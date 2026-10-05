@@ -316,39 +316,51 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(agree.items[0]!.detail).not.toContain("unverified");
   });
 
-  it("consultingDoctorForMachine / machineOccupancy — the real SELECTs: newest consult within 90 min wins, an unwarehoused newer one hides an older warehouse doctor", async () => {
+  it("consultingDoctorForMachine / machineOccupancy — the real SELECTs: the LATEST warehouse consult of the IST day wins at any age; the 90-min window only labels it", async () => {
     const { consultingDoctorForMachine, machineOccupancy } = await import("@/lib/encounter-windows/occupant");
     const db = pg.sql as unknown as import("@/lib/encounter-windows").WindowsDb;
-    const w = (key: string, machine: string, uid: string, name: string, src: string, openAgo: string, closeAgo: string | null) =>
-      `('${key}', '${machine}', 'r4', ${src === "warehouse" ? `'${uid}'` : "NULL"}, ${src === "warehouse" ? `'${name}'` : "NULL"}, '${src}', 'rows', ${ago(openAgo)}, ${closeAgo ? ago(closeAgo) : "NULL"}, 'open', 'clean', 'v')`;
+    // Fixed instants, so the IST-day boundary never depends on when the suite runs. asOf = 2026-10-05 12:30 IST; the IST day began 2026-10-04T18:30:00Z.
+    const asOf = "2026-10-05T07:00:00.000Z";
+    const w = (key: string, machine: string, uid: string, name: string, src: string, open: string, close: string | null) =>
+      `('${key}', '${machine}', 'r4', ${src === "warehouse" ? `'${uid}'` : "NULL"}, ${src === "warehouse" ? `'${name}'` : "NULL"}, '${src}', 'rows', '${open}'::timestamptz, ${close ? `'${close}'::timestamptz` : "NULL"}, 'open', 'clean', 'v')`;
     pg.exec(`
       INSERT INTO eta_encounter_windows (consult_key, machine, room_id, consulting_doctor_uid, consulting_doctor_name, attribution_source, attribution, t_open, t_close, close_reason, quality, resolver_version)
       VALUES ${[
-        w("a1@x", "mx", "u1", DOC.full_name, "warehouse", "120 minutes", "110 minutes"), // older than 90 min, closed: out
-        w("a2@x", "mx", "u2", DOC2.full_name, "warehouse", "40 minutes", "30 minutes"),  // newest in the window: wins
-        w("b1@x", "my", "u1", DOC.full_name, "warehouse", "60 minutes", "50 minutes"),
-        w("b2@x", "my", "u2", DOC2.full_name, "extension", "10 minutes", "5 minutes"),   // newer but not warehouse: hides b1
-        w("c1@x", "mz", "u1", DOC.full_name, "warehouse", "3 hours", null),         // unclosed, within 4 h: in
-        w("d1@x", "mw", "u1", DOC.full_name, "warehouse", "5 hours", null),         // unclosed, past 4 h: out
+        w("a1@x", "mx", "u1", DOC.full_name, "warehouse", "2026-10-05T03:00:00Z", "2026-10-05T03:10:00Z"), // earlier today
+        w("a2@x", "mx", "u2", DOC2.full_name, "warehouse", "2026-10-05T06:20:00Z", "2026-10-05T06:30:00Z"), // latest today, 40 min ago: wins, live
+        w("b1@x", "my", "u1", DOC.full_name, "warehouse", "2026-10-05T05:55:00Z", "2026-10-05T06:05:00Z"), // 65 min ago
+        w("b2@x", "my", "u2", DOC2.full_name, "extension", "2026-10-05T06:50:00Z", "2026-10-05T06:55:00Z"), // newer but NOT warehouse: ignored
+        w("c1@x", "mz", "u1", DOC.full_name, "warehouse", "2026-10-05T04:00:00Z", null),                    // unclosed 3 h: live
+        w("d1@x", "mw", "u1", DOC.full_name, "warehouse", "2026-10-05T02:00:00Z", null),                    // unclosed 5 h: returned, NOT live
+        w("e1@x", "mv", "u1", DOC.full_name, "warehouse", "2026-10-04T17:00:00Z", "2026-10-04T17:10:00Z"), // 22:30 IST YESTERDAY: not today
+        w("f1@x", "mu", "u1", DOC.full_name, "warehouse", "2026-10-04T19:00:00Z", "2026-10-04T19:10:00Z"), // 00:30 IST today: today
       ].join(",\n")};
     `);
-    const at = Date.now();
-    expect((await consultingDoctorForMachine(db, "mx", at))?.uid).toBe("u2");
-    expect(await consultingDoctorForMachine(db, "my", at)).toBeNull();
-    expect((await consultingDoctorForMachine(db, "mz", at))?.t_close).toBeNull();
-    expect(await consultingDoctorForMachine(db, "mw", at)).toBeNull();
-    expect(await consultingDoctorForMachine(db, "unknown-machine", at)).toBeNull();
-    // as-of an earlier instant the older consult is the newest in ITS window
-    expect((await consultingDoctorForMachine(db, "mx", at - 100 * 60_000))?.uid).toBe("u1");
-    // machineOccupancy: the cookie doctor logged in on mx is stale against the warehouse doctor
-    const cookie = { doctor_uid: "cookie-uid", display_name: DOC.full_name };
-    pg.exec(presence("ext", "mx", "login", "15 minutes", JSON.stringify(cookie))
-      + presence("ext", "mx", "heartbeat", "1 minute", JSON.stringify({ ...cookie, tab_focus: "true" })));
-    const occ = await machineOccupancy(db, at);
-    const mx = occ.find((m) => m.machine === "mx")!;
-    expect(mx.occupied).toBe(true);
-    expect(mx.occupant_display).toMatchObject({ uid: "u2", name: DOC2.full_name, source: "warehouse", cookie_uid: "cookie-uid", cookie_name: DOC.full_name, stale: true });
-    expect(occ.find((m) => m.machine === "my")).toBeUndefined(); // no events and no warehouse doctor: not a machine this reads
+    const one = (machine: string, when = asOf) => consultingDoctorForMachine(db, machine, when);
+    expect(await one("mx")).toMatchObject({ uid: "u2", live: true });
+    expect(await one("my")).toMatchObject({ uid: "u1", live: true }); // the extension-sourced newer row never hides or replaces the warehouse doctor
+    expect(await one("mz")).toMatchObject({ uid: "u1", t_close: null, live: true });
+    expect(await one("mw")).toMatchObject({ uid: "u1", t_close: null, live: false });
+    expect(await one("mv")).toBeNull();
+    expect(await one("mu")).toMatchObject({ uid: "u1", live: false });
+    expect(await one("unknown-machine")).toBeNull();
+    // as-of 05:00Z the earlier consult is the latest one that had opened
+    expect(await one("mx", "2026-10-05T05:00:00.000Z")).toMatchObject({ uid: "u1", live: false });
+    // machineOccupancy: stale cookie logins on mx (live consult) and mw (consult 5 h old) never replace the warehouse doctor
+    const cookie = JSON.stringify({ doctor_uid: "cookie-uid", display_name: DOC.full_name });
+    const hb = JSON.stringify({ doctor_uid: "cookie-uid", display_name: DOC.full_name, tab_focus: "true" });
+    const ev = (machine: string, event: string, ts: string, payload: string) =>
+      `INSERT INTO pulse_presence_events (source, machine, event, ts, payload) VALUES ('ext', '${machine}', '${event}', '${ts}'::timestamptz, '${payload}'::jsonb);`;
+    pg.exec(["mx", "mw"].map((m) => ev(m, "login", "2026-10-05T06:40:00Z", cookie) + ev(m, "heartbeat", "2026-10-05T06:59:00Z", hb)).join("\n"));
+    const occ = await machineOccupancy(db, asOf);
+    const by = (m: string) => occ.find((x) => x.machine === m);
+    expect(by("mx")!.occupied).toBe(true);
+    expect(by("mx")!.occupant_display).toMatchObject({ uid: "u2", name: DOC2.full_name, source: "warehouse", label: "consulting", cookie_uid: "cookie-uid", cookie_name: DOC.full_name, stale: true });
+    expect(by("mw")!.occupant_display).toMatchObject({ uid: "u1", name: DOC.full_name, source: "warehouse", label: "last consult", consult_at: "2026-10-05T02:00:00.000Z", cookie_uid: "cookie-uid", stale: true });
+    expect(by("my")!.occupant_display).toMatchObject({ uid: "u1", source: "warehouse", label: "consulting", cookie_uid: null }); // live, no extension session
+    expect(by("mz")!.occupant_display).toMatchObject({ uid: "u1", label: "consulting" });
+    expect(by("mu")!.occupant_display).toBeNull(); // consult today but old, and the room is empty
+    expect(by("mv")).toBeUndefined(); // yesterday's consult only: not a machine today
   });
 
   it("R6 open_outbox — open until a chunk lands after the alert AND the levels moved since", async () => {

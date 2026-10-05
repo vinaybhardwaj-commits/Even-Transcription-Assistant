@@ -4,7 +4,7 @@
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { neon } from '@neondatabase/serverless';
-import { resolveMachines } from './occupancy.mjs';
+import { resolveMachines, consultLabel } from './occupancy.mjs';
 
 const HOME = os.homedir();
 const REFRESH = Number(process.env.PW_REFRESH || 5) * 1000; // ms
@@ -100,7 +100,7 @@ function render({ current, feed }) {
       let who;
       if (od && od.source === 'warehouse') {
         // the warehouse consult doctor is authoritative; the extension's cookie identity is only a dim, possibly stale, second opinion
-        who = `${C.green}${od.name || od.uid}${C.reset} ${C.dim}(consulting)${C.reset}`;
+        who = `${C.green}${od.name || od.uid}${C.reset} ${C.dim}${consultLabel(od)}${C.reset}`;
         if (od.cookie_uid) who += ` ${C.dim}session: ${od.cookie_name || od.cookie_uid}${od.stale ? ' ' + C.yellow + 'stale' + C.dim : ''}${C.reset}`;
       } else if (occ === null && r.out_reason === 'no_identity' && alive) who = `${C.dim}— no consult yet${C.reset}`;
       else if (occ === null) who = `${C.red}— logged out${C.reset}${r.out_reason ? ' ' + C.dim + '(' + r.out_reason + (r.last_display_name ? ': ' + r.last_display_name : '') + ')' + C.reset : ''}`;
@@ -147,7 +147,7 @@ async function tick() {
 if (ONCE) {
   const { current, feed } = await fetchState();
   console.log('CURRENT(ext) rows:', current.length);
-  for (const r of current) console.log('  ', r.machine, '|', r.event, '|', r.ambiguous ? identOf(r) : r.occupied ? r.display_name + (r.background.length ? ' [bg: ' + r.background.join(', ') + ']' : '') : 'LOGGED-OUT(' + r.out_reason + ')', '|', r.ts, r.occupant_display && r.occupant_display.source === 'warehouse' ? '| consulting: ' + r.occupant_display.name + (r.occupant_display.stale ? ' (session ' + (r.occupant_display.cookie_name || '?') + ' stale)' : '') : '');
+  for (const r of current) console.log('  ', r.machine, '|', r.event, '|', r.ambiguous ? identOf(r) : r.occupied ? r.display_name + (r.background.length ? ' [bg: ' + r.background.join(', ') + ']' : '') : 'LOGGED-OUT(' + r.out_reason + ')', '|', r.ts, r.occupant_display && r.occupant_display.source === 'warehouse' ? '| ' + r.occupant_display.name + ' ' + consultLabel(r.occupant_display) + (r.occupant_display.stale ? ' (session ' + (r.occupant_display.cookie_name || '?') + ' stale)' : '') : '');
   console.log('FEED rows:', feed.length);
   for (const r of feed.slice(0, 8)) console.log('  ', r.ts, r.source, r.machine, r.event, r.email || '');
   process.exit(0);

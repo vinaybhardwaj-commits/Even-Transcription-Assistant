@@ -24,12 +24,17 @@
 // BACKGROUND profile = present stream with no tab_focus=true event in the last focusMin (default 10) AND no encounter in
 // genuineMin; never chosen over a focused/encounter-bearing stream. AMBIGUOUS: >=2 streams focused-now and encounter
 // evidence cannot single one out -> machine.ambiguous=true, candidates=[names], no single occupant is picked.
-// WAREHOUSE DISPLAY (5 Oct 2026). The extension's doctor_uid comes from a Google __session cookie Pulse never clears; a doctor who signs in by
-// phone OTP runs the page under a bearer the extension cannot see, so the extension keeps naming the previous Google-login doctor. The warehouse
-// doctor on each consult (eta_encounter_windows.consulting_doctor_uid/name, attribution_source='warehouse') is authoritative. Each machine row
-// therefore also carries occupant_display = {uid, name, source:'warehouse'|'cookie', cookie_uid, cookie_name, stale}: the warehouse doctor of the
-// machine's most recent consult (t_open within WAREHOUSE_MIN minutes of asOf, or unclosed within 4 h) when there is one, else the cookie identity.
-// stale = a cookie identity is present and differs from the warehouse doctor. Attribution logic is untouched; this only decides what is SHOWN.
+// WAREHOUSE DISPLAY (5 Oct 2026; ruled the same day: the stale cookie name must never resurface). The extension's doctor_uid comes from a Google
+// __session cookie Pulse never clears; a doctor who signs in by phone OTP runs the page under a bearer the extension cannot see, so the extension
+// keeps naming the previous Google-login doctor. The warehouse doctor on each consult (eta_encounter_windows.consulting_doctor_uid/name,
+// attribution_source='warehouse') is authoritative. Each machine row also carries
+//   occupant_display = {uid, name, source:'warehouse'|'cookie', label:'consulting'|'last consult'|null, consult_at, cookie_uid, cookie_name, stale}
+// RULE: the occupant is the warehouse doctor of the machine's LATEST warehouse-sourced consult in the current IST day, at any age. The cookie
+// identity is the occupant ONLY when the machine has no warehouse consult today. The 90-min / 4-h window decides ONLY the label: a consult inside it
+// (t_open < WAREHOUSE_MIN min ago, or unclosed within 4 h) is 'consulting', an older one today is 'last consult' (consult_at = its t_open).
+// The warehouse doctor is shown while the machine's extension stream is present OR the consult is live; a logged-out machine with no live consult
+// shows no occupant. stale = a cookie identity is present and differs (by uid) from that warehouse doctor; the cookie is always carried so the
+// caller can show it dimmed as "session: <name>". Attribution logic is untouched; this only decides what is SHOWN.
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { neon } from '@neondatabase/serverless';
@@ -142,33 +147,47 @@ export function pickOccupant(present, asOf, opts = {}) {
 }
 
 export const WAREHOUSE_MIN = Number(process.env.OCC_WAREHOUSE_MIN || 90);
+export const UNCLOSED_MAX_H = 4;
 export const ALIVE_S = Number(process.env.OCC_ALIVE_S || 180);
 
-// machine -> {uid, name, t_open, t_close} of the machine's MOST RECENT consult within WAREHOUSE_MIN of asOf (or unclosed, t_open within 4 h),
-// kept only when that consult's attribution_source is 'warehouse'. Most-recent-first so an older doctor never shows through a newer consult.
-export async function consultingDoctorsByMachine(sql, asOf, minutes = WAREHOUSE_MIN) {
-  const q = `select distinct on (machine) machine, consulting_doctor_uid as uid, consulting_doctor_name as name,
-       attribution_source as src, t_open, t_close
-    from eta_encounter_windows
-    where machine is not null and t_open <= coalesce($1::timestamptz, now())
-      and (t_open >= coalesce($1::timestamptz, now()) - ($2::int * interval '1 minute')
-           or (t_close is null and t_open >= coalesce($1::timestamptz, now()) - interval '4 hours'))
-    order by machine, t_open desc`;
-  const a = [asOf ? new Date(asOf).toISOString() : null, minutes];
-  const rows = await (sql.query ? sql.query(q, a) : sql(q, a));  // neon <1.0 has no .query
+// machine -> {uid, name, t_open, t_close, live, consult_key} of the machine's LATEST warehouse-sourced consult in the IST day containing asOf (any age).
+// live = that consult is inside the label window: t_open within WAREHOUSE_MIN minutes of asOf, or unclosed with t_open within 4 h.
+export async function consultingDoctorsByMachine(sql, asOf) {
+  const q = `with p as (select coalesce($1::timestamptz, now()) as a)
+    select distinct on (machine) machine, consulting_doctor_uid as uid, consulting_doctor_name as name, t_open, t_close, consult_key
+    from eta_encounter_windows, p
+    where machine is not null and attribution_source = 'warehouse' and consulting_doctor_uid is not null
+      and t_open <= p.a and t_open >= (date_trunc('day', p.a at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata')
+    order by machine, t_open desc, consult_key desc`;
+  const args1 = [asOf ? new Date(asOf).toISOString() : null];
+  const rows = await (sql.query ? sql.query(q, args1) : sql(q, args1));  // neon <1.0 has no .query
+  const A = asOf ? new Date(asOf).getTime() : Date.now();
   const m = new Map();
-  for (const r of rows) if (r.src === 'warehouse' && r.uid) m.set(r.machine, { uid: r.uid, name: r.name, t_open: r.t_open, t_close: r.t_close });
+  for (const r of rows) {
+    const open = new Date(r.t_open).getTime();
+    m.set(r.machine, { uid: r.uid, name: r.name, t_open: r.t_open, t_close: r.t_close, consult_key: r.consult_key,
+      live: A - open <= WAREHOUSE_MIN * 60000 || (r.t_close == null && A - open <= UNCLOSED_MAX_H * 3600000) });
+  }
   return m;
 }
 
-// What the "who is in the room" line shows. warehouse = {uid,name}|null, cookie = {uid,name}|null (the extension's resolved occupant).
+// What the "who is in the room" line shows. warehouse = {uid,name,live,t_open}|null, cookie = {uid,name}|null (the extension's resolved occupant).
 export function occupantDisplay(warehouse, cookie) {
   const cu = cookie && cookie.uid ? cookie.uid : null, cn = cookie && cookie.name ? cookie.name : null;
   if (warehouse && warehouse.uid)
-    return { uid: warehouse.uid, name: warehouse.name || null, source: 'warehouse', cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid };
-  if (cu) return { uid: cu, name: cn, source: 'cookie', cookie_uid: cu, cookie_name: cn, stale: false };
+    return { uid: warehouse.uid, name: warehouse.name || null, source: 'warehouse', label: warehouse.live === false ? 'last consult' : 'consulting',
+      consult_at: warehouse.t_open ? new Date(warehouse.t_open).toISOString() : null, cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid };
+  if (cu) return { uid: cu, name: cn, source: 'cookie', label: null, consult_at: null, cookie_uid: cu, cookie_name: cn, stale: false };
   return null;
 }
+
+// "(consulting)" or "(last consult 11:32)" (IST HH:MM of that consult's t_open); '' for a cookie display.
+export const consultLabel = (od) => {
+  if (!od || od.source !== 'warehouse') return '';
+  if (od.label !== 'last consult') return '(consulting)';
+  const t = od.consult_at ? new Date(od.consult_at).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' }) : '--:--';
+  return `(last consult ${t})`;
+};
 
 // One row per machine, shaped like watch.mjs's old fetchState() rows plus occupancy fields.
 export async function resolveMachines(sql, opts) {
@@ -198,7 +217,7 @@ export async function resolveMachines(sql, opts) {
       sessions: streams,
       ext_alive: ss[0].machine_last_ts != null && new Date(ss[0].asof).getTime() - new Date(ss[0].machine_last_ts).getTime() <= ALIVE_S * 1000,
       consulting,
-      occupant_display: occupantDisplay(consulting, best ? { uid: best.uid, name: best.dn } : null),
+      occupant_display: occupantDisplay(consulting && (present.length > 0 || consulting.live) ? consulting : null, best ? { uid: best.uid, name: best.dn } : null),
     });
   }
   return out;
