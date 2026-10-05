@@ -126,6 +126,35 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
 }
 
 // ---------------------------------------------------------------------------
+// GENUINE RECOVERY (fleet-attention build, 5 Oct 2026)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY. `computeRoomStatus` reads a room `ok` the moment its poll looks clean. A session that CLOSES looks clean — `session_open` goes false, so the
+ * `tape_stalled` condition (tape not advancing while a session is open) stops holding — and a Mac that has gone into DarkWake still polls, so on
+ * 5 Oct 2026 the watchdog announced `recovered` at 04:36 for rooms whose microphones had been frozen since 01:36. "The poll looks fine" is not "the
+ * room is recording": recovery needs EVIDENCE OF AUDIO, which is what this is.
+ *
+ * GENUINE = a bench chunk newer than the alert (the room's `room_alert_state.since`) AND at least GENUINE_RECOVERY_MIN_DISTINCT distinct
+ * (peak, zero_ratio) level values in the last 120 s. A microphone CoreAudio has stopped delivering from repeats ONE identical value for hours
+ * (4,220 identical samples on OPD 6 from 01:36:52), so two distinct values is the cheapest honest sign that the signal is moving.
+ */
+export const GENUINE_RECOVERY_MIN_DISTINCT = 2;
+export const RECOVERY_LEVEL_WINDOW_S = 120;
+
+export type RecoveryEvidence = {
+  /** a bench_chunk row (any session of the room) created after the alert began */
+  chunk_after_alert: boolean;
+  /** distinct (peak, zero_ratio) values among the room's level samples in the last RECOVERY_LEVEL_WINDOW_S */
+  distinct_levels: number;
+};
+
+/** PURE. `null` (evidence could not be read) is NOT genuine: an alert stays open rather than closing on a guess. */
+export function isGenuineRecovery(ev: RecoveryEvidence | null | undefined): boolean {
+  return Boolean(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT);
+}
+
+// ---------------------------------------------------------------------------
 // The four message shapes
 // ---------------------------------------------------------------------------
 
@@ -168,7 +197,7 @@ function andJoin(parts: readonly string[]): string {
  * — not what the Mac's poll says about itself, but whether its bytes are reaching storage — and
  * V's ruling requires the message to be able to say which one fired.
  */
-const REASON_LABEL: Record<DegradationReason, string> = {
+export const REASON_LABEL: Record<DegradationReason, string> = {
   device_missing: "a missing input device",
   silent_while_recording: "silence while recording",
   clipping: "clipping",
@@ -225,6 +254,12 @@ export type RoomRunInput = {
   prior: { status: RoomAlertStatus; since: string } | null;
   /** now < muted_until, read by the caller. */
   muted: boolean;
+  /**
+   * Evidence that audio is really flowing again, consulted ONLY when this run would announce a recovery (prior offline/degraded, now ok).
+   * `undefined` = the caller did not check (the pure planner's legacy behaviour: the poll alone decides). `null` = the caller tried and could not
+   * read it. runWatchdog always supplies it for a room whose prior status is not ok.
+   */
+  recovery_evidence?: RecoveryEvidence | null;
 };
 
 export type RoomWrite = { room_id: string; status: RoomAlertStatus; since: string };
@@ -260,6 +295,10 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
 
     // D1: no change, no write, no message. This is the whole point of an edge trigger.
     if (newStatus === input.prior.status) continue;
+
+    // GENUINE RECOVERY ONLY. A clean poll is not proof of audio (see GENUINE_RECOVERY_MIN_DISTINCT). Without a chunk newer than the alert and a
+    // moving level signal the alert stays OPEN: no write, so the room's `since` and status stand, and no `recovered` message.
+    if (newStatus === "ok" && input.recovery_evidence !== undefined && !isGenuineRecovery(input.recovery_evidence)) continue;
 
     writes.push({ room_id: input.room_id, status: newStatus, since: nowIso });
 
@@ -510,6 +549,34 @@ export async function recordHeartbeat(ok: boolean, evaluated: number, error?: st
 }
 
 /**
+ * ONE READ: for every room whose watchdog status is not ok, is there a chunk newer than the alert (`room_alert_state.since`), and how many distinct
+ * (peak, zero_ratio) level values did it report in the last RECOVERY_LEVEL_WINDOW_S seconds. Read-only. bench_level_sample's index leads
+ * (room_id, ist_date, sampled_at), so the ist_date bound keeps the 120 s read on the newest index pages.
+ */
+export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEvidence>> {
+  const rows = (await sql`
+    SELECT ras.room_id,
+           EXISTS (
+             SELECT 1 FROM bench_chunk c JOIN bench_session s ON s.id = c.session_id
+              WHERE s.room_id = ras.room_id AND c.created_at > ras.since
+           ) AS chunk_after_alert,
+           (
+             SELECT count(*)::int FROM (
+               SELECT DISTINCT b.peak, b.zero_ratio FROM bench_level_sample b
+                WHERE b.room_id = ras.room_id
+                  AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                  AND b.sampled_at > now() - interval '120 seconds'
+             ) d
+           ) AS distinct_levels
+      FROM room_alert_state ras
+     WHERE ras.status <> 'ok'
+  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string }>;
+  const m = new Map<string, RecoveryEvidence>();
+  for (const r of rows) m.set(r.room_id, { chunk_after_alert: Boolean(r.chunk_after_alert), distinct_levels: Number(r.distinct_levels) || 0 });
+  return m;
+}
+
+/**
  * FAIL SAFE (the order's own words): "a watchdog that cannot read state must log loudly and send
  * nothing, never send a false alarm." The read is the only step allowed to abort the whole run;
  * once rows are in hand, one room's write failing is logged and skipped, never fatal to the rest.
@@ -566,6 +633,19 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
     );
   }
 
+  // Evidence for the rooms whose alert is open. A failed read is logged and leaves every open alert OPEN this run (null evidence is not genuine).
+  let evidence: Map<string, RecoveryEvidence> | null = null;
+  if (rows.some((r) => r.prior_status && r.prior_status !== "ok")) {
+    try {
+      evidence = await loadRecoveryEvidence();
+    } catch (e) {
+      console.error(
+        "[room-watchdog] could not read recovery evidence — open alerts stay open this run:",
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+  }
+
   const inputs: RoomRunInput[] = rows.map((row) => ({
     room_id: row.room_id,
     room_name: row.room_name,
@@ -579,6 +659,9 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
     },
     prior: row.prior_status && row.prior_since ? { status: row.prior_status, since: row.prior_since } : null,
     muted: Boolean(row.muted_until && Date.parse(row.muted_until) > nowMs),
+    ...(row.prior_status && row.prior_status !== "ok"
+      ? { recovery_evidence: evidence?.get(row.room_id) ?? null }
+      : {}),
   }));
 
   const plan = planWatchdogRun(inputs, nowMs);

@@ -29,6 +29,7 @@
 import * as React from "react";
 import { BenchLevelMeter } from "@/components/admin/BenchLevelMeter";
 import { isDigitalSilence } from "@/lib/bench-meter";
+import { FleetAttentionBadge, FleetAttentionPanel, useFleetAttention } from "@/components/admin/FleetAttentionPanel";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
 import {
@@ -709,6 +710,8 @@ export function BenchRoomsLive() {
    *  nowhere; a colour whose rule is invisible is a colour an operator has to learn by folklore. */
   const thresholds = rollup?.thresholds ?? null;
   const attention = React.useMemo(() => attentionItems(rooms, listenerMap, listenersKnown, nowMs), [rooms, listenerMap, listenersKnown, nowMs]);
+  // The server-side, state-based attention list (lib/fleet-attention.ts). Polled every 30 s; shared by the panel and the room-card badges.
+  const fleetAttention = useFleetAttention();
   const selectedId = useSelectedRoom()?.roomId ?? null;
 
   // DEFAULT SELECTION, first rule: the room that is RECORDING. `suggest` never overrides a click,
@@ -954,9 +957,11 @@ export function BenchRoomsLive() {
             </div>
           ))}
         </div>
-      ) : rooms.length > 0 ? (
-        <p className="text-caption text-success-700">Nothing needs attention.</p>
       ) : null}
+
+      {/* FLEET ATTENTION — replaces the bare "Nothing needs attention." line, which this page printed with OPD 4 silent for four days. The
+          panel says all-clear only when the server read every source and found nothing, and never while the list above has items. */}
+      <FleetAttentionPanel state={fleetAttention} legacyCount={attention.length} nowMs={nowMs} />
 
       {/* CARDS, not rows (E1). A table is for comparing rooms; the operator is not comparing,
           they are scanning for trouble — so the worst condition promotes the whole card and finds
@@ -1017,11 +1022,14 @@ export function BenchRoomsLive() {
                   <p className="font-semibold text-even-navy-800 truncate">{r.room.name}</p>
                   <p className="text-caption text-even-ink-400 truncate">{r.room.slug}</p>
                 </div>
-                {st.state === "finished" ? (
-                  <span className={`${PILL} ${FINISHED_PILL}`} title={st.hint ?? undefined}>{STATE_WORD.finished}</span>
-                ) : (
-                  <Pill level={st.level} title={st.hint ?? undefined}>{STATE_WORD[st.state]}</Pill>
-                )}
+                <div className="flex items-center gap-1 shrink-0">
+                  <FleetAttentionBadge items={fleetAttention.data?.items} roomId={r.room.id} />
+                  {st.state === "finished" ? (
+                    <span className={`${PILL} ${FINISHED_PILL}`} title={st.hint ?? undefined}>{STATE_WORD.finished}</span>
+                  ) : (
+                    <Pill level={st.level} title={st.hint ?? undefined}>{STATE_WORD[st.state]}</Pill>
+                  )}
+                </div>
               </div>
 
               <p className="mt-2 text-body text-even-navy-800">{st.label}</p>
