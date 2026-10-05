@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import { makeFakeClinician } from "../support/fake-identity";
 
 const calls: unknown[][] = [];
 let failDb = false;
@@ -182,5 +183,96 @@ describe("unknown top-level keys are kept in payload, never promoted", () => {
   it("an unknown-key poller event too", async () => {
     await post([poller({ new_metric: 7 })]);
     expect((inserted()[0]!.payload as Record<string, unknown>).new_metric).toBe(7);
+  });
+});
+
+// ---------------------------------------------------------------- extension 0.1.1 (17 fields, identity_stale)
+// Both wire shapes must validate: the 13-field event an older build queued, and the 17-field one (page_name, instance_id, cookie_uid, cookie_name).
+// The event is stored verbatim in payload, so the new fields need no migration and nothing may strip them.
+describe("extension 0.1.1 wire shape", () => {
+  const DOC = makeFakeClinician(1); // the doctor the stale cookie names
+  const UID = DOC.id;
+  const PAGE = "Fakefirst"; // the greeting's first name: a witness, never a doctor_uid
+  const INST = "0123456789abcdef0123456789abcdef";
+  // the original 13 fields: doctor_uid + the 12 the sink requires
+  const old13 = (over: Record<string, unknown> = {}) => ext({ doctor_uid: UID, ...over });
+  // all 17: the 13 + page_name, instance_id, cookie_uid, cookie_name (null off the identity_stale event)
+  const new17 = (over: Record<string, unknown> = {}) =>
+    old13({ page_name: PAGE, instance_id: INST, cookie_uid: null, cookie_name: null, ext_version: "0.1.1", ...over });
+  const stale = (over: Record<string, unknown> = {}) =>
+    new17({ event: "identity_stale", doctor_uid: null, display_name: null, email: null, reason: "stale_cookie", cookie_uid: UID, cookie_name: DOC.full_name, ...over });
+
+  it("the old 13-field event still validates and is stored as sent (no new keys invented)", async () => {
+    const e = old13();
+    expect(Object.keys(e)).toHaveLength(13);
+    const res = await post([e]);
+    expect(await res.json()).toMatchObject({ ok: true, inserted: 1, rejected: 0 });
+    const row = inserted()[0]!;
+    expect(row.payload).toEqual(e);
+    expect(Object.keys(row.payload as object)).not.toContain("page_name");
+  });
+
+  it("the new 17-field event validates; every new field is stored verbatim in payload", async () => {
+    const e = new17();
+    expect(Object.keys(e)).toHaveLength(17);
+    const res = await post([e]);
+    expect(await res.json()).toMatchObject({ ok: true, inserted: 1, rejected: 0 });
+    const row = inserted()[0]!;
+    expect(row).toMatchObject({ source: "ext", machine: "MAC-1", event: "heartbeat" });
+    expect(row.payload).toEqual(e);
+    expect(row.payload).toMatchObject({ page_name: PAGE, instance_id: INST, cookie_uid: null, cookie_name: null });
+  });
+
+  it("identity_stale is a valid event: promoted as the event column, doctor_uid/display_name null, cookie identity kept in payload", async () => {
+    const e = stale();
+    const res = await post([e]);
+    expect(await res.json()).toMatchObject({ ok: true, inserted: 1, rejected: 0 });
+    const row = inserted()[0]!;
+    expect(row).toMatchObject({ source: "ext", event: "identity_stale", email: null });
+    expect(row.payload).toMatchObject({ doctor_uid: null, display_name: null, reason: "stale_cookie", page_name: PAGE, cookie_uid: UID, cookie_name: DOC.full_name, instance_id: INST });
+  });
+
+  it("an old and a new event in one batch both insert; a made-up event name is still rejected", async () => {
+    const res = await post([old13({ event: "login" }), stale(), new17({ event: "identity_swapped" })]);
+    expect(await res.json()).toMatchObject({ inserted: 2, rejected: 1 });
+    expect(inserted().map((r) => r.event)).toEqual(["login", "identity_stale"]);
+  });
+
+  it("reason stays free text: every 0.1.1 reason value is accepted, nothing is narrowed or rewritten", async () => {
+    const reasons = [
+      "stale_cookie", "absent_401", "absent_403", "absent_500", "invalid_no_doctor", "name_absent_404", "name_unreadable", "name_invalid",
+      "identity_unreadable", "body_unavailable,identity_unreadable", "absent_401,idle_timeout", null,
+    ];
+    const res = await post(reasons.map((reason) => new17({ reason, doctor_uid: reason === null ? UID : null })));
+    expect(await res.json()).toMatchObject({ inserted: reasons.length, rejected: 0 });
+    expect(inserted().map((r) => (r.payload as Record<string, unknown>).reason)).toEqual(reasons);
+  });
+
+  it("the new fields are optional individually (any subset validates) and nullable", async () => {
+    const res = await post([old13({ page_name: PAGE }), old13({ instance_id: INST }), old13({ cookie_uid: null }), new17({ page_name: null, instance_id: null })]);
+    expect(await res.json()).toMatchObject({ inserted: 4, rejected: 0 });
+  });
+
+  const badNew: Array<[string, () => unknown]> = [
+    ["page_name a number", () => new17({ page_name: 7 })],
+    ["instance_id an object", () => new17({ instance_id: { id: INST } })],
+    ["cookie_uid a boolean", () => new17({ cookie_uid: true })],
+    ["cookie_name an array", () => new17({ cookie_name: ["x"] })],
+    ["page_name over the length bound", () => new17({ page_name: "x".repeat(600) })],
+    ["NUL in page_name", () => new17({ page_name: "a\u0000b" })],
+    ["lone surrogate in cookie_name", () => new17({ cookie_name: "\uD800" })],
+  ];
+  for (const [name, bad] of badNew) {
+    it(`a bad new field is rejected per item, the batch continues: ${name}`, async () => {
+      const res = await post([new17({ machine_id: "GOOD" }), bad(), new17({ machine_id: "GOOD" })]);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, inserted: 2, rejected: 1 });
+      expect(inserted().every((r) => r.machine === "GOOD")).toBe(true);
+    });
+  }
+
+  it("the { events: [...] } wrapper carries 17-field and identity_stale events through", async () => {
+    const res = await post({ events: [new17(), stale()] });
+    expect(await res.json()).toMatchObject({ inserted: 2, rejected: 0 });
   });
 });

@@ -1,9 +1,9 @@
 /**
  * POST /api/presence — append-only presence ingest (T-PRESENCE-5).
  *
- * Producers: the Pulse Chrome extension (12-key events, source 'ext') and the
- * tailnet poller (8-field events, source 'poller'). Body is a JSON array or a
- * single object.
+ * Producers: the Pulse Chrome extension (source 'ext'; 13 fields, or 17 from extension 0.1.1 which adds page_name, instance_id,
+ * cookie_uid, cookie_name and the `identity_stale` event) and the tailnet poller (8-field events, source 'poller'). Body is a JSON
+ * array or a single object. The event is stored verbatim in `payload`; nothing strips unknown keys.
  *
  * Auth: Authorization: Bearer ${PRESENCE_INGEST_TOKEN} (distinct from every other secret).
  *   Missing/wrong token → 401. Token env unset → 503 (fail closed, producers retry).

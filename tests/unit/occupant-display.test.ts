@@ -20,29 +20,29 @@ const UB = B.id;
 describe("buildOccupantDisplay", () => {
   it("warehouse doctor present, cookie agrees -> warehouse, not stale", () => {
     expect(buildOccupantDisplay({ uid: UA, name: A.full_name }, { uid: UA, name: A.full_name })).toEqual({
-      uid: UA, name: A.full_name, source: "warehouse", label: "consulting", consult_at: null, cookie_uid: UA, cookie_name: A.full_name, stale: false,
+      uid: UA, name: A.full_name, source: "warehouse", label: "consulting", consult_at: null, cookie_uid: UA, cookie_name: A.full_name, stale: false, page_name: null,
     });
   });
 
   it("warehouse doctor present, cookie names someone else -> warehouse wins, stale true, cookie kept for the dim second line", () => {
     expect(buildOccupantDisplay({ uid: UA, name: A.full_name }, { uid: UB, name: B.full_name })).toEqual({
-      uid: UA, name: A.full_name, source: "warehouse", label: "consulting", consult_at: null, cookie_uid: UB, cookie_name: B.full_name, stale: true,
+      uid: UA, name: A.full_name, source: "warehouse", label: "consulting", consult_at: null, cookie_uid: UB, cookie_name: B.full_name, stale: true, page_name: null,
     });
   });
 
   it("an older consult today carries the 'last consult' label and its time; a live one carries 'consulting'", () => {
     const old = buildOccupantDisplay({ uid: UA, name: A.full_name, live: false, t_open: "2026-10-05T04:00:00.000Z" }, { uid: UB, name: B.full_name });
-    expect(old).toMatchObject({ source: "warehouse", label: "last consult", consult_at: "2026-10-05T04:00:00.000Z", stale: true });
+    expect(old).toMatchObject({ source: "warehouse", label: "last consult", consult_at: "2026-10-05T04:00:00.000Z", stale: true, page_name: null, });
     expect(buildOccupantDisplay({ uid: UA, name: A.full_name, live: true, t_open: "2026-10-05T06:40:00.000Z" }, null)).toMatchObject({ label: "consulting" });
   });
 
   it("warehouse doctor present, no cookie identity -> warehouse, not stale (nothing to disagree with)", () => {
-    expect(buildOccupantDisplay({ uid: UA, name: A.full_name }, null)).toMatchObject({ source: "warehouse", cookie_uid: null, cookie_name: null, stale: false });
+    expect(buildOccupantDisplay({ uid: UA, name: A.full_name }, null)).toMatchObject({ source: "warehouse", cookie_uid: null, cookie_name: null, stale: false, page_name: null, });
   });
 
   it("no warehouse doctor -> the cookie identity with source 'cookie', no label, never stale", () => {
     expect(buildOccupantDisplay(null, { uid: UB, name: B.full_name })).toEqual({
-      uid: UB, name: B.full_name, source: "cookie", label: null, consult_at: null, cookie_uid: UB, cookie_name: B.full_name, stale: false,
+      uid: UB, name: B.full_name, source: "cookie", label: null, consult_at: null, cookie_uid: UB, cookie_name: B.full_name, stale: false, page_name: null,
     });
     // a warehouse row with no uid is no warehouse doctor
     expect(buildOccupantDisplay({ uid: null, name: A.full_name }, { uid: UB, name: B.full_name })).toMatchObject({ source: "cookie", uid: UB });
@@ -138,7 +138,7 @@ describe("machineOccupancy", () => {
     const [m] = await machineOccupancy(occDb(loggedIn(MACH, UB, B.full_name), [winRow()]), NOW);
     expect(m).toMatchObject({ machine: MACH, room_id: "room_7", occupied: true, cookie_uid: UB, cookie_name: B.full_name });
     expect(m!.occupant_display).toEqual({
-      uid: UA, name: A.full_name, source: "warehouse", label: "consulting", consult_at: agoIso(30), cookie_uid: UB, cookie_name: B.full_name, stale: true,
+      uid: UA, name: A.full_name, source: "warehouse", label: "consulting", consult_at: agoIso(30), cookie_uid: UB, cookie_name: B.full_name, stale: true, page_name: null,
     });
     expect(m!.consulting).toMatchObject({ uid: UA });
   });
@@ -146,7 +146,7 @@ describe("machineOccupancy", () => {
   it("consult 3 h ago, cookie stream still present -> the warehouse doctor with the 'last consult' label (the cookie name does not resurface), stale", async () => {
     const [m] = await machineOccupancy(occDb(loggedIn(MACH, UB, B.full_name), [winRow({ t_open: agoIso(180), t_close: agoIso(170) })]), NOW);
     expect(m!.occupant_display).toEqual({
-      uid: UA, name: A.full_name, source: "warehouse", label: "last consult", consult_at: agoIso(180), cookie_uid: UB, cookie_name: B.full_name, stale: true,
+      uid: UA, name: A.full_name, source: "warehouse", label: "last consult", consult_at: agoIso(180), cookie_uid: UB, cookie_name: B.full_name, stale: true, page_name: null,
     });
   });
 
@@ -157,19 +157,19 @@ describe("machineOccupancy", () => {
 
   it("the cookie doctor is the warehouse doctor -> display warehouse, stale false", async () => {
     const [m] = await machineOccupancy(occDb(loggedIn(MACH, UA, A.full_name), [winRow()]), NOW);
-    expect(m!.occupant_display).toMatchObject({ source: "warehouse", uid: UA, stale: false });
+    expect(m!.occupant_display).toMatchObject({ source: "warehouse", uid: UA, stale: false, page_name: null, });
   });
 
   it("no warehouse consult today -> the cookie display, source 'cookie', not stale", async () => {
     const [m] = await machineOccupancy(occDb(loggedIn(MACH, UB, B.full_name), []), NOW);
     expect(m!.consulting).toBeNull();
-    expect(m!.occupant_display).toEqual({ uid: UB, name: B.full_name, source: "cookie", label: null, consult_at: null, cookie_uid: UB, cookie_name: B.full_name, stale: false });
+    expect(m!.occupant_display).toEqual({ uid: UB, name: B.full_name, source: "cookie", label: null, consult_at: null, cookie_uid: UB, cookie_name: B.full_name, stale: false, page_name: null, });
   });
 
   it("no extension session but a LIVE warehouse consult -> the warehouse doctor, no cookie, not stale", async () => {
     const [m] = await machineOccupancy(occDb([], [winRow()]), NOW);
     expect(m).toMatchObject({ machine: MACH, occupied: false, cookie_uid: null, cookie_name: null });
-    expect(m!.occupant_display).toMatchObject({ source: "warehouse", uid: UA, label: "consulting", cookie_uid: null, stale: false });
+    expect(m!.occupant_display).toMatchObject({ source: "warehouse", uid: UA, label: "consulting", cookie_uid: null, stale: false, page_name: null, });
   });
 
   it("no extension session and the consult is old -> the room is empty: nothing displayed (the warehouse doctor stays on the row as `consulting`)", async () => {

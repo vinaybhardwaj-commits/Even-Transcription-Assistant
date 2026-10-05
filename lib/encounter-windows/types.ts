@@ -26,8 +26,14 @@ export type PresenceEvent = {
   rx?: string | null;
   /** payload->>'tab_focus': 'true' | 'false' | boolean | null */
   focus?: string | boolean | null;
-  /** payload->>'reason' (resolver logouts) */
+  /** payload->>'reason' (resolver logouts; extension reasons such as stale_cookie, absent_401, identity_unreadable) */
   reason?: string | null;
+  /** payload->>'page_name' (extension 0.1.1): first name from the Pulse home greeting. A witness, never an identity. */
+  page?: string | null;
+  /** payload->>'instance_id' (extension 0.1.1): 32 hex, one per extension install (Chrome profile). */
+  inst?: string | null;
+  /** payload->>'cookie_uid' (extension 0.1.1, identity_stale events only): the stale Google-cookie doctor_uid. */
+  cookie_uid?: string | null;
 };
 
 export type Attribution = "rows" | "occupant" | "none";

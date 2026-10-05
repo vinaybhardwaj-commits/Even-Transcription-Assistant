@@ -23,6 +23,7 @@
     "tests/unit/llm-provider-truth.test.ts",
     "tests/unit/mcp-diff-room-install-states.test.ts",
     "tests/unit/mcp-s3.test.ts",
+    "tests/unit/occupancy-mjs-sql.test.ts",
     "tests/unit/room-controls.test.ts",
     "tests/unit/room-install-assign-route.test.ts",
     "tests/unit/room-install-audio-input.test.ts",

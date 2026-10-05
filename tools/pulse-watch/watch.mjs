@@ -108,6 +108,9 @@ function render({ current, feed }) {
       else if (stale) who = `${C.yellow}${occ} ${C.dim}(stale ${ageStr(r.ts)})${C.reset}`;
       else who = `${C.green}${occ}${C.reset}`;
       if (occ !== null && !(od && od.source === 'warehouse') && !r.ambiguous && r.background && r.background.length) who += ` ${C.dim}[background: ${r.background.join(', ')}]${C.reset}`;
+      // no warehouse doctor and no cookie identity: show the page greeting (a witness, never an identity), dimmed
+      if (occ === null && !(od && od.source === 'warehouse') && r.page_name) who += ` ${C.dim}page: ${r.page_name}${C.reset}`;
+      if (r.instances > 1) who += ` ${C.dim}[instances=${r.instances}]${C.reset}`;
       const last = `${C.dim}[${r.event} ${ageStr(r.ts)} ago]${C.reset}`;
       L.push(`  ${star} ${C.bold}${mach}${C.reset} ${C.dim}${room}${C.reset} ${who}  ${last}`);
     }

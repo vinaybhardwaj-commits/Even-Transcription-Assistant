@@ -13,9 +13,16 @@
 //                   34 idle events in OPD rooms 09:00-11:20 IST, 13 inside open consults, median idle->active 92-193 s)
 //   idle_timeout    no GENUINE activity on the stream within GENUINE_MIN minutes (default 45)
 //   nightly_cutoff  last genuine activity predates the most recent NIGHTLY_CUTOFF (IST, default 00:00)
+//   stale_cookie    the stream's last login/logout/identity_stale control event is an `identity_stale` (extension 0.1.1: the Google-cookie identity
+//                   contradicts the greeting the page shows; the event has doctor_uid null and names the stream in payload.cookie_uid). It closes
+//                   the stream exactly like a logout; a later login re-opens it.
 // Genuine activity = login | active | encounter_open | encounter_close | heartbeat with tab_focus=true.
 // Background heartbeats (tab_focus not true) NEVER count. Null-uid twin rows (dual Chrome profile) are ignored for
-// identity. A machine is occupied iff >=1 stream is present.
+// identity. A row whose reason contains `stale_cookie` is never a doctor's activity (its uid/name are nulled in `ev`).
+// A machine is occupied iff >=1 stream is present.
+// MACHINE SIGNALS (extension 0.1.1): page_name = the latest non-null payload.page_name on the machine's ext rows in the last PAGE_MIN (10) minutes;
+// instances = distinct payload.instance_id values reporting on the machine in that window (several Chrome profiles on one Mac). All rows are kept; the
+// count is informational (the outputs add an instances>1 note, nothing alerts). page_name is a witness, never an identity.
 // DUAL-PROFILE TIEBREAK (>=2 present uid streams on one machine; chrome.idle is OS-wide so both profiles mirror active/idle
 // at the same instants and "freshest genuine activity" flaps). Occupant is chosen by:
 //   1. the stream whose latest non-logout ext event has tab_focus=true (the focused Pulse tab)
@@ -45,20 +52,28 @@ export const DEFAULTS = {
   lookbackH: Number(process.env.OCC_LOOKBACK_H || 168),
   focusMin: Number(process.env.OCC_FOCUS_MIN || 10),
   idleOutMin: Number(process.env.OCC_IDLE_OUT_MIN || 45),
+  pageMin: Number(process.env.OCC_PAGE_MIN || 10),
 };
 
 export const connect = () =>
   neon(process.env.DATABASE_URL || readFileSync((process.env.ETA_DB_URL_FILE || os.homedir() + '/.claude/secrets/eta_database_url'), 'utf8').trim());
 
-// $1 asOf timestamptz|null  $2 genuine minutes  $3 cutoff 'HH:MM'  $4 lookback hours  $5 idle-out minutes
+// $1 asOf timestamptz|null  $2 genuine minutes  $3 cutoff 'HH:MM'  $4 lookback hours  $5 idle-out minutes  $6 page/instances window minutes
+// `uid` in ev is the STREAM key: doctor_uid; for an ext identity_stale row it is payload.cookie_uid (the stream the event closes; the row's own
+// doctor_uid is null); null for any other row whose reason contains stale_cookie (never a doctor's activity).
 export const OCCUPANCY_SQL = `
-with prm as (select coalesce($1::timestamptz, now()) as asof, $2::int as gmin, $3::time as cut, $4::int as lb, $5::int as imin),
-c0 as (select asof, gmin, lb, imin, ((date_trunc('day', asof at time zone 'Asia/Kolkata') + cut) at time zone 'Asia/Kolkata') as c from prm),
-cfg as (select asof, gmin, lb, imin, case when c > asof then c - interval '1 day' else c end as cutoff_ts from c0),
+with prm as (select coalesce($1::timestamptz, now()) as asof, $2::int as gmin, $3::time as cut, $4::int as lb, $5::int as imin, $6::int as pmin),
+c0 as (select asof, gmin, lb, imin, pmin, ((date_trunc('day', asof at time zone 'Asia/Kolkata') + cut) at time zone 'Asia/Kolkata') as c from prm),
+cfg as (select asof, gmin, lb, imin, pmin, case when c > asof then c - interval '1 day' else c end as cutoff_ts from c0),
 ev as (
   select e.id, e.machine, e.room, e.event, e.ts, e.source,
-         e.payload->>'doctor_uid' as uid, e.payload->>'display_name' as dn, e.payload->>'reason' as reason,
-         (e.payload->>'tab_focus') = 'true' as focus
+         case when e.event = 'identity_stale' then (case when e.source = 'ext' then e.payload->>'cookie_uid' end)
+              when position('stale_cookie' in coalesce(e.payload->>'reason', '')) > 0 then null
+              else e.payload->>'doctor_uid' end as uid,
+         case when position('stale_cookie' in coalesce(e.payload->>'reason', '')) > 0 then null else e.payload->>'display_name' end as dn,
+         e.payload->>'reason' as reason,
+         (e.payload->>'tab_focus') = 'true' as focus,
+         e.payload->>'page_name' as page, e.payload->>'instance_id' as inst
   from pulse_presence_events e cross join cfg
   where e.source in ('ext','resolver') and e.ts <= cfg.asof and e.ts > cfg.asof - (cfg.lb * interval '1 hour')
 ),
@@ -69,18 +84,26 @@ mach_idle as (
 mach_last as (
   select distinct on (machine) machine, room, event, ts as machine_last_ts from ev order by machine, ts desc, id desc
 ),
+mach_meta as (
+  select ev.machine,
+    (array_agg(ev.page order by ev.ts desc, ev.id desc) filter (where ev.page is not null))[1] as m_page,
+    count(distinct ev.inst)::int as m_instances
+  from ev cross join cfg
+  where ev.source = 'ext' and ev.ts > cfg.asof - (cfg.pmin * interval '1 minute')
+  group by ev.machine
+),
 streams as (
   select machine, uid,
     (array_agg(dn   order by ts desc, id desc) filter (where dn is not null))[1]   as dn,
     (array_agg(room order by ts desc, id desc) filter (where room is not null))[1] as room,
     max(ts) as last_ts,
-    max(ts) filter (where source = 'ext' and event <> 'logout' and focus) as last_focus_ts,
-    (array_agg(coalesce(focus, false) order by ts desc, id desc) filter (where source = 'ext' and event <> 'logout'))[1] as last_focus_flag,
+    max(ts) filter (where source = 'ext' and event not in ('logout','identity_stale') and focus) as last_focus_ts,
+    (array_agg(coalesce(focus, false) order by ts desc, id desc) filter (where source = 'ext' and event not in ('logout','identity_stale')))[1] as last_focus_flag,
     max(ts) filter (where event in ('encounter_open','encounter_close')) as last_enc_ts,
     max(ts) filter (where event in ('login','active','encounter_open','encounter_close') or (event = 'heartbeat' and focus)) as last_genuine_ts,
     max(ts) filter (where event in ('login','active','encounter_open','encounter_close')) as last_reset_ts,
-    (array_agg(event order by ts desc, id desc) filter (where source = 'ext' and event in ('login','logout')))[1] as ctl_event,
-    (array_agg(ts    order by ts desc, id desc) filter (where source = 'ext' and event in ('login','logout')))[1] as ctl_ts,
+    (array_agg(event order by ts desc, id desc) filter (where source = 'ext' and event in ('login','logout','identity_stale')))[1] as ctl_event,
+    (array_agg(ts    order by ts desc, id desc) filter (where source = 'ext' and event in ('login','logout','identity_stale')))[1] as ctl_ts,
     max(ts) filter (where source = 'resolver' and event = 'logout') as res_logout_ts,
     (array_agg(reason order by ts desc, id desc) filter (where source = 'resolver' and event = 'logout'))[1] as res_reason
   from ev where uid is not null group by machine, uid
@@ -89,6 +112,7 @@ resolved as (
   select s.*, mi.idle_state, mi.idle_ts, cfg.asof, cfg.cutoff_ts,
     case
       when s.ctl_event = 'logout' then 'logout'
+      when s.ctl_event = 'identity_stale' then 'stale_cookie'
       when s.res_logout_ts is not null and (s.last_genuine_ts is null or s.last_genuine_ts <= s.res_logout_ts) then 'stamped:' || coalesce(s.res_reason, '?')
       when mi.idle_state = 'locked' then 'locked'
       when mi.idle_state = 'idle' and mi.idle_ts <= cfg.asof - (cfg.imin * interval '1 minute')
@@ -100,15 +124,16 @@ resolved as (
 )
 select ml.machine, ml.room as m_room, ml.event as m_event, ml.machine_last_ts, mi.idle_state as m_idle_state, mi.idle_ts as m_idle_ts,
        r.uid, r.dn, r.room, r.last_ts, r.last_genuine_ts, r.last_focus_ts, r.last_focus_flag, r.last_enc_ts, r.ctl_event, r.ctl_ts, r.res_logout_ts, r.out_reason,
-       cfg.asof, cfg.cutoff_ts
+       mm.m_page, mm.m_instances, cfg.asof, cfg.cutoff_ts
 from mach_last ml cross join cfg
 left join mach_idle mi using (machine)
+left join mach_meta mm using (machine)
 left join resolved r using (machine)
 order by ml.machine, r.last_genuine_ts desc nulls last`;
 
 const args = (o = {}) => [o.asOf ? new Date(o.asOf).toISOString() : null,
   o.genuineMin ?? DEFAULTS.genuineMin, o.nightlyCutoff ?? DEFAULTS.nightlyCutoff, o.lookbackH ?? DEFAULTS.lookbackH,
-  o.idleOutMin ?? DEFAULTS.idleOutMin];
+  o.idleOutMin ?? DEFAULTS.idleOutMin, o.pageMin ?? DEFAULTS.pageMin];
 
 // One row per (machine, doctor_uid) stream; machines with no uid stream appear once with uid=null.
 export async function resolveSessions(sql, opts) {
@@ -171,13 +196,16 @@ export async function consultingDoctorsByMachine(sql, asOf) {
   return m;
 }
 
-// What the "who is in the room" line shows. warehouse = {uid,name,live,t_open}|null, cookie = {uid,name}|null (the extension's resolved occupant).
-export function occupantDisplay(warehouse, cookie) {
+// What the "who is in the room" line shows. warehouse = {uid,name,live,t_open}|null, cookie = {uid,name}|null (the extension's resolved occupant),
+// page = the first name the Pulse page greets (a witness, never an identity). Null when there is no warehouse doctor and no cookie identity:
+// the caller then shows the machine row's own page_name ("page: <name>").
+export function occupantDisplay(warehouse, cookie, page = null) {
+  const pn = page && String(page).trim() ? String(page).trim() : null;
   const cu = cookie && cookie.uid ? cookie.uid : null, cn = cookie && cookie.name ? cookie.name : null;
   if (warehouse && warehouse.uid)
     return { uid: warehouse.uid, name: warehouse.name || null, source: 'warehouse', label: warehouse.live === false ? 'last consult' : 'consulting',
-      consult_at: warehouse.t_open ? new Date(warehouse.t_open).toISOString() : null, cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid };
-  if (cu) return { uid: cu, name: cn, source: 'cookie', label: null, consult_at: null, cookie_uid: cu, cookie_name: cn, stale: false };
+      consult_at: warehouse.t_open ? new Date(warehouse.t_open).toISOString() : null, cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid, page_name: pn };
+  if (cu) return { uid: cu, name: cn, source: 'cookie', label: null, consult_at: null, cookie_uid: cu, cookie_name: cn, stale: false, page_name: pn };
   return null;
 }
 
@@ -217,7 +245,9 @@ export async function resolveMachines(sql, opts) {
       sessions: streams,
       ext_alive: ss[0].machine_last_ts != null && new Date(ss[0].asof).getTime() - new Date(ss[0].machine_last_ts).getTime() <= ALIVE_S * 1000,
       consulting,
-      occupant_display: occupantDisplay(consulting && (present.length > 0 || consulting.live) ? consulting : null, best ? { uid: best.uid, name: best.dn } : null),
+      page_name: ss[0].m_page || null,                      // latest page_name on the machine's ext rows in the last pageMin minutes
+      instances: Number(ss[0].m_instances) || 0,            // distinct instance_ids reporting in that window; > 1 = several Chrome profiles (informational)
+      occupant_display: occupantDisplay(consulting && (present.length > 0 || consulting.live) ? consulting : null, best ? { uid: best.uid, name: best.dn } : null, ss[0].m_page || null),
     });
   }
   return out;

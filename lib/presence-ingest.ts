@@ -3,7 +3,14 @@
  *
  * Two producers, two shapes. An item must carry every known key of one shape. Unknown extra
  * top-level keys are kept in `payload` (the event verbatim) and never promoted, so the queryable
- * columns come only from known fields. Any fault in one item rejects that item only; the caller
+ * columns come only from known fields.
+ *
+ * EXTENSION 0.1.1 (17 fields). Beyond the 13 base fields the extension now sends page_name (first name from the Pulse home greeting,
+ * a witness never an identity), instance_id (32 hex, one per install), cookie_uid and cookie_name (non-null only on the new
+ * `identity_stale` event: the stale Google-cookie identity). The four are OPTIONAL here, so a 13-field event queued by an older build
+ * still validates; when present each must be null or a bounded string. `reason` stays free text (stale_cookie, absent_401,
+ * invalid_no_doctor, name_absent_<n>, ... — the extension owns that vocabulary; the sink never narrows it). The whole event is stored
+ * verbatim in `payload`, so the new fields are queryable as payload->>'page_name' etc. without a migration. Any fault in one item rejects that item only; the caller
  * counts it and inserts the rest. Strings and timestamps are checked to what Postgres/jsonb accepts.
  */
 
@@ -16,7 +23,10 @@ export const POLLER_KEYS = [
   "machine", "ts", "idle_s", "locked", "chrome_running", "console_user", "state", "poller_version",
 ] as const;
 
-export const EXT_EVENTS = ["login", "logout", "encounter_open", "encounter_close", "idle", "active", "locked", "heartbeat"];
+/** Fields added in extension 0.1.1: optional (absent on an older build's queued events), null-or-bounded-string when present. */
+export const EXT_OPTIONAL_STRING_KEYS = ["page_name", "instance_id", "cookie_uid", "cookie_name"] as const;
+
+export const EXT_EVENTS = ["login", "logout", "encounter_open", "encounter_close", "idle", "active", "locked", "heartbeat", "identity_stale"];
 
 export type PresenceRow = {
   source: "ext" | "poller";
@@ -79,6 +89,9 @@ export function validateItem(x: unknown): ItemResult {
   if (isExt) {
     for (const k of ["machine_id", "room", "email", "display_name", "encounter_id", "prescription_ref", "reason"]) {
       if (!nstr(x[k])) return { ok: false, reason: `bad ${k}` };
+    }
+    for (const k of EXT_OPTIONAL_STRING_KEYS) {
+      if (k in x && !nstr(x[k])) return { ok: false, reason: `bad ${k}` };
     }
     if (typeof x.event !== "string" || !EXT_EVENTS.includes(x.event)) return { ok: false, reason: "bad event" };
     const ts = parseTs(x.ts);

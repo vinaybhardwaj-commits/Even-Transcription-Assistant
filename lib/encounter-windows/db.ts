@@ -26,6 +26,10 @@
  * stream's LATEST tab_focus flag; a stream that was focused and then backgrounded must read unfocused, which needs
  * the flip event. Repeats of the same flag carry nothing the resolver reads, so the latest kept event always has
  * the same flag as the latest real event. keepFocusFlips() in ./filter.ts is the same rule in TypeScript.
+ *
+ * Extension 0.1.1 fields (page, inst, cookie_uid) ride on whatever rows are kept. A background profile's heartbeats are dropped, so the
+ * `instances` count taken from this load can undercount a quiet background profile whose only kept rows are its active/idle/encounter events;
+ * the tools/pulse-watch resolver reads every row and counts exactly. The count is informational either way.
  */
 import type { NeonQueryFunction } from "@neondatabase/serverless";
 import { computeWindowsDetailed } from "./compute";
@@ -82,7 +86,10 @@ export async function fetchEvents(db: WindowsDb, from: Date, to: Date): Promise<
              payload->>'encounter_id'     AS enc,
              payload->>'prescription_ref' AS rx,
              payload->>'tab_focus'        AS focus,
-             payload->>'reason'           AS reason
+             payload->>'reason'           AS reason,
+             payload->>'page_name'        AS page,
+             payload->>'instance_id'      AS inst,
+             payload->>'cookie_uid'       AS cookie_uid
         FROM pulse_presence_events
        WHERE source IN ('ext', 'resolver')
          AND machine IS NOT NULL
@@ -97,7 +104,7 @@ export async function fetchEvents(db: WindowsDb, from: Date, to: Date): Promise<
       ) s
       WHERE prev_f IS DISTINCT FROM f
     )
-    SELECT id, source, machine, event, ts, uid, dn, enc, rx, focus, reason
+    SELECT id, source, machine, event, ts, uid, dn, enc, rx, focus, reason, page, inst, cookie_uid
       FROM base
      WHERE event <> 'heartbeat' OR focus = 'true' OR id IN (SELECT id FROM flips)
      ORDER BY ts, id

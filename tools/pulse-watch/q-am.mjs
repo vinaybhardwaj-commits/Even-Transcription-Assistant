@@ -3,13 +3,15 @@ import { readFileSync } from 'fs';
 import { resolveMachines, consultLabel } from './occupancy.mjs';
 const sql = neon(process.env.DATABASE_URL || readFileSync(process.env.HOME+'/.claude/secrets/eta_database_url','utf8').trim());
 console.log('=== OCCUPANCY (resolved: idle/locked, 45m no genuine activity, nightly cutoff => logged out) ===');
+const dim = (s) => (process.stdout.isTTY ? '\x1b[2m' + s + '\x1b[0m' : s);
+const pageNote = (m) => (m.page_name ? '  ' + dim('page: ' + m.page_name) : '');   // page greeting: a witness, shown only when no doctor is known
 const who = (m) => {
   const od = m.occupant_display;
   if (od && od.source === 'warehouse') return od.name + ' ' + consultLabel(od) + (od.cookie_uid ? '  session: ' + (od.cookie_name || od.cookie_uid) + (od.stale ? ' STALE' : '') : '');
   if (m.occupied) return 'PRESENT  ' + (m.ambiguous ? 'AMBIGUOUS(' + m.candidates.join('/') + ')' : m.display_name) + (m.background.length ? ' bg:' + m.background.join('/') : '');
-  return m.out_reason === 'no_identity' && m.ext_alive ? 'no consult yet' : 'out(' + m.out_reason + ')';
+  return (m.out_reason === 'no_identity' && m.ext_alive ? 'no consult yet' : 'out(' + m.out_reason + ')') + pageNote(m);
 };
-for (const m of await resolveMachines(sql)) console.log(`  ${m.machine.padEnd(26)} ${who(m).padEnd(24)} last_genuine=${m.last_genuine_ts ? new Date(m.last_genuine_ts).toISOString().slice(5,19)+'Z' : '-'}  idle_state=${m.idle_state||'-'}`);
+for (const m of await resolveMachines(sql)) console.log(`  ${m.machine.padEnd(26)} ${who(m).padEnd(24)} last_genuine=${m.last_genuine_ts ? new Date(m.last_genuine_ts).toISOString().slice(5,19)+'Z' : '-'}  idle_state=${m.idle_state||'-'}${m.instances > 1 ? '  instances=' + m.instances : ''}`);
 console.log('=== MONITORED rooms — extension, last 6 min ===');
 const e = await sql`SELECT machine, count(*) n, max(ts) last FROM pulse_presence_events WHERE source='ext' AND ts>now()-interval '6 minutes' GROUP BY 1 ORDER BY 1`;
 for(const r of e) console.log(`  ${r.machine.padEnd(26)} n=${String(r.n).padStart(3)} last=${new Date(r.last).toISOString().slice(11,19)}Z`);

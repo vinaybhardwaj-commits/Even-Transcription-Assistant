@@ -16,8 +16,16 @@
  *                   rooms 09:00-11:20 IST, 13 inside open consults, median idle->active 92-193 s)
  *   idle_timeout    no GENUINE activity on the stream within genuineMin minutes (default 45)
  *   nightly_cutoff  last genuine activity predates the most recent nightly cutoff (IST, default 00:00)
+ *   stale_cookie    the stream's last login/logout/identity_stale control event is an `identity_stale` (extension 0.1.1: the Google-cookie
+ *                   identity contradicts the greeting the page shows). It closes the stream exactly like a logout; a later login re-opens it.
+ *                   The event carries doctor_uid null and names the stream in `cookie_uid`.
  * Genuine activity = login | active | encounter_open | encounter_close | heartbeat with tab_focus=true.
- * Null-uid twin rows (dual Chrome profile) never count for identity.
+ * Null-uid twin rows (dual Chrome profile) never count for identity. A row whose reason contains `stale_cookie` is never a doctor's
+ * activity at all: normalizeEvent drops its uid/name (the extension already sends doctor_uid null for it; this holds if one ever carries a uid).
+ *
+ * MACHINE SIGNALS (extension 0.1.1): page_name = the latest non-null `page_name` on the machine's ext events within pageMin (default 10) minutes;
+ * instances = how many distinct `instance_id`s reported on the machine in that window (several Chrome profiles on one Mac). Every row is kept; the
+ * count is informational and nothing alerts on it. Fleet attention keys on the machine, so it never double-counts instances.
  *
  * DUAL-PROFILE TIEBREAK (>=2 present uid streams on one machine) is pickOccupant(): focused Pulse tab, then the
  * most recent encounter event, then freshest genuine activity; two focused streams that encounter evidence
@@ -31,6 +39,7 @@ export const OCC_DEFAULTS = {
   lookbackH: 72,
   focusMin: 10,
   idleOutMin: 45,
+  pageMin: 10,
 };
 
 export type OccOptions = Partial<typeof OCC_DEFAULTS>;
@@ -48,24 +57,38 @@ export type NEvent = {
   rx: string | null;
   focus: boolean;
   reason: string | null;
+  /** identity_stale only: the stale cookie doctor_uid (the stream the event closes) */
+  cookie: string | null;
+  /** page_name: first name the Pulse page greets */
+  page: string | null;
+  /** instance_id: the extension install that sent the row */
+  inst: string | null;
 };
+
+/** A reason set (comma-joined) that includes stale_cookie: the row's identity is the stale cookie's, not a doctor's. */
+export const isStaleReason = (reason: string | null | undefined): boolean => !!reason && reason.includes("stale_cookie");
 
 export function normalizeEvent(e: PresenceEvent): NEvent | null {
   if (!e.machine || !e.event) return null;
   const t = e.ts instanceof Date ? e.ts.getTime() : typeof e.ts === "number" ? e.ts : new Date(e.ts).getTime();
   if (!Number.isFinite(t)) return null;
+  const reason = e.reason || null;
+  const stale = isStaleReason(reason); // never a doctor's activity (see the header)
   return {
     id: Number(e.id),
     t,
     source: String(e.source),
     machine: e.machine,
     event: e.event,
-    uid: e.uid || null,
-    dn: e.dn || null,
+    uid: stale ? null : e.uid || null,
+    dn: stale ? null : e.dn || null,
     enc: e.enc || null,
     rx: e.rx || null,
     focus: e.focus === true || e.focus === "true",
-    reason: e.reason || null,
+    reason,
+    cookie: e.cookie_uid || null,
+    page: e.page || null,
+    inst: e.inst || null,
   };
 }
 
@@ -131,10 +154,18 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
     last_enc_ts: number | null;
     last_genuine_ts: number | null;
     last_reset_ts: number | null; // latest login|active|encounter_open|encounter_close (no heartbeats): resets the idle_45m clock
-    ctl_event: string | null;
+    ctl_event: string | null; // latest ext login | logout | identity_stale on the stream
     res_logout_ts: number | null;
   };
   const acc = new Map<string, Acc>();
+  const accFor = (uid: string): Acc => {
+    let a = acc.get(uid);
+    if (!a) {
+      a = { uid, dn: null, last_focus_ts: null, last_focus_flag: false, last_enc_ts: null, last_genuine_ts: null, last_reset_ts: null, ctl_event: null, res_logout_ts: null };
+      acc.set(uid, a);
+    }
+    return a;
+  };
   for (let i = 0; i < end; i++) {
     const e = machineEvents[i]!;
     if (e.t <= lowT) continue;
@@ -143,12 +174,13 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
       idleState = e.event;
       idleTs = e.t;
     }
-    if (e.uid == null) continue;
-    let a = acc.get(e.uid);
-    if (!a) {
-      a = { uid: e.uid, dn: null, last_focus_ts: null, last_focus_flag: false, last_enc_ts: null, last_genuine_ts: null, last_reset_ts: null, ctl_event: null, res_logout_ts: null };
-      acc.set(e.uid, a);
+    if (e.event === "identity_stale") {
+      // The row itself carries doctor_uid null; the stream it closes is named by cookie_uid. It is a control event, like a logout.
+      if (e.source === "ext" && e.cookie != null) accFor(e.cookie).ctl_event = "identity_stale";
+      continue;
     }
+    if (e.uid == null) continue;
+    const a = accFor(e.uid);
     // events arrive ascending by (t, id): later assignments are "latest"
     if (e.dn != null) a.dn = e.dn;
     if (e.source === "ext" && e.event !== "logout") {
@@ -169,6 +201,7 @@ export function resolveStreams(machineEvents: NEvent[], asOf: number, opts: OccO
   for (const a of acc.values()) {
     let reason: string | null;
     if (a.ctl_event === "logout") reason = "logout";
+    else if (a.ctl_event === "identity_stale") reason = "stale_cookie";
     else if (a.res_logout_ts != null && (a.last_genuine_ts == null || a.last_genuine_ts <= a.res_logout_ts)) reason = "stamped";
     else if (idleState === "locked") reason = "locked";
     else if (
@@ -232,12 +265,34 @@ export function pickOccupant(present: Stream[], asOf: number, opts: OccOptions =
   return { best: c.slice().sort(fresh)[0]!, ambiguous: false, candidates: [], rule: "freshest" }; // rule 3
 }
 
+export type MachineSignals = {
+  /** latest non-null page_name on the machine's ext events within pageMin minutes of asOf, else null */
+  page_name: string | null;
+  /** distinct instance_ids that reported on the machine in that window (several Chrome profiles on one Mac); 0 when none carry one */
+  instances: number;
+};
+
+/** page_name + instances for ONE machine as of asOf. `machineEvents` must be sorted by (t, id). Informational only. */
+export function machineSignals(machineEvents: NEvent[], asOf: number, opts: OccOptions = {}): MachineSignals {
+  const lowT = asOf - (opts.pageMin ?? OCC_DEFAULTS.pageMin) * 60_000;
+  const end = upperBound(machineEvents, asOf);
+  let page: string | null = null;
+  const insts = new Set<string>();
+  for (let i = 0; i < end; i++) {
+    const e = machineEvents[i]!;
+    if (e.t <= lowT || e.source !== "ext") continue;
+    if (e.page != null) page = e.page; // ascending: the last one is the latest
+    if (e.inst != null) insts.add(e.inst);
+  }
+  return { page_name: page, instances: insts.size };
+}
+
 export type OccAt = {
   n_present: number;
   best: { uid: string; dn: string | null } | null;
   rule: string | null;
   ambiguous: boolean;
-};
+} & MachineSignals;
 
 /** Occupancy of one machine at one instant: how many streams are present and who the occupant is. */
 export function occupancyAt(machineEvents: NEvent[], asOf: number, opts: OccOptions = {}): OccAt {
@@ -248,5 +303,6 @@ export function occupancyAt(machineEvents: NEvent[], asOf: number, opts: OccOpti
     best: pick.best ? { uid: pick.best.uid, dn: pick.best.dn } : null,
     rule: pick.rule,
     ambiguous: pick.ambiguous,
+    ...machineSignals(machineEvents, asOf, opts),
   };
 }

@@ -58,6 +58,8 @@ export type OccupantDisplay = {
   cookie_name: string | null;
   /** a cookie identity is present and differs from the warehouse doctor */
   stale: boolean;
+  /** the first name the Pulse page greets on this machine (extension 0.1.1), last 10 min; a witness, never an identity. null when unknown */
+  page_name: string | null;
 };
 
 const clean = (s: string | null | undefined): string | null => {
@@ -66,7 +68,8 @@ const clean = (s: string | null | undefined): string | null => {
 };
 
 /** Pure. `warehouse` = the machine's warehouse doctor (latest consult today) or null; `cookie` = the extension's resolved occupant or null. */
-export function buildOccupantDisplay(warehouse: WarehouseDoctor | null, cookie: DoctorRef | null): OccupantDisplay | null {
+export function buildOccupantDisplay(warehouse: WarehouseDoctor | null, cookie: DoctorRef | null, pageName: string | null = null): OccupantDisplay | null {
+  const pn = clean(pageName);
   const cu = clean(cookie?.uid);
   const cn = clean(cookie?.name);
   const wu = clean(warehouse?.uid);
@@ -80,10 +83,11 @@ export function buildOccupantDisplay(warehouse: WarehouseDoctor | null, cookie: 
       cookie_uid: cu,
       cookie_name: cn,
       stale: cu !== null && cu !== wu,
+      page_name: pn,
     };
   }
-  if (cu || cn) return { uid: cu, name: cn, source: "cookie", label: null, consult_at: null, cookie_uid: cu, cookie_name: cn, stale: false };
-  return null;
+  if (cu || cn) return { uid: cu, name: cn, source: "cookie", label: null, consult_at: null, cookie_uid: cu, cookie_name: cn, stale: false, page_name: pn };
+  return null; // no identity at all: the caller shows MachineOccupancy.page_name ("page: <name>") on its own
 }
 
 type WindowDocRow = {
@@ -152,6 +156,10 @@ export type MachineOccupancy = {
   /** the machine's warehouse doctor today (latest warehouse consult, any age; null when none today) */
   consulting: ConsultingDoctor | null;
   occupant_display: OccupantDisplay | null;
+  /** first name the Pulse page greets on this machine in the last 10 min (extension 0.1.1); a witness, never an identity */
+  page_name: string | null;
+  /** distinct extension installs (Chrome profiles) reporting on the machine in the last 10 min; > 1 is informational, never an alert */
+  instances: number;
 };
 
 /**
@@ -195,7 +203,9 @@ export async function machineOccupancy(db: WindowsDb, asOf: string | number | Da
       cookie_uid: cookie?.uid ?? null,
       cookie_name: cookie?.name ?? null,
       consulting,
-      occupant_display: buildOccupantDisplay(shown, cookie),
+      occupant_display: buildOccupantDisplay(shown, cookie, occ?.page_name ?? null),
+      page_name: occ?.page_name ?? null,
+      instances: occ?.instances ?? 0,
     });
   }
   return out;

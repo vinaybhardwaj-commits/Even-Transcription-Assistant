@@ -28,6 +28,12 @@ node watch.mjs
 `occupancy.mjs` falls back to the call form; `node tools/pulse-watch/q-am.mjs` from the repo root also works after the
 repo's own `npm install`.
 
+Extension 0.1.1 signals (5 Oct 2026): an `identity_stale` event closes the cookie doctor's stream like a logout (out_reason `stale_cookie`); a row
+whose reason contains `stale_cookie` is never a doctor's activity; each machine row carries `page_name` (the Pulse home greeting's first name, last 10
+minutes; a witness, never an identity) and `instances` (distinct `instance_id`s reporting, i.e. Chrome profiles; > 1 prints `instances=N`, no alert).
+`q-am.mjs` and `watch.mjs` show `page: <name>` dimmed when there is no warehouse doctor and no cookie identity. The same rules live in
+`lib/encounter-windows/occupancy.ts`; `tests/unit/occupancy-mjs-sql.test.ts` proves the SQL against postgres and in lockstep with it.
+
 Changes from the Air originals: `DATABASE_URL` is honoured first, the `sql.query` fallback, and the pinned driver version.
 Nothing else.
 
