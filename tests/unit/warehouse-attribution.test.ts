@@ -144,7 +144,8 @@ function fakeDb(queue: Candidate[], opts: { updateReturns?: (payload: Array<Reco
         : payload.map((p) => {
             const c = queue.find((x) => x.consult_key === p.consult_key)!;
             return { consult_key: c.consult_key, machine: c.machine, room_slug: c.room_slug, consult_uid: c.consult_uid, doctor_uid: c.doctor_uid, display_name: c.display_name,
-              warehouse_doctor_uid: p.warehouse_doctor_uid, warehouse_doctor_name: p.warehouse_doctor_name, doctor_mismatch: p.doctor_mismatch };
+              warehouse_doctor_uid: p.warehouse_doctor_uid, warehouse_doctor_name: p.warehouse_doctor_name, doctor_mismatch: p.doctor_mismatch,
+              warehouse_attempts: p.warehouse_doctor_uid == null ? 1 : 0 };
           });
     }
     return Object.assign(q, { then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) => Promise.resolve(out).then(res, rej) });
@@ -164,13 +165,13 @@ describe("attributeFromWarehouse", () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const r = await attributeFromWarehouse(db, { hours: 36, limit: 500, query });
 
-    expect(r).toEqual({ candidates: 2, checked: 2, resolved: 1, unresolved: 1, mismatches: 1, raced: 0, deferred: 0 });
+    expect(r).toEqual({ candidates: 2, checked: 2, resolved: 1, unresolved: 1, mismatches: 1, raced: 0, deferred: 0, gave_up: 0 });
     // queue SELECT: bound values only, the three gates in the WHERE
     const select = issued[0]!;
-    expect(select.vals).toEqual([36, 10, 500]);
+    expect(select.vals).toEqual([36, 12, 10, 500]); // hours, MAX_UNRESOLVED_CHECKS, recheck minutes, limit
     expect(select.text).toMatch(/consult_uid IS NOT NULL OR prescription_ref IS NOT NULL/);
     expect(select.text).toMatch(/warehouse_checked_at IS NULL/);
-    expect(select.text).toMatch(/warehouse_doctor_uid IS NULL AND warehouse_checked_at < now\(\)/);
+    expect(select.text).toMatch(/warehouse_doctor_uid IS NULL AND warehouse_attempts < \?::int\s+AND warehouse_checked_at < now\(\)/);
     // one Metabase call with both uid kinds inlined only through the escaper
     expect(query).toHaveBeenCalledTimes(1);
     expect(query.mock.calls[0]![0]).toContain("p.consult_uid IN ('C1','C2')");
@@ -180,7 +181,7 @@ describe("attributeFromWarehouse", () => {
     expect(issued).toHaveLength(2);
     const setList = /SET([\s\S]*?)\sFROM\s/.exec(update.text)![1]!;
     expect(setList).not.toMatch(/(^|[\s,])(doctor_uid|display_name|attribution)\s*=/);
-    for (const col of ["warehouse_doctor_uid", "warehouse_doctor_name", "warehouse_prescription_uid", "warehouse_checked_at", "consulting_doctor_uid", "consulting_doctor_name", "attribution_source", "doctor_mismatch"]) {
+    for (const col of ["warehouse_doctor_uid", "warehouse_doctor_name", "warehouse_prescription_uid", "warehouse_checked_at", "warehouse_attempts", "consulting_doctor_uid", "consulting_doctor_name", "attribution_source", "doctor_mismatch"]) {
       expect(setList).toContain(col);
     }
     const payload = JSON.parse(update.vals[0] as string) as Array<Record<string, unknown>>;
@@ -197,7 +198,7 @@ describe("attributeFromWarehouse", () => {
   it("an empty queue makes no Metabase call and no write", async () => {
     const { db, issued } = fakeDb([]);
     const query = vi.fn();
-    expect(await attributeFromWarehouse(db, { query })).toEqual({ candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0 });
+    expect(await attributeFromWarehouse(db, { query })).toEqual({ candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0, gave_up: 0 });
     expect(query).not.toHaveBeenCalled();
     expect(issued).toHaveLength(1);
   });
@@ -212,12 +213,22 @@ describe("attributeFromWarehouse", () => {
     expect(issued.every((q) => !q.text.includes("DROP"))).toBe(true);
   });
 
-  it("chunks Metabase calls, and past the deadline defers the rest (they stay queued)", async () => {
+  it("EVERY chunk is gated on the deadline, the first included: an expired deadline calls Metabase zero times and defers the queue", async () => {
     const queue = ["A", "B", "C"].map((n) => cand({ consult_key: `${n}@m`, consult_uid: `${n}1`, prescription_ref: null }));
-    const { db } = fakeDb(queue);
+    const { db, issued } = fakeDb(queue);
     const query = vi.fn().mockResolvedValue([]);
     const r = await attributeFromWarehouse(db, { query, chunkSize: 1, deadlineMs: Date.now() - 1 });
-    expect(query).toHaveBeenCalledTimes(1); // the first chunk always runs
+    expect(query).not.toHaveBeenCalled();
+    expect(issued.filter((q) => /UPDATE/.test(q.text))).toHaveLength(0);
+    expect(r).toMatchObject({ candidates: 3, checked: 0, deferred: 3 });
+  });
+
+  it("a deadline that passes DURING a chunk defers the following chunks (they stay queued)", async () => {
+    const queue = ["A", "B", "C"].map((n) => cand({ consult_key: `${n}@m`, consult_uid: `${n}1`, prescription_ref: null }));
+    const { db } = fakeDb(queue);
+    const query = vi.fn(async () => { await new Promise((res) => setTimeout(res, 60)); return []; });
+    const r = await attributeFromWarehouse(db, { query, chunkSize: 1, deadlineMs: Date.now() + 30 });
+    expect(query).toHaveBeenCalledTimes(1);
     expect(r).toMatchObject({ candidates: 3, checked: 1, deferred: 2 });
     const { db: db2 } = fakeDb(queue);
     const q2 = vi.fn().mockResolvedValue([]);
@@ -241,9 +252,22 @@ describe("attributeFromWarehouse", () => {
   it("clamps hours to 1..720 and limit to 1..2000", async () => {
     const a = fakeDb([]);
     await attributeFromWarehouse(a.db, { hours: 100000, limit: 999999 });
-    expect(a.issued[0]!.vals).toEqual([720, 10, 2000]);
+    expect(a.issued[0]!.vals).toEqual([720, 12, 10, 2000]);
     const b = fakeDb([]);
     await attributeFromWarehouse(b.db, { hours: 0, limit: 0 });
-    expect(b.issued[0]!.vals).toEqual([1, 10, 1]);
+    expect(b.issued[0]!.vals).toEqual([1, 12, 10, 1]);
+  });
+
+  it("RETRY CAP: the write bumps warehouse_attempts only for an unresolved lookup, and the 12th unresolved one is reported as gave_up", async () => {
+    const { db, issued } = fakeDb([cand(), cand({ consult_key: "C2@m", consult_uid: "C2", prescription_ref: null })], {
+      updateReturns: (payload) => payload.map((p) => ({
+        consult_key: p.consult_key, machine: "m", room_slug: "opd-6", consult_uid: p.consult_key === "C1@m" ? "C1" : "C2", doctor_uid: "EDOC1", display_name: "x",
+        warehouse_doctor_uid: p.warehouse_doctor_uid, warehouse_doctor_name: null, doctor_mismatch: p.doctor_mismatch,
+        warehouse_attempts: p.consult_key === "C1@m" ? 0 : 12, // C1 resolved; C2 just used its 12th unresolved check
+      })),
+    });
+    const r = await attributeFromWarehouse(db, { query: vi.fn().mockResolvedValue([wh({ doctor_uid: "WDOC1" })]) });
+    expect(r).toMatchObject({ resolved: 1, unresolved: 1, gave_up: 1 });
+    expect(issued[1]!.text).toMatch(/warehouse_attempts\s+= w\.warehouse_attempts \+ CASE WHEN r\.warehouse_doctor_uid IS NULL THEN 1 ELSE 0 END/);
   });
 });

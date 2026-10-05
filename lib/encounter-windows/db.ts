@@ -281,12 +281,16 @@ export type WindowFilter = {
   from?: string | null;
   to?: string | null;
   quality?: string | null;
-  /** true: only rows where the warehouse and the extension name different doctors. */
+  /** true: only rows where the warehouse and the extension name different doctors; false: only rows where they do not; null/absent: both. */
   mismatch?: boolean | null;
   limit?: number;
 };
 
-/** Read rows ordered by t_open. Only what the table holds: ids, times, doctor uids/names (extension and warehouse), labels. */
+/**
+ * Read rows ordered by t_open. Only what the table holds: ids, times, doctor uids/names (extension and warehouse), labels.
+ * `doctor_uid` matches the doctor to REPORT (consulting_doctor_uid) OR the extension's doctor_uid, so a doctor's list holds the
+ * consults Pulse says were theirs and the ones the extension saw them logged in for; `mismatch` true/false filters doctor_mismatch.
+ */
 export async function queryWindows(db: WindowsDb, f: WindowFilter): Promise<EncounterWindowRead[]> {
   const limit = Math.min(Math.max(Math.trunc(f.limit ?? 1000), 1), 5000);
   const rows = (await db`
@@ -296,11 +300,11 @@ export async function queryWindows(db: WindowsDb, f: WindowFilter): Promise<Enco
            consulting_doctor_uid, consulting_doctor_name, attribution_source, doctor_mismatch
       FROM eta_encounter_windows
      WHERE (${f.room_id ?? null}::text IS NULL OR room_id = ${f.room_id ?? null}::text)
-       AND (${f.doctor_uid ?? null}::text IS NULL OR doctor_uid = ${f.doctor_uid ?? null}::text)
+       AND (${f.doctor_uid ?? null}::text IS NULL OR consulting_doctor_uid = ${f.doctor_uid ?? null}::text OR doctor_uid = ${f.doctor_uid ?? null}::text)
        AND (${f.from ?? null}::timestamptz IS NULL OR t_open >= ${f.from ?? null}::timestamptz)
        AND (${f.to ?? null}::timestamptz IS NULL OR t_open < ${f.to ?? null}::timestamptz)
        AND (${f.quality ?? null}::text IS NULL OR quality = ${f.quality ?? null}::text)
-       AND (${f.mismatch === true ? true : null}::boolean IS NULL OR doctor_mismatch = true)
+       AND (${f.mismatch ?? null}::boolean IS NULL OR doctor_mismatch = ${f.mismatch ?? null}::boolean)
      ORDER BY t_open, id
      LIMIT ${limit}
   `) as unknown as Array<Record<string, unknown>>;

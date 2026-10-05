@@ -3,7 +3,7 @@
  *
  * Every 2 minutes (vercel.json) it asks the warehouse about the consults that have no answer yet (default: windows that
  * opened in the last 36 h; see attributeFromWarehouse). `?hours=N` (1..720) widens that for a backfill; a backfill
- * works through the queue in batches of 500 until it is empty or 50 s are used, and reports complete=false when it
+ * works through the queue in batches of 500 until it is empty or the 28 s budget is used, and reports complete=false when it
  * stopped early — call again, the rows already written are out of the queue, so the call resumes where it stopped.
  *
  * BEARER, NOT COOKIE — the same shape as ./cron.ts: CRON_SECRET unset -> 503 and nothing runs; wrong bearer -> 401;
@@ -17,7 +17,8 @@ import { sql } from "@/lib/db";
 import { attributeFromWarehouse, type WarehouseSummary } from "./warehouse-attribution";
 
 const NO_STORE = { headers: { "cache-control": "no-store" } };
-const BUDGET_MS = 50_000;
+// 28 s, not 50: the deadline gates when a Metabase call may START, and a call can run METABASE_TIMEOUT_MS (25 s) — 28 + 25 stays under the 60 s ceiling.
+const BUDGET_MS = 28_000;
 const BATCH = 500;
 const DEFAULT_HOURS = 36;
 const bad = (message: string) => NextResponse.json({ error: { code: "VALIDATION_FAILED", message } }, { status: 400, ...NO_STORE });
@@ -41,7 +42,7 @@ export async function handleWarehouseCron(req: Request): Promise<NextResponse> {
 
   const startedAt = Date.now();
   const deadlineMs = startedAt + BUDGET_MS;
-  const total: WarehouseSummary = { candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0 };
+  const total: WarehouseSummary = { candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0, gave_up: 0 };
   let batches = 0;
   let complete = false;
   try {

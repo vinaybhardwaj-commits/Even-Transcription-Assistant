@@ -104,14 +104,16 @@ describe("migration 0124", () => {
       SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
        WHERE table_name = 'eta_encounter_windows' AND column_name = ANY(${[
          "warehouse_doctor_uid", "warehouse_doctor_name", "warehouse_checked_at", "warehouse_prescription_uid",
-         "consulting_doctor_uid", "consulting_doctor_name", "attribution_source", "doctor_mismatch"]}::text[])
+         "consulting_doctor_uid", "consulting_doctor_name", "attribution_source", "doctor_mismatch", "warehouse_attempts"]}::text[])
        ORDER BY column_name`) as Array<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>;
     expect(cols.map((c) => c.column_name)).toEqual([
-      "attribution_source", "consulting_doctor_name", "consulting_doctor_uid", "doctor_mismatch", "warehouse_checked_at",
+      "attribution_source", "consulting_doctor_name", "consulting_doctor_uid", "doctor_mismatch", "warehouse_attempts", "warehouse_checked_at",
       "warehouse_doctor_name", "warehouse_doctor_uid", "warehouse_prescription_uid"]);
     const mm = cols.find((c) => c.column_name === "doctor_mismatch")!;
     expect([mm.data_type, mm.is_nullable, mm.column_default]).toEqual(["boolean", "NO", "false"]);
     expect(cols.find((c) => c.column_name === "warehouse_checked_at")!.data_type).toBe("timestamp with time zone");
+    const att = cols.find((c) => c.column_name === "warehouse_attempts")!;
+    expect([att.data_type, att.is_nullable, att.column_default]).toEqual(["integer", "NO", "0"]);
     const idx = (await pg.sql`SELECT indexdef FROM pg_indexes WHERE indexname = 'eta_encounter_windows_wh_unchecked_idx'`) as Array<{ indexdef: string }>;
     expect(idx[0]!.indexdef).toMatch(/\(t_open\) WHERE \(warehouse_checked_at IS NULL\)/);
     await expect(
@@ -189,7 +191,7 @@ describe("attributeFromWarehouse on real rows", () => {
       { consult_uid: "E2", prescription_uid: "RX2", doctor_uid: null, created_at: iso(39) },                          // row exists, no doctor
     ]);
     const s = await attributeFromWarehouse(db, { query });
-    expect(s).toEqual({ candidates: 3, checked: 3, resolved: 1, unresolved: 2, mismatches: 1, raced: 0, deferred: 0 });
+    expect(s).toEqual({ candidates: 3, checked: 3, resolved: 1, unresolved: 2, mismatches: 1, raced: 0, deferred: 0, gave_up: 0 });
     expect(query).toHaveBeenCalledTimes(1);
 
     expect(await rowOf(`E1@${M}`)).toMatchObject({ warehouse_doctor_uid: "UX", consulting_doctor_uid: "UX", consulting_doctor_name: NX, attribution_source: "warehouse", doctor_mismatch: true, warehouse_prescription_uid: "RX1" });
@@ -225,6 +227,30 @@ describe("attributeFromWarehouse on real rows", () => {
     pg.exec(`UPDATE eta_encounter_windows SET t_open = now() - interval '40 hours', t_close = now() - interval '39 hours';`);
     expect((await attributeFromWarehouse(db, { hours: 36, query: metabase([]) })).candidates).toBe(0);
     expect((await attributeFromWarehouse(db, { hours: 48, query: metabase([]) })).candidates).toBe(1);
+  });
+
+  it_("RETRY CAP: 12 unresolved lookups and the row is never queued again; the cap survives a refresh and the attribution stays extension", async () => {
+    pg.exec(consult("E1", 60, 50, "UA", NA));
+    await refresh(db);
+    const none = metabase([]);
+    for (let i = 1; i <= 12; i++) {
+      pg.exec(`UPDATE eta_encounter_windows SET warehouse_checked_at = now() - interval '11 minutes';`); // let the 10-minute pace elapse
+      const s = await attributeFromWarehouse(db, { query: none });
+      expect(s, `check ${i}`).toMatchObject({ candidates: 1, unresolved: 1, gave_up: i === 12 ? 1 : 0 });
+      expect((await rowOf(`E1@${M}`))!.warehouse_attempts, `attempts after ${i}`).toBe(i);
+    }
+    pg.exec(`UPDATE eta_encounter_windows SET warehouse_checked_at = now() - interval '2 hours';`);
+    const idle = metabase([{ consult_uid: "E1", doctor_uid: "UX", doctor_name: NX, created_at: iso(59) }]);
+    expect((await attributeFromWarehouse(db, { query: idle })).candidates).toBe(0); // given up: not asked, even though the warehouse would now answer
+    expect(idle).not.toHaveBeenCalled();
+    await refresh(db);
+    expect(await rowOf(`E1@${M}`)).toMatchObject({ warehouse_attempts: 12, attribution_source: "extension", consulting_doctor_uid: "UA", warehouse_doctor_uid: null });
+    // an ANSWERED lookup does not count as an unresolved attempt
+    pg.exec(`TRUNCATE eta_encounter_windows;`);
+    pg.exec(consult("E9", 30, 20, "UA", NA));
+    await refresh(db);
+    await attributeFromWarehouse(db, { query: metabase([{ consult_uid: "E9", doctor_uid: "UX", doctor_name: NX, created_at: iso(29) }]) });
+    expect((await rowOf(`E9@${M}`))!.warehouse_attempts).toBe(0);
   });
 
   it_("matches on prescription_ref when the consult has no consult_uid", async () => {
@@ -283,7 +309,12 @@ describe("GET /api/encounter-windows data layer — queryWindows", () => {
     expect(all[1]).toMatchObject({ doctor_mismatch: false, attribution_source: "warehouse", consulting_doctor_name: `${NB} (wh)` });
 
     expect((await queryWindows(db, { mismatch: true })).map((w) => w.consult_uid)).toEqual(["E1"]);
-    expect((await queryWindows(db, { mismatch: false })).map((w) => w.consult_uid)).toEqual(["E1", "E2"]);
+    expect((await queryWindows(db, { mismatch: false })).map((w) => w.consult_uid)).toEqual(["E2"]);
+    // doctor_uid matches the doctor to REPORT (consulting) OR the extension's: UX only via consulting, UA only via the extension, UB both
+    expect((await queryWindows(db, { doctor_uid: "UX" })).map((w) => w.consult_uid)).toEqual(["E1"]);
+    expect((await queryWindows(db, { doctor_uid: "UA" })).map((w) => w.consult_uid)).toEqual(["E1"]);
+    expect((await queryWindows(db, { doctor_uid: "UB" })).map((w) => w.consult_uid)).toEqual(["E2"]);
+    expect(await queryWindows(db, { doctor_uid: "NOBODY" })).toEqual([]);
     expect((await queryWindows(db, { mismatch: null })).map((w) => w.consult_uid)).toEqual(["E1", "E2"]);
   });
 });

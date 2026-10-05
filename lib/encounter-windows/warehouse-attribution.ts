@@ -14,8 +14,9 @@
  * It NEVER writes doctor_uid, display_name or attribution: the extension's view stays as the resolver computed it.
  *
  * WORK QUEUE. A row is looked up when it has a consult_uid or prescription_ref, t_open is inside the window, and it has
- * never been checked, or was checked without an answer more than 10 minutes ago (Pulse writes the record within 60 s of
- * startConsult, but a sync can lag). A row that was answered is not looked up again. A lookup that finds nothing still
+ * never been checked, or was checked without an answer more than 10 minutes ago and fewer than MAX_UNRESOLVED_CHECKS (12)
+ * times (Pulse writes the record within 60 s of startConsult, but a sync can lag). A row that was answered is not looked up
+ * again; a row that used up its 12 unresolved checks is final (it keeps reading extension/none). A lookup that finds nothing still
  * stamps warehouse_checked_at, so the queue drains and the retry is paced.
  *
  * Neon HTTP: tagged templates only, every value bound, no sql.unsafe(), timestamps come back as strings. The ONLY values
@@ -55,6 +56,9 @@ export type Decision = {
   doctor_mismatch: boolean;
 };
 
+/** Unresolved lookups after which a consult is no longer retried (migration 0124, warehouse_attempts). */
+export const MAX_UNRESOLVED_CHECKS = 12;
+
 export type WarehouseSummary = {
   /** rows the queue handed over */
   candidates: number;
@@ -67,6 +71,8 @@ export type WarehouseSummary = {
   raced: number;
   /** candidates not looked up because the deadline came first; they stay queued */
   deferred: number;
+  /** rows written unresolved for the MAX_UNRESOLVED_CHECKS-th time: final, never retried */
+  gave_up: number;
 };
 
 export type QueryFn = (sqlText: string) => Promise<Array<Record<string, unknown>>>;
@@ -78,7 +84,7 @@ export type AttributeOptions = {
   limit?: number;
   /** Candidate rows per Metabase query. Default 200 (the endpoint returns ~2000 rows at most; two per consult). */
   chunkSize?: number;
-  /** Do not START another Metabase chunk after this epoch ms. */
+  /** Do not START any Metabase chunk after this epoch ms (the first one included: a late start defers the whole queue). */
   deadlineMs?: number;
   /** Injected in tests; defaults to the real Metabase client. */
   query?: QueryFn;
@@ -163,7 +169,8 @@ async function loadCandidates(db: WindowsDb, hours: number, limit: number): Prom
      WHERE (consult_uid IS NOT NULL OR prescription_ref IS NOT NULL)
        AND t_open >= now() - make_interval(hours => ${hours}::int)
        AND (warehouse_checked_at IS NULL
-            OR (warehouse_doctor_uid IS NULL AND warehouse_checked_at < now() - make_interval(mins => ${RECHECK_MINUTES}::int)))
+            OR (warehouse_doctor_uid IS NULL AND warehouse_attempts < ${MAX_UNRESOLVED_CHECKS}::int
+                AND warehouse_checked_at < now() - make_interval(mins => ${RECHECK_MINUTES}::int)))
      ORDER BY t_open DESC, id DESC
      LIMIT ${limit}
   `) as unknown as Array<Record<string, unknown>>;
@@ -191,6 +198,7 @@ async function writeDecisions(db: WindowsDb, items: Array<{ c: Candidate; d: Dec
         warehouse_doctor_name      = r.warehouse_doctor_name,
         warehouse_prescription_uid = r.warehouse_prescription_uid,
         warehouse_checked_at       = now(),
+        warehouse_attempts         = w.warehouse_attempts + CASE WHEN r.warehouse_doctor_uid IS NULL THEN 1 ELSE 0 END,
         consulting_doctor_uid      = r.consulting_doctor_uid,
         consulting_doctor_name     = r.consulting_doctor_name,
         attribution_source         = r.attribution_source,
@@ -201,7 +209,7 @@ async function writeDecisions(db: WindowsDb, items: Array<{ c: Candidate; d: Dec
      WHERE w.consult_key = r.consult_key
        AND w.doctor_uid IS NOT DISTINCT FROM r.ext_uid
     RETURNING w.consult_key, w.machine, w.room_slug, w.consult_uid, w.doctor_uid, w.display_name,
-              w.warehouse_doctor_uid, w.warehouse_doctor_name, w.doctor_mismatch
+              w.warehouse_doctor_uid, w.warehouse_doctor_name, w.doctor_mismatch, w.warehouse_attempts
   `) as unknown as Array<Record<string, unknown>>;
 }
 
@@ -211,13 +219,14 @@ export async function attributeFromWarehouse(db: WindowsDb, opts: AttributeOptio
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 500), 1), 2000);
   const chunkSize = Math.min(Math.max(Math.trunc(opts.chunkSize ?? 200), 1), 500);
   const query = opts.query ?? metabaseQuery;
-  const out: WarehouseSummary = { candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0 };
+  const out: WarehouseSummary = { candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0, gave_up: 0 };
 
   const queue = await loadCandidates(db, hours, limit);
   out.candidates = queue.length;
   for (let at = 0; at < queue.length; at += chunkSize) {
     const chunk = queue.slice(at, at + chunkSize);
-    if (opts.deadlineMs !== undefined && at > 0 && Date.now() > opts.deadlineMs) {
+    // EVERY chunk is gated on the deadline, the first too: a Metabase call may run 25 s, so the caller's budget plus that timeout must fit the function ceiling.
+    if (opts.deadlineMs !== undefined && Date.now() > opts.deadlineMs) {
       out.deferred = queue.length - at;
       break;
     }
@@ -231,7 +240,10 @@ export async function attributeFromWarehouse(db: WindowsDb, opts: AttributeOptio
     for (const w of written) {
       out.checked++;
       if (w.warehouse_doctor_uid != null) out.resolved++;
-      else out.unresolved++;
+      else {
+        out.unresolved++;
+        if (Number(w.warehouse_attempts) >= MAX_UNRESOLVED_CHECKS) out.gave_up++;
+      }
       if (w.doctor_mismatch === true) {
         out.mismatches++;
         console.info(

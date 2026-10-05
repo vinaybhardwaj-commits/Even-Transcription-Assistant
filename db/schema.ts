@@ -445,6 +445,7 @@ export const etaEncounterWindows = pgTable("eta_encounter_windows", {
   consultingDoctorName:    text("consulting_doctor_name"),
   attributionSource:       text("attribution_source"),        // warehouse | extension | none (CHECK in SQL)
   doctorMismatch:          boolean("doctor_mismatch").notNull().default(false),
+  warehouseAttempts:       integer("warehouse_attempts").notNull().default(0),   // unresolved lookups so far; the cron stops at 12
 }, (t) => ({
   byConsultKey: uniqueIndex("eta_encounter_windows_consult_key_key").on(t.consultKey),
   byRoomOpen:   index("eta_encounter_windows_room_open_idx").on(t.roomId, t.tOpen),

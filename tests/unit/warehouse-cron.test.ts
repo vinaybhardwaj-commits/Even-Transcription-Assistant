@@ -9,7 +9,7 @@ import { GET } from "@/app/api/cron/encounter-windows/warehouse/route";
 import fs from "node:fs";
 
 const SAVED = process.env.CRON_SECRET;
-const sum = (o: Record<string, number> = {}) => ({ candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0, ...o });
+const sum = (o: Record<string, number> = {}) => ({ candidates: 0, checked: 0, resolved: 0, unresolved: 0, mismatches: 0, raced: 0, deferred: 0, gave_up: 0, ...o });
 const req = (auth?: string, qs = "") =>
   new Request(`https://x.test/api/cron/encounter-windows/warehouse${qs}`, { headers: auth ? { authorization: auth } : {} });
 
@@ -48,7 +48,9 @@ describe("GET /api/cron/encounter-windows/warehouse", () => {
     const [, opts] = M.attribute.mock.calls[0]!;
     expect(opts).toMatchObject({ hours: 36, limit: 500 });
     expect(opts.deadlineMs).toBeGreaterThan(Date.now());
-    expect(opts.deadlineMs).toBeLessThanOrEqual(Date.now() + 50_000);
+    // 28 s: the deadline gates when a Metabase call may START, and a call can run 25 s, so 28 + 25 stays under the 60 s ceiling
+    expect(opts.deadlineMs).toBeLessThanOrEqual(Date.now() + 28_000);
+    expect(opts.deadlineMs).toBeGreaterThan(Date.now() + 27_000);
   });
 
   it("?hours= is clamped to 720; a full batch is followed by another until the queue is short", async () => {

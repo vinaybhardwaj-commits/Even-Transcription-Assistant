@@ -4,7 +4,7 @@
  * lib/encounter-windows/warehouse-attribution.ts. Migration 0124 must be applied first.
  *
  * Every 2 minutes (vercel.json), no query string. `?hours=N` (1..720, default 36) is a backfill: it works through the
- * queue in batches of 500 for up to 50 s and reports complete=false when it stopped early; call again to continue.
+ * queue in batches of 500 for up to 28 s (budget + the 25 s Metabase timeout stays under maxDuration) and reports complete=false when it stopped early; call again to continue.
  * BEARER, NOT COOKIE: CRON_SECRET unset -> 503, wrong bearer -> 401, bad hours -> 400. Response: counts only.
  */
 import { handleWarehouseCron } from "@/lib/encounter-windows/warehouse-cron";

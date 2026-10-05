@@ -20,7 +20,11 @@
 -- these columns survive it; its upsert recomputes consulting_*/attribution_source/doctor_mismatch from the stored
 -- warehouse doctor and the fresh extension doctor.
 --
--- ADDITIVE AND IDEMPOTENT. ADD COLUMN IF NOT EXISTS x8, one partial index (rows still waiting for their first
+-- RETRY CAP. warehouse_attempts counts the lookups that found NO warehouse doctor. After 12 of them the cron stops asking
+-- (the consult is final-unresolved; warehouse_checked_at stays set, attribution_source stays extension/none per rule 2/3, which is
+-- also what a window refresh re-derives, so the cap survives it). A consult the warehouse answered is never asked again either way.
+--
+-- ADDITIVE AND IDEMPOTENT. ADD COLUMN IF NOT EXISTS x9, one partial index (rows still waiting for their first
 -- warehouse check), comments, the schema_migrations row. Nullable or defaulted, so old code and a half-applied
 -- deploy keep working. No data is touched. APPLY BEFORE the warehouse cron deploys.
 -- =====================================================================
@@ -33,6 +37,7 @@ ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS consulting_doctor_uid
 ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS consulting_doctor_name     text;
 ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS attribution_source         text;
 ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS doctor_mismatch            boolean NOT NULL DEFAULT false;
+ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS warehouse_attempts         integer NOT NULL DEFAULT 0;
 
 DO $$
 BEGIN
@@ -63,6 +68,8 @@ COMMENT ON COLUMN eta_encounter_windows.consulting_doctor_name IS
   'Display name for consulting_doctor_uid.';
 COMMENT ON COLUMN eta_encounter_windows.attribution_source IS
   'warehouse | extension | none. warehouse = Pulse''s own consult record; extension = who the extension saw logged in (the warehouse had nothing); none = neither. Provisional ''extension''/''none'' until warehouse_checked_at is set.';
+COMMENT ON COLUMN eta_encounter_windows.warehouse_attempts IS
+  'Lookups that found no warehouse doctor. At 12 the cron stops retrying this consult.';
 COMMENT ON COLUMN eta_encounter_windows.doctor_mismatch IS
   'true when warehouse_doctor_uid and doctor_uid are both known and differ. The extension view is never overwritten.';
 

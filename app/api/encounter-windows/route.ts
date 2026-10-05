@@ -3,9 +3,9 @@
  *
  * Auth: ADMIN_TOKEN via `Authorization: Bearer <token>` (lib/admin-gate requireAdmin — the same internal gate the
  * other token-guarded admin routes use; unset token refuses, never allows).
- * Query params (all optional): room_id, doctor_uid, from, to (ISO timestamps, from <= t_open < to), quality
+ * Query params (all optional): room_id, doctor_uid (matches consulting_doctor_uid OR the extension's doctor_uid), from, to (ISO timestamps, from <= t_open < to), quality
  * (clean|ambiguous|multi_doctor|unclosed|unattributed), mismatch (true: only consults where the warehouse and the
- * extension name different doctors), limit (1..5000, default 1000).
+ * extension name different doctors; false: only those where they do not), limit (1..5000, default 1000).
  * Returns { ok, count, windows: [...] }. Only what the table holds: ids, times, doctor uids/names and labels. Each row carries
  * both views of the doctor: doctor_uid/display_name/attribution (the extension's) and warehouse_* (Pulse's own consult record,
  * migration 0124), plus consulting_doctor_uid/_name + attribution_source (the one to report: warehouse > extension > none)
@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
       from,
       to,
       quality,
-      mismatch: mismatchRaw === "true" ? true : null,
+      mismatch: mismatchRaw === "true" ? true : mismatchRaw === "false" ? false : null,
       limit,
     });
     return NextResponse.json({ ok: true, count: windows.length, windows }, NO_STORE);

@@ -162,13 +162,13 @@ describe("GET /api/encounter-windows", () => {
     });
   });
 
-  it("?mismatch=true reaches the query as true; false or absent means no filter; anything else is a 400", async () => {
+  it("?mismatch=true reaches the query as true, ?mismatch=false as false, absent as null; anything else is a 400", async () => {
     process.env.ADMIN_TOKEN = "tok";
     M.query.mockResolvedValue([]);
     await readGET(readReq("?mismatch=true"));
     await readGET(readReq("?mismatch=false"));
     await readGET(readReq(""));
-    expect(M.query.mock.calls.map(([, f]) => f.mismatch)).toEqual([true, null, null]);
+    expect(M.query.mock.calls.map(([, f]) => f.mismatch)).toEqual([true, false, null]);
     M.query.mockClear();
     expect((await readGET(readReq("?mismatch=yes"))).status).toBe(400);
     expect(M.query).not.toHaveBeenCalled();
