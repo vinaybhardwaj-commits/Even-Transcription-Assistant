@@ -145,6 +145,12 @@ export type OutboxFacts = {
   body: string;
   chunk_after_alert: boolean;
   distinct_levels_since_alert: number;
+  /**
+   * The room's watchdog state (`room_alert_state.status`) when the loader read it; null = no state row; undefined = not supplied (legacy callers and
+   * plain-object tests: no gate). R6 is gated on it: a state of `ok` with no open session means the watchdog closed the alert (genuinely, or quietly
+   * because nothing was open to prove anything about), so the alert is not an item.
+   */
+  state_status?: string | null;
 };
 
 export type RoomAttentionInputs = {
@@ -455,7 +461,10 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     // R6 — OPEN OUTBOX. The watchdog's newest offline/degraded alert stands until audio is PROVEN back: a chunk newer than the alert and a level
     // signal that has moved since. It clears on the FIRST such evidence, by spec — there is no hold-down. The watchdog's own `recovered` message
     // is deliberately not consulted: it fired falsely at 04:36 on 5 Oct.
-    if (r.outbox && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert })) {
+    // GATE: the alert is closed when the room's watchdog state is `ok` AND no session is open for it (a room closed for the day, whose alert the
+    // watchdog closed quietly). A session that is open keeps the alert standing until audio is proven. No state row = not closed.
+    const alertClosedByWatchdog = r.outbox?.state_status === "ok" && !r.open_session;
+    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert })) {
       const o = r.outbox;
       const reasons = (Object.keys(REASON_LABEL) as DegradationReason[]).filter((k) => o.body.includes(REASON_LABEL[k]));
       const red = o.kind === "offline" || reasons.includes("device_missing") || reasons.includes("tape_stalled");
@@ -659,6 +668,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
          ORDER BY rid, o.created_at DESC, o.id DESC
       )
       SELECT a.room_id, a.id, a.kind, a.created_at, a.body,
+             (SELECT ras.status FROM room_alert_state ras WHERE ras.room_id = a.room_id) AS state_status,
              EXISTS (
                SELECT 1 FROM bench_session s JOIN bench_chunk c ON c.session_id = s.id
                 WHERE s.room_id = a.room_id AND (s.ended_at IS NULL OR s.ended_at > a.created_at) AND c.created_at > a.created_at
@@ -681,7 +691,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
              ), 0)::int AS distinct_levels_since_alert
         FROM a
        WHERE a.room_id = ANY(${ids}::text[])
-    `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; chunk_after_alert: boolean; distinct_levels_since_alert: unknown }>, []),
+    `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown }>, []),
     safe("bench_command", degraded, async () => (await sql`
       SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at, COALESCE(c.error, c.result->>'error') AS error
         FROM bench_command c
@@ -805,6 +815,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
               kind: ob.kind,
               created_at: obAt,
               body: ob.body ?? "",
+              state_status: ob.state_status ?? null,
               chunk_after_alert: Boolean(ob.chunk_after_alert),
               distinct_levels_since_alert: Number(ob.distinct_levels_since_alert) || 0,
             }

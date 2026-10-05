@@ -27,7 +27,7 @@ Branch `vinay/fleet-attention` (from `origin/main` e71bbff). Not merged, not dep
 | R3 | `silent_tape` | newest ≥ 2 consecutive primary chunks of the open session are ≤ 800 bytes per second (size_bytes / duration_ms) AND ≥ 150 s long | red |
 | R4 | `consult_without_tape` | an `eta_encounter_windows` row is open now (t_close null/future) or opened < 15 min ago, and no `bench_chunk` for the room in 10 min | red |
 | R5 | `no_session_in_clinic` | Mon–Sat 08:30–20:30 IST, the room's Mac had login/active/focused-heartbeat in the last 30 min, no open session | amber |
-| R6 | `open_outbox` | newest `offline`/`degraded` outbox row (7-day look-back) with no GENUINE recovery since. R6 clears on the FIRST evidence, by spec | red for offline, device_missing, tape_stalled; else amber |
+| R6 | `open_outbox` | newest `offline`/`degraded` outbox row (7-day look-back) with no GENUINE recovery since. R6 clears on the FIRST evidence, by spec. GATE (third commit): not an item when the room's `room_alert_state.status` is `ok` AND no session is open (the watchdog closed it, quietly or genuinely); a non-ok state, an open session or no state row keeps it | red for offline, device_missing, tape_stalled; else amber |
 | R7 | `stale_start` | a `start_day` command acked `failed` in the last 60 min and no session started since | red |
 
 **`locked` means SCREEN LOCKED, not asleep.** OPD 5 recorded all morning with `idle_s` ≈ 31,000 and `locked: true`; OPD 6, 5 and 1 were remote-started at 09:13 under locked screens. So a locked screen on its own is never an item. A Mac in DarkWake cannot be told from a locked idle Mac through `locked` / the poller flag; that needs the pmset sleep/wake events from the health daemon, which does not ship them yet (code comment in `resolveLockState`). When it does, R1 can say "asleep" again.
@@ -59,21 +59,23 @@ A chunk newer than the alert AND ≥ 2 distinct level values. The watchdog measu
 
 ## Tests
 
-- `fleet-attention.test.ts` — 68 tests, pure. Every rule, the 5 Oct fixtures, the locked-screen-is-not-asleep cases, audio-evidence clearing, R1(b) timing, rate-based R3.
+- `fleet-attention.test.ts` — 69 tests, pure. Every rule, the 5 Oct fixtures, the locked-screen-is-not-asleep cases, audio-evidence clearing, R1(b) timing, rate-based R3.
 - `room-watchdog-genuine-recovery.test.ts` — 18 tests: the 04:36 case withheld (session open), chunk-but-frozen, null evidence, honest recovery with the full outage duration, quiet close (degraded, offline, null evidence, muted, next outage alerts again), `fleet_outage` counting with quiet closes in the same run, legacy callers, muted rooms.
-- `fleet-attention-sql.test.ts` — 23 tests against a real postgres:16 (Docker, the s1-pg harness, bound untyped params like the Neon driver): every SELECT, hostname normalisation, poller raw/legacy keys across the cutover, R1(a)/(b), R3 rate, R6 session filter, `loadRecoveryEvidence`, quiet close through `persistPlan`, and the EXPLAIN test.
+- `fleet-attention-sql.test.ts` — 24 tests against a real postgres:16 (Docker, the s1-pg harness, bound untyped params like the Neon driver): every SELECT, hostname normalisation, poller raw/legacy keys across the cutover, R1(a)/(b), R3 rate, R6 session filter, `loadRecoveryEvidence`, quiet close through `persistPlan`, and the EXPLAIN test.
 - Existing `room-watchdog*.test.ts` unchanged and green.
 
-## Live read-only probe (SELECTs only, 5 Oct 10:41 IST, 1.0 s, 11 rooms, nothing degraded, 7 items)
+## Live read-only probe (SELECTs only; 5 Oct 10:47 IST after the R6 gate, 11 rooms, nothing degraded, 4 items)
 
 | room | session | items now |
 |---|---|---|
-| OPD 4 | none | red open_outbox (degraded 1 Oct 18:15), red stale_start (failed start 10:13), red consult_without_tape, amber no_session_in_clinic |
-| OPD 5 | recording, screen locked 544 min, chunk 2 min ago, 54 distinct levels | none (not asleep) |
-| OPD 3 | recording, chunk 3 min ago, 53 distinct levels | amber open_outbox (degraded "clipping" 10:38; flapping degraded/recovered every ~10 min under the OLD watchdog) |
-| Dietary Room | none | red open_outbox (offline 3 Oct 17:32; the old watchdog sent `recovered` at 10:02) |
-| Home Office | none | red open_outbox (degraded 08:22, missing input device) |
+| OPD 4 | none | red stale_start (failed start 10:13), red consult_without_tape, amber no_session_in_clinic |
+| OPD 5 | recording, screen locked 550 min, audio moving | none (not asleep) |
+| OPD 3 | recording, audio moving | none (its 10:38 alert closed by the watchdog state) |
+| Dietary Room | none | none (state ok, nothing open: R6 gate) |
+| Home Office | none | red open_outbox (state still degraded since 08:22, missing input device) |
 | the other six rooms | recording, audio moving | none |
+
+Before the gate (10:41 IST) the same probe showed 7 items: Dietary Room and OPD 4 also carried an old open_outbox, and OPD 3 an amber one, all with watchdog state `ok`.
 
 ## Decisions where the spec was silent (follow existing patterns)
 
@@ -89,6 +91,6 @@ A chunk newer than the alert AND ≥ 2 distinct level values. The watchdog measu
 
 ## Open for the orchestrator
 
-- R6 reads the OUTBOX, not `room_alert_state`. Once the F4 watchdog is deployed, a closed-for-the-day room (e.g. Dietary Room) is quietly closed in `room_alert_state` but its last offline/degraded outbox row still has no chunk after it, so R6 keeps showing it red until audio flows. If that is too loud, gate R6 on `room_alert_state.status <> 'ok'` OR an open session; not done, because F6 said accept R6 as is.
+- R6 is gated on the watchdog state (third commit, coordinator ruling): once the F4 watchdog is deployed, a room closed for the day clears when its alert is closed quietly. Caveat: with the CURRENT production watchdog the false `recovered` still sets the state to `ok`, so an alert the old code wrongly closed is hidden while no session is open; R1(a)/R2/R3 catch it as soon as a session opens, and an open session keeps R6 standing.
 - Nothing pushes to `main`; this branch is the only thing pushed.
 - The watchdog still has no human consumer for its outbox; R6 puts the open alerts on the bench page, it does not page anyone.

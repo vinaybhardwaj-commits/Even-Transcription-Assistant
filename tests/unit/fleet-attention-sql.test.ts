@@ -309,6 +309,20 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
+  it("R6 GATE — outbox alert + watchdog state ok + no session → NO item (Dietary closed for the day); state ok but a session open and no genuine recovery → item; state not ok → item", async () => {
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
+             VALUES ('offline', ARRAY['r6'], 'OPD 6', 'ok', 'offline', 's', 'x', ${ago("30 hours")}),
+                    ('recovered', ARRAY['r6'], 'OPD 6', 'offline', 'ok', 's', 'recovered', ${ago("29 hours")});
+             INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'ok', ${ago("29 hours")});`);
+    expect(await attention().then((x) => x.items)).toEqual([]);
+    // a session opens (no chunk after the alert yet): the alert stands again
+    pg.exec(session("bs6", "r6", "20 seconds"));
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+    // session gone, but the watchdog state is not ok: the alert stands
+    pg.exec(`TRUNCATE bench_session; UPDATE room_alert_state SET status = 'offline' WHERE room_id = 'r6';`);
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+  });
+
   it("R6 — a chunk from a session that had ALREADY ended before the alert is not evidence (the session filter on the chunk EXISTS)", async () => {
     pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at) VALUES ('offline', ARRAY['r6'], 'OPD 6', 's', 'x', ${ago("3 hours")});`);
     pg.exec(session("old6", "r6", "9 hours", "ended", "5 hours") + chunkRow("c1", "old6", "2 hours", 3_400_000));

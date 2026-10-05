@@ -513,6 +513,21 @@ describe("R6 open_outbox", () => {
     expect(items[0]!.detail).toContain("offline");
   });
 
+  it("GATE: an alert whose watchdog state is `ok` with NO session open is closed (a room closed for the day); a state that is not ok, an open session, or no state row keeps it open", () => {
+    const withState = (state_status: string | null | undefined, session: boolean) =>
+      kinds(run("2026-10-05 10:00:00", room({
+        room_id: "room_opd3", room_name: "OPD 3",
+        open_session: session ? recordingSince("2026-10-05 09:59:40") : null,
+        outbox: degraded(["device_missing"], { ...(state_status === undefined ? {} : { state_status }) }),
+      })));
+    expect(withState("ok", false)).toEqual([]);
+    expect(withState("ok", true)).toEqual(["room_opd3:open_outbox"]);
+    expect(withState("degraded", false)).toEqual(["room_opd3:open_outbox"]);
+    expect(withState("offline", false)).toEqual(["room_opd3:open_outbox"]);
+    expect(withState(null, false)).toEqual(["room_opd3:open_outbox"]);
+    expect(withState(undefined, false)).toEqual(["room_opd3:open_outbox"]);
+  });
+
   it("degraded severity follows the reason: device_missing and tape_stalled are red; silence, clipping, encoder and disk are amber", () => {
     const sev = (r: Parameters<typeof degradedMessage>[1]) => run("2026-10-05 04:40:00", opd3(degraded(r)))[0]!.severity;
     expect(sev(["device_missing"])).toBe("red");
