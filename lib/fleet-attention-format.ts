@@ -43,7 +43,7 @@ export type FleetAttentionResponse = {
 
 /** The kind in plain words — what the staff-facing row calls it. */
 export const KIND_LABEL: Record<AttentionKind, string> = {
-  asleep: "Mac asleep",
+  asleep: "Mac not capturing",
   capture_frozen: "Microphone frozen",
   silent_tape: "Recording is silence",
   consult_without_tape: "Consult not being recorded",

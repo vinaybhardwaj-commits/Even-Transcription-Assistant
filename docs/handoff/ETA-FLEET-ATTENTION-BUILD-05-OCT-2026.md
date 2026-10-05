@@ -1,6 +1,6 @@
 # ETA fleet attention — build note, 5 Oct 2026
 
-Branch `vinay/fleet-attention` (from `origin/main` e71bbff). Not merged, not deployed, no migration. Builder: Claude Fable 5.1.
+Branch `vinay/fleet-attention` (from `origin/main` e71bbff). Not merged, not deployed, no migration, no CHECK change. Builder: Claude Fable 5.1. First delivery ad53794; Refuter fixes F1–F7 are the second commit (section "Refuter fixes" below).
 
 ## Why
 
@@ -15,55 +15,80 @@ Branch `vinay/fleet-attention` (from `origin/main` e71bbff). Not merged, not dep
 | `app/api/admin/fleet-attention/route.ts` (new) | `GET` → `{generated_at, items, rooms_checked, degraded?}`. Admin cookie (`benchAdminGuard`), `no-store`, force-dynamic. |
 | `components/admin/FleetAttentionPanel.tsx` (new) | `useFleetAttention` (30 s poll, skips hidden tab), the panel, the per-room badge. |
 | `components/admin/BenchRoomsLive.tsx` | The bare "Nothing needs attention." line is replaced by the panel; each room card shows a red/amber badge. The older browser-computed "Needs your attention" list is kept. |
-| `lib/room-watchdog.ts` | `recovered` needs a genuine recovery (below). `REASON_LABEL` exported. |
+| `lib/room-watchdog.ts` | `recovered` needs a genuine recovery while a session is open; a room with no session closes quietly (below). `REASON_LABEL` exported. |
 | `tests/unit/fleet-attention.test.ts`, `…-sql.test.ts`, `room-watchdog-genuine-recovery.test.ts` (new) | See Tests. |
 
 ## The rules
 
 | | kind | condition | severity |
 |---|---|---|---|
-| R1 | `asleep` | newest power-determining event is `locked` (ext), or the newest poller row is locked/unreachable, with nothing newer saying awake. Any hour. | red |
+| R1 | `asleep` (label "Mac not capturing") | (a) a RECORDING session is open AND the Mac is screen-locked (ext `locked`, or poller `locked: true`) or unreachable AND there is no audio evidence; or (b) the poller's newest row is `unreachable`, ≥ 3 min old as a run, and the row is ≤ 10 min old | red |
 | R2 | `capture_frozen` | recording session open ≥ 2 min and the last 120 s of `bench_level_sample` hold ≤ 1 distinct (peak, zero_ratio), or no sample at all | red |
-| R3 | `silent_tape` | newest ≥ 2 consecutive primary chunks of the open session are ≤ 230,000 bytes | red |
+| R3 | `silent_tape` | newest ≥ 2 consecutive primary chunks of the open session are ≤ 800 bytes per second (size_bytes / duration_ms) AND ≥ 150 s long | red |
 | R4 | `consult_without_tape` | an `eta_encounter_windows` row is open now (t_close null/future) or opened < 15 min ago, and no `bench_chunk` for the room in 10 min | red |
 | R5 | `no_session_in_clinic` | Mon–Sat 08:30–20:30 IST, the room's Mac had login/active/focused-heartbeat in the last 30 min, no open session | amber |
-| R6 | `open_outbox` | newest `offline`/`degraded` outbox row (7-day look-back) with no GENUINE recovery since | red for offline, device_missing, tape_stalled; else amber |
+| R6 | `open_outbox` | newest `offline`/`degraded` outbox row (7-day look-back) with no GENUINE recovery since. R6 clears on the FIRST evidence, by spec | red for offline, device_missing, tape_stalled; else amber |
 | R7 | `stale_start` | a `start_day` command acked `failed` in the last 60 min and no session started since | red |
 
-Power determination (R1): `locked` = asleep; `login`, `active`, `encounter_open/close` and a FOCUSED heartbeat = awake; `idle`, `logout` and an unfocused heartbeat say nothing. The 5 Oct DarkWake kept sending unfocused heartbeats, so a heartbeat alone never clears a lock. The newest determination across ext and poller wins.
+**`locked` means SCREEN LOCKED, not asleep.** OPD 5 recorded all morning with `idle_s` ≈ 31,000 and `locked: true`; OPD 6, 5 and 1 were remote-started at 09:13 under locked screens. So a locked screen on its own is never an item. A Mac in DarkWake cannot be told from a locked idle Mac through `locked` / the poller flag; that needs the pmset sleep/wake events from the health daemon, which does not ship them yet (code comment in `resolveLockState`). When it does, R1 can say "asleep" again.
+
+AUDIO EVIDENCE (clears R1 at once): the meter moved (≥ 2 distinct values in 120 s) AND a chunk landed in the last 10 min. A session younger than those windows gets the benefit of the doubt on the half it cannot have produced yet. R1(a) detail: "Screen locked and no audio since 01:36 IST." (or "Mac unreachable on the network and no audio since …").
+
+Lock determination: `locked` (ext) and the poller's `locked`/`unreachable` = down; `login`, `active`, `encounter_open/close` and a FOCUSED heartbeat = awake; `idle`, `logout` and an unfocused heartbeat say nothing. The newest determination across ext and poller wins.
 
 De-dup: one item per kind per room; sort red first, then oldest `since`.
 
 ## Genuine recovery (watchdog and R6 share the definition)
 
-A chunk newer than the alert AND ≥ 2 distinct level values. The watchdog measures the values over the last 120 s and the chunk against `room_alert_state.since`; R6 measures both since the outbox row. When the planner would announce `recovered` without that evidence it does nothing: no write (so `since` and the status stand) and no message, and the eventual honest recovery names the whole outage. `RoomRunInput.recovery_evidence` is optional: `undefined` keeps the planner's old behaviour for legacy callers; `runWatchdog` always supplies it for a room whose prior status is not ok, and a failed evidence read counts as "not genuine" (alert stays open, logged).
+A chunk newer than the alert AND ≥ 2 distinct level values. The watchdog measures the values over the last 120 s and the chunk against `room_alert_state.since` (only sessions that had not ended before the alert); R6 measures both since the outbox row. `RoomRunInput.recovery_evidence` is optional: `undefined` keeps the planner's old behaviour for legacy callers; `runWatchdog` always supplies it for a room whose prior status is not ok, and a failed evidence read counts as "not genuine" (alert stays open, logged).
+
+- A session IS open: without that evidence the alert stays open — no write (so `since` and the status stand) and no message; the eventual honest recovery names the whole outage.
+- NO session is open and the poll is clean (F4): the alert is CLOSED QUIETLY — the state is written to `ok`, no message is planned, so no outbox row and no "recovered" text. A room closed for the day no longer stays offline/degraded, and its next outage is an ok → degraded edge again, so it alerts. `fleet_outage` counting is unaffected (only offline crossings count). An audit row for the quiet close would need a new outbox kind, i.e. a CHECK change on `room_alert_outbox.kind` — NOT done; for Fable if wanted.
+
+## Refuter fixes (second commit)
+
+| | status |
+|---|---|
+| F1 | R1 rewritten as above. Locked screen with no session: no item. Audio evidence clears it immediately. Kept red. |
+| F2 | `POLLER_LEGACY_KEYS` (consul4–7, echo, discussion, audiometry → full hostnames); the poller queries match `machine IN (canonical, raw hostname, legacy)` for the newest row and for both look-backs (3 days). Verified against `~/dev/eta-presence-poller` on the Mini (HOSTS.md and `make_event(host["machine"], …)`): from the 5 Oct 04:44Z cutover every poller row, `unreachable` included, keys on the full hostname; earlier rows use the short key. |
+| F3 | Every `bench_level_sample` read is `room_id = ANY($ids)` with an `ist_date` and `sampled_at` bound (or per-room); every `bench_chunk` read goes through the room's sessions (`bench_session (room_id, started_at DESC)`) then `(session_id, source, idx)`. The false "index use" comment is fixed. EXPLAIN (ANALYZE) on the statements the loader actually sends, at ≈110k level samples + ≈30k chunks, asserts no Seq Scan on `bench_level_sample` or `bench_chunk`, and that `bench_level_sample_room_day_time_idx` and `bench_chunk_session_source_idx_key` are used. `bench_session` itself is Seq Scanned in the test at 300 sessions (tiny table; the planner's choice, not asserted). |
+| F4 | Quiet close, above. Both paths tested, plus persistPlan against postgres (state to ok, zero outbox rows, next outage queues). |
+| F5 | R3 by rate: ≤ 800 B/s AND duration ≥ 150,000 ms, ≥ 2 consecutive. |
+| F6 | Accepted; one-line comment that R6 clears on first evidence by spec. |
+| F7 | Stale `loadRecoveryEvidence` comment fixed; its chunk EXISTS also excludes sessions that ended before the alert. |
 
 ## Tests
 
-- `fleet-attention.test.ts` — 54 tests, pure. Every rule, with the 5 Oct fixtures (DarkWake at 01:36:50 with continuing unfocused heartbeats and a `locked`; 48 identical samples with `frozen_since` 01:36:52; 212,378-byte chunks; the 04:40 state after the 04:36 false recovery; OPD 4 with no session since 1 Oct; a failed start "tapewriter exited with status 1").
-- `room-watchdog-genuine-recovery.test.ts` — 11 tests: the 04:36 case withheld, chunk-but-frozen withheld, null evidence withheld, the honest recovery sent with the full outage duration, offline recovery, legacy callers, muted rooms.
-- `fleet-attention-sql.test.ts` — 13 tests against a real postgres:16 (Docker, the s1-pg harness, bound untyped params like the Neon driver): every SELECT, the hostname normalisation (curly apostrophe and `(2)`), poller raw-hostname match, `frozen_since`, the outbox DISTINCT ON/unnest, `degraded` naming.
+- `fleet-attention.test.ts` — 68 tests, pure. Every rule, the 5 Oct fixtures, the locked-screen-is-not-asleep cases, audio-evidence clearing, R1(b) timing, rate-based R3.
+- `room-watchdog-genuine-recovery.test.ts` — 18 tests: the 04:36 case withheld (session open), chunk-but-frozen, null evidence, honest recovery with the full outage duration, quiet close (degraded, offline, null evidence, muted, next outage alerts again), `fleet_outage` counting with quiet closes in the same run, legacy callers, muted rooms.
+- `fleet-attention-sql.test.ts` — 23 tests against a real postgres:16 (Docker, the s1-pg harness, bound untyped params like the Neon driver): every SELECT, hostname normalisation, poller raw/legacy keys across the cutover, R1(a)/(b), R3 rate, R6 session filter, `loadRecoveryEvidence`, quiet close through `persistPlan`, and the EXPLAIN test.
 - Existing `room-watchdog*.test.ts` unchanged and green.
 
-The fixtures use IST wall clock for the 5 Oct times (01:36:50 IST = 20:06:50Z on 4 Oct). The brief gave the times without a zone; IST is the zone the clinic and the bench use, but see UNVERIFIED.
+## Live read-only probe (SELECTs only, 5 Oct 10:41 IST, 1.0 s, 11 rooms, nothing degraded, 7 items)
 
-## Live read-only probe
-
-`getFleetAttention` was run once against the live Neon database through SELECTs only (no writes; connection string never printed): 838 ms, 11 rooms, no degraded sources, 7 items — OPD 4 raised four kinds, matching the 5 Oct facts (consult with no tape, no session in clinic, failed start, open watchdog alert).
+| room | session | items now |
+|---|---|---|
+| OPD 4 | none | red open_outbox (degraded 1 Oct 18:15), red stale_start (failed start 10:13), red consult_without_tape, amber no_session_in_clinic |
+| OPD 5 | recording, screen locked 544 min, chunk 2 min ago, 54 distinct levels | none (not asleep) |
+| OPD 3 | recording, chunk 3 min ago, 53 distinct levels | amber open_outbox (degraded "clipping" 10:38; flapping degraded/recovered every ~10 min under the OLD watchdog) |
+| Dietary Room | none | red open_outbox (offline 3 Oct 17:32; the old watchdog sent `recovered` at 10:02) |
+| Home Office | none | red open_outbox (degraded 08:22, missing input device) |
+| the other six rooms | recording, audio moving | none |
 
 ## Decisions where the spec was silent (follow existing patterns)
 
-1. Types and wording live in `lib/fleet-attention-format.ts`, not `fleet-attention.ts`, so the client never bundles the Postgres driver. `fleet-attention.ts` re-exports the types.
-2. The response may carry an optional `degraded: string[]` naming sources that could not be read; the panel then never shows "Nothing needs attention". A failed route answers 500 and the panel says the check failed.
-3. R2 skips a session open under 2 minutes; R4 skips when the tape started under 10 minutes ago (no first 5-minute piece can exist yet) and ignores an unclosed window older than 4 hours (a resolver leftover; the resolver itself caps at 90 min).
-4. R3 reads the PRIMARY mic only; the backup mic is ignored.
-5. "Open session" = `recording` or `paused` for R5/R7; R2/R3 need `recording`.
-6. R1 `since` uses the earlier of the two sources when both say asleep; the poller's start is the first row of the current unbroken locked/unreachable run (3-day look-back).
+1. Types and wording live in `lib/fleet-attention-format.ts`, not `fleet-attention.ts`, so the client never bundles the Postgres driver.
+2. The response may carry an optional `degraded: string[]`; the panel then never shows "Nothing needs attention". A failed route answers 500.
+3. R2 skips a session open under 2 minutes; R4 skips when the tape started under 10 minutes ago and ignores an unclosed window older than 4 hours.
+4. R3 reads the PRIMARY mic only.
+5. "Open session" = `recording` or `paused` for R5/R7; R1(a)/R2/R3 need `recording`.
+6. R1(a) `since` = the later of the lock start and the no-audio start. R1(b) `since` = the first row of the current unreachable run (3-day look-back).
 7. R5 `since` = later of 08:30 today and the first genuine activity in the last 30 min.
-8. The older browser-computed "Needs your attention" list stays; the new panel shows "Nothing needs attention" only when that list is empty too.
+8. ADDED beyond the ruling for R1(b): a poller row older than 10 minutes is ignored (the poller itself may be down), and a recording session demonstrably delivering audio suppresses it (the poller failing to reach the Mac is then a network fact, not a capture fact).
+9. The older browser-computed "Needs your attention" list stays.
 
-## Not done / for the orchestrator
+## Open for the orchestrator
 
+- R6 reads the OUTBOX, not `room_alert_state`. Once the F4 watchdog is deployed, a closed-for-the-day room (e.g. Dietary Room) is quietly closed in `room_alert_state` but its last offline/degraded outbox row still has no chunk after it, so R6 keeps showing it red until audio flows. If that is too loud, gate R6 on `room_alert_state.status <> 'ok'` OR an open session; not done, because F6 said accept R6 as is.
 - Nothing pushes to `main`; this branch is the only thing pushed.
-- R1 is red at any hour, as specified. Overnight, a Mac that sleeps after clinic will show red until it wakes; if that is too loud, restrict R1 to hours from 07:30 or to machines with an open session the day before.
 - The watchdog still has no human consumer for its outbox; R6 puts the open alerts on the bench page, it does not page anyone.

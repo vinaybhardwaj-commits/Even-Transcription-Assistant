@@ -1,12 +1,14 @@
 /**
- * lib/fleet-attention.ts DB half + lib/room-watchdog.ts loadRecoveryEvidence — AGAINST A REAL POSTGRES.
+ * lib/fleet-attention.ts DB half + lib/room-watchdog.ts loadRecoveryEvidence/persistPlan — AGAINST A REAL POSTGRES.
  *
  * The rules are proven in fleet-attention.test.ts with plain objects. What a plain object cannot prove is that the SELECTs themselves run: row
  * comparisons, LATERAL joins, jsonb_to_recordset over a bound parameter, DISTINCT ON over unnest(), the ist_date index bounds. Every statement
  * here is sent through the s1-pg harness with BOUND, untyped parameters, the way the Neon driver sends them.
  *
- * The tables are minimal hand-written DDL carrying only the columns the queries read (the same approach as room-watchdog-outbox.test.ts), except
- * pulse_presence_events, eta_encounter_windows, room_alert_state and room_alert_outbox, which are created from their real migrations.
+ * The tables are minimal hand-written DDL carrying only the columns the queries read (the same approach as room-watchdog-outbox.test.ts), with the
+ * REAL indexes copied from their migrations (0054 bench_session (room_id, started_at DESC); 0045 bench_chunk UNIQUE (session_id, source, idx); 0112
+ * bench_level_sample (room_id, ist_date, sampled_at)), because the last describe asserts the queries use them. pulse_presence_events,
+ * eta_encounter_windows, room_alert_state and room_alert_outbox are created from their real migrations.
  * Times are relative to the database's now(), so nothing here depends on the date or on clinic hours.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
@@ -17,8 +19,20 @@ import { makeFakeClinician } from "../support/fake-identity";
 const DOC = makeFakeClinician(1);
 const DOC2 = makeFakeClinician(2);
 
-const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
-vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v) }));
+type Sql = (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>;
+const H = vi.hoisted(() => ({
+  sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>),
+  rec: [] as Array<{ q: string; v: unknown[] }>,
+}));
+// Every statement the code under test sends is recorded (text with $n placeholders + the bound values) so the EXPLAIN test can replay it.
+vi.mock("@/lib/db", () => ({
+  sql: (s: TemplateStringsArray, ...v: unknown[]) => {
+    let q = "";
+    s.forEach((p, i) => { q += p + (i < v.length ? `$${i + 1}` : ""); });
+    H.rec.push({ q, v });
+    return H.sql!(s, ...v);
+  },
+}));
 vi.mock("@/lib/bench", () => ({ listBenchSessions: async () => [] }));
 
 const HAVE_DOCKER = dockerAvailable();
@@ -43,8 +57,10 @@ beforeAll(() => {
       install_id text PRIMARY KEY, room_id text NOT NULL, hostname text, enrolled_at timestamptz, retired_at timestamptz,
       last_seen_at timestamptz, tape_advancing boolean, session_open boolean, disk_free_bytes bigint, state_flags jsonb);
     CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz, status text NOT NULL DEFAULT 'recording');
-    CREATE TABLE bench_chunk (id text PRIMARY KEY, session_id text NOT NULL, source text NOT NULL DEFAULT 'primary',
-      created_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz NOT NULL, size_bytes bigint);
+    CREATE INDEX bench_session_room_started_idx ON bench_session (room_id, started_at DESC);
+    CREATE TABLE bench_chunk (id text PRIMARY KEY, session_id text NOT NULL, source text NOT NULL DEFAULT 'primary', idx int NOT NULL DEFAULT 0,
+      created_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz NOT NULL, size_bytes bigint, duration_ms int,
+      CONSTRAINT bench_chunk_session_source_idx_key UNIQUE (session_id, source, idx));
     CREATE TABLE bench_level_sample (
       id bigserial PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL, sampled_at timestamptz NOT NULL DEFAULT now(),
       peak real NOT NULL, avg real, zero_ratio real, session_open boolean NOT NULL DEFAULT false, tape_advancing boolean NOT NULL DEFAULT false,
@@ -52,34 +68,48 @@ beforeAll(() => {
     CREATE INDEX bench_level_sample_room_day_time_idx ON bench_level_sample (room_id, ist_date, sampled_at);
     CREATE TABLE bench_command (id text PRIMARY KEY, room_id text NOT NULL, kind text NOT NULL, status text NOT NULL DEFAULT 'pending',
       result jsonb, error text, created_at timestamptz NOT NULL DEFAULT now(), acked_at timestamptz);
+    CREATE FUNCTION explain_json(q text) RETURNS text LANGUAGE plpgsql AS $f$
+      DECLARE r text;
+      BEGIN EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || q INTO r; RETURN r; END
+    $f$;
   `);
   for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0122_pulse_presence_events", "0123_eta_encounter_windows"]) {
     pg.exec(noRecord(`db/migrations/${f}.sql`));
   }
-  H.sql = pg.sql;
+  H.sql = pg.sql as Sql;
 }, 240_000);
 afterAll(() => { if (HAVE_DOCKER) pg.stop(); });
 
+let chunkIdx = 0;
 beforeEach(() => {
   if (!HAVE_DOCKER) return;
+  chunkIdx = 0;
+  H.rec.length = 0;
   pg.exec(`
     TRUNCATE room_alert_outbox RESTART IDENTITY; TRUNCATE room_alert_state; TRUNCATE pulse_presence_events; TRUNCATE eta_encounter_windows;
     TRUNCATE bench_command; TRUNCATE bench_level_sample; TRUNCATE bench_chunk; TRUNCATE bench_session;
     DELETE FROM room_install; DELETE FROM room;
-    INSERT INTO room (id, slug, name) VALUES ('r6', 'opd-6-x', 'OPD 6'), ('r4', 'opd-4-x', 'OPD 4');
+    INSERT INTO room (id, slug, name) VALUES ('r6', 'opd-6-x', 'OPD 6'), ('r4', 'opd-4-x', 'OPD 4'), ('r7', 'consul-4-x', 'CONSUL 4');
     INSERT INTO room_install (install_id, room_id, hostname, enrolled_at) VALUES
       ('i6', 'r6', 'EHRC-OPD6’s Mac mini (2)', now() - interval '30 days'),
-      ('i4', 'r4', 'EHRC-OPD4s-Mac-mini', now() - interval '30 days');
+      ('i4', 'r4', 'EHRC-OPD4s-Mac-mini', now() - interval '30 days'),
+      ('i7', 'r7', 'EHRC-CONSUL4s-Mac-mini', now() - interval '30 days');
   `);
 });
+
+const M6 = "EHRC-OPD6s-Mac-mini-2"; // normalizeHostname('EHRC-OPD6’s Mac mini (2)')
+const M4 = "EHRC-OPD4s-Mac-mini";
+const M7 = "EHRC-CONSUL4s-Mac-mini";
 
 const ago = (interval: string) => `now() - interval '${interval}'`;
 const presence = (source: "ext" | "poller", machine: string, event: string, when: string, payload = "{}") =>
   `INSERT INTO pulse_presence_events (source, machine, event, ts, payload) VALUES ('${source}', '${machine}', '${event}', ${ago(when)}, '${payload}'::jsonb);`;
-const session = (id: string, room: string, startedAgo: string, status = "recording") =>
-  `INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('${id}', '${room}', ${ago(startedAgo)}, '${status}');`;
-const chunkRow = (id: string, sess: string, createdAgo: string, size: number | "NULL", source = "primary") =>
-  `INSERT INTO bench_chunk (id, session_id, source, created_at, started_at, size_bytes) VALUES ('${id}', '${sess}', '${source}', ${ago(createdAgo)}, ${ago(createdAgo)} - interval '5 minutes', ${size});`;
+const session = (id: string, room: string, startedAgo: string, status = "recording", endedAgo?: string) =>
+  `INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('${id}', '${room}', ${ago(startedAgo)}, ${endedAgo ? ago(endedAgo) : "NULL"}, '${status}');`;
+/** A 5-minute (300 000 ms) chunk by default; `size` bytes. 3.4 MB is normal speech, 212 378 B / 300 s = 708 B/s is digital silence. */
+const chunkRow = (id: string, sess: string, createdAgo: string, size: number | "NULL", source = "primary", durationMs: number | "NULL" = 300_000) =>
+  `INSERT INTO bench_chunk (id, session_id, source, idx, created_at, started_at, size_bytes, duration_ms)
+   VALUES ('${id}', '${sess}', '${source}', ${chunkIdx++}, ${ago(createdAgo)}, ${ago(createdAgo)} - interval '5 minutes', ${size}, ${durationMs});`;
 /** Samples every `step` seconds from `fromAgo` to `toAgo`; peak/zero either constant or varying with the timestamp. */
 const samples = (room: string, fromAgo: string, toAgo: string, mode: "frozen" | "moving", step = 5) => `
   INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
@@ -96,50 +126,112 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
   it("an empty, healthy fleet is an empty list, every source read, nothing degraded", async () => {
     const r = await attention();
     expect(r.items).toEqual([]);
-    expect(r.rooms_checked).toBe(2);
+    expect(r.rooms_checked).toBe(3);
     expect(r.degraded).toBeUndefined();
     expect(Number.isFinite(Date.parse(r.generated_at))).toBe(true);
   });
 
-  it("R1 asleep — ext `locked` found under the NORMALISED machine name (curly apostrophe and (2) in the hostname); heartbeats after it do not clear it", async () => {
+  // ---- R1 (a): a session is open, the screen is locked / the Mac unreachable, and there is no audio ---------------------------------------------
+
+  it("R1(a) — ext `locked` (found under the NORMALISED machine name) + an open session + frozen levels + no chunk → red, 'Screen locked and no audio since'; a focused heartbeat clears it", async () => {
     pg.exec([
-      presence("ext", "EHRC-OPD6s-Mac-mini-2", "heartbeat", "40 minutes", '{"tab_focus": true}'),
-      presence("ext", "EHRC-OPD6s-Mac-mini-2", "locked", "30 minutes"),
-      ...[25, 20, 15, 10, 5, 1].map((m) => presence("ext", "EHRC-OPD6s-Mac-mini-2", "heartbeat", `${m} minutes`, '{"tab_focus": false}')),
+      presence("ext", M6, "heartbeat", "40 minutes", '{"tab_focus": true}'),
+      presence("ext", M6, "locked", "30 minutes"),
+      ...[25, 20, 15, 10, 5, 1].map((m) => presence("ext", M6, "heartbeat", `${m} minutes`, '{"tab_focus": false}')),
+      session("bs6", "r6", "2 hours"),
+      samples("r6", "20 minutes", "1 second", "frozen"),
     ].join("\n"));
     const r = await attention();
-    expect(kindsOf(r)).toEqual(["r6:asleep"]);
-    expect(minutesBetween(r.items[0]!.since, Date.now() - 30 * 60_000)).toBeLessThan(1);
-    expect(r.items[0]!.machine).toBe("EHRC-OPD6’s Mac mini (2)");
-    // a focused heartbeat after the lock clears it
-    pg.exec(presence("ext", "EHRC-OPD6s-Mac-mini-2", "heartbeat", "30 seconds", '{"tab_focus": true}'));
-    // (during clinic hours R5 may now fire for the Mac that just woke — that is correct and clock-dependent, so assert only on R1)
+    expect(kindsOf(r)).toContain("r6:asleep");
+    const item = r.items.find((i) => i.kind === "asleep")!;
+    expect(item.severity).toBe("red");
+    expect(item.machine).toBe("EHRC-OPD6’s Mac mini (2)");
+    expect(item.detail).toContain("Screen locked and no audio since");
+    expect(minutesBetween(item.since, Date.now() - 30 * 60_000)).toBeLessThan(1);
+    // a focused heartbeat after the lock: the screen is not locked any more
+    pg.exec(presence("ext", M6, "heartbeat", "30 seconds", '{"tab_focus": true}'));
     expect(kindsOf(await attention())).not.toContain("r6:asleep");
   });
 
-  it("R1 asleep — poller rows matched on the RAW hostname; since is where the current unreachable run began", async () => {
-    const raw = "EHRC-OPD4s-Mac-mini";
+  it("R1 — a locked screen with NO session open is NOT an item (OPD 5 on 5 Oct recorded all morning under a locked screen; DarkWake cannot be told from a locked idle Mac)", async () => {
+    pg.exec([presence("ext", M6, "locked", "6 hours"), presence("poller", M6, "ok", "2 minutes", '{"locked": true}')].join("\n"));
+    expect(kindsOf(await attention())).not.toContain("r6:asleep");
+    // …and a locked screen under a session that IS delivering audio is not an item either (the OPD 5 case)
+    pg.exec([session("bs6", "r6", "5 hours"), samples("r6", "30 minutes", "1 second", "moving"), chunkRow("c1", "bs6", "3 minutes", 3_400_000)].join("\n"));
+    expect(kindsOf(await attention())).not.toContain("r6:asleep");
+  });
+
+  it("R1(a) — audio evidence clears it: it takes BOTH a chunk in the last 10 minutes and moving levels; either one missing leaves it red", async () => {
+    pg.exec([presence("ext", M6, "locked", "30 minutes"), session("bs6", "r6", "2 hours")].join("\n"));
+    // chunk but frozen levels
+    pg.exec([samples("r6", "20 minutes", "1 second", "frozen"), chunkRow("c1", "bs6", "3 minutes", 3_400_000)].join("\n"));
+    expect(kindsOf(await attention())).toContain("r6:asleep");
+    // moving levels but the last chunk is 15 minutes old
+    pg.exec(`TRUNCATE bench_level_sample; TRUNCATE bench_chunk;` + samples("r6", "20 minutes", "1 second", "moving") + chunkRow("c2", "bs6", "15 minutes", 3_400_000));
+    expect(kindsOf(await attention())).toContain("r6:asleep");
+    // both → cleared at once
+    pg.exec(chunkRow("c3", "bs6", "2 minutes", 3_400_000));
+    expect(kindsOf(await attention())).not.toContain("r6:asleep");
+  });
+
+  it("R1(a) — the poller's `locked: true` counts as locked, the same way", async () => {
+    pg.exec([presence("poller", M4, "ok", "2 minutes", '{"locked": true}'), session("bs4", "r4", "2 hours"), samples("r4", "10 minutes", "1 second", "frozen")].join("\n"));
+    expect(kindsOf(await attention())).toContain("r4:asleep");
+  });
+
+  // ---- R1 (b): the poller has not reached the Mac for 3 minutes -------------------------------------------------------------------------------
+
+  it("R1(b) — the poller's newest row `unreachable` for >= 3 min, matched on the RAW hostname; since is where the current unreachable run began; a newer ok clears it", async () => {
     pg.exec([
-      presence("poller", raw, "ok", "30 minutes", '{"locked": false}'),
-      presence("poller", raw, "ok", "20 minutes", '{"locked": false}'),
-      presence("poller", raw, "unreachable", "15 minutes", '{"locked": false}'),
-      presence("poller", raw, "unreachable", "10 minutes", '{"locked": false}'),
-      presence("poller", raw, "unreachable", "1 minute", '{"locked": false}'),
+      presence("poller", M4, "ok", "30 minutes", '{"locked": false}'),
+      presence("poller", M4, "ok", "20 minutes", '{"locked": false}'),
+      presence("poller", M4, "unreachable", "15 minutes", '{"locked": false}'),
+      presence("poller", M4, "unreachable", "10 minutes", '{"locked": false}'),
+      presence("poller", M4, "unreachable", "1 minute", '{"locked": false}'),
     ].join("\n"));
     const r = await attention();
     expect(kindsOf(r)).toEqual(["r4:asleep"]);
+    expect(r.items[0]!.detail).toContain("unreachable on the network since");
     expect(minutesBetween(r.items[0]!.since, Date.now() - 15 * 60_000)).toBeLessThan(1);
-    // the Mac comes back: a newer ok clears it
-    pg.exec(presence("poller", raw, "ok", "10 seconds", '{"locked": false}'));
+    pg.exec(presence("poller", M4, "ok", "10 seconds", '{"locked": false}'));
     expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
-  it("R1 asleep — poller locked=true counts", async () => {
-    pg.exec(presence("poller", "EHRC-OPD4s-Mac-mini", "ok", "2 minutes", '{"locked": true}'));
-    expect(kindsOf(await attention())).toEqual(["r4:asleep"]);
+  it("R1(b) — not yet 3 minutes, or a poller row older than 10 minutes (the poller itself may be down), raises nothing", async () => {
+    pg.exec([presence("poller", M4, "ok", "30 minutes"), presence("poller", M4, "unreachable", "2 minutes"), presence("poller", M4, "unreachable", "1 minute")].join("\n"));
+    expect(await attention().then((x) => x.items)).toEqual([]);
+    pg.exec(`TRUNCATE pulse_presence_events;` + [presence("poller", M4, "ok", "40 minutes"), presence("poller", M4, "unreachable", "22 minutes"), presence("poller", M4, "unreachable", "12 minutes")].join("\n"));
+    expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
-  it("R2 capture_frozen — finds where the identical run began (20 minutes ago), R3 silent_tape — two silent primary chunks", async () => {
+  it("R1(b) — an unreachable poller does not make a room red while its recording is demonstrably delivering audio", async () => {
+    pg.exec([
+      presence("poller", M6, "ok", "30 minutes"), presence("poller", M6, "unreachable", "10 minutes"), presence("poller", M6, "unreachable", "1 minute"),
+      session("bs6", "r6", "2 hours"), samples("r6", "20 minutes", "1 second", "moving"), chunkRow("c1", "bs6", "3 minutes", 3_400_000),
+    ].join("\n"));
+    expect(kindsOf(await attention())).not.toContain("r6:asleep");
+  });
+
+  it("R1(b) — POLLER KEYS ACROSS THE 5 Oct RENAME: a run of `unreachable` rows that began under the short key (consul4) and continues under the full hostname is ONE run", async () => {
+    pg.exec([
+      presence("poller", "consul4", "ok", "60 minutes", '{"locked": false}'),
+      presence("poller", "consul4", "unreachable", "40 minutes", '{"locked": false}'),
+      presence("poller", "consul4", "unreachable", "30 minutes", '{"locked": false}'),
+      presence("poller", M7, "unreachable", "20 minutes", '{"locked": false}'),
+      presence("poller", M7, "unreachable", "10 minutes", '{"locked": false}'),
+      presence("poller", M7, "unreachable", "1 minute", '{"locked": false}'),
+    ].join("\n"));
+    const r = await attention();
+    expect(kindsOf(r)).toEqual(["r7:asleep"]);
+    expect(minutesBetween(r.items[0]!.since, Date.now() - 40 * 60_000)).toBeLessThan(1);
+    // an `ok` under the SHORT key, newer than the unreachable run's start, ends the run: the newest row wins and `since` would restart
+    pg.exec(presence("poller", "consul4", "ok", "30 seconds"));
+    expect(await attention().then((x) => x.items)).toEqual([]);
+  });
+
+  // ---- R2 / R3 --------------------------------------------------------------------------------------------------------------------------------
+
+  it("R2 capture_frozen — finds where the identical run began (20 minutes ago); R3 silent_tape — two silent primary chunks BY RATE (708 B/s over 300 s)", async () => {
     pg.exec([
       session("bs6", "r6", "3 hours"),
       samples("r6", "40 minutes", "20 minutes 5 seconds", "moving"),
@@ -157,6 +249,18 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(silent.detail).toContain("last 2 recording pieces");
   });
 
+  it("R3 — short chunks never count (a 60 s piece of 20 000 B is 333 B/s but is too short to judge), a loud chunk breaks the run, and a chunk of unknown length is not silent", async () => {
+    pg.exec([
+      session("bs6", "r6", "3 hours"), samples("r6", "10 minutes", "1 second", "moving"),
+      chunkRow("c1", "bs6", "9 minutes", 20_000, "primary", 60_000),
+      chunkRow("c2", "bs6", "8 minutes", 20_000, "primary", 60_000),
+      chunkRow("c3", "bs6", "7 minutes", 212378, "primary", "NULL"),
+      chunkRow("c4", "bs6", "6 minutes", 212378),
+      chunkRow("c5", "bs6", "5 minutes", 3_400_000),
+    ].join("\n"));
+    expect(await attention().then((x) => x.items)).toEqual([]);
+  });
+
   it("R2 — moving samples raise nothing; a session with no samples at all in 120 s raises, citing the last sample it knows of", async () => {
     pg.exec([session("bs6", "r6", "3 hours"), samples("r6", "30 minutes", "1 second", "moving"), chunkRow("c1", "bs6", "2 minutes", 3_400_000)].join("\n"));
     expect(await attention().then((x) => x.items)).toEqual([]);
@@ -166,6 +270,8 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(r.items[0]!.detail).toContain("No microphone level readings");
     expect(minutesBetween(r.items[0]!.since, Date.now() - 10 * 60_000)).toBeLessThan(0.5);
   });
+
+  // ---- R4 / R6 / R7 ---------------------------------------------------------------------------------------------------------------------------
 
   it("R4 consult_without_tape — a live Pulse window with no chunk; a stale unclosed window is ignored", async () => {
     pg.exec(`
@@ -198,9 +304,20 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     r = await attention();
     expect(kindsOf(r)).toEqual(["r6:open_outbox"]);
     expect(r.items[0]!.detail).toContain("audio levels have not moved");
-    // (c) the honest recovery: moving levels since
+    // (c) the honest recovery: moving levels since (R6 clears on the FIRST evidence, by spec)
     pg.exec(`TRUNCATE bench_level_sample;` + samples("r6", "2 hours", "1 hour", "moving", 60));
     expect(await attention().then((x) => x.items)).toEqual([]);
+  });
+
+  it("R6 — a chunk from a session that had ALREADY ended before the alert is not evidence (the session filter on the chunk EXISTS)", async () => {
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at) VALUES ('offline', ARRAY['r6'], 'OPD 6', 's', 'x', ${ago("3 hours")});`);
+    pg.exec(session("old6", "r6", "9 hours", "ended", "5 hours") + chunkRow("c1", "old6", "2 hours", 3_400_000));
+    const r = await attention();
+    expect(kindsOf(r)).toEqual(["r6:open_outbox"]);
+    expect(r.items[0]!.detail).toContain("no new recording has arrived since");
+    // …but a session still open at the alert time that delivered a chunk after it is
+    pg.exec(session("live6", "r6", "6 hours") + chunkRow("c2", "live6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60));
+    expect(kindsOf(await attention())).not.toContain("r6:open_outbox");
   });
 
   it("R6 — only the NEWEST offline/degraded alert counts, and an alert older than 7 days is history", async () => {
@@ -242,8 +359,8 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
   });
 });
 
-describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence against postgres", () => {
-  it("reports, per non-ok room, a chunk after the alert and the distinct levels of the last 120 s", async () => {
+describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres", () => {
+  it("loadRecoveryEvidence reports, per non-ok room, a chunk after the alert and the distinct levels of the last 120 s", async () => {
     const { loadRecoveryEvidence } = await import("@/lib/room-watchdog");
     pg.exec(`
       INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("3 hours")}), ('r4', 'ok', ${ago("3 hours")});
@@ -265,4 +382,97 @@ describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence against postgres", () => {
     pg.exec(`TRUNCATE bench_level_sample;` + samples("r6", "10 minutes", "5 minutes", "moving"));
     expect((await loadRecoveryEvidence()).get("r6")!.distinct_levels).toBe(0);
   });
+
+  it("loadRecoveryEvidence — a chunk of a session that ended BEFORE the alert is not evidence", async () => {
+    const { loadRecoveryEvidence } = await import("@/lib/room-watchdog");
+    pg.exec(`INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("3 hours")});`);
+    pg.exec(session("old6", "r6", "9 hours", "ended", "5 hours") + chunkRow("c1", "old6", "1 hour", 3_400_000));
+    expect((await loadRecoveryEvidence()).get("r6")!.chunk_after_alert).toBe(false);
+    pg.exec(session("live6", "r6", "6 hours") + chunkRow("c2", "live6", "30 minutes", 3_400_000));
+    expect((await loadRecoveryEvidence()).get("r6")!.chunk_after_alert).toBe(true);
+  });
+
+  it("QUIET CLOSE (F4) through persistPlan: a degraded room that polls clean with no session open is written to ok with NO outbox row; the next outage queues its alert", async () => {
+    const { planWatchdogRun, persistPlan } = await import("@/lib/room-watchdog");
+    const now = Date.now();
+    pg.exec(`INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("14 hours")});`);
+    const clean = { last_seen_at: new Date(now - 5_000).toISOString(), tape_advancing: false, session_open: false, disk_free_bytes: 50_000_000_000, state_flags: [] as string[], open_session: null };
+    const closeRun = planWatchdogRun([
+      { room_id: "r6", room_name: "OPD 6", facts: clean, prior: { status: "degraded", since: new Date(now - 14 * 3_600_000).toISOString() }, muted: false, recovery_evidence: { chunk_after_alert: false, distinct_levels: 0 } },
+    ], now);
+    expect(closeRun.messages).toEqual([]);
+    expect(await persistPlan(closeRun)).toBe(0);
+    expect(await pg.sql`SELECT status FROM room_alert_state WHERE room_id = 'r6'`).toEqual([{ status: "ok" }]);
+    expect(await pg.sql`SELECT count(*)::int AS n FROM room_alert_outbox`).toEqual([{ n: 0 }]);
+    // next day: a new outage is an ok → degraded edge again, so it queues a message
+    const later = now + 20 * 3_600_000;
+    const next = planWatchdogRun([
+      { room_id: "r6", room_name: "OPD 6", facts: { ...clean, last_seen_at: new Date(later - 5_000).toISOString(), session_open: true, tape_advancing: true, state_flags: ["DEVICE_MISSING"] }, prior: { status: "ok", since: new Date(now).toISOString() }, muted: false },
+    ], later);
+    expect(await persistPlan(next)).toBe(1);
+    expect(await pg.sql`SELECT kind FROM room_alert_outbox`).toEqual([{ kind: "degraded" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// F3 — every read of the two big tables rides an index. Proven by EXPLAIN (ANALYZE) on the statements the loader ACTUALLY sent, at volume.
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+type PlanNode = { "Node Type": string; "Relation Name"?: string; "Index Name"?: string; Plans?: PlanNode[] };
+const walk = (n: PlanNode, out: PlanNode[] = []): PlanNode[] => { out.push(n); for (const c of n.Plans ?? []) walk(c, out); return out; };
+const lit = (v: unknown): string => {
+  if (v === null || v === undefined) return "NULL";
+  const s = Array.isArray(v) ? `{${v.map((e) => `"${String(e).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}` : String(v);
+  return `'${s.replace(/'/g, "''")}'`;
+};
+
+describe.runIf(HAVE_DOCKER)("F3 — the bench_level_sample / bench_chunk reads never sequential-scan", () => {
+  it("at volume (≈110k level samples, 3 days of history, 60 other rooms; ≈30k chunks), no statement the loader sends Seq Scans bench_level_sample or bench_chunk, and the level reads use the (room_id, ist_date, sampled_at) index", async () => {
+    // the real rooms: 3 days of samples every 15 s; 60 decoy rooms: 3 days every 5 min; 300 decoy sessions of 100 chunks each
+    pg.exec(`
+      INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+      SELECT r, (t AT TIME ZONE 'Asia/Kolkata')::date, t, random(), random(), true, true
+        FROM unnest(ARRAY['r4','r6','r7']) r, generate_series(now() - interval '3 days', now(), interval '15 seconds') t;
+      INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+      SELECT 'decoy' || d, (t AT TIME ZONE 'Asia/Kolkata')::date, t, random(), random(), true, true
+        FROM generate_series(1, 60) d, generate_series(now() - interval '3 days', now(), interval '5 minutes') t;
+      INSERT INTO bench_session (id, room_id, started_at, ended_at, status)
+      SELECT 'ds' || s, 'decoy' || (s % 60), now() - (s || ' minutes')::interval * 9, now() - (s || ' minutes')::interval * 9 + interval '1 hour', 'ended'
+        FROM generate_series(1, 300) s;
+      INSERT INTO bench_chunk (id, session_id, source, idx, created_at, started_at, size_bytes, duration_ms)
+      SELECT 'dc' || s || '_' || i, 'ds' || s, 'primary', i, now() - (s * 9 || ' minutes')::interval + (i || ' minutes')::interval, now() - (s * 9 || ' minutes')::interval, 3400000, 300000
+        FROM generate_series(1, 300) s, generate_series(1, 100) i;
+    `);
+    // a frozen open session on r6 (so the per-room frozen-since read runs) with a recent chunk, an open alert (so the R6 read runs), a live window, a failed start
+    pg.exec([
+      `DELETE FROM bench_level_sample WHERE room_id = 'r6' AND sampled_at > ${ago("20 minutes")};`,
+      session("bs6", "r6", "3 hours"), samples("r6", "20 minutes", "1 second", "frozen"), chunkRow("c1", "bs6", "3 minutes", 3_400_000),
+      presence("ext", M6, "locked", "30 minutes"), presence("poller", M4, "unreachable", "12 minutes"), presence("poller", M4, "unreachable", "1 minute"),
+      `INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at) VALUES ('degraded', ARRAY['r4'], 'OPD 4', 's', 'x', ${ago("3 hours")});`,
+      `INSERT INTO bench_command (id, room_id, kind, status, error, created_at, acked_at) VALUES ('k1', 'r4', 'start_day', 'failed', 'x', ${ago("11 minutes")}, ${ago("10 minutes")});`,
+      `ANALYZE bench_level_sample; ANALYZE bench_chunk; ANALYZE bench_session;`,
+    ].join("\n"));
+
+    H.rec.length = 0;
+    const r = await attention();
+    expect(r.degraded).toBeUndefined();
+    expect(kindsOf(r)).toContain("r6:capture_frozen"); // the frozen-since lookup ran
+    expect(kindsOf(r)).toContain("r4:open_outbox"); // the R6 lookup ran
+
+    const heavy = H.rec.filter((x) => /bench_level_sample|bench_chunk/.test(x.q));
+    // level reads: the window, the newest-per-room, the R6 lookup, the frozen-since lookup; chunk reads: the 30-minute fleet read and R6's EXISTS
+    expect(heavy.length).toBeGreaterThanOrEqual(5);
+    const usedIndexes = new Set<string>();
+    for (const { q, v } of heavy) {
+      const text = q.replace(/\$(\d+)/g, (_m, n) => lit(v[Number(n) - 1]));
+      const raw = (await pg.sql`SELECT explain_json(${text}) AS plan`) as Array<{ plan: string }>;
+      const nodes = walk((JSON.parse(raw[0]!.plan) as Array<{ Plan: PlanNode }>)[0]!.Plan);
+      const seq = nodes.filter((n) => n["Node Type"] === "Seq Scan" && (n["Relation Name"] === "bench_level_sample" || n["Relation Name"] === "bench_chunk"));
+      expect(seq.map((n) => n["Relation Name"]), `Seq Scan in: ${q.replace(/\s+/g, " ").slice(0, 160)}`).toEqual([]);
+      for (const n of nodes) if (n["Index Name"]) usedIndexes.add(n["Index Name"]);
+      if (process.env.FA_EXPLAIN_DEBUG) console.log(q.replace(/\s+/g, " ").slice(0, 70), "=>", nodes.map((n) => `${n["Node Type"]}:${n["Relation Name"] ?? ""}${n["Index Name"] ? "@" + n["Index Name"] : ""}`).join(" | "));
+    }
+    expect(usedIndexes.has("bench_level_sample_room_day_time_idx")).toBe(true);
+    expect([...usedIndexes].sort().join(",")).toContain("bench_chunk_session_source_idx_key"); // the chunk reads go through (session_id, source, idx)
+  }, 180_000);
 });

@@ -1,12 +1,16 @@
 /**
- * Room watchdog — `recovered` needs EVIDENCE OF AUDIO (fleet-attention build, 5 Oct 2026).
+ * Room watchdog — `recovered` needs EVIDENCE OF AUDIO while a session is open; a room with no session closes QUIETLY
+ * (fleet-attention build, 5 Oct 2026; Refuter fix F4).
  *
  * The fact being fixed: at 04:36 on 5 Oct the watchdog announced `recovered` for rooms whose Macs were still in DarkWake with frozen microphones.
  * The old rule read a room `ok` as soon as its poll looked clean, and a session that CLOSES looks clean (`session_open` false → no `tape_stalled`).
- * A recovery now needs a bench chunk newer than the alert AND >= 2 distinct level values in the last 120 s; otherwise the alert stays open —
- * no write (so the room's `since` and status stand) and no message.
+ *   - A session is OPEN: a recovery needs a bench chunk newer than the alert AND >= 2 distinct level values in the last 120 s; otherwise the alert
+ *     stays open (no write, no message).
+ *   - NO session is open and the poll is clean: there is no tape to prove anything about, so the alert is closed QUIETLY (state write to ok, no
+ *     message, no outbox row, no "recovered" text). Otherwise a room closed for the day would stay offline/degraded forever and its NEXT outage
+ *     could never alert, because alerts are edge-triggered.
  *
- * Pure planner only; the evidence SELECT (loadRecoveryEvidence) is read-only SQL and is not exercised here.
+ * Pure planner only; the evidence SELECT (loadRecoveryEvidence) is covered in fleet-attention-sql.test.ts.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -22,7 +26,7 @@ const ist = (s: string): number => Date.parse(`${s.replace(" ", "T")}+05:30`);
 const NOW = ist("2026-10-05 04:36:00");
 const iso = (s: string) => new Date(ist(s)).toISOString();
 
-/** What a Mac in DarkWake / a closed session polls: perfectly clean. */
+/** A closed session / a Mac with nothing open: perfectly clean, no tape to speak of. */
 const cleanPoll = (): RoomPollFacts => ({
   last_seen_at: new Date(NOW - 5_000).toISOString(),
   tape_advancing: false,
@@ -32,10 +36,13 @@ const cleanPoll = (): RoomPollFacts => ({
   open_session: null,
 });
 
+/** A session is open and the poll reads clean (tape advancing per the poll): the case where a clean poll must NOT be taken as proof. */
+const openPoll = (): RoomPollFacts => ({ ...cleanPoll(), tape_advancing: true, session_open: true });
+
 const input = (over: Partial<RoomRunInput> = {}): RoomRunInput => ({
   room_id: "room_opd6",
   room_name: "OPD 6",
-  facts: cleanPoll(),
+  facts: openPoll(),
   prior: { status: "degraded", since: iso("2026-10-05 01:37:00") },
   muted: false,
   ...over,
@@ -56,7 +63,7 @@ describe("isGenuineRecovery", () => {
   });
 });
 
-describe("planWatchdogRun — a clean poll alone does not recover a room", () => {
+describe("planWatchdogRun — with a session OPEN, a clean poll alone does not recover a room", () => {
   it("the 04:36 case: no chunk since the 01:37 alert and frozen levels → NO `recovered` message and NO state write", () => {
     const plan = planWatchdogRun([input({ recovery_evidence: ev(false, 1) })], NOW);
     expect(plan.messages).toEqual([]);
@@ -79,6 +86,17 @@ describe("planWatchdogRun — a clean poll alone does not recover a room", () =>
     expect(plan.writes).toEqual([]);
   });
 
+  it("an open session recorded on the bench side (open_session, even if the poll's session_open flag is null) counts as a session", () => {
+    const facts: RoomPollFacts = {
+      ...cleanPoll(),
+      session_open: null,
+      open_session: { status: "recording", started_at: new Date(NOW - 20_000).toISOString(), last_any_chunk_at: new Date(NOW - 5_000).toISOString() },
+    };
+    const plan = planWatchdogRun([input({ facts, recovery_evidence: ev(false, 0) })], NOW);
+    expect(plan.messages).toEqual([]);
+    expect(plan.writes).toEqual([]);
+  });
+
   it("the HONEST recovery: a chunk after the alert and moving levels → `recovered`, naming how long it was down, and the state moves to ok", () => {
     const plan = planWatchdogRun([input({ recovery_evidence: ev(true, 37) })], NOW);
     expect(plan.messages).toHaveLength(1);
@@ -88,7 +106,7 @@ describe("planWatchdogRun — a clean poll alone does not recover a room", () =>
     expect(plan.writes).toEqual([{ room_id: "room_opd6", status: "ok", since: new Date(NOW).toISOString() }]);
   });
 
-  it("an offline room's recovery needs the same evidence", () => {
+  it("an offline room's recovery needs the same evidence while a session is open", () => {
     const offline = { status: "offline" as const, since: iso("2026-10-05 01:37:00") };
     expect(planWatchdogRun([input({ prior: offline, recovery_evidence: ev(false, 0) })], NOW).messages).toEqual([]);
     const ok = planWatchdogRun([input({ prior: offline, recovery_evidence: ev(true, 5) })], NOW);
@@ -101,26 +119,8 @@ describe("planWatchdogRun — a clean poll alone does not recover a room", () =>
     expect(planWatchdogRun([input({ prior, recovery_evidence: ev(false, 1) })], NOW).writes).toEqual([]);
     // 08:45 — audio is back.
     const later = ist("2026-10-05 08:45:00");
-    const plan = planWatchdogRun([input({ prior, facts: { ...cleanPoll(), last_seen_at: new Date(later - 5_000).toISOString() }, recovery_evidence: ev(true, 30) })], later);
+    const plan = planWatchdogRun([input({ prior, facts: { ...openPoll(), last_seen_at: new Date(later - 5_000).toISOString() }, recovery_evidence: ev(true, 30) })], later);
     expect(plan.messages[0]!.text).toMatch(/recovered after being degraded for 7 h 8 min/);
-  });
-
-  it("evidence is consulted ONLY for a recovery: new alerts, and status changes that are not toward ok, are unaffected", () => {
-    // ok → degraded still alerts, evidence or not
-    const toDegraded = planWatchdogRun([input({ prior: { status: "ok", since: iso("2026-10-05 00:00:00") }, facts: { ...cleanPoll(), state_flags: ["DEVICE_MISSING"] }, recovery_evidence: ev(false, 0) })], NOW);
-    expect(toDegraded.messages.map((m) => m.kind)).toEqual(["degraded"]);
-    // degraded → offline still alerts
-    const toOffline = planWatchdogRun([input({ facts: { ...cleanPoll(), last_seen_at: new Date(NOW - 10 * 60_000).toISOString() }, recovery_evidence: ev(false, 0) })], NOW);
-    expect(toOffline.messages.map((m) => m.kind)).toEqual(["offline"]);
-    // first sight of a room (D2) still seeds silently
-    const seed = planWatchdogRun([input({ prior: null })], NOW);
-    expect(seed.messages).toEqual([]);
-    expect(seed.writes).toHaveLength(1);
-  });
-
-  it("with no evidence field at all (the planner's legacy callers) the poll alone still decides", () => {
-    const plan = planWatchdogRun([input()], NOW);
-    expect(plan.messages.map((m) => m.kind)).toEqual(["recovered"]);
   });
 
   it("a muted room's recovery is withheld the same way and never messages", () => {
@@ -128,5 +128,74 @@ describe("planWatchdogRun — a clean poll alone does not recover a room", () =>
     const honest = planWatchdogRun([input({ muted: true, recovery_evidence: ev(true, 9) })], NOW);
     expect(honest.messages).toEqual([]);
     expect(honest.writes).toHaveLength(1);
+  });
+});
+
+describe("planWatchdogRun — with NO session open, a clean poll closes the alert quietly (F4)", () => {
+  it("a degraded room with nothing open → state written to ok, NO message (no outbox row, no `recovered` text), `since` reset", () => {
+    const plan = planWatchdogRun([input({ facts: cleanPoll(), recovery_evidence: ev(false, 0) })], NOW);
+    expect(plan.messages).toEqual([]);
+    expect(plan.writes).toEqual([{ room_id: "room_opd6", status: "ok", since: new Date(NOW).toISOString() }]);
+  });
+
+  it("an offline room that comes back clean with nothing open also closes quietly", () => {
+    const offline = { status: "offline" as const, since: iso("2026-10-04 20:31:00") };
+    const plan = planWatchdogRun([input({ facts: cleanPoll(), prior: offline, recovery_evidence: ev(false, 0) })], NOW);
+    expect(plan.messages).toEqual([]);
+    expect(plan.writes).toEqual([{ room_id: "room_opd6", status: "ok", since: new Date(NOW).toISOString() }]);
+  });
+
+  it("unreadable evidence (null) makes no difference when no session is open", () => {
+    const plan = planWatchdogRun([input({ facts: cleanPoll(), recovery_evidence: null })], NOW);
+    expect(plan.messages).toEqual([]);
+    expect(plan.writes).toHaveLength(1);
+    expect(plan.writes[0]!.status).toBe("ok");
+  });
+
+  it("a muted room closes quietly too (the write lands, nothing is said)", () => {
+    const plan = planWatchdogRun([input({ facts: cleanPoll(), muted: true, recovery_evidence: ev(false, 0) })], NOW);
+    expect(plan.messages).toEqual([]);
+    expect(plan.writes).toHaveLength(1);
+  });
+
+  it("the NEXT outage can alert again: after the quiet close the prior is ok, and a new degraded poll messages", () => {
+    const closed = planWatchdogRun([input({ facts: cleanPoll(), recovery_evidence: ev(false, 0) })], NOW);
+    const next = ist("2026-10-06 09:10:00");
+    const prior = { status: closed.writes[0]!.status, since: closed.writes[0]!.since };
+    const again = planWatchdogRun([input({ prior, facts: { ...openPoll(), last_seen_at: new Date(next - 5_000).toISOString(), state_flags: ["DEVICE_MISSING"] } })], next);
+    expect(again.messages.map((m) => m.kind)).toEqual(["degraded"]);
+  });
+
+  it("fleet_outage counting is unaffected by rooms that close quietly in the same run", () => {
+    const stale = (id: string) => input({ room_id: id, room_name: id, facts: { ...cleanPoll(), last_seen_at: new Date(NOW - 10 * 60_000).toISOString() }, prior: { status: "ok", since: iso("2026-10-05 00:00:00") } });
+    const quiet = (id: string) => input({ room_id: id, room_name: id, facts: cleanPoll(), prior: { status: "degraded", since: iso("2026-10-05 01:00:00") }, recovery_evidence: ev(false, 0) });
+    // 3 of 5 rooms cross into offline, 2 close quietly → fleet outage counts 3 of 5, not 3 of anything else
+    const plan = planWatchdogRun([stale("a"), stale("b"), stale("c"), quiet("d"), quiet("e")], NOW);
+    expect(plan.messages.map((m) => m.kind)).toEqual(["fleet_outage"]);
+    expect(plan.messages[0]!.room_ids).toEqual(["a", "b", "c"]);
+    expect(plan.writes.map((w) => `${w.room_id}:${w.status}`).sort()).toEqual(["a:offline", "b:offline", "c:offline", "d:ok", "e:ok"]);
+    // a quiet close never adds to the offline count: 1 offline + 4 quiet closes → one ordinary offline message
+    const one = planWatchdogRun([stale("a"), quiet("b"), quiet("c"), quiet("d"), quiet("e")], NOW);
+    expect(one.messages.map((m) => m.kind)).toEqual(["offline"]);
+  });
+});
+
+describe("planWatchdogRun — everything else is unchanged", () => {
+  it("evidence is consulted ONLY for a recovery: new alerts, and status changes that are not toward ok, are unaffected", () => {
+    // ok → degraded still alerts, evidence or not
+    const toDegraded = planWatchdogRun([input({ prior: { status: "ok", since: iso("2026-10-05 00:00:00") }, facts: { ...openPoll(), state_flags: ["DEVICE_MISSING"] }, recovery_evidence: ev(false, 0) })], NOW);
+    expect(toDegraded.messages.map((m) => m.kind)).toEqual(["degraded"]);
+    // degraded → offline still alerts
+    const toOffline = planWatchdogRun([input({ facts: { ...openPoll(), last_seen_at: new Date(NOW - 10 * 60_000).toISOString() }, recovery_evidence: ev(false, 0) })], NOW);
+    expect(toOffline.messages.map((m) => m.kind)).toEqual(["offline"]);
+    // first sight of a room (D2) still seeds silently
+    const seed = planWatchdogRun([input({ prior: null })], NOW);
+    expect(seed.messages).toEqual([]);
+    expect(seed.writes).toHaveLength(1);
+  });
+
+  it("with no evidence field at all (the planner's legacy callers) the poll alone still decides, session or not", () => {
+    expect(planWatchdogRun([input()], NOW).messages.map((m) => m.kind)).toEqual(["recovered"]);
+    expect(planWatchdogRun([input({ facts: cleanPoll() })], NOW).messages.map((m) => m.kind)).toEqual(["recovered"]);
   });
 });

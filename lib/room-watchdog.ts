@@ -10,7 +10,8 @@
  *
  * D1 EDGE-TRIGGERED, NOT LEVEL-TRIGGERED. `planWatchdogRun` only ever emits a message on a status
  * CHANGE. A room sitting in `degraded` for six hours produces one message when it enters and one
- * when it leaves — never a repeat in between. `room_alert_state` (migration 0103) is what makes
+ * when it genuinely recovers (a clean poll alone is not enough while a session is open; see GENUINE RECOVERY below) — never a repeat in
+ * between. `room_alert_state` (migration 0103) is what makes
  * that possible: it is the only place the watchdog's own idea of "what did I last say about this
  * room" is kept.
  *
@@ -255,7 +256,8 @@ export type RoomRunInput = {
   /** now < muted_until, read by the caller. */
   muted: boolean;
   /**
-   * Evidence that audio is really flowing again, consulted ONLY when this run would announce a recovery (prior offline/degraded, now ok).
+   * Evidence that audio is really flowing again, consulted ONLY when this run would announce a recovery (prior offline/degraded, now ok) and
+   * only while a session is open; with no session open the alert closes quietly instead (see planWatchdogRun).
    * `undefined` = the caller did not check (the pure planner's legacy behaviour: the poll alone decides). `null` = the caller tried and could not
    * read it. runWatchdog always supplies it for a room whose prior status is not ok.
    */
@@ -296,9 +298,21 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
     // D1: no change, no write, no message. This is the whole point of an edge trigger.
     if (newStatus === input.prior.status) continue;
 
-    // GENUINE RECOVERY ONLY. A clean poll is not proof of audio (see GENUINE_RECOVERY_MIN_DISTINCT). Without a chunk newer than the alert and a
-    // moving level signal the alert stays OPEN: no write, so the room's `since` and status stand, and no `recovered` message.
-    if (newStatus === "ok" && input.recovery_evidence !== undefined && !isGenuineRecovery(input.recovery_evidence)) continue;
+    // RECOVERY, for a caller that supplies evidence (runWatchdog always does).
+    //  - A session is OPEN: a clean poll is not proof of audio (see GENUINE_RECOVERY_MIN_DISTINCT). Without a chunk newer than the alert and a moving
+    //    level signal the alert stays OPEN: no write (so the room's `since` and status stand) and no `recovered` message.
+    //  - NO session is open and the poll is clean: there is no tape to prove anything about, so a room closed for the day must not stay
+    //    offline/degraded forever (which would also swallow its NEXT outage, an edge-triggered alert needs the state to return to ok). The state
+    //    is CLOSED QUIETLY: the write lands, no message is planned, so no outbox row and no "recovered" text — it was never proven. This needs no new
+    //    outbox kind and no new status, so no CHECK change. (An audit row for the quiet close would need a new outbox kind, which is a CHECK change.)
+    if (newStatus === "ok" && input.recovery_evidence !== undefined) {
+      const sessionOpen = input.facts.open_session !== null || input.facts.session_open === true;
+      if (!sessionOpen) {
+        writes.push({ room_id: input.room_id, status: "ok", since: nowIso });
+        continue;
+      }
+      if (!isGenuineRecovery(input.recovery_evidence)) continue;
+    }
 
     writes.push({ room_id: input.room_id, status: newStatus, since: nowIso });
 
@@ -320,7 +334,8 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
         kind: "degraded", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "degraded",
       });
     } else {
-      // newStatus === "ok": D5, recovery is always sent, naming how long it was gone.
+      // newStatus === "ok" with a session open (or a legacy caller that supplied no evidence): the recovery is sent, naming how long it was gone.
+      // runWatchdog only reaches here for a room whose recovery is GENUINE (see above); an unproven one `continue`d, a closed-for-the-day one closed quietly.
       const downForMs = nowMs - Date.parse(input.prior.since);
       messages.push({
         ...recoveryMessage(input.room_name, input.prior.status, downForMs, nowIso),
@@ -550,15 +565,16 @@ export async function recordHeartbeat(ok: boolean, evaluated: number, error?: st
 
 /**
  * ONE READ: for every room whose watchdog status is not ok, is there a chunk newer than the alert (`room_alert_state.since`), and how many distinct
- * (peak, zero_ratio) level values did it report in the last RECOVERY_LEVEL_WINDOW_S seconds. Read-only. bench_level_sample's index leads
- * (room_id, ist_date, sampled_at), so the ist_date bound keeps the 120 s read on the newest index pages.
+ * (peak, zero_ratio) level values did it report in the last RECOVERY_LEVEL_WINDOW_S seconds. Read-only. Both reads are per room
+ * (`room_id = ras.room_id`): the level read rides the (room_id, ist_date, sampled_at) index with an ist_date and sampled_at bound; the chunk read
+ * goes through the room's sessions (bench_session (room_id, started_at DESC)) that had not ended before the alert, then bench_chunk by session_id.
  */
 export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEvidence>> {
   const rows = (await sql`
     SELECT ras.room_id,
            EXISTS (
              SELECT 1 FROM bench_chunk c JOIN bench_session s ON s.id = c.session_id
-              WHERE s.room_id = ras.room_id AND c.created_at > ras.since
+              WHERE s.room_id = ras.room_id AND (s.ended_at IS NULL OR s.ended_at > ras.since) AND c.created_at > ras.since
            ) AS chunk_after_alert,
            (
              SELECT count(*)::int FROM (

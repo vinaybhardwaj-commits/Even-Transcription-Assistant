@@ -9,9 +9,13 @@
 import { describe, it, expect } from "vitest";
 import {
   computeAttention,
-  resolvePower,
+  resolveLockState,
   classifyExtEvent,
   isClinicHours,
+  isSilentChunk,
+  chunkBytesPerSecond,
+  legacyPollerKey,
+  POLLER_LEGACY_KEYS,
   type RoomAttentionInputs,
   type PresenceEventLite,
   type LevelSample,
@@ -54,7 +58,7 @@ const kinds = (items: ReturnType<typeof run>) => items.map((i) => `${i.room_id}:
 const recordingSince = (at: string, id = "bs_1") => ({ id, status: "recording" as const, started_at: iso(at) });
 
 // ---------------------------------------------------------------------------
-// R1 asleep
+// R1 asleep (kind id kept; "Mac not capturing") — a LOCKED SCREEN ALONE IS NOT A FAULT
 // ---------------------------------------------------------------------------
 
 /** The 5 Oct DarkWake: normal heartbeats, a `locked` at 01:36:50, then UNFOCUSED heartbeats every 30 s all night. */
@@ -66,29 +70,77 @@ function darkWakeEvents(untilHHMMSS: string): PresenceEventLite[] {
   return evs;
 }
 
-describe("R1 asleep", () => {
-  it("raises RED from the `locked` event even though heartbeats kept arriving, and names the time it slept", () => {
-    const items = run("2026-10-05 02:10:00", room({ ext_events: darkWakeEvents("02:09:50") }));
-    expect(kinds(items)).toEqual(["room_opd6:asleep"]);
+describe("R1 asleep — Mac not capturing", () => {
+  const N = "2026-10-05 04:40:00";
+  const open = recordingSince("2026-10-04 08:40:00");
+  const asleepOf = (items: ReturnType<typeof run>) => items.filter((i) => i.kind === "asleep");
+  /** OPD 6 as it was at 04:40 on 5 Oct: screen locked since 01:36:50, meter frozen since 01:36:52, no chunk since 01:35. */
+  const frozenLocked = (over: Partial<RoomAttentionInputs> = {}) =>
+    room({ ext_events: darkWakeEvents("04:39:50"), open_session: open, samples: frozenSamples("2026-10-05 04:39:58"), frozen_since: iso("2026-10-05 01:36:52"), last_chunk_at: iso("2026-10-05 01:35:00"), ...over });
+
+  it("raises RED when the screen is locked, a session is open and there is no audio: 'Screen locked and no audio since 01:36 IST'", () => {
+    const items = asleepOf(run(N, frozenLocked()));
+    expect(items).toHaveLength(1);
     expect(items[0]!.severity).toBe("red");
+    expect(items[0]!.detail).toBe("Screen locked and no audio since 01:36 IST.");
     expect(items[0]!.since).toBe(iso("2026-10-05 01:36:50"));
-    expect(items[0]!.detail).toContain("01:36 IST");
     expect(items[0]!.machine).toBe("EHRC-OPD6s-Mac-mini");
-    expect(items[0]!.action.length).toBeGreaterThan(10);
+    expect(items[0]!.detail).not.toMatch(/asleep/i);
   });
 
-  it("holds all night: still raised at 04:40, when the watchdog had already (falsely) said recovered", () => {
-    expect(kinds(run("2026-10-05 04:40:00", room({ ext_events: darkWakeEvents("04:39:50") })))).toEqual(["room_opd6:asleep"]);
+  it("since is when the audio stopped when that is later than the lock (meter frozen at 01:36:52, chunks still arriving at 04:35)", () => {
+    const items = asleepOf(run(N, frozenLocked({ chunks: [chunk("2026-10-05 04:35:00", 3_400_000)] })));
+    expect(items[0]!.since).toBe(iso("2026-10-05 01:36:52"));
   });
 
-  it("clears the moment a FOCUSED heartbeat, an `active` or a `login` follows the lock", () => {
+  it("raises when the meter moves but NO chunk landed in 10 minutes (the half of the audio test the meter cannot see)", () => {
+    const items = asleepOf(run(N, room({ ext_events: darkWakeEvents("04:39:50"), open_session: open, samples: movingSamples("2026-10-05 04:39:58"), chunks: [], last_chunk_at: iso("2026-10-05 04:20:00") })));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.detail).toBe("Screen locked and no audio since 04:20 IST.");
+  });
+
+  it("OPD 5 under a locked screen, recording all morning, idle for hours: NOTHING (any audio evidence clears R1)", () => {
+    const opd5 = room({
+      room_id: "room_opd5",
+      room_name: "OPD 5",
+      ext_events: [{ event: "locked", ts: iso("2026-10-05 01:00:00") }],
+      poller: { ts: iso("2026-10-05 10:09:30"), state: "ok", locked: true, asleep_since: iso("2026-10-05 01:00:00") },
+      open_session: recordingSince("2026-10-05 09:13:00"),
+      samples: movingSamples("2026-10-05 10:09:58"),
+      chunks: [chunk("2026-10-05 10:08:00", 3_400_000)],
+    });
+    expect(run("2026-10-05 10:10:00", opd5)).toEqual([]);
+  });
+
+  it("a locked screen with NO session open produces NO item — even after hours of unfocused heartbeats (DarkWake looks the same as a locked idle Mac)", () => {
+    expect(run("2026-10-05 04:40:00", room({ ext_events: darkWakeEvents("04:39:50") }))).toEqual([]);
+    expect(run("2026-10-05 04:40:00", room({ poller: { ts: iso("2026-10-05 04:39:30"), state: "ok", locked: true, asleep_since: iso("2026-10-05 01:37:30") } }))).toEqual([]);
+  });
+
+  it("needs a RECORDING session: a paused one raises nothing", () => {
+    expect(asleepOf(run(N, frozenLocked({ open_session: { ...open, status: "paused" } })))).toEqual([]);
+  });
+
+  it("gives a session that opened under 2 minutes ago (and under 10 for the chunk half) the benefit of the doubt", () => {
+    const young = room({ ext_events: [{ event: "locked", ts: iso("2026-10-05 09:00:00") }], open_session: recordingSince("2026-10-05 09:59:00") });
+    expect(run("2026-10-05 10:00:00", young)).toEqual([]);
+  });
+
+  it("clears at once on any audio evidence: add a moving meter and a fresh chunk to the frozen, locked room", () => {
+    expect(asleepOf(run(N, frozenLocked()))).toHaveLength(1);
+    expect(asleepOf(run(N, frozenLocked({ samples: movingSamples("2026-10-05 04:39:58"), chunks: [chunk("2026-10-05 04:35:00", 3_400_000)] })))).toEqual([]);
+  });
+
+  it("a person at the Mac (focused heartbeat, active, login) after the lock clears the lock half", () => {
     for (const wake of [
-      { event: "heartbeat", ts: iso("2026-10-05 02:09:55"), tab_focus: true },
-      { event: "heartbeat", ts: iso("2026-10-05 02:09:55"), tab_focus: "true" },
-      { event: "active", ts: iso("2026-10-05 02:09:55") },
-      { event: "login", ts: iso("2026-10-05 02:09:55") },
+      { event: "heartbeat", ts: iso("2026-10-05 04:39:55"), tab_focus: true },
+      { event: "heartbeat", ts: iso("2026-10-05 04:39:55"), tab_focus: "true" },
+      { event: "active", ts: iso("2026-10-05 04:39:55") },
+      { event: "login", ts: iso("2026-10-05 04:39:55") },
     ] as PresenceEventLite[]) {
-      expect(run("2026-10-05 02:10:00", room({ ext_events: [...darkWakeEvents("02:09:50"), wake] }))).toEqual([]);
+      const items = run(N, frozenLocked({ ext_events: [...darkWakeEvents("04:39:50"), wake] }));
+      expect(asleepOf(items)).toEqual([]);
+      expect(kinds(items)).toContain("room_opd6:capture_frozen"); // R2 is independent of the lock and still says it
     }
   });
 
@@ -97,32 +149,66 @@ describe("R1 asleep", () => {
     expect(classifyExtEvent({ event: "logout", ts: "x" })).toBeNull();
     expect(classifyExtEvent({ event: "heartbeat", ts: "x", tab_focus: false })).toBeNull();
     expect(classifyExtEvent({ event: "heartbeat", ts: "x", tab_focus: null })).toBeNull();
-    expect(classifyExtEvent({ event: "locked", ts: "x" })).toBe("asleep");
+    expect(classifyExtEvent({ event: "locked", ts: "x" })).toBe("locked");
   });
 
-  it("raises from the poller alone: locked=true, or unreachable", () => {
-    const base = { ext_events: [] as PresenceEventLite[] };
-    const locked = run("2026-10-05 02:10:00", room({ ...base, poller: { ts: iso("2026-10-05 02:09:30"), state: "ok", locked: true, asleep_since: iso("2026-10-05 01:37:30") } }));
-    expect(kinds(locked)).toEqual(["room_opd6:asleep"]);
-    expect(locked[0]!.since).toBe(iso("2026-10-05 01:37:30"));
-    const unreachable = run("2026-10-05 02:10:00", room({ ...base, poller: { ts: iso("2026-10-05 02:09:30"), state: "unreachable", locked: false } }));
-    expect(kinds(unreachable)).toEqual(["room_opd6:asleep"]);
-    expect(unreachable[0]!.since).toBe(iso("2026-10-05 02:09:30"));
+  it("the poller alone can say locked or unreachable, with the run's start as `since`", () => {
+    const locked = asleepOf(run(N, room({ open_session: open, samples: frozenSamples("2026-10-05 04:39:58"), frozen_since: iso("2026-10-05 01:36:52"), last_chunk_at: iso("2026-10-05 01:35:00"), poller: { ts: iso("2026-10-05 04:39:30"), state: "ok", locked: true, asleep_since: iso("2026-10-05 01:37:30") } })));
+    expect(locked[0]!.detail).toBe("Screen locked and no audio since 01:37 IST.");
+    const unreachable = asleepOf(run(N, room({ open_session: open, samples: frozenSamples("2026-10-05 04:39:58"), frozen_since: iso("2026-10-05 01:36:52"), last_chunk_at: iso("2026-10-05 01:35:00"), poller: { ts: iso("2026-10-05 04:39:30"), state: "unreachable", locked: false, asleep_since: iso("2026-10-05 04:38:00") } })));
+    expect(unreachable[0]!.detail).toBe("Mac unreachable on the network and no audio since 04:38 IST.");
   });
 
-  it("the newer source wins: a poller `ok` after the lock clears it; a lock after a poller `ok` raises it", () => {
+  describe("(b) the poller's newest row is `unreachable` for 3 minutes or more", () => {
+    const unreach = (ts: string, since: string) => ({ ts: iso(ts), state: "unreachable", locked: false, unreachable_since: iso(since) });
+
+    it("raises RED with no session at all", () => {
+      const items = run(N, room({ poller: unreach("2026-10-05 04:39:30", "2026-10-05 04:35:00") }));
+      expect(kinds(items)).toEqual(["room_opd6:asleep"]);
+      expect(items[0]!.severity).toBe("red");
+      expect(items[0]!.since).toBe(iso("2026-10-05 04:35:00"));
+      expect(items[0]!.detail).toBe("The Mac in OPD 6 has been unreachable on the network since 04:35 IST.");
+    });
+    it("not before 3 minutes (the boundary is inclusive)", () => {
+      expect(run(N, room({ poller: unreach("2026-10-05 04:39:30", "2026-10-05 04:38:00") }))).toEqual([]);
+      expect(kinds(run(N, room({ poller: unreach("2026-10-05 04:39:30", "2026-10-05 04:37:00") })))).toEqual(["room_opd6:asleep"]);
+    });
+    it("a poller row older than 10 minutes says nothing about now (the poller may be down)", () => {
+      expect(run(N, room({ poller: unreach("2026-10-05 04:25:00", "2026-10-05 03:00:00") }))).toEqual([]);
+    });
+    it("a Mac the poller cannot reach but whose recording is demonstrably delivering audio is a network fact, not a capture fact", () => {
+      const delivering = room({ open_session: open, samples: movingSamples("2026-10-05 04:39:58"), chunks: [chunk("2026-10-05 04:35:00", 3_400_000)], poller: unreach("2026-10-05 04:39:30", "2026-10-05 04:30:00") });
+      expect(run(N, delivering)).toEqual([]);
+    });
+    it("an ok poller row that is merely locked is not (b)", () => {
+      expect(run(N, room({ poller: { ts: iso("2026-10-05 04:39:30"), state: "ok", locked: true } }))).toEqual([]);
+    });
+  });
+
+  it("resolveLockState: the newer source wins; when both say down, since is the earlier; unknown evidence is not down", () => {
     const lockedAt0136 = darkWakeEvents("01:40:00");
-    expect(run("2026-10-05 02:10:00", room({ ext_events: lockedAt0136, poller: { ts: iso("2026-10-05 02:09:30"), state: "ok", locked: false } }))).toEqual([]);
-    expect(kinds(run("2026-10-05 02:10:00", room({ ext_events: lockedAt0136, poller: { ts: iso("2026-10-05 01:30:00"), state: "ok", locked: false } })))).toEqual(["room_opd6:asleep"]);
+    expect(resolveLockState(lockedAt0136, { ts: iso("2026-10-05 02:09:30"), state: "ok", locked: false }).down).toBe(false);
+    expect(resolveLockState(lockedAt0136, { ts: iso("2026-10-05 01:30:00"), state: "ok", locked: false }).down).toBe(true);
+    expect(resolveLockState(lockedAt0136, { ts: iso("2026-10-05 02:00:00"), state: "unreachable", locked: false, asleep_since: iso("2026-10-05 01:38:00") })).toEqual({ down: true, since: iso("2026-10-05 01:36:50"), by: "locked" });
+    expect(resolveLockState([], { ts: iso("2026-10-05 02:00:00"), state: "unreachable", locked: false })).toEqual({ down: true, since: iso("2026-10-05 02:00:00"), by: "unreachable" });
+    expect(resolveLockState([], null)).toEqual({ down: false, since: null, by: null });
   });
 
-  it("when both say asleep, since is the EARLIER of the two", () => {
-    const p = resolvePower(darkWakeEvents("01:40:00"), { ts: iso("2026-10-05 02:00:00"), state: "unreachable", locked: false, asleep_since: iso("2026-10-05 01:38:00") });
-    expect(p).toEqual({ asleep: true, since: iso("2026-10-05 01:36:50") });
-  });
-
-  it("says nothing about a machine it has no evidence for", () => {
-    expect(run("2026-10-05 02:10:00", room())).toEqual([]);
+  it("POLLER_LEGACY_KEYS maps the seven pre-5-Oct short names; the -2 Macs and unknown keys have none", () => {
+    expect(POLLER_LEGACY_KEYS).toEqual({
+      consul4: "EHRC-CONSUL4s-Mac-mini",
+      consul5: "EHRC-CONSUL5s-Mac-mini",
+      consul6: "EHRC-CONSUL6s-Mac-mini",
+      consul7: "EHRC-CONSUL7s-Mac-mini",
+      echo: "EHRC-ECHOs-Mac-mini",
+      discussion: "EHRC-DISCUSSIONs-Mac-mini",
+      audiometry: "EHRC-AUDIOMETRYs-Mac-mini",
+    });
+    expect(legacyPollerKey("EHRC-CONSUL4s-Mac-mini")).toBe("consul4");
+    expect(legacyPollerKey("EHRC-AUDIOMETRYs-Mac-mini")).toBe("audiometry");
+    expect(legacyPollerKey("EHRC-CONSUL4s-Mac-mini-2")).toBeNull();
+    expect(legacyPollerKey("EHRC-CONSUL2s-Mac-mini-2")).toBeNull();
+    expect(legacyPollerKey("nope")).toBeNull();
   });
 });
 
@@ -194,54 +280,85 @@ describe("R2 capture_frozen", () => {
 // R3 silent_tape
 // ---------------------------------------------------------------------------
 
+/** A 5-minute (300,000 ms) chunk by default. */
 const chunk = (createdIST: string, size: number | null, over: Partial<ChunkLite> = {}): ChunkLite => ({
   session_id: "bs_1",
   source: "primary",
   created_at: iso(createdIST),
   started_at: new Date(ist(createdIST) - 300_000).toISOString(),
   size_bytes: size,
+  duration_ms: 300_000,
   ...over,
 });
 
-describe("R3 silent_tape", () => {
+describe("R3 silent_tape — silent BY RATE: <= 800 bytes/s over a chunk of >= 150 s", () => {
   const open = recordingSince("2026-10-05 08:40:00");
   const NOW = "2026-10-05 10:07:00";
+  const silent = [chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 212_378)];
+  const withMeter = (chunks: ChunkLite[], over: Partial<RoomAttentionInputs> = {}) =>
+    room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks, ...over });
 
-  it("raises RED on two consecutive newest chunks of 212,378 bytes (digital silence)", () => {
-    const items = run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 212_378), chunk("2026-10-05 09:55:00", 3_400_000)] }));
+  it("raises RED on two consecutive newest chunks of 212,378 bytes over 300 s (708 B/s)", () => {
+    const items = run(NOW, withMeter([...silent, chunk("2026-10-05 09:55:00", 3_400_000)]));
     expect(kinds(items)).toEqual(["room_opd6:silent_tape"]);
     expect(items[0]!.severity).toBe("red");
-    expect(items[0]!.detail).toContain("212 KB");
+    expect(items[0]!.detail).toContain("about 708 bytes per second");
     expect(items[0]!.since).toBe(chunk("2026-10-05 10:00:00", 1).started_at);
   });
 
   it("counts the whole silent run, newest backwards", () => {
-    const items = run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 212_378), chunk("2026-10-05 09:55:00", 212_378)] }));
+    const items = run(NOW, withMeter([...silent, chunk("2026-10-05 09:55:00", 212_378)]));
     expect(items[0]!.detail).toContain("last 3 recording pieces");
   });
 
   it("one silent chunk is not enough", () => {
-    expect(run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 3_400_000)] }))).toEqual([]);
+    expect(run(NOW, withMeter([chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 3_400_000)]))).toEqual([]);
   });
 
   it("silence that is NOT consecutive with the newest chunk is not raised", () => {
-    expect(run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 3_400_000), chunk("2026-10-05 10:00:00", 212_378), chunk("2026-10-05 09:55:00", 212_378)] }))).toEqual([]);
-    expect(run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 3_400_000), chunk("2026-10-05 09:55:00", 212_378)] }))).toEqual([]);
+    expect(run(NOW, withMeter([chunk("2026-10-05 10:05:00", 3_400_000), chunk("2026-10-05 10:00:00", 212_378), chunk("2026-10-05 09:55:00", 212_378)]))).toEqual([]);
+    expect(run(NOW, withMeter([chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 3_400_000), chunk("2026-10-05 09:55:00", 212_378)]))).toEqual([]);
   });
 
-  it("the threshold is 230,000 inclusive; 230,001 is audio", () => {
-    expect(kinds(run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 230_000), chunk("2026-10-05 10:00:00", 230_000)] })))).toEqual(["room_opd6:silent_tape"]);
-    expect(run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks: [chunk("2026-10-05 10:05:00", 230_001), chunk("2026-10-05 10:00:00", 230_001)] }))).toEqual([]);
+  it("the rate is 800 B/s inclusive: 240,000 bytes over 300 s is silent, 240,300 (801 B/s) is audio", () => {
+    expect(kinds(run(NOW, withMeter([chunk("2026-10-05 10:05:00", 240_000), chunk("2026-10-05 10:00:00", 240_000)])))).toEqual(["room_opd6:silent_tape"]);
+    expect(run(NOW, withMeter([chunk("2026-10-05 10:05:00", 240_300), chunk("2026-10-05 10:00:00", 240_300)]))).toEqual([]);
   });
 
-  it("ignores the backup mic, chunks of other sessions, unknown sizes, and a session that is not recording", () => {
-    const silentBackup = [chunk("2026-10-05 10:05:00", 212_378, { source: "backup" }), chunk("2026-10-05 10:00:00", 212_378, { source: "backup" })];
-    const otherSession = [chunk("2026-10-05 10:05:00", 212_378, { session_id: "bs_old" }), chunk("2026-10-05 10:00:00", 212_378, { session_id: "bs_old" })];
-    const unknown = [chunk("2026-10-05 10:05:00", null), chunk("2026-10-05 10:00:00", null)];
-    for (const chunks of [silentBackup, otherSession, unknown]) {
-      expect(run(NOW, room({ open_session: open, samples: movingSamples("2026-10-05 10:06:58"), chunks }))).toEqual([]);
+  it("it is a RATE, not a size: a long chunk of a given size is the same as a short one at the same rate", () => {
+    // 10-minute chunks: 400,000 bytes is 667 B/s — silent although larger than the old 230,000-byte rule.
+    const long = (c: string) => chunk(c, 400_000, { duration_ms: 600_000 });
+    expect(kinds(run(NOW, withMeter([long("2026-10-05 10:05:00"), long("2026-10-05 09:55:00")])))).toEqual(["room_opd6:silent_tape"]);
+    // 150-second chunks: 120,000 bytes is exactly 800 B/s.
+    const mid = (c: string) => chunk(c, 120_000, { duration_ms: 150_000 });
+    expect(kinds(run(NOW, withMeter([mid("2026-10-05 10:05:00"), mid("2026-10-05 10:00:00")])))).toEqual(["room_opd6:silent_tape"]);
+  });
+
+  it("a chunk shorter than 150 s is never called silent, however small (a tail chunk, a pause or a restart)", () => {
+    const short = (c: string) => chunk(c, 1_000, { duration_ms: 149_999 });
+    expect(run(NOW, withMeter([short("2026-10-05 10:05:00"), short("2026-10-05 10:00:00")]))).toEqual([]);
+  });
+
+  it("an unknown size or an unknown/zero duration is never silent", () => {
+    expect(run(NOW, withMeter([chunk("2026-10-05 10:05:00", null), chunk("2026-10-05 10:00:00", null)]))).toEqual([]);
+    expect(run(NOW, withMeter([chunk("2026-10-05 10:05:00", 100, { duration_ms: null }), chunk("2026-10-05 10:00:00", 100, { duration_ms: 0 })]))).toEqual([]);
+  });
+
+  it("isSilentChunk / chunkBytesPerSecond at the boundaries", () => {
+    expect(chunkBytesPerSecond({ size_bytes: 212_378, duration_ms: 300_000 })).toBeCloseTo(707.93, 1);
+    expect(isSilentChunk({ size_bytes: 240_000, duration_ms: 300_000 })).toBe(true);
+    expect(isSilentChunk({ size_bytes: 240_001, duration_ms: 300_000 })).toBe(false);
+    expect(isSilentChunk({ size_bytes: 1, duration_ms: 150_000 })).toBe(true);
+    expect(isSilentChunk({ size_bytes: 1, duration_ms: 149_999 })).toBe(false);
+    expect(chunkBytesPerSecond({ size_bytes: null, duration_ms: 300_000 })).toBeNull();
+  });
+
+  it("ignores the backup mic, chunks of other sessions, and a session that is not recording", () => {
+    const silentBackup = silent.map((c) => ({ ...c, source: "backup" }));
+    const otherSession = silent.map((c) => ({ ...c, session_id: "bs_old" }));
+    for (const chunks of [silentBackup, otherSession]) {
+      expect(run(NOW, withMeter(chunks))).toEqual([]);
     }
-    const silent = [chunk("2026-10-05 10:05:00", 212_378), chunk("2026-10-05 10:00:00", 212_378)];
     expect(run(NOW, room({ open_session: { ...open, status: "paused" }, chunks: silent }))).toEqual([]);
     expect(run(NOW, room({ chunks: silent }))).toEqual([]);
   });
@@ -458,8 +575,9 @@ describe("R7 stale_start", () => {
 
 describe("computeAttention as a whole", () => {
   it("is state-based: the same evidence gives the same answer every call, and an empty fleet is empty", () => {
-    const r = room({ ext_events: darkWakeEvents("02:09:50") });
+    const r = room({ poller: { ts: iso("2026-10-05 02:09:30"), state: "unreachable", locked: false, unreachable_since: iso("2026-10-05 01:50:00") } });
     expect(run("2026-10-05 02:10:00", r)).toEqual(run("2026-10-05 02:10:00", r));
+    expect(run("2026-10-05 02:10:00", r)).toHaveLength(1);
     expect(computeAttention({ now_ms: ist("2026-10-05 02:10:00"), rooms: [] })).toEqual([]);
     expect(run("2026-10-05 02:10:00", room())).toEqual([]);
   });
@@ -467,14 +585,14 @@ describe("computeAttention as a whole", () => {
   it("sorts red before amber, then oldest first; one item per kind per room", () => {
     const amberOld = room({ room_id: "room_a", room_name: "OPD 4", recent_activity: { first_at: iso("2026-10-05 14:00:00"), last_at: iso("2026-10-05 14:29:00") }, last_session_started_at: iso("2026-10-01 08:40:00") });
     const redNew = room({ room_id: "room_b", room_name: "OPD 5", failed_start: { acked_at: iso("2026-10-05 14:20:00"), error: "tapewriter exited with status 1" } });
-    const redOld = room({ room_id: "room_c", room_name: "OPD 6", ext_events: [{ event: "locked", ts: iso("2026-10-05 13:00:00") }] });
+    const redOld = room({ room_id: "room_c", room_name: "OPD 6", poller: { ts: iso("2026-10-05 14:29:30"), state: "unreachable", locked: false, unreachable_since: iso("2026-10-05 13:00:00") } });
     const items = run("2026-10-05 14:30:00", amberOld, redNew, redOld);
     expect(items.map((i) => `${i.room_id}:${i.kind}:${i.severity}`)).toEqual(["room_c:asleep:red", "room_b:stale_start:red", "room_a:no_session_in_clinic:amber"]);
   });
 
   it("one room can carry several kinds at once, never two of the same", () => {
     const r = room({
-      ext_events: [{ event: "locked", ts: iso("2026-10-05 14:00:00") }],
+      poller: { ts: iso("2026-10-05 14:29:30"), state: "unreachable", locked: false, unreachable_since: iso("2026-10-05 14:00:00") },
       windows: [{ display_name: DOC.full_name, t_open: iso("2026-10-05 14:10:00"), t_close: null }],
       recent_activity: { first_at: iso("2026-10-05 13:50:00"), last_at: iso("2026-10-05 13:59:00") },
     });
@@ -484,7 +602,7 @@ describe("computeAttention as a whole", () => {
 
   it("every item carries one-sentence detail and action, a valid ISO since, and a plain-words label exists for every kind", () => {
     const r = room({
-      ext_events: [{ event: "locked", ts: iso("2026-10-05 14:00:00") }],
+      poller: { ts: iso("2026-10-05 14:29:30"), state: "unreachable", locked: false, unreachable_since: iso("2026-10-05 14:00:00") },
       windows: [{ display_name: DOC.full_name, t_open: iso("2026-10-05 14:10:00"), t_close: null }],
     });
     for (const it of run("2026-10-05 14:30:00", r)) {
