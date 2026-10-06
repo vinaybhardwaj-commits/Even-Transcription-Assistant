@@ -153,6 +153,7 @@ import { deriveRow, installPlatform } from "@/lib/room-install-view";
 import {
   ACK_WAIT_MS,
   ackWaitMsFor,
+  applyStartBackoff,
   audioInputRefusal,
   BusError,
   classifyBusError,
@@ -160,6 +161,7 @@ import {
   decideStart,
   findActiveSession,
   getListener,
+  getRecentStartAttempts,
   insertCommand,
   isListening,
   isTier1Verb,
@@ -548,11 +550,15 @@ async function sendAndWait(room: RoomRef, kind: CommandKind, args: unknown, list
 
 const startRecording: McpTool = {
   name: "scribe_start_recording",
-  description: "Start the Bench tape in a room via its listening kiosk (command start_day). Requires a listener (kiosk polled within 10 s) else kiosk_not_listening — no session row is faked. Idempotent: already recording → { already_recording:true, session_id }. Paused-for-consent → room_paused unless override_pause:true (audited). Waits up to 8 s for the kiosk ack.",
+  description: "Start the Bench tape in a room via its listening kiosk (command start_day). Requires a listener (kiosk polled within 10 s) else kiosk_not_listening — no session row is faked. Idempotent: already recording → { already_recording:true, session_id }. Paused-for-consent → room_paused unless override_pause:true (audited). Backoff: a room with 2+ FAILED start_day attempts in the last 60 min (failed/expired, or acked 5+ min ago with no session) is NOT sent another — the result is ok:true { skipped:true, reason:\"room_failing\", failed_attempts, retry_after_s, room_id } and nothing is queued; force:true bypasses. Waits up to 8 s for the kiosk ack.",
   scope: "write",
   inputSchema: {
     type: "object",
-    properties: { ...ROOM_WRITE_ARGS, override_pause: { type: "boolean", default: false, description: "resume over a consent pause — rare, audited" } },
+    properties: {
+      ...ROOM_WRITE_ARGS,
+      override_pause: { type: "boolean", default: false, description: "resume over a consent pause — rare, audited" },
+      force: { type: "boolean", default: false, description: "bypass the room_failing backoff (2+ failed start_day attempts in 60 min)" },
+    },
     additionalProperties: false,
   },
   handler: async (args: ToolArgs, ctx: ToolContext) => {
@@ -563,8 +569,23 @@ const startRecording: McpTool = {
     try {
       const [listener, active] = await Promise.all([getListener(room.id), findActiveSession(room.id)]);
       const overridePause = argBool(args, "override_pause");
-      const d = decideStart({ listener, activeSession: active, overridePause, now });
+      const verdict = decideStart({ listener, activeSession: active, overridePause, now });
       const ctx = { room: { id: room.id, slug: room.slug, name: room.name }, listener: listenerView(listener, now), active_session: active };
+      // Backoff: read only for a start that would otherwise be sent, and not under force. An
+      // unreadable attempts query fails OPEN — a clinic start must not hang on bookkeeping.
+      const force = argBool(args, "force");
+      let attempts: Awaited<ReturnType<typeof getRecentStartAttempts>> = [];
+      if (verdict.action === "send" && !force) {
+        try {
+          attempts = await getRecentStartAttempts(room.id, now);
+        } catch (e) {
+          console.warn("[mcp-bench] start backoff read failed", JSON.stringify({ room_id: room.id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+        }
+      }
+      const d = applyStartBackoff(verdict, { attempts, activeSession: active, force, now });
+      if (d.action === "skipped") {
+        return { ok: true, queued: false, skipped: true, reason: d.reason, failed_attempts: d.failed_attempts, retry_after_s: d.retry_after_s, room_id: room.id, ...ctx };
+      }
       if (d.action === "reject") return { ok: false, error: d.error, ...ctx };
       if (d.action === "already_recording") return { ok: true, already_recording: true, session_id: d.session_id, ...ctx };
       const out = await sendAndWait(room, "start_day", d.args, listener);

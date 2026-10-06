@@ -802,3 +802,131 @@ export function decideStart(input: {
   if (paused && !input.overridePause) return { action: "reject", error: "room_paused" };
   return { action: "send", args: paused && input.overridePause ? { override_pause: true } : null };
 }
+
+// ---------------------------------------------------------------------------
+// start_day backoff — stop hammering a room whose recorder is failing
+// ---------------------------------------------------------------------------
+
+/** Backoff window: start_day attempts newer than this are counted. */
+export const START_BACKOFF_WINDOW_S = 3600;
+/** This many FAILED attempts inside the window, and no live session, skips the next start. */
+export const START_BACKOFF_MAX_FAILED = 2;
+/** An acked start must have produced a bench_session within this long of its ack, else it failed. */
+export const START_ACK_SESSION_GRACE_S = 300;
+
+/** One prior start_day command with the one fact the backoff needs from bench_session. */
+export type StartAttempt = {
+  status: string;
+  created_at: string | Date;
+  acked_at: string | Date | null;
+  /** TRUE when a bench_session for the room began between the command's creation and ack + grace. */
+  session_started: boolean;
+  /** TRUE when the ack's result.session_id names a bench_session of this room (whenever it began). */
+  session_named: boolean;
+};
+
+export type StartSkipped = {
+  action: "skipped";
+  skipped: true;
+  reason: "room_failing";
+  failed_attempts: number;
+  retry_after_s: number;
+};
+
+const TERMINAL_FAILURE = new Set(["failed", "expired"]);
+
+/**
+ * PURE — did this prior start_day fail? A terminal failure status (failed / expired), OR acked
+ * more than START_ACK_SESSION_GRACE_S ago with no session to show for it (the kiosk said yes and
+ * nothing recorded). A session is shown either by the ack naming one of the room's sessions
+ * (`session_named`, whenever it began) or by one beginning inside the window (`session_started`).
+ * Pending, a young ack, and an ack that produced a session are NOT failures.
+ */
+export function isFailedStartAttempt(a: StartAttempt, now: Date): boolean {
+  if (TERMINAL_FAILURE.has(a.status)) return true;
+  if (a.status === "acked" && a.acked_at) {
+    const ackedMs = new Date(a.acked_at).getTime();
+    return now.getTime() - ackedMs > START_ACK_SESSION_GRACE_S * 1000 && !a.session_started && !a.session_named;
+  }
+  return false;
+}
+
+/**
+ * PURE — the backoff verdict over a room's start_day attempts in the last START_BACKOFF_WINDOW_S.
+ * `retry_after_s` is the time until the OLDEST failed attempt leaves the window (so the failed
+ * count drops below the threshold), at least 1.
+ */
+export function evaluateStartBackoff(
+  attempts: StartAttempt[],
+  now: Date = new Date(),
+): { failed_attempts: number; retry_after_s: number } {
+  const windowStart = now.getTime() - START_BACKOFF_WINDOW_S * 1000;
+  const failed = attempts
+    .filter((a) => new Date(a.created_at).getTime() > windowStart && isFailedStartAttempt(a, now))
+    .map((a) => new Date(a.created_at).getTime())
+    .sort((x, y) => x - y);
+  if (failed.length < START_BACKOFF_MAX_FAILED) return { failed_attempts: failed.length, retry_after_s: 0 };
+  // With n >= max failures in the window, the count drops below max once all but the (max - 1)
+  // newest have aged out — for max = 2, once the SECOND-NEWEST failure leaves the window.
+  const pivot = failed[failed.length - START_BACKOFF_MAX_FAILED]!;
+  const retry = Math.ceil((pivot + START_BACKOFF_WINDOW_S * 1000 - now.getTime()) / 1000);
+  return { failed_attempts: failed.length, retry_after_s: Math.max(retry, 1) };
+}
+
+/**
+ * PURE — layer the backoff over decideStart's verdict. ONLY a `send` verdict can be turned into a
+ * skip, so the listener check, active-session idempotency and the pause check keep their
+ * precedence by construction. A room with ANY active session (recording or paused — a
+ * consent-pause start with override_pause included) is never skipped: it has a tape, it is not
+ * failing. `force` bypasses.
+ */
+export function applyStartBackoff(
+  decision: StartDecision,
+  opts: { attempts: StartAttempt[]; activeSession?: { id: string; status: string } | null; force?: boolean; now?: Date },
+): StartDecision | StartSkipped {
+  if (decision.action !== "send" || opts.force || opts.activeSession) return decision;
+  const v = evaluateStartBackoff(opts.attempts, opts.now);
+  if (v.failed_attempts < START_BACKOFF_MAX_FAILED) return decision;
+  return { action: "skipped", skipped: true, reason: "room_failing", failed_attempts: v.failed_attempts, retry_after_s: v.retry_after_s };
+}
+
+/**
+ * This room's start_day commands from the last START_BACKOFF_WINDOW_S, oldest first — one
+ * room-scoped, time-bounded read. Two facts are resolved in SQL: `session_named` — the ack's
+ * result.session_id is a bench_session of this room (the kiosk makes the session, then acks it with
+ * the id, so this holds whenever the session began) — and `session_started`, the fallback: a
+ * bench_session for the room that began between the command's creation and its ack plus the grace.
+ * Existing tables: 0041 (bench_session) + 0044 (bench_command).
+ */
+export async function getRecentStartAttempts(roomId: string, now: Date = new Date()): Promise<StartAttempt[]> {
+  return guarded(async () => {
+    const since = new Date(now.getTime() - START_BACKOFF_WINDOW_S * 1000).toISOString();
+    const rows = (await sql`
+      SELECT c.status, c.created_at, c.acked_at,
+             EXISTS (
+               SELECT 1 FROM bench_session s
+                WHERE s.room_id = c.room_id
+                  AND s.id = c.result ->> 'session_id'
+             ) AS session_named,
+             EXISTS (
+               SELECT 1 FROM bench_session s
+                WHERE s.room_id = c.room_id
+                  AND s.started_at >= c.created_at
+                  AND c.acked_at IS NOT NULL
+                  AND s.started_at <= c.acked_at + (${START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')
+             ) AS session_started
+        FROM bench_command c
+       WHERE c.room_id = ${roomId}
+         AND c.kind = 'start_day'
+         AND c.created_at > ${since}::timestamptz
+       ORDER BY c.created_at ASC
+    `) as Array<{ status: string; created_at: string | Date; acked_at: string | Date | null; session_started: boolean; session_named: boolean }>;
+    return rows.map((r) => ({
+      status: r.status,
+      created_at: r.created_at,
+      acked_at: r.acked_at ?? null,
+      session_started: r.session_started === true,
+      session_named: r.session_named === true,
+    }));
+  });
+}
