@@ -161,15 +161,15 @@ describe("not recording: start, backoff, max tries", () => {
   });
 
   it("3 recorded start tries in the hour -> one message with needs_hands; 2 tries still start; old or ok tries do not count", () => {
-    const three = recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start"), row(T, 2000, "scribe_start")]);
+    const three = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })]);
     const d = first(idle(T), T, three);
     expect(d).toMatchObject({ rule: "not_recording", action: "message", severity: "error" });
     expect(d.params).toMatchObject({ needs_hands: true, kind: "start_exhausted" });
     expect(d.params).not.toHaveProperty("tries");
     expect(d.inputs).toMatchObject({ tries: 3 });
     expect(d.failing_class).toBe("not_recording");
-    expect(first(idle(T), T, recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start")])).action).toBe("scribe_start");
-    expect(first(idle(T), T, recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start"), row(T, 4000, "scribe_start")])).action).toBe("scribe_start");
+    expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" })])).action).toBe("scribe_start");
+    expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 4000, "scribe_start", { outcome: "failed" })])).action).toBe("scribe_start");
     expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "ok" }), row(T, 1000, "scribe_start", { outcome: "ok" }), row(T, 2000, "scribe_start", { outcome: "ok" })])).action).toBe("scribe_start");
   });
 
@@ -496,7 +496,7 @@ describe("fleet incident, caps and repeated failure", () => {
     expect(failingClass(decideRoom(idle(T), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBeNull();
     expect(failingClass(decideRoom(idle(T, { listener: { listening: true, paused: true } }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBeNull();
     expect(failingClass(decideRoom(idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 600 } }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe("not_recording");
-    const three = recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start"), row(T, 2000, "scribe_start")]);
+    const three = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })]);
     expect(failingClass(decideRoom(idle(T), DEFAULT_CONFIG, T, three))).toBe("not_recording");
   });
 
@@ -605,8 +605,8 @@ describe("F2: params are stable across minutes (the dedupe key is (room, rule, a
   });
 
   it("start_exhausted with 3 vs 4 tries in the hour, and action_failing with 3 vs 4 failures, have identical params", () => {
-    const rows3 = recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start"), row(T, 2000, "scribe_start")]);
-    const rows4 = recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start"), row(T, 2000, "scribe_start"), row(T, 2500, "scribe_start")]);
+    const rows3 = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })]);
+    const rows4 = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" }), row(T, 2500, "scribe_start", { outcome: "failed" })]);
     expect(p(decideRoom(idle(T), DEFAULT_CONFIG, T, rows3))).toBe(p(decideRoom(idle(T), DEFAULT_CONFIG, T, rows4)));
     const asleep = idle(T, { reachable: { poller_ok_at: ago(T, 240), kh_heartbeat_at: ago(T, 240) } });
     const f = (s: number) => row(T, s, "ticket:wake", { outcome: "failed" });
@@ -616,7 +616,7 @@ describe("F2: params are stable across minutes (the dedupe key is (room, rule, a
   it("no decision any rule emits carries a number-bearing countdown in params: every params value is a string, boolean or a fixed enum", () => {
     const scenarios: Array<[RoomSense, RecentContext]> = [
       [idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 1800 } }), EMPTY_RECENT],
-      [idle(T), recent([row(T, 100, "scribe_start"), row(T, 1000, "scribe_start"), row(T, 2000, "scribe_start")])],
+      [idle(T), recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })])],
       [idle(T, { reachable: { poller_ok_at: ago(T, 700), kh_heartbeat_at: ago(T, 700) } }), EMPTY_RECENT],
       [healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "recording", session_open: true, received_at: ago(T, 300) } } }), recent([row(T, 420, "scribe_restart")])],
       [healthy(T, { reachable: { kh_heartbeat_at: ago(T, 660) } }), EMPTY_RECENT],

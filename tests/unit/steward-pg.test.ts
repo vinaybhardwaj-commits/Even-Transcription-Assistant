@@ -283,6 +283,33 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     expect((await rows`SELECT value->>'at' AS at FROM steward_config WHERE key = 'last_tick'`)[0]!.at).toBe(new Date(AS_OF + 60_000).toISOString());
   }, 120_000);
 
+  it("F13: tick A's release after its lease was lost (expired, retaken by B) writes NO last_tick and leaves B's lease untouched", async () => {
+    pg.exec(`DELETE FROM steward_decisions`);
+    pg.exec(`DELETE FROM steward_config WHERE key = 'last_tick'`);
+    const a = leaseLock(sql, { holder: "A", ttlSeconds: 30 });
+    const b = leaseLock(sql, { holder: "B", ttlSeconds: 30 });
+    let bLease: Record<string, any> | undefined;
+    // tick A takes the lease and ticks; just before A's release its lease expires and B retakes it
+    const lockA = {
+      acquire: () => a.acquire(),
+      release: async (lastTick?: Record<string, unknown>) => {
+        pg.exec(`UPDATE steward_config SET value = jsonb_build_object('holder', 'A', 'until', (now() - interval '1 second')::text) WHERE key = 'loop_lease'`);
+        expect(await b.acquire()).toBe(true);
+        bLease = (await rows`SELECT value, updated_at::text AS u, updated_by FROM steward_config WHERE key = 'loop_lease'`)[0];
+        await a.release(lastTick); // the release CTE of the stale holder
+      },
+    };
+    const s = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000, lock: lockA });
+    expect(s.decisions_written).toBe(3); // tick A did its work
+    expect((await rows`SELECT count(*)::int AS n FROM steward_config WHERE key = 'last_tick'`)[0]!.n).toBe(0);
+    const after = (await rows`SELECT value, updated_at::text AS u, updated_by FROM steward_config WHERE key = 'loop_lease'`)[0]!;
+    expect(after).toEqual(bLease);
+    expect(after.value.holder).toBe("B");
+    expect(after.updated_by).toBe("B");
+    await b.release();
+    expect((await rows`SELECT value->>'holder' AS h FROM steward_config WHERE key = 'loop_lease'`)[0]!.h).toBeNull();
+  }, 120_000);
+
   it("F8: no `rooms` row in steward_config -> {ok:false, reason:'config_unavailable'}, the lease row is never touched, nothing is written", async () => {
     pg.exec(`DELETE FROM steward_decisions`);
     const before = (await rows`SELECT updated_at::text AS u, updated_by FROM steward_config WHERE key = 'loop_lease'`)[0]!;

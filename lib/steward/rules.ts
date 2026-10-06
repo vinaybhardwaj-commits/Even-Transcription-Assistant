@@ -346,7 +346,7 @@ function notRecording(c: Ctx): Decision[] {
   if (L.paused === true) {
     return [mk(c, "not_recording", "log_only", {}, "inside the window with no session, but the room is paused (consent pause)", "scribe_start held: room paused", "info")];
   }
-  const tries = rowsOf(c, "scribe_start", START_TRIES_WINDOW_MS).filter((r) => r.outcome !== "ok").length;
+  const tries = rowsOf(c, "scribe_start", START_TRIES_WINDOW_MS).filter((r) => r.outcome === "failed").length;
   if (tries >= cfg.caps.start_retries) {
     return fcAll([
       mk(

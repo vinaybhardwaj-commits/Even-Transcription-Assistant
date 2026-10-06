@@ -370,16 +370,27 @@ describe("ordering and fleet incidents", () => {
     expect(db.state.table.map((r) => r.action)).toEqual(["scribe_start", "scribe_start"]);
   });
 
-  it("the rules' memory reaches the next tick: after 3 recorded starts the room gets the needs_hands message", async () => {
+  it("F11: SHADOW start rows are not attempts: 60+ min of shadow scribe_start decisions for 4 unstarted rooms is still scribe_start every time, never start_exhausted, never fleet_hold", async () => {
+    const db = fakeDb({ rooms: ["a", "b", "c", "d"].map((x) => ({ room_id: `room_${x}`, room_name: x, hostname: `H${x}` })) });
+    senseWith((id, A) => idle(A, { room_id: id }));
+    for (const m of [0, 16, 32, 48, 64]) await run(db.sql, T + m * MIN);
+    expect(db.state.table).toHaveLength(20);
+    expect(db.state.table.every((r) => r.rule === "not_recording" && r.action === "scribe_start" && r.mode === "shadow")).toBe(true);
+    expect(db.state.table.some((r) => r.rule === "fleet_hold" || r.rule === "fleet_incident" || r.action === "message")).toBe(false);
+    expect(db.state.table.some((r) => r.inputs.failing_class)).toBe(false);
+  });
+
+  it("the rules' memory reaches the next tick: after 3 REAL failed starts the room gets the needs_hands message (and, with 3 such rooms, a positive fleet signal)", async () => {
     const db = fakeDb();
     senseWith((id, A) => idle(A, { room_id: id }));
+    for (const m of [40, 25, 10]) {
+      db.state.table.push({ id: db.state.nextId++, room_id: "room_a", ts: new Date(T - m * MIN).toISOString(), rule: "not_recording", action: "scribe_start", params: {}, result: "failed: kiosk did not ack", mode: "live", inputs: { primary: true }, why: "", why_not: null, actor: "steward", machine: "HOST-A", window_kind: "clinic", inputs_hash: "x" });
+    }
     await run(db.sql, T);
-    await run(db.sql, T + 16 * MIN);
-    await run(db.sql, T + 32 * MIN);
-    expect(db.state.table.map((r) => r.action)).toEqual(["scribe_start", "scribe_start", "scribe_start"]);
-    await run(db.sql, T + 48 * MIN);
-    expect(db.state.table[3]).toMatchObject({ action: "message", rule: "not_recording" });
-    expect(db.state.table[3]!.params).toMatchObject({ needs_hands: true });
+    const last = db.state.table[db.state.table.length - 1]!;
+    expect(last).toMatchObject({ action: "message", rule: "not_recording" });
+    expect(last.params).toMatchObject({ needs_hands: true, kind: "start_exhausted" });
+    expect(last.inputs).toMatchObject({ failing_class: "not_recording", tries: 3 });
   });
 });
 
