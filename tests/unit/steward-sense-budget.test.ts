@@ -111,9 +111,19 @@ describe("khSleepMarker (bench rule R11 derivation)", () => {
     expect(khSleepMarker(undefined, A)).toBeNull();
   });
 
-  it("a display.state 'asleep' newer than the newest power event counts; an older one does not", () => {
-    const ds = (msAgo: number) => ({ ts: iso(msAgo), received_at: iso(msAgo), state: "asleep", origin: null });
+  it("a display.state 'off' newer than the newest power event counts; an older one does not", () => {
+    const ds = (msAgo: number) => ({ ts: iso(msAgo), received_at: iso(msAgo), state: "off", origin: "pmset_log" });
     expect(khSleepMarker(snap({ last_display_state: ds(6 * H) }), A)).toBe(iso(6 * H));
     expect(khSleepMarker(snap({ power_events: [pe("power.wake", 5 * H)], last_display_state: ds(6 * H) }), A)).toBeNull();
+    // the old spelling is no marker: the daemon never emits "asleep"
+    expect(khSleepMarker(snap({ last_display_state: { ...ds(6 * H), state: "asleep" } }), A)).toBeNull();
+  });
+
+  it("a display.state 'unknown' (ioreg gave no reading) or 'on' is not-off: no sleep marker", () => {
+    const ds = (state: string) => ({ ts: iso(6 * H), received_at: iso(6 * H), state, origin: "ioreg" });
+    expect(khSleepMarker(snap({ last_display_state: ds("unknown") }), A)).toBeNull();
+    expect(khSleepMarker(snap({ last_display_state: ds("on") }), A)).toBeNull();
+    // unknown does not cancel a real power.sleep marker either
+    expect(khSleepMarker(snap({ power_events: [pe("power.sleep", 8 * H)], last_display_state: ds("unknown") }), A)).toBe(iso(8 * H));
   });
 });

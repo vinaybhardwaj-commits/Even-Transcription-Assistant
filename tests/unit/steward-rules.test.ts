@@ -348,6 +348,22 @@ describe("asleep", () => {
 });
 
 // ---------------------------------------------------------------------------
+describe("audio.devices is event-driven", () => {
+  it("a room with no audio.devices rows in 24 h and everything else healthy -> rule ok; audio_devices is never in inputs.missing; the age is null", () => {
+    const d = first(healthy(T, { audio: { default_input_present: null, devices_at: null } }), T);
+    expect(d).toMatchObject({ rule: "ok", action: "none" });
+    expect(d.inputs.missing).not.toContain("audio_devices");
+    expect(d.inputs.audio_devices_age_s).toBeNull();
+  });
+
+  it("the age of the latest audio.devices row is recorded for visibility and never degrades the room, however old", () => {
+    const d = first(healthy(T, { audio: { default_input_present: true, devices_at: ago(T, 20 * 3600) } }), T);
+    expect(d).toMatchObject({ rule: "ok", action: "none" });
+    expect(d.inputs.audio_devices_age_s).toBe(20 * 3600);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("silence and the microphone", () => {
   const consult = (secOpen: number, over: DeepPartial<RoomSense> = {}) => healthy(T, { consult_open: true, consult_started_at: ago(T, secOpen), ...over });
 

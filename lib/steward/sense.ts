@@ -50,7 +50,7 @@ export type RoomSense = {
     poller_ok_at: string | null;
     kh_heartbeat_at: string | null;
     kh_enrolled: boolean | null;
-    /** the kiosk-health sleep marker (bench rule R11 derivation, see khSleepMarker): ISO ts of a sleep/darkwake/asleep-display event with no wake and no heartbeat since, else null */
+    /** the kiosk-health sleep marker (bench rule R11 derivation, see khSleepMarker): ISO ts of a sleep/darkwake/display-off event with no wake and no heartbeat since, else null */
     sleep_at?: string | null;
   };
   chrome: {
@@ -68,6 +68,8 @@ export type RoomSense = {
   occupancy: { state: "nobody" | "present" | "pending"; idle_s: number | null; identity_fault: boolean } | null;
   audio: {
     default_input_present: boolean | null;
+    /** ISO received_at of the newest audio.devices row, any age (visibility only; never a missing input), null when none */
+    devices_at?: string | null;
     usb_removed_recent: boolean | null;
     device_missing_flag: boolean | null;
     silent_while_recording_since: string | null;
@@ -153,7 +155,7 @@ const groupBy = <T extends { room_id: string }>(rows: T[]): Map<string, T[]> => 
 
 /**
  * The kiosk-health SLEEP marker, same derivation as bench rule R11 (lib/kiosk-health-rules.ts): the newest of power.sleep / power.darkwake / power.wake by EVENT time is a
- * sleep or darkwake, it happened within 12 h of asOf, and no heartbeat was received after its ts + 180 s. A display.state "asleep" newer than that power event counts the
+ * sleep or darkwake, it happened within 12 h of asOf, and no heartbeat was received after its ts + 180 s. A display.state "off" (a sleeping display; "on" and "unknown" are not-off, "unknown" = ioreg gave no reading) newer than that power event counts the
  * same way. Returns the ISO ts of the sleep, or null. Pure. Needs an enrolled snapshot (any kiosk-health row in 7 days).
  */
 export function khSleepMarker(kh: KioskHealthSnapshot | undefined | null, A: number): string | null {
@@ -164,7 +166,7 @@ export function khSleepMarker(kh: KioskHealthSnapshot | undefined | null, A: num
   let candidate: number | null = null;
   if (newest && newest.kind !== "power.wake") candidate = tsOf(newest);
   const ds = kh.last_display_state;
-  if (ds && ds.state === "asleep" && Number.isFinite(Date.parse(ds.ts)) && (!newest || Date.parse(ds.ts) > tsOf(newest))) candidate = Date.parse(ds.ts);
+  if (ds && ds.state === "off" && Number.isFinite(Date.parse(ds.ts)) && (!newest || Date.parse(ds.ts) > tsOf(newest))) candidate = Date.parse(ds.ts);
   if (candidate === null || !Number.isFinite(candidate)) return null;
   const hb = kh.last_heartbeat_received_at ? Date.parse(kh.last_heartbeat_received_at) : NaN;
   const heartbeatedSince = Number.isFinite(hb) && hb > candidate + KH_HEARTBEAT_AFTER_SLEEP_MS;
@@ -517,9 +519,10 @@ export async function senseAll(
 
     // --- audio
     const dev = kh?.last_audio_devices ?? null;
-    const devFresh = dev ? A - Date.parse(dev.received_at) <= 30 * 60_000 : false;
-    const defaultInputPresent = dev && devFresh ? dev.default_input_present : null;
-    if (khR.ok && kh && defaultInputPresent === null) miss("audio_devices");
+    // audio.devices is event-driven (first poll, USB/audio appear/disappear, system_profiler every 30 min only when changed): hours of silence are normal, so the latest row is
+    // read at any age and its absence is never a missing input; the age is recorded for visibility only (inputs.audio_devices_age_s).
+    const defaultInputPresent = dev ? dev.default_input_present : null;
+    const devicesAt = dev ? toIso(dev.received_at) : null;
     let usbRemoved: boolean | null = null;
     if (audioR.ok) {
       const rows = (key ? (audioBy.get(key) ?? []) : [])
@@ -602,6 +605,7 @@ export async function senseAll(
       occupancy,
       audio: {
         default_input_present: defaultInputPresent,
+        devices_at: devicesAt,
         usb_removed_recent: usbRemoved,
         device_missing_flag: flagsKnown ? flags.flags.includes("DEVICE_MISSING") : null,
         silent_while_recording_since: silentSince,

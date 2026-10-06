@@ -215,7 +215,7 @@ function mk(
     why_not,
     severity,
     inputs_hash: hashFacts({ rule, action, params, f }),
-    inputs: { ...f, ages_s: ages(c), ...extraInputs },
+    inputs: { ...f, ages_s: ages(c), audio_devices_age_s: secs(c.age(c.s.audio.devices_at)), ...extraInputs },
   };
 }
 
