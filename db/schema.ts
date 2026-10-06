@@ -415,6 +415,27 @@ export const pulsePresenceEvents = pgTable("pulse_presence_events", {
   byReceived:  index("pulse_presence_events_received_idx").on(t.receivedAt),
 }));
 
+// kiosk_health_events (migration 0126) — append-only events from the W1 kiosk-health daemon, posted to POST /api/kiosk-health.
+// UNIQUE (machine, boot_id, seq) is the SQL constraint kiosk_health_events_machine_boot_seq_key; the sink inserts ON CONFLICT DO NOTHING.
+export const kioskHealthEvents = pgTable("kiosk_health_events", {
+  id:         bigserial("id", { mode: "number" }).primaryKey(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  machine:    text("machine").notNull(),
+  roomId:     text("room_id"),
+  installId:  text("install_id"),
+  bootId:     text("boot_id").notNull(),
+  seq:        bigint("seq", { mode: "number" }).notNull(),
+  source:     text("source").notNull(),   // "daemon"
+  kind:       text("kind").notNull(),     // free text, e.g. power.sleep, display.state, heartbeat
+  ts:         timestamp("ts", { withTimezone: true }).notNull(),
+  payload:    jsonb("payload").notNull().default(sql`'{}'::jsonb`),
+}, (t) => ({
+  byMachineTs: index("kiosk_health_events_machine_ts_idx").on(t.machine, t.ts.desc()),
+  byKindTs:    index("kiosk_health_events_kind_ts_idx").on(t.kind, t.ts.desc()),
+  byReceived:  index("kiosk_health_events_received_idx").on(t.receivedAt),
+  uniq:        uniqueIndex("kiosk_health_events_machine_boot_seq_key").on(t.machine, t.bootId, t.seq),
+}));
+
 // eta_encounter_windows (migration 0123) — one row per consult window, derived from pulse_presence_events by
 // lib/encounter-windows and recomputed by /api/cron/encounter-windows. Value sets are CHECKs in SQL.
 export const etaEncounterWindows = pgTable("eta_encounter_windows", {
