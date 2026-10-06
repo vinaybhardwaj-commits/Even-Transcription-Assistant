@@ -74,7 +74,6 @@ describe("sign / verify", () => {
     expect(verifyTicket(t, sig, OTHER_PUB, V)).toEqual({ ok: false, reason: "bad_signature" });
     expect(verifyTicket(t, "not-base64!!", PUB, V)).toEqual({ ok: false, reason: "bad_signature" });
     expect(verifyTicket(t, sig, "not a pem", V)).toEqual({ ok: false, reason: "bad_signature" });
-    expect(verifyTicket({ ...t, extra: 1 }, sig, PUB, V)).toEqual({ ok: false, reason: "bad_signature" });
   });
 
   it("rejects (malformed) any object key not matching /^[a-z_][a-z0-9_]*$/, at any depth, before the signature is looked at", () => {
@@ -127,6 +126,18 @@ describe("sign / verify", () => {
     expect(verifyTicket(par, signTicket(par, PRIV), PUB, V)).toEqual({ ok: false, reason: "bad_params" });
     const mach = { ...par, params: {} };
     expect(verifyTicket(mach, signTicket(mach, PRIV), PUB, V)).toEqual({ ok: false, reason: "machine_mismatch" });
+  });
+
+  it("rejects (malformed) any extra or missing top-level field, even with a valid signature, before the signature is looked at", () => {
+    const good = mk();
+    const extra = { ...good, note: "x" };
+    expect(verifyTicket(extra, signTicket(extra, PRIV), PUB, V)).toEqual({ ok: false, reason: "malformed" });
+    expect(verifyTicket(extra, signTicket(good, PRIV), PUB, V)).toEqual({ ok: false, reason: "malformed" });
+    const { nonce: _n, ...noNonce } = good;
+    expect(verifyTicket(noNonce, signTicket(noNonce, PRIV), PUB, V)).toEqual({ ok: false, reason: "malformed" });
+    const { params: _p, ...noParams } = good;
+    expect(verifyTicket(noParams, signTicket(noParams, PRIV), PUB, V)).toEqual({ ok: false, reason: "malformed" });
+    expect(verifyTicket(good, signTicket(good, PRIV), PUB, V)).toEqual({ ok: true });
   });
 
   it("rejects malformed tickets", () => {

@@ -7,7 +7,7 @@
  * The signature covers canonicalTicket(ticket): JSON, keys sorted bytewise recursively (integer-like keys are forbidden, see KEY_RE), no whitespace, UTF-8.
  * It travels as standard base64 (RFC 4648, with padding): exactly 88 characters, no trailing junk.
  *
- * verifyTicket rejects, in this check order, with these reasons: malformed (not an object of the right shape, v != 1, or any object key not matching KEY_RE),
+ * verifyTicket rejects, in this check order, with these reasons: malformed (not an object of the right shape, v != 1, any top-level field outside the 8 or any of the 8 missing, or any object key not matching KEY_RE),
  * bad_signature (including a signature that is not strict standard base64 of 64 bytes), expired, action_not_allowed, bad_params, machine_mismatch.
  * issueTicket enforces ttl <= 900 s, a valid action/params pair, and at most ONE outstanding (issued or fetched) ticket per (machine, action).
  *
@@ -55,6 +55,9 @@ export function paramsValid(action: unknown, params: unknown): boolean {
 
 // Every object key, at any depth, must match this. It rules out integer-like keys ("1", "10"), which JS orders before all others whatever the sort, so a
 // non-JS verifier sorting bytewise would disagree. Keys are therefore sorted bytewise; integer-like keys are forbidden.
+/** The ticket has exactly these top-level fields: no others, none missing. */
+export const TICKET_FIELDS = ["v", "ticket_id", "machine", "action", "params", "issued_at", "expires_at", "nonce"] as const;
+
 export const KEY_RE = /^[a-z_][a-z0-9_]*$/;
 
 export function keysCanonical(v: unknown): boolean {
@@ -109,7 +112,7 @@ export function verifyTicket(t: unknown, signatureB64: string, publicKeyPem: str
   if (
     !isObj(t) || t.v !== TICKET_VERSION || typeof t.ticket_id !== "string" || typeof t.machine !== "string" || typeof t.action !== "string" ||
     !isObj(t.params) || typeof t.issued_at !== "string" || typeof t.expires_at !== "string" || typeof t.nonce !== "string" || typeof signatureB64 !== "string" ||
-    !keysCanonical(t)
+    !keysCanonical(t) || Object.keys(t).length !== TICKET_FIELDS.length || !TICKET_FIELDS.every((k) => Object.prototype.hasOwnProperty.call(t, k))
   ) {
     return { ok: false, reason: "malformed" };
   }
