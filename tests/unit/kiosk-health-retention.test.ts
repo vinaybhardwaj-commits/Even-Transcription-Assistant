@@ -36,8 +36,8 @@ describe("GET /api/cron/kiosk-health-retention", () => {
     M.sql.mockResolvedValueOnce(ids(5000)).mockResolvedValueOnce(ids(1200)).mockResolvedValueOnce([]);
     const res = await GET(req("Bearer s3cret"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 6200, batches: 2, budget_hit: false, steward_nonces_deleted: 0, steward_decisions_deleted: 0, steward_tickets_deleted: 0, steward_tickets_expired: 0 });
-    expect(M.sql).toHaveBeenCalledTimes(7); // 3 kiosk statements, then one empty statement each for nonces, decisions, ticket expiry, ticket delete
+    expect(await res.json()).toEqual({ deleted: 6200, batches: 2, budget_hit: false, steward_nonces_deleted: 0, steward_decisions_deleted: 0, steward_tickets_deleted: 0, steward_tickets_expired: 0, room_audio_state_deleted: 0, room_audio_day_deleted: 0 });
+    expect(M.sql).toHaveBeenCalledTimes(9); // 3 kiosk statements, then one empty statement each for nonces, decisions, ticket expiry, ticket delete, room_audio_state, room_audio_day
   });
 
   it("uses a 30-day cutoff bound as a parameter and the id-subselect batch form", async () => {
@@ -77,7 +77,7 @@ describe("GET /api/cron/kiosk-health-retention", () => {
       .mockResolvedValueOnce([{ ticket_id: "a" }, { ticket_id: "b" }, { ticket_id: "c" }]) // tickets batch 1
       .mockResolvedValueOnce([]); // tickets done
     const body = await (await GET(req("Bearer s3cret"))).json();
-    expect(body).toEqual({ deleted: 0, batches: 0, budget_hit: false, steward_nonces_deleted: 2, steward_decisions_deleted: 1, steward_tickets_deleted: 3, steward_tickets_expired: 2 });
+    expect(body).toEqual({ deleted: 0, batches: 0, budget_hit: false, steward_nonces_deleted: 2, steward_decisions_deleted: 1, steward_tickets_deleted: 3, steward_tickets_expired: 2, room_audio_state_deleted: 0, room_audio_day_deleted: 0 });
     const call = (i: number) => {
       const [strings, ...values] = M.sql.mock.calls[i] as [string[], ...unknown[]];
       return { text: strings.join("?"), values };
@@ -98,6 +98,36 @@ describe("GET /api/cron/kiosk-health-retention", () => {
     expect(call(7).text).toContain("COALESCE(completed_at, expires_at) <");
     expect(call(7).text).toContain("LIMIT 5000");
     expect(call(7).values).toEqual(["2026-09-06T00:00:00.000Z"]);
+  });
+
+  it("room audio state (0129): deletes room_audio_state > 12 months and room_audio_day > 36 months by ist_day, in batches, and reports both counts", async () => {
+    M.sql.mockReset();
+    M.sql
+      .mockResolvedValueOnce([]) // kiosk
+      .mockResolvedValueOnce([]) // nonces
+      .mockResolvedValueOnce([]) // decisions
+      .mockResolvedValueOnce([]) // ticket flips
+      .mockResolvedValueOnce([]) // tickets
+      .mockResolvedValueOnce(ids(5000)) // room_audio_state batch 1
+      .mockResolvedValueOnce(ids(30)) // room_audio_state batch 2
+      .mockResolvedValueOnce([]) // room_audio_state done
+      .mockResolvedValueOnce([{ room_id: "a" }, { room_id: "b" }]) // room_audio_day batch 1
+      .mockResolvedValueOnce([]); // room_audio_day done
+    const body = await (await GET(req("Bearer s3cret"))).json();
+    expect(body).toMatchObject({ budget_hit: false, room_audio_state_deleted: 5030, room_audio_day_deleted: 2 });
+    const call = (i: number) => {
+      const [strings, ...values] = M.sql.mock.calls[i] as [string[], ...unknown[]];
+      return { text: strings.join("?"), values };
+    };
+    expect(call(5).text).toContain("DELETE FROM room_audio_state");
+    expect(call(5).text).toContain("ist_day < current_date - interval '12 months'");
+    expect(call(5).text).toContain("LIMIT 5000");
+    expect(call(5).values).toEqual([]);
+    expect(call(8).text).toContain("DELETE FROM room_audio_day");
+    expect(call(8).text).toContain("ist_day < current_date - interval '36 months'");
+    expect(call(8).text).toContain("LIMIT 5000");
+    expect(call(8).values).toEqual([]);
+    expect(M.sql).toHaveBeenCalledTimes(10);
   });
 
   it("503 with the partial count on a database fault", async () => {

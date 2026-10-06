@@ -68,6 +68,8 @@ describe.skipIf(!HAVE_DOCKER)("0128 room steward over real postgres", () => {
     H.sql = pg.sql as never;
     pg.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
     pg.exec(mig("0126_kiosk_health_events.sql")); // the retention cron also deletes from it
+    pg.exec(mig("0123_eta_encounter_windows.sql")); // 0129 grants SELECT on it; the retention cron also deletes from the 0129 room_audio tables
+    pg.exec(mig("0129_room_audio_state.sql"));
     pg.exec(mig("0128_room_steward.sql"));
     pg.exec(mig("0128_room_steward.sql")); // idempotent
     expect(await rows`SELECT version, name FROM schema_migrations WHERE version = 128`).toEqual([{ version: 128, name: "0128_room_steward" }]);
