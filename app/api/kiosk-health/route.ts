@@ -11,12 +11,15 @@
  *       (or, rarely, a row Postgres refused on data grounds).
  *   400 { ok:false, error: bad_json | bad_body | empty_batch | too_many_events }   413 { ok:false, error:"body_too_large" } (over 3 MB)
  *   503 { ok:false, error:"db" } on any database fault the daemon should retry.
+ * Events of kind 'steward.result' additionally update steward_tickets (lib/steward/results.ts); a fault there is logged and never changes the response.
  * Logs carry counts and generic reasons only, never payload contents or header values.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "crypto";
 import { sql } from "@/lib/db";
 import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-health-ingest";
+import { tokenOk } from "@/lib/kiosk-health-auth";
+import { applyStewardResults, STEWARD_RESULT_KIND } from "@/lib/steward/results";
+import type { StewardSql } from "@/lib/steward/tickets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,12 +34,6 @@ const reply = (status: number, body: Record<string, unknown>) =>
   NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
 
 let warnedUnset = false;
-
-function tokenOk(header: string, expected: string): boolean {
-  const a = Buffer.from(header);
-  const b = Buffer.from(`Bearer ${expected}`);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 
 // SQLSTATE class 22 (data exception) or 23 (integrity) means this row's data, not the database.
 function isDataFault(e: unknown): boolean {
@@ -116,6 +113,16 @@ export async function POST(req: NextRequest) {
           rejected.push({ index: -1, reason: "db_data_fault" });
         }
       }
+    }
+  }
+
+  // Room Steward (0128): apply steward.result events to their tickets AFTER the events are stored. Never changes the response; applyStewardResults does not throw.
+  const stewardRows = v.rows.filter((r) => r.kind === STEWARD_RESULT_KIND);
+  if (stewardRows.length > 0) {
+    try {
+      await applyStewardResults(sql as unknown as StewardSql, stewardRows);
+    } catch {
+      console.error("[kiosk-health] steward result handling failed");
     }
   }
 

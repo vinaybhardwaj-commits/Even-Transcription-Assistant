@@ -437,6 +437,64 @@ export const kioskHealthEvents = pgTable("kiosk_health_events", {
   uniq:        uniqueIndex("kiosk_health_events_machine_boot_seq_key").on(t.machine, t.bootId, t.seq),
 }));
 
+// Room Steward (migration 0128). steward_config: key/value, seeded; steward_decisions: append-only decision log (inputs = ids/hashes/counts only, never names or PHI);
+// steward_tickets: Ed25519-signed repair tickets (lib/steward/tickets.ts), partial unique index (machine, action) WHERE status IN ('issued','fetched');
+// steward_nonces: consumed steward.result nonces, 7-day retention. CHECKs and the partial unique index live in SQL.
+export const stewardConfig = pgTable("steward_config", {
+  key:       text("key").primaryKey(),
+  value:     jsonb("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedBy: text("updated_by"),
+});
+
+export const stewardDecisions = pgTable("steward_decisions", {
+  id:         bigserial("id", { mode: "number" }).primaryKey(),
+  ts:         timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
+  roomId:     text("room_id"),
+  machine:    text("machine"),
+  windowKind: text("window_kind"),
+  rule:       text("rule").notNull(),
+  action:     text("action").notNull(),
+  params:     jsonb("params").notNull().default(sql`'{}'::jsonb`),
+  mode:       text("mode").notNull(),     // 'shadow' | 'live' (CHECK in SQL)
+  result:     text("result"),
+  actor:      text("actor").notNull().default("steward"),
+  why:        text("why"),
+  whyNot:     text("why_not"),
+  inputsHash: text("inputs_hash"),
+  inputs:     jsonb("inputs").notNull().default(sql`'{}'::jsonb`),
+}, (t) => ({
+  byRoomTs: index("steward_decisions_room_ts_idx").on(t.roomId, t.ts.desc()),
+  byTs:     index("steward_decisions_ts_idx").on(t.ts),
+}));
+
+export const stewardTickets = pgTable("steward_tickets", {
+  ticketId:    text("ticket_id").primaryKey(),
+  machine:     text("machine").notNull(),
+  action:      text("action").notNull(),
+  params:      jsonb("params").notNull().default(sql`'{}'::jsonb`),
+  decisionId:  bigint("decision_id", { mode: "number" }).references(() => stewardDecisions.id, { onDelete: "set null" }),
+  issuedAt:    timestamp("issued_at", { withTimezone: true }).notNull(),
+  expiresAt:   timestamp("expires_at", { withTimezone: true }).notNull(),
+  nonce:       text("nonce").notNull().unique(),
+  signature:   text("signature").notNull(),
+  status:      text("status").notNull(),  // 'issued' | 'fetched' | 'done' | 'failed' | 'expired' (CHECK in SQL)
+  fetchedAt:   timestamp("fetched_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  result:      jsonb("result"),
+}, (t) => ({
+  byMachineStatus: index("steward_tickets_machine_status_idx").on(t.machine, t.status),
+  byExpires:       index("steward_tickets_expires_idx").on(t.expiresAt),
+}));
+
+export const stewardNonces = pgTable("steward_nonces", {
+  nonce:   text("nonce").primaryKey(),
+  machine: text("machine").notNull(),
+  seenAt:  timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  bySeen: index("steward_nonces_seen_idx").on(t.seenAt),
+}));
+
 // eta_encounter_windows (migration 0123) — one row per consult window, derived from pulse_presence_events by
 // lib/encounter-windows and recomputed by /api/cron/encounter-windows. Value sets are CHECKs in SQL.
 export const etaEncounterWindows = pgTable("eta_encounter_windows", {

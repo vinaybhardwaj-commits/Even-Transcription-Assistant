@@ -61,6 +61,11 @@ function stringsSafe(v: unknown, depth = 0): boolean {
   return true;
 }
 
+/** A machine id as the kiosk-facing routes accept it: 1..128 chars, no NUL or lone surrogate. */
+export function isValidMachine(x: unknown): x is string {
+  return nonEmpty(x, 128) && !BAD_STRING.test(x);
+}
+
 function optId(x: unknown): string | null | undefined {
   if (x === undefined || x === null) return null;
   return nonEmpty(x, 64) ? x : undefined; // undefined = invalid
