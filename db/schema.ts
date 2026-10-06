@@ -433,6 +433,7 @@ export const kioskHealthEvents = pgTable("kiosk_health_events", {
   byMachineTs: index("kiosk_health_events_machine_ts_idx").on(t.machine, t.ts.desc()),
   byKindTs:    index("kiosk_health_events_kind_ts_idx").on(t.kind, t.ts.desc()),
   byReceived:  index("kiosk_health_events_received_idx").on(t.receivedAt),
+  byMachineReceived: index("kiosk_health_events_machine_received_idx").on(t.machine, t.receivedAt.desc()),
   uniq:        uniqueIndex("kiosk_health_events_machine_boot_seq_key").on(t.machine, t.bootId, t.seq),
 }));
 

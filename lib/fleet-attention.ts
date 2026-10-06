@@ -33,7 +33,7 @@
  * R10 chrome_not_running    the poller is ok and says chrome_running=false (any extension age): Chrome is down, so presence cannot report. Amber.
  *                           Only between 08:00 and 21:30 IST (the Kiosk Bot and the nightly shutdown make it noise overnight).
  *                           R8 is red only when chrome_running=true; the two never fire together for one machine.
- * R11 guard_activity        ONE fleet-level amber row when the presence guard (eta-presence-guard) acted on any Mac in the last 24 h: a guard event other than
+ * guard_activity            ONE fleet-level amber row when the presence guard (eta-presence-guard) acted on any Mac in the last 24 h: a guard event other than
  *                           `boot` (missing, stripped, rewrite_failed, relaunch, unknown_host) — ext-health guard_events_24h > 0 or guard_relaunches_24h > 0.
  *                           "Presence guard acted in the last 24 h: OPD 4 (stripped ×1, relaunch ×1), OPD 6 (missing ×1)." A boot rewrite alone raises nothing;
  *                           it is listed in the detail (boot ×n) of a room that did raise. `since` = the OLDEST non-boot guard event in the 24 h window across the listed rooms (guard_first_at).
@@ -49,8 +49,10 @@
  */
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
-import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
-import { POLLER_LEGACY_KEYS, legacyPollerKey } from "@/lib/encounter-windows/machine-keys";
+import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
+import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
+import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
+import { kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -210,7 +212,12 @@ export type RoomAttentionInputs = {
   ext?: ExtHealthRow | null;
 };
 
-export type AttentionInputs = { now_ms: number; rooms: RoomAttentionInputs[] };
+export type AttentionInputs = {
+  now_ms: number;
+  rooms: RoomAttentionInputs[];
+  /** R11-R17: the kiosk-health daemon evidence per canonical machine (lib/kiosk-health-read.ts). Absent or empty = no kiosk-health rule can fire. */
+  kiosk_health?: Map<string, KioskHealthSnapshot>;
+};
 
 // ---------------------------------------------------------------------------
 // R1 — lock / reachability state
@@ -585,7 +592,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           behindRooms.push({ name, version: e.ext_version ? clean(e.ext_version, 40) : "version unknown", since, atFloor: e.behind_at_floor });
         }
       }
-      // R11: collected here, raised ONCE for the fleet after the loop. A boot rewrite alone does not raise it.
+      // guard_activity: collected here, raised ONCE for the fleet after the loop. A boot rewrite alone does not raise it.
       if (e.guard_events_24h > 0 || e.guard_relaunches_24h > 0) {
         const at = e.guard_first_at ? Date.parse(e.guard_first_at) : NaN;
         guardRooms.push({ name, since: Number.isFinite(at) ? at : now, reasons: e.guard_reasons_24h ?? {} });
@@ -624,7 +631,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     });
   }
 
-  // R11 — one fleet-level row for every Mac the presence guard acted on in the last 24 h.
+  // guard_activity — one fleet-level row for every Mac the presence guard acted on in the last 24 h.
   if (guardRooms.length > 0) {
     guardRooms.sort((x, y) => x.name.localeCompare(y.name, "en", { numeric: true }));
     const list = guardRooms.map((g) => `${g.name} (${guardReasonList(g.reasons)})`).join(", ");
@@ -638,6 +645,25 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       action: `The guard already repaired the extension policy or restarted Chrome. If the same ${guardRooms.length === 1 ? "Mac shows" : "Macs show"} up again tomorrow, find out why its policy file keeps being lost.`,
       severity: "amber",
     });
+  }
+
+  // R11-R17 — the kiosk-health daemon's rules (lib/kiosk-health-rules.ts), merged here so the one dedupe/sort below orders everything.
+  // R16 (presence_cannot_run) is the EXPLANATION for a silent extension, so it replaces R8 (extension_missing) for the same room.
+  if (inputs.kiosk_health && inputs.kiosk_health.size > 0) {
+    const extByMachine = new Map<string, ExtHealthRow>();
+    const roomByMachine = new Map<string, KioskRoomRef>();
+    for (const r of inputs.rooms) {
+      if (!r.machine) continue;
+      const canon = normalizeHostname(r.machine);
+      roomByMachine.set(canon, { room_id: r.room_id, room_name: r.room_name, machine: r.machine });
+      if (r.ext) extByMachine.set(canon, r.ext);
+    }
+    const kiosk = kioskHealthItems(inputs.kiosk_health, extByMachine, new Date(now).toISOString(), isClinicHours(now), roomByMachine);
+    const explained = new Set(kiosk.filter((k) => k.kind === "presence_cannot_run").map((k) => k.room_id));
+    if (explained.size > 0) {
+      for (let i = out.length - 1; i >= 0; i--) if (out[i]!.kind === "extension_missing" && explained.has(out[i]!.room_id)) out.splice(i, 1);
+    }
+    out.push(...kiosk);
   }
 
   // One item per kind per room (the earliest wins), then red first, oldest first.
@@ -842,6 +868,12 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     safe("ext_health", degraded, () => extHealth(sql, { asOf: nowMs, rooms: roomRows }), [] as ExtHealthRow[]),
   ]);
   const extHealthBy = new Map(extRows.filter((x) => x.room_id).map((x) => [x.room_id as string, x]));
+  // R11-R17 — kiosk-health evidence for the same machines (every spelling), same asOf. A failed read (readKioskHealth's ok:false, or a throw) is an empty
+  // map plus the "kiosk_health" source marked degraded, so "nothing needs attention" is not shown on the strength of evidence that was never read.
+  const kioskKeys = [...new Set(roomRows.filter((r) => r.hostname && !isExtHealthExcluded(r.hostname)).flatMap((r) => machineKeys(r.hostname as string)))];
+  const kh = await safe("kiosk_health", degraded, () => readKioskHealth(sql as never, kioskKeys, new Date(nowMs).toISOString()), { snapshots: new Map<string, KioskHealthSnapshot>(), ok: true });
+  if (!kh.ok) degraded.push("kiosk_health");
+  const kioskHealth = kh.snapshots;
 
   const byMachine = <T extends { machine: string }>(rows: T[]) => new Map(rows.map((r) => [r.machine, r]));
   const extBy = new Map<string, PresenceEventLite[]>();
@@ -976,7 +1008,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     };
   });
 
-  return { inputs: { now_ms: nowMs, rooms }, degraded };
+  return { inputs: { now_ms: nowMs, rooms, kiosk_health: kioskHealth }, degraded };
 }
 
 /** The route's whole job: load, compute, wrap. */
@@ -986,6 +1018,7 @@ export async function getFleetAttention(nowMs: number = Date.now()): Promise<Fle
     generated_at: new Date(nowMs).toISOString(),
     items: computeAttention(inputs),
     rooms_checked: inputs.rooms.length,
+    ...(inputs.kiosk_health && inputs.kiosk_health.size > 0 ? { kiosk_health: summarizeKioskHealth(inputs.kiosk_health, nowMs) } : {}),
     ...(degraded.length ? { degraded: [...new Set(degraded)] } : {}),
   };
 }

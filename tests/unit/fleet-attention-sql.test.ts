@@ -73,7 +73,7 @@ beforeAll(() => {
       BEGIN EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || q INTO r; RETURN r; END
     $f$;
   `);
-  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution"]) {
+  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution", "0126_kiosk_health_events", "0127_kiosk_health_machine_received_idx"]) {
     pg.exec(noRecord(`db/migrations/${f}.sql`));
   }
   H.sql = pg.sql as Sql;
@@ -86,7 +86,7 @@ beforeEach(() => {
   chunkIdx = 0;
   H.rec.length = 0;
   pg.exec(`
-    TRUNCATE room_alert_outbox RESTART IDENTITY; TRUNCATE room_alert_state; TRUNCATE pulse_presence_events; TRUNCATE eta_encounter_windows;
+    TRUNCATE room_alert_outbox RESTART IDENTITY; TRUNCATE room_alert_state; TRUNCATE pulse_presence_events; TRUNCATE eta_encounter_windows; TRUNCATE kiosk_health_events;
     TRUNCATE bench_command; TRUNCATE bench_level_sample; TRUNCATE bench_chunk; TRUNCATE bench_session;
     DELETE FROM room_install; DELETE FROM room;
     INSERT INTO room (id, slug, name) VALUES ('r6', 'opd-6-x', 'OPD 6'), ('r4', 'opd-4-x', 'OPD 4'), ('r7', 'consul-4-x', 'CONSUL 4');
@@ -129,6 +129,33 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(r.rooms_checked).toBe(3);
     expect(r.degraded).toBeUndefined();
     expect(Number.isFinite(Date.parse(r.generated_at))).toBe(true);
+  });
+
+  // ---- R11-R17: the kiosk-health daemon's rules, through the real loader ----------------------------------------------------------------------
+
+  it("kiosk health — a daemon drift row for a fleet Mac becomes a config_drift item on its room, with the per-machine summary on the response; nothing degraded", async () => {
+    pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES
+      (now() - interval '30 minutes', '${M6}', 'b', 1, 'daemon', 'drift', now() - interval '30 minutes', '{"field":"sleep","expected":0,"actual":10,"change":"initial"}'::jsonb),
+      (now() - interval '20 seconds', '${M6}', 'b', 2, 'daemon', 'heartbeat', now() - interval '20 seconds', '{}'::jsonb);`);
+    const r = await attention();
+    expect(r.items.find((i) => i.room_id === "r6" && i.kind === "config_drift")).toMatchObject({ severity: "amber", machine: "EHRC-OPD6’s Mac mini (2)" });
+    expect(r.kiosk_health?.[M6]).toMatchObject({ enrolled: true, drift_fields: ["sleep"], default_input_present: null, chrome_presence_ok: null });
+    expect(r.degraded).toBeUndefined();
+  });
+
+  it("kiosk health — when the kiosk-health table cannot be read the source is marked degraded and the other items are untouched", async () => {
+    pg.exec("DROP TABLE kiosk_health_events;");
+    try {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await attention();
+      expect(r.degraded).toContain("kiosk_health");
+      expect(r.items).toEqual([]);
+      expect(r.kiosk_health).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    } finally {
+      pg.exec(noRecord("db/migrations/0126_kiosk_health_events.sql") + noRecord("db/migrations/0127_kiosk_health_machine_received_idx.sql"));
+    }
   });
 
   // ---- R1 (a): a session is open, the screen is locked / the Mac unreachable, and there is no audio ---------------------------------------------
