@@ -300,6 +300,23 @@ describe("asleep", () => {
     expect(first(idle(T, { reachable: { poller_ok_at: ago(T, 3 * 3600), kh_heartbeat_at: ago(T, 3600) } }), T).rule).toBe("kiosk_asleep");
   });
 
+  it("overnight sleep: the machine slept at 23:10, nothing since, tick at 07:31 -> ticket:wake (not sense_degraded); the 2 h rule still holds for a room with no sleep marker", () => {
+    const b = ist("07:31");
+    const slept = ist("23:10", "2026-10-05");
+    const quiet = { poller_ok_at: ago(b, (b - slept) / 1000), kh_heartbeat_at: ago(b, (b - slept) / 1000), kh_enrolled: true };
+    const d = first(idle(b, { reachable: { ...quiet, sleep_at: new Date(slept).toISOString() } }), b);
+    expect(d).toMatchObject({ rule: "kiosk_asleep", action: "ticket:wake" });
+    expect(d.inputs.sleep_marker_at).toBe(new Date(slept).toISOString());
+    expect(d.failing_class ?? null).toBeNull(); // slept overnight, not awake today: never a fleet signal
+    // the same silence without a marker is still sense_degraded
+    expect(first(idle(b, { reachable: { ...quiet, sleep_at: null } }), b)).toMatchObject({ rule: "sense_degraded", action: "log_only" });
+    // a sleep marker never overrides a poller that sees the Mac, nor a recording room
+    expect(first(idle(b, { reachable: { ...quiet, poller_ok_at: ago(b, 30), sleep_at: new Date(slept).toISOString() } }), b).rule).not.toBe("kiosk_asleep");
+    expect(first(healthy(b, { reachable: { ...quiet, sleep_at: new Date(slept).toISOString() } }), b).rule).not.toBe("kiosk_asleep");
+    // sleeping more than 10 min with nothing heard: wake + message
+    expect(decideRoom(idle(b, { reachable: { ...quiet, sleep_at: new Date(slept).toISOString() } }), DEFAULT_CONFIG, b, EMPTY_RECENT).map((x) => x.action)).toEqual(["ticket:wake", "message"]);
+  });
+
   it("F1: kiosk_asleep is a positive fleet signal (the machine spoke today, inside the 2 h data rule); a machine last heard yesterday is sense_degraded and never counts", () => {
     const awake = first(idle(T, { reachable: { poller_ok_at: ago(T, 1800), kh_heartbeat_at: ago(T, 1800) } }), T);
     expect(awake).toMatchObject({ rule: "kiosk_asleep", failing_class: "kiosk_asleep" });

@@ -16,6 +16,7 @@ import { extHealth, isExtHealthExcluded, type ExtHealthRoom, type ExtHealthRow, 
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { scopedOccupancy, type ScopedOccupancy } from "./occupancy-read";
 import { DEFAULT_SOURCE_TIMEOUT_MS } from "./config";
+import { KH_ASLEEP_MAX_AGE_MS, KH_HEARTBEAT_AFTER_SLEEP_MS } from "@/lib/kiosk-health-rules";
 import { SourceTimeout, raceTimeout } from "./timeout";
 import { canonicalMachine, expandKeys, matchKey, readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { evaluateStartBackoff, type StartAttempt, START_ACK_SESSION_GRACE_S, START_BACKOFF_WINDOW_S } from "@/lib/bench-commands";
@@ -45,7 +46,13 @@ export type RoomSense = {
   };
   /** bench_listener: the browser-kiosk poll. `paused` is the consent pause: the steward never starts a paused room. */
   listener: { listening: boolean | null; paused: boolean | null };
-  reachable: { poller_ok_at: string | null; kh_heartbeat_at: string | null; kh_enrolled: boolean | null };
+  reachable: {
+    poller_ok_at: string | null;
+    kh_heartbeat_at: string | null;
+    kh_enrolled: boolean | null;
+    /** the kiosk-health sleep marker (bench rule R11 derivation, see khSleepMarker): ISO ts of a sleep/darkwake/asleep-display event with no wake and no heartbeat since, else null */
+    sleep_at?: string | null;
+  };
   chrome: {
     running: boolean | null;
     active: string[] | null;
@@ -144,9 +151,32 @@ const groupBy = <T extends { room_id: string }>(rows: T[]): Map<string, T[]> => 
   return m;
 };
 
+/**
+ * The kiosk-health SLEEP marker, same derivation as bench rule R11 (lib/kiosk-health-rules.ts): the newest of power.sleep / power.darkwake / power.wake by EVENT time is a
+ * sleep or darkwake, it happened within 12 h of asOf, and no heartbeat was received after its ts + 180 s. A display.state "asleep" newer than that power event counts the
+ * same way. Returns the ISO ts of the sleep, or null. Pure. Needs an enrolled snapshot (any kiosk-health row in 7 days).
+ */
+export function khSleepMarker(kh: KioskHealthSnapshot | undefined | null, A: number): string | null {
+  if (!kh || !kh.enrolled) return null;
+  const tsOf = (e: { ts: string; received_at: string }) => Date.parse(e.ts);
+  const state = kh.power_events.filter((e) => e.kind === "power.sleep" || e.kind === "power.darkwake" || e.kind === "power.wake");
+  const newest = state.reduce<(typeof state)[number] | null>((best, e) => (!best || tsOf(e) > tsOf(best) || (tsOf(e) === tsOf(best) && Date.parse(e.received_at) > Date.parse(best.received_at)) ? e : best), null);
+  let candidate: number | null = null;
+  if (newest && newest.kind !== "power.wake") candidate = tsOf(newest);
+  const ds = kh.last_display_state;
+  if (ds && ds.state === "asleep" && Number.isFinite(Date.parse(ds.ts)) && (!newest || Date.parse(ds.ts) > tsOf(newest))) candidate = Date.parse(ds.ts);
+  if (candidate === null || !Number.isFinite(candidate)) return null;
+  const hb = kh.last_heartbeat_received_at ? Date.parse(kh.last_heartbeat_received_at) : NaN;
+  const heartbeatedSince = Number.isFinite(hb) && hb > candidate + KH_HEARTBEAT_AFTER_SLEEP_MS;
+  if (A - candidate > KH_ASLEEP_MAX_AGE_MS || heartbeatedSince) return null;
+  return new Date(candidate).toISOString();
+}
+
 export const SENSE_BOUNDS = {
   /** newest poller `ok` row per machine (24 h: kiosk_asleep needs "awake today" and "any data in 2 h"; one LIMIT 1 index probe per spelling, so the width costs nothing when rows exist) */
   poller_lookback_min: 24 * 60,
+  /** and at most this many of the machine's newest rows are examined per spelling (the poller `ok` is picked from them): the cost bound of the wide lookback */
+  poller_scan_rows: 720,
   /** newest ext event of any kind (explains no_tab) */
   ext_event_lookback_h: 2,
   /** newest ext heartbeat */
@@ -265,12 +295,17 @@ export async function senseAll(
           SELECT q.ts, q.idle, q.chrome
             FROM unnest(m.keys) AS k(key)
            CROSS JOIN LATERAL (
-             SELECT p.ts, p.payload->>'chrome_running' AS chrome,
-                    CASE WHEN p.payload->>'idle_s' ~ '^[0-9]{1,9}(\\.[0-9]+)?$' THEN (p.payload->>'idle_s')::numeric END AS idle
-               FROM pulse_presence_events p
-              WHERE p.source = 'poller' AND p.machine = k.key AND p.event = 'ok'
-                AND p.ts > ${hi}::timestamptz - ${mins(B.poller_lookback_min)}::interval AND p.ts <= ${hi}::timestamptz
-              ORDER BY p.ts DESC LIMIT 1
+             SELECT w.ts, w.payload->>'chrome_running' AS chrome,
+                    CASE WHEN w.payload->>'idle_s' ~ '^[0-9]{1,9}(\\.[0-9]+)?$' THEN (w.payload->>'idle_s')::numeric END AS idle
+               FROM (
+                 SELECT p.ts, p.source, p.event, p.payload
+                   FROM pulse_presence_events p
+                  WHERE p.machine = k.key
+                    AND p.ts > ${hi}::timestamptz - ${mins(B.poller_lookback_min)}::interval AND p.ts <= ${hi}::timestamptz
+                  ORDER BY p.ts DESC LIMIT ${B.poller_scan_rows}::int
+               ) w
+              WHERE w.source = 'poller' AND w.event = 'ok'
+              ORDER BY w.ts DESC LIMIT 1
            ) q
            ORDER BY q.ts DESC LIMIT 1
         ) t
@@ -552,7 +587,7 @@ export async function senseAll(
         recorder_status,
       },
       listener,
-      reachable: { poller_ok_at: toIso(poll?.ts), kh_heartbeat_at: khHb, kh_enrolled: khR.ok ? (kh ? kh.enrolled : false) : null },
+      reachable: { poller_ok_at: toIso(poll?.ts), kh_heartbeat_at: khHb, kh_enrolled: khR.ok ? (kh ? kh.enrolled : false) : null, sleep_at: khR.ok ? khSleepMarker(kh, A) : null },
       chrome: {
         running: prof?.running ?? boolOrNull(poll?.chrome) ?? null,
         active,

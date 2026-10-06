@@ -4,7 +4,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SourceTimeout, raceTimeout } from "@/lib/steward/timeout";
-import { safeRead } from "@/lib/steward/sense";
+import { khSleepMarker, safeRead } from "@/lib/steward/sense";
+import type { KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -89,5 +90,30 @@ describe("safeRead", () => {
     await vi.advanceTimersByTimeAsync(2);
     expect(await p).toEqual({ v: 0, ok: false });
     expect(d).toContain("tail:timeout");
+  });
+});
+
+describe("khSleepMarker (bench rule R11 derivation)", () => {
+  const A = Date.parse("2026-10-06T02:01:00Z"); // 07:31 IST
+  const iso = (msAgo: number) => new Date(A - msAgo).toISOString();
+  const H = 3_600_000;
+  const snap = (over: Partial<KioskHealthSnapshot>): KioskHealthSnapshot =>
+    ({ machine: "m", enrolled: true, power_events: [], last_display_state: null, last_heartbeat_received_at: null, ...over }) as unknown as KioskHealthSnapshot;
+  const pe = (kind: string, msAgo: number) => ({ kind, ts: iso(msAgo), received_at: iso(msAgo), reason: null, kAESleep: null });
+
+  it("a sleep 8 h ago with no heartbeat after sleep + 180 s is a marker; a later wake, a later heartbeat, an age > 12 h, or no enrolment is not", () => {
+    expect(khSleepMarker(snap({ power_events: [pe("power.sleep", 8 * H)], last_heartbeat_received_at: iso(8 * H + 60_000) }), A)).toBe(iso(8 * H));
+    expect(khSleepMarker(snap({ power_events: [pe("power.darkwake", 8 * H)] }), A)).toBe(iso(8 * H));
+    expect(khSleepMarker(snap({ power_events: [pe("power.sleep", 8 * H), pe("power.wake", 7 * H)] }), A)).toBeNull();
+    expect(khSleepMarker(snap({ power_events: [pe("power.sleep", 8 * H)], last_heartbeat_received_at: iso(2 * H) }), A)).toBeNull();
+    expect(khSleepMarker(snap({ power_events: [pe("power.sleep", 13 * H)] }), A)).toBeNull();
+    expect(khSleepMarker(snap({ enrolled: false, power_events: [pe("power.sleep", 8 * H)] }), A)).toBeNull();
+    expect(khSleepMarker(undefined, A)).toBeNull();
+  });
+
+  it("a display.state 'asleep' newer than the newest power event counts; an older one does not", () => {
+    const ds = (msAgo: number) => ({ ts: iso(msAgo), received_at: iso(msAgo), state: "asleep", origin: null });
+    expect(khSleepMarker(snap({ last_display_state: ds(6 * H) }), A)).toBe(iso(6 * H));
+    expect(khSleepMarker(snap({ power_events: [pe("power.wake", 5 * H)], last_display_state: ds(6 * H) }), A)).toBeNull();
   });
 });

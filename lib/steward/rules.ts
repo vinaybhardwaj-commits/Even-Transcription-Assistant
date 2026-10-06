@@ -11,7 +11,8 @@
  *   3  outside_window                  nothing to do.
  *   INSIDE the window:
  *   4  kiosk_asleep                    poller AND kiosk-health heartbeat both stale > 3 min AND no chunk for 10 min AND the room is not recording -> ticket wake;
- *                                      message after 10 min. With neither poller nor kiosk-health data in the last 2 h: sense_degraded (inputs.missing), never asleep.
+ *                                      message after 10 min. With neither poller nor kiosk-health data in the last 2 h: sense_degraded (inputs.missing), never asleep —
+ *                                      UNLESS kiosk-health carries a sleep marker (R11 derivation; reachable.sleep_at): then ticket wake even after an overnight sleep.
  *   5  not_recording                   no session, reachable -> scribe_start; room_failing backoff, then max start_retries tries, then message + needs_hands.
  *   6  session_died                    no chunk for 10 min AND (recorder.status stale > 3 min OR recorder session_open=false OR kiosk-health absent/stale: then
  *                                      inputs.recorder_stale = "unknown") -> scribe_restart, then
@@ -314,8 +315,12 @@ function kioskAsleep(c: Ctx): Decision[] | null {
   if (chunkAge !== null && chunkAge < ASLEEP_NO_CHUNK_MS) return null;
   const pAge = age(s.reachable.poller_ok_at);
   const kAge = age(s.reachable.kh_heartbeat_at);
+  // A kiosk-health SLEEP marker (bench rule R11: the newest power event is a sleep / darkwake, < 12 h old, no heartbeat since sleep + 180 s) is positive evidence that the
+  // Mac is asleep, even when it has been silent for hours (overnight sleep): it overrides the 2 h reachability rule below, provided the poller does not see the Mac.
+  const sleepAt = s.reachable.sleep_at ?? null;
+  const sleeping = sleepAt !== null && s.reachable.kh_enrolled === true && (pAge === null || pAge > ASLEEP_AFTER_MS);
   // F4: with neither source heard in the last 2 h the room's reachability is unknown (e.g. a room with no poller and no kiosk-health): do not call it asleep.
-  if ((pAge === null || pAge > REACHABILITY_DATA_MAX_AGE_MS) && (kAge === null || kAge > REACHABILITY_DATA_MAX_AGE_MS)) {
+  if (!sleeping && (pAge === null || pAge > REACHABILITY_DATA_MAX_AGE_MS) && (kAge === null || kAge > REACHABILITY_DATA_MAX_AGE_MS)) {
     return [
       mk(c, "sense_degraded", "log_only", {}, "no presence-poller or kiosk-health data in the last 2 h: reachability cannot be judged", "kiosk_asleep not emitted: no reachability data in 2 h", "warn", {
         missing: [...new Set([...s.missing, "reachability_2h"])].sort(),
@@ -324,13 +329,13 @@ function kioskAsleep(c: Ctx): Decision[] | null {
   }
   const pStale = pAge === null || pAge > ASLEEP_AFTER_MS;
   const kStale = kAge === null || kAge > ASLEEP_AFTER_MS;
-  if (!(pStale && kStale)) return null;
+  if (!sleeping && !(pStale && kStale)) return null;
   // positive failure signal for the fleet count only when the machine was awake today (it spoke since IST midnight / the window start)
   const floor = todayFloor(c);
   const awakeToday = atOrAfter(s.reachable.poller_ok_at, floor) || atOrAfter(s.reachable.kh_heartbeat_at, floor);
-  const out: Decision[] = [mk(c, "kiosk_asleep", "ticket:wake", {}, "poller and kiosk-health heartbeat both stale > 3 min and no fresh chunk: the Mac looks asleep", null, "error", {}, { awake_today: awakeToday })];
+  const out: Decision[] = [mk(c, "kiosk_asleep", "ticket:wake", {}, "poller and kiosk-health heartbeat both stale > 3 min and no fresh chunk: the Mac looks asleep", null, "error", {}, { awake_today: awakeToday, sleep_marker_at: sleepAt })];
   if ((pAge === null || pAge > ASLEEP_MESSAGE_AFTER_MS) && (kAge === null || kAge > ASLEEP_MESSAGE_AFTER_MS)) {
-    out.push(mk(c, "kiosk_asleep", "message", { kind: "asleep_10m", needs_hands: true, text: "kiosk unreachable for 10+ min inside the window — needs hands" }, "still unreachable after 10 min", "wake ticket did not bring the Mac back", "error", {}, { awake_today: awakeToday }));
+    out.push(mk(c, "kiosk_asleep", "message", { kind: "asleep_10m", needs_hands: true, text: "kiosk unreachable for 10+ min inside the window — needs hands" }, "still unreachable after 10 min", "wake ticket did not bring the Mac back", "error", {}, { awake_today: awakeToday, sleep_marker_at: sleepAt }));
   }
   return awakeToday ? fcAll(out, "kiosk_asleep") : out;
 }
