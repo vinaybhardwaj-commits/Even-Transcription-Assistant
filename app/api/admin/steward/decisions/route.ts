@@ -15,7 +15,7 @@ export const maxDuration = 30;
 
 const NO_STORE = { "cache-control": "no-store" };
 const MAX_LIMIT = 500;
-export const DEFAULT_LIMIT = 100;
+const DEFAULT_LIMIT = 100;
 
 type Row = {
   id: unknown;
