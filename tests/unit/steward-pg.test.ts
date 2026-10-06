@@ -9,6 +9,7 @@
  *   3. Dedupe: the same tick again writes nothing; a changed fact writes.
  *   4. Kill switch OFF + shadow -> "shadow: would scribe_start"; shadow off (live asked) -> "blocked: live executor not enabled in P0" and live_executor in degraded.
  *   5. /api/cron/steward and /api/admin/steward/decisions through the real tables.
+ *   6. (fix pass) last_tick written by the lease release; config_unavailable takes no lease; the scoped occupancy reader (roster machines, 2 h, LIMIT) on the real index.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
@@ -24,6 +25,7 @@ vi.mock("@/lib/bench", () => ({
 import { GET as cron } from "@/app/api/cron/steward/route";
 import { GET as decisionsRoute } from "@/app/api/admin/steward/decisions/route";
 import { leaseLock, runSteward } from "@/lib/steward/loop";
+import { OCCUPANCY_ROW_LIMIT, scopedOccupancy } from "@/lib/steward/occupancy-read";
 import type { StewardSql } from "@/lib/steward/tickets";
 
 const HAVE_DOCKER = dockerAvailable();
@@ -266,4 +268,79 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     expect((await get("?since=nope")).status).toBe(400);
     expect((await get("?limit=0")).status).toBe(400);
   }, 60_000);
+  it("F7: the lease release writes steward_config.last_tick (the same statement); the lease is free afterwards", async () => {
+    pg.exec(`DELETE FROM steward_decisions`);
+    pg.exec(`DELETE FROM steward_config WHERE key = 'last_tick'`);
+    const s = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
+    const lt = (await rows`SELECT value, updated_by FROM steward_config WHERE key = 'last_tick'`)[0]!;
+    expect(Object.keys(lt.value).sort()).toEqual(["at", "budget_hit", "decisions_written", "degraded", "elapsed_ms", "rooms"]);
+    expect(lt.value).toMatchObject({ at: new Date(AS_OF).toISOString(), rooms: 3, decisions_written: 3, budget_hit: false, degraded: [] });
+    expect(lt.value.elapsed_ms).toBe(s.elapsed_ms);
+    expect((await rows`SELECT value->>'holder' AS h FROM steward_config WHERE key = 'loop_lease'`)[0]!.h).toBeNull();
+    // a second tick overwrites it (upsert), still one row
+    await runSteward(sql, { asOf: AS_OF + 60_000, budgetMs: 20_000 });
+    expect((await rows`SELECT count(*)::int AS n FROM steward_config WHERE key = 'last_tick'`)[0]!.n).toBe(1);
+    expect((await rows`SELECT value->>'at' AS at FROM steward_config WHERE key = 'last_tick'`)[0]!.at).toBe(new Date(AS_OF + 60_000).toISOString());
+  }, 120_000);
+
+  it("F8: no `rooms` row in steward_config -> {ok:false, reason:'config_unavailable'}, the lease row is never touched, nothing is written", async () => {
+    pg.exec(`DELETE FROM steward_decisions`);
+    const before = (await rows`SELECT updated_at::text AS u, updated_by FROM steward_config WHERE key = 'loop_lease'`)[0]!;
+    const saved = (await rows`SELECT value FROM steward_config WHERE key = 'rooms'`)[0]!.value;
+    pg.exec(`DELETE FROM steward_config WHERE key = 'rooms'`);
+    try {
+      const s = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
+      expect(s).toMatchObject({ ok: false, reason: "config_unavailable", rooms: 0, decisions_written: 0, skipped_lock: false });
+      expect((await rows`SELECT count(*)::int AS n FROM steward_decisions`)[0]!.n).toBe(0);
+      const after = (await rows`SELECT updated_at::text AS u, updated_by FROM steward_config WHERE key = 'loop_lease'`)[0]!;
+      expect(after).toEqual(before);
+      // the cron answers 200 with the same body
+      const SAVED = process.env.CRON_SECRET;
+      process.env.CRON_SECRET = "cron-pg";
+      try {
+        const r = await cron(new Request("https://x.test/api/cron/steward", { headers: { authorization: "Bearer cron-pg" } }));
+        expect(r.status).toBe(200);
+        expect(await r.json()).toMatchObject({ ok: false, reason: "config_unavailable" });
+      } finally {
+        if (SAVED === undefined) delete process.env.CRON_SECRET;
+        else process.env.CRON_SECRET = SAVED;
+      }
+    } finally {
+      pg.exec(`INSERT INTO steward_config (key, value, updated_by) VALUES ('rooms', '${JSON.stringify(saved).replace(/'/g, "''")}'::jsonb, 'test-restore') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+    }
+  }, 120_000);
+
+  it("F6: scopedOccupancy reads only the roster machines, only the last 2 h, bounded, with machine = ANY on the (machine, ts) index", async () => {
+    const ext = (machine: string, event: string, minAgo: number, extra = "") =>
+      `INSERT INTO pulse_presence_events (source, machine, event, ts, payload) VALUES ('ext', '${machine}', '${event}', '${at(minAgo)}', '{"doctor_uid":"d1","display_name":"Dr T","tab_focus":"true","instance_id":"i1"${extra}}'::jsonb);`;
+    pg.exec(`
+      ${ext("clinic-a-mac", "login", 30)}
+      ${ext("clinic-a-mac", "heartbeat", 1)}
+      ${ext("other-mac", "login", 20)}
+      ${ext("other-mac", "heartbeat", 1)}
+      ${ext("clinic-b-mac", "login", 180)}
+    `);
+    const seen: string[] = [];
+    const spy = ((strings: TemplateStringsArray, ...v: unknown[]) => {
+      seen.push(strings.join("?"));
+      return H.sql!(strings, ...v);
+    }) as never;
+    const out = await scopedOccupancy(spy, AS_OF, ["clinic-a-mac", "clinic-b-mac"]);
+    expect(out.map((o) => o.machine)).toEqual(["clinic-a-mac"]); // other-mac not in the roster; clinic-b-mac's only event is 3 h old
+    const text = seen.join(" ");
+    expect(text).toContain("machine = ANY(");
+    expect(text).toContain("LIMIT");
+    expect(text).not.toContain("machine IS NOT NULL");
+    expect(await scopedOccupancy(spy, AS_OF, [])).toEqual([]);
+
+    // volume: more focused heartbeats than the limit inside 2 h -> still answers, newest rows win
+    pg.exec(`
+      INSERT INTO pulse_presence_events (source, machine, event, ts, payload)
+      SELECT 'ext', 'clinic-b-mac', 'heartbeat', '${at(0)}'::timestamptz - (g * interval '1 second'), '{"doctor_uid":"d2","display_name":"Dr U","tab_focus":"true","instance_id":"i2"}'::jsonb
+        FROM generate_series(1, ${OCCUPANCY_ROW_LIMIT + 200}) g;
+    `);
+    const big = await scopedOccupancy(spy, AS_OF, ["clinic-a-mac", "clinic-b-mac"]);
+    expect(big.map((o) => o.machine).sort()).toEqual(["clinic-a-mac", "clinic-b-mac"]);
+    pg.exec(`DELETE FROM pulse_presence_events WHERE machine IN ('clinic-b-mac', 'other-mac') AND source = 'ext'`);
+  }, 120_000);
 });

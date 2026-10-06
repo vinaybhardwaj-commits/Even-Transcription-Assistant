@@ -5,13 +5,16 @@
  * RULE ORDER (first match wins; the primary decision is element 0, a few rules add a second element):
  *   0  no_machine / sense_degraded     no bound machine; or the session state cannot be read.
  *   OUTSIDE the window (windowAt):
- *   1  closed_day                      a closed IST day (days.closed): a session is left alone.
- *   2  end_of_window                   session open -> scribe_stop; consult open -> wait up to late_stop_max_min (30), then scribe_stop + "late stop" message.
+ *   1  end_of_window                   session open -> scribe_stop; consult open -> wait up to late_stop_max_min (30), then scribe_stop + "late stop" message.
+ *                                      (evaluated BEFORE closed_day: an OT session that ran past midnight into a closed day is still stopped.)
+ *   2  closed_day                      a closed IST day (days.closed) with no session open: nothing.
  *   3  outside_window                  nothing to do.
  *   INSIDE the window:
- *   4  kiosk_asleep                    poller AND kiosk-health heartbeat both stale > 3 min -> ticket wake; message after 10 min.
+ *   4  kiosk_asleep                    poller AND kiosk-health heartbeat both stale > 3 min AND no chunk for 10 min AND the room is not recording -> ticket wake;
+ *                                      message after 10 min. With neither poller nor kiosk-health data in the last 2 h: sense_degraded (inputs.missing), never asleep.
  *   5  not_recording                   no session, reachable -> scribe_start; room_failing backoff, then max start_retries tries, then message + needs_hands.
- *   6  session_died                    no chunk for 10 min AND (recorder.status stale > 3 min OR recorder session_open=false) -> scribe_restart, then
+ *   6  session_died                    no chunk for 10 min AND (recorder.status stale > 3 min OR recorder session_open=false OR kiosk-health absent/stale: then
+ *                                      inputs.recorder_stale = "unknown") -> scribe_restart, then
  *                                      ticket restart_recorder_app (only when the recorder says no session is open), then message.
  *   7  kiosk_health_down               no kiosk-health heartbeat for 5 min while the poller is ok -> ticket restart_kiosk_health; message if still down at 10 min.
  *   8  mic_fault                       a consult has been open >= 60 s and the mic is gone (message "mic unplugged/missing — check cable") or silent (message
@@ -23,7 +26,10 @@
  *   13 extension_missing               chrome.alert ext_missing:<profile> -> ticket relaunch_chrome, then policy_cycle (max 1 per profile per day), then message.
  *   14 ok                              nothing wrong.
  * Then, over the primary decision: (a) the same action failing >= 3 times in 60 min -> message + needs_hands; (b) actions_per_room_per_hour cap;
- * (c) a fleet incident (>= 3 rooms failing the same rule, or a hold row < 15 min old) holds the per-room action.
+ * (c) a fleet incident (>= 3 rooms with a POSITIVE failure signal of the same class in 5 min, or a hold row < 15 min old) holds the per-room action.
+ * POSITIVE SIGNAL (Decision.failing_class): session_died; kiosk_asleep after the machine was awake today; kiosk_health_down after kiosk-health reported today; a start
+ * attempted and failed (backoff / retries exhausted); a live mic fault; a Chrome fault. A room that has simply not started yet today, and a consent-paused room, never count.
+ * PARAMS ARE STABLE: a decision's params hold no countdown or elapsed number (those live in inputs), so the dedupe key (room, rule, action, params) is stable across minutes.
  * Chrome-touching tickets (open_pulse, relaunch_chrome, policy_cycle) are gated: occupancy nobody AND no pending login AND poller idle >= 600 s AND no consult open.
  * A blocked decision is log_only with the blocking condition in why_not.
  */
@@ -60,6 +66,8 @@ export type Decision = {
   inputs_hash: string;
   /** discrete facts (hashed) plus ages in seconds (not hashed); ids, booleans, counts only */
   inputs: Record<string, unknown>;
+  /** the fleet-incident class this room is in because of a POSITIVE failure signal (also written to inputs.failing_class), or null/absent */
+  failing_class?: string | null;
 };
 
 export type RecentAction = {
@@ -68,6 +76,8 @@ export type RecentAction = {
   action: string;
   params: Record<string, unknown>;
   outcome: "ok" | "failed" | "shadow" | null;
+  /** inputs.failing_class of the stored row (positive failure signal), or null */
+  failing_class?: string | null;
 };
 
 export type RecentContext = {
@@ -104,6 +114,10 @@ export const START_TRIES_WINDOW_MS = 60 * MIN;
 export const FAILING_ACTION_MAX = 3;
 export const FLEET_MIN_ROOMS = 3;
 export const FLEET_HOLD_MS = 15 * MIN;
+/** kiosk_asleep needs the room to have no fresh chunk for this long (a recording room is never asleep). */
+export const ASLEEP_NO_CHUNK_MS = 10 * MIN;
+/** with neither poller nor kiosk-health data for this long, reachability is unknown: kiosk_asleep is not emitted. */
+export const REACHABILITY_DATA_MAX_AGE_MS = 2 * 3_600_000;
 /** lib/bench-commands START_BACKOFF_MAX_FAILED, copied so this file stays free of the bench module. */
 export const START_BACKOFF_MAX_FAILED = 2;
 
@@ -185,6 +199,8 @@ function mk(
   why_not: string | null,
   severity: Severity,
   extraFacts: Record<string, unknown> = {},
+  /** volatile numbers (countdowns, elapsed minutes, counters): written to inputs, NEVER hashed and NEVER in params */
+  extraInputs: Record<string, unknown> = {},
 ): Decision {
   const f = { ...facts(c), ...extraFacts };
   return {
@@ -198,9 +214,29 @@ function mk(
     why_not,
     severity,
     inputs_hash: hashFacts({ rule, action, params, f }),
-    inputs: { ...f, ages_s: ages(c) },
+    inputs: { ...f, ages_s: ages(c), ...extraInputs },
   };
 }
+
+/** Mark a decision as a POSITIVE failure signal of `cls` (fleet-incident class). Returns the same decision. */
+function fc(d: Decision, cls: string): Decision {
+  d.failing_class = cls;
+  d.inputs.failing_class = cls;
+  return d;
+}
+const fcAll = (ds: Decision[], cls: string): Decision[] => ds.map((d) => fc(d, cls));
+/** A replacement decision (cap / action_failing / fleet_hold) keeps the class of the decision it replaced. */
+function inherit(d: Decision, from: Decision): Decision {
+  return from.failing_class ? fc(d, from.failing_class) : d;
+}
+
+/** Earliest instant that counts as "today" for awake_today / reported_today: IST midnight, or the window start when the window began earlier (OT crosses midnight). */
+const todayFloor = (c: Ctx): number => Math.min(istMidnightOf(c.A), c.win.start_ms ?? Number.POSITIVE_INFINITY);
+const atOrAfter = (iso: string | null | undefined, ms: number): boolean => {
+  if (!iso) return false;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) && t >= ms;
+};
 
 const rowsOf = (c: Ctx, action: string, withinMs: number, profile?: string) =>
   c.recent.room.filter(
@@ -237,9 +273,7 @@ function chromeTicket(c: Ctx, rule: string, name: StewardAction, profile: string
 
 function outsideWindow(c: Ctx): Decision[] {
   const { s, win } = c;
-  if (win.closed_day) {
-    return [mk(c, "closed_day", "none", {}, s.recording.session_open ? "closed day: a session is open and is left alone" : "closed day", null, "info")];
-  }
+  // end_of_window BEFORE closed_day (F10): an OT session that ran past midnight into a closed day is still stopped.
   if (s.recording.session_open === true) {
     const lateMax = c.cfg.schedule[s.kind].late_stop_max_min * MIN;
     const since = win.since_end_ms;
@@ -255,31 +289,50 @@ function outsideWindow(c: Ctx): Decision[] {
             `window ended ${sinceTxt} ago; ${s.consult_open === null ? "consult state unknown" : "a consult is open"}, waiting up to ${c.cfg.schedule[s.kind].late_stop_max_min} min before stopping`,
             s.consult_open === null ? "scribe_stop held: consult state unknown" : "scribe_stop held: consult open",
             "info",
+            {},
+            { since_end_min: since === null ? null : Math.round(since / MIN) },
           ),
         ];
       }
+      const sinceIn = { since_end_min: since === null ? null : Math.round(since / MIN) };
       return [
-        mk(c, "end_of_window", "scribe_stop", { late: true }, `window ended ${sinceTxt} ago and the consult is still open: stopping anyway (late stop)`, null, "warn"),
-        mk(c, "end_of_window", "message", { kind: "late_stop", text: `late stop: session closed ${sinceTxt} after the window ended with a consult still open` }, "late stop notice", null, "warn"),
+        mk(c, "end_of_window", "scribe_stop", { late: true }, `window ended ${sinceTxt} ago and the consult is still open: stopping anyway (late stop)`, null, "warn", {}, sinceIn),
+        mk(c, "end_of_window", "message", { kind: "late_stop", text: "late stop: session closed after the window ended with a consult still open" }, `late stop notice (window ended ${sinceTxt} ago)`, null, "warn", {}, sinceIn),
       ];
     }
-    return [mk(c, "end_of_window", "scribe_stop", {}, `window ended ${sinceTxt} ago and no consult is open`, null, "info")];
+    return [mk(c, "end_of_window", "scribe_stop", {}, `window ended ${sinceTxt} ago and no consult is open`, null, "info", {}, { since_end_min: since === null ? null : Math.round(since / MIN) })];
   }
+  if (win.closed_day) return [mk(c, "closed_day", "none", {}, "closed day", null, "info")];
   return [mk(c, "outside_window", "none", {}, "outside the schedule window", null, "info")];
 }
 
 function kioskAsleep(c: Ctx): Decision[] | null {
   const { s, age } = c;
+  // F4: a room that is recording is never asleep, and a fresh chunk (< 10 min) is proof of life.
+  if (s.recording.session_open === true && s.recording.session_status === "recording") return null;
+  const chunkAge = age(s.recording.last_chunk_at);
+  if (chunkAge !== null && chunkAge < ASLEEP_NO_CHUNK_MS) return null;
   const pAge = age(s.reachable.poller_ok_at);
   const kAge = age(s.reachable.kh_heartbeat_at);
+  // F4: with neither source heard in the last 2 h the room's reachability is unknown (e.g. a room with no poller and no kiosk-health): do not call it asleep.
+  if ((pAge === null || pAge > REACHABILITY_DATA_MAX_AGE_MS) && (kAge === null || kAge > REACHABILITY_DATA_MAX_AGE_MS)) {
+    return [
+      mk(c, "sense_degraded", "log_only", {}, "no presence-poller or kiosk-health data in the last 2 h: reachability cannot be judged", "kiosk_asleep not emitted: no reachability data in 2 h", "warn", {
+        missing: [...new Set([...s.missing, "reachability_2h"])].sort(),
+      }),
+    ];
+  }
   const pStale = pAge === null || pAge > ASLEEP_AFTER_MS;
   const kStale = kAge === null || kAge > ASLEEP_AFTER_MS;
   if (!(pStale && kStale)) return null;
-  const out: Decision[] = [mk(c, "kiosk_asleep", "ticket:wake", {}, "poller and kiosk-health heartbeat both stale > 3 min: the Mac looks asleep", null, "error")];
+  // positive failure signal for the fleet count only when the machine was awake today (it spoke since IST midnight / the window start)
+  const floor = todayFloor(c);
+  const awakeToday = atOrAfter(s.reachable.poller_ok_at, floor) || atOrAfter(s.reachable.kh_heartbeat_at, floor);
+  const out: Decision[] = [mk(c, "kiosk_asleep", "ticket:wake", {}, "poller and kiosk-health heartbeat both stale > 3 min and no fresh chunk: the Mac looks asleep", null, "error", {}, { awake_today: awakeToday })];
   if ((pAge === null || pAge > ASLEEP_MESSAGE_AFTER_MS) && (kAge === null || kAge > ASLEEP_MESSAGE_AFTER_MS)) {
-    out.push(mk(c, "kiosk_asleep", "message", { kind: "asleep_10m", needs_hands: true, text: "kiosk unreachable for 10+ min inside the window — needs hands" }, "still unreachable after 10 min", "wake ticket did not bring the Mac back", "error"));
+    out.push(mk(c, "kiosk_asleep", "message", { kind: "asleep_10m", needs_hands: true, text: "kiosk unreachable for 10+ min inside the window — needs hands" }, "still unreachable after 10 min", "wake ticket did not bring the Mac back", "error", {}, { awake_today: awakeToday }));
   }
-  return out;
+  return awakeToday ? fcAll(out, "kiosk_asleep") : out;
 }
 
 function notRecording(c: Ctx): Decision[] {
@@ -290,33 +343,37 @@ function notRecording(c: Ctx): Decision[] {
   }
   const tries = rowsOf(c, "scribe_start", START_TRIES_WINDOW_MS).filter((r) => r.outcome !== "ok").length;
   if (tries >= cfg.caps.start_retries) {
-    return [
+    return fcAll([
       mk(
         c,
         "not_recording",
         "message",
-        { kind: "start_exhausted", needs_hands: true, tries, text: `recorder will not start after ${tries} tries — needs hands` },
+        { kind: "start_exhausted", needs_hands: true, text: "recorder will not start after repeated tries — needs hands" },
         `scribe_start tried ${tries} times in the last hour and the room is still not recording`,
         `scribe_start held: ${cfg.caps.start_retries} tries used`,
         "error",
+        {},
+        { tries },
       ),
-    ];
+    ], "not_recording");
   }
   if (s.start_backoff === null) {
     return [mk(c, "not_recording", "log_only", {}, "inside the window with no session, but start history is unreadable", "scribe_start held: start_attempts missing", "warn")];
   }
   if (s.start_backoff.failed_attempts >= START_BACKOFF_MAX_FAILED) {
-    return [
+    return fcAll([
       mk(
         c,
         "not_recording",
         "log_only",
-        { retry_after_s: s.start_backoff.retry_after_s },
+        {},
         `inside the window with no session; the room is failing (${s.start_backoff.failed_attempts} failed starts in the last hour)`,
         `scribe_start held: room_failing backoff, retry in ${s.start_backoff.retry_after_s} s`,
         "warn",
+        {},
+        { retry_after_s: s.start_backoff.retry_after_s, failed_attempts: s.start_backoff.failed_attempts },
       ),
-    ];
+    ], "not_recording");
   }
   return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", { tries })];
 }
@@ -332,24 +389,28 @@ function sessionDied(c: Ctx): Decision[] | null {
   if (chunkAge === null || chunkAge < DIED_NO_CHUNK_MS) return null;
   const rs = s.recording.recorder_status;
   const khAge = age(s.reachable.kh_heartbeat_at);
-  const khDown = khAge === null || khAge > KH_DOWN_AFTER_MS;
+  const khDown = khAge === null || khAge > KH_DOWN_AFTER_MS || s.reachable.kh_enrolled !== true;
   const rsAge = age(rs?.received_at);
-  // With kiosk-health itself down, a stale recorder.status says nothing about the recorder.
-  const recorderStale = !khDown && (rs === null || rsAge === null || rsAge > RECORDER_STALE_MS);
+  // F5: with kiosk-health absent/stale/not enrolled a stale recorder.status says nothing about the recorder, but an open session with no chunk for 10 min is still a dead
+  // session: fire, and say that the recorder state is unknown (inputs.recorder_stale = "unknown") instead of forcing it to false.
+  const recorderStale: boolean | "unknown" = khDown ? "unknown" : rs === null || rsAge === null || rsAge > RECORDER_STALE_MS;
   const recorderClosed = rs?.session_open === false;
-  if (!(recorderStale || recorderClosed)) return null;
-  const why = `no chunk for ${Math.round(chunkAge / MIN)} min and ${recorderClosed ? "the recorder says no session is open" : "recorder.status is stale"}`;
+  if (recorderStale === false && !recorderClosed) return null;
+  const rsFact = { recorder_stale: recorderStale };
+  const why = `no chunk for ${Math.round(chunkAge / MIN)} min and ${
+    recorderClosed ? "the recorder says no session is open" : recorderStale === "unknown" ? "kiosk-health is absent or stale (recorder state unknown)" : "recorder.status is stale"
+  }`;
   const restarts = rowsOf(c, "scribe_restart", LADDER_MEMORY_MS);
   const appRestarts = rowsOf(c, "ticket:restart_recorder_app", LADDER_MEMORY_MS);
-  if (restarts.length === 0) return [mk(c, "session_died", "scribe_restart", {}, why, null, "error", { recorder_closed: recorderClosed, restarts: 0 })];
+  if (restarts.length === 0) return fcAll([mk(c, "session_died", "scribe_restart", {}, why, null, "error", { recorder_closed: recorderClosed, restarts: 0, ...rsFact })], "session_died");
   const lastRestartAge = Math.min(...restarts.map((r) => c.A - Date.parse(r.ts)));
   if (appRestarts.length === 0 && lastRestartAge < LADDER_STEP_MS) {
-    return [mk(c, "session_died", "log_only", {}, `${why}; scribe_restart sent ${Math.round(lastRestartAge / MIN)} min ago, waiting 5 min`, "next step held: waiting for the restart to take effect", "warn", { recorder_closed: recorderClosed, restarts: restarts.length })];
+    return fcAll([mk(c, "session_died", "log_only", {}, `${why}; scribe_restart sent ${Math.round(lastRestartAge / MIN)} min ago, waiting 5 min`, "next step held: waiting for the restart to take effect", "warn", { recorder_closed: recorderClosed, restarts: restarts.length, ...rsFact })], "session_died");
   }
   if (recorderClosed && appRestarts.length === 0) {
-    return [mk(c, "session_died", "ticket:restart_recorder_app", {}, `${why}; scribe_restart did not recover it`, null, "error", { recorder_closed: true, restarts: restarts.length })];
+    return fcAll([mk(c, "session_died", "ticket:restart_recorder_app", {}, `${why}; scribe_restart did not recover it`, null, "error", { recorder_closed: true, restarts: restarts.length, ...rsFact })], "session_died");
   }
-  return [
+  return fcAll([
     mk(
       c,
       "session_died",
@@ -358,9 +419,9 @@ function sessionDied(c: Ctx): Decision[] | null {
       `${why}; restart ladder exhausted`,
       appRestarts.length > 0 ? "restart_recorder_app already tried" : "restart_recorder_app skipped: the recorder has not confirmed that no session is open",
       "error",
-      { recorder_closed: recorderClosed, restarts: restarts.length, app_restarts: appRestarts.length },
+      { recorder_closed: recorderClosed, restarts: restarts.length, app_restarts: appRestarts.length, ...rsFact },
     ),
-  ];
+  ], "session_died");
 }
 
 function kioskHealthDown(c: Ctx): Decision[] | null {
@@ -370,11 +431,13 @@ function kioskHealthDown(c: Ctx): Decision[] | null {
   if (pAge === null || pAge > ASLEEP_AFTER_MS) return null; // the poller is not ok: that is the asleep rule's business
   const kAge = age(s.reachable.kh_heartbeat_at);
   if (kAge !== null && kAge <= KH_DOWN_AFTER_MS) return null;
-  const out: Decision[] = [mk(c, "kiosk_health_down", "ticket:restart_kiosk_health", {}, "no kiosk-health heartbeat for 5 min while the poller is ok", null, "warn")];
+  // positive failure signal for the fleet count only when kiosk-health had reported today (silent AFTER reporting, not never enrolled-and-quiet)
+  const reportedToday = atOrAfter(s.reachable.kh_heartbeat_at, todayFloor(c));
+  const out: Decision[] = [mk(c, "kiosk_health_down", "ticket:restart_kiosk_health", {}, "no kiosk-health heartbeat for 5 min while the poller is ok", null, "warn", {}, { reported_today: reportedToday })];
   if (kAge === null || kAge >= KH_DOWN_MESSAGE_AFTER_MS) {
-    out.push(mk(c, "kiosk_health_down", "message", { kind: "kh_down_10m", needs_hands: true, text: "kiosk-health daemon still down after 10 min — needs hands" }, "still down after 10 min", "restart_kiosk_health did not bring it back", "warn"));
+    out.push(mk(c, "kiosk_health_down", "message", { kind: "kh_down_10m", needs_hands: true, text: "kiosk-health daemon still down after 10 min — needs hands" }, "still down after 10 min", "restart_kiosk_health did not bring it back", "warn", {}, { reported_today: reportedToday }));
   }
-  return out;
+  return reportedToday ? fcAll(out, "kiosk_health_down") : out;
 }
 
 function micFault(c: Ctx): Decision[] | null {
@@ -394,9 +457,9 @@ function micFault(c: Ctx): Decision[] | null {
     return [mk(c, "mic_check_pending", "none", {}, "mic problem seen but the consult opened under 60 s ago", "mic message held: consult under 60 s old", "info")];
   }
   if (missingMic) {
-    return [mk(c, "mic_fault", "message", { kind: "mic_missing", text: "mic unplugged/missing — check cable" }, "consult open >= 60 s and the default input is missing", "never a restart: the mic is physical", "error")];
+    return fcAll([mk(c, "mic_fault", "message", { kind: "mic_missing", text: "mic unplugged/missing — check cable" }, "consult open >= 60 s and the default input is missing", "never a restart: the mic is physical", "error")], "mic_fault");
   }
-  return [mk(c, "mic_fault", "message", { kind: "mic_silent", text: "no sound from the mic — check mute or cable" }, "consult open >= 60 s and the tape has been silent >= 60 s", "never a restart: the mic is physical", "error")];
+  return fcAll([mk(c, "mic_fault", "message", { kind: "mic_silent", text: "no sound from the mic — check mute or cable" }, "consult open >= 60 s and the tape has been silent >= 60 s", "never a restart: the mic is physical", "error")], "mic_fault");
 }
 
 function profileUnloaded(c: Ctx): Decision[] | null {
@@ -406,7 +469,7 @@ function profileUnloaded(c: Ctx): Decision[] | null {
   if (ch.active.includes(ch.last_used)) return null;
   const extAge = age(s.ext.last_event_at);
   if (extAge !== null && extAge < PROFILE_QUIET_MS) return null;
-  return chromeTicket(c, "profile_unloaded", "open_pulse", ch.last_used, "chrome is running but the profile in use is not loaded and the extension is silent", "warn", null);
+  return fcAll(chromeTicket(c, "profile_unloaded", "open_pulse", ch.last_used, "chrome is running but the profile in use is not loaded and the extension is silent", "warn", null), "profile_unloaded");
 }
 
 const EXT_MISSING_PREFIX = "ext_missing:";
@@ -423,16 +486,16 @@ function extensionMissing(c: Ctx): Decision[] | null {
   if (!profile) return null;
   const relaunches = rowsOf(c, "ticket:relaunch_chrome", LADDER_MEMORY_MS, profile);
   if (relaunches.length === 0) {
-    return chromeTicket(c, "extension_missing", "relaunch_chrome", profile, "the extension is missing from the profile (chrome.alert)", "error", null);
+    return fcAll(chromeTicket(c, "extension_missing", "relaunch_chrome", profile, "the extension is missing from the profile (chrome.alert)", "error", null), "extension_missing");
   }
   const lastAge = Math.min(...relaunches.map((r) => c.A - Date.parse(r.ts)));
   if (lastAge < 2 * LADDER_STEP_MS) {
-    return [mk(c, "extension_missing", "log_only", { profile }, `relaunch_chrome sent ${Math.round(lastAge / MIN)} min ago; waiting before the policy cycle`, "policy_cycle held: waiting 10 min after relaunch", "warn")];
+    return fcAll([mk(c, "extension_missing", "log_only", { profile }, `relaunch_chrome sent ${Math.round(lastAge / MIN)} min ago; waiting before the policy cycle`, "policy_cycle held: waiting 10 min after relaunch", "warn")], "extension_missing");
   }
   const dayStart = istMidnightOf(c.A);
   const cycles = c.recent.room.filter((r) => r.action === "ticket:policy_cycle" && r.params?.profile === profile && Date.parse(r.ts) >= dayStart).length;
   if (cycles >= c.cfg.caps.policy_cycle_per_profile_per_day) {
-    return [
+    return fcAll([
       mk(
         c,
         "extension_missing",
@@ -442,9 +505,9 @@ function extensionMissing(c: Ctx): Decision[] | null {
         `policy_cycle held: ${cycles} of ${c.cfg.caps.policy_cycle_per_profile_per_day} used today for this profile`,
         "error",
       ),
-    ];
+    ], "extension_missing");
   }
-  return chromeTicket(c, "extension_missing", "policy_cycle", profile, "relaunch_chrome did not restore the extension", "error", "relaunch_chrome already tried");
+  return fcAll(chromeTicket(c, "extension_missing", "policy_cycle", profile, "relaunch_chrome did not restore the extension", "error", "relaunch_chrome already tried"), "extension_missing");
 }
 
 function chain(c: Ctx): Decision[] {
@@ -503,15 +566,19 @@ function guards(c: Ctx, ds: Decision[]): Decision[] {
     }).length;
     if (failed >= FAILING_ACTION_MAX) {
       out = [
-        mk(
-          c,
-          "action_failing",
-          "message",
-          { kind: "action_failing", needs_hands: true, action: p.action, ...(typeof p.params?.profile === "string" ? { profile: p.params.profile } : {}), failures: failed, text: `${p.action} has failed ${failed} times — stopped, needs hands` },
-          `${p.action} failed ${failed} times in the last hour`,
-          `${p.action} held: failing ${failed} times`,
-          "error",
-          { failed_action: p.action, failures: failed },
+        inherit(
+          mk(
+            c,
+            "action_failing",
+            "message",
+            { kind: "action_failing", needs_hands: true, action: p.action, ...(typeof p.params?.profile === "string" ? { profile: p.params.profile } : {}), text: `${p.action} has failed repeatedly — stopped, needs hands` },
+            `${p.action} failed ${failed} times in the last hour`,
+            `${p.action} held: failing ${failed} times`,
+            "error",
+            { failed_action: p.action },
+            { failures: failed },
+          ),
+          p,
         ),
       ];
     }
@@ -523,15 +590,19 @@ function guards(c: Ctx, ds: Decision[]): Decision[] {
     const n = c.recent.room.filter((r) => COUNTED_FOR_CAP(r.action) && c.A - Date.parse(r.ts) <= 60 * MIN && c.A >= Date.parse(r.ts)).length;
     if (n >= c.cfg.caps.actions_per_room_per_hour) {
       out = [
-        mk(
-          c,
-          "cap_reached",
-          "log_only",
-          { wanted: head.action, ...(typeof head.params?.profile === "string" ? { profile: head.params.profile } : {}) },
-          `wanted ${head.action} (${head.rule}) but the hourly action cap is reached`,
-          `actions_per_room_per_hour=${c.cfg.caps.actions_per_room_per_hour} reached (${n} in the last hour)`,
-          "warn",
-          { capped_rule: head.rule },
+        inherit(
+          mk(
+            c,
+            "cap_reached",
+            "log_only",
+            { wanted: head.action, ...(typeof head.params?.profile === "string" ? { profile: head.params.profile } : {}) },
+            `wanted ${head.action} (${head.rule}) but the hourly action cap is reached`,
+            `actions_per_room_per_hour=${c.cfg.caps.actions_per_room_per_hour} reached (${n} in the last hour)`,
+            "warn",
+            { capped_rule: head.rule },
+            { actions_last_hour: n },
+          ),
+          head,
         ),
       ];
     }
@@ -543,15 +614,19 @@ function guards(c: Ctx, ds: Decision[]): Decision[] {
     const n = c.recent.fleet.failing[h.rule] ?? 0;
     if (c.recent.fleet.hold[h.rule] || n >= FLEET_MIN_ROOMS) {
       out = [
-        mk(
-          c,
-          "fleet_hold",
-          "log_only",
-          { class: h.rule, wanted: h.action },
-          `fleet incident: ${Math.max(n, FLEET_MIN_ROOMS)}+ rooms failing "${h.rule}"; the per-room ${h.action} is held for 15 min`,
-          `${h.action} held: fleet incident on ${h.rule}`,
-          "warn",
-          { class: h.rule },
+        inherit(
+          mk(
+            c,
+            "fleet_hold",
+            "log_only",
+            { class: h.rule, wanted: h.action },
+            `fleet incident: ${Math.max(n, FLEET_MIN_ROOMS)}+ rooms failing "${h.rule}"; the per-room ${h.action} is held for 15 min`,
+            `${h.action} held: fleet incident on ${h.rule}`,
+            "warn",
+            { class: h.rule },
+            { failing_rooms: n },
+          ),
+          h,
         ),
       ];
     }
@@ -577,12 +652,9 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
 export function failingClass(ds: readonly Decision[]): string | null {
   const p = ds[0];
   if (!p) return null;
-  if (p.rule === "fleet_hold") return typeof p.params.class === "string" ? p.params.class : null;
-  if (p.rule === "action_failing" || p.rule === "cap_reached") {
-    const w = p.inputs.capped_rule;
-    return typeof w === "string" && FAILING_RULES.includes(w) ? w : null;
-  }
-  return FAILING_RULES.includes(p.rule) ? p.rule : null;
+  // only a decision that carries a POSITIVE failure signal puts its room in a class; a held / capped decision keeps the class of the decision it replaced
+  const cls = p.failing_class;
+  return typeof cls === "string" && FAILING_RULES.includes(cls) ? cls : null;
 }
 
 /** One fleet decision per class with >= FLEET_MIN_ROOMS failing rooms (room_id null, window_kind 'fleet'). Sorted by class. */

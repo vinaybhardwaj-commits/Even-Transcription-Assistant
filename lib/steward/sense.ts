@@ -4,7 +4,7 @@
  * senseAll(sql, asOf, roster, degraded?) -> Map<room_id, RoomSense>. A BOUNDED set of statements, each machine-scoped (machine = ANY / = m.n) or room-scoped
  * (room_id = ANY) and time-bounded to asOf (the full list with bounds is in the steward-2 notes and the comment on each statement below). Everything the existing
  * readers already compute is REUSED, not re-queried: readKioskHealth (recorder.status, heartbeat, audio.devices, chrome.profile/alert, enrolment), extHealth
- * (ext status, poller idle) and machineOccupancy (occupancy, pending login, identity fault), isSilentChunk / evaluateStartBackoff (R3 silence by rate, start backoff).
+ * (ext status, poller idle) and scopedOccupancy (occupancy, pending login, identity fault; roster-scoped, 2 h), isSilentChunk / evaluateStartBackoff (R3 silence by rate, start backoff).
  *
  * FAILURE CONTRACT. Every source is read through safe(): a source that throws is NAMED in `degraded` and its fields stay null; the room's `missing` lists every null
  * input by name so a rule can say WHY it did not fire. A failed source never throws out of senseAll.
@@ -14,7 +14,9 @@
 import type { WindowsDb } from "@/lib/encounter-windows/db";
 import { extHealth, isExtHealthExcluded, type ExtHealthRoom, type ExtHealthRow, type ExtStatus } from "@/lib/encounter-windows/ext-health";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
-import { machineOccupancy, type MachineOccupancy } from "@/lib/encounter-windows/occupant";
+import { scopedOccupancy, type ScopedOccupancy } from "./occupancy-read";
+import { DEFAULT_SOURCE_TIMEOUT_MS } from "./config";
+import { SourceTimeout, raceTimeout } from "./timeout";
 import { canonicalMachine, expandKeys, matchKey, readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { evaluateStartBackoff, type StartAttempt, START_ACK_SESSION_GRACE_S, START_BACKOFF_WINDOW_S } from "@/lib/bench-commands";
 import { LISTENER_FRESH_MS, SILENT_MS, SILENT_ZERO_RATIO, parseInstallState } from "@/lib/bench-bus-constants";
@@ -94,12 +96,40 @@ const jsonVal = (v: unknown): unknown => {
 };
 const boolOrNull = (v: unknown): boolean | null => (v === true || v === "true" ? true : v === false || v === "false" ? false : null);
 
-async function safe<T>(source: string, degraded: string[], fn: () => Promise<T>, fallback: T): Promise<{ v: T; ok: boolean }> {
+/** Limits for one sense pass: every source read has a timeout, and nothing new starts after the deadline. */
+export type SenseLimits = {
+  /** per-source timeout (steward_config source_timeout_ms), default 6000 */
+  sourceTimeoutMs?: number;
+  /** absolute time (in `now()` units) after which no source is started and a running one is cut: the tick keeps the rest of its budget for the decisions INSERT */
+  deadlineMs?: number;
+  now?: () => number;
+};
+
+/**
+ * A source read with a timeout (min of the per-source timeout and the time left to the deadline). A failure names the source in `degraded`; a timeout names
+ * `<source>:timeout`; a source not started because the deadline had passed names `<source>:skipped`. The fallback stands in for the data in every case.
+ */
+export async function safeRead<T>(lim: SenseLimits, source: string, degraded: string[], fn: () => Promise<T>, fallback: T): Promise<{ v: T; ok: boolean }> {
+  const now = lim.now ?? Date.now;
+  const mark = (name: string) => {
+    if (!degraded.includes(name)) degraded.push(name);
+  };
+  const left = lim.deadlineMs === undefined ? Number.POSITIVE_INFINITY : lim.deadlineMs - now();
+  if (left <= 0) {
+    mark(`${source}:skipped`);
+    return { v: fallback, ok: false };
+  }
+  const ms = Math.min(lim.sourceTimeoutMs ?? DEFAULT_SOURCE_TIMEOUT_MS, left);
   try {
-    return { v: await fn(), ok: true };
+    return { v: await raceTimeout(fn, ms), ok: true };
   } catch (e) {
-    console.error(`[steward-sense] could not read ${source}:`, e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
-    if (!degraded.includes(source)) degraded.push(source);
+    if (e instanceof SourceTimeout) {
+      console.error(`[steward-sense] ${source} timed out after ${Math.round(ms)} ms`);
+      mark(`${source}:timeout`);
+    } else {
+      console.error(`[steward-sense] could not read ${source}:`, e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
+      mark(source);
+    }
     return { v: fallback, ok: false };
   }
 }
@@ -115,8 +145,8 @@ const groupBy = <T extends { room_id: string }>(rows: T[]): Map<string, T[]> => 
 };
 
 export const SENSE_BOUNDS = {
-  /** newest poller `ok` row per machine */
-  poller_lookback_min: 30,
+  /** newest poller `ok` row per machine (24 h: kiosk_asleep needs "awake today" and "any data in 2 h"; one LIMIT 1 index probe per spelling, so the width costs nothing when rows exist) */
+  poller_lookback_min: 24 * 60,
   /** newest ext event of any kind (explains no_tab) */
   ext_event_lookback_h: 2,
   /** newest ext heartbeat */
@@ -157,8 +187,10 @@ export async function senseAll(
   asOfIn: number | string | Date,
   roster: readonly RosterRoom[],
   degraded: string[] = [],
+  limits: SenseLimits = {},
 ): Promise<Map<string, RoomSense>> {
   const sql = sqlIn as unknown as WindowsDb & StewardSql;
+  const safe = <T>(source: string, deg: string[], fn: () => Promise<T>, fallback: T) => safeRead(limits, source, deg, fn, fallback);
   const A = new Date(asOfIn).getTime();
   if (!Number.isFinite(A)) throw new Error("senseAll: bad asOf");
   const hi = new Date(A).toISOString();
@@ -174,6 +206,8 @@ export async function senseAll(
   const mj = JSON.stringify(uniqMachines);
   const khKeys = [...new Set(withMachine.flatMap((r) => machineKeys(r.machine as string)))];
   const khKeysExpanded = expandKeys(khKeys);
+  /** every spelling pulse_presence_events may carry for the roster machines (canonical + legacy keys) */
+  const occKeys = [...new Set([...khKeys, ...uniqMachines.map((m) => m.n)])];
   const extRooms: ExtHealthRoom[] = withMachine.map((r) => ({ room_id: r.room_id, room_name: r.room_name, hostname: r.machine as string }));
 
   if (roster.length === 0) return new Map();
@@ -305,8 +339,9 @@ export async function senseAll(
     }, new Map<string, KioskHealthSnapshot>()),
     // 13 — extension health: reuse extHealth (ext status, poller idle; excluded machines have no row).
     safe("ext_health", degraded, () => extHealth(sql, { asOf: A, rooms: extRooms }), [] as ExtHealthRow[]),
-    // 14 — occupancy: reuse machineOccupancy (pending login, identity fault, occupied).
-    safe("occupancy", degraded, () => machineOccupancy(sql, A), [] as MachineOccupancy[]),
+    // 14 — occupancy (pending login, identity fault, occupied): the steward's own SCOPED reader (lib/steward/occupancy-read.ts): roster machines only, last 2 h, LIMIT 5000,
+    //      on the (machine, ts) index — not machineOccupancy, which scans every machine for 25-49 h.
+    safe("occupancy", degraded, () => scopedOccupancy(sql, A, occKeys), [] as ScopedOccupancy[]),
   ]);
 
   const sessBy = new Map<string, SessionRow>();

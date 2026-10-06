@@ -3,6 +3,8 @@
  *
  * steward_config (migration 0128) is key/value jsonb, seeded once, one row per knob. loadConfig reads ALL rows in ONE statement; parseConfig turns them into a
  * typed Config. A missing or malformed key falls back to the seed value and is named in `invalid` — except the kill switch, whose fallback is ON (the safe side).
+ * The fallback is for caps / timeouts / switches ONLY. `rooms` and `schedule` have NO fallback: if either is missing or malformed (or the read fails) the config is
+ * UNAVAILABLE (`fatal`) and the loop skips the tick (a default roster would re-admit dev/test rooms and re-class the OT room; a default schedule would act on the wrong hours).
  *
  * Roster (buildRoster, pure): every Scribe room (the `room` table, not disabled), class from config.rooms[room].class else 'clinic'; excluded when the room's config
  * flags contain 'test' or 'dev'; machine from config.rooms[room].machine else the room's enrolled install hostname (the same room↔machine mapping ext-health uses).
@@ -26,9 +28,14 @@ export type Config = {
   caps: { actions_per_room_per_hour: number; policy_cycle_per_profile_per_day: number; start_retries: number };
   priority: RoomClass[];
   rooms: Record<string, RoomOverride>;
+  /** per-source read timeout of the sense step (steward_config key `source_timeout_ms`, optional: a number or {ms}); default 6000 */
+  source_timeout_ms: number;
 };
 
 export const CONFIG_KEYS = ["kill_switch", "shadow", "schedule", "days", "caps", "priority", "rooms"] as const;
+/** keys with NO fallback: missing or malformed = config unavailable (the tick is skipped). */
+export const FATAL_CONFIG_KEYS = ["rooms", "schedule"] as const;
+export const DEFAULT_SOURCE_TIMEOUT_MS = 6000;
 
 /** The seed of migration 0128, minus the seeded rooms (those are data, not defaults). Kill switch ON. */
 export const DEFAULT_CONFIG: Config = {
@@ -41,7 +48,9 @@ export const DEFAULT_CONFIG: Config = {
   days: { mode: "every_day", closed: [] },
   caps: { actions_per_room_per_hour: 4, policy_cycle_per_profile_per_day: 1, start_retries: 3 },
   priority: ["ot", "opd", "clinic"],
+  // NOT a fallback: rooms/schedule are FATAL when missing (see FATAL_CONFIG_KEYS). These are placeholders so the type is total.
   rooms: {},
+  source_timeout_ms: DEFAULT_SOURCE_TIMEOUT_MS,
 };
 
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
@@ -69,8 +78,11 @@ function parseSched(raw: unknown, dflt: Sched): Sched | null {
   return { start, end, tz: "Asia/Kolkata", late_stop_max_min: late };
 }
 
-/** Typed config from the raw rows. `invalid` names every key that was missing or malformed (its default was used). */
-export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>): { config: Config; invalid: string[] } {
+/**
+ * Typed config from the raw rows. `invalid` names every key that was missing or malformed (its default was used). `fatal` is the subset with no safe default
+ * (rooms, schedule): when it is non-empty the caller must not run a tick with this config.
+ */
+export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>): { config: Config; invalid: string[]; fatal: string[] } {
   const raw = new Map<string, unknown>();
   for (const r of rows) raw.set(r.key, jsonVal(r.value));
   const invalid: string[] = [];
@@ -130,11 +142,20 @@ export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>
     if (!ok) invalid.push("rooms");
   } else invalid.push("rooms");
 
-  return { config: cfg, invalid };
+  // optional: absent = default and NOT invalid; present but malformed = default and invalid
+  if (raw.has("source_timeout_ms")) {
+    const v = raw.get("source_timeout_ms");
+    const ms = typeof v === "number" ? v : isObj(v) ? v.ms : undefined;
+    if (typeof ms === "number" && Number.isInteger(ms) && ms >= 500 && ms <= 15_000) cfg.source_timeout_ms = ms;
+    else invalid.push("source_timeout_ms");
+  }
+
+  const fatal = invalid.filter((k) => (FATAL_CONFIG_KEYS as readonly string[]).includes(k));
+  return { config: cfg, invalid, fatal };
 }
 
 /** ONE statement: every steward_config row. */
-export async function loadConfig(sql: StewardSql): Promise<{ config: Config; invalid: string[] }> {
+export async function loadConfig(sql: StewardSql): Promise<{ config: Config; invalid: string[]; fatal: string[] }> {
   const rows = (await sql`SELECT key, value FROM steward_config`) as Array<{ key: string; value: unknown }>;
   return parseConfig(rows);
 }

@@ -3,8 +3,9 @@
  *
  * P0 IS SHADOW: it senses every room, decides, and RECORDS what it would do in steward_decisions. It never calls Scribe, never issues a ticket, never sends a message.
  * Auth: Authorization: Bearer ${CRON_SECRET} (same as the other crons). Unset -> 503 and NOTHING runs; wrong or missing -> 401.
- * Response 200: { rooms, decisions_written, skipped_lock, elapsed_ms, degraded[], kill_switch, budget_hit, fleet_incidents }. A tick that cannot do its work reports it in
- * `degraded` rather than failing; only a crash of the loop itself answers 500.
+ * Response 200: { ok, rooms, decisions_written, skipped_lock, elapsed_ms, degraded[], kill_switch, budget_hit, fleet_incidents }. A tick that cannot do its work reports it in
+ * `degraded` rather than failing; only a crash of the loop itself answers 500. A config without `rooms` / `schedule` (or an unreadable one) skips the tick: 200 { ok:false,
+ * reason:"config_unavailable", ... } — the lease is never taken. Each tick logs one JSON line `steward.tick` and stores steward_config.last_tick.
  */
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";

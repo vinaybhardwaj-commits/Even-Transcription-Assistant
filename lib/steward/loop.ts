@@ -7,6 +7,11 @@
  * actionable decision is recorded with result "kill_switch"; with it OFF and shadow on, "shadow: would <action>". Asking for LIVE (shadow off for an action) selects the
  * LiveExecutor stub, which throws; the loop records the decision as shadow with result "blocked: live executor not enabled in P0" and names it in `degraded`.
  *
+ * CONFIG. Read BEFORE the lease. No `rooms` / `schedule` (or a failed read) = the tick is skipped with {ok:false, reason:"config_unavailable"}: nothing is taken, nothing released.
+ * BUDGET. Sensing and the decision-log read share the first (budget - 3 s); every source read has its own timeout (steward_config source_timeout_ms, default 6 s); the last 3 s
+ * are reserved for the decisions INSERT, which a tick always attempts once it holds the lease and has a config.
+ * LAST TICK. The lease release also writes steward_config.last_tick (one statement) and the tick logs one JSON line `steward.tick`.
+ *
  * LOCK. The spec asked for pg_try_advisory_lock. That lock is SESSION-scoped and the Neon HTTP driver gives no session: each statement may run on a different backend and
  * the lock would be dropped (or leaked) at once. The mutual exclusion here is therefore a LEASE ROW in steward_config (key 'loop_lease', value {holder, until}) taken and
  * released with single atomic statements; an expired lease (a crashed run) is taken over. See leaseLock.
@@ -18,18 +23,25 @@
  * write (it would only repeat rows), a failure of the roster read ends the tick with rooms 0.
  */
 import { randomUUID } from "node:crypto";
-import { DEFAULT_CONFIG, buildRoster, loadConfig, type Config, type RosterRow } from "./config";
+import { buildRoster, loadConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
 import { senseAll } from "./sense";
+import { SourceTimeout, raceTimeout } from "./timeout";
 import type { StewardSql } from "./tickets";
 
 export const DEDUPE_REFRESH_MS = 15 * 60_000;
 export const FLEET_COUNT_WINDOW_MS = 5 * 60_000;
 export const LEASE_KEY = "loop_lease";
 export const LEASE_TTL_S = 55;
+/** the last part of the tick budget kept for the decisions INSERT (sensing and the log read stop before it) */
+export const INSERT_RESERVE_MS = 3000;
+export const LAST_TICK_KEY = "last_tick";
 
 export type StewardSummary = {
+  /** false only when the tick could not run at all (reason set) */
+  ok: boolean;
+  reason?: "config_unavailable";
   rooms: number;
   decisions_written: number;
   skipped_lock: boolean;
@@ -42,7 +54,8 @@ export type StewardSummary = {
 
 export interface LoopLock {
   acquire(): Promise<boolean>;
-  release(): Promise<void>;
+  /** `lastTick`, when given, is stored as steward_config.last_tick in the SAME statement as the release */
+  release(lastTick?: Record<string, unknown>): Promise<void>;
 }
 
 /** Lease row in steward_config; single atomic statements. See the file header for why this is not pg_try_advisory_lock. */
@@ -61,11 +74,26 @@ export function leaseLock(sql: StewardSql, opts: { holder?: string; ttlSeconds?:
       `) as unknown[];
       return rows.length > 0;
     },
-    async release() {
+    async release(lastTick) {
+      if (!lastTick) {
+        await sql`
+          UPDATE steward_config
+             SET value = jsonb_build_object('holder', NULL::text, 'until', now()::text), updated_at = now()
+           WHERE key = ${LEASE_KEY} AND value->>'holder' = ${holder}::text
+        `;
+        return;
+      }
+      // ONE statement: the guarded release (UPDATE) and the last_tick upsert (INSERT .. SELECT FROM the released row), so a lost lease writes no last_tick and a release costs one round trip
       await sql`
-        UPDATE steward_config
-           SET value = jsonb_build_object('holder', NULL::text, 'until', now()::text), updated_at = now()
-         WHERE key = ${LEASE_KEY} AND value->>'holder' = ${holder}::text
+        WITH rel AS (
+          UPDATE steward_config
+             SET value = jsonb_build_object('holder', NULL::text, 'until', now()::text), updated_at = now()
+           WHERE key = ${LEASE_KEY} AND value->>'holder' = ${holder}::text
+          RETURNING key
+        )
+        INSERT INTO steward_config (key, value, updated_by)
+        SELECT ${LAST_TICK_KEY}::text, ${JSON.stringify(lastTick)}::jsonb, ${holder}::text FROM rel
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by
       `;
     },
   };
@@ -122,7 +150,7 @@ export function outcomeOf(result: string | null): RecentAction["outcome"] {
   return null;
 }
 
-type DbRow = { id?: unknown; room_id: string | null; ts: unknown; rule: string; action: string; params: unknown; result: string | null; primary?: unknown };
+type DbRow = { id?: unknown; room_id: string | null; ts: unknown; rule: string; action: string; params: unknown; result: string | null; primary?: unknown; failing_class?: string | null };
 
 async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promise<{ lastPrimary: Map<string, DbRow>; recentRows: Map<string, RecentAction[]>; fleetRows: DbRow[] }> {
   const hi = new Date(A).toISOString();
@@ -136,7 +164,7 @@ async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promis
   `) as DbRow[];
   // every non-'none' row of the last 24 h (the rules' memory: tries, ladder steps, caps, policy_cycle per day) — newest first, capped
   const rows = (await sql`
-    SELECT d.room_id, d.ts, d.rule, d.action, d.params, d.result
+    SELECT d.room_id, d.ts, d.rule, d.action, d.params, d.result, d.inputs->>'failing_class' AS failing_class
       FROM steward_decisions d
      WHERE d.room_id = ANY(${roomIds}::text[]) AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz AND d.action <> 'none'
      ORDER BY d.ts DESC, d.id DESC
@@ -156,7 +184,7 @@ async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promis
   for (const r of rows) {
     const ts = toIso(r.ts);
     if (!r.room_id || !ts) continue;
-    const a: RecentAction = { ts, rule: r.rule, action: r.action, params: objOf(r.params), outcome: outcomeOf(r.result) };
+    const a: RecentAction = { ts, rule: r.rule, action: r.action, params: objOf(r.params), outcome: outcomeOf(r.result), failing_class: typeof r.failing_class === "string" ? r.failing_class : null };
     const l = recentRows.get(r.room_id);
     if (l) l.push(a);
     else recentRows.set(r.room_id, [a]);
@@ -195,6 +223,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     if (!degraded.includes(s)) degraded.push(s);
   };
   const summary = (over: Partial<StewardSummary>): StewardSummary => ({
+    ok: true,
     rooms: 0,
     decisions_written: 0,
     skipped_lock: false,
@@ -205,6 +234,24 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     fleet_incidents: 0,
     ...over,
   });
+
+  // --- config FIRST, before the lease (F8). No `rooms` / `schedule` = no tick: a default roster would re-admit dev/test rooms and re-class the OT room. Nothing is
+  //     taken, so nothing is released. (The seed fallback stays for caps / timeouts / switches only.)
+  let cfg: Config;
+  try {
+    const r = await loadConfig(sql);
+    if (r.fatal.length > 0) {
+      console.error(`[steward] config unavailable: ${r.fatal.join(",")} missing or malformed`);
+      for (const k of r.fatal) degrade(`config:${k}`);
+      return configUnavailable(summary, degraded, now() - t0);
+    }
+    cfg = r.config;
+    for (const k of r.invalid) degrade(`config:${k}`);
+  } catch (e) {
+    console.error("[steward] config read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
+    degrade("steward_config");
+    return configUnavailable(summary, degraded, now() - t0);
+  }
 
   const lock = opts.lock ?? leaseLock(sql);
   let got = false;
@@ -217,18 +264,8 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
   }
   if (!got) return summary({ skipped_lock: true });
 
-  try {
-    // --- config (one query). A failure falls back to the seed with the kill switch ON.
-    let cfg: Config = DEFAULT_CONFIG;
-    try {
-      const r = await loadConfig(sql);
-      cfg = r.config;
-      for (const k of r.invalid) degrade(`config:${k}`);
-    } catch (e) {
-      console.error("[steward] config read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
-      degrade("steward_config");
-    }
-
+  // The tick body. Every path returns a summary; the lease is released (with the last_tick summary) after it, whatever happened.
+  const body = async (): Promise<StewardSummary> => {
     // --- roster
     let rosterRows: RosterRow[] = [];
     try {
@@ -246,22 +283,47 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     const roster = buildRoster(rosterRows, cfg);
     if (roster.length === 0) return summary({ kill_switch: cfg.kill_switch });
 
-    // --- sense
-    const senses = await senseAll(sql, A, roster, degraded);
+    // --- time plan (F3): sensing and the decision-log read stop INSERT_RESERVE_MS before the budget ends; the decisions INSERT always gets that reserve.
+    const senseDeadline = t0 + opts.budgetMs - INSERT_RESERVE_MS;
 
-    // --- the decision log (memory for the rules and the dedupe reference)
-    let mem: Awaited<ReturnType<typeof loadRecent>> | null = null;
+    // --- sense: every source has its own timeout; past the deadline the remaining sources are skipped (degraded) and the tick still decides and writes
+    let senses: Awaited<ReturnType<typeof senseAll>>;
     try {
-      mem = await loadRecent(sql, roster.map((r) => r.room_id), A);
+      senses = await senseAll(sql, A, roster, degraded, { sourceTimeoutMs: cfg.source_timeout_ms, deadlineMs: senseDeadline, now });
     } catch (e) {
-      console.error("[steward] decision log read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
-      degrade("steward_decisions");
+      console.error("[steward] sense failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
+      degrade("sense");
+      senses = new Map();
     }
-    if (!mem) return summary({ rooms: roster.length, kill_switch: cfg.kill_switch });
 
-    const recentFor = (roomId: string, fleet: RecentContext["fleet"]): RecentContext => ({ room: mem!.recentRows.get(roomId) ?? [], fleet });
+    // --- the decision log (memory for the rules and the dedupe reference). A failure / timeout does NOT end the tick: decisions are made without memory, flagged
+    //     inputs.memory_degraded, and the INSERT is still attempted (the spec: a tick never ends without trying the insert).
+    let mem: Awaited<ReturnType<typeof loadRecent>> = { lastPrimary: new Map(), recentRows: new Map(), fleetRows: [] };
+    let memoryDegraded = false;
+    {
+      const left = senseDeadline - now();
+      if (left <= 0) {
+        degrade("steward_decisions:skipped");
+        memoryDegraded = true;
+      } else {
+        try {
+          mem = await raceTimeout(() => loadRecent(sql, roster.map((r) => r.room_id), A), Math.min(cfg.source_timeout_ms, left));
+        } catch (e) {
+          memoryDegraded = true;
+          if (e instanceof SourceTimeout) {
+            console.error("[steward] decision log read timed out");
+            degrade("steward_decisions:timeout");
+          } else {
+            console.error("[steward] decision log read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
+            degrade("steward_decisions");
+          }
+        }
+      }
+    }
 
-    // --- pass 1 (no fleet context) -> who is failing how
+    const recentFor = (roomId: string, fleet: RecentContext["fleet"]): RecentContext => ({ room: mem.recentRows.get(roomId) ?? [], fleet });
+
+    // --- pass 1 (no fleet context) -> who carries a POSITIVE failure signal, and of which class (F1)
     const failingRooms: Record<string, string[]> = {};
     const noFleet: RecentContext["fleet"] = { failing: {}, hold: {} };
     for (const room of roster) {
@@ -270,9 +332,10 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, noFleet));
       const cls = failingClass(ds);
       if (cls) (failingRooms[cls] ??= []).push(room.room_id);
-      // a failure seen in the last 5 minutes still counts toward "the same way within 5 min"
+      // a positive signal recorded in the last 5 minutes still counts toward "the same way within 5 min"; rows without failing_class (a room that merely had not started) never do
       for (const r of mem.recentRows.get(room.room_id) ?? []) {
-        if (FAILING_RULES.includes(r.rule) && A - Date.parse(r.ts) <= FLEET_COUNT_WINDOW_MS && Date.parse(r.ts) <= A) (failingRooms[r.rule] ??= []).push(room.room_id);
+        const t = Date.parse(r.ts);
+        if (r.failing_class && FAILING_RULES.includes(r.failing_class) && A - t <= FLEET_COUNT_WINDOW_MS && t <= A) (failingRooms[r.failing_class] ??= []).push(room.room_id);
       }
     }
     const failing: Record<string, number> = {};
@@ -319,7 +382,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         why: d.why,
         why_not: d.why_not,
         inputs_hash: d.inputs_hash,
-        inputs: { ...d.inputs, tick: asOfIso, primary, seq },
+        inputs: { ...d.inputs, tick: asOfIso, primary, seq, ...(memoryDegraded ? { memory_degraded: true } : {}) },
         ts: asOfIso,
       });
     };
@@ -362,7 +425,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       await record(d, true, 0);
     }
 
-    // --- ONE insert
+    // --- ONE insert (always attempted when there is something to write)
     let written = 0;
     if (rows.length > 0) {
       const inserted = (await sql`
@@ -376,17 +439,35 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       written = inserted.length;
     }
     return summary({ rooms: processed, decisions_written: written, kill_switch: cfg.kill_switch, budget_hit: budgetHit, fleet_incidents: fleetDs.length });
+  };
+
+  let result: StewardSummary;
+  try {
+    result = await body();
   } catch (e) {
-    // Anything not handled above: the tick fails soft, the lock is still released, the cron answers 200 with the degraded list.
+    // Anything not handled above: the tick fails soft, the lease is still released, the cron answers 200 with the degraded list.
     console.error("[steward] tick failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
     degrade("tick");
-    return summary({});
-  } finally {
-    try {
-      await lock.release();
-    } catch {
-      console.error("[steward] lock release failed");
-    }
+    result = summary({});
   }
+  // --- release the lease; the last_tick summary rides in the same statement (one round trip). No secrets, no PHI: counts, flags and source names.
+  const tick = tickSummary(asOfIso, result);
+  try {
+    await lock.release(tick);
+  } catch {
+    console.error("[steward] lock release failed");
+  }
+  console.log(JSON.stringify({ evt: "steward.tick", ...tick }));
+  return result;
 }
 
+/** The last_tick value and the steward.tick log line. */
+export function tickSummary(at: string, s: StewardSummary): Record<string, unknown> {
+  return { at, elapsed_ms: s.elapsed_ms, rooms: s.rooms, decisions_written: s.decisions_written, degraded: s.degraded, budget_hit: s.budget_hit };
+}
+
+function configUnavailable(summary: (over: Partial<StewardSummary>) => StewardSummary, degraded: string[], elapsed: number): StewardSummary {
+  const s = summary({ ok: false, reason: "config_unavailable", elapsed_ms: elapsed });
+  console.log(JSON.stringify({ evt: "steward.tick", reason: "config_unavailable", elapsed_ms: s.elapsed_ms, rooms: 0, decisions_written: 0, degraded, budget_hit: false }));
+  return s;
+}
