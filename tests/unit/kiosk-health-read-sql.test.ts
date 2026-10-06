@@ -27,6 +27,11 @@ function row(machine: string, kind: string, tsAgo: number, payload: unknown, rec
   seq += 1;
   return `(${lit(at(recvAgo))}, ${lit(machine)}, 'room_x', 'inst', 'boot1', ${seq}, 'daemon', ${lit(kind)}, ${lit(at(tsAgo))}, ${lit(JSON.stringify(payload))}::jsonb)`;
 }
+/** A row with explicit received_at / ts / boot_id (absolute ISO times), for the first-tail backfill proof. */
+function rowAbs(machine: string, boot: string, kind: string, recvIso: string, payload: unknown, tsIso: string = recvIso): string {
+  seq += 1;
+  return `(${lit(recvIso)}, ${lit(machine)}, 'room_x', 'inst', ${lit(boot)}, ${seq}, 'daemon', ${lit(kind)}, ${lit(tsIso)}, ${lit(JSON.stringify(payload))}::jsonb)`;
+}
 function insert(rows: string[]): void {
   pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, room_id, install_id, boot_id, seq, source, kind, ts, payload) VALUES ${rows.join(",\n")};`);
 }
@@ -157,5 +162,99 @@ describe.skipIf(!HAVE_DOCKER)("readKioskHealth against postgres 16", () => {
     await readKioskHealth(wrap as never, [M], AS_OF.toISOString());
     expect(rec.length).toBe(4);
     for (const q of rec) expect(q).toMatch(/machine\s*=\s*ANY\(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R17 first-tail backfill (fix C): recorder.log rows received within 10 min after the SAME boot_id's start heartbeat are historical launchd.log lines
+// ---------------------------------------------------------------------------
+describe.skipIf(!HAVE_DOCKER)("recorder.log signature_mismatch rows exclude the daemon's first-tail backfill", () => {
+  const AS = "2026-10-06T05:50:00.000Z";
+  const Z = (hhmm: string) => `2026-10-06T${hhmm}:00.000Z`;
+  const sigLine = (n: string) => ({ file: "launchd.log", line: `room-recorder: update to 0.1.18 stopped: signature_mismatch: ${n}`, count: 1, recv_ts: "2026-10-05T10:00:00Z", redaction: "none" });
+  const START = { event: "start", version: "0.1.4" };
+  const CARDIO = "EHRC-CARDIOLOGYs-Mac-mini";
+  const DIET = "EHRC-DIETARYs-Mac-mini";
+  const WIN = "EHRC-WINDOWs-Mac-mini"; // row 3 min after the start beat, and one 15 min after
+  const FAR = "EHRC-FARs-Mac-mini"; // only a row 15 min after
+  const NEAR = "EHRC-NEARs-Mac-mini"; // only a row 3 min after
+  const UNK = "EHRC-UNKNOWNBOOTs-Mac-mini"; // start beat belongs to another boot_id
+  const NOSTART = "EHRC-NOSTARTs-Mac-mini"; // heartbeats but none with event=start
+  const LIVE = "EHRC-LIVEs-Mac-mini"; // F5: line timestamps decide inside the window
+  const read = async (m: string) => (await readKioskHealth(pg.sql as never, [m], AS)).snapshots.get(m)!;
+
+  beforeAll(() => {
+    insert([
+      // the 6 Oct Cardiology / Dietary false alarm: boot beat 05:40Z, historical lines shipped at 05:41Z
+      rowAbs(CARDIO, "bootC", "heartbeat", Z("05:40"), START),
+      rowAbs(CARDIO, "bootC", "recorder.log", Z("05:41"), sigLine("old a")),
+      rowAbs(CARDIO, "bootC", "recorder.log", "2026-10-06T05:41:01.000Z", sigLine("old b")),
+      rowAbs(DIET, "bootD", "heartbeat", Z("05:40"), START),
+      rowAbs(DIET, "bootD", "recorder.log", Z("05:41"), sigLine("old c")),
+      // one machine, one boot: +3 min is backfill (excluded), +15 min is a live failure (kept)
+      rowAbs(WIN, "bootW", "heartbeat", Z("05:00"), START),
+      rowAbs(WIN, "bootW", "recorder.log", Z("05:03"), sigLine("backfill")),
+      rowAbs(WIN, "bootW", "recorder.log", Z("05:15"), sigLine("live")),
+      rowAbs(FAR, "bootF", "heartbeat", Z("05:00"), START),
+      rowAbs(FAR, "bootF", "recorder.log", Z("05:15"), sigLine("live far")),
+      rowAbs(NEAR, "bootN", "heartbeat", Z("05:00"), START),
+      rowAbs(NEAR, "bootN", "recorder.log", Z("05:03"), sigLine("backfill near")),
+      // a start beat of a DIFFERENT boot_id does not shield this boot's row; no start beat known at all keeps the row
+      rowAbs(UNK, "bootOther", "heartbeat", Z("05:00"), START),
+      rowAbs(UNK, "bootU", "recorder.log", Z("05:03"), sigLine("unknown boot")),
+      rowAbs(NOSTART, "bootS", "heartbeat", Z("05:00"), { version: "0.1.4" }),
+      rowAbs(NOSTART, "bootS", "recorder.log", Z("05:03"), sigLine("no start beat")),
+      // F5: live failure 5 min after the beat whose line is stamped AFTER the beat is kept; a historical stamped line in the window is excluded;
+      // a line stamped only 2 min before the beat (< 10 min) is kept
+      rowAbs(LIVE, "bootL", "heartbeat", Z("05:00"), START),
+      rowAbs(LIVE, "bootL", "recorder.log", Z("05:05"), { ...sigLine("live"), line: "2026-10-06T05:04:30Z room-recorder: update to 0.1.18 stopped: signature_mismatch: live" }),
+      rowAbs(LIVE, "bootL", "recorder.log", Z("05:03"), { ...sigLine("hist"), line: "2026-10-05T10:00:00Z room-recorder: update to 0.1.18 stopped: signature_mismatch: hist" }),
+      rowAbs(LIVE, "bootL", "recorder.log", Z("05:02"), { ...sigLine("near"), line: "2026-10-06T04:58:00Z room-recorder: update to 0.1.18 stopped: signature_mismatch: near" }),
+    ]);
+  });
+
+  it("a row 3 min after the start beat is excluded; a row 15 min after is included", async () => {
+    expect((await read(NEAR)).recorder_update_failures_24h.count).toBe(0);
+    const far = await read(FAR);
+    expect(far.recorder_update_failures_24h.count).toBe(1);
+    expect(far.recorder_update_failures_24h.newest_line).toContain("live far");
+    const w = await read(WIN);
+    expect(w.recorder_update_failures_24h.count).toBe(1);
+    expect(w.recorder_update_failures_24h.newest_line).toContain("live");
+    expect(w.recorder_update_failures_24h.newest_line).not.toContain("backfill");
+  });
+
+  it("a row whose boot_id has no start heartbeat is included (other boot's beat, or no event=start heartbeat at all)", async () => {
+    expect((await read(UNK)).recorder_update_failures_24h.count).toBe(1);
+    expect((await read(NOSTART)).recorder_update_failures_24h.count).toBe(1);
+  });
+
+  it("F5 a live signature_mismatch 5 min after the start beat with a line stamped after the beat is kept; a historical stamped line and one 2 min before the beat: historical excluded, near kept", async () => {
+    const f = (await read(LIVE)).recorder_update_failures_24h;
+    expect(f.count).toBe(2);
+    expect(f.newest_line).toContain("signature_mismatch: live");
+  });
+
+  it("chrome.profile history (24 h, newest first, capped at 300 per machine) and ext_installed come back from the real SELECTs", async () => {
+    const P = "EHRC-PROFILEs-Mac-mini";
+    const rows: string[] = [];
+    for (let i = 0; i < 320; i += 1) {
+      const recv = new Date(Date.parse(AS) - (300 + i * 240) * 1000).toISOString();
+      rows.push(rowAbs(P, "bootP", "chrome.profile", recv, { running: true, last_used: "Profile 1", active: ["Profile 1"], guest: false, ext: { "Profile 1": [] }, presence_ok: i < 310 ? false : true }));
+    }
+    insert(rows);
+    const s = await read(P);
+    expect(s.chrome_profile_history.length).toBe(300);
+    expect(Date.parse(s.chrome_profile_history[0]!.ts)).toBeGreaterThan(Date.parse(s.chrome_profile_history[299]!.ts));
+    expect(s.chrome_profile_history[0]!.ts).toBe(new Date(Date.parse(AS) - 300 * 1000).toISOString());
+    expect(s.last_chrome_profile).toMatchObject({ presence_ok: false, ext_installed: false, last_used: "Profile 1" });
+  });
+
+  it("the Cardiology / Dietary fixture (start beat 05:40Z, recorder.log rows 05:41Z) raises no R17", async () => {
+    const snaps = new Map([...(await readKioskHealth(pg.sql as never, [CARDIO, DIET], AS)).snapshots]);
+    expect([...snaps.keys()].sort()).toEqual([CARDIO, DIET].sort());
+    for (const s of snaps.values()) expect(s.recorder_update_failures_24h.count).toBe(0);
+    const items = kioskHealthItems(snaps, new Map(), AS, true);
+    expect(items.filter((i) => i.kind === "recorder_update_failing")).toEqual([]);
   });
 });

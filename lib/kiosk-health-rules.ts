@@ -16,9 +16,21 @@
  * R14 config_drift            amber  a field whose LATEST drift row (24 h) is unresolved, or a field with no drift row in 24 h that the newest drift.summary
  *                             (received within 24 h) lists.
  * R15 recovery_failed         red    watchdog/ladder outcome not_recovered within 60 min, no later power.wake.
- * R16 presence_cannot_run     red in clinic hours, amber otherwise: chrome.alert within 15 min unless a chrome.profile at or after the alert says presence_ok.
+ * R16 presence_cannot_run     red in clinic hours, amber otherwise. Raised while EITHER (a) the newest chrome.profile (received within 20 min) has
+ *                             presence_ok === false — it stays raised for as long as the machine keeps reporting that, however old the chrome.alert is — OR
+ *                             (b) a chrome.alert arrived within 15 min and no chrome.profile at or after the alert says presence_ok === true.
+ *                             Held by (a), the reason / last used / guest come FROM THAT PROFILE: running false → "Chrome not running"; guest → "Chrome on Guest
+ *                             profile"; else "ext_missing:<last_used>" when the profile's ext map holds no extension for last_used; else the newest chrome.alert's
+ *                             reason when that alert is newer than the profile; else "presence_ok false". Under (b) alone the alert's reason is shown.
+ *                             `since` under (a) is the start of the CURRENT episode: the earliest of the consecutive presence_ok=false chrome.profile rows ending at
+ *                             the newest one (24 h of rows, newest 300), never a stale alert. Clears when the newest chrome.profile has presence_ok === true at
+ *                             ts >= the alert's ts, or when the machine stops reporting (profile older than 20 min and alert older than 15 min).
  *                             Suppresses R8 (extension_missing) for that room: R16 is the explanation.
- * R17 recorder_update_failing amber  a recorder self-update failed signature_mismatch in the last 24 h.
+ *                             An "ext_missing:<profile>" reason gets its own action: the extension dir is empty in that profile, the fleet thread re-installs there.
+ * R17 recorder_update_failing amber  a recorder self-update failed signature_mismatch in the last 24 h. FIRST-TAIL BACKFILL IS EXCLUDED: on its first tail the
+ *                             daemon ships historical launchd.log lines, so recorder.log rows received within 10 min after the daemon's start heartbeat
+ *                             (heartbeat payload.event === "start") of the SAME boot_id are not counted (done in the read, lib/kiosk-health-read.ts query 3).
+ *                             With no start heartbeat known for the row's boot_id in the window, the row is kept.
  *
  * Time bases: `received_at` is the trusted arrival time and bounds every read window; `ts` is event time and orders events. pmset-log power rows can be
  * backfilled 12–17 h late (ts old, received_at now), so R11 judges a power event by its ts: a 15 h-old sleep that only just arrived is history, not news.
@@ -35,6 +47,8 @@ export const KH_SUMMARY_FRESH_MS = 24 * 3_600_000;
 export const KH_SILENT_AFTER_S = 180;
 export const KH_RECOVERY_WINDOW_MS = 60 * 60_000;
 export const KH_CHROME_ALERT_WINDOW_MS = 15 * 60_000;
+/** R16 / R8 text: a chrome.profile received within this long is the machine's current Chrome state (the daemon emits one every 5 min or on change). */
+export const KH_CHROME_PROFILE_FRESH_MS = 20 * 60_000;
 export const KH_DRIFT_DETAIL_MAX = 4;
 export const KH_RECORDER_LINE_MAX = 120;
 
@@ -85,6 +99,52 @@ export function summarizeKioskHealth(snapshots: ReadonlyMap<string, KioskHealthS
     };
   }
   return out;
+}
+
+/** The newest chrome.profile when it was received within 20 min of `nowMs` (and not from the future), else null. */
+function freshChromeProfile(s: KioskHealthSnapshot | null | undefined, nowMs: number): NonNullable<KioskHealthSnapshot["last_chrome_profile"]> | null {
+  const p = s?.last_chrome_profile;
+  if (!p) return null;
+  const rec = Date.parse(p.received_at);
+  return Number.isFinite(rec) && nowMs - rec <= KH_CHROME_PROFILE_FRESH_MS && nowMs >= rec - 60_000 ? p : null;
+}
+
+/**
+ * R8 (extension_missing) wording from the machine's own Chrome evidence. Returns null when no chrome.profile arrived within 20 min, AND when the newest one
+ * shows nothing wrong (running, not Guest, presence_ok not false) — the caller then keeps R8's original wording unchanged. Otherwise `cause` replaces the
+ * "Chrome is running" clause of the R8 detail and `action` replaces the install instruction. Branch order: presence_ok false (reason = newest chrome.alert's,
+ * else "presence_ok false"), Chrome not running, Guest profile.
+ */
+export function extensionMissingAdvice(s: KioskHealthSnapshot | null | undefined, nowMs: number): { cause: string; action: string } | null {
+  const p = freshChromeProfile(s, nowMs);
+  if (!p) return null;
+  const profile = clean(p.last_used ?? s?.last_chrome_alert?.last_used ?? "", 60) || "unknown";
+  if (p.presence_ok === false) {
+    const reason = clean(s?.last_chrome_alert?.reason, 80) || "presence_ok false";
+    return { cause: `Extension cannot run: ${reason} (profile ${profile})`, action: "Repair the active Chrome profile (fleet thread)" };
+  }
+  if (p.running === false) return { cause: "Chrome not running", action: "Open Chrome on the kiosk (or wait for the Kiosk Bot)" };
+  if (p.guest === true) return { cause: "Chrome is on the Guest profile; relaunch on a named profile", action: "Relaunch Chrome on the named clinic profile (fleet thread)" };
+  return null;
+}
+
+/**
+ * Where the current presence_ok=false episode began: the earliest ts of the unbroken run of presence_ok === false chrome.profile rows that ends at the newest
+ * row. The newest row (query 1) is added when the 24 h history (query 2) does not carry it. null when the newest row is not false.
+ */
+function falseEpisodeStart(s: KioskHealthSnapshot): string | null {
+  const newest = s.last_chrome_profile;
+  if (!newest || newest.presence_ok !== false) return null;
+  const rows = [...s.chrome_profile_history];
+  if (!rows.some((r) => r.ts === newest.ts)) rows.push({ ts: newest.ts, received_at: newest.received_at, presence_ok: newest.presence_ok });
+  rows.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts) || Date.parse(b.received_at) - Date.parse(a.received_at));
+  let start = newest.ts;
+  for (const r of rows) {
+    if (Date.parse(r.ts) > Date.parse(newest.ts)) continue;
+    if (r.presence_ok !== false) break;
+    start = r.ts;
+  }
+  return start;
 }
 
 /** The kinds this file can raise, for tests and callers that need to tell kiosk items from R1–R10. */
@@ -233,20 +293,47 @@ export function kioskHealthItems(
       }
     }
 
-    // R16 — PRESENCE CANNOT RUN. Chrome raised an alert in the last 15 min and no later chrome.profile reports presence_ok.
+    // R16 — PRESENCE CANNOT RUN. Raised while the newest chrome.profile (received within 20 min) says presence_ok === false, or — as before — when a
+    // chrome.alert arrived within 15 min and no chrome.profile at or after it says presence_ok === true. The alert is emitted once per episode (on the
+    // true→false edge or after 2 false samples), so it ages out after 15 min while the fault persists; the 5-minutely chrome.profile keeps the item up.
     {
       const a = s.last_chrome_alert;
-      if (a && now - Date.parse(a.received_at) <= KH_CHROME_ALERT_WINDOW_MS && now >= Date.parse(a.received_at) - 60_000) {
-        const cleared = s.last_chrome_profile && s.last_chrome_profile.presence_ok === true && Date.parse(s.last_chrome_profile.ts) >= Date.parse(a.ts);
-        if (!cleared) {
-          mk(
-            "presence_cannot_run",
-            sevClinic,
-            a.ts,
-            `Pulse Presence cannot run on ${name}: ${clean(a.reason, 80) || "reason unknown"}; Chrome last used ${a.last_used ? clean(a.last_used, 60) : "unknown"}, guest session ${a.guest === null ? "unknown" : a.guest ? "yes" : "no"}.`,
-            `Open Chrome on ${name} with the clinic profile (not a guest session) and confirm the Presence extension is installed.`,
-          );
+      const profile = freshChromeProfile(s, now);
+      const heldByProfile = profile !== null && profile.presence_ok === false;
+      const alertLive = a !== null && now - Date.parse(a.received_at) <= KH_CHROME_ALERT_WINDOW_MS && now >= Date.parse(a.received_at) - 60_000;
+      const cleared = !!a && !!s.last_chrome_profile && s.last_chrome_profile.presence_ok === true && Date.parse(s.last_chrome_profile.ts) >= Date.parse(a.ts);
+      if (heldByProfile || (alertLive && !cleared)) {
+        let reason: string;
+        let lastUsed: string | null;
+        let guest: boolean | null;
+        let since: string;
+        if (heldByProfile) {
+          // The profile is the current truth; an alert may belong to an earlier episode, so it is only the reason when it is NEWER than the profile.
+          lastUsed = profile!.last_used;
+          guest = profile!.guest;
+          since = falseEpisodeStart(s) ?? profile!.ts;
+          reason =
+            profile!.running === false ? "Chrome not running"
+            : profile!.guest === true ? "Chrome on Guest profile"
+            : profile!.ext_installed === false && profile!.last_used ? `ext_missing:${clean(profile!.last_used, 60)}`
+            : a && Date.parse(a.ts) > Date.parse(profile!.ts) && clean(a.reason, 80) ? clean(a.reason, 80)
+            : "presence_ok false";
+        } else {
+          reason = clean(a!.reason, 80) || "reason unknown";
+          lastUsed = a!.last_used;
+          guest = a!.guest;
+          since = a!.ts;
         }
+        const extMissing = /^ext_missing:/.test(reason) ? clean(reason.slice("ext_missing:".length), 60) : null;
+        mk(
+          "presence_cannot_run",
+          sevClinic,
+          since,
+          `Pulse Presence cannot run on ${name}: ${reason}; Chrome last used ${lastUsed ? clean(lastUsed, 60) : "unknown"}, guest session ${guest === null ? "unknown" : guest ? "yes" : "no"}.`,
+          extMissing !== null
+            ? `Extension dir empty in ${extMissing || "the active profile"}; fleet thread re-installs into that profile`
+            : `Open Chrome on ${name} with the clinic profile (not a guest session) and confirm the Presence extension is installed.`,
+        );
       }
     }
 

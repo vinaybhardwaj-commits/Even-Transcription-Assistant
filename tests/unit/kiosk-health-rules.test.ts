@@ -10,8 +10,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { computeAttention, isClinicHours, type RoomAttentionInputs } from "@/lib/fleet-attention";
 import { KIND_LABEL } from "@/lib/fleet-attention-format";
 import type { ExtHealthRow, ExtStatus } from "@/lib/encounter-windows/ext-health";
-import { kioskHealthItems, summarizeKioskHealth, KIOSK_HEALTH_KINDS } from "@/lib/kiosk-health-rules";
-import { readKioskHealth, type KioskHealthSnapshot, type KhPowerEvent } from "@/lib/kiosk-health-read";
+import { kioskHealthItems, summarizeKioskHealth, extensionMissingAdvice, KIOSK_HEALTH_KINDS } from "@/lib/kiosk-health-rules";
+import { readKioskHealth, parseLineTimestamp, type KioskHealthSnapshot, type KhPowerEvent } from "@/lib/kiosk-health-read";
 
 /** An IST wall-clock string ("2026-10-06 11:00:00") as epoch ms. */
 const ist = (s: string): number => Date.parse(`${s.replace(" ", "T")}+05:30`);
@@ -41,6 +41,7 @@ const snap = (now: number, over: Partial<KioskHealthSnapshot> = {}): KioskHealth
   last_ladder: null,
   last_chrome_profile: null,
   last_chrome_alert: null,
+  chrome_profile_history: [],
   recorder_update_failures_24h: { count: 0, newest_line: null, newest_ts: null },
   last_recorder_status: { ts: ago(now, 120), received_at: ago(now, 120), state: "recording", session_open: "yes", pending_piece_count: 0 },
   ...over,
@@ -382,6 +383,85 @@ describe("R16 presence_cannot_run", () => {
   });
 });
 
+describe("R16 presence_cannot_run — holds while the newest chrome.profile says presence_ok === false (fix A / F2)", () => {
+  type Prof = NonNullable<KioskHealthSnapshot["last_chrome_profile"]>;
+  const alert = (now: number, agoS: number, reason = "ext_missing:Default") => ({ ts: ago(now, agoS), received_at: ago(now, agoS), reason, last_used: "Default", guest: false, presence_ok: false });
+  const prof = (now: number, agoS: number, ok: boolean | null, over: Partial<Prof> = {}): Prof => ({ ts: ago(now, agoS), received_at: ago(now, agoS), running: true, last_used: "Default", guest: false, presence_ok: ok, ...over });
+  const hist = (now: number, rows: Array<[number, boolean | null]>) => rows.map(([agoS, ok]) => ({ ts: ago(now, agoS), received_at: ago(now, agoS), presence_ok: ok }));
+  const r16 = (now: number, over: Partial<KioskHealthSnapshot>) => run(now, snap(now, over)).find((i) => i.kind === "presence_cannot_run");
+
+  it("a 40 min old alert + a 5 min old chrome.profile with presence_ok false still fires (red in clinic hours, amber at night)", () => {
+    const it = r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 2400), last_chrome_profile: prof(CLINIC_NOW, 300, false) })!;
+    expect(it.severity).toBe("red");
+    expect(r16(NIGHT_NOW, { last_chrome_alert: alert(NIGHT_NOW, 2400), last_chrome_profile: prof(NIGHT_NOW, 300, false) })).toMatchObject({ severity: "amber" });
+  });
+
+  it("clears when the newest chrome.profile has presence_ok true (a 40 min old alert + a fresh true profile raises nothing)", () => {
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 2400), last_chrome_profile: prof(CLINIC_NOW, 300, true) })).toBeUndefined();
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 600), last_chrome_profile: prof(CLINIC_NOW, 120, true) })).toBeUndefined();
+  });
+
+  it("with no chrome.profile it falls back to the 15 min alert rule", () => {
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 2400) })).toBeUndefined();
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 14 * 60) })).toBeDefined();
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 16 * 60) })).toBeUndefined();
+  });
+
+  it("a chrome.profile with presence_ok false older than 20 min no longer holds it (the machine stopped reporting)", () => {
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 2400), last_chrome_profile: prof(CLINIC_NOW, 21 * 60, false) })).toBeUndefined();
+    expect(r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 2400), last_chrome_profile: prof(CLINIC_NOW, 19 * 60, false) })).toBeDefined();
+  });
+
+  it("F2 held by the profile: reason / last used / guest come FROM THE PROFILE — running false, Guest, empty extension dir", () => {
+    const stale = alert(CLINIC_NOW, 3 * 3600, "not_running"); // an old alert from an earlier episode must not supply the reason
+    const notRunning = r16(CLINIC_NOW, { last_chrome_alert: stale, last_chrome_profile: prof(CLINIC_NOW, 200, false, { running: false }) })!;
+    expect(notRunning.detail).toContain("cannot run on");
+    expect(notRunning.detail).toContain(": Chrome not running;");
+    const guest = r16(CLINIC_NOW, { last_chrome_alert: stale, last_chrome_profile: prof(CLINIC_NOW, 200, false, { guest: true, last_used: "Guest Profile" }) })!;
+    expect(guest.detail).toContain(": Chrome on Guest profile;");
+    expect(guest.detail).toContain("Chrome last used Guest Profile, guest session yes");
+    const em = r16(CLINIC_NOW, { last_chrome_alert: stale, last_chrome_profile: prof(CLINIC_NOW, 200, false, { last_used: "Profile 1", ext_installed: false }) })!;
+    expect(em.detail).toContain(": ext_missing:Profile 1;");
+    expect(em.detail).toContain("Chrome last used Profile 1");
+    expect(em.action).toBe("Extension dir empty in Profile 1; fleet thread re-installs into that profile");
+    expect(em.action.toLowerCase()).not.toContain("re-run the presence install");
+  });
+
+  it("F2 the reason falls back to the alert's only when the alert is NEWER than the profile, else 'presence_ok false'", () => {
+    const newer = r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 120, "no_profile"), last_chrome_profile: prof(CLINIC_NOW, 600, false) })!;
+    expect(newer.detail).toContain(": no_profile;");
+    const older = r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 2400, "no_profile"), last_chrome_profile: prof(CLINIC_NOW, 300, false) })!;
+    expect(older.detail).toContain(": presence_ok false;");
+    expect(older.action).toContain("clinic profile");
+    expect(older.action.toLowerCase()).not.toContain("re-run the presence install");
+    expect(r16(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 300, false) })!.detail).toContain(": presence_ok false;");
+  });
+
+  it("F2 `since` is the start of the CURRENT false episode — the earliest of the consecutive presence_ok=false profile rows — not a stale alert", () => {
+    const history = hist(CLINIC_NOW, [[300, false], [600, false], [900, false], [1200, true], [1500, false], [1800, false]]);
+    const it = r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 5 * 3600), last_chrome_profile: prof(CLINIC_NOW, 300, false), chrome_profile_history: history })!;
+    expect(Date.parse(it.since)).toBe(CLINIC_NOW - 900_000); // the true row at 1200 s ends the run; 1500 s / 1800 s belong to an earlier episode
+    // a null presence_ok row also breaks the run
+    const withNull = r16(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 300, false), chrome_profile_history: hist(CLINIC_NOW, [[300, false], [600, null], [900, false]]) })!;
+    expect(Date.parse(withNull.since)).toBe(CLINIC_NOW - 300_000);
+    // only the newest row loaded (empty history) -> its own ts; the newest row is not duplicated when the history carries it
+    expect(Date.parse(r16(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 300, false) })!.since)).toBe(CLINIC_NOW - 300_000);
+    // a whole day of false rows -> the oldest loaded
+    const day = hist(CLINIC_NOW, Array.from({ length: 100 }, (_, i): [number, boolean] => [300 + i * 300, false]));
+    expect(Date.parse(r16(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 300, false), chrome_profile_history: day })!.since)).toBe(CLINIC_NOW - 300_000 * 100);
+  });
+
+  it("the alert-only path (no profile) keeps the alert's reason, ts and fields; ext_missing:<profile> gets the empty-dir action, other reasons the old one", () => {
+    const em = r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 300, "ext_missing:Profile 2") })!;
+    expect(em.detail).toContain("ext_missing:Profile 2");
+    expect(Date.parse(em.since)).toBe(CLINIC_NOW - 300_000);
+    expect(em.action).toBe("Extension dir empty in Profile 2; fleet thread re-installs into that profile");
+    const g = r16(CLINIC_NOW, { last_chrome_alert: alert(CLINIC_NOW, 300, "guest") })!;
+    expect(g.action).toContain("clinic profile");
+    expect(g.action.toLowerCase()).not.toContain("re-run the presence install");
+  });
+});
+
 describe("R17 recorder_update_failing", () => {
   const line = "room-recorder: update to 0.1.18 stopped: signature_mismatch: " + "x".repeat(200);
 
@@ -483,6 +563,91 @@ describe("wiring in computeAttention", () => {
 });
 
 // ---------------------------------------------------------------------------
+// R8 text from the machine's own chrome.profile (fix B / F3)
+// ---------------------------------------------------------------------------
+
+describe("R8 extension_missing wording from chrome.profile (fix B)", () => {
+  const prof = (now: number, agoS: number, over: Partial<NonNullable<KioskHealthSnapshot["last_chrome_profile"]>> = {}) => ({
+    ts: ago(now, agoS), received_at: ago(now, agoS), running: true as boolean | null, last_used: "Profile 2" as string | null, guest: false as boolean | null, presence_ok: null as boolean | null, ...over,
+  });
+  const alertWith = (now: number, reason: string | null) => ({ ts: ago(now, 1200), received_at: ago(now, 1200), reason, last_used: "Profile 2", guest: false, presence_ok: false });
+  const r8 = (now: number, s: KioskHealthSnapshot) => computeAttention({ now_ms: now, rooms: [room(now)], kiosk_health: new Map([[MACHINE, s]]) }).find((i) => i.kind === "extension_missing");
+  const OLD_ACTION = "Re-run the presence install on OPD 6 (policy file lost, usually after a reboot).";
+  const OLD_DETAIL = "The Pulse Presence extension on OPD 6 (" + MACHINE + ") has gone silent although the Mac is up and Chrome is running;";
+
+  it("presence_ok false + a chrome.alert reason -> 'Extension cannot run: <reason> (profile <last_used>)' and the profile-repair action", () => {
+    const a = extensionMissingAdvice(snap(CLINIC_NOW, { last_chrome_alert: alertWith(CLINIC_NOW, "ext_missing:Profile 2"), last_chrome_profile: prof(CLINIC_NOW, 200, { presence_ok: false }) }), CLINIC_NOW)!;
+    expect(a.cause).toBe("Extension cannot run: ext_missing:Profile 2 (profile Profile 2)");
+    expect(a.action).toBe("Repair the active Chrome profile (fleet thread)");
+  });
+
+  it("running false -> 'Chrome not running'", () => {
+    const s = snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { running: false }) });
+    expect(extensionMissingAdvice(s, CLINIC_NOW)!.cause).toBe("Chrome not running");
+    const item = r8(CLINIC_NOW, s)!;
+    expect(item.detail).toContain("Chrome not running");
+    expect(item.detail).not.toContain("and Chrome is running");
+    expect(item.action).not.toContain("Re-run the presence install");
+  });
+
+  it("guest -> 'Chrome is on the Guest profile; relaunch on a named profile'", () => {
+    const s = snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { guest: true }) });
+    expect(extensionMissingAdvice(s, CLINIC_NOW)!.cause).toBe("Chrome is on the Guest profile; relaunch on a named profile");
+    const item = r8(CLINIC_NOW, s)!;
+    expect(item.detail).toContain("Chrome is on the Guest profile; relaunch on a named profile");
+    expect(item.action).not.toContain("Re-run the presence install");
+  });
+
+  it("presence_ok false with no chrome.alert reason reads 'presence_ok false'", () => {
+    const a = extensionMissingAdvice(snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { presence_ok: false }) }), CLINIC_NOW)!;
+    expect(a.cause).toBe("Extension cannot run: presence_ok false (profile Profile 2)");
+  });
+
+  it("F3 no 'policy present' / 'not the policy file' wording in any branch", () => {
+    const states = [
+      snap(CLINIC_NOW, { last_chrome_alert: alertWith(CLINIC_NOW, "ext_missing:Profile 2"), last_chrome_profile: prof(CLINIC_NOW, 200, { presence_ok: false }) }),
+      snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { running: false }) }),
+      snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { guest: true }) }),
+    ];
+    for (const s of states) {
+      const a = extensionMissingAdvice(s, CLINIC_NOW)!;
+      const item = r8(CLINIC_NOW, s); // undefined for the presence_ok false state: R16 explains it and suppresses R8
+      for (const t of [a.cause, a.action, item?.detail ?? "", item?.action ?? ""]) expect(t.toLowerCase()).not.toMatch(/policy present|not the policy file|policy file is not/);
+    }
+  });
+
+  it("F3 fall-through: a fresh profile that is running, not Guest and presence_ok null/true -> no advice, main's original wording unchanged", () => {
+    for (const ok of [null, true]) {
+      const s = snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { presence_ok: ok }) });
+      expect(extensionMissingAdvice(s, CLINIC_NOW)).toBeNull();
+      const item = r8(CLINIC_NOW, s)!;
+      expect(item.action).toBe(OLD_ACTION);
+      expect(item.detail).toContain(OLD_DETAIL);
+    }
+  });
+
+  it("no chrome.profile, or one older than 20 min -> no advice and the old wording stays on the R8 item", () => {
+    expect(extensionMissingAdvice(snap(CLINIC_NOW), CLINIC_NOW)).toBeNull();
+    expect(extensionMissingAdvice(null, CLINIC_NOW)).toBeNull();
+    expect(extensionMissingAdvice(snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 21 * 60, { running: false }) }), CLINIC_NOW)).toBeNull();
+    for (const s of [snap(CLINIC_NOW), snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 21 * 60, { running: false }) })]) {
+      const item = r8(CLINIC_NOW, s)!;
+      expect(item.action).toBe(OLD_ACTION);
+      expect(item.detail).toContain(OLD_DETAIL);
+    }
+    const noKiosk = computeAttention({ now_ms: CLINIC_NOW, rooms: [room(CLINIC_NOW)] }).find((i) => i.kind === "extension_missing")!;
+    expect(noKiosk.action).toBe(OLD_ACTION);
+  });
+
+  it("R16 still suppresses R8 for the room while the profile reports presence_ok false (no alert needed)", () => {
+    const s = snap(CLINIC_NOW, { last_chrome_profile: prof(CLINIC_NOW, 200, { presence_ok: false }) });
+    const ks = computeAttention({ now_ms: CLINIC_NOW, rooms: [room(CLINIC_NOW)], kiosk_health: new Map([[MACHINE, s]]) }).map((i) => i.kind);
+    expect(ks).toContain("presence_cannot_run");
+    expect(ks).not.toContain("extension_missing");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // readKioskHealth — fake sql
 // ---------------------------------------------------------------------------
 
@@ -521,7 +686,7 @@ describe("readKioskHealth", () => {
       { part: "drift", machine: MACHINE, kind: "drift", ts: T(1000), received_at: T(1000), payload: { field: "sleep", expected: 0, actual: 0, change: "resolved", resolved: true }, n: null },
       { part: "start_failure", machine: MACHINE, kind: "audio.error", ts: T(90), received_at: T(90), payload: null, n: 2 },
     ];
-    const recorder = [{ machine: MACHINE, n: 4, line: "room-recorder: update to 0.1.18 stopped: signature_mismatch: sig", ts: T(7000) }];
+    const recorder = [7000, 7100, 7200, 7300].map((a, i) => ({ machine: MACHINE, boot_id: "b1", seq: i + 1, ts: T(a), line: "room-recorder: update to 0.1.18 stopped: signature_mismatch: sig", recv_ts: null, start_ts: null }));
     const seen = [{ machine: MACHINE, received_at: T(5), kind: "power.wake" }];
     const { sql } = fakeSql([newest, detail, recorder, seen]);
     const r = await readKioskHealth(sql, [MACHINE], AS_OF);
@@ -590,9 +755,79 @@ describe("readKioskHealth", () => {
     expect(rec[1]!.q).toContain("(k.payload->'start_failure') = 'true'::jsonb");
     expect(rec[0]!.q).toMatch(/DISTINCT ON \(k\.machine, k\.kind\)/);
     expect(rec[2]!.q).toMatch(/signature_mismatch/);
+    // fix C / F1: the start beats are a MATERIALIZED CTE (machine = ANY, bounded on received_at) joined on (machine, boot_id) — no correlated per-row subquery
+    expect(rec[2]!.q).toMatch(/starts AS MATERIALIZED/);
+    expect(rec[2]!.q).not.toMatch(/NOT EXISTS/);
+    expect(rec[2]!.q).toMatch(/b\.machine = ANY\(\$\d+::text\[\]\)/);
+    expect(rec[2]!.q).toMatch(/b\.payload->>'event' = 'start'/);
+    expect(rec[2]!.q).toMatch(/interval '24 hours 10 minutes'/);
+    expect(rec[2]!.q).toMatch(/LEFT JOIN starts st ON st\.machine = c\.machine AND st\.boot_id = c\.boot_id/);
+    expect(rec[2]!.q).toMatch(/rn <= 200/);
     expect(rec[3]!.q).toMatch(/DISTINCT ON \(k\.machine\)/);
     expect(rec[3]!.q).toMatch(/received_at BETWEEN \$\d+::timestamptz - interval '7 days' AND \$\d+::timestamptz/);
     expect(rec[3]!.q).toMatch(/ORDER BY k\.machine, k\.received_at DESC/);
+  });
+
+  it("F5 first-tail backfill: window AND line timestamp; a live failure after the beat, a late-stamped line and a no-start boot are kept", async () => {
+    const START = ago(CLINIC_NOW, 3000);
+    const at = (afterStartS: number) => new Date(Date.parse(START) + afterStartS * 1000).toISOString();
+    const row = (seq: number, afterStartS: number, line: string, start: string | null = START, recv_ts: string | null = null) =>
+      ({ machine: MACHINE, boot_id: "b1", seq, ts: at(afterStartS), line, recv_ts, start_ts: start });
+    const rows = [
+      row(1, 60, "room-recorder: update to 0.1.18 stopped: signature_mismatch: no stamp"), // no parseable stamp, inside the window -> backfill
+      row(2, 120, `${at(-86400)} room-recorder: signature_mismatch: yesterday`), // stamped a day before the beat -> backfill
+      row(3, 300, `${at(240)} room-recorder: signature_mismatch: live`), // 5 min after the beat, stamped after it -> KEPT
+      row(4, 120, `${at(-300)} room-recorder: signature_mismatch: 5 min before beat`), // stamped < 10 min before the beat -> KEPT
+      row(5, 15 * 60, "room-recorder: signature_mismatch: 15 min after"), // outside the window -> KEPT
+      row(6, 120, "room-recorder: signature_mismatch: no start beat for this boot", null), // no start beat -> KEPT
+      row(7, 120, "room-recorder: signature_mismatch: stale recv_ts, ts in window"), // backfill: ts inside the window even though recv_ts is old
+    ];
+    rows[6]!.recv_ts = "2026-10-05T10:00:00.000Z";
+    const { sql } = fakeSql([[], [], rows, []]);
+    const f = (await readKioskHealth(sql, [MACHINE], AS_OF)).snapshots.get(MACHINE)!.recorder_update_failures_24h;
+    expect(f.count).toBe(4);
+    expect(f.newest_line).toContain("15 min after");
+  });
+
+  it("F5 a row with several start beats (join fan-out) is counted once; recv_ts inside the window excludes even when ts is outside", async () => {
+    const START = ago(CLINIC_NOW, 3000);
+    const START2 = ago(CLINIC_NOW, 2900);
+    const at = (afterStartS: number) => new Date(Date.parse(START) + afterStartS * 1000).toISOString();
+    const base = { machine: MACHINE, boot_id: "b1", line: "room-recorder: signature_mismatch: x" };
+    const rows = [
+      { ...base, seq: 1, ts: at(5000), recv_ts: at(30), start_ts: START },
+      { ...base, seq: 1, ts: at(5000), recv_ts: at(30), start_ts: START2 },
+      { ...base, seq: 2, ts: at(7000), recv_ts: null, start_ts: START },
+      { ...base, seq: 2, ts: at(7000), recv_ts: null, start_ts: START2 },
+    ];
+    const { sql } = fakeSql([[], [], rows, []]);
+    expect((await readKioskHealth(sql, [MACHINE], AS_OF)).snapshots.get(MACHINE)!.recorder_update_failures_24h.count).toBe(1);
+  });
+
+  it("parseLineTimestamp reads ISO / space / bracketed stamps, a zone when given (else UTC), and nothing else", () => {
+    expect(parseLineTimestamp("2026-10-06T05:40:00Z room-recorder: x")).toBe(Date.parse("2026-10-06T05:40:00Z"));
+    expect(parseLineTimestamp("[2026-10-06 05:40:00.250] x")).toBe(Date.parse("2026-10-06T05:40:00.250Z"));
+    expect(parseLineTimestamp("2026-10-06 11:10:00 +0530 x")).toBe(Date.parse("2026-10-06T05:40:00Z"));
+    expect(parseLineTimestamp("2026-10-06T11:10:00+05:30 x")).toBe(Date.parse("2026-10-06T05:40:00Z"));
+    expect(parseLineTimestamp("room-recorder: update stopped: signature_mismatch")).toBeNull();
+    expect(parseLineTimestamp("")).toBeNull();
+    expect(parseLineTimestamp("2026-13-45T99:99:99Z x")).toBeNull();
+  });
+
+  it("chrome.profile history: rows from the detail query are kept newest first; ext_installed is derived from the ext map for last_used", async () => {
+    const profile = (a: number, payload: Record<string, unknown>) => ({ machine: MACHINE, room_id: null, kind: "chrome.profile", ts: T(a), received_at: T(a), payload });
+    const newest = [
+      profile(60, { running: true, last_used: "Profile 1", active: ["Profile 1"], guest: false, ext: { "Profile 1": [], Default: ["0.4.2"] }, presence_ok: false }),
+    ];
+    const detail = [300, 60, 180].map((a) => ({ part: "profile", machine: MACHINE, kind: "chrome.profile", ts: T(a), received_at: T(a), payload: { presence_ok: a === 300 ? true : false }, n: null }));
+    const { sql } = fakeSql([newest, detail, [], []]);
+    const s = (await readKioskHealth(sql, [MACHINE], AS_OF)).snapshots.get(MACHINE)!;
+    expect(s.chrome_profile_history.map((r) => [r.ts, r.presence_ok])).toEqual([[T(60), false], [T(180), false], [T(300), true]]);
+    expect(s.last_chrome_profile).toMatchObject({ last_used: "Profile 1", presence_ok: false, ext_installed: false });
+    const withExt = fakeSql([[profile(60, { running: true, last_used: "Default", ext: { Default: ["0.4.2"] }, presence_ok: true })], [], [], []]);
+    expect((await readKioskHealth(withExt.sql, [MACHINE], AS_OF)).snapshots.get(MACHINE)!.last_chrome_profile!.ext_installed).toBe(true);
+    const noMap = fakeSql([[profile(60, { running: true, last_used: "Default", presence_ok: true })], [], [], []]);
+    expect((await readKioskHealth(noMap.sql, [MACHINE], AS_OF)).snapshots.get(MACHINE)!.last_chrome_profile!.ext_installed).toBeNull();
   });
 
   it("with no machines, issues no query and is ok", async () => {

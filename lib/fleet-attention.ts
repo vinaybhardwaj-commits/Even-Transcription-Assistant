@@ -27,6 +27,8 @@
  * R9 extension_behind       ONE fleet-level amber row ("N rooms on old extension builds: <room (version), ...>; update to <target>") for every room whose extension is
  *                           alive but below EXT_TARGET_VERSION and has been for >= 60 min. Action is to update the extension, not to re-install the policy.
  *                           R8/R9 never fire for a machine on EXT_HEALTH_EXCLUDED_MACHINES (Home Office, ORB3, ORB2: no extension).
+ *                           R8's text and action come from the machine's newest chrome.profile (kiosk-health, received within 20 min) when there is one
+ *                           (lib/kiosk-health-rules.ts extensionMissingAdvice); only without one does the wording below apply.
  *                           R8's action says "(machine rebooted at HH:MM, policy file lost)" when the poller shows a reboot in the last 15 min (unreachable -> ok with idle_s ~0,
  *                           or an ok -> ok idle_s drop from >= 600 to <= 120 while the extension went quiet); otherwise "(policy file lost, usually after a reboot)".
  *                           Status `quiet` (nobody has used the console since the extension went quiet, so the Mac may simply be idle) raises nothing; the table shows it.
@@ -52,7 +54,7 @@ import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
-import { kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
+import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -578,12 +580,17 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           ? `Re-run the presence install on ${name} (machine rebooted at ${istHourMinute(e.rebooted_at)}, policy file lost).`
           : `Re-run the presence install on ${name} (policy file lost, usually after a reboot).`;
       if (e.status === "missing" && (e.ext_age_s === null || e.ext_age_s * 1000 >= EXT_MISSING_AFTER_MS)) {
+        // When the kiosk-health daemon's newest chrome.profile (received within 20 min) exists, the cause and the action come from it (a present policy file
+        // with a dead extension is a profile fault, not a lost policy); with no such row the old "policy file lost, re-run the install" wording stays.
+        const advice = r.machine ? extensionMissingAdvice(inputs.kiosk_health?.get(normalizeHostname(r.machine)), now) : null;
         mk(
           "extension_missing",
           "red",
           Number.isFinite(lastMs) ? lastMs : now - EXT_NEVER_SEEN_MS,
-          `The Pulse Presence extension on ${place} has gone silent although the Mac is up and Chrome is running; ${beat}, ${ver}. Doctor and room attribution is blind on this Mac.`,
-          missingAction,
+          advice
+            ? `The Pulse Presence extension on ${place} has gone silent although the Mac is up. ${advice.cause}; ${beat}, ${ver}. Doctor and room attribution is blind on this Mac.`
+            : `The Pulse Presence extension on ${place} has gone silent although the Mac is up and Chrome is running; ${beat}, ${ver}. Doctor and room attribution is blind on this Mac.`,
+          advice ? advice.action : missingAction,
         );
       }
       if (e.status === "behind" && e.behind_since) {

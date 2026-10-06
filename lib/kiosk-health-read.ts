@@ -9,7 +9,14 @@
  *   1. newest row per (machine, kind) — DISTINCT ON over the 24 h window (rides kiosk_health_events_machine_ts_idx).
  *   2. one window CTE over power.* / drift / audio.error(start_failure) rows, split three ways: audio start failures in the last 10 min (a count per
  *      machine), power events in the last 12 h (newest 50 per machine, row_number cap), drift rows in the 24 h (newest 100 per machine).
- *   3. recorder.log rows whose line mentions signature_mismatch: count + newest line per machine.
+ *   3. recorder.log rows whose line mentions signature_mismatch (newest 200 per machine), left-joined to a MATERIALIZED CTE of the daemon's start
+ *      heartbeats (kind 'heartbeat', payload.event = 'start', machine = ANY, received_at in asOf − 24 h 10 min .. asOf) on (machine, boot_id) — one hash join,
+ *      no per-row scan. FIRST-TAIL BACKFILL IS EXCLUDED in TS (`isFirstTailBackfill`): on its first tail the daemon ships historical launchd.log lines, so
+ *      a row is dropped when, against a start beat of the SAME boot_id, its own time (its ts, or payload.recv_ts when parseable — either) is within −1..+10 min of the
+ *      beat's ts AND the timestamp at the head of its log line is older than the beat by more than 10 min; a line with no parseable leading timestamp
+ *      is judged by the −1..+10 min window alone. A line stamped after the beat (a live failure just after boot) is kept; a boot_id with no start beat
+ *      in the window keeps every row. A line timestamp with no zone is read as UTC (the later reading, so a misread keeps a row rather than hiding one).
+ *      Query 2 also carries the chrome.profile history (24 h, newest 300 per machine) so R16 can date the current presence_ok=false episode.
  *   4. the newest row per machine of ANY kind in the last 7 days (kiosk_health_events_machine_received_idx, migration 0127): decides `enrolled` and
  *      last_seen_received_at, so a daemon that stopped hours ago stays visible instead of vanishing once its last row leaves the 24 h window.
  *
@@ -73,7 +80,9 @@ export type KioskHealthSnapshot = {
   last_drift_summary: { ts: string; received_at: string; drift_count: number; items: Array<{ field: string; expected: string | null; actual: string | null }> } | null;
   last_watchdog: { ts: string; received_at: string; trigger: string | null; action: string | null; outcome: string | null; failure_reasons: string[] } | null;
   last_ladder: { ts: string; received_at: string; rung: string | null; trigger: string | null; outcome: string | null; reason: string | null } | null;
-  last_chrome_profile: { ts: string; received_at: string; running: boolean | null; last_used: string | null; guest: boolean | null; presence_ok: boolean | null } | null;
+  last_chrome_profile: { ts: string; received_at: string; running: boolean | null; last_used: string | null; guest: boolean | null; presence_ok: boolean | null; ext_installed?: boolean | null } | null;
+  /** chrome.profile rows of the last 24 h by received_at, newest first by ts, at most 300 — R16 walks it to find where the current presence_ok=false episode began */
+  chrome_profile_history: Array<{ ts: string; received_at: string; presence_ok: boolean | null }>;
   last_chrome_alert: { ts: string; received_at: string; reason: string | null; last_used: string | null; guest: boolean | null; presence_ok: boolean | null } | null;
   recorder_update_failures_24h: { count: number; newest_line: string | null; newest_ts: string | null };
   last_recorder_status: { ts: string; received_at: string; state: string | null; session_open: string | null; pending_piece_count: number | null } | null;
@@ -141,7 +150,7 @@ export function canonicalMachine(key: string): string {
 
 type NewestRow = { machine: string; room_id: string | null; kind: string; ts: unknown; received_at: unknown; payload: unknown };
 type WindowRow = { part: string; machine: string; kind: string; ts: unknown; received_at: unknown; payload: unknown; n: unknown };
-type RecorderRow = { machine: string; n: unknown; line: string | null; ts: unknown };
+type RecorderRow = { machine: string; boot_id: string; seq: unknown; ts: unknown; line: string | null; recv_ts: string | null; start_ts: unknown };
 type SeenRow = { machine: string; received_at: unknown; kind: string };
 
 const emptySnapshot = (machine: string): KioskHealthSnapshot => ({
@@ -162,11 +171,49 @@ const emptySnapshot = (machine: string): KioskHealthSnapshot => ({
   last_ladder: null,
   last_chrome_profile: null,
   last_chrome_alert: null,
+  chrome_profile_history: [],
   recorder_update_failures_24h: { count: 0, newest_line: null, newest_ts: null },
   last_recorder_status: null,
 });
 
 const newer = (a: string, b: string | null | undefined): boolean => !b || Date.parse(a) > Date.parse(b);
+
+export const KH_BACKFILL_AFTER_START_MS = 10 * 60_000;
+export const KH_BACKFILL_BEFORE_START_MS = 60_000;
+export const KH_BACKFILL_LINE_AGE_MS = 10 * 60_000;
+
+/** The timestamp at the head of a log line ("2026-10-05T10:00:00Z ...", "[2026-10-05 10:00:00.123] ...", with or without a zone), epoch ms, or null. No zone = UTC. */
+export function parseLineTimestamp(line: string | null | undefined): number | null {
+  if (!line) return null;
+  const m = /^\s*\[?(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?\s*(Z|[+-]\d{2}:?\d{2})?/.exec(line);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, se, frac, zone] = m;
+  const ms = frac ? Number(`0.${frac}`) * 1000 : 0;
+  const tz = !zone || zone === "Z" ? "Z" : zone.length === 5 ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+  const t = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${se}${tz}`);
+  return Number.isFinite(t) ? t + Math.round(ms) : null;
+}
+
+/**
+ * True when a recorder.log row is the daemon's first-tail backfill of one of its start beats (`startsMs`: ts of the start heartbeats of the row's
+ * own boot_id). See the header, query 3.
+ */
+export function isFirstTailBackfill(rowTimesMs: readonly number[], lineTsMs: number | null, startsMs: readonly number[]): boolean {
+  return startsMs.some(
+    (st) =>
+      rowTimesMs.some((t) => t >= st - KH_BACKFILL_BEFORE_START_MS && t <= st + KH_BACKFILL_AFTER_START_MS) &&
+      (lineTsMs === null || lineTsMs < st - KH_BACKFILL_LINE_AGE_MS),
+  );
+}
+
+/** Does this chrome.profile payload show an extension installed in the profile named by last_used? null = the payload carries no ext map to judge by. */
+function extInstalled(p: Record<string, unknown>, lastUsed: string | null): boolean | null {
+  const m = p.ext;
+  if (!lastUsed || !m || typeof m !== "object" || Array.isArray(m)) return null;
+  const entry = (m as Record<string, unknown>)[lastUsed];
+  if (Array.isArray(entry)) return entry.length > 0;
+  return typeof entry === "string" ? entry.length > 0 : false;
+}
 
 /**
  * Per canonical machine, the evidence the kiosk-health rules read. `machineKeys` is every spelling of every machine to read (the flat union of
@@ -219,7 +266,7 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
          WHERE k.machine = ANY(${keys}::text[])
            AND k.received_at >= ${hi}::timestamptz - interval '24 hours'
            AND k.received_at <= ${hi}::timestamptz
-           AND (k.kind LIKE 'power.%' OR k.kind = 'drift' OR (k.kind = 'audio.error' AND (k.payload->'start_failure') = 'true'::jsonb))
+           AND (k.kind LIKE 'power.%' OR k.kind = 'drift' OR k.kind = 'chrome.profile' OR (k.kind = 'audio.error' AND (k.payload->'start_failure') = 'true'::jsonb))
       ),
       p AS (
         SELECT w.machine, w.kind, w.ts, w.received_at,
@@ -233,10 +280,18 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
                row_number() OVER (PARTITION BY w.machine ORDER BY w.ts DESC, w.received_at DESC) AS rn
           FROM w
          WHERE w.kind = 'drift'
+      ),
+      cp AS (
+        SELECT w.machine, w.kind, w.ts, w.received_at, jsonb_build_object('presence_ok', w.payload->'presence_ok') AS payload,
+               row_number() OVER (PARTITION BY w.machine ORDER BY w.ts DESC, w.received_at DESC) AS rn
+          FROM w
+         WHERE w.kind = 'chrome.profile'
       )
       SELECT 'power' AS part, p.machine, p.kind, p.ts, p.received_at, p.payload, NULL::int AS n FROM p WHERE p.rn <= 50
       UNION ALL
       SELECT 'drift', d.machine, d.kind, d.ts, d.received_at, d.payload, NULL::int FROM d WHERE d.rn <= 100
+      UNION ALL
+      SELECT 'profile', cp.machine, cp.kind, cp.ts, cp.received_at, cp.payload, NULL::int FROM cp WHERE cp.rn <= 300
       UNION ALL
       SELECT 'start_failure', f.machine, 'audio.error', max(f.ts), max(f.received_at), NULL::jsonb, count(*)::int
         FROM w f
@@ -244,15 +299,32 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
        GROUP BY f.machine
     `) as unknown as WindowRow[];
 
-    // 3 — recorder self-update failures: count + newest line per machine.
+    // 3 — recorder self-update failures, minus the daemon's first-tail backfill. The start beats are a MATERIALIZED CTE (one bounded scan on machine = ANY /
+    // kind / received_at), joined to the candidate rows on (machine, boot_id); the exclusion itself is TS (isFirstTailBackfill) because the line timestamp
+    // has to be parsed defensively. A row with several start beats comes back once per beat; they are folded below by (machine, boot_id, seq).
     const recorder = (await sql`
-      SELECT DISTINCT ON (r.machine) r.machine, count(*) OVER (PARTITION BY r.machine)::int AS n, r.payload->>'line' AS line, r.ts
-        FROM kiosk_health_events r
-       WHERE r.machine = ANY(${keys}::text[])
-         AND r.received_at >= ${hi}::timestamptz - interval '24 hours'
-         AND r.received_at <= ${hi}::timestamptz
-         AND r.kind = 'recorder.log' AND r.payload->>'line' LIKE '%signature_mismatch%'
-       ORDER BY r.machine, r.ts DESC, r.received_at DESC
+      WITH starts AS MATERIALIZED (
+        SELECT b.machine, b.boot_id, b.ts
+          FROM kiosk_health_events b
+         WHERE b.machine = ANY(${keys}::text[])
+           AND b.kind = 'heartbeat' AND b.payload->>'event' = 'start'
+           AND b.received_at >= ${hi}::timestamptz - interval '24 hours 10 minutes'
+           AND b.received_at <= ${hi}::timestamptz
+      ),
+      cand AS (
+        SELECT r.machine, r.boot_id, r.seq, r.ts, r.payload->>'line' AS line, r.payload->>'recv_ts' AS recv_ts,
+               row_number() OVER (PARTITION BY r.machine ORDER BY r.ts DESC, r.received_at DESC, r.seq DESC) AS rn
+          FROM kiosk_health_events r
+         WHERE r.machine = ANY(${keys}::text[])
+           AND r.received_at >= ${hi}::timestamptz - interval '24 hours'
+           AND r.received_at <= ${hi}::timestamptz
+           AND r.kind = 'recorder.log' AND r.payload->>'line' LIKE '%signature_mismatch%'
+      )
+      SELECT c.machine, c.boot_id, c.seq, c.ts, c.line, c.recv_ts, st.ts AS start_ts
+        FROM cand c
+        LEFT JOIN starts st ON st.machine = c.machine AND st.boot_id = c.boot_id
+       WHERE c.rn <= 200
+       ORDER BY c.machine, c.ts DESC, c.seq DESC
     `) as unknown as RecorderRow[];
 
     for (const r of newest) {
@@ -310,7 +382,8 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
           break;
         case "chrome.profile":
           if (!s.last_chrome_profile || newer(ts, s.last_chrome_profile.ts)) {
-            s.last_chrome_profile = { ts, received_at: rec, running: bool(p.running), last_used: str(p.last_used, 80), guest: bool(p.guest), presence_ok: bool(p.presence_ok) };
+            const lastUsed = str(p.last_used, 80);
+            s.last_chrome_profile = { ts, received_at: rec, running: bool(p.running), last_used: lastUsed, guest: bool(p.guest), presence_ok: bool(p.presence_ok), ext_installed: extInstalled(p, lastUsed) };
           }
           break;
         case "chrome.alert":
@@ -345,6 +418,8 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
         // Latest row per field: newest ts wins (the SQL ordering is by ts DESC but several spellings of one machine can interleave).
         if (prev && !newer(ts, prev.ts)) continue;
         s.last_drift_by_field[field] = { ts, received_at: rec, field, expected: show(p.expected), actual: show(p.actual), change: str(p.change, 20), resolved: p.resolved === true };
+      } else if (r.part === "profile") {
+        s.chrome_profile_history.push({ ts, received_at: rec, presence_ok: bool(obj(r.payload).presence_ok) });
       } else if (r.part === "start_failure") {
         s.audio_start_failures_10m += numOrNull(r.n) ?? 0;
         if (!s.audio_start_failure_newest_ts || newer(ts, s.audio_start_failure_newest_ts)) s.audio_start_failure_newest_ts = ts;
@@ -353,15 +428,32 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
     for (const s of out.values()) {
       s.power_events.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts) || Date.parse(a.received_at) - Date.parse(b.received_at));
       s.last_power = s.power_events.length ? s.power_events[s.power_events.length - 1]! : null;
+      s.chrome_profile_history.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts) || Date.parse(b.received_at) - Date.parse(a.received_at));
     }
 
+    // Fold the join fan-out (one candidate row per start beat of its boot) back to one row, then drop first-tail backfill.
+    const folded = new Map<string, { r: RecorderRow; starts: number[] }>();
     for (const r of recorder) {
+      const key = `${r.machine}|${r.boot_id}|${String(r.seq)}`;
+      let f = folded.get(key);
+      if (!f) {
+        f = { r, starts: [] };
+        folded.set(key, f);
+      }
+      const st = toIso(r.start_ts);
+      if (st) f.starts.push(Date.parse(st));
+    }
+    for (const { r, starts } of folded.values()) {
       const s = snap(r.machine);
       const ts = toIso(r.ts);
       if (!s || !ts) continue;
       s.enrolled = true;
+      const recvIso = toIso(r.recv_ts);
+      // The row's own times: its event ts, and payload.recv_ts when it parses — either one inside the window counts (the daemon may stamp either).
+      const rowTimes = [Date.parse(ts), ...(recvIso ? [Date.parse(recvIso)] : [])];
+      if (isFirstTailBackfill(rowTimes, parseLineTimestamp(r.line), starts)) continue;
       const f = s.recorder_update_failures_24h;
-      f.count += numOrNull(r.n) ?? 0;
+      f.count += 1;
       if (!f.newest_ts || newer(ts, f.newest_ts)) {
         f.newest_ts = ts;
         f.newest_line = r.line ? r.line.slice(0, 300) : null;
