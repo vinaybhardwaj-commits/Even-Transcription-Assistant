@@ -70,6 +70,8 @@ export const REBOOT_IDLE_MAX_S = 120;
 export const REBOOT_IDLE_BEFORE_S = 600;
 /** Rule (b): the extension's newest event must be no later than this after the drop poll, and silent at least this long by asOf. */
 export const REBOOT_EXT_GAP_S = 120;
+/** How far back the loader reads the presence guard's events (source 'guard'). */
+export const GUARD_LOOKBACK_H = 24;
 /** How far back the loader looks for the start of a Chrome-not-running run (a lower bound, like BEHIND_LOOKBACK_H). */
 export const CHROME_DOWN_LOOKBACK_H = 24;
 
@@ -122,6 +124,15 @@ export function versionState(v: string | null | undefined, target: string = EXT_
 /** One poller row, reduced to what the reboot flag reads. `state` is the poller's own verdict ("ok" | "unreachable"); `idle_s` null when absent. */
 export type PollerPoll = { ts: string; state: string | null; idle_s: number | null };
 
+/** The presence guard's last 24 h for one machine (source 'guard' rows). `counts` is per reason, boot included. */
+export type GuardActivity = {
+  last_reason: string | null;
+  last_at: string | null;
+  /** The OLDEST non-boot guard event in the window, or null when there is none. */
+  first_at?: string | null;
+  counts: Record<string, number>;
+};
+
 /** What the loader finds for one machine. Timestamps are ISO strings. */
 export type ExtHealthInput = {
   machine: string;
@@ -139,6 +150,8 @@ export type ExtHealthInput = {
   chrome_down_since?: string | null;
   /** The poller's rows from the last ~30 min, any order. Feeds the reboot flag. */
   poller_recent?: PollerPoll[];
+  /** The presence guard's rows for this machine over the 24 h before asOf, or absent/null when it posted none. */
+  guard?: GuardActivity | null;
 };
 
 export type ExtHealthRow = {
@@ -161,9 +174,35 @@ export type ExtHealthRow = {
   rebooted_recently: boolean;
   /** When the Mac came back (the poll that showed it), or null. */
   rebooted_at: string | null;
+  /** The presence guard's newest event for this machine in the 24 h before asOf (any reason, boot included), or null. */
+  guard_last_reason: string | null;
+  guard_last_at: string | null;
+  /** The OLDEST non-boot guard event in those 24 h (when the guard first had to act), or null. */
+  guard_first_at: string | null;
+  /** Guard events in those 24 h whose reason is not `boot` (a boot rewrite is the guard doing its job after a reboot, not a fault). */
+  guard_events_24h: number;
+  /** Guard `relaunch` events in those 24 h (the guard had to restart Chrome). */
+  guard_relaunches_24h: number;
+  /** Guard events per reason in those 24 h, boot included ({} when none): the breakdown behind the two counts. */
+  guard_reasons_24h: Record<string, number>;
 };
 
 const ms = (iso: string | null | undefined): number => (iso ? Date.parse(iso) : NaN);
+
+/** PURE. The five guard_* fields of an ExtHealthRow from the loader's per-machine guard summary; no summary = null/0/{}. */
+export function guardFields(g: GuardActivity | null | undefined): Pick<ExtHealthRow, "guard_last_reason" | "guard_last_at" | "guard_first_at" | "guard_events_24h" | "guard_relaunches_24h" | "guard_reasons_24h"> {
+  const counts = g?.counts ?? {};
+  let events = 0;
+  for (const [reason, n] of Object.entries(counts)) if (reason !== "boot") events += n;
+  return {
+    guard_last_reason: g?.last_reason ?? null,
+    guard_last_at: g?.last_at ?? null,
+    guard_first_at: events > 0 ? (g?.first_at ?? null) : null,
+    guard_events_24h: events,
+    guard_relaunches_24h: counts.relaunch ?? 0,
+    guard_reasons_24h: { ...counts },
+  };
+}
 
 /**
  * PURE. When did the Mac come back from a restart, if it did so within REBOOT_WINDOW_S of asOf? Returns that poll's ISO time, else null; the newest of:
@@ -243,6 +282,7 @@ export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: numb
       chrome_down_since: status === "no_chrome" ? (i.chrome_down_since ?? null) : null,
       rebooted_recently: rebootedAt !== null,
       rebooted_at: rebootedAt,
+      ...guardFields(i.guard),
     });
   }
   return rows;
@@ -431,6 +471,41 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
     recentBy.set(r.machine, list);
   }
 
+  // The presence guard's last 24 h: ONE machine-scoped, AGGREGATED read (`machine = ANY(keys)` over a bounded ts range rides pulse_presence_events_machine_ts_idx;
+  // never an unbounded or key-less scan; GROUP BY machine, reason so the result is a handful of rows however chatty a Mac is, with no per-row fetch and no LIMIT
+  // that could drop events). The guard names its Mac by LocalHostName, so every spelling machineKeys() knows is matched and mapped back to the canonical key. A failure here must not take the extension rules down with it: it is logged (generic text) and the guard fields read null/0.
+  const guardBy = new Map<string, GuardActivity>();
+  try {
+    const keyToCanon = new Map<string, string>();
+    for (const m of machines) for (const k of m.keys) if (!keyToCanon.has(k)) keyToCanon.set(k, m.n);
+    const lo24 = new Date(A - GUARD_LOOKBACK_H * 3_600_000).toISOString();
+    const grows = (await db`
+      SELECT p.machine AS machine, p.payload->>'reason' AS reason, count(*) AS n, max(p.ts) AS last_ts, min(p.ts) AS first_ts
+        FROM pulse_presence_events p
+       WHERE p.source = 'guard' AND p.machine = ANY(${[...keyToCanon.keys()]}::text[])
+         AND p.ts > ${lo24}::timestamptz AND p.ts <= ${hi}::timestamptz
+       GROUP BY 1, 2
+    `) as unknown as Array<{ machine: string; reason: string | null; n: unknown; last_ts: unknown; first_ts: unknown }>;
+    for (const g of grows) {
+      const canon = keyToCanon.get(g.machine);
+      const last = toIso(g.last_ts);
+      const first = toIso(g.first_ts);
+      const n = numOrNull(g.n);
+      if (!canon || !last || !first || !g.reason || n === null || n <= 0) continue;
+      const cur = guardBy.get(canon) ?? { last_reason: null, last_at: null, first_at: null, counts: {} };
+      // One Mac can arrive under several spellings, and each (spelling, reason) is its own group: merge by sum / newest / oldest.
+      cur.counts[g.reason] = (cur.counts[g.reason] ?? 0) + n;
+      if (cur.last_at === null || Date.parse(last) > Date.parse(cur.last_at)) {
+        cur.last_reason = g.reason;
+        cur.last_at = last;
+      }
+      if (g.reason !== "boot" && (cur.first_at == null || Date.parse(first) < Date.parse(cur.first_at))) cur.first_at = first;
+      guardBy.set(canon, cur);
+    }
+  } catch (e) {
+    console.warn(`[ext-health] guard read failed: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+  }
+
   return fleet.map((r): ExtHealthInput => {
     const n = normalizeHostname(r.hostname as string);
     const e = by.get(n);
@@ -454,6 +529,7 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
       behind_since: behindSince.get(n) ?? null,
       chrome_down_since: chromeDownSince.get(n) ?? null,
       poller_recent: recentBy.get(n) ?? [],
+      guard: guardBy.get(n) ?? null,
     };
   });
 }

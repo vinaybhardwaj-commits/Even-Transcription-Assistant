@@ -12,6 +12,11 @@
  * invalid_no_doctor, name_absent_<n>, ... — the extension owns that vocabulary; the sink never narrows it). The whole event is stored
  * verbatim in `payload`, so the new fields are queryable as payload->>'page_name' etc. without a migration. Any fault in one item rejects that item only; the caller
  * counts it and inserts the rest. Strings and timestamps are checked to what Postgres/jsonb accepts.
+ *
+ * THIRD PRODUCER, the presence guard (eta-presence-guard, a LaunchDaemon on each clinic Mac): `{"source":"guard","machine":<LocalHostName>,"event":"guard",
+ * "reason":<boot|missing|stripped|rewrite_failed|relaunch|unknown_host>,"ts":<ISO UTC>}`. It is the only producer that names its source in the item, so it
+ * is recognised by `source === "guard"` BEFORE the ext/poller shape test and validated on its own. Stored with source 'guard', event 'guard', room and
+ * email null; `payload` = { reason } ONLY: every other key the item carries is dropped, so a guard row can never carry an identity or free text.
  */
 
 export const EXT_KEYS = [
@@ -26,10 +31,13 @@ export const POLLER_KEYS = [
 /** Fields added in extension 0.1.1: optional (absent on an older build's queued events), null-or-bounded-string when present. */
 export const EXT_OPTIONAL_STRING_KEYS = ["page_name", "instance_id", "cookie_uid", "cookie_name"] as const;
 
+/** The reasons the presence guard reports (its own vocabulary: eta-presence-guard.sh post_event + the unknown_host log line). */
+export const GUARD_REASONS = ["boot", "missing", "stripped", "rewrite_failed", "relaunch", "unknown_host"] as const;
+
 export const EXT_EVENTS = ["login", "logout", "encounter_open", "encounter_close", "idle", "active", "locked", "heartbeat", "identity_stale"];
 
 export type PresenceRow = {
-  source: "ext" | "poller";
+  source: "ext" | "poller" | "guard";
   machine: string | null;
   room: string | null;
   event: string | null;
@@ -78,8 +86,23 @@ function hasKeys(o: Record<string, unknown>, keys: readonly string[]): boolean {
   return keys.every((k) => k in o);
 }
 
+/** A guard item. `ts` defaults to now when absent. Any fault rejects the item only. */
+function validateGuardItem(x: Record<string, unknown>): ItemResult {
+  if (!stringsSafe(x)) return { ok: false, reason: "unsafe string" };
+  if (JSON.stringify(x).length > MAX_ITEM_CHARS) return { ok: false, reason: "item too large" };
+  if (x.event !== "guard") return { ok: false, reason: "bad event" };
+  if (!str(x.machine)) return { ok: false, reason: "bad machine" };
+  if (typeof x.reason !== "string" || !(GUARD_REASONS as readonly string[]).includes(x.reason)) return { ok: false, reason: "bad reason" };
+  let ts: string | null;
+  if (x.ts === undefined || x.ts === null) ts = new Date().toISOString();
+  else ts = parseTs(x.ts);
+  if (!ts) return { ok: false, reason: "bad ts" };
+  return { ok: true, row: { source: "guard", machine: x.machine as string, room: null, event: "guard", ts, email: null, payload: { reason: x.reason } } };
+}
+
 export function validateItem(x: unknown): ItemResult {
   if (!isObj(x)) return { ok: false, reason: "item is not an object" };
+  if (x.source === "guard") return validateGuardItem(x);
   const isExt = hasKeys(x, EXT_KEYS);
   const isPoller = hasKeys(x, POLLER_KEYS);
   if (isExt === isPoller) return { ok: false, reason: "unknown shape" };

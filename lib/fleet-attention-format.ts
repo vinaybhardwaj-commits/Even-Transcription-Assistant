@@ -8,7 +8,7 @@
 
 export type AttentionSeverity = "red" | "amber";
 
-/** One kind per rule R1..R10. A room carries at most one item of each kind. */
+/** One kind per rule R1..R11. A room carries at most one item of each kind. */
 export type AttentionKind =
   | "asleep"
   | "capture_frozen"
@@ -19,7 +19,8 @@ export type AttentionKind =
   | "stale_start"
   | "extension_missing"
   | "extension_behind"
-  | "chrome_not_running";
+  | "chrome_not_running"
+  | "guard_activity";
 
 export type AttentionItem = {
   room_id: string;
@@ -56,6 +57,7 @@ export const KIND_LABEL: Record<AttentionKind, string> = {
   extension_missing: "Presence extension missing",
   extension_behind: "Presence extension out of date",
   chrome_not_running: "Chrome not running",
+  guard_activity: "Presence guard acted",
 };
 
 /** "for 3 h 12 m", "for 45 m", "for under a minute", "for 4 d 3 h". Never negative. */

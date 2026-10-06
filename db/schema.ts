@@ -403,7 +403,7 @@ export const sttEngine = pgTable("stt_engine", {
 export const pulsePresenceEvents = pgTable("pulse_presence_events", {
   id:         bigserial("id", { mode: "number" }).primaryKey(),
   receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
-  source:     text("source").notNull(), // 'ext' | 'poller' (CHECK in SQL)
+  source:     text("source").notNull(), // 'ext' | 'poller' | 'guard' (CHECK in SQL, widened by 0125)
   machine:    text("machine"),          // machine_id (ext) | machine (poller)
   room:       text("room"),
   event:      text("event"),            // event (ext) | state (poller)

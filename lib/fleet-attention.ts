@@ -33,6 +33,10 @@
  * R10 chrome_not_running    the poller is ok and says chrome_running=false (any extension age): Chrome is down, so presence cannot report. Amber.
  *                           Only between 08:00 and 21:30 IST (the Kiosk Bot and the nightly shutdown make it noise overnight).
  *                           R8 is red only when chrome_running=true; the two never fire together for one machine.
+ * R11 guard_activity        ONE fleet-level amber row when the presence guard (eta-presence-guard) acted on any Mac in the last 24 h: a guard event other than
+ *                           `boot` (missing, stripped, rewrite_failed, relaunch, unknown_host) — ext-health guard_events_24h > 0 or guard_relaunches_24h > 0.
+ *                           "Presence guard acted in the last 24 h: OPD 4 (stripped ×1, relaunch ×1), OPD 6 (missing ×1)." A boot rewrite alone raises nothing;
+ *                           it is listed in the detail (boot ×n) of a room that did raise. `since` = the OLDEST non-boot guard event in the 24 h window across the listed rooms (guard_first_at).
  *
  * `computeAttention` is PURE (no I/O). `loadAttentionInputs` / `getFleetAttention` are the DB half: read-only SELECTs, bound parameters only (the
  * Neon HTTP driver has no sql.unsafe), timestamps normalised from whatever the driver returns. Every bench_level_sample / bench_chunk read is
@@ -289,6 +293,14 @@ export function resolveLockState(
 const clean = (s: string | null | undefined, max = 160): string =>
   (s ?? "").replace(/[\u0000-\u001f"]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 
+/** The presence guard's reasons in the order a person reads them: faults first, boot rewrites last. */
+const GUARD_REASON_ORDER = ["missing", "stripped", "rewrite_failed", "relaunch", "unknown_host", "boot"];
+
+/** "stripped ×1, relaunch ×1, boot ×2" from a reason -> count map. Zero counts and unknown reasons are dropped; unknown ones cannot occur (ingest validates). */
+function guardReasonList(reasons: Record<string, number>): string {
+  return GUARD_REASON_ORDER.filter((r) => (reasons[r] ?? 0) > 0).map((r) => `${r} ×${reasons[r]}`).join(", ");
+}
+
 const doctorLabel = (name: string | null): string => {
   const n = clean(name, 80);
   if (!n) return "A doctor";
@@ -334,6 +346,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
   const now = inputs.now_ms;
   const out: AttentionItem[] = [];
   const behindRooms: Array<{ name: string; version: string; since: number; atFloor: boolean }> = [];
+  const guardRooms: Array<{ name: string; since: number; reasons: Record<string, number> }> = [];
 
   for (const r of inputs.rooms) {
     const mk = (kind: AttentionKind, severity: AttentionSeverity, sinceMs: number, detail: string, action: string): void => {
@@ -572,6 +585,11 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           behindRooms.push({ name, version: e.ext_version ? clean(e.ext_version, 40) : "version unknown", since, atFloor: e.behind_at_floor });
         }
       }
+      // R11: collected here, raised ONCE for the fleet after the loop. A boot rewrite alone does not raise it.
+      if (e.guard_events_24h > 0 || e.guard_relaunches_24h > 0) {
+        const at = e.guard_first_at ? Date.parse(e.guard_first_at) : NaN;
+        guardRooms.push({ name, since: Number.isFinite(at) ? at : now, reasons: e.guard_reasons_24h ?? {} });
+      }
       // R10 — CHROME NOT RUNNING. The extension lives inside Chrome; with Chrome down nothing can report. Amber: a person (or the Kiosk Bot) opens it.
       // Clinic hours only (08:00–21:30 IST, every day): overnight Chrome is down by design.
       const istMin = istParts(now).minutes;
@@ -602,6 +620,22 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       since: new Date(behindRooms[0].since).toISOString(),
       detail: `${n} ${n === 1 ? "room" : "rooms"} on old extension builds: ${list}; update to ${EXT_TARGET_VERSION}.${floor}`,
       action: `Update the Pulse Presence extension to ${EXT_TARGET_VERSION} on ${n === 1 ? "that Mac" : "those Macs"} (reload it from chrome://extensions, or re-pack from the current build).`,
+      severity: "amber",
+    });
+  }
+
+  // R11 — one fleet-level row for every Mac the presence guard acted on in the last 24 h.
+  if (guardRooms.length > 0) {
+    guardRooms.sort((x, y) => x.name.localeCompare(y.name, "en", { numeric: true }));
+    const list = guardRooms.map((g) => `${g.name} (${guardReasonList(g.reasons)})`).join(", ");
+    out.push({
+      room_id: "fleet",
+      room_name: "Fleet",
+      machine: null,
+      kind: "guard_activity",
+      since: new Date(Math.min(...guardRooms.map((g) => g.since))).toISOString(),
+      detail: `Presence guard acted in the last 24 h: ${list}.`,
+      action: `The guard already repaired the extension policy or restarted Chrome. If the same ${guardRooms.length === 1 ? "Mac shows" : "Macs show"} up again tomorrow, find out why its policy file keeps being lost.`,
       severity: "amber",
     });
   }

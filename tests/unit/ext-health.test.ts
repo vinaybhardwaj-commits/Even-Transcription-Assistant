@@ -7,7 +7,7 @@
  * The rules are PURE (`computeExtHealth`); the loader is exercised with a fake tagged-template db (shape, bound parameters, exclusions). The SELECTs
  * themselves run against a real postgres in tests/unit/fleet-attention-sql.test.ts.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   computeExtHealth,
   compareExtVersions,
@@ -754,5 +754,79 @@ describe("loadExtHealthInputs — Chrome-down start and the reboot history", () 
     expect(rows[1]).toMatchObject({ rebooted_recently: false, rebooted_at: null });
     const inputs = await loadExtHealthInputs(db, new Date(NOW), [ROOMS[0]!, ROOMS[1]!]);
     expect(inputs[1]!.poller_recent).toEqual([{ ts: ago(5 * 60), state: "ok", idle_s: 3000.5 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The presence guard fields (source 'guard' rows, 24 h)
+// ---------------------------------------------------------------------------
+
+describe("guard_* fields", () => {
+  it("default to null / 0 / {} when the machine has no guard rows (absent, null, or an empty summary)", () => {
+    const none = { guard_last_reason: null, guard_last_at: null, guard_first_at: null, guard_events_24h: 0, guard_relaunches_24h: 0, guard_reasons_24h: {} };
+    expect(one()).toMatchObject(none);
+    expect(one({ guard: null })).toMatchObject(none);
+    expect(one({ guard: { last_reason: null, last_at: null, counts: {} } })).toMatchObject(none);
+  });
+
+  it("count every reason except boot as an event, relaunches separately; last_* is the newest row's reason and time", () => {
+    const r = one({ guard: { last_reason: "boot", last_at: ago(60), first_at: ago(5000), counts: { boot: 2, stripped: 1, relaunch: 1, missing: 3 } } });
+    expect(r.guard_first_at).toBe(ago(5000));
+    expect(r.guard_last_reason).toBe("boot");
+    expect(r.guard_last_at).toBe(ago(60));
+    expect(r.guard_events_24h).toBe(5); // stripped 1 + relaunch 1 + missing 3; boot excluded
+    expect(r.guard_relaunches_24h).toBe(1);
+    expect(r.guard_reasons_24h).toEqual({ boot: 2, stripped: 1, relaunch: 1, missing: 3 });
+  });
+
+  it("boot alone is zero events and has no first non-boot time", () => {
+    const r = one({ guard: { last_reason: "boot", last_at: ago(60), first_at: null, counts: { boot: 1 } } });
+    expect(r.guard_first_at).toBeNull();
+    expect(r.guard_events_24h).toBe(0);
+    expect(r.guard_relaunches_24h).toBe(0);
+  });
+});
+
+describe("loadExtHealthInputs — the guard read", () => {
+  const isGuardQ = (q: Q) => /p\.source = 'guard'/.test(q.text);
+  // What the GROUP BY machine, reason read returns: one row per group, count as the driver's bigint text.
+  const guardRows = [
+    { machine: "EHRC-ECHOs-Mac-mini", reason: "boot", n: "1", last_ts: ago(60), first_ts: ago(60) },
+    { machine: "EHRC-ECHOs-Mac-mini", reason: "stripped", n: "1", last_ts: ago(3600), first_ts: ago(3600) },
+    { machine: "EHRC-ECHOs-Mac-mini", reason: "relaunch", n: "1", last_ts: ago(3500), first_ts: ago(3500) },
+    { machine: "EHRC-CONSUL5\u2019s Mac mini", reason: "missing", n: "2", last_ts: ago(7200), first_ts: ago(9000) }, // raw hostname spelling maps back to the canonical key
+    { machine: "not-in-the-fleet", reason: "missing", n: "1", last_ts: ago(10), first_ts: ago(10) },
+  ];
+  const responder = (q: Q): unknown => (isGuardQ(q) ? guardRows : /FROM room_install/.test(q.text) ? ROOMS : []);
+
+  it("is ONE machine-scoped, time-bounded, bound-parameter read, and maps rows to the canonical machine key (newest row first = last_*)", async () => {
+    const { db, issued } = fakeDb(responder);
+    const rows = await extHealth(db, { asOf: NOW });
+    const gq = issued.filter(isGuardQ);
+    expect(gq).toHaveLength(1);
+    expect(gq[0]!.text).toMatch(/p\.machine = ANY\(/);
+    expect(gq[0]!.text).toMatch(/p\.ts > .*AND p\.ts <= /s);
+    expect(gq[0]!.text).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/i);
+    expect(gq[0]!.text).toMatch(/count\(\*\)/);
+    expect(gq[0]!.text).toMatch(/GROUP BY 1, 2/); // aggregated in SQL: no per-row fetch, no LIMIT
+    expect(gq[0]!.text).not.toMatch(/\bLIMIT\b/i);
+    expect(gq[0]!.vals).toContain(new Date(NOW - 24 * 3_600_000).toISOString());
+    expect(gq[0]!.vals).toContain(new Date(NOW).toISOString());
+    const keys = gq[0]!.vals.find((v) => Array.isArray(v)) as string[];
+    expect(keys).toEqual(expect.arrayContaining(["EHRC-ECHOs-Mac-mini", "EHRC-CONSUL5\u2019s Mac mini", "echo", "consul5"]));
+    expect(keys.some((k) => /Vinay|ORBOX3|orb2/i.test(k))).toBe(false); // excluded machines are never asked about
+    const cardio = rows.find((r) => r.room_name === "Cardiology OPD")!;
+    expect(cardio).toMatchObject({ guard_last_reason: "boot", guard_last_at: ago(60), guard_first_at: ago(3600), guard_events_24h: 2, guard_relaunches_24h: 1, guard_reasons_24h: { boot: 1, stripped: 1, relaunch: 1 } });
+    const opd5 = rows.find((r) => r.room_name === "OPD 5")!;
+    expect(opd5).toMatchObject({ guard_last_reason: "missing", guard_last_at: ago(7200), guard_first_at: ago(9000), guard_events_24h: 2, guard_relaunches_24h: 0 });
+  });
+
+  it("no guard rows: every machine reads null/0; a failing guard read does not take the extension read down", async () => {
+    const a = await extHealth(fakeDb((q) => (isGuardQ(q) ? [] : responder(q))).db, { asOf: NOW });
+    expect(a.map((r) => [r.guard_last_reason, r.guard_events_24h, r.guard_relaunches_24h])).toEqual([[null, 0, 0], [null, 0, 0]]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const b = await extHealth(fakeDb((q) => { if (isGuardQ(q)) throw new Error("boom"); return responder(q); }).db, { asOf: NOW });
+    warn.mockRestore();
+    expect(b.map((r) => r.guard_events_24h)).toEqual([0, 0]);
   });
 });

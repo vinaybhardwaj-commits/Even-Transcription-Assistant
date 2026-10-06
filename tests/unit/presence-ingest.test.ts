@@ -276,3 +276,69 @@ describe("extension 0.1.1 wire shape", () => {
     expect(await res.json()).toMatchObject({ inserted: 2, rejected: 0 });
   });
 });
+
+describe("presence guard events (source 'guard')", () => {
+  // The exact body eta-presence-guard.sh post_event sends: {"events":[{"source":"guard","machine":..,"event":"guard","reason":..,"ts":..}]}
+  const guard = (over: Record<string, unknown> = {}) => ({ source: "guard", machine: "EHRC-CONSUL4s-Mac-mini", event: "guard", reason: "stripped", ts: "2026-10-06T05:30:12Z", ...over });
+
+  it("accepts the guard's real body shape and stores source guard, event guard, room/email null, payload = reason", async () => {
+    const res = await post({ events: [guard()] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, inserted: 1, rejected: 0, count: 1 });
+    expect(inserted()[0]).toEqual({
+      source: "guard", machine: "EHRC-CONSUL4s-Mac-mini", room: null, event: "guard", ts: "2026-10-06T05:30:12.000Z", email: null, payload: { reason: "stripped" },
+    });
+  });
+
+  it("every reason in the vocabulary lands", async () => {
+    const reasons = ["boot", "missing", "stripped", "rewrite_failed", "relaunch", "unknown_host"];
+    const res = await post(reasons.map((reason) => guard({ reason })));
+    expect(await res.json()).toMatchObject({ inserted: 6, rejected: 0 });
+    expect(inserted().map((r) => (r.payload as { reason: string }).reason)).toEqual(reasons);
+  });
+
+  it("rejects a bad reason, a non-guard event, a missing/empty machine and a bad ts, counted as rejected; the good row in the batch still lands", async () => {
+    const res = await post([guard({ reason: "exploded" }), guard({ event: "heartbeat" }), guard({ machine: "" }), guard({ machine: undefined }), guard({ ts: "yesterday" }), guard({ reason: undefined }), guard({ machine: "GOOD" })]);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ inserted: 1, rejected: 6 });
+    expect(inserted()).toHaveLength(1);
+    expect(inserted()[0]).toMatchObject({ source: "guard", machine: "GOOD" });
+  });
+
+  it("an absent ts defaults to now", async () => {
+    const before = Date.now();
+    await post([guard({ ts: undefined })]);
+    const ts = Date.parse(String(inserted()[0]!.ts));
+    expect(ts).toBeGreaterThanOrEqual(before - 1000);
+    expect(ts).toBeLessThanOrEqual(Date.now() + 1000);
+  });
+
+  it("stores payload = { reason } ONLY: an email, a name, free text or any other key on the item is dropped, and the email column stays null", async () => {
+    await post([guard({ email: FAKE_EMAIL, display_name: FAKE_NAME, guard_version: "0.3", detail: "free text", n: 5, nested: { a: 1 } })]);
+    const row = inserted()[0]!;
+    expect(row.payload).toEqual({ reason: "stripped" });
+    expect(row.email).toBeNull();
+    expect(JSON.stringify(row)).not.toContain("fixture");
+  });
+
+  it("an unsafe string in a guard row rejects that row only", async () => {
+    const res = await post([guard({ machine: "a\u0000b" }), guard()]);
+    expect(await res.json()).toMatchObject({ inserted: 1, rejected: 1 });
+  });
+
+  it("leaves ext and poller rows byte-identical: same columns, no guard fields, payload verbatim", async () => {
+    const e = ext();
+    const p = poller();
+    await post([e, p, guard()]);
+    const rows = inserted();
+    expect(rows[0]).toEqual({ source: "ext", machine: "MAC-1", room: "OPD-3", event: "heartbeat", ts: "2026-09-30T08:35:00.000Z", email: FAKE_EMAIL, payload: e });
+    expect(rows[1]).toEqual({ source: "poller", machine: "MAC-2", room: null, event: "active", ts: "2026-09-30T08:35:00.000Z", email: null, payload: p });
+    expect(rows[2]).toMatchObject({ source: "guard" });
+  });
+
+  it("an item that is neither shape and not a guard (including an unknown source) is still rejected, 200", async () => {
+    const res = await post([{ source: "other", machine: "M", event: "guard", reason: "boot", ts: "2026-10-06T05:30:12Z" }]);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ inserted: 0, rejected: 1 });
+  });
+});

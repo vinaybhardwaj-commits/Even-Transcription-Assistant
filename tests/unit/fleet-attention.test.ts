@@ -648,6 +648,12 @@ describe("R8 extension_missing / R9 extension_behind", () => {
     chrome_down_since: null,
     rebooted_recently: false,
     rebooted_at: null,
+    guard_last_reason: null,
+    guard_last_at: null,
+    guard_first_at: null,
+    guard_events_24h: 0,
+    guard_relaunches_24h: 0,
+    guard_reasons_24h: {},
     ...over,
   });
   const cardio = (ext: ExtHealthRow | null | undefined) => room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext });
@@ -796,6 +802,12 @@ describe("R8 reboot note / R10 chrome_not_running", () => {
     chrome_down_since: null,
     rebooted_recently: false,
     rebooted_at: null,
+    guard_last_reason: null,
+    guard_last_at: null,
+    guard_first_at: null,
+    guard_events_24h: 0,
+    guard_relaunches_24h: 0,
+    guard_reasons_24h: {},
     ...over,
   });
   const cardio = (ext: ExtHealthRow | null) => room({ room_id: "room_cardio", room_name: "Cardiology OPD", machine: "EHRC-ECHOs-Mac-mini", ext });
@@ -945,5 +957,59 @@ describe("fmtFor / fmtIst", () => {
     expect(fmtIst(iso("2026-10-05 01:36:50"), now)).toBe("01:36 IST");
     expect(fmtIst(iso("2026-10-04 23:59:00"), now)).toBe("4 Oct 23:59 IST");
     expect(fmtIst("nope", now)).toBe("an unknown time");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R11 guard_activity
+// ---------------------------------------------------------------------------
+
+describe("R11 guard_activity", () => {
+  const NOW = "2026-10-06 15:00:00";
+  const base: ExtHealthRow = {
+    machine: "m", room_id: "r", room_name: "R", last_ext_ts: iso("2026-10-06 14:59:40"), ext_age_s: 20, ext_version: EXT_TARGET_VERSION, version_state: "current",
+    poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20, idle_s: null }, status: "ok", behind_since: null, behind_at_floor: false,
+    chrome_down_since: null, rebooted_recently: false, rebooted_at: null,
+    guard_last_reason: null, guard_last_at: null, guard_first_at: null, guard_events_24h: 0, guard_relaunches_24h: 0, guard_reasons_24h: {},
+  };
+  const guarded = (name: string, reasons: Record<string, number>, firstAt: string, lastAt: string = firstAt): RoomAttentionInputs => {
+    const counts = Object.entries(reasons);
+    const ext: ExtHealthRow = {
+      ...base, room_id: `room_${name}`, room_name: name, machine: `m-${name}`, guard_last_reason: counts[0]?.[0] ?? null, guard_last_at: iso(lastAt), guard_first_at: iso(firstAt),
+      guard_events_24h: counts.filter(([k]) => k !== "boot").reduce((s, [, n]) => s + n, 0), guard_relaunches_24h: reasons.relaunch ?? 0, guard_reasons_24h: reasons,
+    };
+    return room({ room_id: ext.room_id as string, room_name: name, machine: ext.machine, ext });
+  };
+  const fleet = (items: ReturnType<typeof run>) => items.filter((i) => i.kind === "guard_activity");
+
+  it("ONE amber fleet row naming each Mac the guard acted on, with its reasons and counts", () => {
+    const items = run(NOW, guarded("OPD 6", { missing: 1 }, "2026-10-06 09:00:00"), guarded("OPD 4", { relaunch: 1, stripped: 1 }, "2026-10-06 08:00:00"));
+    const f = fleet(items);
+    expect(f).toHaveLength(1);
+    expect(items).toHaveLength(1);
+    expect(f[0]).toMatchObject({ room_id: "fleet", room_name: "Fleet", machine: null, kind: "guard_activity", severity: "amber" });
+    expect(f[0]!.detail).toBe("Presence guard acted in the last 24 h: OPD 4 (stripped ×1, relaunch ×1), OPD 6 (missing ×1).");
+    expect(f[0]!.since).toBe(iso("2026-10-06 08:00:00"));
+    expect(f[0]!.detail.trim().endsWith(".") && f[0]!.action.trim().endsWith(".")).toBe(true);
+    expect(KIND_LABEL.guard_activity).toBe("Presence guard acted");
+  });
+
+  it("`since` is the OLDEST non-boot guard event across the listed rooms, not the earliest of each room's newest", () => {
+    // OPD 4: first acted 02:00, newest 14:00. OPD 6: first 05:00, newest 06:00. The earliest newest is 06:00; the oldest event is 02:00.
+    const f = fleet(run(NOW, guarded("OPD 4", { stripped: 2 }, "2026-10-06 02:00:00", "2026-10-06 14:00:00"), guarded("OPD 6", { missing: 1 }, "2026-10-06 05:00:00", "2026-10-06 06:00:00")));
+    expect(f[0]!.since).toBe(iso("2026-10-06 02:00:00"));
+  });
+
+  it("boot rewrites alone raise nothing; in a room that did raise they are listed last in the detail", () => {
+    expect(run(NOW, guarded("OPD 4", { boot: 2 }, "2026-10-06 08:00:00"))).toEqual([]);
+    const f = fleet(run(NOW, guarded("OPD 4", { boot: 2, stripped: 1 }, "2026-10-06 08:00:00"), guarded("OPD 5", { boot: 1 }, "2026-10-06 08:05:00")));
+    expect(f[0]!.detail).toBe("Presence guard acted in the last 24 h: OPD 4 (stripped ×1, boot ×2).");
+  });
+
+  it("a relaunch alone raises it; no guard activity raises nothing; rooms sort numerically (OPD 4 before OPD 10)", () => {
+    expect(fleet(run(NOW, guarded("OPD 4", { relaunch: 1 }, "2026-10-06 08:00:00")))).toHaveLength(1);
+    expect(run(NOW, room({ room_id: "room_x", room_name: "X", machine: "mx", ext: base }))).toEqual([]);
+    const f = fleet(run(NOW, guarded("OPD 10", { missing: 1 }, "2026-10-06 08:00:00"), guarded("OPD 4", { missing: 1 }, "2026-10-06 08:30:00")));
+    expect(f[0]!.detail).toBe("Presence guard acted in the last 24 h: OPD 4 (missing ×1), OPD 10 (missing ×1).");
   });
 });

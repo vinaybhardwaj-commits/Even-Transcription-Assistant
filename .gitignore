@@ -79,3 +79,7 @@ docs/handoff/ETA-E7-VOICE-HARVEST-INVENTORY-CC-KICKOFF-14-SEP-2026.md
 # the same one. Redacting the copy would buy nothing and would imply a fix that is not one.
 docs/handoff/ETA-S1-FIX2-REPORT-14-SEP-2026-SCRATCH-COPY.md
 extensions/pulse-presence/src/eta_config.js
+
+# python bytecode (scripts/*)
+__pycache__/
+*.pyc
