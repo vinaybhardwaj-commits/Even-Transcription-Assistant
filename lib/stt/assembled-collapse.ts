@@ -81,7 +81,8 @@ export function foldText(s: string): string {
  * how a regimen is written; "follow-up" and "and/or" do not.
  */
 export function isNumberToken(word: string): boolean {
-  const raw = (word ?? "").toLowerCase();
+  // NFC first: engines emit Bengali য় ড় ঢ় and Devanagari nukta letters precomposed (U+09DF, U+095B), the lexicon stores NFC.
+  const raw = (word ?? "").toLowerCase().normalize("NFC");
   for (const part of [raw, ...raw.split(JOINER)]) {
     const w = part.replace(PUNCT, "").trim();
     if (!w) continue;

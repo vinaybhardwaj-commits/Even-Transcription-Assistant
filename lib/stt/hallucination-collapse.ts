@@ -72,7 +72,8 @@ function hasNumericChar(w: string): boolean {
 /** PURE. True for a token holding any numeric character or a known number word, ignoring case and
  *  surrounding punctuation. A hyphen- or slash-joined token ("ek-ek", "1-0-1") is a number if any part is. */
 export function isNumberToken(word: string, numberWords: ReadonlySet<string> = NUMBER_WORDS): boolean {
-  const raw = (word ?? "").toLowerCase();
+  // NFC first: engines emit Bengali য় ড় ঢ় and Devanagari nukta letters precomposed (U+09DF, U+095B), the lexicon stores NFC.
+  const raw = (word ?? "").toLowerCase().normalize("NFC");
   for (const part of [raw, ...raw.split(NUMBER_PART_SPLIT)]) {
     const w = part.replace(PUNCT_FOLD, "").trim();
     if (w && (hasNumericChar(w) || numberWords.has(w))) return true;
