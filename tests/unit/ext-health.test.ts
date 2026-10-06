@@ -41,31 +41,31 @@ const mk = (over: Partial<ExtHealthInput> = {}): ExtHealthInput => ({
 const one = (over: Partial<ExtHealthInput> = {}, now = NOW) => computeExtHealth([mk(over)], now)[0]!;
 
 describe("version comparison — dotted integers, never strings", () => {
-  it("target is 0.1.1.39", () => expect(EXT_TARGET_VERSION).toBe("0.1.1.39"));
+  it("target is 0.1.1.40", () => expect(EXT_TARGET_VERSION).toBe("0.1.1.40"));
 
   it("compares numerically part by part", () => {
     expect(compareExtVersions("0.1.0.9", "0.1.0.40")).toBeLessThan(0); // lexically '9' > '4'
-    expect(compareExtVersions("0.1.0.40", "0.1.1.39")).toBeLessThan(0);
-    expect(compareExtVersions("0.1.1.100", "0.1.1.39")).toBeGreaterThan(0); // lexically '1' < '3'
-    expect(compareExtVersions("0.1.1.39", "0.1.1.39")).toBe(0);
+    expect(compareExtVersions("0.1.0.40", "0.1.1.40")).toBeLessThan(0);
+    expect(compareExtVersions("0.1.1.100", "0.1.1.40")).toBeGreaterThan(0); // lexically '1' < '3'
+    expect(compareExtVersions("0.1.1.40", "0.1.1.40")).toBe(0);
     expect(compareExtVersions("0.2", "0.1.9.9")).toBeGreaterThan(0);
   });
 
   it("missing trailing parts read as zero", () => {
-    expect(compareExtVersions("0.1.1.39.0", "0.1.1.39")).toBe(0);
+    expect(compareExtVersions("0.1.1.40.0", "0.1.1.40")).toBe(0);
     expect(compareExtVersions("0.1.1", "0.1.1.0")).toBe(0);
-    expect(compareExtVersions("0.1.1", "0.1.1.39")).toBeLessThan(0);
+    expect(compareExtVersions("0.1.1", "0.1.1.40")).toBeLessThan(0);
   });
 
   it("garbage does not parse", () => {
-    for (const bad of ["", "abc", "0.1.x", "0..1", "v0.1.1", "0.1.1.39-beta", "1234567.1", "0.1.1.39.1.1.1"]) expect(parseExtVersion(bad), bad).toBeNull();
-    expect(compareExtVersions("abc", "0.1.1.39")).toBeNull();
+    for (const bad of ["", "abc", "0.1.x", "0..1", "v0.1.1", "0.1.1.40-beta", "1234567.1", "0.1.1.40.1.1.1"]) expect(parseExtVersion(bad), bad).toBeNull();
+    expect(compareExtVersions("abc", "0.1.1.40")).toBeNull();
     expect(parseExtVersion(" 0.1.0.36 ")).toEqual([0, 1, 0, 36]);
     expect(parseExtVersion(null)).toBeNull();
   });
 
   it("version_state: current at and above the target, behind below it, unknown when absent or unparseable", () => {
-    expect(versionState("0.1.1.39")).toBe("current");
+    expect(versionState("0.1.1.40")).toBe("current");
     expect(versionState("0.1.2.0")).toBe("current");
     expect(versionState("0.1.0.36")).toBe("behind");
     expect(versionState(null)).toBe("unknown");
@@ -82,7 +82,7 @@ describe("status — ok", () => {
       room_name: "Cardiology OPD",
       status: "ok",
       ext_age_s: 20,
-      ext_version: "0.1.1.39",
+      ext_version: "0.1.1.40",
       version_state: "current",
       behind_since: null,
       poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 30 },
@@ -505,7 +505,7 @@ describe("status — no_tab (the extension is alive, no Pulse tab)", () => {
 });
 
 describe("status — behind", () => {
-  it("version 0.1.0.36 against target 0.1.1.39, alive = behind, and carries when the run began", () => {
+  it("version 0.1.0.36 against target 0.1.1.40, alive = behind, and carries when the run began", () => {
     const r = one({ ext_version: "0.1.0.36", behind_since: ago(5 * 3600) });
     expect(r).toMatchObject({ status: "behind", version_state: "behind", ext_version: "0.1.0.36", behind_since: ago(5 * 3600) });
   });
@@ -513,7 +513,7 @@ describe("status — behind", () => {
   it("a version above the target is current", () => expect(one({ ext_version: "0.1.2.0" })).toMatchObject({ status: "ok", version_state: "current" }));
 
   it("behind_since is only reported while the status is behind", () => {
-    expect(one({ ext_version: "0.1.1.39", behind_since: ago(3600) }).behind_since).toBeNull();
+    expect(one({ ext_version: "0.1.1.40", behind_since: ago(3600) }).behind_since).toBeNull();
   });
 });
 
@@ -664,10 +664,10 @@ describe("loadExtHealthInputs / extHealth", () => {
     expect(since).toHaveLength(1);
     expect(String(since[0]!.vals[0])).toContain("EHRC-CONSUL5s-Mac-mini");
     expect(String(since[0]!.vals[0])).not.toContain("EHRC-ECHOs-Mac-mini");
-    expect(since[0]!.vals.find((v) => Array.isArray(v))).toEqual([0, 1, 1, 39]);
+    expect(since[0]!.vals.find((v) => Array.isArray(v))).toEqual([0, 1, 1, 40]);
     expect(since[0]!.vals).toContain(new Date(NOW - 2 * 3_600_000).toISOString()); // the 2-hour look-back, not 24 h
 
-    const b = fakeDb((q) => (/LEFT JOIN LATERAL/.test(q.text) ? [{ ...eventRows[1]!, ver: "0.1.1.39" }] : /FROM room_install/.test(q.text) ? ROOMS : []));
+    const b = fakeDb((q) => (/LEFT JOIN LATERAL/.test(q.text) ? [{ ...eventRows[1]!, ver: "0.1.1.40" }] : /FROM room_install/.test(q.text) ? ROOMS : []));
     await extHealth(b.db, { asOf: NOW });
     expect(b.issued.filter((q) => /AS since/.test(q.text))).toHaveLength(0);
   });
@@ -701,7 +701,7 @@ describe("loadExtHealthInputs / extHealth", () => {
 });
 
 describe("loadExtHealthInputs — Chrome-down start and the reboot history", () => {
-  const base = { ext_event: "heartbeat", ext_ts: ago(10), ext_reason: null, ver: "0.1.1.39", poller_ts: ago(10), poller_state: "ok", console_user: "console-a" };
+  const base = { ext_event: "heartbeat", ext_ts: ago(10), ext_reason: null, ver: "0.1.1.40", poller_ts: ago(10), poller_state: "ok", console_user: "console-a" };
 
   it("the Chrome-down read runs ONLY for machines whose newest poll is ok with chrome_running=false, and its answer lands on the row", async () => {
     const rowsFor = (chrome5: string) => [
