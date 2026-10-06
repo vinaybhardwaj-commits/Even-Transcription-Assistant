@@ -14,7 +14,7 @@ export const revalidate = 0;
 export const maxDuration = 30;
 
 const NO_STORE = { "cache-control": "no-store" };
-export const MAX_LIMIT = 500;
+const MAX_LIMIT = 500;
 export const DEFAULT_LIMIT = 100;
 
 type Row = {
