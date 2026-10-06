@@ -5,10 +5,13 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { neon } from '@neondatabase/serverless';
 import { resolveMachines, consultLabel } from './occupancy.mjs';
+import { cachedFacts, suffixParts, HEADER_NOTE } from './snapshot.mjs';
 
 const HOME = os.homedir();
 const REFRESH = Number(process.env.PW_REFRESH || 5) * 1000; // ms
 const ONCE = process.argv.includes('--once');
+const DUMP = process.argv.includes('--dump'); // with --once: the old plain-text dump instead of the board
+const COLS = Number(process.env.PW_COLS || 160); // one row = one line at this width
 const THIRD_FLOOR = 'EHRC-AUDIOMETRYs-Mac-mini';
 const FEED_N = 25;
 const STALE_S = 90; // no heartbeat beyond this => occupant likely gone
@@ -52,14 +55,25 @@ const evColor = (ev) =>
   ev === 'active' ? C.cyan : C.yellow;
 
 async function fetchState() {
-  const current = await resolveMachines(sql);
-  const feed = await sql`
+  const [current, feed] = await Promise.all([resolveMachines(sql), sql`
     select source, machine, event, email, payload->>'display_name' as display_name, ts
     from pulse_presence_events
     order by ts desc
-    limit ${FEED_N}`;
-  return { current, feed };
+    limit ${FEED_N}`]);   // resolver and feed run in parallel
+  // per-machine extras (ext version, heartbeat age, poller): ONE machine-scoped 10-minute read, cached 30 s in snapshot.mjs; the resolver rows already carry pending / instances / warehouse doctor
+  const { facts } = await cachedFacts(sql, current.map((r) => r.machine), ONCE);
+  return { current, feed, facts };
 }
+
+const vis = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').length;
+function clip(s, n) { // ANSI-aware clip to n visible columns
+  if (vis(s) <= n) return s;
+  let out = '', v = 0;
+  for (const m of s.matchAll(/(\x1b\[[0-9;]*m)|([\s\S])/gu)) { if (m[1]) { out += m[1]; continue; } if (v >= n - 1) break; out += m[2]; v++; }
+  return out + '…' + C.reset;
+}
+const SEG = { dim: C.dim, gray: C.gray, red: C.red, yellow: C.yellow };
+const suffixOf = (r, facts) => suffixParts(r, facts.get(r.machine)).map((p) => SEG[p.color] + p.text + C.reset).join('  ');
 
 function detectChanges(current) {
   for (const r of current) {
@@ -79,9 +93,10 @@ function detectChanges(current) {
   firstTick = false;
 }
 
-function render({ current, feed }) {
+function render({ current, feed, facts }, clear = true) {
   const L = [];
   L.push(`${C.bold}${C.inv} ETA PULSE PRESENCE — LIVE ${C.reset}  ${C.dim}${nowIST()} IST  ·  refresh ${REFRESH/1000}s  ·  watching since ${fmtClock(started)}${C.reset}`);
+  L.push(`${C.dim}${HEADER_NOTE}${C.reset}`);
   L.push('');
   L.push(`${C.bold}WHO IS LOGGED IN (Pulse extension)${C.reset}`);
   if (!current.length) {
@@ -110,9 +125,12 @@ function render({ current, feed }) {
       if (occ !== null && !(od && od.source === 'warehouse') && !r.ambiguous && r.background && r.background.length) who += ` ${C.dim}[background: ${r.background.join(', ')}]${C.reset}`;
       // no warehouse doctor and no cookie identity: show the page greeting (a witness, never an identity), dimmed
       if (occ === null && !(od && od.source === 'warehouse') && r.page_name) who += ` ${C.dim}page: ${r.page_name}${C.reset}`;
-      if (r.instances > 1) who += ` ${C.dim}[instances=${r.instances}]${C.reset}`;
       const last = `${C.dim}[${r.event} ${ageStr(r.ts)} ago]${C.reset}`;
-      L.push(`  ${star} ${C.bold}${mach}${C.reset} ${C.dim}${room}${C.reset} ${who}  ${last}`);
+      const head = `  ${star} ${C.bold}${mach}${C.reset} ${C.dim}${room}${C.reset} `;
+      const suf = suffixOf(r, facts);
+      let line = `${head}${who}  ${last}  ${suf}`;
+      if (vis(line) > COLS) { const w = COLS - vis(head) - vis(suf) - 2; line = `${head}${clip(who, Math.max(12, w))}  ${suf}`; }   // too wide: drop the [event age] tail (hb covers it), then clip the name
+      L.push(clip(line, COLS));
     }
   }
   L.push('');
@@ -134,7 +152,7 @@ function render({ current, feed }) {
     const email = r.display_name || r.email || '';
     L.push(`  ${C.gray}${t}${C.reset} ${C.dim}${src}${C.reset} ${mach} ${evColor(r.event)}${ev}${C.reset} ${email}`);
   }
-  process.stdout.write('\x1b[2J\x1b[H' + L.join('\n') + '\n');
+  process.stdout.write((clear ? '\x1b[2J\x1b[H' : '') + L.join('\n') + '\n');
 }
 
 async function tick() {
@@ -147,7 +165,12 @@ async function tick() {
   }
 }
 
-if (ONCE) {
+if (ONCE && !DUMP) {
+  const state = await fetchState();
+  detectChanges(state.current);
+  render(state, false);
+  process.exit(0);
+} else if (ONCE) {
   const { current, feed } = await fetchState();
   console.log('CURRENT(ext) rows:', current.length);
   for (const r of current) console.log('  ', r.machine, '|', r.event, '|', r.ambiguous ? identOf(r) : r.occupied ? r.display_name + (r.background.length ? ' [bg: ' + r.background.join(', ') + ']' : '') : 'LOGGED-OUT(' + r.out_reason + ')', '|', r.ts, r.occupant_display && r.occupant_display.source === 'warehouse' ? '| ' + r.occupant_display.name + ' ' + consultLabel(r.occupant_display) + (r.occupant_display.stale ? ' (session ' + (r.occupant_display.cookie_name || '?') + ' stale)' : '') : '');
