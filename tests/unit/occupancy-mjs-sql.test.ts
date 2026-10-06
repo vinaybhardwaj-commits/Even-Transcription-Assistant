@@ -7,7 +7,7 @@
  * driver), and asserts (a) the new behaviour, and (b) that the TypeScript resolver gives the same per-stream answer and the same page_name / instances.
  *
  * Rules under test: an ext `identity_stale` event (doctor_uid null, payload.cookie_uid = the stale cookie doctor) closes THAT doctor's stream like a
- * logout with out_reason stale_cookie; a row whose reason contains stale_cookie is never a doctor's activity; page_name = latest non-null page on the
+ * logout with out_reason stale_cookie (and, when he was present, demotes him to the page-name stream: F8); a row whose reason contains stale_cookie is never a doctor's activity; page_name = latest non-null page on the
  * machine's ext rows in the last 10 min; instances = distinct instance_ids reporting there. Time is fixed (asOf), so nothing depends on the clock.
  * Needs Docker (postgres:16); ETA_ALLOW_SKIP_E2E=1 accepts that it was not proven, like tests/unit/fleet-attention-sql.test.ts.
  */
@@ -100,7 +100,7 @@ const MACHINES = [S_STALE, S_RELOGIN, S_AFTER, S_NOTGEN, S_TWO_INST, S_PAGE_ONLY
 type SqlRow = { uid: string; out_reason: string | null; present: boolean };
 type MachineRow = {
   machine: string; occupied: boolean; doctor_uid: string | null; out_reason: string | null; page_name: string | null; instances: number;
-  occupant_display: unknown; sessions: SqlRow[];
+  occupant_display: unknown; sessions: SqlRow[]; stale_occupant?: { page_name: string | null; cookie_name: string | null } | null;
 };
 let byMachine = new Map<string, MachineRow>();
 
@@ -156,14 +156,16 @@ describe.runIf(HAVE_DOCKER)("resolveMachines (SQL) — extension 0.1.1", () => {
     expect([...byMachine.keys()].sort()).toEqual([...MACHINES].sort());
   });
 
-  it("identity_stale closes the cookie doctor's stream: out_reason stale_cookie, machine empty", () => {
-    expect(m(S_STALE)).toMatchObject({ occupied: false, doctor_uid: null, out_reason: "stale_cookie", page_name: PAGE });
+  it("identity_stale closes the cookie doctor's stream (out_reason stale_cookie) and DEMOTES him: the machine is occupied by the page-name stream, uid null (F8)", () => {
+    expect(m(S_STALE)).toMatchObject({ occupied: true, doctor_uid: null, page_name: PAGE, stale_occupant: { page_name: PAGE, cookie_name: A.full_name } });
     expect(stream(S_STALE, UA)).toMatchObject({ present: false, out_reason: "stale_cookie" });
+    expect(stream(S_STALE, `stale:${PAGE}`)).toMatchObject({ present: true });
   });
 
   it("a later login re-opens it; plain activity after the stale event does not", () => {
     expect(m(S_RELOGIN)).toMatchObject({ occupied: true, doctor_uid: UA, out_reason: null });
-    expect(m(S_AFTER)).toMatchObject({ occupied: false, out_reason: "stale_cookie" });
+    expect(m(S_AFTER)).toMatchObject({ occupied: true, doctor_uid: null, stale_occupant: { page_name: PAGE } }); // the demoted page-name stream; A himself stays out
+    expect(stream(S_AFTER, UA)).toMatchObject({ present: false, out_reason: "stale_cookie" });
   });
 
   it("rows whose reason contains stale_cookie never keep a doctor alive (idle_timeout, not present)", () => {
@@ -193,7 +195,7 @@ describe.runIf(HAVE_DOCKER)("resolveMachines (SQL) — extension 0.1.1", () => {
   it("LOCKSTEP with lib/encounter-windows/occupancy.ts: same per-stream out_reason / present, same page_name and instances, on every scenario", () => {
     for (const name of MACHINES) {
       const es = tsEvents(name);
-      const ts = new Map(resolveStreams(es, NOW).map((s) => [s.uid, { present: s.present, out_reason: s.out_reason }]));
+      const ts = new Map(resolveStreams(es, NOW).map((s) => [s.uid ?? `stale:${s.page_name ?? ""}`, { present: s.present, out_reason: s.out_reason }]));
       const sqlStreams = new Map(m(name).sessions.map((s) => [s.uid, { present: s.present, out_reason: s.out_reason }]));
       expect(sqlStreams, name).toEqual(ts);
       const sig = machineSignals(es, NOW);

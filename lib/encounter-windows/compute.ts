@@ -199,7 +199,7 @@ export function computeWindowsDetailed(events: PresenceEvent[], opts: ComputeOpt
   for (const raw of events) {
     const e = normalizeEvent(raw);
     if (!e) continue;
-    if (e.t > maxT) maxT = e.t;
+    if (e.source !== "poller" && e.t > maxT) maxT = e.t; // poller rows only feed the login rule
     let a = byMachine.get(e.machine);
     if (!a) byMachine.set(e.machine, (a = []));
     a.push(e);
@@ -233,7 +233,7 @@ export function computeWindowsDetailed(events: PresenceEvent[], opts: ComputeOpt
         attribution = "rows";
         doctorUid = top.uid;
         displayName = top.dn;
-      } else if (occOpen.best) {
+      } else if (occOpen.best && occOpen.best.uid) { // a stale-cookie occupant has no uid: it never attributes (the warehouse decides)
         attribution = "occupant";
         doctorUid = occOpen.best.uid;
         displayName = occOpen.best.dn;

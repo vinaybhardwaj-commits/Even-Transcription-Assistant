@@ -34,6 +34,17 @@ minutes; a witness, never an identity) and `instances` (distinct `instance_id`s 
 `q-am.mjs` and `watch.mjs` show `page: <name>` dimmed when there is no warehouse doctor and no cookie identity. The same rules live in
 `lib/encounter-windows/occupancy.ts`; `tests/unit/occupancy-mjs-sql.test.ts` proves the SQL against postgres and in lockstep with it.
 
+Login rule (6 Oct 2026): an ext `login` opens presence only with console activity (the nearest poller row within 300 s has idle_s <= 600, or no poller row within
+300 s) and no `identity_stale` within 10 s; otherwise it is the machine's PENDING session (`pending` on the machine row, `pendingLabel()`). It is promoted by any
+ext `active` / encounter event after the login by the login's own uid (no expiry: it stays pending until promoted, logout, a replacing login, or the nightly cutoff; an event
+of another uid or none promotes only within 45 min of the login) or by a poller row within 45 min with `idle_s < (poll ts - login ts) + 5 s`. An `identity_stale` session
+(one within 10 s of the login, or one for its cookie uid at ANY later time while pending) promotes to a STALE-COOKIE stream instead (uid null, the page greeting is the identity,
+`stale_occupant` on the machine row, `staleOccupantLabel()`: `page: <page_name> (cookie <name> stale)`), never the cookie doctor; an identity_stale for a PRESENT doctor's cookie
+demotes him to that stream from then on. In the machine row (F11) that stream merges into a present doctor whose first name equals the page_name, else it is the occupant only when no doctor is present and is never counted as a doctor or in the ambiguity check (beside a real occupant it shows as `stale_occupant`). `occupancy.mjs` does it in two steps
+(`loginEffects()` reads the logins, the identity_stale rows and ONE poller read bounded per login window (a LATERAL index range scan per window, ~1k rows for 46 logins; over 400 windows it splits by IST day), then `judgeMachine()` - a port of `resolveStreamsDetailed` - runs over only the
+Macs that have a login the rule does not accept; `OCCUPANCY_SQL` applies the ignore list, the heartbeat-ignore intervals and the synthetic promotions; live calls cache the
+judgement for 15 s). The lookback is 72 h, the same as `lib/encounter-windows/occupancy.ts`; proven in `tests/unit/occupancy-login-rule-sql.test.ts`.
+
 Changes from the Air originals: `DATABASE_URL` is honoured first, the `sql.query` fallback, and the pinned driver version.
 Nothing else.
 

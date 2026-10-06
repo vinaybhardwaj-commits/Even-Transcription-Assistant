@@ -25,6 +25,7 @@
  * production path; a scratch run against a real Postgres engine (pglite) checked that the SQL and this function keep
  * the same ids on random streams, missing flags included.
  */
+import { canonicalPollerKey } from "./machine-keys";
 import type { PresenceEvent } from "./types";
 
 type Flag = boolean | null;
@@ -62,4 +63,37 @@ export function keepFocusFlips(events: PresenceEvent[]): PresenceEvent[] {
     if (keep) out.push(raw);
   }
   return out;
+}
+
+/** The login rule reads a poller row only within this long before / after an ext login on the same Mac (the +50 min covers the 45-min idle-reset promotion). */
+export const POLL_KEEP_BEFORE_LOGIN_MS = 5 * 60_000;
+export const POLL_KEEP_AFTER_LOGIN_MS = 50 * 60_000;
+
+const msOf = (ts: PresenceEvent["ts"]): number => (ts instanceof Date ? ts.getTime() : typeof ts === "number" ? ts : new Date(ts).getTime());
+
+/**
+ * The poller rows (source 'poller', with an idle_s) within [login - 5 min, login + 50 min] of an ext login on the same Mac, in (ts, id) order.
+ * fetchEvents reads the poller rows in ONE query bounded per login window (see db.ts) and matches them to the logins again HERE. A poller row's `machine` is brought to the
+ * extension's spelling (the pre-5-Oct short keys map through machine-keys). `ext` = the extension/resolver rows of the same read.
+ */
+export function pollerRowsNearLogins(ext: PresenceEvent[], poll: PresenceEvent[]): PresenceEvent[] {
+  const logins = new Map<string, number[]>();
+  for (const e of ext) {
+    if (e.source !== "ext" || e.event !== "login" || !e.machine) continue;
+    const t = msOf(e.ts);
+    if (!Number.isFinite(t)) continue;
+    const l = logins.get(e.machine);
+    if (l) l.push(t);
+    else logins.set(e.machine, [t]);
+  }
+  const out: Array<{ raw: PresenceEvent; t: number; id: number }> = [];
+  for (const p of poll) {
+    if (p.source !== "poller" || !p.machine || p.idle_s === null || p.idle_s === undefined) continue;
+    const t = msOf(p.ts);
+    if (!Number.isFinite(t)) continue;
+    const near = (logins.get(canonicalPollerKey(p.machine)) ?? []).some((lt) => t >= lt - POLL_KEEP_BEFORE_LOGIN_MS && t <= lt + POLL_KEEP_AFTER_LOGIN_MS);
+    if (near) out.push({ raw: p, t, id: Number(p.id) });
+  }
+  out.sort((a, b) => a.t - b.t || a.id - b.id);
+  return out.map((x) => x.raw);
 }

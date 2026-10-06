@@ -34,6 +34,8 @@ export type PresenceEvent = {
   inst?: string | null;
   /** payload->>'cookie_uid' (extension 0.1.1, identity_stale events only): the stale Google-cookie doctor_uid. */
   cookie_uid?: string | null;
+  /** payload->>'idle_s' (poller rows only): the console's idle seconds. fetchEvents keeps poller rows only near an ext login (the login rule). */
+  idle_s?: string | number | null;
 };
 
 export type Attribution = "rows" | "occupant" | "none";

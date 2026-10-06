@@ -1,10 +1,11 @@
 export * from "./types";
 export { computeWindows, computeWindowsDetailed } from "./compute";
-export { pickOccupant, resolveStreams, occupancyAt, cutoffTs, OCC_DEFAULTS } from "./occupancy";
+export { pickOccupant, foldGhost, pageNamesDoctor, firstNameOf, resolveStreams, resolveStreamsDetailed, occupancyAt, cutoffTs, OCC_DEFAULTS, LOGIN_RULE, STALE_UNKNOWN_NAME } from "./occupancy";
+export type { PendingSession, PendingReason } from "./occupancy";
 export { refreshWindows, refreshWindowsByDay, splitByIstDay, istMidnightAtOrBefore, queryWindows, loadCrosswalk, fetchEvents } from "./db";
 export type { WindowsDb, RefreshResult, RefreshByDayResult, WindowFilter } from "./db";
-export { keepFocusFlips } from "./filter";
-export { consultingDoctorForMachine, machineOccupancy, buildOccupantDisplay, WAREHOUSE_WINDOW_MIN } from "./occupant";
-export type { OccupantDisplay, MachineOccupancy, ConsultingDoctor } from "./occupant";
+export { keepFocusFlips, pollerRowsNearLogins } from "./filter";
+export { consultingDoctorForMachine, machineOccupancy, buildOccupantDisplay, pendingLabel, staleOccupantLabel, WAREHOUSE_WINDOW_MIN } from "./occupant";
+export type { OccupantDisplay, MachineOccupancy, ConsultingDoctor, StaleOccupant } from "./occupant";
 export { extHealth, computeExtHealth, summarizeExtHealth, EXT_TARGET_VERSION, EXT_HEALTH_EXCLUDED_MACHINES } from "./ext-health";
 export type { ExtHealthRow, ExtHealthSummary, ExtStatus } from "./ext-health";

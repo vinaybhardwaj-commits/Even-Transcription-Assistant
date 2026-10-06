@@ -27,12 +27,22 @@
  * the flip event. Repeats of the same flag carry nothing the resolver reads, so the latest kept event always has
  * the same flag as the latest real event. keepFocusFlips() in ./filter.ts is the same rule in TypeScript.
  *
+ * LOGIN RULE ROWS (6 Oct 2026). The resolver's login rule (occupancy.ts) reads the poller's idle_s around each ext login. After the ext query above, if it
+ * returned any ext `login`, ONE more query reads the poller rows: a window [login - 5 min, login + 50 min] (capped at the read end) per login, on the login's Mac
+ * under the canonical key and the pre-5-Oct short key, every login, overlapping windows merged; more than 400 windows split the read by IST day (F12). The windows are bound parameters (three arrays, unnest) and a
+ * LATERAL subquery (with an ORDER BY, which stops the planner flattening it back into a hash join over a table scan) runs one (machine, ts) index range scan per window,
+ * so the transfer is ~23 rows per login (a poll every ~2.4 min) — about 1k rows for 46 logins, not every poller row of the read range of every Mac with a login; source
+ * 'poller' with an idle_s; machine, ts and idle_s only. The rows are then matched to the logins again in TypeScript (pollerRowsNearLogins). No login -> no second
+ * query, so a read with no logins issues exactly the one query it always did. identity_stale rows are not heartbeats: the filter always keeps them.
+ *
  * Extension 0.1.1 fields (page, inst, cookie_uid) ride on whatever rows are kept. A background profile's heartbeats are dropped, so the
  * `instances` count taken from this load can undercount a quiet background profile whose only kept rows are its active/idle/encounter events;
  * the tools/pulse-watch resolver reads every row and counts exactly. The count is informational either way.
  */
 import type { NeonQueryFunction } from "@neondatabase/serverless";
 import { computeWindowsDetailed } from "./compute";
+import { pollerRowsNearLogins, POLL_KEEP_AFTER_LOGIN_MS, POLL_KEEP_BEFORE_LOGIN_MS } from "./filter";
+import { canonicalPollerKey, legacyPollerKey } from "./machine-keys";
 import {
   normalizeHostname,
   type Attribution,
@@ -109,7 +119,91 @@ export async function fetchEvents(db: WindowsDb, from: Date, to: Date): Promise<
      WHERE event <> 'heartbeat' OR focus = 'true' OR id IN (SELECT id FROM flips)
      ORDER BY ts, id
   `) as unknown as Array<PresenceEvent>;
-  return rows;
+  return withLoginPollerRows(db, rows, to.getTime() + TAIL_MS);
+}
+
+/** At most this many windows go in ONE poller query; a read with more is split by IST day (then by this cap within a day), so no login loses its poller evidence. */
+export const MAX_LOGIN_WINDOWS = 400;
+
+type PollerWindow = { machine: string; lo: number; hi: number };
+
+/** The poller windows of the logins in `ext`: one per login on its Mac (canonical key + the pre-5-Oct short key), overlapping windows of one key merged. */
+export function loginPollerWindows(ext: PresenceEvent[], hiMs: number): PollerWindow[] {
+  const byMachine = new Map<string, Array<[number, number]>>();
+  for (const e of ext) {
+    if (e.source !== "ext" || e.event !== "login" || !e.machine) continue;
+    const t = new Date(e.ts as string | number | Date).getTime();
+    if (!Number.isFinite(t)) continue;
+    const w = byMachine.get(e.machine) ?? [];
+    w.push([t - POLL_KEEP_BEFORE_LOGIN_MS, Math.min(t + POLL_KEEP_AFTER_LOGIN_MS, hiMs)]);
+    byMachine.set(e.machine, w);
+  }
+  const out: PollerWindow[] = [];
+  for (const [m, ws] of byMachine) {
+    ws.sort((a, b) => a[0] - b[0]);
+    const merged: Array<[number, number]> = [];
+    for (const w of ws) {
+      const last = merged[merged.length - 1];
+      if (last && w[0] <= last[1]) last[1] = Math.max(last[1], w[1]);
+      else merged.push([w[0], w[1]]);
+    }
+    const legacy = legacyPollerKey(m);
+    for (const key of legacy ? [m, legacy] : [m]) for (const [lo, hi] of merged) out.push({ machine: key, lo, hi });
+  }
+  return out;
+}
+
+/** F12: one query's worth of windows per chunk — all of them when they fit the cap, else one chunk per IST day of the window's start (split again at the cap). */
+export function chunkPollerWindows(windows: PollerWindow[], max = MAX_LOGIN_WINDOWS): PollerWindow[][] {
+  if (windows.length === 0) return [];
+  if (windows.length <= max) return [windows];
+  const days = new Map<number, PollerWindow[]>();
+  for (const w of windows) {
+    const d = istMidnightAtOrBefore(w.lo);
+    const list = days.get(d);
+    if (list) list.push(w);
+    else days.set(d, [w]);
+  }
+  const out: PollerWindow[][] = [];
+  for (const d of [...days.keys()].sort((x, y) => x - y)) {
+    const ws = days.get(d)!;
+    for (let i = 0; i < ws.length; i += max) out.push(ws.slice(i, i + max));
+  }
+  return out;
+}
+
+/** Append the poller rows the login rule needs (see LOGIN RULE ROWS above). Pure pass-through when `ext` holds no login. */
+export async function withLoginPollerRows(db: WindowsDb, ext: PresenceEvent[], hiMs: number): Promise<PresenceEvent[]> {
+  const windows = loginPollerWindows(ext, hiMs);
+  if (windows.length === 0) return ext;
+  type Raw = { machine: string; ts: string | number | Date; idle_s: string | number | null };
+  const chunks = await Promise.all(
+    chunkPollerWindows(windows).map(async (ws): Promise<Raw[]> => {
+      const machines = ws.map((w) => w.machine);
+      const los = ws.map((w) => new Date(w.lo).toISOString());
+      const his = ws.map((w) => new Date(w.hi).toISOString());
+      return (await db`
+    WITH w AS (SELECT * FROM unnest(${machines}::text[], ${los}::timestamptz[], ${his}::timestamptz[]) AS t(machine, lo, hi))
+    SELECT p.machine, p.ts, p.idle_s
+      FROM w
+      JOIN LATERAL (
+        SELECT e.machine, e.ts, e.payload->>'idle_s' AS idle_s
+          FROM pulse_presence_events e
+         WHERE e.machine = w.machine AND e.ts BETWEEN w.lo AND w.hi
+           AND e.source = 'poller'
+           AND e.payload ? 'idle_s'
+         ORDER BY e.ts
+      ) p ON true
+  `) as unknown as Raw[];
+    }),
+  );
+  const raw = chunks.flat();
+  // only machine, ts and idle_s are read; ids are synthetic (negative: a poller row sorts before an ext row at the same instant and is never a window's source id)
+  const poll: PresenceEvent[] = raw.map((r, i) => ({ id: -(i + 1), source: "poller", machine: canonicalPollerKey(r.machine), event: "ok", ts: r.ts, idle_s: r.idle_s }));
+  const near = pollerRowsNearLogins(ext, poll);
+  if (near.length === 0) return ext;
+  const t = (e: PresenceEvent) => new Date(e.ts as string | number | Date).getTime();
+  return [...ext, ...near].sort((a, b) => t(a) - t(b) || Number(a.id) - Number(b.id));
 }
 
 export type RefreshResult = {

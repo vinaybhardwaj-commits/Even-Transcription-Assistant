@@ -26,6 +26,11 @@ export const POLLER_LEGACY_KEYS: Readonly<Record<string, string>> = {
   audiometry: "EHRC-AUDIOMETRYs-Mac-mini",
 };
 
+/** A poller row's `machine` (full hostname, or a pre-5-Oct short key) in the extension's machine_id spelling. */
+export function canonicalPollerKey(machine: string): string {
+  return POLLER_LEGACY_KEYS[machine] ?? normalizeHostname(machine);
+}
+
 /** The pre-rename poller key for a canonical machine key, or null. */
 export function legacyPollerKey(canonical: string): string | null {
   for (const [legacy, canon] of Object.entries(POLLER_LEGACY_KEYS)) if (canon === canonical) return legacy;

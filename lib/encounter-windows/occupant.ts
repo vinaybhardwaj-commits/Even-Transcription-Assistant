@@ -23,7 +23,7 @@
  *   machineOccupancy(db, asOf)                     one row per machine: the extension's resolved occupant (occupancyAt, unchanged) plus the display.
  */
 import { fetchEvents, istMidnightAtOrBefore, loadCrosswalk, type WindowsDb } from "./db";
-import { byTimeThenId, normalizeEvent, occupancyAt, type NEvent, type OccOptions } from "./occupancy";
+import { byTimeThenId, normalizeEvent, occupancyAt, STALE_UNKNOWN_NAME, type NEvent, type OccOptions, type PendingSession } from "./occupancy";
 import { normalizeHostname, type PresenceEvent } from "./types";
 
 /** A consult is LIVE (label "consulting") when it opened this recently (minutes), or is still unclosed. */
@@ -142,6 +142,24 @@ export async function consultingDoctorForMachine(db: WindowsDb, machine: string,
   return (await loadConsultingDoctors(db, at, m)).get(m) ?? null;
 }
 
+/** The grey line for a pending login: "session: <name> (pending, no console activity)". The reason field says whether identity_stale also fired. */
+export const pendingLabel = (p: PendingSession | null | undefined): string =>
+  p ? `session: ${clean(p.display_name) ?? "unknown"} (pending, no console activity)` : "";
+
+/**
+ * The grey line for a stale-cookie occupant: presence came from a login the extension itself flagged identity_stale, promoted by activity. The identity is the
+ * page's greeting; the cookie doctor is named only as the stale witness. "page: <page_name> (cookie <cookie_name> stale)"; no page_name -> "unknown (stale cookie)".
+ */
+export const staleOccupantLabel = (s: { page_name?: string | null; cookie_name?: string | null } | null | undefined): string => {
+  if (!s) return "";
+  const page = clean(s.page_name);
+  if (!page) return STALE_UNKNOWN_NAME;
+  const cookie = clean(s.cookie_name);
+  return cookie ? `page: ${page} (cookie ${cookie} stale)` : `page: ${page} (stale cookie)`;
+};
+
+export type StaleOccupant = { page_name: string | null; cookie_name: string | null; label: string };
+
 export type MachineOccupancy = {
   machine: string;
   room_id: string | null;
@@ -150,9 +168,14 @@ export type MachineOccupancy = {
   /** two focused streams the resolver could not separate: no single cookie occupant */
   ambiguous: boolean;
   occupant_rule: string | null;
-  /** the extension's resolved occupant (null when none or ambiguous) */
+  /** the extension's resolved occupant (null when none, ambiguous, or the occupant is a stale-cookie stream: see stale_occupant) */
   cookie_uid: string | null;
   cookie_name: string | null;
+  /**
+   * Set when the only presence is a stale-cookie stream (a login flagged identity_stale, promoted by activity): the page greeting stands in for the identity.
+   * The cookie doctor is never cookie_uid/cookie_name and never an occupant; uid is always null here.
+   */
+  stale_occupant: StaleOccupant | null;
   /** the machine's warehouse doctor today (latest warehouse consult, any age; null when none today) */
   consulting: ConsultingDoctor | null;
   occupant_display: OccupantDisplay | null;
@@ -160,6 +183,11 @@ export type MachineOccupancy = {
   page_name: string | null;
   /** distinct extension installs (Chrome profiles) reporting on the machine in the last 10 min; > 1 is informational, never an alert */
   instances: number;
+  /**
+   * A login the resolver did NOT treat as presence (no console activity at the Mac, or an identity_stale in the same seconds); it stays pending until activity
+   * promotes it, a logout, a replacing login, or the nightly cutoff. Not present, not counted for windows; show it in grey (pendingLabel). null when none.
+   */
+  pending: PendingSession | null;
 };
 
 /**
@@ -178,21 +206,27 @@ export async function machineOccupancy(db: WindowsDb, asOf: string | number | Da
     loadConsultingDoctors(db, at, null),
   ]);
   const byMachine = new Map<string, NEvent[]>();
+  const extMachines = new Set<string>(); // machines with an extension/resolver row; poller rows alone never make a machine appear
   for (const e of events) {
     const n = normalizeEvent(e);
     if (!n) continue;
+    if (n.source !== "poller") extMachines.add(n.machine);
     const list = byMachine.get(n.machine);
     if (list) list.push(n);
     else byMachine.set(n.machine, [n]);
   }
-  const names = new Set<string>([...byMachine.keys(), ...doctors.keys()]);
+  const names = new Set<string>([...extMachines, ...doctors.keys()]);
   const out: MachineOccupancy[] = [];
   for (const machine of [...names].sort()) {
     const es = (byMachine.get(machine) ?? []).sort(byTimeThenId);
     const occ = es.length ? occupancyAt(es, A, opts) : null;
-    const occupied = (occ?.n_present ?? 0) > 0;
+    const occupied = (occ?.n_present ?? 0) > 0 || occ?.best != null; // a page-name stream alone is not a counted doctor but does occupy the room
     const consulting = doctors.get(machine) ?? null;
-    const cookie: DoctorRef | null = occ?.best ? { uid: occ.best.uid, name: occ.best.dn } : null;
+    const staleBest = occ?.stale ?? null; // the page-name stream, as the occupant or beside the real one (F11)
+    const cookie: DoctorRef | null = occ?.best && !occ.best.stale_cookie ? { uid: occ.best.uid, name: occ.best.dn } : null;
+    const stale_occupant: StaleOccupant | null = staleBest
+      ? { page_name: staleBest.page_name ?? null, cookie_name: staleBest.cookie_name ?? null, label: staleOccupantLabel(staleBest) }
+      : null;
     const shown = consulting && (occupied || consulting.live) ? consulting : null;
     out.push({
       machine,
@@ -202,10 +236,12 @@ export async function machineOccupancy(db: WindowsDb, asOf: string | number | Da
       occupant_rule: occ?.rule ?? null,
       cookie_uid: cookie?.uid ?? null,
       cookie_name: cookie?.name ?? null,
+      stale_occupant,
       consulting,
       occupant_display: buildOccupantDisplay(shown, cookie, occ?.page_name ?? null),
       page_name: occ?.page_name ?? null,
       instances: occ?.instances ?? 0,
+      pending: occ?.pending ?? null,
     });
   }
   return out;

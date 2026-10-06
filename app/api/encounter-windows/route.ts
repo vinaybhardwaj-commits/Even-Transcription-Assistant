@@ -14,6 +14,15 @@
  * occupant and occupant_display = { uid, name, source: 'warehouse'|'cookie', cookie_uid, cookie_name, stale }. The warehouse consulting doctor of the
  * machine's most recent consult (opened within 90 min of as_of, or unclosed) is shown in preference to the extension's Google-cookie identity, which
  * Pulse never clears (lib/encounter-windows/occupant.ts). stale = the cookie identity differs from the warehouse doctor. Read-only.
+ * Each machine row also carries `pending`: { display_name, since, reason: 'no_console_activity' | 'identity_stale' } | null (6 Oct 2026) — a login the
+ * resolver did NOT treat as presence (no console activity at the Mac, or an identity_stale in the same seconds, or one that arrives later while it is pending).
+ * It stays pending until the login's own doctor is active on the Mac (or, within 45 min of the login, any activity or a poller reset), the doctor logs out, a new
+ * login replaces it, or the nightly cutoff passes. A doctor who is present and whose cookie then goes identity_stale is shown as the stale occupant below. It is not present and not counted for windows; the bench shows it
+ * in grey as "session: <name> (pending, no console activity)". New optional field; null when none.
+ * `stale_occupant`: { page_name, cookie_name, label } | null — set when a promoted/demoted identity_stale session (the page-name stream) is present and NOT merged into a present
+ * doctor whose first name it is (F11): the occupant when no doctor is present, else shown beside the real occupant; it is never counted as a doctor nor part of ambiguity (`occupied` is
+ * true when it is the only presence). The page greeting is the
+ * identity ("page: <page_name> (cookie <cookie_name> stale)", or "unknown (stale cookie)"), uid null; the cookie doctor is never cookie_uid/cookie_name.
  * The occupancy response also carries `ext_health`: counts by status ({ok, no_tab, missing, quiet, behind, offline, no_chrome, total}) of the Pulse Presence extension
  * across the presence machines, or null when that read failed (it never fails the occupancy read).
  * ?ext_health=1 (optionally as_of=<ISO>) returns { ok, as_of, count, summary, machines: [...] }: one row per presence machine

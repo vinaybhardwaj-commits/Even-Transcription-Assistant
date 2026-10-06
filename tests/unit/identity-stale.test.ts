@@ -48,10 +48,13 @@ describe("identity_stale closes the cookie doctor's stream exactly like a logout
     expect(stream(aLoggedIn(), UA)).toMatchObject({ present: true, out_reason: null });
   });
 
-  it("an identity_stale for (machine, cookie_uid) -> that stream is out with out_reason stale_cookie; the machine is empty", () => {
+  it("an identity_stale for (machine, cookie_uid) -> that stream is out with out_reason stale_cookie; the cookie doctor is demoted to the page's identity (uid null), never the occupant", () => {
     const evs = [...aLoggedIn(), staleA(0.5)];
     expect(stream(evs, UA)).toMatchObject({ present: false, out_reason: "stale_cookie", dn: A.full_name });
-    expect(occupancyAt(norm(evs), NOW)).toMatchObject({ n_present: 0, best: null });
+    // F8: the cookie identity is display-only; the present doctor is demoted to the page greeting from the identity_stale instant
+    const o = occupancyAt(norm(evs), NOW);
+    expect(o.n_present).toBe(0); // F11: the page-name stream is the occupant, not a counted doctor
+    expect(o.best).toEqual({ uid: null, dn: PAGE, stale_cookie: true, page_name: PAGE, cookie_name: A.full_name });
   });
 
   it("is a control event like a logout: genuine activity after it does NOT re-open the stream, a later login DOES", () => {
@@ -77,6 +80,7 @@ describe("identity_stale closes the cookie doctor's stream exactly like a logout
     ];
     expect(stream(evs, UA)).toMatchObject({ present: false, out_reason: "stale_cookie" });
     expect(stream(evs, UB)).toMatchObject({ present: true, out_reason: null });
+    // B is the occupant; A's cookie, demoted to the page identity, sits beside B (n_present 2) without ever being picked
     expect(occupancyAt(norm(evs), NOW)).toMatchObject({ n_present: 1, best: { uid: UB } });
   });
 
@@ -216,7 +220,8 @@ describe("machineOccupancy / buildOccupantDisplay carry page_name and instances"
   it("stale cookie doctor + a live warehouse consult: the display is the warehouse doctor and the page name sits alongside", async () => {
     const evs = [...aLoggedIn(), staleA(0.5)];
     const [m] = await machineOccupancy(occDb(evs, [winRow()]), NOW);
-    expect(m).toMatchObject({ machine: M, occupied: false, cookie_uid: null, page_name: PAGE, instances: 1 });
+    expect(m).toMatchObject({ machine: M, occupied: true, cookie_uid: null, page_name: PAGE, instances: 1 });
+    expect(m!.stale_occupant).toMatchObject({ page_name: PAGE, cookie_name: A.full_name });
     expect(m!.occupant_display).toMatchObject({ source: "warehouse", uid: UB, cookie_uid: null, stale: false, page_name: PAGE });
   });
 
