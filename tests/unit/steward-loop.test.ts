@@ -228,17 +228,23 @@ describe("kill switch, shadow and the live executor that is not there", () => {
     expect(s.kill_switch).toBe(false);
   });
 
-  it("asking for LIVE reaches the stub, which throws: the row stays shadow, the result says blocked, 'live_executor' is degraded", async () => {
+  it("asking for LIVE on an action the live executor does not implement reaches the throwing method: the row stays shadow, the result says blocked, 'live_executor' is degraded", async () => {
+    // ticket:wake is live-capable by name, but LiveExecutor.issueTicket throws (only scribe_start is built)
     const db = fakeDb({ cfg: { kill_switch: { on: false }, shadow: { global: false, actions: {} } } });
-    senseWith((id, A) => idle(A, { room_id: id }));
+    senseWith((id, A) => idle(A, { room_id: id, reachable: { poller_ok_at: ago(A, 300), kh_heartbeat_at: ago(A, 300) } }));
     const s = await run(db.sql, T);
-    expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "shadow" });
+    expect(db.state.table[0]).toMatchObject({ action: "ticket:wake", mode: "shadow" });
     expect(db.state.table[0]!.result).toContain("live executor not enabled in P0");
     expect(s.degraded).toContain("live_executor");
-    // a per-action override works the same way
+  });
+
+  it("(d) a per-action `false` no longer lifts an action while shadow.global is true (global true shadows everything)", async () => {
     const db2 = fakeDb({ cfg: { kill_switch: { on: false }, shadow: { global: true, actions: { scribe_start: false } } } });
-    await run(db2.sql, T);
-    expect(db2.state.table[0]!.result).toContain("blocked");
+    senseWith((id, A) => idle(A, { room_id: id }));
+    const live = { scribeStart: vi.fn(), scribeStop: vi.fn(), scribeRestart: vi.fn(), issueTicket: vi.fn(), message: vi.fn() };
+    await run(db2.sql, T, { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });
+    expect(db2.state.table[0]).toMatchObject({ action: "scribe_start", mode: "shadow", result: "shadow: would scribe_start" });
+    expect(Object.values(live).every((f) => f.mock.calls.length === 0)).toBe(true);
   });
 
   it("the executors: Shadow records, Live throws, dispatch routes by action and ignores none/log_only", async () => {
@@ -249,7 +255,8 @@ describe("kill switch, shadow and the live executor that is not there", () => {
     expect(await dispatch(sh, d("message"))).toEqual({ result: "shadow: would message" });
     expect(await dispatch(sh, d("none"))).toBeNull();
     expect(await dispatch(sh, d("log_only"))).toBeNull();
-    for (const a of ["scribe_start", "scribe_stop", "scribe_restart", "ticket:wake", "message"]) await expect(dispatch(new LiveExecutor(), d(a))).rejects.toThrow("live executor not enabled in P0");
+    // the live executor implements scribe_start only (steward-executor.test.ts); every other method throws
+    for (const a of ["scribe_stop", "scribe_restart", "ticket:wake", "message"]) await expect(dispatch(new LiveExecutor(), d(a))).rejects.toThrow("live executor not enabled in P0");
   });
 
   it("outcomeOf maps results to the rules' memory", () => {
@@ -534,5 +541,136 @@ describe("F8: no rooms / schedule, no tick", () => {
     expect(await run(db.sql, T)).toMatchObject({ ok: false, reason: "config_unavailable" });
     const ok = fakeDb();
     expect(await run(ok.sql, T)).toMatchObject({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("(a) the caps count EXECUTED actions only", () => {
+  const every = (db: ReturnType<typeof fakeDb>) => db.state.table.filter((r) => r.room_id !== null);
+  for (const [label, cfg] of [["kill switch ON (the seed)", {}], ["kill switch OFF, shadow ON", { kill_switch: { on: false } }]] as const) {
+    it(`${label}: 90 min of one-minute ticks on an unstarted room is scribe_start on every row that passes dedupe, never cap_reached`, async () => {
+      const db = fakeDb({ cfg });
+      senseWith((id, A) => idle(A, { room_id: id }));
+      for (let m = 0; m <= 90; m++) await run(db.sql, T + m * MIN);
+      const rows = every(db);
+      expect(rows).toHaveLength(7); // 0, 15, 30, 45, 60, 75, 90
+      expect(rows.every((r) => r.rule === "not_recording" && r.action === "scribe_start" && r.mode === "shadow")).toBe(true);
+      expect(rows.some((r) => r.rule === "cap_reached" || r.rule === "fleet_hold")).toBe(false);
+    });
+  }
+
+  it("executed rows (ok / failed) DO count: 4 real executed starts in the hour and the 5th is cap_reached; skipped rows do not", async () => {
+    const db = fakeDb({ cfg: { kill_switch: { on: false }, caps: { actions_per_room_per_hour: 4, policy_cycle_per_profile_per_day: 1, start_retries: 9 } } });
+    senseWith((id, A) => idle(A, { room_id: id }));
+    const put = (m: number, result: string) =>
+      db.state.table.push({ id: db.state.nextId++, room_id: "room_a", ts: new Date(T - m * MIN).toISOString(), rule: "not_recording", action: "scribe_start", params: {}, result, mode: "live", inputs: { primary: true }, why: "", why_not: null, actor: "steward", machine: "HOST-A", window_kind: "clinic", inputs_hash: "x" });
+    for (const m of [50, 40, 30, 20]) put(m, "skipped: already_recording session_id=x");
+    await run(db.sql, T);
+    expect(db.state.table[db.state.table.length - 1]).toMatchObject({ rule: "not_recording", action: "scribe_start" });
+    db.state.table.length = 0;
+    put(50, "ok: start_day acked command_id=c1");
+    put(40, "failed: no ack from the kiosk command_id=c2");
+    put(30, "ok: start_day acked command_id=c3");
+    put(20, "failed: start_day failed command_id=c4");
+    await run(db.sql, T);
+    expect(db.state.table[db.state.table.length - 1]).toMatchObject({ rule: "cap_reached", action: "log_only", params: { wanted: "scribe_start" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("(d) per-action shadow lift: executes only if kill off AND global false AND actions[a] !== true", () => {
+  const spyExec = () => ({ scribeStart: vi.fn(async () => ({ result: "ok: start_day acked command_id=c" })), scribeStop: vi.fn(), scribeRestart: vi.fn(), issueTicket: vi.fn(), message: vi.fn() });
+  const ALL_TICKETS = Object.fromEntries(["wake", "open_pulse", "relaunch_chrome", "policy_cycle", "restart_recorder_app", "restart_kiosk_health"].map((a) => [`ticket:${a}`, true]));
+  const lifted = { ...ALL_TICKETS, message: true, scribe_start: false };
+  // room_a: no session (scribe_start); room_b: asleep 12 min (ticket:wake + message)
+  const fleet = () =>
+    senseWith((id, A) =>
+      id === "room_a" ? idle(A, { room_id: id }) : idle(A, { room_id: id, machine: "HOST-B", reachable: { poller_ok_at: ago(A, 720), kh_heartbeat_at: ago(A, 720) } }),
+    );
+  const rooms = [{ room_id: "room_a", room_name: "A", hostname: "HOST-A" }, { room_id: "room_b", room_name: "B", hostname: "HOST-B" }];
+
+  it("kill off, global false, tickets + message shadowed, scribe_start false: ONLY scribe_start executes — no ticket, no message", async () => {
+    const db = fakeDb({ rooms, cfg: { kill_switch: { on: false }, shadow: { global: false, actions: lifted } } });
+    fleet();
+    const live = spyExec();
+    const s = await run(db.sql, T, { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });
+    expect(live.scribeStart).toHaveBeenCalledTimes(1);
+    expect(live.issueTicket).not.toHaveBeenCalled();
+    expect(live.message).not.toHaveBeenCalled();
+    expect(live.scribeStop).not.toHaveBeenCalled();
+    const by = (a: string) => db.state.table.find((r) => r.action === a)!;
+    expect(by("scribe_start")).toMatchObject({ room_id: "room_a", mode: "live", result: "ok: start_day acked command_id=c" });
+    expect(by("ticket:wake")).toMatchObject({ mode: "shadow", result: "shadow: would ticket:wake" });
+    expect(by("message")).toMatchObject({ mode: "shadow", result: "shadow: would message" });
+    expect(s.degraded).not.toContain("live_executor");
+  });
+
+  it("the same config with shadow.global TRUE: nothing executes", async () => {
+    const db = fakeDb({ rooms, cfg: { kill_switch: { on: false }, shadow: { global: true, actions: lifted } } });
+    fleet();
+    const live = spyExec();
+    await run(db.sql, T, { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });
+    expect(Object.values(live).every((f) => f.mock.calls.length === 0)).toBe(true);
+    const acts = db.state.table.filter((r) => r.action !== "none" && r.action !== "log_only");
+    expect(acts.length).toBeGreaterThanOrEqual(3);
+    expect(acts.every((r) => r.mode === "shadow" && String(r.result).startsWith("shadow: would "))).toBe(true);
+  });
+
+  it("the same config with the KILL SWITCH on: nothing executes, result kill_switch", async () => {
+    const db = fakeDb({ rooms, cfg: { kill_switch: { on: true }, shadow: { global: false, actions: lifted } } });
+    fleet();
+    const live = spyExec();
+    await run(db.sql, T, { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });
+    expect(Object.values(live).every((f) => f.mock.calls.length === 0)).toBe(true);
+    expect(db.state.table.filter((r) => r.action !== "none" && r.action !== "log_only").every((r) => r.result === "kill_switch")).toBe(true);
+  });
+
+  it("an action that is not live-capable (scribe_stop here) or unnamed is SHADOW even with kill off, global false and no per-action entry", async () => {
+    const db = fakeDb({ cfg: { kill_switch: { on: false }, shadow: { global: false, actions: {} } } });
+    senseWith((id, A) => healthy(A, { room_id: id })); // 22:00 IST: outside the clinic window with a session open and no consult -> scribe_stop
+    const live = spyExec();
+    await run(db.sql, ist("22:00"), { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });
+    expect(db.state.table[0]).toMatchObject({ action: "scribe_stop", mode: "shadow", result: "shadow: would scribe_stop" });
+    expect(Object.values(live).every((f) => f.mock.calls.length === 0)).toBe(true);
+  });
+
+  it("an unnamed lift never lifts: a per-action value that is not a boolean stays shadow (and the config is named invalid)", async () => {
+    const db = fakeDb({ cfg: { kill_switch: { on: false }, shadow: { global: false, actions: { scribe_start: "false" } } } });
+    senseWith((id, A) => idle(A, { room_id: id }));
+    const live = spyExec();
+    const s = await run(db.sql, T, { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });
+    expect(live.scribeStart).not.toHaveBeenCalled();
+    expect(db.state.table[0]).toMatchObject({ action: "scribe_start", result: "shadow: would scribe_start" });
+    expect(s.degraded).toContain("config:shadow");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("(b) every decision row carries the reachability evidence actually sensed", () => {
+  it("a scribe_start for a kiosk-enrolled room: numeric last_chunk_s, kh_heartbeat_s and poller_ok_s, plus ext_status, occupancy, sleep_marker (bool), at the top level of the row's inputs", async () => {
+    const db = fakeDb();
+    senseWith((id, A) => {
+      const s = idle(A, { room_id: id, reachable: { poller_ok_at: ago(A, 45), kh_heartbeat_at: ago(A, 20), sleep_at: null } });
+      s.recording.last_chunk_24h_at = ago(A, 2400);
+      return s;
+    });
+    await run(db.sql, T);
+    const r = db.state.table[0]!;
+    expect(r).toMatchObject({ rule: "not_recording", action: "scribe_start" });
+    expect(r.inputs).toMatchObject({ last_chunk_s: 2400, kh_heartbeat_s: 20, poller_ok_s: 45, ext_status: "ok", occupancy: "nobody", sleep_marker: false });
+    expect((r.inputs.ages_s as Record<string, unknown>).kh_heartbeat_s).toBe(20);
+  });
+
+  it("the other rules and the guards use the same builder: wake, mic fault, cap_reached and ok rows all carry the keys; last_chunk_s is null only with no chunk at all", async () => {
+    const db = fakeDb();
+    senseWith((id, A) => idle(A, { room_id: id, reachable: { poller_ok_at: ago(A, 300), kh_heartbeat_at: ago(A, 300), sleep_at: ago(A, 600) } }));
+    await run(db.sql, T);
+    senseWith((id, A) => healthy(A, { room_id: id }));
+    await run(db.sql, T + 20 * MIN);
+    for (const r of db.state.table) {
+      for (const k of ["last_chunk_s", "kh_heartbeat_s", "poller_ok_s", "ext_status", "occupancy", "sleep_marker"]) expect(r.inputs).toHaveProperty(k);
+    }
+    expect(db.state.table[0]!.inputs).toMatchObject({ kh_heartbeat_s: 300, poller_ok_s: 300, sleep_marker: true, last_chunk_s: null });
+    expect(db.state.table[db.state.table.length - 1]!.inputs).toMatchObject({ last_chunk_s: 60, sleep_marker: false });
   });
 });

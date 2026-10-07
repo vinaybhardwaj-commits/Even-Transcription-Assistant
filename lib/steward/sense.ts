@@ -42,6 +42,8 @@ export type RoomSense = {
     session_started_at: string | null;
     /** newest bench chunk of the open session (any age), or null */
     last_chunk_at: string | null;
+    /** newest bench chunk of ANY of the room's sessions in the last 24 h (visibility for inputs.last_chunk_s; no rule reads it), null when there is none */
+    last_chunk_24h_at?: string | null;
     recorder_status: RecorderStatus | null;
   };
   /** bench_listener: the browser-kiosk poll. `paused` is the consent pause: the steward never starts a paused room. */
@@ -195,6 +197,8 @@ export const SENSE_BOUNDS = {
   chunks_lookback_min: 30,
   /** open sessions are looked for this far back */
   session_lookback_days: 3,
+  /** the newest chunk of any session (inputs.last_chunk_s) is looked for this far back */
+  last_chunk_lookback_h: 24,
   usb_removed_within_min: 5,
 } as const;
 
@@ -203,6 +207,7 @@ export const SENSE_BOUNDS = {
 // ---------------------------------------------------------------------------
 
 type SessionRow = { room_id: string; id: string; status: string; started_at: unknown; last_chunk_at: unknown };
+type LastChunkRow = { room_id: string; last_chunk_at: unknown };
 type ChunkRow = { room_id: string; created_at: unknown; started_at: unknown; size_bytes: unknown; duration_ms: unknown };
 type LevelRow = { room_id: string; sampled_at: unknown; zero_ratio: unknown };
 type ListenerRow = { room_id: string; last_poll_at: unknown; paused: unknown };
@@ -256,7 +261,7 @@ export async function senseAll(
   `) as unknown as SessionRow[], [] as SessionRow[]);
   const openRoomIds = [...new Set(sess.v.map((s) => s.room_id))];
 
-  const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR] = await Promise.all([
+  const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR] = await Promise.all([
     // 2 — chunks of the open sessions, last 30 min (R3 silence by rate).
     safe("bench_chunk", degraded, async () => (await sql`
       SELECT s.room_id, c.created_at, c.started_at, c.size_bytes, c.duration_ms
@@ -379,6 +384,16 @@ export async function senseAll(
     // 14 — occupancy (pending login, identity fault, occupied): the steward's own SCOPED reader (lib/steward/occupancy-read.ts): roster machines only, last 2 h, LIMIT 5000,
     //      on the (machine, ts) index — not machineOccupancy, which scans every machine for 25-49 h.
     safe("occupancy", degraded, () => scopedOccupancy(sql, A, occKeys), [] as ScopedOccupancy[]),
+    // 15 — the newest chunk of ANY session per room, last 24 h (inputs.last_chunk_s: "null only when no chunk in 24 h"). Sessions started within 3 days; one GROUP BY over the roster.
+    safe("bench_chunk_24h", degraded, async () => (await sql`
+      SELECT s.room_id, max(c.created_at) AS last_chunk_at
+        FROM bench_session s
+        JOIN bench_chunk c ON c.session_id = s.id
+       WHERE s.room_id = ANY(${ids}::text[])
+         AND s.started_at > ${hi}::timestamptz - make_interval(days => ${B.session_lookback_days}::int) AND s.started_at <= ${hi}::timestamptz
+         AND c.created_at > ${hi}::timestamptz - make_interval(hours => ${B.last_chunk_lookback_h}::int) AND c.created_at <= ${hi}::timestamptz
+       GROUP BY s.room_id
+    `) as unknown as LastChunkRow[], [] as LastChunkRow[]),
   ]);
 
   const sessBy = new Map<string, SessionRow>();
@@ -414,6 +429,7 @@ export async function senseAll(
   const khBy = new Map([...khR.v.entries()].map(([k, s]) => [lc(k), s]));
   const extHealthBy = new Map(extHealthR.v.map((r) => [lc(r.machine), r]));
   const occBy = new Map(occR.v.map((o) => [lc(o.machine), o]));
+  const lastChunkBy = new Map(lastChunkR.v.map((l) => [l.room_id, toIso(l.last_chunk_at)]));
 
   const out = new Map<string, RoomSense>();
   for (const r of roster) {
@@ -587,6 +603,7 @@ export async function senseAll(
         session_status: s ? (s.status === "paused" ? "paused" : "recording") : null,
         session_started_at: s ? toIso(s.started_at) : null,
         last_chunk_at: s ? toIso(s.last_chunk_at) : null,
+        last_chunk_24h_at: lastChunkBy.get(r.room_id) ?? null,
         recorder_status,
       },
       listener,

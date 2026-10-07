@@ -26,7 +26,7 @@
  *   12 profile_unloaded                chrome running, the profile in use is not loaded, no ext events for 10 min -> ticket open_pulse.
  *   13 extension_missing               chrome.alert ext_missing:<profile> -> ticket relaunch_chrome, then policy_cycle (max 1 per profile per day), then message.
  *   14 ok                              nothing wrong.
- * Then, over the primary decision: (a) the same action failing >= 3 times in 60 min -> message + needs_hands; (b) actions_per_room_per_hour cap;
+ * Then, over the primary decision: (a) the same action failing >= 3 times in 60 min -> message + needs_hands; (b) actions_per_room_per_hour cap (counts EXECUTED actions only: result ok / failed);
  * (c) a fleet incident (>= 3 rooms with a POSITIVE failure signal of the same class in 5 min, or a hold row < 15 min old) holds the per-room action.
  * POSITIVE SIGNAL (Decision.failing_class): session_died; kiosk_asleep after the machine was awake today; kiosk_health_down after kiosk-health reported today; a start
  * attempted and failed (backoff / retries exhausted); a live mic fault; a Chrome fault. A room that has simply not started yet today, and a consent-paused room, never count.
@@ -129,6 +129,8 @@ export const CHROME_TOUCHING: readonly StewardAction[] = ["open_pulse", "relaunc
 
 const ACTIONABLE = (a: string): boolean => a === "scribe_start" || a === "scribe_stop" || a === "scribe_restart" || a.startsWith("ticket:") || a === "message";
 const COUNTED_FOR_CAP = (a: string): boolean => a === "scribe_start" || a === "scribe_stop" || a === "scribe_restart" || a.startsWith("ticket:");
+/** a stored row counts toward the caps ONLY when something was actually sent (result ok or failed); kill_switch / shadow / blocked / skipped / cap_reached / fleet_hold / log_only never count. */
+const EXECUTED = (r: { outcome: "ok" | "failed" | "shadow" | null }): boolean => r.outcome === "ok" || r.outcome === "failed";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -183,7 +185,7 @@ function ages(c: Ctx): Record<string, unknown> {
   return {
     poller_ok_s: secs(age(s.reachable.poller_ok_at)),
     kh_heartbeat_s: secs(age(s.reachable.kh_heartbeat_at)),
-    last_chunk_s: secs(age(s.recording.last_chunk_at)),
+    last_chunk_s: secs(age(s.recording.last_chunk_24h_at ?? s.recording.last_chunk_at)),
     recorder_status_s: secs(age(s.recording.recorder_status?.received_at)),
     consult_s: secs(age(s.consult_started_at)),
     silent_s: secs(age(s.audio.silent_while_recording_since)),
@@ -204,6 +206,7 @@ function mk(
   extraInputs: Record<string, unknown> = {},
 ): Decision {
   const f = { ...facts(c), ...extraFacts };
+  const ag = ages(c);
   return {
     room_id: c.s.room_id,
     machine: c.s.machine,
@@ -215,7 +218,18 @@ function mk(
     why_not,
     severity,
     inputs_hash: hashFacts({ rule, action, params, f }),
-    inputs: { ...f, ages_s: ages(c), audio_devices_age_s: secs(c.age(c.s.audio.devices_at)), ...extraInputs },
+    // THE one inputs builder (every rule and every guard goes through mk): the reachability evidence actually sensed sits at the top level of every row (not hashed) and, with
+    // the other ages, under ages_s. last_chunk_s is the newest chunk of ANY session in the last 24 h (null only when there is none); sleep_marker is a bool (the R11 marker).
+    inputs: {
+      ...f,
+      last_chunk_s: ag.last_chunk_s,
+      kh_heartbeat_s: ag.kh_heartbeat_s,
+      poller_ok_s: ag.poller_ok_s,
+      sleep_marker: c.s.reachable.sleep_at != null,
+      ages_s: ag,
+      audio_devices_age_s: secs(c.age(c.s.audio.devices_at)),
+      ...extraInputs,
+    },
   };
 }
 
@@ -592,7 +606,7 @@ function guards(c: Ctx, ds: Decision[]): Decision[] {
   // (b) cap on actions per room per hour
   const head = out[0]!;
   if (COUNTED_FOR_CAP(head.action)) {
-    const n = c.recent.room.filter((r) => COUNTED_FOR_CAP(r.action) && c.A - Date.parse(r.ts) <= 60 * MIN && c.A >= Date.parse(r.ts)).length;
+    const n = c.recent.room.filter((r) => COUNTED_FOR_CAP(r.action) && EXECUTED(r) && c.A - Date.parse(r.ts) <= 60 * MIN && c.A >= Date.parse(r.ts)).length;
     if (n >= c.cfg.caps.actions_per_room_per_hour) {
       out = [
         inherit(

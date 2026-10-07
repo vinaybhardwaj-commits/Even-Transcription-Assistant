@@ -3,9 +3,10 @@
  *
  *   runSteward(sql, { asOf, budgetMs }): lock -> config -> roster -> senseAll -> decide (two passes, for the fleet-incident count) -> dedupe -> shadow-execute -> ONE INSERT.
  *
- * SHADOW ONLY. The executor the loop uses is ShadowExecutor: it never calls Scribe, never issues a ticket, never messages. With the kill switch ON (the seed) every
- * actionable decision is recorded with result "kill_switch"; with it OFF and shadow on, "shadow: would <action>". Asking for LIVE (shadow off for an action) selects the
- * LiveExecutor stub, which throws; the loop records the decision as shadow with result "blocked: live executor not enabled in P0" and names it in `degraded`.
+ * SHADOW BY DEFAULT. config.actionMode decides per action: kill switch ON (the seed) -> result "kill_switch"; shadow.global true, or shadow.actions[action] true, or an action that is
+ * not live-capable -> ShadowExecutor, "shadow: would <action>" (it never calls Scribe, never issues a ticket, never messages). Only kill_switch off AND shadow.global false AND
+ * shadow.actions[action] !== true selects the LiveExecutor, which implements scribe_start (re-checked at execution time); any other live action throws and the loop records it as
+ * shadow with result "blocked: live executor not enabled in P0" and names it in `degraded`. Caps (rules.ts) count only rows whose result is ok / failed.
  *
  * CONFIG. Read BEFORE the lease. No `rooms` / `schedule` (or a failed read) = the tick is skipped with {ok:false, reason:"config_unavailable"}: nothing is taken, nothing released.
  * BUDGET. Sensing and the decision-log read share the first (budget - 3 s); every source read has its own timeout (steward_config source_timeout_ms, default 6 s); the last 3 s
@@ -23,7 +24,7 @@
  * write (it would only repeat rows), a failure of the roster read ends the tick with rooms 0.
  */
 import { randomUUID } from "node:crypto";
-import { buildRoster, loadConfig, type Config, type RosterRow } from "./config";
+import { actionMode, buildRoster, loadConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
 import { senseAll } from "./sense";
@@ -350,16 +351,21 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     // --- pass 2 + dedupe + shadow execution
     const rows: OutRow[] = [];
     let budgetHit = false;
-    const executorFor = opts.executorFor ?? ((live: boolean) => (live ? new LiveExecutor() : new ShadowExecutor()));
+    // a live start waits for the kiosk's ack: never longer than the time left before the INSERT reserve (1 s floor, 8 s ceiling)
+    const executorFor =
+      opts.executorFor ??
+      ((live: boolean) => (live ? new LiveExecutor({ ackTimeoutMs: Math.max(1000, Math.min(8000, t0 + opts.budgetMs - INSERT_RESERVE_MS - now())) }) : new ShadowExecutor()));
 
     const record = async (d: Decision, primary: boolean, seq: number): Promise<void> => {
       let mode: "shadow" | "live" = "shadow";
       let result: string | null = null;
       if (d.action !== "none" && d.action !== "log_only") {
-        if (cfg.kill_switch) {
+        // config.actionMode: executes only if kill_switch off AND shadow.global false AND shadow.actions[action] !== true AND the action is live-capable
+        const am = actionMode(cfg, d.action);
+        if (am === "kill_switch") {
           result = "kill_switch";
         } else {
-          const shadow = cfg.shadow.actions[d.action] ?? cfg.shadow.global;
+          const shadow = am === "shadow";
           try {
             result = (await dispatch(executorFor(!shadow), d))?.result ?? null;
             if (!shadow) mode = "live";

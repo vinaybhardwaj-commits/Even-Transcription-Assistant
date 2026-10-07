@@ -95,8 +95,17 @@ export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>
   const sh = raw.get("shadow");
   if (isObj(sh) && typeof sh.global === "boolean" && (sh.actions === undefined || isObj(sh.actions))) {
     const actions: Record<string, boolean> = {};
-    for (const [k, v] of Object.entries((sh.actions as Record<string, unknown>) ?? {})) if (typeof v === "boolean") actions[k] = v;
+    let badAction = false;
+    for (const [k, v] of Object.entries((sh.actions as Record<string, unknown>) ?? {})) {
+      if (typeof v === "boolean") actions[k] = v;
+      else {
+        // a malformed per-action value must never lift an action out of shadow by being ignored: it stays SHADOW (true) and is named
+        actions[k] = true;
+        badAction = true;
+      }
+    }
     cfg.shadow = { global: sh.global, actions };
+    if (badAction) invalid.push("shadow");
   } else invalid.push("shadow");
 
   const sc = raw.get("schedule");
@@ -161,6 +170,37 @@ export async function loadConfig(sql: StewardSql): Promise<{ config: Config; inv
 }
 
 // ---------------------------------------------------------------------------
+// Action mode (kill switch + shadow)
+// ---------------------------------------------------------------------------
+
+/** The actions that may EVER leave shadow (one per executor method the live executor implements or will implement). Anything else is always shadow. */
+export const LIVE_CAPABLE_ACTIONS: readonly string[] = [
+  "scribe_start",
+  "ticket:wake",
+  "ticket:open_pulse",
+  "ticket:relaunch_chrome",
+  "ticket:policy_cycle",
+  "ticket:restart_recorder_app",
+  "ticket:restart_kiosk_health",
+  "message",
+];
+
+export type ActionMode = "kill_switch" | "shadow" | "live";
+
+/**
+ * How ONE action is executed under this config. An action executes ONLY if kill_switch.on = false AND shadow.global = false AND shadow.actions[action] !== true AND the
+ * action is a known live-capable name. Everything else records the decision and executes nothing: "kill_switch" when the switch is on, "shadow" otherwise.
+ * (Before this rule a per-action `false` overrode `global: true`; now global true shadows every action, and a per-action `true` is the only way to hold one back.)
+ */
+export function actionMode(cfg: Config, action: string): ActionMode {
+  if (cfg.kill_switch) return "kill_switch";
+  if (cfg.shadow.global) return "shadow";
+  if (!LIVE_CAPABLE_ACTIONS.includes(action)) return "shadow";
+  if (cfg.shadow.actions[action] === true) return "shadow";
+  return "live";
+}
+
+// ---------------------------------------------------------------------------
 // Roster
 // ---------------------------------------------------------------------------
 
@@ -171,11 +211,14 @@ export type RosterRow = { room_id: string; room_name: string; hostname: string |
 export type RosterRoom = { room_id: string; room_name: string; machine: string | null; klass: RoomClass; flags: string[]; kind: ScheduleKind; state_flags: unknown };
 
 export const EXCLUDED_FLAGS: readonly string[] = ["test", "dev"];
+/** rooms whose id starts with this are dev/test scratch rooms (lib/brain/scratch.ts SCRATCH_ROOM_PREFIX, copied: this module has no imports) and never join the roster. */
+export const SCRATCH_ROOM_PREFIX = "room_scratch_";
 
 /** Every non-excluded room, in processing order (config.priority, then name). */
 export function buildRoster(rows: readonly RosterRow[], cfg: Config): RosterRoom[] {
   const out: RosterRoom[] = [];
   for (const r of rows) {
+    if (r.room_id.startsWith(SCRATCH_ROOM_PREFIX)) continue;
     const o = cfg.rooms[r.room_id];
     const flags = o?.flags ?? [];
     if (flags.some((f) => EXCLUDED_FLAGS.includes(f.toLowerCase()))) continue;

@@ -3,7 +3,7 @@
  * recent decisions go in; Decisions come out. Every clock here is an explicit IST instant on 6 Oct 2026 (a Tuesday), never Date.now().
  */
 import { describe, it, expect } from "vitest";
-import { DEFAULT_CONFIG, buildRoster, parseConfig, windowAt, type Config } from "@/lib/steward/config";
+import { DEFAULT_CONFIG, actionMode, buildRoster, parseConfig, windowAt, type Config } from "@/lib/steward/config";
 import { EMPTY_RECENT, chromeGate, decideRoom, failingClass, fleetDecisions, hashFacts, type RecentAction, type RecentContext } from "@/lib/steward/rules";
 import type { RoomSense } from "@/lib/steward/sense";
 import { ago, healthy, idle, ist, type DeepPartial } from "../support/steward-fixtures";
@@ -65,6 +65,38 @@ describe("config: parse, roster, windows", () => {
     expect(r[0]).toMatchObject({ klass: "ot", kind: "ot", machine: "vinay-orb2" });
     expect(r[1]).toMatchObject({ klass: "clinic", machine: null });
     expect(r[2]!.machine).toBe("EHRC-CONSUL1s-Mac-mini-2");
+  });
+
+  it("(c) rooms whose id starts with room_scratch_ are dev/test and never join the roster", () => {
+    const cfg = parseConfig([{ key: "rooms", value: {} }]).config;
+    const r = buildRoster(
+      [
+        { room_id: "room_scratch_ab12cd", room_name: "Scratch 1", hostname: "scratch-mac" },
+        { room_id: "room_scratch_", room_name: "Scratch 2", hostname: null },
+        { room_id: "room_real", room_name: "OPD 9", hostname: "HOST-9" },
+        { room_id: "room_scratchy", room_name: "Not scratch", hostname: "HOST-S" },
+      ],
+      cfg,
+    );
+    expect(r.map((x) => x.room_id).sort()).toEqual(["room_real", "room_scratchy"]);
+  });
+
+  it("(d) actionMode: kill switch -> kill_switch; global true -> shadow; a per-action true -> shadow; unknown or not-live-capable names -> shadow; only the rest is live", () => {
+    const cfgOf = (kill: boolean, global: boolean, actions: Record<string, boolean>) => ({ ...DEFAULT_CONFIG, kill_switch: kill, shadow: { global, actions } });
+    expect(actionMode(cfgOf(true, false, {}), "scribe_start")).toBe("kill_switch");
+    expect(actionMode(cfgOf(false, true, { scribe_start: false }), "scribe_start")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, { scribe_start: true }), "scribe_start")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, { "ticket:wake": true, message: true, scribe_start: false }), "scribe_start")).toBe("live");
+    expect(actionMode(cfgOf(false, false, { "ticket:wake": true }), "ticket:wake")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, {}), "ticket:wake")).toBe("live");
+    expect(actionMode(cfgOf(false, false, {}), "ticket:made_up")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, { bogus: false }), "bogus")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, {}), "scribe_stop")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, {}), "scribe_restart")).toBe("shadow");
+    // a malformed per-action value parses as shadow (true), never as a lift
+    const parsed = parseConfig([{ key: "shadow", value: { global: false, actions: { scribe_start: "no" } } }]);
+    expect(parsed.config.shadow.actions.scribe_start).toBe(true);
+    expect(parsed.invalid).toContain("shadow");
   });
 
   it("clinic window: 07:29 IST is out, 07:30 is in; 21:29 in, 21:30 out", () => {
@@ -533,15 +565,18 @@ describe("fleet incident, caps and repeated failure", () => {
     expect(fleetDecisions({ x: ["a", "b"] })).toEqual([]);
   });
 
-  it("actions_per_room_per_hour: the 4th action in the hour is logged, not taken", () => {
+  it("actions_per_room_per_hour: the 4th EXECUTED action in the hour is logged, not taken; shadow / kill_switch / skipped rows never count", () => {
     const asleep = idle(T, { reachable: { poller_ok_at: ago(T, 240), kh_heartbeat_at: ago(T, 240) } });
-    const four = recent([row(T, 100, "ticket:wake"), row(T, 700, "scribe_restart"), row(T, 1400, "ticket:wake"), row(T, 2100, "ticket:wake")]);
+    const ex = { outcome: "ok" as const };
+    const four = recent([row(T, 100, "ticket:wake", ex), row(T, 700, "scribe_restart", { outcome: "failed" }), row(T, 1400, "ticket:wake", ex), row(T, 2100, "ticket:wake", ex)]);
+    const shadowFour = recent([row(T, 100, "ticket:wake"), row(T, 700, "scribe_restart"), row(T, 1400, "ticket:wake", { outcome: null }), row(T, 2100, "ticket:wake")]);
+    expect(first(asleep, T, shadowFour).action).toBe("ticket:wake");
     const d = first(asleep, T, four);
     expect(d).toMatchObject({ rule: "cap_reached", action: "log_only", params: { wanted: "ticket:wake" } });
     expect(d.why_not).toContain("actions_per_room_per_hour=4");
-    expect(first(asleep, T, recent([row(T, 100, "ticket:wake"), row(T, 700, "scribe_restart"), row(T, 1400, "ticket:wake")])).action).toBe("ticket:wake");
+    expect(first(asleep, T, recent([row(T, 100, "ticket:wake", ex), row(T, 700, "scribe_restart", ex), row(T, 1400, "ticket:wake", ex)])).action).toBe("ticket:wake");
     // messages do not count against the cap
-    expect(first(asleep, T, recent([row(T, 100, "message"), row(T, 200, "message"), row(T, 300, "message"), row(T, 400, "message")])).action).toBe("ticket:wake");
+    expect(first(asleep, T, recent([row(T, 100, "message", ex), row(T, 200, "message", ex), row(T, 300, "message", ex), row(T, 400, "message", ex)])).action).toBe("ticket:wake");
   });
 
   it("the same action failing 3 times in an hour -> stop, one message, needs_hands (2 failures still try)", () => {
@@ -667,7 +702,7 @@ describe("F1: only a POSITIVE failure signal puts a room in a fleet class", () =
 
   it("a cap-reached or action_failing replacement keeps the class of the decision it replaced; the class is also written to inputs.failing_class", () => {
     const died = healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "recording", session_open: true, received_at: ago(T, 300) } } });
-    const four = recent([row(T, 100, "ticket:wake"), row(T, 700, "ticket:wake"), row(T, 1400, "ticket:wake"), row(T, 2100, "ticket:wake")]);
+    const four = recent([row(T, 100, "ticket:wake", { outcome: "ok" }), row(T, 700, "ticket:wake", { outcome: "ok" }), row(T, 1400, "ticket:wake", { outcome: "ok" }), row(T, 2100, "ticket:wake", { outcome: "ok" })]);
     const d = decideRoom(died, DEFAULT_CONFIG, T, four)[0]!;
     expect(d.rule).toBe("cap_reached");
     expect(failingClass([d])).toBe("session_died");
@@ -709,5 +744,38 @@ describe("F8 / F3 config: rooms and schedule have no fallback; source_timeout_ms
       expect(r.invalid).toEqual(["source_timeout_ms"]);
       expect(r.config.source_timeout_ms).toBe(6000);
     }
+  });
+});
+
+describe("(b) one inputs builder: every row of every rule carries the reachability evidence", () => {
+  it("a scribe_start decision for a kiosk-enrolled room carries numeric kh_heartbeat_s and poller_ok_s (and last_chunk_s, ext_status, occupancy, sleep_marker)", () => {
+    const s = idle(T);
+    s.recording.last_chunk_24h_at = ago(T, 3000);
+    const d = first(s, T);
+    expect(d).toMatchObject({ action: "scribe_start" });
+    expect(d.inputs).toMatchObject({ kh_heartbeat_s: 30, poller_ok_s: 30, last_chunk_s: 3000, ext_status: "ok", occupancy: "nobody", sleep_marker: false });
+    expect(typeof d.inputs.kh_heartbeat_s).toBe("number");
+    expect(typeof d.inputs.poller_ok_s).toBe("number");
+  });
+
+  it("the keys are present on EVERY decision of a spread of rules and guards; sleep_marker is a bool; last_chunk_s is null only with no chunk at all", () => {
+    const sleeping = idle(T, { reachable: { poller_ok_at: ago(T, 400), kh_heartbeat_at: ago(T, 400), sleep_at: ago(T, 500) } });
+    const cases: Array<ReturnType<typeof decideRoom>> = [
+      decideRoom(sleeping, DEFAULT_CONFIG, T),
+      decideRoom(healthy(T), DEFAULT_CONFIG, T),
+      decideRoom(idle(T, { listener: { paused: true } }), DEFAULT_CONFIG, T),
+      decideRoom(idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 600 } }), DEFAULT_CONFIG, T),
+      decideRoom(healthy(T, { recording: { last_chunk_at: ago(T, 900), recorder_status: { state: "recording", session_open: false, received_at: ago(T, 300) } } }), DEFAULT_CONFIG, T),
+      decideRoom(sleeping, DEFAULT_CONFIG, T, recent([row(T, 10, "ticket:wake", { outcome: "ok" }), row(T, 20, "ticket:wake", { outcome: "ok" }), row(T, 30, "ticket:wake", { outcome: "ok" }), row(T, 40, "ticket:wake", { outcome: "ok" })])),
+      decideRoom(idle(T), DEFAULT_CONFIG, T, recent([], { failing: { not_recording: 3 }, hold: {} })),
+    ];
+    const all = cases.flat();
+    expect(all.length).toBeGreaterThanOrEqual(7);
+    expect(all.map((d) => d.rule)).toEqual(expect.arrayContaining(["kiosk_asleep", "ok", "not_recording", "cap_reached", "fleet_hold"]));
+    for (const d of all) {
+      for (const k of ["last_chunk_s", "kh_heartbeat_s", "poller_ok_s", "ext_status", "occupancy", "sleep_marker"]) expect(d.inputs, `${d.rule}/${d.action} lacks ${k}`).toHaveProperty(k);
+      expect(typeof d.inputs.sleep_marker).toBe("boolean");
+    }
+    expect(decideRoom(sleeping, DEFAULT_CONFIG, T)[0]!.inputs).toMatchObject({ sleep_marker: true, last_chunk_s: null, kh_heartbeat_s: 400 });
   });
 });

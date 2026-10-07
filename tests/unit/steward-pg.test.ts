@@ -7,7 +7,7 @@
  *   2. runSteward on a seeded fleet (as of 2026-10-06 10:00 IST): the excluded rooms (ORB3, Home Office) never appear; ORB2 (ot) and a clinic room with no session get a
  *      scribe_start; a healthy recording room gets none. The seed's kill switch ON -> result "kill_switch", mode shadow. No source is degraded.
  *   3. Dedupe: the same tick again writes nothing; a changed fact writes.
- *   4. Kill switch OFF + shadow -> "shadow: would scribe_start"; shadow off (live asked) -> "blocked: live executor not enabled in P0" and live_executor in degraded.
+ *   4. Kill switch OFF + shadow -> "shadow: would scribe_start"; scribe_start lifted alone -> the REAL live start path (listener, session re-check, start_day, ack) on the real bench tables.
  *   5. /api/cron/steward and /api/admin/steward/decisions through the real tables.
  *   6. (fix pass) last_tick written by the lease release; config_unavailable takes no lease; the scoped occupancy reader (roster machines, 2 h, LIMIT) on the real index.
  */
@@ -42,6 +42,7 @@ const MIGRATIONS = [
   "0079_install_assigned_channel.sql",
   "0080_bench_command_set_audio_input.sql",
   "0081_room_states_and_verbs.sql",
+  "0066_mic_levels.sql",
   "0103_room_alert_state.sql",
   "0112_bench_level_samples.sql",
   "0122_pulse_presence_events.sql",
@@ -90,6 +91,11 @@ function seedFleet() {
     ${poller("ORBOX3", 1)}
     INSERT INTO bench_listener (room_id, tab_id, last_poll_at, paused) VALUES
       ('${ORB2}', 't', '${at(0.2)}', false), ('${CLINIC_A}', 't', '${at(0.2)}', false), ('${CLINIC_B}', 't', '${at(0.2)}', false);
+    INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('bs_a_old', '${CLINIC_A}', '${at(420)}', '${at(300)}', 'ended');
+    INSERT INTO bench_chunk (id, session_id, idx, r2_key, content_type, started_at, ended_at, duration_ms, size_bytes, created_at) VALUES
+      ('bc_a_old', 'bs_a_old', 0, 'ka0', 'audio/webm', '${at(305)}', '${at(300)}', 300000, 480000, '${at(300)}');
+    INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES
+      ('${at(0.5)}', 'clinic-a-mac', 'boot1', 1, 'daemon', 'heartbeat', '${at(0.5)}', '{"event":"start"}'::jsonb);
     INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('bs_b', '${CLINIC_B}', '${at(60)}', 'recording');
     INSERT INTO bench_chunk (id, session_id, idx, r2_key, content_type, started_at, ended_at, duration_ms, size_bytes, created_at) VALUES
       ('bc_1', 'bs_b', 0, 'k0', 'audio/webm', '${at(50)}', '${at(45)}', 300000, 480000, '${at(45)}'),
@@ -128,6 +134,8 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     H.sql = pg.sql as never;
     pg.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
     for (const m of MIGRATIONS) pg.exec(mig(m));
+    // getListener (the live start's execution-time read) selects bench_listener.spare_device, added by 0068 — whose other statements need tables this suite does not build
+    pg.exec(`ALTER TABLE bench_listener ADD COLUMN IF NOT EXISTS spare_device boolean`);
     seedFleet();
   }, 240_000);
   afterAll(() => {
@@ -164,7 +172,16 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
       expect(by[id]).toMatchObject({ rule: "not_recording", action: "scribe_start", mode: "shadow", result: "kill_switch" });
       expect(by[id]!.inputs).toMatchObject({ primary: true, tick: "2026-10-06T04:30:00.000Z", in_window: true, session_open: false });
       expect(by[id]!.inputs.ages_s.poller_ok_s).toBe(60);
+      // the reachability evidence sits at the top level of EVERY row's inputs
+      expect(by[id]!.inputs).toMatchObject({ poller_ok_s: 60, occupancy: "nobody", sleep_marker: false });
+      expect(by[id]!.inputs).toHaveProperty("kh_heartbeat_s");
+      expect(by[id]!.inputs).toHaveProperty("ext_status");
+      expect(by[id]!.inputs).toHaveProperty("last_chunk_s");
     }
+    // Clinic A is kiosk-enrolled (a kiosk-health heartbeat 30 s ago) and had a CLOSED session whose newest chunk is 5 h old: both are real, numeric values
+    expect(by[CLINIC_A]!.inputs).toMatchObject({ kh_heartbeat_s: 30, last_chunk_s: 18_000 });
+    expect(by[ORB2]!.inputs.kh_heartbeat_s).toBeNull();
+    expect(by[ORB2]!.inputs.last_chunk_s).toBeNull();
     expect(by[CLINIC_B]).toMatchObject({ rule: "ok", action: "none", mode: "shadow", result: null });
     expect(by[CLINIC_B]!.inputs).toMatchObject({ session_open: true, session_status: "recording" });
     expect(by[CLINIC_B]!.inputs.ages_s.last_chunk_s).toBe(30);
@@ -190,7 +207,7 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     await other.release();
   }, 120_000);
 
-  it("kill switch OFF + shadow: 'shadow: would scribe_start'; shadow off (live asked): blocked, live_executor degraded", async () => {
+  it("kill switch OFF + shadow: 'shadow: would scribe_start'; scribe_start lifted alone: the real live start (skipped / sent / session re-check), nothing else executes", async () => {
     pg.exec(`UPDATE steward_config SET value = '{"on":false}'::jsonb WHERE key = 'kill_switch'`);
     pg.exec(`DELETE FROM steward_decisions`);
     const s1 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
@@ -200,20 +217,51 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     expect(d1.map((r) => r.result)).toEqual(["shadow: would scribe_start", "shadow: would scribe_start"]);
     expect(d1.every((r) => r.mode === "shadow")).toBe(true);
 
-    pg.exec(`UPDATE steward_config SET value = '{"global":false,"actions":{}}'::jsonb WHERE key = 'shadow'`);
-    pg.exec(`DELETE FROM steward_decisions`);
-    const s2 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
-    expect(s2.degraded).toContain("live_executor");
-    const d2 = (await decisions()).filter(actionable);
-    expect(d2.map((r) => r.result)).toEqual(["blocked: live executor not enabled in P0", "blocked: live executor not enabled in P0"]);
-    expect(d2.every((r) => r.mode === "shadow")).toBe(true);
-    // still nothing was issued or sent
-    expect((await rows`SELECT count(*)::int AS n FROM steward_tickets`)[0]!.n).toBe(0);
-    expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
+    // (d)(e) shadow.global false, kill switch off, scribe_start NOT held: the REAL LiveExecutor runs against the real bench tables (decideStart / backoff / start_day), nothing mocked.
+    //        Every other action stays held back by name (tickets, message) — only scribe_start may execute.
+    const held = '{"global":false,"actions":{"ticket:wake":true,"ticket:open_pulse":true,"ticket:relaunch_chrome":true,"ticket:policy_cycle":true,"ticket:restart_recorder_app":true,"ticket:restart_kiosk_health":true,"message":true}}';
+    try {
+      pg.exec(`UPDATE steward_config SET value = '${held}'::jsonb WHERE key = 'shadow'`);
+      pg.exec(`DELETE FROM steward_decisions`);
+      // 1) the kiosks' last poll is 12 s before AS_OF, i.e. long stale against the executor's clock: nothing is sent, the rows say so
+      const s2 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
+      expect(s2.degraded).not.toContain("live_executor");
+      const d2 = (await decisions()).filter(actionable);
+      expect(d2.map((r) => r.result)).toEqual(["skipped: kiosk_not_listening", "skipped: kiosk_not_listening"]);
+      expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
 
-    // restore the seed
-    pg.exec(`UPDATE steward_config SET value = '{"global":true,"actions":{}}'::jsonb WHERE key = 'shadow'`);
-    pg.exec(`UPDATE steward_config SET value = '{"on":true}'::jsonb WHERE key = 'kill_switch'`);
+      // 2) Clinic A's kiosk polls NOW and acks the start; ORB2's does not listen: exactly ONE start_day command, from source 'steward'
+      pg.exec(`UPDATE bench_listener SET last_poll_at = now() WHERE room_id = '${CLINIC_A}'`);
+      pg.exec(`DELETE FROM steward_decisions`);
+      const ack = setInterval(() => pg.exec(`UPDATE bench_command SET status = 'acked', acked_at = now(), result = '{}'::jsonb WHERE status = 'pending'`), 300);
+      let s3;
+      try {
+        s3 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
+      } finally {
+        clearInterval(ack);
+      }
+      const d3 = Object.fromEntries((await decisions()).filter(actionable).map((r) => [r.room_id as string, r]));
+      expect(d3[CLINIC_A]).toMatchObject({ action: "scribe_start", mode: "live" });
+      expect(String(d3[CLINIC_A]!.result)).toMatch(/^ok: start_day acked command_id=cmd_/);
+      expect(d3[ORB2]).toMatchObject({ mode: "live", result: "skipped: kiosk_not_listening" });
+      expect(s3.degraded).not.toContain("live_executor");
+      const cmds = await rows`SELECT room_id, kind, source, status FROM bench_command`;
+      expect(cmds).toEqual([{ room_id: CLINIC_A, kind: "start_day", source: "steward", status: "acked" }]);
+
+      // 3) EXECUTION-TIME RE-CHECK on the real tables: a session opens for Clinic A after the sense ran -> the next executor call sends nothing
+      pg.exec(`DELETE FROM bench_command`);
+      const { LiveExecutor } = await import("@/lib/steward/executor");
+      pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('bs_race', '${CLINIC_A}', now(), 'recording')`);
+      const r = await new LiveExecutor().scribeStart({ room_id: CLINIC_A, action: "scribe_start", params: {} } as never);
+      expect(r.result).toBe("skipped: already_recording session_id=bs_race");
+      expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
+      pg.exec(`DELETE FROM bench_session WHERE id = 'bs_race'`);
+    } finally {
+      // restore the seed
+      pg.exec(`DELETE FROM bench_command`);
+      pg.exec(`UPDATE steward_config SET value = '{"global":true,"actions":{}}'::jsonb WHERE key = 'shadow'`);
+      pg.exec(`UPDATE steward_config SET value = '{"on":true}'::jsonb WHERE key = 'kill_switch'`);
+    }
   }, 180_000);
 
   it("a listener paused by the kiosk means no start decision (consent safety), through the real sense queries", async () => {
