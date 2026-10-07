@@ -533,6 +533,12 @@ public actor RoomEngine {
   private var lastPieceEndedAt: Date?
   private var needsActiveReconciliation = false
   private var lastMicMode: MicModeStatus?
+  private var lastEvent: (name: String, at: Date)?
+  /// When tapewriter last exited 76 in this session; the second one inside 10 minutes is a crash.
+  private var lastMicModeRestart: (sessionID: String, at: Date)?
+  /// MicModeGuard.relaunchExitCode in tapewriter: a planned restart, not a failure.
+  static let micModeRestartExitCode: Int32 = 76
+  static let micModeRestartThrottle: TimeInterval = 600
   private var reconciledServerStateKnown = false
   private var reconciledServerSessionID: String?
   private var reconciledServerSessionStatus: BenchSessionStatus?
@@ -3379,9 +3385,31 @@ public actor RoomEngine {
     }
     nextPieceIndex = segment.nextPieceIndex
     capture = nil
+    let exitStatus = segment.process.terminationStatus ?? -1
+    if exitStatus == Self.micModeRestartExitCode, phase == .recording, let sessionID {
+      let now = Date()
+      if let last = lastMicModeRestart, last.sessionID == sessionID,
+        now.timeIntervalSince(last.at) < Self.micModeRestartThrottle
+      {
+        log("micmode restart suppressed: throttle")
+      } else {
+        lastMicModeRestart = (sessionID, now)
+        log("tapewriter planned restart: mic_mode")
+        do {
+          try startCapture(trigger: .reconciliation)
+          lastEvent = ("mic_mode_restart", now)
+          try? saveStatus()
+          return
+        } catch {
+          phase = .failed
+          needsActiveReconciliation = true
+          throw error
+        }
+      }
+    }
     phase = .failed
     needsActiveReconciliation = true
-    throw RoomEngineError.captureExited(segment.process.terminationStatus ?? -1)
+    throw RoomEngineError.captureExited(exitStatus)
   }
 
   private func stopCaptureAndPublishFinal(reason: RoomResidentCaptureStopReason) throws {
@@ -3621,7 +3649,9 @@ public actor RoomEngine {
         sessionID: sessionID,
         pendingPieceCount: pending,
         lastError: lastError,
-        micMode: currentMicMode()))
+        micMode: currentMicMode(),
+        lastEvent: lastEvent?.name,
+        lastEventAt: lastEvent?.at))
   }
 
   /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the

@@ -389,6 +389,9 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   public var updatedAt: Date
   /// The latest MicModeGuard result from tapewriter; nil when none has been read.
   public var micMode: MicModeStatus?
+  /// A planned event, not an error: "mic_mode_restart" after tapewriter's exit 76 relaunch.
+  public var lastEvent: String?
+  public var lastEventAt: Date?
 
   enum CodingKeys: String, CodingKey {
     case state
@@ -397,6 +400,8 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     case lastError = "last_error"
     case updatedAt = "updated_at"
     case micMode = "mic_mode"
+    case lastEvent = "last_event"
+    case lastEventAt = "last_event_at"
   }
 
   public init(
@@ -405,7 +410,9 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     pendingPieceCount: Int = 0,
     lastError: String? = nil,
     updatedAt: Date = Date(),
-    micMode: MicModeStatus? = nil
+    micMode: MicModeStatus? = nil,
+    lastEvent: String? = nil,
+    lastEventAt: Date? = nil
   ) {
     self.state = state
     self.sessionID = sessionID
@@ -413,6 +420,8 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     self.lastError = lastError.map { String($0.prefix(500)) }
     self.updatedAt = updatedAt
     self.micMode = micMode
+    self.lastEvent = lastEvent
+    self.lastEventAt = lastEventAt
   }
 }
 

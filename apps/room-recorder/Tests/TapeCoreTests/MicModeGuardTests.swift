@@ -344,3 +344,189 @@ private final class RecordingRestartStore: MicModeRestartStore, @unchecked Senda
     #expect(try JSONDecoder().decode(RoomRecorderStatus.self, from: plain).micMode == nil)
   }
 }
+
+// MARK: - FIX3: exit 76 is a planned restart that needs no server
+
+/// Wraps an `R4FakeTapewriter` so a test can make it "exit" with a chosen status once it is
+/// durable. The inner fake is interrupted so its writer thread stops.
+private final class ScriptedExitTapewriter: RoomCaptureProcess, @unchecked Sendable {
+  let inner: R4FakeTapewriter
+  private let lock = NSLock()
+  private var forced: Int32?
+  init(inner: R4FakeTapewriter) { self.inner = inner }
+  func exit(status: Int32) {
+    lock.withLock { forced = status }
+    inner.interrupt()
+  }
+  var isRunning: Bool { lock.withLock { forced == nil } && inner.isRunning }
+  var terminationStatus: Int32? {
+    lock.withLock { forced } ?? inner.terminationStatus
+  }
+  func interrupt() { inner.interrupt() }
+  func waitUntilExit() { inner.waitUntilExit() }
+}
+
+private final class ScriptedLauncher: RoomCaptureLaunching, @unchecked Sendable {
+  private let lock = NSLock()
+  private let base = R4FakeLauncher()
+  private var wrapped: [ScriptedExitTapewriter] = []
+  func launch(executable: URL, outputDirectory: URL, deviceUID: String, logURL: URL) throws
+    -> any RoomCaptureProcess
+  {
+    let process = try base.launch(
+      executable: executable, outputDirectory: outputDirectory, deviceUID: deviceUID, logURL: logURL
+    )
+    let scripted = ScriptedExitTapewriter(inner: process as! R4FakeTapewriter)
+    lock.withLock { wrapped.append(scripted) }
+    return scripted
+  }
+  var count: Int { lock.withLock { wrapped.count } }
+  func exitLatest(status: Int32) { lock.withLock { wrapped.last }?.exit(status: status) }
+  var directories: [URL] { base.launchedDirectories }
+}
+
+/// The server never answers: every call after the first active-session read throws.
+private actor DeadRemote: RoomEngineRemote {
+  private let inner: R4Remote
+  private var activeCalls = 0
+  init() { inner = R4Remote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: []) }
+  func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
+    activeCalls += 1
+    if activeCalls == 1 { return try await inner.activeSession(tabID: tabID, since: since) }
+    throw URLError(.notConnectedToInternet)
+  }
+  func createSession(label: String?, micLabel: String?) async throws -> CreateSessionResponse {
+    throw URLError(.notConnectedToInternet)
+  }
+  func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws
+    -> BenchOKResponse
+  { throw URLError(.notConnectedToInternet) }
+  func pollCommands(
+    tabID: String, previousPollAt: String?, recordingSessionID: String?, paused: Bool,
+    primaryLevels: BenchLevelPair?, install: InstallPollFields?
+  ) async throws -> CommandPollResponse { throw URLError(.notConnectedToInternet) }
+  func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
+    -> CommandAcknowledgement
+  { throw URLError(.notConnectedToInternet) }
+  func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse {
+    throw URLError(.notConnectedToInternet)
+  }
+  func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
+    -> ImmutablePieceUploadResult
+  { throw URLError(.notConnectedToInternet) }
+}
+
+@Suite(.serialized) struct MicModeRestartTests {
+  final class Lines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String] = []
+    func add(_ line: String) { lock.withLock { items.append(line) } }
+    var all: [String] { lock.withLock { items } }
+  }
+
+  private func start(_ launcher: ScriptedLauncher, lines: Lines, root: URL) async throws
+    -> (RoomEngine, Task<Void, Error>)
+  {
+    try RoomPersistence(root: root).saveConfiguration(try R4Fixture.configuration())
+    let engine = try await RoomEngine.load(
+      rootURL: root,
+      enrolmentReader: R4Fixture.enrolled,
+      remoteFactory: { _ in DeadRemote() },
+      captureLauncher: launcher,
+      pieceRunner: R4FakeEncoder(),
+      updaterFactory: { _, _, _ in nil },
+      log: { lines.add($0) })
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { launcher.count == 1 }
+    return (engine, task)
+  }
+
+  @Test func exit76RelaunchesWithNoServerAndIsNotFailed() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let launcher = ScriptedLauncher()
+    let lines = Lines()
+    let (_, task) = try await start(launcher, lines: lines, root: root)
+    // Let the first segment become durable, then plant mic_mode.json as tapewriter would.
+    try await Task.sleep(for: .milliseconds(300))
+    MicModeStatus.write(
+      MicModeStatus(before: 2, after: 0, set: "ok", at: "2026-10-08T00:00:00.000Z"),
+      directory: launcher.directories[0])
+    launcher.exitLatest(status: 76)
+    try await R4Fixture.waitUntil { launcher.count == 2 }
+    // Same session dir, next segment.
+    #expect(
+      launcher.directories[0].deletingLastPathComponent()
+        == launcher.directories[1].deletingLastPathComponent())
+    MicModeStatus.write(
+      MicModeStatus(before: 0, after: 0, set: "skip", at: "2026-10-08T00:01:00.000Z"),
+      directory: launcher.directories[1])
+    try await Task.sleep(for: .milliseconds(1_800))
+    task.cancel()
+    _ = try? await task.value
+
+    let status = try RoomPersistence(root: root).loadStatus()
+    #expect(status.state == .recording)
+    #expect(status.lastEvent == "mic_mode_restart")
+    #expect(status.lastEventAt != nil)
+    #expect(status.micMode?.after == 0)
+    #expect(lines.all.contains("tapewriter planned restart: mic_mode"))
+    #expect(!lines.all.contains { $0.contains("tapewriter exited") })
+  }
+
+  @Test func secondExit76InsideTenMinutesTakesTheOldPath() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let launcher = ScriptedLauncher()
+    let lines = Lines()
+    let (_, task) = try await start(launcher, lines: lines, root: root)
+    try await Task.sleep(for: .milliseconds(300))
+    launcher.exitLatest(status: 76)
+    try await R4Fixture.waitUntil { launcher.count == 2 }
+    try await Task.sleep(for: .milliseconds(300))
+    launcher.exitLatest(status: 76)
+    // The dead server puts the loop in poll back-off (5 to 30 s), so allow for it.
+    for _ in 0..<6_000 where !lines.all.contains("micmode restart suppressed: throttle") {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(lines.all.contains("micmode restart suppressed: throttle"))
+    try await Task.sleep(for: .milliseconds(500))
+    task.cancel()
+    _ = try? await task.value
+
+    #expect(launcher.count == 2)  // the server is dead, so nothing relaunched the third
+    let status = try RoomPersistence(root: root).loadStatus()
+    #expect(status.state == .failed)
+  }
+
+  @Test func exit1KeepsTheOldPath() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let launcher = ScriptedLauncher()
+    let lines = Lines()
+    let (_, task) = try await start(launcher, lines: lines, root: root)
+    try await Task.sleep(for: .milliseconds(300))
+    launcher.exitLatest(status: 1)
+    try await R4Fixture.waitUntil {
+      (try? RoomPersistence(root: root).loadStatus().state) == .failed
+    }
+    task.cancel()
+    _ = try? await task.value
+
+    #expect(launcher.count == 1)
+    let status = try RoomPersistence(root: root).loadStatus()
+    #expect(status.lastEvent == nil)
+    #expect(!lines.all.contains("tapewriter planned restart: mic_mode"))
+  }
+
+  @Test func statusRoundTripsLastEventAndOldFilesDecode() throws {
+    let at = Date(timeIntervalSince1970: 1_790_000_000)
+    let status = RoomRecorderStatus(state: .recording, lastEvent: "mic_mode_restart", lastEventAt: at)
+    let object =
+      try JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as! [String: Any]
+    #expect(object["last_event"] as? String == "mic_mode_restart")
+    #expect(object["last_event_at"] != nil)
+    let plain = try JSONEncoder().encode(RoomRecorderStatus(state: .ready))
+    #expect(try JSONDecoder().decode(RoomRecorderStatus.self, from: plain).lastEvent == nil)
+  }
+}
