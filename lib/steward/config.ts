@@ -28,6 +28,8 @@ export type Config = {
   caps: { actions_per_room_per_hour: number; policy_cycle_per_profile_per_day: number; start_retries: number };
   priority: RoomClass[];
   rooms: Record<string, RoomOverride>;
+  /** steward_config key `start_day_live` ({"on": bool}, optional, default false): the Steward really enqueues start_day (see startday.ts). The kill switch still wins. */
+  start_day_live: boolean;
   /** per-source read timeout of the sense step (steward_config key `source_timeout_ms`, optional: a number or {ms}); default 6000 */
   source_timeout_ms: number;
 };
@@ -50,6 +52,7 @@ export const DEFAULT_CONFIG: Config = {
   priority: ["ot", "opd", "clinic"],
   // NOT a fallback: rooms/schedule are FATAL when missing (see FATAL_CONFIG_KEYS). These are placeholders so the type is total.
   rooms: {},
+  start_day_live: false,
   source_timeout_ms: DEFAULT_SOURCE_TIMEOUT_MS,
 };
 
@@ -148,6 +151,13 @@ export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>
     const ms = typeof v === "number" ? v : isObj(v) ? v.ms : undefined;
     if (typeof ms === "number" && Number.isInteger(ms) && ms >= 500 && ms <= 15_000) cfg.source_timeout_ms = ms;
     else invalid.push("source_timeout_ms");
+  }
+
+  // optional: absent = false and NOT invalid; present but malformed = false and invalid (the safe side)
+  if (raw.has("start_day_live")) {
+    const v = raw.get("start_day_live");
+    if (isObj(v) && typeof v.on === "boolean") cfg.start_day_live = v.on;
+    else invalid.push("start_day_live");
   }
 
   const fatal = invalid.filter((k) => (FATAL_CONFIG_KEYS as readonly string[]).includes(k));

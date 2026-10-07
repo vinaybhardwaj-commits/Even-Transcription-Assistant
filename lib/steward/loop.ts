@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { buildRoster, loadConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
+import { alertDecision, attemptDecision, attemptStart, defaultPort, deviceMissing, evaluateStartDay, readExpectedDevice, readRecorderStreak, shouldArm, skipDecision, startInFlight, type StartDayPort } from "./startday";
 import { senseAll } from "./sense";
 import { SourceTimeout, raceTimeout } from "./timeout";
 import type { StewardSql } from "./tickets";
@@ -106,6 +107,8 @@ export type RunOptions = {
   lock?: LoopLock;
   now?: () => number;
   executorFor?: (live: boolean) => Executor;
+  /** the lib/bench-commands functions the live start_day path calls (default: imported lazily) */
+  startDayPort?: StartDayPort;
 };
 
 // ---------------------------------------------------------------------------
@@ -370,6 +373,10 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
           }
         }
       }
+      emit(d, primary, seq, mode, result);
+    };
+
+    const emit = (d: Decision, primary: boolean, seq: number, mode: "shadow" | "live", result: string | null): void => {
       rows.push({
         room_id: d.room_id,
         machine: d.machine,
@@ -387,6 +394,38 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       });
     };
 
+    // --- start_day LIVE (startday.ts). Armed only when steward_config.start_day_live is on AND the kill switch is off; otherwise this is never called and the loop is
+    //     exactly the shadow loop. Returns after writing the room's primary row (an attempt, an alert, or why there was none); an attempt is never deduped away.
+    const armed = shouldArm(cfg);
+    let startPort: StartDayPort | null = opts.startDayPort ?? null;
+    const startDayFlow = async (room: { room_id: string; room_name: string }, sense: NonNullable<ReturnType<typeof senses.get>>, d: Decision, last: DbRow | undefined, lastTs: string | null): Promise<void> => {
+      const skipRow = (reason: string, facts: Record<string, unknown>): void => {
+        const sk = skipDecision(d, reason, facts);
+        const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(sk) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS;
+        if (!same) emit(sk, true, 0, "shadow", `skipped: ${reason}`);
+      };
+      if (memoryDegraded) return skipRow("decision_log_unavailable", {});
+      const recorder = await readRecorderStreak(sql, sense.machine ?? "", A, cfg.source_timeout_ms);
+      const deviceName = deviceMissing(sense) ? await readExpectedDevice(sql, room.room_id) : null;
+      const v = evaluateStartDay({ sense, cfg, A, recent: mem.recentRows.get(room.room_id) ?? [], recorder, deviceName });
+      if (!v.go) {
+        if (v.alert) return emit(alertDecision(d, room, v.alert.device, v.facts), true, 0, "shadow", `alert: input device missing (${v.alert.device}); no retry until it is present`);
+        return skipRow(v.reason, v.facts);
+      }
+      const inflight = await startInFlight(sql, room.room_id, A);
+      if (inflight !== false) return skipRow(inflight === null ? "start_in_flight_unreadable" : "start_in_flight", v.facts);
+      try {
+        startPort = startPort ?? (await defaultPort());
+      } catch {
+        degrade("start_day_port");
+        return skipRow("enqueue_unavailable", v.facts);
+      }
+      const r = await attemptStart(startPort, room.room_id, A);
+      if (!r.counted) return skipRow(r.result.replace(/^skipped: /, "").replace(/ \(session .*$/, ""), { ...v.facts, server: r.result });
+      emit(attemptDecision(d, v.device_missing, v.facts), true, 0, "live", r.result);
+    };
+
+
     let processed = 0;
     for (const room of roster) {
       if (now() - t0 >= opts.budgetMs) {
@@ -402,6 +441,10 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       const lastTs = last ? toIso(last.ts) : null;
       for (let i = 0; i < ds.length; i++) {
         const d = ds[i]!;
+        if (i === 0 && armed && d.action === "scribe_start") {
+          await startDayFlow(room, sense, d, last, lastTs);
+          continue;
+        }
         if (i === 0) {
           const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS;
           if (same) continue;
