@@ -116,3 +116,30 @@ private final class FakeMicModeAPI: MicModeAPI, @unchecked Sendable {
     #expect(api.setCalls.isEmpty)
   }
 }
+
+@Suite struct MicModeLaneWiringTests {
+  private func source(_ name: String) throws -> String {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    return try String(
+      contentsOf: root.appendingPathComponent("Sources/tapewriter/\(name)"), encoding: .utf8)
+  }
+
+  @Test func guardIsCalledOnceInCaptureSessionInitAndNeverInTheLane() throws {
+    let recorder = try source("Recorder.swift")
+    let lane = try source("ResidentAudioCaptureLane.swift")
+    // Every lane start builds a CaptureSession, whose init is the single guard call.
+    #expect(recorder.components(separatedBy: "MicModeGuard.enforceStandardForMainBundle()").count == 2)
+    #expect(!lane.contains("MicModeGuard"))
+    #expect(!lane.contains("MicModeWatchdog"))
+  }
+
+  @Test func unreadableModeNeverSets() {
+    let api = FakeMicModeAPI()
+    api.modes["a"] = -1
+    var lines: [String] = []
+    MicModeGuard.enforceStandard(ids: ["a"], api: api, log: { lines.append($0) })
+    #expect(api.setCalls.isEmpty)
+    #expect(lines == ["micmode before=unreadable set=skip bundle=a"])
+  }
+}

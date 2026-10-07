@@ -38,9 +38,11 @@ struct MicModeReport: Equatable {
   var setResult: Int?
   var after: Int
   var error: String?
+  var unreadable = false
 
   var logLine: String {
-    "micmode before=\(before) set=\(setResult.map(String.init) ?? "skip") after=\(after) bundle=\(bundleID)"
+    if unreadable { return "micmode before=unreadable set=skip bundle=\(bundleID)" }
+    return "micmode before=\(before) set=\(setResult.map(String.init) ?? "skip") after=\(after) bundle=\(bundleID)"
       + (error.map { " error=\($0)" } ?? "")
   }
 }
@@ -78,7 +80,9 @@ enum MicModeGuard {
       var report = MicModeReport(
         bundleID: id, available: true, before: before, setResult: nil, after: before, error: nil)
       let supported = api.supportsStandard(bundleID: id)
-      if before != 0, supported != false {
+      if before < 0 {
+        report.unreadable = true
+      } else if before > 0, supported != false {
         let outcome = api.setStandard(bundleID: id)
         report.setResult = outcome.result
         report.error = outcome.error

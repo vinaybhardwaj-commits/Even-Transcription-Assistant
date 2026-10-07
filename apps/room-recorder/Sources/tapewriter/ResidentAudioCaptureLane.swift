@@ -56,7 +56,6 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
   private var finalizationRequired = false
   private var handoffError: Error?
   private var handoffsInProgress = 0
-  private var micModeWatchdog = MicModeWatchdog()
 
   package convenience init(
     stableDeviceUID: String,
@@ -70,7 +69,6 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
       rolloverStoreFactory: rolloverStoreFactory,
       authorize: { try Self.validateInput(stableDeviceUID: stableDeviceUID) },
       sessionFactory: { generation, resumeAfterNS in
-        MicModeGuard.enforceStandardForMainBundle()
         let device = try AudioDevices.selected(uid: stableDeviceUID)
         return try CaptureSession(
           device: device,
@@ -226,11 +224,6 @@ package final class ResidentAudioCaptureLane: @unchecked Sendable {
       return
     }
     guard !session.hasStoppedProducing else {
-      stateLock.withLock { active = false }
-      throw ResidentAudioCaptureLaneError.stoppedUnexpectedly
-    }
-    // Existing replacement path: the owner restarts the lane on stoppedUnexpectedly.
-    if micModeWatchdog.tick(nowNS: nowNS()) {
       stateLock.withLock { active = false }
       throw ResidentAudioCaptureLaneError.stoppedUnexpectedly
     }
