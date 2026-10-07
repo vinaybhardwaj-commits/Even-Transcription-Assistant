@@ -271,7 +271,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     let rosterRows: RosterRow[] = [];
     try {
       rosterRows = (await sql`
-        SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.state_flags
+        SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.state_flags, ri.expected_device_name AS device_name
           FROM room r
           LEFT JOIN room_install ri ON ri.room_id = r.id AND ri.retired_at IS NULL AND ri.enrolled_at IS NOT NULL
          WHERE r.disabled_at IS NULL
@@ -354,16 +354,24 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     // a live start waits for the kiosk's ack: never longer than the time left before the INSERT reserve (1 s floor, 8 s ceiling)
     const executorFor =
       opts.executorFor ??
-      ((live: boolean) => (live ? new LiveExecutor({ ackTimeoutMs: Math.max(1000, Math.min(8000, t0 + opts.budgetMs - INSERT_RESERVE_MS - now())) }) : new ShadowExecutor()));
+      ((live: boolean) => (live ? new LiveExecutor({ ackTimeoutMs: Math.max(1000, Math.min(8000, t0 + opts.budgetMs - INSERT_RESERVE_MS - now())), maxAttempts: cfg.caps.start_retries }) : new ShadowExecutor()));
 
     const record = async (d: Decision, primary: boolean, seq: number): Promise<void> => {
       let mode: "shadow" | "live" = "shadow";
       let result: string | null = null;
       if (d.action !== "none" && d.action !== "log_only") {
         // config.actionMode: executes only if kill_switch off AND shadow.global false AND shadow.actions[action] !== true AND the action is live-capable
-        const am = actionMode(cfg, d.action);
+        let am = actionMode(cfg, d.action);
+        // a LIVE scribe_start must also pass its gates (kiosk-health heartbeat <= 180 s, recorder ready + no session for >= 5 min, ...): the first failing gate is the result, nothing is sent
+        const gateFail = am === "live" && d.action === "scribe_start" && typeof d.inputs.start_gate_fail === "string" ? d.inputs.start_gate_fail : null;
+        if (gateFail) {
+          am = "shadow";
+          result = `shadow: ${gateFail}`;
+        }
         if (am === "kill_switch") {
           result = "kill_switch";
+        } else if (gateFail) {
+          // result already set above; nothing executes
         } else {
           const shadow = am === "shadow";
           try {
@@ -409,7 +417,10 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       for (let i = 0; i < ds.length; i++) {
         const d = ds[i]!;
         if (i === 0) {
-          const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS;
+          // A start that would EXECUTE now is never swallowed by a previous row that executed nothing (e.g. "shadow: recorder_ready_under_5m" a minute ago, same key): the attempt goes through.
+          const wouldGoLive = d.action === "scribe_start" && actionMode(cfg, "scribe_start") === "live" && typeof d.inputs.start_gate_fail !== "string";
+          const lastRan = !last || !(typeof last.result === "string" && /^(shadow|kill_switch|blocked)/.test(last.result));
+          const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !lastRan);
           if (same) continue;
         } else {
           const k = keyOf(d);

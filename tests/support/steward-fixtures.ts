@@ -41,13 +41,24 @@ export function healthy(A: number, over: DeepPartial<RoomSense> = {}): RoomSense
     consult_started_at: null,
     occupancy: { state: "nobody", idle_s: 900, identity_fault: false },
     audio: { default_input_present: true, usb_removed_recent: false, device_missing_flag: false, silent_while_recording_since: null },
-    start_backoff: { failed_attempts: 0, retry_after_s: 0 },
+    start_attempts: [],
     missing: [],
   };
   return merge(base, over);
 }
 
 /** The same room with no session open. */
-export const idle = (A: number, over: DeepPartial<RoomSense> = {}) =>
-  healthy(A, { recording: { session_open: false, session_id: null, session_status: null, session_started_at: null, last_chunk_at: null, recorder_status: null }, ...over });
+export const idle = (A: number, over: DeepPartial<RoomSense> = {}) => {
+  const { recording, ...rest } = over;
+  return healthy(A, { ...rest, recording: { session_open: false, session_id: null, session_status: null, session_started_at: null, last_chunk_at: null, recorder_status: null, ...(recording ?? {}) } });
+};
 
+
+/** a steward start_day command created `secAgo` s before A that FAILED */
+export const failedAttempt = (A: number, secAgo: number) => ({ status: "failed", created_at: ago(A, secAgo), acked_at: null, session_started: false, session_named: false });
+/** a steward start_day command that is still pending */
+export const pendingAttempt = (A: number, secAgo: number) => ({ status: "pending", created_at: ago(A, secAgo), acked_at: null, session_started: false, session_named: false });
+/** a steward start_day command the kiosk acked and that produced a session */
+export const okAttempt = (A: number, secAgo: number) => ({ status: "acked", created_at: ago(A, secAgo), acked_at: ago(A, secAgo - 2), session_started: true, session_named: true });
+/** a kiosk-enrolled room whose recorder has been "ready" with no session for `readySec` s (rows every 30 s, newest 20 s old) */
+export const readyRecorder = (A: number, readySec: number) => ({ latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "false", ready_since: ago(A, readySec), ready_samples: Math.max(2, Math.round(readySec / 30)) });

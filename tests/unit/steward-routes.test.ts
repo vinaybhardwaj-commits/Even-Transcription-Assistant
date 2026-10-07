@@ -94,7 +94,7 @@ describe("GET /api/admin/steward/decisions", () => {
     const [strings, ...values] = M.sql.mock.calls[0]!;
     const text = (strings as string[]).join("?");
     expect(text).toContain("ORDER BY ts DESC, id DESC");
-    expect(values).toEqual(["room_a", "room_a", "2026-10-06T00:00:00.000Z", "2026-10-06T00:00:00.000Z", 100]);
+    expect(values).toEqual(["room_a", "room_a", "2026-10-06T00:00:00.000Z", "2026-10-06T00:00:00.000Z", null, null, null, null, 100]);
   });
 
   it("no filters -> nulls bound; limit is clamped to 500", async () => {
@@ -103,12 +103,24 @@ describe("GET /api/admin/steward/decisions", () => {
     const res = await decisions(req("limit=9999"));
     expect((await res.json()).limit).toBe(500);
     const [, ...values] = M.sql.mock.calls[0]!;
-    expect(values).toEqual([null, null, null, null, 500]);
+    expect(values).toEqual([null, null, null, null, null, null, null, null, 500]);
+  });
+
+  it("rule and action filters are bound parameters (FLEET polls live attempts with action=scribe_start&rule=not_recording)", async () => {
+    okGuard();
+    M.sql.mockResolvedValue([]);
+    await decisions(req("room=room_a&rule=not_recording&action=scribe_start"));
+    const [strings, ...values] = M.sql.mock.calls[0]!;
+    const text = (strings as string[]).join("?");
+    expect(text).toContain("rule = ");
+    expect(text).toContain("action = ");
+    expect(values).toEqual(["room_a", "room_a", null, null, "not_recording", "not_recording", "scribe_start", "scribe_start", 100]);
+    expect(JSON.stringify(values)).not.toContain("DROP");
   });
 
   it("400 on a bad since, a bad limit or an over-long room", async () => {
     okGuard();
-    for (const qs of ["since=yesterday", "limit=0", "limit=abc", "limit=1.5", `room=${"x".repeat(65)}`, "room="]) {
+    for (const qs of ["since=yesterday", "limit=0", "limit=abc", "limit=1.5", `room=${"x".repeat(65)}`, "room=", `rule=${"x".repeat(65)}`, "rule=", `action=${"x".repeat(65)}`, "action="]) {
       expect((await decisions(req(qs))).status).toBe(400);
     }
     expect(M.sql).not.toHaveBeenCalled();

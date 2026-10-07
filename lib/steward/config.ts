@@ -26,6 +26,8 @@ export type Config = {
   schedule: { clinic: Sched; ot: Sched };
   days: { mode: string; closed: string[] };
   caps: { actions_per_room_per_hour: number; policy_cycle_per_profile_per_day: number; start_retries: number };
+  /** steward_config key `start_day_live` {"on": bool}: the LIVE start_day switch. Missing / malformed = false (fail-closed). scribe_start executes only if this is on AND the kill switch is off AND actionMode allows it. */
+  start_day_live: boolean;
   priority: RoomClass[];
   rooms: Record<string, RoomOverride>;
   /** per-source read timeout of the sense step (steward_config key `source_timeout_ms`, optional: a number or {ms}); default 6000 */
@@ -47,6 +49,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   days: { mode: "every_day", closed: [] },
   caps: { actions_per_room_per_hour: 4, policy_cycle_per_profile_per_day: 1, start_retries: 3 },
+  start_day_live: false,
   priority: ["ot", "opd", "clinic"],
   // NOT a fallback: rooms/schedule are FATAL when missing (see FATAL_CONFIG_KEYS). These are placeholders so the type is total.
   rooms: {},
@@ -151,6 +154,13 @@ export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>
     if (!ok) invalid.push("rooms");
   } else invalid.push("rooms");
 
+  // start_day_live: absent = false (NOT invalid: the row is not seeded); present but malformed = false and invalid. Fail-closed either way.
+  if (raw.has("start_day_live")) {
+    const v = raw.get("start_day_live");
+    if (isObj(v) && typeof v.on === "boolean") cfg.start_day_live = v.on;
+    else invalid.push("start_day_live");
+  }
+
   // optional: absent = default and NOT invalid; present but malformed = default and invalid
   if (raw.has("source_timeout_ms")) {
     const v = raw.get("source_timeout_ms");
@@ -189,7 +199,7 @@ export type ActionMode = "kill_switch" | "shadow" | "live";
 
 /**
  * How ONE action is executed under this config. An action executes ONLY if kill_switch.on = false AND shadow.global = false AND shadow.actions[action] !== true AND the
- * action is a known live-capable name. Everything else records the decision and executes nothing: "kill_switch" when the switch is on, "shadow" otherwise.
+ * action is a known live-capable name, and (scribe_start only) start_day_live.on is true. Everything else records the decision and executes nothing: "kill_switch" when the switch is on, "shadow" otherwise.
  * (Before this rule a per-action `false` overrode `global: true`; now global true shadows every action, and a per-action `true` is the only way to hold one back.)
  */
 export function actionMode(cfg: Config, action: string): ActionMode {
@@ -197,6 +207,8 @@ export function actionMode(cfg: Config, action: string): ActionMode {
   if (cfg.shadow.global) return "shadow";
   if (!LIVE_CAPABLE_ACTIONS.includes(action)) return "shadow";
   if (cfg.shadow.actions[action] === true) return "shadow";
+  // the live start has its own switch: steward_config start_day_live {"on":true} (fail-closed)
+  if (action === "scribe_start" && !cfg.start_day_live) return "shadow";
   return "live";
 }
 
@@ -207,24 +219,26 @@ export function actionMode(cfg: Config, action: string): ActionMode {
 /** "EHRC-CONSUL2’s Mac mini (2)" -> "EHRC-CONSUL2s-Mac-mini-2" (same rule as lib/encounter-windows/types.ts normalizeHostname; copied so this module has no imports). */
 export const normalizeMachine = (h: string): string => h.replace(/’/g, "").replace(/'/g, "").replace(/\s*\((\d+)\)/, "-$1").replace(/\s+/g, "-");
 
-export type RosterRow = { room_id: string; room_name: string; hostname: string | null; state_flags?: unknown };
-export type RosterRoom = { room_id: string; room_name: string; machine: string | null; klass: RoomClass; flags: string[]; kind: ScheduleKind; state_flags: unknown };
+export type RosterRow = { room_id: string; room_name: string; hostname: string | null; state_flags?: unknown; device_name?: string | null };
+export type RosterRoom = { room_id: string; room_name: string; machine: string | null; klass: RoomClass; flags: string[]; kind: ScheduleKind; state_flags: unknown; /** room_install.expected_device_name: the input device the room should be on */ device_name: string | null };
 
 export const EXCLUDED_FLAGS: readonly string[] = ["test", "dev"];
 /** rooms whose id starts with this are dev/test scratch rooms (lib/brain/scratch.ts SCRATCH_ROOM_PREFIX, copied: this module has no imports) and never join the roster. */
 export const SCRATCH_ROOM_PREFIX = "room_scratch_";
+/** hard list (ORB3, Home Office): never in the roster whatever steward_config.rooms says (dev rigs; a live start there is never wanted) */
+export const NEVER_ROSTER_ROOM_IDS: readonly string[] = ["room_jwyrr4dc", "room_2qe955hy"];
 
 /** Every non-excluded room, in processing order (config.priority, then name). */
 export function buildRoster(rows: readonly RosterRow[], cfg: Config): RosterRoom[] {
   const out: RosterRoom[] = [];
   for (const r of rows) {
-    if (r.room_id.startsWith(SCRATCH_ROOM_PREFIX)) continue;
+    if (r.room_id.startsWith(SCRATCH_ROOM_PREFIX) || NEVER_ROSTER_ROOM_IDS.includes(r.room_id)) continue;
     const o = cfg.rooms[r.room_id];
     const flags = o?.flags ?? [];
     if (flags.some((f) => EXCLUDED_FLAGS.includes(f.toLowerCase()))) continue;
     const klass: RoomClass = o?.class ?? "clinic";
     const machine = o?.machine ?? (r.hostname ? normalizeMachine(r.hostname) : null);
-    out.push({ room_id: r.room_id, room_name: r.room_name, machine, klass, flags, kind: klass === "ot" ? "ot" : "clinic", state_flags: r.state_flags ?? null });
+    out.push({ room_id: r.room_id, room_name: r.room_name, machine, klass, flags, kind: klass === "ot" ? "ot" : "clinic", state_flags: r.state_flags ?? null, device_name: r.device_name ?? null });
   }
   const rank = (k: RoomClass): number => {
     const i = cfg.priority.indexOf(k);

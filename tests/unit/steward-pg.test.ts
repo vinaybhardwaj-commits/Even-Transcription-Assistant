@@ -223,11 +223,22 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     try {
       pg.exec(`UPDATE steward_config SET value = '${held}'::jsonb WHERE key = 'shadow'`);
       pg.exec(`DELETE FROM steward_decisions`);
+      // 0) the flag start_day_live is NOT seeded (absent = off, fail-closed): shadow lifted for scribe_start and the kill switch off, and still nothing is sent
+      const s0 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
+      expect(s0.degraded).toEqual([]);
+      expect((await decisions()).filter(actionable).map((r) => [r.mode, r.result])).toEqual([["shadow", "shadow: would scribe_start"], ["shadow", "shadow: would scribe_start"]]);
+      expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
+      // the gate evidence the live start needs: Clinic A's recorder.status history (ready, no open session, for 8 min) beside its kiosk-health heartbeat; ORB2 has no kiosk-health at all
+      pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES
+        ${[8, 6, 4, 2, 0.5].map((m, i) => `('${at(m)}', 'clinic-a-mac', 'boot1', ${100 + i}, 'recorder', 'recorder.status', '${at(m)}', '{"state":"ready","session_open":false}'::jsonb)`).join(",")}`);
+      pg.exec(`INSERT INTO steward_config (key, value) VALUES ('start_day_live', '{"on":true}'::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+      pg.exec(`DELETE FROM steward_decisions`);
       // 1) the kiosks' last poll is 12 s before AS_OF, i.e. long stale against the executor's clock: nothing is sent, the rows say so
       const s2 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
       expect(s2.degraded).not.toContain("live_executor");
       const d2 = (await decisions()).filter(actionable);
-      expect(d2.map((r) => r.result)).toEqual(["skipped: kiosk_not_listening", "skipped: kiosk_not_listening"]);
+      expect(d2.map((r) => [r.mode, r.result])).toEqual([["live", "skipped: kiosk_not_listening"], ["shadow", "shadow: no_kiosk_health"]]);
+      expect(d2[0]!.inputs).toMatchObject({ start_gate_fail: null, kh_heartbeat_s: 30, recorder_ready_for_s: 480, start_gates: { in_window: true, kiosk_health_fresh: true, recorder_ready: true, no_open_session: true } });
       expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
 
       // 2) Clinic A's kiosk polls NOW and acks the start; ORB2's does not listen: exactly ONE start_day command, from source 'steward'
@@ -243,7 +254,7 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
       const d3 = Object.fromEntries((await decisions()).filter(actionable).map((r) => [r.room_id as string, r]));
       expect(d3[CLINIC_A]).toMatchObject({ action: "scribe_start", mode: "live" });
       expect(String(d3[CLINIC_A]!.result)).toMatch(/^ok: start_day acked command_id=cmd_/);
-      expect(d3[ORB2]).toMatchObject({ mode: "live", result: "skipped: kiosk_not_listening" });
+      expect(d3[ORB2]).toMatchObject({ mode: "shadow", result: "shadow: no_kiosk_health" }); // ORB2: no kiosk-health -> live start never fires there
       expect(s3.degraded).not.toContain("live_executor");
       const cmds = await rows`SELECT room_id, kind, source, status FROM bench_command`;
       expect(cmds).toEqual([{ room_id: CLINIC_A, kind: "start_day", source: "steward", status: "acked" }]);
@@ -256,7 +267,18 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
       expect(r.result).toBe("skipped: already_recording session_id=bs_race");
       expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
       pg.exec(`DELETE FROM bench_session WHERE id = 'bs_race'`);
+
+      // 4) THE DAILY SCHEDULE on the real tables: three failed steward attempts today (>= 4 min apart from any start) -> a 4th is never issued: skipped: start_exhausted, no command
+      const ago = (min: number) => `GREATEST((date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata') + interval '1 second', now() - interval '${min} minutes')`;
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at) VALUES
+        ('cmd_x1', '${CLINIC_A}', 'start_day', 'failed', 'steward', ${ago(120)}), ('cmd_x2', '${CLINIC_A}', 'start_day', 'failed', 'steward', ${ago(110)}), ('cmd_x3', '${CLINIC_A}', 'start_day', 'failed', 'steward', ${ago(100)})`);
+      pg.exec(`UPDATE bench_listener SET last_poll_at = now() WHERE room_id = '${CLINIC_A}'`);
+      const r4 = await new LiveExecutor().scribeStart({ room_id: CLINIC_A, action: "scribe_start", params: {} } as never);
+      expect(r4.result).toMatch(/^skipped: start_exhausted attempts=3/);
+      expect((await rows`SELECT count(*)::int AS n FROM bench_command WHERE id NOT LIKE 'cmd_x%'`)[0]!.n).toBe(0);
     } finally {
+      pg.exec(`DELETE FROM kiosk_health_events WHERE kind = 'recorder.status'`);
+      pg.exec(`DELETE FROM steward_config WHERE key = 'start_day_live'`);
       // restore the seed
       pg.exec(`DELETE FROM bench_command`);
       pg.exec(`UPDATE steward_config SET value = '{"global":true,"actions":{}}'::jsonb WHERE key = 'shadow'`);
@@ -309,6 +331,12 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     expect(a.decisions).toHaveLength(2);
     const s = await (await get("?since=2026-10-06T04:05:00Z")).json();
     expect(s.decisions).toHaveLength(2);
+    const byAction = await (await get("?action=scribe_start")).json();
+    expect(byAction.decisions.map((d: any) => d.rule)).toEqual(["not_recording"]);
+    const byRule = await (await get(`?rule=ok&room=${CLINIC_A}`)).json();
+    expect(byRule.decisions).toHaveLength(1);
+    expect((await (await get("?rule=nope")).json()).decisions).toHaveLength(0);
+    expect((await get(`?action=${"x".repeat(65)}`)).status).toBe(400);
     const l = await (await get("?limit=1")).json();
     expect(l.decisions).toHaveLength(1);
     expect((await get("?room=x%27%3B%20DROP%20TABLE%20steward_decisions%3B--")).status).toBe(200);

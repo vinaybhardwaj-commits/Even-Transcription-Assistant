@@ -5,7 +5,9 @@
  * LiveExecutor implements scribe_start ONLY (the Bench start_day path, re-checked at execution time); every other method throws and the loop records it as shadow.
  * Which executor runs for an action is decided by config.actionMode (kill switch, shadow.global, shadow.actions[action]).
  */
+import { istMidnightOf } from "./config";
 import type { Decision } from "./rules";
+import { START_IN_FLIGHT_S, startVerdict } from "./start-schedule";
 
 export type ExecResult = { result: string };
 
@@ -37,9 +39,11 @@ export const LIVE_EXECUTOR_DISABLED = "live executor not enabled in P0";
 export type StartDeps = {
   getListener: (roomId: string) => Promise<import("@/lib/bench-commands").ListenerRow | null>;
   findActiveSession: (roomId: string) => Promise<{ id: string; status: string; started_at?: string } | null>;
+  /** start_day commands of ANY source in the last hour (Kiosk Bot, the admin route, the MCP tool, us): used for the "already in flight" check */
   getRecentStartAttempts: (roomId: string, now: Date) => Promise<import("@/lib/bench-commands").StartAttempt[]>;
+  /** this room's start_day commands with source 'steward' since IST midnight (the 3-per-day cap and the 5/15/45 min backoff) */
+  getStewardAttemptsToday: (roomId: string, now: Date) => Promise<import("@/lib/bench-commands").StartAttempt[]>;
   decideStart: typeof import("@/lib/bench-commands").decideStart;
-  applyStartBackoff: typeof import("@/lib/bench-commands").applyStartBackoff;
   insertCommand: (input: { roomId: string; kind: "start_day"; args?: unknown; source?: string }) => Promise<string>;
   waitForAck: (id: string, opts: { timeoutMs?: number }) => Promise<{ status: string; error: string | null; result: unknown } | null>;
 };
@@ -47,12 +51,25 @@ export type StartDeps = {
 /** Loaded lazily: lib/bench-commands pulls the database client at import, and the shadow path (and its tests) must not need it. */
 async function realStartDeps(): Promise<StartDeps> {
   const b = await import("@/lib/bench-commands");
+  const { sql } = await import("@/lib/db");
   return {
     getListener: b.getListener,
     findActiveSession: b.findActiveSession,
     getRecentStartAttempts: b.getRecentStartAttempts,
+    getStewardAttemptsToday: async (roomId, now) => {
+      const dayStart = new Date(istMidnightOf(now.getTime())).toISOString();
+      const rows = (await sql`
+        SELECT c.status, c.created_at, c.acked_at,
+               EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.id = c.result ->> 'session_id') AS session_named,
+               EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
+                         AND s.started_at <= c.acked_at + (${b.START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')) AS session_started
+          FROM bench_command c
+         WHERE c.room_id = ${roomId} AND c.kind = 'start_day' AND c.source = 'steward' AND c.created_at >= ${dayStart}::timestamptz
+         ORDER BY c.created_at ASC
+      `) as Array<{ status: string; created_at: string | Date; acked_at: string | Date | null; session_started: boolean; session_named: boolean }>;
+      return rows.map((r) => ({ status: r.status, created_at: r.created_at, acked_at: r.acked_at ?? null, session_started: r.session_started === true, session_named: r.session_named === true }));
+    },
     decideStart: b.decideStart,
-    applyStartBackoff: b.applyStartBackoff,
     insertCommand: (i) => b.insertCommand(i),
     waitForAck: (id, o) => b.waitForAck(id, o),
   };
@@ -60,14 +77,17 @@ async function realStartDeps(): Promise<StartDeps> {
 
 export const START_SOURCE = "steward";
 export const DEFAULT_ACK_TIMEOUT_MS = 8000;
+/** the ONLY command kind this executor can queue */
+export const LIVE_COMMAND_KIND = "start_day" as const;
 
 /**
  * The live start, the same path as the MCP tool scribe_start_recording: read the listener AND the room's open session NOW (execution time, not sense time), run decideStart
- * (kiosk listening? already recording? paused?) and applyStartBackoff (2+ failed start_day in 60 min = room_failing, nothing sent), and only then queue ONE start_day command and wait
- * for the kiosk's ack. Results: "ok: ..." (acked), "failed: ..." (queued and not acked / failed) — these two count against the caps and the retry memory — and "skipped: <reason>"
- * when NOTHING was sent (already recording, paused, kiosk not listening, room_failing, attempts unreadable): a skipped row never counts. Never overrides a consent pause; never forces.
+ * (kiosk listening? already recording = success, nothing sent? paused?), refuse when ANY start_day (Kiosk Bot, an operator, us) was queued < 4 min ago, apply the daily schedule
+ * (3 steward attempts per IST day, 5 / 15 / 45 min after the 1st / 2nd / 3rd failed one, lib/steward/start-schedule.ts), and only then queue ONE start_day command and wait for the
+ * kiosk's ack. Results: "ok: ..." (acked), "failed: ..." (queued and not acked / failed) — these two count against the caps — and "skipped: <reason>" when NOTHING was sent (already
+ * recording, paused, kiosk not listening, in flight, exhausted, backoff, pending, unreadable): a skipped row never counts. Never overrides a consent pause; never forces; can emit start_day and nothing else.
  */
-export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackTimeoutMs?: number; now?: () => Date } = {}): Promise<ExecResult> {
+export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackTimeoutMs?: number; now?: () => Date; maxAttempts?: number } = {}): Promise<ExecResult> {
   const roomId = d.room_id;
   if (!roomId) return { result: "skipped: no_room" };
   const now = (opts.now ?? (() => new Date()))();
@@ -75,17 +95,20 @@ export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackT
   const verdict = deps.decideStart({ listener, activeSession: active, overridePause: false, now });
   if (verdict.action === "reject") return { result: `skipped: ${verdict.error}` };
   if (verdict.action === "already_recording") return { result: `skipped: already_recording session_id=${verdict.session_id}` };
-  // a session opened between the verdict and now cannot be missed: `active` was read in the same Promise.all, and applyStartBackoff never skips a room that has one
-  let attempts: Awaited<ReturnType<StartDeps["getRecentStartAttempts"]>>;
+  let recent: Awaited<ReturnType<StartDeps["getRecentStartAttempts"]>>;
+  let today: Awaited<ReturnType<StartDeps["getStewardAttemptsToday"]>>;
   try {
-    attempts = await deps.getRecentStartAttempts(roomId, now);
+    [recent, today] = await Promise.all([deps.getRecentStartAttempts(roomId, now), deps.getStewardAttemptsToday(roomId, now)]);
   } catch {
     return { result: "skipped: start_attempts_unreadable" };
   }
-  const v = deps.applyStartBackoff(verdict, { attempts, activeSession: active, force: false, now });
-  if (v.action === "skipped") return { result: `skipped: room_failing failed_attempts=${v.failed_attempts} retry_after_s=${v.retry_after_s}` };
-  if (v.action !== "send") return { result: `skipped: ${v.action}` };
-  const id = await deps.insertCommand({ roomId, kind: "start_day", args: v.args ?? undefined, source: START_SOURCE });
+  if (recent.some((a) => now.getTime() - new Date(a.created_at).getTime() < START_IN_FLIGHT_S * 1000)) return { result: "skipped: start_in_flight" };
+  const sv = startVerdict(today, now.getTime(), opts.maxAttempts ?? 3);
+  if (sv.kind === "exhausted") return { result: `skipped: start_exhausted attempts=${sv.attempts}` };
+  if (sv.kind === "pending") return { result: `skipped: start_pending attempts=${sv.attempts}` };
+  if (sv.kind === "backoff") return { result: `skipped: start_backoff attempts=${sv.attempts} retry_after_s=${sv.retry_after_s}` };
+  if (verdict.action !== "send") return { result: `skipped: ${(verdict as { action: string }).action}` };
+  const id = await deps.insertCommand({ roomId, kind: LIVE_COMMAND_KIND, args: verdict.args ?? undefined, source: START_SOURCE });
   const row = await deps.waitForAck(id, { timeoutMs: opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS });
   if (!row) return { result: `failed: no ack from the kiosk command_id=${id}` };
   if (row.status === "acked") return { result: `ok: start_day acked command_id=${id}` };
@@ -94,9 +117,9 @@ export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackT
 
 /** scribe_start is live; every other method throws, and the loop treats a throw as "stay in shadow". */
 export class LiveExecutor implements Executor {
-  constructor(private readonly opts: { ackTimeoutMs?: number; deps?: StartDeps; now?: () => Date } = {}) {}
+  constructor(private readonly opts: { ackTimeoutMs?: number; deps?: StartDeps; now?: () => Date; maxAttempts?: number } = {}) {}
   async scribeStart(d: Decision): Promise<ExecResult> {
-    return liveScribeStart(d, this.opts.deps ?? (await realStartDeps()), { ackTimeoutMs: this.opts.ackTimeoutMs, now: this.opts.now });
+    return liveScribeStart(d, this.opts.deps ?? (await realStartDeps()), { ackTimeoutMs: this.opts.ackTimeoutMs, now: this.opts.now, maxAttempts: this.opts.maxAttempts });
   }
   scribeStop(_d: Decision): Promise<ExecResult> {
     throw new Error(LIVE_EXECUTOR_DISABLED);
@@ -122,6 +145,7 @@ export async function dispatch(ex: Executor, d: Decision): Promise<ExecResult | 
     case "scribe_restart":
       return ex.scribeRestart(d);
     case "message":
+    case "alert":
       return ex.message(d);
     case "log_only":
     case "none":

@@ -3,10 +3,10 @@
  * recent decisions go in; Decisions come out. Every clock here is an explicit IST instant on 6 Oct 2026 (a Tuesday), never Date.now().
  */
 import { describe, it, expect } from "vitest";
-import { DEFAULT_CONFIG, actionMode, buildRoster, parseConfig, windowAt, type Config } from "@/lib/steward/config";
+import { DEFAULT_CONFIG, NEVER_ROSTER_ROOM_IDS, actionMode, buildRoster, parseConfig, windowAt, type Config } from "@/lib/steward/config";
 import { EMPTY_RECENT, chromeGate, decideRoom, failingClass, fleetDecisions, hashFacts, type RecentAction, type RecentContext } from "@/lib/steward/rules";
 import type { RoomSense } from "@/lib/steward/sense";
-import { ago, healthy, idle, ist, type DeepPartial } from "../support/steward-fixtures";
+import { ago, failedAttempt, healthy, idle, ist, okAttempt, pendingAttempt, readyRecorder, type DeepPartial } from "../support/steward-fixtures";
 
 const row = (A: number, secAgo: number, action: string, over: Partial<RecentAction> = {}): RecentAction => ({
   ts: ago(A, secAgo),
@@ -82,11 +82,15 @@ describe("config: parse, roster, windows", () => {
   });
 
   it("(d) actionMode: kill switch -> kill_switch; global true -> shadow; a per-action true -> shadow; unknown or not-live-capable names -> shadow; only the rest is live", () => {
-    const cfgOf = (kill: boolean, global: boolean, actions: Record<string, boolean>) => ({ ...DEFAULT_CONFIG, kill_switch: kill, shadow: { global, actions } });
+    const cfgOf = (kill: boolean, global: boolean, actions: Record<string, boolean>, startLive = true) => ({ ...DEFAULT_CONFIG, kill_switch: kill, start_day_live: startLive, shadow: { global, actions } });
     expect(actionMode(cfgOf(true, false, {}), "scribe_start")).toBe("kill_switch");
     expect(actionMode(cfgOf(false, true, { scribe_start: false }), "scribe_start")).toBe("shadow");
     expect(actionMode(cfgOf(false, false, { scribe_start: true }), "scribe_start")).toBe("shadow");
     expect(actionMode(cfgOf(false, false, { "ticket:wake": true, message: true, scribe_start: false }), "scribe_start")).toBe("live");
+    expect(actionMode(cfgOf(false, false, { scribe_start: false }, false), "scribe_start")).toBe("shadow"); // start_day_live off (the default): fail-closed
+    expect(actionMode({ ...DEFAULT_CONFIG, kill_switch: false, shadow: { global: false, actions: {} } }, "scribe_start")).toBe("shadow"); // start_day_live defaults off
+    expect(DEFAULT_CONFIG.start_day_live).toBe(false);
+    expect(actionMode(cfgOf(true, false, {}), "scribe_start")).toBe("kill_switch");
     expect(actionMode(cfgOf(false, false, { "ticket:wake": true }), "ticket:wake")).toBe("shadow");
     expect(actionMode(cfgOf(false, false, {}), "ticket:wake")).toBe("live");
     expect(actionMode(cfgOf(false, false, {}), "ticket:made_up")).toBe("shadow");
@@ -185,31 +189,128 @@ describe("not recording: start, backoff, max tries", () => {
     expect(first(idle(T), T)).toMatchObject({ rule: "not_recording", action: "scribe_start", severity: "warn", why_not: null });
   });
 
-  it("room_failing backoff (2 failed starts in the hour) holds the start and says why", () => {
-    const d = first(idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 1800 } }), T);
+  it("backoff after a FAILED start: 5 min after the 1st, 15 after the 2nd; the countdown lives in inputs, params stay {}", () => {
+    const d = first(idle(T, { start_attempts: [failedAttempt(T, 120)] }), T);
     expect(d).toMatchObject({ rule: "not_recording", action: "log_only", params: {}, failing_class: "not_recording" });
-    expect(d.inputs).toMatchObject({ retry_after_s: 1800, failing_class: "not_recording" });
-    expect(d.why_not).toContain("room_failing");
+    expect(d.inputs).toMatchObject({ retry_after_s: 180, attempts: 1, failing_class: "not_recording" });
+    expect(d.why_not).toContain("backoff");
+    // 4 min 59 s: still held; 5 min 00 s: go
+    expect(first(idle(T, { start_attempts: [failedAttempt(T, 299)] }), T).action).toBe("log_only");
+    expect(first(idle(T, { start_attempts: [failedAttempt(T, 300)] }), T).action).toBe("scribe_start");
+    // 2nd failed attempt: 15 min
+    const two = (sec: number) => idle(T, { start_attempts: [failedAttempt(T, 4000), failedAttempt(T, sec)] });
+    expect(first(two(899), T)).toMatchObject({ action: "log_only" });
+    expect(first(two(899), T).inputs).toMatchObject({ retry_after_s: 1, attempts: 2 });
+    expect(first(two(900), T).action).toBe("scribe_start");
   });
 
-  it("3 recorded start tries in the hour -> one message with needs_hands; 2 tries still start; old or ok tries do not count", () => {
-    const three = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })]);
-    const d = first(idle(T), T, three);
-    expect(d).toMatchObject({ rule: "not_recording", action: "message", severity: "error" });
-    expect(d.params).toMatchObject({ needs_hands: true, kind: "start_exhausted" });
-    expect(d.params).not.toHaveProperty("tries");
-    expect(d.inputs).toMatchObject({ tries: 3 });
-    expect(d.failing_class).toBe("not_recording");
-    expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" })])).action).toBe("scribe_start");
-    expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 4000, "scribe_start", { outcome: "failed" })])).action).toBe("scribe_start");
-    expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "ok" }), row(T, 1000, "scribe_start", { outcome: "ok" }), row(T, 2000, "scribe_start", { outcome: "ok" })])).action).toBe("scribe_start");
+  it("a 4th start is never issued in an IST day: 3 attempts -> start_exhausted (log_only) + a needs-hands message; the old 'tries in the decision log' rule is gone", () => {
+    const ds = decideRoom(idle(T, { start_attempts: [failedAttempt(T, 9000), failedAttempt(T, 5000), failedAttempt(T, 3000)] }), DEFAULT_CONFIG, T, EMPTY_RECENT);
+    expect(ds.map((d) => [d.rule, d.action])).toEqual([["start_exhausted", "log_only"], ["start_exhausted", "message"]]);
+    expect(ds[1]!.params).toMatchObject({ needs_hands: true, kind: "start_exhausted" });
+    expect(ds[0]!.failing_class).toBe("not_recording");
+    expect(ds[0]!.inputs).toMatchObject({ attempts: 3 });
+    // three failed scribe_start ROWS in the decision log no longer matter by themselves
+    expect(first(idle(T), T, recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })])).action).toBe("scribe_start");
+    // 2 attempts (the 2nd long past its 15 min wait) still start
+    expect(first(idle(T, { start_attempts: [failedAttempt(T, 9000), failedAttempt(T, 3000)] }), T).action).toBe("scribe_start");
+  });
+
+  it("a pending / young-acked last attempt holds the next one; a successful attempt (session appeared) does not start a backoff; the start of the day has no history", () => {
+    expect(first(idle(T, { start_attempts: [pendingAttempt(T, 60)] }), T)).toMatchObject({ rule: "not_recording", action: "log_only" });
+    expect(first(idle(T, { start_attempts: [pendingAttempt(T, 60)] }), T).why_not).toContain("pending");
+    expect(first(idle(T, { start_attempts: [okAttempt(T, 60)] }), T).action).toBe("scribe_start");
+    expect(first(idle(T, { start_attempts: [] }), T).action).toBe("scribe_start");
+  });
+
+  it("device missing: ONE attempt is allowed, then an alert naming the room and the device and no more attempts; when the device is back the normal schedule resumes", () => {
+    const missing = (over: DeepPartial<RoomSense> = {}) =>
+      idle(T, { room_name: "Cardiology", audio: { default_input_present: false, configured_device: "TONOR TM20 Audio Device" }, ...over });
+    // no attempt yet: the one allowed attempt (tagged in inputs)
+    const first1 = first(missing({ start_attempts: [] }), T);
+    expect(first1).toMatchObject({ action: "scribe_start" });
+    expect(first1.inputs).toMatchObject({ device_missing: true, attempts: 0 });
+    // one attempt already made today (failed, its backoff over): alert, not a 2nd attempt
+    const d = first(missing({ start_attempts: [failedAttempt(T, 3000)] }), T);
+    expect(d).toMatchObject({ rule: "device_missing", action: "alert", severity: "error" });
+    expect(d.params).toEqual({ room_id: "room_a", room: "Cardiology", device: "TONOR TM20 Audio Device" });
+    expect(d.why).toContain("TONOR TM20 Audio Device");
+    // the alert keeps coming while the device is absent (never a start)
+    expect(first(missing({ start_attempts: [failedAttempt(T, 9000), failedAttempt(T, 5000)] }), T).action).toBe("alert");
+    // each of the three signals counts: default input absent, DEVICE_MISSING flag, a USB removal with no usb_added since
+    for (const audio of [{ default_input_present: true, device_missing_flag: true }, { default_input_present: true, usb_removed_recent: true }]) {
+      expect(first(idle(T, { audio: { ...audio, configured_device: null, default_input_name: "USB Mic" }, start_attempts: [failedAttempt(T, 3000)] }), T).params).toMatchObject({ device: "USB Mic" });
+    }
+    expect(first(idle(T, { audio: { default_input_present: false }, start_attempts: [failedAttempt(T, 3000)] }), T).params).toMatchObject({ device: "input device (name not reported)" });
+    // device back: a normal start resumes
+    expect(first(idle(T, { start_attempts: [failedAttempt(T, 3000)] }), T).action).toBe("scribe_start");
+  });
+
+  it("the live-start gates are recorded in inputs on every scribe_start: heartbeat <= 180 s, recorder ready + no session held >= 300 s from the history; the first failing gate is named", () => {
+    const ready = (sec: number) => idle(T, { reachable: { kh_heartbeat_at: ago(T, 60) }, recording: { recorder_history: readyRecorder(T, sec) } });
+    const pass = first(ready(400), T);
+    expect(pass.inputs).toMatchObject({ start_gate_fail: null, recorder_ready_for_s: 400, kh_heartbeat_s: 60, start_gates: { in_window: true, room_eligible: true, no_open_session: true, kiosk_health_fresh: true, recorder_ready: true } });
+    // recorder ready for 4:59 no, 5:00 yes
+    expect(first(ready(299), T).inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m", start_gates: { recorder_ready: false } });
+    expect(first(ready(300), T).inputs).toMatchObject({ start_gate_fail: null });
+    // heartbeat: 180 s ok, 181 s stale
+    const hb = (sec: number) => idle(T, { reachable: { poller_ok_at: ago(T, 30), kh_heartbeat_at: ago(T, sec) }, recording: { recorder_history: readyRecorder(T, 400) } });
+    expect(first(hb(170), T).inputs).toMatchObject({ start_gate_fail: null, kh_heartbeat_s: 170 });
+    expect(first(hb(181), T).inputs).toMatchObject({ start_gate_fail: "kh_heartbeat_stale", start_gates: { kiosk_health_fresh: false } });
+    // the ready streak needs >= 2 rows and a newest row <= 7 min old
+    const one = idle(T, { recording: { recorder_history: { ...readyRecorder(T, 400), ready_samples: 1 } } });
+    expect(first(one, T).inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m", recorder_ready_for_s: null });
+    const stale = idle(T, { recording: { recorder_history: { ...readyRecorder(T, 900), latest_at: ago(T, 421) } } });
+    expect(first(stale, T).inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m", recorder_ready_for_s: null });
+    // the newest row is not ready (recording / session open): recorder_not_ready
+    const notReady = idle(T, { recording: { recorder_history: { latest_at: ago(T, 20), latest_state: "recording", latest_session_open: "true", ready_since: null, ready_samples: 0 } } });
+    expect(first(notReady, T).inputs).toMatchObject({ start_gate_fail: "recorder_not_ready" });
+  });
+
+  it("a room with no kiosk-health at all (ORB2) can never pass the gates: no_kiosk_health", () => {
+    const orb2 = idle(T, { reachable: { kh_heartbeat_at: null, kh_enrolled: false }, recording: { recorder_history: null } });
+    const d = first(orb2, T);
+    expect(d).toMatchObject({ action: "scribe_start" });
+    expect(d.inputs).toMatchObject({ start_gate_fail: "no_kiosk_health", start_gates: { kiosk_health_fresh: false, recorder_ready: false } });
+  });
+
+  // ---- adopted from FLEET's withdrawn builder (BUILDER-REPORT-STARTDAY.md) ----
+  it("[FLEET] hard never-start list: ORB3 (room_jwyrr4dc) and Home Office (room_2qe955hy) never join the roster, whatever their hostname", () => {
+    expect(NEVER_ROSTER_ROOM_IDS).toEqual(["room_jwyrr4dc", "room_2qe955hy"]);
+    const cfg = parseConfig([{ key: "rooms", value: {} }]).config;
+    const r = buildRoster([{ room_id: "room_jwyrr4dc", room_name: "ORB3", hostname: "ORBOX3" }, { room_id: "room_2qe955hy", room_name: "Home Office", hostname: "Vinays-Mac-mini" }, { room_id: "room_ok", room_name: "OPD 1", hostname: "H1" }], cfg);
+    expect(r.map((x) => x.room_id)).toEqual(["room_ok"]);
+  });
+
+  it("[FLEET] window edges through decideRoom with every gate otherwise green: 07:29:59 and 21:30:00 are outside (no start), 07:30:00 and 21:29:59 start", () => {
+    const green = (A: number) => idle(A, { reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: readyRecorder(A, 600) } });
+    for (const [t, expectStart] of [[ist("07:29", "2026-10-06", "59"), false], [ist("07:30"), true], [ist("21:29", "2026-10-06", "59"), true], [ist("21:30"), false]] as const) {
+      const d = first(green(t), t);
+      if (expectStart) expect(d).toMatchObject({ action: "scribe_start", inputs: { start_gate_fail: null, start_gates: { in_window: true } } });
+      else expect(d.action).not.toBe("scribe_start");
+    }
+  });
+
+  it("[FLEET] the heartbeat boundary is inclusive (exactly 180 s passes), and the newest recorder.status row may be exactly 7 min old (420 s passes, 421 s does not)", () => {
+    const hb = idle(T, { reachable: { poller_ok_at: ago(T, 30), kh_heartbeat_at: ago(T, 180) }, recording: { recorder_history: readyRecorder(T, 600) } });
+    expect(first(hb, T).inputs).toMatchObject({ start_gate_fail: null, kh_heartbeat_s: 180 });
+    const edge = idle(T, { recording: { recorder_history: { ...readyRecorder(T, 900), latest_at: ago(T, 420) } } });
+    expect(first(edge, T).inputs).toMatchObject({ start_gate_fail: null });
+  });
+
+  it("[FLEET] a gated start row does not suppress the attempt: the same (rule, action, params) is produced every tick; the gate result lives in inputs only (the loop test covers the dedupe bypass)", () => {
+    const a = first(idle(T, { reachable: { kh_heartbeat_at: ago(T, 300) } }), T);
+    const b = first(idle(T + 60_000, { reachable: { kh_heartbeat_at: ago(T + 60_000, 30) }, recording: { recorder_history: readyRecorder(T + 60_000, 600) } }), T + 60_000);
+    expect([a.rule, a.action, a.params]).toEqual([b.rule, b.action, b.params]);
+    expect(a.inputs).toMatchObject({ start_gate_fail: expect.any(String) });
+    expect(b.inputs).toMatchObject({ start_gate_fail: null });
   });
 
   it("a paused (consent) room is never started; unreadable start history holds the start", () => {
     const d = first(idle(T, { listener: { listening: true, paused: true } }), T);
     expect(d).toMatchObject({ action: "log_only" });
     expect(d.why_not).toContain("paused");
-    const e = first(idle(T, { start_backoff: null }), T);
+    const e = first(idle(T, { start_attempts: null }), T);
     expect(e).toMatchObject({ action: "log_only" });
     expect(e.why_not).toContain("start_attempts");
   });
@@ -543,13 +644,12 @@ describe("fleet incident, caps and repeated failure", () => {
   it("F1: failingClass needs a POSITIVE failure signal: a room that simply has not started yet today and a consent-paused room never count; a failed start does", () => {
     expect(failingClass(decideRoom(idle(T), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBeNull();
     expect(failingClass(decideRoom(idle(T, { listener: { listening: true, paused: true } }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBeNull();
-    expect(failingClass(decideRoom(idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 600 } }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe("not_recording");
-    const three = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })]);
-    expect(failingClass(decideRoom(idle(T), DEFAULT_CONFIG, T, three))).toBe("not_recording");
+    expect(failingClass(decideRoom(idle(T, { start_attempts: [failedAttempt(T, 120)] }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe("not_recording");
+    expect(failingClass(decideRoom(idle(T, { start_attempts: [failedAttempt(T, 9000), failedAttempt(T, 5000), failedAttempt(T, 3000)] }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe("not_recording");
   });
 
   it("failingClass keeps a held or gated room in its class", () => {
-    const failedStart = idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 600 } });
+    const failedStart = idle(T, { start_attempts: [failedAttempt(T, 120)] });
     expect(failingClass(decideRoom(healthy(T), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBeNull();
     // a held unstarted room (hold row, no signal of its own) does not count; a held signalled room does
     expect(failingClass(decideRoom(idle(T), DEFAULT_CONFIG, T, recent([], { failing: {}, hold: { not_recording: true } })))).toBeNull();
@@ -637,12 +737,13 @@ describe("degraded inputs and determinism", () => {
 describe("F2: params are stable across minutes (the dedupe key is (room, rule, action, params))", () => {
   const p = (ds: ReturnType<typeof decideRoom>) => JSON.stringify(ds.map((d) => [d.rule, d.action, d.params]));
 
-  it("a room_failing backoff counting down 1800 s -> 1740 s has identical params; the countdown is in inputs", () => {
-    const a = decideRoom(idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 1800 } }), DEFAULT_CONFIG, T, EMPTY_RECENT);
-    const b = decideRoom(idle(T + 60_000, { start_backoff: { failed_attempts: 2, retry_after_s: 1740 } }), DEFAULT_CONFIG, T + 60_000, EMPTY_RECENT);
+  it("a start backoff counting down 240 s -> 180 s has identical params; the countdown is in inputs", () => {
+    const att = [failedAttempt(T, 60)];
+    const a = decideRoom(idle(T, { start_attempts: att }), DEFAULT_CONFIG, T, EMPTY_RECENT);
+    const b = decideRoom(idle(T + 60_000, { start_attempts: att }), DEFAULT_CONFIG, T + 60_000, EMPTY_RECENT);
     expect(p(a)).toBe(p(b));
-    expect(a[0]!.inputs.retry_after_s).toBe(1800);
-    expect(b[0]!.inputs.retry_after_s).toBe(1740);
+    expect(a[0]!.inputs.retry_after_s).toBe(240);
+    expect(b[0]!.inputs.retry_after_s).toBe(180);
   });
 
   it("a late stop one minute later has identical params (no elapsed minutes in the message text); the elapsed minutes are in inputs", () => {
@@ -655,10 +756,10 @@ describe("F2: params are stable across minutes (the dedupe key is (room, rule, a
     expect(b[1]!.inputs.since_end_min).toBe(31);
   });
 
-  it("start_exhausted with 3 vs 4 tries in the hour, and action_failing with 3 vs 4 failures, have identical params", () => {
-    const rows3 = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })]);
-    const rows4 = recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" }), row(T, 2500, "scribe_start", { outcome: "failed" })]);
-    expect(p(decideRoom(idle(T), DEFAULT_CONFIG, T, rows3))).toBe(p(decideRoom(idle(T), DEFAULT_CONFIG, T, rows4)));
+  it("start_exhausted with 3 vs 4 attempts today, and action_failing with 3 vs 4 failures, have identical params", () => {
+    const f3 = [failedAttempt(T, 9000), failedAttempt(T, 5000), failedAttempt(T, 3000)];
+    const f4 = [...f3, failedAttempt(T, 2500)];
+    expect(p(decideRoom(idle(T, { start_attempts: f3 }), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe(p(decideRoom(idle(T, { start_attempts: f4 }), DEFAULT_CONFIG, T, EMPTY_RECENT)));
     const asleep = idle(T, { reachable: { poller_ok_at: ago(T, 240), kh_heartbeat_at: ago(T, 240) } });
     const f = (s: number) => row(T, s, "ticket:wake", { outcome: "failed" });
     expect(p(decideRoom(asleep, DEFAULT_CONFIG, T, recent([f(100), f(900), f(1800)])))).toBe(p(decideRoom(asleep, DEFAULT_CONFIG, T, recent([f(100), f(900), f(1200), f(1800)]))));
@@ -666,8 +767,9 @@ describe("F2: params are stable across minutes (the dedupe key is (room, rule, a
 
   it("no decision any rule emits carries a number-bearing countdown in params: every params value is a string, boolean or a fixed enum", () => {
     const scenarios: Array<[RoomSense, RecentContext]> = [
-      [idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 1800 } }), EMPTY_RECENT],
-      [idle(T), recent([row(T, 100, "scribe_start", { outcome: "failed" }), row(T, 1000, "scribe_start", { outcome: "failed" }), row(T, 2000, "scribe_start", { outcome: "failed" })])],
+      [idle(T, { start_attempts: [failedAttempt(T, 120)] }), EMPTY_RECENT],
+      [idle(T, { start_attempts: [failedAttempt(T, 9000), failedAttempt(T, 5000), failedAttempt(T, 3000)] }), EMPTY_RECENT],
+      [idle(T, { audio: { default_input_present: false, configured_device: "Mic" }, start_attempts: [failedAttempt(T, 3000)] }), EMPTY_RECENT],
       [idle(T, { reachable: { poller_ok_at: ago(T, 700), kh_heartbeat_at: ago(T, 700) } }), EMPTY_RECENT],
       [healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "recording", session_open: true, received_at: ago(T, 300) } } }), recent([row(T, 420, "scribe_restart")])],
       [healthy(T, { reachable: { kh_heartbeat_at: ago(T, 660) } }), EMPTY_RECENT],
@@ -764,7 +866,7 @@ describe("(b) one inputs builder: every row of every rule carries the reachabili
       decideRoom(sleeping, DEFAULT_CONFIG, T),
       decideRoom(healthy(T), DEFAULT_CONFIG, T),
       decideRoom(idle(T, { listener: { paused: true } }), DEFAULT_CONFIG, T),
-      decideRoom(idle(T, { start_backoff: { failed_attempts: 2, retry_after_s: 600 } }), DEFAULT_CONFIG, T),
+      decideRoom(idle(T, { start_attempts: [failedAttempt(T, 120)] }), DEFAULT_CONFIG, T),
       decideRoom(healthy(T, { recording: { last_chunk_at: ago(T, 900), recorder_status: { state: "recording", session_open: false, received_at: ago(T, 300) } } }), DEFAULT_CONFIG, T),
       decideRoom(sleeping, DEFAULT_CONFIG, T, recent([row(T, 10, "ticket:wake", { outcome: "ok" }), row(T, 20, "ticket:wake", { outcome: "ok" }), row(T, 30, "ticket:wake", { outcome: "ok" }), row(T, 40, "ticket:wake", { outcome: "ok" })])),
       decideRoom(idle(T), DEFAULT_CONFIG, T, recent([], { failing: { not_recording: 3 }, hold: {} })),

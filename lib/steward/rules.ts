@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import { istMidnightOf, windowAt, type Config, type WindowState } from "./config";
 import type { RoomSense } from "./sense";
 import { paramsValid, type StewardAction } from "./tickets";
+import { startVerdict } from "./start-schedule";
 
 export type DecisionAction =
   | "scribe_start"
@@ -45,6 +46,7 @@ export type DecisionAction =
   | "scribe_restart"
   | `ticket:${StewardAction}`
   | "message"
+  | "alert"
   | "log_only"
   | "none";
 
@@ -119,8 +121,12 @@ export const FLEET_HOLD_MS = 15 * MIN;
 export const ASLEEP_NO_CHUNK_MS = 10 * MIN;
 /** with neither poller nor kiosk-health data for this long, reachability is unknown: kiosk_asleep is not emitted. */
 export const REACHABILITY_DATA_MAX_AGE_MS = 2 * 3_600_000;
-/** lib/bench-commands START_BACKOFF_MAX_FAILED, copied so this file stays free of the bench module. */
-export const START_BACKOFF_MAX_FAILED = 2;
+/** live-start gate: the kiosk-health heartbeat must be this fresh (kh_heartbeat_s <= 180) */
+export const START_GATE_KH_MAX_MS = 180_000;
+/** live-start gate: recorder.status must have been ready with no session for this long, derived from the history (recorder_ready_for_s >= 300) */
+export const START_GATE_RECORDER_READY_MS = 300_000;
+/** the newest recorder.status row must be this young (kiosk-health re-emits at least every 300 s) for the ready streak to count */
+export const START_GATE_RECORDER_LATEST_MAX_MS = 420_000;
 
 /** Rules whose decision means "this room is failing", the fleet-incident classes. */
 export const FAILING_RULES: readonly string[] = ["not_recording", "session_died", "kiosk_asleep", "kiosk_health_down", "mic_fault", "profile_unloaded", "extension_missing"];
@@ -180,6 +186,15 @@ function facts(c: Ctx): Record<string, unknown> {
   };
 }
 
+/** How long recorder.status has been "ready" with session_open false, from the history: null unless the newest row is <= 7 min old, ready, and the run has >= 2 rows. */
+function recorderReadyForMs(c: Ctx): number | null {
+  const h = c.s.recording.recorder_history;
+  if (!h || !h.ready_since || h.ready_samples < 2) return null;
+  const latest = c.age(h.latest_at);
+  if (latest === null || latest > START_GATE_RECORDER_LATEST_MAX_MS) return null;
+  return c.age(h.ready_since);
+}
+
 function ages(c: Ctx): Record<string, unknown> {
   const { s, age } = c;
   return {
@@ -187,6 +202,7 @@ function ages(c: Ctx): Record<string, unknown> {
     kh_heartbeat_s: secs(age(s.reachable.kh_heartbeat_at)),
     last_chunk_s: secs(age(s.recording.last_chunk_24h_at ?? s.recording.last_chunk_at)),
     recorder_status_s: secs(age(s.recording.recorder_status?.received_at)),
+    recorder_ready_for_s: secs(recorderReadyForMs(c)),
     consult_s: secs(age(s.consult_started_at)),
     silent_s: secs(age(s.audio.silent_while_recording_since)),
     idle_s: s.occupancy?.idle_s ?? null,
@@ -225,6 +241,7 @@ function mk(
       last_chunk_s: ag.last_chunk_s,
       kh_heartbeat_s: ag.kh_heartbeat_s,
       poller_ok_s: ag.poller_ok_s,
+      recorder_ready_for_s: ag.recorder_ready_for_s,
       sleep_marker: c.s.reachable.sleep_at != null,
       ages_s: ag,
       audio_devices_age_s: secs(c.age(c.s.audio.devices_at)),
@@ -354,47 +371,102 @@ function kioskAsleep(c: Ctx): Decision[] | null {
   return awakeToday ? fcAll(out, "kiosk_asleep") : out;
 }
 
+/** The input device a missing-device alert names: expected_device_name, else the default input's name, else a plain statement that it was not reported. */
+const deviceLabel = (s: RoomSense): string => s.audio.configured_device ?? s.audio.default_input_name ?? "input device (name not reported)";
+/** the three signals mic_fault reads: default input absent, the DEVICE_MISSING install flag, or a USB removal with the newest audio row still absent (no usb_added since) */
+const deviceMissing = (s: RoomSense): boolean => s.audio.default_input_present === false || s.audio.device_missing_flag === true || s.audio.usb_removed_recent === true;
+
+/**
+ * The live-start gates of a scribe_start decision, each recorded in inputs.start_gates; start_gate_fail names the FIRST failing one (null = all pass). The window, the dev/test/scratch
+ * exclusion (roster) and "no open session" (the rule only runs with session_open false; the executor re-reads it when it runs) are already true here; the other two are read from kiosk-health:
+ *   kiosk_health_fresh  kh_heartbeat_s <= 180            recorder_ready  recorder.status ready + session_open false held >= 300 s, from the history (recorder_ready_for_s)
+ * A room with no kiosk-health at all (ORB2) can never pass: start_gate_fail = "no_kiosk_health" (the loop records result "shadow: no_kiosk_health").
+ */
+function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | null } {
+  const { s, age } = c;
+  const khAge = age(s.reachable.kh_heartbeat_at);
+  const readyFor = recorderReadyForMs(c);
+  const gates = {
+    in_window: c.win.in_window,
+    room_eligible: true,
+    no_open_session: s.recording.session_open === false,
+    kiosk_health_fresh: khAge !== null && khAge <= START_GATE_KH_MAX_MS,
+    recorder_ready: readyFor !== null && readyFor >= START_GATE_RECORDER_READY_MS,
+  };
+  let fail: string | null = null;
+  if (s.reachable.kh_enrolled !== true || (khAge === null && !s.recording.recorder_history)) fail = "no_kiosk_health";
+  else if (!gates.kiosk_health_fresh) fail = "kh_heartbeat_stale";
+  else if (!s.recording.recorder_history) fail = "no_recorder_status";
+  else if (!gates.recorder_ready) fail = s.recording.recorder_history.ready_since ? "recorder_ready_under_5m" : "recorder_not_ready";
+  else if (!gates.no_open_session) fail = "session_open";
+  else if (!gates.in_window) fail = "outside_window";
+  return { gates, fail };
+}
+
 function notRecording(c: Ctx): Decision[] {
   const { s, cfg } = c;
   const L = s.listener;
   if (L.paused === true) {
     return [mk(c, "not_recording", "log_only", {}, "inside the window with no session, but the room is paused (consent pause)", "scribe_start held: room paused", "info")];
   }
-  const tries = rowsOf(c, "scribe_start", START_TRIES_WINDOW_MS).filter((r) => r.outcome === "failed").length;
-  if (tries >= cfg.caps.start_retries) {
-    return fcAll([
-      mk(
-        c,
-        "not_recording",
-        "message",
-        { kind: "start_exhausted", needs_hands: true, text: "recorder will not start after repeated tries — needs hands" },
-        `scribe_start tried ${tries} times in the last hour and the room is still not recording`,
-        `scribe_start held: ${cfg.caps.start_retries} tries used`,
-        "error",
-        {},
-        { tries },
-      ),
-    ], "not_recording");
-  }
-  if (s.start_backoff === null) {
+  if (s.start_attempts === null) {
     return [mk(c, "not_recording", "log_only", {}, "inside the window with no session, but start history is unreadable", "scribe_start held: start_attempts missing", "warn")];
   }
-  if (s.start_backoff.failed_attempts >= START_BACKOFF_MAX_FAILED) {
-    return fcAll([
-      mk(
-        c,
-        "not_recording",
-        "log_only",
-        {},
-        `inside the window with no session; the room is failing (${s.start_backoff.failed_attempts} failed starts in the last hour)`,
-        `scribe_start held: room_failing backoff, retry in ${s.start_backoff.retry_after_s} s`,
-        "warn",
-        {},
-        { retry_after_s: s.start_backoff.retry_after_s, failed_attempts: s.start_backoff.failed_attempts },
-      ),
-    ], "not_recording");
+  const v = startVerdict(s.start_attempts, c.A, cfg.caps.start_retries);
+  const attempts = v.attempts;
+  // a 4th attempt is never issued in an IST day: start_exhausted (log_only) plus a needs-hands message
+  if (v.kind === "exhausted") {
+    return fcAll(
+      [
+        mk(c, "start_exhausted", "log_only", {}, `${attempts} start_day attempts today and the room is still not recording: no more starts today`, `scribe_start held: ${cfg.caps.start_retries} attempts used today (IST)`, "error", {}, { attempts }),
+        mk(
+          c,
+          "start_exhausted",
+          "message",
+          { kind: "start_exhausted", needs_hands: true, text: "recorder will not start after repeated tries — needs hands" },
+          `${attempts} start_day attempts today and the room is still not recording`,
+          `scribe_start held: ${cfg.caps.start_retries} attempts used today (IST)`,
+          "error",
+          {},
+          { attempts },
+        ),
+      ],
+      "not_recording",
+    );
   }
-  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", { tries })];
+  // device missing: ONE live attempt, then an alert naming the room and the device, and no more attempts until the device is back
+  if (deviceMissing(s) && attempts >= 1) {
+    const device = deviceLabel(s);
+    return fcAll(
+      [
+        mk(
+          c,
+          "device_missing",
+          "alert",
+          { room_id: s.room_id, room: s.room_name, device },
+          `room ${s.room_name} cannot start: the input device "${device}" is missing; one start was tried today and no more are sent until it reappears`,
+          "scribe_start held: input device missing after one attempt",
+          "error",
+          {},
+          { attempts },
+        ),
+      ],
+      "not_recording",
+    );
+  }
+  if (v.kind === "pending") {
+    return [mk(c, "not_recording", "log_only", {}, "inside the window with no session; the last start_day has not resolved yet", "scribe_start held: previous start_day pending", "info", {}, { attempts })];
+  }
+  if (v.kind === "backoff") {
+    return fcAll(
+      [
+        mk(c, "not_recording", "log_only", {}, `inside the window with no session; the last start_day failed (attempt ${attempts} today)`, `scribe_start held: backoff after failed attempt ${attempts}, retry in ${v.retry_after_s} s`, "warn", {}, { attempts, retry_after_s: v.retry_after_s }),
+      ],
+      "not_recording",
+    );
+  }
+  const g = startGates(c);
+  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(s) ? { device_missing: true } : {}) })];
 }
 
 function sessionDied(c: Ctx): Decision[] | null {

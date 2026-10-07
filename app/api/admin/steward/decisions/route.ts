@@ -1,7 +1,7 @@
 /**
- * GET /api/admin/steward/decisions?room=&since=&limit= — the Room Steward's decision log, newest first (part 3's panel; FLEET's judging of the shadow days).
+ * GET /api/admin/steward/decisions?room=&since=&rule=&action=&limit= — the Room Steward's decision log, newest first (part 3's panel; FLEET's judging of the shadow days).
  *
- * Admin-cookie auth like /api/admin/fleet-attention (benchAdminGuard). Read-only. `room` = a room id (exact); `since` = an ISO-8601 instant (rows with ts >= since);
+ * Admin-cookie auth like /api/admin/fleet-attention (benchAdminGuard). Read-only. `room` = a room id (exact); `rule` / `action` = exact rule / action name (FLEET polls live attempts with action=scribe_start); `since` = an ISO-8601 instant (rows with ts >= since);
  * `limit` = 1..500 (default 100). Every value is a bound parameter. Rows come back with `ts` as an ISO string; `inputs` carries ids, hashes and counts only.
  */
 import { NextResponse } from "next/server";
@@ -45,6 +45,13 @@ export async function GET(req: Request) {
   if (room !== null && (room.length === 0 || room.length > 64 || /\u0000/.test(room))) {
     return NextResponse.json({ error: { code: "BAD_REQUEST", message: "room must be 1..64 characters" } }, { status: 400, headers: NO_STORE });
   }
+  const rule = url.searchParams.get("rule");
+  const action = url.searchParams.get("action");
+  for (const [k, v] of [["rule", rule], ["action", action]] as const) {
+    if (v !== null && (v.length === 0 || v.length > 64 || /\u0000/.test(v))) {
+      return NextResponse.json({ error: { code: "BAD_REQUEST", message: `${k} must be 1..64 characters` } }, { status: 400, headers: NO_STORE });
+    }
+  }
   const sinceRaw = url.searchParams.get("since");
   let since: string | null = null;
   if (sinceRaw !== null) {
@@ -65,6 +72,8 @@ export async function GET(req: Request) {
         FROM steward_decisions
        WHERE (${room}::text IS NULL OR room_id = ${room}::text)
          AND (${since}::timestamptz IS NULL OR ts >= ${since}::timestamptz)
+         AND (${rule}::text IS NULL OR rule = ${rule}::text)
+         AND (${action}::text IS NULL OR action = ${action}::text)
        ORDER BY ts DESC, id DESC
        LIMIT ${limit}::int
     `) as unknown as Row[];

@@ -19,10 +19,10 @@ import { DEFAULT_SOURCE_TIMEOUT_MS } from "./config";
 import { KH_ASLEEP_MAX_AGE_MS, KH_HEARTBEAT_AFTER_SLEEP_MS } from "@/lib/kiosk-health-rules";
 import { SourceTimeout, raceTimeout } from "./timeout";
 import { canonicalMachine, expandKeys, matchKey, readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
-import { evaluateStartBackoff, type StartAttempt, START_ACK_SESSION_GRACE_S, START_BACKOFF_WINDOW_S } from "@/lib/bench-commands";
+import { START_ACK_SESSION_GRACE_S, type StartAttempt } from "@/lib/bench-commands";
 import { LISTENER_FRESH_MS, SILENT_MS, SILENT_ZERO_RATIO, parseInstallState } from "@/lib/bench-bus-constants";
 import { isSilentChunk, SILENT_CHUNKS_REQUIRED } from "@/lib/fleet-attention";
-import { normalizeMachine, type RoomClass, type RosterRoom, type ScheduleKind } from "./config";
+import { istMidnightOf, normalizeMachine, type RoomClass, type RosterRoom, type ScheduleKind } from "./config";
 import type { StewardSql } from "./tickets";
 
 export type RecorderStatus = { state: string | null; session_open: boolean | null; received_at: string };
@@ -44,6 +44,8 @@ export type RoomSense = {
     last_chunk_at: string | null;
     /** newest bench chunk of ANY of the room's sessions in the last 24 h (visibility for inputs.last_chunk_s; no rule reads it), null when there is none */
     last_chunk_24h_at?: string | null;
+    /** the recorder.status history of the last 30 min (kiosk_health_events), newest first walk: `latest_*` = the newest row; `ready_since` / `ready_samples` = the oldest ts and the count of the contiguous run of rows that are state "ready" with session_open false ending at the newest row (null when the newest row is not ready). null = no recorder.status row at all (no kiosk-health). */
+    recorder_history?: { latest_at: string; latest_state: string | null; latest_session_open: string | null; ready_since: string | null; ready_samples: number } | null;
     recorder_status: RecorderStatus | null;
   };
   /** bench_listener: the browser-kiosk poll. `paused` is the consent pause: the steward never starts a paused room. */
@@ -75,8 +77,13 @@ export type RoomSense = {
     usb_removed_recent: boolean | null;
     device_missing_flag: boolean | null;
     silent_while_recording_since: string | null;
+    /** room_install.expected_device_name: the input device this room should be on (the name an alert names), null when never reported */
+    configured_device?: string | null;
+    /** the default input's name in the newest audio.devices row, null when unknown */
+    default_input_name?: string | null;
   };
-  start_backoff: { failed_attempts: number; retry_after_s: number } | null;
+  /** this room's steward start_day commands since IST midnight (bench_command source 'steward'), oldest first; null = unreadable */
+  start_attempts: StartAttempt[] | null;
   /** every input that was null (source failed, or the machine simply has no row), by name */
   missing: string[];
 };
@@ -199,6 +206,8 @@ export const SENSE_BOUNDS = {
   session_lookback_days: 3,
   /** the newest chunk of any session (inputs.last_chunk_s) is looked for this far back */
   last_chunk_lookback_h: 24,
+  /** recorder.status rows for the live-start "ready for >= 5 min" derivation */
+  recorder_history_lookback_min: 30,
   usb_removed_within_min: 5,
 } as const;
 
@@ -207,6 +216,7 @@ export const SENSE_BOUNDS = {
 // ---------------------------------------------------------------------------
 
 type SessionRow = { room_id: string; id: string; status: string; started_at: unknown; last_chunk_at: unknown };
+type RecorderRow = { machine: string; ts: unknown; state: string | null; session_open: string | null };
 type LastChunkRow = { room_id: string; last_chunk_at: unknown };
 type ChunkRow = { room_id: string; created_at: unknown; started_at: unknown; size_bytes: unknown; duration_ms: unknown };
 type LevelRow = { room_id: string; sampled_at: unknown; zero_ratio: unknown };
@@ -231,7 +241,7 @@ export async function senseAll(
   const A = new Date(asOfIn).getTime();
   if (!Number.isFinite(A)) throw new Error("senseAll: bad asOf");
   const hi = new Date(A).toISOString();
-  const asOfDate = new Date(A);
+  const dayStartIso = new Date(istMidnightOf(A)).toISOString();
   const B = SENSE_BOUNDS;
   const mins = (n: number) => `${n} minutes`;
 
@@ -261,7 +271,7 @@ export async function senseAll(
   `) as unknown as SessionRow[], [] as SessionRow[]);
   const openRoomIds = [...new Set(sess.v.map((s) => s.room_id))];
 
-  const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR] = await Promise.all([
+  const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR, recorderR] = await Promise.all([
     // 2 — chunks of the open sessions, last 30 min (R3 silence by rate).
     safe("bench_chunk", degraded, async () => (await sql`
       SELECT s.room_id, c.created_at, c.started_at, c.size_bytes, c.duration_ms
@@ -283,7 +293,7 @@ export async function senseAll(
     safe("bench_listener", degraded, async () => (await sql`
       SELECT l.room_id, l.last_poll_at, l.paused FROM bench_listener l WHERE l.room_id = ANY(${ids}::text[])
     `) as unknown as ListenerRow[], [] as ListenerRow[]),
-    // 5 — start_day commands of the last hour (the backoff window), same shape as getRecentStartAttempts.
+    // 5 — this room's STEWARD start_day commands since IST midnight (the 3-per-day cap and the 5/15/45 min backoff, lib/steward/start-schedule.ts), same row shape as getRecentStartAttempts.
     safe("bench_command", degraded, async () => (await sql`
       SELECT c.room_id, c.status, c.created_at, c.acked_at,
              EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.id = c.result ->> 'session_id') AS session_named,
@@ -291,7 +301,8 @@ export async function senseAll(
                        AND s.started_at <= c.acked_at + (${START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')) AS session_started
         FROM bench_command c
        WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'start_day'
-         AND c.created_at > ${hi}::timestamptz - (${START_BACKOFF_WINDOW_S}::int * INTERVAL '1 second') AND c.created_at <= ${hi}::timestamptz
+         AND c.source = 'steward'
+         AND c.created_at >= ${dayStartIso}::timestamptz AND c.created_at <= ${hi}::timestamptz
        ORDER BY c.created_at ASC
     `) as unknown as AttemptRow[], [] as AttemptRow[]),
     // 6 — the newest poller `ok` row per machine within 30 min (every spelling, one index lookup per spelling on (machine, ts)).
@@ -394,6 +405,15 @@ export async function senseAll(
          AND c.created_at > ${hi}::timestamptz - make_interval(hours => ${B.last_chunk_lookback_h}::int) AND c.created_at <= ${hi}::timestamptz
        GROUP BY s.room_id
     `) as unknown as LastChunkRow[], [] as LastChunkRow[]),
+    // 16 — recorder.status history, last 30 min, newest first per machine (the live-start gate "ready and no session, held >= 5 min" is derived from the run, never from one sample). (machine, ts) index.
+    safe("kiosk_health_recorder", degraded, async () => (await sql`
+      SELECT k.machine, k.ts, k.payload->>'state' AS state, k.payload->>'session_open' AS session_open
+        FROM kiosk_health_events k
+       WHERE k.machine = ANY(${khKeysExpanded}::text[]) AND k.kind = 'recorder.status'
+         AND k.ts > ${hi}::timestamptz - make_interval(mins => ${B.recorder_history_lookback_min}::int) AND k.ts <= ${hi}::timestamptz
+       ORDER BY k.machine, k.ts DESC
+       LIMIT 3000
+    `) as unknown as RecorderRow[], [] as RecorderRow[]),
   ]);
 
   const sessBy = new Map<string, SessionRow>();
@@ -430,6 +450,13 @@ export async function senseAll(
   const extHealthBy = new Map(extHealthR.v.map((r) => [lc(r.machine), r]));
   const occBy = new Map(occR.v.map((o) => [lc(o.machine), o]));
   const lastChunkBy = new Map(lastChunkR.v.map((l) => [l.room_id, toIso(l.last_chunk_at)]));
+  const recBy = new Map<string, RecorderRow[]>();
+  for (const p of recorderR.v) {
+    const k = lc(canonicalMachine(p.machine));
+    const a = recBy.get(k);
+    if (a) a.push(p);
+    else recBy.set(k, [p]);
+  }
 
   const out = new Map<string, RoomSense>();
   for (const r of roster) {
@@ -576,18 +603,37 @@ export async function senseAll(
       if (silentSince === null && flags.flags.includes("SILENT_WHILE_RECORDING")) silentSince = new Date(A - SILENT_MS).toISOString();
     }
 
-    // --- start backoff
-    let startBackoff: RoomSense["start_backoff"] = null;
+    // --- this room's steward start attempts of the IST day
+    let startAttempts: RoomSense["start_attempts"] = null;
     if (attemptsR.ok) {
-      const attempts: StartAttempt[] = (attemptsBy.get(r.room_id) ?? []).map((a) => ({
+      startAttempts = (attemptsBy.get(r.room_id) ?? []).map((a) => ({
         status: a.status,
         created_at: toIso(a.created_at) ?? "",
         acked_at: toIso(a.acked_at),
         session_started: a.session_started === true,
         session_named: a.session_named === true,
       }));
-      startBackoff = evaluateStartBackoff(attempts, asOfDate);
     } else miss("start_attempts");
+
+    // --- recorder.status history (visibility + the live-start gate; a failed read leaves it null and is named in `degraded`, never in `missing`)
+    let recorderHistory: NonNullable<RoomSense["recording"]["recorder_history"]> | null = null;
+    {
+      const rows = (key ? (recBy.get(key) ?? []) : [])
+        .map((x) => ({ ts: toIso(x.ts), ready: x.state === "ready" && x.session_open === "false", state: x.state, so: x.session_open }))
+        .filter((x): x is { ts: string; ready: boolean; state: string | null; so: string | null } => x.ts !== null)
+        .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+      if (rows.length > 0) {
+        let n = 0;
+        while (n < rows.length && rows[n]!.ready) n++;
+        recorderHistory = {
+          latest_at: rows[0]!.ts,
+          latest_state: rows[0]!.state,
+          latest_session_open: rows[0]!.so,
+          ready_since: n > 0 ? rows[n - 1]!.ts : null,
+          ready_samples: n,
+        };
+      }
+    }
 
     out.set(r.room_id, {
       room_id: r.room_id,
@@ -604,6 +650,7 @@ export async function senseAll(
         session_started_at: s ? toIso(s.started_at) : null,
         last_chunk_at: s ? toIso(s.last_chunk_at) : null,
         last_chunk_24h_at: lastChunkBy.get(r.room_id) ?? null,
+        recorder_history: recorderHistory,
         recorder_status,
       },
       listener,
@@ -626,8 +673,10 @@ export async function senseAll(
         usb_removed_recent: usbRemoved,
         device_missing_flag: flagsKnown ? flags.flags.includes("DEVICE_MISSING") : null,
         silent_while_recording_since: silentSince,
+        configured_device: r.device_name ?? null,
+        default_input_name: dev?.default_input_name ?? null,
       },
-      start_backoff: startBackoff,
+      start_attempts: startAttempts,
       missing,
     });
   }
