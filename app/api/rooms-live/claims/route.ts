@@ -1,25 +1,26 @@
 /**
- * GET/POST /api/rooms-live/claims — "I'm on it" (SPEC-v1 AMENDMENT 2). Guard: admin OR staff. All SQL is GATING's helper lib/rooms-live-claims.ts (openClaims / claim / clear).
+ * GET/POST /api/rooms-live/claims — "I'm on it" (SPEC-v1 AMENDMENT 2). Open access (owner ruling 8 Oct 2026): no login, no PIN. All SQL is GATING's helper lib/rooms-live-claims.ts (openClaims / claim / clear).
  *   GET   -> { claims: [{ room_id, claimed_by, claimed_at, state_at_claim }] } for the eight rooms.
- *   POST  { room_id, action: "claim" | "clear", note? }  claimed_by / cleared_by = the guard's name (staff name, or the admin e-mail local part);
+ *   POST  { room_id, action: "claim" | "clear", note?, name? }  claimed_by / cleared_by = the guard's name for an admin or staff cookie; for an open caller the body `name` (trimmed, 1-64 chars,
+ *         control characters removed) when valid, else "staff". 30 POSTs a minute per IP per instance, then 429 { ok:false, reason:"rate_limited" }.
  *         state_at_claim = the room's current computed state. 409 { ok:false, reason:"already_claimed", existing:{ claimed_by, claimed_at } } when someone got there first.
  */
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { claim, clear, openClaims } from "@/lib/rooms-live-claims";
+import { claimAllowed } from "@/lib/rooms-live/claim-limit";
 import { roomsLiveGuard } from "@/lib/rooms-live/guard";
 import { loadRoster, isRosterRoom } from "@/lib/rooms-live/roster";
 import { buildSnapshot, resetSnapshotMemo } from "@/lib/rooms-live/snapshot";
+import { cleanName, clientIp } from "@/lib/rooms-live/staff-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const NO_STORE = { "cache-control": "no-store" };
-const deny = (g: { code: string; msg: string }) => NextResponse.json({ error: { code: g.code, message: g.msg } }, { status: 401, headers: NO_STORE });
 
 export async function GET(req: Request) {
-  const g = await roomsLiveGuard(req);
-  if (!g.ok) return deny(g);
+  await roomsLiveGuard(req); // always ok: access is open
   try {
     const ids = (await loadRoster(sql as never)).map((r) => r.room_id);
     const rows = (await openClaims(sql as never)).filter((c) => ids.includes(c.room_id));
@@ -30,21 +31,22 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  if (!claimAllowed(clientIp(req))) return NextResponse.json({ ok: false, reason: "rate_limited" }, { status: 429, headers: { ...NO_STORE, "retry-after": "60" } });
   const g = await roomsLiveGuard(req);
-  if (!g.ok) return deny(g);
-  let b: { room_id?: unknown; action?: unknown; note?: unknown } = {};
+  let b: { room_id?: unknown; action?: unknown; note?: unknown; name?: unknown } = {};
   try {
     b = (await req.json()) as typeof b;
   } catch {
     /* falls through to the validation below */
   }
   const roomId = typeof b.room_id === "string" ? b.room_id : "";
+  const who = g.kind === "open" ? (cleanName(b.name) ?? "staff") : g.name;
   if (!(await isRosterRoom(sql as never, roomId)) || (b.action !== "claim" && b.action !== "clear")) {
     return NextResponse.json({ error: { code: "BAD_REQUEST", message: "room_id must be one of the OPD rooms and action claim or clear" } }, { status: 400, headers: NO_STORE });
   }
   try {
     if (b.action === "clear") {
-      const r = await clear(sql as never, { room_id: roomId, cleared_by: g.name });
+      const r = await clear(sql as never, { room_id: roomId, cleared_by: who });
       if (r.ok) return NextResponse.json({ ok: true }, { headers: NO_STORE });
       return NextResponse.json({ ok: false, reason: r.reason }, { status: r.reason === "no_open_claim" ? 404 : 400, headers: NO_STORE });
     }
@@ -57,7 +59,7 @@ export async function POST(req: Request) {
       state = null;
     }
     const note = typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 280) : null;
-    const r = await claim(sql as never, { room_id: roomId, claimed_by: g.name, state_at_claim: state, note });
+    const r = await claim(sql as never, { room_id: roomId, claimed_by: who, state_at_claim: state, note });
     if (r.ok) return NextResponse.json({ ok: true, claim: { claimed_by: r.claim.claimed_by, claimed_at: new Date(r.claim.claimed_at).toISOString() } }, { headers: NO_STORE });
     if (r.reason === "already_claimed") return NextResponse.json({ ok: false, reason: "already_claimed", existing: { claimed_by: r.existing.claimed_by, claimed_at: new Date(r.existing.claimed_at).toISOString() } }, { status: 409, headers: NO_STORE });
     return NextResponse.json({ ok: false, reason: "invalid", field: r.field }, { status: 400, headers: NO_STORE });

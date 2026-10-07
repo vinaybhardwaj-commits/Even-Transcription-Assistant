@@ -160,11 +160,12 @@ describe("memo", () => {
 });
 
 describe("routes", () => {
-  it("now: 401 without an admin cookie; with one, 200, no-store, eight rooms", async () => {
+  it("now: open access, no cookie needed: 200 with no cookie and with an admin cookie, no-store, eight rooms", async () => {
     const { GET } = await import("@/app/api/rooms-live/now/route");
     M.cookie.mockResolvedValue(null);
-    const denied = await GET(new Request("http://x/api/rooms-live/now"));
-    expect(denied.status).toBe(401);
+    const open = await GET(new Request("http://x/api/rooms-live/now"));
+    expect(open.status).toBe(200);
+    expect(open.headers.get("cache-control")).toBe("no-store");
     M.cookie.mockResolvedValue("jwt");
     M.verify.mockResolvedValue({ admin_id: "a", email: "a@b" });
     const ok = await GET(new Request("http://x/api/rooms-live/now"));
@@ -175,22 +176,22 @@ describe("routes", () => {
     expect(body.rooms.every((r: { state: string }) => r.state === "unknown")).toBe(true);
     expect(Array.isArray(body.degraded)).toBe(true);
   });
-  it("day: 401 without a cookie; 400 for a room outside the allow-list (Audiometry, ORB2, ORB3, Home Office, junk)", async () => {
+  it("day: open access (no 401 without a cookie); 400 for a room outside the allow-list (Audiometry, ORB2, ORB3, Home Office, junk)", async () => {
     const { GET } = await import("@/app/api/rooms-live/day/route");
     M.cookie.mockResolvedValue(null);
-    expect((await GET(new Request("http://x/api/rooms-live/day?room_id=room_yh3etjpf"))).status).toBe(401);
+    const open = await GET(new Request("http://x/api/rooms-live/day?room_id=room_yh3etjpf"));
+    expect(open.status).toBe(200);
+    expect(open.headers.get("cache-control")).toBe("no-store");
     M.cookie.mockResolvedValue("jwt");
     M.verify.mockResolvedValue({ admin_id: "a", email: "a@b" });
     for (const id of ["room_jwyrr4dc", "room_2qe955hy", "room_d74hhmc4", "room_mah3aspr", "", "x' OR 1=1"]) expect((await GET(new Request(`http://x/api/rooms-live/day?room_id=${encodeURIComponent(id)}`))).status).toBe(400);
   });
 });
 
-describe("guard (admin OR staff)", () => {
-  it("no cookie at all: AUTH_REQUIRED", async () => {
+describe("guard (open access, owner ruling 8 Oct 2026)", () => {
+  it("no cookie at all: ok, kind open, name staff", async () => {
     M.cookie.mockResolvedValue(null);
-    const g = await roomsLiveGuard();
-    expect(g.ok).toBe(false);
-    if (!g.ok) expect(g.code).toBe("AUTH_REQUIRED");
+    expect(await roomsLiveGuard()).toEqual({ ok: true, kind: "open", name: "staff" });
   });
   it("a valid admin cookie passes as kind admin, named by the e-mail local part", async () => {
     M.cookie.mockResolvedValue("jwt");
@@ -202,22 +203,21 @@ describe("guard (admin OR staff)", () => {
     M.staff.value = await signStaffJwt("Front Desk 2");
     expect(await roomsLiveGuard()).toEqual({ ok: true, kind: "staff", name: "Front Desk 2" });
   });
-  it("a garbage or expired staff cookie is AUTH_EXPIRED; an invalid admin cookie with no staff cookie is AUTH_EXPIRED too", async () => {
+  it("a garbage or expired staff cookie is not denied: it falls through to open; so does an invalid admin cookie with no staff cookie", async () => {
     M.cookie.mockResolvedValue(null);
     M.staff.value = "not.a.jwt";
-    const g = await roomsLiveGuard();
-    expect(g.ok).toBe(false);
-    if (!g.ok) expect(g.code).toBe("AUTH_EXPIRED");
+    expect(await roomsLiveGuard()).toEqual({ ok: true, kind: "open", name: "staff" });
+    const { SignJWT } = await import("jose");
+    M.staff.value = await new SignJWT({ staff: true, name: "A" }).setProtectedHeader({ alg: "HS256" }).setAudience("staff").setExpirationTime(Math.floor(Date.now() / 1000) - 10).sign(new TextEncoder().encode("fixture-staff-secret-not-real"));
+    expect(await roomsLiveGuard()).toEqual({ ok: true, kind: "open", name: "staff" });
     M.staff.value = null;
     M.cookie.mockResolvedValue("jwt");
     M.verify.mockRejectedValue(new Error("bad"));
-    const h = await roomsLiveGuard();
-    expect(h.ok).toBe(false);
-    if (!h.ok) expect(h.code).toBe("AUTH_EXPIRED");
+    expect(await roomsLiveGuard()).toEqual({ ok: true, kind: "open", name: "staff" });
   });
-  it("the page guard gives null for nobody, a Who for either cookie", async () => {
+  it("the page guard never returns null: open for nobody, a Who for either cookie", async () => {
     M.cookie.mockResolvedValue(null);
-    expect(await roomsLivePageGuard()).toBeNull();
+    expect(await roomsLivePageGuard()).toEqual({ kind: "open", name: "staff" });
     M.staff.value = await signStaffJwt("Reception");
     expect(await roomsLivePageGuard()).toEqual({ kind: "staff", name: "Reception" });
   });

@@ -45,12 +45,12 @@ describe("copy, exactly", () => {
     expect(segmentColor("something_new")).toBe("#8A8E96");
     expect(/_/.test(DAY_LEGEND.map((l) => l.word).join(" "))).toBe(false);
   });
-  it("FIX-1 F2: a 401 goes back to the staff login on /rooms-live, never to /admin", async () => {
+  it("open access (8 Oct 2026): a 401 no longer redirects anywhere; the screen never sends people to /admin", async () => {
     expect(LOGIN_PATH).toBe("/rooms-live");
     const { readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const src = readFileSync(join(process.cwd(), "components/rooms-live/RoomsLiveClient.tsx"), "utf8");
-    expect(src).toContain("window.location.assign(LOGIN_PATH)");
+    expect(src).not.toContain("window.location.assign");
     expect(src).not.toMatch(/["']\/admin["']/);
   });
   it("no support phone anywhere: no 'Call ETA support', no ROOMS_LIVE_SUPPORT_PHONE, no config.ts", async () => {

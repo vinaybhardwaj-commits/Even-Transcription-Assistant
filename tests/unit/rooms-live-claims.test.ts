@@ -10,6 +10,7 @@ vi.mock("@/lib/steward/occupancy-read", () => ({ scopedOccupancy: (...a: unknown
 
 import { GET, POST } from "@/app/api/rooms-live/claims/route";
 import { signStaffJwt } from "@/lib/rooms-live/staff-auth";
+import { resetClaimLimitForTests } from "@/lib/rooms-live/claim-limit";
 import { buildSnapshot, getSnapshot, resetMemoForTests } from "@/lib/rooms-live/snapshot";
 import { groupOf } from "@/lib/rooms-live/present";
 import { AUTO_CLEAR_GAP_MS, resetAutoClearForTests, claimResolved } from "@/lib/rooms-live/claims";
@@ -47,6 +48,7 @@ const post = (b: unknown) => POST(new Request("http://x/api/rooms-live/claims", 
 const ROOM = ROOM_IDS[0]!;
 
 beforeEach(async () => {
+  resetClaimLimitForTests(); // these requests carry no IP header: they all share one limiter key
   resetMemoForTests();
   resetAutoClearForTests();
   process.env.JWT_SECRET_STAFF = "fixture-staff-secret-not-real";
@@ -58,10 +60,10 @@ beforeEach(async () => {
 });
 
 describe("claims route", () => {
-  it("401 without any cookie; 400 for a room outside the eight or a bad action", async () => {
+  it("open access: no cookie is not a 401 (GET 200, POST claims as 'staff'); 400 for a room outside the eight or a bad action", async () => {
     M.staff.value = null;
-    expect((await post({ room_id: ROOM, action: "claim" })).status).toBe(401);
-    expect((await GET(new Request("http://x"))).status).toBe(401);
+    expect((await GET(new Request("http://x"))).status).toBe(200);
+    expect((await post({ room_id: ROOM, action: "claim" })).status).toBe(200);
     M.staff.value = await signStaffJwt("Asha");
     for (const b of [{ room_id: "room_jwyrr4dc", action: "claim" }, { room_id: "room_d74hhmc4", action: "claim" }, { room_id: ROOM, action: "steal" }, { room_id: "", action: "claim" }, {}]) expect((await post(b)).status).toBe(400);
   });

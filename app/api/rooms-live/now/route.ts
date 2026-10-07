@@ -1,5 +1,5 @@
 /**
- * GET /api/rooms-live/now — the Rooms Live screen's one read (SPEC-v1 §2, AMENDMENT 2). Guard: admin cookie OR staff cookie (lib/rooms-live/guard.ts), no-store.
+ * GET /api/rooms-live/now — the Rooms Live screen's one read (SPEC-v1 §2, AMENDMENT 2). Open access (owner ruling 8 Oct 2026; lib/rooms-live/guard.ts never denies), no-store.
  * Reads only, with ONE exception: a claim whose room is back in listening/quiet (or has no doctor) is cleared with by="auto", at most once per room per minute per
  * instance (lib/rooms-live/claims.ts). Never a 500: a failed read is named in `degraded` and its rooms come back "unknown".
  */
@@ -18,8 +18,7 @@ export const maxDuration = 30;
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function GET(req: Request) {
-  const guard = await roomsLiveGuard(req);
-  if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, headers: NO_STORE });
+  await roomsLiveGuard(req); // always ok: access is open (owner ruling 8 Oct 2026)
   try {
     return NextResponse.json(await getSnapshot({ db: sql, claims: realClaimsPort(sql as never) }), { headers: NO_STORE });
   } catch (e) {
