@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { claim, clear, openClaims } from "@/lib/rooms-live-claims";
 import { roomsLiveGuard } from "@/lib/rooms-live/guard";
-import { isRoomId } from "@/lib/rooms-live/rooms";
+import { loadRoster, isRosterRoom } from "@/lib/rooms-live/roster";
 import { buildSnapshot, resetSnapshotMemo } from "@/lib/rooms-live/snapshot";
 
 export const runtime = "nodejs";
@@ -21,7 +21,8 @@ export async function GET(req: Request) {
   const g = await roomsLiveGuard(req);
   if (!g.ok) return deny(g);
   try {
-    const rows = (await openClaims(sql as never)).filter((c) => isRoomId(c.room_id));
+    const ids = (await loadRoster(sql as never)).map((r) => r.room_id);
+    const rows = (await openClaims(sql as never)).filter((c) => ids.includes(c.room_id));
     return NextResponse.json({ claims: rows.map((c) => ({ room_id: c.room_id, claimed_by: c.claimed_by, claimed_at: new Date(c.claimed_at).toISOString(), state_at_claim: c.state_at_claim })) }, { headers: NO_STORE });
   } catch {
     return NextResponse.json({ claims: [], degraded: ["rooms_live_claim"] }, { headers: NO_STORE });
@@ -38,7 +39,7 @@ export async function POST(req: Request) {
     /* falls through to the validation below */
   }
   const roomId = typeof b.room_id === "string" ? b.room_id : "";
-  if (!isRoomId(roomId) || (b.action !== "claim" && b.action !== "clear")) {
+  if (!(await isRosterRoom(sql as never, roomId)) || (b.action !== "claim" && b.action !== "clear")) {
     return NextResponse.json({ error: { code: "BAD_REQUEST", message: "room_id must be one of the OPD rooms and action claim or clear" } }, { status: 400, headers: NO_STORE });
   }
   try {

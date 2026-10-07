@@ -30,6 +30,8 @@ function fakeDb(o: Opt = {}) {
   const calls: string[] = o.calls ?? [];
   const db = (async (strings: TemplateStringsArray) => {
     const text = strings.join("?");
+    if (text.includes("FROM steward_config")) return [];
+    if (text.includes("FROM room WHERE")) return ROOM_IDS.map((id) => ({ room_id: id, name: id }));
     const name = ["bench_listener", "room_install", "bench_session", "bench_level_sample", "steward_decisions", "kiosk_health_events", "pulse_presence_events"].find((n) => text.includes(`FROM ${n}`));
     calls.push(name ?? "?");
     if (!name) throw new Error("unexpected statement " + text.slice(0, 60));
@@ -64,7 +66,7 @@ describe("row shape", () => {
     expect(Object.keys(r).sort()).toEqual(["ages_s", "baseline_rms", "claim", "detail_code", "device", "doctor", "doctor_known", "label", "level", "room_id", "session", "state", "state_since", "steward"].sort());
     expect(Object.keys(r.level).sort()).toEqual(["at", "rms", "stale", "zero"]);
     expect(Object.keys(r.ages_s).sort()).toEqual(["heartbeat", "listener", "ext"].sort());
-    expect(r.doctor).toEqual({ display: "Test Clinician", activity: "Signed in" });
+    expect(r.doctor).toEqual({ display: "Clinician T", activity: "Signed in" }); // F28: the occupant's name (page_name), not the ext event's display_name
     expect(r.session.open).toBe(true);
     expect(r.session.chunk_age_s).toBe(70);
     expect(s.degraded).toEqual([]);

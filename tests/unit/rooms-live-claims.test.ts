@@ -130,7 +130,10 @@ describe("auto-clear (the only write of GET /now)", () => {
   })();
   it("a claim on a room that is back in listening is cleared with by auto; the row shows no claim", async () => {
     const clear = vi.fn(async () => {});
-    const s = await buildSnapshot({ db: healthyDb, now: () => NOW, claims: { open: async () => [claimRow(ROOM)], clear } });
+    const deps = { db: healthyDb, now: () => NOW, claims: { open: async () => [claimRow(ROOM)], clear } };
+    await buildSnapshot(deps);
+    expect(clear).not.toHaveBeenCalled(); // F27: one resolved poll is not enough
+    const s = await buildSnapshot(deps);
     expect(clear).toHaveBeenCalledTimes(1);
     expect(clear).toHaveBeenCalledWith(ROOM);
     expect(s.rooms.find((r) => r.room_id === ROOM)!.claim).toBeNull();
@@ -138,11 +141,12 @@ describe("auto-clear (the only write of GET /now)", () => {
   it("fires ONCE per room per minute: the next snapshots inside 60 s do not clear again; after 60 s it may", async () => {
     const clear = vi.fn(async () => {});
     const deps = (t: number) => ({ db: healthyDb, now: () => t, claims: { open: async () => [claimRow(ROOM)], clear } });
-    await buildSnapshot(deps(NOW));
+    await buildSnapshot(deps(NOW));               // poll 1: streak 1
+    await buildSnapshot(deps(NOW + 10_000));      // poll 2: streak 2 -> clears
     await buildSnapshot(deps(NOW + 20_000));
-    await buildSnapshot(deps(NOW + AUTO_CLEAR_GAP_MS - 1));
+    await buildSnapshot(deps(NOW + 10_000 + AUTO_CLEAR_GAP_MS - 1));
     expect(clear).toHaveBeenCalledTimes(1);
-    await buildSnapshot(deps(NOW + AUTO_CLEAR_GAP_MS + 1));
+    await buildSnapshot(deps(NOW + 10_000 + AUTO_CLEAR_GAP_MS + 1));
     expect(clear).toHaveBeenCalledTimes(2);
   });
   it("a claim on a room still in trouble WITH a doctor present is kept and shown (who, since); with no doctor the same claim is cleared", async () => {
@@ -157,7 +161,9 @@ describe("auto-clear (the only write of GET /now)", () => {
     expect(clear).not.toHaveBeenCalled();
     resetAutoClearForTests();
     M.occ.mockResolvedValue([]);
-    const gone = await buildSnapshot({ db: noSession, now: () => NOW, claims: { open: async () => [claimRow(ROOM)], clear } });
+    const goneDeps = { db: noSession, now: () => NOW, claims: { open: async () => [claimRow(ROOM)], clear } };
+    await buildSnapshot(goneDeps);
+    const gone = await buildSnapshot(goneDeps);
     expect(gone.rooms.find((r) => r.room_id === ROOM)!.claim).toBeNull();
     expect(clear).toHaveBeenCalledTimes(1);
   });
@@ -210,14 +216,18 @@ describe("FIX-1 F1: a failed occupancy read is 'doctor unknown', never 'no docto
     M.occ.mockReset();
     M.occ.mockResolvedValue([]);
     const clear = vi.fn(async () => {});
-    await buildSnapshot({ db, now: () => NOW, claims: { open: async () => [claimOn(MUTED)], clear } });
+    const deps = { db, now: () => NOW, claims: { open: async () => [claimOn(MUTED)], clear } };
+    await buildSnapshot(deps);
+    await buildSnapshot(deps);
     expect(clear).toHaveBeenCalledTimes(1);
   });
   it("while occupancy is degraded, auto-clear on listening/quiet still works", async () => {
     M.occ.mockReset();
     M.occ.mockRejectedValue(new Error("boom"));
     const clear = vi.fn(async () => {});
-    const s = await buildSnapshot({ db, now: () => NOW, claims: { open: async () => [claimOn(ROOM_IDS[0]!)], clear } });
+    const deps = { db, now: () => NOW, claims: { open: async () => [claimOn(ROOM_IDS[0]!)], clear } };
+    await buildSnapshot(deps);
+    const s = await buildSnapshot(deps);
     expect(s.rooms.find((r) => r.room_id === ROOM_IDS[0])!.state).toBe("listening");
     expect(clear).toHaveBeenCalledWith(ROOM_IDS[0]);
   });
@@ -270,5 +280,40 @@ describe("FIX-1 F4: the claims POST never leaves a claims-less snapshot in the s
     expect((await post({ room_id: ROOM, action: "claim" })).status).toBe(503);
     await getSnapshot(deps);
     expect(open).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("v1.1 F27: two consecutive resolved polls clear a claim", () => {
+  const NOW = Date.parse("2026-10-07T10:00:00.000Z");
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const claimRow = (room: string) => ({ id: 1, room_id: room, claimed_by: "Asha", claimed_at: iso(NOW - 120_000), cleared_at: null, cleared_by: null, state_at_claim: "muted", note: null });
+  const hosts: Record<string, string> = Object.fromEntries(ROOM_IDS.map((id, i) => [id, `HOST-${i}`]));
+  /** the first room's mic is dead (peak 0) while `dead.v` is true, otherwise it is speaking */
+  const dead = { v: false };
+  const db = (async (strings: TemplateStringsArray) => {
+    const t = strings.join("?");
+    if (t.includes("FROM bench_listener")) return ROOM_IDS.map((id) => ({ room_id: id, last_poll_at: iso(NOW - 1000), levels_at: iso(NOW - 800), mic_peak: 0.035, mic_zero_ratio: 0.001, recording_session_id: "s", paused: false }));
+    if (t.includes("FROM room_install")) return ROOM_IDS.map((id) => ({ room_id: id, hostname: hosts[id], state_flags: { flags: [] }, state_changed_at: null, input_device_name: "M", input_devices: [{ name: "M" }] }));
+    if (t.includes("FROM bench_session")) return ROOM_IDS.map((id) => ({ room_id: id, id: "s" + id, status: "recording", started_at: iso(NOW - 3_600_000), last_chunk_at: iso(NOW - 60_000) }));
+    if (t.includes("FROM bench_level_sample")) return ROOM_IDS.flatMap((id) => Array.from({ length: 120 }, (_, i) => ({ room_id: id, sampled_at: iso(NOW - 800 - i * 2300), peak: id === ROOM && dead.v ? 0 : i < 4 ? 0.035 + i * 0.002 : 0.009 + (i % 5) * 0.0004, zero_ratio: id === ROOM && dead.v ? 1 : 0.001 })));
+    if (t.includes("FROM kiosk_health_events")) return Object.values(hosts).map((m) => ({ machine: m, received_at: iso(NOW - 20_000) }));
+    return [];
+  }) as unknown as import("@/lib/rooms-live/read").Db;
+  it("good, bad (doctor present, Mic silent), good, good -> cleared only on the second consecutive good poll", async () => {
+    resetAutoClearForTests();
+    M.occ.mockReset();
+    M.occ.mockResolvedValue([{ machine: "HOST-0", occupied: true, ambiguous: false, stale_occupant: null, pending: null, page_name: "Clinician T" }]);
+    const clear = vi.fn(async () => {});
+    const deps = { db, now: () => NOW, claims: { open: async () => [claimRow(ROOM)], clear } };
+    dead.v = false;
+    await buildSnapshot(deps);
+    dead.v = true;
+    const bad = await buildSnapshot(deps);
+    expect(bad.rooms.find((r) => r.room_id === ROOM)!.state).toBe("muted");
+    dead.v = false;
+    await buildSnapshot(deps);
+    expect(clear).not.toHaveBeenCalled(); // the bad poll reset the run
+    await buildSnapshot(deps);
+    expect(clear).toHaveBeenCalledTimes(1);
   });
 });

@@ -17,7 +17,7 @@ export type InstallRow = { room_id: string; hostname: string | null; state_flags
 export type SessionRow = { room_id: string; id: string; status: string; started_at: string; last_chunk_at: string | null };
 export type LevelDbRow = { room_id: string; sampled_at: string; peak: number; zero_ratio: number | null };
 export type HeartbeatRow = { machine: string; received_at: string };
-export type ExtRow = { machine: string; ts: string; dn: string | null; has_encounter: boolean };
+export type ExtRow = { machine: string; ts: string; has_encounter: boolean };
 export type StewardRow = { room_id: string; action: string; mode: string; ts: string };
 
 const num = (x: unknown): number | null => {
@@ -102,17 +102,17 @@ export async function readHeartbeats(db: Db, keys: readonly string[], asOf: stri
   return rows.map((r) => ({ machine: String(r.machine), received_at: iso(r.received_at) }));
 }
 
-/** the newest extension event per machine within 10 min: its age, the display name the extension reports and whether an encounter is attached. NO uid, email or cookie is selected. */
+/** the newest extension event per machine within 10 min: its age and whether an encounter is attached (the doctor's name comes from scopedOccupancy, F28). NO uid, email or cookie is selected. */
 export async function readExt(db: Db, keys: readonly string[], asOf: string): Promise<ExtRow[]> {
   const rows = (await db`
-    SELECT DISTINCT ON (p.machine) p.machine, p.ts, p.payload->>'display_name' AS dn, p.payload->>'encounter_id' AS enc
+    SELECT DISTINCT ON (p.machine) p.machine, p.ts, p.payload->>'encounter_id' AS enc
       FROM pulse_presence_events p
      WHERE p.source = 'ext' AND p.machine = ANY(${keys}::text[])
        AND p.ts > ${asOf}::timestamptz - interval '10 minutes' AND p.ts <= ${asOf}::timestamptz
      ORDER BY p.machine, p.ts DESC, p.id DESC
      LIMIT 200
   `) as Array<Record<string, unknown>>;
-  return rows.map((r) => ({ machine: String(r.machine), ts: iso(r.ts), dn: typeof r.dn === "string" && r.dn.trim() ? r.dn.trim().slice(0, 60) : null, has_encounter: typeof r.enc === "string" && r.enc.trim().length > 0 }));
+  return rows.map((r) => ({ machine: String(r.machine), ts: iso(r.ts), has_encounter: typeof r.enc === "string" && r.enc.trim().length > 0 }));
 }
 
 export async function readOccupancy(db: Db, keys: readonly string[], asOf: string): Promise<ScopedOccupancy[]> {

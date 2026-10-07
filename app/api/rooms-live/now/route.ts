@@ -8,6 +8,7 @@ import { sql } from "@/lib/db";
 import { roomsLiveGuard } from "@/lib/rooms-live/guard";
 import { realClaimsPort } from "@/lib/rooms-live/claims";
 import { ROOMS } from "@/lib/rooms-live/rooms";
+import { loadRoster } from "@/lib/rooms-live/roster";
 import { getSnapshot, type Snapshot } from "@/lib/rooms-live/snapshot";
 
 export const runtime = "nodejs";
@@ -26,7 +27,7 @@ export async function GET(req: Request) {
     const empty: Snapshot = {
       generated_at: new Date().toISOString(),
       degraded: ["snapshot"],
-      rooms: ROOMS.map((r) => ({
+      rooms: (await loadRoster(sql as never).catch(() => ROOMS)).map((r) => ({
         room_id: r.room_id,
         label: r.label,
         doctor: null,

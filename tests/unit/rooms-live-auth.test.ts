@@ -150,3 +150,14 @@ describe("the staff cookie opens nothing else", () => {
     expect((await benchAdminGuard()).ok).toBe(false);
   });
 });
+
+describe("v1.1: client IP", () => {
+  it("x-vercel-forwarded-for wins over the first x-forwarded-for entry (the client can write the latter)", async () => {
+    const { clientIp } = await import("@/lib/rooms-live/staff-auth");
+    const h = (o: Record<string, string>) => new Request("http://x/", { headers: o });
+    expect(clientIp(h({ "x-vercel-forwarded-for": "203.0.113.7", "x-forwarded-for": "1.2.3.4, 203.0.113.7" }))).toBe("203.0.113.7");
+    expect(clientIp(h({ "x-forwarded-for": "1.2.3.4, 5.6.7.8" }))).toBe("1.2.3.4");
+    expect(clientIp(h({ "x-real-ip": "9.9.9.9" }))).toBe("9.9.9.9");
+    expect(clientIp(h({}))).toBe("unknown");
+  });
+});

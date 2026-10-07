@@ -8,8 +8,9 @@
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { raceTimeout } from "@/lib/steward/timeout";
-import { autoClearDue, claimResolved, toView, type ClaimView, type ClaimsPort } from "./claims";
-import { ROOMS, ROOM_IDS } from "./rooms";
+import { autoClearDue, claimResolved, resolvedStreak, toView, CLEAR_AFTER_POLLS, forgetStreaksExcept, type ClaimView, type ClaimsPort } from "./claims";
+import { ROOMS as ROOMS_DEFAULT, type RoomDef } from "./rooms";
+import { loadRoster, resetRosterForTests } from "./roster";
 import {
   STATEMENT_TIMEOUT_MS,
   istDateOf,
@@ -88,7 +89,7 @@ export function deviceNamesOf(raw: unknown): string[] | null {
   return v.map((d) => (typeof d === "string" ? d : d && typeof d === "object" && typeof (d as { name?: unknown }).name === "string" ? (d as { name: string }).name : "")).filter(Boolean);
 }
 
-export type Deps = { db: Db; now?: () => number; timeoutMs?: number; claims?: ClaimsPort };
+export type Deps = { db: Db; now?: () => number; timeoutMs?: number; claims?: ClaimsPort; /** the rooms to show; default = loadRoster (F29) */ rooms?: readonly RoomDef[] };
 
 export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   const now = (deps.now ?? Date.now)();
@@ -105,6 +106,8 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   };
   const today = istDateOf(now);
   const yesterday = istDateOf(now - 86_400_000);
+  const ROOMS: readonly RoomDef[] = deps.rooms ?? (await raceTimeout(() => loadRoster(deps.db, now), tmo).catch(() => ROOMS_DEFAULT));
+  const ROOM_IDS = ROOMS.map((r) => r.room_id);
 
   const [lis, ins, ses, lev, ste, clm] = await Promise.all([
     safe("bench_listener", () => readListeners(deps.db, ROOM_IDS)),
@@ -183,7 +186,8 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const o = occBy.get(def.room_id);
     const e = extBy.get(def.room_id);
     const present = !!o && o.occupied && !o.ambiguous;
-    const doctor = present ? { display: e?.dn ?? o!.page_name ?? "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" } : null;
+    // F28: the name is the identity-checked occupant's (scopedOccupancy), never the newest extension event's display_name (that is the stale cookie identity)
+    const doctor = present ? { display: o!.page_name?.trim().slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" } : null;
     return {
       room_id: def.room_id,
       label: def.label,
@@ -206,12 +210,15 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const row = rooms.find((r) => r.room_id === c.room_id);
     if (!row) continue;
     const resolved = claimResolved(row.state, !!row.doctor, row.doctor_known);
-    if (resolved && deps.claims && autoClearDue(row.room_id, now)) {
+    // F27: one good poll is not enough; it takes two in a row
+    const streak = resolvedStreak(row.room_id, resolved);
+    if (resolved && deps.claims && streak >= CLEAR_AFTER_POLLS && autoClearDue(row.room_id, now)) {
       await safe("rooms_live_claim_clear", () => deps.claims!.clear(row.room_id));
       continue;
     }
     if (!resolved) row.claim = toView(c);
   }
+  if (deps.claims && clm.ok) forgetStreaksExcept((clm.v ?? []).map((c) => c.room_id));
   return { generated_at: asOf, rooms, degraded };
 }
 
@@ -232,6 +239,7 @@ export async function getSnapshot(deps: Deps): Promise<Snapshot> {
 }
 export const resetMemoForTests = (): void => {
   memo = null;
+  resetRosterForTests();
 };
 /** after a claim is written the next /now must show it at once */
 export const resetSnapshotMemo = resetMemoForTests;

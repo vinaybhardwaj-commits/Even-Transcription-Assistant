@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { roomsLiveGuard } from "@/lib/rooms-live/guard";
 import { readDay, istDateOf } from "@/lib/rooms-live/read";
-import { isRoomId } from "@/lib/rooms-live/rooms";
+import { isRosterRoom } from "@/lib/rooms-live/roster";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,7 +18,7 @@ export async function GET(req: Request) {
   const guard = await roomsLiveGuard(req);
   if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, headers: NO_STORE });
   const roomId = new URL(req.url).searchParams.get("room_id") ?? "";
-  if (!isRoomId(roomId)) return NextResponse.json({ error: { code: "BAD_REQUEST", message: "room_id must be one of the OPD rooms" } }, { status: 400, headers: NO_STORE });
+  if (!(await isRosterRoom(sql as never, roomId))) return NextResponse.json({ error: { code: "BAD_REQUEST", message: "room_id must be one of the OPD rooms" } }, { status: 400, headers: NO_STORE });
   const now = Date.now();
   const day = istDateOf(now);
   try {

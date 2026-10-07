@@ -9,15 +9,15 @@ const sqlOf = (text: string): string[] => [...text.matchAll(/\bdb`([^`]*)`/g)].m
 const all = files.flatMap((f) => sqlOf(readFileSync(join(DIR, f), "utf8")).map((s) => ({ f, s })));
 
 describe("every SQL string in lib/rooms-live", () => {
-  it("finds the 8 statements of this module (7 now-reads + the day read; occupancy is imported from lib/steward)", () => {
-    expect(all.length).toBe(8);
+  it("finds the 10 statements of this module (7 now-reads + the day read + the 2 roster reads; occupancy is imported from lib/steward)", () => {
+    expect(all.length).toBe(10);
   });
   it("has a LIMIT", () => {
     for (const { f, s } of all) expect(/\bLIMIT\b/i.test(s), `${f}: ${s.slice(0, 80)}`).toBe(true);
   });
   it("is bounded by the room allow-list (room_id / machine = ANY or a single room) or a time bound", () => {
     for (const { f, s } of all) {
-      const ok = /(room_id|machine) = ANY\(\$\{/i.test(s) || /room_id = \$\{/i.test(s);
+      const ok = /(room_id|machine|id) = ANY\(\$\{/i.test(s) || /room_id = \$\{/i.test(s) || /steward_config WHERE key = \$\{/i.test(s);
       const timed = /interval '\d+ (minutes|hours)'/i.test(s) || /ist_day = \$\{/i.test(s);
       expect(ok || timed, `${f}: ${s.slice(0, 80)}`).toBe(true);
     }

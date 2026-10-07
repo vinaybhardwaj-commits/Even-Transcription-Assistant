@@ -109,6 +109,9 @@ export async function pinOk(pin: unknown, env: Record<string, string | undefined
 }
 
 export function clientIp(req: Request): string {
+  // Vercel sets x-vercel-forwarded-for itself (what @vercel/functions ipAddress() reads); the client cannot spoof it, unlike the first x-forwarded-for entry
+  const vf = req.headers.get("x-vercel-forwarded-for")?.split(",")[0]?.trim();
+  if (vf) return vf;
   const xf = req.headers.get("x-forwarded-for");
   const first = xf ? xf.split(",")[0]!.trim() : "";
   return first || req.headers.get("x-real-ip") || "unknown";
