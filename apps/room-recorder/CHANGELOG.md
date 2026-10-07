@@ -2,6 +2,7 @@
 
 Earlier versions are recorded in `docs/BUILD-HISTORY.md`.
 
+- **0.1.26** — MicModeGuard: on macOS 26 and later the recorder forces Mic Mode to Standard (never Voice Isolation, which gates the room mic to exact zeros) for its own bundle id and its parent id before each capture session starts, through a dlsym'd AVFCapture shim that does nothing when the symbols are missing; a 60 s watchdog re-checks while recording and, if the active mode is not Standard, sets it again and rebuilds the capture session, at most once per 10 minutes. Built from 0.1.24; the unreleased 0.1.25 branch must be renumbered above 0.1.26.
 - **0.1.24** — 0.1.23's fix, corrected: `RoomSubprocess` no longer sets a `Process` stream after `run()`, which Foundation refuses with `task already launched` — 0.1.23 died on that at every launch.
 - **0.1.23** — WITHDRAWN 17 Sep, never shipped past Home Office: crashed at launch (see 0.1.24). Do not use `Foundation.Pipe` for poll helpers or ffmpeg stderr (`RoomSubprocess` temp files). The live leak was `MachineFacts.runTool` three times per 1.5 s poll while recording, not only failed piece writes.
 - **0.1.22** — three operator verbs from the desk: check_update_now, report_diag (redacted, never a secret) and restart_engine; a Mac may pin its own channel in config.json and says so in its heartbeat; the heartbeat also carries clip count and time since the last audible frame.

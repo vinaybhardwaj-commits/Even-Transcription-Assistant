@@ -49,7 +49,7 @@ final class CaptureSession: @unchecked Sendable {
 
   }
 
-  private let engine = AVAudioEngine()
+  private let engine: AVAudioEngine
   private let ring: AudioRing
   private let state: State
   let captureGeneration: UInt64
@@ -61,6 +61,8 @@ final class CaptureSession: @unchecked Sendable {
     captureGeneration: UInt64 = 0,
     resumeAfterNS: UInt64? = nil
   ) throws {
+    MicModeGuard.enforceStandardForMainBundle()
+    engine = AVAudioEngine()
     self.ring = ring
     self.captureGeneration = captureGeneration
     let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })
@@ -266,9 +268,30 @@ public enum Recorder {
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
     var lossMarkedDeviceLost = false
     var retryAfterNS = UInt64.max
+    var micModeWatchdog = MicModeWatchdog()
 
     while !stopping.load(ordering: .acquiring) {
       if writer.hasFailed { break }
+      if capture != nil, micModeWatchdog.tick(nowNS: monotonicNowNS()),
+        let active = capture
+      {
+        active.stop()
+        capture = nil
+        if let boundary = active.lastAcceptedFrameEnd {
+          lossBoundary = boundary
+          try enqueue(
+            .configurationChange, monoNS: boundary.monoNS, wallNS: boundary.wallNS, ring: ring,
+            writer: writer)
+        } else if lossBoundary == nil {
+          let boundary = (monoNS: monotonicNowNS(), wallNS: wallNowNS())
+          lossBoundary = boundary
+          try enqueue(
+            .configurationChange, monoNS: boundary.monoNS, wallNS: boundary.wallNS, ring: ring,
+            writer: writer)
+        }
+        retryAfterNS = monotonicNowNS()
+        fputs("Mic mode not Standard; rebuilding capture.\n", stderr)
+      }
       if let active = capture,
         !AudioDevices.isAlive(currentDevice) || active.hasStoppedProducing
       {

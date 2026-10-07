@@ -15,12 +15,13 @@ var products: [Product] = [
 ]
 
 var targets: [Target] = [
+  .target(name: "MicModeShim", path: "Sources/MicModeShim"),
   .target(
     name: "TapeCore",
     swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
   .target(
     name: "TapeCapture",
-    dependencies: ["TapeCore"],
+    dependencies: ["TapeCore", "MicModeShim"],
     path: "Sources/tapewriter",
     swiftSettings: includeDurabilityFaultProbe
       ? [.define("ETA_DURABILITY_FAULT_PROBE")]
