@@ -1,0 +1,206 @@
+/** lib/rooms-live/state.ts — the six states, every SPEC-v1 §3 fixture, and the edges around them. */
+import { describe, it, expect } from "vitest";
+import { computeState, sinceOfRun, type LevelRow, type StateInput } from "@/lib/rooms-live/state";
+
+const NOW = Date.parse("2026-10-07T10:00:00Z");
+const S = 1000;
+const known = { listener: true, install: true, session: true, heartbeat: true, ext: true, levels: true };
+
+/** n rows ending at NOW, one every 2.3 s, value from fn(i) (i = 0 is the newest) */
+const rows = (n: number, fn: (i: number) => { rms: number; zero?: number }): LevelRow[] =>
+  Array.from({ length: n }, (_, k) => {
+    const i = n - 1 - k;
+    const v = fn(i);
+    return { t: NOW - Math.round(i * 2300), rms: v.rms, zero: v.zero ?? 0.001 };
+  });
+/** jittered ambient around `mid` so no two rows are identical */
+const ambient = (n: number, mid: number): LevelRow[] => rows(n, (i) => ({ rms: mid * (1 + ((i % 7) - 3) * 0.04), zero: 0.001 + (i % 3) * 0.0004 }));
+
+function input(over: Partial<StateInput> = {}): StateInput {
+  const lv = over.levels ?? ambient(200, 0.01);
+  const newest = lv.length ? [...lv].sort((a, b) => b.t - a.t)[0]! : null;
+  return {
+    now: NOW,
+    listener: { last_poll_at: NOW - 1 * S, levels_at: newest ? newest.t : NOW - 1 * S, rms: newest?.rms ?? null, zero: newest?.zero ?? null },
+    install: { flags: [], state_changed_at: null, input_device_name: "C270 HD WEBCAM", input_devices: ["C270 HD WEBCAM"] },
+    session: { open: true, since: NOW - 3_600_000, chunk_age_s: 60 },
+    heartbeat_at: NOW - 20 * S,
+    ext_at: NOW - 20 * S,
+    levels: lv,
+    steward: null,
+    known: { ...known },
+    ...over,
+  };
+}
+
+describe("SPEC fixtures", () => {
+  it("OPD 4 06:56 UTC frozen tail (zero .73 identical for 20 min, DEVICE_MISSING) -> unplugged, since = state_changed_at", () => {
+    const frozen = rows(500, () => ({ rms: 0.0164, zero: 0.73 }));
+    const changed = NOW - 20 * 60_000;
+    const r = computeState(input({ levels: frozen, install: { flags: ["DEVICE_MISSING", "ENCODER_STALLED"], state_changed_at: changed, input_device_name: "C270 HD WEBCAM", input_devices: [] } }));
+    expect(r.state).toBe("unplugged");
+    expect(r.state_since).toBe(changed);
+    expect(r.device.missing).toBe(true);
+    expect(r.level.stale).toBe(true); // the frozen tail is stale, and it never became "quiet"
+  });
+  it("OPD 3 zero 1.000 (TM20, digital silence) -> muted", () => {
+    const r = computeState(input({ levels: rows(120, () => ({ rms: 0, zero: 1 })) }));
+    expect(r.state).toBe("muted");
+    expect(r.level.stale).toBe(false); // an identical (0, 1.0) pair is legitimate digital silence
+    expect(r.state_since).not.toBeNull();
+  });
+  it("OPD 5 zero 0.967 (FIX-1 F3b): NOT silent below 0.995, however long it lasts -> quiet", () => {
+    const r = computeState(input({ levels: rows(300, () => ({ rms: 0, zero: 0.967 })) }));
+    expect(r.state).toBe("quiet");
+  });
+  it("C270 ambient rms 0.010 with p25 0.009 -> quiet", () => {
+    const r = computeState(input({ levels: rows(200, (i) => ({ rms: i < 4 ? [0.0100, 0.0102, 0.0098, 0.0101][i]! : [0.0085, 0.009, 0.0105, 0.0105][i % 4]!, zero: 0.001 })) }));
+    expect(r.baseline_rms).toBeCloseTo(0.009, 3);
+    expect(r.state).toBe("quiet");
+  });
+  it("speech rms 0.035 -> listening", () => {
+    const lv = rows(200, (i) => ({ rms: i < 6 ? 0.035 + i * 0.001 : 0.009 + (i % 5) * 0.0005, zero: 0.001 }));
+    expect(computeState(input({ levels: lv })).state).toBe("listening");
+  });
+  it("TM20 room p25 0.10: rms 0.11 -> quiet, rms 0.30 -> listening", () => {
+    const base = (hi: number) => rows(200, (i) => ({ rms: i < 6 ? hi + i * 0.0007 : 0.10 + (i % 5) * 0.004, zero: 0 }));
+    const q = computeState(input({ levels: base(0.11) }));
+    expect(q.baseline_rms).toBeGreaterThan(0.09);
+    expect(q.baseline_rms).toBeLessThan(0.11);
+    expect(q.state).toBe("quiet");
+    expect(computeState(input({ levels: base(0.30) })).state).toBe("listening");
+  });
+  it("everything stale -> off", () => {
+    const r = computeState(input({ listener: { last_poll_at: NOW - 60 * S, levels_at: NOW - 60 * S, rms: 0.01, zero: 0 }, heartbeat_at: NOW - 600 * S, ext_at: null, levels: [] }));
+    expect(r.state).toBe("off");
+  });
+  it("listener fresh, no session -> notrec", () => {
+    expect(computeState(input({ session: { open: false, since: null, chunk_age_s: null } })).state).toBe("notrec");
+  });
+  it("listener says rec=true but the server has no session -> notrec (server truth wins)", () => {
+    const r = computeState(input({ session: { open: false, since: null, chunk_age_s: null } }));
+    expect(r.state).toBe("notrec");
+    expect(r.detail_code).toBeNull();
+  });
+});
+
+describe("rule order and edges", () => {
+  it("off needs ALL three stale: a fresh heartbeat or a fresh ext event keeps the room 'not recording / app not responding'", () => {
+    const stale = { last_poll_at: NOW - 30 * S, levels_at: NOW - 30 * S, rms: 0.01, zero: 0 };
+    expect(computeState(input({ listener: stale, heartbeat_at: NOW - 100 * S, ext_at: NOW - 900 * S })).detail_code).toBe("app_not_responding");
+    expect(computeState(input({ listener: stale, heartbeat_at: NOW - 900 * S, ext_at: NOW - 100 * S })).state).toBe("notrec");
+    expect(computeState(input({ listener: stale, heartbeat_at: NOW - 181 * S, ext_at: NOW - 181 * S })).state).toBe("off");
+    expect(computeState(input({ listener: stale, heartbeat_at: NOW - 180 * S, ext_at: NOW - 181 * S })).state).toBe("notrec");
+  });
+  it("listener age exactly 10 s is fresh, 10.1 s is stale", () => {
+    const at = (age: number) => computeState(input({ listener: { last_poll_at: NOW - age, levels_at: NOW - 1000, rms: 0.01, zero: 0.001 } })).state;
+    expect(at(10_000)).toBe("quiet");
+    expect(at(10_100)).toBe("notrec"); // stale listener, fresh heartbeat: app_not_responding
+  });
+  it("unplugged by the device list alone (no flag), and only while the listener is fresh", () => {
+    const inst = { flags: [], state_changed_at: null, input_device_name: "TONOR TM20", input_devices: ["C270 HD WEBCAM"] };
+    expect(computeState(input({ install: inst })).state).toBe("unplugged");
+    expect(computeState(input({ install: { ...inst, input_devices: null } })).state).not.toBe("unplugged"); // an app that does not report devices says nothing
+    expect(computeState(input({ install: inst, listener: { last_poll_at: NOW - 30 * S, levels_at: NOW - 30 * S, rms: 0.01, zero: 0 }, heartbeat_at: NOW - 900 * S, ext_at: NOW - 900 * S })).state).toBe("off");
+  });
+  it("unplugged beats not-recording and muted", () => {
+    expect(computeState(input({ session: { open: false, since: null, chunk_age_s: null }, install: { flags: ["DEVICE_MISSING"], state_changed_at: NOW - 5000, input_device_name: "x", input_devices: [] } })).state).toBe("unplugged");
+  });
+  it("muted by the recorder's own SILENT_WHILE_RECORDING flag", () => {
+    expect(computeState(input({ install: { flags: ["SILENT_WHILE_RECORDING"], state_changed_at: null, input_device_name: "a", input_devices: ["a"] } })).state).toBe("muted");
+  });
+  it("FIX-1 F3b boundary: zero >= 0.995 must be sustained for >= 60 s; 57 s of it is still Quiet; 63 s is Mic silent", () => {
+    const base = ambient(100, 0.01).map((x) => ({ ...x, t: x.t - 400_000 }));
+    const run = (seconds: number, z: number) => {
+      const n = Math.floor((seconds * 1000) / 2300);
+      return [...base, ...rows(n + 1, () => ({ rms: 0, zero: z }))];
+    };
+    const at = (seconds: number, z: number) => computeState(input({ levels: run(seconds, z) }));
+    expect(at(63, 0.995).state).toBe("muted");
+    expect(at(63, 1).state).toBe("muted");
+    expect(at(57, 0.995).state).toBe("quiet");
+    expect(at(10, 1).state).toBe("quiet");
+    expect(at(600, 0.994).state).toBe("quiet");     // 0.994 never counts, however long
+    expect(at(600, 0.95).state).toBe("quiet");
+  });
+  it("exactly 60.000 s of an unbroken run is Mic silent; 59.999 s is not", () => {
+    const base = ambient(60, 0.01).map((x) => ({ ...x, t: x.t - 300_000 }));
+    const mk = (spanMs: number) => {
+      const lv = [...base];
+      for (let t = NOW - spanMs; t <= NOW; t += 2000) lv.push({ t, rms: 0, zero: 1 });
+      if (lv[lv.length - 1]!.t !== NOW) lv.push({ t: NOW, rms: 0, zero: 1 });
+      return computeState(input({ levels: lv })).state;
+    };
+    expect(mk(60_000)).toBe("muted");
+    expect(mk(59_999)).toBe("quiet");
+  });
+  it("a run broken by one non-silent row starts again: 90 s of silence, one speech row, then 20 s of silence -> Quiet/Listening, not Mic silent", () => {
+    const lv = [...ambient(60, 0.01).map((x) => ({ ...x, t: x.t - 200_000 })), ...rows(40, (i) => (i === 9 ? { rms: 0.012, zero: 0.002 } : { rms: 0, zero: 1 }))];
+    const r = computeState(input({ levels: lv }));
+    expect(["quiet", "listening"]).toContain(r.state);
+    expect(r.state_since === null || r.state_since >= NOW - 10 * 2300).toBe(true);
+  });
+  it("a stale silence (newest row older than 15 s) is not 'Mic silent'", () => {
+    const lv = rows(120, () => ({ rms: 0, zero: 1 })).map((x) => ({ ...x, t: x.t - 20_000 }));
+    const r = computeState(input({ levels: lv, listener: { last_poll_at: NOW - 1000, levels_at: NOW - 20_000, rms: 0, zero: 1 } }));
+    expect(r.state).not.toBe("muted");
+  });
+  it("a frozen non-silent level is stale and never yields quiet/listening: notrec + level_stale", () => {
+    const r = computeState(input({ levels: rows(60, () => ({ rms: 0.0125, zero: 0 })) }));
+    expect(r.state).toBe("notrec");
+    expect(r.detail_code).toBe("level_stale");
+    expect(r.level.stale).toBe(true);
+  });
+  it("a level older than 6 s is stale; 6.0 s is not", () => {
+    const lv = ambient(200, 0.01).map((x) => ({ ...x, t: x.t - 6000 }));
+    const mk = (age: number) => computeState(input({ levels: lv, listener: { last_poll_at: NOW - 1000, levels_at: NOW - age, rms: lv[lv.length - 1]!.rms, zero: 0.001 } }));
+    expect(mk(6000).level.stale).toBe(false);
+    expect(mk(6100).level.stale).toBe(true);
+  });
+  it("a single loud row (>= 2.5 x baseline) in the last 10 s makes it listening even when the mean is low", () => {
+    const lv = rows(200, (i) => ({ rms: i === 2 ? 0.0235 : 0.009 + (i % 5) * 0.0003, zero: 0.001 }));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeCloseTo(0.0093, 3);
+    expect(r.state).toBe("listening");
+  });
+  it("a near-silent mic (baseline ~0.0003, zero 0.84) is quiet, not 'listening': the spike rule never goes below the 0.008 floor", () => {
+    const lv = rows(200, (i) => ({ rms: 0.0003 + (i % 4) * 0.0002, zero: 0.84 + (i % 3) * 0.01 }));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeLessThan(0.001);
+    expect(r.state).toBe("quiet");
+  });
+  it("the floor 0.008 applies when there is no baseline yet (fewer than 30 rows)", () => {
+    const lv = rows(10, (i) => ({ rms: 0.005 + i * 0.0002, zero: 0.001 }));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeNull();
+    expect(r.state).toBe("quiet");
+    expect(computeState(input({ levels: rows(10, (i) => ({ rms: 0.012 + i * 0.0002, zero: 0.001 })) })).state).toBe("listening");
+  });
+  it("source failures are 'unknown', never a guess: listener/install/session unreadable, or heartbeat/ext unreadable with a stale listener", () => {
+    expect(computeState(input({ known: { ...known, session: false } })).state).toBe("unknown");
+    expect(computeState(input({ known: { ...known, listener: false } })).state).toBe("unknown");
+    const stale = { last_poll_at: NOW - 60 * S, levels_at: NOW - 60 * S, rms: 0.01, zero: 0 };
+    expect(computeState(input({ listener: stale, heartbeat_at: null, ext_at: null, known: { ...known, heartbeat: false } })).state).toBe("unknown");
+    expect(computeState(input({ known: { ...known, heartbeat: false, ext: false } })).state).not.toBe("unknown"); // fresh listener does not need them
+  });
+  it("level history unreadable and too few rows -> unknown (levels_unavailable)", () => {
+    const r = computeState(input({ levels: [], listener: { last_poll_at: NOW - 1000, levels_at: NOW - 1000, rms: 0.01, zero: 0.001 }, known: { ...known, levels: false } }));
+    expect(r.state).toBe("unknown");
+    expect(r.detail_code).toBe("levels_unavailable");
+  });
+  it("Steward overlay: a live scribe_start within 10 min -> detail restarting on a not-recording room; shadow, old or other actions do nothing", () => {
+    const nr = { session: { open: false, since: null, chunk_age_s: null } };
+    expect(computeState(input({ ...nr, steward: { action: "scribe_start", mode: "live", at: NOW - 9 * 60_000 } })).detail_code).toBe("restarting");
+    expect(computeState(input({ ...nr, steward: { action: "scribe_start", mode: "live", at: NOW - 11 * 60_000 } })).detail_code).toBeNull();
+    expect(computeState(input({ ...nr, steward: { action: "scribe_start", mode: "shadow", at: NOW - 60_000 } })).detail_code).toBeNull();
+    expect(computeState(input({ ...nr, steward: { action: "scribe_restart", mode: "live", at: NOW - 60_000 } })).detail_code).toBeNull();
+  });
+  it("state_since: the start of the unbroken run of matching rows", () => {
+    const lv = [...ambient(60, 0.01).map((x) => ({ ...x, t: x.t - 400_000 })), ...rows(40, (i) => ({ rms: 0, zero: 1 - i * 0.0001 }))];
+    const r = computeState(input({ levels: lv }));
+    expect(r.state).toBe("muted");
+    expect(r.state_since).toBe(NOW - 39 * 2300);
+    expect(sinceOfRun([], () => true)).toBeNull();
+    expect(sinceOfRun([{ t: 1, rms: 0, zero: 0 }], () => false)).toBeNull();
+  });
+});

@@ -45,6 +45,7 @@ export async function openClaims(sql: ClaimSql): Promise<RoomClaim[]> {
       FROM rooms_live_claim
      WHERE cleared_at IS NULL
      ORDER BY claimed_at, id
+     LIMIT 50
   `) as RoomClaim[];
 }
 
