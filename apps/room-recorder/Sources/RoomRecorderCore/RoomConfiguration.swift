@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TapeCapture
+import TapeCore
 
 /// ─── THE CASE ORDER HERE IS NOT THE ERROR CODE ORDER ────────────────────────────────────────
 /// Swift bridges an enum's cases to `NSError.code` by putting every case that carries an
@@ -386,6 +387,8 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   public var pendingPieceCount: Int
   public var lastError: String?
   public var updatedAt: Date
+  /// The latest MicModeGuard result from tapewriter; nil when none has been read.
+  public var micMode: MicModeStatus?
 
   enum CodingKeys: String, CodingKey {
     case state
@@ -393,6 +396,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     case pendingPieceCount = "pending_piece_count"
     case lastError = "last_error"
     case updatedAt = "updated_at"
+    case micMode = "mic_mode"
   }
 
   public init(
@@ -400,13 +404,15 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     sessionID: String? = nil,
     pendingPieceCount: Int = 0,
     lastError: String? = nil,
-    updatedAt: Date = Date()
+    updatedAt: Date = Date(),
+    micMode: MicModeStatus? = nil
   ) {
     self.state = state
     self.sessionID = sessionID
     self.pendingPieceCount = max(0, pendingPieceCount)
     self.lastError = lastError.map { String($0.prefix(500)) }
     self.updatedAt = updatedAt
+    self.micMode = micMode
   }
 }
 

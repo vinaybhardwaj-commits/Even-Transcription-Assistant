@@ -162,6 +162,7 @@ public enum Recorder {
     requestedDeviceUID: String?,
     unsignedDevelopmentArchive: UnsignedDevelopmentArchiveOptions? = nil
   ) throws {
+    MicModeStatusSink.directory = outputDirectory
     try requireMicrophonePermission()
     let validatedDevice = try AudioDevices.selected(uid: requestedDeviceUID)
     let stableDeviceUID = validatedDevice.uid
@@ -268,29 +269,15 @@ public enum Recorder {
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
     var lossMarkedDeviceLost = false
     var retryAfterNS = UInt64.max
-    var micModeWatchdog = MicModeWatchdog()
+    var micModeRelaunch = false
+    var micModeWatchdog = MicModeWatchdog(
+      store: FileMicModeRestartStore(directory: outputDirectory.deletingLastPathComponent()))
 
     while !stopping.load(ordering: .acquiring) {
       if writer.hasFailed { break }
-      if capture != nil, micModeWatchdog.tick(nowNS: monotonicNowNS()),
-        let active = capture
-      {
-        active.stop()
-        capture = nil
-        if let boundary = active.lastAcceptedFrameEnd {
-          lossBoundary = boundary
-          try enqueue(
-            .configurationChange, monoNS: boundary.monoNS, wallNS: boundary.wallNS, ring: ring,
-            writer: writer)
-        } else if lossBoundary == nil {
-          let boundary = (monoNS: monotonicNowNS(), wallNS: wallNowNS())
-          lossBoundary = boundary
-          try enqueue(
-            .configurationChange, monoNS: boundary.monoNS, wallNS: boundary.wallNS, ring: ring,
-            writer: writer)
-        }
-        retryAfterNS = monotonicNowNS()
-        fputs("Mic mode not Standard; rebuilding capture.\n", stderr)
+      if capture != nil, micModeWatchdog.tick(nowNS: monotonicNowNS()) {
+        micModeRelaunch = true
+        break
       }
       if let active = capture,
         !AudioDevices.isAlive(currentDevice) || active.hasStoppedProducing
@@ -352,6 +339,10 @@ public enum Recorder {
     print(
       "Capture blocks: \(statistics.acceptedBlocks) accepted, \(statistics.droppedBlocks) dropped")
     print("Recording stopped cleanly.")
+    if micModeRelaunch {
+      fputs("Mic mode not Standard after Set; exiting for relaunch.\n", stderr)
+      throw MicModeRelaunchRequested()
+    }
   }
 
   static func finalizeCapture(

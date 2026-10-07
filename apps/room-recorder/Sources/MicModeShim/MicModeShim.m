@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <stdlib.h>
 #include "MicModeShim.h"
 
 typedef long (*RRGetFn)(NSString *);
@@ -11,12 +12,23 @@ static RRGetFn gGet, gGetActive;
 static RRSupportedFn gSupported;
 static RRSetFn gSet;
 static int gResolved;
+static int gDidResolve;
+static const char *gPathOverride;
+static NSObject *gLock;
 
 static void rr_resolve(void) {
   static dispatch_once_t once;
-  dispatch_once(&once, ^{
+  dispatch_once(&once, ^{ gLock = [NSObject new]; });
+  @synchronized(gLock) {
+    if (gDidResolve) return;
+    gDidResolve = 1;
+    gGet = gGetActive = NULL;
+    gSupported = NULL;
+    gSet = NULL;
+    gResolved = 0;
     @try {
-      const char *path = "/System/Library/PrivateFrameworks/AVFCapture.framework/AVFCapture";
+      const char *path = gPathOverride ? gPathOverride
+        : "/System/Library/PrivateFrameworks/AVFCapture.framework/AVFCapture";
       void *h = dlopen(path, RTLD_LAZY | RTLD_NOLOAD);
       if (!h) h = dlopen(path, RTLD_LAZY);
       if (!h) return;
@@ -28,7 +40,17 @@ static void rr_resolve(void) {
     } @catch (NSException *e) {
       gResolved = 0;
     }
-  });
+  }
+}
+
+void rr_micmode_reset_resolver(const char *framework_path) {
+  rr_resolve();  // makes sure gLock exists
+  @synchronized(gLock) {
+    free((void *)gPathOverride);
+    gPathOverride = framework_path ? strdup(framework_path) : NULL;
+    gDidResolve = 0;
+    gResolved = 0;
+  }
 }
 
 static void rr_copy_err(char *err, size_t errlen, NSString *msg) {

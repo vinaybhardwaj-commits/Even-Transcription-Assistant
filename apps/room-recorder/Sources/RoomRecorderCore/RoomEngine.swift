@@ -532,6 +532,7 @@ public actor RoomEngine {
   private var lastError: String?
   private var lastPieceEndedAt: Date?
   private var needsActiveReconciliation = false
+  private var lastMicMode: MicModeStatus?
   private var reconciledServerStateKnown = false
   private var reconciledServerSessionID: String?
   private var reconciledServerSessionStatus: BenchSessionStatus?
@@ -3619,7 +3620,17 @@ public actor RoomEngine {
         state: state,
         sessionID: sessionID,
         pendingPieceCount: pending,
-        lastError: lastError))
+        lastError: lastError,
+        micMode: currentMicMode()))
+  }
+
+  /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the
+  /// process exits so the status still says what the guard last did.
+  private func currentMicMode() -> MicModeStatus? {
+    if let directory = capture?.directory, let fresh = MicModeStatus.read(directory: directory) {
+      lastMicMode = fresh
+    }
+    return lastMicMode
   }
 
   private static func iso8601(_ date: Date) -> String {

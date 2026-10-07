@@ -76,6 +76,8 @@ do {
   default:
     throw RecorderError("unknown command: \(command)\n\(usage)")
   }
+} catch is MicModeRelaunchRequested {
+  exit(76)  // MicModeGuard.relaunchExitCode; the engine's unexpected-exit path relaunches
 } catch {
   fputs("tapewriter: \(error.localizedDescription)\n", stderr)
   exit(1)

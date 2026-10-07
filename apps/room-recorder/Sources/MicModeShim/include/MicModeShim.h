@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+/// Test hook: re-resolve against another library path (NULL restores the system default).
+void rr_micmode_reset_resolver(const char *framework_path);
 /// 1 when AVFCapture loaded and all four mic-mode symbols resolved, else 0. Never throws.
 int rr_micmode_available(void);
 /// Preferred mode for the bundle id (0 Standard, 1 Wide Spectrum, 2 Voice Isolation); -1 when unreadable.
