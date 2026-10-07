@@ -279,6 +279,55 @@ describe("not recording: start, backoff, max tries", () => {
     for (const [v, want] of [["no", false], ["yes", true], ["unknown", null], [false, false], [true, true], ["false", false], ["true", true], [null, null], [undefined, null], ["", null], ["maybe", null]] as const) expect(sessionOpenOf(v), String(v)).toBe(want);
   });
 
+  it("F1 (FLEET refuter): the literal live clamp IST [07:30, 21:30) sits on top of the configured window: an OT-class room (window 06:00-04:00) at 06:15 and 02:00 refuses; 07:30:00 and 21:29:59 pass, 21:30:00 refuses", () => {
+    const ot = (A: number) => idle(A, { klass: "ot", kind: "ot", reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: readyRecorder(A, 600) } });
+    for (const [label, t, fail] of [
+      ["06:15", ist("06:15"), "outside_live_clamp"],
+      ["02:00", ist("02:00", "2026-10-07"), "outside_live_clamp"],
+      ["07:29:59", ist("07:29", "2026-10-06", "59"), "outside_live_clamp"],
+      ["07:30:00", ist("07:30"), null],
+      ["21:29:59", ist("21:29", "2026-10-06", "59"), null],
+      ["21:30:00", ist("21:30"), "outside_live_clamp"],
+    ] as const) {
+      const d = first(ot(t), t);
+      expect(d, label).toMatchObject({ action: "scribe_start", inputs: { live_clamp: "ist_0730_2130", start_gate_fail: fail } });
+    }
+    expect(first(ot(ist("06:15")), ist("06:15")).inputs).toMatchObject({ start_gates: { in_window: true, in_live_clamp: false } });
+    // a clinic room keeps its own window: 07:29:59 never reaches the gates (outside_window, no start decision)
+    expect(first(idle(ist("07:29", "2026-10-06", "59")), ist("07:29", "2026-10-06", "59")).action).toBe("none");
+  });
+
+  it("F2: ONE device_missing alert per missing episode: alert, then inputs-only hold rows; the device seen again closes the episode (a 'back' row); a new disappearance alerts again", () => {
+    const tried = [failedAttempt(T, 3000)];
+    const gone = (A: number) => idle(A, { room_name: "Cardiology", audio: { default_input_present: false, devices_at: ago(A, 600), configured_device: "TONOR TM20" }, start_attempts: tried });
+    const back = (A: number) => idle(A, { room_name: "Cardiology", audio: { default_input_present: true, devices_at: ago(A, 30) }, start_attempts: tried });
+    const alertRow = (ts: number): RecentAction => ({ ts: new Date(ts).toISOString(), rule: "device_missing", action: "alert", params: {}, outcome: "shadow" });
+    const backRow = (ts: number): RecentAction => ({ ts: new Date(ts).toISOString(), rule: "device_missing", action: "log_only", params: { state: "back" }, outcome: null });
+    // first tick of the episode: the alert
+    expect(first(gone(T), T)).toMatchObject({ rule: "device_missing", action: "alert" });
+    // later ticks, alert in memory: a hold row, no alert, the episode is marked in inputs
+    for (const m of [1, 20, 90, 600]) {
+      const A = T + m * 60_000;
+      const d = first(gone(A), A, recent([alertRow(T)]));
+      expect(d, `+${m}`).toMatchObject({ rule: "device_missing_hold", action: "log_only" });
+      expect(d.inputs).toMatchObject({ device_missing_episode: "open", attempts: 1 });
+      expect(decideRoom(gone(A), DEFAULT_CONFIG, A, recent([alertRow(T)])).some((x) => x.action === "alert")).toBe(false);
+    }
+    // the device is seen again: the normal decision plus ONE closing row
+    const A2 = T + 120 * 60_000;
+    const ds = decideRoom(back(A2), DEFAULT_CONFIG, A2, recent([alertRow(T)]));
+    expect(ds[0]).toMatchObject({ action: "scribe_start" });
+    expect(ds.filter((x) => x.rule === "device_missing")).toHaveLength(1);
+    expect(ds.find((x) => x.rule === "device_missing")).toMatchObject({ action: "log_only", params: { state: "back" } });
+    // closed episode (back row newest): no second closing row, and a NEW disappearance alerts again
+    const A3 = T + 180 * 60_000;
+    expect(decideRoom(back(A3), DEFAULT_CONFIG, A3, recent([backRow(A2), alertRow(T)])).some((x) => x.rule === "device_missing")).toBe(false);
+    expect(first(gone(A3), A3, recent([backRow(A2), alertRow(T)]))).toMatchObject({ rule: "device_missing", action: "alert" });
+    // an open episode survives a stale / unknown reading: the device is not "seen again" unless a row says present
+    const unknown = idle(A3, { audio: { default_input_present: null }, start_attempts: tried });
+    expect(decideRoom(unknown, DEFAULT_CONFIG, A3, recent([alertRow(T)])).some((x) => x.rule === "device_missing")).toBe(false);
+  });
+
   it("F20: the hard never-live list: ORB2, ORB3, Home Office and room_scratch_* fail the room_eligible gate whatever the data (every other gate green)", () => {
     const green = (room_id: string) => idle(T, { room_id, reachable: { kh_heartbeat_at: ago(T, 30) }, recording: { recorder_history: readyRecorder(T, 600) } });
     expect(NEVER_LIVE_ROOM_IDS).toEqual(["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy"]);

@@ -24,7 +24,7 @@
  * write (it would only repeat rows), a failure of the roster read ends the tick with rooms 0.
  */
 import { randomUUID } from "node:crypto";
-import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, type Config, type RosterRow } from "./config";
+import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, parseConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
 import { senseAll } from "./sense";
@@ -415,6 +415,30 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       }
       earlyWritten++;
       const t1 = now();
+      // the switches are read AGAIN, from the table, immediately before the send (one bound SELECT): a tick that started before an operator flipped kill_switch / start_day_live / shadow must not send.
+      // Anything but "scribe_start is still live" — including an unreadable table — skips; the row says so.
+      {
+        let stillLive = false;
+        let why = "flag_off_at_send";
+        try {
+          const keys = ["kill_switch", "start_day_live", "shadow"];
+          const rowsNow = (await raceTimeout(() => sql`SELECT key, value FROM steward_config WHERE key = ANY(${keys}::text[])`, Math.min(cfg.source_timeout_ms, 3000))) as Array<{ key: string; value: unknown }>;
+          const fresh = parseConfig(rowsNow.filter((r) => keys.includes(r.key))).config;
+          stillLive = actionMode({ ...cfg, kill_switch: fresh.kill_switch, start_day_live: fresh.start_day_live, shadow: fresh.shadow }, d.action) === "live";
+        } catch {
+          why = "flag_unreadable_at_send";
+        }
+        if (!stillLive) {
+          const skipped = `skipped: ${why}`;
+          try {
+            await setResult(id, "live", skipped, { call_ms: 0 });
+            return null;
+          } catch {
+            degrade("steward_decisions");
+            return rowOf(d, primary, seq, "live", skipped, { attempt_no: attemptNo });
+          }
+        }
+      }
       const call = (async () => dispatch(executorFor(true), d))();
       let mode: "shadow" | "live" = "live";
       let result: string | null;

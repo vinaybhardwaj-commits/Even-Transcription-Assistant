@@ -35,7 +35,7 @@
  * A blocked decision is log_only with the blocking condition in why_not.
  */
 import { createHash } from "node:crypto";
-import { isNeverLiveRoom, istMidnightOf, windowAt, type Config, type WindowState } from "./config";
+import { IST_OFFSET_MS, isNeverLiveRoom, istMidnightOf, windowAt, type Config, type WindowState } from "./config";
 import type { RoomSense } from "./sense";
 import { paramsValid, type StewardAction } from "./tickets";
 import { startVerdict } from "./start-schedule";
@@ -399,12 +399,22 @@ const deviceAnnotation = (c: Ctx): string | null => {
  *   kiosk_health_fresh  kh_heartbeat_s <= 180            recorder_ready  recorder.status ready + session_open false held >= 300 s, from the history (recorder_ready_for_s)
  * A room with no kiosk-health at all (ORB2) can never pass: start_gate_fail = "no_kiosk_health" (the loop records result "shadow: no_kiosk_health").
  */
+/** F1 (FLEET refuter): a LIVE start is allowed only inside a literal IST [07:30, 21:30), whatever the room's configured window says (an OT window 06:00-04:00 cannot widen it) */
+export const LIVE_CLAMP_LABEL = "ist_0730_2130";
+const LIVE_CLAMP_START_MS = (7 * 60 + 30) * 60_000;
+const LIVE_CLAMP_END_MS = (21 * 60 + 30) * 60_000;
+const inLiveClamp = (A: number): boolean => {
+  const msOfDay = (((A + IST_OFFSET_MS) % 86_400_000) + 86_400_000) % 86_400_000;
+  return msOfDay >= LIVE_CLAMP_START_MS && msOfDay < LIVE_CLAMP_END_MS;
+};
+
 function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | null } {
   const { s, age } = c;
   const khAge = age(s.reachable.kh_heartbeat_at);
   const readyFor = recorderReadyForMs(c);
   const gates = {
     in_window: c.win.in_window,
+    in_live_clamp: inLiveClamp(c.A),
     room_eligible: !isNeverLiveRoom(s.room_id),
     no_open_session: s.recording.session_open === false,
     kiosk_health_fresh: khAge !== null && khAge <= START_GATE_KH_MAX_MS,
@@ -418,8 +428,18 @@ function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | nu
   else if (!gates.recorder_ready) fail = s.recording.recorder_history.ready_since ? "recorder_ready_under_5m" : "recorder_not_ready";
   else if (!gates.no_open_session) fail = "session_open";
   else if (!gates.in_window) fail = "outside_window";
+  else if (!gates.in_live_clamp) fail = "outside_live_clamp";
   return { gates, fail };
 }
+
+/** the newest row of rule device_missing in the room's memory is an ALERT = a missing episode is open (a "back" log_only row closes it) */
+function deviceEpisodeOpen(c: Ctx): boolean {
+  let newest: RecentAction | null = null;
+  for (const r of c.recent.room) if (r.rule === "device_missing" && (newest === null || Date.parse(r.ts) > Date.parse(newest.ts))) newest = r;
+  return newest !== null && newest.action === "alert";
+}
+/** the device is SEEN again: the newest audio.devices row says a default input is present and no USB removal is pending */
+const deviceSeenAgain = (c: Ctx): boolean => c.s.audio.default_input_present === true && c.s.audio.usb_removed_recent !== true;
 
 function notRecording(c: Ctx): Decision[] {
   const { s, cfg } = c;
@@ -455,6 +475,13 @@ function notRecording(c: Ctx): Decision[] {
   // device missing: ONE live attempt, then an alert naming the room and the device, and no more attempts until the device is back
   if (deviceMissing(c) && attempts >= 1) {
     const device = deviceLabel(s);
+    // F2: ONE alert row per missing episode. An episode opens with the alert and closes when the device is seen again (decideRoom appends the closing row); while it is open, inputs only.
+    if (deviceEpisodeOpen(c)) {
+      return fcAll(
+        [mk(c, "device_missing_hold", "log_only", {}, `room ${s.room_name}: the input device "${device}" is still missing (alert already raised for this episode); no starts until it reappears`, "scribe_start held: input device missing (episode open)", "warn", {}, { attempts, device_missing_episode: "open" })],
+        "not_recording",
+      );
+    }
     return fcAll(
       [
         mk(
@@ -484,7 +511,7 @@ function notRecording(c: Ctx): Decision[] {
     );
   }
   const g = startGates(c);
-  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(c) ? { device_missing: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
+  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(c) ? { device_missing: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
 }
 
 function sessionDied(c: Ctx): Decision[] | null {
@@ -752,7 +779,12 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
   const A = new Date(asOf).getTime();
   if (!Number.isFinite(A)) throw new Error("decideRoom: bad asOf");
   const c: Ctx = { s: sense, cfg, A, win: windowAt(cfg, sense.kind, A), recent, age: mkAge(A) };
-  return guards(c, chain(c));
+  const ds = guards(c, chain(c));
+  // F2: the device reappeared while an episode is open: one closing row (log_only), so a later disappearance is a NEW episode with a new alert
+  if (deviceEpisodeOpen(c) && deviceSeenAgain(c)) {
+    ds.push(mk(c, "device_missing", "log_only", { state: "back" }, `room ${sense.room_name}: the input device is back; the missing-device episode is closed`, null, "info", {}, {}));
+  }
+  return ds;
 }
 
 /**

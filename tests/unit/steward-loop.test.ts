@@ -857,6 +857,64 @@ describe("start_day_live and the live-start gates", () => {
     expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "live", result: "skipped: budget" });
   });
 
+  it("F2: 90 minutes of ticks with the device missing write exactly ONE alert row; the device back closes the episode, a new disappearance alerts again", async () => {
+    const db = fakeDb({ cfg: { ...open, shadow: { global: true, actions: {} } } });
+    let present: boolean | null = false;
+    senseWith((id, A) => idle(A, { room_id: id, room_name: "Cardiology", audio: { default_input_present: present, devices_at: ago(A, 600), configured_device: "TONOR TM20" }, start_attempts: [failedAttempt(A, 3000)] }));
+    for (let m = 0; m < 90; m++) await run(db.sql, T + m * MIN);
+    const alerts = () => db.state.table.filter((r) => r.rule === "device_missing" && r.action === "alert");
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.params).toMatchObject({ room: "Cardiology", device: "TONOR TM20" });
+    expect(db.state.table.some((r) => r.rule === "device_missing_hold")).toBe(true);
+    present = true;
+    for (let m = 90; m < 95; m++) await run(db.sql, T + m * MIN);
+    expect(db.state.table.filter((r) => r.rule === "device_missing" && r.action === "log_only" && (r.params as { state?: string }).state === "back")).toHaveLength(1);
+    present = false;
+    for (let m = 95; m < 100; m++) await run(db.sql, T + m * MIN);
+    expect(alerts()).toHaveLength(2);
+  });
+
+  describe("the switches are read again from steward_config immediately before each live send", () => {
+    const flips: Array<[string, () => Record<string, unknown>]> = [
+      ["kill_switch turned on", () => ({ kill_switch: { on: true } })],
+      ["start_day_live turned off", () => ({ start_day_live: { on: false } })],
+      ["start_day_live malformed", () => ({ start_day_live: "yes" })],
+      ["start_day_live removed", () => ({ start_day_live: undefined })],
+      ["shadow.global turned on", () => ({ shadow: { global: true, actions: {} } })],
+      ["scribe_start held by name", () => ({ shadow: { global: false, actions: { scribe_start: true } } })],
+    ];
+    for (const [name, flip] of flips) {
+      it(`${name} between the sense and the send: nothing is sent, the row says skipped: flag_off_at_send`, async () => {
+        const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+        senseWith((id, A) => {
+          Object.assign(db.state.cfg, flip()); // the operator flips it after the tick read its config
+          return liveReady(id, A);
+        });
+        const l = spy();
+        await run(db.sql, T, withSpy(l));
+        expect(l.scribeStart).not.toHaveBeenCalled();
+        expect(db.state.table).toHaveLength(1);
+        expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "live", result: "skipped: flag_off_at_send" });
+      });
+    }
+    it("the read fails: fail closed, nothing is sent (skipped: flag_unreadable_at_send)", async () => {
+      const db = fakeDb({ cfg: { ...open, ...LIVE_ON }, fail: [/WHERE key = ANY/] });
+      senseWith((id, A) => liveReady(id, A));
+      const l = spy();
+      await run(db.sql, T, withSpy(l));
+      expect(l.scribeStart).not.toHaveBeenCalled();
+      expect(db.state.table[0]).toMatchObject({ result: "skipped: flag_unreadable_at_send" });
+    });
+    it("unchanged switches: the send goes out (the read is one bound SELECT per send)", async () => {
+      const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+      senseWith((id, A) => liveReady(id, A));
+      const l = spy();
+      await run(db.sql, T, withSpy(l));
+      expect(l.scribeStart).toHaveBeenCalledTimes(1);
+      expect(db.state.calls.filter((c) => c.includes("WHERE key = ANY")).length).toBe(1);
+    });
+  });
+
   it("F20: the hard never-live list in the loop: ORB2 / ORB3 / Home Office / room_scratch_* are never sent a live start, even with every gate green and a forced decision", async () => {
     for (const id of ["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy"]) {
       const db = fakeDb({ cfg: { ...open, ...LIVE_ON }, rooms: [{ room_id: id, room_name: "X", hostname: "HOST-X" }] });
