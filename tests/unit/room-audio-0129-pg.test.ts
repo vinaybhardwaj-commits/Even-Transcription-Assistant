@@ -5,7 +5,7 @@
  *   1. The migration survives the app's own splitSql (extracted from app/api/run-migrations/route.ts and run as-is): the DO $$ ... $$ block stays ONE
  *      statement, every statement runs, and applying twice (as the runner would on a re-run, and as raw psql) is idempotent.
  *   2. As eta_audio_writer (SET ROLE): INSERT, SELECT, DELETE on both tables, UPDATE on room_audio_day, SELECT on eta_encounter_windows work;
- *      SELECT on kiosk_health_events and steward_decisions is denied; INSERT/UPDATE on eta_encounter_windows and UPDATE on room_audio_state are denied.
+ *      SELECT on steward_decisions is denied (SELECT on kiosk_health_events is granted by 0130; its writes stay denied); INSERT/UPDATE on eta_encounter_windows and UPDATE on room_audio_state are denied.
  *   3. CHECK constraints reject an unknown state, an unknown source and ts_end <= ts_start.
  *   4. A room-day rewrite (DELETE + INSERT in one transaction) leaves exactly the new rows; a failing rewrite rolls back and keeps the old ones.
  *   5. Retention through the real cron route: room_audio_state > 12 months and room_audio_day > 36 months go (by ist_day), younger rows survive, counts reported.
@@ -94,6 +94,13 @@ describe.skipIf(!HAVE_DOCKER)("0129 room audio state over real postgres", () => 
       "room_audio_day_day_idx", "room_audio_state_day_room_idx", "room_audio_state_room_end_idx", "room_audio_state_room_start_idx",
     ]);
     expect(psql(`SELECT obj_description('room_audio_state'::regclass);`)).toBe("Room audio-state intervals. Metadata only: no audio, no text.");
+
+    // 0130 applies after 0129 (through the app's splitSql, twice, and as raw psql) and registers itself
+    const stmts130 = split(mig("0130_audio_writer_kiosk_health_read.sql"));
+    for (let pass = 0; pass < 2; pass += 1) psql(`BEGIN;\n${stmts130.map((s) => `${s};`).join("\n")}\nCOMMIT;`);
+    pg.exec(mig("0130_audio_writer_kiosk_health_read.sql"));
+    expect(psql(`SELECT version || ':' || name FROM schema_migrations WHERE version = 130;`)).toBe("130:0130_audio_writer_kiosk_health_read");
+    expect(readFileSync("db/migrations/0130_audio_writer_kiosk_health_read.sql", "utf8")).not.toMatch(/PASSWORD\s+'|WITH\s+LOGIN|\bLOGIN\s*;/i);
   }, 240_000);
 
   it("eta_audio_writer: INSERT, SELECT, DELETE on both tables, UPDATE on room_audio_day, SELECT on eta_encounter_windows", () => {
@@ -124,8 +131,12 @@ describe.skipIf(!HAVE_DOCKER)("0129 room audio state over real postgres", () => 
     `)).toBe("9/v2");
   });
 
-  it("eta_audio_writer: nothing else — kiosk_health_events and steward_decisions unreadable, eta_encounter_windows read-only, room_audio_state not updatable", () => {
-    expect(denied(`SELECT count(*) FROM kiosk_health_events;`)).toMatch(/permission denied for table kiosk_health_events/);
+  it("eta_audio_writer: nothing else — steward_decisions unreadable, kiosk_health_events read-only (0130), eta_encounter_windows read-only, room_audio_state not updatable", () => {
+    // 0130: SELECT on kiosk_health_events is now ALLOWED; every write stays denied
+    expect(denied(`SELECT count(*) FROM kiosk_health_events;`)).toBe("");
+    expect(denied(`INSERT INTO kiosk_health_events (machine, boot_id, seq, source, kind) VALUES ('m', 'b', 1, 's', 'k');`)).toMatch(/permission denied for table kiosk_health_events/);
+    expect(denied(`UPDATE kiosk_health_events SET kind = 'x';`)).toMatch(/permission denied for table kiosk_health_events/);
+    expect(denied(`DELETE FROM kiosk_health_events;`)).toMatch(/permission denied for table kiosk_health_events/);
     expect(denied(`SELECT count(*) FROM steward_decisions;`)).toMatch(/permission denied for table steward_decisions/);
     expect(denied(`SELECT count(*) FROM steward_config;`)).toMatch(/permission denied for table steward_config/);
     expect(denied(`INSERT INTO eta_encounter_windows (consult_key, machine, attribution, t_open, close_reason, quality, resolver_version) VALUES ('k@m', 'm', 'none', now(), 'open', 'unclosed', 'v');`)).toMatch(/permission denied for table eta_encounter_windows/);
