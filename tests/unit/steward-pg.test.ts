@@ -230,8 +230,16 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
       expect((await rows`SELECT count(*)::int AS n FROM bench_command`)[0]!.n).toBe(0);
       // the gate evidence the live start needs: Clinic A's recorder.status history (ready, no open session, for 8 min) beside its kiosk-health heartbeat; ORB2 has no kiosk-health at all
       pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES
-        ${[8, 6, 4, 2, 0.5].map((m, i) => `('${at(m)}', 'clinic-a-mac', 'boot1', ${100 + i}, 'recorder', 'recorder.status', '${at(m)}', '{"state":"ready","session_open":false}'::jsonb)`).join(",")}`);
+        ${[8, 6, 4, 2, 0.5].map((m, i) => `('${at(m)}', 'clinic-a-mac', 'boot1', ${100 + i}, 'recorder', 'recorder.status', '${at(m + 180)}', '{"state":"ready","session_open":"no"}'::jsonb)`).join(",")}`);
+      // (F22) the kiosk's own clock (ts) is 3 h behind its received_at: the held-ready duration and the 30 min window run on received_at. (F18) the daemon spells it "no" / "yes" / "unknown".
       pg.exec(`INSERT INTO steward_config (key, value) VALUES ('start_day_live', '{"on":true}'::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+      // F18: "unknown" in the newest row is NOT closed: the gate fails closed
+      pg.exec(`UPDATE kiosk_health_events SET payload = '{"state":"ready","session_open":"unknown"}'::jsonb WHERE kind = 'recorder.status' AND seq = 104`);
+      pg.exec(`DELETE FROM steward_decisions`);
+      await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
+      const unk = (await decisions()).find((r) => r.room_id === CLINIC_A && r.action === "scribe_start")!;
+      expect(unk).toMatchObject({ mode: "shadow", result: "shadow: recorder_not_ready" });
+      pg.exec(`UPDATE kiosk_health_events SET payload = '{"state":"ready","session_open":"no"}'::jsonb WHERE kind = 'recorder.status' AND seq = 104`);
       pg.exec(`DELETE FROM steward_decisions`);
       // 1) the kiosks' last poll is 12 s before AS_OF, i.e. long stale against the executor's clock: nothing is sent, the rows say so
       const s2 = await runSteward(sql, { asOf: AS_OF, budgetMs: 20_000 });
@@ -253,6 +261,11 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
       }
       const d3 = Object.fromEntries((await decisions()).filter(actionable).map((r) => [r.room_id as string, r]));
       expect(d3[CLINIC_A]).toMatchObject({ action: "scribe_start", mode: "live" });
+      // F19 on the real tables: ONE row for the attempt (the "sending" row, updated by id), with its attempt number and the call time
+      expect(d3[CLINIC_A]!.inputs).toMatchObject({ attempt_no: 1 });
+      expect(typeof d3[CLINIC_A]!.inputs.call_ms).toBe("number");
+      expect((await rows`SELECT count(*)::int AS n FROM steward_decisions WHERE result = 'sending'`)[0]!.n).toBe(0);
+      expect((await rows`SELECT count(*)::int AS n FROM steward_decisions WHERE room_id = ${CLINIC_A} AND action = 'scribe_start'`)[0]!.n).toBe(1);
       expect(String(d3[CLINIC_A]!.result)).toMatch(/^ok: start_day acked command_id=cmd_/);
       expect(d3[ORB2]).toMatchObject({ mode: "shadow", result: "shadow: no_kiosk_health" }); // ORB2: no kiosk-health -> live start never fires there
       expect(s3.degraded).not.toContain("live_executor");

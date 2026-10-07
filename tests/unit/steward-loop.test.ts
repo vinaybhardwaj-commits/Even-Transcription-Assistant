@@ -3,7 +3,7 @@
  * degraded sources, fleet incidents, processing order. Real SQL is proven in steward-pg.test.ts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ago, failedAttempt, healthy, idle, ist, readyRecorder } from "../support/steward-fixtures";
+import { ago, failedAttempt, healthy, idle, ist, pendingAttempt, readyRecorder } from "../support/steward-fixtures";
 import type { RoomSense } from "@/lib/steward/sense";
 
 const M = vi.hoisted(() => ({ senseAll: vi.fn() }));
@@ -54,6 +54,16 @@ function fakeDb(opts: { cfg?: Record<string, unknown>; dropCfg?: string[]; rooms
       const hiMs = Date.parse(String(v[0]));
       const holdMs = Number(v[1]) * 1000;
       return state.table.filter((r) => r.room_id === null && r.rule === "fleet_incident" && Date.parse(r.ts) > hiMs - holdMs && Date.parse(r.ts) <= hiMs).sort((a, b) => (a.ts < b.ts ? 1 : -1));
+    }
+    if (text.includes("UPDATE steward_decisions")) {
+      // the live send's "sending" row -> its final result, by id (v = [mode, result, inputs patch, id])
+      const row = state.table.find((r) => String(r.id) === String(v[3]) && r.result === "sending");
+      if (row) {
+        row.mode = String(v[0]);
+        row.result = v[1] as string | null;
+        Object.assign(row.inputs, JSON.parse(String(v[2])));
+      }
+      return [];
     }
     if (text.includes("INSERT INTO steward_decisions")) {
       const rows = JSON.parse(String(v[0])) as Array<Omit<Stored, "id" | "actor">>;
@@ -401,7 +411,7 @@ describe("ordering and fleet incidents", () => {
 describe("F2: two consecutive ticks a minute apart with the same state produce ONE row", () => {
   it("a room in start backoff (retry_after_s 240 -> 180 -> 120): one row, the countdown lives in inputs", async () => {
     const db = fakeDb();
-    senseWith((id, A) => idle(A, { room_id: id, start_attempts: [{ status: "failed", created_at: new Date(T - 60_000).toISOString(), acked_at: null, session_started: false, session_named: false }] }));
+    senseWith((id, A) => idle(A, { room_id: id, start_attempts: [{ status: "failed", created_at: new Date(T - 60_000).toISOString(), acked_at: new Date(T - 60_000).toISOString(), session_started: false, session_named: false }] }));
     expect((await run(db.sql, T)).decisions_written).toBe(1);
     expect((await run(db.sql, T + MIN)).decisions_written).toBe(0);
     expect((await run(db.sql, T + 2 * MIN)).decisions_written).toBe(0);
@@ -725,7 +735,7 @@ describe("start_day_live and the live-start gates", () => {
   for (const [name, mk, reason] of [
     ["heartbeat 181 s old", (id: string, A: number) => idle(A, { room_id: id, reachable: { poller_ok_at: ago(A, 20), kh_heartbeat_at: ago(A, 181) }, recording: { recorder_history: readyRecorder(A, 600) } }), "kh_heartbeat_stale"],
     ["recorder ready for 4:59", (id: string, A: number) => idle(A, { room_id: id, reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: readyRecorder(A, 299) } }), "recorder_ready_under_5m"],
-    ["recorder not ready (session open on the recorder)", (id: string, A: number) => idle(A, { room_id: id, reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: { latest_at: ago(A, 20), latest_state: "recording", latest_session_open: "true", ready_since: null, ready_samples: 0 } } }), "recorder_not_ready"],
+    ["recorder not ready (session open on the recorder)", (id: string, A: number) => idle(A, { room_id: id, reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: { latest_at: ago(A, 20), latest_state: "recording", latest_session_open: "yes", ready_since: null, ready_samples: 0 } } }), "recorder_not_ready"],
   ] as const) {
     it(`gate: ${name} -> shadow: ${reason}, nothing sent`, async () => {
       const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
@@ -747,8 +757,116 @@ describe("start_day_live and the live-start gates", () => {
     expect(l.scribeStart).toHaveBeenCalledTimes(1);
     expect(db.state.table).toHaveLength(2);
     expect(db.state.table[1]).toMatchObject({ mode: "live", result: "ok: start_day acked command_id=c" });
-    await run(db.sql, T + 3 * MIN, withSpy(l)); // an executed row is deduped like any other: no second attempt from this loop minute
+    // the next minute the sense shows the attempt (queued, awaiting its session): the schedule holds the next one, so nothing is sent
+    senseWith((id, A) => idle(A, { room_id: id, reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: readyRecorder(A, 400) }, start_attempts: [pendingAttempt(A, 60)] }));
+    await run(db.sql, T + 3 * MIN, withSpy(l));
     expect(l.scribeStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("F21: the retry the schedule allows is exempt from the 15-min dedupe: attempt 1 fails at T; at +1 min backoff holds; at +5:30 the retry goes out (same key, previous row 'failed:' 5 min old); a 'sending' or fresh 'skipped:' row still holds the key", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    const l = spy();
+    l.scribeStart.mockResolvedValue({ result: "failed: no ack from the kiosk command_id=c1" });
+    senseWith((id, A) => liveReady(id, A));
+    await run(db.sql, T, withSpy(l));
+    expect(l.scribeStart).toHaveBeenCalledTimes(1);
+    expect(db.state.table[0]).toMatchObject({ mode: "live", result: "failed: no ack from the kiosk command_id=c1" });
+    senseWith((id, A) => ({ ...liveReady(id, A), start_attempts: [failedAttempt(A, 60)] }));
+    await run(db.sql, T + MIN, withSpy(l));
+    expect(l.scribeStart).toHaveBeenCalledTimes(1);
+    expect(db.state.table.at(-1)).toMatchObject({ rule: "not_recording", action: "log_only" });
+    senseWith((id, A) => ({ ...liveReady(id, A), start_attempts: [failedAttempt(A, 330)] }));
+    l.scribeStart.mockResolvedValue({ result: "ok: start_day acked command_id=c2" });
+    await run(db.sql, T + 5.5 * MIN, withSpy(l));
+    expect(l.scribeStart).toHaveBeenCalledTimes(2);
+    expect(db.state.table.at(-1)).toMatchObject({ action: "scribe_start", mode: "live", result: "ok: start_day acked command_id=c2" });
+    // a row stuck at "sending" keeps the key for the 15 min (the schedule is read from bench_command, not from this row)
+    const db2 = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    senseWith((id, A) => liveReady(id, A));
+    db2.state.table.push({ id: db2.state.nextId++, room_id: "room_a", ts: new Date(T - 2 * MIN).toISOString(), rule: "not_recording", action: "scribe_start", params: {}, result: "sending", mode: "live", inputs: { primary: true }, why: "", why_not: null, actor: "steward", machine: "HOST-A", window_kind: "clinic", inputs_hash: "x" });
+    const l2 = spy();
+    await run(db2.sql, T, withSpy(l2));
+    expect(l2.scribeStart).not.toHaveBeenCalled();
+  });
+
+  it("F19: every live send writes a 'sending' row first (own statement, same key, inputs.attempt_no) and updates THAT row by id; one row per attempt in the log", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    senseWith((id, A) => ({ ...liveReady(id, A), start_attempts: [failedAttempt(A, 400)] }));
+    const seen: Array<string | null> = [];
+    const l = spy();
+    l.scribeStart.mockImplementation(async () => {
+      seen.push(db.state.table[0]?.result ?? null); // the row is in the log while the send runs
+      return { result: "ok: start_day acked command_id=c" };
+    });
+    const s = await run(db.sql, T, withSpy(l));
+    expect(seen).toEqual(["sending"]);
+    expect(db.state.table).toHaveLength(1);
+    expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "live", result: "ok: start_day acked command_id=c" });
+    expect(db.state.table[0]!.inputs).toMatchObject({ attempt_no: 2, primary: true });
+    expect(db.state.table[0]!.inputs.call_ms).toBeTypeOf("number");
+    expect(s.decisions_written).toBe(1);
+    const inserts = db.state.calls.filter((c) => c.startsWith("INSERT INTO steward_decisions")).length;
+    const updates = db.state.calls.filter((c) => c.startsWith("UPDATE steward_decisions")).length;
+    expect([inserts, updates]).toEqual([1, 1]);
+  });
+
+  it("F19: a send that hangs: the 'sending' row stays, the tick still returns (degraded live_call_timeout), nothing else is lost", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON, live_call_timeout_ms: 1000 } });
+    senseWith((id, A) => liveReady(id, A));
+    const l = spy();
+    l.scribeStart.mockImplementation((() => new Promise(() => {})) as never);
+    const t0 = Date.now();
+    const s = await run(db.sql, T, withSpy(l));
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(l.scribeStart).toHaveBeenCalledTimes(1);
+    expect(s.degraded).toContain("live_call_timeout");
+    expect(db.state.table).toHaveLength(1);
+    expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "live", result: "sending" });
+    expect(db.state.table[0]!.inputs).toMatchObject({ attempt_no: 1 });
+    expect(s.decisions_written).toBe(1);
+  }, 15_000);
+
+  it("F19: a send that finishes after the timeout updates its row (best effort)", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON, live_call_timeout_ms: 1000 } });
+    senseWith((id, A) => liveReady(id, A));
+    const l = spy();
+    l.scribeStart.mockImplementation((() => new Promise((r) => setTimeout(() => r({ result: "ok: start_day acked command_id=late" }), 1300))) as never);
+    await run(db.sql, T, withSpy(l));
+    expect(db.state.table[0]!.result).toBe("sending");
+    await new Promise((r) => setTimeout(r, 600));
+    expect(db.state.table[0]).toMatchObject({ result: "ok: start_day acked command_id=late", mode: "live" });
+  }, 15_000);
+
+  it("F19: no live send when the 'sending' row cannot be written (nothing is sent without its audit row)", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON }, fail: [/INSERT INTO steward_decisions/] });
+    senseWith((id, A) => liveReady(id, A));
+    const l = spy();
+    const s = await run(db.sql, T, withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    expect(s.degraded).toContain("steward_decisions");
+  });
+
+  it("F19: under 6 s of budget left: no live send, the row says 'skipped: budget'", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    senseWith((id, A) => liveReady(id, A));
+    const l = spy();
+    // a 5.5 s budget: less than the 6 s a live send needs
+    const s = await run(db.sql, T, { ...withSpy(l), budgetMs: 5500 });
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    expect(s.degraded).toContain("live_budget");
+    expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "live", result: "skipped: budget" });
+  });
+
+  it("F20: the hard never-live list in the loop: ORB2 / ORB3 / Home Office / room_scratch_* are never sent a live start, even with every gate green and a forced decision", async () => {
+    for (const id of ["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy"]) {
+      const db = fakeDb({ cfg: { ...open, ...LIVE_ON }, rooms: [{ room_id: id, room_name: "X", hostname: "HOST-X" }] });
+      senseWith((rid, A) => liveReady(rid, A));
+      const l = spy();
+      await run(db.sql, T, withSpy(l));
+      expect(l.scribeStart, id).not.toHaveBeenCalled();
+      const r = db.state.table.find((x) => x.action === "scribe_start");
+      if (r) expect(r, id).toMatchObject({ mode: "shadow", result: "shadow: never_live_room" });
+    }
   });
 
   it("the loop never calls stop / restart / ticket / message live", async () => {

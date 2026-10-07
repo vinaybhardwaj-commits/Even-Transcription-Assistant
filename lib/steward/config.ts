@@ -32,12 +32,15 @@ export type Config = {
   rooms: Record<string, RoomOverride>;
   /** per-source read timeout of the sense step (steward_config key `source_timeout_ms`, optional: a number or {ms}); default 6000 */
   source_timeout_ms: number;
+  /** timeout of ONE live executor call (steward_config key `live_call_timeout_ms`, optional: a number or {ms}, 1000..8000); default 5000. A hung send leaves its "sending" row and the tick returns. */
+  live_call_timeout_ms: number;
 };
 
 export const CONFIG_KEYS = ["kill_switch", "shadow", "schedule", "days", "caps", "priority", "rooms"] as const;
 /** keys with NO fallback: missing or malformed = config unavailable (the tick is skipped). */
 export const FATAL_CONFIG_KEYS = ["rooms", "schedule"] as const;
 export const DEFAULT_SOURCE_TIMEOUT_MS = 6000;
+export const DEFAULT_LIVE_CALL_TIMEOUT_MS = 5000;
 
 /** The seed of migration 0128, minus the seeded rooms (those are data, not defaults). Kill switch ON. */
 export const DEFAULT_CONFIG: Config = {
@@ -54,6 +57,7 @@ export const DEFAULT_CONFIG: Config = {
   // NOT a fallback: rooms/schedule are FATAL when missing (see FATAL_CONFIG_KEYS). These are placeholders so the type is total.
   rooms: {},
   source_timeout_ms: DEFAULT_SOURCE_TIMEOUT_MS,
+  live_call_timeout_ms: DEFAULT_LIVE_CALL_TIMEOUT_MS,
 };
 
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
@@ -169,6 +173,13 @@ export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>
     else invalid.push("source_timeout_ms");
   }
 
+  if (raw.has("live_call_timeout_ms")) {
+    const v = raw.get("live_call_timeout_ms");
+    const ms = typeof v === "number" ? v : isObj(v) ? v.ms : undefined;
+    if (typeof ms === "number" && Number.isInteger(ms) && ms >= 1000 && ms <= 8000) cfg.live_call_timeout_ms = ms;
+    else invalid.push("live_call_timeout_ms");
+  }
+
   const fatal = invalid.filter((k) => (FATAL_CONFIG_KEYS as readonly string[]).includes(k));
   return { config: cfg, invalid, fatal };
 }
@@ -227,6 +238,13 @@ export const EXCLUDED_FLAGS: readonly string[] = ["test", "dev"];
 export const SCRATCH_ROOM_PREFIX = "room_scratch_";
 /** hard list (ORB3, Home Office): never in the roster whatever steward_config.rooms says (dev rigs; a live start there is never wanted) */
 export const NEVER_ROSTER_ROOM_IDS: readonly string[] = ["room_jwyrr4dc", "room_2qe955hy"];
+
+/**
+ * HARD never-live list: a live scribe_start is refused for these rooms whatever the data says (ORB2 = the OT2 recorder with no kiosk-health, ORB3, Home Office), and for every
+ * room_scratch_* room. Enforced three times: the gates in rules.ts, the loop's record(), and the executor itself.
+ */
+export const NEVER_LIVE_ROOM_IDS: readonly string[] = ["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy"];
+export const isNeverLiveRoom = (roomId: string | null | undefined): boolean => typeof roomId === "string" && (roomId.startsWith(SCRATCH_ROOM_PREFIX) || NEVER_LIVE_ROOM_IDS.includes(roomId));
 
 /** Every non-excluded room, in processing order (config.priority, then name). */
 export function buildRoster(rows: readonly RosterRow[], cfg: Config): RosterRoom[] {

@@ -44,7 +44,7 @@ export type RoomSense = {
     last_chunk_at: string | null;
     /** newest bench chunk of ANY of the room's sessions in the last 24 h (visibility for inputs.last_chunk_s; no rule reads it), null when there is none */
     last_chunk_24h_at?: string | null;
-    /** the recorder.status history of the last 30 min (kiosk_health_events), newest first walk: `latest_*` = the newest row; `ready_since` / `ready_samples` = the oldest ts and the count of the contiguous run of rows that are state "ready" with session_open false ending at the newest row (null when the newest row is not ready). null = no recorder.status row at all (no kiosk-health). */
+    /** the recorder.status history of the last 30 min (kiosk_health_events), newest first walk: `latest_*` = the newest row; `ready_since` / `ready_samples` = the oldest received_at and the count of the contiguous run of rows that are state "ready" with session_open false ending at the newest row (null when the newest row is not ready). null = no recorder.status row at all (no kiosk-health). */
     recorder_history?: { latest_at: string; latest_state: string | null; latest_session_open: string | null; ready_since: string | null; ready_samples: number } | null;
     recorder_status: RecorderStatus | null;
   };
@@ -112,6 +112,11 @@ const jsonVal = (v: unknown): unknown => {
   }
   return v;
 };
+/**
+ * recorder.status.session_open as the daemon writes it (eta-kiosk-health RecorderState.swift): "yes" / "no" / "unknown". "yes" and true = open, "no" and false = closed,
+ * anything else ("unknown", null, junk) = null: NOT closed, so every gate that needs "closed" fails closed. The legacy "true" / "false" spellings are accepted too.
+ */
+export const sessionOpenOf = (v: unknown): boolean | null => (v === true || v === "yes" || v === "true" ? true : v === false || v === "no" || v === "false" ? false : null);
 const boolOrNull = (v: unknown): boolean | null => (v === true || v === "true" ? true : v === false || v === "false" ? false : null);
 
 /** Limits for one sense pass: every source read has a timeout, and nothing new starts after the deadline. */
@@ -405,13 +410,13 @@ export async function senseAll(
          AND c.created_at > ${hi}::timestamptz - make_interval(hours => ${B.last_chunk_lookback_h}::int) AND c.created_at <= ${hi}::timestamptz
        GROUP BY s.room_id
     `) as unknown as LastChunkRow[], [] as LastChunkRow[]),
-    // 16 — recorder.status history, last 30 min, newest first per machine (the live-start gate "ready and no session, held >= 5 min" is derived from the run, never from one sample). (machine, ts) index.
+    // 16 — recorder.status history, last 30 min, newest first per machine (the live-start gate "ready and no session, held >= 5 min" is derived from the run, never from one sample). (machine, received_at) index (0127). Times are the SERVER's received_at, never the kiosk's own clock (a skewed clock must not shorten or lengthen the held-ready duration).
     safe("kiosk_health_recorder", degraded, async () => (await sql`
-      SELECT k.machine, k.ts, k.payload->>'state' AS state, k.payload->>'session_open' AS session_open
+      SELECT k.machine, k.received_at AS ts, k.payload->>'state' AS state, k.payload->>'session_open' AS session_open
         FROM kiosk_health_events k
        WHERE k.machine = ANY(${khKeysExpanded}::text[]) AND k.kind = 'recorder.status'
-         AND k.ts > ${hi}::timestamptz - make_interval(mins => ${B.recorder_history_lookback_min}::int) AND k.ts <= ${hi}::timestamptz
-       ORDER BY k.machine, k.ts DESC
+         AND k.received_at > ${hi}::timestamptz - make_interval(mins => ${B.recorder_history_lookback_min}::int) AND k.received_at <= ${hi}::timestamptz
+       ORDER BY k.machine, k.received_at DESC
        LIMIT 3000
     `) as unknown as RecorderRow[], [] as RecorderRow[]),
   ]);
@@ -476,7 +481,7 @@ export async function senseAll(
     else if (!kh) miss("kiosk_health.snapshot");
     const rs = kh?.last_recorder_status ?? null;
     if (khR.ok && kh && !rs) miss("recorder_status");
-    const recorder_status: RecorderStatus | null = rs ? { state: rs.state, session_open: boolOrNull(rs.session_open), received_at: rs.received_at } : null;
+    const recorder_status: RecorderStatus | null = rs ? { state: rs.state, session_open: sessionOpenOf(rs.session_open), received_at: rs.received_at } : null;
 
     // --- listener
     const lrow = listenerBy.get(r.room_id);
@@ -619,7 +624,7 @@ export async function senseAll(
     let recorderHistory: NonNullable<RoomSense["recording"]["recorder_history"]> | null = null;
     {
       const rows = (key ? (recBy.get(key) ?? []) : [])
-        .map((x) => ({ ts: toIso(x.ts), ready: x.state === "ready" && x.session_open === "false", state: x.state, so: x.session_open }))
+        .map((x) => ({ ts: toIso(x.ts), ready: x.state === "ready" && sessionOpenOf(x.session_open) === false, state: x.state, so: x.session_open }))
         .filter((x): x is { ts: string; ready: boolean; state: string | null; so: string | null } => x.ts !== null)
         .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
       if (rows.length > 0) {

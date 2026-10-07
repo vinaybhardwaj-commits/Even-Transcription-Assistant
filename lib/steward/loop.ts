@@ -24,7 +24,7 @@
  * write (it would only repeat rows), a failure of the roster read ends the tick with rooms 0.
  */
 import { randomUUID } from "node:crypto";
-import { actionMode, buildRoster, loadConfig, type Config, type RosterRow } from "./config";
+import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
 import { senseAll } from "./sense";
@@ -38,6 +38,8 @@ export const LEASE_TTL_S = 55;
 /** the last part of the tick budget kept for the decisions INSERT (sensing and the log read stop before it) */
 export const INSERT_RESERVE_MS = 3000;
 export const LAST_TICK_KEY = "last_tick";
+/** no live send is issued when less than this much of the tick budget is left (the row says "skipped: budget") */
+export const LIVE_MIN_BUDGET_MS = 6000;
 
 export type StewardSummary = {
   /** false only when the tick could not run at all (reason set) */
@@ -213,6 +215,18 @@ type OutRow = {
   ts: string;
 };
 
+/** the one INSERT shape of the tick (also used for a "sending" row) */
+async function insertRows(sql: StewardSql, rows: OutRow[]): Promise<unknown[]> {
+  return (await sql`
+    INSERT INTO steward_decisions (ts, room_id, machine, window_kind, rule, action, params, mode, result, actor, why, why_not, inputs_hash, inputs)
+    SELECT x.ts, x.room_id, x.machine, x.window_kind, x.rule, x.action, x.params, x.mode, x.result, 'steward', x.why, x.why_not, x.inputs_hash, x.inputs
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(
+        ts timestamptz, room_id text, machine text, window_kind text, rule text, action text, params jsonb, mode text, result text,
+        why text, why_not text, inputs_hash text, inputs jsonb)
+    RETURNING id
+  `) as unknown[];
+}
+
 export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<StewardSummary> {
   const now = opts.now ?? Date.now;
   const t0 = now();
@@ -354,7 +368,79 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     // a live start waits for the kiosk's ack: never longer than the time left before the INSERT reserve (1 s floor, 8 s ceiling)
     const executorFor =
       opts.executorFor ??
-      ((live: boolean) => (live ? new LiveExecutor({ ackTimeoutMs: Math.max(1000, Math.min(8000, t0 + opts.budgetMs - INSERT_RESERVE_MS - now())), maxAttempts: cfg.caps.start_retries }) : new ShadowExecutor()));
+      ((live: boolean) => (live ? new LiveExecutor({ ackTimeoutMs: Math.max(1000, Math.min(8000, cfg.live_call_timeout_ms - 1000, t0 + opts.budgetMs - INSERT_RESERVE_MS - now())), maxAttempts: cfg.caps.start_retries }) : new ShadowExecutor()));
+
+    // rows written BEFORE the tick's single INSERT: one "sending" row per live send (F19)
+    let earlyWritten = 0;
+    const rowOf = (d: Decision, primary: boolean, seq: number, mode: "shadow" | "live", result: string | null, extra: Record<string, unknown> = {}): OutRow => ({
+      room_id: d.room_id,
+      machine: d.machine,
+      window_kind: d.window_kind,
+      rule: d.rule,
+      action: d.action,
+      params: d.params,
+      mode,
+      result,
+      why: d.why,
+      why_not: d.why_not,
+      inputs_hash: d.inputs_hash,
+      inputs: { ...d.inputs, tick: asOfIso, primary, seq, ...(memoryDegraded ? { memory_degraded: true } : {}), ...extra },
+      ts: asOfIso,
+    });
+    const setResult = (id: unknown, mode: "shadow" | "live", result: string | null, patch: Record<string, unknown>) =>
+      sql`UPDATE steward_decisions SET mode = ${mode}, result = ${result}, inputs = inputs || ${JSON.stringify(patch)}::jsonb WHERE id = ${String(id)}::bigint AND result = 'sending'`;
+
+    /**
+     * A LIVE send (F19): (1) refuse when under LIVE_MIN_BUDGET_MS of budget is left ("skipped: budget"); (2) write a "sending" row in its OWN statement (same dedupe key, inputs.attempt_no)
+     * — no row, no send; (3) run the executor under live_call_timeout_ms; (4) update THAT row to ok / failed / skipped by id. A hung send leaves the "sending" row (the bench_command table
+     * is the truth about whether a command was queued) and the tick goes on. Returns the row to add to the tick's INSERT, or null when the row already exists in the log.
+     */
+    const liveSend = async (d: Decision, primary: boolean, seq: number): Promise<OutRow | null> => {
+      if (t0 + opts.budgetMs - now() < LIVE_MIN_BUDGET_MS) {
+        degrade("live_budget");
+        return rowOf(d, primary, seq, "live", "skipped: budget");
+      }
+      const attemptNo = (typeof d.inputs.attempts === "number" ? d.inputs.attempts : 0) + 1;
+      const sendingRow = rowOf(d, primary, seq, "live", "sending", { attempt_no: attemptNo });
+      let id: unknown = null;
+      try {
+        const ins = await insertRows(sql, [sendingRow]);
+        id = (ins[0] as { id?: unknown } | undefined)?.id ?? null;
+      } catch {
+        console.error("[steward] the sending row could not be written: no live send");
+      }
+      if (id === null || id === undefined) {
+        degrade("steward_decisions");
+        return rowOf(d, primary, seq, "shadow", "blocked: audit row not written, nothing sent", { attempt_no: attemptNo });
+      }
+      earlyWritten++;
+      const t1 = now();
+      const call = (async () => dispatch(executorFor(true), d))();
+      let mode: "shadow" | "live" = "live";
+      let result: string | null;
+      try {
+        result = (await raceTimeout(() => call, cfg.live_call_timeout_ms))?.result ?? null;
+      } catch (e) {
+        if (e instanceof SourceTimeout) {
+          // the "sending" row stays; if the call finishes later in this process, the row is updated then (best effort)
+          degrade("live_call_timeout");
+          console.error("[steward] live call timed out: the sending row stays");
+          call.then((r) => setResult(id, "live", r?.result ?? null, { call_ms: now() - t1, late: true })).catch(() => {});
+          return null;
+        }
+        result = `blocked: ${e instanceof Error ? e.message.slice(0, 120) : LIVE_EXECUTOR_DISABLED}`;
+        mode = "shadow";
+        degrade("live_executor");
+      }
+      try {
+        await setResult(id, mode, result, { call_ms: now() - t1 });
+        return null;
+      } catch {
+        console.error("[steward] the sending row could not be updated: the result goes in a new row");
+        degrade("steward_decisions");
+        return rowOf(d, primary, seq, mode, result, { attempt_no: attemptNo });
+      }
+    };
 
     const record = async (d: Decision, primary: boolean, seq: number): Promise<void> => {
       let mode: "shadow" | "live" = "shadow";
@@ -364,41 +450,30 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         let am = actionMode(cfg, d.action);
         // a LIVE scribe_start must also pass its gates (kiosk-health heartbeat <= 180 s, recorder ready + no session for >= 5 min, ...): the first failing gate is the result, nothing is sent
         const gateFail = am === "live" && d.action === "scribe_start" && typeof d.inputs.start_gate_fail === "string" ? d.inputs.start_gate_fail : null;
-        if (gateFail) {
+        // F20: the hard never-live list, checked here again whatever the rules said
+        const neverLive = am === "live" && d.action === "scribe_start" && !gateFail && isNeverLiveRoom(d.room_id);
+        if (gateFail || neverLive) {
           am = "shadow";
-          result = `shadow: ${gateFail}`;
+          result = `shadow: ${gateFail ?? "never_live_room"}`;
         }
         if (am === "kill_switch") {
           result = "kill_switch";
-        } else if (gateFail) {
+        } else if (gateFail || neverLive) {
           // result already set above; nothing executes
+        } else if (am === "live") {
+          const row = await liveSend(d, primary, seq);
+          if (row) rows.push(row);
+          return;
         } else {
-          const shadow = am === "shadow";
           try {
-            result = (await dispatch(executorFor(!shadow), d))?.result ?? null;
-            if (!shadow) mode = "live";
+            result = (await dispatch(executorFor(false), d))?.result ?? null;
           } catch (e) {
             result = `blocked: ${e instanceof Error ? e.message.slice(0, 120) : LIVE_EXECUTOR_DISABLED}`;
-            mode = "shadow";
             degrade("live_executor");
           }
         }
       }
-      rows.push({
-        room_id: d.room_id,
-        machine: d.machine,
-        window_kind: d.window_kind,
-        rule: d.rule,
-        action: d.action,
-        params: d.params,
-        mode,
-        result,
-        why: d.why,
-        why_not: d.why_not,
-        inputs_hash: d.inputs_hash,
-        inputs: { ...d.inputs, tick: asOfIso, primary, seq, ...(memoryDegraded ? { memory_degraded: true } : {}) },
-        ts: asOfIso,
-      });
+      rows.push(rowOf(d, primary, seq, mode, result));
     };
 
     let processed = 0;
@@ -419,8 +494,11 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         if (i === 0) {
           // A start that would EXECUTE now is never swallowed by a previous row that executed nothing (e.g. "shadow: recorder_ready_under_5m" a minute ago, same key): the attempt goes through.
           const wouldGoLive = d.action === "scribe_start" && actionMode(cfg, "scribe_start") === "live" && typeof d.inputs.start_gate_fail !== "string";
-          const lastRan = !last || !(typeof last.result === "string" && /^(shadow|kill_switch|blocked)/.test(last.result));
-          const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !lastRan);
+          // F21: a retry the schedule allows (the rules only emit scribe_start when the verdict is "go") is exempt from the 15-min dedupe, so the 5 / 15 / 45 min schedule is real. Only a
+          // send still in flight ("sending") or a "skipped:" row younger than 5 min (kiosk not listening, ...) holds the key.
+          const lastR = typeof last?.result === "string" ? last.result : "";
+          const holdsKey = /^sending/.test(lastR) || (/^skipped/.test(lastR) && lastTs !== null && A - Date.parse(lastTs) < 5 * 60_000);
+          const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !holdsKey);
           if (same) continue;
         } else {
           const k = keyOf(d);
@@ -445,17 +523,9 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     // --- ONE insert (always attempted when there is something to write)
     let written = 0;
     if (rows.length > 0) {
-      const inserted = (await sql`
-        INSERT INTO steward_decisions (ts, room_id, machine, window_kind, rule, action, params, mode, result, actor, why, why_not, inputs_hash, inputs)
-        SELECT x.ts, x.room_id, x.machine, x.window_kind, x.rule, x.action, x.params, x.mode, x.result, 'steward', x.why, x.why_not, x.inputs_hash, x.inputs
-          FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(
-            ts timestamptz, room_id text, machine text, window_kind text, rule text, action text, params jsonb, mode text, result text,
-            why text, why_not text, inputs_hash text, inputs jsonb)
-        RETURNING id
-      `) as unknown[];
-      written = inserted.length;
+      written = (await insertRows(sql, rows)).length;
     }
-    return summary({ rooms: processed, decisions_written: written, kill_switch: cfg.kill_switch, budget_hit: budgetHit, fleet_incidents: fleetDs.length });
+    return summary({ rooms: processed, decisions_written: written + earlyWritten, kill_switch: cfg.kill_switch, budget_hit: budgetHit, fleet_incidents: fleetDs.length });
   };
 
   let result: StewardSummary;

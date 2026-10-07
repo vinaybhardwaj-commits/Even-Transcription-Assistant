@@ -35,7 +35,7 @@
  * A blocked decision is log_only with the blocking condition in why_not.
  */
 import { createHash } from "node:crypto";
-import { istMidnightOf, windowAt, type Config, type WindowState } from "./config";
+import { isNeverLiveRoom, istMidnightOf, windowAt, type Config, type WindowState } from "./config";
 import type { RoomSense } from "./sense";
 import { paramsValid, type StewardAction } from "./tickets";
 import { startVerdict } from "./start-schedule";
@@ -374,7 +374,24 @@ function kioskAsleep(c: Ctx): Decision[] | null {
 /** The input device a missing-device alert names: expected_device_name, else the default input's name, else a plain statement that it was not reported. */
 const deviceLabel = (s: RoomSense): string => s.audio.configured_device ?? s.audio.default_input_name ?? "input device (name not reported)";
 /** the three signals mic_fault reads: default input absent, the DEVICE_MISSING install flag, or a USB removal with the newest audio row still absent (no usb_added since) */
-const deviceMissing = (s: RoomSense): boolean => s.audio.default_input_present === false || s.audio.device_missing_flag === true || s.audio.usb_removed_recent === true;
+/**
+ * F23: device_missing needs EVIDENCE younger than 6 h: the newest audio.devices row says "no default input" and was received <= 6 h ago, or a USB removal with no usb_added since
+ * (sense.usb_removed_recent, already bounded to the last minutes). The DEVICE_MISSING install flag has no timestamp and an old "absent" row is stale: they only annotate inputs.
+ */
+export const DEVICE_EVIDENCE_MAX_MS = 6 * 3_600_000;
+const deviceMissing = (c: Ctx): boolean => {
+  const a = c.s.audio;
+  const rowAge = c.age(a.devices_at);
+  return (a.default_input_present === false && rowAge !== null && rowAge <= DEVICE_EVIDENCE_MAX_MS) || a.usb_removed_recent === true;
+};
+/** a device signal that is NOT evidence (flag only, or an absent row older than 6 h): recorded in inputs, never acted on */
+const deviceAnnotation = (c: Ctx): string | null => {
+  if (deviceMissing(c)) return null;
+  const a = c.s.audio;
+  if (a.default_input_present === false) return "audio_row_older_than_6h";
+  if (a.device_missing_flag === true) return "install_flag_only";
+  return null;
+};
 
 /**
  * The live-start gates of a scribe_start decision, each recorded in inputs.start_gates; start_gate_fail names the FIRST failing one (null = all pass). The window, the dev/test/scratch
@@ -388,13 +405,14 @@ function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | nu
   const readyFor = recorderReadyForMs(c);
   const gates = {
     in_window: c.win.in_window,
-    room_eligible: true,
+    room_eligible: !isNeverLiveRoom(s.room_id),
     no_open_session: s.recording.session_open === false,
     kiosk_health_fresh: khAge !== null && khAge <= START_GATE_KH_MAX_MS,
     recorder_ready: readyFor !== null && readyFor >= START_GATE_RECORDER_READY_MS,
   };
   let fail: string | null = null;
   if (s.reachable.kh_enrolled !== true || (khAge === null && !s.recording.recorder_history)) fail = "no_kiosk_health";
+  else if (!gates.room_eligible) fail = "never_live_room";
   else if (!gates.kiosk_health_fresh) fail = "kh_heartbeat_stale";
   else if (!s.recording.recorder_history) fail = "no_recorder_status";
   else if (!gates.recorder_ready) fail = s.recording.recorder_history.ready_since ? "recorder_ready_under_5m" : "recorder_not_ready";
@@ -435,7 +453,7 @@ function notRecording(c: Ctx): Decision[] {
     );
   }
   // device missing: ONE live attempt, then an alert naming the room and the device, and no more attempts until the device is back
-  if (deviceMissing(s) && attempts >= 1) {
+  if (deviceMissing(c) && attempts >= 1) {
     const device = deviceLabel(s);
     return fcAll(
       [
@@ -466,7 +484,7 @@ function notRecording(c: Ctx): Decision[] {
     );
   }
   const g = startGates(c);
-  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(s) ? { device_missing: true } : {}) })];
+  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(c) ? { device_missing: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
 }
 
 function sessionDied(c: Ctx): Decision[] | null {

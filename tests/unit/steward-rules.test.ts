@@ -3,9 +3,9 @@
  * recent decisions go in; Decisions come out. Every clock here is an explicit IST instant on 6 Oct 2026 (a Tuesday), never Date.now().
  */
 import { describe, it, expect } from "vitest";
-import { DEFAULT_CONFIG, NEVER_ROSTER_ROOM_IDS, actionMode, buildRoster, parseConfig, windowAt, type Config } from "@/lib/steward/config";
+import { DEFAULT_CONFIG, NEVER_LIVE_ROOM_IDS, NEVER_ROSTER_ROOM_IDS, actionMode, isNeverLiveRoom, buildRoster, parseConfig, windowAt, type Config } from "@/lib/steward/config";
 import { EMPTY_RECENT, chromeGate, decideRoom, failingClass, fleetDecisions, hashFacts, type RecentAction, type RecentContext } from "@/lib/steward/rules";
-import type { RoomSense } from "@/lib/steward/sense";
+import { sessionOpenOf, type RoomSense } from "@/lib/steward/sense";
 import { ago, failedAttempt, healthy, idle, ist, okAttempt, pendingAttempt, readyRecorder, type DeepPartial } from "../support/steward-fixtures";
 
 const row = (A: number, secAgo: number, action: string, over: Partial<RecentAction> = {}): RecentAction => ({
@@ -101,6 +101,18 @@ describe("config: parse, roster, windows", () => {
     const parsed = parseConfig([{ key: "shadow", value: { global: false, actions: { scribe_start: "no" } } }]);
     expect(parsed.config.shadow.actions.scribe_start).toBe(true);
     expect(parsed.invalid).toContain("shadow");
+  });
+
+  it("live_call_timeout_ms: default 5000; a number or {ms} within 1000..8000; malformed = default and named", () => {
+    expect(DEFAULT_CONFIG.live_call_timeout_ms).toBe(5000);
+    expect(parseConfig([{ key: "live_call_timeout_ms", value: 3000 }]).config.live_call_timeout_ms).toBe(3000);
+    expect(parseConfig([{ key: "live_call_timeout_ms", value: { ms: 7000 } }]).config.live_call_timeout_ms).toBe(7000);
+    for (const bad of [999, 8001, "5", null, { ms: "x" }]) {
+      const r = parseConfig([{ key: "live_call_timeout_ms", value: bad }]);
+      expect(r.config.live_call_timeout_ms).toBe(5000);
+      expect(r.invalid).toContain("live_call_timeout_ms");
+    }
+    expect(parseConfig([]).invalid).not.toContain("live_call_timeout_ms");
   });
 
   it("clinic window: 07:29 IST is out, 07:30 is in; 21:29 in, 21:30 out", () => {
@@ -225,7 +237,7 @@ describe("not recording: start, backoff, max tries", () => {
 
   it("device missing: ONE attempt is allowed, then an alert naming the room and the device and no more attempts; when the device is back the normal schedule resumes", () => {
     const missing = (over: DeepPartial<RoomSense> = {}) =>
-      idle(T, { room_name: "Cardiology", audio: { default_input_present: false, configured_device: "TONOR TM20 Audio Device" }, ...over });
+      idle(T, { room_name: "Cardiology", audio: { default_input_present: false, devices_at: ago(T, 600), configured_device: "TONOR TM20 Audio Device" }, ...over });
     // no attempt yet: the one allowed attempt (tagged in inputs)
     const first1 = first(missing({ start_attempts: [] }), T);
     expect(first1).toMatchObject({ action: "scribe_start" });
@@ -237,13 +249,48 @@ describe("not recording: start, backoff, max tries", () => {
     expect(d.why).toContain("TONOR TM20 Audio Device");
     // the alert keeps coming while the device is absent (never a start)
     expect(first(missing({ start_attempts: [failedAttempt(T, 9000), failedAttempt(T, 5000)] }), T).action).toBe("alert");
-    // each of the three signals counts: default input absent, DEVICE_MISSING flag, a USB removal with no usb_added since
-    for (const audio of [{ default_input_present: true, device_missing_flag: true }, { default_input_present: true, usb_removed_recent: true }]) {
+    // the two EVIDENCE signals: a default-input-absent audio.devices row <= 6 h old, a USB removal with no usb_added since
+    for (const audio of [{ default_input_present: true, usb_removed_recent: true }, { default_input_present: false, devices_at: ago(T, 6 * 3600) }]) {
       expect(first(idle(T, { audio: { ...audio, configured_device: null, default_input_name: "USB Mic" }, start_attempts: [failedAttempt(T, 3000)] }), T).params).toMatchObject({ device: "USB Mic" });
     }
-    expect(first(idle(T, { audio: { default_input_present: false }, start_attempts: [failedAttempt(T, 3000)] }), T).params).toMatchObject({ device: "input device (name not reported)" });
+    expect(first(idle(T, { audio: { default_input_present: false, devices_at: ago(T, 60) }, start_attempts: [failedAttempt(T, 3000)] }), T).params).toMatchObject({ device: "input device (name not reported)" });
     // device back: a normal start resumes
     expect(first(idle(T, { start_attempts: [failedAttempt(T, 3000)] }), T).action).toBe("scribe_start");
+  });
+
+  it("F23: device_missing needs evidence younger than 6 h: an 'absent' audio row 6 h 1 s old, or the DEVICE_MISSING flag alone, only annotates inputs and the start schedule goes on", () => {
+    const tried = [failedAttempt(T, 3000)];
+    const stale = first(idle(T, { audio: { default_input_present: false, devices_at: ago(T, 6 * 3600 + 1) }, start_attempts: tried }), T);
+    expect(stale).toMatchObject({ rule: "not_recording", action: "scribe_start" });
+    expect(stale.inputs).toMatchObject({ device_signal_not_evidence: "audio_row_older_than_6h" });
+    expect(stale.inputs).not.toHaveProperty("device_missing");
+    const flag = first(idle(T, { audio: { default_input_present: true, device_missing_flag: true }, start_attempts: tried }), T);
+    expect(flag).toMatchObject({ action: "scribe_start" });
+    expect(flag.inputs).toMatchObject({ device_signal_not_evidence: "install_flag_only" });
+    // no devices_at at all (age unknown) is not evidence either
+    expect(first(idle(T, { audio: { default_input_present: false }, start_attempts: tried }), T).action).toBe("scribe_start");
+    // exactly 6 h old still counts
+    expect(first(idle(T, { audio: { default_input_present: false, devices_at: ago(T, 6 * 3600) }, start_attempts: tried }), T)).toMatchObject({ rule: "device_missing", action: "alert" });
+    // a USB removal with no usb_added since is evidence
+    expect(first(idle(T, { audio: { usb_removed_recent: true }, start_attempts: tried }), T)).toMatchObject({ rule: "device_missing", action: "alert" });
+  });
+
+  it("F18: recorder.status session_open is the daemon's \"yes\" / \"no\" / \"unknown\": no = closed, yes = open, unknown = null (NOT closed); booleans and the legacy true/false strings are accepted too", () => {
+    for (const [v, want] of [["no", false], ["yes", true], ["unknown", null], [false, false], [true, true], ["false", false], ["true", true], [null, null], [undefined, null], ["", null], ["maybe", null]] as const) expect(sessionOpenOf(v), String(v)).toBe(want);
+  });
+
+  it("F20: the hard never-live list: ORB2, ORB3, Home Office and room_scratch_* fail the room_eligible gate whatever the data (every other gate green)", () => {
+    const green = (room_id: string) => idle(T, { room_id, reachable: { kh_heartbeat_at: ago(T, 30) }, recording: { recorder_history: readyRecorder(T, 600) } });
+    expect(NEVER_LIVE_ROOM_IDS).toEqual(["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy"]);
+    for (const id of ["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy", "room_scratch_x1"]) {
+      expect(isNeverLiveRoom(id), id).toBe(true);
+      expect(first(green(id), T).inputs, id).toMatchObject({ start_gate_fail: "never_live_room", start_gates: { room_eligible: false } });
+    }
+    expect(isNeverLiveRoom("room_scratchy")).toBe(false);
+    expect(isNeverLiveRoom(null)).toBe(false);
+    expect(first(green("room_real"), T).inputs).toMatchObject({ start_gate_fail: null, start_gates: { room_eligible: true } });
+    // ORB2 with no kiosk-health keeps the more specific reason
+    expect(first(idle(T, { room_id: "room_mah3aspr", reachable: { kh_heartbeat_at: null, kh_enrolled: false }, recording: { recorder_history: null } }), T).inputs).toMatchObject({ start_gate_fail: "no_kiosk_health" });
   });
 
   it("the live-start gates are recorded in inputs on every scribe_start: heartbeat <= 180 s, recorder ready + no session held >= 300 s from the history; the first failing gate is named", () => {
@@ -263,7 +310,7 @@ describe("not recording: start, backoff, max tries", () => {
     const stale = idle(T, { recording: { recorder_history: { ...readyRecorder(T, 900), latest_at: ago(T, 421) } } });
     expect(first(stale, T).inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m", recorder_ready_for_s: null });
     // the newest row is not ready (recording / session open): recorder_not_ready
-    const notReady = idle(T, { recording: { recorder_history: { latest_at: ago(T, 20), latest_state: "recording", latest_session_open: "true", ready_since: null, ready_samples: 0 } } });
+    const notReady = idle(T, { recording: { recorder_history: { latest_at: ago(T, 20), latest_state: "recording", latest_session_open: "yes", ready_since: null, ready_samples: 0 } } });
     expect(first(notReady, T).inputs).toMatchObject({ start_gate_fail: "recorder_not_ready" });
   });
 

@@ -16,7 +16,7 @@ const MIN = 60_000;
 const dec = (room_id: string | null = "room_a", action = "scribe_start"): Decision =>
   ({ room_id, machine: "HOST-A", window_kind: "clinic", rule: "not_recording", action, params: {}, why: "", why_not: null, severity: "warn", inputs_hash: "x", inputs: {} }) as Decision;
 const listening = (over: Record<string, unknown> = {}) => ({ room_id: "room_a", tab_id: "t", last_poll_at: new Date(NOW.getTime() - 2000), recording_session_id: null, paused: false, ...over }) as never;
-const attempt = (minAgo: number, over: Partial<StartAttempt> = {}): StartAttempt => ({ status: "failed", created_at: new Date(NOW.getTime() - minAgo * MIN).toISOString(), acked_at: null, session_started: false, session_named: false, ...over });
+const attempt = (minAgo: number, over: Partial<StartAttempt> = {}): StartAttempt => ({ status: "failed", created_at: new Date(NOW.getTime() - minAgo * MIN).toISOString(), acked_at: new Date(NOW.getTime() - minAgo * MIN).toISOString(), session_started: false, session_named: false, ...over });
 
 function deps(over: Partial<StartDeps> = {}) {
   const calls = { insert: [] as Array<Record<string, unknown>>, wait: [] as Array<{ id: string; timeoutMs?: number }>, active: 0, listener: 0, today: 0, recent: 0 };
@@ -96,6 +96,9 @@ describe("liveScribeStart — the bench start_day path", () => {
     const broken = deps({ getStewardAttemptsToday: async () => { throw new Error("db down"); } });
     expect((await go(broken.d)).result).toBe("skipped: start_attempts_unreadable");
     expect(broken.calls.insert).toHaveLength(0);
+    // F21: no ack time on a failed command -> the failure is taken as known 8 s after it was queued; an ack time wins
+    expect((await go(at([attempt(5, { acked_at: null })]).d)).result).toMatch(/^skipped: start_backoff attempts=1 retry_after_s=8$/);
+    expect((await go(at([attempt(5, { acked_at: new Date(NOW.getTime() - 2 * MIN).toISOString() })]).d)).result).toMatch(/^skipped: start_backoff attempts=1 retry_after_s=180$/);
     // the cap follows config (caps.start_retries)
     expect((await go(at([attempt(300), attempt(200)]).d, { maxAttempts: 2 })).result).toBe("skipped: start_exhausted attempts=2");
   });
@@ -144,6 +147,18 @@ describe("the live executor can only emit start_day — never stop, restart, pau
       await go(d);
     }
     expect([...kinds]).toEqual(["start_day"]);
+  });
+
+  it("F20: the hard never-live list is refused INSIDE the executor, before anything is read or sent (ORB2, ORB3, Home Office, room_scratch_*)", async () => {
+    for (const id of ["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy", "room_scratch_ab12"]) {
+      const { d, calls } = deps();
+      const r = await liveScribeStart(dec(id), d, { now: () => NOW });
+      expect(r.result, id).toBe("skipped: never_live_room");
+      expect(calls.insert).toHaveLength(0);
+      expect(calls.listener + calls.active + calls.today + calls.recent).toBe(0);
+    }
+    const ok = deps();
+    expect((await liveScribeStart(dec("room_real"), ok.d, { now: () => NOW })).result).toMatch(/^ok:/);
   });
 
   it("structural guard: executor.ts contains no other bench command kind", () => {

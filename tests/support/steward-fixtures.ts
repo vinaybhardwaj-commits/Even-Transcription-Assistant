@@ -55,10 +55,11 @@ export const idle = (A: number, over: DeepPartial<RoomSense> = {}) => {
 
 
 /** a steward start_day command created `secAgo` s before A that FAILED */
-export const failedAttempt = (A: number, secAgo: number) => ({ status: "failed", created_at: ago(A, secAgo), acked_at: null, session_started: false, session_named: false });
+/** a failed start whose failure became known the moment it was queued (acked_at = created_at); the schedule tests set acked_at / null explicitly to test F21 */
+export const failedAttempt = (A: number, secAgo: number) => ({ status: "failed", created_at: ago(A, secAgo), acked_at: ago(A, secAgo), session_started: false, session_named: false });
 /** a steward start_day command that is still pending */
 export const pendingAttempt = (A: number, secAgo: number) => ({ status: "pending", created_at: ago(A, secAgo), acked_at: null, session_started: false, session_named: false });
 /** a steward start_day command the kiosk acked and that produced a session */
 export const okAttempt = (A: number, secAgo: number) => ({ status: "acked", created_at: ago(A, secAgo), acked_at: ago(A, secAgo - 2), session_started: true, session_named: true });
 /** a kiosk-enrolled room whose recorder has been "ready" with no session for `readySec` s (rows every 30 s, newest 20 s old) */
-export const readyRecorder = (A: number, readySec: number) => ({ latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "false", ready_since: ago(A, readySec), ready_samples: Math.max(2, Math.round(readySec / 30)) });
+export const readyRecorder = (A: number, readySec: number) => ({ latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "no", ready_since: ago(A, readySec), ready_samples: Math.max(2, Math.round(readySec / 30)) });

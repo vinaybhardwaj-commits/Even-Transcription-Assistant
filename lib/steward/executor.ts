@@ -5,7 +5,7 @@
  * LiveExecutor implements scribe_start ONLY (the Bench start_day path, re-checked at execution time); every other method throws and the loop records it as shadow.
  * Which executor runs for an action is decided by config.actionMode (kill switch, shadow.global, shadow.actions[action]).
  */
-import { istMidnightOf } from "./config";
+import { isNeverLiveRoom, istMidnightOf } from "./config";
 import type { Decision } from "./rules";
 import { START_IN_FLIGHT_S, startVerdict } from "./start-schedule";
 
@@ -90,6 +90,8 @@ export const LIVE_COMMAND_KIND = "start_day" as const;
 export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackTimeoutMs?: number; now?: () => Date; maxAttempts?: number } = {}): Promise<ExecResult> {
   const roomId = d.room_id;
   if (!roomId) return { result: "skipped: no_room" };
+  // F20: the hard never-live list (ORB2, ORB3, Home Office, room_scratch_*): refused here whatever the caller and the data say, before anything is read or sent
+  if (isNeverLiveRoom(roomId)) return { result: "skipped: never_live_room" };
   const now = (opts.now ?? (() => new Date()))();
   const [listener, active] = await Promise.all([deps.getListener(roomId), deps.findActiveSession(roomId)]);
   const verdict = deps.decideStart({ listener, activeSession: active, overridePause: false, now });
