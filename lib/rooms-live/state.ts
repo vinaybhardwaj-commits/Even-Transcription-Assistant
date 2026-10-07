@@ -8,7 +8,7 @@
  *                (detail app_not_responding).
  *   -  muted     open session AND state_flags SILENT_WHILE_RECORDING (the recorder's own 2-minute test).
  *   -  stale     a stale level never yields muted/quiet/listening by itself: notrec, detail level_stale.
- *   4 muted      ("Mic silent") open session AND zero_ratio >= 0.995 sustained for >= 60 s: a real silenced input is exact digital zero. 0.95-0.995 is NOT silence (FIX-1 F3b).
+ *   4 muted      ("Mic silent") open session AND a silent sample run >= 60 s. A sample is silent when zero_ratio >= 0.995 OR peak < 0.002 (v1.1). 0.95-0.995 with a live peak is NOT silence (FIX-1 F3b).
  *   5 quiet      open session AND not muted AND 10 s mean rms < max(0.008, 1.5 x the room's p25 rms over the last 15 min).
  *   6 listening  open session AND not muted AND at or above that threshold, or any single row in the last 10 s >= 2.5 x the baseline (never below 0.008).
  * LEVEL `stale`: levels_at older than 6 s, OR the identical (rms, zero) pair for more than 6 s. DIGITAL SILENCE IS THE EXCEPTION to the second test: a muted mic
@@ -21,6 +21,8 @@ export const HEARTBEAT_FRESH_S = 180;
 export const EXT_FRESH_S = 180;
 export const LEVEL_FRESH_S = 6;
 export const MUTE_ZERO = 0.995;
+/** v1.1: a healthy C270 never reports a peak below ~0.007 (room noise); a peak under this is a dead input even when zero_ratio is 0.98-0.99 (live: OPD 5, 7 Oct 20:15-20:30 IST) */
+export const MUTE_PEAK = 0.002;
 export const MUTE_SUSTAIN_S = 60;
 export const QUIET_FLOOR = 0.008;
 export const BASELINE_FACTOR = 1.5;
@@ -82,8 +84,8 @@ function series(inp: StateInput): LevelRow[] {
   return rows;
 }
 
-const isMuteRow = (r: LevelRow): boolean => r.zero !== null && r.zero >= MUTE_ZERO;
-const isDigitalSilence = (r: LevelRow): boolean => r.rms <= 0.0005 && r.zero !== null && r.zero >= 0.95;
+const isMuteRow = (r: LevelRow): boolean => (r.zero !== null && r.zero >= MUTE_ZERO) || r.rms < MUTE_PEAK;
+const isDigitalSilence = (r: LevelRow): boolean => r.rms < MUTE_PEAK || (r.rms <= 0.0005 && r.zero !== null && r.zero >= 0.95);
 
 /** milliseconds for which the newest (rms, zero) pair has been identical, from the series */
 function identicalForMs(rows: readonly LevelRow[]): number {
@@ -112,7 +114,7 @@ export function computeState(inp: StateInput): StateResult {
   const frozen = !!newest && !isDigitalSilence(newest) && identicalForMs(rows) > LEVEL_FRESH_S * 1000;
   const levelStale = levelAge === null || levelAge > LEVEL_FRESH_S || frozen;
 
-  const baseRows = rows.filter((r) => now - r.t <= BASELINE_WINDOW_S * 1000 && (r.zero === null || r.zero < MUTE_ZERO));
+  const baseRows = rows.filter((r) => now - r.t <= BASELINE_WINDOW_S * 1000 && !isMuteRow(r));
   const baseline = baseRows.length >= BASELINE_MIN_ROWS ? percentile(baseRows.map((r) => r.rms), 25) : null;
   const threshold = Math.max(QUIET_FLOOR, BASELINE_FACTOR * (baseline ?? 0));
 
@@ -150,7 +152,7 @@ export function computeState(inp: StateInput): StateResult {
   if (!inp.known.levels && rows.length < 3) return out("unknown", "levels_unavailable", null);
   if (levelStale) return out("notrec", "level_stale", null);
 
-  // 4 muted ("Mic silent"): zero_ratio >= 0.995 on every row of an unbroken run that has lasted >= 60 s and is still current
+  // 4 muted ("Mic silent"): every row silent (zero_ratio >= 0.995 or peak < 0.002) of an unbroken run that has lasted >= 60 s and is still current
   const run = sinceOfRun(rows, isMuteRow);
   if (run !== null && newest && now - newest.t <= MUTE_ROW_MAX_AGE_S * 1000 && newest.t - run >= MUTE_SUSTAIN_S * 1000) return out("muted", null, run);
 

@@ -49,8 +49,8 @@ describe("SPEC fixtures", () => {
     expect(r.level.stale).toBe(false); // an identical (0, 1.0) pair is legitimate digital silence
     expect(r.state_since).not.toBeNull();
   });
-  it("OPD 5 zero 0.967 (FIX-1 F3b): NOT silent below 0.995, however long it lasts -> quiet", () => {
-    const r = computeState(input({ levels: rows(300, () => ({ rms: 0, zero: 0.967 })) }));
+  it("zero 0.967 with a live peak (FIX-1 F3b): NOT silent below 0.995, however long it lasts -> quiet", () => {
+    const r = computeState(input({ levels: rows(300, (i) => ({ rms: 0.01 + (i % 3) * 0.001, zero: 0.967 })) }));
     expect(r.state).toBe("quiet");
   });
   it("C270 ambient rms 0.010 with p25 0.009 -> quiet", () => {
@@ -113,7 +113,7 @@ describe("rule order and edges", () => {
     const base = ambient(100, 0.01).map((x) => ({ ...x, t: x.t - 400_000 }));
     const run = (seconds: number, z: number) => {
       const n = Math.floor((seconds * 1000) / 2300);
-      return [...base, ...rows(n + 1, () => ({ rms: 0, zero: z }))];
+      return [...base, ...rows(n + 1, (i) => ({ rms: (z >= 0.995 ? 0.005 : 0.01) + (i % 3) * 0.0004, zero: z }))];
     };
     const at = (seconds: number, z: number) => computeState(input({ levels: run(seconds, z) }));
     expect(at(63, 0.995).state).toBe("muted");
@@ -163,10 +163,10 @@ describe("rule order and edges", () => {
     expect(r.baseline_rms).toBeCloseTo(0.0093, 3);
     expect(r.state).toBe("listening");
   });
-  it("a near-silent mic (baseline ~0.0003, zero 0.84) is quiet, not 'listening': the spike rule never goes below the 0.008 floor", () => {
-    const lv = rows(200, (i) => ({ rms: 0.0003 + (i % 4) * 0.0002, zero: 0.84 + (i % 3) * 0.01 }));
+  it("a near-silent mic (baseline ~0.003, zero 0.84) is quiet, not 'listening': the spike rule never goes below the 0.008 floor", () => {
+    const lv = rows(200, (i) => ({ rms: 0.0025 + (i % 4) * 0.0004, zero: 0.84 + (i % 3) * 0.01 }));
     const r = computeState(input({ levels: lv }));
-    expect(r.baseline_rms).toBeLessThan(0.001);
+    expect(r.baseline_rms).toBeLessThan(0.004);
     expect(r.state).toBe("quiet");
   });
   it("the floor 0.008 applies when there is no baseline yet (fewer than 30 rows)", () => {
@@ -202,5 +202,44 @@ describe("rule order and edges", () => {
     expect(r.state_since).toBe(NOW - 39 * 2300);
     expect(sinceOfRun([], () => true)).toBeNull();
     expect(sinceOfRun([{ t: 1, rms: 0, zero: 0 }], () => false)).toBeNull();
+  });
+});
+
+describe("v1.1: a dead input is silent by peak as well as by zero_ratio", () => {
+  const base = () => ambient(60, 0.01).map((x) => ({ ...x, t: x.t - 300_000 }));
+  const tail = (spanMs: number, fn: (t: number, k: number) => { rms: number; zero: number }) => {
+    const lv: LevelRow[] = base();
+    let k = 0;
+    for (let t = NOW - spanMs; t <= NOW; t += 2000, k++) lv.push({ t, ...fn(t, k) });
+    if (lv[lv.length - 1]!.t !== NOW) lv.push({ t: NOW, ...fn(NOW, k) });
+    return lv;
+  };
+  it("OPD 5-shaped (peak 0..0.001, zero_ratio 0.98-1.0 for 90 s, doctor consulting) -> Mic silent", () => {
+    const lv = tail(90_000, (_t, k) => ({ rms: (k % 3) * 0.0005, zero: 0.98 + (k % 5) * 0.005 }));
+    const r = computeState(input({ levels: lv }));
+    expect(r.state).toBe("muted");
+    expect(r.level.stale).toBe(false);
+    expect(r.state_since).not.toBeNull();
+  });
+  it("OPD 5-shaped with a changing-by-nothing pair (peak 0.001, zero 0.99 repeated) is silence, not a frozen level", () => {
+    const r = computeState(input({ levels: tail(90_000, () => ({ rms: 0.001, zero: 0.99 })) }));
+    expect(r.state).toBe("muted");
+    expect(r.level.stale).toBe(false);
+  });
+  it("OPD 7-shaped (peak 0.008 steady, zero 0.0002) all day -> Quiet", () => {
+    const lv = rows(400, (i) => ({ rms: 0.008 + (i % 3) * 0.0001, zero: 0.0002 }));
+    expect(computeState(input({ levels: lv })).state).toBe("quiet");
+  });
+  it("boundary: peak 0.0019 for 90 s -> Mic silent; peak 0.0021 (zero 0.5) for 90 s -> Quiet", () => {
+    expect(computeState(input({ levels: tail(90_000, (_t, k) => ({ rms: 0.0019 + (k % 2) * 0.00001, zero: 0.5 })) })).state).toBe("muted");
+    expect(computeState(input({ levels: tail(90_000, (_t, k) => ({ rms: 0.0021 + (k % 2) * 0.00001, zero: 0.5 })) })).state).toBe("quiet");
+  });
+  it("run length: 59 s of silent peaks -> Quiet; 61 s -> Mic silent", () => {
+    expect(computeState(input({ levels: tail(59_000, () => ({ rms: 0.0005, zero: 0.9 })) })).state).toBe("quiet");
+    expect(computeState(input({ levels: tail(61_000, () => ({ rms: 0.0005, zero: 0.9 })) })).state).toBe("muted");
+  });
+  it("one live row inside the run breaks it", () => {
+    const lv = tail(90_000, (t) => (t === NOW - 30_000 ? { rms: 0.02, zero: 0.001 } : { rms: 0.0005, zero: 0.9 }));
+    expect(computeState(input({ levels: lv })).state).not.toBe("muted");
   });
 });
