@@ -36,8 +36,8 @@ describe("GET /api/cron/kiosk-health-retention", () => {
     M.sql.mockResolvedValueOnce(ids(5000)).mockResolvedValueOnce(ids(1200)).mockResolvedValueOnce([]);
     const res = await GET(req("Bearer s3cret"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 6200, batches: 2, budget_hit: false, steward_nonces_deleted: 0, steward_decisions_deleted: 0, steward_tickets_deleted: 0, steward_tickets_expired: 0, room_audio_state_deleted: 0, room_audio_day_deleted: 0 });
-    expect(M.sql).toHaveBeenCalledTimes(9); // 3 kiosk statements, then one empty statement each for nonces, decisions, ticket expiry, ticket delete, room_audio_state, room_audio_day
+    expect(await res.json()).toEqual({ deleted: 6200, batches: 2, budget_hit: false, steward_nonces_deleted: 0, steward_decisions_deleted: 0, steward_tickets_deleted: 0, steward_tickets_expired: 0, room_audio_state_deleted: 0, room_audio_day_deleted: 0, rooms_live_claim_autocleared: 0, rooms_live_claim_deleted: 0 });
+    expect(M.sql).toHaveBeenCalledTimes(11); // 3 kiosk statements, then one empty statement each for nonces, decisions, ticket expiry, ticket delete, room_audio_state, room_audio_day, claim delete, claim autoclear
   });
 
   it("uses a 30-day cutoff bound as a parameter and the id-subselect batch form", async () => {
@@ -77,7 +77,7 @@ describe("GET /api/cron/kiosk-health-retention", () => {
       .mockResolvedValueOnce([{ ticket_id: "a" }, { ticket_id: "b" }, { ticket_id: "c" }]) // tickets batch 1
       .mockResolvedValueOnce([]); // tickets done
     const body = await (await GET(req("Bearer s3cret"))).json();
-    expect(body).toEqual({ deleted: 0, batches: 0, budget_hit: false, steward_nonces_deleted: 2, steward_decisions_deleted: 1, steward_tickets_deleted: 3, steward_tickets_expired: 2, room_audio_state_deleted: 0, room_audio_day_deleted: 0 });
+    expect(body).toEqual({ deleted: 0, batches: 0, budget_hit: false, steward_nonces_deleted: 2, steward_decisions_deleted: 1, steward_tickets_deleted: 3, steward_tickets_expired: 2, room_audio_state_deleted: 0, room_audio_day_deleted: 0, rooms_live_claim_autocleared: 0, rooms_live_claim_deleted: 0 });
     const call = (i: number) => {
       const [strings, ...values] = M.sql.mock.calls[i] as [string[], ...unknown[]];
       return { text: strings.join("?"), values };
@@ -112,7 +112,9 @@ describe("GET /api/cron/kiosk-health-retention", () => {
       .mockResolvedValueOnce(ids(30)) // room_audio_state batch 2
       .mockResolvedValueOnce([]) // room_audio_state done
       .mockResolvedValueOnce([{ room_id: "a" }, { room_id: "b" }]) // room_audio_day batch 1
-      .mockResolvedValueOnce([]); // room_audio_day done
+      .mockResolvedValueOnce([]) // room_audio_day done
+      .mockResolvedValueOnce([]) // claim delete
+      .mockResolvedValueOnce([]); // claim autoclear
     const body = await (await GET(req("Bearer s3cret"))).json();
     expect(body).toMatchObject({ budget_hit: false, room_audio_state_deleted: 5030, room_audio_day_deleted: 2 });
     const call = (i: number) => {
@@ -127,7 +129,39 @@ describe("GET /api/cron/kiosk-health-retention", () => {
     expect(call(8).text).toContain("ist_day < current_date - interval '36 months'");
     expect(call(8).text).toContain("LIMIT 5000");
     expect(call(8).values).toEqual([]);
-    expect(M.sql).toHaveBeenCalledTimes(10);
+    expect(M.sql).toHaveBeenCalledTimes(12); // + one empty statement each for claim delete and claim autoclear
+  });
+
+  it("Rooms Live claims (0131): deletes cleared claims > 7 days, then auto-clears open claims > 7 days, in batches, and reports both counts", async () => {
+    M.sql.mockReset();
+    M.sql
+      .mockResolvedValueOnce([]) // kiosk
+      .mockResolvedValueOnce([]) // nonces
+      .mockResolvedValueOnce([]) // decisions
+      .mockResolvedValueOnce([]) // ticket flips
+      .mockResolvedValueOnce([]) // tickets
+      .mockResolvedValueOnce([]) // room_audio_state
+      .mockResolvedValueOnce([]) // room_audio_day
+      .mockResolvedValueOnce(ids(5000)) // claim delete batch 1
+      .mockResolvedValueOnce(ids(7)) // claim delete batch 2
+      .mockResolvedValueOnce([]) // claim delete done
+      .mockResolvedValueOnce(ids(3)) // claim autoclear batch 1
+      .mockResolvedValueOnce([]); // claim autoclear done
+    const body = await (await GET(req("Bearer s3cret"))).json();
+    expect(body).toMatchObject({ budget_hit: false, rooms_live_claim_deleted: 5007, rooms_live_claim_autocleared: 3 });
+    const call = (i: number) => {
+      const [strings, ...values] = M.sql.mock.calls[i] as [string[], ...unknown[]];
+      return { text: strings.join("?"), values };
+    };
+    expect(call(7).text).toContain("DELETE FROM rooms_live_claim");
+    expect(call(7).text).toContain("claimed_at < now() - interval '7 days' AND cleared_at IS NOT NULL");
+    expect(call(7).text).toContain("LIMIT 5000");
+    expect(call(7).values).toEqual([]);
+    expect(call(10).text).toContain("UPDATE rooms_live_claim SET cleared_at = now(), cleared_by = 'retention'");
+    expect(call(10).text).toContain("cleared_at IS NULL AND claimed_at < now() - interval '7 days'");
+    expect(call(10).text).toContain("LIMIT 5000");
+    expect(call(10).values).toEqual([]);
+    expect(M.sql).toHaveBeenCalledTimes(12);
   });
 
   it("503 with the partial count on a database fault", async () => {

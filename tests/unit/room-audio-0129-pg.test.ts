@@ -77,6 +77,7 @@ describe.skipIf(!HAVE_DOCKER)("0129 room audio state over real postgres", () => 
     pg.exec(mig("0123_eta_encounter_windows.sql")); // GRANT SELECT target
     pg.exec(mig("0126_kiosk_health_events.sql")); // a table the writer must NOT read
     pg.exec(mig("0128_room_steward.sql")); // steward_decisions, ditto
+    pg.exec(mig("0131_rooms_live_claim.sql")); // the retention cron also touches rooms_live_claim
 
     const split = loadSplitSql();
     const stmts = split(mig("0129_room_audio_state.sql"));

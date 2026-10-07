@@ -5,8 +5,9 @@
  * Room Steward (0128), same budget, after the kiosk rows: steward_nonces older than 7 days (seen_at) and steward_decisions older than 30 days (ts), then outstanding steward_tickets past expires_at are flipped to expired (so a machine that never polls again does not pin rows), then finished steward_tickets
  * (status done|failed|expired, completed_at or else expires_at older than 30 days). Decisions go first: tickets.decision_id is ON DELETE SET NULL.
  * Room audio state (0129), same budget, last: room_audio_state older than 12 months and room_audio_day older than 36 months, both by ist_day (cutoff computed in SQL from current_date).
+ * Rooms Live claims (0131), same budget, very last: cleared rooms_live_claim rows with claimed_at older than 7 days are deleted, then open ones older than 7 days are auto-cleared (cleared_by = 'retention'; deleted by a later run, not this one).
  * Auth: Authorization: Bearer ${CRON_SECRET} (same as the other crons). Unset → 503, wrong/missing → 401.
- * Response: 200 { deleted, batches, budget_hit, steward_nonces_deleted, steward_decisions_deleted, steward_tickets_deleted, steward_tickets_expired, room_audio_state_deleted, room_audio_day_deleted } (batches counts kiosk statements that deleted rows). DB fault → 503.
+ * Response: 200 { deleted, batches, budget_hit, steward_nonces_deleted, steward_decisions_deleted, steward_tickets_deleted, steward_tickets_expired, room_audio_state_deleted, room_audio_day_deleted, rooms_live_claim_autocleared, rooms_live_claim_deleted } (batches counts kiosk statements that deleted rows). DB fault → 503.
  */
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
@@ -40,6 +41,8 @@ export async function GET(req: Request) {
   let ticketsExpired = 0;
   let audioStateDeleted = 0;
   let audioDayDeleted = 0;
+  let claimsAutocleared = 0;
+  let claimsDeleted = 0;
   try {
     for (;;) {
       if (Date.now() - startedAt >= BUDGET_MS) {
@@ -138,12 +141,38 @@ export async function GET(req: Request) {
       if (rows.length === 0) break;
       audioDayDeleted += rows.length;
     }
+    while (!budgetHit) {
+      if (Date.now() - startedAt >= BUDGET_MS) {
+        budgetHit = true;
+        break;
+      }
+      const rows = (await sql`
+        DELETE FROM rooms_live_claim
+         WHERE id IN (SELECT id FROM rooms_live_claim WHERE claimed_at < now() - interval '7 days' AND cleared_at IS NOT NULL ORDER BY id LIMIT 5000)
+        RETURNING id
+      `) as Array<{ id: number }>;
+      if (rows.length === 0) break;
+      claimsDeleted += rows.length;
+    }
+    while (!budgetHit) {
+      if (Date.now() - startedAt >= BUDGET_MS) {
+        budgetHit = true;
+        break;
+      }
+      const rows = (await sql`
+        UPDATE rooms_live_claim SET cleared_at = now(), cleared_by = 'retention'
+         WHERE id IN (SELECT id FROM rooms_live_claim WHERE cleared_at IS NULL AND claimed_at < now() - interval '7 days' ORDER BY id LIMIT 5000)
+        RETURNING id
+      `) as Array<{ id: number }>;
+      if (rows.length === 0) break;
+      claimsAutocleared += rows.length;
+    }
   } catch {
     console.error(`[kiosk-health-retention] delete failed after ${deleted} rows in ${batches} batches`);
     return NextResponse.json({ error: { code: "UPSTREAM_UNAVAILABLE", message: "delete failed" }, deleted, batches }, { status: 503, ...NO_STORE });
   }
   return NextResponse.json(
-    { deleted, batches, budget_hit: budgetHit, steward_nonces_deleted: noncesDeleted, steward_decisions_deleted: decisionsDeleted, steward_tickets_deleted: ticketsDeleted, steward_tickets_expired: ticketsExpired, room_audio_state_deleted: audioStateDeleted, room_audio_day_deleted: audioDayDeleted },
+    { deleted, batches, budget_hit: budgetHit, steward_nonces_deleted: noncesDeleted, steward_decisions_deleted: decisionsDeleted, steward_tickets_deleted: ticketsDeleted, steward_tickets_expired: ticketsExpired, room_audio_state_deleted: audioStateDeleted, room_audio_day_deleted: audioDayDeleted, rooms_live_claim_autocleared: claimsAutocleared, rooms_live_claim_deleted: claimsDeleted },
     NO_STORE,
   );
 }
