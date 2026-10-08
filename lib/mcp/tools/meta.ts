@@ -12,6 +12,7 @@ import { argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../regist
 
 type Surface = typeof import("../surface");
 const surface = (): Promise<Surface> => import("../surface");
+const profile = () => import("../profile");
 
 // ---------------------------------------------------------------------------
 // scribe_help
@@ -58,7 +59,7 @@ const oneLine = (s: string, max = 160): string => {
 const help: McpTool = {
   name: "scribe_help",
   description:
-    "One tool's full contract from the registry: scope, complete description, input schema, and for a group its selector and what each value runs. " +
+    "One tool's full contract from the registry: scope, description, `help` (the long text the operator list leaves out), input schema, and for a group its selector and what each value runs. " +
     "Accepts any name tools/call accepts, old names included. An unknown name answers { error: 'unknown_tool', suggestions } with the five closest names. Reads no database.",
   scope: "read",
   inputSchema: {
@@ -69,24 +70,34 @@ const help: McpTool = {
   },
   handler: async (args: ToolArgs) => {
     const S = await surface();
+    const P = await profile();
     const wanted = argStr(args, "tool", 128);
     const accepted = [...S.CALLABLE_TOOLS.keys()];
     if (!wanted) return { error: "tool_required", suggestions: [] as string[] };
-    const tool = S.CALLABLE_TOOLS.get(wanted);
-    if (!tool) return { error: "unknown_tool", suggestions: closestNames(wanted, accepted) };
+    const full = S.CALLABLE_TOOLS.get(wanted);
+    const listedIn = (n: string): string[] => [
+      ...(P.OPERATOR_TOOL_NAMES.includes(n as never) ? ["operator"] : []),
+      ...(S.LAB_TOOLS.some((t) => t.name === n) ? ["lab"] : []),
+    ];
+    if (!full) return { error: "unknown_tool", suggestions: closestNames(wanted, accepted) };
+    // S3 — an operator-profile tool answers with its short description AND the long text as `help`.
+    const tool = P.operatorTool(wanted) ?? full;
+    const helpField = tool.help !== undefined ? { help: tool.help } : {};
 
-    const members = S.groupMembers(tool);
+    const members = S.groupMembers(full);
     if (members.length > 0) {
       // A group: selector + what each value runs.
-      const probes = S.groupProbes(tool);
+      const probes = S.groupProbes(full);
       const keys = new Set(probes.flatMap((p) => Object.keys(p.probe)));
       const isSelector = keys.size === 1 && probes.every((p) => Object.values(p.probe)[0] === p.value);
       const selectorKey = isSelector ? [...keys][0]! : null;
       return {
         name: tool.name,
         scope: tool.scope,
+        listed_in: listedIn(tool.name),
         accepted_legacy_names: members.filter((m) => m !== tool.name),
         description: tool.description,
+        ...helpField,
         input_schema: tool.inputSchema,
         members: {
           selector: selectorKey,
@@ -106,8 +117,10 @@ const help: McpTool = {
     return {
       name: tool.name,
       scope: tool.scope,
-      ...(group ? { group: group.name, listed: false } : { listed: true }),
+      ...(group ? { group: group.name } : {}),
+      listed_in: listedIn(tool.name),
       description: tool.description,
+      ...helpField,
       input_schema: tool.inputSchema,
     };
   },

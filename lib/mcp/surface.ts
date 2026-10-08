@@ -29,7 +29,8 @@
  * scribe_list_commands are listed on their own.
  */
 
-import type { McpTool, ToolArgs } from "./registry";
+import type { McpScope } from "./auth";
+import { ToolScopeError, type McpTool, type ToolArgs } from "./registry";
 import { HEALTH_TOOLS } from "./tools/health";
 import { BRAIN_TOOLS } from "./tools/brain";
 import { BENCH_TOOLS } from "./tools/bench";
@@ -109,6 +110,16 @@ export type GroupSpec = {
   route?: (args: ToolArgs) => GroupVariant | GroupRefusal;
   /** Member properties the group does not publish because the selector sets them. */
   hide?: string[];
+  /**
+   * S3 — a MIXED-scope group (scribe_jobs: submit is invoke, cancel is write, status/list are read).
+   * The group registers with this scope (the lowest, read, so the door admits any token) for the
+   * door's single scope check, and its handler then checks the picked member's own scope against
+   * the caller's before running it. Without this a
+   * mixed group is a build error, as before.
+   */
+  scope?: McpScope;
+  /** tools/list annotation overrides; required in practice with `scope` (see McpTool.annotations). */
+  annotations?: McpTool["annotations"];
 };
 
 const withoutKey = (args: ToolArgs, key: string | undefined): ToolArgs => {
@@ -126,7 +137,7 @@ const withoutKey = (args: ToolArgs, key: string | undefined): ToolArgs => {
 export function buildGroup(spec: GroupSpec): McpTool {
   const { name, selector: sel, variants } = spec;
   if (variants.length < 2) throw new Error(`surface: group ${name} needs at least two variants`);
-  const scopes = [...new Set(variants.map((v) => v.tool.scope))];
+  const scopes = spec.scope ? [spec.scope] : [...new Set(variants.map((v) => v.tool.scope))];
   if (scopes.length !== 1) throw new Error(`surface: group ${name} mixes scopes (${scopes.join(", ")})`);
   const values = variants.map((v) => v.value);
   if (new Set(values).size !== values.length) throw new Error(`surface: group ${name} repeats a value`);
@@ -172,10 +183,15 @@ export function buildGroup(spec: GroupSpec): McpTool {
     name,
     description,
     scope: scopes[0]!,
+    ...(spec.annotations ? { annotations: spec.annotations } : {}),
     inputSchema: groupSchema(spec),
     handler: async (args, ctx) => {
       const picked = route(args);
       if (!isVariant(picked)) return picked;
+      // A mixed-scope group: the door checked the group's scope; the member's own scope is checked here.
+      if (spec.scope && !ctx.scopes.has(picked.tool.scope)) {
+        throw new ToolScopeError(picked.tool.scope, { member: picked.tool.name });
+      }
       // Looked up at call time, not captured, so the object the tool file exports is the one that runs.
       return picked.tool.handler(picked.args ? picked.args(args) : withoutKey(args, sel?.key), ctx);
     },
@@ -476,6 +492,27 @@ export const GROUPS: readonly McpTool[] = [
   }),
 ];
 
+/**
+ * S3 — scribe_jobs. NOT in GROUPS: a GROUPS member is hidden from the lab list behind its group,
+ * and the lab profile keeps the four job tools listed beside this one. Callable under its own name
+ * and, like every group, from every profile.
+ */
+export const JOBS_GROUP: McpTool = buildGroup({
+  name: "scribe_jobs",
+  lead:
+    "Background jobs. Scope per action: status and list need READ, submit (queues long work) needs INVOKE, cancel needs WRITE. The caller needs the picked action's own scope; an unknown action is refused with unknown_action and nothing runs.",
+  selector: { key: "action" },
+  scope: "read",
+  // Registered read for the group gate, but submit/cancel write: never read-only; cancel is destructive.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  variants: [
+    v("submit", "scribe_job_submit"),
+    v("status", "scribe_job_status"),
+    v("list", "scribe_job_list"),
+    v("cancel", "scribe_job_cancel"),
+  ],
+});
+
 // ---------------------------------------------------------------------------
 // The two tables the door reads
 // ---------------------------------------------------------------------------
@@ -505,8 +542,20 @@ export const LISTED_TOOLS: readonly McpTool[] = (() => {
   return out;
 })();
 
-/** tools/call: every published name, then every group name (a group wins its own name). */
+/** The lab profile's list: today's LISTED_TOOLS with scribe_jobs added after the four job tools. */
+export const LAB_TOOLS: readonly McpTool[] = (() => {
+  const out: McpTool[] = [];
+  for (const t of LISTED_TOOLS) {
+    out.push(t);
+    if (t.name === "scribe_job_cancel") out.push(JOBS_GROUP);
+  }
+  if (!out.includes(JOBS_GROUP)) out.push(JOBS_GROUP);
+  return out;
+})();
+
+/** tools/call: every published name, then every group name (a group wins its own name). Profile-blind. */
 export const CALLABLE_TOOLS: ReadonlyMap<string, McpTool> = new Map<string, McpTool>([
   ...PUBLISHED_TOOLS.map((t) => [t.name, t] as const),
   ...GROUPS.map((g) => [g.name, g] as const),
+  [JOBS_GROUP.name, JOBS_GROUP] as const,
 ]);

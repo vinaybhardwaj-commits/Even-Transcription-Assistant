@@ -27,7 +27,8 @@ import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
 import { auditToolCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
-import { CALLABLE_TOOLS, LISTED_TOOLS } from "@/lib/mcp/surface";
+import { CALLABLE_TOOLS } from "@/lib/mcp/surface";
+import { resolveProfile, toolsForProfile, OPERATOR_TOOL_NAMES, type McpProfile } from "@/lib/mcp/profile";
 
 const SERVER_NAME = "even-scribe-mcp";
 const SLICE = "S3";
@@ -39,7 +40,6 @@ const MAX_BODY_BYTES = 256 * 1024;
 
 // Registry (PRD §12). Names are the contract. Slice E: tools/list publishes the grouped surface;
 // tools/call still accepts every name the door ever published (lib/mcp/surface).
-const TOOLS: readonly McpTool[] = LISTED_TOOLS;
 const TOOL_BY_NAME = CALLABLE_TOOLS;
 
 type JsonRpcId = string | number | null;
@@ -97,7 +97,9 @@ export function mcpAuthFailureResponse(failure: McpAuthFailure): NextResponse {
 }
 
 /** Parse + dispatch one POST body for an ALREADY-AUTHORIZED principal. */
-export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal): Promise<NextResponse> {
+export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal, opts: { profile?: McpProfile } = {}): Promise<NextResponse> {
+  // S3 — which tools/list this request gets. tools/call ignores it.
+  const profile = resolveProfile(req, opts.profile);
   // 1. Parse.
   let raw: string;
   try {
@@ -127,7 +129,7 @@ export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal): P
   let httpStatus = 200;
   for (const r of requests) {
     try {
-      const out = await dispatch(r, principal, req);
+      const out = await dispatch(r, principal, req, profile);
       if (out) responses.push(out);
     } catch (e) {
       if (e instanceof HttpStatusError) {
@@ -143,11 +145,19 @@ export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal): P
   return NextResponse.json(payload, { status: httpStatus, headers: NO_STORE });
 }
 
+/** S3 — which profile is active and how to reach the other. Never carries a path or key. */
+function profileInstructions(profile: McpProfile): string {
+  const lab = toolsForProfile("lab").length;
+  return profile === "operator"
+    ? `Profile: operator (${OPERATOR_TOOL_NAMES.length} tools listed). For the lab profile (${lab} tools, full descriptions) send header X-Scribe-Profile: lab, add ?profile=lab, or use the /lab form of this URL. tools/call accepts every tool name from either profile; scribe_help returns any tool's full contract.`
+    : `Profile: lab (${lab} tools listed). For the operator profile (${OPERATOR_TOOL_NAMES.length} tools) send header X-Scribe-Profile: operator, add ?profile=operator, or drop the /lab segment from this URL. tools/call accepts every tool name from either profile.`;
+}
+
 function idOf(r: JsonRpcRequest): JsonRpcId {
   return typeof r?.id === "string" || typeof r?.id === "number" ? r.id : null;
 }
 
-async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextRequest): Promise<JsonRpcResponse | null> {
+async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextRequest, profile: McpProfile): Promise<JsonRpcResponse | null> {
   const id = idOf(r);
   const isNotification = r?.id === undefined;
   if (typeof r !== "object" || r === null || r.jsonrpc !== "2.0" || typeof r.method !== "string") {
@@ -173,18 +183,19 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
         capabilities: { tools: {} },
         serverInfo: { name: SERVER_NAME, version: version() },
         instructions:
-          "Even Scribe operator door (S2): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores, jobs and the audit log; plus room control through scribe_room_command, whose description lists every kind and where each executes. Related tools are grouped behind one selector argument; every tool name published before the grouping, scribe_start_recording included, is still accepted by tools/call. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
+          profileInstructions(profile) +
+          " Even Scribe operator door (S3): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores, jobs and the audit log; plus room control through scribe_room_command, whose description lists every kind and where each executes. Related tools are grouped behind one selector argument; every tool name published before the grouping, scribe_start_recording included, is still accepted by tools/call. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
       });
     }
     case "ping":
       return rpcResult(id, {});
     case "tools/list":
       return rpcResult(id, {
-        tools: TOOLS.map((t) => ({
+        tools: toolsForProfile(profile).map((t) => ({
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
-          annotations: { readOnlyHint: t.scope === "read", destructiveHint: false, openWorldHint: false, title: t.name },
+          annotations: { readOnlyHint: t.scope === "read", destructiveHint: false, openWorldHint: false, ...t.annotations, title: t.name },
         })),
       });
     case "tools/call":
