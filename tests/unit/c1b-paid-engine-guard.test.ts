@@ -161,9 +161,13 @@ describe("item 7 — every route to an UNNAMED paid call is closed", () => {
   it("(b2) THE ASYNC PATH refuses a named engine rather than silently running whisper", async () => {
     const { BENCH_TOOLS } = await import("@/lib/mcp/tools/bench");
     const t = BENCH_TOOLS.find((x) => x.name === "scribe_transcribe_range")!;
-    const out = (await t.handler({ session_id: "s", start: "10:00", end: "10:01", engine: "sarvam", async: true },
+    // S8A-FIX2 (V's ruling O4): "sarvam" is now refused earlier still, as scope_consult_only, so the dropped-engine check uses another named engine.
+    const out = (await t.handler({ session_id: "s", start: "10:00", end: "10:01", engine: "deepgram", async: true },
       { actor: "mcp:op", scopes: new Set(["read", "invoke"]), origin: "https://x" } as never)) as Record<string, unknown>;
     expect(out.error, "a dropped engine arg would be a silent wrong-engine result").toBe("engine_not_supported_on_async");
+    const sarvam = (await t.handler({ session_id: "s", start: "10:00", end: "10:01", engine: "sarvam", async: true },
+      { actor: "mcp:op", scopes: new Set(["read", "invoke"]), origin: "https://x" } as never)) as Record<string, unknown>;
+    expect(sarvam.error).toBe("scope_consult_only");
   });
 
   it("(c) ROUTING INHERITANCE — a routing row pointing at the paid engine grants nothing", async () => {

@@ -13,6 +13,7 @@
  */
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
+import { checkRoomStage, ROOM_AUDIO_DETAIL, SCOPE_CHECK_DETAIL } from "@/lib/stt/sarvam-scope";
 import { ROOM_WINDOW_KIND } from "./room-window-kind";
 import { sql } from "@/lib/db";
 import { bulkAgeMinutes, isBulkWindow } from "@/lib/service-pool";
@@ -124,6 +125,13 @@ export const roomWindowKind: JobKind = {
 
     switch (ctx.step) {
       case STEPS.prepare: {
+        // O4 (V, 08 Oct): an MCP-submitted room window is never sent to Sarvam. Checked BEFORE the window is claimed, from the room stage's routing rows,
+        // so refusing leaves the window and its drain job exactly as they were. System callers (cron, admin route) are unchanged.
+        if (ctx.args.via === "mcp") {
+          const verdict = await checkRoomStage();
+          if (verdict === "sarvam") return failWith(jobError("scope_consult_only", ROOM_AUDIO_DETAIL));
+          if (verdict === "unavailable") return failWith(jobError("scope_check_unavailable", SCOPE_CHECK_DETAIL)); // S5: fail closed, with its own reason
+        }
         const o = await roomWindowPrepare(windowId, who, ctx.progress);
         if (!o.ok) {
           // The join service's own mutex said "come back" — not a failure. Requeue on the SAME

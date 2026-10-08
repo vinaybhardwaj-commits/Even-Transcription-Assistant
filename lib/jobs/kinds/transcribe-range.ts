@@ -23,6 +23,7 @@ import { transcribeWithWhisper } from "@/lib/whisper";
 import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
+import { namesSarvam, ROOM_AUDIO_DETAIL, SCOPE_CONSULT_ONLY } from "@/lib/stt/sarvam-scope";
 
 const STEPS = { resolve: "resolve", join: "join", transcribe: "transcribe" } as const;
 
@@ -57,6 +58,9 @@ export const transcribeRangeKind: JobKind = {
    */
   parseArgs(raw) {
     const o = (raw ?? {}) as Record<string, unknown>;
+    // O4 (V, 08 Oct): room / bench audio is never sent to Sarvam. This kind transcribes with whisper only and used to DROP an `engine` it was given;
+    // a Sarvam engine named here is now refused by name, so scribe_jobs submit cannot be used to get around the tool's refusal.
+    if (typeof o.engine === "string" && namesSarvam(o.engine)) throw new JobArgsError(`${SCOPE_CONSULT_ONLY}: ${ROOM_AUDIO_DETAIL}`);
     const session_id = typeof o.session_id === "string" ? o.session_id.trim() : "";
     const room = typeof o.room === "string" ? o.room.trim() : "";
     if (!session_id && !room) throw new JobArgsError("session_id or room is required");

@@ -56,6 +56,23 @@ export const JOB_ERROR_CODES = [
   "emotion_window_failed",
   "emotion_not_configured",
   "emotion_cap_changed",
+  // sarvam_transcribe / sarvam_translate (S8A) — closed codes; the gateway's own error text is never stored
+  "sarvam_gateway_not_configured",
+  "sarvam_daily_cap",
+  "sarvam_submit_failed",
+  "sarvam_job_failed",
+  "sarvam_timeout",
+  "sarvam_result_failed",
+  "sarvam_translate_failed",
+  "source_not_found",
+  "source_ambiguous",
+  "window_too_long",
+  "result_write_failed",
+  // S8A-FIX: only isolated consult audio (or a doctor-recorded encounter) goes to Sarvam
+  "scope_consult_only",
+  "scope_check_unavailable",
+  "consult_index_unavailable",
+  "duration_unknown",
   // the stubs
   "not_implemented",
 ] as const;

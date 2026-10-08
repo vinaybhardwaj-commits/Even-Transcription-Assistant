@@ -60,15 +60,24 @@ afterAll(() => {
   else process.env.SCRIBE_MCP_TOKEN = ORIGINAL;
 });
 
+const JOB_KIND_TOOLS = new Set(["scribe_job_submit", "scribe_job_status", "scribe_job_list"]);
+const JOB_KIND_NAMES = (await import("@/lib/jobs/kinds")).JOB_KIND_NAMES;
+/** a schema with properties.kind.enum / .description removed (the one thing S8A changed on the job tools) */
+const withoutKindEnum = (schema: unknown): unknown => {
+  const s = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, Row> };
+  if (s.properties?.kind) { delete s.properties.kind.enum; delete s.properties.kind.description; }
+  return s;
+};
+
 describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   const names = async (opts: Parameters<typeof door>[1] = {}) => (await listed(opts)).map((t) => t.name);
 
   it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the six S1 reads and scribe_reb_index", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(49);
+    expect(all).toHaveLength(50);
     for (const n of OPERATOR_13) expect(all).toContain(n);
-    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
+    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_sarvam", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
   });
 
@@ -108,11 +117,16 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
     for (const t of all) {
       const base = mainBy.get(t.name);
       if (!base) continue;
-      expect(t.inputSchema, t.name).toEqual(P.shortSchema(base.inputSchema));
+      // the job tools list every registered job kind (an enum and prose), which S8A grew; everything else about them must still match main
+      if (JOB_KIND_TOOLS.has(t.name)) {
+        expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
+        const kindProp = (t.inputSchema as Row & { properties: Row }).properties.kind;
+        if (kindProp) expect(kindProp).toMatchObject({ enum: JOB_KIND_NAMES });
+      } else expect(t.inputSchema, t.name).toEqual(P.shortSchema(base.inputSchema));
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_steward", "scribe_stt_windows", "scribe_tape_day"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_sarvam", "scribe_steward", "scribe_stt_windows", "scribe_tape_day"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
@@ -128,6 +142,14 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       if (t.name === "scribe_help") continue; // its own text was extended in S3
       if (!P.listedTool(t.name)) continue;    // an old name a group now fronts
       const out = (await help.handler({ tool: t.name }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row;
+      if (JOB_KIND_TOOLS.has(t.name)) {
+        // the prose names every registered kind; S8A added two. Only the kind list may differ.
+        // G6: the WHOLE text must match main's, with the registered-kind list, its stub count and the published error-code list the only things allowed to differ
+        const norm = (x: string) => x.replace(/kind is one of [^.]*\./, "kind is one of <KINDS>.").replace(/\d+ of the \d+ kinds are registered but not yet implemented[^.]*\./, "<STUBS>.").replace(/error_code is one of [^.]*\./, "error_code is one of <CODES>.");
+        expect(norm(String(out.help)), t.name).toBe(norm(t.description));
+        expect(String(out.help).length, t.name).toBeGreaterThan(150);
+        continue;
+      }
       expect(out.help, t.name).toBe(t.description);
     }
   });
@@ -341,11 +363,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays under 36,500 characters", async () => {
+  it("budget: the full tools/list result stays under 40,000 characters", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(36_500);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(40_000);
   });
 
   it("scribe_help returns the long text as `help` beside the short description, for every listed tool", async () => {

@@ -18,9 +18,11 @@ import { emotionWindowKind } from "./emotion-window";
 import { jevEnglishKind } from "./jev-english";
 import { jevWindowKind } from "./jev-window";
 import { jevRoleKind } from "./jev-role";
+import { sarvamTranscribeKind } from "./sarvam-transcribe";
+import { sarvamTranslateKind } from "./sarvam-translate";
 import { STUB_KINDS } from "./stubs";
 
-export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, ...STUB_KINDS];
+export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, ...STUB_KINDS];
 export const KIND_BY_NAME = new Map(JOB_KINDS.map((k) => [k.name, k]));
 export const JOB_KIND_NAMES = JOB_KINDS.map((k) => k.name);
 /** The kinds that are registered but still fail not_implemented. Derived, so prose cannot drift. */

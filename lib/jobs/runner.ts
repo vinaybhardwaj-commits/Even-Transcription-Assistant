@@ -6,6 +6,7 @@
  * place is why a new kind cannot accidentally hold a lease open or run past the route ceiling.
  */
 
+import { sarvamJobEnded } from "./sarvam-hook";
 import { KIND_BY_NAME } from "./kinds";
 import {
   cancelJob,
@@ -85,6 +86,7 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
     // nothing, which is `lease_lost`, not `failures_exceeded`. The verdict's "two reports lie
     // about writes they did not make" — the only place "no best-effort branch" was not literal.
     const rows = await failJob(job.id, jobError("failures_exceeded", `after ${job.failures} attempts at step ${job.step ?? "start"}`), runner);
+    if (rows > 0) await sarvamJobEnded(job, "failed"); // S8A-FIX2: only fires for the two sarvam kinds; never throws
     return { ...base, outcome: rows === 0 ? "lease_lost" : "failures_exceeded", ms: Date.now() - started };
   }
 
@@ -122,6 +124,7 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
     });
     // Zero rows means the lease was lost while the step ran: abandon, write nothing else.
     if (after === null) return { ...base, step, outcome: "lease_lost", ms: Date.now() - started };
+    if (after.status === "failed") await sarvamJobEnded(job, "failed"); // S8A-FIX2: the throw that ended the job; only for the two sarvam kinds
     return { ...base, step, outcome: "failed", ms: Date.now() - started, failures: after.failures };
   }
 
