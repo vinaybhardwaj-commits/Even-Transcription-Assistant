@@ -11,7 +11,9 @@
  *   4 muted      ("Mic silent") open session AND a silent sample run >= 60 s. A sample is silent when zero_ratio >= 0.995 OR peak < 0.002 (v1.1). 0.95-0.995 with a live peak is NOT silence (FIX-1 F3b).
  *   5 quiet      open session AND not muted AND fewer than 3 rows >= 1.25 x the floor in the last 20 s and no row >= 2.0 x it (v1.3; the floor is max(0.008, baseline)).
  *   6 listening  open session AND not muted AND 3 rows >= 1.25 x the floor in the last 20 s, or one row >= 2.0 x it.
- *   BASELINE (v1.4): p10 of the room's non-mute rms over the last 45 min, after dropping the rows the rule itself calls loud, so sustained consult speech cannot pull its own floor up.
+ *   BASELINE (v1.4): p10 of the room's non-mute rms over the last 45 min, then p10 again after dropping the rows the rule calls loud against that first floor. This blunts the
+ *     effect of long consults on their own floor but does NOT remove it: continuous speech over ~40 of the 45 min (more than ~90 % of rows) still raises the floor to the speech
+ *     level (probe: 95 % speech at 1.3-1.6 x a 0.009 floor gives a baseline of ~0.0117).
  * LEVEL `stale`: levels_at older than 6 s, OR the identical (rms, zero) pair for more than 6 s. DIGITAL SILENCE IS THE EXCEPTION to the second test: a muted mic
  * legitimately reports (0, 1.0) minute after minute (live: OPD 3), so an identical pair with rms 0 and zero >= 0.95 is not "frozen". A frozen tail after an unplug
  * has a non-zero rms (live: 0.0164 / 0.73, 0.0125 / 0.00) and is caught.

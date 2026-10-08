@@ -55,8 +55,7 @@ describe("SPEC fixtures", () => {
   });
   it("C270 ambient rms 0.010 with p25 0.009 -> quiet", () => {
     const r = computeState(input({ levels: rows(200, (i) => ({ rms: i < 4 ? [0.0100, 0.0102, 0.0098, 0.0101][i]! : [0.0085, 0.009, 0.0105, 0.0105][i % 4]!, zero: 0.001 })) }));
-    expect(r.baseline_rms).toBeGreaterThan(0.0082); // v1.4: p10, not p25
-    expect(r.baseline_rms).toBeLessThan(0.0095);
+    expect(r.baseline_rms).toBeCloseTo(0.0085, 4); // v1.4: p10 (0.0085), not p25 (0.009)
     expect(r.state).toBe("quiet");
   });
   it("speech rms 0.035 -> listening", () => {
@@ -331,8 +330,25 @@ describe("v1.4: baseline is p10 over 45 min, minus the rows the rule calls loud"
     expect(r.baseline_rms).toBeLessThan(0.0095);
     expect(r.state).toBe("listening");
   });
-  it("the window is 45 min: rows older than that are ignored", () => {
-    const old = series(60, (age) => (age > 45 * 60 ? 0.05 : jit(0.009, age)));
-    expect(computeState(input({ levels: old })).baseline_rms).toBeLessThan(0.0095);
+  it("the window is exactly 45 min: 0-15 min at 0.020, 15-45 min at 0.012, 45-90 min at 0.009 -> baseline ~0.012 (a 15-min window sees 0.020, a 90-min window sees 0.009)", () => {
+    const lv = series(90, (age) => (age <= 15 * 60 ? jit(0.020, age) : age <= 45 * 60 ? jit(0.012, age) : jit(0.009, age)));
+    const b = computeState(input({ levels: lv })).baseline_rms!;
+    expect(b).toBeGreaterThan(0.0105);
+    expect(b).toBeLessThan(0.0125);
+  });
+  it("the second pass matters: 8 % floor rows, 12 % at 1.22x, 80 % speech at 2.2x -> the baseline is the floor (~0.0087); one pass alone would give ~0.0104", () => {
+    const lv = series(45, (age) => {
+      const k = Math.round(age / 2.3) % 25;
+      return k < 2 ? jit(0.009, age) : k < 5 ? jit(0.011, age) : jit(0.020, age);
+    });
+    const b = computeState(input({ levels: lv })).baseline_rms!;
+    expect(b).toBeLessThan(0.0095);
+  });
+  it("the limit (R1): continuous speech over ~95 % of the 45 min still raises the floor to the speech level", () => {
+    const lv = series(45, (age) => {
+      const k = Math.round(age / 2.3) % 20;
+      return k === 0 ? jit(0.009, age) : 0.009 * (1.3 + ((Math.round(age) % 4) * 0.1));
+    });
+    expect(computeState(input({ levels: lv })).baseline_rms!).toBeGreaterThan(0.0110);
   });
 });
