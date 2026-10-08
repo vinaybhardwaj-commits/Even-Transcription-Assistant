@@ -392,7 +392,7 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
 
   it("R6 open_outbox — open until a chunk lands after the alert AND the levels moved since", async () => {
     const { degradedMessage } = await import("@/lib/room-watchdog");
-    const body = degradedMessage("OPD 6", ["device_missing"], new Date().toISOString()).text.replace(/'/g, "''");
+    const body = degradedMessage("OPD 6", ["device_missing", "silent_while_recording"], new Date().toISOString()).text.replace(/'/g, "''");
     pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
              VALUES ('degraded', ARRAY['r6'], 'OPD 6', 'ok', 'degraded', 's', '${body}', ${ago("3 hours")}),
                     ('recovered', ARRAY['r6'], 'OPD 6', 'degraded', 'ok', 's', 'recovered', ${ago("10 minutes")});`);
@@ -408,6 +408,24 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(r.items[0]!.detail).toContain("audio levels have not moved");
     // (c) the honest recovery: moving levels since (R6 clears on the FIRST evidence, by spec)
     pg.exec(`TRUNCATE bench_level_sample;` + samples("r6", "2 hours", "1 hour", "moving", 60));
+    // (c1) Arch #20 DWELL: moving levels an hour ago are history. Nothing in the last 120 s, so the alert stands.
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+    // (c2) the honest recovery: live, moving levels held through the last two minutes clear it
+    pg.exec(samples("r6", "115 seconds", "0 seconds", "moving", 2));
+    expect(await attention().then((x) => x.items)).toEqual([]);
+    // (c3) tiny peaks with zero_ratio ~1 are not a recovery however many distinct values they have (OPD5, alerts 545-575)
+    pg.exec(`TRUNCATE bench_level_sample; INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+             SELECT 'r6', (t AT TIME ZONE 'Asia/Kolkata')::date, t, 0.0001 + (extract(epoch from t)::bigint % 9) * 0.0004, 0.999, true, true
+               FROM generate_series(${ago("115 seconds")}, ${ago("0 seconds")}, interval '2 seconds') t;`);
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+  });
+
+  it("R6 dwell SCOPE (F3): an alert that was NOT silent (device missing) clears on the old evidence; the dwell is for SILENT alerts only", async () => {
+    const { degradedMessage } = await import("@/lib/room-watchdog");
+    const body = degradedMessage("OPD 6", ["device_missing"], new Date().toISOString()).text.replace(/'/g, "''");
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
+             VALUES ('degraded', ARRAY['r6'], 'OPD 6', 'ok', 'degraded', 's', '${body}', ${ago("3 hours")});`);
+    pg.exec(session("bs6", "r6", "2 hours", "ended") + chunkRow("c1", "bs6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60));
     expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
@@ -432,7 +450,7 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(kindsOf(r)).toEqual(["r6:open_outbox"]);
     expect(r.items[0]!.detail).toContain("no new recording has arrived since");
     // …but a session still open at the alert time that delivered a chunk after it is
-    pg.exec(session("live6", "r6", "6 hours") + chunkRow("c2", "live6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60));
+    pg.exec(session("live6", "r6", "6 hours") + chunkRow("c2", "live6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60) + samples("r6", "115 seconds", "0 seconds", "moving", 2));
     expect(kindsOf(await attention())).not.toContain("r6:open_outbox");
   });
 
@@ -500,6 +518,37 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
 });
 
 describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres", () => {
+  it("C1 (ARCH-14 refute): a room degraded for ANOTHER reason that then goes digital-silent is held to the dwell too (silent_alert from the level log, in the watchdog and in fleet attention)", async () => {
+    const { loadRecoveryEvidence } = await import("@/lib/room-watchdog");
+    const { degradedMessage } = await import("@/lib/room-watchdog");
+    const body = degradedMessage("OPD 6", ["device_missing"], new Date().toISOString()).text.replace(/'/g, "''");
+    pg.exec(`INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("3 hours")});
+             INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
+             VALUES ('degraded', ARRAY['r6'], 'OPD 6', 'ok', 'degraded', 's', '${body}', ${ago("3 hours")});`);
+    pg.exec(session("bs6", "r6", "2 hours", "ended") + chunkRow("c1", "bs6", "1 hour", 3_400_000));
+    const zeros = (count: number) => `INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+      SELECT 'r6', (t AT TIME ZONE 'Asia/Kolkata')::date, t, 0.0004, 1.0, true, true
+        FROM generate_series(now() - interval '100 minutes', now() - interval '100 minutes' + (${count - 1} * interval '1 second'), interval '1 second') t;`;
+    // the C270 comes back reading zeros (S15 shape), then three live-looking ticks in the last two minutes
+    const ticks = `INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing) VALUES
+      ('r6', (now() AT TIME ZONE 'Asia/Kolkata')::date, now() - interval '20 seconds', 0.03, 0.1, true, true),
+      ('r6', (now() AT TIME ZONE 'Asia/Kolkata')::date, now() - interval '15 seconds', 0.05, 0.1, true, true),
+      ('r6', (now() AT TIME ZONE 'Asia/Kolkata')::date, now() - interval '10 seconds', 0.04, 0.1, true, true);`;
+    // 10 digital-silence samples: not an episode. The device-missing alert recovers as before (scope).
+    pg.exec(zeros(10) + ticks);
+    expect((await loadRecoveryEvidence()).get("r6")!.silent_alert).toBe(false);
+    expect(await attention().then((x) => x.items)).toEqual([]);
+    // 100 digital-silence samples since the alert (>= SILENT_POLLS): the alert is now held to the dwell, and 3 live ticks do not clear it
+    pg.exec(`TRUNCATE bench_level_sample;` + zeros(100) + ticks);
+    expect((await loadRecoveryEvidence()).get("r6")!.silent_alert).toBe(true);
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+    // samples from BEFORE the alert began do not count
+    pg.exec(`TRUNCATE bench_level_sample;` + `INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+      SELECT 'r6', (t AT TIME ZONE 'Asia/Kolkata')::date, t, 0.0004, 1.0, true, true
+        FROM generate_series(now() - interval '5 hours', now() - interval '5 hours' + interval '99 seconds', interval '1 second') t;` + ticks);
+    expect((await loadRecoveryEvidence()).get("r6")!.silent_alert).toBe(false);
+  });
+
   it("the dwell's SQL: live = zero_ratio < 0.5 AND peak >= 0.005, counted over the last 120 s only; dead, floor-miss and NULL-ratio samples are not live; silent_alert follows the newest alert body", async () => {
     const { loadRecoveryEvidence, RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK } = await import("@/lib/room-watchdog");
     expect([RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK]).toEqual([0.5, 0.005]);
@@ -576,25 +625,25 @@ describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres
     expect((await loadRecoveryEvidence()).get("r6")!.chunk_after_alert).toBe(true);
   });
 
-  it("QUIET CLOSE (F4) through persistPlan: a degraded room that polls clean with no session open is written to ok with NO outbox row; the next outage queues its alert", async () => {
+  it("CLOSE WITHOUT PROOF (F4, Arch #20) through persistPlan: a degraded room that polls clean with no session open is written to ok AND gets one recovery row; the next outage queues its alert", async () => {
     const { planWatchdogRun, persistPlan } = await import("@/lib/room-watchdog");
     const now = Date.now();
     pg.exec(`INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("14 hours")});`);
     const clean = { last_seen_at: new Date(now - 5_000).toISOString(), tape_advancing: false, session_open: false, disk_free_bytes: 50_000_000_000, state_flags: [] as string[], open_session: null };
     const closeRun = planWatchdogRun([
-      { room_id: "r6", room_name: "OPD 6", facts: clean, prior: { status: "degraded", since: new Date(now - 14 * 3_600_000).toISOString() }, muted: false, recovery_evidence: { chunk_after_alert: false, distinct_levels: 0 } },
+      { room_id: "r6", room_name: "OPD 6", facts: clean, prior: { status: "degraded", since: "2026-10-05T05:00:00.000Z" }, muted: false, recovery_evidence: { chunk_after_alert: false, distinct_levels: 0 } },
     ], now);
-    expect(closeRun.messages).toEqual([]);
-    expect(await persistPlan(closeRun)).toBe(0);
+    expect(closeRun.messages.map((m) => m.kind)).toEqual(["recovered"]);
+    expect(await persistPlan(closeRun)).toBe(1);
     expect(await pg.sql`SELECT status FROM room_alert_state WHERE room_id = 'r6'`).toEqual([{ status: "ok" }]);
-    expect(await pg.sql`SELECT count(*)::int AS n FROM room_alert_outbox`).toEqual([{ n: 0 }]);
+    expect(await pg.sql`SELECT kind, room_ids FROM room_alert_outbox`).toEqual([{ kind: "recovered", room_ids: ["r6"] }]);
     // next day: a new outage is an ok → degraded edge again, so it queues a message
     const later = now + 20 * 3_600_000;
     const next = planWatchdogRun([
       { room_id: "r6", room_name: "OPD 6", facts: { ...clean, last_seen_at: new Date(later - 5_000).toISOString(), session_open: true, tape_advancing: true, state_flags: ["DEVICE_MISSING"] }, prior: { status: "ok", since: new Date(now).toISOString() }, muted: false },
     ], later);
     expect(await persistPlan(next)).toBe(1);
-    expect(await pg.sql`SELECT kind FROM room_alert_outbox`).toEqual([{ kind: "degraded" }]);
+    expect(await pg.sql`SELECT kind FROM room_alert_outbox ORDER BY id`).toEqual([{ kind: "recovered" }, { kind: "degraded" }]);
   });
 });
 

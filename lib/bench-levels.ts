@@ -1,4 +1,5 @@
 import { sql } from "@/lib/db";
+import { SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
 import { istDate as todayIstDate } from "@/lib/bench-reaper-core";
 
 export const LEVEL_TIMELINE_BUCKET_SECONDS = 15;
@@ -22,8 +23,7 @@ export const FROZEN_BUCKETS = 3;
 
 /**
  * PURE. Marks, never drops. Input is time-ordered.
- * The 0.98 below is the Bench digital-silence line (SILENT_ZERO_RATIO). It is a literal here because this branch does not carry that constant; #20, which
- * does, switches it to SILENT_ZERO_RATIO so the two cannot drift.
+ * The digital-silence line is SILENT_ZERO_RATIO (0.98), the same constant the Bench meter and the watchdog use, so the three cannot drift.
  */
 export function markFrozenBuckets(samples: BenchLevelSample[]): BenchLevelSample[] {
   let run = 0;
@@ -31,7 +31,7 @@ export function markFrozenBuckets(samples: BenchLevelSample[]): BenchLevelSample
     const prev = samples[i - 1];
     const same = prev && prev.peak === s.peak && prev.avg === s.avg && prev.zero_ratio === s.zero_ratio;
     run = same ? run + 1 : 1;
-    const silent = s.zero_ratio !== null && s.zero_ratio >= 0.98;
+    const silent = s.zero_ratio !== null && s.zero_ratio >= SILENT_ZERO_RATIO;
     return run >= FROZEN_BUCKETS && !silent ? { ...s, stale: true } : s;
   });
 }
