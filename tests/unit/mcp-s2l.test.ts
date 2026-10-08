@@ -233,6 +233,14 @@ describe("scribe_steward_command — the kinds", () => {
     expect(rv).toMatchObject({ value: { global: false } });
     expect(await cmd({ kind: "set_shadow", reason: "undo the undo", value: rv.value })).toMatchObject({ ok: true, live_actions: ["scribe_start", "ticket:wake"] });
   });
+  it("G35: while global is false, null on a PUBLISHED key is held (true), not cleared; null on an unpublished legacy key still removes it; while global is true null clears", async () => {
+    cfg.shadow = { global: false, actions: { ...Object.fromEntries(PUBLISHED.map((x) => [x, true])), message: false, legacy_action: true } };
+    const a = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { "ticket:wake": null, message: null, legacy_action: null } } });
+    expect(a).toMatchObject({ ok: true, live_actions: [], changed_actions: ["message"], after: { global: false, actions: Object.fromEntries(PUBLISHED.map((x) => [x, true])) } });
+    expect((a.revert as { exact: boolean }).exact).toBe(false); // the legacy key (SF3)
+    cfg.shadow = { global: true, actions: { message: true } };
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null } } })).toMatchObject({ ok: true, after: { global: true, actions: {} } });
+  });
   it("SF1: a plain shadow-only change (global stays true) lists no live action", async () => {
     cfg.shadow = { global: true, actions: {} };
     expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: false } } })).toMatchObject({ ok: true, live_actions: [], changed_actions: [] });

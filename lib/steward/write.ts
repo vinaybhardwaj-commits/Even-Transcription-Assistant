@@ -134,18 +134,23 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
         }
         if (Object.values(touched).some((v) => v === null)) return fail("bad_value", "actions: null is not allowed in the call that turns global off; name each action true (held) or false (live)");
       }
-      // G18: merge per key; an explicit null clears one key
+      // G18: merge per key; null clears one key (G35: held, not removed, while global is false)
       const actions: Record<string, boolean> = { ...curActions };
       if (turningOff) for (const a of LIVE_CAPABLE_ACTIONS) actions[a] = true; // held unless this call names it false below
       const undo: Record<string, boolean | null> = {};
       const legacyCleared: string[] = [];
-      for (const [k, v] of Object.entries(touched)) {
-        if (!LIVE_CAPABLE_ACTIONS.includes(k)) legacyCleared.push(k);
-        else undo[k] = k in curActions ? curActions[k]! : null; // what the key was before: its value, or null (absent)
-        if (v === null) delete actions[k];
-        else actions[k] = v;
-      }
       const afterGlobal = p.data.global ?? curGlobal;
+      for (const [k, v] of Object.entries(touched)) {
+        const published = LIVE_CAPABLE_ACTIONS.includes(k);
+        if (!published) legacyCleared.push(k);
+        else undo[k] = k in curActions ? curActions[k]! : null; // what the key was before: its value, or null (absent)
+        // G35: while global is (or becomes) false an ABSENT published key is LIVE, so null there means "back to held" (true), never "clear". Only an unpublished legacy key,
+        // or any key while global stays true (absent = shadow anyway), is really removed.
+        if (v === null) {
+          if (published && afterGlobal === false) actions[k] = true;
+          else delete actions[k];
+        } else actions[k] = v;
+      }
       const after = { global: afterGlobal, actions };
       let revert: Revert;
       if (turningOff) {

@@ -193,6 +193,30 @@ describe.skipIf(!HAVE_DOCKER)("0136 steward_config_history and lib/steward/write
     expect(val("shadow")).toEqual({ global: true, actions: {} });
   });
 
+  it("G35 while global is already false: null on a published action means HELD, never live; only false takes one live; the revert round-trips", async () => {
+    expect(val("shadow")).toEqual({ global: true, actions: {} });
+    await run("set_shadow", { value: { global: false, actions: { message: false } } });
+    const liveNow = () => { const c = parseConfig(cfgRows()).config; return PUBLISHED.filter((a) => actionMode(c, a) === "live"); };
+    expect(liveNow()).toEqual(["message"]);
+    // null on a held published key: stays held (the old behaviour deleted the key, and an absent key is live)
+    const a = await run("set_shadow", { value: { actions: { "ticket:policy_cycle": null } } }) as Extract<Awaited<ReturnType<typeof run>>, { ok: true }> & { live_actions: string[] };
+    expect(a).toMatchObject({ ok: true, live_actions: ["message"], unchanged: true });
+    expect((val("shadow") as { actions: Record<string, boolean> }).actions["ticket:policy_cycle"]).toBe(true);
+    expect(liveNow()).toEqual(["message"]);
+    // null on the LIVE action: back to held, nothing is live
+    const b = await run("set_shadow", { value: { actions: { message: null } } }) as Extract<Awaited<ReturnType<typeof run>>, { ok: true }> & { live_actions: string[] };
+    expect(b).toMatchObject({ ok: true, live_actions: [], changed_actions: ["message"] });
+    expect((val("shadow") as { actions: Record<string, boolean> }).actions.message).toBe(true);
+    expect(liveNow()).toEqual([]);
+    // the revert of b round-trips to message live
+    const rv = await run("set_shadow", { value: b.revert.value });
+    expect(rv).toMatchObject({ ok: true, live_actions: ["message"] });
+    expect(liveNow()).toEqual(["message"]);
+    // back to the seed
+    expect(await run("set_shadow", { value: { global: true, actions: Object.fromEntries(PUBLISHED.map((x) => [x, null])) } })).toMatchObject({ ok: true, live_actions: [] });
+    expect(val("shadow")).toEqual({ global: true, actions: {} });
+  });
+
   it("the SQL refuses a write when the kill switch is ON even if the plan was made while it was OFF (the race), and writes NOTHING", async () => {
     // plan against a state where the switch is OFF, apply after it flipped ON: do exactly what runCommand's statement does
     psql(`UPDATE steward_config SET value = '{"on":true}'::jsonb WHERE key = 'kill_switch';`);
