@@ -128,6 +128,11 @@ export const START_GATE_RECORDER_READY_MS = 300_000;
 /** the newest recorder.status row must be this young (kiosk-health re-emits at least every 300 s) for the ready streak to count */
 export const START_GATE_RECORDER_LATEST_MAX_MS = 420_000;
 
+/** S5 (Rooms Live v1.7): a session_died episode ends when the room has been ok this long; until then a flap back into session_died is the SAME episode (no second message). */
+export const DIED_EPISODE_OK_MS = 10 * MIN;
+/** S5: an episode row that is neither refreshed (the loop refreshes a held decision every 15 min) nor closed by a "cleared" row for this long is a dead episode (the loop stopped seeing the room). */
+export const DIED_EPISODE_STALE_MS = 20 * MIN;
+
 /** Rules whose decision means "this room is failing", the fleet-incident classes. */
 export const FAILING_RULES: readonly string[] = ["not_recording", "session_died", "kiosk_asleep", "kiosk_health_down", "mic_fault", "profile_unloaded", "extension_missing"];
 
@@ -514,6 +519,53 @@ function notRecording(c: Ctx): Decision[] {
   return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(c) ? { device_missing: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
 }
 
+// ---------------------------------------------------------------------------
+// S5: session_died hysteresis. NO new table: the state is read back from this room's own session_died rows in c.recent.room (the loop already loads every non-'none' row of the
+// last 24 h). Three kinds of row carry it (all rule "session_died"):
+//   params.state "confirming"  log_only, written on the FIRST tick the condition holds. It acts on nothing; the NEXT tick that finds it as the newest row (the condition therefore
+//                              held on both ticks: a tick where it did not hold writes a "cleared" row, see below) is the second consecutive tick and the decision fires.
+//   params.state "cleared"     log_only, written (decideRoom, as the closing row) on the first tick the room is no longer session_died while an episode is open. "The room has been ok"
+//                              is measured from this row.
+//   anything else              the ladder rows (scribe_restart / waiting / ticket / message). While the newest row is one of these the condition has held continuously (the loop refreshes it).
+// An episode is every session_died row back to a "cleared" row that was followed by >= DIED_EPISODE_OK_MS of ok. A flap that returns sooner is the same episode, so it cannot send a second message.
+// ---------------------------------------------------------------------------
+type DiedEpisode = {
+  /** the condition is confirmed on this tick (a continuing fired episode, or a "confirming" row from an earlier tick with nothing newer) */
+  confirmed: boolean;
+  /** a session_died message was already decided in this episode */
+  messageSent: boolean;
+  /** the newest session_died row is not a "cleared" row and is not stale: an episode is open and needs a closing row when the room stops failing */
+  openUncleared: number | null;
+};
+const diedState = (r: RecentAction): "confirming" | "cleared" | "fired" => (r.params?.state === "confirming" ? "confirming" : r.params?.state === "cleared" ? "cleared" : "fired");
+
+function diedEpisode(c: Ctx): DiedEpisode {
+  const rows = c.recent.room.filter((r) => r.rule === "session_died" && c.A >= Date.parse(r.ts)).sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+  const none: DiedEpisode = { confirmed: false, messageSent: false, openUncleared: null };
+  const n = rows[0];
+  if (!n) return none;
+  const nAge = c.A - Date.parse(n.ts);
+  const nState = diedState(n);
+  let confirmed = false;
+  let openUncleared: number | null = null;
+  if (nState === "cleared") {
+    if (nAge >= DIED_EPISODE_OK_MS) return none; // ok for 10 min: the episode is over
+  } else {
+    if (nAge > DIED_EPISODE_STALE_MS) return none;
+    openUncleared = Date.parse(n.ts);
+    confirmed = nState === "fired" || nAge > 0;
+  }
+  let messageSent = false;
+  let newerTs = c.A;
+  for (const r of rows) {
+    const t = Date.parse(r.ts);
+    if (diedState(r) === "cleared" && newerTs - t >= DIED_EPISODE_OK_MS) break; // the room was ok long enough after this row: older rows are an earlier episode
+    if (r.action === "message") messageSent = true;
+    newerTs = t;
+  }
+  return { confirmed, messageSent, openUncleared };
+}
+
 function sessionDied(c: Ctx): Decision[] | null {
   const { s, age } = c;
   if (s.recording.session_open !== true || s.recording.session_status !== "recording") return null;
@@ -533,9 +585,14 @@ function sessionDied(c: Ctx): Decision[] | null {
   const recorderClosed = rs?.session_open === false;
   if (recorderStale === false && !recorderClosed) return null;
   const rsFact = { recorder_stale: recorderStale };
+  const ep = diedEpisode(c);
   const why = `no chunk for ${Math.round(chunkAge / MIN)} min and ${
     recorderClosed ? "the recorder says no session is open" : recorderStale === "unknown" ? "kiosk-health is absent or stale (recorder state unknown)" : "recorder.status is stale"
   }`;
+  // S5: the first tick of a session_died is only noted. It fires on the next tick that still finds the condition (2 consecutive ticks, ticks are 1 min apart).
+  if (!ep.confirmed) {
+    return [mk(c, "session_died", "log_only", { state: "confirming" }, `${why}; first tick, waiting for a second before acting`, "session_died held: needs 2 consecutive ticks", "warn", { recorder_closed: recorderClosed }, { ...rsFact })];
+  }
   const restarts = rowsOf(c, "scribe_restart", LADDER_MEMORY_MS);
   const appRestarts = rowsOf(c, "ticket:restart_recorder_app", LADDER_MEMORY_MS);
   if (restarts.length === 0) return fcAll([mk(c, "session_died", "scribe_restart", {}, why, null, "error", { recorder_closed: recorderClosed, restarts: 0, ...rsFact })], "session_died");
@@ -545,6 +602,10 @@ function sessionDied(c: Ctx): Decision[] | null {
   }
   if (recorderClosed && appRestarts.length === 0) {
     return fcAll([mk(c, "session_died", "ticket:restart_recorder_app", {}, `${why}; scribe_restart did not recover it`, null, "error", { recorder_closed: true, restarts: restarts.length, ...rsFact })], "session_died");
+  }
+  // S5: one message per episode, until the room has been ok for 10 min
+  if (ep.messageSent) {
+    return fcAll([mk(c, "session_died", "log_only", { state: "message_sent" }, `${why}; restart ladder exhausted`, "message held: already sent for this episode (room not ok for 10 min since)", "warn", { recorder_closed: recorderClosed }, { ...rsFact })], "session_died");
   }
   return fcAll([
     mk(
@@ -780,6 +841,12 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
   if (!Number.isFinite(A)) throw new Error("decideRoom: bad asOf");
   const c: Ctx = { s: sense, cfg, A, win: windowAt(cfg, sense.kind, A), recent, age: mkAge(A) };
   const ds = guards(c, chain(c));
+  // S5: the room is no longer session_died while an episode is open: one closing row, so "ok for 10 min" can be measured from it
+  const open = diedEpisode(c).openUncleared;
+  const p0 = ds[0];
+  if (open !== null && p0 && p0.rule !== "session_died" && p0.failing_class !== "session_died") {
+    ds.push(mk(c, "session_died", "log_only", { state: "cleared", closes: new Date(open).toISOString() }, `room ${sense.room_name}: no longer session_died; an episode is closed once the room has been ok for 10 min`, null, "info", {}, {}));
+  }
   // F2: the device reappeared while an episode is open: one closing row (log_only), so a later disappearance is a NEW episode with a new alert
   if (deviceEpisodeOpen(c) && deviceSeenAgain(c)) {
     ds.push(mk(c, "device_missing", "log_only", { state: "back" }, `room ${sense.room_name}: the input device is back; the missing-device episode is closed`, null, "info", {}, {}));

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEGRADED_NOTE, GROUND, counts, groupOf, type Group } from "@/lib/rooms-live/present";
 import type { RoomRow, Snapshot } from "@/lib/rooms-live/snapshot";
 import { chipAlarm, durationOf, sortAttention, type EscalationLevel } from "@/lib/rooms-live/escalation";
+import { stripView } from "@/lib/rooms-live/steward-lines";
 import { RoomDetail } from "./RoomDetail";
 import { RoomTile } from "./RoomTile";
 
@@ -150,6 +151,9 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
   );
   const alarm = chipAlarm(attention.map((a) => a.level));
   const openRow = rows.find((r) => r.room_id === open) ?? null;
+  const strip = stripView(snap?.steward_status, now);
+  const stripColors = { ok: { bg: "#E6F1EC", fg: "#1D6B57" }, amber: { bg: "#FBE9D6", fg: "#8A3F05" }, red: { bg: "#7A1410", fg: "#FFFFFF" }, off: { bg: "#ECEBE6", fg: "#22262B" }, unavailable: { bg: "#ECEBE6", fg: "#4F535A" } }[strip.tone];
+  const changes = snap?.changes_today ?? [];
   const stamp = new Date(now).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
   return (
@@ -174,6 +178,9 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
           </span>
         </div>
       </header>
+      {snap ? (
+        <p data-testid="steward-strip" data-tone={strip.tone} role="status" style={{ background: stripColors.bg, color: stripColors.fg, borderRadius: 10, padding: "8px 12px", fontSize: 14, margin: "0 0 12px", fontWeight: strip.tone === "red" ? 700 : 400 }}>{strip.text}</p>
+      ) : null}
       {snap && snap.degraded.length > 0 ? <p role="status" style={{ background: "#FBE9D6", color: "#8A3F05", borderRadius: 10, padding: "8px 12px", fontSize: 14 }}>{DEGRADED_NOTE}</p> : null}
       {notice ? <p role="status" style={{ background: "#ECEBE6", borderRadius: 10, padding: "10px 12px", fontSize: 15, fontWeight: 700 }}>{notice}</p> : null}
       {askFor ? (
@@ -208,6 +215,18 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
           </section>
         );
       })}
+      {changes.length > 0 ? (
+        <section aria-label="Changes today" style={{ marginBottom: 18 }}>
+          <h2 style={{ fontSize: 17, margin: "0 0 4px" }}>Changes today <span style={{ color: "#4F535A", fontWeight: 400 }}>({changes.length})</span></h2>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
+            {changes.map((c, i) => (
+              <li key={`${c.room_id}-${c.at}-${i}`} style={{ background: "#fff", border: "1px solid #E4E2DC", borderRadius: 8, padding: "6px 10px" }}>
+                <b>{c.label}</b> · {c.text} <span style={{ background: "#ECEBE6", color: "#4F535A", borderRadius: 999, padding: "1px 8px", fontSize: 12, marginLeft: 4 }}>Steward</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       <footer style={{ marginTop: 24, fontSize: 13, color: "#4F535A" }}>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 8, minHeight: 44 }}>
           <input type="checkbox" checked={eng} onChange={toggleEng} style={{ width: 20, height: 20 }} /> Engineering details

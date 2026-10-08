@@ -50,6 +50,7 @@ export function RoomTile({ row, nowMs, eng, calm, level, durMs, canClaim, onClai
       <SoundBar row={row} onDark={!!st && (level === 3 || level === 4)} />
       <div style={{ fontSize: 16, fontWeight: 600, color: st ? fg : c.fg }}>{headline(row)}</div>
       {(problem || row.state === "unknown") && first ? <div style={{ fontSize: 15 }}>{first}</div> : null}
+      {row.steward_line ? <div data-testid="steward-line" style={{ fontSize: 13, color: sub }}>{row.steward_line.text}</div> : null}
       {showNoDoctorNote(row) ? <div style={{ fontSize: 14, color: sub }}>{NO_DOCTOR_PROBLEM_NOTE}</div> : null}
       {since && (esc || row.state_since !== null) ? <div style={{ fontSize: 13, color: sub, fontWeight: st?.boldFor ? 800 : 400 }}>{since}</div> : null}
       {eng ? (

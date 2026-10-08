@@ -32,6 +32,7 @@ function fakeDb(o: { wh?: Wh[]; failWh?: boolean; whCalls?: string[] } = {}): Db
     if (text.includes("FROM kiosk_health_events")) return [{ machine: MACHINE, received_at: iso(NOW - 20_000) }];
     if (text.includes("FROM pulse_presence_events")) return [{ machine: MACHINE, ts: iso(NOW - 10_000), enc: null }];
     if (text.includes("FROM steward_decisions")) return [];
+    if (text.includes("FROM steward_config")) return []; // v1.7: the status strip read ([] = "Steward status unavailable", not a degraded read)
     void vals;
     throw new Error("unexpected statement " + text.slice(0, 60));
   }) as unknown as Db;

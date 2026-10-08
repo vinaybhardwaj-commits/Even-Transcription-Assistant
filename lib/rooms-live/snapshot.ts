@@ -22,6 +22,9 @@ import {
   readOccupancy,
   readSessions,
   readSteward,
+  readStewardActions,
+  readStewardConfig,
+  readStewardLog,
   readWarehouseConsults,
   type Db,
   type ExtRow,
@@ -30,9 +33,12 @@ import {
   type LevelDbRow,
   type ListenerRow,
   type SessionRow,
+  type StewardLogRow,
   type StewardRow,
   type WarehouseConsultRow,
 } from "./read";
+import { STATUS_KEYS, statusFromRows } from "./steward-status";
+import { cardLine, isChange, lineOf, type StewardLine, type StewardStatus } from "./steward-lines";
 import { computeState, type LevelRow, type RoomStateName, type StateInput } from "./state";
 
 export type RoomRow = {
@@ -49,10 +55,25 @@ export type RoomRow = {
   device: { name: string | null; missing: boolean };
   session: { open: boolean; since: string | null; chunk_age_s: number | null };
   steward: { action: string; mode: string; at: string } | null;
+  /** v1.7 S2: the one plain-words Steward line for the card (newest action of the last 60 min, else the hold line), or null */
+  steward_line: StewardLine | null;
+  /** v1.7 S4: this room's last 20 non-ok decisions, newest first (the Details view) */
+  steward_log: StewardLine[];
   claim: ClaimView | null;
   ages_s: { listener: number | null; heartbeat: number | null; ext: number | null };
 };
-export type Snapshot = { generated_at: string; rooms: RoomRow[]; degraded: string[] };
+/** v1.7 S3: a Steward action or alert (live or shadow) of today, tagged "Steward" */
+export type ChangeRow = StewardLine & { room_id: string; label: string; tag: "Steward" };
+export type Snapshot = {
+  generated_at: string;
+  rooms: RoomRow[];
+  degraded: string[];
+  /** v1.7 S1: the strip's data; the page says "Steward status unavailable" for state "unavailable" */
+  steward_status: StewardStatus;
+  /** v1.7 S3: today's Steward changes, newest first, at most 50 */
+  changes_today: ChangeRow[];
+};
+export const CHANGES_MAX = 50;
 
 export const MEMO_MS = 2000;
 /** a warehouse consult closed longer ago than this is no longer "in consultation" */
@@ -112,7 +133,7 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     try {
       return { v: await raceTimeout(fn, tmo), ok: true };
     } catch {
-      degraded.push(name);
+      if (!degraded.includes(name)) degraded.push(name); // v1.7: the Steward's three decision reads share one name
       return { v: null, ok: false };
     }
   };
@@ -121,14 +142,24 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   const ROOMS: readonly RoomDef[] = deps.rooms ?? (await raceTimeout(() => loadRoster(deps.db, now), tmo).catch(() => ROOMS_DEFAULT));
   const ROOM_IDS = ROOMS.map((r) => r.room_id);
 
-  const [lis, ins, ses, lev, ste, clm] = await Promise.all([
+  const istDayStart = new Date(Math.floor((now + 19_800_000) / 86_400_000) * 86_400_000 - 19_800_000).toISOString();
+  const [lis, ins, ses, lev, ste, clm, scf, slog, sact] = await Promise.all([
     safe("bench_listener", () => readListeners(deps.db, ROOM_IDS)),
     safe("room_install", () => readInstalls(deps.db, ROOM_IDS)),
     safe("bench_session", () => readSessions(deps.db, ROOM_IDS, asOf)),
     safe("bench_level_sample", () => readLevels(deps.db, ROOM_IDS, asOf, today, yesterday)),
     safe("steward_decisions", () => readSteward(deps.db, ROOM_IDS, asOf)),
     safe("rooms_live_claim", async () => (deps.claims ? await deps.claims.open() : [])),
+    safe("steward_config", () => readStewardConfig(deps.db, STATUS_KEYS)),
+    safe("steward_decisions", () => readStewardLog(deps.db, ROOM_IDS, asOf)),
+    safe("steward_decisions", () => readStewardActions(deps.db, ROOM_IDS, asOf, istDayStart)),
   ]);
+  // v1.7: a failed or unreadable steward_config is "Steward status unavailable" on the page; the cards still render
+  const stewardStatus: StewardStatus = scf.ok && scf.v ? statusFromRows(scf.v) : { state: "unavailable" };
+  const logBy = new Map<string, StewardLogRow[]>();
+  for (const r of slog.v ?? []) logBy.set(r.room_id, [...(logBy.get(r.room_id) ?? []), r]);
+  const actBy = new Map<string, StewardLogRow[]>();
+  for (const r of sact.v ?? []) actBy.set(r.room_id, [...(actBy.get(r.room_id) ?? []), r]);
 
   const installBy = new Map<string, InstallRow>((ins.v ?? []).map((r) => [r.room_id, r]));
   // machine spellings per room, from the install hostname
@@ -247,6 +278,8 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
       device: r.device,
       session: { open: input.session.open, since: input.session.since === null ? null : new Date(input.session.since).toISOString(), chunk_age_s: input.session.chunk_age_s },
       steward: sdec ? { action: sdec.action, mode: sdec.mode, at: sdec.ts } : null,
+      steward_line: cardLine(actBy.get(def.room_id) ?? [], now),
+      steward_log: (logBy.get(def.room_id) ?? []).slice(0, 20).map(lineOf),
       claim: null,
       ages_s: { listener: r1(r.ages_s.listener), heartbeat: r1(r.ages_s.heartbeat), ext: r1(r.ages_s.ext) },
     };
@@ -265,7 +298,13 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     if (!resolved) row.claim = toView(c);
   }
   if (deps.claims && clm.ok) forgetStreaksExcept((clm.v ?? []).map((c) => c.room_id));
-  return { generated_at: asOf, rooms, degraded };
+  const labelOf = new Map(rooms.map((r) => [r.room_id, r.label]));
+  const changes_today: ChangeRow[] = (sact.v ?? [])
+    .filter((r) => isChange(r) && labelOf.has(r.room_id) && Date.parse(r.ts) >= Date.parse(istDayStart))
+    .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+    .slice(0, CHANGES_MAX)
+    .map((r) => ({ ...lineOf(r), room_id: r.room_id, label: labelOf.get(r.room_id)!, tag: "Steward" as const }));
+  return { generated_at: asOf, rooms, degraded, steward_status: stewardStatus, changes_today };
 }
 
 // ---------------------------------------------------------------------------

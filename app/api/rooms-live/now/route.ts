@@ -26,6 +26,8 @@ export async function GET(req: Request) {
     const empty: Snapshot = {
       generated_at: new Date().toISOString(),
       degraded: ["snapshot"],
+      steward_status: { state: "unavailable" },
+      changes_today: [],
       rooms: (await loadRoster(sql as never).catch(() => ROOMS)).map((r) => ({
         room_id: r.room_id,
         label: r.label,
@@ -39,6 +41,8 @@ export async function GET(req: Request) {
         device: { name: null, missing: false },
         session: { open: false, since: null, chunk_age_s: null },
         steward: null,
+        steward_line: null,
+        steward_log: [],
         claim: null,
         ages_s: { listener: null, heartbeat: null, ext: null },
       })),
