@@ -1398,7 +1398,20 @@ public actor RoomEngine {
       } catch {
         lastError = bounded(error)
         try? saveStatus(preferred: .offline)
-        try await Task.sleep(nanoseconds: backoffNanoseconds)
+        // Sleep the poll back-off in 1 s slices. A capture process that exits meanwhile (exit 76
+        // mic-mode restart) is finished and relaunched at once, not after the full back-off.
+        var remaining = backoffNanoseconds
+        while remaining > 0 {
+          let slice = min(remaining, 1_000_000_000)
+          try await Task.sleep(nanoseconds: slice)
+          remaining -= slice
+          do {
+            try await finishUnexpectedCaptureIfNeeded()
+          } catch {
+            lastError = bounded(error)
+            try? saveStatus()
+          }
+        }
         backoffNanoseconds = min(backoffNanoseconds * 2, 30_000_000_000)
       }
     }
@@ -3675,6 +3688,7 @@ public actor RoomEngine {
       currentSessionID: sessionID,
       nextSessionID: nextSessionID,
       pieceEndedAt: lastPieceEndedAt)
+    if nextSessionID != sessionID { lastEvent = nil }
     sessionID = nextSessionID
   }
 }

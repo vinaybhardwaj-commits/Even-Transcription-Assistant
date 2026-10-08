@@ -388,11 +388,22 @@ private final class ScriptedLauncher: RoomCaptureLaunching, @unchecked Sendable 
 /// The server never answers: every call after the first active-session read throws.
 private actor DeadRemote: RoomEngineRemote {
   private let inner: R4Remote
+  private let other: R4Remote
   private var activeCalls = 0
-  init() { inner = R4Remote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: []) }
+  private var reachable = false
+  init() {
+    inner = R4Remote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: [])
+    other = R4Remote(
+      activeSessionJSON: R4Fixture.recordingActiveJSON.replacingOccurrences(
+        of: "bs_r4", with: "bs_r5"),
+      polls: [])
+  }
+  /// From now on the active-session read answers with a different recording session.
+  func comeBackWithNewSession() { reachable = true }
   func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
     activeCalls += 1
     if activeCalls == 1 { return try await inner.activeSession(tabID: tabID, since: since) }
+    if reachable { return try await other.activeSession(tabID: tabID, since: since) }
     throw URLError(.notConnectedToInternet)
   }
   func createSession(label: String?, micLabel: String?) async throws -> CreateSessionResponse {
@@ -424,14 +435,14 @@ private actor DeadRemote: RoomEngineRemote {
     var all: [String] { lock.withLock { items } }
   }
 
-  private func start(_ launcher: ScriptedLauncher, lines: Lines, root: URL) async throws
-    -> (RoomEngine, Task<Void, Error>)
-  {
+  private func start(
+    _ launcher: ScriptedLauncher, lines: Lines, root: URL, remote: DeadRemote = DeadRemote()
+  ) async throws -> (RoomEngine, Task<Void, Error>) {
     try RoomPersistence(root: root).saveConfiguration(try R4Fixture.configuration())
     let engine = try await RoomEngine.load(
       rootURL: root,
       enrolmentReader: R4Fixture.enrolled,
-      remoteFactory: { _ in DeadRemote() },
+      remoteFactory: { _ in remote },
       captureLauncher: launcher,
       pieceRunner: R4FakeEncoder(),
       updaterFactory: { _, _, _ in nil },
@@ -452,8 +463,11 @@ private actor DeadRemote: RoomEngineRemote {
     MicModeStatus.write(
       MicModeStatus(before: 2, after: 0, set: "ok", at: "2026-10-08T00:00:00.000Z"),
       directory: launcher.directories[0])
+    let exitedAt = Date()
     launcher.exitLatest(status: 76)
     try await R4Fixture.waitUntil { launcher.count == 2 }
+    // The dead server's first poll back-off is 5 s; the relaunch must not wait for it.
+    #expect(Date().timeIntervalSince(exitedAt) < 2)
     // Same session dir, next segment.
     #expect(
       launcher.directories[0].deletingLastPathComponent()
@@ -497,6 +511,35 @@ private actor DeadRemote: RoomEngineRemote {
     #expect(launcher.count == 2)  // the server is dead, so nothing relaunched the third
     let status = try RoomPersistence(root: root).loadStatus()
     #expect(status.state == .failed)
+  }
+
+  @Test func newSessionClearsLastEvent() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let launcher = ScriptedLauncher()
+    let lines = Lines()
+    let remote = DeadRemote()
+    let (_, task) = try await start(launcher, lines: lines, root: root, remote: remote)
+    try await Task.sleep(for: .milliseconds(300))
+    launcher.exitLatest(status: 76)
+    try await R4Fixture.waitUntil { launcher.count == 2 }
+    try await R4Fixture.waitUntil {
+      (try? RoomPersistence(root: root).loadStatus().lastEvent) == "mic_mode_restart"
+    }
+    // A second 76 takes the old path (.failed); the server then answers with another session.
+    launcher.exitLatest(status: 76)
+    try await R4Fixture.waitUntil {
+      (try? RoomPersistence(root: root).loadStatus().state) == .failed
+    }
+    await remote.comeBackWithNewSession()
+    for _ in 0..<4_000 where (try? RoomPersistence(root: root).loadStatus().lastEvent) != nil {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    task.cancel()
+    _ = try? await task.value
+    let status = try RoomPersistence(root: root).loadStatus()
+    #expect(status.lastEvent == nil)
+    #expect(status.lastEventAt == nil)
   }
 
   @Test func exit1KeepsTheOldPath() async throws {
