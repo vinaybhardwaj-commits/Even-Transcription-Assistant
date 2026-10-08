@@ -18,6 +18,7 @@ export type SessionRow = { room_id: string; id: string; status: string; started_
 export type LevelDbRow = { room_id: string; sampled_at: string; peak: number; zero_ratio: number | null };
 export type HeartbeatRow = { machine: string; received_at: string };
 export type ExtRow = { machine: string; ts: string; has_encounter: boolean };
+export type WarehouseConsultRow = { machine: string; doctor_name: string | null; t_open: string; t_close: string | null };
 export type StewardRow = { room_id: string; action: string; mode: string; ts: string };
 
 const num = (x: unknown): number | null => {
@@ -62,16 +63,16 @@ export async function readSessions(db: Db, ids: readonly string[], asOf: string)
   return rows.map((r) => ({ room_id: String(r.room_id), id: String(r.id), status: String(r.status), started_at: iso(r.started_at), last_chunk_at: tsOrNull(r.last_chunk_at) }));
 }
 
-/** recording level rows of the last 15 min (the baseline and the last-3-polls check); ~26 rows a minute per room */
+/** recording level rows of the last 45 min (the baseline and the 20 s speech check); ~26 rows a minute per room, 8 rooms x 45 min ~ 9,400 */
 export async function readLevels(db: Db, ids: readonly string[], asOf: string, istToday: string, istYesterday: string): Promise<LevelDbRow[]> {
   const rows = (await db`
     SELECT room_id, sampled_at, peak, zero_ratio
       FROM bench_level_sample
      WHERE room_id = ANY(${ids}::text[]) AND ist_date IN (${istToday}::date, ${istYesterday}::date)
-       AND sampled_at > ${asOf}::timestamptz - interval '15 minutes' AND sampled_at <= ${asOf}::timestamptz
+       AND sampled_at > ${asOf}::timestamptz - interval '45 minutes' AND sampled_at <= ${asOf}::timestamptz
        AND session_open = true
      ORDER BY sampled_at DESC
-     LIMIT 9000
+     LIMIT 12000
   `) as Array<Record<string, unknown>>;
   return rows.map((r) => ({ room_id: String(r.room_id), sampled_at: iso(r.sampled_at), peak: Number(r.peak), zero_ratio: num(r.zero_ratio) }));
 }
@@ -113,6 +114,22 @@ export async function readExt(db: Db, keys: readonly string[], asOf: string): Pr
      LIMIT 200
   `) as Array<Record<string, unknown>>;
   return rows.map((r) => ({ machine: String(r.machine), ts: iso(r.ts), has_encounter: typeof r.enc === "string" && r.enc.trim().length > 0 }));
+}
+
+/** the newest warehouse-attributed consult per machine opened today (IST): the doctor Pulse itself recorded. Name and times only; no uid is selected. */
+export async function readWarehouseConsults(db: Db, keys: readonly string[], asOf: string | number | Date): Promise<WarehouseConsultRow[]> {
+  const A = new Date(asOf).getTime();
+  const dayStart = new Date(Math.floor((A + 19_800_000) / 86_400_000) * 86_400_000 - 19_800_000).toISOString();
+  const hi = new Date(A).toISOString();
+  const rows = (await db`
+    SELECT DISTINCT ON (w.machine) w.machine, w.consulting_doctor_name, w.t_open, w.t_close
+      FROM eta_encounter_windows w
+     WHERE w.attribution_source = 'warehouse' AND w.machine = ANY(${keys}::text[])
+       AND w.t_open >= ${dayStart}::timestamptz AND w.t_open <= ${hi}::timestamptz
+     ORDER BY w.machine, w.t_open DESC
+     LIMIT 40
+  `) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({ machine: String(r.machine), doctor_name: typeof r.consulting_doctor_name === "string" && r.consulting_doctor_name.trim() ? r.consulting_doctor_name.trim() : null, t_open: iso(r.t_open), t_close: tsOrNull(r.t_close) }));
 }
 
 export async function readOccupancy(db: Db, keys: readonly string[], asOf: string): Promise<ScopedOccupancy[]> {

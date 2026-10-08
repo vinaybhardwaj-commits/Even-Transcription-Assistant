@@ -9,8 +9,9 @@
  *   -  muted     open session AND state_flags SILENT_WHILE_RECORDING (the recorder's own 2-minute test).
  *   -  stale     a stale level never yields muted/quiet/listening by itself: notrec, detail level_stale.
  *   4 muted      ("Mic silent") open session AND a silent sample run >= 60 s. A sample is silent when zero_ratio >= 0.995 OR peak < 0.002 (v1.1). 0.95-0.995 with a live peak is NOT silence (FIX-1 F3b).
- *   5 quiet      open session AND not muted AND 10 s mean rms < max(0.008, 1.5 x the room's p25 rms over the last 15 min).
- *   6 listening  open session AND not muted AND at or above that threshold, or any single row in the last 10 s >= 2.5 x the baseline (never below 0.008).
+ *   5 quiet      open session AND not muted AND fewer than 3 rows >= 1.25 x the floor in the last 20 s and no row >= 2.0 x it (v1.3; the floor is max(0.008, baseline)).
+ *   6 listening  open session AND not muted AND 3 rows >= 1.25 x the floor in the last 20 s, or one row >= 2.0 x it.
+ *   BASELINE (v1.4): p10 of the room's non-mute rms over the last 45 min, after dropping the rows the rule itself calls loud, so sustained consult speech cannot pull its own floor up.
  * LEVEL `stale`: levels_at older than 6 s, OR the identical (rms, zero) pair for more than 6 s. DIGITAL SILENCE IS THE EXCEPTION to the second test: a muted mic
  * legitimately reports (0, 1.0) minute after minute (live: OPD 3), so an identical pair with rms 0 and zero >= 0.95 is not "frozen". A frozen tail after an unplug
  * has a non-zero rms (live: 0.0164 / 0.73, 0.0125 / 0.00) and is caught.
@@ -32,7 +33,8 @@ export const SPEECH_MIN_ROWS = 3;
 export const SPIKE_FACTOR = 2.0;
 /** only the no-baseline path (fewer than BASELINE_MIN_ROWS rows) still uses a mean */
 export const MEAN_WINDOW_S = 10;
-export const BASELINE_WINDOW_S = 15 * 60;
+export const BASELINE_WINDOW_S = 45 * 60;
+export const BASELINE_PERCENTILE = 10;
 export const BASELINE_MIN_ROWS = 30;
 export const STEWARD_OVERLAY_S = 10 * 60;
 export const MUTE_ROW_MAX_AGE_S = 15;
@@ -49,7 +51,7 @@ export type StateInput = {
   session: { open: boolean; since: number | null; chunk_age_s: number | null };
   heartbeat_at: number | null;
   ext_at: number | null;
-  /** recording rows of the last 15 min, any order */
+  /** recording rows of the last 45 min, any order */
   levels: readonly LevelRow[];
   steward: { action: string; mode: string; at: number } | null;
   /** which sources answered; false = that read failed (degraded) */
@@ -72,6 +74,14 @@ export function percentile(values: readonly number[], p: number): number | null 
   if (values.length === 0) return null;
   const s = [...values].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.max(0, Math.round((p / 100) * (s.length - 1))))]!;
+}
+
+/** v1.4: p10 over the window, recomputed without the rows the first pass already calls loud (>= 1.25 x its floor); null under BASELINE_MIN_ROWS rows */
+export function baselineOf(baseRows: readonly LevelRow[]): number | null {
+  if (baseRows.length < BASELINE_MIN_ROWS) return null;
+  const first = percentile(baseRows.map((r) => r.rms), BASELINE_PERCENTILE)!;
+  const quietRows = baseRows.filter((r) => r.rms < SPEECH_FACTOR * Math.max(QUIET_FLOOR, first));
+  return quietRows.length >= BASELINE_MIN_ROWS ? percentile(quietRows.map((r) => r.rms), BASELINE_PERCENTILE) : first;
 }
 
 export function deviceMissing(i: StateInput["install"]): boolean {
@@ -119,7 +129,7 @@ export function computeState(inp: StateInput): StateResult {
   const levelStale = levelAge === null || levelAge > LEVEL_FRESH_S || frozen;
 
   const baseRows = rows.filter((r) => now - r.t <= BASELINE_WINDOW_S * 1000 && !isMuteRow(r));
-  const baseline = baseRows.length >= BASELINE_MIN_ROWS ? percentile(baseRows.map((r) => r.rms), 25) : null;
+  const baseline = baselineOf(baseRows);
   const floor = Math.max(QUIET_FLOOR, baseline ?? 0);
   const speechAt = SPEECH_FACTOR * floor;
   const spikeAt = SPIKE_FACTOR * floor;

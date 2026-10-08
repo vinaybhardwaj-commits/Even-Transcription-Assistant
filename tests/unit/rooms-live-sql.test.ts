@@ -9,8 +9,8 @@ const sqlOf = (text: string): string[] => [...text.matchAll(/\bdb`([^`]*)`/g)].m
 const all = files.flatMap((f) => sqlOf(readFileSync(join(DIR, f), "utf8")).map((s) => ({ f, s })));
 
 describe("every SQL string in lib/rooms-live", () => {
-  it("finds the 10 statements of this module (7 now-reads + the day read + the 2 roster reads; occupancy is imported from lib/steward)", () => {
-    expect(all.length).toBe(10);
+  it("finds the 11 statements of this module (8 now-reads + the day read + the 2 roster reads; occupancy is imported from lib/steward)", () => {
+    expect(all.length).toBe(11);
   });
   it("has a LIMIT", () => {
     for (const { f, s } of all) expect(/\bLIMIT\b/i.test(s), `${f}: ${s.slice(0, 80)}`).toBe(true);
@@ -27,6 +27,19 @@ describe("every SQL string in lib/rooms-live", () => {
       expect(/interval '\d+ (minutes|hours)'/i.test(s), `${f}: time window`).toBe(true);
       expect(/(room_id|machine) = ANY\(\$\{/i.test(s), `${f}: allow-list`).toBe(true);
     }
+  });
+  it("the warehouse consult read is capped, scoped to the allow-list, to the warehouse source and to today, and selects no uid", () => {
+    const s = all.find((x) => /FROM eta_encounter_windows/.test(x.s))!.s;
+    expect(s).toMatch(/attribution_source = 'warehouse'/);
+    expect(s).toMatch(/machine = ANY\(\$\{/);
+    expect(s).toMatch(/DISTINCT ON \(w\.machine\)/);
+    expect(s).toMatch(/LIMIT 40\b/);
+    expect(s).not.toMatch(/doctor_uid/);
+  });
+  it("the level read covers 45 minutes and LIMIT 12000", () => {
+    const s = all.find((x) => /FROM bench_level_sample/.test(x.s))!.s;
+    expect(s).toMatch(/interval '45 minutes'/);
+    expect(s).toMatch(/LIMIT 12000\b/);
   });
   it("is read-only: no INSERT / UPDATE / DELETE / DDL anywhere in the module", () => {
     for (const f of files) {

@@ -55,7 +55,8 @@ describe("SPEC fixtures", () => {
   });
   it("C270 ambient rms 0.010 with p25 0.009 -> quiet", () => {
     const r = computeState(input({ levels: rows(200, (i) => ({ rms: i < 4 ? [0.0100, 0.0102, 0.0098, 0.0101][i]! : [0.0085, 0.009, 0.0105, 0.0105][i % 4]!, zero: 0.001 })) }));
-    expect(r.baseline_rms).toBeCloseTo(0.009, 3);
+    expect(r.baseline_rms).toBeGreaterThan(0.0082); // v1.4: p10, not p25
+    expect(r.baseline_rms).toBeLessThan(0.0095);
     expect(r.state).toBe("quiet");
   });
   it("speech rms 0.035 -> listening", () => {
@@ -288,5 +289,50 @@ describe("v1.1: a dead input is silent by peak as well as by zero_ratio", () => 
   it("one live row inside the run breaks it", () => {
     const lv = tail(90_000, (t) => (t === NOW - 30_000 ? { rms: 0.02, zero: 0.001 } : { rms: 0.0005, zero: 0.9 }));
     expect(computeState(input({ levels: lv })).state).not.toBe("muted");
+  });
+});
+
+describe("v1.4: baseline is p10 over 45 min, minus the rows the rule calls loud", () => {
+  const MIN = 60_000;
+  /** a series ending at NOW, one row every 2.3 s over `spanMin` minutes; fn(ageS) gives the row */
+  const series = (spanMin: number, fn: (ageS: number) => number): LevelRow[] => {
+    const n = Math.floor((spanMin * 60) / 2.3);
+    return Array.from({ length: n }, (_, i) => ({ t: NOW - Math.round(i * 2300), rms: fn(i * 2.3), zero: 0.001 + (i % 3) * 0.0004 })).reverse();
+  };
+  const jit = (mid: number, i: number) => mid * (1 + ((Math.round(i) % 7) - 3) * 0.02);
+
+  it("10 min of a 0.009 floor then 30 min of speech at 1.3-1.6x it stays listening", () => {
+    const lv = series(40, (age) => (age <= 30 * 60 ? 0.009 * (1.3 + ((Math.round(age) % 4) * 0.1)) : jit(0.009, age)));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeLessThan(0.0095);
+    expect(r.baseline_rms).toBeGreaterThan(0.0084);
+    expect(r.state).toBe("listening");
+    expect(lv[lv.length - 1]!.t).toBe(NOW);
+    expect(NOW - lv[0]!.t).toBeGreaterThan(39 * MIN);
+  });
+  it("floor-only rows (45 min at 0.009) stay quiet", () => {
+    const r = computeState(input({ levels: series(45, (age) => jit(0.009, age)) }));
+    expect(r.state).toBe("quiet");
+    expect(r.baseline_rms).toBeGreaterThan(0.0082); // p10 of +-6 % jitter around 0.009
+    expect(r.baseline_rms).toBeLessThan(0.0095);
+  });
+  it("Dietary-shaped series (floor 0.0195): 3 rows >= 0.0244 in 20 s reads listening; 2 such rows reads quiet", () => {
+    const base = (hot: number[]) => series(45, (age) => (hot.some((h) => Math.abs(age - h) < 1.1) ? 0.0250 : jit(0.0195, age)));
+    const on = computeState(input({ levels: base([0, 4.6, 9.2]) }));
+    expect(on.baseline_rms).toBeGreaterThan(0.0178);
+    expect(on.baseline_rms).toBeLessThan(0.0200);
+    expect(on.state).toBe("listening");
+    expect(computeState(input({ levels: base([0, 4.6]) })).state).toBe("quiet");
+  });
+  it("speech that fills the whole 45 min cannot drag the floor to itself: baseline stays at the quiet end", () => {
+    // 75 % of rows are speech at 1.4 x 0.009; p10 of all rows is still the floor rows
+    const lv = series(45, (age) => (age % 8 < 2 ? jit(0.009, age) : 0.009 * 1.4));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeLessThan(0.0095);
+    expect(r.state).toBe("listening");
+  });
+  it("the window is 45 min: rows older than that are ignored", () => {
+    const old = series(60, (age) => (age > 45 * 60 ? 0.05 : jit(0.009, age)));
+    expect(computeState(input({ levels: old })).baseline_rms).toBeLessThan(0.0095);
   });
 });
