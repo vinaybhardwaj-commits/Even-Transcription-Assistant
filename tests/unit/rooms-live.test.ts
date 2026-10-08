@@ -565,3 +565,52 @@ describe("the state rules stay importable from a browser bundle", () => {
     expect(fromLib.roomState).toBe(fromPure.roomState);
   });
 });
+
+// ===========================================================================
+// Arch #15 (arch-refuter-a pin c): the failed-start ack window AT THE CALL SITE in readRoomsLive
+// ===========================================================================
+
+describe("readRoomsLive — a failed start_day ack counts as death evidence only inside the session's window", () => {
+  const started = NOW - 3_600_000;
+  const ended = started + 15_000;
+  const run = async (ackAt: number | null) => {
+    appCalls.length = 0;
+    appResponder = (text) => {
+      if (/FROM room WHERE/.test(text)) return [ROOM];
+      if (/FROM bench_session s/.test(text)) {
+        return [{ id: "bs_dead", room_id: ROOM.id, status: "ended", started_at: new Date(started), ended_at: new Date(ended), last_primary_at: null, last_backup_at: null, backup_chunks: 0, primary_chunks: 0, chunks_after_end: 0, notes: null }];
+      }
+      if (/FROM bench_command/.test(text)) return ackAt === null ? [] : [{ room_id: ROOM.id, acked_at: new Date(ackAt) }];
+      return [];
+    };
+    const out = await readRoomsLive(new Date(NOW));
+    return { room: out.rooms[0]!, degraded: out.degraded };
+  };
+
+  it("an ack 3 min after the end (the edge) is evidence: the dead start is flagged", async () => {
+    const { room } = await run(ended + 180_000);
+    expect(room.last_session_ended).toBe(true);
+    expect(room.last_session_start_failed).toBe(true);
+  });
+  it("an ack 1 ms past the edge, an hour later, or none at all is NOT: it stays an ordinary Finished", async () => {
+    for (const ack of [ended + 180_001, ended + 3_600_000, null]) {
+      const { room } = await run(ack);
+      expect(room.last_session_start_failed, `ack ${ack}`).toBe(false);
+      expect(room.last_session_ended).toBe(true);
+    }
+  });
+  it("the ack read is its own start_day / failed query, and a fault in it degrades only that source", async () => {
+    await run(ended);
+    const q = appCalls.find((c) => /FROM bench_command/.test(c.text))!;
+    expect(q.text).toMatch(/kind = 'start_day' AND status = 'failed'/);
+    appResponder = (text) => {
+      if (/FROM room WHERE/.test(text)) return [ROOM];
+      if (/FROM bench_session s/.test(text)) return [{ id: "bs_dead", room_id: ROOM.id, status: "ended", started_at: new Date(started), ended_at: new Date(ended), last_primary_at: null, last_backup_at: null, backup_chunks: 0, primary_chunks: 0, chunks_after_end: 0, notes: null }];
+      if (/FROM bench_command/.test(text)) throw new Error("boom");
+      return [];
+    };
+    const out = await readRoomsLive(new Date(NOW));
+    expect(out.degraded.some((d) => d.startsWith("start_acks_unavailable"))).toBe(true);
+    expect(out.rooms[0]!.last_session_start_failed).toBe(false);
+  });
+});

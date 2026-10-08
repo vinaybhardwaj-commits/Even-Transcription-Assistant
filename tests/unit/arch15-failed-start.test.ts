@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { NOTE_ROLLOVER, NOTE_STALL } from "../../lib/bench-reaper-core";
 import { roomState, sessionDiedAtStart, START_FAILED_MAX_MS, START_FAILED_NOTE } from "../../lib/bench-bus-constants";
 import { buildRoomLive, failedAckBelongsToSession } from "../../lib/admin/rooms-live";
 import { startBlockedReason } from "../../components/admin/BenchRoomsLive";
@@ -122,6 +123,20 @@ describe("failed-ack window (pins the +180 s edge: a +60 min mutant must fail)",
     expect(failedAckBelongsToSession(NOW + 60 * 60_000, sess, NOW)).toBe(false);
     expect(failedAckBelongsToSession(NOW - 15_000 - 60_000, sess, NOW)).toBe(true);
     expect(failedAckBelongsToSession(NOW - 15_000 - 60_001, sess, NOW)).toBe(false);
+  });
+});
+
+describe("the reaper-note literals in bench-bus-constants are the reaper's own notes (pin a)", () => {
+  it("bench-bus-constants stays import-free, so it spells the notes out; they must equal NOTE_STALL / NOTE_ROLLOVER exactly", () => {
+    const src = readFileSync("lib/bench-bus-constants.ts", "utf8");
+    expect(src).toContain(`"${NOTE_STALL}"`);
+    expect(src).toContain(`"${NOTE_ROLLOVER}"`);
+  });
+  it("and the verdict honours the constants themselves, not just the copy of their text", () => {
+    const base = { status: "ended", started_at: iso(NOW - 15_000), ended_at: iso(NOW), primary_chunks: 0, backup_chunks: 0 } as never;
+    expect(sessionDiedAtStart({ ...(base as object), notes: NOTE_STALL } as never)).toBe(true);
+    expect(sessionDiedAtStart({ ...(base as object), notes: NOTE_ROLLOVER } as never)).toBe(true);
+    expect(sessionDiedAtStart({ ...(base as object), notes: "auto-ended: something else (reaper)" } as never)).toBe(false);
   });
 });
 
