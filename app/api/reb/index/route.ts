@@ -4,7 +4,7 @@
  * POST  Authorization: Bearer ${REB_INDEX_TOKEN} (constant-time; 401 wrong/missing; 503 when REB_INDEX_TOKEN is unset).
  *       Body: one row object or an array of 1..500 rows. Row fields: window_id, ist_date (YYYY-MM-DD), room_id, layer, engine, version,
  *       config_hash, status (ok|empty|failed|skipped), r2_key, sha256 (64 hex) required; t0_ms, t1_ms, bytes (integers), model, reason, machine,
- *       started_at, finished_at (ISO timestamps), shadow (boolean, default false) optional. A bad row -> 400 naming the row index; nothing is written.
+ *       started_at, finished_at (ISO 8601 with zone), shadow (boolean, default false) optional. A bad row -> 400 naming the row index; nothing is written.
  *       INSERT ... ON CONFLICT (window_id, layer, engine, version, config_hash, shadow) DO NOTHING. A row that hits the key is "existing" when the
  *       stored sha256 equals the sent one, a conflict when it differs (the stored row is never changed).
  *       -> { ok, inserted, existing, conflicts: [{ key, stored_sha, sent_sha }] }; HTTP 409 when conflicts is non-empty (inserted rows stand).
@@ -36,6 +36,9 @@ const isDay = (d: string): boolean => {
   const t = new Date(`${d}T00:00:00Z`).getTime();
   return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === d;
 };
+
+/** ISO 8601 date-time with an explicit zone (what Postgres timestamptz accepts unambiguously); JS Date alone also takes "1". */
+const ISO_TS = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}(:?\d{2})?)$/;
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
 
@@ -87,7 +90,7 @@ function parseRow(raw: unknown): Row | string {
   for (const k of OPTIONAL_TS) {
     const v = r[k];
     if (v === undefined || v === null) out[k] = null;
-    else if (typeof v === "string" && !Number.isNaN(new Date(v).getTime())) out[k] = v;
+    else if (typeof v === "string" && ISO_TS.test(v) && !Number.isNaN(new Date(v).getTime())) out[k] = v;
     else return `${k} must be an ISO timestamp or null`;
   }
   const d = r.ist_date;

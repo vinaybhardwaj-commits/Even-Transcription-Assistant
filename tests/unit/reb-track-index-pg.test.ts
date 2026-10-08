@@ -157,4 +157,6 @@ describe.skipIf(!HAVE_DOCKER)("0135 reb_track_index over real postgres", () => {
     expect(seen).toEqual(all.rows.map((r: { id: number }) => r.id)); // the pages add up to the unpaged read
     expect(cursor).toBeNull();
   });
+
+  it("teardown", () => { pg.stop(); });
 });

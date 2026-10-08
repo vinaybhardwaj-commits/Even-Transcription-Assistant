@@ -64,12 +64,16 @@ describe("POST validation", () => {
   });
   it.each([
     [{ window_id: "" }, /window_id/], [{ room_id: undefined }, /room_id/], [{ ist_date: "2026-02-30" }, /ist_date/], [{ ist_date: "2026-13-01" }, /ist_date/], [{ ist_date: "06-10-2026" }, /ist_date/],
-    [{ sha256: "abc" }, /sha256/], [{ shadow: "yes" }, /shadow/], [{ t0_ms: 1.5 }, /t0_ms/], [{ bytes: -1 }, /bytes/], [{ started_at: "not a time" }, /started_at/],
+    [{ sha256: "abc" }, /sha256/], [{ shadow: "yes" }, /shadow/], [{ t0_ms: 1.5 }, /t0_ms/], [{ bytes: -1 }, /bytes/], [{ started_at: "not a time" }, /started_at/], [{ started_at: "1" }, /started_at/], [{ finished_at: "2026-10-06" }, /finished_at/], [{ started_at: "2026-10-06T04:00:00" }, /started_at/],
     [{ model: 5 }, /model/], [{ r2_key: undefined }, /r2_key/],
   ])("rejects %j", async (o, re) => {
     const r = await post(row(o as Record<string, unknown>));
     expect(r.status).toBe(400);
     expect((await r.json()).error.message).toMatch(re);
+  });
+  it("accepts ISO 8601 timestamps with a zone", async () => {
+    M.stored = [keyRow()];
+    for (const t of ["2026-10-06T04:00:00Z", "2026-10-06T09:30:00.123+05:30", "2026-10-06 04:00:00+00"]) expect((await post(row({ started_at: t, finished_at: t }))).status).toBe(200);
   });
   it("400 for non-JSON, an empty array, a non-object row and 501 rows; 500 rows pass validation", async () => {
     expect((await post("{nope", "wtok", true)).status).toBe(400);
