@@ -30,6 +30,7 @@ import { chunkText, gwBatchInit, gwBatchResult, gwBatchStartJob, gwBatchStatus, 
 import { SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
 import { appendLedger, touchLane, type CallLine } from "@/lib/sarvam-lab";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { saveStep } from "../store";
 import { jobError, type JobErrorCode } from "../errors";
 import {
   SARVAM_WALL_MS, capRefusalForJob, dailyCapRefusal, looksNonEnglish, readJson, recordSarvamCall, resultKey, writeJson,
@@ -89,7 +90,10 @@ export const sarvamTranscribeKind: JobKind = {
   // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back
   dedupeOn: (args) => {
     const a = args as unknown as SarvamTranscribeArgs;
-    return a.source === "encounter" ? [["encounter_id", a.encounter_id]] : [["consult_uid", a.consult_uid]];
+    // G23: the options are part of the identity (a codemix ask must not be answered with an open transcribe-mode job). A caller that sends the defaults (or the
+    // same options) still dedupes; only a DIFFERENT mode / english / num_speakers opens a second job.
+    const id: [string, string] = a.source === "encounter" ? ["encounter_id", a.encounter_id] : ["consult_uid", a.consult_uid];
+    return [id, ["mode", a.mode], ["english", String(a.english)], ["num_speakers", a.num_speakers === undefined ? null : String(a.num_speakers)]];
   },
   async run(ctx: StepContext) {
     const out = await runStep(ctx);
@@ -208,8 +212,13 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
   }
   // S3: the paid-call audit row is what the daily cap counts. It is retried inside the call and, if it still cannot be written, this step THROWS: the job stays
   // in `start` (so its minutes stay RESERVED for the cap, see reservedMinutesEarlier) and the replay finds the job already started, skips the start, and writes the row.
+  // G22: persist the START EVIDENCE (sarvam_job_id and duration_ms are already in progress; this adds sarvam_started_ms) BEFORE the audit write, so a job the runner
+  // ends after MAX_FAILURES of audit_write_failed still carries proof that Sarvam was started: the cap keeps reserving its minutes and the ledger line counts its audio.
+  const startedMs = num(ctx.progress.sarvam_started_ms) || Date.now();
+  const progress = { ...ctx.progress, sarvam_started_ms: startedMs };
+  if (ctx.runner && !num(ctx.progress.sarvam_started_ms)) await saveStep(ctx.job.id, STEPS.start, progress, ctx.runner);
   await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: ctx.job.id, sarvamJobId: jobId, durationMs: num(ctx.progress.duration_ms) || 0, scope: scopeOf(ctx) });
-  return nextStep(STEPS.poll, { ...ctx.progress, sarvam_started_ms: Date.now() });
+  return nextStep(STEPS.poll, progress);
 }
 
 // --- poll -----------------------------------------------------------------------------------------------------------------------------------

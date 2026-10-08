@@ -55,21 +55,27 @@ export function normaliseJob(r: Record<string, unknown>): JobRow {
  * S4 — the open (queued or running) job of `kind` whose args match every [key, value] pair (at most two), oldest first, or null. Bound parameters only.
  * A narrow race remains by design: two submits in the same instant can both see "none"; a unique index would be a migration and is not part of this change.
  */
-export async function findOpenJob(kind: string, match: Array<[string, string]>): Promise<JobRow | null> {
+export async function findOpenJob(kind: string, match: Array<[string, string | null]>): Promise<JobRow | null> {
   const [k1, v1] = match[0] ?? ["", ""];
   const [k2, v2] = match[1] ?? [null, null];
   if (!k1) return null;
+  // the first two pairs narrow in SQL (bound); any further pair (a null means "absent") is checked on the few rows that remain (G23)
   const rows = (await sql`
     SELECT id, kind, args, status, step, progress, result, error, actor,
            created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures
       FROM scribe_job
      WHERE kind = ${kind}::text AND status IN ('queued', 'running')
-       AND args->>${k1}::text = ${v1}::text
-       AND (${k2}::text IS NULL OR args->>${k2}::text = ${v2}::text)
+       AND args->>${k1}::text IS NOT DISTINCT FROM ${v1}::text
+       AND (${k2}::text IS NULL OR args->>${k2}::text IS NOT DISTINCT FROM ${v2}::text)
      ORDER BY created_at, id
-     LIMIT 1
+     LIMIT 50
   `) as Array<Record<string, unknown>>;
-  return rows[0] ? normaliseJob(rows[0]) : null;
+  const rest = match.slice(1); // re-checked here for every pair after the first (the SQL pair-2 filter is only a narrowing)
+  for (const r of rows) {
+    const args = (typeof r.args === "string" ? JSON.parse(r.args) : r.args) as Record<string, unknown>;
+    if (rest.every(([k, v]) => (args[k] === undefined || args[k] === null ? null : String(args[k])) === v)) return normaliseJob(r);
+  }
+  return null;
 }
 
 export async function insertJob(input: {

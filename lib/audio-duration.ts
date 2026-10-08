@@ -161,7 +161,7 @@ function mp4Ms(b: Uint8Array): number | null {
   if (b.length < 16 || fourcc(b, 4) !== "ftyp") return null;
   let movieScale = 0, movieDur = 0, mehdDur = 0;
   let mediaScale = 0, mediaDur = 0; // first mdhd
-  let sttsTicks = 0, trunTicks = 0, tfhdDefault = 0, trexDefault = 0;
+  let pendingSamples = 0, sttsTicks = 0, trunTicks = 0, tfhdDefault = 0, trexDefault = 0;
   let boxes = 0;
   const walk = (start: number, end: number, depth: number): void => {
     let o = start;
@@ -203,7 +203,7 @@ function mp4Ms(b: Uint8Array): number | null {
         const per = 4 * ((flags & 0x100 ? 1 : 0) + (flags & 0x200 ? 1 : 0) + (flags & 0x400 ? 1 : 0) + (flags & 0x800 ? 1 : 0));
         if (flags & 0x100 && per > 0) for (let i = 0; i < count && p + (i + 1) * per <= bodyEnd; i++) trunTicks += u32be(b, p + i * per);
         else if (tfhdDefault > 0) trunTicks += tfhdDefault * Math.min(count, 100_000_000);
-        else if (trexDefault > 0) trunTicks += trexDefault * Math.min(count, 100_000_000); // G14: no per-sample durations and no tfhd default: the trex default
+        else pendingSamples += Math.min(count, 100_000_000); // G14/G20: no per-sample durations and no tfhd default: priced at the trex default AFTER the walk, so a moov that comes LAST still counts
       } else if (MP4_CONTAINERS.has(type) && depth < 8) {
         if (type === "moof") tfhdDefault = 0;
         walk(body, bodyEnd, depth + 1);
@@ -213,6 +213,7 @@ function mp4Ms(b: Uint8Array): number | null {
     }
   };
   walk(0, b.length, 0);
+  if (trexDefault > 0) trunTicks += trexDefault * pendingSamples; // G20: the moov/mvex/trex default, wherever the moov sat
   const ms = (ticks: number, scale: number): number => (ticks > 0 && scale > 0 ? Math.round((ticks * 1000) / scale) : 0);
   // G9/G8: the LONGEST of every claim the file makes, so a header cannot understate what the samples hold
   const best = Math.max(ms(movieDur, movieScale), ms(mediaDur, mediaScale), ms(mehdDur, movieScale), ms(sttsTicks, mediaScale), ms(trunTicks, mediaScale));

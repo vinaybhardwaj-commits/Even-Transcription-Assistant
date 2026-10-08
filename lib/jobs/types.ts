@@ -132,7 +132,7 @@ export type JobKind = {
    * queued or running job of this kind whose args match all of them and, if one exists, returns THAT job (flagged `deduped`) instead of queueing another.
    * Absent = no dedupe (every other kind).
    */
-  dedupeOn?: (args: Record<string, unknown>) => Array<[string, string]> | null;
+  dedupeOn?: (args: Record<string, unknown>) => Array<[string, string | null]> | null;
   /**
    * REDUNDANCY-R1 — whether this step is BULK work, so pooled service calls inside it try the *_BULK_URLS
    * endpoints first. Absent = never bulk. Called by the runner once per step, inside the step's own error

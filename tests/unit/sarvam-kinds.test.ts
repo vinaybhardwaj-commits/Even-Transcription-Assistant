@@ -159,7 +159,8 @@ describe("sarvam_transcribe: prepare", () => {
 describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id)", () => {
   const enc = { source: "encounter", encounter_id: "enc_1", mode: "codemix", english: true, num_speakers: 2 };
   const init = (progress: Row = { clip_key: "clip.webm", content_type: "audio/webm", scope: "encounter", ref: "enc_1" }) => T.sarvamTranscribeKind.run(ctx("init", enc, progress));
-  const auditAndReserved = (audit: number, reserved: number) => (text: string) => (/FROM audit_log/.test(text) ? [{ minutes: audit }] : /FROM scribe_job/.test(text) ? [{ minutes: reserved }] : []);
+  let failedMin = 0;
+  const auditAndReserved = (audit: number, reserved: number) => (text: string) => (/j\.status = 'failed'/.test(text) ? [{ minutes: failedMin }] : /FROM audit_log/.test(text) ? [{ minutes: audit }] : /FROM scribe_job/.test(text) ? [{ minutes: reserved }] : []);
 
   it("measures the duration from the container, creates the Sarvam job, and PERSISTS its id and the measured duration", async () => {
     store.set("clip.webm", clip10());
@@ -194,11 +195,25 @@ describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id
     answer = auditAndReserved(200, 31); // 241 > 240
     expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
     // only jobs created BEFORE this one count (two racing jobs cannot refuse each other), and only those not yet audited
-    const q = statements.find((s) => /FROM scribe_job/.test(s.text))!;
+    const q = statements.find((s) => /FROM scribe_job/.test(s.text) && !/j\.status = 'failed'/.test(s.text))!;
     expect(q.text).toMatch(/created_at < \?::timestamptz OR \(created_at = \?::timestamptz AND id < \?::text\)/);
     expect(q.text).toMatch(/IN \('prepare', 'init', 'upload', 'start'\)/);
     expect(q.values).toContain("job_t1");
     expect(q.values).toContain("2026-10-08T06:00:00.000Z");
+  });
+
+  it("G22: a FAILED job that Sarvam was started for and that has no paid-call row still holds its minutes (the failed-job reservation is part of the cap)", async () => {
+    store.set("clip.webm", clip10());
+    gw.init.mockResolvedValue({ ok: true, jobId: "sj_9" });
+    failedMin = 30;
+    answer = auditAndReserved(200, 0); // 200 + 0 + 30 failed-unaudited + 10 = 240
+    expect(await init()).toMatchObject({ kind: "next", step: "upload" });
+    failedMin = 31; // 241
+    expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
+    const q = statements.find((s) => /j\.status = 'failed'/.test(s.text))!;
+    expect(q.text).toMatch(/sarvam_started_ms/);
+    expect(q.text).toMatch(/NOT EXISTS \(SELECT 1 FROM audit_log/); // once the row lands it is counted as audited minutes, not twice
+    failedMin = 0;
   });
 
   it("G2: with the Sarvam job id already persisted, a replay creates NO second job and reads no audio", async () => {
@@ -388,6 +403,21 @@ describe("S3 — the paid-call audit row is retried, or the step throws and the 
     expect(await start()).toMatchObject({ kind: "next", step: "poll" });
     expect(gw.startJob).not.toHaveBeenCalled();
     expect(inserts()).toHaveLength(1);
+    err.mockRestore();
+  });
+  it("G22: the start evidence (sarvam_started_ms) is saved BEFORE the audit write, so three audit failures leave a job the end hook still ledgers with the measured audio", async () => {
+    const err = errLog();
+    gw.status.mockResolvedValue({ ok: true, state: "Running", outputs: [] });
+    answer = (text) => (/INSERT INTO audit_log/.test(text) ? new Error("db down") : []);
+    await expect(T.sarvamTranscribeKind.run({ ...(ctx("start", args, prog) as object), runner: "run_1" } as never)).rejects.toThrow(/audit_write_failed/);
+    const save = statements.find((s) => /UPDATE scribe_job/.test(s.text) && /progress/.test(s.text))!;
+    expect(save).toBeDefined();
+    const saved = JSON.parse(save.values.find((v) => typeof v === "string" && String(v).includes("sarvam_started_ms")) as string);
+    expect(saved).toMatchObject({ sarvam_job_id: "sj_9", duration_ms: 600_000 });
+    expect(saved.sarvam_started_ms).toBeGreaterThan(0);
+    const { endedLine } = await import("@/lib/jobs/sarvam-hook");
+    const line = endedLine({ id: "job_t1", kind: "sarvam_transcribe", args, progress: saved, created_at: "2026-10-08T06:00:00.000Z" }, "failed", "2026-10-08T06:10:00.000Z");
+    expect(line).toMatchObject({ status: "failed", request_id: "sj_9", audio_s: 600 });
     err.mockRestore();
   });
   it("the retry delays are bounded (3 retries); an existing row ends the loop at once", async () => {

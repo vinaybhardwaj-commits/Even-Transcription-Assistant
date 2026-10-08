@@ -150,7 +150,7 @@ describe("transcribe / translate", () => {
 });
 
 describe("S4 — one open job per source: the open job's id comes back", () => {
-  const openRow = (over: Row = {}) => ({ id: "job_open1", kind: "sarvam_transcribe", args: {}, status: "running", step: "poll", progress: {}, result: null, error: null, actor: "mcp:a", created_at: "2026-10-08T06:00:00.000Z", started_at: null, updated_at: "x", finished_at: null, lease_until: null, lease_owner: null, attempts: 2, failures: 0, ...over });
+  const openRow = (over: Row = {}) => ({ id: "job_open1", kind: "sarvam_transcribe", args: { encounter_id: "enc_1", mode: "transcribe", english: true }, status: "running", step: "poll", progress: {}, result: null, error: null, actor: "mcp:a", created_at: "2026-10-08T06:00:00.000Z", started_at: null, updated_at: "x", finished_at: null, lease_until: null, lease_owner: null, attempts: 2, failures: 0, ...over });
   const findOpen = () => statements.filter((s) => /FROM scribe_job/.test(s.text) && /status IN \('queued', 'running'\)/.test(s.text) && /args->>/.test(s.text));
 
   it("transcribe: a second ask for the same encounter returns the open job (deduped), queues nothing, and the lookup is a bound (kind, encounter_id) match", async () => {
@@ -158,7 +158,17 @@ describe("S4 — one open job per source: the open job's id comes back", () => {
     expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toEqual({ ok: true, job_id: "job_open1", kind: "sarvam_transcribe", status: "running", deduped: true });
     expect(inserted).toEqual([]);
     const q = findOpen()[0]!;
-    expect(q.values).toEqual(["sarvam_transcribe", "encounter_id", "enc_1", null, null, null]);
+    expect(q.values).toEqual(["sarvam_transcribe", "encounter_id", "enc_1", "mode", "mode", "transcribe"]);
+  });
+  it("G23: the options are part of the identity — a codemix ask is NOT answered with an open transcribe-mode job; the same options (or the defaults) are", async () => {
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow()] : []);
+    expect(await run({ action: "transcribe", encounter_id: "enc_1", mode: "codemix" })).toMatchObject({ ok: true, job_id: "job_new1" });
+    expect(await run({ action: "transcribe", encounter_id: "enc_1", num_speakers: 2 })).toMatchObject({ job_id: "job_new1" });
+    expect(await run({ action: "transcribe", encounter_id: "enc_1", english: false })).toMatchObject({ job_id: "job_new1" });
+    expect(await run({ action: "transcribe", encounter_id: "enc_1", mode: "transcribe", english: true })).toMatchObject({ job_id: "job_open1", deduped: true });
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ args: { encounter_id: "enc_1", mode: "transcribe", english: true, num_speakers: 2 } })] : []);
+    expect(await run({ action: "transcribe", encounter_id: "enc_1", num_speakers: 2 })).toMatchObject({ job_id: "job_open1", deduped: true });
+    expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toMatchObject({ job_id: "job_new1" });
   });
   it("no open job (none, or it already finished) -> a new job; a different encounter -> a new job", async () => {
     answer = () => [];
@@ -169,10 +179,11 @@ describe("S4 — one open job per source: the open job's id comes back", () => {
   });
   it("translate: deduped on (source kind, id); an encounter and a run with the same id string are different sources", async () => {
     process.env.SARVAM_GW_REGION = "";
-    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ id: "job_open2", kind: "sarvam_translate" })] : /FROM transcription_run/.test(text) ? [{ subject_type: "encounter" }] : []);
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ id: "job_open2", kind: "sarvam_translate", args: { kind: "encounter", id: "enc_1" } })] : /FROM transcription_run/.test(text) ? [{ subject_type: "encounter" }] : []);
     expect(await run({ action: "translate", encounter_id: "enc_1" })).toMatchObject({ ok: true, job_id: "job_open2", deduped: true });
     expect(findOpen()[0]!.values).toEqual(["sarvam_translate", "kind", "encounter", "id", "id", "enc_1"]);
     statements.length = 0;
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ id: "job_open2", kind: "sarvam_translate", args: { kind: "transcription_run", id: "enc_1" } })] : []);
     expect(await run({ action: "translate", transcription_run_id: "enc_1" })).toMatchObject({ deduped: true });
     expect(findOpen()[0]!.values).toEqual(["sarvam_translate", "kind", "transcription_run", "id", "id", "enc_1"]);
     expect(inserted).toEqual([]);

@@ -92,7 +92,16 @@ export async function reservedMinutesEarlier(job: { id: string; created_at: stri
        AND (created_at < ${job.created_at}::timestamptz OR (created_at = ${job.created_at}::timestamptz AND id < ${job.id}::text))
        AND COALESCE(step, 'prepare') IN ('prepare', 'init', 'upload', 'start')
   `) as Array<{ minutes: number | string | null }>;
-  const n = Number(rows[0]?.minutes ?? 0);
+  // G22: a job the runner FAILED after Sarvam was started, whose paid-call row never landed, still holds its minutes (Sarvam is billing them) for a day
+  const failed = (await sql`
+    SELECT COALESCE(SUM((j.progress->>'duration_ms')::numeric / 60000), 0)::float8 AS minutes
+      FROM scribe_job j
+     WHERE j.kind = 'sarvam_transcribe' AND j.status = 'failed' AND j.id <> ${job.id}::text
+       AND j.progress ? 'sarvam_job_id' AND (j.progress->>'sarvam_started_ms') IS NOT NULL AND (j.progress->>'duration_ms') IS NOT NULL
+       AND j.updated_at > now() - interval '1 day'
+       AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.action = 'stt.paid_call' AND a.target_type = 'stt_engine' AND a.target_id = ${SARVAM_ENGINE} AND a.metadata_json->>'job_id' = j.id)
+  `) as Array<{ minutes: number | string | null }>;
+  const n = Number(rows[0]?.minutes ?? 0) + Number(failed[0]?.minutes ?? 0);
   return Number.isFinite(n) ? n : 0;
 }
 export const SARVAM_MAX_JOB_MINUTES = 30;
