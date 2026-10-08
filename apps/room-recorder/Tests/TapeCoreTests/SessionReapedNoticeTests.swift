@@ -33,3 +33,27 @@
     }
   }
 #endif
+
+#if canImport(RoomRecorderCore)
+  import TapeCore
+
+  /// Arch #21 refute rulings F1 and F2. Swift was NOT compiled where this was written.
+  @Suite struct ReapedPieceHandlingTests {
+    @Test func reapedSessionRegistrationStatesAreTerminalNotRetried() {
+      #expect(ArchiveDeliveryCoordinator.isTerminalRegistration("verified"))
+      #expect(ArchiveDeliveryCoordinator.isTerminalRegistration("rehomed_after_reap"))
+      #expect(ArchiveDeliveryCoordinator.isTerminalRegistration("refused_session_reaped"))
+      #expect(!ArchiveDeliveryCoordinator.isTerminalRegistration("pending"))
+      #expect(!ArchiveDeliveryCoordinator.isTerminalRegistration(""))
+    }
+
+    @Test func aChunkReplyStopsOnlyTheSessionItIsAbout() {
+      let flag: String? = "ended_disagrees"
+      #expect(RoomEngine.shouldStopForChunkReply(pieceSessionID: "bs_a", activeSessionID: "bs_a", endedDisagrees: flag))
+      // an older session's leftover piece while a new one records: never stops the live session
+      #expect(!RoomEngine.shouldStopForChunkReply(pieceSessionID: "bs_old", activeSessionID: "bs_new", endedDisagrees: flag))
+      #expect(!RoomEngine.shouldStopForChunkReply(pieceSessionID: "bs_a", activeSessionID: nil, endedDisagrees: flag))
+      #expect(!RoomEngine.shouldStopForChunkReply(pieceSessionID: "bs_a", activeSessionID: "bs_a", endedDisagrees: nil))
+    }
+  }
+#endif

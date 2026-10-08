@@ -44,7 +44,7 @@ import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { findBenchSession, newChunkId, newEventId, ymdUtc } from "@/lib/bench";
+import { findBenchSession, newChunkId, newEventId, newSessionId, ymdUtc } from "@/lib/bench";
 import { headObject, benchChunkKey } from "@/lib/r2";
 import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
@@ -63,6 +63,51 @@ export const dynamic = "force-dynamic";
  */
 function disagreementFields(): Record<string, string> {
   return { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES, ended_disagrees: ENDED_DISAGREES };
+}
+
+/** Re-homed chunks live in a high idx band so they can never collide with the new session's own 0.. numbering. */
+const REHOME_IDX_BASE = 90_000;
+
+/**
+ * ARCH #21 (F3) — where a late chunk of a REAPED session goes. Never the ended session. In order:
+ *  1. a session of this room already created for THIS old session (notes "re-homed after reap of <id>") — so a backlog lands together;
+ *  2. the room's open `recording` session, if one exists (the kiosk already started again);
+ *  3. a new session for the room, created ENDED (so no phantom Recording chip) at the chunk's own end time, notes "re-homed after reap of <old id>".
+ * Returns null when it cannot (idx outside the band, or any write fails) and the caller falls back to refusing.
+ * The chunk's idx moves into the high band (90 000 + idx): a re-homed row is addressed by the same (session, source, idx) key as any other, so a
+ * retry of the same piece is idempotent and cannot overwrite the new session's own pieces.
+ */
+async function rehomeAfterReap(a: { roomId: string; oldSessionId: string; idx: number; startedAt: Date; endedAt: Date }): Promise<{ sessionId: string; idx: number } | null> {
+  if (a.idx < 0 || a.idx >= 9_999) return null;
+  const note = `re-homed after reap of ${a.oldSessionId}`;
+  try {
+    const existing = (await sql`
+      SELECT id FROM bench_session WHERE room_id = ${a.roomId} AND notes LIKE ${note + "%"} ORDER BY started_at DESC LIMIT 1
+    `) as Array<{ id: string }>;
+    let target = existing[0]?.id ?? null;
+    if (!target) {
+      const open = (await sql`
+        SELECT id FROM bench_session WHERE room_id = ${a.roomId} AND status = 'recording' ORDER BY started_at DESC LIMIT 1
+      `) as Array<{ id: string }>;
+      target = open[0]?.id ?? null;
+    }
+    if (!target) {
+      target = newSessionId();
+      await sql`
+        INSERT INTO bench_session (id, room_id, started_at, ended_at, status, notes)
+        VALUES (${target}, ${a.roomId}, ${a.startedAt.toISOString()}, ${a.endedAt.toISOString()}, 'ended', ${note})
+      `;
+    }
+    await sql`
+      INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+      VALUES (${newEventId()}, ${target}, 'chunk_rehomed', ${a.startedAt.toISOString()}, 'none',
+              ${JSON.stringify({ source: "server", reaped_session_id: a.oldSessionId, original_idx: a.idx, rehomed_idx: REHOME_IDX_BASE + a.idx, chunk_started_at: a.startedAt.toISOString() })}::jsonb)
+    `;
+    return { sessionId: target, idx: REHOME_IDX_BASE + a.idx };
+  } catch (e) {
+    console.warn(`[bench-chunks] re-home after reap failed for ${a.oldSessionId}: ${String(e).slice(0, 150)}`);
+    return null;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -154,56 +199,59 @@ export async function POST(req: NextRequest) {
     chunkStartedAtMs: startedAt.getTime(),
   });
 
-  // ── ARCH #21 — A REAPED SESSION TAKES NO NEW CHUNK ROWS ─────────────────────────────────
+  // ── ARCH #21 — A REAPED SESSION TAKES NO NEW CHUNK ROWS; REAL AUDIO IS RE-HOMED ─────────
   //
   // The header above says a chunk is always accepted, and for an OPERATOR-ended session that
   // stands. A session the REAPER ended is different: the system declared it dead, raised an
   // alert, and the room is expected to start a new one. bs_wrnpdr4e (reaped 12:26 IST) took a
   // chunk at 15:41 from a zombie kiosk, leaving a 3 h gap recorded inside an ended session.
   //
-  // So: no bench_chunk row, no window evaluation. The audio is NOT lost — the kiosk already
-  // PUT it to R2 at the session key (that is why this route is reached at all) and nothing here
-  // deletes it; the event below names the key, idx and source so it can be recovered. The reply
-  // is a 200 whose upload_state says plainly it was not registered, carrying BOTH disagreement
-  // spellings (see disagreementFields) so the browser kiosk and the native app each drop to
-  // needs-start. A non-2xx would make both retry for ever against a session that will never
-  // take it.
-  if (endedDisagrees && isReaperNote(session.notes)) {
-    try {
-      await sql`
-        INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
-        VALUES (${newEventId()}, ${sessionId}, 'chunk_refused_reaped', ${startedAt.toISOString()}, 'none',
-                ${JSON.stringify({ source: "server", idx, chunk_source: source, size_bytes: sizeBytes, r2_key: benchChunkKey(session.room_slug, ymdUtc(new Date(session.started_at)), sessionId, idx, source), chunk_started_at: startedAt.toISOString() })}::jsonb)
-      `;
-    } catch (e) {
-      console.warn(`[bench-chunks] reaped-session refusal event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
-    }
-    console.warn(`[bench-chunks] ${SESSION_REAPED} session=${sessionId} idx=${idx} source=${source} — chunk NOT registered into the reaped session; audio left in R2; kiosk told`);
-    return respondOk({
-      ok: true,
-      key: benchChunkKey(session.room_slug, ymdUtc(new Date(session.started_at)), sessionId, idx, source),
-      upload_state: "refused_session_reaped",
-      session_reaped: true,
-      ...disagreementFields(),
-    });
-  }
-
-  // Server-side authoritative verify (D8): the object must exist in R2 with
-  // the exact claimed size before a 'verified' row is written.
-  const key = benchChunkKey(
-    session.room_slug,
-    ymdUtc(new Date(session.started_at)),
-    sessionId,
-    idx,
-    source,
-  );
-  const head = await headObject(key);
+  // So the chunk is NEVER appended to the ended session. But it is real audio (it can also be a
+  // backlog from a Mac that kept capturing through a network outage and was reaped meanwhile), so
+  // it is not left unregistered either: it is RE-HOMED, explicitly, into a session of the same
+  // room (see rehomeAfterReap) and flagged with a `chunk_rehomed` event + a note on the target.
+  // The reply is a 200 carrying BOTH disagreement spellings, so the browser kiosk and the native
+  // app each learn their old session was reaped. Only if re-homing is impossible does the chunk
+  // fall back to the earlier behaviour: no row, a `chunk_refused_reaped` event naming the R2 key.
+  const originalKey = benchChunkKey(session.room_slug, ymdUtc(new Date(session.started_at)), sessionId, idx, source);
+  // Server-side authoritative verify (D8) — BEFORE any re-home, so a bogus claim cannot create a session.
+  const head = await headObject(originalKey);
   if (head.size === null) {
     return respondError("UPSTREAM_UNAVAILABLE", "r2_object_not_found_or_unreachable");
   }
   if (head.size !== sizeBytes) {
     return respondError("VALIDATION_FAILED", `r2_size_mismatch_${head.size}_${sizeBytes}`);
   }
+  let targetSessionId = sessionId;
+  let targetIdx = idx;
+  let rehomed = false;
+  if (endedDisagrees && isReaperNote(session.notes)) {
+    const home = await rehomeAfterReap({ roomId: session.room_id, oldSessionId: sessionId, idx, startedAt, endedAt });
+    if (!home) {
+      try {
+        await sql`
+          INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+          VALUES (${newEventId()}, ${sessionId}, 'chunk_refused_reaped', ${startedAt.toISOString()}, 'none',
+                  ${JSON.stringify({ source: "server", idx, chunk_source: source, size_bytes: sizeBytes, r2_key: originalKey, chunk_started_at: startedAt.toISOString() })}::jsonb)
+        `;
+      } catch (e) {
+        console.warn(`[bench-chunks] reaped-session refusal event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
+      }
+      console.warn(`[bench-chunks] ${SESSION_REAPED} session=${sessionId} idx=${idx} source=${source} — could not re-home; chunk NOT registered; audio left in R2; kiosk told`);
+      return respondOk({
+        ok: true,
+        key: originalKey,
+        upload_state: "refused_session_reaped",
+        session_reaped: true,
+        ...disagreementFields(),
+      });
+    }
+    targetSessionId = home.sessionId;
+    targetIdx = home.idx;
+    rehomed = true;
+  }
+
+  const key = originalKey;   // the object stays where the kiosk PUT it, whichever session the row belongs to
 
   const id = newChunkId();
   try {
@@ -212,7 +260,7 @@ export async function POST(req: NextRequest) {
         id, session_id, idx, source, r2_key, content_type, started_at, ended_at,
         duration_ms, size_bytes, upload_state, gap_before_ms, peak_level, avg_level
       ) VALUES (
-        ${id}, ${sessionId}, ${idx}, ${source}, ${key}, ${contentType},
+        ${id}, ${targetSessionId}, ${targetIdx}, ${source}, ${key}, ${contentType},
         ${startedAt.toISOString()}, ${endedAt.toISOString()},
         ${durationMs}, ${sizeBytes}, 'verified', ${gapBeforeMs}, ${peakLevel}, ${avgLevel}
       )
@@ -243,7 +291,7 @@ export async function POST(req: NextRequest) {
     // five minutes for hours; 108 identical rows is a log, not a timeline. First-detection is
     // decided by Postgres — ON CONFLICT DO NOTHING on 0064's partial unique index — rather than
     // by a read-then-write that two concurrent after() hooks could both pass.
-    if (endedDisagrees) {
+    if (endedDisagrees && !rehomed) {
       try {
         await sql`
           INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
@@ -285,7 +333,7 @@ export async function POST(req: NextRequest) {
       /* ensureRoomDayOpen never throws; this is belt-and-braces so a day miss never costs the window write */
     }
     try {
-      await evaluateAndWriteWindows(sessionId);
+      await evaluateAndWriteWindows(targetSessionId);
     } catch {
       /* non-critical: the next chunk re-evaluates the whole session */
     }
@@ -296,7 +344,8 @@ export async function POST(req: NextRequest) {
   return respondOk({
     ok: true,
     key,
-    upload_state: "verified",
+    upload_state: rehomed ? "rehomed_after_reap" : "verified",
+    ...(rehomed ? { session_reaped: true, rehomed_session_id: targetSessionId } : {}),
     ...(endedDisagrees ? disagreementFields() : {}),
   });
 }

@@ -1,7 +1,7 @@
 /**
  * Arch #21 — a reap is a capture-failure event. One block per acceptance criterion.
  *   AC1 every reaper end alerts (outbox row + event) and surfaces on Bench attention
- *   AC2 a chunk recorded after a REAPED end is never registered into the ended session
+ *   AC2 a chunk recorded after a REAPED end is never appended to the ended session; real audio is re-homed (F3)
  *   AC3 the kiosk learns the session was reaped (chunk reply, both key spellings; native poll reply)
  *   AC4 reap during clinic hours reads differently from an end-of-day reap
  */
@@ -12,6 +12,9 @@ const calls: Call[] = [];
 let notes: string | null = null;
 let status = "ended";
 let reapedLookup: unknown[] = [];
+let existingRehome: unknown[] = [];
+let openRecording: unknown[] = [];
+let r2Size = 4242;
 let endedAt: string | null = "2026-10-07T06:56:31.000Z";   // 12:26:31 IST
 
 vi.mock("@/lib/db", () => ({
@@ -19,12 +22,14 @@ vi.mock("@/lib/db", () => ({
     const text = strings.join("?").replace(/\s+/g, " ").trim();
     calls.push({ text, values });
     if (/SELECT id, ended_at, notes FROM bench_session/.test(text)) return Promise.resolve(reapedLookup);
+    if (/FROM bench_session WHERE room_id = \? AND notes LIKE/.test(text)) return Promise.resolve(existingRehome);
+    if (/FROM bench_session WHERE room_id = \? AND status = 'recording'/.test(text)) return Promise.resolve(openRecording);
     return Promise.resolve([]);
   },
 }));
 vi.mock("@/lib/room-install", async (orig) => ({ ...((await orig()) as Record<string, unknown>), applyInstallPoll: async () => ({ ok: true, assigned_channel: null }) }));
 vi.mock("@/lib/room-auth", () => ({ readRoomClaims: async () => ({ room_id: "room_test" }) }));
-vi.mock("@/lib/r2", () => ({ headObject: async () => ({ size: 4242 }), benchChunkKey: () => "bench/room/2026-10-07/bs_t/9.webm" }));
+vi.mock("@/lib/r2", () => ({ headObject: async () => ({ size: r2Size }), benchChunkKey: () => "bench/room/2026-10-07/bs_t/9.webm" }));
 vi.mock("@/lib/bench-window", () => ({ evaluateAndWriteWindows: async () => {}, istDateOf: () => "2026-10-07" }));
 vi.mock("@/lib/bench", async (orig) => ({
   ...((await orig()) as Record<string, unknown>),
@@ -47,7 +52,7 @@ const post = async (startedAt: string) => {
   await new Promise((r) => setTimeout(r, 0));
   return { status: res.status, json };
 };
-beforeEach(() => { calls.length = 0; notes = null; status = "ended"; endedAt = "2026-10-07T06:56:31.000Z"; });
+beforeEach(() => { existingRehome = []; openRecording = []; r2Size = 4242; calls.length = 0; notes = null; status = "ended"; endedAt = "2026-10-07T06:56:31.000Z"; });
 
 describe("AC1 — every reap alerts and surfaces", () => {
   const NOW = Date.parse("2026-10-07T07:30:00.000Z");
@@ -100,33 +105,71 @@ describe("AC1 — every reap alerts and surfaces", () => {
   });
 });
 
-describe("AC2 — a late chunk is never appended to a reaped session", () => {
-  it("reaped session + chunk recorded after the end: no bench_chunk row, no window evaluation, audio key kept in an event", async () => {
+describe("AC2 — a late chunk is never appended to a reaped session; real audio is re-homed (refute F3)", () => {
+  const chunkInserts = () => calls.filter((c) => /INSERT INTO bench_chunk/.test(c.text));
+  it("no open session: a new ENDED session is created for the room with the re-home note, and the chunk lands in IT", async () => {
     notes = core.NOTE_STALL;
     const { status: st, json } = await post("2026-10-07T10:11:00.000Z");   // 15:41 IST, the OPD4 case
     expect(st).toBe(200);
-    expect(calls.some((c) => /INSERT INTO bench_chunk/.test(c.text))).toBe(false);
-    const ev = calls.find((c) => /INSERT INTO bench_event/.test(c.text))!;
-    expect(ev.text).toContain("chunk_refused_reaped");
-    expect(JSON.stringify(ev.values)).toContain("bench/room/2026-10-07/bs_t/9.webm");
-    expect(json.upload_state).toBe("refused_session_reaped");
+    const mk = calls.find((c) => /INSERT INTO bench_session/.test(c.text))!;
+    expect(mk.text).toMatch(/'ended'/);
+    expect(mk.values).toContain("re-homed after reap of bs_t");
+    expect(mk.values).toContain("room_test");
+    const ins = chunkInserts();
+    expect(ins).toHaveLength(1);
+    expect(ins[0]!.values).not.toContain("bs_t");                       // never the ended session
+    expect(ins[0]!.values).toContain(90_009);                           // high idx band, cannot collide with the new session's own pieces
+    expect(ins[0]!.values).toContain("bench/room/2026-10-07/bs_t/9.webm"); // the object stays where the kiosk PUT it
+    expect(calls.some((c) => /INSERT INTO bench_event/.test(c.text) && /chunk_rehomed/.test(c.text))).toBe(true);
+    expect(json.upload_state).toBe("rehomed_after_reap");
     expect(json.session_reaped).toBe(true);
+    expect(json.rehomed_session_id).toMatch(/^bs_/);
+    expect(json.rehomed_session_id).not.toBe("bs_t");
   });
-  it("an OPERATOR-ended session keeps the old rule: chunk accepted", async () => {
+  it("a session already created for THIS old session is reused (a backlog lands together)", async () => {
+    notes = core.NOTE_STALL;
+    existingRehome = [{ id: "bs_home" }];
+    const { json } = await post("2026-10-07T10:11:00.000Z");
+    expect(calls.some((c) => /INSERT INTO bench_session/.test(c.text))).toBe(false);
+    expect(json.rehomed_session_id).toBe("bs_home");
+  });
+  it("the room's open recording session is used when there is one", async () => {
+    notes = core.NOTE_STALL;
+    openRecording = [{ id: "bs_open" }];
+    const { json } = await post("2026-10-07T10:11:00.000Z");
+    expect(calls.some((c) => /INSERT INTO bench_session/.test(c.text))).toBe(false);
+    expect(json.rehomed_session_id).toBe("bs_open");
+  });
+  it("if re-homing is impossible (idx outside the band) it falls back to refusing: no row, event with the R2 key", async () => {
+    notes = core.NOTE_STALL;
+    const req = { json: async () => ({ session_id: "bs_t", idx: 50_000, started_at: "2026-10-07T10:11:00.000Z", ended_at: "2026-10-07T10:11:00.000Z", duration_ms: 1, size_bytes: 4242, gap_before_ms: 0 }) } as never;
+    const json = (await (await POST(req)).json()) as Record<string, unknown>;
+    expect(chunkInserts()).toHaveLength(0);
+    expect(json.upload_state).toBe("refused_session_reaped");
+    expect(calls.find((c) => /INSERT INTO bench_event/.test(c.text))!.text).toContain("chunk_refused_reaped");
+  });
+  it("an unverified R2 object creates nothing (no session from a bogus claim)", async () => {
+    notes = core.NOTE_STALL; r2Size = 1;
+    const { json } = await post("2026-10-07T10:11:00.000Z");
+    expect(JSON.stringify(json)).toMatch(/r2_size_mismatch/);
+    expect(calls.some((c) => /INSERT INTO bench_session/.test(c.text))).toBe(false);
+  });
+  it("an OPERATOR-ended session keeps the old rule: chunk accepted into it", async () => {
     notes = null;
     const { json } = await post("2026-10-07T10:11:00.000Z");
-    expect(calls.some((c) => /INSERT INTO bench_chunk/.test(c.text))).toBe(true);
+    expect(chunkInserts()[0]!.values).toContain("bs_t");
     expect(json.upload_state).toBe("verified");
   });
-  it("a flush chunk captured BEFORE the reap's ended_at still registers (not a late chunk)", async () => {
+  it("a flush chunk captured BEFORE the reap's ended_at still registers in the session (not a late chunk)", async () => {
     notes = core.NOTE_STALL;
     const { json } = await post("2026-10-07T06:50:00.000Z");
     expect(json.upload_state).toBe("verified");
+    expect(chunkInserts()[0]!.values).toContain("bs_t");
   });
 });
 
 describe("AC3 — the kiosk learns", () => {
-  it("chunk reply carries `disagreement` (browser) AND `ended_disagrees` (native decodes this key)", async () => {
+  it("chunk reply carries `disagreement` (browser) AND `ended_disagrees` (native decodes this key), re-homed or not", async () => {
     notes = core.NOTE_ROLLOVER;
     const { json } = await post("2026-10-07T10:11:00.000Z");
     expect(json.disagreement).toBe("ended_disagrees");

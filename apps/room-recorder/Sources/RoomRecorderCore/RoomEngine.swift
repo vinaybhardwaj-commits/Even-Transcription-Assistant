@@ -3473,6 +3473,17 @@ public actor RoomEngine {
     }
   }
 
+  /// PURE — Arch #21. A chunk reply saying "your session was ended" stops capture only when the piece
+  /// it answers belongs to the session recording RIGHT NOW. A spool can still hold pieces of an older
+  /// (reaped or zombie-ended) session while a new one records; that reply is about the old one and
+  /// must never stop the healthy one.
+  public static func shouldStopForChunkReply(
+    pieceSessionID: String, activeSessionID: String?, endedDisagrees: String?
+  ) -> Bool {
+    guard endedDisagrees != nil, let activeSessionID else { return false }
+    return pieceSessionID == activeSessionID
+  }
+
   private func drainPending() async throws -> Bool {
     var endedByServer = false
     for pending in try spool.pending() {
@@ -3489,7 +3500,11 @@ public actor RoomEngine {
           sessionID: benchPiece.sessionID,
           index: benchPiece.index,
           sizeBytes: benchPiece.sizeBytes))
-      if case .registered(let response, _) = result, response.endedDisagrees != nil {
+      if case .registered(let response, _) = result,
+        Self.shouldStopForChunkReply(
+          pieceSessionID: benchPiece.sessionID, activeSessionID: sessionID,
+          endedDisagrees: response.endedDisagrees)
+      {
         endedByServer = true
       }
     }
