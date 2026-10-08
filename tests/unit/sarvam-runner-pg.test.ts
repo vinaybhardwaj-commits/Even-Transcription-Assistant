@@ -34,6 +34,8 @@ vi.mock("@/lib/sarvam-lab", async (orig) => ({
   touchLane: async () => undefined,
 }));
 
+// G42: these tests run a real postgres through psql, 3-6 s each when the machine is idle and far more under load; the 5 s default timed out and cascaded
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-sarvam-runner");
 const row = async (id: string) => (await pg.sql`SELECT id, status, step, progress, failures, error, lease_owner, lease_until FROM scribe_job WHERE id = ${id}`)[0] as Record<string, any>;

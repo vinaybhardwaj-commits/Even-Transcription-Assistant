@@ -241,6 +241,28 @@ describe("scribe_steward_command — the kinds", () => {
     cfg.shadow = { global: true, actions: { message: true } };
     expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null } } })).toMatchObject({ ok: true, after: { global: true, actions: {} } });
   });
+  it("G41: while global is false, holding a key that was ABSENT (= live) gives a revert that names false and is NOT exact (it restores the behaviour, not the stored bytes); replaying it makes the action live again", async () => {
+    cfg.shadow = { global: false, actions: { "ticket:wake": true } }; // every other published action is absent = live
+    const before = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { "ticket:wake": true } } });
+    expect(before).toMatchObject({ ok: true, unchanged: true });
+    const out = await cmd({ kind: "set_shadow", reason: "hold message", value: { actions: { message: true } } });
+    expect(out).toMatchObject({ ok: true, changed_actions: ["message"] });
+    expect(out.live_actions).not.toContain("message");
+    const rv = out.revert as { exact: boolean; note?: string; value: Row };
+    expect(rv.value).toEqual({ actions: { message: false } });
+    expect(rv.exact).toBe(false);
+    expect(rv.note).toMatch(/message was absent.*explicit false/);
+    const back = await cmd({ kind: "set_shadow", reason: "undo", value: rv.value });
+    expect(back.live_actions).toContain("message"); // live again, as before
+    // an absent key while global is TRUE is shadow: clearing it again is exact
+    cfg.shadow = { global: true, actions: {} };
+    const t = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: true } } });
+    expect(t.revert).toMatchObject({ exact: true, value: { actions: { message: null } } });
+    // turning global back ON from OFF with absent (live) keys: the explicit map restores behaviour, not bytes
+    cfg.shadow = { global: false, actions: { "ticket:wake": true } };
+    const on = await cmd({ kind: "set_shadow", reason: "r", value: { global: true } });
+    expect((on.revert as { exact: boolean }).exact).toBe(false);
+  });
   it("SF1: a plain shadow-only change (global stays true) lists no live action", async () => {
     cfg.shadow = { global: true, actions: {} };
     expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: false } } })).toMatchObject({ ok: true, live_actions: [], changed_actions: [] });

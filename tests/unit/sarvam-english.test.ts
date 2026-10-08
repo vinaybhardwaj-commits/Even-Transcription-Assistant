@@ -3,15 +3,17 @@
  * No network, no database, no secret.
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { detectScript, hasIndicScript } from "@/lib/script-detect";
-import { drugCandidates, nameScore, phoneticKey, type Lexicon } from "@/lib/drug-match";
+import { drugCandidates, nameScore, phoneticKey, matchForm, type Lexicon } from "@/lib/drug-match";
+import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 import { alignEnglish, settleUnpaired, tagNative, addMayura, finalizeEnglish } from "@/lib/jobs/kinds/sarvam-english";
 import { planUnits } from "@/lib/jobs/kinds/sarvam-translate";
 import type { ResultDoc } from "@/lib/jobs/kinds/sarvam-common";
 
 const base = JSON.parse(readFileSync("data/drug-lexicon.json", "utf8")) as Lexicon;
-const lex: Lexicon = { ...base, clinical_terms: (JSON.parse(readFileSync("data/clinical-terms.json", "utf8")) as { terms: string[] }).terms };
+const lex: Lexicon = DRUG_LEXICON; // the real list (names used in >= 3 Pulse prescriptions) + the curated terms and analytes
+const fixtures = JSON.parse(readFileSync("tests/fixtures/name-check-english.json", "utf8")) as { ordinary: string[]; holdout: string[]; final: string[]; consult: string[] };
 
 describe("detectScript", () => {
   it.each([
@@ -86,53 +88,63 @@ describe("alignEnglish / settleUnpaired — a mixed en / kn / hi consult loses n
 });
 
 describe("drug-name check — proposes, never rewrites", () => {
-  it("\"combat land\" -> Combiflam, with the entry index, the heard text, a score and the lexicon source", () => {
+  const sug = (c: Array<{ suggested: string }>) => c.map((x) => x.suggested.toLowerCase());
+  it("\"combat land\" -> Combiflam (matched on \"combat\"), with the entry index, the heard text, a score, the lexicon source and the category", () => {
     const c = drugCandidates("Take combat land twice a day after food", 3, lex);
-    expect(c).toEqual([{ entry_idx: 3, heard: "combat", suggested: "Combiflam", score: expect.any(Number), source: "hand-fixture", category: "drug" }]);
-    expect(c[0]!.score).toBeGreaterThanOrEqual(0.55);
+    expect(c[0]).toEqual({ entry_idx: 3, heard: "combat", suggested: expect.stringMatching(/^combiflam/i), score: expect.any(Number), source: lex.source, category: "drug" });
+    expect(c[0]!.score).toBeGreaterThanOrEqual(0.6);
   });
   it("doses and numbers are never part of a candidate: a window touching a digit is skipped, and the function returns no text at all", () => {
     expect(drugCandidates("paracetamol 650 mg three times a day for 5 days", 0, lex)).toEqual([]);
-    const c = drugCandidates("combat land 500 milligram", 0, lex);
-    for (const x of c) expect(/\d/.test(x.heard)).toBe(false);
+    for (const x of drugCandidates("combat land 500 milligram", 0, lex)) expect(/\d/.test(x.heard)).toBe(false);
   });
-  it("a correctly heard name proposes nothing; short tokens (Rx, PX, mg) propose nothing", () => {
+  it("a correctly heard name proposes nothing; short tokens (Rx, PX, mg) propose nothing; a name that merely extends a catalog name is not a mis-hearing", () => {
     expect(drugCandidates("Crocin and Dolo and Combiflam", 0, lex)).toEqual([]);
     expect(drugCandidates("PX for fever, Rx given, mg", 0, lex)).toEqual([]);
+    expect(drugCandidates("send an ultrasound of the abdomen", 0, lex)).toEqual([]);
   });
-  it("deterministic and sorted; the matcher helpers behave", () => {
-    const a = drugCandidates("combat land and pentopraz", 0, lex);
-    expect(a).toEqual(drugCandidates("combat land and pentopraz", 0, lex));
-    expect(a.map((x) => x.suggested)).toEqual(expect.arrayContaining(["Combiflam", "Pantoprazole"]));
+  it("deterministic; the matcher helpers behave; pack words and numbers are dropped from a catalog name before matching", () => {
+    const a = drugCandidates("started on Bilus M and take combat land", 0, lex);
+    expect(a).toEqual(drugCandidates("started on Bilus M and take combat land", 0, lex));
+    expect(matchForm("Niftas 100 Mg Tablet")).toBe("niftas");
+    expect(matchForm("COMBIFLAM 325mg 400mg TAB")).toBe("combiflam");
     expect(phoneticKey("Combiflam")).toBe(phoneticKey("combiflam"));
     expect(nameScore("zzzz", "Combiflam")).toBe(0);
   });
-  it("ADDENDUM 2 — the four garbled lab / clinical terms get candidates: \"IG\" -> IgE, \"Citrus Phthalate\" -> citrate / oxalate, \"nodrinal\" -> nocturia, \"Bilus M\" -> bilastine", () => {
-    const one = (text: string, l: Lexicon = lex) => drugCandidates(text, 0, l);
-    const ige = one("His IG level is high");
-    expect(ige).toContainEqual(expect.objectContaining({ heard: "IG", suggested: "IgE", category: "investigation" })); // a tie with IgA / IgG is reported, not guessed
+  it("ADDENDUM 2 against the REAL list — \"IG\" -> IgE, \"Citrus Phthalate\" -> citrate, \"nodrinal\" -> nocturia, \"Bilus M\" -> a Bila* brand", () => {
+    const ige = drugCandidates("His IG level is high", 0, lex);
+    expect(ige).toContainEqual(expect.objectContaining({ heard: "IG", suggested: "IgE", category: "investigation" })); // a near-tie with IgA / IgM is reported, not guessed
     expect(ige.length).toBeLessThanOrEqual(3);
-    const cit = one("Send the Citrus Phthalate levels in urine");
-    expect(cit.length).toBeGreaterThan(0);
-    expect(cit.some((c) => /^citrate|^oxalate/i.test(c.suggested) && /citrus|phthalate/i.test(c.heard))).toBe(true);
-    expect(one("complains of nodrinal since two weeks")).toEqual([expect.objectContaining({ heard: "nodrinal", suggested: "nocturia", category: "clinical_term" })]);
-    const bil = one("started on Bilus M at night");
-    expect(bil).toEqual([expect.objectContaining({ heard: "Bilus", category: "drug" })]);
-    expect(bil[0]!.suggested).toMatch(/^Bila/); // a bilastine-type brand from the lexicon
+    expect(sug(drugCandidates("Send the Citrus Phthalate levels in urine", 0, lex))).toContain("citrate");
+    expect(drugCandidates("complains of nodrinal since two weeks", 0, lex)).toContainEqual(expect.objectContaining({ heard: "nodrinal", suggested: "nocturia", category: "clinical_term" }));
+    const bil = drugCandidates("started on Bilus M at night", 0, lex);
+    expect(bil.length).toBeGreaterThan(0);
+    expect(bil.every((x) => x.heard === "Bilus" && x.category === "drug" && /^bil/i.test(x.suggested))).toBe(true);
   });
-  it("an ordinary lowercase 'ig' or 'it' is not an acronym candidate; ordinary words around the garbles propose nothing", () => {
-    expect(drugCandidates("it is fine and the ig of the thing", 0, lex)).toEqual([]);
-    expect(drugCandidates("patient came with fever and cough for two days", 0, lex)).toEqual([]);
+  it("false positives stay rare against the 9,903-name list: 130 ordinary English sentences (3 sets) and an enc_hy24855a22-shaped consult — the numbers", () => {
+    const count = (xs: string[]) => xs.filter((t) => drugCandidates(t, 0, lex).length > 0).length;
+    const a = count(fixtures.ordinary), b = count(fixtures.holdout), c = count(fixtures.final);
+    // measured 09 Oct: 3 / 50, 3 / 50, 0 / 30 (the first set was used to design the context rules; the second was looked at once; the third was written last and never tuned on)
+    expect(fixtures.ordinary.length + fixtures.holdout.length + fixtures.final.length).toBe(130);
+    expect(a).toBeLessThanOrEqual(4);
+    expect(b).toBeLessThanOrEqual(4);
+    expect(c).toBeLessThanOrEqual(1);
+    expect(a + b + c).toBeLessThanOrEqual(8); // <= ~6 %
+    expect(fixtures.consult.filter((t) => drugCandidates(t, 0, lex).some((x) => !/combiflam/i.test(x.suggested))).length).toBe(0); // the consult's own garble-free names: no noise
   });
-  it("the committed lexicon is names only: strings, no digits-and-units, no patient columns", () => {
-    expect(lex.names.length).toBeGreaterThan(20);
-    for (const n of lex.names) {
-      expect(typeof n).toBe("string");
-      expect(n.length).toBeLessThanOrEqual(80);
-      expect(/\b\d+\s?(mg|ml|mcg|g)\b/i.test(n)).toBe(false);
-    }
-    expect(Object.keys(base).sort()).toEqual(["investigations", "names", "note", "source", "version"]);
-    for (const n of [...(base.investigations ?? []), ...(lex.clinical_terms ?? [])]) { expect(typeof n).toBe("string"); expect(n.length).toBeLessThanOrEqual(80); }
+  it("speed: the real list (~10,000 entries) is bucketed by first sound, 130 sentences take well under a few seconds", () => {
+    const t0 = Date.now();
+    for (const t of [...fixtures.ordinary, ...fixtures.holdout, ...fixtures.final]) drugCandidates(t, 0, lex);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+  it("the committed lexicon is names only and sized for a serverless bundle", () => {
+    expect(base.names.length).toBeGreaterThan(9000);
+    expect(base.investigations!.length).toBeGreaterThan(1000);
+    expect(base.source).toMatch(/>= 3 prescriptions/);
+    expect(Object.keys(base).sort()).toEqual(["investigations", "names", "source", "version"]);
+    for (const n of [...base.names, ...base.investigations!]) { expect(n.length).toBeLessThanOrEqual(260); expect(/^[A-Za-z0-9 -]+$/.test(n)).toBe(true); }
+    expect(statSync("data/drug-lexicon.json").size).toBeLessThan(700_000);
+    expect(statSync("data/clinical-terms.json").size).toBeLessThan(10_000);
   });
 });
 

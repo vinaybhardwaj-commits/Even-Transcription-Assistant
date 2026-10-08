@@ -139,11 +139,14 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
       if (turningOff) for (const a of LIVE_CAPABLE_ACTIONS) actions[a] = true; // held unless this call names it false below
       const undo: Record<string, boolean | null> = {};
       const legacyCleared: string[] = [];
+      const absentLive: string[] = []; // G41: published keys that were ABSENT (= live) while global was already false
       const afterGlobal = p.data.global ?? curGlobal;
       for (const [k, v] of Object.entries(touched)) {
         const published = LIVE_CAPABLE_ACTIONS.includes(k);
         if (!published) legacyCleared.push(k);
-        else undo[k] = k in curActions ? curActions[k]! : null; // what the key was before: its value, or null (absent)
+        else if (k in curActions) undo[k] = curActions[k]!;
+        else if (curGlobal === false && !turningOff) { undo[k] = false; absentLive.push(k); } // absent while global is false = LIVE; a null here would replay as HELD (G35), so the undo names false
+        else undo[k] = null; // absent while global is true = shadow: clearing it again restores exactly that
         // G35: while global is (or becomes) false an ABSENT published key is LIVE, so null there means "back to held" (true), never "clear". Only an unpublished legacy key,
         // or any key while global stays true (absent = shadow anyway), is really removed.
         if (v === null) {
@@ -161,14 +164,16 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
       } else if (curGlobal === false && p.data.global !== undefined) {
         // global is being turned back ON from a prior OFF: replaying `global:false` needs an actions map, so carry the explicit prior value of every published key (absent = live = false)
         const all: Record<string, boolean | null> = {};
-        for (const a of LIVE_CAPABLE_ACTIONS) all[a] = a in curActions ? curActions[a]! : false;
+        for (const a of LIVE_CAPABLE_ACTIONS) { all[a] = a in curActions ? curActions[a]! : false; if (!(a in curActions)) absentLive.push(a); }
         revert = { kind: "set_shadow", value: { global: false, actions: all }, exact: true };
       } else {
         // G24: only the fields this command touched (an actions-only change never reverts `global`)
         revert = { kind: "set_shadow", value: { ...(p.data.global !== undefined ? { global: curGlobal } : {}), ...(Object.keys(undo).length ? { actions: undo } : {}) }, exact: true };
       }
+      // G41: an absent key (live) is restored as an EXPLICIT false: the same behaviour (live), not the same bytes, so the revert is not exact and says so
+      if (absentLive.length > 0) revert = { ...revert, exact: false, note: `${absentLive.slice(0, 5).join(", ")} ${absentLive.length === 1 ? "was" : "were"} absent (= live while global is false); the revert writes explicit false, which is the same behaviour but not the same stored value` };
       // SF3: a cleared LEGACY (unpublished) key is not put back by the revert (set_shadow refuses to create unpublished keys), so that revert is not exact
-      if (legacyCleared.length > 0) revert = { ...revert, exact: false, note: `cleared legacy key(s) ${legacyCleared.slice(0, 5).join(", ")} are not published steward actions and are not re-created by the revert` };
+      if (legacyCleared.length > 0) revert = { ...revert, exact: false, note: `${revert.note ? `${revert.note}; ` : ""}cleared legacy key(s) ${legacyCleared.slice(0, 5).join(", ")} are not published steward actions and are not re-created by the revert` };
       return done(after, revert);
     }
     case "add_room": {

@@ -843,7 +843,7 @@ describe("S8A4 — the English track comes from a second Sarvam pass over the au
     expect(doc.entries.map((e: Row) => e.script)).toEqual(["Latin", "Kannada", "Devanagari"]);
     expect(doc.entries[1].text).toBe("ನನಗೆ ತಲೆನೋವು ಇದೆ"); // the native text is untouched
     expect(doc.english).toBe("How are you feeling I have a headache I have fever. Take combat land twice a day");
-    expect(doc.drug_candidates).toEqual([{ entry_idx: 2, heard: "combat", suggested: "Combiflam", score: expect.any(Number), source: "hand-fixture", category: "drug" }]);
+    expect(doc.drug_candidates[0]).toEqual({ entry_idx: 2, heard: "combat", suggested: expect.stringMatching(/^combiflam/i), score: expect.any(Number), source: expect.stringContaining("pulse-medications"), category: "drug" });
     expect(doc.english_entries[2].text).toContain("combat land"); // proposed, not rewritten
     expect(doc.sarvam_job_ids).toEqual({ native: "sj_9", english: "sj_en" });
     expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ task: "translate", request_id: "sj_en", audio_s: 600, status: "ok", model: "saaras:v3" })]);

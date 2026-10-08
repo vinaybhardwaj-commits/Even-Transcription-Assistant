@@ -53,16 +53,12 @@ function lcs(a: string, b: string): number {
 }
 const sharedPrefix = (a: string, b: string): number => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; };
 
-/**
- * Similarity 0..1: the best of (1) letter similarity, (2) consonant-skeleton similarity, (3) order-preserving common-letters similarity (2*LCS / total length) — the
- * one that catches "nodrinal" for "nocturia" — each gated so it cannot fire on a stranger: the first sound must agree, and (2) / (3) also need a shared start.
- */
-export function nameScore(heard: string, name: string, words = 1): number {
-  const h = squash(heard), n = squash(name);
-  if (!h || !n || phoneticKey(h)[0] !== phoneticKey(n)[0]) return 0;
+function scoreForms(h: string, hp: string, n: string, np: string, words: number, letterOnly = false): number {
+  if (!h || !n || hp[0] !== np[0]) return 0;
   const letters = sim(h, n);
+  if (letterOnly) return letters;
   const pre = sharedPrefix(h, n);
-  const pk = sim(phoneticKey(h), phoneticKey(n));
+  const pk = sim(hp, np);
   // the skeleton alone over-matches short names, so it counts only with a shared 2-letter start and a similar length
   const lenOk = Math.abs(h.length - n.length) <= 3 && Math.min(h.length, n.length) >= 4;
   const common = (2 * lcs(h, n)) / (h.length + n.length);
@@ -70,25 +66,93 @@ export function nameScore(heard: string, name: string, words = 1): number {
   const similarLen = Math.min(h.length, n.length) / Math.max(h.length, n.length) >= 0.6;
   const lcsScore = pre >= 2 && similarLen ? common * 0.92 : 0;
   // the skeleton measure is for ONE word (a multi-word window has too many consonants to compare)
-  return Math.max(letters, words === 1 && lenOk && pre >= 2 ? pk : 0, Math.min(h.length, n.length) >= 3 ? lcsScore : 0);
+  // (a skeleton of fewer than 4 consonants says too little: "reduce" and "retoz" are both r-t-s)
+  const pkScore = words === 1 && lenOk && pre >= 2 && hp.length >= 4 && np.length >= 4 && letters >= 0.45 ? pk * 0.85 : 0;
+  return Math.max(letters, pkScore, Math.min(h.length, n.length) >= 3 ? lcsScore : 0);
 }
 
-const COMMON = new Set(`a abdomen about above across advice advise after again against ago all along also always am an and another any anyone anything are arm arms around ask asked asks baby back bad be been before being belly below best better between big both bread breath breathing but came can capsule capsules cause causes check checked checking chest child children clear clinic coffee cold come comes coming continue continued cough could crossing daily daughter day days did different do doctor doctors does doing done dose doses down drinking during each ear early ears eating eight either even evening ever every everyone everything eye eyes family father feel feeling feels feet felt fever few fine first five follow followup food foot for four friend from gave get gets getting give given gives giving go goes going gone good got had hair hand hands has have having he head heart her here high him his history home hospital hour hours house how husband i if into is issue issues it its job just keep kept kidney kidneys last late later least leg legs less let lets level levels line little liver long look looked looks lot lots low lung lungs madam made make makes mam man many may me meal meals might milk mine minute minutes moment month months more morning most mother mouth much must my neck need needed needs neither never new next night nights nine no normal nose not nothing now nurse off office often oil okay old once one only onto or other our out over own pain pains part parts passing patient patients people place places problem problems put puts report reports rest result results review rice right room running said salt same saw say says school second see seeing seen sees seven shall she short should side sides since sir sister sitting six skin sleep sleeping small some someone something son soon standing start started starts still stomach stop stopped stops such sugar symptom symptoms syrup tablet tablets take taken takes taking tea teeth tell tells ten test tests than that the their them then there these they thing things third this those three thrice throat through time times today told tomorrow too took tooth twice two under until up upon us usual very walking want wanted wants was water way ways we week weekly weeks well went were what when where which while who whom whose why wife will with within without woman work worse worst would wrong year years yes yesterday you young your`.split(" "));
+/**
+ * Similarity 0..1: the best of (1) letter similarity, (2) consonant-skeleton similarity, (3) order-preserving common-letters similarity (2*LCS / total length) — the
+ * one that catches "nodrinal" for "nocturia" — each gated so it cannot fire on a stranger: the first sound must agree, and (2) / (3) also need a shared start.
+ */
+export function nameScore(heard: string, name: string, words = 1): number {
+  const h = squash(heard), n = squash(name);
+  return scoreForms(h, phoneticKey(h), n, phoneticKey(n), words);
+}
+
+const COMMON = new Set(`a abdomen about above across advice advise after again against ago all along also always am an and another any anyone april are arm arms around ask asked asks august baby back bad be been before being belly below best better between big blood both bread breath breathing but came can capsule capsules cause causes check checked checking chest child children clear clinic coffee cold come comes coming continue continued cough could count crossing culture daily daughter day days december did different do doctor doctors does doing done dose doses down drinking during each ear early ears eating eight either even evening ever every everyone everything eye eyes family father february feel feeling feels feet felt fever few fine first five followup food foot for four friday friend from gave get gets getting give given gives giving go goes going gone good got had hair hand has have having he head heart height her here high him his history home hour hours house how husband i if into is issue issues it its january job july june just keep kept kidney kidneys last late later least leg legs less let lets level levels line little liver long look looked looks lot lots low lung lungs madam made make makes mam man many march may me meal meals might milk mine minute minutes moment monday month months more morning most mother mouth much must my neck need needed needs neither never new next night nights nine no normal nose not nothing november now nurse october off office often oil okay old once one only onto or other our out over own pain pains part parts passing patient patients people place places pressure problem problems pulse put puts report reports rest result results review rice right routine running said salt same sample saturday saw say says scan school second see seeing seen sees september seven shall she short should side sides since sir sister sitting six skin sleeping some someone something son soon standing start started starts still stomach stool stop stopped stops such sugar sunday symptom symptoms syrup tablet tablets take taken takes taking tea teeth tell tells temperature ten test tests than that the their them then there these they thing things third this those three thrice throat through thursday time times today told tomorrow too took tooth tuesday twice two under until up upon urine us usual very walking want wanted wants was water way ways we wednesday week weekly weeks weight well went were what when where which while who whom whose why wife will with within without woman work worse worst would wrong year years yes yesterday you young your`.split(" "));
+/** articles, prepositions, pronouns, auxiliaries: a multi-word window never contains one ("the road", "she has") */
+const FUNCTION_WORDS = new Set(`the a an and or but if then than that this these those there here when where what which who whom whose why how not no yes all any some each every both either neither more most less least much many few little very too also only just even still again always never often ever once twice since until while after before during about above below between into onto over under through across along around against without within upon from with for off out down up i me my mine we us our you your he him his she her it its they them their one two three is are was were be been being am do does did done doing have has had having can could shall should will would may might must to of in on at by as so`.split(" "));
 /** very common English words: never proposed as a mis-hearing of a name, alone or as a whole multi-word window */
 const isCommon = (w: string): boolean => COMMON.has(w.toLowerCase());
+/**
+ * CONTEXT. A real catalog (~10 000 brand names) holds a near-sound-alike for almost any ordinary word, so a loose score alone is mostly noise. A window is therefore
+ * compared at the loose threshold only when a word that talks about that kind of thing sits within a few words of it ("take X twice a day", "X level is high",
+ * "complains of X since"); anywhere else it must clear OUT_OF_CONTEXT_THRESHOLD.
+ */
+export const OUT_OF_CONTEXT_THRESHOLD = 0.85;
+/** a brand-name catalog holds a near-sound-alike for almost anything, so a DRUG needs a little more than the investigation / clinical-term lists */
+const DRUG_THRESHOLD = 0.6; // and out of context only a CLOSE SPELLING counts (letter similarity, see below)
+const CUE_RADIUS = 4;
+const CUES: Record<Category, Set<string>> = {
+   drug: new Set("tablet tablets tab tabs capsule capsules syrup injection inj cream gel ointment drops started prescribe prescribed prescription medicine medicines medication medications drug drugs dose doses mg ml mcg twice thrice rx dosage".split(" ")),
+  investigation: new Set("level levels test tests report reports serum urine blood count profile panel scan xray x-ray ultrasound usg mri ct culture investigation investigations lab labs value values result results sample screening ratio titre titer".split(" ")),
+  clinical_term: new Set("complains complaint complaints complained history since having suffering suffers symptom symptoms feels feeling feel has with diagnosed diagnosis noticed noticing episodes episode problem trouble reports reported developed develop".split(" ")),
+};
+const cued = (words: string[], start: number, size: number, c: Category): boolean => {
+  for (let i = Math.max(0, start - CUE_RADIUS); i < Math.min(words.length, start + size + CUE_RADIUS); i++) if (i < start || i >= start + size) if (CUES[c].has(words[i]!.toLowerCase())) return true;
+  return false;
+};
+
 const WORD = /[\p{L}\p{N}][\p{L}\p{N}'-]*/gu;
 
-const allNames = (lex: Lexicon): Array<{ name: string; category: Category }> => [
-  ...lex.names.map((name) => ({ name, category: "drug" as const })),
-  ...(lex.investigations ?? []).map((name) => ({ name, category: "investigation" as const })),
-  ...(lex.clinical_terms ?? []).map((name) => ({ name, category: "clinical_term" as const })),
-];
+/** Words that only describe the pack, not the product: dropped from a catalog name before matching ("Niftas 100 Mg Tablet" is matched as "Niftas"). */
+const PACK_WORDS = new Set("tablet tablets tab tabs capsule capsules cap caps syrup suspension injection inj cream gel ointment lotion drops drop mouth wash shampoo soap powder sachet spray solution mg gm gms g ml mcg iu sr xr er cr bp ip each with".split(" "));
+
+type Entry = { name: string; category: Category; form: string; pk: string; first: string };
+const indexCache = new WeakMap<Lexicon, { buckets: Map<string, Entry[]>; known: Set<string> }>();
+
+/** The matching form of a catalog name: letters only, pack words and numbers removed. "" when nothing is left. */
+export function matchForm(name: string): string {
+  return squash(name.split(/[\s/,()+-]+/).filter((t) => t && !/\d/.test(t) && !PACK_WORDS.has(t.toLowerCase())).join(" "));
+}
+
+/** Built once per lexicon object: entries bucketed by the first sound, so a window is compared with ~1/10 of the names, not all of them. */
+function indexOf(lex: Lexicon): { buckets: Map<string, Entry[]>; known: Set<string> } {
+  const hit = indexCache.get(lex);
+  if (hit) return hit;
+  const buckets = new Map<string, Entry[]>();
+  const known = new Set<string>();
+  const seen = new Set<string>();
+  const add = (name: string, category: Category) => {
+    const form = matchForm(name);
+    if (form.length < 3) return;
+    known.add(form);
+    if (seen.has(`${category}:${form}`)) return; // many pack sizes of one product are one entry (the first, in file order, is suggested)
+    seen.add(`${category}:${form}`);
+    const pk = phoneticKey(form);
+    const first = pk[0] ?? "";
+    const e: Entry = { name, category, form, pk, first };
+    const list = buckets.get(first);
+    if (list) list.push(e);
+    else buckets.set(first, [e]);
+  };
+  for (const n of lex.names) add(n, "drug");
+  for (const n of lex.investigations ?? []) {
+    add(n, "investigation");
+    // an acronym test name inside a long catalog name ("Chikungunya IgG IgM", "Prostatic Specific Antigen PSA Total") is also an entry of its own: IgG, IgM, PSA
+    for (const t of n.split(/[\s/,()+-]+/)) if (/^[A-Za-z]{2,5}$/.test(t) && (t.match(/[A-Z]/g) ?? []).length >= 2) add(t, "investigation");
+  }
+  for (const n of lex.clinical_terms ?? []) add(n, "clinical_term");
+  const built = { buckets, known };
+  indexCache.set(lex, built);
+  return built;
+}
 
 /** Candidates for one English text. `entryIdx` is carried through. A window containing a digit is skipped, so doses and numbers are never touched. */
 export function drugCandidates(text: string, entryIdx: number, lex: Lexicon, threshold: number = DRUG_MATCH_THRESHOLD): DrugCandidate[] {
   const words = [...text.matchAll(WORD)].map((m) => m[0]);
-  const entries = allNames(lex);
-  const known = new Set(entries.map((e) => squash(e.name)));
+  const { buckets, known } = indexOf(lex);
   const out: DrugCandidate[] = [];
   const taken = new Set<number>();
   // smallest windows first: "Bilus" is proposed before "Bilus M at", and a word already inside a candidate is not used again
@@ -99,6 +163,7 @@ export function drugCandidates(text: string, entryIdx: number, lex: Lexicon, thr
       if (win.some((w) => /\d/.test(w))) continue;
       if (win.every((w) => isCommon(w))) continue; // plain English ("she has", "since two") is never a mis-hearing of a name
       if (win.some((w) => known.has(squash(w)))) continue; // a window that already contains a real lexicon name is not a mis-hearing of one
+      if (size > 1 && win.some((w) => FUNCTION_WORDS.has(w.toLowerCase()))) continue;
       if (size > 1 && win.some((w) => squash(w).length < 3)) continue; // a multi-word window is made of real words, not of "a", "of", "M"
       const heard = win.join(" ");
       const h = squash(heard);
@@ -106,11 +171,24 @@ export function drugCandidates(text: string, entryIdx: number, lex: Lexicon, thr
       const acronym = size === 1 && /^[A-Z]{2,4}$/.test(heard);
       if (h.length < MIN_HEARD_LEN && !acronym) continue;
       if (known.has(h)) continue;
-      const scored = entries.map((e) => ({ ...e, score: nameScore(heard, e.name, size) })).filter((x) => x.score >= threshold && !(acronym && squash(x.name).length > MAX_ACRONYM_LEN + 1));
+      const hp = phoneticKey(h);
+      const scored: Array<Entry & { score: number }> = [];
+      for (const e of buckets.get(hp[0] ?? "") ?? []) {
+        if (e.form.length > h.length * 2 + 2 || e.form.length * 2 + 2 < h.length) continue; // far-off lengths cannot clear the threshold
+        if (acronym && e.form.length > MAX_ACRONYM_LEN + 1) continue;
+        if (!acronym && e.form.length < 5) continue; // a 3-4 letter catalog name matches half the dictionary
+        if (Math.min(h.length, e.form.length) >= 6 && (e.form.startsWith(h) || h.startsWith(e.form))) continue; // the same word, or a name that merely extends it ("ultrasound" / "Ultrasound Neck")
+        // in context: the full score at the threshold; out of context: only a close spelling (letter similarity) at OUT_OF_CONTEXT_THRESHOLD
+        const sc = cued(words, i, size, e.category) ? scoreForms(h, hp, e.form, e.pk, size) : scoreForms(h, hp, e.form, e.pk, size, true);
+        const inCtx = cued(words, i, size, e.category);
+        const need = inCtx ? Math.max(threshold, e.category === "drug" ? DRUG_THRESHOLD : 0) : Math.max(threshold, OUT_OF_CONTEXT_THRESHOLD);
+        if (!inCtx && (h.length < 6 || e.form.length < 6)) continue; // out of context, short words are never enough
+        if (sc >= need) scored.push({ ...e, score: sc });
+      }
       if (scored.length > 0) {
         scored.sort((x, y) => y.score - x.score || (x.name < y.name ? -1 : 1));
-        // the best, and any name scoring within 0.03 of it (up to 3): a tie ("IG" -> IgA or IgE) is reported, not guessed
-        for (const x of scored.filter((y) => y.score >= scored[0]!.score - 0.03).slice(0, 3)) {
+        // the best, and any name scoring within 0.1 of it (up to 3): a near-tie ("IG" -> IgA or IgE) is reported, not guessed
+        for (const x of scored.filter((y) => y.score >= scored[0]!.score - 0.11).slice(0, 3)) {
           out.push({ entry_idx: entryIdx, heard, suggested: x.name, score: Math.round(x.score * 100) / 100, source: lex.source, category: x.category });
         }
         for (let k = 0; k < size; k++) taken.add(i + k);

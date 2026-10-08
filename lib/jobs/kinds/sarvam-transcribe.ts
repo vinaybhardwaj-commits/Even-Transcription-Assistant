@@ -36,12 +36,7 @@ import {
   type EnglishEntry, type ResultDoc, type SarvamScope,
 } from "./sarvam-common";
 import { addMayura, alignEnglish, finalizeEnglish, settleUnpaired, tagNative } from "./sarvam-english";
-import type { Lexicon } from "@/lib/drug-match";
-import lexicon from "@/data/drug-lexicon.json";
-import clinical from "@/data/clinical-terms.json";
-
-/** drug / brand names + investigation names (scripts/gen-drug-lexicon.ts) + a curated clinical-term list. NAMES only; proposes corrections, never rewrites. */
-const DRUG_LEXICON = { ...(lexicon as Lexicon), clinical_terms: (clinical as { terms: string[] }).terms } as Lexicon;
+import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 
 export const SARVAM_TRANSCRIBE_KIND = "sarvam_transcribe";
 const STEPS = {
