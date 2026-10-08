@@ -40,8 +40,9 @@
  * invisibly.
  */
 import { sql } from "@/lib/db";
-import { DISK_LOW_BYTES } from "@/lib/bench-bus-constants";
-import { isBenchStalled } from "@/lib/bench-reaper-core";
+import { DISK_LOW_BYTES, SILENT_PEAK_MAX, SILENT_POLLS, SILENT_ZERO_RATIO, wrongInputCandidate } from "@/lib/bench-bus-constants";
+import { isBenchStalled, REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
+import { START_FAILED_MAX_MS } from "@/lib/bench-bus-constants";
 import { listBenchSessions } from "@/lib/bench";
 import { parseFlag } from "@/lib/flags";
 
@@ -73,7 +74,23 @@ export type RoomPollFacts = {
   state_flags: readonly string[];
   /** This room's currently-open (`status = 'recording'`) bench session, or null if none. */
   open_session: OpenBenchSession | null;
+  /** Arch #22: the name of the attached input WRONG_INPUT_SUSPECTED points at, so the alert can name it. Absent/null: none known. */
+  wrong_input_candidate?: string | null;
+  /**
+   * ARCH #17 — the room's NEWEST session is one that died at start (ended within START_FAILED_MAX_MS with no piece of either stream) and ended
+   * inside START_DEATH_WINDOW_MS. Optional: absent/false adds nothing, so every caller that predates it is unchanged.
+   */
+  start_died?: boolean;
 };
+
+/**
+ * ARCH #17: the app retries a start death (up to 3 attempts, pauses of ~2 s and ~5 s after ~15 s deaths). A death is only FINAL, and only then
+ * alerted, once this long has passed with no newer session: a retry that opens one clears it, a kiosk that does not retry is alerted this much later.
+ */
+export const START_RETRY_GRACE_MS = 90_000;
+
+/** ARCH #17: how long a dead start keeps the room degraded without a newer session to replace it. */
+export const START_DEATH_WINDOW_MS = 30 * 60_000;
 
 /**
  * One named reason a room reads `degraded`, so an alert can say WHICH evidence tripped rather than
@@ -84,15 +101,18 @@ export type RoomPollFacts = {
 export type DegradationReason =
   | "device_missing"
   | "silent_while_recording"
+  | "wrong_input_suspected"
   | "clipping"
   | "encoder_stalled"
   | "tape_stalled"
   | "disk_critical"
-  | "not_delivering";
+  | "not_delivering"
+  | "start_died";
 
 const FLAG_REASON: Record<string, DegradationReason> = {
   DEVICE_MISSING: "device_missing",
   SILENT_WHILE_RECORDING: "silent_while_recording",
+  WRONG_INPUT_SUSPECTED: "wrong_input_suspected",
   CLIPPING: "clipping",
   ENCODER_STALLED: "encoder_stalled",
 };
@@ -122,6 +142,7 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
   if (facts.tape_advancing === false && facts.session_open === true) reasons.push("tape_stalled");
   if (facts.disk_free_bytes !== null && facts.disk_free_bytes < DISK_LOW_BYTES) reasons.push("disk_critical");
   if (facts.open_session !== null && isBenchStalled(facts.open_session, nowMs)) reasons.push("not_delivering");
+  if (facts.start_died === true) reasons.push("start_died");
 
   return reasons.length > 0 ? { status: "degraded", reasons } : { status: "ok", reasons: [] };
 }
@@ -142,17 +163,48 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
  */
 export const GENUINE_RECOVERY_MIN_DISTINCT = 2;
 export const RECOVERY_LEVEL_WINDOW_S = 120;
+/**
+ * RECOVERY DWELL (Arch #14 acceptance add, 6-7 Oct 2026). Alerts 545-575 flipped OPD5 degraded <-> "recovering" on peaks of 0.0001-0.004 while
+ * `zero_ratio` sat near 1: two distinct values satisfy GENUINE_RECOVERY_MIN_DISTINCT, and a dead tape produces them.
+ *
+ * SCOPE (herdr-lead ruling on F3): the dwell applies ONLY to the recovery of an alert that included SILENT_WHILE_RECORDING (`silent_alert`). An
+ * offline, DEVICE_MISSING, CLIPPING, disk-low or encoder-stalled alert recovers as it always did: a quiet clinic must not hold those open.
+ *
+ * WHAT "LIVE" MEANS HERE, AND A DELIBERATE DELTA FROM THE FIRE PATH. A sample is live when `zero_ratio` is well under the digital-silence line
+ * (below RECOVERY_LIVE_MAX_ZERO_RATIO) AND its `peak` is at or above RECOVERY_LIVE_MIN_PEAK. The fire path uses SILENT_PEAK_MAX (0.01), calibrated
+ * on the checkpoint's TRUE peak (speak-test 0.012-0.026). `bench_level_sample.peak` on the Mac is the checkpoint RMS (RoomEngine.currentLevels sends
+ * peak = average = rms), which sits well below the true peak for the same speech, so 0.01 would leave soft speech never live. The recovery floor is
+ * 0.005, about the 0.007 noise floor of a healthy C270 (MUTE_PEAK in rooms-live/state.ts documents it) and far above the 0.0001-0.004 ticks of the
+ * 545-575 flaps. The fire floor is unchanged.
+ *
+ * At least RECOVERY_MIN_LIVE_SAMPLES live samples, and at least RECOVERY_MIN_LIVE_SHARE of the window's samples. One tiny tick cannot clear degraded.
+ * KNOWN LIMIT: a steady tone or hum with energy above the floor reads as live; there is no spectral data to tell it from speech.
+ */
+export const RECOVERY_LIVE_MAX_ZERO_RATIO = 0.5;
+export const RECOVERY_LIVE_MIN_PEAK = 0.005;
+export const RECOVERY_MIN_LIVE_SAMPLES = 20;
+export const RECOVERY_MIN_LIVE_SHARE = 0.5;
+/** The two wordings of the silent reason in an outbox body: the current one and the one written before Arch #14. */
+export const SILENT_ALERT_BODY_MARKERS = ["digital silence on the capture", "silence while recording"] as const;
 
 export type RecoveryEvidence = {
   /** a bench_chunk row (any session of the room) created after the alert began */
   chunk_after_alert: boolean;
   /** distinct (peak, zero_ratio) values among the room's level samples in the last RECOVERY_LEVEL_WINDOW_S */
   distinct_levels: number;
+  /** level samples in the same window that are live (see RECOVERY DWELL). Absent: the caller does not read the dwell and only the other two tests apply. */
+  live_samples?: number;
+  /** all level samples in the same window */
+  total_samples?: number;
+  /** The alert being recovered included SILENT_WHILE_RECORDING. The dwell is tested only when this is true. */
+  silent_alert?: boolean;
 };
 
 /** PURE. `null` (evidence could not be read) is NOT genuine: an alert stays open rather than closing on a guess. */
 export function isGenuineRecovery(ev: RecoveryEvidence | null | undefined): boolean {
-  return Boolean(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT);
+  if (!(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT)) return false;
+  if (ev.silent_alert !== true || ev.live_samples === undefined || ev.total_samples === undefined) return true;
+  return ev.live_samples >= RECOVERY_MIN_LIVE_SAMPLES && ev.live_samples >= ev.total_samples * RECOVERY_MIN_LIVE_SHARE;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +252,14 @@ function andJoin(parts: readonly string[]): string {
  */
 export const REASON_LABEL: Record<DegradationReason, string> = {
   device_missing: "a missing input device",
-  silent_while_recording: "silence while recording",
+  silent_while_recording: "digital silence on the capture (exact zeros, not a quiet room)",
+  wrong_input_suspected: "the recorder may be on the wrong input (another input is attached)",
   clipping: "clipping",
   encoder_stalled: "a stalled encoder",
   tape_stalled: "a stalled tape",
   disk_critical: "critically low disk",
   not_delivering: "no audio reaching storage, independent of what the Mac itself reports",
+  start_died: "a recording that died at start (the recorder exited within seconds and no audio was captured)",
 };
 
 export function offlineMessage(roomName: string, atIso: string): WatchdogMessage {
@@ -215,8 +269,11 @@ export function offlineMessage(roomName: string, atIso: string): WatchdogMessage
   };
 }
 
-export function degradedMessage(roomName: string, reasons: readonly DegradationReason[], atIso: string): WatchdogMessage {
-  const why = andJoin(reasons.map((r) => REASON_LABEL[r]));
+export function degradedMessage(roomName: string, reasons: readonly DegradationReason[], atIso: string, wrongInputCandidate?: string | null): WatchdogMessage {
+  const why = andJoin(reasons.map((r) =>
+    r === "wrong_input_suspected" && wrongInputCandidate
+      ? `the recorder may be on the wrong input (another input is attached: ${wrongInputCandidate})`
+      : REASON_LABEL[r]));
   return {
     subject: `EvenScribe watchdog: ${roomName} capture is degraded`,
     text: `${roomName} is polling but its capture looks degraded — ${why} — as of ${atIso}. Go and look.`,
@@ -233,6 +290,46 @@ export function recoveryMessage(
   return {
     subject: `EvenScribe watchdog: ${roomName} is back`,
     text: `${roomName} recovered after being ${word} for ${fmtDuration(downForMs)}. It is recording normally again as of ${atIso}.`,
+  };
+}
+
+/**
+ * Arch #20. A room that is polling again with NO session open. There is no tape to prove audio with, so this does not say it is recording
+ * normally (recoveryMessage does); it says what is known: the alert is over and the room is back. It exists so a return is never absent from
+ * the history (7 Oct: OPD4, OPD5 and Dietary came back after S15/S16 and the watchdog wrote nothing).
+ */
+export function quietRecoveryMessage(roomName: string, previousStatus: RoomAlertStatus, downForMs: number, atIso: string): WatchdogMessage {
+  // A room that was DEGRADED (it was polling the whole time) and now has no open session has not "come back": its session ended or was closed, and the
+  // watchdog has nothing to say about whether capture is healthy. Only a room that was OFFLINE can say it is polling normally again.
+  if (previousStatus === "degraded") {
+    return {
+      subject: `EvenScribe watchdog: ${roomName} alert cleared, no session open`,
+      text: `${roomName}'s degraded alert was cleared as of ${atIso} after ${fmtDuration(downForMs)}: the session ended or was closed, and no recording session is open now. Capture was not confirmed healthy.`,
+    };
+  }
+  const word = "offline";
+  return {
+    subject: `EvenScribe watchdog: ${roomName} is back`,
+    text: `${roomName} is polling normally again after being ${word} for ${fmtDuration(downForMs)}, as of ${atIso}. No recording session is open, so audio is not yet confirmed.`,
+  };
+}
+
+/** Arch #20. Several rooms clearing in one run: ONE cluster-cleared message beside the per-room ones. */
+/** IST clinic window for the quiet history rows (Arch #20 F2): 07:30 inclusive to 21:30 exclusive. Overnight rooms coming back in the morning write nothing. */
+export const CLINIC_WINDOW_START_IST_MIN = 7 * 60 + 30;
+export const CLINIC_WINDOW_END_IST_MIN = 21 * 60 + 30;
+/** PURE. Was this instant inside the IST clinic window? An unparseable instant is NOT (it writes nothing rather than guess). */
+export function inClinicWindow(iso: string): boolean {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return false;
+  const minutes = Math.floor((((t + 330 * 60_000) % 86_400_000) + 86_400_000) % 86_400_000 / 60_000);
+  return minutes >= CLINIC_WINDOW_START_IST_MIN && minutes < CLINIC_WINDOW_END_IST_MIN;
+}
+
+export function clusterClearedMessage(roomNames: readonly string[], atIso: string): WatchdogMessage {
+  return {
+    subject: `EvenScribe watchdog: ${roomNames.length} rooms are back`,
+    text: `${roomNames.length} rooms cleared in the same run, as of ${atIso}: ${andJoin(roomNames)}. Each room has its own recovery row.`,
   };
 }
 
@@ -284,6 +381,7 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
   const individualOffline: { room_id: string; room_name: string; from: RoomAlertStatus }[] = [];
   const offlineRoomIds: string[] = []; // D3 numerator — every room crossing into offline, muted or not.
   let offlineTransitions = 0;
+  const cleared: { room_id: string; room_name: string; alert_in_clinic_window: boolean }[] = []; // Arch #20 — rooms whose alert cleared this run, for the cluster-cleared event.
 
   for (const input of inputs) {
     const { status: newStatus, reasons } = computeRoomStatus(input.facts, nowMs);
@@ -309,6 +407,15 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
       const sessionOpen = input.facts.open_session !== null || input.facts.session_open === true;
       if (!sessionOpen) {
         writes.push({ room_id: input.room_id, status: "ok", since: nowIso });
+        // Arch #20: the state still closes without proof, but the return is no longer absent from the history. A muted room keeps its silence (D9).
+        // F2: and only for an alert that was raised inside the clinic window; an overnight room coming back in the morning writes nothing.
+        if (!input.muted && inClinicWindow(input.prior.since)) {
+          cleared.push({ room_id: input.room_id, room_name: input.room_name, alert_in_clinic_window: true });
+          messages.push({
+            ...quietRecoveryMessage(input.room_name, input.prior.status, nowMs - Date.parse(input.prior.since), nowIso),
+            kind: "recovered", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "ok",
+          });
+        }
         continue;
       }
       if (!isGenuineRecovery(input.recovery_evidence)) continue;
@@ -330,13 +437,14 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
     if (newStatus === "degraded") {
       // V's ruling: name WHICH signal tripped — the classifier, not_delivering, or both.
       messages.push({
-        ...degradedMessage(input.room_name, reasons, nowIso),
+        ...degradedMessage(input.room_name, reasons, nowIso, input.facts.wrong_input_candidate),
         kind: "degraded", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "degraded",
       });
     } else {
       // newStatus === "ok" with a session open (or a legacy caller that supplied no evidence): the recovery is sent, naming how long it was gone.
       // runWatchdog only reaches here for a room whose recovery is GENUINE (see above); an unproven one `continue`d, a closed-for-the-day one closed quietly.
       const downForMs = nowMs - Date.parse(input.prior.since);
+      cleared.push({ room_id: input.room_id, room_name: input.room_name, alert_in_clinic_window: inClinicWindow(input.prior.since) });
       messages.push({
         ...recoveryMessage(input.room_name, input.prior.status, downForMs, nowIso),
         kind: "recovered", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "ok",
@@ -365,6 +473,17 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
         kind: "offline", room_ids: [room.room_id], room_name: room.room_name, status_from: room.from, status_to: "offline",
       });
     }
+  }
+
+  // Arch #20: two or more rooms clearing in one run (the S12/S15/S16 shape) also get one cluster-cleared row naming them all. No new outbox kind:
+  // it is a `recovered` row with several room_ids, so no CHECK change (arch #21 is widening that constraint in 0132).
+  // Only rooms whose alert was raised inside the clinic window count toward it (F2).
+  const clusterRooms = cleared.filter((c) => c.alert_in_clinic_window);
+  if (clusterRooms.length >= 2) {
+    messages.push({
+      ...clusterClearedMessage(clusterRooms.map((c) => c.room_name), nowIso),
+      kind: "recovered", room_ids: clusterRooms.map((c) => c.room_id), status_from: null, status_to: "ok",
+    });
   }
 
   return { messages, writes };
@@ -465,6 +584,8 @@ type FleetRow = {
   session_open: boolean | null;
   disk_free_bytes: number | null;
   state_flags: unknown;
+  input_device_name?: string | null;
+  input_devices?: unknown;
   prior_status: RoomAlertStatus | null;
   prior_since: string | null;
   muted_until: string | null;
@@ -583,12 +704,49 @@ export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEviden
                   AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
                   AND b.sampled_at > now() - interval '120 seconds'
              ) d
-           ) AS distinct_levels
+           ) AS distinct_levels,
+           (
+             SELECT count(*) FILTER (WHERE b.zero_ratio IS NOT NULL AND b.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND b.peak >= ${RECOVERY_LIVE_MIN_PEAK})::int
+               FROM bench_level_sample b
+              WHERE b.room_id = ras.room_id
+                AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                AND b.sampled_at > now() - interval '120 seconds'
+           ) AS live_samples,
+           (
+             SELECT count(*)::int FROM bench_level_sample b
+              WHERE b.room_id = ras.room_id
+                AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                AND b.sampled_at > now() - interval '120 seconds'
+           ) AS total_samples,
+           (COALESCE((
+             SELECT o.kind = 'degraded' AND (o.body LIKE '%' || ${SILENT_ALERT_BODY_MARKERS[0]} || '%' OR o.body LIKE '%' || ${SILENT_ALERT_BODY_MARKERS[1]} || '%')
+               FROM room_alert_outbox o
+              WHERE ras.room_id = ANY(o.room_ids) AND o.kind IN ('offline', 'degraded')
+              ORDER BY o.created_at DESC, o.id DESC LIMIT 1
+           ), false)
+           -- C1 (ARCH-14 refute): the watchdog writes one outbox row per STATUS change, so a room already degraded for another reason that then goes
+           -- digital-silent writes no new row. The level log still shows it: a room is held to the dwell too when, since this alert began, it logged
+           -- SILENT_POLLS (80, about two minutes) of digital-silence samples (the fire rule's own ratio and peak floor).
+           OR (
+             SELECT count(*) FROM bench_level_sample s
+              WHERE s.room_id = ras.room_id
+                AND s.ist_date >= (ras.since AT TIME ZONE 'Asia/Kolkata')::date
+                AND s.sampled_at > ras.since
+                AND s.zero_ratio >= ${SILENT_ZERO_RATIO} AND s.peak < ${SILENT_PEAK_MAX}
+           ) >= ${SILENT_POLLS}) AS silent_alert
       FROM room_alert_state ras
      WHERE ras.status <> 'ok'
-  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string }>;
+  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string; live_samples: number | string; total_samples: number | string; silent_alert: boolean }>;
   const m = new Map<string, RecoveryEvidence>();
-  for (const r of rows) m.set(r.room_id, { chunk_after_alert: Boolean(r.chunk_after_alert), distinct_levels: Number(r.distinct_levels) || 0 });
+  for (const r of rows) {
+    m.set(r.room_id, {
+      chunk_after_alert: Boolean(r.chunk_after_alert),
+      distinct_levels: Number(r.distinct_levels) || 0,
+      live_samples: Number(r.live_samples) || 0,
+      total_samples: Number(r.total_samples) || 0,
+      silent_alert: Boolean(r.silent_alert),
+    });
+  }
   return m;
 }
 
@@ -597,6 +755,33 @@ export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEviden
  * nothing, never send a false alarm." The read is the only step allowed to abort the whole run;
  * once rows are in hand, one room's write failing is logged and skipped, never fatal to the rest.
  */
+/** Arch #22. The candidate's name for the alert text, from whatever shape `input_devices` came back in (jsonb array or its text). Null on any doubt. */
+function wrongInputCandidateName(selectedName: string | null | undefined, raw: unknown): string | null {
+  let devices: unknown = raw;
+  if (typeof raw === "string") {
+    try { devices = JSON.parse(raw); } catch { return null; }
+  }
+  if (!Array.isArray(devices)) return null;
+  return wrongInputCandidate(devices as Parameters<typeof wrongInputCandidate>[0], selectedName)?.name ?? null;
+}
+
+/** Rooms whose NEWEST real session died at start, recently (exported for its real-postgres test). */
+export async function readDeadStarts(): Promise<string[]> {
+  const dead = (await sql`
+      SELECT s.room_id
+        FROM bench_session s
+       WHERE s.status = 'ended'
+         AND s.ended_at > now() - (${START_DEATH_WINDOW_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at < now() - (${START_RETRY_GRACE_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at - s.started_at < (${START_FAILED_MAX_MS / 1000}::int * INTERVAL '1 second')
+         AND NOT EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = s.id)
+         AND NOT EXISTS (SELECT 1 FROM bench_session n WHERE n.room_id = s.room_id AND n.started_at > s.started_at
+                         AND (n.notes IS NULL OR n.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}))  -- Arch #21: a re-home container is never a newer session
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
+    `) as Array<{ room_id: string }>;
+  return dead.map((d) => d.room_id);
+}
+
 export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogRunResult> {
   let rows: FleetRow[];
   try {
@@ -608,6 +793,8 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
         ri.tape_advancing,
         ri.session_open,
         ri.disk_free_bytes,
+        ri.input_device_name,
+        ri.input_devices,
         COALESCE(ri.state_flags -> 'flags', '[]'::jsonb) AS state_flags,
         ras.status AS prior_status,
         ras.since AS prior_since,
@@ -649,6 +836,15 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
     );
   }
 
+  // ARCH #17 — rooms whose NEWEST session died at start, recently. FAIL-SAFE like the read above: a fault here only means this signal is absent this run.
+  // The 0-chunk test is on the session itself; "newest" so a successful retry (a newer session) clears it.
+  const startDied = new Set<string>();
+  try {
+    for (const room_id of await readDeadStarts()) startDied.add(room_id);
+  } catch (e) {
+    console.error("[room-watchdog] could not read dead starts — start_died is unavailable this run:", e instanceof Error ? e.message : String(e));
+  }
+
   // Evidence for the rooms whose alert is open. A failed read is logged and leaves every open alert OPEN this run (null evidence is not genuine).
   let evidence: Map<string, RecoveryEvidence> | null = null;
   if (rows.some((r) => r.prior_status && r.prior_status !== "ok")) {
@@ -672,6 +868,8 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
       disk_free_bytes: row.disk_free_bytes,
       state_flags: Array.isArray(row.state_flags) ? (row.state_flags as string[]) : [],
       open_session: openSessions.get(row.room_id) ?? null,
+      wrong_input_candidate: wrongInputCandidateName(row.input_device_name, row.input_devices),
+      start_died: startDied.has(row.room_id),
     },
     prior: row.prior_status && row.prior_since ? { status: row.prior_status, since: row.prior_since } : null,
     muted: Boolean(row.muted_until && Date.parse(row.muted_until) > nowMs),

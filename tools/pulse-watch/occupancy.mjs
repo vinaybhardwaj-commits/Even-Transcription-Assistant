@@ -594,7 +594,10 @@ export async function consultingDoctorsByMachine(sql, asOf) {
   const m = new Map();
   for (const r of rows) {
     const open = new Date(r.t_open).getTime();
-    m.set(r.machine, { uid: r.uid, name: r.name, t_open: r.t_open, t_close: r.t_close, consult_key: r.consult_key,
+    // open (90-min rule, 8 Oct 2026; mirrors Rooms Live v1.5): the consult is OPEN = unclosed with t_open within 4 h, or closed within the last 2 min.
+    const closeMs = r.t_close != null ? new Date(r.t_close).getTime() : null;
+    const isOpen = (closeMs == null && A - open <= UNCLOSED_MAX_H * 3600000) || (closeMs != null && A - closeMs <= 120000);
+    m.set(r.machine, { uid: r.uid, name: r.name, t_open: r.t_open, t_close: r.t_close, consult_key: r.consult_key, open: isOpen,
       live: A - open <= WAREHOUSE_MIN * 60000 || (r.t_close == null && A - open <= UNCLOSED_MAX_H * 3600000) });
   }
   return m;
@@ -608,7 +611,8 @@ export function occupantDisplay(warehouse, cookie, page = null) {
   const cu = cookie && cookie.uid ? cookie.uid : null, cn = cookie && cookie.name ? cookie.name : null;
   if (warehouse && warehouse.uid)
     return { uid: warehouse.uid, name: warehouse.name || null, source: 'warehouse', label: warehouse.live === false ? 'last consult' : 'consulting',
-      consult_at: warehouse.t_open ? new Date(warehouse.t_open).toISOString() : null, cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid, page_name: pn };
+      consult_at: warehouse.t_open ? new Date(warehouse.t_open).toISOString() : null, cookie_uid: cu, cookie_name: cn, stale: !!cu && cu !== warehouse.uid, page_name: pn,
+      consult_close: warehouse.t_close ? new Date(warehouse.t_close).toISOString() : null, consult_open: !!warehouse.open };
   if (cu) return { uid: cu, name: cn, source: 'cookie', label: null, consult_at: null, cookie_uid: cu, cookie_name: cn, stale: false, page_name: pn };
   return null;
 }

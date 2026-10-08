@@ -1,6 +1,6 @@
 "use client";
 import type { CSSProperties } from "react";
-import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, barFraction, forMinutes, headline, isProblem, stepsFor } from "@/lib/rooms-live/present";
+import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, BAR_TICK_FRACTION, barFraction, forMinutes, headline, isProblem, stepsFor } from "@/lib/rooms-live/present";
 import { cardStyle, L4_FILL as L4_TEXT, type EscalationLevel } from "@/lib/rooms-live/escalation";
 import type { RoomRow } from "@/lib/rooms-live/snapshot";
 
@@ -8,11 +8,12 @@ const box: CSSProperties = { background: "#fff", borderRadius: 14, padding: 14, 
 
 export function SoundBar({ row, onDark }: { row: RoomRow; onDark?: boolean }) {
   const c = COLORS[row.state];
-  const pct = Math.round(barFraction(row.level.rms) * 100);
+  const pct = Math.round(barFraction(row.level.rms, row.baseline_rms) * 100);
   const grey = row.level.stale || row.state === "off" || row.state === "unplugged" || row.state === "notrec" || row.state === "unknown";
   return (
-    <div role="meter" aria-label="Sound level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={grey ? 0 : pct} style={{ height: 8, borderRadius: 4, background: onDark ? "rgba(255,255,255,.28)" : "#ECEBE6", overflow: "hidden" }}>
+    <div role="meter" aria-label="Sound level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={grey ? 0 : pct} style={{ height: 8, borderRadius: 4, background: onDark ? "rgba(255,255,255,.28)" : "#ECEBE6", overflow: "hidden", position: "relative" }}>
       <div style={{ width: `${grey ? 0 : pct}%`, height: "100%", background: onDark ? "#FFFFFF" : c.fg, transition: "width .6s ease" }} />
+      <div aria-hidden="true" data-testid="speech-tick" style={{ position: "absolute", left: `${BAR_TICK_FRACTION * 100}%`, top: 0, bottom: 0, width: 2, background: onDark ? "rgba(255,255,255,.75)" : "#4F535A" }} />
     </div>
   );
 }
@@ -41,14 +42,18 @@ export function RoomTile({ row, nowMs, eng, calm, level, durMs, canClaim, onClai
           <div style={{ fontSize: 18, fontWeight: 700 }}>{row.label}</div>
           <div style={{ fontSize: 14, color: sub }}>{row.doctor ? `${row.doctor.display} · ${row.doctor.activity}` : row.doctor_known === false ? "Doctor not known right now" : "No doctor signed in"}</div>
         </div>
-        <span style={pill}>
-          <span aria-hidden="true">{ICON[row.state]} </span>
-          {WORD[row.state]}
-        </span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+          <span style={pill}>
+            <span aria-hidden="true">{ICON[row.state]} </span>
+            {WORD[row.state]}
+          </span>
+          <a data-testid="steward-log-link" href={`/rooms-live/steward/${row.room_id}`} style={{ fontSize: 12, color: sub, textDecoration: "underline", padding: "6px 2px" }}>Steward log</a>
+        </div>
       </div>
       <SoundBar row={row} onDark={!!st && (level === 3 || level === 4)} />
       <div style={{ fontSize: 16, fontWeight: 600, color: st ? fg : c.fg }}>{headline(row)}</div>
       {(problem || row.state === "unknown") && first ? <div style={{ fontSize: 15 }}>{first}</div> : null}
+      {row.steward_line ? <div data-testid="steward-line" style={{ fontSize: 13, color: sub }}>{row.steward_line.text}</div> : null}
       {showNoDoctorNote(row) ? <div style={{ fontSize: 14, color: sub }}>{NO_DOCTOR_PROBLEM_NOTE}</div> : null}
       {since && (esc || row.state_since !== null) ? <div style={{ fontSize: 13, color: sub, fontWeight: st?.boldFor ? 800 : 400 }}>{since}</div> : null}
       {eng ? (

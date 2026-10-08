@@ -187,6 +187,8 @@ export type BenchSessionRollupRow = {
   last_any_chunk_at: string | Date | null;
   /** K-B: backup-stream chunks and primary-mic loss events */
   backup_chunk_count: number;
+  /** Arch #15: a start_day was acked failed around this session (death evidence). */
+  start_failed_ack?: boolean;
   backup_verified_count: number;
   primary_lost_count: number;
   primary_restored_count: number;
@@ -219,7 +221,12 @@ export async function listBenchSessions(f: BenchSessionListFilters = {}): Promis
            COUNT(c.id) FILTER (WHERE c.source = 'backup')::int AS backup_chunk_count,
            COUNT(c.id) FILTER (WHERE c.source = 'backup' AND c.upload_state = 'verified')::int AS backup_verified_count,
            COALESCE(ev.primary_lost_count, 0)::int AS primary_lost_count,
-           COALESCE(ev.primary_restored_count, 0)::int AS primary_restored_count
+           COALESCE(ev.primary_restored_count, 0)::int AS primary_restored_count,
+           EXISTS (
+             SELECT 1 FROM bench_command bc
+              WHERE bc.room_id = s.room_id AND bc.kind = 'start_day' AND bc.status = 'failed'
+                AND bc.acked_at BETWEEN s.started_at - interval '1 minute' AND COALESCE(s.ended_at, now()) + interval '3 minutes'
+           ) AS start_failed_ack
       FROM bench_session s
       JOIN room r ON r.id = s.room_id
       LEFT JOIN bench_chunk c ON c.session_id = s.id

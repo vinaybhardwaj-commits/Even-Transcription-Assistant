@@ -41,7 +41,7 @@ import {
   type Step,
   type UnassignedInstall,
 } from "@/lib/room-install-view";
-import { INSTALL_STATE_LABEL } from "@/lib/bench-bus-constants";
+import { INSTALL_STATE_LABEL, wrongInputCandidate } from "@/lib/bench-bus-constants";
 
 /** A3 — the in-table action class BenchClient already uses. 44px minimum touch target. */
 const ROW_BTN =
@@ -733,9 +733,10 @@ function FleetRowView({
         {i && view.input_devices && view.input_devices.length > 0 && (
           <ul data-devices className="mt-0.5 text-even-ink-400">
             {view.input_devices.map((d) => (
-              <li key={d.uid}>
+              <li key={d.uid} data-device-selected={d.is_selected === true || (!view.input_devices!.some((x) => x.is_selected) && d.name === i.input_device_name) ? "true" : undefined}>
                 {d.name}
                 {d.is_default ? " (default)" : ""}
+                {d.is_selected === true || (!view.input_devices!.some((x) => x.is_selected) && d.name === i.input_device_name) ? " · selected" : ""}
               </li>
             ))}
           </ul>
@@ -744,6 +745,26 @@ function FleetRowView({
         {i && view.can_set_audio_input && (
           <AudioInputControl install={i} view={view} busy={busy === i.install_id} onSet={onSetAudioInput} />
         )}
+        {/* Arch #22. ALERT, NOT AN AUTO-SWITCH: the recorder reads digital zero and another input is attached. The existing set_audio_input
+            command does the switch, and only when a person presses this. The candidate is attached, not proven live. */}
+        {i && view.state_flags.includes("WRONG_INPUT_SUSPECTED") && (() => {
+          const cand = wrongInputCandidate(view.input_devices, i.input_device_name);
+          return cand ? (
+            <span data-wrong-input className="mt-1.5 flex flex-col items-start gap-1 text-caption text-danger-700">
+              <span>Digital silence on the selected input. Another input is attached: {cand.name}.</span>
+              {view.can_set_audio_input && cand.uid && (
+                <button
+                  type="button"
+                  disabled={busy === i.install_id}
+                  onClick={() => onSetAudioInput(i, { device_uid: cand.uid! })}
+                  className="rounded-lg border border-even-ink-100 bg-white px-2 py-1 text-even-navy-800 disabled:opacity-40"
+                >
+                  Switch to {cand.name}
+                </button>
+              )}
+            </span>
+          ) : null;
+        })()}
       </td>
 
       {/* STATES A AND B (R3-3). Three answers, not two: an idle room with nobody in it reads

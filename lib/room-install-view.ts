@@ -100,7 +100,7 @@ export type InstallView = {
 };
 
 /** B2-D10 — one entry of the app's input-device list, as `cleanPollFields` bounded it. */
-export type InputDevice = { name: string; uid: string; is_default: boolean };
+export type InputDevice = { name: string; uid: string; is_default: boolean; is_selected?: boolean };
 
 export type UpdateChannel = "stable" | "test";
 
@@ -347,8 +347,10 @@ export const SESSION_WARN_DAYS = 30;
  * DEGRADATION — reaches the row state:
  *  - DEVICE_MISSING          the input device this Mac was reading from is gone. Nothing is
  *                            arriving; this is the exact case that exposed the bug.
- *  - SILENT_WHILE_RECORDING  recording, tape advancing, and the last two minutes are bit-exact
- *                            zero (§2). The room is capturing nothing usable.
+ *  - SILENT_WHILE_RECORDING  recording, tape advancing, and the last two minutes are digital
+ *                            silence: zero_ratio at or above the Bench line (0.98) and no live
+ *                            peak. Exact capture zeros, not an empty clinic. The room is
+ *                            capturing nothing usable.
  *  - CLIPPING                three of the last ten recording polls hit full scale. The samples
  *                            reaching the tape are corrupted at the peaks — degraded content, not
  *                            just a fact worth a note.
@@ -368,6 +370,7 @@ export const SESSION_WARN_DAYS = 30;
 const DEGRADED_STATE_FLAGS: ReadonlySet<InstallStateFlag> = new Set<InstallStateFlag>([
   "DEVICE_MISSING",
   "SILENT_WHILE_RECORDING",
+  "WRONG_INPUT_SUSPECTED",
   "CLIPPING",
   "ENCODER_STALLED",
 ]);

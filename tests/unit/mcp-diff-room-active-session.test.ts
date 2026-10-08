@@ -124,4 +124,26 @@ describe("scribe_diff_room — recording follows the SAME active-session check s
     expect(row.recording).toBe(true);
     expect(row.recording_session_id).toBe("bs_today");
   });
+
+  it("ARCH #15: the door reads a 15 s zero-piece ended session as start_failed, and a real ended day as finished", async () => {
+    const sess = (over: Row): Row => ({
+      id: "bs_x", room_id: ROOM.id, label: null, mic_label: null, started_at: "2026-09-28T03:16:00.000Z", ended_at: "2026-09-28T03:16:15.000Z",
+      status: "ended", notes: null, room_name: ROOM.name, room_slug: ROOM.slug, chunk_count: 0, verified_count: 0, total_bytes: 0, gap_ms: 0, gap_count: 0,
+      last_chunk_at: null, last_any_chunk_at: null, backup_chunk_count: 0, backup_verified_count: 0, primary_lost_count: 0, primary_restored_count: 0, start_failed_ack: true, ...over,
+    });
+    active = null;
+    todaySessions = [sess({})];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
+    todaySessions = [sess({ chunk_count: 40, ended_at: "2026-09-28T11:00:00.000Z" })];
+    expect(((await rowOf()).room_state as Row).state).toBe("finished");
+    todaySessions = [sess({ start_failed_ack: false })];   // an operator stop inside the window: no death evidence
+    expect(((await rowOf()).room_state as Row).state).toBe("finished");
+    // the door must pass BOTH evidence fields through: a failed ack alone, and the compensation note alone, each make it start_failed
+    todaySessions = [sess({ start_failed_ack: true, notes: null })];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
+    todaySessions = [sess({ start_failed_ack: false, notes: "start failed: capture did not start" })];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
+    todaySessions = [sess({ start_failed_ack: false, notes: "auto-ended: no chunks >30m (reaper)" })];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
+  });
 });

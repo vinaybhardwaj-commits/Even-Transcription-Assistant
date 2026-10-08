@@ -56,7 +56,8 @@ import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounte
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
 import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
-import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
+import { SILENT_PEAK_MAX, SILENT_POLLS, SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
+import { REASON_LABEL, isGenuineRecovery, RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK, SILENT_ALERT_BODY_MARKERS, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
   type AttentionItem,
@@ -175,6 +176,11 @@ export type OutboxFacts = {
   body: string;
   chunk_after_alert: boolean;
   distinct_levels_since_alert: number;
+  /** Arch #20 dwell: level samples in the last RECOVERY_LEVEL_WINDOW_S that are live (zero_ratio < RECOVERY_LIVE_MAX_ZERO_RATIO and peak >= RECOVERY_LIVE_MIN_PEAK), and all samples in that window. Absent: no dwell test. */
+  live_samples_since_alert?: number;
+  total_samples_recent?: number;
+  /** C1: the level log shows >= SILENT_POLLS digital-silence samples since the alert began, even though the alert's text names another reason. */
+  digital_silence_since_alert?: boolean;
   /**
    * The room's watchdog state (`room_alert_state.status`) when the loader read it; null = no state row; undefined = not supplied (legacy callers and
    * plain-object tests: no gate). R6 is gated on it: a state of `ok` with no open session means the watchdog closed the alert (genuinely, or quietly
@@ -534,7 +540,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     // GATE: the alert is closed when the room's watchdog state is `ok` AND no session is open for it (a room closed for the day, whose alert the
     // watchdog closed quietly). A session that is open keeps the alert standing until audio is proven. No state row = not closed.
     const alertClosedByWatchdog = r.outbox?.state_status === "ok" && !r.open_session;
-    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert })) {
+    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert, live_samples: r.outbox.live_samples_since_alert, total_samples: r.outbox.total_samples_recent, silent_alert: (r.outbox.kind === "degraded" && SILENT_ALERT_BODY_MARKERS.some((m) => r.outbox!.body.includes(m))) || r.outbox.digital_silence_since_alert })) {
       const o = r.outbox;
       const reasons = (Object.keys(REASON_LABEL) as DegradationReason[]).filter((k) => o.body.includes(REASON_LABEL[k]));
       const red = o.kind === "offline" || reasons.includes("device_missing") || reasons.includes("tape_stalled");
@@ -883,10 +889,20 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
                       AND x.sampled_at > a.created_at
                     ORDER BY x.ist_date, x.sampled_at LIMIT 1
                  ) f
-             ), 0)::int AS distinct_levels_since_alert
+             ), 0)::int AS distinct_levels_since_alert,
+             (SELECT count(*) FILTER (WHERE x.zero_ratio IS NOT NULL AND x.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND x.peak >= ${RECOVERY_LIVE_MIN_PEAK})::int
+                FROM bench_level_sample x
+               WHERE x.room_id = a.room_id AND x.ist_date >= (a.created_at AT TIME ZONE 'Asia/Kolkata')::date
+                 AND x.sampled_at > a.created_at AND x.sampled_at > now() - interval '120 seconds') AS live_samples_since_alert,
+             (SELECT count(*)::int FROM bench_level_sample x
+               WHERE x.room_id = a.room_id AND x.ist_date >= (a.created_at AT TIME ZONE 'Asia/Kolkata')::date
+                 AND x.sampled_at > a.created_at AND x.sampled_at > now() - interval '120 seconds') AS total_samples_recent,
+             ((SELECT count(*) FROM bench_level_sample x
+                WHERE x.room_id = a.room_id AND x.ist_date >= (a.created_at AT TIME ZONE 'Asia/Kolkata')::date
+                  AND x.sampled_at > a.created_at AND x.zero_ratio >= ${SILENT_ZERO_RATIO} AND x.peak < ${SILENT_PEAK_MAX}) >= ${SILENT_POLLS}) AS digital_silence_since_alert
         FROM a
        WHERE a.room_id = ANY(${ids}::text[])
-    `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown }>, []),
+    `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown; live_samples_since_alert: unknown; total_samples_recent: unknown; digital_silence_since_alert: unknown }>, []),
     // Arch #21 — the newest session_reaped alert per room (12 h). Counts and times only in the body; no patient data.
     safe("room_alert_reaped", degraded, async () => (await sql`
       SELECT DISTINCT ON (rid) rid AS room_id, o.created_at, o.body, o.status_to AS phase
@@ -896,9 +912,13 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
        ORDER BY rid, o.created_at DESC, o.id DESC
     `) as Array<{ room_id: string; created_at: unknown; body: string; phase: string | null }>, []),
     safe("bench_command", degraded, async () => (await sql`
-      SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at, COALESCE(c.error, c.result->>'error') AS error
+      SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at,
+             COALESCE(c.error, c.result->>'error', 'start deferred (waiting for the input device) and no recording has begun') AS error
         FROM bench_command c
-       WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'start_day' AND c.status = 'failed'
+       WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'start_day'
+         -- ARCH #17: a FAILED start, or a start the app ACCEPTED as deferred (waiting for its input device) that is still an acked, deferred row two minutes
+         -- on. The R7 rule then clears it the moment any session opens after the ack, so "accepted" can never read as success without a recording.
+         AND (c.status = 'failed' OR (c.status = 'acked' AND c.result->>'deferred' = 'true' AND c.acked_at < now() - interval '2 minutes'))
          AND c.acked_at > now() - interval '60 minutes' AND c.created_at > now() - interval '3 hours'
        ORDER BY c.room_id, c.acked_at DESC
     `) as Array<{ room_id: string; acked_at: unknown; error: string | null }>, []),
@@ -1040,6 +1060,9 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
               state_status: ob.state_status ?? null,
               chunk_after_alert: Boolean(ob.chunk_after_alert),
               distinct_levels_since_alert: Number(ob.distinct_levels_since_alert) || 0,
+              live_samples_since_alert: Number(ob.live_samples_since_alert) || 0,
+              total_samples_recent: Number(ob.total_samples_recent) || 0,
+              digital_silence_since_alert: Boolean(ob.digital_silence_since_alert),
             }
           : null,
       failed_start: fs && fsAt ? { acked_at: fsAt, error: fs.error } : null,

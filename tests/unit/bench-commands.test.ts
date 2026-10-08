@@ -156,7 +156,7 @@ describe("pollCommands — poll lifecycle", () => {
   });
 
   it("appends a PHI-free IST-day sample when a measured main level arrives", async () => {
-    responder = () => [];
+    responder = (text) => (/FROM bench_session/.test(text) ? [{ "?column?": 1 }] : []);
     await pollCommands({
       roomId: "room_1",
       tabId: "tab_A",
@@ -176,6 +176,28 @@ describe("pollCommands — poll lifecycle", () => {
       true,
       true,
     ]);
+  });
+});
+
+describe("pollCommands — level sample session honesty (Arch #19)", () => {
+  const poll = () => pollCommands({
+    roomId: "room_1", tabId: "tab_A", prevPollAt: null, recordingSessionId: "bs_reaped", paused: false,
+    mic: { peak: 0.0125, avg: 0.01, zeroRatio: 0 },
+  });
+
+  it("a session the server has ended is session_open:false and tape_advancing:false, whatever the kiosk names", async () => {
+    responder = () => [];
+    await poll();
+    const lookup = findCall(/FROM bench_session/);
+    expect(lookup!.text).toContain("status IN ('recording', 'paused')");
+    expect(lookup!.values).toEqual(["bs_reaped"]);
+    expect(findCall(/INSERT INTO bench_level_sample/)!.values.slice(-2)).toEqual([false, false]);
+  });
+
+  it("a session lookup that fails keeps the kiosk's claim rather than dropping the sample", async () => {
+    responder = (text) => { if (/FROM bench_session/.test(text)) throw new Error("boom"); return []; };
+    await poll();
+    expect(findCall(/INSERT INTO bench_level_sample/)!.values.slice(-2)).toEqual([true, true]);
   });
 });
 

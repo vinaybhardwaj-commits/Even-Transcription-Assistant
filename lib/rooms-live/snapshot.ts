@@ -22,6 +22,10 @@ import {
   readOccupancy,
   readSessions,
   readSteward,
+  readStewardActions,
+  readStewardConfig,
+  readStewardLog,
+  readWarehouseConsults,
   type Db,
   type ExtRow,
   type HeartbeatRow,
@@ -29,14 +33,18 @@ import {
   type LevelDbRow,
   type ListenerRow,
   type SessionRow,
+  type StewardLogRow,
   type StewardRow,
+  type WarehouseConsultRow,
 } from "./read";
+import { STATUS_KEYS, statusFromRows } from "./steward-status";
+import { cardLine, isChange, lineOf, type StewardLine, type StewardStatus } from "./steward-lines";
 import { computeState, type LevelRow, type RoomStateName, type StateInput } from "./state";
 
 export type RoomRow = {
   room_id: string;
   label: string;
-  doctor: { display: string; activity: "In consultation" | "Signed in" } | null;
+  doctor: { display: string; activity: "In consultation" | "Signed in" | `Last consult ${string}` } | null;
   /** false when the occupancy read failed: the doctor is UNKNOWN, not absent (FIX-1 F1) */
   doctor_known: boolean;
   state: RoomStateName;
@@ -47,12 +55,37 @@ export type RoomRow = {
   device: { name: string | null; missing: boolean };
   session: { open: boolean; since: string | null; chunk_age_s: number | null };
   steward: { action: string; mode: string; at: string } | null;
+  /** v1.7 S2: the one plain-words Steward line for the card (newest action of the last 60 min, else the hold line), or null */
+  steward_line: StewardLine | null;
+  /** v1.7 S4: this room's last 20 non-ok decisions, newest first (the Details view) */
+  steward_log: StewardLine[];
   claim: ClaimView | null;
   ages_s: { listener: number | null; heartbeat: number | null; ext: number | null };
 };
-export type Snapshot = { generated_at: string; rooms: RoomRow[]; degraded: string[] };
+/** v1.7 S3: a Steward action or alert (live or shadow) of today, tagged "Steward" */
+export type ChangeRow = StewardLine & { room_id: string; label: string; tag: "Steward" };
+export type Snapshot = {
+  generated_at: string;
+  rooms: RoomRow[];
+  degraded: string[];
+  /** v1.7 S1: the strip's data; the page says "Steward status unavailable" for state "unavailable" */
+  steward_status: StewardStatus;
+  /** v1.7 S3: today's Steward changes, newest first, at most 50 */
+  changes_today: ChangeRow[];
+};
+export const CHANGES_MAX = 50;
 
 export const MEMO_MS = 2000;
+/** a warehouse consult closed longer ago than this is no longer "in consultation" */
+export const CONSULT_CLOSE_GRACE_MS = 2 * 60_000;
+/** v1.5: between patients, a consult closed within this long ago still names the doctor ("Last consult HH:MM") */
+export const LAST_CONSULT_WINDOW_MS = 90 * 60_000;
+
+/** HH:MM, 24 h, Asia/Kolkata */
+const istHm = (t: number): string => {
+  const m = Math.floor(((t + 19_800_000) % 86_400_000) / 60_000);
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
 
 const ms = (x: string | null | undefined): number | null => {
   if (!x) return null;
@@ -100,7 +133,7 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     try {
       return { v: await raceTimeout(fn, tmo), ok: true };
     } catch {
-      degraded.push(name);
+      if (!degraded.includes(name)) degraded.push(name); // v1.7: the Steward's three decision reads share one name
       return { v: null, ok: false };
     }
   };
@@ -109,14 +142,24 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   const ROOMS: readonly RoomDef[] = deps.rooms ?? (await raceTimeout(() => loadRoster(deps.db, now), tmo).catch(() => ROOMS_DEFAULT));
   const ROOM_IDS = ROOMS.map((r) => r.room_id);
 
-  const [lis, ins, ses, lev, ste, clm] = await Promise.all([
+  const istDayStart = new Date(Math.floor((now + 19_800_000) / 86_400_000) * 86_400_000 - 19_800_000).toISOString();
+  const [lis, ins, ses, lev, ste, clm, scf, slog, sact] = await Promise.all([
     safe("bench_listener", () => readListeners(deps.db, ROOM_IDS)),
     safe("room_install", () => readInstalls(deps.db, ROOM_IDS)),
     safe("bench_session", () => readSessions(deps.db, ROOM_IDS, asOf)),
     safe("bench_level_sample", () => readLevels(deps.db, ROOM_IDS, asOf, today, yesterday)),
     safe("steward_decisions", () => readSteward(deps.db, ROOM_IDS, asOf)),
     safe("rooms_live_claim", async () => (deps.claims ? await deps.claims.open() : [])),
+    safe("steward_config", () => readStewardConfig(deps.db, STATUS_KEYS)),
+    safe("steward_decisions", () => readStewardLog(deps.db, ROOM_IDS, asOf)),
+    safe("steward_decisions", () => readStewardActions(deps.db, ROOM_IDS, asOf, istDayStart)),
   ]);
+  // v1.7: a failed or unreadable steward_config is "Steward status unavailable" on the page; the cards still render
+  const stewardStatus: StewardStatus = scf.ok && scf.v ? statusFromRows(scf.v) : { state: "unavailable" };
+  const logBy = new Map<string, StewardLogRow[]>();
+  for (const r of slog.v ?? []) logBy.set(r.room_id, [...(logBy.get(r.room_id) ?? []), r]);
+  const actBy = new Map<string, StewardLogRow[]>();
+  for (const r of sact.v ?? []) actBy.set(r.room_id, [...(actBy.get(r.room_id) ?? []), r]);
 
   const installBy = new Map<string, InstallRow>((ins.v ?? []).map((r) => [r.room_id, r]));
   // machine spellings per room, from the install hostname
@@ -129,11 +172,13 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   let hb: { v: HeartbeatRow[] | null; ok: boolean } = { v: [], ok: true };
   let ext: { v: ExtRow[] | null; ok: boolean } = { v: [], ok: true };
   let occ: { v: Awaited<ReturnType<typeof readOccupancy>> | null; ok: boolean } = { v: [], ok: true };
+  let whc: { v: WarehouseConsultRow[] | null; ok: boolean } = { v: [], ok: true };
   if (allKeys.length > 0) {
-    [hb, ext, occ] = await Promise.all([
+    [hb, ext, occ, whc] = await Promise.all([
       safe("kiosk_health_heartbeat", () => readHeartbeats(deps.db, allKeys, asOf)),
       safe("pulse_presence_ext", () => readExt(deps.db, allKeys, asOf)),
       safe("occupancy", () => readOccupancy(deps.db, allKeys, asOf)),
+      safe("eta_encounter_windows", () => readWarehouseConsults(deps.db, allKeys, asOf)),
     ]);
   }
 
@@ -158,10 +203,29 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const room = roomOfKey.get(matchKey(e.machine));
     if (room && (!extBy.has(room) || Date.parse(e.ts) > Date.parse(extBy.get(room)!.ts))) extBy.set(room, e);
   }
-  const occBy = new Map<string, { occupied: boolean; ambiguous: boolean; page_name: string | null }>();
+  const occBy = new Map<string, { occupied: boolean; ambiguous: boolean; page_name: string | null; best_dn: string | null; best_uid: string | null; best_stale: boolean }>();
   for (const o of occ.v ?? []) {
     const room = roomOfKey.get(matchKey(o.machine));
-    if (room) occBy.set(room, { occupied: o.occupied, ambiguous: o.ambiguous, page_name: o.page_name });
+    if (room) occBy.set(room, { occupied: o.occupied, ambiguous: o.ambiguous, page_name: o.page_name, best_dn: o.best_dn ?? null, best_uid: o.best_uid ?? null, best_stale: !!o.best_stale });
+  }
+  // v1.4: the newest warehouse consult per room; it counts only while OPEN (t_open <= now, and no t_close or one within the last 2 minutes)
+  const openConsultBy = new Map<string, WarehouseConsultRow>();
+  const lastConsultBy = new Map<string, WarehouseConsultRow>();
+  for (const c of whc.v ?? []) {
+    const room = roomOfKey.get(matchKey(c.machine));
+    const tOpen = Date.parse(c.t_open);
+    const tClose = c.t_close ? Date.parse(c.t_close) : null;
+    if (!room || !Number.isFinite(tOpen) || tOpen > now) continue;
+    if (tClose !== null && !(tClose >= now - CONSULT_CLOSE_GRACE_MS)) {
+      // v1.5: closed, but recently enough that the doctor is still the room's doctor between patients
+      if (tClose >= now - LAST_CONSULT_WINDOW_MS && tClose <= now) {
+        const pl = lastConsultBy.get(room);
+        if (!pl || Date.parse(pl.t_close!) < tClose) lastConsultBy.set(room, c);
+      }
+      continue;
+    }
+    const prev = openConsultBy.get(room);
+    if (!prev || Date.parse(prev.t_open) < tOpen) openConsultBy.set(room, c);
   }
 
   const rooms: RoomRow[] = ROOMS.map((def) => {
@@ -187,12 +251,25 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const e = extBy.get(def.room_id);
     const present = !!o && o.occupied && !o.ambiguous;
     // F28: the name is the identity-checked occupant's (scopedOccupancy), never the newest extension event's display_name (that is the stale cookie identity)
-    const doctor = present ? { display: o!.page_name?.trim().slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" } : null;
+    // v1.5: else a consult closed within 90 min names it ("Last consult HH:MM"). v1.4: an open warehouse consult names the doctor whatever occupancy says. Otherwise the occupancy rules stand: the occupant's non-stale full display name (v1.6),
+    // then the page greeting, then the literal. A stale-cookie stream's dn is a greeting or a placeholder, never the cookie's name; its best_dn is not used.
+    const wc = openConsultBy.get(def.room_id);
+    // v1.6: the resolver's full display name comes before the page greeting (a first name only); a bare email or uid is not a name
+    const rawBest = o && !o.best_stale ? o.best_dn?.trim() : "";
+    const bestName = rawBest && !rawBest.includes("@") && rawBest !== o?.best_uid?.trim() ? rawBest : "";
+    const lc = lastConsultBy.get(def.room_id);
+    const doctor: RoomRow["doctor"] = wc?.doctor_name
+      ? { display: wc.doctor_name.slice(0, 60), activity: "In consultation" }
+      : lc?.doctor_name
+        ? { display: lc.doctor_name.slice(0, 60), activity: `Last consult ${istHm(Date.parse(lc.t_close!))}` }
+        : present
+        ? { display: bestName.slice(0, 60) || o!.page_name?.trim().slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" }
+        : null;
     return {
       room_id: def.room_id,
       label: def.label,
       doctor,
-      doctor_known: occ.ok,
+      doctor_known: occ.ok && whc.ok,
       state: r.state,
       state_since: r.state_since === null ? null : new Date(r.state_since).toISOString(),
       detail_code: r.detail_code,
@@ -201,6 +278,8 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
       device: r.device,
       session: { open: input.session.open, since: input.session.since === null ? null : new Date(input.session.since).toISOString(), chunk_age_s: input.session.chunk_age_s },
       steward: sdec ? { action: sdec.action, mode: sdec.mode, at: sdec.ts } : null,
+      steward_line: cardLine(actBy.get(def.room_id) ?? [], now),
+      steward_log: (logBy.get(def.room_id) ?? []).slice(0, 20).map(lineOf),
       claim: null,
       ages_s: { listener: r1(r.ages_s.listener), heartbeat: r1(r.ages_s.heartbeat), ext: r1(r.ages_s.ext) },
     };
@@ -219,7 +298,13 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     if (!resolved) row.claim = toView(c);
   }
   if (deps.claims && clm.ok) forgetStreaksExcept((clm.v ?? []).map((c) => c.room_id));
-  return { generated_at: asOf, rooms, degraded };
+  const labelOf = new Map(rooms.map((r) => [r.room_id, r.label]));
+  const changes_today: ChangeRow[] = (sact.v ?? [])
+    .filter((r) => isChange(r) && labelOf.has(r.room_id) && Date.parse(r.ts) >= Date.parse(istDayStart))
+    .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+    .slice(0, CHANGES_MAX)
+    .map((r) => ({ ...lineOf(r), room_id: r.room_id, label: labelOf.get(r.room_id)!, tag: "Steward" as const }));
+  return { generated_at: asOf, rooms, degraded, steward_status: stewardStatus, changes_today };
 }
 
 // ---------------------------------------------------------------------------

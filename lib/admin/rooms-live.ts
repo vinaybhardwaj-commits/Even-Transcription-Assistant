@@ -81,6 +81,7 @@ export function listenerState(listener: ListenerRow | null, readFailed: boolean,
   const age = nowMs - new Date(listener.last_poll_at).getTime();
   return Number.isFinite(age) && age <= LISTENER_FRESH_MS ? "listening" : "stale";
 }
+import { sessionDiedAtStart } from "@/lib/bench-bus-constants";
 
 // The six room states (K2 §1) live in lib/bench-bus-constants.ts — the PURE module that is safe
 // to pull into a browser bundle. THIS file imports lib/db and lib/brain/db, so a client component
@@ -138,6 +139,9 @@ export type LiveSession = {
   primary_chunks: number;
   /** ENDED DISAGREES — pieces whose UPLOAD landed after this session's ended_at. */
   chunks_after_end: number;
+  /** Arch #15: the session row's notes, and whether a start_day was acked failed around it (death evidence). */
+  notes?: string | null;
+  start_failed_ack?: boolean;
 };
 
 export type RoomLive = {
@@ -224,6 +228,8 @@ export type RoomLive = {
   ended_at_lies_sessions: string[];
   /** D30 — the room's most recent session today is `ended`. The seventh state's own input. */
   last_session_ended: boolean;
+  /** ARCH #15: that ended session died at start (no pieces, lived < START_FAILED_MAX_MS). */
+  last_session_start_failed: boolean;
   ended_disagrees_session_id: string | null;
   /** When the row says the session ended — the start of the disagreement, not of the session. */
   ended_disagrees_ended_at: string | null;
@@ -335,6 +341,16 @@ export const SQL_LAST_WINDOW_MARKER =
 // ---------------------------------------------------------------------------
 // The aggregation
 // ---------------------------------------------------------------------------
+
+/** Arch #15: how far a failed start ack may sit outside its session's life and still be that session's death evidence. */
+export const START_ACK_BEFORE_MS = 60_000;
+export const START_ACK_AFTER_MS = 180_000;
+/** PURE — is this failed start_day ack (ms) within [started - 60 s, ended + 180 s] of the session? An open session counts to `nowMs`. */
+export function failedAckBelongsToSession(ackMs: number, s: { started_at: string; ended_at: string | null }, nowMs: number): boolean {
+  const a0 = new Date(s.started_at).getTime() - START_ACK_BEFORE_MS;
+  const a1 = (s.ended_at ? new Date(s.ended_at).getTime() : nowMs) + START_ACK_AFTER_MS;
+  return Number.isFinite(a0) && Number.isFinite(a1) && ackMs >= a0 && ackMs <= a1;
+}
 
 type RoomRow = { id: string; slug: string; name: string; transcript_enabled: boolean; visits_enabled: boolean };
 
@@ -503,6 +519,7 @@ export function buildRoomLive(
     ended_at_lies: liars.length > 0,
     ended_at_lies_sessions: liars.map((sn) => sn.id),
     last_session_ended: Boolean(lastSessionEnded),
+    last_session_start_failed: Boolean(lastSessionEnded && newest && sessionDiedAtStart(newest)),
     ended_disagrees_session_id: disagreeing?.id ?? null,
     ended_disagrees_ended_at: disagreeing?.ended_at ?? null,
     ended_disagrees_last_piece_at: disagreeLastPiece === null ? null : new Date(disagreeLastPiece).toISOString(),
@@ -585,19 +602,37 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
              COUNT(c.id) FILTER (
                WHERE s.ended_at IS NOT NULL
                  AND c.started_at > s.ended_at + make_interval(secs => ${ENDED_DISAGREES_SKEW_GRACE_MS / 1000}::int)
-             ) AS chunks_after_end
+             ) AS chunks_after_end,
+             s.notes
         FROM bench_session s
         LEFT JOIN bench_chunk c ON c.session_id = s.id
        WHERE s.started_at >= ${fromIso}::timestamptz
          AND s.started_at <  ${toIso}::timestamptz
          -- Arch #21 (re-check R3): a session that only holds re-homed late chunks is bookkeeping, never the room's "newest session".
          AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
-       GROUP BY s.id, s.room_id, s.status, s.started_at, s.ended_at
+       GROUP BY s.id, s.room_id, s.status, s.started_at, s.ended_at, s.notes
        ORDER BY s.started_at DESC
     `) as unknown[];
     sessions = normaliseSessions(rows);
   } catch (e) {
     topDegraded.push(`sessions_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+  }
+  // ARCH #15 — death evidence for the few candidates only (an ended, pieceless, short session): was a start_day acked FAILED around it? Its own tiny
+  // query, kept out of the session aggregate above (which is pinned to one SELECT). Fail-safe: a fault leaves the flag false, i.e. "Finished" as before.
+  const startCandidates = sessions.filter((s) => s.status === "ended" && !s.primary_chunks && !s.backup_chunks && s.notes !== undefined);
+  if (startCandidates.length) {
+    try {
+      const acks = (await sql`
+        SELECT room_id, acked_at FROM bench_command
+         WHERE kind = 'start_day' AND status = 'failed' AND room_id = ANY(${[...new Set(startCandidates.map((s) => s.room_id))]}::text[])
+           AND acked_at >= ${fromIso}::timestamptz - interval '1 minute'
+      `) as Array<{ room_id: string; acked_at: string | Date }>;
+      for (const s of startCandidates) {
+        s.start_failed_ack = acks.some((a) => a.room_id === s.room_id && failedAckBelongsToSession(new Date(a.acked_at).getTime(), s, nowMs));
+      }
+    } catch (e) {
+      topDegraded.push(`start_acks_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+    }
   }
   const byRoom = new Map<string, LiveSession[]>();
   for (const s of sessions) {
@@ -771,6 +806,8 @@ export function normaliseSessions(rows: readonly unknown[]): LiveSession[] {
       backup_chunks: Number(r.backup_chunks) || 0,
       primary_chunks: Number(r.primary_chunks) || 0,
       chunks_after_end: Number(r.chunks_after_end) || 0,
+      notes: typeof r.notes === "string" ? r.notes : null,
+      start_failed_ack: r.start_failed_ack === true,
     });
   }
   return out;

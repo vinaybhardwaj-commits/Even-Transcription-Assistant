@@ -138,10 +138,10 @@ const PRIMARY_COUNT = S.LISTED_TOOLS.length; // read from the registry, not a li
 
 const ctx = { origin: "https://x", actor: "mcp:test", scopes: new Set<Scope>(ALL_SCOPES) };
 
-const rpc = async (body: unknown, scopes: Scope[]) => {
+const rpc = async (body: unknown, scopes: Scope[], headers: Record<string, string> = {}) => {
   const req = new NextRequest("https://x/api/mcp", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
   const res = await handleMcpRpc(req, { token_id: "surface-test", scopes: new Set(scopes) });
@@ -276,11 +276,13 @@ describe("every published name resolves and behaves identically", () => {
 });
 
 describe("tools/list — the primary surface", () => {
-  it(`publishes ${PRIMARY_COUNT} tools, no duplicates, and no name a group has taken`, async () => {
-    const { status, body } = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, ["read"]);
+  it(`the lab profile publishes ${PRIMARY_COUNT} + scribe_jobs tools, no duplicates, and no name a group has taken`, async () => {
+    // S3: the default profile is now operator (13 tools); the full pre-S3 list is the lab profile.
+    const { status, body } = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, ["read"], { "x-scribe-profile": "lab" });
     expect(status).toBe(200);
     const names = ((body.result as Row).tools as Array<{ name: string }>).map((t) => t.name);
-    expect(names).toHaveLength(PRIMARY_COUNT);
+    expect(names).toHaveLength(PRIMARY_COUNT + 1);
+    expect(names).toContain("scribe_jobs");
     expect(new Set(names).size).toBe(names.length);
     const taken = new Set(S.GROUPS.flatMap((g) => S.groupMembers(g)));
     for (const g of S.GROUPS) taken.delete(g.name);

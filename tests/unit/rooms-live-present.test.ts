@@ -1,6 +1,6 @@
 /** lib/rooms-live/present.ts — the copy word for word, the grouping, the counts. */
 import { describe, it, expect } from "vitest";
-import { COLORS, DAY_LEGEND, DEGRADED_NOTE, LOGIN_PATH, STILL_NOT_WORKING, WORD, barFraction, counts, forMinutes, groupOf, headline, segmentColor, segmentWord, SEGMENT_WORD, showNoDoctorNote, stepsFor } from "@/lib/rooms-live/present";
+import { COLORS, DAY_LEGEND, DEGRADED_NOTE, LOGIN_PATH, STILL_NOT_WORKING, WORD, BAR_TICK_FRACTION, barFraction, counts, forMinutes, groupOf, headline, segmentColor, segmentWord, SEGMENT_WORD, showNoDoctorNote, stepsFor } from "@/lib/rooms-live/present";
 import { ROOMS, ROOM_IDS } from "@/lib/rooms-live/rooms";
 
 describe("copy, exactly", () => {
@@ -129,13 +129,19 @@ describe("small helpers", () => {
     expect(forMinutes("2026-10-07T07:30:00Z", now)).toBe("For 2 h 30 min");
     expect(forMinutes("2026-10-07T10:05:00Z", now)).toBeNull();
   });
-  it("barFraction: log scale, 0 at 0.001, 1 at 0.1", () => {
+  it("barFraction (v1.4): relative to the room floor max(baseline, 0.008): ratio 1 -> 0, 1.25 -> the tick, 4 -> 1", () => {
     expect(barFraction(null)).toBe(0);
     expect(barFraction(0)).toBe(0);
-    expect(barFraction(0.001)).toBeCloseTo(0, 5);
-    expect(barFraction(0.1)).toBeCloseTo(1, 5);
-    expect(barFraction(0.01)).toBeCloseTo(0.5, 5);
+    expect(barFraction(0.008)).toBeCloseTo(0, 5);
+    expect(barFraction(0.004)).toBe(0);
+    expect(barFraction(0.01)).toBeCloseTo(BAR_TICK_FRACTION, 5); // 1.25 x 0.008
+    expect(barFraction(0.032)).toBeCloseTo(1, 5);
     expect(barFraction(5)).toBe(1);
+    // floor-level audio is empty, not half height (it used to be 45-60 %)
+    expect(barFraction(0.0088, 0.0087)).toBeLessThan(0.05);
+    expect(barFraction(0.0195, 0.0195)).toBeCloseTo(0, 5); // Dietary's floor
+    expect(barFraction(0.0244, 0.0195)).toBeCloseTo(BAR_TICK_FRACTION, 2);
+    expect(BAR_TICK_FRACTION).toBeCloseTo(0.161, 3);
   });
   it("the allow-list is the eight rooms, in order, with the spec's labels", () => {
     expect(ROOMS.map((r) => r.label)).toEqual(["OPD 1", "OPD 3", "OPD 4 Ortho", "OPD 5", "OPD 6", "OPD 7", "Dietary", "Cardiology"]);

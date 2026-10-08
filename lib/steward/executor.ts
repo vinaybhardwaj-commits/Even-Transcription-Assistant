@@ -5,6 +5,7 @@
  * LiveExecutor implements scribe_start ONLY (the Bench start_day path, re-checked at execution time); every other method throws and the loop records it as shadow.
  * Which executor runs for an action is decided by config.actionMode (kill switch, shadow.global, shadow.actions[action]).
  */
+import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { isNeverLiveRoom, istMidnightOf } from "./config";
 import type { Decision } from "./rules";
 import { START_IN_FLIGHT_S, startVerdict } from "./start-schedule";
@@ -48,8 +49,9 @@ export type StartDeps = {
   waitForAck: (id: string, opts: { timeoutMs?: number }) => Promise<{ status: string; error: string | null; result: unknown } | null>;
 };
 
+
 /** Loaded lazily: lib/bench-commands pulls the database client at import, and the shadow path (and its tests) must not need it. */
-async function realStartDeps(): Promise<StartDeps> {
+export async function realStartDeps(): Promise<StartDeps> {
   const b = await import("@/lib/bench-commands");
   const { sql } = await import("@/lib/db");
   return {
@@ -61,7 +63,7 @@ async function realStartDeps(): Promise<StartDeps> {
       const rows = (await sql`
         SELECT c.status, c.created_at, c.acked_at,
                EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.id = c.result ->> 'session_id') AS session_named,
-               EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
+               EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}) AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
                          AND s.started_at <= c.acked_at + (${b.START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')) AS session_started
           FROM bench_command c
          WHERE c.room_id = ${roomId} AND c.kind = 'start_day' AND c.source = 'steward' AND c.created_at >= ${dayStart}::timestamptz
@@ -76,6 +78,8 @@ async function realStartDeps(): Promise<StartDeps> {
 }
 
 export const START_SOURCE = "steward";
+/** the result of a start that was queued but not acked inside the tick: counts as an attempt (dedupe), never as a failure (backoff); reconciled on a later tick */
+export const PENDING_PREFIX = "pending: sent, awaiting ack";
 export const DEFAULT_ACK_TIMEOUT_MS = 8000;
 /** the ONLY command kind this executor can queue */
 export const LIVE_COMMAND_KIND = "start_day" as const;
@@ -84,10 +88,14 @@ export const LIVE_COMMAND_KIND = "start_day" as const;
  * The live start, the same path as the MCP tool scribe_start_recording: read the listener AND the room's open session NOW (execution time, not sense time), run decideStart
  * (kiosk listening? already recording = success, nothing sent? paused?), refuse when ANY start_day (Kiosk Bot, an operator, us) was queued < 4 min ago, apply the daily schedule
  * (3 steward attempts per IST day, 5 / 15 / 45 min after the 1st / 2nd / 3rd failed one, lib/steward/start-schedule.ts), and only then queue ONE start_day command and wait for the
- * kiosk's ack. Results: "ok: ..." (acked), "failed: ..." (queued and not acked / failed) — these two count against the caps — and "skipped: <reason>" when NOTHING was sent (already
+ * kiosk's ack. Results: "ok: ..." (acked), "failed: ..." (the kiosk reported failure / expired) — these two count against the caps; "pending: sent, awaiting ack" (queued, no ack inside the tick) counts as an attempt for dedupe only — and "skipped: <reason>" when NOTHING was sent (already
  * recording, paused, kiosk not listening, in flight, exhausted, backoff, pending, unreadable): a skipped row never counts. Never overrides a consent pause; never forces; can emit start_day and nothing else.
  */
-export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackTimeoutMs?: number; now?: () => Date; maxAttempts?: number } = {}): Promise<ExecResult> {
+export async function liveScribeStart(
+  d: Decision,
+  deps: StartDeps,
+  opts: { ackTimeoutMs?: number; now?: () => Date; maxAttempts?: number; deferredRecheckMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<ExecResult> {
   const roomId = d.room_id;
   if (!roomId) return { result: "skipped: no_room" };
   // F20: the hard never-live list (ORB2, ORB3, Home Office, room_scratch_*): refused here whatever the caller and the data say, before anything is read or sent
@@ -112,14 +120,24 @@ export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackT
   if (verdict.action !== "send") return { result: `skipped: ${(verdict as { action: string }).action}` };
   const id = await deps.insertCommand({ roomId, kind: LIVE_COMMAND_KIND, args: verdict.args ?? undefined, source: START_SOURCE });
   const row = await deps.waitForAck(id, { timeoutMs: opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS });
-  if (!row) return { result: `failed: no ack from the kiosk command_id=${id}` };
+  // F44: no ack inside the in-tick wait is NOT a failure. The kiosk acks in ~4-13 s; the command is queued and may still be acked. The loop reconciles it on the next ticks (reconcilePending).
+  if (!row) return { result: `${PENDING_PREFIX} command_id=${id}` };
+  // ARCH #17 (C2), folded into F44: a DEFERRED ack ({ok:true, deferred:true, session_id:null}: the app accepted the start and is waiting for its input device) is PENDING,
+  // exactly like a late ack. ACCEPTED IS NOT STARTED, so it is never "ok" here. reconcilePending (loop.ts) is the one collector: it settles the row when a session opens
+  // after the command ("ok ... deferred then recording"), when the app amends the command to failed, or after START_NO_ACK_FAIL_S with no session.
+  if (row.status === "acked" && isDeferredAck(row.result)) return { result: `${PENDING_PREFIX} (deferred: the kiosk accepted the start and is waiting for its input device) command_id=${id}` };
   if (row.status === "acked") return { result: `ok: start_day acked command_id=${id}` };
   return { result: `failed: start_day ${row.status}${row.error ? ` (${String(row.error).slice(0, 80)})` : ""} command_id=${id}` };
 }
 
+/** PURE — did the app ack this start as ACCEPTED-BUT-DEFERRED ({ok:true, deferred:true}, no session yet)? */
+export function isDeferredAck(result: unknown): boolean {
+  return !!result && typeof result === "object" && (result as Record<string, unknown>).deferred === true;
+}
+
 /** scribe_start is live; every other method throws, and the loop treats a throw as "stay in shadow". */
 export class LiveExecutor implements Executor {
-  constructor(private readonly opts: { ackTimeoutMs?: number; deps?: StartDeps; now?: () => Date; maxAttempts?: number } = {}) {}
+  constructor(private readonly opts: { ackTimeoutMs?: number; deps?: StartDeps; now?: () => Date; maxAttempts?: number; deferredRecheckMs?: number; sleep?: (ms: number) => Promise<void> } = {}) {}
   async scribeStart(d: Decision): Promise<ExecResult> {
     return liveScribeStart(d, this.opts.deps ?? (await realStartDeps()), { ackTimeoutMs: this.opts.ackTimeoutMs, now: this.opts.now, maxAttempts: this.opts.maxAttempts });
   }

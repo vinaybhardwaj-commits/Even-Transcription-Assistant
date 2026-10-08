@@ -103,14 +103,16 @@ describe("liveScribeStart — the bench start_day path", () => {
     expect((await go(at([attempt(300), attempt(200)]).d, { maxAttempts: 2 })).result).toBe("skipped: start_exhausted attempts=2");
   });
 
-  it("a command that is not acked is FAILED (it counts toward the cap and the schedule); a failed ack is failed; skipped results are not", async () => {
+  it("a command not acked inside the tick is PENDING (an attempt, not a failure: F44); a failed ack is failed; skipped results are not", async () => {
     const none = deps({ waitForAck: async () => null });
-    expect((await go(none.d)).result).toMatch(/^failed: no ack from the kiosk command_id=cmd_1$/);
+    expect((await go(none.d)).result).toBe("pending: sent, awaiting ack command_id=cmd_1");
     const bad = deps({ waitForAck: async () => ({ status: "failed", error: "mic busy", result: {} }) });
     expect((await go(bad.d)).result).toBe("failed: start_day failed (mic busy) command_id=cmd_1");
     const { outcomeOf } = await import("@/lib/steward/loop");
     expect(outcomeOf("ok: start_day acked command_id=c")).toBe("ok");
-    expect(outcomeOf("failed: no ack from the kiosk command_id=c")).toBe("failed");
+    expect(outcomeOf("pending: sent, awaiting ack command_id=c")).toBeNull();
+    expect(outcomeOf("failed: no ack after 120 s command_id=c")).toBe("failed");
+    expect(outcomeOf("ok: start_day acked (late) command_id=c")).toBe("ok");
     expect(outcomeOf("skipped: already_recording session_id=x")).toBeNull();
     expect(outcomeOf("skipped: start_backoff attempts=1 retry_after_s=9")).toBeNull();
   });

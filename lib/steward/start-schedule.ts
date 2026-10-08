@@ -11,6 +11,8 @@ export const START_BACKOFF_MIN: readonly number[] = [5, 15, 45];
 export const START_ACK_GRACE_S = 300;
 /** a failed / expired command with no ack time: the failure is taken as known this long after it was queued (the executor's ack wait is at most 8 s) */
 export const START_FAIL_FALLBACK_S = 8;
+/** F44: a steward start_day command still PENDING (never acked) this long after it was queued has failed; the backoff runs from that moment */
+export const START_NO_ACK_FAIL_S = 120;
 /** a start_day command of ANY source younger than this is still in flight (Kiosk Bot may be starting the same room) */
 export const START_IN_FLIGHT_S = 240;
 
@@ -26,6 +28,7 @@ const ms = (x: string | Date): number => new Date(x).getTime();
 
 export function attemptFailed(a: StartAttemptLike, nowMs: number): boolean {
   if (a.status === "failed" || a.status === "expired") return true;
+  if (a.status === "pending") return nowMs - ms(a.created_at) > START_NO_ACK_FAIL_S * 1000;
   if (a.status === "acked" && a.acked_at) return nowMs - ms(a.acked_at) > START_ACK_GRACE_S * 1000 && !a.session_started && !a.session_named;
   return false;
 }
@@ -37,6 +40,7 @@ export function attemptFailed(a: StartAttemptLike, nowMs: number): boolean {
 export function failureKnownAtMs(a: StartAttemptLike): number {
   if (a.status === "acked" && a.acked_at) return ms(a.acked_at) + START_ACK_GRACE_S * 1000;
   if (a.acked_at) return ms(a.acked_at);
+  if (a.status === "pending") return ms(a.created_at) + START_NO_ACK_FAIL_S * 1000;
   return ms(a.created_at) + START_FAIL_FALLBACK_S * 1000;
 }
 

@@ -17,6 +17,7 @@
 import { NextResponse } from "next/server";
 import { benchAdminGuard } from "@/lib/bench";
 import { listListeners, isListening, LISTENER_FRESH_MS, classifyBusError, BusError } from "@/lib/bench-commands";
+import { readLevelsStale } from "@/lib/bench-levels-stale";
 import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 export const runtime = "nodejs";
@@ -47,6 +48,7 @@ export async function GET() {
   const now = new Date();
   try {
     const rows = await listListeners(now);
+    const stale = await readLevelsStale(rows.map((l) => l.room_id), now.getTime());
     return NextResponse.json(
       {
         now: now.toISOString(),
@@ -69,6 +71,7 @@ export async function GET() {
           mic: mainLevels(l.mic_peak, l.mic_avg, l.mic_zero_ratio),
           spare: l.spare_device === true ? parseMicLevelPair(l.spare_peak, l.spare_avg) : null,
           levels_at: l.levels_at ? new Date(l.levels_at).toISOString() : null,
+          levels_stale: stale.get(l.room_id) ?? null,
           // §2.4 — a spare exists only when the client reported an explicitly chosen second device.
           // TRUE only for a literal true; null/false → false. The page draws no spare lane unless
           // this is true, whatever backup pieces may have arrived.

@@ -11,18 +11,21 @@ export function BenchLevelMeter({
   levels,
   live,
   digitalSilence = false,
+  stale = false,
   label = "Main microphone",
 }: {
   levels: BenchMeterLevels | null | undefined;
   live: boolean;
   digitalSilence?: boolean;
+  /** Arch #19: the level is frozen or old. Greyed, never painted as a live signal. */
+  stale?: boolean;
   label?: string;
 }) {
-  const target = live && levels && !digitalSilence ? scaledPeak(levels.peak) : 0;
+  const target = live && levels && !digitalSilence && !stale ? scaledPeak(levels.peak) : 0;
   const [display, setDisplay] = React.useState(target);
 
   React.useEffect(() => {
-    if (!live || digitalSilence || !levels) {
+    if (!live || digitalSilence || stale || !levels) {
       setDisplay(0);
       return;
     }
@@ -37,11 +40,11 @@ export function BenchLevelMeter({
       globalThis.clearTimeout(delay);
       if (decayTimer) globalThis.clearInterval(decayTimer);
     };
-  }, [digitalSilence, levels, live, target]);
+  }, [digitalSilence, levels, live, stale, target]);
 
   const count = 18;
   const active = Math.round(display * count);
-  const state = !live || !levels ? "idle" : digitalSilence ? "digital silence" : "live";
+  const state = !live || !levels ? "idle" : stale ? "stale" : digitalSilence ? "digital silence" : "live";
 
   return (
     <div className="mt-3" data-meter-state={state.replace(" ", "_")}>
@@ -53,7 +56,7 @@ export function BenchLevelMeter({
           className={`text-[10px] font-semibold ${
             digitalSilence && live
               ? "text-danger-700"
-              : live && levels
+              : live && levels && !stale
                 ? "text-success-700"
                 : "text-even-ink-400"
           }`}
@@ -70,7 +73,7 @@ export function BenchLevelMeter({
         aria-valuenow={Math.round(display * 100)}
       >
         {Array.from({ length: count }, (_, index) => {
-          const lit = index < active && live && !digitalSilence;
+          const lit = index < active && live && !digitalSilence && !stale;
           const band = index / count;
           const color = !lit
             ? digitalSilence && live

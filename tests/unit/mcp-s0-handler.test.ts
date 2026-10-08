@@ -28,7 +28,7 @@ vi.mock("@/lib/mcp/surface", async () => {
   const boom = mk("t_throws", async () => { throw new Error("kaboom"); });
   const grouped = { ...mk("t_group", async () => ({ fine: true })), memberFor: () => "t_member" };
   const all = [ok, resultError, degraded, boom, grouped];
-  return { LISTED_TOOLS: all, CALLABLE_TOOLS: new Map(all.map((t) => [t.name, t])) };
+  return { LISTED_TOOLS: all, LAB_TOOLS: all, groupProbes: () => [], CALLABLE_TOOLS: new Map(all.map((t) => [t.name, t])) };
 });
 
 const { handleMcpRpc, mcpMethodNotAllowedResponse } = await import("@/lib/mcp/handler");
@@ -68,7 +68,10 @@ describe("S0.1 — GET is 405 on both doors", () => {
     const opt = await pathOptions();
     expect(opt.status).toBe(204);
     expect(opt.headers.get("access-control-allow-origin")).toBe("*");
-    expect(headerOptionsMaybe).toBeUndefined(); // the header door never exported OPTIONS; S0 does not add one
+    // S3.4: the header door now answers OPTIONS explicitly too (204, Allow, no CORS — it never had any).
+    const hopt = await headerOptionsMaybe!();
+    expect(hopt.status).toBe(204);
+    expect(hopt.headers.get("allow")).toBe("POST, OPTIONS");
   });
 
   it("the 405 helper is static: no auth state, no tool names", async () => {
@@ -84,7 +87,7 @@ describe("S0.2 — initialize", () => {
     expect(r.capabilities).toEqual({ tools: {} });
     expect((r.serverInfo as Row).name).toBe("even-scribe-mcp");
     expect(typeof (r.serverInfo as Row).version).toBe("string");
-    expect(String(r.instructions)).toContain("Even Scribe operator door (S2)");
+    expect(String(r.instructions)).toContain("Even Scribe operator door (S3)");
   });
 
   it("serverInfo.version is the git sha (7 chars) when VERCEL_GIT_COMMIT_SHA is set", async () => {

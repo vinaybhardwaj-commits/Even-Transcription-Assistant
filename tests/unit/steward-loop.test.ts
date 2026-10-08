@@ -8,9 +8,12 @@ import type { RoomSense } from "@/lib/steward/sense";
 
 const M = vi.hoisted(() => ({ senseAll: vi.fn() }));
 vi.mock("@/lib/steward/sense", () => ({ senseAll: M.senseAll }));
+vi.mock("@/lib/db", () => ({ sql: vi.fn(async () => []) }));
 
 import { DEDUPE_REFRESH_MS, leaseLock, outcomeOf, runSteward, type LoopLock } from "@/lib/steward/loop";
-import { LiveExecutor, ShadowExecutor, dispatch } from "@/lib/steward/executor";
+import { LiveExecutor, ShadowExecutor, dispatch, type StartDeps } from "@/lib/steward/executor";
+import { decideStart } from "@/lib/bench-commands";
+import { startVerdict } from "@/lib/steward/start-schedule";
 import type { Decision } from "@/lib/steward/rules";
 
 type Stored = { id: number; room_id: string | null; ts: string; rule: string; action: string; params: Record<string, unknown>; result: string | null; mode: string; inputs: Record<string, unknown>; why: string; why_not: string | null; actor: string; machine: string | null; window_kind: string; inputs_hash: string };
@@ -28,7 +31,7 @@ function fakeDb(opts: { cfg?: Record<string, unknown>; dropCfg?: string[]; rooms
     ...opts.cfg,
   };
   for (const k of opts.dropCfg ?? []) delete cfg[k];
-  const state = { cfg, rooms: opts.rooms ?? [{ room_id: "room_a", room_name: "OPD A", hostname: "HOST-A" }], table: [] as Stored[], calls: [] as string[], nextId: 1 };
+  const state = { cfg, rooms: opts.rooms ?? [{ room_id: "room_a", room_name: "OPD A", hostname: "HOST-A" }], table: [] as Stored[], calls: [] as string[], nextId: 1, bench: new Map<string, { id: string; status: string; error: string | null; created_at: string }>() };
   const sql = (async (strings: TemplateStringsArray, ...v: unknown[]) => {
     const text = strings.join("?");
     state.calls.push(text.replace(/\s+/g, " ").trim().slice(0, 60));
@@ -54,6 +57,18 @@ function fakeDb(opts: { cfg?: Record<string, unknown>; dropCfg?: string[]; rooms
       const hiMs = Date.parse(String(v[0]));
       const holdMs = Number(v[1]) * 1000;
       return state.table.filter((r) => r.room_id === null && r.rule === "fleet_incident" && Date.parse(r.ts) > hiMs - holdMs && Date.parse(r.ts) <= hiMs).sort((a, b) => (a.ts < b.ts ? 1 : -1));
+    }
+    if (text.includes("d.result LIKE 'pending%'")) return state.table.filter((r) => r.action === "scribe_start" && r.mode === "live" && (r.result ?? "").startsWith("pending"));
+    if (text.includes("d.result LIKE 'ok: start_day deferred")) return []; // arch#17 reviseDeferredOk read: nothing to revise (the one allowed change to this fake)
+    if (text.includes("FROM bench_command WHERE id = ANY")) return (v[0] as string[]).flatMap((id) => (state.bench.has(id) ? [state.bench.get(id)!] : []));
+    if (text.includes("AND result LIKE 'pending%'")) {
+      // F44 reconcile: a pending row -> its settled result, by id (v = [result, inputs patch, id])
+      const row = state.table.find((r) => String(r.id) === String(v[2]) && (r.result ?? "").startsWith("pending"));
+      if (row) {
+        row.result = v[0] as string;
+        Object.assign(row.inputs, JSON.parse(String(v[1])));
+      }
+      return [];
     }
     if (text.includes("UPDATE steward_decisions")) {
       // the live send's "sending" row -> its final result, by id (v = [mode, result, inputs patch, id])
@@ -335,9 +350,13 @@ describe("ordering and fleet incidents", () => {
   it("F1: 3 rooms with a POSITIVE signal (a dead session): each per-room action is held, ONE fleet decision is written; the next tick writes nothing new", async () => {
     const db = fakeDb({ rooms: ["a", "b", "c"].map((x) => ({ room_id: `room_${x}`, room_name: x, hostname: `H${x}` })) });
     senseWith((id, A) => died(A, id));
+    // S5: the 1st tick of a session_died only notes it ("confirming", log_only); the fleet class counts from the 2nd consecutive tick
+    const s0 = await run(db.sql, T - MIN);
+    expect(s0.fleet_incidents).toBe(0);
+    expect(db.state.table.map((r) => [r.rule, r.action])).toEqual([["session_died", "log_only"], ["session_died", "log_only"], ["session_died", "log_only"]]);
     const s = await run(db.sql, T);
     expect(s.fleet_incidents).toBe(1);
-    const per = db.state.table.filter((r) => r.room_id);
+    const per = db.state.table.filter((r) => r.room_id && r.ts === new Date(T).toISOString());
     expect(per.map((r) => [r.rule, r.action])).toEqual([["fleet_hold", "log_only"], ["fleet_hold", "log_only"], ["fleet_hold", "log_only"]]);
     expect(per.every((r) => r.inputs.failing_class === "session_died")).toBe(true);
     const fleet = db.state.table.filter((r) => r.room_id === null);
@@ -364,6 +383,7 @@ describe("ordering and fleet incidents", () => {
   it("F1: the hold stops renewing once fewer than 3 rooms carry a positive signal: after 15 min the 2 that still fail act, no new fleet row", async () => {
     const db = fakeDb({ rooms: ["a", "b", "c"].map((x) => ({ room_id: `room_${x}`, room_name: x, hostname: `H${x}` })) });
     senseWith((id, A) => died(A, id));
+    await run(db.sql, T - MIN); // S5: the 1st tick only notes the dead session
     await run(db.sql, T);
     expect(db.state.table.filter((r) => r.rule === "fleet_incident")).toHaveLength(1);
     // room_c recovers; a, b still dead
@@ -936,5 +956,212 @@ describe("start_day_live and the live-start gates", () => {
     expect(l.scribeRestart).not.toHaveBeenCalled();
     expect(l.issueTicket).not.toHaveBeenCalled();
     expect(l.message).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("F44: fire then collect; a start acked after the in-tick wait is never a failure", () => {
+  const open = { kill_switch: { on: false }, shadow: { global: false, actions: {} }, ...LIVE_ON };
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `room_${"abcdefg"[i]}`);
+  const roomsOf = (n: number) => ids(n).map((id, i) => ({ room_id: id, room_name: `OPD ${i + 1}`, hostname: `HOST-${i}` }));
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  /** a kiosk bus backed by the fake db's bench table: each start_day is acked (or failed) `latency(room)` ms after it is queued; the ack wait is the real shape (null at the timeout) */
+  function kiosk(db: ReturnType<typeof fakeDb>, latency: (room: string) => number, outcome: (room: string) => { status: "acked" | "failed"; error: string | null } = () => ({ status: "acked", error: null }), ackTimeoutMs = 4000) {
+    const sent: string[] = [];
+    const deps: StartDeps = {
+      getListener: async (roomId) => ({ room_id: roomId, tab_id: "t", last_poll_at: new Date(Date.now() - 2000), recording_session_id: null, paused: false }) as never,
+      findActiveSession: async () => null,
+      getRecentStartAttempts: async (roomId) => attemptsOf(db, roomId) as never,
+      getStewardAttemptsToday: async (roomId) => attemptsOf(db, roomId) as never,
+      decideStart,
+      insertCommand: async ({ roomId }) => {
+        const id = `cmd_${roomId}_${sent.length + 1}`;
+        sent.push(roomId);
+        db.state.bench.set(id, { id, status: "pending", error: null, created_at: new Date().toISOString(), room_id: roomId, acked_at: null } as never);
+        const lat = latency(roomId);
+        if (Number.isFinite(lat))
+          setTimeout(() => {
+            const o = outcome(roomId);
+            Object.assign(db.state.bench.get(id)!, { status: o.status, error: o.error, acked_at: new Date().toISOString() });
+          }, lat);
+        return id;
+      },
+      waitForAck: async (id, o) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < (o.timeoutMs ?? 8000)) {
+          const row = db.state.bench.get(id)!;
+          if (row.status !== "pending") return { status: row.status, error: row.error, result: {} };
+          await sleep(500);
+        }
+        return null;
+      },
+    };
+    return { sent, executorFor: (live: boolean) => (live ? new LiveExecutor({ deps, ackTimeoutMs }) : new ShadowExecutor()) };
+  }
+  const attemptsOf = (db: ReturnType<typeof fakeDb>, roomId: string) =>
+    [...db.state.bench.values()].filter((b) => (b as never as { room_id: string }).room_id === roomId).map((b) => ({ status: b.status, created_at: b.created_at, acked_at: (b as never as { acked_at: string | null }).acked_at ?? null, session_started: false, session_named: false }));
+  /** the sense shows each room's bench attempts, as sense.ts does */
+  const senseBench = (db: ReturnType<typeof fakeDb>) => senseWith((id, A) => ({ ...liveReady(id, A), start_attempts: attemptsOf(db, id) }));
+  /** one tick at `offsetS` after T, with the clock where the test is */
+  async function tick(db: ReturnType<typeof fakeDb>, k: ReturnType<typeof kiosk>, offsetS: number, advanceMs = 0) {
+    vi.setSystemTime(T + offsetS * 1000);
+    const p = run(db.sql, T + offsetS * 1000, { executorFor: k.executorFor });
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    return p;
+  }
+  const startRows = (db: ReturnType<typeof fakeDb>) => db.state.table.filter((r) => r.action === "scribe_start");
+  const failedRows = (db: ReturnType<typeof fakeDb>) => db.state.table.filter((r) => outcomeOf(r.result) === "failed");
+
+  beforeEach(() => vi.useFakeTimers({ now: T }));
+  afterEach(() => vi.useRealTimers());
+
+  it("two rooms, the kiosk acks AFTER the in-tick wait: both rows pending (not failed), the next tick settles both to 'ok ... (late)', zero failures, no resend", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(2) });
+    const k = kiosk(db, () => 10_000); // ack at +10 s; the in-tick wait is 4 s
+    senseBench(db);
+    const s1 = await tick(db, k, 0, 6000);
+    expect(s1.degraded).not.toContain("live_budget");
+    expect(startRows(db).map((r) => r.result)).toEqual(["pending: sent, awaiting ack command_id=cmd_room_a_1", "pending: sent, awaiting ack command_id=cmd_room_b_2"]);
+    expect(startRows(db).every((r) => r.mode === "live" && outcomeOf(r.result) === null)).toBe(true);
+    await vi.advanceTimersByTimeAsync(8000); // the kiosk acks
+    await tick(db, k, 60);
+    expect(startRows(db).map((r) => r.result)).toEqual(["ok: start_day acked (late) command_id=cmd_room_a_1", "ok: start_day acked (late) command_id=cmd_room_b_2"]);
+    expect(startRows(db)[0]!.inputs).toMatchObject({ late: true, pending_at: new Date(T).toISOString(), attempt_no: 1 });
+    expect(failedRows(db)).toHaveLength(0);
+    expect(k.sent).toHaveLength(2); // no second send
+    for (const id of ids(2)) expect(startVerdict(attemptsOf(db, id), T + 60_000, 3).kind).toBe("pending"); // acked, waiting for its session: not a failure, no backoff
+  });
+
+  it("five rooms, 6 s ack latency each: all five are sent in the SAME tick, none 'skipped: budget', all acked in the tick", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(5) });
+    const k = kiosk(db, () => 6000, undefined, 8000); // the executor's real ceiling for the in-tick wait is 8 s
+    senseBench(db);
+    const p = tick(db, k, 0, 9000);
+    const s = await p;
+    expect(k.sent).toEqual(ids(5));
+    expect(startRows(db)).toHaveLength(5);
+    expect(startRows(db).every((r) => r.result?.startsWith("ok: start_day acked command_id="))).toBe(true);
+    expect(startRows(db).some((r) => r.result === "skipped: budget")).toBe(false);
+    expect(s.degraded).not.toContain("live_budget");
+    expect(s.decisions_written).toBe(5);
+  });
+
+  it("the kiosk reports FAILED: 'failed:' with the kiosk's error, the backoff applies (no resend one minute later)", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(1) });
+    const k = kiosk(db, () => 1000, () => ({ status: "failed", error: "mic busy" }));
+    senseBench(db);
+    await tick(db, k, 0, 2000);
+    expect(startRows(db)[0]!.result).toBe("failed: start_day failed (mic busy) command_id=cmd_room_a_1");
+    await tick(db, k, 60);
+    expect(k.sent).toHaveLength(1);
+    expect(startVerdict(attemptsOf(db, "room_a"), T + 60_000, 3).kind).toBe("backoff");
+  });
+
+  it("the kiosk reports FAILED after the in-tick wait: pending first, then 'failed:' with the error on the next tick, backoff applied", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(1) });
+    const k = kiosk(db, () => 10_000, () => ({ status: "failed", error: "mic busy" }));
+    senseBench(db);
+    await tick(db, k, 0, 6000);
+    expect(startRows(db)[0]!.result).toMatch(/^pending/);
+    await vi.advanceTimersByTimeAsync(8000);
+    await tick(db, k, 60);
+    expect(startRows(db)[0]!.result).toBe("failed: start_day failed (mic busy) command_id=cmd_room_a_1");
+    expect(k.sent).toHaveLength(1);
+    expect(startVerdict(attemptsOf(db, "room_a"), T + 60_000, 3).kind).toBe("backoff");
+  });
+
+  it("never acked: pending for 120 s, then 'failed: no ack after 120 s' and the backoff applies; nothing resent meanwhile", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(1) });
+    const k = kiosk(db, () => Infinity);
+    senseBench(db);
+    await tick(db, k, 0, 6000);
+    await tick(db, k, 60);
+    await tick(db, k, 118);
+    expect(startRows(db)[0]!.result).toMatch(/^pending/);
+    expect(startVerdict(attemptsOf(db, "room_a"), T + 118_000, 3).kind).toBe("pending");
+    await tick(db, k, 130);
+    expect(startRows(db)[0]!.result).toBe("failed: no ack after 120 s command_id=cmd_room_a_1");
+    expect(k.sent).toHaveLength(1);
+    const v = startVerdict(attemptsOf(db, "room_a"), T + 130_000, 3);
+    expect(v).toMatchObject({ kind: "backoff", retry_after_s: 290 }); // 120 s + 5 min, counted from the send
+    // and the retry goes out once the backoff has run (attempt 2)
+    await tick(db, k, 130 + 291, 6000);
+    expect(k.sent).toHaveLength(2);
+  });
+
+  it("no double send while a start is pending, even when the sense cannot see it (the log row and the executor's own re-read both hold)", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(1) });
+    const k = kiosk(db, () => Infinity);
+    senseWith((id, A) => liveReady(id, A)); // blind: no start_attempts
+    await tick(db, k, 0, 6000);
+    for (const off of [60, 90, 119]) await tick(db, k, off);
+    expect(k.sent).toHaveLength(1);
+    expect(startRows(db)).toHaveLength(1);
+  });
+
+  it("a failed read of the pending rows does not end the tick: they stay pending, degraded names reconcile_pending", async () => {
+    const db = fakeDb({ cfg: open, rooms: roomsOf(1), fail: [/d\.result LIKE 'pending%'/] });
+    const k = kiosk(db, () => 10_000);
+    senseBench(db);
+    const s = await tick(db, k, 0, 6000);
+    expect(s.degraded).toContain("reconcile_pending");
+    expect(startRows(db)[0]!.result).toMatch(/^pending/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S5 (Rooms Live v1.7): session_died flapping. FIXTURE SOURCE: built from the FLEET spec's description of OPD 4 (room_ux92qpws, EHRC-CONSUL4s-Mac-mini-2) on 2026-10-08
+// 12:40-12:58Z, NOT from real rows: the read-only role (~/.config/eta-audio/db.url) has no SELECT on steward_decisions. The spec says only that the decision alternated
+// session_died/message and ok/none every 2-5 min; the run lengths below are one such alternation (every gap under 10 min). The loop is the real one (runSteward).
+// ---------------------------------------------------------------------------
+describe("S5: session_died flapping (OPD 4, 8 Oct 2026 12:40-12:58Z)", () => {
+  const OPD4 = { room_id: "room_ux92qpws", room_name: "OPD 4", hostname: "EHRC-CONSUL4s-Mac-mini-2" };
+  const T0 = Date.parse("2026-10-08T12:40:00Z");
+  const seedRestart = (db: ReturnType<typeof fakeDb>, minAgo: number) =>
+    db.state.table.push({ id: db.state.nextId++, room_id: OPD4.room_id, ts: new Date(T0 - minAgo * MIN).toISOString(), rule: "session_died", action: "scribe_restart", params: {}, result: "shadow: would scribe_restart", mode: "shadow", inputs: { primary: true }, why: "seed", why_not: null, actor: "steward", machine: null, window_kind: "clinic", inputs_hash: "seed" });
+  /** tick minute m of the window; `diedAt` says which minutes have the dead-session condition */
+  const play = async (db: ReturnType<typeof fakeDb>, diedAt: (m: number) => boolean, minutes: number) => {
+    senseWith((id, A) => (diedAt(Math.round((A - T0) / MIN)) ? died(A, id) : healthy(A, { room_id: id })));
+    for (let m = 0; m < minutes; m++) await run(db.sql, T0 + m * MIN);
+  };
+  const sd = (db: ReturnType<typeof fakeDb>) => db.state.table.filter((r) => r.rule === "session_died");
+  const inRuns = (runs: Array<[number, number]>) => (m: number) => runs.some(([a, b]) => m >= a && m <= b);
+
+  it("four dead-session runs separated by 2-3 min of ok are ONE episode: exactly one message", async () => {
+    const db = fakeDb({ rooms: [OPD4] });
+    seedRestart(db, 12); // scribe_restart sent 12 min before 12:40: the ladder is at its last rung
+    await play(db, inRuns([[0, 2], [6, 8], [11, 14], [17, 18]]), 19);
+    const msgs = sd(db).filter((r) => r.action === "message");
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.ts).toBe(new Date(T0).toISOString()); // the episode was already confirmed by the seeded restart row; it fires on the first tick
+    // the later runs do not stay silent in the log: each re-confirms (1 tick) and then records that the message was already sent
+    expect(sd(db).filter((r) => r.params.state === "message_sent").length).toBeGreaterThan(0);
+    expect(sd(db).filter((r) => r.params.state === "confirming").length).toBeGreaterThanOrEqual(3);
+    expect(sd(db).filter((r) => r.params.state === "cleared")).toHaveLength(3); // one closing row per ok gap
+  });
+
+  it("a one-tick blip never fires: the 1st tick only notes it, the next ok tick closes it", async () => {
+    const db = fakeDb({ rooms: [OPD4] });
+    await play(db, inRuns([[3, 3]]), 8);
+    expect(sd(db).map((r) => [r.params.state, r.action])).toEqual([["confirming", "log_only"], ["cleared", "log_only"]]);
+    expect(db.state.table.some((r) => r.action === "scribe_restart" || r.action === "message")).toBe(false);
+  });
+
+  it("two consecutive ticks fire (scribe_restart first); the message waits for the ladder (5 min) and is sent once", async () => {
+    const db = fakeDb({ rooms: [OPD4] });
+    await play(db, () => true, 40);
+    const rows = sd(db);
+    expect(rows[0]).toMatchObject({ action: "log_only", params: { state: "confirming" } });
+    expect(rows[1]).toMatchObject({ action: "scribe_restart" });
+    expect(rows.filter((r) => r.action === "message")).toHaveLength(1);
+  });
+
+  it("the room ok for 10 min ends the episode: a later death is a new episode with its own (one) message", async () => {
+    const db = fakeDb({ rooms: [OPD4] });
+    seedRestart(db, 8); // still inside the 30 min ladder memory at minute 21
+    await play(db, inRuns([[0, 3], [20, 24]]), 26); // ok from minute 4 to 19 (16 min)
+    const msgs = sd(db).filter((r) => r.action === "message");
+    expect(msgs.map((r) => Math.round((Date.parse(r.ts) - T0) / MIN))).toEqual([0, 21]);
   });
 });
