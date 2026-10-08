@@ -26,7 +26,7 @@ const ROOM_OPTIONAL: ReadonlySet<CommandKind> = new Set(["note", "mute_alerts"])
 const stewardCommand: McpTool = {
   name: "scribe_steward_command",
   description:
-    "WRITE; changes the Room Steward's config and can make it act on live clinical rooms. Times UTC. `kind`: set_shadow {global?, actions?}, kill_switch {on}, start_day_live {on}, add_room {room, class?, flags?, machine?}, " +
+    "WRITE; changes the Room Steward's config and can make it act on live clinical rooms. Times UTC. `kind`: set_shadow {global?, actions? (a partial update of published action names; null clears one)}, kill_switch {on}, start_day_live {on}, add_room {room, class?, flags?, machine?}, " +
     "flag_room {room, add?, remove?}, set_window {profile clinic|ot, start, end, late_stop_max_min?}, note {text; room?}, mute_alerts {minutes 0 or 5..720; room?}. `reason` (1..280) is required and logged with the actor in " +
     "steward_config_history. While the kill switch is ON every kind except kill_switch and note answers kill_switch_on. The answer is {ok, kind, key, before, after, revert}; run `revert` to undo exactly. " +
     "`value` carries the kind's arguments as an object (note: a string). The Steward reads `operator_note` and `alert_mutes` at its next tick only once GATING wires that.",
@@ -150,6 +150,18 @@ const lanes: McpTool = {
 // scribe_health aspect=routes
 // ---------------------------------------------------------------------------
 
+export const PUBLIC_ORIGIN_DEFAULT = "https://evenscribe.app";
+/** The public origin the route probe may call: APP_URL if it is an http(s) URL, else the production constant. Only the origin is kept (no path, query or credentials). */
+export function publicOrigin(): URL | null {
+  const raw = (process.env.APP_URL ?? "").trim() || PUBLIC_ORIGIN_DEFAULT;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    return new URL(u.origin);
+  } catch {
+    return null;
+  }
+}
 export const ROUTE_TIMEOUT_MS = 5_000;
 export const ROUTES_TOTAL_MS = 20_000;
 /** the fixed allow-list: this app's own public routes, no query strings, no credentials. Nothing here is built from a caller's input. */
@@ -168,13 +180,15 @@ export const ROUTE_SKIPPED: ReadonlyArray<{ route: string; reason: string }> = [
 const healthRoutes: McpTool = {
   name: "scribe_health_routes",
   description:
-    "Production route probe, read-only; touches no room. Times UTC. GETs (or OPTIONS) a FIXED list of this app's own routes on its own origin, no credentials, no query strings, 5 s each and 20 s in all; returns {route, method, status, ms, ok}. " +
+    "Production route probe, read-only; touches no room. Times UTC. GETs (or OPTIONS) a FIXED list of this app's own routes on its public origin (configuration, never a request header), no credentials, no query strings, 5 s each and 20 s in all; returns {route, method, status, ms, ok}. " +
     "Routes that need a credential are listed as skipped, never fetched.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  handler: async (_args: ToolArgs, ctx: ToolContext) => {
-    let origin: URL;
-    try { origin = new URL(ctx.origin); } catch { return { ok: false, error: "no_origin" }; }
+  handler: async () => {
+    // G19: the origin is the app's PUBLIC origin from configuration (APP_URL, else the production constant), NEVER derived from the request's Host /
+    // X-Forwarded-* headers, so a caller cannot point the probe at another host.
+    const origin = publicOrigin();
+    if (!origin) return { ok: false, error: "no_origin" };
     if (origin.protocol !== "https:" && origin.protocol !== "http:") return { ok: false, error: "no_origin" };
     const total = AbortSignal.timeout(ROUTES_TOTAL_MS);
     const results = await Promise.all(

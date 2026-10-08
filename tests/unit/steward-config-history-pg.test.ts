@@ -204,7 +204,7 @@ describe.skipIf(!HAVE_DOCKER)("0136 steward_config_history and lib/steward/write
       return pg.sql(s, ...v);
     }) as never;
     const n = hist().length;
-    expect(await runCommand(always, { kind: "set_shadow", value: { actions: {} }, minutes: null, roomId: null, nowMs: 0, actor: "mcp:tester", reason: "lose" })).toMatchObject({ ok: false, error: "config_changed_concurrently" });
+    expect(await runCommand(always, { kind: "set_shadow", value: { actions: { "ticket:wake": true } }, minutes: null, roomId: null, nowMs: 0, actor: "mcp:tester", reason: "lose" })).toMatchObject({ ok: false, error: "config_changed_concurrently" });
     expect(hist()).toHaveLength(n);
   });
 

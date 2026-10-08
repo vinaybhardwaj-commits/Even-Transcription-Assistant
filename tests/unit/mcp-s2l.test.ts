@@ -168,6 +168,47 @@ describe("scribe_steward_command — the kinds", () => {
     expect((cfg.operator_note as { text: string }).text).toBe(""); // reverting the first note clears it
   });
 
+  it("G17: set_shadow rejects unknown action keys (allowlist = the published, live-capable action names), naming them and the allowed list; nothing is written", async () => {
+    for (const bad of [{ actions: { totally_made_up: true } }, { actions: { "ticket:wake": false, scribe_stat: true } }, { global: false, actions: { restart_everything: false } }]) {
+      const out = await cmd({ kind: "set_shadow", reason: "r", value: bad });
+      expect(out, JSON.stringify(bad)).toMatchObject({ ok: false, error: "unknown_action", kind: "set_shadow" });
+      expect(String(out.detail)).toContain("allowed: scribe_start, ticket:wake");
+    }
+    expect(writes).toEqual([]);
+    for (const good of ["scribe_start", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"]) {
+      expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { [good]: false } } }), good).toMatchObject({ ok: true });
+    }
+    // the allowlist IS the Steward's own list (config.ts), so it cannot drift
+    const { LIVE_CAPABLE_ACTIONS } = await import("@/lib/steward/config");
+    expect(LIVE_CAPABLE_ACTIONS).toContain("scribe_start");
+  });
+  it("G17: a legacy unknown key already in the map may be CLEARED with null, but not set", async () => {
+    cfg.shadow = { global: true, actions: { legacy_action: true, "ticket:wake": false } };
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { legacy_action: true } } })).toMatchObject({ ok: false, error: "unknown_action" });
+    expect(await cmd({ kind: "set_shadow", reason: "clean up", value: { actions: { legacy_action: null } } })).toMatchObject({ ok: true, after: { global: true, actions: { "ticket:wake": false } } });
+  });
+  it("G18: actions merge PER KEY — a partial update leaves the other keys alone; null clears one key; global alone leaves the map", async () => {
+    cfg.shadow = { global: true, actions: { "ticket:wake": false, message: true } };
+    const a = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { scribe_start: false } } });
+    expect(a).toMatchObject({ ok: true, after: { global: true, actions: { "ticket:wake": false, message: true, scribe_start: false } } });
+    const b = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null, "ticket:wake": true } } });
+    expect(b).toMatchObject({ ok: true, after: { global: true, actions: { "ticket:wake": true, scribe_start: false } } });
+    expect((cfg.shadow as { actions: Row }).actions).not.toHaveProperty("message");
+    const c = await cmd({ kind: "set_shadow", reason: "r", value: { global: false } });
+    expect(c).toMatchObject({ ok: true, after: { global: false, actions: { "ticket:wake": true, scribe_start: false } } });
+    // clearing a key that is not there is a no-op; an empty partial update changes nothing
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null } } })).toMatchObject({ ok: true, unchanged: true });
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: {} } })).toMatchObject({ ok: true, unchanged: true });
+  });
+  it("G18: the revert of a partial update restores exactly the keys it touched (a new key is cleared, a changed one goes back, a cleared one returns)", async () => {
+    cfg.shadow = { global: true, actions: { "ticket:wake": false, message: true } };
+    const out = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { scribe_start: false, "ticket:wake": true, message: null } } });
+    expect(out).toMatchObject({ ok: true, revert: { kind: "set_shadow", exact: true, value: { global: true, actions: { scribe_start: null, "ticket:wake": false, message: true } } } });
+    const rv = out.revert as { kind: string; value: unknown };
+    expect(await cmd({ kind: rv.kind, reason: "undo", value: rv.value })).toMatchObject({ ok: true });
+    expect(cfg.shadow).toEqual({ global: true, actions: { "ticket:wake": false, message: true } });
+  });
+
   it("add_room: resolves the room by name, refuses a duplicate, and its revert is inexact (flag dev), said so", async () => {
     const out = await cmd({ kind: "add_room", reason: "new OPD", room: "OPD 1", value: { class: "opd", flags: ["pilot"], machine: "mac-7" } });
     expect(out).toMatchObject({ ok: true, key: "rooms", room: { id: ROOM.id, slug: "opd-1" }, after: { [ROOM.id]: { flags: ["pilot"], class: "opd", machine: "mac-7" }, room_jwyrr4dc: { flags: ["dev", "test"], machine: "ORBOX3" } },
@@ -321,8 +362,9 @@ describe("scribe_lanes", () => {
 
 describe("scribe_health aspect=routes", () => {
   const fetchMock = vi.fn();
-  beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); });
-  afterEach(() => vi.unstubAllGlobals());
+  const savedApp = process.env.APP_URL;
+  beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); process.env.APP_URL = "https://app.example.test"; });
+  afterEach(() => { vi.unstubAllGlobals(); if (savedApp === undefined) delete process.env.APP_URL; else process.env.APP_URL = savedApp; });
 
   it("probes the fixed allow-list on the request's own origin, no credentials, no query strings; ok by route", async () => {
     fetchMock.mockImplementation(async (_u: string, init: { method: string }) => new Response(null, { status: init.method === "OPTIONS" ? 204 : 200 }));
@@ -371,10 +413,34 @@ describe("scribe_health aspect=routes", () => {
     }
   });
 
-  it("no usable origin -> a named error and no fetch", async () => {
+  it("G19: the origin is configuration (APP_URL, else the production constant) — NEVER the request's own origin / Host", async () => {
+    fetchMock.mockImplementation(async () => new Response(null, { status: 200 }));
     const t = S.CALLABLE_TOOLS.get("scribe_health_routes")!;
-    expect(await t.handler({}, { origin: "not a url", actor: "a", scopes: new Set(["read"]) } as never)).toEqual({ ok: false, error: "no_origin" });
-    expect(await t.handler({}, { origin: "ftp://x", actor: "a", scopes: new Set(["read"]) } as never)).toEqual({ ok: false, error: "no_origin" });
+    // a hostile request origin (what a spoofed Host / X-Forwarded-Host would produce) is ignored
+    const out = await t.handler({}, { origin: "https://evil.example", actor: "a", scopes: new Set(["read"]) } as never) as Row;
+    expect(out.origin).toBe("https://app.example.test");
+    for (const [url] of fetchMock.mock.calls as Array<[string]>) { expect(url.startsWith("https://app.example.test/")).toBe(true); expect(url).not.toContain("evil"); }
+    // APP_URL with a path / query / credentials keeps only its origin
+    process.env.APP_URL = "https://user:pw@app.example.test/some/path?x=1";
+    expect(R.publicOrigin()!.href).toBe("https://app.example.test/");
+    // unset -> the production constant
+    delete process.env.APP_URL;
+    expect(R.publicOrigin()!.origin).toBe(R.PUBLIC_ORIGIN_DEFAULT);
+    expect(R.PUBLIC_ORIGIN_DEFAULT).toBe("https://evenscribe.app");
+    fetchMock.mockClear();
+    await t.handler({}, { origin: "https://evil.example", actor: "a", scopes: new Set(["read"]) } as never);
+    for (const [url] of fetchMock.mock.calls as Array<[string]>) expect(url.startsWith("https://evenscribe.app/")).toBe(true);
+    // the handler does not even read ctx.origin: a context with none still works
+    fetchMock.mockClear();
+    expect(await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never)).toMatchObject({ origin: "https://evenscribe.app", checked: 5 });
+  });
+
+  it("an APP_URL that is not an http(s) URL -> a named error and no fetch", async () => {
+    const t = S.CALLABLE_TOOLS.get("scribe_health_routes")!;
+    process.env.APP_URL = "ftp://x";
+    expect(await t.handler({}, { origin: "https://app.example.test", actor: "a", scopes: new Set(["read"]) } as never)).toEqual({ ok: false, error: "no_origin" });
+    process.env.APP_URL = "not a url";
+    expect(await t.handler({}, { origin: "https://app.example.test", actor: "a", scopes: new Set(["read"]) } as never)).toEqual({ ok: false, error: "no_origin" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

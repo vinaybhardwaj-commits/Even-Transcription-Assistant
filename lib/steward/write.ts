@@ -19,6 +19,7 @@
 import { z } from "zod";
 import { nanoid } from "nanoid";
 import type { StewardSql } from "./tickets";
+import { LIVE_CAPABLE_ACTIONS } from "./config";
 
 export const COMMAND_KINDS = ["set_shadow", "kill_switch", "start_day_live", "add_room", "flag_room", "set_window", "note", "mute_alerts"] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
@@ -59,7 +60,8 @@ const flags = z.array(z.string().regex(FLAG)).max(10);
 
 export const Reason = z.string().trim().min(1).max(REASON_MAX);
 const V = {
-  set_shadow: z.object({ global: z.boolean().optional(), actions: z.record(z.string().regex(ACTION_KEY), z.boolean()).refine((r) => Object.keys(r).length <= 30).optional() }).strict()
+  // `actions` is a PARTIAL update: each key is set to true / false, or to null to clear that one key (G18)
+  set_shadow: z.object({ global: z.boolean().optional(), actions: z.record(z.string().regex(ACTION_KEY), z.boolean().nullable()).refine((r) => Object.keys(r).length <= 30).optional() }).strict()
     .refine((v) => v.global !== undefined || v.actions !== undefined, { message: "give global and/or actions" }),
   kill_switch: z.object({ on: z.boolean() }).strict(),
   start_day_live: z.object({ on: z.boolean() }).strict(),
@@ -118,8 +120,21 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
       const c = cur(key);
       const curGlobal = isObj(c) && typeof c.global === "boolean" ? c.global : true; // parseConfig's fallback is shadow ON
       const curActions = isObj(c) && isObj(c.actions) ? (c.actions as Record<string, boolean>) : {};
-      const after = { global: p.data.global ?? curGlobal, actions: p.data.actions ?? curActions }; // `actions`, when given, REPLACES the map
-      return done(after, { kind: "set_shadow", value: { global: curGlobal, actions: curActions }, exact: true });
+      // G17: only a published action name may be set — the actions the Steward can ever take out of shadow (LIVE_CAPABLE_ACTIONS). Anything else is always
+      // shadow, so a setting for it would be a silent no-op that reads like a control. A key ALREADY in the map may still be cleared with null (clean-up of a legacy key).
+      const touched = p.data.actions ?? {};
+      const unknown = Object.entries(touched).filter(([k, v]) => !LIVE_CAPABLE_ACTIONS.includes(k) && !(v === null && k in curActions)).map(([k]) => k);
+      if (unknown.length > 0) return fail("unknown_action", `not a published steward action: ${unknown.slice(0, 5).join(", ")}; allowed: ${LIVE_CAPABLE_ACTIONS.join(", ")}`);
+      // G18: merge per key; an explicit null clears one key
+      const actions: Record<string, boolean> = { ...curActions };
+      const undo: Record<string, boolean | null> = {};
+      for (const [k, v] of Object.entries(touched)) {
+        undo[k] = k in curActions ? curActions[k]! : null; // what the key was before: its value, or null (absent)
+        if (v === null) delete actions[k];
+        else actions[k] = v;
+      }
+      const after = { global: p.data.global ?? curGlobal, actions };
+      return done(after, { kind: "set_shadow", value: { global: curGlobal, ...(Object.keys(undo).length ? { actions: undo } : {}) }, exact: true });
     }
     case "add_room": {
       if (!input.roomId) return fail("room_required");
