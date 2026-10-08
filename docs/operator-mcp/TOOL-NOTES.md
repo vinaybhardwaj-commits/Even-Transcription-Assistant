@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 39 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep)
+## The surface: 41 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep; `scribe_help` and `scribe_usage`, S0, 8 Oct)
 
 `tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
@@ -266,9 +266,9 @@ tells an operator which box to go and look at. Anything that legitimately needs 
 
 ## `listChanged`, and why your client may still be stale (§2.6)
 
-`initialize` advertises `capabilities.tools.listChanged: true`. The tool set is built at module load
-from the registry, so a deploy changes it and a client that honours the notification picks the new
-set up.
+**Withdrawn by S0.2 (8 Oct 2026):** `initialize` now advertises `capabilities.tools: {}`. The door is stateless JSON over POST
+with no SSE stream, so it can never send `notifications/tools/list_changed`; advertising it promised a push that cannot arrive.
+The tool set is built at module load from the registry, so it changes only on a deploy.
 
 **A client that caches its manifest regardless still needs reconnecting.** On 12 Sep the Claude
 connector served a tool list fetched before `scribe_room_command` existed: the server answered
@@ -280,3 +280,25 @@ months stale. Fresh results with stale descriptions is the signature: reconnect 
 **After Slice E a stale client still works.** It lists the old tools (51, or 52 if cached after C2), and every one
 of those names still answers. What it cannot see is the new group names until it reconnects. Verify the surface
 with curl against the door, never by asking a connector what it lists.
+
+## S0 (08 Oct 2026) — reliability and hygiene
+
+Two new read tools, both ungrouped, no rename of anything already published:
+
+- **`scribe_help`** `{ tool }` — one tool's full contract from the registry: scope, full description, input schema; for a group also
+  its selector and what each value runs (`members`), and `accepted_legacy_names`. Accepts any name `tools/call` accepts. An unknown name
+  answers `{ error: "unknown_tool", suggestions: [five closest names] }`. Reads no database.
+- **`scribe_usage`** `{ since_hours?, tool? }` — `tools/call` volume from `audit_log`: per tool (and group variant) calls, errors,
+  `error_rate`, p50/p95/max ms and actors, plus calls per actor. `since_hours` defaults to 24, max 336; `per_tool` is capped at 100 rows.
+
+Behaviour changes:
+
+1. **GET on both doors is 405** with `Allow: POST, OPTIONS` and `{"error":"method_not_allowed","hint":"Even Scribe MCP speaks JSON-RPC over POST"}`.
+   The old 200 banner is gone, so a GET probe no longer reads as "the door is up". OPTIONS is unchanged (204).
+2. **`initialize` no longer advertises `listChanged`** (see above). `serverInfo.version` is still the git sha.
+3. **Audit honesty.** `audit_log.metadata_json.ok` is now false when the handler threw **or** answered `{ error: "…" }` / `{ degraded: true }`.
+   New `metadata_json.err_kind`: `"throw"`, `"result_error"` or `null`. The `isError` flag callers see is **unchanged** (true only when the handler threw).
+   Rows written before S0 have no `err_kind` and count throws only, so `scribe_usage` error rates step up across the deploy.
+4. **One log line per `tools/call`:** `{"mcp":"call","tool","variant","ms","ok","err_kind","actor","bytes_out"}`. Never arguments, the request path, the key or the user agent.
+5. **`structuredContent` is kept.** `lib/overnight-translate/door.ts` reads `result.structuredContent` from this door, so the duplicate payload stays until that consumer moves to `content`.
+6. **bench-timeline fix.** The brain visit read bound one parameter to a two-placeholder statement (`SQL_VISITS_FOR_DAY`: room_day_id, arm), so every bench timeline fell back to "picture unavailable".
