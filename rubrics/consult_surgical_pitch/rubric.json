@@ -130,8 +130,16 @@
           ],
           "properties": {
             "item": {
-              "type": "string",
-              "maxLength": 40
+              "enum": [
+                "surgery_recommended",
+                "pitch_source",
+                "benefits_named",
+                "risks_named",
+                "alternatives_named",
+                "timing_named",
+                "doubt_code",
+                "uptake_of_surgery"
+              ]
             },
             "quote": {
               "type": "string",

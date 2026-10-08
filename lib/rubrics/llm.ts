@@ -5,7 +5,7 @@
  *   - models: lib/llm/gemini.ts llmFallbackModels() — env LLM_FALLBACK_MODELS, else google/gemini-3.8-flash then meta-llama/llama-4-scout. The FIRST is the scoring model; the next only answers if
  *     the first is unavailable (never because its answer was bad: a bad answer is retried ONCE on the same model, then the unit fails).
  * temperature 0, JSON mode, the answer validated against the rubric's output schema. Every failure is a CLOSED CODE; no model output or transcript is ever in a code or a log line.
- * A transient infrastructure failure (timeout, 429, 5xx, unreachable) THROWS (the runner retries the step, as for a database error); a missing key or a refusal by the provider (4xx) is a failed unit.
+ * A transient infrastructure failure (timeout, 408, 429, 5xx, unreachable, an empty model response) THROWS (the runner retries the step, as for a database error); a missing key or a refusal by the provider (4xx) is a failed unit.
  */
 import { openrouterChat, OpenRouterError, type OpenRouterChatResult } from "@/lib/openrouter";
 import { llmFallbackModels } from "@/lib/llm/gemini";
@@ -25,7 +25,7 @@ export type LlmOutcome =
   | { ok: true; value: Record<string, unknown>; model: string; attempts: number; latency_ms: number }
   | { ok: false; reason: "llm_invalid_json" | "llm_schema_invalid" | "llm_not_configured" | "llm_refused"; model: string | null; attempts: number };
 
-const TRANSIENT = /^(openrouter_timeout|openrouter_unreachable|openrouter_http_(429|5\d\d)|openrouter_abort)/;
+const TRANSIENT = /^(openrouter_timeout|openrouter_unreachable|openrouter_http_(408|429|5\d\d)|openrouter_abort|openrouter_empty)/;
 
 /** Parse the model's text as a JSON object; tolerate a markdown fence around it. Returns null when it is not an object. */
 export function parseJsonObject(text: string): Record<string, unknown> | null {

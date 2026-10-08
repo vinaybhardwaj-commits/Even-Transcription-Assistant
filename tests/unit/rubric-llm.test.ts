@@ -82,7 +82,7 @@ describe("the llm client path", () => {
     const boom = (code: string) => L.setRubricChatForTests(async () => { throw new OpenRouterError(code); });
     boom("openrouter_no_key");
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_not_configured" });
-    for (const c of ["openrouter_timeout", "openrouter_http_429", "openrouter_http_503", "openrouter_unreachable:TypeError"]) { boom(c); await expect(L.askJson({ system: "s", user: "u", schema: { type: "object" } })).rejects.toThrow(/^llm_unavailable/); }
+    for (const c of ["openrouter_timeout", "openrouter_http_408", "openrouter_empty", "openrouter_http_429", "openrouter_http_503", "openrouter_unreachable:TypeError"]) { boom(c); await expect(L.askJson({ system: "s", user: "u", schema: { type: "object" } })).rejects.toThrow(/^llm_unavailable/); }
     boom("openrouter_http_400");
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_refused" });
   });
@@ -148,7 +148,7 @@ describe("consult_chair_affect", () => {
 
 describe("consult_surgical_pitch", () => {
   const PITCH = { surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: false, alternatives_named: false, timing_named: true },
-    doubts: [{ kind: "pain", code: "unheard", quote: "Will it need an operation?" }], uptake_of_surgery: "accept", prompted_yes: true, evidence: [{ item: "timing", quote: "in two weeks" }] };
+    doubts: [{ kind: "pain", code: "unheard", quote: "Will it need an operation?" }], uptake_of_surgery: "accept", prompted_yes: true, evidence: [{ item: "timing_named", quote: "in two weeks" }] };
   it("scores the pitch: balance flags, doubt codes, uptake; findings are codes", async () => {
     L.setRubricChatForTests(async () => answer(PITCH));
     const r = await E.evaluateSurgicalPitch(pitch, T);
@@ -203,5 +203,20 @@ describe("gates: lab only, blind room-days, bench wiring", () => {
     const set = parseBenchSet({ unit: "consult", items: [{ unit_key: "m001", expected: { surgery_recommended: false } }, { unit_key: "m002", expected: { uptake_codes: ["hedge", "accept"], distress: "low" } }] })!;
     expect(compareItem(set.items[0]!, { surgery_recommended: false }).every((c) => c.equal)).toBe(true);
     expect(compareItem(set.items[1]!, { uptake_codes: ["accept", "hedge"], distress: "low" }).every((c) => c.equal)).toBe(true);
+  });
+});
+
+describe("S71-G62 — an evidence item label is one of the rubric's own item ids, never free text", () => {
+  it("the output schema's evidence item is an enum equal to the question ids; a label carrying anything else is a schema failure (after the one retry)", async () => {
+    for (const r of [affect, pitch]) {
+      const item = (r.output as unknown as { properties: { evidence: { items: { properties: { item: { enum?: string[] } } } } } }).properties.evidence.items.properties.item;
+      expect(item.enum).toEqual(r.questions!.map((q) => q.id));
+    }
+    L.setRubricChatForTests(async () => answer({ ...AFFECT_OK, evidence: [{ item: "Mrs Somebody Name", quote: "Okay doctor." }] }));
+    expect(await E.evaluateConsultAffect(affect, T)).toMatchObject({ status: "failed", reason: "llm_schema_invalid" });
+    L.setRubricChatForTests(async () => answer({ ...AFFECT_OK, evidence: [{ item: "distress", quote: "Okay doctor." }] }));
+    expect(await E.evaluateConsultAffect(affect, T)).toMatchObject({ status: "ok" });
+    L.setRubricChatForTests(async () => answer({ surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: true, alternatives_named: true, timing_named: true }, uptake_of_surgery: "accept", evidence: [{ item: "a free label", quote: "x" }] }));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "failed", reason: "llm_schema_invalid" });
   });
 });

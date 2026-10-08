@@ -160,8 +160,17 @@
           ],
           "properties": {
             "item": {
-              "type": "string",
-              "maxLength": 40
+              "enum": [
+                "distress",
+                "confusion",
+                "frustration",
+                "reassurance",
+                "teach_back",
+                "engagement_process",
+                "information_present",
+                "uptake",
+                "resolution_type"
+              ]
             },
             "quote": {
               "type": "string",
