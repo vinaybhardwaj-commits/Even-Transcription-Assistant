@@ -8,7 +8,7 @@
 import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { isNeverLiveRoom, istMidnightOf } from "./config";
 import type { Decision } from "./rules";
-import { START_IN_FLIGHT_S, startVerdict } from "./start-schedule";
+import { START_IN_FLIGHT_S, START_NO_ACK_FAIL_S, startVerdict } from "./start-schedule";
 
 export type ExecResult = { result: string };
 
@@ -45,6 +45,8 @@ export type StartDeps = {
   /** this room's start_day commands with source 'steward' since IST midnight (the 3-per-day cap and the 5/15/45 min backoff) */
   getStewardAttemptsToday: (roomId: string, now: Date) => Promise<import("@/lib/bench-commands").StartAttempt[]>;
   decideStart: typeof import("@/lib/bench-commands").decideStart;
+  /** R2: mark this room's steward start_day commands still `pending` and older than `olderThanS` as `expired` (only that room, kind and source); resolves to the expired ids */
+  expireStaleStarts?: (roomId: string, olderThanS: number) => Promise<string[]>;
   insertCommand: (input: { roomId: string; kind: "start_day"; args?: unknown; source?: string }) => Promise<string>;
   waitForAck: (id: string, opts: { timeoutMs?: number }) => Promise<{ status: string; error: string | null; result: unknown } | null>;
 };
@@ -72,6 +74,7 @@ export async function realStartDeps(): Promise<StartDeps> {
       return rows.map((r) => ({ status: r.status, created_at: r.created_at, acked_at: r.acked_at ?? null, session_started: r.session_started === true, session_named: r.session_named === true }));
     },
     decideStart: b.decideStart,
+    expireStaleStarts: b.expireStaleStartDay,
     insertCommand: (i) => b.insertCommand(i),
     waitForAck: (id, o) => b.waitForAck(id, o),
   };
@@ -118,6 +121,15 @@ export async function liveScribeStart(
   if (sv.kind === "pending") return { result: `skipped: start_pending attempts=${sv.attempts}` };
   if (sv.kind === "backoff") return { result: `skipped: start_backoff attempts=${sv.attempts} retry_after_s=${sv.retry_after_s}` };
   if (verdict.action !== "send") return { result: `skipped: ${(verdict as { action: string }).action}` };
+  // R2 (F44.1): a retry (an earlier steward start today) must not leave the earlier start_day live on the bus. A command delivered and never acked stays `pending` (the lazy expiry covers
+  // only undelivered ones), so the stale one (> START_NO_ACK_FAIL_S) is marked `expired` BEFORE the new one is queued. If that cannot be done, nothing is sent: never two non-terminal start_days.
+  if (today.length > 0 && deps.expireStaleStarts) {
+    try {
+      await deps.expireStaleStarts(roomId, START_NO_ACK_FAIL_S);
+    } catch {
+      return { result: "skipped: start_expire_failed" };
+    }
+  }
   const id = await deps.insertCommand({ roomId, kind: LIVE_COMMAND_KIND, args: verdict.args ?? undefined, source: START_SOURCE });
   const row = await deps.waitForAck(id, { timeoutMs: opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS });
   // F44: no ack inside the in-tick wait is NOT a failure. The kiosk acks in ~4-13 s; the command is queued and may still be acked. The loop reconciles it on the next ticks (reconcilePending).
