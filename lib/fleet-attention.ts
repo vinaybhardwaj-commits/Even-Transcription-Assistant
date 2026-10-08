@@ -57,6 +57,7 @@ import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-re
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
 import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { HOST_OFFLINE_TTL_MS } from "@/lib/bench-bus-constants";
+import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -602,7 +603,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           "red",
           lastPoll,
           `The kiosk in ${name} has not polled since ${fmtIst(new Date(lastPoll).toISOString(), now)} but the cloud still shows a recording session. Nothing is being captured.`,
-          `Go to ${name} (or ask for the Mini to be woken) and open the room page. If it is back within 30 minutes the same recording resumes; after that start a new one.`,
+          `Go to ${name} (or ask for the Mini to be woken) and open the room page. If it is back within ${STALLED_BADGE_MINUTES} minutes of the last audio the same recording resumes; after that it starts a new one.`,
         );
       }
     }

@@ -67,6 +67,11 @@ describe("AC2/AC3 — fleet attention", () => {
   it("still present three hours in (no age cut-off while the session is open)", () => {
     expect(run(room({ listener_last_poll_at: iso(NOW - min(180)) }))).toHaveLength(1);
   });
+  it("the action copy states the resume window the code enforces (STALLED_BADGE_MINUTES), not a different number", () => {
+    const [item] = run(room({ listener_last_poll_at: iso(NOW - min(7)) }));
+    expect(item!.action).toContain(`${STALLED_BADGE_MINUTES} minutes`);
+    expect(item!.action).not.toMatch(/30 minutes/);
+  });
   it("silent for a fresh poll, an unsupplied read, and a room whose kiosk never polled", () => {
     expect(run(room({ listener_last_poll_at: iso(NOW - min(1)) }))).toHaveLength(0);
     expect(run(room({}))).toHaveLength(0);                                     // read failed -> undefined -> no rule
