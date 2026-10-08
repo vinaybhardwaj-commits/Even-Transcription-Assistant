@@ -291,7 +291,24 @@ describe("G10 — a start 4xx on a job that is already running continues instead
     expect(ledgerLines()).toEqual([expect.objectContaining({ status: "failed", http_status: 400 })]);
     gw.status.mockResolvedValueOnce({ ok: true, state: "Created", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_500", status: 500, transient: true });
     lab.clear();
-    expect(await start()).toMatchObject({ kind: "fail" }); // the re-check itself failing is not evidence the job runs
+    await expect(start()).rejects.toThrow(/status_500/); // G15: a transient re-check failure is retried, not a verdict
+  });
+  it("G15: if the recheck after a start 4xx itself fails TRANSIENTLY the step throws (retried under MAX_FAILURES); a terminal recheck failure still fails the job", async () => {
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_503", status: 503, transient: true });
+    gw.startJob.mockResolvedValue({ ok: false, error: "start_409", status: 409, transient: false });
+    await expect(start()).rejects.toThrow(/sarvam_submit_failed: status_503/);
+    expect(ledgerLines()).toEqual([]); // not failed: Sarvam may be running it
+    expect(audits()).toHaveLength(0);
+    gw.status.mockReset();
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_404", status: 404, transient: false });
+    expect(await start()).toEqual({ kind: "fail", error: "sarvam_submit_failed: start_409" });
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "failed", http_status: 409 })]);
+    // and the retry after the throw succeeds once Sarvam answers: Running -> poll, one audit row
+    gw.status.mockReset();
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: true, state: "Running", outputs: [] });
+    lab.clear();
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(audits()).toHaveLength(1);
   });
   it("a start that answers Failed state is also past Created, and the poll step will report it", async () => {
     gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: true, state: "Failed", outputs: [] });

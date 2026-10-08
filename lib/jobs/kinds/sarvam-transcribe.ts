@@ -189,6 +189,9 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
       // G10: a 4xx on start may only mean the job is ALREADY started (a replay that raced). Ask again: if Sarvam has the job past Created it is running
       // (and billing), so carry on polling it instead of failing a job Sarvam is still working on.
       const again = await gwBatchStatus(jobId);
+      // G15: if the recheck ITSELF fails transiently (503, timeout), Sarvam may well be running the job: throw, so the runner retries the step under
+      // MAX_FAILURES, instead of failing a job we cannot say is not running.
+      if (!again.ok && again.transient) return bail(again, "sarvam_submit_failed");
       if (!(again.ok && !isCreatedState(again.state))) return ledgerFailed(ctx, s, "sarvam_submit_failed");
     }
   }
