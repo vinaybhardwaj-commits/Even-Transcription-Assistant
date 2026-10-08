@@ -1,6 +1,6 @@
 # tools/pulse-watch
 
-Durable copy (4 Oct 2026) of the read-side Pulse Presence tooling that lived only in `~/pulse-watch` on V's MacBook Air.
+Durable copy (4 Oct 2026, refreshed 8 Oct 2026 from the Air) of the read-side Pulse Presence tooling that lived only in `~/pulse-watch` on V's MacBook Air.
 **`lib/encounter-windows` is canonical. `tools/pulse-watch` is the read-only historical reference** it was ported from and
 checked against: the `.mjs` scripts run against the live database with no build step, but they are not maintained in step with
 the port and nothing in the app imports them.
@@ -12,6 +12,14 @@ the port and nothing in the app imports them.
 | `q-am.mjs` | one-shot: resolved occupancy per machine plus the monitored rooms' last 6 minutes of extension events |
 | `q-contract.mjs` | read-only contract/anomaly monitor for the extension sink (identity, open sessions, skew/lag, dual stream, silent hosts) |
 | `package.json` | its own dependency (`@neondatabase/serverless`) |
+| `snapshot.mjs` | cached per-machine facts and the board header/suffix helpers used by both watchers |
+| `watch-classic.mjs` | the previous watcher layout, kept with its audio column |
+| `audioState.mjs` / `audioState.test.mjs` | room audio-state column: latest state per room mapped to its machine (`node audioState.test.mjs`) |
+| `stamp-logouts.mjs` | one-shot: stamps resolved logouts from `resolveSessions` |
+
+Doctor shown per room (8 Oct 2026, matches Rooms Live v1.6 `lib/rooms-live/snapshot.ts`): an open warehouse consult shows
+"consulting"; a consult closed within 90 minutes shows "last consult HH:MM"; otherwise the live Pulse sign-in.
+
 
 ## Run
 
