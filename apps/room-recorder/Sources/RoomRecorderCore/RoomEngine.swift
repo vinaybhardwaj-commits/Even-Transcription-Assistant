@@ -28,6 +28,8 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
   case residentArchiveDidNotBecomeDurable
   case residentArchiveCaptureStopped
   case invalidManifestMetadata
+  /// Arch #17. The configured input device was not attached/answering after every retry; no session was opened.
+  case inputDeviceNotReady(String)
   case io(String)
 
   public var errorDescription: String? {
@@ -55,9 +57,31 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
     case .residentArchiveDidNotBecomeDurable: return "resident_archive_capture_not_durable"
     case .residentArchiveCaptureStopped: return "resident_archive_capture_stopped"
     case .invalidManifestMetadata: return "spool manifest metadata is invalid"
+    case .inputDeviceNotReady(let detail): return "input_device_not_ready: \(detail)"
     case .io(let message): return message
     }
   }
+}
+
+/// Arch #17 — how a day start waits for its input device. `.live` is production (real sleeps, random
+/// jitter); `.disabled` skips the check entirely for fixtures that open sessions against fake devices.
+public struct RoomInputReadyWait: Sendable {
+  public let enabled: Bool
+  public let jitterRoll: @Sendable () -> Double
+  public let sleep: @Sendable (UInt64) async throws -> Void
+  public init(
+    enabled: Bool, jitterRoll: @escaping @Sendable () -> Double,
+    sleep: @escaping @Sendable (UInt64) async throws -> Void
+  ) {
+    self.enabled = enabled
+    self.jitterRoll = jitterRoll
+    self.sleep = sleep
+  }
+  public static let live = RoomInputReadyWait(
+    enabled: true, jitterRoll: { Double.random(in: 0...1) },
+    sleep: { try await Task.sleep(nanoseconds: $0) })
+  public static let disabled = RoomInputReadyWait(
+    enabled: false, jitterRoll: { 0 }, sleep: { _ in })
 }
 
 public enum RoomEnginePhase: Equatable, Sendable {
@@ -501,6 +525,9 @@ public actor RoomEngine {
   private let log: @Sendable (String) -> Void
   /// Release R4. What `set_audio_input` switches between and sets the volume of.
   private let audioInputs: any RoomAudioInputControlling
+  private let inputReadyWait: RoomInputReadyWait
+  /// Arch #17. The one background start (device wait and/or retries after a start death), if any. Beside the poll loop, never in it.
+  private var startRetryTask: Task<Void, Never>?
   /// Release R4. The §5.5 machine reading for the poll, for the device config.json names now.
   /// `MachineFactsReader.read` in production; injected so a test can see the poll follow a switch.
   private let machineFacts: @Sendable (String?) -> MachineFacts
@@ -663,6 +690,8 @@ public actor RoomEngine {
     },
     /// Release R4. CoreAudio by default.
     audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
+    /// Arch #17. How the start waits for its input device; tests that open a session with fixture devices pass `.disabled`.
+    inputReadyWait: RoomInputReadyWait = .live,
     machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
       MachineFactsReader.read(inputDeviceUID: $0)
     },
@@ -715,6 +744,7 @@ public actor RoomEngine {
       updater: updaterFactory(configuration, remote, persistence.root),
       log: log,
       audioInputs: audioInputs,
+      inputReadyWait: inputReadyWait,
       machineFacts: machineFacts,
       processExit: processExit,
       helperVersion: helperVersion
@@ -762,6 +792,8 @@ public actor RoomEngine {
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
     },
     audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
+    /// Arch #17. How the start waits for its input device; tests that open a session with fixture devices pass `.disabled`.
+    inputReadyWait: RoomInputReadyWait = .live,
     machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
       MachineFactsReader.read(inputDeviceUID: $0)
     },
@@ -772,6 +804,7 @@ public actor RoomEngine {
   ) {
     self.persistence = persistence
     self.audioInputs = audioInputs
+    self.inputReadyWait = inputReadyWait
     self.machineFacts = machineFacts
     self.processExit = processExit
     self.helperVersion = helperVersion
@@ -1678,8 +1711,22 @@ public actor RoomEngine {
         try prepareDecisionAcknowledgement(command, success: true)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
       case .start:
-        try await beginOrResume(commandID: command.id)
-        result = CommandResult(ok: true, sessionID: sessionID, error: nil)
+        switch try await attemptStartOrDefer(command) {
+        case .started:
+          result = CommandResult(ok: true, sessionID: sessionID, error: nil)
+        case .deferred:
+          // Accepted, not yet started: the wait / retries run beside the poll loop. The ack SAYS so —
+          // {ok:true, deferred:true, session_id:null} — so a caller (MCP scribe_start_recording, the
+          // Steward) reads it as PENDING, never as started. A wait that later fails reports itself with
+          // sendLateStartFailure. Acked here, not through the journal gate below: nothing was journaled
+          // for a start that has not begun.
+          let deferredResult = CommandResult(
+            ok: true, sessionID: nil, error: nil,
+            verb: OperatorVerbAcknowledgement(deferred: true))
+          completedCommands[command.id] = deferredResult
+          await acknowledgeDeferredStart(command, result: deferredResult)
+          return
+        }
       case .resume:
         try await resume(commandID: command.id)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
@@ -2507,6 +2554,8 @@ public actor RoomEngine {
         priorState: .commandNoop, newState: .startAckReady)
       return
     } else {
+      // Arch #17: device readiness is decided BEFORE this point, by attemptStartOrDefer — never here, where a
+      // wait would hold the poll loop. beginOrResume only ever runs once the device is there (or unknowable).
       try advanceControl(
         commandID: commandID, commandKind: .startDay, sessionID: nil,
         priorState: nil, newState: .startIntent)
@@ -2593,6 +2642,199 @@ public actor RoomEngine {
   /// Arch #15 — written on the session end that START COMPENSATION patches, so the server can tell a start
   /// that died on its own from an operator stop. MUST equal START_FAILED_NOTE in lib/bench-bus-constants.ts.
   static let startFailedNote = "start failed: capture did not start"
+
+  /// Arch #17 — the delays between readiness checks: 1, 2, 4, 8, 16 s (about 31 s in all, inside the
+  /// start command's patience), each stretched by up to `jitterFraction` so rooms that started on the
+  /// same second do not re-check on the same second.
+  static let inputReadyBaseDelays: [Double] = [1, 2, 4, 8, 16]
+  static let inputReadyJitterFraction = 0.5
+
+  /// PURE — what the attached-device list says about the configured device. `unknown` (CoreAudio
+  /// would not answer, or the config names no device) never blocks a start: not being able to look
+  /// is not evidence the device is missing, and a start that was going to work must not be refused.
+  public enum InputReadiness: Equatable, Sendable { case ready, notReady, unknown }
+  public static func inputReadiness(devices: [AudioInputDeviceEntry]?, uid: String) -> InputReadiness {
+    guard let devices, !uid.isEmpty else { return .unknown }
+    return devices.contains(where: { $0.uid == uid }) ? .ready : .notReady
+  }
+
+  /// PURE — the schedule in nanoseconds for a given jitter roll in 0...1.
+  public static func inputReadyDelays(jitterRoll: Double) -> [UInt64] {
+    let roll = min(max(jitterRoll, 0), 1)
+    return inputReadyBaseDelays.map { UInt64($0 * (1 + inputReadyJitterFraction * roll) * 1_000_000_000) }
+  }
+
+  // MARK: - Arch #17: start that waits and retries WITHOUT holding the poll loop
+
+  private enum StartOutcome { case started, deferred }
+
+  /// Total start attempts for one start_day (the first plus retries), and the pauses between a start
+  /// death and the next try. Presence is not readiness: a device that is listed can still make the
+  /// tapewriter exit ~15 s in with no piece (5 Oct), so a death is retried before it is final.
+  static let startAttempts = 3
+  static let startRetryBaseDelays: [Double] = [2, 5]
+
+  /// PURE — the pauses after a start death, in nanoseconds, for a jitter roll in 0...1.
+  public static func startRetryDelays(jitterRoll: Double) -> [UInt64] {
+    let roll = min(max(jitterRoll, 0), 1)
+    return startRetryBaseDelays.map { UInt64($0 * (1 + inputReadyJitterFraction * roll) * 1_000_000_000) }
+  }
+
+  /// PURE — errors that mean the capture itself died at start (retryable), as opposed to a refusal.
+  static func isStartDeath(_ error: Error) -> Bool {
+    guard let e = error as? RoomEngineError else { return false }
+    switch e {
+    case .captureExited, .captureDidNotBecomeDurable, .residentArchiveDidNotBecomeDurable,
+      .residentArchiveCaptureStopped:
+      return true
+    default:
+      return false
+    }
+  }
+
+  /// ONE enumeration decides: if the configured device is listed (or the list cannot be read) the start
+  /// runs inline exactly as before; if it is NOT listed the start is accepted at once and waits in the
+  /// background. A first attempt that dies is retried in the background too, then the error surfaces
+  /// as before so the failed ack and the dead-start alert are unchanged.
+  private func attemptStartOrDefer(_ command: BenchCommand) async throws -> StartOutcome {
+    if startRetryTask != nil { return .deferred }   // one background start at a time
+    if inputReadyWait.enabled,
+      Self.inputReadiness(devices: audioInputs.inputDevices(), uid: configuration.deviceUID) == .notReady
+    {
+      spawnStart(commandID: command.id, waitForDevice: true, attempts: Self.startAttempts)
+      return .deferred
+    }
+    do {
+      try await beginOrResume(commandID: command.id)
+      return .started
+    } catch {
+      if inputReadyWait.enabled, Self.isStartDeath(error) {
+        spawnStart(commandID: command.id, waitForDevice: false, attempts: Self.startAttempts - 1)
+      }
+      throw error
+    }
+  }
+
+  private func spawnStart(commandID: String, waitForDevice: Bool, attempts: Int) {
+    // Only a start that was ACKED AS DEFERRED needs its failure carried to the server by a second ack;
+    // one that died inline was already acked failed.
+    let reportLateFailure = waitForDevice
+    startRetryTask = Task { [weak self] in
+      await self?.runBackgroundStart(
+        commandID: commandID, waitForDevice: waitForDevice, attempts: attempts,
+        reportLateFailure: reportLateFailure)
+    }
+  }
+
+  /// PURE — the reason string a failed deferred start reports. The device case has a fixed code the
+  /// server and its alert key on; anything else is the bounded error text.
+  static func lateStartFailureReason(_ error: Error) -> String {
+    if let e = error as? RoomEngineError, case .inputDeviceNotReady = e { return "input_device_not_ready" }
+    return bounded(error, limit: 160)
+  }
+
+  private func acknowledgeDeferredStart(_ command: BenchCommand, result: CommandResult) async {
+    for attempt in 1...3 {
+      do {
+        let ack = try await remote.acknowledge(
+          commandID: command.id, ok: true, sessionID: nil, error: nil, audioInput: nil,
+          verb: result.verb)
+        if ack.ok, ack.id == command.id, ack.status == "acked" { return }
+        throw RoomEngineError.io("invalid deferred acknowledgement response")
+      } catch {
+        lastError = bounded(error)
+        log("deferred start ack failed (attempt \(attempt)): \(bounded(error))")
+        if attempt < 3 { try? await inputReadyWait.sleep(UInt64(attempt) * 1_000_000_000) }
+      }
+    }
+  }
+
+  /// Arch #17 (C1). The background wait/retries ended in failure: tell the server the SAME way a direct
+  /// failure would, a failed ack on the start_day (the server amends a deferred command to failed), so the
+  /// Remote start failed alert fires. Retried; the ack is idempotent server-side.
+  private func sendLateStartFailure(commandID: String, error: Error) async {
+    let reason = Self.lateStartFailureReason(error)
+    for attempt in 1...3 {
+      do {
+        let ack = try await remote.acknowledge(
+          commandID: commandID, ok: false, sessionID: nil, error: reason, audioInput: nil, verb: nil)
+        if ack.ok, ack.id == commandID, ack.status == "failed" { return }
+        throw RoomEngineError.io("invalid late-failure acknowledgement response")
+      } catch {
+        log("late start failure ack failed (attempt \(attempt)): \(bounded(error))")
+        if attempt < 3 { try? await inputReadyWait.sleep(UInt64(attempt) * 1_000_000_000) }
+      }
+    }
+  }
+
+  private func runBackgroundStart(
+    commandID: String, waitForDevice: Bool, attempts: Int, reportLateFailure: Bool
+  ) async {
+    defer { startRetryTask = nil }
+    var left = attempts
+    var waitFirst = waitForDevice
+    let pauses = Self.startRetryDelays(jitterRoll: inputReadyWait.jitterRoll())
+    var tried = 0
+    var lastFailure: Error?
+    while left > 0, !Task.isCancelled {
+      do {
+        if waitFirst {
+          try await Self.awaitInputDevice(
+            uid: configuration.deviceUID,
+            devices: { [audioInputs] in audioInputs.inputDevices() },
+            delays: Self.inputReadyDelays(jitterRoll: inputReadyWait.jitterRoll()),
+            sleep: inputReadyWait.sleep, log: log)
+          waitFirst = false
+        } else if tried > 0 {
+          try await inputReadyWait.sleep(pauses[min(tried - 1, pauses.count - 1)])
+        }
+        if phase == .recording || phase == .paused { return }   // started some other way meanwhile
+        left -= 1
+        tried += 1
+        try await beginOrResume(commandID: commandID)
+        log("background start succeeded (attempt \(tried))")
+        return
+      } catch {
+        lastError = bounded(error)
+        lastFailure = error
+        log("background start failed (attempt \(tried)): \(bounded(error))")
+        if error is CancellationError { return }
+        if let e = error as? RoomEngineError, case .inputDeviceNotReady = e { break }
+        if !Self.isStartDeath(error) { break }
+      }
+    }
+    if !hasActiveCapture, phase != .paused, phase != .recording { phase = .failed }
+    try? saveStatus()
+    if reportLateFailure, let failure = lastFailure, !Task.isCancelled {
+      await sendLateStartFailure(commandID: commandID, error: failure)
+    }
+  }
+
+  /// Arch #17 — the retry loop, free of the engine so a test can drive it with a scripted device list
+  /// and a no-op sleeper. Ready, or a list that cannot be read (`unknown`), returns at once; a device
+  /// that stays absent through every delay throws `inputDeviceNotReady` (checked once more after the
+  /// last sleep). Returns the number of readiness checks made.
+  @discardableResult
+  static func awaitInputDevice(
+    uid: String,
+    devices: () -> [AudioInputDeviceEntry]?,
+    delays: [UInt64],
+    sleep: @Sendable (UInt64) async throws -> Void,
+    log: @Sendable (String) -> Void = { _ in }
+  ) async throws -> Int {
+    var checks = 0
+    for (attempt, delay) in delays.enumerated() {
+      checks += 1
+      if inputReadiness(devices: devices(), uid: uid) != .notReady { return checks }
+      log("start deferred: input device not ready (attempt \(attempt + 1) of \(delays.count + 1)); retrying")
+      try await sleep(delay)
+    }
+    checks += 1
+    if inputReadiness(devices: devices(), uid: uid) == .notReady {
+      throw RoomEngineError.inputDeviceNotReady("configured input device not attached after \(delays.count + 1) checks")
+    }
+    return checks
+  }
 
   private func pause(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }

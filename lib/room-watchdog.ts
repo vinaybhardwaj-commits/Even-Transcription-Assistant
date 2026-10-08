@@ -42,6 +42,7 @@
 import { sql } from "@/lib/db";
 import { DISK_LOW_BYTES, wrongInputCandidate } from "@/lib/bench-bus-constants";
 import { isBenchStalled } from "@/lib/bench-reaper-core";
+import { START_FAILED_MAX_MS } from "@/lib/bench-bus-constants";
 import { listBenchSessions } from "@/lib/bench";
 import { parseFlag } from "@/lib/flags";
 
@@ -75,7 +76,21 @@ export type RoomPollFacts = {
   open_session: OpenBenchSession | null;
   /** Arch #22: the name of the attached input WRONG_INPUT_SUSPECTED points at, so the alert can name it. Absent/null: none known. */
   wrong_input_candidate?: string | null;
+  /**
+   * ARCH #17 — the room's NEWEST session is one that died at start (ended within START_FAILED_MAX_MS with no piece of either stream) and ended
+   * inside START_DEATH_WINDOW_MS. Optional: absent/false adds nothing, so every caller that predates it is unchanged.
+   */
+  start_died?: boolean;
 };
+
+/**
+ * ARCH #17: the app retries a start death (up to 3 attempts, pauses of ~2 s and ~5 s after ~15 s deaths). A death is only FINAL, and only then
+ * alerted, once this long has passed with no newer session: a retry that opens one clears it, a kiosk that does not retry is alerted this much later.
+ */
+export const START_RETRY_GRACE_MS = 90_000;
+
+/** ARCH #17: how long a dead start keeps the room degraded without a newer session to replace it. */
+export const START_DEATH_WINDOW_MS = 30 * 60_000;
 
 /**
  * One named reason a room reads `degraded`, so an alert can say WHICH evidence tripped rather than
@@ -91,7 +106,8 @@ export type DegradationReason =
   | "encoder_stalled"
   | "tape_stalled"
   | "disk_critical"
-  | "not_delivering";
+  | "not_delivering"
+  | "start_died";
 
 const FLAG_REASON: Record<string, DegradationReason> = {
   DEVICE_MISSING: "device_missing",
@@ -126,6 +142,7 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
   if (facts.tape_advancing === false && facts.session_open === true) reasons.push("tape_stalled");
   if (facts.disk_free_bytes !== null && facts.disk_free_bytes < DISK_LOW_BYTES) reasons.push("disk_critical");
   if (facts.open_session !== null && isBenchStalled(facts.open_session, nowMs)) reasons.push("not_delivering");
+  if (facts.start_died === true) reasons.push("start_died");
 
   return reasons.length > 0 ? { status: "degraded", reasons } : { status: "ok", reasons: [] };
 }
@@ -242,6 +259,7 @@ export const REASON_LABEL: Record<DegradationReason, string> = {
   tape_stalled: "a stalled tape",
   disk_critical: "critically low disk",
   not_delivering: "no audio reaching storage, independent of what the Mac itself reports",
+  start_died: "a recording that died at start (the recorder exited within seconds and no audio was captured)",
 };
 
 export function offlineMessage(roomName: string, atIso: string): WatchdogMessage {
@@ -729,6 +747,25 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
     );
   }
 
+  // ARCH #17 — rooms whose NEWEST session died at start, recently. FAIL-SAFE like the read above: a fault here only means this signal is absent this run.
+  // The 0-chunk test is on the session itself; "newest" so a successful retry (a newer session) clears it.
+  const startDied = new Set<string>();
+  try {
+    const dead = (await sql`
+      SELECT s.room_id
+        FROM bench_session s
+       WHERE s.status = 'ended'
+         AND s.ended_at > now() - (${START_DEATH_WINDOW_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at < now() - (${START_RETRY_GRACE_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at - s.started_at < (${START_FAILED_MAX_MS / 1000}::int * INTERVAL '1 second')
+         AND NOT EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = s.id)
+         AND NOT EXISTS (SELECT 1 FROM bench_session n WHERE n.room_id = s.room_id AND n.started_at > s.started_at)
+    `) as Array<{ room_id: string }>;
+    for (const d of dead) startDied.add(d.room_id);
+  } catch (e) {
+    console.error("[room-watchdog] could not read dead starts — start_died is unavailable this run:", e instanceof Error ? e.message : String(e));
+  }
+
   // Evidence for the rooms whose alert is open. A failed read is logged and leaves every open alert OPEN this run (null evidence is not genuine).
   let evidence: Map<string, RecoveryEvidence> | null = null;
   if (rows.some((r) => r.prior_status && r.prior_status !== "ok")) {
@@ -753,6 +790,7 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
       state_flags: Array.isArray(row.state_flags) ? (row.state_flags as string[]) : [],
       open_session: openSessions.get(row.room_id) ?? null,
       wrong_input_candidate: wrongInputCandidateName(row.input_device_name, row.input_devices),
+      start_died: startDied.has(row.room_id),
     },
     prior: row.prior_status && row.prior_since ? { status: row.prior_status, since: row.prior_since } : null,
     muted: Boolean(row.muted_until && Date.parse(row.muted_until) > nowMs),

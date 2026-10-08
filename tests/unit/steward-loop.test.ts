@@ -59,6 +59,7 @@ function fakeDb(opts: { cfg?: Record<string, unknown>; dropCfg?: string[]; rooms
       return state.table.filter((r) => r.room_id === null && r.rule === "fleet_incident" && Date.parse(r.ts) > hiMs - holdMs && Date.parse(r.ts) <= hiMs).sort((a, b) => (a.ts < b.ts ? 1 : -1));
     }
     if (text.includes("d.result LIKE 'pending%'")) return state.table.filter((r) => r.action === "scribe_start" && r.mode === "live" && (r.result ?? "").startsWith("pending"));
+    if (text.includes("d.result LIKE 'ok: start_day deferred")) return []; // arch#17 reviseDeferredOk read: nothing to revise (the one allowed change to this fake)
     if (text.includes("FROM bench_command WHERE id = ANY")) return (v[0] as string[]).flatMap((id) => (state.bench.has(id) ? [state.bench.get(id)!] : []));
     if (text.includes("AND result LIKE 'pending%'")) {
       // F44 reconcile: a pending row -> its settled result, by id (v = [result, inputs patch, id])

@@ -307,7 +307,8 @@ import Testing
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
-      residentRuntimeFactory: { _, _ in probe.makeRuntime() }
+      residentRuntimeFactory: { _, _ in probe.makeRuntime() },
+      inputReadyWait: .disabled
     )
     #expect(probe.factoryCalls == 0)
 
@@ -582,7 +583,8 @@ import Testing
       remoteFactory: { _ in remote },
       captureLauncher: RefusingCaptureLauncher(),
       retainedArchiveRecovery: EncoderCapableRecovery(),
-      residentRuntimeFactory: { _, _ in probe.makeRuntime() }
+      residentRuntimeFactory: { _, _ in probe.makeRuntime() },
+      inputReadyWait: .disabled
     )
 
     let task = Task { try await engine.run() }
