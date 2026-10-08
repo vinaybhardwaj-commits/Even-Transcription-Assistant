@@ -78,6 +78,13 @@ describe("AC2 — WRONG_INPUT_SUSPECTED", () => {
     const mic3 = { name: "Meet", uid: "uid-meet", is_default: false };
     expect(C.wrongInputCandidate([{ ...TONOR, is_default: true }, mic3], "TONOR TM20")?.uid).toBe("uid-meet");
   });
+  it("the OS default wins over list order: with the default LAST in the list it is still the candidate", () => {
+    const meet = { name: "Meet", uid: "uid-meet", is_default: false };
+    expect(C.wrongInputCandidate([TONOR, meet, C270], "TONOR TM20")?.uid).toBe("uid-c270");
+    expect(C.wrongInputCandidate([meet, TONOR, C270], "TONOR TM20")?.uid).toBe("uid-c270");
+    // no default among the others: list order decides
+    expect(C.wrongInputCandidate([TONOR, meet, { ...C270, is_default: false }], "TONOR TM20")?.uid).toBe("uid-meet");
+  });
   it("two attached devices sharing the selected name, and no mark, is ambiguous: no candidate, no flag", () => {
     const a = { name: "C270 HD", uid: "a", is_default: false };
     const b = { name: "C270 HD", uid: "b", is_default: true };

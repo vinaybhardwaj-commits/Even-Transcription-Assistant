@@ -266,6 +266,32 @@ describe.runIf(HAVE_DOCKER)("runWatchdog end to end — the alert is queued, the
     }
   }, 120_000);
 
+  it("Arch #22 wiring: runWatchdog reads the room's input list and the queued degraded alert NAMES the OS-default candidate", async () => {
+    const { runWatchdog } = await import("@/lib/room-watchdog");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
+    try {
+      seedRooms(["r1"]); setState("r1", "ok");
+      const devices = JSON.stringify([
+        { name: "TONOR TM20", uid: "uid-tonor", is_default: false, is_selected: true },
+        { name: "Meet Speaker Mic", uid: "uid-meet", is_default: false },
+        { name: "C270 HD", uid: "uid-c270", is_default: true },
+      ]);
+      pg.exec(
+        `INSERT INTO room_install (room_id, last_seen_at, tape_advancing, session_open, disk_free_bytes, state_flags, input_device_name, input_devices, enrolled_at)
+         VALUES ('r1', now(), true, true, 500000000000, '{"flags": ["SILENT_WHILE_RECORDING", "WRONG_INPUT_SUSPECTED"]}'::jsonb, 'TONOR TM20', '${devices}'::jsonb, now());`,
+      );
+      const r = await runWatchdog(Date.now());
+      expect(r).toMatchObject({ ok: true, alerts_queued: 1 });
+      expect((await outbox()).map((x) => x.kind)).toEqual(["degraded"]);
+      const body = ((await pg.sql`SELECT body FROM room_alert_outbox`) as Array<{ body: string }>)[0]!.body;
+      expect(body).toContain("may be on the wrong input");
+      expect(body, "the OS default, not the first other device in list order").toContain("C270 HD");
+      expect(body).not.toContain("Meet Speaker Mic");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }, 120_000);
+
   it("a HEARTBEAT write that fails never stops the run or the alert: the pulse must not be the reason a room goes unannounced", async () => {
     const { runWatchdog } = await import("@/lib/room-watchdog");
     vi.spyOn(console, "error").mockImplementation(() => {});
