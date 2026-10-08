@@ -69,6 +69,8 @@ const REASON: Record<string, string> = {
   extension_missing: "the browser extension is missing",
   end_of_window: "the day's recording window ended",
 };
+/** the why, in plain words, for a rule (null when the rule has no reason phrase) */
+export const whyOf = (rule: string): string | null => REASON[rule] ?? null;
 const REASON_UNKNOWN = "something in the room needs a look";
 
 const NOTE: Record<string, string | ((pstate: string | null) => string)> = {

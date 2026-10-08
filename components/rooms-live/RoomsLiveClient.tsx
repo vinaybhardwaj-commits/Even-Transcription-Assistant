@@ -176,6 +176,7 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
             <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: 9, background: err ? "#9E2A1E" : "#1D6B57", display: "inline-block" }} />
             {err ? "Can't reach the server" : age === null ? "Loading…" : `updated ${age} s ago`}
           </span>
+          <a data-testid="all-steward-logs" href="/rooms-live/steward" style={{ color: "#1D4F8C", fontSize: 14 }}>All Steward logs</a>
         </div>
       </header>
       {snap ? (

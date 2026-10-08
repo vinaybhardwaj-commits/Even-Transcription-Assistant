@@ -9,8 +9,8 @@ const sqlOf = (text: string): string[] => [...text.matchAll(/\bdb`([^`]*)`/g)].m
 const all = files.flatMap((f) => sqlOf(readFileSync(join(DIR, f), "utf8")).map((s) => ({ f, s })));
 
 describe("every SQL string in lib/rooms-live", () => {
-  it("finds the 14 statements of this module (8 now-reads + the day read + the 2 roster reads + the 3 v1.7 Steward reads; occupancy is imported from lib/steward)", () => {
-    expect(all.length).toBe(14);
+  it("finds the 15 statements of this module (8 now-reads + the day read + the 2 roster reads + the 3 v1.7 Steward reads + the A1 history read; occupancy is imported from lib/steward)", () => {
+    expect(all.length).toBe(15);
   });
   it("has a LIMIT", () => {
     for (const { f, s } of all) expect(/\bLIMIT\b/i.test(s), `${f}: ${s.slice(0, 80)}`).toBe(true);

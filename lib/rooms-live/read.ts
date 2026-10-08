@@ -213,3 +213,27 @@ export async function readDay(db: Db, roomId: string, istDay: string, asOfMs: nu
   }
   return { as_of: new Date(high).toISOString(), segments };
 }
+
+export const HISTORY_PAGE = 200;
+export const HISTORY_DAYS = 30;
+export const HISTORY_MAX_OFFSET = 10_000;
+
+/**
+ * v1.7 A1 S7 / S8: one IST day of decisions for the Steward log page, newest first. `ids` is the one room, or every roster room.
+ * Clamped in SQL to the last 30 days (720 h) and to `asOf`; LIMIT 200 + 1 (the extra row says "there is a next page"); OFFSET paging.
+ * actionsOnly = "Things it did or wanted to do": hides every none / log_only row (ok rows included). No params / why / inputs column is read.
+ */
+export async function readStewardHistory(db: Db, ids: readonly string[], asOf: string, fromIso: string, toIso: string, actionsOnly: boolean, offset: number): Promise<StewardLogRow[]> {
+  const off = Number.isInteger(offset) ? Math.min(HISTORY_MAX_OFFSET, Math.max(0, offset)) : 0;
+  const rows = (await db`
+    SELECT d.room_id, d.ts, d.rule, d.action, d.mode, d.result, d.params->>'state' AS pstate
+      FROM steward_decisions d
+     WHERE d.room_id = ANY(${ids}::text[])
+       AND d.ts >= ${fromIso}::timestamptz AND d.ts < ${toIso}::timestamptz
+       AND d.ts > ${asOf}::timestamptz - interval '720 hours' AND d.ts <= ${asOf}::timestamptz
+       AND (NOT ${actionsOnly}::boolean OR d.action NOT IN ('none', 'log_only'))
+     ORDER BY d.ts DESC, d.id DESC
+     LIMIT 201 OFFSET ${off}
+  `) as Array<Record<string, unknown>>;
+  return rows.map(logRow);
+}
