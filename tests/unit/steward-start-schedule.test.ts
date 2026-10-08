@@ -54,6 +54,16 @@ describe("startVerdict", () => {
     expect(failureKnownAtMs(at(0, { status: "acked", acked_at: iso(1) }))).toBe(T0 + 6 * MIN);
   });
 
+  it("F44: a command still PENDING is unresolved (no backoff) for 120 s, then failed; the backoff runs from queued + 120 s", () => {
+    const p = at(0, { status: "pending", acked_at: null });
+    expect(attemptFailed(p, T0 + 119_000)).toBe(false);
+    expect(v([p], 1)).toMatchObject({ kind: "pending" });
+    expect(attemptFailed(p, T0 + 121_000)).toBe(true);
+    expect(failureKnownAtMs(p)).toBe(T0 + 120_000);
+    expect(v([p], 3)).toMatchObject({ kind: "backoff", retry_after_s: 240 });
+    expect(v([p], 7.1)).toMatchObject({ kind: "go" });
+  });
+
   it("F21 timeline: attempt 1 queued 08:00 (failure known 08:00:20), attempt 2 allowed 08:05:20, queued 08:06 (known 08:06:30), attempt 3 allowed 08:21:30, then never", () => {
     const sec = (s: number) => new Date(T0 + s * 1000).toISOString();
     const a1 = { ...at(0), acked_at: sec(20) };
