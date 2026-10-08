@@ -1,16 +1,24 @@
 {
   "id": "consult_chair_affect",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "title": "Consult chair affect, uptake and teach-back",
   "unit": "consult",
   "inputs": [
+    "consult_span",
     "consult_text"
   ],
   "engine": "llm_zdr",
   "source": "consult-chair-affect@v0.2",
   "output": {
     "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scorable"
+    ],
     "properties": {
+      "scorable": {
+        "type": "boolean"
+      },
       "distress": {
         "enum": [
           "low",
@@ -39,33 +47,141 @@
           "high"
         ]
       },
-      "uptake": {
-        "type": "array",
-        "items": {
-          "enum": [
-            "accept",
-            "hedge",
-            "refuse",
-            "question",
-            "defer",
-            "cost",
-            "unheard"
-          ]
-        }
-      },
       "teach_back": {
         "enum": [
           "none",
           "partial",
           "full"
         ]
+      },
+      "recommendations": {
+        "type": "array",
+        "maxItems": 20,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "uptake",
+            "resolution_type"
+          ],
+          "properties": {
+            "uptake": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "items": {
+                "enum": [
+                  "accept",
+                  "hedge",
+                  "refuse",
+                  "question",
+                  "defer",
+                  "cost",
+                  "unheard"
+                ]
+              }
+            },
+            "resolution_type": {
+              "enum": [
+                "patient_agrees",
+                "patient_refuses",
+                "neither_agrees_nor_refuses",
+                "deferred",
+                "provider_action",
+                "information_only",
+                "not_resolved",
+                "empathy_only"
+              ]
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "t_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
+      },
+      "cases_lite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "engagement_process",
+          "information_present",
+          "doctor_effect_proxy",
+          "dominant_mix"
+        ],
+        "properties": {
+          "engagement_process": {
+            "enum": [
+              "present",
+              "absent",
+              "lecture_only"
+            ]
+          },
+          "information_present": {
+            "type": "boolean"
+          },
+          "doctor_effect_proxy": {
+            "enum": [
+              "fear_assuaged",
+              "load_eased",
+              "load_held",
+              "flat_no_load",
+              "process_friction",
+              "unknown"
+            ]
+          },
+          "dominant_mix": {
+            "enum": [
+              "presentation_heavy",
+              "resolution_present",
+              "engagement_present",
+              "mixed",
+              "process_friction",
+              "unscorable"
+            ]
+          }
+        }
+      },
+      "evidence": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "item",
+            "quote"
+          ],
+          "properties": {
+            "item": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "t_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
       }
     }
   },
   "bench": {
-    "location": "rubrics/consult_chair_affect/bench.json",
-    "metric": "weighted_kappa",
-    "threshold": 0.6
+    "location": "rubric/bench/consult_chair_affect/gold.jsonl",
+    "metric": "field_accuracy",
+    "threshold": 0.7
   },
   "status": "draft",
   "definition": {
@@ -158,6 +274,100 @@
         "low",
         "medium"
       ]
+    },
+    "engine_note": "engine llm_zdr since v1.0.0. The Jev typed questions above mirror the booleans and code-like items; Jev is not used until its own bench passes (draft status, S7-1).",
+    "bench_population": "Meet teleconsultations of one clinician plus a 28-consult cut, single rater; no room tape. CASES heuristic sidecars are not human gold."
+  },
+  "prompt": "prompt.json",
+  "questions": [
+    {
+      "id": "distress",
+      "text": "How distressed is the patient in the chair, by the distress anchors (disease severity is not distress)?",
+      "choices": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "confusion",
+      "text": "How far does the patient fail to follow the plan, by the confusion anchors?",
+      "choices": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "frustration",
+      "text": "How much frustration is there (process repair loops versus anger at the doctor or the process), by the frustration anchors?",
+      "choices": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "reassurance",
+      "text": "How reassured is the patient at the close compared with the opening, by the reassurance anchors and anti-defaults?",
+      "choices": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    {
+      "id": "teach_back",
+      "text": "Does the patient restate the plan in their own words: none, partial or full?",
+      "choices": [
+        "none",
+        "partial",
+        "full"
+      ]
+    },
+    {
+      "id": "engagement_process",
+      "text": "Is there an engagement process (the doctor invites and answers the patient's own concerns), only a lecture, or none?",
+      "choices": [
+        "present",
+        "absent",
+        "lecture_only"
+      ]
+    },
+    {
+      "id": "information_present",
+      "text": "Does the doctor give information or a plan in the consultation?",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "uptake",
+      "text": "For one audible recommendation, how does the patient respond?",
+      "choices": [
+        "accept",
+        "hedge",
+        "refuse",
+        "question",
+        "defer",
+        "cost",
+        "unheard"
+      ]
+    },
+    {
+      "id": "resolution_type",
+      "text": "For one recommendation, how does its thread resolve?",
+      "choices": [
+        "patient_agrees",
+        "patient_refuses",
+        "neither_agrees_nor_refuses",
+        "deferred",
+        "provider_action",
+        "information_only",
+        "not_resolved",
+        "empathy_only"
+      ]
     }
-  }
+  ]
 }

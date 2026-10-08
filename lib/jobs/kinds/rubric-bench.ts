@@ -13,6 +13,7 @@ import { evaluateUnit } from "@/lib/rubrics/engines";
 import { compareItem, parseBenchSet, scoreBench, type BenchSet } from "@/lib/rubrics/bench";
 import { finishRun, insertRun, newRunId, readEvidence, writeEvidence } from "@/lib/rubrics/store";
 import { rubricTiming } from "./rubric-run";
+import { labStore } from "@/lib/sarvam-lab";
 
 export const RUBRIC_BENCH_KIND = "rubric_bench";
 const Args = z.object({ rubric_id: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/) }).strict();
@@ -46,9 +47,25 @@ export const rubricBenchKind: JobKind = {
 export const REPO_BENCH_SETS: Record<string, unknown> = {};
 
 async function loadBenchSet(rubricId: string, version: string, location: string): Promise<BenchSet | null> {
+  // llm_zdr rubrics: gold prepared offline and uploaded as JSONL (rubric/bench/<rubric_id>/gold.jsonl); the gold never enters the repo
+  if (location.startsWith("rubric/bench/")) return loadGold(location);
   // the repo copy first (once a rubric is benched its set is registered above); otherwise the lab store copy for this exact version (a draft's labelled set lives there until it is committed)
   const repo = location.startsWith("rubrics/") ? parseBenchSet(REPO_BENCH_SETS[location]) : null;
   return repo ?? parseBenchSet(await readEvidence(`rubric/${rubricId}/${version}/bench.json`));
+}
+
+/** One JSON object per line: { unit_key, expected: { field: value } }. Bad lines make the whole set invalid (a silent skip would inflate the score). */
+async function loadGold(location: string): Promise<BenchSet | null> {
+  const store = labStore();
+  if (!store || !/^rubric\/bench\/[a-z][a-z0-9_]{1,63}\/gold\.jsonl$/.test(location)) return null;
+  const obj = await store.get(location);
+  if (!obj) return null;
+  const items: unknown[] = [];
+  for (const line of obj.body.split("\n")) {
+    if (!line.trim()) continue;
+    try { items.push(JSON.parse(line)); } catch { return null; }
+  }
+  return parseBenchSet({ unit: "consult", items });
 }
 
 const num = (v: unknown): number => (typeof v === "number" ? v : Number(v)) || 0;
@@ -78,8 +95,9 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   while (idx < end && Date.now() < deadline) {
     const item = set.items[idx]!;
     // a DB / R2 error throws (the step is retried); a unit the engine could not score, or that is held out or unresolved, comes back skipped / failed and fails every expected field
-    const out = await evaluateUnit(r, set.unit, item.unit_key);
-    const score: Record<string, unknown> | null = out.status === "ok" || out.status === "empty" ? (out.score ?? null) : null;
+    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true });
+    // a skipped unit with a score is a scored "nothing to score" (no surgery recommended, unscorable tape): it can be right or wrong against the gold
+    const score: Record<string, unknown> | null = out.status === "ok" || out.status === "empty" || (out.status === "skipped" && out.score) ? (out.score ?? null) : null;
     compared[idx] = compareItem(item, score);
     idx += 1;
   }
@@ -93,7 +111,7 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   const compared = (ctx.progress.compared as Array<ReturnType<typeof compareItem>>) ?? [];
   const report = scoreBench(r.bench.metric, r.bench.threshold, compared);
   if ("error" in report) return failWith(jobError("bench_metric_unsupported", r.bench.metric));
-  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, ...report, items_detail: compared });
+  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, population: (r.definition as { bench_population?: string } | undefined)?.bench_population ?? null, ...report, items_detail: compared });
   await finishRun({ run_id: runId, units_ok: compared.length - report.unscored, units_failed: report.unscored });
   return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, metric: report.metric, value: report.value, threshold: report.threshold, passed: report.passed, items: report.items, fields: report.fields, unscored: report.unscored, report_key: reportKey, status_at_run: r.status });
 }

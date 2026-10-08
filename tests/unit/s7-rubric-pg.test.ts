@@ -175,7 +175,6 @@ describe.runIf(HAVE)("the readers on fixtures", () => {
     statements.length = 0;
     expect(await R.readWindowEmotion("w3")).toMatchObject({ ok: false, reason: "blind_room_day" });
     expect(statements.some((q) => /room_span_emotion/.test(q.text))).toBe(false);
-    expect(await R.readConsultText("x")).toMatchObject({ ok: false, reason: "not_implemented" });
     expect(await R.readPulseRecord("x")).toMatchObject({ ok: false, reason: "not_implemented" });
   });
   it("consult_span: the open and close, the overlapping windows with absolute times; an open consult and a blind day are refused", async () => {
@@ -400,5 +399,51 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       ('talk_time','0.1.0','window','n_ok','r1','2026-10-08','rub_null','ok','{"evidence_key":"rubric/talk_time/0.1.0/n_ok.json"}','[]',true)`;
     const rows = await S.listResults({ rubric_id: "talk_time", limit: 50 });
     expect(rows.map((r) => r.unit_key)).toEqual(["n_ok"]);
+  });
+
+  it("S7-1 consult_text: the speaker lines of a consult from the turns of its windows (t from the open, doctor / other / unknown), blind refused before any text query; llm rubric_run + rubric_bench through the real runner with a fake model", async () => {
+    const R = await import("@/lib/rubrics/readers");
+    const LLM = await import("@/lib/rubrics/llm");
+    const t = await R.readConsultText("enc1@m1");
+    expect(t.ok && t.data.source).toBe("database");
+    expect(t.ok && t.data.lines.map((l) => [l.t_ms, l.speaker, l.text])).toEqual([[0, "doctor", "alpha"], [8000, "other", "bravo"], [25000, "doctor", "charlie"]]); // delta (40 s) is after the close; the unknown turn would read "unknown"
+    statements.length = 0;
+    expect(await R.readConsultText("enc3@m2")).toMatchObject({ ok: false, reason: "blind_room_day" });
+    expect(statements.some((q) => /cue|jev_window_text/.test(q.text))).toBe(false);
+    expect(await R.readConsultText("enc2@m1")).toMatchObject({ ok: false }); // open consult
+    expect(await R.readConsultText("nope")).toMatchObject({ ok: false, reason: "not_found" });
+
+    const good = { scorable: true, distress: "low", confusion: "low", frustration: "low", reassurance: "medium", teach_back: "none", recommendations: [{ uptake: ["accept"], resolution_type: "patient_agrees", quote: "charlie" }],
+      cases_lite: { engagement_process: "present", information_present: true, doctor_effect_proxy: "load_eased", dominant_mix: "mixed" }, evidence: [{ item: "distress", quote: "bravo" }] };
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify(good), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "consult_chair_affect", version: "1.0.0", ok: 1, skipped: 2, blind_room_days: 1 } });
+      expect(calls).toBe(1); // the blind consult and the unknown key never reached the model
+      const rows = (await pg.sql`SELECT unit_key, status, score, findings, lab FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
+      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]); // no row without a room and date; none for the blind day
+      expect(rows[0]).toMatchObject({ status: "ok", lab: true, score: { distress: "low", uptake_codes: ["accept"] } });
+      expect(JSON.stringify(rows)).not.toMatch(/alpha|bravo|charlie/); // no transcript text in the table
+      expect(JSON.parse(mem.get("rubric/consult_chair_affect/1.0.0/enc1@m1.json")!).quotes ?? JSON.parse(mem.get("rubric/consult_chair_affect/1.0.0/enc1@m1.json")!).evidence.quotes.length).toBeTruthy();
+      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
+
+      // bench: gold from the lab store (JSONL), Meet text from the lab store, no rubric_result rows
+      mem.set("rubric/bench/consult_chair_affect/gold.jsonl", [{ unit_key: "m001", expected: { distress: "low", uptake_codes: ["accept"] } }, { unit_key: "m002", expected: { distress: "high" } }].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      for (const k of ["m001", "m002"]) mem.set(`rubric/bench/consult_chair_affect/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 3, speaker: "doctor", text: "hello" }, { t_s: 9, speaker: "patient", text: "okay" }, { t_s: 20, speaker: "doctor", text: "charlie" }] }));
+      await pg.sql`DELETE FROM rubric_result`;
+      const b = await runJob("rubric_bench", { rubric_id: "consult_chair_affect" });
+      expect(b.job).toMatchObject({ status: "done", result: { metric: "field_accuracy", items: 2, fields: 3, passed: false } });
+      expect(b.job.result.value).toBeCloseTo(0.667, 2);
+      expect(JSON.parse(mem.get(b.job.result.report_key)!).population).toMatch(/Meet teleconsult.*no room tape/);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(0);
+      // a model outage mid-run THROWS: the step is retried, nothing is stored as a failed unit
+      LLM.setRubricChatForTests(async () => { throw new (await import("@/lib/openrouter")).OpenRouterError("openrouter_http_503"); });
+      const down = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1"] });
+      expect(down.job.status).not.toBe("done");
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result WHERE status = 'failed'`)[0] as { n: number }).n).toBe(0);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
   });
 });

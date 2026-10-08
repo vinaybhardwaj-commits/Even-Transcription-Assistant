@@ -28,7 +28,7 @@ describe("the rubric files and the registry", () => {
   it("every file passes the schema and the cross-field rules; nothing is production or benched yet; status changes only by commit", () => {
     for (const r of RUBRICS) {
       expect(T.RubricFile.safeParse(r).success, r.id).toBe(true);
-      expect(T.rubricProblems(r, r.id, () => false), r.id).toEqual([]);
+      expect(T.rubricProblems(r, r.id, (f: string) => f.endsWith("/prompt.json") && !!r.prompt), r.id).toEqual([]);
       expect(r.status, r.id).toBe("draft");
     }
   });
@@ -37,7 +37,10 @@ describe("the rubric files and the registry", () => {
     expect(unitsOf(getRubric("talk_time")!)).toEqual(["window", "consult"]);
     expect(unitsOf(getRubric("room_mic_quality")!)).toEqual(["room_hour"]);
     const defs = ["consult_chair_affect", "consult_surgical_pitch", "ehrc_surgical_outcome", "care_sentiment"].map((i) => getRubric(i)!);
-    for (const d of defs) { expect(d.engine).toBe("llm_zdr"); expect(d.prompt).toBeUndefined(); expect(d.source).toMatch(/@/); }
+    for (const d of defs) { expect(d.engine).toBe("llm_zdr"); expect(d.source).toMatch(/@/); }
+    // S7-1: the two consult rubrics have an engine and a prompt file (v1.0.0); the other two stay definition-only
+    for (const d of defs.slice(0, 2)) { expect(d.version).toBe("1.0.0"); expect(d.prompt).toBe("prompt.json"); }
+    for (const d of defs.slice(2)) expect(d.prompt).toBeUndefined();
     expect(getRubric("care_sentiment")!.inputs).toEqual(["external"]);
     expect(getRubric("consult_chair_affect")!.source).toBe("consult-chair-affect@v0.2");
     expect(getRubric("ehrc_surgical_outcome")!.source).toBe("ehrc-surgical-outcome@md");
@@ -47,10 +50,10 @@ describe("the rubric files and the registry", () => {
       const text = readFileSync(join(ROOT, f, "rubric.json"), "utf8");
       expect(T.identifierTokens(text), f).toEqual([]);
       expect(/[^\x00-\x7f]/.test(text), `${f} has a non-ASCII character (a quoted phrase in another script?)`).toBe(false);
-      expect(/"examples?"\s*:|"gold|"quotes?"\s*:|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), f).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
+      expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), f).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
     }
     expect(readdirSync(join(ROOT)).filter((n) => !statSync(join(ROOT, n)).isDirectory())).toEqual([]); // no stray files
-    for (const f of folders) expect(readdirSync(join(ROOT, f))).toEqual(["rubric.json"]); // no gold set, no bench with text, no linkage
+    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
   });
   it("a bad file fails: unknown key, bad semver, id not the folder, a draft-only gap on a benched rubric, a code rubric with a prompt, a consult rubric with no consult input", () => {
     const ok = JSON.parse(JSON.stringify(getRubric("talk_time")));
@@ -62,7 +65,7 @@ describe("the rubric files and the registry", () => {
     expect(T.rubricProblems({ ...ok, status: "benched" }, "talk_time", () => false).join()).toMatch(/bench file/);
     expect(T.rubricProblems({ ...ok, prompt: "p.md" }, "talk_time", () => true).join()).toMatch(/engine code takes no/);
     expect(T.rubricProblems({ ...ok, unit: "consult", units: ["consult"], inputs: ["turns"] }, "talk_time", () => true).join()).toMatch(/consult rubric needs/);
-    expect(T.rubricProblems({ ...ok, status: "production", inputs: ["consult_text", "turns"] }, "talk_time", () => true).join()).toMatch(/not implemented/);
+    expect(T.rubricProblems({ ...ok, status: "production", inputs: ["pulse_record", "turns"] }, "talk_time", () => true).join()).toMatch(/not implemented/);
     expect(T.rubricProblems({ ...ok, engine: "llm_zdr", status: "production" }, "talk_time", () => true).join()).toMatch(/needs a prompt/);
   });
   it("canRun: a non-production rubric needs lab:true; only engine code runs; the unit must be one the rubric supports", () => {

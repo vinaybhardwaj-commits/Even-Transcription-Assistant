@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "rubric_id": "consult_chair_affect",
+  "note": "The anchors, anti-defaults, codes and scales in the prompt are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-prompts.ts), so the prompt cannot drift from the rubric. This file holds the fixed framing.",
+  "rules": [
+    "Read the consultation transcript only. Score the PATIENT in the chair.",
+    "Every evidence item is a quote copied EXACTLY from the transcript (same words, same script); never paraphrase, never invent.",
+    "Answer with ONE JSON object and nothing else.",
+    "If the transcript has no usable consultation (no speech, only connection checks), answer {\"scorable\": false}.",
+    "Disease severity is not distress.",
+    "Use medium for reassurance only as the anchors allow: it is not the default bucket.",
+    "Each audible recommendation is one item in `recommendations` with one or two uptake codes and the resolution type of its thread.",
+    "cases_lite is a structural overlay, kept apart from the four affect axes: never let it change an axis."
+  ],
+  "user_header": "CONSULTATION TRANSCRIPT. Times are mm:ss from the start of the consultation. Speakers: doctor, other (the patient and anyone with them), unknown."
+}
