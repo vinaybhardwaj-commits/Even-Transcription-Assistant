@@ -6,11 +6,12 @@ it carries the contract. The reasoning belongs here.
 
 ## The surface: 41 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep; `scribe_help` and `scribe_usage`, S0, 8 Oct)
 
-`tools/list` publishes **29** tools. `tools/call` accepts those 27 **and every one of the 52 names**
+`tools/list` lists the registry's **41** primaries in the lab profile (**42** with `scribe_jobs`, S3) and **13** in the
+operator profile (see *Profiles*, below). `tools/call` accepts all of those **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
-(`0f27b8c`) — for as long as the door exists. A regroup, not a rename.
+(`0f27b8c`) — for as long as the door exists, from either profile. A regroup, not a rename.
 
-**What a group is.** Ten of the 27 are groups. A group picks ONE of the original tools by an
+**What a group is.** Ten of the listed primaries are groups (an eleventh, `scribe_jobs`, is lab-only and keeps the four job tools listed beside it). A group picks ONE of the original tools by an
 argument and runs **that tool's own handler** with the caller's context, so behaviour, refusals,
 scope checks and response shape are the original tool's — there is no second implementation.
 
@@ -302,3 +303,35 @@ Behaviour changes:
 4. **One log line per `tools/call`:** `{"mcp":"call","tool","variant","ms","ok","err_kind","actor","bytes_out"}`. Never arguments, the request path, the key or the user agent.
 5. **`structuredContent` is kept.** `lib/overnight-translate/door.ts` reads `result.structuredContent` from this door, so the duplicate payload stays until that consumer moves to `content`.
 6. **bench-timeline fix.** The brain visit read bound one parameter to a two-placeholder statement (`SQL_VISITS_FOR_DAY`: room_day_id, arm), so every bench timeline fell back to "picture unavailable".
+
+## Profiles (S3, 08 Oct 2026)
+
+`tools/list` has two profiles. They change **only** what `tools/list` returns and one sentence of `initialize.instructions`;
+**`tools/call` ignores the profile** — every accepted name (all 52 published names, every group, `scribe_help`, `scribe_usage`,
+`scribe_jobs`) answers from either one, with the same scope checks.
+
+**operator (default) — 13 tools, in this order:** `scribe_health`, `scribe_system`, `scribe_rooms`, `scribe_sessions`,
+`scribe_session_tape`, `scribe_room_levels`, `scribe_room_alerts`, `scribe_room_command`, `scribe_list_commands`,
+`scribe_jobs`, `scribe_audit_recent`, `scribe_help`, `scribe_usage`. Descriptions are short (plain tools <= 200 characters, groups
+<= 400) and carry exactly three facts: read or write, whether the tool can touch a live clinical room, and "Times UTC". The long text
+moved to a per-tool `help` field that `scribe_help` returns beside the short description. The operator `tools/list` is held under
+24,000 characters by a test. Input schemas are unchanged.
+
+**lab — 42 tools:** every tool the door listed before S3, with its full description, plus `scribe_jobs`.
+
+**Three ways to select lab** (first match wins; unknown values are ignored):
+
+1. header `X-Scribe-Profile: lab` (or `operator`);
+2. query `?profile=lab`;
+3. the `/lab` form of the URL: `/api/mcp/lab` (bearer) or `/api/mcp/<key>/lab` (path key).
+
+**`scribe_jobs`** `{ action: submit | status | list | cancel }` routes to `scribe_job_submit` / `scribe_job_status` /
+`scribe_job_list` / `scribe_job_cancel`. It registers with the `invoke` scope (the door's single check), then the handler requires
+the picked member's own scope: submit = invoke, cancel = write, status/list = read. A token without `invoke` therefore uses the old
+job tool names for status/list. An unknown action answers `{ ok:false, error:"unknown_action", allowed }` and runs nothing.
+The audit row's `variant` is the member that ran.
+
+**OPTIONS** is explicit on all four routes: 204, `Allow: POST, OPTIONS` (the path-key routes add their CORS headers, now
+including `x-scribe-profile`).
+
+`scripts/mcp-surface-report.ts` writes `fixtures/mcp/live-tools-list-<sha>.json` (operator) and `-<sha>-lab.json` (lab).
