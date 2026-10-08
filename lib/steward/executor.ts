@@ -5,6 +5,7 @@
  * LiveExecutor implements scribe_start ONLY (the Bench start_day path, re-checked at execution time); every other method throws and the loop records it as shadow.
  * Which executor runs for an action is decided by config.actionMode (kill switch, shadow.global, shadow.actions[action]).
  */
+import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { isNeverLiveRoom, istMidnightOf } from "./config";
 import type { Decision } from "./rules";
 import { START_IN_FLIGHT_S, START_NO_ACK_FAIL_S, startVerdict } from "./start-schedule";
@@ -52,7 +53,7 @@ export type StartDeps = {
 
 
 /** Loaded lazily: lib/bench-commands pulls the database client at import, and the shadow path (and its tests) must not need it. */
-async function realStartDeps(): Promise<StartDeps> {
+export async function realStartDeps(): Promise<StartDeps> {
   const b = await import("@/lib/bench-commands");
   const { sql } = await import("@/lib/db");
   return {
@@ -64,7 +65,7 @@ async function realStartDeps(): Promise<StartDeps> {
       const rows = (await sql`
         SELECT c.status, c.created_at, c.acked_at,
                EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.id = c.result ->> 'session_id') AS session_named,
-               EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
+               EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}) AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
                          AND s.started_at <= c.acked_at + (${b.START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')) AS session_started
           FROM bench_command c
          WHERE c.room_id = ${roomId} AND c.kind = 'start_day' AND c.source = 'steward' AND c.created_at >= ${dayStart}::timestamptz

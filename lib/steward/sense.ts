@@ -11,6 +11,7 @@
  *
  * `inputs` the rules read never carry names or PHI: ids, booleans, ISO times and counts only.
  */
+import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import type { WindowsDb } from "@/lib/encounter-windows/db";
 import { extHealth, isExtHealthExcluded, type ExtHealthRoom, type ExtHealthRow, type ExtStatus } from "@/lib/encounter-windows/ext-health";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
@@ -302,7 +303,7 @@ export async function senseAll(
     safe("bench_command", degraded, async () => (await sql`
       SELECT c.room_id, c.status, c.created_at, c.acked_at,
              EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.id = c.result ->> 'session_id') AS session_named,
-             EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
+             EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}) AND s.started_at >= c.created_at AND c.acked_at IS NOT NULL
                        AND s.started_at <= c.acked_at + (${START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')) AS session_started
         FROM bench_command c
        WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'start_day'

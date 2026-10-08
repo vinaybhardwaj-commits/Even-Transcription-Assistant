@@ -55,6 +55,7 @@ import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, 
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
+import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { SILENT_PEAK_MAX, SILENT_POLLS, SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
 import { REASON_LABEL, isGenuineRecovery, RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK, SILENT_ALERT_BODY_MARKERS, type DegradationReason } from "@/lib/room-watchdog";
 import {
@@ -97,6 +98,8 @@ export const ACTIVITY_WINDOW_MS = 30 * 60_000;
 export const CONSULT_DISPLAY_MS = 90 * 60_000;
 /** R7 */
 export const FAILED_START_WINDOW_MS = 60 * 60_000;
+/** Arch #21: how long a reap stays on the board with nothing opened after it. */
+export const REAPED_WINDOW_MS = 12 * 60 * 60_000;
 /** R8: the extension must have been silent this long (ext-health `missing` already implies it; the rule keeps it explicit). */
 export const EXT_MISSING_AFTER_MS = 10 * 60_000;
 /** R9: the machine must have been below the target version this long. */
@@ -216,6 +219,8 @@ export type RoomAttentionInputs = {
   outbox: OutboxFacts | null;
   /** R7: the room's newest failed start_day ack, with `error` the ack reason. */
   failed_start: { acked_at: string; error: string | null } | null;
+  /** Arch #21: the room's newest session_reaped alert (last 12 h), with the copy phase the reaper chose. Absent = none. */
+  reaped?: { created_at: string; body: string; phase: "clinic_hours" | "overnight" } | null;
   /** R8/R9: the machine's extension health row (lib/encounter-windows/ext-health.ts), or absent/null (no machine, excluded machine, or source degraded). */
   ext?: ExtHealthRow | null;
 };
@@ -572,6 +577,22 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       }
     }
 
+    // R18 — SESSION REAPED (Arch #21). The reaper ended a session the room never ended. Stays until a recording opens after it (a reaped
+    // room that was started again is recovered), and for no longer than REAPED_WINDOW_MS. Red in clinic hours; amber otherwise.
+    if (r.reaped) {
+      const at = Date.parse(r.reaped.created_at);
+      const lastStart = r.last_session_started_at ? Date.parse(r.last_session_started_at) : -Infinity;
+      if (Number.isFinite(at) && now >= at && now - at <= REAPED_WINDOW_MS && !r.open_session && !(lastStart > at)) {
+        mk(
+          "session_reaped",
+          r.reaped.phase === "clinic_hours" ? "red" : "amber",
+          at,
+          clean(r.reaped.body),
+          r.reaped.phase === "overnight" ? `If ${name} should still be recording, go and press start.` : `Go to ${name}, check the microphone and the Mac, and press start.`,
+        );
+      }
+    }
+
     // R8 / R9 / R10 — PRESENCE EXTENSION. State from lib/encounter-windows/ext-health.ts; an excluded machine (Home Office, ORB3, ORB2) never has a row.
     // R8: the extension has been silent for >= 10 min while the Mac is up, Chrome is running and somebody HAS used the console since it went quiet (else it is `quiet`).
     // R9: collected here, raised ONCE for the fleet after the loop. `quiet` raises nothing.
@@ -739,7 +760,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     });
   const mj = JSON.stringify(machines);
 
-  const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, failed, extRows] = await Promise.all([
+  const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, reapedRows, failed, extRows] = await Promise.all([
     // R1 — the newest lock-determining ext event per machine (same predicate as classifyExtEvent).
     safe("presence_ext", degraded, async () => (await sql`
       SELECT m.n AS machine, e.event, e.ts, e.focus
@@ -798,6 +819,8 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
         FROM bench_session s
        WHERE s.room_id = ANY(${ids}::text[])
          AND (s.started_at > now() - interval '2 days' OR s.status IN ('recording', 'paused'))
+         -- Arch #21 (re-check R3): a session that only holds re-homed late chunks is never a START — it must not clear the reap alert or stale_start.
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
     `) as Array<{ room_id: string; id: string; status: string; started_at: unknown; last_chunk_at: unknown }>, []),
     // R1/R2 — the last 120 s of levels for the fleet: room_id = ANY(ids) leads the (room_id, ist_date, sampled_at) index, ist_date and sampled_at bound it.
     safe("bench_level_sample", degraded, async () => (await sql`
@@ -880,6 +903,14 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
         FROM a
        WHERE a.room_id = ANY(${ids}::text[])
     `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown; live_samples_since_alert: unknown; total_samples_recent: unknown; digital_silence_since_alert: unknown }>, []),
+    // Arch #21 — the newest session_reaped alert per room (12 h). Counts and times only in the body; no patient data.
+    safe("room_alert_reaped", degraded, async () => (await sql`
+      SELECT DISTINCT ON (rid) rid AS room_id, o.created_at, o.body, o.status_to AS phase
+        FROM room_alert_outbox o
+        CROSS JOIN LATERAL unnest(o.room_ids) AS rid
+       WHERE o.kind = 'session_reaped' AND o.created_at > now() - interval '12 hours' AND rid = ANY(${ids}::text[])
+       ORDER BY rid, o.created_at DESC, o.id DESC
+    `) as Array<{ room_id: string; created_at: unknown; body: string; phase: string | null }>, []),
     safe("bench_command", degraded, async () => (await sql`
       SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at,
              COALESCE(c.error, c.result->>'error', 'start deferred (waiting for the input device) and no recording has begun') AS error
@@ -967,6 +998,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
   const lastSampleBy = new Map(lastSamples.map((r) => [r.room_id, toIso(r.last_sample_at)]));
   const outboxBy = new Map(outbox.map((r) => [r.room_id, r]));
   const failedBy = new Map(failed.map((r) => [r.room_id, r]));
+  const reapedBy = new Map(reapedRows.map((r) => [r.room_id, r]));
 
   // R1/R2's look-back: only for rooms whose last 120 s is ONE identical value, find where that run began (2-day look-back). Rare, so per room;
   // both reads are room_id = $1 with an ist_date bound.
@@ -1034,6 +1066,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
             }
           : null,
       failed_start: fs && fsAt ? { acked_at: fsAt, error: fs.error } : null,
+      reaped: reapedFor(reapedBy.get(r.room_id)),
       ext: extHealthBy.get(r.room_id) ?? null,
     };
   });
@@ -1051,4 +1084,13 @@ export async function getFleetAttention(nowMs: number = Date.now()): Promise<Fle
     ...(inputs.kiosk_health && inputs.kiosk_health.size > 0 ? { kiosk_health: summarizeKioskHealth(inputs.kiosk_health, nowMs) } : {}),
     ...(degraded.length ? { degraded: [...new Set(degraded)] } : {}),
   };
+}
+
+/** Arch #21 — one loader row to the attention input. An unknown phase reads as clinic_hours: say the louder thing. */
+function reapedFor(row: { created_at: unknown; body: string; phase: string | null } | undefined): RoomAttentionInputs["reaped"] {
+  if (!row) return null;
+  const at = toIso(row.created_at);
+  if (!at) return null;
+  const phase = row.phase === "overnight" ? row.phase : "clinic_hours";
+  return { created_at: at, body: row.body ?? "", phase };
 }

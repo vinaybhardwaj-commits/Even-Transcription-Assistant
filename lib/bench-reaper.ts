@@ -34,7 +34,8 @@
  * write is never touched; `ended_at` is the honest last-audio time computed by the core, NOT now().
  */
 import { sql } from "./db";
-import { decideBenchReaps, REAP_CAP, type BenchReapCandidate, type BenchReapDecision } from "./bench-reaper-core";
+import { newEventId } from "./bench";
+import { decideBenchReaps, reapAlertCopy, REAP_CAP, SESSION_REAPED, type BenchReapCandidate, type BenchReapDecision } from "./bench-reaper-core";
 
 /** A tagged-template SQL runner with lib/db's `sql` shape — injectable for tests. */
 export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>;
@@ -56,13 +57,14 @@ export async function reapBenchSessions(
   let rows: BenchReapCandidate[] = [];
   try {
     rows = (await run`
-      SELECT s.id, s.status, s.started_at,
+      SELECT s.id, s.status, s.started_at, s.room_id, r.name AS room_name,
              MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_primary_at,
              MAX(c.created_at) FILTER (WHERE c.source = 'backup')  AS last_backup_at
         FROM bench_session s
+        JOIN room r ON r.id = s.room_id
         LEFT JOIN bench_chunk c ON c.session_id = s.id
        WHERE s.status <> 'ended'
-       GROUP BY s.id, s.status, s.started_at
+       GROUP BY s.id, s.status, s.started_at, s.room_id, r.name
        ORDER BY s.started_at ASC
        LIMIT 200
     `) as BenchReapCandidate[];
@@ -74,6 +76,7 @@ export async function reapBenchSessions(
   const decisions = decideBenchReaps(rows ?? [], now, cap);
   if (dryRun) return { dry_run: true, candidates: rows.length, reaped: decisions.map((d) => ({ ...d, audit: "written" as const })) };
 
+  const byId = new Map(rows.map((r) => [r.id, r]));
   const reaped: BenchReapResult["reaped"] = [];
   for (const d of decisions) {
     try {
@@ -94,6 +97,7 @@ export async function reapBenchSessions(
                   ${JSON.stringify({ rule: d.rule, note: d.note, ended_at: d.ended_at })}::jsonb)
         `;
       } catch { audit = "failed"; }   // best-effort audit, like the encounter reaper
+      await raiseReapAlert(run, d, byId.get(d.id));
       reaped.push({ ...d, audit });
     } catch (e) {
       console.error("[bench-reaper] update failed for", d.id, (e as Error)?.message ?? e);
@@ -101,4 +105,35 @@ export async function reapBenchSessions(
     }
   }
   return { dry_run: false, candidates: rows.length, reaped };
+}
+
+/**
+ * Arch #21 — a reap is a capture-failure event. One outbox row (the alert the relay posts and
+ * scribe_room_alerts reads; migration 0138 admits the kind) and one bench_event row (the timeline,
+ * and what the chunk route / poll reply recognise). Both best-effort and independent: the session
+ * is already honestly ended, and a failed alert write must not undo it or stop the sweep. Failure
+ * is logged loudly — a reap that could not alert is exactly the silent cleanup this closes.
+ */
+async function raiseReapAlert(run: SqlTag, d: BenchReapDecision, cand: BenchReapCandidate | undefined): Promise<void> {
+  const roomId = cand?.room_id;
+  if (!roomId) return;
+  const roomName = cand?.room_name || roomId;
+  const copy = reapAlertCopy({ roomName, sessionId: d.id, rule: d.rule, lastAudioIso: d.ended_at });
+  try {
+    await run`
+      INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body)
+      VALUES (${SESSION_REAPED}, ARRAY[${roomId}]::text[], ${roomName}, NULL, ${copy.phase}, ${copy.subject}, ${copy.body})
+    `;
+  } catch (e) {
+    console.error("[bench-reaper] ALERT NOT QUEUED for reaped", d.id, (e as Error)?.message ?? e);
+  }
+  try {
+    await run`
+      INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+      VALUES (${newEventId()}, ${d.id}, ${SESSION_REAPED}, ${d.ended_at}::timestamptz, 'none',
+              ${JSON.stringify({ source: "server", rule: d.rule, phase: copy.phase, last_chunk_at: d.ended_at, room_id: roomId })}::jsonb)
+    `;
+  } catch (e) {
+    console.error("[bench-reaper] reap event not written for", d.id, (e as Error)?.message ?? e);
+  }
 }

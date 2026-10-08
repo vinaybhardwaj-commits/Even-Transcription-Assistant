@@ -24,6 +24,9 @@
  * never reloaded, and held the session id in its own memory — carried on writing chunks until
  * 00:58:46. All 108 are present and verified.
  *
+ * (ARCH #21, 8 Oct 2026: the one exception is a session the REAPER ended — see "A REAPED SESSION TAKES
+ * NO NEW CHUNK ROWS" below. Its late chunk is not registered, its audio stays in R2, and the kiosk is told.)
+ *
  * THE CHUNK IS ALWAYS ACCEPTED. Never refuse audio because a row says the session is over: those
  * 108 chunks are exactly why. Refusing would have converted a bookkeeping fault into six hours of
  * lost recording, which is a far worse failure than the one being fixed.
@@ -37,19 +40,93 @@
  * Neither addition touches the request path. The status is read off the session row this route
  * already loads, and the event write goes in the same after() hook as the window evaluation.
  */
+import { createHash } from "node:crypto";
 import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { findBenchSession, newChunkId, newEventId, ymdUtc } from "@/lib/bench";
+import { findBenchSession, newChunkId, newEventId, newSessionId, ymdUtc } from "@/lib/bench";
 import { headObject, benchChunkKey } from "@/lib/r2";
 import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
 import { parseMicLevelPair } from "@/lib/bench-levels";
+import { isReaperNote, rehomeNote, SESSION_REAPED } from "@/lib/bench-reaper-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * The disagreement signal under BOTH names. The server has always sent `disagreement`; the browser
+ * kiosk reads that. The native Room Recorder decodes `ended_disagrees` (BenchClient.swift
+ * ChunkRegistrationResponse and its contract tests) — a key this route never sent, so the native
+ * app could not learn its session was ended through the chunk reply (found 8 Oct, Arch #21).
+ */
+function disagreementFields(): Record<string, string> {
+  return { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES, ended_disagrees: ENDED_DISAGREES };
+}
+
+/**
+ * ROLLOUT FLAG (Arch #21 round 2). The new replies (`ended_disagrees`, `rehomed_after_reap`, `refused_session_reaped`) and the re-home itself are for kiosks that run the new app:
+ * an OLD app stops a healthy recording on any `ended_disagrees` and retries a non-"verified" upload for ever. So they go out only when BENCH_CHUNK_REAPED_REPLIES=1; unset / anything
+ * else is OFF and the route answers exactly as main does (append to the ended session, `disagreement` only, upload_state "verified"). Read per request. Flip it after every kiosk runs the new app.
+ */
+const reapedRepliesOn = (): boolean => process.env.BENCH_CHUNK_REAPED_REPLIES === "1";
+
+/** Natural key of a re-home / refusal event: the same piece retried (same target, source, idx) is the same event, so a retry loop writes ONE row. */
+const eventIdFor = (kind: string, sessionId: string, source: string, idx: number): string =>
+  `be_${kind}_${createHash("sha1").update(`${sessionId}|${source}|${idx}`).digest("hex").slice(0, 24)}`;
+
+/** Re-homed chunks live in a high idx band so they can never collide with another session's own 0.. numbering. */
+const REHOME_IDX_BASE = 90_000;
+
+/**
+ * ARCH #21 (F3, reworked after the re-check) — where a late chunk of a REAPED session goes: ONE dedicated session per reaped session, never an
+ * open one (re-check R1: two reaped sessions' idx collided inside a shared open session and a piece vanished; R2: audio landed out of time order).
+ *
+ *  - the home is an ENDED session of the room whose notes are exactly "re-homed after reap of <old id>" (so no phantom Recording chip), created on
+ *    the first late chunk and reused by every later one;
+ *  - CREATE-OR-GET IS SERIALISED PER REAPED SESSION (R4): one transaction takes pg_advisory_xact_lock(hashtext('rehome:<old id>')), inserts the
+ *    home only if none exists (the INSERT is its own statement, so it sees the winner's commit), then widens its bounds and returns its id. No
+ *    unique index, no migration. Neon's HTTP driver has no interactive transactions; sql.transaction([...]) is the non-interactive form;
+ *  - EVERY re-homed chunk widens the home's started_at / ended_at with LEAST / GREATEST (R5), so the bounds always cover the pieces in it;
+ *  - the idx moves into the 90 000+ band; a retry of the same piece hits the same (session, source, idx) and is idempotent. The event records the
+ *    R2 key AND the source (R1's recovery gap).
+ * Returns null when it cannot (idx outside the band, or any write fails) and the caller falls back to refusing.
+ */
+async function rehomeAfterReap(a: { roomId: string; oldSessionId: string; idx: number; source: string; r2Key: string; startedAt: Date; endedAt: Date }): Promise<{ sessionId: string; idx: number } | null> {
+  if (a.idx < 0 || a.idx >= 9_999) return null;
+  const note = rehomeNote(a.oldSessionId);
+  try {
+    const results = (await sql.transaction([
+      sql`SELECT pg_advisory_xact_lock(hashtext(${"rehome:" + a.oldSessionId}))`,
+      sql`
+        INSERT INTO bench_session (id, room_id, started_at, ended_at, status, notes)
+        SELECT ${newSessionId()}, ${a.roomId}, ${a.startedAt.toISOString()}::timestamptz, ${a.endedAt.toISOString()}::timestamptz, 'ended', ${note}
+         WHERE NOT EXISTS (SELECT 1 FROM bench_session WHERE room_id = ${a.roomId} AND notes = ${note})
+      `,
+      sql`
+        UPDATE bench_session
+           SET started_at = LEAST(started_at, ${a.startedAt.toISOString()}::timestamptz),
+               ended_at   = GREATEST(ended_at, ${a.endedAt.toISOString()}::timestamptz)
+         WHERE room_id = ${a.roomId} AND notes = ${note}
+        RETURNING id
+      `,
+    ])) as unknown as Array<Array<{ id: string }>>;
+    const target = results?.[2]?.[0]?.id ?? null;
+    if (!target) return null;
+    await sql`
+      INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+      VALUES (${eventIdFor("rehomed", target, a.source, REHOME_IDX_BASE + a.idx)}, ${target}, 'chunk_rehomed', ${a.startedAt.toISOString()}, 'none',
+              ${JSON.stringify({ source: "server", reaped_session_id: a.oldSessionId, original_idx: a.idx, rehomed_idx: REHOME_IDX_BASE + a.idx, chunk_source: a.source, r2_key: a.r2Key, chunk_started_at: a.startedAt.toISOString() })}::jsonb)
+      ON CONFLICT (id) DO NOTHING
+    `;
+    return { sessionId: target, idx: REHOME_IDX_BASE + a.idx };
+  } catch (e) {
+    console.warn(`[bench-chunks] re-home after reap failed for ${a.oldSessionId}: ${String(e).slice(0, 150)}`);
+    return null;
+  }
+}
 
 export async function POST(req: NextRequest) {
   const claims = await readRoomClaims();
@@ -140,22 +217,60 @@ export async function POST(req: NextRequest) {
     chunkStartedAtMs: startedAt.getTime(),
   });
 
-  // Server-side authoritative verify (D8): the object must exist in R2 with
-  // the exact claimed size before a 'verified' row is written.
-  const key = benchChunkKey(
-    session.room_slug,
-    ymdUtc(new Date(session.started_at)),
-    sessionId,
-    idx,
-    source,
-  );
-  const head = await headObject(key);
+  // ── ARCH #21 — A REAPED SESSION TAKES NO NEW CHUNK ROWS; REAL AUDIO IS RE-HOMED ─────────
+  //
+  // The header above says a chunk is always accepted, and for an OPERATOR-ended session that
+  // stands. A session the REAPER ended is different: the system declared it dead, raised an
+  // alert, and the room is expected to start a new one. bs_wrnpdr4e (reaped 12:26 IST) took a
+  // chunk at 15:41 from a zombie kiosk, leaving a 3 h gap recorded inside an ended session.
+  //
+  // So the chunk is NEVER appended to the ended session. But it is real audio (it can also be a
+  // backlog from a Mac that kept capturing through a network outage and was reaped meanwhile), so
+  // it is not left unregistered either: it is RE-HOMED, explicitly, into a session of the same
+  // room (see rehomeAfterReap) and flagged with a `chunk_rehomed` event + a note on the target.
+  // The reply is a 200 carrying BOTH disagreement spellings, so the browser kiosk and the native
+  // app each learn their old session was reaped. Only if re-homing is impossible does the chunk
+  // fall back to the earlier behaviour: no row, a `chunk_refused_reaped` event naming the R2 key.
+  const originalKey = benchChunkKey(session.room_slug, ymdUtc(new Date(session.started_at)), sessionId, idx, source);
+  // Server-side authoritative verify (D8) — BEFORE any re-home, so a bogus claim cannot create a session.
+  const head = await headObject(originalKey);
   if (head.size === null) {
     return respondError("UPSTREAM_UNAVAILABLE", "r2_object_not_found_or_unreachable");
   }
   if (head.size !== sizeBytes) {
     return respondError("VALIDATION_FAILED", `r2_size_mismatch_${head.size}_${sizeBytes}`);
   }
+  let targetSessionId = sessionId;
+  let targetIdx = idx;
+  let rehomed = false;
+  if (reapedRepliesOn() && endedDisagrees && isReaperNote(session.notes)) {
+    const home = await rehomeAfterReap({ roomId: session.room_id, oldSessionId: sessionId, idx, source, r2Key: originalKey, startedAt, endedAt });
+    if (!home) {
+      try {
+        await sql`
+          INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+          VALUES (${eventIdFor("refused", sessionId, source, idx)}, ${sessionId}, 'chunk_refused_reaped', ${startedAt.toISOString()}, 'none',
+                  ${JSON.stringify({ source: "server", idx, chunk_source: source, size_bytes: sizeBytes, r2_key: originalKey, chunk_started_at: startedAt.toISOString() })}::jsonb)
+          ON CONFLICT (id) DO NOTHING
+        `;
+      } catch (e) {
+        console.warn(`[bench-chunks] reaped-session refusal event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
+      }
+      console.warn(`[bench-chunks] ${SESSION_REAPED} session=${sessionId} idx=${idx} source=${source} — could not re-home; chunk NOT registered; audio left in R2; kiosk told`);
+      return respondOk({
+        ok: true,
+        key: originalKey,
+        upload_state: "refused_session_reaped",
+        session_reaped: true,
+        ...disagreementFields(),
+      });
+    }
+    targetSessionId = home.sessionId;
+    targetIdx = home.idx;
+    rehomed = true;
+  }
+
+  const key = originalKey;   // the object stays where the kiosk PUT it, whichever session the row belongs to
 
   const id = newChunkId();
   try {
@@ -164,7 +279,7 @@ export async function POST(req: NextRequest) {
         id, session_id, idx, source, r2_key, content_type, started_at, ended_at,
         duration_ms, size_bytes, upload_state, gap_before_ms, peak_level, avg_level
       ) VALUES (
-        ${id}, ${sessionId}, ${idx}, ${source}, ${key}, ${contentType},
+        ${id}, ${targetSessionId}, ${targetIdx}, ${source}, ${key}, ${contentType},
         ${startedAt.toISOString()}, ${endedAt.toISOString()},
         ${durationMs}, ${sizeBytes}, 'verified', ${gapBeforeMs}, ${peakLevel}, ${avgLevel}
       )
@@ -195,7 +310,7 @@ export async function POST(req: NextRequest) {
     // five minutes for hours; 108 identical rows is a log, not a timeline. First-detection is
     // decided by Postgres — ON CONFLICT DO NOTHING on 0064's partial unique index — rather than
     // by a read-then-write that two concurrent after() hooks could both pass.
-    if (endedDisagrees) {
+    if (endedDisagrees && !rehomed) {
       try {
         await sql`
           INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
@@ -237,7 +352,7 @@ export async function POST(req: NextRequest) {
       /* ensureRoomDayOpen never throws; this is belt-and-braces so a day miss never costs the window write */
     }
     try {
-      await evaluateAndWriteWindows(sessionId);
+      await evaluateAndWriteWindows(targetSessionId);
     } catch {
       /* non-critical: the next chunk re-evaluates the whole session */
     }
@@ -248,7 +363,8 @@ export async function POST(req: NextRequest) {
   return respondOk({
     ok: true,
     key,
-    upload_state: "verified",
-    ...(endedDisagrees ? { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES } : {}),
+    upload_state: rehomed ? "rehomed_after_reap" : "verified",
+    ...(rehomed ? { session_reaped: true, rehomed_session_id: targetSessionId } : {}),
+    ...(endedDisagrees ? (reapedRepliesOn() ? disagreementFields() : { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES }) : {}),
   });
 }

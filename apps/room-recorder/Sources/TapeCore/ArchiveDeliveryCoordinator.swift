@@ -619,7 +619,7 @@ public struct ArchiveDeliveryCoordinator: Sendable {
       )
       throw ArchiveDeliveryCoordinatorError.wireFailure(.registration)
     }
-    guard registration.ok, !registration.key.isEmpty, registration.uploadState == "verified" else {
+    guard registration.ok, !registration.key.isEmpty, Self.isTerminalRegistration(registration.uploadState) else {
       try observeFailure(
         .registration,
         reservation: reservation,
@@ -629,6 +629,17 @@ public struct ArchiveDeliveryCoordinator: Sendable {
       throw ArchiveDeliveryCoordinatorError.registrationNotVerified
     }
     return registration
+  }
+
+  /// Arch #21. The upload states that END a piece's delivery. `verified` is the normal one. The two
+  /// reaped-session states are terminal too: the server answers them when the session this piece
+  /// belongs to was ended by its reaper, and the bytes are already safe in R2 — `rehomed_after_reap`
+  /// (registered into another session of the room) or `refused_session_reaped` (no row, an event
+  /// naming the R2 key). Retrying either would loop for ever against a session that will never take
+  /// the piece, and would block the lane from ever reaching needs-start.
+  public static func isTerminalRegistration(_ uploadState: String) -> Bool {
+    uploadState == "verified" || uploadState == "rehomed_after_reap"
+      || uploadState == "refused_session_reaped"
   }
 
   private func gapBeforeMS(

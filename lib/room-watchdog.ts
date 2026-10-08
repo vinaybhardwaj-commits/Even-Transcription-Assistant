@@ -41,7 +41,7 @@
  */
 import { sql } from "@/lib/db";
 import { DISK_LOW_BYTES, SILENT_PEAK_MAX, SILENT_POLLS, SILENT_ZERO_RATIO, wrongInputCandidate } from "@/lib/bench-bus-constants";
-import { isBenchStalled } from "@/lib/bench-reaper-core";
+import { isBenchStalled, REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { START_FAILED_MAX_MS } from "@/lib/bench-bus-constants";
 import { listBenchSessions } from "@/lib/bench";
 import { parseFlag } from "@/lib/flags";
@@ -765,6 +765,23 @@ function wrongInputCandidateName(selectedName: string | null | undefined, raw: u
   return wrongInputCandidate(devices as Parameters<typeof wrongInputCandidate>[0], selectedName)?.name ?? null;
 }
 
+/** Rooms whose NEWEST real session died at start, recently (exported for its real-postgres test). */
+export async function readDeadStarts(): Promise<string[]> {
+  const dead = (await sql`
+      SELECT s.room_id
+        FROM bench_session s
+       WHERE s.status = 'ended'
+         AND s.ended_at > now() - (${START_DEATH_WINDOW_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at < now() - (${START_RETRY_GRACE_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at - s.started_at < (${START_FAILED_MAX_MS / 1000}::int * INTERVAL '1 second')
+         AND NOT EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = s.id)
+         AND NOT EXISTS (SELECT 1 FROM bench_session n WHERE n.room_id = s.room_id AND n.started_at > s.started_at
+                         AND (n.notes IS NULL OR n.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}))  -- Arch #21: a re-home container is never a newer session
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
+    `) as Array<{ room_id: string }>;
+  return dead.map((d) => d.room_id);
+}
+
 export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogRunResult> {
   let rows: FleetRow[];
   try {
@@ -823,17 +840,7 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
   // The 0-chunk test is on the session itself; "newest" so a successful retry (a newer session) clears it.
   const startDied = new Set<string>();
   try {
-    const dead = (await sql`
-      SELECT s.room_id
-        FROM bench_session s
-       WHERE s.status = 'ended'
-         AND s.ended_at > now() - (${START_DEATH_WINDOW_MS / 1000}::int * INTERVAL '1 second')
-         AND s.ended_at < now() - (${START_RETRY_GRACE_MS / 1000}::int * INTERVAL '1 second')
-         AND s.ended_at - s.started_at < (${START_FAILED_MAX_MS / 1000}::int * INTERVAL '1 second')
-         AND NOT EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = s.id)
-         AND NOT EXISTS (SELECT 1 FROM bench_session n WHERE n.room_id = s.room_id AND n.started_at > s.started_at)
-    `) as Array<{ room_id: string }>;
-    for (const d of dead) startDied.add(d.room_id);
+    for (const room_id of await readDeadStarts()) startDied.add(room_id);
   } catch (e) {
     console.error("[room-watchdog] could not read dead starts — start_died is unavailable this run:", e instanceof Error ? e.message : String(e));
   }

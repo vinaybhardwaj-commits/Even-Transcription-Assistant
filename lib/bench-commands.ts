@@ -18,6 +18,7 @@
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { z } from "zod";
+import { isReaperNote, REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { finiteNumberOrNull, type MicLevels } from "@/lib/bench-levels";
 import { applyInstallPoll, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type InstallPollFields } from "@/lib/room-install";
 
@@ -407,6 +408,8 @@ export type PollResult =
       commands: PendingCommand[];
       /** B2-D5. Native polls only — from applyInstallPoll's own RETURNING, no extra read. */
       assigned_channel?: "stable" | "test" | null;
+      /** Arch #21. Native polls only: the session this poll reported as recording was ended by the reaper. */
+      session_reaped?: { session_id: string; ended_at: string | null };
     };
 
 /**
@@ -608,9 +611,26 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
        ORDER BY created_at ASC
        LIMIT 20
     `) as Array<{ id: string; kind: CommandKind; args: unknown; created_at: string | Date }>;
+    // Arch #21 — tell a kiosk that reports a REAPED session as recording. Native polls only (the
+    // browser kiosk's response stays exactly as it was; it learns from the chunk reply). Fail-safe:
+    // a fault here costs the hint, never the poll — the chunk reply still carries the signal.
+    let sessionReaped: { session_id: string; ended_at: string | null } | null = null;
+    if (input.install?.install_id && input.recordingSessionId) {
+      try {
+        const r = (await sql`
+          SELECT id, ended_at, notes FROM bench_session
+           WHERE id = ${input.recordingSessionId} AND room_id = ${input.roomId} AND status = 'ended'
+           LIMIT 1
+        `) as Array<{ id: string; ended_at: string | Date | null; notes: string | null }>;
+        if (r[0] && isReaperNote(r[0].notes)) {
+          sessionReaped = { session_id: r[0].id, ended_at: r[0].ended_at ? new Date(r[0].ended_at).toISOString() : null };
+        }
+      } catch { /* hint only */ }
+    }
     return {
       superseded: false,
       now: new Date().toISOString(),
+      ...(sessionReaped ? { session_reaped: sessionReaped } : {}),
       commands: rows.map((r) => ({ id: r.id, kind: r.kind, args: r.args ?? null, created_at: new Date(r.created_at).toISOString() })),
       // The browser kiosk never gets the key: its response is exactly what it was before B2.
       ...(input.install?.install_id ? { assigned_channel: assignedChannel } : {}),
@@ -988,7 +1008,7 @@ export async function getRecentStartAttempts(roomId: string, now: Date = new Dat
              EXISTS (
                SELECT 1 FROM bench_session s
                 WHERE s.room_id = c.room_id
-                  AND s.started_at >= c.created_at
+                  AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}) AND s.started_at >= c.created_at
                   AND c.acked_at IS NOT NULL
                   AND s.started_at <= c.acked_at + (${START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')
              ) AS session_started

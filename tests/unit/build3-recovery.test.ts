@@ -62,7 +62,7 @@ describe("D39 — a recording with no day record is a bug, so the day opens itse
     const src = code("app", "api", "bench", "chunks", "route.ts");
     expect(src).toMatch(/ensureRoomDayOpen\(session\.room_id, istDateOf\(startedAt\.getTime\(\)\)\)/);
     // Before evaluateAndWriteWindows, so the day exists when the windows look it up and bind to it.
-    expect(src.indexOf("ensureRoomDayOpen")).toBeLessThan(src.lastIndexOf("evaluateAndWriteWindows(sessionId)"));
+    expect(src.indexOf("ensureRoomDayOpen")).toBeLessThan(src.lastIndexOf("evaluateAndWriteWindows(targetSessionId)"));
   });
 
   it("the desk start also opens the day — on a successful start_day ack", () => {
