@@ -40,7 +40,7 @@
  * invisibly.
  */
 import { sql } from "@/lib/db";
-import { DISK_LOW_BYTES } from "@/lib/bench-bus-constants";
+import { DISK_LOW_BYTES, SILENT_PEAK_MAX } from "@/lib/bench-bus-constants";
 import { isBenchStalled } from "@/lib/bench-reaper-core";
 import { listBenchSessions } from "@/lib/bench";
 import { parseFlag } from "@/lib/flags";
@@ -142,17 +142,33 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
  */
 export const GENUINE_RECOVERY_MIN_DISTINCT = 2;
 export const RECOVERY_LEVEL_WINDOW_S = 120;
+/**
+ * RECOVERY DWELL (Arch #14 acceptance add, 6-7 Oct 2026). Alerts 545-575 flipped OPD5 degraded <-> "recovering" on peaks of 0.0001-0.004 while
+ * `zero_ratio` sat near 1: two distinct values satisfy GENUINE_RECOVERY_MIN_DISTINCT, and a dead tape produces them. When the evidence carries
+ * the live-sample counts, recovery also needs the dwell window to be mostly LIVE: a sample is live when `zero_ratio` is well under the
+ * digital-silence line (below RECOVERY_LIVE_MAX_ZERO_RATIO) AND its peak is at or above the alive floor (SILENT_PEAK_MAX). At least
+ * RECOVERY_MIN_LIVE_SAMPLES live samples, and at least RECOVERY_MIN_LIVE_SHARE of the window's samples. One tiny tick cannot clear degraded.
+ */
+export const RECOVERY_LIVE_MAX_ZERO_RATIO = 0.5;
+export const RECOVERY_MIN_LIVE_SAMPLES = 20;
+export const RECOVERY_MIN_LIVE_SHARE = 0.5;
 
 export type RecoveryEvidence = {
   /** a bench_chunk row (any session of the room) created after the alert began */
   chunk_after_alert: boolean;
   /** distinct (peak, zero_ratio) values among the room's level samples in the last RECOVERY_LEVEL_WINDOW_S */
   distinct_levels: number;
+  /** level samples in the same window that are live (see RECOVERY DWELL). Absent: the caller does not read the dwell and only the other two tests apply. */
+  live_samples?: number;
+  /** all level samples in the same window */
+  total_samples?: number;
 };
 
 /** PURE. `null` (evidence could not be read) is NOT genuine: an alert stays open rather than closing on a guess. */
 export function isGenuineRecovery(ev: RecoveryEvidence | null | undefined): boolean {
-  return Boolean(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT);
+  if (!(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT)) return false;
+  if (ev.live_samples === undefined || ev.total_samples === undefined) return true;
+  return ev.live_samples >= RECOVERY_MIN_LIVE_SAMPLES && ev.live_samples >= ev.total_samples * RECOVERY_MIN_LIVE_SHARE;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,12 +599,32 @@ export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEviden
                   AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
                   AND b.sampled_at > now() - interval '120 seconds'
              ) d
-           ) AS distinct_levels
+           ) AS distinct_levels,
+           (
+             SELECT count(*) FILTER (WHERE b.zero_ratio IS NOT NULL AND b.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND b.peak >= ${SILENT_PEAK_MAX})::int
+               FROM bench_level_sample b
+              WHERE b.room_id = ras.room_id
+                AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                AND b.sampled_at > now() - interval '120 seconds'
+           ) AS live_samples,
+           (
+             SELECT count(*)::int FROM bench_level_sample b
+              WHERE b.room_id = ras.room_id
+                AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                AND b.sampled_at > now() - interval '120 seconds'
+           ) AS total_samples
       FROM room_alert_state ras
      WHERE ras.status <> 'ok'
-  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string }>;
+  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string; live_samples: number | string; total_samples: number | string }>;
   const m = new Map<string, RecoveryEvidence>();
-  for (const r of rows) m.set(r.room_id, { chunk_after_alert: Boolean(r.chunk_after_alert), distinct_levels: Number(r.distinct_levels) || 0 });
+  for (const r of rows) {
+    m.set(r.room_id, {
+      chunk_after_alert: Boolean(r.chunk_after_alert),
+      distinct_levels: Number(r.distinct_levels) || 0,
+      live_samples: Number(r.live_samples) || 0,
+      total_samples: Number(r.total_samples) || 0,
+    });
+  }
   return m;
 }
 

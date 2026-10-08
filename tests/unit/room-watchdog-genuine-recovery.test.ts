@@ -17,6 +17,7 @@ import {
   planWatchdogRun,
   isGenuineRecovery,
   GENUINE_RECOVERY_MIN_DISTINCT,
+  RECOVERY_MIN_LIVE_SAMPLES,
   type RoomRunInput,
   type RoomPollFacts,
   type RecoveryEvidence,
@@ -197,5 +198,26 @@ describe("planWatchdogRun — everything else is unchanged", () => {
   it("with no evidence field at all (the planner's legacy callers) the poll alone still decides, session or not", () => {
     expect(planWatchdogRun([input()], NOW).messages.map((m) => m.kind)).toEqual(["recovered"]);
     expect(planWatchdogRun([input({ facts: cleanPoll() })], NOW).messages.map((m) => m.kind)).toEqual(["recovered"]);
+  });
+});
+
+// Arch #14 acceptance add: recovery needs speech-level energy held for a dwell, not a tiny non-zero tick.
+describe("isGenuineRecovery — dwell on live samples", () => {
+  const dwell = (live: number, total: number): RecoveryEvidence => ({ chunk_after_alert: true, distinct_levels: 40, live_samples: live, total_samples: total });
+  it("tiny peaks with zero_ratio near 1 (no live samples) never clear degraded, however many distinct values", () => {
+    expect(isGenuineRecovery(dwell(0, 80))).toBe(false);
+  });
+  it("one live tick is not a dwell", () => {
+    expect(isGenuineRecovery(dwell(1, 80))).toBe(false);
+  });
+  it("enough live samples, but under half the window, is not genuine", () => {
+    expect(isGenuineRecovery(dwell(RECOVERY_MIN_LIVE_SAMPLES, 80))).toBe(false);
+  });
+  it("a window that is mostly live is genuine", () => {
+    expect(isGenuineRecovery(dwell(60, 80))).toBe(true);
+    expect(isGenuineRecovery(dwell(RECOVERY_MIN_LIVE_SAMPLES, RECOVERY_MIN_LIVE_SAMPLES))).toBe(true);
+  });
+  it("still needs a chunk after the alert", () => {
+    expect(isGenuineRecovery({ ...dwell(60, 80), chunk_after_alert: false })).toBe(false);
   });
 });

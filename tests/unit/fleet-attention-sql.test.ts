@@ -485,7 +485,7 @@ describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres
     `);
     let m = await loadRecoveryEvidence();
     expect([...m.keys()]).toEqual(["r6"]);
-    expect(m.get("r6")).toEqual({ chunk_after_alert: false, distinct_levels: 1 });
+    expect(m.get("r6")).toMatchObject({ chunk_after_alert: false, distinct_levels: 1, live_samples: 20, total_samples: 20 });
     // a chunk older than the alert does not count; one after it does
     pg.exec(chunkRow("c0", "bs6", "4 hours", 3_400_000));
     m = await loadRecoveryEvidence();
