@@ -270,7 +270,7 @@ describe("scribe_steward_command — the kinds", () => {
     cfg.shadow = { global: false, actions: { "ticket:wake": false, message: true, scribe_start: true } };
     await cmd({ kind: "set_shadow", reason: "undo", value: (a.revert as { value: unknown }).value });
     expect((cfg.shadow as { global: boolean }).global).toBe(false);
-    expect((cfg.shadow as { actions: Row }).actions).not.toHaveProperty("message");
+    expect((cfg.shadow as { actions: Row }).actions.message).toBe(true); // G35: null under global:false is HELD, not removed
     // an actions-only change made while global is already false: its revert is actions-only too
     const b = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { scribe_start: false } } });
     expect((b.revert as { value: Row }).value).toEqual({ actions: { scribe_start: true } });

@@ -158,18 +158,16 @@ describe("S4 — one open job per source: the open job's id comes back", () => {
     expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toEqual({ ok: true, job_id: "job_open1", kind: "sarvam_transcribe", status: "running", deduped: true });
     expect(inserted).toEqual([]);
     const q = findOpen()[0]!;
-    expect(q.values).toEqual(["sarvam_transcribe", "encounter_id", "enc_1", "mode", "mode", "transcribe"]);
+    expect(q.values).toEqual(["sarvam_transcribe", ["encounter_id", "mode", "english", "num_speakers"], ["enc_1", "transcribe", "true", null]]);
   });
-  it("G23: the options are part of the identity — a codemix ask is NOT answered with an open transcribe-mode job; the same options (or the defaults) are", async () => {
-    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow()] : []);
-    expect(await run({ action: "transcribe", encounter_id: "enc_1", mode: "codemix" })).toMatchObject({ ok: true, job_id: "job_new1" });
-    expect(await run({ action: "transcribe", encounter_id: "enc_1", num_speakers: 2 })).toMatchObject({ job_id: "job_new1" });
-    expect(await run({ action: "transcribe", encounter_id: "enc_1", english: false })).toMatchObject({ job_id: "job_new1" });
-    expect(await run({ action: "transcribe", encounter_id: "enc_1", mode: "transcribe", english: true })).toMatchObject({ job_id: "job_open1", deduped: true });
-    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ args: { encounter_id: "enc_1", mode: "transcribe", english: true, num_speakers: 2 } })] : []);
-    expect(await run({ action: "transcribe", encounter_id: "enc_1", num_speakers: 2 })).toMatchObject({ job_id: "job_open1", deduped: true });
-    expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toMatchObject({ job_id: "job_new1" });
+  it("G23: the options are part of the identity — the lookup carries mode, english and num_speakers (a different option is a different key); the real-SQL proof is in sarvam-runner-pg.test.ts", async () => {
+    answer = () => [];
+    const keysOf = async (a: Row) => { statements.length = 0; await run({ action: "transcribe", encounter_id: "enc_1", ...a }); return findOpen()[0]!.values.slice(1); };
+    expect(await keysOf({})).toEqual([["encounter_id", "mode", "english", "num_speakers"], ["enc_1", "transcribe", "true", null]]);
+    expect(await keysOf({ mode: "codemix" })).toEqual([["encounter_id", "mode", "english", "num_speakers"], ["enc_1", "codemix", "true", null]]);
+    expect(await keysOf({ english: false, num_speakers: 2 })).toEqual([["encounter_id", "mode", "english", "num_speakers"], ["enc_1", "transcribe", "false", "2"]]);
   });
+
   it("no open job (none, or it already finished) -> a new job; a different encounter -> a new job", async () => {
     answer = () => [];
     expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toEqual({ ok: true, job_id: "job_new1", kind: "sarvam_transcribe", status: "queued" });
@@ -181,11 +179,11 @@ describe("S4 — one open job per source: the open job's id comes back", () => {
     process.env.SARVAM_GW_REGION = "";
     answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ id: "job_open2", kind: "sarvam_translate", args: { kind: "encounter", id: "enc_1" } })] : /FROM transcription_run/.test(text) ? [{ subject_type: "encounter" }] : []);
     expect(await run({ action: "translate", encounter_id: "enc_1" })).toMatchObject({ ok: true, job_id: "job_open2", deduped: true });
-    expect(findOpen()[0]!.values).toEqual(["sarvam_translate", "kind", "encounter", "id", "id", "enc_1"]);
+    expect(findOpen()[0]!.values).toEqual(["sarvam_translate", ["kind", "id"], ["encounter", "enc_1"]]);
     statements.length = 0;
     answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ id: "job_open2", kind: "sarvam_translate", args: { kind: "transcription_run", id: "enc_1" } })] : []);
     expect(await run({ action: "translate", transcription_run_id: "enc_1" })).toMatchObject({ deduped: true });
-    expect(findOpen()[0]!.values).toEqual(["sarvam_translate", "kind", "transcription_run", "id", "id", "enc_1"]);
+    expect(findOpen()[0]!.values).toEqual(["sarvam_translate", ["kind", "id"], ["transcription_run", "enc_1"]]);
     expect(inserted).toEqual([]);
   });
   it("the generic scribe_job_submit path dedupes too (it goes through submitJob), and says so", async () => {
