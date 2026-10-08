@@ -2,7 +2,9 @@
  * GET /api/encounter-windows — read encounter windows (eta_encounter_windows), ordered by t_open.
  *
  * Auth: ADMIN_TOKEN via `Authorization: Bearer <token>` (lib/admin-gate requireAdmin — the same internal gate the
- * other token-guarded admin routes use; unset token refuses, never allows).
+ * other token-guarded admin routes use; unset token refuses, never allows). ALSO accepted (additive, GET only): a bearer equal to
+ * REB_INDEX_READ_TOKEN (constant-time compare; unset/blank means only ADMIN_TOKEN works) so the box's REB encounter-layer reader
+ * need not hold ADMIN_TOKEN. The read token is bearer-header only (never ?token=).
  * Query params (all optional): room_id, doctor_uid (matches consulting_doctor_uid OR the extension's doctor_uid), from, to (ISO timestamps, from <= t_open < to), quality
  * (clean|ambiguous|multi_doctor|unclosed|unattributed), mismatch (true: only consults where the warehouse and the
  * extension name different doctors; false: only those where they do not), limit (1..5000, default 1000).
@@ -30,6 +32,7 @@
  * status ok | no_tab | missing | quiet | behind | offline | no_chrome. Home Office, ORB3 and ORB2 (no extension) are never listed. Read-only.
  * No transcripts, no patient identifiers. Bad params -> 400.
  */
+import { createHash, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin-gate";
 import { sql } from "@/lib/db";
@@ -49,8 +52,19 @@ function isoParam(v: string | null): string | null | "bad" {
   return Number.isNaN(t) ? "bad" : new Date(t).toISOString();
 }
 
+const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
+
+/** True only for a non-empty bearer header equal to a non-blank REB_INDEX_READ_TOKEN (hashed, constant-time; same style as app/api/reb/index). */
+function hasRebReadToken(req: NextRequest): boolean {
+  const expected = (process.env.REB_INDEX_READ_TOKEN ?? "").trim();
+  if (expected === "") return false;
+  const header = req.headers.get("authorization") || "";
+  const presented = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
+  return presented !== "" && timingSafeEqual(digest(presented), digest(expected));
+}
+
 export async function GET(req: NextRequest) {
-  const denied = requireAdmin(req);
+  const denied = hasRebReadToken(req) ? null : requireAdmin(req);
   if (denied) return denied;
 
   const p = req.nextUrl.searchParams;

@@ -18,7 +18,7 @@
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
 import { z } from "zod";
-import { isReaperNote } from "@/lib/bench-reaper-core";
+import { isReaperNote, REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { finiteNumberOrNull, type MicLevels } from "@/lib/bench-levels";
 import { applyInstallPoll, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type InstallPollFields } from "@/lib/room-install";
 
@@ -353,6 +353,10 @@ export type PollInput = {
   /** §2.4 — did the client report an explicitly chosen second device? undefined = not reported
    *  (the browser kiosk never sends it), and undefined never erases a stored value. */
   spareDevice?: boolean | null;
+  /** Arch #22 — the recorder's monotonically increasing level-sample sequence and the checkpoint's own capture instant (ISO). Absent on every app
+   *  that does not send them; absent is stored as NULL, never as 0. */
+  levelSeq?: number | null;
+  levelCapturedAt?: string | null;
   /**
    * Install and Fleet §4.3 — the native Room Recorder's seven optional fields.
    *
@@ -529,7 +533,43 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     // or logging fault can never block the command poll that controls a live room.
     if (mic) {
       try {
-        await sql`
+        // Arch #19 — THE SESSION THE KIOSK NAMES MAY ALREADY BE ENDED. A frozen kiosk keeps naming the session the cloud reaper closed, so
+        // `recordingSessionId !== null` kept stamping session_open / tape_advancing true on dead samples (TF bs_jjndbqdj, 7 Oct). The server's own
+        // session row decides. A lookup that fails falls back to the kiosk's claim: a missed sample would be worse than the old behaviour.
+        let sessionOpen = input.recordingSessionId !== null;
+        if (sessionOpen) {
+          try {
+            const open = (await sql`
+              SELECT 1 FROM bench_session WHERE id = ${input.recordingSessionId} AND status IN ('recording', 'paused') LIMIT 1
+            `) as unknown[];
+            sessionOpen = open.length > 0;
+          } catch { /* keep the kiosk's claim */ }
+        }
+        const seq = typeof input.levelSeq === "number" && Number.isSafeInteger(input.levelSeq) && input.levelSeq >= 0 ? input.levelSeq : null;
+        const capturedAt = seq !== null && input.levelCapturedAt ? input.levelCapturedAt : null;
+        let wrote = false;
+        if (seq !== null) {
+          // Migration 0133 adds seq / captured_at. If it is not applied yet this INSERT fails and the sample is written the old way below, so a
+          // deploy ahead of the migration loses no level samples.
+          try {
+            await sql`
+              INSERT INTO bench_level_sample (
+                room_id, ist_date, sampled_at, peak, avg, zero_ratio,
+                session_open, tape_advancing, source, seq, captured_at
+              )
+              VALUES (
+                ${input.roomId}, (now() AT TIME ZONE 'Asia/Kolkata')::date, now(),
+                ${mic.peak}, ${mic.avg}, ${mic.zeroRatio ?? null},
+                ${sessionOpen},
+                ${sessionOpen && !input.paused},
+                'command_poll', ${seq}, ${capturedAt}::timestamptz
+              )
+            `;
+            wrote = true;
+          } catch { /* fall through to the pre-0133 insert */ }
+        }
+        if (!wrote) {
+          await sql`
           INSERT INTO bench_level_sample (
             room_id, ist_date, sampled_at, peak, avg, zero_ratio,
             session_open, tape_advancing, source
@@ -537,11 +577,12 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
           VALUES (
             ${input.roomId}, (now() AT TIME ZONE 'Asia/Kolkata')::date, now(),
             ${mic.peak}, ${mic.avg}, ${mic.zeroRatio ?? null},
-            ${input.recordingSessionId !== null},
-            ${input.recordingSessionId !== null && !input.paused},
+            ${sessionOpen},
+            ${sessionOpen && !input.paused},
             'command_poll'
           )
         `;
+        }
       } catch (error) {
         console.warn("[bench-levels] append failed", JSON.stringify({
           room_id: input.roomId,
@@ -626,7 +667,26 @@ export async function ackCommand(input: AckInput): Promise<"acked" | "failed" | 
        WHERE id = ${input.commandId} AND room_id = ${input.roomId} AND status = 'pending'
        RETURNING id, kind
     `) as Array<{ id: string; kind?: string }>;
-    if (!rows.length) return null;
+    if (!rows.length) {
+      // ARCH #17 (C1) — A DEFERRED START'S LATE FAILURE. The app acks a start it could not run yet as {ok:true, deferred:true} and waits for the
+      // input device beside its poll loop. If that wait (or the retries) ends in failure there is no second command to carry it, so the same
+      // command is AMENDED: a start_day that is `acked` AND deferred becomes `failed` with the app's reason. That is the signal the Remote start
+      // failed alert (fleet-attention R7) already reads, and the 3-per-day caps count. Only start_day, only while deferred, only a failure.
+      if (!input.ok) {
+        const late = (await sql`
+          UPDATE bench_command
+             SET status = 'failed',
+                 result = ${result}::jsonb,
+                 error = ${input.error ?? "failed"},
+                 acked_at = now()
+           WHERE id = ${input.commandId} AND room_id = ${input.roomId} AND kind = 'start_day'
+             AND status = 'acked' AND result ->> 'deferred' = 'true'
+           RETURNING id
+        `) as Array<{ id: string }>;
+        if (late.length) return "failed";
+      }
+      return null;
+    }
     if (rows[0]!.kind === "set_audio_input" && input.ok && input.applied?.applied_device_uid) {
       await recordExpectedDevice(input.roomId, input.applied.applied_device_uid);
     }
@@ -727,6 +787,23 @@ export async function insertCommand(input: { roomId: string; kind: CommandKind; 
       VALUES (${id}, ${input.roomId}, ${input.kind}, ${args}::jsonb, 'pending', ${input.source ?? "mcp"})
     `;
     return id;
+  });
+}
+
+/**
+ * F44.1 R2: mark a room's steward start_day commands that are still `pending` (delivered and never acked, or not yet delivered) and older than `olderThanS` as `expired`, so a retry
+ * never leaves two live start_days for one room. Only that room, only kind start_day, only source 'steward', only `pending` (an ack that lands first is untouched). Returns the ids.
+ */
+export async function expireStaleStartDay(roomId: string, olderThanS: number): Promise<string[]> {
+  return guarded(async () => {
+    const rows = (await sql`
+      UPDATE bench_command
+         SET status = 'expired'
+       WHERE room_id = ${roomId} AND kind = 'start_day' AND source = 'steward' AND status = 'pending'
+         AND created_at < now() - (${olderThanS}::int * INTERVAL '1 second')
+       RETURNING id
+    `) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
   });
 }
 
@@ -943,7 +1020,7 @@ export async function getRecentStartAttempts(roomId: string, now: Date = new Dat
              EXISTS (
                SELECT 1 FROM bench_session s
                 WHERE s.room_id = c.room_id
-                  AND s.started_at >= c.created_at
+                  AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"}) AND s.started_at >= c.created_at
                   AND c.acked_at IS NOT NULL
                   AND s.started_at <= c.acked_at + (${START_ACK_SESSION_GRACE_S}::int * INTERVAL '1 second')
              ) AS session_started

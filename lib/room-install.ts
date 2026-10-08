@@ -1195,14 +1195,17 @@ export function cleanInputDevices(v: unknown): string | null {
   const out: InputDevice[] = [];
   for (const d of parsed) {
     if (!d || typeof d !== "object") return null;
-    const { name, uid, is_default } = d as Record<string, unknown>;
+    const { name, uid, is_default, is_selected } = d as Record<string, unknown>;
     if (typeof name !== "string" || typeof uid !== "string" || typeof is_default !== "boolean") return null;
+    // Arch #22 — optional; absent on every app below the one that sends it. Only a literal true is kept.
+    if (is_selected !== undefined && typeof is_selected !== "boolean") return null;
     const n = name.trim();
     const u = uid.trim();
     if (!n || !u || n.length > INPUT_DEVICE_NAME_MAX || u.length > INPUT_DEVICE_UID_MAX) return null;
-    out.push({ name: n, uid: u, is_default });
+    out.push({ name: n, uid: u, is_default, ...(is_selected === true ? { is_selected: true } : {}) });
   }
   if (out.filter((d) => d.is_default).length > 1) return null;
+  if (out.filter((d) => d.is_selected).length > 1) return null;
   return JSON.stringify(out);
 }
 
@@ -1395,11 +1398,17 @@ export async function applyInstallPoll(
     tape_advancing: f.tape_advancing,
     rec: recording,
     // Tier 1 §3 — the 0.1.22 heartbeat, on the entry only when this poll carried it, so a 0.1.21
-    // entry reads exactly as it did and the rules fall back to peak / zero_ratio for it.
+    // entry reads exactly as it did. `silence_ms` is stored and is not what raises
+    // SILENT_WHILE_RECORDING: that count is `pollIsSilent` (zero_ratio and peak) below.
     ...(f.clip_count !== null ? { clip_count: f.clip_count } : {}),
     ...(f.silence_ms !== null ? { silence_ms: f.silence_ms } : {}),
   });
-  const silentNow = pollIsSilent({ rec: recording, tape_advancing: f.tape_advancing, zero_ratio: f.zero_ratio });
+  const silentNow = pollIsSilent({
+    rec: recording,
+    tape_advancing: f.tape_advancing,
+    zero_ratio: f.zero_ratio,
+    peak: f.peak,
+  });
   try {
     const rows = (await sql`
       UPDATE room_install

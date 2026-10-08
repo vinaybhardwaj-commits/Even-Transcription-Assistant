@@ -53,7 +53,8 @@ import Testing
       captureLauncher: launcher,
       pieceRunner: R4FakeEncoder(),
       updaterFactory: { _, _, _ in nil },
-      log: { _ in })
+      log: { _ in },
+      inputReadyWait: .disabled)
 
     let task = Task { try await engine.run() }
     try await R4Fixture.waitUntil { await remote.acknowledgementCount() == 2 }

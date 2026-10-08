@@ -29,6 +29,10 @@ export type ScopedOccupancy = {
   stale_occupant: StaleOccupant | null;
   pending: PendingSession | null;
   page_name: string | null;
+  /** the chosen occupant's uid / display name (null when none, ambiguous, or a stale-cookie stream: then `best_stale` is true and dn is the page greeting, never the cookie's name) */
+  best_uid: string | null;
+  best_dn: string | null;
+  best_stale: boolean;
 };
 
 export async function scopedOccupancy(db: WindowsDb, asOf: string | number | Date, machineKeys: readonly string[], opts: OccOptions = {}): Promise<ScopedOccupancy[]> {
@@ -96,6 +100,9 @@ export async function scopedOccupancy(db: WindowsDb, asOf: string | number | Dat
       stale_occupant: staleBest ? { page_name: staleBest.page_name ?? null, cookie_name: staleBest.cookie_name ?? null, label: staleOccupantLabel(staleBest) } : null,
       pending: occ?.pending ?? null,
       page_name: occ?.page_name ?? null,
+      best_uid: occ?.best?.uid ?? null,
+      best_dn: occ?.best?.dn ?? null,
+      best_stale: !!occ?.best?.stale_cookie,
     });
   }
   return out;

@@ -17,7 +17,7 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { NOTE_SUPERSEDED, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+import { NOTE_SUPERSEDED, REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { benchAdminGuard, listBenchSessions, newSessionId, type BenchSessionListFilters } from "@/lib/bench";
 
 export const runtime = "nodejs";
@@ -51,6 +51,7 @@ export async function POST(req: NextRequest) {
              notes = CASE WHEN s.notes IS NULL OR s.notes = '' THEN ${NOTE_SUPERSEDED} ELSE s.notes || chr(10) || ${NOTE_SUPERSEDED} END
        WHERE s.room_id = ${claims.room_id}
          AND s.status = 'recording'
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})   -- Arch #21: a re-home container is bookkeeping, never a session to supersede
          AND COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at)
              < now() - (${STALLED_BADGE_MINUTES}::int * INTERVAL '1 minute')
     `;

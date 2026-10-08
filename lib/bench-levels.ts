@@ -1,4 +1,5 @@
 import { sql } from "@/lib/db";
+import { SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
 import { istDate as todayIstDate } from "@/lib/bench-reaper-core";
 
 export const LEVEL_TIMELINE_BUCKET_SECONDS = 15;
@@ -13,7 +14,27 @@ export type BenchLevelSample = {
   session_open: boolean;
   tape_advancing: boolean;
   samples: number;
+  /** Arch #19 — set at read time: this bucket repeats the previous buckets' exact (peak, avg, zero_ratio). Frozen meter, not a live signal. */
+  stale?: boolean;
 };
+
+/** A bucket is frozen when it and the (FROZEN_BUCKETS - 1) before it hold the identical triple. Digital silence (zero_ratio >= 0.98) is exempt: it is named elsewhere. */
+export const FROZEN_BUCKETS = 3;
+
+/**
+ * PURE. Marks, never drops. Input is time-ordered.
+ * The digital-silence line is SILENT_ZERO_RATIO (0.98), the same constant the Bench meter and the watchdog use, so the three cannot drift.
+ */
+export function markFrozenBuckets(samples: BenchLevelSample[]): BenchLevelSample[] {
+  let run = 0;
+  return samples.map((s, i) => {
+    const prev = samples[i - 1];
+    const same = prev && prev.peak === s.peak && prev.avg === s.avg && prev.zero_ratio === s.zero_ratio;
+    run = same ? run + 1 : 1;
+    const silent = s.zero_ratio !== null && s.zero_ratio >= SILENT_ZERO_RATIO;
+    return run >= FROZEN_BUCKETS && !silent ? { ...s, stale: true } : s;
+  });
+}
 
 /** A finite number from a number or non-empty numeric string; everything else is absent. */
 export function finiteNumberOrNull(value: unknown): number | null {
@@ -75,7 +96,7 @@ export async function readRoomLevelDay(
     samples: number | string;
   }>;
 
-  const samples = rows.map((row) => ({
+  const samples = markFrozenBuckets(rows.map((row) => ({
     t_ms: new Date(row.sampled_at).getTime(),
     peak: Number(row.peak),
     avg: row.avg === null ? null : Number(row.avg),
@@ -83,7 +104,7 @@ export async function readRoomLevelDay(
     session_open: Boolean(row.session_open),
     tape_advancing: Boolean(row.tape_advancing),
     samples: Number(row.samples),
-  }));
+  })));
 
   return {
     samples,

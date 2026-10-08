@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { COLORS, DAY_LEGEND, WORD, headline, segmentColor, segmentWord, stepsFor } from "@/lib/rooms-live/present";
 import type { RoomRow } from "@/lib/rooms-live/snapshot";
 
+const RESULT_WORD = { done: "done", pending: "waiting for the kiosk", failed: "failed", skipped: "not done", watching: "not done" } as const;
 type Day = { as_of: string | null; segments: Array<{ state: string; start: string; end: string }> };
 const IST_MS = 19_800_000;
 const dayStartMs = (now: number) => Math.floor((now + IST_MS) / 86_400_000) * 86_400_000 - IST_MS;
@@ -40,6 +41,18 @@ export function RoomDetail({ row, nowMs, onClose }: { row: RoomRow; nowMs: numbe
           </ol>
         ) : (
           <p style={{ fontSize: 16 }}>Nothing to do. {headline(row)}.</p>
+        )}
+        <h3 style={{ fontSize: 15, margin: "14px 0 6px" }}>What the Steward did</h3>
+        {(row.steward_log ?? []).length === 0 ? (
+          <p style={{ fontSize: 14, color: "#4F535A", margin: 0 }}>Nothing to report from the Steward.</p>
+        ) : (
+          <ul aria-label="Steward log" style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+            {(row.steward_log ?? []).map((l, i) => (
+              <li key={`${l.at}-${i}`} style={{ borderBottom: "1px solid #E4E2DC", paddingBottom: 4 }}>
+                <b>{new Date(l.at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}</b> · {l.text} · <span style={{ color: "#4F535A" }}>{l.mode === "live" ? "live" : "watching only"} · {RESULT_WORD[l.outcome]}</span>
+              </li>
+            ))}
+          </ul>
         )}
         <h3 style={{ fontSize: 15, margin: "14px 0 6px" }}>Today</h3>
         {day === "none" ? (

@@ -26,7 +26,7 @@ import { GET as sweepGET } from "@/app/api/cron/encounter-windows/sweep/route";
 import { GET as readGET } from "@/app/api/encounter-windows/route";
 import { NextRequest } from "next/server";
 
-const SAVED = { CRON_SECRET: process.env.CRON_SECRET, ADMIN_TOKEN: process.env.ADMIN_TOKEN };
+const SAVED = { CRON_SECRET: process.env.CRON_SECRET, ADMIN_TOKEN: process.env.ADMIN_TOKEN, REB_INDEX_READ_TOKEN: process.env.REB_INDEX_READ_TOKEN };
 beforeEach(() => {
   M.refresh.mockReset();
   M.query.mockReset();
@@ -277,5 +277,48 @@ describe("GET /api/encounter-windows?ext_health=1", () => {
     const r = await readGET(readReq("?ext_health=1"));
     expect(r.status).toBe(500);
     expect(JSON.stringify(await r.json())).not.toContain("secret");
+  });
+});
+
+describe("GET /api/encounter-windows — REB read token (additive)", () => {
+  const ok = () => M.query.mockResolvedValue([{ id: 1 }]);
+  it("401 with no bearer or a wrong bearer, even when both tokens are set", async () => {
+    process.env.ADMIN_TOKEN = "adm"; process.env.REB_INDEX_READ_TOKEN = "rd";
+    expect((await readGET(readReq("", ""))).status).toBe(401);
+    expect((await readGET(readReq("", "Bearer nope"))).status).toBe(401);
+    expect(M.query).not.toHaveBeenCalled();
+  });
+  it("200 with ADMIN_TOKEN (unchanged) and 200 with REB_INDEX_READ_TOKEN", async () => {
+    process.env.ADMIN_TOKEN = "adm"; process.env.REB_INDEX_READ_TOKEN = "rd"; ok();
+    expect((await readGET(readReq("", "Bearer adm"))).status).toBe(200);
+    expect((await readGET(readReq("", "Bearer rd"))).status).toBe(200);
+    expect((await readGET(readReq("", "bearer rd"))).status).toBe(200);
+  });
+  it("read token works with ADMIN_TOKEN unset", async () => {
+    delete process.env.ADMIN_TOKEN; process.env.REB_INDEX_READ_TOKEN = "rd"; ok();
+    expect((await readGET(readReq("", "Bearer rd"))).status).toBe(200);
+  });
+  it("read token unset or blank: only the admin token works, and an empty/blank bearer never matches", async () => {
+    process.env.ADMIN_TOKEN = "adm"; ok();
+    delete process.env.REB_INDEX_READ_TOKEN;
+    expect((await readGET(readReq("", "Bearer rd"))).status).toBe(401);
+    expect((await readGET(readReq("", "Bearer adm"))).status).toBe(200);
+    process.env.REB_INDEX_READ_TOKEN = "   ";
+    expect((await readGET(readReq("", "Bearer "))).status).toBe(401);
+    expect((await readGET(readReq("", "Bearer    "))).status).toBe(401);
+  });
+  it("the read token is bearer-only: ?token=<read token> does not pass", async () => {
+    process.env.ADMIN_TOKEN = "adm"; process.env.REB_INDEX_READ_TOKEN = "rd";
+    expect((await readGET(readReq("?token=rd", ""))).status).toBe(401);
+  });
+  it("the route exports GET only, so the read token cannot reach any other method", async () => {
+    const mod = await import("@/app/api/encounter-windows/route");
+    expect(Object.keys(mod).filter((k) => ["POST", "PUT", "PATCH", "DELETE"].includes(k))).toEqual([]);
+  });
+  it("the read token also opens the occupancy and ext_health reads (same gate, GET)", async () => {
+    process.env.ADMIN_TOKEN = "adm"; process.env.REB_INDEX_READ_TOKEN = "rd";
+    M.occ.mockResolvedValue([]);
+    expect((await readGET(readReq("?occupancy=1", "Bearer rd"))).status).toBe(200);
+    expect((await readGET(readReq("?ext_health=1", "Bearer rd"))).status).toBe(200);
   });
 });

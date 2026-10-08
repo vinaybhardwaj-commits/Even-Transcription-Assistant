@@ -82,6 +82,12 @@ export async function GET(req: NextRequest) {
     return z !== null && z >= 0 && z <= 1 ? { ...m, zeroRatio: z } : m;
   })();
   const spare = levelPair("spare_peak", "spare_avg");
+  // Arch #22 — the recorder's level-sample sequence and capture instant. Whole non-negative number or nothing; an ISO instant or nothing.
+  const levelSeqRaw = (sp.get("level_seq") ?? "").trim();
+  const levelSeq = /^[0-9]{1,15}$/.test(levelSeqRaw) ? Number(levelSeqRaw) : null;
+  const levelAtRaw = (sp.get("level_at") ?? "").trim();
+  const levelAtMs = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(levelAtRaw) ? Date.parse(levelAtRaw) : NaN;
+  const levelCapturedAt = Number.isFinite(levelAtMs) ? new Date(levelAtMs).toISOString() : null;
   // §2.4 — an EXPLICITLY chosen second device. Only ever true when the client says `spare_device=true`;
   // any other value (including absent — the browser kiosk never sends it) leaves it unreported, and
   // the upsert COALESCE means unreported never erases a stored flag. Never derived from a piece.
@@ -181,7 +187,7 @@ export async function GET(req: NextRequest) {
     : undefined;
 
   try {
-    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare, spareDevice, install });
+    const out = await pollCommands({ roomId: claims.room_id, tabId, prevPollAt, recordingSessionId, paused, mic, spare, spareDevice, install, levelSeq, levelCapturedAt });
     // §4.5 rule 3 — a retired install is told once, in a status it cannot mistake for a transient
     // fault, and it stops polling. Deliberately NOT a 503: 503 means "try again", and this one
     // never should.

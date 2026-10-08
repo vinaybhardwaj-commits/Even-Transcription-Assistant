@@ -10,6 +10,7 @@
  */
 import { NextRequest } from "next/server";
 import { checkMcpBearer } from "@/lib/mcp/auth";
+import { optionsResponse } from "@/lib/mcp/doors";
 import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
 export const runtime = "nodejs";
@@ -21,6 +22,10 @@ export const maxDuration = 300;
 
 export async function GET() {
   return mcpMethodNotAllowedResponse();
+}
+
+export async function OPTIONS() {
+  return optionsResponse(false);
 }
 
 export async function POST(req: NextRequest) {

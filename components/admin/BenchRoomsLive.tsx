@@ -117,6 +117,8 @@ type ListenerRowView = {
   mic?: Levels;
   spare?: Levels;
   levels_at?: string | null;
+  /** Arch #19: derived server-side at read time. null = could not be judged, which does not grey the meter. */
+  levels_stale?: boolean | null;
   /** §2.4 — the client reported an EXPLICITLY chosen second device. The card draws no spare lane,
    *  no spare vital and no spare line unless this is true — never from a backup piece arriving. */
   spare_device?: boolean;
@@ -179,6 +181,7 @@ type RoomLive = {
   ended_at_lies_sessions?: string[];
   /** D30 — the most recent session today is ended. The seventh state's own input. */
   last_session_ended?: boolean;
+  last_session_start_failed?: boolean;
   last_warehouse_at: string | null;
   /** Is there a genuine warehouse-typed cue today? With none, the This-doctor row does not
    *  render at all — a vital nothing feeds should not hold a line saying nothing (§3.1). */
@@ -239,6 +242,8 @@ export function startBlockedReason(st: RoomStateView): string | null {
       // the page is quiet stopped being the operator's question when the day was ended on
       // purpose — but the button cannot pretend, so this says what to do before pressing it.
       return "This day is finished. To record again, open the room page on the clinic Mac — no kiosk page is listening in this room right now.";
+    case "start_failed":
+      return "The last start failed, and no kiosk page is listening to retry it. Open the room page on the clinic Mac (remount the microphone if it fails again).";
     case "recording":
       return "Start is off because this room is already recording. Use stop to end the day first.";
     case "paused":
@@ -308,6 +313,7 @@ const STATE_WORD: Record<RoomState, string> = {
   paused: "paused",
   recording: "recording",
   host_offline: "host offline",
+  start_failed: "failed to start",
   finished: "finished",
   ready: "ready",
   dropped: "dropped",
@@ -979,6 +985,7 @@ export function BenchRoomsLive() {
             nowMs,
             // D30 — a day that was ended on purpose is not a kiosk that vanished by accident.
             lastSessionEnded: Boolean(r.last_session_ended),
+            lastSessionStartFailed: Boolean(r.last_session_start_failed),
             recordedMsToday: r.audio_recorded_ms ?? null,
           });
           // The card's edge carries the WORST condition on it. `backup_reads_no_chunks` is no
@@ -1224,6 +1231,7 @@ export function BenchRoomsLive() {
                     levels={l?.mic}
                     live={Boolean(l?.listening) && (st.state === "recording" || st.state === "ready")}
                     digitalSilence={isDigitalSilence(l?.mic)}
+                    stale={l?.levels_stale === true}
                   />
                   {r.spare_exists && l?.spare ? <LevelBar label="Spare mic" levels={l.spare} /> : null}
                 </div>

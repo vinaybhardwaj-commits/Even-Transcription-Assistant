@@ -40,6 +40,7 @@
  * Neither addition touches the request path. The status is read off the session row this route
  * already loads, and the event write goes in the same after() hook as the window evaluation.
  */
+import { createHash } from "node:crypto";
 import { NextRequest, after } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
@@ -64,6 +65,17 @@ export const dynamic = "force-dynamic";
 function disagreementFields(): Record<string, string> {
   return { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES, ended_disagrees: ENDED_DISAGREES };
 }
+
+/**
+ * ROLLOUT FLAG (Arch #21 round 2). The new replies (`ended_disagrees`, `rehomed_after_reap`, `refused_session_reaped`) and the re-home itself are for kiosks that run the new app:
+ * an OLD app stops a healthy recording on any `ended_disagrees` and retries a non-"verified" upload for ever. So they go out only when BENCH_CHUNK_REAPED_REPLIES=1; unset / anything
+ * else is OFF and the route answers exactly as main does (append to the ended session, `disagreement` only, upload_state "verified"). Read per request. Flip it after every kiosk runs the new app.
+ */
+export const reapedRepliesOn = (): boolean => process.env.BENCH_CHUNK_REAPED_REPLIES === "1";
+
+/** Natural key of a re-home / refusal event: the same piece retried (same target, source, idx) is the same event, so a retry loop writes ONE row. */
+const eventIdFor = (kind: string, sessionId: string, source: string, idx: number): string =>
+  `be_${kind}_${createHash("sha1").update(`${sessionId}|${source}|${idx}`).digest("hex").slice(0, 24)}`;
 
 /** Re-homed chunks live in a high idx band so they can never collide with another session's own 0.. numbering. */
 const REHOME_IDX_BASE = 90_000;
@@ -105,8 +117,9 @@ async function rehomeAfterReap(a: { roomId: string; oldSessionId: string; idx: n
     if (!target) return null;
     await sql`
       INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
-      VALUES (${newEventId()}, ${target}, 'chunk_rehomed', ${a.startedAt.toISOString()}, 'none',
+      VALUES (${eventIdFor("rehomed", target, a.source, REHOME_IDX_BASE + a.idx)}, ${target}, 'chunk_rehomed', ${a.startedAt.toISOString()}, 'none',
               ${JSON.stringify({ source: "server", reaped_session_id: a.oldSessionId, original_idx: a.idx, rehomed_idx: REHOME_IDX_BASE + a.idx, chunk_source: a.source, r2_key: a.r2Key, chunk_started_at: a.startedAt.toISOString() })}::jsonb)
+      ON CONFLICT (id) DO NOTHING
     `;
     return { sessionId: target, idx: REHOME_IDX_BASE + a.idx };
   } catch (e) {
@@ -230,14 +243,15 @@ export async function POST(req: NextRequest) {
   let targetSessionId = sessionId;
   let targetIdx = idx;
   let rehomed = false;
-  if (endedDisagrees && isReaperNote(session.notes)) {
+  if (reapedRepliesOn() && endedDisagrees && isReaperNote(session.notes)) {
     const home = await rehomeAfterReap({ roomId: session.room_id, oldSessionId: sessionId, idx, source, r2Key: originalKey, startedAt, endedAt });
     if (!home) {
       try {
         await sql`
           INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
-          VALUES (${newEventId()}, ${sessionId}, 'chunk_refused_reaped', ${startedAt.toISOString()}, 'none',
+          VALUES (${eventIdFor("refused", sessionId, source, idx)}, ${sessionId}, 'chunk_refused_reaped', ${startedAt.toISOString()}, 'none',
                   ${JSON.stringify({ source: "server", idx, chunk_source: source, size_bytes: sizeBytes, r2_key: originalKey, chunk_started_at: startedAt.toISOString() })}::jsonb)
+          ON CONFLICT (id) DO NOTHING
         `;
       } catch (e) {
         console.warn(`[bench-chunks] reaped-session refusal event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
@@ -351,6 +365,6 @@ export async function POST(req: NextRequest) {
     key,
     upload_state: rehomed ? "rehomed_after_reap" : "verified",
     ...(rehomed ? { session_reaped: true, rehomed_session_id: targetSessionId } : {}),
-    ...(endedDisagrees ? disagreementFields() : {}),
+    ...(endedDisagrees ? (reapedRepliesOn() ? disagreementFields() : { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES }) : {}),
   });
 }

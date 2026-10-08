@@ -22,6 +22,8 @@ beforeAll(() => {
       ('bs_fresh0', 'room_a', now() - interval '2 minutes', 'recording'),
       ('bs_paused', 'room_a', now() - interval '5 hours', 'paused'),
       ('bs_other', 'room_b', now() - interval '5 hours', 'recording');
+    INSERT INTO bench_session (id, room_id, started_at, status, notes) VALUES
+      ('bs_home', 'room_a', now() - interval '6 hours', 'recording', 're-homed after reap of bs_old');
     INSERT INTO bench_chunk (id, session_id, created_at) VALUES
       ('c1', 'bs_live', now() - interval '4 minutes'), ('c2', 'bs_live', now() - interval '9 minutes'),
       ('c3', 'bs_stale', now() - interval '45 minutes');
@@ -45,6 +47,8 @@ describe("Arch #16 guard: POST /api/bench/sessions on real postgres", () => {
     expect(by.bs_paused.status).toBe("paused");
     expect(by.bs_other.status).toBe("recording");
     expect(by.bs_stale.status).toBe("ended");
-    expect(rows.filter((r) => r.status === "recording" && !["bs_live","bs_fresh0","bs_other"].includes(String(r.id)))).toHaveLength(1); // the new one
+    expect(by.bs_home.status).toBe("recording");                       // Arch #21: a re-home container is never superseded...
+    expect(by.bs_home.notes).toBe("re-homed after reap of bs_old");   // ...and its note is untouched
+    expect(rows.filter((r) => r.status === "recording" && !["bs_live","bs_fresh0","bs_other","bs_home"].includes(String(r.id)))).toHaveLength(1); // the new one
   });
 });

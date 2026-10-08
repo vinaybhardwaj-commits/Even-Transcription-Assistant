@@ -21,40 +21,16 @@
  * user agent — never a path or URL) and lib/mcp/audit's console fallback, which carries the
  * same fields. Do not add logging here without keeping that true.
  */
-import { NextRequest, NextResponse } from "next/server";
-import { checkMcpBearer } from "@/lib/mcp/auth";
+import { NextRequest } from "next/server";
+import { checkPathKey, optionsResponse, withCors } from "@/lib/mcp/doors";
 import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300; // same ceiling as the header form (raised for U2 joining)
 
-const CORS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "POST, OPTIONS",
-  "access-control-allow-headers": "content-type, authorization, mcp-protocol-version",
-};
-
-/** The existing auth, fed the path key as a synthetic Bearer header — one comparison, one
- *  401/503 mapping, zero new token handling. An empty/missing key fails the Bearer shape.
- *  A key with header-illegal bytes cannot be a real token: the Request constructor throws,
- *  and the check re-runs with no header at all, which yields the same 503 (env unset) or
- *  401 (env set) mapping from the same code — never a 500, never a pass. */
-function checkPathKey(key: string) {
-  try {
-    return checkMcpBearer(new Request("https://mcp.internal/", { headers: { authorization: `Bearer ${key}` } }));
-  } catch {
-    return checkMcpBearer(new Request("https://mcp.internal/"));
-  }
-}
-
-function withCors(res: NextResponse): NextResponse {
-  for (const [k, v] of Object.entries(CORS)) res.headers.set(k, v);
-  return res;
-}
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: CORS });
+  return optionsResponse(true);
 }
 
 export async function GET() {

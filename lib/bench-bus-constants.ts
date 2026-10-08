@@ -220,7 +220,7 @@ export const NO_DAY_LANE_STATE = (n: number): string =>
  *  this module must stay import-free so it is safe in the kiosk and admin browser bundles. */
 export type RoomStateLevel = "ok" | "amber" | "red" | "unknown";
 
-export type RoomState = "cant_tell" | "paused" | "recording" | "host_offline" | "finished" | "ready" | "dropped" | "offline";
+export type RoomState = "cant_tell" | "paused" | "recording" | "host_offline" | "start_failed" | "finished" | "ready" | "dropped" | "offline";
 
 /**
  * FINISHED FOR TODAY (D30) — the seventh state, and the reason it exists.
@@ -235,6 +235,59 @@ export type RoomState = "cant_tell" | "paused" | "recording" | "host_offline" | 
  * dropped and offline (a deliberate end outranks every explanation of why the page went away).
  * It is never amber: nothing here needs anybody to do anything.
  */
+/**
+ * ARCH #15 — A START THAT DIED IS NOT A FINISHED DAY.
+ *
+ * On 5 Oct the tapewriter exited (status 1) about 15 s after start with no chunk, OPD4 twelve
+ * times over. The app ends the session it just opened (start compensation), so from the bus's
+ * point of view the newest session is `ended` — exactly what an end of day looks like — and the
+ * board printed "Finished for today · Press start to record again" over a dead capture.
+ *
+ * What separates them is that a start that died NEVER RECORDED: no piece of either stream, and
+ * the session lived seconds. A real day, even a short one, lands at least one piece (they are cut
+ * every five minutes and a stop flushes the one in progress). So: ended, zero pieces, and open
+ * for under START_FAILED_MAX_MS. The window is generous against the ~15 s evidence and far below
+ * a real session; an operator who presses start and stop within it records nothing either, and
+ * reading that as a failed start is the honest call. Derived at read time. DEATH EVIDENCE IS REQUIRED (refute F2): the start compensation's
+ * note on the session end (kiosks built with the matching Swift) or a start_day command acked FAILED around the session (every
+ * native build already does that), so an operator stop inside the window is never a failed start.
+ */
+export const START_FAILED_MAX_MS = 3 * 60_000;
+/** The note the app's start compensation writes on the session end (RoomEngine.startFailedNote — keep equal). */
+export const START_FAILED_NOTE = "start failed: capture did not start";
+export const START_FAILED_HINT = "Capture did not start. Check the microphone / USB cable, then press start to retry; if it fails again, remount the microphone or restart the recorder app.";
+
+/** PURE — did this (newest, ended) session die at start? Unparseable times answer false: say nothing rather than guess. */
+export function sessionDiedAtStart(s: {
+  status: string;
+  started_at: string | Date | null | undefined;
+  ended_at: string | Date | null | undefined;
+  primary_chunks: number | null | undefined;
+  backup_chunks: number | null | undefined;
+  /** The session row's notes. */
+  notes?: string | null;
+  /** A start_day command for this room was acked FAILED around this session's life (read-side EXISTS). */
+  start_failed_ack?: boolean | null;
+}): boolean {
+  if (s.status !== "ended") return false;
+  // F2 (refute 08 Oct): only a start that DIED ON ITS OWN. An operator who presses start then stop inside the window
+  // also leaves an ended, zero-piece, short session — but writes neither the compensation note nor a failed ack.
+  // The reaper's notes count too (refute re-check C1): a zero-chunk session the REAPER ended has ended_at = started_at, so it is ended, pieceless and
+  // "short" — and a session that never produced a piece did not record, whoever ended it. Literals, because this module stays import-free.
+  const notes = typeof s.notes === "string" ? s.notes : "";
+  const evidence =
+    notes.includes(START_FAILED_NOTE) ||
+    notes.includes("auto-ended: no chunks >30m (reaper)") ||
+    notes.includes("auto-ended: day rollover (reaper)") ||
+    s.start_failed_ack === true;
+  if (!evidence) return false;
+  if ((Number(s.primary_chunks) || 0) > 0 || (Number(s.backup_chunks) || 0) > 0) return false;
+  const a = s.started_at ? new Date(s.started_at).getTime() : NaN;
+  const b = s.ended_at ? new Date(s.ended_at).getTime() : NaN;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return b - a < START_FAILED_MAX_MS;
+}
+
 export const FINISHED_HINT = "Press start to record again";
 
 export type RoomStateView = {
@@ -316,6 +369,8 @@ export function roomState(input: {
   /** D30 — the room's MOST RECENT session today is `ended`. Absent is false, so every caller
    *  that has not been taught about the seventh state keeps exactly the chain it had. */
   lastSessionEnded?: boolean;
+  /** ARCH #15 — the newest session is ended AND died at start (sessionDiedAtStart). Absent is false. Only read when lastSessionEnded. */
+  lastSessionStartFailed?: boolean;
   /** Audio recorded in this room today, summed from the PIECES themselves. Null or zero simply
    *  drops the duration from the label; it never suppresses the state. */
   recordedMsToday?: number | null;
@@ -353,6 +408,16 @@ export function roomState(input: {
   // 4 FINISHED FOR TODAY (D30). Ahead of ready, dropped and offline, because a day that was
   // ended on purpose ALREADY EXPLAINS the quiet kiosk and each of those three would describe it
   // as an accident. Never amber: nothing here needs anybody to do anything.
+  if (input.lastSessionEnded && input.lastSessionStartFailed) {
+    return {
+      state: "start_failed",
+      label: "Failed to start — no audio recorded",
+      hint: START_FAILED_HINT,
+      level: "red",
+      // Same rule as finished: the retry button is offered only where a kiosk is listening for it.
+      start_available: listening,
+    };
+  }
   if (input.lastSessionEnded) {
     const rec = Number(input.recordedMsToday);
     const dur = Number.isFinite(rec) && rec > 0 ? ` · ${fmtCoarse(rec)} recorded` : "";
@@ -407,11 +472,43 @@ export function roomState(input: {
  * are R2.5. Until then these thresholds are deliberately coarse: each one is a condition no working
  * room meets, so a flag means "go and look", never "this is the diagnosis".
  */
+export type InputDeviceFact = { name: string; uid?: string; is_default?: boolean; is_selected?: boolean };
+
+/**
+ * PURE — Arch #22. The attached input this room should be looking at instead of the one it is on, or null.
+ *
+ * THE SELECTED DEVICE is the entry the recorder marked `is_selected` (its configured device uid). An app that does not send the mark is matched by
+ * NAME against `selectedName`; if two attached devices share that name the selection is ambiguous and this returns null rather than guess. A selected
+ * device that cannot be identified is DEVICE_MISSING's business, not this one.
+ *
+ * THE CANDIDATE is the OS default input when it is not the selected one (the 7 Oct case: a working C270 was the OS default while the recorder sat on
+ * TONOR), else the first other attached input in the app's order. "Attached" is all this knows: the kiosk does not report another device's level,
+ * so the alert says SUSPECTED and names the candidate; it never claims the candidate is live.
+ */
+export function wrongInputCandidate(
+  devices: ReadonlyArray<InputDeviceFact> | null | undefined,
+  selectedName: string | null | undefined,
+): InputDeviceFact | null {
+  if (!Array.isArray(devices) || devices.length < 2) return null;
+  const marked = devices.filter((d) => d && d.is_selected === true);
+  let selected: InputDeviceFact | null = null;
+  if (marked.length === 1) selected = marked[0]!;
+  else if (marked.length === 0 && selectedName) {
+    const byName = devices.filter((d) => d && d.name === selectedName);
+    if (byName.length === 1) selected = byName[0]!;
+  }
+  if (!selected) return null;
+  const others = devices.filter((d) => d && d !== selected && !(selected!.uid !== undefined && d.uid === selected!.uid));
+  if (others.length === 0) return null;
+  return others.find((d) => d.is_default === true) ?? others[0]!;
+}
+
 export type InstallStateFlag =
   | "SILENT_WHILE_RECORDING"
   | "CLIPPING"
   | "DEVICE_MISSING"
   | "DEVICE_CHANGED"
+  | "WRONG_INPUT_SUSPECTED"
   | "ENCODER_STALLED"
   | "DISK_LOW"
   | "CHANNEL_DRIFT";
@@ -422,6 +519,7 @@ export const INSTALL_STATE_FLAGS: readonly InstallStateFlag[] = [
   "CLIPPING",
   "DEVICE_MISSING",
   "DEVICE_CHANGED",
+  "WRONG_INPUT_SUSPECTED",
   "ENCODER_STALLED",
   "DISK_LOW",
   "CHANNEL_DRIFT",
@@ -435,19 +533,39 @@ export const INSTALL_STATE_FLAGS: readonly InstallStateFlag[] = [
 export const POLL_RING_SIZE = 10;
 
 /**
- * SILENT_WHILE_RECORDING — eighty consecutive polls, about two minutes at the recording cadence.
+ * SILENT_WHILE_RECORDING — eighty consecutive polls, about two minutes at the recording cadence
+ * (`SILENT_POLLS` × `POLL_VISIBLE_MS` = 120 s). That is the capture-dead window: a room must not
+ * sit in exact digital zero for hours before the flag is raised, and two minutes is long enough
+ * that a pause between patients does not raise it — the tape runs through those.
  *
- * `zero_ratio` is BIT-EXACT zeros (B2-D7), not quiet: a quiet room still has a noise floor and reads
- * near zero here, while a dead input reads 1. 0.98 rather than 1 so a device that emits the odd
- * non-zero glitch is still called dead. Two minutes so a room is not called silent for the length of
- * a pause between patients — the tape runs through those.
+ * DIGITAL ZERO, NOT A QUIET ROOM. `zero_ratio` is the share of BIT-EXACT zero samples (B2-D7).
+ * An empty OPD still has a noise floor (AC, corridor, HVAC), so its samples are not exact zeros
+ * and the ratio stays well under this line. A dead or muted capture path reads ~1. 0.98, not 1,
+ * is the Bench live meter's digital-silence rule (`lib/bench-meter.ts`), so one odd non-zero
+ * glitch does not hide a dead input. The alert uses that same ratio.
+ *
+ * PEAK IS THE OTHER HALF, AND IT IS A DELIBERATE DELTA FROM THE METER. The meter paints "digital
+ * silence" from the ratio alone, on the current slice, even when that slice also has a peak.
+ * The alert does not: a checkpoint peak at or above `SILENT_PEAK_MAX` is a live microphone.
+ * The 5 Oct 2026 speak-test on a working C270 measured peaks of 0.012–0.026; 0.01 sits just
+ * under that band. A reported peak at or above it breaks the run, so quiet-but-alive ambient
+ * is not paged as capture death. A poll that omits peak (an app that has not sent one) makes
+ * no claim, and the ratio decides alone.
+ *
+ * `silence_ms` (0.1.22, time since a sample above −55 dBFS) does NOT decide this flag. The PCM
+ * tail meter under-states it: a read covers at most the last 30 s, and a longer gap or a new
+ * file restarts the clock, so the value can stay under two minutes through hours of exact zeros.
+ * While it was allowed to veto the ratio, that is what it did. It also counts any room whose
+ * samples merely sit under −55 dBFS, which is quieter than speech and is not bit-exact zero.
  */
 export const SILENT_POLLS = 80;
 export const SILENT_ZERO_RATIO = 0.98;
+/** A reported checkpoint peak at or above this is a live mic, not digital capture silence. */
+export const SILENT_PEAK_MAX = 0.01;
 /**
- * The same two minutes, measured by the app itself (0.1.22 `silence_ms`): time since the last sample
- * above −55 dBFS. DERIVED from the poll count and the recording cadence, so the two paths name the
- * same duration and cannot drift.
+ * Two minutes in milliseconds, from the poll count and the recording cadence. Kept so a reader
+ * can name the window. Not a second silence rule: `silence_ms` is stored and is not consulted
+ * when the flag is raised.
  */
 export const SILENT_MS = SILENT_POLLS * POLL_VISIBLE_MS;
 
@@ -489,10 +607,11 @@ export const CHANNEL_DRIFT_MS = 30 * 60_000;
 
 /** What a person reads on the card and in the MCP. Short: they sit in a chip. */
 export const INSTALL_STATE_LABEL: Record<InstallStateFlag, string> = {
-  SILENT_WHILE_RECORDING: "silent while recording",
+  SILENT_WHILE_RECORDING: "digital silence",
   CLIPPING: "clipping",
   DEVICE_MISSING: "device missing",
   DEVICE_CHANGED: "device changed",
+  WRONG_INPUT_SUSPECTED: "wrong input suspected",
   ENCODER_STALLED: "encoder stalled",
   DISK_LOW: "disk low",
   CHANNEL_DRIFT: "channel drift",
@@ -581,12 +700,36 @@ export function parsePollRing(raw: unknown): PollRingEntry[] {
 }
 
 /**
- * PURE — is THIS poll a silent one, for the carried count? Only this poll's own readings: the history
- * is the count the SQL carries, and a poll that did not report `zero_ratio` breaks the run (it made
- * no claim, and "two minutes of silence" must be two minutes of MEASURED silence).
+ * PURE — is THIS poll digital capture silence, for the carried count?
+ *
+ * Recording, the tape advancing, and `zero_ratio` at or above the Bench line (0.98). A reported
+ * peak at or above `SILENT_PEAK_MAX` is a live mic and is not silence. A poll that did not report
+ * `zero_ratio` breaks the run: it made no claim, and two minutes of silence must be two minutes
+ * of measured silence. The history is the count the SQL carries (`nextSilentPolls`).
  */
-export function pollIsSilent(p: { rec: boolean; tape_advancing: boolean | null; zero_ratio: number | null }): boolean {
-  return p.rec && p.tape_advancing === true && p.zero_ratio !== null && p.zero_ratio >= SILENT_ZERO_RATIO;
+export function pollIsSilent(p: {
+  rec: boolean;
+  tape_advancing: boolean | null;
+  zero_ratio: number | null;
+  peak?: number | null;
+}): boolean {
+  if (!(p.rec && p.tape_advancing === true && p.zero_ratio !== null && p.zero_ratio >= SILENT_ZERO_RATIO)) return false;
+  if (typeof p.peak === "number" && Number.isFinite(p.peak) && p.peak >= SILENT_PEAK_MAX) return false;
+  return true;
+}
+
+/**
+ * PURE — the consecutive digital-silence count after this poll, including it.
+ *
+ * The poll UPDATE in `applyInstallPoll` implements this: a silent poll adds one to the previous
+ * head, and any other poll writes zero. A speak-energy poll therefore clears the run on that poll.
+ */
+export function nextSilentPolls(
+  previous: number,
+  poll: { rec: boolean; tape_advancing: boolean | null; zero_ratio: number | null; peak?: number | null },
+): number {
+  const prev = Number.isFinite(previous) ? Math.max(0, Math.trunc(previous)) : 0;
+  return pollIsSilent(poll) ? prev + 1 : 0;
 }
 
 /** PURE — did this ring entry see clipping? `clip_count` when the app sent one, else `peak`. */
@@ -602,8 +745,10 @@ export function pollClipped(e: PollRingEntry): boolean {
  * UPDATE returned, so a poll that omitted a field is judged on the last value the row holds — the same
  * value the card shows. `recording` and `tapeAdvancing` are THIS poll's.
  *
- * `silenceMs` is the 0.1.22 heartbeat. PRESENT, it decides SILENT_WHILE_RECORDING on its own; ABSENT
- * (every 0.1.21 app), the carried `zero_ratio` count decides. The fallback is the spec's, not a guess.
+ * SILENT_WHILE_RECORDING follows the carried digital-silence count (`silent_polls`), which
+ * `pollIsSilent` built from this poll's `zero_ratio` and peak. `silenceMs` is not read: a short
+ * value under-states (the PCM clock restarts) and used to hide hours of exact zeros, and a long
+ * value is only "nothing above −55 dBFS", which a quiet live room can be.
  *
  * Returns the new record. The caller writes it only when it differs from `prev`.
  */
@@ -612,13 +757,17 @@ export function evaluateInstallStates(input: {
   recording: boolean;
   tapeAdvancing: boolean | null;
   inputDeviceName: string | null;
-  inputDevices: ReadonlyArray<{ name: string }> | null;
+  inputDevices: ReadonlyArray<{ name: string; uid?: string; is_default?: boolean; is_selected?: boolean }> | null;
   expectedDeviceName: string | null;
   diskFreeBytes: number | null;
   updateChannel: string | null;
   assignedChannel: string | null;
   /** Tier 1 §3. The 0.1.22 heartbeat's lock. Absent on every earlier app, and absent is not locked. */
   channelLocked?: boolean | null;
+  /**
+   * 0.1.22 heartbeat, kept on the call so a poll can still pass it through. Not read: digital
+   * silence is the carried zero-ratio count. See `SILENT_POLLS`.
+   */
   silenceMs?: number | null;
   prev: InstallStateRecord;
   nowMs: number;
@@ -626,11 +775,14 @@ export function evaluateInstallStates(input: {
   const flags = new Set<InstallStateFlag>();
   const head = input.ring[0];
 
-  if (input.recording && input.tapeAdvancing === true) {
-    const ms = typeof input.silenceMs === "number" && Number.isFinite(input.silenceMs) ? input.silenceMs : null;
-    if (ms !== null ? ms >= SILENT_MS : (head?.silent_polls ?? 0) >= SILENT_POLLS) {
-      flags.add("SILENT_WHILE_RECORDING");
-    }
+  if (input.recording && input.tapeAdvancing === true && (head?.silent_polls ?? 0) >= SILENT_POLLS) {
+    flags.add("SILENT_WHILE_RECORDING");
+  }
+
+  // Arch #22. The digital-silence rule above, plus another attached input. SILENT_WHILE_RECORDING stays raised beside it: this one adds the
+  // recoverable cause and the candidate to look at. Alert-only; nothing here switches a device.
+  if (flags.has("SILENT_WHILE_RECORDING") && wrongInputCandidate(input.inputDevices, input.inputDeviceName)) {
+    flags.add("WRONG_INPUT_SUSPECTED");
   }
 
   if (input.recording && input.ring.filter((e) => e.rec && pollClipped(e)).length >= CLIP_POLLS_MIN) {

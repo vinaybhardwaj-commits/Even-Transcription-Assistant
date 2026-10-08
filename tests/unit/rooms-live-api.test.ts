@@ -25,14 +25,18 @@ const MACH: Record<string, string> = {
   room_pnyc9u49: "EHRC-CONSUL6s-Mac-mini", room_qyzghzaf: "EHRC-CONSUL7s-Mac-mini", room_ymch4bxu: "EHRC-DISCUSSIONs-Mac-mini", room_bh6jtq4t: "EHRC-ECHOs-Mac-mini",
 };
 
-type Opt = { fail?: string[]; calls?: string[]; unplugged?: string; muted?: string };
+type Opt = { fail?: string[]; calls?: string[]; unplugged?: string; muted?: string; config?: Array<{ key: string; value: unknown }>; configFails?: boolean; decisions?: Array<Record<string, unknown>> };
 function fakeDb(o: Opt = {}) {
   const calls: string[] = o.calls ?? [];
   const db = (async (strings: TemplateStringsArray) => {
     const text = strings.join("?");
+    if (text.includes("FROM steward_config") && text.includes("key = ANY")) {
+      if (o.configFails) throw new Error("boom steward_config");
+      return o.config ?? [];
+    }
     if (text.includes("FROM steward_config")) return [];
     if (text.includes("FROM room WHERE")) return ROOM_IDS.map((id) => ({ room_id: id, name: id }));
-    const name = ["bench_listener", "room_install", "bench_session", "bench_level_sample", "steward_decisions", "kiosk_health_events", "pulse_presence_events"].find((n) => text.includes(`FROM ${n}`));
+    const name = ["bench_listener", "room_install", "bench_session", "bench_level_sample", "steward_decisions", "kiosk_health_events", "pulse_presence_events", "eta_encounter_windows"].find((n) => text.includes(`FROM ${n}`));
     calls.push(name ?? "?");
     if (!name) throw new Error("unexpected statement " + text.slice(0, 60));
     if (o.fail?.includes(name)) throw new Error("boom with a secret postgres://user:pw@host/db");
@@ -40,7 +44,8 @@ function fakeDb(o: Opt = {}) {
     if (name === "room_install") return ROOM_IDS.map((id) => ({ room_id: id, hostname: HOST[id], state_flags: { flags: id === o.unplugged ? ["DEVICE_MISSING"] : [], drift_since: null }, state_changed_at: iso(NOW - 600_000), input_device_name: "C270 HD WEBCAM", input_devices: id === o.unplugged ? [] : [{ name: "C270 HD WEBCAM" }] }));
     if (name === "bench_session") return ROOM_IDS.map((id) => ({ room_id: id, id: "bs_" + id, status: "recording", started_at: iso(NOW - 3_600_000), last_chunk_at: iso(NOW - 70_000) }));
     if (name === "bench_level_sample") return ROOM_IDS.flatMap((id) => Array.from({ length: 150 }, (_, i) => ({ room_id: id, sampled_at: iso(NOW - 800 - i * 2300), peak: id === o.muted ? 0 : i < 4 ? 0.035 + i * 0.002 : 0.009 + (i % 5) * 0.0004, zero_ratio: id === o.muted ? 1 : 0.001 })));
-    if (name === "steward_decisions") return [];
+    if (name === "steward_decisions") return o.decisions ?? [];
+    if (name === "eta_encounter_windows") return [];
     if (name === "kiosk_health_events") return Object.values(MACH).map((m) => ({ machine: m, received_at: iso(NOW - 20_000) }));
     return Object.values(MACH).map((m) => ({ machine: m, ts: iso(NOW - 10_000), dn: "Test Clinician", enc: null }));
   }) as unknown as import("@/lib/rooms-live/read").Db;
@@ -63,7 +68,7 @@ describe("row shape", () => {
     expect(s.rooms.map((r) => r.room_id)).toEqual(ROOMS.map((r) => r.room_id));
     expect(s.rooms.map((r) => r.label)).toEqual(ROOMS.map((r) => r.label));
     const r = s.rooms[0]!;
-    expect(Object.keys(r).sort()).toEqual(["ages_s", "baseline_rms", "claim", "detail_code", "device", "doctor", "doctor_known", "label", "level", "room_id", "session", "state", "state_since", "steward"].sort());
+    expect(Object.keys(r).sort()).toEqual(["ages_s", "baseline_rms", "claim", "detail_code", "device", "doctor", "doctor_known", "label", "level", "room_id", "session", "state", "state_since", "steward", "steward_line", "steward_log"].sort());
     expect(Object.keys(r.level).sort()).toEqual(["at", "rms", "stale", "zero"]);
     expect(Object.keys(r.ages_s).sort()).toEqual(["heartbeat", "listener", "ext"].sort());
     expect(r.doctor).toEqual({ display: "Clinician T", activity: "Signed in" }); // F28: the occupant's name (page_name), not the ext event's display_name
@@ -220,5 +225,53 @@ describe("guard (open access, owner ruling 8 Oct 2026)", () => {
     expect(await roomsLivePageGuard()).toEqual({ kind: "open", name: "staff" });
     M.staff.value = await signStaffJwt("Reception");
     expect(await roomsLivePageGuard()).toEqual({ kind: "staff", name: "Reception" });
+  });
+});
+
+describe("v1.7: the Steward on the page (additive fields, degraded path)", () => {
+  const CFG = [
+    { key: "kill_switch", value: { on: false } },
+    { key: "shadow", value: { global: false, actions: { scribe_stop: true, scribe_restart: true, alert: true, message: true, "ticket:wake": true, "ticket:open_pulse": true, "ticket:relaunch_chrome": true, "ticket:policy_cycle": true, "ticket:restart_recorder_app": true, "ticket:restart_kiosk_health": true } } },
+    { key: "start_day_live", value: { on: true } },
+    { key: "last_tick", value: { at: iso(NOW - 60_000) } },
+  ];
+  const ROOM = "room_ux92qpws";
+  const dec = (minAgo: number, rule: string, action: string, mode: string, result: string | null, pstate: string | null = null, room = ROOM) => ({ room_id: room, ts: iso(NOW - minAgo * 60_000), rule, action, mode, result, pstate, id: 1 });
+  it("adds steward_status, changes_today and the per-room steward_line / steward_log; the existing fields are untouched", async () => {
+    const base = await buildSnapshot({ db: fakeDb().db, now: () => NOW });
+    resetMemoForTests();
+    const decisions = [dec(4, "session_died", "log_only", "shadow", null, "confirming"), dec(20, "session_died", "scribe_restart", "shadow", "kill_switch"), dec(90, "not_recording", "scribe_start", "live", "ok: start_day acked")];
+    const s = await buildSnapshot({ db: fakeDb({ config: CFG, decisions }).db, now: () => NOW });
+    expect(s.steward_status).toEqual({ state: "on", last_tick_at: iso(NOW - 60_000), starts_live: true, others: "watching" });
+    const r = s.rooms.find((x) => x.room_id === ROOM)!;
+    expect(r.steward_line?.text).toMatch(/^Steward would have restarted recording at \d\d:\d\d \(watching only, not done\)$/);
+    expect(r.steward_log.map((l) => l.kind)).toEqual(["note", "action", "action"]); // newest first
+    expect(s.changes_today.every((c) => c.tag === "Steward" && c.label.length > 0)).toBe(true);
+    expect(s.changes_today.length).toBeGreaterThan(0);
+    // existing fields byte-identical: every key the old snapshot had is equal (the fake serves the same decisions to readSteward, which only feeds the overlay)
+    const strip = (x: typeof r) => { const { steward_line: _l, steward_log: _g, steward: _s, ...rest } = x; return rest; };
+    for (const o of base.rooms) expect(strip(s.rooms.find((x) => x.room_id === o.room_id)! as never)).toEqual(strip(o as never));
+    expect(s.degraded).toEqual([]);
+  });
+  it("steward_config unreadable (the read fails): degraded names it, the strip data says unavailable, every card still renders", async () => {
+    const s = await buildSnapshot({ db: fakeDb({ configFails: true }).db, now: () => NOW });
+    expect(s.degraded).toEqual(["steward_config"]);
+    expect(s.steward_status).toEqual({ state: "unavailable" });
+    expect(s.rooms).toHaveLength(8);
+    expect(s.rooms.every((r) => r.state === "listening")).toBe(true);
+  });
+  it("a steward_config with no kill_switch row is 'unavailable', not 'off'", async () => {
+    const s = await buildSnapshot({ db: fakeDb({ config: [] }).db, now: () => NOW });
+    expect(s.steward_status).toEqual({ state: "unavailable" });
+  });
+  it("the decision reads failing: the cards render with no Steward line, and the failure is named once", async () => {
+    const s = await buildSnapshot({ db: fakeDb({ config: CFG, fail: ["steward_decisions"] }).db, now: () => NOW });
+    expect(s.degraded).toEqual(["steward_decisions"]);
+    expect(s.rooms.every((r) => r.steward_line === null && r.steward_log.length === 0)).toBe(true);
+    expect(s.changes_today).toEqual([]);
+  });
+  it("kill switch on: status 'off'", async () => {
+    const s = await buildSnapshot({ db: fakeDb({ config: CFG.map((r) => (r.key === "kill_switch" ? { key: "kill_switch", value: { on: true } } : r)) }).db, now: () => NOW });
+    expect(s.steward_status).toMatchObject({ state: "off" });
   });
 });

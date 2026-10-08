@@ -144,7 +144,7 @@ import {
   type TranscriptCounts,
 } from "@/lib/room-facts";
 import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
-import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, type InstallStateFlag } from "@/lib/bench-bus-constants";
+import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, sessionDiedAtStart, type InstallStateFlag } from "@/lib/bench-bus-constants";
 import { levelForSpan, parseMicLevelPair, QUIET_FLOOR_RMS, readLevelSamplesInRange, type SegmentLevel } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
@@ -538,6 +538,22 @@ async function sendAndWait(room: RoomRef, kind: CommandKind, args: unknown, list
       : { ok: false, error: "kiosk_not_listening", ...base };
   }
   const result = (typeof row.result === "object" && row.result !== null ? row.result : {}) as Record<string, unknown>;
+  // ARCH #17 (C2) — a start the app ACCEPTED but could not run yet (it is waiting for the input device) is PENDING, not started. ok:true means the
+  // command was accepted; `started:false` and `pending:true` say no recording exists yet. A late failure flips the command to failed (see ackCommand).
+  if (kind === "start_day" && row.status === "acked" && result.deferred === true) {
+    return {
+      ok: true,
+      pending: true,
+      deferred: true,
+      started: false,
+      session_id: null,
+      status: "pending",
+      ...base,
+      result,
+      hint: "the kiosk accepted the start but is waiting for its input device; no recording exists yet. Check scribe_diff_room / scribe_get_session; a failure to start arrives as a failed start_day (Remote start failed).",
+      acked_at: row.acked_at ? new Date(row.acked_at).toISOString() : null,
+    };
+  }
   return {
     ok: row.status === "acked",
     status: row.status,
@@ -2898,6 +2914,10 @@ const diffRoom: McpTool = {
                 recordingSince: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
                 nowMs: now.getTime(),
                 lastSessionEnded,
+                lastSessionStartFailed: Boolean(
+                  lastSessionEnded && newestSession &&
+                  sessionDiedAtStart({ ...newestSession, primary_chunks: newestSession.chunk_count, backup_chunks: newestSession.backup_chunk_count, notes: newestSession.notes, start_failed_ack: newestSession.start_failed_ack }),
+                ),
                 recordedMsToday: Number(live.audio_recorded_ms) || 0,
               }),
               // Additive and ORTHOGONAL to `state` above: that is a precedence chain, these are a

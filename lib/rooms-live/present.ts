@@ -124,8 +124,14 @@ export function forMinutes(since: string | null, nowMs: number): string | null {
   return m < 1 ? "For under a minute" : m < 120 ? `For ${m} min` : `For ${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
-/** 0..1 for the sound bar: a log scale, 0.001 -> 0 and 0.1 -> 1 (healthy ambient 0.01 sits at the middle) */
-export function barFraction(rms: number | null): number {
+/** v1.4: the sound bar is drawn against the room's own floor, max(baseline, 0.008): ratio 1 -> 0, ratio 4 -> 1 on a log2 scale. Floor-level audio draws empty, never at half height. */
+export const BAR_FLOOR_MIN = 0.008;
+export const BAR_FULL_RATIO = 4;
+export const BAR_SPEECH_RATIO = 1.25;
+export function barFraction(rms: number | null, baseline: number | null = null): number {
   if (rms === null || !(rms > 0)) return 0;
-  return Math.max(0, Math.min(1, (Math.log10(rms) + 3) / 2));
+  const ratio = rms / Math.max(BAR_FLOOR_MIN, baseline ?? 0);
+  return Math.max(0, Math.min(1, Math.log2(ratio) / Math.log2(BAR_FULL_RATIO)));
 }
+/** where the 1.25 x floor tick sits on the bar (0..1): the point where a row starts to count toward "listening" */
+export const BAR_TICK_FRACTION = Math.log2(BAR_SPEECH_RATIO) / Math.log2(BAR_FULL_RATIO);

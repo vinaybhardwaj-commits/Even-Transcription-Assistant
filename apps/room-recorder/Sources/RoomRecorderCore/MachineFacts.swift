@@ -33,6 +33,9 @@ public struct MachineFacts: Equatable, Sendable {
   /// The display name of the configured input device, read now. Nil when that device is not
   /// currently attached — an unplugged mic is not a renamed one.
   public var inputDeviceName: String?
+  /// Arch #22. The uid of the device this room is CONFIGURED to record from, as the caller passed it to `read(inputDeviceUID:)`. Carried so the
+  /// device list can mark which entry is the selected one. Not a measurement of attachment: `inputDevices` says what is attached.
+  public var inputDeviceUID: String?
   /// Release B2 (D10). Every input device attached now, the system default marked. Nil when
   /// CoreAudio could not be asked. Read-only: the app reports the list and changes nothing.
   public var inputDevices: [AudioInputDeviceEntry]?
@@ -54,8 +57,10 @@ public struct MachineFacts: Equatable, Sendable {
     inputDeviceName: String?,
     inputDevices: [AudioInputDeviceEntry]? = nil,
     inputVolume: Double? = nil,
-    inputVolumeSettable: Bool? = nil
+    inputVolumeSettable: Bool? = nil,
+    inputDeviceUID: String? = nil
   ) {
+    self.inputDeviceUID = inputDeviceUID
     self.micState = micState
     self.neverSleep = neverSleep
     self.launchedBy = launchedBy
@@ -93,7 +98,8 @@ public enum MachineFactsReader {
       inputDeviceName: inputDeviceName(forUID: inputDeviceUID),
       inputDevices: AudioInputDevices.list(),
       inputVolume: volume?.value,
-      inputVolumeSettable: volume?.settable
+      inputVolumeSettable: volume?.settable,
+      inputDeviceUID: inputDeviceUID
     )
   }
 

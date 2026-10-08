@@ -9,15 +9,15 @@ const sqlOf = (text: string): string[] => [...text.matchAll(/\bdb`([^`]*)`/g)].m
 const all = files.flatMap((f) => sqlOf(readFileSync(join(DIR, f), "utf8")).map((s) => ({ f, s })));
 
 describe("every SQL string in lib/rooms-live", () => {
-  it("finds the 10 statements of this module (7 now-reads + the day read + the 2 roster reads; occupancy is imported from lib/steward)", () => {
-    expect(all.length).toBe(10);
+  it("finds the 15 statements of this module (8 now-reads + the day read + the 2 roster reads + the 3 v1.7 Steward reads + the A1 history read; occupancy is imported from lib/steward)", () => {
+    expect(all.length).toBe(15);
   });
   it("has a LIMIT", () => {
     for (const { f, s } of all) expect(/\bLIMIT\b/i.test(s), `${f}: ${s.slice(0, 80)}`).toBe(true);
   });
   it("is bounded by the room allow-list (room_id / machine = ANY or a single room) or a time bound", () => {
     for (const { f, s } of all) {
-      const ok = /(room_id|machine|id) = ANY\(\$\{/i.test(s) || /room_id = \$\{/i.test(s) || /steward_config WHERE key = \$\{/i.test(s);
+      const ok = /(room_id|machine|id) = ANY\(\$\{/i.test(s) || /room_id = \$\{/i.test(s) || /steward_config WHERE key = (\$\{|ANY\(\$\{)/i.test(s);
       const timed = /interval '\d+ (minutes|hours)'/i.test(s) || /ist_day = \$\{/i.test(s);
       expect(ok || timed, `${f}: ${s.slice(0, 80)}`).toBe(true);
     }
@@ -27,6 +27,19 @@ describe("every SQL string in lib/rooms-live", () => {
       expect(/interval '\d+ (minutes|hours)'/i.test(s), `${f}: time window`).toBe(true);
       expect(/(room_id|machine) = ANY\(\$\{/i.test(s), `${f}: allow-list`).toBe(true);
     }
+  });
+  it("the warehouse consult read is capped, scoped to the allow-list, to the warehouse source and to today, and selects no uid", () => {
+    const s = all.find((x) => /FROM eta_encounter_windows/.test(x.s))!.s;
+    expect(s).toMatch(/attribution_source = 'warehouse'/);
+    expect(s).toMatch(/machine = ANY\(\$\{/);
+    expect(s).toMatch(/DISTINCT ON \(w\.machine\)/);
+    expect(s).toMatch(/LIMIT 40\b/);
+    expect(s).not.toMatch(/doctor_uid/);
+  });
+  it("the level read covers 45 minutes and LIMIT 12000", () => {
+    const s = all.find((x) => /FROM bench_level_sample/.test(x.s))!.s;
+    expect(s).toMatch(/interval '45 minutes'/);
+    expect(s).toMatch(/LIMIT 12000\b/);
   });
   it("is read-only: no INSERT / UPDATE / DELETE / DDL anywhere in the module", () => {
     for (const f of files) {

@@ -64,6 +64,7 @@ vi.mock("next/server", async (orig) => ({ ...((await orig()) as Record<string, u
 
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-arch21-rehome");
+process.env.BENCH_CHUNK_REAPED_REPLIES = "1";   // the new replies / re-home are behind this server flag (default OFF)
 const { POST } = await import("@/app/api/bench/chunks/route");
 
 const reaped = (id: string) => ({ id, room_id: "room_opd4", room_slug: "opd-4", started_at: "2026-10-07T03:30:00.000Z", status: "ended", ended_at: "2026-10-07T06:56:31.000Z", notes: "auto-ended: no chunks >30m (reaper)" });
@@ -113,6 +114,16 @@ describe.runIf(HAVE)("R4 — concurrent late chunks of one reaped session", () =
     expect(rows.map((r) => `${r.source}:${r.idx}`).sort()).toEqual(["backup:90003", "backup:90004", "primary:90003", "primary:90004", "primary:90005"]);   // the retry of 3 is idempotent
     expect((await pg.sql`SELECT count(*)::int AS n FROM bench_chunk WHERE session_id = 'bs_A'`)[0]).toEqual({ n: 0 });                                    // nothing in the ended session
   }, 120_000);
+
+  it("round 2 — a retry loop writes ONE chunk_rehomed event per piece (natural key: home session + source + rehomed idx)", async () => {
+    const h = (await homes("bs_A"))[0]!;
+    await late("bs_A", 3, "primary", "2026-10-07T10:11:00.000Z");
+    await late("bs_A", 3, "primary", "2026-10-07T10:11:00.000Z");
+    const n = (await pg.sql`SELECT count(*)::int AS n FROM bench_event WHERE session_id = ${h.id} AND kind = 'chunk_rehomed' AND payload->>'chunk_source' = 'primary' AND (payload->>'rehomed_idx')::int = 90003`)[0] as { n: number };
+    expect(n.n).toBe(1);
+    const all = (await pg.sql`SELECT count(*)::int AS n FROM bench_event WHERE session_id = ${h.id} AND kind = 'chunk_rehomed'`)[0] as { n: number };
+    expect(all.n).toBe(5);   // primary 3,4,5 + backup 3,4 — one each, however many times each was sent
+  }, 60_000);
 
   it("R5 — the home's bounds cover every piece that landed in it", async () => {
     const h = (await homes("bs_A"))[0]!;

@@ -8,6 +8,11 @@
  * shadow.actions[action] !== true selects the LiveExecutor, which implements scribe_start (re-checked at execution time); any other live action throws and the loop records it as
  * shadow with result "blocked: live executor not enabled in P0" and names it in `degraded`. Caps (rules.ts) count only rows whose result is ok / failed.
  *
+ * FIRE THEN COLLECT (F44). A live start is issued in the room loop (its "sending" row, the flag re-read and the executor's re-checks all unchanged) but its ack is NOT awaited there:
+ * every eligible start is in flight at once and the acks are collected together after the room loop, inside the tick budget. No ack in the tick = "pending: sent, awaiting ack
+ * command_id=..." (not a failure). A later tick RECONCILES each pending row from bench_command (reconcilePending): acked -> "ok: start_day acked (late)", failed / expired -> "failed:",
+ * still pending after START_NO_ACK_FAIL_S -> "failed: no ack after 120 s". The row is UPDATED IN PLACE (one row per attempt, as the "sending" row is).
+ *
  * CONFIG. Read BEFORE the lease. No `rooms` / `schedule` (or a failed read) = the tick is skipped with {ok:false, reason:"config_unavailable"}: nothing is taken, nothing released.
  * BUDGET. Sensing and the decision-log read share the first (budget - 3 s); every source read has its own timeout (steward_config source_timeout_ms, default 6 s); the last 3 s
  * are reserved for the decisions INSERT, which a tick always attempts once it holds the lease and has a config.
@@ -25,7 +30,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, parseConfig, type Config, type RosterRow } from "./config";
-import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
+import { LIVE_EXECUTOR_DISABLED, LiveExecutor, PENDING_PREFIX, isDeferredAck, ShadowExecutor, dispatch, type Executor } from "./executor";
+import { START_NO_ACK_FAIL_S } from "./start-schedule";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
 import { senseAll } from "./sense";
 import { SourceTimeout, raceTimeout } from "./timeout";
@@ -155,6 +161,9 @@ export function outcomeOf(result: string | null): RecentAction["outcome"] {
 
 type DbRow = { id?: unknown; room_id: string | null; ts: unknown; rule: string; action: string; params: unknown; result: string | null; primary?: unknown; failing_class?: string | null };
 
+/** the cap on the 24 h rule-memory read in loadRecent */
+export const RECENT_ROWS_LIMIT = 3000;
+
 async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promise<{ lastPrimary: Map<string, DbRow>; recentRows: Map<string, RecentAction[]>; fleetRows: DbRow[] }> {
   const hi = new Date(A).toISOString();
   // newest primary row per room (the dedupe reference), last 24 h — (room_id, ts DESC) index
@@ -171,8 +180,10 @@ async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promis
       FROM steward_decisions d
      WHERE d.room_id = ANY(${roomIds}::text[]) AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz AND d.action <> 'none'
      ORDER BY d.ts DESC, d.id DESC
-     LIMIT 3000
+     LIMIT ${RECENT_ROWS_LIMIT}
   `) as DbRow[];
+  // F44.1 (F5): live volume is ~160 rows a day, far from the cap; if it is ever reached the OLDEST rows are silently cut, so say so (counts only)
+  if (rows.length >= RECENT_ROWS_LIMIT) console.warn(`[steward] decision log read hit its LIMIT (${RECENT_ROWS_LIMIT} rows): the oldest rows of the last 24 h are not in the rules' memory`);
   // fleet incident rows of the last 15 min (room_id NULL)
   const fleet = (await sql`
     SELECT d.room_id, d.ts, d.rule, d.action, d.params, d.result
@@ -225,6 +236,177 @@ async function insertRows(sql: StewardSql, rows: OutRow[]): Promise<unknown[]> {
         why text, why_not text, inputs_hash text, inputs jsonb)
     RETURNING id
   `) as unknown[];
+}
+
+// ---------------------------------------------------------------------------
+// F44: reconcile pending starts
+// ---------------------------------------------------------------------------
+
+/**
+ * R1 (F44.1): one deadline for a whole reconcile. `left()` is the time remaining under it; once it is spent it THROWS SourceTimeout, so no further statement is issued —
+ * the reads and every UPDATE share the one budget instead of each taking a full timeout.
+ */
+function deadlineOf(totalMs: number, now: () => number): () => number {
+  const end = now() + totalMs;
+  return () => {
+    const rest = end - now();
+    if (rest <= 0) throw new SourceTimeout(totalMs);
+    return rest;
+  };
+}
+
+const PENDING_RE = /^pending\b.*command_id=(\S+)/;
+
+/**
+ * Settle the "pending: sent, awaiting ack" rows of the last 24 h from bench_command (the truth about the command). One SELECT for the rows, one for the commands, one UPDATE per settled row
+ * (guarded `result LIKE 'pending%'`, so a second reader or a repeat is a no-op). The row is updated IN PLACE rather than followed by a new row: the log keeps ONE row per attempt (the
+ * invariant the "sending" row already has), the room's dedupe reference and the per-hour caps count the attempt once, and inputs records that it was pending (pending_at, late, settled_at).
+ * Returns the number of rows settled. A failure of either read leaves the rows pending (they are tried again next tick).
+ */
+/**
+ * ARCH #17 (fix F, refute): a deferred start that was SETTLED ok can still turn out to have failed — the app's wait/retries end in a failure ack, which amends the command
+ * to `failed` (ackCommand). Revisit the last 24 h of "ok: start_day deferred then recording" rows: if the command is now failed, the row becomes "failed: …". Guarded
+ * (`result LIKE 'ok: start_day deferred%'`) so a repeat is a no-op, and the command must belong to the SAME room as the decision. Fail-safe: a read fault leaves rows as they are.
+ */
+export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: number, onFault?: () => void, now: () => number = Date.now): Promise<number> {
+  const left = deadlineOf(timeoutMs, now);
+  let revised = 0;
+  let at = { room: "-", cmd: "-" }; // the row being worked on, for the one log line a fault leaves
+  try {
+  const hi = new Date(A).toISOString();
+  const okRows = (await raceTimeout(
+    () => sql`SELECT d.id, d.room_id, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'ok: start_day deferred then recording%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts DESC LIMIT 50`,
+    left(),
+  )) as Array<{ id: unknown; room_id: string | null; result: string | null }>;
+  const todo = okRows.flatMap((r) => {
+    const m = /command_id=(\S+)/.exec(r.result ?? "");
+    return m ? [{ id: r.id, room: r.room_id, cmd: m[1]! }] : [];
+  });
+  if (todo.length === 0) return 0;
+  at = { room: todo[0]!.room ?? "-", cmd: todo[0]!.cmd };
+  const cmds = (await raceTimeout(
+    () => sql`SELECT id, room_id, status, error FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[]) AND status = 'failed'`,
+    left(),
+  )) as Array<{ id: string; room_id: string; status: string; error: string | null }>;
+  const failed = new Map(cmds.map((c) => [c.id, c]));
+  for (const t of todo) {
+    const c = failed.get(t.cmd);
+    if (!c || !t.room || c.room_id !== t.room) continue;
+    at = { room: t.room, cmd: t.cmd };
+    const result = `failed: start_day failed after it was settled ok${c.error ? ` (${String(c.error).slice(0, 80)})` : ""} command_id=${t.cmd}`;
+    await raceTimeout(
+      () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ revised_at: hi, revised_from: "ok" })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE 'ok: start_day deferred%'`,
+      left(),
+    );
+    revised++;
+  }
+  } catch (e) {
+    // Not silent: one line naming the room and command, and the caller's tick is marked degraded (F44's reconcile_pending). The rows stay as they are; the next tick tries again.
+    console.error(`[steward] deferred-start revision failed room=${at.room} command_id=${at.cmd}: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+    onFault?.();
+  }
+  return revised;
+}
+
+/**
+ * R3 (F44.1): a start settled "failed: no ack after 120 s" in the last 30 min can still be acked by a slow kiosk. Revisit those rows: if the command is now `acked` (and not a
+ * deferred ack, which is accepted-not-started), the row becomes "ok: start_day acked (late, after 120 s)" with inputs.late=true. Guarded by the settled result, so a repeat is a
+ * no-op; the command must belong to the SAME room. A read fault leaves the rows as they are (onFault marks the tick degraded).
+ */
+export const LATE_ACK_WINDOW_MIN = 30;
+export async function reviseLateAcks(sql: StewardSql, A: number, timeoutMs: number, onFault?: () => void, now: () => number = Date.now): Promise<number> {
+  const left = deadlineOf(timeoutMs, now);
+  let revised = 0;
+  let at = { room: "-", cmd: "-" };
+  try {
+    const hi = new Date(A).toISOString();
+    const failedRows = (await raceTimeout(
+      () => sql`SELECT d.id, d.room_id, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE ${`failed: no ack after ${START_NO_ACK_FAIL_S} s%`} AND d.ts > ${hi}::timestamptz - make_interval(mins => ${LATE_ACK_WINDOW_MIN}) AND d.ts <= ${hi}::timestamptz ORDER BY d.ts DESC LIMIT 50`,
+      left(),
+    )) as Array<{ id: unknown; room_id: string | null; result: string | null }>;
+    const todo = failedRows.flatMap((r) => {
+      const m = /command_id=(\S+)/.exec(r.result ?? "");
+      return m ? [{ id: r.id, room: r.room_id, cmd: m[1]! }] : [];
+    });
+    if (todo.length === 0) return 0;
+    at = { room: todo[0]!.room ?? "-", cmd: todo[0]!.cmd };
+    const cmds = (await raceTimeout(
+      () => sql`SELECT id, room_id, status, result FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[]) AND status = 'acked'`,
+      left(),
+    )) as Array<{ id: string; room_id: string; status: string; result?: unknown }>;
+    const acked = new Map(cmds.map((c) => [c.id, c]));
+    for (const t of todo) {
+      const c = acked.get(t.cmd);
+      if (!c || c.status !== "acked" || !t.room || c.room_id !== t.room || isDeferredAck(c.result)) continue;
+      at = { room: t.room, cmd: t.cmd };
+      const result = `ok: start_day acked (late, after ${START_NO_ACK_FAIL_S} s) command_id=${t.cmd}`;
+      await raceTimeout(
+        () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ late: true, revised_at: hi, revised_from: "failed" })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE ${`failed: no ack after ${START_NO_ACK_FAIL_S} s%`}`,
+        left(),
+      );
+      revised++;
+    }
+  } catch (e) {
+    console.error(`[steward] late-ack revision failed room=${at.room} command_id=${at.cmd}: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+    onFault?.();
+  }
+  return revised;
+}
+
+export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: number, onReviseFault?: () => void, now: () => number = Date.now): Promise<number> {
+  const left = deadlineOf(timeoutMs, now); // R1: ONE deadline for every read and UPDATE below (and for the revisions)
+  const hi = new Date(A).toISOString();
+  // The revision runs first and is independent of the pending rows below: a fault here never blocks them.
+  const revised = (await reviseDeferredOk(sql, A, left(), onReviseFault, now)) + (await reviseLateAcks(sql, A, left(), onReviseFault, now));
+  const pend = (await raceTimeout(
+    () => sql`SELECT d.id, d.ts, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'pending%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts ASC LIMIT 50`,
+    left(),
+  )) as Array<{ id: unknown; ts: unknown; result: string | null }>;
+  const todo = pend.flatMap((r) => {
+    const m = PENDING_RE.exec(r.result ?? "");
+    return m ? [{ id: r.id, ts: toIso(r.ts), cmd: m[1]! }] : [];
+  });
+  if (todo.length === 0) return revised;
+  const cmds = (await raceTimeout(
+    () => sql`SELECT id, room_id, status, error, created_at, result FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[])`,
+    left(),
+  )) as Array<{ id: string; room_id?: string; status: string; error: string | null; created_at: unknown; result?: unknown }>;
+  const byId = new Map(cmds.map((c) => [c.id, c]));
+  let settled = 0;
+  for (const t of todo) {
+    const c = byId.get(t.cmd);
+    const sentMs = Date.parse(toIso(c?.created_at) ?? t.ts ?? "");
+    const waitedS = Number.isFinite(sentMs) ? (A - sentMs) / 1000 : 0;
+    let result: string | null = null;
+    if (c?.status === "acked" && isDeferredAck(c.result)) {
+      // ARCH #17 (C2): the app ACCEPTED this start and is waiting for its input device; accepted is not started. Settle only on evidence: a session opened for the room
+      // after the command was created (ok), or START_NO_ACK_FAIL_S with none (failed). Otherwise it stays pending. A late failure ack makes the command `failed`, handled below.
+      // "Opened" is not enough (a start that died ~15 s in with no audio also opened a session): the session must be STILL OPEN and must have PRODUCED AUDIO since it began —
+      // a piece of either stream, or a level sample from a poll that reported the session open with the tape advancing (the same evidence the fleet read uses; no new table).
+      const opened = c.room_id && Number.isFinite(sentMs)
+        ? ((await raceTimeout(
+            () => sql`
+              SELECT s.id FROM bench_session s
+               WHERE s.room_id = ${c.room_id!} AND s.started_at >= ${new Date(sentMs).toISOString()}::timestamptz AND s.status IN ('recording', 'paused')
+                 AND (EXISTS (SELECT 1 FROM bench_chunk ch WHERE ch.session_id = s.id)
+                      OR EXISTS (SELECT 1 FROM bench_level_sample l WHERE l.room_id = s.room_id AND l.ist_date >= (s.started_at AT TIME ZONE 'Asia/Kolkata')::date AND l.sampled_at >= s.started_at AND l.session_open IS TRUE AND l.tape_advancing IS TRUE))
+               ORDER BY s.started_at ASC LIMIT 1`,
+            left(),
+          )) as Array<{ id: string }>)
+        : [];
+      if (opened.length) result = `ok: start_day deferred then recording (late) session_id=${opened[0]!.id} command_id=${t.cmd}`;
+      else if (waitedS > START_NO_ACK_FAIL_S) result = `failed: start_day deferred, no recording session after ${START_NO_ACK_FAIL_S} s command_id=${t.cmd}`;
+    } else if (c?.status === "acked") result = `ok: start_day acked (late) command_id=${t.cmd}`;
+    else if (c && (c.status === "failed" || c.status === "expired")) result = `failed: start_day ${c.status}${c.error ? ` (${String(c.error).slice(0, 80)})` : ""} command_id=${t.cmd}`;
+    else if (waitedS > START_NO_ACK_FAIL_S) result = `failed: no ack after ${START_NO_ACK_FAIL_S} s command_id=${t.cmd}`;
+    if (result === null) continue;
+    await raceTimeout(
+      () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ pending_at: t.ts, late: true, settled_at: hi, waited_s: Math.round(waitedS) })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE 'pending%'`,
+      left(),
+    );
+    settled++;
+  }
+  return settled + revised;
 }
 
 export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<StewardSummary> {
@@ -321,16 +503,30 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         degrade("steward_decisions:skipped");
         memoryDegraded = true;
       } else {
+        // F44: settle the pending starts BEFORE the log is read, so the rules and the dedupe see the settled result. A failure leaves them pending; the tick goes on.
+        // R1 (F44.1): the reconcile runs under ONE deadline, and `left` is taken again after it, so a slow reconcile can never push the log read past senseDeadline.
         try {
-          mem = await raceTimeout(() => loadRecent(sql, roster.map((r) => r.room_id), A), Math.min(cfg.source_timeout_ms, left));
-        } catch (e) {
+          await reconcilePending(sql, A, Math.min(cfg.source_timeout_ms, left), () => degrade("reconcile_revise"));
+        } catch {
+          console.error("[steward] pending starts could not be reconciled");
+          degrade("reconcile_pending");
+        }
+        const leftForLog = senseDeadline - now();
+        if (leftForLog <= 0) {
+          degrade("steward_decisions:skipped");
           memoryDegraded = true;
-          if (e instanceof SourceTimeout) {
-            console.error("[steward] decision log read timed out");
-            degrade("steward_decisions:timeout");
-          } else {
-            console.error("[steward] decision log read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
-            degrade("steward_decisions");
+        } else {
+          try {
+            mem = await raceTimeout(() => loadRecent(sql, roster.map((r) => r.room_id), A), Math.min(cfg.source_timeout_ms, leftForLog));
+          } catch (e) {
+            memoryDegraded = true;
+            if (e instanceof SourceTimeout) {
+              console.error("[steward] decision log read timed out");
+              degrade("steward_decisions:timeout");
+            } else {
+              console.error("[steward] decision log read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
+              degrade("steward_decisions");
+            }
           }
         }
       }
@@ -393,12 +589,14 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     /**
      * A LIVE send (F19): (1) refuse when under LIVE_MIN_BUDGET_MS of budget is left ("skipped: budget"); (2) write a "sending" row in its OWN statement (same dedupe key, inputs.attempt_no)
      * — no row, no send; (3) run the executor under live_call_timeout_ms; (4) update THAT row to ok / failed / skipped by id. A hung send leaves the "sending" row (the bench_command table
-     * is the truth about whether a command was queued) and the tick goes on. Returns the row to add to the tick's INSERT, or null when the row already exists in the log.
+     * is the truth about whether a command was queued) and the tick goes on. F44: steps 1-2 and the flag re-read run here; the executor call is STARTED but not awaited: `finish`
+     * collects it (after every room has been issued). Returns the row to add to the tick's INSERT (or null when the row already exists in the log), and `finish` when a send is in flight.
      */
-    const liveSend = async (d: Decision, primary: boolean, seq: number): Promise<OutRow | null> => {
+    type LiveOut = { row: OutRow | null; finish?: () => Promise<OutRow | null> };
+    const liveSend = async (d: Decision, primary: boolean, seq: number): Promise<LiveOut> => {
       if (t0 + opts.budgetMs - now() < LIVE_MIN_BUDGET_MS) {
         degrade("live_budget");
-        return rowOf(d, primary, seq, "live", "skipped: budget");
+        return { row: rowOf(d, primary, seq, "live", "skipped: budget") };
       }
       const attemptNo = (typeof d.inputs.attempts === "number" ? d.inputs.attempts : 0) + 1;
       const sendingRow = rowOf(d, primary, seq, "live", "sending", { attempt_no: attemptNo });
@@ -411,7 +609,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       }
       if (id === null || id === undefined) {
         degrade("steward_decisions");
-        return rowOf(d, primary, seq, "shadow", "blocked: audit row not written, nothing sent", { attempt_no: attemptNo });
+        return { row: rowOf(d, primary, seq, "shadow", "blocked: audit row not written, nothing sent", { attempt_no: attemptNo }) };
       }
       earlyWritten++;
       const t1 = now();
@@ -432,40 +630,46 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
           const skipped = `skipped: ${why}`;
           try {
             await setResult(id, "live", skipped, { call_ms: 0 });
-            return null;
+            return { row: null };
           } catch {
             degrade("steward_decisions");
-            return rowOf(d, primary, seq, "live", skipped, { attempt_no: attemptNo });
+            return { row: rowOf(d, primary, seq, "live", skipped, { attempt_no: attemptNo }) };
           }
         }
       }
       const call = (async () => dispatch(executorFor(true), d))();
-      let mode: "shadow" | "live" = "live";
-      let result: string | null;
-      try {
-        result = (await raceTimeout(() => call, cfg.live_call_timeout_ms))?.result ?? null;
-      } catch (e) {
-        if (e instanceof SourceTimeout) {
-          // the "sending" row stays; if the call finishes later in this process, the row is updated then (best effort)
-          degrade("live_call_timeout");
-          console.error("[steward] live call timed out: the sending row stays");
-          call.then((r) => setResult(id, "live", r?.result ?? null, { call_ms: now() - t1, late: true })).catch(() => {});
-          return null;
+      call.catch(() => {}); // collected later by `finish`; a rejection before then must not be unhandled
+      const finish = async (): Promise<OutRow | null> => {
+        let mode: "shadow" | "live" = "live";
+        let result: string | null;
+        try {
+          result = (await raceTimeout(() => call, Math.max(0, cfg.live_call_timeout_ms - (now() - t1))))?.result ?? null;
+        } catch (e) {
+          if (e instanceof SourceTimeout) {
+            // the "sending" row stays; if the call finishes later in this process, the row is updated then (best effort)
+            degrade("live_call_timeout");
+            console.error("[steward] live call timed out: the sending row stays");
+            call.then((r) => setResult(id, "live", r?.result ?? null, { call_ms: now() - t1, late: true })).catch(() => {});
+            return null;
+          }
+          result = `blocked: ${e instanceof Error ? e.message.slice(0, 120) : LIVE_EXECUTOR_DISABLED}`;
+          mode = "shadow";
+          degrade("live_executor");
         }
-        result = `blocked: ${e instanceof Error ? e.message.slice(0, 120) : LIVE_EXECUTOR_DISABLED}`;
-        mode = "shadow";
-        degrade("live_executor");
-      }
-      try {
-        await setResult(id, mode, result, { call_ms: now() - t1 });
-        return null;
-      } catch {
-        console.error("[steward] the sending row could not be updated: the result goes in a new row");
-        degrade("steward_decisions");
-        return rowOf(d, primary, seq, mode, result, { attempt_no: attemptNo });
-      }
+        try {
+          await setResult(id, mode, result, { call_ms: now() - t1 });
+          return null;
+        } catch {
+          console.error("[steward] the sending row could not be updated: the result goes in a new row");
+          degrade("steward_decisions");
+          return rowOf(d, primary, seq, mode, result, { attempt_no: attemptNo });
+        }
+      };
+      return { row: null, finish };
     };
 
+    /** F44: the live sends issued in this tick whose acks are still to be collected */
+    const inflight: Array<() => Promise<OutRow | null>> = [];
     const record = async (d: Decision, primary: boolean, seq: number): Promise<void> => {
       let mode: "shadow" | "live" = "shadow";
       let result: string | null = null;
@@ -485,8 +689,9 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         } else if (gateFail || neverLive) {
           // result already set above; nothing executes
         } else if (am === "live") {
-          const row = await liveSend(d, primary, seq);
-          if (row) rows.push(row);
+          const out = await liveSend(d, primary, seq);
+          if (out.row) rows.push(out.row);
+          if (out.finish) inflight.push(out.finish);
           return;
         } else {
           try {
@@ -501,47 +706,58 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     };
 
     let processed = 0;
-    for (const room of roster) {
-      if (now() - t0 >= opts.budgetMs) {
-        budgetHit = true;
-        degrade("budget");
-        break;
-      }
-      const sense = senses.get(room.room_id);
-      if (!sense) continue;
-      processed++;
-      const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, fleetCtx));
-      const last = mem.lastPrimary.get(room.room_id);
-      const lastTs = last ? toIso(last.ts) : null;
-      for (let i = 0; i < ds.length; i++) {
-        const d = ds[i]!;
-        if (i === 0) {
-          // A start that would EXECUTE now is never swallowed by a previous row that executed nothing (e.g. "shadow: recorder_ready_under_5m" a minute ago, same key): the attempt goes through.
-          const wouldGoLive = d.action === "scribe_start" && actionMode(cfg, "scribe_start") === "live" && typeof d.inputs.start_gate_fail !== "string";
-          // F21: a retry the schedule allows (the rules only emit scribe_start when the verdict is "go") is exempt from the 15-min dedupe, so the 5 / 15 / 45 min schedule is real. Only a
-          // send still in flight ("sending") or a "skipped:" row younger than 5 min (kiosk not listening, ...) holds the key.
-          const lastR = typeof last?.result === "string" ? last.result : "";
-          const holdsKey = /^sending/.test(lastR) || (/^skipped/.test(lastR) && lastTs !== null && A - Date.parse(lastTs) < 5 * 60_000);
-          const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !holdsKey);
-          if (same) continue;
-        } else {
-          const k = keyOf(d);
-          const dup = (mem.recentRows.get(room.room_id) ?? []).some((r) => keyOf(r) === k && A - Date.parse(r.ts) < DEDUPE_REFRESH_MS);
-          if (dup) continue;
+    let fleetDs: Decision[] = [];
+    // R4 (F44.1): fire -> collect is try/finally. If anything throws between a send and the collect, every in-flight row is still settled (none is left "sending");
+    // the rows already built are then written best-effort and the error goes on to the tick's soft failure.
+    let threw = true;
+    try {
+      for (const room of roster) {
+        if (now() - t0 >= opts.budgetMs) {
+          budgetHit = true;
+          degrade("budget");
+          break;
         }
-        await record(d, i === 0, i);
+        const sense = senses.get(room.room_id);
+        if (!sense) continue;
+        processed++;
+        const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, fleetCtx));
+        const last = mem.lastPrimary.get(room.room_id);
+        const lastTs = last ? toIso(last.ts) : null;
+        for (let i = 0; i < ds.length; i++) {
+          const d = ds[i]!;
+          if (i === 0) {
+            // A start that would EXECUTE now is never swallowed by a previous row that executed nothing (e.g. "shadow: recorder_ready_under_5m" a minute ago, same key): the attempt goes through.
+            const wouldGoLive = d.action === "scribe_start" && actionMode(cfg, "scribe_start") === "live" && typeof d.inputs.start_gate_fail !== "string";
+            // F21: a retry the schedule allows (the rules only emit scribe_start when the verdict is "go") is exempt from the 15-min dedupe, so the 5 / 15 / 45 min schedule is real. Only a
+            // send still in flight ("sending") or a "skipped:" row younger than 5 min (kiosk not listening, ...) holds the key.
+            const lastR = typeof last?.result === "string" ? last.result : "";
+            const holdsKey = /^(sending|pending)/.test(lastR) || (/^skipped/.test(lastR) && lastTs !== null && A - Date.parse(lastTs) < 5 * 60_000);
+            const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !holdsKey);
+            if (same) continue;
+          } else {
+            const k = keyOf(d);
+            const dup = (mem.recentRows.get(room.room_id) ?? []).some((r) => keyOf(r) === k && A - Date.parse(r.ts) < DEDUPE_REFRESH_MS);
+            if (dup) continue;
+          }
+          await record(d, i === 0, i);
+        }
       }
-    }
 
-    // --- fleet incidents (one decision per class)
-    const fleetDs = budgetHit ? [] : fleetDecisions(failingRooms);
-    for (const d of fleetDs) {
-      const k = keyOf(d);
-      const dup = mem.fleetRows.some((r) => keyOf({ rule: r.rule, action: r.action, params: objOf(r.params) }) === k && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
-      // the room list can change between ticks while the incident is the same: dedupe on the class alone
-      const dupClass = mem.fleetRows.some((r) => objOf(r.params).class === d.params.class && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
-      if (dup || dupClass) continue;
-      await record(d, true, 0);
+      // --- fleet incidents (one decision per class)
+      fleetDs = budgetHit ? [] : fleetDecisions(failingRooms);
+      for (const d of fleetDs) {
+        const k = keyOf(d);
+        const dup = mem.fleetRows.some((r) => keyOf({ rule: r.rule, action: r.action, params: objOf(r.params) }) === k && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
+        // the room list can change between ticks while the incident is the same: dedupe on the class alone
+        const dupClass = mem.fleetRows.some((r) => objOf(r.params).class === d.params.class && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
+        if (dup || dupClass) continue;
+        await record(d, true, 0);
+      }
+      threw = false;
+    } finally {
+      // --- F44: collect the acks of every start issued this tick, together (each bounded by live_call_timeout_ms from its own send; the executor's ack wait is already capped to the budget)
+      for (const o of await Promise.all(inflight.map((f) => f()))) if (o) rows.push(o);
+      if (threw && rows.length > 0) await insertRows(sql, rows).catch(() => []);
     }
 
     // --- ONE insert (always attempted when there is something to write)
