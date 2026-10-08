@@ -82,4 +82,24 @@
       #expect(s.sleeps.isEmpty)
     }
   }
+
+  /// Arch #17, refute F1: a start death is retried (3 attempts, backed off) before it is final.
+  @Suite struct StartDeathRetryTests {
+    @Test func theRetryPausesAreBackedOffAndJittered() {
+      #expect(RoomEngine.startAttempts == 3)
+      #expect(RoomEngine.startRetryDelays(jitterRoll: 0) == [2, 5].map { UInt64($0) * 1_000_000_000 })
+      #expect(RoomEngine.startRetryDelays(jitterRoll: 1) == [3, 7.5].map { UInt64($0 * 1_000_000_000) })
+      #expect(RoomEngine.startRetryDelays(jitterRoll: -4) == RoomEngine.startRetryDelays(jitterRoll: 0))
+    }
+
+    @Test func onlyACaptureDeathIsRetried() {
+      #expect(RoomEngine.isStartDeath(RoomEngineError.captureExited(1)))
+      #expect(RoomEngine.isStartDeath(RoomEngineError.captureDidNotBecomeDurable))
+      #expect(RoomEngine.isStartDeath(RoomEngineError.residentArchiveDidNotBecomeDurable))
+      #expect(!RoomEngine.isStartDeath(RoomEngineError.roomPaused))
+      #expect(!RoomEngine.isStartDeath(RoomEngineError.pendingUploads(2)))
+      #expect(!RoomEngine.isStartDeath(RoomEngineError.inputDeviceNotReady("x")))
+      #expect(!RoomEngine.isStartDeath(CancellationError()))
+    }
+  }
 #endif

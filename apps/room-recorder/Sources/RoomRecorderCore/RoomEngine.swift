@@ -526,6 +526,8 @@ public actor RoomEngine {
   /// Release R4. What `set_audio_input` switches between and sets the volume of.
   private let audioInputs: any RoomAudioInputControlling
   private let inputReadyWait: RoomInputReadyWait
+  /// Arch #17. The one background start (device wait and/or retries after a start death), if any. Beside the poll loop, never in it.
+  private var startRetryTask: Task<Void, Never>?
   /// Release R4. The §5.5 machine reading for the poll, for the device config.json names now.
   /// `MachineFactsReader.read` in production; injected so a test can see the poll follow a switch.
   private let machineFacts: @Sendable (String?) -> MachineFacts
@@ -1709,8 +1711,14 @@ public actor RoomEngine {
         try prepareDecisionAcknowledgement(command, success: true)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
       case .start:
-        try await beginOrResume(commandID: command.id)
-        result = CommandResult(ok: true, sessionID: sessionID, error: nil)
+        switch try await attemptStartOrDefer(command) {
+        case .started:
+          result = CommandResult(ok: true, sessionID: sessionID, error: nil)
+        case .deferred:
+          // Accepted, not yet started: the wait / retries run beside the poll loop. The outcome is the
+          // session appearing (or the dead-start / device-missing alert), not this ack.
+          result = CommandResult(ok: true, sessionID: nil, error: nil)
+        }
       case .resume:
         try await resume(commandID: command.id)
         result = CommandResult(ok: true, sessionID: sessionID, error: nil)
@@ -2538,12 +2546,8 @@ public actor RoomEngine {
         priorState: .commandNoop, newState: .startAckReady)
       return
     } else {
-      // Arch #17 — BEFORE a day session is committed: is the input device there? A device that is
-      // not yet attached/answering (five Minis at the 09:06 auto-start, 5 Oct) otherwise opens a
-      // session, loses the tapewriter ~15 s later with no piece, and leaves a dead session behind.
-      // Retry with backoff + jitter; if it never appears, fail BEFORE any session exists so the
-      // command acks failed with a named reason instead of a silent 15 s death.
-      try await waitForInputDeviceReady()
+      // Arch #17: device readiness is decided BEFORE this point, by attemptStartOrDefer — never here, where a
+      // wait would hold the poll loop. beginOrResume only ever runs once the device is there (or unknowable).
       try advanceControl(
         commandID: commandID, commandKind: .startDay, sessionID: nil,
         priorState: nil, newState: .startIntent)
@@ -2652,14 +2656,97 @@ public actor RoomEngine {
     return inputReadyBaseDelays.map { UInt64($0 * (1 + inputReadyJitterFraction * roll) * 1_000_000_000) }
   }
 
-  private func waitForInputDeviceReady() async throws {
-    guard inputReadyWait.enabled else { return }
-    try await Self.awaitInputDevice(
-      uid: configuration.deviceUID,
-      devices: { [audioInputs] in audioInputs.inputDevices() },
-      delays: Self.inputReadyDelays(jitterRoll: inputReadyWait.jitterRoll()),
-      sleep: inputReadyWait.sleep,
-      log: log)
+  // MARK: - Arch #17: start that waits and retries WITHOUT holding the poll loop
+
+  private enum StartOutcome { case started, deferred }
+
+  /// Total start attempts for one start_day (the first plus retries), and the pauses between a start
+  /// death and the next try. Presence is not readiness: a device that is listed can still make the
+  /// tapewriter exit ~15 s in with no piece (5 Oct), so a death is retried before it is final.
+  static let startAttempts = 3
+  static let startRetryBaseDelays: [Double] = [2, 5]
+
+  /// PURE — the pauses after a start death, in nanoseconds, for a jitter roll in 0...1.
+  public static func startRetryDelays(jitterRoll: Double) -> [UInt64] {
+    let roll = min(max(jitterRoll, 0), 1)
+    return startRetryBaseDelays.map { UInt64($0 * (1 + inputReadyJitterFraction * roll) * 1_000_000_000) }
+  }
+
+  /// PURE — errors that mean the capture itself died at start (retryable), as opposed to a refusal.
+  static func isStartDeath(_ error: Error) -> Bool {
+    guard let e = error as? RoomEngineError else { return false }
+    switch e {
+    case .captureExited, .captureDidNotBecomeDurable, .residentArchiveDidNotBecomeDurable,
+      .residentArchiveCaptureStopped:
+      return true
+    default:
+      return false
+    }
+  }
+
+  /// ONE enumeration decides: if the configured device is listed (or the list cannot be read) the start
+  /// runs inline exactly as before; if it is NOT listed the start is accepted at once and waits in the
+  /// background. A first attempt that dies is retried in the background too, then the error surfaces
+  /// as before so the failed ack and the dead-start alert are unchanged.
+  private func attemptStartOrDefer(_ command: BenchCommand) async throws -> StartOutcome {
+    if startRetryTask != nil { return .deferred }   // one background start at a time
+    if inputReadyWait.enabled,
+      Self.inputReadiness(devices: audioInputs.inputDevices(), uid: configuration.deviceUID) == .notReady
+    {
+      spawnStart(commandID: command.id, waitForDevice: true, attempts: Self.startAttempts)
+      return .deferred
+    }
+    do {
+      try await beginOrResume(commandID: command.id)
+      return .started
+    } catch {
+      if inputReadyWait.enabled, Self.isStartDeath(error) {
+        spawnStart(commandID: command.id, waitForDevice: false, attempts: Self.startAttempts - 1)
+      }
+      throw error
+    }
+  }
+
+  private func spawnStart(commandID: String, waitForDevice: Bool, attempts: Int) {
+    startRetryTask = Task { [weak self] in
+      await self?.runBackgroundStart(commandID: commandID, waitForDevice: waitForDevice, attempts: attempts)
+    }
+  }
+
+  private func runBackgroundStart(commandID: String, waitForDevice: Bool, attempts: Int) async {
+    defer { startRetryTask = nil }
+    var left = attempts
+    var waitFirst = waitForDevice
+    let pauses = Self.startRetryDelays(jitterRoll: inputReadyWait.jitterRoll())
+    var tried = 0
+    while left > 0, !Task.isCancelled {
+      do {
+        if waitFirst {
+          try await Self.awaitInputDevice(
+            uid: configuration.deviceUID,
+            devices: { [audioInputs] in audioInputs.inputDevices() },
+            delays: Self.inputReadyDelays(jitterRoll: inputReadyWait.jitterRoll()),
+            sleep: inputReadyWait.sleep, log: log)
+          waitFirst = false
+        } else if tried > 0 {
+          try await inputReadyWait.sleep(pauses[min(tried - 1, pauses.count - 1)])
+        }
+        if phase == .recording || phase == .paused { return }   // started some other way meanwhile
+        left -= 1
+        tried += 1
+        try await beginOrResume(commandID: commandID)
+        log("background start succeeded (attempt \(tried))")
+        return
+      } catch {
+        lastError = bounded(error)
+        log("background start failed (attempt \(tried)): \(bounded(error))")
+        if error is CancellationError { return }
+        if let e = error as? RoomEngineError, case .inputDeviceNotReady = e { break }
+        if !Self.isStartDeath(error) { break }
+      }
+    }
+    if !hasActiveCapture, phase != .paused, phase != .recording { phase = .failed }
+    try? saveStatus()
   }
 
   /// Arch #17 — the retry loop, free of the engine so a test can drive it with a scripted device list

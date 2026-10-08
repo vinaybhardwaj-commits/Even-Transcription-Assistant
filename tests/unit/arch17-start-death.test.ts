@@ -64,6 +64,9 @@ describe("runWatchdog wiring", () => {
     expect(q.text).toMatch(/n\.started_at > s\.started_at/);   // a newer (retry) session clears it
     expect(q.values).toContain(W.START_DEATH_WINDOW_MS / 1000);
     expect(q.values).toContain(180);
+    expect(q.text).toMatch(/s\.ended_at < now\(\) - /);          // F1: final only after the retry grace
+    expect(q.values).toContain(W.START_RETRY_GRACE_MS / 1000);
+    expect(W.START_RETRY_GRACE_MS).toBe(90_000);
   });
   it("a failed read costs only this signal, not the run", async () => {
     const db = await import("@/lib/db");

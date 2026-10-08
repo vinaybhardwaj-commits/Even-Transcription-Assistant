@@ -83,6 +83,12 @@ export type RoomPollFacts = {
   start_died?: boolean;
 };
 
+/**
+ * ARCH #17: the app retries a start death (up to 3 attempts, pauses of ~2 s and ~5 s after ~15 s deaths). A death is only FINAL, and only then
+ * alerted, once this long has passed with no newer session: a retry that opens one clears it, a kiosk that does not retry is alerted this much later.
+ */
+export const START_RETRY_GRACE_MS = 90_000;
+
 /** ARCH #17: how long a dead start keeps the room degraded without a newer session to replace it. */
 export const START_DEATH_WINDOW_MS = 30 * 60_000;
 
@@ -750,6 +756,7 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
         FROM bench_session s
        WHERE s.status = 'ended'
          AND s.ended_at > now() - (${START_DEATH_WINDOW_MS / 1000}::int * INTERVAL '1 second')
+         AND s.ended_at < now() - (${START_RETRY_GRACE_MS / 1000}::int * INTERVAL '1 second')
          AND s.ended_at - s.started_at < (${START_FAILED_MAX_MS / 1000}::int * INTERVAL '1 second')
          AND NOT EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = s.id)
          AND NOT EXISTS (SELECT 1 FROM bench_session n WHERE n.room_id = s.room_id AND n.started_at > s.started_at)
