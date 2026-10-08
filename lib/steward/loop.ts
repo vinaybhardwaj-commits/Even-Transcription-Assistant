@@ -161,6 +161,9 @@ export function outcomeOf(result: string | null): RecentAction["outcome"] {
 
 type DbRow = { id?: unknown; room_id: string | null; ts: unknown; rule: string; action: string; params: unknown; result: string | null; primary?: unknown; failing_class?: string | null };
 
+/** the cap on the 24 h rule-memory read in loadRecent */
+export const RECENT_ROWS_LIMIT = 3000;
+
 async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promise<{ lastPrimary: Map<string, DbRow>; recentRows: Map<string, RecentAction[]>; fleetRows: DbRow[] }> {
   const hi = new Date(A).toISOString();
   // newest primary row per room (the dedupe reference), last 24 h — (room_id, ts DESC) index
@@ -177,8 +180,10 @@ async function loadRecent(sql: StewardSql, roomIds: string[], A: number): Promis
       FROM steward_decisions d
      WHERE d.room_id = ANY(${roomIds}::text[]) AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz AND d.action <> 'none'
      ORDER BY d.ts DESC, d.id DESC
-     LIMIT 3000
+     LIMIT ${RECENT_ROWS_LIMIT}
   `) as DbRow[];
+  // F44.1 (F5): live volume is ~160 rows a day, far from the cap; if it is ever reached the OLDEST rows are silently cut, so say so (counts only)
+  if (rows.length >= RECENT_ROWS_LIMIT) console.warn(`[steward] decision log read hit its LIMIT (${RECENT_ROWS_LIMIT} rows): the oldest rows of the last 24 h are not in the rules' memory`);
   // fleet incident rows of the last 15 min (room_id NULL)
   const fleet = (await sql`
     SELECT d.room_id, d.ts, d.rule, d.action, d.params, d.result
@@ -237,6 +242,19 @@ async function insertRows(sql: StewardSql, rows: OutRow[]): Promise<unknown[]> {
 // F44: reconcile pending starts
 // ---------------------------------------------------------------------------
 
+/**
+ * R1 (F44.1): one deadline for a whole reconcile. `left()` is the time remaining under it; once it is spent it THROWS SourceTimeout, so no further statement is issued —
+ * the reads and every UPDATE share the one budget instead of each taking a full timeout.
+ */
+function deadlineOf(totalMs: number, now: () => number): () => number {
+  const end = now() + totalMs;
+  return () => {
+    const rest = end - now();
+    if (rest <= 0) throw new SourceTimeout(totalMs);
+    return rest;
+  };
+}
+
 const PENDING_RE = /^pending\b.*command_id=(\S+)/;
 
 /**
@@ -250,14 +268,15 @@ const PENDING_RE = /^pending\b.*command_id=(\S+)/;
  * to `failed` (ackCommand). Revisit the last 24 h of "ok: start_day deferred then recording" rows: if the command is now failed, the row becomes "failed: …". Guarded
  * (`result LIKE 'ok: start_day deferred%'`) so a repeat is a no-op, and the command must belong to the SAME room as the decision. Fail-safe: a read fault leaves rows as they are.
  */
-export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: number, onFault?: () => void): Promise<number> {
+export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: number, onFault?: () => void, now: () => number = Date.now): Promise<number> {
+  const left = deadlineOf(timeoutMs, now);
   let revised = 0;
   let at = { room: "-", cmd: "-" }; // the row being worked on, for the one log line a fault leaves
   try {
   const hi = new Date(A).toISOString();
   const okRows = (await raceTimeout(
     () => sql`SELECT d.id, d.room_id, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'ok: start_day deferred then recording%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts DESC LIMIT 50`,
-    timeoutMs,
+    left(),
   )) as Array<{ id: unknown; room_id: string | null; result: string | null }>;
   const todo = okRows.flatMap((r) => {
     const m = /command_id=(\S+)/.exec(r.result ?? "");
@@ -267,7 +286,7 @@ export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: nu
   at = { room: todo[0]!.room ?? "-", cmd: todo[0]!.cmd };
   const cmds = (await raceTimeout(
     () => sql`SELECT id, room_id, status, error FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[]) AND status = 'failed'`,
-    timeoutMs,
+    left(),
   )) as Array<{ id: string; room_id: string; status: string; error: string | null }>;
   const failed = new Map(cmds.map((c) => [c.id, c]));
   for (const t of todo) {
@@ -277,7 +296,7 @@ export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: nu
     const result = `failed: start_day failed after it was settled ok${c.error ? ` (${String(c.error).slice(0, 80)})` : ""} command_id=${t.cmd}`;
     await raceTimeout(
       () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ revised_at: hi, revised_from: "ok" })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE 'ok: start_day deferred%'`,
-      timeoutMs,
+      left(),
     );
     revised++;
   }
@@ -289,13 +308,59 @@ export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: nu
   return revised;
 }
 
-export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: number, onReviseFault?: () => void): Promise<number> {
+/**
+ * R3 (F44.1): a start settled "failed: no ack after 120 s" in the last 30 min can still be acked by a slow kiosk. Revisit those rows: if the command is now `acked` (and not a
+ * deferred ack, which is accepted-not-started), the row becomes "ok: start_day acked (late, after 120 s)" with inputs.late=true. Guarded by the settled result, so a repeat is a
+ * no-op; the command must belong to the SAME room. A read fault leaves the rows as they are (onFault marks the tick degraded).
+ */
+export const LATE_ACK_WINDOW_MIN = 30;
+export async function reviseLateAcks(sql: StewardSql, A: number, timeoutMs: number, onFault?: () => void, now: () => number = Date.now): Promise<number> {
+  const left = deadlineOf(timeoutMs, now);
+  let revised = 0;
+  let at = { room: "-", cmd: "-" };
+  try {
+    const hi = new Date(A).toISOString();
+    const failedRows = (await raceTimeout(
+      () => sql`SELECT d.id, d.room_id, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE ${`failed: no ack after ${START_NO_ACK_FAIL_S} s%`} AND d.ts > ${hi}::timestamptz - make_interval(mins => ${LATE_ACK_WINDOW_MIN}) AND d.ts <= ${hi}::timestamptz ORDER BY d.ts DESC LIMIT 50`,
+      left(),
+    )) as Array<{ id: unknown; room_id: string | null; result: string | null }>;
+    const todo = failedRows.flatMap((r) => {
+      const m = /command_id=(\S+)/.exec(r.result ?? "");
+      return m ? [{ id: r.id, room: r.room_id, cmd: m[1]! }] : [];
+    });
+    if (todo.length === 0) return 0;
+    at = { room: todo[0]!.room ?? "-", cmd: todo[0]!.cmd };
+    const cmds = (await raceTimeout(
+      () => sql`SELECT id, room_id, status, result FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[]) AND status = 'acked'`,
+      left(),
+    )) as Array<{ id: string; room_id: string; status: string; result?: unknown }>;
+    const acked = new Map(cmds.map((c) => [c.id, c]));
+    for (const t of todo) {
+      const c = acked.get(t.cmd);
+      if (!c || c.status !== "acked" || !t.room || c.room_id !== t.room || isDeferredAck(c.result)) continue;
+      at = { room: t.room, cmd: t.cmd };
+      const result = `ok: start_day acked (late, after ${START_NO_ACK_FAIL_S} s) command_id=${t.cmd}`;
+      await raceTimeout(
+        () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ late: true, revised_at: hi, revised_from: "failed" })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE ${`failed: no ack after ${START_NO_ACK_FAIL_S} s%`}`,
+        left(),
+      );
+      revised++;
+    }
+  } catch (e) {
+    console.error(`[steward] late-ack revision failed room=${at.room} command_id=${at.cmd}: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+    onFault?.();
+  }
+  return revised;
+}
+
+export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: number, onReviseFault?: () => void, now: () => number = Date.now): Promise<number> {
+  const left = deadlineOf(timeoutMs, now); // R1: ONE deadline for every read and UPDATE below (and for the revisions)
   const hi = new Date(A).toISOString();
   // The revision runs first and is independent of the pending rows below: a fault here never blocks them.
-  const revised = await reviseDeferredOk(sql, A, timeoutMs, onReviseFault);
+  const revised = (await reviseDeferredOk(sql, A, left(), onReviseFault, now)) + (await reviseLateAcks(sql, A, left(), onReviseFault, now));
   const pend = (await raceTimeout(
     () => sql`SELECT d.id, d.ts, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'pending%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts ASC LIMIT 50`,
-    timeoutMs,
+    left(),
   )) as Array<{ id: unknown; ts: unknown; result: string | null }>;
   const todo = pend.flatMap((r) => {
     const m = PENDING_RE.exec(r.result ?? "");
@@ -304,7 +369,7 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
   if (todo.length === 0) return revised;
   const cmds = (await raceTimeout(
     () => sql`SELECT id, room_id, status, error, created_at, result FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[])`,
-    timeoutMs,
+    left(),
   )) as Array<{ id: string; room_id?: string; status: string; error: string | null; created_at: unknown; result?: unknown }>;
   const byId = new Map(cmds.map((c) => [c.id, c]));
   let settled = 0;
@@ -326,7 +391,7 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
                  AND (EXISTS (SELECT 1 FROM bench_chunk ch WHERE ch.session_id = s.id)
                       OR EXISTS (SELECT 1 FROM bench_level_sample l WHERE l.room_id = s.room_id AND l.ist_date >= (s.started_at AT TIME ZONE 'Asia/Kolkata')::date AND l.sampled_at >= s.started_at AND l.session_open IS TRUE AND l.tape_advancing IS TRUE))
                ORDER BY s.started_at ASC LIMIT 1`,
-            timeoutMs,
+            left(),
           )) as Array<{ id: string }>)
         : [];
       if (opened.length) result = `ok: start_day deferred then recording (late) session_id=${opened[0]!.id} command_id=${t.cmd}`;
@@ -337,7 +402,7 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
     if (result === null) continue;
     await raceTimeout(
       () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ pending_at: t.ts, late: true, settled_at: hi, waited_s: Math.round(waitedS) })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE 'pending%'`,
-      timeoutMs,
+      left(),
     );
     settled++;
   }
@@ -439,22 +504,29 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         memoryDegraded = true;
       } else {
         // F44: settle the pending starts BEFORE the log is read, so the rules and the dedupe see the settled result. A failure leaves them pending; the tick goes on.
+        // R1 (F44.1): the reconcile runs under ONE deadline, and `left` is taken again after it, so a slow reconcile can never push the log read past senseDeadline.
         try {
           await reconcilePending(sql, A, Math.min(cfg.source_timeout_ms, left), () => degrade("reconcile_revise"));
         } catch {
           console.error("[steward] pending starts could not be reconciled");
           degrade("reconcile_pending");
         }
-        try {
-          mem = await raceTimeout(() => loadRecent(sql, roster.map((r) => r.room_id), A), Math.min(cfg.source_timeout_ms, left));
-        } catch (e) {
+        const leftForLog = senseDeadline - now();
+        if (leftForLog <= 0) {
+          degrade("steward_decisions:skipped");
           memoryDegraded = true;
-          if (e instanceof SourceTimeout) {
-            console.error("[steward] decision log read timed out");
-            degrade("steward_decisions:timeout");
-          } else {
-            console.error("[steward] decision log read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
-            degrade("steward_decisions");
+        } else {
+          try {
+            mem = await raceTimeout(() => loadRecent(sql, roster.map((r) => r.room_id), A), Math.min(cfg.source_timeout_ms, leftForLog));
+          } catch (e) {
+            memoryDegraded = true;
+            if (e instanceof SourceTimeout) {
+              console.error("[steward] decision log read timed out");
+              degrade("steward_decisions:timeout");
+            } else {
+              console.error("[steward] decision log read failed:", e instanceof Error ? e.message.slice(0, 200) : "error");
+              degrade("steward_decisions");
+            }
           }
         }
       }
@@ -634,51 +706,59 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     };
 
     let processed = 0;
-    for (const room of roster) {
-      if (now() - t0 >= opts.budgetMs) {
-        budgetHit = true;
-        degrade("budget");
-        break;
-      }
-      const sense = senses.get(room.room_id);
-      if (!sense) continue;
-      processed++;
-      const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, fleetCtx));
-      const last = mem.lastPrimary.get(room.room_id);
-      const lastTs = last ? toIso(last.ts) : null;
-      for (let i = 0; i < ds.length; i++) {
-        const d = ds[i]!;
-        if (i === 0) {
-          // A start that would EXECUTE now is never swallowed by a previous row that executed nothing (e.g. "shadow: recorder_ready_under_5m" a minute ago, same key): the attempt goes through.
-          const wouldGoLive = d.action === "scribe_start" && actionMode(cfg, "scribe_start") === "live" && typeof d.inputs.start_gate_fail !== "string";
-          // F21: a retry the schedule allows (the rules only emit scribe_start when the verdict is "go") is exempt from the 15-min dedupe, so the 5 / 15 / 45 min schedule is real. Only a
-          // send still in flight ("sending") or a "skipped:" row younger than 5 min (kiosk not listening, ...) holds the key.
-          const lastR = typeof last?.result === "string" ? last.result : "";
-          const holdsKey = /^(sending|pending)/.test(lastR) || (/^skipped/.test(lastR) && lastTs !== null && A - Date.parse(lastTs) < 5 * 60_000);
-          const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !holdsKey);
-          if (same) continue;
-        } else {
-          const k = keyOf(d);
-          const dup = (mem.recentRows.get(room.room_id) ?? []).some((r) => keyOf(r) === k && A - Date.parse(r.ts) < DEDUPE_REFRESH_MS);
-          if (dup) continue;
+    let fleetDs: Decision[] = [];
+    // R4 (F44.1): fire -> collect is try/finally. If anything throws between a send and the collect, every in-flight row is still settled (none is left "sending");
+    // the rows already built are then written best-effort and the error goes on to the tick's soft failure.
+    let threw = true;
+    try {
+      for (const room of roster) {
+        if (now() - t0 >= opts.budgetMs) {
+          budgetHit = true;
+          degrade("budget");
+          break;
         }
-        await record(d, i === 0, i);
+        const sense = senses.get(room.room_id);
+        if (!sense) continue;
+        processed++;
+        const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, fleetCtx));
+        const last = mem.lastPrimary.get(room.room_id);
+        const lastTs = last ? toIso(last.ts) : null;
+        for (let i = 0; i < ds.length; i++) {
+          const d = ds[i]!;
+          if (i === 0) {
+            // A start that would EXECUTE now is never swallowed by a previous row that executed nothing (e.g. "shadow: recorder_ready_under_5m" a minute ago, same key): the attempt goes through.
+            const wouldGoLive = d.action === "scribe_start" && actionMode(cfg, "scribe_start") === "live" && typeof d.inputs.start_gate_fail !== "string";
+            // F21: a retry the schedule allows (the rules only emit scribe_start when the verdict is "go") is exempt from the 15-min dedupe, so the 5 / 15 / 45 min schedule is real. Only a
+            // send still in flight ("sending") or a "skipped:" row younger than 5 min (kiosk not listening, ...) holds the key.
+            const lastR = typeof last?.result === "string" ? last.result : "";
+            const holdsKey = /^(sending|pending)/.test(lastR) || (/^skipped/.test(lastR) && lastTs !== null && A - Date.parse(lastTs) < 5 * 60_000);
+            const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(d) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS && !(wouldGoLive && !holdsKey);
+            if (same) continue;
+          } else {
+            const k = keyOf(d);
+            const dup = (mem.recentRows.get(room.room_id) ?? []).some((r) => keyOf(r) === k && A - Date.parse(r.ts) < DEDUPE_REFRESH_MS);
+            if (dup) continue;
+          }
+          await record(d, i === 0, i);
+        }
       }
-    }
 
-    // --- fleet incidents (one decision per class)
-    const fleetDs = budgetHit ? [] : fleetDecisions(failingRooms);
-    for (const d of fleetDs) {
-      const k = keyOf(d);
-      const dup = mem.fleetRows.some((r) => keyOf({ rule: r.rule, action: r.action, params: objOf(r.params) }) === k && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
-      // the room list can change between ticks while the incident is the same: dedupe on the class alone
-      const dupClass = mem.fleetRows.some((r) => objOf(r.params).class === d.params.class && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
-      if (dup || dupClass) continue;
-      await record(d, true, 0);
+      // --- fleet incidents (one decision per class)
+      fleetDs = budgetHit ? [] : fleetDecisions(failingRooms);
+      for (const d of fleetDs) {
+        const k = keyOf(d);
+        const dup = mem.fleetRows.some((r) => keyOf({ rule: r.rule, action: r.action, params: objOf(r.params) }) === k && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
+        // the room list can change between ticks while the incident is the same: dedupe on the class alone
+        const dupClass = mem.fleetRows.some((r) => objOf(r.params).class === d.params.class && A - Date.parse(toIso(r.ts) ?? "") < DEDUPE_REFRESH_MS);
+        if (dup || dupClass) continue;
+        await record(d, true, 0);
+      }
+      threw = false;
+    } finally {
+      // --- F44: collect the acks of every start issued this tick, together (each bounded by live_call_timeout_ms from its own send; the executor's ack wait is already capped to the budget)
+      for (const o of await Promise.all(inflight.map((f) => f()))) if (o) rows.push(o);
+      if (threw && rows.length > 0) await insertRows(sql, rows).catch(() => []);
     }
-
-    // --- F44: collect the acks of every start issued this tick, together (each bounded by live_call_timeout_ms from its own send; the executor's ack wait is already capped to the budget)
-    for (const o of await Promise.all(inflight.map((f) => f()))) if (o) rows.push(o);
 
     // --- ONE insert (always attempted when there is something to write)
     let written = 0;
