@@ -1,9 +1,10 @@
 /** GET /api/admin/stt-lab/routing — routing matrix + engines. PUT — set a cell. */
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
+import { isSarvamEngine, SCOPE_CONSULT_ONLY } from "@/lib/stt/o4-scope";
 
 export const runtime = "nodejs";
 
@@ -32,6 +33,13 @@ export async function PUT(req: NextRequest) {
   let body: { stage?: string; language_bucket?: string; engine_id?: string } = {};
   try { body = (await req.json()) as typeof body; } catch { return respondError("VALIDATION_FAILED", "body_not_json"); }
   if (!body.stage || !body.language_bucket || !body.engine_id) return respondError("VALIDATION_FAILED", "stage_bucket_engine_required");
+
+  // O4: the room stage may never be pointed at Sarvam. Other stages are unchanged.
+  if (body.stage === "room") {
+    let key: string | undefined;
+    try { key = ((await sql`SELECT adapter_key FROM stt_engine WHERE id = ${body.engine_id} LIMIT 1`) as Array<{ adapter_key: string }>)[0]?.adapter_key; } catch { /* id prefix still decides */ }
+    if (isSarvamEngine(body.engine_id, key)) return NextResponse.json({ error: SCOPE_CONSULT_ONLY }, { status: 400 });
+  }
 
   await sql`
     INSERT INTO stt_routing (stage, language_bucket, engine_id, updated_by_admin_id, updated_at)

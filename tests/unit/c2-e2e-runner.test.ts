@@ -612,7 +612,7 @@ describe.skipIf(!HAVE_DOCKER)("0086 — room routing resolves to `route`, and `r
 
     // NOT PAID — asserted on is_paid, never on cost_per_min_usd (NULL for every paid engine).
     const { paidEngineInfo } = await import("@/lib/stt/paid-engines");
-    const info = await paidEngineInfo(english!);
+    const info = await paidEngineInfo(english as string); // asserted === "route" just above
     expect(info.paid, "the resolved room engine must not bill").toBe(false);
     const row = (await sql`SELECT is_paid, enabled, fanout_enabled, adapter_key FROM stt_engine WHERE id = 'route'`) as Array<{ is_paid: boolean; enabled: boolean; fanout_enabled: boolean; adapter_key: string }>;
     expect(row[0]!.is_paid).toBe(false);
