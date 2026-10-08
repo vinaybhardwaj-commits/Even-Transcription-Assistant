@@ -213,7 +213,7 @@ export type RoomAttentionInputs = {
   /** R7: the room's newest failed start_day ack, with `error` the ack reason. */
   failed_start: { acked_at: string; error: string | null } | null;
   /** Arch #21: the room's newest session_reaped alert (last 12 h), with the copy phase the reaper chose. Absent = none. */
-  reaped?: { created_at: string; body: string; phase: "clinic_hours" | "end_of_day" | "overnight" } | null;
+  reaped?: { created_at: string; body: string; phase: "clinic_hours" | "overnight" } | null;
   /** R8/R9: the machine's extension health row (lib/encounter-windows/ext-health.ts), or absent/null (no machine, excluded machine, or source degraded). */
   ext?: ExtHealthRow | null;
 };
@@ -581,7 +581,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           r.reaped.phase === "clinic_hours" ? "red" : "amber",
           at,
           clean(r.reaped.body),
-          r.reaped.phase === "end_of_day" ? `If ${name} should still be recording, go and press start.` : `Go to ${name}, check the microphone and the Mac, and press start.`,
+          r.reaped.phase === "overnight" ? `If ${name} should still be recording, go and press start.` : `Go to ${name}, check the microphone and the Mac, and press start.`,
         );
       }
     }
@@ -1065,6 +1065,6 @@ function reapedFor(row: { created_at: unknown; body: string; phase: string | nul
   if (!row) return null;
   const at = toIso(row.created_at);
   if (!at) return null;
-  const phase = row.phase === "end_of_day" || row.phase === "overnight" ? row.phase : "clinic_hours";
+  const phase = row.phase === "overnight" ? row.phase : "clinic_hours";
   return { created_at: at, body: row.body ?? "", phase };
 }

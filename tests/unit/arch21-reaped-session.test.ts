@@ -158,13 +158,17 @@ describe("AC4 — clinic-hours reap vs end-of-day reap", () => {
   it("classifies by the IST time of the last audio", () => {
     expect(core.classifyReap("stall", "2026-10-07T06:56:31.000Z")).toBe("clinic_hours");   // 12:26 IST
     expect(core.classifyReap("stall", "2026-10-07T11:53:00.000Z")).toBe("clinic_hours");   // 17:23 IST (Dietary)
-    expect(core.classifyReap("stall", "2026-10-07T14:00:00.000Z")).toBe("end_of_day");     // 19:30 IST
-    expect(core.classifyReap("stall", "2026-10-07T01:00:00.000Z")).toBe("end_of_day");     // 06:30 IST
+    expect(core.classifyReap("stall", "2026-10-07T14:00:00.000Z")).toBe("clinic_hours");   // 19:30 IST, consults still running
+    expect(core.classifyReap("stall", "2026-10-07T15:59:00.000Z")).toBe("clinic_hours");   // 21:29 IST
+    expect(core.classifyReap("stall", "2026-10-07T16:00:00.000Z")).toBe("overnight");      // 21:30 IST, day closed
+    expect(core.classifyReap("stall", "2026-10-07T16:30:00.000Z")).toBe("overnight");      // 22:00 IST
+    expect(core.classifyReap("stall", "2026-10-07T01:59:00.000Z")).toBe("overnight");      // 07:29 IST
+    expect(core.classifyReap("stall", "2026-10-07T02:00:00.000Z")).toBe("clinic_hours");   // 07:30 IST
     expect(core.classifyReap("rollover", "2026-10-07T06:56:31.000Z")).toBe("overnight");
   });
   it("the copy differs and the clinic-hours copy says capture FAILED", () => {
     const a = core.reapAlertCopy({ roomName: "OPD4", sessionId: "bs_x", rule: "stall", lastAudioIso: "2026-10-07T06:56:31.000Z" });
-    const b = core.reapAlertCopy({ roomName: "OPD4", sessionId: "bs_x", rule: "stall", lastAudioIso: "2026-10-07T14:00:00.000Z" });
+    const b = core.reapAlertCopy({ roomName: "OPD4", sessionId: "bs_x", rule: "stall", lastAudioIso: "2026-10-07T16:30:00.000Z" });
     expect(a.body).not.toBe(b.body);
     expect(a.subject).toMatch(/clinic hours/);
     expect(a.body).toMatch(/FAILED/);
