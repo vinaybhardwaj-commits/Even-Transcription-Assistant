@@ -81,6 +81,7 @@ export function listenerState(listener: ListenerRow | null, readFailed: boolean,
   const age = nowMs - new Date(listener.last_poll_at).getTime();
   return Number.isFinite(age) && age <= LISTENER_FRESH_MS ? "listening" : "stale";
 }
+import { sessionDiedAtStart } from "@/lib/bench-bus-constants";
 
 // The six room states (K2 §1) live in lib/bench-bus-constants.ts — the PURE module that is safe
 // to pull into a browser bundle. THIS file imports lib/db and lib/brain/db, so a client component
@@ -224,6 +225,8 @@ export type RoomLive = {
   ended_at_lies_sessions: string[];
   /** D30 — the room's most recent session today is `ended`. The seventh state's own input. */
   last_session_ended: boolean;
+  /** ARCH #15: that ended session died at start (no pieces, lived < START_FAILED_MAX_MS). */
+  last_session_start_failed: boolean;
   ended_disagrees_session_id: string | null;
   /** When the row says the session ended — the start of the disagreement, not of the session. */
   ended_disagrees_ended_at: string | null;
@@ -503,6 +506,7 @@ export function buildRoomLive(
     ended_at_lies: liars.length > 0,
     ended_at_lies_sessions: liars.map((sn) => sn.id),
     last_session_ended: Boolean(lastSessionEnded),
+    last_session_start_failed: Boolean(lastSessionEnded && newest && sessionDiedAtStart(newest)),
     ended_disagrees_session_id: disagreeing?.id ?? null,
     ended_disagrees_ended_at: disagreeing?.ended_at ?? null,
     ended_disagrees_last_piece_at: disagreeLastPiece === null ? null : new Date(disagreeLastPiece).toISOString(),

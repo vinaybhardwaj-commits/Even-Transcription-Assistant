@@ -210,7 +210,7 @@ export const NO_DAY_LANE_STATE = (n: number): string =>
  *  this module must stay import-free so it is safe in the kiosk and admin browser bundles. */
 export type RoomStateLevel = "ok" | "amber" | "red" | "unknown";
 
-export type RoomState = "cant_tell" | "paused" | "recording" | "finished" | "ready" | "dropped" | "offline";
+export type RoomState = "cant_tell" | "paused" | "recording" | "start_failed" | "finished" | "ready" | "dropped" | "offline";
 
 /**
  * FINISHED FOR TODAY (D30) — the seventh state, and the reason it exists.
@@ -225,6 +225,41 @@ export type RoomState = "cant_tell" | "paused" | "recording" | "finished" | "rea
  * dropped and offline (a deliberate end outranks every explanation of why the page went away).
  * It is never amber: nothing here needs anybody to do anything.
  */
+/**
+ * ARCH #15 — A START THAT DIED IS NOT A FINISHED DAY.
+ *
+ * On 5 Oct the tapewriter exited (status 1) about 15 s after start with no chunk, OPD4 twelve
+ * times over. The app ends the session it just opened (start compensation), so from the bus's
+ * point of view the newest session is `ended` — exactly what an end of day looks like — and the
+ * board printed "Finished for today · Press start to record again" over a dead capture.
+ *
+ * What separates them is that a start that died NEVER RECORDED: no piece of either stream, and
+ * the session lived seconds. A real day, even a short one, lands at least one piece (they are cut
+ * every five minutes and a stop flushes the one in progress). So: ended, zero pieces, and open
+ * for under START_FAILED_MAX_MS. The window is generous against the ~15 s evidence and far below
+ * a real session; an operator who presses start and stop within it records nothing either, and
+ * reading that as a failed start is the honest call. Derived at read time from rows already
+ * loaded, so it works for every kiosk build with no app change.
+ */
+export const START_FAILED_MAX_MS = 3 * 60_000;
+export const START_FAILED_HINT = "Capture did not start. Check the microphone / USB cable, then press start to retry; if it fails again, remount the microphone or restart the recorder app.";
+
+/** PURE — did this (newest, ended) session die at start? Unparseable times answer false: say nothing rather than guess. */
+export function sessionDiedAtStart(s: {
+  status: string;
+  started_at: string | Date | null | undefined;
+  ended_at: string | Date | null | undefined;
+  primary_chunks: number | null | undefined;
+  backup_chunks: number | null | undefined;
+}): boolean {
+  if (s.status !== "ended") return false;
+  if ((Number(s.primary_chunks) || 0) > 0 || (Number(s.backup_chunks) || 0) > 0) return false;
+  const a = s.started_at ? new Date(s.started_at).getTime() : NaN;
+  const b = s.ended_at ? new Date(s.ended_at).getTime() : NaN;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return b - a < START_FAILED_MAX_MS;
+}
+
 export const FINISHED_HINT = "Press start to record again";
 
 export type RoomStateView = {
@@ -306,6 +341,8 @@ export function roomState(input: {
   /** D30 — the room's MOST RECENT session today is `ended`. Absent is false, so every caller
    *  that has not been taught about the seventh state keeps exactly the chain it had. */
   lastSessionEnded?: boolean;
+  /** ARCH #15 — the newest session is ended AND died at start (sessionDiedAtStart). Absent is false. Only read when lastSessionEnded. */
+  lastSessionStartFailed?: boolean;
   /** Audio recorded in this room today, summed from the PIECES themselves. Null or zero simply
    *  drops the duration from the label; it never suppresses the state. */
   recordedMsToday?: number | null;
@@ -331,6 +368,16 @@ export function roomState(input: {
   // 4 FINISHED FOR TODAY (D30). Ahead of ready, dropped and offline, because a day that was
   // ended on purpose ALREADY EXPLAINS the quiet kiosk and each of those three would describe it
   // as an accident. Never amber: nothing here needs anybody to do anything.
+  if (input.lastSessionEnded && input.lastSessionStartFailed) {
+    return {
+      state: "start_failed",
+      label: "Failed to start — no audio recorded",
+      hint: START_FAILED_HINT,
+      level: "red",
+      // Same rule as finished: the retry button is offered only where a kiosk is listening for it.
+      start_available: listening,
+    };
+  }
   if (input.lastSessionEnded) {
     const rec = Number(input.recordedMsToday);
     const dur = Number.isFinite(rec) && rec > 0 ? ` · ${fmtCoarse(rec)} recorded` : "";
