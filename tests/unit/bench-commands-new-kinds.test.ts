@@ -253,19 +253,19 @@ describe("the heartbeat: clip_count, silence_ms, channel_locked", () => {
     expect("silence_ms" in entry).toBe(false);
   });
 
-  it("this poll's silence_ms decides SILENT_WHILE_RECORDING when the app sends it", async () => {
+  it("silence_ms does not decide SILENT_WHILE_RECORDING — the carried digital-zero count does", async () => {
     const returned = (silentPolls: number) => [{
       install_id: "install_1", assigned_channel: null, state_flags: { flags: [], drift_since: null },
       poll_ring: [{ at: "x", peak: 0, zero_ratio: 1, tape_advancing: true, rec: true, silent_polls: silentPolls }],
     }];
-    // 0.1.22 says 2 minutes of silence though the ring count is short: flagged.
+    // A long below-−55 dBFS heartbeat with a short zero-ratio run is a quiet room, not capture death.
     responder = (t) => (/^UPDATE room_install SET last_seen_at/.test(t) ? returned(3) : []);
     await RI.applyInstallPoll({ install_id: "install_1", tape_advancing: true, silence_ms: "120000" }, { recording: true });
-    expect(JSON.parse(String(calls[1]!.values[0])).flags).toEqual(["SILENT_WHILE_RECORDING"]);
-    // 0.1.22 says sound a moment ago though the ring count is long: not flagged, nothing written.
-    calls.length = 0;
-    responder = (t) => (/^UPDATE room_install SET last_seen_at/.test(t) ? returned(500) : []);
-    await RI.applyInstallPoll({ install_id: "install_1", tape_advancing: true, silence_ms: "200" }, { recording: true });
     expect(calls).toHaveLength(1);
+    // The PCM clock under-states. A carried digital-zero run still raises the flag.
+    calls.length = 0;
+    responder = (t) => (/^UPDATE room_install SET last_seen_at/.test(t) ? returned(80) : []);
+    await RI.applyInstallPoll({ install_id: "install_1", tape_advancing: true, silence_ms: "200", zero_ratio: "1", peak: "0" }, { recording: true });
+    expect(JSON.parse(String(calls[1]!.values[0])).flags).toEqual(["SILENT_WHILE_RECORDING"]);
   });
 });

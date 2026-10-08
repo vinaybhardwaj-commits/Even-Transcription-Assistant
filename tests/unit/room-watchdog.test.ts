@@ -265,6 +265,12 @@ describe("message shapes", () => {
   // V's ruling, 19 Sep 2026: "the message has to say WHICH signal tripped — notDelivering, the
   // classifier, or both. A watchdog that says 'degraded' without saying why sends someone to look
   // at the wrong thing."
+  it("digital silence is named as capture death, not an empty room", () => {
+    const msg = degradedMessage("OPD 5", ["silent_while_recording"], nowIso);
+    expect(msg.text).toContain("digital silence on the capture (exact zeros, not a quiet room)");
+    expect(msg.text).not.toMatch(/empty room|quiet room is|room is empty/i);
+  });
+
   it("degraded names the classifier's own reason when only the classifier fired", () => {
     const msg = degradedMessage("OPD 3", ["device_missing"], nowIso);
     expect(msg.text).toContain("a missing input device");

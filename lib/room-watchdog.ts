@@ -200,7 +200,7 @@ function andJoin(parts: readonly string[]): string {
  */
 export const REASON_LABEL: Record<DegradationReason, string> = {
   device_missing: "a missing input device",
-  silent_while_recording: "silence while recording",
+  silent_while_recording: "digital silence on the capture (exact zeros, not a quiet room)",
   clipping: "clipping",
   encoder_stalled: "a stalled encoder",
   tape_stalled: "a stalled tape",
