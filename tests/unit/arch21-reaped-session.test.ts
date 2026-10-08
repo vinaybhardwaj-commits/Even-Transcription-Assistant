@@ -114,9 +114,9 @@ describe("AC1 — every reap alerts and surfaces", () => {
     const res = await reapBenchSessions({ now: new Date(NOW) }, run);
     expect(res.reaped).toHaveLength(1);
   });
-  it("migration (placeholder 0199, GATING renumbers) admits the kind", async () => {
+  it("migration 0138 admits the kind", async () => {
     const { readFileSync } = await import("node:fs");
-    expect(readFileSync("db/migrations/0199_room_alert_outbox_session_reaped.sql", "utf8")).toContain("'session_reaped'");
+    expect(readFileSync("db/migrations/0138_room_alert_outbox_session_reaped.sql", "utf8")).toContain("'session_reaped'");
   });
   const room = (reaped: unknown) => ({
     room_id: "room_opd4", room_name: "OPD4", machine: null, ext_events: [], poller: null, recent_activity: null, open_session: null,
