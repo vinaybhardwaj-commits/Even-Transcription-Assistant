@@ -55,9 +55,8 @@ import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, 
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
-import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { HOST_OFFLINE_TTL_MS } from "@/lib/bench-bus-constants";
-import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+import { REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
