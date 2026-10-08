@@ -129,6 +129,12 @@ export type McpTool = {
    * audit row, so a grouped call still says which tool actually ran.
    */
   memberFor?: (args: ToolArgs) => string | null;
+  /**
+   * S3 — the long-form text that the OPERATOR profile's tools/list leaves out. Set on the operator
+   * view of a tool (lib/mcp/profile.ts), never on the tool objects the tool files export.
+   * scribe_help returns it as `help` beside the short description.
+   */
+  help?: string;
 };
 
 export type ToolResult = Record<string, unknown>;

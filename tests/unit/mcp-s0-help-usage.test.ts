@@ -50,7 +50,9 @@ describe("S0.7 scribe_help", () => {
   it("an ungrouped tool: name, scope, full description, input schema; no DB", async () => {
     const out = await run("scribe_help", { tool: "scribe_audit_recent" });
     const real = S.CALLABLE_TOOLS.get("scribe_audit_recent")!;
-    expect(out).toMatchObject({ name: "scribe_audit_recent", scope: "read", listed: true, description: real.description, input_schema: real.inputSchema });
+    expect(out).toMatchObject({ name: "scribe_audit_recent", scope: "read", listed: true, description: expect.any(String), help: real.description, input_schema: real.inputSchema });
+    // S3: the operator list carries the short text; the long text is `help`.
+    expect((out.description as string).length).toBeLessThanOrEqual(200);
     expect(out.group).toBeUndefined();
     expect(sqlCalls).toHaveLength(0);
   });
@@ -59,7 +61,8 @@ describe("S0.7 scribe_help", () => {
     const out = await run("scribe_help", { tool: "scribe_rooms" });
     expect(out.name).toBe("scribe_rooms");
     expect(out.scope).toBe("read");
-    expect(out.description).toBe(S.CALLABLE_TOOLS.get("scribe_rooms")!.description);
+    expect(out.help).toBe(S.CALLABLE_TOOLS.get("scribe_rooms")!.description); // S3: long text moved to help
+    expect((out.description as string).length).toBeLessThanOrEqual(400);
     expect(out.accepted_legacy_names).toEqual(expect.arrayContaining(["scribe_list_rooms", "scribe_fleet", "scribe_day_report"]));
     const m = out.members as { selector: string; values: Array<{ value: string; runs: string; meaning: string }> };
     expect(m.selector).toBe("view");
