@@ -463,6 +463,30 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
+  it("Arch #17 C1/C2 — a start the app ACCEPTED as deferred is stale_start after two minutes with no session; a late failure ack quotes its reason; any session after it clears it", async () => {
+    const { ackCommand } = await import("@/lib/bench-commands");
+    pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, created_at) VALUES ('cmd_def', 'r6', 'start_day', 'pending', ${ago("6 minutes")});`);
+    // the app's deferred ack: {ok:true, deferred:true}, no session
+    expect(await ackCommand({ roomId: "r6", commandId: "cmd_def", ok: true, sessionId: null, error: null, applied: { deferred: true } })).toBe("acked");
+    pg.exec(`UPDATE bench_command SET acked_at = ${ago("5 minutes")} WHERE id = 'cmd_def';`);
+    let r = await attention();
+    expect(kindsOf(r)).toEqual(["r6:stale_start"]);
+    expect(r.items[0]!.detail).toContain("start deferred (waiting for the input device) and no recording has begun");
+    // young deferred starts are not yet an alert (the wait is still allowed to finish)
+    pg.exec(`UPDATE bench_command SET acked_at = ${ago("30 seconds")} WHERE id = 'cmd_def';`);
+    expect(await attention().then((x) => x.items)).toEqual([]);
+    pg.exec(`UPDATE bench_command SET acked_at = ${ago("5 minutes")} WHERE id = 'cmd_def';`);
+    // the app's wait ended in failure: a failed ack on the SAME command, with the fixed reason
+    expect(await ackCommand({ roomId: "r6", commandId: "cmd_def", ok: false, sessionId: null, error: "input_device_not_ready" })).toBe("failed");
+    pg.exec(`UPDATE bench_command SET acked_at = ${ago("4 minutes")} WHERE id = 'cmd_def';`);
+    r = await attention();
+    expect(kindsOf(r)).toEqual(["r6:stale_start"]);
+    expect(r.items[0]!.detail).toContain('"input_device_not_ready"');
+    // any session that opens after the ack resolves it (accepted-then-started is success)
+    pg.exec(session("bs_after", "r6", "2 minutes", "recording") + samples("r6", "2 minutes", "1 second", "moving"));
+    expect(await attention().then((x) => x.items)).toEqual([]);
+  });
+
   it("a source that cannot be read is NAMED in `degraded` and its rules are skipped, never reported as all clear", async () => {
     pg.exec(`ALTER TABLE eta_encounter_windows RENAME TO eta_encounter_windows_gone;`);
     try {

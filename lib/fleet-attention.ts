@@ -865,9 +865,13 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
        WHERE a.room_id = ANY(${ids}::text[])
     `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown }>, []),
     safe("bench_command", degraded, async () => (await sql`
-      SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at, COALESCE(c.error, c.result->>'error') AS error
+      SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at,
+             COALESCE(c.error, c.result->>'error', 'start deferred (waiting for the input device) and no recording has begun') AS error
         FROM bench_command c
-       WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'start_day' AND c.status = 'failed'
+       WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'start_day'
+         -- ARCH #17: a FAILED start, or a start the app ACCEPTED as deferred (waiting for its input device) that is still an acked, deferred row two minutes
+         -- on. The R7 rule then clears it the moment any session opens after the ack, so "accepted" can never read as success without a recording.
+         AND (c.status = 'failed' OR (c.status = 'acked' AND c.result->>'deferred' = 'true' AND c.acked_at < now() - interval '2 minutes'))
          AND c.acked_at > now() - interval '60 minutes' AND c.created_at > now() - interval '3 hours'
        ORDER BY c.room_id, c.acked_at DESC
     `) as Array<{ room_id: string; acked_at: unknown; error: string | null }>, []),

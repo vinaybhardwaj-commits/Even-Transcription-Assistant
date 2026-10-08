@@ -30,7 +30,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, parseConfig, type Config, type RosterRow } from "./config";
-import { LIVE_EXECUTOR_DISABLED, LiveExecutor, PENDING_PREFIX, ShadowExecutor, dispatch, type Executor } from "./executor";
+import { LIVE_EXECUTOR_DISABLED, LiveExecutor, PENDING_PREFIX, isDeferredAck, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { START_NO_ACK_FAIL_S } from "./start-schedule";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
 import { senseAll } from "./sense";
@@ -257,9 +257,9 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
   });
   if (todo.length === 0) return 0;
   const cmds = (await raceTimeout(
-    () => sql`SELECT id, status, error, created_at FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[])`,
+    () => sql`SELECT id, room_id, status, error, created_at, result FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[])`,
     timeoutMs,
-  )) as Array<{ id: string; status: string; error: string | null; created_at: unknown }>;
+  )) as Array<{ id: string; room_id?: string; status: string; error: string | null; created_at: unknown; result?: unknown }>;
   const byId = new Map(cmds.map((c) => [c.id, c]));
   let settled = 0;
   for (const t of todo) {
@@ -267,7 +267,15 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
     const sentMs = Date.parse(toIso(c?.created_at) ?? t.ts ?? "");
     const waitedS = Number.isFinite(sentMs) ? (A - sentMs) / 1000 : 0;
     let result: string | null = null;
-    if (c?.status === "acked") result = `ok: start_day acked (late) command_id=${t.cmd}`;
+    if (c?.status === "acked" && isDeferredAck(c.result)) {
+      // ARCH #17 (C2): the app ACCEPTED this start and is waiting for its input device; accepted is not started. Settle only on evidence: a session opened for the room
+      // after the command was created (ok), or START_NO_ACK_FAIL_S with none (failed). Otherwise it stays pending. A late failure ack makes the command `failed`, handled below.
+      const opened = c.room_id && Number.isFinite(sentMs)
+        ? ((await raceTimeout(() => sql`SELECT id FROM bench_session WHERE room_id = ${c.room_id!} AND started_at >= ${new Date(sentMs).toISOString()}::timestamptz ORDER BY started_at ASC LIMIT 1`, timeoutMs)) as Array<{ id: string }>)
+        : [];
+      if (opened.length) result = `ok: start_day deferred then recording (late) session_id=${opened[0]!.id} command_id=${t.cmd}`;
+      else if (waitedS > START_NO_ACK_FAIL_S) result = `failed: start_day deferred, no recording session after ${START_NO_ACK_FAIL_S} s command_id=${t.cmd}`;
+    } else if (c?.status === "acked") result = `ok: start_day acked (late) command_id=${t.cmd}`;
     else if (c && (c.status === "failed" || c.status === "expired")) result = `failed: start_day ${c.status}${c.error ? ` (${String(c.error).slice(0, 80)})` : ""} command_id=${t.cmd}`;
     else if (waitedS > START_NO_ACK_FAIL_S) result = `failed: no ack after ${START_NO_ACK_FAIL_S} s command_id=${t.cmd}`;
     if (result === null) continue;

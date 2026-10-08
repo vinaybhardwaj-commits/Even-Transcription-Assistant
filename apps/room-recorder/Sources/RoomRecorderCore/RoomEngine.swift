@@ -1715,9 +1715,17 @@ public actor RoomEngine {
         case .started:
           result = CommandResult(ok: true, sessionID: sessionID, error: nil)
         case .deferred:
-          // Accepted, not yet started: the wait / retries run beside the poll loop. The outcome is the
-          // session appearing (or the dead-start / device-missing alert), not this ack.
-          result = CommandResult(ok: true, sessionID: nil, error: nil)
+          // Accepted, not yet started: the wait / retries run beside the poll loop. The ack SAYS so —
+          // {ok:true, deferred:true, session_id:null} — so a caller (MCP scribe_start_recording, the
+          // Steward) reads it as PENDING, never as started. A wait that later fails reports itself with
+          // sendLateStartFailure. Acked here, not through the journal gate below: nothing was journaled
+          // for a start that has not begun.
+          let deferredResult = CommandResult(
+            ok: true, sessionID: nil, error: nil,
+            verb: OperatorVerbAcknowledgement(deferred: true))
+          completedCommands[command.id] = deferredResult
+          await acknowledgeDeferredStart(command, result: deferredResult)
+          return
         }
       case .resume:
         try await resume(commandID: command.id)
@@ -2708,17 +2716,66 @@ public actor RoomEngine {
   }
 
   private func spawnStart(commandID: String, waitForDevice: Bool, attempts: Int) {
+    // Only a start that was ACKED AS DEFERRED needs its failure carried to the server by a second ack;
+    // one that died inline was already acked failed.
+    let reportLateFailure = waitForDevice
     startRetryTask = Task { [weak self] in
-      await self?.runBackgroundStart(commandID: commandID, waitForDevice: waitForDevice, attempts: attempts)
+      await self?.runBackgroundStart(
+        commandID: commandID, waitForDevice: waitForDevice, attempts: attempts,
+        reportLateFailure: reportLateFailure)
     }
   }
 
-  private func runBackgroundStart(commandID: String, waitForDevice: Bool, attempts: Int) async {
+  /// PURE — the reason string a failed deferred start reports. The device case has a fixed code the
+  /// server and its alert key on; anything else is the bounded error text.
+  static func lateStartFailureReason(_ error: Error) -> String {
+    if let e = error as? RoomEngineError, case .inputDeviceNotReady = e { return "input_device_not_ready" }
+    return bounded(error, limit: 160)
+  }
+
+  private func acknowledgeDeferredStart(_ command: BenchCommand, result: CommandResult) async {
+    for attempt in 1...3 {
+      do {
+        let ack = try await remote.acknowledge(
+          commandID: command.id, ok: true, sessionID: nil, error: nil, audioInput: nil,
+          verb: result.verb)
+        if ack.ok, ack.id == command.id, ack.status == "acked" { return }
+        throw RoomEngineError.io("invalid deferred acknowledgement response")
+      } catch {
+        lastError = bounded(error)
+        log("deferred start ack failed (attempt \(attempt)): \(bounded(error))")
+        if attempt < 3 { try? await inputReadyWait.sleep(UInt64(attempt) * 1_000_000_000) }
+      }
+    }
+  }
+
+  /// Arch #17 (C1). The background wait/retries ended in failure: tell the server the SAME way a direct
+  /// failure would, a failed ack on the start_day (the server amends a deferred command to failed), so the
+  /// Remote start failed alert fires. Retried; the ack is idempotent server-side.
+  private func sendLateStartFailure(commandID: String, error: Error) async {
+    let reason = Self.lateStartFailureReason(error)
+    for attempt in 1...3 {
+      do {
+        let ack = try await remote.acknowledge(
+          commandID: commandID, ok: false, sessionID: nil, error: reason, audioInput: nil, verb: nil)
+        if ack.ok, ack.id == commandID, ack.status == "failed" { return }
+        throw RoomEngineError.io("invalid late-failure acknowledgement response")
+      } catch {
+        log("late start failure ack failed (attempt \(attempt)): \(bounded(error))")
+        if attempt < 3 { try? await inputReadyWait.sleep(UInt64(attempt) * 1_000_000_000) }
+      }
+    }
+  }
+
+  private func runBackgroundStart(
+    commandID: String, waitForDevice: Bool, attempts: Int, reportLateFailure: Bool
+  ) async {
     defer { startRetryTask = nil }
     var left = attempts
     var waitFirst = waitForDevice
     let pauses = Self.startRetryDelays(jitterRoll: inputReadyWait.jitterRoll())
     var tried = 0
+    var lastFailure: Error?
     while left > 0, !Task.isCancelled {
       do {
         if waitFirst {
@@ -2739,6 +2796,7 @@ public actor RoomEngine {
         return
       } catch {
         lastError = bounded(error)
+        lastFailure = error
         log("background start failed (attempt \(tried)): \(bounded(error))")
         if error is CancellationError { return }
         if let e = error as? RoomEngineError, case .inputDeviceNotReady = e { break }
@@ -2747,6 +2805,9 @@ public actor RoomEngine {
     }
     if !hasActiveCapture, phase != .paused, phase != .recording { phase = .failed }
     try? saveStatus()
+    if reportLateFailure, let failure = lastFailure, !Task.isCancelled {
+      await sendLateStartFailure(commandID: commandID, error: failure)
+    }
   }
 
   /// Arch #17 — the retry loop, free of the engine so a test can drive it with a scripted device list

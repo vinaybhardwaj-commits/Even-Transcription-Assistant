@@ -102,4 +102,30 @@
       #expect(!RoomEngine.isStartDeath(CancellationError()))
     }
   }
+
+  /// Arch #17 C1/C2: what a deferred start reports when its wait ends badly. Swift NOT compiled where written.
+  @Suite struct DeferredStartReportTests {
+    private final class Sleeps: @unchecked Sendable {
+      private let lock = NSLock()
+      private var n = 0
+      func tick() { lock.lock(); n += 1; lock.unlock() }
+      var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    @Test func aWaitThatNeverFindsTheDeviceEndsInTheNamedErrorAndTheServerCode() async {
+      let sleeps = Sleeps()
+      var thrown: Error?
+      do {
+        try await RoomEngine.awaitInputDevice(
+          uid: "uid-1", devices: { [] }, delays: [1, 2, 4], sleep: { _ in sleeps.tick() })
+      } catch { thrown = error }
+      #expect(sleeps.count == 3)                                   // every backoff step was taken, none of it real time
+      #expect(thrown as? RoomEngineError == RoomEngineError.inputDeviceNotReady("configured input device not attached after 4 checks"))
+      #expect(RoomEngine.lateStartFailureReason(thrown!) == "input_device_not_ready")
+    }
+
+    @Test func otherFailuresReportTheirBoundedText() {
+      #expect(RoomEngine.lateStartFailureReason(RoomEngineError.captureExited(1)) == "tapewriter exited with status 1")
+    }
+  }
 #endif

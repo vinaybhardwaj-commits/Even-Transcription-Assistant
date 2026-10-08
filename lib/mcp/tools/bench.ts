@@ -538,6 +538,22 @@ async function sendAndWait(room: RoomRef, kind: CommandKind, args: unknown, list
       : { ok: false, error: "kiosk_not_listening", ...base };
   }
   const result = (typeof row.result === "object" && row.result !== null ? row.result : {}) as Record<string, unknown>;
+  // ARCH #17 (C2) — a start the app ACCEPTED but could not run yet (it is waiting for the input device) is PENDING, not started. ok:true means the
+  // command was accepted; `started:false` and `pending:true` say no recording exists yet. A late failure flips the command to failed (see ackCommand).
+  if (kind === "start_day" && row.status === "acked" && result.deferred === true) {
+    return {
+      ok: true,
+      pending: true,
+      deferred: true,
+      started: false,
+      session_id: null,
+      status: "pending",
+      ...base,
+      result,
+      hint: "the kiosk accepted the start but is waiting for its input device; no recording exists yet. Check scribe_diff_room / scribe_get_session; a failure to start arrives as a failed start_day (Remote start failed).",
+      acked_at: row.acked_at ? new Date(row.acked_at).toISOString() : null,
+    };
+  }
   return {
     ok: row.status === "acked",
     status: row.status,

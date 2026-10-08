@@ -647,7 +647,26 @@ export async function ackCommand(input: AckInput): Promise<"acked" | "failed" | 
        WHERE id = ${input.commandId} AND room_id = ${input.roomId} AND status = 'pending'
        RETURNING id, kind
     `) as Array<{ id: string; kind?: string }>;
-    if (!rows.length) return null;
+    if (!rows.length) {
+      // ARCH #17 (C1) — A DEFERRED START'S LATE FAILURE. The app acks a start it could not run yet as {ok:true, deferred:true} and waits for the
+      // input device beside its poll loop. If that wait (or the retries) ends in failure there is no second command to carry it, so the same
+      // command is AMENDED: a start_day that is `acked` AND deferred becomes `failed` with the app's reason. That is the signal the Remote start
+      // failed alert (fleet-attention R7) already reads, and the 3-per-day caps count. Only start_day, only while deferred, only a failure.
+      if (!input.ok) {
+        const late = (await sql`
+          UPDATE bench_command
+             SET status = 'failed',
+                 result = ${result}::jsonb,
+                 error = ${input.error ?? "failed"},
+                 acked_at = now()
+           WHERE id = ${input.commandId} AND room_id = ${input.roomId} AND kind = 'start_day'
+             AND status = 'acked' AND result ->> 'deferred' = 'true'
+           RETURNING id
+        `) as Array<{ id: string }>;
+        if (late.length) return "failed";
+      }
+      return null;
+    }
     if (rows[0]!.kind === "set_audio_input" && input.ok && input.applied?.applied_device_uid) {
       await recordExpectedDevice(input.roomId, input.applied.applied_device_uid);
     }
