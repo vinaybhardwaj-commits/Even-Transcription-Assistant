@@ -770,6 +770,23 @@ export async function insertCommand(input: { roomId: string; kind: CommandKind; 
   });
 }
 
+/**
+ * F44.1 R2: mark a room's steward start_day commands that are still `pending` (delivered and never acked, or not yet delivered) and older than `olderThanS` as `expired`, so a retry
+ * never leaves two live start_days for one room. Only that room, only kind start_day, only source 'steward', only `pending` (an ack that lands first is untouched). Returns the ids.
+ */
+export async function expireStaleStartDay(roomId: string, olderThanS: number): Promise<string[]> {
+  return guarded(async () => {
+    const rows = (await sql`
+      UPDATE bench_command
+         SET status = 'expired'
+       WHERE room_id = ${roomId} AND kind = 'start_day' AND source = 'steward' AND status = 'pending'
+         AND created_at < now() - (${olderThanS}::int * INTERVAL '1 second')
+       RETURNING id
+    `) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  });
+}
+
 export async function getCommand(id: string): Promise<CommandRow | null> {
   return guarded(async () => {
     const rows = (await sql`
