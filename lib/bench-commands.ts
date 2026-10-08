@@ -352,6 +352,10 @@ export type PollInput = {
   /** §2.4 — did the client report an explicitly chosen second device? undefined = not reported
    *  (the browser kiosk never sends it), and undefined never erases a stored value. */
   spareDevice?: boolean | null;
+  /** Arch #22 — the recorder's monotonically increasing level-sample sequence and the checkpoint's own capture instant (ISO). Absent on every app
+   *  that does not send them; absent is stored as NULL, never as 0. */
+  levelSeq?: number | null;
+  levelCapturedAt?: string | null;
   /**
    * Install and Fleet §4.3 — the native Room Recorder's seven optional fields.
    *
@@ -538,7 +542,31 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
             sessionOpen = open.length > 0;
           } catch { /* keep the kiosk's claim */ }
         }
-        await sql`
+        const seq = typeof input.levelSeq === "number" && Number.isSafeInteger(input.levelSeq) && input.levelSeq >= 0 ? input.levelSeq : null;
+        const capturedAt = seq !== null && input.levelCapturedAt ? input.levelCapturedAt : null;
+        let wrote = false;
+        if (seq !== null) {
+          // Migration 0133 adds seq / captured_at. If it is not applied yet this INSERT fails and the sample is written the old way below, so a
+          // deploy ahead of the migration loses no level samples.
+          try {
+            await sql`
+              INSERT INTO bench_level_sample (
+                room_id, ist_date, sampled_at, peak, avg, zero_ratio,
+                session_open, tape_advancing, source, seq, captured_at
+              )
+              VALUES (
+                ${input.roomId}, (now() AT TIME ZONE 'Asia/Kolkata')::date, now(),
+                ${mic.peak}, ${mic.avg}, ${mic.zeroRatio ?? null},
+                ${sessionOpen},
+                ${sessionOpen && !input.paused},
+                'command_poll', ${seq}, ${capturedAt}::timestamptz
+              )
+            `;
+            wrote = true;
+          } catch { /* fall through to the pre-0133 insert */ }
+        }
+        if (!wrote) {
+          await sql`
           INSERT INTO bench_level_sample (
             room_id, ist_date, sampled_at, peak, avg, zero_ratio,
             session_open, tape_advancing, source
@@ -551,6 +579,7 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
             'command_poll'
           )
         `;
+        }
       } catch (error) {
         console.warn("[bench-levels] append failed", JSON.stringify({
           room_id: input.roomId,

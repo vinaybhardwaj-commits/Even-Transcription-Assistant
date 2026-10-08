@@ -46,7 +46,7 @@ beforeAll(() => {
     CREATE TABLE room (id text PRIMARY KEY, name text, disabled_at timestamptz);
     CREATE TABLE room_install (
       room_id text PRIMARY KEY, last_seen_at timestamptz, tape_advancing boolean, session_open boolean, disk_free_bytes bigint,
-      state_flags jsonb, retired_at timestamptz, enrolled_at timestamptz);
+      state_flags jsonb, input_device_name text, input_devices jsonb, retired_at timestamptz, enrolled_at timestamptz);
   `);
   pg.exec(noRecord("db/migrations/0103_room_alert_state.sql"));
   pg.exec(noRecord("db/migrations/0119_room_alert_outbox.sql"));

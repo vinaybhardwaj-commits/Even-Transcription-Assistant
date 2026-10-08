@@ -1276,7 +1276,10 @@ public actor RoomEngine {
             // capture runs. The lock is config.json's own.
             clipCount: heartbeat?.clipCount,
             silenceMS: heartbeat?.silenceMS,
-            channelLocked: configuration.channelLocked
+            channelLocked: configuration.channelLocked,
+            // Arch #22. The tail's own checkpoint sequence and the checkpoint's wall clock.
+            levelSeq: signal.levelSeq,
+            levelAt: signal.levelAt
           )
         }
         let response = try await remote.pollCommands(
@@ -2507,6 +2510,11 @@ public actor RoomEngine {
       try advanceControl(
         commandID: commandID, commandKind: .startDay, sessionID: nil,
         priorState: nil, newState: .startIntent)
+      // Arch #22. Say which rule picked the device. Alert-only: the decision never changes it.
+      let inputDecision = InputSelectionPolicy.decide(
+        configuredUID: configuration.deviceUID,
+        attached: machineFacts(configuration.deviceUID).inputDevices)
+      FileHandle.standardError.write(Data("room-recorder: \(inputDecision.logLine)\n".utf8))
       let created: CreateSessionResponse
       do {
         created = try await remote.createSession(label: nil, micLabel: configuration.deviceUID)
@@ -3585,10 +3593,13 @@ public actor RoomEngine {
   /// The PLAIN capture path only, which is the path every clinic Mac runs. The resident-archive
   /// lane (`resident_archive_capture_enabled`, off everywhere) measures its levels in-process and
   /// reports neither here: both are sent as absence, which the server keeps as the last reading.
-  private func currentSignal() -> (peak: Double?, zeroRatio: Double?) {
-    guard residentCaptureOwner == nil, let capture else { return (nil, nil) }
+  private func currentSignal() -> (peak: Double?, zeroRatio: Double?, levelSeq: Int64?, levelAt: String?) {
+    guard residentCaptureOwner == nil, let capture else { return (nil, nil, nil, nil) }
     let tail = refreshedIndexTail(for: capture)
-    return (tail.lastPeak, tail.lastZeroRatio)
+    let at = tail.lastLevelWallNS.map {
+      Self.iso8601(Date(timeIntervalSince1970: Double($0) / 1_000_000_000))
+    }
+    return (tail.lastPeak, tail.lastZeroRatio, tail.levelSeq, at)
   }
 
   /// The tail reader for this capture's index. A capture on a different index path gets a fresh
@@ -3745,6 +3756,12 @@ final class TapeIndexTail {
   private(set) var lastRMS: Double?
   private(set) var lastPeak: Double?
   private(set) var lastZeroRatio: Double?
+  /// Arch #22. How many decoded checkpoints carried a level (`rms` or `peak`) over this reader's life; nil until the first. It is the capture-side
+  /// freshness sequence: a capture that stops producing levels stops advancing it, whatever value `lastRMS` still holds. A new capture gets a new
+  /// reader, so it restarts from 1.
+  private(set) var levelSeq: Int64?
+  /// The `wall_ns` of the newest checkpoint that carried a level.
+  private(set) var lastLevelWallNS: UInt64?
   /// Records decoded over this reader's life. The D9 test counts it; nothing else reads it.
   private(set) var decodedRecordCount = 0
 
@@ -3804,6 +3821,10 @@ final class TapeIndexTail {
         if let rms = record.rms { lastRMS = rms }
         if let peak = record.peak { lastPeak = peak }
         if let zeroRatio = record.zeroRatio { lastZeroRatio = zeroRatio }
+        if record.rms != nil || record.peak != nil {
+          levelSeq = (levelSeq ?? 0) + 1
+          lastLevelWallNS = record.wallNS
+        }
       }
       lastLineStart = lineStart
       lineStart = committed.index(after: index)
@@ -3819,6 +3840,8 @@ final class TapeIndexTail {
     lastRMS = nil
     lastPeak = nil
     lastZeroRatio = nil
+    levelSeq = nil
+    lastLevelWallNS = nil
   }
 }
 

@@ -100,7 +100,7 @@ export type InstallView = {
 };
 
 /** B2-D10 — one entry of the app's input-device list, as `cleanPollFields` bounded it. */
-export type InputDevice = { name: string; uid: string; is_default: boolean };
+export type InputDevice = { name: string; uid: string; is_default: boolean; is_selected?: boolean };
 
 export type UpdateChannel = "stable" | "test";
 
@@ -370,6 +370,7 @@ export const SESSION_WARN_DAYS = 30;
 const DEGRADED_STATE_FLAGS: ReadonlySet<InstallStateFlag> = new Set<InstallStateFlag>([
   "DEVICE_MISSING",
   "SILENT_WHILE_RECORDING",
+  "WRONG_INPUT_SUSPECTED",
   "CLIPPING",
   "ENCODER_STALLED",
 ]);

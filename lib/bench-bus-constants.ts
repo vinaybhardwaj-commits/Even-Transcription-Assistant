@@ -385,11 +385,43 @@ export function roomState(input: {
  * are R2.5. Until then these thresholds are deliberately coarse: each one is a condition no working
  * room meets, so a flag means "go and look", never "this is the diagnosis".
  */
+export type InputDeviceFact = { name: string; uid?: string; is_default?: boolean; is_selected?: boolean };
+
+/**
+ * PURE — Arch #22. The attached input this room should be looking at instead of the one it is on, or null.
+ *
+ * THE SELECTED DEVICE is the entry the recorder marked `is_selected` (its configured device uid). An app that does not send the mark is matched by
+ * NAME against `selectedName`; if two attached devices share that name the selection is ambiguous and this returns null rather than guess. A selected
+ * device that cannot be identified is DEVICE_MISSING's business, not this one.
+ *
+ * THE CANDIDATE is the OS default input when it is not the selected one (the 7 Oct case: a working C270 was the OS default while the recorder sat on
+ * TONOR), else the first other attached input in the app's order. "Attached" is all this knows: the kiosk does not report another device's level,
+ * so the alert says SUSPECTED and names the candidate; it never claims the candidate is live.
+ */
+export function wrongInputCandidate(
+  devices: ReadonlyArray<InputDeviceFact> | null | undefined,
+  selectedName: string | null | undefined,
+): InputDeviceFact | null {
+  if (!Array.isArray(devices) || devices.length < 2) return null;
+  const marked = devices.filter((d) => d && d.is_selected === true);
+  let selected: InputDeviceFact | null = null;
+  if (marked.length === 1) selected = marked[0]!;
+  else if (marked.length === 0 && selectedName) {
+    const byName = devices.filter((d) => d && d.name === selectedName);
+    if (byName.length === 1) selected = byName[0]!;
+  }
+  if (!selected) return null;
+  const others = devices.filter((d) => d && d !== selected && !(selected!.uid !== undefined && d.uid === selected!.uid));
+  if (others.length === 0) return null;
+  return others.find((d) => d.is_default === true) ?? others[0]!;
+}
+
 export type InstallStateFlag =
   | "SILENT_WHILE_RECORDING"
   | "CLIPPING"
   | "DEVICE_MISSING"
   | "DEVICE_CHANGED"
+  | "WRONG_INPUT_SUSPECTED"
   | "ENCODER_STALLED"
   | "DISK_LOW"
   | "CHANNEL_DRIFT";
@@ -400,6 +432,7 @@ export const INSTALL_STATE_FLAGS: readonly InstallStateFlag[] = [
   "CLIPPING",
   "DEVICE_MISSING",
   "DEVICE_CHANGED",
+  "WRONG_INPUT_SUSPECTED",
   "ENCODER_STALLED",
   "DISK_LOW",
   "CHANNEL_DRIFT",
@@ -491,6 +524,7 @@ export const INSTALL_STATE_LABEL: Record<InstallStateFlag, string> = {
   CLIPPING: "clipping",
   DEVICE_MISSING: "device missing",
   DEVICE_CHANGED: "device changed",
+  WRONG_INPUT_SUSPECTED: "wrong input suspected",
   ENCODER_STALLED: "encoder stalled",
   DISK_LOW: "disk low",
   CHANNEL_DRIFT: "channel drift",
@@ -636,7 +670,7 @@ export function evaluateInstallStates(input: {
   recording: boolean;
   tapeAdvancing: boolean | null;
   inputDeviceName: string | null;
-  inputDevices: ReadonlyArray<{ name: string }> | null;
+  inputDevices: ReadonlyArray<{ name: string; uid?: string; is_default?: boolean; is_selected?: boolean }> | null;
   expectedDeviceName: string | null;
   diskFreeBytes: number | null;
   updateChannel: string | null;
@@ -656,6 +690,12 @@ export function evaluateInstallStates(input: {
 
   if (input.recording && input.tapeAdvancing === true && (head?.silent_polls ?? 0) >= SILENT_POLLS) {
     flags.add("SILENT_WHILE_RECORDING");
+  }
+
+  // Arch #22. The digital-silence rule above, plus another attached input. SILENT_WHILE_RECORDING stays raised beside it: this one adds the
+  // recoverable cause and the candidate to look at. Alert-only; nothing here switches a device.
+  if (flags.has("SILENT_WHILE_RECORDING") && wrongInputCandidate(input.inputDevices, input.inputDeviceName)) {
+    flags.add("WRONG_INPUT_SUSPECTED");
   }
 
   if (input.recording && input.ring.filter((e) => e.rec && pollClipped(e)).length >= CLIP_POLLS_MIN) {

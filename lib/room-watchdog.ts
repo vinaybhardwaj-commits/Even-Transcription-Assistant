@@ -40,7 +40,7 @@
  * invisibly.
  */
 import { sql } from "@/lib/db";
-import { DISK_LOW_BYTES } from "@/lib/bench-bus-constants";
+import { DISK_LOW_BYTES, wrongInputCandidate } from "@/lib/bench-bus-constants";
 import { isBenchStalled } from "@/lib/bench-reaper-core";
 import { listBenchSessions } from "@/lib/bench";
 import { parseFlag } from "@/lib/flags";
@@ -73,6 +73,8 @@ export type RoomPollFacts = {
   state_flags: readonly string[];
   /** This room's currently-open (`status = 'recording'`) bench session, or null if none. */
   open_session: OpenBenchSession | null;
+  /** Arch #22: the name of the attached input WRONG_INPUT_SUSPECTED points at, so the alert can name it. Absent/null: none known. */
+  wrong_input_candidate?: string | null;
 };
 
 /**
@@ -84,6 +86,7 @@ export type RoomPollFacts = {
 export type DegradationReason =
   | "device_missing"
   | "silent_while_recording"
+  | "wrong_input_suspected"
   | "clipping"
   | "encoder_stalled"
   | "tape_stalled"
@@ -93,6 +96,7 @@ export type DegradationReason =
 const FLAG_REASON: Record<string, DegradationReason> = {
   DEVICE_MISSING: "device_missing",
   SILENT_WHILE_RECORDING: "silent_while_recording",
+  WRONG_INPUT_SUSPECTED: "wrong_input_suspected",
   CLIPPING: "clipping",
   ENCODER_STALLED: "encoder_stalled",
 };
@@ -232,6 +236,7 @@ function andJoin(parts: readonly string[]): string {
 export const REASON_LABEL: Record<DegradationReason, string> = {
   device_missing: "a missing input device",
   silent_while_recording: "digital silence on the capture (exact zeros, not a quiet room)",
+  wrong_input_suspected: "the recorder may be on the wrong input (another input is attached)",
   clipping: "clipping",
   encoder_stalled: "a stalled encoder",
   tape_stalled: "a stalled tape",
@@ -246,8 +251,11 @@ export function offlineMessage(roomName: string, atIso: string): WatchdogMessage
   };
 }
 
-export function degradedMessage(roomName: string, reasons: readonly DegradationReason[], atIso: string): WatchdogMessage {
-  const why = andJoin(reasons.map((r) => REASON_LABEL[r]));
+export function degradedMessage(roomName: string, reasons: readonly DegradationReason[], atIso: string, wrongInputCandidate?: string | null): WatchdogMessage {
+  const why = andJoin(reasons.map((r) =>
+    r === "wrong_input_suspected" && wrongInputCandidate
+      ? `the recorder may be on the wrong input (another input is attached: ${wrongInputCandidate})`
+      : REASON_LABEL[r]));
   return {
     subject: `EvenScribe watchdog: ${roomName} capture is degraded`,
     text: `${roomName} is polling but its capture looks degraded — ${why} — as of ${atIso}. Go and look.`,
@@ -361,7 +369,7 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
     if (newStatus === "degraded") {
       // V's ruling: name WHICH signal tripped — the classifier, not_delivering, or both.
       messages.push({
-        ...degradedMessage(input.room_name, reasons, nowIso),
+        ...degradedMessage(input.room_name, reasons, nowIso, input.facts.wrong_input_candidate),
         kind: "degraded", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "degraded",
       });
     } else {
@@ -496,6 +504,8 @@ type FleetRow = {
   session_open: boolean | null;
   disk_free_bytes: number | null;
   state_flags: unknown;
+  input_device_name?: string | null;
+  input_devices?: unknown;
   prior_status: RoomAlertStatus | null;
   prior_since: string | null;
   muted_until: string | null;
@@ -655,6 +665,16 @@ export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEviden
  * nothing, never send a false alarm." The read is the only step allowed to abort the whole run;
  * once rows are in hand, one room's write failing is logged and skipped, never fatal to the rest.
  */
+/** Arch #22. The candidate's name for the alert text, from whatever shape `input_devices` came back in (jsonb array or its text). Null on any doubt. */
+function wrongInputCandidateName(selectedName: string | null | undefined, raw: unknown): string | null {
+  let devices: unknown = raw;
+  if (typeof raw === "string") {
+    try { devices = JSON.parse(raw); } catch { return null; }
+  }
+  if (!Array.isArray(devices)) return null;
+  return wrongInputCandidate(devices as Parameters<typeof wrongInputCandidate>[0], selectedName)?.name ?? null;
+}
+
 export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogRunResult> {
   let rows: FleetRow[];
   try {
@@ -666,6 +686,8 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
         ri.tape_advancing,
         ri.session_open,
         ri.disk_free_bytes,
+        ri.input_device_name,
+        ri.input_devices,
         COALESCE(ri.state_flags -> 'flags', '[]'::jsonb) AS state_flags,
         ras.status AS prior_status,
         ras.since AS prior_since,
@@ -730,6 +752,7 @@ export async function runWatchdog(nowMs: number = Date.now()): Promise<WatchdogR
       disk_free_bytes: row.disk_free_bytes,
       state_flags: Array.isArray(row.state_flags) ? (row.state_flags as string[]) : [],
       open_session: openSessions.get(row.room_id) ?? null,
+      wrong_input_candidate: wrongInputCandidateName(row.input_device_name, row.input_devices),
     },
     prior: row.prior_status && row.prior_since ? { status: row.prior_status, since: row.prior_since } : null,
     muted: Boolean(row.muted_until && Date.parse(row.muted_until) > nowMs),

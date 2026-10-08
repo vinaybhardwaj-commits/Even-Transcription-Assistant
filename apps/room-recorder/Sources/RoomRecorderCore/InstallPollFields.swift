@@ -82,6 +82,15 @@ public struct InstallPollFields: Equatable, Sendable {
   /// The config.json lock (D1 amended): this Mac ignores `assigned_channel`.
   public var channelLocked: Bool?
 
+  // ─── ARCH #22 ─────────────────────────────────────────────────────────────────────────────
+  /// The uid of the device this room records from. Used only to mark that entry `is_selected` in `input_devices`; it is not sent on its own.
+  public var selectedInputUID: String?
+  /// The recorder's level-sample sequence: how many index checkpoints that carried a level the current capture's tail reader has seen. Monotonic within a
+  /// capture, restarts at a new one (the server reads a lower value as a new epoch). Nil when no plain capture is running or nothing has been read.
+  public var levelSeq: Int64?
+  /// The wall clock of that checkpoint, ISO-8601, from the index record's own `wall_ns`.
+  public var levelAt: String?
+
   public init(
     installID: String,
     appVersion: String? = nil,
@@ -108,8 +117,14 @@ public struct InstallPollFields: Equatable, Sendable {
     inputVolumeSettable: Bool? = nil,
     clipCount: Int? = nil,
     silenceMS: Int64? = nil,
-    channelLocked: Bool? = nil
+    channelLocked: Bool? = nil,
+    selectedInputUID: String? = nil,
+    levelSeq: Int64? = nil,
+    levelAt: String? = nil
   ) {
+    self.selectedInputUID = selectedInputUID
+    self.levelSeq = levelSeq
+    self.levelAt = levelAt
     self.installID = installID
     self.appVersion = appVersion
     self.buildSHA = buildSHA
@@ -157,7 +172,9 @@ public struct InstallPollFields: Equatable, Sendable {
     zeroRatio: Double? = nil,
     clipCount: Int? = nil,
     silenceMS: Int64? = nil,
-    channelLocked: Bool? = nil
+    channelLocked: Bool? = nil,
+    levelSeq: Int64? = nil,
+    levelAt: String? = nil
   ) {
     self.init(
       installID: installID,
@@ -185,7 +202,10 @@ public struct InstallPollFields: Equatable, Sendable {
       inputVolumeSettable: facts.inputVolumeSettable,
       clipCount: clipCount,
       silenceMS: silenceMS,
-      channelLocked: channelLocked
+      channelLocked: channelLocked,
+      selectedInputUID: facts.inputDeviceUID,
+      levelSeq: levelSeq,
+      levelAt: levelAt
     )
   }
 
@@ -261,7 +281,7 @@ public struct InstallPollFields: Equatable, Sendable {
     add("peak", Self.unitString(peak))
     add("zero_ratio", Self.unitString(zeroRatio))
     // D10. One JSON array, beside `input_device_name`, not instead of it.
-    add("input_devices", inputDevices.flatMap(Self.inputDevicesJSON))
+    add("input_devices", inputDevices.flatMap { Self.inputDevicesJSON($0, selectedUID: selectedInputUID) })
     // ── Release R4 (D4) ─────────────────────────────────────────────────────────────────────
     // Beside `input_device_name`, about the same device. The volume in four decimals, dropped
     // when outside 0–1 like `peak`; settable as `"true"`/`"false"`, absent when not measured.
@@ -281,6 +301,13 @@ public struct InstallPollFields: Equatable, Sendable {
     }
     if let channelLocked {
       items.append(URLQueryItem(name: "channel_locked", value: channelLocked ? "true" : "false"))
+    }
+    // ── Arch #22 ────────────────────────────────────────────────────────────────────────────
+    // The level-sample sequence and its capture instant. Whole non-negative number or nothing; the instant only with a sequence, since an instant alone
+    // says nothing about whether the sequence moved.
+    if let levelSeq, levelSeq >= 0 {
+      items.append(URLQueryItem(name: "level_seq", value: String(levelSeq)))
+      add("level_at", levelAt)
     }
     return items
   }
@@ -309,13 +336,16 @@ public struct InstallPollFields: Equatable, Sendable {
   ///
   /// NIL, NOT `[]`, WHEN EVERY ENTRY WAS DROPPED. The machine reported devices; "no input
   /// devices" would be a claim it never made. A machine that reported none sends `[]`.
-  static func inputDevicesJSON(_ devices: [AudioInputDeviceEntry]) -> String? {
+  static func inputDevicesJSON(_ devices: [AudioInputDeviceEntry], selectedUID: String? = nil) -> String? {
     struct Wire: Encodable {
       let name: String
       let uid: String
       let is_default: Bool
+      // Arch #22. Encoded only when true (nil is omitted by the synthesized encoder), so an unselected entry is byte-identical to before.
+      let is_selected: Bool?
     }
     var kept: [Wire] = []
+    var selectedKept = false
     var defaultKept = false
     for device in devices {
       let name = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -325,7 +355,9 @@ public struct InstallPollFields: Equatable, Sendable {
         !(device.isDefault && defaultKept)
       else { continue }
       if device.isDefault { defaultKept = true }
-      kept.append(Wire(name: name, uid: uid, is_default: device.isDefault))
+      let isSelected = !selectedKept && selectedUID.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) == uid } == true
+      if isSelected { selectedKept = true }
+      kept.append(Wire(name: name, uid: uid, is_default: device.isDefault, is_selected: isSelected ? true : nil))
       if kept.count == inputDevicesMax { break }
     }
     if kept.isEmpty && !devices.isEmpty { return nil }
