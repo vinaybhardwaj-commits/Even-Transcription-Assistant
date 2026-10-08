@@ -37,3 +37,15 @@ export const isIndicScript = (s: Script): boolean => s !== "Latin" && s !== "Non
 
 /** Is a whole text mostly in an Indic script? */
 export const hasIndicScript = (text: string): boolean => isIndicScript(detectScript(text));
+
+/** Share of the text's letters that are written in an Indic script (0..1; 0 for a text with no letter). */
+export function indicLetterRatio(text: string): number {
+  let indic = 0, letters = 0;
+  for (const ch of text) {
+    const s = scriptOf(ch.codePointAt(0)!);
+    if (!s) continue;
+    letters += 1;
+    if (isIndicScript(s)) indic += 1;
+  }
+  return letters ? indic / letters : 0;
+}

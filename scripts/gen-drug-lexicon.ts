@@ -5,7 +5,8 @@
  *
  * NAMES ONLY: it selects DISTINCT brand_name and generic_name (medications) and investigation__name (further_investigation), each only if used in >= 3 DISTINCT prescriptions (GROUP BY ... HAVING COUNT(DISTINCT <prescription id>) >= 3) and nothing else (no strength, no dose, no patient or prescription column), keeps letters / digits / space /
  * hyphen, and drops anything shorter than 4 letters. Metabase caps a result at about 2000 rows, so it pages with LIMIT / OFFSET over a stable ORDER BY. The output is
- * sorted and deduplicated case-insensitively, so a rerun on the same catalog is byte-identical. Run it where the Metabase env exists (Vercel env, or fable); commit only the JSON.
+ * sorted and deduplicated case-insensitively, so a rerun on the same catalog is byte-identical. Run it where the Metabase env exists (Vercel env, or fable); commit only the JSON,
+ * and READ the investigation list before committing it: it comes from a free-text field (the >= 3 distinct prescriptions rule and a length cap are the only filters).
  */
 import { writeFileSync } from "node:fs";
 import { metabaseQuery } from "../lib/metabase";
@@ -15,8 +16,14 @@ const INVESTIGATIONS = '"individuals-prescriptions__further_investigation"';
 const PAGE = 1800;
 /** a name is kept only if it appears in at least this many DISTINCT prescriptions (one-off typos and free text fall out) */
 const MIN_PRESCRIPTIONS = 3;
-/** the prescription id column of both tables. UNVERIFIED here (written without Metabase access): fable's 09 Oct run used the right one; override with LEXICON_RX_COL. */
-const RX_COL = (process.env.LEXICON_RX_COL ?? "prescription_id").replace(/[^A-Za-z0-9_]/g, "");
+/**
+ * The column that says WHICH prescription a row belongs to. Both tables are flattened Firestore sub-collections of a prescription document, so the parent document id is
+ * the prescription: `_parent_doc_id` (confirmed for "individuals-prescriptions__further_investigation", whose columns include _parent_doc_id and investigation__name; the
+ * medications table follows the same flattening convention but its columns were NOT inspected from here: check it once before trusting a rerun).
+ */
+const RX_COL = "_parent_doc_id";
+/** free-text investigation rows can carry a patient's own words: nothing longer than this goes into a committed file (the longest name in the 09 Oct list is 87 characters) */
+const MAX_NAME_LEN = 120;
 
 async function names(table: string, col: "brand_name" | "generic_name" | "investigation__name"): Promise<string[]> {
   const out: string[] = [];
@@ -33,7 +40,7 @@ const clean = (s: string): string => s.normalize("NFKC").replace(/[^A-Za-z0-9 -]
 
 function uniq(all: string[]): string[] {
   const seen = new Map<string, string>();
-  for (const n of all.map(clean).filter((x) => x.replace(/[^A-Za-z]/g, "").length >= 3)) if (!seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n);
+  for (const n of all.map(clean).filter((x) => x.replace(/[^A-Za-z]/g, "").length >= 3 && x.length <= MAX_NAME_LEN)) if (!seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n);
   return [...seen.values()].sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
 }
 

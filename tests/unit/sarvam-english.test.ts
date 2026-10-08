@@ -45,7 +45,7 @@ describe("alignEnglish / settleUnpaired — a mixed en / kn / hi consult loses n
 
   it("each English entry goes to the native entry it overlaps most; unmatched ones are kept; unpaired natives are settled by script", () => {
     const n = structuredClone(native);
-    const track = alignEnglish(n, pass);
+    const { track } = alignEnglish(n, pass);
     expect(track).toHaveLength(5); // nothing dropped
     expect(track.map((t) => t.native_idx)).toEqual([0, 1, 1, 2, null]);
     expect(n[1]!.english).toBe("I have a headache and"); // two English entries on one native entry are joined, in time order
@@ -62,7 +62,7 @@ describe("alignEnglish / settleUnpaired — a mixed en / kn / hi consult loses n
 
   it("mayura results join the track, and finalize orders it by time, builds the English text and the drug candidates", () => {
     const n = structuredClone(native);
-    const track = alignEnglish(n, pass);
+    const { track } = alignEnglish(n, pass);
     const need = settleUnpaired(n, track);
     n[4]!.english = "Come again"; n[4]!.english_source = "mayura";
     addMayura(n, track, need);
@@ -76,7 +76,7 @@ describe("alignEnglish / settleUnpaired — a mixed en / kn / hi consult loses n
 
   it("a native entry with an empty text gets an empty English and needs nothing; a point-like English entry is paired by its midpoint", () => {
     const n = tagNative([{ speaker_id: "0", start_s: 0, end_s: 4, text: "" }, { speaker_id: "0", start_s: 4, end_s: 8, text: "ನಮಸ್ಕಾರ" }]);
-    const track = alignEnglish(n, [{ speaker_id: "0", start_s: 6, end_s: 6, text: "Hello" }]);
+    const { track } = alignEnglish(n, [{ speaker_id: "0", start_s: 6, end_s: 6, text: "Hello" }]);
     expect(track[0]!.native_idx).toBe(1);
     expect(settleUnpaired(n, track)).toEqual([]);
     expect(n[0]!.english).toBe("");
@@ -161,5 +161,34 @@ describe("sarvam_translate planUnits — the file label is not trusted to say al
   it("a non-English label (or no label) is one unit, as before", () => {
     expect(planUnits("bukhar hai", null)).toEqual([{ text: "bukhar hai", translate: true }]);
     expect(planUnits("naanu tale novu ide", "kn-IN")).toEqual([{ text: "naanu tale novu ide", translate: true }]);
+  });
+});
+
+describe("G43 — romanised Indic and checkEnglish (thresholds pinned)", () => {
+  it("function words of the five languages score; English does not; ambiguous words do not name a language", async () => {
+    const { scoreRomanized, verdictOf, ROMANIZED_RATIO, ROMANIZED_SHORT_RATIO, MIXED_RATIO } = await import("@/lib/romanized-indic");
+    expect([ROMANIZED_RATIO, ROMANIZED_SHORT_RATIO, MIXED_RATIO]).toEqual([0.2, 0.3, 0.07]);
+    expect(scoreRomanized("mujhe bukhar hai doctor sahab")).toMatchObject({ hits: 3, lang: "hi" });
+    expect(scoreRomanized("naanu tumba novu ide illa")).toMatchObject({ lang: "kn" });
+    expect(scoreRomanized("mala taap aahe aani khokla pan ahe")).toMatchObject({ lang: "mr" });
+    expect(scoreRomanized("enakku romba kaichal irukku")).toMatchObject({ lang: "ta" });
+    expect(scoreRomanized("naaku jwaram undi baaga ledu")).toMatchObject({ lang: "te" });
+    expect(scoreRomanized("nahi").lang).toBeNull(); // hi and mr both have it
+    expect(verdictOf(scoreRomanized("Take the tablet twice a day after food and come back on Friday"))).toBe("english");
+    expect(verdictOf(scoreRomanized("mujhe bukhar hai doctor sahab"))).toBe("romanized");
+    expect(verdictOf(scoreRomanized("nahi"))).toBe("romanized"); // a 1-word entry that IS an Indic word
+    expect(verdictOf(scoreRomanized("The patient says bukhar hai since yesterday and also has a mild cough"))).toBe("mixed");
+    expect(verdictOf(scoreRomanized("The patient has a fever and a cough since yesterday and says hai once in the whole long sentence about it"))).toBe("english"); // 1 hit in 20 words (5 %) is below MIXED_RATIO: not flagged
+  });
+  it("no ordinary English sentence of the three false-positive sets is read as romanised or mixed Indic", async () => {
+    const { checkEnglish } = await import("@/lib/jobs/kinds/sarvam-english");
+    for (const t of [...fixtures.ordinary, ...fixtures.holdout, ...fixtures.final, ...fixtures.consult]) expect(checkEnglish(t).verdict, t).toBe("english");
+  });
+  it("checkEnglish: Indic-script letters above 15 % are not English; a little Indic inside English is mixed only through romanised words", async () => {
+    const { checkEnglish } = await import("@/lib/jobs/kinds/sarvam-english");
+    expect(checkEnglish("ನನಗೆ ತಲೆನೋವು ಇದೆ").verdict).toBe("indic_script");
+    expect(checkEnglish("I have a headache ನನಗೆ ತಲೆನೋವು ಇದೆ").verdict).toBe("indic_script");
+    expect(checkEnglish("I have a headache since three days").verdict).toBe("english");
+    expect(checkEnglish("").verdict).toBe("english");
   });
 });

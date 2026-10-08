@@ -35,7 +35,7 @@ import {
   SARVAM_WALL_MS, capRefusalForJob, dailyCapRefusal, readJson, recordSarvamCall, resultKey, writeJson,
   type EnglishEntry, type ResultDoc, type SarvamScope,
 } from "./sarvam-common";
-import { addMayura, alignEnglish, finalizeEnglish, settleUnpaired, tagNative } from "./sarvam-english";
+import { addMayura, alignEnglish, englishCounts, finalizeEnglish, settleUnpaired, tagNative } from "./sarvam-english";
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 
 export const SARVAM_TRANSCRIBE_KIND = "sarvam_transcribe";
@@ -385,6 +385,8 @@ async function enFinishStep(ctx: StepContext): Promise<StepOutcome> {
   const K = KEYS.en;
   let pass: "done" | "skipped_cap" | "failed" = ctx.progress.en_skip === "skipped_cap" ? "skipped_cap" : ctx.progress.en_skip === "failed" ? "failed" : "done";
   let track: EnglishEntry[] = [];
+  let rejected = 0;
+  let rejectedNative = new Set<number>();
   const enJobId = String(ctx.progress[K.job] ?? "");
   if (pass === "done") {
     const outputs = (ctx.progress[K.outputs] as string[] | undefined) ?? [];
@@ -398,13 +400,20 @@ async function enFinishStep(ctx: StepContext): Promise<StepOutcome> {
     } else {
       let raw = res.entries.map((e) => ({ speaker_id: e.speakerId, start_s: e.start, end_s: e.end, text: e.transcript }));
       if (raw.length === 0 && res.transcript.trim()) raw = [{ speaker_id: "", start_s: 0, end_s: doc.duration_s, text: res.transcript }];
-      track = alignEnglish(doc.entries, raw);
+      // G43: the pass is not trusted to have returned English: every entry is checked, refused ones send their native partner to mayura
+      const aligned = alignEnglish(doc.entries, raw);
+      track = aligned.track;
+      rejected = aligned.rejected;
+      rejectedNative = aligned.rejectedNative;
+      if (rejected > 0 && rejected > track.length) console.error("[sarvam] english pass looks untranslated", JSON.stringify({ job: ctx.job.id, rejected, of: raw.length }));
       await ledgerBatch(ctx, "ok", 200, ctx.progress[K.throttled] === true, "en");
     }
   }
   doc.english_entries = track;
-  const need = settleUnpaired(doc.entries, track);
-  doc.english_pass = pass;
+  const need = settleUnpaired(doc.entries, track, rejectedNative);
+  doc.pass_rejected = rejected;
+  // "suspect": most of what the pass returned was not English (the API most likely ignored mode translate)
+  doc.english_pass = pass === "done" && rejected > 0 && rejected > (doc.english_entries?.length ?? 0) ? "suspect" : pass;
   doc.sarvam_job_ids = { native: doc.sarvam_job_ids?.native ?? null, english: enJobId || null };
   doc.minutes = { native: doc.minutes?.native ?? 0, english: pass === "done" ? Math.round((num(ctx.progress.duration_ms) / 60_000) * 1000) / 1000 : 0 };
   if (need.length > 0) {
@@ -433,7 +442,6 @@ async function finishDoc(ctx: StepContext, key: string, doc: ResultDoc, mayuraCh
 function summary(jobId: string, doc: ResultDoc): Record<string, unknown> {
   return {
     r2_key: resultKey(jobId),
-    entries: doc.entries.length,
     speakers: doc.speakers.length,
     language_code: doc.language_code,
     duration_s: doc.duration_s,
@@ -442,6 +450,8 @@ function summary(jobId: string, doc: ResultDoc): Record<string, unknown> {
     english_chars: doc.english?.length ?? 0,
     english_pass: doc.english_pass ?? "not_requested",
     english_entries: doc.english_entries?.length ?? 0,
+    ...englishCounts(doc),
+    pass_rejected: doc.pass_rejected ?? 0,
     drug_candidates: doc.drug_candidates?.length ?? 0,
     minutes: doc.minutes ?? { native: 0, english: 0 },
   };
@@ -461,7 +471,7 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
     const chunks = chunkText(entry.text);
     const parts = entry.parts ?? [];
     // the entry's OWN language if Sarvam gave one, else "auto": the file-level code is not trusted for a mixed-language consult
-    const src = entry.language_code && entry.language_code.includes("-") ? entry.language_code : null;
+    const src = entry.mayura_lang ?? (entry.language_code && entry.language_code.includes("-") && !/^en-/i.test(entry.language_code) ? entry.language_code : null);
     // F1: the deadline is checked per CHUNK, and the partial English is saved after EACH chunk, so a claim resumes mid-entry and never re-sends
     while (parts.length < chunks.length) {
       if (Date.now() >= deadline) {
@@ -487,13 +497,13 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
       }
     }
     entry.english = parts.join(" ").trim();
-    entry.english_source = "mayura";
+    entry.english_source = entry.english_source === "mayura_fallback" ? "mayura_fallback" : "mayura";
     delete entry.parts;
   }
   const remaining = doc.entries.filter((e) => e.english === undefined).length;
   if (remaining > 0) return persistAndContinue(ctx, key, doc, throttled, sent);
   doc.english_entries = doc.english_entries ?? [];
-  addMayura(doc.entries, doc.english_entries, doc.entries.map((_, i) => i).filter((i) => doc.entries[i]!.english_source === "mayura"));
+  addMayura(doc.entries, doc.english_entries, doc.entries.map((_, i) => i).filter((i) => doc.entries[i]!.english_source === "mayura" || doc.entries[i]!.english_source === "mayura_fallback"));
   return finishDoc(ctx, key, doc, sent, throttled);
 }
 

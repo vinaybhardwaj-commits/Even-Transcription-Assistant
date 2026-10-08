@@ -571,7 +571,7 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
     gw.result.mockResolvedValue({ ok: true, transcript: "namaste doctor bukhar hai", languageCode: "hi-IN", entries });
     const out = await finish({ ...args, english: false });
     expect(out).toEqual({ kind: "done", result: { r2_key: "mcp-sarvam/job_t1.json", entries: 2, speakers: 2, language_code: "hi-IN", duration_s: 600, english: false, transcript_chars: 25, english_chars: 0,
-      english_pass: "not_requested", english_entries: 0, drug_candidates: 0, minutes: { native: 10, english: 0 } } });
+      english_pass: "not_requested", english_entries: 0, english_ok: 0, mayura_fallback: 0, unverified: 0, untranslated: 0, mixed_language: 0, pass_rejected: 0, drug_candidates: 0, minutes: { native: 10, english: 0 } } });
     expect(JSON.stringify(out)).not.toContain("namaste");
   });
 
@@ -865,11 +865,11 @@ describe("S8A4 — the English track comes from a second Sarvam pass over the au
     answer = () => [];
     const fin1 = await runEnFinish({ en_skip: "skipped_cap", en_outputs: undefined, en_sarvam_job_id: undefined });
     expect(fin1).toMatchObject({ kind: "next", step: "translate" });
-    gw.translate.mockImplementation(async (t: string) => ({ ok: true, english: `EN(${t})` }));
+    gw.translate.mockImplementation(async (t: string) => ({ ok: true, english: t.startsWith("ನ") ? "I have a headache" : "I have a fever" }));
     const out = await step("translate", { ...base, outputs: ["0.json"] });
-    expect(out).toMatchObject({ kind: "done", result: { english_pass: "skipped_cap" } });
+    expect(out).toMatchObject({ kind: "done", result: { english_pass: "skipped_cap", english_ok: 3, untranslated: 0 } });
     expect(gw.translate.mock.calls.map((c) => c[0])).toEqual(["ನನಗೆ ತಲೆನೋವು ಇದೆ", "मुझे बुखार है"]); // only the Indic entries; the Latin one was kept
-    expect(gw.translate.mock.calls.every((c) => c[1] === null)).toBe(true);
+    expect(gw.translate.mock.calls.map((c) => c[1])).toEqual(["kn-IN", null]); // from the script (Kannada); Devanagari could be hi / mr: auto
     const doc = json("mcp-sarvam/job_t1.json");
     expect(doc.entries.map((e: Row) => e.english_source)).toEqual(["native_latin", "mayura", "mayura"]);
     expect(doc.english_entries).toHaveLength(3);
@@ -899,6 +899,90 @@ describe("S8A4 — the English track comes from a second Sarvam pass over the au
     expect(endedEnLine(job as never, "failed", "2026-10-08T06:30:00.000Z")).toMatchObject({ job_id: "job_t1:en", request_id: "sj_en", task: "translate", audio_s: 600, status: "failed" });
     expect(endedEnLine({ ...job, progress: base } as never, "failed", "x")).toBeNull();
     expect(endedLine(job as never, "failed", "x")).toMatchObject({ job_id: "job_t1", task: "transcribe" });
+  });
+});
+
+describe("G43 / G45 — the English track is never trusted to be English", () => {
+  const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true };
+  const base = { clip_key: "clip.webm", content_type: "audio/webm", scope: "encounter", ref: "enc_1", sarvam_job_id: "sj_9", duration_ms: 600_000, started_at: "2026-10-08T06:00:00.000Z", sarvam_started_ms: Date.now(), en_sarvam_job_id: "sj_en", en_started_ms: Date.now(), en_outputs: ["1.json"], outputs: ["0.json"] };
+  const seedDoc = (entries: Row[]) => store.set("mcp-sarvam/job_t1.json", Buffer.from(JSON.stringify({
+    language_code: "en-IN", duration_s: 600, speakers: ["0"], transcript: "x", english_pass: "pending", sarvam_job_ids: { native: "sj_9", english: null }, minutes: { native: 10, english: 0 }, entries,
+  })));
+  const nat = (start: number, text: string, script: string, language_code: string | null = null) => ({ speaker_id: "0", start_s: start, end_s: start + 4, text, script, language_code });
+  const pass = (rows: Array<[number, string]>) => rows.map(([start, transcript]) => ({ transcript, start, end: start + 4, speakerId: "0", languageCode: null }));
+  const finishEn = (over: Row = {}) => T.sarvamTranscribeKind.run(ctx("en_finish", args, { ...base, ...over }));
+  const KN = "ನನಗೆ ತಲೆನೋವು ಇದೆ", HI = "मुझे बुखार है";
+
+  it("THE REFUTER'S CASE — the API ignores mode translate and returns the NATIVE text: no Indic text is accepted as English; every entry goes to mayura as mayura_fallback; the pass is 'suspect'; the counts say so", async () => {
+    seedDoc([nat(0, KN, "Kannada"), nat(4, HI, "Devanagari")]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "kn-IN", entries: pass([[0, KN], [4, HI]]) });
+    const fin = await finishEn();
+    expect(fin).toMatchObject({ kind: "next", step: "translate" });
+    expect(json("mcp-sarvam/job_t1.json")).toMatchObject({ english_pass: "suspect", pass_rejected: 2, english_entries: [] });
+    expect(json("mcp-sarvam/job_t1.json").entries.map((e: Row) => e.english_source)).toEqual(["mayura_fallback", "mayura_fallback"]);
+    gw.translate.mockImplementation(async (t: string) => ({ ok: true, english: t === KN ? "I have a headache" : "I have a fever" }));
+    const out = await step2("translate");
+    expect(out).toMatchObject({ kind: "done", result: { english_pass: "suspect", entries: 2, english_ok: 0, mayura_fallback: 2, unverified: 0, untranslated: 0, pass_rejected: 2 } });
+    const doc = json("mcp-sarvam/job_t1.json");
+    expect(doc.entries.map((e: Row) => [e.english, e.english_status])).toEqual([["I have a headache", "mayura_fallback"], ["I have a fever", "mayura_fallback"]]);
+    expect(doc.english_entries.map((t: Row) => t.source)).toEqual(["mayura_fallback", "mayura_fallback"]);
+    expect(doc.english).toBe("I have a headache I have a fever");
+    expect(/[\u0900-\u0d7f]/.test(doc.english)).toBe(false); // no Indic script anywhere in the English track
+  });
+  const step2 = (name: string, over: Row = {}) => T.sarvamTranscribeKind.run(ctx(name, args, { ...base, ...over }));
+
+  it("(a) a pass entry written in Indic script is refused even when only that entry is wrong; the good ones stay; mayura is told the language the script says", async () => {
+    seedDoc([nat(0, "How are you", "Latin"), nat(4, KN, "Kannada")]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: pass([[0, "How are you"], [4, KN]]) });
+    expect(await finishEn()).toMatchObject({ kind: "next", step: "translate" });
+    gw.translate.mockResolvedValue({ ok: true, english: "I have a headache" });
+    await step2("translate");
+    expect(gw.translate).toHaveBeenCalledTimes(1);
+    expect(gw.translate).toHaveBeenCalledWith(KN, "kn-IN");
+    expect(json("mcp-sarvam/job_t1.json")).toMatchObject({ english_pass: "done", pass_rejected: 1 });
+  });
+
+  it("(b) romanised Indic: a pass entry (or a Latin native entry) full of Hindi / Kannada function words is not English; the language comes from the entry or the score; unknown language -> unverified, never passed as English", async () => {
+    seedDoc([nat(0, "mujhe bukhar hai doctor sahab", "Latin", "hi-IN"), nat(4, "naanu tumba novu ide illa", "Latin"), nat(8, "nahi", "Latin"), nat(12, "Please sit down", "Latin")]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: pass([[0, "mujhe bukhar hai doctor sahab"], [4, "naanu tumba novu ide illa"], [12, "Please sit down"]]) });
+    expect(await finishEn()).toMatchObject({ kind: "next", step: "translate" });
+    gw.translate.mockImplementation(async (t: string) => ({ ok: true, english: t.startsWith("mujhe") ? "I have a fever, doctor" : "I have a lot of pain" }));
+    const out = await step2("translate");
+    expect(gw.translate.mock.calls).toEqual([["mujhe bukhar hai doctor sahab", "hi-IN"], ["naanu tumba novu ide illa", "kn-IN"]]);
+    const doc = json("mcp-sarvam/job_t1.json");
+    expect(doc.entries.map((e: Row) => e.english_status)).toEqual(["mayura_fallback", "mayura_fallback", "unverified", "ok"]);
+    expect(doc.entries[2]).toMatchObject({ english_source: "native_unverified" }); // "nahi" alone: hi and mr tie -> language unknown -> unverified
+    expect(out).toMatchObject({ kind: "done", result: { english_ok: 1, mayura_fallback: 2, unverified: 1, untranslated: 0 } });
+    expect(doc.drug_candidates).toEqual([]);
+  });
+
+  it("(c) the pass returned nothing usable for an entry -> mayura on the native entry; mayura returning Indic / empty / the same text -> english_status untranslated and an EMPTY english, never the Indic text", async () => {
+    seedDoc([nat(0, KN, "Kannada"), nat(4, HI, "Devanagari"), nat(8, "ਸਤ ਸ੍ਰੀ ਅਕਾਲ", "Gurmukhi")]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "", languageCode: "en-IN", entries: [] });
+    expect(await finishEn()).toMatchObject({ kind: "next", step: "translate" });
+    gw.translate.mockImplementation(async (t: string) => (t === KN ? { ok: true, english: KN } : t === HI ? { ok: true, english: "" } : { ok: true, english: "ਸਤ ਸ੍ਰੀ" }));
+    const out = await step2("translate");
+    const doc = json("mcp-sarvam/job_t1.json");
+    expect(doc.entries.map((e: Row) => [e.english, e.english_status])).toEqual([["", "untranslated"], ["", "untranslated"], ["", "untranslated"]]);
+    expect(out).toMatchObject({ kind: "done", result: { entries: 3, english_ok: 0, untranslated: 3 } });
+    expect(doc.english).toBe("");
+  });
+
+  it("G45: a few Hindi words inside an otherwise English entry -> kept as English with mixed_language, not sent to mayura", async () => {
+    seedDoc([nat(0, "The patient says bukhar hai since yesterday and also has a mild cough", "Latin")]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: pass([[0, "The patient says bukhar hai since yesterday and also has a mild cough"]]) });
+    const out = await finishEn();
+    expect(out).toMatchObject({ kind: "done", result: { english_ok: 1, mixed_language: 1, pass_rejected: 0 } });
+    expect(gw.translate).not.toHaveBeenCalled();
+    expect(json("mcp-sarvam/job_t1.json").entries[0]).toMatchObject({ mixed_language: true, english_status: "ok" });
+    expect(json("mcp-sarvam/job_t1.json").english_entries[0]).toMatchObject({ mixed_language: true });
+  });
+
+  it("an honest translate pass is unaffected: all English, status ok, nothing sent to mayura, pass done", async () => {
+    seedDoc([nat(0, KN, "Kannada"), nat(4, HI, "Devanagari")]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: pass([[0, "I have a headache"], [4, "I have a fever"]]) });
+    expect(await finishEn()).toMatchObject({ kind: "done", result: { english_pass: "done", english_ok: 2, mayura_fallback: 0, unverified: 0, untranslated: 0, pass_rejected: 0 } });
+    expect(gw.translate).not.toHaveBeenCalled();
   });
 });
 

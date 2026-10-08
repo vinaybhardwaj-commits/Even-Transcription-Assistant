@@ -24,11 +24,13 @@ export type ResultEntry = {
   speaker_id: string; start_s: number; end_s: number; text: string;
   /** S8A4: the script this entry's own text is written in (Latin, Devanagari, Kannada, ...), and Sarvam's per-entry language if the response carried one */
   script?: string; language_code?: string | null;
-  english?: string; /** where `english` came from: the translate pass (speech -> English), mayura on the entry's text, or the entry itself (Latin script, no partner) */ english_source?: "translate_pass" | "mayura" | "native_latin";
+  english?: string; /** where `english` came from: the translate pass (speech -> English), mayura on the entry's text, or the entry itself (Latin script, no partner) */ english_source?: "translate_pass" | "mayura" | "mayura_fallback" | "native_latin" | "native_unverified";
+  /** S8A4-R3: ok | mayura_fallback | unverified | untranslated | empty — whether the English can be taken as English; mixed_language: some Indic words inside an otherwise English entry; mayura_lang: the source language mayura was given */
+  english_status?: "ok" | "mayura_fallback" | "unverified" | "untranslated" | "empty"; mixed_language?: boolean; mayura_lang?: string | null;
   /** partial English per 900-char chunk, until the entry is complete */ parts?: string[];
 };
 /** S8A4: one entry of the English track. native_idx = the native entry it was aligned to by time overlap, or null (kept, never dropped). */
-export type EnglishEntry = { speaker_id: string; start_s: number; end_s: number; text: string; source: "translate_pass" | "mayura" | "native_latin"; native_idx: number | null };
+export type EnglishEntry = { speaker_id: string; start_s: number; end_s: number; text: string; source: "translate_pass" | "mayura" | "mayura_fallback" | "native_latin" | "native_unverified"; native_idx: number | null; status?: "ok" | "unverified"; mixed_language?: boolean };
 export type ResultDoc = {
   language_code: string | null;
   duration_s: number;
@@ -41,7 +43,9 @@ export type ResultDoc = {
   drug_candidates?: Array<{ entry_idx: number; heard: string; suggested: string; score: number; source: string }>;
   sarvam_job_ids?: { native: string | null; english: string | null };
   minutes?: { native: number; english: number };
-  english_pass?: "pending" | "done" | "skipped_cap" | "failed" | "not_requested";
+  english_pass?: "pending" | "done" | "suspect" | "skipped_cap" | "failed" | "not_requested";
+  /** G43: translate-pass entries that were NOT English (Indic script or romanised Indic) and were refused; their native partners went to mayura */
+  pass_rejected?: number;
   /** the English-track `drug_candidates[].entry_idx` indexes `english_entries` */
 };
 
