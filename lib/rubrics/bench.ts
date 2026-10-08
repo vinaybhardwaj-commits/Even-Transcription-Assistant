@@ -82,7 +82,7 @@ export function labelReport(set: "gold" | "grokbot_agreement" | "human_v", r: Be
   }
   if (opts.excerpt) {
     return { ...r, set, metric: "accuracy_vs_V_on_excerpts", label: `accuracy_vs_V on excerpts (n=${r.items})`, metrics: { ...restMetrics, accuracy_vs_V_on_excerpts: accuracy }, threshold: null, passed: null, human_gold: true, rater: "V", n: r.items,
-      population: "transcript excerpts V labelled (a few turns around surgery talk), in-room consults, room tape (not Meet)",
+      blind_check: "blind check: 18/18 resolved, 0 blind, Fable 9 Oct", population: "transcript excerpts V labelled (a few turns around surgery talk), in-room consults, room tape (not Meet)",
       note: "excerpts are partial consults: recommendation_kind / surgery_recommended are scored; full-consult fields (doubts answered, uptake, balance) are not comparable unless the gold row carries them" };
   }
   return { ...r, set, metric: "accuracy_vs_V", metrics: { ...restMetrics, accuracy_vs_V: accuracy }, threshold: null, passed: null, human_gold: true, rater: "V", n: r.items, population: "in-room consults, room tape (not Meet)" };

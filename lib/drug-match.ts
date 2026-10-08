@@ -118,7 +118,10 @@ const lowerWords = (words: string[]): string[] => words.map((w) => w.toLowerCase
 
 type Cue = "none" | "weak" | "strong";
 /** What kind of cue surrounds the window: "strong" (a cue word of its kind within CUE_RADIUS, a dosing abbreviation or phrase), "weak" (an everyday dosing verb / frequency word right beside it), or "none". */
+/** Test hook (GATING-G66): how many times cueOf has run. One drugCandidates run may call it at most once per (window, category), never once per lexicon entry. */
+export const cueStats = { calls: 0 };
 const cueOf = (words: string[], lw: string[], start: number, size: number, c: Category): Cue => {
+  cueStats.calls += 1;
   for (let i = Math.max(0, start - CUE_RADIUS); i < Math.min(words.length, start + size + CUE_RADIUS); i++) if (i < start || i >= start + size) if (CUES[c].has(words[i]!.toLowerCase())) return "strong";
   if (c !== "drug") return "none";
   let weak = false;

@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, statSync } from "node:fs";
 import { detectScript, hasIndicScript, nonLatinLetterRatio } from "@/lib/script-detect";
-import { drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, type Lexicon } from "@/lib/drug-match";
+import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, type Lexicon } from "@/lib/drug-match";
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 import { alignEnglish, settleUnpaired, tagNative, addMayura, finalizeEnglish, normalizeForEcho, checkEnglish as checkEnglishRaw } from "@/lib/jobs/kinds/sarvam-english";
 import { planUnits } from "@/lib/jobs/kinds/sarvam-translate";
@@ -454,5 +454,23 @@ describe("G61 (S8A6) — clinical English is not a drug, whatever the cue", () =
   it("MUTANT PIN — the clinical gate is what removes them: with an empty list the physiotherapy case is a candidate again", () => {
     // (the equivalent of the mutant is checked by hand in the report; here the positive control: a drug-like non-clinical word with the same cues still scores)
     expect(cands("Continue the stairs tablet twice a week").length).toBeGreaterThan(0);
+  });
+});
+
+describe("GATING-G66 (S71-D) — the cue is computed once per (window, category), never once per lexicon entry", () => {
+  it("cueOf call count is bounded by windows x categories on a real-lexicon run, and does not grow with the number of entries compared", () => {
+    const text = "Take combat land after food and continue the physiotherapy twice a day for the nodrinal";
+    const words = text.split(/\s+/).length;
+    cueStats.calls = 0;
+    drugCandidates(text, 0, lex);
+    const calls = cueStats.calls;
+    const windows = words + (words - 1) + (words - 2); // sizes 1..3
+    expect(calls, "a call per window and category at most").toBeLessThanOrEqual(windows * 3);
+    expect(calls).toBeGreaterThan(0);
+    // growing the lexicon 3x (more entries per bucket) must not change the number of calls: it is a property of the text, not of the entries
+    const big: Lexicon = { ...lex, version: "x3", names: [...lex.names, ...lex.names.map((n) => `${n} Plus`), ...lex.names.map((n) => `${n} Forte`)] };
+    cueStats.calls = 0;
+    drugCandidates(text, 0, big);
+    expect(cueStats.calls).toBe(calls);
   });
 });
