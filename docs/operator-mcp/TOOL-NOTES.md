@@ -326,9 +326,10 @@ moved to a per-tool `help` field that `scribe_help` returns beside the short des
 3. the `/lab` form of the URL: `/api/mcp/lab` (bearer) or `/api/mcp/<key>/lab` (path key).
 
 **`scribe_jobs`** `{ action: submit | status | list | cancel }` routes to `scribe_job_submit` / `scribe_job_status` /
-`scribe_job_list` / `scribe_job_cancel`. It registers with the `invoke` scope (the door's single check), then the handler requires
-the picked member's own scope: submit = invoke, cancel = write, status/list = read. A token without `invoke` therefore uses the old
-job tool names for status/list. An unknown action answers `{ ok:false, error:"unknown_action", allowed }` and runs nothing.
+`scribe_job_list` / `scribe_job_cancel`. It registers with the `read` scope, so the door's single check admits any token, then the
+handler requires the picked member's own scope: status/list = read, submit = invoke, cancel = write (a refusal is the usual 403
+`scope_or_tool_unavailable` with `needed`). A read+write token can cancel but not submit; a read-only token can only status/list.
+The group uses the read (55 s) tool timeout. An unknown action answers `{ ok:false, error:"unknown_action", allowed }` and runs nothing.
 The audit row's `variant` is the member that ran.
 
 **OPTIONS** is explicit on all four routes: 204, `Allow: POST, OPTIONS` (the path-key routes add their CORS headers, now

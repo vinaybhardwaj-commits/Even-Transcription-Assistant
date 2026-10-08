@@ -50,7 +50,7 @@ describe("S0.7 scribe_help", () => {
   it("an ungrouped tool: name, scope, full description, input schema; no DB", async () => {
     const out = await run("scribe_help", { tool: "scribe_audit_recent" });
     const real = S.CALLABLE_TOOLS.get("scribe_audit_recent")!;
-    expect(out).toMatchObject({ name: "scribe_audit_recent", scope: "read", listed: true, description: expect.any(String), help: real.description, input_schema: real.inputSchema });
+    expect(out).toMatchObject({ name: "scribe_audit_recent", scope: "read", listed_in: ["operator", "lab"], description: expect.any(String), help: real.description, input_schema: real.inputSchema });
     // S3: the operator list carries the short text; the long text is `help`.
     expect((out.description as string).length).toBeLessThanOrEqual(200);
     expect(out.group).toBeUndefined();
@@ -83,7 +83,7 @@ describe("S0.7 scribe_help", () => {
 
   it("an old name a group now fronts answers as itself and names its group", async () => {
     const out = await run("scribe_help", { tool: "scribe_list_rooms" });
-    expect(out).toMatchObject({ name: "scribe_list_rooms", group: "scribe_rooms", listed: false });
+    expect(out).toMatchObject({ name: "scribe_list_rooms", group: "scribe_rooms", listed_in: [] });
   });
 
   it("an unknown name answers unknown_tool with five suggestions, closest first", async () => {

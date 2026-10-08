@@ -59,7 +59,7 @@ function briefs(): Record<(typeof OPERATOR_TOOL_NAMES)[number], string> {
     scribe_room_alerts: `${READ_LIVE} The Room Watchdog alert outbox (new, late, heartbeat) for the relay.`,
     scribe_room_command: `WRITE; acts on a LIVE clinical room. Times UTC. ${selector("scribe_room_command")}. Needs an open kiosk listener (else kiosk_not_listening); start_day idempotent; room_paused is consent; no start/stop on a room with patients without V's GO.`,
     scribe_list_commands: `${READ_LIVE} The room command queue (bench_command), newest first.`,
-    scribe_jobs: `Reads and writes the job queue; submit needs invoke, cancel needs write; a job can read room audio, no live-room command. Times UTC. ${selector("scribe_jobs")}.`,
+    scribe_jobs: `Reads and writes the job queue; status/list need read, submit needs invoke, cancel needs write; a job can read room audio, no live-room command. Times UTC. ${selector("scribe_jobs")}.`,
     scribe_audit_recent: `${READ_NO_ROOM} Recent audit_log rows, newest first; metadata as stored.`,
     scribe_help: "Read-only; touches no room. One tool's full contract: scope, schema, and the long help text. Accepts any accepted name. Times UTC.",
     scribe_usage: "Read-only; touches no room. Door usage from audit_log: calls, errors, p50/p95 latency per tool and actor. Times UTC.",

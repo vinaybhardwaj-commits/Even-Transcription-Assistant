@@ -112,8 +112,9 @@ export type GroupSpec = {
   hide?: string[];
   /**
    * S3 — a MIXED-scope group (scribe_jobs: submit is invoke, cancel is write, status/list are read).
-   * The group registers with this scope for the door's single scope check, and its handler then
-   * checks the picked member's own scope against the caller's before running it. Without this a
+   * The group registers with this scope (the lowest, read, so the door admits any token) for the
+   * door's single scope check, and its handler then checks the picked member's own scope against
+   * the caller's before running it. Without this a
    * mixed group is a build error, as before.
    */
   scope?: McpScope;
@@ -496,9 +497,9 @@ export const GROUPS: readonly McpTool[] = [
 export const JOBS_GROUP: McpTool = buildGroup({
   name: "scribe_jobs",
   lead:
-    "Background jobs. submit queues long work (INVOKE scope), status and list read the queue, cancel stops a job (WRITE scope). The caller needs the picked action's own scope; an unknown action is refused with unknown_action and nothing runs.",
+    "Background jobs. Scope per action: status and list need READ, submit (queues long work) needs INVOKE, cancel needs WRITE. The caller needs the picked action's own scope; an unknown action is refused with unknown_action and nothing runs.",
   selector: { key: "action" },
-  scope: "invoke",
+  scope: "read",
   variants: [
     v("submit", "scribe_job_submit"),
     v("status", "scribe_job_status"),

@@ -114,6 +114,23 @@ describe("S3.1 profile selection", () => {
     }
   });
 
+  it("lab descriptions match origin/main's capture (ec0d8a7), except scribe_help and scribe_jobs — a diet cannot touch lab silently", async () => {
+    const main = JSON.parse(readFileSync("fixtures/mcp/live-tools-list-ec0d8a7.json", "utf8")) as { result: { tools: Array<{ name: string; description: string; inputSchema: unknown }> } };
+    const mainBy = new Map(main.result.tools.map((t) => [t.name, t]));
+    const lab = await listed({ headers: { "x-scribe-profile": "lab" } });
+    let compared = 0;
+    for (const t of lab) {
+      if (t.name === "scribe_help" || t.name === "scribe_jobs") continue;
+      const base = mainBy.get(t.name);
+      expect(base, `${t.name} missing from origin/main capture`).toBeDefined();
+      expect(t.description, t.name).toBe(base!.description);
+      expect(t.inputSchema, t.name).toEqual(base!.inputSchema);
+      compared++;
+    }
+    expect(compared).toBe(40);
+    expect(lab.map((t) => t.name).filter((n) => !mainBy.has(n))).toEqual(["scribe_jobs"]);
+  });
+
   it("operator input schemas are unchanged", async () => {
     for (const t of await listed()) expect(t.inputSchema, t.name).toEqual(S.CALLABLE_TOOLS.get(t.name)!.inputSchema);
   });
@@ -124,6 +141,8 @@ describe("S3.1 profile selection", () => {
     expect(op).toContain("X-Scribe-Profile: lab");
     expect(op).toContain("?profile=lab");
     expect(op).toContain("/lab");
+    expect(op).toContain("(S3)");
+    expect(op).not.toContain("(S2)");
     const lab = ((await door("initialize", { headers: { "x-scribe-profile": "lab" } })).body.result as { instructions: string }).instructions;
     expect(lab).toMatch(/^Profile: lab \(42 tools listed\)/);
     expect(lab).toContain("X-Scribe-Profile: operator");
@@ -153,9 +172,9 @@ describe("S3.1 tools/call ignores the profile", () => {
 describe("S3.2 scribe_jobs", () => {
   const MEMBER: Record<string, string> = { submit: "scribe_job_submit", status: "scribe_job_status", list: "scribe_job_list", cancel: "scribe_job_cancel" };
 
-  it("is registered with the invoke scope, selector `action`, and a generated description", () => {
+  it("is registered with the read scope (group gate), selector `action`, and a generated description", () => {
     const g = S.CALLABLE_TOOLS.get("scribe_jobs")!;
-    expect(g.scope).toBe("invoke");
+    expect(g.scope).toBe("read");
     expect(S.groupMembers(g)).toEqual(Object.values(MEMBER));
     expect(g.inputSchema.required).toEqual(["action"]);
     for (const [action, member] of Object.entries(MEMBER)) {
@@ -184,18 +203,54 @@ describe("S3.2 scribe_jobs", () => {
     for (const s of spies) expect(s).not.toHaveBeenCalled();
   });
 
-  it("scope follows the member: read token refused at the door, invoke token refused for cancel (write), allowed for submit/status/list", async () => {
+  it("the description states each action's scope", () => {
+    const d = S.CALLABLE_TOOLS.get("scribe_jobs")!.description;
+    expect(d).toMatch(/status and list need READ/);
+    expect(d).toMatch(/submit[^.]*needs INVOKE/);
+    expect(d).toMatch(/cancel needs WRITE/);
+    expect(P.operatorTool("scribe_jobs")!.description).toMatch(/status\/list need read, submit needs invoke, cancel needs write/);
+  });
+
+  // token shape × action → HTTP status. The member's scope decides; the old names are unchanged.
+  const SHAPES: Record<string, Array<"read" | "invoke" | "write">> = { "read-only": ["read"], "read+write": ["read", "write"], "read+invoke+write": ["read", "invoke", "write"] };
+  const EXPECT: Record<string, Record<string, number>> = {
+    "read-only": { status: 200, list: 200, submit: 403, cancel: 403 },
+    "read+write": { status: 200, list: 200, submit: 403, cancel: 200 },
+    "read+invoke+write": { status: 200, list: 200, submit: 200, cancel: 200 },
+  };
+  const NEEDS: Record<string, string> = { submit: "invoke", cancel: "write" };
+  for (const [shape, scopes] of Object.entries(SHAPES)) {
+    it.each(["status", "list", "submit", "cancel"])(`token ${shape}: action=%s`, async (action) => {
+      for (const m of Object.values(MEMBER)) vi.spyOn(S.PUBLISHED_TOOLS.find((t) => t.name === m)!, "handler").mockResolvedValue({ fine: true });
+      const out = await call("scribe_jobs", { action, job_id: "j" }, scopes);
+      expect(out.status).toBe(EXPECT[shape]![action]);
+      if (out.status === 403) {
+        expect(out.body.error).toMatchObject({ code: -32001, message: "scope_or_tool_unavailable", data: { tool: "scribe_jobs", needed: NEEDS[action] } });
+      }
+    });
+  }
+
+  it("a token with no read scope is refused at the group gate; the old names keep their own scope rules", async () => {
     for (const m of Object.values(MEMBER)) vi.spyOn(S.PUBLISHED_TOOLS.find((t) => t.name === m)!, "handler").mockResolvedValue({ fine: true });
-    expect((await call("scribe_jobs", { action: "list" }, ["read"])).status).toBe(403);
-    const cancel = await call("scribe_jobs", { action: "cancel", job_id: "j" }, ["read", "invoke"]);
-    expect(cancel.status).toBe(403);
-    expect(cancel.body.error).toMatchObject({ code: -32001, message: "scope_or_tool_unavailable", data: { tool: "scribe_jobs", needed: "write" } });
-    for (const action of ["submit", "status", "list"]) expect((await call("scribe_jobs", { action }, ["read", "invoke"])).status, action).toBe(200);
-    // a member's scope is the caller's to hold: invoke alone is not read
-    expect((await call("scribe_jobs", { action: "list" }, ["invoke"])).status).toBe(403);
-    expect((await call("scribe_jobs", { action: "cancel", job_id: "j" }, ["read", "invoke", "write"])).status).toBe(200);
-    // the old names keep their own scope rules
+    expect((await call("scribe_jobs", { action: "submit" }, ["invoke"])).status).toBe(403);
     expect((await call("scribe_job_list", {}, ["read"])).status).toBe(200);
+    expect((await call("scribe_job_cancel", { job_id: "j" }, ["read", "write"])).status).toBe(200);
+    expect((await call("scribe_job_submit", {}, ["read"])).status).toBe(403);
+    expect((await call("scribe_job_submit", {}, ["invoke"])).status).toBe(200);
+  });
+
+  it("a refused member never runs", async () => {
+    const spy = vi.spyOn(S.PUBLISHED_TOOLS.find((t) => t.name === "scribe_job_submit")!, "handler").mockResolvedValue({});
+    await call("scribe_jobs", { action: "submit" }, ["read", "write"]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("scribe_help reports listed_in per profile", async () => {
+    const help = S.CALLABLE_TOOLS.get("scribe_help")!;
+    const li = async (tool: string) => ((await help.handler({ tool }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row).listed_in;
+    expect(await li("scribe_jobs")).toEqual(["operator", "lab"]);
+    expect(await li("scribe_job_status")).toEqual(["lab"]);
+    expect(await li("scribe_list_rooms")).toEqual([]);
   });
 
   it("the audit row names scribe_jobs as target and the member as variant", async () => {

@@ -87,7 +87,7 @@ describe("S0.2 — initialize", () => {
     expect(r.capabilities).toEqual({ tools: {} });
     expect((r.serverInfo as Row).name).toBe("even-scribe-mcp");
     expect(typeof (r.serverInfo as Row).version).toBe("string");
-    expect(String(r.instructions)).toContain("Even Scribe operator door (S2)");
+    expect(String(r.instructions)).toContain("Even Scribe operator door (S3)");
   });
 
   it("serverInfo.version is the git sha (7 chars) when VERCEL_GIT_COMMIT_SHA is set", async () => {

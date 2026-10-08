@@ -75,6 +75,10 @@ const help: McpTool = {
     const accepted = [...S.CALLABLE_TOOLS.keys()];
     if (!wanted) return { error: "tool_required", suggestions: [] as string[] };
     const full = S.CALLABLE_TOOLS.get(wanted);
+    const listedIn = (n: string): string[] => [
+      ...(P.OPERATOR_TOOL_NAMES.includes(n as never) ? ["operator"] : []),
+      ...(S.LAB_TOOLS.some((t) => t.name === n) ? ["lab"] : []),
+    ];
     if (!full) return { error: "unknown_tool", suggestions: closestNames(wanted, accepted) };
     // S3 — an operator-profile tool answers with its short description AND the long text as `help`.
     const tool = P.operatorTool(wanted) ?? full;
@@ -90,6 +94,7 @@ const help: McpTool = {
       return {
         name: tool.name,
         scope: tool.scope,
+        listed_in: listedIn(tool.name),
         accepted_legacy_names: members.filter((m) => m !== tool.name),
         description: tool.description,
         ...helpField,
@@ -112,7 +117,8 @@ const help: McpTool = {
     return {
       name: tool.name,
       scope: tool.scope,
-      ...(group ? { group: group.name, listed: false } : { listed: true }),
+      ...(group ? { group: group.name } : {}),
+      listed_in: listedIn(tool.name),
       description: tool.description,
       ...helpField,
       input_schema: tool.inputSchema,
