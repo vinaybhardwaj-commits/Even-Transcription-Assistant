@@ -9,7 +9,7 @@ import type { Turn } from "../readers/turns";
 import { evaluateRoomMicQuality } from "./room-mic-quality";
 import { evaluateTalkTime } from "./talk-time";
 import { evaluateConsultAffect, evaluateSurgicalPitch } from "./consult-llm";
-import { readConsultText } from "../readers/consult-text";
+import { readBenchText, readConsultText } from "../readers/consult-text";
 import type { EngineResult, UnitOutcome } from "./types";
 import { BLIND_ROOM_DAYS } from "../blind-room-days";
 
@@ -31,7 +31,7 @@ function engine(fn: () => EngineResult, pair: Pair): UnitOutcome {
  * (2) refuse a held-out pair (reason blind_room_day, before any content fetch), (3) read the inputs, (4) run the pure engine. A unit whose room or date cannot be resolved comes back with
  * room_id / ist_date null: the caller writes NO row for it (a result row always has a known room and date).
  */
-export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean } = {}): Promise<UnitOutcome> {
+export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean } = {}): Promise<UnitOutcome> {
   let pair: Pair | ReadRefusal;
   if (r.engine === "llm_zdr") return evaluateLlmUnit(r, unitKind, unitKey, opts);
   if (unitKind === "room_hour") {
@@ -77,9 +77,16 @@ export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: str
  * in a BENCH only, a Meet teleconsult key: its text comes from the lab store (no room, so no room-day to hold out). In a normal run an unknown key is skipped as before. A model outage THROWS
  * (askJson), so the runner retries the step; a bad answer after the one retry is a failed unit with a closed reason.
  */
-async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean }): Promise<UnitOutcome> {
+async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean }): Promise<UnitOutcome> {
   if (unitKind !== "consult") return skip("unit_not_supported");
   let pair: Pair | null = null;
+  if (opts.excerpt) {
+    // S71-C2: a transcript EXCERPT a labeller saw. Bench only; its text is read from the lab store and nothing else (no consult, no room-day, no database read at all)
+    if (!opts.bench) return skip("unit_not_supported");
+    const ex = await readBenchText(unitKey, r.id);
+    if (!ex.ok) return skip(ex.reason);
+    return runLlm(r, { ...ex.data, partial: true }, null);
+  }
   const p = await consultPair(unitKey);
   if (!isRefusal(p)) {
     const blind = blindRefusal(p.room_id, p.ist_date);
@@ -88,6 +95,11 @@ async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string,
   } else if (!(opts.bench && p.reason === "not_found")) return skip(p.reason);
   const got = await readConsultText(unitKey, opts.bench ? { rubricId: r.id } : {});
   if (!got.ok) return skip(got.reason, pair);
+  return runLlm(r, got.data, pair);
+}
+
+async function runLlm(r: Rubric, data: import("../readers/consult-text").ConsultText, pair: Pair | null): Promise<UnitOutcome> {
+  const got = { data };
   try {
     const res = r.id === "consult_chair_affect" ? await evaluateConsultAffect(r, got.data) : r.id === "consult_surgical_pitch" ? await evaluateSurgicalPitch(r, got.data) : null;
     if (!res) return skip("unit_not_supported", pair);

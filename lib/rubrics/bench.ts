@@ -9,7 +9,8 @@ import { scoreJevBench, type BenchItem, type BenchMetrics } from "@/lib/jev/benc
 import type { RubricUnit } from "./types";
 
 export type BenchSetItem = { unit_key: string; expected: Record<string, unknown>; tolerance?: number };
-export type BenchSet = { unit: RubricUnit; items: BenchSetItem[] };
+/** `excerpt`: the units are transcript EXCERPTS (a labeller saw a few turns around the topic, not the whole consult); their text comes from the lab store only, never from the database. */
+export type BenchSet = { unit: RubricUnit; items: BenchSetItem[]; excerpt?: boolean };
 export const BENCH_MAX_ITEMS = 500;
 export const DEFAULT_TOLERANCE = 0.01;
 
@@ -72,12 +73,17 @@ export function scoreBench(metric: string, threshold: number, compared: Array<Re
  * S71-AB/C: what a report calls itself. A GrokBot-label set is model-vs-model AGREEMENT, never "accuracy", and has no pass line; V's own labels are accuracy_vs_V with n stated. The
  * `accuracy` key of the scorer's metrics is renamed for the agreement set so the word cannot be read off the report.
  */
-export function labelReport(set: "gold" | "grokbot_agreement" | "human_v", r: BenchReport): Record<string, unknown> {
+export function labelReport(set: "gold" | "grokbot_agreement" | "human_v", r: BenchReport, opts: { excerpt?: boolean } = {}): Record<string, unknown> {
   if (set === "gold") return { ...r, set };
   const { accuracy, ...restMetrics } = r.metrics as BenchMetrics & { accuracy: number };
   if (set === "grokbot_agreement") {
     return { ...r, set, metric: "agreement_with_grokbot", metrics: { ...restMetrics, agreement: accuracy }, threshold: null, passed: null, human_gold: false, provenance: "model_grokbot", n: r.items,
       note: "labels are the GrokBot Sentiment Analyzer's model scores, not a human verdict; agreement is not accuracy" };
+  }
+  if (opts.excerpt) {
+    return { ...r, set, metric: "accuracy_vs_V_on_excerpts", label: `accuracy_vs_V on excerpts (n=${r.items})`, metrics: { ...restMetrics, accuracy_vs_V_on_excerpts: accuracy }, threshold: null, passed: null, human_gold: true, rater: "V", n: r.items,
+      population: "transcript excerpts V labelled (a few turns around surgery talk), in-room consults, room tape (not Meet)",
+      note: "excerpts are partial consults: recommendation_kind / surgery_recommended are scored; full-consult fields (doubts answered, uptake, balance) are not comparable unless the gold row carries them" };
   }
   return { ...r, set, metric: "accuracy_vs_V", metrics: { ...restMetrics, accuracy_vs_V: accuracy }, threshold: null, passed: null, human_gold: true, rater: "V", n: r.items, population: "in-room consults, room tape (not Meet)" };
 }

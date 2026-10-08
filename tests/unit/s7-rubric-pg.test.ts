@@ -475,4 +475,43 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       LLM.setRubricChatForTests(null);
     }
   });
+
+  it("S71-C2 — rubric_bench human_v on EXCERPTS: text from the lab store only (no consult / room-day query), reported as accuracy_vs_V on excerpts (n=..) with the partial-consult note; the excerpt prompt says it is an excerpt; a mixed set is refused", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const seen: string[] = [];
+    LLM.setRubricChatForTests(async (a) => {
+      seen.push(String((a as { user?: string }).user));
+      const anti = /No-op/.test(String((a as { user?: string }).user)) ? { surgery_recommended: false, recommendation_kind: "no_surgery" } : { surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: false, alternatives_named: false, timing_named: false }, uptake_of_surgery: "accept", evidence: [] };
+      return { content: JSON.stringify(anti), model: "fake/model", latency_ms: 1 };
+    });
+    try {
+      const jl = (rows: unknown[]) => rows.map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([
+        { unit_key: "hv-a", unit_kind: "excerpt", expected: { surgery_recommended: true, recommendation_kind: "surgery" } },
+        { unit_key: "hv-b", unit_kind: "excerpt", expected: { surgery_recommended: false, recommendation_kind: "no_surgery" } },
+        { unit_key: "hv-c", unit_kind: "excerpt", expected: { surgery_recommended: false } },
+      ]));
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-a.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-b.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed, just medicines." }] }));
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-c.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op, only tablets." }] }));
+      statements.length = 0;
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(b.job).toMatchObject({ status: "done", result: { set: "human_v", metric: "accuracy_vs_V_on_excerpts", n: 3, passed: null } });
+      expect(statements.some((q) => /eta_encounter_windows|bench_window|room_day|cue/.test(q.text.replace(/scribe_job|rubric_run|rubric_result/g, "")) && !/scribe_job/.test(q.text))).toBe(false);
+      const rep = JSON.parse(mem.get(b.job.result.report_key)!);
+      expect(rep).toMatchObject({ metric: "accuracy_vs_V_on_excerpts", label: "accuracy_vs_V on excerpts (n=3)", human_gold: true, rater: "V", n: 3 });
+      expect(rep.note).toMatch(/partial consults/);
+      expect(rep.population).toMatch(/excerpts/);
+      expect(rep.metrics.accuracy_vs_V_on_excerpts).toBeGreaterThan(0.5); // hv-a, hv-b right; hv-c: anti-pitch kind is not in its expected fields
+      expect(seen.every((u) => /EXCERPT of a consultation/.test(u))).toBe(true);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(0);
+      // an excerpt unit is never run outside a bench, and a mixed set is not a set
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([{ unit_key: "hv-a", unit_kind: "excerpt", expected: { surgery_recommended: true } }, { unit_key: "enc1@m1", unit_kind: "consult", expected: { surgery_recommended: true } }]));
+      const bad = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(bad.job.status).toBe("failed");
+      expect(String(bad.job.error)).toMatch(/^bench_set_missing/);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
 });

@@ -72,7 +72,11 @@ async function loadGold(location: string): Promise<BenchSet | null> {
     if (!line.trim()) continue;
     try { items.push(JSON.parse(line)); } catch { return null; }
   }
-  return parseBenchSet({ unit: "consult", items });
+  // unit_kind "excerpt" (S71-C2): the unit is a transcript excerpt held in the lab store; a set is all excerpts or none
+  const kinds = new Set(items.map((x) => (x as { unit_kind?: unknown } | null)?.unit_kind ?? "consult"));
+  if (kinds.size !== 1 || !(kinds.has("consult") || kinds.has("excerpt"))) return null;
+  const parsed = parseBenchSet({ unit: "consult", items });
+  return parsed && kinds.has("excerpt") ? { ...parsed, excerpt: true } : parsed;
 }
 
 const num = (v: unknown): number => (typeof v === "number" ? v : Number(v)) || 0;
@@ -102,7 +106,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   while (idx < end && Date.now() < deadline) {
     const item = set.items[idx]!;
     // a DB / R2 error throws (the step is retried); a unit the engine could not score, or that is held out or unresolved, comes back skipped / failed and fails every expected field
-    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true });
+    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true } : {}) });
     // a skipped unit with a score is a scored "nothing to score" (no surgery recommended, unscorable tape): it can be right or wrong against the gold
     const score: Record<string, unknown> | null = out.status === "ok" || out.status === "empty" || (out.status === "skipped" && out.score) ? (out.score ?? null) : null;
     compared[idx] = compareItem(item, score);
@@ -119,8 +123,9 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   const compared = (ctx.progress.compared as Array<ReturnType<typeof compareItem>>) ?? [];
   const report = scoreBench(r.bench.metric, r.bench.threshold, compared);
   if ("error" in report) return failWith(jobError("bench_metric_unsupported", r.bench.metric));
-  const labelled = labelReport(setName, report) as { metric: string; threshold: number | null; passed: boolean | null; human_gold?: boolean };
-  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, population: (r.definition as { bench_population?: string } | undefined)?.bench_population ?? null, ...labelReport(setName, report), items_detail: compared });
+  const excerpt = (ctx.progress.set as BenchSet | undefined)?.excerpt === true;
+  const labelled = labelReport(setName, report, { excerpt }) as { metric: string; threshold: number | null; passed: boolean | null; human_gold?: boolean };
+  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, population: (r.definition as { bench_population?: string } | undefined)?.bench_population ?? null, ...labelReport(setName, report, { excerpt }), items_detail: compared });
   await finishRun({ run_id: runId, units_ok: compared.length - report.unscored, units_failed: report.unscored });
   return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, set: setName, metric: labelled.metric, value: report.value, threshold: labelled.threshold, passed: labelled.passed, n: report.items, items: report.items, fields: report.fields, unscored: report.unscored, report_key: reportKey, status_at_run: r.status });
 }

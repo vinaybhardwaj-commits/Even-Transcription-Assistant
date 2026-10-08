@@ -17,6 +17,8 @@ export const MAX_CONSULT_CHARS = 60_000;
 export type ConsultLine = { t_ms: number; speaker: "doctor" | "other" | "unknown"; speaker_idx: number | null; text: string };
 export type ConsultText = {
   consult_key: string; source: "database" | "bench_text"; span_ms: number; lines: ConsultLine[]; chars: number; truncated: boolean;
+  /** an excerpt (a few turns around the topic), not a whole consult: the prompt says so */
+  partial?: boolean;
   /** the turns (times relative to the consult's open) for the talk-time features */
   turns: Turn[];
 };
@@ -58,9 +60,15 @@ export async function readConsultText(consultKey: string, opts: { rubricId?: str
     return finish(consultKey, "database", close - open, lines, turns);
   }
   if (span.reason !== "not_found" || !opts.rubricId || !/^[a-z][a-z0-9_]{1,63}$/.test(opts.rubricId)) return span; // blind / open / bad key: the refusal stands
+  return readBenchText(consultKey, opts.rubricId);
+}
+
+/** Text of a bench unit from the lab store only (rubric/bench/<rubric_id>/text/<key>.json). Never touches the database: excerpts have no consult and no room-day. */
+export async function readBenchText(consultKey: string, rubricId: string): Promise<ReadResult<ConsultText>> {
+  if (!KEY.test(consultKey) || !/^[a-z][a-z0-9_]{1,63}$/.test(rubricId)) return refuse("bad_unit_key");
   const store = labStore();
   if (!store) return refuse("not_found", "no such consult, and no bench text store");
-  const obj = await store.get(`rubric/bench/${opts.rubricId}/text/${consultKey}.json`);
+  const obj = await store.get(`rubric/bench/${rubricId}/text/${consultKey}.json`);
   if (!obj) return refuse("not_found", "no such consult or bench text");
   let doc: { lines?: Array<{ t_s?: unknown; speaker?: unknown; text?: unknown }> };
   try {

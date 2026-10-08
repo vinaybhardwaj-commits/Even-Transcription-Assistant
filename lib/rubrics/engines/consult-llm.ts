@@ -79,7 +79,7 @@ const bool = (v: unknown): boolean => v === true;
 function userMessage(text: ConsultText, talk: EngineResult): string {
   const t = talk.status === "ok" ? talk.score! : null;
   const facts = t ? `TALK FEATURES (facts measured from the audio's turns, not opinions): doctor_share=${t.doctor_share ?? "unknown"}, doctor_turns=${t.doctor_turns}, patient_and_other_turns=${Number(t.other_turns) + Number(t.unattributed_turns)}, interruptions=${t.interruptions}, silence_share=${t.silence_share}.` : "TALK FEATURES: not available.";
-  return `${RUBRIC_HEADER}\n${facts}${text.truncated ? "\nNOTE: the transcript was cut at the length limit." : ""}\n\n${renderTranscript(text)}`;
+  return `${RUBRIC_HEADER}\n${facts}${text.truncated ? "\nNOTE: the transcript was cut at the length limit." : ""}${text.partial ? "\nNOTE: this is an EXCERPT of a consultation (a few turns around the topic), not the whole consult. Score only what the excerpt shows; do not assume what came before or after." : ""}\n\n${renderTranscript(text)}`;
 }
 const RUBRIC_HEADER = "CONSULTATION TRANSCRIPT. Times are mm:ss from the start of the consultation. Speakers: doctor, other (the patient and anyone with them), unknown.";
 
