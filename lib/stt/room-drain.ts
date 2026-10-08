@@ -44,6 +44,7 @@ import { buildJoinRequest, callJoinService, refuseIfTooLong, clipKey, joinServic
 import { isTranscriptEnabled } from "@/lib/room-switches";
 import { enqueueSubject } from "@/lib/stt/fanout";
 import { resolveRouting } from "./routing";
+import { isSarvamEngine, isScopeRefusal, SCOPE_CONSULT_ONLY } from "./o4-scope";
 import { adapterFor } from "./registry";
 import { whisperAdapter } from "./adapters/whisper";
 import {
@@ -414,6 +415,8 @@ export type DrainStep =
    * fault, so it is named rather than folded into `engine_failed`.
    */
   | "paid_engine_refused"
+  /** O4 — room audio may not go to Sarvam, whatever the routing rows or the naming say. */
+  | "refused"
   /**
    * C1b fix-up 6 — refused at admission because this window cannot finish inside the LEASE.
    * Named, because the alternative is a window that runs, overruns, gets re-claimed and re-run,
@@ -1064,6 +1067,11 @@ export async function roomWindowSegment(
   // So the refusal happens HERE, before the shadow row and before the turns, which is where the
   // pre-C1b inline drain raised it too. Nothing downstream gets to treat a null route as "skip
   // this window": the job fails, named, with the bucket that found nothing.
+  if (isScopeRefusal(routed)) {
+    const detail = `${SCOPE_CONSULT_ONLY} (O4)`;
+    const attempts = await recordFailure(windowId, "refused", detail);
+    return { ...out, step: "refused", detail: `refused: ${detail}`, attempts };
+  }
   if (!routed) {
     const bucket = bucketFor(decided);
     const attempts = await recordFailure(windowId, "no_engine", `stage=${DRAIN_STAGE} bucket=${bucket}`);
@@ -1374,6 +1382,12 @@ export async function roomWindowEngine(
     // operator edited stt_routing while the job was in flight. One resolution, one truth.
     const engineId = typeof progress.engine_id === "string" && progress.engine_id ? progress.engine_id : null;
     const adapter = engineId ? adapterFor(engineId) : null;
+    // O4 — BEFORE any adapter call, independent of is_paid and of explicitlyNamed.
+    if (isSarvamEngine(engineId, adapter?.key)) {
+      const detail = `${SCOPE_CONSULT_ONLY} (O4)`;
+      const attempts = await recordFailure(windowId, "refused", detail);
+      return { ...out, step: "refused", detail: `refused: ${detail}`, attempts };
+    }
     if (!engineId || !adapter) {
       const attempts = await recordFailure(windowId, "no_engine", `stage=room bucket=${bucketFor(decided)}`);
       return { ...out, step: "no_engine", attempts };
