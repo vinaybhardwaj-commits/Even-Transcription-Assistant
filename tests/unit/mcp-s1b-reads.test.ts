@@ -153,6 +153,29 @@ describe("scribe_steward", () => {
     expect(t).toMatchObject({ params: { p: 1, nested: { keep: 1 } }, result: { ticket_id: "t1", outcome: "ok", detail: [{ d: 2 }] } });
   });
 
+  it("H1: nonce / signature keys inside steward_config values are scrubbed in config, tick and why", async () => {
+    const dirty = { key: "rooms", value: { [ROOM.id]: { flags: ["dev"], machine: "m1", nonce: "CFGNONCE", deep: { Signature: "CFGSIG", keep: 1 } } }, updated_at: "2026-10-08T05:00:00.000Z", updated_by: "admin" };
+    answer = (text, values) =>
+      roomTable(text, values) ??
+      (/FROM steward_config/.test(text) && /ANY/.test(text)
+        ? [
+            { key: "last_tick", value: { at: "2026-10-08T09:00:00.000Z", rooms: 3, nonce: "TICKNONCE" }, updated_at: "2026-10-08T09:00:01.000Z", age_s: 5 },
+            { key: "kill_switch", value: { on: true, signature: "KSIG" }, updated_at: "2026-10-08T05:00:00.000Z", age_s: 9 },
+          ]
+        : /FROM steward_config/.test(text) ? [dirty, { key: "kill_switch", value: { on: false, nonce: "KNONCE" }, updated_at: "2026-10-08T05:00:00.000Z", updated_by: null }]
+        : /FROM steward_decisions d/.test(text) ? []
+        : /FROM steward_decisions/.test(text) ? [{ n: 0, newest: null }] : []);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-08T12:00:00.000Z"));
+    const config = await run("scribe_steward", { view: "config" });
+    const tick = await run("scribe_steward", { view: "tick" });
+    const why = await run("scribe_steward", { view: "why", room: "opd-1", at: "2026-10-08T09:30:00Z" });
+    expect(JSON.stringify([config, tick, why])).not.toMatch(/NONCE|SIG/i);
+    expect((config.config as Row[])[0]).toMatchObject({ key: "rooms", value: { [ROOM.id]: { flags: ["dev"], deep: { keep: 1 } } } });
+    expect(tick).toMatchObject({ kill_switch: true, last_tick: { rooms: 3 } });
+    expect((why.config_in_force as Row).room).toMatchObject({ flags: ["dev"], machine: "m1" });
+  });
+
   it("tick: last tick with its age, kill switch, lease held or not (holder never shown), recent decisions", async () => {
     const until = new Date(Date.now() + 30_000).toISOString();
     answer = (text) =>

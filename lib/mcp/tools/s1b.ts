@@ -92,7 +92,7 @@ async function stewardConfigRows(): Promise<Array<{ key: string; value: unknown;
      ORDER BY key
      LIMIT 50
   `) as Row[];
-  return rows.map((r) => ({ key: String(r.key), value: r.value, updated_at: iso(r.updated_at), updated_by: (r.updated_by as string | null) ?? null }));
+  return rows.map((r) => ({ key: String(r.key), value: scrub(r.value), updated_at: iso(r.updated_at), updated_by: (r.updated_by as string | null) ?? null }));
 }
 
 const decisionOut = (r: Row, payload: boolean): Row => ({
@@ -183,8 +183,8 @@ async function stewardTick(): Promise<Row> {
   `) as Row[];
   return {
     ok: true,
-    last_tick: last ? { ...(last.value as object), recorded_at: iso(last.updated_at), age_s: num(last.age_s) } : null,
-    kill_switch: kill ? ((kill.value as { on?: unknown } | null)?.on ?? null) : null,
+    last_tick: last ? { ...(scrub(last.value) as object), recorded_at: iso(last.updated_at), age_s: num(last.age_s) } : null,
+    kill_switch: kill ? ((scrub(kill.value) as { on?: unknown } | null)?.on ?? null) : null,
     // the holder is an internal run id and is not shown; only whether a lease is live
     lease: lease ? { until: Number.isFinite(untilMs) ? new Date(untilMs).toISOString() : null, held: Number.isFinite(untilMs) ? untilMs > Date.now() : null } : null,
     decisions_last_hour: num(recent[0]?.n) ?? 0,

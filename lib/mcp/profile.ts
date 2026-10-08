@@ -81,6 +81,7 @@ function briefs(): Record<string, string> {
     // S1 reads (S1A)
     scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
     scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
+    scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key, sha256) for a window_id or IST date; shadow rows only on request.",
     scribe_steward: "Read-only; touches no room. Times UTC. Room Steward view=config|decisions|tickets|tick|why; why needs room + at (+-15 min). No ticket signatures.",
     scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen; room optional.",
     scribe_stt_windows: "Read-only; touches no room. Times UTC. One STT window (window_id) or a room's windows for an IST day: state, drain, jobs, runs. No transcript text.",
