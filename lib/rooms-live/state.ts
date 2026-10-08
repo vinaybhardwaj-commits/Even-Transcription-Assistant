@@ -25,8 +25,12 @@ export const MUTE_ZERO = 0.995;
 export const MUTE_PEAK = 0.002;
 export const MUTE_SUSTAIN_S = 60;
 export const QUIET_FLOOR = 0.008;
-export const BASELINE_FACTOR = 1.5;
-export const SPIKE_FACTOR = 2.5;
+/** v1.3: speech in a low-signal room sits only 2-4 dB over its floor (live: OPD 7, 8 Oct), so "listening" is a count of rows >= 1.25 x the floor in 20 s, not a 10 s mean */
+export const SPEECH_FACTOR = 1.25;
+export const SPEECH_WINDOW_S = 20;
+export const SPEECH_MIN_ROWS = 3;
+export const SPIKE_FACTOR = 2.0;
+/** only the no-baseline path (fewer than BASELINE_MIN_ROWS rows) still uses a mean */
 export const MEAN_WINDOW_S = 10;
 export const BASELINE_WINDOW_S = 15 * 60;
 export const BASELINE_MIN_ROWS = 30;
@@ -116,7 +120,9 @@ export function computeState(inp: StateInput): StateResult {
 
   const baseRows = rows.filter((r) => now - r.t <= BASELINE_WINDOW_S * 1000 && !isMuteRow(r));
   const baseline = baseRows.length >= BASELINE_MIN_ROWS ? percentile(baseRows.map((r) => r.rms), 25) : null;
-  const threshold = Math.max(QUIET_FLOOR, BASELINE_FACTOR * (baseline ?? 0));
+  const floor = Math.max(QUIET_FLOOR, baseline ?? 0);
+  const speechAt = SPEECH_FACTOR * floor;
+  const spikeAt = SPIKE_FACTOR * floor;
 
   const miss = deviceMissing(inp.install);
   const out = (state: RoomStateName, detail: string | null, since: number | null): StateResult => {
@@ -160,13 +166,24 @@ export function computeState(inp: StateInput): StateResult {
   // exact-zero rows count as silence (rms ~0) here: a mute that is younger than 60 s reads as Quiet, never as a stale level
   const recent = rows.filter((r) => now - r.t <= MEAN_WINDOW_S * 1000);
   if (recent.length === 0) return out("notrec", "level_stale", null);
-  const mean = recent.reduce((a, r) => a + r.rms, 0) / recent.length;
-  // a spike is 2.5 x the room's own baseline, but never below the quiet floor: a near-silent mic (baseline ~0.0003) would otherwise call 0.0008 "speech" (found in the live smoke, OPD 5)
-  const spikeAt = baseline === null ? Infinity : Math.max(QUIET_FLOOR, SPIKE_FACTOR * baseline);
-  const spike = recent.some((r) => r.rms >= spikeAt);
-  const loud = mean >= threshold || spike;
-  const rowLoud = (r: LevelRow): boolean => r.rms >= threshold || r.rms >= spikeAt;
-  if (loud) return out("listening", null, sinceOfRun(rows, (r) => !isMuteRow(r) && rowLoud(r)));
+  if (baseline === null) {
+    // no baseline yet: the mean against the quiet floor, no spike rule
+    const mean = recent.reduce((a, r) => a + r.rms, 0) / recent.length;
+    if (mean >= QUIET_FLOOR) return out("listening", null, sinceOfRun(rows, (r) => !isMuteRow(r) && r.rms >= QUIET_FLOOR));
+    return out("quiet", null, sinceOfRun(rows, (r) => !isMuteRow(r) && r.rms < QUIET_FLOOR));
+  }
+  // v1.3: >= SPEECH_MIN_ROWS rows at >= 1.25 x the floor in the last 20 s, or one row at >= 2.0 x it. Mute rows never count.
+  // The floor is never below QUIET_FLOOR: a near-silent mic (baseline ~0.0003) would otherwise call 0.0008 "speech" (OPD 5)
+  const rowLoud = (r: LevelRow): boolean => !isMuteRow(r) && (r.rms >= speechAt || r.rms >= spikeAt);
+  const window = rows.filter((r) => now - r.t <= SPEECH_WINDOW_S * 1000);
+  const loudRows = window.filter(rowLoud);
+  const listening = loudRows.filter((r) => r.rms >= speechAt).length >= SPEECH_MIN_ROWS || loudRows.some((r) => r.rms >= spikeAt);
+  if (listening) {
+    // the unbroken run of loud rows ending now, never later than the first qualifying row of the current window
+    const run = sinceOfRun(rows, rowLoud);
+    const first = loudRows[0]!.t;
+    return out("listening", null, run === null ? first : Math.min(run, first));
+  }
   return out("quiet", null, sinceOfRun(rows, (r) => !isMuteRow(r) && !rowLoud(r)));
 }
 
