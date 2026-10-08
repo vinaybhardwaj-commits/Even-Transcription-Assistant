@@ -35,6 +35,8 @@ export const STALL_MINUTES = 30;
 export const STALLED_BADGE_MINUTES = 10;
 export const REAP_CAP = 50;
 export const NOTE_STALL = "auto-ended: no chunks >30m (reaper)";
+/** Arch #16: written on a stale `recording` session ended because the kiosk came back and opened a NEW one. Not a reaper note. */
+export const NOTE_SUPERSEDED = "auto-ended: superseded by a new session after the kiosk returned (host was offline)";
 export const NOTE_ROLLOVER = "auto-ended: day rollover (reaper)";
 export const IST_TZ = "Asia/Kolkata";
 

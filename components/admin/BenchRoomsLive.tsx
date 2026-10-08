@@ -312,6 +312,7 @@ const STATE_WORD: Record<RoomState, string> = {
   cant_tell: "can't tell",
   paused: "paused",
   recording: "recording",
+  host_offline: "host offline",
   start_failed: "failed to start",
   finished: "finished",
   ready: "ready",

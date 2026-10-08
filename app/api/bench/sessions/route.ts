@@ -17,6 +17,7 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
+import { NOTE_SUPERSEDED, REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { benchAdminGuard, listBenchSessions, newSessionId, type BenchSessionListFilters } from "@/lib/bench";
 
 export const runtime = "nodejs";
@@ -35,6 +36,28 @@ export async function POST(req: NextRequest) {
   const label = typeof body.label === "string" ? body.label.trim().slice(0, 200) || null : null;
   const micLabel =
     typeof body.mic_label === "string" ? body.mic_label.trim().slice(0, 200) || null : null;
+
+  // ARCH #16 — A RETURNING KIOSK MUST NOT LEAVE ITS DEAD SESSION BEHIND. decideResume refuses to
+  // rejoin a `recording` session quiet for over STALLED_BADGE_MINUTES, so a kiosk back after a
+  // longer outage opens a NEW session — and the old one stayed `recording` until the hourly
+  // reaper, two open sessions in one room. End the stale one here, at its honest last-audio time
+  // (never now()), with a note that says why. Same staleness test as decideResume; paused and
+  // live sessions are untouched. Best-effort: a failure here must never stop a room from starting.
+  try {
+    await sql`
+      UPDATE bench_session s
+         SET status = 'ended',
+             ended_at = COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at),
+             notes = CASE WHEN s.notes IS NULL OR s.notes = '' THEN ${NOTE_SUPERSEDED} ELSE s.notes || chr(10) || ${NOTE_SUPERSEDED} END
+       WHERE s.room_id = ${claims.room_id}
+         AND s.status = 'recording'
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})   -- Arch #21: a re-home container is bookkeeping, never a session to supersede
+         AND COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at)
+             < now() - (${STALLED_BADGE_MINUTES}::int * INTERVAL '1 minute')
+    `;
+  } catch (e) {
+    console.error("[bench-sessions] could not end the stale session before starting a new one", String(e).slice(0, 150));
+  }
 
   const id = newSessionId();
   try {

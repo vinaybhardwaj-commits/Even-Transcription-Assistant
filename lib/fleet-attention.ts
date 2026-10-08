@@ -55,8 +55,8 @@ import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, 
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
-import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
-import { SILENT_PEAK_MAX, SILENT_POLLS, SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
+import { HOST_OFFLINE_TTL_MS, SILENT_PEAK_MAX, SILENT_POLLS, SILENT_ZERO_RATIO } from "@/lib/bench-bus-constants";
+import { REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { REASON_LABEL, isGenuineRecovery, RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK, SILENT_ALERT_BODY_MARKERS, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -221,6 +221,8 @@ export type RoomAttentionInputs = {
   failed_start: { acked_at: string; error: string | null } | null;
   /** Arch #21: the room's newest session_reaped alert (last 12 h), with the copy phase the reaper chose. Absent = none. */
   reaped?: { created_at: string; body: string; phase: "clinic_hours" | "overnight" } | null;
+  /** Arch #16: when the room's kiosk last polled (bench_listener.last_poll_at); null = never; absent = not supplied (no rule). */
+  listener_last_poll_at?: string | null;
   /** R8/R9: the machine's extension health row (lib/encounter-windows/ext-health.ts), or absent/null (no machine, excluded machine, or source degraded). */
   ext?: ExtHealthRow | null;
 };
@@ -593,6 +595,23 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       }
     }
 
+    // R19 — HOST OFFLINE, CLOUD STILL RECORDING (Arch #16). The kiosk has not polled for HOST_OFFLINE_TTL_MS while a session is open. Without this
+    // a stale Recording chip could sit through the 30-minute reaper window plus the hourly sweep with no attention signal. Suppressed when
+    // R1 (Mac not capturing) already names the room.
+    // Needs a listener row: null (no row, the kiosk never polled) says nothing about a kiosk that went away, and undefined (read failed) is not evidence.
+    if (r.open_session?.status === "recording" && r.listener_last_poll_at) {
+      const lastPoll = Date.parse(r.listener_last_poll_at);
+      if (Number.isFinite(lastPoll) && now - lastPoll > HOST_OFFLINE_TTL_MS && !out.some((i) => i.room_id === r.room_id && i.kind === "asleep")) {
+        mk(
+          "host_offline",
+          "red",
+          lastPoll,
+          `The kiosk in ${name} has not polled since ${fmtIst(new Date(lastPoll).toISOString(), now)} but the cloud still shows a recording session. Nothing is being captured.`,
+          `Go to ${name} (or ask for the Mini to be woken) and open the room page. If it is back within ${STALLED_BADGE_MINUTES} minutes of the last audio the same recording resumes; after that it starts a new one.`,
+        );
+      }
+    }
+
     // R8 / R9 / R10 — PRESENCE EXTENSION. State from lib/encounter-windows/ext-health.ts; an excluded machine (Home Office, ORB3, ORB2) never has a row.
     // R8: the extension has been silent for >= 10 min while the Mac is up, Chrome is running and somebody HAS used the console since it went quiet (else it is `quiet`).
     // R9: collected here, raised ONCE for the fleet after the loop. `quiet` raises nothing.
@@ -760,7 +779,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     });
   const mj = JSON.stringify(machines);
 
-  const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, reapedRows, failed, extRows] = await Promise.all([
+  const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, reapedRows, listenerRows, failed, extRows] = await Promise.all([
     // R1 — the newest lock-determining ext event per machine (same predicate as classifyExtEvent).
     safe("presence_ext", degraded, async () => (await sql`
       SELECT m.n AS machine, e.event, e.ts, e.focus
@@ -911,6 +930,10 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
        WHERE o.kind = 'session_reaped' AND o.created_at > now() - interval '12 hours' AND rid = ANY(${ids}::text[])
        ORDER BY rid, o.created_at DESC, o.id DESC
     `) as Array<{ room_id: string; created_at: unknown; body: string; phase: string | null }>, []),
+    // Arch #16 — each room's kiosk last-poll time (the listener row the command poll upserts).
+    safe("bench_listener", degraded, async () => (await sql`
+      SELECT room_id, last_poll_at FROM bench_listener WHERE room_id = ANY(${ids}::text[])
+    `) as Array<{ room_id: string; last_poll_at: unknown }>, []),
     safe("bench_command", degraded, async () => (await sql`
       SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at,
              COALESCE(c.error, c.result->>'error', 'start deferred (waiting for the input device) and no recording has begun') AS error
@@ -999,6 +1022,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
   const outboxBy = new Map(outbox.map((r) => [r.room_id, r]));
   const failedBy = new Map(failed.map((r) => [r.room_id, r]));
   const reapedBy = new Map(reapedRows.map((r) => [r.room_id, r]));
+  const listenerPollBy = new Map(listenerRows.map((r) => [r.room_id, toIso(r.last_poll_at)]));
 
   // R1/R2's look-back: only for rooms whose last 120 s is ONE identical value, find where that run began (2-day look-back). Rare, so per room;
   // both reads are room_id = $1 with an ist_date bound.
@@ -1067,6 +1091,8 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
           : null,
       failed_start: fs && fsAt ? { acked_at: fsAt, error: fs.error } : null,
       reaped: reapedFor(reapedBy.get(r.room_id)),
+      // A failed listener read supplies NOTHING (undefined = no rule), never null: null means "no row" and would read as a dead kiosk.
+      ...(degraded.includes("bench_listener") ? {} : { listener_last_poll_at: listenerPollBy.get(r.room_id) ?? null }),
       ext: extHealthBy.get(r.room_id) ?? null,
     };
   });

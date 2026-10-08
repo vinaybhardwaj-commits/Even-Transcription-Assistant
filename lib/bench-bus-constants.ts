@@ -21,6 +21,16 @@ export const LISTENER_FRESH_MS = 10_000; // last_poll_at within 10 s = listening
  * would tie a kiosk-presence rule to an audio-freshness rule for ever.
  */
 export const LISTENER_OFFLINE_MS = 10 * 60_000;
+/**
+ * ARCH #16 — THE RECORDING TTL. A kiosk that has not polled for this long while the cloud still
+ * says `recording` is not recording: the board reads it as `host_offline` (stalled, red) instead
+ * of a healthy Recording chip. Five minutes = about 150 missed polls at the native 1.5 s cadence,
+ * the same bar the Room Watchdog uses for "offline" (OFFLINE_AFTER_MS), so the chip and the
+ * alert agree. This is the READ-TIME half: the session row itself leaves `recording` through the
+ * reaper (no chunk for 30 min, swept hourly), and a kiosk that returns inside that window simply
+ * reads `recording` again — resume, not a second session (decideResume owns that rule).
+ */
+export const HOST_OFFLINE_TTL_MS = 5 * 60_000;
 export const ACK_WAIT_MS = 8_000; // MCP tools wait this long for the kiosk ack (PRD §8.2)
 export const ACK_POLL_MS = 400;
 /**
@@ -210,7 +220,7 @@ export const NO_DAY_LANE_STATE = (n: number): string =>
  *  this module must stay import-free so it is safe in the kiosk and admin browser bundles. */
 export type RoomStateLevel = "ok" | "amber" | "red" | "unknown";
 
-export type RoomState = "cant_tell" | "paused" | "recording" | "start_failed" | "finished" | "ready" | "dropped" | "offline";
+export type RoomState = "cant_tell" | "paused" | "recording" | "host_offline" | "start_failed" | "finished" | "ready" | "dropped" | "offline";
 
 /**
  * FINISHED FOR TODAY (D30) — the seventh state, and the reason it exists.
@@ -373,6 +383,18 @@ export function roomState(input: {
   }
   if (input.recording) {
     const since = stateMs(input.recordingSince);
+    // ARCH #16 — a Recording the host has stopped backing. Last poll (or, with no listener row at
+    // all, the session's own start) older than the TTL: do not paint a healthy chip.
+    const lastAlive = input.listener ? new Date(input.listener.last_poll_at).getTime() : since;
+    if (lastAlive !== null && Number.isFinite(lastAlive) && input.nowMs - lastAlive > HOST_OFFLINE_TTL_MS) {
+      return {
+        state: "host_offline",
+        label: `Recording stalled · kiosk offline ${fmtCoarse(input.nowMs - lastAlive)} — not capturing`,
+        hint: "the cloud still says recording but the kiosk is gone; open the room page on the Mini (it resumes if it returns soon, otherwise start a new recording)",
+        level: "red",
+        start_available: false,
+      };
+    }
     return {
       state: "recording",
       label: since === null ? "Recording" : `Recording · ${fmtCoarse(input.nowMs - since)}`,

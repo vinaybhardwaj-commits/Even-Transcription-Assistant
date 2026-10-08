@@ -33,6 +33,8 @@ const ROOM = { id: "room_opd5", slug: "opd-test-wxmp", name: "OPD Test" };
 let active: { id: string; status: string; started_at: string } | null = null;
 /** What listBenchSessions' TODAY-scoped query returns — deliberately independent of `active`. */
 let todaySessions: Row[] = [];
+/** Arch #16: a recording room is only "recording" while its kiosk is polling; default = a live kiosk. */
+let listenerRow: Row | null = null;
 
 vi.mock("@/lib/db", () => {
   const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -49,6 +51,7 @@ vi.mock("@/lib/db", () => {
     if (/^SELECT s\.id, s\.room_id, s\.label/.test(text)) {
       return Promise.resolve(todaySessions);
     }
+    if (/FROM bench_listener WHERE room_id = \?/.test(text)) return Promise.resolve(listenerRow ? [listenerRow] : []);
     if (/^SELECT state_flags FROM room_install/.test(text)) return Promise.resolve([]);
     return Promise.resolve([]);
   };
@@ -61,7 +64,7 @@ vi.mock("@/lib/brain/db", async (importOriginal) => {
 });
 vi.mock("@/lib/bench-bus", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual, getListener: async () => null };
+  return { ...actual };
 });
 
 const { BENCH_TOOLS } = await import("@/lib/mcp/tools/bench");
@@ -70,6 +73,7 @@ const diffRoom = BENCH_TOOLS.find((t) => t.name === "scribe_diff_room")!;
 beforeEach(() => {
   active = null;
   todaySessions = [];
+  listenerRow = { room_id: "room_opd5", tab_id: "t", last_poll_at: new Date().toISOString(), recording_session_id: null, paused: false };
 });
 
 const rowOf = async (): Promise<Row> => {
@@ -90,6 +94,15 @@ describe("scribe_diff_room — recording follows the SAME active-session check s
     expect((row.tape_lane as Row).level).toBe("ok");
     expect((row.tape_lane as Row).state).toMatch(/^Recording/);
     expect((row.room_state as Row).state).toBe("recording");
+  });
+
+  it("ARCH #16: the same recording session with a kiosk silent for hours reads host_offline, not Recording", async () => {
+    todaySessions = [];
+    active = { id: "bs_7t4neksu", status: "recording", started_at: "2026-09-27T03:00:03.491Z" };
+    listenerRow = { ...listenerRow!, last_poll_at: new Date(Date.now() - 3 * 3_600_000).toISOString() };
+    const row = await rowOf();
+    expect(row.recording).toBe(true);                       // the cloud row still says so
+    expect((row.room_state as Row).state).toBe("host_offline");
   });
 
   it("a paused session from before midnight reads paused, not silently healthy", async () => {

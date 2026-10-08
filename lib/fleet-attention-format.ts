@@ -18,6 +18,7 @@ export type AttentionKind =
   | "open_outbox"
   | "stale_start"
   | "session_reaped"
+  | "host_offline"
   | "extension_missing"
   | "extension_behind"
   | "chrome_not_running"
@@ -75,6 +76,7 @@ export const KIND_LABEL: Record<AttentionKind, string> = {
   open_outbox: "Watchdog alert still open",
   stale_start: "Remote start failed",
   session_reaped: "Recording ended by the system",
+  host_offline: "Kiosk offline, cloud still Recording",
   extension_missing: "Presence extension missing",
   extension_behind: "Presence extension out of date",
   chrome_not_running: "Chrome not running",
