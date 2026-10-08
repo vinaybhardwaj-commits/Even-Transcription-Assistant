@@ -102,14 +102,15 @@ describe("parseDay", () => {
 });
 
 describe("collapse", () => {
-  it("consecutive ok rows of one mode become one 'All fine HH:MM-HH:MM (N checks)'; anything else breaks the run", () => {
+  it("consecutive ok rows of one mode become one 'All fine HH:MM-HH:MM' with no count; anything else breaks the run", () => {
     // newest first, IST = UTC + 5:30
     const rows = [hist("2026-10-08T07:10:00Z"), hist("2026-10-08T07:09:00Z"), hist("2026-10-08T07:08:00Z"), hist("2026-10-08T07:07:00Z", { rule: "not_recording", action: "scribe_start", mode: "live", result: "ok: start_day acked" }), hist("2026-10-08T07:06:00Z"), hist("2026-10-08T07:05:00Z", { mode: "live" })];
     const out = collapseRows(rows);
     expect(out.map((x) => x.type)).toEqual(["fine", "row", "fine", "fine"]);
-    expect((out[0] as { text: string }).text).toBe("All fine 12:38-12:40 (3 checks)");
-    expect((out[2] as { text: string }).text).toBe("All fine 12:36 (1 check)");
+    expect((out[0] as { text: string }).text).toBe("All fine 12:38-12:40");
+    expect((out[2] as { text: string }).text).toBe("All fine 12:36");
     expect((out[1] as { result: string }).result).toBe("done");
+    for (const x of out) expect((x as { text?: string }).text ?? "").not.toMatch(/check|\(\d+/);
   });
   it("a run does not merge across rooms; no raw names in any text", () => {
     const out = collapseRows([hist("2026-10-08T07:10:00Z"), hist("2026-10-08T07:09:00Z", { room_id: "room_4ggnkg5x" }), hist("2026-10-08T07:08:00Z", { rule: "session_died", action: "message", mode: "shadow", result: "kill_switch" })]);
@@ -138,6 +139,28 @@ describe("the page view", () => {
     const m = await roomPage([]);
     expect(m).toContain("No Steward activity today");
     expect(m).toContain("OPD 4 Ortho");
+  });
+  it("an empty Older page (offset > 0) says there is no older activity; offset 0 keeps today / date wording", async () => {
+    expect(await roomPage([], { room: ROOM, offset: "200" })).toContain("No older Steward activity on this day");
+    expect(await roomPage([], { room: ROOM, offset: "200" })).not.toContain("No Steward activity today");
+    expect(await roomPage([], { room: ROOM, date: "2026-10-01", offset: "200" })).toContain("No older Steward activity on this day");
+    expect(await roomPage([], { room: ROOM, offset: "0" })).toContain("No Steward activity today");
+    expect(await roomPage([], { room: ROOM, date: "2026-10-01" })).toContain("No Steward activity on 2026-10-01");
+  });
+  it("R1: params text (nonce, signature, why) never reaches the HTML, even if the row carries it", async () => {
+    const secret = { nonce: "NONCE-MARK-91", signature: "SIG-MARK-77", why: "WHY-MARK-55 patient name" };
+    const carry = { pstate: JSON.stringify(secret), params: secret, params_text: JSON.stringify(secret), why: secret.why, inputs: secret, nonce: secret.nonce, signature: secret.signature };
+    const m = await roomPage([
+      hist("2026-10-08T02:00:00Z", { rule: "not_recording", action: "scribe_start", mode: "live", result: "ok: start_day acked", ...carry }),
+      hist("2026-10-08T01:00:00Z", { rule: "session_died", action: "message", mode: "shadow", result: "kill_switch", ...carry }),
+      hist("2026-10-08T00:30:00Z", { rule: "doctor_away", action: "log_only", ...carry }),
+    ], { room: ROOM, show: "everything" });
+    expect(m).toContain("Steward started recording");
+    for (const marker of ["NONCE-MARK-91", "SIG-MARK-77", "WHY-MARK-55", "nonce", "signature", "patient name"]) expect(m, marker).not.toContain(marker);
+    // the read selects the state word only, never the params column itself
+    const sel = M.calls.find((c) => /FROM steward_decisions/.test(c.sql))!.sql;
+    expect(sel).toMatch(/d\.params->>'state' AS pstate/);
+    expect(sel).not.toMatch(/params::text|d\.params\s*[,\n]|to_jsonb|row_to_json|SELECT \*/i);
   });
   it("another day says its date; rows show Live / Watching only, the sentence, the result, and a toggle that defaults to actions", async () => {
     const m = await roomPage([hist("2026-10-08T02:00:00Z", { rule: "not_recording", action: "scribe_start", mode: "live", result: "failed: no ack after 60 s" }), hist("2026-10-08T01:00:00Z", { rule: "not_recording", action: "scribe_start", mode: "shadow", result: "kill_switch" })]);

@@ -1,7 +1,7 @@
 /**
  * lib/rooms-live/steward-history.ts — A1 S7 / S8: the pure parts of the Steward log page. No I/O.
  * parseDay: the IST date asked for, today when it is missing / malformed / in the future / older than 30 days (a bad date never errors: it shows today).
- * collapseRows: consecutive ok rows of the same mode become one "All fine HH:MM-HH:MM (N checks)" item. Rows come newest first.
+ * collapseRows: consecutive ok rows of the same mode become one "All fine HH:MM-HH:MM" (no count: the loop writes ok only on a change or a 15-min refresh, so a count would not be a number of checks) item. Rows come newest first.
  * resultWords: the outcome in plain words. Every sentence comes from steward-lines.ts (one mapping table); no raw rule / action / result name is rendered.
  */
 import { istHm, lineOf, outcomeOf, whyOf, type StewardLine, type StewardRowIn } from "./steward-lines";
@@ -69,4 +69,4 @@ export function collapseRows(rows: readonly HistoryRowIn[]): HistoryItem[] {
   return out;
 }
 
-const fineText = (from: string, to: string, n: number): string => `All fine ${from === to ? from : `${from}-${to}`} (${n} ${n === 1 ? "check" : "checks"})`;
+const fineText = (from: string, to: string, _n: number): string => `All fine ${from === to ? from : `${from}-${to}`}`;

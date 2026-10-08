@@ -21,7 +21,7 @@ export function StewardLogView({ page }: { page: LogPage }) {
   const [bg, fg] = tone[page.strip.tone];
   const title = page.room ? `${page.room.label}: Steward log` : "All Steward logs";
   const link = { color: "#1D4F8C", fontSize: 15, display: "inline-flex", alignItems: "center", minHeight: 44 } as const;
-  const empty = page.day.isToday ? "No Steward activity today" : `No Steward activity on ${page.day.date}`;
+  const empty = page.offset > 0 ? "No older Steward activity on this day" : page.day.isToday ? "No Steward activity today" : `No Steward activity on ${page.day.date}`;
   return (
     <main style={{ background: "#F6F5F2", minHeight: "100vh", padding: "16px 16px 48px", fontFamily: '"Atkinson Hyperlegible Next", "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif', color: INK, maxWidth: 800, margin: "0 auto" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
