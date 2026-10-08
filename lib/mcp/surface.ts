@@ -47,6 +47,7 @@ import { LEVEL_TOOLS } from "./tools/levels";
 import { DIARIZE_LABEL_TOOLS } from "./tools/diarize-labels";
 import { ROOM_ALERT_TOOLS } from "./tools/room-alerts";
 import { META_TOOLS } from "./tools/meta";
+import { S1_TOOLS } from "./tools/s1";
 
 /**
  * Every tool the door published before Slice E, in the order tools/list served them, plus every
@@ -59,6 +60,7 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...DIARIZE_LABEL_TOOLS,
   ...ROOM_ALERT_TOOLS,
   ...META_TOOLS,
+  ...S1_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));
@@ -464,6 +466,8 @@ export const GROUPS: readonly McpTool[] = [
     name: "scribe_room_command",
     lead: "Commands to one room, WRITE scope.",
     selector: { key: "kind" },
+    // G5: end_day can stop a live room's recording.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     variants: [
       v("start_day", "scribe_start_recording", { executes: EXECUTES_KIOSK }),
       v("pause_day", "scribe_pause_recording", { executes: EXECUTES_KIOSK }),

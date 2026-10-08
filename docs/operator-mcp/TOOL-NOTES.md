@@ -4,10 +4,10 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 41 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep; `scribe_help` and `scribe_usage`, S0, 8 Oct)
+## The surface: 44 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep; `scribe_help` and `scribe_usage`, S0, 8 Oct; `scribe_now`, `scribe_room` and `scribe_tape_day`, S1A, 8 Oct)
 
-`tools/list` lists the registry's **41** primaries in the lab profile (**42** with `scribe_jobs`, S3) and **13** in the
-operator profile (see *Profiles*, below). `tools/call` accepts all of those **and every one of the 52 names**
+`tools/list` lists the registry's **44** primaries plus `scribe_jobs` (S3): **45** tools, one list for every caller (S1A, V's Q3 ruling: the
+Scribe MCP is for admins only, so everything is visible to everyone; see *Profiles*, below). The 41 before S1A were the lab list; the 3 added in S1A are `scribe_now`, `scribe_room` and `scribe_tape_day`. `tools/call` accepts all of those **and every one of the 52 names**
 the door has published — the 51 at `6b2347e` plus `scribe_window_speakers`, added by Slice C2
 (`0f27b8c`) — for as long as the door exists, from either profile. A regroup, not a rename.
 
@@ -304,22 +304,31 @@ Behaviour changes:
 5. **`structuredContent` is kept.** `lib/overnight-translate/door.ts` reads `result.structuredContent` from this door, so the duplicate payload stays until that consumer moves to `content`.
 6. **bench-timeline fix.** The brain visit read bound one parameter to a two-placeholder statement (`SQL_VISITS_FOR_DAY`: room_day_id, arm), so every bench timeline fell back to "picture unavailable".
 
-## Profiles (S3, 08 Oct 2026)
+## Profiles (S3, 08 Oct 2026; one list since S1A)
 
-`tools/list` has two profiles. They change **only** what `tools/list` returns and one sentence of `initialize.instructions`;
+**One list for everyone (S1A).** `tools/list` returns every listed tool — the 41 earlier primaries, `scribe_jobs` and the three S1 reads, 45 in all. The profile
+selectors still resolve and are still accepted (below), but both profiles now return the same list; `/api/mcp/lab` and `/api/mcp/<key>/lab` are kept.
 **`tools/call` ignores the profile** — every accepted name (all 52 published names, every group, `scribe_help`, `scribe_usage`,
-`scribe_jobs`) answers from either one, with the same scope checks.
+`scribe_jobs`) answers, with the same scope checks.
 
-**operator (default) — 13 tools, in this order:** `scribe_health`, `scribe_system`, `scribe_rooms`, `scribe_sessions`,
-`scribe_session_tape`, `scribe_room_levels`, `scribe_room_alerts`, `scribe_room_command`, `scribe_list_commands`,
-`scribe_jobs`, `scribe_audit_recent`, `scribe_help`, `scribe_usage`. Descriptions are short (plain tools <= 200 characters, groups
-<= 400) and carry exactly three facts: read or write, whether the tool can touch a live clinical room, and "Times UTC". The long text
-moved to a per-tool `help` field that `scribe_help` returns beside the short description. The operator `tools/list` is held under
-24,000 characters by a test. Input schemas are unchanged.
+**Every description is short.** Plain tools <= 200 characters, groups <= 400, each carrying three facts: read or write (or INVOKE scope), whether the tool can
+touch a live clinical room, and "Times UTC". The long text moved to a per-tool `help` field that `scribe_help` returns beside the short description, and
+`scribe_help` also returns the tool's FULL `input_schema`. In `tools/list`, property descriptions inside an input schema are cut to 56 characters
+(structure, types, enums, required and bounds are untouched), and the `annotations.title` that only repeated the tool name is gone. The full `tools/list`
+result is held under **36,000** characters by a test (measured at S1A: see REPORT-S1A).
 
-**lab — 42 tools:** every tool the door listed before S3, with its full description, plus `scribe_jobs`.
+**The 45:** `scribe_health`, `scribe_system`, `scribe_rooms` and the rest are in the Per-token and group tables above; the three S1A reads:
 
-**Three ways to select lab** (first match wins; unknown values are ignored):
+- `scribe_now` `{include_claims?}` — the Rooms Live fleet board: the same snapshot `GET /api/rooms-live/now` serves (lib/rooms-live/snapshot), computed fresh
+  per call (the route's 2-second memo and its claim auto-clear are the route's own and are never touched). `include_claims` defaults to true so the default output matches the route; `false` opts out. Claims are read, never cleared.
+- `scribe_room` `{room, view: alerts|levels|commands|devices, window_min? <= 240}` — one room (an out-of-range window is clamped and the answer says `clamped: true` with the applied value). alerts = Room Watchdog rows for the room (incl. recovered);
+  levels = bucket summary with `zero_ratio`, `capture_dead` (zero_ratio >= 0.98) and `stale`; commands = `bench_command` outcomes; devices = the install's
+  stored input devices. The old tools (`scribe_room_alerts`, `scribe_room_levels`, `scribe_list_commands`) are untouched.
+- `scribe_tape_day` `{ist_date, room?}` — `room_audio_day` rollups (and, with `include_segments`, `room_audio_state` intervals). Read-only; the classifier writes them.
+
+A source table or column that does not exist answers `{ not_collected: true, reason }` for that view; schema is never invented.
+
+**Three ways to select a profile** (kept; first match wins; unknown values are ignored; the list is the same either way):
 
 1. header `X-Scribe-Profile: lab` (or `operator`);
 2. query `?profile=lab`;
@@ -335,4 +344,4 @@ The audit row's `variant` is the member that ran.
 **OPTIONS** is explicit on all four routes: 204, `Allow: POST, OPTIONS` (the path-key routes add their CORS headers, now
 including `x-scribe-profile`).
 
-`scripts/mcp-surface-report.ts` writes `fixtures/mcp/live-tools-list-<sha>.json` (operator) and `-<sha>-lab.json` (lab).
+`scripts/mcp-surface-report.ts` writes `fixtures/mcp/live-tools-list-<sha>.json` (default) and `-<sha>-lab.json` (the /lab selector); the two are identical since S1A.
