@@ -32,7 +32,8 @@ export function isDigitalSilence(
  * newer than LEVELS_FRESH_MS. Digital silence is exempt from the repeat test (a muted mic legitimately repeats 0 / 1.0) because it is
  * already named by `isDigitalSilence`. Mark, never delete: the stored rows are untouched.
  */
-export const LEVELS_FRESH_MS = 6_000;
+/** At least 2x POLL_HIDDEN_MS (5 s): a hidden-tab kiosk polls every 5 s, and one late poll must not grey a live meter. */
+export const LEVELS_FRESH_MS = 12_000;
 export const LEVELS_FROZEN_MS = 6_000;
 
 export type LevelStamp = { t_ms: number; peak: number; avg: number | null; zero_ratio: number | null };
@@ -44,6 +45,9 @@ export function levelsStale(samples: readonly LevelStamp[], nowMs: number): bool
   const newest = sorted[sorted.length - 1]!;
   if (nowMs - newest.t_ms > LEVELS_FRESH_MS) return true;
   if (isDigitalSilence({ peak: newest.peak, avg: newest.avg ?? 0, ...(newest.zero_ratio !== null ? { zero_ratio: newest.zero_ratio } : {}) })) return false;
+  // The repeat test cannot tell a frozen meter from a silent one without the zero ratio (digital silence legitimately repeats). No ratio: CANNOT JUDGE,
+  // which is null, never stale. "We could not look" is not "we looked and it is frozen".
+  if (newest.zero_ratio === null) return null;
   let first = newest.t_ms;
   for (let i = sorted.length - 2; i >= 0; i--) {
     const r = sorted[i]!;

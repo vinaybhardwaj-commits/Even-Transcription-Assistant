@@ -20,7 +20,11 @@ export type BenchLevelSample = {
 /** A bucket is frozen when it and the (FROZEN_BUCKETS - 1) before it hold the identical triple. Digital silence (zero_ratio >= 0.98) is exempt: it is named elsewhere. */
 export const FROZEN_BUCKETS = 3;
 
-/** PURE. Marks, never drops. Input is time-ordered. */
+/**
+ * PURE. Marks, never drops. Input is time-ordered.
+ * The 0.98 below is the Bench digital-silence line (SILENT_ZERO_RATIO). It is a literal here because this branch does not carry that constant; #20, which
+ * does, switches it to SILENT_ZERO_RATIO so the two cannot drift.
+ */
 export function markFrozenBuckets(samples: BenchLevelSample[]): BenchLevelSample[] {
   let run = 0;
   return samples.map((s, i) => {

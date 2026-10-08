@@ -52,6 +52,23 @@ describe("frozen / stale levels (Arch #19)", () => {
     const rows = Array.from({ length: 8 }, (_, i) => st(T + i * 1500, 0, 0, 1));
     expect(levelsStale(rows, T + 7 * 1500)).toBe(false);
   });
+  it("LEVELS_FROZEN_MS boundary: an identical run of exactly 6000 ms is not stale, 6001 ms is", () => {
+    expect(LEVELS_FROZEN_MS).toBe(6_000);
+    const run = (span: number) => [st(T), st(T + span)];
+    expect(levelsStale(run(LEVELS_FROZEN_MS), T + LEVELS_FROZEN_MS)).toBe(false);
+    expect(levelsStale(run(LEVELS_FROZEN_MS + 1), T + LEVELS_FROZEN_MS + 1)).toBe(true);
+  });
+  it("LEVELS_FRESH_MS is at least twice the hidden-tab poll interval (5 s)", () => {
+    expect(LEVELS_FRESH_MS).toBe(12_000);
+    expect(levelsStale([st(T, 0.3)], T + 5_000 + 1_000)).toBe(false);
+    expect(levelsStale([st(T, 0.3)], T + LEVELS_FRESH_MS)).toBe(false);
+    expect(levelsStale([st(T, 0.3)], T + LEVELS_FRESH_MS + 1)).toBe(true);
+  });
+  it("no zero_ratio on the newest sample: the repeat test cannot judge, so null, never stale (but an old sample is still stale)", () => {
+    const rows = Array.from({ length: 8 }, (_, i) => st(T + i * 1500, 0.0125, 0.01, null));
+    expect(levelsStale(rows, T + 7 * 1500)).toBeNull();
+    expect(levelsStale(rows, T + 7 * 1500 + LEVELS_FRESH_MS + 1)).toBe(true);
+  });
   it("no samples is unknown, not stale", () => {
     expect(levelsStale([], T)).toBeNull();
   });
