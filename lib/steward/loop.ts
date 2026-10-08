@@ -250,7 +250,10 @@ const PENDING_RE = /^pending\b.*command_id=(\S+)/;
  * to `failed` (ackCommand). Revisit the last 24 h of "ok: start_day deferred then recording" rows: if the command is now failed, the row becomes "failed: …". Guarded
  * (`result LIKE 'ok: start_day deferred%'`) so a repeat is a no-op, and the command must belong to the SAME room as the decision. Fail-safe: a read fault leaves rows as they are.
  */
-export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: number): Promise<number> {
+export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: number, onFault?: () => void): Promise<number> {
+  let revised = 0;
+  let at = { room: "-", cmd: "-" }; // the row being worked on, for the one log line a fault leaves
+  try {
   const hi = new Date(A).toISOString();
   const okRows = (await raceTimeout(
     () => sql`SELECT d.id, d.room_id, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'ok: start_day deferred then recording%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts DESC LIMIT 50`,
@@ -261,15 +264,16 @@ export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: nu
     return m ? [{ id: r.id, room: r.room_id, cmd: m[1]! }] : [];
   });
   if (todo.length === 0) return 0;
+  at = { room: todo[0]!.room ?? "-", cmd: todo[0]!.cmd };
   const cmds = (await raceTimeout(
     () => sql`SELECT id, room_id, status, error FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[]) AND status = 'failed'`,
     timeoutMs,
   )) as Array<{ id: string; room_id: string; status: string; error: string | null }>;
   const failed = new Map(cmds.map((c) => [c.id, c]));
-  let revised = 0;
   for (const t of todo) {
     const c = failed.get(t.cmd);
     if (!c || !t.room || c.room_id !== t.room) continue;
+    at = { room: t.room, cmd: t.cmd };
     const result = `failed: start_day failed after it was settled ok${c.error ? ` (${String(c.error).slice(0, 80)})` : ""} command_id=${t.cmd}`;
     await raceTimeout(
       () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ revised_at: hi, revised_from: "ok" })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE 'ok: start_day deferred%'`,
@@ -277,18 +281,18 @@ export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: nu
     );
     revised++;
   }
+  } catch (e) {
+    // Not silent: one line naming the room and command, and the caller's tick is marked degraded (F44's reconcile_pending). The rows stay as they are; the next tick tries again.
+    console.error(`[steward] deferred-start revision failed room=${at.room} command_id=${at.cmd}: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+    onFault?.();
+  }
   return revised;
 }
 
-export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: number): Promise<number> {
+export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: number, onReviseFault?: () => void): Promise<number> {
   const hi = new Date(A).toISOString();
   // The revision runs first and is independent of the pending rows below: a fault here never blocks them.
-  let revised = 0;
-  try {
-    revised = await reviseDeferredOk(sql, A, timeoutMs);
-  } catch {
-    /* the rows stay as they are; the next tick tries again */
-  }
+  const revised = await reviseDeferredOk(sql, A, timeoutMs, onReviseFault);
   const pend = (await raceTimeout(
     () => sql`SELECT d.id, d.ts, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'pending%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts ASC LIMIT 50`,
     timeoutMs,
@@ -320,7 +324,7 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
               SELECT s.id FROM bench_session s
                WHERE s.room_id = ${c.room_id!} AND s.started_at >= ${new Date(sentMs).toISOString()}::timestamptz AND s.status IN ('recording', 'paused')
                  AND (EXISTS (SELECT 1 FROM bench_chunk ch WHERE ch.session_id = s.id)
-                      OR EXISTS (SELECT 1 FROM bench_level_sample l WHERE l.room_id = s.room_id AND l.sampled_at >= s.started_at AND l.session_open IS TRUE AND l.tape_advancing IS TRUE))
+                      OR EXISTS (SELECT 1 FROM bench_level_sample l WHERE l.room_id = s.room_id AND l.ist_date >= (s.started_at AT TIME ZONE 'Asia/Kolkata')::date AND l.sampled_at >= s.started_at AND l.session_open IS TRUE AND l.tape_advancing IS TRUE))
                ORDER BY s.started_at ASC LIMIT 1`,
             timeoutMs,
           )) as Array<{ id: string }>)
@@ -436,7 +440,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       } else {
         // F44: settle the pending starts BEFORE the log is read, so the rules and the dedupe see the settled result. A failure leaves them pending; the tick goes on.
         try {
-          await reconcilePending(sql, A, Math.min(cfg.source_timeout_ms, left));
+          await reconcilePending(sql, A, Math.min(cfg.source_timeout_ms, left), () => degrade("reconcile_revise"));
         } catch {
           console.error("[steward] pending starts could not be reconciled");
           degrade("reconcile_pending");

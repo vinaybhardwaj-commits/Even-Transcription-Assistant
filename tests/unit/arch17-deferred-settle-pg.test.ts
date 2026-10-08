@@ -13,7 +13,7 @@ const pg = pgContainer("eta-arch17-settle");
 const T = Date.parse("2026-10-07T08:00:00Z");
 const at = (s: number) => `'${new Date(T + s * 1000).toISOString()}'`;
 const PENDING = (cmd: string) => `pending: sent, awaiting ack (deferred: the kiosk accepted the start and is waiting for its input device) command_id=${cmd}`;
-const ROOMS = ["r_died", "r_alive", "r_chunk", "r_notape", "r_ok_then_fail", "r_other", "r_early"];
+const ROOMS = ["r_died", "r_alive", "r_chunk", "r_notape", "r_ok_then_fail", "r_other", "r_early", "r_closed", "r_oldsample", "r_notopen", "r_endtape", "r_yday"];
 
 beforeAll(() => {
   if (!HAVE) return;
@@ -26,28 +26,44 @@ beforeAll(() => {
       result jsonb, error text, created_at timestamptz NOT NULL DEFAULT now(), acked_at timestamptz);
     CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL, ended_at timestamptz, status text NOT NULL);
     CREATE TABLE bench_chunk (id text PRIMARY KEY, session_id text NOT NULL);
-    CREATE TABLE bench_level_sample (room_id text NOT NULL, sampled_at timestamptz NOT NULL, session_open boolean, tape_advancing boolean);
+    CREATE TABLE bench_level_sample (room_id text NOT NULL, sampled_at timestamptz NOT NULL, session_open boolean, tape_advancing boolean, ist_date date);
     INSERT INTO bench_command (id, room_id, kind, status, result, created_at, acked_at) VALUES ${cmds};
     INSERT INTO steward_decisions (room_id, ts, action, mode, result, inputs) VALUES ${decisions};
     -- r_died: a session opened 20 s after the command, died 15 s later, nothing recorded (no chunk, tape never advanced)
     INSERT INTO bench_session VALUES ('bs_died', 'r_died', ${at(20)}, ${at(35)}, 'ended');
-    INSERT INTO bench_level_sample VALUES ('r_died', ${at(22)}, true, false), ('r_died', ${at(30)}, true, false);
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_died', ${at(22)}, true, false), ('r_died', ${at(30)}, true, false);
     -- r_alive: open session, tape advancing reported by polls
     INSERT INTO bench_session VALUES ('bs_alive', 'r_alive', ${at(20)}, NULL, 'recording');
-    INSERT INTO bench_level_sample VALUES ('r_alive', ${at(25)}, true, true);
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_alive', ${at(25)}, true, true);
     -- r_chunk: open session with a piece landed
     INSERT INTO bench_session VALUES ('bs_chunk', 'r_chunk', ${at(20)}, NULL, 'recording');
     INSERT INTO bench_chunk VALUES ('ch1', 'bs_chunk');
     -- r_notape: open session, polls say open but the tape is not advancing, no piece
     INSERT INTO bench_session VALUES ('bs_notape', 'r_notape', ${at(20)}, NULL, 'recording');
-    INSERT INTO bench_level_sample VALUES ('r_notape', ${at(25)}, true, false);
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_notape', ${at(25)}, true, false);
     -- r_early: an OLDER session (began 10 min BEFORE the start_day command), still open, with a piece AND an advancing tape — it is not the session this start produced
     INSERT INTO bench_session VALUES ('bs_early', 'r_early', ${at(-600)}, NULL, 'recording');
     INSERT INTO bench_chunk VALUES ('ch_early', 'bs_early');
-    INSERT INTO bench_level_sample VALUES ('r_early', ${at(-300)}, true, true), ('r_early', ${at(25)}, true, true);
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_early', ${at(-300)}, true, true), ('r_early', ${at(25)}, true, true);
+    -- Fix G mutants. r_closed: ENDED session that has a piece and an advancing tape (audio, but not open). r_oldsample: open session whose only advancing sample PREDATES its start.
+    -- r_notopen: open session whose advancing sample reports session_open = false.
+    INSERT INTO bench_session VALUES ('bs_closed', 'r_closed', ${at(20)}, ${at(90)}, 'ended');
+    INSERT INTO bench_chunk VALUES ('ch_closed', 'bs_closed');
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_closed', ${at(25)}, true, true);
+    INSERT INTO bench_session VALUES ('bs_oldsample', 'r_oldsample', ${at(20)}, NULL, 'recording');
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_oldsample', ${at(10)}, true, true);
+    INSERT INTO bench_session VALUES ('bs_notopen', 'r_notopen', ${at(20)}, NULL, 'recording');
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_notopen', ${at(25)}, false, true);
+    -- N1: ENDED session, tape advanced ~10 s then the tapewriter exited (a tape_advancing sample, no piece). N5: open session started after the command, no piece, only samples from the day before.
+    INSERT INTO bench_session VALUES ('bs_endtape', 'r_endtape', ${at(20)}, ${at(40)}, 'ended');
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_endtape', ${at(25)}, true, true);
+    INSERT INTO bench_session VALUES ('bs_yday', 'r_yday', ${at(20)}, NULL, 'recording');
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_yday', ${at(-86400)}, true, true);
     -- r_ok_then_fail: alive with audio
     INSERT INTO bench_session VALUES ('bs_okf', 'r_ok_then_fail', ${at(20)}, NULL, 'recording');
-    INSERT INTO bench_level_sample VALUES ('r_ok_then_fail', ${at(25)}, true, true);
+    INSERT INTO bench_level_sample (room_id, sampled_at, session_open, tape_advancing) VALUES ('r_ok_then_fail', ${at(25)}, true, true);
+
+    UPDATE bench_level_sample SET ist_date = (sampled_at AT TIME ZONE 'Asia/Kolkata')::date;
   `);
   H.sql = pg.sql as never;
 }, 120_000);
@@ -117,5 +133,72 @@ describe.runIf(HAVE)("a later failure ack overrides an ok settlement, idempotent
     await reconcile(500);
     const other = (await pg.sql`SELECT result FROM steward_decisions WHERE room_id = 'r_other' AND result LIKE 'ok: start_day deferred%'`) as Array<{ result: string }>;
     expect(other).toHaveLength(1);
+  });
+});
+
+describe.runIf(HAVE)("Fix G: one test per clause of the audio evidence (each fails when its clause is removed)", () => {
+  it("a CLOSED session with audio never settles the start ok (the 'still open' status filter)", async () => {
+    await reconcile(60);
+    expect(await resultOf("r_closed")).not.toMatch(/^ok/);
+  });
+  it("an open session whose only advancing level sample PREDATES the session start is not audio (the 'sampled_at >= started_at' filter)", async () => {
+    expect(await resultOf("r_oldsample")).not.toMatch(/^ok/);
+  });
+  it("an open session whose advancing sample says session_open = false is not audio (the session_open check)", async () => {
+    expect(await resultOf("r_notopen")).not.toMatch(/^ok/);
+  });
+});
+
+describe.runIf(HAVE)("Fix G addendum: N1 and N5", () => {
+  it("N1: an ENDED session whose tape advanced then the tapewriter exited (a tape_advancing sample, no piece) never settles ok", async () => {
+    expect(await resultOf("r_endtape")).not.toMatch(/^ok/);
+  });
+  it("N5: an open session started after the command, with no piece and only level samples from before it began (yesterday), never settles ok", async () => {
+    expect(await resultOf("r_yday")).not.toMatch(/^ok/);
+  });
+});
+
+describe.runIf(HAVE)("Fix G: the revision is idempotent, and a fault in it is loud", () => {
+  const okRow = (room: string, cmd: string) => `INSERT INTO steward_decisions (room_id, ts, action, mode, result, inputs) VALUES ('${room}', ${at(0)}, 'scribe_start', 'live', 'ok: start_day deferred then recording (late) session_id=bs_g command_id=${cmd}', '{}'::jsonb);`;
+  it("a second identical failure ack changes neither the status, the error nor acked_at", async () => {
+    const { ackCommand } = await import("@/lib/bench-commands");
+    pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, result, created_at, acked_at) VALUES ('cmd_g_ack', 'r_g_ack', 'start_day', 'acked', '{"ok":true,"deferred":true}'::jsonb, ${at(0)}, ${at(1)});`);
+    const a = { roomId: "r_g_ack", commandId: "cmd_g_ack", ok: false, sessionId: null, error: "input_device_not_ready" };
+    expect(await ackCommand(a)).toBe("failed");
+    const first = (await pg.sql`SELECT status, error, acked_at::text AS t FROM bench_command WHERE id = 'cmd_g_ack'`)[0];
+    pg.exec(`SELECT pg_sleep(0.05)`);
+    await ackCommand(a);
+    expect((await pg.sql`SELECT status, error, acked_at::text AS t FROM bench_command WHERE id = 'cmd_g_ack'`)[0]).toEqual(first);
+  });
+  it("the revise UPDATE is guarded: a row that left 'ok' between the read and the write is not overwritten (the idempotency guard)", async () => {
+    const { reviseDeferredOk } = await import("@/lib/steward/loop");
+    pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, error, created_at) VALUES ('cmd_g_race', 'r_g_race', 'start_day', 'failed', 'boom', ${at(0)}); ${okRow("r_g_race", "cmd_g_race")}`);
+    const racing = ((s: TemplateStringsArray, ...v: unknown[]) => {
+      const q = s.join("?");
+      const out = pg.sql(s, ...v);
+      if (/FROM bench_command WHERE id = ANY/.test(q)) {
+        // another reader settles the row after we read the failed command and before our write
+        return out.then((r: unknown) => { pg.exec(`UPDATE steward_decisions SET result = 'failed: settled by another reader command_id=cmd_g_race' WHERE room_id = 'r_g_race'`); return r; });
+      }
+      return out;
+    }) as never;
+    expect(await reviseDeferredOk(racing, T + 600_000, 5000)).toBe(1); // it counts its attempt; the guard keeps the row
+    expect(await resultOf("r_g_race")).toBe("failed: settled by another reader command_id=cmd_g_race");
+  });
+  it("a throwing revise query logs one line with room and command id, and marks the tick degraded", async () => {
+    const { reconcilePending } = await import("@/lib/steward/loop");
+    pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, error, created_at) VALUES ('cmd_g_throw', 'r_g_throw', 'start_day', 'failed', 'boom', ${at(0)}); ${okRow("r_g_throw", "cmd_g_throw")}`);
+    const throwing = ((s: TemplateStringsArray, ...v: unknown[]) => {
+      if (/UPDATE steward_decisions SET result/.test(s.join("?")) && /failed after it was settled ok/.test(String(v[0]))) return Promise.reject(new Error("neon 503"));
+      return pg.sql(s, ...v);
+    }) as never;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const degraded = vi.fn();
+    await reconcilePending(throwing, T + 600_000, 5000, degraded);
+    expect(degraded).toHaveBeenCalledTimes(1);
+    const line = err.mock.calls.map((c) => String(c[0])).find((l) => l.includes("revision failed"));
+    expect(line).toContain("room=r_g_throw");
+    expect(line).toContain("command_id=cmd_g_throw");
+    err.mockRestore();
   });
 });
