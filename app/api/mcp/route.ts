@@ -10,7 +10,7 @@
  */
 import { NextRequest } from "next/server";
 import { checkMcpBearer } from "@/lib/mcp/auth";
-import { handleMcpRpc, mcpAuthFailureResponse, mcpBannerResponse } from "@/lib/mcp/handler";
+import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 export async function GET() {
-  return mcpBannerResponse();
+  return mcpMethodNotAllowedResponse();
 }
 
 export async function POST(req: NextRequest) {

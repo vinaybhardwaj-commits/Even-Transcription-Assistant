@@ -100,11 +100,15 @@ describe("one handler, two doors", () => {
     expect(p.result).toEqual(h.result);
   });
 
-  it("GET returns the existing banner without a key check, and OPTIONS answers 204 with CORS", async () => {
+  it("GET answers 405 with Allow on both doors without a key check, and OPTIONS answers 204 with CORS", async () => {
     const viaPath = await pathGet();
     const viaHeader = await headerGet();
+    expect(viaPath.status).toBe(405);
+    expect(viaHeader.status).toBe(405);
+    expect(viaPath.headers.get("allow")).toBe("POST, OPTIONS");
     const [p, h] = [await viaPath.json(), await viaHeader.json()];
-    expect(p).toEqual(h); // same static banner, no tool names, no secrets
+    expect(p).toEqual(h); // same static body, no tool names, no secrets
+    expect(p).toEqual({ error: "method_not_allowed", hint: "Even Scribe MCP speaks JSON-RPC over POST" });
     expect(viaPath.headers.get("access-control-allow-origin")).toBe("*");
     const opt = await pathOptions();
     expect(opt.status).toBe(204);

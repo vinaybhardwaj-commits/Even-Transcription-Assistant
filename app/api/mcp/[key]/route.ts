@@ -11,7 +11,7 @@
  * copy), SAME handler (lib/mcp/handler, shared with /api/mcp — the two doors cannot drift),
  * SAME answers (wrong key → the header form's 401; unset env → its 503).
  *
- * GET returns the existing banner WITHOUT checking the key — static text, reveals nothing.
+ * GET returns 405 (Allow: POST, OPTIONS) WITHOUT checking the key — static text, reveals nothing.
  * OPTIONS answers 204 with CORS headers and Access-Control-Allow-Origin is * on every
  * response: connector setup probes from a browser and fails without it.
  *
@@ -23,7 +23,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkMcpBearer } from "@/lib/mcp/auth";
-import { handleMcpRpc, mcpAuthFailureResponse, mcpBannerResponse } from "@/lib/mcp/handler";
+import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,7 +31,7 @@ export const maxDuration = 300; // same ceiling as the header form (raised for U
 
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-methods": "POST, OPTIONS",
   "access-control-allow-headers": "content-type, authorization, mcp-protocol-version",
 };
 
@@ -58,8 +58,8 @@ export async function OPTIONS() {
 }
 
 export async function GET() {
-  // The banner is static and reveals nothing — same body as GET /api/mcp, no key check.
-  return withCors(mcpBannerResponse());
+  // Static 405, reveals nothing — same body as GET /api/mcp, no key check.
+  return withCors(mcpMethodNotAllowedResponse());
 }
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ key: string }> }) {

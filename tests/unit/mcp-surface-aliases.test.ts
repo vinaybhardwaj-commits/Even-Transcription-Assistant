@@ -454,7 +454,7 @@ describe("audit — a grouped call still names the tool that ran", () => {
     expect(targetOf(auditInserts[0]!)).toBe("scribe_rooms");
     expect(metaOf(auditInserts[0]!)).toMatchObject({ variant: "scribe_list_rooms" });
     expect(targetOf(auditInserts[1]!)).toBe("scribe_list_rooms");
-    expect(Object.keys(metaOf(auditInserts[1]!)).sort()).toEqual(["args", "ms", "ok"]);
+    expect(Object.keys(metaOf(auditInserts[1]!)).sort()).toEqual(["args", "err_kind", "ms", "ok"]);
   });
 });
 

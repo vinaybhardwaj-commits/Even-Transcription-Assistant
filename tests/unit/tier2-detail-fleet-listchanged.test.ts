@@ -188,11 +188,11 @@ describe("§2.4 — the flag is on all four named tools, with the same wording",
   });
 });
 
-describe("§2.6 — listChanged", () => {
-  it("initialize advertises tools.listChanged: true", async () => {
+describe("§2.6 — listChanged (withdrawn by S0.2, 8 Oct 2026)", () => {
+  it("initialize no longer advertises tools.listChanged: the server never sends the notification", async () => {
     const src = await import("node:fs").then((fs) => fs.readFileSync("lib/mcp/handler.ts", "utf8"));
-    expect(src).toMatch(/capabilities:\s*\{\s*tools:\s*\{\s*listChanged:\s*true\s*\}\s*\}/);
-    expect(src).not.toMatch(/listChanged:\s*false/);
+    expect(src).toMatch(/capabilities:\s*\{\s*tools:\s*\{\s*\}\s*\}/);
+    expect(src).not.toMatch(/listChanged:\s*true/);
   });
 });
 

@@ -41,6 +41,9 @@ export function safeArgs(args: unknown): Record<string, unknown> {
   return out;
 }
 
+/** S0.3 — why a call was not ok: the handler threw, or it answered `{error}` / `{degraded:true}`. */
+export type ErrKind = "throw" | "result_error" | null;
+
 export async function auditToolCall(input: {
   tool: string;
   args: unknown;
@@ -54,8 +57,10 @@ export async function auditToolCall(input: {
   /** Slice E — for a GROUP, the published tool that ran (a fixed tool name, never caller text).
    *  Absent for every other call, so a row for an ungrouped or old name is what it was before. */
   variant?: string | null;
+  /** S0.3 — 'throw' | 'result_error' | null (ok). Stored in metadata_json.err_kind. */
+  errKind?: ErrKind;
 }): Promise<void> {
-  const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms, ...(input.variant ? { variant: input.variant } : {}) };
+  const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms, ...(input.variant ? { variant: input.variant } : {}), err_kind: input.errKind ?? null };
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json, ip, user_agent)

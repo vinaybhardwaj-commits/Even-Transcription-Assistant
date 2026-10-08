@@ -6,7 +6,7 @@
  * dispatch into ONE function and can never drift apart in what they expose.
  *
  * Hand-rolled JSON-RPC 2.0 over HTTP POST (stateless; MCP Streamable-HTTP JSON responses, no
- * SSE, no session ids). GET banner is an info stub (no tool names, no secrets).
+ * SSE, no session ids). GET answers 405 (S0.1).
  *
  * AUTH LIVES AT THE ROUTES (fails CLOSED, before anything is parsed): both call
  * lib/mcp/auth's checkMcpBearer — the path route wraps its key in a synthetic Bearer
@@ -24,7 +24,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
-import { auditToolCall, mcpActorId } from "@/lib/mcp/audit";
+import { auditToolCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
 import { CALLABLE_TOOLS, LISTED_TOOLS } from "@/lib/mcp/surface";
@@ -79,20 +79,15 @@ function clientIp(req: NextRequest): string | null {
   return /^(\d{1,3}\.){3}\d{1,3}$/.test(first) || /^[0-9a-f:]+$/i.test(first) ? first : null;
 }
 
-/** The GET banner — static text, no tool names, no secrets, no auth check. */
-export function mcpBannerResponse(): NextResponse {
+/**
+ * S0.1 (8 Oct 2026) — GET on either door. The old 200 JSON banner told a probe "up" with no auth
+ * and no tool names, which hid a dead token behind a green GET. The door speaks JSON-RPC over POST
+ * only: 405 + `Allow`. Static text, no auth check, reveals nothing.
+ */
+export function mcpMethodNotAllowedResponse(): NextResponse {
   return NextResponse.json(
-    {
-      ok: true,
-      service: SERVER_NAME,
-      slice: SLICE,
-      transport: "json-rpc-2.0 over HTTP POST (MCP streamable-http, JSON responses)",
-      protocolVersion: LATEST_PROTOCOL,
-      auth: "Authorization: Bearer <SCRIBE_MCP_TOKEN>",
-      methods: ["initialize", "ping", "tools/list", "tools/call"],
-      version: version(),
-    },
-    { headers: NO_STORE },
+    { error: "method_not_allowed", hint: "Even Scribe MCP speaks JSON-RPC over POST" },
+    { status: 405, headers: { ...NO_STORE, allow: "POST, OPTIONS" } },
   );
 }
 
@@ -170,12 +165,12 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
       const protocolVersion = (PROTOCOL_VERSIONS as readonly string[]).includes(requested) ? requested : LATEST_PROTOCOL;
       return rpcResult(id, {
         protocolVersion,
-        // Tier 2 §2.6 — the server will re-advertise its tool set. The tool list is built at module
-        // load from the registry, so a deploy changes it; a client that honours listChanged picks
-        // the new set up without a reconnect. Clients that cache their manifest regardless still
-        // need reconnecting — stated in docs/operator-mcp/TOOL-NOTES.md, because on 12 Sep a cached
-        // manifest hid scribe_room_command from an operator while the server was serving it.
-        capabilities: { tools: { listChanged: true } },
+        // S0.2 (8 Oct 2026) — listChanged is no longer advertised. The tool list is built at module
+        // load, so it changes only on a deploy, never inside a live session; the server never sends
+        // notifications/tools/list_changed, so advertising it promised a push that cannot arrive
+        // (stateless JSON responses, no SSE). Clients that cache their manifest still need
+        // reconnecting after a deploy — docs/operator-mcp/TOOL-NOTES.md.
+        capabilities: { tools: {} },
         serverInfo: { name: SERVER_NAME, version: version() },
         instructions:
           "Even Scribe operator door (S2): read tools over rooms, brain state/cues, Bench sessions/recordings, STT lab, voice, encounters, traces, stores, jobs and the audit log; plus room control through scribe_room_command, whose description lists every kind and where each executes. Related tools are grouped behind one selector argument; every tool name published before the grouping, scribe_start_recording included, is still accepted by tools/call. Defaults are summaries + pointers; pass include_payload / include_text / include_prompts / include_identity / include_urls explicitly.",
@@ -259,7 +254,6 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
     result = { error: String((e as Error)?.message ?? e).slice(0, 200), degraded: true };
   }
   const ms = Date.now() - t0;
-  void auditToolCall({ tool: name, args, ok: !isError, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id, variant: tool.memberFor?.(args) ?? null });
 
   let text: string;
   try {
@@ -268,6 +262,22 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
     text = JSON.stringify({ error: "result_not_serializable" });
     isError = true;
   }
+
+  // S0.3 — audit honesty. isError (what the CALLER sees) is unchanged: it is true only when the
+  // handler threw. But fail-safe tools answer `{ error }` / `{ degraded:true }` without throwing, and
+  // the audit row used to call all of those ok. `ok` now also falls when the result says it failed.
+  const resultHasError =
+    typeof result === "object" && result !== null && !Array.isArray(result) &&
+    (typeof (result as Record<string, unknown>).error === "string" || (result as Record<string, unknown>).degraded === true);
+  const errKind: ErrKind = isError ? "throw" : resultHasError ? "result_error" : null;
+  const ok = !isError && !resultHasError;
+  const variant = tool.memberFor?.(args) ?? null;
+  void auditToolCall({ tool: name, args, ok, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id, variant, errKind });
+
+  // S0.4 — one structured line per tools/call for the log drain. Never args, never the request
+  // path or key, never the user agent: the path-key door's URL is a secret.
+  console.log(JSON.stringify({ mcp: "call", tool: name, variant, ms, ok, err_kind: errKind, actor: ctx.actor, bytes_out: text.length }));
+
   return rpcResult(id, {
     content: [{ type: "text", text }],
     structuredContent: typeof result === "object" && result !== null && !Array.isArray(result) ? result : { value: result },
