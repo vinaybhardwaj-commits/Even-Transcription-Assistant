@@ -71,7 +71,7 @@ function disagreementFields(): Record<string, string> {
  * an OLD app stops a healthy recording on any `ended_disagrees` and retries a non-"verified" upload for ever. So they go out only when BENCH_CHUNK_REAPED_REPLIES=1; unset / anything
  * else is OFF and the route answers exactly as main does (append to the ended session, `disagreement` only, upload_state "verified"). Read per request. Flip it after every kiosk runs the new app.
  */
-export const reapedRepliesOn = (): boolean => process.env.BENCH_CHUNK_REAPED_REPLIES === "1";
+const reapedRepliesOn = (): boolean => process.env.BENCH_CHUNK_REAPED_REPLIES === "1";
 
 /** Natural key of a re-home / refusal event: the same piece retried (same target, source, idx) is the same event, so a retry loop writes ONE row. */
 const eventIdFor = (kind: string, sessionId: string, source: string, idx: number): string =>

@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
-const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), real: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
+const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), real: null as null | ((t: string) => boolean) }));
 // routes only the statement under test to postgres; every other statement answers "no rows"
 vi.mock("@/lib/db", () => ({
   sql: (s: TemplateStringsArray, ...v: unknown[]) => {

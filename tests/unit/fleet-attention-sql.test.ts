@@ -74,7 +74,7 @@ beforeAll(() => {
       BEGIN EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || q INTO r; RETURN r; END
     $f$;
   `);
-  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0199_room_alert_outbox_session_reaped", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution", "0126_kiosk_health_events", "0127_kiosk_health_machine_received_idx"]) {
+  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0138_room_alert_outbox_session_reaped", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution", "0126_kiosk_health_events", "0127_kiosk_health_machine_received_idx"]) {
     pg.exec(noRecord(`db/migrations/${f}.sql`));
   }
   H.sql = pg.sql as Sql;
