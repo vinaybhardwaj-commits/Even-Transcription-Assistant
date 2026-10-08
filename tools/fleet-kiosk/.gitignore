@@ -1,0 +1,16 @@
+# local config and anything that maps the real fleet stays out of the repo
+hosts-opd.txt
+hosts-*.txt
+kiosk-macs.txt
+machine-ids.txt
+config.sh
+wait-flip.env
+tmp/
+*.log
+bus/*.json
+bus/*.txt
+*cred*
+*secret*
+*token*
+*.bak*
+node_modules/

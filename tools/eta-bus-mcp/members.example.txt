@@ -1,0 +1,2 @@
+# One external poll-based bus member name per line (ext-... guests are handled separately). Copy to members.txt on the bus host.
+example-bot

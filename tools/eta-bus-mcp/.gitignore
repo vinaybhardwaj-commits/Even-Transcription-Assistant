@@ -1,0 +1,9 @@
+wake.log
+*.bak-*
+runtime.out
+.DS_Store
+# real member and allowlist files stay on the bus host; only the *.example files are tracked
+members.txt
+pane-allowlists/*
+!pane-allowlists/example.txt
+FABLE-CONFIG.md

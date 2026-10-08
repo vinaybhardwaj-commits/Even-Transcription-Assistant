@@ -1,0 +1,2 @@
+# Pane ids (workspace:pane) one box may drive, one per line. Copy to <box-name>.txt on the bus host.
+w1:p1

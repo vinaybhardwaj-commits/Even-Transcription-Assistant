@@ -1,0 +1,3 @@
+# hosts-opd.example -- format of the real hosts-opd.txt that kh-rollout.sh reads. Keep the real file local (it is git-ignored).
+# fields: machine_id ssh_target keychain_svc room_id install_id console_user [ssh_key]
+EXAMPLE-MACHINE-1 user@192.0.2.10 example-keychain-service room_example_1 install_example_1 consoleuser

@@ -1,0 +1,3 @@
+Fleet kiosk tooling (flip, guard install, rollout, checks). Snapshot of the Air ~/eta-deploy, 8 Oct 2026.
+Local config, not in the repo (all under ~/.config/eta-fleet-kiosk/): machine-ids.txt (one id per line, read by occ-check.mjs; override with FLEET_KIOSK_IDS_FILE), config.sh (sets OPD1_ID for flip-0111.sh; override with FLEET_KIOSK_CONFIG), wait-flip.env (MID TARGET SVC KEY PROFILE for stage-ext40/wait-flip-echo.sh). Copy hosts-opd.example to hosts-opd.txt and fill it in.
+Left out on purpose: pg/ (install.sh and eta-presence-guard.sh bake the kiosk machine-id allow-list into root scripts that run on the kiosks; not config-driven in under 10 lines).
