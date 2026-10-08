@@ -408,7 +408,16 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(r.items[0]!.detail).toContain("audio levels have not moved");
     // (c) the honest recovery: moving levels since (R6 clears on the FIRST evidence, by spec)
     pg.exec(`TRUNCATE bench_level_sample;` + samples("r6", "2 hours", "1 hour", "moving", 60));
+    // (c1) Arch #20 DWELL: moving levels an hour ago are history. Nothing in the last 120 s, so the alert stands.
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+    // (c2) the honest recovery: live, moving levels held through the last two minutes clear it
+    pg.exec(samples("r6", "115 seconds", "0 seconds", "moving", 2));
     expect(await attention().then((x) => x.items)).toEqual([]);
+    // (c3) tiny peaks with zero_ratio ~1 are not a recovery however many distinct values they have (OPD5, alerts 545-575)
+    pg.exec(`TRUNCATE bench_level_sample; INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+             SELECT 'r6', (t AT TIME ZONE 'Asia/Kolkata')::date, t, 0.0001 + (extract(epoch from t)::bigint % 9) * 0.0004, 0.999, true, true
+               FROM generate_series(${ago("115 seconds")}, ${ago("0 seconds")}, interval '2 seconds') t;`);
+    expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
   });
 
   it("R6 GATE — outbox alert + watchdog state ok + no session → NO item (Dietary closed for the day); state ok but a session open and no genuine recovery → item; state not ok → item", async () => {
@@ -432,7 +441,7 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(kindsOf(r)).toEqual(["r6:open_outbox"]);
     expect(r.items[0]!.detail).toContain("no new recording has arrived since");
     // …but a session still open at the alert time that delivered a chunk after it is
-    pg.exec(session("live6", "r6", "6 hours") + chunkRow("c2", "live6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60));
+    pg.exec(session("live6", "r6", "6 hours") + chunkRow("c2", "live6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60) + samples("r6", "115 seconds", "0 seconds", "moving", 2));
     expect(kindsOf(await attention())).not.toContain("r6:open_outbox");
   });
 
@@ -552,7 +561,7 @@ describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres
     expect((await loadRecoveryEvidence()).get("r6")!.chunk_after_alert).toBe(true);
   });
 
-  it("QUIET CLOSE (F4) through persistPlan: a degraded room that polls clean with no session open is written to ok with NO outbox row; the next outage queues its alert", async () => {
+  it("CLOSE WITHOUT PROOF (F4, Arch #20) through persistPlan: a degraded room that polls clean with no session open is written to ok AND gets one recovery row; the next outage queues its alert", async () => {
     const { planWatchdogRun, persistPlan } = await import("@/lib/room-watchdog");
     const now = Date.now();
     pg.exec(`INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("14 hours")});`);
@@ -560,17 +569,17 @@ describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres
     const closeRun = planWatchdogRun([
       { room_id: "r6", room_name: "OPD 6", facts: clean, prior: { status: "degraded", since: new Date(now - 14 * 3_600_000).toISOString() }, muted: false, recovery_evidence: { chunk_after_alert: false, distinct_levels: 0 } },
     ], now);
-    expect(closeRun.messages).toEqual([]);
-    expect(await persistPlan(closeRun)).toBe(0);
+    expect(closeRun.messages.map((m) => m.kind)).toEqual(["recovered"]);
+    expect(await persistPlan(closeRun)).toBe(1);
     expect(await pg.sql`SELECT status FROM room_alert_state WHERE room_id = 'r6'`).toEqual([{ status: "ok" }]);
-    expect(await pg.sql`SELECT count(*)::int AS n FROM room_alert_outbox`).toEqual([{ n: 0 }]);
+    expect(await pg.sql`SELECT kind, room_ids FROM room_alert_outbox`).toEqual([{ kind: "recovered", room_ids: ["r6"] }]);
     // next day: a new outage is an ok → degraded edge again, so it queues a message
     const later = now + 20 * 3_600_000;
     const next = planWatchdogRun([
       { room_id: "r6", room_name: "OPD 6", facts: { ...clean, last_seen_at: new Date(later - 5_000).toISOString(), session_open: true, tape_advancing: true, state_flags: ["DEVICE_MISSING"] }, prior: { status: "ok", since: new Date(now).toISOString() }, muted: false },
     ], later);
     expect(await persistPlan(next)).toBe(1);
-    expect(await pg.sql`SELECT kind FROM room_alert_outbox`).toEqual([{ kind: "degraded" }]);
+    expect(await pg.sql`SELECT kind FROM room_alert_outbox ORDER BY id`).toEqual([{ kind: "recovered" }, { kind: "degraded" }]);
   });
 });
 

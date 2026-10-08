@@ -55,7 +55,8 @@ import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, 
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
-import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
+import { REASON_LABEL, isGenuineRecovery, RECOVERY_LIVE_MAX_ZERO_RATIO, type DegradationReason } from "@/lib/room-watchdog";
+import { SILENT_PEAK_MAX } from "@/lib/bench-bus-constants";
 import {
   fmtIst,
   type AttentionItem,
@@ -172,6 +173,9 @@ export type OutboxFacts = {
   body: string;
   chunk_after_alert: boolean;
   distinct_levels_since_alert: number;
+  /** Arch #20 dwell: level samples in the last RECOVERY_LEVEL_WINDOW_S that are live (zero_ratio < RECOVERY_LIVE_MAX_ZERO_RATIO and peak >= SILENT_PEAK_MAX), and all samples in that window. Absent: no dwell test. */
+  live_samples_since_alert?: number;
+  total_samples_recent?: number;
   /**
    * The room's watchdog state (`room_alert_state.status`) when the loader read it; null = no state row; undefined = not supplied (legacy callers and
    * plain-object tests: no gate). R6 is gated on it: a state of `ok` with no open session means the watchdog closed the alert (genuinely, or quietly
@@ -529,7 +533,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     // GATE: the alert is closed when the room's watchdog state is `ok` AND no session is open for it (a room closed for the day, whose alert the
     // watchdog closed quietly). A session that is open keeps the alert standing until audio is proven. No state row = not closed.
     const alertClosedByWatchdog = r.outbox?.state_status === "ok" && !r.open_session;
-    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert })) {
+    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert, live_samples: r.outbox.live_samples_since_alert, total_samples: r.outbox.total_samples_recent })) {
       const o = r.outbox;
       const reasons = (Object.keys(REASON_LABEL) as DegradationReason[]).filter((k) => o.body.includes(REASON_LABEL[k]));
       const red = o.kind === "offline" || reasons.includes("device_missing") || reasons.includes("tape_stalled");
@@ -860,10 +864,17 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
                       AND x.sampled_at > a.created_at
                     ORDER BY x.ist_date, x.sampled_at LIMIT 1
                  ) f
-             ), 0)::int AS distinct_levels_since_alert
+             ), 0)::int AS distinct_levels_since_alert,
+             (SELECT count(*) FILTER (WHERE x.zero_ratio IS NOT NULL AND x.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND x.peak >= ${SILENT_PEAK_MAX})::int
+                FROM bench_level_sample x
+               WHERE x.room_id = a.room_id AND x.ist_date >= (a.created_at AT TIME ZONE 'Asia/Kolkata')::date
+                 AND x.sampled_at > a.created_at AND x.sampled_at > now() - interval '120 seconds') AS live_samples_since_alert,
+             (SELECT count(*)::int FROM bench_level_sample x
+               WHERE x.room_id = a.room_id AND x.ist_date >= (a.created_at AT TIME ZONE 'Asia/Kolkata')::date
+                 AND x.sampled_at > a.created_at AND x.sampled_at > now() - interval '120 seconds') AS total_samples_recent
         FROM a
        WHERE a.room_id = ANY(${ids}::text[])
-    `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown }>, []),
+    `) as Array<{ room_id: string; id: unknown; kind: string; created_at: unknown; body: string; state_status: string | null; chunk_after_alert: boolean; distinct_levels_since_alert: unknown; live_samples_since_alert: unknown; total_samples_recent: unknown }>, []),
     safe("bench_command", degraded, async () => (await sql`
       SELECT DISTINCT ON (c.room_id) c.room_id, c.acked_at, COALESCE(c.error, c.result->>'error') AS error
         FROM bench_command c
@@ -1008,6 +1019,8 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
               state_status: ob.state_status ?? null,
               chunk_after_alert: Boolean(ob.chunk_after_alert),
               distinct_levels_since_alert: Number(ob.distinct_levels_since_alert) || 0,
+              live_samples_since_alert: Number(ob.live_samples_since_alert) || 0,
+              total_samples_recent: Number(ob.total_samples_recent) || 0,
             }
           : null,
       failed_start: fs && fsAt ? { acked_at: fsAt, error: fs.error } : null,

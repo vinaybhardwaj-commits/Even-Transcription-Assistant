@@ -275,6 +275,27 @@ export function recoveryMessage(
   };
 }
 
+/**
+ * Arch #20. A room that is polling again with NO session open. There is no tape to prove audio with, so this does not say it is recording
+ * normally (recoveryMessage does); it says what is known: the alert is over and the room is back. It exists so a return is never absent from
+ * the history (7 Oct: OPD4, OPD5 and Dietary came back after S15/S16 and the watchdog wrote nothing).
+ */
+export function quietRecoveryMessage(roomName: string, previousStatus: RoomAlertStatus, downForMs: number, atIso: string): WatchdogMessage {
+  const word = previousStatus === "offline" ? "offline" : "degraded";
+  return {
+    subject: `EvenScribe watchdog: ${roomName} is back`,
+    text: `${roomName} is polling normally again after being ${word} for ${fmtDuration(downForMs)}, as of ${atIso}. No recording session is open, so audio is not yet confirmed.`,
+  };
+}
+
+/** Arch #20. Several rooms clearing in one run: ONE cluster-cleared message beside the per-room ones. */
+export function clusterClearedMessage(roomNames: readonly string[], atIso: string): WatchdogMessage {
+  return {
+    subject: `EvenScribe watchdog: ${roomNames.length} rooms are back`,
+    text: `${roomNames.length} rooms cleared in the same run, as of ${atIso}: ${andJoin(roomNames)}. Each room has its own recovery row.`,
+  };
+}
+
 export function fleetOutageMessage(count: number, total: number, atIso: string): WatchdogMessage {
   return {
     subject: `EvenScribe watchdog: ${count} rooms went offline at once`,
@@ -323,6 +344,7 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
   const individualOffline: { room_id: string; room_name: string; from: RoomAlertStatus }[] = [];
   const offlineRoomIds: string[] = []; // D3 numerator — every room crossing into offline, muted or not.
   let offlineTransitions = 0;
+  const cleared: { room_id: string; room_name: string }[] = []; // Arch #20 — rooms whose alert cleared this run, for the cluster-cleared event.
 
   for (const input of inputs) {
     const { status: newStatus, reasons } = computeRoomStatus(input.facts, nowMs);
@@ -348,6 +370,14 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
       const sessionOpen = input.facts.open_session !== null || input.facts.session_open === true;
       if (!sessionOpen) {
         writes.push({ room_id: input.room_id, status: "ok", since: nowIso });
+        // Arch #20: the state still closes without proof, but the return is no longer absent from the history. A muted room keeps its silence (D9).
+        if (!input.muted) {
+          cleared.push({ room_id: input.room_id, room_name: input.room_name });
+          messages.push({
+            ...quietRecoveryMessage(input.room_name, input.prior.status, nowMs - Date.parse(input.prior.since), nowIso),
+            kind: "recovered", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "ok",
+          });
+        }
         continue;
       }
       if (!isGenuineRecovery(input.recovery_evidence)) continue;
@@ -376,6 +406,7 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
       // newStatus === "ok" with a session open (or a legacy caller that supplied no evidence): the recovery is sent, naming how long it was gone.
       // runWatchdog only reaches here for a room whose recovery is GENUINE (see above); an unproven one `continue`d, a closed-for-the-day one closed quietly.
       const downForMs = nowMs - Date.parse(input.prior.since);
+      cleared.push({ room_id: input.room_id, room_name: input.room_name });
       messages.push({
         ...recoveryMessage(input.room_name, input.prior.status, downForMs, nowIso),
         kind: "recovered", room_ids: [input.room_id], room_name: input.room_name, status_from: input.prior.status, status_to: "ok",
@@ -404,6 +435,15 @@ export function planWatchdogRun(inputs: readonly RoomRunInput[], nowMs: number):
         kind: "offline", room_ids: [room.room_id], room_name: room.room_name, status_from: room.from, status_to: "offline",
       });
     }
+  }
+
+  // Arch #20: two or more rooms clearing in one run (the S12/S15/S16 shape) also get one cluster-cleared row naming them all. No new outbox kind:
+  // it is a `recovered` row with several room_ids, so no CHECK change (arch #21 is widening that constraint in 0132).
+  if (cleared.length >= 2) {
+    messages.push({
+      ...clusterClearedMessage(cleared.map((c) => c.room_name), nowIso),
+      kind: "recovered", room_ids: cleared.map((c) => c.room_id), status_from: null, status_to: "ok",
+    });
   }
 
   return { messages, writes };

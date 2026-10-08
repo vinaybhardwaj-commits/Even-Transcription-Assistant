@@ -132,34 +132,40 @@ describe("planWatchdogRun — with a session OPEN, a clean poll alone does not r
   });
 });
 
-describe("planWatchdogRun — with NO session open, a clean poll closes the alert quietly (F4)", () => {
-  it("a degraded room with nothing open → state written to ok, NO message (no outbox row, no `recovered` text), `since` reset", () => {
+describe("planWatchdogRun — with NO session open, a clean poll closes the alert and says so (F4, Arch #20)", () => {
+  const writeOk = { room_id: "room_opd6", status: "ok", since: new Date(NOW).toISOString() };
+
+  it("a degraded room with nothing open → state written to ok AND a recovery row that does not claim audio is confirmed", () => {
     const plan = planWatchdogRun([input({ facts: cleanPoll(), recovery_evidence: ev(false, 0) })], NOW);
-    expect(plan.messages).toEqual([]);
-    expect(plan.writes).toEqual([{ room_id: "room_opd6", status: "ok", since: new Date(NOW).toISOString() }]);
+    expect(plan.writes).toEqual([writeOk]);
+    expect(plan.messages.map((m) => m.kind)).toEqual(["recovered"]);
+    expect(plan.messages[0]!.room_ids).toEqual(["room_opd6"]);
+    expect(plan.messages[0]!.text).toContain("No recording session is open, so audio is not yet confirmed");
+    expect(plan.messages[0]!.text).not.toContain("recording normally");
   });
 
-  it("an offline room that comes back clean with nothing open also closes quietly", () => {
+  it("an offline room that comes back clean with nothing open also gets its row (S15/S16: OPD4, OPD5, Dietary came back and nothing was written)", () => {
     const offline = { status: "offline" as const, since: iso("2026-10-04 20:31:00") };
     const plan = planWatchdogRun([input({ facts: cleanPoll(), prior: offline, recovery_evidence: ev(false, 0) })], NOW);
-    expect(plan.messages).toEqual([]);
-    expect(plan.writes).toEqual([{ room_id: "room_opd6", status: "ok", since: new Date(NOW).toISOString() }]);
+    expect(plan.writes).toEqual([writeOk]);
+    expect(plan.messages).toHaveLength(1);
+    expect(plan.messages[0]).toMatchObject({ kind: "recovered", status_from: "offline", status_to: "ok" });
+    expect(plan.messages[0]!.text).toContain("after being offline");
   });
 
   it("unreadable evidence (null) makes no difference when no session is open", () => {
     const plan = planWatchdogRun([input({ facts: cleanPoll(), recovery_evidence: null })], NOW);
-    expect(plan.messages).toEqual([]);
-    expect(plan.writes).toHaveLength(1);
-    expect(plan.writes[0]!.status).toBe("ok");
+    expect(plan.messages.map((m) => m.kind)).toEqual(["recovered"]);
+    expect(plan.writes).toEqual([writeOk]);
   });
 
-  it("a muted room closes quietly too (the write lands, nothing is said)", () => {
+  it("a muted room closes quietly (the write lands, nothing is said — D9 holds)", () => {
     const plan = planWatchdogRun([input({ facts: cleanPoll(), muted: true, recovery_evidence: ev(false, 0) })], NOW);
     expect(plan.messages).toEqual([]);
     expect(plan.writes).toHaveLength(1);
   });
 
-  it("the NEXT outage can alert again: after the quiet close the prior is ok, and a new degraded poll messages", () => {
+  it("the NEXT outage can alert again: after the close the prior is ok, and a new degraded poll messages", () => {
     const closed = planWatchdogRun([input({ facts: cleanPoll(), recovery_evidence: ev(false, 0) })], NOW);
     const next = ist("2026-10-06 09:10:00");
     const prior = { status: closed.writes[0]!.status, since: closed.writes[0]!.since };
@@ -167,17 +173,56 @@ describe("planWatchdogRun — with NO session open, a clean poll closes the aler
     expect(again.messages.map((m) => m.kind)).toEqual(["degraded"]);
   });
 
-  it("fleet_outage counting is unaffected by rooms that close quietly in the same run", () => {
+  it("fleet_outage counting is unaffected by rooms that clear in the same run; the two that cleared get a cluster-cleared row", () => {
     const stale = (id: string) => input({ room_id: id, room_name: id, facts: { ...cleanPoll(), last_seen_at: new Date(NOW - 10 * 60_000).toISOString() }, prior: { status: "ok", since: iso("2026-10-05 00:00:00") } });
     const quiet = (id: string) => input({ room_id: id, room_name: id, facts: cleanPoll(), prior: { status: "degraded", since: iso("2026-10-05 01:00:00") }, recovery_evidence: ev(false, 0) });
-    // 3 of 5 rooms cross into offline, 2 close quietly → fleet outage counts 3 of 5, not 3 of anything else
     const plan = planWatchdogRun([stale("a"), stale("b"), stale("c"), quiet("d"), quiet("e")], NOW);
-    expect(plan.messages.map((m) => m.kind)).toEqual(["fleet_outage"]);
-    expect(plan.messages[0]!.room_ids).toEqual(["a", "b", "c"]);
+    expect(plan.messages.filter((m) => m.kind === "fleet_outage").map((m) => m.room_ids)).toEqual([["a", "b", "c"]]);
     expect(plan.writes.map((w) => `${w.room_id}:${w.status}`).sort()).toEqual(["a:offline", "b:offline", "c:offline", "d:ok", "e:ok"]);
-    // a quiet close never adds to the offline count: 1 offline + 4 quiet closes → one ordinary offline message
+    // a clearing never adds to the offline count: 1 offline + 4 clearing → one ordinary offline message
     const one = planWatchdogRun([stale("a"), quiet("b"), quiet("c"), quiet("d"), quiet("e")], NOW);
-    expect(one.messages.map((m) => m.kind)).toEqual(["offline"]);
+    expect(one.messages.filter((m) => m.kind === "offline")).toHaveLength(1);
+    expect(one.messages.filter((m) => m.kind === "fleet_outage")).toHaveLength(0);
+  });
+});
+
+describe("planWatchdogRun — cluster lifecycle (Arch #20)", () => {
+  const back = (id: string, prior: "offline" | "degraded", open: boolean) =>
+    input({
+      room_id: id, room_name: id.toUpperCase(),
+      facts: open ? openPoll() : cleanPoll(),
+      prior: { status: prior, since: iso("2026-10-05 01:00:00") },
+      recovery_evidence: open ? { chunk_after_alert: true, distinct_levels: 40, live_samples: 60, total_samples: 80 } : ev(false, 0),
+    });
+
+  it("three rooms clearing in one run: three per-room rows AND one cluster-cleared row naming all of them", () => {
+    const plan = planWatchdogRun([back("opd4", "degraded", false), back("opd5", "offline", false), back("dietary", "offline", true)], NOW);
+    const rows = plan.messages.filter((m) => m.room_ids!.length === 1);
+    expect(rows.map((m) => m.room_ids![0]).sort()).toEqual(["dietary", "opd4", "opd5"]);
+    const cluster = plan.messages.filter((m) => m.room_ids!.length > 1);
+    expect(cluster).toHaveLength(1);
+    expect(cluster[0]).toMatchObject({ kind: "recovered", status_to: "ok" });
+    expect(cluster[0]!.room_ids!.sort()).toEqual(["dietary", "opd4", "opd5"]);
+    expect(cluster[0]!.text).toContain("3 rooms cleared in the same run");
+  });
+
+  it("one room clearing is not a cluster", () => {
+    const plan = planWatchdogRun([back("opd4", "degraded", false)], NOW);
+    expect(plan.messages).toHaveLength(1);
+  });
+
+  it("a room whose recovery is not proven (session open, no dwell) does not join the cluster and does not clear", () => {
+    const unproven = { ...back("opd5", "degraded", true), recovery_evidence: { chunk_after_alert: true, distinct_levels: 40, live_samples: 0, total_samples: 80 } };
+    const plan = planWatchdogRun([back("opd4", "degraded", false), unproven], NOW);
+    expect(plan.writes.map((w) => w.room_id)).toEqual(["opd4"]);
+    expect(plan.messages).toHaveLength(1);
+  });
+
+  it("muted rooms stay silent and are left out of the cluster", () => {
+    const plan = planWatchdogRun([back("opd4", "degraded", false), { ...back("opd5", "degraded", false), muted: true }, back("opd6", "degraded", false)], NOW);
+    const cluster = plan.messages.find((m) => m.room_ids!.length > 1)!;
+    expect(cluster.room_ids!.sort()).toEqual(["opd4", "opd6"]);
+    expect(plan.writes).toHaveLength(3);
   });
 });
 
