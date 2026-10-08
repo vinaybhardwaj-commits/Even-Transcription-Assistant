@@ -28,7 +28,7 @@
 
 import { findBenchSession, listBenchConsultMarks, listBenchEvents, type BenchSessionRow } from "@/lib/bench";
 import { query } from "@/lib/brain/db";
-import { findRoomDay, istDate, readClustersForDay, SQL_VISITS_FOR_DAY } from "@/lib/brain/state";
+import { DEFAULT_ARM, findRoomDay, istDate, readClustersForDay, SQL_VISITS_FOR_DAY } from "@/lib/brain/state";
 
 // ---------------------------------------------------------------------------
 // Pure model
@@ -182,7 +182,11 @@ type ClusterRow = { id: string; kind: string; visit_id: string | null };
 async function loadBrainVisits(roomId: string, sessionStartedAt: Date): Promise<TimelineVisit[]> {
   const day = await findRoomDay(roomId, istDate(sessionStartedAt));
   if (!day) return [];
-  const visits = await query<VisitRow>(SQL_VISITS_FOR_DAY, [day.id]);
+  // SQL_VISITS_FOR_DAY has TWO placeholders ($1 room_day_id, $2 arm) since the fuse arms landed. This
+  // call bound only $1, so every timeline read failed with "bind message supplies 1 parameters, but
+  // prepared statement requires 2" and the picture fell back to "unavailable" (3 prod hits, 7 Oct).
+  // The timeline shows the production arm, as the brain's own readers do.
+  const visits = await query<VisitRow>(SQL_VISITS_FOR_DAY, [day.id, DEFAULT_ARM]);
   // Clustering is not running (see CLUSTERING_STATUS in lib/brain/state.ts), so no visit has voice
   // evidence. This used to be an empty query result; it is now an empty answer on purpose.
   const clusters = { rows: readClustersForDay(day.id).clusters as ClusterRow[] };
