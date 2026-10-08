@@ -48,6 +48,7 @@ import { DIARIZE_LABEL_TOOLS } from "./tools/diarize-labels";
 import { ROOM_ALERT_TOOLS } from "./tools/room-alerts";
 import { META_TOOLS } from "./tools/meta";
 import { S1_TOOLS } from "./tools/s1";
+import { S1B_TOOLS } from "./tools/s1b";
 
 /**
  * Every tool the door published before Slice E, in the order tools/list served them, plus every
@@ -61,6 +62,7 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...ROOM_ALERT_TOOLS,
   ...META_TOOLS,
   ...S1_TOOLS,
+  ...S1B_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));

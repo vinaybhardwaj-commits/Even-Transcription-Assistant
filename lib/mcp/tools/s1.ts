@@ -27,7 +27,7 @@ export const CAPTURE_DEAD_ZERO_RATIO = 0.98;
 /** a room's newest 15 s level bucket older than this is stale (the meter has stopped, or the listener is gone) */
 export const LEVEL_STALE_AFTER_S = 120;
 
-const iso = (v: unknown): string | null => {
+export const iso = (v: unknown): string | null => {
   if (v === null || v === undefined) return null;
   const d = v instanceof Date ? v : new Date(String(v));
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
@@ -51,7 +51,7 @@ export function notCollectedReason(e: unknown): string | null {
 
 type RoomOutcome = { room: RoomRef } | { error: Record<string, unknown> };
 
-async function pickRoom(args: ToolArgs): Promise<RoomOutcome> {
+export async function pickRoom(args: ToolArgs): Promise<RoomOutcome> {
   const asked = argStr(args, "room", 128);
   if (!asked) return { error: { ok: false, error: "room_required" } };
   try {
@@ -66,7 +66,7 @@ async function pickRoom(args: ToolArgs): Promise<RoomOutcome> {
   }
 }
 
-const roomRef = (r: RoomRef) => ({ id: r.id, slug: r.slug, name: r.name });
+export const roomRef = (r: RoomRef) => ({ id: r.id, slug: r.slug, name: r.name });
 
 // ---------------------------------------------------------------------------
 // scribe_now
