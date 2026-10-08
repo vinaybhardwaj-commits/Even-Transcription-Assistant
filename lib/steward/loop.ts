@@ -245,8 +245,50 @@ const PENDING_RE = /^pending\b.*command_id=(\S+)/;
  * invariant the "sending" row already has), the room's dedupe reference and the per-hour caps count the attempt once, and inputs records that it was pending (pending_at, late, settled_at).
  * Returns the number of rows settled. A failure of either read leaves the rows pending (they are tried again next tick).
  */
+/**
+ * ARCH #17 (fix F, refute): a deferred start that was SETTLED ok can still turn out to have failed — the app's wait/retries end in a failure ack, which amends the command
+ * to `failed` (ackCommand). Revisit the last 24 h of "ok: start_day deferred then recording" rows: if the command is now failed, the row becomes "failed: …". Guarded
+ * (`result LIKE 'ok: start_day deferred%'`) so a repeat is a no-op, and the command must belong to the SAME room as the decision. Fail-safe: a read fault leaves rows as they are.
+ */
+export async function reviseDeferredOk(sql: StewardSql, A: number, timeoutMs: number): Promise<number> {
+  const hi = new Date(A).toISOString();
+  const okRows = (await raceTimeout(
+    () => sql`SELECT d.id, d.room_id, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'ok: start_day deferred then recording%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts DESC LIMIT 50`,
+    timeoutMs,
+  )) as Array<{ id: unknown; room_id: string | null; result: string | null }>;
+  const todo = okRows.flatMap((r) => {
+    const m = /command_id=(\S+)/.exec(r.result ?? "");
+    return m ? [{ id: r.id, room: r.room_id, cmd: m[1]! }] : [];
+  });
+  if (todo.length === 0) return 0;
+  const cmds = (await raceTimeout(
+    () => sql`SELECT id, room_id, status, error FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[]) AND status = 'failed'`,
+    timeoutMs,
+  )) as Array<{ id: string; room_id: string; status: string; error: string | null }>;
+  const failed = new Map(cmds.map((c) => [c.id, c]));
+  let revised = 0;
+  for (const t of todo) {
+    const c = failed.get(t.cmd);
+    if (!c || !t.room || c.room_id !== t.room) continue;
+    const result = `failed: start_day failed after it was settled ok${c.error ? ` (${String(c.error).slice(0, 80)})` : ""} command_id=${t.cmd}`;
+    await raceTimeout(
+      () => sql`UPDATE steward_decisions SET result = ${result}, inputs = inputs || ${JSON.stringify({ revised_at: hi, revised_from: "ok" })}::jsonb WHERE id = ${String(t.id)}::bigint AND result LIKE 'ok: start_day deferred%'`,
+      timeoutMs,
+    );
+    revised++;
+  }
+  return revised;
+}
+
 export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: number): Promise<number> {
   const hi = new Date(A).toISOString();
+  // The revision runs first and is independent of the pending rows below: a fault here never blocks them.
+  let revised = 0;
+  try {
+    revised = await reviseDeferredOk(sql, A, timeoutMs);
+  } catch {
+    /* the rows stay as they are; the next tick tries again */
+  }
   const pend = (await raceTimeout(
     () => sql`SELECT d.id, d.ts, d.result FROM steward_decisions d WHERE d.action = 'scribe_start' AND d.mode = 'live' AND d.result LIKE 'pending%' AND d.ts > ${hi}::timestamptz - interval '24 hours' AND d.ts <= ${hi}::timestamptz ORDER BY d.ts ASC LIMIT 50`,
     timeoutMs,
@@ -255,7 +297,7 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
     const m = PENDING_RE.exec(r.result ?? "");
     return m ? [{ id: r.id, ts: toIso(r.ts), cmd: m[1]! }] : [];
   });
-  if (todo.length === 0) return 0;
+  if (todo.length === 0) return revised;
   const cmds = (await raceTimeout(
     () => sql`SELECT id, room_id, status, error, created_at, result FROM bench_command WHERE id = ANY(${todo.map((t) => t.cmd)}::text[])`,
     timeoutMs,
@@ -270,8 +312,18 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
     if (c?.status === "acked" && isDeferredAck(c.result)) {
       // ARCH #17 (C2): the app ACCEPTED this start and is waiting for its input device; accepted is not started. Settle only on evidence: a session opened for the room
       // after the command was created (ok), or START_NO_ACK_FAIL_S with none (failed). Otherwise it stays pending. A late failure ack makes the command `failed`, handled below.
+      // "Opened" is not enough (a start that died ~15 s in with no audio also opened a session): the session must be STILL OPEN and must have PRODUCED AUDIO since it began —
+      // a piece of either stream, or a level sample from a poll that reported the session open with the tape advancing (the same evidence the fleet read uses; no new table).
       const opened = c.room_id && Number.isFinite(sentMs)
-        ? ((await raceTimeout(() => sql`SELECT id FROM bench_session WHERE room_id = ${c.room_id!} AND started_at >= ${new Date(sentMs).toISOString()}::timestamptz ORDER BY started_at ASC LIMIT 1`, timeoutMs)) as Array<{ id: string }>)
+        ? ((await raceTimeout(
+            () => sql`
+              SELECT s.id FROM bench_session s
+               WHERE s.room_id = ${c.room_id!} AND s.started_at >= ${new Date(sentMs).toISOString()}::timestamptz AND s.status IN ('recording', 'paused')
+                 AND (EXISTS (SELECT 1 FROM bench_chunk ch WHERE ch.session_id = s.id)
+                      OR EXISTS (SELECT 1 FROM bench_level_sample l WHERE l.room_id = s.room_id AND l.sampled_at >= s.started_at AND l.session_open IS TRUE AND l.tape_advancing IS TRUE))
+               ORDER BY s.started_at ASC LIMIT 1`,
+            timeoutMs,
+          )) as Array<{ id: string }>)
         : [];
       if (opened.length) result = `ok: start_day deferred then recording (late) session_id=${opened[0]!.id} command_id=${t.cmd}`;
       else if (waitedS > START_NO_ACK_FAIL_S) result = `failed: start_day deferred, no recording session after ${START_NO_ACK_FAIL_S} s command_id=${t.cmd}`;
@@ -285,7 +337,7 @@ export async function reconcilePending(sql: StewardSql, A: number, timeoutMs: nu
     );
     settled++;
   }
-  return settled;
+  return settled + revised;
 }
 
 export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<StewardSummary> {

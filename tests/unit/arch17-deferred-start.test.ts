@@ -72,7 +72,7 @@ describe("C2 — reconcilePending settles a deferred start only on evidence", ()
       const text = strings.join("?");
       if (/FROM steward_decisions d WHERE/.test(text)) return Promise.resolve([{ id: 1, ts: new Date(T), result: "pending: sent, awaiting ack (deferred: the kiosk accepted the start and is waiting for its input device) command_id=cmd_d" }]);
       if (/FROM bench_command WHERE id = ANY/.test(text)) return Promise.resolve([{ id: "cmd_d", room_id: "room_a", created_at: new Date(T), error: null, ...opts.cmd }]);
-      if (/FROM bench_session WHERE room_id/.test(text)) return Promise.resolve(opts.sessions);
+      if (/FROM bench_session s/.test(text)) return Promise.resolve(opts.sessions);
       if (/UPDATE steward_decisions SET result/.test(text)) { updates.push(String(v[0])); return Promise.resolve([]); }
       return Promise.resolve([]);
     }) as never;
