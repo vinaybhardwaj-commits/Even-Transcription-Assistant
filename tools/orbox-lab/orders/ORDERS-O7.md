@@ -45,7 +45,7 @@ Pass order in the code header: (1) density and runs, (2) boundaries, (3) per-cas
 - Stop, restart or reconfigure room-recorder or room-bench. Write under /var/lib/room-recorder. Delete anything. Move audio off orb2. Transcribe. Message V. Install a schedule.
 
 ## Question to answer in the report
-R5 flag 1: the sudo log shows `sudo python3 -` as root at 18:15:40 on 8 Oct from /home/vinay. Say exactly what that ran and why.
+R5 flag 1: the sudo log shows `sudo python3 -` as root at 18:15:40 on 8 Oct from an operator account. Say exactly what that ran and why.
 
 ## Output
 ~/oc/orbox-builder/O7-REPORT.md, cap 50 lines: the 18:15 answer, dry-run plan, per-case table, orphan list, script sha256, commit sha and push line, gitleaks line, flags. Pane reply 5 lines max. You report to orbox-lead.

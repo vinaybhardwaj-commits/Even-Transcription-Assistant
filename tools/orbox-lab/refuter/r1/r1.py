@@ -1,7 +1,7 @@
 # R1 refuter scorer, written from the method text in ORDERS-O1 (not from the builder's files).
 # Usage: python r1.py <job>   jobs: base pert arm rnn audit
-import sys, re, json, ctypes, numpy as np, soundfile as sf, scipy.signal as ss, jiwer
-LAB = "/var/lib/orb3-lab/"; DEN = "/home/orbox3/orbox-lab/o1/den/"; FS = 16000
+import os, sys, re, json, ctypes, numpy as np, soundfile as sf, scipy.signal as ss, jiwer
+LAB = "/var/lib/orb3-lab/"; DEN = os.environ.get("ORB_LAB_DEN", "<orb3 lab den dir>/"); FS = 16000
 REF = open(LAB + "speech_text.txt").read()
 
 def clean(t):
@@ -49,7 +49,7 @@ def select(a, b):
 
 # --- own RNNoise loop straight on the C library (480-sample frames, int16-scaled float)
 def rnnoise(x48):
-    lib = ctypes.CDLL("/home/orbox3/orbox-lab/venv/lib/python3.14/site-packages/pyrnnoise/librnnoise.so")
+    lib = ctypes.CDLL(os.environ.get("PYRNNOISE_LIB", "librnnoise.so"))
     lib.rnnoise_create.restype = ctypes.c_void_p; lib.rnnoise_create.argtypes = [ctypes.c_void_p]
     lib.rnnoise_destroy.argtypes = [ctypes.c_void_p]
     lib.rnnoise_process_frame.restype = ctypes.c_float

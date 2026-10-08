@@ -1,7 +1,7 @@
 # R2 refuter scorer = R1 scorer (r1.py) + job 'shift'. Written from ORDERS-O1/O2 method text, not the builder's files.
 # Usage: python r2.py shift <run> <tag> <raw|dfn> <A|B|sel>
 import os, sys, re, json, ctypes, numpy as np, soundfile as sf, scipy.signal as ss, jiwer
-LAB = "/var/lib/orb3-lab/"; DEN = "/home/orbox3/orbox-lab/o1/den/"; FS = 16000
+LAB = "/var/lib/orb3-lab/"; DEN = os.environ.get("ORB_LAB_DEN", "<orb3 lab den dir>/"); FS = 16000
 REF = open(LAB + "speech_text.txt").read()
 
 def clean(t):
@@ -50,7 +50,7 @@ def select(a, b):
 
 # --- own RNNoise loop straight on the C library (480-sample frames, int16-scaled float)
 def rnnoise(x48):
-    lib = ctypes.CDLL("/home/orbox3/orbox-lab/venv/lib/python3.14/site-packages/pyrnnoise/librnnoise.so")
+    lib = ctypes.CDLL(os.environ.get("PYRNNOISE_LIB", "librnnoise.so"))
     lib.rnnoise_create.restype = ctypes.c_void_p; lib.rnnoise_create.argtypes = [ctypes.c_void_p]
     lib.rnnoise_destroy.argtypes = [ctypes.c_void_p]
     lib.rnnoise_process_frame.restype = ctypes.c_float

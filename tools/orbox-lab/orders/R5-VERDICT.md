@@ -49,7 +49,7 @@ Raw outputs: orb2 ~/orbox-lab/r5/p1_*.out ... p6_density.out. Idx copies taken 1
 3. One item cannot be audited from the log (flag 1). The filesystem evidence shows it changed nothing under /var/lib/room-recorder.
 
 ## Flags (outside the verdict)
-1. `sudo python3 -` ran as root at 18:15:40 (vinay, PWD /home/vinay), during the v1 re-cut. Its script came from stdin, so the log does not show what it did. Ask the builder what it ran. A root script should not be needed: dd/cat cover every read.
+1. `sudo python3 -` ran as root at 18:15:40 (an operator account), during the v1 re-cut. Its script came from stdin, so the log does not show what it did. Ask the builder what it ran. A root script should not be needed: dd/cat cover every read.
 2. Tape 12:15–12:30 (density 0.2/0.9/0.5 at 12:15/12:20/12:25) is in NO package. It falls between case 1's end and case 2's clipped start. Case 2 activity may have begun about 12:20, not 13:00 as the binding_note says. A density-minimum split (for example at 11:35, density 0.0) would package it.
 3. Case 1 carries about 1 h of sparse tail (11:10–12:15). The cap at booked_end+90 sets its end, not the activity.
 4. In case 2's runs_considered, the 09:05–13:58:30 run has in_chain=false although it supplies the onset. That is confusing in an audit.
