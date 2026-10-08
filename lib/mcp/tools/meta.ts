@@ -59,7 +59,7 @@ const oneLine = (s: string, max = 160): string => {
 const help: McpTool = {
   name: "scribe_help",
   description:
-    "One tool's full contract from the registry: scope, description, `help` (the long text the operator list leaves out), input schema, and for a group its selector and what each value runs. " +
+    "One tool's full contract from the registry: scope, description, `help` (the long text the list leaves out), input schema, and for a group its selector and what each value runs. " +
     "Accepts any name tools/call accepts, old names included. An unknown name answers { error: 'unknown_tool', suggestions } with the five closest names. Reads no database.",
   scope: "read",
   inputSchema: {
@@ -75,13 +75,11 @@ const help: McpTool = {
     const accepted = [...S.CALLABLE_TOOLS.keys()];
     if (!wanted) return { error: "tool_required", suggestions: [] as string[] };
     const full = S.CALLABLE_TOOLS.get(wanted);
-    const listedIn = (n: string): string[] => [
-      ...(P.OPERATOR_TOOL_NAMES.includes(n as never) ? ["operator"] : []),
-      ...(S.LAB_TOOLS.some((t) => t.name === n) ? ["lab"] : []),
-    ];
+    // S1A — one list for everyone: a listed tool is in both profile lists, an unlisted old name in neither.
+    const listedIn = (n: string): string[] => (P.listedTool(n) ? ["operator", "lab"] : []);
     if (!full) return { error: "unknown_tool", suggestions: closestNames(wanted, accepted) };
     // S3 — an operator-profile tool answers with its short description AND the long text as `help`.
-    const tool = P.operatorTool(wanted) ?? full;
+    const tool = P.listedTool(wanted) ?? full;
     const helpField = tool.help !== undefined ? { help: tool.help } : {};
 
     const members = S.groupMembers(full);
@@ -98,7 +96,7 @@ const help: McpTool = {
         accepted_legacy_names: members.filter((m) => m !== tool.name),
         description: tool.description,
         ...helpField,
-        input_schema: tool.inputSchema,
+        input_schema: full.inputSchema,
         members: {
           selector: selectorKey,
           ...(selectorKey ? {} : { routed_by: "which argument is passed (see description)" }),
@@ -121,7 +119,7 @@ const help: McpTool = {
       listed_in: listedIn(tool.name),
       description: tool.description,
       ...helpField,
-      input_schema: tool.inputSchema,
+      input_schema: full.inputSchema,
     };
   },
 };

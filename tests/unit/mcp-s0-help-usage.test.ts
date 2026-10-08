@@ -87,7 +87,7 @@ describe("S0.7 scribe_help", () => {
   });
 
   it("an unknown name answers unknown_tool with five suggestions, closest first", async () => {
-    const out = await run("scribe_help", { tool: "scribe_room" });
+    const out = await run("scribe_help", { tool: "scribe_roms" });
     expect(out.error).toBe("unknown_tool");
     const s = out.suggestions as string[];
     expect(s).toHaveLength(5);

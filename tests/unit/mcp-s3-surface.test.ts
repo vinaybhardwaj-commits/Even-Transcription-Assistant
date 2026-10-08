@@ -60,93 +60,87 @@ afterAll(() => {
   else process.env.SCRIBE_MCP_TOKEN = ORIGINAL;
 });
 
-describe("S3.1 profile selection", () => {
-  it("defaults to operator: exactly the 13 names, in order", async () => {
-    expect((await listed()).map((t) => t.name)).toEqual(OPERATOR_13);
+describe("S3.1 profile selection (S1A: one list for everyone)", () => {
+  const names = async (opts: Parameters<typeof door>[1] = {}) => (await listed(opts)).map((t) => t.name);
+
+  it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the three S1 reads", async () => {
+    const all = await names();
+    expect(all).toHaveLength(S.LAB_TOOLS.length);
+    expect(all).toHaveLength(45);
+    for (const n of OPERATOR_13) expect(all).toContain(n);
+    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
+    expect(new Set(all).size).toBe(all.length);
   });
 
-  it("header X-Scribe-Profile: lab selects lab; so does ?profile=lab; junk values fall back to the default", async () => {
-    const byHeader = await listed({ headers: { "x-scribe-profile": "lab" } });
-    const byQuery = await listed({ url: "https://x/api/mcp?profile=lab" });
-    expect(byHeader).toHaveLength(S.LAB_TOOLS.length);
-    expect(byQuery.map((t) => t.name)).toEqual(byHeader.map((t) => t.name));
-    expect((await listed({ headers: { "x-scribe-profile": "root" } })).map((t) => t.name)).toEqual(OPERATOR_13);
-    expect((await listed({ url: "https://x/api/mcp?profile=" })).map((t) => t.name)).toEqual(OPERATOR_13);
+  it("every profile selector returns the SAME list: header, ?profile=, junk, and the /lab routes", async () => {
+    const base = await listed();
+    expect(await listed({ headers: { "x-scribe-profile": "lab" } })).toEqual(base);
+    expect(await listed({ headers: { "x-scribe-profile": "operator" } })).toEqual(base);
+    expect(await listed({ url: "https://x/api/mcp?profile=lab" })).toEqual(base);
+    expect(await listed({ headers: { "x-scribe-profile": "root" } })).toEqual(base);
   });
 
-  it("header beats query beats the path flag", async () => {
+  it("header beats query beats the path flag (selectors still resolve)", async () => {
     expect(P.resolveProfile(new Request("https://x/?profile=lab", { headers: { "x-scribe-profile": "operator" } }), "lab")).toBe("operator");
     expect(P.resolveProfile(new Request("https://x/?profile=operator"), "lab")).toBe("operator");
     expect(P.resolveProfile(new Request("https://x/"), "lab")).toBe("lab");
     expect(P.resolveProfile(new Request("https://x/"))).toBe("operator");
   });
 
-  it("the four routes: bearer and path-key doors are operator, their /lab twins are lab", async () => {
+  it("the four routes all serve the same full list, with the door's auth intact on the /lab twins", async () => {
     const bearer = { authorization: `Bearer ${TOKEN}` };
-    const names = async (res: Response) => ((await res.json()).result.tools as Array<{ name: string }>).map((t) => t.name);
+    const routeNames = async (res: Response) => ((await res.json()).result.tools as Array<{ name: string }>).map((t) => t.name);
     const list = rpcBody("tools/list");
-    expect(await names(await headerPost(mkReq("https://x/api/mcp", list, bearer)))).toEqual(OPERATOR_13);
-    expect(await names(await pathPost(mkReq("https://x/api/mcp/k", list), { params: Promise.resolve({ key: TOKEN }) }))).toEqual(OPERATOR_13);
-    const lab1 = await names(await labPost(mkReq("https://x/api/mcp/lab", list, bearer)));
-    const lab2 = await names(await pathLabPost(mkReq("https://x/api/mcp/k/lab", list), { params: Promise.resolve({ key: TOKEN }) }));
-    expect(lab1).toHaveLength(S.LAB_TOOLS.length);
-    expect(lab2).toEqual(lab1);
-    // the lab routes keep the door's auth
+    const one = await routeNames(await headerPost(mkReq("https://x/api/mcp", list, bearer)));
+    expect(one).toHaveLength(S.LAB_TOOLS.length);
+    expect(await routeNames(await pathPost(mkReq("https://x/api/mcp/k", list), { params: Promise.resolve({ key: TOKEN }) }))).toEqual(one);
+    expect(await routeNames(await labPost(mkReq("https://x/api/mcp/lab", list, bearer)))).toEqual(one);
+    expect(await routeNames(await pathLabPost(mkReq("https://x/api/mcp/k/lab", list), { params: Promise.resolve({ key: TOKEN }) }))).toEqual(one);
     expect((await labPost(mkReq("https://x/api/mcp/lab", list))).status).toBe(401);
     expect((await pathLabPost(mkReq("https://x/api/mcp/k/lab", list), { params: Promise.resolve({ key: "wrong" }) })).status).toBe(401);
   });
 
-  it("the lab list is today's listed tools plus scribe_jobs (42), every operator name among them", async () => {
-    const lab = (await listed({ headers: { "x-scribe-profile": "lab" } })).map((t) => t.name);
-    expect(lab).toHaveLength(S.LISTED_TOOLS.length + 1);
-    expect(lab).toHaveLength(42);
-    for (const t of S.LISTED_TOOLS) expect(lab).toContain(t.name);
-    expect(lab).toContain("scribe_jobs");
-    for (const n of OPERATOR_13) expect(lab).toContain(n);
-  });
-
-  it("lab keeps today's FULL descriptions and schemas, byte for byte", async () => {
-    const lab = await listed({ headers: { "x-scribe-profile": "lab" } });
-    for (const t of lab) {
-      const real = S.CALLABLE_TOOLS.get(t.name)!;
-      expect(t.description, t.name).toBe(real.description);
-      expect(t.inputSchema, t.name).toEqual(real.inputSchema);
-    }
-  });
-
-  it("lab descriptions match origin/main's capture (ec0d8a7), except scribe_help and scribe_jobs — a diet cannot touch lab silently", async () => {
-    const main = JSON.parse(readFileSync("fixtures/mcp/live-tools-list-ec0d8a7.json", "utf8")) as { result: { tools: Array<{ name: string; description: string; inputSchema: unknown }> } };
+  it("input schemas of every pre-S1 tool match origin/main's capture (ec0d8a7) except property descriptions, which are shortened (the full schema is in scribe_help)", async () => {
+    const main = JSON.parse(readFileSync("fixtures/mcp/live-tools-list-ec0d8a7.json", "utf8")) as { result: { tools: Array<{ name: string; inputSchema: unknown }> } };
     const mainBy = new Map(main.result.tools.map((t) => [t.name, t]));
-    const lab = await listed({ headers: { "x-scribe-profile": "lab" } });
+    const all = await listed();
     let compared = 0;
-    for (const t of lab) {
-      if (t.name === "scribe_help" || t.name === "scribe_jobs") continue;
+    for (const t of all) {
       const base = mainBy.get(t.name);
-      expect(base, `${t.name} missing from origin/main capture`).toBeDefined();
-      expect(t.description, t.name).toBe(base!.description);
-      expect(t.inputSchema, t.name).toEqual(base!.inputSchema);
+      if (!base) continue;
+      expect(t.inputSchema, t.name).toEqual(P.shortSchema(base.inputSchema));
       compared++;
     }
-    expect(compared).toBe(40);
-    expect(lab.map((t) => t.name).filter((n) => !mainBy.has(n))).toEqual(["scribe_jobs"]);
+    expect(compared).toBe(41);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_now", "scribe_room", "scribe_tape_day"]);
+    // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
+    const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
+    for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
+    // the full schema stays reachable
+    const help = S.CALLABLE_TOOLS.get("scribe_help")!;
+    for (const t of all) expect(((await help.handler({ tool: t.name }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row).input_schema, t.name).toEqual(S.CALLABLE_TOOLS.get(t.name)!.inputSchema);
   });
 
-  it("operator input schemas are unchanged", async () => {
-    for (const t of await listed()) expect(t.inputSchema, t.name).toEqual(S.CALLABLE_TOOLS.get(t.name)!.inputSchema);
+  it("the long text of every tool is kept: scribe_help `help` equals the registry description (for tools main already had, main's own capture)", async () => {
+    const main = JSON.parse(readFileSync("fixtures/mcp/live-tools-list-ec0d8a7.json", "utf8")) as { result: { tools: Array<{ name: string; description: string }> } };
+    const help = S.CALLABLE_TOOLS.get("scribe_help")!;
+    for (const t of main.result.tools) {
+      if (t.name === "scribe_help") continue; // its own text was extended in S3
+      if (!P.listedTool(t.name)) continue;    // an old name a group now fronts
+      const out = (await help.handler({ tool: t.name }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row;
+      expect(out.help, t.name).toBe(t.description);
+    }
   });
 
-  it("initialize says which profile is active and how to reach the other", async () => {
+  it("initialize says it is one list and how selectors behave; it never carries the key", async () => {
     const op = ((await door("initialize")).body.result as { instructions: string }).instructions;
-    expect(op).toMatch(/^Profile: operator \(13 tools listed\)/);
-    expect(op).toContain("X-Scribe-Profile: lab");
-    expect(op).toContain("?profile=lab");
-    expect(op).toContain("/lab");
+    expect(op).toContain("One tool list for every caller");
+    expect(op).toContain("X-Scribe-Profile");
     expect(op).toContain("(S3)");
     expect(op).not.toContain("(S2)");
+    expect(op).not.toContain(TOKEN);
     const lab = ((await door("initialize", { headers: { "x-scribe-profile": "lab" } })).body.result as { instructions: string }).instructions;
-    expect(lab).toMatch(/^Profile: lab \(42 tools listed\)/);
-    expect(lab).toContain("X-Scribe-Profile: operator");
-    expect(op + lab).not.toContain(TOKEN);
+    expect(lab).toBe(op);
   });
 });
 
@@ -208,7 +202,7 @@ describe("S3.2 scribe_jobs", () => {
     expect(d).toMatch(/status and list need READ/);
     expect(d).toMatch(/submit[^.]*needs INVOKE/);
     expect(d).toMatch(/cancel needs WRITE/);
-    expect(P.operatorTool("scribe_jobs")!.description).toMatch(/status\/list need read, submit needs invoke, cancel needs write/);
+    expect(P.listedTool("scribe_jobs")!.description).toMatch(/status\/list need read, submit needs invoke, cancel needs write/);
   });
 
   // token shape × action → HTTP status. The member's scope decides; the old names are unchanged.
@@ -269,7 +263,7 @@ describe("S3.2 scribe_jobs", () => {
     const help = S.CALLABLE_TOOLS.get("scribe_help")!;
     const li = async (tool: string) => ((await help.handler({ tool }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row).listed_in;
     expect(await li("scribe_jobs")).toEqual(["operator", "lab"]);
-    expect(await li("scribe_job_status")).toEqual(["lab"]);
+    expect(await li("scribe_job_status")).toEqual(["operator", "lab"]);
     expect(await li("scribe_list_rooms")).toEqual([]);
   });
 
@@ -289,7 +283,7 @@ describe("S3.2 scribe_jobs", () => {
   });
 });
 
-describe("S3.3 the operator description diet", () => {
+describe("S3.3 the description diet, every listed tool (S1A)", () => {
   it("plain tools <= 200 chars, generated group descriptions <= 400", async () => {
     for (const t of await listed()) {
       const isGroup = S.groupProbes(S.CALLABLE_TOOLS.get(t.name)!).length > 0;
@@ -297,23 +291,32 @@ describe("S3.3 the operator description diet", () => {
     }
   });
 
-  it("every operator description says read or write, whether it can touch a live room, and that times are UTC", async () => {
+  it("every description says read or write, whether it can touch a room, and that times are UTC", async () => {
     for (const t of await listed()) {
-      expect(t.description, t.name).toMatch(/\b(read-only|reads|writes?)\b/i);
-      expect(t.description, t.name).toMatch(/room/i);
-      expect(t.description, t.name).toMatch(/times utc/i);
+      expect(t.description, t.name).toMatch(/Times UTC/);
+      expect(t.description, t.name).toMatch(/read|write|invoke|reads and writes/i);
+      expect(t.description, t.name).toMatch(/room|brain|session|queue|job|encounter|trace|audit|voice|clinician|diariz|jev|door|health|system|tool|visit|cue|window|tape/i);
     }
+  });
+
+  it("the write and invoke tools say so in words (the first words of the description)", async () => {
     const byName = Object.fromEntries((await listed()).map((t) => [t.name, t.description]));
-    expect(byName.scribe_room_command).toMatch(/WRITE/);
-    expect(byName.scribe_room_command).toMatch(/LIVE/);
+    for (const t of S.LAB_TOOLS) {
+      const members = S.groupMembers(t);
+      const scopes = [t.scope, ...members.map((m) => S.CALLABLE_TOOLS.get(m)!.scope)];
+      if (t.name === "scribe_jobs") continue;
+      if (scopes.includes("write")) expect(byName[t.name], t.name).toMatch(/WRITE/);
+      else if (scopes.includes("invoke")) expect(byName[t.name], t.name).toMatch(/INVOKE/);
+      else expect(byName[t.name], t.name).toMatch(/Read-only|Reads|read tools|READ/i);
+    }
   });
 
   it("the room-reading tools carry the silence caveats; scribe_room_command carries the command rules", async () => {
     const byName = Object.fromEntries((await listed()).map((t) => [t.name, t.description]));
-    for (const n of ["scribe_rooms", "scribe_room_levels"]) {
-      expect(byName[n], n).toContain("tape_advancing does not mean audio is arriving");
-      expect(byName[n], n).toContain("zero_ratio>=0.98 = digital silence");
-      expect(byName[n], n).toContain("levels can freeze after a device drop");
+    for (const n of ["scribe_rooms", "scribe_room_levels", "scribe_now", "scribe_room"]) {
+      expect(byName[n], n).toMatch(/tape_advancing/);
+      expect(byName[n], n).toMatch(/zero_ratio>=0\.98/);
+      expect(byName[n], n).toMatch(/freeze|frozen/);
     }
     const c = byName.scribe_room_command!;
     for (const s of ["kiosk_not_listening", "start_day idempotent", "room_paused is consent", "no start/stop on a room with patients without V's GO"]) expect(c).toContain(s);
@@ -321,31 +324,27 @@ describe("S3.3 the operator description diet", () => {
 
   it("group value lists are generated from the variant table", async () => {
     const byName = Object.fromEntries((await listed()).map((t) => [t.name, t.description]));
-    for (const n of ["scribe_health", "scribe_system", "scribe_rooms", "scribe_sessions", "scribe_session_tape", "scribe_room_command", "scribe_jobs"]) {
+    for (const n of ["scribe_health", "scribe_system", "scribe_rooms", "scribe_sessions", "scribe_session_tape", "scribe_room_command", "scribe_jobs", "scribe_scratch", "scribe_voice"]) {
       for (const p of S.groupProbes(S.CALLABLE_TOOLS.get(n)!)) expect(byName[n], `${n} ${p.value}`).toContain(p.value);
     }
   });
 
-  it("budget: the operator tools/list result stays under 24,000 characters", async () => {
+  it("budget: the full tools/list result stays under 36,000 characters", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
-    console.log(`operator tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens)`);
-    expect(chars, `operator tools/list is ${chars} chars`).toBeLessThanOrEqual(24_000);
+    console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(36_000);
   });
 
-  it("scribe_help returns the long text as `help` beside the short description, for every dieted tool", async () => {
+  it("scribe_help returns the long text as `help` beside the short description, for every listed tool", async () => {
     const help = S.CALLABLE_TOOLS.get("scribe_help")!;
-    for (const name of OPERATOR_13) {
-      const out = (await help.handler({ tool: name }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row;
-      const full = S.CALLABLE_TOOLS.get(name)!;
-      expect(out.help, name).toBe(full.description);
-      expect((out.description as string).length, name).toBeLessThanOrEqual(400);
-      expect(out.description, name).toBe(P.operatorTool(name)!.description);
+    for (const t of S.LAB_TOOLS) {
+      const out = (await help.handler({ tool: t.name }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row;
+      expect(out.help, t.name).toBe(t.help ?? t.description);
+      expect((out.description as string).length, t.name).toBeLessThanOrEqual(400);
+      expect(out.description, t.name).toBe(P.listedTool(t.name)!.description);
+      expect(out.listed_in, t.name).toEqual(["operator", "lab"]);
     }
-    // a lab-only tool keeps its description and has no help field
-    const lab = (await help.handler({ tool: "scribe_fuse_report" }, { origin: "x", actor: "a", scopes: ALL } as never)) as Row;
-    expect(lab.description).toBe(S.CALLABLE_TOOLS.get("scribe_fuse_report")!.description);
-    expect(lab.help).toBeUndefined();
   });
 });
 
