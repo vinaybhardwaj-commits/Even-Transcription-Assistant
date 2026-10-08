@@ -1195,14 +1195,17 @@ export function cleanInputDevices(v: unknown): string | null {
   const out: InputDevice[] = [];
   for (const d of parsed) {
     if (!d || typeof d !== "object") return null;
-    const { name, uid, is_default } = d as Record<string, unknown>;
+    const { name, uid, is_default, is_selected } = d as Record<string, unknown>;
     if (typeof name !== "string" || typeof uid !== "string" || typeof is_default !== "boolean") return null;
+    // Arch #22 — optional; absent on every app below the one that sends it. Only a literal true is kept.
+    if (is_selected !== undefined && typeof is_selected !== "boolean") return null;
     const n = name.trim();
     const u = uid.trim();
     if (!n || !u || n.length > INPUT_DEVICE_NAME_MAX || u.length > INPUT_DEVICE_UID_MAX) return null;
-    out.push({ name: n, uid: u, is_default });
+    out.push({ name: n, uid: u, is_default, ...(is_selected === true ? { is_selected: true } : {}) });
   }
   if (out.filter((d) => d.is_default).length > 1) return null;
+  if (out.filter((d) => d.is_selected).length > 1) return null;
   return JSON.stringify(out);
 }
 

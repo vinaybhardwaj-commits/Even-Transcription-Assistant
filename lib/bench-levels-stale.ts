@@ -11,19 +11,34 @@ export async function readLevelsStale(ids: readonly string[], nowMs: number): Pr
   const out = new Map<string, boolean | null>();
   if (ids.length === 0) return out;
   try {
-    const rows = (await sql`
-      SELECT room_id, sampled_at, peak, avg, zero_ratio
-        FROM bench_level_sample
-       WHERE room_id = ANY(${ids}::text[])
-         AND ist_date >= ((now() - interval '1 day') AT TIME ZONE 'Asia/Kolkata')::date
-         AND sampled_at > now() - interval '30 seconds'
-       ORDER BY sampled_at ASC
-       LIMIT 2000
-    `) as Array<{ room_id: string; sampled_at: string | Date; peak: number | string; avg: number | string | null; zero_ratio: number | string | null }>;
+    type Row = { room_id: string; sampled_at: string | Date; peak: number | string; avg: number | string | null; zero_ratio: number | string | null; seq?: number | string | null };
+    let rows: Row[];
+    try {
+      rows = (await sql`
+        SELECT room_id, sampled_at, peak, avg, zero_ratio, seq
+          FROM bench_level_sample
+         WHERE room_id = ANY(${ids}::text[])
+           AND ist_date >= ((now() - interval '1 day') AT TIME ZONE 'Asia/Kolkata')::date
+           AND sampled_at > now() - interval '30 seconds'
+         ORDER BY sampled_at ASC
+         LIMIT 2000
+      `) as Row[];
+    } catch {
+      // Migration 0133 (seq) not applied yet: read without it and judge by the identical-run rule.
+      rows = (await sql`
+        SELECT room_id, sampled_at, peak, avg, zero_ratio
+          FROM bench_level_sample
+         WHERE room_id = ANY(${ids}::text[])
+           AND ist_date >= ((now() - interval '1 day') AT TIME ZONE 'Asia/Kolkata')::date
+           AND sampled_at > now() - interval '30 seconds'
+         ORDER BY sampled_at ASC
+         LIMIT 2000
+      `) as Row[];
+    }
     const by = new Map<string, LevelStamp[]>();
     for (const r of rows) {
       const list = by.get(r.room_id) ?? [];
-      list.push({ t_ms: new Date(r.sampled_at).getTime(), peak: Number(r.peak), avg: r.avg === null ? null : Number(r.avg), zero_ratio: r.zero_ratio === null ? null : Number(r.zero_ratio) });
+      list.push({ t_ms: new Date(r.sampled_at).getTime(), peak: Number(r.peak), avg: r.avg === null ? null : Number(r.avg), zero_ratio: r.zero_ratio === null ? null : Number(r.zero_ratio), seq: r.seq == null ? null : Number(r.seq) });
       by.set(r.room_id, list);
     }
     for (const id of ids) out.set(id, levelsStale(by.get(id) ?? [], nowMs));

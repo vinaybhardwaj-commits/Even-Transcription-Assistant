@@ -36,7 +36,8 @@ export function isDigitalSilence(
 export const LEVELS_FRESH_MS = 12_000;
 export const LEVELS_FROZEN_MS = 6_000;
 
-export type LevelStamp = { t_ms: number; peak: number; avg: number | null; zero_ratio: number | null };
+/** `seq` (Arch #22): the recorder's level-sample sequence. Absent/null on any app that does not send it. */
+export type LevelStamp = { t_ms: number; peak: number; avg: number | null; zero_ratio: number | null; seq?: number | null };
 
 /** PURE. `samples` in any order. No samples is stale; null only when the newest sample has no zero_ratio (cannot judge). */
 export function levelsStale(samples: readonly LevelStamp[], nowMs: number): boolean | null {
@@ -45,6 +46,19 @@ export function levelsStale(samples: readonly LevelStamp[], nowMs: number): bool
   const sorted = [...samples].sort((a, b) => a.t_ms - b.t_ms);
   const newest = sorted[sorted.length - 1]!;
   if (nowMs - newest.t_ms > LEVELS_FRESH_MS) return true;
+  // PREFER THE CAPTURE-SIDE SEQUENCE when the newest sample carries one (Arch #22). The recorder advances it once per checkpoint that carried a level
+  // (every 1.25 s), so a sequence that has not moved for LEVELS_FROZEN_MS means the capture stopped producing levels, whatever values are being
+  // resent. Unlike the identical-run rule it needs no digital-silence exemption: a muted mic still advances its sequence. A LOWER or different
+  // sequence is a new capture, never a stall. Only samples that carry a sequence count; an older sample without one is ignored.
+  if (typeof newest.seq === "number") {
+    let first = newest.t_ms;
+    for (let i = sorted.length - 2; i >= 0; i--) {
+      const r = sorted[i]!;
+      if (r.seq === newest.seq) first = r.t_ms;
+      else break;
+    }
+    return newest.t_ms - first > LEVELS_FROZEN_MS;
+  }
   if (isDigitalSilence({ peak: newest.peak, avg: newest.avg ?? 0, ...(newest.zero_ratio !== null ? { zero_ratio: newest.zero_ratio } : {}) })) return false;
   // The repeat test cannot tell a frozen meter from a silent one without the zero ratio (digital silence legitimately repeats). No ratio: CANNOT JUDGE,
   // which is null, never stale. "We could not look" is not "we looked and it is frozen".
