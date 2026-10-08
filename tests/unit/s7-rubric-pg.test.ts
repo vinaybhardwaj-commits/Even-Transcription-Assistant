@@ -419,13 +419,13 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify(good), model: "fake/model", latency_ms: 1 }; });
     try {
       const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
-      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "consult_chair_affect", version: "1.0.0", ok: 1, skipped: 2, blind_room_days: 1 } });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "consult_chair_affect", version: "1.1.0", ok: 1, skipped: 2, blind_room_days: 1 } });
       expect(calls).toBe(1); // the blind consult and the unknown key never reached the model
       const rows = (await pg.sql`SELECT unit_key, status, score, findings, lab FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
       expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]); // no row without a room and date; none for the blind day
       expect(rows[0]).toMatchObject({ status: "ok", lab: true, score: { distress: "low", uptake_codes: ["accept"] } });
       expect(JSON.stringify(rows)).not.toMatch(/alpha|bravo|charlie/); // no transcript text in the table
-      expect(JSON.parse(mem.get("rubric/consult_chair_affect/1.0.0/enc1@m1.json")!).quotes ?? JSON.parse(mem.get("rubric/consult_chair_affect/1.0.0/enc1@m1.json")!).evidence.quotes.length).toBeTruthy();
+      expect(JSON.parse(mem.get("rubric/consult_chair_affect/1.1.0/enc1@m1.json")!).quotes ?? JSON.parse(mem.get("rubric/consult_chair_affect/1.1.0/enc1@m1.json")!).evidence.quotes.length).toBeTruthy();
       expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
 
       // bench: gold from the lab store (JSONL), Meet text from the lab store, no rubric_result rows

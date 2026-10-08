@@ -90,13 +90,13 @@ describe("the llm client path", () => {
 
 describe("the prompts", () => {
   it("are versioned files rendered from the rubric's own definition, deterministically, with temperature-0 framing and the output schema", () => {
-    expect(RUBRIC_PROMPTS.consult_chair_affect!.version).toBe("1.0.0");
+    expect(RUBRIC_PROMPTS.consult_chair_affect!.version).toBe("1.1.0");
     const a = E.systemPrompt(affect);
     expect(a).toBe(E.systemPrompt(affect));
-    expect(a).toContain("consult_chair_affect v1.0.0, prompt v1.0.0");
+    expect(a).toContain("consult_chair_affect v1.1.0, prompt v1.1.0");
     expect(a).toContain(JSON.stringify(affect.output));
     expect(a).toMatch(/anti/i);
-    expect(E.systemPrompt(pitch)).toContain("consult_surgical_pitch v1.0.0");
+    expect(E.systemPrompt(pitch)).toContain("consult_surgical_pitch v1.1.0");
     expect(a).not.toContain("engine_note"); // the repo-side notes are not sent to the model
   });
   it("carry no example transcripts, quotes or identifiers", () => {
@@ -218,5 +218,27 @@ describe("S71-G62 — an evidence item label is one of the rubric's own item ids
     expect(await E.evaluateConsultAffect(affect, T)).toMatchObject({ status: "ok" });
     L.setRubricChatForTests(async () => answer({ surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: true, alternatives_named: true, timing_named: true }, uptake_of_surgery: "accept", evidence: [{ item: "a free label", quote: "x" }] }));
     expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "failed", reason: "llm_schema_invalid" });
+  });
+});
+
+describe("S71-A — 1.1.0 reconciles the prompts with the GrokBot skills", () => {
+  it("the chair prompt carries the anti-defaults, the flat default, the uptake flags and the A-B-C layers; the pitch prompt carries the not-counted rules and the anti-pitch", () => {
+    const a = E.systemPrompt(affect), p = E.systemPrompt(pitch);
+    for (const re of [/okay or thanks[^\n]*not reassurance medium/, /named fear[^\n]*reassurance high/, /still guarded[^\n]*reassurance low/, /chart keyword alone is not medium distress/, /disease severity is not distress/, /never force medium/, /distress low AND confusion low AND frustration low AND reassurance medium/, /prompted yes is accept/, /logistics block[^\n]*refuse/, /layers are scored in order A/, /separate from the reassurance axis/, /no utterance-share/]) expect(a, String(re)).toMatch(re);
+    for (const re of [/'it is needed' is not a benefit/, /small operation[^\n]*not a risk/, /work-up[^\n]*not an alternative/, /no_surgery is an anti-pitch/, /own_contingent/, /outside_surgeon/, /even when the operation is never booked|scored even if the operation is never booked/]) expect(p, String(re)).toMatch(re);
+    expect(a).not.toMatch(/utterance share[s]? (are|is) /i);
+  });
+  it("chair: prompted_yes / logistics_block flags become finding codes and cases_v0 lands under cases_lite (codes and counts only)", async () => {
+    L.setRubricChatForTests(async () => answer({ ...AFFECT_OK, recommendations: [{ uptake: ["refuse"], resolution_type: "patient_refuses", logistics_block: true }, { uptake: ["accept"], resolution_type: "patient_agrees", prompted_yes: true }], cases_v0: { n_threads: 2, non_thread: ["wrap_up"], visit_summary: "mixed" }, evidence: [] }));
+    const r = await E.evaluateConsultAffect(affect, T);
+    expect(r.status).toBe("ok");
+    expect(r.findings).toEqual(expect.arrayContaining(["prompted_yes", "logistics_block"]));
+    expect(r.score!.cases_lite).toMatchObject({ n_threads: 2, non_thread: ["wrap_up"], visit_summary: "mixed" });
+  });
+  it("pitch: an audible no_surgery is an anti-pitch and is SCORED (ok), a plain no-recommendation stays skipped", async () => {
+    L.setRubricChatForTests(async () => answer({ surgery_recommended: false, recommendation_kind: "no_surgery" }));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "ok", findings: ["kind:no_surgery"], score: { surgery_recommended: false, recommendation_kind: "no_surgery" } });
+    L.setRubricChatForTests(async () => answer({ surgery_recommended: false }));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "skipped", reason: "no_surgery_recommendation" });
   });
 });

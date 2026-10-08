@@ -101,7 +101,8 @@ export async function evaluateConsultAffect(r: Rubric, text: ConsultText): Promi
   if (!out.ok) return failed(out.reason, { prompt_version: promptVersion(r), model: out.model, attempts: out.attempts });
   const v = out.value;
   if (v.scorable !== true) return { status: "skipped", score: { scorable: false }, findings: [], reason: "unscorable", evidence: { prompt_version: promptVersion(r), model: out.model, attempts: out.attempts } };
-  const recs = (v.recommendations as Array<{ uptake: string[]; resolution_type: string; quote?: string }>) ?? [];
+  const recs = (v.recommendations as Array<{ uptake: string[]; resolution_type: string; quote?: string; prompted_yes?: boolean; logistics_block?: boolean }>) ?? [];
+  const cv0 = v.cases_v0 as { n_threads: number; non_thread?: string[]; visit_summary?: string } | undefined;
   const cases = v.cases_lite as { engagement_process: Engagement; information_present: boolean; doctor_effect_proxy: string; dominant_mix: string };
   const eng = reconcileEngagement(cases.engagement_process, talk);
   const quotes = [...((v.evidence as Quote[] | undefined) ?? []), ...recs.filter((x) => x.quote).map((x, i) => ({ item: `recommendation_${i + 1}`, quote: x.quote! }))];
@@ -109,6 +110,8 @@ export async function evaluateConsultAffect(r: Rubric, text: ConsultText): Promi
   const uptake = [...new Set(recs.flatMap((x) => x.uptake))].sort();
   const resolutions = [...new Set(recs.map((x) => x.resolution_type))].sort();
   const findings = [`distress:${v.distress}`, `confusion:${v.confusion}`, `frustration:${v.frustration}`, `reassurance:${v.reassurance}`, `teach_back:${v.teach_back}`, ...uptake.map((u) => `uptake:${u}`), `engagement:${eng.value}`, `doctor_effect:${cases.doctor_effect_proxy}`];
+  if (recs.some((x) => x.prompted_yes)) findings.push("prompted_yes");
+  if (recs.some((x) => x.logistics_block)) findings.push("logistics_block");
   if (eng.overridden) findings.push("engagement_overridden_by_talk_time");
   if (quotes.length > 0 && vq.dropped * 2 > quotes.length) findings.push("evidence_weak");
   if (text.truncated) findings.push("truncated_text");
@@ -116,7 +119,7 @@ export async function evaluateConsultAffect(r: Rubric, text: ConsultText): Promi
     status: "ok",
     score: {
       distress: v.distress, confusion: v.confusion, frustration: v.frustration, reassurance: v.reassurance, teach_back: v.teach_back, uptake_codes: uptake, n_recommendations: recs.length,
-      cases_lite: { engagement_process: eng.value, information_present: cases.information_present, doctor_effect_proxy: cases.doctor_effect_proxy, dominant_mix: cases.dominant_mix, resolution_types: resolutions },
+      cases_lite: { engagement_process: eng.value, information_present: cases.information_present, doctor_effect_proxy: cases.doctor_effect_proxy, dominant_mix: cases.dominant_mix, resolution_types: resolutions, ...(cv0 ? { n_threads: cv0.n_threads, non_thread: cv0.non_thread ?? [], visit_summary: cv0.visit_summary ?? null } : {}) },
       prompt_version: promptVersion(r), attempts: out.attempts,
     },
     findings,
@@ -138,6 +141,8 @@ export async function evaluateSurgicalPitch(r: Rubric, text: ConsultText): Promi
   const out = await askJson({ system: systemPrompt(r), user: userMessage(text, talk), schema: r.output as Record<string, unknown>, extraValidate: pitchProblems });
   if (!out.ok) return failed(out.reason, { prompt_version: promptVersion(r), model: out.model, attempts: out.attempts });
   const v = out.value;
+  // the anti-pitch (the doctor audibly advises AGAINST an operation) is scored, not skipped (1.1.0, from the pitch skill)
+  if (v.surgery_recommended !== true && v.recommendation_kind === "no_surgery") return { status: "ok", score: { surgery_recommended: false, recommendation_kind: "no_surgery", prompt_version: promptVersion(r), attempts: out.attempts }, findings: ["kind:no_surgery"], evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source } };
   if (v.surgery_recommended !== true) return { status: "skipped", score: { surgery_recommended: false }, findings: [], reason: "no_surgery_recommendation", evidence: { prompt_version: promptVersion(r), model: out.model, attempts: out.attempts } };
   const bal = v.pitch_balance as Record<string, unknown>;
   const doubts = (v.doubts as Array<{ kind: string; code: string; quote?: string }> | undefined) ?? [];

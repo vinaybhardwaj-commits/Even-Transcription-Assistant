@@ -1,6 +1,6 @@
 {
   "id": "consult_chair_affect",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "title": "Consult chair affect, uptake and teach-back",
   "unit": "consult",
   "inputs": [
@@ -102,6 +102,12 @@
                 "number",
                 "null"
               ]
+            },
+            "prompted_yes": {
+              "type": "boolean"
+            },
+            "logistics_block": {
+              "type": "boolean"
             }
           }
         }
@@ -184,6 +190,43 @@
             }
           }
         }
+      },
+      "cases_v0": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "n_threads"
+        ],
+        "properties": {
+          "n_threads": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 40
+          },
+          "non_thread": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "enum": [
+                "socialising",
+                "agenda_setting",
+                "wrap_up",
+                "physical_exam",
+                "connection_repair"
+              ]
+            }
+          },
+          "visit_summary": {
+            "enum": [
+              "presentation_heavy",
+              "resolution_present",
+              "engagement_present",
+              "mixed",
+              "process_friction",
+              "unscorable"
+            ]
+          }
+        }
       }
     }
   },
@@ -252,7 +295,13 @@
         "unheard"
       ],
       "dual_code_allowed": true,
-      "known_gap": "no logistics code: a site too far is a refusal of the site, not of the care"
+      "known_gap": "no logistics code: a site too far is a refusal of the site, not of the care",
+      "rules": [
+        "score each audible doctor recommendation; an adjacent patient token is required; two codes are allowed",
+        "a prompted yes is accept and is flagged prompted_yes",
+        "a logistics block (site too far, cannot travel) is refuse and is flagged logistics_block; it is a refusal of the site, not of the care",
+        "teach-back is none, partial or full, from what the patient restates in their own words"
+      ]
     },
     "teach_back": [
       "none",
@@ -273,7 +322,7 @@
     "cases_overlay": {
       "separate_from_affect": true,
       "citation": "Laws et al., Patient Education and Counseling 2013;91:192-199 (CASES)",
-      "rule": "the structural overlay never replaces or merges into the four affect axes; engagement as a process is not reassurance",
+      "rule": "the structural overlay never replaces or merges into the four affect axes; engagement as a process is not reassurance; layers are scored in order A (cases_lite), B (per recommendation: uptake then resolution type, the cases thread), C (cases_v0 visit summary); engagement_process and engagement in a thread are kept separate from the reassurance axis (reassurance high may cue engagement, never collapse one into the other); no utterance-share claim is made from these heuristic fields",
       "layers": {
         "A": "light structural tags per consultation: dominant mix (presentation heavy, resolution present, engagement present, mixed, process friction, unscorable), engagement process (present, absent, lecture only), information present, doctor effect proxy (fear assuaged, load eased, load held, flat no load, process friction, unknown)",
         "B": "per recommendation as a mini-thread: owner (patient, doctor, unclear), induction (problem presentation, request, focused question, invitation, cued, unclear), resolution type (patient agrees, patient refuses, neither, deferred, provider action, information only, not resolved, empathy only)",
@@ -284,8 +333,17 @@
         "medium"
       ]
     },
-    "engine_note": "engine llm_zdr since v1.0.0. The Jev typed questions above mirror the booleans and code-like items; Jev is not used until its own bench passes (draft status, S7-1).",
-    "bench_population": "Meet teleconsultations of one clinician plus a 28-consult cut, single rater; no room tape. CASES heuristic sidecars are not human gold."
+    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot chair-affect skill (v0.2 + CASES-lite): anti-defaults, flat default, uptake flags, layers A-B-C. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status).",
+    "bench_population": "Meet teleconsultations of one clinician plus a 28-consult cut, single rater; no room tape. CASES heuristic sidecars are not human gold.",
+    "anti_defaults": [
+      "okay or thanks from the patient is not reassurance medium",
+      "a named fear at the open that is explicitly answered by the close is reassurance high, not medium",
+      "a plan given while the patient is still guarded or wants an in-person visit is reassurance low, not medium",
+      "a chart keyword alone is not medium distress",
+      "disease severity is not distress: a composed history of a serious illness is low distress",
+      "a high rate of the flat default can be a true pattern of short calm specialty consultations: report it, never force medium distress"
+    ],
+    "flat_default": "distress low AND confusion low AND frustration low AND reassurance medium"
   },
   "prompt": "prompt.json",
   "questions": [

@@ -1,6 +1,6 @@
 {
   "id": "consult_surgical_pitch",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "title": "Surgical pitch in a consult",
   "unit": "consult",
   "inputs": [
@@ -186,7 +186,12 @@
         "alternatives_named": "bool (watchful waiting, medicines, a different procedure, another centre)",
         "timing_named": "urgent, elective or if-not-better; the doctor's own staging is not patient deferral"
       },
-      "not": "a lecture score; an empty tape is unscorable, not unbalanced"
+      "not": "a lecture score; an empty tape is unscorable, not unbalanced",
+      "not_counted": [
+        "'it is needed' is not a benefit",
+        "'it is a small operation' is not a risk",
+        "a work-up (scan, test, blood count) is not an alternative to surgery"
+      ]
     },
     "doubt_objects": {
       "unit": "each named patient fear or pushback about the operation",
@@ -218,8 +223,9 @@
         "unheard"
       ],
       "rules": [
-        "a prompted yes is still accept but flagged",
-        "the family later is defer, not refuse"
+        "a prompted yes is accept and is flagged",
+        "the family later is defer, not refuse",
+        "a logistics block (the operating site is too far) is refuse of the site; the same code set as the chair rubric"
       ]
     },
     "sampling": "a chart keyword is not a pitch: score the audible recommendation only; a local referral is still a pitch",
@@ -236,8 +242,14 @@
       "ranking a surgeon before follow-through is joined",
       "disease severity read as distress"
     ],
-    "engine_note": "engine llm_zdr since v1.0.0; the typed questions mirror the booleans and code-like items for a later Jev run, which waits for its own bench (draft status, S7-1).",
-    "bench_population": "Meet scouts and Whisper episodes of Meet teleconsultations; no room tape."
+    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot surgical-pitch skill (v0, frozen): what does not count as benefit, risk or alternative, no_surgery anti-pitch scored, pitch source, doubt codes, scored even when OT is never. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status).",
+    "bench_population": "Meet scouts and Whisper episodes of Meet teleconsultations; no room tape.",
+    "recommendation_kind_rules": [
+      "only surgery (and a contingent surgery) trips pitch balance",
+      "no_surgery is an anti-pitch (the doctor audibly advises against an operation): it is scored, not skipped",
+      "a chart keyword alone is not a pitch",
+      "a pitch is scored even when the operation is never booked; a local referral for surgery is still a pitch"
+    ]
   },
   "prompt": "prompt.json",
   "questions": [
