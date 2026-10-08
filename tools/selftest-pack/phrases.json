@@ -1,0 +1,18 @@
+{
+  "pack_name": "selftest-room-v3",
+  "model": "bulbul:v3",
+  "pace": 1.0,
+  "speakers": { "female": "ritu", "male": "shubh" },
+  "speakers_status": "UNVERIFIED: ids not confirmed against the gateway; override here, never in code",
+  "canary": { "id": "canary-1", "lang": "en-IN", "voice": "female", "text": "Canary check. Room recorder self test, code seven four two." },
+  "phrases": [
+    { "id": "phrase-en-1", "lang": "en-IN", "voice": "female", "text": "Take paracetamol 650 milligrams three times a day for five days." },
+    { "id": "phrase-en-2", "lang": "en-IN", "voice": "male", "text": "Start amoxicillin 500 milligrams every eight hours and review after seven days." },
+    { "id": "phrase-hi-1", "lang": "hi-IN", "voice": "male", "text": "मरीज़ को पैरासिटामोल 650 मिलीग्राम दिन में तीन बार पाँच दिन तक दीजिए।" },
+    { "id": "phrase-hi-2", "lang": "hi-IN", "voice": "female", "text": "मेटफॉर्मिन 500 मिलीग्राम सुबह और शाम खाने के बाद लीजिए, रक्तचाप 120 बटा 80 है।" },
+    { "id": "phrase-kn-1", "lang": "kn-IN", "voice": "female", "text": "ಪ್ಯಾರಸಿಟಮಾಲ್ 650 ಮಿಲಿಗ್ರಾಂ ಮಾತ್ರೆಯನ್ನು ದಿನಕ್ಕೆ ಮೂರು ಬಾರಿ ಐದು ದಿನ ತೆಗೆದುಕೊಳ್ಳಿ." },
+    { "id": "phrase-kn-2", "lang": "kn-IN", "voice": "male", "text": "ಅಮೋಕ್ಸಿಸಿಲಿನ್ 500 ಮಿಲಿಗ್ರಾಂ ಪ್ರತಿ ಎಂಟು ಗಂಟೆಗೆ ಒಮ್ಮೆ ತೆಗೆದುಕೊಳ್ಳಿ, ಏಳು ದಿನಗಳ ನಂತರ ಬನ್ನಿ." },
+    { "id": "phrase-ta-1", "lang": "ta-IN", "voice": "female", "text": "பாராசிட்டமால் 650 மில்லிகிராம் மாத்திரையை ஒரு நாளைக்கு மூன்று முறை ஐந்து நாட்கள் சாப்பிடுங்கள்." },
+    { "id": "phrase-te-1", "lang": "te-IN", "voice": "male", "text": "పారాసెటమాల్ 650 మిల్లీగ్రాముల మాత్రను రోజుకు మూడు సార్లు ఐదు రోజులు వేసుకోండి." }
+  ]
+}
