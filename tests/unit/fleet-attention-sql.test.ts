@@ -476,6 +476,50 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
 });
 
 describe.runIf(HAVE_DOCKER)("loadRecoveryEvidence + persistPlan against postgres", () => {
+  it("the dwell's SQL: live = zero_ratio < 0.5 AND peak >= 0.005, counted over the last 120 s only; dead, floor-miss and NULL-ratio samples are not live; silent_alert follows the newest alert body", async () => {
+    const { loadRecoveryEvidence, RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK } = await import("@/lib/room-watchdog");
+    expect([RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK]).toEqual([0.5, 0.005]);
+    pg.exec(`INSERT INTO room_alert_state (room_id, status, since) VALUES ('r6', 'degraded', ${ago("3 hours")});`);
+    let n = 0;
+    const rows: string[] = [];
+    const add = (count: number, peak: number, zr: number | "NULL") => {
+      for (let i = 0; i < count; i++) {
+        n += 1;
+        rows.push(`('r6', (now() AT TIME ZONE 'Asia/Kolkata')::date, now() - interval '${n} seconds', ${peak}, ${zr}, true, true)`);
+      }
+    };
+    add(10, 0.02, 0.1);     // live
+    add(3, 0.006, 0.1);     // live: above the 0.005 recovery floor (below the 0.01 fire floor)
+    add(4, 0.004, 0.1);     // dead: under the recovery floor
+    add(5, 0.02, 0.7);      // dead: zero_ratio 0.7 is not "well under" digital silence (kills 0.5 -> 0.99)
+    add(5, 0.0003, 0.999);  // dead: the 545-575 flap shape
+    add(2, 0.05, "NULL");   // dead: no ratio, no claim
+    pg.exec(`INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing) VALUES ${rows.join(",")};`);
+    // an old live sample outside the window must not count
+    pg.exec(`INSERT INTO bench_level_sample (room_id, ist_date, sampled_at, peak, zero_ratio, session_open, tape_advancing)
+             VALUES ('r6', (now() AT TIME ZONE 'Asia/Kolkata')::date, now() - interval '5 minutes', 0.3, 0.0, true, true);`);
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at)
+             VALUES ('degraded', ARRAY['r6'], 'OPD 6', 's', 'OPD 6 is polling but its capture looks degraded — digital silence on the capture (exact zeros, not a quiet room) — go and look', ${ago("3 hours")});`);
+    let ev = (await loadRecoveryEvidence()).get("r6")!;
+    expect(ev).toMatchObject({ live_samples: 13, total_samples: 29, silent_alert: true });
+    // a DEVICE_MISSING-only degraded alert is not a silent one: the dwell does not apply to it
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at)
+             VALUES ('degraded', ARRAY['r6'], 'OPD 6', 's', 'OPD 6 is polling but its capture looks degraded — a missing input device — go and look', ${ago("1 hour")});`);
+    expect((await loadRecoveryEvidence()).get("r6")!.silent_alert).toBe(false);
+    // an offline alert is not a silent one either
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at)
+             VALUES ('offline', ARRAY['r6'], 'OPD 6', 's', 'OPD 6 has not polled', ${ago("30 minutes")});`);
+    expect((await loadRecoveryEvidence()).get("r6")!.silent_alert).toBe(false);
+    // the pre-Arch-14 wording still counts as silent
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, subject, body, created_at)
+             VALUES ('degraded', ARRAY['r6'], 'OPD 6', 's', 'OPD 6 is polling but its capture looks degraded — silence while recording — go and look', ${ago("10 minutes")});`);
+    ev = (await loadRecoveryEvidence()).get("r6")!;
+    expect(ev.silent_alert).toBe(true);
+    // and the whole thing refuses this window (13 live of 29 is under the 20-sample floor)
+    const { isGenuineRecovery } = await import("@/lib/room-watchdog");
+    expect(isGenuineRecovery({ ...ev, chunk_after_alert: true })).toBe(false);
+  });
+
   it("loadRecoveryEvidence reports, per non-ok room, a chunk after the alert and the distinct levels of the last 120 s", async () => {
     const { loadRecoveryEvidence } = await import("@/lib/room-watchdog");
     pg.exec(`
