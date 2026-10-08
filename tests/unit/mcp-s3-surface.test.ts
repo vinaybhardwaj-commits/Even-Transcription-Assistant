@@ -63,12 +63,12 @@ afterAll(() => {
 describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   const names = async (opts: Parameters<typeof door>[1] = {}) => (await listed(opts)).map((t) => t.name);
 
-  it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the six S1 reads", async () => {
+  it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the six S1 reads and scribe_reb_index", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(48);
+    expect(all).toHaveLength(49);
     for (const n of OPERATOR_13) expect(all).toContain(n);
-    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
+    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
   });
 
@@ -112,7 +112,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_now", "scribe_room", "scribe_steward", "scribe_stt_windows", "scribe_tape_day"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_steward", "scribe_stt_windows", "scribe_tape_day"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
@@ -341,11 +341,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays under 36,000 characters", async () => {
+  it("budget: the full tools/list result stays under 36,500 characters", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(36_000);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(36_500);
   });
 
   it("scribe_help returns the long text as `help` beside the short description, for every listed tool", async () => {
