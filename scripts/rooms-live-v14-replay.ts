@@ -35,8 +35,6 @@ const db = (async (strings: TemplateStringsArray, ...vals: unknown[]) => {
   if (!res.ok) throw new Error(`sql ${res.status}: ${String(j.message ?? "").slice(0, 120)}`);
   return j.rows ?? [];
 }) as unknown as Db;
-const q = (query: string, params: unknown[] = []) => (db as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<Array<Record<string, unknown>>>)(Object.assign([query], { raw: [query] }) as unknown as TemplateStringsArray, ...[]).then((r) => r, () => []) as Promise<Array<Record<string, unknown>>>;
-void q;
 
 async function raw(query: string, params: unknown[]): Promise<Array<Record<string, unknown>>> {
   const res = await fetch(`https://${host}/sql`, { method: "POST", headers: { "Content-Type": "application/json", "Neon-Connection-String": url }, body: JSON.stringify({ query, params: params.map(toParam) }) });
