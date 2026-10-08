@@ -76,6 +76,8 @@ async function realStartDeps(): Promise<StartDeps> {
 }
 
 export const START_SOURCE = "steward";
+/** the result of a start that was queued but not acked inside the tick: counts as an attempt (dedupe), never as a failure (backoff); reconciled on a later tick */
+export const PENDING_PREFIX = "pending: sent, awaiting ack";
 export const DEFAULT_ACK_TIMEOUT_MS = 8000;
 /** the ONLY command kind this executor can queue */
 export const LIVE_COMMAND_KIND = "start_day" as const;
@@ -84,7 +86,7 @@ export const LIVE_COMMAND_KIND = "start_day" as const;
  * The live start, the same path as the MCP tool scribe_start_recording: read the listener AND the room's open session NOW (execution time, not sense time), run decideStart
  * (kiosk listening? already recording = success, nothing sent? paused?), refuse when ANY start_day (Kiosk Bot, an operator, us) was queued < 4 min ago, apply the daily schedule
  * (3 steward attempts per IST day, 5 / 15 / 45 min after the 1st / 2nd / 3rd failed one, lib/steward/start-schedule.ts), and only then queue ONE start_day command and wait for the
- * kiosk's ack. Results: "ok: ..." (acked), "failed: ..." (queued and not acked / failed) — these two count against the caps — and "skipped: <reason>" when NOTHING was sent (already
+ * kiosk's ack. Results: "ok: ..." (acked), "failed: ..." (the kiosk reported failure / expired) — these two count against the caps; "pending: sent, awaiting ack" (queued, no ack inside the tick) counts as an attempt for dedupe only — and "skipped: <reason>" when NOTHING was sent (already
  * recording, paused, kiosk not listening, in flight, exhausted, backoff, pending, unreadable): a skipped row never counts. Never overrides a consent pause; never forces; can emit start_day and nothing else.
  */
 export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackTimeoutMs?: number; now?: () => Date; maxAttempts?: number } = {}): Promise<ExecResult> {
@@ -112,7 +114,8 @@ export async function liveScribeStart(d: Decision, deps: StartDeps, opts: { ackT
   if (verdict.action !== "send") return { result: `skipped: ${(verdict as { action: string }).action}` };
   const id = await deps.insertCommand({ roomId, kind: LIVE_COMMAND_KIND, args: verdict.args ?? undefined, source: START_SOURCE });
   const row = await deps.waitForAck(id, { timeoutMs: opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS });
-  if (!row) return { result: `failed: no ack from the kiosk command_id=${id}` };
+  // F44: no ack inside the in-tick wait is NOT a failure. The kiosk acks in ~4-13 s; the command is queued and may still be acked. The loop reconciles it on the next ticks (reconcilePending).
+  if (!row) return { result: `${PENDING_PREFIX} command_id=${id}` };
   if (row.status === "acked") return { result: `ok: start_day acked command_id=${id}` };
   return { result: `failed: start_day ${row.status}${row.error ? ` (${String(row.error).slice(0, 80)})` : ""} command_id=${id}` };
 }
