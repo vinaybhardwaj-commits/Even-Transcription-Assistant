@@ -28,6 +28,8 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
   case residentArchiveDidNotBecomeDurable
   case residentArchiveCaptureStopped
   case invalidManifestMetadata
+  /// Arch #17. The configured input device was not attached/answering after every retry; no session was opened.
+  case inputDeviceNotReady(String)
   case io(String)
 
   public var errorDescription: String? {
@@ -55,6 +57,7 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
     case .residentArchiveDidNotBecomeDurable: return "resident_archive_capture_not_durable"
     case .residentArchiveCaptureStopped: return "resident_archive_capture_stopped"
     case .invalidManifestMetadata: return "spool manifest metadata is invalid"
+    case .inputDeviceNotReady(let detail): return "input_device_not_ready: \(detail)"
     case .io(let message): return message
     }
   }
@@ -2507,6 +2510,12 @@ public actor RoomEngine {
         priorState: .commandNoop, newState: .startAckReady)
       return
     } else {
+      // Arch #17 — BEFORE a day session is committed: is the input device there? A device that is
+      // not yet attached/answering (five Minis at the 09:06 auto-start, 5 Oct) otherwise opens a
+      // session, loses the tapewriter ~15 s later with no piece, and leaves a dead session behind.
+      // Retry with backoff + jitter; if it never appears, fail BEFORE any session exists so the
+      // command acks failed with a named reason instead of a silent 15 s death.
+      try await waitForInputDeviceReady()
       try advanceControl(
         commandID: commandID, commandKind: .startDay, sessionID: nil,
         priorState: nil, newState: .startIntent)
@@ -2593,6 +2602,43 @@ public actor RoomEngine {
   /// Arch #15 — written on the session end that START COMPENSATION patches, so the server can tell a start
   /// that died on its own from an operator stop. MUST equal START_FAILED_NOTE in lib/bench-bus-constants.ts.
   static let startFailedNote = "start failed: capture did not start"
+
+  /// Arch #17 — the delays between readiness checks: 1, 2, 4, 8, 16 s (about 31 s in all, inside the
+  /// start command's patience), each stretched by up to `jitterFraction` so rooms that started on the
+  /// same second do not re-check on the same second.
+  static let inputReadyBaseDelays: [Double] = [1, 2, 4, 8, 16]
+  static let inputReadyJitterFraction = 0.5
+
+  /// PURE — what the attached-device list says about the configured device. `unknown` (CoreAudio
+  /// would not answer, or the config names no device) never blocks a start: not being able to look
+  /// is not evidence the device is missing, and a start that was going to work must not be refused.
+  public enum InputReadiness: Equatable, Sendable { case ready, notReady, unknown }
+  public static func inputReadiness(devices: [AudioInputDeviceEntry]?, uid: String) -> InputReadiness {
+    guard let devices, !uid.isEmpty else { return .unknown }
+    return devices.contains(where: { $0.uid == uid }) ? .ready : .notReady
+  }
+
+  /// PURE — the schedule in nanoseconds for a given jitter roll in 0...1.
+  public static func inputReadyDelays(jitterRoll: Double) -> [UInt64] {
+    let roll = min(max(jitterRoll, 0), 1)
+    return inputReadyBaseDelays.map { UInt64($0 * (1 + inputReadyJitterFraction * roll) * 1_000_000_000) }
+  }
+
+  private func waitForInputDeviceReady() async throws {
+    let uid = configuration.deviceUID
+    let delays = Self.inputReadyDelays(jitterRoll: Double.random(in: 0...1))
+    for (attempt, delay) in delays.enumerated() {
+      switch Self.inputReadiness(devices: audioInputs.inputDevices(), uid: uid) {
+      case .ready, .unknown: return
+      case .notReady:
+        log("start deferred: input device not ready (attempt \(attempt + 1) of \(delays.count + 1)); retrying")
+        try await Task.sleep(nanoseconds: delay)
+      }
+    }
+    if Self.inputReadiness(devices: audioInputs.inputDevices(), uid: uid) == .notReady {
+      throw RoomEngineError.inputDeviceNotReady("configured input device not attached after \(delays.count + 1) checks")
+    }
+  }
 
   private func pause(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }
