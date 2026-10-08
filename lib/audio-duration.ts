@@ -4,8 +4,10 @@
  *
  *   WAV   data-chunk size / byte rate from the header.
  *   OGG   the last page's granule position (the end of the stream) minus the Opus pre-skip, at 48 kHz (Vorbis: its own sample rate).
- *   WebM  Matroska: Info/Duration x TimecodeScale when the muxer wrote it; else the timestamp of the LAST block (MediaRecorder streams carry no
- *         Duration). Clusters of unknown size (live muxing) are walked through, not skipped.
+ *   WebM  Matroska: the LONGER of Info/Duration x TimecodeScale (when the muxer wrote it) and the timestamp of the LAST block (MediaRecorder streams
+ *         carry no Duration). A declared Duration can therefore never make a long file look short. Clusters of unknown size (live muxing) are walked through.
+ *   MP4   ISO base media (m4a / audio/mp4, what Safari and iPhones record): the LONGEST of mvhd, mdhd, the fragment header (mehd), the sample table
+ *         (stts) and the fragment runs (trun), so a lying movie header cannot hide the samples.
  *
  * PURE and bounded: it reads the bytes it is given, never more than MAX_ELEMENTS elements, and never throws.
  */
@@ -142,15 +144,81 @@ function webmMs(b: Uint8Array): number | null {
     }
     o = end;
   }
-  if (declared !== null && Number.isFinite(declared) && declared > 0) return Math.round((declared * scale) / 1_000_000);
-  if (lastBlockTicks > 0) return Math.round((lastBlockTicks * scale) / 1_000_000);
-  return null;
+  // G8: the LONGER of the two. A header that declares 60 s over 40 minutes of blocks measures 40 minutes.
+  const fromDeclared = declared !== null && Number.isFinite(declared) && declared > 0 ? Math.round((declared * scale) / 1_000_000) : 0;
+  const fromBlocks = lastBlockTicks > 0 ? Math.round((lastBlockTicks * scale) / 1_000_000) : 0;
+  const best = Math.max(fromDeclared, fromBlocks);
+  return best > 0 ? best : null;
+}
+
+// --- MP4 / M4A -----------------------------------------------------------------------------------------------------------------------------
+const MP4_CONTAINERS = new Set(["moov", "trak", "mdia", "minf", "stbl", "mvex", "moof", "traf"]);
+const u32be = (b: Uint8Array, o: number): number => ((b[o]! << 24) | (b[o + 1]! << 16) | (b[o + 2]! << 8) | b[o + 3]!) >>> 0;
+const u64be = (b: Uint8Array, o: number): number => u32be(b, o) * 4_294_967_296 + u32be(b, o + 4);
+const fourcc = (b: Uint8Array, o: number): string => String.fromCharCode(b[o]!, b[o + 1]!, b[o + 2]!, b[o + 3]!);
+
+function mp4Ms(b: Uint8Array): number | null {
+  if (b.length < 16 || fourcc(b, 4) !== "ftyp") return null;
+  let movieScale = 0, movieDur = 0, mehdDur = 0;
+  let mediaScale = 0, mediaDur = 0; // first mdhd
+  let sttsTicks = 0, trunTicks = 0, tfhdDefault = 0;
+  let boxes = 0;
+  const walk = (start: number, end: number, depth: number): void => {
+    let o = start;
+    while (o + 8 <= end && boxes++ < MAX_ELEMENTS) {
+      let size = u32be(b, o);
+      const type = fourcc(b, o + 4);
+      let head = 8;
+      if (size === 1) { if (o + 16 > end) return; size = u64be(b, o + 8); head = 16; }
+      else if (size === 0) size = end - o; // to the end of the enclosing box / file
+      if (size < head || o + size > end) size = Math.min(Math.max(size, head), end - o); // truncated: read what is there
+      const body = o + head;
+      const bodyEnd = o + size;
+      if (type === "mvhd" && bodyEnd - body >= 20) {
+        if (b[body] === 1 && bodyEnd - body >= 32) { movieScale = u32be(b, body + 20); movieDur = u64be(b, body + 24); }
+        else { movieScale = u32be(b, body + 12); movieDur = u32be(b, body + 16); }
+      } else if (type === "mdhd" && mediaScale === 0 && bodyEnd - body >= 20) {
+        if (b[body] === 1 && bodyEnd - body >= 32) { mediaScale = u32be(b, body + 20); mediaDur = u64be(b, body + 24); }
+        else { mediaScale = u32be(b, body + 12); mediaDur = u32be(b, body + 16); }
+      } else if (type === "mehd" && bodyEnd - body >= 8) {
+        mehdDur = b[body] === 1 && bodyEnd - body >= 12 ? u64be(b, body + 4) : u32be(b, body + 4);
+      } else if (type === "stts" && bodyEnd - body >= 8) {
+        const n = Math.min(u32be(b, body + 4), Math.floor((bodyEnd - body - 8) / 8));
+        for (let i = 0; i < n; i++) sttsTicks += u32be(b, body + 8 + i * 8) * u32be(b, body + 12 + i * 8);
+      } else if (type === "tfhd" && bodyEnd - body >= 8) {
+        const flags = u32be(b, body) & 0xffffff;
+        let p = body + 8; // version/flags + track id
+        if (flags & 0x1) p += 8;
+        if (flags & 0x2) p += 4;
+        tfhdDefault = flags & 0x8 && p + 4 <= bodyEnd ? u32be(b, p) : 0;
+      } else if (type === "trun" && bodyEnd - body >= 8) {
+        const flags = u32be(b, body) & 0xffffff;
+        const count = u32be(b, body + 4);
+        let p = body + 8;
+        if (flags & 0x1) p += 4;
+        if (flags & 0x4) p += 4;
+        const per = 4 * ((flags & 0x100 ? 1 : 0) + (flags & 0x200 ? 1 : 0) + (flags & 0x400 ? 1 : 0) + (flags & 0x800 ? 1 : 0));
+        if (flags & 0x100 && per > 0) for (let i = 0; i < count && p + (i + 1) * per <= bodyEnd; i++) trunTicks += u32be(b, p + i * per);
+        else if (tfhdDefault > 0) trunTicks += tfhdDefault * Math.min(count, 100_000_000);
+      } else if (MP4_CONTAINERS.has(type) && depth < 8) {
+        if (type === "moof") tfhdDefault = 0;
+        walk(body, bodyEnd, depth + 1);
+      }
+      if (bodyEnd <= o) return;
+      o = bodyEnd;
+    }
+  };
+  walk(0, b.length, 0);
+  const ms = (ticks: number, scale: number): number => (ticks > 0 && scale > 0 ? Math.round((ticks * 1000) / scale) : 0);
+  // G9/G8: the LONGEST of every claim the file makes, so a header cannot understate what the samples hold
+  const best = Math.max(ms(movieDur, movieScale), ms(mediaDur, mediaScale), ms(mehdDur, movieScale), ms(sttsTicks, mediaScale), ms(trunTicks, mediaScale));
+  return best > 0 ? best : null;
 }
 
 /** The measured duration in milliseconds, or null when the container says nothing (the caller refuses; it does not guess). */
 export function measureAudioMs(bytes: Uint8Array): number | null {
   try {
-    return wavMs(bytes) ?? oggMs(bytes) ?? webmMs(bytes);
+    return wavMs(bytes) ?? oggMs(bytes) ?? webmMs(bytes) ?? mp4Ms(bytes);
   } catch {
     return null;
   }

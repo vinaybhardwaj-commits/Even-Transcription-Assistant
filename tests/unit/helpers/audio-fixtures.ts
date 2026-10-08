@@ -51,3 +51,35 @@ export function webm(opts: { declaredMs?: number; clusters?: Array<{ tc: number;
   const body = cat(info, ...clusters);
   return cat(header, el(SEGMENT, body, unknown ? "unknown" : body.length));
 }
+
+// --- MP4 / M4A -------------------------------------------------------------------------------------------------------------------------------
+const be32 = (v: number): number[] => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
+const be64 = (v: number): number[] => [...be32(Math.floor(v / 4_294_967_296)), ...be32(v % 4_294_967_296)];
+const box = (type: string, ...payload: Array<Uint8Array | number[]>): Uint8Array => {
+  const body = cat(...payload);
+  return cat(be32(8 + body.length), ascii(type), body);
+};
+const ftyp = (): Uint8Array => box("ftyp", ascii("M4A "), be32(0), ascii("M4A isom"));
+/** mvhd / mdhd body: version 0 (32-bit) or 1 (64-bit duration), timescale, duration */
+const hd = (timescale: number, duration: number, v1 = false): number[] =>
+  v1 ? [1, 0, 0, 0, ...be64(0), ...be64(0), ...be32(timescale), ...be64(duration), ...new Array(80).fill(0)] : [0, 0, 0, 0, ...be32(0), ...be32(0), ...be32(timescale), ...be32(duration), ...new Array(80).fill(0)];
+
+/** A classic (non-fragmented) m4a: moov/mvhd + trak/mdia/mdhd + stts. Any of the three can be left out or made to lie. */
+export function m4a(opts: { mvhd?: { timescale: number; duration: number; v1?: boolean }; mdhd?: { timescale: number; duration: number; v1?: boolean }; stts?: Array<[count: number, delta: number]> }): Uint8Array {
+  const stbl = opts.stts ? box("stbl", box("stts", [0, 0, 0, 0], be32(opts.stts.length), ...opts.stts.map(([c, d]) => [...be32(c), ...be32(d)]))) : new Uint8Array(0);
+  const mdia = box("mdia", opts.mdhd ? box("mdhd", hd(opts.mdhd.timescale, opts.mdhd.duration, opts.mdhd.v1)) : new Uint8Array(0), opts.stts ? box("minf", stbl) : new Uint8Array(0));
+  return cat(ftyp(), box("moov", opts.mvhd ? box("mvhd", hd(opts.mvhd.timescale, opts.mvhd.duration, opts.mvhd.v1)) : new Uint8Array(0), box("trak", mdia)), box("mdat", [1, 2, 3, 4]));
+}
+
+/** A fragmented m4a (what a browser MediaRecorder writes): mvhd with duration 0, mdhd, optional mehd, moof/traf/trun runs. */
+export function fmp4(opts: { mdhdScale: number; mehd?: number; movieScale?: number; runs?: Array<{ durations?: number[]; count?: number; defaultDuration?: number }> }): Uint8Array {
+  const moov = box("moov", box("mvhd", hd(opts.movieScale ?? 1000, 0)), box("trak", box("mdia", box("mdhd", hd(opts.mdhdScale, 0)))), opts.mehd !== undefined ? box("mvex", box("mehd", [0, 0, 0, 0], be32(opts.mehd))) : new Uint8Array(0));
+  const moofs = (opts.runs ?? []).map((r) => {
+    const tfhd = box("tfhd", [0, 0, 0, r.defaultDuration !== undefined ? 0x08 : 0], be32(1), r.defaultDuration !== undefined ? be32(r.defaultDuration) : []);
+    const trun = r.durations
+      ? box("trun", [0, 0, 0x01, 0x00], be32(r.durations.length), ...r.durations.map((d) => be32(d)))
+      : box("trun", [0, 0, 0, 0], be32(r.count ?? 0));
+    return box("moof", box("traf", tfhd, trun));
+  });
+  return cat(ftyp(), moov, ...moofs, box("mdat", [1, 2, 3]));
+}

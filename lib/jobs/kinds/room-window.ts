@@ -13,7 +13,7 @@
  */
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
-import { checkRoomStage, ROOM_AUDIO_DETAIL, SCOPE_CHECK_DETAIL } from "@/lib/stt/sarvam-scope";
+import { checkEngine, checkRoomStage, ROOM_AUDIO_DETAIL, SCOPE_CHECK_DETAIL } from "@/lib/stt/sarvam-scope";
 import { ROOM_WINDOW_KIND } from "./room-window-kind";
 import { sql } from "@/lib/db";
 import { bulkAgeMinutes, isBulkWindow } from "@/lib/service-pool";
@@ -68,6 +68,23 @@ function optionalBool(o: Record<string, unknown>, key: string): boolean {
   if (v === undefined) return false;
   if (typeof v !== "boolean") throw new JobArgsError(`${key} must be a boolean`);
   return v;
+}
+
+/**
+ * Hand a window back exactly as the drain found it, WITHOUT counting an attempt (room-drain's recordFailure would count one and, after enough, park the
+ * window as failed — a refusal by scope must never do that). Only a window THIS job's claim put in 'transcribing' is moved, and its drain job row goes
+ * back to 'queued'. Never throws.
+ */
+async function releaseWindowUntouched(windowId: string): Promise<void> {
+  try {
+    await sql`UPDATE bench_window SET state = 'closed' WHERE id = ${windowId} AND state = 'transcribing'`;
+    await sql`
+      UPDATE stt_subject_job SET state = 'queued', started_at = NULL
+       WHERE subject_type = 'bench_window' AND subject_id = ${windowId} AND tier = 'asr' AND state = 'running'
+    `;
+  } catch (e) {
+    console.warn("[room_window] release after scope refusal failed", JSON.stringify({ err: (e as { name?: string })?.name ?? "error" }));
+  }
 }
 
 export const roomWindowKind: JobKind = {
@@ -151,6 +168,15 @@ export const roomWindowKind: JobKind = {
         const o = await roomWindowSegment(windowId, origin, who, ctx.progress, jobOpts);
         if (!o.ok) return failFromPhase(o);
         const next = { ...(o.next_progress ?? ctx.progress) };
+        // G11: the engine was just chosen (progress.engine_id, from stt_routing as it is NOW). Re-check the O4 rule HERE for an MCP-origin job, so a routing edit
+        // made after the prepare check cannot send the window to Sarvam. Fails closed on a database error. The window is handed back untouched (no attempt counted).
+        if (ctx.args.via === "mcp" && next.silent_window !== true) {
+          const verdict = await checkEngine(typeof next.engine_id === "string" ? next.engine_id : null);
+          if (verdict !== "clear") {
+            await releaseWindowUntouched(windowId);
+            return failWith(verdict === "sarvam" ? jobError("scope_consult_only", ROOM_AUDIO_DETAIL) : jobError("scope_check_unavailable", SCOPE_CHECK_DETAIL));
+          }
+        }
         // E11 — a SILENT window has nothing to route. Its silence and marker are already written, so
         // it skips `engine` entirely: no routed-engine call, and no paid engine reading 900 s of quiet.
         // This is a fact about the audio, not an engine branch.
@@ -158,6 +184,14 @@ export const roomWindowKind: JobKind = {
       }
 
       case STEPS.engine: {
+        // G11: and once more immediately before the engine is called (the progress may be old if the job waited between steps)
+        if (ctx.args.via === "mcp" && typeof ctx.progress.engine_id === "string") {
+          const verdict = await checkEngine(ctx.progress.engine_id);
+          if (verdict !== "clear") {
+            await releaseWindowUntouched(windowId);
+            return failWith(verdict === "sarvam" ? jobError("scope_consult_only", ROOM_AUDIO_DETAIL) : jobError("scope_check_unavailable", SCOPE_CHECK_DETAIL));
+          }
+        }
         const o = await roomWindowEngine(windowId, who, ctx.progress, jobOpts);
         if (!o.ok) return failFromPhase(o);
         const next = o.next_progress ?? ctx.progress;

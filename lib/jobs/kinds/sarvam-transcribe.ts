@@ -72,6 +72,9 @@ export function parseSarvamTranscribeArgs(raw: unknown): SarvamTranscribeArgs {
   return a.encounter_id !== undefined ? { source: "encounter", encounter_id: a.encounter_id, ...common } : { source: "consult", consult_uid: a.consult_uid!, ...common };
 }
 
+/** Sarvam's states for a job that exists but has not been started (everything else means it has been started: running, completed or failed). */
+const isCreatedState = (state: string): boolean => state === "Pending" || state === "Accepted" || state === "Created";
+
 /** A failed gateway call: transient ones THROW (the runner retries the step under MAX_FAILURES), terminal ones fail the job by code. */
 function bail(f: Fail, code: JobErrorCode): StepOutcome {
   if (f.transient) throw new Error(`${code}: ${f.error}`);
@@ -177,12 +180,16 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
   if (!jobId) return failWith(jobError("progress_incomplete", "sarvam job"));
   // a replay after a successful start must not start twice: ask Sarvam first
   const st = await gwBatchStatus(jobId);
-  const alreadyStarted = st.ok && st.state !== "Pending" && st.state !== "Accepted" && st.state !== "Created";
+  const alreadyStarted = st.ok && !isCreatedState(st.state);
   if (!alreadyStarted) {
     const s = await gwBatchStartJob(jobId);
     if (!s.ok) {
       console.error("[sarvam] start failed", JSON.stringify({ job: ctx.job.id, err: s.error, transient: s.transient }));
-      return s.transient ? bail(s, "sarvam_submit_failed") : ledgerFailed(ctx, s, "sarvam_submit_failed");
+      if (s.transient) return bail(s, "sarvam_submit_failed");
+      // G10: a 4xx on start may only mean the job is ALREADY started (a replay that raced). Ask again: if Sarvam has the job past Created it is running
+      // (and billing), so carry on polling it instead of failing a job Sarvam is still working on.
+      const again = await gwBatchStatus(jobId);
+      if (!(again.ok && !isCreatedState(again.state))) return ledgerFailed(ctx, s, "sarvam_submit_failed");
     }
   }
   await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: ctx.job.id, sarvamJobId: jobId, durationMs: num(ctx.progress.duration_ms) || 0, scope: scopeOf(ctx) });

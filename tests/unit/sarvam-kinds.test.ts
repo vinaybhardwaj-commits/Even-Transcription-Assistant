@@ -269,6 +269,119 @@ describe("sarvam_transcribe: upload / start (G2 idempotent)", () => {
   });
 });
 
+describe("G10 — a start 4xx on a job that is already running continues instead of failing it", () => {
+  const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true };
+  const prog = { clip_key: "clip.webm", content_type: "audio/webm", sarvam_job_id: "sj_9", duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z" };
+  const start = () => T.sarvamTranscribeKind.run(ctx("start", args, prog));
+  const audits = () => statements.filter((s) => /INSERT INTO audit_log/.test(s.text));
+
+  it("the Pending replay: status Pending, start answers 409, Sarvam now shows Running -> poll, one audit row, no failure", async () => {
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: true, state: "Running", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: false, error: "start_409", status: 409, transient: false });
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(gw.status).toHaveBeenCalledTimes(2);
+    expect(audits()).toHaveLength(1);
+    expect(ledgerLines()).toEqual([]); // not failed, nothing written yet
+  });
+  it("a start 4xx while Sarvam still says Pending/Created is a real failure (failed ledger line)", async () => {
+    gw.status.mockResolvedValue({ ok: true, state: "Pending", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: false, error: "start_400", status: 400, transient: false });
+    expect(await start()).toEqual({ kind: "fail", error: "sarvam_submit_failed: start_400" });
+    expect(audits()).toHaveLength(0);
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "failed", http_status: 400 })]);
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Created", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_500", status: 500, transient: true });
+    lab.clear();
+    expect(await start()).toMatchObject({ kind: "fail" }); // the re-check itself failing is not evidence the job runs
+  });
+  it("a start that answers Failed state is also past Created, and the poll step will report it", async () => {
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: true, state: "Failed", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: false, error: "start_409", status: 409, transient: false });
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+  });
+});
+
+describe("G13 — ledger accuracy", () => {
+  const T0 = "2026-10-08T06:00:00.000Z";
+  const line = (over: Row = {}) => ({
+    caller: "scribe-mcp", machine: "vercel", job_id: "job_x", request_id: "sj", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
+    started_at: T0, finished_at: "2026-10-08T06:20:00.000Z", status: "ok", http_status: 200, throttled: false, scope: "encounter", ref: "enc_1", ...over,
+  }) as import("@/lib/sarvam-lab").CallLine;
+
+  it("(a) an ok line REPLACES a cancelled / failed line for the same job (one line, audio counted); an ok line is never displaced; non-ok never replaces non-ok", async () => {
+    await L.appendLedger(line({ status: "cancelled", audio_s: 600 }));
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "cancelled" })]);
+    expect(L.tallyOf(lab.get("sarvam/ledger/scribe-mcp/2026-10-08.jsonl")!.body).audio_min).toBe(0); // cancelled audio is not counted...
+    await L.appendLedger(line({ status: "ok" })); // ...until Sarvam is known to have finished
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "ok", audio_s: 600 })]);
+    expect(L.tallyOf(lab.get("sarvam/ledger/scribe-mcp/2026-10-08.jsonl")!.body).audio_min).toBe(10);
+    await L.appendLedger(line({ status: "cancelled" }));
+    await L.appendLedger(line({ status: "failed" }));
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "ok" })]);
+    // failed first, then cancelled: the first non-ok line stays
+    await L.appendLedger(line({ job_id: "job_y", status: "failed" }));
+    await L.appendLedger(line({ job_id: "job_y", status: "cancelled" }));
+    expect(ledgerLines().filter((l) => l.job_id === "job_y")).toEqual([expect.objectContaining({ status: "failed" })]);
+    // other jobs' lines are untouched by a replacement
+    expect(ledgerLines()).toHaveLength(2);
+  });
+
+  it("(a) end to end: a cancel lands DURING finish, the finish still completes -> the ledger says ok with the audio counted", async () => {
+    const { sarvamJobEnded } = await import("@/lib/jobs/sarvam-hook");
+    const fin = { sarvam_job_id: "sj_9", outputs: ["0.json"], duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: T0, sarvam_started_ms: Date.now() };
+    const j = { id: "job_t1", kind: "sarvam_transcribe", args: { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: false }, progress: fin, created_at: T0 } as never;
+    await sarvamJobEnded(j, "cancelled"); // the cancel arrives first
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "cancelled", audio_s: 600 })]);
+    gw.result.mockResolvedValue({ ok: true, transcript: "hi", languageCode: "en-IN", entries: [{ transcript: "hi", start: 0, end: 1, speakerId: "0" }] });
+    await T.sarvamTranscribeKind.run(ctx("finish", { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: false }, fin)); // Sarvam completed
+    expect(ledgerLines()).toEqual([expect.objectContaining({ job_id: "job_t1", status: "ok", audio_s: 600 })]);
+  });
+
+  it("(b) translate lines count INPUT characters: the failed line of sarvam_translate and the runner hook both carry the source chars sent so far", async () => {
+    const text = Array.from({ length: 3 }, (_, i) => `वाक्य ${i}। ` + "क".repeat(480)).join(" ");
+    answer = (t) => (/FROM encounter/.test(t) ? [{ transcript_original: text, transcript_raw: "", detected_language: "hi-IN" }] : []);
+    const a = { kind: "encounter", id: "e1" };
+    const prep = await X.sarvamTranslateKind.run(ctx("prepare", a));
+    const { chunkText } = await import("@/lib/sarvam-gw");
+    const chunks = chunkText(text);
+    // one chunk done, then a terminal failure: the failed line says how much INPUT went out (chunk 0), not the English that came back
+    gw.translate.mockResolvedValueOnce({ ok: true, english: "E" }).mockResolvedValueOnce({ ok: false, error: "translate_400", status: 400, transient: false });
+    await X.sarvamTranslateKind.run(ctx("translate", a, (prep as { progress: Row }).progress));
+    expect(ledgerLines().at(-1)).toMatchObject({ task: "text_translate", status: "failed", chars: chunks[0]!.length });
+    // a step budget that ends after one chunk records the input chars on the job, which is what the runner hook reads
+    lab.clear();
+    gw.translate.mockReset();
+    T.sarvamTiming.translateStepMs = 1;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-08T12:00:00Z"));
+    gw.translate.mockImplementation(async () => { vi.setSystemTime(Date.now() + 50); return { ok: true, english: "E" }; });
+    const prep2 = await X.sarvamTranslateKind.run(ctx("prepare", a));
+    const step = (await X.sarvamTranslateKind.run(ctx("translate", a, (prep2 as { progress: Row }).progress))) as { kind: string; progress: Row };
+    expect(step.kind).toBe("next");
+    expect(step.progress.translate_chars).toBe(chunks[0]!.length);
+    const { endedLine } = await import("@/lib/jobs/sarvam-hook");
+    expect(endedLine({ id: "job_t1", kind: "sarvam_translate", args: a, progress: step.progress, created_at: T0 }, "failed", "t")).toMatchObject({ task: "text_translate", chars: chunks[0]!.length });
+  });
+
+  it("(c) the one-line-per-job check covers the START-date file too: a job that crosses IST midnight gets one line, not two", async () => {
+    const start = "2026-10-08T18:20:00.000Z"; // 23:50 IST on the 8th
+    const midnightCancel = line({ status: "cancelled", started_at: start, finished_at: "2026-10-08T18:25:00.000Z" }); // 23:55 IST, the 8th
+    await L.appendLedger(midnightCancel);
+    expect([...lab.keys()]).toEqual(["sarvam/ledger/scribe-mcp/2026-10-08.jsonl"]);
+    // the job's finish lands at 00:05 IST on the 9th: its own file is the 9th, but the job is already in the 8th's
+    await L.appendLedger(line({ status: "failed", started_at: start, finished_at: "2026-10-08T18:35:00.000Z" }));
+    expect([...lab.keys()]).toEqual(["sarvam/ledger/scribe-mcp/2026-10-08.jsonl"]); // no second line, no second file
+    // and an ok finish replaces the cancelled line IN the start-date file
+    await L.appendLedger(line({ status: "ok", started_at: start, finished_at: "2026-10-08T18:35:00.000Z" }));
+    expect([...lab.keys()]).toEqual(["sarvam/ledger/scribe-mcp/2026-10-08.jsonl"]);
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "ok" })]);
+    // a job not yet in either file is written to the FINISH-date file
+    await L.appendLedger(line({ job_id: "job_new", started_at: start, finished_at: "2026-10-08T18:35:00.000Z" }));
+    expect(lab.get("sarvam/ledger/scribe-mcp/2026-10-09.jsonl")!.body).toContain('"job_id":"job_new"');
+    // both candidate files are within the allowlist
+    for (const k of lab.keys()) expect(L.labWritable(k)).toBe(true);
+  });
+});
+
 describe("sarvam_transcribe: poll / finish / ledger", () => {
   const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true };
   const polling = { sarvam_job_id: "sj_9", sarvam_started_ms: Date.now(), clip_key: "clip.webm", duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z" };
