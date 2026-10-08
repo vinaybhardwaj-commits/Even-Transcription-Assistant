@@ -157,7 +157,7 @@ describe("rule order and edges", () => {
     expect(mk(6000).level.stale).toBe(false);
     expect(mk(6100).level.stale).toBe(true);
   });
-  it("a single loud row (>= 2.5 x baseline) in the last 10 s makes it listening even when the mean is low", () => {
+  it("a single loud row (>= 2.0 x baseline) in the last 20 s makes it listening even when the mean is low", () => {
     const lv = rows(200, (i) => ({ rms: i === 2 ? 0.0235 : 0.009 + (i % 5) * 0.0003, zero: 0.001 }));
     const r = computeState(input({ levels: lv }));
     expect(r.baseline_rms).toBeCloseTo(0.0093, 3);
@@ -168,6 +168,53 @@ describe("rule order and edges", () => {
     const r = computeState(input({ levels: lv }));
     expect(r.baseline_rms).toBeLessThan(0.004);
     expect(r.state).toBe("quiet");
+  });
+  // v1.3: speech 2-4 dB over the floor. Rows are 2.3 s apart, so the last 20 s is i = 0..8.
+  const shaped = (base: number, tailFn: (i: number) => { rms: number; zero?: number }, n = 200) =>
+    // zero_ratio is jittered so the series is not a "frozen" repeat of one (rms, zero) pair
+    rows(n, (i) => {
+      const v = i <= 8 ? tailFn(i) : { rms: base * (1 + ((i % 5) - 2) * 0.002), zero: 0.001 };
+      return { rms: v.rms, zero: (v.zero ?? 0.001) < 0.5 ? (v.zero ?? 0.001) + (i % 3) * 0.0004 : v.zero };
+    });
+  it("v1.3 OPD 7 shape: baseline 0.0081, 20 s alternating 0.0081 / 0.0110 / 0.0125 / 0.0090 -> listening", () => {
+    const lv = shaped(0.0081, (i) => ({ rms: [0.0081, 0.0110, 0.0125, 0.0090][i % 4]!, zero: 0.001 }));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeCloseTo(0.0081, 3);
+    expect(r.state).toBe("listening");
+    expect(r.state_since).not.toBeNull();
+    expect(r.state_since!).toBeGreaterThanOrEqual(NOW - 20 * S);
+  });
+  it("v1.3 OPD 3 silent shape: baseline 0.0088, 20 s of rows 0.0084-0.0092 -> quiet", () => {
+    const lv = shaped(0.0088, (i) => ({ rms: 0.0084 + (i % 3) * 0.0004, zero: 0.001 }));
+    const r = computeState(input({ levels: lv }));
+    expect(r.baseline_rms).toBeCloseTo(0.0088, 3);
+    expect(r.state).toBe("quiet");
+  });
+  it("v1.3 a single spike 0.020 on baseline 0.009 -> listening", () => {
+    const lv = shaped(0.009, (i) => ({ rms: i === 5 ? 0.020 : 0.009, zero: 0.001 }));
+    expect(computeState(input({ levels: lv })).state).toBe("listening");
+  });
+  it("v1.3 two rows >= 1.25x only -> quiet; the third makes it listening", () => {
+    const two = shaped(0.009, (i) => ({ rms: i === 1 || i === 6 ? 0.0125 : 0.009, zero: 0.001 }));
+    expect(computeState(input({ levels: two })).state).toBe("quiet");
+    const three = shaped(0.009, (i) => ({ rms: i === 1 || i === 4 || i === 6 ? 0.0125 : 0.009, zero: 0.001 }));
+    expect(computeState(input({ levels: three })).state).toBe("listening");
+  });
+  it("v1.3 mute rows (zero >= 0.995 or rms < 0.002) never count toward the 3", () => {
+    const lv = shaped(0.009, (i) => (i === 1 ? { rms: 0.0125 } : i === 4 ? { rms: 0.0125, zero: 0.999 } : i === 6 ? { rms: 0.0015 } : { rms: 0.009 }));
+    expect(computeState(input({ levels: lv })).state).toBe("quiet");
+    // a muted row that is also loud must not trigger the spike rule
+    const spike = shaped(0.009, (i) => (i === 3 ? { rms: 0.05, zero: 0.999 } : { rms: 0.009 }));
+    expect(computeState(input({ levels: spike })).state).toBe("quiet");
+  });
+  it("v1.3 rows older than 20 s do not count", () => {
+    const lv = shaped(0.009, () => ({ rms: 0.009 })).map((r, k, a) => (k >= a.length - 14 && k < a.length - 10 ? { ...r, rms: 0.0125 } : r));
+    expect(computeState(input({ levels: lv })).state).toBe("quiet");
+  });
+  it("v1.3 no baseline (< 30 rows): mean 0.0085 -> listening, mean 0.0075 -> quiet, no spike rule", () => {
+    expect(computeState(input({ levels: rows(10, (i) => ({ rms: 0.0085, zero: 0.001 + (i % 3) * 0.0004 })) })).state).toBe("listening");
+    expect(computeState(input({ levels: rows(10, (i) => ({ rms: 0.0075, zero: 0.001 + (i % 3) * 0.0004 })) })).state).toBe("quiet");
+    expect(computeState(input({ levels: rows(10, (i) => ({ rms: i === 2 ? 0.03 : 0.002 + (i % 2) * 0.0005, zero: 0.001 + (i % 3) * 0.0004 })) })).state).toBe("quiet");
   });
   it("the floor 0.008 applies when there is no baseline yet (fewer than 30 rows)", () => {
     const lv = rows(10, (i) => ({ rms: 0.005 + i * 0.0002, zero: 0.001 }));
