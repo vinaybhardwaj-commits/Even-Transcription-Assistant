@@ -82,9 +82,8 @@ describe("S2: the one card line", () => {
     expect([row({}), row({ action: "alert", mode: "shadow" }), row({ action: "message", mode: "shadow" }), row({ action: "scribe_start", mode: "shadow" }), row({ action: "log_only" }), row({ action: "none" })].map(isChange)).toEqual([true, true, true, false, false, false]);
   });
   it("S3 on the real 48 h combos: shadow scribe_start / scribe_restart / ticket rows are not changes; shadow message / alert rows are", () => {
-    const csv = join("/home/eta/oc/eta-steward/rooms-live-review/v17/combos-48h.csv");
-    let text = "";
-    try { text = readFileSync(csv, "utf8"); } catch { text = FALLBACK_COMBOS; }
+    const csv = join(__dirname, "..", "fixtures", "rooms-live", "combos-48h.csv");
+    const text = readFileSync(csv, "utf8");
     const rows = text.trim().split("\n").slice(1).map((l) => l.match(/^([^,]*),([^,]*),([^,]*),"?([^",]*)"?,/)!).map((m) => ({ rule: m[1]!, action: m[2]!, mode: m[3]!, result: m[4] || null }));
     expect(rows.length).toBeGreaterThan(20);
     const shadow = rows.filter((r) => r.mode !== "live");
@@ -166,14 +165,3 @@ describe("S1: the status from steward_config rows (the Steward's own actionMode)
     expect(statusFromRows(rows({ tick: { nope: 1 } }))).toMatchObject({ last_tick_at: null });
   });
 });
-
-// used only if the orchestrator's CSV is not on this machine: the shape of the real 48 h combos that matter here
-const FALLBACK_COMBOS = `rule,action,mode,result_prefix,n
-not_recording,scribe_start,shadow,"shadow: would",96
-session_died,scribe_restart,shadow,"shadow: would",9
-kiosk_asleep,ticket:wake,shadow,"shadow: would",5
-session_died,message,shadow,"shadow: would",5
-mic_fault,alert,shadow,"shadow: would",2
-not_recording,scribe_start,live,"ok: start_day acked",4
-session_died,message,live,"ok: sent",1
-`;
