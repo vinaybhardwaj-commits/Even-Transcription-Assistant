@@ -28,7 +28,7 @@ export const MAX_LATE_ROWS = 200;
 export type RoomAlertRow = {
   id: number;
   created_at: string;
-  kind: "offline" | "degraded" | "recovered" | "fleet_outage";
+  kind: "offline" | "degraded" | "recovered" | "fleet_outage" | "session_reaped";
   room_ids: string[];
   room_name: string | null;
   status_from: string | null;

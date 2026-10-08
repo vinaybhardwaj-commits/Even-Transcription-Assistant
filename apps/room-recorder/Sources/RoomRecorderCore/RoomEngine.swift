@@ -1328,6 +1328,18 @@ public actor RoomEngine {
           await stopRetainedArchiveRecovery()
           break
         }
+        // Arch #21. The server's reaper ended the session this Mac still reports as recording.
+        // Stop capture and drop to the needs-start state through the SAME path a server-ended
+        // session already takes (chunk-reply `ended_disagrees`); the poll reply just says so
+        // without waiting up to one piece for the next upload. A failure here is logged and left
+        // to the next poll — it must not take the poll loop down.
+        if Self.shouldStopForReap(notice: response.sessionReaped, activeSessionID: sessionID, phase: phase) {
+          do {
+            try await stopAfterServerEnd()
+          } catch {
+            log("session reaped by server; stop failed, will retry next poll: \(bounded(error))")
+          }
+        }
         // §13.3 step 10. The poll carrying the receipt came back, so the file has done its job and
         // is deleted. Only now: if this line ran before the poll, a network fault would have
         // erased the only record that an update failed.
@@ -3497,6 +3509,15 @@ public actor RoomEngine {
     }
     phase = .superseded
     try saveStatus()
+  }
+
+  /// PURE — Arch #21. Only a notice naming THIS Mac's open session, while it is recording or
+  /// paused, stops anything; a stale or foreign id never does.
+  public static func shouldStopForReap(
+    notice: SessionReapedNotice?, activeSessionID: String?, phase: RoomEnginePhase
+  ) -> Bool {
+    guard let notice, let activeSessionID, notice.sessionID == activeSessionID else { return false }
+    return phase == .recording || phase == .paused
   }
 
   private func stopAfterSuperseded() async throws {

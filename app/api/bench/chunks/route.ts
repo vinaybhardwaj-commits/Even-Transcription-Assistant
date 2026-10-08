@@ -24,6 +24,9 @@
  * never reloaded, and held the session id in its own memory — carried on writing chunks until
  * 00:58:46. All 108 are present and verified.
  *
+ * (ARCH #21, 8 Oct 2026: the one exception is a session the REAPER ended — see "A REAPED SESSION TAKES
+ * NO NEW CHUNK ROWS" below. Its late chunk is not registered, its audio stays in R2, and the kiosk is told.)
+ *
  * THE CHUNK IS ALWAYS ACCEPTED. Never refuse audio because a row says the session is over: those
  * 108 chunks are exactly why. Refusing would have converted a bookkeeping fault into six hours of
  * lost recording, which is a far worse failure than the one being fixed.
@@ -47,9 +50,20 @@ import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
 import { parseMicLevelPair } from "@/lib/bench-levels";
+import { isReaperNote, SESSION_REAPED } from "@/lib/bench-reaper-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * The disagreement signal under BOTH names. The server has always sent `disagreement`; the browser
+ * kiosk reads that. The native Room Recorder decodes `ended_disagrees` (BenchClient.swift
+ * ChunkRegistrationResponse and its contract tests) — a key this route never sent, so the native
+ * app could not learn its session was ended through the chunk reply (found 8 Oct, Arch #21).
+ */
+function disagreementFields(): Record<string, string> {
+  return { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES, ended_disagrees: ENDED_DISAGREES };
+}
 
 export async function POST(req: NextRequest) {
   const claims = await readRoomClaims();
@@ -139,6 +153,40 @@ export async function POST(req: NextRequest) {
     sessionEndedAt: session.ended_at,
     chunkStartedAtMs: startedAt.getTime(),
   });
+
+  // ── ARCH #21 — A REAPED SESSION TAKES NO NEW CHUNK ROWS ─────────────────────────────────
+  //
+  // The header above says a chunk is always accepted, and for an OPERATOR-ended session that
+  // stands. A session the REAPER ended is different: the system declared it dead, raised an
+  // alert, and the room is expected to start a new one. bs_wrnpdr4e (reaped 12:26 IST) took a
+  // chunk at 15:41 from a zombie kiosk, leaving a 3 h gap recorded inside an ended session.
+  //
+  // So: no bench_chunk row, no window evaluation. The audio is NOT lost — the kiosk already
+  // PUT it to R2 at the session key (that is why this route is reached at all) and nothing here
+  // deletes it; the event below names the key, idx and source so it can be recovered. The reply
+  // is a 200 whose upload_state says plainly it was not registered, carrying BOTH disagreement
+  // spellings (see disagreementFields) so the browser kiosk and the native app each drop to
+  // needs-start. A non-2xx would make both retry for ever against a session that will never
+  // take it.
+  if (endedDisagrees && isReaperNote(session.notes)) {
+    try {
+      await sql`
+        INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
+        VALUES (${newEventId()}, ${sessionId}, 'chunk_refused_reaped', ${startedAt.toISOString()}, 'none',
+                ${JSON.stringify({ source: "server", idx, chunk_source: source, size_bytes: sizeBytes, r2_key: benchChunkKey(session.room_slug, ymdUtc(new Date(session.started_at)), sessionId, idx, source), chunk_started_at: startedAt.toISOString() })}::jsonb)
+      `;
+    } catch (e) {
+      console.warn(`[bench-chunks] reaped-session refusal event write failed session=${sessionId}: ${String(e).slice(0, 150)}`);
+    }
+    console.warn(`[bench-chunks] ${SESSION_REAPED} session=${sessionId} idx=${idx} source=${source} — chunk NOT registered into the reaped session; audio left in R2; kiosk told`);
+    return respondOk({
+      ok: true,
+      key: benchChunkKey(session.room_slug, ymdUtc(new Date(session.started_at)), sessionId, idx, source),
+      upload_state: "refused_session_reaped",
+      session_reaped: true,
+      ...disagreementFields(),
+    });
+  }
 
   // Server-side authoritative verify (D8): the object must exist in R2 with
   // the exact claimed size before a 'verified' row is written.
@@ -249,6 +297,6 @@ export async function POST(req: NextRequest) {
     ok: true,
     key,
     upload_state: "verified",
-    ...(endedDisagrees ? { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES } : {}),
+    ...(endedDisagrees ? disagreementFields() : {}),
   });
 }

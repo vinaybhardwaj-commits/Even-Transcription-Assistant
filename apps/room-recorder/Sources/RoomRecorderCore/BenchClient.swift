@@ -323,11 +323,15 @@ public struct CommandPollResponse: Codable, Equatable, Sendable {
   /// the poll's own UPDATE returned it. What the app does with it is `applyServerAssignedChannel`;
   /// this only carries the string.
   public let assignedChannel: String?
+  /// Arch #21. Present only when the session id this poll reported as recording was ended by the
+  /// server's reaper. The engine drops to a needs-start state instead of claiming to record.
+  public let sessionReaped: SessionReapedNotice?
 
   enum CodingKeys: String, CodingKey {
     case ok, superseded, now, commands
     case roomID = "room_id"
     case assignedChannel = "assigned_channel"
+    case sessionReaped = "session_reaped"
   }
 
   public init(from decoder: Decoder) throws {
@@ -342,6 +346,23 @@ public struct CommandPollResponse: Codable, Equatable, Sendable {
     // `try?`, NOT `try`. A value of the wrong TYPE must cost this one field, not the poll: the
     // commands in the same answer — a stop, a start — still have to run.
     assignedChannel = (try? values.decodeIfPresent(String.self, forKey: .assignedChannel)) ?? nil
+    // Same rule: a malformed notice costs the notice, never the commands beside it.
+    sessionReaped = (try? values.decodeIfPresent(SessionReapedNotice.self, forKey: .sessionReaped)) ?? nil
+  }
+}
+
+public struct SessionReapedNotice: Codable, Equatable, Sendable {
+  public let sessionID: String
+  public let endedAt: String?
+
+  public init(sessionID: String, endedAt: String?) {
+    self.sessionID = sessionID
+    self.endedAt = endedAt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case sessionID = "session_id"
+    case endedAt = "ended_at"
   }
 }
 

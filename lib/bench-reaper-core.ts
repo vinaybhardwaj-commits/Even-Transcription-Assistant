@@ -45,6 +45,9 @@ export interface BenchReapCandidate {
   started_at: string | Date;
   last_primary_at?: string | Date | null;
   last_backup_at?: string | Date | null;
+  /** Arch #21 — for the alert only; absent in older callers and tests. */
+  room_id?: string;
+  room_name?: string | null;
 }
 
 export interface BenchReapDecision {
@@ -123,4 +126,70 @@ export function isBenchStalled(
   const last = ms(s.last_any_chunk_at) ?? ms(s.started_at ?? null);
   if (last == null) return false;
   return nowMs - last > STALLED_BADGE_MINUTES * 60_000;
+}
+
+// ---------------------------------------------------------------------------
+// Arch #21 — a reap is a capture-failure event, not a silent cleanup.
+// ---------------------------------------------------------------------------
+
+/** The outbox / bench_event kind a reap writes. */
+export const SESSION_REAPED = "session_reaped";
+
+/**
+ * Clinic hours, IST, for the copy split only (08:00 up to 19:00). It decides which WORDS an alert
+ * uses, never whether one is sent: every reap alerts. Dietary went dark at 17:23 and OPD4 at 12:26
+ * — both inside this window. A named constant so a different clinic day is a one-line change.
+ */
+export const CLINIC_START_HOUR_IST = 8;
+export const CLINIC_END_HOUR_IST = 19;
+
+export type ReapPhase = "clinic_hours" | "end_of_day" | "overnight";
+
+/** A reaped session's note, recognised on the ended row (chunk route, poll reply). */
+export function isReaperNote(notes: string | null | undefined): boolean {
+  return typeof notes === "string" && (notes.includes(NOTE_STALL) || notes.includes(NOTE_ROLLOVER));
+}
+
+/** PURE — when the audio stopped, in IST words. The rollover rule is by definition a session left open overnight. */
+export function classifyReap(rule: BenchReapDecision["rule"], lastAudioIso: string): ReapPhase {
+  if (rule === "rollover") return "overnight";
+  const t = Date.parse(lastAudioIso);
+  if (!Number.isFinite(t)) return "clinic_hours";   // unknown time: say the louder thing
+  const hour = new Date(t + 5.5 * 3_600_000).getUTCHours();
+  return hour >= CLINIC_START_HOUR_IST && hour < CLINIC_END_HOUR_IST ? "clinic_hours" : "end_of_day";
+}
+
+const istClock = (iso: string): string => {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "an unknown time";
+  const d = new Date(t + 5.5 * 3_600_000);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} IST`;
+};
+
+/** PURE — the alert's words. Session id, room name, times and counts only; no patient data exists here. */
+export function reapAlertCopy(input: { roomName: string; sessionId: string; rule: BenchReapDecision["rule"]; lastAudioIso: string }): {
+  phase: ReapPhase; subject: string; body: string;
+} {
+  const phase = classifyReap(input.rule, input.lastAudioIso);
+  const at = istClock(input.lastAudioIso);
+  const { roomName: room, sessionId: sid } = input;
+  if (phase === "clinic_hours") {
+    return {
+      phase,
+      subject: `EvenScribe: ${room} recording was cut off during clinic hours`,
+      body: `${room} session ${sid} was ended by the system during clinic hours: no audio arrived after ${at} (no chunks for over ${STALL_MINUTES} min). Capture has FAILED and nothing is recording now. Go and look, then press start.`,
+    };
+  }
+  if (phase === "overnight") {
+    return {
+      phase,
+      subject: `EvenScribe: ${room} left a session open overnight`,
+      body: `${room} session ${sid} was still open after midnight and had gone quiet; last audio ${at}. It was closed by the system (day rollover). Press start for today's recording.`,
+    };
+  }
+  return {
+    phase,
+    subject: `EvenScribe: ${room} recording ended after hours (no operator end)`,
+    body: `${room} session ${sid} was closed by the system after hours: last audio ${at}, no chunks for over ${STALL_MINUTES} min and no operator end. Likely end of day; confirm the room went quiet on purpose.`,
+  };
 }
