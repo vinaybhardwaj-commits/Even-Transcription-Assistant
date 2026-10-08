@@ -239,6 +239,26 @@ describe("S3.2 scribe_jobs", () => {
     expect((await call("scribe_job_submit", {}, ["invoke"])).status).toBe(200);
   });
 
+  it("G1: scribe_jobs is never advertised read-only, under either profile; cancel makes it destructive", async () => {
+    for (const headers of [{}, { "x-scribe-profile": "lab" }]) {
+      const body = (await door("tools/list", { headers })).body.result as { tools: Array<{ name: string; annotations: Row }> };
+      const jobs = body.tools.find((t) => t.name === "scribe_jobs")!;
+      expect(jobs.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
+    }
+  });
+
+  it("G1: no listed tool with a write- or invoke-scope member carries readOnlyHint true (both profiles)", async () => {
+    for (const headers of [{}, { "x-scribe-profile": "lab" }]) {
+      const body = (await door("tools/list", { headers })).body.result as { tools: Array<{ name: string; annotations: { readOnlyHint: boolean } }> };
+      for (const t of body.tools) {
+        const tool = S.CALLABLE_TOOLS.get(t.name)!;
+        const members = S.groupMembers(tool);
+        const scopes = [tool.scope, ...members.map((m) => S.CALLABLE_TOOLS.get(m)!.scope)];
+        if (scopes.some((s) => s !== "read")) expect(t.annotations.readOnlyHint, t.name).toBe(false);
+      }
+    }
+  });
+
   it("a refused member never runs", async () => {
     const spy = vi.spyOn(S.PUBLISHED_TOOLS.find((t) => t.name === "scribe_job_submit")!, "handler").mockResolvedValue({});
     await call("scribe_jobs", { action: "submit" }, ["read", "write"]);

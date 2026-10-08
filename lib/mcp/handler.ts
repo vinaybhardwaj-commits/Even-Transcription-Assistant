@@ -195,7 +195,7 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
-          annotations: { readOnlyHint: t.scope === "read", destructiveHint: false, openWorldHint: false, title: t.name },
+          annotations: { readOnlyHint: t.scope === "read", destructiveHint: false, openWorldHint: false, ...t.annotations, title: t.name },
         })),
       });
     case "tools/call":

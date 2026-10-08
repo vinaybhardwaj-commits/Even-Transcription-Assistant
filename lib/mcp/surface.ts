@@ -118,6 +118,8 @@ export type GroupSpec = {
    * mixed group is a build error, as before.
    */
   scope?: McpScope;
+  /** tools/list annotation overrides; required in practice with `scope` (see McpTool.annotations). */
+  annotations?: McpTool["annotations"];
 };
 
 const withoutKey = (args: ToolArgs, key: string | undefined): ToolArgs => {
@@ -181,6 +183,7 @@ export function buildGroup(spec: GroupSpec): McpTool {
     name,
     description,
     scope: scopes[0]!,
+    ...(spec.annotations ? { annotations: spec.annotations } : {}),
     inputSchema: groupSchema(spec),
     handler: async (args, ctx) => {
       const picked = route(args);
@@ -500,6 +503,8 @@ export const JOBS_GROUP: McpTool = buildGroup({
     "Background jobs. Scope per action: status and list need READ, submit (queues long work) needs INVOKE, cancel needs WRITE. The caller needs the picked action's own scope; an unknown action is refused with unknown_action and nothing runs.",
   selector: { key: "action" },
   scope: "read",
+  // Registered read for the group gate, but submit/cancel write: never read-only; cancel is destructive.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   variants: [
     v("submit", "scribe_job_submit"),
     v("status", "scribe_job_status"),
