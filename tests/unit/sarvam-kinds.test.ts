@@ -159,7 +159,8 @@ describe("sarvam_transcribe: prepare", () => {
 describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id)", () => {
   const enc = { source: "encounter", encounter_id: "enc_1", mode: "codemix", english: true, num_speakers: 2 };
   const init = (progress: Row = { clip_key: "clip.webm", content_type: "audio/webm", scope: "encounter", ref: "enc_1" }) => T.sarvamTranscribeKind.run(ctx("init", enc, progress));
-  const auditAndReserved = (audit: number, reserved: number) => (text: string) => (/FROM audit_log/.test(text) ? [{ minutes: audit }] : /FROM scribe_job/.test(text) ? [{ minutes: reserved }] : []);
+  let failedMin = 0;
+  const auditAndReserved = (audit: number, reserved: number) => (text: string) => (/j\.progress \? 'sarvam_job_id'/.test(text) ? [{ minutes: failedMin }] : /FROM audit_log/.test(text) ? [{ minutes: audit }] : /FROM scribe_job/.test(text) ? [{ minutes: reserved }] : []);
 
   it("measures the duration from the container, creates the Sarvam job, and PERSISTS its id and the measured duration", async () => {
     store.set("clip.webm", clip10());
@@ -194,11 +195,26 @@ describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id
     answer = auditAndReserved(200, 31); // 241 > 240
     expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
     // only jobs created BEFORE this one count (two racing jobs cannot refuse each other), and only those not yet audited
-    const q = statements.find((s) => /FROM scribe_job/.test(s.text))!;
+    const q = statements.find((s) => /FROM scribe_job/.test(s.text) && !/j\.progress \? 'sarvam_job_id'/.test(s.text))!;
     expect(q.text).toMatch(/created_at < \?::timestamptz OR \(created_at = \?::timestamptz AND id < \?::text\)/);
     expect(q.text).toMatch(/IN \('prepare', 'init', 'upload', 'start'\)/);
     expect(q.values).toContain("job_t1");
     expect(q.values).toContain("2026-10-08T06:00:00.000Z");
+  });
+
+  it("G22: a job Sarvam was started for and that has no paid-call row holds its minutes WHATEVER its status (the reservation is part of the cap)", async () => {
+    store.set("clip.webm", clip10());
+    gw.init.mockResolvedValue({ ok: true, jobId: "sj_9" });
+    failedMin = 30;
+    answer = auditAndReserved(200, 0); // 200 + 0 + 30 failed-unaudited + 10 = 240
+    expect(await init()).toMatchObject({ kind: "next", step: "upload" });
+    failedMin = 31; // 241
+    expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
+    const q = statements.find((s) => /j\.progress \? 'sarvam_job_id'/.test(s.text))!;
+    expect(q.text).toMatch(/sarvam_started_ms/);
+    expect(q.text).not.toMatch(/j\.status = /); // any status
+    expect(q.text).toMatch(/NOT EXISTS \(SELECT 1 FROM audit_log/); // once the row lands it is counted as audited minutes, not twice
+    failedMin = 0;
   });
 
   it("G2: with the Sarvam job id already persisted, a replay creates NO second job and reads no audio", async () => {
@@ -368,26 +384,37 @@ describe("S3 — the paid-call audit row is retried, or the step throws and the 
     expect(statements.filter((s) => /SELECT 1 AS one FROM audit_log/.test(s.text)).length).toBe(3); // each attempt re-checks, so a row that landed after a lost reply is not doubled
     err.mockRestore();
   });
-  it("an insert that never succeeds makes the step THROW (audit_write_failed): no poll, the job stays in `start` — still counted as reserved for the cap — and the replay writes the row without starting twice", async () => {
+  it("an insert that never succeeds does NOT fail the job (G26): the step moves on to poll with audit_pending and the start evidence in the progress it returns; no second start", async () => {
     const err = errLog();
     gw.status.mockResolvedValue({ ok: true, state: "Pending", outputs: [] });
     gw.startJob.mockResolvedValue({ ok: true });
     answer = (text) => (/INSERT INTO audit_log/.test(text) ? new Error("db down") : []);
-    await expect(start()).rejects.toThrow(/audit_write_failed: db down/);
+    const out = await start();
+    expect(out).toMatchObject({ kind: "next", step: "poll", progress: { audit_pending: true, sarvam_job_id: "sj_9", duration_ms: 600_000 } });
+    expect((out as unknown as { progress: { sarvam_started_ms: number } }).progress.sarvam_started_ms).toBeGreaterThan(0);
     expect(gw.startJob).toHaveBeenCalledTimes(1);
     expect(inserts()).toHaveLength(4); // the first try and three retries
-    // the reservation: a job in `start` is one of the steps reservedMinutesEarlier counts, so its minutes stay held while the row is missing
-    expect(statements.length).toBeGreaterThan(0);
-    const reserve = (await import("node:fs")).readFileSync("lib/jobs/kinds/sarvam-common.ts", "utf8");
-    expect(reserve).toMatch(/IN \('prepare', 'init', 'upload', 'start'\)/);
-    // replay: Sarvam already shows the job Running, the database is back
+    // no mid-step write of any kind (G27): the start step never touches scribe_job itself
+    expect(statements.filter((s) => /UPDATE scribe_job/.test(s.text))).toEqual([]);
+    err.mockRestore();
+  });
+  it("poll retries the audit write on every claim: still failing -> audit_pending stays and polling goes on; once the database is back the row lands ONCE and audit_pending is dropped", async () => {
+    const err = errLog();
+    const pollProg = { ...prog, sarvam_started_ms: Date.now(), audit_pending: true };
+    const poll = () => T.sarvamTranscribeKind.run(ctx("poll", args, pollProg));
+    gw.status.mockResolvedValue({ ok: true, state: "Running", outputs: [] });
+    answer = (text) => (/INSERT INTO audit_log/.test(text) ? new Error("db down") : []);
+    expect(await poll()).toMatchObject({ kind: "next", step: "poll", progress: { audit_pending: true } });
     answer = () => [];
     statements.length = 0;
-    gw.status.mockResolvedValue({ ok: true, state: "Running", outputs: [] });
-    gw.startJob.mockClear();
-    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
-    expect(gw.startJob).not.toHaveBeenCalled();
+    const ok = await poll();
+    expect(ok).toMatchObject({ kind: "next", step: "poll" });
+    expect((ok as { progress: Row }).progress).not.toHaveProperty("audit_pending");
     expect(inserts()).toHaveLength(1);
+    // Completed with the audit still pending: the job still goes on to finish (an audit fault never fails it)
+    answer = (text) => (/INSERT INTO audit_log/.test(text) ? new Error("db down") : []);
+    gw.status.mockResolvedValue({ ok: true, state: "Completed", outputs: ["o.json"] });
+    expect(await poll()).toMatchObject({ kind: "next", step: "finish", progress: { audit_pending: true } });
     err.mockRestore();
   });
   it("the retry delays are bounded (3 retries); an existing row ends the loop at once", async () => {

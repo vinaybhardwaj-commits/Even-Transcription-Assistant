@@ -43,7 +43,7 @@ export async function checkEngine(engineId: string | null | undefined): Promise<
 export async function checkRoomStage(): Promise<ScopeVerdict> {
   let rows: Array<{ engine_id: string | null }>;
   try {
-    rows = (await sql`SELECT engine_id FROM stt_routing WHERE stage = 'room' LIMIT 20`) as Array<{ engine_id: string | null }>;
+    rows = (await sql`SELECT engine_id FROM stt_routing WHERE stage = 'room' ORDER BY engine_id NULLS FIRST`) as Array<{ engine_id: string | null }>;
   } catch {
     return "unavailable";
   }

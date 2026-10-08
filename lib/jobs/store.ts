@@ -52,20 +52,20 @@ export function normaliseJob(r: Record<string, unknown>): JobRow {
 }
 
 /**
- * S4 — the open (queued or running) job of `kind` whose args match every [key, value] pair (at most two), oldest first, or null. Bound parameters only.
- * A narrow race remains by design: two submits in the same instant can both see "none"; a unique index would be a migration and is not part of this change.
+ * S4 — the open (queued or running) job of `kind` whose args match EVERY [key, value] pair (a null value means "absent / null"), oldest first, or null.
+ * The whole match is done in SQL with bound array parameters (G28: no row cap, no filtering in code). A narrow race remains by design: two submits in the
+ * same instant can both see "none"; a unique index would be a migration and is not part of this change.
  */
-export async function findOpenJob(kind: string, match: Array<[string, string]>): Promise<JobRow | null> {
-  const [k1, v1] = match[0] ?? ["", ""];
-  const [k2, v2] = match[1] ?? [null, null];
-  if (!k1) return null;
+export async function findOpenJob(kind: string, match: Array<[string, string | null]>): Promise<JobRow | null> {
+  if (match.length === 0) return null;
+  const keys = match.map(([k]) => k);
+  const vals = match.map(([, v]) => v);
   const rows = (await sql`
     SELECT id, kind, args, status, step, progress, result, error, actor,
            created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures
       FROM scribe_job
      WHERE kind = ${kind}::text AND status IN ('queued', 'running')
-       AND args->>${k1}::text = ${v1}::text
-       AND (${k2}::text IS NULL OR args->>${k2}::text = ${v2}::text)
+       AND NOT EXISTS (SELECT 1 FROM unnest(${keys}::text[], ${vals}::text[]) AS m(k, v) WHERE (args->>m.k) IS DISTINCT FROM m.v)
      ORDER BY created_at, id
      LIMIT 1
   `) as Array<Record<string, unknown>>;

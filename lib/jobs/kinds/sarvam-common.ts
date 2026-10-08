@@ -92,7 +92,18 @@ export async function reservedMinutesEarlier(job: { id: string; created_at: stri
        AND (created_at < ${job.created_at}::timestamptz OR (created_at = ${job.created_at}::timestamptz AND id < ${job.id}::text))
        AND COALESCE(step, 'prepare') IN ('prepare', 'init', 'upload', 'start')
   `) as Array<{ minutes: number | string | null }>;
-  const n = Number(rows[0]?.minutes ?? 0);
+  // G22/G26: a job Sarvam was STARTED for (progress.sarvam_started_ms) whose paid-call row has not landed holds its minutes, WHATEVER ITS STATUS (running in poll with
+  // audit_pending, done, failed, cancelled: Sarvam bills it either way), for a day. Jobs still in prepare..start are counted above, not twice.
+  const failed = (await sql`
+    SELECT COALESCE(SUM((j.progress->>'duration_ms')::numeric / 60000), 0)::float8 AS minutes
+      FROM scribe_job j
+     WHERE j.kind = 'sarvam_transcribe' AND j.id <> ${job.id}::text
+       AND j.progress ? 'sarvam_job_id' AND (j.progress->>'sarvam_started_ms') IS NOT NULL AND (j.progress->>'duration_ms') IS NOT NULL
+       AND NOT (j.status IN ('queued', 'running') AND COALESCE(j.step, 'prepare') IN ('prepare', 'init', 'upload', 'start'))
+       AND j.updated_at > now() - interval '1 day'
+       AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.action = 'stt.paid_call' AND a.target_type = 'stt_engine' AND a.target_id = ${SARVAM_ENGINE} AND a.metadata_json->>'job_id' = j.id)
+  `) as Array<{ minutes: number | string | null }>;
+  const n = Number(rows[0]?.minutes ?? 0) + Number(failed[0]?.minutes ?? 0);
   return Number.isFinite(n) ? n : 0;
 }
 export const SARVAM_MAX_JOB_MINUTES = 30;
@@ -112,8 +123,8 @@ export const auditRetry = { delaysMs: [100, 300, 900] };
  * does not list (reported, not changed here).
  *
  * S3: THE ROW IS WHAT THE DAILY CAP COUNTS, so a write that fails is retried (auditRetry.delaysMs) and, if it still fails, THROWS (audit_write_failed). The
- * caller (the `start` step) lets that propagate: the runner retries the step, the job stays in `start` where its minutes remain reserved for the cap, and the
- * replay finds the Sarvam job already started and writes the row. The row is never silently skipped.
+ * caller (sarvam-transcribe settleAudit) catches that and keeps the job going with progress.audit_pending, retrying the write on every poll claim; the minutes stay
+ * reserved meanwhile. The row is never silently skipped, and an audit fault never fails a job Sarvam is running.
  */
 export async function recordSarvamCall(opts: { actor: string | null; jobId: string; sarvamJobId: string; durationMs: number; scope: SarvamScope }): Promise<void> {
   const minutes = Math.round((opts.durationMs / 60_000) * 1000) / 1000;

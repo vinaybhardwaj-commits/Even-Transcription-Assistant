@@ -89,7 +89,7 @@ export function fmp4(opts: { mdhdScale: number; mehd?: number; movieScale?: numb
  * and whose mvex/trex carries the ONLY default_sample_duration, then moof (mfhd, traf: tfhd with just default-base-is-moof, tfdt, trun with a data offset and
  * per-sample SIZES but no durations) + mdat per fragment. `fragments` is the sample count of each fragment.
  */
-export function safariFmp4(opts: { timescale: number; trexDefault: number; fragments: number[]; trexDefaultInTfhd?: number }): Uint8Array {
+export function safariFmp4(opts: { timescale: number; trexDefault: number; fragments: number[]; trexDefaultInTfhd?: number; moovLast?: boolean }): Uint8Array {
   const trex = box("trex", [0, 0, 0, 0], be32(1), be32(1), be32(opts.trexDefault), be32(0), be32(0));
   const moov = box("moov", box("mvhd", hd(1000, 0)), box("trak", box("mdia", box("mdhd", hd(opts.timescale, 0)))), box("mvex", trex));
   let seq = 0;
@@ -99,5 +99,6 @@ export function safariFmp4(opts: { timescale: number; trexDefault: number; fragm
     const trun = box("trun", [0, 0, 0x02, 0x01], be32(count), be32(112), ...Array.from({ length: Math.min(count, 64) }, () => be32(400)));
     return [box("moof", box("mfhd", [0, 0, 0, 0], be32(++seq)), box("traf", tfhd, tfdt, trun)), box("mdat", [0, 0, 0, 0])];
   });
-  return cat(box("ftyp", ascii("iso5"), be32(512), ascii("iso5"), ascii("iso6"), ascii("mp41")), moov, ...frags);
+  const ftyp = box("ftyp", ascii("iso5"), be32(512), ascii("iso5"), ascii("iso6"), ascii("mp41"));
+  return opts.moovLast ? cat(ftyp, ...frags, moov) : cat(ftyp, moov, ...frags);
 }

@@ -89,7 +89,10 @@ export const sarvamTranscribeKind: JobKind = {
   // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back
   dedupeOn: (args) => {
     const a = args as unknown as SarvamTranscribeArgs;
-    return a.source === "encounter" ? [["encounter_id", a.encounter_id]] : [["consult_uid", a.consult_uid]];
+    // G23: the options are part of the identity (a codemix ask must not be answered with an open transcribe-mode job). A caller that sends the defaults (or the
+    // same options) still dedupes; only a DIFFERENT mode / english / num_speakers opens a second job.
+    const id: [string, string] = a.source === "encounter" ? ["encounter_id", a.encounter_id] : ["consult_uid", a.consult_uid];
+    return [id, ["mode", a.mode], ["english", String(a.english)], ["num_speakers", a.num_speakers === undefined ? null : String(a.num_speakers)]];
   },
   async run(ctx: StepContext) {
     const out = await runStep(ctx);
@@ -206,14 +209,32 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
       if (!(again.ok && !isCreatedState(again.state))) return ledgerFailed(ctx, s, "sarvam_submit_failed");
     }
   }
-  // S3: the paid-call audit row is what the daily cap counts. It is retried inside the call and, if it still cannot be written, this step THROWS: the job stays
-  // in `start` (so its minutes stay RESERVED for the cap, see reservedMinutesEarlier) and the replay finds the job already started, skips the start, and writes the row.
-  await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: ctx.job.id, sarvamJobId: jobId, durationMs: num(ctx.progress.duration_ms) || 0, scope: scopeOf(ctx) });
-  return nextStep(STEPS.poll, { ...ctx.progress, sarvam_started_ms: Date.now() });
+  // G22/G26: THE START EVIDENCE TRAVELS IN THE STEP'S OWN RESULT. sarvam_started_ms goes into the progress this step returns (saved by the runner under the lease), never
+  // through a mid-step write (G27) and never by throwing: a throw makes the runner write the PRE-step progress back and erase it.
+  const progress = { ...ctx.progress, sarvam_started_ms: num(ctx.progress.sarvam_started_ms) || Date.now() };
+  // S3: the paid-call audit row is what the daily cap counts. It is retried inside the call. If it still cannot be written the job does NOT fail while Sarvam is running:
+  // the step moves on to `poll` with audit_pending, and poll retries the write on every claim (settleAudit) until it lands. Meanwhile the minutes stay reserved
+  // (reservedMinutesEarlier counts any job with sarvam_started_ms and no audit row, whatever its status).
+  return nextStep(STEPS.poll, await settleAudit(ctx, { ...progress, audit_pending: true }));
+}
+
+/** Write the paid-call row if progress says it is pending; on success audit_pending is dropped, on audit_write_failed it stays (never throws for that). */
+async function settleAudit(ctx: StepContext, progress: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (progress.audit_pending !== true) return progress;
+  try {
+    await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: ctx.job.id, sarvamJobId: String(progress.sarvam_job_id ?? ""), durationMs: num(progress.duration_ms) || 0, scope: scopeOf(ctx) });
+  } catch (e) {
+    if (!/^audit_write_failed/.test(String((e as Error)?.message ?? e))) throw e;
+    return progress;
+  }
+  const { audit_pending: _done, ...rest } = progress;
+  void _done;
+  return rest;
 }
 
 // --- poll -----------------------------------------------------------------------------------------------------------------------------------
 async function pollStep(ctx: StepContext): Promise<StepOutcome> {
+  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress) }; // G26: an audit fault never fails the job while Sarvam runs; retried on every claim
   const jobId = String(ctx.progress.sarvam_job_id ?? "");
   const startedMs = num(ctx.progress.sarvam_started_ms);
   if (!jobId || !startedMs) return failWith(jobError("progress_incomplete", "sarvam job"));
@@ -271,6 +292,7 @@ async function ledgerFailed(ctx: StepContext, f: Fail, code: JobErrorCode, extra
 
 // --- finish ---------------------------------------------------------------------------------------------------------------------------------
 async function finishStep(ctx: StepContext): Promise<StepOutcome> {
+  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress) }; // one more try at a still-pending audit row; never fatal
   const a = ctx.args as unknown as SarvamTranscribeArgs;
   const jobId = String(ctx.progress.sarvam_job_id ?? "");
   const outputs = (ctx.progress.outputs as string[] | undefined) ?? [];

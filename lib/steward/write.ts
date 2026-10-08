@@ -158,13 +158,14 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
         const all: Record<string, boolean | null> = {};
         for (const a of LIVE_CAPABLE_ACTIONS) all[a] = a in curActions ? curActions[a]! : null;
         revert = { kind: "set_shadow", value: { global: true, actions: all }, exact: true };
-      } else if (curGlobal === false) {
-        // the prior state had global OFF: replaying `global:false` needs an actions map, so carry the explicit prior value of every published key (absent = live = false)
+      } else if (curGlobal === false && p.data.global !== undefined) {
+        // global is being turned back ON from a prior OFF: replaying `global:false` needs an actions map, so carry the explicit prior value of every published key (absent = live = false)
         const all: Record<string, boolean | null> = {};
         for (const a of LIVE_CAPABLE_ACTIONS) all[a] = a in curActions ? curActions[a]! : false;
         revert = { kind: "set_shadow", value: { global: false, actions: all }, exact: true };
       } else {
-        revert = { kind: "set_shadow", value: { global: curGlobal, ...(Object.keys(undo).length ? { actions: undo } : {}) }, exact: true };
+        // G24: only the fields this command touched (an actions-only change never reverts `global`)
+        revert = { kind: "set_shadow", value: { ...(p.data.global !== undefined ? { global: curGlobal } : {}), ...(Object.keys(undo).length ? { actions: undo } : {}) }, exact: true };
       }
       // SF3: a cleared LEGACY (unpublished) key is not put back by the revert (set_shadow refuses to create unpublished keys), so that revert is not exact
       if (legacyCleared.length > 0) revert = { ...revert, exact: false, note: `cleared legacy key(s) ${legacyCleared.slice(0, 5).join(", ")} are not published steward actions and are not re-created by the revert` };

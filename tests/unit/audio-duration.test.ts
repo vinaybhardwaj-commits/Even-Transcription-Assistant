@@ -100,6 +100,14 @@ describe("G9 — MP4 / M4A (what iPhones and Safari record)", () => {
 });
 
 describe("G14 — a Safari-style fragmented audio/mp4: the only duration is moov/mvex/trex default_sample_duration", () => {
+  it("G20: a moov that comes AFTER the moofs measures the same duration (the trex default is applied once the whole file has been walked)", () => {
+    const first = safariFmp4({ timescale: 48_000, trexDefault: 1024, fragments: [100, 100, 100] });
+    const last = safariFmp4({ timescale: 48_000, trexDefault: 1024, fragments: [100, 100, 100], moovLast: true });
+    const a = measureAudioMs(first), b = measureAudioMs(last);
+    expect(a).not.toBeNull();
+    expect(b).toBe(a);
+    expect(b).toBe(Math.round((300 * 1024 / 48_000) * 1000));
+  });
   it("50 fragments x 2,812 samples x 1024 ticks at 48 kHz (about 50 minutes) measures 50 minutes, not null", () => {
     const m = safariFmp4({ timescale: 48_000, trexDefault: 1024, fragments: Array.from({ length: 50 }, () => 2_812) });
     const ms = measureAudioMs(m);

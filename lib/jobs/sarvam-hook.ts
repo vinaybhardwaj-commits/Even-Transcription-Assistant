@@ -30,7 +30,9 @@ export function endedLine(job: Pick<JobRow, "id" | "kind" | "args" | "progress" 
       audio_s: 0, chars: n(p.translate_chars), started_at: s(p.translate_started_at) ?? s(p.started_at) ?? job.created_at,
     };
   }
-  const started = n(p.sarvam_started_ms) > 0; // the batch was actually started at Sarvam
+  // G22: the start step persists sarvam_started_ms BEFORE its audit write, so a job ended after audit_write_failed still counts its audio here. (The Sarvam job id alone,
+  // set at init, is NOT proof of a start: a job that failed at upload has a request id and was never billed.)
+  const started = n(p.sarvam_started_ms) > 0;
   return {
     ...base, job_id: job.id, request_id: s(p.sarvam_job_id), mode: "batch", task: "transcribe", model: "saaras:v3",
     audio_s: started ? Math.round(n(p.duration_ms) / 10) / 100 : 0, started_at: s(p.started_at) ?? job.created_at,

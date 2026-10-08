@@ -257,11 +257,25 @@ describe("scribe_steward_command — the kinds", () => {
   it("G18: the revert of a partial update restores exactly the keys it touched (a new key is cleared, a changed one goes back, a cleared one returns)", async () => {
     cfg.shadow = { global: true, actions: { "ticket:wake": false, message: true } };
     const out = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { scribe_start: false, "ticket:wake": true, message: null } } });
-    expect(out).toMatchObject({ ok: true, revert: { kind: "set_shadow", exact: true, value: { global: true, actions: { scribe_start: null, "ticket:wake": false, message: true } } } });
+    expect(out).toMatchObject({ ok: true, revert: { kind: "set_shadow", exact: true, value: { actions: { scribe_start: null, "ticket:wake": false, message: true } } } });
     const rv = out.revert as { kind: string; value: unknown };
     expect(await cmd({ kind: rv.kind, reason: "undo", value: rv.value })).toMatchObject({ ok: true });
     expect(cfg.shadow).toEqual({ global: true, actions: { "ticket:wake": false, message: true } });
   });
+  it("G24: the revert carries ONLY the fields the command touched — an actions-only change has no `global` (whatever global is), and a later change of global is not undone by it", async () => {
+    cfg.shadow = { global: true, actions: { "ticket:wake": false } };
+    const a = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: true } } });
+    expect((a.revert as { value: Row }).value).toEqual({ actions: { message: null } });
+    // someone turns global off meanwhile (naming what goes live); reverting the ACTIONS-only change must leave global alone
+    cfg.shadow = { global: false, actions: { "ticket:wake": false, message: true, scribe_start: true } };
+    await cmd({ kind: "set_shadow", reason: "undo", value: (a.revert as { value: unknown }).value });
+    expect((cfg.shadow as { global: boolean }).global).toBe(false);
+    expect((cfg.shadow as { actions: Row }).actions.message).toBe(true); // G35: null under global:false is HELD, not removed
+    // an actions-only change made while global is already false: its revert is actions-only too
+    const b = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { scribe_start: false } } });
+    expect((b.revert as { value: Row }).value).toEqual({ actions: { scribe_start: true } });
+  });
+
 
   it("add_room: resolves the room by name, refuses a duplicate, and its revert is inexact (flag dev), said so", async () => {
     const out = await cmd({ kind: "add_room", reason: "new OPD", room: "OPD 1", value: { class: "opd", flags: ["pilot"], machine: "mac-7" } });

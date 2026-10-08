@@ -84,6 +84,13 @@ beforeEach(() => {
 afterEach(() => L.setLabStoreForTests(null));
 
 describe("the helpers", () => {
+  it("G21: the room-stage read has a deterministic ORDER BY and no LIMIT, so no routing row can go unchecked by truncation", async () => {
+    const seen: string[] = [];
+    answer = (text) => { if (/FROM stt_routing/.test(text)) seen.push(text); return []; };
+    await Scope.checkRoomStage();
+    expect(seen[0]).toMatch(/ORDER BY engine_id/);
+    expect(seen[0]).not.toMatch(/LIMIT/);
+  });
   it("namesSarvam: sarvam, sarvam-gw, sarvam_anything, any case — nothing else", () => {
     for (const id of ["sarvam", "SARVAM", "sarvam-gw", "sarvam_scribe", "x-sarvam-y"]) expect(Scope.namesSarvam(id), id).toBe(true);
     for (const id of ["whisper", "deepgram", "route", "indicconformer", "", null, undefined]) expect(Scope.namesSarvam(id as string), String(id)).toBe(false);
