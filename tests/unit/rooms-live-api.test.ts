@@ -32,7 +32,7 @@ function fakeDb(o: Opt = {}) {
     const text = strings.join("?");
     if (text.includes("FROM steward_config")) return [];
     if (text.includes("FROM room WHERE")) return ROOM_IDS.map((id) => ({ room_id: id, name: id }));
-    const name = ["bench_listener", "room_install", "bench_session", "bench_level_sample", "steward_decisions", "kiosk_health_events", "pulse_presence_events"].find((n) => text.includes(`FROM ${n}`));
+    const name = ["bench_listener", "room_install", "bench_session", "bench_level_sample", "steward_decisions", "kiosk_health_events", "pulse_presence_events", "eta_encounter_windows"].find((n) => text.includes(`FROM ${n}`));
     calls.push(name ?? "?");
     if (!name) throw new Error("unexpected statement " + text.slice(0, 60));
     if (o.fail?.includes(name)) throw new Error("boom with a secret postgres://user:pw@host/db");
@@ -41,6 +41,7 @@ function fakeDb(o: Opt = {}) {
     if (name === "bench_session") return ROOM_IDS.map((id) => ({ room_id: id, id: "bs_" + id, status: "recording", started_at: iso(NOW - 3_600_000), last_chunk_at: iso(NOW - 70_000) }));
     if (name === "bench_level_sample") return ROOM_IDS.flatMap((id) => Array.from({ length: 150 }, (_, i) => ({ room_id: id, sampled_at: iso(NOW - 800 - i * 2300), peak: id === o.muted ? 0 : i < 4 ? 0.035 + i * 0.002 : 0.009 + (i % 5) * 0.0004, zero_ratio: id === o.muted ? 1 : 0.001 })));
     if (name === "steward_decisions") return [];
+    if (name === "eta_encounter_windows") return [];
     if (name === "kiosk_health_events") return Object.values(MACH).map((m) => ({ machine: m, received_at: iso(NOW - 20_000) }));
     return Object.values(MACH).map((m) => ({ machine: m, ts: iso(NOW - 10_000), dn: "Test Clinician", enc: null }));
   }) as unknown as import("@/lib/rooms-live/read").Db;

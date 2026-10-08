@@ -1,6 +1,6 @@
 "use client";
 import type { CSSProperties } from "react";
-import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, barFraction, forMinutes, headline, isProblem, stepsFor } from "@/lib/rooms-live/present";
+import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, BAR_TICK_FRACTION, barFraction, forMinutes, headline, isProblem, stepsFor } from "@/lib/rooms-live/present";
 import { cardStyle, L4_FILL as L4_TEXT, type EscalationLevel } from "@/lib/rooms-live/escalation";
 import type { RoomRow } from "@/lib/rooms-live/snapshot";
 
@@ -8,11 +8,12 @@ const box: CSSProperties = { background: "#fff", borderRadius: 14, padding: 14, 
 
 export function SoundBar({ row, onDark }: { row: RoomRow; onDark?: boolean }) {
   const c = COLORS[row.state];
-  const pct = Math.round(barFraction(row.level.rms) * 100);
+  const pct = Math.round(barFraction(row.level.rms, row.baseline_rms) * 100);
   const grey = row.level.stale || row.state === "off" || row.state === "unplugged" || row.state === "notrec" || row.state === "unknown";
   return (
-    <div role="meter" aria-label="Sound level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={grey ? 0 : pct} style={{ height: 8, borderRadius: 4, background: onDark ? "rgba(255,255,255,.28)" : "#ECEBE6", overflow: "hidden" }}>
+    <div role="meter" aria-label="Sound level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={grey ? 0 : pct} style={{ height: 8, borderRadius: 4, background: onDark ? "rgba(255,255,255,.28)" : "#ECEBE6", overflow: "hidden", position: "relative" }}>
       <div style={{ width: `${grey ? 0 : pct}%`, height: "100%", background: onDark ? "#FFFFFF" : c.fg, transition: "width .6s ease" }} />
+      <div aria-hidden="true" data-testid="speech-tick" style={{ position: "absolute", left: `${BAR_TICK_FRACTION * 100}%`, top: 0, bottom: 0, width: 2, background: onDark ? "rgba(255,255,255,.75)" : "#4F535A" }} />
     </div>
   );
 }

@@ -22,6 +22,7 @@ import {
   readOccupancy,
   readSessions,
   readSteward,
+  readWarehouseConsults,
   type Db,
   type ExtRow,
   type HeartbeatRow,
@@ -30,6 +31,7 @@ import {
   type ListenerRow,
   type SessionRow,
   type StewardRow,
+  type WarehouseConsultRow,
 } from "./read";
 import { computeState, type LevelRow, type RoomStateName, type StateInput } from "./state";
 
@@ -53,6 +55,8 @@ export type RoomRow = {
 export type Snapshot = { generated_at: string; rooms: RoomRow[]; degraded: string[] };
 
 export const MEMO_MS = 2000;
+/** a warehouse consult closed longer ago than this is no longer "in consultation" */
+export const CONSULT_CLOSE_GRACE_MS = 2 * 60_000;
 
 const ms = (x: string | null | undefined): number | null => {
   if (!x) return null;
@@ -129,11 +133,13 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   let hb: { v: HeartbeatRow[] | null; ok: boolean } = { v: [], ok: true };
   let ext: { v: ExtRow[] | null; ok: boolean } = { v: [], ok: true };
   let occ: { v: Awaited<ReturnType<typeof readOccupancy>> | null; ok: boolean } = { v: [], ok: true };
+  let whc: { v: WarehouseConsultRow[] | null; ok: boolean } = { v: [], ok: true };
   if (allKeys.length > 0) {
-    [hb, ext, occ] = await Promise.all([
+    [hb, ext, occ, whc] = await Promise.all([
       safe("kiosk_health_heartbeat", () => readHeartbeats(deps.db, allKeys, asOf)),
       safe("pulse_presence_ext", () => readExt(deps.db, allKeys, asOf)),
       safe("occupancy", () => readOccupancy(deps.db, allKeys, asOf)),
+      safe("eta_encounter_windows", () => readWarehouseConsults(deps.db, allKeys, asOf)),
     ]);
   }
 
@@ -158,10 +164,21 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const room = roomOfKey.get(matchKey(e.machine));
     if (room && (!extBy.has(room) || Date.parse(e.ts) > Date.parse(extBy.get(room)!.ts))) extBy.set(room, e);
   }
-  const occBy = new Map<string, { occupied: boolean; ambiguous: boolean; page_name: string | null }>();
+  const occBy = new Map<string, { occupied: boolean; ambiguous: boolean; page_name: string | null; best_dn: string | null; best_stale: boolean }>();
   for (const o of occ.v ?? []) {
     const room = roomOfKey.get(matchKey(o.machine));
-    if (room) occBy.set(room, { occupied: o.occupied, ambiguous: o.ambiguous, page_name: o.page_name });
+    if (room) occBy.set(room, { occupied: o.occupied, ambiguous: o.ambiguous, page_name: o.page_name, best_dn: o.best_dn ?? null, best_stale: !!o.best_stale });
+  }
+  // v1.4: the newest warehouse consult per room; it counts only while OPEN (t_open <= now, and no t_close or one within the last 2 minutes)
+  const openConsultBy = new Map<string, WarehouseConsultRow>();
+  for (const c of whc.v ?? []) {
+    const room = roomOfKey.get(matchKey(c.machine));
+    const tOpen = Date.parse(c.t_open);
+    const tClose = c.t_close ? Date.parse(c.t_close) : null;
+    if (!room || !Number.isFinite(tOpen) || tOpen > now) continue;
+    if (tClose !== null && !(tClose >= now - CONSULT_CLOSE_GRACE_MS)) continue;
+    const prev = openConsultBy.get(room);
+    if (!prev || Date.parse(prev.t_open) < tOpen) openConsultBy.set(room, c);
   }
 
   const rooms: RoomRow[] = ROOMS.map((def) => {
@@ -187,12 +204,20 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const e = extBy.get(def.room_id);
     const present = !!o && o.occupied && !o.ambiguous;
     // F28: the name is the identity-checked occupant's (scopedOccupancy), never the newest extension event's display_name (that is the stale cookie identity)
-    const doctor = present ? { display: o!.page_name?.trim().slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" } : null;
+    // v1.4: an open warehouse consult names the doctor whatever occupancy says. Otherwise the occupancy rules stand: the page greeting, then the occupant's
+    // non-stale display name, then the literal. A stale-cookie stream's dn is a greeting or a placeholder, never the cookie's name; its best_dn is not used.
+    const wc = openConsultBy.get(def.room_id);
+    const bestName = o && !o.best_stale ? o.best_dn?.trim() : "";
+    const doctor: RoomRow["doctor"] = wc?.doctor_name
+      ? { display: wc.doctor_name.slice(0, 60), activity: "In consultation" }
+      : present
+        ? { display: o!.page_name?.trim().slice(0, 60) || bestName?.slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" }
+        : null;
     return {
       room_id: def.room_id,
       label: def.label,
       doctor,
-      doctor_known: occ.ok,
+      doctor_known: occ.ok && whc.ok,
       state: r.state,
       state_since: r.state_since === null ? null : new Date(r.state_since).toISOString(),
       detail_code: r.detail_code,
