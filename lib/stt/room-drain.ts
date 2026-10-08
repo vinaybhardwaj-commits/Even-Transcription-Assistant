@@ -1375,7 +1375,7 @@ export async function roomWindowEngine(
   // explicitlyNamed: a Sarvam room engine never fetches room audio at all.
   {
     const o4EngineId = typeof progress.engine_id === "string" && progress.engine_id ? progress.engine_id : null;
-    if (isSarvamEngine(o4EngineId, o4EngineId ? adapterFor(o4EngineId)?.key : null)) {
+    if (isSarvamEngine(o4EngineId)) {
       const detail = `${SCOPE_CONSULT_ONLY} (O4)`;
       const attempts = await recordFailure(windowId, "refused", detail);
       return { ...out, step: "refused", detail: `refused: ${detail}`, attempts };

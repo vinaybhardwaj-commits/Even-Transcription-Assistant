@@ -36,12 +36,16 @@ vi.mock("@/lib/stt/registry", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   adapterFor: (k: string) => (k === "sarvam" || k === "whisper" ? { key: k, transcribe: H.transcribe, capabilities: {} } : null),
 }));
+vi.mock("@/lib/whisper", () => ({
+  transcribeWithWhisper: async () => ({ ok: true, transcript: "words", language: "en", latency_ms: 10, attempts: 1,
+                                        segments: [{ start_s: 0, end_s: 5, text: "words" }], engineVersion: null }),
+}));
 vi.mock("@/lib/auth", () => ({ verifyAdminJwt: async () => ({ admin_id: "a1" }) }));
 vi.mock("@/lib/cookie", () => ({ readAdminCookie: async () => "c" }));
 
 import { isSarvamEngine, isScopeRefusal } from "@/lib/stt/o4-scope";
 import { resolveRouting } from "@/lib/stt/routing";
-import { roomWindowEngine } from "@/lib/stt/room-drain";
+import { roomWindowEngine, roomWindowSegment } from "@/lib/stt/room-drain";
 import { PUT } from "@/app/api/admin/stt-lab/routing/route";
 
 beforeEach(() => {
@@ -98,14 +102,26 @@ describe("3. roomWindowEngine", () => {
     expect(H.failures.length).toBe(1);
   });
   it("refuses a Sarvam-prefixed engine id too", async () => {
-    H.engines.sarvam_v2 = H.engines.sarvam!;
-    const out = await roomWindowEngine("w1", { actor: "t", via: "test" } as never, { engine_id: "sarvam", clip_r2_key: "k" });
+    const out = await roomWindowEngine("w1", { actor: "t", via: "test" } as never, { engine_id: "sarvam-v3", clip_r2_key: "k" });
     expect(out.step).toBe("refused");
+    expect(H.transcribe).not.toHaveBeenCalled();
+    expect(H.download).not.toHaveBeenCalled();
   });
   it("does not refuse a non-Sarvam engine as O4", async () => {
     const out = await roomWindowEngine("w1", { actor: "t", via: "test" } as never, { engine_id: "whisper", clip_r2_key: "k" }).catch(() => ({ step: "threw", detail: "" }));
     expect(H.download).toHaveBeenCalled();
     expect(out.detail ?? "").not.toContain("scope_consult_only");
+  });
+});
+
+describe("3b. roomWindowSegment", () => {
+  it("fails the window by name as refused when room resolves to Sarvam", async () => {
+    const out = await roomWindowSegment("w1", "https://x.test", { actor: "t", via: "test" } as never, { clip_r2_key: "k", audio_seconds: 900 });
+    expect(out.ok).toBe(false);
+    expect(out.step).toBe("refused");
+    expect(out.detail).toBe("refused: scope_consult_only (O4)");
+    expect(H.failures.length).toBe(1);
+    expect(out.next_progress).toBeUndefined(); // no engine_id handed on to the engine step
   });
 });
 
