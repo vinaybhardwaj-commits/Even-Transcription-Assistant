@@ -142,17 +142,48 @@ export function computeRoomStatus(facts: RoomPollFacts, nowMs: number): RoomStat
  */
 export const GENUINE_RECOVERY_MIN_DISTINCT = 2;
 export const RECOVERY_LEVEL_WINDOW_S = 120;
+/**
+ * RECOVERY DWELL (Arch #14 acceptance add, 6-7 Oct 2026). Alerts 545-575 flipped OPD5 degraded <-> "recovering" on peaks of 0.0001-0.004 while
+ * `zero_ratio` sat near 1: two distinct values satisfy GENUINE_RECOVERY_MIN_DISTINCT, and a dead tape produces them.
+ *
+ * SCOPE (herdr-lead ruling on F3): the dwell applies ONLY to the recovery of an alert that included SILENT_WHILE_RECORDING (`silent_alert`). An
+ * offline, DEVICE_MISSING, CLIPPING, disk-low or encoder-stalled alert recovers as it always did: a quiet clinic must not hold those open.
+ *
+ * WHAT "LIVE" MEANS HERE, AND A DELIBERATE DELTA FROM THE FIRE PATH. A sample is live when `zero_ratio` is well under the digital-silence line
+ * (below RECOVERY_LIVE_MAX_ZERO_RATIO) AND its `peak` is at or above RECOVERY_LIVE_MIN_PEAK. The fire path uses SILENT_PEAK_MAX (0.01), calibrated
+ * on the checkpoint's TRUE peak (speak-test 0.012-0.026). `bench_level_sample.peak` on the Mac is the checkpoint RMS (RoomEngine.currentLevels sends
+ * peak = average = rms), which sits well below the true peak for the same speech, so 0.01 would leave soft speech never live. The recovery floor is
+ * 0.005, about the 0.007 noise floor of a healthy C270 (MUTE_PEAK in rooms-live/state.ts documents it) and far above the 0.0001-0.004 ticks of the
+ * 545-575 flaps. The fire floor is unchanged.
+ *
+ * At least RECOVERY_MIN_LIVE_SAMPLES live samples, and at least RECOVERY_MIN_LIVE_SHARE of the window's samples. One tiny tick cannot clear degraded.
+ * KNOWN LIMIT: a steady tone or hum with energy above the floor reads as live; there is no spectral data to tell it from speech.
+ */
+export const RECOVERY_LIVE_MAX_ZERO_RATIO = 0.5;
+export const RECOVERY_LIVE_MIN_PEAK = 0.005;
+export const RECOVERY_MIN_LIVE_SAMPLES = 20;
+export const RECOVERY_MIN_LIVE_SHARE = 0.5;
+/** The two wordings of the silent reason in an outbox body: the current one and the one written before Arch #14. */
+export const SILENT_ALERT_BODY_MARKERS = ["digital silence on the capture", "silence while recording"] as const;
 
 export type RecoveryEvidence = {
   /** a bench_chunk row (any session of the room) created after the alert began */
   chunk_after_alert: boolean;
   /** distinct (peak, zero_ratio) values among the room's level samples in the last RECOVERY_LEVEL_WINDOW_S */
   distinct_levels: number;
+  /** level samples in the same window that are live (see RECOVERY DWELL). Absent: the caller does not read the dwell and only the other two tests apply. */
+  live_samples?: number;
+  /** all level samples in the same window */
+  total_samples?: number;
+  /** The alert being recovered included SILENT_WHILE_RECORDING. The dwell is tested only when this is true. */
+  silent_alert?: boolean;
 };
 
 /** PURE. `null` (evidence could not be read) is NOT genuine: an alert stays open rather than closing on a guess. */
 export function isGenuineRecovery(ev: RecoveryEvidence | null | undefined): boolean {
-  return Boolean(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT);
+  if (!(ev && ev.chunk_after_alert && ev.distinct_levels >= GENUINE_RECOVERY_MIN_DISTINCT)) return false;
+  if (ev.silent_alert !== true || ev.live_samples === undefined || ev.total_samples === undefined) return true;
+  return ev.live_samples >= RECOVERY_MIN_LIVE_SAMPLES && ev.live_samples >= ev.total_samples * RECOVERY_MIN_LIVE_SHARE;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +231,7 @@ function andJoin(parts: readonly string[]): string {
  */
 export const REASON_LABEL: Record<DegradationReason, string> = {
   device_missing: "a missing input device",
-  silent_while_recording: "silence while recording",
+  silent_while_recording: "digital silence on the capture (exact zeros, not a quiet room)",
   clipping: "clipping",
   encoder_stalled: "a stalled encoder",
   tape_stalled: "a stalled tape",
@@ -583,12 +614,39 @@ export async function loadRecoveryEvidence(): Promise<Map<string, RecoveryEviden
                   AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
                   AND b.sampled_at > now() - interval '120 seconds'
              ) d
-           ) AS distinct_levels
+           ) AS distinct_levels,
+           (
+             SELECT count(*) FILTER (WHERE b.zero_ratio IS NOT NULL AND b.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND b.peak >= ${RECOVERY_LIVE_MIN_PEAK})::int
+               FROM bench_level_sample b
+              WHERE b.room_id = ras.room_id
+                AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                AND b.sampled_at > now() - interval '120 seconds'
+           ) AS live_samples,
+           (
+             SELECT count(*)::int FROM bench_level_sample b
+              WHERE b.room_id = ras.room_id
+                AND b.ist_date >= ((now() - interval '120 seconds') AT TIME ZONE 'Asia/Kolkata')::date
+                AND b.sampled_at > now() - interval '120 seconds'
+           ) AS total_samples,
+           COALESCE((
+             SELECT o.kind = 'degraded' AND (o.body LIKE '%' || ${SILENT_ALERT_BODY_MARKERS[0]} || '%' OR o.body LIKE '%' || ${SILENT_ALERT_BODY_MARKERS[1]} || '%')
+               FROM room_alert_outbox o
+              WHERE ras.room_id = ANY(o.room_ids) AND o.kind IN ('offline', 'degraded')
+              ORDER BY o.created_at DESC, o.id DESC LIMIT 1
+           ), false) AS silent_alert
       FROM room_alert_state ras
      WHERE ras.status <> 'ok'
-  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string }>;
+  `) as Array<{ room_id: string; chunk_after_alert: boolean; distinct_levels: number | string; live_samples: number | string; total_samples: number | string; silent_alert: boolean }>;
   const m = new Map<string, RecoveryEvidence>();
-  for (const r of rows) m.set(r.room_id, { chunk_after_alert: Boolean(r.chunk_after_alert), distinct_levels: Number(r.distinct_levels) || 0 });
+  for (const r of rows) {
+    m.set(r.room_id, {
+      chunk_after_alert: Boolean(r.chunk_after_alert),
+      distinct_levels: Number(r.distinct_levels) || 0,
+      live_samples: Number(r.live_samples) || 0,
+      total_samples: Number(r.total_samples) || 0,
+      silent_alert: Boolean(r.silent_alert),
+    });
+  }
   return m;
 }
 

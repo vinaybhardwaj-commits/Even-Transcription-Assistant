@@ -1395,11 +1395,17 @@ export async function applyInstallPoll(
     tape_advancing: f.tape_advancing,
     rec: recording,
     // Tier 1 §3 — the 0.1.22 heartbeat, on the entry only when this poll carried it, so a 0.1.21
-    // entry reads exactly as it did and the rules fall back to peak / zero_ratio for it.
+    // entry reads exactly as it did. `silence_ms` is stored and is not what raises
+    // SILENT_WHILE_RECORDING: that count is `pollIsSilent` (zero_ratio and peak) below.
     ...(f.clip_count !== null ? { clip_count: f.clip_count } : {}),
     ...(f.silence_ms !== null ? { silence_ms: f.silence_ms } : {}),
   });
-  const silentNow = pollIsSilent({ rec: recording, tape_advancing: f.tape_advancing, zero_ratio: f.zero_ratio });
+  const silentNow = pollIsSilent({
+    rec: recording,
+    tape_advancing: f.tape_advancing,
+    zero_ratio: f.zero_ratio,
+    peak: f.peak,
+  });
   try {
     const rows = (await sql`
       UPDATE room_install

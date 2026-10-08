@@ -17,6 +17,7 @@ import {
   planWatchdogRun,
   isGenuineRecovery,
   GENUINE_RECOVERY_MIN_DISTINCT,
+  RECOVERY_MIN_LIVE_SAMPLES,
   type RoomRunInput,
   type RoomPollFacts,
   type RecoveryEvidence,
@@ -197,5 +198,41 @@ describe("planWatchdogRun — everything else is unchanged", () => {
   it("with no evidence field at all (the planner's legacy callers) the poll alone still decides, session or not", () => {
     expect(planWatchdogRun([input()], NOW).messages.map((m) => m.kind)).toEqual(["recovered"]);
     expect(planWatchdogRun([input({ facts: cleanPoll() })], NOW).messages.map((m) => m.kind)).toEqual(["recovered"]);
+  });
+});
+
+// Arch #14 acceptance add: recovery needs speech-level energy held for a dwell, not a tiny non-zero tick.
+describe("isGenuineRecovery — dwell on live samples", () => {
+  const dwell = (live: number, total: number, silent_alert = true): RecoveryEvidence => ({ chunk_after_alert: true, distinct_levels: 40, live_samples: live, total_samples: total, silent_alert });
+  it("tiny peaks with zero_ratio near 1 (no live samples) never clear degraded, however many distinct values", () => {
+    expect(isGenuineRecovery(dwell(0, 80))).toBe(false);
+  });
+  it("one live tick is not a dwell", () => {
+    expect(isGenuineRecovery(dwell(1, 80))).toBe(false);
+  });
+  it("enough live samples, but under half the window, is not genuine", () => {
+    expect(isGenuineRecovery(dwell(RECOVERY_MIN_LIVE_SAMPLES, 80))).toBe(false);
+  });
+  it("a window that is mostly live is genuine", () => {
+    expect(isGenuineRecovery(dwell(60, 80))).toBe(true);
+    expect(isGenuineRecovery(dwell(RECOVERY_MIN_LIVE_SAMPLES, RECOVERY_MIN_LIVE_SAMPLES))).toBe(true);
+  });
+  it("19 of 19 live is NOT genuine: the 20-sample floor holds even at a 100 % live share", () => {
+    expect(RECOVERY_MIN_LIVE_SAMPLES).toBe(20);
+    expect(isGenuineRecovery(dwell(19, 19))).toBe(false);
+    expect(isGenuineRecovery(dwell(20, 20))).toBe(true);
+  });
+  it("the share edge: 40 of 80 is genuine, 40 of 81 is not", () => {
+    expect(isGenuineRecovery(dwell(40, 80))).toBe(true);
+    expect(isGenuineRecovery(dwell(40, 81))).toBe(false);
+  });
+  it("SCOPE (F3): only an alert that included SILENT is held to the dwell; offline, DEVICE_MISSING, clipping, disk, encoder recover as before", () => {
+    expect(isGenuineRecovery(dwell(0, 80, false))).toBe(true);
+    expect(isGenuineRecovery({ chunk_after_alert: true, distinct_levels: 2, live_samples: 0, total_samples: 80 })).toBe(true);
+    expect(isGenuineRecovery({ chunk_after_alert: false, distinct_levels: 2, live_samples: 0, total_samples: 80 })).toBe(false);
+    expect(isGenuineRecovery({ ...dwell(0, 80, false), distinct_levels: 1 })).toBe(false);
+  });
+  it("still needs a chunk after the alert", () => {
+    expect(isGenuineRecovery({ ...dwell(60, 80), chunk_after_alert: false })).toBe(false);
   });
 });
