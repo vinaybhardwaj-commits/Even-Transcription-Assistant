@@ -92,6 +92,7 @@ import type { SttAdapter } from "@/lib/stt/types";
 import { ADAPTERS, adapterFor } from "@/lib/stt/registry";
 import { guardPaidEngine, PAID_MAX_DURATION_MS } from "@/lib/stt/paid-engines";
 import { guardedTranscribe } from "@/lib/stt/guarded-transcribe";
+import { checkEngine, sarvamScopeRefusal } from "@/lib/stt/sarvam-scope";
 
 /** Every engine the registry can actually run. Derived, so a new adapter is selectable at once. */
 const STT_ENGINE_KEYS = Object.keys(ADAPTERS).sort();
@@ -2028,6 +2029,13 @@ const transcribeRange: McpTool = {
     additionalProperties: false,
   },
   handler: async (args: ToolArgs, ctx: ToolContext) => {
+    // O4 (V, 08 Oct): room / bench audio is never sent to Sarvam, by any engine id that is or routes to it. Refused BEFORE anything else,
+    // so neither the synchronous path nor `async:true` (which would otherwise answer engine_not_supported_on_async) gets near an engine.
+    {
+      const asked = argStr(args, "engine", 32);
+      const verdict = asked ? await checkEngine(asked) : "clear";
+      if (verdict !== "clear") return sarvamScopeRefusal({ engine: asked, tool: "scribe_transcribe_range" }, verdict);
+    }
     // Tier 2 §3 — `async:true` submits the equivalent job and returns its id. The synchronous
     // path below is UNCHANGED and stays the default for one release, so nothing that calls this
     // tool today sees a different answer.

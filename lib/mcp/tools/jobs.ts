@@ -12,6 +12,8 @@ import { JobArgsError, submitJob, UnknownKindError, JOB_KIND_NAMES } from "@/lib
 import { KIND_BY_NAME, STUB_KIND_NAMES } from "@/lib/jobs/kinds";
 import { readRecentAudit, AUDIT_ACTIONS_HINT } from "@/lib/jobs/audit-read";
 import { errorCodeOf, JOB_ERROR_CODES } from "@/lib/jobs/errors";
+import { checkRoomStage, sarvamScopeRefusal } from "@/lib/stt/sarvam-scope";
+import { sarvamJobEnded } from "@/lib/jobs/sarvam-hook";
 import { argInt, argStr, argBool, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 /** PURE — the row a caller sees. `result` is withheld unless asked for: it can be large. */
@@ -83,10 +85,18 @@ const submit: McpTool = {
       // Fix-up 4 item 6 — the per-kind scope check now lives INSIDE submitJob, which all three
       // submit paths go through. The copy that used to sit here is gone: a rule with two homes is
       // a rule one caller can skip, which is exactly how the async:true shims got past it.
+      let jobArgs: unknown = (args as Record<string, unknown>).args ?? {};
+      // O4 (V, 08 Oct): an MCP-submitted room window is never sent to Sarvam. `via` is stamped here, not trusted: a caller cannot claim "cron" to
+      // pass as a system job. When the room stage routes to Sarvam the submit is refused outright and nothing is queued or claimed.
+      if (kind === "room_window" && jobArgs && typeof jobArgs === "object" && !Array.isArray(jobArgs)) {
+        if ("via" in (jobArgs as Record<string, unknown>)) jobArgs = { ...(jobArgs as Record<string, unknown>), via: "mcp" };
+        const verdict = await checkRoomStage();
+        if (verdict !== "clear") return sarvamScopeRefusal({ kind }, verdict);
+      }
       try {
         const job = await submitJob({
           kind,
-          args: (args as Record<string, unknown>).args ?? {},
+          args: jobArgs,
           // Fix-up (3): the resolved token's actor, so a job row says who asked for it.
           actor: ctx.actor,
           origin: ctx.origin,
@@ -95,7 +105,7 @@ const submit: McpTool = {
         return { ok: true, job_id: job.id, kind: job.kind, status: job.status };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind, allowed: JOB_KIND_NAMES };
-        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", kind, detail: e.reason };
+        if (e instanceof JobArgsError) return e.reason.startsWith("scope_consult_only") ? sarvamScopeRefusal({ kind }) : { ok: false, error: "bad_args", kind, detail: e.reason };
         throw e;
       }
     }),
@@ -203,6 +213,8 @@ const cancel: McpTool = {
           ? { ok: false, error: "not_cancellable", job_id: id, status: existing.status }
           : { ok: false, error: "unknown_job", job_id: id };
       }
+      // S8A-FIX2: a cancelled Sarvam job still writes its one ledger line (audio_s = the measured seconds if a Sarvam batch was started, else 0)
+      await sarvamJobEnded(job, "cancelled");
       return { ok: true, job_id: job.id, status: job.status, step: job.step };
     }),
 };

@@ -50,6 +50,7 @@ import { META_TOOLS } from "./tools/meta";
 import { S1_TOOLS } from "./tools/s1";
 import { S1B_TOOLS } from "./tools/s1b";
 import { S5_TOOLS } from "./tools/s5";
+import { S8_TOOLS } from "./tools/s8";
 
 /**
  * Every tool the door published before Slice E, in the order tools/list served them, plus every
@@ -65,6 +66,7 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...S1_TOOLS,
   ...S1B_TOOLS,
   ...S5_TOOLS,
+  ...S8_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));
