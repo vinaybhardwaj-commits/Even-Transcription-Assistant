@@ -10,15 +10,21 @@ import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepCont
 import { jobError } from "../errors";
 import { getRubric, canRun } from "@/lib/rubrics/registry";
 import { evaluateUnit } from "@/lib/rubrics/engines";
-import { compareItem, parseBenchSet, scoreBench, type BenchSet } from "@/lib/rubrics/bench";
+import { compareItem, labelReport, parseBenchSet, scoreBench, type BenchSet } from "@/lib/rubrics/bench";
 import { finishRun, insertRun, newRunId, readEvidence, writeEvidence } from "@/lib/rubrics/store";
 import { rubricTiming } from "./rubric-run";
 import { labStore } from "@/lib/sarvam-lab";
 
 export const RUBRIC_BENCH_KIND = "rubric_bench";
-const Args = z.object({ rubric_id: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/) }).strict();
+/**
+ * S71-AB/C: which labelled set a bench runs. `gold` (default) = the rubric's own bench.location; `grokbot_agreement` = model labels by the GrokBot Sentiment Analyzer (NOT human gold; the report
+ * calls the metric agreement_with_grokbot); `human_v` = V's own labels (human gold; the report calls the metric accuracy_vs_V and states n). Each set is its own run and its own report.
+ */
+export const BENCH_SETS = ["gold", "grokbot_agreement", "human_v"] as const;
+export type BenchSetName = (typeof BENCH_SETS)[number];
+const Args = z.object({ rubric_id: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/), set: z.enum(BENCH_SETS).optional() }).strict();
 
-export function parseRubricBenchArgs(raw: unknown): { rubric_id: string } {
+export function parseRubricBenchArgs(raw: unknown): { rubric_id: string; set?: BenchSetName } {
   const p = Args.safeParse(raw ?? {});
   if (!p.success) throw new JobArgsError(`bad args: ${p.error.issues[0]?.path.join(".") || "args"} ${p.error.issues[0]?.message ?? ""}`.trim().slice(0, 160));
   const r = getRubric(p.data.rubric_id);
@@ -32,7 +38,7 @@ export const rubricBenchKind: JobKind = {
   first: "load",
   scope: "invoke",
   parseArgs: (raw) => parseRubricBenchArgs(raw) as unknown as Record<string, unknown>,
-  dedupeOn: (args) => [["rubric_id", String(args.rubric_id)]],
+  dedupeOn: (args) => [["rubric_id", String(args.rubric_id)], ["set", String(args.set ?? "gold")]],
   async run(ctx: StepContext) {
     switch (ctx.step) {
       case "load": return loadStep(ctx);
@@ -46,7 +52,8 @@ export const rubricBenchKind: JobKind = {
 /** Repo bench sets are registered here once a rubric is benched (static imports: the bundler ships them). None yet. */
 export const REPO_BENCH_SETS: Record<string, unknown> = {};
 
-async function loadBenchSet(rubricId: string, version: string, location: string): Promise<BenchSet | null> {
+async function loadBenchSet(rubricId: string, version: string, location: string, set: BenchSetName = "gold"): Promise<BenchSet | null> {
+  if (set !== "gold") return loadGold(`rubric/bench/${rubricId}/${set}.jsonl`);
   // llm_zdr rubrics: gold prepared offline and uploaded as JSONL (rubric/bench/<rubric_id>/gold.jsonl); the gold never enters the repo
   if (location.startsWith("rubric/bench/")) return loadGold(location);
   // the repo copy first (once a rubric is benched its set is registered above); otherwise the lab store copy for this exact version (a draft's labelled set lives there until it is committed)
@@ -57,7 +64,7 @@ async function loadBenchSet(rubricId: string, version: string, location: string)
 /** One JSON object per line: { unit_key, expected: { field: value } }. Bad lines make the whole set invalid (a silent skip would inflate the score). */
 async function loadGold(location: string): Promise<BenchSet | null> {
   const store = labStore();
-  if (!store || !/^rubric\/bench\/[a-z][a-z0-9_]{1,63}\/gold\.jsonl$/.test(location)) return null;
+  if (!store || !/^rubric\/bench\/[a-z][a-z0-9_]{1,63}\/(gold|grokbot_agreement|human_v)\.jsonl$/.test(location)) return null;
   const obj = await store.get(location);
   if (!obj) return null;
   const items: unknown[] = [];
@@ -71,12 +78,12 @@ async function loadGold(location: string): Promise<BenchSet | null> {
 const num = (v: unknown): number => (typeof v === "number" ? v : Number(v)) || 0;
 
 async function loadStep(ctx: StepContext): Promise<StepOutcome> {
-  const a = ctx.args as { rubric_id: string };
+  const a = ctx.args as { rubric_id: string; set?: BenchSetName };
   const r = getRubric(a.rubric_id);
   if (!r) return failWith(jobError("unknown_rubric", a.rubric_id));
   if (r.bench.metric !== "field_accuracy" && r.bench.metric !== "accuracy") return failWith(jobError("bench_metric_unsupported", r.bench.metric));
   if (typeof ctx.progress.run_id === "string") return nextStep("evaluate", ctx.progress);
-  const set = await loadBenchSet(r.id, r.version, r.bench.location);
+  const set = await loadBenchSet(r.id, r.version, r.bench.location, a.set ?? "gold");
   if (!set) return failWith(jobError("bench_set_missing", r.bench.location));
   const runId = newRunId();
   await insertRun({ run_id: runId, rubric_id: r.id, version: r.version, kind: "bench", units_planned: set.items.length, actor: ctx.job.actor ?? null });
@@ -105,13 +112,15 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
 }
 
 async function finishStep(ctx: StepContext): Promise<StepOutcome> {
-  const a = ctx.args as { rubric_id: string };
+  const a = ctx.args as { rubric_id: string; set?: BenchSetName };
+  const setName: BenchSetName = a.set ?? "gold";
   const r = getRubric(a.rubric_id)!;
   const runId = String(ctx.progress.run_id ?? "");
   const compared = (ctx.progress.compared as Array<ReturnType<typeof compareItem>>) ?? [];
   const report = scoreBench(r.bench.metric, r.bench.threshold, compared);
   if ("error" in report) return failWith(jobError("bench_metric_unsupported", r.bench.metric));
-  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, population: (r.definition as { bench_population?: string } | undefined)?.bench_population ?? null, ...report, items_detail: compared });
+  const labelled = labelReport(setName, report) as { metric: string; threshold: number | null; passed: boolean | null; human_gold?: boolean };
+  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, population: (r.definition as { bench_population?: string } | undefined)?.bench_population ?? null, ...labelReport(setName, report), items_detail: compared });
   await finishRun({ run_id: runId, units_ok: compared.length - report.unscored, units_failed: report.unscored });
-  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, metric: report.metric, value: report.value, threshold: report.threshold, passed: report.passed, items: report.items, fields: report.fields, unscored: report.unscored, report_key: reportKey, status_at_run: r.status });
+  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, set: setName, metric: labelled.metric, value: report.value, threshold: labelled.threshold, passed: labelled.passed, n: report.items, items: report.items, fields: report.fields, unscored: report.unscored, report_key: reportKey, status_at_run: r.status });
 }

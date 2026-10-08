@@ -67,3 +67,17 @@ export function scoreBench(metric: string, threshold: number, compared: Array<Re
   const passed = value >= threshold;
   return { metric, value: Math.round(value * 1000) / 1000, threshold, passed, items, fields: flat.length, items_all_equal: allEqual, metrics, per_field: perField, unscored };
 }
+
+/**
+ * S71-AB/C: what a report calls itself. A GrokBot-label set is model-vs-model AGREEMENT, never "accuracy", and has no pass line; V's own labels are accuracy_vs_V with n stated. The
+ * `accuracy` key of the scorer's metrics is renamed for the agreement set so the word cannot be read off the report.
+ */
+export function labelReport(set: "gold" | "grokbot_agreement" | "human_v", r: BenchReport): Record<string, unknown> {
+  if (set === "gold") return { ...r, set };
+  const { accuracy, ...restMetrics } = r.metrics as BenchMetrics & { accuracy: number };
+  if (set === "grokbot_agreement") {
+    return { ...r, set, metric: "agreement_with_grokbot", metrics: { ...restMetrics, agreement: accuracy }, threshold: null, passed: null, human_gold: false, provenance: "model_grokbot", n: r.items,
+      note: "labels are the GrokBot Sentiment Analyzer's model scores, not a human verdict; agreement is not accuracy" };
+  }
+  return { ...r, set, metric: "accuracy_vs_V", metrics: { ...restMetrics, accuracy_vs_V: accuracy }, threshold: null, passed: null, human_gold: true, rater: "V", n: r.items, population: "in-room consults, room tape (not Meet)" };
+}

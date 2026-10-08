@@ -446,4 +446,33 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       LLM.setRubricChatForTests(null);
     }
   });
+
+  it("S71-AB/C — rubric_bench by set: grokbot_agreement is reported as agreement_with_grokbot (no accuracy, no pass line, human_gold false); human_v as accuracy_vs_V with n stated; the default set is unchanged", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const good = { surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: true, alternatives_named: true, timing_named: true }, uptake_of_surgery: "accept", evidence: [] };
+    LLM.setRubricChatForTests(async () => ({ content: JSON.stringify(good), model: "fake/model", latency_ms: 1 }));
+    try {
+      const gold = (rows: unknown[]) => rows.map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/grokbot_agreement.jsonl", gold([{ unit_key: "g1", provenance: "model_grokbot", human_gold: false, expected: { surgery_recommended: true } }, { unit_key: "g2", expected: { surgery_recommended: false } }]));
+      for (const k of ["g1", "g2", "enc1@m1"]) mem.set(`rubric/bench/consult_surgical_pitch/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 3, speaker: "doctor", text: "hello" }, { t_s: 9, speaker: "patient", text: "okay" }] }));
+      const ag = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "grokbot_agreement" });
+      expect(ag.job).toMatchObject({ status: "done", result: { set: "grokbot_agreement", metric: "agreement_with_grokbot", passed: null, threshold: null, n: 2 } });
+      const rep = JSON.parse(mem.get(ag.job.result.report_key)!);
+      expect(rep).toMatchObject({ set: "grokbot_agreement", metric: "agreement_with_grokbot", human_gold: false, provenance: "model_grokbot" });
+      expect(rep.metrics.accuracy).toBeUndefined();
+      expect(rep.metrics.agreement).toBeCloseTo(0.5, 2);
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", gold([{ unit_key: "enc1@m1", human_gold: true, rater: "V", expected: { surgery_recommended: true, recommendation_kind: "surgery" } }]));
+      const hv = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(hv.job).toMatchObject({ status: "done", result: { set: "human_v", metric: "accuracy_vs_V", n: 1, passed: null } });
+      const rep2 = JSON.parse(mem.get(hv.job.result.report_key)!);
+      expect(rep2).toMatchObject({ metric: "accuracy_vs_V", human_gold: true, rater: "V", n: 1 });
+      expect(rep2.metrics.agreement).toBeUndefined();
+      expect(rep2.metrics.accuracy_vs_V).toBe(1);
+      // an unknown set is refused at submit
+      const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+      expect(() => KIND_BY_NAME.get("rubric_bench")!.parseArgs({ rubric_id: "consult_surgical_pitch", set: "nope" })).toThrow();
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
 });

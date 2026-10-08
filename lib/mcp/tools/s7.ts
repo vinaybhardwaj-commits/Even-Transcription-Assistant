@@ -49,7 +49,7 @@ const rubric: McpTool = {
     "action=list|describe|results|runs (read) and run|bench (invoke; queue a job). list {status?}: id, version, units, engine, inputs, status, bench. describe {rubric_id}: the full rubric file (definition, output schema, bench) plus recent runs. " +
     "results {rubric_id?, unit?, rooms? (the first), from?, to?, run_id?, lab?, status?, limit <= 200}: stored results (score, findings, evidence_key, a pointer to the R2 evidence); include_text:true also fetches the evidence JSON of at most 20 rows. runs {rubric_id?, limit}: run history (runs and benches). " +
     `run {rubric_id, unit?, unit_keys?, rooms?, from?, to?, limit <= ${RUBRIC_RUN_MAX_UNITS}, lab?}: only a PRODUCTION rubric runs on a room/date range; a draft or benched rubric needs lab:true AND unit_keys (lab_required / explicit_units_required otherwise). ` +
-    "Only engine=code rubrics run in this slice (engine_not_available otherwise). bench {rubric_id}: run the rubric over its labelled bench set and score it (rubric_run kind bench; result passed true/false, report in R2). Rubric status changes only by repository commit. " +
+    "Only engine=code rubrics run in this slice (engine_not_available otherwise). bench {rubric_id, set?}: run the rubric over its labelled bench set and score it (rubric_run kind bench; result passed true/false, report in R2). Rubric status changes only by repository commit. " +
     "A unit the readers refuse (a blind room-day, no diarization, no audio state) is stored as status skipped with its reason; no transcript text is ever stored in a result.",
   scope: "read",
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -65,6 +65,7 @@ const rubric: McpTool = {
       from: { type: "string", description: "IST YYYY-MM-DD" },
       to: { type: "string", description: "IST YYYY-MM-DD" },
       run_id: { type: "string" },
+      set: { type: "string", description: "bench: gold|grokbot_agreement|human_v" },
       lab: { type: "boolean" },
       include_text: { type: "boolean", description: "results: fetch R2 evidence" },
       limit: { type: "integer", minimum: 1, maximum: RESULTS_LIMIT_MAX },
@@ -122,7 +123,8 @@ const rubric: McpTool = {
       }
       case "bench": {
         if (!rid) return { ok: false, error: "rubric_id_required" };
-        return submit(RUBRIC_BENCH_KIND, { rubric_id: rid }, ctx);
+        const set = argStr(args, "set", 24);
+        return submit(RUBRIC_BENCH_KIND, { rubric_id: rid, ...(set ? { set } : {}) }, ctx);
       }
     }
   },
