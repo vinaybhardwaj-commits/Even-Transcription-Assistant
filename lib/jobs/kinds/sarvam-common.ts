@@ -20,7 +20,15 @@ export const SARVAM_WALL_MS = 30 * 60_000;
 export type SarvamScope = "encounter" | "consult_clip";
 export const SCOPE_CONSULT_ONLY = "scope_consult_only";
 
-export type ResultEntry = { speaker_id: string; start_s: number; end_s: number; text: string; english?: string; /** partial English per 900-char chunk, until the entry is complete */ parts?: string[] };
+export type ResultEntry = {
+  speaker_id: string; start_s: number; end_s: number; text: string;
+  /** S8A4: the script this entry's own text is written in (Latin, Devanagari, Kannada, ...), and Sarvam's per-entry language if the response carried one */
+  script?: string; language_code?: string | null;
+  english?: string; /** where `english` came from: the translate pass (speech -> English), mayura on the entry's text, or the entry itself (Latin script, no partner) */ english_source?: "translate_pass" | "mayura" | "native_latin";
+  /** partial English per 900-char chunk, until the entry is complete */ parts?: string[];
+};
+/** S8A4: one entry of the English track. native_idx = the native entry it was aligned to by time overlap, or null (kept, never dropped). */
+export type EnglishEntry = { speaker_id: string; start_s: number; end_s: number; text: string; source: "translate_pass" | "mayura" | "native_latin"; native_idx: number | null };
 export type ResultDoc = {
   language_code: string | null;
   duration_s: number;
@@ -28,6 +36,13 @@ export type ResultDoc = {
   entries: ResultEntry[];
   transcript: string;
   english?: string;
+  /** S8A4 */
+  english_entries?: EnglishEntry[];
+  drug_candidates?: Array<{ entry_idx: number; heard: string; suggested: string; score: number; source: string }>;
+  sarvam_job_ids?: { native: string | null; english: string | null };
+  minutes?: { native: number; english: number };
+  english_pass?: "pending" | "done" | "skipped_cap" | "failed" | "not_requested";
+  /** the English-track `drug_candidates[].entry_idx` indexes `english_entries` */
 };
 
 export async function readJson<T>(key: string): Promise<T | null> {
@@ -86,11 +101,12 @@ export async function sarvamRatePerMin(): Promise<{ rate: number | null; source:
  */
 export async function reservedMinutesEarlier(job: { id: string; created_at: string }): Promise<number> {
   const rows = (await sql`
-    SELECT COALESCE(SUM(COALESCE((progress->>'duration_ms')::numeric / 60000, ${SARVAM_MAX_JOB_MINUTES})), 0)::float8 AS minutes
+    SELECT COALESCE(SUM(COALESCE((progress->>'duration_ms')::numeric / 60000, ${SARVAM_MAX_JOB_MINUTES})
+                          * (CASE WHEN args->>'english' = 'true' AND COALESCE(step, 'prepare') IN ('prepare', 'init', 'upload', 'start') THEN 2 ELSE 1 END)), 0)::float8 AS minutes
       FROM scribe_job
      WHERE kind = 'sarvam_transcribe' AND status IN ('queued', 'running') AND id <> ${job.id}::text
        AND (created_at < ${job.created_at}::timestamptz OR (created_at = ${job.created_at}::timestamptz AND id < ${job.id}::text))
-       AND COALESCE(step, 'prepare') IN ('prepare', 'init', 'upload', 'start')
+       AND COALESCE(step, 'prepare') IN ('prepare', 'init', 'upload', 'start', 'en_init', 'en_upload', 'en_start')
   `) as Array<{ minutes: number | string | null }>;
   // G22/G26: a job Sarvam was STARTED for (progress.sarvam_started_ms) whose paid-call row has not landed holds its minutes, WHATEVER ITS STATUS (running in poll with
   // audit_pending, done, failed, cancelled: Sarvam bills it either way), for a day. Jobs still in prepare..start are counted above, not twice.
@@ -103,7 +119,16 @@ export async function reservedMinutesEarlier(job: { id: string; created_at: stri
        AND j.updated_at > now() - interval '1 day'
        AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.action = 'stt.paid_call' AND a.target_type = 'stt_engine' AND a.target_id = ${SARVAM_ENGINE} AND a.metadata_json->>'job_id' = j.id)
   `) as Array<{ minutes: number | string | null }>;
-  const n = Number(rows[0]?.minutes ?? 0) + Number(failed[0]?.minutes ?? 0);
+  // S8A4: the English pass is a second paid batch over the same audio: started (en_started_ms) and not yet audited under `<job id>:en` holds its minutes too
+  const english = (await sql`
+    SELECT COALESCE(SUM((j.progress->>'duration_ms')::numeric / 60000), 0)::float8 AS minutes
+      FROM scribe_job j
+     WHERE j.kind = 'sarvam_transcribe' AND j.id <> ${job.id}::text
+       AND j.progress ? 'en_sarvam_job_id' AND (j.progress->>'en_started_ms') IS NOT NULL AND (j.progress->>'duration_ms') IS NOT NULL
+       AND j.updated_at > now() - interval '1 day'
+       AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.action = 'stt.paid_call' AND a.target_type = 'stt_engine' AND a.target_id = ${SARVAM_ENGINE} AND a.metadata_json->>'job_id' = j.id || ':en')
+  `) as Array<{ minutes: number | string | null }>;
+  const n = Number(rows[0]?.minutes ?? 0) + Number(failed[0]?.minutes ?? 0) + Number(english[0]?.minutes ?? 0);
   return Number.isFinite(n) ? n : 0;
 }
 export const SARVAM_MAX_JOB_MINUTES = 30;

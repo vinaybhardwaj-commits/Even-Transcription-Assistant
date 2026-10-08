@@ -39,11 +39,22 @@ export function endedLine(job: Pick<JobRow, "id" | "kind" | "args" | "progress" 
   };
 }
 
+/** PURE — S8A4: the line for the ENGLISH pass of a sarvam_transcribe job the runner or a cancel ended, or null when that pass never started at Sarvam. */
+export function endedEnLine(job: Pick<JobRow, "id" | "kind" | "args" | "progress" | "created_at">, status: "failed" | "cancelled", nowIso: string): CallLine | null {
+  const p = job.progress ?? {};
+  if (job.kind !== "sarvam_transcribe" || n(p.en_started_ms) <= 0) return null;
+  const base = endedLine(job, status, nowIso);
+  return { ...base, job_id: `${job.id}:en`, request_id: s(p.en_sarvam_job_id), task: "translate", audio_s: Math.round(n(p.duration_ms) / 10) / 100, started_at: s(p.en_started_at) ?? base.started_at };
+}
+
 /** Write the line (once) and refresh the lane. A no-op for any other kind. Never throws. */
 export async function sarvamJobEnded(job: JobRow, status: "failed" | "cancelled"): Promise<void> {
   if (!isSarvamKind(job.kind)) return;
   try {
-    await appendLedger(endedLine(job, status, new Date().toISOString()));
+    const now = new Date().toISOString();
+    await appendLedger(endedLine(job, status, now));
+    const en = endedEnLine(job, status, now);
+    if (en) await appendLedger(en);
     await touchLane({ force: true, excludeJobId: job.id });
   } catch (e) {
     console.warn("[sarvam-lab]", JSON.stringify({ code: "ended_hook_failed", err: (e as { name?: string })?.name ?? "error" }));

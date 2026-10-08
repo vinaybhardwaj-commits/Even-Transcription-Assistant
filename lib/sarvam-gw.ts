@@ -17,7 +17,8 @@ export const TRANSLATE_CHUNK_CHARS = 900;
 const JOB_PATH = "/speech-to-text/job/v1";
 const XFER_TIMEOUT_MS = 60_000;
 
-export type GwEntry = { transcript: string; start: number; end: number; speakerId: string };
+/** languageCode: the entry's OWN language if the response carries one (null when it does not: saaras gives one code for the whole file) */
+export type GwEntry = { transcript: string; start: number; end: number; speakerId: string; languageCode: string | null };
 export type Fail = { ok: false; error: string; status?: number; transient: boolean };
 
 /** 429 and 5xx are worth another try; so is a timeout or a network failure. Any other status is the caller's problem. PURE. */
@@ -53,7 +54,7 @@ async function jsonPost(route: string, body: unknown): Promise<{ ok: true; json:
   }
 }
 
-export type BatchStartOpts = { mode?: "transcribe" | "codemix"; languageCode?: string | null; numSpeakers?: number | null; prompt?: string | null };
+export type BatchStartOpts = { mode?: "transcribe" | "codemix" | "translate"; languageCode?: string | null; numSpeakers?: number | null; prompt?: string | null };
 
 /** 1. init — returns Sarvam's job id. The caller persists it BEFORE anything else, so a replay resumes instead of paying twice. */
 export async function gwBatchInit(opts: BatchStartOpts = {}): Promise<{ ok: true; jobId: string } | Fail> {
@@ -63,7 +64,7 @@ export async function gwBatchInit(opts: BatchStartOpts = {}): Promise<{ ok: true
         model: SARVAM_GW_STT_MODEL,
         with_diarization: true,
         with_timestamps: true,
-        ...(opts.mode === "codemix" ? { mode: "codemix" } : {}),
+        ...(opts.mode === "codemix" || opts.mode === "translate" ? { mode: opts.mode } : {}), // translate = speech -> English (S8A4 second pass)
         ...(opts.languageCode ? { language_code: opts.languageCode } : {}),
         ...(opts.numSpeakers ? { num_speakers: opts.numSpeakers } : {}),
         ...(opts.prompt ? { prompt: opts.prompt } : {}),
@@ -151,7 +152,7 @@ export async function gwBatchResult(jobId: string, outputs: string[]): Promise<B
       if (!u) continue;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), XFER_TIMEOUT_MS);
-      let j: { transcript?: string; language_code?: string | null; diarized_transcript?: { entries?: Array<{ transcript?: string; start_time_seconds?: number; end_time_seconds?: number; speaker_id?: string | number }> } };
+      let j: { transcript?: string; language_code?: string | null; diarized_transcript?: { entries?: Array<{ transcript?: string; start_time_seconds?: number; end_time_seconds?: number; speaker_id?: string | number; language_code?: string | null }> } };
       try {
         const r = await fetch(u, { cache: "no-store", signal: ctrl.signal });
         if (!r.ok) continue;
@@ -165,7 +166,7 @@ export async function gwBatchResult(jobId: string, outputs: string[]): Promise<B
       if (!lang && j.language_code) lang = j.language_code;
       for (const e of j.diarized_transcript?.entries ?? []) {
         if (e.transcript && e.transcript.trim()) {
-          entries.push({ transcript: e.transcript.trim(), start: e.start_time_seconds ?? 0, end: e.end_time_seconds ?? 0, speakerId: String(e.speaker_id ?? "") });
+          entries.push({ transcript: e.transcript.trim(), start: e.start_time_seconds ?? 0, end: e.end_time_seconds ?? 0, speakerId: String(e.speaker_id ?? ""), languageCode: typeof e.language_code === "string" && e.language_code ? e.language_code : null });
         }
       }
     }

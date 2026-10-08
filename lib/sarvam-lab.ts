@@ -42,7 +42,7 @@ function assertReadable(key: string): void {
 export type SarvamScope = "encounter" | "consult_clip";
 export type CallLine = {
   caller: typeof CALLER; machine: typeof MACHINE; job_id: string; request_id: string | null; route: "gateway"; mode: "batch" | "sync";
-  task: "transcribe" | "text_translate"; model: string; audio_s: number; chars?: number; started_at: string; finished_at: string;
+  task: "transcribe" | "translate" | "text_translate"; model: string; audio_s: number; chars?: number; started_at: string; finished_at: string;
   status: "ok" | "failed" | "cancelled"; http_status: number | null; throttled: boolean; scope: SarvamScope; ref: string;
 };
 export type LaneActive = { job_id: string; mode: string; task: string; model: string; audio_s: number; started_at: string; scope: string };
@@ -270,7 +270,7 @@ export async function activeJobs(excludeJobId?: string | null): Promise<LaneActi
       return {
         job_id: r.id,
         mode: transcribe ? "batch" : "sync",
-        task: transcribe ? "transcribe" : "text_translate",
+        task: transcribe ? (String(r.step ?? "").startsWith("en_") ? "translate" : "transcribe") : "text_translate", // the English pass of a transcribe job is task translate
         model: transcribe ? "saaras:v3" : "mayura:v1",
         audio_s: transcribe && Number.isFinite(ms) ? Math.round(ms / 10) / 100 : 0,
         started_at: r.started_at ?? new Date(r.created_at).toISOString(),

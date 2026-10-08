@@ -159,8 +159,9 @@ describe("sarvam_transcribe: prepare", () => {
 describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id)", () => {
   const enc = { source: "encounter", encounter_id: "enc_1", mode: "codemix", english: true, num_speakers: 2 };
   const init = (progress: Row = { clip_key: "clip.webm", content_type: "audio/webm", scope: "encounter", ref: "enc_1" }) => T.sarvamTranscribeKind.run(ctx("init", enc, progress));
+  const initNoEn = (progress: Row = { clip_key: "clip.webm", content_type: "audio/webm", scope: "encounter", ref: "enc_1" }) => T.sarvamTranscribeKind.run(ctx("init", { ...enc, english: false }, progress));
   let failedMin = 0;
-  const auditAndReserved = (audit: number, reserved: number) => (text: string) => (/j\.progress \? 'sarvam_job_id'/.test(text) ? [{ minutes: failedMin }] : /FROM audit_log/.test(text) ? [{ minutes: audit }] : /FROM scribe_job/.test(text) ? [{ minutes: reserved }] : []);
+  const auditAndReserved = (audit: number, reserved: number) => (text: string) => (/j\.progress \? 'en_sarvam_job_id'/.test(text) ? [{ minutes: 0 }] : /j\.progress \? 'sarvam_job_id'/.test(text) ? [{ minutes: failedMin }] : /FROM audit_log/.test(text) ? [{ minutes: audit }] : /FROM scribe_job/.test(text) ? [{ minutes: reserved }] : []);
 
   it("measures the duration from the container, creates the Sarvam job, and PERSISTS its id and the measured duration", async () => {
     store.set("clip.webm", clip10());
@@ -191,9 +192,9 @@ describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id
     store.set("clip.webm", clip10());
     gw.init.mockResolvedValue({ ok: true, jobId: "sj_9" });
     answer = auditAndReserved(200, 29); // 200 + 29 + 10 = 239 <= 240
-    expect(await init()).toMatchObject({ kind: "next", step: "upload" });
+    expect(await initNoEn()).toMatchObject({ kind: "next", step: "upload" });
     answer = auditAndReserved(200, 31); // 241 > 240
-    expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
+    expect(await initNoEn()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
     // only jobs created BEFORE this one count (two racing jobs cannot refuse each other), and only those not yet audited
     const q = statements.find((s) => /FROM scribe_job/.test(s.text) && !/j\.progress \? 'sarvam_job_id'/.test(s.text))!;
     expect(q.text).toMatch(/created_at < \?::timestamptz OR \(created_at = \?::timestamptz AND id < \?::text\)/);
@@ -207,14 +208,23 @@ describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id
     gw.init.mockResolvedValue({ ok: true, jobId: "sj_9" });
     failedMin = 30;
     answer = auditAndReserved(200, 0); // 200 + 0 + 30 failed-unaudited + 10 = 240
-    expect(await init()).toMatchObject({ kind: "next", step: "upload" });
+    expect(await initNoEn()).toMatchObject({ kind: "next", step: "upload" });
     failedMin = 31; // 241
-    expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
+    expect(await initNoEn()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 31 \+ this 10 min$/) });
     const q = statements.find((s) => /j\.progress \? 'sarvam_job_id'/.test(s.text))!;
     expect(q.text).toMatch(/sarvam_started_ms/);
     expect(q.text).not.toMatch(/j\.status = /); // any status
     expect(q.text).toMatch(/NOT EXISTS \(SELECT 1 FROM audit_log/); // once the row lands it is counted as audited minutes, not twice
     failedMin = 0;
+  });
+
+  it("S8A4: an English-track job asks the cap for BOTH passes (2 x the measured minutes)", async () => {
+    store.set("clip.webm", clip10());
+    gw.init.mockResolvedValue({ ok: true, jobId: "sj_9" });
+    answer = auditAndReserved(200, 20); // 200 + 20 + 2 x 10 = 240
+    expect(await init()).toMatchObject({ kind: "next", step: "upload" });
+    answer = auditAndReserved(200, 21); // 241
+    expect(await init()).toMatchObject({ kind: "fail", error: expect.stringMatching(/^sarvam_daily_cap: today 200 \+ reserved 21 \+ this 20 min$/) });
   });
 
   it("G2: with the Sarvam job id already persisted, a replay creates NO second job and reads no audio", async () => {
@@ -543,11 +553,12 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
   it("finish: R2 object with speaker-labelled entries + ONE ok ledger line in the contract shape; non-English + english -> translate", async () => {
     gw.result.mockResolvedValue({ ok: true, transcript: "namaste doctor bukhar hai", languageCode: "hi-IN", entries });
     const out = await finish();
-    expect(out).toMatchObject({ kind: "next", step: "translate", progress: { total_entries: 2, language_code: "hi-IN" } });
+    expect(out).toMatchObject({ kind: "next", step: "en_init", progress: { total_entries: 2, language_code: "hi-IN" } }); // S8A4: the English comes from the audio
     expect(JSON.stringify((out as { progress: Row }).progress)).not.toContain("namaste");
     expect(json("mcp-sarvam/job_t1.json")).toEqual({
       language_code: "hi-IN", duration_s: 600, speakers: ["0", "1"], transcript: "namaste doctor bukhar hai",
-      entries: [{ speaker_id: "0", start_s: 0, end_s: 4.5, text: "namaste doctor" }, { speaker_id: "1", start_s: 5, end_s: 8, text: "bukhar hai" }],
+      entries: [{ speaker_id: "0", start_s: 0, end_s: 4.5, text: "namaste doctor", script: "Latin", language_code: null }, { speaker_id: "1", start_s: 5, end_s: 8, text: "bukhar hai", script: "Latin", language_code: null }],
+      english_pass: "pending", sarvam_job_ids: { native: "sj_9", english: null }, minutes: { native: 10, english: 0 },
     });
     expect(ledgerLines()).toEqual([{
       caller: "scribe-mcp", machine: "vercel", job_id: "job_t1", request_id: "sj_9", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
@@ -559,31 +570,23 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
   it("finish: english:false -> done now, counts only (no text in the job result)", async () => {
     gw.result.mockResolvedValue({ ok: true, transcript: "namaste doctor bukhar hai", languageCode: "hi-IN", entries });
     const out = await finish({ ...args, english: false });
-    expect(out).toEqual({ kind: "done", result: { r2_key: "mcp-sarvam/job_t1.json", entries: 2, speakers: 2, language_code: "hi-IN", duration_s: 600, english: false, transcript_chars: 25, english_chars: 0 } });
+    expect(out).toEqual({ kind: "done", result: { r2_key: "mcp-sarvam/job_t1.json", entries: 2, speakers: 2, language_code: "hi-IN", duration_s: 600, english: false, transcript_chars: 25, english_chars: 0,
+      english_pass: "not_requested", english_entries: 0, drug_candidates: 0, minutes: { native: 10, english: 0 } } });
     expect(JSON.stringify(out)).not.toContain("namaste");
   });
 
-  it("finish: a language code that says English -> done, no translation call; throttled is carried into the ledger", async () => {
-    gw.result.mockResolvedValue({ ok: true, transcript: "hello doctor", languageCode: "en-IN", entries: [{ transcript: "hello doctor", start: 0, end: 2, speakerId: "0" }] });
+  it("finish: a file-level language code that says English does NOT end the job: the English pass still runs (S8A4); throttled is carried into the ledger; no mayura call", async () => {
+    gw.result.mockResolvedValue({ ok: true, transcript: "hello doctor", languageCode: "en-IN", entries: [{ transcript: "hello doctor", start: 0, end: 2, speakerId: "0", languageCode: null }] });
     const out = await finish(args, { ...fin, throttled: true });
-    expect(out).toMatchObject({ kind: "done", result: { english: true, english_chars: 12 } });
+    expect(out).toMatchObject({ kind: "next", step: "en_init" });
     expect(gw.translate).not.toHaveBeenCalled();
-    expect(json("mcp-sarvam/job_t1.json")).toMatchObject({ english: "hello doctor", entries: [{ english: "hello doctor" }] });
-    expect(ledgerLines()[0]).toMatchObject({ status: "ok", throttled: true });
-  });
-
-  it("G7: NO language code -> nothing is assumed from the text; it goes to translation (source auto), plain ASCII included", async () => {
-    gw.result.mockResolvedValue({ ok: true, transcript: "bukhar hai doctor sahab", languageCode: null, entries: [{ transcript: "bukhar hai doctor sahab", start: 0, end: 3, speakerId: "0" }] });
-    expect(await finish()).toMatchObject({ kind: "next", step: "translate" });
-    gw.translate.mockResolvedValue({ ok: true, english: "I have a fever, doctor" });
-    const out = await T.sarvamTranscribeKind.run(ctx("translate", args, fin));
-    expect(gw.translate).toHaveBeenCalledWith("bukhar hai doctor sahab", null);
-    expect(out.kind).toBe("done");
+    expect(ledgerLines()[0]).toMatchObject({ status: "ok", throttled: true, task: "transcribe" });
   });
 
   it("finish: no diarized entries -> one pseudo-entry; a terminal download failure is a named failure with a ledger line; a transient one throws", async () => {
     gw.result.mockResolvedValue({ ok: true, transcript: "namaste", languageCode: "hi-IN", entries: [] });
-    expect(await finish()).toMatchObject({ kind: "next", step: "translate", progress: { total_entries: 1 } });
+    expect(await finish()).toMatchObject({ kind: "next", step: "en_init", progress: { total_entries: 1 } });
+    expect(json("mcp-sarvam/job_t1.json").entries).toEqual([expect.objectContaining({ text: "namaste", start_s: 0, end_s: 600 })]);
     lab.clear(); // a fresh job: one ledger line per job id
     gw.result.mockResolvedValue({ ok: false, error: "download_links_403", status: 403, transient: false });
     expect(await finish()).toEqual({ kind: "fail", error: "sarvam_result_failed: download_links_403" });
@@ -595,12 +598,12 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
   const translate = (progress: Row = fin) => T.sarvamTranscribeKind.run(ctx("translate", args, progress));
   const seed = (entries: Row[]) => store.set("mcp-sarvam/job_t1.json", Buffer.from(JSON.stringify({ language_code: "hi-IN", duration_s: 10, speakers: ["0"], transcript: "t", entries })));
 
-  it("translate: every entry, <= 900 chars per request, the source language passed; done with counts only and an ok text_translate ledger line", async () => {
+  it("translate: every entry still without English, <= 900 chars per request, the entry's OWN language (else auto) passed; done with counts only and an ok text_translate ledger line", async () => {
     seed([{ speaker_id: "0", start_s: 0, end_s: 1, text: "text 0" }, { speaker_id: "0", start_s: 1, end_s: 2, text: "text 1" }]);
     gw.translate.mockImplementation(async (t: string) => ({ ok: true, english: `EN(${t})` }));
     const out = await translate();
     expect(out).toMatchObject({ kind: "done", result: { entries: 2, english: true, language_code: "hi-IN" } });
-    expect(gw.translate).toHaveBeenCalledWith("text 0", "hi-IN");
+    expect(gw.translate).toHaveBeenCalledWith("text 0", null); // S8A4: the entry has no language of its own -> auto, never the file label
     expect(json("mcp-sarvam/job_t1.json")).toMatchObject({ english: "EN(text 0) EN(text 1)", entries: [{ english: "EN(text 0)" }, { english: "EN(text 1)" }] });
     expect(ledgerLines().at(-1)).toMatchObject({ job_id: "job_t1:translate", task: "text_translate", mode: "sync", model: "mayura:v1", audio_s: 0, chars: 12, status: "ok", scope: "encounter", ref: "enc_1" });
   });
@@ -649,6 +652,7 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
     gw.translate.mockResolvedValue({ ok: false, error: "translate_429", status: 429, transient: true });
     await expect(translate()).rejects.toThrow(/translate_429/);
   });
+
 });
 
 describe("D — ledger and lane", () => {
@@ -769,6 +773,135 @@ describe("D3 — the allowlist", () => {
   });
 });
 
+describe("S8A4 — the English track comes from a second Sarvam pass over the audio", () => {
+  const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true, num_speakers: 2 };
+  const base = { clip_key: "clip.webm", content_type: "audio/webm", scope: "encounter", ref: "enc_1", sarvam_job_id: "sj_9", duration_ms: 600_000, started_at: "2026-10-08T06:00:00.000Z", sarvam_started_ms: Date.now() };
+  const step = (name: string, progress: Row, a: Row = args) => T.sarvamTranscribeKind.run(ctx(name, a, progress));
+  const nativeEntries = [
+    { transcript: "How are you feeling", start: 0, end: 5, speakerId: "0", languageCode: null },
+    { transcript: "ನನಗೆ ತಲೆನೋವು ಇದೆ", start: 5, end: 9, speakerId: "1", languageCode: null },
+    { transcript: "मुझे बुखार है", start: 9, end: 12, speakerId: "1", languageCode: null },
+  ];
+  const englishEntries = [
+    { transcript: "How are you feeling", start: 0, end: 5, speakerId: "0", languageCode: null },
+    { transcript: "I have a headache", start: 5.1, end: 8.9, speakerId: "1", languageCode: null },
+    { transcript: "I have fever. Take combat land twice a day", start: 9, end: 12, speakerId: "1", languageCode: null },
+  ];
+  const auditInserts = () => statements.filter((s) => /INSERT INTO audit_log/.test(s.text));
+
+  it("native finish -> en_init; en_init creates a SECOND Sarvam job in translate mode over the same clip and persists its id; en_upload re-uploads the same audio", async () => {
+    store.set("clip.webm", clip10());
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: nativeEntries });
+    expect(await step("finish", { ...base, outputs: ["0.json"] })).toMatchObject({ kind: "next", step: "en_init" });
+    gw.init.mockResolvedValue({ ok: true, jobId: "sj_en" });
+    const out = await step("en_init", { ...base, outputs: ["0.json"] });
+    expect(gw.init).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "translate", numSpeakers: 2 }));
+    expect(out).toMatchObject({ kind: "next", step: "en_upload", progress: { en_sarvam_job_id: "sj_en", sarvam_job_id: "sj_9" } });
+    gw.upload.mockResolvedValue({ ok: true });
+    const up = await step("en_upload", (out as { progress: Row }).progress);
+    expect(gw.upload).toHaveBeenLastCalledWith("sj_en", expect.anything(), "audio/webm");
+    expect(up).toMatchObject({ kind: "next", step: "en_start" });
+    // a replay of en_init does not create a third job
+    gw.init.mockClear();
+    expect(await step("en_init", (out as { progress: Row }).progress)).toMatchObject({ step: "en_upload" });
+    expect(gw.init).not.toHaveBeenCalled();
+  });
+
+  it("en_start writes ITS OWN paid-call row under <job id>:en (one per pass, idempotent), then en_poll -> en_finish; both ledger lines have the right task", async () => {
+    gw.status.mockResolvedValue({ ok: true, state: "Pending", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: true });
+    const withEn = { ...base, outputs: ["0.json"], en_sarvam_job_id: "sj_en", en_started_at: "2026-10-08T06:05:00.000Z" };
+    const st = await step("en_start", withEn);
+    expect(st).toMatchObject({ kind: "next", step: "en_poll", progress: { en_sarvam_job_id: "sj_en" } });
+    expect(Number((st as { progress: Row }).progress.en_started_ms)).toBeGreaterThan(0);
+    const row = JSON.parse(String(auditInserts()[0]!.values.find((v) => typeof v === "string" && String(v).includes("sarvam_job_id"))));
+    expect(row).toMatchObject({ job_id: "job_t1:en", sarvam_job_id: "sj_en", audio_minutes: 10 });
+    gw.status.mockResolvedValue({ ok: true, state: "Completed", outputs: ["1.json"] });
+    expect(await step("en_poll", (st as { progress: Row }).progress)).toMatchObject({ kind: "next", step: "en_finish", progress: { en_outputs: ["1.json"] } });
+  });
+
+  async function runEnFinish(over: Row = {}) {
+    store.set("mcp-sarvam/job_t1.json", Buffer.from(JSON.stringify({
+      language_code: "en-IN", duration_s: 600, speakers: ["0", "1"], transcript: "x", english_pass: "pending", sarvam_job_ids: { native: "sj_9", english: null }, minutes: { native: 10, english: 0 },
+      entries: [
+        { speaker_id: "0", start_s: 0, end_s: 5, text: "How are you feeling", script: "Latin", language_code: null },
+        { speaker_id: "1", start_s: 5, end_s: 9, text: "ನನಗೆ ತಲೆನೋವು ಇದೆ", script: "Kannada", language_code: null },
+        { speaker_id: "1", start_s: 9, end_s: 12, text: "मुझे बुखार है", script: "Devanagari", language_code: null },
+      ],
+    })));
+    return step("en_finish", { ...base, outputs: ["0.json"], en_sarvam_job_id: "sj_en", en_started_at: "2026-10-08T06:05:00.000Z", en_started_ms: Date.now(), en_outputs: ["1.json"], ...over });
+  }
+
+  it("en_finish: the Kannada and Hindi entries get their English from the translate pass (no mayura), no entry is lost, the drug check proposes Combiflam, the result carries both job ids and both minutes", async () => {
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: englishEntries });
+    const out = await runEnFinish();
+    expect(out).toMatchObject({ kind: "done", result: { english_pass: "done", english_entries: 3, drug_candidates: 1, minutes: { native: 10, english: 10 } } });
+    expect(gw.translate).not.toHaveBeenCalled();
+    const doc = json("mcp-sarvam/job_t1.json");
+    expect(doc.entries.map((e: Row) => e.english)).toEqual(["How are you feeling", "I have a headache", "I have fever. Take combat land twice a day"]);
+    expect(doc.entries.map((e: Row) => e.english_source)).toEqual(["translate_pass", "translate_pass", "translate_pass"]);
+    expect(doc.entries.map((e: Row) => e.script)).toEqual(["Latin", "Kannada", "Devanagari"]);
+    expect(doc.entries[1].text).toBe("ನನಗೆ ತಲೆನೋವು ಇದೆ"); // the native text is untouched
+    expect(doc.english).toBe("How are you feeling I have a headache I have fever. Take combat land twice a day");
+    expect(doc.drug_candidates).toEqual([{ entry_idx: 2, heard: "combat", suggested: "Combiflam", score: expect.any(Number), source: "hand-fixture", category: "drug" }]);
+    expect(doc.english_entries[2].text).toContain("combat land"); // proposed, not rewritten
+    expect(doc.sarvam_job_ids).toEqual({ native: "sj_9", english: "sj_en" });
+    expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ task: "translate", request_id: "sj_en", audio_s: 600, status: "ok", model: "saaras:v3" })]);
+  });
+
+  it("a pass-2 entry with no native partner is kept in the English track (native_idx null)", async () => {
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: [...englishEntries, { transcript: "Okay", start: 30, end: 31, speakerId: "0", languageCode: null }] });
+    await runEnFinish();
+    const doc = json("mcp-sarvam/job_t1.json");
+    expect(doc.english_entries).toHaveLength(4);
+    expect(doc.english_entries.at(-1)).toMatchObject({ text: "Okay", native_idx: null, source: "translate_pass" });
+  });
+
+  it("the cap refuses the second pass -> NOT a failed job: english_pass skipped_cap; the Latin entry stays, the Kannada and Hindi entries go to mayura PER ENTRY (source auto)", async () => {
+    answer = (text) => (/j\.progress \? 'en_sarvam_job_id'/.test(text) ? [{ minutes: 0 }] : /FROM audit_log/.test(text) ? [{ minutes: 235 }] : /FROM scribe_job/.test(text) ? [{ minutes: 0 }] : []);
+    const init = await step("en_init", { ...base, outputs: ["0.json"] });
+    expect(init).toMatchObject({ kind: "next", step: "en_finish", progress: { en_skip: "skipped_cap" } });
+    expect(gw.init).not.toHaveBeenCalledWith(expect.objectContaining({ mode: "translate" }));
+    answer = () => [];
+    const fin1 = await runEnFinish({ en_skip: "skipped_cap", en_outputs: undefined, en_sarvam_job_id: undefined });
+    expect(fin1).toMatchObject({ kind: "next", step: "translate" });
+    gw.translate.mockImplementation(async (t: string) => ({ ok: true, english: `EN(${t})` }));
+    const out = await step("translate", { ...base, outputs: ["0.json"] });
+    expect(out).toMatchObject({ kind: "done", result: { english_pass: "skipped_cap" } });
+    expect(gw.translate.mock.calls.map((c) => c[0])).toEqual(["ನನಗೆ ತಲೆನೋವು ಇದೆ", "मुझे बुखार है"]); // only the Indic entries; the Latin one was kept
+    expect(gw.translate.mock.calls.every((c) => c[1] === null)).toBe(true);
+    const doc = json("mcp-sarvam/job_t1.json");
+    expect(doc.entries.map((e: Row) => e.english_source)).toEqual(["native_latin", "mayura", "mayura"]);
+    expect(doc.english_entries).toHaveLength(3);
+    expect(doc.minutes).toEqual({ native: 10, english: 0 });
+  });
+
+  it("a terminal failure of the English pass (Sarvam says Failed) does not fail the job: a failed ledger line for the pass, then the mayura fallback", async () => {
+    gw.status.mockResolvedValue({ ok: true, state: "Failed", outputs: [] });
+    const out = await step("en_poll", { ...base, en_sarvam_job_id: "sj_en", en_started_ms: Date.now(), en_started_at: "2026-10-08T06:05:00.000Z" });
+    expect(out).toMatchObject({ kind: "next", step: "en_finish", progress: { en_skip: "failed" } });
+    expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ status: "failed", task: "translate", request_id: "sj_en", audio_s: 600 })]);
+  });
+
+  it("a transient failure of the English pass still throws (retried under MAX_FAILURES)", async () => {
+    gw.init.mockResolvedValue({ ok: false, error: "http_503", status: 503, transient: true });
+    await expect(step("en_init", { ...base, outputs: ["0.json"] })).rejects.toThrow(/sarvam_submit_failed/);
+  });
+
+  it("english:false never starts a second pass", async () => {
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: nativeEntries });
+    expect(await step("finish", { ...base, outputs: ["0.json"] }, { ...args, english: false })).toMatchObject({ kind: "done", result: { english_pass: "not_requested" } });
+  });
+
+  it("the runner-ended hook writes the English pass's own line when that pass had started", async () => {
+    const { endedEnLine, endedLine } = await import("@/lib/jobs/sarvam-hook");
+    const job = { id: "job_t1", kind: "sarvam_transcribe", args, created_at: "2026-10-08T06:00:00.000Z", progress: { ...base, en_sarvam_job_id: "sj_en", en_started_ms: 5, en_started_at: "2026-10-08T06:05:00.000Z" } };
+    expect(endedEnLine(job as never, "failed", "2026-10-08T06:30:00.000Z")).toMatchObject({ job_id: "job_t1:en", request_id: "sj_en", task: "translate", audio_s: 600, status: "failed" });
+    expect(endedEnLine({ ...job, progress: base } as never, "failed", "x")).toBeNull();
+    expect(endedLine(job as never, "failed", "x")).toMatchObject({ job_id: "job_t1", task: "transcribe" });
+  });
+});
+
 describe("sarvam_translate (A2, F1, G4, G7)", () => {
   const P = X.parseSarvamTranslateArgs;
   const run = (step: string, args: Row, progress: Row = {}) => X.sarvamTranslateKind.run(ctx(step, args, progress));
@@ -828,6 +961,23 @@ describe("sarvam_translate (A2, F1, G4, G7)", () => {
     expect(await run("prepare", { kind: "encounter", id: "e1" })).toMatchObject({ kind: "done" });
     answer = (text) => (/FROM encounter/.test(text) ? [{ transcript_original: "नमस्ते", transcript_raw: "", detected_language: "hi-IN" }] : []);
     expect(await run("prepare", { kind: "encounter", id: "e1" })).toEqual({ kind: "fail", error: "sarvam_gateway_not_configured" });
+  });
+
+  it("S8A4: an en-IN-labelled stored text with a Kannada sentence is NOT already_english: only that sentence is translated, the English around it is kept; a purely English text under the same label still is already_english", async () => {
+    const kn = "ನನಗೆ ತಲೆನೋವು ಇದೆ.";
+    const text = `How are you feeling today? ${kn} Take rest.`;
+    answer = (t2) => (/FROM encounter/.test(t2) ? [{ transcript_original: text, transcript_raw: "", detected_language: "en-IN" }] : []);
+    const args = { kind: "encounter", id: "e1" };
+    const prep = await run("prepare", args);
+    expect(prep).toMatchObject({ kind: "next", step: "translate", progress: { chunks_total: 1 } });
+    gw.translate.mockResolvedValue({ ok: true, english: "I have a headache." });
+    const out = await run("translate", args, (prep as { progress: Row }).progress);
+    expect(out).toMatchObject({ kind: "done" });
+    expect(gw.translate).toHaveBeenCalledTimes(1);
+    expect(gw.translate).toHaveBeenCalledWith(kn, null); // the file label is not passed as the source language
+    expect(json("mcp-sarvam/job_t1.json").english).toBe("How are you feeling today? I have a headache. Take rest.");
+    answer = (t2) => (/FROM encounter/.test(t2) ? [{ transcript_original: "How are you feeling today? Take rest.", transcript_raw: "", detected_language: "en-IN" }] : []);
+    expect(await run("prepare", args)).toMatchObject({ kind: "done", result: { reason: "already_english" } });
   });
 
   it("F1: chunks of <= 900 chars across claims, the English so far saved after EACH chunk, no chunk re-sent; R2 object {source, chars_in, chars_out, english}; only SELECTs on clinical tables; ok ledger line", async () => {

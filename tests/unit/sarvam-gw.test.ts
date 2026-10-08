@@ -115,7 +115,7 @@ describe("G5 — the download timeout covers the body read", () => {
   it("a normal download returns transcript, language and diarized entries; an empty one is terminal", async () => {
     respond = () => jsonRes({ download_urls: { "0.json": { file_url: "https://blob.example.test/0.json" } } });
     vi.stubGlobal("fetch", vi.fn(async () => jsonRes({ transcript: "hello there", language_code: "en-IN", diarized_transcript: { entries: [{ transcript: "hello there", start_time_seconds: 0, end_time_seconds: 2, speaker_id: 1 }] } })));
-    expect(await W.gwBatchResult("sj", ["0.json"])).toEqual({ ok: true, transcript: "hello there", languageCode: "en-IN", entries: [{ transcript: "hello there", start: 0, end: 2, speakerId: "1" }] });
+    expect(await W.gwBatchResult("sj", ["0.json"])).toEqual({ ok: true, transcript: "hello there", languageCode: "en-IN", entries: [{ transcript: "hello there", start: 0, end: 2, speakerId: "1", languageCode: null }] });
     vi.stubGlobal("fetch", vi.fn(async () => jsonRes({ transcript: "" })));
     expect(await W.gwBatchResult("sj", ["0.json"])).toEqual({ ok: false, error: "empty_batch_transcript", transient: false });
   });
