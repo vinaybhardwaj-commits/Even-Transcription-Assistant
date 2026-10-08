@@ -81,6 +81,8 @@ function briefs(): Record<string, string> {
     // S1 reads (S1A)
     scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
     scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
+    scribe_steward_command: "WRITE; changes Room Steward config; can act on LIVE rooms. Times UTC. kind=set_shadow|kill_switch|start_day_live|add_room|flag_room|set_window|note|mute_alerts; reason required; returns a revert.",
+    scribe_lanes: "Read-only; touches no room. Times UTC. Fleet and lane state from the lab bucket: view=fleet|lanes (name, age_s, stale > 600 s, summary).",
     scribe_sarvam: "Reads and writes the job queue; consult audio/text only to Sarvam (ZDR); touches no room. Times UTC. action=transcribe|translate|status|result|usage|health; submits need invoke.",
     scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key, sha256) for a window_id or IST date; shadow rows only on request.",
     scribe_steward: "Read-only; touches no room. Times UTC. Room Steward view=config|decisions|tickets|tick|why; why needs room + at (+-15 min). No ticket signatures.",

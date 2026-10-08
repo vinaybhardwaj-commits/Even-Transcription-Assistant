@@ -51,6 +51,7 @@ import { S1_TOOLS } from "./tools/s1";
 import { S1B_TOOLS } from "./tools/s1b";
 import { S5_TOOLS } from "./tools/s5";
 import { S8_TOOLS } from "./tools/s8";
+import { S2L_TOOLS } from "./tools/s2l";
 
 /**
  * Every tool the door published before Slice E, in the order tools/list served them, plus every
@@ -67,6 +68,7 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...S1B_TOOLS,
   ...S5_TOOLS,
   ...S8_TOOLS,
+  ...S2L_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));
@@ -374,6 +376,7 @@ export const GROUPS: readonly McpTool[] = [
       v("voice", "scribe_voice_health"),
       v("llm", "scribe_llm_health"),
       v("kb", "scribe_kb_probe"),
+      v("routes", "scribe_health_routes"),
     ],
   }),
   buildGroup({
