@@ -81,12 +81,15 @@ function briefs(): Record<string, string> {
     // S1 reads (S1A)
     scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
     scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
+    scribe_steward: "Read-only; touches no room. Times UTC. Room Steward view=config|decisions|tickets|tick|why; why needs room + at (+-15 min). No ticket signatures.",
+    scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen; room optional.",
+    scribe_stt_windows: "Read-only; touches no room. Times UTC. One STT window (window_id) or a room's windows for an IST day: state, drain, jobs, runs. No transcript text.",
     scribe_tape_day: `${NO_ROOM_READ} Minutes per audio state per room for one IST day; include_segments (needs room) adds the state intervals. Writes nothing.`,
   };
 }
 
 /** Longest property description tools/list carries; the full text stays in the registry and scribe_help returns it. */
-export const LISTED_PROP_DESC_MAX_CHARS = 56;
+export const LISTED_PROP_DESC_MAX_CHARS = 40;
 
 /** `text` cut to <= max chars at a sentence end if one fits, else at a word boundary with an ellipsis. */
 export function shortText(text: string, max: number = LISTED_PROP_DESC_MAX_CHARS): string {

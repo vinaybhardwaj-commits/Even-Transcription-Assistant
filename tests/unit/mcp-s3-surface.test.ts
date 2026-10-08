@@ -63,12 +63,12 @@ afterAll(() => {
 describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   const names = async (opts: Parameters<typeof door>[1] = {}) => (await listed(opts)).map((t) => t.name);
 
-  it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the three S1 reads", async () => {
+  it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the six S1 reads", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(45);
+    expect(all).toHaveLength(48);
     for (const n of OPERATOR_13) expect(all).toContain(n);
-    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
+    for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
   });
 
@@ -112,7 +112,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_now", "scribe_room", "scribe_tape_day"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_now", "scribe_room", "scribe_steward", "scribe_stt_windows", "scribe_tape_day"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
@@ -234,7 +234,7 @@ describe("S3.2 scribe_jobs", () => {
   });
 
   it("G1: scribe_jobs is never advertised read-only, under either profile; cancel makes it destructive", async () => {
-    for (const headers of [{}, { "x-scribe-profile": "lab" }]) {
+    for (const headers of [{}, { "x-scribe-profile": "lab" }] as Array<Record<string, string>>) {
       const body = (await door("tools/list", { headers })).body.result as { tools: Array<{ name: string; annotations: Row }> };
       const jobs = body.tools.find((t) => t.name === "scribe_jobs")!;
       expect(jobs.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
@@ -242,7 +242,7 @@ describe("S3.2 scribe_jobs", () => {
   });
 
   it("G1: no listed tool with a write- or invoke-scope member carries readOnlyHint true (both profiles)", async () => {
-    for (const headers of [{}, { "x-scribe-profile": "lab" }]) {
+    for (const headers of [{}, { "x-scribe-profile": "lab" }] as Array<Record<string, string>>) {
       const body = (await door("tools/list", { headers })).body.result as { tools: Array<{ name: string; annotations: { readOnlyHint: boolean } }> };
       for (const t of body.tools) {
         const tool = S.CALLABLE_TOOLS.get(t.name)!;
