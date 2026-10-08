@@ -63,6 +63,27 @@ public enum RoomEngineError: Error, LocalizedError, Equatable, Sendable {
   }
 }
 
+/// Arch #17 — how a day start waits for its input device. `.live` is production (real sleeps, random
+/// jitter); `.disabled` skips the check entirely for fixtures that open sessions against fake devices.
+public struct RoomInputReadyWait: Sendable {
+  public let enabled: Bool
+  public let jitterRoll: @Sendable () -> Double
+  public let sleep: @Sendable (UInt64) async throws -> Void
+  public init(
+    enabled: Bool, jitterRoll: @escaping @Sendable () -> Double,
+    sleep: @escaping @Sendable (UInt64) async throws -> Void
+  ) {
+    self.enabled = enabled
+    self.jitterRoll = jitterRoll
+    self.sleep = sleep
+  }
+  public static let live = RoomInputReadyWait(
+    enabled: true, jitterRoll: { Double.random(in: 0...1) },
+    sleep: { try await Task.sleep(nanoseconds: $0) })
+  public static let disabled = RoomInputReadyWait(
+    enabled: false, jitterRoll: { 0 }, sleep: { _ in })
+}
+
 public enum RoomEnginePhase: Equatable, Sendable {
   case ready
   case recording
@@ -504,6 +525,7 @@ public actor RoomEngine {
   private let log: @Sendable (String) -> Void
   /// Release R4. What `set_audio_input` switches between and sets the volume of.
   private let audioInputs: any RoomAudioInputControlling
+  private let inputReadyWait: RoomInputReadyWait
   /// Release R4. The §5.5 machine reading for the poll, for the device config.json names now.
   /// `MachineFactsReader.read` in production; injected so a test can see the poll follow a switch.
   private let machineFacts: @Sendable (String?) -> MachineFacts
@@ -666,6 +688,8 @@ public actor RoomEngine {
     },
     /// Release R4. CoreAudio by default.
     audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
+    /// Arch #17. How the start waits for its input device; tests that open a session with fixture devices pass `.disabled`.
+    inputReadyWait: RoomInputReadyWait = .live,
     machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
       MachineFactsReader.read(inputDeviceUID: $0)
     },
@@ -718,6 +742,7 @@ public actor RoomEngine {
       updater: updaterFactory(configuration, remote, persistence.root),
       log: log,
       audioInputs: audioInputs,
+      inputReadyWait: inputReadyWait,
       machineFacts: machineFacts,
       processExit: processExit,
       helperVersion: helperVersion
@@ -765,6 +790,8 @@ public actor RoomEngine {
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
     },
     audioInputs: any RoomAudioInputControlling = CoreAudioInputControl(),
+    /// Arch #17. How the start waits for its input device; tests that open a session with fixture devices pass `.disabled`.
+    inputReadyWait: RoomInputReadyWait = .live,
     machineFacts: @escaping @Sendable (String?) -> MachineFacts = {
       MachineFactsReader.read(inputDeviceUID: $0)
     },
@@ -775,6 +802,7 @@ public actor RoomEngine {
   ) {
     self.persistence = persistence
     self.audioInputs = audioInputs
+    self.inputReadyWait = inputReadyWait
     self.machineFacts = machineFacts
     self.processExit = processExit
     self.helperVersion = helperVersion
@@ -2625,19 +2653,39 @@ public actor RoomEngine {
   }
 
   private func waitForInputDeviceReady() async throws {
-    let uid = configuration.deviceUID
-    let delays = Self.inputReadyDelays(jitterRoll: Double.random(in: 0...1))
+    guard inputReadyWait.enabled else { return }
+    try await Self.awaitInputDevice(
+      uid: configuration.deviceUID,
+      devices: { [audioInputs] in audioInputs.inputDevices() },
+      delays: Self.inputReadyDelays(jitterRoll: inputReadyWait.jitterRoll()),
+      sleep: inputReadyWait.sleep,
+      log: log)
+  }
+
+  /// Arch #17 — the retry loop, free of the engine so a test can drive it with a scripted device list
+  /// and a no-op sleeper. Ready, or a list that cannot be read (`unknown`), returns at once; a device
+  /// that stays absent through every delay throws `inputDeviceNotReady` (checked once more after the
+  /// last sleep). Returns the number of readiness checks made.
+  @discardableResult
+  static func awaitInputDevice(
+    uid: String,
+    devices: () -> [AudioInputDeviceEntry]?,
+    delays: [UInt64],
+    sleep: @Sendable (UInt64) async throws -> Void,
+    log: @Sendable (String) -> Void = { _ in }
+  ) async throws -> Int {
+    var checks = 0
     for (attempt, delay) in delays.enumerated() {
-      switch Self.inputReadiness(devices: audioInputs.inputDevices(), uid: uid) {
-      case .ready, .unknown: return
-      case .notReady:
-        log("start deferred: input device not ready (attempt \(attempt + 1) of \(delays.count + 1)); retrying")
-        try await Task.sleep(nanoseconds: delay)
-      }
+      checks += 1
+      if inputReadiness(devices: devices(), uid: uid) != .notReady { return checks }
+      log("start deferred: input device not ready (attempt \(attempt + 1) of \(delays.count + 1)); retrying")
+      try await sleep(delay)
     }
-    if Self.inputReadiness(devices: audioInputs.inputDevices(), uid: uid) == .notReady {
+    checks += 1
+    if inputReadiness(devices: devices(), uid: uid) == .notReady {
       throw RoomEngineError.inputDeviceNotReady("configured input device not attached after \(delays.count + 1) checks")
     }
+    return checks
   }
 
   private func pause(commandID: String) async throws {
