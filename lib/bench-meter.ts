@@ -24,3 +24,31 @@ export function isDigitalSilence(
       && levels.zero_ratio >= DIGITAL_SILENCE_ZERO_RATIO,
     );
 }
+
+/**
+ * FROZEN / STALE LEVELS (Arch #19). When a capture device drops, the recorder keeps resending the last meter value, so a flat non-zero floor
+ * (live, 7 Oct: peak 0.0125, 0.0164) looks alive to any levels-only reader. There is no capture-side sequence number yet, so the test is
+ * derived at READ time from the samples themselves: the same (peak, avg, zero_ratio) triple for longer than LEVELS_FROZEN_MS, or no sample
+ * newer than LEVELS_FRESH_MS. Digital silence is exempt from the repeat test (a muted mic legitimately repeats 0 / 1.0) because it is
+ * already named by `isDigitalSilence`. Mark, never delete: the stored rows are untouched.
+ */
+export const LEVELS_FRESH_MS = 6_000;
+export const LEVELS_FROZEN_MS = 6_000;
+
+export type LevelStamp = { t_ms: number; peak: number; avg: number | null; zero_ratio: number | null };
+
+/** PURE. `samples` in any order. Returns null when there is nothing to judge (unknown, not stale). */
+export function levelsStale(samples: readonly LevelStamp[], nowMs: number): boolean | null {
+  if (samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a.t_ms - b.t_ms);
+  const newest = sorted[sorted.length - 1]!;
+  if (nowMs - newest.t_ms > LEVELS_FRESH_MS) return true;
+  if (isDigitalSilence({ peak: newest.peak, avg: newest.avg ?? 0, ...(newest.zero_ratio !== null ? { zero_ratio: newest.zero_ratio } : {}) })) return false;
+  let first = newest.t_ms;
+  for (let i = sorted.length - 2; i >= 0; i--) {
+    const r = sorted[i]!;
+    if (r.peak === newest.peak && r.avg === newest.avg && r.zero_ratio === newest.zero_ratio) first = r.t_ms;
+    else break;
+  }
+  return newest.t_ms - first > LEVELS_FROZEN_MS;
+}

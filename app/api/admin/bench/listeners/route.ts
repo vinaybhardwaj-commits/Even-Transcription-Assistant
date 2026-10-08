@@ -17,6 +17,8 @@
 import { NextResponse } from "next/server";
 import { benchAdminGuard } from "@/lib/bench";
 import { listListeners, isListening, LISTENER_FRESH_MS, classifyBusError, BusError } from "@/lib/bench-commands";
+import { sql } from "@/lib/db";
+import { levelsStale, type LevelStamp } from "@/lib/bench-meter";
 import { finiteNumberOrNull, parseMicLevelPair } from "@/lib/bench-levels";
 
 export const runtime = "nodejs";
@@ -40,6 +42,36 @@ function mainLevels(
   };
 }
 
+/**
+ * Arch #19 — per room, is the level frozen or old. Derived here, at read time, from the last 30 s of bench_level_sample rows; nothing is
+ * written. A read that fails leaves the room out of the map: `levels_stale: null` means "could not judge", and the card does not grey on it.
+ */
+async function readLevelsStale(ids: readonly string[], nowMs: number): Promise<Map<string, boolean | null>> {
+  const out = new Map<string, boolean | null>();
+  if (ids.length === 0) return out;
+  try {
+    const rows = (await sql`
+      SELECT room_id, sampled_at, peak, avg, zero_ratio
+        FROM bench_level_sample
+       WHERE room_id = ANY(${ids}::text[])
+         AND ist_date >= ((now() - interval '1 day') AT TIME ZONE 'Asia/Kolkata')::date
+         AND sampled_at > now() - interval '30 seconds'
+       ORDER BY sampled_at ASC
+       LIMIT 2000
+    `) as Array<{ room_id: string; sampled_at: string | Date; peak: number | string; avg: number | string | null; zero_ratio: number | string | null }>;
+    const by = new Map<string, LevelStamp[]>();
+    for (const r of rows) {
+      const list = by.get(r.room_id) ?? [];
+      list.push({ t_ms: new Date(r.sampled_at).getTime(), peak: Number(r.peak), avg: r.avg === null ? null : Number(r.avg), zero_ratio: r.zero_ratio === null ? null : Number(r.zero_ratio) });
+      by.set(r.room_id, list);
+    }
+    for (const id of ids) out.set(id, levelsStale(by.get(id) ?? [], nowMs));
+  } catch (e) {
+    console.warn("[bench-listeners] levels_stale read failed", String((e as Error)?.message ?? e).slice(0, 160));
+  }
+  return out;
+}
+
 export async function GET() {
   const guard = await benchAdminGuard();
   if (!guard.ok) return NextResponse.json({ error: { code: guard.code, message: guard.msg } }, { status: 401, ...noStore });
@@ -47,6 +79,7 @@ export async function GET() {
   const now = new Date();
   try {
     const rows = await listListeners(now);
+    const stale = await readLevelsStale(rows.map((l) => l.room_id), now.getTime());
     return NextResponse.json(
       {
         now: now.toISOString(),
@@ -69,6 +102,7 @@ export async function GET() {
           mic: mainLevels(l.mic_peak, l.mic_avg, l.mic_zero_ratio),
           spare: l.spare_device === true ? parseMicLevelPair(l.spare_peak, l.spare_avg) : null,
           levels_at: l.levels_at ? new Date(l.levels_at).toISOString() : null,
+          levels_stale: stale.get(l.room_id) ?? null,
           // §2.4 — a spare exists only when the client reported an explicitly chosen second device.
           // TRUE only for a literal true; null/false → false. The page draws no spare lane unless
           // this is true, whatever backup pieces may have arrived.

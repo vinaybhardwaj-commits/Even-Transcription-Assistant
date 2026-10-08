@@ -526,6 +526,18 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
     // or logging fault can never block the command poll that controls a live room.
     if (mic) {
       try {
+        // Arch #19 — THE SESSION THE KIOSK NAMES MAY ALREADY BE ENDED. A frozen kiosk keeps naming the session the cloud reaper closed, so
+        // `recordingSessionId !== null` kept stamping session_open / tape_advancing true on dead samples (TF bs_jjndbqdj, 7 Oct). The server's own
+        // session row decides. A lookup that fails falls back to the kiosk's claim: a missed sample would be worse than the old behaviour.
+        let sessionOpen = input.recordingSessionId !== null;
+        if (sessionOpen) {
+          try {
+            const open = (await sql`
+              SELECT 1 FROM bench_session WHERE id = ${input.recordingSessionId} AND status IN ('recording', 'paused') LIMIT 1
+            `) as unknown[];
+            sessionOpen = open.length > 0;
+          } catch { /* keep the kiosk's claim */ }
+        }
         await sql`
           INSERT INTO bench_level_sample (
             room_id, ist_date, sampled_at, peak, avg, zero_ratio,
@@ -534,8 +546,8 @@ export async function pollCommands(input: PollInput): Promise<PollResult> {
           VALUES (
             ${input.roomId}, (now() AT TIME ZONE 'Asia/Kolkata')::date, now(),
             ${mic.peak}, ${mic.avg}, ${mic.zeroRatio ?? null},
-            ${input.recordingSessionId !== null},
-            ${input.recordingSessionId !== null && !input.paused},
+            ${sessionOpen},
+            ${sessionOpen && !input.paused},
             'command_poll'
           )
         `;
