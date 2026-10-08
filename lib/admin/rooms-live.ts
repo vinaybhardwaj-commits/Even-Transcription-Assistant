@@ -139,6 +139,9 @@ export type LiveSession = {
   primary_chunks: number;
   /** ENDED DISAGREES — pieces whose UPLOAD landed after this session's ended_at. */
   chunks_after_end: number;
+  /** Arch #15: the session row's notes, and whether a start_day was acked failed around it (death evidence). */
+  notes?: string | null;
+  start_failed_ack?: boolean;
 };
 
 export type RoomLive = {
@@ -589,17 +592,37 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
              COUNT(c.id) FILTER (
                WHERE s.ended_at IS NOT NULL
                  AND c.started_at > s.ended_at + make_interval(secs => ${ENDED_DISAGREES_SKEW_GRACE_MS / 1000}::int)
-             ) AS chunks_after_end
+             ) AS chunks_after_end,
+             s.notes
         FROM bench_session s
         LEFT JOIN bench_chunk c ON c.session_id = s.id
        WHERE s.started_at >= ${fromIso}::timestamptz
          AND s.started_at <  ${toIso}::timestamptz
-       GROUP BY s.id, s.room_id, s.status, s.started_at, s.ended_at
+       GROUP BY s.id, s.room_id, s.status, s.started_at, s.ended_at, s.notes
        ORDER BY s.started_at DESC
     `) as unknown[];
     sessions = normaliseSessions(rows);
   } catch (e) {
     topDegraded.push(`sessions_unavailable:${String((e as Error)?.message ?? e).slice(0, 80)}`);
+  }
+  // ARCH #15 — death evidence for the few candidates only (an ended, pieceless, short session): was a start_day acked FAILED around it? Its own tiny
+  // query, kept out of the session aggregate above (which is pinned to one SELECT). Fail-safe: a fault leaves the flag false, i.e. "Finished" as before.
+  const startCandidates = sessions.filter((s) => s.status === "ended" && !s.primary_chunks && !s.backup_chunks && s.notes !== undefined);
+  if (startCandidates.length) {
+    try {
+      const acks = (await sql`
+        SELECT room_id, acked_at FROM bench_command
+         WHERE kind = 'start_day' AND status = 'failed' AND room_id = ANY(${[...new Set(startCandidates.map((s) => s.room_id))]}::text[])
+           AND acked_at >= ${fromIso}::timestamptz - interval '1 minute'
+      `) as Array<{ room_id: string; acked_at: string | Date }>;
+      for (const s of startCandidates) {
+        const a0 = new Date(s.started_at).getTime() - 60_000;
+        const a1 = (s.ended_at ? new Date(s.ended_at).getTime() : nowMs) + 180_000;
+        s.start_failed_ack = acks.some((a) => a.room_id === s.room_id && new Date(a.acked_at).getTime() >= a0 && new Date(a.acked_at).getTime() <= a1);
+      }
+    } catch (e) {
+      topDegraded.push(`start_acks_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
+    }
   }
   const byRoom = new Map<string, LiveSession[]>();
   for (const s of sessions) {
@@ -773,6 +796,8 @@ export function normaliseSessions(rows: readonly unknown[]): LiveSession[] {
       backup_chunks: Number(r.backup_chunks) || 0,
       primary_chunks: Number(r.primary_chunks) || 0,
       chunks_after_end: Number(r.chunks_after_end) || 0,
+      notes: typeof r.notes === "string" ? r.notes : null,
+      start_failed_ack: r.start_failed_ack === true,
     });
   }
   return out;

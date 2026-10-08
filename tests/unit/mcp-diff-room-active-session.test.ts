@@ -129,12 +129,14 @@ describe("scribe_diff_room — recording follows the SAME active-session check s
     const sess = (over: Row): Row => ({
       id: "bs_x", room_id: ROOM.id, label: null, mic_label: null, started_at: "2026-09-28T03:16:00.000Z", ended_at: "2026-09-28T03:16:15.000Z",
       status: "ended", notes: null, room_name: ROOM.name, room_slug: ROOM.slug, chunk_count: 0, verified_count: 0, total_bytes: 0, gap_ms: 0, gap_count: 0,
-      last_chunk_at: null, last_any_chunk_at: null, backup_chunk_count: 0, backup_verified_count: 0, primary_lost_count: 0, primary_restored_count: 0, ...over,
+      last_chunk_at: null, last_any_chunk_at: null, backup_chunk_count: 0, backup_verified_count: 0, primary_lost_count: 0, primary_restored_count: 0, start_failed_ack: true, ...over,
     });
     active = null;
     todaySessions = [sess({})];
     expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
     todaySessions = [sess({ chunk_count: 40, ended_at: "2026-09-28T11:00:00.000Z" })];
+    expect(((await rowOf()).room_state as Row).state).toBe("finished");
+    todaySessions = [sess({ start_failed_ack: false })];   // an operator stop inside the window: no death evidence
     expect(((await rowOf()).room_state as Row).state).toBe("finished");
   });
 });

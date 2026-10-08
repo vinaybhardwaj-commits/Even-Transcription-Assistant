@@ -238,10 +238,13 @@ export type RoomState = "cant_tell" | "paused" | "recording" | "start_failed" | 
  * every five minutes and a stop flushes the one in progress). So: ended, zero pieces, and open
  * for under START_FAILED_MAX_MS. The window is generous against the ~15 s evidence and far below
  * a real session; an operator who presses start and stop within it records nothing either, and
- * reading that as a failed start is the honest call. Derived at read time from rows already
- * loaded, so it works for every kiosk build with no app change.
+ * reading that as a failed start is the honest call. Derived at read time. DEATH EVIDENCE IS REQUIRED (refute F2): the start compensation's
+ * note on the session end (kiosks built with the matching Swift) or a start_day command acked FAILED around the session (every
+ * native build already does that), so an operator stop inside the window is never a failed start.
  */
 export const START_FAILED_MAX_MS = 3 * 60_000;
+/** The note the app's start compensation writes on the session end (RoomEngine.startFailedNote — keep equal). */
+export const START_FAILED_NOTE = "start failed: capture did not start";
 export const START_FAILED_HINT = "Capture did not start. Check the microphone / USB cable, then press start to retry; if it fails again, remount the microphone or restart the recorder app.";
 
 /** PURE — did this (newest, ended) session die at start? Unparseable times answer false: say nothing rather than guess. */
@@ -251,8 +254,16 @@ export function sessionDiedAtStart(s: {
   ended_at: string | Date | null | undefined;
   primary_chunks: number | null | undefined;
   backup_chunks: number | null | undefined;
+  /** The session row's notes. */
+  notes?: string | null;
+  /** A start_day command for this room was acked FAILED around this session's life (read-side EXISTS). */
+  start_failed_ack?: boolean | null;
 }): boolean {
   if (s.status !== "ended") return false;
+  // F2 (refute 08 Oct): only a start that DIED ON ITS OWN. An operator who presses start then stop inside the window
+  // also leaves an ended, zero-piece, short session — but writes neither the compensation note nor a failed ack.
+  const evidence = (typeof s.notes === "string" && s.notes.includes(START_FAILED_NOTE)) || s.start_failed_ack === true;
+  if (!evidence) return false;
   if ((Number(s.primary_chunks) || 0) > 0 || (Number(s.backup_chunks) || 0) > 0) return false;
   const a = s.started_at ? new Date(s.started_at).getTime() : NaN;
   const b = s.ended_at ? new Date(s.ended_at).getTime() : NaN;

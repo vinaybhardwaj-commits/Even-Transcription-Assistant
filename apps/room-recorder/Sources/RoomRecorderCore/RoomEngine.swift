@@ -1838,7 +1838,7 @@ public actor RoomEngine {
         commandID: command.id, commandKind: .startDay, sessionID: id,
         priorState: .startCompensationIntent, newState: .captureStopped)
     case .captureStopped:
-      _ = try await remote.patchSession(id: id, action: .end, notes: nil)
+      _ = try await remote.patchSession(id: id, action: .end, notes: Self.startFailedNote)
       reconciledServerSessionID = nil
       reconciledServerSessionStatus = nil
       try advanceControl(
@@ -2564,7 +2564,7 @@ public actor RoomEngine {
       try advanceControl(
         commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
         priorState: .startCompensationIntent, newState: .captureStopped)
-      _ = try await remote.patchSession(id: openedSessionID, action: .end, notes: nil)
+      _ = try await remote.patchSession(id: openedSessionID, action: .end, notes: Self.startFailedNote)
       try advanceControl(
         commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
         priorState: .captureStopped, newState: .sessionEndPatched)
@@ -2581,6 +2581,10 @@ public actor RoomEngine {
       commandID: commandID, commandKind: .startDay, sessionID: openedSessionID,
       priorState: .captureDurable, newState: .startAckReady)
   }
+
+  /// Arch #15 — written on the session end that START COMPENSATION patches, so the server can tell a start
+  /// that died on its own from an operator stop. MUST equal START_FAILED_NOTE in lib/bench-bus-constants.ts.
+  static let startFailedNote = "start failed: capture did not start"
 
   private func pause(commandID: String) async throws {
     guard let id = sessionID else { throw RoomEngineError.noActiveSession }

@@ -2899,7 +2899,7 @@ const diffRoom: McpTool = {
                 lastSessionEnded,
                 lastSessionStartFailed: Boolean(
                   lastSessionEnded && newestSession &&
-                  sessionDiedAtStart({ ...newestSession, primary_chunks: newestSession.chunk_count, backup_chunks: newestSession.backup_chunk_count }),
+                  sessionDiedAtStart({ ...newestSession, primary_chunks: newestSession.chunk_count, backup_chunks: newestSession.backup_chunk_count, notes: newestSession.notes, start_failed_ack: newestSession.start_failed_ack }),
                 ),
                 recordedMsToday: Number(live.audio_recorded_ms) || 0,
               }),
