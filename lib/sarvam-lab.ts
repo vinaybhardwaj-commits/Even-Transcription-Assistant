@@ -139,22 +139,51 @@ export const istDateOf = (ms: number): string => new Date(ms + 19_800_000).toISO
 // --- the ledger ---------------------------------------------------------------------------------------------------------------------------
 /**
  * Append one line. Returns true when it landed (or is already there). NEVER throws (D4).
- * ONE LINE PER JOB ID: if the day's file already holds a line for `line.job_id`, nothing is written — a replayed step, a cancel that races a finish, or
- * the runner's end-of-job hook cannot double-count a job.
+ * ONE LINE PER JOB ID, looked for in BOTH the finish-date file and the start-date file (a job that crosses IST midnight lives in either), so a replayed
+ * step, a cancel that races a finish, or the runner's end-of-job hook cannot double-count a job.
+ * AN `ok` LINE WINS (G13a): if the job's existing line is NOT ok (a cancel or a runner failure that raced a finish Sarvam completed), the ok line REPLACES it
+ * in place, so audio_min counts the audio Sarvam finished; the cancel stays on the job row. An existing ok line is never replaced, and a non-ok line
+ * never replaces another line.
  */
 export async function appendLedger(line: CallLine): Promise<boolean> {
   if (!available()) {
     logCode("lab_store_not_configured", { what: "ledger" });
     return false;
   }
-  const key = ledgerKey(istDateOf(Date.parse(line.finished_at) || Date.now()));
+  const finishedMs = Date.parse(line.finished_at);
+  const startedMs = Date.parse(line.started_at);
+  const keys = [...new Set([ledgerKey(istDateOf(Number.isFinite(finishedMs) ? finishedMs : Date.now())), ...(Number.isFinite(startedMs) ? [ledgerKey(istDateOf(startedMs))] : [])])];
+  const marker = `"job_id":${JSON.stringify(line.job_id)}`;
   const text = `${JSON.stringify(line)}\n`;
   try {
     const store = guarded();
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const cur = await store.get(key);
-      if (cur && cur.body.includes(`"job_id":${JSON.stringify(line.job_id)}`)) return true;
-      const body = cur ? (cur.body.endsWith("\n") || cur.body === "" ? cur.body : `${cur.body}\n`) + text : text;
+      const objs = await Promise.all(keys.map((k) => store.get(k)));
+      // is this job already in a file?
+      let hitKey: string | null = null;
+      let hitObj: StoredObject | null = null;
+      let hitIdx = -1;
+      let hitLines: string[] = [];
+      for (let i = 0; i < keys.length && hitIdx < 0; i++) {
+        const o = objs[i];
+        if (!o) continue;
+        const lines = o.body.split("\n");
+        const idx = lines.findIndex((l) => l.includes(marker));
+        if (idx >= 0) { hitKey = keys[i]!; hitObj = o; hitIdx = idx; hitLines = lines; }
+      }
+      let key: string;
+      let cur: StoredObject | null;
+      let body: string;
+      if (hitObj && hitKey) {
+        let existingStatus = "";
+        try { existingStatus = String((JSON.parse(hitLines[hitIdx]!) as { status?: unknown }).status ?? ""); } catch { /* a torn line counts as present */ }
+        if (existingStatus === "ok" || line.status !== "ok") return true; // already there; a non-ok line never displaces one
+        hitLines[hitIdx] = JSON.stringify(line); // the ok line replaces the cancelled / failed one
+        key = hitKey; cur = hitObj; body = hitLines.join("\n");
+      } else {
+        key = keys[0]!; cur = objs[0] ?? null;
+        body = cur ? (cur.body.endsWith("\n") || cur.body === "" ? cur.body : `${cur.body}\n`) + text : text;
+      }
       // an existing object must carry an ETag to be replaced safely; without one we cannot make the write conditional, so we do not write
       if (cur && !cur.etag) {
         logCode("ledger_no_etag");

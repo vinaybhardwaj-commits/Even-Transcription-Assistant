@@ -129,6 +129,24 @@ describe("the helpers", () => {
     await k.run({ job: { id: "job_r" } as never, step: "prepare", args: { window_id: "bw_1", origin: "https://x", actor: "cron", via: "cron" }, progress: {} });
     expect(roomPrepare).toHaveBeenCalledTimes(1);
   });
+  it("G12: PRODUCTION's rows — room/english = route, room/indic = route (adapter route) — are ALLOWED; room/indic = sarvam is refused", async () => {
+    engineRows = { route: "route", whisper: "whisper", sarvam: "sarvam" };
+    const rows = (pairs: Array<[string, string]>) => (text: string, values: unknown[]) =>
+      /FROM stt_routing/.test(text) ? pairs.map(([bucket, engine]) => ({ language_bucket: bucket, engine_id: engine })) : tables(text, values);
+    answer = rows([["english", "route"], ["indic", "route"]]);
+    expect(await Scope.roomStageRoutesToSarvam()).toBe(false);
+    answer = rows([["english", "route"], ["indic", "sarvam"]]);
+    expect(await Scope.roomStageRoutesToSarvam()).toBe(true);
+    answer = rows([["english", "route"], ["indic", "route"], ["default", "sarvam"]]);
+    expect(await Scope.roomStageRoutesToSarvam()).toBe(true);
+    answer = rows([["english", "route"], ["indic", "auto"]]);
+    expect(await Scope.roomStageRoutesToSarvam()).toBe(false);
+    // and end to end: with the production rows an MCP room_window submit goes through, with via stamped
+    answer = rows([["english", "route"], ["indic", "route"]]);
+    expect(await call("scribe_job_submit", { kind: "room_window", args: { window_id: "bw_1", origin: "https://x", actor: "mcp:night", via: "mcp" } })).toMatchObject({ ok: true, kind: "room_window" });
+    answer = rows([["english", "route"], ["indic", "sarvam"]]);
+    expect(await call("scribe_job_submit", { kind: "room_window", args: { window_id: "bw_1", origin: "https://x", actor: "mcp:night", via: "mcp" } })).toMatchObject({ ok: false, error: "scope_consult_only" });
+  });
   it("roomStageRoutesToSarvam: any room bucket that routes to a Sarvam-backed engine", async () => {
     expect(await Scope.roomStageRoutesToSarvam()).toBe(true);
     roomEngine = "whisper";
@@ -208,6 +226,64 @@ describe("1c — room_window submitted through MCP", () => {
     roomEngine = "whisper";
     await run("mcp");
     expect(roomPrepare).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("G11 — the rule is re-checked where room_window picks the engine for an MCP-origin job (and only there)", () => {
+  const k = KIND_BY_NAME.get("room_window")!;
+  const segment = vi.fn();
+  const rw = { window_id: "bw_1", origin: "https://x", actor: "mcp:night" };
+  const run = (step: string, via: string, progress: Row = {}) => k.run({ job: { id: "job_r" } as never, step, args: { ...rw, via }, progress });
+  const released = () => statements.filter((s) => /UPDATE bench_window SET state = 'closed'|UPDATE stt_subject_job SET state = 'queued'/.test(s.text));
+
+  beforeEach(async () => {
+    segment.mockReset();
+    const drain = await import("@/lib/stt/room-drain");
+    vi.spyOn(drain, "roomWindowSegment").mockImplementation((async (...a: unknown[]) => segment(...a)) as never);
+    vi.spyOn(drain, "roomWindowEngine").mockImplementation((async () => ({ ok: true, step: "ok", next_progress: { done_engine: true } })) as never);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a routing edit AFTER the prepare check: the segment step has just chosen Sarvam -> refused, the window handed back WITHOUT counting an attempt", async () => {
+    roomEngine = "whisper"; // prepare/submit passed
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "sarvam", silent_window: false } });
+    expect(await run("segment", "mcp")).toEqual({ kind: "fail", error: "scope_consult_only: room and bench audio is not sent to Sarvam; only cut consult clips and doctor-app / phone encounter audio are" });
+    const rel = released();
+    expect(rel).toHaveLength(2);
+    expect(rel[0]!.values).toContain("bw_1");
+    for (const s of statements) expect(s.text).not.toMatch(/attempts|state = 'failed'/); // no attempt counted, nothing parked
+  });
+  it("an alias engine id (adapter sarvam) and a database error are refused too (fail closed)", async () => {
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "indic_x" } });
+    expect(await run("segment", "mcp")).toMatchObject({ kind: "fail", error: expect.stringMatching(/^scope_consult_only/) });
+    // S5: with the engine table unreadable, ANY engine id is refused — with its own reason, scope_check_unavailable — and the window is released untouched
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "whisper" } });
+    answer = () => new Error("db down");
+    statements.length = 0;
+    expect(await run("segment", "mcp")).toMatchObject({ kind: "fail", error: expect.stringMatching(/^scope_check_unavailable/) });
+    expect(released().length).toBeGreaterThanOrEqual(1); // the release was attempted (the database is down, so only the first UPDATE is even tried)
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "my_engine" } });
+    expect(await run("segment", "mcp")).toMatchObject({ kind: "fail", error: expect.stringMatching(/^scope_check_unavailable/) });
+    // the engine step re-check refuses the same way
+    expect(await run("engine", "mcp", { engine_id: "whisper" })).toMatchObject({ kind: "fail", error: expect.stringMatching(/^scope_check_unavailable/) });
+  });
+  it("a non-Sarvam engine proceeds to the engine step; a SILENT window (no engine call) is not refused; cron / admin jobs are untouched", async () => {
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "route", silent_window: false } });
+    expect(await run("segment", "mcp")).toMatchObject({ kind: "next", step: "engine" });
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "sarvam", silent_window: true } });
+    expect(await run("segment", "mcp")).toMatchObject({ kind: "next", step: "finish" });
+    segment.mockResolvedValue({ ok: true, step: "ok", next_progress: { engine_id: "sarvam", silent_window: false } });
+    for (const via of ["cron", "admin_route"]) expect(await run("segment", via), via).toMatchObject({ kind: "next", step: "engine" });
+  });
+  it("the engine step re-checks too, immediately before the engine is called", async () => {
+    roomEngine = "whisper";
+    expect(await run("engine", "mcp", { engine_id: "sarvam" })).toMatchObject({ kind: "fail", error: expect.stringMatching(/^scope_consult_only/) });
+    expect(released()).toHaveLength(2);
+    statements.length = 0;
+    const drain = await import("@/lib/stt/room-drain");
+    expect(await run("engine", "mcp", { engine_id: "route" })).toMatchObject({ kind: "next" });
+    expect(await run("engine", "cron", { engine_id: "sarvam" })).toMatchObject({ kind: "next" });
+    expect(vi.mocked(drain.roomWindowEngine)).toHaveBeenCalledTimes(2);
   });
 });
 

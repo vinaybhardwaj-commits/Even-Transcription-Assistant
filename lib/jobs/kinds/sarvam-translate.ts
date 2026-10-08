@@ -120,6 +120,9 @@ async function ledger(ctx: StepContext, status: "ok" | "failed", chars: number, 
   });
 }
 
+/** INPUT characters already sent: the source chunks translated so far (what the contract's `chars` means), never the English that came back. */
+const inputCharsDone = (chunks: string[], done: number): number => chunks.slice(0, done).reduce((n, c) => n + c.length, 0);
+
 async function translateStep(ctx: StepContext): Promise<StepOutcome> {
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   const a = ctx.args as unknown as SarvamTranslateArgs;
@@ -140,7 +143,7 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
       await writeJson(key, doc).catch(() => undefined);
       console.error("[sarvam] translate failed", JSON.stringify({ job: ctx.job.id, err: r.error, transient: r.transient }));
       if (r.transient) throw new Error(`sarvam_translate_failed: ${r.error}`);
-      await ledger(ctx, "failed", doc.parts.join("").length, r.status ?? httpStatusOf(r.error), throttled || r.status === 429);
+      await ledger(ctx, "failed", inputCharsDone(chunks, doc.parts.length), r.status ?? httpStatusOf(r.error), throttled || r.status === 429);
       return failWith(jobError("sarvam_translate_failed", r.error));
     }
     doc.parts.push(r.english);
@@ -150,7 +153,7 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
       throw new Error("result_write_failed");
     }
   }
-  if (doc.parts.length < chunks.length) return nextStep(STEPS.translate, { ...ctx.progress, chunks_done: doc.parts.length });
+  if (doc.parts.length < chunks.length) return nextStep(STEPS.translate, { ...ctx.progress, chunks_done: doc.parts.length, translate_chars: inputCharsDone(chunks, doc.parts.length) });
   doc.english = doc.parts.join(" ").trim();
   doc.chars_out = doc.english.length;
   try {
