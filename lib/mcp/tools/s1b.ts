@@ -32,6 +32,14 @@ export const KH_LAST_SEEN_DAYS = 7;
 export const POWER_ROWS_PER_MACHINE = 20;
 export const WINDOWS_DEFAULT = 100;
 
+/** Keys that must never leave this door, wherever they sit in a stored JSON value (a steward.result event stores the ticket's nonce in `result`). */
+const SECRET_KEYS = /^(nonce|signature)$/i;
+export function scrub(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(scrub);
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v as Row).filter(([k]) => !SECRET_KEYS.test(k)).map(([k, x]) => [k, scrub(x)]));
+  return v;
+}
+
 const trunc = (v: unknown, n = 200): string | null => (typeof v === "string" ? v.slice(0, n) : null);
 const num = (v: unknown): number | null => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
 const ageS = (v: unknown, nowMs = Date.now()): number | null => {
@@ -101,7 +109,7 @@ const decisionOut = (r: Row, payload: boolean): Row => ({
   actor: String(r.actor),
   why: trunc(r.why, 400),
   why_not: trunc(r.why_not, 400),
-  ...(payload ? { params: r.params ?? null, inputs: r.inputs ?? null, inputs_hash: (r.inputs_hash as string | null) ?? null } : {}),
+  ...(payload ? { params: scrub(r.params ?? null), inputs: scrub(r.inputs ?? null), inputs_hash: (r.inputs_hash as string | null) ?? null } : {}),
 });
 
 async function stewardDecisions(roomId: string | null, sinceHours: number, limit: number, payload: boolean): Promise<Row> {
@@ -136,7 +144,7 @@ async function stewardTickets(roomId: string | null, sinceHours: number, limit: 
   const kept = rows.slice(0, limit);
   const byStatus: Record<string, number> = {};
   for (const r of kept) byStatus[String(r.status)] = (byStatus[String(r.status)] ?? 0) + 1;
-  // never the signature or the nonce
+  // never the signature or the nonce: not as columns, and not inside params / result (scrub)
   return {
     ok: true,
     since_hours: sinceHours,
@@ -153,7 +161,7 @@ async function stewardTickets(roomId: string | null, sinceHours: number, limit: 
       fetched_at: iso(r.fetched_at),
       completed_at: iso(r.completed_at),
       decision_id: r.decision_id === null || r.decision_id === undefined ? null : Number(r.decision_id),
-      ...(payload ? { params: r.params ?? null, result: r.result ?? null } : {}),
+      ...(payload ? { params: scrub(r.params ?? null), result: scrub(r.result ?? null) } : {}),
     })),
   };
 }
@@ -213,7 +221,7 @@ async function stewardWhy(args: ToolArgs, room: RoomRef): Promise<Row> {
     truncated: rows.length > LIMIT_DEFAULT,
     // beyond retention the decision log has been pruned: an empty answer there means "gone", not "nothing happened"
     ...(beyond ? { beyond_retention: true, retention_days: DECISION_RETENTION_DAYS } : {}),
-    decisions: rows.slice(0, LIMIT_DEFAULT).map((r) => decisionOut(r, true)),
+    decisions: rows.slice(0, LIMIT_DEFAULT).map((r) => decisionOut(r, argBool(args, "include_payload"))),
     // steward_config keeps no history: these are the values NOW, not at `at`
     config_in_force: {
       history: false,
@@ -407,6 +415,7 @@ async function kioskHealth(list: Install[]): Promise<Row> {
 
 async function kioskPower(list: Install[]): Promise<Row> {
   const { keys, roomOf } = keyMap(list);
+  if (keys.length === 0) return { not_collected: true, reason: "no machine bound to this room" };
   const rows = keys.length
     ? ((await sql`
         SELECT w.machine, w.kind, w.ts, w.received_at, w.reason, w.kaesleep FROM (
@@ -630,12 +639,15 @@ async function oneWindow(windowId: string): Promise<Row> {
 }
 
 async function dayWindows(roomId: string, day: string, limit: number): Promise<Row> {
+  // bench_window.start_ms is epoch ms (lib/bench-window.ts), so a window belongs to the IST day it STARTS in, whatever day its session started.
+  const dayLo = Date.parse(`${day}T00:00:00+05:30`);
+  const dayHi = dayLo + 86_400_000;
   const rows = (await sql`
     SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic, w.state, w.closed_at
       FROM bench_window w
       JOIN bench_session s ON s.id = w.session_id
-     WHERE s.room_id = ${roomId}::text AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${day}::date
-     ORDER BY s.started_at, w.start_ms
+     WHERE s.room_id = ${roomId}::text AND w.start_ms >= ${dayLo}::bigint AND w.start_ms < ${dayHi}::bigint
+     ORDER BY w.start_ms
      LIMIT ${limit + 1}
   `) as Row[];
   const kept = rows.slice(0, limit);
@@ -671,7 +683,7 @@ async function dayWindows(roomId: string, day: string, limit: number): Promise<R
 const sttWindows: McpTool = {
   name: "scribe_stt_windows",
   description:
-    "STT windows, read-only; touches no room. Pass `window_id` for one window (state, drain job, scribe_job rows, runs with engine/cost/length, encounter link) or `ist_date` + `room` for that day's windows with state counts. " +
+    "STT windows, read-only; touches no room. Pass `window_id` for one window (state, drain job, scribe_job rows, runs with engine/cost/length, encounter link) or `ist_date` + `room` for the windows that START in that IST day, with state counts. " +
     "No transcript text, clip keys or patient identifiers. Lab / REB fields are null (S5). `limit` <= 200 (default 100) for a day. Times UTC.",
   scope: "read",
   inputSchema: {

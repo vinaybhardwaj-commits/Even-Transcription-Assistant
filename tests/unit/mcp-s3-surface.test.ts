@@ -234,7 +234,7 @@ describe("S3.2 scribe_jobs", () => {
   });
 
   it("G1: scribe_jobs is never advertised read-only, under either profile; cancel makes it destructive", async () => {
-    for (const headers of [{}, { "x-scribe-profile": "lab" }]) {
+    for (const headers of [{}, { "x-scribe-profile": "lab" }] as Array<Record<string, string>>) {
       const body = (await door("tools/list", { headers })).body.result as { tools: Array<{ name: string; annotations: Row }> };
       const jobs = body.tools.find((t) => t.name === "scribe_jobs")!;
       expect(jobs.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
@@ -242,7 +242,7 @@ describe("S3.2 scribe_jobs", () => {
   });
 
   it("G1: no listed tool with a write- or invoke-scope member carries readOnlyHint true (both profiles)", async () => {
-    for (const headers of [{}, { "x-scribe-profile": "lab" }]) {
+    for (const headers of [{}, { "x-scribe-profile": "lab" }] as Array<Record<string, string>>) {
       const body = (await door("tools/list", { headers })).body.result as { tools: Array<{ name: string; annotations: { readOnlyHint: boolean } }> };
       for (const t of body.tools) {
         const tool = S.CALLABLE_TOOLS.get(t.name)!;

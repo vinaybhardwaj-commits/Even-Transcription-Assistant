@@ -137,6 +137,22 @@ describe("scribe_steward", () => {
     noWrites();
   });
 
+  it("F1: a nonce or signature inside a stored result / params / inputs never leaves, include_payload or not", async () => {
+    answer = (text) =>
+      /FROM steward_tickets t/.test(text)
+        ? [{ ticket_id: "t1", machine: "m1", action: "restart_engine", status: "done", issued_at: "2026-10-08T08:00:00.000Z", expires_at: "2026-10-08T08:05:00.000Z", fetched_at: null, completed_at: null, decision_id: null,
+             params: { p: 1, Nonce: "PNONCE", nested: { signature: "PSIG", keep: 1 } },
+             result: { ticket_id: "t1", nonce: "RNONCE", outcome: "ok", detail: [{ NONCE: "DNONCE", d: 2 }] } }]
+        : /FROM steward_decisions d/.test(text) ? [decision(1, "2026-10-08T09:00:00.000Z", { params: { signature: "XSIG", a: 1 }, inputs: { nonce: "XNONCE", n: 1 } })] : [];
+    for (const include_payload of [false, true]) {
+      const t = await run("scribe_steward", { view: "tickets", include_payload });
+      const d = await run("scribe_steward", { view: "decisions", include_payload });
+      expect(JSON.stringify([t, d]), `include_payload=${include_payload}`).not.toMatch(/NONCE|PSIG|XSIG/i);
+    }
+    const t = ((await run("scribe_steward", { view: "tickets", include_payload: true })).tickets as Row[])[0]!;
+    expect(t).toMatchObject({ params: { p: 1, nested: { keep: 1 } }, result: { ticket_id: "t1", outcome: "ok", detail: [{ d: 2 }] } });
+  });
+
   it("tick: last tick with its age, kill switch, lease held or not (holder never shown), recent decisions", async () => {
     const until = new Date(Date.now() + 30_000).toISOString();
     answer = (text) =>
@@ -170,10 +186,15 @@ describe("scribe_steward", () => {
       expect(stmt.text).toMatch(/d\.ts >= \?::timestamptz AND d\.ts <= \?::timestamptz/); // both edges inclusive
     });
 
-    it("returns the rows, payloads included, and the config now with history:false and this room's flags", async () => {
+    it("returns the rows (params/inputs only with include_payload, as decisions) and the config now with history:false and this room's flags", async () => {
       const out = await run("scribe_steward", { view: "why", room: "opd-1", at: AT });
       expect(out).toMatchObject({ ok: true, count: 3, truncated: false, window: { minutes_each_side: 15 } });
-      expect((out.decisions as Row[])[0]).toMatchObject({ params: { a: 1 } });
+      expect((out.decisions as Row[])[0]).toMatchObject({ rule: "r_start", why: "inside window" });
+      expect((out.decisions as Row[])[0]).not.toHaveProperty("params");
+      expect((out.decisions as Row[])[0]).not.toHaveProperty("inputs");
+      expect((out.decisions as Row[])[0]).not.toHaveProperty("inputs_hash");
+      const full = await run("scribe_steward", { view: "why", room: "opd-1", at: AT, include_payload: true });
+      expect((full.decisions as Row[])[0]).toMatchObject({ params: { a: 1 }, inputs: { n: 1 }, inputs_hash: "h" });
       expect(out.config_in_force).toMatchObject({ history: false, kill_switch: { on: false }, room: { flags: ["dev"] } });
       expect(out).not.toHaveProperty("beyond_retention");
       noWrites();
@@ -290,6 +311,11 @@ describe("scribe_kiosks", () => {
     expect(((out.kiosks as Row[])[0]!.events as Row[]).map((e) => e.kind)).toEqual(["power.wake", "power.sleep"]);
     answer = withInstall();
     expect(await run("scribe_kiosks", { view: "power" })).toMatchObject({ view: "power", not_collected: true, reason: expect.stringContaining("power.*") });
+    // G3: an install with no hostname has no machine to ask about; the reason says so and no event table is read
+    answer = (text, values) => roomTable(text, values) ?? (/FROM room_install i/.test(text) ? [{ ...INSTALL, hostname: null }] : []);
+    statements.length = 0;
+    expect(await run("scribe_kiosks", { view: "power", room: "opd-1" })).toMatchObject({ not_collected: true, reason: "no machine bound to this room" });
+    expect(statements.filter((s) => /kiosk_health_events/.test(s.text))).toEqual([]);
     noWrites();
   });
 
@@ -381,8 +407,23 @@ describe("scribe_stt_windows", () => {
     const out = await run("scribe_stt_windows", { ist_date: "2026-10-08", room: "opd-1", limit: 50 });
     expect(out).toMatchObject({ ok: true, count: 2, truncated: false, by_state: { transcribed: 1, silent: 1 }, drain_by_state: { done: 1, no_job: 1 }, room: { id: ROOM.id } });
     const stmt = statements.find((s) => /FROM bench_window w/.test(s.text))!;
-    expect(stmt.values).toEqual([ROOM.id, "2026-10-08", 51]);
+    // G2: filtered by the WINDOW's own start (epoch ms) inside the IST day [00:00+05:30, +24 h), not by the session's start date
+    expect(stmt.values).toEqual([ROOM.id, Date.parse("2026-10-08T00:00:00+05:30"), Date.parse("2026-10-09T00:00:00+05:30"), 51]);
+    expect(stmt.text).not.toMatch(/started_at/);
     noWrites();
+  });
+
+  it("G2: a session that crosses IST midnight puts each window on the IST day it starts in", async () => {
+    // session started 23:30 IST on the 8th; its windows at 23:30 (8th) and 00:15 (9th)
+    const w1 = Date.parse("2026-10-08T23:30:00+05:30");
+    const w2 = Date.parse("2026-10-09T00:15:00+05:30");
+    const all = [{ id: "bw_a", room_day_id: null, start_ms: w1, end_ms: w1 + 900_000, source_mic: "primary", state: "transcribed", closed_at: null }, { id: "bw_b", room_day_id: null, start_ms: w2, end_ms: w2 + 900_000, source_mic: "primary", state: "transcribed", closed_at: null }];
+    // the mock plays the database: it applies the bound [lo, hi) filter
+    answer = (text, values) => roomTable(text, values) ?? (/FROM bench_window w/.test(text) ? all.filter((w) => w.start_ms >= (values[1] as number) && w.start_ms < (values[2] as number)) : []);
+    const eighth = await run("scribe_stt_windows", { ist_date: "2026-10-08", room: "opd-1" });
+    const ninth = await run("scribe_stt_windows", { ist_date: "2026-10-09", room: "opd-1" });
+    expect((eighth.windows as Row[]).map((w) => w.id)).toEqual(["bw_a"]);
+    expect((ninth.windows as Row[]).map((w) => w.id)).toEqual(["bw_b"]);
   });
 
   it("day: a bad or impossible date is refused before any SQL; an unknown room reads no window table", async () => {
