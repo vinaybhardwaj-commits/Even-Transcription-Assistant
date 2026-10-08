@@ -320,8 +320,8 @@ result is held under **36,000** characters by a test (measured at S1A: see REPOR
 **The 45:** `scribe_health`, `scribe_system`, `scribe_rooms` and the rest are in the Per-token and group tables above; the three S1A reads:
 
 - `scribe_now` `{include_claims?}` — the Rooms Live fleet board: the same snapshot `GET /api/rooms-live/now` serves (lib/rooms-live/snapshot), computed fresh
-  per call (the route's 2-second memo and its claim auto-clear are the route's own and are never touched). `include_claims` adds each open claim, read-only.
-- `scribe_room` `{room, view: alerts|levels|commands|devices, window_min? <= 240}` — one room. alerts = Room Watchdog rows for the room (incl. recovered);
+  per call (the route's 2-second memo and its claim auto-clear are the route's own and are never touched). `include_claims` defaults to true so the default output matches the route; `false` opts out. Claims are read, never cleared.
+- `scribe_room` `{room, view: alerts|levels|commands|devices, window_min? <= 240}` — one room (an out-of-range window is clamped and the answer says `clamped: true` with the applied value). alerts = Room Watchdog rows for the room (incl. recovered);
   levels = bucket summary with `zero_ratio`, `capture_dead` (zero_ratio >= 0.98) and `stale`; commands = `bench_command` outcomes; devices = the install's
   stored input devices. The old tools (`scribe_room_alerts`, `scribe_room_levels`, `scribe_list_commands`) are untouched.
 - `scribe_tape_day` `{ist_date, room?}` — `room_audio_day` rollups (and, with `include_segments`, `room_audio_state` intervals). Read-only; the classifier writes them.

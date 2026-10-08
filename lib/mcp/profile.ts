@@ -81,7 +81,7 @@ function briefs(): Record<string, string> {
     // S1 reads (S1A)
     scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
     scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
-    scribe_tape_day: `${NO_ROOM_READ} One IST day of room tape state (sessions, pieces, gaps) from room_audio_state / room_audio_day; writes nothing.`,
+    scribe_tape_day: `${NO_ROOM_READ} Minutes per audio state per room for one IST day; include_segments (needs room) adds the state intervals. Writes nothing.`,
   };
 }
 

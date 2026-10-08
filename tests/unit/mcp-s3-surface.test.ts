@@ -253,6 +253,18 @@ describe("S3.2 scribe_jobs", () => {
     }
   });
 
+  it("G5: scribe_room_command is destructive and not read-only (end_day can stop a live room); scribe_tape_day's text names what it returns", async () => {
+    const tools = (await door("tools/list")).body.result as { tools: Array<{ name: string; description: string; annotations: Row }> };
+    const rc = tools.tools.find((t) => t.name === "scribe_room_command")!;
+    expect(rc.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+    const td = tools.tools.find((t) => t.name === "scribe_tape_day")!.description;
+    expect(td).toMatch(/Minutes per audio state/);
+    expect(td).toMatch(/include_segments/);
+    expect(td).not.toMatch(/sessions|pieces|gaps/);
+    // generic: every tool whose scope or members include a write is destructive-capable only if it is a room/queue mutator; none is advertised read-only
+    for (const t of tools.tools) if (/^WRITE|^Reads and writes/.test(t.description)) expect(t.annotations.readOnlyHint, t.name).toBe(false);
+  });
+
   it("a refused member never runs", async () => {
     const spy = vi.spyOn(S.PUBLISHED_TOOLS.find((t) => t.name === "scribe_job_submit")!, "handler").mockResolvedValue({});
     await call("scribe_jobs", { action: "submit" }, ["read", "write"]);

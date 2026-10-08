@@ -33,11 +33,19 @@ const iso = (v: unknown): string | null => {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
+/** YYYY-MM-DD that is a real calendar date (2026-02-30 rolls over in Date.parse, so compare the round trip). */
+export function isRealDate(day: string): boolean {
+  if (!IST_DATE_RE.test(day)) return false;
+  const t = Date.parse(`${day}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === day;
+}
+
 /** A missing table or column is "not collected", not an error: the tool never invents schema. */
 export function notCollectedReason(e: unknown): string | null {
   const err = e as { code?: string; message?: string } | null;
   const msg = String(err?.message ?? e);
-  if (err?.code === "42P01" || err?.code === "42703" || /relation .* does not exist|column .* does not exist/i.test(msg)) return msg.slice(0, 160);
+  // Codes only (G2): a message that merely sounds like a missing table is an ordinary failure.
+  if (err?.code === "42P01" || err?.code === "42703") return msg.slice(0, 160);
   return null;
 }
 
@@ -70,18 +78,18 @@ const now: McpTool = {
     "The fleet board, read-only: every Rooms Live room's state (listening, quiet, recording, silent, offline, unknown…), state_since, detail_code, level (rms, zero, at, stale), device, session, steward, ages. " +
     "The SAME snapshot GET /api/rooms-live/now serves (lib/rooms-live/snapshot), computed fresh each call. " +
     "tape_advancing does not mean audio is arriving — trust the room state and the ages (ages_s), not a single level reading. zero_ratio >= 0.98 = digital silence; levels can freeze after a device drop. " +
-    "`include_claims` (default false) adds each room's open \"I'm on it\" claim; reading it never clears one (the route's auto-clear belongs to the route). Doctor names are included as the screen shows them. Times UTC.",
+    "`include_claims` (default TRUE, so the default output matches the route; false opts out) attaches each room's open \"I'm on it\" claim; reading it never clears one (the route's auto-clear belongs to the route). Doctor names are included as the screen shows them. Times UTC.",
   scope: "read",
   inputSchema: {
     type: "object",
-    properties: { include_claims: { type: "boolean", description: "Attach each room's open claim ({by, since}); default false. Read-only: no auto-clear." } },
+    properties: { include_claims: { type: "boolean", description: "Attach each room's open claim ({by, since}); default true. Read-only: no auto-clear." } },
     additionalProperties: false,
   },
   handler: async (args: ToolArgs) =>
     failSafe({ rooms: [] as unknown[], degraded: ["snapshot"] }, async () => {
       // buildSnapshot, not getSnapshot: the route's 2-second memo and its claim-streak / auto-clear state belong to the route; a tool call must not feed or skew them.
       const snap = await buildSnapshot({ db: sql as never });
-      if (!argBool(args, "include_claims")) return snap as never;
+      if (args.include_claims === false) return snap as never;
       const degraded = [...snap.degraded];
       try {
         const claims = await openClaims(sql as never);
@@ -260,12 +268,15 @@ const room: McpTool = {
     const picked = await pickRoom(args);
     if ("error" in picked) return picked.error;
     const windowMin = argInt(args, "window_min", WINDOW_MIN_DEFAULT, 1, WINDOW_MIN_MAX);
+    const rawWindow = typeof args.window_min === "number" ? args.window_min : typeof args.window_min === "string" ? Number(args.window_min) : NaN;
+    const asked = Number.isFinite(rawWindow) ? Math.trunc(rawWindow) : null;
+    const clamp = asked !== null && (asked > WINDOW_MIN_MAX || asked < 1) ? { clamped: true, window_min_requested: asked, window_min_applied: windowMin } : {};
     const body =
       view === "alerts" ? await viewAlerts(picked.room, windowMin)
       : view === "levels" ? await viewLevels(picked.room, windowMin, argBool(args, "include_samples"))
       : view === "commands" ? await viewCommands(picked.room, windowMin, argBool(args, "include_payload"))
       : await viewDevices(picked.room);
-    return { room: roomRef(picked.room), view, ...body };
+    return { room: roomRef(picked.room), view, ...clamp, ...body };
   },
 };
 
@@ -293,7 +304,7 @@ const tapeDay: McpTool = {
   },
   handler: async (args: ToolArgs) => {
     const day = argStr(args, "ist_date", 10);
-    if (!day || !IST_DATE_RE.test(day) || Number.isNaN(Date.parse(`${day}T00:00:00Z`))) return { ok: false, error: "invalid_ist_date" };
+    if (!day || !isRealDate(day)) return { ok: false, error: "invalid_ist_date" };
     void DAY_COLUMNS; // the sql tag takes no identifiers; the column list is spelled out in the statement
     let roomId: string | null = null;
     let ref: RoomRef | null = null;

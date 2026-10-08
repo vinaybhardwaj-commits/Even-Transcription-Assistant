@@ -88,6 +88,18 @@ describe("scribe_now", () => {
     noWrites();
   });
 
+  it("the DEFAULT call matches GET /api/rooms-live/now byte for byte even with a claim open", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-08T12:00:00.000Z"));
+    answer = (text) => (/FROM rooms_live_claim/.test(text) ? [{ id: 1, room_id: ROOM.id, claimed_by: "ops", claimed_at: "2026-10-08T11:00:00.000Z", cleared_at: null, cleared_by: null, state_at_claim: null, note: null }] : []);
+    const routeBody = await (await nowRoute(new Request("https://x/api/rooms-live/now"))).text();
+    expect(routeBody).toContain('"claim":{"by":"ops"');
+    resetMemoForTests();
+    resetAutoClearForTests();
+    expect(JSON.stringify(await run("scribe_now", {}))).toBe(routeBody);
+    noWrites();
+  });
+
   it("matches GET /api/rooms-live/now BYTE FOR BYTE for the same instant and data", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-08T12:00:00.000Z"));
@@ -113,11 +125,13 @@ describe("scribe_now", () => {
 
   it("include_claims attaches an open claim to a room that still needs someone, reads it without clearing it", async () => {
     answer = (text) => (/FROM rooms_live_claim/.test(text) ? [{ id: 1, room_id: ROOM.id, claimed_by: "ops", claimed_at: "2026-10-08T11:00:00.000Z", cleared_at: null, cleared_by: null, state_at_claim: null, note: null }] : []);
-    const withClaims = await run("scribe_now", { include_claims: true });
+    const withClaims = await run("scribe_now", {}); // default: claims on, as the route
     const row = (withClaims.rooms as Row[]).find((r) => r.room_id === ROOM.id)!;
     // with every source empty the room is "unknown", which is not resolved: the claim shows
     expect(row.claim).toEqual({ by: "ops", since: "2026-10-08T11:00:00.000Z" });
-    const without = await run("scribe_now", {});
+    const explicit = await run("scribe_now", { include_claims: true });
+    expect(JSON.stringify(explicit.rooms)).toBe(JSON.stringify(withClaims.rooms));
+    const without = await run("scribe_now", { include_claims: false });
     expect((without.rooms as Row[]).every((r) => r.claim === null)).toBe(true);
     noWrites();
   });
@@ -158,6 +172,21 @@ describe("scribe_room", () => {
     const capped = await run("scribe_room", { room: "opd-1", view: "alerts", window_min: 9999 });
     expect(capped.ok).toBe(true);
     noWrites();
+  });
+
+  it("G2: only SQLSTATE 42P01/42703 means not_collected; a message that merely says 'does not exist' is a plain failure", async () => {
+    answer = (text, values) => roomTableKnowsOpd1(text, values) ?? (/room_alert_outbox/.test(text) ? new Error('relation "x" does not exist') : []);
+    const out = await run("scribe_room", { room: "opd-1", view: "alerts" });
+    expect(out).toMatchObject({ ok: false });
+    expect(out).not.toHaveProperty("not_collected");
+  });
+
+  it("G4: a window over 240 (or under 1) is clamped and the answer says so; an in-range one is not flagged", async () => {
+    const over = await run("scribe_room", { room: "opd-1", view: "alerts", window_min: 9999 });
+    expect(over).toMatchObject({ clamped: true, window_min_requested: 9999, window_min_applied: 240 });
+    expect(await run("scribe_room", { room: "opd-1", view: "alerts", window_min: 0 })).toMatchObject({ clamped: true, window_min_applied: 1 });
+    expect(await run("scribe_room", { room: "opd-1", view: "alerts", window_min: 240 })).not.toHaveProperty("clamped");
+    expect(await run("scribe_room", { room: "opd-1", view: "alerts" })).not.toHaveProperty("clamped");
   });
 
   it("alerts: a missing outbox table is not_collected, not an error", async () => {
@@ -285,6 +314,11 @@ describe("scribe_tape_day", () => {
   });
 
   it("an unknown room answers unknown_room; a missing table is not_collected", async () => {
+    // G3: an impossible calendar date is refused before any SQL
+    statements.length = 0;
+    for (const d of ["2026-02-30", "2026-04-31", "2026-00-10", "2025-02-29"]) expect(await run("scribe_tape_day", { ist_date: d })).toEqual({ ok: false, error: "invalid_ist_date" });
+    expect(await run("scribe_tape_day", { ist_date: "2028-02-29" })).toMatchObject({ ok: true });
+    expect(statements.filter((s) => /room_audio_day/.test(s))).toHaveLength(1);
     expect(await run("scribe_tape_day", { ist_date: DAY, room: "nope" })).toEqual({ ok: false, error: "unknown_room", room: "nope" });
     answer = (text) => (/FROM room_audio_day/.test(text) ? Object.assign(new Error('relation "room_audio_day" does not exist'), { code: "42P01" }) : []);
     expect(await run("scribe_tape_day", { ist_date: DAY })).toMatchObject({ ok: true, not_collected: true, ist_date: DAY });
