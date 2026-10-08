@@ -800,6 +800,9 @@ export async function findActiveSession(roomId: string): Promise<{ id: string; s
 // Pure decision for scribe_start_recording pre-checks (unit-tested)
 // ---------------------------------------------------------------------------
 
+/** Arch #16: how old a recording session must be before a listening kiosk that does not name it counts as having abandoned it. */
+export const ABANDONED_SESSION_GRACE_MS = 2 * 60_000;
+
 export type StartDecision =
   | { action: "reject"; error: "kiosk_not_listening" | "room_paused" }
   | { action: "already_recording"; session_id: string }
@@ -807,17 +810,26 @@ export type StartDecision =
 
 export function decideStart(input: {
   listener: ListenerRow | null;
-  activeSession: { id: string; status: string } | null;
+  activeSession: { id: string; status: string; started_at?: string | Date } | null;
   overridePause: boolean;
   now?: Date;
 }): StartDecision {
   const now = input.now ?? new Date();
   if (!isListening(input.listener, now)) return { action: "reject", error: "kiosk_not_listening" };
   const s = input.activeSession;
+  // ARCH #16 — a `recording` row the LISTENING kiosk does not claim is an abandoned session (the host went away and came back; the cloud row
+  // outlived it). "Idempotent start" must not hand it back as a live tape and block the room until the hourly reaper: send the start, and
+  // POST /api/bench/sessions ends the stale row. Only when we KNOW the session's age (started_at supplied) and it is older than the grace, so
+  // a session the kiosk created a moment ago, before its next poll could name it, is never mistaken for abandoned.
+  const abandoned =
+    s?.status === "recording" && s.started_at !== undefined &&
+    input.listener?.recording_session_id !== s.id &&
+    now.getTime() - new Date(s.started_at).getTime() > ABANDONED_SESSION_GRACE_MS;
   // Idempotent start: a live tape means "return it", never a second tape.
-  if (s?.status === "recording" || (input.listener?.recording_session_id && !input.listener.paused && !s)) {
+  if ((s?.status === "recording" && !abandoned) || (input.listener?.recording_session_id && !input.listener.paused && !s)) {
     return { action: "already_recording", session_id: s?.id ?? input.listener!.recording_session_id! };
   }
+  if (abandoned) return { action: "send", args: null };
   const paused = Boolean(input.listener?.paused) || s?.status === "paused";
   if (paused && !input.overridePause) return { action: "reject", error: "room_paused" };
   return { action: "send", args: paused && input.overridePause ? { override_pause: true } : null };

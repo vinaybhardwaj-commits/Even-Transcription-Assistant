@@ -61,6 +61,7 @@ beforeAll(() => {
     CREATE TABLE bench_chunk (id text PRIMARY KEY, session_id text NOT NULL, source text NOT NULL DEFAULT 'primary', idx int NOT NULL DEFAULT 0,
       created_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz NOT NULL, size_bytes bigint, duration_ms int,
       CONSTRAINT bench_chunk_session_source_idx_key UNIQUE (session_id, source, idx));
+    CREATE TABLE bench_listener (room_id text PRIMARY KEY, last_poll_at timestamptz NOT NULL DEFAULT now());
     CREATE TABLE bench_level_sample (
       id bigserial PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL, sampled_at timestamptz NOT NULL DEFAULT now(),
       peak real NOT NULL, avg real, zero_ratio real, session_open boolean NOT NULL DEFAULT false, tape_advancing boolean NOT NULL DEFAULT false,
@@ -87,7 +88,7 @@ beforeEach(() => {
   H.rec.length = 0;
   pg.exec(`
     TRUNCATE room_alert_outbox RESTART IDENTITY; TRUNCATE room_alert_state; TRUNCATE pulse_presence_events; TRUNCATE eta_encounter_windows; TRUNCATE kiosk_health_events;
-    TRUNCATE bench_command; TRUNCATE bench_level_sample; TRUNCATE bench_chunk; TRUNCATE bench_session;
+    TRUNCATE bench_command; TRUNCATE bench_listener; TRUNCATE bench_level_sample; TRUNCATE bench_chunk; TRUNCATE bench_session;
     DELETE FROM room_install; DELETE FROM room;
     INSERT INTO room (id, slug, name) VALUES ('r6', 'opd-6-x', 'OPD 6'), ('r4', 'opd-4-x', 'OPD 4'), ('r7', 'consul-4-x', 'CONSUL 4');
     INSERT INTO room_install (install_id, room_id, hostname, enrolled_at) VALUES
