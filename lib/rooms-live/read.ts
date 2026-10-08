@@ -110,7 +110,7 @@ const logRow = (r: Record<string, unknown>): StewardLogRow => ({
   pstate: typeof r.pstate === "string" ? r.pstate : null,
 });
 
-/** v1.7 S4: each room's newest 20 non-ok decisions of the last 24 h (the Details view) */
+/** v1.7 S4: each room's newest 20 non-ok, non-none decisions of the last 24 h (the Details view) */
 export async function readStewardLog(db: Db, ids: readonly string[], asOf: string): Promise<StewardLogRow[]> {
   const rows = (await db`
     SELECT x.room_id, x.ts, x.rule, x.action, x.mode, x.result, x.pstate
@@ -119,7 +119,7 @@ export async function readStewardLog(db: Db, ids: readonly string[], asOf: strin
                row_number() OVER (PARTITION BY d.room_id ORDER BY d.ts DESC, d.id DESC) AS rn
           FROM steward_decisions d
          WHERE d.room_id = ANY(${ids}::text[]) AND d.ts > ${asOf}::timestamptz - interval '24 hours' AND d.ts <= ${asOf}::timestamptz
-           AND d.rule <> 'ok'
+           AND d.rule <> 'ok' AND d.action <> 'none'
       ) x
      WHERE x.rn <= 20
      ORDER BY x.ts DESC, x.id DESC

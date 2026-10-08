@@ -105,7 +105,7 @@ const tail = (o: Outcome, v: Verb, hm: string, result: string | null): string =>
   switch (o) {
     case "pending": return `Steward asked to ${v.infinitive} at ${hm}, waiting for the kiosk to answer`;
     case "failed": return `Steward tried to ${v.infinitive} at ${hm}, ${/no ack/i.test(result ?? "") ? "the kiosk did not answer" : "it did not go through"}`;
-    case "skipped": return `Steward did not ${v.infinitive} at ${hm}, the kiosk was not ready`;
+    case "skipped": return /^\s*skipped:\s*kiosk not listening/i.test(result ?? "") ? `Steward did not ${v.infinitive} at ${hm}, the kiosk was not ready` : `Steward's request to ${v.infinitive} at ${hm} was not sent`;
     default: return "";
   }
 };
@@ -152,8 +152,8 @@ export function cardLine(rows: readonly StewardRowIn[], nowMs: number): StewardL
   return hold ? lineOf(hold) : null;
 }
 
-/** S3: the rows that go into "Changes today": every non-none, non-log_only decision (live or shadow). */
-export const isChange = (r: StewardRowIn): boolean => isAct(r);
+/** S3: the rows that go into "Changes today": live actions (not none / log_only), plus every message / alert in any mode. Shadow starts, restarts and tickets are not changes. */
+export const isChange = (r: StewardRowIn): boolean => isAct(r) && (r.mode === "live" || r.action === "message" || r.action === "alert");
 
 // ---------------------------------------------------------------------------
 // S1: the status strip

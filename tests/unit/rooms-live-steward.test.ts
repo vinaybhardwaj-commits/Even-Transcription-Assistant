@@ -2,6 +2,9 @@
 import { describe, it, expect } from "vitest";
 import { cardLine, isChange, lineOf, sentenceOf, stripView, type StewardRowIn, type StewardStatus } from "@/lib/rooms-live/steward-lines";
 import { statusFromRows } from "@/lib/rooms-live/steward-status";
+import { readStewardLog } from "@/lib/rooms-live/read";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const NOW = Date.parse("2026-10-08T12:50:00Z"); // 18:20 IST
 const iso = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
@@ -75,8 +78,39 @@ describe("S2: the one card line", () => {
     expect(cardLine([hold, row({ ts: iso(30) })], NOW)?.text).toMatch(/started recording/);
     expect(cardLine([row({ ts: new Date(NOW + 10 * 60_000).toISOString() })], NOW)).toBeNull();
   });
-  it("S3: only actions (live or shadow) are changes; log_only and none are not", () => {
-    expect([row({}), row({ action: "alert", mode: "shadow" }), row({ action: "log_only" }), row({ action: "none" })].map(isChange)).toEqual([true, true, false, false]);
+  it("S3: live actions, and messages / alerts in any mode, are changes; shadow actions, log_only and none are not", () => {
+    expect([row({}), row({ action: "alert", mode: "shadow" }), row({ action: "message", mode: "shadow" }), row({ action: "scribe_start", mode: "shadow" }), row({ action: "log_only" }), row({ action: "none" })].map(isChange)).toEqual([true, true, true, false, false, false]);
+  });
+  it("S3 on the real 48 h combos: shadow scribe_start / scribe_restart / ticket rows are not changes; shadow message / alert rows are", () => {
+    const csv = join("/home/eta/oc/eta-steward/rooms-live-review/v17/combos-48h.csv");
+    let text = "";
+    try { text = readFileSync(csv, "utf8"); } catch { text = FALLBACK_COMBOS; }
+    const rows = text.trim().split("\n").slice(1).map((l) => l.match(/^([^,]*),([^,]*),([^,]*),"?([^",]*)"?,/)!).map((m) => ({ rule: m[1]!, action: m[2]!, mode: m[3]!, result: m[4] || null }));
+    expect(rows.length).toBeGreaterThan(20);
+    const shadow = rows.filter((r) => r.mode !== "live");
+    const shadowStarts = shadow.filter((r) => /^(scribe_start|scribe_restart|scribe_stop|ticket:)/.test(r.action));
+    const shadowMsgs = shadow.filter((r) => r.action === "message" || r.action === "alert");
+    expect(shadowStarts.length).toBeGreaterThan(0);
+    expect(shadowMsgs.length).toBeGreaterThan(0);
+    for (const r of shadowStarts) expect(isChange(row({ ...r, ts: "2026-10-08T02:00:00Z" })), `${r.rule}|${r.action}|${r.mode}`).toBe(false);
+    for (const r of shadowMsgs) expect(isChange(row({ ...r, ts: "2026-10-08T02:00:00Z" })), `${r.rule}|${r.action}|${r.mode}`).toBe(true);
+    for (const r of rows.filter((x) => x.mode === "live" && x.action !== "none" && x.action !== "log_only")) expect(isChange(row(r)), `${r.rule}|${r.action}|live`).toBe(true);
+  });
+  it("F2: live skipped: kiosk not listening says the kiosk was not ready; any other skipped says it was not sent", () => {
+    const t = (result: string, action = "scribe_start") => sentenceOf(row({ action, mode: "live", result }));
+    expect(t("skipped: kiosk not listening")).toBe("Steward did not start recording at 07:30, the kiosk was not ready");
+    expect(t("skipped: budget")).toBe("Steward's request to start recording at 07:30 was not sent");
+    expect(t("skipped: budget", "ticket:wake")).toBe("Steward's request to ask the kiosk to wake at 07:30 was not sent");
+    expect(t("skipped: budget", "ticket:wake")).not.toMatch(/kiosk was not ready/);
+  });
+  it("F4: the Details read excludes none rows before the 20-per-room cut (keeps log_only)", async () => {
+    let sqlText = "";
+    const db = ((strings: TemplateStringsArray) => { sqlText = strings.join("?"); return Promise.resolve([]); }) as never;
+    await readStewardLog(db, ["opd4"], "2026-10-08T12:50:00Z");
+    const inner = sqlText.slice(sqlText.indexOf("FROM steward_decisions"), sqlText.indexOf(") x"));
+    expect(inner).toMatch(/d\.action <> 'none'/);
+    expect(inner).not.toMatch(/log_only/);
+    expect(sqlText.indexOf("d.action <> 'none'")).toBeLessThan(sqlText.indexOf("rn <= 20"));
   });
 });
 
@@ -132,3 +166,14 @@ describe("S1: the status from steward_config rows (the Steward's own actionMode)
     expect(statusFromRows(rows({ tick: { nope: 1 } }))).toMatchObject({ last_tick_at: null });
   });
 });
+
+// used only if the orchestrator's CSV is not on this machine: the shape of the real 48 h combos that matter here
+const FALLBACK_COMBOS = `rule,action,mode,result_prefix,n
+not_recording,scribe_start,shadow,"shadow: would",96
+session_died,scribe_restart,shadow,"shadow: would",9
+kiosk_asleep,ticket:wake,shadow,"shadow: would",5
+session_died,message,shadow,"shadow: would",5
+mic_fault,alert,shadow,"shadow: would",2
+not_recording,scribe_start,live,"ok: start_day acked",4
+session_died,message,live,"ok: sent",1
+`;
