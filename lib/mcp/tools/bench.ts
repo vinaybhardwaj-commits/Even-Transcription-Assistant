@@ -144,7 +144,7 @@ import {
   type TranscriptCounts,
 } from "@/lib/room-facts";
 import { readChunksAfterEnd, readMicSizes, readSwitches, readTranscriptAndStranded } from "@/lib/admin/room-reads";
-import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, type InstallStateFlag } from "@/lib/bench-bus-constants";
+import { ENDED_DISAGREES_SKEW_GRACE_MS, ENDED_DISAGREES_HINT, ENDED_DISAGREES_TITLE, parseInstallState, sessionDiedAtStart, type InstallStateFlag } from "@/lib/bench-bus-constants";
 import { levelForSpan, parseMicLevelPair, QUIET_FLOOR_RMS, readLevelSamplesInRange, type SegmentLevel } from "@/lib/bench-levels";
 // Fuse slice 2: the scratch room and the scratch day the replay writer writes into (F6, F7).
 import { resolveScratchGraph, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
@@ -2897,6 +2897,10 @@ const diffRoom: McpTool = {
                 recordingSince: recordingSession ? new Date(recordingSession.started_at).toISOString() : null,
                 nowMs: now.getTime(),
                 lastSessionEnded,
+                lastSessionStartFailed: Boolean(
+                  lastSessionEnded && newestSession &&
+                  sessionDiedAtStart({ ...newestSession, primary_chunks: newestSession.chunk_count, backup_chunks: newestSession.backup_chunk_count, notes: newestSession.notes, start_failed_ack: newestSession.start_failed_ack }),
+                ),
                 recordedMsToday: Number(live.audio_recorded_ms) || 0,
               }),
               // Additive and ORTHOGONAL to `state` above: that is a precedence chain, these are a
