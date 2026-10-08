@@ -7,6 +7,7 @@ vi.mock("@/lib/db", () => ({ sql: (() => Promise.resolve([])) as unknown }));
 
 import { buildSnapshot, resetMemoForTests } from "@/lib/rooms-live/snapshot";
 import type { Db } from "@/lib/rooms-live/read";
+import { groupOf } from "@/lib/rooms-live/present";
 
 const NOW = Date.parse("2026-10-08T06:42:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -52,13 +53,28 @@ describe("O2: who is in the room", () => {
     expect(r.doctor_known).toBe(true);
     expect(s.degraded).toEqual([]);
   });
-  it("a consult closed 1 min ago still counts (2 min grace); closed 7 min ago + unoccupied -> no doctor, and the doctor is known to be absent", async () => {
+  it("a consult closed 1 min ago still counts (2 min grace); closed 95 min ago + unoccupied -> no doctor, and the doctor is known to be absent", async () => {
     const recent = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Just", t_open: iso(NOW - 20 * 60_000), t_close: iso(NOW - 60_000) }] }));
     expect(recent.r.doctor?.display).toBe("Clinician Just");
     resetMemoForTests();
-    const old = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Gone", t_open: iso(NOW - 30 * 60_000), t_close: iso(NOW - 7 * 60_000) }] }));
+    const old = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Gone", t_open: iso(NOW - 110 * 60_000), t_close: iso(NOW - 95 * 60_000) }] }));
     expect(old.r.doctor).toBeNull();
     expect(old.r.doctor_known).toBe(true);
+  });
+  it("v1.5: closed 25 min ago, nobody signed in -> named, Last consult HH:MM (IST), grouped with doctor-present rooms", async () => {
+    const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Between", t_open: iso(NOW - 40 * 60_000), t_close: iso(NOW - 25 * 60_000) }] }));
+    expect(r.doctor).toEqual({ display: "Clinician Between", activity: "Last consult 11:47" });
+    expect(r.doctor_known).toBe(true);
+    expect(groupOf(r)).not.toBe("nodoctor");
+  });
+  it("v1.5: closed 25 min ago, occupancy names someone else -> the warehouse name wins", async () => {
+    occ({ occupied: true, page_name: "Someone Else" });
+    const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Between", t_open: iso(NOW - 40 * 60_000), t_close: iso(NOW - 25 * 60_000) }] }));
+    expect(r.doctor).toEqual({ display: "Clinician Between", activity: "Last consult 11:47" });
+  });
+  it("v1.5: closed exactly 90 min ago still names; 95 min does not (checked above)", async () => {
+    const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Edge", t_open: iso(NOW - 100 * 60_000), t_close: iso(NOW - 90 * 60_000) }] }));
+    expect(r.doctor?.display).toBe("Clinician Edge");
   });
   it("a consult that opens in the future is not open", async () => {
     const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Later", t_open: iso(NOW + 5 * 60_000), t_close: null }] }));

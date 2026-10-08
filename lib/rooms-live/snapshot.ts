@@ -38,7 +38,7 @@ import { computeState, type LevelRow, type RoomStateName, type StateInput } from
 export type RoomRow = {
   room_id: string;
   label: string;
-  doctor: { display: string; activity: "In consultation" | "Signed in" } | null;
+  doctor: { display: string; activity: "In consultation" | "Signed in" | `Last consult ${string}` } | null;
   /** false when the occupancy read failed: the doctor is UNKNOWN, not absent (FIX-1 F1) */
   doctor_known: boolean;
   state: RoomStateName;
@@ -57,6 +57,14 @@ export type Snapshot = { generated_at: string; rooms: RoomRow[]; degraded: strin
 export const MEMO_MS = 2000;
 /** a warehouse consult closed longer ago than this is no longer "in consultation" */
 export const CONSULT_CLOSE_GRACE_MS = 2 * 60_000;
+/** v1.5: between patients, a consult closed within this long ago still names the doctor ("Last consult HH:MM") */
+export const LAST_CONSULT_WINDOW_MS = 90 * 60_000;
+
+/** HH:MM, 24 h, Asia/Kolkata */
+const istHm = (t: number): string => {
+  const m = Math.floor(((t + 19_800_000) % 86_400_000) / 60_000);
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
 
 const ms = (x: string | null | undefined): number | null => {
   if (!x) return null;
@@ -171,12 +179,20 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   }
   // v1.4: the newest warehouse consult per room; it counts only while OPEN (t_open <= now, and no t_close or one within the last 2 minutes)
   const openConsultBy = new Map<string, WarehouseConsultRow>();
+  const lastConsultBy = new Map<string, WarehouseConsultRow>();
   for (const c of whc.v ?? []) {
     const room = roomOfKey.get(matchKey(c.machine));
     const tOpen = Date.parse(c.t_open);
     const tClose = c.t_close ? Date.parse(c.t_close) : null;
     if (!room || !Number.isFinite(tOpen) || tOpen > now) continue;
-    if (tClose !== null && !(tClose >= now - CONSULT_CLOSE_GRACE_MS)) continue;
+    if (tClose !== null && !(tClose >= now - CONSULT_CLOSE_GRACE_MS)) {
+      // v1.5: closed, but recently enough that the doctor is still the room's doctor between patients
+      if (tClose >= now - LAST_CONSULT_WINDOW_MS && tClose <= now) {
+        const pl = lastConsultBy.get(room);
+        if (!pl || Date.parse(pl.t_close!) < tClose) lastConsultBy.set(room, c);
+      }
+      continue;
+    }
     const prev = openConsultBy.get(room);
     if (!prev || Date.parse(prev.t_open) < tOpen) openConsultBy.set(room, c);
   }
@@ -204,13 +220,16 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const e = extBy.get(def.room_id);
     const present = !!o && o.occupied && !o.ambiguous;
     // F28: the name is the identity-checked occupant's (scopedOccupancy), never the newest extension event's display_name (that is the stale cookie identity)
-    // v1.4: an open warehouse consult names the doctor whatever occupancy says. Otherwise the occupancy rules stand: the page greeting, then the occupant's
+    // v1.5: else a consult closed within 90 min names it ("Last consult HH:MM"). v1.4: an open warehouse consult names the doctor whatever occupancy says. Otherwise the occupancy rules stand: the page greeting, then the occupant's
     // non-stale display name, then the literal. A stale-cookie stream's dn is a greeting or a placeholder, never the cookie's name; its best_dn is not used.
     const wc = openConsultBy.get(def.room_id);
     const bestName = o && !o.best_stale ? o.best_dn?.trim() : "";
+    const lc = lastConsultBy.get(def.room_id);
     const doctor: RoomRow["doctor"] = wc?.doctor_name
       ? { display: wc.doctor_name.slice(0, 60), activity: "In consultation" }
-      : present
+      : lc?.doctor_name
+        ? { display: lc.doctor_name.slice(0, 60), activity: `Last consult ${istHm(Date.parse(lc.t_close!))}` }
+        : present
         ? { display: o!.page_name?.trim().slice(0, 60) || bestName?.slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" }
         : null;
     return {
