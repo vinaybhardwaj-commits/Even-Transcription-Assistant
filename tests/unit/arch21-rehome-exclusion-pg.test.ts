@@ -93,7 +93,10 @@ describe.runIf(HAVE)("a re-home container is not a session the room started", ()
       INSERT INTO bench_chunk VALUES ('hc_g', 'home_g');
       INSERT INTO bench_session VALUES ('dead_h', 'rh', ${t(diedAt - 15_000)}, ${t(diedAt)}, 'ended', NULL), ('retry_h', 'rh', ${t(diedAt + 30_000)}, NULL, 'recording', NULL);
     `);
+    // round 2 B1(b): H is committed BEFORE its bench_chunk row (or the chunk insert failed and left H): ended, 0 chunks, < 3 min — it must not read as a dead start itself
+    pg.exec(`INSERT INTO bench_session VALUES ('home_i', 'ri', ${t(diedAt - 20_000)}, ${t(diedAt)}, 'ended', '${NOTE}');`);
     const found = await W.readDeadStarts();
+    expect(found).not.toContain("ri");
     expect(found).toContain("rg");      // the re-home container does not hide it
     expect(found).not.toContain("rh");  // a real retry still clears it
   });

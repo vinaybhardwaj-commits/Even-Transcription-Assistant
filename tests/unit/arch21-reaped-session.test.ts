@@ -79,7 +79,7 @@ const post = async (startedAt: string) => {
   await new Promise((r) => setTimeout(r, 0));
   return { status: res.status, json };
 };
-beforeEach(() => { existingRehome = []; createdHome = null; txs.length = 0; r2Size = 4242; calls.length = 0; notes = null; status = "ended"; endedAt = "2026-10-07T06:56:31.000Z"; });
+beforeEach(() => { process.env.BENCH_CHUNK_REAPED_REPLIES = "1"; existingRehome = []; createdHome = null; txs.length = 0; r2Size = 4242; calls.length = 0; notes = null; status = "ended"; endedAt = "2026-10-07T06:56:31.000Z"; });
 
 describe("AC1 — every reap alerts and surfaces", () => {
   const NOW = Date.parse("2026-10-07T07:30:00.000Z");
@@ -210,6 +210,37 @@ describe("AC2 — a late chunk is never appended to a reaped session; real audio
     const { json } = await post("2026-10-07T06:50:00.000Z");
     expect(json.upload_state).toBe("verified");
     expect(chunkInserts()[0]!.values).toContain("bs_t");
+  });
+});
+
+describe("round 2 — rollout flag BENCH_CHUNK_REAPED_REPLIES (default OFF): OFF answers exactly as main, ON answers with the new replies", () => {
+  it("flag OFF (unset): a late chunk of a reaped session is appended to it as before; the reply has `disagreement` only, upload_state verified, nothing re-homed", async () => {
+    delete process.env.BENCH_CHUNK_REAPED_REPLIES;
+    notes = core.NOTE_STALL;
+    const { st, json } = await post("2026-10-07T10:11:00.000Z").then((r) => ({ st: r.status, json: r.json }));
+    expect(st).toBe(200);
+    expect(json).toEqual({ ok: true, key: "bench/room/2026-10-07/bs_t/9.webm", upload_state: "verified", disagreement: "ended_disagrees" });
+    expect(json).not.toHaveProperty("ended_disagrees");
+    expect(calls.some((c) => /^INSERT INTO bench_session/.test(c.text))).toBe(false);
+    expect(calls.some((c) => /chunk_rehomed|chunk_refused_reaped/.test(c.text))).toBe(false);
+    const ins = calls.filter((c) => /INSERT INTO bench_chunk/.test(c.text));
+    expect(ins).toHaveLength(1);
+    expect(ins[0]!.values).toContain("bs_t");
+    expect(ins[0]!.values).toContain(9);
+  });
+  it("flag set to anything but 1 is OFF too", async () => {
+    process.env.BENCH_CHUNK_REAPED_REPLIES = "true";
+    notes = core.NOTE_STALL;
+    const { json } = await post("2026-10-07T10:11:00.000Z");
+    expect(json.upload_state).toBe("verified");
+  });
+  it("flag ON: the same chunk is re-homed and the reply is rehomed_after_reap with both disagreement keys", async () => {
+    process.env.BENCH_CHUNK_REAPED_REPLIES = "1";
+    notes = core.NOTE_STALL;
+    const { json } = await post("2026-10-07T10:11:00.000Z");
+    expect(json.upload_state).toBe("rehomed_after_reap");
+    expect(json.ended_disagrees).toBe("ended_disagrees");
+    expect(json.disagreement).toBe("ended_disagrees");
   });
 });
 
