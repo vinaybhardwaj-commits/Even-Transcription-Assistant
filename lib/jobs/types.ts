@@ -128,6 +128,12 @@ export type JobKind = {
   scopeForArgs?: (args: Record<string, unknown>) => { scope: "read" | "invoke" | "write"; arg: string } | null;
   run: (ctx: StepContext) => Promise<StepOutcome>;
   /**
+   * S4 — OPEN-JOB DEDUPE. The args fields (top-level keys of the parsed args) that identify the work, as [key, value] pairs. `submitJob` looks for a
+   * queued or running job of this kind whose args match all of them and, if one exists, returns THAT job (flagged `deduped`) instead of queueing another.
+   * Absent = no dedupe (every other kind).
+   */
+  dedupeOn?: (args: Record<string, unknown>) => Array<[string, string]> | null;
+  /**
    * REDUNDANCY-R1 — whether this step is BULK work, so pooled service calls inside it try the *_BULK_URLS
    * endpoints first. Absent = never bulk. Called by the runner once per step, inside the step's own error
    * handling, so a strict-env throw counts as a step failure like any other.

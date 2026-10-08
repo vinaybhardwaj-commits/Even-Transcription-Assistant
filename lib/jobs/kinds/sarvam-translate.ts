@@ -69,6 +69,11 @@ export const sarvamTranslateKind: JobKind = {
   first: STEPS.prepare,
   scope: "invoke",
   parseArgs: (raw) => parseSarvamTranslateArgs(raw) as unknown as Record<string, unknown>,
+  // S4: one open job per (source kind, id); a second ask returns the open job's id
+  dedupeOn: (args) => {
+    const a = args as unknown as SarvamTranslateArgs;
+    return [["kind", a.kind], ["id", a.id]];
+  },
   async run(ctx: StepContext) {
     const out = await runStep(ctx);
     // a job that never reached Sarvam (prepare ended it) is not "Sarvam work"; the lane still gets its end-of-work rewrite

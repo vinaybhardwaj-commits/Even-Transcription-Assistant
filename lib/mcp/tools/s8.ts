@@ -64,7 +64,8 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
   }
   try {
     const job = await submitJob({ kind, args: raw, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
-    return { ok: true, job_id: job.id, kind: job.kind, status: job.status };
+    // S4: an open job for the same source is returned, not duplicated
+    return { ok: true, job_id: job.id, kind: job.kind, status: job.status, ...(job.deduped ? { deduped: true } : {}) };
   } catch (e) {
     if (e instanceof JobArgsError) return { ok: false, error: "bad_args", kind, detail: e.reason };
     if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind };

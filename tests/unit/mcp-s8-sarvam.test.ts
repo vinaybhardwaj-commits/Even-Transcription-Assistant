@@ -149,6 +149,47 @@ describe("transcribe / translate", () => {
   });
 });
 
+describe("S4 — one open job per source: the open job's id comes back", () => {
+  const openRow = (over: Row = {}) => ({ id: "job_open1", kind: "sarvam_transcribe", args: {}, status: "running", step: "poll", progress: {}, result: null, error: null, actor: "mcp:a", created_at: "2026-10-08T06:00:00.000Z", started_at: null, updated_at: "x", finished_at: null, lease_until: null, lease_owner: null, attempts: 2, failures: 0, ...over });
+  const findOpen = () => statements.filter((s) => /FROM scribe_job/.test(s.text) && /status IN \('queued', 'running'\)/.test(s.text) && /args->>/.test(s.text));
+
+  it("transcribe: a second ask for the same encounter returns the open job (deduped), queues nothing, and the lookup is a bound (kind, encounter_id) match", async () => {
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow()] : []);
+    expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toEqual({ ok: true, job_id: "job_open1", kind: "sarvam_transcribe", status: "running", deduped: true });
+    expect(inserted).toEqual([]);
+    const q = findOpen()[0]!;
+    expect(q.values).toEqual(["sarvam_transcribe", "encounter_id", "enc_1", null, null, null]);
+  });
+  it("no open job (none, or it already finished) -> a new job; a different encounter -> a new job", async () => {
+    answer = () => [];
+    expect(await run({ action: "transcribe", encounter_id: "enc_1" })).toEqual({ ok: true, job_id: "job_new1", kind: "sarvam_transcribe", status: "queued" });
+    expect(await run({ action: "transcribe", encounter_id: "enc_2" })).toMatchObject({ ok: true, job_id: "job_new1" });
+    expect(inserted).toHaveLength(2);
+    expect(findOpen()[0]!.text).toMatch(/status IN \('queued', 'running'\)/); // done / failed / cancelled jobs are not "open"
+  });
+  it("translate: deduped on (source kind, id); an encounter and a run with the same id string are different sources", async () => {
+    process.env.SARVAM_GW_REGION = "";
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow({ id: "job_open2", kind: "sarvam_translate" })] : /FROM transcription_run/.test(text) ? [{ subject_type: "encounter" }] : []);
+    expect(await run({ action: "translate", encounter_id: "enc_1" })).toMatchObject({ ok: true, job_id: "job_open2", deduped: true });
+    expect(findOpen()[0]!.values).toEqual(["sarvam_translate", "kind", "encounter", "id", "id", "enc_1"]);
+    statements.length = 0;
+    expect(await run({ action: "translate", transcription_run_id: "enc_1" })).toMatchObject({ deduped: true });
+    expect(findOpen()[0]!.values).toEqual(["sarvam_translate", "kind", "transcription_run", "id", "id", "enc_1"]);
+    expect(inserted).toEqual([]);
+  });
+  it("the generic scribe_job_submit path dedupes too (it goes through submitJob), and says so", async () => {
+    answer = (text) => (/FROM scribe_job/.test(text) && /args->>/.test(text) ? [openRow()] : []);
+    const out = (await S.CALLABLE_TOOLS.get("scribe_job_submit")!.handler({ kind: "sarvam_transcribe", args: { encounter_id: "enc_1" } }, ctxFor(["read", "invoke"]))) as Row;
+    expect(out).toMatchObject({ ok: true, job_id: "job_open1", deduped: true });
+    expect(inserted).toEqual([]);
+  });
+  it("other kinds are untouched: no open-job lookup is made for them", async () => {
+    answer = () => [];
+    await S.CALLABLE_TOOLS.get("scribe_job_submit")!.handler({ kind: "transcribe_range", args: { room: "opd-1", start: "2026-10-08T03:30:00Z", end: "2026-10-08T03:35:00Z" } }, ctxFor(["read", "invoke"]));
+    expect(findOpen()).toEqual([]);
+  });
+});
+
 describe("status / result", () => {
   const job = (over: Row = {}) => ({
     id: "job_s1", kind: "sarvam_transcribe", status: "done", step: "finish", attempts: 5, failures: 0, error: null, actor: "mcp:a",

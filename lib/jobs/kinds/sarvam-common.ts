@@ -103,42 +103,56 @@ export async function capRefusalForJob(job: { id: string; created_at: string }, 
   return today + reserved + ownMinutes > SARVAM_DAILY_CAP_MINUTES ? { today: Math.round(today * 100) / 100, reserved: Math.round(reserved * 100) / 100, own: Math.round(ownMinutes * 100) / 100 } : null;
 }
 
+/** Back-off between the attempts at the paid-call audit write (ms). Mutable so a test need not wait. */
+export const auditRetry = { delaysMs: [100, 300, 900] };
+
 /**
  * One audit_log stt.paid_call per Sarvam batch (engine 'sarvam-gw'), IDEMPOTENT on the job id: a replayed step writes no second row.
  * actor_type 'system' — the value mcp/audit.ts writes; lib/stt/paid-engines recordPaidCall writes 'mcp', which the actor_type enum of migration 0001
- * does not list (reported, not changed here). Never throws.
+ * does not list (reported, not changed here).
+ *
+ * S3: THE ROW IS WHAT THE DAILY CAP COUNTS, so a write that fails is retried (auditRetry.delaysMs) and, if it still fails, THROWS (audit_write_failed). The
+ * caller (the `start` step) lets that propagate: the runner retries the step, the job stays in `start` where its minutes remain reserved for the cap, and the
+ * replay finds the Sarvam job already started and writes the row. The row is never silently skipped.
  */
 export async function recordSarvamCall(opts: { actor: string | null; jobId: string; sarvamJobId: string; durationMs: number; scope: SarvamScope }): Promise<void> {
-  try {
-    const have = (await sql`
-      SELECT 1 AS one FROM audit_log WHERE action = 'stt.paid_call' AND target_type = 'stt_engine' AND target_id = ${SARVAM_ENGINE} AND metadata_json->>'job_id' = ${opts.jobId}::text LIMIT 1
-    `) as unknown[];
-    if (have.length > 0) return;
-    const minutes = Math.round((opts.durationMs / 60_000) * 1000) / 1000;
-    let rate: { rate: number | null; source: string | null } = { rate: null, source: null };
+  const minutes = Math.round((opts.durationMs / 60_000) * 1000) / 1000;
+  let lastErr = "error";
+  for (let attempt = 0; attempt <= auditRetry.delaysMs.length; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, auditRetry.delaysMs[attempt - 1]));
     try {
-      rate = await sarvamRatePerMin();
-    } catch {
-      /* no stt_engine table or row: the estimate stays null */
+      const have = (await sql`
+        SELECT 1 AS one FROM audit_log WHERE action = 'stt.paid_call' AND target_type = 'stt_engine' AND target_id = ${SARVAM_ENGINE} AND metadata_json->>'job_id' = ${opts.jobId}::text LIMIT 1
+      `) as unknown[];
+      if (have.length > 0) return;
+      let rate: { rate: number | null; source: string | null } = { rate: null, source: null };
+      try {
+        rate = await sarvamRatePerMin();
+      } catch {
+        /* no stt_engine table or row: the estimate stays null */
+      }
+      const est = rate.rate === null ? null : Math.round(rate.rate * minutes * 100000) / 100000;
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+        VALUES ('system', ${opts.actor ?? "mcp"}, 'stt.paid_call', 'stt_engine', ${SARVAM_ENGINE}, ${JSON.stringify({
+          engine: SARVAM_ENGINE,
+          job_id: opts.jobId,
+          sarvam_job_id: opts.sarvamJobId,
+          scope: opts.scope,
+          duration_ms: Math.round(opts.durationMs),
+          audio_minutes: minutes,
+          cost_per_min_usd: rate.rate,
+          estimated_cost_usd: est,
+          rate_source: rate.source,
+        })}::jsonb)
+      `;
+      return;
+    } catch (e) {
+      lastErr = String((e as Error)?.message ?? e).slice(0, 120);
+      console.error("[sarvam] paid-call audit write failed", JSON.stringify({ job_id: opts.jobId, attempt: attempt + 1, err: lastErr }));
     }
-    const est = rate.rate === null ? null : Math.round(rate.rate * minutes * 100000) / 100000;
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('system', ${opts.actor ?? "mcp"}, 'stt.paid_call', 'stt_engine', ${SARVAM_ENGINE}, ${JSON.stringify({
-        engine: SARVAM_ENGINE,
-        job_id: opts.jobId,
-        sarvam_job_id: opts.sarvamJobId,
-        scope: opts.scope,
-        duration_ms: Math.round(opts.durationMs),
-        audio_minutes: minutes,
-        cost_per_min_usd: rate.rate,
-        estimated_cost_usd: est,
-        rate_source: rate.source,
-      })}::jsonb)
-    `;
-  } catch (e) {
-    console.error("[sarvam] paid-call audit write failed", JSON.stringify({ job_id: opts.jobId, err: String((e as Error)?.message ?? e).slice(0, 120) }));
   }
+  throw new Error(`audit_write_failed: ${lastErr}`);
 }
 
 /**

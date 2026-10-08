@@ -12,7 +12,7 @@
 
 import { after } from "next/server";
 import { KIND_BY_NAME, JOB_KIND_NAMES } from "./kinds";
-import { insertJob, newJobId } from "./store";
+import { findOpenJob, insertJob, newJobId } from "./store";
 import { JobArgsError, type JobRow } from "./types";
 import { ToolScopeError } from "@/lib/mcp/registry";
 import type { McpScope } from "@/lib/mcp/auth";
@@ -60,7 +60,7 @@ export async function submitJob(input: {
    * exactly how the shims got past it.
    */
   scopes?: ReadonlySet<McpScope>;
-}): Promise<JobRow> {
+}): Promise<JobRow & { deduped?: boolean }> {
   const kind = KIND_BY_NAME.get(input.kind);
   if (!kind) throw new UnknownKindError(input.kind);
   const scopes = input.scopes ?? new Set<McpScope>();
@@ -74,6 +74,12 @@ export async function submitJob(input: {
   const extra = kind.scopeForArgs?.(args) ?? null;
   if (extra && !scopes.has(extra.scope)) {
     throw new ToolScopeError(extra.scope, { kind: kind.name, kind_scope: kind.scope, arg: extra.arg, arg_scope: extra.scope });
+  }
+  // S4: a kind that names its identity gets its OPEN job back instead of a duplicate (and the runner is not kicked again)
+  const match = kind.dedupeOn?.(args) ?? null;
+  if (match) {
+    const open = await findOpenJob(kind.name, match);
+    if (open) return { ...open, deduped: true };
   }
   const job = await insertJob({ id: newJobId(), kind: kind.name, args, actor: input.actor });
   if (input.origin) kickRunner(input.origin);

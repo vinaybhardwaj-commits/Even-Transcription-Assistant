@@ -86,6 +86,11 @@ export const sarvamTranscribeKind: JobKind = {
   first: STEPS.prepare,
   scope: "invoke",
   parseArgs: (raw) => parseSarvamTranscribeArgs(raw) as unknown as Record<string, unknown>,
+  // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back
+  dedupeOn: (args) => {
+    const a = args as unknown as SarvamTranscribeArgs;
+    return a.source === "encounter" ? [["encounter_id", a.encounter_id]] : [["consult_uid", a.consult_uid]];
+  },
   async run(ctx: StepContext) {
     const out = await runStep(ctx);
     // D2: the lane is rewritten on every step, and once more when work ends (forced, the finishing job excluded from `active`)
@@ -180,7 +185,13 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
   if (!jobId) return failWith(jobError("progress_incomplete", "sarvam job"));
   // a replay after a successful start must not start twice: ask Sarvam first
   const st = await gwBatchStatus(jobId);
-  const alreadyStarted = st.ok && !isCreatedState(st.state);
+  // S2: a FAILED status read says nothing about whether the job was started, so it is never read as "not started" (that would start it a second time and
+  // pay twice). A transient failure throws (the runner retries the step); a terminal one (the job is unknown to Sarvam) fails the job by code.
+  if (!st.ok) {
+    console.error("[sarvam] status before start failed", JSON.stringify({ job: ctx.job.id, err: st.error, transient: st.transient }));
+    return st.transient ? bail(st, "sarvam_submit_failed") : ledgerFailed(ctx, st, "sarvam_submit_failed");
+  }
+  const alreadyStarted = !isCreatedState(st.state);
   if (!alreadyStarted) {
     const s = await gwBatchStartJob(jobId);
     if (!s.ok) {
@@ -195,6 +206,8 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
       if (!(again.ok && !isCreatedState(again.state))) return ledgerFailed(ctx, s, "sarvam_submit_failed");
     }
   }
+  // S3: the paid-call audit row is what the daily cap counts. It is retried inside the call and, if it still cannot be written, this step THROWS: the job stays
+  // in `start` (so its minutes stay RESERVED for the cap, see reservedMinutesEarlier) and the replay finds the job already started, skips the start, and writes the row.
   await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: ctx.job.id, sarvamJobId: jobId, durationMs: num(ctx.progress.duration_ms) || 0, scope: scopeOf(ctx) });
   return nextStep(STEPS.poll, { ...ctx.progress, sarvam_started_ms: Date.now() });
 }
