@@ -514,4 +514,27 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       LLM.setRubricChatForTests(null);
     }
   });
+
+  it("S71-E G68 — excerpt units are accepted only from set human_v: gold and grokbot_agreement naming excerpts are refused as no set (bench_set_missing), 0 model calls", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const rows = [{ unit_key: "hv-a", unit_kind: "excerpt", expected: { surgery_recommended: false } }].map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-a.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed." }] }));
+      for (const set of ["gold", "grokbot_agreement"] as const) {
+        mem.set(`rubric/bench/consult_surgical_pitch/${set === "gold" ? "gold" : set}.jsonl`, rows);
+        const r = await runJob("rubric_bench", set === "gold" ? { rubric_id: "consult_surgical_pitch" } : { rubric_id: "consult_surgical_pitch", set });
+        expect(r.job.status, set).toBe("failed");
+        expect(String(r.job.error), set).toMatch(/^bench_set_missing/);
+      }
+      expect(calls).toBe(0);
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", rows);
+      const ok = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(ok.job).toMatchObject({ status: "done", result: { metric: "accuracy_vs_V_on_excerpts", n: 1 } });
+      expect(calls).toBe(1);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
 });

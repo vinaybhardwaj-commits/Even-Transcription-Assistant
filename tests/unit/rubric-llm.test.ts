@@ -242,3 +242,20 @@ describe("S71-A — 1.1.0 reconciles the prompts with the GrokBot skills", () =>
     expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "skipped", reason: "no_surgery_recommendation" });
   });
 });
+
+describe("S71-E G69 — an excerpt unit is bench-only", () => {
+  it("evaluateUnit with excerpt:true and no bench flag is skipped unit_not_supported: no store read, no model call (the guard dies if it is removed)", async () => {
+    let called = 0;
+    L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
+    store.set("rubric/bench/consult_chair_affect/text/hv-x.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+    const reads = vi.spyOn(Map.prototype, "has");
+    reads.mockClear();
+    const out = await evaluateUnit(affect, "consult", "hv-x", { excerpt: true });
+    expect(out).toMatchObject({ status: "skipped", reason: "unit_not_supported", room_id: null });
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-x"))).toBe(false); // the lab store was not consulted
+    reads.mockRestore();
+    expect(called).toBe(0);
+    expect(await evaluateUnit(affect, "consult", "hv-x", { excerpt: true, bench: true })).toMatchObject({ status: "ok" }); // the bench path reads it
+    expect(called).toBe(1);
+  });
+});

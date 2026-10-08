@@ -53,16 +53,16 @@ export const rubricBenchKind: JobKind = {
 export const REPO_BENCH_SETS: Record<string, unknown> = {};
 
 async function loadBenchSet(rubricId: string, version: string, location: string, set: BenchSetName = "gold"): Promise<BenchSet | null> {
-  if (set !== "gold") return loadGold(`rubric/bench/${rubricId}/${set}.jsonl`);
+  if (set !== "gold") return loadGold(`rubric/bench/${rubricId}/${set}.jsonl`, set);
   // llm_zdr rubrics: gold prepared offline and uploaded as JSONL (rubric/bench/<rubric_id>/gold.jsonl); the gold never enters the repo
-  if (location.startsWith("rubric/bench/")) return loadGold(location);
+  if (location.startsWith("rubric/bench/")) return loadGold(location, "gold");
   // the repo copy first (once a rubric is benched its set is registered above); otherwise the lab store copy for this exact version (a draft's labelled set lives there until it is committed)
   const repo = location.startsWith("rubrics/") ? parseBenchSet(REPO_BENCH_SETS[location]) : null;
   return repo ?? parseBenchSet(await readEvidence(`rubric/${rubricId}/${version}/bench.json`));
 }
 
 /** One JSON object per line: { unit_key, expected: { field: value } }. Bad lines make the whole set invalid (a silent skip would inflate the score). */
-async function loadGold(location: string): Promise<BenchSet | null> {
+async function loadGold(location: string, set: BenchSetName = "gold"): Promise<BenchSet | null> {
   const store = labStore();
   if (!store || !/^rubric\/bench\/[a-z][a-z0-9_]{1,63}\/(gold|grokbot_agreement|human_v)\.jsonl$/.test(location)) return null;
   const obj = await store.get(location);
@@ -76,6 +76,8 @@ async function loadGold(location: string): Promise<BenchSet | null> {
   const kinds = new Set(items.map((x) => (x as { unit_kind?: unknown } | null)?.unit_kind ?? "consult"));
   if (kinds.size !== 1 || !(kinds.has("consult") || kinds.has("excerpt"))) return null;
   const parsed = parseBenchSet({ unit: "consult", items });
+  // GATING-G68: an excerpt skips every database blind check, so it is accepted from the ONE set whose blind status was verified offline (human_v: 18/18 resolved, 0 blind); any other set naming excerpts is no set
+  if (kinds.has("excerpt") && set !== "human_v") return null;
   return parsed && kinds.has("excerpt") ? { ...parsed, excerpt: true } : parsed;
 }
 

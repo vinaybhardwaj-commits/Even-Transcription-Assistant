@@ -474,3 +474,16 @@ describe("GATING-G66 (S71-D) — the cue is computed once per (window, category)
     expect(cueStats.calls).toBe(calls);
   });
 });
+
+describe("GATING-G67 (S71-E) — candidate snapshot", () => {
+  it("drugCandidates over every fixture set and the recall phrasings equals the pinned snapshot (a cue cached under the wrong key changes candidates and fails here)", () => {
+    const snap = JSON.parse(readFileSync("tests/fixtures/drug-candidates.snapshot.json", "utf8")) as Record<string, unknown[]>;
+    expect(Object.keys(snap).length).toBeGreaterThan(200);
+    const diff: string[] = [];
+    for (const [t, want] of Object.entries(snap)) {
+      const got = drugCandidates(t, 0, lex).map((c) => [c.heard, c.suggested, c.score, c.category]);
+      if (JSON.stringify(got) !== JSON.stringify(want)) diff.push(t);
+    }
+    expect(diff, `${diff.length} texts changed`).toEqual([]);
+  });
+});
