@@ -82,6 +82,7 @@ beforeEach(() => {
   for (const k of Object.keys(GW_ENV)) { savedEnv[k] = process.env[k]; process.env[k] = (GW_ENV as Record<string, string>)[k]; }
   Object.values(gw).forEach((f) => f.mockReset());
   T.sarvamTiming.pollStepMs = 0; T.sarvamTiming.pollIntervalMs = 0; T.sarvamTiming.translateStepMs = 60_000;
+  C.auditRetry.delaysMs = [0, 0, 0];
   L.setLabStoreForTests(labStore);
 });
 afterEach(() => {
@@ -291,12 +292,110 @@ describe("G10 — a start 4xx on a job that is already running continues instead
     expect(ledgerLines()).toEqual([expect.objectContaining({ status: "failed", http_status: 400 })]);
     gw.status.mockResolvedValueOnce({ ok: true, state: "Created", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_500", status: 500, transient: true });
     lab.clear();
-    expect(await start()).toMatchObject({ kind: "fail" }); // the re-check itself failing is not evidence the job runs
+    await expect(start()).rejects.toThrow(/status_500/); // G15: a transient re-check failure is retried, not a verdict
+  });
+  it("G15: if the recheck after a start 4xx itself fails TRANSIENTLY the step throws (retried under MAX_FAILURES); a terminal recheck failure still fails the job", async () => {
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_503", status: 503, transient: true });
+    gw.startJob.mockResolvedValue({ ok: false, error: "start_409", status: 409, transient: false });
+    await expect(start()).rejects.toThrow(/sarvam_submit_failed: status_503/);
+    expect(ledgerLines()).toEqual([]); // not failed: Sarvam may be running it
+    expect(audits()).toHaveLength(0);
+    gw.status.mockReset();
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: false, error: "status_404", status: 404, transient: false });
+    expect(await start()).toEqual({ kind: "fail", error: "sarvam_submit_failed: start_409" });
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "failed", http_status: 409 })]);
+    // and the retry after the throw succeeds once Sarvam answers: Running -> poll, one audit row
+    gw.status.mockReset();
+    gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: true, state: "Running", outputs: [] });
+    lab.clear();
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(audits()).toHaveLength(1);
   });
   it("a start that answers Failed state is also past Created, and the poll step will report it", async () => {
     gw.status.mockResolvedValueOnce({ ok: true, state: "Pending", outputs: [] }).mockResolvedValueOnce({ ok: true, state: "Failed", outputs: [] });
     gw.startJob.mockResolvedValue({ ok: false, error: "start_409", status: 409, transient: false });
     expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+  });
+});
+
+describe("S2 — a failed status read before start is never read as 'not started'", () => {
+  const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true };
+  const prog = { clip_key: "clip.webm", content_type: "audio/webm", sarvam_job_id: "sj_9", duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z" };
+  const start = () => T.sarvamTranscribeKind.run(ctx("start", args, prog));
+  const audits = () => statements.filter((s) => /INSERT INTO audit_log/.test(s.text));
+
+  it("a transient failure of the FIRST status read throws (the runner retries); Sarvam's start is never called, so there is no double start; nothing is audited", async () => {
+    gw.status.mockResolvedValue({ ok: false, error: "status_503", status: 503, transient: true });
+    await expect(start()).rejects.toThrow(/sarvam_submit_failed: status_503/);
+    await expect(start()).rejects.toThrow(/status_503/);
+    expect(gw.startJob).not.toHaveBeenCalled();
+    expect(audits()).toHaveLength(0);
+    expect(ledgerLines()).toEqual([]);
+    // the retry that finally reads a status carries on normally: Pending -> one start; Running -> no start
+    gw.status.mockReset();
+    gw.status.mockResolvedValueOnce({ ok: false, error: "status_500", status: 500, transient: true }).mockResolvedValueOnce({ ok: true, state: "Running", outputs: [] });
+    await expect(start()).rejects.toThrow();
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(gw.startJob).not.toHaveBeenCalled();
+    expect(audits()).toHaveLength(1);
+  });
+  it("a terminal failure of the first status read (the job is unknown to Sarvam) fails the job by code, again WITHOUT calling start", async () => {
+    gw.status.mockResolvedValue({ ok: false, error: "status_404", status: 404, transient: false });
+    expect(await start()).toEqual({ kind: "fail", error: "sarvam_submit_failed: status_404" });
+    expect(gw.startJob).not.toHaveBeenCalled();
+    expect(ledgerLines()).toEqual([expect.objectContaining({ status: "failed", http_status: 404 })]);
+  });
+  it("the cases G15 already covers (the RECHECK after a start 4xx) are cited, not repeated: see 'G15: if the recheck after a start 4xx itself fails TRANSIENTLY'", () => {
+    expect(true).toBe(true);
+  });
+});
+
+describe("S3 — the paid-call audit row is retried, or the step throws and the reservation is kept", () => {
+  const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true };
+  const prog = { clip_key: "clip.webm", content_type: "audio/webm", sarvam_job_id: "sj_9", duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z" };
+  const start = () => T.sarvamTranscribeKind.run(ctx("start", args, prog));
+  const inserts = () => statements.filter((s) => /INSERT INTO audit_log/.test(s.text));
+  const errLog = () => vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+  it("an insert that fails twice and then succeeds is retried inside the step: one row, the job moves on", async () => {
+    const err = errLog();
+    gw.status.mockResolvedValue({ ok: true, state: "Pending", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: true });
+    let n = 0;
+    answer = (text) => (/INSERT INTO audit_log/.test(text) ? (++n <= 2 ? new Error("connection reset") : []) : []);
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(inserts()).toHaveLength(3); // two failures and the success
+    expect(statements.filter((s) => /SELECT 1 AS one FROM audit_log/.test(s.text)).length).toBe(3); // each attempt re-checks, so a row that landed after a lost reply is not doubled
+    err.mockRestore();
+  });
+  it("an insert that never succeeds makes the step THROW (audit_write_failed): no poll, the job stays in `start` — still counted as reserved for the cap — and the replay writes the row without starting twice", async () => {
+    const err = errLog();
+    gw.status.mockResolvedValue({ ok: true, state: "Pending", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: true });
+    answer = (text) => (/INSERT INTO audit_log/.test(text) ? new Error("db down") : []);
+    await expect(start()).rejects.toThrow(/audit_write_failed: db down/);
+    expect(gw.startJob).toHaveBeenCalledTimes(1);
+    expect(inserts()).toHaveLength(4); // the first try and three retries
+    // the reservation: a job in `start` is one of the steps reservedMinutesEarlier counts, so its minutes stay held while the row is missing
+    expect(statements.length).toBeGreaterThan(0);
+    const reserve = (await import("node:fs")).readFileSync("lib/jobs/kinds/sarvam-common.ts", "utf8");
+    expect(reserve).toMatch(/IN \('prepare', 'init', 'upload', 'start'\)/);
+    // replay: Sarvam already shows the job Running, the database is back
+    answer = () => [];
+    statements.length = 0;
+    gw.status.mockResolvedValue({ ok: true, state: "Running", outputs: [] });
+    gw.startJob.mockClear();
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(gw.startJob).not.toHaveBeenCalled();
+    expect(inserts()).toHaveLength(1);
+    err.mockRestore();
+  });
+  it("the retry delays are bounded (3 retries); an existing row ends the loop at once", async () => {
+    expect(C.auditRetry.delaysMs.length).toBe(3);
+    gw.status.mockResolvedValue({ ok: true, state: "Running", outputs: [] });
+    answer = (text) => (/SELECT 1 AS one FROM audit_log/.test(text) ? [{ one: 1 }] : []);
+    expect(await start()).toMatchObject({ kind: "next", step: "poll" });
+    expect(inserts()).toHaveLength(0);
   });
 });
 

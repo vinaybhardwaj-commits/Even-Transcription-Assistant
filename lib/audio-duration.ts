@@ -161,7 +161,7 @@ function mp4Ms(b: Uint8Array): number | null {
   if (b.length < 16 || fourcc(b, 4) !== "ftyp") return null;
   let movieScale = 0, movieDur = 0, mehdDur = 0;
   let mediaScale = 0, mediaDur = 0; // first mdhd
-  let sttsTicks = 0, trunTicks = 0, tfhdDefault = 0;
+  let sttsTicks = 0, trunTicks = 0, tfhdDefault = 0, trexDefault = 0;
   let boxes = 0;
   const walk = (start: number, end: number, depth: number): void => {
     let o = start;
@@ -185,6 +185,9 @@ function mp4Ms(b: Uint8Array): number | null {
       } else if (type === "stts" && bodyEnd - body >= 8) {
         const n = Math.min(u32be(b, body + 4), Math.floor((bodyEnd - body - 8) / 8));
         for (let i = 0; i < n; i++) sttsTicks += u32be(b, body + 8 + i * 8) * u32be(b, body + 12 + i * 8);
+      } else if (type === "trex" && bodyEnd - body >= 24) {
+        // moov/mvex/trex: the default_sample_duration every fragment falls back on when its own tfhd / trun say nothing (a Safari MediaRecorder layout)
+        trexDefault = u32be(b, body + 12);
       } else if (type === "tfhd" && bodyEnd - body >= 8) {
         const flags = u32be(b, body) & 0xffffff;
         let p = body + 8; // version/flags + track id
@@ -200,6 +203,7 @@ function mp4Ms(b: Uint8Array): number | null {
         const per = 4 * ((flags & 0x100 ? 1 : 0) + (flags & 0x200 ? 1 : 0) + (flags & 0x400 ? 1 : 0) + (flags & 0x800 ? 1 : 0));
         if (flags & 0x100 && per > 0) for (let i = 0; i < count && p + (i + 1) * per <= bodyEnd; i++) trunTicks += u32be(b, p + i * per);
         else if (tfhdDefault > 0) trunTicks += tfhdDefault * Math.min(count, 100_000_000);
+        else if (trexDefault > 0) trunTicks += trexDefault * Math.min(count, 100_000_000); // G14: no per-sample durations and no tfhd default: the trex default
       } else if (MP4_CONTAINERS.has(type) && depth < 8) {
         if (type === "moof") tfhdDefault = 0;
         walk(body, bodyEnd, depth + 1);

@@ -41,7 +41,7 @@ describe("measureAudioMs", () => {
   });
 });
 
-import { fmp4, m4a } from "./helpers/audio-fixtures";
+import { fmp4, m4a, safariFmp4 } from "./helpers/audio-fixtures";
 
 describe("G8 — a declared WebM Duration can never make a long file look short", () => {
   it("60 s declared over 40 minutes of blocks measures 40 minutes (so it is refused as too long, not charged 1 minute)", () => {
@@ -96,5 +96,35 @@ describe("G9 — MP4 / M4A (what iPhones and Safari record)", () => {
   });
   it("non-audio / unknown stays null", () => {
     expect(measureAudioMs(new Uint8Array([0, 0, 0, 20, 0x66, 0x74, 0x79, 0x70, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]))).toBeNull();
+  });
+});
+
+describe("G14 — a Safari-style fragmented audio/mp4: the only duration is moov/mvex/trex default_sample_duration", () => {
+  it("50 fragments x 2,812 samples x 1024 ticks at 48 kHz (about 50 minutes) measures 50 minutes, not null", () => {
+    const m = safariFmp4({ timescale: 48_000, trexDefault: 1024, fragments: Array.from({ length: 50 }, () => 2_812) });
+    const ms = measureAudioMs(m);
+    expect(ms).toBe(Math.round((50 * 2_812 * 1024 * 1000) / 48_000));
+    expect(ms!).toBeGreaterThan(30 * 60_000); // so the 30-minute rule sees it
+  });
+  it("a short one: 430 samples of 1024 at 44.1 kHz", () => {
+    expect(measureAudioMs(safariFmp4({ timescale: 44_100, trexDefault: 1024, fragments: [215, 215] }))).toBe(Math.round((430 * 1024 * 1000) / 44_100));
+  });
+  it("a tfhd default beats the trex default; a header-only file with no samples stays null", () => {
+    expect(measureAudioMs(safariFmp4({ timescale: 48_000, trexDefault: 1024, trexDefaultInTfhd: 2048, fragments: [100] }))).toBe(Math.round((100 * 2048 * 1000) / 48_000));
+    expect(measureAudioMs(safariFmp4({ timescale: 48_000, trexDefault: 1024, fragments: [] }))).toBeNull();
+    expect(measureAudioMs(safariFmp4({ timescale: 48_000, trexDefault: 0, fragments: [100] }))).toBeNull(); // nothing says how long a sample is
+  });
+  it("fuzz: every truncation point and 1,200 mutated Safari-style files never throw, each fast", () => {
+    const base = safariFmp4({ timescale: 48_000, trexDefault: 1024, fragments: [300, 300, 300] });
+    let seed = 777;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let cut = 0; cut < base.length; cut++) expect(() => measureAudioMs(base.slice(0, cut))).not.toThrow();
+    for (let i = 0; i < 1200; i++) {
+      const m = base.slice();
+      for (let k = 0; k < 4; k++) m[Math.floor(rnd() * m.length)] = Math.floor(rnd() * 256);
+      const t0 = Date.now();
+      expect(() => measureAudioMs(m)).not.toThrow();
+      expect(Date.now() - t0).toBeLessThan(200);
+    }
   });
 });
