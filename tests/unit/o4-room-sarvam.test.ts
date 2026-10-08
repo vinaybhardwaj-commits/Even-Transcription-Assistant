@@ -8,6 +8,7 @@ const H = vi.hoisted(() => ({
   routing: "sarvam",
   engines: {} as Record<string, { enabled: boolean; adapter_key: string; is_paid: boolean }>,
   transcribe: vi.fn(),
+  download: vi.fn(async () => new Uint8Array([1, 2, 3])),
   failures: [] as string[],
   puts: [] as unknown[],
 }));
@@ -27,7 +28,7 @@ vi.mock("@/lib/db", () => ({
     return [];
   },
 }));
-vi.mock("@/lib/r2", () => ({ getObjectBytes: async () => new Uint8Array([1, 2, 3]), deleteObject: async () => {}, signGetUrl: async () => "u" }));
+vi.mock("@/lib/r2", () => ({ getObjectBytes: H.download, deleteObject: async () => {}, signGetUrl: async () => "u" }));
 vi.mock("@/lib/bench-range", () => ({
   resolveRange: () => ({ kind: "single", covering: { duration_s: 900 } }),
 }));
@@ -44,7 +45,7 @@ import { roomWindowEngine } from "@/lib/stt/room-drain";
 import { PUT } from "@/app/api/admin/stt-lab/routing/route";
 
 beforeEach(() => {
-  H.routing = "sarvam"; H.transcribe.mockReset(); H.failures = []; H.puts = [];
+  H.routing = "sarvam"; H.transcribe.mockReset(); H.download.mockClear(); H.failures = []; H.puts = [];
   H.engines = {
     sarvam: { enabled: true, adapter_key: "sarvam", is_paid: false }, // is_paid FALSE on purpose
     sarvam_v2: { enabled: true, adapter_key: "sarvam", is_paid: false },
@@ -93,6 +94,7 @@ describe("3. roomWindowEngine", () => {
     expect(out.step).toBe("refused");
     expect(out.detail).toBe("refused: scope_consult_only (O4)");
     expect(H.transcribe).not.toHaveBeenCalled();
+    expect(H.download).not.toHaveBeenCalled(); // no audio fetched at all
     expect(H.failures.length).toBe(1);
   });
   it("refuses a Sarvam-prefixed engine id too", async () => {
@@ -102,6 +104,7 @@ describe("3. roomWindowEngine", () => {
   });
   it("does not refuse a non-Sarvam engine as O4", async () => {
     const out = await roomWindowEngine("w1", { actor: "t", via: "test" } as never, { engine_id: "whisper", clip_r2_key: "k" }).catch(() => ({ step: "threw", detail: "" }));
+    expect(H.download).toHaveBeenCalled();
     expect(out.detail ?? "").not.toContain("scope_consult_only");
   });
 });

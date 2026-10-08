@@ -170,7 +170,9 @@ describe("item 7 — every route to an UNNAMED paid call is closed", () => {
     const { guardPaidEngine } = await import("@/lib/stt/paid-engines");
     const { resolveRouting } = await import("@/lib/stt/routing");
     // The routing table really does say sarvam...
-    expect(await resolveRouting("room", "indic")).toBe("sarvam");
+    // (O4: stage room no longer inherits sarvam — it is refused; note still inherits it.)
+    expect(await resolveRouting("note", "indic")).toBe("sarvam");
+    expect(await resolveRouting("room", "indic")).toMatchObject({ refused: true, code: "scope_consult_only" });
     // ...and it still is not a naming. Inheriting a row is precisely an UNATTENDED spend.
     const out = await guardPaidEngine({ engine: "sarvam", explicitlyNamed: false, durationMs: 60_000 });
     expect(out.ok, "a routing row is configuration, not a person asking").toBe(false);

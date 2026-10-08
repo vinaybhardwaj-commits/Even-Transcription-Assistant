@@ -1371,6 +1371,16 @@ export async function roomWindowEngine(
   // through state or keeping one giant step that reintroduces the ceiling this slice removed.
   // DO NOT "fix" this by caching the buffer somewhere global: an R2 GET is cheap and a step that
   // depends on another step's memory is a step that breaks the first time a runner is recycled.
+  // O4 — BEFORE the download and before any adapter call, independent of is_paid and of
+  // explicitlyNamed: a Sarvam room engine never fetches room audio at all.
+  {
+    const o4EngineId = typeof progress.engine_id === "string" && progress.engine_id ? progress.engine_id : null;
+    if (isSarvamEngine(o4EngineId, o4EngineId ? adapterFor(o4EngineId)?.key : null)) {
+      const detail = `${SCOPE_CONSULT_ONLY} (O4)`;
+      const attempts = await recordFailure(windowId, "refused", detail);
+      return { ...out, step: "refused", detail: `refused: ${detail}`, attempts };
+    }
+  }
   const bytes = await getObjectBytes(join.key);
   if (!bytes) { const attempts = await recordFailure(windowId, "clip_missing", join.key); return { ...out, step: "clip_missing", attempts }; }
     // --- C4. TRANSCRIBE, with the language FORCED ------------------------------------------
@@ -1382,12 +1392,6 @@ export async function roomWindowEngine(
     // operator edited stt_routing while the job was in flight. One resolution, one truth.
     const engineId = typeof progress.engine_id === "string" && progress.engine_id ? progress.engine_id : null;
     const adapter = engineId ? adapterFor(engineId) : null;
-    // O4 — BEFORE any adapter call, independent of is_paid and of explicitlyNamed.
-    if (isSarvamEngine(engineId, adapter?.key)) {
-      const detail = `${SCOPE_CONSULT_ONLY} (O4)`;
-      const attempts = await recordFailure(windowId, "refused", detail);
-      return { ...out, step: "refused", detail: `refused: ${detail}`, attempts };
-    }
     if (!engineId || !adapter) {
       const attempts = await recordFailure(windowId, "no_engine", `stage=room bucket=${bucketFor(decided)}`);
       return { ...out, step: "no_engine", attempts };
