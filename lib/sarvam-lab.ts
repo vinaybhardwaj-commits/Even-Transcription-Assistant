@@ -48,7 +48,7 @@ export type CallLine = {
 export type LaneActive = { job_id: string; mode: string; task: string; model: string; audio_s: number; started_at: string; scope: string };
 
 // --- the store ----------------------------------------------------------------------------------------------------------------------------
-export type StoredObject = { body: string; etag: string | null };
+export type StoredObject = { body: string; etag: string | null; /** the object's own modified time, when the store reports one */ last_modified?: string | null };
 export interface LabStore {
   get(key: string): Promise<StoredObject | null>;
   put(key: string, body: string, cond: { ifMatch?: string; ifNoneMatch?: boolean }): Promise<"ok" | "precondition_failed">;
@@ -76,7 +76,7 @@ const realStore: LabStore = {
     try {
       const r = await client().send(new GetObjectCommand({ Bucket: LAB_BUCKET, Key: key }), { abortSignal: AbortSignal.timeout(15_000) });
       const body = r.Body ? await (r.Body as unknown as { transformToString: () => Promise<string> }).transformToString() : "";
-      return { body, etag: r.ETag ?? null };
+      return { body, etag: r.ETag ?? null, last_modified: r.LastModified ? r.LastModified.toISOString() : null };
     } catch (e) {
       if ((e as { name?: string })?.name === "NoSuchKey" || status(e) === 404) return null;
       throw e;
@@ -123,10 +123,21 @@ export function setLabStoreForTests(s: LabStore | null): void {
 function guarded(): LabStore {
   const inner = override ?? realStore;
   return {
-    get: (k) => { assertReadable(k); return inner.get(k); },
-    put: (k, b, c) => { assertWritable(k); return inner.put(k, b, c); },
-    list: (p) => { assertReadable(p); return inner.list(p); },
+    // async, so a refused key is always a REJECTED promise, never a synchronous throw
+    get: async (k) => { assertReadable(k); return inner.get(k); },
+    put: async (k, b, c) => { assertWritable(k); return inner.put(k, b, c); },
+    list: async (p) => { assertReadable(p); return inner.list(p); },
   };
+}
+
+/**
+ * S2L: a READ-ONLY view of the same guarded store, for scribe_lanes. get / list only, both allowlist-checked (reads under `lanes/` and the ledger prefix;
+ * writes are not reachable through it). null when the lab credentials are not configured (and no test store is set).
+ */
+export function labReader(): Pick<LabStore, "get" | "list"> | null {
+  if (!available()) return null;
+  const g = guarded();
+  return { get: (k) => g.get(k), list: (p) => g.list(p) };
 }
 
 const logCode = (code: string, extra: Record<string, unknown> = {}): void => {

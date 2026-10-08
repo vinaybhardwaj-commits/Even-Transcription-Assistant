@@ -83,7 +83,8 @@ const CAPTURES = [FLOOR, CURRENT];
 
 /** Every name either capture published, each with the most recent schema and scope for it. */
 const LIVE_TOOLS: LiveTool[] = [...new Map([...FLOOR.tools, ...CURRENT.tools].map((t) => [t.name, t])).values()];
-const SCOPES: Record<string, Scope> = { ...FLOOR.scopes, ...CURRENT.scopes };
+// scribe_health_routes (S2L) postdates both captures: a new group member, read scope
+const SCOPES: Record<string, Scope> = { ...FLOOR.scopes, ...CURRENT.scopes, scribe_health_routes: "read" };
 
 /**
  * Argument-contract changes that were RULED, not drifted into. Each names the tool, the argument, the
@@ -318,6 +319,7 @@ describe("every group variant runs its original handler", () => {
     ["scribe_health", { aspect: "voice" }, "scribe_voice_health", {}],
     ["scribe_health", { aspect: "llm" }, "scribe_llm_health", {}],
     ["scribe_health", { aspect: "kb", q: "anemia", topK: 3, include_text: true }, "scribe_kb_probe", { q: "anemia", topK: 3, include_text: true }],
+    ["scribe_health", { aspect: "routes" }, "scribe_health_routes", {}],
     ["scribe_system", { view: "map", detail: "full" }, "scribe_system_map", { detail: "full" }],
     ["scribe_system", { view: "stores" }, "scribe_store_stats", {}],
     ["scribe_system", { view: "stt_engines" }, "scribe_list_stt_engines", {}],

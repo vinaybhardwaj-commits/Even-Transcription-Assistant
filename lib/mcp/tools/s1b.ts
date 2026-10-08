@@ -80,7 +80,7 @@ async function optionalRoom(args: ToolArgs): Promise<{ room: RoomRef | null } | 
 // scribe_steward
 // ---------------------------------------------------------------------------
 
-const STEWARD_VIEWS = ["config", "decisions", "tickets", "tick", "why"] as const;
+const STEWARD_VIEWS = ["config", "decisions", "tickets", "tick", "why", "history"] as const;
 type StewardView = (typeof STEWARD_VIEWS)[number];
 /** config rows that are bookkeeping, not settings: the loop lease and the last-tick summary (shown by `tick`) */
 const NON_SETTING_KEYS = ["loop_lease", "last_tick"];
@@ -166,6 +166,29 @@ async function stewardTickets(roomId: string | null, sinceHours: number, limit: 
   };
 }
 
+/** S2L: steward_config_history, newest first (who changed what, from what, to what, why). Config values only, scrubbed like every steward value. */
+async function stewardHistory(roomId: string | null, sinceHours: number, limit: number): Promise<Row> {
+  const rows = (await sql`
+    SELECT id, key, kind, room_id, before, after, actor, reason, via, created_at
+      FROM steward_config_history
+     WHERE created_at > now() - make_interval(hours => ${sinceHours})
+       AND (${roomId}::text IS NULL OR room_id = ${roomId}::text)
+     ORDER BY created_at DESC, id DESC
+     LIMIT ${limit + 1}
+  `) as Row[];
+  const kept = rows.slice(0, limit);
+  return {
+    ok: true,
+    since_hours: sinceHours,
+    count: kept.length,
+    truncated: rows.length > limit,
+    changes: kept.map((r) => ({
+      id: String(r.id), key: String(r.key), kind: (r.kind as string | null) ?? null, room_id: (r.room_id as string | null) ?? null,
+      before: scrub(r.before ?? null), after: scrub(r.after ?? null), actor: String(r.actor), reason: String(r.reason), via: String(r.via), at: iso(r.created_at),
+    })),
+  };
+}
+
 async function stewardTick(): Promise<Row> {
   const rows = (await sql`
     SELECT key, value, updated_at, EXTRACT(EPOCH FROM (now() - updated_at))::int AS age_s
@@ -241,7 +264,7 @@ const steward: McpTool = {
   name: "scribe_steward",
   description:
     "Room Steward, read-only; touches no room (the steward itself may act on one). `view`: config (settings now), decisions (newest first, room name joined), tickets (repair tickets, never the signature or nonce), tick (last tick, kill switch, lease), " +
-    "why ({room, at}: decisions within 15 min either side of `at`, plus the config now; steward_config keeps no history so history:false). since_hours <= 168 (default 24), limit <= 200 (default 50), both clamped with clamped:true. " +
+    "why ({room, at}: decisions within 15 min either side of `at`, plus the config now; history:false there), history (config changes made through scribe_steward_command: key, before, after, actor, reason; room?). since_hours <= 168 (default 24), limit <= 200 (default 50), both clamped with clamped:true. " +
     "include_payload adds decision params/inputs and ticket params/result. Decision rows are kept 30 days. Times UTC.",
   scope: "read",
   inputSchema: {
@@ -272,9 +295,10 @@ const steward: McpTool = {
         case "tickets": return stewardTickets(r.room?.id ?? null, sinceHours, limit, payload);
         case "tick": return stewardTick();
         case "why": return stewardWhy(args, r.room!);
+        case "history": return stewardHistory(r.room?.id ?? null, sinceHours, limit);
       }
     });
-    return { view, ...(r.room ? { room: roomRef(r.room) } : {}), ...(view === "decisions" || view === "tickets" ? clamp : {}), ...body };
+    return { view, ...(r.room ? { room: roomRef(r.room) } : {}), ...(view === "decisions" || view === "tickets" || view === "history" ? clamp : {}), ...body };
   },
 };
 
