@@ -147,6 +147,11 @@ export const CLINIC_END_MIN_IST = 21 * 60 + 30;
 /** Anything outside clinic hours is "overnight", including the day-rollover rule. */
 export type ReapPhase = "clinic_hours" | "overnight";
 
+/** Arch #21: the exact note on a session that only EXISTS to hold the late chunks of a reaped session. Never a start, never "newest". */
+export const REHOME_NOTE_PREFIX = "re-homed after reap of ";
+export const rehomeNote = (reapedSessionId: string): string => `${REHOME_NOTE_PREFIX}${reapedSessionId}`;
+export const isRehomeNote = (notes: string | null | undefined): boolean => typeof notes === "string" && notes.startsWith(REHOME_NOTE_PREFIX);
+
 /** A reaped session's note, recognised on the ended row (chunk route, poll reply). */
 export function isReaperNote(notes: string | null | undefined): boolean {
   return typeof notes === "string" && (notes.includes(NOTE_STALL) || notes.includes(NOTE_ROLLOVER));

@@ -110,7 +110,7 @@ import {
 import { decideSource, sourceAnswer, type MicSource, type SourceDecision } from "@/lib/bench-source";
 import { closeOrphanedSession } from "@/lib/bench-orphan";
 // U3: the reaper's OWN window and badge rule — imported, never retyped (PRD D11).
-import { isBenchStalled, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+import { isBenchStalled, isRehomeNote, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { listCuesForDay, WINDOW_CUE_TYPE } from "@/lib/brain/state";
 import { query as brainQuery } from "@/lib/brain/db";
 // The live monitor's shared rules, imported so the MCP and the admin screen can never
@@ -2838,6 +2838,7 @@ const diffRoom: McpTool = {
           // seventh state's own input, computed here so the door reaches the same chain the
           // screen does with the same facts.
           const newestSession = sessions.reduce<BenchSessionRollupRow | null>((acc, sn) => {
+            if (isRehomeNote(sn.notes)) return acc;   // Arch #21 R3: a re-home container is never the newest session
             const t = msOfLoose(sn.started_at);
             if (t === null) return acc;
             const at = acc === null ? null : msOfLoose(acc.started_at);

@@ -56,7 +56,7 @@ beforeAll(() => {
     CREATE TABLE room_install (
       install_id text PRIMARY KEY, room_id text NOT NULL, hostname text, enrolled_at timestamptz, retired_at timestamptz,
       last_seen_at timestamptz, tape_advancing boolean, session_open boolean, disk_free_bytes bigint, state_flags jsonb);
-    CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz, status text NOT NULL DEFAULT 'recording');
+    CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz, status text NOT NULL DEFAULT 'recording', notes text);
     CREATE INDEX bench_session_room_started_idx ON bench_session (room_id, started_at DESC);
     CREATE TABLE bench_chunk (id text PRIMARY KEY, session_id text NOT NULL, source text NOT NULL DEFAULT 'primary', idx int NOT NULL DEFAULT 0,
       created_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz NOT NULL, size_bytes bigint, duration_ms int,
@@ -73,7 +73,7 @@ beforeAll(() => {
       BEGIN EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON) ' || q INTO r; RETURN r; END
     $f$;
   `);
-  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution", "0126_kiosk_health_events", "0127_kiosk_health_machine_received_idx"]) {
+  for (const f of ["0103_room_alert_state", "0119_room_alert_outbox", "0199_room_alert_outbox_session_reaped", "0122_pulse_presence_events", "0123_eta_encounter_windows", "0124_encounter_windows_warehouse_attribution", "0126_kiosk_health_events", "0127_kiosk_health_machine_received_idx"]) {
     pg.exec(noRecord(`db/migrations/${f}.sql`));
   }
   H.sql = pg.sql as Sql;
@@ -461,6 +461,21 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     // a session opened after the failure resolves it
     pg.exec(session("bs6", "r6", "5 minutes", "recording") + samples("r6", "4 minutes", "1 second", "moving"));
     expect(await attention().then((x) => x.items)).toEqual([]);
+  });
+
+  it("Arch #21 R3 — a re-home session (started AFTER the alert) clears neither stale_start nor the reap alert; a real new session still does", async () => {
+    pg.exec(`
+      INSERT INTO bench_command (id, room_id, kind, status, error, created_at, acked_at) VALUES
+        ('kr', 'r6', 'start_day', 'failed', 'tapewriter exited with status 1', ${ago("11 minutes")}, ${ago("10 minutes")});
+      INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
+        VALUES ('session_reaped', ARRAY['r6'], 'OPD 6', NULL, 'clinic_hours', 'reaped', 'OPD 6 session bs_old was ended by the system during clinic hours', ${ago("20 minutes")});
+      INSERT INTO bench_session (id, room_id, started_at, ended_at, status, notes)
+        VALUES ('bs_old', 'r6', ${ago("3 hours")}, ${ago("20 minutes")}, 'ended', 'auto-ended: no chunks >30m (reaper)'),
+               ('bs_home', 'r6', ${ago("5 minutes")}, ${ago("4 minutes")}, 'ended', 're-homed after reap of bs_old');
+    `);
+    expect(kindsOf(await attention())).toEqual(["r6:session_reaped", "r6:stale_start"]);
+    pg.exec(session("bs_new", "r6", "2 minutes", "recording") + samples("r6", "2 minutes", "1 second", "moving"));
+    expect(kindsOf(await attention())).toEqual([]);
   });
 
   it("a source that cannot be read is NAMED in `degraded` and its rules are skipped, never reported as all clear", async () => {

@@ -55,6 +55,7 @@ import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, 
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
+import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
 import { REASON_LABEL, isGenuineRecovery, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
@@ -812,6 +813,8 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
         FROM bench_session s
        WHERE s.room_id = ANY(${ids}::text[])
          AND (s.started_at > now() - interval '2 days' OR s.status IN ('recording', 'paused'))
+         -- Arch #21 (re-check R3): a session that only holds re-homed late chunks is never a START — it must not clear the reap alert or stale_start.
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
     `) as Array<{ room_id: string; id: string; status: string; started_at: unknown; last_chunk_at: unknown }>, []),
     // R1/R2 — the last 120 s of levels for the fleet: room_id = ANY(ids) leads the (room_id, ist_date, sampled_at) index, ist_date and sampled_at bound it.
     safe("bench_level_sample", degraded, async () => (await sql`

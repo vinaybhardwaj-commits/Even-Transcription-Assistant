@@ -50,7 +50,7 @@ import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
 import { parseMicLevelPair } from "@/lib/bench-levels";
-import { isReaperNote, SESSION_REAPED } from "@/lib/bench-reaper-core";
+import { isReaperNote, rehomeNote, SESSION_REAPED } from "@/lib/bench-reaper-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,43 +65,48 @@ function disagreementFields(): Record<string, string> {
   return { [CHUNK_DISAGREEMENT_FIELD]: ENDED_DISAGREES, ended_disagrees: ENDED_DISAGREES };
 }
 
-/** Re-homed chunks live in a high idx band so they can never collide with the new session's own 0.. numbering. */
+/** Re-homed chunks live in a high idx band so they can never collide with another session's own 0.. numbering. */
 const REHOME_IDX_BASE = 90_000;
 
 /**
- * ARCH #21 (F3) — where a late chunk of a REAPED session goes. Never the ended session. In order:
- *  1. a session of this room already created for THIS old session (notes "re-homed after reap of <id>") — so a backlog lands together;
- *  2. the room's open `recording` session, if one exists (the kiosk already started again);
- *  3. a new session for the room, created ENDED (so no phantom Recording chip) at the chunk's own end time, notes "re-homed after reap of <old id>".
+ * ARCH #21 (F3, reworked after the re-check) — where a late chunk of a REAPED session goes: ONE dedicated session per reaped session, never an
+ * open one (re-check R1: two reaped sessions' idx collided inside a shared open session and a piece vanished; R2: audio landed out of time order).
+ *
+ *  - the home is an ENDED session of the room whose notes are exactly "re-homed after reap of <old id>" (so no phantom Recording chip), created on
+ *    the first late chunk and reused by every later one;
+ *  - CREATE-OR-GET IS SERIALISED PER REAPED SESSION (R4): one transaction takes pg_advisory_xact_lock(hashtext('rehome:<old id>')), inserts the
+ *    home only if none exists (the INSERT is its own statement, so it sees the winner's commit), then widens its bounds and returns its id. No
+ *    unique index, no migration. Neon's HTTP driver has no interactive transactions; sql.transaction([...]) is the non-interactive form;
+ *  - EVERY re-homed chunk widens the home's started_at / ended_at with LEAST / GREATEST (R5), so the bounds always cover the pieces in it;
+ *  - the idx moves into the 90 000+ band; a retry of the same piece hits the same (session, source, idx) and is idempotent. The event records the
+ *    R2 key AND the source (R1's recovery gap).
  * Returns null when it cannot (idx outside the band, or any write fails) and the caller falls back to refusing.
- * The chunk's idx moves into the high band (90 000 + idx): a re-homed row is addressed by the same (session, source, idx) key as any other, so a
- * retry of the same piece is idempotent and cannot overwrite the new session's own pieces.
  */
-async function rehomeAfterReap(a: { roomId: string; oldSessionId: string; idx: number; startedAt: Date; endedAt: Date }): Promise<{ sessionId: string; idx: number } | null> {
+async function rehomeAfterReap(a: { roomId: string; oldSessionId: string; idx: number; source: string; r2Key: string; startedAt: Date; endedAt: Date }): Promise<{ sessionId: string; idx: number } | null> {
   if (a.idx < 0 || a.idx >= 9_999) return null;
-  const note = `re-homed after reap of ${a.oldSessionId}`;
+  const note = rehomeNote(a.oldSessionId);
   try {
-    const existing = (await sql`
-      SELECT id FROM bench_session WHERE room_id = ${a.roomId} AND notes LIKE ${note + "%"} ORDER BY started_at DESC LIMIT 1
-    `) as Array<{ id: string }>;
-    let target = existing[0]?.id ?? null;
-    if (!target) {
-      const open = (await sql`
-        SELECT id FROM bench_session WHERE room_id = ${a.roomId} AND status = 'recording' ORDER BY started_at DESC LIMIT 1
-      `) as Array<{ id: string }>;
-      target = open[0]?.id ?? null;
-    }
-    if (!target) {
-      target = newSessionId();
-      await sql`
+    const results = (await sql.transaction([
+      sql`SELECT pg_advisory_xact_lock(hashtext(${"rehome:" + a.oldSessionId}))`,
+      sql`
         INSERT INTO bench_session (id, room_id, started_at, ended_at, status, notes)
-        VALUES (${target}, ${a.roomId}, ${a.startedAt.toISOString()}, ${a.endedAt.toISOString()}, 'ended', ${note})
-      `;
-    }
+        SELECT ${newSessionId()}, ${a.roomId}, ${a.startedAt.toISOString()}::timestamptz, ${a.endedAt.toISOString()}::timestamptz, 'ended', ${note}
+         WHERE NOT EXISTS (SELECT 1 FROM bench_session WHERE room_id = ${a.roomId} AND notes = ${note})
+      `,
+      sql`
+        UPDATE bench_session
+           SET started_at = LEAST(started_at, ${a.startedAt.toISOString()}::timestamptz),
+               ended_at   = GREATEST(ended_at, ${a.endedAt.toISOString()}::timestamptz)
+         WHERE room_id = ${a.roomId} AND notes = ${note}
+        RETURNING id
+      `,
+    ])) as unknown as Array<Array<{ id: string }>>;
+    const target = results?.[2]?.[0]?.id ?? null;
+    if (!target) return null;
     await sql`
       INSERT INTO bench_event (id, session_id, kind, at, brain_status, payload)
       VALUES (${newEventId()}, ${target}, 'chunk_rehomed', ${a.startedAt.toISOString()}, 'none',
-              ${JSON.stringify({ source: "server", reaped_session_id: a.oldSessionId, original_idx: a.idx, rehomed_idx: REHOME_IDX_BASE + a.idx, chunk_started_at: a.startedAt.toISOString() })}::jsonb)
+              ${JSON.stringify({ source: "server", reaped_session_id: a.oldSessionId, original_idx: a.idx, rehomed_idx: REHOME_IDX_BASE + a.idx, chunk_source: a.source, r2_key: a.r2Key, chunk_started_at: a.startedAt.toISOString() })}::jsonb)
     `;
     return { sessionId: target, idx: REHOME_IDX_BASE + a.idx };
   } catch (e) {
@@ -226,7 +231,7 @@ export async function POST(req: NextRequest) {
   let targetIdx = idx;
   let rehomed = false;
   if (endedDisagrees && isReaperNote(session.notes)) {
-    const home = await rehomeAfterReap({ roomId: session.room_id, oldSessionId: sessionId, idx, startedAt, endedAt });
+    const home = await rehomeAfterReap({ roomId: session.room_id, oldSessionId: sessionId, idx, source, r2Key: originalKey, startedAt, endedAt });
     if (!home) {
       try {
         await sql`

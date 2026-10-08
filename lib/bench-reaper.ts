@@ -109,7 +109,7 @@ export async function reapBenchSessions(
 
 /**
  * Arch #21 — a reap is a capture-failure event. One outbox row (the alert the relay posts and
- * scribe_room_alerts reads; migration 0132 admits the kind) and one bench_event row (the timeline,
+ * scribe_room_alerts reads; migration 0199 (placeholder; GATING renumbers) admits the kind) and one bench_event row (the timeline,
  * and what the chunk route / poll reply recognise). Both best-effort and independent: the session
  * is already honestly ended, and a failed alert write must not undo it or stop the sweep. Failure
  * is logged loudly — a reap that could not alert is exactly the silent cleanup this closes.

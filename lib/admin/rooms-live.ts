@@ -25,7 +25,7 @@ import { sql } from "@/lib/db";
 import { query as brainQuery } from "@/lib/brain/db";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
 import { LISTENER_FRESH_MS, listListeners, type ListenerRow } from "@/lib/bench-commands";
-import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+import { REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
 import { ENDED_DISAGREES_SKEW_GRACE_MS, fmtCoarse } from "@/lib/bench-bus-constants";
 // EVERY DECISION ON THIS SCREEN IS MADE IN lib/room-facts.ts, and the door makes it there too
 // (Build 1 §3.6). Re-exported below so no caller's import path changed.
@@ -590,6 +590,8 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
         LEFT JOIN bench_chunk c ON c.session_id = s.id
        WHERE s.started_at >= ${fromIso}::timestamptz
          AND s.started_at <  ${toIso}::timestamptz
+         -- Arch #21 (re-check R3): a session that only holds re-homed late chunks is bookkeeping, never the room's "newest session".
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
        GROUP BY s.id, s.room_id, s.status, s.started_at, s.ended_at
        ORDER BY s.started_at DESC
     `) as unknown[];
