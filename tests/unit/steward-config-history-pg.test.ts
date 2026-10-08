@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import ts from "typescript";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { parseConfig } from "@/lib/steward/config";
+import { parseConfig, actionMode } from "@/lib/steward/config";
 import { runCommand, planCommand, COMMAND_KINDS, type CommandKind } from "@/lib/steward/write";
 
 const HAVE_DOCKER = dockerAvailable();
@@ -43,6 +43,9 @@ const hist = () => (JSON.parse(psql(`SELECT coalesce(json_agg(h ORDER BY created
 const val = (key: string): unknown => cfgRows().find((r) => r.key === key)?.value;
 const run = (kind: CommandKind, extra: Record<string, unknown> = {}) =>
   runCommand(pg.sql as never, { kind, value: undefined, minutes: null, roomId: null, nowMs: Date.parse("2026-10-08T12:00:00Z"), actor: "mcp:tester", reason: "pg test", ...extra } as never);
+
+const PUBLISHED = ["scribe_start", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"];
+const HELD_EXCEPT_START = Object.fromEntries(PUBLISHED.map((a) => [a, a !== "scribe_start"]));
 
 describe("REQUIRED PROOF — 0136 against a real postgres", () => {
   it("ran, or was skipped deliberately", () => {
@@ -85,7 +88,7 @@ describe.skipIf(!HAVE_DOCKER)("0136 steward_config_history and lib/steward/write
   it("the seed: kill switch ON, so every kind but note and kill_switch is refused and NOTHING is written", async () => {
     expect(val("kill_switch")).toEqual({ on: true });
     for (const [kind, value, roomId] of [
-      ["set_shadow", { global: false }, null], ["start_day_live", { on: true }, null], ["add_room", {}, "room_new"],
+      ["set_shadow", { global: false, actions: { message: false } }, null], ["start_day_live", { on: true }, null], ["add_room", {}, "room_new"],
       ["flag_room", { add: ["dev"] }, "room_jwyrr4dc"], ["set_window", { profile: "clinic", start: "08:00", end: "20:00" }, null],
     ] as Array<[CommandKind, unknown, string | null]>) {
       expect(await run(kind, { value, roomId }), kind).toMatchObject({ ok: false, error: "kill_switch_on" });
@@ -126,7 +129,7 @@ describe.skipIf(!HAVE_DOCKER)("0136 steward_config_history and lib/steward/write
     const baseline = parseConfig(cfgRows());
     expect(baseline.invalid).toEqual([]);
     const cases: Array<{ kind: CommandKind; extra: Record<string, unknown>; key: string; check: (v: any) => void }> = [
-      { kind: "set_shadow", extra: { value: { global: false, actions: { scribe_start: false } } }, key: "shadow", check: (v) => expect(v).toEqual({ global: false, actions: { scribe_start: false } }) },
+      { kind: "set_shadow", extra: { value: { global: false, actions: { scribe_start: false } } }, key: "shadow", check: (v) => expect(v).toEqual({ global: false, actions: HELD_EXCEPT_START }) },
       { kind: "start_day_live", extra: { value: { on: true } }, key: "start_day_live", check: (v) => expect(v).toEqual({ on: true }) },
       { kind: "add_room", extra: { roomId: "room_aaaa1111", value: { class: "opd", flags: ["pilot"], machine: "mac-9" } }, key: "rooms", check: (v) => expect(v.room_aaaa1111).toEqual({ flags: ["pilot"], class: "opd", machine: "mac-9" }) },
       { kind: "flag_room", extra: { roomId: "room_aaaa1111", value: { add: ["dev"], remove: ["pilot"] } }, key: "rooms", check: (v) => expect(v.room_aaaa1111.flags).toEqual(["dev"]) },
@@ -156,6 +159,38 @@ describe.skipIf(!HAVE_DOCKER)("0136 steward_config_history and lib/steward/write
       }
     }
     expect(parseConfig(cfgRows()).config.start_day_live).toBe(false); // the revert switched it back
+  });
+
+  it("SF1 from the seed shadow {global:true, actions:{}}: {global:false} and {global:false, actions:{}} are REFUSED; {global:false, actions:{message:false}} makes exactly message live (by the Steward's own actionMode); the revert round-trips", async () => {
+    expect(val("shadow")).toEqual({ global: true, actions: {} });
+    const n = hist().length;
+    for (const value of [{ global: false }, { global: false, actions: {} }]) {
+      expect(await run("set_shadow", { value }), JSON.stringify(value)).toMatchObject({ ok: false, error: "explicit_actions_required" });
+    }
+    expect(val("shadow")).toEqual({ global: true, actions: {} });
+    expect(hist()).toHaveLength(n); // nothing written, no history row
+    const liveNow = () => { const c = parseConfig(cfgRows()).config; return PUBLISHED.filter((a) => actionMode(c, a) === "live"); };
+    expect(liveNow()).toEqual([]);
+    const r = await run("set_shadow", { value: { global: false, actions: { message: false } } }) as Extract<Awaited<ReturnType<typeof run>>, { ok: true }> & { live_actions: string[]; changed_actions: string[] };
+    expect(r).toMatchObject({ ok: true, live_actions: ["message"], changed_actions: ["message"] });
+    expect(val("shadow")).toEqual({ global: false, actions: Object.fromEntries(PUBLISHED.map((a) => [a, a !== "message"])) });
+    expect(liveNow()).toEqual(["message"]); // the Steward itself agrees: exactly message
+    // the revert, replayed as a command, restores the seed exactly
+    const rv = await run("set_shadow", { value: r.revert.value });
+    expect(rv).toMatchObject({ ok: true, live_actions: [] });
+    expect(val("shadow")).toEqual({ global: true, actions: {} });
+    expect(liveNow()).toEqual([]);
+    // going live with scribe_start named: still only that one
+    const s2 = await run("set_shadow", { value: { global: false, actions: { scribe_start: false } } });
+    expect(s2).toMatchObject({ ok: true, live_actions: ["scribe_start"] });
+    // an actions-only change under global:false touches only the named action, and its revert (which carries an explicit map) is accepted
+    const s3 = await run("set_shadow", { value: { actions: { message: false } } }) as Extract<Awaited<ReturnType<typeof run>>, { ok: true }>;
+    expect(s3).toMatchObject({ ok: true, changed_actions: ["message"] });
+    expect(liveNow()).toEqual(["message"]); // scribe_start is in live_actions (shadow config) but the Steward also needs start_day_live, which is off here
+    expect(await run("set_shadow", { value: { actions: { message: true } } })).toMatchObject({ ok: true, live_actions: ["scribe_start"] });
+    const back = await run("set_shadow", { value: { global: true, actions: Object.fromEntries(PUBLISHED.map((a) => [a, null])) } });
+    expect(back).toMatchObject({ ok: true, live_actions: [] });
+    expect(val("shadow")).toEqual({ global: true, actions: {} });
   });
 
   it("the SQL refuses a write when the kill switch is ON even if the plan was made while it was OFF (the race), and writes NOTHING", async () => {

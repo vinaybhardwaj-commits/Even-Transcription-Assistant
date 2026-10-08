@@ -125,16 +125,45 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
       const touched = p.data.actions ?? {};
       const unknown = Object.entries(touched).filter(([k, v]) => !LIVE_CAPABLE_ACTIONS.includes(k) && !(v === null && k in curActions)).map(([k]) => k);
       if (unknown.length > 0) return fail("unknown_action", `not a published steward action: ${unknown.slice(0, 5).join(", ")}; allowed: ${LIVE_CAPABLE_ACTIONS.join(", ")}`);
+      const turningOff = p.data.global === false && curGlobal !== false; // global true/absent -> false
+      // SF1: going live is explicit PER ACTION. global:false must carry an actions map naming at least one action; every published action it does NOT name is written
+      // as held in shadow (true), so nothing goes live implicitly (V's ruling: only scribe_start is ever meant to be live, and changing that is V's decision).
+      if (turningOff) {
+        if (Object.keys(touched).length === 0) {
+          return fail("explicit_actions_required", `global:false takes actions live only by name: give actions {"<action>": false} for each action to go live (the rest are held in shadow); published: ${LIVE_CAPABLE_ACTIONS.join(", ")}`);
+        }
+        if (Object.values(touched).some((v) => v === null)) return fail("bad_value", "actions: null is not allowed in the call that turns global off; name each action true (held) or false (live)");
+      }
       // G18: merge per key; an explicit null clears one key
       const actions: Record<string, boolean> = { ...curActions };
+      if (turningOff) for (const a of LIVE_CAPABLE_ACTIONS) actions[a] = true; // held unless this call names it false below
       const undo: Record<string, boolean | null> = {};
+      const legacyCleared: string[] = [];
       for (const [k, v] of Object.entries(touched)) {
-        undo[k] = k in curActions ? curActions[k]! : null; // what the key was before: its value, or null (absent)
+        if (!LIVE_CAPABLE_ACTIONS.includes(k)) legacyCleared.push(k);
+        else undo[k] = k in curActions ? curActions[k]! : null; // what the key was before: its value, or null (absent)
         if (v === null) delete actions[k];
         else actions[k] = v;
       }
-      const after = { global: p.data.global ?? curGlobal, actions };
-      return done(after, { kind: "set_shadow", value: { global: curGlobal, ...(Object.keys(undo).length ? { actions: undo } : {}) }, exact: true });
+      const afterGlobal = p.data.global ?? curGlobal;
+      const after = { global: afterGlobal, actions };
+      let revert: Revert;
+      if (turningOff) {
+        // undo of the whole transition: global back on, and every published key back to what it was (absent = null)
+        const all: Record<string, boolean | null> = {};
+        for (const a of LIVE_CAPABLE_ACTIONS) all[a] = a in curActions ? curActions[a]! : null;
+        revert = { kind: "set_shadow", value: { global: true, actions: all }, exact: true };
+      } else if (curGlobal === false) {
+        // the prior state had global OFF: replaying `global:false` needs an actions map, so carry the explicit prior value of every published key (absent = live = false)
+        const all: Record<string, boolean | null> = {};
+        for (const a of LIVE_CAPABLE_ACTIONS) all[a] = a in curActions ? curActions[a]! : false;
+        revert = { kind: "set_shadow", value: { global: false, actions: all }, exact: true };
+      } else {
+        revert = { kind: "set_shadow", value: { global: curGlobal, ...(Object.keys(undo).length ? { actions: undo } : {}) }, exact: true };
+      }
+      // SF3: a cleared LEGACY (unpublished) key is not put back by the revert (set_shadow refuses to create unpublished keys), so that revert is not exact
+      if (legacyCleared.length > 0) revert = { ...revert, exact: false, note: `cleared legacy key(s) ${legacyCleared.slice(0, 5).join(", ")} are not published steward actions and are not re-created by the revert` };
+      return done(after, revert);
     }
     case "add_room": {
       if (!input.roomId) return fail("room_required");
@@ -206,8 +235,24 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
   }
 }
 
+/**
+ * SF1: what a set_shadow answer must say. `live_actions` = the published actions that WOULD execute under this shadow config (global false and the action not held
+ * with true); they still need the kill switch off, and scribe_start also start_day_live. `changed_actions` = published actions whose live/shadow state differs from before.
+ */
+export function shadowView(before: unknown, after: unknown): { live_actions: string[]; changed_actions: string[] } {
+  const live = (v: unknown): string[] => {
+    const g = isObj(v) && typeof v.global === "boolean" ? v.global : true;
+    const acts = isObj(v) && isObj(v.actions) ? (v.actions as Record<string, unknown>) : {};
+    return g ? [] : LIVE_CAPABLE_ACTIONS.filter((a) => acts[a] !== true);
+  };
+  const was = new Set(live(before));
+  const now = live(after);
+  const nowSet = new Set(now);
+  return { live_actions: now, changed_actions: LIVE_CAPABLE_ACTIONS.filter((a) => was.has(a) !== nowSet.has(a)) };
+}
+
 export type CommandResult =
-  | { ok: true; kind: CommandKind; key: string; before: unknown | null; after: unknown; revert: Revert; unchanged: boolean; history_id: string | null }
+  | { ok: true; kind: CommandKind; key: string; before: unknown | null; after: unknown; revert: Revert; unchanged: boolean; history_id: string | null; live_actions?: string[]; changed_actions?: string[] }
   | { ok: false; error: string; detail?: string };
 
 /**
@@ -225,7 +270,8 @@ export async function runCommand(sql: StewardSql, input: PlanInput & { reason: s
     for (const r of rows) current[r.key] = r.value;
     const plan = planCommand(input, current);
     if (!plan.ok) return plan;
-    if (plan.unchanged) return { ok: true, kind: input.kind, key: plan.key, before: plan.before, after: plan.after, revert: plan.revert, unchanged: true, history_id: null };
+    const view = input.kind === "set_shadow" ? shadowView(plan.before, plan.after) : {};
+    if (plan.unchanged) return { ok: true, kind: input.kind, key: plan.key, before: plan.before, after: plan.after, revert: plan.revert, unchanged: true, history_id: null, ...view };
 
     const id = `sch_${nanoid(16)}`;
     const beforeJson = plan.before === null ? null : JSON.stringify(plan.before);
@@ -250,7 +296,7 @@ export async function runCommand(sql: StewardSql, input: PlanInput & { reason: s
       SELECT (SELECT count(*) FROM upd)::int AS applied, (SELECT count(*) FROM hist)::int AS logged
     `) as Array<{ applied: number | string; logged: number | string }>;
     if (Number(out[0]?.applied ?? 0) === 1 && Number(out[0]?.logged ?? 0) === 1) {
-      return { ok: true, kind: input.kind, key: plan.key, before: plan.before, after: plan.after, revert: plan.revert, unchanged: false, history_id: id };
+      return { ok: true, kind: input.kind, key: plan.key, before: plan.before, after: plan.after, revert: plan.revert, unchanged: false, history_id: id, ...view };
     }
     // nothing was written: the value changed under us, or the kill switch was switched ON between the read and the write. Read again and decide.
   }

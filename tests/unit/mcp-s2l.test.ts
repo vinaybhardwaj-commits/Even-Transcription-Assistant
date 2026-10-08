@@ -150,7 +150,7 @@ describe("scribe_steward_command — the kinds", () => {
       expect(back.ok, `revert of ${JSON.stringify(args)}`).toBe(true);
       return { out, before, now: JSON.parse(JSON.stringify(cfg[key] ?? null)) };
     };
-    let r = await roundTrip({ kind: "set_shadow", value: { global: false } }, "shadow");
+    let r = await roundTrip({ kind: "set_shadow", value: { global: false, actions: { message: false } } }, "shadow");
     expect((r as { now: unknown }).now).toEqual((r as { before: unknown }).before);
     r = await roundTrip({ kind: "set_shadow", value: { actions: { "ticket:wake": false } } }, "shadow");
     expect((r as { now: unknown }).now).toEqual((r as { before: unknown }).before);
@@ -194,11 +194,57 @@ describe("scribe_steward_command — the kinds", () => {
     const b = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null, "ticket:wake": true } } });
     expect(b).toMatchObject({ ok: true, after: { global: true, actions: { "ticket:wake": true, scribe_start: false } } });
     expect((cfg.shadow as { actions: Row }).actions).not.toHaveProperty("message");
-    const c = await cmd({ kind: "set_shadow", reason: "r", value: { global: false } });
-    expect(c).toMatchObject({ ok: true, after: { global: false, actions: { "ticket:wake": true, scribe_start: false } } });
+    const c = await cmd({ kind: "set_shadow", reason: "r", value: { global: false, actions: { scribe_start: false } } });
+    expect(c).toMatchObject({ ok: true, after: { global: false, actions: { "ticket:wake": true, scribe_start: false, message: true } } }); // every unnamed published action is HELD
     // clearing a key that is not there is a no-op; an empty partial update changes nothing
-    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null } } })).toMatchObject({ ok: true, unchanged: true });
     expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: {} } })).toMatchObject({ ok: true, unchanged: true });
+  });
+  const PUBLISHED = ["scribe_start", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"];
+  it("SF1: global:false is refused without an actions map naming an action (explicit_actions_required) and writes nothing; null is refused too", async () => {
+    cfg.shadow = { global: true, actions: {} };
+    for (const v of [{ global: false }, { global: false, actions: {} }]) {
+      expect(await cmd({ kind: "set_shadow", reason: "r", value: v }), JSON.stringify(v)).toMatchObject({ ok: false, error: "explicit_actions_required" });
+    }
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { global: false, actions: { message: null } } })).toMatchObject({ ok: false, error: "bad_value" });
+    expect(cfg.shadow).toEqual({ global: true, actions: {} });
+    expect(writes).toEqual([]);
+  });
+  it("SF1: global:false with actions {message:false} makes EXACTLY message live; every other published action is written held (true); the answer lists live_actions and changed_actions", async () => {
+    cfg.shadow = { global: true, actions: {} };
+    const out = await cmd({ kind: "set_shadow", reason: "go live for message", value: { global: false, actions: { message: false } } });
+    expect(out).toMatchObject({ ok: true, live_actions: ["message"], changed_actions: ["message"] });
+    const sh = cfg.shadow as { global: boolean; actions: Record<string, boolean> };
+    expect(sh.global).toBe(false);
+    for (const a of PUBLISHED) expect(sh.actions[a], a).toBe(a !== "message");
+    // revert: global back on, every published key back to absent
+    expect(out.revert).toMatchObject({ kind: "set_shadow", exact: true, value: { global: true } });
+    const rv = out.revert as { value: unknown };
+    expect(await cmd({ kind: "set_shadow", reason: "undo", value: rv.value })).toMatchObject({ ok: true, live_actions: [], changed_actions: ["message"] });
+    expect(cfg.shadow).toEqual({ global: true, actions: {} });
+  });
+  it("SF1: scribe_start is live only if the call names it false; naming one action true holds it; an actions-only change while global is already false changes only the named actions", async () => {
+    cfg.shadow = { global: true, actions: {} };
+    const a = await cmd({ kind: "set_shadow", reason: "r", value: { global: false, actions: { scribe_start: false, message: true } } });
+    expect(a).toMatchObject({ ok: true, live_actions: ["scribe_start"] });
+    const b = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { "ticket:wake": false } } });
+    expect(b).toMatchObject({ ok: true, live_actions: ["scribe_start", "ticket:wake"], changed_actions: ["ticket:wake"] });
+    // the revert of an actions-only change under global:false replays (it carries an explicit map, so global:false is not refused)
+    const rv = (await cmd({ kind: "set_shadow", reason: "r", value: { global: true } })).revert as { value: unknown };
+    expect(rv).toMatchObject({ value: { global: false } });
+    expect(await cmd({ kind: "set_shadow", reason: "undo the undo", value: rv.value })).toMatchObject({ ok: true, live_actions: ["scribe_start", "ticket:wake"] });
+  });
+  it("SF1: a plain shadow-only change (global stays true) lists no live action", async () => {
+    cfg.shadow = { global: true, actions: {} };
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: false } } })).toMatchObject({ ok: true, live_actions: [], changed_actions: [] });
+  });
+  it("SF3: clearing a LEGACY unpublished key gives a revert that is NOT exact, says why, and does not carry the key (so replaying it cannot hit unknown_action)", async () => {
+    cfg.shadow = { global: true, actions: { legacy_action: true, "ticket:wake": false } };
+    const out = await cmd({ kind: "set_shadow", reason: "clean", value: { actions: { legacy_action: null, "ticket:wake": true } } });
+    const rv = out.revert as { exact: boolean; note?: string; value: { actions: Row } };
+    expect(rv.exact).toBe(false);
+    expect(rv.note).toMatch(/legacy_action.*not re-created/);
+    expect(rv.value.actions).toEqual({ "ticket:wake": false });
+    expect(await cmd({ kind: "set_shadow", reason: "replay", value: rv.value })).toMatchObject({ ok: true });
   });
   it("G18: the revert of a partial update restores exactly the keys it touched (a new key is cleared, a changed one goes back, a cleared one returns)", async () => {
     cfg.shadow = { global: true, actions: { "ticket:wake": false, message: true } };

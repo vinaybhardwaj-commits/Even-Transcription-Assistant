@@ -26,7 +26,7 @@ const ROOM_OPTIONAL: ReadonlySet<CommandKind> = new Set(["note", "mute_alerts"])
 const stewardCommand: McpTool = {
   name: "scribe_steward_command",
   description:
-    "WRITE; changes the Room Steward's config and can make it act on live clinical rooms. Times UTC. `kind`: set_shadow {global?, actions? (a partial update of published action names; null clears one)}, kill_switch {on}, start_day_live {on}, add_room {room, class?, flags?, machine?}, " +
+    "WRITE; changes the Room Steward's config and can make it act on live clinical rooms. Times UTC. `kind`: set_shadow {global?, actions? (partial update of published action names; null clears one; global:false needs actions naming what goes live, the rest are held)}, kill_switch {on}, start_day_live {on}, add_room {room, class?, flags?, machine?}, " +
     "flag_room {room, add?, remove?}, set_window {profile clinic|ot, start, end, late_stop_max_min?}, note {text; room?}, mute_alerts {minutes 0 or 5..720; room?}. `reason` (1..280) is required and logged with the actor in " +
     "steward_config_history. While the kill switch is ON every kind except kill_switch and note answers kill_switch_on. The answer is {ok, kind, key, before, after, revert}; run `revert` to undo exactly. " +
     "`value` carries the kind's arguments as an object (note: a string). The Steward reads `operator_note` and `alert_mutes` at its next tick only once GATING wires that.",
@@ -65,7 +65,7 @@ const stewardCommand: McpTool = {
     if (!out.ok) return { ...out, kind };
     // the revert names the room by what the caller can pass back: its slug, falling back to the id
     const revert = out.revert.room && ref ? { ...out.revert, room: ref.slug } : out.revert;
-    return { ok: true, kind: out.kind, key: out.key, ...(ref ? { room: ref } : {}), before: out.before, after: out.after, unchanged: out.unchanged, revert, history_id: out.history_id };
+    return { ok: true, kind: out.kind, key: out.key, ...(ref ? { room: ref } : {}), before: out.before, after: out.after, unchanged: out.unchanged, revert, history_id: out.history_id, ...(out.live_actions ? { live_actions: out.live_actions, changed_actions: out.changed_actions } : {}) };
   },
 };
 
