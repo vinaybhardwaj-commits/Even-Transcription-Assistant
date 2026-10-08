@@ -172,10 +172,10 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const room = roomOfKey.get(matchKey(e.machine));
     if (room && (!extBy.has(room) || Date.parse(e.ts) > Date.parse(extBy.get(room)!.ts))) extBy.set(room, e);
   }
-  const occBy = new Map<string, { occupied: boolean; ambiguous: boolean; page_name: string | null; best_dn: string | null; best_stale: boolean }>();
+  const occBy = new Map<string, { occupied: boolean; ambiguous: boolean; page_name: string | null; best_dn: string | null; best_uid: string | null; best_stale: boolean }>();
   for (const o of occ.v ?? []) {
     const room = roomOfKey.get(matchKey(o.machine));
-    if (room) occBy.set(room, { occupied: o.occupied, ambiguous: o.ambiguous, page_name: o.page_name, best_dn: o.best_dn ?? null, best_stale: !!o.best_stale });
+    if (room) occBy.set(room, { occupied: o.occupied, ambiguous: o.ambiguous, page_name: o.page_name, best_dn: o.best_dn ?? null, best_uid: o.best_uid ?? null, best_stale: !!o.best_stale });
   }
   // v1.4: the newest warehouse consult per room; it counts only while OPEN (t_open <= now, and no t_close or one within the last 2 minutes)
   const openConsultBy = new Map<string, WarehouseConsultRow>();
@@ -220,17 +220,19 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     const e = extBy.get(def.room_id);
     const present = !!o && o.occupied && !o.ambiguous;
     // F28: the name is the identity-checked occupant's (scopedOccupancy), never the newest extension event's display_name (that is the stale cookie identity)
-    // v1.5: else a consult closed within 90 min names it ("Last consult HH:MM"). v1.4: an open warehouse consult names the doctor whatever occupancy says. Otherwise the occupancy rules stand: the page greeting, then the occupant's
-    // non-stale display name, then the literal. A stale-cookie stream's dn is a greeting or a placeholder, never the cookie's name; its best_dn is not used.
+    // v1.5: else a consult closed within 90 min names it ("Last consult HH:MM"). v1.4: an open warehouse consult names the doctor whatever occupancy says. Otherwise the occupancy rules stand: the occupant's non-stale full display name (v1.6),
+    // then the page greeting, then the literal. A stale-cookie stream's dn is a greeting or a placeholder, never the cookie's name; its best_dn is not used.
     const wc = openConsultBy.get(def.room_id);
-    const bestName = o && !o.best_stale ? o.best_dn?.trim() : "";
+    // v1.6: the resolver's full display name comes before the page greeting (a first name only); a bare email or uid is not a name
+    const rawBest = o && !o.best_stale ? o.best_dn?.trim() : "";
+    const bestName = rawBest && !rawBest.includes("@") && rawBest !== o?.best_uid?.trim() ? rawBest : "";
     const lc = lastConsultBy.get(def.room_id);
     const doctor: RoomRow["doctor"] = wc?.doctor_name
       ? { display: wc.doctor_name.slice(0, 60), activity: "In consultation" }
       : lc?.doctor_name
         ? { display: lc.doctor_name.slice(0, 60), activity: `Last consult ${istHm(Date.parse(lc.t_close!))}` }
         : present
-        ? { display: o!.page_name?.trim().slice(0, 60) || bestName?.slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" }
+        ? { display: bestName.slice(0, 60) || o!.page_name?.trim().slice(0, 60) || "Doctor", activity: (e?.has_encounter && now - Date.parse(e.ts) <= 180_000 ? "In consultation" : "Signed in") as "In consultation" | "Signed in" }
         : null;
     return {
       room_id: def.room_id,

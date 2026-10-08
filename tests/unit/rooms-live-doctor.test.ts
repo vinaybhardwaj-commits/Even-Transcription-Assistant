@@ -95,9 +95,32 @@ describe("O2: who is in the room", () => {
     const { r } = await run(fakeDb());
     expect(r.doctor).toEqual({ display: "Clinician Signed", activity: "Signed in" });
   });
-  it("occupied + page_name -> the page greeting still comes first", async () => {
-    occ({ occupied: true, page_name: "Greeter", best_dn: "Clinician Signed" });
-    expect((await run(fakeDb())).r.doctor?.display).toBe("Greeter");
+  it("v1.6: sign-in only, non-stale full best_dn + first-name page_name -> the full name, Signed in", async () => {
+    occ({ occupied: true, page_name: "Prashanth", best_dn: "Dr Prashanth Nagaraj", best_uid: "ABC123" });
+    expect((await run(fakeDb())).r.doctor).toEqual({ display: "Dr Prashanth Nagaraj", activity: "Signed in" });
+  });
+  it("v1.6: stale identity + page_name -> page_name (F28 unchanged)", async () => {
+    occ({ occupied: true, page_name: "Prashanth", best_dn: "Cookie Person", best_stale: true });
+    expect((await run(fakeDb())).r.doctor?.display).toBe("Prashanth");
+  });
+  it("v1.6: best_dn is an email or the uid -> page_name", async () => {
+    occ({ occupied: true, page_name: "Prashanth", best_dn: "p.nagaraj@example.org" });
+    expect((await run(fakeDb())).r.doctor?.display).toBe("Prashanth");
+    resetMemoForTests();
+    occ({ occupied: true, page_name: "Prashanth", best_dn: "ABC123", best_uid: "ABC123" });
+    expect((await run(fakeDb())).r.doctor?.display).toBe("Prashanth");
+  });
+  it("v1.5 R2: closed 91 min ago -> no Last consult", async () => {
+    const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Edge", t_open: iso(NOW - 110 * 60_000), t_close: iso(NOW - 91 * 60_000) }] }));
+    expect(r.doctor).toBeNull();
+  });
+  it("v1.5 R2: t_close null -> the open-consult path", async () => {
+    const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Open", t_open: iso(NOW - 10 * 60_000), t_close: null }] }));
+    expect(r.doctor).toEqual({ display: "Clinician Open", activity: "In consultation" });
+  });
+  it("v1.5 R2: t_close in the future -> treated as open", async () => {
+    const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Open", t_open: iso(NOW - 10 * 60_000), t_close: iso(NOW + 5 * 60_000) }] }));
+    expect(r.doctor).toEqual({ display: "Clinician Open", activity: "In consultation" });
   });
   it("occupied, nothing named -> the literal Doctor", async () => {
     occ({ occupied: true });
