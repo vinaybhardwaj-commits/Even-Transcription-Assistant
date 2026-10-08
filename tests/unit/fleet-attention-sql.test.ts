@@ -392,7 +392,7 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
 
   it("R6 open_outbox — open until a chunk lands after the alert AND the levels moved since", async () => {
     const { degradedMessage } = await import("@/lib/room-watchdog");
-    const body = degradedMessage("OPD 6", ["device_missing"], new Date().toISOString()).text.replace(/'/g, "''");
+    const body = degradedMessage("OPD 6", ["device_missing", "silent_while_recording"], new Date().toISOString()).text.replace(/'/g, "''");
     pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
              VALUES ('degraded', ARRAY['r6'], 'OPD 6', 'ok', 'degraded', 's', '${body}', ${ago("3 hours")}),
                     ('recovered', ARRAY['r6'], 'OPD 6', 'degraded', 'ok', 's', 'recovered', ${ago("10 minutes")});`);
@@ -418,6 +418,15 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
              SELECT 'r6', (t AT TIME ZONE 'Asia/Kolkata')::date, t, 0.0001 + (extract(epoch from t)::bigint % 9) * 0.0004, 0.999, true, true
                FROM generate_series(${ago("115 seconds")}, ${ago("0 seconds")}, interval '2 seconds') t;`);
     expect(kindsOf(await attention())).toEqual(["r6:open_outbox"]);
+  });
+
+  it("R6 dwell SCOPE (F3): an alert that was NOT silent (device missing) clears on the old evidence; the dwell is for SILENT alerts only", async () => {
+    const { degradedMessage } = await import("@/lib/room-watchdog");
+    const body = degradedMessage("OPD 6", ["device_missing"], new Date().toISOString()).text.replace(/'/g, "''");
+    pg.exec(`INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body, created_at)
+             VALUES ('degraded', ARRAY['r6'], 'OPD 6', 'ok', 'degraded', 's', '${body}', ${ago("3 hours")});`);
+    pg.exec(session("bs6", "r6", "2 hours", "ended") + chunkRow("c1", "bs6", "1 hour", 3_400_000) + samples("r6", "2 hours", "1 hour", "moving", 60));
+    expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
   it("R6 GATE — outbox alert + watchdog state ok + no session → NO item (Dietary closed for the day); state ok but a session open and no genuine recovery → item; state not ok → item", async () => {

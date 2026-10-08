@@ -55,8 +55,7 @@ import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, 
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
 import { extensionMissingAdvice, kioskHealthItems, summarizeKioskHealth, type KioskRoomRef } from "@/lib/kiosk-health-rules";
-import { REASON_LABEL, isGenuineRecovery, RECOVERY_LIVE_MAX_ZERO_RATIO, type DegradationReason } from "@/lib/room-watchdog";
-import { SILENT_PEAK_MAX } from "@/lib/bench-bus-constants";
+import { REASON_LABEL, isGenuineRecovery, RECOVERY_LIVE_MAX_ZERO_RATIO, RECOVERY_LIVE_MIN_PEAK, SILENT_ALERT_BODY_MARKERS, type DegradationReason } from "@/lib/room-watchdog";
 import {
   fmtIst,
   type AttentionItem,
@@ -173,7 +172,7 @@ export type OutboxFacts = {
   body: string;
   chunk_after_alert: boolean;
   distinct_levels_since_alert: number;
-  /** Arch #20 dwell: level samples in the last RECOVERY_LEVEL_WINDOW_S that are live (zero_ratio < RECOVERY_LIVE_MAX_ZERO_RATIO and peak >= SILENT_PEAK_MAX), and all samples in that window. Absent: no dwell test. */
+  /** Arch #20 dwell: level samples in the last RECOVERY_LEVEL_WINDOW_S that are live (zero_ratio < RECOVERY_LIVE_MAX_ZERO_RATIO and peak >= RECOVERY_LIVE_MIN_PEAK), and all samples in that window. Absent: no dwell test. */
   live_samples_since_alert?: number;
   total_samples_recent?: number;
   /**
@@ -533,7 +532,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     // GATE: the alert is closed when the room's watchdog state is `ok` AND no session is open for it (a room closed for the day, whose alert the
     // watchdog closed quietly). A session that is open keeps the alert standing until audio is proven. No state row = not closed.
     const alertClosedByWatchdog = r.outbox?.state_status === "ok" && !r.open_session;
-    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert, live_samples: r.outbox.live_samples_since_alert, total_samples: r.outbox.total_samples_recent })) {
+    if (r.outbox && !alertClosedByWatchdog && !isGenuineRecovery({ chunk_after_alert: r.outbox.chunk_after_alert, distinct_levels: r.outbox.distinct_levels_since_alert, live_samples: r.outbox.live_samples_since_alert, total_samples: r.outbox.total_samples_recent, silent_alert: r.outbox.kind === "degraded" && SILENT_ALERT_BODY_MARKERS.some((m) => r.outbox!.body.includes(m)) })) {
       const o = r.outbox;
       const reasons = (Object.keys(REASON_LABEL) as DegradationReason[]).filter((k) => o.body.includes(REASON_LABEL[k]));
       const red = o.kind === "offline" || reasons.includes("device_missing") || reasons.includes("tape_stalled");
@@ -865,7 +864,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
                     ORDER BY x.ist_date, x.sampled_at LIMIT 1
                  ) f
              ), 0)::int AS distinct_levels_since_alert,
-             (SELECT count(*) FILTER (WHERE x.zero_ratio IS NOT NULL AND x.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND x.peak >= ${SILENT_PEAK_MAX})::int
+             (SELECT count(*) FILTER (WHERE x.zero_ratio IS NOT NULL AND x.zero_ratio < ${RECOVERY_LIVE_MAX_ZERO_RATIO} AND x.peak >= ${RECOVERY_LIVE_MIN_PEAK})::int
                 FROM bench_level_sample x
                WHERE x.room_id = a.room_id AND x.ist_date >= (a.created_at AT TIME ZONE 'Asia/Kolkata')::date
                  AND x.sampled_at > a.created_at AND x.sampled_at > now() - interval '120 seconds') AS live_samples_since_alert,

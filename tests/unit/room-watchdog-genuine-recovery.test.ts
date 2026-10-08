@@ -192,7 +192,7 @@ describe("planWatchdogRun — cluster lifecycle (Arch #20)", () => {
       room_id: id, room_name: id.toUpperCase(),
       facts: open ? openPoll() : cleanPoll(),
       prior: { status: prior, since: iso("2026-10-05 01:00:00") },
-      recovery_evidence: open ? { chunk_after_alert: true, distinct_levels: 40, live_samples: 60, total_samples: 80 } : ev(false, 0),
+      recovery_evidence: open ? { chunk_after_alert: true, distinct_levels: 40, live_samples: 60, total_samples: 80, silent_alert: true } : ev(false, 0),
     });
 
   it("three rooms clearing in one run: three per-room rows AND one cluster-cleared row naming all of them", () => {
@@ -212,7 +212,7 @@ describe("planWatchdogRun — cluster lifecycle (Arch #20)", () => {
   });
 
   it("a room whose recovery is not proven (session open, no dwell) does not join the cluster and does not clear", () => {
-    const unproven = { ...back("opd5", "degraded", true), recovery_evidence: { chunk_after_alert: true, distinct_levels: 40, live_samples: 0, total_samples: 80 } };
+    const unproven = { ...back("opd5", "degraded", true), recovery_evidence: { chunk_after_alert: true, distinct_levels: 40, live_samples: 0, total_samples: 80, silent_alert: true } };
     const plan = planWatchdogRun([back("opd4", "degraded", false), unproven], NOW);
     expect(plan.writes.map((w) => w.room_id)).toEqual(["opd4"]);
     expect(plan.messages).toHaveLength(1);
