@@ -69,8 +69,8 @@ describe("frozen / stale levels (Arch #19)", () => {
     expect(levelsStale(rows, T + 7 * 1500)).toBeNull();
     expect(levelsStale(rows, T + 7 * 1500 + LEVELS_FRESH_MS + 1)).toBe(true);
   });
-  it("no samples is unknown, not stale", () => {
-    expect(levelsStale([], T)).toBeNull();
+  it("no samples at all in the window is stale (true), not unknown", () => {
+    expect(levelsStale([], T)).toBe(true);
   });
 
   const bucket = (peak: number, zr: number | null = 0.1): BenchLevelSample => ({ t_ms: 0, peak, avg: 0.01, zero_ratio: zr, session_open: true, tape_advancing: true, samples: 10 });
@@ -86,5 +86,35 @@ describe("frozen / stale levels (Arch #19)", () => {
   it("the card greys a stale level: the meter takes a stale prop and the card passes levels_stale", () => {
     expect(readFileSync("components/admin/BenchLevelMeter.tsx", "utf8")).toMatch(/stale\?: boolean/);
     expect(readFileSync("components/admin/BenchRoomsLive.tsx", "utf8")).toContain("stale={l?.levels_stale === true}");
+  });
+});
+
+describe("levels_stale while the kiosk keeps polling but samples stop (refuter C1)", () => {
+  it("the route's reader: a room with NO samples in the window reads stale true; a read that fails leaves the room out (null on the card)", async () => {
+    const { vi } = await import("vitest");
+    vi.resetModules();
+    const NOW = 5_000_000;
+    let rows: Array<Record<string, unknown>> = [];
+    let fail = false;
+    vi.doMock("@/lib/db", () => ({ sql: async () => { if (fail) throw new Error("db down"); return rows; } }));
+    const { readLevelsStale } = await import("@/lib/bench-levels-stale");
+    // r1 has a fresh moving sample; r2 stopped sending (no rows); r3's only sample is 20 s old (in the window, past the 12 s fresh line)
+    rows = [
+      { room_id: "r1", sampled_at: new Date(NOW - 1000), peak: 0.2, avg: 0.1, zero_ratio: 0.1 },
+      { room_id: "r3", sampled_at: new Date(NOW - 20_000), peak: 0.2, avg: 0.1, zero_ratio: 0.1 },
+    ];
+    const m = await readLevelsStale(["r1", "r2", "r3"], NOW);
+    expect(m.get("r1")).toBe(false);
+    expect(m.get("r2")).toBe(true);
+    expect(m.get("r3")).toBe(true);
+    fail = true;
+    const failed = await readLevelsStale(["r1"], NOW);
+    expect(failed.get("r1") ?? null).toBeNull();
+    vi.doUnmock("@/lib/db");
+  });
+  it("the route uses that reader and passes its answer to the card", () => {
+    const r = readFileSync("app/api/admin/bench/listeners/route.ts", "utf8");
+    expect(r).toContain('from "@/lib/bench-levels-stale"');
+    expect(r).toContain("levels_stale: stale.get(l.room_id) ?? null");
   });
 });

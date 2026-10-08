@@ -38,9 +38,10 @@ export const LEVELS_FROZEN_MS = 6_000;
 
 export type LevelStamp = { t_ms: number; peak: number; avg: number | null; zero_ratio: number | null };
 
-/** PURE. `samples` in any order. Returns null when there is nothing to judge (unknown, not stale). */
+/** PURE. `samples` in any order. No samples is stale; null only when the newest sample has no zero_ratio (cannot judge). */
 export function levelsStale(samples: readonly LevelStamp[], nowMs: number): boolean | null {
-  if (samples.length === 0) return null;
+  // Nothing newer than LEVELS_FRESH_MS exists: stale. (A caller that could not READ samples must not call this; it has nothing to judge.)
+  if (samples.length === 0) return true;
   const sorted = [...samples].sort((a, b) => a.t_ms - b.t_ms);
   const newest = sorted[sorted.length - 1]!;
   if (nowMs - newest.t_ms > LEVELS_FRESH_MS) return true;
