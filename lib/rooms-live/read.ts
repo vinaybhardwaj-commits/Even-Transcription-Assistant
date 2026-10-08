@@ -20,6 +20,8 @@ export type HeartbeatRow = { machine: string; received_at: string };
 export type ExtRow = { machine: string; ts: string; has_encounter: boolean };
 export type WarehouseConsultRow = { machine: string; doctor_name: string | null; t_open: string; t_close: string | null };
 export type StewardRow = { room_id: string; action: string; mode: string; ts: string };
+/** v1.7: a decision row as the Steward lines need it (no params / why / inputs text: only the rule, action, mode, result and the session_died state word) */
+export type StewardLogRow = { room_id: string; ts: string; rule: string; action: string; mode: string; result: string | null; pstate: string | null };
 
 const num = (x: unknown): number | null => {
   if (x === null || x === undefined || x === "") return null;
@@ -88,6 +90,56 @@ export async function readSteward(db: Db, ids: readonly string[], asOf: string):
      LIMIT 200
   `) as Array<Record<string, unknown>>;
   return rows.map((r) => ({ room_id: String(r.room_id), action: String(r.action), mode: String(r.mode), ts: iso(r.ts) }));
+}
+
+/** v1.7 S1: the four steward_config rows the status strip needs */
+export async function readStewardConfig(db: Db, keys: readonly string[]): Promise<Array<{ key: string; value: unknown }>> {
+  const rows = (await db`
+    SELECT key, value FROM steward_config WHERE key = ANY(${keys}::text[]) LIMIT 10
+  `) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({ key: String(r.key), value: r.value }));
+}
+
+const logRow = (r: Record<string, unknown>): StewardLogRow => ({
+  room_id: String(r.room_id),
+  ts: iso(r.ts),
+  rule: String(r.rule),
+  action: String(r.action),
+  mode: String(r.mode),
+  result: typeof r.result === "string" ? r.result : null,
+  pstate: typeof r.pstate === "string" ? r.pstate : null,
+});
+
+/** v1.7 S4: each room's newest 20 non-ok, non-none decisions of the last 24 h (the Details view) */
+export async function readStewardLog(db: Db, ids: readonly string[], asOf: string): Promise<StewardLogRow[]> {
+  const rows = (await db`
+    SELECT x.room_id, x.ts, x.rule, x.action, x.mode, x.result, x.pstate
+      FROM (
+        SELECT d.room_id, d.ts, d.id, d.rule, d.action, d.mode, d.result, d.params->>'state' AS pstate,
+               row_number() OVER (PARTITION BY d.room_id ORDER BY d.ts DESC, d.id DESC) AS rn
+          FROM steward_decisions d
+         WHERE d.room_id = ANY(${ids}::text[]) AND d.ts > ${asOf}::timestamptz - interval '24 hours' AND d.ts <= ${asOf}::timestamptz
+           AND d.rule <> 'ok' AND d.action <> 'none'
+      ) x
+     WHERE x.rn <= 20
+     ORDER BY x.ts DESC, x.id DESC
+     LIMIT 400
+  `) as Array<Record<string, unknown>>;
+  return rows.map(logRow);
+}
+
+/** v1.7 S2 / S3: the rows that did (or would have done) something since IST midnight (at most 24 h), plus the device_missing_hold rows of the last hour */
+export async function readStewardActions(db: Db, ids: readonly string[], asOf: string, sinceIso: string): Promise<StewardLogRow[]> {
+  const rows = (await db`
+    SELECT d.room_id, d.ts, d.rule, d.action, d.mode, d.result, d.params->>'state' AS pstate
+      FROM steward_decisions d
+     WHERE d.room_id = ANY(${ids}::text[]) AND d.ts > ${asOf}::timestamptz - interval '24 hours' AND d.ts <= ${asOf}::timestamptz
+       AND ((d.action NOT IN ('none', 'log_only') AND (d.ts >= ${sinceIso}::timestamptz OR d.ts > ${asOf}::timestamptz - interval '60 minutes'))
+         OR (d.rule = 'device_missing_hold' AND d.ts > ${asOf}::timestamptz - interval '60 minutes'))
+     ORDER BY d.ts DESC, d.id DESC
+     LIMIT 500
+  `) as Array<Record<string, unknown>>;
+  return rows.map(logRow);
 }
 
 /** the newest kiosk-health heartbeat per machine within 10 min */
@@ -160,4 +212,28 @@ export async function readDay(db: Db, roomId: string, istDay: string, asOfMs: nu
     if (e > s) segments.push({ state: String(r.state), start: new Date(s).toISOString(), end: new Date(e).toISOString() });
   }
   return { as_of: new Date(high).toISOString(), segments };
+}
+
+export const HISTORY_PAGE = 200;
+export const HISTORY_DAYS = 30;
+export const HISTORY_MAX_OFFSET = 10_000;
+
+/**
+ * v1.7 A1 S7 / S8: one IST day of decisions for the Steward log page, newest first. `ids` is the one room, or every roster room.
+ * Clamped in SQL to the last 30 days (720 h) and to `asOf`; LIMIT 200 + 1 (the extra row says "there is a next page"); OFFSET paging.
+ * actionsOnly = "Things it did or wanted to do": hides every none / log_only row (ok rows included). No params / why / inputs column is read.
+ */
+export async function readStewardHistory(db: Db, ids: readonly string[], asOf: string, fromIso: string, toIso: string, actionsOnly: boolean, offset: number): Promise<StewardLogRow[]> {
+  const off = Number.isInteger(offset) ? Math.min(HISTORY_MAX_OFFSET, Math.max(0, offset)) : 0;
+  const rows = (await db`
+    SELECT d.room_id, d.ts, d.rule, d.action, d.mode, d.result, d.params->>'state' AS pstate
+      FROM steward_decisions d
+     WHERE d.room_id = ANY(${ids}::text[])
+       AND d.ts >= ${fromIso}::timestamptz AND d.ts < ${toIso}::timestamptz
+       AND d.ts > ${asOf}::timestamptz - interval '720 hours' AND d.ts <= ${asOf}::timestamptz
+       AND (NOT ${actionsOnly}::boolean OR d.action NOT IN ('none', 'log_only'))
+     ORDER BY d.ts DESC, d.id DESC
+     LIMIT 201 OFFSET ${off}
+  `) as Array<Record<string, unknown>>;
+  return rows.map(logRow);
 }

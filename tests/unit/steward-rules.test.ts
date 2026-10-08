@@ -18,6 +18,8 @@ const row = (A: number, secAgo: number, action: string, over: Partial<RecentActi
 });
 const recent = (rows: RecentAction[], fleet: RecentContext["fleet"] = { failing: {}, hold: {} }): RecentContext => ({ room: rows, fleet });
 const T = ist("10:00");
+/** S5: session_died fires on the 2nd consecutive tick: the 1st tick left this "confirming" row 60 s ago (recent() adds more rows after it) */
+const confirming = (extra: RecentAction[] = []): RecentContext => recent([row(T, 60, "log_only", { rule: "session_died", params: { state: "confirming" } }), ...extra]);
 const first = (s: RoomSense, A: number, r: RecentContext = EMPTY_RECENT, cfg: Config = DEFAULT_CONFIG) => decideRoom(s, cfg, A, r)[0]!;
 
 // ---------------------------------------------------------------------------
@@ -423,7 +425,7 @@ describe("session died vs upload lag", () => {
     healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "recording", session_open: true, received_at: ago(T, 300) } }, ...over });
 
   it("no chunk for 12 min and recorder.status stale 5 min -> scribe_restart", () => {
-    expect(first(died(), T)).toMatchObject({ rule: "session_died", action: "scribe_restart", severity: "error" });
+    expect(first(died(), T, confirming())).toMatchObject({ rule: "session_died", action: "scribe_restart", severity: "error" });
   });
 
   it("no chunk for 12 min but the recorder is fresh and says a session is open = upload lag, not a death", () => {
@@ -433,7 +435,7 @@ describe("session died vs upload lag", () => {
 
   it("recorder says session_open=false with a fresh status and no chunk for 12 min -> scribe_restart", () => {
     const s = healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "idle", session_open: false, received_at: ago(T, 20) } } });
-    expect(first(s, T).action).toBe("scribe_restart");
+    expect(first(s, T, confirming()).action).toBe("scribe_restart");
   });
 
   it("a session that started 2 min ago has no chunk yet and is not dead; a paused session is not dead", () => {
@@ -444,39 +446,39 @@ describe("session died vs upload lag", () => {
   });
 
   it("ladder: restart sent 2 min ago -> wait; 7 min ago and the recorder says no session -> ticket restart_recorder_app", () => {
-    const wait = first(died(), T, recent([row(T, 120, "scribe_restart")]));
+    const wait = first(died(), T, confirming([row(T, 120, "scribe_restart")]));
     expect(wait).toMatchObject({ rule: "session_died", action: "log_only" });
     expect(wait.why_not).toContain("restart");
     const closed = healthy(T, { recording: { last_chunk_at: ago(T, 900), recorder_status: { state: "idle", session_open: false, received_at: ago(T, 20) } } });
-    expect(first(closed, T, recent([row(T, 420, "scribe_restart")]))).toMatchObject({ rule: "session_died", action: "ticket:restart_recorder_app", params: {} });
+    expect(first(closed, T, confirming([row(T, 420, "scribe_restart")]))).toMatchObject({ rule: "session_died", action: "ticket:restart_recorder_app", params: {} });
   });
 
   it("ladder: no ticket while a session is not confirmed closed; then the message; and after the app restart the message", () => {
-    const m = first(died(), T, recent([row(T, 420, "scribe_restart")]));
+    const m = first(died(), T, confirming([row(T, 420, "scribe_restart")]));
     expect(m).toMatchObject({ rule: "session_died", action: "message" });
     expect(m.params.needs_hands).toBe(true);
     expect(m.why_not).toContain("not confirmed");
     const closed = healthy(T, { recording: { last_chunk_at: ago(T, 900), recorder_status: { state: "idle", session_open: false, received_at: ago(T, 20) } } });
-    const m2 = first(closed, T, recent([row(T, 800, "scribe_restart"), row(T, 420, "ticket:restart_recorder_app")]));
+    const m2 = first(closed, T, confirming([row(T, 800, "scribe_restart"), row(T, 420, "ticket:restart_recorder_app")]));
     expect(m2).toMatchObject({ action: "message" });
     expect(m2.why_not).toContain("already tried");
   });
 
   it("F5: with kiosk-health down (heartbeat 8 min old) and no chunk for 12 min the session is still dead: scribe_restart with inputs.recorder_stale = 'unknown' (not forced false)", () => {
     const s = died({ reachable: { kh_heartbeat_at: ago(T, 480) } });
-    const d = first(s, T);
+    const d = first(s, T, confirming());
     expect(d).toMatchObject({ rule: "session_died", action: "scribe_restart", failing_class: "session_died" });
     expect(d.inputs.recorder_stale).toBe("unknown");
   });
 
   it("F5: a room with no kiosk-health at all (not enrolled / no snapshot) and a session open with no chunk for 12 min -> session_died; with a fresh chunk it is fine", () => {
     const noKh = (chunk: number) => healthy(T, { recording: { last_chunk_at: ago(T, chunk), recorder_status: null }, reachable: { kh_heartbeat_at: null, kh_enrolled: false } });
-    const d = first(noKh(720), T);
+    const d = first(noKh(720), T, confirming());
     expect(d).toMatchObject({ rule: "session_died", action: "scribe_restart" });
     expect(d.inputs.recorder_stale).toBe("unknown");
     expect(first(noKh(60), T).rule).toBe("ok");
     // a known-fresh recorder keeps recorder_stale false
-    expect(first(died(), T).inputs.recorder_stale).toBe(true);
+    expect(first(died(), T, confirming()).inputs.recorder_stale).toBe(true);
   });
 
   it("with the kiosk-health daemon down (heartbeat 8 min old) but the tape fresh: restart_kiosk_health, no session death", () => {
@@ -891,7 +893,7 @@ describe("F1: only a POSITIVE failure signal puts a room in a fleet class", () =
 
   it("session_died and a live mic fault are positive signals; a healthy and a consent-paused room are not", () => {
     const died = healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "recording", session_open: true, received_at: ago(T, 300) } } });
-    expect(failingClass(decideRoom(died, DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe("session_died");
+    expect(failingClass(decideRoom(died, DEFAULT_CONFIG, T, confirming()))).toBe("session_died");
     const mic = healthy(T, { consult_open: true, consult_started_at: ago(T, 300), audio: { default_input_present: false } });
     expect(failingClass(decideRoom(mic, DEFAULT_CONFIG, T, EMPTY_RECENT))).toBe("mic_fault");
     expect(failingClass(decideRoom(healthy(T), DEFAULT_CONFIG, T, EMPTY_RECENT))).toBeNull();
@@ -900,7 +902,7 @@ describe("F1: only a POSITIVE failure signal puts a room in a fleet class", () =
 
   it("a cap-reached or action_failing replacement keeps the class of the decision it replaced; the class is also written to inputs.failing_class", () => {
     const died = healthy(T, { recording: { last_chunk_at: ago(T, 720), recorder_status: { state: "recording", session_open: true, received_at: ago(T, 300) } } });
-    const four = recent([row(T, 100, "ticket:wake", { outcome: "ok" }), row(T, 700, "ticket:wake", { outcome: "ok" }), row(T, 1400, "ticket:wake", { outcome: "ok" }), row(T, 2100, "ticket:wake", { outcome: "ok" })]);
+    const four = confirming([row(T, 100, "ticket:wake", { outcome: "ok" }), row(T, 700, "ticket:wake", { outcome: "ok" }), row(T, 1400, "ticket:wake", { outcome: "ok" }), row(T, 2100, "ticket:wake", { outcome: "ok" })]);
     const d = decideRoom(died, DEFAULT_CONFIG, T, four)[0]!;
     expect(d.rule).toBe("cap_reached");
     expect(failingClass([d])).toBe("session_died");
