@@ -6,7 +6,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { roomState, sessionDiedAtStart, START_FAILED_MAX_MS, START_FAILED_NOTE } from "../../lib/bench-bus-constants";
-import { buildRoomLive } from "../../lib/admin/rooms-live";
+import { buildRoomLive, failedAckBelongsToSession } from "../../lib/admin/rooms-live";
 import { startBlockedReason } from "../../components/admin/BenchRoomsLive";
 
 const NOW = Date.parse("2026-10-05T04:00:00.000Z");
@@ -33,6 +33,12 @@ describe("sessionDiedAtStart — the discriminator", () => {
   it("death evidence is either the compensation note or a start_day acked failed around the session", () => {
     expect(sessionDiedAtStart(s({ notes: null, start_failed_ack: true }))).toBe(true);
     expect(sessionDiedAtStart(s({ notes: `x\n${START_FAILED_NOTE}` }))).toBe(true);
+  });
+  it("C1: a REAPED zero-chunk session reads as a dead start (its ended_at = started_at, so it is ended, pieceless and short)", () => {
+    expect(sessionDiedAtStart(s({ notes: "auto-ended: no chunks >30m (reaper)", ended_at: iso(NOW - 15_000) }))).toBe(true);
+    expect(sessionDiedAtStart(s({ notes: "auto-ended: day rollover (reaper)", ended_at: iso(NOW - 15_000) }))).toBe(true);
+    // ...but a reaped session that DID record is a real day
+    expect(sessionDiedAtStart(s({ notes: "auto-ended: no chunks >30m (reaper)", primary_chunks: 3 }))).toBe(false);
   });
   it("any piece of either stream means it recorded", () => {
     expect(sessionDiedAtStart(s({ primary_chunks: 1 }))).toBe(false);
@@ -105,6 +111,17 @@ describe("AC4 — Bench never shows healthy EOD for it", () => {
   it("the newest session decides: a good morning followed by a dead restart is a failed start", () => {
     const morning = sess({ id: "bs_am", started_at: iso(NOW - 8 * 3_600_000), ended_at: iso(NOW - 3_600_000), primary_chunks: 90 });
     expect(live([morning, sess({})]).last_session_start_failed).toBe(true);
+  });
+});
+
+describe("failed-ack window (pins the +180 s edge: a +60 min mutant must fail)", () => {
+  const sess = { started_at: iso(NOW - 15_000), ended_at: iso(NOW) };
+  it("accepts an ack from 60 s before the start to 180 s after the end, nothing outside", () => {
+    expect(failedAckBelongsToSession(NOW + 180_000, sess, NOW)).toBe(true);
+    expect(failedAckBelongsToSession(NOW + 180_001, sess, NOW)).toBe(false);
+    expect(failedAckBelongsToSession(NOW + 60 * 60_000, sess, NOW)).toBe(false);
+    expect(failedAckBelongsToSession(NOW - 15_000 - 60_000, sess, NOW)).toBe(true);
+    expect(failedAckBelongsToSession(NOW - 15_000 - 60_001, sess, NOW)).toBe(false);
   });
 });
 

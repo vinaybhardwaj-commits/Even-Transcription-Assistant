@@ -138,5 +138,12 @@ describe("scribe_diff_room — recording follows the SAME active-session check s
     expect(((await rowOf()).room_state as Row).state).toBe("finished");
     todaySessions = [sess({ start_failed_ack: false })];   // an operator stop inside the window: no death evidence
     expect(((await rowOf()).room_state as Row).state).toBe("finished");
+    // the door must pass BOTH evidence fields through: a failed ack alone, and the compensation note alone, each make it start_failed
+    todaySessions = [sess({ start_failed_ack: true, notes: null })];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
+    todaySessions = [sess({ start_failed_ack: false, notes: "start failed: capture did not start" })];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
+    todaySessions = [sess({ start_failed_ack: false, notes: "auto-ended: no chunks >30m (reaper)" })];
+    expect(((await rowOf()).room_state as Row).state).toBe("start_failed");
   });
 });

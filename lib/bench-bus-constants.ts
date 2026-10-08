@@ -262,7 +262,14 @@ export function sessionDiedAtStart(s: {
   if (s.status !== "ended") return false;
   // F2 (refute 08 Oct): only a start that DIED ON ITS OWN. An operator who presses start then stop inside the window
   // also leaves an ended, zero-piece, short session — but writes neither the compensation note nor a failed ack.
-  const evidence = (typeof s.notes === "string" && s.notes.includes(START_FAILED_NOTE)) || s.start_failed_ack === true;
+  // The reaper's notes count too (refute re-check C1): a zero-chunk session the REAPER ended has ended_at = started_at, so it is ended, pieceless and
+  // "short" — and a session that never produced a piece did not record, whoever ended it. Literals, because this module stays import-free.
+  const notes = typeof s.notes === "string" ? s.notes : "";
+  const evidence =
+    notes.includes(START_FAILED_NOTE) ||
+    notes.includes("auto-ended: no chunks >30m (reaper)") ||
+    notes.includes("auto-ended: day rollover (reaper)") ||
+    s.start_failed_ack === true;
   if (!evidence) return false;
   if ((Number(s.primary_chunks) || 0) > 0 || (Number(s.backup_chunks) || 0) > 0) return false;
   const a = s.started_at ? new Date(s.started_at).getTime() : NaN;

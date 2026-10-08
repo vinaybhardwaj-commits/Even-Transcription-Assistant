@@ -342,6 +342,16 @@ export const SQL_LAST_WINDOW_MARKER =
 // The aggregation
 // ---------------------------------------------------------------------------
 
+/** Arch #15: how far a failed start ack may sit outside its session's life and still be that session's death evidence. */
+export const START_ACK_BEFORE_MS = 60_000;
+export const START_ACK_AFTER_MS = 180_000;
+/** PURE — is this failed start_day ack (ms) within [started - 60 s, ended + 180 s] of the session? An open session counts to `nowMs`. */
+export function failedAckBelongsToSession(ackMs: number, s: { started_at: string; ended_at: string | null }, nowMs: number): boolean {
+  const a0 = new Date(s.started_at).getTime() - START_ACK_BEFORE_MS;
+  const a1 = (s.ended_at ? new Date(s.ended_at).getTime() : nowMs) + START_ACK_AFTER_MS;
+  return Number.isFinite(a0) && Number.isFinite(a1) && ackMs >= a0 && ackMs <= a1;
+}
+
 type RoomRow = { id: string; slug: string; name: string; transcript_enabled: boolean; visits_enabled: boolean };
 
 /**
@@ -616,9 +626,7 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
            AND acked_at >= ${fromIso}::timestamptz - interval '1 minute'
       `) as Array<{ room_id: string; acked_at: string | Date }>;
       for (const s of startCandidates) {
-        const a0 = new Date(s.started_at).getTime() - 60_000;
-        const a1 = (s.ended_at ? new Date(s.ended_at).getTime() : nowMs) + 180_000;
-        s.start_failed_ack = acks.some((a) => a.room_id === s.room_id && new Date(a.acked_at).getTime() >= a0 && new Date(a.acked_at).getTime() <= a1);
+        s.start_failed_ack = acks.some((a) => a.room_id === s.room_id && failedAckBelongsToSession(new Date(a.acked_at).getTime(), s, nowMs));
       }
     } catch (e) {
       topDegraded.push(`start_acks_unavailable:${String((e as Error)?.message ?? e).slice(0, 60)}`);
