@@ -1,0 +1,7 @@
+{
+ "note": "Template. Copy to hosts.json (git-ignored) and fill in your own machines. name = the machine id the extension reports; target = user@address for ssh.",
+ "hosts": [
+  {"name": "EXAMPLE-HOST-1", "target": "user1@192.0.2.11", "room": "Room A"},
+  {"name": "EXAMPLE-HOST-2", "target": "user2@192.0.2.12", "room": "Room B"}
+ ]
+}

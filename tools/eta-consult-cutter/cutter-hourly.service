@@ -1,0 +1,12 @@
+[Unit]
+Description=Consult cutter: cut every eligible closed consult window (span rule, diarize, doctor/others split, store, private R2 mirror)
+
+[Service]
+# Environment: set CONSULT_R2_WRITE_FILE (else every clip stays pending_no_credential) and CONSULT_DIARIZE_PKG_DIR / CONSULT_DIARIZE_MODULE (see README)
+Type=oneshot
+# runs the pinned deploy worktree (moved only by deploy.sh from a clean commit), never the live working tree
+WorkingDirectory=%h/oc/consult/cutter-deploy
+# venv outside both trees: psycopg + boto3 (--system-site-packages); the GPU worker uses the eta-diarize venv under flock ~/gpu.lock and never starts 22:30-06:00
+ExecStart=%h/oc/consult/cutter-venv/bin/python -m cutter.run --once
+# the DB credential is read from ~/.config/eta-audio/db.url (read-only use); nothing is passed on the command line
+TimeoutStartSec=3h

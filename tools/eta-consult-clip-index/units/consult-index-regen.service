@@ -1,0 +1,8 @@
+[Unit]
+Description=Rebuild the consult-audio index page (reads clips/index.jsonl + patients.json; atomic write)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/oc/consult/clip-index/gen_index.py
+Nice=10
+TimeoutStartSec=5min

@@ -1,0 +1,21 @@
+# NOT INSTALLED. Install only after a refuter PASS, with the Mini side ready (see config.example.json / README in REPORT.md):
+#   cp this file ~/.config/systemd/user/ ; write ~/.config/consult-alert-relay/config.json ; systemctl --user daemon-reload
+#   systemctl --user enable --now consult-alert-relay.service
+# It starts in DRY-RUN (no --live). Going live is one edit: add --live to ExecStart, then daemon-reload + restart.
+# Without the config file the unit is skipped (condition); a config that does not parse exits 78 once and is not restarted.
+[Unit]
+Description=Consult alert relay (spool -> ETA bus)
+After=network-online.target
+ConditionPathExists=%h/.config/consult-alert-relay/config.json
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/oc/consult/alert-relay/relay.py --config %h/.config/consult-alert-relay/config.json
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=78
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

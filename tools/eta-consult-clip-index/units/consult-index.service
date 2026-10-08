@@ -1,0 +1,18 @@
+[Unit]
+Description=Private consult-audio index server (private bind address from CONSULT_INDEX_BIND, port 8099 only; serves index.html + .flac with Range)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# set to this host's private (e.g. VPN) address; the server refuses wildcard addresses
+Environment=CONSULT_INDEX_BIND=192.0.2.10
+# build the page once so the first start never serves a 404 (gen_index.py is atomic and idempotent)
+ExecStartPre=/usr/bin/python3 %h/oc/consult/clip-index/gen_index.py
+ExecStart=/usr/bin/python3 %h/oc/consult/clip-index/serve.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
