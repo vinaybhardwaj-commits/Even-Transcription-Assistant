@@ -117,6 +117,8 @@ type ListenerRowView = {
   mic?: Levels;
   spare?: Levels;
   levels_at?: string | null;
+  /** Arch #19: derived server-side at read time. null = could not be judged, which does not grey the meter. */
+  levels_stale?: boolean | null;
   /** §2.4 — the client reported an EXPLICITLY chosen second device. The card draws no spare lane,
    *  no spare vital and no spare line unless this is true — never from a backup piece arriving. */
   spare_device?: boolean;
@@ -1223,6 +1225,7 @@ export function BenchRoomsLive() {
                     levels={l?.mic}
                     live={Boolean(l?.listening) && (st.state === "recording" || st.state === "ready")}
                     digitalSilence={isDigitalSilence(l?.mic)}
+                    stale={l?.levels_stale === true}
                   />
                   {r.spare_exists && l?.spare ? <LevelBar label="Spare mic" levels={l.spare} /> : null}
                 </div>
