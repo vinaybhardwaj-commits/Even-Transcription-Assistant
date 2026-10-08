@@ -1,0 +1,91 @@
+{
+  "id": "talk_time",
+  "version": "0.1.0",
+  "title": "Talk time, interruptions and silence of a window or a consult",
+  "unit": "window",
+  "units": [
+    "window",
+    "consult"
+  ],
+  "inputs": [
+    "turns",
+    "consult_span"
+  ],
+  "engine": "code",
+  "definition": {
+    "doctor": "a turn whose room_turn_speaker row has role = clinician (an enrolled voiceprint matched); every other attributed turn is 'other'; a turn with no row is 'unattributed'",
+    "talk_ms": "per class, the length of the union of that class's turn intervals (a turn's start_ms/end_ms are the cue's own)",
+    "doctor_share": "doctor_talk_ms / (doctor_talk_ms + other_talk_ms); null when there is no doctor or no other talk",
+    "turns": "count of attributed turns per class",
+    "interruptions": "count of turns that start inside a turn of a different speaker and end after it (a turn nested inside another is overlap, not an interruption)",
+    "overlap_ms": "length of time covered by two or more speakers at once",
+    "longest_monologue_ms": "the longest run of one speaker's turns whose gaps are under 2 000 ms",
+    "silence_share": "1 - union of all turn intervals / window length (consult: the consult span)",
+    "skipped": "no_diarization when the window has no room_turn_speaker rows; no_turns when it has no stt_turn cues",
+    "consult_unit": "the turns of every bench window overlapping the consult span (eta_encounter_windows t_open..t_close), clipped to the span"
+  },
+  "output": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "span_ms": {
+        "type": "number"
+      },
+      "doctor_talk_ms": {
+        "type": "number"
+      },
+      "other_talk_ms": {
+        "type": "number"
+      },
+      "unattributed_talk_ms": {
+        "type": "number"
+      },
+      "doctor_share": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "doctor_turns": {
+        "type": "integer"
+      },
+      "other_turns": {
+        "type": "integer"
+      },
+      "unattributed_turns": {
+        "type": "integer"
+      },
+      "interruptions": {
+        "type": "integer"
+      },
+      "overlap_ms": {
+        "type": "number"
+      },
+      "longest_monologue_ms": {
+        "type": "number"
+      },
+      "silence_share": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "speakers": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "span_ms",
+      "doctor_talk_ms",
+      "other_talk_ms",
+      "interruptions",
+      "silence_share"
+    ]
+  },
+  "bench": {
+    "location": "rubrics/talk_time/bench.json",
+    "metric": "field_accuracy",
+    "threshold": 0.9
+  },
+  "status": "draft"
+}

@@ -34,6 +34,8 @@ vi.mock("@/lib/sarvam-lab", async (orig) => ({
   touchLane: async () => undefined,
 }));
 
+// G42: these tests run a real postgres through psql, 3-6 s each when the machine is idle and far more under load; the 5 s default timed out and cascaded
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-sarvam-runner");
 const row = async (id: string) => (await pg.sql`SELECT id, status, step, progress, failures, error, lease_owner, lease_until FROM scribe_job WHERE id = ${id}`)[0] as Record<string, any>;
@@ -170,5 +172,39 @@ describe.runIf(HAVE)("findOpenJob in real SQL (G28, G23)", () => {
     expect(await findOpenJob("sarvam_translate", [["encounter_id", "enc_9"]])).toBeNull(); // another kind
     await pg.sql`UPDATE scribe_job SET status = 'done' WHERE id = 'job_g999'`;
     expect(await findOpenJob("sarvam_transcribe", pairs({ num_speakers: "2" }))).toBeNull(); // finished = not open
+  });
+});
+
+describe.runIf(HAVE)("S8A4 — the cap counts BOTH Sarvam passes (real SQL)", () => {
+  const args = (english: boolean) => JSON.stringify({ source: "encounter", encounter_id: "enc_x", mode: "transcribe", english });
+  const ins = async (id: string, status: string, step: string, progress: Record<string, unknown>, english = true) => {
+    await pg.sql`INSERT INTO scribe_job (id, kind, args, status, step, progress) VALUES (${id}, 'sarvam_transcribe', ${args(english)}::jsonb, ${status}, ${step}, ${JSON.stringify(progress)}::jsonb)`;
+  };
+  const reserved = async () => (await import("@/lib/jobs/kinds/sarvam-common")).reservedMinutesEarlier({ id: "job_zzzz_probe", created_at: new Date(Date.now() + 120_000).toISOString() });
+  const clear = () => pg.exec(`DELETE FROM scribe_job WHERE id LIKE 'job_s84%'; DELETE FROM audit_log WHERE metadata_json->>'job_id' LIKE 'job_s84%';`);
+
+  it("an English-track job still in prepare..start reserves 2 x its minutes; an English-pass job in en_init..en_start reserves the second pass only; english:false reserves 1 x", async () => {
+    await clear();
+    const base = await reserved(); // jobs left by the earlier suites in this database
+    await ins("job_s84a", "running", "upload", { duration_ms: 600_000 }); // english:true, native not started: 2 x 10
+    expect((await reserved()) - base).toBeCloseTo(20, 5);
+    await clear();
+    await ins("job_s84b", "running", "en_upload", { duration_ms: 600_000, sarvam_job_id: "sj", sarvam_started_ms: 1 }); // native started (unaudited: 10) + the second pass to come (10)
+    expect((await reserved()) - base).toBeCloseTo(20, 5);
+    await clear();
+    await ins("job_s84c", "running", "upload", { duration_ms: 600_000 }, false);
+    expect((await reserved()) - base).toBeCloseTo(10, 5);
+    await clear();
+  });
+
+  it("a started English pass without its <id>:en paid-call row holds its minutes in any status; once the row exists they are audited, not reserved", async () => {
+    await clear();
+    const base = await reserved();
+    await ins("job_s84d", "done", "translate", { duration_ms: 1_200_000, sarvam_job_id: "sj", sarvam_started_ms: 1, en_sarvam_job_id: "sje", en_started_ms: 2 });
+    pg.exec(`INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json) VALUES ('system', 'x', 'stt.paid_call', 'stt_engine', 'sarvam-gw', '{"job_id":"job_s84d"}'::jsonb);`);
+    expect((await reserved()) - base).toBeCloseTo(20, 5); // native audited; the English pass (20 min) is not
+    pg.exec(`INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json) VALUES ('system', 'x', 'stt.paid_call', 'stt_engine', 'sarvam-gw', '{"job_id":"job_s84d:en"}'::jsonb);`);
+    expect((await reserved()) - base).toBeCloseTo(0, 5);
+    await clear();
   });
 });

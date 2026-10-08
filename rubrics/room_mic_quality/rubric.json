@@ -1,0 +1,97 @@
+{
+  "id": "room_mic_quality",
+  "version": "0.1.0",
+  "title": "Room microphone quality, per room-hour",
+  "unit": "room_hour",
+  "inputs": [
+    "audio_state"
+  ],
+  "engine": "code",
+  "definition": {
+    "unit_key": "<room_id>:<ist_date>:<HH> (IST hour 00-23)",
+    "expected_min": "60 for every hour that has at least one room_audio_state interval; an hour with none is skipped:no_audio_state",
+    "state_to_minutes": "each room_audio_state interval is clipped to the hour; minutes = overlap / 60 000 ms",
+    "recorded_min": "audio_present + audio_gated + room_quiet + speech + consult",
+    "muted_min": "muted",
+    "off_min": "recorder_off + device_missing",
+    "dead_min": "device_dead + zero_all_day",
+    "withheld_min": "withheld",
+    "speech_min": "speech + consult",
+    "recorded_ratio": "recorded_min / expected_min",
+    "zero_ratio": "mean of bench_level_sample.zero_ratio over the samples of that room in that hour; null without samples",
+    "peak_headroom": "1 - max(bench_level_sample.peak) over the hour (peak is 0..1 of full scale); null without samples",
+    "flags": {
+      "low_recording": "recorded_ratio < 0.8",
+      "muted": "muted_min >= 5",
+      "dead": "dead_min >= 5",
+      "off": "off_min >= 5",
+      "no_speech": "recorded_min >= 30 and speech_min = 0",
+      "clipping": "peak_headroom < 0.05",
+      "zero_heavy": "zero_ratio >= 0.98"
+    },
+    "blind_room_day": "a (room, IST date) in the held-out evaluation set is refused before any fetch (reason blind_room_day) and nothing is written for it"
+  },
+  "output": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "expected_min": {
+        "type": "number"
+      },
+      "recorded_min": {
+        "type": "number"
+      },
+      "recorded_ratio": {
+        "type": "number"
+      },
+      "muted_min": {
+        "type": "number"
+      },
+      "off_min": {
+        "type": "number"
+      },
+      "dead_min": {
+        "type": "number"
+      },
+      "withheld_min": {
+        "type": "number"
+      },
+      "speech_min": {
+        "type": "number"
+      },
+      "zero_ratio": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "peak_headroom": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "samples": {
+        "type": "integer"
+      },
+      "flags": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "expected_min",
+      "recorded_min",
+      "recorded_ratio",
+      "flags"
+    ]
+  },
+  "bench": {
+    "location": "rubrics/room_mic_quality/bench.json",
+    "metric": "field_accuracy",
+    "threshold": 0.9
+  },
+  "status": "draft"
+}

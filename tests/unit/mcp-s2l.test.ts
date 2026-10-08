@@ -67,13 +67,13 @@ beforeEach(() => {
 });
 
 describe("registration", () => {
-  it("the tools are listed (52 in all), write / read scope, and scribe_health gained aspect=routes", async () => {
+  it("the tools are listed (53 in all), write / read scope, and scribe_health gained aspect=routes", async () => {
     expect(S.CALLABLE_TOOLS.get("scribe_steward_command")!.scope).toBe("write");
     expect(S.CALLABLE_TOOLS.get("scribe_lanes")!.scope).toBe("read");
     const req = new NextRequest("https://x/api/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     const body = (await (await handleMcpRpc(req, { token_id: "t", scopes: new Set(["read"]) } as never)).json()) as { result: { tools: Array<{ name: string; description: string; annotations: Row; inputSchema: Row }> } };
     const t = body.result.tools;
-    expect(t.length).toBe(52);
+    expect(t.length).toBe(53);
     const sc = t.find((x) => x.name === "scribe_steward_command")!;
     expect(sc.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
     expect(sc.description.length).toBeLessThanOrEqual(200);
@@ -209,6 +209,20 @@ describe("scribe_steward_command — the kinds", () => {
     expect(cfg.shadow).toEqual({ global: true, actions: {} });
     expect(writes).toEqual([]);
   });
+  it("G51 — {global:false} without a named action is ALWAYS explicit_actions_required, whatever the current global: true (the transition) and false (no transition) alike; nothing is written", async () => {
+    for (const cur of [{ global: true, actions: {} }, { global: false, actions: { message: false, "ticket:wake": true } }]) {
+      for (const v of [{ global: false }, { global: false, actions: {} }]) {
+        cfg.shadow = structuredClone(cur);
+        writes.length = 0;
+        expect(await cmd({ kind: "set_shadow", reason: "r", value: v }), `${JSON.stringify(cur)} <- ${JSON.stringify(v)}`).toMatchObject({ ok: false, error: "explicit_actions_required" });
+        expect(cfg.shadow).toEqual(cur);
+        expect(writes).toEqual([]);
+      }
+    }
+    // naming an action is still fine in both states
+    cfg.shadow = { global: false, actions: { message: true } };
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { global: false, actions: { message: false } } })).toMatchObject({ ok: true, changed_actions: ["message"] });
+  });
   it("SF1: global:false with actions {message:false} makes EXACTLY message live; every other published action is written held (true); the answer lists live_actions and changed_actions", async () => {
     cfg.shadow = { global: true, actions: {} };
     const out = await cmd({ kind: "set_shadow", reason: "go live for message", value: { global: false, actions: { message: false } } });
@@ -240,6 +254,28 @@ describe("scribe_steward_command — the kinds", () => {
     expect((a.revert as { exact: boolean }).exact).toBe(false); // the legacy key (SF3)
     cfg.shadow = { global: true, actions: { message: true } };
     expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: null } } })).toMatchObject({ ok: true, after: { global: true, actions: {} } });
+  });
+  it("G41: while global is false, holding a key that was ABSENT (= live) gives a revert that names false and is NOT exact (it restores the behaviour, not the stored bytes); replaying it makes the action live again", async () => {
+    cfg.shadow = { global: false, actions: { "ticket:wake": true } }; // every other published action is absent = live
+    const before = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { "ticket:wake": true } } });
+    expect(before).toMatchObject({ ok: true, unchanged: true });
+    const out = await cmd({ kind: "set_shadow", reason: "hold message", value: { actions: { message: true } } });
+    expect(out).toMatchObject({ ok: true, changed_actions: ["message"] });
+    expect(out.live_actions).not.toContain("message");
+    const rv = out.revert as { exact: boolean; note?: string; value: Row };
+    expect(rv.value).toEqual({ actions: { message: false } });
+    expect(rv.exact).toBe(false);
+    expect(rv.note).toMatch(/message was absent.*explicit false/);
+    const back = await cmd({ kind: "set_shadow", reason: "undo", value: rv.value });
+    expect(back.live_actions).toContain("message"); // live again, as before
+    // an absent key while global is TRUE is shadow: clearing it again is exact
+    cfg.shadow = { global: true, actions: {} };
+    const t = await cmd({ kind: "set_shadow", reason: "r", value: { actions: { message: true } } });
+    expect(t.revert).toMatchObject({ exact: true, value: { actions: { message: null } } });
+    // turning global back ON from OFF with absent (live) keys: the explicit map restores behaviour, not bytes
+    cfg.shadow = { global: false, actions: { "ticket:wake": true } };
+    const on = await cmd({ kind: "set_shadow", reason: "r", value: { global: true } });
+    expect((on.revert as { exact: boolean }).exact).toBe(false);
   });
   it("SF1: a plain shadow-only change (global stays true) lists no live action", async () => {
     cfg.shadow = { global: true, actions: {} };
@@ -494,13 +530,14 @@ describe("scribe_health aspect=routes", () => {
     // unset -> the production constant
     delete process.env.APP_URL;
     expect(R.publicOrigin()!.origin).toBe(R.PUBLIC_ORIGIN_DEFAULT);
-    expect(R.PUBLIC_ORIGIN_DEFAULT).toBe("https://evenscribe.app");
+    expect(R.PUBLIC_ORIGIN_DEFAULT).toBe("https://www.evenscribe.app");
+    expect(R.PUBLIC_ORIGIN_DEFAULT).not.toBe("https://evenscribe.app"); // G50: the apex answers 307 and the probe would read the redirect, not the route
     fetchMock.mockClear();
     await t.handler({}, { origin: "https://evil.example", actor: "a", scopes: new Set(["read"]) } as never);
-    for (const [url] of fetchMock.mock.calls as Array<[string]>) expect(url.startsWith("https://evenscribe.app/")).toBe(true);
+    for (const [url] of fetchMock.mock.calls as Array<[string]>) expect(url.startsWith("https://www.evenscribe.app/")).toBe(true);
     // the handler does not even read ctx.origin: a context with none still works
     fetchMock.mockClear();
-    expect(await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never)).toMatchObject({ origin: "https://evenscribe.app", checked: 5 });
+    expect(await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never)).toMatchObject({ origin: "https://www.evenscribe.app", checked: 5 });
   });
 
   it("an APP_URL that is not an http(s) URL -> a named error and no fetch", async () => {

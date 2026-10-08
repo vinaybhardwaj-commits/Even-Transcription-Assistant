@@ -1,0 +1,163 @@
+{
+  "id": "consult_chair_affect",
+  "version": "0.2.0",
+  "title": "Consult chair affect, uptake and teach-back",
+  "unit": "consult",
+  "inputs": [
+    "consult_text"
+  ],
+  "engine": "llm_zdr",
+  "source": "consult-chair-affect@v0.2",
+  "output": {
+    "type": "object",
+    "properties": {
+      "distress": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "confusion": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "frustration": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "reassurance": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "uptake": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "accept",
+            "hedge",
+            "refuse",
+            "question",
+            "defer",
+            "cost",
+            "unheard"
+          ]
+        }
+      },
+      "teach_back": {
+        "enum": [
+          "none",
+          "partial",
+          "full"
+        ]
+      }
+    }
+  },
+  "bench": {
+    "location": "rubrics/consult_chair_affect/bench.json",
+    "metric": "weighted_kappa",
+    "threshold": 0.6
+  },
+  "status": "draft",
+  "definition": {
+    "object": "a doctor-patient consultation (clinic or teleconsult) read as a whole; the affect of the PATIENT in the chair",
+    "unscorable": "no speaker or no transcript characters: unscorable, never neutral",
+    "axes": [
+      "distress",
+      "confusion",
+      "frustration",
+      "reassurance"
+    ],
+    "scale": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "principles": [
+      "disease severity is not distress",
+      "trajectory (open to close) matters more than one moment",
+      "report rates and means across consults, never the modal bucket alone on a three-level scale"
+    ],
+    "anchors": {
+      "distress": {
+        "low": "composed help-seeking; concern is named but turn-taking holds and no functional break or fear language drives the visit",
+        "medium": "pain or fear is doing work in the chair (a functional limit, a named fear, a second opinion after sudden news) while the patient can still give a history",
+        "high": "breaks the consultation: crying, unable to answer, the talk cannot proceed; rare, do not inflate medium"
+      },
+      "confusion": {
+        "low": "follows the plan; at most one clarification",
+        "medium": "needs repeats, hits a language or plan barrier, talks past the question, or still wants an in-person explanation after the plan landed",
+        "high": "never takes in what was asked across the whole consultation"
+      },
+      "frustration": {
+        "low": "none, or only connection checks at the start",
+        "medium": "repeated repair loops (language, screen, connection, device) that eat the consultation: PROCESS frustration",
+        "high": "anger at the doctor or at the process; do not inflate process repair loops to high",
+        "note": "process frustration and clinical frustration (anger at earlier care) are different things and must not stand in for each other"
+      },
+      "reassurance": {
+        "low": "plan given but the patient stays guarded, still asks for more detail or an in-person visit, or the close does not answer a named concern",
+        "medium": "thanks or agreement with residual caution; plan accepted; no named fear was the opening load, or a mild concern closed without a clear calmer shift",
+        "high": "the close is clearly calmer than the opening, or a named fear got an explicit answer"
+      },
+      "anti_defaults": [
+        "medium reassurance is not the dump bin: a patient saying okay or thanks is not enough",
+        "if the opening had a named fear and the close answered it, reassurance is high",
+        "if the close is still guarded after the plan, reassurance is low"
+      ]
+    },
+    "uptake": {
+      "unit": "each audible doctor recommendation",
+      "codes": [
+        "accept",
+        "hedge",
+        "refuse",
+        "question",
+        "defer",
+        "cost",
+        "unheard"
+      ],
+      "dual_code_allowed": true,
+      "known_gap": "no logistics code: a site too far is a refusal of the site, not of the care"
+    },
+    "teach_back": [
+      "none",
+      "partial",
+      "full"
+    ],
+    "aggregation": {
+      "required_columns": [
+        "n_scored",
+        "distress_medium_plus_pct",
+        "confusion_medium_plus_pct",
+        "reassurance_high_pct",
+        "flat_default_pct",
+        "accept_pct"
+      ],
+      "flat_default": "distress low AND confusion low AND frustration low AND reassurance medium; a high rate can be a true pattern of short calm consultations, not a scoring bug"
+    },
+    "cases_overlay": {
+      "separate_from_affect": true,
+      "citation": "Laws et al., Patient Education and Counseling 2013;91:192-199 (CASES)",
+      "rule": "the structural overlay never replaces or merges into the four affect axes; engagement as a process is not reassurance",
+      "layers": {
+        "A": "light structural tags per consultation: dominant mix (presentation heavy, resolution present, engagement present, mixed, process friction, unscorable), engagement process (present, absent, lecture only), information present, doctor effect proxy (fear assuaged, load eased, load held, flat no load, process friction, unknown)",
+        "B": "per recommendation as a mini-thread: owner (patient, doctor, unclear), induction (problem presentation, request, focused question, invitation, cued, unclear), resolution type (patient agrees, patient refuses, neither, deferred, provider action, information only, not resolved, empathy only)",
+        "C": "threads with owner, induction, processes present and resolution types, plus non-thread talk (socialising, agenda setting, wrap-up, physical exam, connection repair); utterance shares stay null unless estimable"
+      },
+      "confidence": [
+        "low",
+        "medium"
+      ]
+    }
+  }
+}

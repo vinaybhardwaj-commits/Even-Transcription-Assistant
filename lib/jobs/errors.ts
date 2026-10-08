@@ -71,6 +71,11 @@ export const JOB_ERROR_CODES = [
   // S8A-FIX: only isolated consult audio (or a doctor-recorded encounter) goes to Sarvam
   "scope_consult_only",
   "scope_check_unavailable",
+  // rubric_run / rubric_bench (S7-0)
+  "unknown_rubric",
+  "rubric_units_unresolved",
+  "bench_set_missing",
+  "bench_metric_unsupported",
   "consult_index_unavailable",
   "duration_unknown",
   // the stubs

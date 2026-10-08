@@ -51,6 +51,7 @@ import { S1_TOOLS } from "./tools/s1";
 import { S1B_TOOLS } from "./tools/s1b";
 import { S5_TOOLS } from "./tools/s5";
 import { S8_TOOLS } from "./tools/s8";
+import { S7_TOOLS } from "./tools/s7";
 import { S2L_TOOLS } from "./tools/s2l";
 
 /**
@@ -69,6 +70,7 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...S5_TOOLS,
   ...S8_TOOLS,
   ...S2L_TOOLS,
+  ...S7_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));
@@ -130,6 +132,8 @@ export type GroupSpec = {
   scope?: McpScope;
   /** tools/list annotation overrides; required in practice with `scope` (see McpTool.annotations). */
   annotations?: McpTool["annotations"];
+  /** S7-0: a property every variant declares the same way but for its wording is ONE fragment with the descriptions joined, not an anyOf of copies (scribe_jobs' 16-name kind enum). */
+  collapseSame?: boolean;
 };
 
 const withoutKey = (args: ToolArgs, key: string | undefined): ToolArgs => {
@@ -333,6 +337,11 @@ function groupSchema(spec: GroupSpec): McpTool["inputSchema"] {
     if (list.length === 1) {
       // Every variant declares it identically → the fragment unchanged. Otherwise marked with its users.
       properties[key] = list[0]!.values.length === all ? list[0]!.frag : mark(list[0]!);
+    } else if (spec.collapseSame && list.every((e) => same({ ...e.frag, description: undefined }, { ...list[0]!.frag, description: undefined }))) {
+      // S7-0: declared identically but for the wording (the job kind enum, 16 names, twice in scribe_jobs): ONE fragment, the descriptions joined, so tools/list stays small
+      const { description: _d, ...bare } = list[0]!.frag;
+      void _d;
+      properties[key] = { ...bare, description: list.map((e) => `${tag(e.values)}${typeof e.frag.description === "string" ? ` ${e.frag.description}` : ""}`).join(" ") };
     } else {
       properties[key] = { anyOf: list.map(mark), description: `Declared differently per variant: ${list.map((e) => tag(e.values)).join(", ")}.` };
     }
@@ -515,6 +524,7 @@ export const JOBS_GROUP: McpTool = buildGroup({
   lead:
     "Background jobs. Scope per action: status and list need READ, submit (queues long work) needs INVOKE, cancel needs WRITE. The caller needs the picked action's own scope; an unknown action is refused with unknown_action and nothing runs.",
   selector: { key: "action" },
+  collapseSame: true,
   scope: "read",
   // Registered read for the group gate, but submit/cancel write: never read-only; cancel is destructive.
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },

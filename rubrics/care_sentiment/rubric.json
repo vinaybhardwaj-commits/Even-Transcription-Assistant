@@ -1,0 +1,158 @@
+{
+  "id": "care_sentiment",
+  "version": "1.0.0",
+  "title": "Customer-care sentiment: stay feedback and staff interaction",
+  "unit": "stay",
+  "inputs": [
+    "external"
+  ],
+  "engine": "llm_zdr",
+  "source": "even-customer-care-sentiment@v1",
+  "output": {
+    "type": "object",
+    "properties": {
+      "route": {
+        "enum": [
+          "stay_feedback",
+          "staff_interaction",
+          "unscorable"
+        ]
+      }
+    }
+  },
+  "bench": {
+    "location": "rubrics/care_sentiment/bench.json",
+    "metric": "accuracy",
+    "threshold": 0.8
+  },
+  "status": "draft",
+  "definition": {
+    "principle": "customer-care sentiment has two distinct listening objects; never merge them: route first, then score",
+    "route": {
+      "stay_feedback": "a coordinator interviewing an inpatient or attender about the hospital stay",
+      "staff_interaction": "a staff-handled live patient or party task (floor, outpatient, front desk, inpatient, pharmacy, lab, sales) captured on a wearable or similar",
+      "unscorable": "purely internal operations with no patient party, empty or inaudible transcript, or insufficient evidence: unscorable, not satisfied and not a blank scored as zero"
+    },
+    "layer_A_stay_feedback": {
+      "object": "patient or attender sentiment about the stay, not the coordinator",
+      "axes": {
+        "who": [
+          "patient",
+          "attender",
+          "coordinator"
+        ],
+        "service_valence": [
+          "satisfied",
+          "mixed",
+          "dissatisfied",
+          "anxious_about_stay"
+        ],
+        "issue_objects": [
+          "housekeeping",
+          "food",
+          "nursing",
+          "doctor",
+          "wait",
+          "billing",
+          "other"
+        ],
+        "issue_rule": "each object needs supporting evidence; no evidence, no object",
+        "concrete_vs_vague": "a named missing item is concrete; empty praise after a leading prompt is not",
+        "coordinator_leading": "a prompted yes is marked and is not valence"
+      },
+      "severity_of_stay_issues": {
+        "independent_of_valence": true,
+        "codes": [
+          "high",
+          "medium",
+          "low",
+          "na"
+        ],
+        "high": "safety risk, blocked care, or an unresolved major service failure",
+        "medium": "a real identifiable service problem",
+        "low": "minor or none",
+        "na": "unscorable or no issue content"
+      },
+      "gap_tags_optional": [
+        "process",
+        "communication",
+        "ownership",
+        "follow_up",
+        "system"
+      ]
+    },
+    "layer_B_staff_interaction": {
+      "object": "quality of the staff-patient or staff-party interaction, not stay valence",
+      "team": [
+        "opd_coordinator",
+        "ipd_coordinator",
+        "front_desk",
+        "floor",
+        "pharmacy",
+        "lab",
+        "sales_care",
+        "admin",
+        "ops",
+        "other"
+      ],
+      "outcome_status": [
+        "resolved",
+        "pending",
+        "open"
+      ],
+      "quality_band": {
+        "scale": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "blank": "insufficient evidence: excluded from averages",
+        "driven_by": "the number of checklist items passed",
+        "hard_floor_1": "safety risk, blocked necessary care or an egregious failure overrides the checklist"
+      },
+      "checklist": {
+        "understanding": "the need was correctly identified with no misread backtracking",
+        "owning": "one person owns it start to finish, or there is an explicit handoff; never a silent drop",
+        "accurate_complete": "correct and nothing material left out",
+        "proactive": "a specific next step or time offered without being asked",
+        "closed": "the other party clearly knows what happens next"
+      },
+      "band_map": {
+        "5": "all five pass plus a genuine extra",
+        "4": "all five pass, functional",
+        "3": "exactly four of five",
+        "2": "three or fewer",
+        "1": "hard floor"
+      },
+      "gaps": [
+        "process",
+        "communication",
+        "knowledge",
+        "documentation",
+        "ownership",
+        "follow_up",
+        "system",
+        "technology",
+        "policy",
+        "soft_skill"
+      ],
+      "severity": {
+        "independent_of_quality_band": true,
+        "codes": [
+          "high",
+          "medium",
+          "low",
+          "na"
+        ]
+      }
+    },
+    "do_not": [
+      "score care-staff conversations with the consult rubrics",
+      "use licensed sentiment products",
+      "read a quality band as severity or severity as a quality band",
+      "rank a coordinator as if a doctor"
+    ]
+  }
+}

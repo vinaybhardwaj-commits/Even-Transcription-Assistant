@@ -1,0 +1,118 @@
+{
+  "id": "consult_surgical_pitch",
+  "version": "0.1.0",
+  "title": "Surgical pitch in a consult",
+  "unit": "consult",
+  "inputs": [
+    "consult_text"
+  ],
+  "engine": "llm_zdr",
+  "source": "consult-surgical-pitch@v0",
+  "output": {
+    "type": "object",
+    "properties": {
+      "recommendation_kind": {
+        "enum": [
+          "surgery",
+          "investigation",
+          "conservative",
+          "referral",
+          "no_surgery",
+          "other"
+        ]
+      },
+      "uptake_of_surgery": {
+        "enum": [
+          "accept",
+          "hedge",
+          "refuse",
+          "question",
+          "defer",
+          "cost",
+          "unheard"
+        ]
+      }
+    }
+  },
+  "bench": {
+    "location": "rubrics/consult_surgical_pitch/bench.json",
+    "metric": "accuracy",
+    "threshold": 0.8
+  },
+  "status": "draft",
+  "definition": {
+    "object": "the surgery recommendation in a doctor-patient consultation: how it is pitched, how doubt is handled, how the patient takes it up",
+    "extends": "consult_chair_affect: keeps its four axes, uptake codes and teach-back, and adds the three blocks below",
+    "recommendation_kind": [
+      "surgery",
+      "investigation",
+      "conservative",
+      "referral",
+      "no_surgery",
+      "other"
+    ],
+    "pitch_source": [
+      "own",
+      "own_contingent",
+      "outside_surgeon"
+    ],
+    "pitch_balance": {
+      "unit": "the audible surgery pitch, if one exists",
+      "fields": {
+        "benefits_named": "bool",
+        "risks_named": "bool",
+        "alternatives_named": "bool (watchful waiting, medicines, a different procedure, another centre)",
+        "timing_named": "urgent, elective or if-not-better; the doctor's own staging is not patient deferral"
+      },
+      "not": "a lecture score; an empty tape is unscorable, not unbalanced"
+    },
+    "doubt_objects": {
+      "unit": "each named patient fear or pushback about the operation",
+      "kinds": [
+        "pain",
+        "complication",
+        "anaesthesia",
+        "cost",
+        "work or family time",
+        "second opinion",
+        "too soon"
+      ],
+      "codes": [
+        "answered",
+        "partial",
+        "unheard",
+        "deferred_to_family"
+      ],
+      "rule": "whether THAT fear got a reply, not whether the patient is calm; reassurance stays a separate axis"
+    },
+    "uptake_of_surgery": {
+      "codes": [
+        "accept",
+        "hedge",
+        "refuse",
+        "question",
+        "defer",
+        "cost",
+        "unheard"
+      ],
+      "rules": [
+        "a prompted yes is still accept but flagged",
+        "the family later is defer, not refuse"
+      ]
+    },
+    "sampling": "a chart keyword is not a pitch: score the audible recommendation only; a local referral is still a pitch",
+    "followthrough_v1": [
+      "ot_booked",
+      "waitlisted",
+      "cancelled",
+      "no_show",
+      "never",
+      "different_procedure"
+    ],
+    "not_for": [
+      "stay outcome labels",
+      "ranking a surgeon before follow-through is joined",
+      "disease severity read as distress"
+    ]
+  }
+}

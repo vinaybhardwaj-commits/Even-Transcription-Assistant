@@ -28,10 +28,13 @@ const MAX_ATTEMPTS = 5;
 export const LANE_MIN_INTERVAL_MS = 20_000;
 const PAST_CACHE_MS = 10 * 60_000;
 
-const WRITE_ALLOW: RegExp[] = [/^sarvam\/ledger\/scribe-mcp\/\d{4}-\d{2}-\d{2}\.jsonl$/, /^lanes\/sarvam-scribe-mcp\.json$/];
-const READ_ALLOW_PREFIXES = ["lanes/", LEDGER_PREFIX];
+/** S7-0: rubric evidence and bench reports, rubric/<rubric_id>/<semver>/<name>.json. NOT reb/ (the REB track index stays outside this code's reach). */
+export const RUBRIC_PREFIX = "rubric/";
+const RUBRIC_KEY = /^rubric\/[a-z][a-z0-9_]{1,63}\/\d+\.\d+\.\d+\/[A-Za-z0-9_.:@=-]{1,200}\.json$/;
+const WRITE_ALLOW: RegExp[] = [/^sarvam\/ledger\/scribe-mcp\/\d{4}-\d{2}-\d{2}\.jsonl$/, /^lanes\/sarvam-scribe-mcp\.json$/, RUBRIC_KEY];
+const READ_ALLOW_PREFIXES = ["lanes/", LEDGER_PREFIX, RUBRIC_PREFIX];
 export const labWritable = (key: string): boolean => WRITE_ALLOW.some((r) => r.test(key));
-export const labReadable = (key: string): boolean => READ_ALLOW_PREFIXES.some((p) => key.startsWith(p)) && !key.includes("..");
+export const labReadable = (key: string): boolean => READ_ALLOW_PREFIXES.some((p) => key.startsWith(p)) && !key.includes("..") && !key.startsWith("reb/");
 function assertWritable(key: string): void {
   if (!labWritable(key)) throw new Error("lab_key_not_writable");
 }
@@ -42,7 +45,7 @@ function assertReadable(key: string): void {
 export type SarvamScope = "encounter" | "consult_clip";
 export type CallLine = {
   caller: typeof CALLER; machine: typeof MACHINE; job_id: string; request_id: string | null; route: "gateway"; mode: "batch" | "sync";
-  task: "transcribe" | "text_translate"; model: string; audio_s: number; chars?: number; started_at: string; finished_at: string;
+  task: "transcribe" | "translate" | "text_translate"; model: string; audio_s: number; chars?: number; started_at: string; finished_at: string;
   status: "ok" | "failed" | "cancelled"; http_status: number | null; throttled: boolean; scope: SarvamScope; ref: string;
 };
 export type LaneActive = { job_id: string; mode: string; task: string; model: string; audio_s: number; started_at: string; scope: string };
@@ -134,6 +137,11 @@ function guarded(): LabStore {
  * S2L: a READ-ONLY view of the same guarded store, for scribe_lanes. get / list only, both allowlist-checked (reads under `lanes/` and the ledger prefix;
  * writes are not reachable through it). null when the lab credentials are not configured (and no test store is set).
  */
+/** S7-0: the guarded store (allowlisted get / put / list) for rubric evidence; null when the lab credentials are not configured (and no test store is set). */
+export function labStore(): LabStore | null {
+  return available() ? guarded() : null;
+}
+
 export function labReader(): Pick<LabStore, "get" | "list"> | null {
   if (!available()) return null;
   const g = guarded();
@@ -270,7 +278,7 @@ export async function activeJobs(excludeJobId?: string | null): Promise<LaneActi
       return {
         job_id: r.id,
         mode: transcribe ? "batch" : "sync",
-        task: transcribe ? "transcribe" : "text_translate",
+        task: transcribe ? (String(r.step ?? "").startsWith("en_") ? "translate" : "transcribe") : "text_translate", // the English pass of a transcribe job is task translate
         model: transcribe ? "saaras:v3" : "mayura:v1",
         audio_s: transcribe && Number.isFinite(ms) ? Math.round(ms / 10) / 100 : 0,
         started_at: r.started_at ?? new Date(r.created_at).toISOString(),

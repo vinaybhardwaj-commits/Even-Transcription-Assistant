@@ -19,6 +19,7 @@ import { chunkText, gwTranslateChunk, SARVAM_GW_TRANSLATE_MODEL } from "@/lib/sa
 import { appendLedger, touchLane } from "@/lib/sarvam-lab";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
+import { detectScript, isNonLatinScript, nonLatinLetterRatio } from "@/lib/script-detect";
 import { looksNonEnglish, readJson, resultKey, writeJson } from "./sarvam-common";
 import { ROOM_AUDIO_ARGS, sarvamTiming } from "./sarvam-transcribe";
 
@@ -62,6 +63,31 @@ export async function pickSourceText(a: SarvamTranslateArgs): Promise<Picked> {
   return { text: (r.transcript_original ?? "").trim(), language: r.detected_language ?? null, column: "transcript_original" };
 }
 
+/**
+ * S8A4: what to translate. The file-level language label is not trusted to say "all English": when it says non-English (or says nothing) the whole text is one unit, as
+ * before; when it says English, the text is split into sentences and every sentence written in an Indic script is a unit of its own, so a Kannada line inside an
+ * en-IN-labelled consult is translated and the English sentences around it are kept verbatim. PURE and deterministic (the same text always gives the same units).
+ */
+export type Unit = { text: string; translate: boolean };
+export function planUnits(text: string, language: string | null): Unit[] {
+  if (looksNonEnglish(text, language)) return [{ text, translate: true }];
+  const units: Unit[] = [];
+  for (const sentence of text.split(/(?<=[.!?।\n])\s+/)) {
+    if (!sentence.trim()) continue;
+    const translate = isNonLatinScript(detectScript(sentence)) || nonLatinLetterRatio(sentence) > 0.15; // ANY non-Latin script (Urdu included), not only the nine Indic ones
+    const last = units[units.length - 1];
+    if (last && last.translate === translate) last.text += ` ${sentence}`;
+    else units.push({ text: sentence, translate });
+  }
+  return units;
+}
+const chunksOf = (units: Unit[]): string[] => units.filter((u) => u.translate).flatMap((u) => chunkText(u.text));
+/** The English text: translated units from `parts` (in chunk order), the others verbatim. */
+function assemble(units: Unit[], parts: string[]): string {
+  let k = 0;
+  return units.map((u) => (u.translate ? chunkText(u.text).map(() => parts[k++] ?? "").join(" ").trim() : u.text)).filter(Boolean).join(" ").trim();
+}
+
 type Doc = { source: { kind: string; id: string; column: string }; chars_in: number; chars_out: number; english: string; parts: string[]; chunks_total: number; language: string | null };
 
 export const sarvamTranslateKind: JobKind = {
@@ -99,16 +125,19 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
   const source = { kind: a.kind, id: a.id, column: picked.column };
   // empty / already English: finished, and Sarvam is not called (so this needs no gateway)
   if (!picked.text) return doneWith({ reason: "empty_text", source, chars_in: 0, chars_out: 0 });
-  if (!looksNonEnglish(picked.text, picked.language)) return doneWith({ reason: "already_english", source, chars_in: picked.text.length, chars_out: 0 });
+  const units = planUnits(picked.text, picked.language);
+  // already English = the label says so AND no sentence is written in an Indic script (a label alone is not evidence: saaras labels a whole file once)
+  if (!units.some((u) => u.translate)) return doneWith({ reason: "already_english", source, chars_in: picked.text.length, chars_out: 0 });
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
-  const chunks = chunkText(picked.text);
-  const doc: Doc = { source, chars_in: picked.text.length, chars_out: 0, english: "", parts: [], chunks_total: chunks.length, language: picked.language };
+  const chunks = chunksOf(units);
+  const charsIn = units.length === 1 ? picked.text.length : chunks.reduce((n, c) => n + c.length, 0); // a mixed text sends only its Indic sentences
+  const doc: Doc = { source, chars_in: charsIn, chars_out: 0, english: "", parts: [], chunks_total: chunks.length, language: picked.language };
   try {
     await writeJson(resultKey(ctx.job.id), doc);
   } catch {
     return failWith(jobError("result_write_failed"));
   }
-  return nextStep(STEPS.translate, { column: picked.column, chunks_total: chunks.length, chars_in: picked.text.length, scope: "encounter", ref: a.kind === "encounter" ? a.id : `run:${a.id}`, started_at: new Date().toISOString() });
+  return nextStep(STEPS.translate, { column: picked.column, chunks_total: chunks.length, chars_in: charsIn, scope: "encounter", ref: a.kind === "encounter" ? a.id : `run:${a.id}`, started_at: new Date().toISOString() });
 }
 
 const httpStatusOf = (error: string): number | null => {
@@ -136,14 +165,15 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
   if (!doc) return failWith(jobError("sarvam_result_failed", "result_missing"));
   const picked = await pickSourceText(a);
   if (picked === "missing" || picked === "scope" || !picked.text) return failWith(jobError("source_not_found"));
-  const chunks = chunkText(picked.text);
+  const units = planUnits(picked.text, picked.language);
+  const chunks = chunksOf(units);
   if (chunks.length !== doc.chunks_total) return failWith(jobError("sarvam_result_failed", "source_changed"));
   const deadline = Date.now() + sarvamTiming.translateStepMs;
   const throttled = ctx.progress.throttled === true;
   // the deadline is checked per CHUNK and the English so far is saved after EACH one: a claim never re-sends a translated chunk
   while (doc.parts.length < chunks.length) {
     if (Date.now() >= deadline) break;
-    const r = await gwTranslateChunk(chunks[doc.parts.length]!, doc.language);
+    const r = await gwTranslateChunk(chunks[doc.parts.length]!, units.length === 1 && units[0]!.translate ? doc.language : null);
     if (!r.ok) {
       await writeJson(key, doc).catch(() => undefined);
       console.error("[sarvam] translate failed", JSON.stringify({ job: ctx.job.id, err: r.error, transient: r.transient }));
@@ -159,7 +189,7 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
     }
   }
   if (doc.parts.length < chunks.length) return nextStep(STEPS.translate, { ...ctx.progress, chunks_done: doc.parts.length, translate_chars: inputCharsDone(chunks, doc.parts.length) });
-  doc.english = doc.parts.join(" ").trim();
+  doc.english = assemble(units, doc.parts);
   doc.chars_out = doc.english.length;
   try {
     await writeJson(key, doc);

@@ -32,12 +32,28 @@ import { appendLedger, touchLane, type CallLine } from "@/lib/sarvam-lab";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
 import {
-  SARVAM_WALL_MS, capRefusalForJob, dailyCapRefusal, looksNonEnglish, readJson, recordSarvamCall, resultKey, writeJson,
-  type ResultDoc, type SarvamScope,
+  SARVAM_WALL_MS, capRefusalForJob, dailyCapRefusal, readJson, recordSarvamCall, resultKey, writeJson,
+  type EnglishEntry, type ResultDoc, type SarvamScope,
 } from "./sarvam-common";
+import { addMayura, alignEnglish, englishCounts, finalizeEnglish, settleUnpaired, tagNative } from "./sarvam-english";
+import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 
 export const SARVAM_TRANSCRIBE_KIND = "sarvam_transcribe";
-const STEPS = { prepare: "prepare", init: "init", upload: "upload", start: "start", poll: "poll", finish: "finish", translate: "translate" } as const;
+const STEPS = {
+  prepare: "prepare", init: "init", upload: "upload", start: "start", poll: "poll", finish: "finish",
+  // S8A4: the second Sarvam pass (saaras:v3 translate mode, speech -> English) on the same audio, then the merge
+  enInit: "en_init", enUpload: "en_upload", enStart: "en_start", enPoll: "en_poll", enFinish: "en_finish",
+  translate: "translate",
+} as const;
+
+/** The two Sarvam passes of one job. The native pass keeps its original progress keys; the English pass uses the en_ ones. */
+type Pass = "native" | "en";
+const KEYS = {
+  native: { job: "sarvam_job_id", started: "sarvam_started_ms", startedAt: "started_at", outputs: "outputs", throttled: "throttled", pending: "audit_pending" },
+  en: { job: "en_sarvam_job_id", started: "en_started_ms", startedAt: "en_started_at", outputs: "en_outputs", throttled: "en_throttled", pending: "en_audit_pending" },
+} as const;
+/** The audit_log job id: the job's own id for the native pass, `<id>:en` for the English pass (one paid-call row per pass, idempotent on it). */
+const auditJobId = (ctx: StepContext, pass: Pass): string => (pass === "en" ? `${ctx.job.id}:en` : ctx.job.id);
 
 /** Timing knobs (mutable so a test can run the loops without waiting). A step must stay well inside MAX_STEP_MS (200 s). */
 export const sarvamTiming = { pollStepMs: 90_000, pollIntervalMs: 5_000, translateStepMs: 120_000 };
@@ -106,11 +122,16 @@ export const sarvamTranscribeKind: JobKind = {
 async function runStep(ctx: StepContext): Promise<StepOutcome> {
   switch (ctx.step) {
     case STEPS.prepare: return prepareStep(ctx);
-    case STEPS.init: return initStep(ctx);
-    case STEPS.upload: return uploadStep(ctx);
-    case STEPS.start: return startStep(ctx);
-    case STEPS.poll: return pollStep(ctx);
+    case STEPS.init: return initStep(ctx, "native");
+    case STEPS.upload: return uploadStep(ctx, "native");
+    case STEPS.start: return startStep(ctx, "native");
+    case STEPS.poll: return pollStep(ctx, "native");
     case STEPS.finish: return finishStep(ctx);
+    case STEPS.enInit: return initStep(ctx, "en");
+    case STEPS.enUpload: return uploadStep(ctx, "en");
+    case STEPS.enStart: return startStep(ctx, "en");
+    case STEPS.enPoll: return pollStep(ctx, "en");
+    case STEPS.enFinish: return enFinishStep(ctx);
     case STEPS.translate: return translateStep(ctx);
     default: return failWith(jobError("unknown_step", ctx.step));
   }
@@ -140,13 +161,37 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
 }
 
 // --- init -----------------------------------------------------------------------------------------------------------------------------------
-async function initStep(ctx: StepContext): Promise<StepOutcome> {
-  if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
+/** The English pass could not be run or finished: the native result stands, the entries still needing English go to mayura (per entry). Never fails the job. */
+const enSkip = (ctx: StepContext, reason: "skipped_cap" | "failed", extra: Record<string, unknown> = {}): StepOutcome => nextStep(STEPS.enFinish, { ...ctx.progress, ...extra, en_skip: reason });
+
+/** A terminal failure of a pass: the native pass fails the job (ledger line + code); the English pass logs its failed line and falls back to mayura. */
+async function passFailed(ctx: StepContext, pass: Pass, f: Fail, code: JobErrorCode, extra: { throttled?: boolean } = {}): Promise<StepOutcome> {
+  if (pass === "native") return ledgerFailed(ctx, f, code, extra);
+  if (typeof ctx.progress[KEYS.en.job] === "string") await ledgerBatch(ctx, "failed", f.status ?? httpStatusOf(f.error), extra.throttled === true || ctx.progress[KEYS.en.throttled] === true || f.status === 429, "en");
+  return enSkip(ctx, "failed");
+}
+
+async function initStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
+  if (!gatewayConfigured()) return pass === "en" ? enSkip(ctx, "failed") : failWith(jobError("sarvam_gateway_not_configured"));
   const a = ctx.args as unknown as SarvamTranscribeArgs;
+  const K = KEYS[pass];
   const clipKey = String(ctx.progress.clip_key ?? "");
   if (!clipKey) return failWith(jobError("progress_incomplete", "clip key"));
   // already created on an earlier claim: do NOT create a second Sarvam job
-  if (typeof ctx.progress.sarvam_job_id === "string" && ctx.progress.sarvam_job_id) return nextStep(STEPS.upload, ctx.progress);
+  if (typeof ctx.progress[K.job] === "string" && ctx.progress[K.job]) return nextStep(pass === "en" ? STEPS.enUpload : STEPS.upload, ctx.progress);
+
+  if (pass === "en") {
+    // the SAME audio again (a batch job owns its upload); its measured duration is already in progress. The second pass's minutes must fit the cap too.
+    const minutes = num(ctx.progress.duration_ms) / 60_000;
+    const cap = await capRefusalForJob({ id: ctx.job.id, created_at: ctx.job.created_at }, minutes);
+    if (cap) return enSkip(ctx, "skipped_cap");
+    const init = await gwBatchInit({ mode: "translate", numSpeakers: a.num_speakers ?? null, prompt: SARVAM_MEDICAL_PROMPT });
+    if (!init.ok) {
+      console.error("[sarvam] english-pass init failed", JSON.stringify({ job: ctx.job.id, err: init.error, transient: init.transient }));
+      return init.transient ? bail(init, "sarvam_submit_failed") : enSkip(ctx, "failed");
+    }
+    return nextStep(STEPS.enUpload, { ...ctx.progress, [K.job]: init.jobId, [K.startedAt]: new Date().toISOString() });
+  }
 
   const bytes = await getObjectBytes(clipKey);
   if (!bytes) return failWith(jobError("clip_missing_in_r2"));
@@ -155,9 +200,9 @@ async function initStep(ctx: StepContext): Promise<StepOutcome> {
   if (ms === null) return failWith(jobError("duration_unknown"));
   if (ms > JOIN_MAX_MS) return failWith(jobError("window_too_long"));
   const minutes = ms / 60_000;
-  const cap = await capRefusalForJob({ id: ctx.job.id, created_at: ctx.job.created_at }, minutes);
+  // S8A4: an English-track job makes TWO Sarvam passes over the audio, so it asks the cap for both
+  const cap = await capRefusalForJob({ id: ctx.job.id, created_at: ctx.job.created_at }, minutes * (a.english ? 2 : 1));
   if (cap) return failWith(jobError("sarvam_daily_cap", `today ${cap.today} + reserved ${cap.reserved} + this ${cap.own} min`));
-
   const init = await gwBatchInit({ mode: a.mode, numSpeakers: a.num_speakers ?? null, prompt: SARVAM_MEDICAL_PROMPT });
   if (!init.ok) {
     console.error("[sarvam] init failed", JSON.stringify({ job: ctx.job.id, err: init.error, transient: init.transient }));
@@ -168,37 +213,39 @@ async function initStep(ctx: StepContext): Promise<StepOutcome> {
 }
 
 // --- upload ---------------------------------------------------------------------------------------------------------------------------------
-async function uploadStep(ctx: StepContext): Promise<StepOutcome> {
-  const jobId = String(ctx.progress.sarvam_job_id ?? "");
+async function uploadStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
+  const K = KEYS[pass];
+  const jobId = String(ctx.progress[K.job] ?? "");
   const clipKey = String(ctx.progress.clip_key ?? "");
   if (!jobId || !clipKey) return failWith(jobError("progress_incomplete", "sarvam job"));
   const bytes = await getObjectBytes(clipKey);
-  if (!bytes) return failWith(jobError("clip_missing_in_r2"));
+  if (!bytes) return pass === "en" ? enSkip(ctx, "failed") : failWith(jobError("clip_missing_in_r2"));
   const up = await gwBatchUpload(jobId, bytes, String(ctx.progress.content_type ?? "audio/webm"));
   if (!up.ok) {
-    console.error("[sarvam] upload failed", JSON.stringify({ job: ctx.job.id, err: up.error, transient: up.transient }));
-    return up.transient ? bail(up, "sarvam_submit_failed") : ledgerFailed(ctx, up, "sarvam_submit_failed");
+    console.error("[sarvam] upload failed", JSON.stringify({ job: ctx.job.id, pass, err: up.error, transient: up.transient }));
+    return up.transient ? bail(up, "sarvam_submit_failed") : passFailed(ctx, pass, up, "sarvam_submit_failed");
   }
-  return nextStep(STEPS.start, ctx.progress);
+  return nextStep(pass === "en" ? STEPS.enStart : STEPS.start, ctx.progress);
 }
 
 // --- start ----------------------------------------------------------------------------------------------------------------------------------
-async function startStep(ctx: StepContext): Promise<StepOutcome> {
-  const jobId = String(ctx.progress.sarvam_job_id ?? "");
+async function startStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
+  const K = KEYS[pass];
+  const jobId = String(ctx.progress[K.job] ?? "");
   if (!jobId) return failWith(jobError("progress_incomplete", "sarvam job"));
   // a replay after a successful start must not start twice: ask Sarvam first
   const st = await gwBatchStatus(jobId);
   // S2: a FAILED status read says nothing about whether the job was started, so it is never read as "not started" (that would start it a second time and
   // pay twice). A transient failure throws (the runner retries the step); a terminal one (the job is unknown to Sarvam) fails the job by code.
   if (!st.ok) {
-    console.error("[sarvam] status before start failed", JSON.stringify({ job: ctx.job.id, err: st.error, transient: st.transient }));
-    return st.transient ? bail(st, "sarvam_submit_failed") : ledgerFailed(ctx, st, "sarvam_submit_failed");
+    console.error("[sarvam] status before start failed", JSON.stringify({ job: ctx.job.id, pass, err: st.error, transient: st.transient }));
+    return st.transient ? bail(st, "sarvam_submit_failed") : passFailed(ctx, pass, st, "sarvam_submit_failed");
   }
   const alreadyStarted = !isCreatedState(st.state);
   if (!alreadyStarted) {
     const s = await gwBatchStartJob(jobId);
     if (!s.ok) {
-      console.error("[sarvam] start failed", JSON.stringify({ job: ctx.job.id, err: s.error, transient: s.transient }));
+      console.error("[sarvam] start failed", JSON.stringify({ job: ctx.job.id, pass, err: s.error, transient: s.transient }));
       if (s.transient) return bail(s, "sarvam_submit_failed");
       // G10: a 4xx on start may only mean the job is ALREADY started (a replay that raced). Ask again: if Sarvam has the job past Created it is running
       // (and billing), so carry on polling it instead of failing a job Sarvam is still working on.
@@ -206,55 +253,57 @@ async function startStep(ctx: StepContext): Promise<StepOutcome> {
       // G15: if the recheck ITSELF fails transiently (503, timeout), Sarvam may well be running the job: throw, so the runner retries the step under
       // MAX_FAILURES, instead of failing a job we cannot say is not running.
       if (!again.ok && again.transient) return bail(again, "sarvam_submit_failed");
-      if (!(again.ok && !isCreatedState(again.state))) return ledgerFailed(ctx, s, "sarvam_submit_failed");
+      if (!(again.ok && !isCreatedState(again.state))) return passFailed(ctx, pass, s, "sarvam_submit_failed");
     }
   }
-  // G22/G26: THE START EVIDENCE TRAVELS IN THE STEP'S OWN RESULT. sarvam_started_ms goes into the progress this step returns (saved by the runner under the lease), never
+  // G22/G26: THE START EVIDENCE TRAVELS IN THE STEP'S OWN RESULT. The started-at stamp goes into the progress this step returns (saved by the runner under the lease), never
   // through a mid-step write (G27) and never by throwing: a throw makes the runner write the PRE-step progress back and erase it.
-  const progress = { ...ctx.progress, sarvam_started_ms: num(ctx.progress.sarvam_started_ms) || Date.now() };
+  const progress = { ...ctx.progress, [K.started]: num(ctx.progress[K.started]) || Date.now() };
   // S3: the paid-call audit row is what the daily cap counts. It is retried inside the call. If it still cannot be written the job does NOT fail while Sarvam is running:
-  // the step moves on to `poll` with audit_pending, and poll retries the write on every claim (settleAudit) until it lands. Meanwhile the minutes stay reserved
-  // (reservedMinutesEarlier counts any job with sarvam_started_ms and no audit row, whatever its status).
-  return nextStep(STEPS.poll, await settleAudit(ctx, { ...progress, audit_pending: true }));
+  // the step moves on to `poll` with the pending flag, and poll retries the write on every claim (settleAudit) until it lands. Meanwhile the minutes stay reserved
+  // (reservedMinutesEarlier counts any job with a recorded start and no audit row, whatever its status).
+  return nextStep(pass === "en" ? STEPS.enPoll : STEPS.poll, await settleAudit(ctx, { ...progress, [K.pending]: true }, pass));
 }
 
-/** Write the paid-call row if progress says it is pending; on success audit_pending is dropped, on audit_write_failed it stays (never throws for that). */
-async function settleAudit(ctx: StepContext, progress: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (progress.audit_pending !== true) return progress;
+/** Write the paid-call row for a pass if progress says it is pending; on success the flag is dropped, on audit_write_failed it stays (never throws for that). */
+async function settleAudit(ctx: StepContext, progress: Record<string, unknown>, pass: Pass = "native"): Promise<Record<string, unknown>> {
+  const K = KEYS[pass];
+  if (progress[K.pending] !== true) return progress;
   try {
-    await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: ctx.job.id, sarvamJobId: String(progress.sarvam_job_id ?? ""), durationMs: num(progress.duration_ms) || 0, scope: scopeOf(ctx) });
+    await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: auditJobId(ctx, pass), sarvamJobId: String(progress[K.job] ?? ""), durationMs: num(progress.duration_ms) || 0, scope: scopeOf(ctx) });
   } catch (e) {
     if (!/^audit_write_failed/.test(String((e as Error)?.message ?? e))) throw e;
     return progress;
   }
-  const { audit_pending: _done, ...rest } = progress;
+  const { [K.pending]: _done, ...rest } = progress;
   void _done;
   return rest;
 }
 
 // --- poll -----------------------------------------------------------------------------------------------------------------------------------
-async function pollStep(ctx: StepContext): Promise<StepOutcome> {
-  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress) }; // G26: an audit fault never fails the job while Sarvam runs; retried on every claim
-  const jobId = String(ctx.progress.sarvam_job_id ?? "");
-  const startedMs = num(ctx.progress.sarvam_started_ms);
+async function pollStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
+  const K = KEYS[pass];
+  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress, pass) }; // G26: an audit fault never fails the job while Sarvam runs; retried on every claim
+  const jobId = String(ctx.progress[K.job] ?? "");
+  const startedMs = num(ctx.progress[K.started]);
   if (!jobId || !startedMs) return failWith(jobError("progress_incomplete", "sarvam job"));
   const deadline = Date.now() + sarvamTiming.pollStepMs;
-  let throttled = ctx.progress.throttled === true;
+  let throttled = ctx.progress[K.throttled] === true;
   for (;;) {
-    if (Date.now() - startedMs > SARVAM_WALL_MS) return ledgerFailed(ctx, { ok: false, error: "timeout", transient: false }, "sarvam_timeout", { throttled });
+    if (Date.now() - startedMs > SARVAM_WALL_MS) return passFailed(ctx, pass, { ok: false, error: "timeout", transient: false }, "sarvam_timeout", { throttled });
     const st = await gwBatchStatus(jobId);
     if (st.ok) {
       if (st.state === "Completed") {
-        if (st.outputs.length === 0) return ledgerFailed(ctx, { ok: false, error: "no_outputs", transient: false }, "sarvam_result_failed", { throttled });
-        return nextStep(STEPS.finish, { ...ctx.progress, outputs: st.outputs, throttled });
+        if (st.outputs.length === 0) return passFailed(ctx, pass, { ok: false, error: "no_outputs", transient: false }, "sarvam_result_failed", { throttled });
+        return nextStep(pass === "en" ? STEPS.enFinish : STEPS.finish, { ...ctx.progress, [K.outputs]: st.outputs, [K.throttled]: throttled });
       }
-      if (st.state === "Failed") return ledgerFailed(ctx, { ok: false, error: "job_failed", transient: false }, "sarvam_job_failed", { throttled });
+      if (st.state === "Failed") return passFailed(ctx, pass, { ok: false, error: "job_failed", transient: false }, "sarvam_job_failed", { throttled });
     } else if (st.status === 429) throttled = true; // a transient status error is retried inside the window, as lib/sarvam.ts does
     await touchLane(); // throttled to once per 20 s: the lane stays fresh while we wait
     if (Date.now() + sarvamTiming.pollIntervalMs >= deadline) break;
     await sleep(sarvamTiming.pollIntervalMs);
   }
-  return nextStep(STEPS.poll, { ...ctx.progress, throttled });
+  return nextStep(pass === "en" ? STEPS.enPoll : STEPS.poll, { ...ctx.progress, [K.throttled]: throttled });
 }
 
 // --- ledger helpers (D1; failures never fail the job, D4) -----------------------------------------------------------------------------------
@@ -267,11 +316,13 @@ const refOf = (ctx: StepContext): string => {
   return String(ctx.progress.ref ?? (a.source === "encounter" ? a.encounter_id : a.consult_uid));
 };
 
-async function ledgerBatch(ctx: StepContext, status: "ok" | "failed", httpStatus: number | null, throttled: boolean): Promise<void> {
+/** One ledger line per Sarvam batch pass: the native pass is task "transcribe" under the job's id; the English pass is task "translate" under `<id>:en`. */
+async function ledgerBatch(ctx: StepContext, status: "ok" | "failed", httpStatus: number | null, throttled: boolean, pass: Pass = "native"): Promise<void> {
+  const K = KEYS[pass];
   await appendLedger({
-    caller: "scribe-mcp", machine: "vercel", job_id: ctx.job.id, request_id: typeof ctx.progress.sarvam_job_id === "string" ? ctx.progress.sarvam_job_id : null,
-    route: "gateway", mode: "batch", task: "transcribe", model: SARVAM_GW_STT_MODEL, audio_s: Math.round(num(ctx.progress.duration_ms) / 10) / 100 || 0,
-    started_at: typeof ctx.progress.started_at === "string" ? ctx.progress.started_at : new Date().toISOString(), finished_at: new Date().toISOString(),
+    caller: "scribe-mcp", machine: "vercel", job_id: auditJobId(ctx, pass), request_id: typeof ctx.progress[K.job] === "string" ? (ctx.progress[K.job] as string) : null,
+    route: "gateway", mode: "batch", task: pass === "en" ? "translate" : "transcribe", model: SARVAM_GW_STT_MODEL, audio_s: Math.round(num(ctx.progress.duration_ms) / 10) / 100 || 0,
+    started_at: typeof ctx.progress[K.startedAt] === "string" ? (ctx.progress[K.startedAt] as string) : new Date().toISOString(), finished_at: new Date().toISOString(),
     status, http_status: httpStatus, throttled, scope: scopeOf(ctx), ref: refOf(ctx),
   } satisfies CallLine);
 }
@@ -290,9 +341,9 @@ async function ledgerFailed(ctx: StepContext, f: Fail, code: JobErrorCode, extra
   return failWith(jobError(code, f.error));
 }
 
-// --- finish ---------------------------------------------------------------------------------------------------------------------------------
+// --- finish (native pass) ------------------------------------------------------------------------------------------------------------------
 async function finishStep(ctx: StepContext): Promise<StepOutcome> {
-  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress) }; // one more try at a still-pending audit row; never fatal
+  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress, "native") }; // one more try at a still-pending audit row; never fatal
   const a = ctx.args as unknown as SarvamTranscribeArgs;
   const jobId = String(ctx.progress.sarvam_job_id ?? "");
   const outputs = (ctx.progress.outputs as string[] | undefined) ?? [];
@@ -302,53 +353,120 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
     console.error("[sarvam] result failed", JSON.stringify({ job: ctx.job.id, err: res.error, transient: res.transient }));
     return res.transient ? bail(res, "sarvam_result_failed") : ledgerFailed(ctx, res, "sarvam_result_failed");
   }
-  const entries = res.entries.map((e) => ({ speaker_id: e.speakerId, start_s: e.start, end_s: e.end, text: e.transcript }));
-  const speakers = [...new Set(entries.map((e) => e.speaker_id))].sort();
   const knownMs = num(ctx.progress.duration_ms);
-  const durationS = knownMs > 0 ? Math.round(knownMs / 10) / 100 : entries.reduce((m, e) => Math.max(m, e.end_s), 0);
-  const doc: ResultDoc = { language_code: res.languageCode, duration_s: durationS, speakers, entries, transcript: res.transcript };
-
+  let raw = res.entries.map((e) => ({ speaker_id: e.speakerId, start_s: e.start, end_s: e.end, text: e.transcript, language_code: e.languageCode }));
+  const durationS = knownMs > 0 ? Math.round(knownMs / 10) / 100 : raw.reduce((m, e) => Math.max(m, e.end_s), 0);
+  // no diarized entries: the whole transcript is one pseudo-entry (translated chunk by chunk, so its length is no problem)
+  if (raw.length === 0 && res.transcript.trim()) raw = [{ speaker_id: "", start_s: 0, end_s: durationS, text: res.transcript, language_code: null }];
+  const entries = tagNative(raw);
+  const speakers = [...new Set(entries.map((e) => e.speaker_id))].sort();
   const wantEnglish = a.english === true;
-  const needsTranslate = wantEnglish && looksNonEnglish(res.transcript, res.languageCode);
-  if (wantEnglish && !needsTranslate) {
-    // the language code says English: no Sarvam text call, the English IS the transcript
-    doc.english = res.transcript;
-    for (const e of doc.entries) e.english = e.text;
-  }
-  if (needsTranslate && doc.entries.length === 0) {
-    // no diarized entries: the whole transcript is one pseudo-entry (translated chunk by chunk, so its length is no problem)
-    doc.entries = [{ speaker_id: "", start_s: 0, end_s: durationS, text: res.transcript }];
-  }
+  const doc: ResultDoc = {
+    language_code: res.languageCode, duration_s: durationS, speakers, entries, transcript: res.transcript,
+    english_pass: wantEnglish ? "pending" : "not_requested", sarvam_job_ids: { native: jobId, english: null }, minutes: { native: Math.round((knownMs / 60_000) * 1000) / 1000, english: 0 },
+  };
   try {
     await writeJson(resultKey(ctx.job.id), doc);
   } catch {
     throw new Error("result_write_failed"); // transient by nature: retried under MAX_FAILURES, the Sarvam output is still downloadable
   }
   await ledgerBatch(ctx, "ok", 200, ctx.progress.throttled === true);
-  if (needsTranslate) return nextStep(STEPS.translate, { ...ctx.progress, total_entries: doc.entries.length, language_code: res.languageCode, translate_started_at: new Date().toISOString() });
+  // S8A4: the English track comes from the AUDIO: a second saaras:v3 pass in translate mode, whatever the file-level language_code says
+  if (wantEnglish) return nextStep(STEPS.enInit, { ...ctx.progress, total_entries: entries.length, language_code: res.languageCode });
+  return doneWith(summary(ctx.job.id, doc));
+}
+
+// --- en_finish: download the English pass, align, settle what is unpaired --------------------------------------------------------------------
+async function enFinishStep(ctx: StepContext): Promise<StepOutcome> {
+  ctx = { ...ctx, progress: await settleAudit(ctx, ctx.progress, "en") };
+  const key = resultKey(ctx.job.id);
+  const doc = await readJson<ResultDoc>(key);
+  if (!doc) return failWith(jobError("sarvam_result_failed", "result_missing"));
+  const K = KEYS.en;
+  let pass: "done" | "skipped_cap" | "failed" = ctx.progress.en_skip === "skipped_cap" ? "skipped_cap" : ctx.progress.en_skip === "failed" ? "failed" : "done";
+  let track: EnglishEntry[] = [];
+  let rejected = 0;
+  let passReference: string | null = null;
+  let rejectedNative = new Set<number>();
+  const enJobId = String(ctx.progress[K.job] ?? "");
+  if (pass === "done") {
+    const outputs = (ctx.progress[K.outputs] as string[] | undefined) ?? [];
+    if (!enJobId || outputs.length === 0) return failWith(jobError("progress_incomplete", "english outputs"));
+    const res = await gwBatchResult(enJobId, outputs);
+    if (!res.ok) {
+      console.error("[sarvam] english result failed", JSON.stringify({ job: ctx.job.id, err: res.error, transient: res.transient }));
+      if (res.transient) return bail(res, "sarvam_result_failed");
+      await ledgerBatch(ctx, "failed", res.status ?? httpStatusOf(res.error), false, "en");
+      pass = "failed";
+    } else {
+      let raw = res.entries.map((e) => ({ speaker_id: e.speakerId, start_s: e.start, end_s: e.end, text: e.transcript }));
+      // G49: a transcript-only response has no entries to align. It is NOT turned into a pseudo-entry attached to one native entry (its text would sit in the English next to
+      // mayura's translation of the same speech): every native entry is settled on its own (Latin kept, the rest to mayura) and the pass text is kept only as a reference.
+      if (raw.length === 0 && res.transcript.trim()) passReference = res.transcript.trim();
+      // G43: the pass is not trusted to have returned English: every entry is checked, refused ones send their native partner to mayura
+      const aligned = alignEnglish(doc.entries, raw);
+      track = aligned.track;
+      rejected = aligned.rejected;
+      rejectedNative = aligned.rejectedNative;
+      if (rejected > 0 && rejected > track.length) console.error("[sarvam] english pass looks untranslated", JSON.stringify({ job: ctx.job.id, rejected, of: raw.length }));
+      await ledgerBatch(ctx, "ok", 200, ctx.progress[K.throttled] === true, "en");
+    }
+  }
+  doc.english_entries = track;
+  const need = settleUnpaired(doc.entries, track, rejectedNative);
+  doc.pass_rejected = rejected;
+  if (passReference) doc.english_pass_reference = passReference;
+  // "suspect": most of what the pass returned was not English (the API most likely ignored mode translate)
+  doc.english_pass = pass === "done" && rejected > 0 && rejected > (doc.english_entries?.length ?? 0) ? "suspect" : pass;
+  doc.sarvam_job_ids = { native: doc.sarvam_job_ids?.native ?? null, english: enJobId || null };
+  doc.minutes = { native: doc.minutes?.native ?? 0, english: pass === "done" ? Math.round((num(ctx.progress.duration_ms) / 60_000) * 1000) / 1000 : 0 };
+  if (need.length > 0) {
+    try {
+      await writeJson(key, doc);
+    } catch {
+      throw new Error("result_write_failed");
+    }
+    return nextStep(STEPS.translate, { ...ctx.progress, remaining_entries: need.length, translate_started_at: new Date().toISOString() });
+  }
+  return finishDoc(ctx, key, doc, 0, false);
+}
+
+/** Order the English track, compute the drug candidates, write the final object, finish. */
+async function finishDoc(ctx: StepContext, key: string, doc: ResultDoc, mayuraChars: number, throttled: boolean): Promise<StepOutcome> {
+  finalizeEnglish(doc, DRUG_LEXICON);
+  try {
+    await writeJson(key, doc);
+  } catch {
+    throw new Error("result_write_failed");
+  }
+  if (mayuraChars > 0) await ledgerTranslation(ctx, "ok", mayuraChars, 200, throttled);
   return doneWith(summary(ctx.job.id, doc));
 }
 
 function summary(jobId: string, doc: ResultDoc): Record<string, unknown> {
   return {
     r2_key: resultKey(jobId),
-    entries: doc.entries.length,
     speakers: doc.speakers.length,
     language_code: doc.language_code,
     duration_s: doc.duration_s,
     english: doc.english !== undefined,
     transcript_chars: doc.transcript.length,
     english_chars: doc.english?.length ?? 0,
+    english_pass: doc.english_pass ?? "not_requested",
+    english_entries: doc.english_entries?.length ?? 0,
+    ...englishCounts(doc),
+    pass_rejected: doc.pass_rejected ?? 0,
+    drug_candidates: doc.drug_candidates?.length ?? 0,
+    minutes: doc.minutes ?? { native: 0, english: 0 },
   };
 }
 
-// --- translate ------------------------------------------------------------------------------------------------------------------------------
+// --- translate: mayura, PER ENTRY, for the entries the English pass did not cover ----------------------------------------------------------------
 async function translateStep(ctx: StepContext): Promise<StepOutcome> {
   const key = resultKey(ctx.job.id);
   const doc = await readJson<ResultDoc>(key);
   if (!doc) return failWith(jobError("sarvam_result_failed", "result_missing"));
   const deadline = Date.now() + sarvamTiming.translateStepMs;
-  const lang = doc.language_code;
   const throttled = ctx.progress.translate_throttled === true;
   let sent = num(ctx.progress.translate_chars) || 0;
 
@@ -356,19 +474,29 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
     if (entry.english !== undefined) continue;
     const chunks = chunkText(entry.text);
     const parts = entry.parts ?? [];
+    // the entry's OWN language if Sarvam gave one, else "auto": the file-level code is not trusted for a mixed-language consult
+    const src = entry.mayura_lang ?? (entry.language_code && entry.language_code.includes("-") && !/^en-/i.test(entry.language_code) ? entry.language_code : null);
+    let gaveUp = false;
     // F1: the deadline is checked per CHUNK, and the partial English is saved after EACH chunk, so a claim resumes mid-entry and never re-sends
     while (parts.length < chunks.length) {
       if (Date.now() >= deadline) {
         entry.parts = parts;
         return persistAndContinue(ctx, key, doc, throttled, sent);
       }
-      const r = await gwTranslateChunk(chunks[parts.length]!, lang);
+      const r = await gwTranslateChunk(chunks[parts.length]!, src);
       if (!r.ok) {
         entry.parts = parts;
         await writeJson(key, doc).catch(() => undefined);
         console.error("[sarvam] translate failed", JSON.stringify({ job: ctx.job.id, err: r.error, transient: r.transient }));
         if (r.transient) throw new Error(`sarvam_translate_failed: ${r.error}`);
         await ledgerTranslation(ctx, "failed", sent, r.status ?? httpStatusOf(r.error), throttled || r.status === 429);
+        // G54: mayura refuses (unavailable, capped, a 4xx) an entry the translate pass had PARTLY covered: the job goes on, the entry keeps that part and says so (status partial)
+        if (entry.partial_english) {
+          entry.english = "";
+          delete entry.parts;
+          gaveUp = true;
+          break;
+        }
         return failWith(jobError("sarvam_translate_failed", r.error));
       }
       parts.push(r.english);
@@ -380,19 +508,16 @@ async function translateStep(ctx: StepContext): Promise<StepOutcome> {
         throw new Error("result_write_failed");
       }
     }
+    if (gaveUp) continue; // the entry stays english "" with its partial English set aside (addMayura restores it as status partial)
     entry.english = parts.join(" ").trim();
+    entry.english_source = entry.english_source === "mayura_fallback" ? "mayura_fallback" : "mayura";
     delete entry.parts;
   }
   const remaining = doc.entries.filter((e) => e.english === undefined).length;
   if (remaining > 0) return persistAndContinue(ctx, key, doc, throttled, sent);
-  doc.english = doc.entries.map((e) => e.english ?? "").filter(Boolean).join(" ");
-  try {
-    await writeJson(key, doc);
-  } catch {
-    throw new Error("result_write_failed");
-  }
-  await ledgerTranslation(ctx, "ok", sent, 200, throttled);
-  return doneWith(summary(ctx.job.id, doc));
+  doc.english_entries = doc.english_entries ?? [];
+  addMayura(doc.entries, doc.english_entries, doc.entries.map((_, i) => i).filter((i) => doc.entries[i]!.english_source === "mayura" || doc.entries[i]!.english_source === "mayura_fallback"));
+  return finishDoc(ctx, key, doc, sent, throttled);
 }
 
 async function persistAndContinue(ctx: StepContext, key: string, doc: ResultDoc, throttled: boolean, sent: number): Promise<StepOutcome> {

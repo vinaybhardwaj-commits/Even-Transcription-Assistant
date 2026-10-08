@@ -1,0 +1,64 @@
+{
+  "id": "ehrc_surgical_outcome",
+  "version": "0.1.0",
+  "title": "Surgical stay outcome label",
+  "unit": "stay",
+  "inputs": [
+    "pulse_record"
+  ],
+  "engine": "llm_zdr",
+  "source": "ehrc-surgical-outcome@md",
+  "output": {
+    "type": "object",
+    "properties": {
+      "label": {
+        "enum": [
+          "positive",
+          "negative",
+          "neutral_protocol",
+          "unscored"
+        ]
+      }
+    }
+  },
+  "bench": {
+    "location": "rubrics/ehrc_surgical_outcome/bench.json",
+    "metric": "accuracy",
+    "threshold": 0.8
+  },
+  "status": "draft",
+  "definition": {
+    "grain": "the stay, not the person",
+    "labels": [
+      "positive",
+      "negative",
+      "neutral_protocol",
+      "unscored"
+    ],
+    "do_not_use_as_outcome": [
+      "a quality band or low-value finding (quality, not recovery)",
+      "a booking call outcome",
+      "the first outpatient visit after discharge when it is a different problem",
+      "silence or no follow-up on its own (never positive)"
+    ],
+    "negative": "pus or surgical-site infection (not expected serous drainage), fever, spreading redness, an unplanned return to theatre or revision, or a same-problem outpatient visit that documents a complication; planned staging is not negative",
+    "positive": "an indicated operation, no negative finding, and after the procedure window either (1) post-discharge care-manager questions exist and are clean and any same-problem outpatient visit in the window documents no harm, or (2) a same-problem visit in the window with no complaint or symptomatically better; expected symptoms do not veto",
+    "neutral_protocol": "still on a planned dirty-case wound pathway (negative-pressure dressing, empiric intravenous antibiotics, dressings) without meeting negative; not recovered, do not promote",
+    "unscored": "empty post-discharge questions or a missed call with no later clean same-problem note; the only note is before the window; a later visit is a different problem and no same-problem follow-up exists",
+    "windows_last_same_problem_note_inside": {
+      "joints_ligament_flap_fusion": "2-4 weeks",
+      "tonsil": "10-14 days",
+      "hernia_fistula_day_case_general_surgery": "1-2 weeks",
+      "stones": "post-procedure; a planned stent removal is allowed"
+    },
+    "read_order": [
+      "pre-op indication",
+      "theatre record",
+      "discharge",
+      "post-discharge questions",
+      "last same-problem outpatient note inside the window",
+      "label"
+    ],
+    "escalate": "ask a medical reader when wound versus expected drainage, or staging versus a return to theatre, is the fork"
+  }
+}

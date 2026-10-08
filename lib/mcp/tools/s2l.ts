@@ -150,7 +150,8 @@ const lanes: McpTool = {
 // scribe_health aspect=routes
 // ---------------------------------------------------------------------------
 
-export const PUBLIC_ORIGIN_DEFAULT = "https://evenscribe.app";
+// G50: the production origin is www; the apex 307-redirects to it (and a redirect across origins drops the bearer), so the code default is www. APP_URL still overrides.
+export const PUBLIC_ORIGIN_DEFAULT = "https://www.evenscribe.app";
 /** The public origin the route probe may call: APP_URL if it is an http(s) URL, else the production constant. Only the origin is kept (no path, query or credentials). */
 export function publicOrigin(): URL | null {
   const raw = (process.env.APP_URL ?? "").trim() || PUBLIC_ORIGIN_DEFAULT;

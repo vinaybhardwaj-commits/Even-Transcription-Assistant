@@ -78,7 +78,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the S1, S5, S8 and S2L additions", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(52);
+    expect(all).toHaveLength(53);
     for (const n of OPERATOR_13) expect(all).toContain(n);
     for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_sarvam", "scribe_steward_command", "scribe_lanes", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
@@ -132,7 +132,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
