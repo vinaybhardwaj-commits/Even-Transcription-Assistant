@@ -45,7 +45,7 @@ const BASE_CFG = (over: Record<string, unknown> = {}): Record<string, unknown> =
   ...over,
 });
 
-function fakeDb(o: { cfg?: Record<string, unknown>; rooms?: Array<{ room_id: string; room_name: string; hostname: string | null }>; recorder?: RecorderRow[] | "throw"; inflight?: boolean; failLog?: boolean; deviceName?: string | null } = {}) {
+function fakeDb(o: { cfg?: Record<string, unknown>; rooms?: Array<{ room_id: string; room_name: string; hostname: string | null }>; recorder?: RecorderRow[] | "throw"; inflight?: boolean; failLog?: boolean; deviceName?: string | null; operatorEnd?: string | null; sessionToday?: boolean; dayThrows?: boolean } = {}) {
   const state = {
     cfg: o.cfg ?? BASE_CFG(),
     rooms: o.rooms ?? [{ room_id: "room_a", room_name: "OPD A", hostname: "HOST-A" }],
@@ -55,6 +55,9 @@ function fakeDb(o: { cfg?: Record<string, unknown>; rooms?: Array<{ room_id: str
     inflight: o.inflight ?? false,
     deviceName: o.deviceName === undefined ? "USB Mic X" : o.deviceName,
     failLog: o.failLog ?? false,
+    operatorEnd: o.operatorEnd ?? null,
+    sessionToday: o.sessionToday ?? true,
+    dayThrows: o.dayThrows ?? false,
   };
   const sql = (async (strings: TemplateStringsArray, ...v: unknown[]) => {
     const text = strings.join("?");
@@ -76,6 +79,11 @@ function fakeDb(o: { cfg?: Record<string, unknown>; rooms?: Array<{ room_id: str
       if (state.recorder === "throw") throw new Error("boom");
       return state.recorder;
     }
+    if (text.includes("c.kind = 'end_day'")) {
+      if (state.dayThrows) throw new Error("boom");
+      return state.operatorEnd ? [{ acked_at: state.operatorEnd }] : [];
+    }
+    if (text.includes("FROM bench_session s")) return state.sessionToday ? [{ x: 1 }] : [];
     if (text.includes("FROM bench_command c")) return state.inflight ? [{ x: 1 }] : [];
     if (text.includes("expected_device_name")) return state.deviceName === null ? [] : [{ expected_device_name: state.deviceName }];
     if (text.includes("INSERT INTO steward_decisions")) {
@@ -431,7 +439,53 @@ describe("waiting_for_mic: never start an unplugged kiosk; start promptly when t
     // and the same state inside the window goes
     const B = ist("21:29");
     const w2: RecentAction[] = [{ ...waiting[0]!, ts: new Date(B - 60_000).toISOString() }];
-    expect(evaluateStartDay({ sense: idle(B, { audio: { default_input_present: true } }), cfg: cfgOn, A: B, recent: w2, recorder: READY(B) })).toMatchObject({ go: true, mic_return: true });
+    expect(evaluateStartDay({ sense: idle(B, { audio: { default_input_present: true } }), cfg: cfgOn, A: B, recent: w2, recorder: READY(B), day: { operator_end_at: null, session_today: false } })).toMatchObject({ go: true, mic_return: true });
+  });
+
+  it("late evening: an operator end_day after 20:00 IST closes the day; no start after 20:30 once the room has had a session; a quiet room may still start", () => {
+    const run = (hhmm: string, day: { operator_end_at: string | null; session_today: boolean } | null | undefined) => {
+      const A = ist(hhmm);
+      return evaluateStartDay({ sense: idle(A, { audio: { default_input_present: true } }), cfg: cfgOn, A, recent: [], recorder: READY(A), day });
+    };
+    expect(run("21:14", { operator_end_at: new Date(ist("21:09")).toISOString(), session_today: true })).toMatchObject({ go: false, reason: "day_ended_by_operator" });
+    expect(run("20:10", { operator_end_at: new Date(ist("20:05")).toISOString(), session_today: true })).toMatchObject({ go: false, reason: "day_ended_by_operator" });
+    expect(run("20:31", { operator_end_at: null, session_today: true })).toMatchObject({ go: false, reason: "late_start_blocked" });
+    expect(run("20:29", { operator_end_at: null, session_today: true })).toMatchObject({ go: true });
+    expect(run("20:31", { operator_end_at: null, session_today: false })).toMatchObject({ go: true });
+    // an operator end beats "no session today"
+    expect(run("20:31", { operator_end_at: new Date(ist("20:20")).toISOString(), session_today: false })).toMatchObject({ reason: "day_ended_by_operator" });
+    // unreadable late state = no start; before 20:00 the day state is not needed at all
+    expect(run("20:31", null)).toMatchObject({ go: false, reason: "day_state_unreadable" });
+    expect(run("20:05", undefined)).toMatchObject({ go: false, reason: "day_state_unreadable" });
+    expect(run("19:59", undefined)).toMatchObject({ go: true });
+  });
+
+  it("replay of the 9 Oct incident: end_day (mcp) acked 21:09 IST, the next tick at 21:14 IST -> day_ended_by_operator, no command; the next IST day starts normally", async () => {
+    const D = "2026-10-09";
+    const db = fakeDb({ operatorEnd: new Date(ist("21:09", D)).toISOString(), sessionToday: true });
+    const { calls, port } = fakePort();
+    senseWith((id, A) => idle(A, { room_id: id, audio: { default_input_present: true }, reachable: { kh_heartbeat_at: ago(A, 20) } } as never));
+    db.state.recorder = READY(ist("21:14", D));
+    await tick(db, port, ist("21:14", D));
+    expect(calls.insert).toHaveLength(0);
+    expect(rowsOf(db).at(-1)).toMatchObject({ rule: SKIP_RULE, params: { reason: "day_ended_by_operator" } });
+    // the next IST day: the read finds no end_day of that day
+    const db2 = fakeDb({ operatorEnd: null, sessionToday: false });
+    const p2 = fakePort();
+    senseWith((id, A) => idle(A, { room_id: id, audio: { default_input_present: true }, reachable: { kh_heartbeat_at: ago(A, 20) } } as never));
+    db2.state.recorder = READY(ist("08:00", "2026-10-10"));
+    await tick(db2, p2.port, ist("08:00", "2026-10-10"));
+    expect(p2.calls.insert).toHaveLength(1);
+  });
+
+  it("the late guards read once, only from 20:00 IST; an unreadable read means no start", async () => {
+    const db = fakeDb({ dayThrows: true });
+    const { calls, port } = fakePort();
+    senseWith((id, A) => idle(A, { room_id: id, audio: { default_input_present: true }, reachable: { kh_heartbeat_at: ago(A, 20) } } as never));
+    db.state.recorder = READY(ist("20:10"));
+    await tick(db, port, ist("20:10"));
+    expect(calls.insert).toHaveLength(0);
+    expect(rowsOf(db).at(-1)).toMatchObject({ params: { reason: "day_state_unreadable" } });
   });
 
   it("3 failed non-device attempts, then the device goes missing: waiting_for_mic wins over the cap and the backoff", () => {
@@ -562,9 +616,12 @@ describe("phantom_session (shadow only)", () => {
   });
 });
 
+/** a room with no session and no operator end all day (the late guards pass) */
+const QUIET_DAY = { operator_end_at: null, session_today: false };
+
 describe("the pure guards at their edges", () => {
   const cfg = { ...DEFAULT_CONFIG, kill_switch: false, start_day_live: true };
-  const go = (A: number, over: Parameters<typeof idle>[1] = {}, recorder: RecorderRow[] | null = READY(A)) => evaluateStartDay({ sense: idle(A, over), cfg, A, recent: [], recorder });
+  const go = (A: number, over: Parameters<typeof idle>[1] = {}, recorder: RecorderRow[] | null = READY(A)) => evaluateStartDay({ sense: idle(A, over), cfg, A, recent: [], recorder, day: QUIET_DAY });
 
   it("time window: 07:29:59 no, 07:30:00 yes, 21:29:59 yes, 21:30:00 no (IST, end exclusive)", () => {
     expect(go(ist("07:29", "2026-10-06", "59"))).toMatchObject({ go: false, reason: "outside_start_window" });
@@ -579,7 +636,7 @@ describe("the pure guards at their edges", () => {
     const wide = { ...cfg, schedule: { ...cfg.schedule, clinic: { ...cfg.schedule.clinic, start: "06:00", end: "23:00" } } };
     for (const [hhmm, want] of [["07:29", false], ["07:30", true], ["21:29", true], ["21:30", false]] as const) {
       const A = ist(hhmm);
-      expect(evaluateStartDay({ sense: idle(A), cfg: wide, A, recent: [], recorder: READY(A) }).go).toBe(want);
+      expect(evaluateStartDay({ sense: idle(A), cfg: wide, A, recent: [], recorder: READY(A), day: QUIET_DAY }).go).toBe(want);
     }
   });
   it("a closed day is outside the window", () => {

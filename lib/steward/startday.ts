@@ -13,6 +13,9 @@
  * GUARDS (all must hold for an attempt):
  *   dev_room                   room flagged dev/test in steward_config.rooms, or one of NEVER_START_DAY_ROOMS (ORB3, Home Office)
  *   outside_start_window       now is not in 07:30-21:30 IST (start inclusive, end exclusive; a closed day is outside)
+ *   day_ended_by_operator     a non-steward end_day of the room was acked in this IST day at or after 20:00 IST (V / Kiosk Bot / fable closed the day on purpose): no start_day until the next IST day
+ *   late_start_blocked         no start at or after 20:30 IST unless the room has had no session at all this IST day
+ *   day_state_unreadable       from 20:00 IST the two guards above need one read; if it fails, no start (fail safe)
  *   kiosk_health_stale         no kiosk-health heartbeat for the room's machine within the last 3 min
  *   session_open               the sensed session is open (the loop's own read); the server is asked again at enqueue time (findActiveSession)
  *   recorder_*                 recorder.status must be ready with session_open false, continuously for >= 5 min, newest row <= 7 min old (streak waived on a mic return)
@@ -40,6 +43,9 @@ export const NEVER_START_DAY_ROOMS: readonly string[] = ["room_jwyrr4dc", "room_
 /** the order's literal start window 07:30-21:30 IST (minutes of the IST day, end exclusive), applied IN ADDITION to the room's configured clinic window and closed days */
 export const START_FROM_MIN = 7 * 60 + 30;
 export const START_UNTIL_MIN = 21 * 60 + 30;
+/** from 20:00 IST an operator end_day closes the day for the Steward; from 20:30 IST only a room with no session all day may still be started */
+export const OPERATOR_END_FROM_MIN = 20 * 60;
+export const LATE_START_FROM_MIN = 20 * 60 + 30;
 export const KH_FRESH_MS = 3 * 60_000;
 export const READY_MIN_MS = 5 * 60_000;
 /** kiosk-health re-emits recorder.status at least every 300 s: a newest row older than this is not evidence of anything */
@@ -139,6 +145,15 @@ export type StartDayInput = {
   recorder: readonly RecorderRow[] | null;
   /** room_install.expected_device_name when known (the alert names it) */
   deviceName?: string | null;
+  /** readDayState() result; needed from 20:00 IST (undefined or null there = unreadable = no start) */
+  day?: DayState | null;
+};
+
+export type DayState = {
+  /** acked_at (ISO) of the newest non-steward end_day acked in this IST day at or after 20:00 IST, else null */
+  operator_end_at: string | null;
+  /** the room has had at least one bench_session start this IST day */
+  session_today: boolean;
 };
 
 export type StartDayVerdict =
@@ -196,6 +211,13 @@ export function evaluateStartDay(inp: StartDayInput): StartDayVerdict {
   const w = windowAt(cfg, "clinic", A);
   const istMin = Math.floor((A - istMidnightOf(A)) / 60_000);
   if (!w.in_window || istMin < START_FROM_MIN || istMin >= START_UNTIL_MIN) return skip("outside_start_window");
+
+  if (istMin >= OPERATOR_END_FROM_MIN) {
+    if (!inp.day) return skip("day_state_unreadable");
+    facts.session_today = inp.day.session_today;
+    if (inp.day.operator_end_at) return skip("day_ended_by_operator", { operator_end_at: inp.day.operator_end_at });
+    if (istMin >= LATE_START_FROM_MIN && inp.day.session_today) return skip("late_start_blocked");
+  }
 
   const kh = s.reachable.kh_heartbeat_at ? Date.parse(s.reachable.kh_heartbeat_at) : NaN;
   facts.kh_heartbeat_age_s = Number.isFinite(kh) ? Math.round((A - kh) / 1000) : null;
@@ -306,6 +328,32 @@ export async function startInFlight(sql: StewardSql, roomId: string, A: number):
        LIMIT 1
     `) as unknown[];
     return rows.length > 0;
+  } catch {
+    return null;
+  }
+}
+
+/** The one extra read of the late-evening guards (only called from 20:00 IST): an operator end_day acked today at or after 20:00 IST, and whether the room had any session today.
+ *  null = unreadable. INFERRED columns: bench_command(room_id, kind, source, acked_at), bench_session(room_id, started_at). */
+export async function readDayState(sql: StewardSql, roomId: string, A: number): Promise<DayState | null> {
+  try {
+    const midnight = istMidnightOf(A);
+    const from = new Date(midnight + OPERATOR_END_FROM_MIN * 60_000).toISOString();
+    const day0 = new Date(midnight).toISOString();
+    const hi = new Date(A).toISOString();
+    const ends = (await sql`
+      SELECT c.acked_at FROM bench_command c
+       WHERE c.room_id = ${roomId} AND c.kind = 'end_day' AND c.source <> 'steward'
+         AND c.acked_at IS NOT NULL AND c.acked_at >= ${from}::timestamptz AND c.acked_at <= ${hi}::timestamptz
+       ORDER BY c.acked_at DESC LIMIT 1
+    `) as unknown as { acked_at: string | Date }[];
+    const sess = (await sql`
+      SELECT 1 AS x FROM bench_session s
+       WHERE s.room_id = ${roomId} AND s.started_at >= ${day0}::timestamptz AND s.started_at <= ${hi}::timestamptz
+       LIMIT 1
+    `) as unknown[];
+    const at = ends[0]?.acked_at;
+    return { operator_end_at: at ? new Date(at).toISOString() : null, session_today: sess.length > 0 };
   } catch {
     return null;
   }
