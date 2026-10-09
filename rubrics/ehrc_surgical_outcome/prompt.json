@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "rubric_id": "ehrc_surgical_outcome",
   "note": "Anchors, labels and the read order are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-llm.ts systemPrompt).",
   "rules": [
@@ -12,7 +12,7 @@
     "better_or_no_complaint is true only when a same-problem follow-up record documents no complaint, or the patient symptomatically better; expected symptoms do not veto.",
     "escalate is true when the fork is wound versus expected drainage, or staging versus a return to theatre, and you cannot tell.",
     "The label is a proposal: positive needs a same-problem record with no complaint or better and no negative signal; negative needs at least one code.",
-    "Every evidence quote is copied EXACTLY from the stay record; never paraphrase.",
+    "evidence is a short list of {item, quote}. item is ONE of: ssi_pus, fever, spreading_redness, return_to_theatre, complication_documented, indication, procedure, discharge_course, follow_up_better, follow_up_complaint, planned_staging, other. quote is a SHORT phrase (under 80 characters) copied EXACTLY from the stay record; never paraphrase, and never copy a name, a number that identifies a person, or a contact detail.",
     "Answer with ONE JSON object and nothing else."
   ],
   "user_header": "STAY RECORD. Dates are days after the admission or after the discharge. Follow-up records are numbered R1, R2, ... in time order."

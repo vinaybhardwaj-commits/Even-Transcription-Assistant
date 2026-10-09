@@ -66,6 +66,8 @@ export async function buildBoard(a: BoardArgs): Promise<BoardResult> {
   const by = a.by ?? (r.unit === "consult" ? "doctor" : "room");
   if (by !== "doctor" && by !== "room") return { ok: false, error: "bad_args", detail: "by is doctor or room" };
   if (by === "doctor" && !units.includes("consult")) return { ok: false, error: "board_by_doctor_needs_consult" };
+  // E3-2: a stay has no room to group by (and no doctor without a consult): refused before any query
+  if (by === "room" && r.unit === "stay") return { ok: false, error: "board_stay_no_room" };
   const minN = Math.max(MIN_N_FLOOR, Math.trunc(Number(a.min_n)) || MIN_N_DEFAULT);
   const room = a.room && /^[A-Za-z0-9_-]{1,64}$/.test(a.room) ? a.room : null;
   // 1. a filter that names a held-out (room, date) is refused (a single day, or a one-sided range)

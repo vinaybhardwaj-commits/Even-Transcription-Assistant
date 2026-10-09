@@ -101,7 +101,7 @@ export async function listResults(f: ResultFilter): Promise<Array<Record<string,
        AND (${f.run_id ?? null}::text IS NULL OR run_id = ${f.run_id ?? null}::text)
        AND (${f.lab ?? null}::boolean IS NULL OR lab = ${f.lab ?? null}::boolean)
        AND (${f.status ?? null}::text IS NULL OR status = ${f.status ?? null}::text)
-       AND room_id IS NOT NULL AND ist_date IS NOT NULL -- GATING-G65 (ours): a row whose room or date is unknown cannot be checked against the held-out set, so it is never served
+       AND ist_date IS NOT NULL AND (room_id IS NOT NULL OR unit_kind = 'stay') -- GATING-G65 (ours): a row whose room or date is unknown cannot be checked against the held-out set, so it is never served; E3-2: a STAY has no room and no room-day (the held-out set is by room-day), it is read by its admission date
        AND NOT EXISTS (
              SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
               WHERE (b.d = rubric_result.ist_date AND b.r = rubric_result.room_id)

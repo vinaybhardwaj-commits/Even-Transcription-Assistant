@@ -6,6 +6,7 @@
  * ON d.ipd_no = a.identifier; the patient bridge a.uhid = individuals.kx_uhid -> individuals.uid = "individuals-prescriptions"._parent_doc_id. member_uid is NOT a bridge.
  * PHI RULE (hard): no name, mobile, telecom, address, kin, birth date, policy, payer or MLC column is ever selected. uhid and kx_uhid appear ONLY inside a JOIN condition, never in a SELECT list; the ipd
  * number (a.identifier) is likewise used only to join. No output field carries any of them (a test reads the SQL text and the output).
+ * LIMITS (E3-3): per STAY, inside the SQL (row_number() OVER (PARTITION BY stay)): at most 5 theatre notes and 10 follow-up records, one more is fetched to flag truncation; discharge and cdmss: one row per stay.
  * BATCHING. Five SELECTs per batch of at most 40 stays (admissions, theatre, discharge, cdmss, follow-up), never one per stay. withStayBatch(uids, fn) runs them once and lets readStayRecord answer from
  * that batch; a stay outside the batch is fetched as a batch of one.
  * The post-discharge care-manager questions are NOT read (care_manager_completed_tasks.entries is opaque): cm_questions is the constant "not_read".
@@ -20,14 +21,24 @@ export const STAY_UID_RE = /^[A-Za-z0-9]{20,40}$/;
 export const STAY_BATCH_MAX = 40;
 export const FOLLOW_UP_DAYS_MAX = 60;
 export const STAY_TEXT_MAX = 8_000;
+/** E3-3: per-STAY limits, applied inside the SQL (row_number() per stay), one more row is fetched to know whether a stay was cut */
+export const STAY_THEATRE_MAX = 5;
+export const STAY_FOLLOWUP_MAX = 10;
+const REF_RE = /^[A-Za-z0-9_-]{1,128}$/;
+/** E3-1: an opaque row reference, or null when the warehouse value is not a clean id */
+export const cleanRef = (v: unknown): string | null => (typeof v === "string" && REF_RE.test(v) ? v : typeof v === "number" ? String(v) : null);
 
 export type StayRecord = {
   stay_uid: string;
   admission: { admitted_at: string | null; ist_date: string | null; admission_type: string | null; department: string | null; encounter_id: string | null };
-  theatre: Array<{ surgery_name: string; template_name: string; created_at: string | null; note: string }>;
+  theatre: Array<{ ref: string | null; surgery_name: string; template_name: string; created_at: string | null; note: string }>;
+  /** more than STAY_THEATRE_MAX notes existed: only the first (oldest) STAY_THEATRE_MAX are here */
+  theatre_truncated: boolean;
   discharge: { discharged_at: string | null; discharge_type: string | null } | null;
-  cdmss: { procedure: string; diagnosis: string; indication: string; course_summary: string; disposition: string; follow_up: string; aftercare_instructions: string; aftercare_warning_signs: string } | null;
+  cdmss: { ref: string | null; procedure: string; diagnosis: string; indication: string; course_summary: string; disposition: string; follow_up: string; aftercare_instructions: string; aftercare_warning_signs: string } | null;
   follow_up: Array<{ rec_uid: string; uploaded_at: string; record: NormRecord }>;
+  /** more than STAY_FOLLOWUP_MAX records existed: only the first (earliest) STAY_FOLLOWUP_MAX are here */
+  follow_up_truncated: boolean;
   /** the care-manager post-discharge questions are not read in this slice */
   cm_questions: "not_read";
 };
@@ -46,45 +57,54 @@ export function admissionsSql(uids: readonly string[]): string {
  WHERE a.uid IN (${uidListLiteral(uids)})`;
 }
 export function theatreSql(uids: readonly string[]): string {
-  return `SELECT a.uid AS stay_uid, o.surgery_name AS surgery_name, o.template_name AS template_name, o.created_at AS created_at, o.note AS note
-  FROM kx_ip_admissions a
-  JOIN kx_clinical_template_ot_notes o ON o.encounter_id = a.encounter_id
- WHERE a.uid IN (${uidListLiteral(uids)})
- ORDER BY a.uid, o.created_at
- LIMIT 400`;
+  return `SELECT t.stay_uid, t.note_uid, t.surgery_name, t.template_name, t.created_at, t.note
+  FROM (SELECT a.uid AS stay_uid, o.uid AS note_uid, o.surgery_name AS surgery_name, o.template_name AS template_name, o.created_at AS created_at, o.note AS note,
+               row_number() OVER (PARTITION BY a.uid ORDER BY o.created_at, o.uid) AS rn
+          FROM kx_ip_admissions a
+          JOIN kx_clinical_template_ot_notes o ON o.encounter_id = a.encounter_id
+         WHERE a.uid IN (${uidListLiteral(uids)})) t
+ WHERE t.rn <= ${STAY_THEATRE_MAX + 1}
+ ORDER BY t.stay_uid, t.rn`;
 }
 export function dischargeSql(uids: readonly string[]): string {
-  return `SELECT a.uid AS stay_uid, d.discharge_date_time AS discharged_at, d.discharge_type AS discharge_type
-  FROM kx_ip_admissions a
-  JOIN kx_discharge_summary_records d ON d.ipd_no = a.identifier
- WHERE a.uid IN (${uidListLiteral(uids)})
- ORDER BY a.uid, d.discharge_date_time DESC
- LIMIT 200`;
+  return `SELECT t.stay_uid, t.discharged_at, t.discharge_type
+  FROM (SELECT a.uid AS stay_uid, d.discharge_date_time AS discharged_at, d.discharge_type AS discharge_type,
+               row_number() OVER (PARTITION BY a.uid ORDER BY d.discharge_date_time DESC) AS rn
+          FROM kx_ip_admissions a
+          JOIN kx_discharge_summary_records d ON d.ipd_no = a.identifier
+         WHERE a.uid IN (${uidListLiteral(uids)})) t
+ WHERE t.rn = 1
+ ORDER BY t.stay_uid`;
 }
 export function cdmssSql(uids: readonly string[]): string {
-  return `SELECT a.uid AS stay_uid, c.extracted__procedure AS procedure_text, c.extracted__diagnosis AS diagnosis_text, c.extracted__indication AS indication_text, c.extracted__course_summary AS course_summary,
-       c.extracted__disposition AS disposition_text, c.extracted__follow_up AS follow_up_text, c.extracted__aftercare__instructions AS aftercare_instructions, c.extracted__aftercare__warning_signs AS aftercare_warning_signs
-  FROM kx_ip_admissions a
-  JOIN cdmss_discharge_extracts c ON c.encounter_id = a.encounter_id
- WHERE a.uid IN (${uidListLiteral(uids)})
- LIMIT 200`;
+  return `SELECT t.stay_uid, t.cdmss_uid, t.procedure_text, t.diagnosis_text, t.indication_text, t.course_summary, t.disposition_text, t.follow_up_text, t.aftercare_instructions, t.aftercare_warning_signs
+  FROM (SELECT a.uid AS stay_uid, c.uid AS cdmss_uid, c.extracted__procedure AS procedure_text, c.extracted__diagnosis AS diagnosis_text, c.extracted__indication AS indication_text, c.extracted__course_summary AS course_summary,
+               c.extracted__disposition AS disposition_text, c.extracted__follow_up AS follow_up_text, c.extracted__aftercare__instructions AS aftercare_instructions, c.extracted__aftercare__warning_signs AS aftercare_warning_signs,
+               row_number() OVER (PARTITION BY a.uid ORDER BY c.uid) AS rn
+          FROM kx_ip_admissions a
+          JOIN cdmss_discharge_extracts c ON c.encounter_id = a.encounter_id
+         WHERE a.uid IN (${uidListLiteral(uids)})) t
+ WHERE t.rn = 1
+ ORDER BY t.stay_uid`;
 }
 export function followUpSql(uids: readonly string[]): string {
-  return `SELECT a.uid AS stay_uid, p.uid AS rec_uid, p.uploaded_at AS uploaded_at,
-       p.general_practitioner_prescription__examination AS exam,
-       p.general_practitioner_prescription__presenting_complaints AS complaints,
-       p.general_practitioner_prescription__plan_of_management AS plan,
-       p.general_practitioner_prescription__ai_field_metadata AS ai_meta,
-       p.medications AS meds, p.further_investigation AS investigations, p.refer_to AS refer_to, p.structured_general_advice AS advice,
-       p.followup__followup_date AS fu_date, p.followup__followup_type AS fu_type, p.next_follow_up_date AS fu_next, p.followup__follow_up_instructions AS fu_instructions
-  FROM kx_ip_admissions a
-  JOIN kx_discharge_summary_records d ON d.ipd_no = a.identifier
-  JOIN individuals i ON i.kx_uhid = a.uhid
-  JOIN "individuals-prescriptions" p ON p._parent_doc_id = i.uid
- WHERE a.uid IN (${uidListLiteral(uids)}) AND p.type = '${RECORD_TYPE}' AND p.is_draft = false
-   AND p.uploaded_at > d.discharge_date_time AND p.uploaded_at <= d.discharge_date_time + interval '${FOLLOW_UP_DAYS_MAX} days'
- ORDER BY a.uid, p.uploaded_at
- LIMIT 1000`;
+  return `SELECT t.stay_uid, t.rec_uid, t.uploaded_at, t.exam, t.complaints, t.plan, t.ai_meta, t.meds, t.investigations, t.refer_to, t.advice, t.fu_date, t.fu_type, t.fu_next, t.fu_instructions
+  FROM (SELECT a.uid AS stay_uid, p.uid AS rec_uid, p.uploaded_at AS uploaded_at,
+               p.general_practitioner_prescription__examination AS exam,
+               p.general_practitioner_prescription__presenting_complaints AS complaints,
+               p.general_practitioner_prescription__plan_of_management AS plan,
+               p.general_practitioner_prescription__ai_field_metadata AS ai_meta,
+               p.medications AS meds, p.further_investigation AS investigations, p.refer_to AS refer_to, p.structured_general_advice AS advice,
+               p.followup__followup_date AS fu_date, p.followup__followup_type AS fu_type, p.next_follow_up_date AS fu_next, p.followup__follow_up_instructions AS fu_instructions,
+               row_number() OVER (PARTITION BY a.uid ORDER BY p.uploaded_at, p.uid) AS rn
+          FROM kx_ip_admissions a
+          JOIN kx_discharge_summary_records d ON d.ipd_no = a.identifier
+          JOIN individuals i ON i.kx_uhid = a.uhid
+          JOIN "individuals-prescriptions" p ON p._parent_doc_id = i.uid
+         WHERE a.uid IN (${uidListLiteral(uids)}) AND p.type = '${RECORD_TYPE}' AND p.is_draft = false
+           AND p.uploaded_at > d.discharge_date_time AND p.uploaded_at <= d.discharge_date_time + interval '${FOLLOW_UP_DAYS_MAX} days') t
+ WHERE t.rn <= ${STAY_FOLLOWUP_MAX + 1}
+ ORDER BY t.stay_uid, t.rn`;
 }
 
 // ---- assembling --------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -125,10 +145,12 @@ export async function fetchStayBatch(uids: readonly string[]): Promise<StayBatch
     out.set(id, {
       stay_uid: id,
       admission: { admitted_at: strOrNull(a.admitted_at), ist_date: istDateOfInstant(a.admitted_at), admission_type: strOrNull(a.admission_type), department: strOrNull(a.department), encounter_id: strOrNull(a.encounter_id) },
-      theatre: (oBy.get(id) ?? []).map((o) => ({ surgery_name: str(o.surgery_name, 300), template_name: str(o.template_name, 300), created_at: strOrNull(o.created_at), note: str(o.note) })),
+      theatre: (oBy.get(id) ?? []).slice(0, STAY_THEATRE_MAX).map((o) => ({ ref: cleanRef(o.note_uid), surgery_name: str(o.surgery_name, 300), template_name: str(o.template_name, 300), created_at: strOrNull(o.created_at), note: str(o.note) })),
+      theatre_truncated: (oBy.get(id)?.length ?? 0) > STAY_THEATRE_MAX,
       discharge: d ? { discharged_at: strOrNull(d.discharged_at), discharge_type: strOrNull(d.discharge_type) } : null,
-      cdmss: c ? { procedure: str(c.procedure_text), diagnosis: str(c.diagnosis_text), indication: str(c.indication_text), course_summary: str(c.course_summary), disposition: str(c.disposition_text), follow_up: str(c.follow_up_text), aftercare_instructions: str(c.aftercare_instructions), aftercare_warning_signs: str(c.aftercare_warning_signs) } : null,
-      follow_up: (fBy.get(id) ?? []).filter((r) => { const k = String(r.rec_uid ?? ""); if (!k || seen.has(k)) return false; seen.add(k); return true; })
+      cdmss: c ? { ref: cleanRef(c.cdmss_uid), procedure: str(c.procedure_text), diagnosis: str(c.diagnosis_text), indication: str(c.indication_text), course_summary: str(c.course_summary), disposition: str(c.disposition_text), follow_up: str(c.follow_up_text), aftercare_instructions: str(c.aftercare_instructions), aftercare_warning_signs: str(c.aftercare_warning_signs) } : null,
+      follow_up_truncated: (fBy.get(id)?.length ?? 0) > STAY_FOLLOWUP_MAX,
+      follow_up: (fBy.get(id) ?? []).slice(0, STAY_FOLLOWUP_MAX).filter((r) => { const k = String(r.rec_uid ?? ""); if (!k || seen.has(k)) return false; seen.add(k); return true; })
         .map((r) => ({ rec_uid: String(r.rec_uid), uploaded_at: strOrNull(r.uploaded_at) ?? "", record: normaliseRecord(r) })),
       cm_questions: "not_read",
     });
