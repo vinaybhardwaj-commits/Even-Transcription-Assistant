@@ -231,13 +231,24 @@ describe("S8C-4: a room given as a SLUG is mapped to its room_id through the mir
   });
 });
 
-describe("S8C-2 in the job: the duration is never shorter than the mirror row says", () => {
+describe("S8C-2 in the job: the duration is never shorter than the mirror row says, and a real-shaped clip passes", () => {
   const flac60s = (): Uint8Array => { const b = new Uint8Array(42); b.set([0x66, 0x4c, 0x61, 0x43, 0x00, 0x00, 0x00, 0x22]); const rate = 16_000, total = rate * 60; b[18] = (rate >> 12) & 0xff; b[19] = (rate >> 4) & 0xff; b[20] = ((rate & 0x0f) << 4) | (0 << 1) | 0; b[21] = (15 << 4) | 0; b[22] = (total >>> 24) & 0xff; b[23] = (total >>> 16) & 0xff; b[24] = (total >>> 8) & 0xff; b[25] = total & 0xff; return b; };
   it("a clip whose container says 60 s but whose mirror row says 60 minutes is window_too_long (the cap and the 30-minute limit see the longer figure)", async () => {
     const key = `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`;
     clipBytes.set(key, flac60s());
     const run = (mirror?: number) => T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "init", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: { clip_key: key, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", ...(mirror === undefined ? {} : { mirror_minutes: mirror }) }, runner: "r" } as never);
     expect(await run(60)).toEqual({ kind: "fail", error: "window_too_long" });
+  });
+  it("the crafted 15 MB case (header claims one sample) still reads at least the mirror minutes: 31 minutes = window_too_long; and a real-shaped 4 MB 10-minute 16 kHz mono clip is NOT refused", async () => {
+    const key = `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`;
+    const withHeader = (total: number, size: number): Uint8Array => { const b = new Uint8Array(size); b.set(flac60s().subarray(0, 42)); const rate = 16_000; b[22] = (total >>> 24) & 0xff; b[23] = (total >>> 16) & 0xff; b[24] = (total >>> 8) & 0xff; b[25] = total & 0xff; void rate; return b; };
+    const run = () => T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "init", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: { clip_key: key, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", mirror_minutes: 31 }, runner: "r" } as never);
+    clipBytes.set(key, withHeader(1, 15_000_000));
+    expect(await run()).toEqual({ kind: "fail", error: "window_too_long" });
+    const real = withHeader(16_000 * 600, 4_000_000);
+    clipBytes.set(key, real);
+    const ok = await T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "init", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: { clip_key: key, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", mirror_minutes: 10 }, runner: "r" } as never);
+    expect(JSON.stringify(ok)).not.toContain("window_too_long");
   });
 });
 
