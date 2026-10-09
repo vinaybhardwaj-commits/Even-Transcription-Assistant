@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "rubric_id": "encounter_vs_record",
+  "note": "The said-items extraction prompt. The comparison with the signed record is done in code (lib/rubrics/evr/compare.ts), not by the model.",
+  "rules": [
+    "Read the consultation transcript only. List the clinically material items that the DOCTOR (or the patient, for complaints) actually SAID: complaints, diagnoses, medicines, investigations, procedures or operations, and any follow-up advice (when to come back, what to do next).",
+    "A medicine counts only if it is named or clearly described as being prescribed or continued; give its dose, frequency, route and duration only if they were said, and leave them empty otherwise.",
+    "Give the side (left, right, both) only if it was said. Never infer a side, a dose or a name that is not on the tape.",
+    "Every item carries a quote copied EXACTLY from the transcript (same words, same script). An item without such a quote must not be listed.",
+    "Do not judge anyone and do not compare with any record. Answer with ONE JSON object and nothing else. If there is no usable consultation answer {\"scorable\": false}."
+  ],
+  "user_header": "CONSULTATION TRANSCRIPT. Times are mm:ss from the start of the consultation. Speakers: doctor, other, unknown."
+}

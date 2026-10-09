@@ -1,0 +1,18 @@
+{
+  "version": "1.1.0",
+  "rubric_id": "consult_surgical_pitch",
+  "note": "Anchors and codes are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-prompts.ts).",
+  "rules": [
+    "Read the consultation transcript only.",
+    "Decide first whether the doctor audibly recommends an operation. A chart keyword is not a pitch; a local referral for surgery is still a pitch; a pitch is scored even if the operation is never booked.",
+    "If no operation is recommended answer {\"surgery_recommended\": false}. If the doctor audibly advises AGAINST an operation, answer {\"surgery_recommended\": false, \"recommendation_kind\": \"no_surgery\"}: the anti-pitch is still scored.",
+    "recommendation_kind is surgery, investigation, conservative, referral, no_surgery or other; only surgery and a contingent surgery have a pitch balance.",
+    "pitch_source is own, own_contingent (a plan that walks back to a scan first) or outside_surgeon.",
+    "Benefits named: 'it is needed' does not count. Risks named: 'it is a small operation' does not count. Alternatives named: a work-up is not an alternative. Timing: urgent, elective or if-not-better.",
+    "Each named patient doubt gets one code: answered, partial, unheard, deferred_to_family.",
+    "Uptake of the surgery uses the seven chair codes. A prompted yes is accept with prompted_yes true; the family later is defer, not refuse; a logistics block is refuse.",
+    "Every evidence and doubt quote is copied EXACTLY from the transcript; never paraphrase.",
+    "Answer with ONE JSON object and nothing else."
+  ],
+  "user_header": "CONSULTATION TRANSCRIPT. Times are mm:ss from the start of the consultation. Speakers: doctor, other (the patient and anyone with them), unknown."
+}

@@ -1,0 +1,19 @@
+{
+  "version": "1.1.0",
+  "rubric_id": "consult_chair_affect",
+  "note": "The anchors, anti-defaults, codes and scales in the prompt are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-prompts.ts), so the prompt cannot drift from the rubric. This file holds the fixed framing.",
+  "rules": [
+    "Read the consultation transcript only. Score the PATIENT in the chair, not the doctor.",
+    "Every evidence item is a quote copied EXACTLY from the transcript (same words, same script); never paraphrase, never invent.",
+    "Answer with ONE JSON object and nothing else.",
+    "If the transcript has no usable consultation (no speech, only connection checks), answer {\"scorable\": false}: unscorable is never neutral.",
+    "Disease severity is not distress. A chart keyword is not medium distress.",
+    "Reassurance medium is not the dump bin: okay or thanks is not medium; a named fear answered by the close is high; a plan with the patient still guarded is low.",
+    "A high rate of the flat default (D low, C low, F low, R medium) can be a true pattern: report what you see, never force medium.",
+    "Uptake: each audible recommendation is one item in `recommendations` with one or two of the seven codes. A prompted yes is accept with prompted_yes true; a logistics block (too far, cannot travel) is refuse with logistics_block true.",
+    "Teach-back is none, partial or full, only from the patient's own restatement.",
+    "CASES-lite is a structural overlay in three layers, filled in order: A (cases_lite), B (each recommendation's uptake and resolution_type), C (cases_v0: thread count, non-thread talk, visit summary). Engagement process is kept separate from reassurance; never let the overlay change an axis.",
+    "Make no claim about utterance shares."
+  ],
+  "user_header": "CONSULTATION TRANSCRIPT. Times are mm:ss from the start of the consultation. Speakers: doctor, other (the patient and anyone with them), unknown."
+}

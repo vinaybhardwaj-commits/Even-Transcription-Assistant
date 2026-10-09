@@ -6,5 +6,7 @@ export type EngineResult = {
   evidence?: Record<string, unknown>;
   /** why a unit is skipped / empty / failed: a closed code (no_diarization, no_turns, blind_room_day, no_audio_state, ...) */
   reason?: string;
+  /** model calls this unit made (attempts); counted against the llm_zdr ceilings (S71-R4 G71) */
+  calls?: number;
 };
 export type UnitOutcome = EngineResult & { room_id: string | null; ist_date: string | null };

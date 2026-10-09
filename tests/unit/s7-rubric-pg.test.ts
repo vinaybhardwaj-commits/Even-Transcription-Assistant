@@ -13,7 +13,10 @@ import { dockerAvailable, pgContainer } from "../support/s1-pg";
 type Row = Record<string, unknown>;
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), statements: [] as Array<{ text: string }> }));
 const statements = H.statements;
-vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push({ text: s.join("?") }); return H.sql!(s, ...v); } }));
+vi.mock("@/lib/db", () => ({
+  // `transaction` of the Neon driver: the statements arrive already started (the harness runs each one synchronously, in order), so the transaction is their results in order
+  sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push({ text: s.join("?") }); return H.sql!(s, ...v); }, { transaction: async (qs: Array<Promise<unknown>>) => Promise.all(qs) }),
+}));
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 
 const HAVE = dockerAvailable();
@@ -53,6 +56,7 @@ beforeAll(() => {
   if (!HAVE) return;
   pg.start();
   pg.exec(FIXTURE_DDL);
+  pg.exec("ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS consult_uid text, ADD COLUMN IF NOT EXISTS warehouse_prescription_uid text;");
   pg.exec(readFileSync("db/migrations/0082_scribe_job.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0139_rubric_results.sql", "utf8"));
   H.sql = pg.sql as never;
@@ -175,8 +179,7 @@ describe.runIf(HAVE)("the readers on fixtures", () => {
     statements.length = 0;
     expect(await R.readWindowEmotion("w3")).toMatchObject({ ok: false, reason: "blind_room_day" });
     expect(statements.some((q) => /room_span_emotion/.test(q.text))).toBe(false);
-    expect(await R.readConsultText("x")).toMatchObject({ ok: false, reason: "not_implemented" });
-    expect(await R.readPulseRecord("x")).toMatchObject({ ok: false, reason: "not_implemented" });
+    expect(await R.readPulseRecord("x")).toMatchObject({ ok: false, reason: "not_found" }); // S7-2: a real reader; unknown consult
   });
   it("consult_span: the open and close, the overlapping windows with absolute times; an open consult and a blind day are refused", async () => {
     const R = await import("@/lib/rubrics/readers");
@@ -400,5 +403,409 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       ('talk_time','0.1.0','window','n_ok','r1','2026-10-08','rub_null','ok','{"evidence_key":"rubric/talk_time/0.1.0/n_ok.json"}','[]',true)`;
     const rows = await S.listResults({ rubric_id: "talk_time", limit: 50 });
     expect(rows.map((r) => r.unit_key)).toEqual(["n_ok"]);
+  });
+
+  it("S7-1 consult_text: the speaker lines of a consult from the turns of its windows (t from the open, doctor / other / unknown), blind refused before any text query; llm rubric_run + rubric_bench through the real runner with a fake model", async () => {
+    const R = await import("@/lib/rubrics/readers");
+    const LLM = await import("@/lib/rubrics/llm");
+    const t = await R.readConsultText("enc1@m1");
+    expect(t.ok && t.data.source).toBe("database");
+    expect(t.ok && t.data.lines.map((l) => [l.t_ms, l.speaker, l.text])).toEqual([[0, "doctor", "alpha"], [8000, "other", "bravo"], [25000, "doctor", "charlie"]]); // delta (40 s) is after the close; the unknown turn would read "unknown"
+    statements.length = 0;
+    expect(await R.readConsultText("enc3@m2")).toMatchObject({ ok: false, reason: "blind_room_day" });
+    expect(statements.some((q) => /cue|jev_window_text/.test(q.text))).toBe(false);
+    expect(await R.readConsultText("enc2@m1")).toMatchObject({ ok: false }); // open consult
+    expect(await R.readConsultText("nope")).toMatchObject({ ok: false, reason: "not_found" });
+
+    const good = { scorable: true, distress: "low", confusion: "low", frustration: "low", reassurance: "medium", teach_back: "none", recommendations: [{ uptake: ["accept"], resolution_type: "patient_agrees", quote: "charlie" }],
+      cases_lite: { engagement_process: "present", information_present: true, doctor_effect_proxy: "load_eased", dominant_mix: "mixed" }, evidence: [{ item: "distress", quote: "bravo" }] };
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify(good), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "consult_chair_affect", version: "1.1.0", ok: 1, skipped: 2, blind_room_days: 1 } });
+      expect(calls).toBe(1); // the blind consult and the unknown key never reached the model
+      const rows = (await pg.sql`SELECT unit_key, status, score, findings, lab FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
+      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]); // no row without a room and date; none for the blind day
+      expect(rows[0]).toMatchObject({ status: "ok", lab: true, score: { distress: "low", uptake_codes: ["accept"] } });
+      expect(JSON.stringify(rows)).not.toMatch(/alpha|bravo|charlie/); // no transcript text in the table
+      const evKey = `rubric/consult_chair_affect/1.1.0/${"enc1@m1"}.json`; // (built, so no literal reads as an email address)
+      expect(JSON.parse(mem.get(evKey)!).quotes ?? JSON.parse(mem.get(evKey)!).evidence.quotes.length).toBeTruthy();
+      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
+
+      // bench: gold from the lab store (JSONL), Meet text from the lab store, no rubric_result rows
+      mem.set("rubric/bench/consult_chair_affect/gold.jsonl", [{ unit_key: "m001", expected: { distress: "low", uptake_codes: ["accept"] } }, { unit_key: "m002", expected: { distress: "high" } }].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      for (const k of ["m001", "m002"]) mem.set(`rubric/bench/consult_chair_affect/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 3, speaker: "doctor", text: "hello" }, { t_s: 9, speaker: "patient", text: "okay" }, { t_s: 20, speaker: "doctor", text: "charlie" }] }));
+      await pg.sql`DELETE FROM rubric_result`;
+      const b = await runJob("rubric_bench", { rubric_id: "consult_chair_affect" });
+      expect(b.job).toMatchObject({ status: "done", result: { metric: "field_accuracy", items: 2, fields: 3, passed: false } });
+      expect(b.job.result.value).toBeCloseTo(0.667, 2);
+      expect(JSON.parse(mem.get(b.job.result.report_key)!).population).toMatch(/Meet teleconsult.*no room tape/);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(0);
+      // a model outage mid-run THROWS: the step is retried, nothing is stored as a failed unit
+      LLM.setRubricChatForTests(async () => { throw new (await import("@/lib/openrouter")).OpenRouterError("openrouter_http_503"); });
+      const down = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1"] });
+      expect(down.job.status).not.toBe("done");
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result WHERE status = 'failed'`)[0] as { n: number }).n).toBe(0);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-AB/C — rubric_bench by set: grokbot_agreement is reported as agreement_with_grokbot (no accuracy, no pass line, human_gold false); human_v as accuracy_vs_V with n stated; the default set is unchanged", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const good = { surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: true, alternatives_named: true, timing_named: true }, uptake_of_surgery: "accept", evidence: [] };
+    LLM.setRubricChatForTests(async () => ({ content: JSON.stringify(good), model: "fake/model", latency_ms: 1 }));
+    try {
+      const gold = (rows: unknown[]) => rows.map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/grokbot_agreement.jsonl", gold([{ unit_key: "g1", provenance: "model_grokbot", human_gold: false, expected: { surgery_recommended: true } }, { unit_key: "g2", expected: { surgery_recommended: false } }]));
+      for (const k of ["g1", "g2", "enc1@m1"]) mem.set(`rubric/bench/consult_surgical_pitch/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 3, speaker: "doctor", text: "hello" }, { t_s: 9, speaker: "patient", text: "okay" }] }));
+      const ag = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "grokbot_agreement" });
+      expect(ag.job).toMatchObject({ status: "done", result: { set: "grokbot_agreement", metric: "agreement_with_grokbot", passed: null, threshold: null, n: 2 } });
+      const rep = JSON.parse(mem.get(ag.job.result.report_key)!);
+      expect(rep).toMatchObject({ set: "grokbot_agreement", metric: "agreement_with_grokbot", human_gold: false, provenance: "model_grokbot" });
+      expect(rep.metrics.accuracy).toBeUndefined();
+      expect(rep.metrics.agreement).toBeCloseTo(0.5, 2);
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", gold([{ unit_key: "enc1@m1", human_gold: true, rater: "V", expected: { surgery_recommended: true, recommendation_kind: "surgery" } }]));
+      const hv = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(hv.job).toMatchObject({ status: "done", result: { set: "human_v", metric: "accuracy_vs_V", n: 1, passed: null } });
+      const rep2 = JSON.parse(mem.get(hv.job.result.report_key)!);
+      expect(rep2).toMatchObject({ metric: "accuracy_vs_V", human_gold: true, rater: "V", n: 1 });
+      expect(rep2.metrics.agreement).toBeUndefined();
+      expect(rep2.metrics.accuracy_vs_V).toBe(1);
+      // an unknown set is refused at submit
+      const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+      expect(() => KIND_BY_NAME.get("rubric_bench")!.parseArgs({ rubric_id: "consult_surgical_pitch", set: "nope" })).toThrow();
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-C2 — rubric_bench human_v on EXCERPTS: text from the lab store only (no consult / room-day query), reported as accuracy_vs_V on excerpts (n=..) with the partial-consult note; the excerpt prompt says it is an excerpt; a mixed set is refused", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const seen: string[] = [];
+    LLM.setRubricChatForTests(async (a) => {
+      seen.push(String((a as { user?: string }).user));
+      const anti = /No-op/.test(String((a as { user?: string }).user)) ? { surgery_recommended: false, recommendation_kind: "no_surgery" } : { surgery_recommended: true, recommendation_kind: "surgery", pitch_source: "own", pitch_balance: { benefits_named: true, risks_named: false, alternatives_named: false, timing_named: false }, uptake_of_surgery: "accept", evidence: [] };
+      return { content: JSON.stringify(anti), model: "fake/model", latency_ms: 1 };
+    });
+    try {
+      const jl = (rows: unknown[]) => rows.map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([
+        { unit_key: "hv-a", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: true, recommendation_kind: "surgery" } },
+        { unit_key: "hv-b", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: false, recommendation_kind: "no_surgery" } },
+        { unit_key: "hv-c", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: false } },
+      ]));
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-a.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-b.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed, just medicines." }] }));
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-c.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op, only tablets." }] }));
+      statements.length = 0;
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(b.job).toMatchObject({ status: "done", result: { set: "human_v", metric: "accuracy_vs_V_on_excerpts", n: 3, passed: null } });
+      expect(statements.some((q) => /eta_encounter_windows|bench_window|room_day|cue/.test(q.text.replace(/scribe_job|rubric_run|rubric_result/g, "")) && !/scribe_job/.test(q.text))).toBe(false);
+      const rep = JSON.parse(mem.get(b.job.result.report_key)!);
+      expect(rep).toMatchObject({ metric: "accuracy_vs_V_on_excerpts", label: "accuracy_vs_V on excerpts (n=3)", human_gold: true, rater: "V", n: 3 });
+      expect(rep.note).toMatch(/partial consults/);
+      expect(rep.population).toMatch(/excerpts/);
+      expect(rep.metrics.accuracy_vs_V_on_excerpts).toBeGreaterThan(0.5); // hv-a, hv-b right; hv-c: anti-pitch kind is not in its expected fields
+      expect(seen.every((u) => /EXCERPT of a consultation/.test(u))).toBe(true);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(0);
+      // an excerpt unit is never run outside a bench, and a mixed set is not a set
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([{ unit_key: "hv-a", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: true } }, { unit_key: "enc1@m1", unit_kind: "consult", expected: { surgery_recommended: true } }]));
+      const bad = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(bad.job.status).toBe("failed");
+      expect(String(bad.job.error)).toMatch(/^bench_set_missing/);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-E G68 — excerpt units are accepted only from set human_v: gold and grokbot_agreement naming excerpts are refused as no set (bench_set_missing), 0 model calls", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const rows = [{ unit_key: "hv-a", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: false } }].map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-a.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed." }] }));
+      for (const set of ["gold", "grokbot_agreement"] as const) {
+        mem.set(`rubric/bench/consult_surgical_pitch/${set === "gold" ? "gold" : set}.jsonl`, rows);
+        const r = await runJob("rubric_bench", set === "gold" ? { rubric_id: "consult_surgical_pitch" } : { rubric_id: "consult_surgical_pitch", set });
+        expect(r.job.status, set).toBe("failed");
+        expect(String(r.job.error), set).toMatch(/^bench_set_missing/);
+      }
+      expect(calls).toBe(0);
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", rows);
+      const ok = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(ok.job).toMatchObject({ status: "done", result: { metric: "accuracy_vs_V_on_excerpts", n: 1 } });
+      expect(calls).toBe(1);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-R4 G71 — a running llm job STOPS at the ceiling: the remaining items are unscored (reason llm_cap), no further model call", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      const rows = ["g1", "g2", "g3", "g4"].map((k) => JSON.stringify({ unit_key: k, expected: { surgery_recommended: false } })).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", rows);
+      for (const k of ["g1", "g2", "g3", "g4"]) mem.set(`rubric/bench/consult_surgical_pitch/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 1, speaker: "doctor", text: "hello" }] }));
+      // planned (4) exceeds the per-job ceiling (2) at SUBMIT in the tool path; here the job is inserted directly, as an already-queued job, to exercise the mid-run stop
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch" });
+      expect(b.job).toMatchObject({ status: "done", result: { items: 4, llm_calls: 2, skipped_llm_cap: 2, unscored: 2 } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-R5 Q3 — the run-time stop of rubric_run: a running llm run stops at the job ceiling (2 of 4 units scored, 2 skipped llm_cap, 2 model calls); the stop-removed mutant makes 4 calls", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    for (const k of ["encA@m1", "encB@m1", "encC@m1"]) await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"] });
+      expect(run.job).toMatchObject({ status: "done", result: { llm_calls: 2, skipped_llm_cap: 2 } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("S71-R5 Q4 — three CONCURRENT 30-unit submits (60 calls each at 2 a unit) under a day cap of 100: exactly ONE job is queued (the capped insert runs behind an advisory lock); a claimed job with no run row yet is counted by its args", async () => {
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "100";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const keys = (tag: string) => Array.from({ length: 30 }, (_, i) => `${tag}${i}`);
+    try {
+      const sub = (tag: string) => submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(tag) }, actor: "mcp:t", scopes: new Set(["invoke"] as never) });
+      statements.length = 0;
+      const res = await Promise.allSettled([sub("a"), sub("b"), sub("c")]);
+      // the capped insert is [advisory lock, conditional insert] in ONE transaction, in that order (the synchronous harness cannot interleave, so the lock itself is pinned by its statement)
+      const order = statements.map((q) => (/pg_advisory_xact_lock/.test(q.text) ? "lock" : /INSERT INTO scribe_job/.test(q.text) ? "insert" : "")).filter(Boolean);
+      expect(order).toEqual(["lock", "insert", "lock", "insert", "lock", "insert"]);
+      expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      for (const r of res.filter((x) => x.status === "rejected")) expect(String((r as PromiseRejectedResult).reason?.reason ?? (r as PromiseRejectedResult).reason)).toMatch(/^llm_daily_cap/);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM scribe_job WHERE kind = 'rubric_run'`)[0] as { n: number }).n).toBe(1);
+      // a RUNNING job that has no run row yet still holds its reservation (counted from its args): the next 30 are refused
+      await pg.exec(`UPDATE scribe_job SET status = 'running', progress = '{}'::jsonb;`);
+      await expect(sub("d")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) });
+      // once the run row exists (progress.run_id) the reservation moves to the run row (units_planned), which is still counted until it finishes
+      await pg.exec(`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_q4', 'consult_chair_affect', '1.1.0', 'run', 30); UPDATE scribe_job SET progress = '{"run_id":"rub_q4"}'::jsonb;`);
+      await expect(sub("e")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) });
+      // a finished run counts (units_ok + units_failed) x 2 = the worst case
+      await pg.exec(`UPDATE rubric_run SET units_ok = 20, units_failed = 5, finished_at = now(); UPDATE scribe_job SET status = 'done';`);
+      const C = await import("@/lib/rubrics/llm-cap");
+      expect(await C.dayUsage()).toEqual({ used: 50, queued: 0 }); // (20 + 5) x 2
+      await expect(sub("f")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 50 + 60 > 100
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("S71-R5 Q2 — a row carrying BOTH room_id and room_ids is checked against the UNION: a blind room_id with clean room_ids is blind_room_day, 0 reads, 0 calls", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const rows = [{ unit_key: "hv-q2", unit_kind: "excerpt", room_id: "room_4ggnkg5x", room_ids: ["r1", "r2"], ist_date: "2026-09-23", expected: { surgery_recommended: false } }].map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", rows);
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-q2.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed." }] }));
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(b.job).toMatchObject({ status: "done", result: { n: 1, unscored: 1 } });
+      expect(calls).toBe(0);
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S7-2 encounter_vs_record through the real runner: record (fake warehouse) vs tape (fake model) -> a discrepancy report; blind skipped before the warehouse; read-only; evr_perturb bench selects its windows at run time", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc1AaaaaaaaaaaZ', warehouse_prescription_uid = 'recA' WHERE consult_key = 'enc1@m1'`;
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc3AaaaaaaaaaaZ', warehouse_prescription_uid = 'recB' WHERE consult_key = 'enc3@m2'`;
+    const queries: string[] = [];
+    REC.setMetabaseForTests(async (q) => { queries.push(q); return [{ rec_uid: "recA", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [
+      { generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }, { generic_name: "Warfarin", strength: "5 mg", frequency: "OD" }], investigations: [], refer_to: [], advice: [] }]; });
+    LLM.setRubricChatForTests(async () => ({ content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "250 mg", freq: "twice a day", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }));
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "encounter_vs_record", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "encounter_vs_record", ok: 1, skipped: 2, blind_room_days: 1 } });
+      expect(queries).toHaveLength(1); // the blind consult never reached the warehouse
+      expect(queries[0]).toMatch(/^SELECT /);
+      const rows = (await pg.sql`SELECT unit_key, status, score, findings FROM rubric_result`) as Array<Record<string, any>>;
+      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]);
+      expect(rows[0]).toMatchObject({ status: "ok", score: { label: "discrepancy report", severity: "obvious", n_findings: 2 } });
+      expect(rows[0].findings).toEqual(["obvious:in_record_not_said:drug", "obvious:value_mismatch:dose"]);
+      expect(JSON.stringify(rows)).not.toMatch(/Warfarin|Alphamox|alpha/); // no record or tape text in the table
+      const ev = JSON.parse(mem.get(`rubric/encounter_vs_record/0.1.0/${"enc1@m1"}.json`)!);
+      expect(JSON.stringify(ev)).toContain("no support found");
+      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
+      // evr_perturb: the file holds a header only; the windows are selected in the job (enc1@m1 qualifies; the open and the blind consults do not)
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", JSON.stringify({ header: { selection: "closed windows from 2026-10-02 with a prescription uid, not held out, with a stored transcript; md5 order by seed", seed: 5, n_windows: 40 } }) + "\n");
+      queries.length = 0;
+      const b = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(b.job).toMatchObject({ status: "done", result: { set: "evr_perturb", metric: "perturbation_recall", n: 1, passed: null } });
+      const rep = JSON.parse(mem.get(b.job.result.report_key)!);
+      expect(rep).toMatchObject({ windows_planned: 1, windows_scored: 1, human_gold: false });
+      expect(rep.per_kind.add_drug).toMatchObject({ n_applicable: 1, recall: 1 });
+      expect(rep.per_kind.dose_x2.n_applicable).toBe(1);
+      expect(rep.baseline_flag_rate.obvious).toBe(1); // the original holds the unsupported Warfarin: reported as a flag rate, not as a label
+      expect(rep.note).toMatch(/NOT negatives/);
+      expect(JSON.stringify(rep)).not.toMatch(/Warfarin|Alphamox/);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(1); // the bench wrote no result row
+      // an EXPLICIT blind unit_key row (R2): refused blind_room_day, counted, and the warehouse is never asked for it
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, { unit_key: "enc1@m1" }, { unit_key: "enc3@m2" }].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      queries.length = 0;
+      const bb = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(bb.job).toMatchObject({ status: "done", result: { n: 1, windows_skipped: { blind_room_day: 1 } } });
+      expect(queries).toHaveLength(1); // enc1 only
+      // evr_perturb is for encounter_vs_record only
+      const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+      expect(() => KIND_BY_NAME.get("rubric_bench")!.parseArgs({ rubric_id: "consult_surgical_pitch", set: "evr_perturb" })).toThrow();
+    } finally {
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+    }
+  });
+
+  it("ROUND3-B Q3 — the run-time stop of evr_perturb: at the job ceiling (2) the remaining windows are skipped llm_cap (2 scored, 2 skipped, 2 extraction calls); the stop-removed mutant makes 4", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const ids = ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"];
+    for (const [i, k] of ids.entries()) {
+      if (k !== "enc1@m1") await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+      await pg.sql`UPDATE eta_encounter_windows SET consult_uid = ${`ConsultUidCap${i}AaaaaaaaaaZ`}, warehouse_prescription_uid = ${`rec${i}`} WHERE consult_key = ${k}`;
+    }
+    REC.setMetabaseForTests(async () => [{ rec_uid: "recX", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "500 mg", freq: "twice a day", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, ...ids.map((unit_key) => ({ unit_key }))].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      const b = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(b.job).toMatchObject({ status: "done", result: { n: 2, llm_calls: 2, skipped_llm_cap: 2, windows_skipped: { llm_cap: 2 } } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("G74 — every unfinished rubric job is reserved at units x 2: the submit precheck refuses the 4th 300-unit job (4 x 600 > 2000), and six 300-unit jobs run interleaved at 2 calls a unit stay within the day cap (a x1 reservation made 3600)", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { submitJob } = await import("@/lib/jobs/submit");
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const keys = (tag: string) => Array.from({ length: 300 }, (_, i) => `${tag}${i}`);
+    const sub = (tag: string) => submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(tag) }, actor: "mcp:t", scopes: new Set(["invoke"] as never) });
+    try {
+      for (const t of ["a", "b", "c"]) await sub(t); // 3 x 600 = 1800 <= 2000
+      await expect(sub("d")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap: today 0 used \+ 1800 queued \+ 600 planned > daily cap 2000/) }); // 4 x 600 > 2000
+      expect(C.reservationFor("rubric_run", { rubric_id: "consult_chair_affect", unit_keys: keys("x") })).toBe(600);
+      // the running stop, GATING's repro: six 300-unit jobs (submit bypassed: they are claimed and running) each take a step of 10 units at 2 calls a unit, round robin, using callsLeft() as the runner does
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+      const N = 6;
+      for (let i = 0; i < N; i++) {
+        await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES (${`rub_g74_${i}`}, 'consult_chair_affect', '1.1.0', 'run', 300)`;
+        await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES (${`job_g74_${i}`}, 'rubric_run', ${JSON.stringify({ rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(`j${i}`) })}::jsonb, 'mcp:t', 'running', ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: 0 })}::jsonb)`;
+      }
+      const made = new Array<number>(N).fill(0);
+      for (let round = 0; round < 80; round++) {
+        let moved = 0;
+        for (let i = 0; i < N; i++) {
+          const left = await C.callsLeft(300, made[i]!);
+          const take = Math.max(0, Math.min(left, 2 * 10, 600 - made[i]!)); // one step: 10 units at 2 calls each, never past the job's own 300 units
+          if (take <= 0) continue;
+          made[i]! += take;
+          moved += take;
+          await pg.sql`UPDATE scribe_job SET progress = ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: made[i] })}::jsonb WHERE id = ${`job_g74_${i}`}`;
+        }
+        if (moved === 0) break;
+      }
+      const total = made.reduce((a, b) => a + b, 0);
+      expect(total).toBeLessThanOrEqual(2000);
+      expect(Math.max(...made)).toBeLessThanOrEqual(600);
+      // three jobs are within the cap by their reservations (3 x 600 = 1800): each one runs to its end
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+      for (let i = 0; i < 3; i++) {
+        await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES (${`rub_g74_${i}`}, 'consult_chair_affect', '1.1.0', 'run', 300)`;
+        await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES (${`job_g74_${i}`}, 'rubric_run', ${JSON.stringify({ rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(`k${i}`) })}::jsonb, 'mcp:t', 'running', ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: 0 })}::jsonb)`;
+      }
+      const m3 = [0, 0, 0];
+      for (let round = 0; round < 80; round++) {
+        let moved = 0;
+        for (let i = 0; i < 3; i++) {
+          const take = Math.max(0, Math.min(await C.callsLeft(300, m3[i]!), 20, 600 - m3[i]!));
+          if (take <= 0) continue;
+          m3[i]! += take; moved += take;
+          await pg.sql`UPDATE scribe_job SET progress = ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: m3[i] })}::jsonb WHERE id = ${`job_g74_${i}`}`;
+        }
+        if (moved === 0) break;
+      }
+      expect(m3).toEqual([600, 600, 600]);
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("G75 — a run of UNSCORABLE tapes still counts its model calls: the job stops at its ceiling (2 of 4 units, llm_calls 2, 2 skipped llm_cap); with the attempts dropped it would make 4", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const ids = ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"];
+    for (const [i, k] of ids.entries()) {
+      if (k !== "enc1@m1") await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+      await pg.sql`UPDATE eta_encounter_windows SET consult_uid = ${`ConsultUidG75${i}AaaaaaaaaaZ`}, warehouse_prescription_uid = ${`recG75${i}`} WHERE consult_key = ${k}`;
+    }
+    REC.setMetabaseForTests(async () => [{ rec_uid: "recX", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "encounter_vs_record", lab: true, unit_keys: ids });
+      expect(run.job).toMatchObject({ status: "done", result: { llm_calls: 2, skipped_llm_cap: 2 } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    const args = { rubric_id: "consult_chair_affect", lab: true, unit: "consult", unit_keys: ["z1"], limit: 200 };
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    try {
+      // an UNFINISHED run of 300 units, no job row: reserved at 600, not 300
+      await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_g74s', 'consult_chair_affect', '1.1.0', 'run', 300)`;
+      expect(await C.dayUsage()).toEqual({ used: 600, queued: 0 });
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1100" }))).toBeNull(); // 600 + 600 > 1100 (at x1: 300 + 600 would pass)
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1200" }))).not.toBeNull(); // 600 + 600 <= 1200
+      await pg.exec(`DELETE FROM scribe_job;`);
+      // the job has recorded MORE calls than its reservation (900 > 600): the larger figure counts
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES ('job_g74s', 'rubric_run', ${JSON.stringify(args)}::jsonb, 'mcp:t', 'running', '{"run_id":"rub_g74s","llm_calls":900}'::jsonb)`;
+      expect(await C.dayUsage()).toEqual({ used: 900, queued: 0 });
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1400" }))).toBeNull(); // 900 + 600 > 1400 (without the greatest(): 600 + 600 would pass)
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1500" }))).not.toBeNull();
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
   });
 });

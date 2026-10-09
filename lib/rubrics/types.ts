@@ -6,7 +6,7 @@ import { z } from "zod";
 
 export const RUBRIC_UNITS = ["window", "consult", "room_hour", "stay"] as const;
 export type RubricUnit = (typeof RUBRIC_UNITS)[number];
-/** Reader names a rubric may declare as inputs. consult_text and pulse_record are S7.2 (stubs that answer not_implemented); `external` = the data comes from outside the MCP. */
+/** Reader names a rubric may declare as inputs. every reader is implemented (consult_text since S7-1, pulse_record since S7-2); `external` = the data comes from outside the MCP. */
 export const READER_NAMES = ["window_english", "turns", "emotion", "audio_state", "consult_span", "consult_text", "pulse_record", "external"] as const;
 export type ReaderName = (typeof READER_NAMES)[number];
 export const RUBRIC_ENGINES = ["code", "jev", "llm_zdr"] as const;
@@ -56,8 +56,6 @@ export function rubricProblems(r: Rubric, dirName: string, hasFile: (rel: string
   if (r.engine === "code" && (r.questions || r.prompt)) p.push("engine code takes no questions or prompt");
   if (r.prompt && !hasFile(`${dirName}/${r.prompt}`)) p.push(`prompt file ${r.prompt} is missing`);
   if (r.status !== "draft") {
-    const stub = r.inputs.filter((i) => i === "consult_text" || i === "pulse_record");
-    if (stub.length > 0) p.push(`inputs ${stub.join(", ")} are not implemented (S7.2): a ${r.status} rubric cannot use them`);
     if (!r.bench.location.startsWith("rubrics/") && !r.bench.location.startsWith("rubric/")) p.push("bench.location must be rubrics/<...> (repo) or rubric/<...> (lab store)");
     if (r.bench.location.startsWith("rubrics/") && !hasFile(r.bench.location.slice("rubrics/".length))) p.push(`bench file ${r.bench.location} is missing`);
   }

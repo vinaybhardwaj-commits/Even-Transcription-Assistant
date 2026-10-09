@@ -88,6 +88,42 @@ export async function insertJob(input: {
 }
 
 /**
+ * S71-R4 (Q4) — A CAPPED INSERT. For the llm rubrics a job over the day's call ceiling must not queue, and three submits that each read the usage before any inserts would all pass. So the check
+ * and the insert are ONE transaction behind a transaction-scoped advisory lock (one key for every llm rubric submit): the second statement takes a fresh snapshot AFTER the lock, so it sees every job
+ * the previous holder inserted. The usage counted is the same as lib/rubrics/llm-cap.ts dayUsage(): runs today (finished x factor, unfinished = their plan), plus the args of queued jobs and of RUNNING
+ * jobs that have no run row yet. Returns null when the job would break the ceiling (nothing was inserted).
+ */
+export const LLM_SUBMIT_LOCK_KEY = 7_102_026_001;
+export async function insertJobCapped(
+  input: { id: string; kind: string; args: Record<string, unknown>; actor: string | null },
+  g: { planned: number; dailyCap: number; ids: string[]; factor: number; est: { gold: number; grokbot_agreement: number; human_v: number; evr_perturb: number } },
+): Promise<JobRow | null> {
+  const results = (await sql.transaction([
+    sql`SELECT pg_advisory_xact_lock(${LLM_SUBMIT_LOCK_KEY}::bigint)`,
+    sql`
+      INSERT INTO scribe_job (id, kind, args, actor)
+      SELECT ${input.id}, ${input.kind}, ${JSON.stringify(input.args)}::jsonb, ${input.actor}
+       WHERE (
+         (SELECT coalesce(sum(CASE WHEN r.finished_at IS NULL THEN greatest(r.units_planned * ${g.factor}::int, coalesce((jj.progress->>'llm_calls')::int, 0)) ELSE (r.units_ok + r.units_failed) * ${g.factor}::int END), 0)
+            FROM rubric_run r LEFT JOIN scribe_job jj ON (jj.progress->>'run_id') = r.run_id
+           WHERE r.rubric_id = ANY(${g.ids}::text[]) AND (r.started_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date)
+         + (SELECT coalesce(sum(CASE j.kind
+                  WHEN 'rubric_run' THEN coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(j.args->'unit_keys') = 'array' THEN j.args->'unit_keys' END), (j.args->>'limit')::int, 200) * ${g.factor}::int
+                  WHEN 'rubric_bench' THEN CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${g.est.grokbot_agreement}::int WHEN 'human_v' THEN ${g.est.human_v}::int WHEN 'evr_perturb' THEN ${g.est.evr_perturb}::int ELSE ${g.est.gold}::int END
+                  ELSE 0 END), 0)
+              FROM scribe_job j
+             WHERE j.kind IN ('rubric_run', 'rubric_bench') AND j.args->>'rubric_id' = ANY(${g.ids}::text[])
+               AND (j.status = 'queued' OR (j.status = 'running' AND (j.progress->>'run_id') IS NULL)))
+         + ${g.planned}::int
+       ) <= ${g.dailyCap}::int
+      RETURNING id, kind, args, status, step, progress, result, error, actor,
+                created_at, started_at, updated_at, finished_at, lease_until, lease_owner, attempts, failures`,
+  ])) as unknown as Array<Array<Record<string, unknown>>>;
+  const row = results[1]?.[0];
+  return row ? normaliseJob(row) : null;
+}
+
+/**
  * §3 — CLAIM. The one statement the whole design rests on.
  *
  * `FOR UPDATE SKIP LOCKED` is why two runners on the same minute do not collide: each takes rows

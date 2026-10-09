@@ -1,16 +1,24 @@
 {
   "id": "consult_surgical_pitch",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "title": "Surgical pitch in a consult",
   "unit": "consult",
   "inputs": [
+    "consult_span",
     "consult_text"
   ],
   "engine": "llm_zdr",
   "source": "consult-surgical-pitch@v0",
   "output": {
     "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "surgery_recommended"
+    ],
     "properties": {
+      "surgery_recommended": {
+        "type": "boolean"
+      },
       "recommendation_kind": {
         "enum": [
           "surgery",
@@ -20,6 +28,81 @@
           "no_surgery",
           "other"
         ]
+      },
+      "pitch_source": {
+        "enum": [
+          "own",
+          "own_contingent",
+          "outside_surgeon"
+        ]
+      },
+      "pitch_balance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "benefits_named",
+          "risks_named",
+          "alternatives_named",
+          "timing_named"
+        ],
+        "properties": {
+          "benefits_named": {
+            "type": "boolean"
+          },
+          "risks_named": {
+            "type": "boolean"
+          },
+          "alternatives_named": {
+            "type": "boolean"
+          },
+          "timing_named": {
+            "type": "boolean"
+          }
+        }
+      },
+      "doubts": {
+        "type": "array",
+        "maxItems": 12,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "code"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "pain",
+                "complication",
+                "anaesthesia",
+                "cost",
+                "work_family_time",
+                "second_opinion",
+                "too_soon",
+                "other"
+              ]
+            },
+            "code": {
+              "enum": [
+                "answered",
+                "partial",
+                "unheard",
+                "deferred_to_family"
+              ]
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "t_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
       },
       "uptake_of_surgery": {
         "enum": [
@@ -31,12 +114,51 @@
           "cost",
           "unheard"
         ]
+      },
+      "prompted_yes": {
+        "type": "boolean"
+      },
+      "evidence": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "item",
+            "quote"
+          ],
+          "properties": {
+            "item": {
+              "enum": [
+                "surgery_recommended",
+                "pitch_source",
+                "benefits_named",
+                "risks_named",
+                "alternatives_named",
+                "timing_named",
+                "doubt_code",
+                "uptake_of_surgery"
+              ]
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "t_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
       }
     }
   },
   "bench": {
-    "location": "rubrics/consult_surgical_pitch/bench.json",
-    "metric": "accuracy",
+    "location": "rubric/bench/consult_surgical_pitch/gold.jsonl",
+    "metric": "field_accuracy",
     "threshold": 0.8
   },
   "status": "draft",
@@ -64,7 +186,12 @@
         "alternatives_named": "bool (watchful waiting, medicines, a different procedure, another centre)",
         "timing_named": "urgent, elective or if-not-better; the doctor's own staging is not patient deferral"
       },
-      "not": "a lecture score; an empty tape is unscorable, not unbalanced"
+      "not": "a lecture score; an empty tape is unscorable, not unbalanced",
+      "not_counted": [
+        "'it is needed' is not a benefit",
+        "'it is a small operation' is not a risk",
+        "a work-up (scan, test, blood count) is not an alternative to surgery"
+      ]
     },
     "doubt_objects": {
       "unit": "each named patient fear or pushback about the operation",
@@ -96,8 +223,9 @@
         "unheard"
       ],
       "rules": [
-        "a prompted yes is still accept but flagged",
-        "the family later is defer, not refuse"
+        "a prompted yes is accept and is flagged",
+        "the family later is defer, not refuse",
+        "a logistics block (the operating site is too far) is refuse of the site; the same code set as the chair rubric"
       ]
     },
     "sampling": "a chart keyword is not a pitch: score the audible recommendation only; a local referral is still a pitch",
@@ -113,6 +241,89 @@
       "stay outcome labels",
       "ranking a surgeon before follow-through is joined",
       "disease severity read as distress"
+    ],
+    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot surgical-pitch skill (v0, frozen): what does not count as benefit, risk or alternative, no_surgery anti-pitch scored, pitch source, doubt codes, scored even when OT is never. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status).",
+    "bench_population": "Meet scouts and Whisper episodes of Meet teleconsultations; no room tape.",
+    "recommendation_kind_rules": [
+      "only surgery (and a contingent surgery) trips pitch balance",
+      "no_surgery is an anti-pitch (the doctor audibly advises against an operation): it is scored, not skipped",
+      "a chart keyword alone is not a pitch",
+      "a pitch is scored even when the operation is never booked; a local referral for surgery is still a pitch"
     ]
-  }
+  },
+  "prompt": "prompt.json",
+  "questions": [
+    {
+      "id": "surgery_recommended",
+      "text": "Does the doctor recommend an operation in this consultation (an audible recommendation, not a chart keyword)?",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "pitch_source",
+      "text": "Whose pitch is it: the speaking doctor's own, their contingent plan, or an outside surgeon's?",
+      "choices": [
+        "own",
+        "own_contingent",
+        "outside_surgeon"
+      ]
+    },
+    {
+      "id": "benefits_named",
+      "text": "Does the doctor name the benefits of the operation?",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "risks_named",
+      "text": "Does the doctor name the risks of the operation?",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "alternatives_named",
+      "text": "Does the doctor name alternatives (watchful waiting, medicines, another procedure, another centre)?",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "timing_named",
+      "text": "Does the doctor name the timing (urgent, elective, if-not-better)?",
+      "choices": [
+        "yes",
+        "no"
+      ]
+    },
+    {
+      "id": "doubt_code",
+      "text": "For one patient doubt about the operation, did it get a reply?",
+      "choices": [
+        "answered",
+        "partial",
+        "unheard",
+        "deferred_to_family"
+      ]
+    },
+    {
+      "id": "uptake_of_surgery",
+      "text": "How does the patient take up the surgery recommendation?",
+      "choices": [
+        "accept",
+        "hedge",
+        "refuse",
+        "question",
+        "defer",
+        "cost",
+        "unheard"
+      ]
+    }
+  ]
 }

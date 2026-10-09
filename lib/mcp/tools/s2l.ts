@@ -163,6 +163,29 @@ export function publicOrigin(): URL | null {
     return null;
   }
 }
+/**
+ * S8A8 G69: the probe must read the ROUTE, not the apex's 307. When APP_URL is the APEX of the production host (evenscribe.app), the probe goes to the www origin instead (APP_URL itself is
+ * not changed). Any other configured origin is probed as it is.
+ */
+export function probeOrigin(): URL | null {
+  const o = publicOrigin();
+  if (!o) return null;
+  const prod = new URL(PUBLIC_ORIGIN_DEFAULT);
+  const apex = prod.hostname.replace(/^www\./, "");
+  // G77: an apex origin with a PORT keeps the port when it is mapped to www (same scheme as configured)
+  return o.hostname === apex ? new URL(`${o.protocol}//${prod.hostname}${o.port ? `:${o.port}` : ""}`) : o;
+}
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+/** The ONE redirect the probe follows: same scheme, the same host or its www / apex twin, the same path. Anything else (another site, another path, a second hop) is reported as the status it is. */
+export function sameSiteTarget(from: URL, location: string | null): URL | null {
+  if (!location) return null;
+  let to: URL;
+  try { to = new URL(location, from); } catch { return null; }
+  const strip = (h: string) => h.replace(/^www\./, "");
+  // G76: only https is followed (a redirect on http is reported as the status it is), and the scheme must not change
+  if (to.protocol !== "https:" || to.protocol !== from.protocol || to.port !== from.port || strip(to.hostname) !== strip(from.hostname) || to.pathname !== from.pathname || to.search !== "" || to.username || to.password) return null;
+  return to;
+}
 export const ROUTE_TIMEOUT_MS = 5_000;
 export const ROUTES_TOTAL_MS = 20_000;
 /** the fixed allow-list: this app's own public routes, no query strings, no credentials. Nothing here is built from a caller's input. */
@@ -188,7 +211,7 @@ const healthRoutes: McpTool = {
   handler: async () => {
     // G19: the origin is the app's PUBLIC origin from configuration (APP_URL, else the production constant), NEVER derived from the request's Host /
     // X-Forwarded-* headers, so a caller cannot point the probe at another host.
-    const origin = publicOrigin();
+    const origin = probeOrigin();
     if (!origin) return { ok: false, error: "no_origin" };
     if (origin.protocol !== "https:" && origin.protocol !== "http:") return { ok: false, error: "no_origin" };
     const total = AbortSignal.timeout(ROUTES_TOTAL_MS);
@@ -196,13 +219,21 @@ const healthRoutes: McpTool = {
       ROUTE_ALLOWLIST.map(async (r) => {
         const t0 = Date.now();
         try {
-          const res = await fetch(`${origin.origin}${r.route}`, {
+          const go = (u: string) => fetch(u, {
             method: r.method, redirect: "manual", cache: "no-store", headers: { accept: "application/json" },
             signal: AbortSignal.any ? AbortSignal.any([total, AbortSignal.timeout(ROUTE_TIMEOUT_MS)]) : AbortSignal.timeout(ROUTE_TIMEOUT_MS),
           });
+          const first = `${origin.origin}${r.route}`;
+          let res = await go(first);
+          let followed = false;
+          if (REDIRECTS.has(res.status)) {
+            // G69: exactly ONE same-site redirect is followed (no credentials are sent either way); a second hop, another site or another path is reported as the redirect it is
+            const to = sameSiteTarget(new URL(first), res.headers.get("location"));
+            if (to) { await res.body?.cancel().catch(() => undefined); res = await go(to.href); followed = true; }
+          }
           await res.body?.cancel().catch(() => undefined); // the body is never read, let alone returned
           const ok = r.ok ? r.ok.includes(res.status) : res.status >= 200 && res.status < 300;
-          return { route: r.route, method: r.method, status: res.status, ms: Date.now() - t0, ok };
+          return { route: r.route, method: r.method, status: res.status, ms: Date.now() - t0, ok, ...(followed ? { redirected: true } : {}) };
         } catch (e) {
           const timedOut = (e as { name?: string })?.name === "TimeoutError" || (e as { name?: string })?.name === "AbortError";
           return { route: r.route, method: r.method, status: null, ms: Date.now() - t0, ok: false, error: timedOut ? "timeout" : "network" };

@@ -127,6 +127,10 @@ export type JobKind = {
    */
   scopeForArgs?: (args: Record<string, unknown>) => { scope: "read" | "invoke" | "write"; arg: string } | null;
   run: (ctx: StepContext) => Promise<StepOutcome>;
+  /** S71-R4 (G71): an ASYNC submit-time check (reads the database, e.g. a cost ceiling). Throws JobArgsError to refuse; runs after the open-job dedupe, before the insert. */
+  precheck?: (args: Record<string, unknown>) => Promise<void>;
+  /** S71-R4 (Q4): the model calls this job reserves, 0 = none. When > 0 the insert is a CAPPED insert (one transaction, advisory lock): see insertJobCapped. */
+  capPlan?: (args: Record<string, unknown>) => number;
   /**
    * S4 — OPEN-JOB DEDUPE. The args fields (top-level keys of the parsed args) that identify the work, as [key, value] pairs. `submitJob` looks for a
    * queued or running job of this kind whose args match all of them and, if one exists, returns THAT job (flagged `deduped`) instead of queueing another.

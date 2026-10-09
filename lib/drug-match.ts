@@ -87,7 +87,25 @@ const COMMON = new Set(`a abdomen about above across advice advise after again a
 /** articles, prepositions, pronouns, auxiliaries: a multi-word window never contains one ("the road", "she has") */
 const FUNCTION_WORDS = new Set(`the a an and or but if then than that this these those there here when where what which who whom whose why how not no yes all any some each every both either neither more most less least much many few little very too also only just even still again always never often ever once twice since until while after before during about above below between into onto over under through across along around against without within upon from with for off out down up i me my mine we us our you your he him his she her it its they them their one two three is are was were be been being am do does did done doing have has had having can could shall should will would may might must to of in on at by as so`.split(" "));
 /** very common English words: never proposed as a mis-hearing of a name, alone or as a whole multi-word window */
-const isCommon = (w: string): boolean => COMMON.has(w.toLowerCase());
+export const isCommon = (w: string): boolean => inflectedIn(COMMON, w);
+
+/**
+ * S8A8 D2 — INFLECTED FORMS. The word lists hold base forms ("medicine"); "medicines", "tolerated", "stretching" are the same ordinary words and must not escape the gate on a plural or a tense.
+ * True when the word, or the word with a plural / past / -ing / -ly ending taken off (and the e a dropped ending hid), is in the set. Short words (under 5 letters) are tested as they are.
+ */
+export function inflectedIn(set: ReadonlySet<string>, word: string): boolean {
+  const w = word.toLowerCase();
+  if (set.has(w)) return true;
+  if (w.length < 5) return false;
+  const cands: string[] = [];
+  if (w.endsWith("ies")) cands.push(`${w.slice(0, -3)}y`);
+  if (w.endsWith("es")) cands.push(w.slice(0, -2));
+  if (w.endsWith("s")) cands.push(w.slice(0, -1));
+  if (w.endsWith("ed")) cands.push(w.slice(0, -2), w.slice(0, -1), w.slice(0, -3));
+  if (w.endsWith("ing")) cands.push(w.slice(0, -3), `${w.slice(0, -3)}e`, w.slice(0, -4));
+  if (w.endsWith("ly")) cands.push(w.slice(0, -2));
+  return cands.some((c) => c.length >= 4 && set.has(c));
+}
 /**
  * CONTEXT. A real catalog (~10 000 brand names) holds a near-sound-alike for almost any ordinary word, so a loose score alone is mostly noise. A window is therefore
  * compared at the loose threshold only when a word that talks about that kind of thing sits within a few words of it ("take X twice a day", "X level is high",
@@ -118,7 +136,10 @@ const lowerWords = (words: string[]): string[] => words.map((w) => w.toLowerCase
 
 type Cue = "none" | "weak" | "strong";
 /** What kind of cue surrounds the window: "strong" (a cue word of its kind within CUE_RADIUS, a dosing abbreviation or phrase), "weak" (an everyday dosing verb / frequency word right beside it), or "none". */
+/** Test hook (GATING-G66): how many times cueOf has run. One drugCandidates run may call it at most once per (window, category), never once per lexicon entry. */
+export const cueStats = { calls: 0 };
 const cueOf = (words: string[], lw: string[], start: number, size: number, c: Category): Cue => {
+  cueStats.calls += 1;
   for (let i = Math.max(0, start - CUE_RADIUS); i < Math.min(words.length, start + size + CUE_RADIUS); i++) if (i < start || i >= start + size) if (CUES[c].has(words[i]!.toLowerCase())) return "strong";
   if (c !== "drug") return "none";
   let weak = false;
@@ -146,7 +167,7 @@ const cueOf = (words: string[], lw: string[], start: number, size: number, c: Ca
  */
 export const COMMON_WORD_MIN_SCORE = 0.85;
 const COMMON_FREQ: ReadonlySet<string> = new Set((commonWords as { words: string[] }).words);
-export const isFrequentWord = (w: string): boolean => COMMON_FREQ.has(w.toLowerCase());
+export const isFrequentWord = (w: string): boolean => inflectedIn(COMMON_FREQ, w);
 
 /**
  * G61 (S8A6) — CLINICAL ENGLISH IS NOT A DRUG, WHATEVER THE CUE. The 8,000-word list is everyday English; a consult is full of words just outside it ("physiotherapy", "tolerated", "elevate",
@@ -155,7 +176,7 @@ export const isFrequentWord = (w: string): boolean => COMMON_FREQ.has(w.toLowerC
  * and whatever the cue; a garbled drug name ("combat land", "nodrinal", "metphormin") has none.
  */
 const CLINICAL_ENGLISH: ReadonlySet<string> = new Set((clinicalWords as { words: string[] }).words);
-export const isClinicalEnglishWord = (w: string): boolean => CLINICAL_ENGLISH.has(w.toLowerCase());
+export const isClinicalEnglishWord = (w: string): boolean => inflectedIn(CLINICAL_ENGLISH, w);
 
 const WORD = /[\p{L}\p{N}][\p{L}\p{N}'-]*/gu;
 
@@ -171,18 +192,44 @@ export function matchForm(name: string): string {
 }
 
 /** Built once per lexicon object: entries bucketed by the first sound, so a window is compared with ~1/10 of the names, not all of them. */
+/**
+ * S8A8b — A CLINICAL-TERM / ADVICE PHRASE MADE ONLY OF ORDINARY WORDS IS NEVER A CANDIDATE (T1: drug and investigation entries are NOT subject to this: "Bleeding Time", "Copper Serum", brands that are English words stay). "Continue same medicines" is a real advice phrase in the name list, but every token of it is an everyday or clinical
+ * English word (after inflection); proposing it for the ordinary sentence "Continue medicines daily" is noise. Such an entry is still a KNOWN name (an exact occurrence proposes nothing) but is
+ * not indexed as a target. Pack words ("tablet", "mg") and numbers are not tokens of the name for this test. An entry with ONE token outside the lists ("Combiflam", "nocturia") stays.
+ */
+/** Imperative advice verbs: a lexicon entry that STARTS with one is a sentence of advice stored as a name ("Continue same medicines"), not a product, a test or a symptom. */
+const ADVICE_VERBS = new Set("continue avoid take start stop use apply give repeat follow maintain reduce increase keep resume restart".split(" "));
+export function isAdvicePhrase(name: string): boolean {
+  const first = (name.trim().split(/[\s/,()+-]+/)[0] ?? "").toLowerCase();
+  return ADVICE_VERBS.has(first) && name.trim().split(/\s+/).length >= 2 && !/\d/.test(name) && allOrdinaryWords(name);
+}
+function allOrdinaryWords(name: string): boolean {
+  const toks = name.split(/[\s/,()+-]+/).filter((t) => t && !/\d/.test(t) && !PACK_WORDS.has(t.toLowerCase())).map((t) => t.replace(/[^\p{L}]/gu, "")).filter((t) => t.length > 0);
+  return toks.length > 0 && toks.every((t) => isCommon(t) || isFrequentWord(t) || isClinicalEnglishWord(t));
+}
+export type DropCounts = { drug: number; investigation: number; clinical_term: number; total: number };
+const dropCache = new WeakMap<Lexicon, DropCounts>();
+/** How many lexicon entries (distinct match forms per category) are not indexed because every token is an ordinary word. */
+export function lexiconDropCounts(lex: Lexicon): DropCounts {
+  indexOf(lex);
+  return dropCache.get(lex)!;
+}
+
 function indexOf(lex: Lexicon): { buckets: Map<string, Entry[]>; known: Set<string> } {
   const hit = indexCache.get(lex);
   if (hit) return hit;
   const buckets = new Map<string, Entry[]>();
   const known = new Set<string>();
   const seen = new Set<string>();
+  const drops: DropCounts = { drug: 0, investigation: 0, clinical_term: 0, total: 0 };
+  dropCache.set(lex, drops);
   const add = (name: string, category: Category) => {
     const form = matchForm(name);
     if (form.length < 3) return;
     known.add(form);
     if (seen.has(`${category}:${form}`)) return; // many pack sizes of one product are one entry (the first, in file order, is suggested)
     seen.add(`${category}:${form}`);
+    if (isAdvicePhrase(name)) { drops[category] += 1; drops.total += 1; return; } // S8A8b/T1: ONLY advice phrases ("Continue same medicines"); no other drug, investigation or clinical-term entry is dropped by this rule
     const pk = phoneticKey(form);
     const first = pk[0] ?? "";
     const e: Entry = { name, category, form, pk, first };
