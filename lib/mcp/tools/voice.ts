@@ -28,6 +28,7 @@ import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
+import { voiceConsole } from "./voice-console";
 
 const PRESIGN_SECONDS = 3600;
 
@@ -299,4 +300,4 @@ const encounterShadowRun: McpTool = {
     }),
 };
 
-export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses, encounterShadowRun];
+export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses, encounterShadowRun, voiceConsole];

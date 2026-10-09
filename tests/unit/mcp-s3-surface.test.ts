@@ -63,6 +63,14 @@ afterAll(() => {
 const JOB_KIND_TOOLS = new Set(["scribe_job_submit", "scribe_job_status", "scribe_job_list"]);
 /** scribe_health's `aspect` enum and prose grew by `routes` (S2L); nothing else about it may differ from main */
 const ASPECT_TOOLS = new Set(["scribe_health"]);
+/** scribe_voice gained the `console` view (S6A) with its action / min_cosine arguments; nothing else about it may differ from main */
+const CONSOLE_TOOLS = new Set(["scribe_voice"]);
+const withoutConsole = (schema: unknown): unknown => {
+  const s = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, Row> };
+  if (s.properties) { delete s.properties.action; delete s.properties.min_cosine; const v = s.properties.view; if (v && Array.isArray(v.enum)) v.enum = (v.enum as string[]).filter((x) => x !== "console"); }
+  const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
+  return strip(s);
+};
 const JOB_KIND_NAMES = (await import("@/lib/jobs/kinds")).JOB_KIND_NAMES;
 /** a schema with properties.kind.enum / .description removed (the one thing S8A changed on the job tools) */
 const withoutKindEnum = (schema: unknown): unknown => {
@@ -124,6 +132,9 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       if (ASPECT_TOOLS.has(t.name)) {
         expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
         expect(((t.inputSchema as Row & { properties: Row }).properties.aspect as Row).enum).toEqual(["all", "stt", "voice", "llm", "kb", "routes"]);
+      } else if (CONSOLE_TOOLS.has(t.name)) {
+        expect(withoutConsole(t.inputSchema), t.name).toEqual(withoutConsole(P.shortSchema(base.inputSchema)));
+        expect(((t.inputSchema as Row & { properties: Row }).properties.view as Row).enum).toEqual(["prints", "samples", "window_speakers", "console"]);
       } else if (JOB_KIND_TOOLS.has(t.name)) {
         expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
         const kindProp = (t.inputSchema as Row & { properties: Row }).properties.kind;
@@ -158,6 +169,13 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const norm = (x: string) => x.replace(/`aspect` \(default all\) picks the tool that runs: [^.]*\./, "<ASPECTS>.");
         expect(norm(String(out.help)), t.name).toBe(norm(t.description));
         expect(String(out.help)).toContain("routes → scribe_health_routes");
+        continue;
+      }
+      if (CONSOLE_TOOLS.has(t.name)) {
+        // S6A: the generated group text lists one more view. The whole text must still match main's with that list normalised.
+        const norm = (x: string) => x.replace(/; console → scribe_voice_console/, "");
+        expect(norm(String(out.help)), t.name).toBe(norm(t.description));
+        expect(String(out.help)).toContain("console → scribe_voice_console");
         continue;
       }
       if (JOB_KIND_TOOLS.has(t.name)) {

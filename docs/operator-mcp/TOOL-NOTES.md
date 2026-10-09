@@ -41,7 +41,7 @@ review; the code does not check it.
 | `scribe_session_tape` | read | `view`: `session` → `scribe_get_session`; `manifest` / `timeline` / `chunk` / `zip` → `scribe_get_recording` with that `mode` |
 | `scribe_encounter` | read | exactly one id: `encounter_id` → `scribe_get_encounter`; `trace_id` → `scribe_get_trace`; both or neither → `one_id_required` |
 | `scribe_stt_runs` | read | `subject_id` or `encounter_id` given → `scribe_get_stt_run`; neither → `scribe_list_stt_runs` |
-| `scribe_voice` | read | `view`: `prints` → `scribe_list_voiceprints`; `samples` → `scribe_list_voice_samples`; `window_speakers` → `scribe_window_speakers` |
+| `scribe_voice` | read | `view`: `prints` → `scribe_list_voiceprints`; `samples` → `scribe_list_voice_samples`; `window_speakers` → `scribe_window_speakers`; `console` → `scribe_voice_console` |
 | `scribe_room_command` | write | `kind`: `start_day` → `scribe_start_recording`; `pause_day` → `scribe_pause_recording`; `resume_day` → `scribe_resume_recording`; `end_day` → `scribe_stop_recording`; `close_orphaned_session` → `scribe_close_orphaned_session`; `set_audio_input` → `scribe_set_audio_input`; `check_update_now` / `report_diag` / `restart_engine` → `scribe_room_command` |
 | `scribe_scratch` | write | `action`: `replay` → `scribe_replay_write`; `fuse` → `scribe_fuse_run` |
 

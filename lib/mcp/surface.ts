@@ -478,6 +478,7 @@ export const GROUPS: readonly McpTool[] = [
       v("prints", "scribe_list_voiceprints"),
       v("samples", "scribe_list_voice_samples"),
       v("window_speakers", "scribe_window_speakers"),
+      v("console", "scribe_voice_console"),
     ],
   }),
   buildGroup({
