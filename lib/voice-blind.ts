@@ -5,7 +5,10 @@
  * (fail closed). No pair is ever named in an answer. Read only.
  */
 import { sql } from "@/lib/db";
-import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+
+const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
 
 export type BlindRefusal = "blind_room_day" | "window_unplaced";
 type Pair = { room_id: string; ist_date: string };
@@ -31,6 +34,23 @@ export async function windowPlacement(windowId: string): Promise<{ known: boolea
   const r = rows[0];
   if (!r) return { known: false, pairs: [] };
   return { known: true, pairs: [r.room_id && r.ist_date ? { room_id: r.room_id, ist_date: r.ist_date } : null, r.room_id2 && r.ist_date2 ? { room_id: r.room_id2, ist_date: r.ist_date2 } : null] };
+}
+
+/**
+ * B1 (REL2-R3): the number of room_turn_speaker rows (of this window and/or room-day) with ANY held-out placement: the row's OWN rts.room_day_id, or its window's bench_window.room_day_id or room_diarize_window.room_day_id.
+ * A caller that serves those rows refuses when this is > 0 (fail closed, as N2-1 does for the nemotron shadow row).
+ */
+export async function rtsBlindRows(f: { windowId?: string | null; roomDayId?: string | null }): Promise<number> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n
+      FROM room_turn_speaker rts
+      LEFT JOIN bench_window w ON w.id = rts.window_id
+      LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
+     WHERE (${f.windowId ?? null}::text IS NULL OR rts.window_id = ${f.windowId ?? null}::text)
+       AND (${f.roomDayId ?? null}::text IS NULL OR rts.room_day_id = ${f.roomDayId ?? null}::text)
+       AND EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+  `) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
 }
 
 export async function roomDayPlacement(roomDayId: string): Promise<Pair | null> {

@@ -7,7 +7,7 @@
  * Read-only. Transcript text of runs is returned only with include_text=true.
  */
 
-import { guardRoomDay, guardWindow } from "@/lib/voice-blind";
+import { guardRoomDay, guardWindow, rtsBlindRows } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
@@ -406,6 +406,8 @@ const roomTurnSpeakers: McpTool = {
       // S6-BLIND: placement first, content after. A held-out room-day is refused blind_room_day and an unplaced window window_unplaced, before room_turn_speaker is read.
       if (windowId) { const g = await guardWindow(windowId); if (g) return { error: g, spans: [], summary: {} }; }
       if (roomDayId) { const g = await guardRoomDay(roomDayId); if (g) return { error: g, spans: [], summary: {} }; }
+      // B1: each turn row has placements of its own (rts.room_day_id) besides its window's: if ANY row asked for is held out by ANY of them, the whole answer is refused (fail closed), before a span is read
+      if ((await rtsBlindRows({ windowId, roomDayId })) > 0) return { error: "blind_room_day", spans: [], summary: {} };
 
       const spans = (await sql`
         SELECT window_id, source_ref, speaker_idx, overlap_ms, room_day_id,

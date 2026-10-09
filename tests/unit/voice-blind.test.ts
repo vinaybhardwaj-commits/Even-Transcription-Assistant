@@ -40,26 +40,26 @@ describe("scribe_window_speakers", () => {
   it("a window on a held-out room-day is refused blind_room_day with ZERO room_turn_speaker reads; an unplaced and an unknown window are window_unplaced; an ordinary window is read", async () => {
     answers = [PLACE_BLIND];
     expect(await call("scribe_window_speakers", { window_id: "w1" })).toMatchObject({ error: "blind_room_day", spans: [] });
-    expect(reads(/FROM room_turn_speaker/)).toEqual([]);
+    expect(reads(/FROM room_turn_speaker\s+WHERE/)).toEqual([]);
     statements.length = 0; answers = [PLACE_NONE];
     expect(await call("scribe_window_speakers", { window_id: "w1" })).toMatchObject({ error: "window_unplaced" });
-    expect(reads(/FROM room_turn_speaker/)).toEqual([]);
+    expect(reads(/FROM room_turn_speaker\s+WHERE/)).toEqual([]);
     statements.length = 0; answers = []; // unknown window: no bench_window row
     expect(await call("scribe_window_speakers", { window_id: "w_nope" })).toMatchObject({ error: "window_unplaced" });
-    expect(reads(/FROM room_turn_speaker/)).toEqual([]);
-    statements.length = 0; answers = [PLACE_OK, [/FROM room_turn_speaker/, [{ window_id: "w1", source_ref: "t1", speaker_idx: 0, role: "clinician", clinician_id: "docA" }]]];
+    expect(reads(/FROM room_turn_speaker\s+WHERE/)).toEqual([]);
+    statements.length = 0; answers = [PLACE_OK, [/FROM room_turn_speaker\s+WHERE/, [{ window_id: "w1", source_ref: "t1", speaker_idx: 0, role: "clinician", clinician_id: "docA" }]]];
     expect(await call("scribe_window_speakers", { window_id: "w1" })).toMatchObject({ summary: { turns: 1 } });
-    expect(reads(/FROM room_turn_speaker/)).toHaveLength(1);
+    expect(reads(/FROM room_turn_speaker\s+WHERE/)).toHaveLength(1);
   });
   it("room_day_id: held out = blind_room_day, no room-day = window_unplaced, both with zero turn reads; with both ids either one can refuse", async () => {
     answers = [[/FROM room_day WHERE id/, [{ room_id: BR, ist_date: BD }]]];
     expect(await call("scribe_window_speakers", { room_day_id: "rd_b" })).toMatchObject({ error: "blind_room_day" });
     statements.length = 0; answers = [];
     expect(await call("scribe_window_speakers", { room_day_id: "rd_none" })).toMatchObject({ error: "window_unplaced" });
-    expect(reads(/FROM room_turn_speaker/)).toEqual([]);
+    expect(reads(/FROM room_turn_speaker\s+WHERE/)).toEqual([]);
     statements.length = 0; answers = [PLACE_OK, [/FROM room_day WHERE id/, [{ room_id: BR, ist_date: BD }]]];
     expect(await call("scribe_window_speakers", { window_id: "w1", room_day_id: "rd_b" })).toMatchObject({ error: "blind_room_day" });
-    expect(reads(/FROM room_turn_speaker/)).toEqual([]);
+    expect(reads(/FROM room_turn_speaker\s+WHERE/)).toEqual([]);
   });
   it("a window whose bench_window and diarize-window room-days differ is refused if EITHER is held out", async () => {
     answers = [[/FROM bench_window w\s+LEFT JOIN room_day rd/, [{ id: "w1", room_id: "r1", ist_date: "2026-10-05", room_id2: BR, ist_date2: BD }]]];
