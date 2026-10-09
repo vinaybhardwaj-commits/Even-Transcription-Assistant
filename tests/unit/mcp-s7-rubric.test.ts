@@ -49,6 +49,7 @@ describe("registration", () => {
     expect(listed.description).toMatch(/UTC/);
     expect(listed.description).toMatch(/invoke/);
     expect(listed.description).toMatch(/touches no room/);
+    expect(listed.description).toMatch(/draft rubrics need lab:true \+ unit_keys/); // W2: a draft run needs explicit units
     expect(Object.keys((t.inputSchema as { properties: Row }).properties).length).toBeLessThanOrEqual(15); // S7-1B: + by, min_n
   });
   it("the two job kinds are registered with invoke scope", async () => {

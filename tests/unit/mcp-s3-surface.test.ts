@@ -65,11 +65,18 @@ const JOB_KIND_TOOLS = new Set(["scribe_job_submit", "scribe_job_status", "scrib
 const ASPECT_TOOLS = new Set(["scribe_health"]);
 /** scribe_voice gained the `console` view (S6A) with its action / min_cosine arguments; nothing else about it may differ from main */
 const CONSOLE_TOOLS = new Set(["scribe_voice"]);
+/**
+ * W1: ONLY the generated console notes are normalised: the `action` / `min_cosine` properties, "console" in the view enum, and the "|console" the generator adds to the shared clinician_id tag.
+ * Every other description (the view text, include_urls, window_id, room_day_id, limit, clinician_id's own tag) must still equal main's, so a changed non-console description fails.
+ */
 const withoutConsole = (schema: unknown): unknown => {
   const s = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, Row> };
-  if (s.properties) { delete s.properties.action; delete s.properties.min_cosine; const v = s.properties.view; if (v && Array.isArray(v.enum)) v.enum = (v.enum as string[]).filter((x) => x !== "console"); }
-  const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
-  return strip(s);
+  if (s.properties) {
+    delete s.properties.action; delete s.properties.min_cosine;
+    const v = s.properties.view; if (v && Array.isArray(v.enum)) v.enum = (v.enum as string[]).filter((x) => x !== "console");
+    const c = s.properties.clinician_id; if (c && typeof c.description === "string") c.description = c.description.replace("|console]", "]");
+  }
+  return s;
 };
 const JOB_KIND_NAMES = (await import("@/lib/jobs/kinds")).JOB_KIND_NAMES;
 /** a schema with properties.kind.enum / .description removed (the one thing S8A changed on the job tools) */
