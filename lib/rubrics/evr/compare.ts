@@ -26,26 +26,48 @@ const STOP = new Set(["the", "and", "with", "for", "of", "to", "in", "on", "a", 
 const content = (s: string): string[] => words(s).filter((w) => w.length >= 4 && !STOP.has(w));
 
 // ---- parsing ------------------------------------------------------------------------------------------------------------------------------
-export type Dose = { value: number; unit: "mg" | "ml" | "iu" | "pct" };
+export type Dose = { value: number; unit: "mg" | "ml" | "iu" | "pct"; /** read from a bare number with no unit, in the record's unit */ bare?: true };
 const SMALL: Record<string, number> = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
 /** "five hundred" -> 500, "one thousand" -> 1000, "two fifty" -> 250, "half" -> 0.5, "one and a half" -> 1.5. Returns the text with each number-word run replaced by digits. PURE. */
 export function numberWordsToDigits(s: string): string {
-  const pre = s.replace(/\bone and a half\b/gi, "1.5").replace(/\bhalf\b/gi, "0.5");
+  const DIG = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+  // "point five" -> 0.5, "one point five" -> 1.5 (a decimal point spoken as a word)
+  const pre = s
+    .replace(/\b(one|two|three|four|five|six|seven|eight|nine|zero)?\s*point\s+(zero|one|two|three|four|five|six|seven|eight|nine)\b/gi, (_m, w: string | undefined, d: string) => `${w ? DIG.indexOf(w.toLowerCase()) : 0}.${DIG.indexOf(d.toLowerCase())}`)
+    .replace(/\bone and a half\b/gi, "1.5").replace(/\bhalf\b/gi, "0.5");
   const toks = pre.split(/(\s+)/);
   const out: string[] = [];
+  const word = (t: string | undefined) => (t ?? "").toLowerCase().replace(/[^a-z]/g, "");
   for (let i = 0; i < toks.length; i++) {
-    const w = (toks[i] ?? "").toLowerCase().replace(/[^a-z]/g, "");
+    const w = word(toks[i]);
     if (w in SMALL || w === "hundred" || w === "thousand") {
-      let total = 0, cur = 0, j = i, used = false, last = i;
-      for (; j < toks.length; j++) {
-        const t = (toks[j] ?? "").toLowerCase().replace(/[^a-z]/g, "");
+      // collect the run of number words (skipping spaces and "and")
+      const run: string[] = [];
+      let last = i;
+      for (let j = i; j < toks.length; j++) {
+        const t = word(toks[j]);
         if (/^\s+$/.test(toks[j] ?? "") || t === "and") continue;
-        if (t in SMALL) { cur += SMALL[t]!; used = true; last = j; }
-        else if (t === "hundred") { cur = (cur || 1) * 100; used = true; last = j; }
-        else if (t === "thousand") { total += (cur || 1) * 1000; cur = 0; used = true; last = j; }
-        else break;
+        if (t in SMALL || t === "hundred" || t === "thousand") { run.push(t); last = j; } else break;
       }
-      if (used) { out.push(String(total + cur)); i = last; continue; }
+      // Q1: "<1-9> <tens>[ <1-9>]" is hundreds + tens (+ units): "six fifty" 650, "two fifty" 250, "one twenty five" 125 (a hundreds digit is spoken before the tens). No "hundred" in the run.
+      let total = 0, cur = 0;
+      const isUnit = (t: string | undefined) => t !== undefined && t in SMALL && SMALL[t]! >= 1 && SMALL[t]! <= 9;
+      const isTens = (t: string | undefined) => t !== undefined && t in SMALL && SMALL[t]! >= 20 && SMALL[t]! % 10 === 0;
+      let k = 0;
+      if (isUnit(run[0]) && isTens(run[1]) && !run.includes("hundred") && !run.includes("thousand")) {
+        cur = SMALL[run[0]!]! * 100 + SMALL[run[1]!]!;
+        k = 2;
+        if (isUnit(run[2])) { cur += SMALL[run[2]!]!; k = 3; }
+      }
+      for (; k < run.length; k++) {
+        const t = run[k]!;
+        if (t in SMALL) cur += SMALL[t]!;
+        else if (t === "hundred") cur = (cur || 1) * 100;
+        else { total += (cur || 1) * 1000; cur = 0; }
+      }
+      out.push(String(total + cur));
+      i = last;
+      continue;
     }
     out.push(toks[i] ?? "");
   }
@@ -58,7 +80,7 @@ export function parseDose(s: string, defaultUnit?: Dose["unit"]): Dose | null {
   const m = /(\d+(?:\.\d+)?)\s*(mg|mcg|µg|μg|ug|g|ml|iu|units?|%)/i.exec(text);
   if (!m) {
     const bare = /^\s*(\d+(?:\.\d+)?)\s*$/.exec(text.trim());
-    return bare && defaultUnit ? { value: Number(bare[1]), unit: defaultUnit } : null;
+    return bare && defaultUnit ? { value: Number(bare[1]), unit: defaultUnit, bare: true } : null;
   }
   const v = Number(m[1]);
   const u = m[2]!.toLowerCase();
@@ -68,6 +90,17 @@ export function parseDose(s: string, defaultUnit?: Dose["unit"]): Dose | null {
   if (u === "ml") return { value: v, unit: "ml" };
   if (u === "%") return { value: v, unit: "pct" };
   return { value: v, unit: "iu" };
+}
+/**
+ * Q6: the dose said on the tape, read against the record's dose. A figure with its own unit is read as it is. A BARE number (or "half" / "point five") carries no unit, so it is read in the record's
+ * unit ONLY when that is plausible against the record dose (at least 10 % and at most 10 x of it); otherwise it is treated as unparseable (counted apart by the bench). "2 tablets"-style counts
+ * have no bare-number form and are never read as mg.
+ */
+export function parseTapeDose(said: string, record: Dose | null): Dose | null {
+  const d = parseDose(said, record?.unit);
+  if (!d) return null;
+  if (d.bare && record && !(d.value >= record.value * 0.1 && d.value <= record.value * 10)) return null;
+  return d;
 }
 export function parseFreq(s: string): number | null {
   const t = s.toLowerCase();
@@ -158,7 +191,7 @@ export function compareRecord(rec: NormRecord, said: SaidItems, lines: TapeLine[
     }
     matchedSaid.add(idx);
     const s = said.meds[idx]!;
-    const rd = parseDose(m.dose), sd = parseDose(s.dose, rd?.unit);
+    const rd = parseDose(m.dose), sd = parseTapeDose(s.dose, rd);
     if (rd && sd && rd.unit === sd.unit && rd.value > 0 && sd.value > 0 && Math.abs(rd.value - sd.value) > 1e-9) {
       const ratio = rd.value / sd.value;
       const clear = ratio >= DOSE_CLEAR_HIGH || ratio <= DOSE_CLEAR_LOW;

@@ -6,7 +6,7 @@
  * Expected: add_drug / add_procedure / add_diagnosis / laterality_swap = obvious; dose_x2 / dose_half = obvious when the tape states that drug's dose, else none; remove_drug = minor (said_not_in_record).
  * Originals are NOT negatives (a real record can hold a real discrepancy): they give baseline_flag_rate only. PURE and seeded (mulberry32), so a rerun repeats.
  */
-import { compareRecord, nameOverlap, parseDose, parseSide, sameDrug, swapSide, tapeMention, type TapeLine } from "./compare";
+import { compareRecord, nameOverlap, parseDose, parseTapeDose, parseSide, sameDrug, swapSide, tapeMention, type TapeLine } from "./compare";
 import { findingCode, type Finding, type NormRecord, type SaidItems, type Tier } from "./types";
 
 export const PERTURB_KINDS = ["add_drug", "dose_x2", "dose_half", "laterality_swap", "add_procedure", "add_diagnosis", "remove_drug"] as const;
@@ -51,8 +51,9 @@ export function perturb(kind: PerturbKind, rec: NormRecord, said: SaidItems, lin
     const cands = INJECT_DRUGS.filter((d) => !tapeText.includes(d.toLowerCase()) && !rec.meds.some((m) => sameDrug([m.name, m.alt_name].filter(Boolean), [d])) && !tapeMention([d], lines));
     if (cands.length === 0) return { kind, applicable: false };
     const name = pick(cands, r);
+    const unmatchedSaid = said.meds.some((s) => !rec.meds.some((m) => sameDrug([m.name, m.alt_name].filter(Boolean), [s.name])));
     out.meds.push({ name, alt_name: "", dose: "500 mg", freq: "twice daily", route: "oral", duration: "5 days", side: "" });
-    return { kind, applicable: true, record: out, expect: { target: name, field: "drug", kind: "in_record_not_said", tier: "obvious" } };
+    return { kind, applicable: true, record: out, expect: { target: name, field: "drug", kind: "in_record_not_said", tier: unmatchedSaid ? "material" : "obvious" } }; // Q5: with a said drug unmatched by the record, the compare caps an unsupported record drug at material (R1)
   }
   if (kind === "add_procedure") {
     const cands = INJECT_PROCEDURES.filter((p) => !rec.procedures.some((x) => x.name.toLowerCase() === p.toLowerCase()) && !p.toLowerCase().split(" ").filter((w) => w.length >= 5).some((w) => tapeText.includes(w.slice(0, 5))));
@@ -72,9 +73,8 @@ export function perturb(kind: PerturbKind, rec: NormRecord, said: SaidItems, lin
     const idx = rec.meds.map((m, i) => ({ m, i })).filter(({ m }) => parseDose(m.dose));
     if (idx.length === 0) return { kind, applicable: false };
     const { m, i } = pick(idx, r);
-    const unit = parseDose(m.dose)!.unit;
     const sm = said.meds.find((s) => sameDrug([m.name, m.alt_name].filter(Boolean), [s.name]));
-    const stated = !!sm && !!parseDose(sm.dose, unit);
+    const stated = !!sm && !!parseTapeDose(sm.dose, parseDose(m.dose));
     // R5: a dose said on the tape that cannot be parsed is reported apart ("tape_dose_unparseable"), never counted as a correct none
     const none_reason = stated ? undefined : sm && sm.dose.trim() ? ("tape_dose_unparseable" as const) : ("no_dose_on_tape" as const);
     out.meds[i]!.dose = scaleDose(m.dose, kind === "dose_x2" ? 2 : 0.5);

@@ -679,4 +679,30 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       REC.setMetabaseForTests(null);
     }
   });
+
+  it("ROUND3-B Q3 — the run-time stop of evr_perturb: at the job ceiling (2) the remaining windows are skipped llm_cap (2 scored, 2 skipped, 2 extraction calls); the stop-removed mutant makes 4", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const ids = ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"];
+    for (const [i, k] of ids.entries()) {
+      if (k !== "enc1@m1") await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+      await pg.sql`UPDATE eta_encounter_windows SET consult_uid = ${`ConsultUidCap${i}AaaaaaaaaaZ`}, warehouse_prescription_uid = ${`rec${i}`} WHERE consult_key = ${k}`;
+    }
+    REC.setMetabaseForTests(async () => [{ rec_uid: "recX", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "500 mg", freq: "twice a day", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, ...ids.map((unit_key) => ({ unit_key }))].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      const b = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(b.job).toMatchObject({ status: "done", result: { n: 2, llm_calls: 2, skipped_llm_cap: 2, windows_skipped: { llm_cap: 2 } } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
 });

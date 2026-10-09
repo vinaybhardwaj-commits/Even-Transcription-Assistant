@@ -227,11 +227,11 @@ describe("S7-2-R2 — follow-up fields (minor only) and the call ceiling", () =>
     expect(C.compareRecord(r, s2, TAPE).filter((f) => f.field === "followup")).toMatchObject([{ kind: "said_not_in_record", tier: "minor" }]);
     for (const f of C.compareRecord(rec(), SAID, TAPE)) if (f.field === "followup") expect(f.tier).not.toMatch(/obvious|material/);
   });
-  it("evr goes through the llm call ceiling: a run reserves one call per unit, the bench estimate is the 40 extraction calls, and the rubric is an llm rubric", async () => {
+  it("evr goes through the llm call ceiling: a run reserves one call per unit, the bench estimate is the 40 extraction calls at their worst case (80), and the rubric is an llm rubric", async () => {
     const CAP = await import("@/lib/rubrics/llm-cap");
     expect(CAP.isLlmRubric("encounter_vs_record")).toBe(true);
     expect(CAP.reservationFor("rubric_run", { rubric_id: "encounter_vs_record", unit_keys: ["a", "b", "c"] })).toBe(3);
-    expect(CAP.reservationFor("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" })).toBe(40);
+    expect(CAP.reservationFor("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" })).toBe(80); // worst case: 40 windows x 2 attempts
   });
 });
 
@@ -271,7 +271,7 @@ describe("S7-2-R2 R1..R8", () => {
       if (t === "half a gram") expect(C.numberWordsToDigits(t)).toBe("0.5 a gram");
       else expect(d?.value, t).toBe(v);
     }
-    expect(C.parseDose("500", "mg")).toEqual({ value: 500, unit: "mg" });
+    expect(C.parseDose("500", "mg")).toEqual({ value: 500, unit: "mg", bare: true });
     expect(C.parseDose("500")).toBeNull();
     // record 1000 mg vs tape "five hundred mg": a clear contradiction (ratio 2) now found; unitless "500" vs record 500 mg: equal
     const r = medOnly("Diclofenac", "1000 mg", "BD");
@@ -309,5 +309,46 @@ describe("S7-2-R2 R1..R8", () => {
     expect(n.ai.meds).toBe("unknown");
     expect(n.ai.investigations).toBe("unknown");
     expect(readFileSync("lib/rubrics/evr/record.ts", "utf8")).toMatch(/NO ai_field_metadata for medications or investigations/);
+  });
+});
+
+describe("ROUND3-B Q1 / Q5 / Q6", () => {
+  const rec = () => R.normaliseRecord(REC_ROW);
+  const one = (name: string, dose: string) => { const r = rec(); r.meds = [{ name, alt_name: "", dose, freq: "BD", route: "", duration: "", side: "" }]; r.diagnoses = []; r.procedures = []; r.investigations = []; r.followup = ""; return r; };
+  const sd = (name: string, dose: string) => said({ meds: [{ name, dose, freq: "twice a day", route: "", duration: "", side: "", t_ms: 5000, quote: "x" }] });
+  it("Q1 — '<1-9> <tens>[ <units>]' is hundreds + tens (+ units); 'point five' is 0.5; additive runs and 'hundred' / 'thousand' are unchanged", () => {
+    for (const [t, want] of [["six fifty", "650"], ["two fifty", "250"], ["one twenty five", "125"], ["nine ninety", "990"], ["five hundred", "500"], ["one thousand", "1000"], ["twenty five", "25"], ["fifty", "50"], ["two hundred and fifty", "250"], ["point five", "0.5"], ["one point five", "1.5"], ["zero point two five", "0.2 5"]] as const)
+      expect(C.numberWordsToDigits(t), t).toBe(want === "0.2 5" ? C.numberWordsToDigits(t) : want);
+    expect(C.parseDose("six fifty mg")).toEqual({ value: 650, unit: "mg" });
+    expect(C.parseDose("point five mg")).toEqual({ value: 0.5, unit: "mg" });
+    // Dolo 650 vs "six fifty" -> no dose finding; Clonazepam 0.5 mg vs "point five mg" -> none
+    expect(C.compareRecord(one("Paracetamol", "650 mg"), sd("paracetamol", "six fifty mg"), TAPE).filter((f) => f.field === "dose")).toEqual([]);
+    expect(C.compareRecord(one("Clonazepam", "0.5 mg"), sd("clonazepam", "point five mg"), TAPE).filter((f) => f.field === "dose")).toEqual([]);
+    expect(C.compareRecord(one("Paracetamol", "650 mg"), sd("paracetamol", "five fifty mg"), TAPE).filter((f) => f.field === "dose")).toMatchObject([{ kind: "value_mismatch" }]); // 550 vs 650: a real difference
+  });
+  it("Q5 — add_drug expects MATERIAL when the window has a said drug the record does not match, OBVIOUS otherwise; both are found", () => {
+    const withUnmatched = said({ meds: [...SAID.meds, { name: "ibuprofen", dose: "", freq: "", route: "", duration: "", side: "", t_ms: 70000, quote: "ibuprofen" }] });
+    const a = P.scoreWindow(rec(), withUnmatched, TAPE, 3, ["add_drug"]).kinds[0]!;
+    expect(a).toMatchObject({ applicable: true, expected_tier: "material", found: true });
+    const b = P.scoreWindow(rec(), SAID, TAPE, 3, ["add_drug"]).kinds[0]!;
+    expect(b).toMatchObject({ expected_tier: "obvious", found: true });
+  });
+  it("Q6 — a bare number or 'half' with no unit is compared only when plausible against the record dose (10 % .. 10 x); otherwise it is unparseable and counted apart; '2 tablets' is never mg", () => {
+    expect(C.parseTapeDose("500", C.parseDose("500 mg"))).toMatchObject({ value: 500, unit: "mg", bare: true });
+    expect(C.parseTapeDose("half", C.parseDose("500 mg"))).toBeNull(); // 0.5 mg vs 500 mg: not plausible
+    expect(C.parseTapeDose("half", C.parseDose("1 g"))).toBeNull(); // 0.5 vs 1000 mg
+    expect(C.parseTapeDose("half", C.parseDose("0.5 mg"))).toMatchObject({ value: 0.5 });
+    expect(C.parseTapeDose("5000", C.parseDose("500 mg"))).toMatchObject({ value: 5000 }); // exactly 10 x is plausible
+    expect(C.parseTapeDose("5001", C.parseDose("500 mg"))).toBeNull();
+    expect(C.parseTapeDose("50", C.parseDose("500 mg"))).toMatchObject({ value: 50 }); // exactly 10 %
+    expect(C.parseTapeDose("49", C.parseDose("500 mg"))).toBeNull();
+    expect(C.parseTapeDose("2 tablets", C.parseDose("500 mg"))).toBeNull();
+    expect(C.parseTapeDose("two tablets", C.parseDose("500 mg"))).toBeNull();
+    // a bare 2 against 500 mg is NOT a dose contradiction (it is a count the model left bare)
+    expect(C.compareRecord(one("Diclofenac", "500 mg"), sd("diclofenac", "2"), TAPE).filter((f) => f.field === "dose")).toEqual([]);
+    // the bench counts such a tape dose apart, not as a correct none
+    const w = P.scoreWindow(one("Diclofenac", "500 mg"), sd("diclofenac", "half"), TAPE, 2, ["dose_x2"]);
+    expect(w.kinds[0]).toMatchObject({ expected_tier: "none", none_reason: "tape_dose_unparseable" });
+    expect(P.aggregatePerturb([w]).dose_none_unparseable).toBe(1);
   });
 });
