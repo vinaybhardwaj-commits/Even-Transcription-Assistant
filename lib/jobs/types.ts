@@ -93,6 +93,15 @@ export type StepOutcome =
   | { kind: "done"; result: Record<string, unknown> }
   | { kind: "fail"; error: string };
 
+/** G80: a step that throws can say what progress to keep. The runner merges `progress_patch` over the pre-step progress when it records the failure (so calls already made are not forgotten). */
+export function withProgressPatch(e: unknown, patch: Record<string, unknown>): Error {
+  return Object.assign(e instanceof Error ? e : new Error(String(e)), { progress_patch: patch });
+}
+export const progressPatchOf = (e: unknown): Record<string, unknown> | null => {
+  const p = (e as { progress_patch?: unknown } | null)?.progress_patch;
+  return p && typeof p === "object" && !Array.isArray(p) ? (p as Record<string, unknown>) : null;
+};
+
 export const nextStep = (step: string, progress: Record<string, unknown> = {}): StepOutcome => ({ kind: "next", step, progress });
 export const doneWith = (result: Record<string, unknown>): StepOutcome => ({ kind: "done", result });
 export const failWith = (error: string): StepOutcome => ({ kind: "fail", error });

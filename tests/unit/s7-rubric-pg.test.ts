@@ -787,6 +787,42 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
+  it("G80 — a model outage (llm_unavailable) MID-BATCH keeps the calls already made: the failed step records progress.llm_calls = every attempt so far and the position, so a retry neither forgets nor repeats them (run path)", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const { OpenRouterError } = await import("@/lib/openrouter");
+    for (const k of ["encA@m1", "encB@m1", "encC@m1"]) await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      // units 1-2 are scored (2 calls); unit 3 throws on every claim: 3 failures (MAX_FAILURES) end the job. Every attempt is a real call: 2 + 3 = 5.
+      const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"] });
+      expect(run.job).toMatchObject({ status: "failed" });
+      expect(calls).toBe(5);
+      expect(run.job.progress).toMatchObject({ idx: 2, llm_calls: 5 });
+    } finally {
+      LLM.setRubricChatForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("G80 — the same on the bench path (labelled bench): the throwing batch keeps llm_calls and the position", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const { OpenRouterError } = await import("@/lib/openrouter");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const rows = ["g1", "g2", "g3", "g4"].map((k) => JSON.stringify({ unit_key: k, expected: { surgery_recommended: false } })).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", rows);
+      for (const k of ["g1", "g2", "g3", "g4"]) mem.set(`rubric/bench/consult_surgical_pitch/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 1, speaker: "doctor", text: "hello" }] }));
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch" });
+      expect(b.job).toMatchObject({ status: "failed" });
+      expect(calls).toBe(5);
+      expect(b.job.progress).toMatchObject({ idx: 2, llm_calls: 5 });
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
   it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
     const C = await import("@/lib/rubrics/llm-cap");
     const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");

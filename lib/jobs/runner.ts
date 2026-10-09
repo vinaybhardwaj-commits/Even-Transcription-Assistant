@@ -18,7 +18,7 @@ import {
   readJob,
   saveStep,
 } from "./store";
-import { INVOCATION_BUDGET_MS, LEASE_MS, MAX_FAILURES, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS, type JobRow } from "./types";
+import { INVOCATION_BUDGET_MS, LEASE_MS, MAX_FAILURES, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS, progressPatchOf, type JobRow } from "./types";
 import { errorCodeOf, jobError } from "./errors";
 import { randomUUID } from "node:crypto";
 import { withPoolContext } from "@/lib/service-pool";
@@ -117,7 +117,7 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
     const after = await recordFailure({
       id: job.id,
       step,
-      progress: job.progress,
+      progress: { ...job.progress, ...(progressPatchOf(e) ?? {}) },
       error: jobError("step_threw", `${step} failed after ${job.failures + 1} attempts`),
       maxFailures: MAX_FAILURES,
       runner,

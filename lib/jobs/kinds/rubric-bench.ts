@@ -6,8 +6,9 @@
  * Draft, benched and production rubrics may all be benched. A bench writes NO rubric_result row (it must not overwrite the results of real units).
  */
 import { z } from "zod";
-import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { JobArgsError, doneWith, failWith, nextStep, withProgressPatch, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
+import { countingCalls, talliedCalls } from "@/lib/rubrics/llm";
 import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun } from "@/lib/rubrics/registry";
 import { evaluateUnit, evaluateEvrPerturbUnit } from "@/lib/rubrics/engines";
@@ -144,6 +145,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   const llm = isLlmRubric(r.id);
   let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
   let left = llm ? await callsLeft(set.items.length, made) : Number.POSITIVE_INFINITY;
+  try { // G80: a throw keeps the batch's position and every model call made so far
   while (idx < end && Date.now() < deadline) {
     if (llm && left <= 0) { // G71: at the cap, the remaining items are unscored (reason llm_cap) and no more calls are made
       for (; idx < set.items.length; idx++) { compared[idx] = compareItem(set.items[idx]!, null); capSkipped += 1; }
@@ -151,13 +153,16 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
     }
     const item = set.items[idx]!;
     // a DB / R2 error throws (the step is retried); a unit the engine could not score, or that is held out or unresolved, comes back skipped / failed and fails every expected field
-    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true, room_id: item.room_id ?? null, room_ids: item.room_ids ?? null, ist_date: item.ist_date ?? null } : {}) });
+    const out = await countingCalls(() => evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true, room_id: item.room_id ?? null, room_ids: item.room_ids ?? null, ist_date: item.ist_date ?? null } : {}) }));
     // a skipped unit with a score is a scored "nothing to score" (no surgery recommended, unscorable tape): it can be right or wrong against the gold
     const score: Record<string, unknown> | null = out.status === "ok" || out.status === "empty" || (out.status === "skipped" && out.score) ? (out.score ?? null) : null;
     compared[idx] = compareItem(item, score);
     made += out.calls ?? 0;
     left -= out.calls ?? 0;
     idx += 1;
+  }
+  } catch (e) {
+    throw withProgressPatch(e, { idx, compared, llm_calls: made + talliedCalls(e), skipped_cap: capSkipped });
   }
   return nextStep(idx >= set.items.length ? "finish" : "evaluate", { ...ctx.progress, idx, compared, llm_calls: made, skipped_cap: capSkipped });
 }
@@ -171,16 +176,20 @@ async function evaluateEvrStep(ctx: StepContext, r: NonNullable<ReturnType<typeo
   // G71: the same model-call ceiling as every llm rubric (one extraction call per window)
   let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
   let left = await callsLeft(set.items.length, made);
+  try { // G80
   while (idx < end && Date.now() < deadline) {
     if (left <= 0) {
       for (; idx < set.items.length; idx++) { outs[idx] = { skip: "llm_cap" }; capSkipped += 1; }
       break;
     }
-    const res = await evaluateEvrPerturbUnit(r, set.items[idx]!.unit_key, set.evr!.seed + idx, set.evr!.kinds as PerturbKind[]);
+    const res = await countingCalls(() => evaluateEvrPerturbUnit(r, set.items[idx]!.unit_key, set.evr!.seed + idx, set.evr!.kinds as PerturbKind[]));
     outs[idx] = res.ok ? res.outcome : { skip: res.reason };
     made += res.calls;
     left -= res.calls;
     idx += 1;
+  }
+  } catch (e) {
+    throw withProgressPatch(e, { idx, evr_out: outs, llm_calls: made + talliedCalls(e), skipped_cap: capSkipped });
   }
   return nextStep(idx >= set.items.length ? "finish" : "evaluate", { ...ctx.progress, idx, evr_out: outs, llm_calls: made, skipped_cap: capSkipped });
 }

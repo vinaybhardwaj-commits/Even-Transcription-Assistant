@@ -9,7 +9,26 @@
  */
 import { openrouterChat, OpenRouterError, type OpenRouterChatResult } from "@/lib/openrouter";
 import { llmFallbackModels } from "@/lib/llm/gemini";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { validateAgainst } from "./schema";
+
+/**
+ * G80: every model attempt (a failed transient one too: it may have been billed) is tallied in the store of the nearest `countingCalls`, so a unit that THROWS mid-way (llm_unavailable) still tells the
+ * step how many calls it made. The error leaves with `tallied_calls`; the step adds them to progress.llm_calls before the runner records the failure.
+ */
+const tally = new AsyncLocalStorage<{ n: number }>();
+export async function countingCalls<T>(fn: () => Promise<T>): Promise<T> {
+  const store = { n: 0 };
+  try {
+    return await tally.run(store, fn);
+  } catch (e) {
+    throw Object.assign(e instanceof Error ? e : new Error(String(e)), { tallied_calls: store.n });
+  }
+}
+export const talliedCalls = (e: unknown): number => {
+  const n = (e as { tallied_calls?: unknown } | null)?.tallied_calls;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+};
 
 export type ChatFn = (args: Parameters<typeof openrouterChat>[0]) => Promise<OpenRouterChatResult>;
 let chatOverride: ChatFn | null = null;
@@ -48,6 +67,8 @@ export async function askJson(args: { system: string; user: string; schema: Reco
   let last: "llm_invalid_json" | "llm_schema_invalid" = "llm_invalid_json";
   for (let i = 0; i < 2; i++) {
     attempts += 1;
+    const store = tally.getStore();
+    if (store) store.n += 1;
     let res: OpenRouterChatResult;
     try {
       res = await chat({
