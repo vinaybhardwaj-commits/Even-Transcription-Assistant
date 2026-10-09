@@ -1,7 +1,11 @@
 /**
- * GUARD — the scanner behind the room-access build gate. PURE: it takes (path, source) pairs and returns the violations, so the test can also feed it an injected raw query.
- * A violation is (a) SQL naming a room-data table (FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM <table>), or (b) a string or template literal that builds / reads an R2 room-audio key prefix,
- * in a file outside lib/room-access/ that is not on the allowlist. Comments are ignored.
+ * GUARD — the scanner behind the room-access build gate. WHAT IT IS: a TEXT LINT against ACCIDENTAL raw room SQL (someone writing `FROM bench_window` in a route or tool). It is NOT an adversarial parser and
+ * does not stop a determined author; review and the job / tool-layer checks are the controls for that. PURE: it takes (path, source) pairs and returns the violations, so the test can also feed it an injected query.
+ * A violation is (a) SQL naming a room-data table (FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM <table>, quoted / schema-qualified / ONLY / inside parentheses, SQL comments blanked), (b) a literal that uses a
+ * dollar-quote ($$ / $tag$) or an E'...' string AND names any gated table (FAIL CLOSED: those forms are not parsed), or (c) a literal that builds / reads an R2 room-audio key prefix, in a file outside
+ * lib/room-access/ that is not on the allowlist. TS comments are ignored.
+ * KNOWN LIMITS (not scanned): SQL assembled by string concatenation or built in a variable across literals (a table name in one piece, FROM in another); a table name from a variable or a config value;
+ * SQL read from a file; dynamic identifiers; a table reached through a VIEW or function that is not gated.
  */
 export const ROOM_TABLES = [
   "room_turn_speaker", "room_diarize_window", "bench_window", "bench_session", "speaker_cluster", "room_speaker_cluster_member", "diarize_window_label",
@@ -114,6 +118,9 @@ export function scanSource(file: string, src: string): Violation[] {
   };
   for (const lit0 of literalsOf(code)) {
     const lit = { ...lit0, text: blankSqlComments(lit0.text) };
+    // REL3-FU2 F3 fail closed: forms the scanner does not parse (dollar-quoted bodies, E'..' escape strings) that name ANY gated table are a violation by themselves
+    const unparsed = /\$(?:[A-Za-z_]\w*)?\$/.test(lit.text) || /(?<![A-Za-z0-9_$])[Ee]$/.test(code.slice(Math.max(0, lit0.at - 3), lit0.at - 1)) && code[lit0.at - 1] === "'";
+    if (unparsed) for (const t of ROOM_TABLES) { const w = new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i").exec(lit.text); if (w) add("sql", t, lit.at + w.index); }
     for (const m of lit.text.matchAll(KW_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
     // REL3-FU2 G3-1: every FROM is looked at, INCLUDING the ones inside parentheses (derived tables, LATERAL, subqueries in a JOIN): the scan resumes right after each FROM keyword instead of
     // skipping the span a match consumed; FROM ONLY <table> is the same table

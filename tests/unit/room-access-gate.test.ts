@@ -88,6 +88,19 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
     expect(blankSqlComments("a /* b */ c -- d\ne")).toBe("a         c     \ne");
     expect(blankSqlComments("'/*' x '*/'")).toBe("'/*' x '*/'");
   });
+  it("REL3-FU2 F3: fail closed — a literal with a dollar-quote or an E'..' string that names any gated table fails; the same forms without a gated table pass", () => {
+    for (const t of ROOM_TABLES) {
+      for (const f of [`sql\`DO $$ BEGIN PERFORM 1 FROM ${t}; END $$\``, `sql\`SELECT $q$ x $q$ || (SELECT count(*) FROM ${t})\``, `sql\`SELECT $tag$${t}$tag$\``,
+        "sql(E'SELECT 1 FROM ' || 'x', [])".replace("E'SELECT 1 FROM '", `E'SELECT 1 FROM ${t}'`), `q(e'\\x41 ${t}')`]) {
+        expect(scanSource("lib/x.ts", f).map((v) => v.what), `${t}: ${f}`).toContain(t);
+      }
+    }
+    for (const f of ["sql`DO $$ BEGIN PERFORM 1 FROM other_t; END $$`", "q(E'abc\\n')", "sql`SELECT ${x}::int, $1, $2 FROM other_t`", "const s = 'price $5'", "const k = `e'${t}`"]) {
+      expect(scanSource("lib/x.ts", f), f).toEqual([]);
+    }
+    // a plain quoted string ending in the letter e before another literal is not an E-string
+    expect(scanSource("lib/x.ts", "f('name', 'cue')")).toEqual([]);
+  });
   it("a synthetic file added to the tree would fail the gate (the assertion above is not vacuous)", () => {
     const fake = scanSource("lib/mcp/tools/new-tool.ts", "const rows = await sql`SELECT * FROM room_turn_speaker`;");
     const loose = fake.filter((v) => !ALLOWLIST[v.file]);
