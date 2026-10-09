@@ -1,0 +1,11 @@
+# ~/.ssh/config entry for the relay (NOT applied). The key is a NEW key. Its authorized_keys line on the Mini (fable) uses the forced command
+#   from="127.0.0.1,::1" ... env -u HERDR_PANE_ID -u HERDR_MACHINE -u HERDR_SESSION ETA_BUS_AS=consult-alerts /bin/sh .../run.sh
+# (the line-18 pattern plus from= for the reverse tunnel). NOTE: POST_TO_ALLOW is read only by ssh-forced-postonly.sh, NOT by run.sh /
+# server.mjs, so this key gets the full non-orchestrator bus surface (inbox, thread, roster, post to anyone); an allowlist would need
+# server code. The relay sends no identity itself.
+Host consult-alerts-bus
+  HostName 127.0.0.1
+  Port 2224
+  User bus-user
+  IdentityFile ~/.ssh/consult_alerts_key
+  IdentitiesOnly yes

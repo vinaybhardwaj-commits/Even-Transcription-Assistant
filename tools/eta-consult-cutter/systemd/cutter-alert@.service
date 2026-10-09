@@ -1,0 +1,6 @@
+[Unit]
+Description=Alert spool line when %i fails (read by tools/alert_watch.py, relayed to the bus by an agent session)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/oc/consult/cutter-deploy/tools/alert_append.py "ALERT %i failed (see journalctl --user -u %i)"

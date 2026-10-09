@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+hosts.json
+HOSTS.local.md
+*.log

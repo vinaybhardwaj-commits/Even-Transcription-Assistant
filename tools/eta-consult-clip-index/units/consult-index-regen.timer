@@ -1,0 +1,10 @@
+[Unit]
+Description=Rebuild the consult-audio index page every 20 minutes
+
+[Timer]
+OnCalendar=*:0/20:00
+Persistent=false
+Unit=consult-index-regen.service
+
+[Install]
+WantedBy=timers.target
