@@ -21,7 +21,10 @@ import { inClinicHours, joinOnlyWindow, listCliplessWindows } from "@/lib/stt/jo
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
+
+/** Stop starting joins once the tick has run this long, so one slow tick cannot hit maxDuration mid-join. */
+const TIME_BUDGET_MS = 180_000;
 
 const DEFAULT_BATCH = 6;
 const MAX_BATCH = 12;
@@ -65,6 +68,11 @@ export async function GET(req: NextRequest) {
   let joined = 0;
   let stoppedAt: string | null = null;
   for (const w of windows) {
+    if (Date.now() - t0 > TIME_BUDGET_MS) {
+      steps.time_budget = (steps.time_budget ?? 0) + 1;
+      stoppedAt = "time_budget";
+      break;
+    }
     const r = await joinOnlyWindow(w.window_id, { includeTranscriptDisabled: true });
     const key = r.ok ? (r.joined ? "joined" : "already_joined") : r.step;
     steps[key] = (steps[key] ?? 0) + 1;
@@ -75,6 +83,6 @@ export async function GET(req: NextRequest) {
     if (STOP_STEPS.has(r.step)) { stoppedAt = r.step; break; }
   }
   return respondOk({
-    batch, listed: windows.length, joined, steps, stopped_at: stoppedAt, ms: Date.now() - t0,
+    batch, listed: windows.length, joined, join_failed: steps.join_failed ?? 0, steps, stopped_at: stoppedAt, ms: Date.now() - t0,
   });
 }

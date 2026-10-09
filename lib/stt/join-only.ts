@@ -24,7 +24,7 @@
  * The drain makes the same check absolutely, on entry, as `step: "flag_off"` (room-drain.ts §C1).
  * That is right for transcription. This path is not transcription, which is why it may be asked.
  */
-import { refuseIfTooLong, roomsRecordingNow, joinServiceConfigured } from "@/lib/bench-join";
+import { refuseIfTooLong, roomsRecordingNow, joinServiceConfigured, JOIN_MAX_MS } from "@/lib/bench-join";
 import { sql } from "@/lib/db";
 import { isTranscriptEnabled } from "@/lib/room-switches";
 import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
@@ -150,7 +150,13 @@ export async function joinOnlyWindow(
  *
  * READ ONLY, and it takes the same decision the joiner takes: transcript-disabled rooms are left
  * out unless asked for. A listing that quietly included them would invite a run that quietly
- * processed them. Ids and counts only — no slugs, no names.
+ * processed them.
+ *
+ * HEAD OF LINE. Oldest-first means a window that can never join would sit at the head forever, so
+ * the two permanent refusals are asked in SQL: D2's length cap (the same JOIN_MAX_MS
+ * `refuseIfTooLong` uses) and "the session has any chunk at all". The chunk test is NOT exactly
+ * `loadWindowContext`'s (resolveRange is JS over the window's time range and source); a window with
+ * chunks that do not cover it can still be listed and fail as no_chunks. Ids and counts only — no slugs, no names.
  */
 export async function listCliplessWindows(opts: {
   limit: number;
@@ -171,6 +177,8 @@ export async function listCliplessWindows(opts: {
        AND w.state = ${JOIN_ONLY_STATE}
        AND w.room_day_id IS NOT NULL
        AND w.grid_aligned = TRUE
+       AND (w.end_ms - w.start_ms) <= ${JOIN_MAX_MS}
+       AND EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = w.session_id)
        AND NOT EXISTS (
          SELECT 1 FROM unnest(${blindDays}::text[], ${blindRooms}::text[]) AS b(day, room)
           WHERE b.day = d.ist_date::text AND b.room = d.room_id

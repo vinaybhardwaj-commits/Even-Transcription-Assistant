@@ -6,14 +6,17 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { JOIN_MAX_MS } from "@/lib/bench-join";
 import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 
 const H = vi.hoisted(() => ({
   statements: [] as string[],
+  params: [] as unknown[][],
   sqlCalls: 0,
   lookup: "clear" as "clear" | "blind" | "null_day" | "no_row" | "throws",
   joinCalls: 0,
   joinRequests: [] as unknown[],
+  joinMs: 0,
   list: [] as Array<{ window_id: string; transcript_enabled: boolean }>,
   listOpts: [] as unknown[],
   joinOnlyOpts: [] as unknown[],
@@ -21,8 +24,9 @@ const H = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/db", () => ({
-  sql: (strings: TemplateStringsArray) => {
+  sql: (strings: TemplateStringsArray, ...v: unknown[]) => {
     const text = strings.join("?");
+    H.params.push(v);
     H.statements.push(text);
     H.sqlCalls += 1;
     if (/FROM bench_window w\s+JOIN room_day d/i.test(text) && /SELECT d\.ist_date/i.test(text)) {
@@ -60,8 +64,8 @@ async function seam() {
 const updates = () => H.statements.filter((s) => /UPDATE/i.test(s));
 
 beforeEach(() => {
-  H.statements.length = 0; H.sqlCalls = 0; H.lookup = "clear"; H.joinCalls = 0; H.joinRequests.length = 0;
-  H.list = []; H.listOpts.length = 0; H.joinOnlyOpts.length = 0; H.joinOnlySteps = {};
+  H.statements.length = 0; H.params.length = 0; H.sqlCalls = 0; H.lookup = "clear"; H.joinCalls = 0; H.joinRequests.length = 0;
+  H.joinMs = 0; H.list = []; H.listOpts.length = 0; H.joinOnlyOpts.length = 0; H.joinOnlySteps = {};
   vi.resetModules();
 });
 
@@ -102,6 +106,7 @@ describe("the route", () => {
       listCliplessWindows: async (o: unknown) => { H.listOpts.push(o); return H.list; },
       joinOnlyWindow: async (id: string, o: unknown) => {
         H.joinOnlyOpts.push(o);
+        if (H.joinMs) vi.setSystemTime(new Date(Date.now() + H.joinMs));
         const r = H.joinOnlySteps[id] ?? { ok: true, joined: true };
         return r.ok ? { ok: true, window_id: id, joined: r.joined } : { ok: false, window_id: id, step: r.step };
       },
@@ -180,6 +185,24 @@ describe("the route", () => {
     }
   });
 
+  it("L1: a tick that would pass 180 s stops before the next join, and counts it", async () => {
+    H.list = ["a", "b", "c", "d"].map((window_id) => ({ window_id, transcript_enabled: false }));
+    H.joinMs = 100_000;   // a: 0->100 s, b: 100->200 s, then 200 s > 180 s: c is never started
+    const body = await (await call(`Bearer ${SECRET}`)).json();
+    expect(H.joinOnlyOpts.length).toBe(2);
+    expect(body.stopped_at).toBe("time_budget");
+    expect(body.steps.time_budget).toBe(1);
+    expect(body.joined).toBe(2);
+  });
+
+  it("L2: join_failed windows are counted in the response", async () => {
+    H.list = ["a", "b"].map((window_id) => ({ window_id, transcript_enabled: false }));
+    H.joinOnlySteps = { a: { ok: false, step: "join_failed" }, b: { ok: false, step: "join_failed" } };
+    const body = await (await call(`Bearer ${SECRET}`)).json();
+    expect(body.join_failed).toBe(2);
+    expect(H.joinOnlyOpts.length).toBe(2);   // transient: keeps going
+  });
+
   it("a blind refusal for one window does not stop the tick", async () => {
     H.list = ["a", "b"].map((window_id) => ({ window_id, transcript_enabled: false }));
     H.joinOnlySteps = { a: { ok: false, step: "blind_room_day" } };
@@ -197,6 +220,9 @@ describe("e. the listing SQL", () => {
     const q = H.statements[0];
     expect(q).toMatch(/w\.grid_aligned = TRUE/);
     expect(q).toMatch(/NOT EXISTS[\s\S]*unnest\(\?::text\[\], \?::text\[\]\)[\s\S]*d\.ist_date::text[\s\S]*d\.room_id/);
+    expect(q).toMatch(/\(w\.end_ms - w\.start_ms\) <= \?/);   // L2a: D2 cap, parameter = JOIN_MAX_MS
+    expect(H.params[0]).toContain(JOIN_MAX_MS);
+    expect(q).toMatch(/EXISTS \(SELECT 1 FROM bench_chunk c WHERE c\.session_id = w\.session_id\)/);   // L2b
     expect(q).toMatch(/ORDER BY w\.start_ms ASC/);
     expect(q).not.toMatch(/room_[a-z0-9]{8}/);   // no hand-copied pair in the text
   });

@@ -35,6 +35,7 @@ vi.mock("@/lib/stt/room-drain", () => ({
 }));
 vi.mock("@/lib/room-switches", () => ({ isTranscriptEnabled: async () => H.transcriptEnabled }));
 vi.mock("@/lib/bench-join", () => ({
+  JOIN_MAX_MS: 30 * 60_000,
   refuseIfTooLong: () => H.tooLong,
   roomsRecordingNow: async () => H.recording,
   joinServiceConfigured: () => H.configured,
