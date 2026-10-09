@@ -487,3 +487,38 @@ describe("GATING-G67 (S71-E) — candidate snapshot", () => {
     expect(diff, `${diff.length} texts changed`).toEqual([]);
   });
 });
+
+describe("S8A8 D1 — an overlapping short utterance is emitted ONCE (shaped like the mixed Hindi / English bench job)", () => {
+  const HI = "\u092e\u0941\u091d\u0947 \u0918\u0941\u091f\u0928\u0947 \u092e\u0947\u0902 \u0926\u0930\u094d\u0926 \u0939\u0948 \u0914\u0930 \u0938\u0940\u0922\u093c\u0940 \u091a\u0922\u093c\u0928\u0947 \u092e\u0947\u0902 \u0926\u093f\u0915\u094d\u0915\u0924 \u0939\u094b\u0924\u0940 \u0939\u0948";
+  const native = () => tagNative([
+    { speaker_id: "0", start_s: 0, end_s: 25, text: HI },
+    { speaker_id: "1", start_s: 3, end_s: 4, text: "Hi" },
+    { speaker_id: "1", start_s: 12, end_s: 13, text: "Okay." },
+    { speaker_id: "1", start_s: 20, end_s: 22, text: "Definitely, this is a treatment." },
+  ]);
+  const pass = [
+    { speaker_id: "0", start_s: 0, end_s: 25, text: "I have knee pain and trouble climbing stairs" },
+    { speaker_id: "1", start_s: 3.1, end_s: 3.9, text: "Hi" },
+    { speaker_id: "1", start_s: 12.1, end_s: 12.9, text: "Okay." },
+    { speaker_id: "1", start_s: 20.1, end_s: 21.9, text: "Definitely, this is a treatment." },
+  ];
+  it("each short entry pairs with its OWN native entry: 4 English entries for 4 native ones (was 7), the flat English has each utterance once", () => {
+    const n = native();
+    const al = alignEnglish(n, pass);
+    expect(al.track.map((t) => t.native_idx)).toEqual([0, 1, 2, 3]);
+    const need = settleUnpaired(n, al.track, al.rejectedNative);
+    expect(need).toEqual([]); // nothing is left unpaired, so nothing is re-emitted as native_latin
+    expect(al.track).toHaveLength(4);
+    expect(n.map((e) => e.english_source)).toEqual(["translate_pass", "translate_pass", "translate_pass", "translate_pass"]);
+    expect(n[0]!.english).toBe("I have knee pain and trouble climbing stairs"); // the long line does not swallow the backchannels
+    const doc = { entries: n, english_entries: al.track } as unknown as ResultDoc;
+    finalizeEnglish(doc, lex);
+    expect(doc.english).toBe("I have knee pain and trouble climbing stairs Hi Okay. Definitely, this is a treatment.");
+    for (const u of ["Hi", "Okay.", "Definitely, this is a treatment."]) expect(doc.english!.split(u).length - 1, u).toBe(1);
+  });
+  it("a point-like pass entry still pairs by midpoint, and an entry that only STRADDLES a boundary keeps the first-on-tie rule", () => {
+    const n = tagNative([{ speaker_id: "0", start_s: 5, end_s: 9, text: "ok one" }, { speaker_id: "0", start_s: 9, end_s: 12, text: "ok two" }]);
+    const al = alignEnglish(n, [{ speaker_id: "0", start_s: 8.6, end_s: 9.4, text: "and" }, { speaker_id: "0", start_s: 10, end_s: 10, text: "point" }]);
+    expect(al.track.map((t) => t.native_idx)).toEqual([0, 1]);
+  });
+});

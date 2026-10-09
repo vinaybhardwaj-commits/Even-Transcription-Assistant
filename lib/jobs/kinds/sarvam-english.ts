@@ -50,14 +50,31 @@ export const normalizeForEcho = (t: string): string => t.toLowerCase().replace(/
 
 const overlap = (a0: number, a1: number, b0: number, b1: number): number => Math.min(a1, b1) - Math.max(a0, b0);
 
-/** The index of the native entry an English entry belongs to: the one it overlaps most in time; for a point-like entry, the one that contains its midpoint; else null. */
+/**
+ * The index of the native entry an English entry belongs to: the one it overlaps most in time (the first on a tie); for a point-like entry, the one that contains its midpoint; else null.
+ * S8A8 D1: when the entry lies FULLY inside two or more native entries (a short translate-pass entry such as "Hi" inside both a long native line and the short native entry it really
+ * belongs to) the overlap ties, and the first one used to win, which was the long line: the short native entry was left unpaired and was emitted AGAIN as native_latin. The tightest
+ * containing native entry (the shortest) now wins. An entry that merely straddles a boundary keeps the old rule.
+ */
 function partnerOf(e: RawEntry, native: ResultEntry[]): number | null {
+  const EPS = 1e-9;
   let best = -1;
   let bestOv = 0;
   native.forEach((n, i) => {
     const ov = overlap(e.start_s, e.end_s, n.start_s, n.end_s);
-    if (ov > bestOv) { best = i; bestOv = ov; }
+    if (ov > bestOv + EPS) { best = i; bestOv = ov; }
   });
+  if (best >= 0) {
+    const len = e.end_s - e.start_s;
+    if (len > 0 && bestOv >= len - EPS) {
+      // fully contained: among the native entries that contain it entirely, the tightest fit
+      let tight = best;
+      native.forEach((n, i) => {
+        if (overlap(e.start_s, e.end_s, n.start_s, n.end_s) >= len - EPS && n.end_s - n.start_s < native[tight]!.end_s - native[tight]!.start_s - EPS) tight = i;
+      });
+      best = tight;
+    }
+  }
   if (best >= 0) return best;
   const mid = (e.start_s + e.end_s) / 2;
   const at = native.findIndex((n) => mid >= n.start_s && mid <= n.end_s);
