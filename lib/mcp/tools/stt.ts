@@ -7,6 +7,7 @@
  * Read-only. Transcript text of runs is returned only with include_text=true.
  */
 
+import { guardRoomDay, guardWindow } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
@@ -402,6 +403,9 @@ const roomTurnSpeakers: McpTool = {
       const roomDayId = argStr(args, "room_day_id", 64);
       const limit = argInt(args, "limit", 200, 1, 500);
       if (!windowId && !roomDayId) return { error: "window_id or room_day_id is required", spans: [], summary: {} };
+      // S6-BLIND: placement first, content after. A held-out room-day is refused blind_room_day and an unplaced window window_unplaced, before room_turn_speaker is read.
+      if (windowId) { const g = await guardWindow(windowId); if (g) return { error: g, spans: [], summary: {} }; }
+      if (roomDayId) { const g = await guardRoomDay(roomDayId); if (g) return { error: g, spans: [], summary: {} }; }
 
       const spans = (await sql`
         SELECT window_id, source_ref, speaker_idx, overlap_ms, room_day_id,

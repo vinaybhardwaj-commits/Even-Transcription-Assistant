@@ -29,6 +29,8 @@ import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX 
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
 import { voiceConsole } from "./voice-console";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { blockedSampleSources } from "@/lib/voice-blind";
 
 const PRESIGN_SECONDS = 3600;
 
@@ -99,6 +101,8 @@ const listVoiceSamples: McpTool = {
       if (!clinicianId) return { samples: [], error: "clinician_id_required" };
       const includeUrls = argBool(args, "include_urls");
       const rows = await listSamples(clinicianId);
+      // S6-BLIND: a sample whose source is a held-out (or unplaced) bench WINDOW gets no URL; an encounter source has no room-day link and is left as is (W3). Room audio keys (bench/) are never presigned here.
+      const blocked = includeUrls ? await blockedSampleSources(rows.map((r) => r.source_encounter_id).filter((x): x is string => typeof x === "string")) : new Set<string>();
       const samples = await Promise.all(
         rows.map(async (s) => {
           const base = {
@@ -115,6 +119,7 @@ const listVoiceSamples: McpTool = {
             match_confidence: s.match_confidence,
           };
           if (!includeUrls || !s.audio_r2_key) return base;
+          if ((s.source_encounter_id && blocked.has(s.source_encounter_id)) || s.audio_r2_key.startsWith("bench/")) return { ...base, url_withheld: "blind_room_day" };
           let url: string | null = null;
           try {
             url = await signGetUrl({ key: s.audio_r2_key, expiresInSeconds: PRESIGN_SECONDS, contentType: s.content_type ?? undefined });
@@ -149,6 +154,7 @@ const getClusters: McpTool = {
       if (!room) return { clusters: [], error: "unknown_room" };
       const d = pickIstDate(args);
       if ("error" in d) return { clusters: [], error: d.error };
+      if (isBlindRoomDay(d.date, room.id)) return { clusters: [], error: "blind_room_day" }; // S6-BLIND: a held-out room + date is refused before any lookup
       if (!(await roomExists(room.id))) return { clusters: [], error: "unknown_room" };
       const day = await findRoomDay(room.id, d.date);
       if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, clustering: CLUSTERING_STATUS, clusters: [] };
@@ -195,7 +201,7 @@ const diarizeSegments: McpTool = {
         limit: argInt(args, "limit", SESSION_WINDOW_LIMIT_DEFAULT, 1, SESSION_WINDOW_LIMIT_MAX),
         // raw, not argStr: an overlong or non-string engine must reach pickQuery and be refused, never read as absent
         engine: args.engine == null ? null : String(args.engine),
-      });
+      }, { blindGuard: true }); // S6-BLIND: held-out windows refused, unplaced windows refused, held-out windows left out of a session and counted
       return r.ok ? { segments: r.payload } : { segments: null, error: r.error };
     }),
 };
