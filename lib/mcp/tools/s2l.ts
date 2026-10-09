@@ -172,8 +172,8 @@ export function probeOrigin(): URL | null {
   if (!o) return null;
   const prod = new URL(PUBLIC_ORIGIN_DEFAULT);
   const apex = prod.hostname.replace(/^www\./, "");
-  // G77: an apex origin with a PORT keeps the port when it is mapped to www (same scheme as configured)
-  return o.hostname === apex ? new URL(`${o.protocol}//${prod.hostname}${o.port ? `:${o.port}` : ""}`) : o;
+  // G77: an apex origin with a PORT keeps the port when it is mapped to www. G76 rule: the www probe is ALWAYS https (an http APP_URL on the apex is never probed as http://www)
+  return o.hostname === apex ? new URL(`https://${prod.hostname}${o.port ? `:${o.port}` : ""}`) : o;
 }
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 /** The ONE redirect the probe follows: same scheme, the same host or its www / apex twin, the same path. Anything else (another site, another path, a second hop) is reported as the status it is. */

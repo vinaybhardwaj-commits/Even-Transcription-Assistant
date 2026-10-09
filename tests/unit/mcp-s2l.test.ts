@@ -576,6 +576,11 @@ describe("scribe_health aspect=routes", () => {
     expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app:8443");
     process.env.APP_URL = "https://evenscribe.app";
     expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app");
+    // REL2: an http apex is still probed on https://www (never http://www), with or without a port
+    process.env.APP_URL = "http://evenscribe.app";
+    expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app");
+    process.env.APP_URL = "http://evenscribe.app:8080";
+    expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app:8080");
     process.env.APP_URL = "https://evenscribe.app:8443";
     const ok = await t.handler({}, ctx) as Row;
     expect(ok.origin).toBe("https://www.evenscribe.app:8443");
