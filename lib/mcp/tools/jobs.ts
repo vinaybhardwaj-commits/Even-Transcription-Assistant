@@ -101,6 +101,7 @@ const submit: McpTool = {
           actor: ctx.actor,
           origin: ctx.origin,
           scopes: ctx.scopes,
+          callerClass: "mcp", // O5: this tool IS the MCP layer (a job argument can never claim it)
         });
         return { ok: true, job_id: job.id, kind: job.kind, status: job.status, ...(job.deduped ? { deduped: true } : {}) };
       } catch (e) {

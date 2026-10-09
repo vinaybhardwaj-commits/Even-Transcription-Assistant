@@ -38,7 +38,11 @@ export const USAGE_DAYS_MAX = 30;
 
 /** The documented keys, plus the room-audio ones, which are passed on ONLY so the kind can refuse them by name (scope_consult_only). */
 const SUBMIT_KEYS = ["encounter_id", "consult_uid", "mode", "english", "num_speakers", "transcription_run_id", ...ROOM_AUDIO_ARGS] as const;
-const submitArgs = (args: ToolArgs): Row => Object.fromEntries(SUBMIT_KEYS.filter((k) => args[k] !== undefined && args[k] !== null).map((k) => [k, args[k]]));
+/** O5: the room source arrives as `room_audio` ({window_id} | {session_id | room+date, from, to}) and is flattened for the kind's parser; top-level room keys are still passed on so the kind decides. */
+const submitArgs = (args: ToolArgs): Row => {
+  const ra = args.room_audio && typeof args.room_audio === "object" && !Array.isArray(args.room_audio) ? (args.room_audio as Row) : {};
+  return Object.fromEntries([...SUBMIT_KEYS.filter((k) => args[k] !== undefined && args[k] !== null).map((k) => [k, args[k]]), ...Object.entries(ra).filter(([k, v]) => (ROOM_AUDIO_ARGS as readonly string[]).includes(k) && v !== undefined && v !== null)]);
+};
 const num = (v: unknown): number | null => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
 const round = (n: number, d = 4): number => Math.round(n * 10 ** d) / 10 ** d;
 
@@ -47,19 +51,15 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
   // 1. validate by the kind's own parser, so a refusal is typed and nothing is queued
   try {
     if (kind === SARVAM_TRANSCRIBE_KIND) {
-      const parsed = parseSarvamTranscribeArgs(raw);
+      const parsed = parseSarvamTranscribeArgs(raw, "mcp"); // O5: this tool layer IS the MCP class
       // S8C: a consult clip comes from the CONSULT index mirror: held-out check first, voice_isolated refused, an existing palimpsest track refused (no double spend), the audio probed
       if (parsed.source === "consult") {
         const pre = await preflightClip(parsed.consult_uid);
         if (!pre.ok) return { ok: false, error: pre.error, ...(pre.track ? { track: pre.track } : {}) };
       }
     } else {
-      const parsed = parseSarvamTranslateArgs(raw);
-      if (parsed.kind === "transcription_run") {
-        // only a run whose subject is an ENCOUNTER may be translated; a window-subject run is room tape text
-        const rows = (await sql`SELECT subject_type FROM transcription_run WHERE id = ${parsed.id}::text LIMIT 1`) as Array<{ subject_type: string | null }>;
-        if (rows[0] && rows[0].subject_type !== "encounter") return { ok: false, error: "scope_consult_only", detail: "the run's subject is not an encounter" };
-      }
+      const parsed = parseSarvamTranslateArgs(raw, "mcp");
+      void parsed; // O5: a window / window-subject run is room text an MCP caller may translate; the job re-checks the held-out rule at submit and at its first step
     }
   } catch (e) {
     if (e instanceof JobArgsError) return e.reason.startsWith("scope_consult_only") ? { ok: false, error: "scope_consult_only", detail: e.reason.replace(/^scope_consult_only:\s*/, "") } : { ok: false, error: "bad_args", kind, detail: e.reason };
@@ -71,11 +71,11 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
     if (cap) return { ok: false, ...cap };
   }
   try {
-    const job = await submitJob({ kind, args: raw, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
+    const job = await submitJob({ kind, args: raw, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes, callerClass: "mcp" });
     // S4: an open job for the same source is returned, not duplicated
     return { ok: true, job_id: job.id, kind: job.kind, status: job.status, ...(job.deduped ? { deduped: true } : {}) };
   } catch (e) {
-    if (e instanceof JobArgsError) return { ok: false, error: "bad_args", kind, detail: e.reason };
+    if (e instanceof JobArgsError) return e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason, kind } : { ok: false, error: "bad_args", kind, detail: e.reason };
     if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind };
     throw e; // ToolScopeError -> the door's 403
   }
@@ -194,12 +194,12 @@ async function usage(args: ToolArgs): Promise<Row> {
 const sarvam: McpTool = {
   name: "scribe_sarvam",
   description:
-    "Sarvam speech AI through the Even AWS gateway (saaras:v3 transcription with speaker labels, mayura:v1 translation); Sarvam is zero-data-retention. Reads and writes the job queue and one R2 result object per job; touches no room; " +
-    "never writes a clinical table. ONLY ISOLATED CONSULT AUDIO goes to Sarvam (V's standing rule): `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a clip from the CONSULT cutter; " +
-    "is resolved through CONSULT's index mirror: held-out pair refused first, voice_isolated rows refused (consult_voice_isolated), a palimpsest track already there refused (already_transcribed, with the track ref), audio not readable refused (audio_unreadable); consult_index_unavailable / consult_index_integrity if the mirror is missing or fails its sha256). status / result {consult_uid} return that palimpsest track (layer, config_hash, segment count; text only with include_text) without calling Sarvam; consult_clips {ist_date, room_slug?, status?} lists the mirror's clips (no doctor fields; held-out excluded and counted). Options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
-    "Both queue a job and need invoke scope. status / result {job_id} (include_text returns the stored JSON: transcript, speaker-labelled entries, English); usage {ist_date | days <= 30}: gateway minutes, estimated cost, calls, Sarvam jobs and runs; " +
-    "health: configured env names, lab_store_configured, credential check, STS expiry (Sarvam is not called). " +
-    `A daily cap of ${SARVAM_DAILY_CAP_MINUTES} audio minutes applies, counting earlier queued jobs. Results are written to R2 mcp-sarvam/<job_id>.json; the job row carries counts only. Usage is also logged to the shared Sarvam ledger (sarvam.call.v1) and lane file. Times UTC.`,
+    "Sarvam speech AI via the Even AWS gateway (saaras:v3 transcription with speakers, mayura:v1 translation); zero-data-retention. Writes the job queue and one R2 result per job, never a clinical table, cue or app text. " +
+    "`action` transcribe takes {encounter_id} (max 30 min, duration measured from the audio) or {consult_uid} (CONSULT's index mirror: held-out pair refused first, then voice_isolated, already_transcribed with the track ref, audio_unreadable, mirror_minutes_missing; consult_index_unavailable / consult_index_integrity if the mirror is missing or fails its sha256). " +
+    "MCP research may also send ROOM audio as `room_audio` {window_id} or {session_id | room+date, from, to} (ISO or HH:MM IST, max 30 min); blind room-days are never processed (blind_room_day); results are labelled sarvam_mcp_research. " +
+    "status / result {consult_uid} return that palimpsest track without calling Sarvam; consult_clips {ist_date, room_slug?, status?} lists the mirror's clips (held-out excluded and counted). Options mode transcribe|codemix, english default true, num_speakers 1-6. translate takes {encounter_id}, {transcription_run_id} or {window_id}. " +
+    "Both queue a job and need invoke. status / result {job_id} (include_text: the stored JSON); usage {ist_date | days <= 30}; health: env names, lab_store_configured, credential check, STS expiry (Sarvam is not called). " +
+    `Daily cap ${SARVAM_DAILY_CAP_MINUTES} audio minutes incl. queued jobs. Results: R2 mcp-sarvam/<job_id>.json. Usage is logged to the shared ledger (sarvam.call.v1, with use and scope) and lane file. Times UTC.`,
   scope: "read",
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   inputSchema: {
@@ -218,6 +218,7 @@ const sarvam: McpTool = {
       days: { type: "integer", minimum: 1, maximum: USAGE_DAYS_MAX },
       room_slug: { type: "string" },
       status: { type: "string" },
+      room_audio: { type: "object" },
     },
     required: ["action"],
     additionalProperties: false,

@@ -6,7 +6,8 @@
  * place is why a new kind cannot accidentally hold a lease open or run past the route ceiling.
  */
 
-import { sarvamJobEnded } from "./sarvam-hook";
+import { isSarvamKind, sarvamJobEnded } from "./sarvam-hook";
+import { refreshContractFiles } from "@/lib/sarvam-lab";
 import { KIND_BY_NAME } from "./kinds";
 import {
   cancelJob,
@@ -156,10 +157,14 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
       : null;
 
   if (outcome.kind === "done") {
-    return lost(await finishJob(job.id, outcome.result, runner)) ?? { ...base, step, outcome: "done", ms: Date.now() - started };
+    const rows = await finishJob(job.id, outcome.result, runner);
+    if (rows > 0 && isSarvamKind(job.kind)) await refreshContractFiles(job.created_at).catch(() => undefined); // contract v1.2: after each call finishes, the day file from Neon + the lane
+    return lost(rows) ?? { ...base, step, outcome: "done", ms: Date.now() - started };
   }
   if (outcome.kind === "fail") {
-    return lost(await failJob(job.id, outcome.error, runner)) ?? { ...base, step, outcome: "failed", ms: Date.now() - started };
+    const rows = await failJob(job.id, outcome.error, runner);
+    if (rows > 0 && isSarvamKind(job.kind)) await refreshContractFiles(job.created_at).catch(() => undefined);
+    return lost(rows) ?? { ...base, step, outcome: "failed", ms: Date.now() - started };
   }
   return lost(await saveStep(job.id, outcome.step, outcome.progress, runner)) ?? { ...base, step, outcome: "advanced", ms: Date.now() - started };
 }
