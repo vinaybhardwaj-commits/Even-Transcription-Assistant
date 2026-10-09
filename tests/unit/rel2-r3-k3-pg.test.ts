@@ -581,3 +581,20 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect((await sttRunsFor("bw_clean")).length).toBeGreaterThanOrEqual(1);
   });
 });
+
+(HAVE ? describe : describe.skip)("REL3-FU2 F2-2: the STT leaderboard (subject bench_window / all) leaves out runs of held-out windows", () => {
+  it("excludes them from the board, counts them in n_blind_excluded, and encounter stays 0", async () => {
+    const { computeLeaderboard } = await import("@/lib/room-access/stt-leaderboard");
+    const runs = (await H.sql!`SELECT tr.subject_id AS wid FROM transcription_run tr WHERE tr.subject_type = 'bench_window' AND tr.mode = 'batch' AND tr.tier = 'asr'` as Array<{ wid: string }>);
+    const { windowsBlindAny } = await import("@/lib/room-access/check");
+    const held = await windowsBlindAny([...new Set(runs.map((r) => r.wid))]);
+    const nHeld = runs.filter((r) => held.has(r.wid)).length;
+    expect(nHeld).toBeGreaterThan(0);
+    const bw = await computeLeaderboard({ subjectKind: "bench_window" });
+    expect(bw.n_blind_excluded).toBe(nHeld);
+    expect(bw.total_runs).toBe(runs.length - nHeld);
+    const all = await computeLeaderboard({ subjectKind: "all" });
+    expect(all.n_blind_excluded).toBe(nHeld);
+    expect((await computeLeaderboard({})).n_blind_excluded).toBe(0);
+  });
+});

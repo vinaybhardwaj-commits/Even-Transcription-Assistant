@@ -44,7 +44,6 @@ export const ALLOWLIST: Record<string, { max: number; why: string }> = {
   "lib/stt/diarize-window.ts": { max: 4, why: "production pipeline writer/reaper/planner: only closes, expires or plans rows, chooses no window for processing; MCP-submitted work is guarded by the job hook" },
   "lib/stt/fanout.ts": { max: 13, why: "STT-lab fan-out of ENCOUNTER audio to engines and its run bookkeeping (lab pipeline, not a caller-facing reader of window transcripts)" },
   "lib/stt/join-only.ts": { max: 2, why: "production pipeline CHOOSER: picks its own windows, leaves held-out ones out through room-access blindWindowIds before its LIMIT (n_blind_excluded); still names bench_window/room_diarize_window in its own scan" },
-  "lib/stt/leaderboard.ts": { max: 1, why: "STT-lab leaderboard: per-engine scores against ENCOUNTER gold (stt_gold is keyed on encounter_id); no window row, no text" },
   "lib/stt/measure-job.ts": { max: 6, why: "production pipeline CHOOSER: picks its own windows, leaves held-out ones out through room-access blindWindowIds before its LIMIT (n_blind_excluded); still names bench_window/room_diarize_window in its own scan" },
   "lib/stt/room-drain.ts": { max: 20, why: "production pipeline CHOOSER: picks its own windows, leaves held-out ones out through room-access blindWindowIds before its LIMIT (n_blind_excluded); still names bench_window/room_diarize_window in its own scan" },
   "lib/stt/scoring.ts": { max: 14, why: "STT-lab scoring of ENCOUNTER runs against gold (writes wer / cer / term recall); no caller-facing window transcript read" },
