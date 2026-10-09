@@ -19,6 +19,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { SQL_CUES_TODAY_SPLIT, benchSessionTotals } from "@/lib/room-access/tool-reads";
 import { query } from "@/lib/brain/db";
 import { istDate } from "@/lib/brain/state";
 import { retrieve } from "@/lib/kb-retrieve";
@@ -40,10 +41,7 @@ const num = (rows: unknown, key = "n"): number => {
 // --- Fuse slice 3: live vs scratch, one query each (named so the report can quote them) ---
 
 /** Today's cues, split by the day's 0046 scratch flag. */
-export const SQL_CUES_TODAY_SPLIT =
-  "SELECT COUNT(*) FILTER (WHERE d.scratch IS NOT TRUE)::int AS live_n, " +
-  "COUNT(*) FILTER (WHERE d.scratch IS TRUE)::int AS scratch_n " +
-  "FROM cue c JOIN room_day d ON d.id = c.room_day_id WHERE d.ist_date = $1::date";
+export { SQL_CUES_TODAY_SPLIT };
 
 /** Today's room_days, split the same way. */
 export const SQL_ROOM_DAYS_TODAY_SPLIT =
@@ -63,19 +61,22 @@ async function split(fn: () => Promise<SplitRow | null>): Promise<{ live: number
   }
 }
 
+/** K-GUARD: the bench session totals leave held-out sessions out (and say how many). One read per call. */
+let totalsMemo: Promise<Awaited<ReturnType<typeof benchSessionTotals>>> | null = null;
+const sessionTotals = () => (totalsMemo ??= benchSessionTotals());
 const storeStats: McpTool = {
   name: "scribe_store_stats",
   description: "Store counts: bench sessions (by status), bench chunks (by upload_state), consult marks, encounters (total + today), STT engines enabled, brain cues + room-days today (IST). The brain counts separate LIVE days (cues_today, room_days_today) from the fuse's SCRATCH days (scratch_cues_today, scratch_room_days_today) — a replayed or warehouse-loaded day never inflates the live numbers. Per-count fail-safe.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () => {
+    totalsMemo = null;
     const today = istDate();
     const [sessions, sessionsByStatus, chunksByState, marks, encounters, encountersToday, enginesEnabled, cuesToday, roomDaysToday] = await Promise.all([
-      count(async () => num(await sql`SELECT COUNT(*)::int AS n FROM bench_session`)),
+      count(async () => (await sessionTotals()).total),
       (async () => {
         try {
-          const rows = (await sql`SELECT status, COUNT(*)::int AS n FROM bench_session GROUP BY status ORDER BY status`) as Array<{ status: string; n: number }>;
-          return { value: Object.fromEntries(rows.map((r) => [r.status, Number(r.n)])) as Record<string, number> };
+          return { value: (await sessionTotals()).byStatus };
         } catch (e) {
           return { value: null, error: String((e as Error)?.message ?? e).slice(0, 120) };
         }
@@ -105,11 +106,12 @@ const storeStats: McpTool = {
         return r.rows[0] ?? null;
       }),
     ]);
+    const blindExcluded = await sessionTotals().then((t) => t.nBlindExcluded).catch(() => null);
     const parts = { sessions, sessionsByStatus, chunksByState, marks, encounters, encountersToday, enginesEnabled, cuesToday, roomDaysToday };
     const errors = Object.entries(parts).filter(([, v]) => v.error).map(([k, v]) => `${k}: ${v.error}`);
     return {
       ist_date: today,
-      bench: { sessions: sessions.value, sessions_by_status: sessionsByStatus.value, chunks_by_upload_state: chunksByState.value, consult_marks: marks.value },
+      bench: { sessions: sessions.value, sessions_by_status: sessionsByStatus.value, chunks_by_upload_state: chunksByState.value, consult_marks: marks.value, n_blind_excluded: blindExcluded },
       encounters: { total: encounters.value, today_ist: encountersToday.value },
       stt: { engines_enabled: enginesEnabled.value },
       brain: {

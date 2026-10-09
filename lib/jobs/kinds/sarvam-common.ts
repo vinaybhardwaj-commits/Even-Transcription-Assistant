@@ -11,8 +11,7 @@ import { isNonEnglish } from "@/lib/sarvam";
 
 export const SARVAM_ENGINE = "sarvam-gw";
 export const SARVAM_DAILY_CAP_MINUTES = 240;
-export const RESULT_PREFIX = "mcp-sarvam/";
-export const resultKey = (jobId: string): string => `${RESULT_PREFIX}${jobId}.json`;
+export { MCP_SARVAM_PREFIX as RESULT_PREFIX, sarvamResultKey as resultKey } from "@/lib/room-access/keys";
 /** A Sarvam batch gets this long, wall clock from its start, before the job gives up. */
 export const SARVAM_WALL_MS = 30 * 60_000;
 

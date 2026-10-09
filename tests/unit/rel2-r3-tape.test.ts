@@ -21,7 +21,7 @@ vi.mock("@/lib/brain/state", () => ({ CUES_DEFAULT_LIMIT: 50, CUES_MAX_LIMIT: 20
 
 const { BLIND_ROOM_DAYS } = await import("@/lib/rubrics/blind-room-days");
 const { BENCH_TOOLS } = await import("@/lib/mcp/tools/bench");
-const { spanTouchesBlindDay } = await import("@/lib/voice-blind");
+const { spanTouchesBlindDay } = await import("@/lib/room-access/check");
 const { stitchKind } = await import("@/lib/jobs/kinds/stitch");
 const { transcribeRangeKind } = await import("@/lib/jobs/kinds/transcribe-range");
 const [BD, BR] = BLIND_ROOM_DAYS[0]!;

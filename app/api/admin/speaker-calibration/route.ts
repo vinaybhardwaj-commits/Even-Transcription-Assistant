@@ -28,6 +28,7 @@
  * ALL SQL IS INFERRED. The read fails safe to empty with a logged reason — never a 500.
  */
 import { NextRequest } from "next/server";
+import { adminDiarizeAnswers } from "@/lib/room-access/tool-reads";
 import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
@@ -68,14 +69,9 @@ export async function GET(req: NextRequest) {
   try {
     // INFERRED SQL #8 — the stored diarize answers for this session's windows. Joined through
     // bench_window because room_diarize_window is keyed on the window, not the session.
-    rows = (await sql`
-      SELECT d.window_id, d.speakers_json
-        FROM room_diarize_window d
-        JOIN bench_window w ON w.id = d.window_id
-       WHERE w.session_id = ${sessionId}
-         AND d.state = 'ok'
-       ORDER BY w.start_ms ASC
-    `) as Array<{ window_id: string; speakers_json: unknown }>;
+    const got = await adminDiarizeAnswers(sessionId);
+    if ("error" in got) return respondError("FORBIDDEN", got.error);
+    rows = got.rows;
   } catch (e) {
     const msg = `[speaker-calibration] read failed: ${String((e as Error)?.message ?? e).slice(0, 200)} — degraded to empty`;
     console.log(msg);

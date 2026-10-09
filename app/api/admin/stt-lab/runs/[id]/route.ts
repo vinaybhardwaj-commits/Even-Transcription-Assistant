@@ -8,6 +8,7 @@
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
+import { adminWindowRow } from "@/lib/room-access/tool-reads";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -31,10 +32,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     SELECT id, patient_label_raw, recorded_at, detected_language, note_type
       FROM encounter WHERE id = ${id} LIMIT 1
   `) as Array<Record<string, unknown>>;
-  const win = (await sql`
-    SELECT id, session_id, start_ms, end_ms, source_mic, state, room_day_id
-      FROM bench_window WHERE id = ${id} LIMIT 1
-  `) as Array<Record<string, unknown>>;
+  const winGot = await adminWindowRow(id);
+  if ("error" in winGot) return respondError("FORBIDDEN", winGot.error);
+  const win = winGot.rows;
 
   // Nothing anywhere knows this id.
   if (!enc[0] && !win[0] && kindRows.length === 0) return respondError("NOT_FOUND", "subject_not_found");

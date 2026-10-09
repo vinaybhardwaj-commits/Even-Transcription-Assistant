@@ -76,7 +76,7 @@ export async function GET(
       notes: session.notes,
     },
     archive_policy:
-      "bench/ prefix is a permanent archive — exempt from retention policy and self-delete (Room-Bench PRD D6)",
+      "the bench audio prefix is a permanent archive — exempt from retention policy and self-delete (Room-Bench PRD D6)",
     chunks: withUrls, // primary stream (USB mic)
     gaps: withUrls
       .filter((c) => c.gap_before_ms >= 2000)

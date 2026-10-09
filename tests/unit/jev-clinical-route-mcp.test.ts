@@ -24,7 +24,7 @@ const runClinicalRouteAsyncMock = vi.fn(async (_roomDayId: string) => ({
 vi.mock("@/lib/jev/clinical-route", () => ({ runClinicalRouteAsync: (roomDayId: string) => runClinicalRouteAsyncMock(roomDayId) }));
 vi.mock("@/lib/brain/db", () => ({ query: vi.fn() }));
 vi.mock("@/lib/jobs/submit", () => ({ submitJob: vi.fn() }));
-vi.mock("@/lib/voice-blind", () => ({ roomDayIsBlind: async () => false })); // K3-2: the held-out check is tested in rel2-r3-k3-pg
+vi.mock("@/lib/room-access/check", () => ({ roomDayIsBlind: async () => false })); // K3-2: the held-out check is tested in rel2-r3-k3-pg
 
 import { JEV_TOOLS } from "@/lib/mcp/tools/jev";
 import type { ToolContext } from "@/lib/mcp/registry";

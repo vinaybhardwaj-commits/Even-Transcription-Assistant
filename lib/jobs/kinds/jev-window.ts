@@ -44,7 +44,7 @@ import { PROMPT_VERSION, QUESTION_ID, SETTING, qid } from "@/lib/jev/prompts/arm
 import { ETA_JEV_BATCH_WINDOWS, ETA_JEV_CONTEXT_WINDOWS, ETA_JEV_MAX_INFLIGHT_PER_JOB, ETA_JEV_MAX_INFLIGHT_GLOBAL } from "@/lib/jev/thresholds";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
-import { roomDayArgHeldOut, splitBlindWindows } from "../held-out";
+import { roomDayArgHeldOut, splitBlindWindows } from "@/lib/room-access/jobs";
 
 export const JEV_WINDOW_KIND = "jev_window";
 

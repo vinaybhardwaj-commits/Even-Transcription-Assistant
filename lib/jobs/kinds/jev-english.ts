@@ -28,7 +28,7 @@ import { parseFlag, FlagValueError } from "@/lib/flags";
 import { classifyWindow, emptyRow, notReadyRow, failedRow, translatedRow, TERMINAL_SOURCES, nativeEnglishVotes, votesRecord, type JevWindowText } from "@/lib/jev/english";
 import { translateToEnglish } from "@/lib/jev/translate";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
-import { roomDayArgHeldOut, splitBlindWindows } from "../held-out";
+import { roomDayArgHeldOut, splitBlindWindows } from "@/lib/room-access/jobs";
 
 export const JEV_ENGLISH_KIND = "jev_english"; // name underscore (matches diarize_window/emotion_window); file stays jev-english.ts. Spec wrote "jev-english" — see report.
 export const ETA_JEV_TRANSLATE_ENABLED = "ETA_JEV_TRANSLATE_ENABLED";

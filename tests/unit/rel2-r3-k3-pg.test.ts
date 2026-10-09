@@ -102,7 +102,7 @@ const winRow = (id: string, session: string, hourUtc: number) => `INSERT INTO be
     `);
   });
   it("B3-1: a session whose window is held out ONLY by its turn rows, its window text or its emotion rows is refused (the guard, the listing and the tools)", async () => {
-    const { guardSessionSpan, sessionsBlindAny } = await import("@/lib/voice-blind");
+    const { guardSessionSpan, sessionsBlindAny } = await import("@/lib/room-access/check");
     for (const id of ["bs_rts", "bs_txt", "bs_emo"]) {
       expect(await guardSessionSpan(id), id).toBe("blind_room_day");
       expect(await call("scribe_get_session", { session_id: id }), id).toMatchObject({ error: "blind_room_day" });
@@ -110,7 +110,7 @@ const winRow = (id: string, session: string, hourUtc: number) => `INSERT INTO be
     expect([...(await sessionsBlindAny(["bs_rts", "bs_txt", "bs_emo", "bs_clean"]))].sort()).toEqual(["bs_emo", "bs_rts", "bs_txt"]);
   });
   it("B3-2: a session whose span touches a held-out IST day is refused WHATEVER the range (even one entirely on a clean day); a range reaching out of a clean session into the day is refused too", async () => {
-    const { guardSessionSpan } = await import("@/lib/voice-blind");
+    const { guardSessionSpan } = await import("@/lib/room-access/check");
     const dayEnd = dayStart + 86_400_000;
     // bs_before started the evening before and its last chunk ends inside the held-out day (see the guard test above)
     pg.exec(`INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('bs_span', '${BR}', '${T(dayStart - 3_600_000)}', '${T(dayStart - 1_800_000)}', 'ended');
@@ -385,5 +385,44 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(ev!.windows).toHaveLength(1);
     expect(ev!.windows[0]!.text).toBe("ok words");
     expect(ev!.n_blind_excluded).toBe(2);
+
+(HAVE ? describe : describe.skip)("GUARD — the readers that used to carry their own SQL (REB index route, store stats, rooms, the admin STT-lab / drain / calibration / windows routes) now refuse or exclude held-out targets through lib/room-access", () => {
+  beforeAll(() => {
+    pg.exec(`
+      INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) VALUES
+        ('w_ok', '${CLEAN_DAY}', 'r_clean', 'stt', 'e', 'v1', 'c1', 'ok', 'k1', 'aa'), ('w_blind', '${BD}', '${BR}', 'stt', 'e', 'v1', 'c2', 'ok', 'k2', 'bb');
+    `);
+  });
+  it("the bearer route GET /api/reb/index (it had NO held-out filter) lists only the clean row", async () => {
+    const { rebIndexRows } = await import("@/lib/room-access/tool-reads");
+    const rows = await rebIndexRows({ cursor: 0, windowId: null, day: null, layer: null, engine: null, roomId: null, withShadow: true, limit: 50 });
+    expect(rows.map((r) => r.window_id)).toEqual(["w_ok"]);
+    const byDay = await rebIndexRows({ cursor: 0, windowId: null, day: BD, layer: null, engine: null, roomId: BR, withShadow: true, limit: 50 });
+    expect(byDay).toEqual([]);
+  });
+  it("scribe_store_stats leaves held-out sessions out of the totals and says how many; scribe_list_rooms never shows a held-out session as a room's last", async () => {
+    const out = await call("scribe_store_stats", {});
+    expect(out.bench.n_blind_excluded).toBeGreaterThanOrEqual(2);
+    const { benchSessionTotals } = await import("@/lib/room-access/tool-reads");
+    const t = await benchSessionTotals();
+    const all = Number(((await H.sql!`SELECT count(*)::int AS n FROM bench_session` as Array<{ n: number }>)[0]!.n));
+    expect(t.total + t.nBlindExcluded).toBe(all);
+    const rooms = await call("scribe_list_rooms", {});
+    const blindRoom = (rooms.rooms as Array<{ id: string; last_session_at: string | null }>).find((r) => r.id === BR);
+    expect(blindRoom?.last_session_at ?? null).toBe(null); // its only sessions are held out
+  });
+  it("the admin routes' reads: a held-out session / window is refused; a clean one is served", async () => {
+    const R = await import("@/lib/room-access/tool-reads");
+    for (const id of ["bs_blind", "bs_win", "bs_rts"]) {
+      expect(await R.adminSessionWindows(id), id).toEqual({ error: "blind_room_day" });
+      expect(await R.adminDiarizeAnswers(id), id).toEqual({ error: "blind_room_day" });
+      expect(await R.adminDrainRows(id), id).toEqual({ error: "blind_room_day" });
+    }
+    expect(await R.adminWindowRow("bw_rts")).toEqual({ error: "blind_room_day" });
+    expect(await R.adminWindowRow("bw_blind")).toEqual({ error: "blind_room_day" });
+    expect("rows" in (await R.adminSessionWindows("bs_ok"))).toBe(true);
+    expect("rows" in (await R.adminWindowRow("bw_ok_none"))).toBe(true);
+    const pending = await R.measurePendingCount();
+    expect(pending).toBeGreaterThanOrEqual(0);
   });
 });

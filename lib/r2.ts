@@ -73,18 +73,7 @@ export function whisperBufferKey(encounterId: string): string {
  * Everything under the `bench/` prefix is immutable by convention: no code
  * path deletes or overwrites under it (PRD D6).
  */
-export function benchChunkKey(
-  roomSlug: string,
-  dateYmd: string,
-  sessionId: string,
-  idx: number,
-  source: "primary" | "backup" = "primary",
-): string {
-  // K-B: the backup (second-mic) stream lives in the SAME session folder as
-  // backup_chunk_{idx}.webm; the primary path is byte-identical to before.
-  const base = source === "backup" ? "backup_chunk_" : "chunk_";
-  return `bench/${roomSlug}/${dateYmd}/${sessionId}/${base}${String(idx).padStart(5, "0")}.webm`;
-}
+export { benchChunkKey } from "@/lib/room-access/keys";
 
 /**
  * Presigned HEAD URL — lets the browser verify a bench chunk landed in R2

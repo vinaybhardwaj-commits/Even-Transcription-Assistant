@@ -35,7 +35,7 @@ export const JOIN_MAX_MINUTES = JOIN_MAX_MS / 60_000;
 
 /** D3 — kept clips live in the SAME bucket as the tape, under their own prefix. Nothing under
  *  `clips/` is ever deleted or expired by this code. */
-export const CLIPS_PREFIX = "clips/";
+export { CLIPS_PREFIX } from "@/lib/room-access/keys";
 
 /** The joined clip's link. One hour — long enough to play a full consultation (the same window
  *  the manifest/chunk presigns use). The clip itself is kept; only the link expires. */
@@ -59,20 +59,8 @@ export function whisperTimeoutForClip(durationMs: number): number {
 // Key + provenance (D3, D4) — PURE
 // ---------------------------------------------------------------------------
 
-/** Compact UTC stamp for a key segment: 2026-08-19T05:34:00.000Z → 20260819T053400Z. */
-export function keyStamp(ms: number): string {
-  return new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-}
-
-/**
- * `clips/<session_id>/<start>-<end>-<source>.webm`
- *
- * Deterministic: the same window on the same session and microphone is the same key, so asking
- * twice overwrites one object rather than growing the archive by one clip per curious click.
- */
-export function clipKey(sessionId: string, startMs: number, endMs: number, source: "primary" | "backup"): string {
-  return `${CLIPS_PREFIX}${sessionId}/${keyStamp(startMs)}-${keyStamp(endMs)}-${source}.webm`;
-}
+import { clipKey } from "@/lib/room-access/keys";
+export { keyStamp, clipKey } from "@/lib/room-access/keys";
 
 export type ClipMeta = {
   session_id: string;

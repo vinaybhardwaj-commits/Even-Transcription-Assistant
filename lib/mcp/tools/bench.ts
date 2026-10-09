@@ -79,7 +79,7 @@
  *                     tool, not an option on this one, and a dry run of an open tape is safe.
  */
 
-import { guardSessionSpan, sessionsBlindAny } from "@/lib/voice-blind";
+import { guardSessionSpan, sessionsBlindAny } from "@/lib/room-access/check";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";

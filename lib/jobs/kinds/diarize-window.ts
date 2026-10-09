@@ -62,7 +62,7 @@ import { observedQuietSpans, remapSegments, requestSpeechRegions, trimmedAudioKe
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
-import { windowArgHeldOut } from "../held-out";
+import { windowArgHeldOut } from "@/lib/room-access/jobs";
 
 export const DIARIZE_WINDOW_KIND = "diarize_window";
 

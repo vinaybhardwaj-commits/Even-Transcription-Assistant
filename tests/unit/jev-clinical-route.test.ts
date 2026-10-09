@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 type Row = Record<string, unknown>;
 const dbCalls: Array<{ text: string; values: unknown[] }> = [];
 let dbResponder: () => Row[] = () => [];
-vi.mock("@/lib/voice-blind", () => ({ windowsBlindAny: async () => new Set<string>() })); // K4-2: the placement check is tested in rel2-r3-k3-pg
+vi.mock("@/lib/room-access/check", () => ({ windowsBlindAny: async () => new Set<string>() })); // K4-2: the placement check is tested in rel2-r3-k3-pg
 vi.mock("@/lib/db", () => {
   const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
     dbCalls.push({ text: strings.raw.join("?"), values });

@@ -374,7 +374,7 @@ describe.runIf(HAVE_DOCKER)("E31 A12 (R62) — the close lands on its own; the e
  * today, is read off the source rather than remembered, and fails the moment any tuple loses a field it
  * still computes.
  */
-const STORE_SRC = readFileSync("lib/emotion/store.ts", "utf8");
+const STORE_SRC = readFileSync("lib/room-access/emotion-store.ts", "utf8");
 /** The three writers of room_emotion_window that carry a conflict rule. The narrow failure write has none. */
 const CONFLICT_COPIES = ["recordEmotionWindow", "finishEmotionWindow", "writeNoSegmentsWindow"] as const;
 

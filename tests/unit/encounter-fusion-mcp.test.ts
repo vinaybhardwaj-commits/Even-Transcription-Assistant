@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const H = vi.hoisted(() => ({ v1: 0, v2: 0 }));
-vi.mock("@/lib/voice-blind", async (orig) => ({ ...((await orig()) as object), roomDayIsBlind: async () => false })); // REL2-R3: the held-out check is pinned in rel2-r3-sweep.test.ts; this file is about dispatch / the store
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...((await orig()) as object), roomDayIsBlind: async () => false })); // REL2-R3: the held-out check is pinned in rel2-r3-sweep.test.ts; this file is about dispatch / the store
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no database in this test"); } }));
 vi.mock("@/lib/encounter-clock/shadow-io", async (orig) => ({
   ...(await orig<typeof import("@/lib/encounter-clock/shadow-io")>()),

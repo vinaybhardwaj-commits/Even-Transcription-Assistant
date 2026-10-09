@@ -702,7 +702,7 @@ describe.runIf(HAVE_DOCKER)("E18 R47/R48/R49 — the set is pinned in time, the 
     // over `picked` would then say a window had been handed back when it had not. Rather than test a race, the
     // divergence is made inexpressible: `picked` carries the id ALONE and the session and day the ledger needs
     // come out of the UPDATE's own RETURNING, so a stamp over `picked` does not resolve at all.
-    const src = readFileSync("lib/stt/silence.ts", "utf8");
+    const src = readFileSync("lib/room-access/silence.ts", "utf8");
     const stmt = src.slice(src.indexOf("export async function reopenSilentWindows"));
     expect(stmt, "the UPDATE returns what the ledger writes").toMatch(/RETURNING w\.id, w\.session_id, w\.room_day_id/);
     expect(stmt, "and the ledger reads them off the moved set").toMatch(/FROM moved m CROSS JOIN bound b/);

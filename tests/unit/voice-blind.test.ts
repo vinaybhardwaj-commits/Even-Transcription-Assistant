@@ -25,7 +25,7 @@ let samples: Row[] = [];
 const { BLIND_ROOM_DAYS } = await import("@/lib/rubrics/blind-room-days");
 const S = await import("@/lib/mcp/surface");
 const D = await import("@/lib/diarize-segments");
-const V = await import("@/lib/voice-blind");
+const V = await import("@/lib/room-access/check");
 const [BD, BR] = BLIND_ROOM_DAYS[0]!;
 const call = async (name: string, args: Row) => (await S.CALLABLE_TOOLS.get(name)!.handler(args, { origin: "https://x", actor: "mcp:t", scopes: new Set(["read"]) } as never)) as Row;
 const reads = (re: RegExp) => statements.filter((s) => re.test(s.text));

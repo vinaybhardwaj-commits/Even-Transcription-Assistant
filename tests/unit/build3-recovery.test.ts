@@ -198,7 +198,7 @@ describe("§3.10 — the control that runs a room's waiting audio", () => {
 
   it("the card's count is all-history, not today's stranded-audio rollup", () => {
     const ui = code("components", "admin", "BenchRoomsLive.tsx");
-    const reads = code("lib", "admin", "room-reads.ts");
+    const reads = code("lib", "room-access", "admin-reads.ts");
     const waitingRead = reads.slice(
       reads.indexOf("export async function readWaitingAudioCounts"),
       reads.indexOf("export async function readTranscriptAndStranded"),
@@ -284,7 +284,7 @@ describe("§2.5 — the screen and the door report the same level numbers", () =
   it("the screen, door and D36/D37 piece readers use the same strict pair parser", () => {
     const chunks = code("app", "api", "bench", "chunks", "route.ts");
     const listeners = code("app", "api", "admin", "bench", "listeners", "route.ts");
-    const reads = code("lib", "admin", "room-reads.ts");
+    const reads = code("lib", "room-access", "admin-reads.ts");
     const windows = code("lib", "bench-window.ts");
     expect(door).toMatch(/spareExists && listener[\s\S]*parseMicLevelPair\(listener\.spare_peak, listener\.spare_avg\)/);
     expect(listeners).toMatch(/l\.spare_device === true \? parseMicLevelPair\(l\.spare_peak, l\.spare_avg\) : null/);

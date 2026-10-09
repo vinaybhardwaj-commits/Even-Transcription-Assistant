@@ -214,7 +214,7 @@ describe("fixtureVerdict — a fixture window's fate, one pure decision", () => 
   for (const [label, row, want] of cases) it(label, () => expect(fixtureVerdict(row as never)).toBe(want));
 
   it("uses J0's OWN isNativeEnglish — imported, not re-implemented", () => {
-    const src = readFileSync(join(process.cwd(), "lib/overnight-translate/select.ts"), "utf8");
+    const src = readFileSync(join(process.cwd(), "lib/room-access/overnight-select.ts"), "utf8");
     expect(src).toContain('import { isNativeEnglish } from "@/lib/jev/english"');
   });
   it("isClosedHourIst: 21..23 and 0..6 are closed", () => {

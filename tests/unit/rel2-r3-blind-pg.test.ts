@@ -118,7 +118,7 @@ afterAll(() => { if (HAVE) pg.stop(); });
 
 (HAVE ? describe : describe.skip)("SWEEP: every placement of a window, on real SQL", () => {
   it("windowBlindAny / windowsBlindAny: held out by the diarize row, the turn rows, the window text, the emotion rows or the bench placement; a clean window and an unknown id are not", async () => {
-    const V = await import("@/lib/voice-blind");
+    const V = await import("@/lib/room-access/check");
     for (const w of ["sJev", "sEmo", "sRts", "sRdw", "sBench"]) expect(await V.windowBlindAny(w), w).toBe(true);
     expect(await V.windowBlindAny("sClean")).toBe(false);
     expect(await V.windowBlindAny("nope")).toBe(false);
@@ -164,7 +164,7 @@ afterAll(() => { if (HAVE) pg.stop(); });
   const dayStart = Date.parse(`${BD}T00:00:00+05:30`);
   const iso = (ms: number) => new Date(ms).toISOString();
   it("sessions: on the held-out day, ending into it, starting before it, a clean window-only session with a held-out window placement, and a clean session far away", async () => {
-    const { guardSessionSpan } = await import("@/lib/voice-blind");
+    const { guardSessionSpan } = await import("@/lib/room-access/check");
     pg.exec(`
       INSERT INTO bench_session (id, room_id, started_at, ended_at) VALUES
         ('bsOn', '${BR}', '${iso(dayStart + 3_600_000)}', '${iso(dayStart + 7_200_000)}'),

@@ -148,9 +148,9 @@ describe("GET", () => {
   it("binds filters, excludes shadow by default, clamps limit to 5000 and asks for one extra row", async () => {
     await get("window_id=w1&layer=stt&engine=e&room_id=r");
     const a = M.calls[0]!;
-    expect(a.v).toEqual([0, "w1", "w1", null, null, "stt", "stt", "e", "e", "r", "r", false, 1001]);
+    expect(a.v).toEqual([0, "w1", "w1", null, null, "stt", "stt", "e", "e", "r", "r", false, expect.any(Array), expect.any(Array), 1001]);
     await get("ist_date=2026-10-06&shadow=1&limit=99999&cursor=7");
-    expect(M.calls[1]!.v).toEqual([7, null, null, "2026-10-06", "2026-10-06", null, null, null, null, null, null, true, 5001]);
+    expect(M.calls[1]!.v).toEqual([7, null, null, "2026-10-06", "2026-10-06", null, null, null, null, null, null, true, expect.any(Array), expect.any(Array), 5001]);
   });
   it("paginates: next_cursor is the last id of a full page, null at the end; ids and bigints come back as numbers, timestamps as strings", async () => {
     const mk = (id: number) => ({ id: String(id), window_id: "w", ist_date: "2026-10-06", t0_ms: "5", t1_ms: null, bytes: "9", started_at: new Date("2026-10-06T04:00:00Z"), finished_at: null, indexed_at: "2026-10-06 10:00:00+00", shadow: false });

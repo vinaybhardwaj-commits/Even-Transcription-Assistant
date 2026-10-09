@@ -13,7 +13,7 @@
  * drift into two different answers for the same window.
  */
 
-import { guardSessionSpan } from "@/lib/voice-blind";
+import { guardSessionSpan } from "@/lib/room-access/check";
 import { listBenchChunks, listBenchSessions, type BenchChunkRow } from "@/lib/bench";
 import { resolveRange, type CoveringChunk, type RangeResolution } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService, refuseIfTooLong, whisperTimeoutForClip } from "@/lib/bench-join";
@@ -25,7 +25,7 @@ import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
 import { namesSarvam, ROOM_AUDIO_DETAIL, SCOPE_CONSULT_ONLY } from "@/lib/stt/sarvam-scope";
-import { sessionRangeHeldOut } from "../held-out";
+import { sessionRangeHeldOut } from "@/lib/room-access/jobs";
 
 const STEPS = { resolve: "resolve", join: "join", transcribe: "transcribe" } as const;
 

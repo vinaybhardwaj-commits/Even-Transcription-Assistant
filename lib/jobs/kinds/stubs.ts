@@ -12,7 +12,7 @@
 
 import { JobArgsError, failWith, type JobKind } from "../types";
 import { jobError } from "../errors";
-import { clipKeyHeldOut, roomDateArgHeldOut } from "../held-out";
+import { clipKeyHeldOut, roomDateArgHeldOut } from "@/lib/room-access/jobs";
 
 const requireString = (o: Record<string, unknown>, key: string): string => {
   const v = typeof o[key] === "string" ? (o[key] as string).trim() : "";

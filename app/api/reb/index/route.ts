@@ -15,7 +15,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@/lib/db";
+import { insertRebIndexRows, rebIndexRows } from "@/lib/room-access/tool-reads";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,27 +131,8 @@ export async function POST(req: NextRequest) {
   const payload = JSON.stringify(rows);
 
   try {
-    const ins = (await sql`
-      INSERT INTO reb_track_index (window_id, ist_date, room_id, t0_ms, t1_ms, layer, engine, model, version, config_hash, shadow, status, reason,
-                                   machine, r2_key, sha256, bytes, started_at, finished_at)
-      SELECT window_id, ist_date, room_id, t0_ms, t1_ms, layer, engine, model, version, config_hash, shadow, status, reason,
-             machine, r2_key, sha256, bytes, started_at, finished_at
-        FROM jsonb_to_recordset(${payload}::jsonb) AS r(
-          window_id text, ist_date date, room_id text, t0_ms bigint, t1_ms bigint, layer text, engine text, model text, version text,
-          config_hash text, shadow boolean, status text, reason text, machine text, r2_key text, sha256 text, bytes bigint,
-          started_at timestamptz, finished_at timestamptz)
-      ON CONFLICT ON CONSTRAINT reb_track_index_key DO NOTHING
-      RETURNING window_id, layer, engine, version, config_hash, shadow`) as Array<Row>;
+    const { ins, stored } = await insertRebIndexRows(payload);
     const insertedKeys = new Set(ins.map((r) => keyOf(r)));
-
-    // What is stored now under each sent key (the row we just wrote, or the one that was already there).
-    const stored = (await sql`
-      SELECT t.window_id, t.layer, t.engine, t.version, t.config_hash, t.shadow, t.sha256
-        FROM reb_track_index t
-        JOIN (SELECT DISTINCT window_id, layer, engine, version, config_hash, shadow
-                FROM jsonb_to_recordset(${payload}::jsonb) AS r(window_id text, layer text, engine text, version text, config_hash text, shadow boolean)) k
-          ON t.window_id = k.window_id AND t.layer = k.layer AND t.engine = k.engine AND t.version = k.version
-         AND t.config_hash = k.config_hash AND t.shadow = k.shadow`) as Array<Row>;
     const storedSha = new Map(stored.map((r) => [keyOf(r), r.sha256]));
 
     let inserted = 0;
@@ -205,19 +186,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const got = (await sql`
-      SELECT id, window_id, to_char(ist_date, 'YYYY-MM-DD') AS ist_date, room_id, t0_ms, t1_ms, layer, engine, model, version, config_hash, shadow,
-             status, reason, machine, r2_key, sha256, bytes, started_at, finished_at, indexed_at
-        FROM reb_track_index
-       WHERE id > ${cursor}
-         AND (${windowId}::text IS NULL OR window_id = ${windowId})
-         AND (${istDate}::text IS NULL OR ist_date = ${istDate}::date)
-         AND (${layer}::text IS NULL OR layer = ${layer})
-         AND (${engine}::text IS NULL OR engine = ${engine})
-         AND (${roomId}::text IS NULL OR room_id = ${roomId})
-         AND (${withShadow}::boolean OR shadow = false)
-       ORDER BY id
-       LIMIT ${limit + 1}`) as Array<Record<string, unknown>>;
+    const got = (await rebIndexRows({ cursor, windowId, day: istDate, layer, engine, roomId, withShadow, limit })) as Array<Record<string, unknown>>;
     const page = got.slice(0, limit);
     const out = page.map((r) => ({
       ...r,

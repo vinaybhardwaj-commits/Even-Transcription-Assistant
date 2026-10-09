@@ -36,6 +36,7 @@
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
+import { measurePendingCount } from "@/lib/room-access/tool-reads";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -92,13 +93,7 @@ function paramsOf(req: NextRequest) {
  */
 async function pendingCount(): Promise<number | null> {
   try {
-    const rows = (await sql`
-      SELECT COUNT(*)::int AS n
-        FROM bench_window w
-       WHERE w.state IN ('closed', 'transcribing', 'transcribed', 'failed', 'silent')
-         AND NOT EXISTS (SELECT 1 FROM stt_window_measure m WHERE m.window_id = w.id)
-    `) as Array<{ n: number }>;
-    return Number(rows[0]?.n) || 0;
+    return await measurePendingCount();
   } catch {
     return null;
   }

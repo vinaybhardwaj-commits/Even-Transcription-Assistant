@@ -17,7 +17,7 @@ import { checkEngine, checkRoomStage, ROOM_AUDIO_DETAIL, SCOPE_CHECK_DETAIL } fr
 import { ROOM_WINDOW_KIND } from "./room-window-kind";
 import { sql } from "@/lib/db";
 import { bulkAgeMinutes, isBulkWindow } from "@/lib/service-pool";
-import { windowArgHeldOut } from "../held-out";
+import { windowArgHeldOut } from "@/lib/room-access/jobs";
 import {
   roomWindowPrepare, roomWindowSegment, roomWindowEngine, roomWindowPoll, roomWindowFinish,
   ROUTER_JOB_LOST,

@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "vitest run tests/unit/room-access-gate.test.ts --reporter=dot",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

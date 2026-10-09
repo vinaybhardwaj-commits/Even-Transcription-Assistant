@@ -899,9 +899,9 @@ describe("14 — the SQL, the migration, and the duplicate", () => {
     )
       .split("\n")
       .filter(Boolean);
-    expect(found).toEqual(["lib/brain/state.ts"]);
+    expect(found).toEqual(["lib/room-access/brain-state.ts"]);
 
-    const src = readFileSync("lib/brain/state.ts", "utf8");
+    const src = readFileSync("lib/room-access/brain-state.ts", "utf8");
     const m = /export const SQL_VISITS_FOR_DAY =\s*([\s\S]*?);\n/.exec(src);
     if (!m) throw new Error("SQL_VISITS_FOR_DAY not found in lib/brain/state.ts");
     const a = m[1]!.replace(/\s+/g, " ").trim();

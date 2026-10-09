@@ -21,6 +21,7 @@ import { probeSttEngines, type EngineHealth } from "./stt";
 import { classifyBusError, listListeners } from "@/lib/bench-commands";
 import { POOL_SERVICES, poolConfigProblems, poolConfigured } from "@/lib/service-pool";
 import { withServiceAccess } from "@/lib/service-access";
+import { BENCH_PREFIX } from "@/lib/room-access/keys";
 
 const PYANNOTE_TIMEOUT_MS = 5_000;
 
@@ -193,7 +194,7 @@ const scribeSystemMap: McpTool = {
         app_neon: { env: "APP_DATABASE_URL", driver: "neon http", tables: ["clinician", "encounter", "llm_traces", "trace", "voice_print", "voice_sample", "stt_*", "room", "bench_session", "bench_chunk", "bench_event", "audit_log"] },
         brain_role: { env: "BRAIN_DATABASE_URL", driver: "neon ws pool", tables: ["room_day", "visit", "speaker_cluster", "cue"] },
         kb_neon: { env: "KB_DATABASE_URL", tables: ["mksap_chunks"] },
-        r2: { env: "R2_BUCKET", prefixes: ["encounters/", "whisper-buffer/", "voice-samples/", "bench/{slug}/{UTC-date}/{session_id}/"] },
+        r2: { env: "R2_BUCKET", prefixes: ["encounters/", "whisper-buffer/", "voice-samples/", `${BENCH_PREFIX}{slug}/{UTC-date}/{session_id}/`] },
       },
       brain_routes: ["POST /api/brain/cues", "GET /api/brain/rooms/:id/state", "GET /api/brain/rooms/:id/cues", "GET /api/brain/health"],
       mcp: { path: "/api/mcp", token_env: "SCRIBE_MCP_TOKEN", slice: "S2 (read tools + command bus + remote tape control)", command_bus: health.listeners_note ?? "bench_command / bench_listener (0044)" },
