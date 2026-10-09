@@ -34,7 +34,12 @@ function put(layer: string, engine: string, name: string, doc: unknown, o: { sta
 }
 const seg = (t0: number, t1: number, speaker: string, text: string) => ({ t0_ms: t0, t1_ms: t1, speaker, lang: "en-IN", text });
 const STT = { layer: "stt", status: "ok", segments: [seg(0, 4000, "SPEAKER_00", "a"), seg(4000, 8000, "SPEAKER_01", "b"), seg(8000, 12000, "SPEAKER_02", "c"), seg(12000, 16000, "SPEAKER_03", "d"), seg(16000, 20000, "SPEAKER_04", "e"), seg(20000, 24000, "SPEAKER_05", "f")] };
-const roleDoc = (derived: string | null, speakers: Record<string, unknown>, over: Record<string, unknown> = {}) => ({ layer: "role", engine: "text-judge", status: "ok", extras: { derived_from: { stt: derived } }, speakers, ...over });
+// shaped exactly like palimpsest #10830: extras.map = {<speaker id>: {role, confidence, abstain, judge_a, judge_b}}; extras.derived_from = {stt (path), stt_sha256}; segments {t0_ms,t1_ms,speaker,role}, no text
+const roleDoc = (derived: string | null, map: Record<string, unknown>, over: Record<string, unknown> = {}) => ({
+  layer: "role", engine: "text-judge", status: "ok",
+  extras: { derived_from: { stt: "reb/2026-10-05/r_clean/_consults/x/tracks/stt.json", ...(derived === null ? {} : { stt_sha256: derived }) }, map },
+  segments: [{ t0_ms: 0, t1_ms: 4000, speaker: "SPEAKER_00", role: "doctor" }], ...over,
+});
 const SPK = {
   SPEAKER_00: { role: "doctor", confidence: 0.9, abstain: false }, SPEAKER_01: { role: "patient", confidence: 0.8, abstain: false }, SPEAKER_02: { role: "attendant", confidence: 0.7, abstain: false },
   SPEAKER_03: { role: "doctor", confidence: 0.2, abstain: true }, SPEAKER_04: { role: "unknown", confidence: 0.1, abstain: false },
@@ -80,7 +85,9 @@ afterEach(async () => { if (HAVE) (await import("@/lib/sarvam-lab")).setLabStore
     put("role", "text-judge", "role", roleDoc(stt.sha, SPK));
     const r = await read({ roleTextJudge: true });
     expect(who(r)).toEqual(WITH_ROLES);
-    expect(r.found!.turns.map((t) => t.speaker_idx)).toEqual([0, 1, 2, 3, 4, 5]);
+    // RT-2: doctor / patient / attendant keep their idx; abstain, role unknown and a speaker missing from the map carry NO idx (talk_time must not count them as the patient)
+    expect(r.found!.turns.map((t) => t.speaker_idx)).toEqual([0, 1, 2, null, null, null]);
+    expect(r.found!.lines.map((l) => l.speaker_idx)).toEqual([0, 1, 2, null, null, null]);
   });
 
   it("the newest text-judge row decides: a newer one with other roles wins over an older ok one; a newer skipped / failed / empty makes everything unknown", async () => {
@@ -105,6 +112,27 @@ afterEach(async () => { if (HAVE) (await import("@/lib/sarvam-lab")).setLabStore
     pg.exec("DELETE FROM reb_track_index WHERE layer = 'role'");
     put("role", "text-judge", "role3", roleDoc(stt.sha.toUpperCase(), SPK));
     expect(who(await read({ roleTextJudge: true }))).toEqual(WITH_ROLES); // sha compare is case-insensitive, like the index check
+  });
+
+  it("RT-1: verdicts come from extras.map only; a top-level speakers map is ignored; derived_from spellings: stt_sha256 and stt.sha256 accepted, a bare string stt (a path), a sha under the old stt-as-sha spelling or a wrong key -> all unknown", async () => {
+    const stt = put("stt", "sarvam", "stt", STT);
+    const base = roleDoc(stt.sha, SPK);
+    const swap = (o: Record<string, unknown>) => ({ ...base, ...o });
+    const cases: Array<[string, unknown, string[]]> = [
+      ["quoted shape", base, WITH_ROLES],
+      ["stt.sha256 object spelling", swap({ extras: { derived_from: { stt: { path: "p", sha256: stt.sha } }, map: SPK } }), WITH_ROLES],
+      ["verdicts only in top-level speakers", swap({ extras: { derived_from: { stt_sha256: stt.sha } }, speakers: SPK }), ALL_UNKNOWN],
+      ["stt string holding the sha", swap({ extras: { derived_from: { stt: stt.sha }, map: SPK } }), ALL_UNKNOWN],
+      ["derived_from is a bare string", swap({ extras: { derived_from: stt.sha, map: SPK } }), ALL_UNKNOWN],
+      ["wrong key name", swap({ extras: { derived_from: { sha256: stt.sha }, map: SPK } }), ALL_UNKNOWN],
+      ["translate_sha256 alone", swap({ extras: { derived_from: { translate_sha256: stt.sha }, map: SPK } }), ALL_UNKNOWN],
+      ["map is an array", swap({ extras: { derived_from: { stt_sha256: stt.sha }, map: [{ role: "doctor", abstain: false }] } }), ALL_UNKNOWN],
+    ];
+    for (const [name, doc, want] of cases) {
+      pg.exec("DELETE FROM reb_track_index WHERE layer = 'role'");
+      put("role", "text-judge", "r", doc);
+      expect(who(await read({ roleTextJudge: true })), name).toEqual(want);
+    }
   });
 
   it("engine sarvam-doctor-map is never read: a newer ok doctor-map row is ignored (its object is never fetched); alone it yields all unknown", async () => {
@@ -147,7 +175,17 @@ afterEach(async () => { if (HAVE) (await import("@/lib/sarvam-lab")).setLabStore
     const stt = put("stt", "sarvam", "stt", STT);
     put("translate", "sarvam", "tr", TR(segs));
     put("role", "text-judge", "role", roleDoc(stt.sha, SPK));
-    expect(who(await read({ roleTextJudge: true }))).toEqual(OVERLAP);
+    const r = await read({ roleTextJudge: true });
+    expect(who(r)).toEqual(OVERLAP);
+    expect(r.found!.turns.map((t) => t.speaker_idx)).toEqual([0, 1, 1, 2, 2, null]);
+  });
+  it("RT-2 on translate: a segment whose stt speaker abstained (SPEAKER_03) or has role unknown carries speaker_idx null, not the Sarvam id", async () => {
+    const stt = put("stt", "sarvam", "stt", STT);
+    put("translate", "sarvam", "tr", TR([[0, 4000], [12_000, 16_000], [16_000, 20_000]]));
+    put("role", "text-judge", "role", roleDoc(stt.sha, SPK));
+    const r = await read({ roleTextJudge: true });
+    expect(who(r)).toEqual(["doctor/clinician", "unknown/-", "unknown/-"]);
+    expect(r.found!.turns.map((t) => t.speaker_idx)).toEqual([0, null, null]);
   });
   it("the threshold is 50% of the translate segment: exactly 50% maps; a best overlap of 33% is unknown", async () => {
     const stt = put("stt", "sarvam", "stt", STT);

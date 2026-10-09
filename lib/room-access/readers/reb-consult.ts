@@ -20,7 +20,8 @@ import type { Turn } from "@/lib/room-access/readers/turns";
 /**
  * ROLE-TJ: palimpsest's role.text-judge layer (doctor / patient / attendant by what is SAID, never by voiceprint). OFF: a later order flips it after palimpsest's measurement numbers. With it false this file
  * behaves exactly as before (the role layer is not even queried). Engine sarvam-doctor-map (withdrawn, voiceprint-based) is never read: the index query names engine text-judge and the row is re-checked.
- * Role row shape (INFERRED, palimpsest #10730 / #10733, layer not live): { status, engine, layer: "role", extras: { derived_from: { stt: <sha256 of the stt track read> } }, speakers: { "<sarvam speaker id>": { role: doctor|patient|attendant|unknown, confidence, abstain } } }.
+ * Role row shape (palimpsest #10830): extras.map = { "<sarvam speaker id>": { role: doctor|patient|attendant|unknown, confidence, abstain, judge_a, judge_b } }; extras.derived_from = { stt (path), stt_sha256, translate_sha256? }.
+ * INFERRED spelling: the sha key (stt_sha256, or sha256 under an object-valued stt); fail closed on anything else.
  */
 export const ROLE_TEXT_JUDGE_ENABLED = false;
 export const ROLE_ENGINE = "text-judge";
@@ -74,16 +75,17 @@ const idxOf = (k: unknown): number | null => { const n = /(\d+)\s*$/.exec(String
 
 /** PURE — a parsed role row to a verdict per Sarvam speaker index; null (= every speaker unknown) unless the row is ok and was derived from exactly the stt track used. abstain or an unrecognised role = unknown. */
 export function roleVerdicts(doc: unknown, usedSttSha: string): Map<number, RoleVerdict> | null {
-  const d = doc as { status?: unknown; engine?: unknown; extras?: { derived_from?: unknown }; speakers?: unknown } | null;
+  const d = doc as { status?: unknown; engine?: unknown; extras?: { derived_from?: unknown; map?: unknown } } | null;
   if (!d || typeof d !== "object" || d.status !== "ok" || (d.engine !== undefined && d.engine !== ROLE_ENGINE)) return null;
-  const df = d.extras?.derived_from as unknown;
-  const from = typeof df === "string" ? df : df && typeof df === "object" ? (df as { stt?: unknown }).stt : null;
+  // derived_from = {stt: <path>, stt_sha256, translate_sha256?}; the key spelling is INFERRED (no real track to read): accept stt_sha256, or sha256 under an object-valued stt; anything else fails closed. A bare string `stt` is a PATH, never a sha.
+  const df = d.extras?.derived_from as { stt?: unknown; stt_sha256?: unknown } | null | undefined;
+  const sttObj = df && typeof df.stt === "object" && df.stt ? (df.stt as { sha256?: unknown }) : null;
+  const from = df && typeof df === "object" ? (typeof df.stt_sha256 === "string" ? df.stt_sha256 : sttObj && typeof sttObj.sha256 === "string" ? sttObj.sha256 : null) : null;
   if (typeof from !== "string" || !usedSttSha || from.toLowerCase() !== usedSttSha.toLowerCase()) return null;
-  const entries: Array<[unknown, unknown]> = Array.isArray(d.speakers)
-    ? (d.speakers as Array<Record<string, unknown>>).map((e) => [e?.speaker ?? e?.id, e])
-    : d.speakers && typeof d.speakers === "object" ? Object.entries(d.speakers as Record<string, unknown>) : [];
+  const m = d.extras?.map;
   const out = new Map<number, RoleVerdict>();
-  for (const [k, v] of entries) {
+  if (!m || typeof m !== "object" || Array.isArray(m)) return out; // verdicts live ONLY in extras.map {<Sarvam speaker id>: {role, confidence, abstain, judge_a, judge_b}}
+  for (const [k, v] of Object.entries(m as Record<string, unknown>)) {
     const idx = idxOf(k);
     const e = v as { role?: unknown; abstain?: unknown } | null;
     if (idx === null || !e || typeof e !== "object") continue;
@@ -94,7 +96,7 @@ export function roleVerdicts(doc: unknown, usedSttSha: string): Map<number, Role
 }
 
 const asSpeaker = (v: RoleVerdict | undefined, idx: number | null): ReturnType<Resolve> =>
-  v === "doctor" ? { speaker: "doctor", idx } : v === "patient" ? { speaker: "other", idx } : v === "attendant" ? { speaker: "other", idx, attendant: true } : { speaker: "unknown", idx };
+  v === "doctor" ? { speaker: "doctor", idx } : v === "patient" ? { speaker: "other", idx } : v === "attendant" ? { speaker: "other", idx, attendant: true } : { speaker: "unknown", idx: null }; // abstain / unknown / absent: NO speaker_idx, so talk_time never counts it as the patient
 
 /** the stt segments of the stt track used: [t0, t1, speaker index] */
 function sttSpans(doc: unknown): Array<[number, number, number | null]> {
