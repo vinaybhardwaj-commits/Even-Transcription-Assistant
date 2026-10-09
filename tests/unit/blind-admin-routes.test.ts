@@ -13,6 +13,7 @@ const dataReads: string[] = [];
 let session: { id: string; room_id: string; started_at: string; ended_at: string | null } | null = null;
 
 let lookupFails = false;
+let chunksFail = false;
 let windowRows: unknown[] = [];
 let chunkRows: Array<{ started_at: string }> = [];
 const windowQueries: Array<{ text: string; values: unknown[] }> = [];
@@ -20,6 +21,7 @@ vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?");
     if (/FROM bench_session/.test(text)) { if (lookupFails) throw new Error("db down"); return session ? [session] : []; }
+    if (/FROM bench_chunk/.test(text)) { dataReads.push("chunks"); if (chunksFail) throw new Error("db down"); return chunkRows; }
     dataReads.push(text); windowQueries.push({ text, values }); return windowRows;
   },
 }));
@@ -29,8 +31,7 @@ vi.mock("@/lib/r2", () => ({ signGetUrl: async () => "https://r2.invalid/x" }));
 vi.mock("@/lib/bench", () => ({
   benchAdminGuard: async () => ({ ok: true }),
   findBenchSession: async () => session && { ...session, label: null, mic_label: null, status: "ended", notes: null, room_slug: "s", room_name: "n" },
-  listBenchChunks: async () => { dataReads.push("chunks"); return chunkRows; },
-  listBenchEvents: async () => { dataReads.push("events"); return []; },
+    listBenchEvents: async () => { dataReads.push("events"); return []; },
   splitChunksBySource: (rows: unknown[]) => ({ primary: rows, backup: [] }),
 }));
 
@@ -42,7 +43,7 @@ const callCal = () => calibration(new NextRequest("http://x/api/admin/speaker-ca
 const callMan = () => manifest(new NextRequest("http://x/m"), { params: Promise.resolve({ id: "bs_t" }) });
 const mk = (room_id: string, started_at: string, ended_at: string | null = null) => { session = { id: "bs_t", room_id, started_at, ended_at }; };
 
-beforeEach(() => { dataReads.length = 0; windowQueries.length = 0; session = null; lookupFails = false; windowRows = []; chunkRows = []; });
+beforeEach(() => { dataReads.length = 0; windowQueries.length = 0; session = null; lookupFails = false; chunksFail = false; windowRows = []; chunkRows = []; });
 
 describe("speaker-calibration", () => {
   it("blind session: 403 blind_room_day and no data query runs", async () => {
@@ -120,6 +121,14 @@ describe("speaker-calibration NULL room_day", () => {
 });
 
 describe("bench manifest", () => {
+  it("chunk read throws: 503 db, events never read, nothing served", async () => {
+    mk(BR, "2026-10-08T05:00:00Z");
+    chunksFail = true;
+    const res = await callMan();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, error: "db" });
+    expect(dataReads).toEqual(["chunks"]);
+  });
   it("ended_at on a blind IST day (started the day before): 403, no chunk read", async () => {
     mk(BR, `${dayBefore}T05:00:00Z`, `${BD}T05:00:00Z`);
     expect((await callMan()).status).toBe(403);
