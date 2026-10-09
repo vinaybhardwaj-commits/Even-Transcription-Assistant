@@ -128,6 +128,11 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
         const kindProp = (t.inputSchema as Row & { properties: Row }).properties.kind;
         if (kindProp) expect(kindProp).toMatchObject({ enum: JOB_KIND_NAMES });
+      } else if (t.name === "scribe_diarize_segments") {
+        // epic #23 (b) added ONE optional property, `engine` (enum ["nemotron"]); everything else must still match main
+        const { engine, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
+        expect(engine).toMatchObject({ type: "string", enum: ["nemotron"] });
+        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.shortSchema(base.inputSchema));
       } else expect(t.inputSchema, t.name).toEqual(P.shortSchema(base.inputSchema));
       compared++;
     }
@@ -161,6 +166,13 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const norm = (x: string) => x.replace(/kind is one of [^.]*\./, "kind is one of <KINDS>.").replace(/\d+ of the \d+ kinds are registered but not yet implemented[^.]*\./, "<STUBS>.").replace(/error_code is one of [^.]*\./, "error_code is one of <CODES>.");
         expect(norm(String(out.help)), t.name).toBe(norm(t.description));
         expect(String(out.help).length, t.name).toBeGreaterThan(150);
+        continue;
+      }
+      if (t.name === "scribe_diarize_segments") {
+        // epic #23 (b) inserted ONE sentence about engine=nemotron; with it removed, the text is main's exactly
+        const added = " engine=nemotron (window_id only) reads the SHADOW Nemotron turns instead of production's; omit it for production.";
+        expect(String(out.help)).toContain(added);
+        expect(String(out.help).replace(added, ""), t.name).toBe(t.description);
         continue;
       }
       expect(out.help, t.name).toBe(t.description);
