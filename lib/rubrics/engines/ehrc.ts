@@ -11,6 +11,7 @@
  * enum), source, record_ref (an opaque, validated row uid), field, start, end} (character offsets into that source text) are kept. The quote string itself never reaches R2, the table, a log or the tool output; a quote
  * that cannot be located is dropped and counted (quote_unlocated).
  */
+import { createHash } from "node:crypto";
 import type { Rubric } from "../types";
 import { askJson } from "../llm";
 import { promptVersion, systemPrompt } from "./consult-llm";
@@ -26,6 +27,12 @@ export const normItem = (v: unknown): EvidenceItem => (typeof v === "string" && 
 export const EVIDENCE_SOURCES = ["theatre", "discharge_summary", "cdmss", "follow_up"] as const;
 export type Section = { source: (typeof EVIDENCE_SOURCES)[number]; ref: string | null; field: string; text: string };
 export type EvidenceRef = { item: EvidenceItem; source: Section["source"]; record_ref: string; field: string; start: number; end: number };
+/**
+ * E3-5: a stored record_ref is NEVER the warehouse uid (a uid can be name-shaped): it is the first 24 hex of sha256("ehrc-ref:" + uid). To relocate a ref, re-hash the candidate uids you already hold and compare.
+ * Every reader (safeStayEvidence, so results include_text) drops a record_ref that is not exactly 24 lowercase hex characters, legacy objects included.
+ */
+export const REF_HASH_RE = /^[0-9a-f]{24}$/;
+export const refOf = (uid: string): string => createHash("sha256").update(`ehrc-ref:${uid}`, "utf8").digest("hex").slice(0, 24);
 /** PURE — where a quote sits in the sections the model was shown (case-insensitive, first hit); null = cannot be located. Returns offsets and an opaque ref, never the text. */
 export function locateQuote(item: unknown, quote: unknown, sections: readonly Section[]): EvidenceRef | null {
   const q = typeof quote === "string" ? quote.trim().toLowerCase() : "";
@@ -33,7 +40,7 @@ export function locateQuote(item: unknown, quote: unknown, sections: readonly Se
   for (const sec of sections) {
     if (!sec.ref) continue; // a section without a validated row uid cannot be referred to
     const at = sec.text.toLowerCase().indexOf(q);
-    if (at >= 0) return { item: normItem(item), source: sec.source, record_ref: sec.ref, field: sec.field, start: at, end: at + q.length };
+    if (at >= 0) return { item: normItem(item), source: sec.source, record_ref: refOf(sec.ref), field: sec.field, start: at, end: at + q.length };
   }
   return null;
 }
@@ -41,7 +48,7 @@ export function locateQuote(item: unknown, quote: unknown, sections: readonly Se
 export function safeStayEvidence(ev: unknown): Record<string, unknown> | null {
   if (!ev || typeof ev !== "object") return null;
   const e = ev as Record<string, unknown>;
-  const refs = Array.isArray(e.refs) ? (e.refs as Array<Record<string, unknown>>).map((r) => ({ item: normItem(r?.item), source: (EVIDENCE_SOURCES as readonly string[]).includes(String(r?.source)) ? r.source : "other", record_ref: typeof r?.record_ref === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(r.record_ref) ? r.record_ref : null, field: typeof r?.field === "string" && /^[a-z_]{1,40}$/.test(r.field) ? r.field : null, start: Number.isInteger(r?.start) ? r.start : null, end: Number.isInteger(r?.end) ? r.end : null })) : [];
+  const refs = Array.isArray(e.refs) ? (e.refs as Array<Record<string, unknown>>).map((r) => ({ item: normItem(r?.item), source: (EVIDENCE_SOURCES as readonly string[]).includes(String(r?.source)) ? r.source : "other", record_ref: typeof r?.record_ref === "string" && REF_HASH_RE.test(r.record_ref) ? r.record_ref : null, field: typeof r?.field === "string" && /^[a-z_]{1,40}$/.test(r.field) ? r.field : null, start: Number.isInteger(r?.start) ? r.start : null, end: Number.isInteger(r?.end) ? r.end : null })) : [];
   const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
   return { model: typeof e.model === "string" ? e.model.slice(0, 80) : null, prompt_version: typeof e.prompt_version === "string" ? e.prompt_version.slice(0, 20) : null, attempts: num(e.attempts), window_class: typeof e.window_class === "string" ? e.window_class.slice(0, 40) : null, window_days: num(e.window_days),
     n_theatre_notes: num(e.n_theatre_notes), n_followups_in_window: num(e.n_followups_in_window), theatre_truncated: e.theatre_truncated === true, follow_up_truncated: e.follow_up_truncated === true, refs, quote_unlocated: num(e.quote_unlocated) };

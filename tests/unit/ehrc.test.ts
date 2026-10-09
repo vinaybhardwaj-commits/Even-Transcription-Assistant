@@ -164,7 +164,7 @@ describe("the engine on a fake warehouse and a fake model", () => {
     expect(pos).toMatchObject({ status: "ok", score: { label: "positive", n_same_problem: 1, cm_questions: "not_read" }, findings: ["label:positive"], calls: 1 });
     // E3-1: no quote text; a located reference (closed item, source, opaque ref, offsets); the unlocatable one is counted
     const ev = pos.evidence as { refs: Array<Record<string, unknown>>; quote_unlocated: number };
-    expect(ev.refs).toEqual([{ item: "other", source: "follow_up", record_ref: `rec_${uidOf(1)}_${day(10).replace(/[^0-9]/g, "")}`, field: "record", start: expect.any(Number), end: expect.any(Number) }]);
+    expect(ev.refs).toEqual([{ item: "other", source: "follow_up", record_ref: E.refOf(`rec_${uidOf(1)}_${day(10).replace(/[^0-9]/g, "")}`), field: "record", start: expect.any(Number), end: expect.any(Number) }]);
     expect(ev.quote_unlocated).toBe(1);
     modelSays({ label: "positive", negative_signals: ["ssi_pus", "fever"], same_problem: [true], better_or_no_complaint: true, escalate: true });
     expect(await E.evaluateEhrc(rubric, key(1))).toMatchObject({ score: { label: "negative", negative_signals: ["ssi_pus", "fever"], escalate: true }, findings: ["label:negative", "neg:ssi_pus", "neg:fever", "escalate"] });
@@ -221,9 +221,9 @@ describe("E3-1 PHI: stay evidence carries NO note text", () => {
     expect(all).not.toMatch(/Wound dry|failed conservative|Zorbel/i);
     const ev = out.evidence as { refs: Array<{ item: string; source: string; record_ref: string; field: string; start: number; end: number }>; quote_unlocated: number };
     // the name+id quote IS in the note, so it is located (offsets only); its item was free text, so it is stored as "other"
-    expect(ev.refs[0]).toEqual({ item: "other", source: "theatre", record_ref: "otnote_1", field: "note", start: note.toLowerCase().indexOf(NAME.toLowerCase()), end: note.toLowerCase().indexOf(NAME.toLowerCase()) + `${NAME} (${HOSPITAL_ID})`.length });
+    expect(ev.refs[0]).toEqual({ item: "other", source: "theatre", record_ref: E.refOf("otnote_1"), field: "note", start: note.toLowerCase().indexOf(NAME.toLowerCase()), end: note.toLowerCase().indexOf(NAME.toLowerCase()) + `${NAME} (${HOSPITAL_ID})`.length });
     expect(ev.refs[1]).toMatchObject({ item: "fever", source: "theatre", field: "note" });
-    expect(ev.refs[2]).toMatchObject({ item: "indication", source: "cdmss", record_ref: "cdmss_1", field: "indication" });
+    expect(ev.refs[2]).toMatchObject({ item: "indication", source: "cdmss", record_ref: E.refOf("cdmss_1"), field: "indication" });
     expect(ev.refs).toHaveLength(3);
     expect(ev.quote_unlocated).toBe(1);
     for (const r of ev.refs) expect(Object.keys(r).sort()).toEqual(["end", "field", "item", "record_ref", "source", "start"]);
@@ -234,16 +234,16 @@ describe("E3-1 PHI: stay evidence carries NO note text", () => {
     for (const bad of ["Zorbel", "", null, undefined, 5, "FEVER", "knee pain"]) expect(E.normItem(bad)).toBe("other");
     const secs = [{ source: "theatre" as const, ref: null, field: "note", text: "wound dry" }, { source: "follow_up" as const, ref: "rec_1", field: "record", text: "knee pain better" }];
     expect(E.locateQuote("x", "wound dry", secs)).toBeNull(); // null ref
-    expect(E.locateQuote("follow_up_better", "KNEE PAIN", secs)).toEqual({ item: "follow_up_better", source: "follow_up", record_ref: "rec_1", field: "record", start: 0, end: 9 });
+    expect(E.locateQuote("follow_up_better", "KNEE PAIN", secs)).toEqual({ item: "follow_up_better", source: "follow_up", record_ref: E.refOf("rec_1"), field: "record", start: 0, end: 9 });
     expect(E.locateQuote("x", "ab", secs)).toBeNull(); // too short
     expect(E.locateQuote("x", 42, secs)).toBeNull();
   });
   it("safeStayEvidence (what results include_text returns) is a whitelist: legacy text fields, quotes and unknown keys are dropped", () => {
-    const view = E.safeStayEvidence({ model: "m", prompt_version: "0.2.1", attempts: 1, quotes: [{ item: NAME, quote: HOSPITAL_ID }], note: NAME, refs: [{ item: NAME, source: "theatre", record_ref: "otnote_1", field: "note", start: 1, end: 5, quote: NAME }, { item: "fever", source: "elsewhere", record_ref: `bad ref ${NAME}`, field: NAME, start: 1.5, end: "x" }] });
+    const view = E.safeStayEvidence({ model: "m", prompt_version: "0.2.1", attempts: 1, quotes: [{ item: NAME, quote: HOSPITAL_ID }], note: NAME, refs: [{ item: NAME, source: "theatre", record_ref: E.refOf("otnote_1"), field: "note", start: 1, end: 5, quote: NAME }, { item: "fever", source: "elsewhere", record_ref: `bad ref ${NAME}`, field: NAME, start: 1.5, end: "x" }] });
     const s = JSON.stringify(view);
     expect(s).not.toContain(NAME);
     expect(s).not.toContain(HOSPITAL_ID);
-    expect(view).toMatchObject({ refs: [{ item: "other", source: "theatre", record_ref: "otnote_1", field: "note", start: 1, end: 5 }, { item: "fever", source: "other", record_ref: null, field: null, start: null, end: null }] });
+    expect(view).toMatchObject({ refs: [{ item: "other", source: "theatre", record_ref: E.refOf("otnote_1"), field: "note", start: 1, end: 5 }, { item: "fever", source: "other", record_ref: null, field: null, start: null, end: null }] });
     expect(E.safeStayEvidence(null)).toBeNull();
   });
 });
@@ -283,3 +283,27 @@ describe("E3-4: the from/to span is at most 31 dates inclusive", () => {
   });
 });
 
+describe("E3-5: record_ref is never the warehouse uid", () => {
+  const NAMEY = "Zorbel_Quintaglio_4815"; // a uid shaped like a person's name: it passes the old clean-id check
+  it("the refuter's case: note, cdmss and follow-up row uids that look like a name never appear in the evidence; refs are 24 hex characters of sha256('ehrc-ref:' + uid)", async () => {
+    const note = "Wound dry and clean, knee moving well.";
+    stays.set(uidOf(1), { ot: [{ ...KNEE, note_uid: NAMEY, note }], cdmss: { cdmss_uid: `${NAMEY}_c`, indication_text: "painful knee" }, followups: [{ ...rec(uidOf(1), day(10)), rec_uid: `${NAMEY}_r` }] });
+    LLM.setRubricChatForTests(async () => ({ content: JSON.stringify({ label: "positive", negative_signals: [], same_problem: [true], planned_staging: false, better_or_no_complaint: true, escalate: false,
+      evidence: [{ item: "fever", quote: "Wound dry" }, { item: "indication", quote: "painful knee" }, { item: "follow_up_better", quote: "knee pain" }] }), model: "fake/model", latency_ms: 1 }));
+    const out = await E.evaluateEhrc(rubric, key1());
+    const s = JSON.stringify(out);
+    expect(s).not.toContain("Zorbel");
+    expect(s).not.toContain("Quintaglio");
+    const refs = (out.evidence as { refs: Array<{ record_ref: string }> }).refs;
+    expect(refs.map((r) => r.record_ref)).toEqual([E.refOf(NAMEY), E.refOf(`${NAMEY}_c`), E.refOf(`${NAMEY}_r`)]);
+    for (const r of refs) expect(r.record_ref).toMatch(/^[0-9a-f]{24}$/);
+    expect(E.refOf(NAMEY)).toBe((await import("node:crypto")).createHash("sha256").update(`ehrc-ref:${NAMEY}`).digest("hex").slice(0, 24));
+    expect(E.refOf("a")).not.toBe(E.refOf("b"));
+  });
+  it("every reader drops a record_ref that is not 24 lowercase hex characters (a legacy name-shaped ref, upper case, a raw uid, 23 / 25 characters); a valid hash passes", () => {
+    const mk = (record_ref: unknown) => ((E.safeStayEvidence({ refs: [{ item: "fever", source: "theatre", record_ref, field: "note", start: 1, end: 2 }] }) as { refs: Array<{ record_ref: string | null }> }).refs[0]!.record_ref);
+    for (const bad of [NAMEY, "otnote_1", E.refOf("x").toUpperCase(), E.refOf("x").slice(1), `${E.refOf("x")}0`, "", null, 7, "../../etc"]) expect(mk(bad), String(bad)).toBeNull();
+    expect(mk(E.refOf("x"))).toBe(E.refOf("x"));
+    expect(JSON.stringify(E.safeStayEvidence({ refs: [{ item: "fever", source: "theatre", record_ref: NAMEY, field: "note", start: 1, end: 2 }] }))).not.toContain("Zorbel");
+  });
+});

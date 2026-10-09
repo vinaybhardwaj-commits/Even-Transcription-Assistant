@@ -1,5 +1,5 @@
 {
-  "version": "0.2.1",
+  "version": "0.2.2",
   "rubric_id": "ehrc_surgical_outcome",
   "note": "Anchors, labels and the read order are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-llm.ts systemPrompt).",
   "rules": [
