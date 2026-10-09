@@ -29,7 +29,7 @@
  * speaker's, and there is never a clinician match (Nemotron has no identity — that is ticket c). Only
  * `window_id` is supported for it. With no `engine`, every answer is exactly what it was.
  */
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { refusalForPairs, windowPlacement } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { nemotronShadowEnabled } from "@/lib/diarize-engine";
@@ -418,14 +418,18 @@ export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: bool
     }
     const rows = (await sql`
       SELECT n.window_id, w.session_id, n.room_day_id, w.source_mic, n.status, n.received_at,
-             w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json
+             w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json,
+             nrd.room_id AS shadow_room_id, nrd.ist_date::text AS shadow_ist_date
         FROM diarize_nemotron_window n
         JOIN bench_window w ON w.id = n.window_id
+        LEFT JOIN room_day nrd ON nrd.id = n.room_day_id
        WHERE n.window_id = ${pick.id} AND n.status IN ('ok', 'empty')
        ORDER BY n.received_at DESC, n.id DESC
        LIMIT 1
-    `) as NemotronWindowRow[];
+    `) as Array<NemotronWindowRow & { shadow_room_id?: string | null; shadow_ist_date?: string | null }>;
     const row = rows[0];
+    // N2-1: the EITHER-placement rule covers the shadow row's OWN room-day too (n.room_day_id): a window whose bench placement is clean but whose shadow row sits on a held-out day is refused, and no turn leaves
+    if (guard && row && row.shadow_room_id && row.shadow_ist_date && isBlindRoomDay(row.shadow_ist_date, row.shadow_room_id)) return { ok: false, status: 403, error: "blind_room_day" };
     return row ? { ok: true, payload: nemotronWindowPayload(row) } : { ok: false, status: 404, error: "not_found" };
   }
 
