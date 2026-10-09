@@ -292,3 +292,24 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     for (const c of spy.mock.calls) expect(JSON.stringify(c)).not.toContain("held out words");
   });
 });
+
+(HAVE ? describe : describe.skip)("K4-3 the runner re-checks the held-out rule at EVERY step start", () => {
+  it("jobs inserted at a LATER step (diarize_window at local_label on a held-out window, stitch at join on a held-out session) fail blind_room_day with 0 room reads and 0 R2 reads", async () => {
+    const { readJob } = await import("@/lib/jobs/store");
+    const { runOneStep } = await import("@/lib/jobs/runner");
+    const cases = [
+      ["job_late_1", "diarize_window", "local_label", { window_id: "bw_rdw" }, {}],
+      ["job_late_2", "stitch", "join", { session_id: "bs_blind", start: dayStart + 3_600_000, end: dayStart + 3_900_000, source: "primary", format: "webm" }, { pieces: [{ start: dayStart + 3_600_000, end: dayStart + 3_900_000 }], done: [], total_ms: 300000 }],
+      ["job_late_3", "emotion_window", "score", { window_id: "bw_blind" }, { window_id: "bw_blind" }],
+    ] as const;
+    for (const [id, kind, step, args, progress] of cases) {
+      pg.exec(`INSERT INTO scribe_job (id, kind, args, progress, step, actor, status, lease_owner, lease_until) VALUES ('${id}', '${kind}', '${JSON.stringify(args)}'::jsonb, '${JSON.stringify(progress)}'::jsonb, '${step}', 'test', 'running', 'r1', now() + interval '4 minutes');`);
+      H.statements.length = 0; R2.get = 0; R2.presign = 0;
+      const rep = await runOneStep((await readJob(id))!, "r1");
+      expect(rep.outcome, id).toBe("failed");
+      expect(await readJob(id), id).toMatchObject({ status: "failed", error: expect.stringContaining("blind_room_day") });
+      expect(H.statements.filter((t) => /FROM (cue|transcription_run|jev_window_signal|bench_event)|INSERT INTO (room_|jev_|cue|transcription)|FROM bench_chunk\s+WHERE/.test(t)), id).toEqual([]);
+      expect(R2).toEqual({ presign: 0, get: 0 });
+    }
+  });
+});
