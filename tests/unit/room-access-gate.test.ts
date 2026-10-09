@@ -101,6 +101,19 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
     // a plain quoted string ending in the letter e before another literal is not an E-string
     expect(scanSource("lib/x.ts", "f('name', 'cue')")).toEqual([]);
   });
+  it("REL3-FU2 F4: the refuter's strings — comment openers hidden in $$ bodies and E'..' strings do not blank the table away", () => {
+    const fs = [
+      "sql`SELECT $$/*$$ AS a FROM bench_window WHERE b = $$*/$$`",
+      "sql`SELECT E'\\\\' /*' AS a FROM bench_window`",
+      "sql`SELECT $q$/*$q$ AS a FROM cue WHERE b = $q$*/$q$`",
+      "sql`SELECT e'\\\\' /*' AS a FROM jev_window_text`",
+    ];
+    for (const f of fs) expect(scanSource("lib/x.ts", f).length, f).toBeGreaterThan(0);
+    expect(scanSource("lib/x.ts", fs[0]!).map((v) => v.what)).toContain("bench_window");
+    expect(scanSource("lib/x.ts", fs[1]!).map((v) => v.what)).toContain("bench_window");
+    expect(scanSource("lib/x.ts", fs[2]!).map((v) => v.what)).toContain("cue");
+    expect(scanSource("lib/x.ts", fs[3]!).map((v) => v.what)).toContain("jev_window_text");
+  });
   it("a synthetic file added to the tree would fail the gate (the assertion above is not vacuous)", () => {
     const fake = scanSource("lib/mcp/tools/new-tool.ts", "const rows = await sql`SELECT * FROM room_turn_speaker`;");
     const loose = fake.filter((v) => !ALLOWLIST[v.file]);

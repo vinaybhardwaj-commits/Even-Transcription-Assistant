@@ -119,8 +119,9 @@ export function scanSource(file: string, src: string): Violation[] {
   for (const lit0 of literalsOf(code)) {
     const lit = { ...lit0, text: blankSqlComments(lit0.text) };
     // REL3-FU2 F3 fail closed: forms the scanner does not parse (dollar-quoted bodies, E'..' escape strings) that name ANY gated table are a violation by themselves
-    const unparsed = /\$(?:[A-Za-z_]\w*)?\$/.test(lit.text) || /(?<![A-Za-z0-9_$])[Ee]$/.test(code.slice(Math.max(0, lit0.at - 3), lit0.at - 1)) && code[lit0.at - 1] === "'";
-    if (unparsed) for (const t of ROOM_TABLES) { const w = new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i").exec(lit.text); if (w) add("sql", t, lit.at + w.index); }
+    // F4: the unparsed-form test and the table search run on the RAW text (before comment blanking), so a comment opener hidden in a $$ body or an E'..' string cannot blank the table away
+    const unparsed = /\$(?:[A-Za-z_]\w*)?\$/.test(lit0.text) || /(?<![A-Za-z0-9_])[Ee]'/.test(lit0.text) || (/(?<![A-Za-z0-9_$])[Ee]$/.test(code.slice(Math.max(0, lit0.at - 3), lit0.at - 1)) && code[lit0.at - 1] === "'");
+    if (unparsed) for (const t of ROOM_TABLES) { const w = new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i").exec(lit0.text); if (w) add("sql", t, lit0.at + w.index); }
     for (const m of lit.text.matchAll(KW_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
     // REL3-FU2 G3-1: every FROM is looked at, INCLUDING the ones inside parentheses (derived tables, LATERAL, subqueries in a JOIN): the scan resumes right after each FROM keyword instead of
     // skipping the span a match consumed; FROM ONLY <table> is the same table
