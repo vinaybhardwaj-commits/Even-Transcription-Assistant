@@ -90,3 +90,44 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
   }
   return { found: null, n_integrity_skipped: skipped };
 }
+
+// ---- S8C: a palimpsest track of a consult, as a reference (scribe_sarvam status / result / transcribe) --------------------------------------------------------------------------
+export type RebTrackRef = { source: "palimpsest"; layer: "translate" | "stt"; config_hash: string; n_segments: number; segments?: Array<{ t0_ms: number; t1_ms: number; speaker: string; lang: string | null; text: string }> };
+/**
+ * The newest ok palimpsest track (translate first, then stt) of one consult, with the same key ownership (this uid, this room, not held out) and sha256 checks as consult text. The caller has already passed the
+ * consult's (room, date) through the held-out check. Text (segments) only when asked. No Sarvam call, no write.
+ */
+export async function findRebTrack(uid: string, roomId: string, istDate: string, opts: { withText?: boolean } = {}): Promise<{ found: RebTrackRef | null; n_integrity_skipped: number }> {
+  if (!UID_RE.test(uid) || blindRefusal(roomId, istDate)) return { found: null, n_integrity_skipped: 0 };
+  const store = labStore();
+  if (!store) return { found: null, n_integrity_skipped: 0 };
+  const rows = (await sql`
+    SELECT layer, engine, config_hash, r2_key, sha256
+      FROM reb_track_index
+     WHERE window_id = ${`consult-${uid}`}::text AND status = 'ok' AND shadow = false AND layer IN ('translate', 'stt')
+     ORDER BY finished_at DESC NULLS LAST, id DESC
+     LIMIT 40
+  `) as IndexRow[];
+  let skipped = 0;
+  for (const layer of ["translate", "stt"] as const) {
+    for (const row of rows.filter((r) => r.layer === layer)) {
+      const m = REB_CONSULT_KEY.exec(String(row.r2_key));
+      if (!m || m[3] !== uid || m[2] !== roomId || blindRefusal(m[2]!, m[1]!)) { skipped += 1; continue; }
+      const obj = await store.get(row.r2_key);
+      if (!obj) continue;
+      if (typeof row.sha256 !== "string" || sha256(obj.body) !== row.sha256.toLowerCase()) { skipped += 1; continue; }
+      let doc: { status?: unknown; segments?: unknown };
+      try { doc = JSON.parse(obj.body); } catch { skipped += 1; continue; }
+      if (doc?.status !== "ok" || !Array.isArray(doc.segments)) continue;
+      const segs = (doc.segments as Array<Record<string, unknown>>).filter((g) => g && typeof g === "object");
+      return {
+        found: {
+          source: "palimpsest", layer, config_hash: String(row.config_hash), n_segments: segs.length,
+          ...(opts.withText ? { segments: segs.map((g) => ({ t0_ms: Number(g.t0_ms), t1_ms: Number(g.t1_ms), speaker: String(g.speaker ?? ""), lang: typeof g.lang === "string" ? g.lang : null, text: typeof g.text === "string" ? g.text : "" })) } : {}),
+        },
+        n_integrity_skipped: skipped,
+      };
+    }
+  }
+  return { found: null, n_integrity_skipped: skipped };
+}
