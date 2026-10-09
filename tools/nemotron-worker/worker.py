@@ -11,6 +11,8 @@ when the worker really runs.
 
 NEVER LOGGED: clip URLs, the token, turns, audio paths. Logs and the status file carry ids, codes, counts, timings.
 
+Hard stop: any 3xx from the server is never followed; the worker exits 3 (a redirect is a wrong base URL, and following
+it would carry the bearer elsewhere). Clips are fetched over https only, never following a redirect.
 Backoff: 404 disabled / 503 not_configured / 503 db / clip_sign / 401 / 5xx / network → sleep 30 s doubling to 15 min
 (±20 % jitter), reset on the first 200. 409, duplicate, 403 blind_room_day, 404 unknown_window → move on.
 SIGTERM/SIGINT: no new claim; a window already fetched is finished and posted; then exit 0. A window still waiting
@@ -24,6 +26,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import shutil
@@ -81,8 +84,14 @@ def to_turns(segments, audio_ms: int) -> list:
     same payload and the server answers `duplicate`, not `conflict`."""
     rows = []
     for start_s, end_s, label in segments:
-        s = max(0, min(audio_ms, int(round(float(start_s) * 1000))))
-        e = max(0, min(audio_ms, int(round(float(end_s) * 1000))))
+        try:
+            a, b = float(start_s), float(end_s)
+        except (TypeError, ValueError):
+            raise TurnsError("infer_failed") from None
+        if not (math.isfinite(a) and math.isfinite(b)):  # NaN/inf from the model is an inference failure, not a crash
+            raise TurnsError("infer_failed")
+        s = max(0, min(audio_ms, int(round(a * 1000))))
+        e = max(0, min(audio_ms, int(round(b * 1000))))
         if e > s:
             rows.append((s, e, str(label)))
     rows.sort(key=lambda r: (r[0], r[1], r[2]))
@@ -103,6 +112,23 @@ def to_turns(segments, audio_ms: int) -> list:
 # HTTP. Every failure becomes (status, code); a URL or token never reaches an exception message or a log line.
 # ---------------------------------------------------------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a 3xx: urllib then raises HTTPError with the 3xx code. A redirect would carry the bearer (or a
+    presigned GET) to a host nobody chose; the production host answers directly or not at all."""
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+class HardError(Exception):
+    """A configuration fault the worker must not retry around (a 3xx from the server). The worker exits 3."""
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 class Api:
     def __init__(self, base_url: str, token: str, timeout_s: float = 30.0):
         self.base = base_url.rstrip("/")
@@ -117,9 +143,11 @@ class Api:
         if data is not None:
             req.add_header("content-type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+            with _OPENER.open(req, timeout=self.timeout_s) as r:
                 return r.status, _json_or_empty(r.read(2_000_000))
         except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                raise HardError(f"redirect_{e.code}") from None
             try:
                 payload = _json_or_empty(e.read(64_000))
             except Exception:
@@ -141,12 +169,15 @@ class FetchError(Exception):
     pass
 
 
-def fetch_clip(url: str, dest: str, max_bytes: int, timeout_s: float) -> tuple:
-    """Stream the presigned GET to `dest`, hashing as it goes. (sha256 hex, bytes). FetchError carries no URL."""
+def fetch_clip(url: str, dest: str, max_bytes: int, timeout_s: float, schemes: tuple = ("https",)) -> tuple:
+    """Stream the presigned GET to `dest`, hashing as it goes. (sha256 hex, bytes). FetchError carries no URL.
+    https only (no file:, no http:) and no redirects; `schemes` is widened only by the tests' local fake server."""
+    if urllib.parse.urlsplit(str(url)).scheme.lower() not in schemes:
+        raise FetchError("bad_scheme")
     h = hashlib.sha256()
     n = 0
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout_s) as r, open(dest, "wb") as f:
+        with _OPENER.open(urllib.request.Request(url, method="GET"), timeout=timeout_s) as r, open(dest, "wb") as f:
             while True:
                 chunk = r.read(1 << 20)
                 if not chunk:
@@ -316,6 +347,7 @@ class Worker:
         self.last_ok_at: Optional[str] = None
         self.last_error_code: Optional[str] = None
         self.state = "starting"
+        self.fatal: Optional[str] = None
         self._mu = threading.Lock()
 
     # -- shared pieces ------------------------------------------------------------------------------------------
@@ -481,6 +513,8 @@ class Worker:
     def _process_and_count(self, w: dict) -> None:
         try:
             self.process(w)
+        except HardError as e:
+            self._fatal(e)
         finally:
             with self._mu:
                 self.in_flight -= 1
@@ -502,10 +536,21 @@ class Worker:
             log.info("heartbeat status=%d code=%s", status, out.get("error") or "-")
         return status
 
+    def _fatal(self, e: "HardError") -> None:
+        log.error("hard_error code=%s: not following, stopping the worker", e.code)
+        with self._mu:
+            self.fatal = e.code
+            self.last_error_code = e.code
+        self.stop.set()
+
     def heartbeat_loop(self) -> None:
         hb = Backoff(self.cfg.heartbeat_s, self.cfg.backoff_max_s)
         while not self.stop.is_set():
-            ok = self.heartbeat_once() == 200
+            try:
+                ok = self.heartbeat_once() == 200
+            except HardError as e:
+                self._fatal(e)
+                break
             if ok:
                 hb.reset()
             if self.stop.wait(self.cfg.heartbeat_s if ok else hb.next()):
@@ -517,12 +562,15 @@ class Worker:
         log.info("start worker_id=%s model=%s model_rev=%s config_hash=%s concurrency=%d rate_per_hour=%d",
                  self.cfg.worker_id, self.engine.model, self.engine.model_rev, config_hash(self.engine.config),
                  self.cfg.concurrency, self.cfg.rate_per_hour)
-        while self.step():
-            pass
-        self.state = "stopped"
+        try:
+            while self.step():
+                pass
+        except HardError as e:
+            self._fatal(e)
+        self.state = f"fatal:{self.fatal}" if self.fatal else "stopped"
         self.write_state()
         log.info("stop counts=%s", json.dumps(dict(self.counts), sort_keys=True))
-        return 0
+        return 3 if self.fatal else 0
 
 
 def _iso(t: float) -> str:
@@ -532,6 +580,48 @@ def _iso(t: float) -> str:
 # ---------------------------------------------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------------------------------------------
+
+DEFAULT_BASE_URL = "https://www.evenscribe.app"
+OTHER_HOST_OVERRIDE_ENV = "NEMOTRON_ALLOW_OTHER_BASE_URL"
+
+
+def check_base_url(url: str, env) -> Optional[str]:
+    """None when the worker may talk to `url`, else why not. Only https://www.evenscribe.app (the host that answers
+    without a redirect) unless NEMOTRON_ALLOW_OTHER_BASE_URL=1 is set (a local test server, a preview)."""
+    u = urllib.parse.urlsplit(url or "")
+    if u.scheme == "https" and u.hostname == "www.evenscribe.app" and u.port is None and u.path in ("", "/") \
+            and not u.query and not u.username:
+        return None
+    if env.get(OTHER_HOST_OVERRIDE_ENV) == "1" and u.scheme in ("https", "http") and u.hostname:
+        return None
+    return f"base URL must be {DEFAULT_BASE_URL} (set {OTHER_HOST_OVERRIDE_ENV}=1 to allow another host)"
+
+
+STALE_TMP_S = 3600  # leases are 15 min; a nemo-w-* dir an hour old belongs to no live window
+
+
+def sweep_stale_tmp(root: Optional[str], now: float, older_than_s: float = STALE_TMP_S) -> int:
+    """Remove nemo-w-* dirs under the temp root that THIS user owns and that are older than `older_than_s` (left by
+    a killed run). Never follows a symlink; never touches another user's dir. Returns the count removed."""
+    root = root or tempfile.gettempdir()
+    n = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith("nemo-w-"):
+            continue
+        p = os.path.join(root, name)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and now - st.st_mtime > older_than_s:
+            shutil.rmtree(p, ignore_errors=True)
+            n += 1
+    return n
+
 
 def read_token(path: str) -> str:
     """The bearer from a file that must be a regular file, owned by us, mode 0600 or tighter."""
@@ -553,7 +643,8 @@ def main(argv=None) -> int:
     env = os.environ.get
     home = os.path.expanduser("~")
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--base-url", default=env("NEMOTRON_BASE_URL"), help="e.g. https://evenscribe.app (required)")
+    p.add_argument("--base-url", default=env("NEMOTRON_BASE_URL") or DEFAULT_BASE_URL,
+                   help=f"default {DEFAULT_BASE_URL}; another host needs {OTHER_HOST_OVERRIDE_ENV}=1")
     p.add_argument("--token-file", default=env("NEMOTRON_TOKEN_FILE", f"{home}/.config/eta-nemotron/token"))
     p.add_argument("--worker-id", default=env("NEMOTRON_WORKER_ID") or default_worker_id())
     p.add_argument("--concurrency", type=int, default=int(env("NEMOTRON_CONCURRENCY", "1")))
@@ -567,13 +658,17 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S%z")
-    if not a.base_url or not a.base_url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
-        raise SystemExit("--base-url (or NEMOTRON_BASE_URL) is required: https://… or a localhost test server")
+    why = check_base_url(a.base_url, os.environ)
+    if why:
+        raise SystemExit(why)
     if not a.worker_id or set(a.worker_id) - WORKER_ID_OK or len(a.worker_id) > 64:
         raise SystemExit("bad --worker-id")
     token = read_token(a.token_file)
     if a.state_file:
         os.makedirs(os.path.dirname(a.state_file), mode=0o700, exist_ok=True)
+    swept = sweep_stale_tmp(a.tmp_root, time.time())
+    if swept:
+        log.info("swept %d stale temp dir(s)", swept)
 
     import engine_nemo  # the GPU stack loads only here
     engine = engine_nemo.NemotronEngine(device=a.device, finetune_ckpt=a.finetune_ckpt)

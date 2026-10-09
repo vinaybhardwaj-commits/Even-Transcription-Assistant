@@ -23,6 +23,9 @@ database credential. Nothing clinician-facing reads these rows.
   - Runs under `nice -n 10` and `ionice -c 3`.
   - Rate cap: 60 windows/hour by default.
 - SIGTERM stops new claims. A fetched window is finished and posted, then the worker exits 0. A window still waiting for the GPU is abandoned unposted: its lease lapses and the server offers it again.
+- Base URL: `https://www.evenscribe.app` by default. Any other host is refused unless `NEMOTRON_ALLOW_OTHER_BASE_URL=1` is set.
+- Any 3xx from the server is never followed: the worker exits with code 3, since a redirect would carry the bearer to another host. Clips are fetched over https only, with no redirects; anything else posts `fetch_failed`.
+- At startup it deletes this user's `nemo-w-*` temp dirs that are over an hour old, left behind by a killed run. Model output with NaN or inf times posts `infer_failed`.
 - Never logged: clip URLs, the token, turns, audio paths. The log and `status.json` carry ids, codes, counts and timings.
 
 ## Engine version (what each row is keyed on)
@@ -37,10 +40,10 @@ mkdir -p ~/.config/eta-nemotron && chmod 700 ~/.config/eta-nemotron
 ( umask 077; cat > ~/.config/eta-nemotron/token )      # paste, then Ctrl-D
 
 cd <checkout>/tools/nemotron-worker
-NEMOTRON_BASE_URL=https://evenscribe.app ./nemotron-worker.sh start
+./nemotron-worker.sh start         # base URL https://www.evenscribe.app
 ./nemotron-worker.sh status        # pid, status.json (state, counts, last codes), GPU memory
 ./nemotron-worker.sh logs 40
-./nemotron-worker.sh stop          # SIGTERM; waits up to 120 s for the window in hand
+./nemotron-worker.sh stop          # SIGTERM; waits up to 180 s for the window in hand
 ```
 - Python: `~/eta-data/nemotron/venv-nemo-main` (NeMo `cf724ac`, torch 2.14 cu126). Override it with `NEMOTRON_PYTHON`.
 - Optional knobs: `NEMOTRON_CONCURRENCY`, `NEMOTRON_RATE_PER_HOUR`, `NEMOTRON_MIN_FREE_VRAM_MIB`, `NEMOTRON_GPU_LOCK` (`''` disables it), `NEMOTRON_TMP_ROOT`, `NEMOTRON_WORKER_ID` (default `box-<hostname>`), `NEMOTRON_STATE_DIR`.

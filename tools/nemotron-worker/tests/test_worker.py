@@ -41,6 +41,7 @@ class FakeServer:
         self.posts, self.heartbeats, self.pending_calls, self.clip_gets = [], [], [], 0
         self.clips = {}  # path -> (status, bytes)
         self.auth_seen = set()
+        self.elsewhere = 0  # requests that reached a redirect target (must stay 0)
         self.on_ingest = None
         srv = self
 
@@ -49,14 +50,20 @@ class FakeServer:
                 pass
 
             def _send(self, status, body):
+                loc = body.pop("_location", None) if isinstance(body, dict) else None
                 raw = json.dumps(body).encode() if isinstance(body, dict) else body
                 self.send_response(status)
+                if loc:
+                    self.send_header("location", srv.base + loc)
                 self.send_header("content-length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
 
             def do_GET(self):
                 u = urlparse(self.path)
+                if u.path.startswith("/elsewhere"):
+                    srv.elsewhere += 1
+                    return self._send(200, {"ok": True, "windows": [], "exhausted": 0})
                 if u.path.startswith("/clips/"):
                     srv.clip_gets += 1
                     st, b = srv.clips.get(u.path, (404, b"no"))
@@ -69,6 +76,9 @@ class FakeServer:
                 self._send(404, {"error": "nope"})
 
             def do_POST(self):
+                if self.path.startswith("/elsewhere"):
+                    srv.elsewhere += 1
+                    return self._send(200, {"ok": True, "result": "stored"})
                 srv.auth_seen.add(self.headers.get("authorization"))
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 if self.path == "/api/diarize/nemotron/ingest":
@@ -125,6 +135,11 @@ def stub_decode(src, wav):
     return 60_000
 
 
+def local_fetch(url, dest, max_bytes, timeout_s):
+    """The real fetch_clip, widened to http ONLY so the localhost fake server can serve clips."""
+    return worker.fetch_clip(url, dest, max_bytes, timeout_s, schemes=("https", "http"))
+
+
 class Clock:
     def __init__(self, t=1_800_000_000.0):
         self.t = t
@@ -149,18 +164,21 @@ class Base(unittest.TestCase):
         self.addCleanup(worker.log.removeHandler, h)
         self.addCleanup(self.srv.close)
 
-    def make(self, engine=None, free=None, **cfg):
+    def make(self, engine=None, free=None, fetch=None, **cfg):
         c = worker.Config(base_url=self.srv.base, worker_id="box-test", backoff_min_s=30, backoff_max_s=900,
                           idle_poll_s=60, tmp_root=self.tmp, ingest_retries=2, **cfg)
 
         def sleep(s):
             self.clock.sleeps.append(s)
             self.clock.t += s
+            if len(self.clock.sleeps) >= 50:  # a loop that should have ended fails its assertions instead of hanging
+                self.stop.set()
             return self.stop.is_set()
 
         w = worker.Worker(c, worker.Api(self.srv.base, TOKEN, timeout_s=5), engine or StubEngine(), stop=self.stop,
                           clock=self.clock, sleep=sleep, free_vram=(lambda: free), decode=stub_decode,
-                          gpu_name=lambda: "Tesla T4", retry_sleep=lambda s: self.clock.sleeps.append(("retry", s)))
+                          gpu_name=lambda: "Tesla T4", retry_sleep=lambda s: self.clock.sleeps.append(("retry", s)),
+                          fetch=fetch or local_fetch)
         w.backoff.rng = lambda: 0.5  # no jitter in tests: factor 1.0
         return w
 
@@ -465,3 +483,128 @@ class Hygiene(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Hardening(Base):
+    """gating-lead follow-up, 9 Oct: no redirects, https-only clips, NaN guard, temp sweep, base URL, stop wait."""
+
+    def test_3xx_from_pending_is_a_hard_stop_and_never_followed(self):
+        self.srv.pending = [(302, {"_location": "/elsewhere/pending"})]
+        w = self.make()
+        self.assertEqual(w.run(), 3)
+        self.assertEqual(self.srv.elsewhere, 0)
+        self.assertEqual(w.fatal, "redirect_302")
+        self.assertEqual(w.state, "fatal:redirect_302")
+        self.assertEqual(len(self.srv.pending_calls), 1)
+
+    def test_3xx_from_ingest_is_a_hard_stop_without_retry(self):
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_1")], "exhausted": 0}),
+                            (200, {"ok": True, "windows": [self.srv.window("bw_fake_2")], "exhausted": 0})]
+        self.srv.ingest = [(307, {"_location": "/elsewhere/ingest"})]
+        w = self.make()
+        self.assertEqual(w.run(), 3)
+        self.assertEqual(len(self.srv.posts), 1)
+        self.assertEqual(self.srv.elsewhere, 0)
+        self.assertEqual(len(self.srv.pending_calls), 1, "no new claim after a hard stop")
+        self.assertTmpEmpty()
+
+    def test_3xx_from_heartbeat_is_a_hard_stop(self):
+        w = self.make()
+        w.api = worker.Api(self.srv.base + "/redir-hb", TOKEN, timeout_s=5)
+        orig = self.srv.httpd.RequestHandlerClass.do_POST
+
+        def do_post(h):
+            if h.path.startswith("/redir-hb"):
+                return h._send(308, {"_location": "/elsewhere/hb"})
+            return orig(h)
+        self.srv.httpd.RequestHandlerClass.do_POST = do_post
+        self.addCleanup(setattr, self.srv.httpd.RequestHandlerClass, "do_POST", orig)
+        t = threading.Thread(target=w.heartbeat_loop, daemon=True)
+        t.start()
+        t.join(5)  # a hard stop ends the loop at once; anything else would sit in its 60 s wait
+        stopped_by_itself = not t.is_alive()
+        self.stop.set()
+        t.join(5)
+        self.assertTrue(stopped_by_itself)
+        self.assertEqual((w.fatal, self.srv.elsewhere), ("redirect_308", 0))
+
+    def test_clip_redirect_is_not_followed(self):
+        self.srv.clips["/clips/a"] = (302, {"_location": "/elsewhere/clip"})
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_1")], "exhausted": 0})]
+        self.make().step()
+        self.assertEqual(self.srv.posts[0]["error_code"], "fetch_failed")
+        self.assertEqual(self.srv.elsewhere, 0)
+
+    def test_fetch_clip_accepts_https_only(self):
+        src = os.path.join(self.tmp, "local.bin")
+        with open(src, "wb") as f:
+            f.write(b"local file bytes")
+        dest = os.path.join(self.tmp, "out.bin")
+        for url in ("file://" + src, self.srv.base + "/clips/a", "ftp://example.invalid/x", "/clips/a"):
+            with self.assertRaises(worker.FetchError) as cm:
+                worker.fetch_clip(url, dest, 1 << 20, 5)
+            self.assertEqual(str(cm.exception), "bad_scheme")
+            self.assertFalse(os.path.exists(dest))
+        self.assertEqual(self.srv.clip_gets, 0)
+        os.remove(src)
+
+    def test_production_fetch_refuses_an_http_clip_url(self):
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_1")], "exhausted": 0})]
+        self.make(fetch=worker.fetch_clip).step()  # the default, unwidened fetch
+        self.assertEqual((self.srv.posts[0]["status"], self.srv.posts[0]["error_code"]), ("failed", "fetch_failed"))
+        self.assertEqual(self.srv.clip_gets, 0)
+
+    def test_nan_inf_or_junk_segments_post_infer_failed(self):
+        bad = [[(float("nan"), 1.0, "speaker_0")], [(0.0, float("inf"), "speaker_0")], [("x", 1.0, "speaker_0")],
+               [(0.5, 1.0, "speaker_0"), (float("-inf"), 2.0, "speaker_1")]]
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window(f"bw_fake_{i}")], "exhausted": 0}) for i in range(len(bad))]
+        w = self.make()
+        for segs in bad:
+            w.engine = StubEngine(segments=segs)
+            w.step()
+        self.assertEqual([(p["status"], p["error_code"], p["turns"]) for p in self.srv.posts], [("failed", "infer_failed", [])] * 4)
+        self.assertTmpEmpty()
+
+    def test_sweep_removes_only_own_old_nemo_dirs(self):
+        root = tempfile.mkdtemp(prefix="nw-sweep-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        old, fresh, other = (os.path.join(root, n) for n in ("nemo-w-old", "nemo-w-fresh", "keep-me"))
+        for d in (old, fresh, other):
+            os.mkdir(d)
+            with open(os.path.join(d, "clip.bin"), "wb") as f:
+                f.write(b"x")
+        target = tempfile.mkdtemp(prefix="nw-target-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(target, ignore_errors=True))
+        os.symlink(target, os.path.join(root, "nemo-w-link"))
+        with open(os.path.join(root, "nemo-w-file"), "w") as f:
+            f.write("x")
+        now = 1_800_000_000.0
+        for p in (old, other, os.path.join(root, "nemo-w-file")):
+            os.utime(p, (now - 7200, now - 7200))
+        os.utime(fresh, (now - 600, now - 600))
+        os.utime(os.path.join(root, "nemo-w-link"), (now - 7200, now - 7200), follow_symlinks=False)
+        self.assertEqual(worker.sweep_stale_tmp(root, now), 1)
+        self.assertEqual(sorted(os.listdir(root)), ["keep-me", "nemo-w-file", "nemo-w-fresh", "nemo-w-link"])
+        self.assertTrue(os.path.isdir(target))
+
+    def test_base_url_policy(self):
+        ok = worker.check_base_url
+        self.assertIsNone(ok("https://www.evenscribe.app", {}))
+        self.assertIsNone(ok("https://www.evenscribe.app/", {}))
+        for bad in ("https://evenscribe.app", "http://www.evenscribe.app", "https://www.evenscribe.app.evil.example",
+                    "https://www.evenscribe.app:8443", "https://u@www.evenscribe.app", "https://www.evenscribe.app/api",
+                    "http://127.0.0.1:3000", "", None):
+            self.assertIsNotNone(ok(bad, {}), bad)
+        self.assertIsNone(ok("http://127.0.0.1:3000", {"NEMOTRON_ALLOW_OTHER_BASE_URL": "1"}))
+        self.assertIsNotNone(ok("http://127.0.0.1:3000", {"NEMOTRON_ALLOW_OTHER_BASE_URL": "yes"}))
+        self.assertIsNotNone(ok("file:///etc/passwd", {"NEMOTRON_ALLOW_OTHER_BASE_URL": "1"}))
+        self.assertEqual(worker.DEFAULT_BASE_URL, "https://www.evenscribe.app")
+
+    def test_stop_waits_at_least_150_s(self):
+        import re
+        sh = open(os.path.join(os.path.dirname(__file__), "..", "nemotron-worker.sh")).read()
+        m = re.search(r"^STOP_WAIT_S=(\d+)$", sh, re.M)
+        self.assertIsNotNone(m)
+        self.assertGreaterEqual(int(m.group(1)), 150)
+        self.assertIn('seq 1 "$STOP_WAIT_S"', sh)
+        self.assertNotIn("NEMOTRON_BASE_URL is required", sh)
