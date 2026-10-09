@@ -467,3 +467,42 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect((await queryWindows(sql as never, { room_id: BR, limit: 100 })).map((r) => r.consult_key)).toEqual([]);
   });
 });
+
+(HAVE ? describe : describe.skip)("GUARD-3 G-3: getRoomDayTape and listRoomDays run the held-out check", () => {
+  it("GET /api/admin/rooms/<held-out room>/days/<held-out day> is 403 blind_room_day (it was 200 with the tape); the lookup throws BlindRoomDayError", async () => {
+    const { getRoomDayTape } = await import("@/lib/room-access/room-day-admin");
+    const { BlindRoomDayError } = await import("@/lib/rubrics/blind-room-days");
+    await expect(getRoomDayTape(BR, BD)).rejects.toBeInstanceOf(BlindRoomDayError);
+    const { GET } = await import("@/app/api/admin/rooms/[roomId]/days/[date]/route");
+    const res = await GET(new Request("http://x"), { params: Promise.resolve({ roomId: BR, date: BD }) });
+    expect(res.status).toBe(403);
+    // the day after (clean) is not refused by the day rule
+    const next = new Date(Date.parse(`${BD}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+    const ok = await GET(new Request("http://x"), { params: Promise.resolve({ roomId: BR, date: next }) });
+    expect(ok.status).not.toBe(403);
+  });
+  it("a clean room's tape leaves out the held-out sessions and windows of that day (turn rows, text, emotion, diarize)", async () => {
+    const { getRoomDayTape } = await import("@/lib/room-access/room-day-admin");
+    const tape = await getRoomDayTape("r_clean", CLEAN_DAY);
+    const text = JSON.stringify(tape);
+    for (const bad of ["bs_win", "bs_rts", "bs_txt", "bs_emo", "bs_rdw", "bw_win", "bw_rts", "bw_txt", "bw_emo", "bw_rdw"]) expect(text, bad).not.toContain(bad);
+    expect(text).toContain("bs_clean");
+  });
+  it("the day BEFORE a held-out day: a session that runs into the held-out day is not part of that day's tape", async () => {
+    const { getRoomDayTape } = await import("@/lib/room-access/room-day-admin");
+    const prev = new Date(Date.parse(`${BD}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    const tape = await getRoomDayTape(BR, prev);
+    expect(JSON.stringify(tape)).not.toContain("bs_span");
+  });
+  it("listRoomDays: a held-out (room, day) is not listed; a clean day's counts leave held-out windows out", async () => {
+    const { listRoomDays } = await import("@/lib/room-access/room-day-admin");
+    const blindRoom = await listRoomDays(BR);
+    expect(blindRoom.map((r) => r.ist_date)).not.toContain(BD);
+    const clean = (await listRoomDays("r_clean")).find((r) => r.ist_date === CLEAN_DAY)!;
+    const all = (await H.sql!`SELECT w.id FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE s.room_id = 'r_clean' AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${CLEAN_DAY}::date` as Array<{ id: string }>).map((r) => r.id);
+    const { windowsBlindAny } = await import("@/lib/room-access/check");
+    const held = await windowsBlindAny(all);
+    expect(held.size).toBeGreaterThan(0);
+    expect(clean.window_count).toBe(all.length - held.size);
+  });
+});

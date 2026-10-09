@@ -29,6 +29,8 @@
  */
 
 import { sql } from "@/lib/db";
+import { BLIND_ROOM_DAYS, BlindRoomDayError, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { sessionsBlindAny, windowsBlindAny } from "@/lib/room-access/check";
 import { emotionEnabled, canSurfaceEmotion } from "@/lib/emotion/gate";
 import { AUTO_DRAIN_MAX_AGE_HOURS } from "@/lib/stt/auto-drain";
 import { readEngineOutcome } from "@/lib/stt/route-run";
@@ -625,6 +627,8 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
   }>;
   const room = roomRows[0];
   if (!room) return null;
+  // G-3: a held-out (room, IST day) has no tape to serve (the admin route answers 403 blind_room_day)
+  if (isBlindRoomDay(istDate, room.id)) throw new BlindRoomDayError();
 
   const dayRows = (await sql`
     SELECT id, doctor_id, started_at, ended_at
@@ -640,6 +644,9 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
        AND (started_at AT TIME ZONE 'Asia/Kolkata')::date = ${istDate}::date
      ORDER BY started_at ASC
   `) as Array<{ id: string; started_at: string; ended_at: string | null }>;
+  // G-3: a session of this day that is held out (it runs into a held-out day, or a window of it has a held-out placement) is left out of the tape
+  const heldSessions = await sessionsBlindAny(sessionRows.map((r) => r.id));
+  if (heldSessions.size > 0) sessionRows.splice(0, sessionRows.length, ...sessionRows.filter((r) => !heldSessions.has(r.id)));
 
   if (!roomDay && sessionRows.length === 0) return null;
 
@@ -693,6 +700,9 @@ export async function getRoomDayTape(roomId: string, istDate: string, opts: GetR
     auto_drain_refused_reason: string | null;
   }>;
 
+  // G-3: a window with ANY held-out placement is never part of the tape
+  const heldWindows = await windowsBlindAny(windowDbRows.map((w) => w.id));
+  for (let i = windowDbRows.length - 1; i >= 0; i--) if (heldWindows.has(windowDbRows[i]!.id)) windowDbRows.splice(i, 1);
   const windows: RawBenchWindowRow[] = windowDbRows.map((w) => ({
     id: w.id,
     session_id: w.session_id,
@@ -922,8 +932,9 @@ export type RoomDayOverviewRow = {
  * room_day_id, so the 8 NULL-room_day_id windows' days still show up (section 5.4).
  */
 export async function listRoomDays(roomId: string): Promise<RoomDayOverviewRow[]> {
+  const heldDays = BLIND_ROOM_DAYS.map(([d]) => d), heldRooms = BLIND_ROOM_DAYS.map(([, r]) => r);
   try {
-    return (await sql`
+    const rows = (await sql`
       WITH days AS (
         SELECT (started_at AT TIME ZONE 'Asia/Kolkata')::date AS ist_date
           FROM bench_session WHERE room_id = ${roomId}
@@ -939,11 +950,21 @@ export async function listRoomDays(roomId: string): Promise<RoomDayOverviewRow[]
         FROM days d
         LEFT JOIN room_day rd ON rd.room_id = ${roomId} AND rd.ist_date = d.ist_date
         LEFT JOIN bench_session s ON s.room_id = ${roomId} AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = d.ist_date
+        -- G-3: a window with ANY held-out placement is not counted
         LEFT JOIN bench_window w ON w.session_id = s.id
+             AND NOT EXISTS (SELECT 1 FROM unnest(${heldDays}::date[], ${heldRooms}::text[]) AS hb(d, r), room_day hr
+                              WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+                                hr.id = w.room_day_id
+                                OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = w.id)
+                                OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = w.id)
+                                OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = w.id)
+                                OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = w.id)))
         LEFT JOIN room_turn_speaker rts ON rts.window_id = w.id
        GROUP BY d.ist_date, rd.id
        ORDER BY d.ist_date DESC
     `) as RoomDayOverviewRow[];
+    // G-3: the held-out (room, IST day) pairs are not listed at all
+    return rows.filter((r) => !isBlindRoomDay(r.ist_date, roomId));
   } catch {
     return [];
   }
