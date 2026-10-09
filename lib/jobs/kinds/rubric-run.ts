@@ -13,7 +13,8 @@ import { jobError } from "../errors";
 import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun, unitsOf } from "@/lib/rubrics/registry";
 import { RUBRIC_UNITS, type RubricUnit } from "@/lib/rubrics/types";
-import { evaluateUnit, resolveUnits } from "@/lib/rubrics/engines";
+import { evaluateUnit, resolveUnits, STAY_RUN_MAX } from "@/lib/rubrics/engines";
+import { parseStayKey, withStayBatch, STAY_BATCH_MAX } from "@/lib/rubrics/readers/stay-record";
 import { countingCalls, talliedCalls } from "@/lib/rubrics/llm";
 import { finishRun, insertRun, newRunId, upsertResult, writeEvidence } from "@/lib/rubrics/store";
 import { perUnitHeldOut } from "@/lib/room-access/jobs";
@@ -44,6 +45,11 @@ export function parseRubricRunArgs(raw: unknown): RubricRunArgs {
   const unit = a.unit ?? r?.unit ?? "window";
   const refusal = canRun(r, { lab: a.lab, unit });
   if (refusal) throw new JobArgsError(`${refusal.error}${refusal.detail ? `: ${refusal.detail}` : ""}`);
+  // S7-3: a stay run covers at most STAY_RUN_MAX stays; with lab:true a stay run may name an admission date range instead of keys (surgical stays only, the same cap)
+  if (unit === "stay") {
+    if ((a.unit_keys?.length ?? 0) > STAY_RUN_MAX) throw new JobArgsError(`bad args: unit_keys at most ${STAY_RUN_MAX} stays`);
+    return { ...a, unit, limit: Math.min(a.limit, STAY_RUN_MAX) };
+  }
   // a non-production rubric runs ONLY on an explicit unit list (lab:true alone is not enough)
   if (r!.status !== "production" && !a.unit_keys) throw new JobArgsError(`explicit_units_required: ${r!.id}@${r!.version} is ${r!.status}: give unit_keys`);
   return { ...a, unit };
@@ -98,7 +104,10 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
   let left = llm ? await callsLeft(keys.length, made) : Number.POSITIVE_INFINITY;
   // G80: a throw anywhere in the batch (llm_unavailable, a database or R2 error) keeps what the batch already did: the position, the counters and EVERY model call made so far, the failing unit's own attempts included
+  // S7-3: a stay batch reads the warehouse ONCE per table for the whole batch (at most STAY_BATCH_MAX stays), then each stay is answered from it
+  const inBatch = <T>(fn: () => Promise<T>): Promise<T> => (a.unit === "stay" ? withStayBatch(keys.slice(idx, end).map((k) => parseStayKey(k) ?? "").filter(Boolean).slice(0, STAY_BATCH_MAX), fn) : fn());
   try {
+  await inBatch(async () => {
   while (idx < end && Date.now() < deadline) {
     if (llm && left <= 0) { // at the cap: the remaining units are skipped (reason llm_cap), no more calls
       capSkipped += keys.length - idx;
@@ -120,7 +129,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
       continue;
     }
     // a result row always has a known room and IST date: a unit whose room or date could not be resolved (no such window, no room-day, a bad key) is counted, never written
-    if (out.room_id === null || out.ist_date === null) {
+    if ((out.room_id === null && a.unit !== "stay") || out.ist_date === null) { // a stay has no room: its IST date is the admission's
       skipped += 1;
       unresolved += 1;
       idx += 1;
@@ -139,6 +148,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
     else skipped += 1;
     idx += 1;
   }
+  });
   } catch (e) {
     throw withProgressPatch(e, { idx, ok, failed, skipped, blind, unresolved, llm_calls: made + talliedCalls(e), skipped_cap: capSkipped });
   }

@@ -40,7 +40,9 @@ describe("the rubric files and the registry", () => {
     for (const d of defs) { expect(d.engine).toBe("llm_zdr"); expect(d.source).toMatch(/@/); }
     // S7-1: the two consult rubrics have an engine and a prompt file (v1.0.0); the other two stay definition-only
     for (const d of defs.slice(0, 2)) { expect(d.version).toBe(d.id === "consult_surgical_pitch" ? "1.1.1" : "1.1.0"); expect(d.prompt).toBe("prompt.json"); } // 1.1.1: the pitch output changed (recommendation_kind decided in code)
-    for (const d of defs.slice(2)) expect(d.prompt).toBeUndefined();
+    expect(defs[2]!.prompt).toBe("prompt.json"); // S7-3: ehrc_surgical_outcome has an engine (draft, lab only); care_sentiment stays definition-only
+    expect(defs[2]!.version).toBe("0.2.0");
+    expect(defs[3]!.prompt).toBeUndefined();
     expect(getRubric("care_sentiment")!.inputs).toEqual(["external"]);
     expect(getRubric("consult_chair_affect")!.source).toBe("consult-chair-affect@v0.2");
     expect(getRubric("ehrc_surgical_outcome")!.source).toBe("ehrc-surgical-outcome@md");
@@ -53,7 +55,7 @@ describe("the rubric files and the registry", () => {
       expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), f).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
     }
     expect(readdirSync(join(ROOT)).filter((n) => !statSync(join(ROOT, n)).isDirectory())).toEqual([]); // no stray files
-    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" || f === "encounter_vs_record" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
+    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" || f === "encounter_vs_record" || f === "ehrc_surgical_outcome" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
   });
   it("a bad file fails: unknown key, bad semver, id not the folder, a draft-only gap on a benched rubric, a code rubric with a prompt, a consult rubric with no consult input", () => {
     const ok = JSON.parse(JSON.stringify(getRubric("talk_time")));

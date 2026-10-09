@@ -1,10 +1,10 @@
 {
   "id": "ehrc_surgical_outcome",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "Surgical stay outcome label",
   "unit": "stay",
   "inputs": [
-    "pulse_record"
+    "stay_record"
   ],
   "engine": "llm_zdr",
   "source": "ehrc-surgical-outcome@md",
@@ -18,8 +18,66 @@
           "neutral_protocol",
           "unscored"
         ]
+      },
+      "negative_signals": {
+        "type": "array",
+        "maxItems": 5,
+        "items": {
+          "enum": [
+            "ssi_pus",
+            "fever",
+            "spreading_redness",
+            "return_to_theatre",
+            "complication_documented"
+          ]
+        }
+      },
+      "same_problem": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+          "type": "boolean"
+        }
+      },
+      "planned_staging": {
+        "type": "boolean"
+      },
+      "better_or_no_complaint": {
+        "type": "boolean"
+      },
+      "escalate": {
+        "type": "boolean"
+      },
+      "evidence": {
+        "type": "array",
+        "maxItems": 12,
+        "items": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "quote": {
+              "type": "string",
+              "maxLength": 400
+            }
+          },
+          "required": [
+            "item",
+            "quote"
+          ]
+        }
       }
-    }
+    },
+    "required": [
+      "label",
+      "negative_signals",
+      "same_problem",
+      "planned_staging",
+      "better_or_no_complaint",
+      "escalate"
+    ]
   },
   "bench": {
     "location": "rubrics/ehrc_surgical_outcome/bench.json",
@@ -59,6 +117,8 @@
       "last same-problem outpatient note inside the window",
       "label"
     ],
-    "escalate": "ask a medical reader when wound versus expected drainage, or staging versus a return to theatre, is the fork"
-  }
+    "escalate": "ask a medical reader when wound versus expected drainage, or staging versus a return to theatre, is the fork",
+    "engine_note": "engine llm_zdr, draft. 0.2.0: reader stay_record (stay key; theatre note, discharge, cdmss extract, outpatient records inside the window by the patient bridge). The model proposes; CODE decides: window class from the procedure keyword table, silence or no same-problem record is never positive, a negative code is negative unless planned staging is stated. Care-manager post-discharge questions are not read (cm_questions: not_read), so positive needs a same-problem record in the window with no complaint or better. Definition text above is unchanged from 0.1.0."
+  },
+  "prompt": "prompt.json"
 }

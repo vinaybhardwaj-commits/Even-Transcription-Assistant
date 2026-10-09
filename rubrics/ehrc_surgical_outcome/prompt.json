@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "rubric_id": "ehrc_surgical_outcome",
+  "note": "Anchors, labels and the read order are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-llm.ts systemPrompt).",
+  "rules": [
+    "Read the stay record only: the pre-operative indication, the theatre record, the discharge, then the numbered outpatient follow-up records. Nothing else is known.",
+    "Label the STAY, not the person. The first outpatient visit after discharge counts only when it is about the same problem as the operation.",
+    "Silence, or no same-problem record, is never positive: answer unscored.",
+    "negative_signals uses ONLY these codes: ssi_pus (pus or a surgical-site infection; expected serous drainage is not), fever, spreading_redness, return_to_theatre (an unplanned return or revision), complication_documented (a same-problem visit that documents a complication). Answer [] when none is documented.",
+    "planned_staging is true only when the record states that a further operation or dressing stage was PLANNED; a planned stage is not a negative.",
+    "same_problem: one boolean per numbered follow-up record, in order: true when that record is about the problem the operation treated.",
+    "better_or_no_complaint is true only when a same-problem follow-up record documents no complaint, or the patient symptomatically better; expected symptoms do not veto.",
+    "escalate is true when the fork is wound versus expected drainage, or staging versus a return to theatre, and you cannot tell.",
+    "The label is a proposal: positive needs a same-problem record with no complaint or better and no negative signal; negative needs at least one code.",
+    "Every evidence quote is copied EXACTLY from the stay record; never paraphrase.",
+    "Answer with ONE JSON object and nothing else."
+  ],
+  "user_header": "STAY RECORD. Dates are days after the admission or after the discharge. Follow-up records are numbered R1, R2, ... in time order."
+}

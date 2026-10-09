@@ -9,8 +9,9 @@ export { readWindowTurns } from "./turns";
 export { readWindowEmotion } from "./emotion";
 export { readConsultSpan, listConsultKeys } from "./consult-span";
 export { readPulseRecord, type PulseRecord } from "./pulse-record";
+export { readStayRecord, withStayBatch, type StayRecord } from "./stay-record";
 export { readConsultText, MAX_CONSULT_CHARS, type ConsultText, type ConsultLine } from "./consult-text";
 export * from "./common";
 
-export const IMPLEMENTED_READERS: readonly ReaderName[] = ["window_english", "turns", "emotion", "audio_state", "consult_span", "consult_text", "pulse_record"];
+export const IMPLEMENTED_READERS: readonly ReaderName[] = ["window_english", "turns", "emotion", "audio_state", "consult_span", "consult_text", "pulse_record", "stay_record"];
 export const STUB_READERS: readonly ReaderName[] = [];
