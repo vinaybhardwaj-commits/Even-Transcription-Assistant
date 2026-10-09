@@ -21,6 +21,7 @@ import {
   attemptStart,
   attemptsToday,
   evaluateStartDay,
+  micReturnSilent,
   recorderVerdict,
   shouldArm,
   type RecorderRow,
@@ -338,57 +339,226 @@ describe("attempt cap and backoff (5 / 15 / 45 min, 3 per IST day)", () => {
   });
 });
 
-describe("device missing: one attempt, one alert, then hold until the device is back", () => {
-  it("attempt (tagged), alert naming room + device, hold, and a normal attempt again once the device is present", async () => {
+describe("waiting_for_mic: never start an unplugged kiosk; start promptly when the mic returns", () => {
+  const cfgOn = { ...DEFAULT_CONFIG, kill_switch: false, start_day_live: true };
+  const absent = (id: string, A: number) => idle(A, { room_id: id, audio: { default_input_present: false } });
+  const present = (id: string, A: number) => idle(A, { room_id: id, audio: { default_input_present: true } });
+  const run = () => {
     const db = fakeDb({ deviceName: "USB Mic X" });
-    const { port, calls } = fakePort();
-    const absent = (id: string, A: number) => idle(A, { room_id: id, audio: { default_input_present: false } });
-    const present = (id: string, A: number) => idle(A, { room_id: id, audio: { default_input_present: true } });
-    const at = async (min: number, sense: typeof absent) => {
+    const p = fakePort();
+    const at = async (min: number, sense: typeof absent, base = T) => {
       senseWith(sense);
-      db.state.recorder = READY(T + min * MIN);
-      await tick(db, port, T + min * MIN);
+      db.state.recorder = READY(base + min * MIN);
+      await tick(db, p.port, base + min * MIN);
     };
-    await at(0, absent);
-    expect(calls.insert).toHaveLength(1);
-    expect(live(db)[0]).toMatchObject({ params: { device_missing: true } });
-    await at(6, absent);                                       // backoff over, device still missing: the alert, no second command
-    expect(calls.insert).toHaveLength(1);
-    const alert = rowsOf(db).at(-1)!;
-    expect(alert).toMatchObject({ rule: ALERT_RULE, action: "log_only", params: { reason: "device_missing", device: "USB Mic X" } });
+    return { db, ...p, at };
+  };
+
+  it("device missing at 07:31 with 0 attempts: waiting_for_mic, NO attempt, ONE alert; the second tick adds no alert", async () => {
+    const { db, calls, at } = run();
+    const t = ist("07:31");
+    await at(0, absent, t);
+    expect(calls.insert).toHaveLength(0);
+    expect(calls.find).toBe(0);
+    expect(rowsOf(db).filter((r) => r.rule === ALERT_RULE)).toHaveLength(1);
+    const alert = rowsOf(db).find((r) => r.rule === ALERT_RULE)!;
+    expect(alert).toMatchObject({ action: "log_only", params: { reason: "device_missing", device: "USB Mic X" } });
     expect(alert.why).toContain("OPD A");
     expect(alert.why).toContain("room_a");
     expect(alert.why).toContain("USB Mic X");
-    await at(30, absent);
-    await at(60, absent);
-    expect(calls.insert).toHaveLength(1);
+    expect(JSON.stringify(alert)).not.toContain("severity\":\"info");
+    expect(rowsOf(db).find((r) => r.rule === SKIP_RULE)).toMatchObject({ params: { reason: "waiting_for_mic", mic_ticks: 0 }, result: "skipped: waiting_for_mic" });
+    await at(1, absent, t);
+    await at(2, absent, t);
     expect(rowsOf(db).filter((r) => r.rule === ALERT_RULE)).toHaveLength(1);
-    expect(rowsOf(db).at(-1)).toMatchObject({ rule: SKIP_RULE, params: { reason: "device_missing_hold" } });
-    await at(90, present);                                     // the device is back: a normal attempt (2nd of the day)
-    expect(calls.insert).toHaveLength(2);
-    expect(live(db).at(-1)!.params).toEqual({});
+    expect(calls.insert).toHaveLength(0);
+    expect(attemptsToday(rowsOf(db).map(toRecent), t + 2 * MIN)).toHaveLength(0);
+  });
+
+  it("the old device_missing attempt / hold paths are gone", async () => {
+    const { db, calls, at } = run();
+    await at(0, absent);
+    await at(6, absent);
+    await at(60, absent);
+    expect(calls.insert).toHaveLength(0);
+    const all = JSON.stringify(rowsOf(db));
+    expect(all).not.toContain("device_missing_hold");
+    expect(all).not.toContain("device_missing_after_attempt");
+    expect(rowsOf(db).filter((r) => r.mode === "live")).toHaveLength(0);
+  });
+
+  it("mic present on 1 tick only is still waiting; 2 consecutive present ticks go (full recorder streak NOT required); a flap resets the count", async () => {
+    const { db, calls, at } = run();
+    await at(0, absent);
+    await at(1, present);
+    expect(calls.insert).toHaveLength(0);
+    expect(rowsOf(db).at(-1)).toMatchObject({ rule: SKIP_RULE, params: { reason: "waiting_for_mic", mic_ticks: 1 } });
+    await at(2, absent);                                      // flap: back to 0
+    expect(rowsOf(db).at(-1)).toMatchObject({ params: { reason: "waiting_for_mic", mic_ticks: 0 } });
+    await at(3, present);
+    await at(4, present);
+    expect(calls.insert).toHaveLength(1);
+    expect(live(db)).toHaveLength(1);
+    expect(live(db)[0]!.params).toEqual({ mic_return: true });
+    expect(live(db)[0]!.inputs).toMatchObject({ mic_return: true });
+  });
+
+  it("a mic-return start skips the 5-min recorder streak when the newest recorder row is ready and <= 7 min old, but every other guard still applies", async () => {
+    const { db, calls, port } = (() => { const d = fakeDb({}); return { db: d, ...fakePort() }; })();
+    const fresh = (A: number): RecorderRow[] => [{ received_at: ago(A, 60), state: "ready", session_open: "false" }];
+    const at = async (min: number, sense: (id: string, A: number) => RoomSense, rec: (A: number) => RecorderRow[]) => {
+      senseWith(sense);
+      db.state.recorder = rec(T + min * MIN);
+      await tick(db, port, T + min * MIN);
+    };
+    await at(0, absent, fresh);
+    await at(1, present, fresh);
+    await at(2, present, (A) => [{ received_at: ago(A, 600), state: "ready", session_open: "false" }]);       // stale recorder row: held
+    expect(calls.insert).toHaveLength(0);
+    expect(rowsOf(db).at(-1)).toMatchObject({ params: { reason: "recorder_status_stale", mic_return: true } });
+    await at(3, present, (A) => [{ received_at: ago(A, 60), state: "busy", session_open: "false" }]);           // not ready: held
+    expect(calls.insert).toHaveLength(0);
+    await at(4, present, fresh);                                                                               // confirmation survived the held ticks
+    expect(calls.insert).toHaveLength(1);
+  });
+
+  it("at 21:31 the same two present ticks do not start: outside_start_window", () => {
+    const A = ist("21:31");
+    const waiting: RecentAction[] = [
+      { ts: new Date(A - 2 * MIN).toISOString(), rule: SKIP_RULE, action: "log_only", params: { reason: "waiting_for_mic", mic_ticks: 1 }, outcome: null, failing_class: null },
+    ];
+    expect(evaluateStartDay({ sense: idle(A, { audio: { default_input_present: true } }), cfg: cfgOn, A, recent: waiting, recorder: READY(A) })).toMatchObject({ go: false, reason: "outside_start_window" });
+    // and the same state inside the window goes
+    const B = ist("21:29");
+    const w2: RecentAction[] = [{ ...waiting[0]!, ts: new Date(B - 60_000).toISOString() }];
+    expect(evaluateStartDay({ sense: idle(B, { audio: { default_input_present: true } }), cfg: cfgOn, A: B, recent: w2, recorder: READY(B) })).toMatchObject({ go: true, mic_return: true });
+  });
+
+  it("3 failed non-device attempts, then the device goes missing: waiting_for_mic wins over the cap and the backoff", () => {
+    const A = T + 60 * MIN;
+    const failed = (min: number): RecentAction => ({ ts: new Date(T + min * MIN).toISOString(), rule: "not_recording", action: "scribe_start", params: {}, outcome: "failed", failing_class: null });
+    const recent = [failed(0), failed(5), failed(20)];
+    const sense = idle(A, { audio: { default_input_present: false } });
+    expect(evaluateStartDay({ sense, cfg: cfgOn, A, recent, recorder: READY(A) })).toMatchObject({ go: false, reason: "waiting_for_mic", alert: expect.any(Object) });
+    // and with a backoff still running (last attempt 1 min ago) the device check still wins
+    expect(evaluateStartDay({ sense, cfg: cfgOn, A, recent: [failed(59)], recorder: READY(A) })).toMatchObject({ reason: "waiting_for_mic" });
+    // the mic back for 2 ticks: now the cap applies again
+    const back = [...recent, { ts: new Date(A - MIN).toISOString(), rule: SKIP_RULE, action: "log_only", params: { reason: "waiting_for_mic", mic_ticks: 1 }, outcome: null, failing_class: null } as RecentAction];
+    expect(evaluateStartDay({ sense: idle(A, { audio: { default_input_present: true } }), cfg: cfgOn, A, recent: back, recorder: READY(A) })).toMatchObject({ go: false, reason: "attempt_cap_reached", params: { mic_return: true } });
+  });
+
+  it("waiting ticks are not attempts: a returning room still has its full 3/day", async () => {
+    const { db, calls, at } = run();
+    for (let i = 0; i < 10; i++) await at(i, absent);
+    await at(10, present);
+    await at(11, present);                                   // 1st attempt
+    expect(calls.insert).toHaveLength(1);
+    expect(attemptsToday(rowsOf(db).map(toRecent), T + 11 * MIN)).toHaveLength(1);
+    await at(16, present);                                   // backoff 5 min over: 2nd
+    await at(31, present);                                   // 15 min over: 3rd
+    expect(calls.insert).toHaveLength(3);
+    await at(120, present);
+    expect(calls.insert).toHaveLength(3);
+    expect(rowsOf(db).at(-1)).toMatchObject({ params: { reason: "attempt_cap_reached" } });
   });
 
   it("the device rule reads the three signals the mic_fault rule uses", () => {
     const A = T;
-    const recorder = READY(A);
     for (const audio of [{ default_input_present: false }, { usb_removed_recent: true }, { device_missing_flag: true }]) {
-      const v = evaluateStartDay({ sense: idle(A, { audio }), cfg: { ...DEFAULT_CONFIG, kill_switch: false, start_day_live: true }, A, recent: [], recorder });
-      expect(v).toMatchObject({ go: true, device_missing: true });
+      const v = evaluateStartDay({ sense: idle(A, { audio }), cfg: cfgOn, A, recent: [], recorder: READY(A) });
+      expect(v).toMatchObject({ go: false, reason: "waiting_for_mic", alert: { device: "input device (name not reported)" } });
     }
   });
 
-  it("an alert is NOT re-sent after a hold; a second device-missing attempt later the same day gets its own alert", () => {
-    const A = T + 200 * MIN;
-    const cfg = { ...DEFAULT_CONFIG, kill_switch: false, start_day_live: true };
-    const recent: RecentAction[] = [
-      { ts: new Date(T).toISOString(), rule: "not_recording", action: "scribe_start", params: { device_missing: true }, outcome: "ok", failing_class: null },
-      { ts: new Date(T + 6 * MIN).toISOString(), rule: ALERT_RULE, action: "log_only", params: {}, outcome: null, failing_class: null },
-    ];
-    const sense = idle(A, { audio: { default_input_present: false } });
-    expect(evaluateStartDay({ sense, cfg, A, recent, recorder: READY(A) })).toMatchObject({ go: false, reason: "device_missing_hold" });
-    const later = [...recent, { ts: new Date(T + 100 * MIN).toISOString(), rule: "not_recording", action: "scribe_start", params: { device_missing: true }, outcome: "ok" as const, failing_class: null }];
-    expect(evaluateStartDay({ sense, cfg, A, recent: later, recorder: READY(A), deviceName: "Mic" })).toMatchObject({ go: false, reason: "device_missing_after_attempt", alert: { device: "Mic" } });
+  it("a USB removal keeps the room waiting even if the default input reads present", () => {
+    const A = T;
+    const v = evaluateStartDay({ sense: idle(A, { audio: { default_input_present: true, usb_removed_recent: true } }), cfg: cfgOn, A, recent: [], recorder: READY(A) });
+    expect(v).toMatchObject({ go: false, reason: "waiting_for_mic" });
+  });
+
+  it("an unknown default_input (null) inside a waiting episode keeps waiting; outside an episode it is not a missing mic", () => {
+    const A = T;
+    const sense = idle(A, { audio: { default_input_present: null } });
+    expect(evaluateStartDay({ sense, cfg: cfgOn, A, recent: [], recorder: READY(A) })).toMatchObject({ go: true, mic_return: false });
+    const waiting: RecentAction[] = [{ ts: new Date(A - 2 * MIN).toISOString(), rule: SKIP_RULE, action: "log_only", params: { reason: "waiting_for_mic", mic_ticks: 0 }, outcome: null, failing_class: null }];
+    expect(evaluateStartDay({ sense, cfg: cfgOn, A, recent: waiting, recorder: READY(A) })).toMatchObject({ go: false, reason: "waiting_for_mic" });
+  });
+
+  it("a day later the alert is allowed again (once per IST day)", () => {
+    const A = ist("08:00", "2026-10-08");
+    const yesterdayAlert: RecentAction[] = [{ ts: new Date(ist("08:00", "2026-10-07")).toISOString(), rule: ALERT_RULE, action: "log_only", params: { reason: "device_missing" }, outcome: null, failing_class: null }];
+    expect(evaluateStartDay({ sense: idle(A, { audio: { default_input_present: false } }), cfg: cfgOn, A, recent: yesterdayAlert, recorder: READY(A) })).toMatchObject({ alert: { device: expect.any(String) } });
+  });
+});
+
+describe("mic_returned_but_silent: the existing silent alert after a mic-return start", () => {
+  const start = T;
+  const attempt = (params: Record<string, unknown>): RecentAction => ({ ts: new Date(start).toISOString(), rule: "not_recording", action: "scribe_start", params, outcome: "ok", failing_class: null });
+  const sense = (A: number, since: string | null, open = true) => healthy(A, { recording: { session_open: open }, audio: { silent_while_recording_since: since } });
+
+  it("zero_ratio 1.0 for 2 min after a mic-return start: one log_only alert, nothing stopped", async () => {
+    const db = fakeDb({});
+    const { port, calls } = fakePort();
+    senseWith(() => idle(T, {}));
+    // a past mic-return start (the attempt row), then the recorder is open and silent
+    const A1 = start + 2 * MIN + 10_000;
+    db.state.table.push({ id: 900, room_id: "room_a", ts: new Date(start).toISOString(), rule: "not_recording", action: "scribe_start", params: { mic_return: true }, result: "ok: start_day queued cmd_1", mode: "live", inputs: { primary: true }, why: "", why_not: null, actor: "steward", machine: "HOST-A", window_kind: "clinic", inputs_hash: "x" });
+    senseWith((id, A) => sense(A, new Date(start + 5_000).toISOString()) as RoomSense);
+    await tick(db, port, A1);
+    const alerts = rowsOf(db).filter((r) => r.rule === ALERT_RULE);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ action: "log_only", params: { reason: "mic_returned_but_silent" }, why_not: null });
+    expect(calls.insert).toHaveLength(0);
+    expect(rowsOf(db).some((r) => r.action === "scribe_stop" || r.action === "restart")).toBe(false);
+    await tick(db, port, A1 + MIN);                         // no repeat
+    expect(rowsOf(db).filter((r) => r.rule === ALERT_RULE && r.params.reason === "mic_returned_but_silent")).toHaveLength(1);
+  });
+
+  it("pure: not before 2 min, not for a normal start, not when the tape has sound, not when no session is open", () => {
+    const since = new Date(start + 5_000).toISOString();
+    const mr = [attempt({ mic_return: true })];
+    expect(micReturnSilent(sense(start + 90_000, since), mr, start + 90_000)).toBeNull();
+    expect(micReturnSilent(sense(start + 130_000, since), mr, start + 130_000)).toMatchObject({ silent_since: since });
+    expect(micReturnSilent(sense(start + 130_000, since), [attempt({})], start + 130_000)).toBeNull();
+    expect(micReturnSilent(sense(start + 130_000, null), mr, start + 130_000)).toBeNull();
+    expect(micReturnSilent(sense(start + 130_000, since, false), mr, start + 130_000)).toBeNull();
+    // silent only for the last 60 s: the first 2 minutes were not all zero
+    expect(micReturnSilent(sense(start + 130_000, new Date(start + 70_000).toISOString()), mr, start + 130_000)).toBeNull();
+  });
+});
+
+describe("phantom_session (shadow only)", () => {
+  const phantom = (id: string, A: number) =>
+    idle(A, { room_id: id, recording: { session_open: false, session_id: null, session_status: null, session_started_at: null, last_chunk_at: null, recorder_status: { state: "recording", session_open: true, received_at: ago(A, 30) } } });
+
+  it("recorder says session_open but the server has none, 2 consecutive ticks: phantom_session log_only, no command", async () => {
+    const db = fakeDb({ recorder: [] });
+    const { port, calls } = fakePort();
+    senseWith(phantom);
+    await tick(db, port, T);
+    expect(rowsOf(db).filter((r) => r.rule === "phantom_session")).toHaveLength(0);
+    expect(rowsOf(db).filter((r) => r.rule === "phantom_session_candidate")).toHaveLength(1);
+    await tick(db, port, T + MIN);
+    const p = rowsOf(db).filter((r) => r.rule === "phantom_session");
+    expect(p).toHaveLength(1);
+    expect(p[0]).toMatchObject({ action: "log_only", mode: "shadow", room_id: "room_a" });
+    await tick(db, port, T + 2 * MIN);                         // no repeat inside 15 min
+    expect(rowsOf(db).filter((r) => r.rule === "phantom_session")).toHaveLength(1);
+    expect(calls.insert).toHaveLength(0);
+  });
+
+  it("one tick is only a candidate; a healthy recorder or an open server session is nothing; works with start_day_live off", async () => {
+    const db = fakeDb({ cfg: BASE_CFG({ start_day_live: { on: false } }), recorder: [] });
+    const { port, calls } = fakePort();
+    senseWith(phantom);
+    await tick(db, port, T);
+    expect(rowsOf(db).filter((r) => r.rule === "phantom_session")).toHaveLength(0);
+    senseWith((id, A) => idle(A, { room_id: id }));
+    await tick(db, port, T + MIN);
+    senseWith((id, A) => healthy(A, { room_id: id, recording: { recorder_status: { state: "recording", session_open: true, received_at: ago(A, 30) } } }));
+    await tick(db, port, T + 2 * MIN);
+    expect(rowsOf(db).filter((r) => r.rule === "phantom_session")).toHaveLength(0);
+    expect(calls.insert).toHaveLength(0);
   });
 });
 

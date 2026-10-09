@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { buildRoster, loadConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
-import { alertDecision, attemptDecision, attemptStart, defaultPort, deviceMissing, evaluateStartDay, readExpectedDevice, readRecorderStreak, shouldArm, skipDecision, startInFlight, type StartDayPort } from "./startday";
+import { PHANTOM_CANDIDATE_RULE, PHANTOM_RULE, alertDecision, attemptDecision, attemptStart, defaultPort, deviceMissing, evaluateStartDay, micReturnSilent, micSilentDecision, phantomCheck, phantomDecision, readExpectedDevice, readRecorderStreak, shouldArm, skipDecision, startInFlight, type StartDayPort } from "./startday";
 import { senseAll } from "./sense";
 import { SourceTimeout, raceTimeout } from "./timeout";
 import type { StewardSql } from "./tickets";
@@ -399,18 +399,19 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     const armed = shouldArm(cfg);
     let startPort: StartDayPort | null = opts.startDayPort ?? null;
     const startDayFlow = async (room: { room_id: string; room_name: string }, sense: NonNullable<ReturnType<typeof senses.get>>, d: Decision, last: DbRow | undefined, lastTs: string | null): Promise<void> => {
-      const skipRow = (reason: string, facts: Record<string, unknown>): void => {
-        const sk = skipDecision(d, reason, facts);
+      const skipRow = (reason: string, facts: Record<string, unknown>, extra: Record<string, unknown> = {}, force = false): void => {
+        const sk = skipDecision(d, reason, facts, extra);
         const same = last && lastTs && keyOf({ rule: last.rule, action: last.action, params: objOf(last.params) }) === keyOf(sk) && A - Date.parse(lastTs) < DEDUPE_REFRESH_MS;
-        if (!same) emit(sk, true, 0, "shadow", `skipped: ${reason}`);
+        if (force || !same) emit(sk, true, 0, "shadow", `skipped: ${reason}`);
       };
       if (memoryDegraded) return skipRow("decision_log_unavailable", {});
       const recorder = await readRecorderStreak(sql, sense.machine ?? "", A, cfg.source_timeout_ms);
-      const deviceName = deviceMissing(sense) ? await readExpectedDevice(sql, room.room_id) : null;
+      const deviceName = deviceMissing(sense) || (mem.recentRows.get(room.room_id) ?? []).some((r) => r.params.reason === "waiting_for_mic") ? await readExpectedDevice(sql, room.room_id) : null;
       const v = evaluateStartDay({ sense, cfg, A, recent: mem.recentRows.get(room.room_id) ?? [], recorder, deviceName });
       if (!v.go) {
-        if (v.alert) return emit(alertDecision(d, room, v.alert.device, v.facts), true, 0, "shadow", `alert: input device missing (${v.alert.device}); no retry until it is present`);
-        return skipRow(v.reason, v.facts);
+        // the once-a-day alert is a second row; the waiting_for_mic skip row stays the room's primary row
+        if (v.alert) emit(alertDecision(d, room, v.alert.device, v.facts), false, 1, "shadow", `alert: waiting for microphone (${v.alert.device}); no start attempted`);
+        return skipRow(v.reason, v.facts, v.params, v.force === true);
       }
       const inflight = await startInFlight(sql, room.room_id, A);
       if (inflight !== false) return skipRow(inflight === null ? "start_in_flight_unreadable" : "start_in_flight", v.facts);
@@ -421,8 +422,8 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         return skipRow("enqueue_unavailable", v.facts);
       }
       const r = await attemptStart(startPort, room.room_id, A);
-      if (!r.counted) return skipRow(r.result.replace(/^skipped: /, "").replace(/ \(session .*$/, ""), { ...v.facts, server: r.result });
-      emit(attemptDecision(d, v.device_missing, v.facts), true, 0, "live", r.result);
+      if (!r.counted) return skipRow(r.result.replace(/^skipped: /, "").replace(/ \(session .*$/, ""), { ...v.facts, server: r.result }, v.mic_return ? { mic_return: true } : {});
+      emit(attemptDecision(d, v.mic_return, v.facts), true, 0, "live", r.result);
     };
 
 
@@ -437,6 +438,12 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       if (!sense) continue;
       processed++;
       const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, fleetCtx));
+      // shadow-only observations (no action, any switch state): a phantom session, and a mic-return start that records only zeros
+      const roomRecent = mem.recentRows.get(room.room_id) ?? [];
+      const ph = memoryDegraded ? "none" : phantomCheck(sense, roomRecent, A);
+      if (ph !== "none" && ds[0]) emit(phantomDecision(ds[0], ph === "phantom" ? PHANTOM_RULE : PHANTOM_CANDIDATE_RULE, { recorder_session_open: true, server_session_open: false }), false, 80, "shadow", null);
+      const ms = armed && !memoryDegraded ? micReturnSilent(sense, roomRecent, A) : null;
+      if (ms && ds[0]) emit(micSilentDecision(ds[0], room, { attempt_ts: ms.attempt_ts, silent_since: ms.silent_since }), false, 81, "shadow", null);
       const last = mem.lastPrimary.get(room.room_id);
       const lastTs = last ? toIso(last.ts) : null;
       for (let i = 0; i < ds.length; i++) {

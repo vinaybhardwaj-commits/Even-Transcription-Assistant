@@ -15,10 +15,13 @@
  *   outside_start_window       now is not in 07:30-21:30 IST (start inclusive, end exclusive; a closed day is outside)
  *   kiosk_health_stale         no kiosk-health heartbeat for the room's machine within the last 3 min
  *   session_open               the sensed session is open (the loop's own read); the server is asked again at enqueue time (findActiveSession)
- *   recorder_*                 recorder.status must be ready with session_open false, continuously for >= 5 min, newest row <= 7 min old
+ *   recorder_*                 recorder.status must be ready with session_open false, continuously for >= 5 min, newest row <= 7 min old (streak waived on a mic return)
  *   attempt_cap_reached        >= 3 attempts today (IST). attempt_backoff: 5 / 15 / 45 min after the 1st / 2nd / 3rd attempt
- *   device missing             the room's input device is absent (default input absent, install flag DEVICE_MISSING, or a USB removal with the newest row absent):
- *                              ONE attempt that IST day, then an alert decision naming room + device, and no retry until the device is present again.
+ *   waiting_for_mic            the room's input device is absent (default input absent, install flag DEVICE_MISSING, or a USB removal with the newest row absent):
+ *                              NEVER an attempt. Checked right after the session guard, ABOVE the recorder, cap and backoff guards, so it wins over all of them. ONE alert
+ *                              decision per IST day (names room + device). The room leaves waiting_for_mic only after 2 consecutive ticks with the mic present; a start
+ *                              coming back from waiting skips the 5 min recorder-ready streak (newest recorder.status ready and <= 7 min old is enough). Waiting ticks are
+ *                              not attempts, so a returning room keeps its full 3/day.
  * An attempt counts whatever its result (ok=false, a refused enqueue). A start that finds a session already open (Kiosk Bot, anyone) is success and not an attempt.
  * Never stops, pauses, resumes or restarts anything.
  */
@@ -50,6 +53,17 @@ export const IN_FLIGHT_S = 240;
 
 export const SKIP_RULE = "start_day_skip";
 export const ALERT_RULE = "start_day_alert";
+export const WAITING_REASON = "waiting_for_mic";
+/** alert reason after a start that came back from waiting_for_mic and then recorded digital zero */
+export const MIC_SILENT_REASON = "mic_returned_but_silent";
+/** a previous tick's "mic present" marker older than this is not the previous tick (the loop runs every minute) */
+export const MIC_TICK_STALE_MS = 3 * 60_000;
+export const MIC_RETURN_TICKS = 2;
+/** after a mic-return start: this long of digital zero from the first level sample raises mic_returned_but_silent */
+export const MIC_SILENT_AFTER_MS = 120_000;
+/** shadow-only: kiosk recorder says a session is open, the server has none */
+export const PHANTOM_RULE = "phantom_session";
+export const PHANTOM_CANDIDATE_RULE = "phantom_session_candidate";
 
 /** steward_config.start_day_live armed? (the global kill switch always wins) */
 export const shouldArm = (cfg: Config): boolean => cfg.start_day_live === true && cfg.kill_switch === false;
@@ -64,7 +78,7 @@ export type StreakVerdict = { ok: true; ready_since: string } | { ok: false; rea
 const isReady = (r: RecorderRow): boolean => typeof r.state === "string" && r.state.trim().toLowerCase() === "ready" && (r.session_open === false || r.session_open === "false");
 
 /** PURE. Rows newest first or in any order; the streak is the run of newest rows that are all ready with no session. */
-export function recorderVerdict(rowsIn: readonly RecorderRow[], A: number): StreakVerdict {
+export function recorderVerdict(rowsIn: readonly RecorderRow[], A: number, opts: { skipStreak?: boolean } = {}): StreakVerdict {
   const rows = rowsIn
     .map((r) => ({ ...r, t: Date.parse(r.received_at) }))
     .filter((r) => Number.isFinite(r.t) && r.t <= A)
@@ -72,6 +86,7 @@ export function recorderVerdict(rowsIn: readonly RecorderRow[], A: number): Stre
   if (rows.length === 0) return { ok: false, reason: "recorder_status_unavailable" };
   if (A - rows[0]!.t > STATUS_MAX_AGE_MS) return { ok: false, reason: "recorder_status_stale" };
   if (!isReady(rows[0]!)) return { ok: false, reason: "recorder_not_ready" };
+  if (opts.skipStreak) return { ok: true, ready_since: new Date(rows[0]!.t).toISOString() };
   let since = rows[0]!.t;
   for (const r of rows) {
     if (!isReady(r)) break;
@@ -127,8 +142,18 @@ export type StartDayInput = {
 };
 
 export type StartDayVerdict =
-  | { go: true; device_missing: boolean; facts: Record<string, unknown> }
-  | { go: false; reason: string; alert?: { device: string }; facts: Record<string, unknown> };
+  | { go: true; mic_return: boolean; facts: Record<string, unknown> }
+  | {
+      go: false;
+      reason: string;
+      /** the once-per-IST-day waiting_for_mic alert */
+      alert?: { device: string };
+      /** extra params of the skip row (waiting_for_mic carries mic_ticks; later guards of a mic return carry mic_return) */
+      params?: Record<string, unknown>;
+      /** write the row even if the dedupe would drop it (the "mic present, 1 of 2" marker the next tick reads) */
+      force?: boolean;
+      facts: Record<string, unknown>;
+    };
 
 const isAttempt = (r: RecentAction): boolean => r.action === "scribe_start" && (r.outcome === "ok" || r.outcome === "failed");
 
@@ -140,10 +165,30 @@ export function attemptsToday(recent: readonly RecentAction[], A: number): Recen
     .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
 }
 
+/** PURE. What the room's own decision rows say about a waiting_for_mic episode: rows of this IST day newer than the day's last attempt. */
+export function waitState(recent: readonly RecentAction[], A: number): { inEpisode: boolean; confirmed: boolean; alertedToday: boolean } {
+  const midnight = istMidnightOf(A);
+  const today = recent.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= A);
+  const lastAttempt = attemptsToday(recent, A).at(-1);
+  const since = lastAttempt ? Date.parse(lastAttempt.ts) : -Infinity;
+  const skips = today.filter((r) => r.rule === SKIP_RULE).sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+  const inEpisode = skips.some((r) => r.params.reason === WAITING_REASON && Date.parse(r.ts) > since);
+  const newest = skips[0];
+  let confirmed = false;
+  if (inEpisode && newest && Date.parse(newest.ts) > since) {
+    const age = A - Date.parse(newest.ts);
+    if (newest.params.reason === WAITING_REASON) confirmed = Number(newest.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && age <= MIC_TICK_STALE_MS;
+    else confirmed = newest.params.mic_return === true;
+  }
+  const alertedToday = today.some((r) => r.rule === ALERT_RULE && r.params.reason === "device_missing");
+  return { inEpisode, confirmed, alertedToday };
+}
+
 export function evaluateStartDay(inp: StartDayInput): StartDayVerdict {
   const { sense: s, cfg, A, recent } = inp;
   const facts: Record<string, unknown> = {};
-  const skip = (reason: string, extra?: Record<string, unknown>): StartDayVerdict => ({ go: false, reason, facts: { ...facts, ...(extra ?? {}) } });
+  let micReturn = false;
+  const skip = (reason: string, extra?: Record<string, unknown>): StartDayVerdict => ({ go: false, reason, ...(micReturn ? { params: { mic_return: true } } : {}), facts: { ...facts, ...(extra ?? {}) } });
 
   if (NEVER_START_DAY_ROOMS.includes(s.room_id) || s.flags.some((f) => ["dev", "test"].includes(f.toLowerCase())) || (cfg.rooms[s.room_id]?.flags ?? []).some((f) => ["dev", "test"].includes(f.toLowerCase()))) {
     return skip("dev_room");
@@ -158,8 +203,24 @@ export function evaluateStartDay(inp: StartDayInput): StartDayVerdict {
 
   if (s.recording.session_open !== false) return skip(s.recording.session_open === true ? "session_open" : "session_unknown");
 
+  // The microphone, above every attempt guard: a room whose mic is unplugged is never started (V, 9 Oct 2026).
+  const missing = deviceMissing(s);
+  const present = !missing && s.audio.default_input_present === true;
+  const wait = waitState(recent, A);
+  facts.device_missing = missing;
+  if (missing || (wait.inEpisode && !present)) {
+    const device = inp.deviceName?.trim() || "input device (name not reported)";
+    return { go: false, reason: WAITING_REASON, params: { mic_ticks: 0 }, ...(wait.alertedToday ? {} : { alert: { device } }), facts };
+  }
+  if (wait.inEpisode) {
+    // mic present again: 2 consecutive ticks, the first one is recorded as mic_ticks 1 (written even when the dedupe would drop it)
+    if (!wait.confirmed) return { go: false, reason: WAITING_REASON, params: { mic_ticks: 1 }, force: true, facts: { ...facts, mic_return: "1 of 2 ticks" } };
+    micReturn = true;
+    facts.mic_return = true;
+  }
+
   if (inp.recorder === null) return skip("recorder_status_unavailable");
-  const rv = recorderVerdict(inp.recorder, A);
+  const rv = recorderVerdict(inp.recorder, A, { skipStreak: micReturn });
   if (!rv.ok) return skip(rv.reason);
   facts.recorder_ready_since = rv.ready_since;
 
@@ -172,20 +233,33 @@ export function evaluateStartDay(inp: StartDayInput): StartDayVerdict {
     facts.backoff_min = waitMin;
     if (A - last < waitMin * 60_000) return skip(`attempt_backoff_${waitMin}m`, { retry_after_s: Math.ceil((waitMin * 60_000 - (A - last)) / 1000) });
   }
+  return { go: true, mic_return: micReturn, facts };
+}
 
-  const missing = deviceMissing(s);
-  facts.device_missing = missing;
-  if (missing) {
-    const deviceAttempts = today.filter((r) => r.params.device_missing === true);
-    if (deviceAttempts.length > 0) {
-      const lastAttempt = Date.parse(deviceAttempts[deviceAttempts.length - 1]!.ts);
-      const alerted = recent.some((r) => r.rule === ALERT_RULE && Date.parse(r.ts) >= lastAttempt && Date.parse(r.ts) <= A);
-      const device = inp.deviceName?.trim() || "input device (name not reported)";
-      // the alert is written ONCE per device-missing attempt; after that the room is held until the device is present again
-      return alerted ? skip("device_missing_hold") : { go: false, reason: "device_missing_after_attempt", alert: { device }, facts };
-    }
-  }
-  return { go: true, device_missing: missing, facts };
+/** PURE. After a mic-return start: the room's level samples have been digital zero since the start for >= 2 min -> the existing silent alert with its own reason. null = nothing to say.
+ *  Never stops or restarts anything: the caller writes one log_only row. */
+export function micReturnSilent(sense: RoomSense, recent: readonly RecentAction[], A: number): { attempt_ts: string; silent_since: string } | null {
+  if (sense.recording.session_open !== true) return null;
+  const since = sense.audio.silent_while_recording_since;
+  if (!since || !Number.isFinite(Date.parse(since))) return null;
+  const attempt = attemptsToday(recent, A).filter((r) => r.outcome === "ok" && r.params.mic_return === true).at(-1);
+  if (!attempt) return null;
+  const t0 = Date.parse(attempt.ts);
+  if (A - t0 < MIC_SILENT_AFTER_MS || A - Date.parse(since) < MIC_SILENT_AFTER_MS) return null;
+  const done = recent.some((r) => r.rule === ALERT_RULE && r.params.reason === MIC_SILENT_REASON && Date.parse(r.ts) >= t0);
+  return done ? null : { attempt_ts: attempt.ts, silent_since: since };
+}
+
+/** PURE, shadow only. The kiosk recorder says a session is open, the server has none. Needs 2 consecutive ticks:
+ *  "candidate" the first time, "phantom" when a candidate row <= 3 min old exists, "none" otherwise or while a phantom row < 15 min old exists. */
+export function phantomCheck(sense: RoomSense, recent: readonly RecentAction[], A: number): "none" | "candidate" | "phantom" {
+  const rs = sense.recording.recorder_status;
+  if (!rs || rs.session_open !== true || sense.recording.session_open !== false) return "none";
+  const fresh = Date.parse(rs.received_at);
+  if (!Number.isFinite(fresh) || A - fresh > STATUS_MAX_AGE_MS) return "none";
+  if (recent.some((r) => r.rule === PHANTOM_RULE && A - Date.parse(r.ts) < 15 * 60_000)) return "none";
+  const cand = recent.some((r) => r.rule === PHANTOM_CANDIDATE_RULE && A - Date.parse(r.ts) <= MIC_TICK_STALE_MS && Date.parse(r.ts) <= A);
+  return cand ? "phantom" : "candidate";
 }
 
 // ---------------------------------------------------------------------------
@@ -260,18 +334,26 @@ function base(d: Decision, rule: string, action: Decision["action"], params: Rec
   return { room_id: d.room_id, machine: d.machine, window_kind: d.window_kind, rule, action, params, why, why_not, severity, inputs_hash: hash({ rule, action, params, ...extra }), inputs };
 }
 
-/** Not attempted. A log_only row whose key is the reason: written when the reason changes (or the 15 min refresh). */
-export const skipDecision = (d: Decision, reason: string, facts: Record<string, unknown>): Decision =>
-  base(d, SKIP_RULE, "log_only", { reason }, `start_day not attempted: ${reason}`, `scribe_start held: ${reason}`, "info", facts);
+/** Not attempted. A log_only row whose key is the reason (+ extra params): written when the key changes (or the 15 min refresh). */
+export const skipDecision = (d: Decision, reason: string, facts: Record<string, unknown>, extra: Record<string, unknown> = {}): Decision =>
+  base(d, SKIP_RULE, "log_only", { reason, ...extra }, `start_day not attempted: ${reason}`, `scribe_start held: ${reason}`, "info", facts);
 
-/** The ONE alert of a device-missing attempt: names the room and the device. */
+/** The ONE alert per IST day for a room that is waiting for its microphone: names the room and the device. No start was or will be attempted. */
 export const alertDecision = (d: Decision, room: { room_id: string; room_name: string }, device: string, facts: Record<string, unknown>): Decision =>
-  base(d, ALERT_RULE, "log_only", { reason: "device_missing", device }, `start_day ALERT: room ${room.room_name} (${room.room_id}) input device missing: ${device}; one attempt made today, no retry until the device is present again`, null, "error", facts);
+  base(d, ALERT_RULE, "log_only", { reason: "device_missing", device }, `start_day ALERT: room ${room.room_name} (${room.room_id}) is waiting for its microphone: ${device} is missing; no start will be attempted until it is back`, null, "error", facts);
 
-/** The attempt itself: the same decision with the device tag when the device was missing. */
-export const attemptDecision = (d: Decision, deviceMissingFlag: boolean, facts: Record<string, unknown>): Decision => ({
+/** The attempt itself; a start that came back from waiting_for_mic is tagged so the silent check can find it. */
+export const attemptDecision = (d: Decision, micReturn: boolean, facts: Record<string, unknown>): Decision => ({
   ...d,
-  params: deviceMissingFlag ? { ...d.params, device_missing: true } : d.params,
+  params: micReturn ? { ...d.params, mic_return: true } : d.params,
   inputs: { ...d.inputs, ...facts, via: "start_day_live" },
-  inputs_hash: hash({ rule: d.rule, action: d.action, device_missing: deviceMissingFlag, ...facts }),
+  inputs_hash: hash({ rule: d.rule, action: d.action, mic_return: micReturn, ...facts }),
 });
+
+/** The existing silent alert, for a mic-return start whose first 2 minutes were digital zero. log_only: nothing is stopped or restarted. */
+export const micSilentDecision = (d: Decision, room: { room_id: string; room_name: string }, facts: Record<string, unknown>): Decision =>
+  base(d, ALERT_RULE, "log_only", { reason: MIC_SILENT_REASON }, `start_day ALERT: room ${room.room_name} (${room.room_id}) started after its microphone came back, but the tape has been digital zero for 2 minutes; nothing was stopped`, null, "error", facts);
+
+/** Shadow only: a candidate (1 tick) or the phantom_session (2 consecutive ticks). */
+export const phantomDecision = (d: Decision, rule: string, facts: Record<string, unknown>): Decision =>
+  base(d, rule, "log_only", {}, rule === PHANTOM_RULE ? "kiosk recorder reports an open session the server does not have (2 consecutive ticks); logged only" : "kiosk recorder reports an open session the server does not have (1 tick)", null, "warn", facts);
