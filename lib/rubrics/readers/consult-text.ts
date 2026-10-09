@@ -15,7 +15,7 @@ import { refuse, type ReadResult } from "./common";
 import { readRebConsult } from "./reb-consult";
 
 export const MAX_CONSULT_CHARS = 60_000;
-export type ConsultLine = { t_ms: number; speaker: "doctor" | "other" | "unknown"; speaker_idx: number | null; text: string };
+export type ConsultLine = { t_ms: number; speaker: "doctor" | "other" | "unknown"; speaker_idx: number | null; text: string; /** ROLE-TJ: patient side, called an attendant by the text-judge */ attendant?: true };
 export type ConsultText = {
   consult_key: string;
   /** S7-2B: where the words came from: palimpsest's English translate track, its native stt track when wholly English, the bench window cues (window_english), or the lab-store bench text */
