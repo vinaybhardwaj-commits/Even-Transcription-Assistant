@@ -112,7 +112,8 @@ async function runLlm(r: Rubric, data: import("../readers/consult-text").Consult
   try {
     const res = r.id === "consult_chair_affect" ? await evaluateConsultAffect(r, got.data) : r.id === "consult_surgical_pitch" ? await evaluateSurgicalPitch(r, got.data) : r.id === "encounter_vs_record" ? await evaluateEncounterVsRecord(r, got.data, unitKey) : null;
     if (!res) return skip("unit_not_supported", pair);
-    return { ...res, calls: Number(res.score?.attempts ?? res.evidence?.attempts ?? (res.status === "skipped" ? 0 : 1)), room_id: pair?.room_id ?? null, ist_date: pair?.ist_date ?? null };
+    // G75: the engine's own count of its model calls first; attempts in the score / evidence otherwise
+    return { ...res, calls: res.calls ?? Number(res.score?.attempts ?? res.evidence?.attempts ?? (res.status === "skipped" ? 0 : 1)), room_id: pair?.room_id ?? null, ist_date: pair?.ist_date ?? null };
   } catch (e) {
     if (String((e as Error)?.message ?? "").startsWith("llm_unavailable")) throw e; // transient: the runner retries
     console.error("[rubric] engine fault", JSON.stringify({ err: String((e as Error)?.name ?? "error") }));

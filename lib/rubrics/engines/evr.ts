@@ -30,7 +30,8 @@ export async function evaluateEncounterVsRecord(r: Rubric, text: ConsultText, co
   const rec = await readPulseRecord(consultKey);
   if (!rec.ok) return { status: "skipped", findings: [], reason: rec.reason === "no_data" ? "no_record" : rec.reason };
   const said = await extractSaid(text);
-  if (!said.ok) return said.reason === "unscorable" ? { status: "skipped", findings: [], reason: "unscorable" } : { status: "failed", findings: [], reason: said.reason, evidence: { prompt_version: promptVersion(r), attempts: said.attempts } };
+  // G75: an unscorable tape still cost its model calls: they are carried so the job and day ceilings count them
+  if (!said.ok) return said.reason === "unscorable" ? { status: "skipped", findings: [], reason: "unscorable", evidence: { prompt_version: promptVersion(r), attempts: said.attempts }, calls: said.attempts } : { status: "failed", findings: [], reason: said.reason, evidence: { prompt_version: promptVersion(r), attempts: said.attempts } };
   const fs: Finding[] = compareRecord(rec.data.record, said.said, tapeLines(text));
   const tier = overallTier(fs);
   const byTier = Object.fromEntries(TIER_ORDER.map((t) => [t, fs.filter((f) => f.tier === t).length]));

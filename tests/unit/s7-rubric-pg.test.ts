@@ -581,10 +581,10 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
-  it("S71-R5 Q4 — three CONCURRENT 30-unit submits under a day cap of 50: exactly ONE job is queued (the capped insert runs behind an advisory lock); a claimed job with no run row yet is counted by its args", async () => {
+  it("S71-R5 Q4 — three CONCURRENT 30-unit submits (60 calls each at 2 a unit) under a day cap of 100: exactly ONE job is queued (the capped insert runs behind an advisory lock); a claimed job with no run row yet is counted by its args", async () => {
     const { submitJob } = await import("@/lib/jobs/submit");
     const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
-    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "50";
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "100";
     await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
     const keys = (tag: string) => Array.from({ length: 30 }, (_, i) => `${tag}${i}`);
     try {
@@ -607,7 +607,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       await pg.exec(`UPDATE rubric_run SET units_ok = 20, units_failed = 5, finished_at = now(); UPDATE scribe_job SET status = 'done';`);
       const C = await import("@/lib/rubrics/llm-cap");
       expect(await C.dayUsage()).toEqual({ used: 50, queued: 0 }); // (20 + 5) x 2
-      await expect(sub("f")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 50 + 30 > 50
+      await expect(sub("f")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 50 + 60 > 100
     } finally {
       if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
       await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
@@ -703,6 +703,109 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       LLM.setRubricChatForTests(null);
       REC.setMetabaseForTests(null);
       await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("G74 — every unfinished rubric job is reserved at units x 2: the submit precheck refuses the 4th 300-unit job (4 x 600 > 2000), and six 300-unit jobs run interleaved at 2 calls a unit stay within the day cap (a x1 reservation made 3600)", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { submitJob } = await import("@/lib/jobs/submit");
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const keys = (tag: string) => Array.from({ length: 300 }, (_, i) => `${tag}${i}`);
+    const sub = (tag: string) => submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(tag) }, actor: "mcp:t", scopes: new Set(["invoke"] as never) });
+    try {
+      for (const t of ["a", "b", "c"]) await sub(t); // 3 x 600 = 1800 <= 2000
+      await expect(sub("d")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap: today 0 used \+ 1800 queued \+ 600 planned > daily cap 2000/) }); // 4 x 600 > 2000
+      expect(C.reservationFor("rubric_run", { rubric_id: "consult_chair_affect", unit_keys: keys("x") })).toBe(600);
+      // the running stop, GATING's repro: six 300-unit jobs (submit bypassed: they are claimed and running) each take a step of 10 units at 2 calls a unit, round robin, using callsLeft() as the runner does
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+      const N = 6;
+      for (let i = 0; i < N; i++) {
+        await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES (${`rub_g74_${i}`}, 'consult_chair_affect', '1.1.0', 'run', 300)`;
+        await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES (${`job_g74_${i}`}, 'rubric_run', ${JSON.stringify({ rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(`j${i}`) })}::jsonb, 'mcp:t', 'running', ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: 0 })}::jsonb)`;
+      }
+      const made = new Array<number>(N).fill(0);
+      for (let round = 0; round < 80; round++) {
+        let moved = 0;
+        for (let i = 0; i < N; i++) {
+          const left = await C.callsLeft(300, made[i]!);
+          const take = Math.max(0, Math.min(left, 2 * 10, 600 - made[i]!)); // one step: 10 units at 2 calls each, never past the job's own 300 units
+          if (take <= 0) continue;
+          made[i]! += take;
+          moved += take;
+          await pg.sql`UPDATE scribe_job SET progress = ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: made[i] })}::jsonb WHERE id = ${`job_g74_${i}`}`;
+        }
+        if (moved === 0) break;
+      }
+      const total = made.reduce((a, b) => a + b, 0);
+      expect(total).toBeLessThanOrEqual(2000);
+      expect(Math.max(...made)).toBeLessThanOrEqual(600);
+      // three jobs are within the cap by their reservations (3 x 600 = 1800): each one runs to its end
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+      for (let i = 0; i < 3; i++) {
+        await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES (${`rub_g74_${i}`}, 'consult_chair_affect', '1.1.0', 'run', 300)`;
+        await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES (${`job_g74_${i}`}, 'rubric_run', ${JSON.stringify({ rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(`k${i}`) })}::jsonb, 'mcp:t', 'running', ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: 0 })}::jsonb)`;
+      }
+      const m3 = [0, 0, 0];
+      for (let round = 0; round < 80; round++) {
+        let moved = 0;
+        for (let i = 0; i < 3; i++) {
+          const take = Math.max(0, Math.min(await C.callsLeft(300, m3[i]!), 20, 600 - m3[i]!));
+          if (take <= 0) continue;
+          m3[i]! += take; moved += take;
+          await pg.sql`UPDATE scribe_job SET progress = ${JSON.stringify({ run_id: `rub_g74_${i}`, llm_calls: m3[i] })}::jsonb WHERE id = ${`job_g74_${i}`}`;
+        }
+        if (moved === 0) break;
+      }
+      expect(m3).toEqual([600, 600, 600]);
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("G75 — a run of UNSCORABLE tapes still counts its model calls: the job stops at its ceiling (2 of 4 units, llm_calls 2, 2 skipped llm_cap); with the attempts dropped it would make 4", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const ids = ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"];
+    for (const [i, k] of ids.entries()) {
+      if (k !== "enc1@m1") await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+      await pg.sql`UPDATE eta_encounter_windows SET consult_uid = ${`ConsultUidG75${i}AaaaaaaaaaZ`}, warehouse_prescription_uid = ${`recG75${i}`} WHERE consult_key = ${k}`;
+    }
+    REC.setMetabaseForTests(async () => [{ rec_uid: "recX", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "encounter_vs_record", lab: true, unit_keys: ids });
+      expect(run.job).toMatchObject({ status: "done", result: { llm_calls: 2, skipped_llm_cap: 2 } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    const args = { rubric_id: "consult_chair_affect", lab: true, unit: "consult", unit_keys: ["z1"], limit: 200 };
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    try {
+      // an UNFINISHED run of 300 units, no job row: reserved at 600, not 300
+      await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_g74s', 'consult_chair_affect', '1.1.0', 'run', 300)`;
+      expect(await C.dayUsage()).toEqual({ used: 600, queued: 0 });
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1100" }))).toBeNull(); // 600 + 600 > 1100 (at x1: 300 + 600 would pass)
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1200" }))).not.toBeNull(); // 600 + 600 <= 1200
+      await pg.exec(`DELETE FROM scribe_job;`);
+      // the job has recorded MORE calls than its reservation (900 > 600): the larger figure counts
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES ('job_g74s', 'rubric_run', ${JSON.stringify(args)}::jsonb, 'mcp:t', 'running', '{"run_id":"rub_g74s","llm_calls":900}'::jsonb)`;
+      expect(await C.dayUsage()).toEqual({ used: 900, queued: 0 });
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1400" }))).toBeNull(); // 900 + 600 > 1400 (without the greatest(): 600 + 600 would pass)
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1500" }))).not.toBeNull();
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
     }
   });
 });

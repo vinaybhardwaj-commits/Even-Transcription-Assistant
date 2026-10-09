@@ -230,7 +230,7 @@ describe("S7-2-R2 — follow-up fields (minor only) and the call ceiling", () =>
   it("evr goes through the llm call ceiling: a run reserves one call per unit, the bench estimate is the 40 extraction calls at their worst case (80), and the rubric is an llm rubric", async () => {
     const CAP = await import("@/lib/rubrics/llm-cap");
     expect(CAP.isLlmRubric("encounter_vs_record")).toBe(true);
-    expect(CAP.reservationFor("rubric_run", { rubric_id: "encounter_vs_record", unit_keys: ["a", "b", "c"] })).toBe(3);
+    expect(CAP.reservationFor("rubric_run", { rubric_id: "encounter_vs_record", unit_keys: ["a", "b", "c"] })).toBe(6); // units x 2 attempts (G74)
     expect(CAP.reservationFor("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" })).toBe(80); // worst case: 40 windows x 2 attempts
   });
 });

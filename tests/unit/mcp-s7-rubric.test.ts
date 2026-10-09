@@ -130,12 +130,12 @@ describe("S71-R4 G71 — a cost ceiling for llm_zdr rubrics, refused at submit",
     try { await f(); } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
   };
   it("per-job ceiling: more units than the cap is llm_job_cap with its numbers; a code rubric is never capped", async () => {
-    await withEnv({ RUBRIC_LLM_JOB_CALL_CAP: "5" }, async () => {
-      const r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(6) });
+    await withEnv({ RUBRIC_LLM_JOB_CALL_CAP: "12" }, async () => {
+      const r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(7) });
       expect(r).toMatchObject({ ok: false, error: "llm_job_cap" });
-      expect(String(r.detail)).toContain("needs 6 calls, per-job cap 5");
+      expect(String(r.detail)).toContain("needs 14 calls, per-job cap 12");
       expect(inserted).toEqual([]);
-      expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(5) })).toMatchObject({ ok: true });
+      expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(6) })).toMatchObject({ ok: true }); // 6 units x 2 attempts = 12 = the cap
       expect(await run({ action: "run", rubric_id: "talk_time", lab: true, unit_keys: keys(30) })).toMatchObject({ ok: true }); // engine code: no model call, no cap
     });
   });
@@ -145,12 +145,12 @@ describe("S71-R4 G71 — a cost ceiling for llm_zdr rubrics, refused at submit",
       // used 60 + queued 65 = 125 already over 100
       let r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(1) });
       expect(r).toMatchObject({ ok: false, error: "llm_daily_cap" });
-      expect(String(r.detail)).toMatch(/today 60 used \+ 65 queued \+ 1 planned > daily cap 100/);
+      expect(String(r.detail)).toMatch(/today 60 used \+ 65 queued \+ 2 planned > daily cap 100/);
       answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 60 }] : []);
-      expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(40) })).toMatchObject({ ok: true }); // 60 + 40 = 100: at the cap is allowed
-      r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(41) });
+      expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(20) })).toMatchObject({ ok: true }); // 60 + 20 units x 2 = 100: at the cap is allowed
+      r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(21) });
       expect(r).toMatchObject({ ok: false, error: "llm_daily_cap" });
-      expect(r.detail).toMatch(/today 60 used \+ 0 queued \+ 41 planned/);
+      expect(r.detail).toMatch(/today 60 used \+ 0 queued \+ 42 planned/);
       expect(await run({ action: "bench", rubric_id: "consult_surgical_pitch", set: "grokbot_agreement" })).toMatchObject({ ok: false, error: "llm_daily_cap" }); // estimate 200 > the day's room
     });
   });
@@ -159,8 +159,8 @@ describe("S71-R4 G71 — a cost ceiling for llm_zdr rubrics, refused at submit",
     expect([C.DEFAULT_JOB_CALL_CAP, C.DEFAULT_DAILY_CALL_CAP]).toEqual([600, 2000]);
     expect([C.jobCallCap({}), C.dailyCallCap({}), C.jobCallCap({ RUBRIC_LLM_JOB_CALL_CAP: "bad" }), C.dailyCallCap({ RUBRIC_LLM_DAILY_CALL_CAP: "-4" })]).toEqual([600, 2000, 600, 2000]);
     answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 100 }] : []);
-    expect(await C.callsLeft(20, 0, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(70); // the day shows 100 including this job's own reservation (20): the others used 80
-    expect(await C.callsLeft(20, 30, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(40); // 30 already made by this job
+    expect(await C.callsLeft(20, 0, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(90); // the day shows 100 including this job's own reservation (20 units x 2 = 40): the others reserve 60
+    expect(await C.callsLeft(20, 30, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(60); // 30 already made by this job (its reservation stays 40)
     expect(await C.callsLeft(100, 590, {})).toBe(10); // the job ceiling binds
   });
 });
