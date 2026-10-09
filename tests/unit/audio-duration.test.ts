@@ -48,6 +48,14 @@ describe("measureAudioMs", () => {
     // the header claims 10 s but the file holds 1.6 MB of 16 kHz mono 16-bit (>= 50 s at the raw ceiling): the size floor wins
     expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 10, extra: 1_600_000 }))).toBeGreaterThan(45_000);
     expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 0 }))).toBeNull();
+    // S8C-2: a crafted STREAMINFO cannot understate. A 15 MB file whose header claims ONE sample reads at least 15 MB / 2000 B/s = 7500 s, whatever rate / channels / bits the header names
+    const big = (o: { rate: number; channels: number; bits: number; samples: number }) => flac({ ...o, extra: 15_000_000 - 42 });
+    expect(measureAudioMs(big({ rate: 16_000, channels: 1, bits: 16, samples: 1 }))).toBeGreaterThanOrEqual(7_500_000);
+    expect(measureAudioMs(big({ rate: 48_000, channels: 2, bits: 24, samples: 1 }))).toBeGreaterThanOrEqual(7_500_000);
+    expect(measureAudioMs(big({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 1800 }))).toBeGreaterThanOrEqual(7_500_000); // an honest header on a file that large: the floor still wins (see the report)
+    // only the cutter's format: rate 8k-96k, 1-2 channels, 16 or 24 bits; anything else is unknown (null), never guessed
+    for (const bad of [{ rate: 655_350, channels: 8, bits: 32 }, { rate: 7_999, channels: 1, bits: 16 }, { rate: 96_001, channels: 1, bits: 16 }, { rate: 16_000, channels: 3, bits: 16 }, { rate: 16_000, channels: 1, bits: 8 }, { rate: 16_000, channels: 1, bits: 32 }, { rate: 16_000, channels: 1, bits: 20 }]) expect(measureAudioMs(big({ ...bad, samples: 1 })), JSON.stringify(bad)).toBeNull();
+    for (const ok of [{ rate: 8_000, channels: 1, bits: 16 }, { rate: 96_000, channels: 2, bits: 24 }, { rate: 44_100, channels: 2, bits: 16 }]) expect(measureAudioMs(flac({ ...ok, samples: ok.rate * 60 }))).toBe(60_000);
     expect(measureAudioMs(new Uint8Array([0x66, 0x4c, 0x61, 0x43, 0x01, 0, 0, 0x22, ...new Array(40).fill(0)]))).toBeNull(); // first block is not STREAMINFO
   });
 

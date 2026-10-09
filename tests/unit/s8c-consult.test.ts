@@ -12,9 +12,10 @@ vi.mock("@/lib/db", () => {
   sql.transaction = async () => [];
   return { sql, db: {} };
 });
+const clipBytes = new Map<string, Uint8Array>();
 const heads: string[] = [];
 let headSize: number | null = 1000;
-vi.mock("@/lib/r2", async (orig) => ({ ...((await orig()) as object), headObject: vi.fn(async (k: string) => { heads.push(k); return { size: headSize, content_type: "audio/flac" }; }), getObjectBytes: vi.fn(async () => null) }));
+vi.mock("@/lib/r2", async (orig) => ({ ...((await orig()) as object), headObject: vi.fn(async (k: string) => { heads.push(k); return { size: headSize, content_type: "audio/flac" }; }), getObjectBytes: vi.fn(async (k: string) => clipBytes.get(k) ?? null) }));
 const submitted: Row[] = [];
 vi.mock("@/lib/jobs/submit", async (orig) => ({ ...((await orig()) as object), submitJob: vi.fn(async (i: { kind: string; args: Row }) => { submitted.push(i); return { id: "job_c1", kind: i.kind, status: "queued" }; }) }));
 vi.mock("@/lib/jobs/kinds/sarvam-common", async (orig) => ({ ...((await orig()) as object), dailyCapRefusal: vi.fn(async () => null) }));
@@ -145,7 +146,7 @@ describe("transcribe {consult_uid}", () => {
     expect(submitted).toHaveLength(1);
     expect(submitted[0]!.args).toEqual({ consult_uid: UID });
     const out = await T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "prepare", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: {}, runner: "r" } as never);
-    expect(out).toEqual({ kind: "next", step: "init", progress: { clip_key: `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult" } });
+    expect(out).toEqual({ kind: "next", step: "init", progress: { clip_key: `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", mirror_minutes: 10 } });
     // the job refuses the same things (a job queued before the rule, or a direct insert)
     setIndex([row(UID, { voice_isolated: true })]);
     expect(await T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "prepare", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: {}, runner: "r" } as never)).toEqual({ kind: "fail", error: "consult_voice_isolated" });
@@ -180,3 +181,63 @@ describe("status / result {consult_uid}: the palimpsest track, no Sarvam call", 
     expect(await call({ action: "status", job_id: "job_nope" })).toMatchObject({ ok: false, error: "unknown_job" });
   });
 });
+
+describe("S8C-1: consult_uid is NOT unique (one row per machine): ANY held-out row refuses, in either row order", () => {
+  const rowsIn = (order: "clean-first" | "blind-first"): Row[] => {
+    const clean = { room_id: "r1", ist_date: "2026-10-08" }, blind = { room_id: BR, ist_date: BD };
+    return order === "clean-first" ? [clean, blind] : [blind, clean];
+  };
+  for (const order of ["clean-first", "blind-first"] as const) {
+    it(`${order}: transcribe, status and result include_text are all blind_room_day, with no mirror, track or audio read`, async () => {
+      setIndex([row(UID)]); // the mirror row sits on the CLEAN pair
+      setRebTrack();
+      const base = answer;
+      answer = (t, v) => (/FROM eta_encounter_windows WHERE consult_uid/.test(t) ? rowsIn(order) : base(t, v));
+      gets.length = 0; heads.length = 0;
+      expect(await call({ action: "transcribe", consult_uid: UID })).toEqual({ ok: false, error: "blind_room_day" });
+      expect(await call({ action: "status", consult_uid: UID })).toEqual({ ok: false, error: "blind_room_day" });
+      expect(await call({ action: "result", consult_uid: UID, include_text: true })).toEqual({ ok: false, error: "blind_room_day" });
+      expect(gets).toEqual([]);
+      expect(heads).toEqual([]);
+      expect(submitted).toEqual([]);
+    });
+  }
+  it("a uid whose rows are all clean is served (the same query, no held-out row)", async () => {
+    setIndex([row(UID)]);
+    setRebTrack();
+    const base = answer;
+    answer = (t, v) => (/FROM eta_encounter_windows WHERE consult_uid/.test(t) ? [{ room_id: "r1", ist_date: "2026-10-08" }, { room_id: "r2", ist_date: "2026-10-08" }] : base(t, v));
+    expect(await call({ action: "result", consult_uid: UID, include_text: true })).toMatchObject({ ok: true, source: "palimpsest" });
+  });
+});
+
+describe("S8C-3: consult_clips returns whitelisted SCALAR fields only", () => {
+  it("nested objects in flags, quality, coverage, span_*, r2.files never reach the output, whatever they hold (a nested doctor_uid included)", async () => {
+    setIndex([row(UID, { flags: ["clean", { doctor_uid: "NESTEDDOC1" }, "doctor_identified", "overlap:low"], quality: { doctor_uid: "NESTEDDOC2" }, coverage: { x: { doctor_uid: "NESTEDDOC3" } }, span_start: { doctor_uid: "NESTEDDOC4" },
+      r2: { bucket: "eta-audio", prefix: "consult-clips/p", files: [{ name: "consult.flac", doctor_uid: "NESTEDDOC5" }, "consult.flac"], at: "t", signature: "SIGX" } })]);
+    const out = await call({ action: "consult_clips", ist_date: "2026-10-08" }) as { rows: Array<Record<string, any>> };
+    const s = JSON.stringify(out);
+    for (const bad of ["NESTEDDOC", "doctor", "signature", "SIGX"]) expect(s, bad).not.toContain(bad);
+    expect(out.rows[0]).toMatchObject({ flags: ["clean", "overlap:low"], quality: null, coverage: null, span_start: null, r2: { bucket: "eta-audio", prefix: "consult-clips/p", n_files: 2, at: "t" } });
+    for (const [k, v] of Object.entries(out.rows[0]!)) { if (k === "r2") { for (const x of Object.values(v as object)) expect(typeof x === "object" && x !== null, `r2.${k}`).toBe(false); } else if (Array.isArray(v)) { for (const x of v) expect(typeof x, k).toBe("string"); } else expect(typeof v === "object" && v !== null, k).toBe(false); } // no nested object at all
+  });
+});
+
+describe("S8C-4: a room given as a SLUG is mapped to its room_id through the mirror", () => {
+  it("a held-out room asked for by slug is blind_room_day (no rows returned); an ordinary slug lists", async () => {
+    setIndex([row(UID), row("CUidBlindSlugAaaaaaaaaaaaaaaaaaaaaa1", { room_id: BR, room_slug: "slug-of-held-out", ist_date: BD })]);
+    expect(await call({ action: "consult_clips", ist_date: BD, room_slug: "slug-of-held-out" })).toEqual({ ok: false, error: "blind_room_day" });
+    expect(await call({ action: "consult_clips", ist_date: "2026-10-08", room_slug: "opd-1" })).toMatchObject({ ok: true, count: 1 });
+  });
+});
+
+describe("S8C-2 in the job: the duration is never shorter than the mirror row says", () => {
+  const flac60s = (): Uint8Array => { const b = new Uint8Array(42); b.set([0x66, 0x4c, 0x61, 0x43, 0x00, 0x00, 0x00, 0x22]); const rate = 16_000, total = rate * 60; b[18] = (rate >> 12) & 0xff; b[19] = (rate >> 4) & 0xff; b[20] = ((rate & 0x0f) << 4) | (0 << 1) | 0; b[21] = (15 << 4) | 0; b[22] = (total >>> 24) & 0xff; b[23] = (total >>> 16) & 0xff; b[24] = (total >>> 8) & 0xff; b[25] = total & 0xff; return b; };
+  it("a clip whose container says 60 s but whose mirror row says 60 minutes is window_too_long (the cap and the 30-minute limit see the longer figure)", async () => {
+    const key = `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`;
+    clipBytes.set(key, flac60s());
+    const run = (mirror?: number) => T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "init", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: { clip_key: key, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", ...(mirror === undefined ? {} : { mirror_minutes: mirror }) }, runner: "r" } as never);
+    expect(await run(60)).toEqual({ kind: "fail", error: "window_too_long" });
+  });
+});
+
