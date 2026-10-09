@@ -172,7 +172,8 @@ export function probeOrigin(): URL | null {
   if (!o) return null;
   const prod = new URL(PUBLIC_ORIGIN_DEFAULT);
   const apex = prod.hostname.replace(/^www\./, "");
-  return o.hostname === apex ? new URL(prod.origin) : o;
+  // G77: an apex origin with a PORT keeps the port when it is mapped to www (same scheme as configured)
+  return o.hostname === apex ? new URL(`${o.protocol}//${prod.hostname}${o.port ? `:${o.port}` : ""}`) : o;
 }
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 /** The ONE redirect the probe follows: same scheme, the same host or its www / apex twin, the same path. Anything else (another site, another path, a second hop) is reported as the status it is. */
@@ -181,7 +182,8 @@ export function sameSiteTarget(from: URL, location: string | null): URL | null {
   let to: URL;
   try { to = new URL(location, from); } catch { return null; }
   const strip = (h: string) => h.replace(/^www\./, "");
-  if (to.protocol !== from.protocol || to.port !== from.port || strip(to.hostname) !== strip(from.hostname) || to.pathname !== from.pathname || to.search !== "" || to.username || to.password) return null;
+  // G76: only https is followed (a redirect on http is reported as the status it is), and the scheme must not change
+  if (to.protocol !== "https:" || to.protocol !== from.protocol || to.port !== from.port || strip(to.hostname) !== strip(from.hostname) || to.pathname !== from.pathname || to.search !== "" || to.username || to.password) return null;
   return to;
 }
 export const ROUTE_TIMEOUT_MS = 5_000;

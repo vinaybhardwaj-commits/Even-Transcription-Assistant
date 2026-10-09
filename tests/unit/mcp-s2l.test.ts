@@ -553,7 +553,31 @@ describe("scribe_health aspect=routes", () => {
     expect(out.ok).toBe(false); // the redirect never ends in 200: ONE hop was followed, the second 307 is the answer
     expect(fetchMock.mock.calls.length).toBe(10);
     expect((out.routes as Row[]).every((r) => r.status === 307)).toBe(true);
-  });
+  }, 15_000); // an unbounded-redirect mutant must FAIL here, not hang
+
+  it("S8A8 G76 / G77 — only https redirects are followed (an http APP_URL and an http same-site Location is NOT followed); an apex APP_URL with a port keeps the port on www", async () => {
+    const t = S.CALLABLE_TOOLS.get("scribe_health_routes")!;
+    const ctx = { actor: "a", scopes: new Set(["read"]) } as never;
+    process.env.APP_URL = "http://app.example.test";
+    fetchMock.mockImplementation(async (u: string) => new Response(null, { status: 307, headers: { location: u.replace("http://app.", "http://www.app.") } }));
+    const out = await t.handler({}, ctx) as Row;
+    expect(out.ok).toBe(false);
+    expect(fetchMock.mock.calls.length).toBe(5); // never followed: 5 routes, 1 request each
+    expect((out.routes as Row[]).every((r) => r.status === 307 && r.redirected === undefined)).toBe(true);
+    expect(R.sameSiteTarget(new URL("http://a.example.test/x"), "http://www.a.example.test/x")).toBeNull();
+    expect(R.sameSiteTarget(new URL("https://a.example.test/x"), "https://www.a.example.test/x")?.href).toBe("https://www.a.example.test/x");
+    // G77: the apex with a port
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (_u: string, init: { method: string }) => new Response(null, { status: init.method === "OPTIONS" ? 204 : 200 }));
+    process.env.APP_URL = "https://evenscribe.app:8443";
+    expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app:8443");
+    process.env.APP_URL = "https://evenscribe.app";
+    expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app");
+    process.env.APP_URL = "https://evenscribe.app:8443";
+    const ok = await t.handler({}, ctx) as Row;
+    expect(ok.origin).toBe("https://www.evenscribe.app:8443");
+    expect(fetchMock.mock.calls.every(([u]) => String(u).startsWith("https://www.evenscribe.app:8443/"))).toBe(true);
+  }, 15_000);
 
   it("G19: the origin is configuration (APP_URL, else the production constant) — NEVER the request's own origin / Host", async () => {
     fetchMock.mockImplementation(async () => new Response(null, { status: 200 }));

@@ -87,7 +87,7 @@ const COMMON = new Set(`a abdomen about above across advice advise after again a
 /** articles, prepositions, pronouns, auxiliaries: a multi-word window never contains one ("the road", "she has") */
 const FUNCTION_WORDS = new Set(`the a an and or but if then than that this these those there here when where what which who whom whose why how not no yes all any some each every both either neither more most less least much many few little very too also only just even still again always never often ever once twice since until while after before during about above below between into onto over under through across along around against without within upon from with for off out down up i me my mine we us our you your he him his she her it its they them their one two three is are was were be been being am do does did done doing have has had having can could shall should will would may might must to of in on at by as so`.split(" "));
 /** very common English words: never proposed as a mis-hearing of a name, alone or as a whole multi-word window */
-const isCommon = (w: string): boolean => inflectedIn(COMMON, w);
+export const isCommon = (w: string): boolean => inflectedIn(COMMON, w);
 
 /**
  * S8A8 D2 — INFLECTED FORMS. The word lists hold base forms ("medicine"); "medicines", "tolerated", "stretching" are the same ordinary words and must not escape the gate on a plural or a tense.

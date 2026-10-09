@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, statSync } from "node:fs";
 import { detectScript, hasIndicScript, nonLatinLetterRatio } from "@/lib/script-detect";
-import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, inflectedIn, lexiconDropCounts, type Lexicon } from "@/lib/drug-match";
+import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, inflectedIn, lexiconDropCounts, isCommon, type Lexicon } from "@/lib/drug-match";
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 import { alignEnglish, settleUnpaired, tagNative, addMayura, finalizeEnglish, normalizeForEcho, checkEnglish as checkEnglishRaw } from "@/lib/jobs/kinds/sarvam-english";
 import { planUnits } from "@/lib/jobs/kinds/sarvam-translate";
@@ -534,7 +534,7 @@ describe("S8A8 D2 / G68 — inflected forms are common words; the 212 drug-free 
     expect(isClinicalEnglishWord("tolerated")).toBe(true);
     expect(cands("Take combat land after food")[0]).toMatchObject({ heard: "combat land" }); // a garbled name made of ordinary words is still found
   });
-  it("G68 — all 212 fixture sentences are drug-free: none gets a candidate (8 of them did before the clinical list: 1 consult_dosing + 7 consult_clinical, all false); recall on the Combiflam phrasings and the earlier cases is unchanged", () => {
+  it("G68 — all 212 fixture sentences are drug-free: none gets a candidate (10 of them did on the baseline before the clinical list and the inflection fix: ordinary 1, consult_dosing 1, consult_clinical 8, all false; 8 with inflection already in: dosing 1 + clinical 7); recall on the Combiflam phrasings and the earlier cases is unchanged", () => {
     const all = [...fixtures.ordinary, ...fixtures.holdout, ...fixtures.final, ...fixtures.consult, ...fixtures.consult_dosing, ...fixtures.consult_clinical];
     expect(all).toHaveLength(212);
     expect(all.filter((t) => cands(t).length > 0)).toEqual([]);
@@ -595,5 +595,21 @@ describe("S8A8 T2 — a fully contained pass entry prefers a native entry of the
     // no same-speaker native contains it: fall back to the tightest
     const n2 = tagNative([{ speaker_id: "0", start_s: 0, end_s: 30, text: "Long line" }, { speaker_id: "1", start_s: 10, end_s: 14, text: "Hi" }]);
     expect(alignEnglish(n2, [{ speaker_id: "2", start_s: 10.6, end_s: 11.4, text: "Hi" }]).track[0]!.native_idx).toBe(1);
+  });
+});
+
+describe("G78 (ORDER-G76-78) — inflection over the COMMON list, and 'Continue same medicines' on the real lexicon", () => {
+  it("isCommon matches inflected forms of the small common list (breaths, babies, bellies), not only exact words", () => {
+    for (const w of ["breath", "breaths", "babies", "bellies", "Babies"]) expect(isCommon(w), w).toBe(true); // breath / baby / belly are listed; the plurals are not
+    expect(isCommon("zzzings")).toBe(false);
+    expect(isCommon("combat")).toBe(false);
+    expect(inflectedIn(new Set(["breath"]), "breaths")).toBe(true);
+    expect(inflectedIn(new Set(["breath"]), "breath")).toBe(true);
+  });
+  it("'Continue same medicines' (a real advice phrase in the lexicon) gives 0 candidates, whole or with a tail; it used to propose 'same medicines' -> S-Amlodipine", () => {
+    for (const t of ["Continue same medicines", "Continue same medicines for a month", "Please continue the same medicines", "Take the same medicines after food"]) expect(drugCandidates(t, 0, lex), t).toEqual([]);
+    // recall is untouched
+    expect(drugCandidates("Take combat land after food", 0, lex).some((c) => /^combiflam/i.test(c.suggested))).toBe(true);
+    expect(isClinicalEnglishWord("medicines")).toBe(true); // the clinical list now holds medicine / medication (plurals by inflection), so a window containing one is skipped
   });
 });
