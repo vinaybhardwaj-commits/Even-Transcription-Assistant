@@ -428,6 +428,23 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     expect(sortKeys(strip(body.result))).toEqual(sortKeys(before));
   });
 
+  it("DT: no listed property tag ends in the middle of a number, and the tags REFUTE-DIET2 found state their facts", async () => {
+    const all = await listed();
+    const tags: Array<[string, string, string]> = [];
+    for (const t of all) for (const [k, v] of Object.entries((t.inputSchema as { properties: Record<string, { description?: string }> }).properties)) if (v.description) tags.push([t.name, k, v.description]);
+    expect(tags.length).toBeGreaterThan(150);
+    // a number is never cut ("→ 0." for 0.95): no tag ends in a bare number, a number plus a dot, or a number plus the ellipsis
+    for (const [n, k, d] of tags) expect(d, `${n}.${k}`).not.toMatch(/(^|[^A-Za-z0-9_])\d+(\.\d*)?…?\.?$/);
+    const tag = (n: string, k: string) => tags.find((x) => x[0] === n && x[1] === k)![2];
+    expect(tag("scribe_set_visit_clinician", "confidence")).toContain("0.95");           // DT-1: the default is stated whole
+    expect(tag("scribe_scratch", "dry_run")).toContain("default true");                   // DT-2
+    expect(tag("scribe_session_tape", "chunk_idx")).toContain("view=chunk");              // DT-3: names the view that needs it
+    expect(tag("scribe_post_cue", "type")).toMatch(/open type minus blocklist/);          // restored scribe_help facts
+    expect(tag("scribe_pin_visit", "at")).toContain("default now");
+    expect(all.find((t) => t.name === "scribe_pin_visit")!.description).toContain("visit phase");
+    for (const n of ["scribe_extract_audio", "scribe_transcribe_range", "scribe_get_state", "scribe_list_cues"]) expect(tag(n, "ist_date"), n).toContain("default today");
+  });
+
   it("Z2: a listed property description is never cut in the middle of a name", () => {
     for (const t of ["[kind=check_update_now|report_diag|restart_engine|self_test] optional args", "[view=manifest|timeline|chunk|zip_download] x"]) {
       const out = P.shortText(t);
