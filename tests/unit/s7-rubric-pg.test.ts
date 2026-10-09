@@ -1107,7 +1107,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ label: "positive", negative_signals: [], same_problem: [true], planned_staging: false, better_or_no_complaint: true, escalate: false, evidence: [{ item: "Zorbel Quintaglio", quote: "Zorbel Quintaglio (ZQ-48152-93)" }, { item: "better", quote: "knee pain" }] }), model: "fake/model", latency_ms: 1 }; });
     try {
       const run = await runJob("rubric_run", { rubric_id: "ehrc_surgical_outcome", lab: true, unit_keys: [uid(1), uid(2), uid(3)].map((u) => `stay:${u}`) });
-      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "ehrc_surgical_outcome", version: "0.2.1", units_planned: 3, ok: 2, skipped: 1, llm_calls: 2 } });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "ehrc_surgical_outcome", version: "0.2.2", units_planned: 3, ok: 2, skipped: 1, llm_calls: 2 } });
       expect(calls).toBe(2);
       expect(sqls).toHaveLength(5); // admissions, theatre, discharge, cdmss, follow-up: once for the 3 stays
       const rows = (await pg.sql`SELECT unit_kind, unit_key, room_id, ist_date::text AS d, status, score, findings FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
@@ -1118,12 +1118,13 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(rows.find((r) => r.status === "skipped")).toMatchObject({ unit_key: `stay:${uid(3)}`, score: { reason: "not_surgical" } });
       expect(rows.find((r) => r.status === "ok")!.score).toMatchObject({ label: "positive", window_class: "joint_ligament_flap_fusion", cm_questions: "not_read" });
       expect(JSON.stringify(rows)).not.toMatch(/knee|uneventful|enc_Stay|Zorbel|ZQ-48152/); // no text, no encounter id in the table
-      const evKey = `rubric/ehrc_surgical_outcome/0.2.1/${`stay:${uid(1)}`}.json`;
+      const evKey = `rubric/ehrc_surgical_outcome/0.2.2/${`stay:${uid(1)}`}.json`;
+      const E5 = await import("@/lib/rubrics/engines/ehrc");
       const evJson = mem.get(evKey)!;
       expect(evJson).not.toMatch(/Zorbel|ZQ-48152|knee pain|uneventful/); // E3-1: the R2 evidence carries no note text, no name, no id
       expect(JSON.parse(evJson).evidence.refs).toEqual([
-        { item: "other", source: "theatre", record_ref: "otnote_run", field: "note", start: 8, end: 8 + "Zorbel Quintaglio (ZQ-48152-93)".length },
-        { item: "other", source: "follow_up", record_ref: `rec_${uid(1)}`, field: "record", start: expect.any(Number), end: expect.any(Number) },
+        { item: "other", source: "theatre", record_ref: E5.refOf("otnote_run"), field: "note", start: 8, end: 8 + "Zorbel Quintaglio (ZQ-48152-93)".length },
+        { item: "other", source: "follow_up", record_ref: E5.refOf(`rec_${uid(1)}`), field: "record", start: expect.any(Number), end: expect.any(Number) },
       ]);
       // E3-2: the results tool serves the stay rows (no room; by admission date) and include_text returns refs and offsets only, never text
       const { CALLABLE_TOOLS } = await import("@/lib/mcp/surface");
@@ -1133,9 +1134,10 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(listed.count).toBe(3);
       expect(listed.results.every((x: Record<string, unknown>) => x.room_id === null && x.ist_date === "2026-09-06")).toBe(true);
       // an OLD evidence object that did hold text (written before this fix) is still never returned as text
-      mem.set(`rubric/ehrc_surgical_outcome/0.2.1/${`stay:${uid(2)}`}.json`, JSON.stringify({ evidence: { quotes: [{ item: "Zorbel Quintaglio", quote: "ZQ-48152-93" }], note: "Zorbel Quintaglio", refs: [] } }));
+      mem.set(`rubric/ehrc_surgical_outcome/0.2.2/${`stay:${uid(2)}`}.json`, JSON.stringify({ evidence: { quotes: [{ item: "Zorbel Quintaglio", quote: "ZQ-48152-93" }], note: "Zorbel Quintaglio", refs: [{ item: "fever", source: "theatre", record_ref: "Zorbel_Quintaglio_4815", field: "note", start: 1, end: 5 }] } }));
       const withText = await tool.handler({ action: "results", rubric_id: "ehrc_surgical_outcome", unit: "stay", lab: true, include_text: true }, ctx0) as Record<string, any>;
       expect(JSON.stringify(withText)).not.toMatch(/Zorbel|ZQ-48152|knee pain|uneventful/);
+      expect(withText.results.find((x: Record<string, any>) => x.unit_key === `stay:${uid(2)}`).evidence.refs[0].record_ref).toBeNull(); // E3-5: a legacy name-shaped record_ref is dropped
       expect(withText.results.find((x: Record<string, any>) => x.unit_key === `stay:${uid(1)}`).evidence.refs).toHaveLength(2);
       expect(await tool.handler({ action: "results", rubric_id: "ehrc_surgical_outcome", unit: "stay", lab: true, from: "2026-09-07", to: "2026-09-08" }, ctx0)).toMatchObject({ count: 0 });
       // the board offers no stay view: by=room has no room, by=doctor needs a consult
