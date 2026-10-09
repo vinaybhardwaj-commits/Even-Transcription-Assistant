@@ -71,6 +71,36 @@ export function stripComments(src: string): string {
   return out;
 }
 
+/**
+ * REL3-FU2 F2-1: SQL comments INSIDE a literal's text (`FROM /* x * / cue`, `FROM -- c` + newline + `cue`) are blanked before the table patterns run, or they would hide a table from them. SQL-aware: a comment opener inside a
+ * SQL string ('...'), a quoted identifier ("...") or a dollar-quoted body is NOT a comment, so `SELECT '/*' AS a FROM cue WHERE b = '*\/'` still shows `cue`. Block comments nest (as in Postgres). Length is kept (newlines
+ * stay) so offsets and line numbers hold.
+ */
+export function blankSqlComments(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!, n = text[i + 1];
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < text.length) { if (text[j] === c) { if (text[j + 1] === c) { j += 2; continue; } break; } j++; }
+      out += text.slice(i, j + 1); i = j + 1; continue;
+    }
+    if (c === "-" && n === "-") { while (i < text.length && text[i] !== "\n") { out += " "; i++; } continue; }
+    if (c === "/" && n === "*") {
+      let depth = 1; out += "  "; i += 2;
+      while (i < text.length && depth > 0) {
+        if (text[i] === "/" && text[i + 1] === "*") { depth++; out += "  "; i += 2; }
+        else if (text[i] === "*" && text[i + 1] === "/") { depth--; out += "  "; i += 2; }
+        else { out += text[i] === "\n" ? "\n" : " "; i++; }
+      }
+      continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
 export type Violation = { file: string; kind: "sql" | "key"; what: string; line: number };
 
 export function scanSource(file: string, src: string): Violation[] {
@@ -82,7 +112,8 @@ export function scanSource(file: string, src: string): Violation[] {
     const k = `${kind}:${what}:${idx}`;
     if (!seen.has(k)) { seen.add(k); out.push({ file, kind, what, line: lineOf(idx) }); }
   };
-  for (const lit of literalsOf(code)) {
+  for (const lit0 of literalsOf(code)) {
+    const lit = { ...lit0, text: blankSqlComments(lit0.text) };
     for (const m of lit.text.matchAll(KW_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
     // REL3-FU2 G3-1: every FROM is looked at, INCLUDING the ones inside parentheses (derived tables, LATERAL, subqueries in a JOIN): the scan resumes right after each FROM keyword instead of
     // skipping the span a match consumed; FROM ONLY <table> is the same table

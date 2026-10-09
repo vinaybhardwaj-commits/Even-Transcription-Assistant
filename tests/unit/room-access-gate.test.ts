@@ -6,7 +6,7 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { KEY_PREFIXES, ROOM_TABLES, scanSource, stripComments } from "../support/room-access-scan";
+import { KEY_PREFIXES, ROOM_TABLES, blankSqlComments, scanSource, stripComments } from "../support/room-access-scan";
 import { ALLOWLIST } from "../support/room-access-allowlist";
 
 const walk = (d: string): string[] => readdirSync(d).flatMap((n) => {
@@ -69,6 +69,24 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
     for (const t of ROOM_TABLES) for (const f of forms(t)) expect(scanSource("lib/x.ts", f).map((v) => v.what), `${t}: ${f}`).toEqual([t]);
     // the clean twins: a derived table over a non-room table, LATERAL over a look-alike
     for (const ok of ["sql`SELECT 1 FROM (SELECT id FROM other_t) q`", "sql`SELECT 1 FROM a, LATERAL (SELECT * FROM cues c) l`", "sql`SELECT 1 FROM ONLY bench_window_silence`"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
+  });
+  it("REL3-FU2 F2-1: SQL comments between FROM / JOIN and a table do not hide it; a comment opener inside a SQL string does not eat real SQL", () => {
+    for (const t of ROOM_TABLES) {
+      for (const f of [`sql\`SELECT 1 FROM /* x */ ${t}\``, `sql\`SELECT 1 FROM -- note\n ${t}\``, `sql\`SELECT 1 FROM /* a */ /* b */ ${t} z\``, `sql\`SELECT 1 FROM a JOIN /* x */ ${t} ON true\``,
+        `sql\`SELECT 1 FROM /* outer /* nested */ still comment */ ${t}\``, `sql\`UPDATE /* c */ ${t} SET a = 1\``, `sql\`INSERT INTO -- c\n ${t} (a) VALUES (1)\``,
+        `sql\`SELECT 1 FROM a, /* c */ ${t} b\``, `sql\`SELECT 1 FROM (SELECT 1 FROM /* c */ ${t}) q\``]) {
+        expect(scanSource("lib/x.ts", f).map((v) => v.what), `${t}: ${f}`).toEqual([t]);
+      }
+      // comment openers INSIDE SQL strings / quoted identifiers are data: the real FROM after them is still seen
+      for (const f of [`sql\`SELECT '/*' AS a FROM ${t} WHERE b = '*/'\``, `sql\`SELECT '--' AS a FROM ${t}\``, `sql\`SELECT "a--b" FROM ${t}\``, `sql\`SELECT 'it''s /* x' AS a FROM ${t}\``]) {
+        expect(scanSource("lib/x.ts", f).map((v) => v.what), `${t}: ${f}`).toEqual([t]);
+      }
+    }
+    // a table named ONLY inside a comment is still not a hit
+    expect(scanSource("lib/x.ts", "sql`SELECT 1 /* FROM cue */ FROM other_t -- JOIN bench_window`")).toEqual([]);
+    // the SQL-aware blanker itself
+    expect(blankSqlComments("a /* b */ c -- d\ne")).toBe("a         c     \ne");
+    expect(blankSqlComments("'/*' x '*/'")).toBe("'/*' x '*/'");
   });
   it("a synthetic file added to the tree would fail the gate (the assertion above is not vacuous)", () => {
     const fake = scanSource("lib/mcp/tools/new-tool.ts", "const rows = await sql`SELECT * FROM room_turn_speaker`;");
