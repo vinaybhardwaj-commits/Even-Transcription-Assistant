@@ -499,11 +499,13 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     const blindRoom = await listRoomDays(BR);
     expect(blindRoom.map((r) => r.ist_date)).not.toContain(BD);
     const clean = (await listRoomDays("r_clean")).find((r) => r.ist_date === CLEAN_DAY)!;
-    const all = (await H.sql!`SELECT w.id FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE s.room_id = 'r_clean' AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${CLEAN_DAY}::date` as Array<{ id: string }>).map((r) => r.id);
-    const { windowsBlindAny } = await import("@/lib/room-access/check");
-    const held = await windowsBlindAny(all);
+    const rows = (await H.sql!`SELECT w.id, s.id AS sid FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE s.room_id = 'r_clean' AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${CLEAN_DAY}::date` as Array<{ id: string; sid: string }>);
+    const { windowsBlindAny, sessionsBlindAny } = await import("@/lib/room-access/check");
+    const held = await windowsBlindAny(rows.map((r) => r.id));
+    const heldS = await sessionsBlindAny([...new Set(rows.map((r) => r.sid))]);
     expect(held.size).toBeGreaterThan(0);
-    expect(clean.window_count).toBe(all.length - held.size);
+    // REL3-FU2: windows of a session refused WHOLE are not counted either
+    expect(clean.window_count).toBe(rows.filter((r) => !held.has(r.id) && !heldS.has(r.sid)).length);
   });
 });
 
@@ -522,5 +524,30 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     const machines = await machineOccupancy(sql as never, asOf);
     expect(JSON.stringify(machines)).not.toContain("doc_blind");
     expect(JSON.stringify(machines)).not.toContain("Held Out Doctor");
+  });
+});
+
+(HAVE ? describe : describe.skip)("REL3-FU2 listRoomDays: a clean window of a session that is refused WHOLE is not counted", () => {
+  it("a session with one clean window and one window held out only by its turn rows contributes 0 windows to the day's count", async () => {
+    pg.exec(`
+      ${sessionRow("bs_mixed", 2)}
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES
+        ('bw_mixed_clean', 'bs_mixed', 'rd_clean', ${Date.parse(CLEAN_DAY + "T02:00:00Z")}, ${Date.parse(CLEAN_DAY + "T02:10:00Z")}, 'primary'),
+        ('bw_mixed_rts', 'bs_mixed', 'rd_clean', ${Date.parse(CLEAN_DAY + "T02:10:00Z")}, ${Date.parse(CLEAN_DAY + "T02:20:00Z")}, 'primary');
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_mixed_rts', 't1', 'rd_blind', 0, 'no_match');
+    `);
+    const { listRoomDays } = await import("@/lib/room-access/room-day-admin");
+    const { guardSessionSpan } = await import("@/lib/room-access/check");
+    expect(await guardSessionSpan("bs_mixed")).toBe("blind_room_day");
+    const row = (await listRoomDays("r_clean")).find((r) => r.ist_date === CLEAN_DAY)!;
+    // the count is exactly the windows of the sessions that are NOT refused whole
+    const ok = (await H.sql!`SELECT w.id, s.id AS sid FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE s.room_id = 'r_clean' AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${CLEAN_DAY}::date` as Array<{ id: string; sid: string }>);
+    const { sessionsBlindAny, windowsBlindAny } = await import("@/lib/room-access/check");
+    const heldS = await sessionsBlindAny([...new Set(ok.map((x) => x.sid))]);
+    const heldW = await windowsBlindAny(ok.map((x) => x.id));
+    const expected = ok.filter((x) => !heldS.has(x.sid) && !heldW.has(x.id)).length;
+    expect(heldS.has("bs_mixed")).toBe(true);
+    expect(row.window_count).toBe(expected);
+    expect(ok.some((x) => x.id === "bw_mixed_clean")).toBe(true); // it exists, and is not counted
   });
 });

@@ -950,6 +950,18 @@ export async function listRoomDays(roomId: string): Promise<RoomDayOverviewRow[]
         FROM days d
         LEFT JOIN room_day rd ON rd.room_id = ${roomId} AND rd.ist_date = d.ist_date
         LEFT JOIN bench_session s ON s.room_id = ${roomId} AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = d.ist_date
+             -- G-3 (minor): a session refused WHOLE (it touches a held-out day, or any of its windows has a held-out placement) contributes nothing, its clean windows included
+             AND NOT (EXISTS (SELECT 1 FROM unnest(${heldDays}::date[], ${heldRooms}::text[]) AS sb(d, r)
+                               WHERE sb.r = s.room_id AND (sb.d::timestamp AT TIME ZONE 'Asia/Kolkata') <= GREATEST(s.started_at, s.ended_at, (SELECT max(sc.ended_at) FROM bench_chunk sc WHERE sc.session_id = s.id))
+                                 AND (sb.d::timestamp AT TIME ZONE 'Asia/Kolkata') + interval '1 day' > s.started_at)
+                      OR EXISTS (SELECT 1 FROM bench_window sw LEFT JOIN room_diarize_window sd ON sd.window_id = sw.id, room_day sr, unnest(${heldDays}::date[], ${heldRooms}::text[]) AS sb2(d, r)
+                                  WHERE sw.session_id = s.id AND sr.id IN (sw.room_day_id, sd.room_day_id) AND sb2.d = sr.ist_date AND sb2.r = sr.room_id)
+                      OR EXISTS (SELECT 1 FROM bench_window sw2, room_turn_speaker st, room_day sr2, unnest(${heldDays}::date[], ${heldRooms}::text[]) AS sb3(d, r)
+                                  WHERE sw2.session_id = s.id AND st.window_id = sw2.id AND sr2.id = st.room_day_id AND sb3.d = sr2.ist_date AND sb3.r = sr2.room_id)
+                      OR EXISTS (SELECT 1 FROM bench_window sw3, jev_window_text sj, room_day sr3, unnest(${heldDays}::date[], ${heldRooms}::text[]) AS sb4(d, r)
+                                  WHERE sw3.session_id = s.id AND sj.window_id = sw3.id AND sr3.id = sj.room_day_id AND sb4.d = sr3.ist_date AND sb4.r = sr3.room_id)
+                      OR EXISTS (SELECT 1 FROM bench_window sw4, room_span_emotion se, room_day sr4, unnest(${heldDays}::date[], ${heldRooms}::text[]) AS sb5(d, r)
+                                  WHERE sw4.session_id = s.id AND se.window_id = sw4.id AND sr4.id = se.room_day_id AND sb5.d = sr4.ist_date AND sb5.r = sr4.room_id))
         -- G-3: a window with ANY held-out placement is not counted
         LEFT JOIN bench_window w ON w.session_id = s.id
              AND NOT EXISTS (SELECT 1 FROM unnest(${heldDays}::date[], ${heldRooms}::text[]) AS hb(d, r), room_day hr
