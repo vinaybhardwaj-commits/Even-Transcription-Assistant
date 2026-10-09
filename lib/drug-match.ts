@@ -192,18 +192,38 @@ export function matchForm(name: string): string {
 }
 
 /** Built once per lexicon object: entries bucketed by the first sound, so a window is compared with ~1/10 of the names, not all of them. */
+/**
+ * S8A8b — A LEXICON ENTRY MADE ONLY OF ORDINARY WORDS IS NEVER A CANDIDATE. "Continue same medicines" is a real advice phrase in the name list, but every token of it is an everyday or clinical
+ * English word (after inflection); proposing it for the ordinary sentence "Continue medicines daily" is noise. Such an entry is still a KNOWN name (an exact occurrence proposes nothing) but is
+ * not indexed as a target. Pack words ("tablet", "mg") and numbers are not tokens of the name for this test. An entry with ONE token outside the lists ("Combiflam", "nocturia") stays.
+ */
+function allOrdinaryWords(name: string): boolean {
+  const toks = name.split(/[\s/,()+-]+/).filter((t) => t && !/\d/.test(t) && !PACK_WORDS.has(t.toLowerCase())).map((t) => t.replace(/[^\p{L}]/gu, "")).filter((t) => t.length > 0);
+  return toks.length > 0 && toks.every((t) => isCommon(t) || isFrequentWord(t) || isClinicalEnglishWord(t));
+}
+export type DropCounts = { drug: number; investigation: number; clinical_term: number; total: number };
+const dropCache = new WeakMap<Lexicon, DropCounts>();
+/** How many lexicon entries (distinct match forms per category) are not indexed because every token is an ordinary word. */
+export function lexiconDropCounts(lex: Lexicon): DropCounts {
+  indexOf(lex);
+  return dropCache.get(lex)!;
+}
+
 function indexOf(lex: Lexicon): { buckets: Map<string, Entry[]>; known: Set<string> } {
   const hit = indexCache.get(lex);
   if (hit) return hit;
   const buckets = new Map<string, Entry[]>();
   const known = new Set<string>();
   const seen = new Set<string>();
+  const drops: DropCounts = { drug: 0, investigation: 0, clinical_term: 0, total: 0 };
+  dropCache.set(lex, drops);
   const add = (name: string, category: Category) => {
     const form = matchForm(name);
     if (form.length < 3) return;
     known.add(form);
     if (seen.has(`${category}:${form}`)) return; // many pack sizes of one product are one entry (the first, in file order, is suggested)
     seen.add(`${category}:${form}`);
+    if (allOrdinaryWords(name)) { drops[category] += 1; drops.total += 1; return; } // S8A8b: known, but never a target
     const pk = phoneticKey(form);
     const first = pk[0] ?? "";
     const e: Entry = { name, category, form, pk, first };

@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, statSync } from "node:fs";
 import { detectScript, hasIndicScript, nonLatinLetterRatio } from "@/lib/script-detect";
-import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, inflectedIn, type Lexicon } from "@/lib/drug-match";
+import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, inflectedIn, lexiconDropCounts, type Lexicon } from "@/lib/drug-match";
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 import { alignEnglish, settleUnpaired, tagNative, addMayura, finalizeEnglish, normalizeForEcho, checkEnglish as checkEnglishRaw } from "@/lib/jobs/kinds/sarvam-english";
 import { planUnits } from "@/lib/jobs/kinds/sarvam-translate";
@@ -542,5 +542,29 @@ describe("S8A8 D2 / G68 — inflected forms are common words; the 212 drug-free 
     const rec = ["Take combat land after food", "Start Combat Land for pain", "I gave him combat land for the fever", "Continue combat land once a day", "Combat land at night please", "Combat land OD for three days", "Combat land daily for a week", "Combat land SOS if the pain returns"];
     expect(rec.filter((t) => cands(t).some((c) => /^combiflam/i.test(c.suggested)))).toEqual(rec);
     expect(cands("complains of nodrinal since two weeks").map((c) => c.suggested)).toContain("nocturia");
+  });
+});
+
+describe("S8A8b — a lexicon entry made only of ordinary words is never a candidate", () => {
+  const cands = (t: string) => drugCandidates(t, 0, lex);
+  const mini: Lexicon = { version: "t", source: "t", names: ["Combiflam 400 mg Tablet", "Pantocid 40 mg Tablet"], investigations: ["Blood Sugar Fasting"], clinical_terms: ["Continue same medicines", "nocturia"] };
+  it("entries whose every token is an everyday / clinical word (after inflection) are not indexed as targets but stay KNOWN; one token outside the lists keeps the entry", () => {
+    const d = lexiconDropCounts(mini);
+    expect(d).toMatchObject({ clinical_term: 1, investigation: 1, drug: 0, total: 2 }); // "Continue same medicines", "Blood Sugar Fasting"; "nocturia" and the brands stay
+    expect(drugCandidates("Continue medicines daily", 0, mini)).toEqual([]);
+    expect(drugCandidates("complains of nodrinal since two weeks", 0, mini).map((c) => c.suggested)).toContain("nocturia");
+    expect(drugCandidates("Take combat land after food", 0, mini).map((c) => c.suggested.toLowerCase())[0]).toMatch(/^combiflam/);
+    expect(drugCandidates("Continue same medicines", 0, mini)).toEqual([]); // an exact occurrence of a known name proposes nothing (it is still known)
+  });
+  it("the real lexicon: 'Continue medicines daily' gives no candidate; the dropped counts are reported (> 0); the G68 recall set and the 212 fixtures are unchanged", () => {
+    expect(cands("Continue medicines daily")).toEqual([]);
+    expect(cands("Continue medicines after food")).toEqual([]);
+    const d = lexiconDropCounts(lex);
+    expect(d.total).toBe(d.drug + d.investigation + d.clinical_term);
+    expect(d.total).toBeGreaterThan(100);
+    const all = [...fixtures.ordinary, ...fixtures.holdout, ...fixtures.final, ...fixtures.consult, ...fixtures.consult_dosing, ...fixtures.consult_clinical];
+    expect(all.filter((t) => cands(t).length > 0)).toEqual([]);
+    const rec = ["Take combat land after food", "Start Combat Land for pain", "I gave him combat land for the fever", "Continue combat land once a day", "Combat land at night please", "Combat land OD for three days", "Combat land daily for a week", "Combat land SOS if the pain returns"];
+    expect(rec.filter((t) => cands(t).some((c) => /^combiflam/i.test(c.suggested)))).toEqual(rec);
   });
 });
