@@ -252,3 +252,36 @@ describe("S8C-2 in the job: the duration is never shorter than the mirror row sa
   });
 });
 
+
+describe("B3-4: a mirror row with no usable minutes is refused (the duration floor needs it)", () => {
+  for (const [label, minutes] of [["null", null], ["zero", 0], ["negative", -5], ["a string", "10"], ["NaN", Number.NaN], ["missing", undefined]] as Array<[string, unknown]>) {
+    it(`minutes ${label}: transcribe is mirror_minutes_missing, 0 heads, 0 submits`, async () => {
+      const r = row(UID) as Row;
+      if (minutes === undefined) delete r.minutes; else r.minutes = minutes;
+      setIndex([r]);
+      gets.length = 0; heads.length = 0; submitted.length = 0;
+      expect(await call({ action: "transcribe", consult_uid: UID })).toEqual({ ok: false, error: "mirror_minutes_missing" });
+      expect(heads).toEqual([]);
+      expect(submitted).toEqual([]);
+    });
+  }
+  it("a positive figure passes the check (the ordinary case still proceeds)", async () => {
+    setIndex([row(UID, { minutes: 10 })]);
+    expect((await call({ action: "transcribe", consult_uid: UID })).error).not.toBe("mirror_minutes_missing");
+  });
+});
+
+describe("K3-2 on the consult source: the sarvam_transcribe job's held-out hook reads ALL rows of the uid", () => {
+  it("heldOut: a uid with any held-out row (either order) is blind_room_day; a clean uid and an encounter source are not", async () => {
+    const hook = T.sarvamTranscribeKind.heldOut!;
+    const orig = answer;
+    for (const rows of [[{ room_id: "r1", ist_date: "2026-10-08" }, { room_id: BR, ist_date: BD }], [{ room_id: BR, ist_date: BD }, { room_id: "r1", ist_date: "2026-10-08" }]]) {
+      answer = (t, v) => (/FROM eta_encounter_windows WHERE consult_uid/.test(t) ? rows : orig(t, v));
+      expect(await hook({ source: "consult", consult_uid: UID })).toBe("blind_room_day");
+    }
+    answer = (t, v) => (/FROM eta_encounter_windows WHERE consult_uid/.test(t) ? [{ room_id: "r1", ist_date: "2026-10-08" }] : orig(t, v));
+    expect(await hook({ source: "consult", consult_uid: UID })).toBe(null);
+    expect(await hook({ source: "encounter", encounter_id: "enc_x" })).toBe(null);
+    answer = orig;
+  });
+});
