@@ -70,6 +70,29 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
     // the clean twins: a derived table over a non-room table, LATERAL over a look-alike
     for (const ok of ["sql`SELECT 1 FROM (SELECT id FROM other_t) q`", "sql`SELECT 1 FROM a, LATERAL (SELECT * FROM cues c) l`", "sql`SELECT 1 FROM ONLY bench_window_silence`"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
   });
+  it("LINT-FU: the former residual forms are violations for every gated table — bracketed join group FROM, JOIN (group), DELETE ... USING, TABLE, COPY, TRUNCATE (list too) — and their clean twins pass", () => {
+    const forms = (t: string): string[] => [
+      `sql\`SELECT 1 FROM (${t} w JOIN x ON true)\``,
+      `sql\`SELECT 1 FROM ((${t} w JOIN x ON true) JOIN y ON true)\``,
+      `sql\`SELECT 1 FROM a, (${t} w JOIN x ON true)\``,
+      `sql\`SELECT 1 FROM x JOIN (${t} w JOIN y ON true) ON true\``,
+      `sql\`DELETE FROM other_t o USING ${t} w WHERE o.id = w.id\``,
+      `sql\`DELETE FROM other_t o USING "public"."${t}" w WHERE o.id = w.id\``,
+      `sql\`TABLE ${t}\``,
+      `sql\`TABLE ONLY public.${t}\``,
+      `sql\`COPY ${t} TO STDOUT\``,
+      `sql\`COPY "${t}" (a, b) FROM STDIN\``,
+      `sql\`TRUNCATE ${t}\``,
+      `sql\`TRUNCATE ONLY ${t} RESTART IDENTITY\``,
+      `sql\`TRUNCATE other_t, ${t} CASCADE\``,
+      `sql\`TRUNCATE TABLE ${t}\``,
+    ];
+    for (const t of ROOM_TABLES) for (const f of forms(t)) expect([...new Set(scanSource("lib/x.ts", f).map((v) => v.what))], `${t}: ${f}`).toEqual([t]);
+    // clean twins: the same forms over non-room tables or look-alike names
+    for (const ok of ["sql`SELECT 1 FROM (other_t w JOIN x ON true)`", "sql`SELECT 1 FROM (bench_window_silence w JOIN x ON true)`", "sql`DELETE FROM other_t o USING other_u w WHERE true`", "sql`DELETE FROM other_t USING cues c`",
+      "sql`TABLE other_t`", "sql`TABLE my_bench_window`", "sql`COPY other_t TO STDOUT`", "sql`COPY cue_id FROM STDIN`", "sql`TRUNCATE other_t`", "sql`TRUNCATE other_t, other_u CASCADE`", "sql`TRUNCATE TABLE bench_window_silence`",
+      "sql`SELECT a FROM x JOIN y USING (cue)`", "const m = 'truncate the cue list';"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
+  });
   it("REL3-FU2 F2-1: SQL comments between FROM / JOIN and a table do not hide it; a comment opener inside a SQL string does not eat real SQL", () => {
     for (const t of ROOM_TABLES) {
       for (const f of [`sql\`SELECT 1 FROM /* x */ ${t}\``, `sql\`SELECT 1 FROM -- note\n ${t}\``, `sql\`SELECT 1 FROM /* a */ /* b */ ${t} z\``, `sql\`SELECT 1 FROM a JOIN /* x */ ${t} ON true\``,
