@@ -15,12 +15,19 @@ private final class FakeMicModeAPI: MicModeAPI, @unchecked Sendable {
   var setError: String?
   var setCalls: [String] = []
   var clearsActive = false
+  var setDelay: TimeInterval = 0
+  var freshCalls = 0
 
+  func fresh() -> MicModeAPI {
+    freshCalls += 1
+    return self
+  }
   func preferredMode(bundleID: String) -> Int { modes[bundleID] ?? 0 }
   func activeMode(bundleID: String) -> Int { activeModes[bundleID] ?? 0 }
   func supportsStandard(bundleID: String) -> Bool? { supports }
   func setStandard(bundleID: String) -> (result: Int, error: String?) {
     setCalls.append(bundleID)
+    if setDelay > 0 { Thread.sleep(forTimeInterval: setDelay) }
     if setResult == 1 {
       modes[bundleID] = 0
       if clearsActive { activeModes[bundleID] = 0 }
@@ -60,7 +67,9 @@ private final class FakeMicModeAPI: MicModeAPI, @unchecked Sendable {
     let reports = MicModeGuard.enforceStandard(ids: ["a"], api: api, osMajor: 26, log: { lines.append($0) })
     #expect(api.setCalls == ["a"])
     #expect(reports.first?.after == 0)
-    #expect(lines == ["micmode before=2 set=1 after=0 bundle=a"])
+    #expect(lines.count == 1)
+    #expect(lines[0].hasPrefix("micmode before=2 set=1 after=0 bundle=a set_ms="))
+    #expect(api.freshCalls == 1)  // the re-read after the Set uses a fresh runner
   }
 
   @Test func testSetCalledWhenSupportedListUnreadable() {
@@ -88,104 +97,129 @@ private final class FakeMicModeAPI: MicModeAPI, @unchecked Sendable {
   }
 }
 
-private final class RecordingRestartStore: MicModeRestartStore, @unchecked Sendable {
-  var date: Date?
-  var saves = 0
-  func lastRestart() -> Date? { date }
-  func saveRestart(_ date: Date) {
-    self.date = date
-    saves += 1
-  }
-}
-
 @Suite struct MicModeWatchdogTests {
   static let parent = "com.evenscribe.room-recorder"
   let s: UInt64 = 1_000_000_000
 
-  private func watchdog(
-    _ api: FakeMicModeAPI, store: MicModeRestartStore = RecordingRestartStore(), os: Int = 26
-  ) -> MicModeWatchdog {
+  final class Capture: @unchecked Sendable {
+    var lines: [String] = []
+    var statuses: [MicModeStatus] = []
+  }
+
+  private func watchdog(_ api: FakeMicModeAPI, _ out: Capture, os: Int = 26) -> MicModeWatchdog {
     MicModeWatchdog(
-      mainBundleID: Self.parent + ".tapewriter", api: api, osMajor: os, store: store,
-      log: { _ in }, status: { _ in })
+      mainBundleID: Self.parent + ".tapewriter", api: api, osMajor: os,
+      log: { out.lines.append($0) }, status: { out.statuses.append($0) })
   }
 
-  @Test func f34RestartRequestedOnlyOnceInTenMinutes() {
+  @Test func resetsInPlaceWhenPreferredIsTwoAndActiveIsZero() {
     let api = FakeMicModeAPI()
-    api.activeModes[Self.parent] = 2
     api.modes[Self.parent] = 2
-    let store = RecordingRestartStore()
-    var w = watchdog(api, store: store)
-    let t0 = Date(timeIntervalSince1970: 1_000_000)
-    let r0 = w.tick(nowNS: 0, now: t0)
-    let r30 = w.tick(nowNS: 30 * s, now: t0)
-    let r60 = w.tick(nowNS: 60 * s, now: t0.addingTimeInterval(60))
-    let r120 = w.tick(nowNS: 120 * s, now: t0.addingTimeInterval(120))
-    let r600 = w.tick(nowNS: 600 * s, now: t0.addingTimeInterval(600))
-    let r660 = w.tick(nowNS: 660 * s, now: t0.addingTimeInterval(660))
-    #expect(!r0 && !r30)
-    #expect(r60)
-    #expect(!r120 && !r600)
-    #expect(r660)
-    #expect(store.saves == 2)
-    #expect(api.setCalls.contains(Self.parent))
+    api.activeModes[Self.parent] = 0
+    let out = Capture()
+    var w = watchdog(api, out)
+    w.tick(nowNS: 0)
+    #expect(api.setCalls.isEmpty)  // first tick only arms the 60 s timer
+    w.tick(nowNS: 60 * s)
+    #expect(api.setCalls == [Self.parent])
+    #expect(api.modes[Self.parent] == 0)
+    #expect(out.lines.first == "micmode watchdog preferred=2 active=0 bundle=\(Self.parent)")
+    let status = out.statuses.last
+    #expect(status?.lastEvent == "mic_mode_reset")
+    #expect(status?.before == 2 && status?.after == 0 && status?.set == "ok")
+    #expect(status?.setMs != nil)
   }
 
-  @Test func f34RelaunchedProcessHonoursPersistedThrottle() {
+  @Test func resetsWhenOnlyActiveIsNonZero() {
     let api = FakeMicModeAPI()
     api.activeModes[Self.parent] = 2
-    let t0 = Date(timeIntervalSince1970: 2_000_000)
-    let store = RecordingRestartStore()
-    store.date = t0.addingTimeInterval(-120)  // previous process restarted 2 min ago
-    var w = watchdog(api, store: store)
-    _ = w.tick(nowNS: 0, now: t0)
-    let r = w.tick(nowNS: 60 * s, now: t0)
-    #expect(!r)
-    #expect(store.saves == 0)
-  }
-
-  @Test func f34NoRestartWhenSetClearsActiveMode() {
-    let api = FakeMicModeAPI()
-    api.activeModes[Self.parent] = 2
-    api.modes[Self.parent] = 2
     api.clearsActive = true
-    var w = watchdog(api)
-    _ = w.tick(nowNS: 0)
-    let r = w.tick(nowNS: 60 * s)
-    #expect(!r)
+    let out = Capture()
+    var w = watchdog(api, out)
+    w.tick(nowNS: 0)
+    w.tick(nowNS: 60 * s)
+    #expect(api.setCalls == [Self.parent])
+    #expect(out.statuses.last?.before == 2 && out.statuses.last?.after == 0)
   }
 
-  @Test func f34FileStoreSurvivesANewInstance() throws {
-    let dir = FileManager.default.temporaryDirectory
-      .appendingPathComponent("micmode-store-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: dir) }
-    let date = Date(timeIntervalSince1970: 3_000_000)
-    FileMicModeRestartStore(directory: dir).saveRestart(date)
-    #expect(FileMicModeRestartStore(directory: dir).lastRestart() == date)
-  }
-
-  @Test func f34ExitCodeIsDistinctFromRestartEngine() {
-    #expect(MicModeGuard.relaunchExitCode == 76)
-  }
-
-  @Test func quietWhenStandard() {
+  @Test func unreadableIsLoggedAndWrittenNeverSetAndNeverRestarts() {
     let api = FakeMicModeAPI()
-    var w = watchdog(api)
-    _ = w.tick(nowNS: 0)
-    let r = w.tick(nowNS: 61 * s)
-    #expect(!r)
+    api.modes[Self.parent] = -1
+    api.activeModes[Self.parent] = -1
+    let out = Capture()
+    var w = watchdog(api, out)
+    w.tick(nowNS: 0)
+    w.tick(nowNS: 60 * s)
     #expect(api.setCalls.isEmpty)
+    #expect(out.lines == ["micmode watchdog preferred=-1 active=-1 bundle=\(Self.parent)"])
+    #expect(out.statuses.last?.set == "unreadable")
+    #expect(out.statuses.last?.lastEvent == nil)
   }
 
-  @Test func f38WatchdogDoesNothingOnUnsupportedOS() {
+  @Test func throttleAllowsOneResetPerTwoMinutesAndLogsTheSuppressed() {
+    let api = FakeMicModeAPI()
+    api.modes[Self.parent] = 2
+    api.setResult = 0  // the Set does not take, so the mode stays non-zero
+    let out = Capture()
+    var w = watchdog(api, out)
+    let t0 = Date(timeIntervalSince1970: 1_000_000)
+    w.tick(nowNS: 0, now: t0)
+    w.tick(nowNS: 60 * s, now: t0.addingTimeInterval(60))  // reset
+    w.tick(nowNS: 120 * s, now: t0.addingTimeInterval(120))  // 60 s later: suppressed
+    w.tick(nowNS: 180 * s, now: t0.addingTimeInterval(180))  // 120 s later: reset again
+    #expect(api.setCalls.count == 2)
+    #expect(out.lines.filter { $0.contains("reset suppressed") }.count == 1)
+    #expect(out.statuses.filter { $0.lastEvent == "mic_mode_reset" }.count == 2)
+    #expect(out.statuses.first?.set == "fail")
+  }
+
+  @Test func oneLogLinePerTickEvenWhenStandardAndFreshRunnerEachTick() {
+    let api = FakeMicModeAPI()
+    let out = Capture()
+    var w = watchdog(api, out)
+    w.tick(nowNS: 0)
+    w.tick(nowNS: 30 * s)
+    #expect(out.lines.isEmpty)
+    w.tick(nowNS: 60 * s)
+    w.tick(nowNS: 120 * s)
+    #expect(out.lines.count == 2)
+    #expect(api.freshCalls == 2)
+    #expect(api.setCalls.isEmpty)
+    #expect(out.statuses.isEmpty)
+  }
+
+  @Test func timedOutSetIsRecordedAsTimeout() {
+    let api = FakeMicModeAPI()
+    api.modes[Self.parent] = 2
+    api.setResult = -2
+    api.setError = "timeout"
+    let out = Capture()
+    var w = watchdog(api, out)
+    w.tick(nowNS: 0)
+    w.tick(nowNS: 60 * s)
+    #expect(out.statuses.last?.set == "timeout")
+    #expect(out.statuses.last?.lastEvent == "mic_mode_reset")
+  }
+
+  @Test func watchdogDoesNothingOnUnsupportedOS() {
     let api = FakeMicModeAPI()
     api.activeModes[Self.parent] = 2
-    var w = watchdog(api, os: 15)
-    _ = w.tick(nowNS: 0)
-    let r = w.tick(nowNS: 61 * s)
-    #expect(!r)
+    let out = Capture()
+    var w = watchdog(api, out, os: 15)
+    w.tick(nowNS: 0)
+    w.tick(nowNS: 61 * s)
     #expect(api.setCalls.isEmpty)
+    #expect(out.lines == ["micmode watchdog skipped: os 15"])
+  }
+
+  @Test func sourceHasNoRestartPath() throws {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    for name in ["tapewriter/MicModeGuard.swift", "tapewriter/Recorder.swift", "TapewriterCLI/main.swift"] {
+      let text = try String(contentsOf: root.appendingPathComponent("Sources/\(name)"), encoding: .utf8)
+      #expect(!text.contains("MicModeRelaunchRequested"))
+      #expect(!text.contains("exit(76)"))
+    }
   }
 }
 
@@ -203,6 +237,9 @@ private final class RecordingRestartStore: MicModeRestartStore, @unchecked Senda
     #expect(run { $0.modes["a"] = 2 }?.after == 0)
     #expect(run { _ in }?.set == "skip")
     #expect(run { $0.modes["a"] = 2; $0.setResult = -1 }?.set == "fail")
+    #expect(run { $0.modes["a"] = 2; $0.setResult = -2 }?.set == "timeout")
+    #expect(run { $0.modes["a"] = 2 }?.setMs != nil)
+    #expect(run { _ in }?.setMs == nil)
     #expect(run { $0.modes["a"] = -1 }?.set == "unreadable")
     #expect(!(run { _ in })!.at.isEmpty)
   }
@@ -245,7 +282,7 @@ private final class RecordingRestartStore: MicModeRestartStore, @unchecked Senda
     }
   }
 
-  @Test func f36RunnerTimesOutAndStaysNonBlocking() {
+  @Test func hungCallDoesNotPoisonLaterCalls() {
     let runner = MicModeCallRunner(timeout: 0.2)
     let started = Date()
     let first = runner.run(fallback: -1) {
@@ -254,14 +291,59 @@ private final class RecordingRestartStore: MicModeRestartStore, @unchecked Senda
     }
     #expect(first.timedOut && first.value == -1)
     let second = runner.run(fallback: -1) { 9 }
-    #expect(second.timedOut && second.value == -1)
+    #expect(!second.timedOut && second.value == 9)
     #expect(Date().timeIntervalSince(started) < 1.4)
-    let fast = MicModeCallRunner(timeout: 30).run(fallback: -1) { 4 }
-    #expect(!fast.timedOut && fast.value == 4)
   }
 
-  @Test func f36TimedOutSetIsReportedAsFail() {
-    // A hung Set: the system API returns (-2, "timeout"); the guard reports set=fail.
+  @Test func slowCallInsideItsTimeoutIsNotATimeout() {
+    // A call that takes longer than the read timeout but less than the Set timeout completes.
+    let runner = MicModeCallRunner(timeout: 0.1)
+    let slow = runner.run(fallback: -1, timeout: 5) {
+      Thread.sleep(forTimeInterval: 0.5)
+      return 1
+    }
+    #expect(!slow.timedOut && slow.value == 1)
+    #expect(runner.run(fallback: -1) { 4 }.value == 4)
+    #expect(SystemMicModeAPI.setTimeout == 10)
+  }
+
+  @Test func neverReturningCallTimesOutAndNextReadStillWorks() {
+    let runner = MicModeCallRunner(timeout: 0.2)
+    let gate = DispatchSemaphore(value: 0)
+    let hung = runner.run(fallback: -2, timeout: 0.3) {
+      gate.wait()
+      return 1
+    }
+    #expect(hung.timedOut && hung.value == -2)
+    #expect(runner.run(fallback: -1) { 7 }.value == 7)
+    gate.signal()
+  }
+
+  @Test func freshAPIHasItsOwnRunner() {
+    let api = SystemMicModeAPI(runner: MicModeCallRunner(timeout: 3))
+    let fresh = api.fresh() as? SystemMicModeAPI
+    #expect(fresh != nil && fresh !== api)
+    #expect(fresh?.runner !== api.runner && fresh?.runner.timeout == 3)
+  }
+
+  @Test func setThatTakesThreeSecondsIsOkWithItsElapsedTime() {
+    let api = FakeMicModeAPI()
+    api.modes["a"] = 2
+    api.setDelay = 3
+    var got: MicModeStatus?
+    var lines: [String] = []
+    MicModeGuard.enforceStandard(
+      ids: ["a"], api: api, osMajor: 26, log: { lines.append($0) }, status: { got = $0 })
+    #expect(got?.set == "ok" && got?.after == 0)
+    let ms = got?.setMs ?? 0
+    #expect(ms >= 2_900 && ms < 4_500)
+    #expect(lines.first?.contains("set_ms=") == true)
+    #expect(api.freshCalls == 1)
+  }
+
+  @Test func timedOutSetIsReportedAsTimeoutAndTheNextReadStillWorks() {
+    // A Set that never returns: the system API gives (-2, "timeout"); the guard reports
+    // set=timeout and the re-read goes through a fresh API.
     let api = FakeMicModeAPI()
     api.modes["a"] = 2
     api.setResult = -2
@@ -270,7 +352,9 @@ private final class RecordingRestartStore: MicModeRestartStore, @unchecked Senda
     let reports = MicModeGuard.enforceStandard(
       ids: ["a"], api: api, osMajor: 26, log: { _ in }, status: { got = $0 })
     #expect(reports.first?.setResult == -2)
-    #expect(got?.set == "fail")
+    #expect(got?.set == "timeout")
+    #expect(got?.after == 2)  // the re-read worked and shows the mode unchanged
+    #expect(api.freshCalls == 1)
   }
 }
 
@@ -427,7 +511,7 @@ private actor DeadRemote: RoomEngineRemote {
   { throw URLError(.notConnectedToInternet) }
 }
 
-@Suite(.serialized) struct MicModeRestartTests {
+@Suite(.serialized) struct MicModeEngineTests {
   final class Lines: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [String] = []
@@ -452,43 +536,31 @@ private actor DeadRemote: RoomEngineRemote {
     return (engine, task)
   }
 
-  @Test func exit76RelaunchesWithNoServerAndIsNotFailed() async throws {
+  @Test func watchdogResetEventReachesStatusJSON() async throws {
     let root = R4Fixture.temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let launcher = ScriptedLauncher()
     let lines = Lines()
     let (_, task) = try await start(launcher, lines: lines, root: root)
-    // Let the first segment become durable, then plant mic_mode.json as tapewriter would.
     try await Task.sleep(for: .milliseconds(300))
     MicModeStatus.write(
-      MicModeStatus(before: 2, after: 0, set: "ok", at: "2026-10-08T00:00:00.000Z"),
+      MicModeStatus(
+        before: 2, after: 0, set: "ok", at: "2026-10-08T00:00:00.000Z", setMs: 41,
+        lastEvent: "mic_mode_reset"),
       directory: launcher.directories[0])
-    let exitedAt = Date()
-    launcher.exitLatest(status: 76)
-    try await R4Fixture.waitUntil { launcher.count == 2 }
-    // The dead server's first poll back-off is 5 s; the relaunch must not wait for it.
-    #expect(Date().timeIntervalSince(exitedAt) < 2)
-    // Same session dir, next segment.
-    #expect(
-      launcher.directories[0].deletingLastPathComponent()
-        == launcher.directories[1].deletingLastPathComponent())
-    MicModeStatus.write(
-      MicModeStatus(before: 0, after: 0, set: "skip", at: "2026-10-08T00:01:00.000Z"),
-      directory: launcher.directories[1])
-    try await Task.sleep(for: .milliseconds(1_800))
+    try await R4Fixture.waitUntil {
+      (try? RoomPersistence(root: root).loadStatus().lastEvent) == "mic_mode_reset"
+    }
     task.cancel()
     _ = try? await task.value
-
     let status = try RoomPersistence(root: root).loadStatus()
     #expect(status.state == .recording)
-    #expect(status.lastEvent == "mic_mode_restart")
     #expect(status.lastEventAt != nil)
-    #expect(status.micMode?.after == 0)
-    #expect(lines.all.contains("tapewriter planned restart: mic_mode"))
-    #expect(!lines.all.contains { $0.contains("tapewriter exited") })
+    #expect(status.micMode?.setMs == 41)
+    #expect(launcher.count == 1)  // no relaunch
   }
 
-  @Test func secondExit76InsideTenMinutesTakesTheOldPath() async throws {
+  @Test func exit76IsNoLongerAPlannedRestart() async throws {
     let root = R4Fixture.temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let launcher = ScriptedLauncher()
@@ -496,21 +568,14 @@ private actor DeadRemote: RoomEngineRemote {
     let (_, task) = try await start(launcher, lines: lines, root: root)
     try await Task.sleep(for: .milliseconds(300))
     launcher.exitLatest(status: 76)
-    try await R4Fixture.waitUntil { launcher.count == 2 }
-    try await Task.sleep(for: .milliseconds(300))
-    launcher.exitLatest(status: 76)
-    // The dead server puts the loop in poll back-off (5 to 30 s), so allow for it.
-    for _ in 0..<6_000 where !lines.all.contains("micmode restart suppressed: throttle") {
-      try await Task.sleep(for: .milliseconds(10))
+    try await R4Fixture.waitUntil {
+      (try? RoomPersistence(root: root).loadStatus().state) == .failed
     }
-    #expect(lines.all.contains("micmode restart suppressed: throttle"))
-    try await Task.sleep(for: .milliseconds(500))
     task.cancel()
     _ = try? await task.value
-
-    #expect(launcher.count == 2)  // the server is dead, so nothing relaunched the third
-    let status = try RoomPersistence(root: root).loadStatus()
-    #expect(status.state == .failed)
+    #expect(launcher.count == 1)
+    #expect(!lines.all.contains("tapewriter planned restart: mic_mode"))
+    #expect(try RoomPersistence(root: root).loadStatus().lastEvent == nil)
   }
 
   @Test func newSessionClearsLastEvent() async throws {
@@ -521,13 +586,16 @@ private actor DeadRemote: RoomEngineRemote {
     let remote = DeadRemote()
     let (_, task) = try await start(launcher, lines: lines, root: root, remote: remote)
     try await Task.sleep(for: .milliseconds(300))
-    launcher.exitLatest(status: 76)
-    try await R4Fixture.waitUntil { launcher.count == 2 }
+    MicModeStatus.write(
+      MicModeStatus(
+        before: 2, after: 0, set: "ok", at: "2026-10-08T00:00:00.000Z", setMs: 5,
+        lastEvent: "mic_mode_reset"),
+      directory: launcher.directories[0])
     try await R4Fixture.waitUntil {
-      (try? RoomPersistence(root: root).loadStatus().lastEvent) == "mic_mode_restart"
+      (try? RoomPersistence(root: root).loadStatus().lastEvent) == "mic_mode_reset"
     }
-    // A second 76 takes the old path (.failed); the server then answers with another session.
-    launcher.exitLatest(status: 76)
+    // The capture dies; the server then answers with another session.
+    launcher.exitLatest(status: 1)
     try await R4Fixture.waitUntil {
       (try? RoomPersistence(root: root).loadStatus().state) == .failed
     }
@@ -559,17 +627,20 @@ private actor DeadRemote: RoomEngineRemote {
     #expect(launcher.count == 1)
     let status = try RoomPersistence(root: root).loadStatus()
     #expect(status.lastEvent == nil)
-    #expect(!lines.all.contains("tapewriter planned restart: mic_mode"))
   }
 
   @Test func statusRoundTripsLastEventAndOldFilesDecode() throws {
     let at = Date(timeIntervalSince1970: 1_790_000_000)
-    let status = RoomRecorderStatus(state: .recording, lastEvent: "mic_mode_restart", lastEventAt: at)
+    let status = RoomRecorderStatus(state: .recording, lastEvent: "mic_mode_reset", lastEventAt: at)
     let object =
       try JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as! [String: Any]
-    #expect(object["last_event"] as? String == "mic_mode_restart")
+    #expect(object["last_event"] as? String == "mic_mode_reset")
     #expect(object["last_event_at"] != nil)
     let plain = try JSONEncoder().encode(RoomRecorderStatus(state: .ready))
     #expect(try JSONDecoder().decode(RoomRecorderStatus.self, from: plain).lastEvent == nil)
+    // An old mic_mode.json (no set_ms, no last_event) still decodes.
+    let old = Data(#"{"before":2,"after":0,"set":"ok","at":"x"}"#.utf8)
+    let decoded = try JSONDecoder().decode(MicModeStatus.self, from: old)
+    #expect(decoded.setMs == nil && decoded.lastEvent == nil)
   }
 }

@@ -389,7 +389,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   public var updatedAt: Date
   /// The latest MicModeGuard result from tapewriter; nil when none has been read.
   public var micMode: MicModeStatus?
-  /// A planned event, not an error: "mic_mode_restart" after tapewriter's exit 76 relaunch.
+  /// A planned event, not an error: "mic_mode_reset" when the tapewriter watchdog reset Mic Mode in place.
   public var lastEvent: String?
   public var lastEventAt: Date?
 

@@ -269,16 +269,11 @@ public enum Recorder {
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
     var lossMarkedDeviceLost = false
     var retryAfterNS = UInt64.max
-    var micModeRelaunch = false
-    var micModeWatchdog = MicModeWatchdog(
-      store: FileMicModeRestartStore(directory: outputDirectory.deletingLastPathComponent()))
+    var micModeWatchdog = MicModeWatchdog()
 
     while !stopping.load(ordering: .acquiring) {
       if writer.hasFailed { break }
-      if capture != nil, micModeWatchdog.tick(nowNS: monotonicNowNS()) {
-        micModeRelaunch = true
-        break
-      }
+      if capture != nil { micModeWatchdog.tick(nowNS: monotonicNowNS()) }
       if let active = capture,
         !AudioDevices.isAlive(currentDevice) || active.hasStoppedProducing
       {
@@ -339,10 +334,6 @@ public enum Recorder {
     print(
       "Capture blocks: \(statistics.acceptedBlocks) accepted, \(statistics.droppedBlocks) dropped")
     print("Recording stopped cleanly.")
-    if micModeRelaunch {
-      fputs("Mic mode not Standard after Set; exiting for relaunch.\n", stderr)
-      throw MicModeRelaunchRequested()
-    }
   }
 
   static func finalizeCapture(

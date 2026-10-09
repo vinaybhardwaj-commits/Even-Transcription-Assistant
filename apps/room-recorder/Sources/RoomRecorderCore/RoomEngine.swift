@@ -534,11 +534,6 @@ public actor RoomEngine {
   private var needsActiveReconciliation = false
   private var lastMicMode: MicModeStatus?
   private var lastEvent: (name: String, at: Date)?
-  /// When tapewriter last exited 76 in this session; the second one inside 10 minutes is a crash.
-  private var lastMicModeRestart: (sessionID: String, at: Date)?
-  /// MicModeGuard.relaunchExitCode in tapewriter: a planned restart, not a failure.
-  static let micModeRestartExitCode: Int32 = 76
-  static let micModeRestartThrottle: TimeInterval = 600
   private var reconciledServerStateKnown = false
   private var reconciledServerSessionID: String?
   private var reconciledServerSessionStatus: BenchSessionStatus?
@@ -1446,8 +1441,8 @@ public actor RoomEngine {
       } catch {
         lastError = bounded(error)
         try? saveStatus(preferred: .offline)
-        // Sleep the poll back-off in 1 s slices. A capture process that exits meanwhile (exit 76
-        // mic-mode restart) is finished and relaunched at once, not after the full back-off.
+        // Sleep the poll back-off in 1 s slices. A capture process that exits meanwhile is
+        // finished at once, not after the full back-off.
         var remaining = backoffNanoseconds
         while remaining > 0 {
           let slice = min(remaining, 1_000_000_000)
@@ -3601,27 +3596,6 @@ public actor RoomEngine {
     nextPieceIndex = segment.nextPieceIndex
     capture = nil
     let exitStatus = segment.process.terminationStatus ?? -1
-    if exitStatus == Self.micModeRestartExitCode, phase == .recording, let sessionID {
-      let now = Date()
-      if let last = lastMicModeRestart, last.sessionID == sessionID,
-        now.timeIntervalSince(last.at) < Self.micModeRestartThrottle
-      {
-        log("micmode restart suppressed: throttle")
-      } else {
-        lastMicModeRestart = (sessionID, now)
-        log("tapewriter planned restart: mic_mode")
-        do {
-          try startCapture(trigger: .reconciliation)
-          lastEvent = ("mic_mode_restart", now)
-          try? saveStatus()
-          return
-        } catch {
-          phase = .failed
-          needsActiveReconciliation = true
-          throw error
-        }
-      }
-    }
     phase = .failed
     needsActiveReconciliation = true
     throw RoomEngineError.captureExited(exitStatus)
@@ -3874,8 +3848,17 @@ public actor RoomEngine {
   private func currentMicMode() -> MicModeStatus? {
     if let directory = capture?.directory, let fresh = MicModeStatus.read(directory: directory) {
       lastMicMode = fresh
+      if let event = fresh.lastEvent, let at = Self.parseISO8601(fresh.at) {
+        lastEvent = (event, at)
+      }
     }
     return lastMicMode
+  }
+
+  private static func parseISO8601(_ text: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.date(from: text)
   }
 
   private static func iso8601(_ date: Date) -> String {
