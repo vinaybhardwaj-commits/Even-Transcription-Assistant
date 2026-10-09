@@ -8,13 +8,15 @@
  * `skipped` with its closed reason, not failed; a unit whose engine throws is `failed` (code engine_error); a DATABASE or R2 error is transient and throws, so the step is retried.
  */
 import { z } from "zod";
-import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { JobArgsError, doneWith, failWith, nextStep, withProgressPatch, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
 import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun, unitsOf } from "@/lib/rubrics/registry";
 import { RUBRIC_UNITS, type RubricUnit } from "@/lib/rubrics/types";
 import { evaluateUnit, resolveUnits } from "@/lib/rubrics/engines";
+import { countingCalls, talliedCalls } from "@/lib/rubrics/llm";
 import { finishRun, insertRun, newRunId, upsertResult, writeEvidence } from "@/lib/rubrics/store";
+import { perUnitHeldOut } from "../held-out";
 
 export const RUBRIC_RUN_KIND = "rubric_run";
 export const RUBRIC_RUN_MAX_UNITS = 500;
@@ -50,6 +52,8 @@ export function parseRubricRunArgs(raw: unknown): RubricRunArgs {
 export const rubricRunKind: JobKind = {
   name: RUBRIC_RUN_KIND,
   first: "resolve",
+  roomData: true,
+  heldOut: perUnitHeldOut,
   scope: "invoke",
   capPlan: (args) => reservationFor(RUBRIC_RUN_KIND, args),
   precheck: async (args) => { const m = await capRefusal(RUBRIC_RUN_KIND, args); if (m) throw new JobArgsError(m); },
@@ -93,6 +97,8 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   const llm = isLlmRubric(r.id);
   let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
   let left = llm ? await callsLeft(keys.length, made) : Number.POSITIVE_INFINITY;
+  // G80: a throw anywhere in the batch (llm_unavailable, a database or R2 error) keeps what the batch already did: the position, the counters and EVERY model call made so far, the failing unit's own attempts included
+  try {
   while (idx < end && Date.now() < deadline) {
     if (llm && left <= 0) { // at the cap: the remaining units are skipped (reason llm_cap), no more calls
       capSkipped += keys.length - idx;
@@ -103,7 +109,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
     const key = keys[idx]!;
     // NO try/catch here (S7-0-R3, G53): a database or R2 error from the resolver, a reader or a write throws, the runner retries the step (MAX_FAILURES), and nothing half-written is
     // hidden as a failed unit. An ENGINE fault (an exception inside the pure engine) is caught inside evaluateUnit and comes back as status failed / engine_error.
-    const out = await evaluateUnit(r, a.unit, key);
+    const out = await countingCalls(() => evaluateUnit(r, a.unit, key));
     made += out.calls ?? 0;
     left -= out.calls ?? 0;
     // a held-out room-day (lib/rubrics/blind-room-days.ts) was refused by the reader before any fetch: NOTHING is written for it, not even a skipped row; it is only counted
@@ -132,6 +138,9 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
     else if (out.status === "failed") failed += 1;
     else skipped += 1;
     idx += 1;
+  }
+  } catch (e) {
+    throw withProgressPatch(e, { idx, ok, failed, skipped, blind, unresolved, llm_calls: made + talliedCalls(e), skipped_cap: capSkipped });
   }
   const progress = { ...ctx.progress, idx, ok, failed, skipped, blind, unresolved, llm_calls: made, skipped_cap: capSkipped };
   return nextStep(idx >= keys.length ? "finish" : "evaluate", progress);

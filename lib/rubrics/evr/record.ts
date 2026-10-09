@@ -113,3 +113,24 @@ export async function fetchPulseRecord(consultUid: string, preferRecUid: string 
   const row = pick ?? rows[0]!; // rows are ORDER BY uploaded_at DESC: the first is the latest
   return { ok: true, record: normaliseRecord(row), rec_uid: String(row.rec_uid ?? ""), n_records: rows.length, chosen: pick ? "window_uid" : "latest" };
 }
+
+/**
+ * S7-1B — the signed record's doctor id for many prescriptions, in ONE read-only SELECT (Metabase db 13). Column p.doctor_uid on "individuals-prescriptions": the same column
+ * lib/encounter-windows/warehouse-attribution.ts already reads (NOT inferred). Every uid is validated against UID_RE and inlined through uidListLiteral; EMR_2_GENERATED, non-draft. Returns
+ * prescription uid -> doctor uid (opaque ids only; no name is selected). A prescription the warehouse does not return is simply absent from the map.
+ */
+export const BOARD_MAX_UIDS = 1500;
+export function doctorsSql(prescriptionUids: readonly string[]): string {
+  if (prescriptionUids.length === 0 || prescriptionUids.length > BOARD_MAX_UIDS) throw new Error("bad_uid_count");
+  for (const u of prescriptionUids) if (!UID_RE.test(u)) throw new Error("bad_prescription_uid");
+  return `SELECT p.uid AS rec_uid, p.doctor_uid AS doctor_uid
+  FROM "individuals-prescriptions" p
+ WHERE p.uid IN (${uidListLiteral(prescriptionUids)}) AND p.type = '${RECORD_TYPE}' AND p.is_draft = false`;
+}
+export async function fetchDoctorsByPrescription(prescriptionUids: readonly string[]): Promise<Map<string, string>> {
+  const q = queryOverride ?? metabaseQuery;
+  const rows = await q(doctorsSql([...new Set(prescriptionUids)]));
+  const out = new Map<string, string>();
+  for (const r of rows) if (typeof r.rec_uid === "string" && typeof r.doctor_uid === "string" && r.doctor_uid) out.set(r.rec_uid, r.doctor_uid);
+  return out;
+}

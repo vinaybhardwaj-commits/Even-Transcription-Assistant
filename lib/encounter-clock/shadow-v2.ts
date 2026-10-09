@@ -72,6 +72,8 @@ export type FusionRunSummary = {
   fusion_version: typeof FUSION_VERSION;
   prompt_versions: { u1: string; u2: string; u6: string };
   acoustic: ShadowSummary;
+  /** G2: windows left out of the evidence because ANY placement is held out */
+  n_blind_excluded: number;
   probes: {
     total: number; no_transcript: number; silent: number; with_text: number;
     english: number; translate_failed: number; judged: number; jev_failed: number;
@@ -247,6 +249,7 @@ export async function runFusionShadowForRoomDay(
       fusion_version: FUSION_VERSION,
       prompt_versions: promptVersions,
       acoustic,
+      n_blind_excluded: evidence.n_blind_excluded ?? 0,
       probes: {
         total: texts.length, no_transcript: noTranscript, silent, with_text: withText.length,
         english: eligible.length, translate_failed: translateFailed, judged: judgedCount, jev_failed: jevFailed,

@@ -39,7 +39,7 @@ describe("the rubric files and the registry", () => {
     const defs = ["consult_chair_affect", "consult_surgical_pitch", "ehrc_surgical_outcome", "care_sentiment"].map((i) => getRubric(i)!);
     for (const d of defs) { expect(d.engine).toBe("llm_zdr"); expect(d.source).toMatch(/@/); }
     // S7-1: the two consult rubrics have an engine and a prompt file (v1.0.0); the other two stay definition-only
-    for (const d of defs.slice(0, 2)) { expect(d.version).toBe("1.1.0"); expect(d.prompt).toBe("prompt.json"); }
+    for (const d of defs.slice(0, 2)) { expect(d.version).toBe(d.id === "consult_surgical_pitch" ? "1.1.1" : "1.1.0"); expect(d.prompt).toBe("prompt.json"); } // 1.1.1: the pitch output changed (recommendation_kind decided in code)
     for (const d of defs.slice(2)) expect(d.prompt).toBeUndefined();
     expect(getRubric("care_sentiment")!.inputs).toEqual(["external"]);
     expect(getRubric("consult_chair_affect")!.source).toBe("consult-chair-affect@v0.2");

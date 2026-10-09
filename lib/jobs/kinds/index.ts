@@ -25,6 +25,17 @@ import { rubricBenchKind } from "./rubric-bench";
 import { STUB_KINDS } from "./stubs";
 
 export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
+/**
+ * K3-2: the registry REFUSES a kind that has not answered "does it read room data?", and one that does but has no held-out guard. Pure, exported so a test can feed it a bad kind. Thrown at load.
+ */
+export function assertHeldOutDeclared(kinds: readonly JobKind[]): void {
+  for (const k of kinds) {
+    if (typeof k.roomData !== "boolean") throw new Error(`job kind "${k.name}" must declare roomData (true or false)`);
+    if (k.roomData && typeof k.heldOut !== "function") throw new Error(`job kind "${k.name}" reads room data and declares no heldOut guard`);
+    if (!k.roomData && !k.roomDataNote && !STUB_KINDS.includes(k)) throw new Error(`job kind "${k.name}" says it reads no room data: roomDataNote must say why`);
+  }
+}
+assertHeldOutDeclared(JOB_KINDS);
 export const KIND_BY_NAME = new Map(JOB_KINDS.map((k) => [k.name, k]));
 export const JOB_KIND_NAMES = JOB_KINDS.map((k) => k.name);
 /** The kinds that are registered but still fail not_implemented. Derived, so prose cannot drift. */

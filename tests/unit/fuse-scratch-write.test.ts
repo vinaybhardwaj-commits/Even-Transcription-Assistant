@@ -490,9 +490,11 @@ describe("9 — the writer refuses a session that is not finished (H1)", () => {
   it("the refusal happens before the events are read — the status check is the first gate after the session", async () => {
     sessionStatus = "recording";
     await call("scribe_replay_write", { session_id: SESSION_ID });
-    // exactly one app query: the session lookup itself
-    expect(appCalls).toHaveLength(1);
+    // the session lookup, then K3-3's held-out placement check (placements only); no event is read
+    expect(appCalls).toHaveLength(2);
     expect(appCalls[0]!.text).toMatch(/FROM bench_session s/);
+    expect(appCalls[1]!.text).toMatch(/FROM bench_session s WHERE s\.id/);
+    expect(appCalls.some((c) => /FROM bench_event/.test(c.text))).toBe(false);
   });
 
   it("an `ended` session still writes, exactly as before", async () => {

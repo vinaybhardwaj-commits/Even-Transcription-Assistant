@@ -42,6 +42,7 @@ vi.mock("@/lib/db", () => {
       return Promise.resolve([{ id: ROOM.id, slug: ROOM.slug, name: ROOM.name, disabled_at: null }]);
     }
     // Ruling 4: day_report must have a REAL session, or its projection assertions are vacuous.
+    if (/^SELECT s\.id FROM bench_session s WHERE s\.id = ANY/.test(text)) return Promise.resolve([]); // K3-1: the held-out exclusion query: none held out
     if (/FROM bench_session/.test(text)) return Promise.resolve(SESSIONS);
     if (/FROM bench_chunk/.test(text)) return Promise.resolve(CHUNKS);
     if (/FROM bench_event/.test(text)) return Promise.resolve([]);

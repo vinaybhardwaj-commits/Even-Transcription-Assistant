@@ -49,7 +49,8 @@ describe("registration", () => {
     expect(listed.description).toMatch(/UTC/);
     expect(listed.description).toMatch(/invoke/);
     expect(listed.description).toMatch(/touches no room/);
-    expect(Object.keys((t.inputSchema as { properties: Row }).properties).length).toBeLessThanOrEqual(13);
+    expect(listed.description).toMatch(/draft rubrics need lab:true \+ unit_keys/); // W2: a draft run needs explicit units
+    expect(Object.keys((t.inputSchema as { properties: Row }).properties).length).toBeLessThanOrEqual(15); // S7-1B: + by, min_n
   });
   it("the two job kinds are registered with invoke scope", async () => {
     const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
@@ -162,5 +163,20 @@ describe("S71-R4 G71 — a cost ceiling for llm_zdr rubrics, refused at submit",
     expect(await C.callsLeft(20, 0, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(90); // the day shows 100 including this job's own reservation (20 units x 2 = 40): the others reserve 60
     expect(await C.callsLeft(20, 30, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(60); // 30 already made by this job (its reservation stays 40)
     expect(await C.callsLeft(100, 590, {})).toBe(10); // the job ceiling binds
+  });
+});
+
+describe("S7-1B — the board action", () => {
+  it("is a READ action: a draft needs lab:true (refused otherwise, nothing queried), it queues nothing and writes nothing, and the answer is counts", async () => {
+    const r = await run({ action: "board", rubric_id: "encounter_vs_record", from: "2026-10-01", to: "2026-10-08" }, ["read"]);
+    expect(r).toMatchObject({ ok: false, error: "rubric_not_production" });
+    expect(statements).toEqual([]);
+    const ok = await run({ action: "board", rubric_id: "encounter_vs_record", from: "2026-10-01", to: "2026-10-08", lab: true, by: "room", min_n: 3 }, ["read"]);
+    expect(ok).toMatchObject({ ok: true, board_meta: { rubric_id: "encounter_vs_record", lab: true, by: "room", min_n: 3, status: "draft", note: "not for decisions" }, groups: [] });
+    expect(writes()).toEqual([]);
+    expect(inserted).toEqual([]);
+    expect(await run({ action: "board", from: "2026-10-01", to: "2026-10-08" }, ["read"])).toEqual({ ok: false, error: "rubric_id_required" });
+    expect(await run({ action: "board", rubric_id: "encounter_vs_record", from: "2026-10-01", to: "2026-10-08", lab: true, by: "nurse" }, ["read"])).toMatchObject({ ok: false, error: "bad_args" });
+    expect(await run({ action: "board", rubric_id: "room_mic_quality", from: "2026-10-01", to: "2026-10-08", lab: true, by: "doctor" }, ["read"])).toMatchObject({ ok: false, error: "board_by_doctor_needs_consult" });
   });
 });

@@ -23,6 +23,7 @@
  *                    NEVER touches the `visit` table — evidence for the future fuse (§11.3).
  */
 
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
 import { getPool, TOKEN_ENV } from "@/lib/brain/db";
 import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
@@ -138,6 +139,7 @@ const getState: McpTool = {
       if (!room) return { state: null, error: "unknown_room" };
       const d = pickIstDate(args);
       if ("error" in d) return { state: null, error: d.error };
+      if (isBlindRoomDay(d.date, room.id)) return { state: null, error: "blind_room_day" }; // SWEEP (REL2-R3): the brain picture (visits, clusters) of a held-out room-day is not served
       if (!(await roomExists(room.id))) return { state: null, error: "unknown_room" };
       const day = await findRoomDay(room.id, d.date);
       const state = await readGraph(getPool(), room.id, d.date, day?.id ?? null);
@@ -178,6 +180,7 @@ const listCues: McpTool = {
       // while believing it was making progress.
       if (cursorRaw && !decodeCueCursor(cursorRaw)) return { cues: [], error: "invalid_cursor" };
       const type = argStr(args, "type", 64);
+      if (isBlindRoomDay(d.date, room.id)) return { cues: [], error: "blind_room_day" }; // SWEEP (REL2-R3): cues (stt_turn included) of a held-out room-day are not served
       if (!(await roomExists(room.id))) return { cues: [], error: "unknown_room" };
       const out = await listCuesForDay(room.id, d.date, {
         since,

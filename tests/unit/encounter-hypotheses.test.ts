@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Answer = unknown[] | ((vals: unknown[]) => unknown[]);
 const db: { calls: Array<{ q: string; vals: unknown[] }>; queue: Answer[] } = { calls: [], queue: [] };
+vi.mock("@/lib/voice-blind", async (orig) => ({ ...((await orig()) as object), roomDayIsBlind: async () => false })); // REL2-R3: the held-out check is pinned in rel2-r3-sweep.test.ts; this file is about dispatch / the store
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...vals: unknown[]) => {
     db.calls.push({ q: strings.join("?").replace(/\s+/g, " ").trim(), vals });

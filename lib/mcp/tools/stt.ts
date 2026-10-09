@@ -7,6 +7,8 @@
  * Read-only. Transcript text of runs is returned only with include_text=true.
  */
 
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { guardRoomDay, guardWindow, roomDayIsBlind, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
@@ -146,7 +148,11 @@ const listSttRuns: McpTool = {
          ORDER BY COALESCE(e.recorded_at, to_timestamp(bw.start_ms / 1000.0)) DESC NULLS LAST
          LIMIT ${limit}
       `) as Array<Record<string, unknown>>;
-      const runs = rows.map((r) => {
+      // SWEEP (REL2-R3): a run whose subject is a bench window with ANY held-out placement is not listed (counted)
+      const blindWins = await windowsBlindAny(rows.filter((r) => r.subject_type === "bench_window").map((r) => String(r.subject_id)));
+      const visible = rows.filter((r) => !(r.subject_type === "bench_window" && blindWins.has(String(r.subject_id))));
+      const nBlindExcluded = rows.length - visible.length;
+      const runs = visible.map((r) => {
         // C3 — the subject block is ALWAYS present, but it must not become a BACK DOOR onto the
         // patient label. subjectLabel() prefers patient_label_raw for an encounter, so without
         // include_identity the label is built WITHOUT it and falls back to the id. Caught by
@@ -155,7 +161,7 @@ const listSttRuns: McpTool = {
         const subject = subjectOf({ ...(r as SubjectRowish), patient_label_raw: includeIdentity ? patient_label_raw : undefined });
         return includeIdentity ? { ...rest, subject, patient_label_raw } : { ...rest, subject };
       });
-      return { runs };
+      return { runs, n_blind_excluded: nBlindExcluded };
     }),
 };
 
@@ -186,6 +192,8 @@ const getSttRun: McpTool = {
       const enc = (await sql`SELECT id, patient_label_raw, recorded_at, detected_language, note_type FROM encounter WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       const win = (await sql`SELECT id, session_id, start_ms, end_ms, source_mic, state FROM bench_window WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       if (!enc[0] && !win[0] && kindRows.length === 0) return { encounter: null, runs: [], gold: null, error: "subject_not_found" };
+      // SWEEP (REL2-R3): a bench window with ANY held-out placement: its transcript runs are not served (checked before the runs, the transcripts and the gold are read)
+      if (win[0] && (await windowBlindAny(id))) return { encounter: null, runs: [], gold: null, error: "blind_room_day" };
       const runs = (await sql`
         SELECT engine, tier, transcript_english, transcript_original, note_text, latency_ms, error,
                judge_score, agreement_score, wer, cer, med_term_recall, is_winner, metrics_json
@@ -255,6 +263,9 @@ const getSttRun: McpTool = {
  * It reports per ENGINE, side by side, because every one of these is only meaningful as a
  * before-and-after — a number for `route` alone answers nothing.
  */
+const BLIND_DAYS_ARG = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS_ARG = BLIND_ROOM_DAYS.map(([, r]) => r);
+
 const routeTripwires: McpTool = {
   name: "scribe_route_tripwires",
   description:
@@ -292,6 +303,11 @@ const routeTripwires: McpTool = {
            AND tr.mode = 'batch' AND tr.tier = 'asr'
            AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
            AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
          GROUP BY tr.engine
          ORDER BY tr.engine
       `) as Array<{ engine: string; runs: number; errors: number; empty_runs: number; chars: string | number; audio_seconds: number | null; runs_with_timeline: number }>;
@@ -313,6 +329,11 @@ const routeTripwires: McpTool = {
            AND tr.metrics_json ? 'language_timeline'
            AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
            AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
          GROUP BY tr.engine
       `) as Array<{ engine: string; spans: number; engine_mix: Record<string, number> | null }>;
 
@@ -330,14 +351,33 @@ const routeTripwires: McpTool = {
            AND tr.metrics_json ? 'language_timeline'
            AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
            AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
          GROUP BY tr.engine
       `) as Array<{ engine: string; language_mix: Record<string, number> | null }>;
+
+      // K3-4: runs of a window with ANY held-out placement are left out of every figure above and counted here
+      const blindN = (await sql`
+        SELECT COUNT(*)::int AS n FROM transcription_run tr
+         WHERE tr.subject_type = 'bench_window' AND tr.mode = 'batch' AND tr.tier = 'asr'
+           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
+           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
+      `) as Array<{ n: number }>;
 
       const spanBy = new Map(mixes.map((m) => [m.engine, m]));
       const langBy = new Map(langMixes.map((m) => [m.engine, m.language_mix]));
 
       return {
         days,
+        n_blind_excluded: Number(blindN[0]?.n ?? 0),
         engines: rows.map((r) => {
           const chars = Number(r.chars ?? 0);
           const secs = Number(r.audio_seconds ?? 0);
@@ -402,6 +442,11 @@ const roomTurnSpeakers: McpTool = {
       const roomDayId = argStr(args, "room_day_id", 64);
       const limit = argInt(args, "limit", 200, 1, 500);
       if (!windowId && !roomDayId) return { error: "window_id or room_day_id is required", spans: [], summary: {} };
+      // S6-BLIND: placement first, content after. A held-out room-day is refused blind_room_day and an unplaced window window_unplaced, before room_turn_speaker is read.
+      if (windowId) { const g = await guardWindow(windowId); if (g) return { error: g, spans: [], summary: {} }; }
+      if (roomDayId) { const g = await guardRoomDay(roomDayId); if (g) return { error: g, spans: [], summary: {} }; }
+      // B1: each turn row has placements of its own (rts.room_day_id) besides its window's: if ANY row asked for is held out by ANY of them, the whole answer is refused (fail closed), before a span is read
+      if ((await rtsBlindRows({ windowId, roomDayId })) > 0) return { error: "blind_room_day", spans: [], summary: {} };
 
       const spans = (await sql`
         SELECT window_id, source_ref, speaker_idx, overlap_ms, room_day_id,
@@ -481,9 +526,11 @@ const silenceReadjudicate: McpTool = {
   },
   handler: async (args: ToolArgs) =>
     failSafe({ ok: false, dry_run: true }, async () => {
-      const { previewSilenceReadjudication, reopenSilentWindows, asOfIsInFuture, DETECTOR_NAME } = await import("@/lib/stt/silence");
+      const { previewSilenceReadjudication, reopenSilentWindows, asOfIsInFuture, DETECTOR_NAME, countBlindSilentWindows } = await import("@/lib/stt/silence");
       const roomId = argStr(args, "room_id", 64) || null;
       const roomDayId = argStr(args, "room_day_id", 64) || null;
+      // K4-4: a held-out room-day is refused (preview and apply) before anything is read or moved; held-out WINDOWS of other days are left out of the set and counted
+      if (roomDayId && (await roomDayIsBlind(roomDayId))) return { ok: false, dry_run: !argBool(args, "apply"), error: "blind_room_day" };
       const fromMs = args.from_ms === undefined || args.from_ms === null ? null : argInt(args, "from_ms", 0, 0, Number.MAX_SAFE_INTEGER);
       const toMs = args.to_ms === undefined || args.to_ms === null ? null : argInt(args, "to_ms", 0, 0, Number.MAX_SAFE_INTEGER);
       const includeReopened = argBool(args, "include_reopened");
@@ -507,7 +554,7 @@ const silenceReadjudicate: McpTool = {
       // the world now and returns the instant it did, which is the as_of to hand back.
       const pinned = { ...live, asOf: asOf || null };
 
-      if (!apply) return { ok: true, dry_run: true, scope, would: await previewSilenceReadjudication(pinned) };
+      if (!apply) return { ok: true, dry_run: true, scope, n_blind_excluded: await countBlindSilentWindows(pinned), would: await previewSilenceReadjudication(pinned) };
 
       // From here on it writes, so every refusal happens BEFORE the first row moves.
       const detector = argStr(args, "detector", 64);
@@ -535,7 +582,7 @@ const silenceReadjudicate: McpTool = {
       const remaining = await previewSilenceReadjudication(live);
       return {
         ok: true, dry_run: false, scope, batch: done.batch, detector: done.detector, as_of: done.as_of,
-        reopened: done.reopened, window_ids: done.window_ids.slice(0, 50),
+        reopened: done.reopened, window_ids: done.window_ids.slice(0, 50), n_blind_excluded: await countBlindSilentWindows(pinned),
         would, remaining_eligible: remaining.eligible.total,
       };
     }),

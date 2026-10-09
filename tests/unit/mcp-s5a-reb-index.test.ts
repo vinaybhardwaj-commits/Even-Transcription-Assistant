@@ -1,6 +1,8 @@
 /**
  * Operator MCP S5A (8 Oct 2026) — scribe_reb_index over reb_track_index (migration 0135). `sql` is mocked; every statement is recorded.
  */
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d), BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
@@ -63,7 +65,7 @@ describe("scribe_reb_index", () => {
     expect(out).toMatchObject({ ok: true, count: 2, next_cursor: null, include_shadow: false });
     expect((out.rows as Row[])[0]).toMatchObject({ id: 1, t0_ms: 1000, bytes: 10, r2_key: "reb/bw_1/asr.whisper__v1__c1.json", sha256: "a".repeat(64), finished_at: "2026-10-08T06:01:00.000Z" });
     // cursor, window, date, layer, engine, room, shadow, limit+1 — all bound
-    expect(rebStmt().values).toEqual([0, "bw_1", "bw_1", null, null, "asr", "asr", "whisper", "whisper", null, null, false, 201]);
+    expect(rebStmt().values).toEqual([0, "bw_1", "bw_1", null, null, "asr", "asr", "whisper", "whisper", null, null, false, BLIND_DAYS, BLIND_ROOMS, 201]); // REL2-R3: the held-out pairs are bound before the limit
     expect(rebStmt().text).toMatch(/ORDER BY id/);
     expect(rebStmt().text).not.toMatch(/bw_1/);
   });
@@ -71,7 +73,7 @@ describe("scribe_reb_index", () => {
   it("include_shadow flips the shadow filter only", async () => {
     await run({ ist_date: "2026-10-08", include_shadow: true });
     expect(rebStmt().values).toContain(true);
-    expect(rebStmt().values).toEqual([0, null, null, "2026-10-08", "2026-10-08", null, null, null, null, null, null, true, 201]);
+    expect(rebStmt().values).toEqual([0, null, null, "2026-10-08", "2026-10-08", null, null, null, null, null, null, true, BLIND_DAYS, BLIND_ROOMS, 201]);
   });
 
   it("keyset paging: limit+1 rows give next_cursor = the last returned id; limit clamps to 1000 and says so", async () => {

@@ -9,25 +9,28 @@
  * A consult with no t_close (still open) is refused (`no_data`); a consult on a held-out room-day is refused (`blind_room_day`) before its windows are looked up.
  */
 import { sql } from "@/lib/db";
-import { blindRefusal, refuse, type ReadResult } from "./common";
+import { blindPairOfUid, blindRefusal, refuse, type ReadResult } from "./common";
 import { BLIND_ROOM_DAYS } from "../blind-room-days";
 
 export type ConsultSpan = {
-  consult_key: string; room_id: string; t_open_ms: number; t_close_ms: number; ist_date: string; quality: string; attribution: string;
+  consult_key: string; consult_uid: string | null; room_id: string; t_open_ms: number; t_close_ms: number; ist_date: string; quality: string; attribution: string;
   windows: Array<{ window_id: string; abs_start_ms: number; abs_end_ms: number }>;
 };
 
 export async function readConsultSpan(consultKey: string): Promise<ReadResult<ConsultSpan>> {
   if (!/^[A-Za-z0-9_.:@-]{1,120}$/.test(consultKey)) return refuse("bad_unit_key");
   const c = (await sql`
-    SELECT consult_key, room_id, t_open, t_close, quality, attribution, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date
-      FROM eta_encounter_windows WHERE consult_key = ${consultKey}::text LIMIT 1
-  `) as Array<{ consult_key: string; room_id: string | null; t_open: string | Date; t_close: string | Date | null; quality: string; attribution: string; ist_date: string }>;
-  const r = c[0];
+    SELECT consult_key, consult_uid, room_id, t_open, t_close, quality, attribution, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date
+      FROM eta_encounter_windows WHERE consult_key = ${consultKey}::text
+  `) as Array<{ consult_key: string; consult_uid?: string | null; room_id: string | null; t_open: string | Date; t_close: string | Date | null; quality: string; attribution: string; ist_date: string }>;
+  // SWEEP (REL2-R3): no row is picked by LIMIT 1: if ANY row of this key, or of its consult_uid (not unique: one row per machine), is on a held-out pair the consult is refused, whatever order the rows come in
+  const heldRow = c.find((x) => x.room_id && blindRefusal(x.room_id, x.ist_date));
+  if (heldRow) return blindRefusal(heldRow.room_id!, heldRow.ist_date)!;
+  const r = c.find((x) => x.room_id) ?? c[0];
   if (!r) return refuse("not_found", "no such consult window");
   if (!r.room_id) return refuse("no_data", "the consult window has no room");
-  const blind = blindRefusal(r.room_id, r.ist_date); // the held-out set, BEFORE the windows are looked up
-  if (blind) return blind;
+  const sibling = await blindPairOfUid(r.consult_uid);
+  if (sibling) return blindRefusal(sibling.room_id, sibling.ist_date)!; // the held-out set, BEFORE the windows are looked up
   if (!r.t_close) return refuse("no_data", "the consult window is still open");
   const open = new Date(r.t_open).toISOString(), close = new Date(r.t_close).toISOString();
   const ws = (await sql`
@@ -38,7 +41,7 @@ export async function readConsultSpan(consultKey: string): Promise<ReadResult<Co
   `) as Array<{ window_id: string; abs_start: number | string; abs_end: number | string }>;
   return {
     ok: true,
-    data: { consult_key: r.consult_key, room_id: r.room_id, t_open_ms: Date.parse(open), t_close_ms: Date.parse(close), ist_date: r.ist_date, quality: r.quality, attribution: r.attribution,
+    data: { consult_key: r.consult_key, consult_uid: typeof r.consult_uid === "string" && r.consult_uid ? r.consult_uid : null, room_id: r.room_id, t_open_ms: Date.parse(open), t_close_ms: Date.parse(close), ist_date: r.ist_date, quality: r.quality, attribution: r.attribution,
       windows: ws.map((x) => ({ window_id: x.window_id, abs_start_ms: Number(x.abs_start), abs_end_ms: Number(x.abs_end) })) },
   };
 }

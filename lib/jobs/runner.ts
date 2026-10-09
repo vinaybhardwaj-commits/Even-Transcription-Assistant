@@ -18,7 +18,7 @@ import {
   readJob,
   saveStep,
 } from "./store";
-import { INVOCATION_BUDGET_MS, LEASE_MS, MAX_FAILURES, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS, type JobRow } from "./types";
+import { INVOCATION_BUDGET_MS, LEASE_MS, MAX_FAILURES, MAX_JOBS_PER_INVOCATION, MAX_STEP_MS, progressPatchOf, type JobRow } from "./types";
 import { errorCodeOf, jobError } from "./errors";
 import { randomUUID } from "node:crypto";
 import { withPoolContext } from "@/lib/service-pool";
@@ -97,6 +97,15 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
   }
 
   const step = job.step ?? kind.first;
+  // K3-2 / K4-3: the held-out rule at EVERY step start (placements only), so a job inserted straight into the table at any step, or one queued before the rule, fails with zero reads. A guard that throws is a failed step (counted, retried).
+  if (kind.heldOut) {
+    const held = await kind.heldOut(job.args).catch((e: unknown) => { console.error("[jobs] held-out guard threw", JSON.stringify({ job_id: job.id, kind: job.kind, err: String((e as Error)?.message ?? e).slice(0, 160) })); throw e; });
+    if (held) {
+      const rows = await failJob(job.id, jobError(held), runner);
+      if (rows > 0) await sarvamJobEnded(job, "failed");
+      return { ...base, step, outcome: rows === 0 ? "lease_lost" : "failed", ms: Date.now() - started };
+    }
+  }
   let outcome;
   try {
     const ctx = { job, step, args: job.args, progress: job.progress, runner };
@@ -117,7 +126,7 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
     const after = await recordFailure({
       id: job.id,
       step,
-      progress: job.progress,
+      progress: { ...job.progress, ...(progressPatchOf(e) ?? {}) },
       error: jobError("step_threw", `${step} failed after ${job.failures + 1} attempts`),
       maxFailures: MAX_FAILURES,
       runner,

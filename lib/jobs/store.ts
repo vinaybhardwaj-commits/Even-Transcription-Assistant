@@ -96,7 +96,7 @@ export async function insertJob(input: {
 export const LLM_SUBMIT_LOCK_KEY = 7_102_026_001;
 export async function insertJobCapped(
   input: { id: string; kind: string; args: Record<string, unknown>; actor: string | null },
-  g: { planned: number; dailyCap: number; ids: string[]; factor: number; est: { gold: number; grokbot_agreement: number; human_v: number; evr_perturb: number } },
+  g: { planned: number; dailyCap: number; jobCap: number; ids: string[]; factor: number; est: { gold: number; grokbot_agreement: number; human_v: number; evr_perturb: number } },
 ): Promise<JobRow | null> {
   const results = (await sql.transaction([
     sql`SELECT pg_advisory_xact_lock(${LLM_SUBMIT_LOCK_KEY}::bigint)`,
@@ -109,7 +109,7 @@ export async function insertJobCapped(
            WHERE r.rubric_id = ANY(${g.ids}::text[]) AND (r.started_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date)
          + (SELECT coalesce(sum(CASE j.kind
                   WHEN 'rubric_run' THEN coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(j.args->'unit_keys') = 'array' THEN j.args->'unit_keys' END), (j.args->>'limit')::int, 200) * ${g.factor}::int
-                  WHEN 'rubric_bench' THEN CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${g.est.grokbot_agreement}::int WHEN 'human_v' THEN ${g.est.human_v}::int WHEN 'evr_perturb' THEN ${g.est.evr_perturb}::int ELSE ${g.est.gold}::int END
+                  WHEN 'rubric_bench' THEN CASE WHEN j.args->'reserved_calls' IS NOT NULL THEN (CASE WHEN (j.args->>'reserved_calls') ~ '^[0-9]{1,9}$' THEN least((j.args->>'reserved_calls')::int, ${g.jobCap}::int) ELSE ${g.jobCap}::int END) ELSE (CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${g.est.grokbot_agreement}::int WHEN 'human_v' THEN ${g.est.human_v}::int WHEN 'evr_perturb' THEN ${g.est.evr_perturb}::int ELSE ${g.est.gold}::int END) END
                   ELSE 0 END), 0)
               FROM scribe_job j
              WHERE j.kind IN ('rubric_run', 'rubric_bench') AND j.args->>'rubric_id' = ANY(${g.ids}::text[])

@@ -136,6 +136,10 @@ function schema(): void {
       started_at timestamptz, ended_at timestamptz, upload_state text);
     CREATE TABLE cue (id text PRIMARY KEY, room_day_id text, type text, source text, source_ref text,
       payload jsonb, at timestamptz DEFAULT now());
+    -- K3-2: the held-out job guard reads placements (it never reads content)
+    CREATE TABLE IF NOT EXISTS room_day (id text PRIMARY KEY, room_id text, ist_date date);
+    CREATE TABLE IF NOT EXISTS jev_window_text (window_id text PRIMARY KEY, room_day_id text);
+    CREATE TABLE IF NOT EXISTS bench_session (id text PRIMARY KEY, room_id text, started_at timestamptz DEFAULT now(), ended_at timestamptz);
     CREATE TABLE voice_print (doctor_id text PRIMARY KEY, centroid bytea);
     CREATE TABLE clinician (id text PRIMARY KEY, full_name text, status text NOT NULL DEFAULT 'active', deleted_at timestamptz);
   `);
@@ -1188,12 +1192,13 @@ describe.skipIf(!HAVE_DOCKER)("C2 merge gate 4 — every voiceprint reader is ac
       .filter((f) => /^(lib|app|scripts)\//.test(f) && /\.[cm]?[jt]sx?$/.test(f))
       .filter((f) => READS.test(textOf(f) ?? ""))
       .sort();
-    const MATCHING_FILTERED = ["app/[slug]/api/voice/identify/route.ts", "lib/stt/diarize-window.ts"];
+    const MATCHING_FILTERED = ["app/[slug]/api/voice/identify/route.ts", "lib/stt/diarize-window.ts", "lib/voice-search.ts"]; // S6B: the search query centroid is the ACTIVE clinician's only, compared in memory
     const OPERATOR_UNFILTERED = [
       "app/api/admin/doctors/[id]/voice-samples/[sampleId]/embedding/route.ts",
       "app/api/admin/doctors/[id]/voice-samples/route.ts",
       "app/api/admin/doctors/[id]/voiceprint/embedding/route.ts",
       "lib/mcp/tools/voice.ts",
+      "lib/voice-console.ts", // S6A: the console shows every voiceprint (overview) and reads active centroids for the pair view, in memory only; counts and cosines leave, no vector
     ];
     const PRESENCE_ONLY = ["app/[slug]/page.tsx"]; // SELECT 1 — whether the signed-in doctor is enrolled; no vector
     const WRITER_SIDE = ["lib/voice-samples.ts"]; // recomputeCentroid reads samples to write the centroid

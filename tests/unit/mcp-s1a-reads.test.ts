@@ -318,7 +318,7 @@ describe("scribe_tape_day", () => {
     statements.length = 0;
     for (const d of ["2026-02-30", "2026-04-31", "2026-00-10", "2025-02-29"]) expect(await run("scribe_tape_day", { ist_date: d })).toEqual({ ok: false, error: "invalid_ist_date" });
     expect(await run("scribe_tape_day", { ist_date: "2028-02-29" })).toMatchObject({ ok: true });
-    expect(statements.filter((s) => /room_audio_day/.test(s))).toHaveLength(1);
+    expect(statements.filter((s) => /room_audio_day/.test(s))).toHaveLength(2); // the listing and (REL2-R3) the held-out count
     expect(await run("scribe_tape_day", { ist_date: DAY, room: "nope" })).toEqual({ ok: false, error: "unknown_room", room: "nope" });
     answer = (text) => (/FROM room_audio_day/.test(text) ? Object.assign(new Error('relation "room_audio_day" does not exist'), { code: "42P01" }) : []);
     expect(await run("scribe_tape_day", { ist_date: DAY })).toMatchObject({ ok: true, not_collected: true, ist_date: DAY });

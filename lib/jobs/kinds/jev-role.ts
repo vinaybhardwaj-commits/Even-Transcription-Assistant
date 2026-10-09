@@ -37,6 +37,7 @@ import { SETTING } from "@/lib/jev/prompts/arm-d-v1";
 import { ROLE_PROMPT_VERSION, ROLE_QUESTION_ID, roleQid } from "@/lib/jev/prompts/role-v1";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { roomDayArgHeldOut, splitBlindWindows } from "../held-out";
 
 export const JEV_ROLE_KIND = "jev_role";
 const CHAR_FLOOR = 40;
@@ -70,9 +71,11 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
   const promptVersion = ctx.args.prompt_version as string;
   const allowNonEnglish = flagOn("ETA_JEV_ROLE_ALLOW_NON_ENGLISH");
 
-  const windows = (await sql`
+  const allWindows = (await sql`
     SELECT window_id FROM room_diarize_window WHERE room_day_id = ${roomDayId} AND state = 'ok'
   `) as Array<{ window_id: string }>;
+  // K4-2: a window with ANY held-out placement is never read or classified; counted
+  const { kept: windows, excluded: n_blind_excluded } = await splitBlindWindows(allWindows, (w) => w.window_id);
 
   // F7: J0's own record of whether a window's text was confirmed English, keyed by window_id
   // (jev_window_text.window_id and room_diarize_window.window_id both reference bench_window(id)).
@@ -207,6 +210,7 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
   return doneWith({
     room_day_id: roomDayId,
     windows_total: windows.length,
+    n_blind_excluded,
     windows_processed: windowsProcessed,
     windows_skipped_non_english: windowsSkippedNonEnglish,
     speakers_written: speakersWritten,
@@ -219,6 +223,8 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
 export const jevRoleKind: JobKind = {
   name: JEV_ROLE_KIND,
   first: "run",
+  roomData: true,
+  heldOut: roomDayArgHeldOut,
   scope: "invoke",
   parseArgs,
   run,

@@ -28,6 +28,9 @@ import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
+import { voiceConsole } from "./voice-console";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { blockedSampleSources, roomDayIsBlind } from "@/lib/voice-blind";
 
 const PRESIGN_SECONDS = 3600;
 
@@ -98,6 +101,8 @@ const listVoiceSamples: McpTool = {
       if (!clinicianId) return { samples: [], error: "clinician_id_required" };
       const includeUrls = argBool(args, "include_urls");
       const rows = await listSamples(clinicianId);
+      // S6-BLIND: a sample whose source is a held-out (or unplaced) bench WINDOW gets no URL; an encounter source has no room-day link and is left as is (W3). Room audio keys (bench/) are never presigned here.
+      const blocked = includeUrls ? await blockedSampleSources(rows.map((r) => r.source_encounter_id).filter((x): x is string => typeof x === "string")) : new Set<string>();
       const samples = await Promise.all(
         rows.map(async (s) => {
           const base = {
@@ -114,6 +119,7 @@ const listVoiceSamples: McpTool = {
             match_confidence: s.match_confidence,
           };
           if (!includeUrls || !s.audio_r2_key) return base;
+          if ((s.source_encounter_id && blocked.has(s.source_encounter_id)) || s.audio_r2_key.startsWith("bench/")) return { ...base, url_withheld: "blind_room_day" };
           let url: string | null = null;
           try {
             url = await signGetUrl({ key: s.audio_r2_key, expiresInSeconds: PRESIGN_SECONDS, contentType: s.content_type ?? undefined });
@@ -148,6 +154,7 @@ const getClusters: McpTool = {
       if (!room) return { clusters: [], error: "unknown_room" };
       const d = pickIstDate(args);
       if ("error" in d) return { clusters: [], error: d.error };
+      if (isBlindRoomDay(d.date, room.id)) return { clusters: [], error: "blind_room_day" }; // S6-BLIND: a held-out room + date is refused before any lookup
       if (!(await roomExists(room.id))) return { clusters: [], error: "unknown_room" };
       const day = await findRoomDay(room.id, d.date);
       if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, clustering: CLUSTERING_STATUS, clusters: [] };
@@ -194,7 +201,7 @@ const diarizeSegments: McpTool = {
         limit: argInt(args, "limit", SESSION_WINDOW_LIMIT_DEFAULT, 1, SESSION_WINDOW_LIMIT_MAX),
         // raw, not argStr: an overlong or non-string engine must reach pickQuery and be refused, never read as absent
         engine: args.engine == null ? null : String(args.engine),
-      });
+      }); // S6-BLIND: lookupSegments is guarded by default
       return r.ok ? { segments: r.payload } : { segments: null, error: r.error };
     }),
 };
@@ -225,6 +232,7 @@ const encounterHypotheses: McpTool = {
       const runId = argStr(args, "run_id", 64);
       if (runId) {
         const run = await readRun(runId);
+        if (run && (await roomDayIsBlind(String((run as { room_day_id?: unknown }).room_day_id ?? "")))) return { run: null, error: "blind_room_day" }; // SWEEP (REL2-R3)
         return run ? { run } : { run: null, error: "run_not_found" };
       }
       let roomDayId = argStr(args, "room_day_id", 64);
@@ -237,11 +245,13 @@ const encounterHypotheses: McpTool = {
         if (!room) return { run: null, error: "unknown_room" };
         const d = pickIstDate(args);
         if ("error" in d) return { run: null, error: d.error };
+        if (isBlindRoomDay(d.date, room.id)) return { run: null, error: "blind_room_day" };
         const day = await findRoomDay(room.id, d.date);
         if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, run: null, runs_for_day: 0 };
         roomDayId = day.id;
         resolved = { room_id: room.id, ist_date: d.date };
       }
+      if (await roomDayIsBlind(roomDayId)) return { run: null, error: "blind_room_day" }; // SWEEP (REL2-R3): also when the room-day id was given directly
       const r = await readLatestRun(roomDayId, version);
       return { ...resolved, room_day_id: roomDayId, smoother_version: version ?? "any", runs_for_day: r.runs_for_day, run: r.run };
     }),
@@ -281,12 +291,14 @@ const encounterShadowRun: McpTool = {
       if (!room) return { ok: false, error: "unknown_room" };
       const d = pickIstDate(args);
       if ("error" in d) return { ok: false, error: d.error };
+      if (isBlindRoomDay(d.date, room.id)) return { ok: false, error: "blind_room_day" }; // SWEEP (REL2-R3): no shadow run on a held-out room-day
       let roomDayId = argStr(args, "room_day_id", 64);
       if (!roomDayId) {
         const day = await findRoomDay(room.id, d.date);
         if (!day) return { ok: false, error: "no_room_day", room_id: room.id, ist_date: d.date };
         roomDayId = day.id;
       }
+      if (await roomDayIsBlind(roomDayId)) return { ok: false, error: "blind_room_day" };
       // v2 when asked for this call (replay) or when the fusion flag is on; the flag parser throws on an
       // unrecognised value, which failSafe reports rather than reading it as off.
       const replay = argBool(args, "fusion");
@@ -299,4 +311,4 @@ const encounterShadowRun: McpTool = {
     }),
 };
 
-export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses, encounterShadowRun];
+export const VOICE_TOOLS: McpTool[] = [voiceHealth, listVoiceprints, listVoiceSamples, getClusters, diarizeSegments, encounterHypotheses, encounterShadowRun, voiceConsole];

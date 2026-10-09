@@ -46,6 +46,8 @@ export type DayEvidence = {
   day_end_ms: number;
   level_samples: BenchLevelSample[];
   windows: ShadowWindow[];
+  /** G2: windows left out of `windows` because ANY of their placements is held out */
+  n_blind_excluded?: number;
   /** Stretches where the recorder was NOT running, from the gaps between chunks. */
   tape_off: TapeOff[];
   /**

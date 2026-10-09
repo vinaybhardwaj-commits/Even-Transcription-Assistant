@@ -84,7 +84,7 @@ const CAPTURES = [FLOOR, CURRENT];
 /** Every name either capture published, each with the most recent schema and scope for it. */
 const LIVE_TOOLS: LiveTool[] = [...new Map([...FLOOR.tools, ...CURRENT.tools].map((t) => [t.name, t])).values()];
 // scribe_health_routes (S2L) postdates both captures: a new group member, read scope
-const SCOPES: Record<string, Scope> = { ...FLOOR.scopes, ...CURRENT.scopes, scribe_health_routes: "read" };
+const SCOPES: Record<string, Scope> = { ...FLOOR.scopes, ...CURRENT.scopes, scribe_health_routes: "read", scribe_voice_console: "read" }; // S6A: the voice console is a new scribe_voice member
 
 /**
  * Argument-contract changes that were RULED, not drifted into. Each names the tool, the argument, the
@@ -345,6 +345,7 @@ describe("every group variant runs its original handler", () => {
     ["scribe_voice", { view: "prints" }, "scribe_list_voiceprints", {}],
     ["scribe_voice", { view: "samples", clinician_id: "c_1", include_urls: true }, "scribe_list_voice_samples", { clinician_id: "c_1", include_urls: true }],
     ["scribe_voice", { view: "window_speakers", window_id: "bw_1", limit: 50 }, "scribe_window_speakers", { window_id: "bw_1", limit: 50 }],
+    ["scribe_voice", { view: "console", action: "pairs", min_cosine: 0.7 }, "scribe_voice_console", { action: "pairs", min_cosine: 0.7 }],
     ["scribe_room_command", { kind: "start_day", room: "r1", override_pause: true }, "scribe_start_recording", { room: "r1", override_pause: true }],
     ["scribe_room_command", { kind: "pause_day", room: "r1" }, "scribe_pause_recording", { room: "r1" }],
     ["scribe_room_command", { kind: "resume_day", room_id: "room_1" }, "scribe_resume_recording", { room_id: "room_1" }],

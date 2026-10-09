@@ -40,6 +40,7 @@ CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text, 
 CREATE TABLE room_span_emotion (window_id text NOT NULL, diarize_run_id text NOT NULL, run_start_ms bigint NOT NULL, run_end_ms bigint NOT NULL, chunk_idx integer NOT NULL, speaker_idx integer NOT NULL,
   segment_start_ms bigint NOT NULL, segment_end_ms bigint NOT NULL, state text NOT NULL, anger double precision, disgust double precision, enthusiasm double precision, fear double precision,
   happiness double precision, neutral double precision, sadness double precision, top_label text, top_score double precision, PRIMARY KEY (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx));
+ALTER TABLE room_span_emotion ADD COLUMN room_day_id text;
 CREATE TABLE jev_window_text (window_id text PRIMARY KEY, room_day_id text NOT NULL, english text, source text NOT NULL, char_count int NOT NULL);
 CREATE TABLE room_audio_state (id bigserial PRIMARY KEY, room_id text NOT NULL, source text NOT NULL DEFAULT 'kiosk', ist_day date NOT NULL, state text NOT NULL, ts_start timestamptz NOT NULL, ts_end timestamptz NOT NULL);
 CREATE TABLE room_audio_day (room_id text NOT NULL, ist_day date NOT NULL, min_off integer NOT NULL DEFAULT 0, min_muted integer NOT NULL DEFAULT 0, min_zero_all_day integer NOT NULL DEFAULT 0,
@@ -59,6 +60,7 @@ beforeAll(() => {
   pg.exec("ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS consult_uid text, ADD COLUMN IF NOT EXISTS warehouse_prescription_uid text;");
   pg.exec(readFileSync("db/migrations/0082_scribe_job.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0139_rubric_results.sql", "utf8"));
+  pg.exec(readFileSync("db/migrations/0135_reb_track_index.sql", "utf8")); // S7-2B: the consult text reader looks the consult up in the index
   H.sql = pg.sql as never;
   const rows = (s: string) => pg.exec(s);
   rows(`
@@ -409,7 +411,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     const R = await import("@/lib/rubrics/readers");
     const LLM = await import("@/lib/rubrics/llm");
     const t = await R.readConsultText("enc1@m1");
-    expect(t.ok && t.data.source).toBe("database");
+    expect(t.ok && t.data.source).toBe("window_english");
     expect(t.ok && t.data.lines.map((l) => [l.t_ms, l.speaker, l.text])).toEqual([[0, "doctor", "alpha"], [8000, "other", "bravo"], [25000, "doctor", "charlie"]]); // delta (40 s) is after the close; the unknown turn would read "unknown"
     statements.length = 0;
     expect(await R.readConsultText("enc3@m2")).toMatchObject({ ok: false, reason: "blind_room_day" });
@@ -787,6 +789,303 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
+  it("G80 — a model outage (llm_unavailable) MID-BATCH keeps the calls already made: the failed step records progress.llm_calls = every attempt so far and the position, so a retry neither forgets nor repeats them (run path)", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const { OpenRouterError } = await import("@/lib/openrouter");
+    for (const k of ["encA@m1", "encB@m1", "encC@m1"]) await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      // units 1-2 are scored (2 calls); unit 3 throws on every claim: 3 failures (MAX_FAILURES) end the job. Every attempt is a real call: 2 + 3 = 5.
+      const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"] });
+      expect(run.job).toMatchObject({ status: "failed" });
+      expect(calls).toBe(5);
+      expect(run.job.progress).toMatchObject({ idx: 2, llm_calls: 5 });
+    } finally {
+      LLM.setRubricChatForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("G80 — the same on the bench path (labelled bench): the throwing batch keeps llm_calls and the position", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const { OpenRouterError } = await import("@/lib/openrouter");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const rows = ["g1", "g2", "g3", "g4"].map((k) => JSON.stringify({ unit_key: k, expected: { surgery_recommended: false } })).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", rows);
+      for (const k of ["g1", "g2", "g3", "g4"]) mem.set(`rubric/bench/consult_surgical_pitch/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 1, speaker: "doctor", text: "hello" }] }));
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch" });
+      expect(b.job).toMatchObject({ status: "failed" });
+      expect(calls).toBe(5);
+      expect(b.job.progress).toMatchObject({ idx: 2, llm_calls: 5 });
+    } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("Q2-1 — the same on the evr_perturb bench path (evaluateEvrStep): an outage on the 2nd window keeps llm_calls and the position; without the progress patch the record is the pre-step one", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const { OpenRouterError } = await import("@/lib/openrouter");
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc1AaaaaaaaaaaZ', warehouse_prescription_uid = 'recA' WHERE consult_key = 'enc1@m1'`;
+    REC.setMetabaseForTests(async () => [{ rec_uid: "recA", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 1 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "500 mg", freq: "BD", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      // three explicit windows (the same consult three times: the fixture has one that qualifies); window 1 is scored, window 2 meets the outage on every claim
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, { unit_key: "enc1@m1" }, { unit_key: "enc1@m1" }, { unit_key: "enc1@m1" }].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      const b = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(b.job).toMatchObject({ status: "failed" });
+      expect(calls).toBeGreaterThanOrEqual(4); // 1 scored window + 3 failing claims
+      expect(b.job.progress).toMatchObject({ idx: 1, llm_calls: calls });
+    } finally {
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+      mem.delete("rubric/bench/encounter_vs_record/evr_perturb.jsonl");
+    }
+  });
+
+  it("Q2-2 — a bench submit reserves by the REAL set size: a 500-item gold set holds 600 (the per-job ceiling) and blocks a second job that would pass under the old fixed 60; a small set keeps the floor", async () => {
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const C = await import("@/lib/rubrics/llm-cap");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "1000";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const scopes = new Set(["invoke"] as never) as ReadonlySet<never>;
+    const run250 = () => submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: Array.from({ length: 250 }, (_, i) => `q${i}`) }, actor: "mcp:t", scopes }); // 500 calls
+    try {
+      const gold = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify({ unit_key: `g${i}`, expected: { surgery_recommended: false } })).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", gold(500));
+      const b = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+      expect((b.args as { reserved_calls?: number }).reserved_calls).toBe(600);
+      expect(await C.dayUsage()).toEqual({ used: 0, queued: 600 });
+      await expect(run250()).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 600 + 500 > 1000 (at the old 60: 560 would have passed)
+      // a SMALL set keeps the floor (the fixed per-set estimate), not 2 x items
+      await pg.exec(`DELETE FROM scribe_job;`);
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", gold(5));
+      const small = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+      expect((small.args as { reserved_calls?: number }).reserved_calls).toBe(60);
+      expect(await C.dayUsage()).toEqual({ used: 0, queued: 60 });
+      await expect(run250()).resolves.toBeTruthy(); // 60 + 500 <= 1000
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      mem.delete("rubric/bench/consult_surgical_pitch/gold.jsonl");
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("Q2-2 — a set that cannot be read (missing, malformed) reserves the WHOLE per-job ceiling, never the fixed estimate", async () => {
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const C = await import("@/lib/rubrics/llm-cap");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "1000";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const scopes = new Set(["invoke"] as never) as ReadonlySet<never>;
+    try {
+      for (const body of [null, "{not json\n"]) {
+        await pg.exec(`DELETE FROM scribe_job;`);
+        if (body === null) mem.delete("rubric/bench/consult_surgical_pitch/gold.jsonl"); else mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", body);
+        const b = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+        expect((b.args as { reserved_calls?: number }).reserved_calls, String(body)).toBe(600);
+        expect(await C.dayUsage()).toEqual({ used: 0, queued: 600 });
+        await expect(submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: Array.from({ length: 225 }, (_, i) => `u${i}`) }, actor: "mcp:t", scopes })).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 600 + 450 > 1000
+      }
+      // the per-job ceiling is the env one, not a literal
+      process.env.RUBRIC_LLM_JOB_CALL_CAP = "300";
+      await pg.exec(`DELETE FROM scribe_job;`);
+      mem.delete("rubric/bench/consult_surgical_pitch/gold.jsonl");
+      expect(((await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes })).args as { reserved_calls?: number }).reserved_calls).toBe(300);
+    } finally {
+      delete process.env.RUBRIC_LLM_JOB_CALL_CAP;
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("Q2-2 — a loader that THROWS reserves the whole ceiling too; and the store.ts copy of the queued-bench reservation (insertJobCapped) honours args.reserved_calls ALONE", async () => {
+    const L = await import("@/lib/sarvam-lab");
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    const C = await import("@/lib/rubrics/llm-cap");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "1000";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const scopes = new Set(["invoke"] as never) as ReadonlySet<never>;
+    try {
+      L.setLabStoreForTests({ get: async () => { throw new Error("lab store down"); }, put: async () => "ok", list: async () => [] });
+      const b = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+      expect((b.args as { reserved_calls?: number }).reserved_calls).toBe(600);
+      // restore the in-memory store for the tests that follow
+      L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, bb) => { mem.set(k, bb); return "ok"; }, list: async (pr) => [...mem.keys()].filter((k) => k.startsWith(pr)) });
+      // the store copy alone: a queued bench that reserved 600 blocks a 500-call insert under a 1000 cap (the fixed estimate, 60, would let it through)
+      await pg.exec(`DELETE FROM scribe_job;`);
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status) VALUES ('job_q22', 'rubric_bench', ${JSON.stringify({ rubric_id: "consult_surgical_pitch", reserved_calls: 600 })}::jsonb, 'mcp:t', 'queued')`;
+      const args = { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["z1"], limit: 200 };
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: "1000" }))).toBeNull();
+      await pg.sql`UPDATE scribe_job SET args = ${JSON.stringify({ rubric_id: "consult_surgical_pitch" })}::jsonb WHERE id = 'job_q22'`; // no reserved_calls: the floor (60)
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: "1000" }))).not.toBeNull();
+    } finally {
+      L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, bb) => { mem.set(k, bb); return "ok"; }, list: async (pr) => [...mem.keys()].filter((k) => k.startsWith(pr)) });
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  describe("S7-2B consult_text from palimpsest's consult-clip tracks (reb_track_index + R2 reb/<date>/<room>/_consults/)", () => {
+    const UID = "ConsultUidEnc1AaaaaaaaaaaZ";
+    const OPEN = EP("10:00:00"); // enc1@m1: room r1, open 10:00:00, close 10:00:30 IST on 2026-10-08
+    const key = (layer: string, cfg: string, uid = UID, room = "r1", date = "2026-10-08") => `reb/${date}/${room}/_consults/${uid}/tracks/${layer}.sarvam-saaras-v3__saaras-v3__${cfg}.json`;
+    const seg = (t0: number, t1: number, speaker: string, text: string, lang = "en-IN") => ({ t0_ms: OPEN + t0, t1_ms: OPEN + t1, speaker, lang, text, extras: {} });
+    const track = (layer: string, segments: unknown[], status = "ok") => JSON.stringify({ config: {}, config_hash: "x", engine: "sarvam-saaras-v3", extras: {}, layer, segments, status, window_id: `consult-${UID}` });
+    const sha = async (b: string) => (await import("node:crypto")).createHash("sha256").update(b, "utf8").digest("hex");
+    async function put(layer: string, cfg: string, body: string, o: { status?: string; finished?: string; shaOf?: string; uid?: string; r2key?: string } = {}) {
+      mem.set(o.r2key ?? key(layer, cfg), body);
+      await pg.sql`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256, finished_at) VALUES (${`consult-${o.uid ?? UID}`}, '2026-10-08', 'r1', ${layer}, 'sarvam-saaras-v3', 'v3', ${cfg}, ${o.status ?? "ok"}, ${o.r2key ?? key(layer, cfg)}, ${o.shaOf ?? (await sha(body))}, ${o.finished ?? "2026-10-08T12:00:00Z"}::timestamptz)`;
+    }
+    const read = async () => (await import("@/lib/rubrics/readers/consult-text")).readConsultText("enc1@m1", {});
+    beforeEach(async () => {
+      await pg.exec(readFileSync("db/migrations/0135_reb_track_index.sql", "utf8"));
+      await pg.exec(`DELETE FROM reb_track_index;`);
+      await pg.sql`UPDATE eta_encounter_windows SET consult_uid = ${UID} WHERE consult_key = 'enc1@m1'`;
+    });
+
+    it("the English translate track is preferred over the native stt track; segments are clamped to the consult span (an overrun end is cut, a segment wholly outside is dropped); evidence fields: source + config_hash", async () => {
+      await put("stt", "11111111", track("stt", [seg(1000, 3000, "doctor_0", "namaste", "hi-IN")]));
+      await put("translate", "22222222", track("translate", [seg(-500, 2000, "doctor_0", "good morning"), seg(5000, 30_560, "patient_1", "my knee hurts"), seg(40_000, 41_000, "patient_1", "outside the span")]));
+      const t = await read();
+      expect(t.ok).toBe(true);
+      if (!t.ok) return;
+      expect(t.data).toMatchObject({ source: "reb_translate", config_hash: "22222222", n_integrity_skipped: 0, span_ms: 30_000 });
+      expect(t.data.lines).toEqual([
+        { t_ms: 0, speaker: "doctor", speaker_idx: 0, text: "good morning" }, // the start clamped to the open
+        { t_ms: 5000, speaker: "other", speaker_idx: 1, text: "my knee hurts" },
+      ]);
+      expect(Math.max(...t.data.turns.map((x) => x.end_ms))).toBe(30_000); // the 0.56 s overrun is cut at the close
+    });
+
+    it("translate wins even when a wholly-English stt track exists too (the layer order, not the language, decides)", async () => {
+      await put("stt", "55555555", track("stt", [seg(1000, 3000, "doctor_0", "native english stt", "en-IN")]), { finished: "2026-10-08T14:00:00Z" });
+      await put("translate", "66666666", track("translate", [seg(1000, 3000, "doctor_0", "translated")]), { finished: "2026-10-08T09:00:00Z" });
+      const t = await read();
+      expect(t.ok && t.data).toMatchObject({ source: "reb_translate", config_hash: "66666666", lines: [{ text: "translated" }] });
+    });
+
+    it("an stt track is used only when EVERY segment is English; otherwise the existing window_english path answers", async () => {
+      await put("stt", "33333333", track("stt", [seg(1000, 3000, "doctor_0", "hello", "en-IN"), seg(4000, 6000, "patient_1", "dard hai", "hi-IN")]));
+      const mixed = await read();
+      expect(mixed.ok && mixed.data.source).toBe("window_english"); // enc1@m1 has stt_turn cues in the fixture
+      await pg.exec(`DELETE FROM reb_track_index;`);
+      mem.clear();
+      await put("stt", "44444444", track("stt", [seg(1000, 3000, "doctor_0", "hello", "en-IN"), seg(4000, 6000, "patient_1", "knee pain", "en")]));
+      const en = await read();
+      expect(en.ok && en.data).toMatchObject({ source: "reb_stt_en", config_hash: "44444444" });
+    });
+
+    it("the newest finished ok track wins across two config hashes; a newer FAILED row and a shadow row are ignored; a newest track whose bytes do not match the index sha256 is skipped and counted, and the older one is used", async () => {
+      await put("translate", "aaaaaaaa", track("translate", [seg(1000, 2000, "doctor_0", "old config")]), { finished: "2026-10-08T10:00:00Z" });
+      await put("translate", "bbbbbbbb", track("translate", [seg(1000, 2000, "doctor_0", "new config")]), { finished: "2026-10-08T11:00:00Z" });
+      await put("translate", "cccccccc", track("translate", [seg(1000, 2000, "doctor_0", "failed config")]), { finished: "2026-10-08T13:00:00Z", status: "failed" });
+      const newest = await read();
+      expect(newest.ok && newest.data).toMatchObject({ source: "reb_translate", config_hash: "bbbbbbbb", lines: [{ text: "new config" }] });
+      // the newest object is not what the index says (re-written after indexing): skipped, counted, the older track answers
+      mem.set(key("translate", "bbbbbbbb"), track("translate", [seg(1000, 2000, "doctor_0", "tampered")]));
+      const skipped = await read();
+      expect(skipped.ok && skipped.data).toMatchObject({ source: "reb_translate", config_hash: "aaaaaaaa", n_integrity_skipped: 1, lines: [{ text: "old config" }] });
+    });
+
+    it("an index row whose key belongs to another consult or room is never fetched (skipped as integrity)", async () => {
+      const spy = vi.fn();
+      const L = await import("@/lib/sarvam-lab");
+      const inner = { get: async (k: string) => { spy(k); return mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null; }, put: async (k: string, b: string) => { mem.set(k, b); return "ok" as const; }, list: async (p: string) => [...mem.keys()].filter((k) => k.startsWith(p)) };
+      L.setLabStoreForTests(inner);
+      try {
+        const other = key("translate", "dddddddd", "OtherConsultUidBbbbbbbbbZ");
+        await put("translate", "dddddddd", track("translate", [seg(1000, 2000, "doctor_0", "someone else")]), { r2key: other });
+        const t = await read();
+        expect(spy).not.toHaveBeenCalledWith(other);
+        expect(t.ok && t.data.source).toBe("window_english");
+        expect(t.ok && t.data.n_integrity_skipped).toBe(1);
+      } finally {
+        L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, b) => { mem.set(k, b); return "ok"; }, list: async (p) => [...mem.keys()].filter((k) => k.startsWith(p)) });
+      }
+    });
+
+    it("a held-out consult is refused BEFORE the index or R2 is touched", async () => {
+      const L = await import("@/lib/sarvam-lab");
+      const spy = vi.fn();
+      L.setLabStoreForTests({ get: async (k) => { spy(k); return null; }, put: async () => "ok", list: async () => [] });
+      try {
+        await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc3AaaaaaaaaaaZ' WHERE consult_key = 'enc3@m2'`;
+        statements.length = 0;
+        const { readConsultText } = await import("@/lib/rubrics/readers/consult-text");
+        const t = await readConsultText("enc3@m2", {});
+        expect(t).toMatchObject({ ok: false, reason: "blind_room_day" });
+        expect(statements.some((q) => /reb_track_index/.test(q.text))).toBe(false);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, b) => { mem.set(k, b); return "ok"; }, list: async (p) => [...mem.keys()].filter((k) => k.startsWith(p)) });
+      }
+    });
+
+    it("the lab store: GET of a consult key is allowed; PUT of it, any other reb/ path, a list under reb/ and a path trick are refused", async () => {
+      const L = await import("@/lib/sarvam-lab");
+      const store = L.labStore()!;
+      const k = key("translate", "eeeeeeee");
+      mem.set(k, "{}");
+      await expect(store.get(k)).resolves.toMatchObject({ body: "{}" });
+      await expect(store.get(`reb/2026-10-08/r1/_consults/${UID}/manifest.json`)).resolves.toBeNull(); // allowed shape, nothing stored
+      await expect(store.put(k, "x", {})).rejects.toThrow(/lab_key_not_writable|not_writable/);
+      for (const bad of ["reb/2026-10-08/r1/tracks/stt.json", "reb/index.json", `reb/2026-10-08/r1/_consults/${UID}/tracks/../../x.json`, `reb/2026-10-08/r1/_consults/${UID}/other.json`, "reb/2026-10-08/r1/_consults/short/tracks/a.json"]) {
+        await expect(store.get(bad), bad).rejects.toThrow(/lab_key_not_readable/);
+      }
+      await expect(store.list("reb/")).rejects.toThrow(/lab_key_not_readable/);
+      expect(L.labWritable(k)).toBe(false);
+    });
+
+    it("evr_perturb selection accepts a consult with a reb track and NO stt_turn cues; keeps the cue path; a failed or missing index row does not qualify", async () => {
+      const { selectEvrWindows } = await import("@/lib/rubrics/evr/select");
+      await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close, consult_uid, warehouse_prescription_uid) VALUES ('encReb@m1', 'r1', ${IST("11:00:00")}::timestamptz, ${IST("11:00:30")}::timestamptz, 'ConsultUidEncRebAaaaaaaaZ', 'recReb')`;
+      try {
+        expect(await selectEvrWindows(50, 1)).not.toContain("encReb@m1");
+        await pg.sql`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) VALUES ('consult-ConsultUidEncRebAaaaaaaaZ', '2026-10-08', 'r1', 'translate', 'e', 'v', 'f1', 'failed', 'k', 's')`;
+        expect(await selectEvrWindows(50, 1)).not.toContain("encReb@m1");
+        await pg.sql`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) VALUES ('consult-ConsultUidEncRebAaaaaaaaZ', '2026-10-08', 'r1', 'translate', 'e', 'v', 'f2', 'ok', 'k', 's')`;
+        expect(await selectEvrWindows(50, 1)).toContain("encReb@m1");
+      } finally {
+        await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key = 'encReb@m1'`;
+      }
+    });
+  });
+
+  it("Q2-4 — a stored reserved_calls that is not a clean integer is read defensively by BOTH SQL copies (dayUsage, insertJobCapped): non-numeric = the whole per-job ceiling, a huge figure is capped at it, a number-like string is that number; absent = the floor", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const run = { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["z1"], limit: 200 };
+    const queued = async (reserved: unknown, absent = false) => {
+      await pg.exec(`DELETE FROM scribe_job;`);
+      const args: Record<string, unknown> = { rubric_id: "consult_surgical_pitch" };
+      if (!absent) args.reserved_calls = reserved;
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status) VALUES ('job_q24', 'rubric_bench', ${JSON.stringify(args)}::jsonb, 'mcp:t', 'queued')`;
+    };
+    try {
+      for (const [v, want] of [["abc", 600], ["", 600], [-5, 600], [1.5, 600], [null, 600], [{}, 600], [999_999_999_999, 600], [99_999, 600], ["300", 300], [450, 450], [12, 12]] as Array<[unknown, number]>) {
+        await queued(v);
+        expect((await C.dayUsage()).queued, `dayUsage ${JSON.stringify(v)}`).toBe(want);
+        // the store copy, alone: under a day cap of want + 500 the insert of a 500-call run passes; one call lower it is refused
+        expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args: run, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: String(want + 500) })), `store pass ${JSON.stringify(v)}`).not.toBeNull();
+        await pg.exec(`DELETE FROM scribe_job WHERE kind = 'rubric_run';`);
+        expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args: run, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: String(want + 499) })), `store refuse ${JSON.stringify(v)}`).toBeNull();
+      }
+      await queued(null, true);
+      expect((await C.dayUsage()).queued).toBe(60); // absent: the fixed floor
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
   it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
     const C = await import("@/lib/rubrics/llm-cap");
     const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
@@ -806,6 +1105,58 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(600, { RUBRIC_LLM_DAILY_CALL_CAP: "1500" }))).not.toBeNull();
     } finally {
       await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("S7-1B U1 — each copy of the 'running job with no run row yet' clause is pinned ALONE: dayUsage (llm-cap.ts) and insertJobCapped (store.ts) both count it, tested directly so neither can hide behind the other", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const keys = Array.from({ length: 30 }, (_, i) => `u${i}`);
+    const args = { rubric_id: "consult_chair_affect", lab: true, unit: "consult", unit_keys: keys, limit: 200 };
+    try {
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES ('job_u1', 'rubric_run', ${JSON.stringify(args)}::jsonb, 'mcp:t', 'running', '{}'::jsonb)`;
+      // copy 1 (lib/rubrics/llm-cap.ts dayUsage): the running job with no run row reserves its 30 units
+      expect(await C.dayUsage()).toEqual({ used: 0, queued: 60 }); // 30 units x 2 attempts (G74)
+      // copy 2 (lib/jobs/store.ts insertJobCapped), called DIRECTLY (no precheck in front of it): 60 + 60 > 100 is refused, nothing is inserted
+      const g = C.cappedGuard(60, { RUBRIC_LLM_DAILY_CALL_CAP: "100" });
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, g)).toBeNull();
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM scribe_job`)[0] as { n: number }).n).toBe(1);
+      // once the job has its run row (progress.run_id) it is no longer counted by its args (the run row carries it): both copies agree
+      await pg.exec(`UPDATE scribe_job SET progress = '{"run_id":"rub_u1"}'::jsonb; INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_u1', 'consult_chair_affect', '1.1.0', 'run', 30);`);
+      expect(await C.dayUsage()).toEqual({ used: 60, queued: 0 }); // the run row: 30 units x 2
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, g)).toBeNull(); // 60 (run row) + 60 > 100
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(60, { RUBRIC_LLM_DAILY_CALL_CAP: "120" }))).not.toBeNull(); // 60 + 60 <= 120
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("S7-1B — the board SQL on real postgres: rows of the range only, the planted held-out row is excluded and counted, the doctor comes from the (fake) warehouse, versions are separate", async () => {
+    const REC = await import("@/lib/rubrics/evr/record");
+    const { buildBoard } = await import("@/lib/rubrics/board");
+    await pg.exec(`DELETE FROM rubric_result; DELETE FROM rubric_run;`);
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidBoard1AaaaaaaaZ', warehouse_prescription_uid = 'RecBoardAaaaaaaaaaaaaaaaaa1' WHERE consult_key = 'enc1@m1'`;
+    await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_bd', 'encounter_vs_record', '0.1.0', 'run', 3) ON CONFLICT DO NOTHING`;
+    const ins = (key: string, room: string, date: string, version: string, lab = true, status = "ok") => pg.sql`INSERT INTO rubric_result (rubric_id, version, unit_kind, unit_key, room_id, ist_date, run_id, status, score, findings, lab) VALUES ('encounter_vs_record', ${version}, 'consult', ${key}, ${room}, ${date}::date, 'rub_bd', ${status}, '{"label":"discrepancy report","severity":"minor","n_findings":1}'::jsonb, '["minor:said_not_in_record:drug"]'::jsonb, ${lab})`;
+    await ins("enc1@m1", "r1", "2026-10-08", "0.1.0");
+    await ins("enc3@m2", "room_qyzghzaf", "2026-08-23", "0.1.0"); // planted held-out pair
+    await ins("encX@m1", "r1", "2026-10-07", "0.1.0", false); // lab false: not in a lab board
+    await ins("encY@m1", "r1", "2026-10-06", "0.1.0", true, "failed"); // not ok
+    await ins("encZ@m1", "r1", "2026-09-01", "0.1.0"); // out of range
+    REC.setMetabaseForTests(async (q) => { expect(q).toMatch(/^SELECT /); return [{ rec_uid: "RecBoardAaaaaaaaaaaaaaaaaa1", doctor_uid: "docBoardOpaqueAaaaaaaaaa" }]; });
+    try {
+      const out = await buildBoard({ rubric_id: "encounter_vs_record", from: "2026-10-01", to: "2026-10-31", lab: true, by: "doctor", min_n: 3 });
+      if (!out.ok) throw new Error(JSON.stringify(out));
+      expect(out.board_meta).toMatchObject({ n_rows: 1, n_unattributed: 0, status: "draft" });
+      expect(out.groups).toEqual([{ group: "docBoardOpaqueAaaaaaaaaa", version: "0.1.0", n_units: 1, below_min_n: true }]);
+      const wide = await buildBoard({ rubric_id: "encounter_vs_record", from: "2026-08-01", to: "2026-10-31", lab: true, by: "room", min_n: 3 });
+      if (!wide.ok) throw new Error(JSON.stringify(wide));
+      expect(wide.board_meta).toMatchObject({ n_rows: 2, n_blind_excluded: 1 }); // enc1 and encZ; the held-out row is excluded in SQL and counted
+      expect(wide.groups.map((g) => g.group)).toEqual(["r1"]);
+    } finally {
+      REC.setMetabaseForTests(null);
+      await pg.exec(`DELETE FROM rubric_result; DELETE FROM rubric_run;`);
     }
   });
 });

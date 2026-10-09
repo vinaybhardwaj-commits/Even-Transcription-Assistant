@@ -28,6 +28,7 @@ import { parseFlag, FlagValueError } from "@/lib/flags";
 import { classifyWindow, emptyRow, notReadyRow, failedRow, translatedRow, TERMINAL_SOURCES, nativeEnglishVotes, votesRecord, type JevWindowText } from "@/lib/jev/english";
 import { translateToEnglish } from "@/lib/jev/translate";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { roomDayArgHeldOut, splitBlindWindows } from "../held-out";
 
 export const JEV_ENGLISH_KIND = "jev_english"; // name underscore (matches diarize_window/emotion_window); file stays jev-english.ts. Spec wrote "jev-english" — see report.
 export const ETA_JEV_TRANSLATE_ENABLED = "ETA_JEV_TRANSLATE_ENABLED";
@@ -121,7 +122,9 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
     throw e;
   }
 
-  const windows = (await sql`SELECT id FROM bench_window WHERE room_day_id = ${roomDayId} ORDER BY start_ms`) as Array<{ id: string }>;
+  const allWindows = (await sql`SELECT id FROM bench_window WHERE room_day_id = ${roomDayId} ORDER BY start_ms`) as Array<{ id: string }>;
+  // K4-2: a window with ANY held-out placement is never read, classified or translated; counted
+  const { kept: windows, excluded: n_blind_excluded } = await splitBlindWindows(allWindows, (w) => w.id);
 
   // Skip only windows already in a TERMINAL source. not_ready (no run yet / gated off) and failed
   // (a translation attempt) are deliberately NOT skipped — they are re-evaluated every run, which is
@@ -173,9 +176,9 @@ async function classify(ctx: StepContext): Promise<StepOutcome> {
   }
 
   if (toTranslate.length === 0) {
-    return doneWith({ room_day_id: roomDayId, windows: windows.length, skipped, ...counts, votes });
+    return doneWith({ room_day_id: roomDayId, windows: windows.length, skipped, n_blind_excluded, ...counts, votes });
   }
-  return nextStep("translate", { room_day_id: roomDayId, windows: windows.length, skipped, to_translate: toTranslate, counts, votes });
+  return nextStep("translate", { room_day_id: roomDayId, windows: windows.length, n_blind_excluded, skipped, to_translate: toTranslate, counts, votes });
 }
 
 async function translate(ctx: StepContext): Promise<StepOutcome> {
@@ -202,14 +205,16 @@ async function translate(ctx: StepContext): Promise<StepOutcome> {
   }
 
   if (remaining.length > 0) {
-    return nextStep("translate", { room_day_id: roomDayId, windows, skipped, to_translate: remaining, counts, votes });
+    return nextStep("translate", { room_day_id: roomDayId, windows, n_blind_excluded: ctx.progress.n_blind_excluded ?? 0, skipped, to_translate: remaining, counts, votes });
   }
-  return doneWith({ room_day_id: roomDayId, windows, skipped, ...counts, votes });
+  return doneWith({ room_day_id: roomDayId, windows, skipped, n_blind_excluded: (ctx.progress.n_blind_excluded as number) ?? 0, ...counts, votes });
 }
 
 export const jevEnglishKind: JobKind = {
   name: JEV_ENGLISH_KIND,
   first: "classify",
+  roomData: true,
+  heldOut: roomDayArgHeldOut,
   scope: "invoke",
   parseArgs,
   run: async (ctx: StepContext): Promise<StepOutcome> => {

@@ -55,7 +55,13 @@ beforeAll(() => {
              UNIQUE (session_id, idx));
            -- 0066 also touches bench_listener (the kiosk's live meter), which this file does not use; the
            -- table is created empty so the migration runs verbatim rather than being edited to fit the test.
-           CREATE TABLE bench_listener (session_id text PRIMARY KEY);`);
+           CREATE TABLE bench_listener (session_id text PRIMARY KEY);
+           -- K4-4: the held-out predicate reads placements only
+           CREATE TABLE room_day (id text PRIMARY KEY, room_id text, ist_date date);
+           CREATE TABLE room_diarize_window (window_id text, room_day_id text);
+           CREATE TABLE room_turn_speaker (window_id text, room_day_id text);
+           CREATE TABLE jev_window_text (window_id text, room_day_id text);
+           CREATE TABLE room_span_emotion (window_id text, room_day_id text);`);
   pg.exec(noRecord("db/migrations/0057_bench_window.sql"));
   // 0066 adds the recorder's meter to bench_chunk. Without it there is no level to be absent.
   pg.exec(noRecord("db/migrations/0066_mic_levels.sql"));

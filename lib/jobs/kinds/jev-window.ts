@@ -44,6 +44,7 @@ import { PROMPT_VERSION, QUESTION_ID, SETTING, qid } from "@/lib/jev/prompts/arm
 import { ETA_JEV_BATCH_WINDOWS, ETA_JEV_CONTEXT_WINDOWS, ETA_JEV_MAX_INFLIGHT_PER_JOB, ETA_JEV_MAX_INFLIGHT_GLOBAL } from "@/lib/jev/thresholds";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { roomDayArgHeldOut, splitBlindWindows } from "../held-out";
 
 export const JEV_WINDOW_KIND = "jev_window";
 
@@ -127,9 +128,11 @@ async function collect(ctx: StepContext): Promise<StepOutcome> {
   const force = ctx.args.force === true;
   const promptVersion = ctx.args.prompt_version as string;
 
-  const windows = (await sql`
+  const allWindows = (await sql`
     SELECT id, session_id, start_ms, end_ms FROM bench_window WHERE room_day_id = ${roomDayId} ORDER BY start_ms
   `) as Array<{ id: string; session_id: string; start_ms: number; end_ms: number }>;
+  // K4-2: a window with ANY held-out placement is never read, written a skip row for, or asked about; counted
+  const { kept: windows, excluded: n_blind_excluded } = await splitBlindWindows(allWindows, (w) => w.id);
 
   const textRows = (await sql`
     SELECT window_id, english FROM jev_window_text WHERE room_day_id = ${roomDayId}
@@ -170,12 +173,13 @@ async function collect(ctx: StepContext): Promise<StepOutcome> {
   const batches = rawBatches.filter((b) => b.some((id) => metaById.get(id)!.hasEnglish));
 
   if (batches.length === 0) {
-    return doneWith({ room_day_id: roomDayId, windows_total: windows.length, windows_asked: 0, windows_skipped: skipped, calls: 0, input_tokens: 0, est_cost_usd: 0 });
+    return doneWith({ room_day_id: roomDayId, windows_total: windows.length, windows_asked: 0, windows_skipped: skipped, n_blind_excluded, calls: 0, input_tokens: 0, est_cost_usd: 0 });
   }
 
   return nextStep("ask", {
     room_day_id: roomDayId,
     prompt_version: promptVersion,
+    n_blind_excluded,
     windows_total: windows.length,
     windows_skipped: skipped,
     meta, // ids + session/start/end + hasEnglish only — no text
@@ -300,6 +304,7 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
   return doneWith({
     room_day_id: roomDayId,
     windows_total: ctx.progress.windows_total,
+    n_blind_excluded: ctx.progress.n_blind_excluded ?? 0,
     windows_asked,
     windows_skipped: ctx.progress.windows_skipped,
     calls,
@@ -311,6 +316,8 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
 export const jevWindowKind: JobKind = {
   name: JEV_WINDOW_KIND,
   first: "collect",
+  roomData: true,
+  heldOut: roomDayArgHeldOut,
   scope: "invoke",
   parseArgs,
   run: async (ctx: StepContext): Promise<StepOutcome> => {

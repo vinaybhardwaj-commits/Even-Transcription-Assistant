@@ -123,7 +123,7 @@ export async function evaluateConsultAffect(r: Rubric, text: ConsultText): Promi
       prompt_version: promptVersion(r), attempts: out.attempts,
     },
     findings,
-    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, truncated: text.truncated, talk_time: talk.score ?? null, engagement_model_said: cases.engagement_process,
+    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, config_hash: text.config_hash ?? null, source_integrity_skipped: text.n_integrity_skipped ?? 0, truncated: text.truncated, talk_time: talk.score ?? null, engagement_model_said: cases.engagement_process,
       quotes: vq.kept.map((q) => ({ item: q.item, quote: q.quote, t: fmt(q.t_ms), t_ms: q.t_ms })), quotes_dropped_not_in_transcript: vq.dropped },
   };
 }
@@ -136,6 +136,15 @@ function pitchProblems(v: Record<string, unknown>): string[] {
   return p;
 }
 
+/**
+ * 1.1.1: the recommendation_kind of a result is decided in CODE. A model answer with surgery_recommended false is always "no_surgery" (never null, never another kind: the two cannot disagree);
+ * with surgery_recommended true it is the model's kind, and null when the model gave none.
+ */
+export function pitchKind(v: Record<string, unknown>): string | null {
+  if (v.surgery_recommended !== true) return "no_surgery";
+  return typeof v.recommendation_kind === "string" && v.recommendation_kind ? v.recommendation_kind : null;
+}
+
 export async function evaluateSurgicalPitch(r: Rubric, text: ConsultText): Promise<EngineResult> {
   const talk = evaluateTalkTime(text.turns, { start_ms: 0, end_ms: Math.max(1, text.span_ms) });
   const out = await askJson({ system: systemPrompt(r), user: userMessage(text, talk), schema: r.output as Record<string, unknown>, extraValidate: pitchProblems });
@@ -143,23 +152,24 @@ export async function evaluateSurgicalPitch(r: Rubric, text: ConsultText): Promi
   const v = out.value;
   // the anti-pitch (the doctor audibly advises AGAINST an operation) is scored, not skipped (1.1.0, from the pitch skill)
   if (v.surgery_recommended !== true && v.recommendation_kind === "no_surgery") return { status: "ok", score: { surgery_recommended: false, recommendation_kind: "no_surgery", prompt_version: promptVersion(r), attempts: out.attempts }, findings: ["kind:no_surgery"], evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source } };
-  if (v.surgery_recommended !== true) return { status: "skipped", score: { surgery_recommended: false }, findings: [], reason: "no_surgery_recommendation", evidence: { prompt_version: promptVersion(r), model: out.model, attempts: out.attempts } };
+  if (v.surgery_recommended !== true) return { status: "skipped", score: { surgery_recommended: false, recommendation_kind: pitchKind(v) }, findings: [], reason: "no_surgery_recommendation", evidence: { prompt_version: promptVersion(r), model: out.model, attempts: out.attempts } };
   const bal = v.pitch_balance as Record<string, unknown>;
   const doubts = (v.doubts as Array<{ kind: string; code: string; quote?: string }> | undefined) ?? [];
   const vq = verifyQuotes(text, [...((v.evidence as Quote[] | undefined) ?? []), ...doubts.filter((d) => d.quote).map((d, i) => ({ item: `doubt_${i + 1}`, quote: d.quote! }))]);
-  const findings = [`kind:${v.recommendation_kind}`, `source:${v.pitch_source}`, ...["benefits_named", "risks_named", "alternatives_named", "timing_named"].map((k) => (bool(bal[k]) ? k : `${k.replace("_named", "")}_not_named`)), ...doubts.map((d) => `doubt:${d.kind}:${d.code}`), `uptake:${v.uptake_of_surgery}`];
+  const kind = pitchKind(v);
+  const findings = [`kind:${kind}`, `source:${v.pitch_source}`, ...["benefits_named", "risks_named", "alternatives_named", "timing_named"].map((k) => (bool(bal[k]) ? k : `${k.replace("_named", "")}_not_named`)), ...doubts.map((d) => `doubt:${d.kind}:${d.code}`), `uptake:${v.uptake_of_surgery}`];
   if (bool(v.prompted_yes)) findings.push("prompted_yes");
   if (text.truncated) findings.push("truncated_text");
   return {
     status: "ok",
     score: {
-      surgery_recommended: true, recommendation_kind: v.recommendation_kind, pitch_source: v.pitch_source,
+      surgery_recommended: true, recommendation_kind: kind, pitch_source: v.pitch_source,
       benefits_named: bool(bal.benefits_named), risks_named: bool(bal.risks_named), alternatives_named: bool(bal.alternatives_named), timing_named: bool(bal.timing_named),
       n_doubts: doubts.length, doubts_unheard: doubts.filter((d) => d.code === "unheard").length, uptake_of_surgery: v.uptake_of_surgery, prompted_yes: bool(v.prompted_yes),
       prompt_version: promptVersion(r), attempts: out.attempts,
     },
     findings,
-    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, truncated: text.truncated, doubts: doubts.map((d) => ({ kind: d.kind, code: d.code })),
+    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, config_hash: text.config_hash ?? null, source_integrity_skipped: text.n_integrity_skipped ?? 0, truncated: text.truncated, doubts: doubts.map((d) => ({ kind: d.kind, code: d.code })),
       quotes: vq.kept.map((q) => ({ item: q.item, quote: q.quote, t: fmt(q.t_ms), t_ms: q.t_ms })), quotes_dropped_not_in_transcript: vq.dropped },
   };
 }

@@ -35,6 +35,7 @@ import { ROUTE_ADAPTER_KEY } from "@/lib/stt/adapters/route";
 import { buildRouteMetrics, charsPerAudioSecond, readEngineOutcome } from "@/lib/stt/route-run";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
+import { clipKeyHeldOut } from "../held-out";
 
 const STEPS = { submit: "submit", poll: "poll" } as const;
 
@@ -62,6 +63,8 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export const routeTranscribeKind: JobKind = {
   name: "route_transcribe",
   first: STEPS.submit,
+  roomData: true,
+  heldOut: clipKeyHeldOut,
   scope: "invoke",
 
   parseArgs(raw) {

@@ -63,6 +63,21 @@ afterAll(() => {
 const JOB_KIND_TOOLS = new Set(["scribe_job_submit", "scribe_job_status", "scribe_job_list"]);
 /** scribe_health's `aspect` enum and prose grew by `routes` (S2L); nothing else about it may differ from main */
 const ASPECT_TOOLS = new Set(["scribe_health"]);
+/** scribe_voice gained the `console` view (S6A) with its action / min_cosine arguments; nothing else about it may differ from main */
+const CONSOLE_TOOLS = new Set(["scribe_voice"]);
+/**
+ * W1: ONLY the generated console notes are normalised: the `action` / `min_cosine` properties, "console" in the view enum, and the "|console" the generator adds to the shared clinician_id tag.
+ * Every other description (the view text, include_urls, window_id, room_day_id, limit, clinician_id's own tag) must still equal main's, so a changed non-console description fails.
+ */
+const withoutConsole = (schema: unknown): unknown => {
+  const s = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, Row> };
+  if (s.properties) {
+    for (const k of ["action", "min_cosine", "speaker_idx", "rooms", "from", "to", "top_k"]) delete s.properties[k]; // S6A + S6B console-only arguments
+    const v = s.properties.view; if (v && Array.isArray(v.enum)) v.enum = (v.enum as string[]).filter((x) => x !== "console");
+    for (const k of ["clinician_id", "window_id"]) { const c = s.properties[k]; if (c && typeof c.description === "string") c.description = c.description.replace("|console]", "]"); }
+  }
+  return s;
+};
 const JOB_KIND_NAMES = (await import("@/lib/jobs/kinds")).JOB_KIND_NAMES;
 /** a schema with properties.kind.enum / .description removed (the one thing S8A changed on the job tools) */
 const withoutKindEnum = (schema: unknown): unknown => {
@@ -124,6 +139,9 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       if (ASPECT_TOOLS.has(t.name)) {
         expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
         expect(((t.inputSchema as Row & { properties: Row }).properties.aspect as Row).enum).toEqual(["all", "stt", "voice", "llm", "kb", "routes"]);
+      } else if (CONSOLE_TOOLS.has(t.name)) {
+        expect(withoutConsole(t.inputSchema), t.name).toEqual(withoutConsole(P.shortSchema(base.inputSchema)));
+        expect(((t.inputSchema as Row & { properties: Row }).properties.view as Row).enum).toEqual(["prints", "samples", "window_speakers", "console"]);
       } else if (JOB_KIND_TOOLS.has(t.name)) {
         expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
         const kindProp = (t.inputSchema as Row & { properties: Row }).properties.kind;
@@ -132,8 +150,8 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         // epic #23 (b) added ONE optional property, `engine` (enum ["nemotron"]); everything else must still match main
         const { engine, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
         expect(engine).toMatchObject({ type: "string", enum: ["nemotron"] });
-        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.shortSchema(base.inputSchema));
-      } else expect(t.inputSchema, t.name).toEqual(P.shortSchema(base.inputSchema));
+        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema)));
+      } else expect(t.inputSchema, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema))); // Z1/Z2: overrides are the only departure from the plain 32-char cut
       compared++;
     }
     expect(compared).toBe(41);
@@ -158,6 +176,13 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const norm = (x: string) => x.replace(/`aspect` \(default all\) picks the tool that runs: [^.]*\./, "<ASPECTS>.");
         expect(norm(String(out.help)), t.name).toBe(norm(t.description));
         expect(String(out.help)).toContain("routes → scribe_health_routes");
+        continue;
+      }
+      if (CONSOLE_TOOLS.has(t.name)) {
+        // S6A: the generated group text lists one more view. The whole text must still match main's with that list normalised.
+        const norm = (x: string) => x.replace(/; console → scribe_voice_console/, "");
+        expect(norm(String(out.help)), t.name).toBe(norm(t.description));
+        expect(String(out.help)).toContain("console → scribe_voice_console");
         continue;
       }
       if (JOB_KIND_TOOLS.has(t.name)) {
@@ -388,11 +413,78 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays under 40,000 characters", async () => {
+  it("budget: the full tools/list result stays at or under 39,500 characters (measured 39,403: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(40_000);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_500);
+  });
+
+  it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
+    const { body } = await door("tools/list");
+    const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k]) => k !== "description").map(([k, v]) => [k, strip(v)])) : o;
+    const sortKeys = (o: unknown): unknown => Array.isArray(o) ? o.map(sortKeys) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeys(v)])) : o;
+    const before = JSON.parse(readFileSync("fixtures/mcp/rel2-r2-tools-list-no-descriptions.json", "utf8"));
+    expect(sortKeys(strip(body.result))).toEqual(sortKeys(before));
+  });
+
+  it("Z2: a listed property description is never cut in the middle of a name", () => {
+    for (const t of ["[kind=check_update_now|report_diag|restart_engine|self_test] optional args", "[view=manifest|timeline|chunk|zip_download] x"]) {
+      const out = P.shortText(t);
+      expect(out.endsWith("…"), out).toBe(true);
+      const body = out.slice(0, -1);
+      // every |-separated name kept is a whole name of the original
+      for (const part of body.replace(/^\[[a-z_]+=/, "").split("|").filter(Boolean)) expect(t, part).toContain(`${part}|`);
+    }
+  });
+
+  it("S6-DIET: every safety statement survived the diet, per tool", async () => {
+    const SAFETY: Record<string, string[]> = {
+      scribe_room_command: ["WRITE; acts on a LIVE clinical room", "kiosk_not_listening", "start_day idempotent", "room_paused is consent", "without V's GO"],
+      scribe_steward_command: ["WRITE", "LIVE rooms", "reason required", "returns a revert"],
+      scribe_rubric: ["never Pulse", "touches no room", "run/bench need invoke", "lab:true"],
+      scribe_sarvam: ["ZDR", "no room audio", "submits need invoke"],
+      scribe_jobs: ["status/list need read, submit needs invoke, cancel needs write", "no live-room command"],
+      scribe_job_submit: ["INVOKE scope", "no live-room command"],
+      scribe_job_cancel: ["WRITE", "no room command"],
+      scribe_scratch: ["SCRATCH room-days only, never a live room"],
+      scribe_post_cue: ["WRITE", "sends no room command"],
+      scribe_pin_visit: ["WRITE", "never edits the visit table", "no room command"],
+      scribe_mark_consult: ["WRITE", "no room command"],
+      scribe_set_visit_clinician: ["WRITE", "no room command"],
+      scribe_silence_readjudicate: ["WRITE only with apply:true", "dry run by default", "no live-room command"],
+      scribe_extract_audio: ["INVOKE scope", "writes no row", "touches no room"],
+      scribe_transcribe_range: ["INVOKE scope", "text only, never bytes", "refused over 30 min", "while any room records"],
+      scribe_encounter_shadow_run: ["INVOKE scope", "no clinician-facing write", "no live room"],
+      scribe_jev_window_run: ["INVOKE scope", "no live-room command"],
+      scribe_note_safety_replay: ["INVOKE scope", "regenerates no note", "shows nothing to clinicians"],
+      scribe_clinical_route_replay: ["INVOKE scope", "no live-room command"],
+      scribe_sessions: ["Read-only", "dry run that writes nothing"],
+      scribe_session_tape: ["Read-only", "may quote operator notes", "touches no room"],
+      scribe_stt_runs: ["Read-only", "may quote identity"],
+      scribe_voice: ["Read-only", "names clinicians", "presigned audio with include_urls"],
+      scribe_diarize_segments: ["Read-only", "without text"],
+      scribe_jev_signals: ["Read-only", "never transcript text"],
+      scribe_jev_decisions: ["Read-only", "never transcript or state text"],
+      scribe_stt_windows: ["Read-only", "No transcript text"],
+      scribe_steward: ["Read-only", "No ticket signatures"],
+      scribe_kiosks: ["Read-only", "sends no command", "room optional"],
+      scribe_get_state: ["Read-only", "Never creates a day"],
+      scribe_rooms: ["Read-only", "digital silence", "can freeze"],
+      scribe_room: ["Read-only", "digital silence", "can freeze"],
+      scribe_now: ["Read-only", "digital silence", "trust state + ages_s"],
+      scribe_room_levels: ["Read-only", "digital silence", "can freeze"],
+      scribe_help: ["Read-only", "accepts any name"],
+    };
+    const byName = Object.fromEntries((await listed()).map((t) => [t.name, t.description]));
+    for (const [n, phrases] of Object.entries(SAFETY)) for (const p of phrases) expect(byName[n], `${n}: ${p}`).toContain(p);
+    // Z1/Z2: property texts the 32-char cut used to lose
+    const props = Object.fromEntries((await listed()).map((t) => [t.name, (t.inputSchema as { properties: Record<string, { description?: string }> }).properties]));
+    expect(props.scribe_room_command!.override_pause!.description).toContain("consent");
+    expect(props.scribe_rubric!.set!.description).toMatch(/human_v/);
+    expect(props.scribe_rubric!.set!.description).toMatch(/evr_perturb/);
+    // every other read tool still says Read-only / Reads, every write tool WRITE or INVOKE
+    for (const [n, d] of Object.entries(byName)) expect(d, n).toMatch(/Read-only|WRITE|INVOKE|Reads and writes|Job queue read\/write/);
   });
 
   it("scribe_help returns the long text as `help` beside the short description, for every listed tool", async () => {

@@ -30,9 +30,15 @@ export const BLIND_ROOM_DAYS: ReadonlyArray<readonly [string, string]> = [
 
 const KEYS: ReadonlySet<string> = new Set(BLIND_ROOM_DAYS.map(([day, room]) => `${day}|${room}`));
 
-/** Is this (IST room-day date, room id) in the held-out set? Pure; false for anything malformed. */
+/** K3-3: a SCRATCH twin (room_scratch_X, the replay copy of room_X) is the same room for this rule. Literal prefixes, as lib/brain/scratch.ts (SCRATCH_ROOM_PREFIX -> ROOM_PREFIX); a test pins them. */
+const SCRATCH_PREFIX = "room_scratch_";
+const REAL_PREFIX = "room_";
+
+/** Is this (IST room-day date, room id) in the held-out set? Pure; false for anything malformed. A scratch room id is mapped to its real room first (K3-3). */
 export function isBlindRoomDay(day: string | null | undefined, roomId: string | null | undefined): boolean {
-  return typeof day === "string" && typeof roomId === "string" && KEYS.has(`${day.slice(0, 10)}|${roomId}`);
+  if (typeof day !== "string" || typeof roomId !== "string") return false;
+  const real = roomId.startsWith(SCRATCH_PREFIX) ? `${REAL_PREFIX}${roomId.slice(SCRATCH_PREFIX.length)}` : roomId;
+  return KEYS.has(`${day.slice(0, 10)}|${real}`) || KEYS.has(`${day.slice(0, 10)}|${roomId}`);
 }
 
 /** The typed error a WRITER throws for a pair in the set (a reader returns the refusal object instead). */

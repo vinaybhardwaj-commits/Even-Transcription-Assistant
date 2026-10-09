@@ -17,9 +17,11 @@ export async function readPulseRecord(consultKey: string): Promise<ReadResult<Pu
   const blind = blindRefusal(pair.room_id, pair.ist_date);
   if (blind) return blind;
   const rows = (await sql`
-    SELECT consult_uid, warehouse_prescription_uid FROM eta_encounter_windows WHERE consult_key = ${consultKey}::text LIMIT 1
+    SELECT consult_uid, warehouse_prescription_uid FROM eta_encounter_windows WHERE consult_key = ${consultKey}::text
   `) as Array<{ consult_uid: string | null; warehouse_prescription_uid: string | null }>;
-  const w = rows[0];
+  // SWEEP (REL2-R3): no row is picked by LIMIT 1; consultPair above already refused if any row of the key or of its uid is held out; two different uids under one key are ambiguous, not guessed
+  if (new Set(rows.map((r) => r.consult_uid).filter(Boolean)).size > 1) return refuse("no_data", "the key names more than one consult_uid");
+  const w = rows.find((r) => r.consult_uid) ?? rows[0];
   if (!w?.consult_uid) return refuse("no_data", "the window has no consult_uid");
   const got = await fetchPulseRecord(w.consult_uid, w.warehouse_prescription_uid);
   if (!got.ok) return refuse(got.reason === "no_record" ? "no_data" : "bad_unit_key", got.reason);

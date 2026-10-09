@@ -17,7 +17,7 @@ export const jobCallCap = (env: Env = process.env): number => posInt(env.RUBRIC_
 export const dailyCallCap = (env: Env = process.env): number => posInt(env.RUBRIC_LLM_DAILY_CALL_CAP, DEFAULT_DAILY_CALL_CAP);
 
 export const isLlmRubric = (id: string): boolean => LLM_WIRED.has(id);
-/** Calls a bench of each set is assumed to need when it is queued (a running bench is bounded by the caps anyway). */
+/** The FLOOR of a queued bench's reservation (Q2-2: the real figure is the set size x MAX_ATTEMPTS, capped at the per-job ceiling, and is stored in args.reserved_calls at submit). */
 export const BENCH_CALL_ESTIMATE: Record<string, number> = { gold: 60, grokbot_agreement: 320, human_v: 40, evr_perturb: 80 }; // WORST CASE: the largest set x 2 attempts (Q7)
 /** Q7: a finished run's calls are counted as (units_ok + units_failed) x this: the retry is not recorded anywhere (no migration), so the day is counted at the worst case. */
 export const FINISHED_RUN_CALL_FACTOR = 2;
@@ -33,7 +33,13 @@ export function reservationFor(kind: string, args: Args): number {
   const id = String(args.rubric_id ?? "");
   if (!isLlmRubric(id)) return 0;
   if (kind === "rubric_run") return (Array.isArray(args.unit_keys) ? args.unit_keys.length : Number(args.limit) || 200) * MAX_ATTEMPTS; // units x 2 (G74)
-  if (kind === "rubric_bench") return BENCH_CALL_ESTIMATE[String(args.set ?? "gold")] ?? 100;
+  // Q2-2: a bench is reserved by its REAL set size (rubric-bench.ts benchReservation, written into args.reserved_calls at submit); the fixed per-set estimate is only the FLOOR for a job that has none
+  if (kind === "rubric_bench") {
+    // Q2-3 / Q2-4: a PRESENT reserved_calls is trusted only as a positive integer, capped at the per-job ceiling; present but anything else (non-numeric, zero, negative, fractional) = the whole per-job ceiling.
+    // Absent = the fixed per-set estimate (the floor). The SQL copies (dayUsage here, insertJobCapped in jobs/store.ts) apply the same rule.
+    if (args.reserved_calls !== undefined) { const r = args.reserved_calls; return typeof r === "number" && Number.isInteger(r) && r > 0 ? Math.min(r, jobCallCap()) : jobCallCap(); }
+    return BENCH_CALL_ESTIMATE[String(args.set ?? "gold")] ?? 100;
+  }
   return 0;
 }
 
@@ -49,7 +55,7 @@ export async function dayUsage(): Promise<{ used: number; queued: number }> {
   const q = (await sql`
     SELECT coalesce(sum(CASE j.kind
              WHEN 'rubric_run' THEN coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(j.args->'unit_keys') = 'array' THEN j.args->'unit_keys' END), (j.args->>'limit')::int, 200) * ${MAX_ATTEMPTS}::int
-             WHEN 'rubric_bench' THEN CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${BENCH_CALL_ESTIMATE.grokbot_agreement}::int WHEN 'human_v' THEN ${BENCH_CALL_ESTIMATE.human_v}::int WHEN 'evr_perturb' THEN ${BENCH_CALL_ESTIMATE.evr_perturb}::int ELSE ${BENCH_CALL_ESTIMATE.gold}::int END
+             WHEN 'rubric_bench' THEN CASE WHEN j.args->'reserved_calls' IS NOT NULL THEN (CASE WHEN (j.args->>'reserved_calls') ~ '^[0-9]{1,9}$' THEN least((j.args->>'reserved_calls')::int, ${jobCallCap()}::int) ELSE ${jobCallCap()}::int END) ELSE (CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${BENCH_CALL_ESTIMATE.grokbot_agreement}::int WHEN 'human_v' THEN ${BENCH_CALL_ESTIMATE.human_v}::int WHEN 'evr_perturb' THEN ${BENCH_CALL_ESTIMATE.evr_perturb}::int ELSE ${BENCH_CALL_ESTIMATE.gold}::int END) END
              ELSE 0 END), 0)::int AS n
       FROM scribe_job j
      WHERE j.kind IN ('rubric_run', 'rubric_bench') AND j.args->>'rubric_id' = ANY(${ids}::text[])
@@ -82,5 +88,5 @@ export async function callsLeft(ownPlannedUnits: number, madeByJob: number, env:
 
 /** The guard parameters for the capped insert (jobs/store.ts insertJobCapped). */
 export function cappedGuard(planned: number, env: Env = process.env) {
-  return { planned, dailyCap: dailyCallCap(env), ids: [...LLM_WIRED], factor: FINISHED_RUN_CALL_FACTOR, est: { gold: BENCH_CALL_ESTIMATE.gold!, grokbot_agreement: BENCH_CALL_ESTIMATE.grokbot_agreement!, human_v: BENCH_CALL_ESTIMATE.human_v!, evr_perturb: BENCH_CALL_ESTIMATE.evr_perturb! } };
+  return { planned, dailyCap: dailyCallCap(env), jobCap: jobCallCap(env), ids: [...LLM_WIRED], factor: FINISHED_RUN_CALL_FACTOR, est: { gold: BENCH_CALL_ESTIMATE.gold!, grokbot_agreement: BENCH_CALL_ESTIMATE.grokbot_agreement!, human_v: BENCH_CALL_ESTIMATE.human_v!, evr_perturb: BENCH_CALL_ESTIMATE.evr_perturb! } };
 }

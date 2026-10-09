@@ -8,6 +8,10 @@
  *
  * A source table or column that does not exist answers `{ not_collected: true, reason }` for that view; schema is never invented.
  */
+import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+
+const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
 import { sql } from "@/lib/db";
 import { listCommands } from "@/lib/bench-commands";
 import { buildSnapshot } from "@/lib/rooms-live/snapshot";
@@ -315,20 +319,29 @@ const tapeDay: McpTool = {
       ref = picked.room;
       roomId = ref.id;
     }
+    // SWEEP (REL2-R3): a named held-out (room, date) is refused before any read; an unnamed room lists the other rooms and says how many held-out ones it left out
+    if (roomId && isBlindRoomDay(day, roomId)) return { ok: false, error: "blind_room_day" };
     try {
       const rows = (await sql`
         SELECT room_id, ist_day, min_off, min_muted, min_zero_all_day, min_present, min_gated, min_withheld,
                consult_min_usable, consult_min_uncertain, consult_min_lost, n_consults, classifier_version, written_at
           FROM room_audio_day
          WHERE ist_day = ${day}::date AND (${roomId}::text IS NULL OR room_id = ${roomId}::text)
+           AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = room_audio_day.ist_day AND b.r = room_audio_day.room_id)
          ORDER BY room_id
          LIMIT 100
       `) as Array<Record<string, unknown>>;
+      const blindN = (await sql`
+        SELECT count(*)::int AS n FROM room_audio_day
+         WHERE ist_day = ${day}::date AND EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = room_audio_day.ist_day AND b.r = room_audio_day.room_id)
+      `) as Array<{ n: number }>;
+      const nBlind = Number(blindN[0]?.n ?? 0);
       const num = (v: unknown): number => Number(v ?? 0);
       const out: Record<string, unknown> = {
         ok: true,
         ist_date: day,
         ...(ref ? { room: roomRef(ref) } : {}),
+        n_blind_excluded: nBlind,
         rooms: rows.map((r) => ({
           room_id: String(r.room_id),
           min_off: num(r.min_off),

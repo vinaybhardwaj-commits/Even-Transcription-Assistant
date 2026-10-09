@@ -9,12 +9,16 @@
  * A missing table or column (SQLSTATE 42P01 / 42703) answers { not_collected: true, reason } for that view. No transcript text, no patient
  * identifier, no ticket signature or nonce, no storage key is returned.
  */
+import { windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { argBool, argInt, argStr, type McpTool, type ToolArgs } from "../registry";
 import type { RoomRef } from "./brain";
 import { isRealDate, iso, notCollectedReason, pickRoom, roomRef } from "./s1";
+import { ACTION_ALLOWLIST } from "@/lib/steward/tickets";
+import { actionMode, LIVE_CAPABLE_ACTIONS, LIVE_IMPLEMENTED_ACTIONS, parseConfig } from "@/lib/steward/config";
 
 type Row = Record<string, unknown>;
 
@@ -80,7 +84,7 @@ async function optionalRoom(args: ToolArgs): Promise<{ room: RoomRef | null } | 
 // scribe_steward
 // ---------------------------------------------------------------------------
 
-const STEWARD_VIEWS = ["config", "decisions", "tickets", "tick", "why", "history"] as const;
+const STEWARD_VIEWS = ["config", "decisions", "tickets", "tick", "why", "history", "ticket_log", "ticket_summary", "live"] as const;
 type StewardView = (typeof STEWARD_VIEWS)[number];
 /** config rows that are bookkeeping, not settings: the loop lease and the last-tick summary (shown by `tick`) */
 const NON_SETTING_KEYS = ["loop_lease", "last_tick"];
@@ -189,6 +193,149 @@ async function stewardHistory(roomId: string | null, sinceHours: number, limit: 
   };
 }
 
+// ---------------------------------------------------------------------------
+// S4 — the repair-ticket console (READ ONLY): ticket_log, ticket_summary, live. No migration, no write, and no column that carries a signature, a nonce or a key is ever selected.
+// A ticket belongs to a machine and the table has no room column: its room is the room of the decision that issued it and NOTHING else (R4-2: a machine's CURRENT room says nothing about where it was when the ticket was issued). No decision = room null, room_source "unknown".
+// Blind room-days do not apply: a ticket holds no audio, no transcript and no patient data.
+// ---------------------------------------------------------------------------
+
+export const TICKET_RANGE_DAYS_MAX = 31;
+export const TICKET_SUMMARY_ROWS_MAX = 2000;
+export const TICKET_STATUSES = ["issued", "fetched", "done", "failed", "expired"] as const;
+const IST_DAY_MS = 86_400_000;
+
+/** PURE — IST dates {from,to} (inclusive) to the half-open instant range; refuses missing, unreal, reversed or > 31-day ranges. */
+export function ticketRange(args: ToolArgs): { ok: true; from: string; to: string; lo: string; hi: string } | Row {
+  const from = argStr(args, "from", 10), to = argStr(args, "to", 10);
+  if (!from || !to) return { ok: false, error: "from_and_to_required" };
+  if (!isRealDate(from) || !isRealDate(to)) return { ok: false, error: "invalid_date", hint: "YYYY-MM-DD (Asia/Kolkata)" };
+  const f = Date.parse(`${from}T00:00:00Z`), t = Date.parse(`${to}T00:00:00Z`);
+  if (t < f) return { ok: false, error: "to_before_from" };
+  if ((t - f) / IST_DAY_MS + 1 > TICKET_RANGE_DAYS_MAX) return { ok: false, error: "range_too_wide", max_days: TICKET_RANGE_DAYS_MAX };
+  return { ok: true, from, to, lo: new Date(f - 19_800_000).toISOString(), hi: new Date(t + IST_DAY_MS - 19_800_000).toISOString() };
+}
+
+/** the action / status filters are closed enums: anything else is refused, never passed to SQL */
+function ticketFilters(args: ToolArgs): { action: string | null; status: string | null } | Row {
+  const action = argStr(args, "action", 32), status = argStr(args, "status", 16);
+  if (action !== null && !(ACTION_ALLOWLIST as readonly string[]).includes(action)) return { ok: false, error: "unknown_action", allowed: [...ACTION_ALLOWLIST] };
+  if (status !== null && !(TICKET_STATUSES as readonly string[]).includes(status)) return { ok: false, error: "unknown_status", allowed: [...TICKET_STATUSES] };
+  return { action, status };
+}
+
+async function stewardTicketLog(args: ToolArgs, roomId: string | null, limit: number): Promise<Row> {
+  const range = ticketRange(args);
+  if (!("lo" in range)) return range as Row;
+  const f = ticketFilters(args);
+  if ("ok" in f) return f as Row;
+  const rows = (await sql`
+    SELECT t.ticket_id, t.machine, t.action, t.status, t.issued_at, t.expires_at, t.fetched_at, t.completed_at,
+           d.rule AS issuer_rule, d.mode AS decision_mode, d.room_id AS room_id, r.name AS room_name
+      FROM steward_tickets t
+      LEFT JOIN steward_decisions d ON d.id = t.decision_id
+      LEFT JOIN room r ON r.id = d.room_id
+     WHERE t.issued_at >= ${range.lo}::timestamptz AND t.issued_at < ${range.hi}::timestamptz
+       AND (${roomId}::text IS NULL OR d.room_id = ${roomId}::text)
+       AND (${f.action}::text IS NULL OR t.action = ${f.action}::text)
+       AND (${f.status}::text IS NULL OR t.status = ${f.status}::text)
+     ORDER BY t.issued_at DESC, t.ticket_id
+     LIMIT ${limit + 1}
+  `) as Row[];
+  const kept = rows.slice(0, limit);
+  return {
+    ok: true,
+    from: range.from, to: range.to, count: kept.length, truncated: rows.length > limit,
+    tickets: kept.map((r) => ({
+      ticket_id: String(r.ticket_id),
+      room_id: (r.room_id as string | null) ?? null,
+      room_name: (r.room_name as string | null) ?? null,
+      room_source: r.room_id ? "decision" : "unknown",
+      machine: String(r.machine),
+      action: String(r.action),
+      status: String(r.status),
+      issuer_rule: (r.issuer_rule as string | null) ?? null,
+      // a ticket is only issued by a live decision; the flag is read off the issuing decision and is null when that decision has been pruned (INFERRED: the ticket row has no mode)
+      mode: (r.decision_mode as string | null) ?? null,
+      issued_at: iso(r.issued_at), expires_at: iso(r.expires_at), fetched_at: iso(r.fetched_at), completed_at: iso(r.completed_at),
+    })),
+  };
+}
+
+async function stewardTicketSummary(args: ToolArgs, roomId: string | null): Promise<Row> {
+  const range = ticketRange(args);
+  if (!("lo" in range)) return range as Row;
+  const f = ticketFilters(args);
+  if ("ok" in f) return f as Row;
+  const all = (await sql`
+    SELECT d.room_id AS room_id, r.name AS room_name, t.action, t.status, d.mode AS decision_mode, count(*)::int AS n
+      FROM steward_tickets t
+      LEFT JOIN steward_decisions d ON d.id = t.decision_id
+      LEFT JOIN room r ON r.id = d.room_id
+     WHERE t.issued_at >= ${range.lo}::timestamptz AND t.issued_at < ${range.hi}::timestamptz
+       AND (${roomId}::text IS NULL OR d.room_id = ${roomId}::text)
+       AND (${f.action}::text IS NULL OR t.action = ${f.action}::text)
+       AND (${f.status}::text IS NULL OR t.status = ${f.status}::text)
+     GROUP BY 1, 2, 3, 4, 5
+     ORDER BY 1, 3, 4, 5
+     LIMIT ${TICKET_SUMMARY_ROWS_MAX + 1}
+  `) as Row[];
+  const truncated = all.length > TICKET_SUMMARY_ROWS_MAX;
+  const rows = all.slice(0, TICKET_SUMMARY_ROWS_MAX);
+  const cell = new Map<string, Row>();
+  let total = 0;
+  const perRoom = new Map<string, { room_id: string | null; room_name: string | null; n: number }>();
+  for (const r of rows) {
+    const n = Number(r.n);
+    total += n;
+    const k = `${r.action}\u0000${r.status}\u0000${r.decision_mode ?? ""}`;
+    const c = cell.get(k) ?? { action: String(r.action), status: String(r.status), mode: (r.decision_mode as string | null) ?? null, n: 0 };
+    c.n = Number(c.n) + n;
+    cell.set(k, c);
+    const rk = String(r.room_id ?? "");
+    const pr = perRoom.get(rk) ?? { room_id: (r.room_id as string | null) ?? null, room_name: (r.room_name as string | null) ?? null, n: 0 };
+    pr.n += n;
+    perRoom.set(rk, pr);
+  }
+  return {
+    ok: true, from: range.from, to: range.to, total, truncated, // R4-3: true when the row limit was hit: the counts then cover only the groups returned
+    by_action_status_mode: [...cell.values()],
+    by_room: [...perRoom.values()],
+    by_room_action_status_mode: rows.map((r) => ({ room_id: (r.room_id as string | null) ?? null, room_name: (r.room_name as string | null) ?? null, action: String(r.action), status: String(r.status), mode: (r.decision_mode as string | null) ?? null, n: Number(r.n) })),
+  };
+}
+
+/**
+ * The effective live state, from the DATABASE: LIVE_CAPABLE_ACTIONS (code) through parseConfig + actionMode on the steward_config rows. Fail-closed exactly as the loop is: a missing or malformed
+ * key falls back to the shadow default and is listed in `invalid`. Only booleans and action names leave; no room id, no machine, no config value beyond those.
+ */
+async function stewardLive(): Promise<Row> {
+  const rows = (await sql`SELECT key, value FROM steward_config ORDER BY key`) as Array<{ key: string; value: unknown }>;
+  const { config, invalid, fatal } = parseConfig(rows);
+  // R4-1: the loop (lib/steward/loop.ts, before the lease) does not tick at all when `rooms` or `schedule` is missing or malformed; then nothing it would do is live, whatever the switches say.
+  const loopPaused = fatal.length > 0;
+  const actions = LIVE_CAPABLE_ACTIONS.map((a) => {
+    const mode = loopPaused ? ("shadow" as const) : actionMode(config, a);
+    // S1: config can say live for an action LiveExecutor does not implement; it would throw and stay in shadow. That is NOT live.
+    const implemented = LIVE_IMPLEMENTED_ACTIONS.includes(a);
+    return { action: a, mode, live: mode === "live" && implemented, ...(mode === "live" && !implemented ? { reason: "not_implemented_live" } : {}), held_by_override: config.shadow.actions[a] === true, needs_start_day_live: a === "scribe_start" };
+  });
+  const capable = new Set(LIVE_CAPABLE_ACTIONS);
+  return {
+    ok: true,
+    kill_switch: config.kill_switch,
+    shadow_global: config.shadow.global,
+    start_day_live: config.start_day_live,
+    loop_paused: loopPaused,
+    ...(loopPaused ? { loop_paused_reason: fatal.map((k) => `config:${k}`) } : {}),
+    live_actions: actions.filter((a) => a.live).map((a) => a.action),
+    actions,
+    // shadow.actions keys the code does not list: always shadow, whatever they say
+    config_only_actions: Object.keys(config.shadow.actions).filter((a) => !capable.has(a)).sort(),
+    invalid_config_keys: invalid,
+    source: "LIVE_CAPABLE_ACTIONS (code) x steward_config (database) through actionMode",
+  };
+}
+
 async function stewardTick(): Promise<Row> {
   const rows = (await sql`
     SELECT key, value, updated_at, EXTRACT(EPOCH FROM (now() - updated_at))::int AS age_s
@@ -265,6 +412,7 @@ const steward: McpTool = {
   description:
     "Room Steward, read-only; touches no room (the steward itself may act on one). `view`: config (settings now), decisions (newest first, room name joined), tickets (repair tickets, never the signature or nonce), tick (last tick, kill switch, lease), " +
     "why ({room, at}: decisions within 15 min either side of `at`, plus the config now; history:false there), history (config changes made through scribe_steward_command: key, before, after, actor, reason; room?). since_hours <= 168 (default 24), limit <= 200 (default 50), both clamped with clamped:true. " +
+    "S4: ticket_log ({from, to} IST dates, span <= 31 days; room?, action?, status?, limit <= 200: ticket id, room, action, status, issuing rule, shadow/live flag, times; never the signature, nonce or key), ticket_summary (same range: counts per action x status x shadow/live and per room), live (the effective live state: LIVE_CAPABLE_ACTIONS in code through steward_config in the database, kill switch, per action shadow/live; read-only). " +
     "include_payload adds decision params/inputs and ticket params/result. Decision rows are kept 30 days. Times UTC.",
   scope: "read",
   inputSchema: {
@@ -276,6 +424,10 @@ const steward: McpTool = {
       since_hours: { type: "integer", minimum: 1, maximum: SINCE_HOURS_MAX, default: SINCE_HOURS_DEFAULT },
       limit: { type: "integer", minimum: 1, maximum: LIMIT_MAX, default: LIMIT_DEFAULT },
       include_payload: { type: "boolean", description: "decisions/tickets: add params, inputs, result" },
+      from: { type: "string", description: "ticket views: IST date" },
+      to: { type: "string", description: "IST date; <= 31 days" },
+      action: { type: "string", description: "ticket views: filter" },
+      status: { type: "string", description: "ticket views: filter" },
     },
     required: ["view"],
     additionalProperties: false,
@@ -296,6 +448,9 @@ const steward: McpTool = {
         case "tick": return stewardTick();
         case "why": return stewardWhy(args, r.room!);
         case "history": return stewardHistory(r.room?.id ?? null, sinceHours, limit);
+        case "ticket_log": return stewardTicketLog(args, r.room?.id ?? null, limit);
+        case "ticket_summary": return stewardTicketSummary(args, r.room?.id ?? null);
+        case "live": return stewardLive();
       }
     });
     return { view, ...(r.room ? { room: roomRef(r.room) } : {}), ...(view === "decisions" || view === "tickets" || view === "history" ? clamp : {}), ...body };
@@ -589,6 +744,8 @@ const kiosks: McpTool = {
 const WINDOW_SELECT_NOTE = "lab / REB fields are null until S5";
 
 async function oneWindow(windowId: string): Promise<Row> {
+  // SWEEP (REL2-R3): a window with ANY held-out placement is not described (before its row, its drain jobs or its runs are read)
+  if (await windowBlindAny(windowId)) return { ok: false, error: "blind_room_day", window_id: windowId };
   const w = (await sql`
     SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic, w.grid_aligned, w.state, w.closed_at, w.created_at,
            w.auto_drain_refused_at, w.auto_drain_refused_reason, s.room_id, r.name AS room_name, s.started_at AS session_started_at
@@ -663,6 +820,7 @@ async function oneWindow(windowId: string): Promise<Row> {
 }
 
 async function dayWindows(roomId: string, day: string, limit: number): Promise<Row> {
+  if (isBlindRoomDay(day, roomId)) return { ok: false, error: "blind_room_day" }; // SWEEP (REL2-R3)
   // bench_window.start_ms is epoch ms (lib/bench-window.ts), so a window belongs to the IST day it STARTS in, whatever day its session started.
   const dayLo = Date.parse(`${day}T00:00:00+05:30`);
   const dayHi = dayLo + 86_400_000;
@@ -674,7 +832,10 @@ async function dayWindows(roomId: string, day: string, limit: number): Promise<R
      ORDER BY w.start_ms
      LIMIT ${limit + 1}
   `) as Row[];
-  const kept = rows.slice(0, limit);
+  // SWEEP (REL2-R3): windows that START on a clean day but carry a held-out placement are left out and counted
+  const blindIds = await windowsBlindAny(rows.slice(0, limit).map((r) => String(r.id)));
+  const kept = rows.slice(0, limit).filter((r) => !blindIds.has(String(r.id)));
+  const nBlindExcluded = rows.slice(0, limit).length - kept.length;
   const ids = kept.map((r) => String(r.id));
   const drain = ids.length
     ? ((await sql`
@@ -696,6 +857,7 @@ async function dayWindows(roomId: string, day: string, limit: number): Promise<R
     ok: true,
     ist_date: day,
     count: kept.length,
+    n_blind_excluded: nBlindExcluded,
     truncated: rows.length > limit,
     by_state: byState,
     drain_by_state: drainStates,

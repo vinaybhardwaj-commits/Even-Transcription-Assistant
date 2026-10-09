@@ -12,11 +12,17 @@ import { labStore } from "@/lib/sarvam-lab";
 import { readConsultSpan } from "./consult-span";
 import { readWindowTurns, type Turn } from "./turns";
 import { refuse, type ReadResult } from "./common";
+import { readRebConsult } from "./reb-consult";
 
 export const MAX_CONSULT_CHARS = 60_000;
 export type ConsultLine = { t_ms: number; speaker: "doctor" | "other" | "unknown"; speaker_idx: number | null; text: string };
 export type ConsultText = {
-  consult_key: string; source: "database" | "bench_text"; span_ms: number; lines: ConsultLine[]; chars: number; truncated: boolean;
+  consult_key: string;
+  /** S7-2B: where the words came from: palimpsest's English translate track, its native stt track when wholly English, the bench window cues (window_english), or the lab-store bench text */
+  source: "reb_translate" | "reb_stt_en" | "window_english" | "bench_text";
+  /** the config_hash of the reb track used (null for the other sources) and how many tracks were skipped for failing the sha256 check */
+  config_hash?: string | null; n_integrity_skipped?: number;
+  span_ms: number; lines: ConsultLine[]; chars: number; truncated: boolean;
   /** an excerpt (a few turns around the topic), not a whole consult: the prompt says so */
   partial?: boolean;
   /** the turns (times relative to the consult's open) for the talk-time features */
@@ -25,7 +31,7 @@ export type ConsultText = {
 
 const KEY = /^[A-Za-z0-9_.:@-]{1,120}$/;
 
-function finish(key: string, source: ConsultText["source"], span_ms: number, lines: ConsultLine[], turns: Turn[]): ReadResult<ConsultText> {
+function finish(key: string, source: ConsultText["source"], span_ms: number, lines: ConsultLine[], turns: Turn[], extra: { config_hash?: string | null; n_integrity_skipped?: number } = {}): ReadResult<ConsultText> {
   let chars = 0;
   const kept: ConsultLine[] = [];
   let truncated = false;
@@ -35,7 +41,7 @@ function finish(key: string, source: ConsultText["source"], span_ms: number, lin
     kept.push(l);
   }
   if (kept.length === 0) return refuse("no_data", "the consult has no transcript text");
-  return { ok: true, data: { consult_key: key, source, span_ms, lines: kept, chars, truncated, turns } };
+  return { ok: true, data: { consult_key: key, source, span_ms, lines: kept, chars, truncated, turns, ...extra } };
 }
 
 export async function readConsultText(consultKey: string, opts: { rubricId?: string } = {}): Promise<ReadResult<ConsultText>> {
@@ -43,6 +49,9 @@ export async function readConsultText(consultKey: string, opts: { rubricId?: str
   const span = await readConsultSpan(consultKey);
   if (span.ok) {
     const { t_open_ms: open, t_close_ms: close } = span.data;
+    // S7-2B: palimpsest's consult-clip tracks first (the held-out check was made by readConsultSpan, before this); window_english below is the fallback
+    const reb = await readRebConsult(span.data);
+    if (reb.found) return finish(consultKey, reb.found.source, close - open, reb.found.lines, reb.found.turns, { config_hash: reb.found.config_hash, n_integrity_skipped: reb.found.n_integrity_skipped });
     const lines: ConsultLine[] = [];
     const turns: Turn[] = [];
     for (const w of span.data.windows) {
@@ -57,7 +66,7 @@ export async function readConsultText(consultKey: string, opts: { rubricId?: str
       }
     }
     lines.sort((a, b) => a.t_ms - b.t_ms);
-    return finish(consultKey, "database", close - open, lines, turns);
+    return finish(consultKey, "window_english", close - open, lines, turns, { config_hash: null, n_integrity_skipped: reb.n_integrity_skipped });
   }
   if (span.reason !== "not_found" || !opts.rubricId || !/^[a-z][a-z0-9_]{1,63}$/.test(opts.rubricId)) return span; // blind / open / bad key: the refusal stands
   return readBenchText(consultKey, opts.rubricId);

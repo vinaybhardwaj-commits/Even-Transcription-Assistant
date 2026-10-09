@@ -467,7 +467,10 @@ describe("scribe_lanes", () => {
 describe("scribe_health aspect=routes", () => {
   const fetchMock = vi.fn();
   const savedApp = process.env.APP_URL;
-  beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); process.env.APP_URL = "https://app.example.test"; });
+  // G79: the fetch the code under test sees THROWS after 60 calls in one test. An unbounded redirect loop (the if -> while mutant at s2l.ts:229) otherwise lives on microtasks alone, starves the timers and
+  // the test timeout can never fire; with the bound it ends in a network error and the call-count assertions FAIL.
+  const boundedFetch = (...a: unknown[]) => { if (fetchMock.mock.calls.length >= 60) throw new Error("test fetch bound exceeded"); return (fetchMock as (...x: unknown[]) => unknown)(...a); };
+  beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal("fetch", boundedFetch); process.env.APP_URL = "https://app.example.test"; });
   afterEach(() => { vi.unstubAllGlobals(); if (savedApp === undefined) delete process.env.APP_URL; else process.env.APP_URL = savedApp; });
 
   it("probes the fixed allow-list on the request's own origin, no credentials, no query strings; ok by route", async () => {
@@ -573,6 +576,11 @@ describe("scribe_health aspect=routes", () => {
     expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app:8443");
     process.env.APP_URL = "https://evenscribe.app";
     expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app");
+    // REL2: an http apex is still probed on https://www (never http://www), with or without a port
+    process.env.APP_URL = "http://evenscribe.app";
+    expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app");
+    process.env.APP_URL = "http://evenscribe.app:8080";
+    expect(R.probeOrigin()!.origin).toBe("https://www.evenscribe.app:8080");
     process.env.APP_URL = "https://evenscribe.app:8443";
     const ok = await t.handler({}, ctx) as Row;
     expect(ok.origin).toBe("https://www.evenscribe.app:8443");

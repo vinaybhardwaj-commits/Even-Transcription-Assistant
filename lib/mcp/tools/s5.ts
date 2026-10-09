@@ -6,6 +6,10 @@
  * ids, layers, engines, versions, R2 keys, sha256, status, times. The table holds no transcript text and no patient identifier.
  * The table missing (SQLSTATE 42P01 / 42703) answers { not_collected: true, reason }. Nothing here writes.
  */
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+
+const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
 import { sql } from "@/lib/db";
 import { argBool, argInt, argStr, type McpTool, type ToolArgs } from "../registry";
 import { isRealDate, iso, notCollectedReason, pickRoom, roomRef } from "./s1";
@@ -74,6 +78,8 @@ const rebIndex: McpTool = {
            AND (${engine}::text IS NULL OR engine = ${engine})
            AND (${roomId}::text IS NULL OR room_id = ${roomId})
            AND (${withShadow}::boolean OR shadow = false)
+           -- SWEEP (REL2-R3): an index row of a held-out (room, IST date) is never listed
+           AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = reb_track_index.ist_date AND b.r = reb_track_index.room_id)
          ORDER BY id
          LIMIT ${limit + 1}
       `) as Row[];

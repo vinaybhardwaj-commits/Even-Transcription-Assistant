@@ -93,6 +93,15 @@ export type StepOutcome =
   | { kind: "done"; result: Record<string, unknown> }
   | { kind: "fail"; error: string };
 
+/** G80: a step that throws can say what progress to keep. The runner merges `progress_patch` over the pre-step progress when it records the failure (so calls already made are not forgotten). */
+export function withProgressPatch(e: unknown, patch: Record<string, unknown>): Error {
+  return Object.assign(e instanceof Error ? e : new Error(String(e)), { progress_patch: patch });
+}
+export const progressPatchOf = (e: unknown): Record<string, unknown> | null => {
+  const p = (e as { progress_patch?: unknown } | null)?.progress_patch;
+  return p && typeof p === "object" && !Array.isArray(p) ? (p as Record<string, unknown>) : null;
+};
+
 export const nextStep = (step: string, progress: Record<string, unknown> = {}): StepOutcome => ({ kind: "next", step, progress });
 export const doneWith = (result: Record<string, unknown>): StepOutcome => ({ kind: "done", result });
 export const failWith = (error: string): StepOutcome => ({ kind: "fail", error });
@@ -111,6 +120,14 @@ export type StepContext = {
 
 export type JobKind = {
   name: string;
+  /**
+   * K3-2: does this kind read room data (a window, a room-day, a session or its tape, a room recording)? REQUIRED, so a new kind must answer. A kind that says true MUST declare `heldOut`; the registry throws
+   * at load if it does not (lib/jobs/kinds/index.ts assertHeldOutDeclared). `roomDataNote` says why a kind that says false does not.
+   */
+  roomData: boolean;
+  roomDataNote?: string;
+  /** K3-2: null = fine, else the held-out refusal. Run by submitJob BEFORE the insert and by the runner at the first step. See lib/jobs/held-out.ts. */
+  heldOut?: (args: Record<string, unknown>) => Promise<"blind_room_day" | "window_unplaced" | null>;
   /** The step a fresh job starts at. */
   first: string;
   /** Which MCP scope may submit this kind (§3: "scope per kind"). */

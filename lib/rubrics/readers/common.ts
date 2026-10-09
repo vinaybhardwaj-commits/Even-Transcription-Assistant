@@ -6,6 +6,7 @@
  */
 import { sql } from "@/lib/db";
 import { isBlindRoomDay } from "../blind-room-days";
+import { windowBlindAny } from "@/lib/voice-blind";
 
 export type ReadRefusal = { ok: false; reason: "blind_room_day" | "not_found" | "not_implemented" | "no_data" | "bad_unit_key"; detail?: string };
 export type ReadOk<T> = { ok: true; data: T };
@@ -51,12 +52,31 @@ export async function windowPair(windowId: string): Promise<{ room_id: string; i
 
 /** The (room, IST date of t_open) a consult window belongs to, or the refusal why that cannot be said. A metadata lookup; a failing query throws. */
 export async function consultPair(consultKey: string): Promise<{ room_id: string; ist_date: string } | ReadRefusal> {
+  // SWEEP (REL2-R3): every row of the key (not one picked by LIMIT 1), and every row of its consult_uid (the uid is NOT unique: one row per machine). If ANY of them is held out, that pair is returned, so the
+  // caller's blindRefusal fires whatever order the rows come in.
   const rows = (await sql`
-    SELECT room_id, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date FROM eta_encounter_windows WHERE consult_key = ${consultKey}::text LIMIT 1
-  `) as Array<{ room_id: string | null; ist_date: string }>;
-  if (!rows[0]) return refuse("not_found", "no such consult window");
-  if (!rows[0].room_id) return refuse("no_data", "the consult window has no room");
-  return { room_id: rows[0].room_id, ist_date: rows[0].ist_date };
+    SELECT room_id, consult_uid, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date FROM eta_encounter_windows WHERE consult_key = ${consultKey}::text
+  `) as Array<{ room_id: string | null; consult_uid?: string | null; ist_date: string }>;
+  if (rows.length === 0) return refuse("not_found", "no such consult window");
+  const held = rows.find((r) => r.room_id && isBlindRoomDay(r.ist_date, r.room_id));
+  if (held) return { room_id: held.room_id!, ist_date: held.ist_date };
+  for (const uid of new Set(rows.map((r) => r.consult_uid).filter((u): u is string => typeof u === "string" && u !== ""))) {
+    const sib = await blindPairOfUid(uid);
+    if (sib) return sib;
+  }
+  const first = rows.find((r) => r.room_id) ?? rows[0]!;
+  if (!first.room_id) return refuse("no_data", "the consult window has no room");
+  return { room_id: first.room_id, ist_date: first.ist_date };
+}
+
+/** consult_uid is NOT unique in eta_encounter_windows (one row per machine): the held-out pair of ANY row that carries this uid, else null. A metadata lookup. */
+export async function blindPairOfUid(consultUid: string | null | undefined): Promise<{ room_id: string; ist_date: string } | null> {
+  if (!consultUid) return null;
+  const rows = (await sql`
+    SELECT room_id, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date FROM eta_encounter_windows WHERE consult_uid = ${consultUid}::text AND room_id IS NOT NULL
+  `) as Array<{ room_id: string; ist_date: string }>;
+  const held = rows.find((r) => r.room_id && r.ist_date && isBlindRoomDay(r.ist_date, r.room_id));
+  return held ? { room_id: held.room_id, ist_date: held.ist_date } : null;
 }
 
 export const isRefusal = (x: unknown): x is ReadRefusal => typeof x === "object" && x !== null && (x as { ok?: unknown }).ok === false;
@@ -64,5 +84,9 @@ export const isRefusal = (x: unknown): x is ReadRefusal => typeof x === "object"
 /** A window id -> refusal when ITS room-day is in the held-out set (a metadata join, before any content fetch). A window with no room-day is not_found. */
 export async function blindGuardWindow(windowId: string): Promise<ReadRefusal | null> {
   const pair = await windowPair(windowId);
-  return isRefusal(pair) ? pair : blindRefusal(pair.room_id, pair.ist_date);
+  if (isRefusal(pair)) return pair;
+  const blind = blindRefusal(pair.room_id, pair.ist_date);
+  if (blind) return blind;
+  // SWEEP (REL2-R3): the window's OTHER placements too (room_diarize_window, and the own room-day of its turn, window-text and emotion rows)
+  return (await windowBlindAny(windowId)) ? refuse("blind_room_day", "held-out evaluation room-day") : null;
 }

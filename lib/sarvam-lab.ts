@@ -34,7 +34,13 @@ const RUBRIC_KEY = /^rubric\/[a-z][a-z0-9_]{1,63}\/\d+\.\d+\.\d+\/[A-Za-z0-9_.:@
 const WRITE_ALLOW: RegExp[] = [/^sarvam\/ledger\/scribe-mcp\/\d{4}-\d{2}-\d{2}\.jsonl$/, /^lanes\/sarvam-scribe-mcp\.json$/, RUBRIC_KEY];
 const READ_ALLOW_PREFIXES = ["lanes/", LEDGER_PREFIX, RUBRIC_PREFIX];
 export const labWritable = (key: string): boolean => WRITE_ALLOW.some((r) => r.test(key));
-export const labReadable = (key: string): boolean => READ_ALLOW_PREFIXES.some((p) => key.startsWith(p)) && !key.includes("..") && !key.startsWith("reb/");
+/**
+ * S7-2B: the ONE reb/ shape this code may READ (never write, never list): palimpsest's consult-clip tracks and manifest,
+ * reb/<ist_date>/<room_id>/_consults/<consult_uid>/tracks/<file>.json and .../manifest.json. Any other reb/ path stays unreadable, and nothing under reb/ is writable.
+ */
+export const REB_CONSULT_KEY = /^reb\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/_consults\/([A-Za-z0-9]{10,60})\/(?:tracks\/[A-Za-z0-9._-]{1,200}\.json|manifest\.json)$/;
+export const labReadable = (key: string): boolean =>
+  !key.includes("..") && ((READ_ALLOW_PREFIXES.some((p) => key.startsWith(p)) && !key.startsWith("reb/")) || REB_CONSULT_KEY.test(key));
 function assertWritable(key: string): void {
   if (!labWritable(key)) throw new Error("lab_key_not_writable");
 }

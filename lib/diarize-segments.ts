@@ -29,6 +29,8 @@
  * speaker's, and there is never a clinician match (Nemotron has no identity — that is ticket c). Only
  * `window_id` is supported for it. With no `engine`, every answer is exactly what it was.
  */
+import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { guardSessionSpan, refusalForPairs, windowBlindAny, windowPlacement } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { nemotronShadowEnabled } from "@/lib/diarize-engine";
 
@@ -98,6 +100,9 @@ export type SessionSegments = {
   session_id: string;
   windows: WindowSegments[];
   truncated: boolean;
+  /** S6-BLIND (the guarded MCP read only): windows left out because their room-day is held out / because they have no room-day */
+  n_blind_excluded?: number;
+  n_unplaced_excluded?: number;
 };
 
 export type SegmentsPayload = EncounterSegments | WindowSegments | SessionSegments;
@@ -117,7 +122,9 @@ export type SegmentEngine = (typeof SEGMENT_ENGINES)[number];
 
 export type SegmentsLookup =
   | { ok: true; payload: SegmentsPayload }
-  | { ok: false; status: 400 | 404; error: "one_id_required" | "bad_id" | "bad_engine" | "engine_needs_window_id" | "not_found" | "engine_disabled" };
+  | { ok: false; status: 400 | 404; error: "one_id_required" | "bad_id" | "bad_engine" | "engine_needs_window_id" | "not_found" | "engine_disabled" }
+  // S6-BLIND (only when the caller asks for the guard: the MCP tool): a held-out room-day, or a window with no room-day
+  | { ok: false; status: 403; error: "blind_room_day" | "window_unplaced" };
 
 // ---------------------------------------------------------------------------
 // PURE shaping
@@ -390,9 +397,10 @@ export function pickQuery(q: SegmentsQuery):
 // Reads. SELECT only; the column lists name no text column.
 // ---------------------------------------------------------------------------
 
-export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> {
+export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: boolean } = {}): Promise<SegmentsLookup> {
   const pick = pickQuery(q);
   if (!pick.ok) return pick;
+  const guard = opts.blindGuard !== false; // S6-BLIND: guarded by default, so the MCP tool and the /api route (its bearer twin) share one rule
 
   if (pick.engine === "nemotron") {
     // the shadow store is readable only while DIARIZE_NEMOTRON_SHADOW is on; a bad flag value reads as off (fail closed)
@@ -403,16 +411,26 @@ export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> 
       on = false;
     }
     if (!on) return { ok: false, status: 404, error: "engine_disabled" };
+    // S6-BLIND: the placement check runs before the shadow store is read, exactly as for the ensemble path (a held-out or unplaced window is refused; an unknown one stays not_found)
+    if (guard) {
+      const p = await windowPlacement(pick.id);
+      // G1: the placement pairs AND the full any-placement set (turn rows, window text, emotion rows included)
+      if (p.known) { const g = refusalForPairs(p.pairs) ?? ((await windowBlindAny(pick.id)) ? "blind_room_day" : null); if (g) return { ok: false, status: 403, error: g }; }
+    }
     const rows = (await sql`
       SELECT n.window_id, w.session_id, n.room_day_id, w.source_mic, n.status, n.received_at,
-             w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json
+             w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json,
+             nrd.room_id AS shadow_room_id, nrd.ist_date::text AS shadow_ist_date
         FROM diarize_nemotron_window n
         JOIN bench_window w ON w.id = n.window_id
+        LEFT JOIN room_day nrd ON nrd.id = n.room_day_id
        WHERE n.window_id = ${pick.id} AND n.status IN ('ok', 'empty')
        ORDER BY n.received_at DESC, n.id DESC
        LIMIT 1
-    `) as NemotronWindowRow[];
+    `) as Array<NemotronWindowRow & { shadow_room_id?: string | null; shadow_ist_date?: string | null }>;
     const row = rows[0];
+    // N2-1: the EITHER-placement rule covers the shadow row's OWN room-day too (n.room_day_id): a window whose bench placement is clean but whose shadow row sits on a held-out day is refused, and no turn leaves
+    if (guard && row && row.shadow_room_id && row.shadow_ist_date && isBlindRoomDay(row.shadow_ist_date, row.shadow_room_id)) return { ok: false, status: 403, error: "blind_room_day" };
     return row ? { ok: true, payload: nemotronWindowPayload(row) } : { ok: false, status: 404, error: "not_found" };
   }
 
@@ -429,6 +447,12 @@ export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> 
   }
 
   if (pick.by === "window_id") {
+    if (guard) {
+      // S6-BLIND: the window's placement is asked first; a held-out window is refused before its segments (or anything else) are read. An unknown window stays not_found (nothing to leak).
+      const p = await windowPlacement(pick.id);
+      // G1: the placement pairs AND the full any-placement set (turn rows, window text, emotion rows included)
+      if (p.known) { const g = refusalForPairs(p.pairs) ?? ((await windowBlindAny(pick.id)) ? "blind_room_day" : null); if (g) return { ok: false, status: 403, error: g }; }
+    }
     const rows = (await sql`
       SELECT d.window_id, w.session_id, d.room_day_id, w.source_mic, d.state, d.diarized_at,
              w.start_ms, w.end_ms, d.segments_run_id, d.last_run_id,
@@ -442,6 +466,7 @@ export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> 
     return row ? { ok: true, payload: windowPayload(row) } : { ok: false, status: 404, error: "not_found" };
   }
 
+  if (guard) return sessionGuarded(pick.id, pick.limit);
   // One more row than the limit, so `truncated` is a fact rather than a guess.
   const rows = (await sql`
     SELECT d.window_id, w.session_id, d.room_day_id, w.source_mic, d.state, d.diarized_at,
@@ -462,5 +487,44 @@ export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> 
       windows: rows.slice(0, pick.limit).map(windowPayload),
       truncated: rows.length > pick.limit,
     },
+  };
+}
+
+/**
+ * S6-BLIND: a session's windows with the held-out room-days left out IN SQL (before the LIMIT) and counted, and the windows with no room-day left out and counted (fail closed). A window is placed
+ * through room_diarize_window.room_day_id, else bench_window.room_day_id. Nothing is named: only counts.
+ */
+async function sessionGuarded(sessionId: string, limit: number): Promise<SegmentsLookup> {
+  // G1: a session that scribe_get_session refuses whole (its day or span is held out, or ANY window has ANY held-out placement) serves none of its windows either
+  if ((await guardSessionSpan(sessionId)) === "blind_room_day") return { ok: false, status: 403, error: "blind_room_day" };
+  const days = BLIND_ROOM_DAYS.map(([d]) => d), rooms = BLIND_ROOM_DAYS.map(([, r]) => r);
+  // Y1: a window is held out if EITHER of its placements (room_diarize_window.room_day_id, bench_window.room_day_id) is a held-out pair, as in the window view (lib/voice-blind refusalForPairs).
+  // Y2: the INNER JOIN below is the unplaced exclusion (a window with no room-day at all drops out and is counted).
+  const rows = (await sql`
+    SELECT d.window_id, w.session_id, d.room_day_id, w.source_mic, d.state, d.diarized_at,
+           w.start_ms, w.end_ms, d.segments_run_id, d.last_run_id,
+           d.speakers_json, d.segments_json, d.timing_json
+      FROM bench_window w
+      JOIN room_diarize_window d ON d.window_id = w.id
+      JOIN room_day rd ON rd.id = COALESCE(d.room_day_id, w.room_day_id)
+     WHERE w.session_id = ${sessionId}
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+     ORDER BY w.start_ms
+     LIMIT ${limit + 1}
+  `) as WindowRow[];
+  const ex = (await sql`
+    SELECT count(*) FILTER (WHERE bl.blind)::int AS blind,
+           count(*) FILTER (WHERE rd.id IS NULL AND NOT bl.blind)::int AS unplaced
+      FROM bench_window w
+      JOIN room_diarize_window d ON d.window_id = w.id
+      LEFT JOIN room_day rd ON rd.id = COALESCE(d.room_day_id, w.room_day_id)
+      CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM room_day r1, unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) AS blind) bl
+     WHERE w.session_id = ${sessionId}
+  `) as Array<{ unplaced: number; blind: number }>;
+  const n_blind_excluded = Number(ex[0]?.blind ?? 0), n_unplaced_excluded = Number(ex[0]?.unplaced ?? 0);
+  if (rows.length === 0 && n_blind_excluded + n_unplaced_excluded === 0) return { ok: false, status: 404, error: "not_found" };
+  return {
+    ok: true,
+    payload: { kind: "session", session_id: sessionId, windows: rows.slice(0, limit).map(windowPayload), truncated: rows.length > limit, n_blind_excluded, n_unplaced_excluded },
   };
 }

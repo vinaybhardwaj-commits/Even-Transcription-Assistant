@@ -14,7 +14,7 @@
  * Read scope, counts only — no window ids, no room labels, no audio, no text.
  */
 import { failSafe, argInt, type McpTool, type ToolArgs } from "../registry";
-import { dailyLabelCounts, eurPerAudioHour, EUR_PER_AUDIO_HOUR_ENV } from "@/lib/diarize-labels";
+import { blindLabelCount, dailyLabelCounts, eurPerAudioHour, EUR_PER_AUDIO_HOUR_ENV } from "@/lib/diarize-labels";
 
 /** The most days one call will summarise. */
 export const MAX_DAYS = 90;
@@ -36,9 +36,11 @@ const diarizeSpend: McpTool = {
     failSafe({ days: [] as unknown[] }, async () => {
       const days = argInt(args, "days", DEFAULT_DAYS, 1, MAX_DAYS);
       const rows = await dailyLabelCounts({ days });
+      const n_blind_excluded = await blindLabelCount({ days }); // K3-4: held-out labels are left out of every figure and counted
       const paid = rows.filter((r) => r.engine === "pyannoteai");
       return {
         days: rows,
+        n_blind_excluded,
         rate_eur_per_audio_hour: eurPerAudioHour(),
         rate_env: EUR_PER_AUDIO_HOUR_ENV,
         // Totals over the window asked for, so a reader does not have to add the column up — and

@@ -15,7 +15,7 @@ vi.mock("@/lib/db", () => ({
 }));
 vi.mock("@/lib/rubrics/readers/consult-text", async (orig) => ({
   ...((await orig()) as object),
-  readConsultText: async () => { calls.text++; return { ok: true, data: { consult_key: "k", source: "database", span_ms: 1000, lines: [{ t_ms: 0, speaker: "doctor", speaker_idx: 0, text: "hello" }], chars: 5, truncated: false, turns: [] } }; },
+  readConsultText: async () => { calls.text++; return { ok: true, data: { consult_key: "k", source: "window_english", span_ms: 1000, lines: [{ t_ms: 0, speaker: "doctor", speaker_idx: 0, text: "hello" }], chars: 5, truncated: false, turns: [] } }; },
 }));
 vi.mock("@/lib/rubrics/readers/pulse-record", () => ({
   readPulseRecord: async () => { calls.record++; return { ok: false, reason: "no_data" }; },

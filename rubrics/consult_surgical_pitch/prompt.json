@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.1.1",
   "rubric_id": "consult_surgical_pitch",
   "note": "Anchors and codes are rendered from rubric.json `definition` at run time (lib/rubrics/engines/consult-prompts.ts).",
   "rules": [

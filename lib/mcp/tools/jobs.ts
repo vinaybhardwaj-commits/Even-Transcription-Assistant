@@ -105,7 +105,7 @@ const submit: McpTool = {
         return { ok: true, job_id: job.id, kind: job.kind, status: job.status, ...(job.deduped ? { deduped: true } : {}) };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind, allowed: JOB_KIND_NAMES };
-        if (e instanceof JobArgsError) return e.reason.startsWith("scope_consult_only") ? sarvamScopeRefusal({ kind }) : { ok: false, error: "bad_args", kind, detail: e.reason };
+        if (e instanceof JobArgsError) return e.reason.startsWith("scope_consult_only") ? sarvamScopeRefusal({ kind }) : e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason, kind } : { ok: false, error: "bad_args", kind, detail: e.reason };
         throw e;
       }
     }),

@@ -82,6 +82,9 @@ export async function submitJob(input: {
     const open = await findOpenJob(kind.name, match);
     if (open) return { ...open, deduped: true };
   }
+  // K3-2: the held-out rule, before the insert: a refused job leaves no row (a guard that cannot answer throws: not a pass)
+  const held = (await kind.heldOut?.(args)) ?? null;
+  if (held) throw new JobArgsError(held);
   await kind.precheck?.(args); // throws JobArgsError: a job over a cost ceiling never queues (the fast refusal, with its numbers)
   const planned = kind.capPlan?.(args) ?? 0;
   let job: JobRow;

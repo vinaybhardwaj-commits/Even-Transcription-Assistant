@@ -31,12 +31,12 @@ vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?").replace(/\s+/g, " ").trim();
     sqlCalls.push({ text, values });
+    if (/FROM diarize_window_label/.test(text)) return Promise.resolve(countRows); // first: the K3-4 held-out predicate mentions bench_window / room_day inside it
     if (/FROM bench_window/.test(text)) return Promise.resolve(windowRow);
     if (/FROM room_day/.test(text)) {
       return roomDayThrows ? Promise.reject(new Error("relation room_day does not exist")) : Promise.resolve(roomDayRows);
     }
     if (/FROM bench_level_sample/.test(text)) return Promise.resolve(levelRows);
-    if (/FROM diarize_window_label/.test(text)) return Promise.resolve(countRows);
     if (/FROM cue/.test(text)) return Promise.resolve(turnsRow);
     if (/FROM voice_print/.test(text)) return Promise.resolve(voicePrintRows);
     return Promise.resolve([]);

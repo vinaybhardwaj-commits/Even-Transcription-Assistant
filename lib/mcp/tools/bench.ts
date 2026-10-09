@@ -79,6 +79,8 @@
  *                     tool, not an option on this one, and a dry run of an open tape is safe.
  */
 
+import { guardSessionSpan, sessionsBlindAny } from "@/lib/voice-blind";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { getObjectBytes, signGetUrl } from "@/lib/r2";
@@ -208,8 +210,11 @@ const listSessions: McpTool = {
         status: argStr(args, "status", 32),
         limit: argInt(args, "limit", 200, 1, 200),
       });
+      // K3-1: a session of a held-out (room, IST day), or with a held-out window placement, is not listed; it is counted
+      const heldOut = await sessionsBlindAny(rows.map((r) => r.id));
       return {
-        sessions: rows.map((r) => ({
+        n_blind_excluded: heldOut.size,
+        sessions: rows.filter((r) => !heldOut.has(r.id)).map((r) => ({
           id: r.id,
           room_id: r.room_id,
           room_name: r.room_name,
@@ -340,6 +345,7 @@ const getSession: McpTool = {
     failSafe({ session: null as unknown, chunks: [] as unknown[], marks: [] as unknown[] }, async () => {
       const id = argStr(args, "session_id", 64);
       if (!id || !id.startsWith("bs_")) return { session: null, chunks: [], marks: [], error: "bad_session_id" };
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { session: null, chunks: [], marks: [], error: "blind_room_day" };
       const b = await loadSessionBundle(id);
       if (!b) return { session: null, chunks: [], marks: [], error: "session_not_found" };
       const { _raw, ...out } = b;
@@ -370,6 +376,7 @@ const getRecording: McpTool = {
       const modeRaw = argStr(args, "mode", 16) ?? "manifest";
       if (!["manifest", "timeline", "chunk", "zip"].includes(modeRaw)) return { mode: null, error: "bad_mode" };
       const mode = modeRaw as "manifest" | "timeline" | "chunk" | "zip";
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { mode, error: "blind_room_day" };
       const b = await loadSessionBundle(id);
       if (!b) return { mode, error: "session_not_found" };
       const { session, chunks, backupChunks } = b._raw;
@@ -951,6 +958,8 @@ async function resolveRangeArgs(args: ToolArgs, ctx: ToolContext): Promise<Range
   if (!start) return { error: { ok: false, error: "invalid_start", hint: "HH:MM[:SS] IST or ISO" } };
   if (!end) return { error: { ok: false, error: "invalid_end", hint: "HH:MM[:SS] IST or ISO" } };
   if (!(end.ms > start.ms)) return { error: { ok: false, error: "end_before_start" } };
+  // B3: held out BEFORE any chunk, presign or R2 read (the session's own day, and every IST day the range touches)
+  if ((await guardSessionSpan(session.id, { startMs: start.ms, endMs: end.ms })) === "blind_room_day") return { error: { ok: false, error: "blind_room_day" } };
   const chunks = await listBenchChunks(session.id);
 
   // U4 — with a microphone named, the events are not consulted at all: a stated choice is never
@@ -1100,7 +1109,7 @@ const extractAudio: McpTool = {
         return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
-        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        if (e instanceof JobArgsError) return e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason } : { ok: false, error: "bad_args", detail: e.reason }; // K3-2: a held-out refusal is named, and no job row exists
         throw e;
       }
     }
@@ -2058,7 +2067,7 @@ const transcribeRange: McpTool = {
         return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status, status_pointer: { tool: "scribe_job_status", job_id: job.id } };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
-        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        if (e instanceof JobArgsError) return e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason } : { ok: false, error: "bad_args", detail: e.reason }; // K3-2: a held-out refusal is named, and no job row exists
         throw e;
       }
     }
@@ -2429,7 +2438,11 @@ const dayReport: McpTool = {
       const d = argStr(args, "ist_date", 10);
       if (d && !IST_DATE_RE.test(d)) return { sessions: [], error: "invalid_ist_date" };
       const day = d ?? istDate(new Date());
-      const rows = await listBenchSessions({ room_id: room.id, ist_date: day });
+      // K3-1: a held-out (room, IST day) is refused whole, before any session, chunk or event read
+      if (isBlindRoomDay(day, room.id)) return { sessions: [], error: "blind_room_day" };
+      const allRows = await listBenchSessions({ room_id: room.id, ist_date: day });
+      const heldOut = await sessionsBlindAny(allRows.map((r) => r.id));
+      const rows = allRows.filter((r) => !heldOut.has(r.id));
       const ordered = [...rows].sort((a, b) => (msOfLoose(a.started_at) ?? 0) - (msOfLoose(b.started_at) ?? 0));
       const degraded: string[] = [];
       const sessions = await Promise.all(
@@ -2456,6 +2469,7 @@ const dayReport: McpTool = {
       return {
         room: { id: room.id, slug: room.slug, name: room.name },
         ist_date: day,
+        ...(heldOut.size ? { n_blind_excluded: heldOut.size } : {}),
         note: "tape_ended_at is the last piece recorded (either microphone) — the stored ended_at is not the end of the recording and is shown only where it differs",
         sessions: detail === "full" ? sessions : sessions.map((x) => pickSummary(x, SUMMARY_DAY_SESSION_FIELDS, SUMMARY_DAY_SESSION_OPTIONAL)),
         ...(degraded.length ? { degraded_reads: degraded } : {}),
@@ -3115,6 +3129,7 @@ const replaySession: McpTool = {
       if (!id || !id.startsWith("bs_")) return { cues: [], error: "bad_session_id" };
       const session = await findBenchSession(id);
       if (!session) return { cues: [], error: "session_not_found" };
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { cues: [], error: "blind_room_day" }; // K3-1: before any chunk or event read
       const limit = argInt(args, "limit", REPLAY_DEFAULT_LIMIT, 1, REPLAY_MAX_LIMIT);
 
       const degraded: string[] = [];
@@ -3217,6 +3232,8 @@ const replayWrite: McpTool = {
       if (!id || !id.startsWith("bs_")) return { ok: false, error: "bad_session_id", written: 0, already_existed: 0, failed: 0 };
       const session = await findBenchSession(id);
       if (!session) return { ok: false, error: "session_not_found", written: 0, already_existed: 0, failed: 0 };
+      // K3-3: a held-out session is never copied into a scratch day (before any event read or scratch graph)
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { ok: false, error: "blind_room_day", written: 0, already_existed: 0, failed: 0 };
 
       // H1 — a session that is not `ended` is refused, recording and paused alike. A live tape
       // is still growing, so the cue list is a PREFIX of the day; written into scratch it would

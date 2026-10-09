@@ -29,6 +29,7 @@ import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, ty
 import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
 import { listBenchSessions } from "@/lib/bench";
 import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 
 type CueRow = { id: string; type: string; at: Date | string; created_at: Date | string; payload: unknown; source: string | null; source_ref: string | null };
@@ -230,6 +231,8 @@ const fuseRun: McpTool = {
       if (day.scratch !== true) {
         return { ok: false, error: "not_a_scratch_day", room_day_id: roomDayId, room_id: day.room_id, ist_date: day.ist_date, visits: [], written: 0, already_existed: 0, failed: 0 };
       }
+      // K3-3: a scratch day replays a REAL room's day; if that real (room, date) is held out nothing is read and nothing is sent to any arm (hybrid / flash send cues to a model)
+      if (isBlindRoomDay(day.ist_date, day.room_id)) return { ok: false, error: "blind_room_day", room_day_id: roomDayId, visits: [], written: 0, already_existed: 0, failed: 0 };
 
       const cues = await readCuesForFuse(roomDayId);
       const res = await runArm(arm, cues, day);

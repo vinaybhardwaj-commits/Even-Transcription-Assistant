@@ -31,6 +31,7 @@ import { dedupeSpanRows, finishEmotionWindow, recordEmotionFailureNarrow, record
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
+import { windowArgHeldOut } from "../held-out";
 
 export const EMOTION_WINDOW_KIND = "emotion_window";
 const PRESIGN_SECONDS = 900;
@@ -315,6 +316,8 @@ const STEPS: Record<string, (ctx: StepContext) => Promise<StepOutcome>> = { prep
 export const emotionWindowKind: JobKind = {
   name: EMOTION_WINDOW_KIND,
   first: "prepare",
+  roomData: true,
+  heldOut: windowArgHeldOut,
   scope: "invoke",
 
   parseArgs(raw) {
