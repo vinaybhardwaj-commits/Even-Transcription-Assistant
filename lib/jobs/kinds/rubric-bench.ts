@@ -9,7 +9,7 @@ import { z } from "zod";
 import { JobArgsError, doneWith, failWith, nextStep, withProgressPatch, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
 import { countingCalls, talliedCalls } from "@/lib/rubrics/llm";
-import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
+import { BENCH_CALL_ESTIMATE, MAX_ATTEMPTS, callsLeft, capRefusal, isLlmRubric, jobCallCap, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun } from "@/lib/rubrics/registry";
 import { evaluateUnit, evaluateEvrPerturbUnit } from "@/lib/rubrics/engines";
 import { aggregatePerturb, PERTURB_KINDS, type PerturbKind, type WindowOutcome } from "@/lib/rubrics/evr/perturb";
@@ -43,7 +43,10 @@ export const rubricBenchKind: JobKind = {
   first: "load",
   scope: "invoke",
   capPlan: (args) => reservationFor(RUBRIC_BENCH_KIND, args),
-  precheck: async (args) => { const m = await capRefusal(RUBRIC_BENCH_KIND, args); if (m) throw new JobArgsError(m); },
+  precheck: async (args) => {
+    // Q2-2: reserve by the real set size (stored in the args the job is inserted with); an unreadable set reserves the whole per-job ceiling
+    if (isLlmRubric(String(args.rubric_id))) args.reserved_calls = await benchReservation(args);
+    const m = await capRefusal(RUBRIC_BENCH_KIND, args); if (m) throw new JobArgsError(m); },
   parseArgs: (raw) => parseRubricBenchArgs(raw) as unknown as Record<string, unknown>,
   dedupeOn: (args) => [["rubric_id", String(args.rubric_id)], ["set", String(args.set ?? "gold")]],
   async run(ctx: StepContext) {
@@ -55,6 +58,24 @@ export const rubricBenchKind: JobKind = {
     }
   },
 };
+
+/**
+ * Q2-2: the calls a bench submit reserves = min(per-job ceiling, max(floor, items x MAX_ATTEMPTS)) where items is the REAL size of the set (the same loader the job's load step uses, from the lab store).
+ * A set that cannot be read (no store, missing, malformed, a loader error) reserves the WHOLE per-job ceiling, never the fixed estimate: the job will fail at load, but until then it holds the headroom.
+ */
+export async function benchReservation(args: Record<string, unknown>, env: Record<string, string | undefined> = process.env): Promise<number> {
+  const cap = jobCallCap(env);
+  const setName = (BENCH_SETS as readonly string[]).includes(String(args.set)) ? (args.set as BenchSetName) : "gold";
+  try {
+    const r = getRubric(String(args.rubric_id));
+    if (!r) return cap;
+    const set = await loadBenchSet(r.id, r.version, r.bench.location, setName);
+    if (!set || set.items.length === 0) return cap;
+    return Math.min(cap, Math.max(BENCH_CALL_ESTIMATE[setName] ?? 100, set.items.length * MAX_ATTEMPTS));
+  } catch {
+    return cap;
+  }
+}
 
 /** Repo bench sets are registered here once a rubric is benched (static imports: the bundler ships them). None yet. */
 export const REPO_BENCH_SETS: Record<string, unknown> = {};

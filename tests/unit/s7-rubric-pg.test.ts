@@ -845,6 +845,92 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
+  it("Q2-2 — a bench submit reserves by the REAL set size: a 500-item gold set holds 600 (the per-job ceiling) and blocks a second job that would pass under the old fixed 60; a small set keeps the floor", async () => {
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const C = await import("@/lib/rubrics/llm-cap");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "1000";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const scopes = new Set(["invoke"] as never) as ReadonlySet<never>;
+    const run250 = () => submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: Array.from({ length: 250 }, (_, i) => `q${i}`) }, actor: "mcp:t", scopes }); // 500 calls
+    try {
+      const gold = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify({ unit_key: `g${i}`, expected: { surgery_recommended: false } })).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", gold(500));
+      const b = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+      expect((b.args as { reserved_calls?: number }).reserved_calls).toBe(600);
+      expect(await C.dayUsage()).toEqual({ used: 0, queued: 600 });
+      await expect(run250()).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 600 + 500 > 1000 (at the old 60: 560 would have passed)
+      // a SMALL set keeps the floor (the fixed per-set estimate), not 2 x items
+      await pg.exec(`DELETE FROM scribe_job;`);
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", gold(5));
+      const small = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+      expect((small.args as { reserved_calls?: number }).reserved_calls).toBe(60);
+      expect(await C.dayUsage()).toEqual({ used: 0, queued: 60 });
+      await expect(run250()).resolves.toBeTruthy(); // 60 + 500 <= 1000
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      mem.delete("rubric/bench/consult_surgical_pitch/gold.jsonl");
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("Q2-2 — a set that cannot be read (missing, malformed) reserves the WHOLE per-job ceiling, never the fixed estimate", async () => {
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const C = await import("@/lib/rubrics/llm-cap");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "1000";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const scopes = new Set(["invoke"] as never) as ReadonlySet<never>;
+    try {
+      for (const body of [null, "{not json\n"]) {
+        await pg.exec(`DELETE FROM scribe_job;`);
+        if (body === null) mem.delete("rubric/bench/consult_surgical_pitch/gold.jsonl"); else mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", body);
+        const b = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+        expect((b.args as { reserved_calls?: number }).reserved_calls, String(body)).toBe(600);
+        expect(await C.dayUsage()).toEqual({ used: 0, queued: 600 });
+        await expect(submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: Array.from({ length: 225 }, (_, i) => `u${i}`) }, actor: "mcp:t", scopes })).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 600 + 450 > 1000
+      }
+      // the per-job ceiling is the env one, not a literal
+      process.env.RUBRIC_LLM_JOB_CALL_CAP = "300";
+      await pg.exec(`DELETE FROM scribe_job;`);
+      mem.delete("rubric/bench/consult_surgical_pitch/gold.jsonl");
+      expect(((await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes })).args as { reserved_calls?: number }).reserved_calls).toBe(300);
+    } finally {
+      delete process.env.RUBRIC_LLM_JOB_CALL_CAP;
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("Q2-2 — a loader that THROWS reserves the whole ceiling too; and the store.ts copy of the queued-bench reservation (insertJobCapped) honours args.reserved_calls ALONE", async () => {
+    const L = await import("@/lib/sarvam-lab");
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    const C = await import("@/lib/rubrics/llm-cap");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "1000";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const scopes = new Set(["invoke"] as never) as ReadonlySet<never>;
+    try {
+      L.setLabStoreForTests({ get: async () => { throw new Error("lab store down"); }, put: async () => "ok", list: async () => [] });
+      const b = await submitJob({ kind: "rubric_bench", args: { rubric_id: "consult_surgical_pitch" }, actor: "mcp:t", scopes });
+      expect((b.args as { reserved_calls?: number }).reserved_calls).toBe(600);
+      // restore the in-memory store for the tests that follow
+      L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, bb) => { mem.set(k, bb); return "ok"; }, list: async (pr) => [...mem.keys()].filter((k) => k.startsWith(pr)) });
+      // the store copy alone: a queued bench that reserved 600 blocks a 500-call insert under a 1000 cap (the fixed estimate, 60, would let it through)
+      await pg.exec(`DELETE FROM scribe_job;`);
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status) VALUES ('job_q22', 'rubric_bench', ${JSON.stringify({ rubric_id: "consult_surgical_pitch", reserved_calls: 600 })}::jsonb, 'mcp:t', 'queued')`;
+      const args = { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["z1"], limit: 200 };
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: "1000" }))).toBeNull();
+      await pg.sql`UPDATE scribe_job SET args = ${JSON.stringify({ rubric_id: "consult_surgical_pitch" })}::jsonb WHERE id = 'job_q22'`; // no reserved_calls: the floor (60)
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: "1000" }))).not.toBeNull();
+    } finally {
+      L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, bb) => { mem.set(k, bb); return "ok"; }, list: async (pr) => [...mem.keys()].filter((k) => k.startsWith(pr)) });
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
   it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
     const C = await import("@/lib/rubrics/llm-cap");
     const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");

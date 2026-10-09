@@ -17,7 +17,7 @@ export const jobCallCap = (env: Env = process.env): number => posInt(env.RUBRIC_
 export const dailyCallCap = (env: Env = process.env): number => posInt(env.RUBRIC_LLM_DAILY_CALL_CAP, DEFAULT_DAILY_CALL_CAP);
 
 export const isLlmRubric = (id: string): boolean => LLM_WIRED.has(id);
-/** Calls a bench of each set is assumed to need when it is queued (a running bench is bounded by the caps anyway). */
+/** The FLOOR of a queued bench's reservation (Q2-2: the real figure is the set size x MAX_ATTEMPTS, capped at the per-job ceiling, and is stored in args.reserved_calls at submit). */
 export const BENCH_CALL_ESTIMATE: Record<string, number> = { gold: 60, grokbot_agreement: 320, human_v: 40, evr_perturb: 80 }; // WORST CASE: the largest set x 2 attempts (Q7)
 /** Q7: a finished run's calls are counted as (units_ok + units_failed) x this: the retry is not recorded anywhere (no migration), so the day is counted at the worst case. */
 export const FINISHED_RUN_CALL_FACTOR = 2;
@@ -33,7 +33,8 @@ export function reservationFor(kind: string, args: Args): number {
   const id = String(args.rubric_id ?? "");
   if (!isLlmRubric(id)) return 0;
   if (kind === "rubric_run") return (Array.isArray(args.unit_keys) ? args.unit_keys.length : Number(args.limit) || 200) * MAX_ATTEMPTS; // units x 2 (G74)
-  if (kind === "rubric_bench") return BENCH_CALL_ESTIMATE[String(args.set ?? "gold")] ?? 100;
+  // Q2-2: a bench is reserved by its REAL set size (rubric-bench.ts benchReservation, written into args.reserved_calls at submit); the fixed per-set estimate is only the FLOOR for a job that has none
+  if (kind === "rubric_bench") { const r = Number(args.reserved_calls); return Number.isFinite(r) && r > 0 ? Math.trunc(r) : (BENCH_CALL_ESTIMATE[String(args.set ?? "gold")] ?? 100); }
   return 0;
 }
 
@@ -49,7 +50,7 @@ export async function dayUsage(): Promise<{ used: number; queued: number }> {
   const q = (await sql`
     SELECT coalesce(sum(CASE j.kind
              WHEN 'rubric_run' THEN coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(j.args->'unit_keys') = 'array' THEN j.args->'unit_keys' END), (j.args->>'limit')::int, 200) * ${MAX_ATTEMPTS}::int
-             WHEN 'rubric_bench' THEN CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${BENCH_CALL_ESTIMATE.grokbot_agreement}::int WHEN 'human_v' THEN ${BENCH_CALL_ESTIMATE.human_v}::int WHEN 'evr_perturb' THEN ${BENCH_CALL_ESTIMATE.evr_perturb}::int ELSE ${BENCH_CALL_ESTIMATE.gold}::int END
+             WHEN 'rubric_bench' THEN coalesce(nullif(j.args->>'reserved_calls', '')::int, CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${BENCH_CALL_ESTIMATE.grokbot_agreement}::int WHEN 'human_v' THEN ${BENCH_CALL_ESTIMATE.human_v}::int WHEN 'evr_perturb' THEN ${BENCH_CALL_ESTIMATE.evr_perturb}::int ELSE ${BENCH_CALL_ESTIMATE.gold}::int END)
              ELSE 0 END), 0)::int AS n
       FROM scribe_job j
      WHERE j.kind IN ('rubric_run', 'rubric_bench') AND j.args->>'rubric_id' = ANY(${ids}::text[])

@@ -109,7 +109,7 @@ export async function insertJobCapped(
            WHERE r.rubric_id = ANY(${g.ids}::text[]) AND (r.started_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date)
          + (SELECT coalesce(sum(CASE j.kind
                   WHEN 'rubric_run' THEN coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(j.args->'unit_keys') = 'array' THEN j.args->'unit_keys' END), (j.args->>'limit')::int, 200) * ${g.factor}::int
-                  WHEN 'rubric_bench' THEN CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${g.est.grokbot_agreement}::int WHEN 'human_v' THEN ${g.est.human_v}::int WHEN 'evr_perturb' THEN ${g.est.evr_perturb}::int ELSE ${g.est.gold}::int END
+                  WHEN 'rubric_bench' THEN coalesce(nullif(j.args->>'reserved_calls', '')::int, CASE coalesce(j.args->>'set', 'gold') WHEN 'grokbot_agreement' THEN ${g.est.grokbot_agreement}::int WHEN 'human_v' THEN ${g.est.human_v}::int WHEN 'evr_perturb' THEN ${g.est.evr_perturb}::int ELSE ${g.est.gold}::int END)
                   ELSE 0 END), 0)
               FROM scribe_job j
              WHERE j.kind IN ('rubric_run', 'rubric_bench') AND j.args->>'rubric_id' = ANY(${g.ids}::text[])
