@@ -40,6 +40,7 @@ CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text, 
 CREATE TABLE room_span_emotion (window_id text NOT NULL, diarize_run_id text NOT NULL, run_start_ms bigint NOT NULL, run_end_ms bigint NOT NULL, chunk_idx integer NOT NULL, speaker_idx integer NOT NULL,
   segment_start_ms bigint NOT NULL, segment_end_ms bigint NOT NULL, state text NOT NULL, anger double precision, disgust double precision, enthusiasm double precision, fear double precision,
   happiness double precision, neutral double precision, sadness double precision, top_label text, top_score double precision, PRIMARY KEY (window_id, diarize_run_id, speaker_idx, run_start_ms, chunk_idx));
+ALTER TABLE room_span_emotion ADD COLUMN room_day_id text;
 CREATE TABLE jev_window_text (window_id text PRIMARY KEY, room_day_id text NOT NULL, english text, source text NOT NULL, char_count int NOT NULL);
 CREATE TABLE room_audio_state (id bigserial PRIMARY KEY, room_id text NOT NULL, source text NOT NULL DEFAULT 'kiosk', ist_day date NOT NULL, state text NOT NULL, ts_start timestamptz NOT NULL, ts_end timestamptz NOT NULL);
 CREATE TABLE room_audio_day (room_id text NOT NULL, ist_day date NOT NULL, min_off integer NOT NULL DEFAULT 0, min_muted integer NOT NULL DEFAULT 0, min_zero_all_day integer NOT NULL DEFAULT 0,

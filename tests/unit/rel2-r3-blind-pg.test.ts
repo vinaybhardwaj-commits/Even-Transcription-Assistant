@@ -22,7 +22,7 @@ beforeAll(() => {
   pg.exec(`
     CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL);
     CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now());
-    CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL DEFAULT 'bs1', room_day_id text);
+    CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL DEFAULT 'bs1', room_day_id text, start_ms bigint NOT NULL DEFAULT 0, end_ms bigint NOT NULL DEFAULT 1);
     CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text, state text NOT NULL DEFAULT 'ok', speakers_json jsonb, last_run_id text);
     CREATE TABLE room_turn_speaker (window_id text NOT NULL, source_ref text NOT NULL, speaker_idx integer NOT NULL DEFAULT 0, overlap_ms integer NOT NULL DEFAULT 0, room_day_id text, clinician_id text, role text,
       match_confidence double precision, losing_clinician_id text, run_id text, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (window_id, source_ref));
@@ -30,12 +30,32 @@ beforeAll(() => {
     CREATE TABLE voice_print (doctor_id text PRIMARY KEY, sample_count int DEFAULT 3, enrolled_at timestamptz DEFAULT now(), last_sample_at timestamptz DEFAULT now(), needs_reenrollment boolean DEFAULT false, centroid bytea);
     CREATE TABLE voice_sample (clinician_id text, source text, included boolean DEFAULT true, match_confidence double precision);
     CREATE TABLE voice_print_generation (clinician_id text, generation int, origin text, sample_count int, provenance_json jsonb, created_at timestamptz DEFAULT now());
+    CREATE TABLE jev_window_text (window_id text PRIMARY KEY, room_day_id text NOT NULL, english text, source text NOT NULL DEFAULT 'run_english', char_count int NOT NULL DEFAULT 1);
+    CREATE TABLE room_span_emotion (window_id text NOT NULL, room_day_id text, speaker_idx int NOT NULL DEFAULT 0, segment_start_ms bigint NOT NULL DEFAULT 0);
+    CREATE TABLE eta_encounter_windows (id serial PRIMARY KEY, consult_key text NOT NULL, consult_uid text, room_id text, t_open timestamptz NOT NULL, t_close timestamptz, quality text NOT NULL DEFAULT 'clean', attribution text NOT NULL DEFAULT 'rows', warehouse_prescription_uid text);
+    CREATE TABLE reb_track_index (id serial PRIMARY KEY, window_id text, status text, shadow boolean DEFAULT false, layer text);
+    CREATE TABLE cue (id text PRIMARY KEY, room_day_id text, type text, payload jsonb);
     CREATE TABLE voice_centroid (clinician_id text, domain text, generation int, embedding_model text, embedding_dim int, n_samples int, created_at timestamptz DEFAULT now(), retired_at timestamptz, retired_by text, retired_reason text);
   `);
   H.sql = pg.sql as never;
   const cent = Buffer.from(new Float32Array(192).fill(0).map((_, i) => (i === 0 ? 1 : 0)).buffer).toString("base64");
   pg.exec(`
     INSERT INTO room_day VALUES ('rd_clean', 'r1', '2026-10-05'), ('rd_blind', '${BR}', '${BD}');
+    -- the sweep windows: one placement each held out
+    INSERT INTO bench_window VALUES ('sJev', 'bs1', 'rd_clean'), ('sEmo', 'bs1', 'rd_clean'), ('sRts', 'bs1', 'rd_clean'), ('sRdw', 'bs1', 'rd_clean'), ('sBench', 'bs1', 'rd_blind'), ('sClean', 'bs1', 'rd_clean');
+    INSERT INTO room_diarize_window (window_id, room_day_id) VALUES ('sJev', 'rd_clean'), ('sEmo', 'rd_clean'), ('sRts', 'rd_clean'), ('sRdw', 'rd_blind'), ('sBench', 'rd_clean'), ('sClean', 'rd_clean');
+    INSERT INTO jev_window_text (window_id, room_day_id) VALUES ('sJev', 'rd_blind'), ('sClean', 'rd_clean');
+    INSERT INTO room_span_emotion (window_id, room_day_id) VALUES ('sEmo', 'rd_blind'), ('sClean', 'rd_clean');
+    INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id) VALUES ('sRts', 't1', 'rd_blind'), ('sClean', 't1', 'rd_clean');
+    -- consult_uid is NOT unique (one row per machine): U1 clean then blind, U2 blind then clean, U3 clean only
+    INSERT INTO eta_encounter_windows (consult_key, consult_uid, room_id, t_open, t_close, warehouse_prescription_uid) VALUES
+      ('u1_clean@m1', 'ConsultUid1AaaaaaaaaaaaaaZ', 'r1', '2026-10-05T04:00:00Z', '2026-10-05T04:30:00Z', 'rec1'), ('u1_blind@m2', 'ConsultUid1AaaaaaaaaaaaaaZ', '${BR}', '${BD}T04:00:00Z', '${BD}T04:30:00Z', 'rec1'),
+      ('u2_blind@m2', 'ConsultUid2AaaaaaaaaaaaaaZ', '${BR}', '${BD}T04:00:00Z', '${BD}T04:30:00Z', 'rec2'), ('u2_clean@m1', 'ConsultUid2AaaaaaaaaaaaaaZ', 'r1', '2026-10-05T04:00:00Z', '2026-10-05T04:30:00Z', 'rec2'),
+      ('u3_clean@m1', 'ConsultUid3AaaaaaaaaaaaaaZ', 'r1', '2026-10-05T04:00:00Z', '2026-10-05T04:30:00Z', 'rec3'),
+      -- the SAME key on two rows (no unique constraint is assumed): clean then blind, and blind then clean
+      ('k_dup_a', NULL, 'r1', '2026-10-05T04:00:00Z', '2026-10-05T04:30:00Z', NULL), ('k_dup_a', NULL, '${BR}', '${BD}T04:00:00Z', '${BD}T04:30:00Z', NULL),
+      ('k_dup_b', NULL, '${BR}', '${BD}T04:00:00Z', '${BD}T04:30:00Z', NULL), ('k_dup_b', NULL, 'r1', '2026-10-05T04:00:00Z', '2026-10-05T04:30:00Z', NULL);
+    INSERT INTO reb_track_index (window_id, status, shadow, layer) VALUES ('consult-ConsultUid1AaaaaaaaaaaaaaZ', 'ok', false, 'translate'), ('consult-ConsultUid2AaaaaaaaaaaaaaZ', 'ok', false, 'translate'), ('consult-ConsultUid3AaaaaaaaaaaaaaZ', 'ok', false, 'translate');
     INSERT INTO clinician VALUES ('docA'), ('docB');
     INSERT INTO voice_print (doctor_id, centroid) VALUES ('docA', decode('${cent}', 'base64')), ('docB', decode('${cent}', 'base64'));
     -- wOK: clean everywhere. wRts: bench and diarize clean, its two turn rows on a held-out day (GATING's repro). wRdw: bench clean, diarize row AND its turn rows held out. wBench: bench held out, rest clean.
@@ -92,5 +112,49 @@ afterAll(() => { if (HAVE) pg.stop(); });
     expect(r.hits.map((h) => h.window_id)).toEqual(["wOK"]); // wRts (turn rows), wRdw (diarize + rows) and wBench (bench) are all held out by one placement or another
     expect(r.n_blind_excluded).toBeGreaterThanOrEqual(2);
     expect(await voiceSearch({ window_id: "wRts", speaker_idx: 0, ...scope })).toEqual({ ok: false, error: "blind_room_day" });
+  });
+});
+
+(HAVE ? describe : describe.skip)("SWEEP: every placement of a window, on real SQL", () => {
+  it("windowBlindAny / windowsBlindAny: held out by the diarize row, the turn rows, the window text, the emotion rows or the bench placement; a clean window and an unknown id are not", async () => {
+    const V = await import("@/lib/voice-blind");
+    for (const w of ["sJev", "sEmo", "sRts", "sRdw", "sBench"]) expect(await V.windowBlindAny(w), w).toBe(true);
+    expect(await V.windowBlindAny("sClean")).toBe(false);
+    expect(await V.windowBlindAny("nope")).toBe(false);
+    expect([...(await V.windowsBlindAny(["sJev", "sEmo", "sRts", "sRdw", "sBench", "sClean", "nope"]))].sort()).toEqual(["sBench", "sEmo", "sJev", "sRdw", "sRts"]);
+  });
+  it("the readers: a window held out only by its window-text or emotion row is refused by blindGuardWindow (before any content)", async () => {
+    const { blindGuardWindow } = await import("@/lib/rubrics/readers/common");
+    for (const w of ["sJev", "sEmo", "sRts", "sRdw"]) expect(await blindGuardWindow(w), w).toMatchObject({ ok: false, reason: "blind_room_day" });
+    expect(await blindGuardWindow("sClean")).toBeNull();
+  });
+  it("consult_uid is NOT unique: a consult is refused if ANY row of its key or uid is on a held-out pair, whichever order the rows come in (consultPair, readConsultSpan, readPulseRecord); a unique clean uid is served", async () => {
+    const C = await import("@/lib/rubrics/readers/common");
+    const { readConsultSpan } = await import("@/lib/rubrics/readers/consult-span");
+    const { readPulseRecord } = await import("@/lib/rubrics/readers/pulse-record");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const queried: string[] = [];
+    REC.setMetabaseForTests(async (q) => { queried.push(q); return []; });
+    try {
+      for (const key of ["u1_clean@m1", "u1_blind@m2", "u2_clean@m1", "u2_blind@m2", "k_dup_a", "k_dup_b"]) {
+        expect(await readConsultSpan(key), key).toMatchObject({ ok: false, reason: "blind_room_day" });
+        expect(await readPulseRecord(key), key).toMatchObject({ ok: false, reason: "blind_room_day" });
+        expect(C.isRefusal(await C.consultPair(key)) ? "refused" : "pair", key).toBe("pair");
+        const pair = await C.consultPair(key) as { room_id: string; ist_date: string };
+        expect(`${pair.room_id}/${pair.ist_date}`, key).toBe(`${BR}/${BD}`); // the held-out pair is what comes back, so every caller's blindRefusal fires
+      }
+      expect(queried).toEqual([]); // the warehouse was never asked
+      expect(await readConsultSpan("u3_clean@m1")).toMatchObject({ ok: true });
+      expect(await C.blindPairOfUid("ConsultUid3AaaaaaaaaaaaaaZ")).toBeNull();
+      expect(await C.blindPairOfUid(null)).toBeNull();
+    } finally {
+      REC.setMetabaseForTests(null);
+    }
+  });
+  it("selectEvrWindows leaves out a consult whose uid has a held-out sibling row, in either order, and keeps the clean unique one", async () => {
+    const { selectEvrWindows } = await import("@/lib/rubrics/evr/select");
+    const keys = await selectEvrWindows(50, 1);
+    expect(keys).toContain("u3_clean@m1");
+    for (const k of ["u1_clean@m1", "u2_clean@m1"]) expect(keys, k).not.toContain(k);
   });
 });

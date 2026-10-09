@@ -23,6 +23,7 @@ beforeAll(() => {
     CREATE TABLE voice_centroid (id text PRIMARY KEY, clinician_id text NOT NULL, domain text NOT NULL, generation int NOT NULL DEFAULT 1, embedding real[] NOT NULL, embedding_model text NOT NULL, embedding_dim int NOT NULL, n_samples int NOT NULL, source jsonb NOT NULL DEFAULT '{}', created_at timestamptz DEFAULT now(), retired_at timestamptz, retired_by text, retired_reason text);
     CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL);
     CREATE TABLE bench_window (id text PRIMARY KEY, room_day_id text);
+    CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text);
     CREATE TABLE room_turn_speaker (window_id text NOT NULL, source_ref text NOT NULL, speaker_idx int NOT NULL DEFAULT 0, role text, clinician_id text, match_confidence double precision, losing_clinician_id text, room_day_id text, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (window_id, source_ref));
     INSERT INTO clinician VALUES ('docA', 'active', NULL), ('docB', 'disabled', NULL), ('docC', 'active', NULL);
     INSERT INTO voice_print (doctor_id, centroid, sample_count) VALUES ('docA', decode('${vec(1)}', 'base64'), 4), ('docB', decode('${vec(0.8)}', 'base64'), 2), ('docC', decode('${vec(0.2)}', 'base64'), 1);

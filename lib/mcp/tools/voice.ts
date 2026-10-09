@@ -30,7 +30,7 @@ import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
 import { voiceConsole } from "./voice-console";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { blockedSampleSources } from "@/lib/voice-blind";
+import { blockedSampleSources, roomDayIsBlind } from "@/lib/voice-blind";
 
 const PRESIGN_SECONDS = 3600;
 
@@ -232,6 +232,7 @@ const encounterHypotheses: McpTool = {
       const runId = argStr(args, "run_id", 64);
       if (runId) {
         const run = await readRun(runId);
+        if (run && (await roomDayIsBlind(String((run as { room_day_id?: unknown }).room_day_id ?? "")))) return { run: null, error: "blind_room_day" }; // SWEEP (REL2-R3)
         return run ? { run } : { run: null, error: "run_not_found" };
       }
       let roomDayId = argStr(args, "room_day_id", 64);
@@ -244,11 +245,13 @@ const encounterHypotheses: McpTool = {
         if (!room) return { run: null, error: "unknown_room" };
         const d = pickIstDate(args);
         if ("error" in d) return { run: null, error: d.error };
+        if (isBlindRoomDay(d.date, room.id)) return { run: null, error: "blind_room_day" };
         const day = await findRoomDay(room.id, d.date);
         if (!day) return { room_id: room.id, room_day_id: null, ist_date: d.date, run: null, runs_for_day: 0 };
         roomDayId = day.id;
         resolved = { room_id: room.id, ist_date: d.date };
       }
+      if (await roomDayIsBlind(roomDayId)) return { run: null, error: "blind_room_day" }; // SWEEP (REL2-R3): also when the room-day id was given directly
       const r = await readLatestRun(roomDayId, version);
       return { ...resolved, room_day_id: roomDayId, smoother_version: version ?? "any", runs_for_day: r.runs_for_day, run: r.run };
     }),
@@ -288,12 +291,14 @@ const encounterShadowRun: McpTool = {
       if (!room) return { ok: false, error: "unknown_room" };
       const d = pickIstDate(args);
       if ("error" in d) return { ok: false, error: d.error };
+      if (isBlindRoomDay(d.date, room.id)) return { ok: false, error: "blind_room_day" }; // SWEEP (REL2-R3): no shadow run on a held-out room-day
       let roomDayId = argStr(args, "room_day_id", 64);
       if (!roomDayId) {
         const day = await findRoomDay(room.id, d.date);
         if (!day) return { ok: false, error: "no_room_day", room_id: room.id, ist_date: d.date };
         roomDayId = day.id;
       }
+      if (await roomDayIsBlind(roomDayId)) return { ok: false, error: "blind_room_day" };
       // v2 when asked for this call (replay) or when the fusion flag is on; the flag parser throws on an
       // unrecognised value, which failSafe reports rather than reading it as off.
       const replay = argBool(args, "fusion");

@@ -24,6 +24,7 @@
  * Every constant that shaped the answer is reported in `parameters` rather than buried (S4).
  */
 
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
 import { query } from "@/lib/brain/db";
 import { listBenchChunks, listBenchSessions, type BenchChunkRow } from "@/lib/bench";
@@ -110,6 +111,8 @@ const fuseReport: McpTool = {
       const dayRes = await query<RoomDayByIdRow>(SQL_ROOM_DAY_BY_ID, [roomDayId]);
       const day = dayRes.rows[0];
       if (!day) return { ok: false, error: "room_day_not_found", room_day_id: roomDayId };
+      // SWEEP (REL2-R3): the held-out set, for the day itself AND for the real room a scratch day replays
+      if (isBlindRoomDay(day.ist_date, day.room_id) || (day.room_id.startsWith(SCRATCH_ROOM_PREFIX) && realRoomIdFor(day.room_id) && isBlindRoomDay(day.ist_date, realRoomIdFor(day.room_id)))) return { ok: false, error: "blind_room_day" };
 
       // ---- which room actually holds the tape? -------------------------------
       // A scratch room has none. realRoomIdFor is the exported inverse of the function that

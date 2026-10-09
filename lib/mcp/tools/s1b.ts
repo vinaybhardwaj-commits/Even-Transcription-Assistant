@@ -9,6 +9,8 @@
  * A missing table or column (SQLSTATE 42P01 / 42703) answers { not_collected: true, reason } for that view. No transcript text, no patient
  * identifier, no ticket signature or nonce, no storage key is returned.
  */
+import { windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
@@ -740,6 +742,8 @@ const kiosks: McpTool = {
 const WINDOW_SELECT_NOTE = "lab / REB fields are null until S5";
 
 async function oneWindow(windowId: string): Promise<Row> {
+  // SWEEP (REL2-R3): a window with ANY held-out placement is not described (before its row, its drain jobs or its runs are read)
+  if (await windowBlindAny(windowId)) return { ok: false, error: "blind_room_day", window_id: windowId };
   const w = (await sql`
     SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic, w.grid_aligned, w.state, w.closed_at, w.created_at,
            w.auto_drain_refused_at, w.auto_drain_refused_reason, s.room_id, r.name AS room_name, s.started_at AS session_started_at
@@ -814,6 +818,7 @@ async function oneWindow(windowId: string): Promise<Row> {
 }
 
 async function dayWindows(roomId: string, day: string, limit: number): Promise<Row> {
+  if (isBlindRoomDay(day, roomId)) return { ok: false, error: "blind_room_day" }; // SWEEP (REL2-R3)
   // bench_window.start_ms is epoch ms (lib/bench-window.ts), so a window belongs to the IST day it STARTS in, whatever day its session started.
   const dayLo = Date.parse(`${day}T00:00:00+05:30`);
   const dayHi = dayLo + 86_400_000;
@@ -825,7 +830,10 @@ async function dayWindows(roomId: string, day: string, limit: number): Promise<R
      ORDER BY w.start_ms
      LIMIT ${limit + 1}
   `) as Row[];
-  const kept = rows.slice(0, limit);
+  // SWEEP (REL2-R3): windows that START on a clean day but carry a held-out placement are left out and counted
+  const blindIds = await windowsBlindAny(rows.slice(0, limit).map((r) => String(r.id)));
+  const kept = rows.slice(0, limit).filter((r) => !blindIds.has(String(r.id)));
+  const nBlindExcluded = rows.slice(0, limit).length - kept.length;
   const ids = kept.map((r) => String(r.id));
   const drain = ids.length
     ? ((await sql`
@@ -847,6 +855,7 @@ async function dayWindows(roomId: string, day: string, limit: number): Promise<R
     ok: true,
     ist_date: day,
     count: kept.length,
+    n_blind_excluded: nBlindExcluded,
     truncated: rows.length > limit,
     by_state: byState,
     drain_by_state: drainStates,

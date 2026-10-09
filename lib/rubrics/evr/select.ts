@@ -14,6 +14,8 @@ export async function selectEvrWindows(n: number, seed: number): Promise<string[
     SELECT w.consult_key FROM eta_encounter_windows w
      WHERE w.t_close IS NOT NULL AND w.t_open >= ${EVR_FIRST_DAY}::date AND w.warehouse_prescription_uid IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE b.d = (w.t_open AT TIME ZONE 'Asia/Kolkata')::date AND b.r = w.room_id)
+       -- SWEEP (REL2-R3): consult_uid is not unique (one row per machine): a consult is out if ANY row carrying its uid is on a held-out pair
+       AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows s, unnest(${days}::date[], ${rooms}::text[]) AS b2(d, r) WHERE s.consult_uid = w.consult_uid AND b2.d = (s.t_open AT TIME ZONE 'Asia/Kolkata')::date AND b2.r = s.room_id)
        AND (EXISTS (SELECT 1 FROM bench_window bw JOIN bench_session s ON s.id = bw.session_id
                     JOIN cue c ON c.room_day_id = bw.room_day_id AND c.type = 'stt_turn' AND (c.payload->'window'->>'start_ms')::bigint = bw.start_ms
                    WHERE s.room_id = w.room_id AND bw.start_ms < (extract(epoch FROM w.t_close) * 1000)::bigint AND bw.end_ms > (extract(epoch FROM w.t_open) * 1000)::bigint)

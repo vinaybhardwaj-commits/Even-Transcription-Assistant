@@ -53,6 +53,47 @@ export async function rtsBlindRows(f: { windowId?: string | null; roomDayId?: st
   return Number(rows[0]?.n ?? 0);
 }
 
+/**
+ * SWEEP (REL2-R3): is ANY placement of this window held out? bench_window.room_day_id, room_diarize_window.room_day_id, and the OWN room_day_id of its room_turn_speaker, jev_window_text and room_span_emotion rows.
+ * Used by every reader and tool that serves a window's content (turns, emotion, window text, runs, windows). A window that does not exist is not blind (the caller says not_found).
+ */
+export async function windowBlindAny(windowId: string): Promise<boolean> {
+  const rows = (await sql`
+    SELECT (
+      EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+      OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+      OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+      OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)
+    ) AS blind
+      FROM bench_window w
+      LEFT JOIN room_diarize_window dw ON dw.window_id = w.id
+     WHERE w.id = ${windowId}::text
+     LIMIT 1
+  `) as Array<{ blind: boolean }>;
+  return rows[0]?.blind === true;
+}
+
+/** The windows of this list with ANY held-out placement, in one statement (the batch form of windowBlindAny). */
+export async function windowsBlindAny(windowIds: readonly string[]): Promise<Set<string>> {
+  const ids = [...new Set(windowIds.filter((x) => /^[A-Za-z0-9_-]{1,80}$/.test(x)))];
+  if (ids.length === 0) return new Set();
+  const rows = (await sql`
+    SELECT w.id FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id
+     WHERE w.id = ANY(${ids}::text[]) AND (
+      EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+      OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+      OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+      OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id))
+  `) as Array<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}
+
+/** Is this room-day id a held-out pair? (An unknown id is not blind: the caller keeps its own not-found answer.) */
+export async function roomDayIsBlind(roomDayId: string): Promise<boolean> {
+  const p = await roomDayPlacement(roomDayId);
+  return !!p && isBlindRoomDay(p.ist_date, p.room_id);
+}
+
 export async function roomDayPlacement(roomDayId: string): Promise<Pair | null> {
   const rows = (await sql`SELECT room_id, ist_date::text AS ist_date FROM room_day WHERE id = ${roomDayId}::text LIMIT 1`) as Array<Pair>;
   return rows[0] ?? null;

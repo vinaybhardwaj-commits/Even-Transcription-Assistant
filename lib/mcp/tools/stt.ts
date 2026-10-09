@@ -7,7 +7,7 @@
  * Read-only. Transcript text of runs is returned only with include_text=true.
  */
 
-import { guardRoomDay, guardWindow, rtsBlindRows } from "@/lib/voice-blind";
+import { guardRoomDay, guardWindow, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
@@ -147,7 +147,11 @@ const listSttRuns: McpTool = {
          ORDER BY COALESCE(e.recorded_at, to_timestamp(bw.start_ms / 1000.0)) DESC NULLS LAST
          LIMIT ${limit}
       `) as Array<Record<string, unknown>>;
-      const runs = rows.map((r) => {
+      // SWEEP (REL2-R3): a run whose subject is a bench window with ANY held-out placement is not listed (counted)
+      const blindWins = await windowsBlindAny(rows.filter((r) => r.subject_type === "bench_window").map((r) => String(r.subject_id)));
+      const visible = rows.filter((r) => !(r.subject_type === "bench_window" && blindWins.has(String(r.subject_id))));
+      const nBlindExcluded = rows.length - visible.length;
+      const runs = visible.map((r) => {
         // C3 — the subject block is ALWAYS present, but it must not become a BACK DOOR onto the
         // patient label. subjectLabel() prefers patient_label_raw for an encounter, so without
         // include_identity the label is built WITHOUT it and falls back to the id. Caught by
@@ -156,7 +160,7 @@ const listSttRuns: McpTool = {
         const subject = subjectOf({ ...(r as SubjectRowish), patient_label_raw: includeIdentity ? patient_label_raw : undefined });
         return includeIdentity ? { ...rest, subject, patient_label_raw } : { ...rest, subject };
       });
-      return { runs };
+      return { runs, n_blind_excluded: nBlindExcluded };
     }),
 };
 
@@ -187,6 +191,8 @@ const getSttRun: McpTool = {
       const enc = (await sql`SELECT id, patient_label_raw, recorded_at, detected_language, note_type FROM encounter WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       const win = (await sql`SELECT id, session_id, start_ms, end_ms, source_mic, state FROM bench_window WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       if (!enc[0] && !win[0] && kindRows.length === 0) return { encounter: null, runs: [], gold: null, error: "subject_not_found" };
+      // SWEEP (REL2-R3): a bench window with ANY held-out placement: its transcript runs are not served (checked before the runs, the transcripts and the gold are read)
+      if (win[0] && (await windowBlindAny(id))) return { encounter: null, runs: [], gold: null, error: "blind_room_day" };
       const runs = (await sql`
         SELECT engine, tier, transcript_english, transcript_original, note_text, latency_ms, error,
                judge_score, agreement_score, wer, cer, med_term_recall, is_winner, metrics_json

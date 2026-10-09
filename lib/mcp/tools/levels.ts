@@ -15,6 +15,7 @@
  *     15 s buckets), and a cut answer says `truncated: true` and where to resume.
  * Numbers only: this table holds no audio and no text, and none is invented here.
  */
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { readRoomLevelDay, LEVEL_TIMELINE_BUCKET_SECONDS, isIsoDate, type BenchLevelSample } from "@/lib/bench-levels";
 import { istDate } from "@/lib/bench-reaper-core";
 import { failSafe, argStr, argInt, type McpTool, type ToolArgs } from "../registry";
@@ -123,6 +124,8 @@ const roomLevels: McpTool = {
 
       // One aggregator, called per IST day the range touches. No second query lives here.
       const days = fromMs !== null && toMs !== null ? istDaysSpanned(fromMs, toMs) : [day];
+      // SWEEP (REL2-R3): the level timeline of a held-out room-day is not served; a range that touches one is refused whole (fail closed)
+      if (days.some((d) => isBlindRoomDay(d, roomId))) return { room_id: roomId, samples: [], sample_count: 0, error: "blind_room_day" };
       let samples: BenchLevelSample[] = [];
       for (const d of days) samples = samples.concat((await readRoomLevelDay(roomId, d)).samples);
       if (fromMs !== null && toMs !== null) {

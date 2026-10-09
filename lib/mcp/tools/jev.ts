@@ -19,6 +19,8 @@
  * for the transcript-hygiene workstream, not E-6's own 'probe' granularity. Same JEV_CLINICAL_ROUTE
  * gate as the standalone runner; off answers {ran:false} with zero Jev calls and zero DB reads.
  */
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { roomDayIsBlind } from "@/lib/voice-blind";
 import { JEV_SUBJECT_TYPES } from "@/lib/jev/types";
 import { query } from "@/lib/brain/db";
 import { submitJob } from "@/lib/jobs/submit";
@@ -99,6 +101,7 @@ const jevSignals: McpTool = {
     failSafe({ signals: [] as unknown[] }, async () => {
       const roomDayId = argStr(args, "room_day_id", 128);
       if (!roomDayId) return { ok: false, error: "room_day_id_required", signals: [] };
+      if (await roomDayIsBlind(roomDayId)) return { ok: false, error: "blind_room_day", signals: [] }; // SWEEP (REL2-R3): jev signals (window phases) of a held-out room-day
       const fromMs = typeof args.from_ms === "number" ? args.from_ms : null;
       const toMs = typeof args.to_ms === "number" ? args.to_ms : null;
       const r = await query<SignalRow>(
@@ -165,9 +168,12 @@ const jevDecisions: McpTool = {
             AND ($2::text IS NULL OR subject_id = $2)
             AND ($3::text IS NULL OR question_id = $3)
             AND ($4::text IS NULL OR prompt_version = $4)
+            -- SWEEP (REL2-R3): a decision about a held-out room-day, or about a window with ANY held-out placement, is never served
+            AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest($6::date[], $7::text[]) AS b(d, r) WHERE r1.id = jev_decision.subject_id AND b.d = r1.ist_date AND b.r = r1.room_id)
+            AND NOT EXISTS (SELECT 1 FROM bench_window bw LEFT JOIN room_diarize_window dw ON dw.window_id = bw.id, room_day r1, unnest($6::date[], $7::text[]) AS b(d, r) WHERE bw.id = jev_decision.subject_id AND r1.id IN (bw.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
           ORDER BY created_at DESC
           LIMIT $5`,
-        [subjectType, subjectId, questionId, promptVersion, limit],
+        [subjectType, subjectId, questionId, promptVersion, limit, BLIND_ROOM_DAYS.map(([d]) => d), BLIND_ROOM_DAYS.map(([, r]) => r)],
       );
       return { ok: true, decisions: r.rows };
     }),

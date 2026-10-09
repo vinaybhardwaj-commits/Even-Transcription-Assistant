@@ -423,13 +423,13 @@ describe("scribe_stt_windows", () => {
   it("a day for a room: counts by state and drain state, windows capped, bound date and room id", async () => {
     answer = (text, values) =>
       roomTable(text, values) ??
-      (/FROM bench_window w/.test(text)
+      (/FROM bench_window w\s+JOIN bench_session/.test(text)
         ? [{ id: "bw_1", room_day_id: "rd_1", start_ms: 0, end_ms: 900_000, source_mic: "primary", state: "transcribed", closed_at: null }, { id: "bw_2", room_day_id: "rd_1", start_ms: 900_000, end_ms: 1_800_000, source_mic: "primary", state: "silent", closed_at: null }]
         : /FROM stt_subject_job/.test(text) ? [{ subject_id: "bw_1", tier: "asr", state: "done", attempts: 1 }]
         : []);
     const out = await run("scribe_stt_windows", { ist_date: "2026-10-08", room: "opd-1", limit: 50 });
     expect(out).toMatchObject({ ok: true, count: 2, truncated: false, by_state: { transcribed: 1, silent: 1 }, drain_by_state: { done: 1, no_job: 1 }, room: { id: ROOM.id } });
-    const stmt = statements.find((s) => /FROM bench_window w/.test(s.text))!;
+    const stmt = statements.find((s) => /FROM bench_window w\s+JOIN bench_session/.test(s.text))!;
     // G2: filtered by the WINDOW's own start (epoch ms) inside the IST day [00:00+05:30, +24 h), not by the session's start date
     expect(stmt.values).toEqual([ROOM.id, Date.parse("2026-10-08T00:00:00+05:30"), Date.parse("2026-10-09T00:00:00+05:30"), 51]);
     expect(stmt.text).not.toMatch(/started_at/);
