@@ -43,6 +43,16 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
     expect(scanSource("lib/x.ts", "// SELECT * FROM bench_window\n/* JOIN cue c */ const a = 1;")).toEqual([]);
     expect(scanSource("lib/x.ts", "const t = 'bench_window'; // FROM bench_session")).toEqual([]);
   });
+  it("G-1: quoted names, schema-qualified names and comma FROM lists are seen (each one, for every table)", () => {
+    const forms = (t: string): string[] => [`sql\`SELECT 1 FROM "${t}" x\``, `sql\`SELECT 1 FROM public.${t}\``, `sql\`SELECT 1 FROM "public"."${t}"\``, `sql\`SELECT 1 FROM public . ${t} w\``,
+      `sql\`SELECT 1 FROM other_t o, ${t} e WHERE 1=1\``, `sql\`SELECT 1 FROM a, b, "${t}" c\``, `sql\`SELECT 1 FROM (SELECT 1) q, public."${t}" z ORDER BY 1\``,
+      `sql\`UPDATE "${t}" SET x = 1\``, `sql\`INSERT INTO public.${t} (a) VALUES (1)\``, `sql\`SELECT 1 FROM a JOIN "${t}" ON true\``, "const q = 'select * from  " + t + "';"];
+    for (const t of ROOM_TABLES) for (const f of forms(t)) expect(scanSource("lib/x.ts", f).map((v) => v.what), `${t}: ${f}`).toEqual([t]);
+    // a table name that is only part of another identifier, a column, or a value is not a hit
+    for (const ok of ["sql`SELECT cue_id FROM cues`", "sql`SELECT 1 FROM bench_window_silence`", "sql`SELECT 1 FROM my_bench_window`", "sql`SELECT cue, bench_window FROM other`", "const x = [cue, bench_window];"]) {
+      expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
+    }
+  });
   it("a synthetic file added to the tree would fail the gate (the assertion above is not vacuous)", () => {
     const fake = scanSource("lib/mcp/tools/new-tool.ts", "const rows = await sql`SELECT * FROM room_turn_speaker`;");
     const loose = fake.filter((v) => !ALLOWLIST[v.file]);

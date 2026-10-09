@@ -10,8 +10,41 @@ export const ROOM_TABLES = [
 ] as const;
 export const KEY_PREFIXES = ["bench/", "clips/", "vad-trim/", "reb/", "consult-clips/", "mcp-sarvam/"] as const;
 
-const SQL_RE = new RegExp(`\\b(?:FROM|JOIN|UPDATE|INTO|DELETE\\s+FROM)\\s+(${ROOM_TABLES.join("|")})\\b`, "gi");
+const NAME = `(?:"?[A-Za-z_][\\w$]*"?\\s*\\.\\s*)?"?(${ROOM_TABLES.join("|")})"?(?![\\w$])`;
+// G-1: a table may be quoted ("bench_window"), schema-qualified (public.bench_window, "public"."bench_window") and may be any item of a comma FROM list
+const KW_RE = new RegExp(`\\b(?:JOIN|UPDATE|INTO)\\s+${NAME}`, "gi");
+const FROM_RE = /\bFROM\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)(?=\s(?:WHERE|GROUP|ORDER|LIMIT|JOIN|LEFT|RIGHT|INNER|CROSS|FULL|NATURAL|ON|UNION|HAVING|RETURNING|SET|FOR|OFFSET)\b|\)|;|$)/gi;
+const ITEM_RE = new RegExp(`^\\s*${NAME}`, "i");
 const KEY_RE = new RegExp(`[\`'"](?:${KEY_PREFIXES.map((p) => p.replace(/[/-]/g, (c) => `\\${c}`)).join("|")})`, "g");
+
+/** The bodies of the string and template literals in comment-stripped code, with their start offsets. */
+export function literalsOf(code: string): Array<{ text: string; at: number }> {
+  const out: Array<{ text: string; at: number }> = [];
+  let i = 0;
+  while (i < code.length) {
+    const c = code[i]!;
+    if (c === "`" || c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < code.length && code[j] !== c) { if (code[j] === "\\") j++; j++; }
+      out.push({ text: code.slice(i + 1, j), at: i + 1 });
+      i = j + 1;
+    } else i++;
+  }
+  return out;
+}
+
+/** Split a FROM list on top-level commas. */
+const splitList = (list: string): string[] => {
+  const items: string[] = [];
+  let depth = 0, cur = "";
+  for (const ch of list) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) { items.push(cur); cur = ""; } else cur += ch;
+  }
+  items.push(cur);
+  return items;
+};
 
 /** Replace comments with spaces (same length), keeping strings. Naive but string-aware enough for this tree. */
 export function stripComments(src: string): string {
@@ -42,7 +75,22 @@ export function scanSource(file: string, src: string): Violation[] {
   const code = stripComments(src);
   const lineOf = (idx: number): number => code.slice(0, idx).split("\n").length;
   const out: Violation[] = [];
-  for (const m of code.matchAll(SQL_RE)) out.push({ file, kind: "sql", what: m[1]!.toLowerCase(), line: lineOf(m.index!) });
-  for (const m of code.matchAll(KEY_RE)) out.push({ file, kind: "key", what: m[0].slice(1), line: lineOf(m.index!) });
-  return out;
+  const seen = new Set<string>();
+  const add = (kind: "sql" | "key", what: string, idx: number): void => {
+    const k = `${kind}:${what}:${idx}`;
+    if (!seen.has(k)) { seen.add(k); out.push({ file, kind, what, line: lineOf(idx) }); }
+  };
+  for (const lit of literalsOf(code)) {
+    for (const m of lit.text.matchAll(KW_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
+    for (const m of lit.text.matchAll(FROM_RE)) {
+      let off = m.index! + m[0].indexOf(m[1]!);
+      for (const item of splitList(m[1]!)) {
+        const t = ITEM_RE.exec(item);
+        if (t) add("sql", t[1]!.toLowerCase(), lit.at + off + (t.index ?? 0));
+        off += item.length + 1;
+      }
+    }
+  }
+  for (const m of code.matchAll(KEY_RE)) add("key", m[0].slice(1), m.index!);
+  return out.sort((a, b) => a.line - b.line);
 }
