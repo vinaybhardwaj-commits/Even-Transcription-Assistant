@@ -96,8 +96,22 @@ describe("ranking, floor, caps, dimensions", () => {
       [/FROM room_turn_speaker/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docA" }]]];
     const r = await V.voiceSearch(Q_WIN) as { hits: Row[]; n_speakers_compared: number; n_bad_dim: number; n_windows_scanned: number; query: Row };
     expect(r.hits.map((h) => [h.window_id, h.speaker_idx, h.cosine, h.clinician_id])).toEqual([["wa", 0, 0.912, "docA"], ["wb", 2, 0.8, null], ["q", 1, 0.7, null]]);
-    expect(r.hits[0]).toEqual({ window_id: "wa", room_id: "r1", ist_date: "2026-10-02", speaker_idx: 0, cosine: 0.912, clinician_id: "docA" });
+    expect(r.hits[0]).toEqual({ window_id: "wa", room_id: "r1", ist_date: "2026-10-02", speaker_idx: 0, cosine: 0.912, clinician_id: "docA", clinician_ambiguous: false });
     expect(r).toMatchObject({ n_speakers_compared: 4, n_bad_dim: 1, n_windows_scanned: 5, query: { kind: "window_speaker" } });
+  });
+  it("S1: two different clinicians for one speaker = clinician_id null + clinician_ambiguous; the attribution SQL is tied to the window's current run", async () => {
+    answers = [PLACE_OK, QVEC, ...COUNTS(2), CANDS(cands([["wa", "0", 0.9], ["wb", "0", 0.8]])),
+      [/FROM room_turn_speaker rts/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docB" }, { window_id: "wa", speaker_idx: 0, clinician_id: "docC" }, { window_id: "wb", speaker_idx: 0, clinician_id: "docA" }]]];
+    const r = await V.voiceSearch(Q_WIN) as { hits: Row[] };
+    expect(r.hits.map((h) => [h.window_id, h.clinician_id, h.clinician_ambiguous])).toEqual([["wa", null, true], ["wb", "docA", false]]);
+    const m = statements.find((x) => /FROM room_turn_speaker rts/.test(x.text))!;
+    expect(m.text).toMatch(/JOIN room_diarize_window d ON d\.window_id = rts\.window_id AND d\.last_run_id = rts\.run_id/);
+  });
+  it("S2: a speakers_json entry whose idx is not a non-negative integer is skipped and counted in n_bad_dim, never returned as a hit", async () => {
+    answers = [PLACE_OK, QVEC, ...COUNTS(1), CANDS(cands([["wa", "http://evil.example", 0.95], ["wa", "-1", 0.95], ["wa", "1.5", 0.95], ["wa", "NaN", 0.95], ["wa", "007", 0.95], ["wa", "2", 0.9]]))];
+    const r = await V.voiceSearch(Q_WIN) as { hits: Row[]; n_bad_dim: number; n_speakers_compared: number };
+    expect(r.hits.map((h) => h.speaker_idx)).toEqual([2]);
+    expect(r).toMatchObject({ n_bad_dim: 5, n_speakers_compared: 1 });
   });
   it("min_cosine can be raised but never lowered below 0.50; top_k never above 50; defaults 0.65 and 20", async () => {
     expect(V.clampMinCosine(0.1)).toBe(0.5);

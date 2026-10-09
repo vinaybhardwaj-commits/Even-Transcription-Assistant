@@ -21,6 +21,7 @@ export const SEARCH_MAX_ROOMS = 10;
 export const SEARCH_MAX_DAYS = 14;
 const EMBEDDING_BYTES = 768; // 192 float32
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const IDX_RE = /^(0|[1-9]\d{0,5})$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
 const ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
@@ -131,6 +132,7 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
   const scored: Array<{ window_id: string; room_id: string; ist_date: string; speaker_idx: number; cosine: number }> = [];
   for (const c of cands) {
     if (qWin !== null && c.window_id === qWin && c.idx === qIdx) continue; // the query's own speaker
+    if (typeof c.idx !== "string" || !IDX_RE.test(c.idx)) { n_bad_dim++; continue; } // S2: an entry whose idx is not a non-negative integer is skipped and counted with the bad ones
     if (typeof c.b64 !== "string" || Buffer.from(c.b64, "base64").length !== EMBEDDING_BYTES) { n_bad_dim++; continue; }
     const cos = cosineSimilarity(qB64, c.b64);
     if (cos === null) { n_bad_dim++; continue; }
@@ -141,16 +143,18 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
   const top = scored.slice(0, topK);
 
   // --- the clinician a hit's speaker matched in that window (room_turn_speaker), for the hits only
-  const matched = new Map<string, string>();
+  // S1: only the rows of the window's CURRENT diarize run (room_turn_speaker.run_id = room_diarize_window.last_run_id); two different clinicians for one speaker = null + clinician_ambiguous.
+  const matched = new Map<string, Set<string>>();
   if (top.length > 0) {
     const wids = [...new Set(top.map((h) => h.window_id))];
     const rows = (await sql`
-      SELECT window_id, speaker_idx, clinician_id
-        FROM room_turn_speaker
-       WHERE window_id = ANY(${wids}::text[]) AND role = 'clinician' AND clinician_id IS NOT NULL
-       GROUP BY window_id, speaker_idx, clinician_id
+      SELECT rts.window_id, rts.speaker_idx, rts.clinician_id
+        FROM room_turn_speaker rts
+        JOIN room_diarize_window d ON d.window_id = rts.window_id AND d.last_run_id = rts.run_id
+       WHERE rts.window_id = ANY(${wids}::text[]) AND rts.role = 'clinician' AND rts.clinician_id IS NOT NULL
+       GROUP BY rts.window_id, rts.speaker_idx, rts.clinician_id
     `) as Array<{ window_id: string; speaker_idx: number; clinician_id: string }>;
-    for (const r of rows) matched.set(`${r.window_id}\u0000${r.speaker_idx}`, r.clinician_id);
+    for (const r of rows) { const k = `${r.window_id}\u0000${r.speaker_idx}`; (matched.get(k) ?? matched.set(k, new Set()).get(k)!).add(r.clinician_id); }
   }
   return {
     ok: true,
@@ -159,6 +163,9 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
     n_windows_scanned: new Set(cands.map((c) => c.window_id)).size,
     n_speakers_compared,
     n_bad_dim,
-    hits: top.map((h) => ({ ...h, clinician_id: matched.get(`${h.window_id}\u0000${h.speaker_idx}`) ?? null })),
+    hits: top.map((h) => {
+      const ids = matched.get(`${h.window_id}\u0000${h.speaker_idx}`);
+      return { ...h, clinician_id: ids && ids.size === 1 ? [...ids][0]! : null, clinician_ambiguous: !!ids && ids.size > 1 };
+    }),
   };
 }
