@@ -21,6 +21,7 @@ vi.mock("@/lib/jobs/store", async (orig) => ({
   ...((await orig()) as object),
   insertJob: vi.fn(async (i: { id: string; kind: string; args: Row }) => { inserted.push(i); return { id: "job_new1", kind: i.kind, status: "queued" }; }),
   findOpenJob: vi.fn(async () => null),
+  insertJobCapped: vi.fn(async (i: { id: string; kind: string; args: Row }) => { inserted.push(i); return { id: "job_new1", kind: i.kind, status: "queued" }; }),
 }));
 
 const S = await import("@/lib/mcp/surface");
@@ -140,11 +141,11 @@ describe("S71-R4 G71 — a cost ceiling for llm_zdr rubrics, refused at submit",
   });
   it("per-day ceiling counts calls already made, runs still open (their reservation) and calls reserved by QUEUED jobs; refused with the three numbers", async () => {
     await withEnv({ RUBRIC_LLM_DAILY_CALL_CAP: "100" }, async () => {
-      answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 60 }] : /FROM scribe_job/.test(t) ? [{ kind: "rubric_run", args: { rubric_id: "consult_surgical_pitch", unit_keys: keys(25) } }, { kind: "rubric_bench", args: { rubric_id: "consult_chair_affect", set: "human_v" } }, { kind: "rubric_run", args: { rubric_id: "talk_time", unit_keys: keys(50) } }] : []);
-      // used 60 + queued (25 + 30 for the human_v bench estimate + 0 for the code rubric) = 115 already over 100
+      answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 60 }] : /FROM scribe_job/.test(t) ? [{ n: 65 }] : []); // the queued reservation is summed in SQL: 25 unit_keys + 40 (the human_v bench worst case); the code rubric counts 0
+      // used 60 + queued 65 = 125 already over 100
       let r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(1) });
       expect(r).toMatchObject({ ok: false, error: "llm_daily_cap" });
-      expect(String(r.detail)).toMatch(/today 60 used \+ 55 queued \+ 1 planned > daily cap 100/);
+      expect(String(r.detail)).toMatch(/today 60 used \+ 65 queued \+ 1 planned > daily cap 100/);
       answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 60 }] : []);
       expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(40) })).toMatchObject({ ok: true }); // 60 + 40 = 100: at the cap is allowed
       r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(41) });

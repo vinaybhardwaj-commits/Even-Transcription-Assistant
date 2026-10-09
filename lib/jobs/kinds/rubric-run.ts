@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
-import { callsLeft, capRefusal, isLlmRubric } from "@/lib/rubrics/llm-cap";
+import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun, unitsOf } from "@/lib/rubrics/registry";
 import { RUBRIC_UNITS, type RubricUnit } from "@/lib/rubrics/types";
 import { evaluateUnit, resolveUnits } from "@/lib/rubrics/engines";
@@ -51,6 +51,7 @@ export const rubricRunKind: JobKind = {
   name: RUBRIC_RUN_KIND,
   first: "resolve",
   scope: "invoke",
+  capPlan: (args) => reservationFor(RUBRIC_RUN_KIND, args),
   precheck: async (args) => { const m = await capRefusal(RUBRIC_RUN_KIND, args); if (m) throw new JobArgsError(m); },
   parseArgs: (raw) => parseRubricRunArgs(raw) as unknown as Record<string, unknown>,
   async run(ctx: StepContext) {

@@ -85,7 +85,8 @@ async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string,
     if (!opts.bench) return skip("unit_not_supported");
     // S71-R4 G70: an excerpt is PLACED (room + IST date) and meets the same held-out check as a consult BEFORE any lab-store read or model call; unplaced = refused, never scored
     // one room (room_id) or several candidate rooms (room_ids: a token that maps to two room-days): every candidate must be a valid room, and ANY held-out candidate refuses the excerpt
-    const rooms = (opts.room_ids && opts.room_ids.length > 0 ? opts.room_ids : opts.room_id ? [opts.room_id] : []) as string[];
+    // Q2: a row carrying BOTH room_id and room_ids is checked against the UNION (neither replaces the other)
+    const rooms = [...new Set([...(opts.room_ids ?? []), ...(opts.room_id ? [opts.room_id] : [])])] as string[];
     if (rooms.length === 0 || !opts.ist_date || !isIstDate(opts.ist_date) || !rooms.every((x) => isRoomId(x))) return skip("excerpt_unplaced");
     const exBlindRoom = rooms.find((x) => blindRefusal(x, opts.ist_date!));
     if (exBlindRoom) return skip("blind_room_day", { room_id: exBlindRoom, ist_date: opts.ist_date });

@@ -8,7 +8,7 @@
 import { z } from "zod";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
-import { callsLeft, capRefusal, isLlmRubric } from "@/lib/rubrics/llm-cap";
+import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun } from "@/lib/rubrics/registry";
 import { evaluateUnit } from "@/lib/rubrics/engines";
 import { compareItem, labelReport, parseBenchSet, scoreBench, type BenchSet } from "@/lib/rubrics/bench";
@@ -38,6 +38,7 @@ export const rubricBenchKind: JobKind = {
   name: RUBRIC_BENCH_KIND,
   first: "load",
   scope: "invoke",
+  capPlan: (args) => reservationFor(RUBRIC_BENCH_KIND, args),
   precheck: async (args) => { const m = await capRefusal(RUBRIC_BENCH_KIND, args); if (m) throw new JobArgsError(m); },
   parseArgs: (raw) => parseRubricBenchArgs(raw) as unknown as Record<string, unknown>,
   dedupeOn: (args) => [["rubric_id", String(args.rubric_id)], ["set", String(args.set ?? "gold")]],

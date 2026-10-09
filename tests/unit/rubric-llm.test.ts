@@ -314,3 +314,20 @@ describe("S71-R4b — an excerpt may name several candidate rooms: blind if ANY 
     expect(parseBenchSet({ unit: "consult", items: [{ unit_key: "k", room_ids: ["a", "b"], ist_date: "2026-10-08", expected: { x: 1 } }] })!.items[0]).toMatchObject({ room_ids: ["a", "b"], ist_date: "2026-10-08" });
   });
 });
+
+describe("S71-R5 Q2 — room_id and room_ids are checked as a UNION", () => {
+  it("a blind room_id with clean room_ids is blind_room_day with 0 store reads and 0 model calls; neither field replaces the other", async () => {
+    let called = 0;
+    L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
+    store.set("rubric/bench/consult_chair_affect/text/hv-q2.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+    const reads = vi.spyOn(Map.prototype, "has");
+    reads.mockClear();
+    for (const o of [{ room_id: "room_4ggnkg5x", room_ids: ["r1", "r2"] }, { room_id: "r1", room_ids: ["r2", "room_4ggnkg5x"] }]) {
+      expect(await evaluateUnit(affect, "consult", "hv-q2", { excerpt: true, bench: true, ist_date: "2026-09-23", ...o }), JSON.stringify(o)).toMatchObject({ status: "skipped", reason: "blind_room_day" });
+    }
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-q2"))).toBe(false);
+    reads.mockRestore();
+    expect(called).toBe(0);
+    expect(await evaluateUnit(affect, "consult", "hv-q2", { excerpt: true, bench: true, ist_date: "2026-09-23", room_id: "r1", room_ids: ["r2"] })).toMatchObject({ status: "ok" });
+  });
+});

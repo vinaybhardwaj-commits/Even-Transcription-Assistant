@@ -13,7 +13,10 @@ import { dockerAvailable, pgContainer } from "../support/s1-pg";
 type Row = Record<string, unknown>;
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), statements: [] as Array<{ text: string }> }));
 const statements = H.statements;
-vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push({ text: s.join("?") }); return H.sql!(s, ...v); } }));
+vi.mock("@/lib/db", () => ({
+  // `transaction` of the Neon driver: the statements arrive already started (the harness runs each one synchronously, in order), so the transaction is their results in order
+  sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push({ text: s.join("?") }); return H.sql!(s, ...v); }, { transaction: async (qs: Array<Promise<unknown>>) => Promise.all(qs) }),
+}));
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 
 const HAVE = dockerAvailable();
@@ -555,6 +558,73 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(calls).toBe(2);
     } finally {
       if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-R5 Q3 — the run-time stop of rubric_run: a running llm run stops at the job ceiling (2 of 4 units scored, 2 skipped llm_cap, 2 model calls); the stop-removed mutant makes 4 calls", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    for (const k of ["encA@m1", "encB@m1", "encC@m1"]) await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"] });
+      expect(run.job).toMatchObject({ status: "done", result: { llm_calls: 2, skipped_llm_cap: 2 } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
+      LLM.setRubricChatForTests(null);
+      await pg.sql`DELETE FROM eta_encounter_windows WHERE consult_key IN ('encA@m1','encB@m1','encC@m1')`;
+    }
+  });
+
+  it("S71-R5 Q4 — three CONCURRENT 30-unit submits under a day cap of 50: exactly ONE job is queued (the capped insert runs behind an advisory lock); a claimed job with no run row yet is counted by its args", async () => {
+    const { submitJob } = await import("@/lib/jobs/submit");
+    const saved = process.env.RUBRIC_LLM_DAILY_CALL_CAP;
+    process.env.RUBRIC_LLM_DAILY_CALL_CAP = "50";
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const keys = (tag: string) => Array.from({ length: 30 }, (_, i) => `${tag}${i}`);
+    try {
+      const sub = (tag: string) => submitJob({ kind: "rubric_run", args: { rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(tag) }, actor: "mcp:t", scopes: new Set(["invoke"] as never) });
+      statements.length = 0;
+      const res = await Promise.allSettled([sub("a"), sub("b"), sub("c")]);
+      // the capped insert is [advisory lock, conditional insert] in ONE transaction, in that order (the synchronous harness cannot interleave, so the lock itself is pinned by its statement)
+      const order = statements.map((q) => (/pg_advisory_xact_lock/.test(q.text) ? "lock" : /INSERT INTO scribe_job/.test(q.text) ? "insert" : "")).filter(Boolean);
+      expect(order).toEqual(["lock", "insert", "lock", "insert", "lock", "insert"]);
+      expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      for (const r of res.filter((x) => x.status === "rejected")) expect(String((r as PromiseRejectedResult).reason?.reason ?? (r as PromiseRejectedResult).reason)).toMatch(/^llm_daily_cap/);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM scribe_job WHERE kind = 'rubric_run'`)[0] as { n: number }).n).toBe(1);
+      // a RUNNING job that has no run row yet still holds its reservation (counted from its args): the next 30 are refused
+      await pg.exec(`UPDATE scribe_job SET status = 'running', progress = '{}'::jsonb;`);
+      await expect(sub("d")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) });
+      // once the run row exists (progress.run_id) the reservation moves to the run row (units_planned), which is still counted until it finishes
+      await pg.exec(`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_q4', 'consult_chair_affect', '1.1.0', 'run', 30); UPDATE scribe_job SET progress = '{"run_id":"rub_q4"}'::jsonb;`);
+      await expect(sub("e")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) });
+      // a finished run counts (units_ok + units_failed) x 2 = the worst case
+      await pg.exec(`UPDATE rubric_run SET units_ok = 20, units_failed = 5, finished_at = now(); UPDATE scribe_job SET status = 'done';`);
+      const C = await import("@/lib/rubrics/llm-cap");
+      expect(await C.dayUsage()).toEqual({ used: 50, queued: 0 }); // (20 + 5) x 2
+      await expect(sub("f")).rejects.toMatchObject({ reason: expect.stringMatching(/^llm_daily_cap/) }); // 50 + 30 > 50
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_DAILY_CALL_CAP; else process.env.RUBRIC_LLM_DAILY_CALL_CAP = saved;
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("S71-R5 Q2 — a row carrying BOTH room_id and room_ids is checked against the UNION: a blind room_id with clean room_ids is blind_room_day, 0 reads, 0 calls", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const rows = [{ unit_key: "hv-q2", unit_kind: "excerpt", room_id: "room_4ggnkg5x", room_ids: ["r1", "r2"], ist_date: "2026-09-23", expected: { surgery_recommended: false } }].map((x) => JSON.stringify(x)).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", rows);
+      mem.set("rubric/bench/consult_surgical_pitch/text/hv-q2.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed." }] }));
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
+      expect(b.job).toMatchObject({ status: "done", result: { n: 1, unscored: 1 } });
+      expect(calls).toBe(0);
+    } finally {
       LLM.setRubricChatForTests(null);
     }
   });

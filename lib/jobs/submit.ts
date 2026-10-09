@@ -12,7 +12,8 @@
 
 import { after } from "next/server";
 import { KIND_BY_NAME, JOB_KIND_NAMES } from "./kinds";
-import { findOpenJob, insertJob, newJobId } from "./store";
+import { findOpenJob, insertJob, insertJobCapped, newJobId } from "./store";
+import { capRefusal, cappedGuard } from "@/lib/rubrics/llm-cap";
 import { JobArgsError, type JobRow } from "./types";
 import { ToolScopeError } from "@/lib/mcp/registry";
 import type { McpScope } from "@/lib/mcp/auth";
@@ -81,8 +82,15 @@ export async function submitJob(input: {
     const open = await findOpenJob(kind.name, match);
     if (open) return { ...open, deduped: true };
   }
-  await kind.precheck?.(args); // throws JobArgsError: a job over a cost ceiling never queues
-  const job = await insertJob({ id: newJobId(), kind: kind.name, args, actor: input.actor });
+  await kind.precheck?.(args); // throws JobArgsError: a job over a cost ceiling never queues (the fast refusal, with its numbers)
+  const planned = kind.capPlan?.(args) ?? 0;
+  let job: JobRow;
+  if (planned > 0) {
+    // Q4: the ceiling is checked again, inside the insert, under a lock: concurrent submits cannot all pass
+    const capped = await insertJobCapped({ id: newJobId(), kind: kind.name, args, actor: input.actor }, cappedGuard(planned));
+    if (!capped) throw new JobArgsError((await capRefusal(kind.name, args)) ?? "llm_daily_cap: the daily call ceiling was reached by a concurrent submit");
+    job = capped;
+  } else job = await insertJob({ id: newJobId(), kind: kind.name, args, actor: input.actor });
   if (input.origin) kickRunner(input.origin);
   return job;
 }
