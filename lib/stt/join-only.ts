@@ -27,6 +27,7 @@
 import { refuseIfTooLong, roomsRecordingNow, joinServiceConfigured } from "@/lib/bench-join";
 import { sql } from "@/lib/db";
 import { isTranscriptEnabled } from "@/lib/room-switches";
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { joinClipForWindow, loadWindowContext } from "./room-drain";
 
 /**
@@ -45,6 +46,8 @@ export type JoinOnlyStep =
   | "room_recording"
   | "recording_unknown"
   | "join_service_not_configured"
+  | "blind_room_day"
+  | "room_day_lookup_failed"
   | "join_failed";
 
 export type JoinOnlyOutcome =
@@ -133,6 +136,7 @@ export async function joinOnlyWindow(
 
   // 6. THE SEAM — the drain's own join step, not a second copy of it.
   const join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
+  if (!join.ok && (join.error === "blind_room_day" || join.error === "room_day_lookup_failed")) return no(join.error);
   if (!join.ok) return no("join_failed", `${join.error}${join.hop ? ` @${join.hop}` : ""}`.slice(0, 160));
 
   return {
@@ -154,16 +158,35 @@ export async function listCliplessWindows(opts: {
 }): Promise<Array<{ window_id: string; transcript_enabled: boolean }>> {
   const include = opts.includeTranscriptDisabled === true;
   const limit = Math.max(1, Math.min(200, Math.trunc(opts.limit)));
+  // The blind pairs come from the constant, never a hand copy; parallel arrays keep them parameters.
+  const blindDays = BLIND_ROOM_DAYS.map(([day]) => day);
+  const blindRooms = BLIND_ROOM_DAYS.map(([, room]) => room);
   return (await sql`
     SELECT w.id AS window_id, r.transcript_enabled
       FROM bench_window w
       JOIN bench_session s ON s.id = w.session_id
       JOIN room r ON r.id = s.room_id
+      JOIN room_day d ON d.id = w.room_day_id
      WHERE w.clip_r2_key IS NULL
        AND w.state = ${JOIN_ONLY_STATE}
        AND w.room_day_id IS NOT NULL
+       AND w.grid_aligned = TRUE
+       AND NOT EXISTS (
+         SELECT 1 FROM unnest(${blindDays}::text[], ${blindRooms}::text[]) AS b(day, room)
+          WHERE b.day = d.ist_date::text AND b.room = d.room_id
+       )
        AND (${include} OR r.transcript_enabled = TRUE)
      ORDER BY w.start_ms ASC
      LIMIT ${limit}
   `) as Array<{ window_id: string; transcript_enabled: boolean }>;
+}
+
+/**
+ * Clinic hours, 07:30 to 21:30 IST: the join service runs on the Mini, and no bulk traffic goes
+ * through the Mini then (standing rule). IST is UTC+05:30 computed by hand from the injected clock —
+ * no locale, no Intl. [07:30, 21:30) is quiet: 07:30 is inside, 21:30 is outside.
+ */
+export function inClinicHours(now: Date): boolean {
+  const istMinutes = (Math.floor(now.getTime() / 60_000) + 330) % 1440;
+  return istMinutes >= 7 * 60 + 30 && istMinutes < 21 * 60 + 30;
 }

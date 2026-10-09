@@ -26,6 +26,10 @@ vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray) => {
     const text = strings.join("?");
     H.statements.push(text);
+    // The seam's blind-guard lookup: a clear (non-blind) room_day.
+    if (/FROM bench_window w\s+JOIN room_day d/i.test(text)) {
+      return Promise.resolve([{ ist_date: "2026-10-01", room_id: "room_clear" }]);
+    }
     if (/UPDATE bench_window/i.test(text) && H.updateThrows) {
       return Promise.reject(new Error("neon: write failed"));
     }
