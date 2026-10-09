@@ -13,6 +13,8 @@ import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { cosineSimilarity } from "@/lib/enroll";
 import { DIARIZE_BATCH_THRESHOLD } from "@/lib/stt/diarize-window";
 
+/** L1 (REL2-R3): every answer that shows centroids, matches or cosines says what it is not, as voice search does. */
+export const SIMILARITY_LABEL = "voice similarity, not identity";
 export const PAIRS_COSINE_FLOOR = 0.5;
 export const PAIRS_COSINE_DEFAULT = DIARIZE_BATCH_THRESHOLD;
 export const CLINICIAN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -122,7 +124,7 @@ function shape(vp: Row, s: Row | undefined, g: Row | undefined, c: Row[] | undef
 export async function consoleOverview(): Promise<Record<string, unknown>> {
   const [vps, s, g, c, m, lost, ex] = await Promise.all([printRows(), samplesBy(), generationsBy(), centroidsBy(), matchedBy(), lostBy(), excluded()]);
   return {
-    view: "overview", clinicians: vps.map((v) => shape(v, s.get(String(v.clinician_id)), g.get(String(v.clinician_id)), c.get(String(v.clinician_id)), m.get(String(v.clinician_id)), lost.get(String(v.clinician_id)))),
+    view: "overview", label: SIMILARITY_LABEL, clinicians: vps.map((v) => shape(v, s.get(String(v.clinician_id)), g.get(String(v.clinician_id)), c.get(String(v.clinician_id)), m.get(String(v.clinician_id)), lost.get(String(v.clinician_id)))),
     summary: { total: vps.length, matchable: vps.filter((v) => v.matchable === true).length }, ...ex,
     notes: { last_matched_at: "created time of the newest role=clinician turn row (INFERRED: room_turn_speaker has no matched-at column)", window: "30 days by created time", held_out: "held-out room-days and turns with no room-day are excluded from the match counts" },
   };
@@ -156,7 +158,7 @@ export async function consoleClinician(clinicianId: string): Promise<Record<stri
      GROUP BY rd.ist_date ORDER BY rd.ist_date
   `) as Row[];
   return {
-    view: "clinician", ...shape(vps[0]!, s.get(clinicianId), g.get(clinicianId), c.get(clinicianId), m.get(clinicianId), lost.get(clinicianId)),
+    view: "clinician", label: SIMILARITY_LABEL, ...shape(vps[0]!, s.get(clinicianId), g.get(clinicianId), c.get(clinicianId), m.get(clinicianId), lost.get(clinicianId)),
     generation_history: gens.map((x) => ({ generation: num(x.generation), origin: x.origin, sample_count: num(x.sample_count), provenance_counts: countsOnly(x.provenance_json), created_at: iso(x.created_at) })),
     voice_centroids: cents.map((x) => ({ domain: x.domain, generation: num(x.generation), embedding_model: x.embedding_model, embedding_dim: num(x.embedding_dim), n_samples: num(x.n_samples), created_at: iso(x.created_at), retired_at: iso(x.retired_at), retired_by: (x.retired_by as string | null) ?? null, retired_reason: (x.retired_reason as string | null) ?? null })),
     daily_30d: series.map((x) => ({ day: x.day, n_matched: num(x.n_matched), match_confidence_p50: r3(x.p50) })),
@@ -192,5 +194,5 @@ export async function consolePairs(minCosine?: number): Promise<Record<string, u
     pairs.push({ a: a.clinician_id, b: b.clinician_id, cosine: Math.round(c * 1000) / 1000, a_won_b_lost_30d: ab, b_won_a_lost_30d: ba, n_contested_30d: ab + ba });
   }
   pairs.sort((x, y) => y.cosine - x.cosine || (x.a < y.a ? -1 : 1));
-  return { view: "pairs", label: "near pairs", min_cosine: min, floor, default: PAIRS_COSINE_DEFAULT, n_active_prints: cents.length, pairs, ...ex };
+  return { view: "pairs", label: SIMILARITY_LABEL, view_label: "near pairs", min_cosine: min, floor, default: PAIRS_COSINE_DEFAULT, n_active_prints: cents.length, pairs, ...ex };
 }

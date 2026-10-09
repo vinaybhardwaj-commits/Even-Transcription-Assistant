@@ -89,7 +89,8 @@ describe("pairs", () => {
   });
   it("near pairs by cosine, 3 dp, sorted descending, default 0.65, with the 30-day contested counts in both directions", async () => {
     const r = await C.consolePairs() as { pairs: Row[]; label: string; min_cosine: number };
-    expect(r.label).toBe("near pairs");
+    expect(r.label).toBe("voice similarity, not identity"); // L1
+    expect((r as { view_label?: string }).view_label).toBe("near pairs");
     expect(r.min_cosine).toBe(0.65);
     // A-B cos 0.8 ; A-C 0.55 (below 0.65) ; B-C = 0.8*0.55+0.6*0.835 ~ 0.941 ; the others are under the threshold
     const cosines = r.pairs.map((p) => p.cosine);
@@ -159,5 +160,17 @@ describe("the tool", () => {
     noVectors(o);
     const group = S.CALLABLE_TOOLS.get("scribe_voice")!;
     expect(JSON.stringify(group.inputSchema)).toMatch(/console/);
+  });
+});
+
+describe("L1: every console view carries the label", () => {
+  it("overview, clinician and pairs say \"voice similarity, not identity\" (the same words as voice search)", async () => {
+    const ov = await C.consoleOverview() as { label: string };
+    expect(ov.label).toBe("voice similarity, not identity");
+    const cl = await C.consoleClinician("docA") as { label?: string };
+    expect(cl.label).toBe("voice similarity, not identity");
+    const pr = await C.consolePairs() as { label: string };
+    expect(pr.label).toBe("voice similarity, not identity");
+    expect((await import("@/lib/voice-search")).voiceSearch).toBeTypeOf("function");
   });
 });
