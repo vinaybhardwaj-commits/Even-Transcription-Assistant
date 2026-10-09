@@ -35,10 +35,13 @@ import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepCont
 import { jobError, type JobErrorCode } from "../errors";
 import {
   SARVAM_WALL_MS, capRefusalForJob, dailyCapRefusal, readJson, recordSarvamCall, resultKey, writeJson,
-  type EnglishEntry, type ResultDoc, type SarvamScope,
+  type EnglishEntry, type ResultDoc, type SarvamScope, type SarvamUse,
 } from "./sarvam-common";
 import { addMayura, alignEnglish, englishCounts, finalizeEnglish, settleUnpaired, tagNative } from "./sarvam-english";
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
+import { RESEARCH_SOURCE_LABEL, roomAudioAllowed, type CallerClass } from "@/lib/stt/o4-scope";
+import { roomDateHeldOut, sessionRangeHeldOut, windowArgHeldOut } from "../held-out";
+import { parseRoomSource, resolveRoomClip, type RoomSource } from "./sarvam-room";
 
 export const SARVAM_TRANSCRIBE_KIND = "sarvam_transcribe";
 const STEPS = {
@@ -63,7 +66,9 @@ export const sarvamTiming = { pollStepMs: 90_000, pollIntervalMs: 5_000, transla
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Arguments that name room tape rather than a consult. Refused, not ignored. */
-export const ROOM_AUDIO_ARGS = ["room", "from", "to", "session_id", "from_ms", "to_ms", "bench_window_id"] as const;
+export const ROOM_AUDIO_ARGS = ["room", "from", "to", "session_id", "from_ms", "to_ms", "bench_window_id", "window_id", "date"] as const;
+/** O5: keys only the MCP tool layer may set (submitJob stamps caller_class); a caller supplying one is refused. */
+const CALLER_KEYS = ["caller", "caller_class", "origin", "use"] as const;
 
 const Args = z.object({
   encounter_id: z.string().trim().min(1).max(128).optional(),
@@ -73,19 +78,38 @@ const Args = z.object({
   num_speakers: z.number().int().min(1).max(6).optional(),
 }).strict();
 
+type Common = { mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number; caller_class?: "mcp" };
 export type SarvamTranscribeArgs =
-  | { source: "encounter"; encounter_id: string; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number }
-  | { source: "consult"; consult_uid: string; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number };
+  | ({ source: "encounter"; encounter_id: string } & Common)
+  | ({ source: "consult"; consult_uid: string } & Common)
+  | ({ source: "window"; window_id: string; caller_class: "mcp" } & Common)
+  | ({ source: "range"; session_id?: string; room?: string; date?: string; start: number; end: number; caller_class: "mcp" } & Common);
 
 /** PURE. Exactly one of encounter_id / consult_uid; any room or session argument is scope_consult_only. Throws JobArgsError. */
-export function parseSarvamTranscribeArgs(raw: unknown): SarvamTranscribeArgs {
+export function parseSarvamTranscribeArgs(raw: unknown, caller: CallerClass = "production"): SarvamTranscribeArgs {
   const o = (raw ?? {}) as Record<string, unknown>;
+  const claimed = CALLER_KEYS.filter((k) => o[k] !== undefined);
+  if (claimed.length > 0) throw new JobArgsError(`bad args: ${claimed[0]} cannot be set by a caller`);
   const room = ROOM_AUDIO_ARGS.filter((k) => o[k] !== undefined && o[k] !== null);
-  if (room.length > 0) throw new JobArgsError(`scope_consult_only: only an encounter_id or a consult_uid may be sent to Sarvam (not ${room.join(", ")})`);
+  if (room.length > 0 && !roomAudioAllowed(caller)) throw new JobArgsError(`scope_consult_only: only an encounter_id or a consult_uid may be sent to Sarvam by a production caller (not ${room.join(", ")})`);
+  const mcp = caller === "mcp" ? ({ caller_class: "mcp" } as const) : {};
+  if (room.length > 0) {
+    // O5: an MCP caller may send a room window or an on-demand room segment; the other keys stay the documented ones
+    const rest = Object.fromEntries(Object.entries(o).filter(([k]) => !(ROOM_AUDIO_ARGS as readonly string[]).includes(k)));
+    const p = Args.safeParse(rest);
+    if (!p.success) throw new JobArgsError(`bad args: ${p.error.issues[0]?.path.join(".") || "args"} ${p.error.issues[0]?.message ?? ""}`.trim().slice(0, 160));
+    if (p.data.encounter_id !== undefined || p.data.consult_uid !== undefined) throw new JobArgsError("give exactly one source: a room window or segment, an {encounter_id} or a {consult_uid}");
+    const unsupported = (["from_ms", "to_ms", "bench_window_id"] as const).find((k) => o[k] !== undefined && o[k] !== null);
+    if (unsupported) throw new JobArgsError(`bad args: ${unsupported} is not a room source key (use window_id, or session_id | room+date with from, to)`);
+    const src = parseRoomSource(o) as RoomSource | null;
+    if (!src) throw new JobArgsError("bad args: no room source (window_id, or session_id | room+date with from, to)");
+    const common = { mode: p.data.mode, english: p.data.english, ...(p.data.num_speakers ? { num_speakers: p.data.num_speakers } : {}) };
+    return { ...src, ...common, caller_class: "mcp" } as SarvamTranscribeArgs;
+  }
   const p = Args.safeParse(o);
   if (!p.success) throw new JobArgsError(`bad args: ${p.error.issues[0]?.path.join(".") || "args"} ${p.error.issues[0]?.message ?? ""}`.trim().slice(0, 160));
   const a = p.data;
-  const common = { mode: a.mode, english: a.english, ...(a.num_speakers ? { num_speakers: a.num_speakers } : {}) };
+  const common = { mode: a.mode, english: a.english, ...(a.num_speakers ? { num_speakers: a.num_speakers } : {}), ...mcp };
   if ((a.encounter_id === undefined) === (a.consult_uid === undefined)) throw new JobArgsError("give exactly one source: {encounter_id} or {consult_uid}");
   return a.encounter_id !== undefined ? { source: "encounter", encounter_id: a.encounter_id, ...common } : { source: "consult", consult_uid: a.consult_uid!, ...common };
 }
@@ -105,17 +129,22 @@ export const sarvamTranscribeKind: JobKind = {
   // K3-2: an encounter source is a doctor-PWA encounter (no room placement); a consult source is a room recording (CONSULT's mirror row names its room and day)
   roomData: true,
   heldOut: async (args) => {
+    // O5: a room window / segment is checked like any room job; a room argument from a PRODUCTION caller never gets this far (the parser refused it)
+    if (args.source === "window") return windowArgHeldOut(args);
+    if (args.source === "range") return (await sessionRangeHeldOut(args)) ?? (typeof args.room === "string" && typeof args.date === "string" ? roomDateHeldOut(args.room, args.date) : null);
     if (args.source !== "consult" || typeof args.consult_uid !== "string") return null;
     const p = await windowPairOf(args.consult_uid); // ALL rows of the uid (S8C-1)
     return p && isBlindRoomDay(p.ist_date, p.room_id) ? "blind_room_day" : null;
   },
   scope: "invoke",
-  parseArgs: (raw) => parseSarvamTranscribeArgs(raw) as unknown as Record<string, unknown>,
+  parseArgs: (raw, caller) => parseSarvamTranscribeArgs(raw, caller ?? "production") as unknown as Record<string, unknown>,
   // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back
   dedupeOn: (args) => {
     const a = args as unknown as SarvamTranscribeArgs;
     // G23: the options are part of the identity (a codemix ask must not be answered with an open transcribe-mode job). A caller that sends the defaults (or the
     // same options) still dedupes; only a DIFFERENT mode / english / num_speakers opens a second job.
+    if (a.source === "window") return [["window_id", a.window_id], ["mode", a.mode], ["english", String(a.english)], ["num_speakers", a.num_speakers === undefined ? null : String(a.num_speakers)]];
+    if (a.source === "range") return [["session_id", a.session_id ?? null], ["room", a.room ?? null], ["start", String(a.start)], ["end", String(a.end)], ["mode", a.mode], ["english", String(a.english)], ["num_speakers", a.num_speakers === undefined ? null : String(a.num_speakers)]];
     const id: [string, string] = a.source === "encounter" ? ["encounter_id", a.encounter_id] : ["consult_uid", a.consult_uid];
     return [id, ["mode", a.mode], ["english", String(a.english)], ["num_speakers", a.num_speakers === undefined ? null : String(a.num_speakers)]];
   },
@@ -147,18 +176,29 @@ async function runStep(ctx: StepContext): Promise<StepOutcome> {
 }
 
 const num = (v: unknown): number => (typeof v === "number" ? v : Number(v));
-const scopeOf = (ctx: StepContext): SarvamScope => (ctx.progress.scope === "consult_clip" ? "consult_clip" : "encounter");
+const scopeOf = (ctx: StepContext): SarvamScope => (ctx.progress.scope === "consult_clip" ? "consult_clip" : ctx.progress.scope === "window" ? "window" : ctx.progress.scope === "room_segment" ? "room_segment" : "encounter");
+/** usage contract v1.2: who asked. Set from the stored caller class in prepare; a job without it is production. */
+const useOf = (ctx: StepContext): SarvamUse => (ctx.progress.use === "mcp" ? "mcp" : ctx.progress.use === "research" ? "research" : "production");
 
 // --- prepare --------------------------------------------------------------------------------------------------------------------------------
 async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   const a = ctx.args as unknown as SarvamTranscribeArgs;
+  const use: SarvamUse = a.caller_class === "mcp" ? "mcp" : "production";
+  if (a.source === "window" || a.source === "range") {
+    // O5: room audio only for the MCP class (the stored class, set by submitJob from the MCP tool layer); the held-out hook already ran at this step's start
+    if (!roomAudioAllowed(use === "mcp" ? "mcp" : "production")) return failWith(jobError("scope_consult_only", "room audio is not sent to Sarvam by a production caller"));
+    if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
+    const clip = await resolveRoomClip(a as unknown as Record<string, unknown>);
+    if (!clip.ok) return failWith(jobError(clip.error));
+    return nextStep(STEPS.init, { clip_key: clip.clip_key, content_type: clip.content_type, scope: clip.scope, ref: clip.ref, source_kind: clip.source_kind, use });
+  }
   // S8C: a consult clip comes from the CONSULT cutter's index mirror (lib/consult-clip.ts): held-out check first, then the sha256-verified row, voice_isolated refused, an existing palimpsest track refused, the eta-audio object probed
   if (a.source === "consult") {
     if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
     const pre = await preflightClip(a.consult_uid);
     if (!pre.ok) return failWith(jobError(pre.error));
-    return nextStep(STEPS.init, { clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", ...(typeof pre.row.minutes === "number" && Number.isFinite(pre.row.minutes) ? { mirror_minutes: pre.row.minutes } : {}) });
+    return nextStep(STEPS.init, { clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", use, ...(typeof pre.row.minutes === "number" && Number.isFinite(pre.row.minutes) ? { mirror_minutes: pre.row.minutes } : {}) });
   }
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   const rows = (await sql`SELECT audio_object_key FROM encounter WHERE id = ${a.encounter_id}::text LIMIT 1`) as Array<{ audio_object_key: string | null }>;
@@ -171,7 +211,7 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
   } catch {
     /* the init step reads the bytes and fails by name if the object is gone */
   }
-  return nextStep(STEPS.init, { clip_key: enc.audio_object_key, content_type: contentType, scope: "encounter", ref: a.encounter_id, source_kind: "encounter" });
+  return nextStep(STEPS.init, { clip_key: enc.audio_object_key, content_type: contentType, scope: "encounter", ref: a.encounter_id, source_kind: "encounter", use });
 }
 
 // --- init -----------------------------------------------------------------------------------------------------------------------------------
@@ -287,7 +327,7 @@ async function settleAudit(ctx: StepContext, progress: Record<string, unknown>, 
   const K = KEYS[pass];
   if (progress[K.pending] !== true) return progress;
   try {
-    await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: auditJobId(ctx, pass), sarvamJobId: String(progress[K.job] ?? ""), durationMs: num(progress.duration_ms) || 0, scope: scopeOf(ctx) });
+    await recordSarvamCall({ actor: ctx.job.actor ?? null, jobId: auditJobId(ctx, pass), sarvamJobId: String(progress[K.job] ?? ""), durationMs: num(progress.duration_ms) || 0, scope: scopeOf(ctx), use: useOf(ctx) });
   } catch (e) {
     if (!/^audit_write_failed/.test(String((e as Error)?.message ?? e))) throw e;
     return progress;
@@ -330,7 +370,7 @@ function httpStatusOf(error: string): number | null {
 }
 const refOf = (ctx: StepContext): string => {
   const a = ctx.args as unknown as SarvamTranscribeArgs;
-  return String(ctx.progress.ref ?? (a.source === "encounter" ? a.encounter_id : a.consult_uid));
+  return String(ctx.progress.ref ?? (a.source === "encounter" ? a.encounter_id : a.source === "consult" ? a.consult_uid : a.source === "window" ? a.window_id : a.session_id ?? a.room ?? ""));
 };
 
 /** One ledger line per Sarvam batch pass: the native pass is task "transcribe" under the job's id; the English pass is task "translate" under `<id>:en`. */
@@ -340,7 +380,7 @@ async function ledgerBatch(ctx: StepContext, status: "ok" | "failed", httpStatus
     caller: "scribe-mcp", machine: "vercel", job_id: auditJobId(ctx, pass), request_id: typeof ctx.progress[K.job] === "string" ? (ctx.progress[K.job] as string) : null,
     route: "gateway", mode: "batch", task: pass === "en" ? "translate" : "transcribe", model: SARVAM_GW_STT_MODEL, audio_s: Math.round(num(ctx.progress.duration_ms) / 10) / 100 || 0,
     started_at: typeof ctx.progress[K.startedAt] === "string" ? (ctx.progress[K.startedAt] as string) : new Date().toISOString(), finished_at: new Date().toISOString(),
-    status, http_status: httpStatus, throttled, scope: scopeOf(ctx), ref: refOf(ctx),
+    status, http_status: httpStatus, throttled, scope: scopeOf(ctx), ref: refOf(ctx), use: useOf(ctx),
   } satisfies CallLine);
 }
 
@@ -348,7 +388,7 @@ async function ledgerTranslation(ctx: StepContext, status: "ok" | "failed", char
   await appendLedger({
     caller: "scribe-mcp", machine: "vercel", job_id: `${ctx.job.id}:translate`, request_id: null, route: "gateway", mode: "sync", task: "text_translate",
     model: SARVAM_GW_TRANSLATE_MODEL, audio_s: 0, chars, started_at: typeof ctx.progress.translate_started_at === "string" ? ctx.progress.translate_started_at : new Date().toISOString(),
-    finished_at: new Date().toISOString(), status, http_status: httpStatus, throttled, scope: scopeOf(ctx), ref: refOf(ctx),
+    finished_at: new Date().toISOString(), status, http_status: httpStatus, throttled, scope: scopeOf(ctx), ref: refOf(ctx), use: useOf(ctx),
   } satisfies CallLine);
 }
 
@@ -380,6 +420,7 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   const wantEnglish = a.english === true;
   const doc: ResultDoc = {
     language_code: res.languageCode, duration_s: durationS, speakers, entries, transcript: res.transcript,
+    ...(scopeOf(ctx) === "window" || scopeOf(ctx) === "room_segment" ? { source_label: RESEARCH_SOURCE_LABEL } : {}),
     english_pass: wantEnglish ? "pending" : "not_requested", sarvam_job_ids: { native: jobId, english: null }, minutes: { native: Math.round((knownMs / 60_000) * 1000) / 1000, english: 0 },
   };
   try {
@@ -463,6 +504,7 @@ async function finishDoc(ctx: StepContext, key: string, doc: ResultDoc, mayuraCh
 function summary(jobId: string, doc: ResultDoc): Record<string, unknown> {
   return {
     r2_key: resultKey(jobId),
+    ...(doc.source_label ? { source: doc.source_label } : {}),
     speakers: doc.speakers.length,
     language_code: doc.language_code,
     duration_s: doc.duration_s,

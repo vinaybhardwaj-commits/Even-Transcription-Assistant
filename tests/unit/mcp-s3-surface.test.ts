@@ -443,7 +443,7 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
       scribe_room_command: ["WRITE; acts on a LIVE clinical room", "kiosk_not_listening", "start_day idempotent", "room_paused is consent", "without V's GO"],
       scribe_steward_command: ["WRITE", "LIVE rooms", "reason required", "returns a revert"],
       scribe_rubric: ["never Pulse", "touches no room", "run/bench need invoke", "lab:true"],
-      scribe_sarvam: ["ZDR", "no room audio", "submits need invoke"],
+      scribe_sarvam: ["ZDR", "never blind days", "submits need invoke"],
       scribe_jobs: ["status/list need read, submit needs invoke, cancel needs write", "no live-room command"],
       scribe_job_submit: ["INVOKE scope", "no live-room command"],
       scribe_job_cancel: ["WRITE", "no room command"],

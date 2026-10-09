@@ -6,7 +6,7 @@
  * It does NOTHING for any other kind. It never throws. The ledger append is once-per-job-id, so a job that already wrote its own line (the kind
  * failed it by code, or it finished ok before the cancel arrived) gets no second one.
  */
-import { appendLedger, touchLane, type CallLine } from "@/lib/sarvam-lab";
+import { appendLedger, refreshContractFiles, type CallLine } from "@/lib/sarvam-lab";
 import type { JobRow } from "./types";
 
 const SARVAM_KINDS = ["sarvam_transcribe", "sarvam_translate"] as const;
@@ -19,10 +19,11 @@ export function endedLine(job: Pick<JobRow, "id" | "kind" | "args" | "progress" 
   const p = job.progress ?? {};
   const a = (job.args ?? {}) as Record<string, unknown>;
   const consult = a.source === "consult";
-  const scope = p.scope === "consult_clip" || consult ? "consult_clip" : "encounter";
+  const scope = p.scope === "window" ? "window" : p.scope === "room_segment" ? "room_segment" : p.scope === "consult_clip" || consult ? "consult_clip" : "encounter";
+  const use = p.use === "mcp" || a.caller_class === "mcp" ? "mcp" : "production"; // contract v1.2: a line without use reads as production
   const ref = s(p.ref) ?? s(a.encounter_id) ?? s(a.consult_uid) ?? (s(a.id) ? (a.kind === "transcription_run" ? `run:${a.id}` : String(a.id)) : "unknown");
   const throttled = p.throttled === true || p.translate_throttled === true;
-  const base = { caller: "scribe-mcp", machine: "vercel", route: "gateway", finished_at: nowIso, status, http_status: null, throttled, scope, ref } as const;
+  const base = { caller: "scribe-mcp", machine: "vercel", route: "gateway", finished_at: nowIso, status, http_status: null, throttled, scope, ref, use } as const;
   const translating = job.kind === "sarvam_translate" || typeof p.translate_started_at === "string";
   if (translating) {
     return {
@@ -55,7 +56,7 @@ export async function sarvamJobEnded(job: JobRow, status: "failed" | "cancelled"
     await appendLedger(endedLine(job, status, now));
     const en = endedEnLine(job, status, now);
     if (en) await appendLedger(en);
-    await touchLane({ force: true, excludeJobId: job.id });
+    await refreshContractFiles(job.created_at); // contract v1.2: the whole day file rewritten from Neon, then the lane
   } catch (e) {
     console.warn("[sarvam-lab]", JSON.stringify({ code: "ended_hook_failed", err: (e as { name?: string })?.name ?? "error" }));
   }
