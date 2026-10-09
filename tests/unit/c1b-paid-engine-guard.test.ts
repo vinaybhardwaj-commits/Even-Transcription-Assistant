@@ -167,7 +167,8 @@ describe("item 7 — every route to an UNNAMED paid call is closed", () => {
     expect(out.error, "a dropped engine arg would be a silent wrong-engine result").toBe("engine_not_supported_on_async");
     const sarvam = (await t.handler({ session_id: "s", start: "10:00", end: "10:01", engine: "sarvam", async: true },
       { actor: "mcp:op", scopes: new Set(["read", "invoke"]), origin: "https://x" } as never)) as Record<string, unknown>;
-    expect(sarvam.error).toBe("scope_consult_only");
+    // O5 (09 Oct): a Sarvam engine named through the MCP tool is a gateway job over the range, not a silent whisper run and not a refusal; this range is malformed (no date), so it is bad_args
+    expect(sarvam.error).toBe("bad_args");
   });
 
   it("(c) ROUTING INHERITANCE — a routing row pointing at the paid engine grants nothing", async () => {
