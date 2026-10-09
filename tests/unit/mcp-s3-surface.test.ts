@@ -72,9 +72,9 @@ const CONSOLE_TOOLS = new Set(["scribe_voice"]);
 const withoutConsole = (schema: unknown): unknown => {
   const s = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, Row> };
   if (s.properties) {
-    delete s.properties.action; delete s.properties.min_cosine;
+    for (const k of ["action", "min_cosine", "speaker_idx", "rooms", "from", "to", "top_k"]) delete s.properties[k]; // S6A + S6B console-only arguments
     const v = s.properties.view; if (v && Array.isArray(v.enum)) v.enum = (v.enum as string[]).filter((x) => x !== "console");
-    const c = s.properties.clinician_id; if (c && typeof c.description === "string") c.description = c.description.replace("|console]", "]");
+    for (const k of ["clinician_id", "window_id"]) { const c = s.properties[k]; if (c && typeof c.description === "string") c.description = c.description.replace("|console]", "]"); }
   }
   return s;
 };
@@ -413,18 +413,18 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 38,600 characters (S6-DIET; measured 38,577)", async () => {
+  it("budget: the full tools/list result stays at or under 39,000 characters (measured 38,980: S6-DIET + S6B search arguments)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(38_600);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_000);
   });
 
-  it("S6-DIET: tools/list with every description field removed is IDENTICAL to s6-blind ff5973ebd5 (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
+  it("S6-DIET: tools/list with every description field removed is IDENTICAL to the S6B capture (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
     const { body } = await door("tools/list");
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k]) => k !== "description").map(([k, v]) => [k, strip(v)])) : o;
     const sortKeys = (o: unknown): unknown => Array.isArray(o) ? o.map(sortKeys) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeys(v)])) : o;
-    const before = JSON.parse(readFileSync("fixtures/mcp/s6-blind-ff5973ebd5-tools-list-no-descriptions.json", "utf8"));
+    const before = JSON.parse(readFileSync("fixtures/mcp/s6b-tools-list-no-descriptions.json", "utf8"));
     expect(sortKeys(strip(body.result))).toEqual(sortKeys(before));
   });
 

@@ -1175,7 +1175,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 merge gate 4 — every voiceprint reader is ac
       .filter((f) => /^(lib|app|scripts)\//.test(f) && /\.[cm]?[jt]sx?$/.test(f))
       .filter((f) => READS.test(textOf(f) ?? ""))
       .sort();
-    const MATCHING_FILTERED = ["app/[slug]/api/voice/identify/route.ts", "lib/stt/diarize-window.ts"];
+    const MATCHING_FILTERED = ["app/[slug]/api/voice/identify/route.ts", "lib/stt/diarize-window.ts", "lib/voice-search.ts"]; // S6B: the search query centroid is the ACTIVE clinician's only, compared in memory
     const OPERATOR_UNFILTERED = [
       "app/api/admin/doctors/[id]/voice-samples/[sampleId]/embedding/route.ts",
       "app/api/admin/doctors/[id]/voice-samples/route.ts",
