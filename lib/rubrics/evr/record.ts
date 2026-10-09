@@ -14,6 +14,8 @@ export const RECORD_TYPE = "EMR_2_GENERATED";
 
 type QueryFn = (sql: string) => Promise<Array<Record<string, unknown>>>;
 let queryOverride: QueryFn | null = null;
+/** The warehouse query function in force: the test hook, else Metabase (db 13, read only). Shared with the stay_record reader so one hook fakes both. */
+export const warehouse = (): QueryFn => queryOverride ?? metabaseQuery;
 /** Test hook: a fake warehouse (no network, no key). */
 export function setMetabaseForTests(fn: QueryFn | null): void {
   queryOverride = fn;
