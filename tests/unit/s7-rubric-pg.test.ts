@@ -823,6 +823,28 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
+  it("Q2-1 — the same on the evr_perturb bench path (evaluateEvrStep): an outage on the 2nd window keeps llm_calls and the position; without the progress patch the record is the pre-step one", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const { OpenRouterError } = await import("@/lib/openrouter");
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc1AaaaaaaaaaaZ', warehouse_prescription_uid = 'recA' WHERE consult_key = 'enc1@m1'`;
+    REC.setMetabaseForTests(async () => [{ rec_uid: "recA", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 1 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "500 mg", freq: "BD", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      // three explicit windows (the same consult three times: the fixture has one that qualifies); window 1 is scored, window 2 meets the outage on every claim
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, { unit_key: "enc1@m1" }, { unit_key: "enc1@m1" }, { unit_key: "enc1@m1" }].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      const b = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(b.job).toMatchObject({ status: "failed" });
+      expect(calls).toBeGreaterThanOrEqual(4); // 1 scored window + 3 failing claims
+      expect(b.job.progress).toMatchObject({ idx: 1, llm_calls: calls });
+    } finally {
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+      mem.delete("rubric/bench/encounter_vs_record/evr_perturb.jsonl");
+    }
+  });
+
   it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
     const C = await import("@/lib/rubrics/llm-cap");
     const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
