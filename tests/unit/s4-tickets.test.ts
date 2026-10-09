@@ -40,7 +40,7 @@ describe("ticket_log", () => {
     const out = await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-07" });
     expect(out).toMatchObject({ ok: true, from: "2026-10-01", to: "2026-10-07", count: 2, truncated: false });
     const t = (out.tickets as Row[])[0]!;
-    expect(t).toEqual({ ticket_id: "tk1", room_id: ROOM.id, room_name: "OPD 1", machine: "m1", action: "wake", status: "done", issuer_rule: "kiosk_asleep", mode: "live",
+    expect(t).toEqual({ ticket_id: "tk1", room_id: ROOM.id, room_name: "OPD 1", room_source: "decision", machine: "m1", action: "wake", status: "done", issuer_rule: "kiosk_asleep", mode: "live",
       issued_at: "2026-10-05T04:00:00.000Z", expires_at: "2026-10-05T04:10:00.000Z", fetched_at: "2026-10-05T04:01:00.000Z", completed_at: "2026-10-05T04:02:00.000Z" });
     expect((out.tickets as Row[])[1]).toMatchObject({ mode: null, issuer_rule: null });
     const keys = (v: unknown, acc: string[] = []): string[] => { if (Array.isArray(v)) v.forEach((x) => keys(x, acc)); else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) { acc.push(k); keys(x, acc); } return acc; };
@@ -78,6 +78,28 @@ describe("ticket_log", () => {
   });
 });
 
+describe("R4-2 room source and R4-3 truncation", () => {
+  it("the room comes from the issuing decision only: no decision = room null and room_source unknown; the SELECT reads no install table", async () => {
+    answer = (t, v) => (/FROM steward_tickets t/.test(t) ? [TROW("tk1"), TROW("tk2", { room_id: null, room_name: null, issuer_rule: null, decision_mode: null })] : roomTable(t, v) ?? []);
+    const out = await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-07" });
+    const t = out.tickets as Row[];
+    expect(t[0]).toMatchObject({ room_id: ROOM.id, room_source: "decision" });
+    expect(t[1]).toMatchObject({ room_id: null, room_name: null, room_source: "unknown" });
+    for (const q of ticketSql()) expect(q.text).not.toMatch(/room_install/);
+    await run({ view: "ticket_summary", from: "2026-10-01", to: "2026-10-07" });
+    for (const q of ticketSql()) expect(q.text).not.toMatch(/room_install/);
+  });
+  it("ticket_summary says truncated when the 2000-row limit is hit, and not at exactly 2000", async () => {
+    const rows = (n: number): Row[] => Array.from({ length: n }, (_, i) => ({ room_id: `r${i}`, room_name: null, action: "wake", status: "done", decision_mode: "live", n: 1 }));
+    answer = (t, v) => (/FROM steward_tickets t/.test(t) ? rows(2001) : roomTable(t, v) ?? []);
+    const big = await run({ view: "ticket_summary", from: "2026-10-01", to: "2026-10-07" });
+    expect(big).toMatchObject({ truncated: true, total: 2000 });
+    expect(ticketSql()[0]!.values).toContain(2001);
+    answer = (t, v) => (/FROM steward_tickets t/.test(t) ? rows(2000) : roomTable(t, v) ?? []);
+    expect(await run({ view: "ticket_summary", from: "2026-10-01", to: "2026-10-07" })).toMatchObject({ truncated: false, total: 2000 });
+  });
+});
+
 describe("ticket_summary", () => {
   it("counts per action x status x mode and per room", async () => {
     answer = (t, v) => (/FROM steward_tickets t/.test(t) ? [
@@ -88,13 +110,16 @@ describe("ticket_summary", () => {
     expect(out).toMatchObject({ ok: true, total: 6 });
     expect(out.by_action_status_mode).toEqual([{ action: "wake", status: "done", mode: "live", n: 5 }, { action: "wake", status: "failed", mode: "live", n: 1 }]);
     expect(out.by_room).toEqual([{ room_id: "r1", room_name: "OPD 1", n: 4 }, { room_id: "r2", room_name: "OPD 2", n: 2 }]);
+    expect(out.truncated).toBe(false);
     expect(ticketSql()[0]!.text).not.toMatch(/signature|nonce/i);
   });
 });
 
 describe("live", () => {
-  const cfg = (o: { kill?: boolean; global?: boolean; actions?: Row; startLive?: boolean }): Row[] => [
+  const SCHED = { clinic: { start: "07:30", end: "21:30", tz: "Asia/Kolkata", late_stop_max_min: 30 }, ot: { start: "06:00", end: "04:00", tz: "Asia/Kolkata", late_stop_max_min: 30 } };
+  const cfg = (o: { kill?: boolean; global?: boolean; actions?: Row; startLive?: boolean; noRooms?: boolean; badSchedule?: boolean }): Row[] => [
     { key: "kill_switch", value: { on: o.kill ?? false } }, { key: "shadow", value: { global: o.global ?? false, actions: o.actions ?? {} } },
+    ...(o.noRooms ? [] : [{ key: "rooms", value: {} }]), ...(o.badSchedule ? [{ key: "schedule", value: { clinic: "x" } }] : [{ key: "schedule", value: SCHED }]),
     ...(o.startLive === undefined ? [] : [{ key: "start_day_live", value: { on: o.startLive } }])];
   const live = async (rows: Row[]) => { answer = (t) => (/FROM steward_config/.test(t) ? rows : []); return run({ view: "live" }); };
   it("is exactly actionMode over LIVE_CAPABLE_ACTIONS and the database config: the seed is nothing live; the kill switch and the global flag each stop everything; scribe_start also needs start_day_live", async () => {
@@ -108,6 +133,19 @@ describe("live", () => {
     const all = (await live(cfg({ startLive: true }))).actions as Row[];
     expect(all.map((a) => a.action)).toEqual([...C.LIVE_CAPABLE_ACTIONS]);
     for (const a of all) expect(a.mode).toBe(C.actionMode({ ...C.DEFAULT_CONFIG, kill_switch: false, shadow: { global: false, actions: {} }, start_day_live: true }, String(a.action)));
+  });
+  it("R4-1: a fatal config (rooms or schedule missing / malformed) = the loop does not tick: loop_paused true, the reason codes, every action not live, even with the switches open", async () => {
+    const open = { startLive: true, actions: {} };
+    for (const [o, why] of [[{ ...open, noRooms: true }, ["config:rooms"]], [{ ...open, badSchedule: true }, ["config:schedule"]], [{ ...open, noRooms: true, badSchedule: true }, ["config:rooms", "config:schedule"]]] as Array<[Parameters<typeof cfg>[0], string[]]>) {
+      const out = await live(cfg(o));
+      expect(out).toMatchObject({ ok: true, loop_paused: true, live_actions: [] });
+      expect([...(out.loop_paused_reason as string[])].sort()).toEqual([...why].sort());
+      for (const a of out.actions as Row[]) expect(a, String(a.action)).toMatchObject({ mode: "shadow", live: false });
+    }
+    // the same switches with a sound config ARE live; and no rows at all is paused too
+    expect(await live(cfg(open))).toMatchObject({ loop_paused: false });
+    expect(((await live(cfg(open))).live_actions as string[]).length).toBeGreaterThan(0);
+    expect(await live([])).toMatchObject({ loop_paused: true });
   });
   it("a malformed key is listed and fails closed; config-only (unpublished) action keys are listed and never live; only booleans and action names leave", async () => {
     const out = await live([{ key: "kill_switch", value: "banana" }, { key: "shadow", value: { global: false, actions: { legacy_action: false } } }]);

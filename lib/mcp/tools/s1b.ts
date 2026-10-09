@@ -193,11 +193,12 @@ async function stewardHistory(roomId: string | null, sinceHours: number, limit: 
 
 // ---------------------------------------------------------------------------
 // S4 — the repair-ticket console (READ ONLY): ticket_log, ticket_summary, live. No migration, no write, and no column that carries a signature, a nonce or a key is ever selected.
-// A ticket belongs to a machine; its room is the room of the decision that issued it, else the room of the active install with that hostname (INFERRED: the table has no room column).
+// A ticket belongs to a machine and the table has no room column: its room is the room of the decision that issued it and NOTHING else (R4-2: a machine's CURRENT room says nothing about where it was when the ticket was issued). No decision = room null, room_source "unknown".
 // Blind room-days do not apply: a ticket holds no audio, no transcript and no patient data.
 // ---------------------------------------------------------------------------
 
 export const TICKET_RANGE_DAYS_MAX = 31;
+export const TICKET_SUMMARY_ROWS_MAX = 2000;
 export const TICKET_STATUSES = ["issued", "fetched", "done", "failed", "expired"] as const;
 const IST_DAY_MS = 86_400_000;
 
@@ -227,13 +228,12 @@ async function stewardTicketLog(args: ToolArgs, roomId: string | null, limit: nu
   if ("ok" in f) return f as Row;
   const rows = (await sql`
     SELECT t.ticket_id, t.machine, t.action, t.status, t.issued_at, t.expires_at, t.fetched_at, t.completed_at,
-           d.rule AS issuer_rule, d.mode AS decision_mode, COALESCE(d.room_id, ri.room_id) AS room_id, r.name AS room_name
+           d.rule AS issuer_rule, d.mode AS decision_mode, d.room_id AS room_id, r.name AS room_name
       FROM steward_tickets t
       LEFT JOIN steward_decisions d ON d.id = t.decision_id
-      LEFT JOIN LATERAL (SELECT i.room_id FROM room_install i WHERE i.hostname = t.machine AND i.retired_at IS NULL ORDER BY i.last_seen_at DESC NULLS LAST LIMIT 1) ri ON true
-      LEFT JOIN room r ON r.id = COALESCE(d.room_id, ri.room_id)
+      LEFT JOIN room r ON r.id = d.room_id
      WHERE t.issued_at >= ${range.lo}::timestamptz AND t.issued_at < ${range.hi}::timestamptz
-       AND (${roomId}::text IS NULL OR COALESCE(d.room_id, ri.room_id) = ${roomId}::text)
+       AND (${roomId}::text IS NULL OR d.room_id = ${roomId}::text)
        AND (${f.action}::text IS NULL OR t.action = ${f.action}::text)
        AND (${f.status}::text IS NULL OR t.status = ${f.status}::text)
      ORDER BY t.issued_at DESC, t.ticket_id
@@ -247,6 +247,7 @@ async function stewardTicketLog(args: ToolArgs, roomId: string | null, limit: nu
       ticket_id: String(r.ticket_id),
       room_id: (r.room_id as string | null) ?? null,
       room_name: (r.room_name as string | null) ?? null,
+      room_source: r.room_id ? "decision" : "unknown",
       machine: String(r.machine),
       action: String(r.action),
       status: String(r.status),
@@ -263,20 +264,21 @@ async function stewardTicketSummary(args: ToolArgs, roomId: string | null): Prom
   if (!("lo" in range)) return range as Row;
   const f = ticketFilters(args);
   if ("ok" in f) return f as Row;
-  const rows = (await sql`
-    SELECT COALESCE(d.room_id, ri.room_id) AS room_id, r.name AS room_name, t.action, t.status, d.mode AS decision_mode, count(*)::int AS n
+  const all = (await sql`
+    SELECT d.room_id AS room_id, r.name AS room_name, t.action, t.status, d.mode AS decision_mode, count(*)::int AS n
       FROM steward_tickets t
       LEFT JOIN steward_decisions d ON d.id = t.decision_id
-      LEFT JOIN LATERAL (SELECT i.room_id FROM room_install i WHERE i.hostname = t.machine AND i.retired_at IS NULL ORDER BY i.last_seen_at DESC NULLS LAST LIMIT 1) ri ON true
-      LEFT JOIN room r ON r.id = COALESCE(d.room_id, ri.room_id)
+      LEFT JOIN room r ON r.id = d.room_id
      WHERE t.issued_at >= ${range.lo}::timestamptz AND t.issued_at < ${range.hi}::timestamptz
-       AND (${roomId}::text IS NULL OR COALESCE(d.room_id, ri.room_id) = ${roomId}::text)
+       AND (${roomId}::text IS NULL OR d.room_id = ${roomId}::text)
        AND (${f.action}::text IS NULL OR t.action = ${f.action}::text)
        AND (${f.status}::text IS NULL OR t.status = ${f.status}::text)
      GROUP BY 1, 2, 3, 4, 5
      ORDER BY 1, 3, 4, 5
-     LIMIT 2000
+     LIMIT ${TICKET_SUMMARY_ROWS_MAX + 1}
   `) as Row[];
+  const truncated = all.length > TICKET_SUMMARY_ROWS_MAX;
+  const rows = all.slice(0, TICKET_SUMMARY_ROWS_MAX);
   const cell = new Map<string, Row>();
   let total = 0;
   const perRoom = new Map<string, { room_id: string | null; room_name: string | null; n: number }>();
@@ -293,7 +295,7 @@ async function stewardTicketSummary(args: ToolArgs, roomId: string | null): Prom
     perRoom.set(rk, pr);
   }
   return {
-    ok: true, from: range.from, to: range.to, total,
+    ok: true, from: range.from, to: range.to, total, truncated, // R4-3: true when the row limit was hit: the counts then cover only the groups returned
     by_action_status_mode: [...cell.values()],
     by_room: [...perRoom.values()],
     by_room_action_status_mode: rows.map((r) => ({ room_id: (r.room_id as string | null) ?? null, room_name: (r.room_name as string | null) ?? null, action: String(r.action), status: String(r.status), mode: (r.decision_mode as string | null) ?? null, n: Number(r.n) })),
@@ -306,9 +308,11 @@ async function stewardTicketSummary(args: ToolArgs, roomId: string | null): Prom
  */
 async function stewardLive(): Promise<Row> {
   const rows = (await sql`SELECT key, value FROM steward_config ORDER BY key`) as Array<{ key: string; value: unknown }>;
-  const { config, invalid } = parseConfig(rows);
+  const { config, invalid, fatal } = parseConfig(rows);
+  // R4-1: the loop (lib/steward/loop.ts, before the lease) does not tick at all when `rooms` or `schedule` is missing or malformed; then nothing it would do is live, whatever the switches say.
+  const loopPaused = fatal.length > 0;
   const actions = LIVE_CAPABLE_ACTIONS.map((a) => {
-    const mode = actionMode(config, a);
+    const mode = loopPaused ? ("shadow" as const) : actionMode(config, a);
     return { action: a, mode, live: mode === "live", held_by_override: config.shadow.actions[a] === true, needs_start_day_live: a === "scribe_start" };
   });
   const capable = new Set(LIVE_CAPABLE_ACTIONS);
@@ -317,6 +321,8 @@ async function stewardLive(): Promise<Row> {
     kill_switch: config.kill_switch,
     shadow_global: config.shadow.global,
     start_day_live: config.start_day_live,
+    loop_paused: loopPaused,
+    ...(loopPaused ? { loop_paused_reason: fatal.map((k) => `config:${k}`) } : {}),
     live_actions: actions.filter((a) => a.live).map((a) => a.action),
     actions,
     // shadow.actions keys the code does not list: always shadow, whatever they say

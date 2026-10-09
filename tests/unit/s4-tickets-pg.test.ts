@@ -42,19 +42,20 @@ afterAll(() => { if (HAVE) pg.stop(); });
     const { CALLABLE_TOOLS } = await import("@/lib/mcp/surface");
     return (await CALLABLE_TOOLS.get("scribe_steward")!.handler({ ...args }, { origin: "x", actor: "a", scopes: new Set(["read"]) } as never)) as Record<string, unknown>;
   };
-  it("ticket_log: the IST range is [from 00:00, to+1 00:00) IST; room by decision, else by install hostname; issuer rule and mode from the decision; no secret anywhere", async () => {
+  it("ticket_log: the IST range is [from 00:00, to+1 00:00) IST; room by the issuing decision only (R4-2); issuer rule and mode from the decision; no secret anywhere", async () => {
     const out = await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-06" });
     const t = out.tickets as Array<Record<string, unknown>>;
     expect(t.map((x) => x.ticket_id)).toEqual(["t_edge_in", "t_install", "t_in_2", "t_in_1"]);
     const by = Object.fromEntries(t.map((x) => [String(x.ticket_id), x]));
-    expect(by.t_in_1).toMatchObject({ room_id: "r1", room_name: "OPD 1", issuer_rule: "kiosk_asleep", mode: "live", action: "wake", status: "done" });
+    expect(by.t_in_1).toMatchObject({ room_id: "r1", room_source: "decision", room_name: "OPD 1", issuer_rule: "kiosk_asleep", mode: "live", action: "wake", status: "done" });
     expect(by.t_in_2).toMatchObject({ mode: "shadow", status: "failed" });
-    expect(by.t_install).toMatchObject({ room_id: "r2", issuer_rule: null, mode: null });
+    expect(by.t_install).toMatchObject({ room_id: null, room_source: "unknown", issuer_rule: null, mode: null }); // R4-2: the install's CURRENT room (r2) is NOT used
     expect(by.t_edge_in).toMatchObject({ room_id: null });
     expect(JSON.stringify(out)).not.toMatch(/SIGSECRET|"n[0-9]"|nonce|signature/);
   });
   it("filters: room (decision or install), action, status", async () => {
-    expect(((await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-06", room: "opd-2" })).tickets as Array<Row>).map((x) => x.ticket_id)).toEqual(["t_install"]);
+    expect(((await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-06", room: "opd-2" })).tickets as Array<Row>).map((x) => x.ticket_id)).toEqual([]); // t_install ran on a machine now in opd-2: not counted (R4-2)
+    expect(((await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-06", room: "opd-1" })).tickets as Array<Row>).map((x) => x.ticket_id)).toEqual(["t_in_2", "t_in_1"]);
     expect(((await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-06", action: "wake" })).tickets as Array<Row>).map((x) => x.ticket_id)).toEqual(["t_install", "t_in_1"]);
     expect(((await run({ view: "ticket_log", from: "2026-10-01", to: "2026-10-06", status: "failed" })).tickets as Array<Row>).map((x) => x.ticket_id)).toEqual(["t_in_2"]);
     expect(((await run({ view: "ticket_log", from: "2026-09-30", to: "2026-09-30" })).tickets as Array<Row>).map((x) => x.ticket_id)).toEqual(["t_before"]);
@@ -64,6 +65,8 @@ afterAll(() => { if (HAVE) pg.stop(); });
     expect(out.total).toBe(4);
     expect((out.by_action_status_mode as Row[]).find((c) => c.action === "wake" && c.status === "done")).toMatchObject({ mode: "live", n: 1 });
     expect((out.by_room as Row[]).find((c) => c.room_id === "r1")).toMatchObject({ n: 2 });
+    expect((out.by_room as Row[]).find((c) => c.room_id === null)).toMatchObject({ n: 2 });
+    expect(out.truncated).toBe(false);
     for (const s of H.statements.filter((x) => /steward_tickets/.test(x))) expect(s.trimStart()).toMatch(/^SELECT/);
   });
 });
