@@ -222,10 +222,10 @@ function mp4Ms(b: Uint8Array): number | null {
 
 /**
  * S8C: FLAC (the CONSULT clips). STREAMINFO is the first metadata block: sample rate (20 bits), channels (3), bits per sample (5), total samples (36). The header is a CLAIM, so the duration is the LONGER of it and a floor
- * from the file size (a FLAC file never holds more than about 1.05x its raw PCM size per second of audio at its own rate), exactly as the other containers take the longest claim. total samples 0 = unknown = null.
+ * from the file size at a FIXED byte rate (FLAC_FLOOR_BYTES_PER_S, below): never from the header.
  */
-/** 16 kbit/s: the lowest bitrate a speech FLAC is assumed to have, so bytes / this is a LONG (conservative) duration. The duration also meets the mirror row\'s minutes x 60 in the job (max of all three). */
-export const FLAC_FLOOR_BYTES_PER_S = 2_000;
+/** 576000 B/s = UNCOMPRESSED 96 kHz x 24-bit x 2 ch, the highest format the STREAMINFO whitelist admits. FLAC never exceeds raw PCM (bar framing), so bytes / this is a true LOWER bound on the duration and never overstates a real clip. The job also takes the mirror row\'s minutes x 60 (max of all three). */
+export const FLAC_FLOOR_BYTES_PER_S = 576_000;
 function flacMs(b: Uint8Array): number | null {
   if (b.length < 42 || b[0] !== 0x66 || b[1] !== 0x4c || b[2] !== 0x61 || b[3] !== 0x43) return null; // "fLaC"
   if ((b[4]! & 0x7f) !== 0) return null; // the first block must be STREAMINFO
@@ -236,7 +236,7 @@ function flacMs(b: Uint8Array): number | null {
   // S8C-2: only the cutter's format is accepted (a crafted STREAMINFO of any other shape is unknown, not guessed at)
   if (rate < 8_000 || rate > 96_000 || channels > 2 || (bits !== 16 && bits !== 24) || total <= 0) return null;
   const claim = (total * 1000) / rate;
-  // the floor does NOT come from the header (it controls rate, channels and bits): a FIXED conservative bitrate, FLAC_FLOOR_BYTES_PER_S, whatever the header says
+  // the floor does NOT come from the header (it controls rate, channels and bits): a FIXED lower-bound byte rate, FLAC_FLOOR_BYTES_PER_S, whatever the header says
   const floor = (b.length * 1000) / FLAC_FLOOR_BYTES_PER_S;
   return Math.round(Math.max(claim, floor));
 }
