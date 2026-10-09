@@ -25,6 +25,7 @@ import { sql } from "@/lib/db";
 import { JOIN_MAX_MS } from "@/lib/bench-join";
 import { measureAudioMs } from "@/lib/audio-duration";
 import { getObjectBytes, headObject } from "@/lib/r2";
+import { preflightClip } from "@/lib/consult-clip";
 import { gatewayConfigured } from "@/lib/sarvam-gateway";
 import { chunkText, gwBatchInit, gwBatchResult, gwBatchStartJob, gwBatchStatus, gwBatchUpload, gwTranslateChunk, SARVAM_GW_STT_MODEL, SARVAM_GW_TRANSLATE_MODEL, type Fail } from "@/lib/sarvam-gw";
 import { SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
@@ -146,8 +147,13 @@ const scopeOf = (ctx: StepContext): SarvamScope => (ctx.progress.scope === "cons
 async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   const a = ctx.args as unknown as SarvamTranscribeArgs;
-  // a consult clip comes from the CONSULT cutter's index; its resolver is not wired yet
-  if (a.source === "consult") return failWith(jobError("consult_index_unavailable"));
+  // S8C: a consult clip comes from the CONSULT cutter's index mirror (lib/consult-clip.ts): held-out check first, then the sha256-verified row, voice_isolated refused, an existing palimpsest track refused, the eta-audio object probed
+  if (a.source === "consult") {
+    if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
+    const pre = await preflightClip(a.consult_uid);
+    if (!pre.ok) return failWith(jobError(pre.error));
+    return nextStep(STEPS.init, { clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult" });
+  }
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   const rows = (await sql`SELECT audio_object_key FROM encounter WHERE id = ${a.encounter_id}::text LIMIT 1`) as Array<{ audio_object_key: string | null }>;
   const enc = rows[0];

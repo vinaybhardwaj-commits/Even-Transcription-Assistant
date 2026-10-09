@@ -29,6 +29,28 @@ describe("measureAudioMs", () => {
     expect(measureAudioMs(webm({ clusters }))).toBe(1439 * 5_000 + 2_500);
   });
 
+  it("flac (the CONSULT clips): STREAMINFO total samples / rate; the longer of that and a size floor (a header cannot understate); total samples 0 = unknown = null", () => {
+    // 44.1 kHz stereo 16-bit, 90 s claimed, a small file
+    const flac = (opts: { rate: number; channels: number; bits: number; samples: number; extra?: number }): Uint8Array => {
+      const b = new Uint8Array(42 + (opts.extra ?? 0));
+      b.set([0x66, 0x4c, 0x61, 0x43, 0x00, 0x00, 0x00, 0x22]); // "fLaC", STREAMINFO (last-flag 0, type 0), length 34
+      b[8] = 0x10; b[9] = 0x00; b[10] = 0x10; b[11] = 0x00; // block sizes
+      b[18] = (opts.rate >> 12) & 0xff; b[19] = (opts.rate >> 4) & 0xff;
+      b[20] = ((opts.rate & 0x0f) << 4) | (((opts.channels - 1) & 0x07) << 1) | (((opts.bits - 1) >> 4) & 0x01);
+      b[21] = (((opts.bits - 1) & 0x0f) << 4) | (Math.floor(opts.samples / 2 ** 32) & 0x0f);
+      const lo = opts.samples >>> 0;
+      b[22] = (lo >>> 24) & 0xff; b[23] = (lo >>> 16) & 0xff; b[24] = (lo >>> 8) & 0xff; b[25] = lo & 0xff;
+      return b;
+    };
+    expect(measureAudioMs(flac({ rate: 44_100, channels: 2, bits: 16, samples: 44_100 * 90 }))).toBe(90_000);
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 30 * 60 }))).toBe(1_800_000);
+    expect(measureAudioMs(flac({ rate: 48_000, channels: 1, bits: 24, samples: 48_000 * 5 * 3600 }))).toBe(18_000_000); // a sample count above 2^32 (36 bits)
+    // the header claims 10 s but the file holds 1.6 MB of 16 kHz mono 16-bit (>= 50 s at the raw ceiling): the size floor wins
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 10, extra: 1_600_000 }))).toBeGreaterThan(45_000);
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 0 }))).toBeNull();
+    expect(measureAudioMs(new Uint8Array([0x66, 0x4c, 0x61, 0x43, 0x01, 0, 0, 0x22, ...new Array(40).fill(0)]))).toBeNull(); // first block is not STREAMINFO
+  });
+
   it("nothing readable -> null (the caller refuses, it does not guess)", () => {
     expect(measureAudioMs(new Uint8Array(0))).toBeNull();
     expect(measureAudioMs(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))).toBeNull();
