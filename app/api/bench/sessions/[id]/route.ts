@@ -15,7 +15,8 @@ import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
-import { benchAdminGuard, findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, splitChunksBySource } from "@/lib/bench";
+import { guardSessionSpan } from "@/lib/room-access/check";
+import { benchAdminGuard, endBenchSession, findBenchSession, pauseBenchSession, resumeBenchSession, setBenchSessionNotes, listBenchChunks, listBenchConsultMarks, listBenchEvents, splitChunksBySource } from "@/lib/bench";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,15 +48,9 @@ export async function PATCH(
 
   try {
     if (action === "pause") {
-      await sql`
-        UPDATE bench_session SET status = 'paused'
-         WHERE id = ${id} AND room_id = ${claims.room_id} AND status = 'recording'
-      `;
+      await pauseBenchSession(id, claims.room_id);
     } else if (action === "resume") {
-      await sql`
-        UPDATE bench_session SET status = 'recording'
-         WHERE id = ${id} AND room_id = ${claims.room_id} AND status = 'paused'
-      `;
+      await resumeBenchSession(id, claims.room_id);
     } else if (action === "end") {
       // ── §3.3 / Build 2 §2.5 — THE END TIME IS THE END OF THE AUDIO, not a clock reading ────
       //
@@ -78,24 +73,12 @@ export async function PATCH(
       // the final piece is often still in flight and the end lands on the piece before it. That
       // is at most one rotation early. It cannot trip the ended-disagrees alarm, which compares
       // CAPTURE times: a flush piece began before the end by construction.
-      await sql`
-        UPDATE bench_session s
-           SET status = 'ended',
-               ended_at = COALESCE(
-                 (SELECT MAX(c.ended_at) FROM bench_chunk c
-                   WHERE c.session_id = s.id AND c.upload_state = 'verified'),
-                 NOW()
-               )
-         WHERE s.id = ${id} AND s.room_id = ${claims.room_id} AND s.status <> 'ended'
-      `;
+      await endBenchSession(id, claims.room_id);
     } else if (action != null) {
       return respondError("VALIDATION_FAILED", "unknown_action");
     }
     if (notes !== undefined) {
-      await sql`
-        UPDATE bench_session SET notes = ${notes || null}
-         WHERE id = ${id} AND room_id = ${claims.room_id}
-      `;
+      await setBenchSessionNotes(id, claims.room_id, notes || null);
     }
   } catch (e) {
     return respondError("UPSTREAM_UNAVAILABLE", String(e).slice(0, 150));
@@ -113,6 +96,8 @@ export async function GET(
   if (!g.ok) return respondError(g.code, g.msg);
   if (!id.startsWith("bs_")) return respondError("VALIDATION_FAILED", "bad_session_id");
 
+  // G-2: a session of a held-out (room, IST day), or with a held-out window placement, is not served (chunks, events, marks)
+  if ((await guardSessionSpan(id)) === "blind_room_day") return respondError("FORBIDDEN", "blind_room_day");
   const session = await findBenchSession(id);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
   const all = await listBenchChunks(id);

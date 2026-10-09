@@ -217,11 +217,14 @@ describe("e. the listing SQL", () => {
   it("excludes the blind pairs (from the constant) and requires grid_aligned, oldest first", async () => {
     const { listCliplessWindows } = await import("@/lib/stt/join-only");
     await listCliplessWindows({ limit: 5, includeTranscriptDisabled: true });
-    const q = H.statements[0];
+    // the DRAIN-GUARD blind-id lookup (room-access) runs first; the listing is the statement that selects the candidate windows
+    const qi = H.statements.findIndex((t) => /SELECT w\.id AS window_id/.test(t));
+    expect(qi).toBeGreaterThanOrEqual(0);
+    const q = H.statements[qi]!;
     expect(q).toMatch(/w\.grid_aligned = TRUE/);
     expect(q).toMatch(/NOT EXISTS[\s\S]*unnest\(\?::text\[\], \?::text\[\]\)[\s\S]*d\.ist_date::text[\s\S]*d\.room_id/);
     expect(q).toMatch(/\(w\.end_ms - w\.start_ms\) <= \?/);   // L2a: D2 cap, parameter = JOIN_MAX_MS
-    expect(H.params[0]).toContain(JOIN_MAX_MS);
+    expect(H.params[qi]).toContain(JOIN_MAX_MS);
     expect(q).toMatch(/EXISTS \(SELECT 1 FROM bench_chunk c WHERE c\.session_id = w\.session_id\)/);   // L2b
     expect(q).toMatch(/ORDER BY w\.start_ms ASC/);
     expect(q).not.toMatch(/room_[a-z0-9]{8}/);   // no hand-copied pair in the text

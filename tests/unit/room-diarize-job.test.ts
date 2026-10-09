@@ -26,6 +26,7 @@ vi.mock("@/lib/db", () => ({
     return Promise.resolve(next ?? []);
   },
 }));
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...(await orig<Record<string, unknown>>()), blindWindowIds: async () => [] as string[] })); // DRAIN-GUARD: blindness is proven in drain-guard-pg.test.ts
 vi.mock("@/lib/jobs/submit", () => ({
   submitJob: async (i: Record<string, unknown>) => { submitted.push(i); return { id: `job_${submitted.length}` }; },
 }));

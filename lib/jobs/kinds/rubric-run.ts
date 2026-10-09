@@ -16,7 +16,7 @@ import { RUBRIC_UNITS, type RubricUnit } from "@/lib/rubrics/types";
 import { evaluateUnit, resolveUnits } from "@/lib/rubrics/engines";
 import { countingCalls, talliedCalls } from "@/lib/rubrics/llm";
 import { finishRun, insertRun, newRunId, upsertResult, writeEvidence } from "@/lib/rubrics/store";
-import { perUnitHeldOut } from "../held-out";
+import { perUnitHeldOut } from "@/lib/room-access/jobs";
 
 export const RUBRIC_RUN_KIND = "rubric_run";
 export const RUBRIC_RUN_MAX_UNITS = 500;

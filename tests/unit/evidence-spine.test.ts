@@ -212,13 +212,13 @@ describe("the spend ledger counts unknown cost apart from zero cost", () => {
   });
 
   it("the SQL separates the two with a FILTER rather than trusting SUM over NULLs", () => {
-    const src = readFileSync("app/api/admin/stt-spend/route.ts", "utf8");
+    const src = readFileSync("lib/room-access/tool-reads.ts", "utf8");
     expect(src).toContain("FILTER (WHERE r.cost_usd IS NULL)");
     expect(src).toContain("COALESCE(SUM(r.cost_usd), 0)");
   });
 
   it("it groups on the IST clinic date, not the UTC date", () => {
-    const src = readFileSync("app/api/admin/stt-spend/route.ts", "utf8");
+    const src = readFileSync("lib/room-access/tool-reads.ts", "utf8");
     expect(src).toContain("Asia/Kolkata");
   });
 });

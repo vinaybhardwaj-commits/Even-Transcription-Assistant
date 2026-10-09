@@ -341,7 +341,4 @@ async function speechRegionsAt(
   }
 }
 
-/** The R2 key for a window's speech-only file. Derived from ids only; deleted when the job finishes. */
-export function trimmedAudioKey(windowId: string, runId: string): string {
-  return `vad-trim/${windowId}/${runId}.wav`;
-}
+export { trimmedAudioKey } from "@/lib/room-access/keys";

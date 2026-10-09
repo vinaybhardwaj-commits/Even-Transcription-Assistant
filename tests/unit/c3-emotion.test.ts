@@ -37,7 +37,7 @@ describe("the two emotion gates", () => {
   });
 
   it("ALLOWLISTED: canSurfaceEmotion is called ONLY by the S1 room-day tape read path", () => {
-    const ALLOWED = ["lib/room-day/admin.ts"];
+    const ALLOWED = ["lib/room-access/room-day-admin.ts"];
     const callers = repoFiles()
       .filter((f) => /^(lib|app)\//.test(f) && f !== "lib/emotion/gate.ts")
       .filter((f) => /\bcanSurfaceEmotion\s*\(/.test(textOf(f) ?? ""));

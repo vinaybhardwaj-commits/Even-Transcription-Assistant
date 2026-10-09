@@ -37,7 +37,7 @@ import { SETTING } from "@/lib/jev/prompts/arm-d-v1";
 import { ROLE_PROMPT_VERSION, ROLE_QUESTION_ID, roleQid } from "@/lib/jev/prompts/role-v1";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, type JobKind, type StepContext, type StepOutcome } from "../types";
-import { roomDayArgHeldOut, splitBlindWindows } from "../held-out";
+import { roomDayArgHeldOut, splitBlindWindows } from "@/lib/room-access/jobs";
 
 export const JEV_ROLE_KIND = "jev_role";
 const CHAR_FLOOR = 40;

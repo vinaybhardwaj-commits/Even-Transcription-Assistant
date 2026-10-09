@@ -242,7 +242,7 @@ describe("§3.1 — the doctor clock is hidden when no warehouse cue exists", ()
     const stripComments = (t: string) =>
       t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
     void stripComments;
-    for (const f of [["lib", "room-facts.ts"], ["lib", "admin", "room-reads.ts"]]) {
+    for (const f of [["lib", "room-facts.ts"], ["lib", "room-access", "admin-reads.ts"]]) {
       const text = code(...f);
       expect(text).not.toMatch(/warehouse silent/i);
       expect(text).not.toMatch(/no warehouse event/i);
@@ -436,7 +436,7 @@ describe("§3.6 — one shared source, and both surfaces call it", () => {
   const facts = code("lib", "room-facts.ts");
   const screen = code("lib", "admin", "rooms-live.ts");
   const door = code("lib", "mcp", "tools", "bench.ts");
-  const reads = code("lib", "admin", "room-reads.ts");
+  const reads = code("lib", "room-access", "admin-reads.ts");
 
   it("the shared module is PURE — a Postgres driver must never reach the browser", () => {
     // It is imported by the client component, so this is the same rule bench-bus-constants has.
@@ -550,7 +550,7 @@ describe("§4 — what this build was not allowed to change", () => {
   it("nothing in the build touches recording, uploading or storing audio", () => {
     // The one rule for this build. Asserted on the shared modules it introduced, which are the
     // only new code that could have reached the audio path.
-    for (const f of [["lib", "room-facts.ts"], ["lib", "admin", "room-reads.ts"]]) {
+    for (const f of [["lib", "room-facts.ts"], ["lib", "room-access", "admin-reads.ts"]]) {
       expect(code(...f)).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\b/);
     }
   });

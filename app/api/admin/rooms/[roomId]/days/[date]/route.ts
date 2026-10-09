@@ -8,6 +8,7 @@
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { getRoomDayTape } from "@/lib/room-day/admin";
+import { BlindRoomDayError } from "@/lib/rubrics/blind-room-days";
 import { respondOk, respondError } from "@/lib/respond";
 
 export const runtime = "nodejs";
@@ -33,7 +34,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ roomId:
   const { roomId, date } = await params;
   if (!IST_DATE_RE.test(date)) return respondError("VALIDATION_FAILED", "bad_ist_date");
 
-  const tape = await getRoomDayTape(roomId, date);
+  let tape;
+  try {
+    tape = await getRoomDayTape(roomId, date);
+  } catch (e) {
+    if (e instanceof BlindRoomDayError) return respondError("FORBIDDEN", "blind_room_day"); // G-3
+    throw e;
+  }
   if (!tape) return respondError("NOT_FOUND", "room_day_not_found");
 
   return respondOk({ tape });

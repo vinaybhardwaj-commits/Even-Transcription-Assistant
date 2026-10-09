@@ -40,6 +40,7 @@ vi.mock("@/lib/bench-join", () => ({
   roomsRecordingNow: async () => H.recording,
   joinServiceConfigured: () => H.configured,
 }));
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...(await orig<Record<string, unknown>>()), blindWindowIds: async () => [] as string[] })); // DRAIN-GUARD: blindness is proven in drain-guard-pg.test.ts
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...vals: unknown[]) => {
     H.queries.push(strings.join("?"));

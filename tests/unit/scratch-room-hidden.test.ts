@@ -112,7 +112,7 @@ function filterRooms(text: string, values: unknown[]): Row[] {
     const bound = values.filter((v) => v === SCRATCH_ROOM_PREFIX);
     expect(bound.length, `the prefix predicate in ${text} bound no prefix parameter`).toBeGreaterThan(0);
     const prefix = String(bound[0]);
-    const includeScratch = INCLUDE_SCRATCH.test(text) && values[0] === true;
+    const includeScratch = INCLUDE_SCRATCH.test(text) && values.find((v) => typeof v === "boolean") === true;
     if (!includeScratch) rows = rows.filter((r) => !String(r.id).startsWith(prefix));
   }
   return rows;

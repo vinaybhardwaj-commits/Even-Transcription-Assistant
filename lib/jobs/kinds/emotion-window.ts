@@ -31,7 +31,7 @@ import { dedupeSpanRows, finishEmotionWindow, recordEmotionFailureNarrow, record
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
-import { windowArgHeldOut } from "../held-out";
+import { windowArgHeldOut } from "@/lib/room-access/jobs";
 
 export const EMOTION_WINDOW_KIND = "emotion_window";
 const PRESIGN_SECONDS = 900;

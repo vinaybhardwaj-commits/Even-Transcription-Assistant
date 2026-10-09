@@ -35,7 +35,7 @@ import { ROUTE_ADAPTER_KEY } from "@/lib/stt/adapters/route";
 import { buildRouteMetrics, charsPerAudioSecond, readEngineOutcome } from "@/lib/stt/route-run";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
-import { clipKeyHeldOut } from "../held-out";
+import { clipKeyHeldOut } from "@/lib/room-access/jobs";
 
 const STEPS = { submit: "submit", poll: "poll" } as const;
 

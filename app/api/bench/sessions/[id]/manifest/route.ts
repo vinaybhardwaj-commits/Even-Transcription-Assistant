@@ -6,9 +6,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { respondError } from "@/lib/respond";
 import { benchAdminGuard, findBenchSession, listBenchEvents, splitChunksBySource, type BenchChunkRow } from "@/lib/bench";
-import { sql } from "@/lib/db";
+import { manifestChunkRows } from "@/lib/room-access/tool-reads";
 import { chunkBasename } from "@/lib/bench-dual";
 import { signGetUrl } from "@/lib/r2";
+import { guardSessionSpan } from "@/lib/room-access/check";
 import { hasBlindChunk, isBlindBenchSession } from "@/lib/bench-blind-guard";
 
 export const runtime = "nodejs";
@@ -26,17 +27,18 @@ export async function GET(
   const session = await findBenchSession(id);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
   if (isBlindBenchSession(session)) return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
+  // Same rule as get_session: ANY window of the session held out by ANY placement (bench, diarize, turn, window-text, emotion) or a span on a held-out day refuses the whole session, before any chunk read.
+  // A guard that cannot answer fails closed (503), never open.
+  try {
+    if ((await guardSessionSpan(id)) === "blind_room_day") return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
+  } catch {
+    return NextResponse.json({ ok: false, error: "db" }, { status: 503 });
+  }
   // Route-local read that does NOT swallow errors (listBenchChunks turns a failed read into []): a chunk
   // read that cannot be made must not look like a session with no chunks, or the blind-day scan below is skipped.
   let all: BenchChunkRow[];
   try {
-    all = (await sql`
-      SELECT id, idx, source, r2_key, content_type, started_at, ended_at, duration_ms,
-             size_bytes, upload_state, gap_before_ms, created_at
-        FROM bench_chunk
-       WHERE session_id = ${id}
-       ORDER BY (source = 'backup'), idx
-    `) as BenchChunkRow[];
+    all = (await manifestChunkRows(id)) as unknown as BenchChunkRow[];
   } catch {
     return NextResponse.json({ ok: false, error: "db" }, { status: 503 });
   }
@@ -94,7 +96,7 @@ export async function GET(
       notes: session.notes,
     },
     archive_policy:
-      "bench/ prefix is a permanent archive — exempt from retention policy and self-delete (Room-Bench PRD D6)",
+      "the bench audio prefix is a permanent archive — exempt from retention policy and self-delete (Room-Bench PRD D6)",
     chunks: withUrls, // primary stream (USB mic)
     gaps: withUrls
       .filter((c) => c.gap_before_ms >= 2000)

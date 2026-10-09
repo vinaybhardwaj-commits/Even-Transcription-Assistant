@@ -9,7 +9,8 @@
  * A missing table or column (SQLSTATE 42P01 / 42703) answers { not_collected: true, reason } for that view. No transcript text, no patient
  * identifier, no ticket signature or nonce, no storage key is returned.
  */
-import { windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
+import { windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
+import { windowDetailRow, windowRunSummaries, windowsStartingIn } from "@/lib/room-access/tool-reads";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
@@ -746,15 +747,7 @@ const WINDOW_SELECT_NOTE = "lab / REB fields are null until S5";
 async function oneWindow(windowId: string): Promise<Row> {
   // SWEEP (REL2-R3): a window with ANY held-out placement is not described (before its row, its drain jobs or its runs are read)
   if (await windowBlindAny(windowId)) return { ok: false, error: "blind_room_day", window_id: windowId };
-  const w = (await sql`
-    SELECT w.id, w.session_id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic, w.grid_aligned, w.state, w.closed_at, w.created_at,
-           w.auto_drain_refused_at, w.auto_drain_refused_reason, s.room_id, r.name AS room_name, s.started_at AS session_started_at
-      FROM bench_window w
-      JOIN bench_session s ON s.id = w.session_id
-      JOIN room r ON r.id = s.room_id
-     WHERE w.id = ${windowId}::text
-     LIMIT 1
-  `) as Row[];
+  const w = await windowDetailRow(windowId);
   if (w.length === 0) return { ok: false, error: "unknown_window", window_id: windowId };
   const win = w[0]!;
   const drain = (await sql`
@@ -772,14 +765,7 @@ async function oneWindow(windowId: string): Promise<Row> {
      LIMIT 20
   `) as Row[];
   // runs carry transcript text in their own columns; only its length is read here
-  const runs = (await sql`
-    SELECT id, encounter_id, engine, stt_engine_id, mode, tier, detected_language, latency_ms, cost_usd, error,
-           COALESCE(length(transcript_original), 0) AS original_chars, created_at
-      FROM transcription_run
-     WHERE subject_type = 'bench_window' AND subject_id = ${windowId}::text
-     ORDER BY created_at DESC
-     LIMIT 20
-  `) as Row[];
+  const runs = await windowRunSummaries(windowId);
   let hypo: Row;
   try {
     const h = (await sql`
@@ -824,14 +810,7 @@ async function dayWindows(roomId: string, day: string, limit: number): Promise<R
   // bench_window.start_ms is epoch ms (lib/bench-window.ts), so a window belongs to the IST day it STARTS in, whatever day its session started.
   const dayLo = Date.parse(`${day}T00:00:00+05:30`);
   const dayHi = dayLo + 86_400_000;
-  const rows = (await sql`
-    SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.source_mic, w.state, w.closed_at
-      FROM bench_window w
-      JOIN bench_session s ON s.id = w.session_id
-     WHERE s.room_id = ${roomId}::text AND w.start_ms >= ${dayLo}::bigint AND w.start_ms < ${dayHi}::bigint
-     ORDER BY w.start_ms
-     LIMIT ${limit + 1}
-  `) as Row[];
+  const rows = await windowsStartingIn(roomId, dayLo, dayHi, limit + 1);
   // SWEEP (REL2-R3): windows that START on a clean day but carry a held-out placement are left out and counted
   const blindIds = await windowsBlindAny(rows.slice(0, limit).map((r) => String(r.id)));
   const kept = rows.slice(0, limit).filter((r) => !blindIds.has(String(r.id)));

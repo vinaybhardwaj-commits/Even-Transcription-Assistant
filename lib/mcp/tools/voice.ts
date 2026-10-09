@@ -30,7 +30,8 @@ import { probePyannote } from "./health";
 import { pickIstDate, resolveRoom } from "./brain";
 import { voiceConsole } from "./voice-console";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { blockedSampleSources, roomDayIsBlind } from "@/lib/voice-blind";
+import { blockedSampleSources, roomDayIsBlind } from "@/lib/room-access/check";
+import { isBenchKey } from "@/lib/room-access/keys";
 
 const PRESIGN_SECONDS = 3600;
 
@@ -119,7 +120,7 @@ const listVoiceSamples: McpTool = {
             match_confidence: s.match_confidence,
           };
           if (!includeUrls || !s.audio_r2_key) return base;
-          if ((s.source_encounter_id && blocked.has(s.source_encounter_id)) || s.audio_r2_key.startsWith("bench/")) return { ...base, url_withheld: "blind_room_day" };
+          if ((s.source_encounter_id && blocked.has(s.source_encounter_id)) || isBenchKey(s.audio_r2_key)) return { ...base, url_withheld: "blind_room_day" };
           let url: string | null = null;
           try {
             url = await signGetUrl({ key: s.audio_r2_key, expiresInSeconds: PRESIGN_SECONDS, contentType: s.content_type ?? undefined });

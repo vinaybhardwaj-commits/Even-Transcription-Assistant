@@ -10,7 +10,7 @@ import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 
 const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
 const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
-import { sql } from "@/lib/db";
+import { rebIndexRows } from "@/lib/room-access/tool-reads";
 import { argBool, argInt, argStr, type McpTool, type ToolArgs } from "../registry";
 import { isRealDate, iso, notCollectedReason, pickRoom, roomRef } from "./s1";
 
@@ -67,22 +67,7 @@ const rebIndex: McpTool = {
     }
     const withShadow = argBool(args, "include_shadow");
     try {
-      const got = (await sql`
-        SELECT id, window_id, to_char(ist_date, 'YYYY-MM-DD') AS ist_date, room_id, t0_ms, t1_ms, layer, engine, model, version, config_hash, shadow,
-               status, reason, machine, r2_key, sha256, bytes, started_at, finished_at, indexed_at
-          FROM reb_track_index
-         WHERE id > ${cursor}
-           AND (${windowId}::text IS NULL OR window_id = ${windowId})
-           AND (${day}::text IS NULL OR ist_date = ${day}::date)
-           AND (${layer}::text IS NULL OR layer = ${layer})
-           AND (${engine}::text IS NULL OR engine = ${engine})
-           AND (${roomId}::text IS NULL OR room_id = ${roomId})
-           AND (${withShadow}::boolean OR shadow = false)
-           -- SWEEP (REL2-R3): an index row of a held-out (room, IST date) is never listed
-           AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = reb_track_index.ist_date AND b.r = reb_track_index.room_id)
-         ORDER BY id
-         LIMIT ${limit + 1}
-      `) as Row[];
+      const got = (await rebIndexRows({ cursor, windowId, day, layer, engine, roomId, withShadow, limit })) as Row[];
       const page = got.slice(0, limit);
       const rows = page.map((r) => ({
         ...r,

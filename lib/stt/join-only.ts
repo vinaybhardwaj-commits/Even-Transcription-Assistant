@@ -26,6 +26,7 @@
  */
 import { refuseIfTooLong, roomsRecordingNow, joinServiceConfigured, JOIN_MAX_MS } from "@/lib/bench-join";
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { isTranscriptEnabled } from "@/lib/room-switches";
 import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { joinClipForWindow, loadWindowContext } from "./room-drain";
@@ -163,6 +164,8 @@ export async function listCliplessWindows(opts: {
   includeTranscriptDisabled?: boolean;
 }): Promise<Array<{ window_id: string; transcript_enabled: boolean }>> {
   const include = opts.includeTranscriptDisabled === true;
+  const blind = await blindWindowIds(); // DRAIN-GUARD: a held-out window is never offered; n_blind_excluded = blind.length
+  if (blind.length > 0) console.log(`[join-only] list: n_blind_excluded ${blind.length}`);
   const limit = Math.max(1, Math.min(200, Math.trunc(opts.limit)));
   // The blind pairs come from the constant, never a hand copy; parallel arrays keep them parameters.
   const blindDays = BLIND_ROOM_DAYS.map(([day]) => day);
@@ -174,6 +177,7 @@ export async function listCliplessWindows(opts: {
       JOIN room r ON r.id = s.room_id
       JOIN room_day d ON d.id = w.room_day_id
      WHERE w.clip_r2_key IS NULL
+       AND w.id <> ALL(${blind}::text[])
        AND w.state = ${JOIN_ONLY_STATE}
        AND w.room_day_id IS NOT NULL
        AND w.grid_aligned = TRUE

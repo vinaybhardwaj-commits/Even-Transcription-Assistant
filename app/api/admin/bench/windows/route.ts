@@ -17,6 +17,7 @@
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
+import { adminSessionChunks, adminSessionWindows } from "@/lib/room-access/tool-reads";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -50,19 +51,13 @@ export async function GET(req: NextRequest) {
   const sessionId = new URL(req.url).searchParams.get("session_id") ?? "";
   if (!sessionId.startsWith("bs_")) return respondError("VALIDATION_FAILED", "session_id_required");
 
-  const rows = (await sql`
-    SELECT id, session_id, room_day_id, start_ms, end_ms, source_mic, clip_r2_key,
-           grid_aligned, state, closed_at, created_at
-      FROM bench_window WHERE session_id = ${sessionId}
-     ORDER BY start_ms ASC, source_mic ASC
-  `) as Array<Record<string, unknown>>;
+  const got = await adminSessionWindows(sessionId);
+  if ("error" in got) return respondError("FORBIDDEN", got.error);
+  const rows = got.rows;
 
   // The same pure evaluator the writer uses, so "why is this still open" is answered from the
   // chunks rather than inferred from the row.
-  const chunks = (await sql`
-    SELECT idx, source, started_at, ended_at, upload_state
-      FROM bench_chunk WHERE session_id = ${sessionId} ORDER BY source, idx
-  `) as WindowChunk[];
+  const chunks = (await adminSessionChunks(sessionId)) as WindowChunk[];
   const events = (await sql`
     SELECT id, kind, at, payload FROM bench_event WHERE session_id = ${sessionId} ORDER BY at ASC, id ASC
   `) as MicEventRow[];

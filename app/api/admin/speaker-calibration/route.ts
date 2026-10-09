@@ -25,15 +25,13 @@
  * there is no separate dry mode, because storing is what every run does. This route then reads
  * those rows. With none stored it says so by name rather than reporting an empty sweep as a finding.
  *
- * ALL SQL IS INFERRED. The read fails safe to empty with a logged reason — never a 500.
+ * ALL SQL IS INFERRED. FAIL CLOSED: a failed session or diarize read answers 503 {ok:false,error:"db"} and nothing is served; a held-out session is 403, an unknown one 404.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
-import { isBlindBenchSession } from "@/lib/bench-blind-guard";
-import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { adminDiarizeAnswers } from "@/lib/room-access/tool-reads";
 import {
   decodeEmbedding,
   sweepThreshold,
@@ -49,8 +47,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
-const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
 
 async function adminOrSecret(req: NextRequest): Promise<boolean> {
   const secret = process.env.MIGRATION_SECRET;
@@ -67,33 +63,22 @@ export async function GET(req: NextRequest) {
   if (!(await adminOrSecret(req))) return respondError("AUTH_REQUIRED", "admin or migration secret required");
 
   const sessionId = req.nextUrl.searchParams.get("session_id") || CALIBRATION_SESSION_ID;
-  // Fail CLOSED: a session that cannot be resolved serves nothing. Not found and a failed read are different facts.
-  let session: { room_id: string; started_at: string | Date; ended_at: string | Date | null } | undefined;
-  try {
-    session = ((await sql`SELECT room_id, started_at, ended_at FROM bench_session WHERE id = ${sessionId} LIMIT 1`) as Array<{ room_id: string; started_at: string | Date; ended_at: string | Date | null }>)[0];
-  } catch {
-    return NextResponse.json({ ok: false, error: "db" }, { status: 503 });
-  }
-  if (!session) return respondError("NOT_FOUND", "session_not_found");
-  if (isBlindBenchSession(session)) return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
   const errors: string[] = [];
   let rows: Array<{ window_id: string; speakers_json: unknown; ist_date?: string | null; room_id?: string | null }> = [];
 
+  // Fail CLOSED: a session that cannot be resolved serves nothing. Not found and a failed read are different facts. The reads live in lib/room-access (REL3-FU2 merge).
+  let got: Awaited<ReturnType<typeof adminDiarizeAnswers>>;
   try {
-    // INFERRED SQL #8 — the stored diarize answers for this session's windows. Joined through
-    // bench_window because room_diarize_window is keyed on the window, not the session.
-    rows = (await sql`
-      SELECT d.window_id, d.speakers_json, rd.ist_date::text AS ist_date, rd.room_id
-        FROM room_diarize_window d
-        JOIN bench_window w ON w.id = d.window_id
-        JOIN room_day rd ON rd.id = w.room_day_id
-       WHERE w.session_id = ${sessionId}
-         AND d.state = 'ok'
-         -- inner join: a window with no room_day cannot be judged, so it is not read. A blind (held-out) room-day's windows are never read, decided from the window's OWN room_day
-         AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
-       ORDER BY w.start_ms ASC
-    `) as typeof rows;
-    rows = rows.filter((r) => !!r.ist_date && !!r.room_id && !isBlindRoomDay(r.ist_date, r.room_id)); // belt and braces: a window with no room_day is excluded too
+    got = await adminDiarizeAnswers(sessionId);
+  } catch {
+    return NextResponse.json({ ok: false, error: "db" }, { status: 503 });
+  }
+  if ("error" in got) {
+    if (got.error === "session_not_found") return respondError("NOT_FOUND", "session_not_found");
+    return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
+  }
+  try {
+    rows = got.rows;
   } catch (e) {
     const msg = `[speaker-calibration] read failed: ${String((e as Error)?.message ?? e).slice(0, 200)} — degraded to empty`;
     console.log(msg);

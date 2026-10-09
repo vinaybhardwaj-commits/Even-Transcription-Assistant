@@ -417,7 +417,7 @@ describe("§2.1 D38 — an idle room reports itself, and the freshness window is
 // ===========================================================================
 
 describe("§2.5 — a session's end time comes from its last VERIFIED piece", () => {
-  const endRoute = code("app", "api", "bench", "sessions", "[id]", "route.ts");
+  const endRoute = code("lib", "room-access", "bench.ts"); // G-2: the end-of-session SQL moved out of the route into lib/room-access (endBenchSession)
   const orphan = code("lib", "bench-orphan.ts");
 
   it("the normal end path takes it from the tape, not from a clock reading", () => {

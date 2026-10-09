@@ -12,6 +12,7 @@ import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 
 const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
 const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
+import { tapeDayRows, tapeDaySegments } from "@/lib/room-access/tool-reads";
 import { sql } from "@/lib/db";
 import { listCommands } from "@/lib/bench-commands";
 import { buildSnapshot } from "@/lib/rooms-live/snapshot";
@@ -293,8 +294,8 @@ const DAY_COLUMNS = "room_id, ist_day, min_off, min_muted, min_zero_all_day, min
 const tapeDay: McpTool = {
   name: "scribe_tape_day",
   description:
-    "One IST day of room-audio state, read-only; touches no room: per-room minutes by state (off, muted, zero all day, present, gated, withheld), consult minutes usable / uncertain / lost, and the consult count, from room_audio_day. " +
-    "`room` (id, slug or name) narrows to one room; include_segments adds that room's state intervals from room_audio_state (needs `room`). The classifier writes about an hour behind; `as_of` says how far. Read-only: CONSULT's classifier writes these tables, this tool never does. Times UTC.",
+    "One IST day of room-audio state, read-only; touches no room: per-room minutes by state (off, muted, zero all day, present, gated, withheld), consult minutes usable / uncertain / lost, and the consult count, from the room-audio day table. " +
+    "`room` (id, slug or name) narrows to one room; include_segments adds that room's state intervals (the room-audio state table; needs `room`). The classifier writes about an hour behind; `as_of` says how far. Read-only: CONSULT's classifier writes these tables, this tool never does. Times UTC.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -322,20 +323,7 @@ const tapeDay: McpTool = {
     // SWEEP (REL2-R3): a named held-out (room, date) is refused before any read; an unnamed room lists the other rooms and says how many held-out ones it left out
     if (roomId && isBlindRoomDay(day, roomId)) return { ok: false, error: "blind_room_day" };
     try {
-      const rows = (await sql`
-        SELECT room_id, ist_day, min_off, min_muted, min_zero_all_day, min_present, min_gated, min_withheld,
-               consult_min_usable, consult_min_uncertain, consult_min_lost, n_consults, classifier_version, written_at
-          FROM room_audio_day
-         WHERE ist_day = ${day}::date AND (${roomId}::text IS NULL OR room_id = ${roomId}::text)
-           AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = room_audio_day.ist_day AND b.r = room_audio_day.room_id)
-         ORDER BY room_id
-         LIMIT 100
-      `) as Array<Record<string, unknown>>;
-      const blindN = (await sql`
-        SELECT count(*)::int AS n FROM room_audio_day
-         WHERE ist_day = ${day}::date AND EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = room_audio_day.ist_day AND b.r = room_audio_day.room_id)
-      `) as Array<{ n: number }>;
-      const nBlind = Number(blindN[0]?.n ?? 0);
+      const { rows, nBlind } = await tapeDayRows(day, roomId);
       const num = (v: unknown): number => Number(v ?? 0);
       const out: Record<string, unknown> = {
         ok: true,
@@ -361,13 +349,7 @@ const tapeDay: McpTool = {
       };
       if (argBool(args, "include_segments")) {
         if (!roomId) return { ...out, segments_error: "room_required_for_segments" };
-        const seg = (await sql`
-          SELECT state, ts_start, ts_end
-            FROM room_audio_state
-           WHERE room_id = ${roomId}::text AND ist_day = ${day}::date
-           ORDER BY ts_start
-           LIMIT ${SEGMENTS_MAX}
-        `) as Array<Record<string, unknown>>;
+        const seg = await tapeDaySegments(roomId, day, SEGMENTS_MAX);
         out.segments = seg.map((s) => ({ state: String(s.state), start: iso(s.ts_start), end: iso(s.ts_end) }));
         out.segments_truncated = seg.length >= SEGMENTS_MAX;
       }

@@ -36,6 +36,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { deleteObject, getObjectBytes } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
@@ -1787,11 +1788,14 @@ export async function drainRoomWaitingWindows(
   const problem = actorProblem(actor);
   if (problem) return [{ window_id: "", ok: false, step: "no_actor", detail: problem }];
   const n = Math.max(1, Math.min(12, Math.trunc(limit) || 4));
+  const blind = await blindWindowIds(); // DRAIN-GUARD: held-out windows are left out BEFORE the LIMIT (n_blind_excluded = blind.length)
+  if (blind.length > 0) console.log(`[room-drain] waiting-windows scan: n_blind_excluded ${blind.length}`);
   const rows = (await sql`
     SELECT w.id
       FROM bench_window w
       JOIN bench_session s ON s.id = w.session_id
      WHERE s.room_id = ${roomId}
+       AND w.id <> ALL(${blind}::text[])
        AND w.state = 'closed'
        AND w.grid_aligned = TRUE
        AND w.room_day_id IS NOT NULL
@@ -1844,12 +1848,15 @@ export async function drainQueuedRoomWindows(
 ): Promise<DrainOutcome[]> {
   const problem = actorProblem(actor);
   if (problem) return [{ window_id: "", ok: false, step: "no_actor", detail: problem }];
+  const blind = await blindWindowIds(); // DRAIN-GUARD: held-out windows are left out BEFORE the LIMIT (n_blind_excluded = blind.length)
+  if (blind.length > 0) console.log(`[room-drain] queued-windows scan: n_blind_excluded ${blind.length}`);
   const jobs = (await sql`
     SELECT j.subject_id, s.room_id
       FROM stt_subject_job j
       JOIN bench_window w ON w.id = j.subject_id
       JOIN bench_session s ON s.id = w.session_id
      WHERE j.subject_type = 'bench_window' AND j.tier = 'asr' AND j.state = 'queued'
+       AND w.id <> ALL(${blind}::text[])
        AND j.attempts < ${DRAIN_MAX_ATTEMPTS}
      ORDER BY j.queued_at ASC
      LIMIT ${Math.max(1, Math.min(50, limit))}

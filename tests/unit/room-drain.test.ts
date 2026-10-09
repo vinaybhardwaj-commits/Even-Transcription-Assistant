@@ -272,7 +272,7 @@ describe("a refused cue post fails the window", () => {
  * way that looks like data".
  */
 describe("the leaderboard filters by subject kind", () => {
-  const src = codeOf("lib/stt/leaderboard.ts");
+  const src = codeOf("lib/room-access/stt-leaderboard.ts");
 
   it("the query filters on subject_type", () => {
     expect(src).toContain("${subjectKind} = 'all' OR tr.subject_type = ${subjectKind}");

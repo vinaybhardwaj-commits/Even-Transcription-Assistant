@@ -28,6 +28,7 @@ import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
 import { buildLedger, type SpendRow } from "@/lib/stt/window-leaderboard";
+import { sttSpendRaw } from "@/lib/room-access/tool-reads";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,24 +49,16 @@ export async function GET(req: NextRequest) {
   if (!(await adminOrSecret(req))) return respondError("AUTH_REQUIRED", "admin or migration secret required");
   const errors: string[] = [];
   let rows: SpendRow[] = [];
+  let nBlindExcluded = 0;
 
   try {
     // INFERRED SQL #7. COALESCE(SUM(...), 0) makes an all-null day report 0 rather than NULL, and
     // the FILTER count beside it is what stops that 0 being read as "free". Grouped on the IST
     // clinic date, not UTC: a clinic day is what an operator is accountable for, and a run at
     // 00:15 IST belongs to the day the clinic was open, not to the previous UTC date.
-    const raw = (await sql`
-      SELECT r.initiated_by,
-             r.initiated_via,
-             to_char((r.created_at AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS day,
-             COUNT(*)::int AS n_runs,
-             COALESCE(SUM(r.cost_usd), 0)::float8 AS cost_usd_total,
-             COUNT(*) FILTER (WHERE r.cost_usd IS NULL)::int AS cost_unreported_runs
-        FROM transcription_run r
-       WHERE r.subject_type = 'bench_window'
-       GROUP BY r.initiated_by, r.initiated_via, (r.created_at AT TIME ZONE 'Asia/Kolkata')::date
-       ORDER BY day DESC, r.initiated_by NULLS LAST
-    `) as Array<Record<string, unknown>>;
+    const spend = await sttSpendRaw();
+    const raw = spend.raw;
+    nBlindExcluded = spend.nBlindExcluded;
     rows = buildLedger(raw);
   } catch (e) {
     const msg = `[spend] read failed: ${String((e as Error)?.message ?? e).slice(0, 200)} — degraded to empty ledger`;
@@ -86,5 +79,6 @@ export async function GET(req: NextRequest) {
       ? "cost_usd_total EXCLUDES runs whose engine reported no cost; Sarvam reports none on any branch, so a total of 0 beside a non-zero cost_unreported_runs means unknown spend, never zero spend"
       : null,
     errors,
+    n_blind_excluded: nBlindExcluded,
   });
 }

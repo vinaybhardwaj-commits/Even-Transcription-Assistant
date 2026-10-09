@@ -19,7 +19,7 @@ describe("K4 pins", () => {
     await expect(import("@/lib/jobs/kinds")).resolves.toBeTruthy();
   });
   it("windowHeldOut itself checks windowBlindAny: a window whose session span and session windows look clean but which has a held-out placement is blind_room_day", async () => {
-    const { windowHeldOut } = await import("@/lib/jobs/held-out");
+    const { windowHeldOut } = await import("@/lib/room-access/jobs");
     answer = (t) => {
       if (/FROM bench_window WHERE id/.test(t)) return [{ session_id: "bs_1", start_ms: 1, end_ms: 2 }];
       if (/SELECT \( EXISTS/.test(t)) return [{ blind: true }];

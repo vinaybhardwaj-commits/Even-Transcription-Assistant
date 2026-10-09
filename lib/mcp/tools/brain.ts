@@ -25,6 +25,7 @@
 
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
+import { roomsWithLastSession } from "@/lib/room-access/tool-reads";
 import { getPool, TOKEN_ENV } from "@/lib/brain/db";
 import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { CUES_DEFAULT_LIMIT, CUES_MAX_LIMIT, decodeCueCursor, findRoomDay, isIstDateString, istDate, listCuesForDay, readGraph, roomExists } from "@/lib/brain/state";
@@ -98,21 +99,7 @@ const listRooms: McpTool = {
       // filter. `_` is a single-character wildcard in LIKE, so the prefix is matched with
       // left()/length() rather than a pattern — no ESCAPE clause to get wrong, and the
       // prefix comes from the one exported constant so it cannot drift.
-      const rows = (await sql`
-        SELECT r.id, r.slug, r.name, r.created_at, r.disabled_at,
-               ls.started_at AS last_session_at, ls.status AS last_session_status
-          FROM room r
-          LEFT JOIN LATERAL (
-            SELECT started_at, status
-              FROM bench_session
-             WHERE room_id = r.id
-             ORDER BY started_at DESC
-             LIMIT 1
-          ) ls ON true
-         WHERE ${includeScratch}::boolean
-            OR left(r.id, length(${SCRATCH_ROOM_PREFIX}::text)) <> ${SCRATCH_ROOM_PREFIX}::text
-         ORDER BY r.created_at
-      `) as Array<{ id: string; slug: string; name: string; created_at: string | Date; disabled_at: string | Date | null; last_session_at: string | Date | null; last_session_status: string | null }>;
+      const rows = (await roomsWithLastSession(includeScratch, SCRATCH_ROOM_PREFIX)) as Array<{ id: string; slug: string; name: string; created_at: string | Date; disabled_at: string | Date | null; last_session_at: string | Date | null; last_session_status: string | null }>;
       return {
         include_scratch: includeScratch,
         rooms: rows.map((r) => ({

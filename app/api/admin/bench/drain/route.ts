@@ -14,6 +14,7 @@
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
+import { adminDrainRows } from "@/lib/room-access/tool-reads";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -42,24 +43,10 @@ export async function GET(req: NextRequest) {
   const sessionId = sp.get("session_id") ?? "";
   if (!sessionId.startsWith("bs_")) return respondError("VALIDATION_FAILED", "session_id_required");
 
-  const rows = (await sql`
-    SELECT w.id, w.start_ms, w.end_ms, w.source_mic, w.state, w.clip_r2_key, w.room_day_id,
-           w.grid_aligned,
-           j.state AS job_state, j.attempts, j.last_error,
-           r.id AS run_id, r.engine, r.stt_engine_id, r.detected_language,
-           r.latency_ms, r.metrics_json,
-           length(r.transcript_original) AS transcript_chars
-      FROM bench_window w
-      LEFT JOIN stt_subject_job j
-             ON j.subject_type = 'bench_window' AND j.subject_id = w.id AND j.tier = 'asr'
-      LEFT JOIN transcription_run r
-             ON r.subject_type = 'bench_window' AND r.subject_id = w.id
-     WHERE w.session_id = ${sessionId}
-     ORDER BY w.start_ms ASC, w.source_mic ASC
-  `) as Array<Record<string, unknown>>;
-
-  const srows = (await sql`SELECT room_id FROM bench_session WHERE id = ${sessionId} LIMIT 1`) as Array<{ room_id: string }>;
-  const roomId = srows[0]?.room_id ?? null;
+  const got = await adminDrainRows(sessionId);
+  if ("error" in got) return respondError("FORBIDDEN", got.error);
+  const rows = got.rows;
+  const roomId = got.roomId;
 
   return respondOk({
     session_id: sessionId,

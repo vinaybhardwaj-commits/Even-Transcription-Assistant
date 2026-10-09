@@ -7,8 +7,9 @@
  * Read-only. Transcript text of runs is returned only with include_text=true.
  */
 
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
-import { guardRoomDay, guardWindow, roomDayIsBlind, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
+import { benchWindowRow, listSttRunSubjects, readTurnSpans, routeTripwireData } from "@/lib/room-access/stt-reads";
+import { runSubjectKinds, sttRunsFor } from "@/lib/room-access/tool-reads";
+import { guardRoomDay, guardWindow, roomDayIsBlind, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
@@ -126,32 +127,7 @@ const listSttRuns: McpTool = {
       const includeIdentity = argBool(args, "include_identity");
       // Still the same query as app/api/admin/stt-lab/runs/route.ts GET — subject-driven,
       // LEFT JOINing outwards so a run with no encounter appears rather than vanishing.
-      const rows = (await sql`
-        SELECT tr.subject_type, tr.subject_id, tr.subject_id AS id,
-               e.patient_label_raw, e.recorded_at, e.detected_language, e.note_type,
-               bw.start_ms AS window_start_ms, bw.end_ms AS window_end_ms,
-               bw.source_mic AS window_source_mic, bw.session_id AS window_session_id,
-               COUNT(DISTINCT tr.engine)::int AS engines,
-               COUNT(*) FILTER (WHERE tr.error IS NOT NULL)::int AS errored,
-               (SELECT w.engine FROM transcription_run w
-                 WHERE w.subject_type = tr.subject_type AND w.subject_id = tr.subject_id
-                   AND w.mode='batch' AND w.tier='asr' AND w.is_winner LIMIT 1) AS winner,
-               (tr.subject_type = 'encounter'
-                 AND EXISTS(SELECT 1 FROM stt_gold g WHERE g.encounter_id = tr.subject_id)) AS has_gold,
-               ROUND(AVG(tr.judge_score)::numeric, 2)::float8 AS avg_judge
-          FROM transcription_run tr
-          LEFT JOIN encounter e ON e.id = tr.encounter_id
-          LEFT JOIN bench_window bw ON tr.subject_type = 'bench_window' AND bw.id = tr.subject_id
-         WHERE tr.mode='batch' AND tr.tier='asr'
-         GROUP BY tr.subject_type, tr.subject_id, e.patient_label_raw, e.recorded_at,
-                  e.detected_language, e.note_type, bw.start_ms, bw.end_ms, bw.source_mic, bw.session_id
-         ORDER BY COALESCE(e.recorded_at, to_timestamp(bw.start_ms / 1000.0)) DESC NULLS LAST
-         LIMIT ${limit}
-      `) as Array<Record<string, unknown>>;
-      // SWEEP (REL2-R3): a run whose subject is a bench window with ANY held-out placement is not listed (counted)
-      const blindWins = await windowsBlindAny(rows.filter((r) => r.subject_type === "bench_window").map((r) => String(r.subject_id)));
-      const visible = rows.filter((r) => !(r.subject_type === "bench_window" && blindWins.has(String(r.subject_id))));
-      const nBlindExcluded = rows.length - visible.length;
+      const { visible, nBlindExcluded } = await listSttRunSubjects(limit);
       const runs = visible.map((r) => {
         // C3 — the subject block is ALWAYS present, but it must not become a BACK DOOR onto the
         // patient label. subjectLabel() prefers patient_label_raw for an encounter, so without
@@ -187,20 +163,14 @@ const getSttRun: McpTool = {
       const includeIdentity = argBool(args, "include_identity");
       // Same shape as app/api/admin/stt-lab/runs/[id]/route.ts GET: ask the runs what kind of
       // subject this is, then LEFT JOIN outwards. Neither lookup is required to hit.
-      const kindRows = (await sql`SELECT DISTINCT subject_type FROM transcription_run WHERE subject_id = ${id} LIMIT 2`) as Array<{ subject_type: string }>;
+      const kindRows = await runSubjectKinds(id);
       const subjectType = kindRows[0]?.subject_type ?? (id.startsWith("enc_") ? "encounter" : "bench_window");
       const enc = (await sql`SELECT id, patient_label_raw, recorded_at, detected_language, note_type FROM encounter WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
-      const win = (await sql`SELECT id, session_id, start_ms, end_ms, source_mic, state FROM bench_window WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
+      const win = await benchWindowRow(id);
       if (!enc[0] && !win[0] && kindRows.length === 0) return { encounter: null, runs: [], gold: null, error: "subject_not_found" };
       // SWEEP (REL2-R3): a bench window with ANY held-out placement: its transcript runs are not served (checked before the runs, the transcripts and the gold are read)
       if (win[0] && (await windowBlindAny(id))) return { encounter: null, runs: [], gold: null, error: "blind_room_day" };
-      const runs = (await sql`
-        SELECT engine, tier, transcript_english, transcript_original, note_text, latency_ms, error,
-               judge_score, agreement_score, wer, cer, med_term_recall, is_winner, metrics_json
-          FROM transcription_run
-         WHERE subject_id = ${id} AND mode='batch'
-         ORDER BY tier, is_winner DESC, engine
-      `) as Array<Record<string, unknown>>;
+      const runs = await sttRunsFor(id);
       const gold = (await sql`SELECT reference_original, reference_english, reference_language, critical_terms_json, terms_model FROM stt_gold WHERE encounter_id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       const { patient_label_raw, ...encRest } = enc[0] ?? ({} as Record<string, unknown>);
       const subject = subjectOf({
@@ -263,9 +233,6 @@ const getSttRun: McpTool = {
  * It reports per ENGINE, side by side, because every one of these is only meaningful as a
  * before-and-after — a number for `route` alone answers nothing.
  */
-const BLIND_DAYS_ARG = BLIND_ROOM_DAYS.map(([d]) => d);
-const BLIND_ROOMS_ARG = BLIND_ROOM_DAYS.map(([, r]) => r);
-
 const routeTripwires: McpTool = {
   name: "scribe_route_tripwires",
   description:
@@ -289,88 +256,7 @@ const routeTripwires: McpTool = {
       // no timeline — otherwise the one number meant to be comparable would not be.
       //
       // audio_seconds is read out of metrics_json, where the room drain has always written it.
-      const rows = (await sql`
-        SELECT tr.engine,
-               COUNT(*)::int AS runs,
-               COUNT(*) FILTER (WHERE tr.error IS NOT NULL)::int AS errors,
-               COUNT(*) FILTER (WHERE tr.error IS NULL
-                                  AND COALESCE(length(COALESCE(tr.transcript_original, tr.transcript_english, '')), 0) = 0)::int AS empty_runs,
-               SUM(COALESCE(length(COALESCE(tr.transcript_original, tr.transcript_english, '')), 0))::bigint AS chars,
-               SUM(COALESCE((tr.metrics_json->>'audio_seconds')::float8, 0))::float8 AS audio_seconds,
-               COUNT(*) FILTER (WHERE tr.metrics_json ? 'language_timeline')::int AS runs_with_timeline
-          FROM transcription_run tr
-         WHERE tr.subject_type = 'bench_window'
-           AND tr.mode = 'batch' AND tr.tier = 'asr'
-           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
-           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
-           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
-                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
-                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
-                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
-                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
-         GROUP BY tr.engine
-         ORDER BY tr.engine
-      `) as Array<{ engine: string; runs: number; errors: number; empty_runs: number; chars: string | number; audio_seconds: number | null; runs_with_timeline: number }>;
-
-      // The two per-span mixes. Precomputed at write time into the same key, so this sums small
-      // objects instead of unnesting every span of every run in the window.
-      const mixes = (await sql`
-        SELECT tr.engine,
-               COALESCE(SUM((tr.metrics_json->'language_timeline'->>'span_count')::int), 0)::int AS spans,
-               jsonb_object_agg(k.key, k.total) FILTER (WHERE k.key IS NOT NULL) AS engine_mix
-          FROM transcription_run tr
-          LEFT JOIN LATERAL (
-                 SELECT e.key, SUM(e.value::int)::int AS total
-                   FROM jsonb_each_text(COALESCE(tr.metrics_json->'language_timeline'->'engine_mix', '{}'::jsonb)) e
-                  GROUP BY e.key
-               ) k ON TRUE
-         WHERE tr.subject_type = 'bench_window'
-           AND tr.mode = 'batch' AND tr.tier = 'asr'
-           AND tr.metrics_json ? 'language_timeline'
-           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
-           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
-           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
-                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
-                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
-                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
-                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
-         GROUP BY tr.engine
-      `) as Array<{ engine: string; spans: number; engine_mix: Record<string, number> | null }>;
-
-      const langMixes = (await sql`
-        SELECT tr.engine,
-               jsonb_object_agg(k.key, k.total) FILTER (WHERE k.key IS NOT NULL) AS language_mix
-          FROM transcription_run tr
-          LEFT JOIN LATERAL (
-                 SELECT e.key, SUM(e.value::int)::int AS total
-                   FROM jsonb_each_text(COALESCE(tr.metrics_json->'language_timeline'->'language_mix', '{}'::jsonb)) e
-                  GROUP BY e.key
-               ) k ON TRUE
-         WHERE tr.subject_type = 'bench_window'
-           AND tr.mode = 'batch' AND tr.tier = 'asr'
-           AND tr.metrics_json ? 'language_timeline'
-           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
-           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
-           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
-                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
-                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
-                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
-                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
-         GROUP BY tr.engine
-      `) as Array<{ engine: string; language_mix: Record<string, number> | null }>;
-
-      // K3-4: runs of a window with ANY held-out placement are left out of every figure above and counted here
-      const blindN = (await sql`
-        SELECT COUNT(*)::int AS n FROM transcription_run tr
-         WHERE tr.subject_type = 'bench_window' AND tr.mode = 'batch' AND tr.tier = 'asr'
-           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
-           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
-           AND EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
-                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
-                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
-                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
-                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
-      `) as Array<{ n: number }>;
+      const { rows, mixes, langMixes, blindN } = await routeTripwireData(days, engine);
 
       const spanBy = new Map(mixes.map((m) => [m.engine, m]));
       const langBy = new Map(langMixes.map((m) => [m.engine, m.language_mix]));
@@ -442,21 +328,9 @@ const roomTurnSpeakers: McpTool = {
       const roomDayId = argStr(args, "room_day_id", 64);
       const limit = argInt(args, "limit", 200, 1, 500);
       if (!windowId && !roomDayId) return { error: "window_id or room_day_id is required", spans: [], summary: {} };
-      // S6-BLIND: placement first, content after. A held-out room-day is refused blind_room_day and an unplaced window window_unplaced, before room_turn_speaker is read.
-      if (windowId) { const g = await guardWindow(windowId); if (g) return { error: g, spans: [], summary: {} }; }
-      if (roomDayId) { const g = await guardRoomDay(roomDayId); if (g) return { error: g, spans: [], summary: {} }; }
-      // B1: each turn row has placements of its own (rts.room_day_id) besides its window's: if ANY row asked for is held out by ANY of them, the whole answer is refused (fail closed), before a span is read
-      if ((await rtsBlindRows({ windowId, roomDayId })) > 0) return { error: "blind_room_day", spans: [], summary: {} };
-
-      const spans = (await sql`
-        SELECT window_id, source_ref, speaker_idx, overlap_ms, room_day_id,
-               clinician_id, role, match_confidence, created_at
-          FROM room_turn_speaker
-         WHERE (${windowId ?? null}::text IS NULL OR window_id = ${windowId ?? null})
-           AND (${roomDayId ?? null}::text IS NULL OR room_day_id = ${roomDayId ?? null})
-         ORDER BY window_id, source_ref
-         LIMIT ${limit}
-      `) as Array<{ speaker_idx: number; role: string | null; clinician_id: string | null }>;
+      const got = await readTurnSpans({ windowId, roomDayId, limit });
+      if ("error" in got) return { error: got.error, spans: [], summary: {} };
+      const spans = got.spans;
 
       // The summary answers the question the table exists for: how much of this is attributed?
       const attributed = spans.filter((r) => r.role === "clinician").length;

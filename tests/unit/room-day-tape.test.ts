@@ -396,7 +396,8 @@ describe("6 - the emotion gate is checked BEFORE the query", () => {
     const turns = windowSlot.kind === "window" ? windowSlot.window.turns : [];
     expect(turns.length).toBeGreaterThan(0);
     expect(turns.every((t) => t.emotion === null)).toBe(true);
-    expect(calls.some((c) => c.text.includes("FROM room_span_emotion"))).toBe(false);
+    // (G-3: the held-out PLACEMENT query reads room_span_emotion.room_day_id only; the emotion CONTENT read is what the gate keeps off)
+    expect(calls.some((c) => c.text.includes("FROM room_span_emotion") && !c.text.includes("unnest("))).toBe(false);
   });
 });
 

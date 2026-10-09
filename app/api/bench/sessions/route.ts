@@ -18,7 +18,8 @@ import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { readRoomClaims } from "@/lib/room-auth";
 import { NOTE_SUPERSEDED, REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
-import { benchAdminGuard, listBenchSessions, newSessionId, type BenchSessionListFilters } from "@/lib/bench";
+import { benchAdminGuard, endStaleSessions, insertBenchSession, listBenchSessions, newSessionId, type BenchSessionListFilters } from "@/lib/bench";
+import { sessionsBlindAny } from "@/lib/room-access/check";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,27 +45,14 @@ export async function POST(req: NextRequest) {
   // (never now()), with a note that says why. Same staleness test as decideResume; paused and
   // live sessions are untouched. Best-effort: a failure here must never stop a room from starting.
   try {
-    await sql`
-      UPDATE bench_session s
-         SET status = 'ended',
-             ended_at = COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at),
-             notes = CASE WHEN s.notes IS NULL OR s.notes = '' THEN ${NOTE_SUPERSEDED} ELSE s.notes || chr(10) || ${NOTE_SUPERSEDED} END
-       WHERE s.room_id = ${claims.room_id}
-         AND s.status = 'recording'
-         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})   -- Arch #21: a re-home container is bookkeeping, never a session to supersede
-         AND COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at)
-             < now() - (${STALLED_BADGE_MINUTES}::int * INTERVAL '1 minute')
-    `;
+    await endStaleSessions(claims.room_id, NOTE_SUPERSEDED, REHOME_NOTE_PREFIX, STALLED_BADGE_MINUTES);
   } catch (e) {
     console.error("[bench-sessions] could not end the stale session before starting a new one", String(e).slice(0, 150));
   }
 
   const id = newSessionId();
   try {
-    await sql`
-      INSERT INTO bench_session (id, room_id, label, mic_label)
-      VALUES (${id}, ${claims.room_id}, ${label}, ${micLabel})
-    `;
+    await insertBenchSession(id, claims.room_id, label, micLabel);
   } catch (e) {
     return respondError("UPSTREAM_UNAVAILABLE", String(e).slice(0, 150));
   }
@@ -98,8 +86,12 @@ export async function GET(req: NextRequest) {
   };
 
   try {
-    const rows = await listBenchSessions(filters);
+    const all = await listBenchSessions(filters);
+    // G-2: a session of a held-out (room, IST day), or with a held-out window placement, is not listed (counted)
+    const heldOut = await sessionsBlindAny(all.map((r) => r.id));
+    const rows = all.filter((r) => !heldOut.has(r.id));
     return respondOk({
+      n_blind_excluded: heldOut.size,
       sessions: rows.map((r) => ({
         id: r.id,
         label: r.label,

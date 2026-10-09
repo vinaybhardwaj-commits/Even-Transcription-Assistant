@@ -10,6 +10,8 @@ const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push(s.join("?")); return H.sql!(s, ...v); }, { transaction: async () => [] }) }));
 const R2 = vi.hoisted(() => ({ presign: 0, get: 0 }));
 vi.mock("@/lib/r2", () => ({ signGetUrl: async () => { R2.presign++; return "https://r2.example/x"; }, getObjectBytes: async () => { R2.get++; return new Uint8Array([1]); } }));
+vi.mock("@/lib/cookie", async (orig) => ({ ...((await orig()) as object), readAdminCookie: async () => "admin-cookie" }));
+vi.mock("@/lib/auth", async (orig) => ({ ...((await orig()) as object), verifyAdminJwt: async () => ({ sub: "admin" }) }));
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 300_000 });
 
 const HAVE = dockerAvailable();
@@ -102,7 +104,7 @@ const winRow = (id: string, session: string, hourUtc: number) => `INSERT INTO be
     `);
   });
   it("B3-1: a session whose window is held out ONLY by its turn rows, its window text or its emotion rows is refused (the guard, the listing and the tools)", async () => {
-    const { guardSessionSpan, sessionsBlindAny } = await import("@/lib/voice-blind");
+    const { guardSessionSpan, sessionsBlindAny } = await import("@/lib/room-access/check");
     for (const id of ["bs_rts", "bs_txt", "bs_emo"]) {
       expect(await guardSessionSpan(id), id).toBe("blind_room_day");
       expect(await call("scribe_get_session", { session_id: id }), id).toMatchObject({ error: "blind_room_day" });
@@ -110,7 +112,7 @@ const winRow = (id: string, session: string, hourUtc: number) => `INSERT INTO be
     expect([...(await sessionsBlindAny(["bs_rts", "bs_txt", "bs_emo", "bs_clean"]))].sort()).toEqual(["bs_emo", "bs_rts", "bs_txt"]);
   });
   it("B3-2: a session whose span touches a held-out IST day is refused WHATEVER the range (even one entirely on a clean day); a range reaching out of a clean session into the day is refused too", async () => {
-    const { guardSessionSpan } = await import("@/lib/voice-blind");
+    const { guardSessionSpan } = await import("@/lib/room-access/check");
     const dayEnd = dayStart + 86_400_000;
     // bs_before started the evening before and its last chunk ends inside the held-out day (see the guard test above)
     pg.exec(`INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('bs_span', '${BR}', '${T(dayStart - 3_600_000)}', '${T(dayStart - 1_800_000)}', 'ended');
@@ -385,5 +387,228 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(ev!.windows).toHaveLength(1);
     expect(ev!.windows[0]!.text).toBe("ok words");
     expect(ev!.n_blind_excluded).toBe(2);
+  });
+});
+
+(HAVE ? describe : describe.skip)("GUARD — the readers that used to carry their own SQL (REB index route, store stats, rooms, the admin STT-lab / drain / calibration / windows routes) now refuse or exclude held-out targets through lib/room-access", () => {
+  beforeAll(() => {
+    pg.exec(`
+      INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) VALUES
+        ('w_ok', '${CLEAN_DAY}', 'r_clean', 'stt', 'e', 'v1', 'c1', 'ok', 'k1', 'aa'), ('w_blind', '${BD}', '${BR}', 'stt', 'e', 'v1', 'c2', 'ok', 'k2', 'bb');
+    `);
+  });
+  it("the bearer route GET /api/reb/index (it had NO held-out filter) lists only the clean row", async () => {
+    const { rebIndexRows } = await import("@/lib/room-access/tool-reads");
+    const rows = await rebIndexRows({ cursor: 0, windowId: null, day: null, layer: null, engine: null, roomId: null, withShadow: true, limit: 50 });
+    expect(rows.map((r) => r.window_id)).toEqual(["w_ok"]);
+    const byDay = await rebIndexRows({ cursor: 0, windowId: null, day: BD, layer: null, engine: null, roomId: BR, withShadow: true, limit: 50 });
+    expect(byDay).toEqual([]);
+  });
+  it("scribe_store_stats leaves held-out sessions out of the totals and says how many; scribe_list_rooms never shows a held-out session as a room's last", async () => {
+    const out = await call("scribe_store_stats", {});
+    expect(out.bench.n_blind_excluded).toBeGreaterThanOrEqual(2);
+    const { benchSessionTotals } = await import("@/lib/room-access/tool-reads");
+    const t = await benchSessionTotals();
+    const all = Number(((await H.sql!`SELECT count(*)::int AS n FROM bench_session` as Array<{ n: number }>)[0]!.n));
+    expect(t.total + t.nBlindExcluded).toBe(all);
+    const rooms = await call("scribe_list_rooms", {});
+    const blindRoom = (rooms.rooms as Array<{ id: string; last_session_at: string | null }>).find((r) => r.id === BR);
+    expect(blindRoom?.last_session_at ?? null).toBe(null); // its only sessions are held out
+  });
+  it("the admin routes' reads: a held-out session / window is refused; a clean one is served", async () => {
+    const R = await import("@/lib/room-access/tool-reads");
+    for (const id of ["bs_blind", "bs_win", "bs_rts"]) {
+      expect(await R.adminSessionWindows(id), id).toEqual({ error: "blind_room_day" });
+      expect(await R.adminDiarizeAnswers(id), id).toEqual({ error: "blind_room_day" });
+      expect(await R.adminDrainRows(id), id).toEqual({ error: "blind_room_day" });
+    }
+    expect(await R.adminWindowRow("bw_rts")).toEqual({ error: "blind_room_day" });
+    expect(await R.adminWindowRow("bw_blind")).toEqual({ error: "blind_room_day" });
+    expect("rows" in (await R.adminSessionWindows("bs_ok"))).toBe(true);
+    expect("rows" in (await R.adminWindowRow("bw_ok_none"))).toBe(true);
+    const pending = await R.measurePendingCount();
+    expect(pending).toBeGreaterThanOrEqual(0);
+  });
+});
+
+(HAVE ? describe : describe.skip)("GUARD-3 G-2: the admin bench-session GETs and the encounter-windows read go through lib/room-access with the held-out rule", () => {
+  it("GET /api/bench/sessions?room_id=<held-out>&ist_date=<held-out day> lists nothing and counts; the unfiltered list leaves the held-out sessions out", async () => {
+    const { GET } = await import("@/app/api/bench/sessions/route");
+    const { NextRequest } = await import("next/server");
+    const get = async (qs: string) => (await (await GET(new NextRequest(`http://x/api/bench/sessions${qs}`))).json()) as { data?: Record<string, any>; sessions?: any[]; n_blind_excluded?: number };
+    const one = await get(`?room_id=${BR}&ist_date=${BD}`);
+    const body = (one.data ?? one) as { sessions: Array<{ id: string }>; n_blind_excluded: number };
+    expect(body.sessions).toEqual([]);
+    expect(body.n_blind_excluded).toBeGreaterThanOrEqual(1);
+    const all = ((await get("")).data ?? (await get(""))) as { sessions: Array<{ id: string }> };
+    for (const bad of ["bs_blind", "bs_win", "bs_rts", "bs_span"]) expect(all.sessions.map((x) => x.id), bad).not.toContain(bad);
+  });
+  it("GET /api/bench/sessions/<held-out id> is 403 blind_room_day (chunks, events and marks are not read); a clean session is 200", async () => {
+    const { GET } = await import("@/app/api/bench/sessions/[id]/route");
+    const { NextRequest } = await import("next/server");
+    const get = (id: string) => GET(new NextRequest(`http://x/api/bench/sessions/${id}`), { params: Promise.resolve({ id }) });
+    H.statements.length = 0;
+    for (const id of ["bs_blind", "bs_win", "bs_rts"]) expect((await get(id)).status, id).toBe(403);
+    expect(H.statements.filter((t) => /FROM bench_chunk\s+WHERE|FROM bench_event/.test(t) && !/FROM bench_session s WHERE/.test(t))).toEqual([]);
+    expect((await get("bs_ok")).status).toBe(200);
+  });
+  it("queryWindows (GET /api/encounter-windows, the clock anchors): a consult window opened or closed on a held-out (room, IST day) is never returned", async () => {
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version) VALUES
+        ('cw_ok', 'm1', 'r_clean', 'none', '${CLEAN_DAY}T04:00:00Z', '${CLEAN_DAY}T04:20:00Z', 'endConsult', 'clean', 'v1'),
+        ('cw_open', 'm1', '${BR}', 'none', '${T(dayStart + 3_600_000)}', '${T(dayStart + 4_000_000)}', 'endConsult', 'clean', 'v1'),
+        ('cw_cross', 'm1', '${BR}', 'none', '${T(dayStart - 600_000)}', '${T(dayStart + 600_000)}', 'endConsult', 'clean', 'v1'),
+        ('cw_other_room', 'm1', 'r_clean', 'none', '${T(dayStart + 3_600_000)}', '${T(dayStart + 4_000_000)}', 'endConsult', 'clean', 'v1');
+    `);
+    const { queryWindows } = await import("@/lib/encounter-windows");
+    const { sql } = await import("@/lib/db");
+    const rows = await queryWindows(sql as never, { from: T(dayStart - 86_400_000), to: T(Date.parse(CLEAN_DAY) + 2 * 86_400_000), limit: 100 });
+    expect(rows.map((r) => r.consult_key).sort()).toEqual(["cw_other_room", "cw_ok"].sort());
+    expect((await queryWindows(sql as never, { room_id: BR, limit: 100 })).map((r) => r.consult_key)).toEqual([]);
+  });
+});
+
+(HAVE ? describe : describe.skip)("GUARD-3 G-3: getRoomDayTape and listRoomDays run the held-out check", () => {
+  it("GET /api/admin/rooms/<held-out room>/days/<held-out day> is 403 blind_room_day (it was 200 with the tape); the lookup throws BlindRoomDayError", async () => {
+    const { getRoomDayTape } = await import("@/lib/room-access/room-day-admin");
+    const { BlindRoomDayError } = await import("@/lib/rubrics/blind-room-days");
+    await expect(getRoomDayTape(BR, BD)).rejects.toBeInstanceOf(BlindRoomDayError);
+    const { GET } = await import("@/app/api/admin/rooms/[roomId]/days/[date]/route");
+    const res = await GET(new Request("http://x"), { params: Promise.resolve({ roomId: BR, date: BD }) });
+    expect(res.status).toBe(403);
+    // the day after (clean) is not refused by the day rule
+    const next = new Date(Date.parse(`${BD}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+    const ok = await GET(new Request("http://x"), { params: Promise.resolve({ roomId: BR, date: next }) });
+    expect(ok.status).not.toBe(403);
+  });
+  it("a clean room's tape leaves out the held-out sessions and windows of that day (turn rows, text, emotion, diarize)", async () => {
+    const { getRoomDayTape } = await import("@/lib/room-access/room-day-admin");
+    const tape = await getRoomDayTape("r_clean", CLEAN_DAY);
+    const text = JSON.stringify(tape);
+    for (const bad of ["bs_win", "bs_rts", "bs_txt", "bs_emo", "bs_rdw", "bw_win", "bw_rts", "bw_txt", "bw_emo", "bw_rdw"]) expect(text, bad).not.toContain(bad);
+    expect(text).toContain("bs_clean");
+  });
+  it("the day BEFORE a held-out day: a session that runs into the held-out day is not part of that day's tape", async () => {
+    const { getRoomDayTape } = await import("@/lib/room-access/room-day-admin");
+    const prev = new Date(Date.parse(`${BD}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    const tape = await getRoomDayTape(BR, prev);
+    expect(JSON.stringify(tape)).not.toContain("bs_span");
+  });
+  it("listRoomDays: a held-out (room, day) is not listed; a clean day's counts leave held-out windows out", async () => {
+    const { listRoomDays } = await import("@/lib/room-access/room-day-admin");
+    const blindRoom = await listRoomDays(BR);
+    expect(blindRoom.map((r) => r.ist_date)).not.toContain(BD);
+    const clean = (await listRoomDays("r_clean")).find((r) => r.ist_date === CLEAN_DAY)!;
+    const rows = (await H.sql!`SELECT w.id, s.id AS sid FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE s.room_id = 'r_clean' AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${CLEAN_DAY}::date` as Array<{ id: string; sid: string }>);
+    const { windowsBlindAny, sessionsBlindAny } = await import("@/lib/room-access/check");
+    const held = await windowsBlindAny(rows.map((r) => r.id));
+    const heldS = await sessionsBlindAny([...new Set(rows.map((r) => r.sid))]);
+    expect(held.size).toBeGreaterThan(0);
+    // REL3-FU2: windows of a session refused WHOLE are not counted either
+    expect(clean.window_count).toBe(rows.filter((r) => !held.has(r.id) && !heldS.has(r.sid)).length);
+  });
+});
+
+(HAVE ? describe : describe.skip)("REL3-FU G3-1: ?occupancy=1&as_of=<held-out day> never returns a held-out room-day's consulting doctor", () => {
+  it("the warehouse occupant of a machine whose latest consult is on a held-out (room, day) is excluded (as_of names a past time); a clean room's machine on the same day is served", async () => {
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version, attribution_source, consulting_doctor_uid, consulting_doctor_name) VALUES
+        ('cw_occ_blind', 'm-blind', '${BR}', 'none', '${T(dayStart + 4 * 3_600_000)}', '${T(dayStart + 4 * 3_600_000 + 600_000)}', 'endConsult', 'clean', 'v1', 'warehouse', 'doc_blind', 'Held Out Doctor'),
+        ('cw_occ_ok', 'm-ok', 'r_clean', 'none', '${T(dayStart + 4 * 3_600_000)}', '${T(dayStart + 4 * 3_600_000 + 600_000)}', 'endConsult', 'clean', 'v1', 'warehouse', 'doc_ok', 'Clean Doctor');
+    `);
+    const asOf = T(dayStart + 4 * 3_600_000 + 1_200_000); // 10:20 IST-ish on the held-out day
+    const { consultingDoctorForMachine, machineOccupancy } = await import("@/lib/encounter-windows/occupant");
+    const { sql } = await import("@/lib/db");
+    expect(await consultingDoctorForMachine(sql as never, "m-blind", asOf)).toBeNull();
+    expect(await consultingDoctorForMachine(sql as never, "m-ok", asOf)).toMatchObject({ uid: "doc_ok" });
+    const machines = await machineOccupancy(sql as never, asOf);
+    expect(JSON.stringify(machines)).not.toContain("doc_blind");
+    expect(JSON.stringify(machines)).not.toContain("Held Out Doctor");
+  });
+});
+
+(HAVE ? describe : describe.skip)("REL3-FU2 listRoomDays: a clean window of a session that is refused WHOLE is not counted", () => {
+  it("a session with one clean window and one window held out only by its turn rows contributes 0 windows to the day's count", async () => {
+    pg.exec(`
+      ${sessionRow("bs_mixed", 2)}
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES
+        ('bw_mixed_clean', 'bs_mixed', 'rd_clean', ${Date.parse(CLEAN_DAY + "T02:00:00Z")}, ${Date.parse(CLEAN_DAY + "T02:10:00Z")}, 'primary'),
+        ('bw_mixed_rts', 'bs_mixed', 'rd_clean', ${Date.parse(CLEAN_DAY + "T02:10:00Z")}, ${Date.parse(CLEAN_DAY + "T02:20:00Z")}, 'primary');
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_mixed_rts', 't1', 'rd_blind', 0, 'no_match');
+    `);
+    const { listRoomDays } = await import("@/lib/room-access/room-day-admin");
+    const { guardSessionSpan } = await import("@/lib/room-access/check");
+    expect(await guardSessionSpan("bs_mixed")).toBe("blind_room_day");
+    const row = (await listRoomDays("r_clean")).find((r) => r.ist_date === CLEAN_DAY)!;
+    // the count is exactly the windows of the sessions that are NOT refused whole
+    const ok = (await H.sql!`SELECT w.id, s.id AS sid FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE s.room_id = 'r_clean' AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${CLEAN_DAY}::date` as Array<{ id: string; sid: string }>);
+    const { sessionsBlindAny, windowsBlindAny } = await import("@/lib/room-access/check");
+    const heldS = await sessionsBlindAny([...new Set(ok.map((x) => x.sid))]);
+    const heldW = await windowsBlindAny(ok.map((x) => x.id));
+    const expected = ok.filter((x) => !heldS.has(x.sid) && !heldW.has(x.id)).length;
+    expect(heldS.has("bs_mixed")).toBe(true);
+    expect(row.window_count).toBe(expected);
+    expect(ok.some((x) => x.id === "bw_mixed_clean")).toBe(true); // it exists, and is not counted
+  });
+});
+
+(HAVE ? describe : describe.skip)("REL3-FU2 scope: transcription_run and bench_chunk readers are in the module and leave held-out rows out", () => {
+  it("/api/admin/stt-spend: window-run spend leaves out runs of windows with ANY held-out placement and counts them", async () => {
+    const { sttSpendRaw } = await import("@/lib/room-access/tool-reads");
+    const all = Number(((await H.sql!`SELECT count(*)::int AS n FROM transcription_run WHERE subject_type = 'bench_window'` as Array<{ n: number }>)[0]!.n));
+    const { raw, nBlindExcluded } = await sttSpendRaw();
+    const counted = raw.reduce((n, r) => n + Number(r.n_runs), 0);
+    expect(nBlindExcluded).toBeGreaterThanOrEqual(2);
+    expect(counted + nBlindExcluded).toBe(all);
+    expect(counted).toBeGreaterThanOrEqual(1);
+  });
+  it("F2-S1 /api/admin/stt-spend: a run whose window row is gone still counts (cost included); held-out runs are still excluded", async () => {
+    const { sttSpendRaw } = await import("@/lib/room-access/tool-reads");
+    const sum = (r: Array<Record<string, unknown>>) => ({ n: r.reduce((a, x) => a + Number(x.n_runs), 0), cost: r.reduce((a, x) => a + Number(x.cost_usd_total), 0) });
+    const before = await sttSpendRaw();
+    pg.exec(`INSERT INTO transcription_run (id, subject_type, subject_id, engine, mode, tier, transcript_original, cost_usd) VALUES
+      ('tr_orph1', 'bench_window', 'bw_gone', 'route', 'batch', 'asr', 'x', 0.05), ('tr_orph2', 'bench_window', 'bw_gone2', 'route', 'batch', 'asr', 'y', 0.03)`);
+    const after = await sttSpendRaw();
+    expect(sum(after.raw).n - sum(before.raw).n).toBe(2);
+    expect(Number((sum(after.raw).cost - sum(before.raw).cost).toFixed(4))).toBe(0.08);
+    expect(after.nBlindExcluded).toBe(before.nBlindExcluded);
+    expect(after.nBlindExcluded).toBeGreaterThanOrEqual(2);
+  });
+  it("scribe_store_stats: chunk totals leave out chunks of a held-out session and count them", async () => {
+    const { benchChunkTotals } = await import("@/lib/room-access/tool-reads");
+    const { sessionsBlindAny } = await import("@/lib/room-access/check");
+    const rows = (await H.sql!`SELECT session_id AS sid FROM bench_chunk` as Array<{ sid: string }>);
+    const held = await sessionsBlindAny([...new Set(rows.map((r) => r.sid))]);
+    const t = await benchChunkTotals();
+    const counted = Object.values(t.byState).reduce((n, v) => n + v.count, 0);
+    expect(rows.filter((r) => held.has(r.sid)).length).toBeGreaterThan(0);
+    expect(t.nBlindExcluded).toBe(rows.filter((r) => held.has(r.sid)).length);
+    expect(counted).toBe(rows.filter((r) => !held.has(r.sid)).length);
+    const st = (await call("scribe_store_stats", {})).bench;
+    expect(st.chunks_by_upload_state).toEqual(t.byState);
+    expect(st.n_blind_chunks_excluded).toBe(t.nBlindExcluded);
+  });
+  it("the runs readers behind scribe_get_stt_run, scribe_stt_windows and the admin run route still refuse a held-out window (guard before the module read)", async () => {
+    expect(await call("scribe_get_stt_run", { subject_id: "bw_rts", include_text: true })).toMatchObject({ error: "blind_room_day", runs: [] });
+    expect(await call("scribe_stt_windows", { window_id: "bw_rts" })).toMatchObject({ error: "blind_room_day" });
+    const { sttRunsFor } = await import("@/lib/room-access/tool-reads");
+    expect((await sttRunsFor("bw_clean")).length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+(HAVE ? describe : describe.skip)("REL3-FU2 F2-2: the STT leaderboard (subject bench_window / all) leaves out runs of held-out windows", () => {
+  it("excludes them from the board, counts them in n_blind_excluded, and encounter stays 0", async () => {
+    const { computeLeaderboard } = await import("@/lib/room-access/stt-leaderboard");
+    const runs = (await H.sql!`SELECT tr.subject_id AS wid FROM transcription_run tr WHERE tr.subject_type = 'bench_window' AND tr.mode = 'batch' AND tr.tier = 'asr'` as Array<{ wid: string }>);
+    const { windowsBlindAny } = await import("@/lib/room-access/check");
+    const held = await windowsBlindAny([...new Set(runs.map((r) => r.wid))]);
+    const nHeld = runs.filter((r) => held.has(r.wid)).length;
+    expect(nHeld).toBeGreaterThan(0);
+    const bw = await computeLeaderboard({ subjectKind: "bench_window" });
+    expect(bw.n_blind_excluded).toBe(nHeld);
+    expect(bw.total_runs).toBe(runs.length - nHeld);
+    const all = await computeLeaderboard({ subjectKind: "all" });
+    expect(all.n_blind_excluded).toBe(nHeld);
+    expect((await computeLeaderboard({})).n_blind_excluded).toBe(0);
   });
 });
