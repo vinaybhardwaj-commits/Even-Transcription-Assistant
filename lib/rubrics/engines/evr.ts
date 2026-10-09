@@ -44,7 +44,7 @@ export async function evaluateEncounterVsRecord(r: Rubric, text: ConsultText, co
     },
     findings: codes,
     evidence: {
-      label: REPORT_LABEL, model: said.model, prompt_version: promptVersion(r), transcript_source: text.source, truncated: text.truncated,
+      label: REPORT_LABEL, model: said.model, prompt_version: promptVersion(r), transcript_source: text.source, config_hash: text.config_hash ?? null, source_integrity_skipped: text.n_integrity_skipped ?? 0, truncated: text.truncated,
       findings: fs.map((f) => ({ code: findingCode(f), field: f.field, tier: f.tier, target: f.target, record_value: f.record_value, support: f.support, tape: f.tape_t_ms.map(fmt), tape_t_ms: f.tape_t_ms, quote: f.quote, field_ai_filled: f.field_ai_filled, text: f.text })),
     },
   };

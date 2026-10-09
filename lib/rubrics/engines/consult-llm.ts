@@ -123,7 +123,7 @@ export async function evaluateConsultAffect(r: Rubric, text: ConsultText): Promi
       prompt_version: promptVersion(r), attempts: out.attempts,
     },
     findings,
-    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, truncated: text.truncated, talk_time: talk.score ?? null, engagement_model_said: cases.engagement_process,
+    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, config_hash: text.config_hash ?? null, source_integrity_skipped: text.n_integrity_skipped ?? 0, truncated: text.truncated, talk_time: talk.score ?? null, engagement_model_said: cases.engagement_process,
       quotes: vq.kept.map((q) => ({ item: q.item, quote: q.quote, t: fmt(q.t_ms), t_ms: q.t_ms })), quotes_dropped_not_in_transcript: vq.dropped },
   };
 }
@@ -159,7 +159,7 @@ export async function evaluateSurgicalPitch(r: Rubric, text: ConsultText): Promi
       prompt_version: promptVersion(r), attempts: out.attempts,
     },
     findings,
-    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, truncated: text.truncated, doubts: doubts.map((d) => ({ kind: d.kind, code: d.code })),
+    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, transcript_chars: text.chars, transcript_source: text.source, config_hash: text.config_hash ?? null, source_integrity_skipped: text.n_integrity_skipped ?? 0, truncated: text.truncated, doubts: doubts.map((d) => ({ kind: d.kind, code: d.code })),
       quotes: vq.kept.map((q) => ({ item: q.item, quote: q.quote, t: fmt(q.t_ms), t_ms: q.t_ms })), quotes_dropped_not_in_transcript: vq.dropped },
   };
 }

@@ -174,7 +174,7 @@ describe("the perturbation bench", () => {
 
 describe("the engine: lab-only, report wording, no banned words", () => {
   beforeEach(() => { L.setRubricChatForTests(null); R.setMetabaseForTests(null); });
-  const text = (): import("@/lib/rubrics/readers/consult-text").ConsultText => ({ consult_key: "k", source: "database", span_ms: 90_000, lines: TAPE.map((l) => ({ t_ms: l.t_ms, speaker: "doctor" as const, speaker_idx: 0, text: l.text })), chars: 200, truncated: false, turns: [] });
+  const text = (): import("@/lib/rubrics/readers/consult-text").ConsultText => ({ consult_key: "k", source: "window_english", span_ms: 90_000, lines: TAPE.map((l) => ({ t_ms: l.t_ms, speaker: "doctor" as const, speaker_idx: 0, text: l.text })), chars: 200, truncated: false, turns: [] });
   it("the rubric is a lab-only draft llm_zdr rubric, runs on consult units only, and is registered", () => {
     expect(rubric).toMatchObject({ engine: "llm_zdr", status: "draft", unit: "consult", version: "0.1.0" });
     expect(canRun(rubric, { lab: false })).toMatchObject({ error: "lab_required" });
