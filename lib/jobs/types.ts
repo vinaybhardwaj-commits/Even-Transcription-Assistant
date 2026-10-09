@@ -133,7 +133,7 @@ export type JobKind = {
   /** Which MCP scope may submit this kind (§3: "scope per kind"). */
   scope: "read" | "invoke" | "write";
   /** PURE where it can be — validates and normalises args at SUBMIT, so a bad job never queues. */
-  parseArgs: (raw: unknown) => Record<string, unknown>;
+  parseArgs: (raw: unknown, caller?: "production" | "mcp") => Record<string, unknown>;
   /**
    * A scope that ONE ARGUMENT needs beyond the kind's own `scope` — for an argument that widens what the job may do
    * (V's ruling, 21 Sep 2026: `room_window`'s `switch_override` needs `write`, because it lets a job write a room whose own

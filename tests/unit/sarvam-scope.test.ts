@@ -115,7 +115,7 @@ describe("the helpers", () => {
       const out = await call("scribe_transcribe_range", { start: "10:00", end: "10:01", session_id: "bs_1", engine });
       expect(out, engine).toMatchObject({ ok: false, error: "scope_check_unavailable", tool: "scribe_transcribe_range", engine });
     }
-    expect(await call("scribe_transcribe_range", { start: "10:00", end: "10:01", session_id: "bs_1", engine: "sarvam" })).toMatchObject({ error: "scope_consult_only" });
+    expect(await call("scribe_transcribe_range", { start: "10:00", end: "10:01", session_id: "bs_1", engine: "sarvam" })).toMatchObject({ error: "bad_args" }); // O5: an MCP caller's Sarvam engine is a gateway job over the range (this one is malformed: no date)
   });
   it("S5 path 2 — the routing read fails: an MCP room_window submit is refused with scope_check_unavailable and nothing is queued; the kind refuses the same way before claiming", async () => {
     answer = (text) => (/FROM stt_routing/.test(text) ? new Error("db down") : []);
@@ -169,11 +169,11 @@ describe("1a — scribe_transcribe_range refuses a Sarvam engine for room / benc
   const range = { start: "2026-10-08 09:00", end: "2026-10-08 09:05", room: "opd-1" };
   const touchedAudio = () => statements.filter((s) => /bench_chunk|bench_session|FROM room\b/.test(s.text));
 
-  it("sync and async: scope_consult_only, before any range, session or audio is touched", async () => {
+  it("O5: a Sarvam engine named through the MCP tool never reaches whisper or the direct Sarvam adapter: a malformed range is bad_args before any range, session or audio is touched, and nothing is queued", async () => {
     for (const engine of ["sarvam", "sarvam-gw", "indic_x"]) {
       for (const async of [false, true]) {
         statements.length = 0;
-        expect(await call("scribe_transcribe_range", { ...range, engine, async }), `${engine} async=${async}`).toMatchObject({ ok: false, error: "scope_consult_only", tool: "scribe_transcribe_range", engine });
+        expect(await call("scribe_transcribe_range", { ...range, engine, async }), `${engine} async=${async}`).toMatchObject({ ok: false, error: "bad_args" });
         expect(touchedAudio(), `${engine} async=${async}`).toEqual([]);
       }
     }
@@ -320,7 +320,7 @@ describe("2 — a Sarvam job ended by the runner or cancelled writes one ledger 
     const j = job() as { id: string; kind: string; args: Row; progress: Row; created_at: string };
     expect(H.endedLine(j, "failed", "2026-10-08T07:00:00.000Z")).toEqual({
       caller: "scribe-mcp", machine: "vercel", route: "gateway", job_id: "job_s1", request_id: "sj_9", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
-      started_at: "2026-10-08T06:00:00.000Z", finished_at: "2026-10-08T07:00:00.000Z", status: "failed", http_status: null, throttled: false, scope: "encounter", ref: "enc_1",
+      started_at: "2026-10-08T06:00:00.000Z", finished_at: "2026-10-08T07:00:00.000Z", status: "failed", http_status: null, throttled: false, scope: "encounter", ref: "enc_1", use: "production",
     });
     const notStarted = { ...j, progress: { clip_key: "k", scope: "encounter", ref: "enc_1", duration_ms: 600_000, sarvam_job_id: "sj_9" } }; // created at Sarvam, never started
     expect(H.endedLine(notStarted, "cancelled", "t")).toMatchObject({ audio_s: 0, status: "cancelled", request_id: "sj_9" });

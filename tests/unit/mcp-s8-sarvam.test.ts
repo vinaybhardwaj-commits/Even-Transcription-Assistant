@@ -31,6 +31,7 @@ vi.mock("@/lib/r2", async (orig) => ({ ...((await orig()) as object), getObjectB
 const S = await import("@/lib/mcp/surface");
 const { handleMcpRpc } = await import("@/lib/mcp/handler");
 const G = await import("@/lib/sarvam-gateway");
+const K = { ...(await import("@/lib/jobs/kinds/sarvam-transcribe")), ...(await import("@/lib/jobs/kinds/sarvam-translate")) };
 
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
 const ENV = {
@@ -89,15 +90,20 @@ describe("transcribe / translate", () => {
     expect(inserted[0]).toMatchObject({ kind: "sarvam_transcribe", actor: "mcp:test", args: { source: "encounter", encounter_id: "enc_1", english: true, mode: "transcribe" } });
   });
 
-  it("A1: room / session / window arguments are scope_consult_only — nothing is queued; the schema no longer lists them", async () => {
-    for (const bad of [{ room: "opd-1", from: "2026-10-08 09:00", to: "2026-10-08 09:10" }, { session_id: "bs_1", from_ms: 0, to_ms: 60_000 }, { room: "opd-1" }, { from_ms: 1 }, { bench_window_id: "bw_1" }, { encounter_id: "enc_1", room: "opd-1" }]) {
-      expect(await run({ action: "transcribe", ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
-      expect(await run({ action: "translate", ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
+  it("A1 (O4, still true for a PRODUCTION caller): room / session / window arguments are scope_consult_only at the parser; the O5 MCP tool layer does not accept the malformed ones and queues nothing", async () => {
+    const bads = [{ room: "opd-1", from: "2026-10-08 09:00", to: "2026-10-08 09:10" }, { session_id: "bs_1", from_ms: 0, to_ms: 60_000 }, { room: "opd-1" }, { from_ms: 1 }, { bench_window_id: "bw_1" }, { encounter_id: "enc_1", room: "opd-1" }];
+    for (const bad of bads) {
+      expect(() => K.parseSarvamTranscribeArgs(bad), JSON.stringify(bad)).toThrow(/^scope_consult_only|exactly one source|bad args/);
+      expect(() => K.parseSarvamTranslateArgs(bad), JSON.stringify(bad)).toThrow(/^scope_consult_only|exactly one|bad args/);
+    }
+    for (const k of ["room", "from", "to", "session_id", "from_ms", "to_ms", "bench_window_id", "window_id", "date"]) expect(() => K.parseSarvamTranscribeArgs({ [k]: "x" }), k).toThrow(/^scope_consult_only/);
+    for (const bad of [{ room: "opd-1" }, { from_ms: 1 }, { bench_window_id: "bw_1" }]) {
+      expect(await run({ action: "transcribe", ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "bad_args" });
     }
     expect(inserted).toEqual([]);
     const props = Object.keys((S.CALLABLE_TOOLS.get("scribe_sarvam")!.inputSchema as { properties: Row }).properties);
     for (const k of ["room", "from", "to", "session_id", "from_ms", "to_ms", "bench_window_id"]) expect(props, k).not.toContain(k);
-    expect(props).toEqual(expect.arrayContaining(["encounter_id", "consult_uid", "transcription_run_id"]));
+    expect(props).toEqual(expect.arrayContaining(["encounter_id", "consult_uid", "transcription_run_id", "room_audio"]));
   });
 
   it("a consult uid answers consult_index_unavailable (no resolver yet) without queueing", async () => {
@@ -140,12 +146,13 @@ describe("transcribe / translate", () => {
     expect(await run({ action: "translate" })).toMatchObject({ ok: false, error: "bad_args" });
   });
 
-  it("A2: a run whose subject is a bench window is scope_consult_only and is not queued", async () => {
-    answer = (text) => (/FROM transcription_run/.test(text) ? [{ subject_type: "bench_window" }] : []);
+  it("A2 (O5): a run whose subject is a bench window is room text: queued for an MCP caller (held-out checked at submit and at the first step); the job refuses it for a production caller", async () => {
+    answer = (text) => (/FROM transcription_run/.test(text) ? [{ subject_type: "bench_window", subject_id: "bw_w" }] : []);
     const before = inserted.length;
-    expect(await run({ action: "translate", transcription_run_id: "trun_w" })).toMatchObject({ ok: false, error: "scope_consult_only" });
-    expect(inserted.length).toBe(before);
-    expect(statements.find((s) => /FROM transcription_run/.test(s.text))!.values).toContain("trun_w");
+    expect(await run({ action: "translate", transcription_run_id: "trun_w" })).toMatchObject({ ok: true });
+    expect(inserted.length).toBe(before + 1);
+    const prod = K.parseSarvamTranslateArgs({ transcription_run_id: "trun_w" }); // default class = production
+    expect(prod).toEqual({ kind: "transcription_run", id: "trun_w" }); // no caller_class: the job's pick says "scope" for it
   });
 });
 
