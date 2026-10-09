@@ -53,7 +53,7 @@ describe("the rubric files and the registry", () => {
       expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), f).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
     }
     expect(readdirSync(join(ROOT)).filter((n) => !statSync(join(ROOT, n)).isDirectory())).toEqual([]); // no stray files
-    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
+    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" || f === "encounter_vs_record" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
   });
   it("a bad file fails: unknown key, bad semver, id not the folder, a draft-only gap on a benched rubric, a code rubric with a prompt, a consult rubric with no consult input", () => {
     const ok = JSON.parse(JSON.stringify(getRubric("talk_time")));
@@ -65,7 +65,6 @@ describe("the rubric files and the registry", () => {
     expect(T.rubricProblems({ ...ok, status: "benched" }, "talk_time", () => false).join()).toMatch(/bench file/);
     expect(T.rubricProblems({ ...ok, prompt: "p.md" }, "talk_time", () => true).join()).toMatch(/engine code takes no/);
     expect(T.rubricProblems({ ...ok, unit: "consult", units: ["consult"], inputs: ["turns"] }, "talk_time", () => true).join()).toMatch(/consult rubric needs/);
-    expect(T.rubricProblems({ ...ok, status: "production", inputs: ["pulse_record", "turns"] }, "talk_time", () => true).join()).toMatch(/not implemented/);
     expect(T.rubricProblems({ ...ok, engine: "llm_zdr", status: "production" }, "talk_time", () => true).join()).toMatch(/needs a prompt/);
   });
   it("canRun: a non-production rubric needs lab:true; only engine code runs; the unit must be one the rubric supports", () => {

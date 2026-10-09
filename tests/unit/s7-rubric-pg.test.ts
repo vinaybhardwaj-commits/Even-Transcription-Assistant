@@ -56,6 +56,7 @@ beforeAll(() => {
   if (!HAVE) return;
   pg.start();
   pg.exec(FIXTURE_DDL);
+  pg.exec("ALTER TABLE eta_encounter_windows ADD COLUMN IF NOT EXISTS consult_uid text, ADD COLUMN IF NOT EXISTS warehouse_prescription_uid text;");
   pg.exec(readFileSync("db/migrations/0082_scribe_job.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0139_rubric_results.sql", "utf8"));
   H.sql = pg.sql as never;
@@ -178,7 +179,7 @@ describe.runIf(HAVE)("the readers on fixtures", () => {
     statements.length = 0;
     expect(await R.readWindowEmotion("w3")).toMatchObject({ ok: false, reason: "blind_room_day" });
     expect(statements.some((q) => /room_span_emotion/.test(q.text))).toBe(false);
-    expect(await R.readPulseRecord("x")).toMatchObject({ ok: false, reason: "not_implemented" });
+    expect(await R.readPulseRecord("x")).toMatchObject({ ok: false, reason: "not_found" }); // S7-2: a real reader; unknown consult
   });
   it("consult_span: the open and close, the overlapping windows with absolute times; an open consult and a blind day are refused", async () => {
     const R = await import("@/lib/rubrics/readers");
@@ -626,6 +627,50 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(calls).toBe(0);
     } finally {
       LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S7-2 encounter_vs_record through the real runner: record (fake warehouse) vs tape (fake model) -> a discrepancy report; blind skipped before the warehouse; read-only; evr_perturb bench selects its windows at run time", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc1AaaaaaaaaaaZ', warehouse_prescription_uid = 'recA' WHERE consult_key = 'enc1@m1'`;
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc3AaaaaaaaaaaZ', warehouse_prescription_uid = 'recB' WHERE consult_key = 'enc3@m2'`;
+    const queries: string[] = [];
+    REC.setMetabaseForTests(async (q) => { queries.push(q); return [{ rec_uid: "recA", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [
+      { generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }, { generic_name: "Warfarin", strength: "5 mg", frequency: "OD" }], investigations: [], refer_to: [], advice: [] }]; });
+    LLM.setRubricChatForTests(async () => ({ content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "250 mg", freq: "twice a day", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }));
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "encounter_vs_record", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "encounter_vs_record", ok: 1, skipped: 2, blind_room_days: 1 } });
+      expect(queries).toHaveLength(1); // the blind consult never reached the warehouse
+      expect(queries[0]).toMatch(/^SELECT /);
+      const rows = (await pg.sql`SELECT unit_key, status, score, findings FROM rubric_result`) as Array<Record<string, any>>;
+      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]);
+      expect(rows[0]).toMatchObject({ status: "ok", score: { label: "discrepancy report", severity: "obvious", n_findings: 2 } });
+      expect(rows[0].findings).toEqual(["obvious:in_record_not_said:drug", "obvious:value_mismatch:dose"]);
+      expect(JSON.stringify(rows)).not.toMatch(/Warfarin|Alphamox|alpha/); // no record or tape text in the table
+      const ev = JSON.parse(mem.get("rubric/encounter_vs_record/0.1.0/enc1@m1.json")!);
+      expect(JSON.stringify(ev)).toContain("no support found");
+      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
+      // evr_perturb: the file holds a header only; the windows are selected in the job (enc1@m1 qualifies; the open and the blind consults do not)
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", JSON.stringify({ header: { selection: "closed windows from 2026-10-02 with a prescription uid, not held out, with a stored transcript; md5 order by seed", seed: 5, n_windows: 40 } }) + "\n");
+      queries.length = 0;
+      const b = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(b.job).toMatchObject({ status: "done", result: { set: "evr_perturb", metric: "perturbation_recall", n: 1, passed: null } });
+      const rep = JSON.parse(mem.get(b.job.result.report_key)!);
+      expect(rep).toMatchObject({ windows_planned: 1, windows_scored: 1, human_gold: false });
+      expect(rep.per_kind.add_drug).toMatchObject({ n_applicable: 1, recall: 1 });
+      expect(rep.per_kind.dose_x2.n_applicable).toBe(1);
+      expect(rep.baseline_flag_rate.obvious).toBe(1); // the original holds the unsupported Warfarin: reported as a flag rate, not as a label
+      expect(rep.note).toMatch(/NOT negatives/);
+      expect(JSON.stringify(rep)).not.toMatch(/Warfarin|Alphamox/);
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(1); // the bench wrote no result row
+      // evr_perturb is for encounter_vs_record only
+      const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+      expect(() => KIND_BY_NAME.get("rubric_bench")!.parseArgs({ rubric_id: "consult_surgical_pitch", set: "evr_perturb" })).toThrow();
+    } finally {
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
     }
   });
 });

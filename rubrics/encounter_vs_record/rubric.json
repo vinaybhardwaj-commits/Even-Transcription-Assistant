@@ -1,0 +1,94 @@
+{
+  "id": "encounter_vs_record",
+  "version": "0.1.0",
+  "title": "Encounter against the signed record: discrepancy report",
+  "unit": "consult",
+  "inputs": [
+    "consult_span",
+    "consult_text",
+    "pulse_record"
+  ],
+  "engine": "llm_zdr",
+  "prompt": "prompt.json",
+  "output": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "label",
+      "severity",
+      "n_findings"
+    ],
+    "properties": {
+      "label": {
+        "enum": [
+          "discrepancy report"
+        ]
+      },
+      "severity": {
+        "enum": [
+          "none",
+          "minor",
+          "material",
+          "obvious"
+        ]
+      },
+      "n_findings": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "counts_by_tier": {
+        "type": "object"
+      },
+      "n_records": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "record_choice": {
+        "enum": [
+          "window_uid",
+          "latest"
+        ]
+      },
+      "ai_filled_findings": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "said_dropped_unverified": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "prompt_version": {
+        "type": "string"
+      },
+      "attempts": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  },
+  "bench": {
+    "location": "rubric/bench/encounter_vs_record/evr_perturb.jsonl",
+    "metric": "field_accuracy",
+    "threshold": 0.5
+  },
+  "status": "draft",
+  "definition": {
+    "object": "Flag obvious differences between what was said in an encounter and the signed Pulse note for it. A discrepancy report for review: it states no verdict on any person and writes nothing to Pulse.",
+    "findings": {
+      "in_record_not_said": "an item in the record with no support on the tape",
+      "said_not_in_record": "an item said on the tape that the record lacks",
+      "value_mismatch": "dose, frequency or side differ between record and tape"
+    },
+    "tiers": {
+      "obvious": "a drug, procedure or non-differential diagnosis in the record with no support on the tape, or a clear side or dose contradiction (dose ratio at least 1.8 or at most 0.56)",
+      "material": "a smaller dose difference or a frequency difference",
+      "minor": "a differential diagnosis, an investigation, or anything said that the record lacks",
+      "none": "no finding"
+    },
+    "provenance": "every finding carries field_ai_filled from the record's own ai_field_metadata; a finding on an AI-filled field says so and is capped at material",
+    "record": "EMR_2_GENERATED, non-draft; the record named by the window's prescription uid, else the latest",
+    "comparison": "in code, field by field; drug names matched with the drug-match scorer behind its common-English and clinical-vocabulary gate",
+    "bench_note": "evr_perturb: one perturbation (add_drug, dose_x2, dose_half, laterality_swap, add_procedure, add_diagnosis, remove_drug) applied to a copy of a real record inside the job; recall per kind, extra findings, and the flag rate on unperturbed originals (originals are not negatives)",
+    "engine_note": "engine llm_zdr for the said-items extraction only; the Jev judgement hook is unwired"
+  }
+}

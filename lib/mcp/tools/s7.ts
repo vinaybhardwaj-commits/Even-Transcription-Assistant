@@ -65,7 +65,7 @@ const rubric: McpTool = {
       from: { type: "string", description: "IST YYYY-MM-DD" },
       to: { type: "string", description: "IST YYYY-MM-DD" },
       run_id: { type: "string" },
-      set: { type: "string", description: "bench: gold|grokbot_agreement|human_v" },
+      set: { type: "string", description: "bench: gold|grokbot_agreement|human_v|evr_perturb" },
       lab: { type: "boolean" },
       include_text: { type: "boolean", description: "results: fetch R2 evidence" },
       limit: { type: "integer", minimum: 1, maximum: RESULTS_LIMIT_MAX },

@@ -10,7 +10,9 @@ import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepCont
 import { jobError } from "../errors";
 import { callsLeft, capRefusal, isLlmRubric, reservationFor } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun } from "@/lib/rubrics/registry";
-import { evaluateUnit } from "@/lib/rubrics/engines";
+import { evaluateUnit, evaluateEvrPerturbUnit } from "@/lib/rubrics/engines";
+import { aggregatePerturb, PERTURB_KINDS, type PerturbKind, type WindowOutcome } from "@/lib/rubrics/evr/perturb";
+import { selectEvrWindows } from "@/lib/rubrics/evr/select";
 import { compareItem, labelReport, parseBenchSet, scoreBench, type BenchSet } from "@/lib/rubrics/bench";
 import { finishRun, insertRun, newRunId, readEvidence, writeEvidence } from "@/lib/rubrics/store";
 import { rubricTiming } from "./rubric-run";
@@ -21,7 +23,7 @@ export const RUBRIC_BENCH_KIND = "rubric_bench";
  * S71-AB/C: which labelled set a bench runs. `gold` (default) = the rubric's own bench.location; `grokbot_agreement` = model labels by the GrokBot Sentiment Analyzer (NOT human gold; the report
  * calls the metric agreement_with_grokbot); `human_v` = V's own labels (human gold; the report calls the metric accuracy_vs_V and states n). Each set is its own run and its own report.
  */
-export const BENCH_SETS = ["gold", "grokbot_agreement", "human_v"] as const;
+export const BENCH_SETS = ["gold", "grokbot_agreement", "human_v", "evr_perturb"] as const;
 export type BenchSetName = (typeof BENCH_SETS)[number];
 const Args = z.object({ rubric_id: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/), set: z.enum(BENCH_SETS).optional() }).strict();
 
@@ -30,6 +32,7 @@ export function parseRubricBenchArgs(raw: unknown): { rubric_id: string; set?: B
   if (!p.success) throw new JobArgsError(`bad args: ${p.error.issues[0]?.path.join(".") || "args"} ${p.error.issues[0]?.message ?? ""}`.trim().slice(0, 160));
   const r = getRubric(p.data.rubric_id);
   const refusal = canRun(r, { lab: true });
+  if (p.data.set === "evr_perturb" && p.data.rubric_id !== "encounter_vs_record") throw new JobArgsError("bad args: set evr_perturb is for encounter_vs_record");
   if (refusal) throw new JobArgsError(`${refusal.error}${refusal.detail ? `: ${refusal.detail}` : ""}`);
   return p.data;
 }
@@ -55,7 +58,36 @@ export const rubricBenchKind: JobKind = {
 /** Repo bench sets are registered here once a rubric is benched (static imports: the bundler ships them). None yet. */
 export const REPO_BENCH_SETS: Record<string, unknown> = {};
 
+/**
+ * S7-2 evr_perturb: the bench FILE (rubric/bench/encounter_vs_record/evr_perturb.jsonl) holds a header line {"header":{"selection": <rule text>, "seed": n, "n_windows": n, "kinds"?: [...]}} and
+ * optionally explicit rows {"unit_key"}; with no rows the windows are chosen HERE, at run time, by lib/rubrics/evr/select.ts. No record text and no id need to be in the file.
+ */
+async function loadEvrSet(): Promise<BenchSet | null> {
+  const store = labStore();
+  if (!store) return null;
+  const obj = await store.get("rubric/bench/encounter_vs_record/evr_perturb.jsonl");
+  if (!obj) return null;
+  let header: { seed?: unknown; n_windows?: unknown; kinds?: unknown } = {};
+  const keys: string[] = [];
+  for (const line of obj.body.split("\n")) {
+    if (!line.trim()) continue;
+    let j: { header?: typeof header; unit_key?: unknown };
+    try { j = JSON.parse(line); } catch { return null; }
+    if (j.header) header = j.header;
+    else if (typeof j.unit_key === "string" && /^[A-Za-z0-9_.:@-]{1,120}$/.test(j.unit_key)) keys.push(j.unit_key);
+    else return null;
+  }
+  const seed = typeof header.seed === "number" && Number.isFinite(header.seed) ? Math.trunc(header.seed) : 1;
+  const n = typeof header.n_windows === "number" ? Math.max(1, Math.min(100, Math.trunc(header.n_windows))) : 40;
+  const kinds = Array.isArray(header.kinds) ? (header.kinds as unknown[]).filter((k): k is PerturbKind => (PERTURB_KINDS as readonly unknown[]).includes(k)) : [...PERTURB_KINDS];
+  if (kinds.length === 0) return null;
+  const chosen = keys.length > 0 ? keys.slice(0, 100) : await selectEvrWindows(n, seed);
+  if (chosen.length === 0) return null;
+  return { unit: "consult", items: chosen.map((unit_key) => ({ unit_key, expected: { evr: "perturb" } })), evr: { seed, kinds } };
+}
+
 async function loadBenchSet(rubricId: string, version: string, location: string, set: BenchSetName = "gold"): Promise<BenchSet | null> {
+  if (set === "evr_perturb") return loadEvrSet();
   if (set !== "gold") return loadGold(`rubric/bench/${rubricId}/${set}.jsonl`, set);
   // llm_zdr rubrics: gold prepared offline and uploaded as JSONL (rubric/bench/<rubric_id>/gold.jsonl); the gold never enters the repo
   if (location.startsWith("rubric/bench/")) return loadGold(location, "gold");
@@ -104,6 +136,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   const r = getRubric(a.rubric_id);
   if (!r) return failWith(jobError("unknown_rubric", a.rubric_id));
   const set = ctx.progress.set as BenchSet;
+  if (set.evr) return evaluateEvrStep(ctx, r, set);
   const compared = [...((ctx.progress.compared as Array<ReturnType<typeof compareItem>> | undefined) ?? [])];
   let idx = num(ctx.progress.idx);
   const deadline = Date.now() + rubricTiming.evaluateStepMs;
@@ -129,8 +162,50 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   return nextStep(idx >= set.items.length ? "finish" : "evaluate", { ...ctx.progress, idx, compared, llm_calls: made, skipped_cap: capSkipped });
 }
 
+/** evr_perturb: a batch of windows per claim; only counts and codes are kept in progress. A window that cannot be scored (held out, no record, unscorable tape) is a skip with its reason. */
+async function evaluateEvrStep(ctx: StepContext, r: NonNullable<ReturnType<typeof getRubric>>, set: BenchSet): Promise<StepOutcome> {
+  const outs = [...((ctx.progress.evr_out as Array<WindowOutcome | { skip: string }> | undefined) ?? [])];
+  let idx = num(ctx.progress.idx);
+  const deadline = Date.now() + rubricTiming.evaluateStepMs;
+  const end = Math.min(set.items.length, idx + rubricTiming.batchUnits);
+  // G71: the same model-call ceiling as every llm rubric (one extraction call per window)
+  let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
+  let left = await callsLeft(set.items.length, made);
+  while (idx < end && Date.now() < deadline) {
+    if (left <= 0) {
+      for (; idx < set.items.length; idx++) { outs[idx] = { skip: "llm_cap" }; capSkipped += 1; }
+      break;
+    }
+    const res = await evaluateEvrPerturbUnit(r, set.items[idx]!.unit_key, set.evr!.seed + idx, set.evr!.kinds as PerturbKind[]);
+    outs[idx] = res.ok ? res.outcome : { skip: res.reason };
+    made += res.calls;
+    left -= res.calls;
+    idx += 1;
+  }
+  return nextStep(idx >= set.items.length ? "finish" : "evaluate", { ...ctx.progress, idx, evr_out: outs, llm_calls: made, skipped_cap: capSkipped });
+}
+
+async function finishEvr(ctx: StepContext, r: NonNullable<ReturnType<typeof getRubric>>): Promise<StepOutcome> {
+  const runId = String(ctx.progress.run_id ?? "");
+  const set = ctx.progress.set as BenchSet;
+  const outs = (ctx.progress.evr_out as Array<WindowOutcome | { skip: string }>) ?? [];
+  const scored = outs.filter((o): o is WindowOutcome => "kinds" in o);
+  const skips: Record<string, number> = {};
+  for (const o of outs) if ("skip" in o) skips[o.skip] = (skips[o.skip] ?? 0) + 1;
+  const agg = aggregatePerturb(scored);
+  const body = {
+    rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, set: "evr_perturb", metric: "perturbation_recall", label: `perturbation recall (windows=${scored.length})`, human_gold: false,
+    note: "perturbations are applied to copies of real records inside the job; originals are NOT negatives (a real record can hold a real discrepancy): baseline_flag_rate is their flag rate, for later human review",
+    windows_planned: set.items.length, windows_scored: scored.length, windows_skipped: skips, seed: set.evr!.seed, kinds: set.evr!.kinds, ...agg,
+  };
+  const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, body);
+  await finishRun({ run_id: runId, units_ok: scored.length, units_failed: set.items.length - scored.length });
+  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, set: "evr_perturb", metric: "perturbation_recall", passed: null, n: scored.length, windows_skipped: skips, llm_calls: num(ctx.progress.llm_calls), skipped_llm_cap: num(ctx.progress.skipped_cap), baseline_flag_rate: agg.baseline_flag_rate, per_kind: agg.per_kind, report_key: reportKey, status_at_run: r.status });
+}
+
 async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   const a = ctx.args as { rubric_id: string; set?: BenchSetName };
+  if ((ctx.progress.set as BenchSet | undefined)?.evr) return finishEvr(ctx, getRubric(a.rubric_id)!);
   const setName: BenchSetName = a.set ?? "gold";
   const r = getRubric(a.rubric_id)!;
   const runId = String(ctx.progress.run_id ?? "");

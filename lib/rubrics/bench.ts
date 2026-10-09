@@ -11,7 +11,7 @@ import type { RubricUnit } from "./types";
 /** `room_id` / `ist_date`: where an EXCERPT came from (S71-R4 G70). An excerpt without both is refused (excerpt_unplaced); with them it meets the same held-out check as a consult before anything is read. */
 export type BenchSetItem = { unit_key: string; expected: Record<string, unknown>; tolerance?: number; room_id?: string; /** several candidate rooms (a token that maps to two room-days): blind if ANY is blind */ room_ids?: string[]; ist_date?: string };
 /** `excerpt`: the units are transcript EXCERPTS (a labeller saw a few turns around the topic, not the whole consult); their text comes from the lab store only, never from the database. */
-export type BenchSet = { unit: RubricUnit; items: BenchSetItem[]; excerpt?: boolean };
+export type BenchSet = { unit: RubricUnit; items: BenchSetItem[]; excerpt?: boolean; /** evr_perturb (S7-2): the perturbation bench; items are windows, expected is unused */ evr?: { seed: number; kinds: string[] } };
 export const BENCH_MAX_ITEMS = 500;
 export const DEFAULT_TOLERANCE = 0.01;
 
@@ -74,7 +74,7 @@ export function scoreBench(metric: string, threshold: number, compared: Array<Re
  * S71-AB/C: what a report calls itself. A GrokBot-label set is model-vs-model AGREEMENT, never "accuracy", and has no pass line; V's own labels are accuracy_vs_V with n stated. The
  * `accuracy` key of the scorer's metrics is renamed for the agreement set so the word cannot be read off the report.
  */
-export function labelReport(set: "gold" | "grokbot_agreement" | "human_v", r: BenchReport, opts: { excerpt?: boolean } = {}): Record<string, unknown> {
+export function labelReport(set: "gold" | "grokbot_agreement" | "human_v" | "evr_perturb", r: BenchReport, opts: { excerpt?: boolean } = {}): Record<string, unknown> {
   if (set === "gold") return { ...r, set };
   const { accuracy, ...restMetrics } = r.metrics as BenchMetrics & { accuracy: number };
   if (set === "grokbot_agreement") {
