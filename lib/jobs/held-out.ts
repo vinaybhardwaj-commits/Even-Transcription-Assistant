@@ -5,7 +5,7 @@
  */
 import { sql } from "@/lib/db";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { guardSessionSpan, roomDayIsBlind, spanTouchesBlindDay, windowBlindAny } from "@/lib/voice-blind";
+import { guardSessionSpan, roomDayIsBlind, spanTouchesBlindDay, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
 
 export type HeldOutVerdict = "blind_room_day" | "window_unplaced";
 export type HeldOutGuard = (args: Record<string, unknown>) => Promise<HeldOutVerdict | null>;
@@ -95,3 +95,13 @@ export const roomDateArgHeldOut: HeldOutGuard = async (a) => (typeof a.room === 
  * registry is uniform; it names that rule rather than refusing a whole run for one unit.
  */
 export const perUnitHeldOut: HeldOutGuard = async () => null;
+
+/**
+ * K4-2: a room-day job that iterates windows leaves out every window with ANY held-out placement (windowBlindAny's set: bench, diarize, turn rows, window text, emotion rows), inside the
+ * loop's input, and counts them (`n_blind_excluded`). A day whose own room-day is held out is refused earlier (the hook); this is for a clean day with one window placed elsewhere.
+ */
+export async function splitBlindWindows<T>(items: readonly T[], idOf: (t: T) => string): Promise<{ kept: T[]; excluded: number }> {
+  const blind = await windowsBlindAny(items.map(idOf));
+  const kept = items.filter((x) => !blind.has(idOf(x)));
+  return { kept, excluded: items.length - kept.length };
+}

@@ -16,6 +16,7 @@
  */
 import { parseFlag } from "@/lib/flags";
 import { sql } from "@/lib/db";
+import { splitBlindWindows } from "@/lib/jobs/held-out";
 import { askJev } from "./ask";
 import { registerEncounterQuestions, U6_OPTIONS, U6_PROMPT_VERSION, U6_QUESTION_ID, type U6Option } from "./prompts/encounter-v1";
 import { windowState } from "@/lib/encounter-clock/fusion-state";
@@ -30,6 +31,8 @@ export type ClinicalRouteOutcome = {
   windowsAsked: number;
   /** Counts only — never which window said what, never any text. */
   byCategory: Record<U6Option, number>;
+  /** K4-2: windows left out because ANY placement is held out */
+  nBlindExcluded?: number;
 };
 
 function emptyCategoryCounts(): Record<U6Option, number> {
@@ -48,13 +51,15 @@ export async function runClinicalRouteAsync(roomDayId: string): Promise<Clinical
 
   registerEncounterQuestions();
 
-  const rows = (await sql`
+  const allRows = (await sql`
     SELECT w.id, t.english
     FROM bench_window w
     LEFT JOIN jev_window_text t ON t.window_id = w.id
     WHERE w.room_day_id = ${roomDayId}
     ORDER BY w.start_ms
   `) as WindowTextRow[];
+  // K4-2: a window with ANY held-out placement is never classified (its text is not sent to the model); counted
+  const { kept: rows, excluded: nBlindExcluded } = await splitBlindWindows(allRows, (r) => r.id);
 
   const byCategory = emptyCategoryCounts();
   let windowsAsked = 0;
@@ -70,5 +75,5 @@ export async function runClinicalRouteAsync(roomDayId: string): Promise<Clinical
     }
   }
 
-  return { ran: true, windowsTotal: rows.length, windowsAsked, byCategory };
+  return { ran: true, windowsTotal: rows.length, windowsAsked, byCategory, nBlindExcluded };
 }

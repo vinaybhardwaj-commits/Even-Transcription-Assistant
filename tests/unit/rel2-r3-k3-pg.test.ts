@@ -246,3 +246,49 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(await jobCount()).toBe(n0);
   });
 });
+
+(HAVE ? describe : describe.skip)("K4-2 room-day jobs leave out windows held out by ANOTHER placement, counted (the refuter's repro: a clean room-day, one window with held-out turn rows)", () => {
+  beforeAll(() => {
+    pg.exec(`
+      INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_k4', 'r_clean', '2026-10-06');
+      ${sessionRow("bs_k4b", 4)}
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES
+        ('bw_k4ok', 'bs_k4b', 'rd_k4', ${Date.parse("2026-10-05T04:00:00Z")}, ${Date.parse("2026-10-05T04:10:00Z")}, 'primary'),
+        ('bw_k4rts', 'bs_k4b', 'rd_k4', ${Date.parse("2026-10-05T04:10:00Z")}, ${Date.parse("2026-10-05T04:20:00Z")}, 'primary');
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_k4rts', 't1', 'rd_blind', 0, 'no_match');
+      INSERT INTO room_diarize_window (window_id, room_day_id, state) VALUES ('bw_k4ok', 'rd_k4', 'ok'), ('bw_k4rts', 'rd_k4', 'ok');
+    `);
+  });
+  const stepCtx = (step: string, args: Record<string, unknown>, progress: Record<string, unknown> = {}) => ({ job: { id: "job_k4", actor: "t", created_at: "2026-10-09T00:00:00Z" }, step, args, progress }) as never;
+
+  it("jev_english: the blind window gets no jev_window_text row, the clean one does; n_blind_excluded 1", async () => {
+    const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+    const out = await KIND_BY_NAME.get("jev_english")!.run(stepCtx("classify", { room_day_id: "rd_k4", force: true }));
+    expect(out).toMatchObject({ kind: "done", result: { windows: 1, n_blind_excluded: 1 } });
+    const text = (await H.sql!`SELECT window_id FROM jev_window_text WHERE room_day_id = 'rd_k4' ORDER BY window_id` as Array<{ window_id: string }>).map((r) => r.window_id);
+    expect(text).toEqual(["bw_k4ok"]);
+  });
+  it("jev_window: skip rows / signals only for the clean window; n_blind_excluded 1", async () => {
+    const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+    const out = await KIND_BY_NAME.get("jev_window")!.run(stepCtx("collect", { room_day_id: "rd_k4", force: true, prompt_version: "v" }));
+    expect(out).toMatchObject({ kind: "done", result: { windows_total: 1, n_blind_excluded: 1 } });
+    expect(((await H.sql!`SELECT window_id FROM jev_window_signal WHERE room_day_id = ${"rd_k4"}::text` as Array<{ window_id: string }>).map((r) => r.window_id))).not.toContain("bw_k4rts");
+  });
+  it("jev_role: the blind window is not processed; n_blind_excluded 1", async () => {
+    const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+    const out = await KIND_BY_NAME.get("jev_role")!.run(stepCtx("run", { room_day_id: "rd_k4", force: true, prompt_version: "v" }));
+    expect(out).toMatchObject({ kind: "done", result: { windows_total: 1, n_blind_excluded: 1 } });
+  });
+  it("clinical_route_replay: the blind window's text is not classified or sent (the flag on, the model call spied)", async () => {
+    pg.exec(`INSERT INTO jev_window_text (window_id, room_day_id, source, char_count, english) VALUES ('bw_k4rts', 'rd_k4', 'run_english', 5, 'held out words') ON CONFLICT (window_id) DO UPDATE SET english = 'held out words', room_day_id = 'rd_k4'`);
+    process.env.JEV_CLINICAL_ROUTE = "true";
+    const { runClinicalRouteAsync } = await import("@/lib/jev/clinical-route");
+    const jev = await import("@/lib/jev/ask");
+    const spy = vi.spyOn(jev, "askJev").mockResolvedValue({ results: {} } as never);
+    const out = await runClinicalRouteAsync("rd_k4").catch((e) => ({ err: String(e) }));
+    spy.mockRestore();
+    delete process.env.JEV_CLINICAL_ROUTE;
+    expect(JSON.stringify(out)).toContain("\"nBlindExcluded\":1");
+    for (const c of spy.mock.calls) expect(JSON.stringify(c)).not.toContain("held out words");
+  });
+});
