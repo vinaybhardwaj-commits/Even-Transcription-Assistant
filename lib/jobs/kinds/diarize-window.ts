@@ -52,7 +52,7 @@ import {
 } from "@/lib/stt/diarize-window";
 import { runDiarize } from "@/lib/diarize";
 import { parseDiarizeSegments } from "@/lib/stt/speaker-clusters";
-import { diarizeEngine, localLabelEnabled, teacherLabelsEnabled, type DiarizeEngine } from "@/lib/diarize-engine";
+import { localLabelEnabled, pushEngine, teacherLabelsEnabled, type DiarizeEngine } from "@/lib/diarize-engine";
 import { PRESIGN_TTL_SECONDS, fetchJobRecord, pollDiarize, submitDiarize } from "@/lib/diarize-pyannoteai";
 import { embedSpeakers, embeddedCount, longestSpanPerSpeaker, mergeEmbeddings } from "@/lib/diarize-embed";
 import { writeWindowLabel } from "@/lib/diarize-labels";
@@ -183,7 +183,7 @@ export const diarizeWindowKind: JobKind = {
 /**
  * Step 1 — decide the engine, and either do the local call outright or submit to pyannote.ai.
  *
- * `diarizeEngine()` THROWS on a value it does not recognise, and that throw is allowed to leave
+ * `pushEngine()` THROWS on a value it does not recognise, and on `nemotron`, and that throw is allowed to leave
  * this step. The runner counts it and retries, and three of them fail the job loudly — which is
  * the outcome a mistyped `DIARIZE_ENGINE` must have.
  */
@@ -192,7 +192,9 @@ async function diarizeStep(ctx: StepContext) {
   const w = await loadWindow(windowId);
   if ("error" in w) return failWith(jobError(w.error, w.detail));
 
-  const engine: DiarizeEngine = diarizeEngine();
+  // pushEngine, not diarizeEngine: `nemotron` is a known engine but has no path in this job, and
+  // the branches below would otherwise treat it as pyannote.ai. It throws, like a typo does.
+  const engine: DiarizeEngine = pushEngine();
   const runId = randomUUID();
 
   // ── THE LEVEL GATE, BEFORE ANY AUDIO IS FETCHED ────────────────────────────────────────────
