@@ -808,4 +808,56 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
     }
   });
+
+  it("S7-1B U1 — each copy of the 'running job with no run row yet' clause is pinned ALONE: dayUsage (llm-cap.ts) and insertJobCapped (store.ts) both count it, tested directly so neither can hide behind the other", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const keys = Array.from({ length: 30 }, (_, i) => `u${i}`);
+    const args = { rubric_id: "consult_chair_affect", lab: true, unit: "consult", unit_keys: keys, limit: 200 };
+    try {
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status, progress) VALUES ('job_u1', 'rubric_run', ${JSON.stringify(args)}::jsonb, 'mcp:t', 'running', '{}'::jsonb)`;
+      // copy 1 (lib/rubrics/llm-cap.ts dayUsage): the running job with no run row reserves its 30 units
+      expect(await C.dayUsage()).toEqual({ used: 0, queued: 60 }); // 30 units x 2 attempts (G74)
+      // copy 2 (lib/jobs/store.ts insertJobCapped), called DIRECTLY (no precheck in front of it): 60 + 60 > 100 is refused, nothing is inserted
+      const g = C.cappedGuard(60, { RUBRIC_LLM_DAILY_CALL_CAP: "100" });
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, g)).toBeNull();
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM scribe_job`)[0] as { n: number }).n).toBe(1);
+      // once the job has its run row (progress.run_id) it is no longer counted by its args (the run row carries it): both copies agree
+      await pg.exec(`UPDATE scribe_job SET progress = '{"run_id":"rub_u1"}'::jsonb; INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_u1', 'consult_chair_affect', '1.1.0', 'run', 30);`);
+      expect(await C.dayUsage()).toEqual({ used: 60, queued: 0 }); // the run row: 30 units x 2
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, g)).toBeNull(); // 60 (run row) + 60 > 100
+      expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args, actor: "mcp:t" }, C.cappedGuard(60, { RUBRIC_LLM_DAILY_CALL_CAP: "120" }))).not.toBeNull(); // 60 + 60 <= 120
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
+  it("S7-1B — the board SQL on real postgres: rows of the range only, the planted held-out row is excluded and counted, the doctor comes from the (fake) warehouse, versions are separate", async () => {
+    const REC = await import("@/lib/rubrics/evr/record");
+    const { buildBoard } = await import("@/lib/rubrics/board");
+    await pg.exec(`DELETE FROM rubric_result; DELETE FROM rubric_run;`);
+    await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidBoard1AaaaaaaaZ', warehouse_prescription_uid = 'RecBoardAaaaaaaaaaaaaaaaaa1' WHERE consult_key = 'enc1@m1'`;
+    await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind, units_planned) VALUES ('rub_bd', 'encounter_vs_record', '0.1.0', 'run', 3) ON CONFLICT DO NOTHING`;
+    const ins = (key: string, room: string, date: string, version: string, lab = true, status = "ok") => pg.sql`INSERT INTO rubric_result (rubric_id, version, unit_kind, unit_key, room_id, ist_date, run_id, status, score, findings, lab) VALUES ('encounter_vs_record', ${version}, 'consult', ${key}, ${room}, ${date}::date, 'rub_bd', ${status}, '{"label":"discrepancy report","severity":"minor","n_findings":1}'::jsonb, '["minor:said_not_in_record:drug"]'::jsonb, ${lab})`;
+    await ins("enc1@m1", "r1", "2026-10-08", "0.1.0");
+    await ins("enc3@m2", "room_qyzghzaf", "2026-08-23", "0.1.0"); // planted held-out pair
+    await ins("encX@m1", "r1", "2026-10-07", "0.1.0", false); // lab false: not in a lab board
+    await ins("encY@m1", "r1", "2026-10-06", "0.1.0", true, "failed"); // not ok
+    await ins("encZ@m1", "r1", "2026-09-01", "0.1.0"); // out of range
+    REC.setMetabaseForTests(async (q) => { expect(q).toMatch(/^SELECT /); return [{ rec_uid: "RecBoardAaaaaaaaaaaaaaaaaa1", doctor_uid: "docBoardOpaqueAaaaaaaaaa" }]; });
+    try {
+      const out = await buildBoard({ rubric_id: "encounter_vs_record", from: "2026-10-01", to: "2026-10-31", lab: true, by: "doctor", min_n: 3 });
+      if (!out.ok) throw new Error(JSON.stringify(out));
+      expect(out.board_meta).toMatchObject({ n_rows: 1, n_unattributed: 0, status: "draft" });
+      expect(out.groups).toEqual([{ group: "docBoardOpaqueAaaaaaaaaa", version: "0.1.0", n_units: 1, below_min_n: true }]);
+      const wide = await buildBoard({ rubric_id: "encounter_vs_record", from: "2026-08-01", to: "2026-10-31", lab: true, by: "room", min_n: 3 });
+      if (!wide.ok) throw new Error(JSON.stringify(wide));
+      expect(wide.board_meta).toMatchObject({ n_rows: 2, n_blind_excluded: 1 }); // enc1 and encZ; the held-out row is excluded in SQL and counted
+      expect(wide.groups.map((g) => g.group)).toEqual(["r1"]);
+    } finally {
+      REC.setMetabaseForTests(null);
+      await pg.exec(`DELETE FROM rubric_result; DELETE FROM rubric_run;`);
+    }
+  });
 });
