@@ -413,11 +413,62 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays under 40,000 characters", async () => {
+  it("budget: the full tools/list result stays at or under 38,500 characters (S6-DIET)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(40_000);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(38_500);
+  });
+
+  it("S6-DIET: tools/list with every description field removed is IDENTICAL to s6-blind ff5973ebd5 (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
+    const { body } = await door("tools/list");
+    const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k]) => k !== "description").map(([k, v]) => [k, strip(v)])) : o;
+    const sortKeys = (o: unknown): unknown => Array.isArray(o) ? o.map(sortKeys) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeys(v)])) : o;
+    const before = JSON.parse(readFileSync("fixtures/mcp/s6-blind-ff5973ebd5-tools-list-no-descriptions.json", "utf8"));
+    expect(sortKeys(strip(body.result))).toEqual(sortKeys(before));
+  });
+
+  it("S6-DIET: every safety statement survived the diet, per tool", async () => {
+    const SAFETY: Record<string, string[]> = {
+      scribe_room_command: ["WRITE; acts on a LIVE clinical room", "kiosk_not_listening", "start_day idempotent", "room_paused is consent", "without V's GO"],
+      scribe_steward_command: ["WRITE", "LIVE rooms", "reason required", "returns a revert"],
+      scribe_rubric: ["never Pulse", "touches no room", "run/bench need invoke", "lab:true"],
+      scribe_sarvam: ["ZDR", "submits need invoke"],
+      scribe_jobs: ["status/list need read, submit needs invoke, cancel needs write", "no live-room command"],
+      scribe_job_submit: ["INVOKE scope", "no live-room command"],
+      scribe_job_cancel: ["WRITE", "no room command"],
+      scribe_scratch: ["SCRATCH room-days only, never a live room"],
+      scribe_post_cue: ["WRITE", "sends no room command"],
+      scribe_pin_visit: ["WRITE", "never edits the visit table", "no room command"],
+      scribe_mark_consult: ["WRITE", "no room command"],
+      scribe_set_visit_clinician: ["WRITE", "no room command"],
+      scribe_silence_readjudicate: ["WRITE only with apply:true", "dry run by default", "no live-room command"],
+      scribe_extract_audio: ["INVOKE scope", "writes no row", "touches no room"],
+      scribe_transcribe_range: ["INVOKE scope", "text only, never bytes", "refused over 30 min", "while any room records"],
+      scribe_encounter_shadow_run: ["INVOKE scope", "no clinician-facing write", "no live room"],
+      scribe_jev_window_run: ["INVOKE scope", "no live-room command"],
+      scribe_note_safety_replay: ["INVOKE scope", "regenerates no note", "shows nothing to clinicians"],
+      scribe_clinical_route_replay: ["INVOKE scope", "no live-room command"],
+      scribe_sessions: ["Read-only", "dry run that writes nothing"],
+      scribe_session_tape: ["Read-only", "may quote operator notes", "touches no room"],
+      scribe_stt_runs: ["Read-only", "may quote identity"],
+      scribe_voice: ["Read-only", "names clinicians", "presigned audio with include_urls"],
+      scribe_diarize_segments: ["Read-only", "without text"],
+      scribe_jev_signals: ["Read-only", "never transcript text"],
+      scribe_jev_decisions: ["Read-only", "never transcript or state text"],
+      scribe_stt_windows: ["Read-only", "No transcript text"],
+      scribe_steward: ["Read-only", "No ticket signatures"],
+      scribe_kiosks: ["Read-only", "sends no command"],
+      scribe_get_state: ["Read-only", "Never creates a day"],
+      scribe_rooms: ["Read-only", "digital silence"],
+      scribe_room: ["Read-only", "digital silence"],
+      scribe_now: ["Read-only", "digital silence"],
+      scribe_room_levels: ["Read-only", "digital silence"],
+    };
+    const byName = Object.fromEntries((await listed()).map((t) => [t.name, t.description]));
+    for (const [n, phrases] of Object.entries(SAFETY)) for (const p of phrases) expect(byName[n], `${n}: ${p}`).toContain(p);
+    // every other read tool still says Read-only / Reads, every write tool WRITE or INVOKE
+    for (const [n, d] of Object.entries(byName)) expect(d, n).toMatch(/Read-only|WRITE|INVOKE|Reads and writes|Job queue read\/write/);
   });
 
   it("scribe_help returns the long text as `help` beside the short description, for every listed tool", async () => {
