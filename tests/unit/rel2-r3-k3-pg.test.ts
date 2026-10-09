@@ -345,3 +345,24 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(await stateOf("bw_sil_day")).toBe(SILENT);
   });
 });
+
+(HAVE ? describe : describe.skip)("REL2-R4 G1 /api/diarize-segments + scribe_diarize_segments, G2 the encounter shadow evidence: the full any-placement set", () => {
+  const seg = async (q: Record<string, unknown>) => { const { lookupSegments } = await import("@/lib/diarize-segments"); return lookupSegments(q as never); };
+  it("G1 window path: a window held out ONLY via its turn rows (bw_k4rts) is 403 blind_room_day from the lookup, the tool and the bearer route's shared function; a clean window is served", async () => {
+    expect(await seg({ window_id: "bw_k4rts" })).toMatchObject({ ok: false, status: 403, error: "blind_room_day" });
+    expect(await call("scribe_diarize_segments", { window_id: "bw_k4rts" })).toMatchObject({ error: "blind_room_day" });
+    expect(await seg({ window_id: "bw_k4ok" })).toMatchObject({ ok: true });
+  });
+  it("G1 session path: a session scribe_get_session refuses whole (bs_k4b holds the turn-row window) refuses ALL its windows, bw_k4ok included, and the clean session lists", async () => {
+    expect(await call("scribe_get_session", { session_id: "bs_k4b" })).toMatchObject({ error: "blind_room_day" });
+    expect(await seg({ session_id: "bs_k4b" })).toMatchObject({ ok: false, status: 403, error: "blind_room_day" });
+    expect(await call("scribe_diarize_segments", { session_id: "bs_k4b" })).toMatchObject({ error: "blind_room_day" });
+    expect((await seg({ session_id: "bs_rdw" })).ok).toBe(false); // held out by the diarize row
+  });
+  it("G1 nemotron path: the shadow store is refused for the turn-row window before it is read", async () => {
+    process.env.DIARIZE_NEMOTRON_SHADOW = "on";
+    try {
+      expect(await seg({ window_id: "bw_k4rts", engine: "nemotron" })).toMatchObject({ ok: false, status: 403, error: "blind_room_day" });
+    } finally { delete process.env.DIARIZE_NEMOTRON_SHADOW; }
+  });
+});

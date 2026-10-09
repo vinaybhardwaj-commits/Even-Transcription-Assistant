@@ -30,7 +30,7 @@
  * `window_id` is supported for it. With no `engine`, every answer is exactly what it was.
  */
 import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { refusalForPairs, windowPlacement } from "@/lib/voice-blind";
+import { guardSessionSpan, refusalForPairs, windowBlindAny, windowPlacement } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { nemotronShadowEnabled } from "@/lib/diarize-engine";
 
@@ -414,7 +414,8 @@ export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: bool
     // S6-BLIND: the placement check runs before the shadow store is read, exactly as for the ensemble path (a held-out or unplaced window is refused; an unknown one stays not_found)
     if (guard) {
       const p = await windowPlacement(pick.id);
-      if (p.known) { const g = refusalForPairs(p.pairs); if (g) return { ok: false, status: 403, error: g }; }
+      // G1: the placement pairs AND the full any-placement set (turn rows, window text, emotion rows included)
+      if (p.known) { const g = refusalForPairs(p.pairs) ?? ((await windowBlindAny(pick.id)) ? "blind_room_day" : null); if (g) return { ok: false, status: 403, error: g }; }
     }
     const rows = (await sql`
       SELECT n.window_id, w.session_id, n.room_day_id, w.source_mic, n.status, n.received_at,
@@ -449,7 +450,8 @@ export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: bool
     if (guard) {
       // S6-BLIND: the window's placement is asked first; a held-out window is refused before its segments (or anything else) are read. An unknown window stays not_found (nothing to leak).
       const p = await windowPlacement(pick.id);
-      if (p.known) { const g = refusalForPairs(p.pairs); if (g) return { ok: false, status: 403, error: g }; }
+      // G1: the placement pairs AND the full any-placement set (turn rows, window text, emotion rows included)
+      if (p.known) { const g = refusalForPairs(p.pairs) ?? ((await windowBlindAny(pick.id)) ? "blind_room_day" : null); if (g) return { ok: false, status: 403, error: g }; }
     }
     const rows = (await sql`
       SELECT d.window_id, w.session_id, d.room_day_id, w.source_mic, d.state, d.diarized_at,
@@ -493,6 +495,8 @@ export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: bool
  * through room_diarize_window.room_day_id, else bench_window.room_day_id. Nothing is named: only counts.
  */
 async function sessionGuarded(sessionId: string, limit: number): Promise<SegmentsLookup> {
+  // G1: a session that scribe_get_session refuses whole (its day or span is held out, or ANY window has ANY held-out placement) serves none of its windows either
+  if ((await guardSessionSpan(sessionId)) === "blind_room_day") return { ok: false, status: 403, error: "blind_room_day" };
   const days = BLIND_ROOM_DAYS.map(([d]) => d), rooms = BLIND_ROOM_DAYS.map(([, r]) => r);
   // Y1: a window is held out if EITHER of its placements (room_diarize_window.room_day_id, bench_window.room_day_id) is a held-out pair, as in the window view (lib/voice-blind refusalForPairs).
   // Y2: the INNER JOIN below is the unplaced exclusion (a window with no room-day at all drops out and is counted).
