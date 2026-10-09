@@ -10,6 +10,8 @@ const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push(s.join("?")); return H.sql!(s, ...v); }, { transaction: async () => [] }) }));
 const R2 = vi.hoisted(() => ({ presign: 0, get: 0 }));
 vi.mock("@/lib/r2", () => ({ signGetUrl: async () => { R2.presign++; return "https://r2.example/x"; }, getObjectBytes: async () => { R2.get++; return new Uint8Array([1]); } }));
+vi.mock("@/lib/cookie", async (orig) => ({ ...((await orig()) as object), readAdminCookie: async () => "admin-cookie" }));
+vi.mock("@/lib/auth", async (orig) => ({ ...((await orig()) as object), verifyAdminJwt: async () => ({ sub: "admin" }) }));
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 300_000 });
 
 const HAVE = dockerAvailable();
@@ -426,5 +428,42 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect("rows" in (await R.adminWindowRow("bw_ok_none"))).toBe(true);
     const pending = await R.measurePendingCount();
     expect(pending).toBeGreaterThanOrEqual(0);
+  });
+});
+
+(HAVE ? describe : describe.skip)("GUARD-3 G-2: the admin bench-session GETs and the encounter-windows read go through lib/room-access with the held-out rule", () => {
+  it("GET /api/bench/sessions?room_id=<held-out>&ist_date=<held-out day> lists nothing and counts; the unfiltered list leaves the held-out sessions out", async () => {
+    const { GET } = await import("@/app/api/bench/sessions/route");
+    const { NextRequest } = await import("next/server");
+    const get = async (qs: string) => (await (await GET(new NextRequest(`http://x/api/bench/sessions${qs}`))).json()) as { data?: Record<string, any>; sessions?: any[]; n_blind_excluded?: number };
+    const one = await get(`?room_id=${BR}&ist_date=${BD}`);
+    const body = (one.data ?? one) as { sessions: Array<{ id: string }>; n_blind_excluded: number };
+    expect(body.sessions).toEqual([]);
+    expect(body.n_blind_excluded).toBeGreaterThanOrEqual(1);
+    const all = ((await get("")).data ?? (await get(""))) as { sessions: Array<{ id: string }> };
+    for (const bad of ["bs_blind", "bs_win", "bs_rts", "bs_span"]) expect(all.sessions.map((x) => x.id), bad).not.toContain(bad);
+  });
+  it("GET /api/bench/sessions/<held-out id> is 403 blind_room_day (chunks, events and marks are not read); a clean session is 200", async () => {
+    const { GET } = await import("@/app/api/bench/sessions/[id]/route");
+    const { NextRequest } = await import("next/server");
+    const get = (id: string) => GET(new NextRequest(`http://x/api/bench/sessions/${id}`), { params: Promise.resolve({ id }) });
+    H.statements.length = 0;
+    for (const id of ["bs_blind", "bs_win", "bs_rts"]) expect((await get(id)).status, id).toBe(403);
+    expect(H.statements.filter((t) => /FROM bench_chunk\s+WHERE|FROM bench_event/.test(t) && !/FROM bench_session s WHERE/.test(t))).toEqual([]);
+    expect((await get("bs_ok")).status).toBe(200);
+  });
+  it("queryWindows (GET /api/encounter-windows, the clock anchors): a consult window opened or closed on a held-out (room, IST day) is never returned", async () => {
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version) VALUES
+        ('cw_ok', 'm1', 'r_clean', 'none', '${CLEAN_DAY}T04:00:00Z', '${CLEAN_DAY}T04:20:00Z', 'endConsult', 'clean', 'v1'),
+        ('cw_open', 'm1', '${BR}', 'none', '${T(dayStart + 3_600_000)}', '${T(dayStart + 4_000_000)}', 'endConsult', 'clean', 'v1'),
+        ('cw_cross', 'm1', '${BR}', 'none', '${T(dayStart - 600_000)}', '${T(dayStart + 600_000)}', 'endConsult', 'clean', 'v1'),
+        ('cw_other_room', 'm1', 'r_clean', 'none', '${T(dayStart + 3_600_000)}', '${T(dayStart + 4_000_000)}', 'endConsult', 'clean', 'v1');
+    `);
+    const { queryWindows } = await import("@/lib/encounter-windows");
+    const { sql } = await import("@/lib/db");
+    const rows = await queryWindows(sql as never, { from: T(dayStart - 86_400_000), to: T(Date.parse(CLEAN_DAY) + 2 * 86_400_000), limit: 100 });
+    expect(rows.map((r) => r.consult_key).sort()).toEqual(["cw_other_room", "cw_ok"].sort());
+    expect((await queryWindows(sql as never, { room_id: BR, limit: 100 })).map((r) => r.consult_key)).toEqual([]);
   });
 });

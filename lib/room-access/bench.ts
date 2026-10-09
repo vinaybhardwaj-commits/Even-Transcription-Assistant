@@ -429,3 +429,62 @@ export class StoreZipWriter {
     return new Uint8Array(parts);
   }
 }
+
+
+// --- G-2: the recorder device's session writes (room-cookie auth), moved out of app/api/bench/sessions[/id] -----------------------------------
+/** ARCH #16: end the room's stale `recording` session at its honest last-audio time (never now()). Best-effort by the caller. */
+export async function endStaleSessions(roomId: string, note: string, rehomePrefix: string, stalledMinutes: number): Promise<void> {
+  await sql`
+    UPDATE bench_session s
+       SET status = 'ended',
+           ended_at = COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at),
+           notes = CASE WHEN s.notes IS NULL OR s.notes = '' THEN ${note} ELSE s.notes || chr(10) || ${note} END
+     WHERE s.room_id = ${roomId}
+       AND s.status = 'recording'
+       AND (s.notes IS NULL OR s.notes NOT LIKE ${rehomePrefix + "%"})   -- Arch #21: a re-home container is bookkeeping, never a session to supersede
+       AND COALESCE((SELECT MAX(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at)
+           < now() - (${stalledMinutes}::int * INTERVAL '1 minute')
+  `;
+}
+
+export async function insertBenchSession(id: string, roomId: string, label: string | null, micLabel: string | null): Promise<void> {
+  await sql`
+    INSERT INTO bench_session (id, room_id, label, mic_label)
+    VALUES (${id}, ${roomId}, ${label}, ${micLabel})
+  `;
+}
+
+export async function pauseBenchSession(id: string, roomId: string): Promise<void> {
+  await sql`
+    UPDATE bench_session SET status = 'paused'
+     WHERE id = ${id} AND room_id = ${roomId} AND status = 'recording'
+  `;
+}
+
+export async function resumeBenchSession(id: string, roomId: string): Promise<void> {
+  await sql`
+    UPDATE bench_session SET status = 'recording'
+     WHERE id = ${id} AND room_id = ${roomId} AND status = 'paused'
+  `;
+}
+
+/** §3.3 / Build 2 §2.5: the END TIME IS THE END OF THE AUDIO (last VERIFIED piece), not a clock reading; NOW() only for a session that recorded nothing. */
+export async function endBenchSession(id: string, roomId: string): Promise<void> {
+  await sql`
+    UPDATE bench_session s
+       SET status = 'ended',
+           ended_at = COALESCE(
+             (SELECT MAX(c.ended_at) FROM bench_chunk c
+               WHERE c.session_id = s.id AND c.upload_state = 'verified'),
+             NOW()
+           )
+     WHERE s.id = ${id} AND s.room_id = ${roomId} AND s.status <> 'ended'
+  `;
+}
+
+export async function setBenchSessionNotes(id: string, roomId: string, notes: string | null): Promise<void> {
+  await sql`
+    UPDATE bench_session SET notes = ${notes}
+     WHERE id = ${id} AND room_id = ${roomId}
+  `;
+}
