@@ -25,6 +25,7 @@ import { EMPTY_TRANSCRIPT } from "@/lib/whisper-constants";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
 import { namesSarvam, ROOM_AUDIO_DETAIL, SCOPE_CONSULT_ONLY } from "@/lib/stt/sarvam-scope";
+import { sessionRangeHeldOut } from "../held-out";
 
 const STEPS = { resolve: "resolve", join: "join", transcribe: "transcribe" } as const;
 
@@ -50,6 +51,8 @@ const asMs = (v: unknown): number | null => {
 export const transcribeRangeKind: JobKind = {
   name: "transcribe_range",
   first: STEPS.resolve,
+  roomData: true,
+  heldOut: sessionRangeHeldOut,
   scope: "invoke",
 
   /**

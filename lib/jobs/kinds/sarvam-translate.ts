@@ -93,6 +93,8 @@ type Doc = { source: { kind: string; id: string; column: string }; chars_in: num
 export const sarvamTranslateKind: JobKind = {
   name: SARVAM_TRANSLATE_KIND,
   first: STEPS.prepare,
+  roomData: false,
+  roomDataNote: "source is an encounter or an stt run of an encounter (no room placement); anything else is refused",
   scope: "invoke",
   parseArgs: (raw) => parseSarvamTranslateArgs(raw) as unknown as Record<string, unknown>,
   // S4: one open job per (source kind, id); a second ask returns the open job's id

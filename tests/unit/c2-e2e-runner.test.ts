@@ -134,6 +134,10 @@ function schema(): void {
       started_at timestamptz, ended_at timestamptz, upload_state text);
     CREATE TABLE cue (id text PRIMARY KEY, room_day_id text, type text, source text, source_ref text,
       payload jsonb, at timestamptz DEFAULT now());
+    -- K3-2: the held-out job guard reads placements (it never reads content)
+    CREATE TABLE IF NOT EXISTS room_day (id text PRIMARY KEY, room_id text, ist_date date);
+    CREATE TABLE IF NOT EXISTS jev_window_text (window_id text PRIMARY KEY, room_day_id text);
+    CREATE TABLE IF NOT EXISTS bench_session (id text PRIMARY KEY, room_id text, started_at timestamptz DEFAULT now(), ended_at timestamptz);
     CREATE TABLE voice_print (doctor_id text PRIMARY KEY, centroid bytea);
     CREATE TABLE clinician (id text PRIMARY KEY, full_name text, status text NOT NULL DEFAULT 'active', deleted_at timestamptz);
   `);

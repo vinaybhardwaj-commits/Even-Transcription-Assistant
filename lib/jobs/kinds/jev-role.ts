@@ -37,6 +37,7 @@ import { SETTING } from "@/lib/jev/prompts/arm-d-v1";
 import { ROLE_PROMPT_VERSION, ROLE_QUESTION_ID, roleQid } from "@/lib/jev/prompts/role-v1";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { roomDayArgHeldOut } from "../held-out";
 
 export const JEV_ROLE_KIND = "jev_role";
 const CHAR_FLOOR = 40;
@@ -219,6 +220,8 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
 export const jevRoleKind: JobKind = {
   name: JEV_ROLE_KIND,
   first: "run",
+  roomData: true,
+  heldOut: roomDayArgHeldOut,
   scope: "invoke",
   parseArgs,
   run,

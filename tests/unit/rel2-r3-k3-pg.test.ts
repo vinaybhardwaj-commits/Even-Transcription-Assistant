@@ -86,3 +86,99 @@ function seed(): void {
     expect(await call("scribe_replay_session", { session_id: "bs_clean" })).toMatchObject({ session_id: "bs_clean" });
   });
 });
+
+const sessionRow = (id: string, hourUtc: number) => `INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('${id}', 'r_clean', '${CLEAN_DAY}T0${hourUtc}:00:00Z', '${CLEAN_DAY}T0${hourUtc}:30:00Z', 'ended');`;
+const winRow = (id: string, session: string, hourUtc: number) => `INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES ('${id}', '${session}', 'rd_clean', ${Date.parse(`${CLEAN_DAY}T0${hourUtc}:00:00Z`)}, ${Date.parse(`${CLEAN_DAY}T0${hourUtc}:10:00Z`)}, 'primary');`;
+
+(HAVE ? describe : describe.skip)("B3-1 / B3-2 the session guard on real SQL: every placement of every window; the whole session span, whatever the range", () => {
+  beforeAll(() => {
+    pg.exec(`
+      ${sessionRow("bs_rts", 1)} ${winRow("bw_rts", "bs_rts", 1)}
+      ${sessionRow("bs_txt", 2)} ${winRow("bw_txt", "bs_txt", 2)}
+      ${sessionRow("bs_emo", 3)} ${winRow("bw_emo", "bs_emo", 3)}
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_rts', 't1', 'rd_blind', 0, 'no_match');
+      INSERT INTO jev_window_text (window_id, room_day_id, source, char_count) VALUES ('bw_txt', 'rd_blind', 'run_english', 0);
+      INSERT INTO room_span_emotion (window_id, room_day_id, diarize_run_id, run_start_ms, run_end_ms, chunk_idx, chunk_count, segment_start_ms, segment_end_ms, speaker_idx, source_refs, clip_start_s, clip_end_s, state, reason) VALUES ('bw_emo', 'rd_blind', 'dr1', 0, 1000, 0, 1, 0, 1000, 0, '{}', 0, 1, 'skipped', 'too_short');
+    `);
+  });
+  it("B3-1: a session whose window is held out ONLY by its turn rows, its window text or its emotion rows is refused (the guard, the listing and the tools)", async () => {
+    const { guardSessionSpan, sessionsBlindAny } = await import("@/lib/voice-blind");
+    for (const id of ["bs_rts", "bs_txt", "bs_emo"]) {
+      expect(await guardSessionSpan(id), id).toBe("blind_room_day");
+      expect(await call("scribe_get_session", { session_id: id }), id).toMatchObject({ error: "blind_room_day" });
+    }
+    expect([...(await sessionsBlindAny(["bs_rts", "bs_txt", "bs_emo", "bs_clean"]))].sort()).toEqual(["bs_emo", "bs_rts", "bs_txt"]);
+  });
+  it("B3-2: a session whose span touches a held-out IST day is refused WHATEVER the range (even one entirely on a clean day); a range reaching out of a clean session into the day is refused too", async () => {
+    const { guardSessionSpan } = await import("@/lib/voice-blind");
+    const dayEnd = dayStart + 86_400_000;
+    // bs_before started the evening before and its last chunk ends inside the held-out day (see the guard test above)
+    pg.exec(`INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('bs_span', '${BR}', '${T(dayStart - 3_600_000)}', '${T(dayStart - 1_800_000)}', 'ended');
+             INSERT INTO bench_chunk (id, session_id, idx, r2_key, content_type, started_at, ended_at, duration_ms, size_bytes, upload_state) VALUES ('bc_span', 'bs_span', 0, 'bench/k_span', 'audio/webm', '${T(dayStart - 3_600_000)}', '${T(dayStart + 600_000)}', 300000, 1000, 'verified');`);
+    expect(await guardSessionSpan("bs_span", { startMs: dayStart - 3_500_000, endMs: dayStart - 3_000_000 })).toBe("blind_room_day"); // the range is the clean evening hour; the session's span is not
+    expect(await guardSessionSpan("bs_span")).toBe("blind_room_day");
+    expect(await guardSessionSpan("bs_clean", { startMs: dayEnd - 60_000, endMs: dayEnd + 60_000 })).toBe(null); // other room: nothing held out
+    expect(await call("scribe_extract_audio", { session_id: "bs_span", start: T(dayStart - 3_500_000), end: T(dayStart - 3_000_000) })).toMatchObject({ error: "blind_room_day" });
+    expect(await call("scribe_transcribe_range", { session_id: "bs_span", start: T(dayStart - 3_500_000), end: T(dayStart - 3_000_000), dry_run: true })).toMatchObject({ error: "blind_room_day" });
+  });
+});
+
+const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FROM scribe_job` as Array<{ n: number }>)[0]!.n));
+
+(HAVE ? describe : describe.skip)("K3-2 the job doors: refused at submit with NO row; a job inserted directly fails at its first step with zero reads", () => {
+  beforeAll(() => {
+    pg.exec(`
+      ${sessionRow("bs_rdw", 5)} ${sessionRow("bs_ok", 6)}
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES ('bw_rdw', 'bs_rdw', 'rd_clean', ${Date.parse(CLEAN_DAY + "T04:20:00Z")}, ${Date.parse(CLEAN_DAY + "T04:30:00Z")}, 'primary');
+      INSERT INTO room_diarize_window (window_id, room_day_id, state) VALUES ('bw_rdw', 'rd_blind', 'ok');
+    `);
+  });
+  it("the refuter's three queued repros: transcribe_range on the held-out session, diarize_window on wRdw, jev_window_run on the held-out room-day: all refused, 0 rows", async () => {
+    const n0 = await jobCount();
+    expect(await call("scribe_job_submit", { kind: "transcribe_range", args: { session_id: "bs_blind", start: T(dayStart + 3_600_000), end: T(dayStart + 3_900_000) } })).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await call("scribe_job_submit", { kind: "diarize_window", args: { window_id: "bw_rdw" } })).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await call("scribe_jev_window_run", { room_day_id: "rd_blind" })).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await jobCount()).toBe(n0);
+  });
+  it("B3-3: async:true on scribe_transcribe_range and scribe_extract_audio for a held-out session is refused IN THE CALL, no job row", async () => {
+    const n0 = await jobCount();
+    const a = { session_id: "bs_blind", start: T(dayStart + 3_600_000), end: T(dayStart + 3_900_000), async: true };
+    expect(await call("scribe_transcribe_range", a)).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await call("scribe_extract_audio", a)).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await jobCount()).toBe(n0);
+  });
+  it("every other room kind refuses its held-out input at submit: stitch, room_window, emotion_window, jev_english, jev_role, route_transcribe (bench key and clips key), day_manifest; and a clean one is queued", async () => {
+    const n0 = await jobCount();
+    const win = { session_id: "bs_blind", start: T(dayStart + 3_600_000), end: T(dayStart + 3_900_000) };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["stitch", win], ["room_window", { window_id: "bw_rdw", origin: "x", actor: "a", via: "mcp" }], ["emotion_window", { window_id: "bw_blind" }],
+      ["jev_english", { room_day_id: "rd_blind" }], ["jev_role", { room_day_id: "rd_blind" }], ["jev_window", { room_day_id: "rd_blind" }],
+      ["route_transcribe", { clip_key: `bench/blind-room/${BD}/bs_blind/chunk_00000.webm` }], ["route_transcribe", { clip_key: "clips/bs_blind/1-2-primary.webm" }],
+      ["day_manifest", { room: "blind-room", ist_date: BD }], ["audio_measure", { clip_key: "clips/bs_win/1-2-primary.webm" }],
+    ];
+    for (const [kind, args] of cases) expect(await call("scribe_job_submit", { kind, args }), kind).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await jobCount()).toBe(n0);
+    const ok = await call("scribe_job_submit", { kind: "stitch", args: { session_id: "bs_ok", start: T(Date.parse(CLEAN_DAY + "T06:00:00Z")), end: T(Date.parse(CLEAN_DAY + "T06:05:00Z")) } });
+    expect(ok, JSON.stringify(ok)).toMatchObject({ ok: true });
+    expect(await jobCount()).toBe(n0 + 1);
+  });
+  it("a job inserted straight into scribe_job (past submit) fails at its FIRST step: blind_room_day, failed, 0 reads of room data, 0 R2 reads", async () => {
+    const { readJob } = await import("@/lib/jobs/store");
+    const { runOneStep } = await import("@/lib/jobs/runner");
+    for (const [id, kind, args] of [["job_direct_1", "diarize_window", { window_id: "bw_rdw" }], ["job_direct_2", "transcribe_range", { session_id: "bs_blind", start: dayStart + 3_600_000, end: dayStart + 3_900_000, source: "primary" }], ["job_direct_3", "jev_window", { room_day_id: "rd_blind", force: false, prompt_version: "v" }]] as const) {
+      pg.exec(`INSERT INTO scribe_job (id, kind, args, actor, status, lease_owner, lease_until) VALUES ('${id}', '${kind}', '${JSON.stringify(args)}'::jsonb, 'test', 'running', 'r1', now() + interval '4 minutes');`);
+      H.statements.length = 0; R2.get = 0; R2.presign = 0;
+      const job = (await readJob(id))!;
+      const rep = await runOneStep(job, "r1");
+      expect(rep.outcome, id).toBe("failed");
+      expect(await readJob(id), id).toMatchObject({ status: "failed", error: expect.stringContaining("blind_room_day") });
+      expect(H.statements.filter((t) => /FROM (cue|transcription_run|jev_window_signal|bench_event)|INSERT INTO (room_|jev_|cue|transcription)/.test(t)), id).toEqual([]);
+      expect(R2).toEqual({ presign: 0, get: 0 });
+    }
+  });
+  it("scribe_clinical_route_replay on the held-out room-day: blind_room_day, no window text read", async () => {
+    H.statements.length = 0;
+    expect(await call("scribe_clinical_route_replay", { room_day_id: "rd_blind" })).toMatchObject({ ran: false, error: "blind_room_day" });
+    expect(H.statements.filter((t) => /FROM jev_window_text jt|jev_window_text WHERE room_day_id|FROM bench_window WHERE room_day_id/.test(t))).toEqual([]);
+  });
+});

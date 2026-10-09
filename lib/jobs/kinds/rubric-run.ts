@@ -16,6 +16,7 @@ import { RUBRIC_UNITS, type RubricUnit } from "@/lib/rubrics/types";
 import { evaluateUnit, resolveUnits } from "@/lib/rubrics/engines";
 import { countingCalls, talliedCalls } from "@/lib/rubrics/llm";
 import { finishRun, insertRun, newRunId, upsertResult, writeEvidence } from "@/lib/rubrics/store";
+import { perUnitHeldOut } from "../held-out";
 
 export const RUBRIC_RUN_KIND = "rubric_run";
 export const RUBRIC_RUN_MAX_UNITS = 500;
@@ -51,6 +52,8 @@ export function parseRubricRunArgs(raw: unknown): RubricRunArgs {
 export const rubricRunKind: JobKind = {
   name: RUBRIC_RUN_KIND,
   first: "resolve",
+  roomData: true,
+  heldOut: perUnitHeldOut,
   scope: "invoke",
   capPlan: (args) => reservationFor(RUBRIC_RUN_KIND, args),
   precheck: async (args) => { const m = await capRefusal(RUBRIC_RUN_KIND, args); if (m) throw new JobArgsError(m); },

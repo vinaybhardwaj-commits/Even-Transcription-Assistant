@@ -12,6 +12,7 @@
 
 import { JobArgsError, failWith, type JobKind } from "../types";
 import { jobError } from "../errors";
+import { clipKeyHeldOut, roomDateArgHeldOut } from "../held-out";
 
 const requireString = (o: Record<string, unknown>, key: string): string => {
   const v = typeof o[key] === "string" ? (o[key] as string).trim() : "";
@@ -19,11 +20,14 @@ const requireString = (o: Record<string, unknown>, key: string): string => {
   return v;
 };
 
-const stub = (name: string, scope: JobKind["scope"], parseArgs: JobKind["parseArgs"]): JobKind => ({
+const stub = (name: string, scope: JobKind["scope"], parseArgs: JobKind["parseArgs"], heldOut?: JobKind["heldOut"]): JobKind => ({
   name,
   first: "start",
   scope,
   parseArgs,
+  // K3-2: a stub that takes a recording or a room + day declares the rule NOW, so the real body inherits it
+  roomData: heldOut !== undefined,
+  ...(heldOut ? { heldOut } : {}),
   run: async () => failWith(jobError("not_implemented", `${name} lands in a later Tier 2 slice`)),
 });
 
@@ -32,7 +36,7 @@ export const STUB_KINDS: JobKind[] = [
   stub("audio_measure", "invoke", (raw) => {
     const o = (raw ?? {}) as Record<string, unknown>;
     return { clip_key: requireString(o, "clip_key") };
-  }),
+  }, clipKeyHeldOut),
   // §5.4's `emotion_clip` is GONE, not renamed: `emotion_window` (Slice C3) implements emotion for
   // real, scoring a diarized window's speech in one call, and two kinds for one job is two places
   // for a caller to be wrong about which one works.
@@ -44,10 +48,10 @@ export const STUB_KINDS: JobKind[] = [
     const engines = Array.isArray(o.engines) ? o.engines.filter((e): e is string => typeof e === "string") : [];
     if (!engines.length) throw new JobArgsError("engines[] is required");
     return { clip_key: requireString(o, "clip_key"), engines };
-  }),
+  }, clipKeyHeldOut),
   // §4.1 — every chunk of a room-day, presigned. Read scope: it creates nothing.
   stub("day_manifest", "read", (raw) => {
     const o = (raw ?? {}) as Record<string, unknown>;
     return { room: requireString(o, "room"), ist_date: requireString(o, "ist_date") };
-  }),
+  }, roomDateArgHeldOut),
 ];

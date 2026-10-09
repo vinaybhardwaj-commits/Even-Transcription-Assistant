@@ -23,7 +23,7 @@ import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { roomDayIsBlind } from "@/lib/voice-blind";
 import { JEV_SUBJECT_TYPES } from "@/lib/jev/types";
 import { query } from "@/lib/brain/db";
-import { submitJob } from "@/lib/jobs/submit";
+import { JobArgsError, submitJob } from "@/lib/jobs/submit";
 import { runNoteSafetyShadowAsync } from "@/lib/jev/note-safety-shadow";
 import { runClinicalRouteAsync } from "@/lib/jev/clinical-route";
 import { argInt, argStr, failSafe as baseFailSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext, type ToolResult } from "../registry";
@@ -60,8 +60,14 @@ const jevWindowRun: McpTool = {
       const roomDayId = argStr(args, "room_day_id", 128);
       if (!roomDayId) return { ok: false, error: "room_day_id_required" };
       const force = args.force === true;
-      const job = await submitJob({ kind: "jev_window", args: { room_day_id: roomDayId, force }, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
-      return { ok: true, job_id: job.id };
+      try {
+        const job = await submitJob({ kind: "jev_window", args: { room_day_id: roomDayId, force }, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
+        return { ok: true, job_id: job.id };
+      } catch (e) {
+        // K3-2: a held-out room-day is refused at submit (no job row), by name
+        if (e instanceof JobArgsError && (e.reason === "blind_room_day" || e.reason === "window_unplaced")) return { ok: false, error: e.reason };
+        throw e;
+      }
     }),
 };
 
@@ -214,6 +220,8 @@ const clinicalRouteReplay: McpTool = {
     failSafe({ ran: false as boolean }, async () => {
       const roomDayId = argStr(args, "room_day_id", 128);
       if (!roomDayId) return { ran: false, error: "room_day_id_required" };
+      // K3-2: the held-out rule before any window text is read or classified
+      if (await roomDayIsBlind(roomDayId)) return { ran: false, error: "blind_room_day" };
       const outcome = await runClinicalRouteAsync(roomDayId);
       return { ok: true, ...outcome };
     }),

@@ -151,8 +151,11 @@ export async function guardSessionSpan(sessionId: string, span?: { startMs?: num
   const rows = (await sql`
     SELECT s.room_id, (extract(epoch FROM s.started_at) * 1000)::bigint AS started_ms,
            (extract(epoch FROM COALESCE(GREATEST(s.ended_at, (SELECT max(c.ended_at) FROM bench_chunk c WHERE c.session_id = s.id)), (SELECT max(c.ended_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at)) * 1000)::bigint AS last_ms,
-           EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id, room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
-                    WHERE w.session_id = s.id AND r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) AS window_blind
+           EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.session_id = s.id AND (
+             EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+             OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+             OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+             OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id))) AS window_blind
       FROM bench_session s WHERE s.id = ${sessionId}::text LIMIT 1
   `) as Array<{ room_id: string; started_ms: string | number; last_ms: string | number | null; window_blind: boolean }>;
   const s = rows[0];
@@ -160,8 +163,9 @@ export async function guardSessionSpan(sessionId: string, span?: { startMs?: num
   if (s.window_blind) return "blind_room_day";
   const started = Number(s.started_ms);
   const last = Math.max(started, Number(s.last_ms ?? started));
-  const t0 = span?.startMs ?? started, t1 = span?.endMs ?? last;
-  if (spanTouchesBlindDay(s.room_id, started, started) || spanTouchesBlindDay(s.room_id, t0, t1)) return "blind_room_day";
+  // B3-2: the WHOLE session span decides, whatever range was asked for (no chunk-level partial serving); a range that reaches outside the session into a held-out day is refused too
+  if (spanTouchesBlindDay(s.room_id, started, last)) return "blind_room_day";
+  if (span?.startMs != null && span?.endMs != null && spanTouchesBlindDay(s.room_id, span.startMs, span.endMs)) return "blind_room_day";
   return null;
 }
 
@@ -182,8 +186,11 @@ export async function sessionsBlindAny(sessionIds: readonly string[]): Promise<S
                     AND (b.d::timestamp AT TIME ZONE 'Asia/Kolkata') + interval '1 day' > s.started_at)
          OR EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
                      WHERE b.r = s.room_id AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = b.d)
-         OR EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id, room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
-                     WHERE w.session_id = s.id AND r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+         OR EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.session_id = s.id AND (
+             EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+             OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+             OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+             OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
        )
   `) as Array<{ id: string }>;
   return new Set(rows.map((r) => r.id));

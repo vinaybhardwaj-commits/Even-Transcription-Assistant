@@ -274,7 +274,7 @@ describe("runOneStep", () => {
   // `T` is a runtime import, so its members are values, not a type namespace — the types come
   // from the module's own type position. (Surfaced by the new test-tree typecheck, fix-up 6.)
   const fakeKind = (impl: JobKindT["run"]) => {
-    const k: JobKindT = { name: "fake", first: "one", scope: "invoke", parseArgs: () => ({}), run: impl };
+    const k: JobKindT = { name: "fake", roomData: false, roomDataNote: "test kind", first: "one", scope: "invoke", parseArgs: () => ({}), run: impl };
     KIND_BY_NAME.set("fake", k);
     return k;
   };
@@ -458,7 +458,7 @@ describe("item 1 — a 61-minute stitch completes (3 pieces = 4 claims)", () => 
     const t0 = Date.parse("2026-09-12T03:00:00Z");
     const joined: string[] = [];
     KIND_BY_NAME.set("fake_stitch", {
-      name: "fake_stitch", first: "resolve", scope: "invoke", parseArgs: () => ({}),
+      name: "fake_stitch", roomData: false, roomDataNote: "test kind", first: "resolve", scope: "invoke", parseArgs: () => ({}),
       run: async (c) => {
         if (c.step === "resolve") return T.nextStep("join", { pieces: planPieces(t0, t0 + min(61)), done: [] });
         const pieces = c.progress.pieces as Array<Record<string, unknown>>;
@@ -485,7 +485,7 @@ describe("item 1 — a 61-minute stitch completes (3 pieces = 4 claims)", () => 
 describe("item 3 — a cancel landing mid-step wins at the boundary", () => {
   it("the step's `done` write matches no row, so the job stays cancelled", async () => {
     KIND_BY_NAME.set("fake_done", {
-      name: "fake_done", first: "one", scope: "invoke", parseArgs: () => ({}),
+      name: "fake_done", roomData: false, roomDataNote: "test kind", first: "one", scope: "invoke", parseArgs: () => ({}),
       run: async () => {
         await store.cancelJob("job_0"); // the cancel lands while this step is in flight
         return T.doneWith({ should_not: "land" });
@@ -569,7 +569,7 @@ describe("item 1 — failJob cannot touch a job it no longer owns", () => {
 describe("item 2 — three consecutive throws persist failures = 3", () => {
   it("throw x3 leaves failures 3 and status failed — the terminal throw is counted like any other", async () => {
     KIND_BY_NAME.set("always_throws", {
-      name: "always_throws", first: "one", scope: "invoke", parseArgs: () => ({}),
+      name: "always_throws", roomData: false, roomDataNote: "test kind", first: "one", scope: "invoke", parseArgs: () => ({}),
       run: async () => { throw new Error("boom"); },
     });
     queue({ kind: "always_throws" });
@@ -590,7 +590,7 @@ describe("item 2 — three consecutive throws persist failures = 3", () => {
 
   it("the count rises one per throw, visible at each step", async () => {
     KIND_BY_NAME.set("always_throws2", {
-      name: "always_throws2", first: "one", scope: "invoke", parseArgs: () => ({}),
+      name: "always_throws2", roomData: false, roomDataNote: "test kind", first: "one", scope: "invoke", parseArgs: () => ({}),
       run: async () => { throw new Error("boom"); },
     });
     queue({ kind: "always_throws2" });
@@ -604,7 +604,7 @@ describe("item 2 — three consecutive throws persist failures = 3", () => {
   });
 
   it("no ordinal wording — the message reads as prose", async () => {
-    KIND_BY_NAME.set("t3", { name: "t3", first: "one", scope: "invoke", parseArgs: () => ({}), run: async () => { throw new Error("boom"); } });
+    KIND_BY_NAME.set("t3", { name: "t3", first: "one", scope: "invoke", roomData: false, roomDataNote: "test kind", parseArgs: () => ({}), run: async () => { throw new Error("boom"); } });
     queue({ kind: "t3" });
     for (let k = 0; k < 3; k++) {
       await stepOne();
@@ -618,7 +618,7 @@ describe("item 4 — the cap is lifetime", () => {
   it("a success between throws does not forgive them", async () => {
     let n = 0;
     KIND_BY_NAME.set("flaky", {
-      name: "flaky", first: "one", scope: "invoke", parseArgs: () => ({}),
+      name: "flaky", first: "one", scope: "invoke", roomData: false, roomDataNote: "test kind", parseArgs: () => ({}),
       // throw, succeed, throw, succeed, throw -> three failures spread out
       run: async () => { n++; if (n % 2 === 1) throw new Error("flake"); return T.nextStep("one", { n }); },
     });
@@ -647,7 +647,7 @@ describe("item 4 — the cap is lifetime", () => {
 describe("mutation survivors (A1–A6): every clause of the claim and the writes is load-bearing", () => {
   const kindThatThrows = (name: string) => {
     KIND_BY_NAME.set(name, {
-      name, first: "one", scope: "invoke", parseArgs: () => ({}),
+      name, first: "one", scope: "invoke", roomData: false, roomDataNote: "test kind", parseArgs: () => ({}),
       run: async () => { throw new Error("boom"); },
     } as JobKindT);
   };
@@ -680,7 +680,7 @@ describe("mutation survivors (A1–A6): every clause of the claim and the writes
 
   it("A3 — after a step the lease is released, so the next claim can take the job", async () => {
     KIND_BY_NAME.set("a3", {
-      name: "a3", first: "one", scope: "invoke", parseArgs: () => ({}),
+      name: "a3", first: "one", scope: "invoke", roomData: false, roomDataNote: "test kind", parseArgs: () => ({}),
       run: async () => T.nextStep("two", {}),
     } as JobKindT);
     queue({ kind: "a3" });
@@ -696,7 +696,7 @@ describe("mutation survivors (A1–A6): every clause of the claim and the writes
 
   it("A4 — a finished job holds no owner, so nothing can be written to it afterwards", async () => {
     KIND_BY_NAME.set("a4", {
-      name: "a4", first: "one", scope: "invoke", parseArgs: () => ({}),
+      name: "a4", first: "one", scope: "invoke", roomData: false, roomDataNote: "test kind", parseArgs: () => ({}),
       run: async () => T.doneWith({ ok: 1 }),
     } as JobKindT);
     queue({ kind: "a4" });

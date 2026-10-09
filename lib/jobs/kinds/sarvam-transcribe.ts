@@ -100,6 +100,8 @@ function bail(f: Fail, code: JobErrorCode): StepOutcome {
 export const sarvamTranscribeKind: JobKind = {
   name: SARVAM_TRANSCRIBE_KIND,
   first: STEPS.prepare,
+  roomData: false,
+  roomDataNote: "source is a doctor-PWA encounter (no room placement); a room audio argument is refused at parse (scope_consult_only)",
   scope: "invoke",
   parseArgs: (raw) => parseSarvamTranscribeArgs(raw) as unknown as Record<string, unknown>,
   // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back

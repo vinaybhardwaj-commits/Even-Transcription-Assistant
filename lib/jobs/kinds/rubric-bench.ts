@@ -41,6 +41,8 @@ export function parseRubricBenchArgs(raw: unknown): { rubric_id: string; set?: B
 export const rubricBenchKind: JobKind = {
   name: RUBRIC_BENCH_KIND,
   first: "load",
+  roomData: false,
+  roomDataNote: "a bench set is the labelled gold set from the lab store, not live room data; its items are never room-day rows",
   scope: "invoke",
   capPlan: (args) => reservationFor(RUBRIC_BENCH_KIND, args),
   precheck: async (args) => {

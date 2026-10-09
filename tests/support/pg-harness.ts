@@ -203,7 +203,12 @@ export function statementForPsql(q: string): { kind: "exec" | "query"; text: str
 export function makeSql(onQuery?: (q: string) => void) {
   return async (strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]> => {
     let q = "";
-    strings.forEach((s, i) => { q += s + (i < values.length ? lit(values[i]) : ""); });
+    // an array value cast to an array type (`${xs}::date[]`) is a postgres array, as the app's driver sends it; every other array stays JSON text (jsonb params)
+    const pgArr = (a: unknown[]): string => {
+      const inner = `{${a.map((e) => (e === null || e === undefined ? "NULL" : `"${String(e).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)).join(",")}}`;
+      return `'${inner.replace(/'/g, "''")}'`;
+    };
+    strings.forEach((s, i) => { q += s + (i < values.length ? (Array.isArray(values[i]) && /^\s*::\s*[a-z_ ]+\[\]/i.test(strings[i + 1] ?? "") ? pgArr(values[i] as unknown[]) : lit(values[i])) : ""); });
     onQuery?.(q);
     const plan = statementForPsql(q);
     if (plan.kind === "exec") { exec(plan.text); return []; }

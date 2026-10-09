@@ -97,6 +97,15 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
   }
 
   const step = job.step ?? kind.first;
+  // K3-2: the held-out rule again at the FIRST step, so a job inserted straight into the table (or queued before the rule) fails with zero reads. A guard that throws is a failed step (counted, retried).
+  if (kind.heldOut && step === kind.first) {
+    const held = await kind.heldOut(job.args).catch((e: unknown) => { console.error("[jobs] held-out guard threw", JSON.stringify({ job_id: job.id, kind: job.kind, err: String((e as Error)?.message ?? e).slice(0, 160) })); throw e; });
+    if (held) {
+      const rows = await failJob(job.id, jobError(held), runner);
+      if (rows > 0) await sarvamJobEnded(job, "failed");
+      return { ...base, step, outcome: rows === 0 ? "lease_lost" : "failed", ms: Date.now() - started };
+    }
+  }
   let outcome;
   try {
     const ctx = { job, step, args: job.args, progress: job.progress, runner };

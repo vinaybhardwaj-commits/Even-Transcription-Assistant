@@ -1109,7 +1109,7 @@ const extractAudio: McpTool = {
         return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
-        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        if (e instanceof JobArgsError) return e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason } : { ok: false, error: "bad_args", detail: e.reason }; // K3-2: a held-out refusal is named, and no job row exists
         throw e;
       }
     }
@@ -2067,7 +2067,7 @@ const transcribeRange: McpTool = {
         return { ok: true, async: true, job_id: job.id, kind: job.kind, status: job.status, status_pointer: { tool: "scribe_job_status", job_id: job.id } };
       } catch (e) {
         if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
-        if (e instanceof JobArgsError) return { ok: false, error: "bad_args", detail: e.reason };
+        if (e instanceof JobArgsError) return e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason } : { ok: false, error: "bad_args", detail: e.reason }; // K3-2: a held-out refusal is named, and no job row exists
         throw e;
       }
     }

@@ -25,6 +25,7 @@ export const JOB_ERROR_CODES = [
   "join_failed",
   "empty_range",
   "blind_room_day",
+  "window_unplaced",
   // the runner itself
   "unknown_kind",
   "unknown_step",

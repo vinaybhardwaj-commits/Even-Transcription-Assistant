@@ -17,6 +17,7 @@ import { checkEngine, checkRoomStage, ROOM_AUDIO_DETAIL, SCOPE_CHECK_DETAIL } fr
 import { ROOM_WINDOW_KIND } from "./room-window-kind";
 import { sql } from "@/lib/db";
 import { bulkAgeMinutes, isBulkWindow } from "@/lib/service-pool";
+import { windowArgHeldOut } from "../held-out";
 import {
   roomWindowPrepare, roomWindowSegment, roomWindowEngine, roomWindowPoll, roomWindowFinish,
   ROUTER_JOB_LOST,
@@ -90,6 +91,8 @@ async function releaseWindowUntouched(windowId: string): Promise<void> {
 export const roomWindowKind: JobKind = {
   name: ROOM_WINDOW_KIND,
   first: STEPS.prepare,
+  roomData: true,
+  heldOut: windowArgHeldOut,
   scope: "invoke",
 
   /**

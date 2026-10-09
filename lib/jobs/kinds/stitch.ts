@@ -17,6 +17,7 @@ import { buildJoinRequest, callJoinService } from "@/lib/bench-join";
 import type { BenchChunkRow } from "@/lib/bench";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
 import { jobError } from "../errors";
+import { sessionRangeHeldOut } from "../held-out";
 
 /** §4.3's contract: the join service is never asked for more than half an hour at once. */
 export const STITCH_PIECE_MS = 30 * 60_000;
@@ -51,6 +52,8 @@ function coveringOf(r: RangeResolution<BenchChunkRow>): CoveringChunk<BenchChunk
 export const stitchKind: JobKind = {
   name: "stitch",
   first: STEPS.resolve,
+  roomData: true,
+  heldOut: sessionRangeHeldOut,
   scope: "invoke",
 
   parseArgs(raw) {

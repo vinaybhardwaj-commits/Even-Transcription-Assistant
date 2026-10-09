@@ -120,6 +120,14 @@ export type StepContext = {
 
 export type JobKind = {
   name: string;
+  /**
+   * K3-2: does this kind read room data (a window, a room-day, a session or its tape, a room recording)? REQUIRED, so a new kind must answer. A kind that says true MUST declare `heldOut`; the registry throws
+   * at load if it does not (lib/jobs/kinds/index.ts assertHeldOutDeclared). `roomDataNote` says why a kind that says false does not.
+   */
+  roomData: boolean;
+  roomDataNote?: string;
+  /** K3-2: null = fine, else the held-out refusal. Run by submitJob BEFORE the insert and by the runner at the first step. See lib/jobs/held-out.ts. */
+  heldOut?: (args: Record<string, unknown>) => Promise<"blind_room_day" | "window_unplaced" | null>;
   /** The step a fresh job starts at. */
   first: string;
   /** Which MCP scope may submit this kind (§3: "scope per kind"). */

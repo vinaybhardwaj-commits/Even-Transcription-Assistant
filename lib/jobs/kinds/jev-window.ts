@@ -44,6 +44,7 @@ import { PROMPT_VERSION, QUESTION_ID, SETTING, qid } from "@/lib/jev/prompts/arm
 import { ETA_JEV_BATCH_WINDOWS, ETA_JEV_CONTEXT_WINDOWS, ETA_JEV_MAX_INFLIGHT_PER_JOB, ETA_JEV_MAX_INFLIGHT_GLOBAL } from "@/lib/jev/thresholds";
 import type { JevAnswer } from "@/lib/jev/types";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
+import { roomDayArgHeldOut } from "../held-out";
 
 export const JEV_WINDOW_KIND = "jev_window";
 
@@ -311,6 +312,8 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
 export const jevWindowKind: JobKind = {
   name: JEV_WINDOW_KIND,
   first: "collect",
+  roomData: true,
+  heldOut: roomDayArgHeldOut,
   scope: "invoke",
   parseArgs,
   run: async (ctx: StepContext): Promise<StepOutcome> => {
