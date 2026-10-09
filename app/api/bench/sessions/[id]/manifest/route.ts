@@ -9,6 +9,7 @@ import { benchAdminGuard, findBenchSession, listBenchEvents, splitChunksBySource
 import { manifestChunkRows } from "@/lib/room-access/tool-reads";
 import { chunkBasename } from "@/lib/bench-dual";
 import { signGetUrl } from "@/lib/r2";
+import { guardSessionSpan } from "@/lib/room-access/check";
 import { hasBlindChunk, isBlindBenchSession } from "@/lib/bench-blind-guard";
 
 export const runtime = "nodejs";
@@ -26,6 +27,13 @@ export async function GET(
   const session = await findBenchSession(id);
   if (!session) return respondError("NOT_FOUND", "session_not_found");
   if (isBlindBenchSession(session)) return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
+  // Same rule as get_session: ANY window of the session held out by ANY placement (bench, diarize, turn, window-text, emotion) or a span on a held-out day refuses the whole session, before any chunk read.
+  // A guard that cannot answer fails closed (503), never open.
+  try {
+    if ((await guardSessionSpan(id)) === "blind_room_day") return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
+  } catch {
+    return NextResponse.json({ ok: false, error: "db" }, { status: 503 });
+  }
   // Route-local read that does NOT swallow errors (listBenchChunks turns a failed read into []): a chunk
   // read that cannot be made must not look like a session with no chunks, or the blind-day scan below is skipped.
   let all: BenchChunkRow[];
