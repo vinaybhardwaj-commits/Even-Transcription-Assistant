@@ -8,6 +8,7 @@
  */
 
 import { benchWindowRow, listSttRunSubjects, readTurnSpans, routeTripwireData } from "@/lib/room-access/stt-reads";
+import { runSubjectKinds, sttRunsFor } from "@/lib/room-access/tool-reads";
 import { guardRoomDay, guardWindow, roomDayIsBlind, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
@@ -162,20 +163,14 @@ const getSttRun: McpTool = {
       const includeIdentity = argBool(args, "include_identity");
       // Same shape as app/api/admin/stt-lab/runs/[id]/route.ts GET: ask the runs what kind of
       // subject this is, then LEFT JOIN outwards. Neither lookup is required to hit.
-      const kindRows = (await sql`SELECT DISTINCT subject_type FROM transcription_run WHERE subject_id = ${id} LIMIT 2`) as Array<{ subject_type: string }>;
+      const kindRows = await runSubjectKinds(id);
       const subjectType = kindRows[0]?.subject_type ?? (id.startsWith("enc_") ? "encounter" : "bench_window");
       const enc = (await sql`SELECT id, patient_label_raw, recorded_at, detected_language, note_type FROM encounter WHERE id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       const win = await benchWindowRow(id);
       if (!enc[0] && !win[0] && kindRows.length === 0) return { encounter: null, runs: [], gold: null, error: "subject_not_found" };
       // SWEEP (REL2-R3): a bench window with ANY held-out placement: its transcript runs are not served (checked before the runs, the transcripts and the gold are read)
       if (win[0] && (await windowBlindAny(id))) return { encounter: null, runs: [], gold: null, error: "blind_room_day" };
-      const runs = (await sql`
-        SELECT engine, tier, transcript_english, transcript_original, note_text, latency_ms, error,
-               judge_score, agreement_score, wer, cer, med_term_recall, is_winner, metrics_json
-          FROM transcription_run
-         WHERE subject_id = ${id} AND mode='batch'
-         ORDER BY tier, is_winner DESC, engine
-      `) as Array<Record<string, unknown>>;
+      const runs = await sttRunsFor(id);
       const gold = (await sql`SELECT reference_original, reference_english, reference_language, critical_terms_json, terms_model FROM stt_gold WHERE encounter_id = ${id} LIMIT 1`) as Array<Record<string, unknown>>;
       const { patient_label_raw, ...encRest } = enc[0] ?? ({} as Record<string, unknown>);
       const subject = subjectOf({

@@ -7,6 +7,8 @@ export const ROOM_TABLES = [
   "room_turn_speaker", "room_diarize_window", "bench_window", "bench_session", "speaker_cluster", "room_speaker_cluster_member", "diarize_window_label",
   "diarize_nemotron_window", "diarize_nemotron_run", "diarize_nemotron_label", "cue", "room_audio_state", "room_audio_day", "room_span_emotion", "jev_window_text",
   "eta_encounter_windows", "reb_track_index",
+  // REL3-FU2 scope: the session tape rows (R2 keys, times, sizes per session) and the transcripts of window subjects
+  "bench_chunk", "transcription_run",
 ] as const;
 export const KEY_PREFIXES = ["bench/", "clips/", "vad-trim/", "reb/", "consult-clips/", "mcp-sarvam/"] as const;
 

@@ -8,7 +8,7 @@
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
-import { adminWindowRow } from "@/lib/room-access/tool-reads";
+import { adminWindowRow, runSubjectKinds, sttRunsFor } from "@/lib/room-access/tool-reads";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -23,9 +23,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   try { await verifyAdminJwt(cookie); } catch { return respondError("AUTH_EXPIRED", "Session invalid"); }
 
   // What kind of subject is this? Ask the runs, which is the only place that knows.
-  const kindRows = (await sql`
-    SELECT DISTINCT subject_type FROM transcription_run WHERE subject_id = ${id} LIMIT 2
-  `) as Array<{ subject_type: string }>;
+  const kindRows = await runSubjectKinds(id);
   const subjectType = kindRows[0]?.subject_type ?? "encounter";
 
   const enc = (await sql`
@@ -39,13 +37,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   // Nothing anywhere knows this id.
   if (!enc[0] && !win[0] && kindRows.length === 0) return respondError("NOT_FOUND", "subject_not_found");
 
-  const runs = (await sql`
-    SELECT engine, tier, transcript_english, transcript_original, note_text, latency_ms, error,
-           judge_score, agreement_score, wer, cer, med_term_recall, is_winner, metrics_json
-      FROM transcription_run
-     WHERE subject_id = ${id} AND mode='batch'
-     ORDER BY tier, is_winner DESC, engine
-  `) as unknown[];
+  const runs = await sttRunsFor(id);
   // Gold is encounter-only by construction (stt_gold.encounter_id). A room window has none,
   // and asking for one is answered null rather than left undefined.
   const gold = (await sql`

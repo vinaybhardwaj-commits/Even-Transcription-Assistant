@@ -551,3 +551,33 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(ok.some((x) => x.id === "bw_mixed_clean")).toBe(true); // it exists, and is not counted
   });
 });
+
+(HAVE ? describe : describe.skip)("REL3-FU2 scope: transcription_run and bench_chunk readers are in the module and leave held-out rows out", () => {
+  it("/api/admin/stt-spend: window-run spend leaves out runs of windows with ANY held-out placement and counts them", async () => {
+    const { sttSpendRaw } = await import("@/lib/room-access/tool-reads");
+    const all = Number(((await H.sql!`SELECT count(*)::int AS n FROM transcription_run WHERE subject_type = 'bench_window'` as Array<{ n: number }>)[0]!.n));
+    const { raw, nBlindExcluded } = await sttSpendRaw();
+    const counted = raw.reduce((n, r) => n + Number(r.n_runs), 0);
+    expect(nBlindExcluded).toBeGreaterThanOrEqual(2);
+    expect(counted + nBlindExcluded).toBe(all);
+    expect(counted).toBeGreaterThanOrEqual(1);
+  });
+  it("scribe_store_stats: chunk totals leave out chunks of a held-out session and count them", async () => {
+    const { benchChunkTotals } = await import("@/lib/room-access/tool-reads");
+    const { sessionsBlindAny } = await import("@/lib/room-access/check");
+    const rows = (await H.sql!`SELECT session_id AS sid FROM bench_chunk` as Array<{ sid: string }>);
+    const held = await sessionsBlindAny([...new Set(rows.map((r) => r.sid))]);
+    const t = await benchChunkTotals();
+    const counted = Object.values(t.byState).reduce((n, v) => n + v.count, 0);
+    expect(rows.filter((r) => held.has(r.sid)).length).toBeGreaterThan(0);
+    expect(t.nBlindExcluded).toBe(rows.filter((r) => held.has(r.sid)).length);
+    expect(counted).toBe(rows.filter((r) => !held.has(r.sid)).length);
+    expect((await call("scribe_store_stats", {})).bench.chunks_by_upload_state).toEqual(t.byState);
+  });
+  it("the runs readers behind scribe_get_stt_run, scribe_stt_windows and the admin run route still refuse a held-out window (guard before the module read)", async () => {
+    expect(await call("scribe_get_stt_run", { subject_id: "bw_rts", include_text: true })).toMatchObject({ error: "blind_room_day", runs: [] });
+    expect(await call("scribe_stt_windows", { window_id: "bw_rts" })).toMatchObject({ error: "blind_room_day" });
+    const { sttRunsFor } = await import("@/lib/room-access/tool-reads");
+    expect((await sttRunsFor("bw_clean")).length).toBeGreaterThanOrEqual(1);
+  });
+});

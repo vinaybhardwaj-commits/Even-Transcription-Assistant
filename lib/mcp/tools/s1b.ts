@@ -10,7 +10,7 @@
  * identifier, no ticket signature or nonce, no storage key is returned.
  */
 import { windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
-import { windowDetailRow, windowsStartingIn } from "@/lib/room-access/tool-reads";
+import { windowDetailRow, windowRunSummaries, windowsStartingIn } from "@/lib/room-access/tool-reads";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
@@ -765,14 +765,7 @@ async function oneWindow(windowId: string): Promise<Row> {
      LIMIT 20
   `) as Row[];
   // runs carry transcript text in their own columns; only its length is read here
-  const runs = (await sql`
-    SELECT id, encounter_id, engine, stt_engine_id, mode, tier, detected_language, latency_ms, cost_usd, error,
-           COALESCE(length(transcript_original), 0) AS original_chars, created_at
-      FROM transcription_run
-     WHERE subject_type = 'bench_window' AND subject_id = ${windowId}::text
-     ORDER BY created_at DESC
-     LIMIT 20
-  `) as Row[];
+  const runs = await windowRunSummaries(windowId);
   let hypo: Row;
   try {
     const h = (await sql`

@@ -19,7 +19,7 @@
  */
 
 import { sql } from "@/lib/db";
-import { SQL_CUES_TODAY_SPLIT, benchSessionTotals } from "@/lib/room-access/tool-reads";
+import { SQL_CUES_TODAY_SPLIT, benchChunkTotals, benchSessionTotals } from "@/lib/room-access/tool-reads";
 import { query } from "@/lib/brain/db";
 import { istDate } from "@/lib/brain/state";
 import { retrieve } from "@/lib/kb-retrieve";
@@ -83,8 +83,7 @@ const storeStats: McpTool = {
       })(),
       (async () => {
         try {
-          const rows = (await sql`SELECT upload_state, COUNT(*)::int AS n, COALESCE(SUM(size_bytes),0)::bigint AS bytes FROM bench_chunk GROUP BY upload_state ORDER BY upload_state`) as Array<{ upload_state: string; n: number; bytes: string | number }>;
-          return { value: Object.fromEntries(rows.map((r) => [r.upload_state, { count: Number(r.n), bytes: Number(r.bytes) }])) };
+          return { value: (await benchChunkTotals()).byState };
         } catch (e) {
           return { value: null, error: String((e as Error)?.message ?? e).slice(0, 120) };
         }

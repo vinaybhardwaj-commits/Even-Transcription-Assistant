@@ -17,7 +17,7 @@
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
-import { adminSessionWindows } from "@/lib/room-access/tool-reads";
+import { adminSessionChunks, adminSessionWindows } from "@/lib/room-access/tool-reads";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
@@ -57,10 +57,7 @@ export async function GET(req: NextRequest) {
 
   // The same pure evaluator the writer uses, so "why is this still open" is answered from the
   // chunks rather than inferred from the row.
-  const chunks = (await sql`
-    SELECT idx, source, started_at, ended_at, upload_state
-      FROM bench_chunk WHERE session_id = ${sessionId} ORDER BY source, idx
-  `) as WindowChunk[];
+  const chunks = (await adminSessionChunks(sessionId)) as WindowChunk[];
   const events = (await sql`
     SELECT id, kind, at, payload FROM bench_event WHERE session_id = ${sessionId} ORDER BY at ASC, id ASC
   `) as MicEventRow[];

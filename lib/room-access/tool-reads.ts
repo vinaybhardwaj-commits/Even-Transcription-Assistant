@@ -260,3 +260,110 @@ export async function measurePendingCount(): Promise<number> {
   `) as Array<{ n: number }>;
   return Number(rows[0]?.n) || 0;
 }
+
+// --- REL3-FU2 scope: transcription_run and bench_chunk readers moved in ------------------------------------------------------------------------------
+/** What kind of subject an id is, from the runs (existence only). */
+export async function runSubjectKinds(id: string): Promise<Array<{ subject_type: string }>> {
+  return (await sql`SELECT DISTINCT subject_type FROM transcription_run WHERE subject_id = ${id} LIMIT 2`) as Array<{ subject_type: string }>;
+}
+
+/** The batch runs of a subject (transcripts included): scribe_get_stt_run and /api/admin/stt-lab/runs/[id]. The CALLER has refused a held-out window before this runs (windowBlindAny / adminWindowRow). */
+export async function sttRunsFor(id: string): Promise<Array<Record<string, unknown>>> {
+  return (await sql`
+    SELECT engine, tier, transcript_english, transcript_original, note_text, latency_ms, error,
+           judge_score, agreement_score, wer, cer, med_term_recall, is_winner, metrics_json
+      FROM transcription_run
+     WHERE subject_id = ${id} AND mode='batch'
+     ORDER BY tier, is_winner DESC, engine
+  `) as Array<Record<string, unknown>>;
+}
+
+/** scribe_stt_windows: the runs of ONE window (transcript LENGTHS only). The caller has already refused a held-out window. */
+export async function windowRunSummaries(windowId: string): Promise<Row[]> {
+  return (await sql`
+    SELECT id, encounter_id, engine, stt_engine_id, mode, tier, detected_language, latency_ms, cost_usd, error,
+           COALESCE(length(transcript_original), 0) AS original_chars, created_at
+      FROM transcription_run
+     WHERE subject_type = 'bench_window' AND subject_id = ${windowId}::text
+     ORDER BY created_at DESC
+     LIMIT 20
+  `) as Row[];
+}
+
+/** /api/admin/stt-spend: window-run spend per initiator per IST day; runs of a window with ANY held-out placement are left out and counted (the K3-4 rule for aggregates). */
+export async function sttSpendRaw(): Promise<{ raw: Array<Record<string, unknown>>; nBlindExcluded: number }> {
+  const raw = (await sql`
+    SELECT r.initiated_by,
+           r.initiated_via,
+           to_char((r.created_at AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS day,
+           COUNT(*)::int AS n_runs,
+           COALESCE(SUM(r.cost_usd), 0)::float8 AS cost_usd_total,
+           COUNT(*) FILTER (WHERE r.cost_usd IS NULL)::int AS cost_unreported_runs
+      FROM transcription_run r
+      JOIN bench_window bw ON bw.id = r.subject_id
+     WHERE r.subject_type = 'bench_window'
+       AND NOT (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr
+                      WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+                        hr.id = bw.room_day_id
+                        OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = bw.id)
+                        OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = bw.id)
+                        OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = bw.id)
+                        OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = bw.id))))
+     GROUP BY r.initiated_by, r.initiated_via, (r.created_at AT TIME ZONE 'Asia/Kolkata')::date
+     ORDER BY day DESC, r.initiated_by NULLS LAST
+  `) as Array<Record<string, unknown>>;
+  const held = (await sql`
+    SELECT COUNT(*)::int AS n FROM transcription_run r JOIN bench_window bw ON bw.id = r.subject_id
+     WHERE r.subject_type = 'bench_window' AND (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr
+                      WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+                        hr.id = bw.room_day_id
+                        OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = bw.id)
+                        OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = bw.id)
+                        OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = bw.id)
+                        OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = bw.id))))
+  `) as Array<{ n: number }>;
+  return { raw, nBlindExcluded: Number(held[0]?.n ?? 0) };
+}
+
+/** scribe_store_stats: chunk counts and bytes by upload state; chunks of a held-out session are left out and counted. */
+export async function benchChunkTotals(): Promise<{ byState: Record<string, { count: number; bytes: number }>; nBlindExcluded: number }> {
+  const rows = (await sql`
+    SELECT c.upload_state, COUNT(*)::int AS n, COALESCE(SUM(c.size_bytes),0)::bigint AS bytes,
+           COUNT(*) FILTER (WHERE (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb(d, r)
+                      WHERE cb.r = s.room_id AND (cb.d::timestamp AT TIME ZONE 'Asia/Kolkata') <= GREATEST(s.started_at, s.ended_at, (SELECT max(cx.ended_at) FROM bench_chunk cx WHERE cx.session_id = s.id))
+                        AND (cb.d::timestamp AT TIME ZONE 'Asia/Kolkata') + interval '1 day' > s.started_at)
+               OR EXISTS (SELECT 1 FROM bench_window cw LEFT JOIN room_diarize_window cd ON cd.window_id = cw.id, room_day cr, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb2(d, r)
+                           WHERE cw.session_id = s.id AND cr.id IN (cw.room_day_id, cd.room_day_id) AND cb2.d = cr.ist_date AND cb2.r = cr.room_id)
+               OR EXISTS (SELECT 1 FROM bench_window cw3, room_turn_speaker ct, room_day cr3, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb3(d, r)
+                           WHERE cw3.session_id = s.id AND ct.window_id = cw3.id AND cr3.id = ct.room_day_id AND cb3.d = cr3.ist_date AND cb3.r = cr3.room_id)
+               OR EXISTS (SELECT 1 FROM bench_window cw4, jev_window_text cj, room_day cr4, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb4(d, r)
+                           WHERE cw4.session_id = s.id AND cj.window_id = cw4.id AND cr4.id = cj.room_day_id AND cb4.d = cr4.ist_date AND cb4.r = cr4.room_id)
+               OR EXISTS (SELECT 1 FROM bench_window cw5, room_span_emotion ce, room_day cr5, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb5(d, r)
+                           WHERE cw5.session_id = s.id AND ce.window_id = cw5.id AND cr5.id = ce.room_day_id AND cb5.d = cr5.ist_date AND cb5.r = cr5.room_id)))::int AS held,
+           COALESCE(SUM(c.size_bytes) FILTER (WHERE (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb(d, r)
+                      WHERE cb.r = s.room_id AND (cb.d::timestamp AT TIME ZONE 'Asia/Kolkata') <= GREATEST(s.started_at, s.ended_at, (SELECT max(cx.ended_at) FROM bench_chunk cx WHERE cx.session_id = s.id))
+                        AND (cb.d::timestamp AT TIME ZONE 'Asia/Kolkata') + interval '1 day' > s.started_at)
+               OR EXISTS (SELECT 1 FROM bench_window cw LEFT JOIN room_diarize_window cd ON cd.window_id = cw.id, room_day cr, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb2(d, r)
+                           WHERE cw.session_id = s.id AND cr.id IN (cw.room_day_id, cd.room_day_id) AND cb2.d = cr.ist_date AND cb2.r = cr.room_id)
+               OR EXISTS (SELECT 1 FROM bench_window cw3, room_turn_speaker ct, room_day cr3, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb3(d, r)
+                           WHERE cw3.session_id = s.id AND ct.window_id = cw3.id AND cr3.id = ct.room_day_id AND cb3.d = cr3.ist_date AND cb3.r = cr3.room_id)
+               OR EXISTS (SELECT 1 FROM bench_window cw4, jev_window_text cj, room_day cr4, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb4(d, r)
+                           WHERE cw4.session_id = s.id AND cj.window_id = cw4.id AND cr4.id = cj.room_day_id AND cb4.d = cr4.ist_date AND cb4.r = cr4.room_id)
+               OR EXISTS (SELECT 1 FROM bench_window cw5, room_span_emotion ce, room_day cr5, unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS cb5(d, r)
+                           WHERE cw5.session_id = s.id AND ce.window_id = cw5.id AND cr5.id = ce.room_day_id AND cb5.d = cr5.ist_date AND cb5.r = cr5.room_id))),0)::bigint AS held_bytes
+      FROM bench_chunk c JOIN bench_session s ON s.id = c.session_id
+     GROUP BY c.upload_state ORDER BY c.upload_state
+  `) as Array<{ upload_state: string; n: number; bytes: string | number; held: number; held_bytes: string | number }>;
+  const byState: Record<string, { count: number; bytes: number }> = {};
+  let held = 0;
+  for (const r of rows) { byState[r.upload_state] = { count: Number(r.n) - Number(r.held), bytes: Number(r.bytes) - Number(r.held_bytes) }; held += Number(r.held); }
+  return { byState, nBlindExcluded: held };
+}
+
+/** /api/admin/bench/windows: the chunk rows of a session (the caller has refused a held-out session). */
+export async function adminSessionChunks(sessionId: string): Promise<Array<{ idx: number; source: string; started_at: string | Date; ended_at: string | Date; upload_state: string }>> {
+  return (await sql`
+    SELECT idx, source, started_at, ended_at, upload_state
+      FROM bench_chunk WHERE session_id = ${sessionId} ORDER BY source, idx
+  `) as Array<{ idx: number; source: string; started_at: string | Date; ended_at: string | Date; upload_state: string }>;
+}
