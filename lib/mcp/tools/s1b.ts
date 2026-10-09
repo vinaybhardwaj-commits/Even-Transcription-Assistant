@@ -18,7 +18,7 @@ import { argBool, argInt, argStr, type McpTool, type ToolArgs } from "../registr
 import type { RoomRef } from "./brain";
 import { isRealDate, iso, notCollectedReason, pickRoom, roomRef } from "./s1";
 import { ACTION_ALLOWLIST } from "@/lib/steward/tickets";
-import { actionMode, LIVE_CAPABLE_ACTIONS, parseConfig } from "@/lib/steward/config";
+import { actionMode, LIVE_CAPABLE_ACTIONS, LIVE_IMPLEMENTED_ACTIONS, parseConfig } from "@/lib/steward/config";
 
 type Row = Record<string, unknown>;
 
@@ -315,7 +315,9 @@ async function stewardLive(): Promise<Row> {
   const loopPaused = fatal.length > 0;
   const actions = LIVE_CAPABLE_ACTIONS.map((a) => {
     const mode = loopPaused ? ("shadow" as const) : actionMode(config, a);
-    return { action: a, mode, live: mode === "live", held_by_override: config.shadow.actions[a] === true, needs_start_day_live: a === "scribe_start" };
+    // S1: config can say live for an action LiveExecutor does not implement; it would throw and stay in shadow. That is NOT live.
+    const implemented = LIVE_IMPLEMENTED_ACTIONS.includes(a);
+    return { action: a, mode, live: mode === "live" && implemented, ...(mode === "live" && !implemented ? { reason: "not_implemented_live" } : {}), held_by_override: config.shadow.actions[a] === true, needs_start_day_live: a === "scribe_start" };
   });
   const capable = new Set(LIVE_CAPABLE_ACTIONS);
   return {
