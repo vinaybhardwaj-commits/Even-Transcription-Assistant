@@ -64,6 +64,7 @@ import type { SttTranscribeResult } from "./types";
 import { collapseAssembled } from "./assembled-collapse";
 import { buildRouteMetrics } from "./route-run";
 import { shouldShadow } from "./shadow";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { readVadParams, readWindowAudioLevel, recordSilenceVerdict, SILENT_STATE, VERDICT_EMPTY_TRANSCRIPT } from "./silence";
 
 /**
@@ -762,6 +763,26 @@ export async function joinClipForWindow(args: {
   endMs: number;
   source: "primary" | "backup";
 }): Promise<{ ok: true; key: string } | { ok: false; error: string; hop?: string }> {
+  // BLIND GUARD, IN THE CUTTER ITSELF (V's condition). Asked of the window's OWN room_day, before
+  // any service call and any write, so every caller — the drain and the join-only path — is covered.
+  // Anything we cannot prove clear is refused: a failed lookup, a missing row, a NULL room_day.
+  let day: string | null = null;
+  let dayRoom: string | null = null;
+  try {
+    const rows = (await sql`
+      SELECT d.ist_date::text AS ist_date, d.room_id
+        FROM bench_window w
+        JOIN room_day d ON d.id = w.room_day_id
+       WHERE w.id = ${args.windowId}
+    `) as Array<{ ist_date: string | null; room_id: string | null }>;
+    day = rows[0]?.ist_date ?? null;
+    dayRoom = rows[0]?.room_id ?? null;
+  } catch {
+    return { ok: false, error: "room_day_lookup_failed" };
+  }
+  if (!day || !dayRoom) return { ok: false, error: "room_day_lookup_failed" };
+  if (isBlindRoomDay(day, dayRoom)) return { ok: false, error: "blind_room_day" };
+
   const join = await callJoinService(
     buildJoinRequest(args.sessionId, args.covering, args.startMs, args.endMs, args.source),
   );
