@@ -67,8 +67,8 @@ describe("scribe_window_speakers", () => {
   });
 });
 
-describe("scribe_diarize_segments (the MCP read; the HTTP route is unchanged)", () => {
-  it("window: held out = 403 blind_room_day, unplaced = window_unplaced, zero segment reads; unknown stays not_found; the unguarded call (the route) never asks for a placement", async () => {
+describe("scribe_diarize_segments and its /api twin (one guarded lookupSegments)", () => {
+  it("window: held out = 403 blind_room_day, unplaced = window_unplaced, zero segment reads; unknown stays not_found", async () => {
     answers = [PLACE_BLIND];
     expect(await D.lookupSegments({ window_id: "w1" }, { blindGuard: true })).toEqual({ ok: false, status: 403, error: "blind_room_day" });
     expect(reads(/FROM room_diarize_window d/)).toEqual([]);
@@ -77,10 +77,6 @@ describe("scribe_diarize_segments (the MCP read; the HTTP route is unchanged)", 
     expect(reads(/FROM room_diarize_window d/)).toEqual([]);
     statements.length = 0; answers = [];
     expect(await D.lookupSegments({ window_id: "w_nope" }, { blindGuard: true })).toMatchObject({ ok: false, status: 404, error: "not_found" });
-    statements.length = 0; answers = [PLACE_BLIND];
-    await D.lookupSegments({ window_id: "w1" }); // no guard: the route's behaviour
-    expect(reads(/LEFT JOIN room_day rd/)).toEqual([]);
-    expect(reads(/FROM room_diarize_window d/)).toHaveLength(1);
     // through the tool
     statements.length = 0; answers = [PLACE_BLIND];
     expect(await call("scribe_diarize_segments", { window_id: "w1" })).toEqual({ segments: null, error: "blind_room_day" });
@@ -99,6 +95,29 @@ describe("scribe_diarize_segments (the MCP read; the HTTP route is unchanged)", 
     expect(await D.lookupSegments({ session_id: "s1" }, { blindGuard: true })).toMatchObject({ ok: true, payload: { windows: [], n_blind_excluded: 4 } });
     statements.length = 0; answers = [];
     expect(await D.lookupSegments({ session_id: "s_nope" }, { blindGuard: true })).toMatchObject({ ok: false, status: 404 });
+  });
+});
+
+describe("GET /api/diarize-segments (the MCP-bearer twin)", () => {
+  it("a held-out window is 403 blind_room_day and an unplaced one window_unplaced, no-store, with zero segment reads; an ordinary window is 200", async () => {
+    process.env.SCRIBE_MCP_TOKEN = "tok-read";
+    const { GET } = await import("@/app/api/diarize-segments/route");
+    const { NextRequest } = await import("next/server");
+    const req = () => new NextRequest("https://x.example.test/api/diarize-segments?window_id=w1", { headers: { authorization: "Bearer tok-read" } });
+    answers = [PLACE_BLIND];
+    let res = await GET(req());
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ ok: false, error: "blind_room_day" });
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(reads(/FROM room_diarize_window d/)).toEqual([]);
+    statements.length = 0; answers = [PLACE_NONE];
+    res = await GET(req());
+    expect(await res.json()).toEqual({ ok: false, error: "window_unplaced" });
+    expect(reads(/FROM room_diarize_window d/)).toEqual([]);
+    statements.length = 0; answers = [PLACE_OK, [/FROM room_diarize_window d/, [{ window_id: "w1", session_id: "s1", room_day_id: "rd", source_mic: "primary", state: "ok", diarized_at: "2026-10-05T00:00:00Z", start_ms: 0, end_ms: 1000, speakers_json: [], segments_json: [], timing_json: {} }]]];
+    res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(reads(/FROM room_diarize_window d/)).toHaveLength(1);
   });
 });
 

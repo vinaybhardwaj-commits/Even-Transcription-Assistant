@@ -400,7 +400,7 @@ export function pickQuery(q: SegmentsQuery):
 export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: boolean } = {}): Promise<SegmentsLookup> {
   const pick = pickQuery(q);
   if (!pick.ok) return pick;
-  const guard = opts.blindGuard === true;
+  const guard = opts.blindGuard !== false; // S6-BLIND: guarded by default, so the MCP tool and the /api route (its bearer twin) share one rule
 
   if (pick.engine === "nemotron") {
     // the shadow store is readable only while DIARIZE_NEMOTRON_SHADOW is on; a bad flag value reads as off (fail closed)

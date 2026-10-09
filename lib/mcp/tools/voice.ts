@@ -201,7 +201,7 @@ const diarizeSegments: McpTool = {
         limit: argInt(args, "limit", SESSION_WINDOW_LIMIT_DEFAULT, 1, SESSION_WINDOW_LIMIT_MAX),
         // raw, not argStr: an overlong or non-string engine must reach pickQuery and be refused, never read as absent
         engine: args.engine == null ? null : String(args.engine),
-      }, { blindGuard: true }); // S6-BLIND: held-out windows refused, unplaced windows refused, held-out windows left out of a session and counted
+      }); // S6-BLIND: lookupSegments is guarded by default
       return r.ok ? { segments: r.payload } : { segments: null, error: r.error };
     }),
 };

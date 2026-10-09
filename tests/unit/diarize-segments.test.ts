@@ -290,7 +290,8 @@ describe("the route: MCP bearer, read scope", () => {
 
   it("responses are never cached", async () => {
     process.env.SCRIBE_MCP_TOKEN = "tok-read";
-    db.rows = [winRow()];
+    // the one fake row answers both the S6-BLIND placement read (room_id / ist_date) and the segment read
+    db.rows = [{ ...(winRow() as object), id: "bw_test_1789999200000", room_id: "room_ordinary", ist_date: "2026-10-05" }];
     const res = await GET(req("window_id=bw_test_1789999200000", "tok-read"));
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
