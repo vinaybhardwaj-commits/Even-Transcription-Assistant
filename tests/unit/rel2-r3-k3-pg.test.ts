@@ -313,3 +313,35 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     }
   });
 });
+
+(HAVE ? describe : describe.skip)("K4-4 scribe_silence_readjudicate: a held-out room-day is refused; held-out windows are left out of the preview and the apply, counted", () => {
+  const SILENT = "silent";
+  beforeAll(() => {
+    pg.exec(`
+      ${sessionRow("bs_sil", 5)}
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, state) VALUES
+        ('bw_sil_ok', 'bs_sil', 'rd_clean', ${Date.parse("2026-10-05T05:00:00Z")}, ${Date.parse("2026-10-05T05:10:00Z")}, 'primary', '${SILENT}'),
+        ('bw_sil_rts', 'bs_sil', 'rd_clean', ${Date.parse("2026-10-05T05:10:00Z")}, ${Date.parse("2026-10-05T05:20:00Z")}, 'primary', '${SILENT}'),
+        ('bw_sil_day', 'bs_sil', 'rd_blind', ${Date.parse("2026-10-05T05:20:00Z")}, ${Date.parse("2026-10-05T05:30:00Z")}, 'primary', '${SILENT}');
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_sil_rts', 't1', 'rd_blind', 0, 'no_match');
+    `);
+  });
+  const stateOf = async (id: string) => ((await H.sql!`SELECT state FROM bench_window WHERE id = ${id}::text` as Array<{ state: string }>)[0]!.state);
+  it("the dry run: a held-out room-day is blind_room_day; the unscoped preview counts only the clean window and says how many were left out", async () => {
+    expect(await call("scribe_silence_readjudicate", { room_day_id: "rd_blind" })).toMatchObject({ ok: false, error: "blind_room_day" });
+    expect(await call("scribe_silence_readjudicate", { room_day_id: "rd_blind", apply: true, detector: "d1", reason: "r", as_of: new Date().toISOString() })).toMatchObject({ ok: false, error: "blind_room_day" });
+    const out = await call("scribe_silence_readjudicate", {});
+    expect(out).toMatchObject({ ok: true, n_blind_excluded: 2 });
+    expect(out.would.eligible.total).toBe(1);
+    expect(out.would.would?.windows ?? out.would.windows).toBe(1);
+  });
+  it("the apply moves only the clean window; both held-out windows stay silent", async () => {
+    const dry = await call("scribe_silence_readjudicate", {});
+    const out = await call("scribe_silence_readjudicate", { apply: true, all_rooms: true, detector: "d1", reason: "k4", as_of: dry.would.as_of });
+    expect(out).toMatchObject({ ok: true, reopened: 1, n_blind_excluded: 2 });
+    expect(out.window_ids).toEqual(["bw_sil_ok"]);
+    expect(await stateOf("bw_sil_ok")).toBe("closed");
+    expect(await stateOf("bw_sil_rts")).toBe(SILENT);
+    expect(await stateOf("bw_sil_day")).toBe(SILENT);
+  });
+});

@@ -8,7 +8,7 @@
  */
 
 import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
-import { guardRoomDay, guardWindow, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
+import { guardRoomDay, guardWindow, roomDayIsBlind, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
 import { subjectOf, type SubjectRowish } from "@/lib/stt/subject";
@@ -526,9 +526,11 @@ const silenceReadjudicate: McpTool = {
   },
   handler: async (args: ToolArgs) =>
     failSafe({ ok: false, dry_run: true }, async () => {
-      const { previewSilenceReadjudication, reopenSilentWindows, asOfIsInFuture, DETECTOR_NAME } = await import("@/lib/stt/silence");
+      const { previewSilenceReadjudication, reopenSilentWindows, asOfIsInFuture, DETECTOR_NAME, countBlindSilentWindows } = await import("@/lib/stt/silence");
       const roomId = argStr(args, "room_id", 64) || null;
       const roomDayId = argStr(args, "room_day_id", 64) || null;
+      // K4-4: a held-out room-day is refused (preview and apply) before anything is read or moved; held-out WINDOWS of other days are left out of the set and counted
+      if (roomDayId && (await roomDayIsBlind(roomDayId))) return { ok: false, dry_run: !argBool(args, "apply"), error: "blind_room_day" };
       const fromMs = args.from_ms === undefined || args.from_ms === null ? null : argInt(args, "from_ms", 0, 0, Number.MAX_SAFE_INTEGER);
       const toMs = args.to_ms === undefined || args.to_ms === null ? null : argInt(args, "to_ms", 0, 0, Number.MAX_SAFE_INTEGER);
       const includeReopened = argBool(args, "include_reopened");
@@ -552,7 +554,7 @@ const silenceReadjudicate: McpTool = {
       // the world now and returns the instant it did, which is the as_of to hand back.
       const pinned = { ...live, asOf: asOf || null };
 
-      if (!apply) return { ok: true, dry_run: true, scope, would: await previewSilenceReadjudication(pinned) };
+      if (!apply) return { ok: true, dry_run: true, scope, n_blind_excluded: await countBlindSilentWindows(pinned), would: await previewSilenceReadjudication(pinned) };
 
       // From here on it writes, so every refusal happens BEFORE the first row moves.
       const detector = argStr(args, "detector", 64);
@@ -580,7 +582,7 @@ const silenceReadjudicate: McpTool = {
       const remaining = await previewSilenceReadjudication(live);
       return {
         ok: true, dry_run: false, scope, batch: done.batch, detector: done.detector, as_of: done.as_of,
-        reopened: done.reopened, window_ids: done.window_ids.slice(0, 50),
+        reopened: done.reopened, window_ids: done.window_ids.slice(0, 50), n_blind_excluded: await countBlindSilentWindows(pinned),
         would, remaining_eligible: remaining.eligible.total,
       };
     }),

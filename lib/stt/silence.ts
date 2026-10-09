@@ -22,6 +22,7 @@
  * the whole reason E13 is still open.
  */
 import { sql } from "@/lib/db";
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 
 /** The state a settled silent window rests in. NEVER 'transcribed' — "we heard nothing" is its own claim. */
 export const SILENT_STATE = "silent";
@@ -300,6 +301,9 @@ export async function asOfIsInFuture(asOf: string): Promise<boolean> {
  * be able to see (a verdict written before 0101, or one whose evidence write failed). Dropping it would hide
  * the windows most in need of a second look.
  */
+const HELD_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
+const HELD_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
+
 export async function listSilentWindows(f: SilenceFilter = {}): Promise<SilentWindowRow[]> {
   const limit = capped(f.limit, 100, 1000);
   return (await sql`
@@ -316,6 +320,13 @@ export async function listSilentWindows(f: SilenceFilter = {}): Promise<SilentWi
        AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
        AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
        AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
+       -- K4-4: a window with ANY held-out placement is never listed
+       AND NOT EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+              hr.id = w.room_day_id
+              OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = w.id)
+              OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = w.id)
+              OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = w.id)
+              OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = w.id)))
      -- R48 — total, for the same reason the bulk path's is: start_ms alone leaves ties to the planner, so two
      -- reads of one unchanged population could return different windows at the same limit.
      ORDER BY w.start_ms ASC, w.id ASC
@@ -413,6 +424,12 @@ export async function previewSilenceReadjudication(f: SilenceFilter = {}): Promi
          AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
          AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
          AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+              hr.id = w.room_day_id
+              OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = w.id)
+              OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = w.id)
+              OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = w.id)
+              OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = w.id)))
     ),
     -- EXACTLY the apply's own bound: same order, same tiebreaker, same limit. These are the windows that would
     -- move. R48 — id is the tiebreaker because start_ms alone is not a total order: windows sharing a start
@@ -535,6 +552,12 @@ export async function reopenSilentWindows(f: SilenceFilter & { batch: string; re
          AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
          AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
          AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+              hr.id = w.room_day_id
+              OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = w.id)
+              OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = w.id)
+              OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = w.id)
+              OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = w.id)))
        ORDER BY w.start_ms ASC, w.id ASC
        LIMIT ${limit}
     ),
@@ -581,7 +604,37 @@ export async function silenceBacklog(roomId?: string | null): Promise<{ pending:
       LEFT JOIN bench_window_silence z ON z.window_id = w.id
      WHERE w.state = ${SILENT_STATE}
        AND (${roomId ?? null}::text IS NULL OR s.room_id = ${roomId ?? null}::text)
+       AND NOT EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+              hr.id = w.room_day_id
+              OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = w.id)
+              OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = w.id)
+              OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = w.id)
+              OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = w.id)))
   `) as Array<{ pending: number; reopened: number; no_evidence: number }>;
   const r = rows[0] ?? { pending: 0, reopened: 0, no_evidence: 0 };
   return { pending: Number(r.pending ?? 0), reopened: Number(r.reopened ?? 0), no_evidence: Number(r.no_evidence ?? 0) };
+}
+
+
+/** K4-4: how many silent windows the filter matches that are left out because ANY placement is held out (counts only). */
+export async function countBlindSilentWindows(f: SilenceFilter = {}): Promise<number> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n
+      FROM bench_window w
+      JOIN bench_session s ON s.id = w.session_id
+      LEFT JOIN bench_window_silence z ON z.window_id = w.id
+     WHERE w.state = ${SILENT_STATE}
+       AND (${f.roomId ?? null}::text IS NULL OR s.room_id = ${f.roomId ?? null}::text)
+       AND (${f.roomDayId ?? null}::text IS NULL OR w.room_day_id = ${f.roomDayId ?? null}::text)
+       AND (${f.fromMs ?? null}::bigint IS NULL OR w.start_ms >= ${f.fromMs ?? null}::bigint)
+       AND (${f.toMs ?? null}::bigint IS NULL OR w.start_ms < ${f.toMs ?? null}::bigint)
+       AND (${f.includeReopened === true}::boolean OR z.reopened_at IS NULL)
+       AND EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
+              hr.id = w.room_day_id
+              OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = w.id)
+              OR hr.id IN (SELECT ht.room_day_id FROM room_turn_speaker ht WHERE ht.window_id = w.id)
+              OR hr.id IN (SELECT hj.room_day_id FROM jev_window_text hj WHERE hj.window_id = w.id)
+              OR hr.id IN (SELECT he.room_day_id FROM room_span_emotion he WHERE he.window_id = w.id)))
+  `) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
 }
