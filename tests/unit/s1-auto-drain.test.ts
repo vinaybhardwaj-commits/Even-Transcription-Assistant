@@ -38,6 +38,7 @@ const H = vi.hoisted(() => ({
   /** E22 R3 — an `enqueued` answer also writes the room_window job the real drain's submit would. */
   writeJob: false,
 }));
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...(await orig<Record<string, unknown>>()), blindWindowIds: async () => [] as string[] })); // DRAIN-GUARD: blindness is proven in drain-guard-pg.test.ts
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql(s, ...v) }));
 vi.mock("@/lib/stt/room-drain", async (orig) => {
   const actual = await orig<typeof import("@/lib/stt/room-drain")>();
@@ -119,7 +120,7 @@ function fakeSql(rows: Array<Record<string, unknown> & { id: string }>): { calls
   H.sql = (async (s: TemplateStringsArray) => {
     const text = s.join("?").replace(/\s+/g, " ");
     log.calls.push(text);
-    return /FROM bench_window w/.test(text) ? rows : [];
+    return /FROM bench_window w/.test(text) && !/WITH bw AS/.test(text) ? rows : []; // DRAIN-GUARD: the blind-set query answers none
   }) as Sql;
   return log;
 }
@@ -134,7 +135,7 @@ describe("ROOM_AUTO_DRAIN_ENABLED", () => {
   it("OFF (unset): enqueued 0, no query of any kind, and NO call to drainRoomWindow", async () => {
     const db = fakeSql([{ id: "bw_a" }]);
     const r = await enqueueAutoDrain("https://x.test", { log: silent });
-    expect(r).toEqual({ enqueued: 0, considered: 0, results: [] });
+    expect(r).toEqual({ enqueued: 0, considered: 0, n_blind_excluded: 0, results: [] });
     expect(db.calls).toHaveLength(0);
     expect(H.drained).toHaveLength(0);
   });
@@ -155,7 +156,7 @@ describe("ROOM_AUTO_DRAIN_ENABLED", () => {
     const db = fakeSql([{ id: "bw_a" }]);
     const r = await enqueueAutoDrain("https://x.test", { log: silent });
     expect(H.drained.map((d) => d.windowId)).toEqual(["bw_a"]);
-    expect(r).toEqual({ enqueued: 1, considered: 1, results: [{ window_id: "bw_a", step: "enqueued", job_id: "job_1" }] });
+    expect(r).toEqual({ enqueued: 1, considered: 1, n_blind_excluded: 0, results: [{ window_id: "bw_a", step: "enqueued", job_id: "job_1" }] });
     expect(db.calls).toHaveLength(3);
     expect(db.calls[0]).toMatch(/FROM bench_window w/);
     expect(db.calls[1]).toMatch(/INSERT INTO stt_subject_job/);
@@ -215,7 +216,7 @@ describe("the actor", () => {
     fakeSql([{ id: "bw_a" }]);
     Object.assign(H, { step: "join_failed", detail: "join_service_not_configured" });
     const r = await enqueueAutoDrain("https://x.test", { log: silent });
-    expect(r).toEqual({ enqueued: 0, considered: 1, results: [{ window_id: "bw_a", step: "join_failed", detail: "join_service_not_configured" }] });
+    expect(r).toEqual({ enqueued: 0, considered: 1, n_blind_excluded: 0, results: [{ window_id: "bw_a", step: "join_failed", detail: "join_service_not_configured" }] });
     expect(readFileSync("lib/stt/auto-drain.ts", "utf8")).not.toMatch(/isTranscriptEnabled\(/);
   });
 });

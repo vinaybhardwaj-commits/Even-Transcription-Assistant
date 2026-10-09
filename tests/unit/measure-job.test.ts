@@ -29,6 +29,7 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...(await orig<Record<string, unknown>>()), blindWindowIds: async () => [] as string[] })); // DRAIN-GUARD: blindness is proven in drain-guard-pg.test.ts
 vi.mock("@/lib/r2", () => ({
   headObject: async () => ({ size: null, content_type: null }),
   getObjectBytes: async () => null,

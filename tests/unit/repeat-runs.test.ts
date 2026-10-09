@@ -22,6 +22,7 @@ import { assembleTape, type AssembleTapeInput, type RawBenchWindowRow, type RawT
 // above (harmless - assembleTape never calls sql) and to the dynamic imports of the backfill/store
 // modules below, which do.
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...(await orig<Record<string, unknown>>()), blindWindowIds: async () => [] as string[] })); // DRAIN-GUARD: blindness is proven in drain-guard-pg.test.ts
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v) }));
 
 // ===========================================================================

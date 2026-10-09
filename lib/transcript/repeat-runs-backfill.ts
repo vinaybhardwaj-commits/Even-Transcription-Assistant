@@ -10,19 +10,22 @@
  * uses in lib/stt/diarize-window.ts, minus the room_day_id leg (not every window has one set).
  */
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { detectRepeatRuns, type RepeatRunTurnInput } from "./repeat-runs";
 import { writeRepeatRuns } from "./repeat-runs-store";
 
 export type BackfillWindowResult = { window_id: string; turns: number; flagged: number };
 export type BackfillSummary = {
   windows_considered: number;
+  /** Held-out windows left out (DRAIN-GUARD). */
+  n_blind_excluded: number;
   windows_with_turns: number;
   turns_total: number;
   turns_flagged: number;
   per_window: BackfillWindowResult[];
 };
 
-async function listCandidateWindows(): Promise<Array<{ window_id: string; session_id: string; start_ms: number; end_ms: number }>> {
+async function listCandidateWindows(): Promise<{ windows: Array<{ window_id: string; session_id: string; start_ms: number; end_ms: number }>; excluded: number }> {
   const rows = (await sql`
     SELECT bw.id AS window_id, bw.session_id, bw.start_ms, bw.end_ms
       FROM bench_window bw
@@ -35,7 +38,9 @@ async function listCandidateWindows(): Promise<Array<{ window_id: string; sessio
      )
      ORDER BY bw.start_ms
   `) as Array<{ window_id: string; session_id: string; start_ms: string | number; end_ms: string | number }>;
-  return rows.map((r) => ({ window_id: r.window_id, session_id: r.session_id, start_ms: Number(r.start_ms), end_ms: Number(r.end_ms) }));
+  const blind = new Set(await blindWindowIds());
+  const kept = rows.filter((r) => !blind.has(r.window_id));
+  return { windows: kept.map((r) => ({ window_id: r.window_id, session_id: r.session_id, start_ms: Number(r.start_ms), end_ms: Number(r.end_ms) })), excluded: rows.length - kept.length };
 }
 
 async function loadWindowTurnsForBackfill(sessionId: string, startMs: number, endMs: number): Promise<RepeatRunTurnInput[]> {
@@ -55,7 +60,7 @@ async function loadWindowTurnsForBackfill(sessionId: string, startMs: number, en
 
 /** Runs the detector over every candidate window and persists the flags. Idempotent. */
 export async function backfillRepeatRuns(): Promise<BackfillSummary> {
-  const windows = await listCandidateWindows();
+  const { windows, excluded } = await listCandidateWindows();
   const perWindow: BackfillWindowResult[] = [];
   let turnsTotal = 0;
   let turnsFlagged = 0;
@@ -76,6 +81,7 @@ export async function backfillRepeatRuns(): Promise<BackfillSummary> {
 
   return {
     windows_considered: windows.length,
+    n_blind_excluded: excluded,
     windows_with_turns: perWindow.filter((w) => w.turns > 0).length,
     turns_total: turnsTotal,
     turns_flagged: turnsFlagged,

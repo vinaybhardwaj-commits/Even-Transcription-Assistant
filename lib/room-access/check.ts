@@ -195,3 +195,33 @@ export async function sessionsBlindAny(sessionIds: readonly string[]): Promise<S
   `) as Array<{ id: string }>;
   return new Set(rows.map((r) => r.id));
 }
+
+/**
+ * DRAIN-GUARD: every window a production CHOOSER (auto-drain, room drain, diarize / emotion enqueue, measure, join-only, repeat-run backfill) must leave out, in one statement: a window with ANY held-out
+ * placement (windowBlindAny's rule), a window of a session that touches a held-out day or holds such a window (sessionsBlindAny's rule, whole session). The chooser removes these ids BEFORE its LIMIT
+ * (`w.id <> ALL(...)`), so a held-out window never takes a slot and the batch size is unchanged; it logs the count as `n_blind_excluded`.
+ */
+export async function blindWindowIds(): Promise<string[]> {
+  const rows = (await sql`
+    WITH bw AS (
+      SELECT w.id, w.session_id
+        FROM bench_window w
+        LEFT JOIN room_diarize_window dw ON dw.window_id = w.id
+       WHERE EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+          OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+          OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+          OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)
+    )
+    SELECT w.id FROM bench_window w
+      JOIN bench_session s ON s.id = w.session_id
+     WHERE w.id IN (SELECT id FROM bw)
+        OR w.session_id IN (SELECT session_id FROM bw)
+        OR EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
+                    WHERE b.r = s.room_id
+                      AND (b.d::timestamp AT TIME ZONE 'Asia/Kolkata') <= GREATEST(s.started_at, s.ended_at, (SELECT max(c.ended_at) FROM bench_chunk c WHERE c.session_id = s.id))
+                      AND (b.d::timestamp AT TIME ZONE 'Asia/Kolkata') + interval '1 day' > s.started_at)
+        OR EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
+                    WHERE b.r = s.room_id AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = b.d)
+  `) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}

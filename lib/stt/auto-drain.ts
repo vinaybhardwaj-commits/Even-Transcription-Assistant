@@ -47,6 +47,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { parseFlag } from "@/lib/flags";
 import { SYSTEM_ACTOR, actorProblem, type RunActor } from "@/lib/stt/receipt";
 import { drainRoomWindow } from "@/lib/stt/room-drain";
@@ -84,6 +85,8 @@ export const AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES = clampedIntEnv("AUTO_DRAIN_REF
 export type AutoDrainResult = {
   enqueued: number;
   considered: number;
+  /** Held-out windows the scan would otherwise have offered (DRAIN-GUARD). */
+  n_blind_excluded: number;
   results: Array<{ window_id: string; step: string; detail?: string; job_id?: string }>;
 };
 
@@ -141,7 +144,7 @@ export async function enqueueAutoDrain(
   opts: { limit?: number; log?: (m: string) => void; actor?: RunActor } = {},
 ): Promise<AutoDrainResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
-  const result: AutoDrainResult = { enqueued: 0, considered: 0, results: [] };
+  const result: AutoDrainResult = { enqueued: 0, considered: 0, n_blind_excluded: 0, results: [] };
 
   if (!parseFlag(ROOM_AUTO_DRAIN_ENABLED_ENV)) {
     log(`[auto-drain] ${ROOM_AUTO_DRAIN_ENABLED_ENV} is off — draining nothing (this is the shipped state)`);
@@ -204,8 +207,11 @@ export async function enqueueAutoDrain(
             AND j.status IN ('queued', 'running')
        )
   `) as Array<Record<string, unknown>>;
+  const blind = new Set(await blindWindowIds());
+  const kept = eligible.filter((e) => !blind.has(String(e.id)));
+  result.n_blind_excluded = eligible.length - kept.length;
   const windows = orderAutoDrainOffers(
-    eligible.map((e) => ({
+    kept.map((e) => ({
       id: String(e.id), room_id: String(e.room_id),
       start_ms: num(e.start_ms) ?? 0, end_ms: num(e.end_ms) ?? 0, closed_ms: num(e.closed_ms) ?? 0,
       last_served_ms: num(e.last_served_ms),
@@ -231,6 +237,6 @@ export async function enqueueAutoDrain(
       await sql`UPDATE bench_window SET auto_drain_refused_at = NOW(), auto_drain_refused_reason = ${out.step} WHERE id = ${w.id}`;
     }
   }
-  log(`[auto-drain] enqueued ${result.enqueued} of ${result.considered} considered window(s) (cap ${limit}, ${AUTO_DRAIN_MAX_AGE_HOURS} h, cooldown ${AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES} min)`);
+  log(`[auto-drain] enqueued ${result.enqueued} of ${result.considered} considered window(s) (cap ${limit}, ${AUTO_DRAIN_MAX_AGE_HOURS} h, cooldown ${AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES} min, n_blind_excluded ${result.n_blind_excluded})`);
   return result;
 }

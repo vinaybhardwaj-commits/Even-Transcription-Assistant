@@ -26,6 +26,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { parseFlag } from "@/lib/flags";
 
 /**
@@ -94,6 +95,8 @@ export type DiarizeEnqueueResult = {
   enqueued: Array<{ window_id: string; job_id: string; retry_of_attempt: number | null }>;
   /** Failed windows that have used every attempt. Visible here so a stuck window is never silent. */
   exhausted: number;
+  /** Held-out windows kept out of this scan, before its LIMIT (DRAIN-GUARD). */
+  n_blind_excluded: number;
   errors: string[];
 };
 
@@ -111,7 +114,7 @@ export async function enqueueDiarizeWindows(
   opts: { limit?: number; log?: Logger; origin?: string; actor: string },
 ): Promise<DiarizeEnqueueResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
-  const result: DiarizeEnqueueResult = { enabled: false, scanned: 0, enqueued: [], exhausted: 0, errors: [] };
+  const result: DiarizeEnqueueResult = { enabled: false, scanned: 0, enqueued: [], exhausted: 0, n_blind_excluded: 0, errors: [] };
 
   if (!roomDiarizeEnabled(process.env, log)) {
     log(`[room-diarize] ${ROOM_DIARIZE_ENABLED_ENV} is off — enqueueing nothing (this is the shipped state)`);
@@ -120,12 +123,15 @@ export async function enqueueDiarizeWindows(
   result.enabled = true;
 
   const limit = Math.max(1, Math.min(DIARIZE_BATCH_LIMIT, Math.trunc(opts.limit ?? DIARIZE_BATCH_LIMIT) || DIARIZE_BATCH_LIMIT));
+  const blind = await blindWindowIds();
+  result.n_blind_excluded = blind.length;
   const windows = await safeRead<Array<{ id: string; attempts: number | null }>>("bench_window scan", [], log, result.errors, async () =>
     (await sql`
       SELECT w.id, d.attempts
         FROM bench_window w
         LEFT JOIN room_diarize_window d ON d.window_id = w.id
        WHERE w.state IN ('closed', 'transcribed')
+         AND w.id <> ALL(${blind}::text[])
          AND w.grid_aligned = TRUE
          AND w.room_day_id IS NOT NULL
          AND w.clip_r2_key IS NOT NULL
@@ -167,6 +173,6 @@ export async function enqueueDiarizeWindows(
     });
     result.enqueued.push({ window_id: w.id, job_id: job.id, retry_of_attempt: w.attempts == null ? null : Number(w.attempts) });
   }
-  log(`[room-diarize] enqueued ${result.enqueued.length} of ${result.scanned} eligible window(s); ${result.enqueued.filter((e) => e.retry_of_attempt !== null).length} retr(ies); ${result.exhausted} failed window(s) at the ${DIARIZE_MAX_ATTEMPTS}-attempt bound`);
+  log(`[room-diarize] enqueued ${result.enqueued.length} of ${result.scanned} eligible window(s); ${result.enqueued.filter((e) => e.retry_of_attempt !== null).length} retr(ies); ${result.exhausted} failed window(s) at the ${DIARIZE_MAX_ATTEMPTS}-attempt bound; n_blind_excluded ${result.n_blind_excluded}`);
   return result;
 }

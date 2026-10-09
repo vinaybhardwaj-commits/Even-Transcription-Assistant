@@ -19,6 +19,7 @@
  * dashboard env-var edit alone to change tonight's pacing; it has to ride a deploy.
  */
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { emotionEnabled, EMOTION_ENABLED_ENV } from "./gate";
 import { emotionSecretConfigured, EMOTION_SECRET_ENV } from "./client";
 import { clampedIntEnv } from "@/lib/stt/auto-drain";
@@ -37,12 +38,14 @@ export type EmotionEnqueueResult = {
   enqueued: Array<{ window_id: string; job_id: string; retry_of_attempt: number | null }>;
   /** Failed windows with every attempt used, for the current diarize run. Counted, never silent. */
   exhausted: number;
+  /** Held-out windows kept out of this scan, before its LIMIT (DRAIN-GUARD). */
+  n_blind_excluded: number;
 };
 
 /** Throws on an unrecognised flag value and on any read or submit failure — the route makes it a non-2xx. */
 export async function enqueueEmotionWindows(opts: { actor: string; origin?: string; log?: (m: string) => void }): Promise<EmotionEnqueueResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
-  const result: EmotionEnqueueResult = { enabled: false, busy: false, enqueued: [], exhausted: 0 };
+  const result: EmotionEnqueueResult = { enabled: false, busy: false, enqueued: [], exhausted: 0, n_blind_excluded: 0 };
   if (!emotionEnabled()) {
     log(`[emotion] ${EMOTION_ENABLED_ENV} is off — enqueueing nothing (this is the shipped state)`);
     return result;
@@ -65,12 +68,15 @@ export async function enqueueEmotionWindows(opts: { actor: string; origin?: stri
     return result;
   }
 
+  const blind = await blindWindowIds();
+  result.n_blind_excluded = blind.length;
   const rows = (await sql`
     SELECT d.window_id, e.attempts
       FROM room_diarize_window d
       JOIN bench_window w ON w.id = d.window_id
       LEFT JOIN room_emotion_window e ON e.window_id = d.window_id
      WHERE d.state = 'ok'
+       AND w.id <> ALL(${blind}::text[])
        AND d.last_run_id IS NOT NULL
        AND w.clip_r2_key IS NOT NULL
        AND (e.window_id IS NULL
@@ -92,6 +98,6 @@ export async function enqueueEmotionWindows(opts: { actor: string; origin?: stri
     });
     result.enqueued.push({ window_id: r.window_id, job_id: job.id, retry_of_attempt: r.attempts == null ? null : Number(r.attempts) });
   }
-  log(`[emotion] enqueued ${result.enqueued.length}; ${result.exhausted} failed window(s) at the ${EMOTION_MAX_ATTEMPTS}-attempt bound`);
+  log(`[emotion] enqueued ${result.enqueued.length}; ${result.exhausted} failed window(s) at the ${EMOTION_MAX_ATTEMPTS}-attempt bound; n_blind_excluded ${result.n_blind_excluded}`);
   return result;
 }

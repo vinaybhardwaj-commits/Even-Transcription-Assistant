@@ -30,6 +30,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { blindWindowIds } from "@/lib/room-access/check";
 import { getObjectBytes, headObject } from "@/lib/r2";
 import { transcribeWithWhisper } from "@/lib/whisper";
 import {
@@ -85,6 +86,8 @@ export type MeasureWindowRow = {
 
 export type MeasureJobResult = {
   scanned: number;
+  /** Held-out windows kept out of this scan, before its LIMIT (DRAIN-GUARD). */
+  n_blind_excluded: number;
   measured: number;
   skipped_unreadable: number;
   quarantined: Record<string, number>;
@@ -128,7 +131,7 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
   const limit = Math.max(1, Math.min(MEASURE_BATCH_LIMIT, Math.trunc(opts.limit ?? MEASURE_BATCH_LIMIT) || MEASURE_BATCH_LIMIT));
   const errors: string[] = [];
   const result: MeasureJobResult = {
-    scanned: 0, measured: 0, skipped_unreadable: 0, quarantined: {}, scores_written: 0,
+    scanned: 0, n_blind_excluded: 0, measured: 0, skipped_unreadable: 0, quarantined: {}, scores_written: 0,
     coverage: { windows: 0, energy_ms: 0, silent_ms: 0, unknown_ms: 0, level_coverage: null },
     fork: { kind: "not_run", reason: "not_reached" },
     scoring: { skipped: "not_reached" },
@@ -142,16 +145,20 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
   // than 'closed' alone because a window that has already been transcribed is still tape that
   // wants measuring — the measurement is about the AUDIO, not about whether anyone paid to read
   // it. Oldest first so a backlog drains in a stable order across passes.
-  const windows = await safeRead<MeasureWindowRow[]>("bench_window scan", [], log, async () =>
-    (await sql`
+  const windows = await safeRead<MeasureWindowRow[]>("bench_window scan", [], log, async () => {
+    const blind = await blindWindowIds();
+    result.n_blind_excluded = blind.length;
+    return (await sql`
       SELECT w.id, w.session_id, s.room_id, w.start_ms, w.end_ms, w.source_mic
         FROM bench_window w
         JOIN bench_session s ON s.id = w.session_id
        WHERE w.state IN ('closed', 'transcribing', 'transcribed', 'failed', 'silent')
+         AND w.id <> ALL(${blind}::text[])
          AND NOT EXISTS (SELECT 1 FROM stt_window_measure m WHERE m.window_id = w.id)
        ORDER BY w.start_ms ASC
        LIMIT ${limit}
-    `) as MeasureWindowRow[]);
+    `) as MeasureWindowRow[];
+  });
 
   if (!windows.ok) errors.push("bench_window scan failed");
   result.scanned = windows.value.length;
@@ -370,7 +377,7 @@ export async function runMeasureJob(opts: { limit?: number; log?: Logger; skipFo
     result.fork = await runForkStep(log);
   }
 
-  log(`[measure] pass done: scanned=${result.scanned} measured=${result.measured} scores=${result.scores_written} skipped=${result.skipped_unreadable} coverage=${result.coverage.level_coverage ?? "n/a"} fork=${result.fork.kind} scored=${"scored" in result.scoring ? result.scoring.scored : "skipped"} refused=${"refused" in result.scoring ? result.scoring.refused : "skipped"}`);
+  log(`[measure] pass done: scanned=${result.scanned} n_blind_excluded=${result.n_blind_excluded} measured=${result.measured} scores=${result.scores_written} skipped=${result.skipped_unreadable} coverage=${result.coverage.level_coverage ?? "n/a"} fork=${result.fork.kind} scored=${"scored" in result.scoring ? result.scoring.scored : "skipped"} refused=${"refused" in result.scoring ? result.scoring.refused : "skipped"}`);
   return result;
 }
 
