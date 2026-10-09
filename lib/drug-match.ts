@@ -87,7 +87,25 @@ const COMMON = new Set(`a abdomen about above across advice advise after again a
 /** articles, prepositions, pronouns, auxiliaries: a multi-word window never contains one ("the road", "she has") */
 const FUNCTION_WORDS = new Set(`the a an and or but if then than that this these those there here when where what which who whom whose why how not no yes all any some each every both either neither more most less least much many few little very too also only just even still again always never often ever once twice since until while after before during about above below between into onto over under through across along around against without within upon from with for off out down up i me my mine we us our you your he him his she her it its they them their one two three is are was were be been being am do does did done doing have has had having can could shall should will would may might must to of in on at by as so`.split(" "));
 /** very common English words: never proposed as a mis-hearing of a name, alone or as a whole multi-word window */
-const isCommon = (w: string): boolean => COMMON.has(w.toLowerCase());
+const isCommon = (w: string): boolean => inflectedIn(COMMON, w);
+
+/**
+ * S8A8 D2 — INFLECTED FORMS. The word lists hold base forms ("medicine"); "medicines", "tolerated", "stretching" are the same ordinary words and must not escape the gate on a plural or a tense.
+ * True when the word, or the word with a plural / past / -ing / -ly ending taken off (and the e a dropped ending hid), is in the set. Short words (under 5 letters) are tested as they are.
+ */
+export function inflectedIn(set: ReadonlySet<string>, word: string): boolean {
+  const w = word.toLowerCase();
+  if (set.has(w)) return true;
+  if (w.length < 5) return false;
+  const cands: string[] = [];
+  if (w.endsWith("ies")) cands.push(`${w.slice(0, -3)}y`);
+  if (w.endsWith("es")) cands.push(w.slice(0, -2));
+  if (w.endsWith("s")) cands.push(w.slice(0, -1));
+  if (w.endsWith("ed")) cands.push(w.slice(0, -2), w.slice(0, -1), w.slice(0, -3));
+  if (w.endsWith("ing")) cands.push(w.slice(0, -3), `${w.slice(0, -3)}e`, w.slice(0, -4));
+  if (w.endsWith("ly")) cands.push(w.slice(0, -2));
+  return cands.some((c) => c.length >= 4 && set.has(c));
+}
 /**
  * CONTEXT. A real catalog (~10 000 brand names) holds a near-sound-alike for almost any ordinary word, so a loose score alone is mostly noise. A window is therefore
  * compared at the loose threshold only when a word that talks about that kind of thing sits within a few words of it ("take X twice a day", "X level is high",
@@ -149,7 +167,7 @@ const cueOf = (words: string[], lw: string[], start: number, size: number, c: Ca
  */
 export const COMMON_WORD_MIN_SCORE = 0.85;
 const COMMON_FREQ: ReadonlySet<string> = new Set((commonWords as { words: string[] }).words);
-export const isFrequentWord = (w: string): boolean => COMMON_FREQ.has(w.toLowerCase());
+export const isFrequentWord = (w: string): boolean => inflectedIn(COMMON_FREQ, w);
 
 /**
  * G61 (S8A6) — CLINICAL ENGLISH IS NOT A DRUG, WHATEVER THE CUE. The 8,000-word list is everyday English; a consult is full of words just outside it ("physiotherapy", "tolerated", "elevate",
@@ -158,7 +176,7 @@ export const isFrequentWord = (w: string): boolean => COMMON_FREQ.has(w.toLowerC
  * and whatever the cue; a garbled drug name ("combat land", "nodrinal", "metphormin") has none.
  */
 const CLINICAL_ENGLISH: ReadonlySet<string> = new Set((clinicalWords as { words: string[] }).words);
-export const isClinicalEnglishWord = (w: string): boolean => CLINICAL_ENGLISH.has(w.toLowerCase());
+export const isClinicalEnglishWord = (w: string): boolean => inflectedIn(CLINICAL_ENGLISH, w);
 
 const WORD = /[\p{L}\p{N}][\p{L}\p{N}'-]*/gu;
 

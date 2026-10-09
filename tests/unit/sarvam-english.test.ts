@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, statSync } from "node:fs";
 import { detectScript, hasIndicScript, nonLatinLetterRatio } from "@/lib/script-detect";
-import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, type Lexicon } from "@/lib/drug-match";
+import { cueStats, drugCandidates, nameScore, phoneticKey, matchForm, isFrequentWord, isClinicalEnglishWord, COMMON_WORD_MIN_SCORE, inflectedIn, type Lexicon } from "@/lib/drug-match";
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 import { alignEnglish, settleUnpaired, tagNative, addMayura, finalizeEnglish, normalizeForEcho, checkEnglish as checkEnglishRaw } from "@/lib/jobs/kinds/sarvam-english";
 import { planUnits } from "@/lib/jobs/kinds/sarvam-translate";
@@ -520,5 +520,27 @@ describe("S8A8 D1 — an overlapping short utterance is emitted ONCE (shaped lik
     const n = tagNative([{ speaker_id: "0", start_s: 5, end_s: 9, text: "ok one" }, { speaker_id: "0", start_s: 9, end_s: 12, text: "ok two" }]);
     const al = alignEnglish(n, [{ speaker_id: "0", start_s: 8.6, end_s: 9.4, text: "and" }, { speaker_id: "0", start_s: 10, end_s: 10, text: "point" }]);
     expect(al.track.map((t) => t.native_idx)).toEqual([0, 1]);
+  });
+});
+
+describe("S8A8 D2 / G68 — inflected forms are common words; the 212 drug-free fixtures give no candidate", () => {
+  const cands = (t: string) => drugCandidates(t, 0, lex);
+  it("D2 — 'medicines' (a plural of a listed word) is not proposed as Meclizine; plural / past / -ing / -ly forms of the lists are matched; short words are not stemmed", () => {
+    for (const t of ["Take the medicines after food", "medicines twice a day", "Take medicines at night after food"]) expect(cands(t).map((c) => c.suggested), t).toEqual([]);
+    const set = new Set(["medicine", "stretch", "tolerate", "study", "quick"]);
+    for (const w of ["medicines", "Medicine", "stretching", "stretched", "stretches", "tolerated", "tolerates", "studies", "quickly"]) expect(inflectedIn(set, w), w).toBe(true);
+    for (const w of ["medic", "tolerant", "ed", "ing", "bus"]) expect(inflectedIn(set, w), w).toBe(false);
+    expect(isFrequentWord("medicines")).toBe(true);
+    expect(isClinicalEnglishWord("tolerated")).toBe(true);
+    expect(cands("Take combat land after food")[0]).toMatchObject({ heard: "combat land" }); // a garbled name made of ordinary words is still found
+  });
+  it("G68 — all 212 fixture sentences are drug-free: none gets a candidate (8 of them did before the clinical list: 1 consult_dosing + 7 consult_clinical, all false); recall on the Combiflam phrasings and the earlier cases is unchanged", () => {
+    const all = [...fixtures.ordinary, ...fixtures.holdout, ...fixtures.final, ...fixtures.consult, ...fixtures.consult_dosing, ...fixtures.consult_clinical];
+    expect(all).toHaveLength(212);
+    expect(all.filter((t) => cands(t).length > 0)).toEqual([]);
+    expect(cands("Continue the physiotherapy twice a week for a month.")).toEqual([]); // the one consult_dosing sentence that lost its (false) candidate
+    const rec = ["Take combat land after food", "Start Combat Land for pain", "I gave him combat land for the fever", "Continue combat land once a day", "Combat land at night please", "Combat land OD for three days", "Combat land daily for a week", "Combat land SOS if the pain returns"];
+    expect(rec.filter((t) => cands(t).some((c) => /^combiflam/i.test(c.suggested)))).toEqual(rec);
+    expect(cands("complains of nodrinal since two weeks").map((c) => c.suggested)).toContain("nocturia");
   });
 });
