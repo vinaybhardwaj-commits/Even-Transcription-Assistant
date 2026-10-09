@@ -193,10 +193,16 @@ export function matchForm(name: string): string {
 
 /** Built once per lexicon object: entries bucketed by the first sound, so a window is compared with ~1/10 of the names, not all of them. */
 /**
- * S8A8b — A LEXICON ENTRY MADE ONLY OF ORDINARY WORDS IS NEVER A CANDIDATE. "Continue same medicines" is a real advice phrase in the name list, but every token of it is an everyday or clinical
+ * S8A8b — A CLINICAL-TERM / ADVICE PHRASE MADE ONLY OF ORDINARY WORDS IS NEVER A CANDIDATE (T1: drug and investigation entries are NOT subject to this: "Bleeding Time", "Copper Serum", brands that are English words stay). "Continue same medicines" is a real advice phrase in the name list, but every token of it is an everyday or clinical
  * English word (after inflection); proposing it for the ordinary sentence "Continue medicines daily" is noise. Such an entry is still a KNOWN name (an exact occurrence proposes nothing) but is
  * not indexed as a target. Pack words ("tablet", "mg") and numbers are not tokens of the name for this test. An entry with ONE token outside the lists ("Combiflam", "nocturia") stays.
  */
+/** Imperative advice verbs: a lexicon entry that STARTS with one is a sentence of advice stored as a name ("Continue same medicines"), not a product, a test or a symptom. */
+const ADVICE_VERBS = new Set("continue avoid take start stop use apply give repeat follow maintain reduce increase keep resume restart".split(" "));
+export function isAdvicePhrase(name: string): boolean {
+  const first = (name.trim().split(/[\s/,()+-]+/)[0] ?? "").toLowerCase();
+  return ADVICE_VERBS.has(first) && name.trim().split(/\s+/).length >= 2 && !/\d/.test(name) && allOrdinaryWords(name);
+}
 function allOrdinaryWords(name: string): boolean {
   const toks = name.split(/[\s/,()+-]+/).filter((t) => t && !/\d/.test(t) && !PACK_WORDS.has(t.toLowerCase())).map((t) => t.replace(/[^\p{L}]/gu, "")).filter((t) => t.length > 0);
   return toks.length > 0 && toks.every((t) => isCommon(t) || isFrequentWord(t) || isClinicalEnglishWord(t));
@@ -223,7 +229,7 @@ function indexOf(lex: Lexicon): { buckets: Map<string, Entry[]>; known: Set<stri
     known.add(form);
     if (seen.has(`${category}:${form}`)) return; // many pack sizes of one product are one entry (the first, in file order, is suggested)
     seen.add(`${category}:${form}`);
-    if (allOrdinaryWords(name)) { drops[category] += 1; drops.total += 1; return; } // S8A8b: known, but never a target
+    if (isAdvicePhrase(name)) { drops[category] += 1; drops.total += 1; return; } // S8A8b/T1: ONLY advice phrases ("Continue same medicines"); no other drug, investigation or clinical-term entry is dropped by this rule
     const pk = phoneticKey(form);
     const first = pk[0] ?? "";
     const e: Entry = { name, category, form, pk, first };

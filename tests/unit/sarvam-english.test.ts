@@ -547,13 +547,16 @@ describe("S8A8 D2 / G68 — inflected forms are common words; the 212 drug-free 
 
 describe("S8A8b — a lexicon entry made only of ordinary words is never a candidate", () => {
   const cands = (t: string) => drugCandidates(t, 0, lex);
-  const mini: Lexicon = { version: "t", source: "t", names: ["Combiflam 400 mg Tablet", "Pantocid 40 mg Tablet"], investigations: ["Blood Sugar Fasting"], clinical_terms: ["Continue same medicines", "nocturia"] };
+  const mini: Lexicon = { version: "t", source: "t", names: ["Combiflam 400 mg Tablet", "Pantocid 40 mg Tablet", "Continue same medicines", "Oral Rehydration Salt"], investigations: ["Blood Sugar Fasting", "Bleeding Time", "Copper Serum"], clinical_terms: ["nocturia", "kidney stone", "Avoid oily food"] };
   it("entries whose every token is an everyday / clinical word (after inflection) are not indexed as targets but stay KNOWN; one token outside the lists keeps the entry", () => {
     const d = lexiconDropCounts(mini);
-    expect(d).toMatchObject({ clinical_term: 1, investigation: 1, drug: 0, total: 2 }); // "Continue same medicines", "Blood Sugar Fasting"; "nocturia" and the brands stay
+    expect(d).toMatchObject({ clinical_term: 1, investigation: 0, drug: 1, total: 2 }); // only the advice phrases "Continue same medicines" and "Avoid oily food"; investigations, other products ("Oral Rehydration Salt") and symptoms stay
     expect(drugCandidates("Continue medicines daily", 0, mini)).toEqual([]);
     expect(drugCandidates("complains of nodrinal since two weeks", 0, mini).map((c) => c.suggested)).toContain("nocturia");
     expect(drugCandidates("Take combat land after food", 0, mini).map((c) => c.suggested.toLowerCase())[0]).toMatch(/^combiflam/);
+    // T1: investigations and products made of English words keep their recall
+    expect(drugCandidates("the bleeding tyme was normal", 0, mini).map((c) => c.suggested)).toContain("Bleeding Time");
+    expect(drugCandidates("send copper serom", 0, mini).map((c) => c.suggested)).toContain("Copper Serum");
     expect(drugCandidates("Continue same medicines", 0, mini)).toEqual([]); // an exact occurrence of a known name proposes nothing (it is still known)
   });
   it("the real lexicon: 'Continue medicines daily' gives no candidate; the dropped counts are reported (> 0); the G68 recall set and the 212 fixtures are unchanged", () => {
@@ -561,10 +564,36 @@ describe("S8A8b — a lexicon entry made only of ordinary words is never a candi
     expect(cands("Continue medicines after food")).toEqual([]);
     const d = lexiconDropCounts(lex);
     expect(d.total).toBe(d.drug + d.investigation + d.clinical_term);
-    expect(d.total).toBeGreaterThan(100);
+    expect(d.total).toBeGreaterThan(0);
+    expect(d.investigation).toBe(0); // T1: no investigation is ever dropped
+    expect(d.total).toBeLessThan(10); // only advice phrases
     const all = [...fixtures.ordinary, ...fixtures.holdout, ...fixtures.final, ...fixtures.consult, ...fixtures.consult_dosing, ...fixtures.consult_clinical];
     expect(all.filter((t) => cands(t).length > 0)).toEqual([]);
     const rec = ["Take combat land after food", "Start Combat Land for pain", "I gave him combat land for the fever", "Continue combat land once a day", "Combat land at night please", "Combat land OD for three days", "Combat land daily for a week", "Combat land SOS if the pain returns"];
     expect(rec.filter((t) => cands(t).some((c) => /^combiflam/i.test(c.suggested)))).toEqual(rec);
+    // T1: investigation garbles of English-word test names are still proposed
+    expect(cands("the bleeding tyme was normal").map((c) => c.suggested.toLowerCase())).toContain("bleeding time");
+    expect(cands("send copper serom").map((c) => c.suggested.toLowerCase().replace(/[^a-z]/g, ""))).toContain("copperserum");
+  });
+});
+
+describe("S8A8 T2 — a fully contained pass entry prefers a native entry of the SAME speaker", () => {
+  it("a long-line sentence that lies inside another speaker's 'Hi' span does not replace 'Hi' and keeps its own speaker", () => {
+    const n = tagNative([
+      { speaker_id: "0", start_s: 0, end_s: 30, text: "\u092e\u0941\u091d\u0947 \u0918\u0941\u091f\u0928\u0947 \u092e\u0947\u0902 \u0926\u0930\u094d\u0926 \u0939\u0948" },
+      { speaker_id: "1", start_s: 10, end_s: 14, text: "Hi" },
+    ]);
+    // speaker 0's translated sentence (10.5 - 12) lies inside BOTH natives; the tighter one is speaker 1's "Hi" span, but the sentence is speaker 0's
+    const al = alignEnglish(n, [
+      { speaker_id: "0", start_s: 0, end_s: 9, text: "I have pain in the knee" },
+      { speaker_id: "0", start_s: 10.5, end_s: 12, text: "and it is worse on the stairs" },
+      { speaker_id: "1", start_s: 10.6, end_s: 11.4, text: "Hi" },
+    ]);
+    expect(al.track.map((t) => [t.speaker_id, t.native_idx])).toEqual([["0", 0], ["0", 0], ["1", 1]]);
+    expect(n[0]!.english).toBe("I have pain in the knee and it is worse on the stairs");
+    expect(n[1]!.english).toBe("Hi");
+    // no same-speaker native contains it: fall back to the tightest
+    const n2 = tagNative([{ speaker_id: "0", start_s: 0, end_s: 30, text: "Long line" }, { speaker_id: "1", start_s: 10, end_s: 14, text: "Hi" }]);
+    expect(alignEnglish(n2, [{ speaker_id: "2", start_s: 10.6, end_s: 11.4, text: "Hi" }]).track[0]!.native_idx).toBe(1);
   });
 });

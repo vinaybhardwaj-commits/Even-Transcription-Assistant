@@ -181,7 +181,7 @@ export function sameSiteTarget(from: URL, location: string | null): URL | null {
   let to: URL;
   try { to = new URL(location, from); } catch { return null; }
   const strip = (h: string) => h.replace(/^www\./, "");
-  if (to.protocol !== from.protocol || strip(to.hostname) !== strip(from.hostname) || to.pathname !== from.pathname || to.search !== "" || to.username || to.password) return null;
+  if (to.protocol !== from.protocol || to.port !== from.port || strip(to.hostname) !== strip(from.hostname) || to.pathname !== from.pathname || to.search !== "" || to.username || to.password) return null;
   return to;
 }
 export const ROUTE_TIMEOUT_MS = 5_000;

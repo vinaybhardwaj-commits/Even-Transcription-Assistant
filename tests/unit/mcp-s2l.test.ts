@@ -540,7 +540,7 @@ describe("scribe_health aspect=routes", () => {
     expect((out.routes as Row[]).every((r) => r.redirected === true)).toBe(true);
     expect(fetchMock.mock.calls.length).toBe(10); // 5 routes x (the redirect + the one follow)
     // not followed: another site, another path, a second hop (the redirect is reported as the status it is, ok:false)
-    for (const loc of ["https://evil.example/api/health", "https://app.example.test/other", "https://app.example.test/api/health?x=1"]) {
+    for (const loc of ["https://evil.example/api/health", "https://app.example.test/other", "https://app.example.test/api/health?x=1", "https://app.example.test:8443/api/health"]) { // T3: a port change is not followed either
       fetchMock.mockReset();
       fetchMock.mockImplementation(async () => new Response(null, { status: 307, headers: { location: loc } }));
       out = await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never) as Row;

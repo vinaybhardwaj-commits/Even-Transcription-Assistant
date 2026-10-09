@@ -67,12 +67,13 @@ function partnerOf(e: RawEntry, native: ResultEntry[]): number | null {
   if (best >= 0) {
     const len = e.end_s - e.start_s;
     if (len > 0 && bestOv >= len - EPS) {
-      // fully contained: among the native entries that contain it entirely, the tightest fit
-      let tight = best;
-      native.forEach((n, i) => {
-        if (overlap(e.start_s, e.end_s, n.start_s, n.end_s) >= len - EPS && n.end_s - n.start_s < native[tight]!.end_s - native[tight]!.start_s - EPS) tight = i;
-      });
-      best = tight;
+      // fully contained: among the native entries that contain it entirely, one with the SAME speaker_id first (T2: a long line's sentence inside another speaker's "Hi" span is not that speaker's), then the tightest fit
+      const containing = native.map((n, i) => ({ n, i })).filter(({ n }) => overlap(e.start_s, e.end_s, n.start_s, n.end_s) >= len - EPS);
+      const sameSpeaker = containing.filter(({ n }) => n.speaker_id === e.speaker_id);
+      const pool = sameSpeaker.length > 0 ? sameSpeaker : containing;
+      let tight = pool[0]!;
+      for (const c of pool) if (c.n.end_s - c.n.start_s < tight.n.end_s - tight.n.start_s - EPS) tight = c;
+      best = tight.i;
     }
   }
   if (best >= 0) return best;
