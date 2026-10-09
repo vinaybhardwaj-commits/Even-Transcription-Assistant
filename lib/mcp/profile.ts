@@ -31,7 +31,7 @@ const READ_NO_ROOM = "Read-only; touches no room. Times UTC.";
 const READ_LIVE = "Read-only; reads live rooms. Times UTC.";
 
 const NO_ROOM_READ = READ_NO_ROOM;
-const CAVEATS = "tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.";
+const CAVEATS = "tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.";
 
 /** One short description per listed tool. Group lines carry a generated selector; the rest are fixed text. */
 function briefs(): Record<string, string> {
@@ -76,18 +76,18 @@ function briefs(): Record<string, string> {
     scribe_room_levels: `${READ_LIVE} ${CAVEATS}`,
     scribe_diarize_spend: `${NO_ROOM_READ} Diarization labels per IST day: windows per engine, audio-hours, estimated euros.`,
     scribe_room_alerts: `${READ_LIVE} Room Watchdog alert outbox (new, late, heartbeat).`,
-    scribe_help: "Read-only; touches no room. One tool's full contract: scope, schema, long help. Times UTC.",
+    scribe_help: "Read-only; touches no room. One tool's full contract: scope, schema, long help; accepts any name. Times UTC.",
     scribe_usage: "Read-only; touches no room. Door usage from audit_log: calls, errors, p50/p95 per tool and actor. Times UTC.",
     // S1 reads (S1A)
-    scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
-    scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels freeze after a device drop.",
+    scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
+    scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
     scribe_steward_command: "WRITE; Room Steward config; can act on LIVE rooms. Times UTC. kind=set_shadow|kill_switch|start_day_live|add_room|flag_room|set_window|note|mute_alerts; reason required; returns a revert.",
     scribe_lanes: "Read-only; touches no room. Times UTC. Fleet and lane state (lab bucket): view=fleet|lanes (name, age_s, stale > 600 s).",
     scribe_rubric: "Job queue read/write; stored data, never Pulse; touches no room. Times UTC. action=list|describe|results|runs|board|run|bench; run/bench need invoke; draft rubrics need lab:true + unit_keys.",
-    scribe_sarvam: "Job queue read/write; consult audio/text only to Sarvam (ZDR); no room. Times UTC. action=transcribe|translate|status|result|usage|health; submits need invoke.",
+    scribe_sarvam: "Job queue read/write; consult audio/text only to Sarvam (ZDR); no room audio. Times UTC. action=transcribe|translate|status|result|usage|health; submits need invoke.",
     scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow only on request.",
     scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why; why needs room + at (+-15 min). No ticket signatures.",
-    scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen.",
+    scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen; room optional.",
     scribe_stt_windows: "Read-only; touches no room. Times UTC. One STT window (window_id) or a room's windows for an IST day. No transcript text.",
     scribe_tape_day: `${NO_ROOM_READ} Minutes per audio state per room for one IST day; include_segments (needs room) adds intervals.`,
   };
@@ -95,6 +95,12 @@ function briefs(): Record<string, string> {
 
 /** Longest property description tools/list carries; the full text stays in the registry and scribe_help returns it. */
 export const LISTED_PROP_DESC_MAX_CHARS = 32;
+
+/** Listed property descriptions that must keep a word the 32-char cut would lose (tool -> property -> text). The full text stays in scribe_help. */
+const LISTED_PROP_OVERRIDES: Record<string, Record<string, string>> = {
+  scribe_room_command: { override_pause: "[kind=start_day] over a consent pause" },
+  scribe_rubric: { set: "bench: gold|grokbot_agreement|human_v|evr_perturb" },
+};
 
 /** `text` cut to <= max chars at a sentence end if one fits, else at a word boundary with an ellipsis. */
 export function shortText(text: string, max: number = LISTED_PROP_DESC_MAX_CHARS): string {
@@ -104,7 +110,10 @@ export function shortText(text: string, max: number = LISTED_PROP_DESC_MAX_CHARS
   if (stop > 8) return t.slice(0, stop + 1);
   const cut = t.slice(0, max - 1);
   const sp = cut.lastIndexOf(" ");
-  return `${(sp > 12 ? cut.slice(0, sp) : cut).replace(/[\s,;:(\-]+$/, "")}…`;
+  if (sp > 12) return `${cut.slice(0, sp).replace(/[\s,;:(\-]+$/, "")}…`;
+  // one long token (a [kind=a|b|c] tag): cut after the last separator, never in the middle of a name
+  const bar = Math.max(cut.lastIndexOf("|"), cut.lastIndexOf(","));
+  return `${(bar > 8 ? cut.slice(0, bar + 1) : cut).replace(/[\s,;:(\-]+$/, "")}…`;
 }
 
 /** The schema with every property/array-item `description` shortened. Structure, types, enums, required, bounds: untouched. */
@@ -119,6 +128,14 @@ export function shortSchema<T>(schema: T): T {
   return walk(schema) as T;
 }
 
+export function withOverrides<T>(tool: string, schema: T): T {
+  const ov = LISTED_PROP_OVERRIDES[tool];
+  if (!ov) return schema;
+  const s = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, { description?: string }> };
+  for (const [k, text] of Object.entries(ov)) { const prop = s.properties?.[k]; if (!prop) throw new Error(`profile: override for ${tool}.${k}, which is not a property`); prop.description = text; }
+  return s as T;
+}
+
 function build(): McpTool[] {
   const text = briefs();
   const names = new Set(LAB_TOOLS.map((t) => t.name));
@@ -129,7 +146,7 @@ function build(): McpTool[] {
     const isGroup = groupProbes(full).length > 0;
     const max = isGroup ? LISTED_GROUP_MAX_CHARS : LISTED_PLAIN_MAX_CHARS;
     if (description.length > max) throw new Error(`profile: ${full.name} description is ${description.length} chars (max ${max})`);
-    return { ...full, description, help: full.help ?? full.description, inputSchema: shortSchema(full.inputSchema) };
+    return { ...full, description, help: full.help ?? full.description, inputSchema: withOverrides(full.name, shortSchema(full.inputSchema)) };
   });
 }
 

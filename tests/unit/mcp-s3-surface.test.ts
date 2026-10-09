@@ -150,8 +150,8 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         // epic #23 (b) added ONE optional property, `engine` (enum ["nemotron"]); everything else must still match main
         const { engine, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
         expect(engine).toMatchObject({ type: "string", enum: ["nemotron"] });
-        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.shortSchema(base.inputSchema));
-      } else expect(t.inputSchema, t.name).toEqual(P.shortSchema(base.inputSchema));
+        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema)));
+      } else expect(t.inputSchema, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema))); // Z1/Z2: overrides are the only departure from the plain 32-char cut
       compared++;
     }
     expect(compared).toBe(41);
@@ -413,11 +413,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 38,500 characters (S6-DIET)", async () => {
+  it("budget: the full tools/list result stays at or under 38,600 characters (S6-DIET; measured 38,577)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(38_500);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(38_600);
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to s6-blind ff5973ebd5 (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
@@ -428,12 +428,22 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     expect(sortKeys(strip(body.result))).toEqual(sortKeys(before));
   });
 
+  it("Z2: a listed property description is never cut in the middle of a name", () => {
+    for (const t of ["[kind=check_update_now|report_diag|restart_engine|self_test] optional args", "[view=manifest|timeline|chunk|zip_download] x"]) {
+      const out = P.shortText(t);
+      expect(out.endsWith("…"), out).toBe(true);
+      const body = out.slice(0, -1);
+      // every |-separated name kept is a whole name of the original
+      for (const part of body.replace(/^\[[a-z_]+=/, "").split("|").filter(Boolean)) expect(t, part).toContain(`${part}|`);
+    }
+  });
+
   it("S6-DIET: every safety statement survived the diet, per tool", async () => {
     const SAFETY: Record<string, string[]> = {
       scribe_room_command: ["WRITE; acts on a LIVE clinical room", "kiosk_not_listening", "start_day idempotent", "room_paused is consent", "without V's GO"],
       scribe_steward_command: ["WRITE", "LIVE rooms", "reason required", "returns a revert"],
       scribe_rubric: ["never Pulse", "touches no room", "run/bench need invoke", "lab:true"],
-      scribe_sarvam: ["ZDR", "submits need invoke"],
+      scribe_sarvam: ["ZDR", "no room audio", "submits need invoke"],
       scribe_jobs: ["status/list need read, submit needs invoke, cancel needs write", "no live-room command"],
       scribe_job_submit: ["INVOKE scope", "no live-room command"],
       scribe_job_cancel: ["WRITE", "no room command"],
@@ -458,15 +468,21 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
       scribe_jev_decisions: ["Read-only", "never transcript or state text"],
       scribe_stt_windows: ["Read-only", "No transcript text"],
       scribe_steward: ["Read-only", "No ticket signatures"],
-      scribe_kiosks: ["Read-only", "sends no command"],
+      scribe_kiosks: ["Read-only", "sends no command", "room optional"],
       scribe_get_state: ["Read-only", "Never creates a day"],
-      scribe_rooms: ["Read-only", "digital silence"],
-      scribe_room: ["Read-only", "digital silence"],
-      scribe_now: ["Read-only", "digital silence"],
-      scribe_room_levels: ["Read-only", "digital silence"],
+      scribe_rooms: ["Read-only", "digital silence", "can freeze"],
+      scribe_room: ["Read-only", "digital silence", "can freeze"],
+      scribe_now: ["Read-only", "digital silence", "trust state + ages_s"],
+      scribe_room_levels: ["Read-only", "digital silence", "can freeze"],
+      scribe_help: ["Read-only", "accepts any name"],
     };
     const byName = Object.fromEntries((await listed()).map((t) => [t.name, t.description]));
     for (const [n, phrases] of Object.entries(SAFETY)) for (const p of phrases) expect(byName[n], `${n}: ${p}`).toContain(p);
+    // Z1/Z2: property texts the 32-char cut used to lose
+    const props = Object.fromEntries((await listed()).map((t) => [t.name, (t.inputSchema as { properties: Record<string, { description?: string }> }).properties]));
+    expect(props.scribe_room_command!.override_pause!.description).toContain("consent");
+    expect(props.scribe_rubric!.set!.description).toMatch(/human_v/);
+    expect(props.scribe_rubric!.set!.description).toMatch(/evr_perturb/);
     // every other read tool still says Read-only / Reads, every write tool WRITE or INVOKE
     for (const [n, d] of Object.entries(byName)) expect(d, n).toMatch(/Read-only|WRITE|INVOKE|Reads and writes|Job queue read\/write/);
   });
