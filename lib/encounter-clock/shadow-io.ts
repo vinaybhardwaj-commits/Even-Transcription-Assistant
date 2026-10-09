@@ -26,6 +26,7 @@ import { writeHypothesisRun, readLatestAcousticRun, type WriteRunResult } from "
 import { runShadow, type DayEvidence, type ShadowSummary, type ShadowWindow } from "@/lib/encounter-clock/shadow";
 import { SMOOTHER_VERSION, type TapeOff } from "@/lib/encounter-clock/smooth";
 import type { TimelineSpan } from "@/lib/encounter-clock/gate";
+import { splitBlindWindows } from "@/lib/jobs/held-out";
 
 /** Chunks closer together than this are one continuous tape; a wider gap is tape-off. */
 export const TAPE_GAP_MS = 5_000;
@@ -37,7 +38,7 @@ export const TAPE_GAP_MS = 5_000;
 export const STILL_RECORDING_MS = 30 * 60_000;
 
 type ChunkRow = { started_at: string | Date; ended_at: string | Date | null };
-type WindowRow = { start_ms: string | number; end_ms: string | number; txt: string | null; lt: unknown };
+type WindowRow = { id: string; start_ms: string | number; end_ms: string | number; txt: string | null; lt: unknown };
 
 const ms = (v: string | Date | null): number | null => (v === null ? null : new Date(v).getTime());
 
@@ -97,7 +98,7 @@ export async function loadDayEvidence(roomId: string, roomDayId: string, istDate
 
   const rows = (await sql`
     SELECT DISTINCT ON (w.id)
-           w.start_ms, w.end_ms,
+           w.id, w.start_ms, w.end_ms,
            t.transcript_original AS txt,
            t.metrics_json -> 'language_timeline' AS lt
       FROM bench_window w
@@ -107,7 +108,9 @@ export async function loadDayEvidence(roomId: string, roomDayId: string, istDate
        AND coalesce(t.transcript_original, '') <> ''
      ORDER BY w.id, t.created_at DESC
   `) as WindowRow[];
-  const windows: ShadowWindow[] = rows.map((r) => ({
+  // G2: a window with ANY held-out placement (bench, diarize, turn rows, window text, emotion rows) is never used as evidence; counted
+  const { kept, excluded: nBlindExcluded } = await splitBlindWindows(rows, (r) => r.id);
+  const windows: ShadowWindow[] = kept.map((r) => ({
     start_ms: Number(r.start_ms), end_ms: Number(r.end_ms),
     text: r.txt ?? "", timeline: timelineOf(r.lt),
   }));
@@ -118,11 +121,12 @@ export async function loadDayEvidence(roomId: string, roomDayId: string, istDate
     day_start_ms: tape.day_start_ms, day_end_ms: tape.day_end_ms,
     tape_off: tape.tape_off, level_samples: levels.samples, windows,
     day_complete: dayIsComplete(istDate, tape.day_end_ms, now),
+    n_blind_excluded: nBlindExcluded,
   };
 }
 
 export type ShadowRunResult =
-  | { ok: true; run_id: string; supersedes: string | null; summary: ShadowSummary }
+  | { ok: true; run_id: string; supersedes: string | null; summary: ShadowSummary; n_blind_excluded: number }
   | { ok: false; error: "no_recorded_audio" | "write_refused"; detail?: unknown };
 
 /** Run the clock over one room-day and store the result. The ONLY write is the E-5 insert. */
@@ -135,5 +139,5 @@ export async function runShadowForRoomDay(input: { room_id: string; room_day_id:
   const previous = await readLatestAcousticRun(input.room_day_id, SMOOTHER_VERSION);
   const written: WriteRunResult = await writeHypothesisRun(run);
   if (!written.ok) return { ok: false, error: "write_refused", detail: written.problems };
-  return { ok: true, run_id: written.run_id, supersedes: previous.run?.id ?? null, summary };
+  return { ok: true, run_id: written.run_id, supersedes: previous.run?.id ?? null, summary, n_blind_excluded: evidence.n_blind_excluded ?? 0 };
 }

@@ -365,4 +365,25 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
       expect(await seg({ window_id: "bw_k4rts", engine: "nemotron" })).toMatchObject({ ok: false, status: 403, error: "blind_room_day" });
     } finally { delete process.env.DIARIZE_NEMOTRON_SHADOW; }
   });
+  it("G2: a clean day with 3 transcribed windows, 2 held out by ANOTHER placement (turn rows; window text on the held-out day) -> loadDayEvidence uses only 1 and counts 2", async () => {
+    pg.exec(`
+      INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_g2', 'r_clean', '2026-10-07');
+      ${sessionRow("bs_g2", 3)}
+      INSERT INTO bench_chunk (id, session_id, idx, r2_key, content_type, started_at, ended_at, duration_ms, size_bytes, upload_state) VALUES ('bc_g2', 'bs_g2', 0, 'bench/g2', 'audio/webm', '${CLEAN_DAY}T03:00:00Z', '${CLEAN_DAY}T03:30:00Z', 1800000, 1000, 'verified');
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES
+        ('bw_g2a', 'bs_g2', 'rd_g2', ${Date.parse(CLEAN_DAY + "T03:00:00Z")}, ${Date.parse(CLEAN_DAY + "T03:10:00Z")}, 'primary'),
+        ('bw_g2b', 'bs_g2', 'rd_g2', ${Date.parse(CLEAN_DAY + "T03:10:00Z")}, ${Date.parse(CLEAN_DAY + "T03:20:00Z")}, 'primary'),
+        ('bw_g2c', 'bs_g2', 'rd_g2', ${Date.parse(CLEAN_DAY + "T03:20:00Z")}, ${Date.parse(CLEAN_DAY + "T03:30:00Z")}, 'primary');
+      INSERT INTO transcription_run (id, subject_type, subject_id, engine, mode, tier, transcript_original) VALUES
+        ('tr_g2a', 'bench_window', 'bw_g2a', 'whisper', 'batch', 'asr', 'ok words'), ('tr_g2b', 'bench_window', 'bw_g2b', 'whisper', 'batch', 'asr', 'held out words b'), ('tr_g2c', 'bench_window', 'bw_g2c', 'whisper', 'batch', 'asr', 'held out words c');
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_g2b', 't1', 'rd_blind', 0, 'no_match');
+      INSERT INTO jev_window_text (window_id, room_day_id, source, char_count) VALUES ('bw_g2c', 'rd_blind', 'run_english', 3);
+    `);
+    const { loadDayEvidence } = await import("@/lib/encounter-clock/shadow-io");
+    const ev = await loadDayEvidence("r_clean", "rd_g2", "2026-10-07", new Date("2026-10-09T00:00:00Z"));
+    expect(ev).not.toBeNull();
+    expect(ev!.windows).toHaveLength(1);
+    expect(ev!.windows[0]!.text).toBe("ok words");
+    expect(ev!.n_blind_excluded).toBe(2);
+  });
 });
