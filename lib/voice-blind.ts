@@ -164,3 +164,27 @@ export async function guardSessionSpan(sessionId: string, span?: { startMs?: num
   if (spanTouchesBlindDay(s.room_id, started, started) || spanTouchesBlindDay(s.room_id, t0, t1)) return "blind_room_day";
   return null;
 }
+
+/**
+ * K3-1 (REL2-R3): the batch form of guardSessionSpan for listings: of these session ids, the ones that are held out (the same rule, whole session, in SQL): the session's room has a held-out IST day overlapping
+ * [started_at, its last end or chunk end], or a window of the session has a held-out placement.
+ */
+export async function sessionsBlindAny(sessionIds: readonly string[]): Promise<Set<string>> {
+  const ids = [...new Set(sessionIds.filter((x) => typeof x === "string" && x.length > 0))];
+  if (ids.length === 0) return new Set();
+  const rows = (await sql`
+    SELECT s.id FROM bench_session s
+     WHERE s.id = ANY(${ids}::text[])
+       AND (
+         EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
+                  WHERE b.r = s.room_id
+                    AND (b.d::timestamp AT TIME ZONE 'Asia/Kolkata') <= GREATEST(s.started_at, s.ended_at, (SELECT max(c.ended_at) FROM bench_chunk c WHERE c.session_id = s.id))
+                    AND (b.d::timestamp AT TIME ZONE 'Asia/Kolkata') + interval '1 day' > s.started_at)
+         OR EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
+                     WHERE b.r = s.room_id AND (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = b.d)
+         OR EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id, room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
+                     WHERE w.session_id = s.id AND r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+       )
+  `) as Array<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}

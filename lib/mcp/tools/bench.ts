@@ -79,7 +79,8 @@
  *                     tool, not an option on this one, and a dry run of an open tape is safe.
  */
 
-import { guardSessionSpan } from "@/lib/voice-blind";
+import { guardSessionSpan, sessionsBlindAny } from "@/lib/voice-blind";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { getObjectBytes, signGetUrl } from "@/lib/r2";
@@ -209,8 +210,11 @@ const listSessions: McpTool = {
         status: argStr(args, "status", 32),
         limit: argInt(args, "limit", 200, 1, 200),
       });
+      // K3-1: a session of a held-out (room, IST day), or with a held-out window placement, is not listed; it is counted
+      const heldOut = await sessionsBlindAny(rows.map((r) => r.id));
       return {
-        sessions: rows.map((r) => ({
+        n_blind_excluded: heldOut.size,
+        sessions: rows.filter((r) => !heldOut.has(r.id)).map((r) => ({
           id: r.id,
           room_id: r.room_id,
           room_name: r.room_name,
@@ -2434,7 +2438,11 @@ const dayReport: McpTool = {
       const d = argStr(args, "ist_date", 10);
       if (d && !IST_DATE_RE.test(d)) return { sessions: [], error: "invalid_ist_date" };
       const day = d ?? istDate(new Date());
-      const rows = await listBenchSessions({ room_id: room.id, ist_date: day });
+      // K3-1: a held-out (room, IST day) is refused whole, before any session, chunk or event read
+      if (isBlindRoomDay(day, room.id)) return { sessions: [], error: "blind_room_day" };
+      const allRows = await listBenchSessions({ room_id: room.id, ist_date: day });
+      const heldOut = await sessionsBlindAny(allRows.map((r) => r.id));
+      const rows = allRows.filter((r) => !heldOut.has(r.id));
       const ordered = [...rows].sort((a, b) => (msOfLoose(a.started_at) ?? 0) - (msOfLoose(b.started_at) ?? 0));
       const degraded: string[] = [];
       const sessions = await Promise.all(
@@ -2461,6 +2469,7 @@ const dayReport: McpTool = {
       return {
         room: { id: room.id, slug: room.slug, name: room.name },
         ist_date: day,
+        ...(heldOut.size ? { n_blind_excluded: heldOut.size } : {}),
         note: "tape_ended_at is the last piece recorded (either microphone) — the stored ended_at is not the end of the recording and is shown only where it differs",
         sessions: detail === "full" ? sessions : sessions.map((x) => pickSummary(x, SUMMARY_DAY_SESSION_FIELDS, SUMMARY_DAY_SESSION_OPTIONAL)),
         ...(degraded.length ? { degraded_reads: degraded } : {}),
@@ -3120,6 +3129,7 @@ const replaySession: McpTool = {
       if (!id || !id.startsWith("bs_")) return { cues: [], error: "bad_session_id" };
       const session = await findBenchSession(id);
       if (!session) return { cues: [], error: "session_not_found" };
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { cues: [], error: "blind_room_day" }; // K3-1: before any chunk or event read
       const limit = argInt(args, "limit", REPLAY_DEFAULT_LIMIT, 1, REPLAY_MAX_LIMIT);
 
       const degraded: string[] = [];
