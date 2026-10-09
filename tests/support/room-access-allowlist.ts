@@ -17,7 +17,6 @@ export const ALLOWLIST: Record<string, { max: number; why: string }> = {
   "lib/bench-window.ts": { max: 4, why: "production pipeline writer/reaper (room drain, auto-drain, diarize/measure/emotion job bodies, window planner, reapers): selects its own work; MCP-submitted work is guarded by the job hook" },
   "lib/brain/fuse/live.ts": { max: 1, why: "production pipeline writer/reaper (room drain, auto-drain, diarize/measure/emotion job bodies, window planner, reapers): selects its own work; MCP-submitted work is guarded by the job hook" },
   "lib/emotion/enqueue.ts": { max: 3, why: "production pipeline writer/reaper (room drain, auto-drain, diarize/measure/emotion job bodies, window planner, reapers): selects its own work; MCP-submitted work is guarded by the job hook" },
-  "lib/encounter-clock/shadow-io.ts": { max: 2, why: "warehouse-attribution / encounter-clock pipeline (GATING-owned); reads CONSULT windows to attribute encounters, serves no MCP/admin caller" },
   "lib/encounter-windows/occupant.ts": { max: 1, why: "warehouse-attribution / encounter-clock pipeline (GATING-owned); reads CONSULT windows to attribute encounters, serves no MCP/admin caller" },
   "lib/encounter-windows/warehouse-attribution.ts": { max: 2, why: "warehouse-attribution / encounter-clock pipeline (GATING-owned); reads CONSULT windows to attribute encounters, serves no MCP/admin caller" },
   "lib/fleet-attention.ts": { max: 4, why: "live-ops view bound to OPEN sessions or the current IST day by construction (no date argument can name a past held-out pair)" },
