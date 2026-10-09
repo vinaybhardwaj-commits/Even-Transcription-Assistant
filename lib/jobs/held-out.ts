@@ -54,20 +54,37 @@ export const sessionRangeHeldOut: HeldOutGuard = async (a) => {
 export const windowArgHeldOut: HeldOutGuard = async (a) => (typeof a.window_id === "string" && a.window_id ? windowHeldOut(a.window_id) : null);
 export const roomDayArgHeldOut: HeldOutGuard = async (a) => (typeof a.room_day_id === "string" && a.room_day_id ? roomDayHeldOut(a.room_day_id) : null);
 
+/** A window job whose window must EXIST to be placed: an unknown window is window_unplaced (used where the id comes out of a storage key, so fail closed). */
+export async function windowHeldOutStrict(windowId: string): Promise<HeldOutVerdict | null> {
+  const rows = (await sql`SELECT 1 AS one FROM bench_window WHERE id = ${windowId}::text LIMIT 1`) as unknown[];
+  if (rows.length === 0) return "window_unplaced";
+  return windowHeldOut(windowId);
+}
+
 /**
- * An R2 clip key: `bench/<room slug>/<IST date>/<session>/chunk_…` (room slug + date + session) or `clips/<session>/…` (session). Any other key is not a room recording and is left alone.
- * A key that names a session or a room-day is checked on all of it.
+ * K4-1: the audio key prefixes a key-taking job (route_transcribe, audio_measure, stt_fanout) may name, each mapped to its placement. An ALLOWLIST: any other prefix is refused
+ * (`window_unplaced`, fail closed). Every R2 key builder in the tree (lib/r2.ts, bench-join, diarize-vad-trim, voice-samples, sarvam-common, rubrics/store, consult-clip) is listed in the K4 report.
+ *   bench/<room slug>/<IST date>/<session>/chunk_…       room slug + date + session (all three)
+ *   clips/<session>/…                                    the session (joined window clips)
+ *   vad-trim/<window id>/<run>.wav                       the WINDOW (diarize's trimmed copy of a window's audio), any placement
+ *   encounters/<id>.<ext>, whisper-buffer/<id>.webm      doctor-PWA encounter audio: no room placement
+ * Not audio sources for these kinds, so refused: voice-samples/ (clinician samples), mcp-sarvam/ and rubric/ (result JSON), consult-clips/ (resolved by consult uid in S8C's own path).
  */
+export const AUDIO_KEY_PREFIXES = ["bench/", "clips/", "vad-trim/", "encounters/", "whisper-buffer/"] as const;
 export const clipKeyHeldOut: HeldOutGuard = async (a) => {
   const key = typeof a.clip_key === "string" ? a.clip_key : "";
-  const m = /^bench\/([^/]+)\/(\d{4}-\d{2}-\d{2})\/(bs_[^/]+)\//.exec(key);
+  if (!key || key.includes("..") || key.startsWith("/") || !AUDIO_KEY_PREFIXES.some((p) => key.startsWith(p))) return "window_unplaced";
+  const m = /^bench\/([^/]+)\/(\d{4}-\d{2}-\d{2})\/(bs_[^/]+)\/[^/]+$/.exec(key);
   if (m) {
     if ((await roomDateHeldOut(m[1]!, m[2]!)) || (await guardSessionSpan(m[3]!))) return "blind_room_day";
     return null;
   }
-  const c = /^clips\/(bs_[^/]+)\//.exec(key);
-  if (c) return guardSessionSpan(c[1]!);
-  return null;
+  const c = /^clips\/(bs_[^/]+)\/[^/]+$/.exec(key);
+  if (c) return (await guardSessionSpan(c[1]!)) ?? null;
+  const v = /^vad-trim\/([A-Za-z0-9_-]{1,80})\/[A-Za-z0-9_.-]{1,120}$/.exec(key);
+  if (v) return windowHeldOutStrict(v[1]!);
+  if (/^(encounters|whisper-buffer)\/[A-Za-z0-9_.-]{1,160}$/.test(key)) return null;
+  return "window_unplaced"; // an allowed prefix with a shape this code cannot place
 };
 
 /** (room, IST date) args (day_manifest). */

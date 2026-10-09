@@ -222,3 +222,27 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(out.days.reduce((n: number, r: { windows: number }) => n + r.windows, 0)).toBe(1);
   });
 });
+
+(HAVE ? describe : describe.skip)("K4-1 key-taking jobs: an ALLOWLIST of audio key prefixes, each mapped to its placement; an unknown prefix is refused", () => {
+  it("the refuter's repro: vad-trim/<window>/<run>.wav for a window held out only by its turn rows is refused for route_transcribe, audio_measure and stt_fanout, with NO row", async () => {
+    const n0 = await jobCount();
+    for (const win of ["bw_rts", "bw_txt", "bw_emo", "bw_rdw", "bw_blind"]) {
+      for (const [kind, extra] of [["route_transcribe", {}], ["audio_measure", {}], ["stt_fanout", { engines: ["whisper"] }]] as const) {
+        expect(await call("scribe_job_submit", { kind, args: { clip_key: `vad-trim/${win}/run1.wav`, ...extra } }), `${kind} ${win}`).toMatchObject({ ok: false, error: "blind_room_day" });
+      }
+    }
+    expect(await jobCount()).toBe(n0);
+  });
+  it("a clean window's vad-trim key, an encounter key and a whisper-buffer key are queued; an unknown window, an unknown prefix, a traversal and a malformed key are refused window_unplaced", async () => {
+    expect(await call("scribe_job_submit", { kind: "route_transcribe", args: { clip_key: "vad-trim/bw_ok_win/run1.wav" } })).toMatchObject({ ok: false, error: "window_unplaced" }); // no such window
+    pg.exec(`${sessionRow("bs_k4", 7)} ${winRow("bw_k4", "bs_k4", 7)}`);
+    expect(await call("scribe_job_submit", { kind: "route_transcribe", args: { clip_key: "vad-trim/bw_k4/run1.wav" } })).toMatchObject({ ok: true });
+    expect(await call("scribe_job_submit", { kind: "audio_measure", args: { clip_key: "encounters/enc_abc.webm" } })).toMatchObject({ ok: true });
+    expect(await call("scribe_job_submit", { kind: "audio_measure", args: { clip_key: "whisper-buffer/enc_abc.webm" } })).toMatchObject({ ok: true });
+    const n0 = await jobCount();
+    for (const key of ["voice-samples/doc/x.webm", "mcp-sarvam/job_1.json", "rubric/a/1.0.0/x.json", "consult-clips/2026-10-08/r/uid/consult.flac", "foo.webm", "bench/../x", "/vad-trim/bw_k4/r.wav", "vad-trim/bw_k4", "clips/bs_k4", "bench/blind-room/x", "encounters/a/b.webm"]) {
+      expect(await call("scribe_job_submit", { kind: "route_transcribe", args: { clip_key: key } }), key).toMatchObject({ ok: false, error: "window_unplaced" });
+    }
+    expect(await jobCount()).toBe(n0);
+  });
+});
