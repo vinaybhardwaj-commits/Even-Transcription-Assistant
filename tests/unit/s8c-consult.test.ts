@@ -146,7 +146,7 @@ describe("transcribe {consult_uid}", () => {
     expect(submitted).toHaveLength(1);
     expect(submitted[0]!.args).toEqual({ consult_uid: UID });
     const out = await T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "prepare", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: {}, runner: "r" } as never);
-    expect(out).toEqual({ kind: "next", step: "init", progress: { clip_key: `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", mirror_minutes: 10 } });
+    expect(out).toEqual({ kind: "next", step: "init", progress: { clip_key: `consult-clips/2026-10-08/opd-1/${UID}/consult.flac`, content_type: "audio/flac", scope: "consult_clip", ref: UID, source_kind: "consult", use: "production", mirror_minutes: 10 } });
     // the job refuses the same things (a job queued before the rule, or a direct insert)
     setIndex([row(UID, { voice_isolated: true })]);
     expect(await T.sarvamTranscribeKind.run({ job: { id: "j", created_at: new Date().toISOString() }, step: "prepare", args: { source: "consult", consult_uid: UID, mode: "transcribe", english: true }, progress: {}, runner: "r" } as never)).toEqual({ kind: "fail", error: "consult_voice_isolated" });
