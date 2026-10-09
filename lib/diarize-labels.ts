@@ -20,6 +20,7 @@
 import { sql } from "@/lib/db";
 import { randomUUID } from "node:crypto";
 import type { DiarizeEngine } from "@/lib/diarize-engine";
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 
 /**
  * What pyannote.ai precision-3 costs per audio-hour.
@@ -92,6 +93,9 @@ export type DailyLabelCount = {
  * accumulator is a number nobody can re-derive when the rate changes or a row is found to be wrong,
  * and this one exists precisely to be checked against an invoice.
  */
+const BLIND_DAYS_ARG = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS_ARG = BLIND_ROOM_DAYS.map(([, r]) => r);
+
 export async function dailyLabelCounts(opts: { days?: number; env?: Record<string, string | undefined> } = {}): Promise<DailyLabelCount[]> {
   const days = Number.isFinite(opts.days) && (opts.days as number) > 0 ? Math.min(Math.floor(opts.days as number), 90) : 14;
   const rows = (await sql`
@@ -101,6 +105,12 @@ export async function dailyLabelCounts(opts: { days?: number; env?: Record<strin
            COALESCE(SUM(audio_seconds), 0)   AS audio_seconds
       FROM diarize_window_label
      WHERE created_at >= (now() - make_interval(days => ${days}))
+       AND NOT (EXISTS (SELECT 1 FROM room_day r0, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b0(d, r) WHERE r0.id = diarize_window_label.room_day_id AND b0.d = r0.ist_date AND b0.r = r0.room_id)
+            OR EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = diarize_window_label.window_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id))))
      GROUP BY 1, 2
      ORDER BY 1 DESC, 2 ASC
   `) as Array<{ ist_date: string; engine: string; windows: number; audio_seconds: string | number }>;
@@ -118,4 +128,20 @@ export async function dailyLabelCounts(opts: { days?: number; env?: Record<strin
       estimated_eur: r.engine === "pyannoteai" ? Math.round(hours * rate * 10000) / 10000 : null,
     };
   });
+}
+
+/** K3-4: the labels in the window that were left out of dailyLabelCounts because the window or its room-day is held out (counts only). */
+export async function blindLabelCount(opts: { days?: number } = {}): Promise<number> {
+  const days = Number.isFinite(opts.days) && (opts.days as number) > 0 ? Math.min(Math.floor(opts.days as number), 90) : 14;
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS n FROM diarize_window_label
+     WHERE created_at >= (now() - make_interval(days => ${days}))
+       AND (EXISTS (SELECT 1 FROM room_day r0, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b0(d, r) WHERE r0.id = diarize_window_label.room_day_id AND b0.d = r0.ist_date AND b0.r = r0.room_id)
+            OR EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = diarize_window_label.window_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id))))
+  `) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
 }

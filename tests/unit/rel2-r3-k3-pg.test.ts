@@ -194,3 +194,31 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
   });
 });
 
+
+(HAVE ? describe : describe.skip)("K3-4 aggregates (route_tripwires, diarize_spend) exclude held-out rows and report n_blind_excluded", () => {
+  beforeAll(() => {
+    pg.exec(`
+      INSERT INTO transcription_run (id, subject_type, subject_id, engine, mode, tier, transcript_original, metrics_json) VALUES
+        ('tr_clean', 'bench_window', 'bw_clean', 'route', 'batch', 'asr', 'hello', '{"audio_seconds": 10}'),
+        ('tr_blind', 'bench_window', 'bw_blind', 'route', 'batch', 'asr', 'held out words', '{"audio_seconds": 20}'),
+        ('tr_rts', 'bench_window', 'bw_rts', 'route', 'batch', 'asr', 'held out by turn rows', '{"audio_seconds": 30}');
+      INSERT INTO diarize_window_label (id, window_id, room_day_id, engine, run_id, segments_json, speaker_count, segment_count, audio_seconds) VALUES
+        ('dl_clean', 'bw_clean', 'rd_clean', 'local', 'r1', '[]', 1, 1, 100),
+        ('dl_blind', 'bw_blind', 'rd_blind', 'local', 'r2', '[]', 1, 1, 200),
+        ('dl_day', 'bw_clean', 'rd_blind', 'local', 'r3', '[]', 1, 1, 400),
+        ('dl_rts', 'bw_rts', 'rd_clean', 'local', 'r4', '[]', 1, 1, 800);
+    `);
+  });
+  it("scribe_route_tripwires counts only the clean run (3 runs, 2 held out), and says how many were left out", async () => {
+    const out = await call("scribe_route_tripwires", { days: 30 });
+    expect(out.n_blind_excluded).toBe(2);
+    const route = out.engines.find((e: { engine: string }) => e.engine === "route");
+    expect(route).toMatchObject({ runs: 1, chars: 5, audio_seconds: 10 });
+  });
+  it("scribe_diarize_spend counts only the clean label (4 labels: the window, the label's own room-day, and the turn-row placement are held out)", async () => {
+    const out = await call("scribe_diarize_spend", { days: 30 });
+    expect(out.n_blind_excluded).toBe(3);
+    expect(out.totals.windows_labelled).toBe(1);
+    expect(out.days.reduce((n: number, r: { windows: number }) => n + r.windows, 0)).toBe(1);
+  });
+});

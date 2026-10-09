@@ -7,6 +7,7 @@
  * Read-only. Transcript text of runs is returned only with include_text=true.
  */
 
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { guardRoomDay, guardWindow, rtsBlindRows, windowBlindAny, windowsBlindAny } from "@/lib/voice-blind";
 import { sql } from "@/lib/db";
 import { listEngines, adapterFor } from "@/lib/stt/registry";
@@ -262,6 +263,9 @@ const getSttRun: McpTool = {
  * It reports per ENGINE, side by side, because every one of these is only meaningful as a
  * before-and-after — a number for `route` alone answers nothing.
  */
+const BLIND_DAYS_ARG = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS_ARG = BLIND_ROOM_DAYS.map(([, r]) => r);
+
 const routeTripwires: McpTool = {
   name: "scribe_route_tripwires",
   description:
@@ -299,6 +303,11 @@ const routeTripwires: McpTool = {
            AND tr.mode = 'batch' AND tr.tier = 'asr'
            AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
            AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
          GROUP BY tr.engine
          ORDER BY tr.engine
       `) as Array<{ engine: string; runs: number; errors: number; empty_runs: number; chars: string | number; audio_seconds: number | null; runs_with_timeline: number }>;
@@ -320,6 +329,11 @@ const routeTripwires: McpTool = {
            AND tr.metrics_json ? 'language_timeline'
            AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
            AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
          GROUP BY tr.engine
       `) as Array<{ engine: string; spans: number; engine_mix: Record<string, number> | null }>;
 
@@ -337,14 +351,33 @@ const routeTripwires: McpTool = {
            AND tr.metrics_json ? 'language_timeline'
            AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
            AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND NOT EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
          GROUP BY tr.engine
       `) as Array<{ engine: string; language_mix: Record<string, number> | null }>;
+
+      // K3-4: runs of a window with ANY held-out placement are left out of every figure above and counted here
+      const blindN = (await sql`
+        SELECT COUNT(*)::int AS n FROM transcription_run tr
+         WHERE tr.subject_type = 'bench_window' AND tr.mode = 'batch' AND tr.tier = 'asr'
+           AND tr.created_at >= NOW() - ((${days})::int || ' days')::interval
+           AND (${engine ?? null}::text IS NULL OR tr.engine = ${engine ?? null})
+           AND EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id WHERE w.id = tr.subject_id AND (
+                 EXISTS (SELECT 1 FROM room_day r1, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b(d, r) WHERE r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+                 OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b2(d, r) WHERE t.window_id = w.id AND b2.d = r2.ist_date AND b2.r = r2.room_id)
+                 OR EXISTS (SELECT 1 FROM jev_window_text j JOIN room_day r3 ON r3.id = j.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b3(d, r) WHERE j.window_id = w.id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
+                 OR EXISTS (SELECT 1 FROM room_span_emotion e JOIN room_day r4 ON r4.id = e.room_day_id, unnest(${BLIND_DAYS_ARG}::date[], ${BLIND_ROOMS_ARG}::text[]) AS b4(d, r) WHERE e.window_id = w.id AND b4.d = r4.ist_date AND b4.r = r4.room_id)))
+      `) as Array<{ n: number }>;
 
       const spanBy = new Map(mixes.map((m) => [m.engine, m]));
       const langBy = new Map(langMixes.map((m) => [m.engine, m.language_mix]));
 
       return {
         days,
+        n_blind_excluded: Number(blindN[0]?.n ?? 0),
         engines: rows.map((r) => {
           const chars = Number(r.chars ?? 0);
           const secs = Number(r.audio_seconds ?? 0);
