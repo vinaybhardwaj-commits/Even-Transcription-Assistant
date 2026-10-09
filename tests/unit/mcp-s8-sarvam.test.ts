@@ -75,7 +75,7 @@ describe("registration", () => {
 
   it("room-restricted tokens are refused; unknown action is named", async () => {
     expect((await rpc({ action: "health" }, ["read"], ["room_x"])).status).toBe(403);
-    expect(await run({ action: "nope" })).toMatchObject({ ok: false, error: "unknown_action", allowed: ["transcribe", "translate", "status", "result", "usage", "health"] });
+    expect(await run({ action: "nope" })).toMatchObject({ ok: false, error: "unknown_action", allowed: ["transcribe", "translate", "status", "result", "usage", "health", "consult_clips"] });
     expect(await run({})).toMatchObject({ ok: false, error: "unknown_action" });
   });
 });

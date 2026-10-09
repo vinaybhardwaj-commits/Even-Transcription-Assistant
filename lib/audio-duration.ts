@@ -220,10 +220,27 @@ function mp4Ms(b: Uint8Array): number | null {
   return best > 0 ? best : null;
 }
 
+/**
+ * S8C: FLAC (the CONSULT clips). STREAMINFO is the first metadata block: sample rate (20 bits), channels (3), bits per sample (5), total samples (36). The header is a CLAIM, so the duration is the LONGER of it and a floor
+ * from the file size (a FLAC file never holds more than about 1.05x its raw PCM size per second of audio at its own rate), exactly as the other containers take the longest claim. total samples 0 = unknown = null.
+ */
+function flacMs(b: Uint8Array): number | null {
+  if (b.length < 42 || b[0] !== 0x66 || b[1] !== 0x4c || b[2] !== 0x61 || b[3] !== 0x43) return null; // "fLaC"
+  if ((b[4]! & 0x7f) !== 0) return null; // the first block must be STREAMINFO
+  const rate = (b[18]! << 12) | (b[19]! << 4) | (b[20]! >> 4);
+  const channels = ((b[20]! >> 1) & 0x07) + 1;
+  const bits = (((b[20]! & 0x01) << 4) | (b[21]! >> 4)) + 1;
+  const total = (b[21]! & 0x0f) * 2 ** 32 + (b[22]! * 2 ** 24 + (b[23]! << 16) + (b[24]! << 8) + b[25]!);
+  if (rate <= 0 || total <= 0) return null;
+  const claim = (total * 1000) / rate;
+  const floor = (b.length * 1000) / ((rate * channels * bits) / 8 * 1.05);
+  return Math.round(Math.max(claim, floor));
+}
+
 /** The measured duration in milliseconds, or null when the container says nothing (the caller refuses; it does not guess). */
 export function measureAudioMs(bytes: Uint8Array): number | null {
   try {
-    return wavMs(bytes) ?? oggMs(bytes) ?? webmMs(bytes) ?? mp4Ms(bytes);
+    return flacMs(bytes) ?? wavMs(bytes) ?? oggMs(bytes) ?? webmMs(bytes) ?? mp4Ms(bytes);
   } catch {
     return null;
   }
