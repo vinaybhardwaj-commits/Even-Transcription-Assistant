@@ -38,6 +38,7 @@
   ],
   "exclude": [
     "node_modules",
+    "tools/even-jev-mcp",
     "tests",
     "docs",
     "vitest.config.ts",

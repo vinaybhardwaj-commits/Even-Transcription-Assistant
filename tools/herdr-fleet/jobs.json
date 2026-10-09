@@ -1,0 +1,37 @@
+[
+ {
+  "name": "backfill (all lanes)",
+  "function": "ON HOLD: Sarvam summary in (09 Oct 00:00) · resumes after V's backfill-planning call",
+  "machine": "Lab box / HF / c3 / c4",
+  "owner": "BACKFILL",
+  "check": "ssh -o BatchMode=yes -o ConnectTimeout=8 e2e-lab 'n=$(pgrep -fc \"[d]rive_lane1|[r]un_c4.sh|[r]un_c3.sh|[r]un_real.sh|[h]ist_bulk\"); [ \"$n\" = 0 ] && echo \"held · 0 processes · V hold · Sarvam summary in, waits on V planning call\" || echo \"WARNING $n backfill processes running during hold\"' </dev/null"
+ },
+ {
+  "name": "handoff-keeper",
+  "function": "writes a handoff page per agent (Cursor)",
+  "machine": "ASUS + Mini",
+  "owner": "HERDR",
+  "check": "bash ~/dev/_fable/handoff/keeper/status.sh"
+ },
+ {
+  "name": "CLARITY L0 test",
+  "function": "language-routing test E6 (768 recordings): finished 8 Oct 23:35",
+  "machine": "Lab box",
+  "owner": "HERDR",
+  "check": "echo \"done · 768/768 · RULING-5: L0 v1 closed\""
+ },
+ {
+  "name": "speech-engine bench",
+  "function": "per-language STT benchmark, stops 07:55",
+  "machine": "c3",
+  "owner": "HERDR",
+  "check": "ssh -o BatchMode=yes -o ConnectTimeout=8 e2e-ci 'pgrep -f [b]ench_full.py >/dev/null && echo \"running\" || echo \"finished or stopped\"' </dev/null"
+ },
+ {
+  "name": "palimpsest-hourly",
+  "function": "consult clips -> Sarvam -> REB store, hourly at :40",
+  "machine": "Lab box",
+  "owner": "PALIMPSEST",
+  "check": "ssh -o BatchMode=yes -o ConnectTimeout=8 e2e-lab python3 - < /Users/vinaybhardwaj/dev/_fable/herdr/fleetboard/check_palimpsest_hourly.py"
+ }
+]
