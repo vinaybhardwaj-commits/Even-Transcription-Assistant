@@ -490,6 +490,8 @@ export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: bool
  */
 async function sessionGuarded(sessionId: string, limit: number): Promise<SegmentsLookup> {
   const days = BLIND_ROOM_DAYS.map(([d]) => d), rooms = BLIND_ROOM_DAYS.map(([, r]) => r);
+  // Y1: a window is held out if EITHER of its placements (room_diarize_window.room_day_id, bench_window.room_day_id) is a held-out pair, as in the window view (lib/voice-blind refusalForPairs).
+  // Y2: the INNER JOIN below is the unplaced exclusion (a window with no room-day at all drops out and is counted).
   const rows = (await sql`
     SELECT d.window_id, w.session_id, d.room_day_id, w.source_mic, d.state, d.diarized_at,
            w.start_ms, w.end_ms, d.segments_run_id, d.last_run_id,
@@ -498,16 +500,17 @@ async function sessionGuarded(sessionId: string, limit: number): Promise<Segment
       JOIN room_diarize_window d ON d.window_id = w.id
       JOIN room_day rd ON rd.id = COALESCE(d.room_day_id, w.room_day_id)
      WHERE w.session_id = ${sessionId}
-       AND NOT EXISTS (SELECT 1 FROM unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
      ORDER BY w.start_ms
      LIMIT ${limit + 1}
   `) as WindowRow[];
   const ex = (await sql`
-    SELECT count(*) FILTER (WHERE rd.id IS NULL)::int AS unplaced,
-           count(*) FILTER (WHERE rd.id IS NOT NULL AND EXISTS (SELECT 1 FROM unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id))::int AS blind
+    SELECT count(*) FILTER (WHERE bl.blind)::int AS blind,
+           count(*) FILTER (WHERE rd.id IS NULL AND NOT bl.blind)::int AS unplaced
       FROM bench_window w
       JOIN room_diarize_window d ON d.window_id = w.id
       LEFT JOIN room_day rd ON rd.id = COALESCE(d.room_day_id, w.room_day_id)
+      CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM room_day r1, unnest(${days}::date[], ${rooms}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) AS blind) bl
      WHERE w.session_id = ${sessionId}
   `) as Array<{ unplaced: number; blind: number }>;
   const n_blind_excluded = Number(ex[0]?.blind ?? 0), n_unplaced_excluded = Number(ex[0]?.unplaced ?? 0);
