@@ -634,12 +634,17 @@ describe("teacher labels", () => {
     expect(ins.values).toContain(900);
   });
 
-  it("migration 0117's engine vocabulary matches DIARIZE_ENGINES — no drift", async () => {
+  it("the EFFECTIVE label engine CHECK matches DIARIZE_ENGINES — no drift", async () => {
+    // 0140 widens 0117's CHECK with nemotron, so the list in force is the LAST migration's, not 0117's.
     const { DIARIZE_ENGINES } = await import("@/lib/diarize-engine");
+    const { checkValues, effectiveCheckValues } = await import("../support/sql-check");
+    const eff = effectiveCheckValues("db/migrations", "diarize_window_label_engine_known", "engine");
+    expect(eff.file).toBe("0140_diarize_nemotron.sql");
+    expect(eff.values).toEqual(new Set(DIARIZE_ENGINES));
+    expect(DIARIZE_ENGINES).toHaveLength(3); // a shrunken array must not silently satisfy this
+    // 0117 itself still carries the two it was written with — history is not rewritten.
     const sqlText = readFileSync("db/migrations/0117_diarize_window_label.sql", "utf8");
-    const m = sqlText.match(/engine IN \(([^)]*)\)/)!;
-    const listed = m[1]!.split(",").map((s) => s.trim().replace(/'/g, ""));
-    expect(listed.sort()).toEqual([...DIARIZE_ENGINES].sort());
+    expect(checkValues(sqlText, "diarize_window_label_engine_known", "engine")).toEqual(new Set(["pyannoteai", "local"]));
   });
 
   it("0117 is the number, and it is append-only", () => {

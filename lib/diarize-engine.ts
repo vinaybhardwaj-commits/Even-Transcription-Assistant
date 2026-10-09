@@ -25,8 +25,16 @@ import { parseFlag } from "@/lib/flags";
 /** The env var that chooses the engine. */
 export const DIARIZE_ENGINE_ENV = "DIARIZE_ENGINE";
 
-/** Every engine this system can run. The order is not meaningful. */
-export const DIARIZE_ENGINES = ["local", "pyannoteai"] as const;
+/**
+ * Every engine this system knows. The order is not meaningful.
+ *
+ * `nemotron` (epic #23, ticket b) is NOT a job engine. Its turns are PULLED by the GPU-box worker
+ * through /api/diarize/nemotron/* and stored in their own table; the `diarize_window` job has no
+ * Nemotron path. It is listed here so labels, the read path and `DIARIZE_ENGINE` share one
+ * vocabulary — and so a production `DIARIZE_ENGINE=nemotron` is a loud failure in that job (see
+ * `PUSH_ENGINES`) rather than an unrecognised value or, worse, a silent fall-through to pyannote.ai.
+ */
+export const DIARIZE_ENGINES = ["local", "pyannoteai", "nemotron"] as const;
 export type DiarizeEngine = (typeof DIARIZE_ENGINES)[number];
 
 /** What an unset or empty `DIARIZE_ENGINE` means: exactly what production did before the switch. */
@@ -55,6 +63,40 @@ export function diarizeEngine(env: Record<string, string | undefined> = process.
     `${DIARIZE_ENGINE_ENV} has an unrecognised value (length ${raw.length}) — use one of ` +
       `${DIARIZE_ENGINES.join("|")}, or leave it unset for ${DIARIZE_ENGINE_DEFAULT}. Refusing to guess.`,
   );
+}
+
+/** The engines the `diarize_window` job can run. Every other known engine is pull-based. */
+export const PUSH_ENGINES = ["local", "pyannoteai"] as const;
+export type PushEngine = (typeof PUSH_ENGINES)[number];
+
+/**
+ * The engine the `diarize_window` job runs, or a THROW.
+ *
+ * `diarizeEngine()` accepts `nemotron` because it is a real engine; the job must not. Without this
+ * check the job's branches (`local` returns early, everything else is pyannote.ai) would send a
+ * `DIARIZE_ENGINE=nemotron` window to the PAID engine without a word. Throwing gives that setting
+ * the same outcome as a typo: the runner retries, then fails the job loudly.
+ */
+export function pushEngine(env: Record<string, string | undefined> = process.env): PushEngine {
+  const e = diarizeEngine(env);
+  if ((PUSH_ENGINES as readonly string[]).includes(e)) return e as PushEngine;
+  throw new DiarizeEngineError(
+    `${DIARIZE_ENGINE_ENV}=${e} is pull-based (its worker posts to /api/diarize/nemotron/ingest) and cannot run ` +
+      `in the diarize_window job — use one of ${PUSH_ENGINES.join("|")}. Refusing to fall through to another engine.`,
+  );
+}
+
+/**
+ * `DIARIZE_NEMOTRON_SHADOW` — whether Nemotron work is OFFERED to the worker and its turns STORED.
+ *
+ * Off (the shipped state): the three /api/diarize/nemotron routes answer 404 `disabled` and touch no
+ * table. It never changes which engine production uses; that is `DIARIZE_ENGINE`, and it stays
+ * `pyannoteai` until the PRD §9 compare passes and V rules. Strict parse: a typo throws.
+ */
+export const DIARIZE_NEMOTRON_SHADOW_ENV = "DIARIZE_NEMOTRON_SHADOW";
+
+export function nemotronShadowEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return parseFlag(DIARIZE_NEMOTRON_SHADOW_ENV, env);
 }
 
 /** True when a value names an engine this build knows. Pure; used by tests and by arg validation. */

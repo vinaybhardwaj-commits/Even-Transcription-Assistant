@@ -5,6 +5,7 @@
  *   ?encounter_id=enc_…   phone encounter; times from the start of the recording
  *   ?window_id=bw_…       room window; times from the clip's start, origin_ms is its wall clock
  *   ?session_id=bs_…      every diarized window of a bench session, in order (&limit=, max 500)
+ *   &engine=nemotron      with window_id only: the SHADOW Nemotron turns (0140) instead of production's
  *
  * Exactly one id. AUTH IS THE MCP BEARER (lib/mcp/auth), and the token must hold `read` — not an
  * admin cookie, not a doctor JWT. The payload is built by lib/diarize-segments.ts from named fields
@@ -33,6 +34,7 @@ export async function GET(req: NextRequest) {
       window_id: p.get("window_id"),
       session_id: p.get("session_id"),
       limit: p.get("limit") === null ? null : Number(p.get("limit")),
+      engine: p.get("engine"),
     });
     if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status, headers: NO_STORE });
     return NextResponse.json({ ok: true, ...r.payload }, { headers: NO_STORE });
