@@ -4,7 +4,6 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "vitest run tests/unit/room-access-gate.test.ts --reporter=dot",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
@@ -13,6 +12,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "smoke": "node scripts/smoke.mjs",
+    "check:room-access": "vitest run tests/unit/room-access-gate.test.ts",
     "check:silent": "node scripts/check-silent-failures.mjs",
     "test": "npm run typecheck:tests && vitest run",
     "test:watch": "vitest",

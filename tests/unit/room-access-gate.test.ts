@@ -1,5 +1,5 @@
 /**
- * GUARD — the build gate. lib/room-access/ is the ONLY module that runs SQL against the room-data tables or builds / reads an R2 room-audio key. This test FAILS the build (npm run build runs it first) if any
+ * GUARD — the gate. lib/room-access/ is the ONLY module that runs SQL against the room-data tables or builds / reads an R2 room-audio key. This test FAILS the suite (npm run check:room-access; the deploy build is untouched) if any
  * other file under lib/ or app/ names one of those tables in SQL or writes one of those key prefixes, unless the file is on the pinned allowlist (tests/support/room-access-allowlist.ts: pipeline files, each
  * with its reason and a maximum count of mentions, so a new query in an allowed file fails too).
  */
