@@ -56,7 +56,7 @@ export type SarvamScope = "encounter" | "consult_clip" | "room_segment" | "windo
 export type SarvamUse = "production" | "mcp" | "research";
 export type CallLine = {
   caller: typeof CALLER; machine: typeof MACHINE; job_id: string; request_id: string | null; route: "gateway"; mode: "batch" | "sync";
-  task: "transcribe" | "translate" | "text_translate"; model: string; audio_s: number; chars?: number; started_at: string; finished_at: string;
+  task: "transcribe" | "translate" | "text_translate"; model: string; audio_s: number; chars?: number | null; started_at: string; finished_at: string;
   status: "ok" | "failed" | "cancelled"; http_status: number | null; throttled: boolean; scope: SarvamScope; ref: string;
   /** O5 / usage contract v1.2: who asked. A line without it reads as production. */
   use?: SarvamUse;
@@ -360,7 +360,7 @@ export function lineFromNeon(r: NeonCall): CallLine | null {
     caller: CALLER, machine: MACHINE, job_id: jobId, request_id: typeof m.sarvam_job_id === "string" ? m.sarvam_job_id : null, route: "gateway", mode: "batch",
     task: en ? "translate" : "transcribe", model: "saaras:v3", audio_s: Math.round(((Number(m.duration_ms) || 0) / 1000) * 100) / 100,
     started_at: started, finished_at: new Date(r.job_finished_at ?? r.created_at).toISOString(), status, http_status: status === "ok" ? 200 : null,
-    throttled: (r.job_progress ?? {})[en ? "en_throttled" : "throttled"] === true, scope, ref: typeof m.ref === "string" ? m.ref : jobId.replace(/:en$/, ""), use,
+    throttled: (r.job_progress ?? {})[en ? "en_throttled" : "throttled"] === true, scope, ref: typeof m.ref === "string" ? m.ref : jobId.replace(/:en$/, ""), use, chars: null, // D-2: sarvam.call.v1 lists chars; null for an audio call
   };
 }
 

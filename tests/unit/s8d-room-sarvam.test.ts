@@ -176,7 +176,7 @@ describe("3. prepare / caps / audit row, in the existing order, through the gate
   it("prepare (MCP stored class): resolves the covering chunk, scope window, use mcp; no audio is read yet", async () => {
     answer = world();
     const out = await T.sarvamTranscribeKind.run(ctx("prepare", winArgs));
-    expect(out).toEqual({ kind: "next", step: "init", progress: { clip_key: CHUNK.r2_key, content_type: "audio/webm", scope: "window", ref: "bw_1", source_kind: "room_window", use: "mcp" } });
+    expect(out).toEqual({ kind: "next", step: "init", progress: { clip_key: CHUNK.r2_key, content_type: "audio/webm", scope: "window", ref: "bw_1", source_kind: "room_window", use: "mcp", chunk_whole: true, clip_start_ms: Date.parse(CHUNK.started_at), clip_end_ms: Date.parse(CHUNK.ended_at) } });
     const { getObjectBytes } = await import("@/lib/r2");
     expect(getObjectBytes).not.toHaveBeenCalled();
     const seg = await T.sarvamTranscribeKind.run(ctx("prepare", { source: "range", session_id: "bs_1", start: WIN.start_ms, end: WIN.end_ms, mode: "transcribe", english: false, caller_class: "mcp" }));
@@ -252,7 +252,7 @@ describe("5. contract v1.2: the whole day file from Neon, the lane by use / scop
   const audit = (job: string, o: Row = {}) => ({ job_id: job, created_at: "2026-10-08T06:00:00.000Z", meta: { engine: "sarvam-gw", job_id: job, sarvam_job_id: `sj_${job}`, scope: "window", use: "mcp", duration_ms: 180_000, audio_minutes: 3, ...o }, job_status: "done", job_finished_at: "2026-10-08T06:05:00.000Z", job_progress: { started_at: "2026-10-08T06:01:00.000Z" } });
   it("lineFromNeon: sarvam.call.v1 fields exactly, enums only, no text; an unfinished job has no line yet", () => {
     const l = L.lineFromNeon(audit("job_a") as never)!;
-    expect(Object.keys(l).sort()).toEqual(["audio_s", "caller", "finished_at", "http_status", "job_id", "machine", "mode", "model", "ref", "request_id", "route", "scope", "started_at", "status", "task", "throttled", "use"]);
+    expect(Object.keys(l).sort()).toEqual(["audio_s", "caller", "chars", "finished_at", "http_status", "job_id", "machine", "mode", "model", "ref", "request_id", "route", "scope", "started_at", "status", "task", "throttled", "use"]);
     expect(l).toMatchObject({ caller: "scribe-mcp", scope: "window", use: "mcp", status: "ok", http_status: 200, task: "transcribe", audio_s: 180, request_id: "sj_job_a" });
     expect(L.lineFromNeon({ ...audit("job_b"), job_status: "running" } as never)).toBeNull();
     expect(L.lineFromNeon(audit("job_c", { scope: "room_segment" }) as never)!.scope).toBe("room_segment");
@@ -306,5 +306,68 @@ describe("5. contract v1.2: the whole day file from Neon, the lane by use / scop
     L.setLabStoreForTests(labStore);
     await expect(L.rewriteLedgerDay("2026-10-08")).resolves.toBe(true);
     expect(lab.get("sarvam/ledger/scribe-mcp/2026-10-08.jsonl")!.body).toContain("job_a");
+  });
+});
+
+describe("D-1 the {room, date, from, to} source is checked on the SESSION it resolves to (both refuter repros), R-1 the audit retry, R-2 chunk_whole", () => {
+  const DAY = Date.parse("2026-10-05T04:30:00Z");
+  /** a database: room r_clean (slug room_clean01) has session bs_2 over the range; sessionBlind says what the session guard answers */
+  const rangeWorld = (o: { windowBlind?: boolean; sessionRunsIntoBlind?: boolean } = {}) => (text: string): unknown => {
+    if (/FROM room WHERE/.test(text)) return [{ id: "r_clean" }];
+    if (/FROM bench_session s\s+JOIN room r|FROM bench_session s JOIN room r|LEFT JOIN bench_chunk c ON c\.session_id = s\.id/.test(text)) return [{ id: "bs_2", room_id: "r_clean", started_at: new Date(DAY - 600_000).toISOString(), ended_at: new Date(DAY + 3_600_000).toISOString(), last_any_chunk_at: new Date(DAY + 3_000_000).toISOString() }];
+    if (/FROM bench_session s WHERE s\.id/.test(text)) return [{ room_id: "r_clean", started_ms: DAY - 600_000, last_ms: DAY + 3_000_000, window_blind: o.windowBlind === true || o.sessionRunsIntoBlind === true }];
+    if (/FROM bench_chunk/.test(text)) return [{ ...CHUNK, started_at: new Date(DAY).toISOString(), ended_at: new Date(DAY + 900_000).toISOString() }];
+    return [];
+  };
+  const rangeArgs = { room: "room_clean01", date: "2026-10-05", from: "10:05", to: "10:10" };
+  it("repro 1 (clean-day range over a session whose window has held-out turn rows) and repro 2 (a session running into the held-out day): refused at submit with NO row and 0 R2 reads, via the hook and via prepare", async () => {
+    const { getObjectBytes } = await import("@/lib/r2");
+    (getObjectBytes as unknown as { mockClear: () => void }).mockClear();
+    for (const o of [{ windowBlind: true }, { sessionRunsIntoBlind: true }]) {
+      answer = rangeWorld(o);
+      expect(await tool({ action: "transcribe", room_audio: rangeArgs }), JSON.stringify(o)).toMatchObject({ ok: false, error: "blind_room_day" });
+      const args = T.parseSarvamTranscribeArgs(rangeArgs, "mcp") as unknown as Row;
+      expect(await T.sarvamTranscribeKind.heldOut!(args)).toBe("blind_room_day");
+      // a job that got past the hook (inserted at prepare) is still stopped before any chunk read
+      statements.length = 0;
+      expect(await T.sarvamTranscribeKind.run(ctx("prepare", args))).toMatchObject({ kind: "fail", error: "blind_room_day" });
+      expect(statements.filter((s) => /FROM bench_chunk(?! c)/.test(s.text) && !/FROM bench_session s WHERE/.test(s.text))).toEqual([]);
+    }
+    expect(jobStore.inserted).toEqual([]);
+    expect(getObjectBytes).not.toHaveBeenCalled();
+    // the clean session is served: queued, and prepare resolves the chunk
+    answer = rangeWorld();
+    expect(await tool({ action: "transcribe", room_audio: rangeArgs })).toMatchObject({ ok: true });
+  });
+  it("R-2: a single covering chunk goes whole and the result says chunk_whole:true with the real span of the audio sent", async () => {
+    answer = rangeWorld();
+    const args = T.parseSarvamTranscribeArgs(rangeArgs, "mcp") as unknown as Row;
+    const out = (await T.sarvamTranscribeKind.run(ctx("prepare", args))) as { progress: Row };
+    expect(out.progress).toMatchObject({ chunk_whole: true, clip_start_ms: DAY, clip_end_ms: DAY + 900_000 });
+    gw.result.mockResolvedValue({ ok: true, entries: [{ transcript: "x", start: 0, end: 1, speakerId: "0" }], transcript: "x", languageCode: "en-IN" });
+    const fin = { ...out.progress, sarvam_job_id: "sj_9", sarvam_started_ms: 1, duration_ms: 600_000, outputs: ["0.json"], started_at: "2026-10-08T06:00:00.000Z" };
+    const done = await T.sarvamTranscribeKind.run(ctx("finish", { ...args, english: false }, fin));
+    expect(done).toMatchObject({ kind: "done", result: { source: "sarvam_mcp_research", chunk_whole: true, clip_span: { start: DAY, end: DAY + 900_000 } } });
+  });
+  it("R-1: the first audit write FAILS (all retries), the job goes on to poll with audit_pending, and the retry on the next claim writes the row exactly once", async () => {
+    gw.status.mockResolvedValue({ ok: true, state: "Pending", outputs: [] });
+    gw.startJob.mockResolvedValue({ ok: true });
+    let fail = true;
+    answer = (text) => (/INSERT INTO audit_log/.test(text) && fail ? new Error("audit table gone") : []);
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const prog = { clip_key: "k", content_type: "audio/webm", sarvam_job_id: "sj_9", duration_ms: 180_000, scope: "window", ref: "bw_1", use: "mcp", started_at: "2026-10-08T06:00:00.000Z" };
+    const started = (await T.sarvamTranscribeKind.run(ctx("start", { source: "window", window_id: "bw_1", mode: "transcribe", english: false, caller_class: "mcp" }, prog))) as { kind: string; step: string; progress: Row };
+    expect(started).toMatchObject({ kind: "next", step: "poll", progress: { audit_pending: true, sarvam_job_id: "sj_9" } });
+    expect(started.progress.sarvam_started_ms).toEqual(expect.any(Number));
+    fail = false;
+    statements.length = 0;
+    gw.status.mockResolvedValue({ ok: true, state: "Running", outputs: [] });
+    const polled = (await T.sarvamTranscribeKind.run(ctx("poll", { source: "window", window_id: "bw_1", mode: "transcribe", english: false, caller_class: "mcp" }, started.progress))) as { progress: Row };
+    err.mockRestore();
+    expect(polled.progress.audit_pending).toBeUndefined();
+    const ins = statements.filter((s) => /INSERT INTO audit_log/.test(s.text));
+    expect(ins).toHaveLength(1);
+    expect(JSON.parse(ins[0]!.values.find((v) => typeof v === "string" && v.startsWith("{")) as string)).toMatchObject({ scope: "window", use: "mcp", job_id: "job_t1" });
+    expect(gw.startJob).toHaveBeenCalledTimes(1);
   });
 });

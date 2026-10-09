@@ -9,6 +9,7 @@ import { listBenchChunks, listBenchSessions, type BenchChunkRow } from "@/lib/be
 import { resolveRange, type CoveringChunk } from "@/lib/bench-range";
 import { JOIN_MAX_MS, buildJoinRequest, callJoinService } from "@/lib/bench-join";
 import { JobArgsError } from "../types";
+import { guardSessionSpan } from "@/lib/voice-blind";
 
 export type RoomSource =
   | { source: "window"; window_id: string }
@@ -64,7 +65,21 @@ const asMs = (v: unknown): number | null => {
   return null;
 };
 
-export type RoomClip = { ok: true; clip_key: string; content_type: string; scope: "window" | "room_segment"; ref: string; source_kind: "room_window" | "room_segment" } | { ok: false; error: "source_not_found" | "no_audio_in_range" | "join_failed" | "session_unresolved" | "window_too_long" };
+/** The session a {room, date, from, to} range lands on (the first session of the room that overlaps it), or the given session_id; null when none. Rows only, no chunk or audio read. */
+export async function resolveRangeSession(a: Record<string, unknown>): Promise<string | null> {
+  if (typeof a.session_id === "string" && a.session_id) return a.session_id;
+  if (typeof a.room !== "string" || !a.room) return null;
+  const start = Number(a.start), end = Number(a.end);
+  const ids = (await sql`SELECT id FROM room WHERE id = ${a.room}::text OR slug = ${a.room}::text`) as Array<{ id: string }>;
+  for (const r of ids) {
+    const sessions = await listBenchSessions({ room_id: r.id });
+    const hit = sessions.find((s) => { const x = asMs(s.started_at), y = asMs(s.last_any_chunk_at) ?? asMs(s.ended_at); return x !== null && x <= end && (y === null || y >= start); });
+    if (hit) return hit.id;
+  }
+  return null;
+}
+
+export type RoomClip = { ok: true; clip_key: string; content_type: string; scope: "window" | "room_segment"; ref: string; source_kind: "room_window" | "room_segment"; chunk_whole?: boolean; clip_start_ms?: number; clip_end_ms?: number } | { ok: false; error: "source_not_found" | "no_audio_in_range" | "join_failed" | "session_unresolved" | "window_too_long" | "blind_room_day" };
 
 /** Find the audio: the chunk that covers the span (one chunk = that chunk), or the joined clip. Reads chunk ROWS and, for a join, the join service; the held-out check has already run. */
 export async function resolveRoomClip(a: Record<string, unknown>): Promise<RoomClip> {
@@ -78,23 +93,22 @@ export async function resolveRoomClip(a: Record<string, unknown>): Promise<RoomC
     sessionId = rows[0].session_id; start = Number(rows[0].start_ms); end = Number(rows[0].end_ms);
     scope = "window"; ref = a.window_id;
   }
-  if (!sessionId && typeof a.room === "string" && a.room) {
-    const ids = (await sql`SELECT id FROM room WHERE id = ${a.room}::text OR slug = ${a.room}::text`) as Array<{ id: string }>;
-    for (const r of ids) {
-      const sessions = await listBenchSessions({ room_id: r.id });
-      const hit = sessions.find((s) => { const x = asMs(s.started_at), y = asMs(s.last_any_chunk_at) ?? asMs(s.ended_at); return x !== null && x <= end && (y === null || y >= start); });
-      if (hit) { sessionId = hit.id; break; }
-    }
-  }
+  if (!sessionId) sessionId = (await resolveRangeSession({ ...a, start, end })) ?? "";
   if (!sessionId) return { ok: false, error: "session_unresolved" };
+  // D-1: the session this range LANDED on is held-out checked as a whole (B3-2), before any chunk is listed, whichever source named it
+  if ((await guardSessionSpan(sessionId, { startMs: start, endMs: end })) === "blind_room_day") return { ok: false, error: "blind_room_day" };
   if (!ref) ref = sessionId;
   if (!(end > start) || end - start > JOIN_MAX_MS) return { ok: false, error: "window_too_long" };
   const chunks = await listBenchChunks(sessionId);
   const res = resolveRange(chunks, start, end, "primary");
   if (res.kind === "none") return { ok: false, error: "no_audio_in_range" };
   const covering = (res.kind === "single" ? [res.covering] : res.covering) as Array<CoveringChunk<BenchChunkRow>>;
-  if (covering.length === 1) return { ok: true, clip_key: covering[0]!.chunk.r2_key, content_type: covering[0]!.chunk.content_type || "audio/webm", scope, ref, source_kind: scope === "window" ? "room_window" : "room_segment" };
+  if (covering.length === 1) {
+    const c = covering[0]!.chunk;
+    // R-2 (refuter): the covering chunk goes whole; the result says so with the real span of the audio sent
+    return { ok: true, clip_key: c.r2_key, content_type: c.content_type || "audio/webm", scope, ref, source_kind: scope === "window" ? "room_window" : "room_segment", chunk_whole: true, clip_start_ms: asMs(c.started_at) ?? start, clip_end_ms: asMs(c.ended_at) ?? end };
+  }
   const joined = await callJoinService(buildJoinRequest(sessionId, covering, start, end, "primary"));
   if (!joined.ok) return { ok: false, error: "join_failed" };
-  return { ok: true, clip_key: joined.key, content_type: "audio/webm", scope, ref, source_kind: scope === "window" ? "room_window" : "room_segment" };
+  return { ok: true, clip_key: joined.key, content_type: "audio/webm", scope, ref, source_kind: scope === "window" ? "room_window" : "room_segment", chunk_whole: false, clip_start_ms: start, clip_end_ms: end };
 }

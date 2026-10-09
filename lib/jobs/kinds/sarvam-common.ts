@@ -34,6 +34,9 @@ export type EnglishEntry = { speaker_id: string; start_s: number; end_s: number;
 export type ResultDoc = {
   /** O5: set to "sarvam_mcp_research" on any result built from ROOM audio; never present on production text */
   source_label?: string;
+  /** R-2: the covering chunk is sent whole; the real span of the audio sent (epoch ms) */
+  chunk_whole?: boolean;
+  clip_span?: { start: unknown; end: unknown };
   language_code: string | null;
   duration_s: number;
   speakers: string[];
