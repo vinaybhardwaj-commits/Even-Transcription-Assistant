@@ -9,6 +9,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
+import { makeFakeClinician } from "../support/fake-identity";
 
 const H = vi.hoisted(() => ({
   sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>),
@@ -40,7 +41,8 @@ const BLIND_ROOM = "room_qyzghzaf";
 
 /** float32 LE, as SQL bytea hex and as base64 — typed here, not taken from the module. */
 const f32 = (...xs: number[]) => { const b = Buffer.alloc(xs.length * 4); xs.forEach((x, i) => b.writeFloatLE(x, i * 4)); return b; };
-const A = "doc_fake0001", B = "doc_fake0002", GONE = "doc_fake0003";
+const [FA, FB, FGONE] = [1, 2, 3].map((n) => makeFakeClinician(n));
+const A = FA.id, B = FB.id, GONE = FGONE.id;
 
 type Kind = typeof import("@/lib/jobs/kinds/nemotron-identity");
 type Enq = typeof import("@/lib/diarize-nemotron/identity-enqueue");
@@ -80,7 +82,7 @@ beforeAll(async () => {
   pg.exec(`INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_1', 'room_fake1', '2026-10-01'), ('rd_blind', '${BLIND_ROOM}', '${BLIND_DAY}');`);
   // A and B active with voiceprints; GONE has one but is deleted, so it is never offered
   pg.exec(`INSERT INTO clinician (id, full_name, status, deleted_at) VALUES
-    ('${A}', 'Fake Clinician 0001', 'active', NULL), ('${B}', 'Fake Clinician 0002', 'active', NULL), ('${GONE}', 'Fake Clinician 0003', 'active', now());
+    ('${A}', '${FA.full_name}', 'active', NULL), ('${B}', '${FB.full_name}', 'active', NULL), ('${GONE}', '${FGONE.full_name}', 'active', now());
     INSERT INTO voice_print (doctor_id, centroid) VALUES
     ('${A}', '\\x${f32(1, 0, 0).toString("hex")}'), ('${B}', '\\x${f32(0, 1, 0).toString("hex")}'), ('${GONE}', '\\x${f32(0, 0, 1).toString("hex")}');`);
   H.sql = pg.sql as never;
@@ -212,7 +214,7 @@ describe.runIf(HAVE)("the job", () => {
     H.embed.mockResolvedValueOnce({ ok: true, latencyMs: 1, speakers: [] });
     await runJob(id, "voice_centroid:room_primary");
     const centroids = H.embed.mock.calls[0]![2] as Array<{ clinician_id: string; centroid_base64: string }>;
-    expect(centroids).toEqual([{ clinician_id: B, full_name: "Fake Clinician 0002", centroid_base64: f32(0, 1, 0).toString("base64") }]);
+    expect(centroids).toEqual([{ clinician_id: B, full_name: FB.full_name, centroid_base64: f32(0, 1, 0).toString("base64") }]);
   });
 });
 

@@ -27,6 +27,7 @@ import {
 import { buildSegment } from "@/lib/encounter-clock/timeline";
 import type { Anchor } from "@/lib/encounter-clock/anchors";
 import { FlagValueError } from "@/lib/flags";
+import { makeFakeClinician } from "../support/fake-identity";
 
 /** float32 little-endian, base64 — written here independently of encodeFloat32. */
 const vec = (...xs: number[]) => {
@@ -37,8 +38,9 @@ const vec = (...xs: number[]) => {
 const S = (s: number) => s * 1000;
 const seg = (a: number, b: number, idx: number): NemoSegment => ({ start_ms: S(a), end_ms: S(b), speaker_idx: idx });
 
-const CA = { clinician_id: "doc_fake0001", full_name: "Fake Clinician 0001", centroid_base64: vec(1, 0, 0) };
-const CB = { clinician_id: "doc_fake0002", full_name: "Fake Clinician 0002", centroid_base64: vec(0, 1, 0) };
+const centroidOf = (n: number, v: string) => { const c = makeFakeClinician(n); return { clinician_id: c.id, full_name: c.full_name, centroid_base64: v }; };
+const CA = centroidOf(1, vec(1, 0, 0));
+const CB = centroidOf(2, vec(0, 1, 0));
 
 describe("switches", () => {
   it("IDENT_CENTROID_SET: unset or blank is voice_print; the three sets pass; anything else throws", () => {
@@ -113,7 +115,8 @@ describe("the service's answer as speaker rows", () => {
     ]);
     const text = JSON.stringify(out);
     for (const b of [e0, e1, CA.centroid_base64, CB.centroid_base64]) expect(text).not.toContain(b);
-    expect(text).not.toContain("Fake Clinician");
+    expect(text).not.toContain(CA.full_name);
+    expect(text).not.toContain(CB.full_name);
   });
 
   it("an untrusted shadow keeps the service's match but writes no losing candidate", () => {
@@ -169,7 +172,7 @@ describe("per turn, per probe, per hypothesis", () => {
 
   it("hypothesis identity: the matched clinician with most speech, its best cosine, in 0114's shape", () => {
     const pieces = turnIdentities([seg(0, 30, 0), seg(30, 70, 2), seg(70, 80, 0), seg(80, 200, 1)], speakers);
-    // A: 30 + 10 = 40 s; B: 40 s → tie → lower id (doc_fake0001)
+    // A: 30 + 10 = 40 s; B: 40 s → tie → the lower id (A)
     expect(dominantIdentity({ start_ms: 0, end_ms: S(200) }, pieces, speakers)).toEqual({ clinician_id: CA.clinician_id, match_source: "voice_print", centroid_id: null, doctor_cosine: 0.81 });
     expect(dominantIdentity({ start_ms: S(30), end_ms: S(75) }, pieces, speakers)).toMatchObject({ clinician_id: CB.clinician_id, doctor_cosine: 0.7 });
     expect(dominantIdentity({ start_ms: S(100), end_ms: S(200) }, pieces, speakers)).toBeNull();
