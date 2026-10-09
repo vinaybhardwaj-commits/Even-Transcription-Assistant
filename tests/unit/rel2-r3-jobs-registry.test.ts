@@ -8,7 +8,7 @@ const { JOB_KINDS, assertHeldOutDeclared } = await import("@/lib/jobs/kinds");
 
 const EXPECT: Record<string, boolean> = {
   transcribe_range: true, stitch: true, route_transcribe: true, room_window: true, diarize_window: true, emotion_window: true, jev_english: true, jev_window: true, jev_role: true,
-  sarvam_transcribe: true, sarvam_translate: false, rubric_run: true, rubric_bench: false, audio_measure: true, stt_fanout: true, day_manifest: true,
+  sarvam_transcribe: true, sarvam_translate: true, rubric_run: true, rubric_bench: false, audio_measure: true, stt_fanout: true, day_manifest: true,
 };
 
 describe("K3-2 the job-kind registry", () => {
