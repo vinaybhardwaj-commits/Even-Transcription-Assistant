@@ -24,10 +24,11 @@
  * The drain makes the same check absolutely, on entry, as `step: "flag_off"` (room-drain.ts §C1).
  * That is right for transcription. This path is not transcription, which is why it may be asked.
  */
-import { refuseIfTooLong, roomsRecordingNow, joinServiceConfigured } from "@/lib/bench-join";
+import { refuseIfTooLong, roomsRecordingNow, joinServiceConfigured, JOIN_MAX_MS } from "@/lib/bench-join";
 import { sql } from "@/lib/db";
 import { blindWindowIds } from "@/lib/room-access/check";
 import { isTranscriptEnabled } from "@/lib/room-switches";
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { joinClipForWindow, loadWindowContext } from "./room-drain";
 
 /**
@@ -46,6 +47,8 @@ export type JoinOnlyStep =
   | "room_recording"
   | "recording_unknown"
   | "join_service_not_configured"
+  | "blind_room_day"
+  | "room_day_lookup_failed"
   | "join_failed";
 
 export type JoinOnlyOutcome =
@@ -134,6 +137,7 @@ export async function joinOnlyWindow(
 
   // 6. THE SEAM — the drain's own join step, not a second copy of it.
   const join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
+  if (!join.ok && (join.error === "blind_room_day" || join.error === "room_day_lookup_failed")) return no(join.error);
   if (!join.ok) return no("join_failed", `${join.error}${join.hop ? ` @${join.hop}` : ""}`.slice(0, 160));
 
   return {
@@ -147,7 +151,13 @@ export async function joinOnlyWindow(
  *
  * READ ONLY, and it takes the same decision the joiner takes: transcript-disabled rooms are left
  * out unless asked for. A listing that quietly included them would invite a run that quietly
- * processed them. Ids and counts only — no slugs, no names.
+ * processed them.
+ *
+ * HEAD OF LINE. Oldest-first means a window that can never join would sit at the head forever, so
+ * the two permanent refusals are asked in SQL: D2's length cap (the same JOIN_MAX_MS
+ * `refuseIfTooLong` uses) and "the session has any chunk at all". The chunk test is NOT exactly
+ * `loadWindowContext`'s (resolveRange is JS over the window's time range and source); a window with
+ * chunks that do not cover it can still be listed and fail as no_chunks. Ids and counts only — no slugs, no names.
  */
 export async function listCliplessWindows(opts: {
   limit: number;
@@ -157,17 +167,38 @@ export async function listCliplessWindows(opts: {
   const blind = await blindWindowIds(); // DRAIN-GUARD: a held-out window is never offered; n_blind_excluded = blind.length
   if (blind.length > 0) console.log(`[join-only] list: n_blind_excluded ${blind.length}`);
   const limit = Math.max(1, Math.min(200, Math.trunc(opts.limit)));
+  // The blind pairs come from the constant, never a hand copy; parallel arrays keep them parameters.
+  const blindDays = BLIND_ROOM_DAYS.map(([day]) => day);
+  const blindRooms = BLIND_ROOM_DAYS.map(([, room]) => room);
   return (await sql`
     SELECT w.id AS window_id, r.transcript_enabled
       FROM bench_window w
       JOIN bench_session s ON s.id = w.session_id
       JOIN room r ON r.id = s.room_id
+      JOIN room_day d ON d.id = w.room_day_id
      WHERE w.clip_r2_key IS NULL
        AND w.id <> ALL(${blind}::text[])
        AND w.state = ${JOIN_ONLY_STATE}
        AND w.room_day_id IS NOT NULL
+       AND w.grid_aligned = TRUE
+       AND (w.end_ms - w.start_ms) <= ${JOIN_MAX_MS}
+       AND EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = w.session_id)
+       AND NOT EXISTS (
+         SELECT 1 FROM unnest(${blindDays}::text[], ${blindRooms}::text[]) AS b(day, room)
+          WHERE b.day = d.ist_date::text AND b.room = d.room_id
+       )
        AND (${include} OR r.transcript_enabled = TRUE)
      ORDER BY w.start_ms ASC
      LIMIT ${limit}
   `) as Array<{ window_id: string; transcript_enabled: boolean }>;
+}
+
+/**
+ * Clinic hours, 07:30 to 21:30 IST: the join service runs on the Mini, and no bulk traffic goes
+ * through the Mini then (standing rule). IST is UTC+05:30 computed by hand from the injected clock —
+ * no locale, no Intl. [07:30, 21:30) is quiet: 07:30 is inside, 21:30 is outside.
+ */
+export function inClinicHours(now: Date): boolean {
+  const istMinutes = (Math.floor(now.getTime() / 60_000) + 330) % 1440;
+  return istMinutes >= 7 * 60 + 30 && istMinutes < 21 * 60 + 30;
 }

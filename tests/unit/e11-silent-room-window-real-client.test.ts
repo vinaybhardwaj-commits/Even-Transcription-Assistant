@@ -27,6 +27,8 @@ const CLIENT = vi.hoisted(() => ({ override: null as Row | null, results: [] as 
 vi.mock("@/lib/db", () => {
   const sql = async (strings: TemplateStringsArray, ...v: unknown[]) => {
     const q = strings.join("?").replace(/\s+/g, " ");
+    // the cutter's blind-guard lookup: a clear (non-blind) room_day
+    if (q.includes("SELECT d.ist_date")) return [{ ist_date: "2026-10-01", room_id: "room_1" }];
     if (q.includes("FROM bench_window w JOIN bench_session"))
       return [{ id: "bw_1", session_id: "sess_1", room_day_id: "rd_1", start_ms: 0, end_ms: 900_000, source_mic: "primary",
                 clip_r2_key: null, grid_aligned: true, room_id: "room_1", state: DB.windowState }];

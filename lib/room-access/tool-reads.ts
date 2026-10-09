@@ -4,7 +4,8 @@
  */
 import { sql } from "@/lib/db";
 import { query } from "@/lib/brain/db";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { isBlindBenchSession } from "@/lib/bench-blind-guard";
 import { guardSessionSpan, windowBlindAny } from "./check";
 
 const HELD_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
@@ -173,18 +174,27 @@ export async function adminWindowRow(id: string): Promise<{ error: "blind_room_d
   return { rows };
 }
 
-/** /api/admin/speaker-calibration: the stored diarize answers of a session's windows; a held-out session is refused. */
-export async function adminDiarizeAnswers(sessionId: string): Promise<{ error: "blind_room_day" } | { rows: Array<{ window_id: string; speakers_json: unknown }> }> {
+/**
+ * /api/admin/speaker-calibration: the stored diarize answers of a session's windows. FAILS CLOSED: a session that cannot be resolved serves nothing (a failed lookup THROWS, the caller answers 503; an unknown one is
+ * session_not_found); a held-out session (its own span, or any window with a held-out placement) is refused; and a window is read only through its OWN room_day, which must exist and must not be held out.
+ */
+export async function adminDiarizeAnswers(sessionId: string): Promise<{ error: "blind_room_day" | "session_not_found" } | { rows: Array<{ window_id: string; speakers_json: unknown; ist_date?: string | null; room_id?: string | null }> }> {
+  const srows = (await sql`SELECT room_id, started_at, ended_at FROM bench_session WHERE id = ${sessionId} LIMIT 1`) as Array<{ room_id: string; started_at: string | Date; ended_at: string | Date | null }>;
+  if (!srows[0]) return { error: "session_not_found" };
+  if (isBlindBenchSession(srows[0])) return { error: "blind_room_day" };
   if ((await guardSessionSpan(sessionId)) === "blind_room_day") return { error: "blind_room_day" };
   const rows = (await sql`
-    SELECT d.window_id, d.speakers_json
+    SELECT d.window_id, d.speakers_json, rd.ist_date::text AS ist_date, rd.room_id
       FROM room_diarize_window d
       JOIN bench_window w ON w.id = d.window_id
+      JOIN room_day rd ON rd.id = w.room_day_id
      WHERE w.session_id = ${sessionId}
        AND d.state = 'ok'
+       -- inner join: a window with no room_day cannot be judged, so it is not read. A blind (held-out) room-day's windows are never read, decided from the window's OWN room_day
+       AND NOT EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
      ORDER BY w.start_ms ASC
-  `) as Array<{ window_id: string; speakers_json: unknown }>;
-  return { rows };
+  `) as Array<{ window_id: string; speakers_json: unknown; ist_date?: string | null; room_id?: string | null }>;
+  return { rows: rows.filter((r) => !!r.ist_date && !!r.room_id && !isBlindRoomDay(r.ist_date, r.room_id)) }; // belt and braces: a window with no room_day is excluded too
 }
 
 /** /api/admin/bench/drain: per-window drain/ASR status of a session (transcript LENGTHS only); a held-out session is refused. */
@@ -366,4 +376,15 @@ export async function adminSessionChunks(sessionId: string): Promise<Array<{ idx
     SELECT idx, source, started_at, ended_at, upload_state
       FROM bench_chunk WHERE session_id = ${sessionId} ORDER BY source, idx
   `) as Array<{ idx: number; source: string; started_at: string | Date; ended_at: string | Date; upload_state: string }>;
+}
+
+/** /api/bench/sessions/[id]/manifest: ALL chunk rows of a session, errors NOT swallowed (a failed read must not look like a session with no chunks). The caller refuses a held-out session and any chunk on a held-out IST day. */
+export async function manifestChunkRows(sessionId: string): Promise<Array<Record<string, unknown>>> {
+  return (await sql`
+    SELECT id, idx, source, r2_key, content_type, started_at, ended_at, duration_ms,
+           size_bytes, upload_state, gap_before_ms, created_at
+      FROM bench_chunk
+     WHERE session_id = ${sessionId}
+     ORDER BY (source = 'backup'), idx
+  `) as Array<Record<string, unknown>>;
 }

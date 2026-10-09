@@ -130,6 +130,8 @@ function schema(): void {
     CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, name text);
     CREATE TABLE bench_window (id text PRIMARY KEY, session_id text, room_day_id text,
       start_ms bigint, end_ms bigint, source_mic text, clip_r2_key text, grid_aligned boolean, state text);
+    CREATE TABLE bench_session (id text PRIMARY KEY, room_id text, started_at timestamptz, ended_at timestamptz);
+    CREATE TABLE room_day (id text PRIMARY KEY, room_id text, ist_date date);
     CREATE TABLE bench_chunk (session_id text, idx int, source text, r2_key text, content_type text,
       started_at timestamptz, ended_at timestamptz, upload_state text);
     CREATE TABLE cue (id text PRIMARY KEY, room_day_id text, type text, source text, source_ref text,
@@ -302,6 +304,10 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     const sql = G.__pgsql;
     SVC.fail = false;
     await seedWindow("bw_cal", "sess_cal", 2 * WINDOW_MS);
+    // The route fails closed on a session it cannot resolve and on a window with no room_day (blind room-day guard):
+    // seed both on a CLEAR (non-blind) room-day, so the reader reaches its own code path.
+    await sql`INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_1', 'room_clear', '2026-10-08') ON CONFLICT (id) DO NOTHING`;
+    await sql`INSERT INTO bench_session (id, room_id, started_at, ended_at) VALUES ('sess_cal', 'room_clear', '2026-10-08T04:00:00Z', '2026-10-08T10:00:00Z') ON CONFLICT (id) DO NOTHING`;
     const r = await runJob("job_cal", "bw_cal");
     expect(r.status, `the job must finish; error=${r.error}`).toBe("done");
 
@@ -313,9 +319,16 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     process.env.MIGRATION_SECRET = process.env.MIGRATION_SECRET || "test-secret";
     const { GET } = await import("@/app/api/admin/speaker-calibration/route");
     const { NextRequest } = await import("next/server");
-    const res = await GET(new NextRequest("https://x.test/api/admin/speaker-calibration?session_id=sess_cal", {
-      headers: { authorization: `Bearer ${process.env.MIGRATION_SECRET}` },
-    }));
+    // The harness renders a JS array as JSON text; the route binds the blind-day arrays for `::date[]` / `::text[]`
+    // (as the Neon driver does), so for this one call hand the harness Postgres array literals instead.
+    const harnessSql = G.__pgsql;
+    G.__pgsql = (st, ...vals) => harnessSql(st, ...vals.map((v) => (Array.isArray(v) ? `{${v.map((x) => `"${String(x)}"`).join(",")}}` : v)));
+    let res: Response;
+    try {
+      res = await GET(new NextRequest("https://x.test/api/admin/speaker-calibration?session_id=sess_cal", {
+        headers: { authorization: `Bearer ${process.env.MIGRATION_SECRET}` },
+      }));
+    } finally { G.__pgsql = harnessSql; }
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.windows_with_results, "the reader must SEE the job's row").toBe(1);

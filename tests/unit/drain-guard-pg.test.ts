@@ -139,6 +139,10 @@ afterAll(() => { if (HAVE) pg.stop(); });
   it("join-only listing: a clipless held-out window is not offered; a clipless clean one is", async () => {
     vi.resetModules();
     pg.exec(`UPDATE bench_window SET clip_r2_key = NULL`);
+    // the listing now also asks "the session has any chunk" (clip-join L2b): give EVERY session one, the held-out ones too, so a held-out window is out because of the blind predicates and not for want of a chunk
+    pg.exec(`INSERT INTO bench_chunk (id, session_id, idx, r2_key, content_type, started_at, ended_at, duration_ms, size_bytes, upload_state)
+      SELECT 'bcj_' || s.id, s.id, 0, 'bench/kj_' || s.id, 'audio/webm', s.started_at, s.started_at + interval '5 minutes', 300000, 1000, 'verified' FROM bench_session s
+      WHERE NOT EXISTS (SELECT 1 FROM bench_chunk c WHERE c.session_id = s.id)`);
     const { listCliplessWindows } = await import("@/lib/stt/join-only");
     const rows = await listCliplessWindows({ limit: 50 });
     expect(rows.map((x) => x.window_id).sort()).toEqual(["bw_clean", "bw_cleanE"]);

@@ -64,6 +64,8 @@ vi.mock("@/lib/db", () => {
       if (/FROM bench_chunk/.test(q)) return BENCH_CHUNKS;
       return [];
     }
+    // the cutter's blind-guard lookup: a clear (non-blind) room_day
+    if (q.includes("SELECT d.ist_date")) return [{ ist_date: "2026-10-01", room_id: "room_1" }];
     if (q.includes("FROM bench_window w JOIN bench_session")) return [{ ...ROOM_WINDOW_ROW, state: DB.windowState }];
     if (q.includes("FROM bench_chunk")) return ROOM_CHUNKS;
     if (q.includes("UPDATE bench_window SET state = 'transcribing'")) { DB.windowState = "transcribing"; return [{ id: "bw_1" }]; }
