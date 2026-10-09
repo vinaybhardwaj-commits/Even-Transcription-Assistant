@@ -74,7 +74,7 @@ const withoutConsole = (schema: unknown): unknown => {
   if (s.properties) {
     for (const k of ["action", "min_cosine", "speaker_idx", "rooms", "from", "to", "top_k"]) delete s.properties[k]; // S6A + S6B console-only arguments
     const v = s.properties.view; if (v && Array.isArray(v.enum)) v.enum = (v.enum as string[]).filter((x) => x !== "console");
-    for (const k of ["clinician_id", "window_id"]) { const c = s.properties[k]; if (c && typeof c.description === "string") c.description = c.description.replace("|console]", "]"); }
+    for (const k of ["clinician_id", "window_id"]) { const c = s.properties[k]; if (c && typeof c.description === "string") c.description = c.description.replace("|console]", "]").replace("|…", "]"); }
   }
   return s;
 };
@@ -413,11 +413,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 39,500 characters (measured 39,403: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property)", async () => {
+  it("budget: the full tools/list result stays at or under 38,000 characters (DIET-2: measured 37,984; was 39,484 after S8D; text only, every safety phrase kept and tested below)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_500);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(38_000);
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
