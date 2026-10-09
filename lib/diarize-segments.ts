@@ -22,6 +22,12 @@
  * host}`; 859 room windows carry it). `source` is `<worker>/<arch>` from it, e.g. `night-drain/arm64`.
  * A row with no producer (534 room windows, and every encounter so far) was written by the app
  * against the Mini's eta-diarize, and says `eta-diarize`.
+ *
+ * `engine=nemotron` (epic #23 b) reads the SHADOW engine instead: diarize_nemotron_window (0140), the
+ * newest `ok`/`empty` row for one window. Same payload shape; `source` is `nemotron/<machine>`, speaker
+ * indices come from the worker's `spkN` labels, `overlap` is true where a turn intersects another
+ * speaker's, and there is never a clinician match (Nemotron has no identity — that is ticket c). Only
+ * `window_id` is supported for it. With no `engine`, every answer is exactly what it was.
  */
 import { sql } from "@/lib/db";
 
@@ -100,11 +106,17 @@ export type SegmentsQuery = {
   window_id?: string | null;
   session_id?: string | null;
   limit?: number | null;
+  /** Absent = the production store, unchanged. `nemotron` = the shadow store (window_id only). */
+  engine?: string | null;
 };
+
+/** The engines `engine=` accepts. Absent means production's own store. */
+export const SEGMENT_ENGINES = ["nemotron"] as const;
+export type SegmentEngine = (typeof SEGMENT_ENGINES)[number];
 
 export type SegmentsLookup =
   | { ok: true; payload: SegmentsPayload }
-  | { ok: false; status: 400 | 404; error: "one_id_required" | "bad_id" | "not_found" };
+  | { ok: false; status: 400 | 404; error: "one_id_required" | "bad_id" | "bad_engine" | "engine_needs_window_id" | "not_found" };
 
 // ---------------------------------------------------------------------------
 // PURE shaping
@@ -282,10 +294,78 @@ export function windowPayload(row: WindowRow): WindowSegments {
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+export type NemotronWindowRow = {
+  window_id: string;
+  session_id: unknown;
+  room_day_id: unknown;
+  source_mic: unknown;
+  status: unknown;
+  received_at: unknown;
+  start_ms: unknown;
+  end_ms: unknown;
+  model_rev: unknown;
+  machine: unknown;
+  turns_json: unknown;
+};
+
+/**
+ * PURE — a stored Nemotron row → the window payload. Turns are re-checked one by one (a malformed turn is
+ * dropped, never echoed); labels other than `spkN` are dropped; the stored label never reaches the output.
+ */
+export function nemotronWindowPayload(row: NemotronWindowRow): WindowSegments {
+  const machine = str(row.machine);
+  const source = machine && PRODUCER_PART_RE.test(machine) ? `nemotron/${machine}` : "nemotron";
+  const turns: Array<{ s: number; e: number; idx: number }> = [];
+  if (Array.isArray(row.turns_json)) {
+    for (const t of row.turns_json) {
+      if (!Array.isArray(t) || t.length !== 3) continue;
+      const s = finite(t[0]);
+      const e = finite(t[1]);
+      const m = typeof t[2] === "string" ? /^spk(\d{1,2})$/.exec(t[2]) : null;
+      if (s === null || e === null || s < 0 || e <= s || !m) continue;
+      turns.push({ s: Math.round(s), e: Math.round(e), idx: Number(m[1]) });
+    }
+  }
+  const speech = new Map<number, number>();
+  for (const t of turns) speech.set(t.idx, (speech.get(t.idx) ?? 0) + (t.e - t.s));
+  const speakers: SpeakerTiming[] = [...speech.keys()]
+    .sort((a, b) => a - b)
+    .map((idx) => ({ speaker_idx: idx, speaker_label: speakerLabel(idx), total_speech_ms: speech.get(idx)! }));
+  const segments: SegmentTiming[] = turns
+    .map((t) => ({
+      start_ms: t.s,
+      end_ms: t.e,
+      speaker_idx: t.idx,
+      speaker_label: speakerLabel(t.idx),
+      source,
+      overlap: turns.some((o) => o.idx !== t.idx && o.s < t.e && t.s < o.e),
+    }))
+    .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms || a.speaker_idx - b.speaker_idx);
+  const rev = str(row.model_rev);
+  return {
+    kind: "window",
+    window_id: row.window_id,
+    session_id: str(row.session_id),
+    room_day_id: str(row.room_day_id),
+    source_mic: str(row.source_mic),
+    diarize_state: str(row.status),
+    diarized_at: iso(row.received_at),
+    origin_ms: finite(row.start_ms),
+    window_end_ms: finite(row.end_ms),
+    clock: "clip_relative",
+    segments_run_id: rev,
+    // The newest stored row for the window is what is returned, so it is never stale relative to itself.
+    segments_stale: false,
+    source,
+    speakers,
+    segments,
+  };
+}
+
 /** PURE — which one id was asked for, or why the query is refused. */
 export function pickQuery(q: SegmentsQuery):
-  | { ok: true; by: "encounter_id" | "window_id" | "session_id"; id: string; limit: number }
-  | { ok: false; status: 400; error: "one_id_required" | "bad_id" } {
+  | { ok: true; by: "encounter_id" | "window_id" | "session_id"; id: string; limit: number; engine: SegmentEngine | null }
+  | { ok: false; status: 400; error: "one_id_required" | "bad_id" | "bad_engine" | "engine_needs_window_id" } {
   const given = (["encounter_id", "window_id", "session_id"] as const).filter(
     (k) => typeof q[k] === "string" && q[k]!.trim() !== "",
   );
@@ -295,7 +375,14 @@ export function pickQuery(q: SegmentsQuery):
   if (!ID_RE.test(id)) return { ok: false, status: 400, error: "bad_id" };
   const n = finite(q.limit);
   const limit = n === null ? SESSION_WINDOW_LIMIT_DEFAULT : Math.min(SESSION_WINDOW_LIMIT_MAX, Math.max(1, Math.trunc(n)));
-  return { ok: true, by, id, limit };
+  let engine: SegmentEngine | null = null;
+  if (typeof q.engine === "string" && q.engine.trim() !== "") {
+    const e = q.engine.trim().toLowerCase();
+    if (!(SEGMENT_ENGINES as readonly string[]).includes(e)) return { ok: false, status: 400, error: "bad_engine" };
+    if (by !== "window_id") return { ok: false, status: 400, error: "engine_needs_window_id" };
+    engine = e as SegmentEngine;
+  }
+  return { ok: true, by, id, limit, engine };
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +392,20 @@ export function pickQuery(q: SegmentsQuery):
 export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> {
   const pick = pickQuery(q);
   if (!pick.ok) return pick;
+
+  if (pick.engine === "nemotron") {
+    const rows = (await sql`
+      SELECT n.window_id, w.session_id, n.room_day_id, w.source_mic, n.status, n.received_at,
+             w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json
+        FROM diarize_nemotron_window n
+        JOIN bench_window w ON w.id = n.window_id
+       WHERE n.window_id = ${pick.id} AND n.status IN ('ok', 'empty')
+       ORDER BY n.received_at DESC, n.id DESC
+       LIMIT 1
+    `) as NemotronWindowRow[];
+    const row = rows[0];
+    return row ? { ok: true, payload: nemotronWindowPayload(row) } : { ok: false, status: 404, error: "not_found" };
+  }
 
   if (pick.by === "encounter_id") {
     const rows = (await sql`

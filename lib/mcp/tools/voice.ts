@@ -172,7 +172,7 @@ const getClusters: McpTool = {
 const diarizeSegments: McpTool = {
   name: "scribe_diarize_segments",
   description:
-    "Speaker timings WITHOUT text for one phone encounter (encounter_id), one room window (window_id) or one bench session's diarized windows (session_id, limit): [{start_ms, end_ms, speaker_idx, speaker_label S0/S1…, source, overlap, confidence?}] plus per-speaker total_speech_ms and, only where the diarize service matched a voiceprint, matched_clinician_id. Labels are neutral indices, never roles or names. Same payload as GET /api/diarize-segments.",
+    "Speaker timings WITHOUT text for one phone encounter (encounter_id), one room window (window_id) or one bench session's diarized windows (session_id, limit): [{start_ms, end_ms, speaker_idx, speaker_label S0/S1…, source, overlap, confidence?}] plus per-speaker total_speech_ms and, only where the diarize service matched a voiceprint, matched_clinician_id. Labels are neutral indices, never roles or names. engine=nemotron (window_id only) reads the SHADOW Nemotron turns instead of production's; omit it for production. Same payload as GET /api/diarize-segments.",
   scope: "read",
   inputSchema: {
     type: "object",
@@ -181,6 +181,7 @@ const diarizeSegments: McpTool = {
       window_id: { type: "string", description: "bw_… id" },
       session_id: { type: "string", description: "bs_… id" },
       limit: { type: "integer", minimum: 1, maximum: SESSION_WINDOW_LIMIT_MAX, default: SESSION_WINDOW_LIMIT_DEFAULT },
+      engine: { type: "string", enum: ["nemotron"], description: "Omit for production's diarizer. nemotron = the shadow engine (window_id only)." },
     },
     additionalProperties: false,
   },
@@ -191,6 +192,8 @@ const diarizeSegments: McpTool = {
         window_id: argStr(args, "window_id", 64),
         session_id: argStr(args, "session_id", 64),
         limit: argInt(args, "limit", SESSION_WINDOW_LIMIT_DEFAULT, 1, SESSION_WINDOW_LIMIT_MAX),
+        // raw, not argStr: an overlong or non-string engine must reach pickQuery and be refused, never read as absent
+        engine: args.engine == null ? null : String(args.engine),
       });
       return r.ok ? { segments: r.payload } : { segments: null, error: r.error };
     }),

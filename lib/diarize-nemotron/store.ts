@@ -1,0 +1,213 @@
+/**
+ * lib/diarize-nemotron/store.ts — the ONLY writer of diarize_nemotron_window, diarize_nemotron_claim and
+ * diarize_nemotron_worker (migration 0140). Epic #23, ticket (b).
+ *
+ * Neon HTTP: every call is one statement, tagged template, every value bound — and CAST where it lands in a
+ * select list, because Neon sends parameters untyped and Postgres cannot infer a type there. Concurrency is settled
+ * INSIDE single statements, never by a read followed by a write:
+ *
+ *   CLAIM   one INSERT … ON CONFLICT DO UPDATE … WHERE the old lease has expired. Two workers racing for
+ *           the same window: the second one's conflict finds a live lease, its WHERE fails, and the window
+ *           is not returned to it. No row lock on bench_window is needed, so the STT path is never blocked.
+ *   INGEST  INSERT … ON CONFLICT ON CONSTRAINT diarize_nemotron_window_once DO NOTHING. An identical
+ *           re-post inserts nothing and is answered as a duplicate; a DIFFERENT payload for the same key is
+ *           refused (409) and the stored row is never overwritten.
+ *
+ * ELIGIBILITY mirrors lib/stt/diarize-job.ts (closed or transcribed, grid-aligned, a room_day, a joined
+ * clip). It does NOT wait for STT, and it never touches room_diarize_window: production diarization is
+ * untouched by anything here.
+ */
+import { sql } from "@/lib/db";
+import { teacherLabelsEnabled } from "@/lib/diarize-engine";
+import { writeWindowLabel } from "@/lib/diarize-labels";
+import { MAX_ATTEMPTS, TERMINAL_ERROR_CODES, type Derived, type IngestBody } from "./validate";
+
+/** How long a claim is the worker's alone. PROVISIONAL (PRD §6.1); a dead worker's window is free again after it. */
+export const LEASE_MINUTES = 15;
+/** A signed clip URL outlives the lease, so a worker that claimed it can always still fetch it. */
+export const CLIP_URL_SECONDS = 1800;
+
+export type ClaimedWindow = {
+  window_id: string;
+  room_day_id: string;
+  start_ms: number;
+  end_ms: number;
+  clip_r2_key: string;
+  attempts: number;
+};
+
+/**
+ * Claim up to `limit` windows for `workerId`, NEWEST first (start_ms is epoch ms), so today's
+ * audio never waits behind the backlog (Orchestrator ruling, 9 Oct 2026). A window is offered when it has no Nemotron
+ * row at all (any revision), and either no claim, or an expired, unfinished claim with attempts left.
+ */
+export async function claimPending(workerId: string, limit: number): Promise<ClaimedWindow[]> {
+  const rows = (await sql`
+    WITH cand AS (
+      SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key
+        FROM bench_window w
+        LEFT JOIN diarize_nemotron_claim c ON c.window_id = w.id
+       WHERE w.state IN ('closed', 'transcribed')
+         AND w.grid_aligned = TRUE
+         AND w.room_day_id IS NOT NULL
+         AND w.clip_r2_key IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id)
+         AND (c.window_id IS NULL OR (c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}))
+       ORDER BY w.start_ms DESC
+       LIMIT ${limit}
+    ), claimed AS (
+      INSERT INTO diarize_nemotron_claim AS c (window_id, worker_id, claimed_at, lease_until, attempts)
+      SELECT id, ${workerId}::text, now(), now() + make_interval(mins => ${LEASE_MINUTES}::int), 1 FROM cand
+      ON CONFLICT (window_id) DO UPDATE
+         SET worker_id = EXCLUDED.worker_id, claimed_at = now(), lease_until = EXCLUDED.lease_until,
+             attempts = c.attempts + 1
+       WHERE c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}
+      RETURNING c.window_id, c.attempts
+    )
+    SELECT cand.id AS window_id, cand.room_day_id, cand.start_ms, cand.end_ms, cand.clip_r2_key, claimed.attempts
+      FROM cand JOIN claimed ON claimed.window_id = cand.id
+     ORDER BY cand.start_ms DESC
+  `) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    window_id: String(r.window_id),
+    room_day_id: String(r.room_day_id),
+    start_ms: Number(r.start_ms),
+    end_ms: Number(r.end_ms),
+    clip_r2_key: String(r.clip_r2_key),
+    attempts: Number(r.attempts),
+  }));
+}
+
+/** Windows whose claims used every attempt without a stored row. Reported on every /pending answer so a stuck window is never silent. */
+export async function countExhausted(): Promise<number> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n FROM diarize_nemotron_claim c
+     WHERE c.done_at IS NULL AND c.attempts >= ${MAX_ATTEMPTS} AND c.lease_until < now()
+       AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = c.window_id)
+  `) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
+}
+
+export type IngestOutcome =
+  | { result: "stored"; id: number; label: "written" | "skipped" | "failed" }
+  | { result: "duplicate" }
+  | { result: "conflict" }
+  | { result: "unknown_window" }
+  | { result: "room_day_mismatch" }
+  | { result: "failure_recorded"; attempts: number }
+  | { result: "no_live_claim" };
+
+/** INSERT the row for a validated body. Returns the new id, or null when the key already had a row. */
+async function insertRow(b: IngestBody, d: Derived, payloadSha: string): Promise<number | null> {
+  const rows = (await sql`
+    INSERT INTO diarize_nemotron_window
+      (window_id, room_day_id, engine, model, model_rev, config, config_hash, worker_id, machine, audio_ms,
+       clip_sha256, turns_json, speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status, error_code)
+    SELECT w.id, w.room_day_id, ${b.engine}::text, ${b.model}::text, ${b.model_rev}::text, ${JSON.stringify(b.config)}::jsonb,
+           ${b.config_hash}::text, ${b.worker_id}::text, ${b.machine}::text, ${b.audio_ms}::int, ${b.clip_sha256}::text,
+           ${JSON.stringify(b.turns)}::jsonb, ${d.speaker_count}::int, ${d.turn_count}::int, ${d.speech_ms}::int, ${d.overlap_ms}::int,
+           ${payloadSha}::text, ${b.status}::text, ${b.error_code}::text
+      FROM bench_window w
+     WHERE w.id = ${b.window_id} AND w.room_day_id = ${b.room_day_id}
+    ON CONFLICT ON CONSTRAINT diarize_nemotron_window_once DO NOTHING
+    RETURNING id
+  `) as Array<{ id: number | string }>;
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/** Why an insert returned nothing: an existing row (same or different payload), or no such window. */
+async function explainNoInsert(b: IngestBody, payloadSha: string): Promise<IngestOutcome> {
+  const existing = (await sql`
+    SELECT payload_sha256 FROM diarize_nemotron_window
+     WHERE window_id = ${b.window_id} AND engine = ${b.engine} AND model_rev = ${b.model_rev} AND config_hash = ${b.config_hash}
+     LIMIT 1
+  `) as Array<{ payload_sha256: string }>;
+  if (existing[0]) return existing[0].payload_sha256 === payloadSha ? { result: "duplicate" } : { result: "conflict" };
+  const w = (await sql`SELECT room_day_id FROM bench_window WHERE id = ${b.window_id} LIMIT 1`) as Array<{ room_day_id: string | null }>;
+  return w[0] ? { result: "room_day_mismatch" } : { result: "unknown_window" };
+}
+
+/** Close the claim once a row is stored. Harmless when there is no claim (a parity backfill posts unclaimed). */
+async function finishClaim(windowId: string): Promise<void> {
+  await sql`
+    UPDATE diarize_nemotron_claim SET done_at = now(), lease_until = now()
+     WHERE window_id = ${windowId} AND done_at IS NULL
+  `;
+}
+
+/**
+ * A teacher label for a stored `ok` row, when DIARIZE_TEACHER_LABELS is on. Never fails the ingest
+ * (lib/diarize-labels.ts: labelling failing must never fail a window). run_id is the (revision, config)
+ * pair, so a re-post can never double-count.
+ */
+async function maybeLabel(b: IngestBody): Promise<"written" | "skipped" | "failed"> {
+  if (b.status !== "ok") return "skipped";
+  let on: boolean;
+  try {
+    on = teacherLabelsEnabled();
+  } catch {
+    return "failed";
+  }
+  if (!on) return "skipped";
+  try {
+    await writeWindowLabel({
+      windowId: b.window_id,
+      roomDayId: b.room_day_id,
+      engine: "nemotron",
+      model: b.model,
+      providerJobId: null,
+      runId: `${b.model_rev}:${b.config_hash}`,
+      segments: b.turns.map(([s, e, l]) => ({ start_ms: s, end_ms: e, speaker_idx: Number(l.slice(3)) })),
+      speakerCount: new Set(b.turns.map((t) => t[2])).size,
+      audioSeconds: b.audio_ms / 1000,
+    });
+    return "written";
+  } catch (e) {
+    console.warn("[nemotron] teacher label write failed:", e instanceof Error ? e.name : "error");
+    return "failed";
+  }
+}
+
+/** Store a result row (ok, empty, or a TERMINAL failure) and close the claim. */
+async function storeRow(b: IngestBody, d: Derived, payloadSha: string): Promise<IngestOutcome> {
+  const id = await insertRow(b, d, payloadSha);
+  if (id === null) return explainNoInsert(b, payloadSha);
+  await finishClaim(b.window_id);
+  return { result: "stored", id, label: await maybeLabel(b) };
+}
+
+/**
+ * The ingest decision for a validated body.
+ *
+ *   ok / empty                 → stored (idempotent on the key; 409 on a different payload).
+ *   failed, terminal code      → stored as the window's `failed` row; no further attempts.
+ *   failed, attempts left      → recorded on the claim (failure_history) and the lease released, so the
+ *                                window is offered again; no window row, so a later success can still land.
+ *   failed, last attempt       → stored as the window's `failed` row.
+ *   failed, no live claim held by this worker → nothing changes (a replayed failure is not a second attempt).
+ */
+export async function recordIngest(b: IngestBody, d: Derived, payloadSha: string): Promise<IngestOutcome> {
+  if (b.status !== "failed") return storeRow(b, d, payloadSha);
+
+  const code = b.error_code!;
+  const claim = (await sql`
+    UPDATE diarize_nemotron_claim
+       SET lease_until = now(), last_error_code = ${code},
+           failure_history = failure_history || jsonb_build_array(jsonb_build_object('at', now(), 'worker_id', ${b.worker_id}::text, 'error_code', ${code}::text))
+     WHERE window_id = ${b.window_id} AND worker_id = ${b.worker_id} AND done_at IS NULL AND lease_until > now()
+    RETURNING attempts
+  `) as Array<{ attempts: number }>;
+  if (!claim[0]) return { result: "no_live_claim" };
+  const attempts = Number(claim[0].attempts);
+  if (TERMINAL_ERROR_CODES.has(code) || attempts >= MAX_ATTEMPTS) return storeRow(b, d, payloadSha);
+  return { result: "failure_recorded", attempts };
+}
+
+/** Upsert the worker's last heartbeat. */
+export async function recordHeartbeat(workerId: string, payload: Record<string, unknown>): Promise<void> {
+  await sql`
+    INSERT INTO diarize_nemotron_worker (worker_id, last_seen_at, payload)
+    VALUES (${workerId}, now(), ${JSON.stringify(payload)}::jsonb)
+    ON CONFLICT (worker_id) DO UPDATE SET last_seen_at = now(), payload = EXCLUDED.payload
+  `;
+}
