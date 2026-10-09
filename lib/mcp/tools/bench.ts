@@ -2011,6 +2011,22 @@ async function whisperNotOkAnswer(
   };
 }
 
+/** O5: scribe_transcribe_range with a Sarvam engine = a sarvam_transcribe job over the range (gateway only). Results land in R2 mcp-sarvam/<job_id>.json and the job result, labelled sarvam_mcp_research. */
+async function transcribeRangeViaSarvam(args: ToolArgs, ctx: ToolContext): Promise<Record<string, unknown>> {
+  const { submitJob, JobArgsError, UnknownKindError } = await import("@/lib/jobs/submit");
+  const session = argStr(args, "session_id", 64);
+  const room = argStr(args, "room", 128) ?? argStr(args, "room_id", 128) ?? argStr(args, "room_slug", 128);
+  const jobArgs: Record<string, unknown> = { from: args.start, to: args.end, ...(session ? { session_id: session } : { room, date: argStr(args, "ist_date", 10) ?? istDate(new Date()) }) };
+  try {
+    const job = await submitJob({ kind: "sarvam_transcribe", args: jobArgs, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes, callerClass: "mcp" });
+    return { ok: true, async: true, engine: "sarvam-gw", source: "sarvam_mcp_research", job_id: job.id, kind: job.kind, status: job.status, note: "results: R2 mcp-sarvam/<job_id>.json and the job result (scribe_sarvam result); nothing is written to cues or the app" };
+  } catch (e) {
+    if (e instanceof JobArgsError) return e.reason === "blind_room_day" || e.reason === "window_unplaced" ? { ok: false, error: e.reason } : { ok: false, error: "bad_args", detail: e.reason };
+    if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind" };
+    throw e;
+  }
+}
+
 const transcribeRange: McpTool = {
   name: "scribe_transcribe_range",
   description:
@@ -2043,6 +2059,9 @@ const transcribeRange: McpTool = {
     {
       const asked = argStr(args, "engine", 32);
       const verdict = asked ? await checkEngine(asked) : "clear";
+      // O5 (V, 09 Oct): an MCP caller may send room audio to Sarvam, through the ZDR gateway only: the range becomes a sarvam_transcribe job (held-out checked at submit and at its first step,
+      // the Sarvam minute caps and paid-call row apply). Production never reaches this tool. An unavailable scope check still refuses (fail closed).
+      if (verdict === "sarvam") return transcribeRangeViaSarvam(args, ctx);
       if (verdict !== "clear") return sarvamScopeRefusal({ engine: asked, tool: "scribe_transcribe_range" }, verdict);
     }
     // Tier 2 §3 — `async:true` submits the equivalent job and returns its id. The synchronous

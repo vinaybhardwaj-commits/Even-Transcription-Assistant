@@ -16,7 +16,8 @@ export { MCP_SARVAM_PREFIX as RESULT_PREFIX, sarvamResultKey as resultKey } from
 export const SARVAM_WALL_MS = 30 * 60_000;
 
 /** Where the audio came from: a doctor-recorded encounter, or a clip cut by the CONSULT cutter. Never room tape, never a whole window. */
-export type SarvamScope = "encounter" | "consult_clip";
+export type SarvamScope = "encounter" | "consult_clip" | "room_segment" | "window" | "synthetic" | "other";
+export type SarvamUse = "production" | "mcp" | "research";
 export const SCOPE_CONSULT_ONLY = "scope_consult_only";
 
 export type ResultEntry = {
@@ -31,6 +32,8 @@ export type ResultEntry = {
 /** S8A4: one entry of the English track. native_idx = the native entry it was aligned to by time overlap, or null (kept, never dropped). */
 export type EnglishEntry = { speaker_id: string; start_s: number; end_s: number; text: string; source: "translate_pass" | "mayura" | "mayura_fallback" | "native_latin" | "native_unverified"; native_idx: number | null; status?: "ok" | "unverified" | "partial"; mixed_language?: boolean };
 export type ResultDoc = {
+  /** O5: set to "sarvam_mcp_research" on any result built from ROOM audio; never present on production text */
+  source_label?: string;
   language_code: string | null;
   duration_s: number;
   speakers: string[];
@@ -159,7 +162,10 @@ export const auditRetry = { delaysMs: [100, 300, 900] };
  * caller (sarvam-transcribe settleAudit) catches that and keeps the job going with progress.audit_pending, retrying the write on every poll claim; the minutes stay
  * reserved meanwhile. The row is never silently skipped, and an audit fault never fails a job Sarvam is running.
  */
-export async function recordSarvamCall(opts: { actor: string | null; jobId: string; sarvamJobId: string; durationMs: number; scope: SarvamScope }): Promise<void> {
+export async function recordSarvamCall(opts: { actor: string | null; jobId: string; sarvamJobId: string; durationMs: number; scope: SarvamScope; use?: SarvamUse }): Promise<void> {
+  // usage contract v1.2: the row carries use + scope; a production caller can only write consult_clip / encounter (a row without use reads as production)
+  const use: SarvamUse = opts.use === "mcp" || opts.use === "research" ? opts.use : "production";
+  if (use === "production" && (opts.scope === "window" || opts.scope === "room_segment")) throw new Error("scope_requires_mcp");
   const minutes = Math.round((opts.durationMs / 60_000) * 1000) / 1000;
   let lastErr = "error";
   for (let attempt = 0; attempt <= auditRetry.delaysMs.length; attempt++) {
@@ -183,6 +189,7 @@ export async function recordSarvamCall(opts: { actor: string | null; jobId: stri
           job_id: opts.jobId,
           sarvam_job_id: opts.sarvamJobId,
           scope: opts.scope,
+          use,
           duration_ms: Math.round(opts.durationMs),
           audio_minutes: minutes,
           cost_per_min_usd: rate.rate,

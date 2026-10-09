@@ -82,7 +82,7 @@ function briefs(): Record<string, string> {
     scribe_help: "Read-only; touches no room. One tool's full contract: scope, schema, long help; accepts any name. Times UTC.",
     scribe_usage: "Read-only; touches no room. Door usage from audit_log: calls, errors, p50/p95 per tool and actor. Times UTC.",
     // S1 reads (S1A)
-    scribe_now: "Read-only; reads live rooms. Times UTC. Fleet board. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
+    scribe_now: "Read-only; reads live rooms. Times UTC. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
     scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
     scribe_steward_command: "WRITE; Room Steward config; can act on LIVE rooms. Times UTC. kind=set_shadow|kill_switch|start_day_live|add_room|flag_room|set_window|note|mute_alerts; reason required; returns a revert.",
     scribe_lanes: "Read-only; touches no room. Times UTC. Fleet and lane state (lab bucket): view=fleet|lanes (name, age_s, stale > 600 s).",
@@ -90,7 +90,7 @@ function briefs(): Record<string, string> {
     scribe_timbre: "Read-only Timbre patient-voice affect per encounter/room-day/doctor cell. Raw=default for trends; calibrated=display-only 1-5. Not a surgery predictor; never neutral or a ranking. Times UTC.",
     scribe_encounter_timeline: "Read-only shadow consult boundaries for one room-day: start/end, confidence, reason codes, agreement vs Pulse and cuts. No text. Times UTC.",
     scribe_freescript: "Job queue read/write. Reads stored FreeScript artifacts. action=read|run; run queues a box job and needs invoke. On unless ETA_FREESCRIPT=0. No transcript text. Times UTC. ist_date.",
-    scribe_sarvam: "Job queue read/write; consult audio/text only to Sarvam (ZDR); no room audio. Times UTC. consult_result accepts consult_uids or ist_date. Text only with include_text. submits need invoke.",
+    scribe_sarvam: "Job queue read/write; Sarvam (ZDR): consult audio/text; MCP research also room windows/segments, never blind days. Times UTC. consult_result accepts consult_uids or ist_date. Text only with include_text. submits need invoke.",
     scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow only on request.",
     scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why|history|ticket_log|ticket_summary|live; why needs room + at (+-15 min). No ticket signatures.",
     scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen|helper|commands; room optional.",
