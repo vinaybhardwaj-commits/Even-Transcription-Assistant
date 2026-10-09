@@ -3232,6 +3232,8 @@ const replayWrite: McpTool = {
       if (!id || !id.startsWith("bs_")) return { ok: false, error: "bad_session_id", written: 0, already_existed: 0, failed: 0 };
       const session = await findBenchSession(id);
       if (!session) return { ok: false, error: "session_not_found", written: 0, already_existed: 0, failed: 0 };
+      // K3-3: a held-out session is never copied into a scratch day (before any event read or scratch graph)
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { ok: false, error: "blind_room_day", written: 0, already_existed: 0, failed: 0 };
 
       // H1 — a session that is not `ended` is refused, recording and paused alike. A live tape
       // is still growing, so the cue list is a PREFIX of the day; written into scratch it would

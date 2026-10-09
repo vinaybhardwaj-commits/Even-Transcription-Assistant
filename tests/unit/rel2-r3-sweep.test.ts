@@ -105,3 +105,32 @@ describe("window-keyed reads (a window id, or a list of runs / windows)", () => 
     expect(content(/transcript_english|FROM stt_gold/)).toEqual([]); // the runs (with transcripts) and the gold; the subject-type probe is metadata
   });
 });
+
+describe("K3-3 scratch twins: a scratch room / day of a held-out real room is held out too", () => {
+  const SCRATCH = `room_scratch_${BR.replace(/^room_/, "")}`;
+  it("isBlindRoomDay maps the scratch id; the literal prefixes equal lib/brain/scratch's", async () => {
+    const { isBlindRoomDay } = await import("@/lib/rubrics/blind-room-days");
+    const { SCRATCH_ROOM_PREFIX, ROOM_PREFIX, scratchRoomIdFor, realRoomIdFor } = await import("@/lib/brain/scratch");
+    expect(SCRATCH_ROOM_PREFIX).toBe("room_scratch_");
+    expect(ROOM_PREFIX).toBe("room_");
+    expect(scratchRoomIdFor(BR)).toBe(SCRATCH);
+    expect(realRoomIdFor(SCRATCH)).toBe(BR);
+    expect(isBlindRoomDay(BD, SCRATCH)).toBe(true);
+    expect(isBlindRoomDay("2026-10-05", SCRATCH)).toBe(false);
+    expect(isBlindRoomDay(BD, "room_scratch_someoneelse")).toBe(false);
+  });
+  it("scribe_get_state and scribe_list_cues with the SCRATCH room id: blind_room_day, no graph, no cue read", async () => {
+    answers = [[/FROM room\s/, [{ ...ROOM, id: SCRATCH }]]];
+    expect(await call("scribe_get_state", { room_id: SCRATCH, ist_date: BD })).toMatchObject({ state: null, error: "blind_room_day" });
+    expect(await call("scribe_list_cues", { room_id: SCRATCH, ist_date: BD })).toMatchObject({ cues: [], error: "blind_room_day" });
+    expect(content(/FROM (cue|visit|speaker_cluster|room_day)\b/)).toEqual([]);
+  });
+  it("scribe_fuse_run (every arm) on a scratch day of the held-out real room: blind_room_day, 0 cue reads, nothing written", async () => {
+    answers = [[/FROM room_day/, [{ id: "rd_scratch_x", room_id: SCRATCH, ist_date: BD, scratch: true }]]];
+    for (const arm of ["rules", "hybrid", "flash", "jev"]) {
+      expect(await call("scribe_fuse_run", { room_day_id: "rd_scratch_x", arm, dry_run: false }), arm).toMatchObject({ ok: false, error: "blind_room_day", written: 0 });
+    }
+    expect(content(/FROM cue|INSERT INTO visit/)).toEqual([]);
+  });
+});
+

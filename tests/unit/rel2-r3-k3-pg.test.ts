@@ -182,3 +182,15 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(H.statements.filter((t) => /FROM jev_window_text jt|jev_window_text WHERE room_day_id|FROM bench_window WHERE room_day_id/.test(t))).toEqual([]);
   });
 });
+
+(HAVE ? describe : describe.skip)("K3-3 scribe_replay_write refuses to copy a held-out session into scratch", () => {
+  it("an ENDED held-out session (and one with a held-out window placement): blind_room_day, 0 events read, no scratch graph; a clean ended session gets past the guard", async () => {
+    H.statements.length = 0;
+    for (const id of ["bs_blind", "bs_win"]) {
+      expect(await call("scribe_replay_write", { session_id: id }), id).toMatchObject({ ok: false, error: "blind_room_day", written: 0 });
+    }
+    expect(H.statements.filter((t) => /FROM bench_event/.test(t))).toEqual([]);
+    expect((await call("scribe_replay_write", { session_id: "bs_ok" })).error).not.toBe("blind_room_day");
+  });
+});
+
