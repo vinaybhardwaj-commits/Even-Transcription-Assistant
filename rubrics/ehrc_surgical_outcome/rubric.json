@@ -1,6 +1,6 @@
 {
   "id": "ehrc_surgical_outcome",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "title": "Surgical stay outcome label",
   "unit": "stay",
   "inputs": [
@@ -118,7 +118,7 @@
       "label"
     ],
     "escalate": "ask a medical reader when wound versus expected drainage, or staging versus a return to theatre, is the fork",
-    "engine_note": "engine llm_zdr, draft. 0.2.0: reader stay_record (stay key; theatre note, discharge, cdmss extract, outpatient records inside the window by the patient bridge). The model proposes; CODE decides: window class from the procedure keyword table, silence or no same-problem record is never positive, a negative code is negative unless planned staging is stated. Care-manager post-discharge questions are not read (cm_questions: not_read), so positive needs a same-problem record in the window with no complaint or better. Definition text above is unchanged from 0.1.0. 0.2.1 (PHI): evidence stores no note text: the model's quote is located in the source and only {item (closed enum), source, record_ref, offsets} are kept."
+    "engine_note": "engine llm_zdr, draft. 0.2.0: reader stay_record (stay key; theatre note, discharge, cdmss extract, outpatient records inside the window by the patient bridge). The model proposes; CODE decides: window class from the procedure keyword table, silence or no same-problem record is never positive, a negative code is negative unless planned staging is stated. Care-manager post-discharge questions are not read (cm_questions: not_read), so positive needs a same-problem record in the window with no complaint or better. Definition text above is unchanged from 0.1.0. 0.2.1 (PHI): evidence stores no note text: the model's quote is located in the source and only {item (closed enum), source, record_ref, offsets} are kept. 0.2.2 (PHI): record_ref is a salted hash of the row uid, never the uid."
   },
   "prompt": "prompt.json"
 }
