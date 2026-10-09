@@ -3,7 +3,7 @@
  * `engine=nemotron` read path of lib/diarize-segments.ts (epic #23 b). All values synthetic.
  */
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db: { calls: Array<{ q: string; vals: unknown[] }>; rows: unknown[] } = { calls: [], rows: [] };
 vi.mock("@/lib/db", () => ({
@@ -68,6 +68,21 @@ describe("segments read path: engine=nemotron", () => {
   beforeEach(() => {
     db.calls = [];
     db.rows = [];
+    vi.stubEnv("DIARIZE_NEMOTRON_SHADOW", "1");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("the shadow store is unreadable while DIARIZE_NEMOTRON_SHADOW is off or bad: 404 engine_disabled, no SQL", async () => {
+    for (const v of ["", "0", "enabled"]) {
+      vi.stubEnv("DIARIZE_NEMOTRON_SHADOW", v);
+      expect(await lookupSegments({ window_id: "bw_1", engine: "nemotron" }), v).toEqual({ ok: false, status: 404, error: "engine_disabled" });
+    }
+    expect(db.calls).toEqual([]);
+    // production's own store does not care about the flag
+    await lookupSegments({ window_id: "bw_1" });
+    expect(db.calls[0]!.q).toContain("FROM room_diarize_window d");
   });
 
   it("pickQuery: absent engine is unchanged; nemotron needs window_id; anything else is refused", () => {

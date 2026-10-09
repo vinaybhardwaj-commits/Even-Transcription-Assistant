@@ -12,6 +12,7 @@ const S = vi.hoisted(() => ({
   countExhausted: vi.fn(),
   recordIngest: vi.fn(),
   recordHeartbeat: vi.fn(),
+  releaseClaim: vi.fn(),
   signGetUrl: vi.fn(),
 }));
 vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
@@ -20,6 +21,7 @@ vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
   countExhausted: S.countExhausted,
   recordIngest: S.recordIngest,
   recordHeartbeat: S.recordHeartbeat,
+  releaseClaim: S.releaseClaim,
 }));
 vi.mock("@/lib/r2", () => ({ signGetUrl: S.signGetUrl }));
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no sql in a route test"); } }));
@@ -148,6 +150,19 @@ describe("GET /pending", () => {
   it("503 on a store fault", async () => {
     S.claimPending.mockRejectedValue(new Error("db down"));
     expect((await pending(req("/api/diarize/nemotron/pending?worker_id=w", { method: "GET" }))).status).toBe(503);
+  });
+
+  it("a clip that cannot be signed gives back EVERY claim of that call, and hands out no URL", async () => {
+    S.claimPending.mockResolvedValue([
+      { window_id: "bw_1", room_day_id: "rd_1", start_ms: 1000, end_ms: 901000, clip_r2_key: "clips/fake1.webm", attempts: 1 },
+      { window_id: "bw_2", room_day_id: "rd_1", start_ms: 2000, end_ms: 902000, clip_r2_key: "clips/fake2.webm", attempts: 2 },
+    ]);
+    S.signGetUrl.mockResolvedValueOnce("https://r2.test/signed").mockRejectedValueOnce(new Error("r2 down"));
+    S.releaseClaim.mockResolvedValue(undefined);
+    const r = await pending(req("/api/diarize/nemotron/pending?worker_id=box-t4-1", { method: "GET" }));
+    expect(r.status).toBe(503);
+    expect(await json(r)).toEqual({ ok: false, error: "clip_sign" });
+    expect(S.releaseClaim.mock.calls).toEqual([["box-t4-1", "bw_1"], ["box-t4-1", "bw_2"]]);
   });
 });
 

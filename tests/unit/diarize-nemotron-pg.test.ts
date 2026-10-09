@@ -161,6 +161,22 @@ describe.runIf(HAVE)("store: claim, lease and the attempt bound", () => {
     // bw_a has a row (done); bw_b was claimed alongside it but nothing was stored, so its expired lease is stolen.
     expect(await store.claimPending("box-2", 8)).toMatchObject([{ window_id: "bw_b", attempts: 2 }]);
   });
+
+  it("releaseClaim gives an unhanded claim back: a first claim vanishes, a later one steps back an attempt; another worker's is untouched", async () => {
+    await store.claimPending("box-1", 8); // bw_b and bw_a, attempts 1 each
+    await store.releaseClaim("box-2", "bw_b"); // not box-2's lease: nothing changes
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_claim`))[0]!.n).toBe(2);
+    await store.releaseClaim("box-1", "bw_b");
+    expect((await q<{ id: string }>(`SELECT window_id AS id FROM diarize_nemotron_claim ORDER BY 1`)).map((r) => r.id)).toEqual(["bw_a"]);
+    expect(await store.claimPending("box-1", 8)).toMatchObject([{ window_id: "bw_b", attempts: 1 }]);
+    expireLeases();
+    expect(await store.claimPending("box-2", 1)).toMatchObject([{ window_id: "bw_b", attempts: 2 }]);
+    await store.releaseClaim("box-2", "bw_b");
+    const c = (await q<{ attempts: number; live: boolean }>(`SELECT attempts, lease_until > now() AS live FROM diarize_nemotron_claim WHERE window_id = 'bw_b'`))[0]!;
+    expect(c).toEqual({ attempts: 1, live: false });
+    // offered again at once, and the refunded attempt is not counted twice
+    expect(await store.claimPending("box-2", 1)).toMatchObject([{ window_id: "bw_b", attempts: 2 }]);
+  });
 });
 
 describe.runIf(HAVE)("store: ingest", () => {
@@ -217,6 +233,29 @@ describe.runIf(HAVE)("store: ingest", () => {
     const row = (await q(`SELECT status, error_code FROM diarize_nemotron_window`))[0]!;
     expect(row).toEqual({ status: "failed", error_code: "decode_failed" });
     expect(await store.claimPending("box-1", 1)).toEqual([]);
+  });
+
+  it("a FINAL failure whose row is refused (room-day mismatch) keeps its lease: nobody else can take the window and burn an attempt", async () => {
+    await store.claimPending("box-1", 1);
+    expect(await ingest({ room_day_id: "rd_other", status: "failed", error_code: "decode_failed", turns: [], clip_sha256: null, audio_ms: 0 }))
+      .toEqual({ result: "room_day_mismatch" });
+    const c = (await q<{ live: boolean; done: boolean; attempts: number; last_error_code: string }>(
+      `SELECT lease_until > now() AS live, done_at IS NOT NULL AS done, attempts, last_error_code FROM diarize_nemotron_claim`))[0]!;
+    expect(c).toEqual({ live: true, done: false, attempts: 1, last_error_code: "decode_failed" });
+    expect(await store.claimPending("box-2", 8)).toEqual([]);
+    // the holder can still post the corrected final row inside its lease
+    expect(await ingest({ status: "failed", error_code: "decode_failed", turns: [], clip_sha256: null, audio_ms: 0 })).toMatchObject({ result: "stored" });
+  });
+
+  it("an insert refused because the key already has a row still closes the claim", async () => {
+    await store.claimPending("box-1", 1);
+    expect(await ingest()).toMatchObject({ result: "stored" });
+    pg.exec(`UPDATE diarize_nemotron_claim SET done_at = NULL, lease_until = now() + interval '10 minutes';`);
+    expect(await ingest()).toEqual({ result: "duplicate" });
+    expect((await q<{ done: boolean }>(`SELECT done_at IS NOT NULL AS done FROM diarize_nemotron_claim`))[0]!.done).toBe(true);
+    pg.exec(`UPDATE diarize_nemotron_claim SET done_at = NULL, lease_until = now() + interval '10 minutes';`);
+    expect(await ingest({ turns: [[0, 4211, "spk0"], [3900, 9100, "spk1"]] })).toEqual({ result: "conflict" });
+    expect((await q<{ done: boolean }>(`SELECT done_at IS NOT NULL AS done FROM diarize_nemotron_claim`))[0]!.done).toBe(true);
   });
 
   it("the third failure is final: a failed row, no fourth attempt", async () => {

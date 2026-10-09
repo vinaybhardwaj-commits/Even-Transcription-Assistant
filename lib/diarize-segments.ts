@@ -30,6 +30,7 @@
  * `window_id` is supported for it. With no `engine`, every answer is exactly what it was.
  */
 import { sql } from "@/lib/db";
+import { nemotronShadowEnabled } from "@/lib/diarize-engine";
 
 export const DIARIZE_SOURCE_DEFAULT = "eta-diarize";
 export const SESSION_WINDOW_LIMIT_DEFAULT = 100;
@@ -116,7 +117,7 @@ export type SegmentEngine = (typeof SEGMENT_ENGINES)[number];
 
 export type SegmentsLookup =
   | { ok: true; payload: SegmentsPayload }
-  | { ok: false; status: 400 | 404; error: "one_id_required" | "bad_id" | "bad_engine" | "engine_needs_window_id" | "not_found" };
+  | { ok: false; status: 400 | 404; error: "one_id_required" | "bad_id" | "bad_engine" | "engine_needs_window_id" | "not_found" | "engine_disabled" };
 
 // ---------------------------------------------------------------------------
 // PURE shaping
@@ -394,6 +395,14 @@ export async function lookupSegments(q: SegmentsQuery): Promise<SegmentsLookup> 
   if (!pick.ok) return pick;
 
   if (pick.engine === "nemotron") {
+    // the shadow store is readable only while DIARIZE_NEMOTRON_SHADOW is on; a bad flag value reads as off (fail closed)
+    let on = false;
+    try {
+      on = nemotronShadowEnabled();
+    } catch {
+      on = false;
+    }
+    if (!on) return { ok: false, status: 404, error: "engine_disabled" };
     const rows = (await sql`
       SELECT n.window_id, w.session_id, n.room_day_id, w.source_mic, n.status, n.received_at,
              w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json

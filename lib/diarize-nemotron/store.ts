@@ -78,6 +78,22 @@ export async function claimPending(workerId: string, limit: number): Promise<Cla
   }));
 }
 
+/**
+ * Give back a claim this worker took but was never handed (the clip URL could not be signed): the attempt is
+ * refunded and the lease released. A first claim is deleted (attempts cannot go below 1); a later one steps back.
+ * Only a live, unfinished lease held by `workerId` is touched.
+ */
+export async function releaseClaim(workerId: string, windowId: string): Promise<void> {
+  await sql`
+    DELETE FROM diarize_nemotron_claim
+     WHERE window_id = ${windowId} AND worker_id = ${workerId} AND done_at IS NULL AND lease_until > now() AND attempts = 1
+  `;
+  await sql`
+    UPDATE diarize_nemotron_claim SET attempts = attempts - 1, lease_until = now()
+     WHERE window_id = ${windowId} AND worker_id = ${workerId} AND done_at IS NULL AND lease_until > now() AND attempts > 1
+  `;
+}
+
 /** Windows whose claims used every attempt without a stored row. Reported on every /pending answer so a stuck window is never silent. */
 export async function countExhausted(): Promise<number> {
   const rows = (await sql`
@@ -171,7 +187,12 @@ async function maybeLabel(b: IngestBody): Promise<"written" | "skipped" | "faile
 /** Store a result row (ok, empty, or a TERMINAL failure) and close the claim. */
 async function storeRow(b: IngestBody, d: Derived, payloadSha: string): Promise<IngestOutcome> {
   const id = await insertRow(b, d, payloadSha);
-  if (id === null) return explainNoInsert(b, payloadSha);
+  if (id === null) {
+    const why = await explainNoInsert(b, payloadSha);
+    // a row already holds the key (same or different payload): the window is done, never re-offered
+    if (why.result === "duplicate" || why.result === "conflict") await finishClaim(b.window_id);
+    return why;
+  }
   await finishClaim(b.window_id);
   return { result: "stored", id, label: await maybeLabel(b) };
 }
@@ -190,16 +211,20 @@ export async function recordIngest(b: IngestBody, d: Derived, payloadSha: string
   if (b.status !== "failed") return storeRow(b, d, payloadSha);
 
   const code = b.error_code!;
+  // A final failure (terminal code, or the last attempt) keeps the lease until storeRow decides: if that insert is
+  // refused (a room-day mismatch), the claim is not left released-but-unfinished for another worker to burn an attempt on.
+  const terminal = TERMINAL_ERROR_CODES.has(code);
   const claim = (await sql`
     UPDATE diarize_nemotron_claim
-       SET lease_until = now(), last_error_code = ${code},
+       SET lease_until = CASE WHEN ${terminal}::boolean OR attempts >= ${MAX_ATTEMPTS}::int THEN lease_until ELSE now() END,
+           last_error_code = ${code},
            failure_history = failure_history || jsonb_build_array(jsonb_build_object('at', now(), 'worker_id', ${b.worker_id}::text, 'error_code', ${code}::text))
      WHERE window_id = ${b.window_id} AND worker_id = ${b.worker_id} AND done_at IS NULL AND lease_until > now()
     RETURNING attempts
   `) as Array<{ attempts: number }>;
   if (!claim[0]) return { result: "no_live_claim" };
   const attempts = Number(claim[0].attempts);
-  if (TERMINAL_ERROR_CODES.has(code) || attempts >= MAX_ATTEMPTS) return storeRow(b, d, payloadSha);
+  if (terminal || attempts >= MAX_ATTEMPTS) return storeRow(b, d, payloadSha);
   return { result: "failure_recorded", attempts };
 }
 
