@@ -14,12 +14,15 @@ import { clipKeyOf, findClip, type ConsultIndexRow } from "@/lib/consult-index";
 export type ClipRefusal = { ok: false; error: "blind_room_day" | "consult_index_unavailable" | "consult_index_integrity" | "consult_not_in_index" | "consult_voice_isolated" | "already_transcribed" | "audio_unreadable"; track?: Omit<RebTrackRef, "segments"> };
 export type ClipOk = { ok: true; row: ConsultIndexRow; key: string; content_type: string };
 
-/** (room, IST date) of a consult from eta_encounter_windows, or null when the database does not know the uid. A metadata lookup only. */
+/**
+ * (room, IST date) of a consult from eta_encounter_windows, or null when the database does not know the uid. A metadata lookup only. consult_uid is NOT unique (one row per machine): ALL rows are read and, if ANY is on
+ * a held-out pair, THAT pair is returned (so the caller's held-out check fires whatever order the rows come in); otherwise the first row's. (S8C-1)
+ */
 export async function windowPairOf(consultUid: string): Promise<{ room_id: string; ist_date: string } | null> {
   const r = (await sql`
-    SELECT room_id, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date FROM eta_encounter_windows WHERE consult_uid = ${consultUid}::text AND room_id IS NOT NULL LIMIT 1
+    SELECT room_id, (t_open AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date FROM eta_encounter_windows WHERE consult_uid = ${consultUid}::text AND room_id IS NOT NULL
   `) as Array<{ room_id: string; ist_date: string }>;
-  return r[0] ?? null;
+  return r.find((x) => isBlindRoomDay(x.ist_date, x.room_id)) ?? r[0] ?? null;
 }
 
 export async function preflightClip(consultUid: string): Promise<ClipOk | ClipRefusal> {
