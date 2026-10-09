@@ -81,7 +81,8 @@ describe("segments read path: engine=nemotron", () => {
     }
     expect(db.calls).toEqual([]);
     // production's own store does not care about the flag
-    await lookupSegments({ window_id: "bw_1" });
+    // REL2-R2: these pin the SQL of each store, not the blind guard (voice-blind.test.ts pins the guard on both): the guard is off here
+    await lookupSegments({ window_id: "bw_1" }, { blindGuard: false });
     expect(db.calls[0]!.q).toContain("FROM room_diarize_window d");
   });
 
@@ -127,14 +128,14 @@ describe("segments read path: engine=nemotron", () => {
 
   it("lookupSegments reads the shadow table only for engine=nemotron, newest ok/empty row", async () => {
     db.rows = [];
-    expect(await lookupSegments({ window_id: "bw_1", engine: "nemotron" })).toEqual({ ok: false, status: 404, error: "not_found" });
+    expect(await lookupSegments({ window_id: "bw_1", engine: "nemotron" }, { blindGuard: false })).toEqual({ ok: false, status: 404, error: "not_found" }); // REL2-R2: guard off, see above
     expect(db.calls).toHaveLength(1);
     expect(db.calls[0]!.q).toContain("FROM diarize_nemotron_window n");
     expect(db.calls[0]!.q).toContain("n.status IN ('ok', 'empty')");
     expect(db.calls[0]!.q).toMatch(/ORDER BY n\.received_at DESC/);
     expect(db.calls[0]!.q).not.toContain("room_diarize_window");
     db.calls = [];
-    await lookupSegments({ window_id: "bw_1" });
+    await lookupSegments({ window_id: "bw_1" }, { blindGuard: false });
     expect(db.calls[0]!.q).toContain("FROM room_diarize_window d");
     expect(db.calls[0]!.q).not.toContain("diarize_nemotron_window");
   });

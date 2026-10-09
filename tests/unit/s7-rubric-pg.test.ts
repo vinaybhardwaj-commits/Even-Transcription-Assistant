@@ -1058,6 +1058,33 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     });
   });
 
+  it("Q2-4 — a stored reserved_calls that is not a clean integer is read defensively by BOTH SQL copies (dayUsage, insertJobCapped): non-numeric = the whole per-job ceiling, a huge figure is capped at it, a number-like string is that number; absent = the floor", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
+    await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    const run = { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["z1"], limit: 200 };
+    const queued = async (reserved: unknown, absent = false) => {
+      await pg.exec(`DELETE FROM scribe_job;`);
+      const args: Record<string, unknown> = { rubric_id: "consult_surgical_pitch" };
+      if (!absent) args.reserved_calls = reserved;
+      await pg.sql`INSERT INTO scribe_job (id, kind, args, actor, status) VALUES ('job_q24', 'rubric_bench', ${JSON.stringify(args)}::jsonb, 'mcp:t', 'queued')`;
+    };
+    try {
+      for (const [v, want] of [["abc", 600], ["", 600], [-5, 600], [1.5, 600], [null, 600], [{}, 600], [999_999_999_999, 600], [99_999, 600], ["300", 300], [450, 450], [12, 12]] as Array<[unknown, number]>) {
+        await queued(v);
+        expect((await C.dayUsage()).queued, `dayUsage ${JSON.stringify(v)}`).toBe(want);
+        // the store copy, alone: under a day cap of want + 500 the insert of a 500-call run passes; one call lower it is refused
+        expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args: run, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: String(want + 500) })), `store pass ${JSON.stringify(v)}`).not.toBeNull();
+        await pg.exec(`DELETE FROM scribe_job WHERE kind = 'rubric_run';`);
+        expect(await insertJobCapped({ id: newJobId(), kind: "rubric_run", args: run, actor: "mcp:t" }, C.cappedGuard(500, { RUBRIC_LLM_DAILY_CALL_CAP: String(want + 499) })), `store refuse ${JSON.stringify(v)}`).toBeNull();
+      }
+      await queued(null, true);
+      expect((await C.dayUsage()).queued).toBe(60); // absent: the fixed floor
+    } finally {
+      await pg.exec(`DELETE FROM scribe_job; DELETE FROM rubric_run;`);
+    }
+  });
+
   it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
     const C = await import("@/lib/rubrics/llm-cap");
     const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");

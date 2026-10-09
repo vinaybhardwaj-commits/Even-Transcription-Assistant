@@ -98,6 +98,34 @@ describe("scribe_diarize_segments and its /api twin (one guarded lookupSegments)
   });
 });
 
+describe("REL2-R2: engine=nemotron keeps BOTH behaviours (main 7a66f27's engine_disabled and our blind / unplaced guard)", () => {
+  const NEMO = /FROM diarize_nemotron_window n/;
+  it("flag off: engine_disabled 404 with ZERO reads (not even the placement); flag on: a held-out or unplaced window is refused BEFORE the shadow store is read, an ordinary one is read", async () => {
+    const saved = process.env.DIARIZE_NEMOTRON_SHADOW;
+    try {
+      delete process.env.DIARIZE_NEMOTRON_SHADOW;
+      answers = [PLACE_BLIND];
+      expect(await D.lookupSegments({ window_id: "w1", engine: "nemotron" }, { blindGuard: true })).toEqual({ ok: false, status: 404, error: "engine_disabled" });
+      expect(statements).toEqual([]);
+      process.env.DIARIZE_NEMOTRON_SHADOW = "1";
+      expect(await D.lookupSegments({ window_id: "w1", engine: "nemotron" }, { blindGuard: true })).toEqual({ ok: false, status: 403, error: "blind_room_day" });
+      expect(statements.filter((x) => NEMO.test(x.text))).toEqual([]);
+      statements.length = 0; answers = [PLACE_NONE];
+      expect(await D.lookupSegments({ window_id: "w1", engine: "nemotron" }, { blindGuard: true })).toEqual({ ok: false, status: 403, error: "window_unplaced" });
+      expect(statements.filter((x) => NEMO.test(x.text))).toEqual([]);
+      statements.length = 0; answers = [PLACE_OK];
+      await D.lookupSegments({ window_id: "w1", engine: "nemotron" }, { blindGuard: true });
+      expect(statements.filter((x) => NEMO.test(x.text))).toHaveLength(1);
+      // the tool path (guarded by default)
+      statements.length = 0; answers = [PLACE_BLIND];
+      expect(await call("scribe_diarize_segments", { window_id: "w1", engine: "nemotron" })).toEqual({ segments: null, error: "blind_room_day" });
+      expect(statements.filter((x) => NEMO.test(x.text))).toEqual([]);
+    } finally {
+      if (saved === undefined) delete process.env.DIARIZE_NEMOTRON_SHADOW; else process.env.DIARIZE_NEMOTRON_SHADOW = saved;
+    }
+  });
+});
+
 describe("GET /api/diarize-segments (the MCP-bearer twin)", () => {
   it("a held-out window is 403 blind_room_day and an unplaced one window_unplaced, no-store, with zero segment reads; an ordinary window is 200", async () => {
     process.env.SCRIBE_MCP_TOKEN = "tok-read";

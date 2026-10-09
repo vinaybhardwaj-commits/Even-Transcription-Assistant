@@ -233,6 +233,18 @@ describe("S7-2-R2 — follow-up fields (minor only) and the call ceiling", () =>
     expect(CAP.reservationFor("rubric_run", { rubric_id: "encounter_vs_record", unit_keys: ["a", "b", "c"] })).toBe(6); // units x 2 attempts (G74)
     expect(CAP.reservationFor("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" })).toBe(80); // worst case: 40 windows x 2 attempts
   });
+  it("Q2-3 / Q2-4 reservationFor's reserved_calls branch: a stored positive integer is the reservation (capped at the per-job ceiling); absent = the fixed floor; PRESENT but not a positive integer = the whole per-job ceiling", async () => {
+    const CAP = await import("@/lib/rubrics/llm-cap");
+    const b = (extra: Record<string, unknown>) => CAP.reservationFor("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "gold", ...extra });
+    expect(b({ reserved_calls: 600 })).toBe(600);
+    expect(b({ reserved_calls: 100 })).toBe(100); // not the fixed 60: the stored figure
+    expect(b({ reserved_calls: 7 })).toBe(7); // below the floor stays what the submit computed
+    expect(b({})).toBe(60); // absent: the floor
+    expect(b({ reserved_calls: 999_999 })).toBe(600); // capped at the ceiling
+    for (const bad of ["abc", "", "300", 0, -5, 1.5, null, Number.NaN, {}, [3]]) expect(b({ reserved_calls: bad }), JSON.stringify(bad)).toBe(600);
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "250";
+    try { expect(b({ reserved_calls: "abc" })).toBe(250); expect(b({ reserved_calls: 400 })).toBe(250); } finally { delete process.env.RUBRIC_LLM_JOB_CALL_CAP; }
+  });
 });
 
 describe("S7-2-R2 R1..R8", () => {
