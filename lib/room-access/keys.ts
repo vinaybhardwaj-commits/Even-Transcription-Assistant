@@ -34,6 +34,9 @@ export function trimmedAudioKey(windowId: string, runId: string): string {
 /** The Sarvam result object of a job. */
 export const sarvamResultKey = (jobId: string): string => `${MCP_SARVAM_PREFIX}${jobId}.json`;
 
+/** `consult-clips/<ist_date>/<room_slug>/<consult_uid>/consult.flac` (the CONSULT cutter's clip). The caller has validated every part. */
+export const consultClipKey = (istDate: string, roomSlug: string, consultUid: string): string => `${CONSULT_CLIPS_PREFIX}${istDate}/${roomSlug}/${consultUid}/consult.flac`;
+
 export const isBenchKey = (key: string): boolean => key.startsWith(BENCH_PREFIX);
 /** True for any key under reb/ (never writable, readable only in the consult manifest shape: see sarvam-lab). */
 export const isRebKey = (key: string): boolean => key.startsWith(REB_PREFIX);
