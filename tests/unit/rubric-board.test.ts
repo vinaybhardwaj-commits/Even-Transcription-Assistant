@@ -137,6 +137,19 @@ describe("the board", () => {
     resultRows = Array.from({ length: 5001 }, (_, i) => mk(i));
     expect(await buildBoard({ ...ARGS, by: "room" })).toMatchObject({ ok: false, error: "board_too_large" });
   });
+  it("V1 — more than 1500 signed records is board_too_large with ZERO warehouse calls; exactly 1500 still makes the one SELECT", async () => {
+    const MAX = REC.BOARD_MAX_UIDS;
+    expect(MAX).toBe(1500);
+    resultRows = Array.from({ length: MAX + 1 }, (_, i) => mk(i + 1));
+    windowRows = Array.from({ length: MAX + 1 }, (_, i) => win(i + 1));
+    expect(await buildBoard({ ...ARGS, by: "doctor", min_n: 3 })).toMatchObject({ ok: false, error: "board_too_large" });
+    expect(warehouse).toEqual([]); // refused before the warehouse is asked
+    resultRows = resultRows.slice(0, MAX);
+    windowRows = windowRows.slice(0, MAX);
+    const ok = await buildBoard({ ...ARGS, by: "doctor", min_n: 3 });
+    expect(ok.ok).toBe(true);
+    expect(warehouse).toHaveLength(1);
+  });
   it("the board never fetches evidence (no lab-store read) and reads no transcript text", () => {
     const src = readFileSync("lib/rubrics/board.ts", "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(/readEvidence|labStore|include_text|payload|transcript/.test(src)).toBe(false);
