@@ -27,11 +27,13 @@
  *
  * ALL SQL IS INFERRED. The read fails safe to empty with a logged reason — never a 500.
  */
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { respondOk, respondError } from "@/lib/respond";
+import { findBenchSession } from "@/lib/bench";
+import { isBlindBenchSession } from "@/lib/bench-blind-guard";
 import {
   decodeEmbedding,
   sweepThreshold,
@@ -62,6 +64,8 @@ export async function GET(req: NextRequest) {
   if (!(await adminOrSecret(req))) return respondError("AUTH_REQUIRED", "admin or migration secret required");
 
   const sessionId = req.nextUrl.searchParams.get("session_id") || CALIBRATION_SESSION_ID;
+  const session = await findBenchSession(sessionId);
+  if (session && isBlindBenchSession(session)) return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
   const errors: string[] = [];
   let rows: Array<{ window_id: string; speakers_json: unknown }> = [];
 
