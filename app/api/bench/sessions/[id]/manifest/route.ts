@@ -8,7 +8,7 @@ import { respondError } from "@/lib/respond";
 import { benchAdminGuard, findBenchSession, listBenchChunks, listBenchEvents, splitChunksBySource } from "@/lib/bench";
 import { chunkBasename } from "@/lib/bench-dual";
 import { signGetUrl } from "@/lib/r2";
-import { isBlindBenchSession } from "@/lib/bench-blind-guard";
+import { hasBlindChunk, isBlindBenchSession } from "@/lib/bench-blind-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +26,8 @@ export async function GET(
   if (!session) return respondError("NOT_FOUND", "session_not_found");
   if (isBlindBenchSession(session)) return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
   const all = await listBenchChunks(id);
+  // Chunks carry their own times: refuse before anything is built if any sits on a blind IST day.
+  if (hasBlindChunk(session.room_id, all)) return NextResponse.json({ ok: false, error: "blind_room_day" }, { status: 403 });
   const { primary: chunks, backup: backupChunks } = splitChunksBySource(all);
   let events: Array<{ id: string; kind: string; at: string; brain_status: string; payload: unknown }> = [];
   try {

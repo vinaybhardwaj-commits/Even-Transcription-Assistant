@@ -18,3 +18,8 @@ function istDate(at: string | Date | null | undefined): string | null {
 export function isBlindBenchSession(s: { room_id: string; started_at: string | Date; ended_at?: string | Date | null }): boolean {
   return [istDate(s.started_at), istDate(s.ended_at)].some((d) => d !== null && isBlindRoomDay(d, s.room_id));
 }
+
+/** True when any chunk's own start falls on a blind IST day in the session's room (a chunk can run past the session's stamped ended_at). */
+export function hasBlindChunk(roomId: string, chunks: ReadonlyArray<{ started_at: string | Date }>): boolean {
+  return chunks.some((c) => { const d = istDate(c.started_at); return d !== null && isBlindRoomDay(d, roomId); });
+}
