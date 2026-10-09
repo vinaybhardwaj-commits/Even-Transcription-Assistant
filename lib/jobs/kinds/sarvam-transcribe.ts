@@ -152,7 +152,7 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
     if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
     const pre = await preflightClip(a.consult_uid);
     if (!pre.ok) return failWith(jobError(pre.error));
-    return nextStep(STEPS.init, { clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult" });
+    return nextStep(STEPS.init, { clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", ...(typeof pre.row.minutes === "number" && Number.isFinite(pre.row.minutes) ? { mirror_minutes: pre.row.minutes } : {}) });
   }
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   const rows = (await sql`SELECT audio_object_key FROM encounter WHERE id = ${a.encounter_id}::text LIMIT 1`) as Array<{ audio_object_key: string | null }>;
@@ -204,8 +204,11 @@ async function initStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
   const bytes = await getObjectBytes(clipKey);
   if (!bytes) return failWith(jobError("clip_missing_in_r2"));
   // F2: the duration is MEASURED from the audio's own container. A NULL or understated database / client value cannot get past this.
-  const ms = measureAudioMs(bytes);
-  if (ms === null) return failWith(jobError("duration_unknown"));
+  const measured = measureAudioMs(bytes);
+  if (measured === null) return failWith(jobError("duration_unknown"));
+  // S8C-2: a consult clip is never shorter than the mirror row says (max of the container, the size floor in measureAudioMs and the mirror's minutes x 60)
+  const mirrorMs = typeof ctx.progress.mirror_minutes === "number" && Number.isFinite(ctx.progress.mirror_minutes) ? ctx.progress.mirror_minutes * 60_000 : 0;
+  const ms = Math.max(measured, mirrorMs);
   if (ms > JOIN_MAX_MS) return failWith(jobError("window_too_long"));
   const minutes = ms / 60_000;
   // S8A4: an English-track job makes TWO Sarvam passes over the audio, so it asks the cap for both
