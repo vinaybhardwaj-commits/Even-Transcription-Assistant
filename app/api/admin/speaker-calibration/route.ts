@@ -86,14 +86,14 @@ export async function GET(req: NextRequest) {
       SELECT d.window_id, d.speakers_json, rd.ist_date::text AS ist_date, rd.room_id
         FROM room_diarize_window d
         JOIN bench_window w ON w.id = d.window_id
-        LEFT JOIN room_day rd ON rd.id = w.room_day_id
+        JOIN room_day rd ON rd.id = w.room_day_id
        WHERE w.session_id = ${sessionId}
          AND d.state = 'ok'
-         -- a blind (held-out) room-day's windows are never read, decided from the window's OWN room_day
+         -- inner join: a window with no room_day cannot be judged, so it is not read. A blind (held-out) room-day's windows are never read, decided from the window's OWN room_day
          AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
        ORDER BY w.start_ms ASC
     `) as typeof rows;
-    rows = rows.filter((r) => !isBlindRoomDay(r.ist_date, r.room_id)); // belt and braces over the SQL exclusion
+    rows = rows.filter((r) => !!r.ist_date && !!r.room_id && !isBlindRoomDay(r.ist_date, r.room_id)); // belt and braces: a window with no room_day is excluded too
   } catch (e) {
     const msg = `[speaker-calibration] read failed: ${String((e as Error)?.message ?? e).slice(0, 200)} — degraded to empty`;
     console.log(msg);

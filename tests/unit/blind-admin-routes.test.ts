@@ -106,6 +106,19 @@ describe("speaker-calibration fails closed", () => {
   });
 });
 
+describe("speaker-calibration NULL room_day", () => {
+  it("a window with no room_day is excluded: inner join in SQL and dropped by the code filter", async () => {
+    mk("room_other", "2026-10-08T05:00:00Z");
+    windowRows = [
+      { window_id: "w1", speakers_json: [], ist_date: null, room_id: null },
+      { window_id: "w2", speakers_json: [], ist_date: "2026-10-08", room_id: BR },
+    ];
+    const body = await (await callCal()).json();
+    expect(body.windows_with_results).toBe(1);
+    expect(windowQueries[0]!.text).not.toMatch(/LEFT JOIN room_day/);
+  });
+});
+
 describe("bench manifest", () => {
   it("ended_at on a blind IST day (started the day before): 403, no chunk read", async () => {
     mk(BR, `${dayBefore}T05:00:00Z`, `${BD}T05:00:00Z`);
