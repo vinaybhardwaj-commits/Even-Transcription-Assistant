@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
+import { callsLeft, capRefusal, isLlmRubric } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun } from "@/lib/rubrics/registry";
 import { evaluateUnit } from "@/lib/rubrics/engines";
 import { compareItem, labelReport, parseBenchSet, scoreBench, type BenchSet } from "@/lib/rubrics/bench";
@@ -37,6 +38,7 @@ export const rubricBenchKind: JobKind = {
   name: RUBRIC_BENCH_KIND,
   first: "load",
   scope: "invoke",
+  precheck: async (args) => { const m = await capRefusal(RUBRIC_BENCH_KIND, args); if (m) throw new JobArgsError(m); },
   parseArgs: (raw) => parseRubricBenchArgs(raw) as unknown as Record<string, unknown>,
   dedupeOn: (args) => [["rubric_id", String(args.rubric_id)], ["set", String(args.set ?? "gold")]],
   async run(ctx: StepContext) {
@@ -105,16 +107,25 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   let idx = num(ctx.progress.idx);
   const deadline = Date.now() + rubricTiming.evaluateStepMs;
   const end = Math.min(set.items.length, idx + rubricTiming.batchUnits);
+  const llm = isLlmRubric(r.id);
+  let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
+  let left = llm ? await callsLeft(set.items.length, made) : Number.POSITIVE_INFINITY;
   while (idx < end && Date.now() < deadline) {
+    if (llm && left <= 0) { // G71: at the cap, the remaining items are unscored (reason llm_cap) and no more calls are made
+      for (; idx < set.items.length; idx++) { compared[idx] = compareItem(set.items[idx]!, null); capSkipped += 1; }
+      break;
+    }
     const item = set.items[idx]!;
     // a DB / R2 error throws (the step is retried); a unit the engine could not score, or that is held out or unresolved, comes back skipped / failed and fails every expected field
-    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true } : {}) });
+    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true, room_id: item.room_id ?? null, ist_date: item.ist_date ?? null } : {}) });
     // a skipped unit with a score is a scored "nothing to score" (no surgery recommended, unscorable tape): it can be right or wrong against the gold
     const score: Record<string, unknown> | null = out.status === "ok" || out.status === "empty" || (out.status === "skipped" && out.score) ? (out.score ?? null) : null;
     compared[idx] = compareItem(item, score);
+    made += out.calls ?? 0;
+    left -= out.calls ?? 0;
     idx += 1;
   }
-  return nextStep(idx >= set.items.length ? "finish" : "evaluate", { ...ctx.progress, idx, compared });
+  return nextStep(idx >= set.items.length ? "finish" : "evaluate", { ...ctx.progress, idx, compared, llm_calls: made, skipped_cap: capSkipped });
 }
 
 async function finishStep(ctx: StepContext): Promise<StepOutcome> {
@@ -129,5 +140,5 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   const labelled = labelReport(setName, report, { excerpt }) as { metric: string; threshold: number | null; passed: boolean | null; human_gold?: boolean };
   const reportKey = await writeEvidence(r.id, r.version, `bench-${runId}`, { rubric_id: r.id, version: r.version, run_id: runId, status_at_run: r.status, population: (r.definition as { bench_population?: string } | undefined)?.bench_population ?? null, ...labelReport(setName, report, { excerpt }), items_detail: compared });
   await finishRun({ run_id: runId, units_ok: compared.length - report.unscored, units_failed: report.unscored });
-  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, set: setName, metric: labelled.metric, value: report.value, threshold: labelled.threshold, passed: labelled.passed, n: report.items, items: report.items, fields: report.fields, unscored: report.unscored, report_key: reportKey, status_at_run: r.status });
+  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, set: setName, metric: labelled.metric, value: report.value, threshold: labelled.threshold, passed: labelled.passed, n: report.items, items: report.items, fields: report.fields, unscored: report.unscored, report_key: reportKey, status_at_run: r.status, llm_calls: num(ctx.progress.llm_calls), skipped_llm_cap: num(ctx.progress.skipped_cap) });
 }

@@ -81,6 +81,7 @@ export async function submitJob(input: {
     const open = await findOpenJob(kind.name, match);
     if (open) return { ...open, deduped: true };
   }
+  await kind.precheck?.(args); // throws JobArgsError: a job over a cost ceiling never queues
   const job = await insertJob({ id: newJobId(), kind: kind.name, args, actor: input.actor });
   if (input.origin) kickRunner(input.origin);
   return job;

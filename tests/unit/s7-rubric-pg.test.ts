@@ -425,7 +425,8 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]); // no row without a room and date; none for the blind day
       expect(rows[0]).toMatchObject({ status: "ok", lab: true, score: { distress: "low", uptake_codes: ["accept"] } });
       expect(JSON.stringify(rows)).not.toMatch(/alpha|bravo|charlie/); // no transcript text in the table
-      expect(JSON.parse(mem.get("rubric/consult_chair_affect/1.1.0/enc1@m1.json")!).quotes ?? JSON.parse(mem.get("rubric/consult_chair_affect/1.1.0/enc1@m1.json")!).evidence.quotes.length).toBeTruthy();
+      const evKey = `rubric/consult_chair_affect/1.1.0/${"enc1@m1"}.json`; // (built, so no literal reads as an email address)
+      expect(JSON.parse(mem.get(evKey)!).quotes ?? JSON.parse(mem.get(evKey)!).evidence.quotes.length).toBeTruthy();
       expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
 
       // bench: gold from the lab store (JSONL), Meet text from the lab store, no rubric_result rows
@@ -487,9 +488,9 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     try {
       const jl = (rows: unknown[]) => rows.map((x) => JSON.stringify(x)).join("\n") + "\n";
       mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([
-        { unit_key: "hv-a", unit_kind: "excerpt", expected: { surgery_recommended: true, recommendation_kind: "surgery" } },
-        { unit_key: "hv-b", unit_kind: "excerpt", expected: { surgery_recommended: false, recommendation_kind: "no_surgery" } },
-        { unit_key: "hv-c", unit_kind: "excerpt", expected: { surgery_recommended: false } },
+        { unit_key: "hv-a", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: true, recommendation_kind: "surgery" } },
+        { unit_key: "hv-b", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: false, recommendation_kind: "no_surgery" } },
+        { unit_key: "hv-c", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: false } },
       ]));
       mem.set("rubric/bench/consult_surgical_pitch/text/hv-a.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
       mem.set("rubric/bench/consult_surgical_pitch/text/hv-b.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed, just medicines." }] }));
@@ -506,7 +507,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(seen.every((u) => /EXCERPT of a consultation/.test(u))).toBe(true);
       expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(0);
       // an excerpt unit is never run outside a bench, and a mixed set is not a set
-      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([{ unit_key: "hv-a", unit_kind: "excerpt", expected: { surgery_recommended: true } }, { unit_key: "enc1@m1", unit_kind: "consult", expected: { surgery_recommended: true } }]));
+      mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", jl([{ unit_key: "hv-a", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: true } }, { unit_key: "enc1@m1", unit_kind: "consult", expected: { surgery_recommended: true } }]));
       const bad = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
       expect(bad.job.status).toBe("failed");
       expect(String(bad.job.error)).toMatch(/^bench_set_missing/);
@@ -520,7 +521,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     let calls = 0;
     LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
     try {
-      const rows = [{ unit_key: "hv-a", unit_kind: "excerpt", expected: { surgery_recommended: false } }].map((x) => JSON.stringify(x)).join("\n") + "\n";
+      const rows = [{ unit_key: "hv-a", unit_kind: "excerpt", room_id: "r1", ist_date: "2026-10-08", expected: { surgery_recommended: false } }].map((x) => JSON.stringify(x)).join("\n") + "\n";
       mem.set("rubric/bench/consult_surgical_pitch/text/hv-a.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed." }] }));
       for (const set of ["gold", "grokbot_agreement"] as const) {
         mem.set(`rubric/bench/consult_surgical_pitch/${set === "gold" ? "gold" : set}.jsonl`, rows);
@@ -534,6 +535,26 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(ok.job).toMatchObject({ status: "done", result: { metric: "accuracy_vs_V_on_excerpts", n: 1 } });
       expect(calls).toBe(1);
     } finally {
+      LLM.setRubricChatForTests(null);
+    }
+  });
+
+  it("S71-R4 G71 — a running llm job STOPS at the ceiling: the remaining items are unscored (reason llm_cap), no further model call", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    const saved = process.env.RUBRIC_LLM_JOB_CALL_CAP;
+    process.env.RUBRIC_LLM_JOB_CALL_CAP = "2";
+    try {
+      const rows = ["g1", "g2", "g3", "g4"].map((k) => JSON.stringify({ unit_key: k, expected: { surgery_recommended: false } })).join("\n") + "\n";
+      mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", rows);
+      for (const k of ["g1", "g2", "g3", "g4"]) mem.set(`rubric/bench/consult_surgical_pitch/text/${k}.json`, JSON.stringify({ lines: [{ t_s: 1, speaker: "doctor", text: "hello" }] }));
+      // planned (4) exceeds the per-job ceiling (2) at SUBMIT in the tool path; here the job is inserted directly, as an already-queued job, to exercise the mid-run stop
+      const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch" });
+      expect(b.job).toMatchObject({ status: "done", result: { items: 4, llm_calls: 2, skipped_llm_cap: 2, unscored: 2 } });
+      expect(calls).toBe(2);
+    } finally {
+      if (saved === undefined) delete process.env.RUBRIC_LLM_JOB_CALL_CAP; else process.env.RUBRIC_LLM_JOB_CALL_CAP = saved;
       LLM.setRubricChatForTests(null);
     }
   });

@@ -120,3 +120,46 @@ describe("run and bench", () => {
     expect(writes()).toEqual([]);
   });
 });
+
+describe("S71-R4 G71 — a cost ceiling for llm_zdr rubrics, refused at submit", () => {
+  const keys = (n: number) => Array.from({ length: n }, (_, i) => `k${i}`);
+  const withEnv = async (env: Record<string, string>, f: () => Promise<void>) => {
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(env)) { saved[k] = process.env[k]; process.env[k] = v; }
+    try { await f(); } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+  };
+  it("per-job ceiling: more units than the cap is llm_job_cap with its numbers; a code rubric is never capped", async () => {
+    await withEnv({ RUBRIC_LLM_JOB_CALL_CAP: "5" }, async () => {
+      const r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(6) });
+      expect(r).toMatchObject({ ok: false, error: "llm_job_cap" });
+      expect(String(r.detail)).toContain("needs 6 calls, per-job cap 5");
+      expect(inserted).toEqual([]);
+      expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(5) })).toMatchObject({ ok: true });
+      expect(await run({ action: "run", rubric_id: "talk_time", lab: true, unit_keys: keys(30) })).toMatchObject({ ok: true }); // engine code: no model call, no cap
+    });
+  });
+  it("per-day ceiling counts calls already made, runs still open (their reservation) and calls reserved by QUEUED jobs; refused with the three numbers", async () => {
+    await withEnv({ RUBRIC_LLM_DAILY_CALL_CAP: "100" }, async () => {
+      answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 60 }] : /FROM scribe_job/.test(t) ? [{ kind: "rubric_run", args: { rubric_id: "consult_surgical_pitch", unit_keys: keys(25) } }, { kind: "rubric_bench", args: { rubric_id: "consult_chair_affect", set: "human_v" } }, { kind: "rubric_run", args: { rubric_id: "talk_time", unit_keys: keys(50) } }] : []);
+      // used 60 + queued (25 + 30 for the human_v bench estimate + 0 for the code rubric) = 115 already over 100
+      let r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(1) });
+      expect(r).toMatchObject({ ok: false, error: "llm_daily_cap" });
+      expect(String(r.detail)).toMatch(/today 60 used \+ 55 queued \+ 1 planned > daily cap 100/);
+      answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 60 }] : []);
+      expect(await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(40) })).toMatchObject({ ok: true }); // 60 + 40 = 100: at the cap is allowed
+      r = await run({ action: "run", rubric_id: "consult_chair_affect", lab: true, unit_keys: keys(41) });
+      expect(r).toMatchObject({ ok: false, error: "llm_daily_cap" });
+      expect(r.detail).toMatch(/today 60 used \+ 0 queued \+ 41 planned/);
+      expect(await run({ action: "bench", rubric_id: "consult_surgical_pitch", set: "grokbot_agreement" })).toMatchObject({ ok: false, error: "llm_daily_cap" }); // estimate 200 > the day's room
+    });
+  });
+  it("the defaults are 600 per job and 2000 per day, bad env falls back, and the calls a running job may still make exclude its own reservation", async () => {
+    const C = await import("@/lib/rubrics/llm-cap");
+    expect([C.DEFAULT_JOB_CALL_CAP, C.DEFAULT_DAILY_CALL_CAP]).toEqual([600, 2000]);
+    expect([C.jobCallCap({}), C.dailyCallCap({}), C.jobCallCap({ RUBRIC_LLM_JOB_CALL_CAP: "bad" }), C.dailyCallCap({ RUBRIC_LLM_DAILY_CALL_CAP: "-4" })]).toEqual([600, 2000, 600, 2000]);
+    answer = (t) => (/FROM rubric_run/.test(t) ? [{ n: 100 }] : []);
+    expect(await C.callsLeft(20, 0, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(70); // the day shows 100 including this job's own reservation (20): the others used 80
+    expect(await C.callsLeft(20, 30, { RUBRIC_LLM_DAILY_CALL_CAP: "150" })).toBe(40); // 30 already made by this job
+    expect(await C.callsLeft(100, 590, {})).toBe(10); // the job ceiling binds
+  });
+});

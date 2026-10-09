@@ -2,8 +2,8 @@
  * lib/rubrics/llm.ts — S7-1: the llm_zdr engine's one door to a model. It goes through the EXISTING ZDR client, lib/openrouter.ts `openrouterChat`, and adds no vendor, no key and no env name:
  *   - zero data retention is hard-wired in that client (every body carries provider { zdr: true, data_collection: "deny" }; no parameter turns it off);
  *   - key: OPENROUTER_API_KEY (Vercel) or the file OPENROUTER_API_KEY_FILE names; URL override OPENROUTER_API_URL (both read by the client);
- *   - models: lib/llm/gemini.ts llmFallbackModels() — env LLM_FALLBACK_MODELS, else google/gemini-3.8-flash then meta-llama/llama-4-scout. The FIRST is the scoring model; the next only answers if
- *     the first is unavailable (never because its answer was bad: a bad answer is retried ONCE on the same model, then the unit fails).
+ *   - model: the FIRST entry of lib/llm/gemini.ts llmFallbackModels() — env LLM_FALLBACK_MODELS, else google/gemini-3.8-flash. There is NO fallback model in this module: the other entries of that list are
+ *     never used here; a bad answer is retried ONCE on the same model, then the unit fails, and an outage throws so the runner retries the step.
  * temperature 0, JSON mode, the answer validated against the rubric's output schema. Every failure is a CLOSED CODE; no model output or transcript is ever in a code or a log line.
  * A transient infrastructure failure (timeout, 408, 429, 5xx, unreachable, an empty model response) THROWS (the runner retries the step, as for a database error); a missing key or a refusal by the provider (4xx) is a failed unit.
  */

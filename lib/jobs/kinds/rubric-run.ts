@@ -10,6 +10,7 @@
 import { z } from "zod";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
+import { callsLeft, capRefusal, isLlmRubric } from "@/lib/rubrics/llm-cap";
 import { getRubric, canRun, unitsOf } from "@/lib/rubrics/registry";
 import { RUBRIC_UNITS, type RubricUnit } from "@/lib/rubrics/types";
 import { evaluateUnit, resolveUnits } from "@/lib/rubrics/engines";
@@ -50,6 +51,7 @@ export const rubricRunKind: JobKind = {
   name: RUBRIC_RUN_KIND,
   first: "resolve",
   scope: "invoke",
+  precheck: async (args) => { const m = await capRefusal(RUBRIC_RUN_KIND, args); if (m) throw new JobArgsError(m); },
   parseArgs: (raw) => parseRubricRunArgs(raw) as unknown as Record<string, unknown>,
   async run(ctx: StepContext) {
     switch (ctx.step) {
@@ -86,11 +88,23 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
   const deadline = Date.now() + rubricTiming.evaluateStepMs;
   let idx = num(ctx.progress.idx), ok = num(ctx.progress.ok), failed = num(ctx.progress.failed), skipped = num(ctx.progress.skipped), blind = num(ctx.progress.blind), unresolved = num(ctx.progress.unresolved);
   const end = Math.min(keys.length, idx + rubricTiming.batchUnits);
+  // G71: a model-call ceiling. Calls made by this job are carried in progress; the day's other usage is read once per step.
+  const llm = isLlmRubric(r.id);
+  let made = num(ctx.progress.llm_calls), capSkipped = num(ctx.progress.skipped_cap);
+  let left = llm ? await callsLeft(keys.length, made) : Number.POSITIVE_INFINITY;
   while (idx < end && Date.now() < deadline) {
+    if (llm && left <= 0) { // at the cap: the remaining units are skipped (reason llm_cap), no more calls
+      capSkipped += keys.length - idx;
+      skipped += keys.length - idx;
+      idx = keys.length;
+      break;
+    }
     const key = keys[idx]!;
     // NO try/catch here (S7-0-R3, G53): a database or R2 error from the resolver, a reader or a write throws, the runner retries the step (MAX_FAILURES), and nothing half-written is
     // hidden as a failed unit. An ENGINE fault (an exception inside the pure engine) is caught inside evaluateUnit and comes back as status failed / engine_error.
     const out = await evaluateUnit(r, a.unit, key);
+    made += out.calls ?? 0;
+    left -= out.calls ?? 0;
     // a held-out room-day (lib/rubrics/blind-room-days.ts) was refused by the reader before any fetch: NOTHING is written for it, not even a skipped row; it is only counted
     if (out.reason === "blind_room_day") {
       skipped += 1;
@@ -118,7 +132,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
     else skipped += 1;
     idx += 1;
   }
-  const progress = { ...ctx.progress, idx, ok, failed, skipped, blind, unresolved };
+  const progress = { ...ctx.progress, idx, ok, failed, skipped, blind, unresolved, llm_calls: made, skipped_cap: capSkipped };
   return nextStep(idx >= keys.length ? "finish" : "evaluate", progress);
 }
 
@@ -128,5 +142,5 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   await finishRun({ run_id: runId, units_ok: num(ctx.progress.ok), units_failed: num(ctx.progress.failed) });
   const a = ctx.args as unknown as RubricRunArgs;
   const r = getRubric(a.rubric_id)!;
-  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, units_planned: ((ctx.progress.keys as string[] | undefined) ?? []).length, ok: num(ctx.progress.ok), failed: num(ctx.progress.failed), skipped: num(ctx.progress.skipped), blind_room_days: num(ctx.progress.blind), blind_excluded: num(ctx.progress.blind_excluded), unresolved: num(ctx.progress.unresolved), truncated: ctx.progress.truncated === true, units: unitsOf(r) });
+  return doneWith({ run_id: runId, rubric_id: r.id, version: r.version, units_planned: ((ctx.progress.keys as string[] | undefined) ?? []).length, ok: num(ctx.progress.ok), failed: num(ctx.progress.failed), skipped: num(ctx.progress.skipped), blind_room_days: num(ctx.progress.blind), llm_calls: num(ctx.progress.llm_calls), skipped_llm_cap: num(ctx.progress.skipped_cap), blind_excluded: num(ctx.progress.blind_excluded), unresolved: num(ctx.progress.unresolved), truncated: ctx.progress.truncated === true, units: unitsOf(r) });
 }

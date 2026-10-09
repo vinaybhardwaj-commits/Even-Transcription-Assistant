@@ -255,7 +255,39 @@ describe("S71-E G69 — an excerpt unit is bench-only", () => {
     expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-x"))).toBe(false); // the lab store was not consulted
     reads.mockRestore();
     expect(called).toBe(0);
-    expect(await evaluateUnit(affect, "consult", "hv-x", { excerpt: true, bench: true })).toMatchObject({ status: "ok" }); // the bench path reads it
+    expect(await evaluateUnit(affect, "consult", "hv-x", { excerpt: true, bench: true, room_id: "r1", ist_date: "2026-10-08" })).toMatchObject({ status: "ok" }); // the bench path reads it
+    expect(called).toBe(1);
+  });
+});
+
+describe("S71-R4 G70 — an excerpt is placed and meets the held-out check before any read or model call", () => {
+  const BLIND = (() => { const [d, r] = ["2026-09-23", "room_4ggnkg5x"]; return { d, r }; })();
+  const spyReads = () => vi.spyOn(Map.prototype, "has");
+  it("an excerpt placed on a blind (room, date) is skipped blind_room_day with 0 lab-store reads and 0 model calls", async () => {
+    let called = 0;
+    L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
+    store.set("rubric/bench/consult_chair_affect/text/hv-b.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+    const reads = spyReads();
+    reads.mockClear();
+    const out = await evaluateUnit(affect, "consult", "hv-b", { excerpt: true, bench: true, room_id: BLIND.r, ist_date: BLIND.d });
+    expect(out).toMatchObject({ status: "skipped", reason: "blind_room_day", room_id: BLIND.r, ist_date: BLIND.d });
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-b"))).toBe(false);
+    reads.mockRestore();
+    expect(called).toBe(0);
+  });
+  it("an excerpt with no room, no date or a malformed one is refused excerpt_unplaced: 0 reads, 0 calls; a placed, not-blind one is scored", async () => {
+    let called = 0;
+    L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
+    store.set("rubric/bench/consult_chair_affect/text/hv-u.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+    const reads = spyReads();
+    reads.mockClear();
+    for (const o of [{}, { room_id: "r1" }, { ist_date: "2026-10-08" }, { room_id: "r1", ist_date: "08/10/2026" }, { room_id: "bad room!", ist_date: "2026-10-08" }, { room_id: null, ist_date: null }]) {
+      expect(await evaluateUnit(affect, "consult", "hv-u", { excerpt: true, bench: true, ...o }), JSON.stringify(o)).toMatchObject({ status: "skipped", reason: "excerpt_unplaced" });
+    }
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-u"))).toBe(false);
+    reads.mockRestore();
+    expect(called).toBe(0);
+    expect(await evaluateUnit(affect, "consult", "hv-u", { excerpt: true, bench: true, room_id: "r1", ist_date: "2026-10-08" })).toMatchObject({ status: "ok" });
     expect(called).toBe(1);
   });
 });

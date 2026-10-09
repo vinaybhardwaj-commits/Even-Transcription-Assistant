@@ -34,7 +34,7 @@ async function submit(kind: string, raw: Row, ctx: ToolContext): Promise<Row> {
   } catch (e) {
     if (e instanceof ToolScopeError) throw e;
     if (e instanceof JobArgsError) {
-      const code = /^(unknown_rubric|lab_required|engine_not_available|unit_not_supported|explicit_units_required)\b/.exec(e.reason)?.[1];
+      const code = /^(unknown_rubric|lab_required|engine_not_available|unit_not_supported|explicit_units_required|llm_job_cap|llm_daily_cap)\b/.exec(e.reason)?.[1];
       return code ? { ok: false, error: code, detail: e.reason.replace(/^[a-z_]+:?\s*/, "") } : { ok: false, error: "bad_args", detail: e.reason };
     }
     if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind };
