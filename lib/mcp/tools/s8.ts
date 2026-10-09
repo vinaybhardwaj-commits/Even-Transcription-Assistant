@@ -22,10 +22,15 @@ import { SARVAM_DAILY_CAP_MINUTES, SARVAM_ENGINE, dailyCapRefusal, istDayStartIs
 import { gatewayConfigured, gatewayHealth } from "@/lib/sarvam-gateway";
 import { argBool, argInt, argStr, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { isRealDate, notCollectedReason } from "./s1";
+import { listClips } from "@/lib/consult-index";
+import { preflightClip, windowPairOf } from "@/lib/consult-clip";
+import { findRebTrack } from "@/lib/rubrics/readers/reb-consult";
+import { findClip } from "@/lib/consult-index";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 
 type Row = Record<string, unknown>;
 
-export const SARVAM_ACTIONS = ["transcribe", "translate", "status", "result", "usage", "health"] as const;
+export const SARVAM_ACTIONS = ["transcribe", "translate", "status", "result", "usage", "health", "consult_clips"] as const;
 type Action = (typeof SARVAM_ACTIONS)[number];
 export const SARVAM_KINDS = [SARVAM_TRANSCRIBE_KIND, SARVAM_TRANSLATE_KIND] as const;
 export const USAGE_DAYS_DEFAULT = 7;
@@ -43,8 +48,11 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
   try {
     if (kind === SARVAM_TRANSCRIBE_KIND) {
       const parsed = parseSarvamTranscribeArgs(raw);
-      // a consult clip comes from the CONSULT cutter's index, whose resolver is not wired yet
-      if (parsed.source === "consult") return { ok: false, error: "consult_index_unavailable" };
+      // S8C: a consult clip comes from the CONSULT index mirror: held-out check first, voice_isolated refused, an existing palimpsest track refused (no double spend), the audio probed
+      if (parsed.source === "consult") {
+        const pre = await preflightClip(parsed.consult_uid);
+        if (!pre.ok) return { ok: false, error: pre.error, ...(pre.track ? { track: pre.track } : {}) };
+      }
     } else {
       const parsed = parseSarvamTranslateArgs(raw);
       if (parsed.kind === "transcription_run") {
@@ -100,6 +108,22 @@ function jobSummary(j: NonNullable<Awaited<ReturnType<typeof readJob>>>): Row {
     started_at: j.started_at,
     finished_at: j.finished_at,
   };
+}
+
+/** status / result {consult_uid}: the palimpsest track of that consult, if one exists. NO Sarvam call. The held-out check comes first; text only with include_text. */
+async function consultTrack(args: ToolArgs, action: "status" | "result"): Promise<Row> {
+  const uid = argStr(args, "consult_uid", 128);
+  if (!uid || !/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return { ok: false, error: "consult_uid_invalid" };
+  let pair = await windowPairOf(uid);
+  if (pair && isBlindRoomDay(pair.ist_date, pair.room_id)) return { ok: false, error: "blind_room_day" };
+  if (!pair) {
+    const c = await findClip(uid);
+    if (!c.ok) return { ok: false, error: c.error };
+    pair = { room_id: c.row.room_id, ist_date: c.row.ist_date };
+  }
+  const t = await findRebTrack(uid, pair.room_id, pair.ist_date, { withText: action === "result" && argBool(args, "include_text") });
+  if (!t.found) return { ok: true, consult_uid: uid, track: null, source: null, n_integrity_skipped: t.n_integrity_skipped };
+  return { ok: true, consult_uid: uid, source: t.found.source, track: { layer: t.found.layer, config_hash: t.found.config_hash, n_segments: t.found.n_segments, ...(t.found.segments ? { segments: t.found.segments } : {}) }, n_integrity_skipped: t.n_integrity_skipped };
 }
 
 async function section(fn: () => Promise<Row>): Promise<Row> {
@@ -172,7 +196,7 @@ const sarvam: McpTool = {
   description:
     "Sarvam speech AI through the Even AWS gateway (saaras:v3 transcription with speaker labels, mayura:v1 translation); Sarvam is zero-data-retention. Reads and writes the job queue and one R2 result object per job; touches no room; " +
     "never writes a clinical table. ONLY ISOLATED CONSULT AUDIO goes to Sarvam (V's standing rule): `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a clip from the CONSULT cutter; " +
-    "answers consult_index_unavailable until that resolver exists); options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
+    "is resolved through CONSULT's index mirror: held-out pair refused first, voice_isolated rows refused (consult_voice_isolated), a palimpsest track already there refused (already_transcribed, with the track ref), audio not readable refused (audio_unreadable); consult_index_unavailable / consult_index_integrity if the mirror is missing or fails its sha256). status / result {consult_uid} return that palimpsest track (layer, config_hash, segment count; text only with include_text) without calling Sarvam; consult_clips {ist_date, room_slug?, status?} lists the mirror's clips (no doctor fields; held-out excluded and counted). Options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
     "Both queue a job and need invoke scope. status / result {job_id} (include_text returns the stored JSON: transcript, speaker-labelled entries, English); usage {ist_date | days <= 30}: gateway minutes, estimated cost, calls, Sarvam jobs and runs; " +
     "health: configured env names, lab_store_configured, credential check, STS expiry (Sarvam is not called). " +
     `A daily cap of ${SARVAM_DAILY_CAP_MINUTES} audio minutes applies, counting earlier queued jobs. Results are written to R2 mcp-sarvam/<job_id>.json; the job row carries counts only. Usage is also logged to the shared Sarvam ledger (sarvam.call.v1) and lane file. Times UTC.`,
@@ -192,6 +216,8 @@ const sarvam: McpTool = {
       transcription_run_id: { type: "string" },
       ist_date: { type: "string" },
       days: { type: "integer", minimum: 1, maximum: USAGE_DAYS_MAX },
+      room_slug: { type: "string" },
+      status: { type: "string" },
     },
     required: ["action"],
     additionalProperties: false,
@@ -203,10 +229,12 @@ const sarvam: McpTool = {
       case "transcribe": return submit(SARVAM_TRANSCRIBE_KIND, args, ctx);
       case "translate": return submit(SARVAM_TRANSLATE_KIND, args, ctx);
       case "status": {
+        if (!argStr(args, "job_id", 128) && argStr(args, "consult_uid", 128)) return consultTrack(args, "status");
         const got = await loadSarvamJob(args);
         return "error" in got ? got.error : { ok: true, ...jobSummary(got.job) };
       }
       case "result": {
+        if (!argStr(args, "job_id", 128) && argStr(args, "consult_uid", 128)) return consultTrack(args, "result");
         const got = await loadSarvamJob(args);
         if ("error" in got) return got.error;
         const base = { ok: true, ...jobSummary(got.job), result: got.job.result ?? null };
@@ -219,6 +247,12 @@ const sarvam: McpTool = {
         } catch {
           return { ...base, content: null, content_note: "r2_read_failed" };
         }
+      }
+      case "consult_clips": {
+        const date = argStr(args, "ist_date", 10), room = argStr(args, "room_slug", 64);
+        if (!date || !isRealDate(date)) return { ok: false, error: "invalid_ist_date" };
+        if (room && isBlindRoomDay(date, room)) return { ok: false, error: "blind_room_day" }; // refused before the mirror is read
+        return listClips({ date, room, status: argStr(args, "status", 16) });
       }
       case "usage": return usage(args);
       case "health": return { ok: true, ...(await gatewayHealth()), lab_store_configured: labStoreConfigured() };

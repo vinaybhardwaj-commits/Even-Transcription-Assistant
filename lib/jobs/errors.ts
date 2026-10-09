@@ -79,6 +79,13 @@ export const JOB_ERROR_CODES = [
   "bench_set_missing",
   "bench_metric_unsupported",
   "consult_index_unavailable",
+  // S8C: consult clips through the CONSULT index mirror
+  "consult_index_integrity",
+  "consult_not_in_index",
+  "consult_voice_isolated",
+  "already_transcribed",
+  "audio_unreadable",
+  "blind_room_day",
   "duration_unknown",
   // the stubs
   "not_implemented",
