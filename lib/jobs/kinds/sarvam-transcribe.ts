@@ -41,7 +41,8 @@ import { addMayura, alignEnglish, englishCounts, finalizeEnglish, settleUnpaired
 import { DRUG_LEXICON } from "@/lib/drug-lexicon";
 import { RESEARCH_SOURCE_LABEL, roomAudioAllowed, type CallerClass } from "@/lib/stt/o4-scope";
 import { roomDateHeldOut, sessionRangeHeldOut, windowArgHeldOut } from "../held-out";
-import { parseRoomSource, resolveRoomClip, type RoomSource } from "./sarvam-room";
+import { guardSessionSpan } from "@/lib/voice-blind";
+import { parseRoomSource, resolveRangeSession, resolveRoomClip, type RoomSource } from "./sarvam-room";
 
 export const SARVAM_TRANSCRIBE_KIND = "sarvam_transcribe";
 const STEPS = {
@@ -131,7 +132,13 @@ export const sarvamTranscribeKind: JobKind = {
   heldOut: async (args) => {
     // O5: a room window / segment is checked like any room job; a room argument from a PRODUCTION caller never gets this far (the parser refused it)
     if (args.source === "window") return windowArgHeldOut(args);
-    if (args.source === "range") return (await sessionRangeHeldOut(args)) ?? (typeof args.room === "string" && typeof args.date === "string" ? roomDateHeldOut(args.room, args.date) : null);
+    if (args.source === "range") {
+      const first = (await sessionRangeHeldOut(args)) ?? (typeof args.room === "string" && typeof args.date === "string" ? await roomDateHeldOut(args.room, args.date) : null);
+      if (first) return first;
+      // D-1: a {room, date, from, to} range is checked on the SESSION it resolves to as well (the whole session span, every window placement), at submit and at every step
+      const sid = await resolveRangeSession(args);
+      return sid ? guardSessionSpan(sid, { startMs: Number(args.start), endMs: Number(args.end) }) : null;
+    }
     if (args.source !== "consult" || typeof args.consult_uid !== "string") return null;
     const p = await windowPairOf(args.consult_uid); // ALL rows of the uid (S8C-1)
     return p && isBlindRoomDay(p.ist_date, p.room_id) ? "blind_room_day" : null;
@@ -191,7 +198,7 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
     if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
     const clip = await resolveRoomClip(a as unknown as Record<string, unknown>);
     if (!clip.ok) return failWith(jobError(clip.error));
-    return nextStep(STEPS.init, { clip_key: clip.clip_key, content_type: clip.content_type, scope: clip.scope, ref: clip.ref, source_kind: clip.source_kind, use });
+    return nextStep(STEPS.init, { clip_key: clip.clip_key, content_type: clip.content_type, scope: clip.scope, ref: clip.ref, source_kind: clip.source_kind, use, ...(clip.chunk_whole !== undefined ? { chunk_whole: clip.chunk_whole, clip_start_ms: clip.clip_start_ms, clip_end_ms: clip.clip_end_ms } : {}) });
   }
   // S8C: a consult clip comes from the CONSULT cutter's index mirror (lib/consult-clip.ts): held-out check first, then the sha256-verified row, voice_isolated refused, an existing palimpsest track refused, the eta-audio object probed
   if (a.source === "consult") {
@@ -420,7 +427,7 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   const wantEnglish = a.english === true;
   const doc: ResultDoc = {
     language_code: res.languageCode, duration_s: durationS, speakers, entries, transcript: res.transcript,
-    ...(scopeOf(ctx) === "window" || scopeOf(ctx) === "room_segment" ? { source_label: RESEARCH_SOURCE_LABEL } : {}),
+    ...(scopeOf(ctx) === "window" || scopeOf(ctx) === "room_segment" ? { source_label: RESEARCH_SOURCE_LABEL, chunk_whole: ctx.progress.chunk_whole === true, clip_span: { start: ctx.progress.clip_start_ms ?? null, end: ctx.progress.clip_end_ms ?? null } } : {}),
     english_pass: wantEnglish ? "pending" : "not_requested", sarvam_job_ids: { native: jobId, english: null }, minutes: { native: Math.round((knownMs / 60_000) * 1000) / 1000, english: 0 },
   };
   try {
@@ -504,7 +511,7 @@ async function finishDoc(ctx: StepContext, key: string, doc: ResultDoc, mayuraCh
 function summary(jobId: string, doc: ResultDoc): Record<string, unknown> {
   return {
     r2_key: resultKey(jobId),
-    ...(doc.source_label ? { source: doc.source_label } : {}),
+    ...(doc.source_label ? { source: doc.source_label, chunk_whole: doc.chunk_whole === true, clip_span: doc.clip_span ?? null } : {}),
     speakers: doc.speakers.length,
     language_code: doc.language_code,
     duration_s: doc.duration_s,
