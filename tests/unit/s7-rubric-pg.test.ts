@@ -649,7 +649,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(rows[0]).toMatchObject({ status: "ok", score: { label: "discrepancy report", severity: "obvious", n_findings: 2 } });
       expect(rows[0].findings).toEqual(["obvious:in_record_not_said:drug", "obvious:value_mismatch:dose"]);
       expect(JSON.stringify(rows)).not.toMatch(/Warfarin|Alphamox|alpha/); // no record or tape text in the table
-      const ev = JSON.parse(mem.get("rubric/encounter_vs_record/0.1.0/enc1@m1.json")!);
+      const ev = JSON.parse(mem.get(`rubric/encounter_vs_record/0.1.0/${"enc1@m1"}.json`)!);
       expect(JSON.stringify(ev)).toContain("no support found");
       expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
       // evr_perturb: the file holds a header only; the windows are selected in the job (enc1@m1 qualifies; the open and the blind consults do not)
@@ -665,6 +665,12 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(rep.note).toMatch(/NOT negatives/);
       expect(JSON.stringify(rep)).not.toMatch(/Warfarin|Alphamox/);
       expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(1); // the bench wrote no result row
+      // an EXPLICIT blind unit_key row (R2): refused blind_room_day, counted, and the warehouse is never asked for it
+      mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, { unit_key: "enc1@m1" }, { unit_key: "enc3@m2" }].map((x) => JSON.stringify(x)).join("\n") + "\n");
+      queries.length = 0;
+      const bb = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
+      expect(bb.job).toMatchObject({ status: "done", result: { n: 1, windows_skipped: { blind_room_day: 1 } } });
+      expect(queries).toHaveLength(1); // enc1 only
       // evr_perturb is for encounter_vs_record only
       const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
       expect(() => KIND_BY_NAME.get("rubric_bench")!.parseArgs({ rubric_id: "consult_surgical_pitch", set: "evr_perturb" })).toThrow();

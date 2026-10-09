@@ -234,3 +234,80 @@ describe("S7-2-R2 — follow-up fields (minor only) and the call ceiling", () =>
     expect(CAP.reservationFor("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" })).toBe(40);
   });
 });
+
+describe("S7-2-R2 R1..R8", () => {
+  const rec = () => R.normaliseRecord(REC_ROW);
+  const medOnly = (name: string, dose = "650 mg", freq = "TDS") => { const r = rec(); r.meds = [{ name, alt_name: "", dose, freq, route: "", duration: "", side: "" }]; return r; };
+  it("R1 — a generic-only record drug vs a brand said on the tape is capped at material, never obvious (Dolo 650 vs paracetamol; Augmentin vs amoxicillin + clavulanate)", () => {
+    for (const [generic, brand, tapeLine] of [["Paracetamol", "Dolo", "Take Dolo 650 three times a day."], ["Amoxicillin and clavulanate", "Augmentin", "Start Augmentin 625 twice daily."]] as const) {
+      const r = medOnly(generic, "650 mg", "TDS");
+      const sd = said({ meds: [{ name: brand, dose: "650 mg", freq: "three times a day", route: "", duration: "", side: "", t_ms: 5000, quote: tapeLine }] });
+      const fs = C.compareRecord(r, sd, lines([[5, tapeLine]]));
+      const f = fs.find((x) => x.field === "drug" && x.kind === "in_record_not_said")!;
+      expect(f, generic).toBeDefined();
+      expect(f.tier, generic).toBe("material");
+      expect(fs.filter((x) => x.field === "drug").some((x) => x.tier === "obvious"), generic).toBe(false);
+      expect(fs.find((x) => x.kind === "said_not_in_record")).toMatchObject({ tier: "minor" });
+    }
+    // with NO unmatched said drug the same unsupported record drug is still obvious
+    expect(C.compareRecord(medOnly("Warfarin"), said(), TAPE).find((x) => x.field === "drug")).toMatchObject({ tier: "obvious" });
+  });
+  it("R3 — add_procedure / add_diagnosis expect material when the target field is AI-filled, obvious otherwise (and are found at that tier)", () => {
+    const ai = rec(); ai.ai.procedures = true; ai.ai.diagnoses = true;
+    const w = P.scoreWindow(ai, SAID, TAPE, 4, ["add_procedure", "add_diagnosis"]);
+    for (const k of w.kinds) expect(k).toMatchObject({ applicable: true, expected_tier: "material", found: true });
+    const human = rec();
+    for (const k of P.scoreWindow(human, SAID, TAPE, 4, ["add_procedure", "add_diagnosis"]).kinds) expect(k).toMatchObject({ expected_tier: "obvious", found: true });
+  });
+  it("R4 — laterality_swap expects obvious only when the tape states a side for that site, else none (reported with its reason)", () => {
+    const noSide = said({ ...SAID, procedures: [{ name: "arthroscopy", side: "", t_ms: 60000, quote: "We will do an arthroscopy." }], diagnoses: [{ name: "osteoarthritis", side: "", t_ms: 5000, quote: "Your knee has osteoarthritis." }] });
+    const k = P.scoreWindow(rec(), noSide, TAPE, 3, ["laterality_swap"]).kinds[0]!;
+    expect(k).toMatchObject({ applicable: true, expected_tier: "none", correct_none: true, none_reason: "no_side_on_tape" });
+    expect(P.scoreWindow(rec(), SAID, TAPE, 3, ["laterality_swap"]).kinds[0]).toMatchObject({ expected_tier: "obvious", found: true });
+  });
+  it("R5 — doses in number words and unitless numbers are compared; an unparseable tape dose is counted apart, not as a correct none", () => {
+    for (const [t, v] of [["five hundred mg", 500], ["one thousand mg", 1000], ["half a gram", 0.5], ["one and a half g", 1500], ["500 mg", 500]] as const) {
+      const d = C.parseDose(t);
+      if (t === "half a gram") expect(C.numberWordsToDigits(t)).toBe("0.5 a gram");
+      else expect(d?.value, t).toBe(v);
+    }
+    expect(C.parseDose("500", "mg")).toEqual({ value: 500, unit: "mg" });
+    expect(C.parseDose("500")).toBeNull();
+    // record 1000 mg vs tape "five hundred mg": a clear contradiction (ratio 2) now found; unitless "500" vs record 500 mg: equal
+    const r = medOnly("Diclofenac", "1000 mg", "BD");
+    const mk = (dose: string) => said({ meds: [{ name: "diclofenac", dose, freq: "twice a day", route: "", duration: "", side: "", t_ms: 20000, quote: "Take diclofenac" }] });
+    expect(C.compareRecord(r, mk("five hundred mg"), TAPE).find((x) => x.field === "dose")).toMatchObject({ tier: "obvious" });
+    expect(C.compareRecord(medOnly("Diclofenac", "500 mg", "BD"), mk("500"), TAPE).find((x) => x.field === "dose")).toBeUndefined();
+    // the bench: a tape dose that cannot be parsed ("a standard dose") makes the dose kinds expect none, and that is REPORTED
+    const odd = said({ meds: [{ name: "diclofenac", dose: "a standard dose", freq: "", route: "", duration: "", side: "", t_ms: 20000, quote: "Take diclofenac" }] });
+    const w = P.scoreWindow(medOnly("Diclofenac", "50 mg", "BD"), odd, TAPE, 2, ["dose_x2", "dose_half"]);
+    for (const k of w.kinds) expect(k).toMatchObject({ expected_tier: "none", none_reason: "tape_dose_unparseable" });
+    const agg = P.aggregatePerturb([w]);
+    expect(agg.dose_none_unparseable).toBe(2);
+    expect(agg.per_kind.dose_x2!.n_none_tape_dose_unparseable).toBe(1);
+    const none = said({ meds: [{ name: "diclofenac", dose: "", freq: "", route: "", duration: "", side: "", t_ms: 20000, quote: "Take diclofenac" }] });
+    expect(P.aggregatePerturb([P.scoreWindow(medOnly("Diclofenac", "50 mg", "BD"), none, TAPE, 2, ["dose_x2"])]).dose_none_unparseable).toBe(0);
+  });
+  it("R6 — the banned-word check covers rubric-bench.ts, s7.ts and the tool description, and it CATCHES an injected word", async () => {
+    const S7 = await import("@/lib/mcp/surface");
+    const tool = S7.CALLABLE_TOOLS.get("scribe_rubric")!;
+    const files = ["lib/jobs/kinds/rubric-bench.ts", "lib/mcp/tools/s7.ts", "lib/rubrics/engines/evr.ts", "lib/rubrics/evr/compare.ts", "lib/rubrics/evr/perturb.ts", "lib/rubrics/evr/said.ts"];
+    const texts = [...files.map((f) => readFileSync(f, "utf8").replace(/BANNED_WORDS = \[[^\]]*\]/, "")), tool.description, JSON.stringify(tool.inputSchema)];
+    for (const t of texts) expect(E.findBanned(t)).toEqual([]);
+    for (const t of texts) expect(E.findBanned(`${t} fraud`)).toEqual(["fraud"]); // injected word is caught in each
+    expect(E.findBanned("A DISHONEST note")).toEqual(["dishonest"]);
+  });
+  it("R7 — laterality is read from the examination text too: a side in the exam that contradicts the tape's side is obvious", () => {
+    const r = rec(); r.exam = "Left knee swelling"; r.procedures = [{ name: "Knee arthroscopy" }]; r.diagnoses = [];
+    const tapeSaid = said({ procedures: [{ name: "knee arthroscopy", side: "right", t_ms: 60000, quote: "We will do an arthroscopy of the right knee." }] });
+    expect(C.compareRecord(r, tapeSaid, TAPE).find((x) => x.field === "laterality")).toMatchObject({ tier: "obvious" });
+    r.exam = "Right knee swelling";
+    expect(C.compareRecord(r, tapeSaid, TAPE).find((x) => x.field === "laterality")).toBeUndefined();
+  });
+  it("R8 — the record reader never invents ai_filled for medications or investigations, even when the raw rows carry something shaped like it", () => {
+    const n = R.normaliseRecord({ ...REC_ROW, meds: [{ generic_name: "A", ai_field_metadata: { generic_name: { ai_filled: true } } }], investigations: [{ investigation: "MRI", ai_field_metadata: { investigation: { ai_filled: true } } }], ai_meta: { medications: { ai_filled: true }, further_investigation: { ai_filled: true } } });
+    expect(n.ai.meds).toBe("unknown");
+    expect(n.ai.investigations).toBe("unknown");
+    expect(readFileSync("lib/rubrics/evr/record.ts", "utf8")).toMatch(/NO ai_field_metadata for medications or investigations/);
+  });
+});

@@ -6,7 +6,7 @@
  * Expected: add_drug / add_procedure / add_diagnosis / laterality_swap = obvious; dose_x2 / dose_half = obvious when the tape states that drug's dose, else none; remove_drug = minor (said_not_in_record).
  * Originals are NOT negatives (a real record can hold a real discrepancy): they give baseline_flag_rate only. PURE and seeded (mulberry32), so a rerun repeats.
  */
-import { compareRecord, parseDose, parseSide, sameDrug, swapSide, tapeMention, type TapeLine } from "./compare";
+import { compareRecord, nameOverlap, parseDose, parseSide, sameDrug, swapSide, tapeMention, type TapeLine } from "./compare";
 import { findingCode, type Finding, type NormRecord, type SaidItems, type Tier } from "./types";
 
 export const PERTURB_KINDS = ["add_drug", "dose_x2", "dose_half", "laterality_swap", "add_procedure", "add_diagnosis", "remove_drug"] as const;
@@ -35,7 +35,7 @@ export type Perturbation = {
   applicable: boolean;
   record?: NormRecord;
   /** the finding this perturbation should produce: kind of finding, record/said item, and the tier expected ("none" = no new finding for the target at material or above) */
-  expect?: { target: string; field: Finding["field"]; kind: Finding["kind"]; tier: Tier };
+  expect?: { target: string; field: Finding["field"]; kind: Finding["kind"]; tier: Tier; /** why "none" is expected */ none_reason?: "no_dose_on_tape" | "tape_dose_unparseable" | "no_side_on_tape" };
 };
 
 const num = (n: number): string => (Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100));
@@ -59,22 +59,26 @@ export function perturb(kind: PerturbKind, rec: NormRecord, said: SaidItems, lin
     if (cands.length === 0) return { kind, applicable: false };
     const name = pick(cands, r);
     out.procedures.push({ name });
-    return { kind, applicable: true, record: out, expect: { target: name, field: "procedure", kind: "in_record_not_said", tier: "obvious" } };
+    return { kind, applicable: true, record: out, expect: { target: name, field: "procedure", kind: "in_record_not_said", tier: rec.ai.procedures === true ? "material" : "obvious" } }; // R3: an AI-filled field is capped at material
   }
   if (kind === "add_diagnosis") {
     const cands = INJECT_DIAGNOSES.filter((d) => !rec.diagnoses.some((x) => x.name.toLowerCase() === d.toLowerCase()) && !d.toLowerCase().split(" ").filter((w) => w.length >= 5).some((w) => tapeText.includes(w.slice(0, 5))));
     if (cands.length === 0) return { kind, applicable: false };
     const name = pick(cands, r);
     out.diagnoses.push({ name, differential: false, location_notes: "" });
-    return { kind, applicable: true, record: out, expect: { target: name, field: "diagnosis", kind: "in_record_not_said", tier: "obvious" } };
+    return { kind, applicable: true, record: out, expect: { target: name, field: "diagnosis", kind: "in_record_not_said", tier: rec.ai.diagnoses === true ? "material" : "obvious" } }; // R3
   }
   if (kind === "dose_x2" || kind === "dose_half") {
     const idx = rec.meds.map((m, i) => ({ m, i })).filter(({ m }) => parseDose(m.dose));
     if (idx.length === 0) return { kind, applicable: false };
     const { m, i } = pick(idx, r);
-    const stated = said.meds.some((s) => sameDrug([m.name, m.alt_name].filter(Boolean), [s.name]) && parseDose(s.dose));
+    const unit = parseDose(m.dose)!.unit;
+    const sm = said.meds.find((s) => sameDrug([m.name, m.alt_name].filter(Boolean), [s.name]));
+    const stated = !!sm && !!parseDose(sm.dose, unit);
+    // R5: a dose said on the tape that cannot be parsed is reported apart ("tape_dose_unparseable"), never counted as a correct none
+    const none_reason = stated ? undefined : sm && sm.dose.trim() ? ("tape_dose_unparseable" as const) : ("no_dose_on_tape" as const);
     out.meds[i]!.dose = scaleDose(m.dose, kind === "dose_x2" ? 2 : 0.5);
-    return { kind, applicable: true, record: out, expect: { target: m.name, field: "dose", kind: "value_mismatch", tier: stated ? "obvious" : "none" } };
+    return { kind, applicable: true, record: out, expect: { target: m.name, field: "dose", kind: "value_mismatch", tier: stated ? "obvious" : "none", ...(none_reason ? { none_reason } : {}) } };
   }
   if (kind === "laterality_swap") {
     const cands: Array<{ type: "proc" | "diag"; i: number; text: string }> = [
@@ -83,11 +87,17 @@ export function perturb(kind: PerturbKind, rec: NormRecord, said: SaidItems, lin
     ];
     if (cands.length === 0) return { kind, applicable: false };
     const c = pick(cands, r);
-    if (c.type === "proc") { const orig = out.procedures[c.i]!.name; out.procedures[c.i]!.name = swapSide(orig); return { kind, applicable: true, record: out, expect: { target: swapSide(orig), field: "laterality", kind: "value_mismatch", tier: "obvious" } }; }
+    // R4: obvious only when the tape states a side for that site (a said item that matches the site and carries one side); otherwise nothing can be compared: none
+    const siteName = c.type === "proc" ? rec.procedures[c.i]!.name : rec.diagnoses[c.i]!.name;
+    const pool = c.type === "proc" ? said.procedures : said.diagnoses;
+    const tapeSide = pool.some((s) => (nameOverlap(siteName, s.name) || nameOverlap(s.name, siteName)) && (parseSide(`${s.side} ${s.name}`) === "left" || parseSide(`${s.side} ${s.name}`) === "right"));
+    const latTier: Tier = tapeSide ? "obvious" : "none";
+    const latReason = tapeSide ? undefined : ("no_side_on_tape" as const);
+    if (c.type === "proc") { const orig = out.procedures[c.i]!.name; out.procedures[c.i]!.name = swapSide(orig); return { kind, applicable: true, record: out, expect: { target: swapSide(orig), field: "laterality", kind: "value_mismatch", tier: latTier, ...(latReason ? { none_reason: latReason } : {}) } }; }
     const d = out.diagnoses[c.i]!;
     d.name = swapSide(d.name); // both places that can carry the side are swapped, so the copy never reads as "both"
     d.location_notes = swapSide(d.location_notes);
-    return { kind, applicable: true, record: out, expect: { target: d.name, field: "laterality", kind: "value_mismatch", tier: "obvious" } };
+    return { kind, applicable: true, record: out, expect: { target: d.name, field: "laterality", kind: "value_mismatch", tier: latTier, ...(latReason ? { none_reason: latReason } : {}) } };
   }
   // remove_drug: remove a record drug that the tape DID say
   const said2 = rec.meds.map((m, i) => ({ m, i })).filter(({ m }) => said.meds.some((s) => sameDrug([m.name, m.alt_name].filter(Boolean), [s.name])));
@@ -98,7 +108,7 @@ export function perturb(kind: PerturbKind, rec: NormRecord, said: SaidItems, lin
   return { kind, applicable: true, record: out, expect: { target: s.name, field: "drug", kind: "said_not_in_record", tier: "minor" } };
 }
 
-export type KindOutcome = { kind: PerturbKind; applicable: boolean; expected_tier: Tier | null; found: boolean | null; correct_none: boolean | null; extra: number };
+export type KindOutcome = { kind: PerturbKind; applicable: boolean; expected_tier: Tier | null; found: boolean | null; correct_none: boolean | null; extra: number; none_reason?: string };
 export type WindowOutcome = { baseline_findings: number; baseline_material_plus: number; baseline_obvious: number; kinds: KindOutcome[] };
 
 const key = (f: Finding): string => `${findingCode(f)}|${f.target.toLowerCase()}`;
@@ -118,7 +128,7 @@ export function scoreWindow(rec: NormRecord, said: SaidItems, lines: TapeLine[],
     const hit = fresh.filter((f) => f.field === e.field && f.kind === e.kind && sameTarget(f, e.target));
     if (e.tier === "none") {
       const bad = hit.filter((f) => f.tier === "material" || f.tier === "obvious");
-      res.push({ kind, applicable: true, expected_tier: "none", found: null, correct_none: bad.length === 0, extra: fresh.length - hit.length });
+      res.push({ kind, applicable: true, expected_tier: "none", found: null, correct_none: bad.length === 0, extra: fresh.length - hit.length, ...(e.none_reason ? { none_reason: e.none_reason } : {}) });
     } else {
       const ok = hit.some((f) => f.tier === e.tier);
       res.push({ kind, applicable: true, expected_tier: e.tier, found: ok, correct_none: null, extra: fresh.length - hit.length });
@@ -128,8 +138,10 @@ export function scoreWindow(rec: NormRecord, said: SaidItems, lines: TapeLine[],
 }
 
 export type PerturbReport = {
+  /** dose kinds scored "none" only because the dose said on the tape could not be parsed (R5): reported, not silently counted correct */
+  dose_none_unparseable: number;
   windows: number; baseline_flag_rate: { any: number; material_or_obvious: number; obvious: number };
-  per_kind: Record<string, { n_applicable: number; n_expected_detect: number; recall: number | null; n_expected_none: number; none_correct: number | null; mean_extra_findings: number | null }>;
+  per_kind: Record<string, { n_none_tape_dose_unparseable: number; n_applicable: number; n_expected_detect: number; recall: number | null; n_expected_none: number; none_correct: number | null; mean_extra_findings: number | null }>;
 };
 export function aggregatePerturb(outs: WindowOutcome[]): PerturbReport {
   const n = outs.length;
@@ -141,9 +153,11 @@ export function aggregatePerturb(outs: WindowOutcome[]): PerturbReport {
     per_kind[kind] = {
       n_applicable: rows.length, n_expected_detect: det.length, recall: det.length ? Math.round((det.filter((k) => k.found).length / det.length) * 1000) / 1000 : null,
       n_expected_none: none.length, none_correct: none.length ? Math.round((none.filter((k) => k.correct_none).length / none.length) * 1000) / 1000 : null,
+      n_none_tape_dose_unparseable: none.filter((k) => k.none_reason === "tape_dose_unparseable").length,
       mean_extra_findings: rows.length ? Math.round((rows.reduce((s, k) => s + k.extra, 0) / rows.length) * 100) / 100 : null,
     };
   }
   const rate = (f: (o: WindowOutcome) => boolean): number => (n ? Math.round((outs.filter(f).length / n) * 1000) / 1000 : 0);
-  return { windows: n, baseline_flag_rate: { any: rate((o) => o.baseline_findings > 0), material_or_obvious: rate((o) => o.baseline_material_plus > 0), obvious: rate((o) => o.baseline_obvious > 0) }, per_kind };
+  const unparse = outs.reduce((s, o) => s + o.kinds.filter((k) => k.none_reason === "tape_dose_unparseable").length, 0);
+  return { dose_none_unparseable: unparse, windows: n, baseline_flag_rate: { any: rate((o) => o.baseline_findings > 0), material_or_obvious: rate((o) => o.baseline_material_plus > 0), obvious: rate((o) => o.baseline_obvious > 0) }, per_kind };
 }

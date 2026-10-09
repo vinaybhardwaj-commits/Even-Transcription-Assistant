@@ -27,9 +27,39 @@ const content = (s: string): string[] => words(s).filter((w) => w.length >= 4 &&
 
 // ---- parsing ------------------------------------------------------------------------------------------------------------------------------
 export type Dose = { value: number; unit: "mg" | "ml" | "iu" | "pct" };
-export function parseDose(s: string): Dose | null {
-  const m = /(\d+(?:\.\d+)?)\s*(mg|mcg|µg|μg|ug|g|ml|iu|units?|%)/i.exec(s.replace(/,/g, ""));
-  if (!m) return null;
+const SMALL: Record<string, number> = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+/** "five hundred" -> 500, "one thousand" -> 1000, "two fifty" -> 250, "half" -> 0.5, "one and a half" -> 1.5. Returns the text with each number-word run replaced by digits. PURE. */
+export function numberWordsToDigits(s: string): string {
+  const pre = s.replace(/\bone and a half\b/gi, "1.5").replace(/\bhalf\b/gi, "0.5");
+  const toks = pre.split(/(\s+)/);
+  const out: string[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const w = (toks[i] ?? "").toLowerCase().replace(/[^a-z]/g, "");
+    if (w in SMALL || w === "hundred" || w === "thousand") {
+      let total = 0, cur = 0, j = i, used = false, last = i;
+      for (; j < toks.length; j++) {
+        const t = (toks[j] ?? "").toLowerCase().replace(/[^a-z]/g, "");
+        if (/^\s+$/.test(toks[j] ?? "") || t === "and") continue;
+        if (t in SMALL) { cur += SMALL[t]!; used = true; last = j; }
+        else if (t === "hundred") { cur = (cur || 1) * 100; used = true; last = j; }
+        else if (t === "thousand") { total += (cur || 1) * 1000; cur = 0; used = true; last = j; }
+        else break;
+      }
+      if (used) { out.push(String(total + cur)); i = last; continue; }
+    }
+    out.push(toks[i] ?? "");
+  }
+  return out.join("");
+}
+
+/** A dose from text with digits or number words and a unit; `defaultUnit` reads a unitless number as that unit (used when the record drug has exactly one unit). */
+export function parseDose(s: string, defaultUnit?: Dose["unit"]): Dose | null {
+  const text = numberWordsToDigits(s).replace(/,/g, "");
+  const m = /(\d+(?:\.\d+)?)\s*(mg|mcg|µg|μg|ug|g|ml|iu|units?|%)/i.exec(text);
+  if (!m) {
+    const bare = /^\s*(\d+(?:\.\d+)?)\s*$/.exec(text.trim());
+    return bare && defaultUnit ? { value: Number(bare[1]), unit: defaultUnit } : null;
+  }
   const v = Number(m[1]);
   const u = m[2]!.toLowerCase();
   if (u === "g") return { value: v * 1000, unit: "mg" };
@@ -95,7 +125,7 @@ function coverage(name: string, tapeWords: Set<string>): number {
   const stems = new Set([...tapeWords].map((w) => w.slice(0, 5)));
   return cw.filter((w) => stems.has(w.slice(0, 5))).length / cw.length;
 }
-const nameOverlap = (a: string, b: string): boolean => {
+export const nameOverlap = (a: string, b: string): boolean => {
   const x = content(a), y = new Set(content(b).map((w) => w.slice(0, 5)));
   return x.length > 0 && x.filter((w) => y.has(w.slice(0, 5))).length / x.length >= 0.5;
 };
@@ -114,18 +144,21 @@ export function compareRecord(rec: NormRecord, said: SaidItems, lines: TapeLine[
   };
 
   // drugs in the record
+  // R1 (S7-2-R2): a drug that is said on the tape but matches NO record drug may simply be the brand of a record drug that was written by its generic name (Pulse carries no brand<->generic
+  // pairs in the S8A4 name list). While any said drug is unmatched, a record drug with no support is capped at material: a correctly recorded drug is never tiered obvious on a naming difference.
+  const unmatchedSaid = said.meds.filter((s) => !rec.meds.some((m) => sameDrug([m.name, m.alt_name].filter(Boolean), [s.name]))).length;
   const matchedSaid = new Set<number>();
   for (const m of rec.meds) {
     const names = [m.name, m.alt_name].filter(Boolean);
     const idx = said.meds.findIndex((s, i) => !matchedSaid.has(i) && sameDrug(names, [s.name]));
     if (idx < 0) {
       const mention = tapeMention(names, lines);
-      if (!mention) push({ kind: "in_record_not_said", field: "drug", tier: "obvious", target: m.name, record_value: [m.name, m.dose, m.freq].filter(Boolean).join(" "), tape_t_ms: [], quote: null, support: "no support found", field_ai_filled: rec.ai.meds, what: "A drug in the record has no support on the tape" });
+      if (!mention) push({ kind: "in_record_not_said", field: "drug", tier: unmatchedSaid > 0 ? "material" : "obvious", target: m.name, record_value: [m.name, m.dose, m.freq].filter(Boolean).join(" "), tape_t_ms: [], quote: null, support: "no support found", field_ai_filled: rec.ai.meds, what: unmatchedSaid > 0 ? "A drug in the record has no support on the tape (a different drug name was said: it may be the same drug by another name)" : "A drug in the record has no support on the tape" });
       continue;
     }
     matchedSaid.add(idx);
     const s = said.meds[idx]!;
-    const rd = parseDose(m.dose), sd = parseDose(s.dose);
+    const rd = parseDose(m.dose), sd = parseDose(s.dose, rd?.unit);
     if (rd && sd && rd.unit === sd.unit && rd.value > 0 && sd.value > 0 && Math.abs(rd.value - sd.value) > 1e-9) {
       const ratio = rd.value / sd.value;
       const clear = ratio >= DOSE_CLEAR_HIGH || ratio <= DOSE_CLEAR_LOW;
@@ -147,7 +180,7 @@ export function compareRecord(rec: NormRecord, said: SaidItems, lines: TapeLine[
       if (coverage(p.name, tapeWords) < COVERAGE_MIN) push({ kind: "in_record_not_said", field: "procedure", tier: "obvious", target: p.name, record_value: p.name, tape_t_ms: [], quote: null, support: "no support found", field_ai_filled: rec.ai.procedures, what: "A procedure in the record has no support on the tape" });
       continue;
     }
-    const rs = parseSide(p.name), ss = parseSide(`${sp.side} ${sp.name}`);
+    const rs = parseSide(p.name) ?? parseSide(rec.exam), ss = parseSide(`${sp.side} ${sp.name}`); // R7: the examination text is read for a side too
     if (rs && ss && rs !== "both" && ss !== "both" && rs !== ss) push({ kind: "value_mismatch", field: "laterality", tier: "obvious", target: p.name, record_value: p.name, tape_t_ms: [sp.t_ms], quote: sp.quote, support: "tape support", field_ai_filled: rec.ai.procedures, what: `The side in the record (${rs}) differs from the side on the tape (${ss})` });
   }
   for (const s of said.procedures) {
@@ -162,7 +195,7 @@ export function compareRecord(rec: NormRecord, said: SaidItems, lines: TapeLine[
       if (coverage(d.name, tapeWords) < COVERAGE_MIN) push({ kind: "in_record_not_said", field: "diagnosis", tier: d.differential ? "minor" : "obvious", target: d.name, record_value: d.name, tape_t_ms: [], quote: null, support: "no support found", field_ai_filled: rec.ai.diagnoses, what: d.differential ? "A differential diagnosis in the record has no support on the tape" : "A diagnosis in the record has no support on the tape" });
       continue;
     }
-    const rs = parseSide(`${d.name} ${d.location_notes}`), ss = parseSide(`${sd.side} ${sd.name}`);
+    const rs = parseSide(`${d.name} ${d.location_notes}`) ?? parseSide(rec.exam), ss = parseSide(`${sd.side} ${sd.name}`); // R7
     if (!d.differential && rs && ss && rs !== "both" && ss !== "both" && rs !== ss) push({ kind: "value_mismatch", field: "laterality", tier: "obvious", target: d.name, record_value: `${d.name} ${d.location_notes}`.trim(), tape_t_ms: [sd.t_ms], quote: sd.quote, support: "tape support", field_ai_filled: rec.ai.diagnoses, what: `The side in the record (${rs}) differs from the side on the tape (${ss})` });
   }
 

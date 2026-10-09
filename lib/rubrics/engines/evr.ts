@@ -20,6 +20,9 @@ export const tapeLines = (t: ConsultText): TapeLine[] => t.lines.map((l) => ({ t
 /** Product wording that must never appear in any string this rubric writes (a test checks every output string). */
 export const BANNED_WORDS = ["fraud", "fraudulent", "guilty", "dishonest", "dishonesty", "lying", "liar", "deceit", "deceive", "deceptive", "falsif", "forged", "forgery", "cheat", "misconduct", "malpractice", "corrupt"];
 
+/** The banned words found in a string (case-insensitive). PURE; used by the tests over every file and string this rubric can write. */
+export const findBanned = (s: string): string[] => BANNED_WORDS.filter((b) => s.toLowerCase().includes(b));
+
 /** The unwired judgement hook: reserved for judgement items only; it is NEVER called in this slice. */
 export const jevJudge: JevJudge | undefined = undefined;
 

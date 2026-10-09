@@ -95,7 +95,7 @@ export function normaliseRecord(row: Record<string, unknown>): NormRecord {
     advice: arr(row.advice).map((a) => str(a.general_advice)).filter(Boolean).join("; "),
     followup: [str(row.fu_type), str(row.fu_instructions), str(row.fu_date), str(row.fu_next)].filter(Boolean).join("; "),
     refer_to: arr(row.refer_to).map((r) => str(r.specialist_type)).filter(Boolean),
-    ai: { exam: combine([aiOf(row.ai_meta, "examination")]), complaints: combine(complaintsRaw.map((c) => aiOf(c.ai_field_metadata, "symptoms"))), diagnoses: combine(diagAi), procedures: combine(procAi), meds: "unknown", investigations: "unknown" },
+    ai: { exam: combine([aiOf(row.ai_meta, "examination")]), complaints: combine(complaintsRaw.map((c) => aiOf(c.ai_field_metadata, "symptoms"))), diagnoses: combine(diagAi), procedures: combine(procAi), /* R8: Pulse carries NO ai_field_metadata for medications or investigations (measured 9 Oct 2026), so their provenance is "unknown" and is never invented here; a drug finding is therefore never AI-capped */ meds: "unknown", investigations: "unknown" },
   };
 }
 
