@@ -86,6 +86,7 @@ export const JOB_ERROR_CODES = [
   "already_transcribed",
   "audio_unreadable",
   "blind_room_day",
+  "mirror_minutes_missing",
   "duration_unknown",
   // the stubs
   "not_implemented",
