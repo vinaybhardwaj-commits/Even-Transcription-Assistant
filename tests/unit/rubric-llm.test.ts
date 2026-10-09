@@ -192,7 +192,9 @@ describe("gates: lab only, blind room-days, bench wiring", () => {
     expect(canRun(affect, { lab: true, unit: "consult" })).toBeNull();
     expect(canRun(pitch, { lab: true, unit: "window" })).toMatchObject({ error: "unit_not_supported" });
     expect(canRun(getRubric("care_sentiment")!, { lab: true })).toMatchObject({ error: "engine_not_available" });
-    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true })).toMatchObject({ error: "engine_not_available" });
+    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true, unit: "stay" })).toBeNull(); // S7-3: wired (draft: lab:true), stay unit only
+    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: false })).toMatchObject({ error: "lab_required" });
+    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true, unit: "consult" })).toMatchObject({ error: "unit_not_supported" });
   });
   it("a consult in a held-out room-day is skipped blind_room_day BEFORE its text is read or a model is called", async () => {
     let called = 0;
