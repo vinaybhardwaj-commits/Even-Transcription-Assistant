@@ -5,7 +5,7 @@
  * dollar-quote ($$ / $tag$) or an E'...' string AND names any gated table (FAIL CLOSED: those forms are not parsed), or (c) a literal that builds / reads an R2 room-audio key prefix, in a file outside
  * lib/room-access/ that is not on the allowlist. TS comments are ignored.
  * KNOWN LIMITS (not scanned): SQL assembled by string concatenation or built in a variable across literals (a table name in one piece, FROM in another); a table name from a variable or a config value;
- * SQL read from a file; dynamic identifiers; a table reached through a VIEW or function that is not gated.
+ * SQL read from a file; dynamic identifiers; a table reached through a VIEW or function that is not gated; forms the FROM / JOIN / UPDATE / INTO patterns do not name: FROM (bench_window w JOIN x ...) (a parenthesised join group), DELETE ... USING <table>, TABLE <table>, COPY <table> ... and TRUNCATE <table>.
  */
 export const ROOM_TABLES = [
   "room_turn_speaker", "room_diarize_window", "bench_window", "bench_session", "speaker_cluster", "room_speaker_cluster_member", "diarize_window_label",

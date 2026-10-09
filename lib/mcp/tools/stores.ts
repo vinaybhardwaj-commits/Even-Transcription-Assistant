@@ -72,6 +72,7 @@ const storeStats: McpTool = {
   handler: async () => {
     totalsMemo = null;
     const today = istDate();
+    let chunksBlindExcluded: number | null = null;
     const [sessions, sessionsByStatus, chunksByState, marks, encounters, encountersToday, enginesEnabled, cuesToday, roomDaysToday] = await Promise.all([
       count(async () => (await sessionTotals()).total),
       (async () => {
@@ -83,7 +84,9 @@ const storeStats: McpTool = {
       })(),
       (async () => {
         try {
-          return { value: (await benchChunkTotals()).byState };
+          const ct = await benchChunkTotals();
+          chunksBlindExcluded = ct.nBlindExcluded;
+          return { value: ct.byState };
         } catch (e) {
           return { value: null, error: String((e as Error)?.message ?? e).slice(0, 120) };
         }
@@ -110,7 +113,7 @@ const storeStats: McpTool = {
     const errors = Object.entries(parts).filter(([, v]) => v.error).map(([k, v]) => `${k}: ${v.error}`);
     return {
       ist_date: today,
-      bench: { sessions: sessions.value, sessions_by_status: sessionsByStatus.value, chunks_by_upload_state: chunksByState.value, consult_marks: marks.value, n_blind_excluded: blindExcluded },
+      bench: { sessions: sessions.value, sessions_by_status: sessionsByStatus.value, chunks_by_upload_state: chunksByState.value, consult_marks: marks.value, n_blind_excluded: blindExcluded, n_blind_chunks_excluded: chunksBlindExcluded },
       encounters: { total: encounters.value, today_ist: encountersToday.value },
       stt: { engines_enabled: enginesEnabled.value },
       brain: {

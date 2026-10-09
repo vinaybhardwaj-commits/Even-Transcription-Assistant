@@ -562,6 +562,18 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(counted + nBlindExcluded).toBe(all);
     expect(counted).toBeGreaterThanOrEqual(1);
   });
+  it("F2-S1 /api/admin/stt-spend: a run whose window row is gone still counts (cost included); held-out runs are still excluded", async () => {
+    const { sttSpendRaw } = await import("@/lib/room-access/tool-reads");
+    const sum = (r: Array<Record<string, unknown>>) => ({ n: r.reduce((a, x) => a + Number(x.n_runs), 0), cost: r.reduce((a, x) => a + Number(x.cost_usd_total), 0) });
+    const before = await sttSpendRaw();
+    pg.exec(`INSERT INTO transcription_run (id, subject_type, subject_id, engine, mode, tier, transcript_original, cost_usd) VALUES
+      ('tr_orph1', 'bench_window', 'bw_gone', 'route', 'batch', 'asr', 'x', 0.05), ('tr_orph2', 'bench_window', 'bw_gone2', 'route', 'batch', 'asr', 'y', 0.03)`);
+    const after = await sttSpendRaw();
+    expect(sum(after.raw).n - sum(before.raw).n).toBe(2);
+    expect(Number((sum(after.raw).cost - sum(before.raw).cost).toFixed(4))).toBe(0.08);
+    expect(after.nBlindExcluded).toBe(before.nBlindExcluded);
+    expect(after.nBlindExcluded).toBeGreaterThanOrEqual(2);
+  });
   it("scribe_store_stats: chunk totals leave out chunks of a held-out session and count them", async () => {
     const { benchChunkTotals } = await import("@/lib/room-access/tool-reads");
     const { sessionsBlindAny } = await import("@/lib/room-access/check");
@@ -572,7 +584,9 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(rows.filter((r) => held.has(r.sid)).length).toBeGreaterThan(0);
     expect(t.nBlindExcluded).toBe(rows.filter((r) => held.has(r.sid)).length);
     expect(counted).toBe(rows.filter((r) => !held.has(r.sid)).length);
-    expect((await call("scribe_store_stats", {})).bench.chunks_by_upload_state).toEqual(t.byState);
+    const st = (await call("scribe_store_stats", {})).bench;
+    expect(st.chunks_by_upload_state).toEqual(t.byState);
+    expect(st.n_blind_chunks_excluded).toBe(t.nBlindExcluded);
   });
   it("the runs readers behind scribe_get_stt_run, scribe_stt_windows and the admin run route still refuse a held-out window (guard before the module read)", async () => {
     expect(await call("scribe_get_stt_run", { subject_id: "bw_rts", include_text: true })).toMatchObject({ error: "blind_room_day", runs: [] });

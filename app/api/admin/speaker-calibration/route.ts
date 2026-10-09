@@ -25,7 +25,7 @@
  * there is no separate dry mode, because storing is what every run does. This route then reads
  * those rows. With none stored it says so by name rather than reporting an empty sweep as a finding.
  *
- * ALL SQL IS INFERRED. The read fails safe to empty with a logged reason — never a 500.
+ * ALL SQL IS INFERRED. FAIL CLOSED: a failed session or diarize read answers 503 {ok:false,error:"db"} and nothing is served; a held-out session is 403, an unknown one 404.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { readAdminCookie } from "@/lib/cookie";

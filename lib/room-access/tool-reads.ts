@@ -310,9 +310,10 @@ export async function sttSpendRaw(): Promise<{ raw: Array<Record<string, unknown
            COALESCE(SUM(r.cost_usd), 0)::float8 AS cost_usd_total,
            COUNT(*) FILTER (WHERE r.cost_usd IS NULL)::int AS cost_unreported_runs
       FROM transcription_run r
-      JOIN bench_window bw ON bw.id = r.subject_id
+      LEFT JOIN bench_window bw ON bw.id = r.subject_id
      WHERE r.subject_type = 'bench_window'
-       AND NOT (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr
+       -- F2-S1: the held-out test applies only when the window row exists; a run whose window row is gone carries no window content and still counts
+       AND NOT (bw.id IS NOT NULL AND EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr
                       WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
                         hr.id = bw.room_day_id
                         OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = bw.id)
@@ -323,8 +324,8 @@ export async function sttSpendRaw(): Promise<{ raw: Array<Record<string, unknown
      ORDER BY day DESC, r.initiated_by NULLS LAST
   `) as Array<Record<string, unknown>>;
   const held = (await sql`
-    SELECT COUNT(*)::int AS n FROM transcription_run r JOIN bench_window bw ON bw.id = r.subject_id
-     WHERE r.subject_type = 'bench_window' AND (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr
+    SELECT COUNT(*)::int AS n FROM transcription_run r LEFT JOIN bench_window bw ON bw.id = r.subject_id
+     WHERE r.subject_type = 'bench_window' AND bw.id IS NOT NULL AND (EXISTS (SELECT 1 FROM unnest(${HELD_DAYS}::date[], ${HELD_ROOMS}::text[]) AS hb(d, r), room_day hr
                       WHERE hb.d = hr.ist_date AND hb.r = hr.room_id AND (
                         hr.id = bw.room_day_id
                         OR hr.id IN (SELECT hd.room_day_id FROM room_diarize_window hd WHERE hd.window_id = bw.id)
