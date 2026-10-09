@@ -517,6 +517,44 @@ describe("scribe_health aspect=routes", () => {
     }
   });
 
+  it("S8A8 G69 — APP_URL on the APEX is probed on www (APP_URL unchanged); exactly ONE same-site redirect is followed; another site, another path or a second hop is reported as the redirect", async () => {
+    process.env.APP_URL = "https://evenscribe.app";
+    fetchMock.mockImplementation(async (u: string, init: { method: string }) => {
+      if (u.startsWith("https://evenscribe.app/")) return new Response(null, { status: 307, headers: { location: u.replace("https://evenscribe.app", "https://www.evenscribe.app") } });
+      return new Response(null, { status: init.method === "OPTIONS" ? 204 : 200 });
+    });
+    const t = S.CALLABLE_TOOLS.get("scribe_health_routes")!;
+    let out = await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never) as Row;
+    expect(out).toMatchObject({ ok: true, origin: "https://www.evenscribe.app" });
+    expect(fetchMock.mock.calls.every(([u]) => String(u).startsWith("https://www.evenscribe.app/"))).toBe(true); // the apex is never even asked
+    expect(process.env.APP_URL).toBe("https://evenscribe.app"); // not changed
+    // a configured non-apex origin that redirects once, same site: followed once
+    process.env.APP_URL = "https://app.example.test";
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (u: string, init: { method: string }) => {
+      if (u.startsWith("https://app.example.test/")) return new Response(null, { status: 307, headers: { location: u.replace("://app.", "://www.app.") } });
+      return new Response(null, { status: init.method === "OPTIONS" ? 204 : 200 });
+    });
+    out = await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never) as Row;
+    expect(out.ok).toBe(true);
+    expect((out.routes as Row[]).every((r) => r.redirected === true)).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(10); // 5 routes x (the redirect + the one follow)
+    // not followed: another site, another path, a second hop (the redirect is reported as the status it is, ok:false)
+    for (const loc of ["https://evil.example/api/health", "https://app.example.test/other", "https://app.example.test/api/health?x=1"]) {
+      fetchMock.mockReset();
+      fetchMock.mockImplementation(async () => new Response(null, { status: 307, headers: { location: loc } }));
+      out = await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never) as Row;
+      expect(out.ok, loc).toBe(false);
+      expect(fetchMock.mock.calls.length, loc).toBe(5); // never followed
+    }
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (u: string) => new Response(null, { status: 307, headers: { location: u.replace("://app.", "://www.app.").replace("://www.www.", "://www.") } }));
+    out = await t.handler({}, { actor: "a", scopes: new Set(["read"]) } as never) as Row;
+    expect(out.ok).toBe(false); // the redirect never ends in 200: ONE hop was followed, the second 307 is the answer
+    expect(fetchMock.mock.calls.length).toBe(10);
+    expect((out.routes as Row[]).every((r) => r.status === 307)).toBe(true);
+  });
+
   it("G19: the origin is configuration (APP_URL, else the production constant) — NEVER the request's own origin / Host", async () => {
     fetchMock.mockImplementation(async () => new Response(null, { status: 200 }));
     const t = S.CALLABLE_TOOLS.get("scribe_health_routes")!;
