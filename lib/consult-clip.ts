@@ -11,7 +11,7 @@ import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { findRebTrack, type RebTrackRef } from "@/lib/rubrics/readers/reb-consult";
 import { clipKeyOf, findClip, type ConsultIndexRow } from "@/lib/consult-index";
 
-export type ClipRefusal = { ok: false; error: "blind_room_day" | "consult_index_unavailable" | "consult_index_integrity" | "consult_not_in_index" | "consult_voice_isolated" | "already_transcribed" | "audio_unreadable"; track?: Omit<RebTrackRef, "segments"> };
+export type ClipRefusal = { ok: false; error: "blind_room_day" | "mirror_minutes_missing" | "consult_index_unavailable" | "consult_index_integrity" | "consult_not_in_index" | "consult_voice_isolated" | "already_transcribed" | "audio_unreadable"; track?: Omit<RebTrackRef, "segments"> };
 export type ClipOk = { ok: true; row: ConsultIndexRow; key: string; content_type: string };
 
 /**
@@ -32,6 +32,8 @@ export async function preflightClip(consultUid: string): Promise<ClipOk | ClipRe
   if (!got.ok) return { ok: false, error: got.error };
   const row = got.row;
   if (row.voice_isolated === true) return { ok: false, error: "consult_voice_isolated" };
+  // B3-4: the mirror row's minutes are the duration floor the cap and the 30-minute limit rest on (max of container, bytes, mirror minutes x 60): without a positive figure that floor is gone
+  if (!(typeof row.minutes === "number" && Number.isFinite(row.minutes) && row.minutes > 0)) return { ok: false, error: "mirror_minutes_missing" };
   const t = await findRebTrack(consultUid, row.room_id, row.ist_date);
   if (t.found) return { ok: false, error: "already_transcribed", track: { source: t.found.source, layer: t.found.layer, config_hash: t.found.config_hash, n_segments: t.found.n_segments } };
   const key = clipKeyOf(row);

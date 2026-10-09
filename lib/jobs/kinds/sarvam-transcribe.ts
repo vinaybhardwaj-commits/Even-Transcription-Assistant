@@ -25,7 +25,8 @@ import { sql } from "@/lib/db";
 import { JOIN_MAX_MS } from "@/lib/bench-join";
 import { measureAudioMs } from "@/lib/audio-duration";
 import { getObjectBytes, headObject } from "@/lib/r2";
-import { preflightClip } from "@/lib/consult-clip";
+import { preflightClip, windowPairOf } from "@/lib/consult-clip";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { gatewayConfigured } from "@/lib/sarvam-gateway";
 import { chunkText, gwBatchInit, gwBatchResult, gwBatchStartJob, gwBatchStatus, gwBatchUpload, gwTranslateChunk, SARVAM_GW_STT_MODEL, SARVAM_GW_TRANSLATE_MODEL, type Fail } from "@/lib/sarvam-gw";
 import { SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
@@ -101,8 +102,13 @@ function bail(f: Fail, code: JobErrorCode): StepOutcome {
 export const sarvamTranscribeKind: JobKind = {
   name: SARVAM_TRANSCRIBE_KIND,
   first: STEPS.prepare,
-  roomData: false,
-  roomDataNote: "source is a doctor-PWA encounter (no room placement); a room audio argument is refused at parse (scope_consult_only)",
+  // K3-2: an encounter source is a doctor-PWA encounter (no room placement); a consult source is a room recording (CONSULT's mirror row names its room and day)
+  roomData: true,
+  heldOut: async (args) => {
+    if (args.source !== "consult" || typeof args.consult_uid !== "string") return null;
+    const p = await windowPairOf(args.consult_uid); // ALL rows of the uid (S8C-1)
+    return p && isBlindRoomDay(p.ist_date, p.room_id) ? "blind_room_day" : null;
+  },
   scope: "invoke",
   parseArgs: (raw) => parseSarvamTranscribeArgs(raw) as unknown as Record<string, unknown>,
   // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back
