@@ -53,6 +53,23 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
       expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
     }
   });
+  it("REL3-FU2 G3-1: tables inside parentheses (derived tables, LATERAL, subqueries in a JOIN, nested) and FROM ONLY are seen, every form for all 17 tables", () => {
+    const forms = (t: string): string[] => [
+      `sql\`SELECT 1 FROM (SELECT id FROM ${t}) q\``,
+      `sql\`SELECT 1 FROM a, LATERAL (SELECT * FROM ${t} c) l\``,
+      `sql\`SELECT 1 FROM ONLY ${t}\``,
+      `sql\`SELECT 1 FROM a JOIN (SELECT x FROM ${t} WHERE y) x ON true\``,
+      `sql\`SELECT 1 FROM a LEFT JOIN LATERAL (SELECT 1 FROM "public"."${t}" z LIMIT 1) l ON true\``,
+      `sql\`SELECT 1 FROM (SELECT 1 FROM (SELECT 1 FROM ${t}) q1) q2\``,
+      `sql\`WITH c AS (SELECT 1 FROM ${t}) SELECT 1 FROM c\``,
+      `sql\`SELECT 1 FROM a WHERE EXISTS (SELECT 1 FROM ${t} z WHERE z.x = a.x)\``,
+      `sql\`UPDATE ONLY ${t} SET x = 1\``,
+      `sql\`SELECT 1 FROM a JOIN ONLY ${t} ON true\``,
+    ];
+    for (const t of ROOM_TABLES) for (const f of forms(t)) expect(scanSource("lib/x.ts", f).map((v) => v.what), `${t}: ${f}`).toEqual([t]);
+    // the clean twins: a derived table over a non-room table, LATERAL over a look-alike
+    for (const ok of ["sql`SELECT 1 FROM (SELECT id FROM other_t) q`", "sql`SELECT 1 FROM a, LATERAL (SELECT * FROM cues c) l`", "sql`SELECT 1 FROM ONLY bench_window_silence`"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
+  });
   it("a synthetic file added to the tree would fail the gate (the assertion above is not vacuous)", () => {
     const fake = scanSource("lib/mcp/tools/new-tool.ts", "const rows = await sql`SELECT * FROM room_turn_speaker`;");
     const loose = fake.filter((v) => !ALLOWLIST[v.file]);

@@ -12,9 +12,9 @@ export const KEY_PREFIXES = ["bench/", "clips/", "vad-trim/", "reb/", "consult-c
 
 const NAME = `(?:"?[A-Za-z_][\\w$]*"?\\s*\\.\\s*)?"?(${ROOM_TABLES.join("|")})"?(?![\\w$])`;
 // G-1: a table may be quoted ("bench_window"), schema-qualified (public.bench_window, "public"."bench_window") and may be any item of a comma FROM list
-const KW_RE = new RegExp(`\\b(?:JOIN|UPDATE|INTO)\\s+${NAME}`, "gi");
+const KW_RE = new RegExp(`\\b(?:JOIN|UPDATE|INTO)\\s+(?:ONLY\\s+)?${NAME}`, "gi");
 const FROM_RE = /\bFROM\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)(?=\s(?:WHERE|GROUP|ORDER|LIMIT|JOIN|LEFT|RIGHT|INNER|CROSS|FULL|NATURAL|ON|UNION|HAVING|RETURNING|SET|FOR|OFFSET)\b|\)|;|$)/gi;
-const ITEM_RE = new RegExp(`^\\s*${NAME}`, "i");
+const ITEM_RE = new RegExp(`^\\s*(?:ONLY\\s+)?${NAME}`, "i");
 const KEY_RE = new RegExp(`[\`'"](?:${KEY_PREFIXES.map((p) => p.replace(/[/-]/g, (c) => `\\${c}`)).join("|")})`, "g");
 
 /** The bodies of the string and template literals in comment-stripped code, with their start offsets. */
@@ -82,13 +82,17 @@ export function scanSource(file: string, src: string): Violation[] {
   };
   for (const lit of literalsOf(code)) {
     for (const m of lit.text.matchAll(KW_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
-    for (const m of lit.text.matchAll(FROM_RE)) {
+    // REL3-FU2 G3-1: every FROM is looked at, INCLUDING the ones inside parentheses (derived tables, LATERAL, subqueries in a JOIN): the scan resumes right after each FROM keyword instead of
+    // skipping the span a match consumed; FROM ONLY <table> is the same table
+    const re = new RegExp(FROM_RE.source, "gi");
+    for (let m = re.exec(lit.text); m; m = re.exec(lit.text)) {
       let off = m.index! + m[0].indexOf(m[1]!);
       for (const item of splitList(m[1]!)) {
         const t = ITEM_RE.exec(item);
         if (t) add("sql", t[1]!.toLowerCase(), lit.at + off + (t.index ?? 0));
         off += item.length + 1;
       }
+      re.lastIndex = m.index! + 4;
     }
   }
   for (const m of code.matchAll(KEY_RE)) add("key", m[0].slice(1), m.index!);
