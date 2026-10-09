@@ -31,7 +31,7 @@ const READ_NO_ROOM = "Read-only; touches no room. Times UTC.";
 const READ_LIVE = "Read-only; reads live rooms. Times UTC.";
 
 const NO_ROOM_READ = READ_NO_ROOM;
-const CAVEATS = "tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.";
+const CAVEATS = "tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a drop.";
 
 /** One short description per listed tool. Group lines carry a generated selector; the rest are fixed text. */
 function briefs(): Record<string, string> {
@@ -39,29 +39,29 @@ function briefs(): Record<string, string> {
     scribe_health: `${READ_NO_ROOM} ${selector("scribe_health")} (default all) probes.`,
     scribe_system: `${READ_NO_ROOM} ${selector("scribe_system")}.`,
     scribe_rooms: `${READ_LIVE} ${selector("scribe_rooms")}. ${CAVEATS}`,
-    scribe_get_state: `${NO_ROOM_READ} Brain picture for a room-day: visits, active visit, speaker clusters (no vectors). Never creates a day.`,
-    scribe_list_cues: `${NO_ROOM_READ} Brain cues for a room-day, newest first; summary only, payload needs include_payload=true.`,
-    scribe_post_cue: "WRITE; adds a cue to a room's live brain day, sends no room command. Times UTC. Open type minus a blocklist; see help.",
-    scribe_pin_visit: "WRITE; operator pin cue (visit phase) on a live brain day; never edits the visit table, no room command. Times UTC.",
+    scribe_get_state: `${NO_ROOM_READ} Brain picture for a room-day: visits, active visit, clusters (no vectors). Never creates a day.`,
+    scribe_list_cues: `${NO_ROOM_READ} Brain cues for a room-day, newest first; summary only (payload: include_payload=true).`,
+    scribe_post_cue: "WRITE; adds a cue to a live brain day, sends no room command. Times UTC.",
+    scribe_pin_visit: "WRITE; operator pin cue on a live brain day; never edits the visit table, no room command. Times UTC.",
     scribe_room_command: `WRITE; acts on a LIVE clinical room. Times UTC. ${selector("scribe_room_command")}. Needs an open kiosk listener (else kiosk_not_listening); start_day idempotent; room_paused is consent; no start/stop on a room with patients without V's GO.`,
     scribe_sessions: `${READ_NO_ROOM} ${selector("scribe_sessions")}; replay is a dry run that writes nothing.`,
     scribe_session_tape: `Read-only; may quote operator notes and presigned audio links; touches no room. Times UTC. ${selector("scribe_session_tape")}.`,
-    scribe_mark_consult: "WRITE; marks a consult on a room's active session (bench_event + cue); no room command. Times UTC.",
+    scribe_mark_consult: "WRITE; marks a consult on the active session (bench_event + cue); no room command. Times UTC.",
     scribe_extract_audio: "INVOKE scope; presigned audio links for an IST window; writes no row, touches no room. Times UTC.",
     scribe_transcribe_range: "INVOKE scope; transcribes an audio window (text only, never bytes); refused over 30 min and while any room records. Times UTC.",
     scribe_list_commands: `${READ_LIVE} Room command queue (bench_command), newest first.`,
     scribe_scratch: `WRITE to SCRATCH room-days only, never a live room. Times UTC. ${selector("scribe_scratch")}.`,
-    scribe_stt_runs: "Read-only; may quote identity; touches no room. Times UTC. No id lists subjects; subject_id or encounter_id lists that subject's runs.",
+    scribe_stt_runs: "Read-only; may quote identity; touches no room. Times UTC. No id lists subjects; subject_id or encounter_id lists its runs.",
     scribe_voice: `Read-only; names clinicians and returns presigned audio with include_urls; touches no room. Times UTC. ${selector("scribe_voice")}.`,
     scribe_silence_readjudicate: "WRITE only with apply:true (dry run by default); re-runs silent windows, no live-room command. Times UTC.",
     scribe_diarize_segments: `${NO_ROOM_READ} Speaker timings without text for an encounter_id, window_id or session_id.`,
     scribe_encounter_hypotheses: `${NO_ROOM_READ} Encounter-clock hypotheses for a room-day: latest smoother run and intervals.`,
-    scribe_encounter_shadow_run: "INVOKE scope; runs the encounter clock over a room-day and stores hypotheses; no STT, no clinician-facing write, no live room. Times UTC.",
+    scribe_encounter_shadow_run: "INVOKE scope; runs the encounter clock over a room-day, stores hypotheses; no STT, no clinician-facing write, no live room. Times UTC.",
     scribe_list_encounters: `${NO_ROOM_READ} Doctor-PWA encounters with status and pipeline flags; filter by bucket, window, doctor.`,
-    scribe_encounter: "Read-only; touches no room. Times UTC. One doctor-PWA encounter (encounter_id) or one LLM trace (trace_id); pass exactly one.",
+    scribe_encounter: "Read-only; touches no room. Times UTC. One doctor-PWA encounter (encounter_id) or LLM trace (trace_id); pass exactly one.",
     scribe_list_traces: `${NO_ROOM_READ} LLM pipeline traces; filter by surface, status, window.`,
     scribe_set_visit_clinician: "WRITE; names the clinician on one visit (the only change a closed visit accepts); no room command. Times UTC.",
-    scribe_fuse_report: `${NO_ROOM_READ} Fuse scoreboard for one room-day: marks vs warehouse vs visits vs tape, every disagreement.`,
+    scribe_fuse_report: `${NO_ROOM_READ} Fuse scoreboard for one room-day: marks vs warehouse vs visits vs tape, disagreements.`,
     scribe_job_submit: "INVOKE scope; queues long work, returns a job id fast; a job can read room audio, no live-room command. Times UTC.",
     scribe_job_status: `${NO_ROOM_READ} One job: status, step, attempts, progress, error_code, timings.`,
     scribe_job_list: `${NO_ROOM_READ} Job queue, newest first; filter by status and kind.`,
@@ -79,22 +79,22 @@ function briefs(): Record<string, string> {
     scribe_help: "Read-only; touches no room. One tool's full contract: scope, schema, long help; accepts any name. Times UTC.",
     scribe_usage: "Read-only; touches no room. Door usage from audit_log: calls, errors, p50/p95 per tool and actor. Times UTC.",
     // S1 reads (S1A)
-    scribe_now: "Read-only; reads live rooms. Times UTC. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
-    scribe_room: "Read-only; reads a live room. Times UTC. view=alerts|levels|commands|devices. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a device drop.",
-    scribe_steward_command: "WRITE; Room Steward config; can act on LIVE rooms. Times UTC. kind=set_shadow|kill_switch|start_day_live|add_room|flag_room|set_window|note|mute_alerts; reason required; returns a revert.",
-    scribe_lanes: "Read-only; touches no room. Times UTC. Fleet and lane state (lab bucket): view=fleet|lanes (name, age_s, stale > 600 s).",
-    scribe_rubric: "Job queue read/write; stored data, never Pulse; touches no room. Times UTC. action=list|describe|results|runs|board|run|bench; run/bench need invoke; draft rubrics need lab:true + unit_keys.",
+    scribe_now: "Read-only; reads live rooms. Times UTC. tape_advancing is not audio arriving: trust state + ages_s; zero_ratio>=0.98 = digital silence; levels can freeze after a drop.",
+    scribe_room: "Read-only; reads a live room. Times UTC. tape_advancing is not audio arriving; zero_ratio>=0.98 = digital silence; levels can freeze after a drop.",
+    scribe_steward_command: "WRITE; Room Steward config; can act on LIVE rooms. Times UTC; reason required; returns a revert.",
+    scribe_lanes: "Read-only; touches no room. Times UTC. Fleet and lane state (lab bucket): name, age_s, stale > 600 s.",
+    scribe_rubric: "Job queue read/write; stored data, never Pulse; touches no room. Times UTC. run/bench need invoke; draft rubrics need lab:true + unit_keys.",
     scribe_sarvam: "Job queue read/write; Sarvam (ZDR): consult/encounter audio; MCP research also room windows/segments, never blind days. Times UTC. Job submits need invoke.",
-    scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow only on request.",
-    scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why|history|ticket_log|ticket_summary|live; why needs room + at (+-15 min). No ticket signatures.",
-    scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen; room optional.",
+    scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow on request.",
+    scribe_steward: "Read-only; touches no room. Times UTC. Steward views; why needs room + at (+-15 min). No ticket signatures.",
+    scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC; room optional.",
     scribe_stt_windows: "Read-only; touches no room. Times UTC. One STT window (window_id) or a room's windows for an IST day. No transcript text.",
     scribe_tape_day: `${NO_ROOM_READ} Minutes per audio state per room for one IST day; include_segments (needs room) adds intervals.`,
   };
 }
 
 /** Longest property description tools/list carries; the full text stays in the registry and scribe_help returns it. */
-export const LISTED_PROP_DESC_MAX_CHARS = 32;
+export const LISTED_PROP_DESC_MAX_CHARS = 22;
 
 /** Listed property descriptions that must keep a word the 32-char cut would lose (tool -> property -> text). The full text stays in scribe_help. */
 const LISTED_PROP_OVERRIDES: Record<string, Record<string, string>> = {
@@ -113,7 +113,10 @@ export function shortText(text: string, max: number = LISTED_PROP_DESC_MAX_CHARS
   if (sp > 12) return `${cut.slice(0, sp).replace(/[\s,;:(\-]+$/, "")}…`;
   // one long token (a [kind=a|b|c] tag): cut after the last separator, never in the middle of a name
   const bar = Math.max(cut.lastIndexOf("|"), cut.lastIndexOf(","));
-  return `${(bar > 8 ? cut.slice(0, bar + 1) : cut).replace(/[\s,;:(\-]+$/, "")}…`;
+  if (bar > 8) return `${cut.slice(0, bar + 1).replace(/[\s,;:(\-]+$/, "")}…`;
+  // no separator inside the cut: keep the whole first name (to its separator) rather than cut it in the middle
+  const next = t.slice(max - 1).search(/[|,\]\s]/);
+  return next >= 0 ? `${t.slice(0, max - 1 + next + 1).replace(/[\s,;:(\-]+$/, "")}…` : `${cut.replace(/[\s,;:(\-]+$/, "")}…`;
 }
 
 /** The schema with every property/array-item `description` shortened. Structure, types, enums, required, bounds: untouched. */
