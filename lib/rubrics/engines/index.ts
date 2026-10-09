@@ -2,6 +2,8 @@
  * lib/rubrics/engines/index.ts — S7-0: evaluate ONE unit of a code-engine rubric (read inputs through the readers, run the pure engine), and resolve which units a run covers.
  * Engines jev and llm_zdr are not wired in this slice (canRun refuses them before a job is queued).
  */
+import { evaluateEhrc } from "./ehrc";
+import { listSurgicalStays, parseStayKey } from "../readers/stay-record";
 import { sql } from "@/lib/db";
 import type { Rubric, RubricUnit } from "../types";
 import { listAudioHours, listConsultKeys, parseRoomHourKey, readAudioHour, readConsultSpan, readWindowTurns, windowPair, consultPair, isRefusal, blindRefusal, refuse, isIstDate, isRoomId, type ReadRefusal } from "../readers";
@@ -14,6 +16,9 @@ import { evaluateEncounterVsRecord, evaluateEvrWindow } from "./evr";
 import type { PerturbKind, WindowOutcome } from "../evr/perturb";
 import type { EngineResult, UnitOutcome } from "./types";
 import { BLIND_ROOM_DAYS } from "../blind-room-days";
+/** S7-3: the most stays one run covers */
+export const STAY_RUN_MAX = 50;
+
 
 type Pair = { room_id: string; ist_date: string };
 const skip = (reason: string, pair: Pair | null = null): UnitOutcome => ({ status: "skipped", findings: [], reason, room_id: pair?.room_id ?? null, ist_date: pair?.ist_date ?? null });
@@ -80,6 +85,12 @@ export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: str
  * (askJson), so the runner retries the step; a bad answer after the one retry is a failed unit with a closed reason.
  */
 async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean; room_id?: string | null; room_ids?: string[] | null; ist_date?: string | null }): Promise<UnitOutcome> {
+  if (unitKind === "stay" && r.id === "ehrc_surgical_outcome") {
+    // S7-3: a stay has no room and no room-day (the held-out set is by room-day, so it cannot apply); its IST date is the admission's. The warehouse read is READ ONLY and PHI-free (stay-record.ts).
+    const e = await evaluateEhrc(r, unitKey);
+    const { ist_date, ...rest } = e;
+    return { ...rest, calls: e.calls ?? 0, room_id: null, ist_date: ist_date ?? null };
+  }
   if (unitKind !== "consult") return skip("unit_not_supported");
   let pair: Pair | null = null;
   if (opts.excerpt) {
@@ -141,6 +152,18 @@ export type Plan = { keys: string[]; truncated: boolean; blind_excluded?: number
 
 /** Which units a run covers: an explicit list, or (for the unit kinds that have a natural listing) a room / date range. Pure of writes. */
 export async function resolveUnits(r: Rubric, unitKind: RubricUnit, p: PlanParams): Promise<Plan> {
+  if (unitKind === "stay") {
+    // S7-3: at most STAY_RUN_MAX stays; explicit keys must be stay:<uid>; or admission dates (IST, span <= 31 days) over SURGICAL stays only
+    if (p.unit_keys && p.unit_keys.length > 0) {
+      const all = [...new Set(p.unit_keys)];
+      const keys = all.filter((k) => parseStayKey(k) !== null).slice(0, Math.min(p.limit, STAY_RUN_MAX));
+      if (keys.length === 0) return { error: "bad_unit_key", detail: "stay keys look like stay:<uid>" };
+      return { keys, truncated: all.length > keys.length };
+    }
+    if (!p.from || !p.to || !isIstDate(p.from) || !isIstDate(p.to) || p.from > p.to) return { error: "range_required", detail: "give unit_keys, or from and to (IST admission dates)" };
+    if (Date.parse(p.to) - Date.parse(p.from) > 31 * 86_400_000) return { error: "range_too_long", detail: "at most 31 days" };
+    return listSurgicalStays(p.from, p.to, Math.min(p.limit, STAY_RUN_MAX));
+  }
   if (p.unit_keys && p.unit_keys.length > 0) {
     const keys = [...new Set(p.unit_keys)].slice(0, p.limit);
     return { keys, truncated: new Set(p.unit_keys).size > keys.length };
