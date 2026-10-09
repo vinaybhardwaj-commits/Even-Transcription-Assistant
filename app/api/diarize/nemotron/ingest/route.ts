@@ -11,6 +11,7 @@
  *   400 { ok:false, error }                         the first validation failure (a code, never the value)
  *   404 { ok:false, error: "unknown_window" }       no such bench_window
  *   409 { ok:false, error: "conflict" | "room_day_mismatch" }  a different payload for a stored key; or the window's room-day differs
+ *   403 { ok:false, error: "blind_room_day" }       the window's room-day is held out (lib/rubrics/blind-room-days.ts); nothing stored
  *   503 { ok:false, error: "db" }                   retry later
  */
 import { NextRequest } from "next/server";
@@ -36,6 +37,8 @@ export async function POST(req: NextRequest) {
     switch (out.result) {
       case "unknown_window":
         return reply(404, { ok: false, error: out.result });
+      case "blind_room_day":
+        return reply(403, { ok: false, error: out.result });
       case "conflict":
       case "room_day_mismatch":
         return reply(409, { ok: false, error: out.result });

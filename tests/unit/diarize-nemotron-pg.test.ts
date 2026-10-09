@@ -20,10 +20,14 @@ const pg = pgContainer("eta-nemotron-0140");
 
 const FIXTURE_DDL = `
 CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text, applied_at timestamptz DEFAULT now());
+CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL);
 CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL, room_day_id text, start_ms bigint NOT NULL, end_ms bigint NOT NULL,
   state text NOT NULL, grid_aligned boolean NOT NULL DEFAULT false, clip_r2_key text, source_mic text);
 `;
 const MIGRATION = "db/migrations/0140_diarize_nemotron.sql";
+/** One (IST date, room) pair of the held-out set, typed by hand — the guard test below proves the module agrees. */
+const BLIND_DAY = "2026-09-28";
+const BLIND_ROOM = "room_qyzghzaf";
 
 type Store = typeof import("@/lib/diarize-nemotron/store");
 type Validate = typeof import("@/lib/diarize-nemotron/validate");
@@ -56,6 +60,11 @@ beforeAll(async () => {
   // 0117 first, as production has it, so 0140's widening of its CHECK is proven against the real constraint.
   pg.exec(readFileSync("db/migrations/0117_diarize_window_label.sql", "utf8"));
   pg.exec(readFileSync(MIGRATION, "utf8"));
+  // the encounter windows (0123 + 0124), for the anchors' blind refusal
+  pg.exec(readFileSync("db/migrations/0123_eta_encounter_windows.sql", "utf8"));
+  pg.exec(readFileSync("db/migrations/0124_encounter_windows_warehouse_attribution.sql", "utf8"));
+  // room-days: rd_1 is an ordinary day; rd_blind is a pair typed by hand from the held-out set
+  pg.exec(`INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_1', 'room_fake1', '2026-10-01'), ('rd_blind', '${BLIND_ROOM}', '${BLIND_DAY}');`);
   H.sql = pg.sql as never;
   store = await import("@/lib/diarize-nemotron/store");
   V = await import("@/lib/diarize-nemotron/validate");
@@ -278,5 +287,69 @@ describe.runIf(HAVE)("store: heartbeat", () => {
     await store.recordHeartbeat("box-1", { queue_depth: 5 });
     const rows = await q<{ worker_id: string; depth: number }>(`SELECT worker_id, (payload->>'queue_depth')::int AS depth FROM diarize_nemotron_worker`);
     expect(rows).toEqual([{ worker_id: "box-1", depth: 5 }]);
+  });
+});
+
+describe.runIf(HAVE)("BLIND room-days (N1, N2): a held-out day never reaches the worker, the store or the anchors", () => {
+  beforeEach(() => {
+    pg.exec(`DELETE FROM diarize_nemotron_window; DELETE FROM diarize_nemotron_claim; DELETE FROM bench_window; DELETE FROM eta_encounter_windows;
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, state, grid_aligned, clip_r2_key) VALUES
+        ('bw_a', 's', 'rd_1', 1000, 901000, 'closed', true, 'clips/a'),
+        ('bw_blind', 's', 'rd_blind', 5000, 905000, 'closed', true, 'clips/x');`);
+  });
+
+  it("guard: the hand-typed pair is in the held-out set, and rd_1's is not", async () => {
+    const { isBlindRoomDay } = await import("@/lib/rubrics/blind-room-days");
+    expect(isBlindRoomDay(BLIND_DAY, BLIND_ROOM)).toBe(true);
+    expect(isBlindRoomDay("2026-10-01", "room_fake1")).toBe(false);
+  });
+
+  it("N1 claim: a blind room-day's window is never offered, even though it is otherwise eligible and newer", async () => {
+    expect((await store.claimPending("box-1", 8)).map((w) => w.window_id)).toEqual(["bw_a"]);
+    expireLeases();
+    expect(await store.claimPending("box-2", 8)).toMatchObject([{ window_id: "bw_a", attempts: 2 }]);
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_claim WHERE window_id = 'bw_blind'`))[0]!.n).toBe(0);
+  });
+
+  it("N1 ingest: a post for a blind window is refused blind_room_day, whatever its status, and nothing is written", async () => {
+    expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_blind" })).toEqual({ result: "blind_room_day" });
+    expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_blind", status: "failed", error_code: "decode_failed", turns: [], clip_sha256: null, audio_ms: 0 }))
+      .toEqual({ result: "blind_room_day" });
+    // the window's OWN room-day decides: posting an ordinary room_day_id does not get it in
+    expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_1" })).toEqual({ result: "blind_room_day" });
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_window`))[0]!.n).toBe(0);
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_claim`))[0]!.n).toBe(0);
+    // an ordinary window still stores
+    expect(await ingest()).toMatchObject({ result: "stored" });
+  });
+
+  const win = (key: string, room: string, tOpen: string) =>
+    `('${key}', 'm1', '${room}', 'rows', '${tOpen}', '${tOpen}'::timestamptz + interval '10 minutes', 'endConsult', 'clean', 'r1')`;
+  const seedWindows = (...v: string[]) =>
+    pg.exec(`INSERT INTO eta_encounter_windows (consult_key, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version) VALUES ${v.join(", ")};`);
+
+  it("N2 anchors: a blind (room, IST day) is refused before any read", async () => {
+    const { loadAnchors } = await import("@/lib/encounter-clock/anchors");
+    seedWindows(win("k_blind", BLIND_ROOM, "2026-09-28T04:30:00Z")); // 10:00 IST on the blind day
+    const calls: number[] = [];
+    const spy = ((s: TemplateStringsArray, ...v: unknown[]) => { calls.push(1); return pg.sql(s, ...v); }) as never;
+    expect(await loadAnchors(spy, BLIND_ROOM, BLIND_DAY)).toEqual({ refused: "blind_room_day" });
+    expect(calls).toEqual([]);
+  });
+
+  it("N2 anchors: the day before a blind day reads normally, but a look-ahead on the blind day is dropped", async () => {
+    const { loadAnchors } = await import("@/lib/encounter-clock/anchors");
+    seedWindows(
+      win("k_before", BLIND_ROOM, "2026-09-27T04:30:00Z"), // 10:00 IST 27 Sep
+      win("k_blind", BLIND_ROOM, "2026-09-28T04:30:00Z"), // 10:00 IST 28 Sep, blind
+      win("k_ok1", "room_fake1", "2026-09-27T04:30:00Z"),
+      win("k_ok2", "room_fake1", "2026-09-28T04:30:00Z"), // an ordinary next day: the control
+    );
+    const blindNext = await loadAnchors(pg.sql as never, BLIND_ROOM, "2026-09-27");
+    if ("refused" in blindNext) throw new Error("27 Sep is not blind");
+    expect(blindNext.anchors.map((a) => [a.consult_key, a.next_start_ms])).toEqual([["k_before", null]]);
+    const control = await loadAnchors(pg.sql as never, "room_fake1", "2026-09-27");
+    if ("refused" in control) throw new Error("room_fake1 is not blind");
+    expect(control.anchors.map((a) => [a.consult_key, a.next_start_ms])).toEqual([["k_ok1", Date.parse("2026-09-28T04:30:00Z")]]);
   });
 });

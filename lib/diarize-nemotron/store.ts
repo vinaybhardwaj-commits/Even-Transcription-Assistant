@@ -20,6 +20,7 @@
 import { sql } from "@/lib/db";
 import { teacherLabelsEnabled } from "@/lib/diarize-engine";
 import { writeWindowLabel } from "@/lib/diarize-labels";
+import { BLIND_ROOM_DAYS, isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { MAX_ATTEMPTS, TERMINAL_ERROR_CODES, type Derived, type IngestBody } from "./validate";
 
 /** How long a claim is the worker's alone. PROVISIONAL (PRD §6.1); a dead worker's window is free again after it. */
@@ -36,6 +37,10 @@ export type ClaimedWindow = {
   attempts: number;
 };
 
+/** The held-out set as the two parallel arrays the claim query unnests: [IST date], [room_id]. */
+const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
+const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
+
 /**
  * Claim up to `limit` windows for `workerId`, NEWEST first (start_ms is epoch ms), so today's
  * audio never waits behind the backlog (Orchestrator ruling, 9 Oct 2026). A window is offered when it has no Nemotron
@@ -46,12 +51,15 @@ export async function claimPending(workerId: string, limit: number): Promise<Cla
     WITH cand AS (
       SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key
         FROM bench_window w
+        JOIN room_day rd ON rd.id = w.room_day_id
         LEFT JOIN diarize_nemotron_claim c ON c.window_id = w.id
        WHERE w.state IN ('closed', 'transcribed')
          AND w.grid_aligned = TRUE
          AND w.room_day_id IS NOT NULL
          AND w.clip_r2_key IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id)
+         -- N1: a BLIND (held-out) room-day's windows are never offered (lib/rubrics/blind-room-days.ts)
+         AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
          AND (c.window_id IS NULL OR (c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}))
        ORDER BY w.start_ms DESC
        LIMIT ${limit}
@@ -111,7 +119,17 @@ export type IngestOutcome =
   | { result: "unknown_window" }
   | { result: "room_day_mismatch" }
   | { result: "failure_recorded"; attempts: number }
-  | { result: "no_live_claim" };
+  | { result: "no_live_claim" }
+  | { result: "blind_room_day" };
+
+/** N1: is this window's OWN room-day (not the posted room_day_id) in the held-out set? */
+async function windowIsBlind(windowId: string): Promise<boolean> {
+  const rows = (await sql`
+    SELECT rd.ist_date::text AS ist_date, rd.room_id FROM bench_window w JOIN room_day rd ON rd.id = w.room_day_id
+     WHERE w.id = ${windowId} LIMIT 1
+  `) as Array<{ ist_date: string; room_id: string }>;
+  return rows[0] ? isBlindRoomDay(rows[0].ist_date, rows[0].room_id) : false;
+}
 
 /** INSERT the row for a validated body. Returns the new id, or null when the key already had a row. */
 async function insertRow(b: IngestBody, d: Derived, payloadSha: string): Promise<number | null> {
@@ -206,8 +224,11 @@ async function storeRow(b: IngestBody, d: Derived, payloadSha: string): Promise<
  *                                window is offered again; no window row, so a later success can still land.
  *   failed, last attempt       → stored as the window's `failed` row.
  *   failed, no live claim held by this worker → nothing changes (a replayed failure is not a second attempt).
+ *   any status, the window's room-day is BLIND → blind_room_day, nothing written.
  */
 export async function recordIngest(b: IngestBody, d: Derived, payloadSha: string): Promise<IngestOutcome> {
+  // N1: a blind room-day's window is refused before anything is written, whatever the status
+  if (await windowIsBlind(b.window_id)) return { result: "blind_room_day" };
   if (b.status !== "failed") return storeRow(b, d, payloadSha);
 
   const code = b.error_code!;

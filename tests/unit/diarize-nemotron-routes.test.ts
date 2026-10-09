@@ -201,6 +201,7 @@ describe("POST /ingest", () => {
     [{ result: "unknown_window" }, 404],
     [{ result: "conflict" }, 409],
     [{ result: "room_day_mismatch" }, 409],
+    [{ result: "blind_room_day" }, 403],
   ])("store says %j → %i", async (out, status) => {
     S.recordIngest.mockResolvedValue(out);
     expect((await post(okBody)).status).toBe(status);

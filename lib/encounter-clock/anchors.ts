@@ -14,8 +14,13 @@
  *
  * READ-ONLY. One read through the existing queryWindows (lib/encounter-windows/db.ts), plus one row of
  * look-ahead so the day's last anchor still knows the next Start. No writes, no migration, no Pulse code.
+ *
+ * BLIND ROOM-DAYS (N2). A (room, IST day) in the held-out set (lib/rubrics/blind-room-days.ts) is refused with
+ * `blind_room_day` BEFORE any read, and a look-ahead row that falls on a blind day is dropped, so not even one
+ * timestamp of a held-out day reaches the timeline.
  */
 import { queryWindows, type CloseReason, type EncounterWindowRead, type Quality, type WindowsDb } from "@/lib/encounter-windows";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 
 export type CloseKind = "clicked_end" | "url_clear" | "next_open" | "logout" | "idle" | "cap" | "open";
 
@@ -122,10 +127,22 @@ export function istDayRange(istDate: string): { from: string; to: string } {
   return { from: new Date(from).toISOString(), to: new Date(from + 86_400_000).toISOString() };
 }
 
+/** PURE — the IST calendar date of an ISO instant, or null. */
+export function istDateOf(iso: string | null): string | null {
+  const t = ms(iso);
+  return t === null ? null : new Date(t + 330 * 60_000).toISOString().slice(0, 10);
+}
+
 /** The anchors for one room on one IST day. Two reads, both through queryWindows; nothing is written. */
-export async function loadAnchors(db: WindowsDb, roomId: string, istDate: string): Promise<{ anchors: Anchor[]; skipped: number }> {
+export async function loadAnchors(
+  db: WindowsDb,
+  roomId: string,
+  istDate: string,
+): Promise<{ anchors: Anchor[]; skipped: number } | { refused: "blind_room_day" }> {
   const { from, to } = istDayRange(istDate);
+  if (isBlindRoomDay(istDate, roomId)) return { refused: "blind_room_day" };
   const rows = await queryWindows(db, { room_id: roomId, from, to, limit: 5000 });
   const [lookahead] = await queryWindows(db, { room_id: roomId, from: to, limit: 1 });
-  return toAnchors(rows, lookahead ?? null);
+  const usable = lookahead && !isBlindRoomDay(istDateOf(lookahead.t_open), roomId) ? lookahead : null;
+  return toAnchors(rows, usable);
 }

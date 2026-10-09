@@ -113,7 +113,9 @@ describe("istDayRange and loadAnchors", () => {
       void vals;
       return Promise.resolve(answers.shift() ?? []);
     });
-    const { anchors } = await loadAnchors(db as never, "room_a", "2026-10-08");
+    const out = await loadAnchors(db as never, "room_a", "2026-10-08");
+    if ("refused" in out) throw new Error("room_a is not a blind room-day");
+    const { anchors } = out;
     expect(calls).toHaveLength(2);
     for (const c of calls) {
       expect(c).toMatch(/^ ?SELECT /);
