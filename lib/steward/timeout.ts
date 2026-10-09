@@ -12,8 +12,7 @@ export class SourceTimeout extends Error {
 export async function raceTimeout<T>(fn: () => Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const work = fn();
-  // the abandoned call may still reject later: never let that become an unhandled rejection
-  work.catch(() => {});
+  work.catch(() => { /* intentional: the abandoned call may still reject later; never let that become an unhandled rejection */ });
   try {
     return await Promise.race([
       work,

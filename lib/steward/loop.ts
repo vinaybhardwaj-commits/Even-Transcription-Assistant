@@ -638,7 +638,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         }
       }
       const call = (async () => dispatch(executorFor(true), d))();
-      call.catch(() => {}); // collected later by `finish`; a rejection before then must not be unhandled
+      call.catch(() => { /* intentional: collected later by `finish`; a rejection before then must not be unhandled */ });
       const finish = async (): Promise<OutRow | null> => {
         let mode: "shadow" | "live" = "live";
         let result: string | null;
@@ -649,7 +649,9 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
             // the "sending" row stays; if the call finishes later in this process, the row is updated then (best effort)
             degrade("live_call_timeout");
             console.error("[steward] live call timed out: the sending row stays");
-            call.then((r) => setResult(id, "live", r?.result ?? null, { call_ms: now() - t1, late: true })).catch(() => {});
+            call.then((r) => setResult(id, "live", r?.result ?? null, { call_ms: now() - t1, late: true })).catch((e) => {
+              console.error(`[steward] late live result not recorded: ${e instanceof Error ? e.name : "error"}`);
+            });
             return null;
           }
           result = `blocked: ${e instanceof Error ? e.message.slice(0, 120) : LIVE_EXECUTOR_DISABLED}`;
