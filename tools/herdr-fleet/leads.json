@@ -1,0 +1,16 @@
+{
+ "_note": "Leads run as Claude Code sessions outside herdr panes; the board shows them from their last bus post (bus.db, read-only). Edit atomically; reloads on mtime.",
+ "bus_db": "~/dev/_fable/bus/bus.db",
+ "working_mins": 15,
+ "idle_mins": 180,
+ "leads": {
+  "herdr-lead": {"function": "orchestrator: herdr panes, CLARITY, Arch backlog, Fleet Board", "owner": "HERDR"},
+  "gating-lead": {"function": "merges, deploys, migrations, Vercel env", "owner": "GATING"},
+  "fable": {"function": "FLEET lead: kiosks, fleet", "owner": "FLEET"},
+  "consult-lead": {"function": "consult capture and isolation lead", "owner": "CONSULT"},
+  "orbox-lead": {"function": "ORBox recorder lead", "owner": "ORBOX"},
+  "backfill-lead": {"function": "room-audio backfill lead (on hold)", "owner": "BACKFILL"},
+  "palimpsest-architect": {"function": "STT architecture, Sarvam lane, REB store", "owner": "PALIMPSEST"},
+  "scribe-mcp-lead": {"function": "Scribe MCP lead", "owner": "SCRIBE-MCP"}
+ }
+}

@@ -1,0 +1,213 @@
+{
+  "_note": "Maintained by herdr-lead. function = what V should read; owner = which Cowork thread directs it. Keys are herdr agent names. Ownership rule 7 Oct (ORBOX brief): one owner per pane; borrowing shows as owner/borrowed-by via an optional \"borrowed_by\" field with \"until\" (IST).",
+  "agents": {
+    "herdr-kit": {
+      "function": "herdr tooling and pane fixes",
+      "owner": "HERDR"
+    },
+    "orbox": {
+      "function": "ORBox scout/runner: tape pulls, level scans",
+      "owner": "ORBOX"
+    },
+    "roadmap-inv": {
+      "function": "warden: watches every agent, every 10 min",
+      "owner": "HERDR"
+    },
+    "eta-presence-ingest": {
+      "function": "Pulse presence data into ETA",
+      "owner": "CONSULT"
+    },
+    "kiosk-health": {
+      "function": "kiosk health monitor builder",
+      "owner": "CONSULT"
+    },
+    "fleet-refuter": {
+      "function": "checker for kiosk-health",
+      "owner": "CONSULT"
+    },
+    "guard-builder": {
+      "function": "presence-guard + Room Steward builder",
+      "owner": "FLEET"
+    },
+    "guard-refuter": {
+      "function": "checker for guard-builder",
+      "owner": "FLEET"
+    },
+    "hist-bulk": {
+      "function": "historical backfill driver (standby)",
+      "owner": "BACKFILL"
+    },
+    "router-fix": {
+      "function": "speech router fixes (CLARITY)",
+      "owner": "HERDR"
+    },
+    "lid-debug": {
+      "function": "language-routing designer (CLARITY)",
+      "owner": "HERDR"
+    },
+    "eta-refuter-2": {
+      "function": "independent checker (CLARITY)",
+      "owner": "HERDR"
+    },
+    "diar-lab": {
+      "function": "doctor voiceprints",
+      "owner": "CONSULT"
+    },
+    "consult-audio": {
+      "function": "room audio-state log",
+      "owner": "CONSULT"
+    },
+    "cap": {
+      "function": "test-set builder + drug capture scoring",
+      "owner": "HERDR"
+    },
+    "stt-bench": {
+      "function": "speech-engine benchmark",
+      "owner": "HERDR"
+    },
+    "consult-m1": {
+      "function": "consult isolation",
+      "owner": "CONSULT"
+    },
+    "chronicle": {
+      "function": "keeps V's roadmap doc current",
+      "owner": "HERDR"
+    },
+    "yoga-free": {
+      "function": "free-model helper, no patient data",
+      "owner": "HERDR"
+    },
+    "backfill-now": {
+      "function": "room-audio backfill, 25 Sep to today",
+      "owner": "BACKFILL"
+    },
+    "orbox-builder": {
+      "function": "ORBox builder (multichannel recorder, lab tools)",
+      "owner": "ORBOX"
+    },
+    "orbox-refuter": {
+      "function": "checker for orbox-builder",
+      "owner": "ORBOX"
+    },
+    "consent-builder": {
+      "function": "EVEN Consent builder (iPad consent forms)",
+      "owner": "CONSENT"
+    },
+    "consent-refuter": {
+      "function": "checker for consent-builder",
+      "owner": "CONSENT"
+    },
+    "arch-builder-a": {
+      "function": "Designer backlog Lane A: #14 #19 #22 #20 (builder)",
+      "owner": "HERDR"
+    },
+    "arch-refuter-a": {
+      "function": "checker for arch-builder-a",
+      "owner": "HERDR"
+    },
+    "arch-builder-b": {
+      "function": "Designer backlog Lane B: #21 #16 #15 #17 (builder)",
+      "owner": "HERDR"
+    },
+    "arch-refuter-b": {
+      "function": "checker for arch-builder-b",
+      "owner": "HERDR"
+    },
+    "mcp-builder": {
+      "function": "Scribe MCP builder (S1)",
+      "owner": "SCRIBE-MCP"
+    },
+    "mcp-refuter": {
+      "function": "checker for mcp-builder",
+      "owner": "SCRIBE-MCP"
+    },
+    "palimpsest-builder": {
+      "function": "REB build steps 0,1,3 (palimpsest)",
+      "owner": "PALIMPSEST"
+    },
+    "eta-refuter-3": {
+      "function": "checker for palimpsest-builder",
+      "owner": "PALIMPSEST"
+    },
+    "palimpsest-web-builder": {
+      "function": "PALIMPSEST REB step 2 web-repo builder (box w2H:p3)",
+      "owner": "PALIMPSEST",
+      "model": "sonnet"
+    }
+  },
+  "machines": {
+    "Local": {
+      "short": "Mac Mini",
+      "kind": "physical",
+      "role": "production engines + agents (home)"
+    },
+    "eta-lab-t4": {
+      "short": "Lab box (T4 GPU)",
+      "kind": "cloud",
+      "role": "E2E cloud, lab agents"
+    },
+    "eta-ci-c3 \u00b7 E2E 24-core": {
+      "short": "c3 (24-core)",
+      "kind": "cloud",
+      "role": "E2E cloud, benchmarks"
+    },
+    "asus-ubuntu \u00b7 i7 16GB (no GPU)": {
+      "short": "ASUS",
+      "kind": "physical",
+      "role": "light agents"
+    },
+    "UbuntuYoga": {
+      "short": "Yoga",
+      "kind": "physical",
+      "role": "CI, no patient data"
+    },
+    "air": {
+      "short": "MacBook Air",
+      "kind": "physical",
+      "role": "your laptop, Cowork"
+    },
+    "orbox3": {
+      "short": "ORB3",
+      "kind": "physical",
+      "role": "recorder test box"
+    },
+    "hf-1 \u00b7 Hugging Face 8-core": {
+      "short": "HF-1",
+      "kind": "cloud",
+      "role": "Hugging Face 8-core \u00b7 BACKFILL lane 3 (29 Sep, Indic engines), setup then benchmark \u00b7 until 21:30",
+      "ssh_probe": "<set locally>"
+    },
+    "hf-2 \u00b7 Hugging Face 8-core": {
+      "short": "HF-2",
+      "kind": "cloud",
+      "role": "Hugging Face 8-core \u00b7 herdr-lead test/verify runner (L0 scoring ~16:00) \u00b7 until 21:30",
+      "ssh_probe": "<set locally>"
+    },
+    "ehrc-audiometry": {
+      "hide": true
+    }
+  },
+  "extra_machines": [
+    {
+      "short": "c4 (24-core)",
+      "kind": "cloud",
+      "role": "E2E \u00b7 BACKFILL runner (room-audio backfill job, no agents)",
+      "state": "running"
+    },
+    {
+      "short": "ORB2",
+      "kind": "physical",
+      "role": "OT2 recorder (ORBOX)",
+      "state": "not in herdr",
+      "probe_ssh": "vinay-orb2",
+      "probe_cmd": "systemctl is-active --quiet room-recorder && sudo -n find /var/lib/room-recorder/tape/tape.pcm -mmin -2 | grep -q .",
+      "probe_label": "recording, tape fresh (<2 min)"
+    },
+    {
+      "short": "opd-bot-1 (GrokBots)",
+      "kind": "external",
+      "role": "Kiosk Bot on the bus (ext-evenscribe-kiosk-bot) + relayed: Metasurfer, Veda, Sentiment, Designer, OR Box Designer \u00b7 not herdr panes",
+      "state": "running"
+    }
+  ]
+}
