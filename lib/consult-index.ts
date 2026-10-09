@@ -15,8 +15,8 @@ import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 export type ConsultIndexRow = Record<string, unknown> & { consult_uid: string; ist_date: string; room_id: string };
 export type PublicClipRow = {
   consult_uid: string; window_id: string | null; ist_date: string; room_id: string; room_slug: string | null; span_start: unknown; span_end: unknown; span_end_epoch: unknown; t_open: unknown; t_close: unknown;
-  minutes: number | null; bytes: number | null; quality: unknown; flags: unknown; coverage: unknown; voice_isolated: boolean; cut_at: unknown; code_commit: unknown;
-  r2: { bucket: unknown; prefix: unknown; files: unknown; at: unknown } | null;
+  minutes: number | null; bytes: number | null; quality: unknown; flags: string[]; coverage: unknown; voice_isolated: boolean; cut_at: unknown; code_commit: unknown;
+  r2: { bucket: unknown; prefix: unknown; n_files: number | null; at: unknown } | null;
 };
 export type ConsultIndex = { ok: true; rows: ConsultIndexRow[]; manifest: { generated_at: unknown; rows: unknown; code_commit: unknown } } | { ok: false; error: "consult_index_unavailable" | "consult_index_integrity" };
 
@@ -50,15 +50,20 @@ export async function readConsultIndex(): Promise<ConsultIndex> {
   return { ok: true, rows, manifest: { generated_at: manifest.generated_at ?? null, rows: manifest.rows ?? null, code_commit: manifest.code_commit ?? null } };
 }
 
-/** PURE — the row as a caller may see it. A whitelist: doctor_uid, doctor_identified, signature and every unlisted field are never copied. */
+/** PURE — a scalar (string clipped, number, boolean) or null: objects and arrays never pass. */
+const scalar = (v: unknown): string | number | boolean | null => (typeof v === "string" ? v.slice(0, 80) : typeof v === "number" && Number.isFinite(v) ? v : typeof v === "boolean" ? v : null);
+/** flags: an array of short code-like strings only; a string that smells of identity (doctor, signature, uid) is dropped, anything that is not a short string is dropped. */
+const flagList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && /^[A-Za-z0-9_:.-]{1,40}$/.test(x) && !/doctor|signature|uid|token|key/i.test(x)).slice(0, 20) : []);
+
+/** PURE — the row as a caller may see it. A whitelist of SCALAR fields (S8C-3): doctor_uid, doctor_identified, signature and every unlisted field are never copied, and no nested object or array is passed through (flags are filtered strings, r2.files is a count). */
 export function publicRow(r: ConsultIndexRow): PublicClipRow {
   const r2 = r.r2 && typeof r.r2 === "object" ? (r.r2 as Record<string, unknown>) : null;
   const n = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
   return {
     consult_uid: r.consult_uid, window_id: typeof r.window_id === "string" ? r.window_id : null, ist_date: r.ist_date, room_id: r.room_id, room_slug: typeof r.room_slug === "string" ? r.room_slug : null,
-    span_start: r.span_start ?? null, span_end: r.span_end ?? null, span_end_epoch: r.span_end_epoch ?? null, t_open: r.t_open ?? null, t_close: r.t_close ?? null, minutes: n(r.minutes), bytes: n(r.bytes),
-    quality: r.quality ?? null, flags: r.flags ?? null, coverage: r.coverage ?? null, voice_isolated: r.voice_isolated === true, cut_at: r.cut_at ?? null, code_commit: r.code_commit ?? null,
-    r2: r2 ? { bucket: r2.bucket ?? null, prefix: r2.prefix ?? null, files: r2.files ?? null, at: r2.at ?? null } : null,
+    span_start: scalar(r.span_start), span_end: scalar(r.span_end), span_end_epoch: scalar(r.span_end_epoch), t_open: scalar(r.t_open), t_close: scalar(r.t_close), minutes: n(r.minutes), bytes: n(r.bytes),
+    quality: scalar(r.quality), flags: flagList(r.flags), coverage: scalar(r.coverage), voice_isolated: r.voice_isolated === true, cut_at: scalar(r.cut_at), code_commit: scalar(r.code_commit),
+    r2: r2 ? { bucket: scalar(r2.bucket), prefix: scalar(r2.prefix), n_files: Array.isArray(r2.files) ? r2.files.length : null, at: scalar(r2.at) } : null,
   };
 }
 
@@ -94,6 +99,11 @@ export async function listClips(opts: { date: string; room?: string | null; stat
   if (opts.room && !SLUG_RE.test(opts.room)) return { ok: false, error: "invalid_room" };
   const idx = await readConsultIndex();
   if (!idx.ok) return { ok: false, error: idx.error };
+  // S8C-4: a room given as a SLUG is mapped to its room_id through the mirror\'s own rows; if that room is held out on this date the answer is refused before any row is returned
+  if (opts.room) {
+    const ids = new Set(idx.rows.filter((r) => r.room_slug === opts.room || r.room_id === opts.room).map((r) => r.room_id));
+    if ([...ids].some((id) => isBlindRoomDay(opts.date, id))) return { ok: false, error: "blind_room_day" };
+  }
   let n_blind_excluded = 0, n_unplaced_excluded = 0;
   const mine: PublicClipRow[] = [];
   for (const r of idx.rows) {
