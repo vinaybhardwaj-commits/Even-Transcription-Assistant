@@ -329,7 +329,7 @@ export async function readExpectedDevice(sql: StewardSql, roomId: string): Promi
 
 const hash = (o: unknown): string => createHash("sha256").update(JSON.stringify(o)).digest("hex").slice(0, 16);
 
-function base(d: Decision, rule: string, action: Decision["action"], params: Record<string, unknown>, why: string, why_not: string | null, severity: Decision["severity"], extra: Record<string, unknown>): Decision {
+export function base(d: Decision, rule: string, action: Decision["action"], params: Record<string, unknown>, why: string, why_not: string | null, severity: Decision["severity"], extra: Record<string, unknown>): Decision {
   const inputs = { ...extra, via: "start_day_live" };
   return { room_id: d.room_id, machine: d.machine, window_kind: d.window_kind, rule, action, params, why, why_not, severity, inputs_hash: hash({ rule, action, params, ...extra }), inputs };
 }

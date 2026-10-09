@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { buildRoster, loadConfig, type Config, type RosterRow } from "./config";
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
+import { HOLD_RULE, alertInputDecision, defaultInputPort, enumChange, enumDecision, evaluateInputFailover, failoverEligible, holdDecision, readInputStates, readZeroSince, sendSwitch, shouldArmFailover, switchDecision, type InputPort, type InputState } from "./input-failover";
 import { PHANTOM_CANDIDATE_RULE, PHANTOM_RULE, alertDecision, attemptDecision, attemptStart, defaultPort, deviceMissing, evaluateStartDay, micReturnSilent, micSilentDecision, phantomCheck, phantomDecision, readExpectedDevice, readRecorderStreak, shouldArm, skipDecision, startInFlight, type StartDayPort } from "./startday";
 import { senseAll } from "./sense";
 import { SourceTimeout, raceTimeout } from "./timeout";
@@ -109,6 +110,8 @@ export type RunOptions = {
   executorFor?: (live: boolean) => Executor;
   /** the lib/bench-commands functions the live start_day path calls (default: imported lazily) */
   startDayPort?: StartDayPort;
+  /** the lib/bench-commands functions the input failover calls (default: imported lazily) */
+  inputPort?: InputPort;
 };
 
 // ---------------------------------------------------------------------------
@@ -427,6 +430,63 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     };
 
 
+    // --- input failover (input-failover.ts): webcam first, TONOR backup. Two extra reads, only for the eligible clinic rooms; shadow rows unless input_failover_live is on.
+    const failoverArmed = shouldArmFailover(cfg);
+    let inputPort: InputPort | null = opts.inputPort ?? null;
+    const getInputPort = async (): Promise<InputPort | null> => {
+      try {
+        inputPort = inputPort ?? (await defaultInputPort());
+      } catch {
+        degrade("input_failover_port");
+      }
+      return inputPort;
+    };
+    let inputStates = new Map<string, InputState>();
+    let zeroSince = new Map<string, number | null>();
+    {
+      const eligible = roster.filter((r) => senses.has(r.room_id) && failoverEligible({ room_name: r.room_name, flags: r.flags }, cfg, r.room_id));
+      if (eligible.length > 0 && !memoryDegraded) {
+        const left = Math.max(1_000, Math.min(cfg.source_timeout_ms, senseDeadline - now()));
+        const st = await readInputStates(sql, eligible.map((r) => r.room_id), left);
+        if (st === null) degrade("input_failover");
+        else inputStates = st;
+        const open = eligible.filter((r) => senses.get(r.room_id)?.recording.session_open === true).map((r) => r.room_id);
+        const zs = await readZeroSince(sql, open, A, left);
+        if (zs === null) degrade("input_failover_levels");
+        else zeroSince = zs;
+      }
+    }
+    const failoverFlow = async (room: { room_id: string; room_name: string }, sense: NonNullable<ReturnType<typeof senses.get>>, d: Decision, recent: RecentAction[]): Promise<void> => {
+      const st = inputStates.get(room.room_id) ?? null;
+      const ec = enumChange(st, recent);
+      if (ec) emit(enumDecision(d, ec), false, 70, "shadow", null);
+      if (!st || sense.recording.session_open !== true) return;
+      const port = await getInputPort();
+      const v = evaluateInputFailover({
+        roomId: room.room_id,
+        roomName: room.room_name,
+        A,
+        session: { open: sense.recording.session_open, status: sense.recording.session_status, started_at: sense.recording.session_started_at },
+        input: st,
+        zeroSince: zeroSince.get(room.room_id) ?? null,
+        recent,
+        appTooOld: port ? port.tooOld(st.app_version) : false,
+      });
+      if (v.kind === "none") return;
+      if (v.kind === "alert") return emit(alertInputDecision(d, room, v), false, 72, "shadow", `alert: ${v.reason}`);
+      if (v.kind === "hold") {
+        const dup = recent.some((r) => r.rule === HOLD_RULE && r.params.reason === v.reason && A - Date.parse(r.ts) < 15 * 60_000);
+        if (!dup) emit(holdDecision(d, v), false, 71, "shadow", `held: ${v.reason}`);
+        return;
+      }
+      if (failoverArmed && port) {
+        const r = await sendSwitch(port, room.room_id, v.to.uid, A);
+        if (!r.sent) return emit(holdDecision(d, { kind: "hold", reason: "not_listening", facts: v.facts }), false, 71, "shadow", r.result);
+        return emit(switchDecision(d, room, v), false, 72, "live", r.result);
+      }
+      emit(switchDecision(d, room, v), false, 72, "shadow", cfg.kill_switch ? "kill_switch" : "shadow: would set_audio_input");
+    };
+
     let processed = 0;
     for (const room of roster) {
       if (now() - t0 >= opts.budgetMs) {
@@ -446,6 +506,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       if (ms && ds[0]) emit(micSilentDecision(ds[0], room, { attempt_ts: ms.attempt_ts, silent_since: ms.silent_since }), false, 81, "shadow", null);
       const last = mem.lastPrimary.get(room.room_id);
       const lastTs = last ? toIso(last.ts) : null;
+      if (ds[0] && !memoryDegraded && inputStates.has(room.room_id)) await failoverFlow(room, sense, ds[0], roomRecent);
       for (let i = 0; i < ds.length; i++) {
         const d = ds[i]!;
         if (i === 0 && armed && d.action === "scribe_start") {
