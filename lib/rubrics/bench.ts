@@ -9,7 +9,7 @@ import { scoreJevBench, type BenchItem, type BenchMetrics } from "@/lib/jev/benc
 import type { RubricUnit } from "./types";
 
 /** `room_id` / `ist_date`: where an EXCERPT came from (S71-R4 G70). An excerpt without both is refused (excerpt_unplaced); with them it meets the same held-out check as a consult before anything is read. */
-export type BenchSetItem = { unit_key: string; expected: Record<string, unknown>; tolerance?: number; room_id?: string; ist_date?: string };
+export type BenchSetItem = { unit_key: string; expected: Record<string, unknown>; tolerance?: number; room_id?: string; /** several candidate rooms (a token that maps to two room-days): blind if ANY is blind */ room_ids?: string[]; ist_date?: string };
 /** `excerpt`: the units are transcript EXCERPTS (a labeller saw a few turns around the topic, not the whole consult); their text comes from the lab store only, never from the database. */
 export type BenchSet = { unit: RubricUnit; items: BenchSetItem[]; excerpt?: boolean };
 export const BENCH_MAX_ITEMS = 500;
@@ -24,7 +24,7 @@ export function parseBenchSet(raw: unknown): BenchSet | null {
   for (const it of o.items as Array<Record<string, unknown>>) {
     if (!it || typeof it.unit_key !== "string" || !it.unit_key || typeof it.expected !== "object" || it.expected === null || Array.isArray(it.expected)) return null;
     if (Object.keys(it.expected as object).length === 0) return null;
-    items.push({ unit_key: it.unit_key, expected: it.expected as Record<string, unknown>, ...(typeof it.tolerance === "number" ? { tolerance: it.tolerance } : {}), ...(typeof it.room_id === "string" ? { room_id: it.room_id } : {}), ...(typeof it.ist_date === "string" ? { ist_date: it.ist_date } : {}) });
+    items.push({ unit_key: it.unit_key, expected: it.expected as Record<string, unknown>, ...(typeof it.tolerance === "number" ? { tolerance: it.tolerance } : {}), ...(typeof it.room_id === "string" ? { room_id: it.room_id } : {}), ...(Array.isArray(it.room_ids) && it.room_ids.every((x) => typeof x === "string") ? { room_ids: it.room_ids as string[] } : {}), ...(typeof it.ist_date === "string" ? { ist_date: it.ist_date } : {}) });
   }
   return { unit: o.unit as RubricUnit, items };
 }

@@ -117,7 +117,7 @@ async function evaluateStep(ctx: StepContext): Promise<StepOutcome> {
     }
     const item = set.items[idx]!;
     // a DB / R2 error throws (the step is retried); a unit the engine could not score, or that is held out or unresolved, comes back skipped / failed and fails every expected field
-    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true, room_id: item.room_id ?? null, ist_date: item.ist_date ?? null } : {}) });
+    const out = await evaluateUnit(r, set.unit, item.unit_key, { bench: true, ...(set.excerpt ? { excerpt: true, room_id: item.room_id ?? null, room_ids: item.room_ids ?? null, ist_date: item.ist_date ?? null } : {}) });
     // a skipped unit with a score is a scored "nothing to score" (no surgery recommended, unscorable tape): it can be right or wrong against the gold
     const score: Record<string, unknown> | null = out.status === "ok" || out.status === "empty" || (out.status === "skipped" && out.score) ? (out.score ?? null) : null;
     compared[idx] = compareItem(item, score);

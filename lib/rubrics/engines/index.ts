@@ -31,7 +31,7 @@ function engine(fn: () => EngineResult, pair: Pair): UnitOutcome {
  * (2) refuse a held-out pair (reason blind_room_day, before any content fetch), (3) read the inputs, (4) run the pure engine. A unit whose room or date cannot be resolved comes back with
  * room_id / ist_date null: the caller writes NO row for it (a result row always has a known room and date).
  */
-export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean; room_id?: string | null; ist_date?: string | null } = {}): Promise<UnitOutcome> {
+export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean; room_id?: string | null; room_ids?: string[] | null; ist_date?: string | null } = {}): Promise<UnitOutcome> {
   let pair: Pair | ReadRefusal;
   if (r.engine === "llm_zdr") return evaluateLlmUnit(r, unitKind, unitKey, opts);
   if (unitKind === "room_hour") {
@@ -77,16 +77,18 @@ export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: str
  * in a BENCH only, a Meet teleconsult key: its text comes from the lab store (no room, so no room-day to hold out). In a normal run an unknown key is skipped as before. A model outage THROWS
  * (askJson), so the runner retries the step; a bad answer after the one retry is a failed unit with a closed reason.
  */
-async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean; room_id?: string | null; ist_date?: string | null }): Promise<UnitOutcome> {
+async function evaluateLlmUnit(r: Rubric, unitKind: RubricUnit, unitKey: string, opts: { bench?: boolean; excerpt?: boolean; room_id?: string | null; room_ids?: string[] | null; ist_date?: string | null }): Promise<UnitOutcome> {
   if (unitKind !== "consult") return skip("unit_not_supported");
   let pair: Pair | null = null;
   if (opts.excerpt) {
     // S71-C2: a transcript EXCERPT a labeller saw. Bench only; its text is read from the lab store and nothing else (no consult, no room-day, no database read at all)
     if (!opts.bench) return skip("unit_not_supported");
     // S71-R4 G70: an excerpt is PLACED (room + IST date) and meets the same held-out check as a consult BEFORE any lab-store read or model call; unplaced = refused, never scored
-    if (!opts.room_id || !opts.ist_date || !isRoomId(opts.room_id) || !isIstDate(opts.ist_date)) return skip("excerpt_unplaced");
-    const exBlind = blindRefusal(opts.room_id, opts.ist_date);
-    if (exBlind) return skip(exBlind.reason, { room_id: opts.room_id, ist_date: opts.ist_date });
+    // one room (room_id) or several candidate rooms (room_ids: a token that maps to two room-days): every candidate must be a valid room, and ANY held-out candidate refuses the excerpt
+    const rooms = (opts.room_ids && opts.room_ids.length > 0 ? opts.room_ids : opts.room_id ? [opts.room_id] : []) as string[];
+    if (rooms.length === 0 || !opts.ist_date || !isIstDate(opts.ist_date) || !rooms.every((x) => isRoomId(x))) return skip("excerpt_unplaced");
+    const exBlindRoom = rooms.find((x) => blindRefusal(x, opts.ist_date!));
+    if (exBlindRoom) return skip("blind_room_day", { room_id: exBlindRoom, ist_date: opts.ist_date });
     const ex = await readBenchText(unitKey, r.id);
     if (!ex.ok) return skip(ex.reason);
     return runLlm(r, { ...ex.data, partial: true }, null);

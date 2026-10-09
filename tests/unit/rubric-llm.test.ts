@@ -291,3 +291,26 @@ describe("S71-R4 G70 — an excerpt is placed and meets the held-out check befor
     expect(called).toBe(1);
   });
 });
+
+describe("S71-R4b — an excerpt may name several candidate rooms: blind if ANY candidate is blind", () => {
+  it("room_ids: one blind candidate refuses with 0 store reads and 0 model calls; all clear is scored; a bad candidate is unplaced; room_id alone still works; parseBenchSet keeps the list", async () => {
+    let called = 0;
+    L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
+    store.set("rubric/bench/consult_chair_affect/text/hv-m.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
+    const reads = vi.spyOn(Map.prototype, "has");
+    reads.mockClear();
+    const date = "2026-09-23"; // 4ggnkg5x is held out on this date; r1 is not
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "room_4ggnkg5x"], ist_date: date })).toMatchObject({ status: "skipped", reason: "blind_room_day" });
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["room_4ggnkg5x", "r1"], ist_date: date })).toMatchObject({ status: "skipped", reason: "blind_room_day" }); // order does not matter
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "bad room!"], ist_date: date })).toMatchObject({ status: "skipped", reason: "excerpt_unplaced" });
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: [], ist_date: date })).toMatchObject({ status: "skipped", reason: "excerpt_unplaced" });
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-m"))).toBe(false);
+    reads.mockRestore();
+    expect(called).toBe(0);
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "r2"], ist_date: date })).toMatchObject({ status: "ok" });
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_id: "r1", ist_date: date })).toMatchObject({ status: "ok" });
+    expect(called).toBe(2);
+    const { parseBenchSet } = await import("@/lib/rubrics/bench");
+    expect(parseBenchSet({ unit: "consult", items: [{ unit_key: "k", room_ids: ["a", "b"], ist_date: "2026-10-08", expected: { x: 1 } }] })!.items[0]).toMatchObject({ room_ids: ["a", "b"], ist_date: "2026-10-08" });
+  });
+});
