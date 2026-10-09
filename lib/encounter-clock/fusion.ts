@@ -112,6 +112,8 @@ export type ProposalCounts = {
   short: number;
   /** Long enough, until acoustics trimmed its non_speech edges below JEV_MIN_RUN. */
   trimmed_away: number;
+  /** Survived the trim but NO probe in it was acoustically `speech`: nobody heard it, so it is not proposed. */
+  no_speech: number;
   /** Probes cut from kept candidates by the acoustic trim. */
   trimmed_probes: number;
 };
@@ -131,6 +133,15 @@ const adjacent = (a: AcousticProbe, b: AcousticProbe, hop: number) => b.t - a.t 
  *   LENGTH: at least JEV_MIN_RUN probes, opener and closer included.
  *   TRIM: leading and trailing probes the acoustic gate judged non_speech are cut (unjudged is kept — no
  *     acoustic evidence is not evidence of silence); still at least JEV_MIN_RUN, or it is dropped.
+ *   HEARD: at least one probe of what survives must be acoustically `speech`. No evidence is not silence,
+ *     but no evidence is not a consultation either: a run with no speech-judged probe rests on transcript
+ *     text alone, and whether text was invented from silence is the one question Jev cannot answer (PLAN-v3
+ *     §1.1, J-A). Jev may propose without an acoustic BOUNDARY, never without acoustic evidence of SOUND
+ *     (ETA-Refuter, E-6.1 verdict).
+ *
+ * TWO "UNJUDGED"S. A probe Jev did not answer (no judgement, or judged:false) is not in a consultation and
+ * BREAKS the run (`eligible`). A probe the ACOUSTIC gate called `unjudged` (no energy evidence) does not
+ * break it, is not trimmed, and does not count as heard.
  *   OUTSIDE ACOUSTICS: where an acoustic encounter exists, acoustics already proposed a boundary and
  *     fuseEncounters arbitrates it; Jev proposes only where acoustics proposed nothing.
  */
@@ -151,7 +162,7 @@ export function proposeFromJev(
   const closes = (i: number) => { const e = byIndex.get(i)?.end; return e !== undefined && e >= END_P; };
 
   const out: Encounter[] = [];
-  const counts: ProposalCounts = { proposed: 0, unclosed: 0, short: 0, trimmed_away: 0, trimmed_probes: 0 };
+  const counts: ProposalCounts = { proposed: 0, unclosed: 0, short: 0, trimmed_away: 0, no_speech: 0, trimmed_probes: 0 };
   let i = 0;
   while (i < probes.length) {
     if (!opens(i)) { i++; continue; }
@@ -173,6 +184,9 @@ export function proposeFromJev(
     while (a <= b && probes[a]!.verdict === "non_speech") a++;
     while (b >= a && probes[b]!.verdict === "non_speech") b--;
     if (b - a + 1 < JEV_MIN_RUN) { counts.trimmed_away++; continue; }
+    let heard = false;
+    for (let q = a; q <= b; q++) if (probes[q]!.verdict === "speech") { heard = true; break; }
+    if (!heard) { counts.no_speech++; continue; }
     counts.trimmed_probes += (a - s) + (e - b);
     out.push(summariseSpan(grid, a, b, hop_ms, "content_boundary"));
     counts.proposed++;
