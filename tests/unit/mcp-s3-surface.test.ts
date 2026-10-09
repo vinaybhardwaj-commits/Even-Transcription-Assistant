@@ -413,18 +413,18 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 39,000 characters (measured 38,980: S6-DIET + S6B search arguments)", async () => {
+  it("budget: the full tools/list result stays at or under 39,400 characters (measured 39,308: S6-DIET + S6B search + S4 ticket views)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_000);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_400);
   });
 
-  it("S6-DIET: tools/list with every description field removed is IDENTICAL to the S6B capture (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
+  it("S6-DIET: tools/list with every description field removed is IDENTICAL to the S4 capture (only scribe_steward gained the ticket views and filters) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
     const { body } = await door("tools/list");
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k]) => k !== "description").map(([k, v]) => [k, strip(v)])) : o;
     const sortKeys = (o: unknown): unknown => Array.isArray(o) ? o.map(sortKeys) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeys(v)])) : o;
-    const before = JSON.parse(readFileSync("fixtures/mcp/s6b-tools-list-no-descriptions.json", "utf8"));
+    const before = JSON.parse(readFileSync("fixtures/mcp/s4-tools-list-no-descriptions.json", "utf8"));
     expect(sortKeys(strip(body.result))).toEqual(sortKeys(before));
   });
 

@@ -86,7 +86,7 @@ function briefs(): Record<string, string> {
     scribe_rubric: "Job queue read/write; stored data, never Pulse; touches no room. Times UTC. action=list|describe|results|runs|board|run|bench; run/bench need invoke; draft rubrics need lab:true + unit_keys.",
     scribe_sarvam: "Job queue read/write; consult audio/text only to Sarvam (ZDR); no room audio. Times UTC. action=transcribe|translate|status|result|usage|health; submits need invoke.",
     scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow only on request.",
-    scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why; why needs room + at (+-15 min). No ticket signatures.",
+    scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why|history|ticket_log|ticket_summary|live; why needs room + at (+-15 min). No ticket signatures.",
     scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen; room optional.",
     scribe_stt_windows: "Read-only; touches no room. Times UTC. One STT window (window_id) or a room's windows for an IST day. No transcript text.",
     scribe_tape_day: `${NO_ROOM_READ} Minutes per audio state per room for one IST day; include_segments (needs room) adds intervals.`,
