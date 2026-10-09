@@ -19,6 +19,20 @@ A fault in one lane is almost never fixed by work in the other.
 ## LANE 1 — THE WEB BUILD
 
 ### SHIPPED TO PRODUCTION
+- **19 SEP — room-drain finish-state** `843e7b2`. Both entry paths reach a terminal state; the failed
+  phase keeps its detail. 65 affected tests green before promote.
+- **19 SEP — phrase-loop guard** `47a648e`, backfill RUN: 94 windows, 13,390 turns, **4,198 flagged (31%)**,
+  44 windows with a flag, `cue` unchanged at 15,970. It MARKS, never deletes. Migration **0104** applied.
+- **19 SEP — Jev slice J0 (english)** `cdb6f67`, migration **0105** applied. Round 1 was UNSOUND and would
+  have written off the corpus (2,263 of 2,265 closed windows had no run and were being stamped
+  `empty` forever). Now `not_ready` / `empty` / `failed` are distinct on the row.
+- **19 SEP — migration 0103 applied at 07:42Z.** It had NEVER been applied: `room_alert_state` did not
+  exist while `lib/room-watchdog.ts` queried it in three places. Production had gone 102 -> 104.
+  `schema_migrations` now runs 103, 104, 105 with no gap.
+- **19 SEP — router restarted**, pid 37823. It had been running `pid 49336` from **14 Sep 14:53** — two VAD
+  fixes sat on disk unshipped for **4.8 days** while every window drained through the unfixed path.
+- **19 SEP — `silent_skipped` fix live.** It tested "no segments", not "no engine ran": a 60 s clip of half
+  silence and half noise made 2 engine calls and still returned `silent_skipped`.
 - **E16** emotion speech fraction, `segments_run_id`, the stale-segments cure.
 - **E18** silence is a named, evidenced, re-adjudicable state; a bound that fails closed and cannot be minted.
   Production `64ce357` (`dpl_2ZX5Ew6kx`). Migrations **0097, 0099, 0101 applied**, live shape verified.
@@ -28,12 +42,53 @@ A fault in one lane is almost never fixed by work in the other.
   (`dpl_BC2eKYJRdht4USB6AnNHhdBm66j6`, target production, READY, serving evenscribe.app — verified from
   Vercel's own record, not from a pane). Final gate **118 files / 2,818 tests**. No migration in this batch.
 
-### IN FLIGHT
+### IN FLIGHT — 19 SEP 2026, five panes
 | id | what | where | state |
 |---|---|---|---|
-| E32 | no session while NEITHER the lockout counter NOR the rate limiter is recording | `vinay/e32-pin-bound` @ `c87196e` in `-e32` | **REFUTED: SOUND WITH FINDINGS.** No finding rises to UNSOUND. |
-| E32b | the two refusals made symmetric in work, not just in bytes | `vinay/e32b-refusal-symmetry` in `-e32b`, off `c87196e` | built; follow-up round in flight |
+| ROUTE-METRICS | three-outcome model + `windows_total`/`windows_skipped` carried to the row | `vinay/route-metrics-truth`; `vinay/vad-starvation` @ `8d6b6e8` rebased on it | built, 3077 tests green; **fleet refuting — this is the merge blocker** |
+| ATTEST-LOADER | coordinator backfill of attested clinician/room/time for the 18 diarized room-days | `vinay/attest-loader` | building (scribe3) |
+| ATTEST-CAPTURE | record-time doctor-PIN attestation, server half only | `vinay/attest-capture` | building (scribe) |
+| ARM-D J1/J2 | Jev window signal; J1 built, J2 follow-on, migration **0107** | `vinay/jev-j1`, `vinay/jev-j2` | building (ETA-Refuter) |
+| NIGHT-DRAIN | Mini-only diarization backlog drain, 21:30–07:30 IST | not yet branched | building (yoga-drain) |
+| S2B-REENROL | voiceprint re-enrolment, migration **0106** | `vinay/s2b-reenrol` @ `0d06845` | pushed, **merge HELD** — see below |
+| E32b | the two refusals made symmetric in work, not just in bytes | `vinay/e32b-refusal-symmetry` in `-e32b`, off `c87196e` | built; still owed a merge |
 | RR-0.1.23 | room-recorder version bump + PR #3 FD-leak fix | `vinay/rr-0.1.23` @ `b0c898d` in `-rr23` | **BUILT AND SIGNED**, not pushed, not uploaded |
+
+### 19 SEP — THE FINDING THAT OUTRANKS THE REST: THERE IS NO ATTESTED PRESENCE
+`ETA-ATTESTED-PRESENCE-COVERAGE-19-SEP-2026.md`. Speaker ID has never fired — `room_turn_speaker`
+has 3,456 rows, `clinician_id` non-null in **ZERO**. The cause is not the prints.
+
+- **1 attested clinician-day of 100 room-days**, and it overlaps **zero** recorded windows (attested
+  14:22–15:07 UTC; first window 16:00 UTC; 52.9 min gap).
+- **PIN logins cannot attest.** 149 of 177 successes are ONE id; the other nine doctors' last login was
+  **25 Jun, before room recording began**. Binding by login puts one id in up to 9 rooms at once.
+- `room_day.doctor_id` NULL on 102 of 102. Migration 0056 already records why: binding one room to one
+  doctor for a day *"lost six hours of another clinician's clinic on 19 Aug"*.
+- 0 of 287 bench sessions name a clinician. `identification_label` has 0 rows. The Room Recorder
+  authenticates the ROOM and has no clinician concept anywhere in its source.
+- The voice matcher covers 2 room-days but is CIRCULAR — using it to enrol trains a print on its own guesses.
+
+**Consequence: S2B-REENROL merge is HELD.** Re-enrolment measured +0.020 median on **n=1 clinician**,
+because 6 of 7 read *"not measured: no attested presence, no audio route"*. Better prints were never
+the blocker. ATTEST-LOADER (existing corpus) and ATTEST-CAPTURE (from now on) are the unblock.
+
+### 19 SEP — THE STARVATION LIST CANNOT BE REBUILT FROM DATA
+`buildRouteMetrics` stored only engine-output spans and `writeRoutedRun` dropped the router's status, so
+the corpus collapses "never heard" and "heard nothing" exactly as the router did. **No SQL can separate
+them.** The suspect windows must be RE-RUN through the fixed router. ROUTE-METRICS is that fix.
+
+### 19 SEP — YOGA IS NOT A DIARIZATION PRODUCER. CLOSED.
+Measured, not argued. Mini noise floor is ZERO (4 runs, 0 ms delta, 0 segments differing). Library
+versions ruled out (matched venv byte-identical to old). Device ruled out (**Mini MPS and Mini CPU are
+bit-identical**). What remains is arm64 vs x86_64: 334 vs 335 segments, 7 of 334 boundaries differing,
+max 169 ms, and **8 of 8 differences sit at a speaker change** against a 43% base rate. Embeddings are
+cosine 1.00000 everywhere, so voice identity is unaffected and the Yoga stays fine for embedding work,
+Jev calls and builds. Throughput: Yoga 10.4x slower single-process; backlog floor ~15.7 d against the
+Mini's ~40 h. It can never be a bit-identical second producer on any configuration — platform, not tuning.
+
+### 19 SEP — SECURITY, NEEDS V
+`clinician.pin_plaintext` is populated for **21 of 25 clinicians** alongside `pin_hash` (25 of 25).
+Found incidentally; counts read, values never selected. It also weakens PIN as an attestation source.
 
 ### E32 — THE TWO OPEN ITEMS, RULED BY THE ORCHESTRATOR
 The builder flagged two rather than deciding them. Both were mine, and both are decided:

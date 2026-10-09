@@ -84,22 +84,42 @@ not part of ETA and was not touched this session.
 
 ## 3. WHERE THE BUILD IS
 
-**Production** = `vinay/s1-auto-drain` @ `de92359`, promoted **08:24:15Z**, READY **08:25:23.131Z**
-(`dpl_4MNbbQwRLwr5pWDSZBkLUUuCx5hA`). Four production promotes on 17 Sep: E32+E32b 05:40, Linux bootstrap
-07:12, E31 b2 round 1 (`ace9ff3`) 08:06, C6/C7 (`de92359`) 08:24.
+**Last written at the close of the 19 Sep 2026 session.**
 
-### IN FLIGHT RIGHT NOW
-**Delivery-evidence phase 1** — Builder running in **scribe3**, worktree
-`~/dev/Even-Transcription-Assistant-de`, branch `vinay/delivery-evidence-p1` off `de92359`.
-Spec: `ETA-DELIVERY-EVIDENCE-PRD.md` **including Amendment 1, which supersedes the original design.**
-When it reports: **Opus refutes it — never the agent that built it.** `ETA-Refuter` is the pane for that.
+**Production** = `vinay/s1-auto-drain` @ **`cdb6f67`** (Jev J0 merge), promoted 19 Sep.
+Migrations **0103, 0104, 0105 applied — `schema_migrations` now has no gap.** 0103 had never been
+applied and `room_alert_state` did not exist while production code queried it.
+Router restarted 19 Sep, **pid 37823**; it had been running 4.8-day-old code since 14 Sep 14:53.
 
-### THE ONE ACTION OWED IMMEDIATELY
-**Production redeploy of `de92359`.** `STT_PER_ATTEMPT_SINCE` is set correctly in Vercel (Production,
-`2026-09-17T08:25:23Z`, added by V ~8h before close) but **zero deployments have run since it was added** —
-verified by querying deployments since that exact millisecond, count 0. Vercel bakes env vars at BUILD time,
-so the value is NOT in the serving bundle and the leaderboard's per-attempt figure is still withheld.
-A no-code rebuild fixes it. Confirm the figure appears afterwards; do not assume.
+### THE FINDING THAT REFRAMES THE SIGNAL LANE
+**There is no attested presence anywhere in the system.** 1 attested clinician-day of 100 room-days, and
+it overlaps ZERO recorded windows. PIN logins cannot attest (149 of 177 successes are one id; the other
+nine doctors last logged in 25 Jun, before recording began). `room_day.doctor_id` NULL 102 of 102.
+0 of 287 bench sessions name a clinician. The Room Recorder authenticates the ROOM and has no clinician
+concept in its source. Speaker ID has never fired in 3,456 rows because there is **no ground truth**,
+not because the prints are weak. Full evidence: `ETA-ATTESTED-PRESENCE-COVERAGE-19-SEP-2026.md`.
+
+### IN FLIGHT RIGHT NOW — five panes
+- **fleet** — refuting `vinay/route-metrics-truth` + `vinay/vad-starvation` @ `8d6b6e8`.
+  **This is the merge blocker for everything downstream.**
+- **scribe3** — `vinay/attest-loader`: coordinator backfill of attested clinician/room/time.
+- **scribe** — `vinay/attest-capture`: record-time doctor-PIN attestation, server half only.
+- **ETA-Refuter** — Arm D J1 built; J2 follow-on, migration **0107**.
+- **yoga-drain** — Mini-only night drain, 21:30–07:30 IST.
+- **split-speaker** — IDLE, arm closed: no composite rule, no text term, 0.65 unmoved.
+
+### THE ACTIONS OWED IMMEDIATELY
+1. **Merge the route-metrics pair on fleet's verdict.** Until it lands, the starvation list cannot be
+   rebuilt — `buildRouteMetrics` never persisted the discriminator, so no SQL separates "never heard"
+   from "heard nothing". Those windows must be RE-RUN through the fixed router.
+2. **`clinician.pin_plaintext` is populated for 21 of 25 clinicians** alongside the hashes. V's call.
+3. **S2B-REENROL merge is HELD** at `vinay/s2b-reenrol` @ `0d06845`, migration 0106 unapplied:
+   +0.020 median on n=1 clinician, because 6 of 7 had no attested presence to measure against.
+
+### MIGRATION NUMBERS ASSIGNED (live head 105)
+0106 S2B-REENROL · 0107 Arm D J2 · 0108 attest-loader · 0109 attest-capture.
+The runner selects BY VERSION with `ON CONFLICT DO NOTHING` and **cannot report a clash** — check any new
+number against every branch head, not just `main`. Two panes collided on 0106 today before it was caught.
 
 ### QUEUED, IN ORDER (from ETA-BUILD-QUEUE.md, reconciled)
 1. Delivery-evidence phase 1 → refute → merge → promote.
@@ -211,6 +231,27 @@ ORB3/ORBOX3 0.1.22.2. **Cardiology, OPD 6 and OPD 7 all stopped polling within 7
 - Asserted a fleet-wide sleep theory as the cause of two outages before checking; it explained neither.
 
 ---
+
+
+**19 Sep session:**
+- **Wrote a full day of work off the bus.** Briefs went to `~/dev/briefs/`, reports to `~/dev/scratch/`,
+  and `ETA-BUILD-QUEUE.md` / `ETA-CARRYOVER.md` were not updated once. The queue says it is the list the
+  orchestrator *re-reads rather than remembers* — I remembered instead, so V had to keep asking what was
+  happening. 100 files were moved back onto the bus at the end of the session.
+- Three instruments were wrong on first build and each was caught only by checking: the service-drift
+  audit counted a runtime `jobs/*.json` as source and reported a fake 118-hour drift; a health check used
+  a port and path that do not exist (router is **8083**, **`/healthz`**, not `/health`); and the
+  watchdog's new `swap_free` STOP fired on a healthy box, twice — first alone, then "corroborated" by
+  `free_pct`, which is itself on this box's documented liar list. It now gates on `diarize_ms >= 400`.
+- Quoted the Yoga as **24x** slower by dividing a 4-way-contended per-window time by the Mini's
+  uncontended one. It is **10.4x**. The decision did not change; the number was wrong and it was
+  decision-relevant.
+- Hypothesised the Yoga/Mini diarization gap was a library-version mismatch, then the compute device.
+  Both were disproved by measurement. It is arm64 vs x86_64.
+- Wrote two self-contradictory briefs (forbade DB access while asking for a live number; told a pane to
+  use `jev_ask` while forbidding text in logs). Both panes stopped and flagged rather than guessing.
+- Told V the Mini was unreachable when the bound device was the **Air** — named the wrong machine for
+  several turns while his Mini was green in his own Tailscale list.
 
 ## 7. NON-NEGOTIABLES
 
