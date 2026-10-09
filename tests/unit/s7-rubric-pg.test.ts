@@ -1086,6 +1086,56 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
+  it("S7-3 ehrc_surgical_outcome through the real runner (unit stay, lab:true): results with NO room and the admission's IST date, no text in the table, evidence in R2, ONE batched read per table for the whole batch, a from/to run lists surgical stays only, the 50-stay cap", async () => {
+    const LLM = await import("@/lib/rubrics/llm");
+    const REC = await import("@/lib/rubrics/evr/record");
+    const uid = (n: number) => `StayRun${String(n).padStart(3, "0")}AaaaaaaaaaaaaaZ`;
+    const sqls: string[] = [];
+    const KNEE = { surgery_name: "Total knee replacement", template_name: "OT note", created_at: "2026-09-06T05:00:00Z", note: "uneventful procedure" };
+    const surgical = new Set([uid(1), uid(2)]); // uid(3) has no theatre note
+    REC.setMetabaseForTests(async (q) => {
+      sqls.push(q);
+      const ids = [...q.matchAll(/'([A-Za-z0-9]{20,40})'/g)].map((m) => m[1]!);
+      if (/SELECT a\.uid AS stay_uid\n  FROM kx_ip_admissions a\n WHERE a\.admission_date_time >=/.test(q)) return [uid(1), uid(2)].map((u) => ({ stay_uid: u }));
+      if (/individuals-prescriptions/.test(q)) return ids.filter((u) => surgical.has(u)).map((u) => ({ stay_uid: u, rec_uid: `rec_${u}`, uploaded_at: "2026-09-20T10:00:00Z", exam: "", complaints: [{ symptoms: "knee pain", diagnoses: [] }], plan: [], ai_meta: {}, meds: [], investigations: [], refer_to: [], advice: [] }));
+      if (/kx_clinical_template_ot_notes/.test(q)) return ids.filter((u) => surgical.has(u)).map((u) => ({ stay_uid: u, ...KNEE }));
+      if (/kx_discharge_summary_records d ON d\.ipd_no/.test(q)) return ids.map((u) => ({ stay_uid: u, discharged_at: "2026-09-10T10:00:00Z", discharge_type: "home" }));
+      if (/cdmss_discharge_extracts/.test(q)) return [];
+      return ids.map((u) => ({ stay_uid: u, admitted_at: "2026-09-05T20:00:00Z", admission_type: "elective", department: "orthopaedics", encounter_id: `enc_${u}` })); // 20:00Z = 01:30 IST on the 6th
+    });
+    let calls = 0;
+    LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ label: "positive", negative_signals: [], same_problem: [true], planned_staging: false, better_or_no_complaint: true, escalate: false, evidence: [{ item: "better", quote: "knee pain" }] }), model: "fake/model", latency_ms: 1 }; });
+    try {
+      const run = await runJob("rubric_run", { rubric_id: "ehrc_surgical_outcome", lab: true, unit_keys: [uid(1), uid(2), uid(3)].map((u) => `stay:${u}`) });
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "ehrc_surgical_outcome", version: "0.2.0", units_planned: 3, ok: 2, skipped: 1, llm_calls: 2 } });
+      expect(calls).toBe(2);
+      expect(sqls).toHaveLength(5); // admissions, theatre, discharge, cdmss, follow-up: once for the 3 stays
+      const rows = (await pg.sql`SELECT unit_kind, unit_key, room_id, ist_date::text AS d, status, score, findings FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
+      expect(rows).toHaveLength(3);
+      expect(rows.map((r) => r.unit_kind)).toEqual(["stay", "stay", "stay"]);
+      expect(rows.every((r) => r.room_id === null && r.d === "2026-09-06")).toBe(true); // the admission's IST date (01:30 on the 6th), no room
+      expect(rows.filter((r) => r.status === "ok")).toHaveLength(2);
+      expect(rows.find((r) => r.status === "skipped")).toMatchObject({ unit_key: `stay:${uid(3)}`, score: { reason: "not_surgical" } });
+      expect(rows.find((r) => r.status === "ok")!.score).toMatchObject({ label: "positive", window_class: "joint_ligament_flap_fusion", cm_questions: "not_read" });
+      expect(JSON.stringify(rows)).not.toMatch(/knee|uneventful|enc_Stay/); // no text, no encounter id in the table
+      const evKey = `rubric/ehrc_surgical_outcome/0.2.0/${`stay:${uid(1)}`}.json`;
+      expect(JSON.parse(mem.get(evKey)!).evidence.quotes).toEqual([{ item: "better", quote: "knee pain" }]);
+      // a from/to run (lab:true) lists the SURGICAL stays of the admission dates, in one SELECT
+      await pg.exec(`DELETE FROM rubric_result; DELETE FROM rubric_run; DELETE FROM scribe_job;`);
+      sqls.length = 0; calls = 0;
+      const byDate = await runJob("rubric_run", { rubric_id: "ehrc_surgical_outcome", lab: true, from: "2026-09-01", to: "2026-09-30" });
+      expect(byDate.job).toMatchObject({ status: "done", result: { units_planned: 2, ok: 2 } });
+      expect(sqls.filter((q) => /EXISTS \(SELECT 1 FROM kx_clinical_template_ot_notes o WHERE o\.encounter_id = a\.encounter_id\)/.test(q))).toHaveLength(1);
+      // the cap: 51 keys are refused at submit
+      const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
+      expect(() => KIND_BY_NAME.get("rubric_run")!.parseArgs({ rubric_id: "ehrc_surgical_outcome", lab: true, unit_keys: Array.from({ length: 51 }, (_, i) => `stay:${uid(i + 1)}`) })).toThrow(/at most 50/);
+      expect(() => KIND_BY_NAME.get("rubric_run")!.parseArgs({ rubric_id: "ehrc_surgical_outcome", unit_keys: [`stay:${uid(1)}`] })).toThrow(/lab_required/);
+    } finally {
+      LLM.setRubricChatForTests(null);
+      REC.setMetabaseForTests(null);
+    }
+  });
+
   it("G74 — each copy of the unfinished-run reservation (store.ts insertJobCapped, llm-cap.ts dayUsage) is pinned ALONE: units x 2, and the larger of that and the job's own recorded calls", async () => {
     const C = await import("@/lib/rubrics/llm-cap");
     const { insertJobCapped, newJobId } = await import("@/lib/jobs/store");
