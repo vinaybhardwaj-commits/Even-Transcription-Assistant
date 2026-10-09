@@ -4,7 +4,7 @@
  * Reads what exists today with NO new writes: voice_print, voice_sample, voice_print_generation, voice_centroid (rows and counts only), room_turn_speaker (who matched, who lost).
  * NOTHING BIOMETRIC LEAVES THIS MODULE: no centroid, no embedding, no samples_json, no base64, no audio key or URL. The only vectors touched are the active voice_print centroids for the
  * `pairs` view, compared in memory by cosineSimilarity (lib/enroll.ts, raw vectors) and dropped; the answer carries the cosine to 3 dp.
- * HELD-OUT ROOM-DAYS: every room_turn_speaker aggregate joins turn -> bench_window -> room_day and excludes the held-out (room, IST date) pairs IN SQL (counted as n_blind_excluded). A turn
+ * HELD-OUT ROOM-DAYS: every room_turn_speaker aggregate joins turn -> bench_window -> room_day (the placement) and excludes a turn when ANY of its placements is a held-out (room, IST date) pair IN SQL: its own rts.room_day_id, its bench_window.room_day_id or its room_diarize_window.room_day_id (B2, REL2-R3); counted as n_blind_excluded. A turn
  * whose window has no room-day cannot be placed, so it is excluded too (fail closed) and counted as n_unplaced_excluded.
  * last_matched_at is the CREATED time of the newest role='clinician' turn row (room_turn_speaker has no separate matched-at column): INFERRED proxy, labelled so in the answer.
  */
@@ -28,14 +28,15 @@ type Row = Record<string, unknown>;
 async function excluded(): Promise<{ n_blind_excluded: number; n_unplaced_excluded: number }> {
   const b = (await sql`
     SELECT count(*)::int AS n FROM room_turn_speaker rts
-      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id
+      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
      WHERE (rts.role = 'clinician' OR rts.losing_clinician_id IS NOT NULL)
-       AND EXISTS (SELECT 1 FROM unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+       AND EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
   `) as Array<{ n: number }>;
   const u = (await sql`
     SELECT count(*)::int AS n FROM room_turn_speaker rts
-      LEFT JOIN bench_window w ON w.id = rts.window_id LEFT JOIN room_day rd ON rd.id = w.room_day_id
+      LEFT JOIN bench_window w ON w.id = rts.window_id LEFT JOIN room_day rd ON rd.id = w.room_day_id LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
      WHERE (rts.role = 'clinician' OR rts.losing_clinician_id IS NOT NULL) AND rd.id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
   `) as Array<{ n: number }>;
   return { n_blind_excluded: num(b[0]?.n), n_unplaced_excluded: num(u[0]?.n) };
 }
@@ -74,9 +75,9 @@ async function matchedBy(): Promise<Map<string, Row>> {
   const rows = (await sql`
     SELECT rts.clinician_id, max(rts.created_at) AS last_matched_at, count(*) FILTER (WHERE rts.created_at >= now() - interval '30 days')::int AS n_matched_30d
       FROM room_turn_speaker rts
-      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id
+      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
      WHERE rts.role = 'clinician' AND rts.clinician_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
      GROUP BY rts.clinician_id
   `) as Row[];
   return new Map(rows.map((r) => [String(r.clinician_id), r]));
@@ -85,9 +86,9 @@ async function lostBy(): Promise<Map<string, number>> {
   const rows = (await sql`
     SELECT rts.losing_clinician_id AS clinician_id, count(*) FILTER (WHERE rts.created_at >= now() - interval '30 days')::int AS n_lost_30d
       FROM room_turn_speaker rts
-      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id
+      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
      WHERE rts.losing_clinician_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
      GROUP BY rts.losing_clinician_id
   `) as Row[];
   return new Map(rows.map((r) => [String(r.clinician_id), num(r.n_lost_30d)]));
@@ -149,9 +150,9 @@ export async function consoleClinician(clinicianId: string): Promise<Record<stri
   const series = (await sql`
     SELECT rd.ist_date::text AS day, count(*)::int AS n_matched, percentile_cont(0.5) WITHIN GROUP (ORDER BY rts.match_confidence) AS p50
       FROM room_turn_speaker rts
-      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id
+      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
      WHERE rts.role = 'clinician' AND rts.clinician_id = ${clinicianId}::text AND rd.ist_date >= (now() AT TIME ZONE 'Asia/Kolkata')::date - 29
-       AND NOT EXISTS (SELECT 1 FROM unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
      GROUP BY rd.ist_date ORDER BY rd.ist_date
   `) as Row[];
   return {
@@ -175,9 +176,9 @@ export async function consolePairs(minCosine?: number): Promise<Record<string, u
   const contested = (await sql`
     SELECT rts.clinician_id AS won, rts.losing_clinician_id AS lost, count(*)::int AS n
       FROM room_turn_speaker rts
-      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id
+      JOIN bench_window w ON w.id = rts.window_id JOIN room_day rd ON rd.id = w.room_day_id LEFT JOIN room_diarize_window dw ON dw.window_id = rts.window_id
      WHERE rts.role = 'clinician' AND rts.clinician_id IS NOT NULL AND rts.losing_clinician_id IS NOT NULL AND rts.created_at >= now() - interval '30 days'
-       AND NOT EXISTS (SELECT 1 FROM unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (rts.room_day_id, w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
      GROUP BY rts.clinician_id, rts.losing_clinician_id
   `) as Array<{ won: string; lost: string; n: number }>;
   const ex = await excluded();

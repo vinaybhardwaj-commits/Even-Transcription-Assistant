@@ -3,14 +3,14 @@
  * A query voice (one speaker of one diarized window, or one clinician's active centroid) is compared in memory by cosineSimilarity (lib/enroll.ts, raw vectors) with the stored speaker
  * embeddings of room_diarize_window rows in a scoped room / IST-date range. Nothing about the query or its hits is stored, logged or returned as a vector: the answer is window ids, room, date,
  * speaker index, a cosine to 3 dp and, where room_turn_speaker matched that speaker in that window, the clinician id. "voice similarity, not identity" — never a verdict.
- * HELD-OUT ROOM-DAYS (S6-BLIND Y1: EITHER placement, room_diarize_window.room_day_id or bench_window.room_day_id, held out excludes a window; same rule as lib/voice-blind refusalForPairs): the query window passes lib/voice-blind (blind_room_day / window_unplaced, 0 further reads); candidate windows on a held-out pair are excluded in SQL and counted
+ * HELD-OUT ROOM-DAYS (B2, REL2-R3: ANY placement of a window, its room_diarize_window.room_day_id, its bench_window.room_day_id or any of its room_turn_speaker rows' own room_day_id; S6-BLIND Y1: EITHER placement, room_diarize_window.room_day_id or bench_window.room_day_id, held out excludes a window; same rule as lib/voice-blind refusalForPairs): the query window passes lib/voice-blind (blind_room_day / window_unplaced, 0 further reads); candidate windows on a held-out pair are excluded in SQL and counted
  * (n_blind_excluded), windows with no room-day are excluded and counted (n_unplaced_excluded); more than MAX_WINDOWS candidates is search_too_wide BEFORE any vector is read.
  */
 import { sql } from "@/lib/db";
 import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
 import { cosineSimilarity } from "@/lib/enroll";
 import { DIARIZE_BATCH_THRESHOLD } from "@/lib/stt/diarize-window";
-import { guardWindow } from "@/lib/voice-blind";
+import { guardWindow, rtsBlindRows } from "@/lib/voice-blind";
 
 export const SEARCH_COSINE_FLOOR = 0.5;
 export const SEARCH_COSINE_DEFAULT = DIARIZE_BATCH_THRESHOLD;
@@ -68,6 +68,7 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
     if (!Number.isInteger(idxN) || idxN < 0 || idxN > 99) return { ok: false, error: "bad_speaker_idx" };
     const g = await guardWindow(wid); // placement only; refused here = no other read happens
     if (g) return { ok: false, error: g };
+    if ((await rtsBlindRows({ windowId: wid })) > 0) return { ok: false, error: "blind_room_day" }; // B2: the query window's own turn rows can be held out too
     const rows = (await sql`
       SELECT sp->>'embedding_base64' AS b64
         FROM room_diarize_window d, jsonb_array_elements(CASE WHEN jsonb_typeof(d.speakers_json) = 'array' THEN d.speakers_json ELSE '[]'::jsonb END) sp
@@ -95,7 +96,7 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
   const counts = (await sql`
     SELECT count(*) FILTER (WHERE NOT blind)::int AS n_candidates, count(*) FILTER (WHERE blind)::int AS n_blind
       FROM (
-        SELECT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) AS blind
+        SELECT (EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = d.window_id AND b2.d = r2.ist_date AND b2.r = r2.room_id)) AS blind
           FROM room_diarize_window d
           JOIN bench_window w ON w.id = d.window_id
           JOIN room_day rd ON rd.id = COALESCE(d.room_day_id, w.room_day_id)
@@ -123,7 +124,7 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
       JOIN room_day rd ON rd.id = COALESCE(d.room_day_id, w.room_day_id),
       jsonb_array_elements(CASE WHEN jsonb_typeof(d.speakers_json) = 'array' THEN d.speakers_json ELSE '[]'::jsonb END) sp
      WHERE d.state = 'ok' AND rd.room_id = ANY(${scope.rooms}::text[]) AND rd.ist_date BETWEEN ${scope.from}::date AND ${scope.to}::date
-       AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
+       AND NOT (EXISTS (SELECT 1 FROM room_day r1, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b(d, r) WHERE r1.id IN (d.room_day_id, w.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) OR EXISTS (SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2.id = t.room_day_id, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b2(d, r) WHERE t.window_id = d.window_id AND b2.d = r2.ist_date AND b2.r = r2.room_id))
        AND sp->>'embedding_base64' IS NOT NULL
      ORDER BY d.window_id, sp->>'idx'
   `) as Cand[];
@@ -152,6 +153,7 @@ export async function voiceSearch(a: SearchArgs): Promise<Record<string, unknown
         FROM room_turn_speaker rts
         JOIN room_diarize_window d ON d.window_id = rts.window_id AND d.last_run_id = rts.run_id
        WHERE rts.window_id = ANY(${wids}::text[]) AND rts.role = 'clinician' AND rts.clinician_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM room_day r3, unnest(${DAYS}::date[], ${ROOMS}::text[]) AS b3(d, r) WHERE r3.id = rts.room_day_id AND b3.d = r3.ist_date AND b3.r = r3.room_id)
        GROUP BY rts.window_id, rts.speaker_idx, rts.clinician_id
     `) as Array<{ window_id: string; speaker_idx: number; clinician_id: string }>;
     for (const r of rows) { const k = `${r.window_id}\u0000${r.speaker_idx}`; (matched.get(k) ?? matched.set(k, new Set()).get(k)!).add(r.clinician_id); }

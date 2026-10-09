@@ -125,14 +125,14 @@ describe("held-out room-days and what may be selected", () => {
     const agg = statements.filter((s) => /FROM room_turn_speaker rts/.test(s.text) && /GROUP BY/.test(s.text));
     expect(agg.length).toBeGreaterThanOrEqual(5); // matched, lost, daily series, pairs (x2 views)
     for (const q of agg) {
-      expect(q.text, q.text.slice(0, 80)).toMatch(/NOT EXISTS \(SELECT 1 FROM unnest\(\?::date\[\], \?::text\[\]\) AS b\(d, r\) WHERE b\.d = rd\.ist_date AND b\.r = rd\.room_id\)/);
+      expect(q.text, q.text.slice(0, 80)).toMatch(/NOT EXISTS \(SELECT 1 FROM room_day r1, unnest\(\?::date\[\], \?::text\[\]\) AS b\(d, r\) WHERE r1\.id IN \(rts\.room_day_id, w\.room_day_id, dw\.room_day_id\) AND b\.d = r1\.ist_date AND b\.r = r1\.room_id\)/); // B2: ANY placement
       expect(q.text.indexOf("NOT EXISTS")).toBeLessThan(q.text.indexOf("GROUP BY"));
       expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
       expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([, r]) => r));
       expect(q.text).toMatch(/JOIN bench_window w ON w\.id = rts\.window_id JOIN room_day rd ON rd\.id = w\.room_day_id/);
     }
     const ex = statements.filter((s) => /count\(\*\)::int AS n FROM room_turn_speaker/.test(s.text));
-    expect(ex.some((q) => /EXISTS \(SELECT 1 FROM unnest/.test(q.text) && !/NOT EXISTS/.test(q.text))).toBe(true); // the blind count
+    expect(ex.some((q) => /EXISTS \(SELECT 1 FROM room_day r1, unnest/.test(q.text) && !/NOT EXISTS/.test(q.text))).toBe(true); // the blind count
     expect(ex.some((q) => /rd\.id IS NULL/.test(q.text))).toBe(true); // the unplaced count
   });
   it("no query selects a vector column, samples_json, an audio key or a presign; the only vector read is encode(centroid) for the pair view", async () => {

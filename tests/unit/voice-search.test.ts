@@ -57,7 +57,7 @@ describe("candidates and scope", () => {
     const r = await V.voiceSearch(Q_WIN) as Row;
     expect(r).toMatchObject({ ok: true, n_blind_excluded: 4, n_unplaced_excluded: 3, n_windows_in_scope: 2, label: "voice similarity, not identity" });
     const v = vectorReads()[0]!;
-    expect(v.text).toMatch(/NOT EXISTS \(SELECT 1 FROM room_day r1, unnest\(\?::date\[\], \?::text\[\]\) AS b\(d, r\) WHERE r1\.id IN \(d\.room_day_id, w\.room_day_id\) AND b\.d = r1\.ist_date AND b\.r = r1\.room_id\)/); // Y1: either placement
+    expect(v.text).toMatch(/NOT \(EXISTS \(SELECT 1 FROM room_day r1, unnest\(\?::date\[\], \?::text\[\]\) AS b\(d, r\) WHERE r1\.id IN \(d\.room_day_id, w\.room_day_id\) AND b\.d = r1\.ist_date AND b\.r = r1\.room_id\) OR EXISTS \(SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2\.id = t\.room_day_id/); // Y1 + B2: bench, diarize AND the window's turn rows' own room-days // Y1: either placement
     expect(v.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
     expect(v.values).toContainEqual(BLIND_ROOM_DAYS.map(([, x]) => x));
     expect(v.values).toContainEqual(["r1"]);
@@ -93,7 +93,7 @@ describe("ranking, floor, caps, dimensions", () => {
   const cands = (list: Array<[string, string, number | string]>): Row[] => list.map(([w, i, c]) => ({ window_id: w, room_id: "r1", ist_date: "2026-10-02", idx: i, b64: typeof c === "number" ? vec(c) : c }));
   it("sorted by cosine desc, 3 dp, the query's own speaker excluded, bad dims skipped and counted, the matched clinician attached", async () => {
     answers = [PLACE_OK, QVEC, ...COUNTS(3), CANDS(cands([["q", "0", 1], ["q", "1", 0.7], ["wa", "0", 0.91234], ["wb", "2", 0.8], ["wc", "0", vec(0.9, 100)], ["wd", "0", 0.55]])),
-      [/FROM room_turn_speaker/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docA" }]]];
+      [/JOIN room_diarize_window d ON d\.window_id = rts\.window_id AND d\.last_run_id/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docA" }]]];
     const r = await V.voiceSearch(Q_WIN) as { hits: Row[]; n_speakers_compared: number; n_bad_dim: number; n_windows_scanned: number; query: Row };
     expect(r.hits.map((h) => [h.window_id, h.speaker_idx, h.cosine, h.clinician_id])).toEqual([["wa", 0, 0.912, "docA"], ["wb", 2, 0.8, null], ["q", 1, 0.7, null]]);
     expect(r.hits[0]).toEqual({ window_id: "wa", room_id: "r1", ist_date: "2026-10-02", speaker_idx: 0, cosine: 0.912, clinician_id: "docA", clinician_ambiguous: false });
@@ -101,10 +101,10 @@ describe("ranking, floor, caps, dimensions", () => {
   });
   it("S1: two different clinicians for one speaker = clinician_id null + clinician_ambiguous; the attribution SQL is tied to the window's current run", async () => {
     answers = [PLACE_OK, QVEC, ...COUNTS(2), CANDS(cands([["wa", "0", 0.9], ["wb", "0", 0.8]])),
-      [/FROM room_turn_speaker rts/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docB" }, { window_id: "wa", speaker_idx: 0, clinician_id: "docC" }, { window_id: "wb", speaker_idx: 0, clinician_id: "docA" }]]];
+      [/JOIN room_diarize_window d ON d\.window_id = rts\.window_id AND d\.last_run_id/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docB" }, { window_id: "wa", speaker_idx: 0, clinician_id: "docC" }, { window_id: "wb", speaker_idx: 0, clinician_id: "docA" }]]];
     const r = await V.voiceSearch(Q_WIN) as { hits: Row[] };
     expect(r.hits.map((h) => [h.window_id, h.clinician_id, h.clinician_ambiguous])).toEqual([["wa", null, true], ["wb", "docA", false]]);
-    const m = statements.find((x) => /FROM room_turn_speaker rts/.test(x.text))!;
+    const m = statements.find((x) => /JOIN room_diarize_window d ON d\.window_id = rts\.window_id AND d\.last_run_id/.test(x.text))!;
     expect(m.text).toMatch(/JOIN room_diarize_window d ON d\.window_id = rts\.window_id AND d\.last_run_id = rts\.run_id/);
   });
   it("S2: a speakers_json entry whose idx is not a non-negative integer is skipped and counted in n_bad_dim, never returned as a hit", async () => {
@@ -141,7 +141,7 @@ describe("ranking, floor, caps, dimensions", () => {
 
 describe("transient and vector-free", () => {
   it("nothing is written (every statement is a SELECT) and no vector, base64, URL, audio key or text leaves in the answer", async () => {
-    answers = [PLACE_OK, QVEC, ...COUNTS(1), CANDS([{ window_id: "wa", room_id: "r1", ist_date: "2026-10-02", idx: "0", b64: vec(0.95) }]), [/FROM room_turn_speaker/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docA" }]]];
+    answers = [PLACE_OK, QVEC, ...COUNTS(1), CANDS([{ window_id: "wa", room_id: "r1", ist_date: "2026-10-02", idx: "0", b64: vec(0.95) }]), [/JOIN room_diarize_window d ON d\.window_id = rts\.window_id AND d\.last_run_id/, [{ window_id: "wa", speaker_idx: 0, clinician_id: "docA" }]]];
     const r = await V.voiceSearch(Q_WIN);
     for (const s of statements) { expect(s.text.trimStart()).toMatch(/^SELECT/); expect(s.text).not.toMatch(/\b(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b/); }
     const flat = (v: unknown, out: unknown[] = []): unknown[] => { out.push(v); if (Array.isArray(v)) v.forEach((x) => flat(x, out)); else if (v && typeof v === "object") Object.values(v as object).forEach((x) => flat(x, out)); return out; };

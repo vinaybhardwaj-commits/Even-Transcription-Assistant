@@ -25,7 +25,7 @@ beforeAll(() => {
     CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL);
     CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL, room_day_id text);
     CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text, state text NOT NULL, speakers_json jsonb, last_run_id text);
-    CREATE TABLE room_turn_speaker (window_id text NOT NULL, source_ref text NOT NULL, speaker_idx integer NOT NULL, clinician_id text, role text, run_id text, PRIMARY KEY (window_id, source_ref));
+    CREATE TABLE room_turn_speaker (window_id text NOT NULL, source_ref text NOT NULL, speaker_idx integer NOT NULL, room_day_id text, clinician_id text, role text, run_id text, PRIMARY KEY (window_id, source_ref));
     CREATE TABLE clinician (id text PRIMARY KEY, status text NOT NULL, deleted_at timestamptz);
     CREATE TABLE voice_print (doctor_id text PRIMARY KEY, centroid bytea);
   `);
