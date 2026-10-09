@@ -7,16 +7,46 @@
  * discharge and the numbered follow-up records, and returns a proposed label, closed negative-signal codes, a same-problem flag per record, planned_staging, better_or_no_complaint, escalate and quotes.
  * AFTER the model, CODE (applyOutcomeRules): silence or no same-problem record in the window is never positive (unscored); the care-manager questions are not read, so positive needs a same-problem record
  * in the window that documents no complaint or better; a negative code makes the label negative unless planned staging is stated (then neutral_protocol); a negative label with no code is unscored.
- * rubric_result gets the label, the codes, the window class and counts (no text); every quote and the record values go only to the R2 evidence, and a quote not found in the stay record is dropped.
+ * rubric_result gets the label, the codes, the window class and counts (no text). E3-1 (PHI): NO note text is stored anywhere. The model's short quote is LOCATED in the source text it was shown; only {item (a closed
+ * enum), source, record_ref (an opaque, validated row uid), field, start, end} (character offsets into that source text) are kept. The quote string itself never reaches R2, the table, a log or the tool output; a quote
+ * that cannot be located is dropped and counted (quote_unlocated).
  */
 import type { Rubric } from "../types";
 import { askJson } from "../llm";
 import { promptVersion, systemPrompt } from "./consult-llm";
-import { readStayRecord, type StayRecord } from "../readers/stay-record";
+import { cleanRef, readStayRecord, type StayRecord } from "../readers/stay-record";
 import type { EngineResult } from "./types";
 
 export const NEGATIVE_CODES = ["ssi_pus", "fever", "spreading_redness", "return_to_theatre", "complication_documented"] as const;
 export type NegativeCode = (typeof NEGATIVE_CODES)[number];
+/** E3-1: the only values an evidence `item` may take. Anything else the model writes is stored as "other". */
+export const EVIDENCE_ITEMS = [...NEGATIVE_CODES, "indication", "procedure", "discharge_course", "follow_up_better", "follow_up_complaint", "planned_staging", "other"] as const;
+export type EvidenceItem = (typeof EVIDENCE_ITEMS)[number];
+export const normItem = (v: unknown): EvidenceItem => (typeof v === "string" && (EVIDENCE_ITEMS as readonly string[]).includes(v) ? (v as EvidenceItem) : "other");
+export const EVIDENCE_SOURCES = ["theatre", "discharge_summary", "cdmss", "follow_up"] as const;
+export type Section = { source: (typeof EVIDENCE_SOURCES)[number]; ref: string | null; field: string; text: string };
+export type EvidenceRef = { item: EvidenceItem; source: Section["source"]; record_ref: string; field: string; start: number; end: number };
+/** PURE — where a quote sits in the sections the model was shown (case-insensitive, first hit); null = cannot be located. Returns offsets and an opaque ref, never the text. */
+export function locateQuote(item: unknown, quote: unknown, sections: readonly Section[]): EvidenceRef | null {
+  const q = typeof quote === "string" ? quote.trim().toLowerCase() : "";
+  if (q.length < 3) return null;
+  for (const sec of sections) {
+    if (!sec.ref) continue; // a section without a validated row uid cannot be referred to
+    const at = sec.text.toLowerCase().indexOf(q);
+    if (at >= 0) return { item: normItem(item), source: sec.source, record_ref: sec.ref, field: sec.field, start: at, end: at + q.length };
+  }
+  return null;
+}
+/** PURE — the only shape of stay evidence that may be shown or returned: every other key (and any legacy text field) is dropped. */
+export function safeStayEvidence(ev: unknown): Record<string, unknown> | null {
+  if (!ev || typeof ev !== "object") return null;
+  const e = ev as Record<string, unknown>;
+  const refs = Array.isArray(e.refs) ? (e.refs as Array<Record<string, unknown>>).map((r) => ({ item: normItem(r?.item), source: (EVIDENCE_SOURCES as readonly string[]).includes(String(r?.source)) ? r.source : "other", record_ref: typeof r?.record_ref === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(r.record_ref) ? r.record_ref : null, field: typeof r?.field === "string" && /^[a-z_]{1,40}$/.test(r.field) ? r.field : null, start: Number.isInteger(r?.start) ? r.start : null, end: Number.isInteger(r?.end) ? r.end : null })) : [];
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return { model: typeof e.model === "string" ? e.model.slice(0, 80) : null, prompt_version: typeof e.prompt_version === "string" ? e.prompt_version.slice(0, 20) : null, attempts: num(e.attempts), window_class: typeof e.window_class === "string" ? e.window_class.slice(0, 40) : null, window_days: num(e.window_days),
+    n_theatre_notes: num(e.n_theatre_notes), n_followups_in_window: num(e.n_followups_in_window), theatre_truncated: e.theatre_truncated === true, follow_up_truncated: e.follow_up_truncated === true, refs, quote_unlocated: num(e.quote_unlocated) };
+}
+
 export type OutcomeLabel = "positive" | "negative" | "neutral_protocol" | "unscored";
 
 /** Window class table, in order: the FIRST class whose pattern matches the procedure text wins. Days are counted from the discharge. */
@@ -76,20 +106,25 @@ function renderRecord(r: InWindow[number], i: number, discharge: string | null):
     `plan/procedures: ${n.procedures.map((x) => x.name).join("; ") || "-"}`, `medications: ${n.meds.map((m) => m.name).join("; ") || "-"}`, `advice: ${n.advice || "-"}`, `follow-up: ${n.followup || "-"}`].join("\n");
 }
 
-/** The user message, in the rubric's read order: indication, theatre record, discharge, follow-up records. Deterministic. */
-export function renderStay(stay: StayRecord, records: InWindow): string {
+/** The user message, in the rubric's read order (indication, theatre record, discharge, follow-up records), AND the sections it was built from (the texts a quote can be located in). Deterministic. */
+export function renderStaySections(stay: StayRecord, records: InWindow): { user: string; sections: Section[] } {
   const adm = stay.admission;
   const c = stay.cdmss;
+  const sections: Section[] = [];
+  const sec = (source: Section["source"], ref: string | null, field: string, text: string): string => { sections.push({ source, ref, field, text }); return text; };
   const parts = [
-    "PRE-OPERATIVE INDICATION", `admission: ${adm.admission_type ?? "-"}, ${adm.department ?? "-"}`, clip(c?.indication || c?.diagnosis || "-", 3000), "",
-    "THEATRE RECORD", ...stay.theatre.map((o) => `${o.surgery_name || o.template_name || "-"} (day ${dayOffset(o.created_at, adm.admitted_at) ?? "?"} after admission)\n${clip(o.note || "-", 4000)}`), "",
-    "DISCHARGE", `type: ${stay.discharge?.discharge_type ?? "-"}`, `procedure: ${clip(c?.procedure || "-", 800)}`, `course: ${clip(c?.course_summary || "-", 3000)}`, `disposition: ${clip(c?.disposition || "-", 600)}`,
-    `follow-up advised: ${clip(c?.follow_up || "-", 800)}`, `aftercare: ${clip(c?.aftercare_instructions || "-", 1000)}`, `warning signs: ${clip(c?.aftercare_warning_signs || "-", 800)}`, "",
+    "PRE-OPERATIVE INDICATION", `admission: ${adm.admission_type ?? "-"}, ${adm.department ?? "-"}`, sec("cdmss", c?.ref ?? null, "indication", clip(c?.indication || c?.diagnosis || "-", 3000)), "",
+    "THEATRE RECORD", ...stay.theatre.map((o) => `${o.surgery_name || o.template_name || "-"} (day ${dayOffset(o.created_at, adm.admitted_at) ?? "?"} after admission)\n${sec("theatre", o.ref, "note", clip(o.note || "-", 4000))}`), "",
+    "DISCHARGE", `type: ${stay.discharge?.discharge_type ?? "-"}`, `procedure: ${sec("cdmss", c?.ref ?? null, "procedure", clip(c?.procedure || "-", 800))}`, `course: ${sec("cdmss", c?.ref ?? null, "course_summary", clip(c?.course_summary || "-", 3000))}`,
+    `disposition: ${sec("cdmss", c?.ref ?? null, "disposition", clip(c?.disposition || "-", 600))}`, `follow-up advised: ${sec("cdmss", c?.ref ?? null, "follow_up", clip(c?.follow_up || "-", 800))}`,
+    `aftercare: ${sec("cdmss", c?.ref ?? null, "aftercare_instructions", clip(c?.aftercare_instructions || "-", 1000))}`, `warning signs: ${sec("cdmss", c?.ref ?? null, "aftercare_warning_signs", clip(c?.aftercare_warning_signs || "-", 800))}`, "",
     "POST-DISCHARGE QUESTIONS", "not read in this slice", "",
-    `OUTPATIENT FOLLOW-UP RECORDS INSIDE THE WINDOW (${records.length})`, ...(records.length === 0 ? ["none"] : records.map((r, i) => renderRecord(r, i, stay.discharge?.discharged_at ?? null))),
+    `OUTPATIENT FOLLOW-UP RECORDS INSIDE THE WINDOW (${records.length})`, ...(records.length === 0 ? ["none"] : records.map((r, i) => sec("follow_up", cleanRefOf(r.rec_uid), "record", renderRecord(r, i, stay.discharge?.discharged_at ?? null)))),
   ];
-  return parts.join("\n");
+  return { user: parts.join("\n"), sections };
 }
+export const renderStay = (stay: StayRecord, records: InWindow): string => renderStaySections(stay, records).user;
+const cleanRefOf = (v: string): string | null => cleanRef(v);
 
 const norm = (t: string): string => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
@@ -108,7 +143,7 @@ export async function evaluateEhrc(r: Rubric, stayKey: string): Promise<EngineRe
   if (!cls) return withDate(unscored("window_unknown"));
   if (!stay.discharge?.discharged_at) return withDate(unscored("no_discharge_date"));
   const recs = recordsInWindow(stay, cls.days);
-  const user = renderStay(stay, recs);
+  const { user, sections } = renderStaySections(stay, recs);
   const out = await askJson({
     system: systemPrompt(r), user, schema: r.output as Record<string, unknown>,
     extraValidate: (v) => (Array.isArray(v.same_problem) && v.same_problem.length !== recs.length ? [`$.same_problem: needs ${recs.length} entries, one per follow-up record`] : []),
@@ -117,15 +152,17 @@ export async function evaluateEhrc(r: Rubric, stayKey: string): Promise<EngineRe
   const v = out.value;
   const prop: Proposal = { label: v.label as OutcomeLabel, negative_signals: (v.negative_signals as string[]) ?? [], same_problem: (v.same_problem as boolean[]) ?? [], planned_staging: v.planned_staging === true, better_or_no_complaint: v.better_or_no_complaint === true, escalate: v.escalate === true };
   const dec = applyOutcomeRules(prop, recs.length);
-  const source = norm(user);
-  const quotes = ((v.evidence as Array<{ item: string; quote: string }> | undefined) ?? []);
-  const kept = quotes.filter((q) => norm(q.quote).length >= 3 && source.includes(norm(q.quote)));
-  const findings = [`label:${dec.label}`, ...dec.codes.map((c) => `neg:${c}`), ...(dec.reason ? [`reason:${dec.reason}`] : []), ...(dec.escalate ? ["escalate"] : [])];
+  // E3-1: locate each quote in the sections shown to the model; keep only {item, source, record_ref, field, start, end}. The quote text and the model's free-text item are discarded here.
+  const quotes = Array.isArray(v.evidence) ? (v.evidence as Array<{ item?: unknown; quote?: unknown }>) : [];
+  const refs: EvidenceRef[] = [];
+  let unlocated = 0;
+  for (const q of quotes) { const at = locateQuote(q?.item, q?.quote, sections); if (at) refs.push(at); else unlocated += 1; }
+  const findings = [`label:${dec.label}`, ...dec.codes.map((c) => `neg:${c}`), ...(dec.reason ? [`reason:${dec.reason}`] : []), ...(dec.escalate ? ["escalate"] : []), ...(stay.theatre_truncated ? ["truncated:theatre"] : []), ...(stay.follow_up_truncated ? ["truncated:follow_up"] : [])];
   return withDate({
     status: "ok",
-    score: { label: dec.label, negative_signals: dec.codes, window_class: cls.id, window_days: cls.days, n_followups_in_window: recs.length, n_same_problem: dec.n_same_problem, planned_staging: prop.planned_staging, escalate: dec.escalate, ...(dec.reason ? { reason: dec.reason } : {}), model_label: prop.label, attempts: out.attempts, ...base },
+    score: { label: dec.label, negative_signals: dec.codes, window_class: cls.id, window_days: cls.days, n_followups_in_window: recs.length, n_same_problem: dec.n_same_problem, planned_staging: prop.planned_staging, escalate: dec.escalate, theatre_truncated: stay.theatre_truncated, follow_up_truncated: stay.follow_up_truncated, ...(dec.reason ? { reason: dec.reason } : {}), model_label: prop.label, attempts: out.attempts, ...base },
     findings,
-    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, window_class: cls.id, window_days: cls.days, n_theatre_notes: stay.theatre.length, n_followups_in_window: recs.length, quotes: kept, quotes_dropped_not_in_record: quotes.length - kept.length },
+    evidence: { model: out.model, prompt_version: promptVersion(r), attempts: out.attempts, window_class: cls.id, window_days: cls.days, n_theatre_notes: stay.theatre.length, n_followups_in_window: recs.length, theatre_truncated: stay.theatre_truncated, follow_up_truncated: stay.follow_up_truncated, refs, quote_unlocated: unlocated },
     calls: out.attempts,
   });
 }

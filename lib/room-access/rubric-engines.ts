@@ -161,7 +161,8 @@ export async function resolveUnits(r: Rubric, unitKind: RubricUnit, p: PlanParam
       return { keys, truncated: all.length > keys.length };
     }
     if (!p.from || !p.to || !isIstDate(p.from) || !isIstDate(p.to) || p.from > p.to) return { error: "range_required", detail: "give unit_keys, or from and to (IST admission dates)" };
-    if (Date.parse(p.to) - Date.parse(p.from) > 31 * 86_400_000) return { error: "range_too_long", detail: "at most 31 days" };
+    // E3-4: 31 dates INCLUSIVE (to - from <= 30 days)
+    if ((Date.parse(p.to) - Date.parse(p.from)) / 86_400_000 + 1 > 31) return { error: "range_too_long", detail: "at most 31 days" };
     return listSurgicalStays(p.from, p.to, Math.min(p.limit, STAY_RUN_MAX));
   }
   if (p.unit_keys && p.unit_keys.length > 0) {
