@@ -61,7 +61,8 @@ describe("G62 — the results read refuses and filters the held-out set", () => 
   it("our G65 — rows whose room or date is NULL are excluded in SQL and never fetched: the listing says IS NOT NULL, and readEvidence with an incomplete pair throws before the store", async () => {
     await Store.listResults({ limit: 10 });
     const q = statements.find((s) => /FROM rubric_result/.test(s.text))!;
-    expect(q.text).toMatch(/room_id IS NOT NULL AND ist_date IS NOT NULL/);
+    // E3-2: a NULL date is never served; a NULL room only for unit_kind 'stay' (a stay has no room and no room-day), every other kind still needs a room
+    expect(q.text).toMatch(/ist_date IS NOT NULL AND \(room_id IS NOT NULL OR unit_kind = 'stay'\)/);
     mem.set("rubric/talk_time/0.1.0/wn.json", "{\"secret\":1}");
     for (const pair of [{ room_id: null, ist_date: "2026-10-01" }, { room_id: BR, ist_date: null }, { room_id: null, ist_date: null }, { room_id: "", ist_date: "2026-10-01" }]) {
       await expect(Store.readEvidence("rubric/talk_time/0.1.0/wn.json", pair)).rejects.toBeInstanceOf(BlindRoomDayError);

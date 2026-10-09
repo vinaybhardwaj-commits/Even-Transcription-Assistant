@@ -8,6 +8,7 @@
  * enums and closed codes, never transcript text; `evidence_key` points at the per-unit JSON in R2 (eta-lab-results rubric/<id>/<version>/<unit>.json) and include_text:true
  * (at most 20 rows) fetches it. A non-production rubric runs only with lab:true AND an explicit unit_keys list (production rubrics may run on a room/date range).
  */
+import { safeStayEvidence } from "@/lib/rubrics/engines/ehrc";
 import { JobArgsError, submitJob, UnknownKindError } from "@/lib/jobs/submit";
 import { RUBRIC_RUN_KIND, RUBRIC_RUN_MAX_UNITS } from "@/lib/jobs/kinds/rubric-run";
 import { RUBRIC_BENCH_KIND } from "@/lib/jobs/kinds/rubric-bench";
@@ -113,7 +114,9 @@ const rubric: McpTool = {
           const key = typeof r.evidence_key === "string" ? r.evidence_key : null;
           if (key && fetched < EVIDENCE_ROWS_MAX) {
             fetched += 1;
-            out.push({ ...r, evidence: await readEvidence(key, { room_id: ((r as Row).room_id as string | null) ?? null, ist_date: ((r as Row).ist_date as string | null) ?? null }).catch(() => null) });
+            // E3-1/E3-2: a STAY has no room (no pair to check) and its evidence is returned through the whitelist: refs and offsets only, never text
+            if ((r as Row).unit_kind === "stay") out.push({ ...r, evidence: safeStayEvidence(((await readEvidence(key).catch(() => null)) as { evidence?: unknown } | null)?.evidence) });
+            else out.push({ ...r, evidence: await readEvidence(key, { room_id: ((r as Row).room_id as string | null) ?? null, ist_date: ((r as Row).ist_date as string | null) ?? null }).catch(() => null) });
           } else out.push(r);
         }
         return { ok: true, count: rows.length, evidence_fetched: fetched, evidence_cap: EVIDENCE_ROWS_MAX, results: out };
