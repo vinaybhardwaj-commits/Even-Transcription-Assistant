@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db: { calls: Array<{ q: string; vals: unknown[] }>; rows: unknown[]; fail: boolean } = { calls: [], rows: [], fail: false };
 // REL2-R4 G1: the placement checks are tested on real SQL (rel2-r3-k3-pg, voice-blind-pg); this file tests the query shapes
-vi.mock("@/lib/voice-blind", async (orig) => ({ ...((await orig()) as object), guardSessionSpan: async () => null, windowBlindAny: async () => false }));
+vi.mock("@/lib/room-access/check", async (orig) => ({ ...((await orig()) as object), guardSessionSpan: async () => null, windowBlindAny: async () => false }));
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...vals: unknown[]) => {
     db.calls.push({ q: strings.join("?"), vals });

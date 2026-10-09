@@ -385,6 +385,8 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(ev!.windows).toHaveLength(1);
     expect(ev!.windows[0]!.text).toBe("ok words");
     expect(ev!.n_blind_excluded).toBe(2);
+  });
+});
 
 (HAVE ? describe : describe.skip)("GUARD — the readers that used to carry their own SQL (REB index route, store stats, rooms, the admin STT-lab / drain / calibration / windows routes) now refuse or exclude held-out targets through lib/room-access", () => {
   beforeAll(() => {
