@@ -5,7 +5,7 @@
  * Lives under [slug] so the path-scoped doctor cookie reaches it. Grounding: may
  * add structure / standard phrasing / prompts for MISSING items, but never invents
  * a specific clinical value — unknown specifics become "___". Runs on Gemini flash
- * (Ollama fallback) via routedChat; throttled + cached so a typing burst is ~1 call.
+ * (OpenRouter fallback) via routedChat; throttled + cached so a typing burst is ~1 call.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
@@ -89,7 +89,6 @@ Return JSON:
   try {
     const r = await routedChat({
       surface: "notegen_analyze", tier: "flash",
-      ollamaModel: process.env.NOTE_MODEL || "qwen2.5:14b",
       messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
       temperature: 0, responseJson: true, maxTokens: MAX_OUTPUT_TOKENS, timeoutMs: 25_000, signal: req.signal,
     });

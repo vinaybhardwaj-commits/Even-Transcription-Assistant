@@ -15,9 +15,14 @@
  * conservative pick with a strong Sarvam default is safer. IndicConformer wins
  * mainly on monolingual-Indic speech; Sarvam keeps its edge on code-mix (where
  * the clinically-critical English terms live).
+ *
+ * OFF QWEN (22 Sep). Both LLM calls below used to go straight to the retired local 14B model via
+ * `lib/qwen.ts`. They now go through `routedChat` (Gemini when flagged+configured,
+ * OpenRouter otherwise — `lib/llm/gemini.ts`), same flash tier as the rest of this
+ * pipeline. No qwen, no direct Ollama call.
  */
 import { indicconformerAdapter } from "./adapters/indicconformer";
-import { qwenJson } from "@/lib/qwen";
+import { routedChat } from "@/lib/llm/gemini";
 
 export const INDIC_NOTE_ASSIST_ON = () => process.env.ETA_NOTE_PARALLEL_INDIC === "1";
 
@@ -34,8 +39,17 @@ async function translateNativeToEnglish(native: string, lang: string): Promise<s
     "CRITICAL: keep English medical terms, drug names, doses, units, and abbreviations exactly as a clinician writes them. " +
     "Do NOT add, omit, summarize, or invent content. Return JSON {\"english\":\"...\"}.";
   try {
-    const r = await qwenJson<{ english?: string }>(sys, `Language: ${lang}\nTranscript:\n${native.slice(0, 8000)}`, { temperature: 0, timeoutMs: 60_000 });
-    const t = (r.json?.english ?? "").trim();
+    const rc = await routedChat({
+      surface: "indic_note_translate", tier: "flash",
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: `Language: ${lang}\nTranscript:\n${native.slice(0, 8000)}` },
+      ],
+      temperature: 0, responseJson: true, timeoutMs: 60_000,
+    });
+    if (!rc.ok || !rc.content) return null;
+    const j = JSON.parse(rc.content) as { english?: string };
+    const t = (j.english ?? "").trim();
     return t || null;
   } catch { return null; }
 }
@@ -46,9 +60,18 @@ async function pickBetter(sarvamEn: string, indicEn: string): Promise<{ winner: 
     "Pick the one that is more COMPLETE and clinically FAITHFUL: better preserves findings, drug names, doses and units, more coherent, fewer dropped segments. " +
     "Do NOT reward length alone. If they are equivalent or you are unsure, pick A. Return JSON {\"winner\":\"A\"|\"B\",\"reason\":\"...\"}.";
   try {
-    const r = await qwenJson<{ winner?: string; reason?: string }>(sys, `TRANSCRIPT A:\n${sarvamEn.slice(0, 6000)}\n\nTRANSCRIPT B:\n${indicEn.slice(0, 6000)}`, { temperature: 0, timeoutMs: 60_000 });
-    const w = (r.json?.winner ?? "A").trim().toUpperCase().startsWith("B") ? "indicconformer" : "sarvam";
-    return { winner: w, reason: (r.json?.reason ?? "").slice(0, 200) };
+    const rc = await routedChat({
+      surface: "indic_note_pick", tier: "flash",
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: `TRANSCRIPT A:\n${sarvamEn.slice(0, 6000)}\n\nTRANSCRIPT B:\n${indicEn.slice(0, 6000)}` },
+      ],
+      temperature: 0, responseJson: true, timeoutMs: 60_000,
+    });
+    if (!rc.ok || !rc.content) return { winner: "sarvam", reason: "pick_failed" };
+    const j = JSON.parse(rc.content) as { winner?: string; reason?: string };
+    const w = (j.winner ?? "A").trim().toUpperCase().startsWith("B") ? "indicconformer" : "sarvam";
+    return { winner: w, reason: (j.reason ?? "").slice(0, 200) };
   } catch { return { winner: "sarvam", reason: "pick_failed" }; }
 }
 

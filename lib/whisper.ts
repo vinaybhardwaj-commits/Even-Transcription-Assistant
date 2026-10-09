@@ -6,7 +6,7 @@
  * 798M params, 4-layer decoder, ~8x faster than full large-v3 on Apple
  * Silicon, 100 languages incl. Hindi + Kannada).
  *
- * Why local: same Mac Mini that hosts qwen2.5:14b, so no extra cloud
+ * Why local: same Mac Mini that hosts the local note/CDS models, so no extra cloud
  * round-trip; audio stays inside the hospital network; zero per-minute
  * cost; multilingual one-pass for English↔Hindi↔Kannada code-switching.
  *

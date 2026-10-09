@@ -5,7 +5,8 @@ const baseURL = `${process.env.OLLAMA_BASE_URL!}`;
 
 export const llm = new OpenAI({ baseURL, apiKey: 'ollama' });
 
-export const TEXT_MODEL = process.env.TEXT_MODEL || 'qwen2.5:14b';
+// Unused (22 Sep, qwen-out): nothing in this codebase reads TEXT_MODEL any more.
+export const TEXT_MODEL = process.env.TEXT_MODEL || '';
 export const EMBED_MODEL = process.env.EMBED_MODEL || 'nomic-embed-text';
 export const TOP_K = parseInt(process.env.TOP_K || '8', 10);
 

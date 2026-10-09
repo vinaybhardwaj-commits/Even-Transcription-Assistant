@@ -5,16 +5,17 @@
  *                     provider actually answered. Read scope. Writes nothing: no trace, no
  *                     encounter, no cue, no row of any kind.
  *
- * WHY THIS EXISTS. routedChat() has always returned the truth — `gemini:<model>` | `ollama` |
- * `none` — and until now that value was read in exactly two places, neither of which the
- * orchestrator can reach: lib/use-flash-translate.ts (a hook) and GET /api/admin/llm-selftest,
- * which is bearer-gated on MIGRATION_SECRET. So nobody had checked in two months, and the
- * traces were recording a hardcoded literal. This tool puts the same answer behind the MCP
- * token, which the orchestrator does have.
+ * WHY THIS EXISTS. routedChat() has always returned the truth — `gemini:<model>` |
+ * `openrouter:<model>` | `none` — and until now that value was read in exactly two places,
+ * neither of which the orchestrator can reach: lib/use-flash-translate.ts (a hook) and
+ * GET /api/admin/llm-selftest, which is bearer-gated on MIGRATION_SECRET. So nobody had
+ * checked in two months, and the traces were recording a hardcoded literal. This tool puts
+ * the same answer behind the MCP token, which the orchestrator does have.
  *
  * `provider` is rc.provider VERBATIM. It is not normalised, prettified or mapped. If a surface
- * that is configured and flagged for Gemini answers `ollama`, that IS the finding, and the row
- * names it itself with warning:"silent_fallback" rather than leaving a reader to spot it.
+ * that is configured and flagged for Gemini answers `openrouter:<model>`, that IS the finding,
+ * and the row names it itself with warning:"silent_fallback" rather than leaving a reader to
+ * spot it.
  *
  * NO SECRETS. Model ids are returned because they are not secrets and they are the thing you
  * need to see; GCP_SA_KEY, the MCP token and the Vertex access token are never read here, and
@@ -49,12 +50,13 @@ const PROBE_MESSAGES = [
   { role: "user", content: "Reply with the single word: ok" },
 ];
 
-/** The local model routedChat falls back to. Same default as note generation. */
-const PROBE_OLLAMA_MODEL = process.env.NOTE_MODEL || "qwen2.5:14b";
+/** Label shown for `model` when Gemini won't be used for this probe — routedChat's OpenRouter
+ *  fallback chain runs instead, and which model in that chain actually answers is `provider`. */
+const OPENROUTER_FALLBACK_LABEL = "openrouter-fallback";
 
 /**
  * Hard per-surface budget. routedChat's own timeoutMs bounds each HTTP hop, but a Gemini
- * timeout is FOLLOWED by an Ollama attempt, so the inner bound alone would allow ~2× per
+ * timeout is FOLLOWED by an OpenRouter attempt, so the inner bound alone would allow ~2× per
  * surface. This races the whole call so a wedged surface costs 10 s and no more — six
  * surfaces, sequential, is a worst case of about a minute. This tool must never be the thing
  * that hangs.
@@ -65,9 +67,9 @@ const SURFACE_TIMEOUT_MS = 10_000;
  * Bounded, but not tiny, and this is deliberate. max_tokens is a CEILING, not a spend — a
  * one-word reply costs one word whatever the cap. Setting it to ~8 would risk a 2.5-series
  * model spending its budget on thinking tokens and returning EMPTY, which openaiChat reports
- * as empty_response, which makes routedChat fall back to Ollama, which would make this tool
- * report a silent_fallback that never happened. A probe that lies in exactly the way it exists
- * to detect is worse than a slightly larger cap.
+ * as empty_response, which makes routedChat fall back to OpenRouter, which would make this
+ * tool report a silent_fallback that never happened. A probe that lies in exactly the way it
+ * exists to detect is worse than a slightly larger cap.
  */
 const PROBE_MAX_TOKENS = 2048;
 
@@ -98,8 +100,8 @@ function flagOn(surface: string): boolean {
 export async function probeLlmSurface(s: { surface: string; tier: "pro" | "flash" }): Promise<LlmSurfaceHealth> {
   const configured = geminiConfigured();
   const flag_on = flagOn(s.surface);
-  const wouldUse = pickGemini(s.surface, s.tier); // undefined → the router stays on Ollama
-  const model = wouldUse ?? PROBE_OLLAMA_MODEL;
+  const wouldUse = pickGemini(s.surface, s.tier); // undefined → the router goes to OpenRouter
+  const model = wouldUse ?? OPENROUTER_FALLBACK_LABEL;
   const t0 = Date.now();
 
   let provider = "unknown";
@@ -112,7 +114,6 @@ export async function probeLlmSurface(s: { surface: string; tier: "pro" | "flash
       routedChat({
         surface: s.surface,
         tier: s.tier,
-        ollamaModel: PROBE_OLLAMA_MODEL,
         messages: PROBE_MESSAGES,
         temperature: 0,
         responseJson: false,
@@ -145,7 +146,7 @@ export async function probeLlmSurface(s: { surface: string; tier: "pro" | "flash
 const llmHealth: McpTool = {
   name: "scribe_llm_health",
   description:
-    "Which LLM provider actually serves each surface (note, cds, native, fusion, live, notegen_analyze). Fires ONE trivial one-word probe per surface through routedChat and reports { surface, tier, configured, flag_on, provider, model, ok, latency_ms, error? }. `provider` is verbatim: 'gemini:<model>' | 'ollama' | 'none'. A surface that is configured AND flagged but answers anything other than gemini: gets warning:'silent_fallback' — that is the failure this tool exists to catch. Sequential, 10s hard cap per surface. Writes NOTHING: no trace, no encounter, no cue. Returns no secret, no token and no prompt or model text.",
+    "Which LLM provider actually serves each surface (note, cds, native, fusion, live, notegen_analyze). Fires ONE trivial one-word probe per surface through routedChat and reports { surface, tier, configured, flag_on, provider, model, ok, latency_ms, error? }. `provider` is verbatim: 'gemini:<model>' | 'openrouter:<model>' | 'none'. A surface that is configured AND flagged but answers anything other than gemini: gets warning:'silent_fallback' — that is the failure this tool exists to catch. Sequential, 10s hard cap per surface. Writes NOTHING: no trace, no encounter, no cue. Returns no secret, no token and no prompt or model text.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () =>

@@ -5,27 +5,23 @@
  * transcript with each candidate and score FAITHFULNESS against the native
  * source (drug names/doses/units + negations weighted above fluency). Lets the
  * data — not brand — pick the translator the live layer should use. Never runs
- * in the live note path. Candidates that need no Mac-Mini change:
+ * in the live note path. Candidates:
  *   translate_saaras      — incumbent: the already-computed audio->English (transcript_raw)
- *   translate_qwen        — qwen2.5:14b text translation of the native transcript
  *   translate_sarvam_api  — Sarvam-Translate (Mayura) text API
  * (Sarvam-1 local can be added later as translate_sarvam1_local — needs the Mini handoff.)
+ *
+ * OFF QWEN (22 Sep). `translate_qwen` (the retired local-model text-translation arm) is REMOVED, not
+ * rerouted: the local 14B model it used is retired on the Mini, so that arm can no longer run at all —
+ * keeping it as a comparison arm that always fails would just add noise to the bake-off.
+ * The JUDGE below, which is infrastructure rather than a compared arm, now goes through
+ * `routedChat` (Gemini when flagged+configured, OpenRouter otherwise).
  */
 import { sql } from "@/lib/db";
 import { customAlphabet } from "nanoid";
-import { qwenJson } from "@/lib/qwen";
+import { routedChat } from "@/lib/llm/gemini";
 import { sarvamTranslateText, isNonEnglish } from "@/lib/sarvam";
 
 const rid = customAlphabet("abcdefghjkmnpqrstuvwxyz0123456789", 16);
-
-const TR_SYS = `You are a clinical translator. Translate the Indian-language clinical transcript to natural English. Keep English medical terms, drug names, doses and units EXACTLY as written. Do not add, omit, or invent. Return JSON {"english":"..."}.`;
-
-async function qwenTranslate(native: string, lang: string | null): Promise<string | null> {
-  try {
-    const r = await qwenJson<{ english?: string }>(TR_SYS, `Language: ${lang ?? "unknown"}\nTranscript:\n${native.slice(0, 9000)}`, { temperature: 0, timeoutMs: 60_000 });
-    return (r.json?.english ?? "").trim() || null;
-  } catch { return null; }
-}
 
 const JUDGE_SYS = `You are an expert medical translation evaluator. You are shown a clinical encounter transcript in its ORIGINAL Indian language (the SOURCE) and several English translations of it (A, B, ...) from different systems — you are NOT told which. Score each translation 1-10 on FAITHFULNESS TO THE SOURCE, in priority order: (1) drug names, doses and units preserved exactly; (2) negations/assertions preserved (no flipped polarity, e.g. "no fever" must not become "fever"); (3) all findings present; (4) nothing invented. Fluency matters least. Return ONLY JSON {"scores":{"A":n,...},"winner":"A","reason":"..."}.`;
 
@@ -40,8 +36,15 @@ async function scoreTranslate(encounterId: string, native: string): Promise<void
     rows.map((r, i) => `TRANSLATION ${labels[i]}:\n${(r.transcript_english || "").slice(0, 5000)}`).join("\n\n");
   let scores: Record<string, number> = {};
   try {
-    const j = await qwenJson<{ scores?: Record<string, number> }>(JUDGE_SYS, body, { temperature: 0, timeoutMs: 60_000 });
-    scores = j.json?.scores ?? {};
+    const rc = await routedChat({
+      surface: "stt_lab_translate_judge", tier: "flash",
+      messages: [{ role: "system", content: JUDGE_SYS }, { role: "user", content: body }],
+      temperature: 0, responseJson: true, timeoutMs: 60_000,
+    });
+    if (rc.ok && rc.content) {
+      const j = JSON.parse(rc.content) as { scores?: Record<string, number> };
+      scores = j.scores ?? {};
+    }
   } catch { /* leave unscored */ }
   let bestId: string | null = null; let best = -1;
   for (let i = 0; i < rows.length; i++) {
@@ -69,7 +72,6 @@ export async function runTranslateBakeoff(encounterId: string): Promise<{ encoun
 
   const candidates: Array<{ engine: string; english: string | null; latency: number; error: string | null }> = [];
   if ((enc.transcript_raw ?? "").trim()) candidates.push({ engine: "translate_saaras", english: (enc.transcript_raw as string).trim(), latency: 0, error: null });
-  { const t0 = Date.now(); const e = await qwenTranslate(native, enc.detected_language); candidates.push({ engine: "translate_qwen", english: e, latency: Date.now() - t0, error: e ? null : "empty" }); }
   { const r = await sarvamTranslateText(native, enc.detected_language); candidates.push({ engine: "translate_sarvam_api", english: r.ok ? r.english : null, latency: r.latencyMs, error: r.ok ? null : r.error }); }
 
   let inserted = 0; const errors: string[] = [];

@@ -8,9 +8,13 @@
  *
  * Flag ETA_INDIC_COMPREHENSION (default ON; set "0" to disable). Soft-fail:
  * any error leaves today's behaviour untouched (English note from Saaras).
+ *
+ * OFF QWEN (22 Sep). This used to try Gemini (native surface, flash) then fall through to a
+ * direct call to the retired local 14B model on any null/failure. It now makes ONE call through `routedChat`,
+ * which already does Gemini-then-OpenRouter internally (`lib/llm/gemini.ts`) — no qwen, no
+ * Ollama, and no second fallback path to keep in sync with the first.
  */
-import { qwenJson } from "@/lib/qwen";
-import { geminiChatIfOn } from "@/lib/llm/gemini";
+import { routedChat } from "@/lib/llm/gemini";
 
 export const INDIC_COMPREHENSION_ON = () => process.env.ETA_INDIC_COMPREHENSION !== "0";
 
@@ -31,20 +35,20 @@ export async function generateNativeAnalysis(nativeTranscript: string, lang: str
   const t = (nativeTranscript || "").trim();
   if (t.length < 10) return null;
   const user = `Language: ${lang ?? "unknown"}\nTranscript:\n${t.slice(0, 9000)}`;
-  // Native analysis on Gemini (native surface, flash) when GEMINI_ALL/GEMINI_NATIVE=1
-  // + Vertex configured; falls through to local qwen otherwise / on failure.
   try {
-    const g = await geminiChatIfOn("native", "flash", [
-      { role: "system", content: SYSTEM_NATIVE }, { role: "user", content: user },
-    ], { temperature: 0, responseJson: true, timeoutMs: 60_000 });
-    if (g && g.ok && g.content) {
-      try { const j = JSON.parse(g.content) as NativeAnalysis; if (j && !j.language) j.language = lang ?? "unknown"; return j; } catch { /* fall through to qwen */ }
-    }
-  } catch { /* fall through to qwen */ }
-  try {
-    const r = await qwenJson<NativeAnalysis>(SYSTEM_NATIVE, user, { temperature: 0, timeoutMs: 60_000 });
-    const j = r.json ?? null;
+    const rc = await routedChat({
+      surface: "native", tier: "flash",
+      messages: [
+        { role: "system", content: SYSTEM_NATIVE },
+        { role: "user", content: user },
+      ],
+      temperature: 0, responseJson: true, timeoutMs: 60_000,
+    });
+    if (!rc.ok || !rc.content) return null;
+    const j = JSON.parse(rc.content) as NativeAnalysis;
     if (j && !j.language) j.language = lang ?? "unknown";
     return j;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }

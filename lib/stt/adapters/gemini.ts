@@ -9,7 +9,7 @@
  *      is correct for note generation and CATASTROPHIC for a lab engine, whose entire purpose is
  *      to attribute quality to a NAMED engine. The precedent is written into this codebase in
  *      blood: `lib/brain/fuse/gemini-arms.ts` records 367 audits labelled `gemini-2.5-pro` that
- *      were actually served by `qwen2.5:14b` for four days, and nothing anywhere said so. There
+ *      were actually served by the retired local 14B model for four days, and nothing anywhere said so. There
  *      is no sensible fallback for an STT engine in any case — Whisper is a DIFFERENT ENGINE
  *      with its own row and its own leaderboard line, not a spare identity for this one.
  *

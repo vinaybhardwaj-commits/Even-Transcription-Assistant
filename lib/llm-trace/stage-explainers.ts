@@ -106,7 +106,7 @@ const DDX_EXPLAINERS: Record<string, StageExplainer> = {
 };
 
 /**
- * /api/transcribe-compare — Parallel Deepgram + Whisper + qwen judge.
+ * /api/transcribe-compare — Parallel Deepgram + Whisper + LLM judge.
  */
 const TRANSCRIBE_EXPLAINERS: Record<string, StageExplainer> = {
   'transcribing-deepgram': {
@@ -127,7 +127,7 @@ const TRANSCRIBE_EXPLAINERS: Record<string, StageExplainer> = {
   },
   judging: {
     title: 'Comparing the two',
-    body: 'qwen2.5:14b is scoring both transcripts 1–10 on clinical accuracy, picking a winner, and explaining the delta.',
+    body: 'The model is scoring both transcripts 1–10 on clinical accuracy, picking a winner, and explaining the delta.',
   },
 };
 

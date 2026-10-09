@@ -12,7 +12,8 @@
  * The night-drain gets it from a wrapper script; this driver checks it itself, per submit, because a
  * wrapper that only polls every 60 s can miss a fast fall between two submits.
  *
- * WHY THIS GATE MATTERS MORE HERE THAN IT DID FOR DIARIZE. qwen2.5:14b is ~9 GB on disk and 10-11.5 GB
+ * WHY THIS GATE MATTERS MORE HERE THAN IT DID FOR DIARIZE (historical: this used to be about
+ * the retired local 14B model, retired 22 Sep). The model here is ~9 GB on disk and 10-11.5 GB
  * resident on a 24 GB Mini that is also running Whisper, the Indic engines and, on the same nights, the
  * night-drain's diarize service. Ollama unloads it 5 minutes after the last call, but while it is loaded
  * the headroom is what the watchdog is measuring. A submit is the only moment this driver can decline to

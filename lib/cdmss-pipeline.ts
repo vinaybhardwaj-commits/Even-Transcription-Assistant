@@ -5,10 +5,10 @@
  *   1. Build seed question from the encounter note
  *   2. HyDE-expand the seed
  *   3. Retrieve top-K excerpts from MKSAP/StatPearls/UpToDate KB
- *   4. Draft pass (qwen2.5:14b, JSON mode): generate CDS suggestions
- *      with [N] citation markers pointing to retrieved excerpt indices
+ *   4. Draft pass (routed via `routedChat`: Gemini or OpenRouter, JSON mode): generate CDS
+ *      suggestions with [N] citation markers pointing to retrieved excerpt indices
  *   5. Critique pass (llama3.1:8b): audit each claim for citation support
- *   6. Revise pass (qwen2.5:14b, JSON mode): rewrite to fix unsupported
+ *   6. Revise pass (routed via `routedChat`, JSON mode): rewrite to fix unsupported
  *      claims (either cite or remove)
  *
  * Returns CdmssOutput (back-compatible shape) plus retrieval metadata
@@ -47,9 +47,9 @@ export type CdmssPipelineEvent =
   | { stage: "fallback"; state: "done"; ms: number; source: "stub" | "empty"; reason: string };
 
 
-const DRAFT_MODEL = process.env.CDS_DRAFT_MODEL || "qwen2.5:14b";
+const DRAFT_MODEL = process.env.CDS_DRAFT_MODEL || "cds-draft";
 const CRITIQUE_MODEL = process.env.CDS_CRITIQUE_MODEL || "llama3.1:8b";
-const REVISE_MODEL = process.env.CDS_REVISE_MODEL || "qwen2.5:14b";
+const REVISE_MODEL = process.env.CDS_REVISE_MODEL || "cds-revise";
 const DRAFT_TIMEOUT_MS = 100_000;
 const CRITIQUE_TIMEOUT_MS = 30_000;
 const REVISE_TIMEOUT_MS = 75_000;
@@ -145,10 +145,11 @@ async function callJson<T>(
   opts: { signal?: AbortSignal; temperature?: number } = {},
 ): Promise<{ ok: true; data: T; latency_ms: number; raw: string; provider: string } | { ok: false; error: string; latency_ms: number; provider: string }> {
   // CDS reasoning passes (draft/critique/revise) run on Gemini (cds surface, pro
-  // tier) when GEMINI_ALL/GEMINI_CDS=1 + Vertex configured; otherwise local llama/
-  // qwen. Soft-fails to the local model on any error.
+  // tier) when GEMINI_ALL/GEMINI_CDS=1 + Vertex configured; otherwise OpenRouter.
+  // Soft-fails to OpenRouter on any Gemini error. `model` now only labels the onEvent
+  // stage-start payload below (routedChat picks the real model itself).
   const rc = await routedChat({
-    surface: "cds", tier: "pro", ollamaModel: model,
+    surface: "cds", tier: "pro",
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },

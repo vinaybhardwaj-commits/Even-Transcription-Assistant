@@ -1,23 +1,34 @@
 /**
  * Gemini (Vertex AI) router — hybrid backend that takes the heavy LLM passes
  * (note generation, CDS reasoning, native-language analysis) OFF the Mac Mini and
- * onto Vertex Gemini, while LOCAL Ollama stays the default + the fallback.
+ * onto Vertex Gemini, with OpenRouter as the fallback.
  *
  * Mirrors the Even-CDMSS (CAT) pattern: Vertex's OpenAI-compatible endpoint, SA
- * access token, per-surface flags, soft-fail to Ollama. Embeddings stay on nomic
- * (the KB corpus is nomic-embedded). NO new npm deps — raw fetch + crypto.
+ * access token, per-surface flags, soft-fail to OpenRouter. Embeddings stay on nomic
+ * via Ollama (the KB corpus is nomic-embedded) — that is a separate concern from this
+ * file and untouched by it. NO new npm deps — raw fetch + crypto.
+ *
+ * OFF QWEN (V, 22 Sep). The retired 14B local model was 11.55 GB on a 24 GB Mini, reached from
+ * Vercel through the Cloudflare tunnel. `routedChat`'s fallback used to be local Ollama;
+ * it is now OpenRouter, on the same ZDR + data_collection:"deny" contract as the Jev
+ * translate path (`lib/openrouter.ts`) — reused here, not duplicated. There is no Ollama
+ * fallback left anywhere in this file.
  *
  * OFF by default: with no GCP_SA_KEY/GCP_PROJECT (geminiConfigured=false) every
- * call routes to Ollama exactly as before. Activate by setting the Vertex env
- * (GCP_SA_KEY, GCP_PROJECT, GCP_LOCATION) AND a flag: GEMINI_ALL=1, or per surface
- * GEMINI_NOTE=1 / GEMINI_CDS=1 / GEMINI_NATIVE=1.
+ * `routedChat` call goes straight to OpenRouter exactly as it does on a Gemini failure.
+ * Activate Gemini by setting the Vertex env (GCP_SA_KEY, GCP_PROJECT, GCP_LOCATION) AND
+ * a flag: GEMINI_ALL=1, or per surface GEMINI_NOTE=1 / GEMINI_CDS=1 / GEMINI_NATIVE=1.
  */
 import { getVertexAccessToken } from "../gcp-auth";
+import { openrouterChat, OpenRouterError } from "../openrouter";
 
 const GCP_LOCATION = process.env.GCP_LOCATION || "asia-south1";
 const GCP_PROJECT = process.env.GCP_PROJECT || "";
 export const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-pro";
 export const GEMINI_FLASH_MODEL = process.env.GEMINI_FLASH_MODEL || "gemini-2.5-flash";
+
+/** OpenRouter fallback chain, tried in order, first success wins. Env-overridable, comma list. */
+export const ROUTED_CHAT_FALLBACK_DEFAULT = "google/gemini-2.5-flash,meta-llama/llama-4-scout";
 
 export function geminiConfigured(): boolean {
   return Boolean(GCP_PROJECT && process.env.GCP_SA_KEY);
@@ -31,7 +42,17 @@ function vertexModelName(model: string): string {
   return model.startsWith("google/") ? model : `google/${model}`;
 }
 
-/** The Gemini model to use for `surface`, or undefined to stay on Ollama. */
+type Env = Record<string, string | undefined>;
+
+/** The OpenRouter models to try, in order. Default only when the env var is absent/empty. */
+function routedChatFallbackChain(env: Env = process.env): string[] {
+  const raw = env.ROUTED_CHAT_FALLBACK;
+  const list = (raw === undefined || raw.trim() === "" ? ROUTED_CHAT_FALLBACK_DEFAULT : raw)
+    .split(",").map((m) => m.trim()).filter(Boolean);
+  return list.length > 0 ? list : ROUTED_CHAT_FALLBACK_DEFAULT.split(",");
+}
+
+/** The Gemini model to use for `surface`, or undefined to go straight to OpenRouter. */
 export function pickGemini(surface: string, tier: "pro" | "flash" = "pro"): string | undefined {
   if (!geminiConfigured()) return undefined;
   const on = process.env.GEMINI_ALL === "1" || process.env[`GEMINI_${surface.toUpperCase()}`] === "1";
@@ -75,11 +96,27 @@ async function openaiChat(p: {
   }
 }
 
+/** A closed code for an OpenRouter failure inside routedChat's fallback loop. */
+function openrouterCodeFor(e: unknown): string {
+  if (e instanceof OpenRouterError) return e.code;
+  if ((e as { name?: unknown } | null)?.name === "AbortError") return "openrouter_abort";
+  return "openrouter_error";
+}
+
+/** Split routedChat's `messages` into openrouterChat's single system/user shape. Every current
+ *  caller sends exactly one system + one user message; a caller that sent more (or none) still
+ *  gets a sane result: all system-role content joined, all non-system content joined after it. */
+function toSystemUser(messages: Msg[]): { system: string; user: string } {
+  const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+  const user = messages.filter((m) => m.role !== "system").map((m) => m.content).join("\n\n");
+  return { system, user };
+}
+
 /**
- * Gemini-only attempt for `surface` (no Ollama fallback inside). Returns null when
- * Gemini is off/unconfigured (caller keeps its existing local path), or a ChatOut
- * (ok/content or ok:false) when it tried. Used where the caller already has a local
- * fallback it wants to preserve verbatim (e.g. native analysis via qwenJson).
+ * Gemini-only attempt for `surface` (no fallback inside). Returns null when Gemini is
+ * off/unconfigured (caller keeps its existing local path), or a ChatOut (ok/content or
+ * ok:false) when it tried. Used where the caller already has its own fallback it wants to
+ * preserve verbatim (e.g. `lib/stt/fuse-transcript.ts`, the translate-live route).
  */
 export async function geminiChatIfOn(
   surface: string, tier: "pro" | "flash", messages: Msg[],
@@ -101,12 +138,16 @@ export async function geminiChatIfOn(
 }
 
 /**
- * Run a chat completion, preferring Gemini for `surface` when flagged+configured,
- * and ALWAYS soft-failing to local Ollama. Identical to the old direct Ollama
- * fetch when Gemini is off. Returns the assistant content + which provider ran.
+ * Run a chat completion, preferring Gemini for `surface` when flagged+configured, and
+ * ALWAYS soft-failing to OpenRouter (`google/gemini-2.5-flash`, then
+ * `meta-llama/llama-4-scout`, under ZDR + data_collection:"deny" — `lib/openrouter.ts`,
+ * the same client the Jev translate path uses; there is no second OpenRouter client).
+ * There is no Ollama fallback: the local 14B model is retired (22 Sep). Returns the assistant
+ * content + which provider ran — `gemini:<model>` or `openrouter:<model>` (the model the
+ * RESPONSE reported), never a guess.
  */
 export async function routedChat(p: {
-  surface: string; tier?: "pro" | "flash"; ollamaModel: string; messages: Msg[];
+  surface: string; tier?: "pro" | "flash"; messages: Msg[];
   temperature?: number; responseJson?: boolean; timeoutMs?: number; signal?: AbortSignal; maxTokens?: number;
 }): Promise<{ ok: boolean; content: string; error?: string; latency_ms: number; provider: string }> {
   const t0 = Date.now();
@@ -120,17 +161,27 @@ export async function routedChat(p: {
         maxTokens: p.maxTokens ?? 8192, timeoutMs: p.timeoutMs, signal: p.signal,
       });
       if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `gemini:${gModel}` };
-      console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> ollama fallback`);
+      console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> openrouter fallback`);
     } catch (e) {
-      console.warn(`[llm] gemini (${p.surface}) threw -> ollama fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
+      console.warn(`[llm] gemini (${p.surface}) threw -> openrouter fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
     }
   }
-  const base = process.env.LLM_BASE_URL || process.env.OLLAMA_BASE_URL;
-  if (!base) return { ok: false, content: "", error: "OLLAMA_BASE_URL not set", latency_ms: Date.now() - t0, provider: "none" };
-  const r = await openaiChat({
-    url: base, authToken: process.env.LLM_API_KEY ?? "ollama", model: p.ollamaModel,
-    messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
-    maxTokens: p.maxTokens, timeoutMs: p.timeoutMs, signal: p.signal,
-  });
-  return { ok: r.ok, content: r.content, error: r.error, latency_ms: Date.now() - t0, provider: "ollama" };
+
+  const { system, user } = toSystemUser(p.messages);
+  const codes: string[] = [];
+  for (const model of routedChatFallbackChain()) {
+    try {
+      const r = await openrouterChat({
+        model, system, user,
+        timeoutMs: p.timeoutMs, signal: p.signal,
+        responseJson: p.responseJson, maxTokens: p.maxTokens,
+      });
+      return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `openrouter:${r.model}` };
+    } catch (e) {
+      codes.push(openrouterCodeFor(e));
+    }
+  }
+  const distinct = [...new Set(codes)];
+  const error = distinct.length === 0 ? "no_fallback_models" : distinct.length === 1 ? distinct[0] : `all_failed:${distinct.join(",")}`.slice(0, 200);
+  return { ok: false, content: "", error, latency_ms: Date.now() - t0, provider: "none" };
 }

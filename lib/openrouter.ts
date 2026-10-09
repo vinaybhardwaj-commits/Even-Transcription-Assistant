@@ -2,7 +2,7 @@
  * lib/openrouter.ts — one chat-completion call to OpenRouter, on the same contract as the router's
  * translate backend (`~/eta-router/router_server.py`, `openrouter_translate`).
  *
- * WHY IT EXISTS. qwen2.5:14b is retired (V, 22 Sep): 11.55 GB on a 24 GB Mini, reached from Vercel
+ * WHY IT EXISTS. The retired local 14B model (V, 22 Sep) was 11.55 GB on a 24 GB Mini, reached from Vercel
  * through the Cloudflare tunnel, and reloaded every time something here called it. OpenRouter is
  * approved for patient text on the special account, under ZERO DATA RETENTION — so every body this
  * module sends carries `provider: { zdr: true, data_collection: "deny" }`, and there is no way to
@@ -16,6 +16,12 @@
  *
  * THE LABEL. `model` in the result is the string the RESPONSE reported, so a caller records the
  * model that actually answered rather than the one it asked for.
+ *
+ * ONE CLIENT, NOT TWO (22 Sep, qwen-out). `routedChat`'s Gemini→Ollama fallback in
+ * lib/llm/gemini.ts now falls to OpenRouter through this same function — `responseJson` and
+ * `maxTokens` below exist for that caller, which needs JSON mode and a token ceiling the way the
+ * Jev translate path never did. Neither changes the ZDR/data_collection body, and both are no-ops
+ * when omitted, so the Jev call above is unaffected.
  */
 import { readFileSync } from "node:fs";
 
@@ -59,6 +65,10 @@ export async function openrouterChat(args: {
   signal?: AbortSignal;
   env?: Env;
   fetchImpl?: typeof fetch;
+  /** JSON mode (`response_format: { type: "json_object" }`). Omitted/false = unchanged behaviour. */
+  responseJson?: boolean;
+  /** A ceiling, not a spend — omitted leaves the request exactly as it was before this field existed. */
+  maxTokens?: number;
 }): Promise<OpenRouterChatResult> {
   const env = args.env ?? process.env;
   const key = readOpenRouterKey(env);
@@ -72,21 +82,25 @@ export async function openrouterChat(args: {
     else args.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
+  const body: Record<string, unknown> = {
+    model: args.model,
+    temperature: 0,
+    provider: { zdr: true, data_collection: "deny" },
+    messages: [
+      { role: "system", content: args.system },
+      { role: "user", content: args.user },
+    ],
+  };
+  if (args.responseJson) body.response_format = { type: "json_object" };
+  if (args.maxTokens) body.max_tokens = args.maxTokens;
+
   const t0 = Date.now();
   let res: Response;
   try {
     res = await doFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: args.model,
-        temperature: 0,
-        provider: { zdr: true, data_collection: "deny" },
-        messages: [
-          { role: "system", content: args.system },
-          { role: "user", content: args.user },
-        ],
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
       cache: "no-store",
     });
@@ -100,13 +114,13 @@ export async function openrouterChat(args: {
 
   if (res.status !== 200) throw new OpenRouterError(`openrouter_http_${res.status}`);
 
-  let body: unknown;
+  let responseBody: unknown;
   try {
-    body = await res.json();
+    responseBody = await res.json();
   } catch {
     throw new OpenRouterError("openrouter_bad_response");
   }
-  const b = body as { model?: unknown; choices?: Array<{ message?: { content?: unknown } }> };
+  const b = responseBody as { model?: unknown; choices?: Array<{ message?: { content?: unknown } }> };
   const content = b?.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new OpenRouterError("openrouter_bad_response");
   if (!content.trim()) throw new OpenRouterError("openrouter_empty");

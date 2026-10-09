@@ -3,7 +3,7 @@
  *
  * Fires a trivial routedChat()/geminiChatIfOn() pass per surface (note→flash,
  * cds→pro, native→flash) and reports the resolved provider ("gemini:<model>" or
- * "ollama"), so we can verify the Vertex/Gemini hybrid is actually live after the
+ * "openrouter:<model>"), so we can verify the Vertex/Gemini hybrid is actually live after the
  * env is set — WITHOUT touching any encounter or clinical data.
  *
  * Auth: Bearer MIGRATION_SECRET (same gate as resume-processing). Read-only.
@@ -36,16 +36,16 @@ export async function GET(req: NextRequest) {
 
   const results = [];
   for (const s of surfaces) {
-    const wouldUse = pickGemini(s.surface, s.tier); // undefined => Ollama
+    const wouldUse = pickGemini(s.surface, s.tier); // undefined => OpenRouter
     const t0 = Date.now();
     try {
       const rc = await routedChat({
-        surface: s.surface, tier: s.tier, ollamaModel: "qwen2.5:14b",
+        surface: s.surface, tier: s.tier,
         messages: PING, temperature: 0, responseJson: false, timeoutMs: 45_000,
       });
       results.push({
         surface: s.surface, tier: s.tier,
-        flag_on: Boolean(wouldUse), would_use: wouldUse ?? "ollama",
+        flag_on: Boolean(wouldUse), would_use: wouldUse ?? "openrouter",
         provider: rc.provider, ok: rc.ok,
         sample: (rc.content || "").slice(0, 40), error: rc.error,
         latency_ms: rc.latency_ms,

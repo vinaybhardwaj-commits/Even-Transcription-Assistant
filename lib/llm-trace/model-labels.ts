@@ -1,14 +1,16 @@
 /**
  * v1.7 Sprint G — functional model labels for user-facing UI (lock #26).
- * Hides raw model strings like `qwen2.5:14b` from users. Trace JSON keeps
- * raw model names for admin forensics.
+ * Hides raw model strings from users. Trace JSON keeps raw model names for
+ * admin forensics.
  *
  * Used both server-side (in /ask route emit messages) and client-side
  * (in TracePanel when rendering stage labels).
+ *
+ * (22 Sep, qwen-out) the retired 14B/7B local reasoning models are removed from this map: they are
+ * retired and nothing in this codebase can produce those literal strings any more — note/CDS
+ * now report a `provider` string like `gemini:<model>` or `openrouter:<model>` instead.
  */
 const MODEL_TO_LABEL: Record<string, string> = {
-  'qwen2.5:14b': 'reasoning model',
-  'qwen2.5:7b': 'audit model',
   'llama3.1:8b': 'query rewriter',
   'mxbai-embed-large': 'embedding model',
   'nomic-embed-text': 'embedding model',

@@ -3,9 +3,9 @@
  *
  * THE FAIL-CLOSED LOCK (X4, §6.6) is the thing in this file that matters most.
  *
- * routedChat falls back to local Ollama SILENTLY on any Gemini error — that is its designed
+ * routedChat falls back to OpenRouter SILENTLY on any Gemini error — that is its designed
  * behaviour and this build does not change it. The consequence for a bake-off is fatal: a fuse
- * secretly served by qwen2.5:14b would be scored as Flash, and nothing anywhere would say so.
+ * secretly served by OpenRouter would be scored as Flash, and nothing anywhere would say so.
  * So every model call in this file goes through `gemini()` below, which inspects `provider` on
  * EVERY call and refuses anything that is not `gemini:`. On refusal the arm writes NOTHING —
  * not a partial run, not a degraded visit — and returns { ok:false, error:'provider_not_gemini',
@@ -63,7 +63,6 @@ async function gemini(surface: string, tier: "pro" | "flash", system: string, us
     rc = await routedChat({
       surface,
       tier,
-      ollamaModel: process.env.NOTE_MODEL || "qwen2.5:14b",
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -76,8 +75,8 @@ async function gemini(surface: string, tier: "pro" | "flash", system: string, us
   } catch (e) {
     return { ok: false, error: "provider_threw", provider: "unknown", detail: String((e as Error)?.message ?? e).slice(0, 200) };
   }
-  // X4. The check is on provider, not on ok: a SUCCESSFUL Ollama answer is exactly the failure
-  // being guarded against, and it looks like success everywhere else.
+  // X4. The check is on provider, not on ok: a SUCCESSFUL OpenRouter answer is exactly the
+  // failure being guarded against, and it looks like success everywhere else.
   if (!rc.provider.startsWith("gemini:")) return { ok: false, error: "provider_not_gemini", provider: rc.provider };
   if (!rc.ok || !rc.content) return { ok: false, error: rc.error ?? "empty_response", provider: rc.provider };
   return { ok: true, content: rc.content, provider: rc.provider };

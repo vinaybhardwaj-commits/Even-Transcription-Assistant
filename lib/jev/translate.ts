@@ -2,7 +2,7 @@
  * lib/jev/translate.ts — Slice J0 step 3: one window's original-language transcript into English.
  *
  * ─── OFF QWEN (V, 22 Sep) ──────────────────────────────────────────────────────────────────────
- * This used to call qwen2.5:14b through `lib/qwen.ts` — 11.55 GB on the Mini, reached from Vercel
+ * This used to call the local 14B model through `lib/qwen.ts` — 11.55 GB on the Mini, reached from Vercel
  * through the Cloudflare tunnel, reloaded at 08:12 IST on 22 Sep by exactly this path after the
  * router had already moved off it. It now speaks OpenRouter on the router's contract
  * (`~/eta-router/router_server.py`): the same system prompt, the same verified-English skip, ZDR on

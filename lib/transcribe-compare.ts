@@ -4,8 +4,9 @@
  * Runs the same audio through:
  *   1. Deepgram nova-3-medical (cloud, existing)   — ./transcribe.ts
  *   2. Whisper large-v3-turbo on the Mac Mini       — ./whisper.ts
- * In parallel. Then asks qwen2.5:14b on the same Mac Mini to judge the
- * two transcripts on a 1-10 quality scale and pick a winner.
+ * In parallel. Then asks an LLM (routed via `routedChat`: Gemini when flagged+configured,
+ * OpenRouter otherwise — 22 Sep, qwen-out) to judge the two transcripts on a 1-10 quality
+ * scale and pick a winner.
  *
  * Returns the full comparison record. Callers persist it to
  * `transcription_comparisons` (migration v36) and decide which
@@ -17,7 +18,7 @@
  */
 import { transcribeAudio } from './transcribe';
 import { transcribeWithWhisper } from './whisper';
-import { qwenJson, QwenError } from './qwen';
+import { routedChat } from './llm/gemini';
 import type { ProgressEvent } from './llm-trace/stream';
 
 export type CompareEmit = (ev: ProgressEvent) => void;
@@ -185,21 +186,29 @@ export async function runTranscriptionCompare(
     };
   }
 
-  // 3. Both succeeded — ask qwen2.5:14b to judge.
-  emit({ type: 'progress', stage: 'drafting' as any, msg: 'qwen scoring both transcripts (1-10) and picking a winner' });
+  // 3. Both succeeded — ask the judge model (routedChat: Gemini or OpenRouter).
+  emit({ type: 'progress', stage: 'drafting' as any, msg: 'Scoring both transcripts (1-10) and picking a winner' });
   let judge: JudgeResult;
   try {
-    const result = await qwenJson<{
+    const rc = await routedChat({
+      surface: 'transcribe_compare_judge',
+      tier: 'flash',
+      messages: [
+        { role: 'system', content: JUDGE_SYSTEM },
+        { role: 'user', content: buildJudgeUserMessage(deepgram.transcript!, whisper.transcript!, opts.context) },
+      ],
+      temperature: 0,
+      responseJson: true,
+      timeoutMs: 30_000,
+      signal: opts.signal,
+    });
+    if (!rc.ok || !rc.content) throw new Error(rc.error ?? 'empty_response');
+    const j = JSON.parse(rc.content) as {
       deepgram_score: number;
       whisper_score: number;
       winner: 'deepgram' | 'whisper' | 'tie';
       reasoning: string;
-    }>(
-      JUDGE_SYSTEM,
-      buildJudgeUserMessage(deepgram.transcript!, whisper.transcript!, opts.context),
-      { temperature: 0, timeoutMs: 30_000 },
-    );
-    const j = result.json;
+    };
     const dgs =
       typeof j.deepgram_score === 'number'
         ? Math.max(0, Math.min(10, j.deepgram_score))
@@ -219,16 +228,11 @@ export async function runTranscriptionCompare(
       whisper_score: ws,
       delta_score: delta,
       reasoning: j.reasoning ?? null,
-      latency_ms: result.latency_ms,
+      latency_ms: rc.latency_ms,
       error: null,
     };
   } catch (e: unknown) {
-    const msg =
-      e instanceof QwenError
-        ? `${e.kind}: ${e.message}`
-        : e instanceof Error
-          ? e.message
-          : String(e);
+    const msg = e instanceof Error ? e.message : String(e);
     judge = {
       winner: null,
       deepgram_score: null,

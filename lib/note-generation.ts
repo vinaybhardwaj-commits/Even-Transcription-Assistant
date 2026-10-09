@@ -5,8 +5,8 @@
  * Output: structured JSON document covering the clinical sections a
  * receiving physician needs — CC, HPI, exam, assessment, plan.
  *
- * Model: qwen2.5:14b on the Mac Mini Ollama (already used by CDMSS).
- * JSON mode via response_format. Temperature 0 for determinism.
+ * Model: routed through `routedChat` (Gemini when flagged+configured, OpenRouter otherwise —
+ * the local 14B model is retired, 22 Sep). JSON mode via response_format. Temperature 0 for determinism.
  *
  * Fail mode: caller catches; encounter status stays "processing" and
  * can be re-triggered, OR the page surfaces the error and leaves the
@@ -21,7 +21,7 @@ export type NoteEvent =
   | { stage: "note"; state: "done"; ms: number; chief_complaint?: string }
   | { stage: "note"; state: "error"; message: string; ms: number };
 
-const NOTE_MODEL = process.env.NOTE_MODEL || "qwen2.5:14b";
+const NOTE_MODEL = process.env.NOTE_MODEL || "note";
 const NOTE_TIMEOUT_MS = 240_000;
 const NOTE_TEMPERATURE = 0;
 
@@ -513,9 +513,6 @@ export async function generateNote(
   transcript: string,
   opts: { signal?: AbortSignal; onEvent?: (e: NoteEvent) => void; noteType?: string; nativeReference?: string } = {},
 ): Promise<NoteResult> {
-  const base = process.env.OLLAMA_BASE_URL;
-  // Nothing has run yet, so there is no provider to report. 'unknown' is the honest answer.
-  if (!base) return { ok: false, error: "OLLAMA_BASE_URL not set", latency_ms: 0, provider: "unknown" };
   const cleanTranscript = (transcript ?? "").trim();
   if (cleanTranscript.length === 0) {
     return { ok: false, error: "empty_transcript", latency_ms: 0, provider: "unknown" };
@@ -542,9 +539,9 @@ export async function generateNote(
   let provider = "unknown";
   try {
     // Note generation: Gemini (note surface, flash tier) when GEMINI_ALL/GEMINI_NOTE=1
-    // + Vertex configured; otherwise local qwen. Soft-fails to qwen on any error.
+    // + Vertex configured; otherwise OpenRouter. Soft-fails to OpenRouter on any Gemini error.
     const rc = await routedChat({
-      surface: "note", tier: "flash", ollamaModel: NOTE_MODEL,
+      surface: "note", tier: "flash",
       messages: [
         { role: "system", content: system },
         { role: "user", content: userContent },
