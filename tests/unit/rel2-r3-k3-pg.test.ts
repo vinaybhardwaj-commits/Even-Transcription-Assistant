@@ -506,3 +506,21 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(clean.window_count).toBe(all.length - held.size);
   });
 });
+
+(HAVE ? describe : describe.skip)("REL3-FU G3-1: ?occupancy=1&as_of=<held-out day> never returns a held-out room-day's consulting doctor", () => {
+  it("the warehouse occupant of a machine whose latest consult is on a held-out (room, day) is excluded (as_of names a past time); a clean room's machine on the same day is served", async () => {
+    pg.exec(`
+      INSERT INTO eta_encounter_windows (consult_key, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version, attribution_source, consulting_doctor_uid, consulting_doctor_name) VALUES
+        ('cw_occ_blind', 'm-blind', '${BR}', 'none', '${T(dayStart + 4 * 3_600_000)}', '${T(dayStart + 4 * 3_600_000 + 600_000)}', 'endConsult', 'clean', 'v1', 'warehouse', 'doc_blind', 'Held Out Doctor'),
+        ('cw_occ_ok', 'm-ok', 'r_clean', 'none', '${T(dayStart + 4 * 3_600_000)}', '${T(dayStart + 4 * 3_600_000 + 600_000)}', 'endConsult', 'clean', 'v1', 'warehouse', 'doc_ok', 'Clean Doctor');
+    `);
+    const asOf = T(dayStart + 4 * 3_600_000 + 1_200_000); // 10:20 IST-ish on the held-out day
+    const { consultingDoctorForMachine, machineOccupancy } = await import("@/lib/encounter-windows/occupant");
+    const { sql } = await import("@/lib/db");
+    expect(await consultingDoctorForMachine(sql as never, "m-blind", asOf)).toBeNull();
+    expect(await consultingDoctorForMachine(sql as never, "m-ok", asOf)).toMatchObject({ uid: "doc_ok" });
+    const machines = await machineOccupancy(sql as never, asOf);
+    expect(JSON.stringify(machines)).not.toContain("doc_blind");
+    expect(JSON.stringify(machines)).not.toContain("Held Out Doctor");
+  });
+});
