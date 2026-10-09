@@ -1,6 +1,6 @@
 {
   "id": "consult_surgical_pitch",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "title": "Surgical pitch in a consult",
   "unit": "consult",
   "inputs": [
@@ -242,7 +242,7 @@
       "ranking a surgeon before follow-through is joined",
       "disease severity read as distress"
     ],
-    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot surgical-pitch skill (v0, frozen): what does not count as benefit, risk or alternative, no_surgery anti-pitch scored, pitch source, doubt codes, scored even when OT is never. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status).",
+    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot surgical-pitch skill (v0, frozen): what does not count as benefit, risk or alternative, no_surgery anti-pitch scored, pitch source, doubt codes, scored even when OT is never. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status). 1.1.1: recommendation_kind is set to no_surgery IN CODE whenever surgery_recommended is false (never null); when true and the model names no kind it stays null.",
     "bench_population": "Meet scouts and Whisper episodes of Meet teleconsultations; no room tape.",
     "recommendation_kind_rules": [
       "only surgery (and a contingent surgery) trips pitch balance",

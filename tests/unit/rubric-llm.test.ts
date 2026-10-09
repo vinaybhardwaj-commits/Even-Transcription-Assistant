@@ -96,7 +96,7 @@ describe("the prompts", () => {
     expect(a).toContain("consult_chair_affect v1.1.0, prompt v1.1.0");
     expect(a).toContain(JSON.stringify(affect.output));
     expect(a).toMatch(/anti/i);
-    expect(E.systemPrompt(pitch)).toContain("consult_surgical_pitch v1.1.0");
+    expect(E.systemPrompt(pitch)).toContain("consult_surgical_pitch v1.1.1");
     expect(a).not.toContain("engine_note"); // the repo-side notes are not sent to the model
   });
   it("carry no example transcripts, quotes or identifiers", () => {
@@ -157,6 +157,26 @@ describe("consult_surgical_pitch", () => {
     expect(r.findings).toEqual(expect.arrayContaining(["risks_not_named", "alternatives_not_named", "doubt:pain:unheard", "uptake:accept", "prompted_yes"]));
     expect(JSON.stringify({ s: r.score, f: r.findings })).not.toMatch(/two weeks|operation/);
     expect((r.evidence as { quotes: unknown[] }).quotes).toHaveLength(2);
+  });
+  it("1.1.1 recommendation_kind is decided in CODE: surgery_recommended false is always no_surgery (never null, never another kind); true keeps the model's kind, or null when it gave none", async () => {
+    expect(pitch.version).toBe("1.1.1");
+    expect(E.pitchKind({ surgery_recommended: false })).toBe("no_surgery");
+    expect(E.pitchKind({ surgery_recommended: false, recommendation_kind: null })).toBe("no_surgery");
+    expect(E.pitchKind({ surgery_recommended: false, recommendation_kind: "conservative" })).toBe("no_surgery");
+    expect(E.pitchKind({ surgery_recommended: true, recommendation_kind: "referral" })).toBe("referral");
+    expect(E.pitchKind({ surgery_recommended: true })).toBeNull();
+    expect(E.pitchKind({ surgery_recommended: true, recommendation_kind: null })).toBeNull();
+    expect(E.pitchKind({ surgery_recommended: true, recommendation_kind: "" })).toBeNull();
+    // through the engine: false with no kind, false with a contradicting kind, true with a kind
+    L.setRubricChatForTests(async () => answer({ surgery_recommended: false }));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "skipped", score: { surgery_recommended: false, recommendation_kind: "no_surgery" } });
+    L.setRubricChatForTests(async () => answer({ surgery_recommended: false, recommendation_kind: "conservative" }));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "skipped", score: { surgery_recommended: false, recommendation_kind: "no_surgery" } });
+    L.setRubricChatForTests(async () => answer(PITCH));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "ok", score: { surgery_recommended: true, recommendation_kind: "surgery" } });
+    // true with the key present but null: the schema refuses it (the enum has no null), so nothing is scored; the code path for a null kind keeps null (pitchKind above)
+    L.setRubricChatForTests(async () => answer({ ...PITCH, recommendation_kind: null }));
+    expect(await E.evaluateSurgicalPitch(pitch, T)).toMatchObject({ status: "failed", reason: "llm_schema_invalid" });
   });
   it("no surgery recommended -> skipped no_surgery_recommendation (the path the order names)", async () => {
     L.setRubricChatForTests(async () => answer({ surgery_recommended: false }));
