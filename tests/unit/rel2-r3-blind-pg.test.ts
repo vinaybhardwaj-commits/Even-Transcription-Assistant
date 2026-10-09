@@ -21,7 +21,8 @@ beforeAll(() => {
   pg.start();
   pg.exec(`
     CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL);
-    CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now());
+    CREATE TABLE bench_chunk (id serial PRIMARY KEY, session_id text NOT NULL, ended_at timestamptz NOT NULL);
+    CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz);
     CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL DEFAULT 'bs1', room_day_id text, start_ms bigint NOT NULL DEFAULT 0, end_ms bigint NOT NULL DEFAULT 1);
     CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text, state text NOT NULL DEFAULT 'ok', speakers_json jsonb, last_run_id text);
     CREATE TABLE room_turn_speaker (window_id text NOT NULL, source_ref text NOT NULL, speaker_idx integer NOT NULL DEFAULT 0, overlap_ms integer NOT NULL DEFAULT 0, room_day_id text, clinician_id text, role text,
@@ -156,5 +157,36 @@ afterAll(() => { if (HAVE) pg.stop(); });
     const keys = await selectEvrWindows(50, 1);
     expect(keys).toContain("u3_clean@m1");
     for (const k of ["u1_clean@m1", "u2_clean@m1"]) expect(keys, k).not.toContain(k);
+  });
+});
+
+(HAVE ? describe : describe.skip)("B3 guardSessionSpan on real SQL: the session's day, the range's days (both midnight directions) and its windows' placements", () => {
+  const dayStart = Date.parse(`${BD}T00:00:00+05:30`);
+  const iso = (ms: number) => new Date(ms).toISOString();
+  it("sessions: on the held-out day, ending into it, starting before it, a clean window-only session with a held-out window placement, and a clean session far away", async () => {
+    const { guardSessionSpan } = await import("@/lib/voice-blind");
+    pg.exec(`
+      INSERT INTO bench_session (id, room_id, started_at, ended_at) VALUES
+        ('bsOn', '${BR}', '${iso(dayStart + 3_600_000)}', '${iso(dayStart + 7_200_000)}'),
+        ('bsBefore', '${BR}', '${iso(dayStart - 3_600_000)}', '${iso(dayStart - 1_800_000)}'),
+        ('bsAfter', '${BR}', '${iso(dayStart + 86_400_000 + 600_000)}', '${iso(dayStart + 86_400_000 + 1_800_000)}'),
+        ('bsWin', 'r1', '2026-10-05T04:00:00Z', '2026-10-05T05:00:00Z'),
+        ('bsFar', 'r1', '2026-10-05T04:00:00Z', '2026-10-05T05:00:00Z'),
+        ('bsOtherRoom', 'r1', '${iso(dayStart + 3_600_000)}', '${iso(dayStart + 7_200_000)}');
+      INSERT INTO bench_window (id, session_id, room_day_id) VALUES ('bwWin', 'bsWin', 'rd_blind'), ('bwFar', 'bsFar', 'rd_clean');
+      INSERT INTO bench_chunk (session_id, ended_at) VALUES ('bsBefore', '${iso(dayStart + 600_000)}');
+    `);
+    expect(await guardSessionSpan("bsOn")).toBe("blind_room_day");
+    expect(await guardSessionSpan("bsWin")).toBe("blind_room_day"); // clean room and day; one of its windows is placed on a held-out room-day
+    expect(await guardSessionSpan("bsBefore")).toBe("blind_room_day"); // started the evening before; its last CHUNK ends inside the held-out day
+    expect(await guardSessionSpan("bsAfter")).toBe(null); // starts and ends the day after
+    // a range on the clean session crossing midnight INTO the held-out day (forward), and one reaching BACK from the next day into it
+    expect(await guardSessionSpan("bsAfter", { startMs: dayStart + 86_400_000 - 600_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe("blind_room_day");
+    expect(await guardSessionSpan("bsAfter", { startMs: dayStart - 600_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe("blind_room_day");
+    expect(await guardSessionSpan("bsAfter", { startMs: dayStart + 86_400_000 + 60_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe(null);
+    expect(await guardSessionSpan("bsOn", { startMs: dayStart + 86_400_000 + 60_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe("blind_room_day"); // the range is on the next day, the SESSION began on the held-out one
+    expect(await guardSessionSpan("bsFar")).toBe(null);
+    expect(await guardSessionSpan("bsOtherRoom")).toBe(null); // same date, a room that is not held out on it
+    expect(await guardSessionSpan("bs_unknown")).toBe(null);
   });
 });

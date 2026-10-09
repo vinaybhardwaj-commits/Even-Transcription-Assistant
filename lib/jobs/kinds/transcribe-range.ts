@@ -13,6 +13,7 @@
  * drift into two different answers for the same window.
  */
 
+import { guardSessionSpan } from "@/lib/voice-blind";
 import { listBenchChunks, listBenchSessions, type BenchChunkRow } from "@/lib/bench";
 import { resolveRange, type CoveringChunk, type RangeResolution } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService, refuseIfTooLong, whisperTimeoutForClip } from "@/lib/bench-join";
@@ -115,6 +116,8 @@ async function resolveStep(ctx: StepContext) {
     sessionId = covering.id;
   }
   if (!sessionId) return failWith(jobError("session_unresolved"));
+  // B3: the held-out rule before any chunk is listed or any audio moves
+  if ((await guardSessionSpan(sessionId, { startMs: start, endMs: end })) === "blind_room_day") return failWith(jobError("blind_room_day"));
 
   const chunks = await listBenchChunks(sessionId);
   const covering = coveringOf(resolveRange(chunks, start, end, source));

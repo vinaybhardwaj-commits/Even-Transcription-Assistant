@@ -127,3 +127,40 @@ export async function blockedSampleSources(sourceIds: readonly string[]): Promis
   for (const r of rows) if (refusalForPairs([r.room_id && r.ist_date ? { room_id: r.room_id, ist_date: r.ist_date } : null, r.room_id2 && r.ist_date2 ? { room_id: r.room_id2, ist_date: r.ist_date2 } : null])) out.add(r.id);
   return out;
 }
+
+const IST_OFFSET_MS = 19_800_000;
+const DAY_MS = 86_400_000;
+const istDayStartMs = (d: string): number => Date.parse(`${d}T00:00:00Z`) - IST_OFFSET_MS;
+
+/**
+ * PURE — does the time span [t0, t1] (epoch ms) touch the IST day of any held-out pair for this room? Every IST day the span overlaps is tested, so a span crossing midnight is refused
+ * from either side (the day before a held-out day, or the day itself). Touching the last millisecond of a day counts.
+ */
+export function spanTouchesBlindDay(roomId: string, t0: number, t1: number): boolean {
+  const lo = Math.min(t0, t1), hi = Math.max(t0, t1);
+  return BLIND_ROOM_DAYS.some(([d, r]) => r === roomId && lo < istDayStartMs(d) + DAY_MS && hi >= istDayStartMs(d));
+}
+
+/**
+ * B3 (REL2-R3): the held-out rule for the tape tools (scribe_get_session, scribe_get_recording, scribe_extract_audio, scribe_transcribe_range and the stitch / transcribe_range jobs), BEFORE any
+ * R2 read or presign. A session is refused (`blind_room_day`) if (a) the span asked for [startMs, endMs] (default: the whole session, started_at to its last end or chunk) or the session's own start
+ * touches a held-out (room, IST date), or (b) ANY bench_window of the session has a held-out placement (bench_window.room_day_id or room_diarize_window.room_day_id). null = not held out.
+ * An unknown session returns null: the caller's own not-found answer stands.
+ */
+export async function guardSessionSpan(sessionId: string, span?: { startMs?: number | null; endMs?: number | null }): Promise<"blind_room_day" | null> {
+  const rows = (await sql`
+    SELECT s.room_id, (extract(epoch FROM s.started_at) * 1000)::bigint AS started_ms,
+           (extract(epoch FROM COALESCE(GREATEST(s.ended_at, (SELECT max(c.ended_at) FROM bench_chunk c WHERE c.session_id = s.id)), (SELECT max(c.ended_at) FROM bench_chunk c WHERE c.session_id = s.id), s.started_at)) * 1000)::bigint AS last_ms,
+           EXISTS (SELECT 1 FROM bench_window w LEFT JOIN room_diarize_window dw ON dw.window_id = w.id, room_day r1, unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
+                    WHERE w.session_id = s.id AND r1.id IN (w.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id) AS window_blind
+      FROM bench_session s WHERE s.id = ${sessionId}::text LIMIT 1
+  `) as Array<{ room_id: string; started_ms: string | number; last_ms: string | number | null; window_blind: boolean }>;
+  const s = rows[0];
+  if (!s) return null;
+  if (s.window_blind) return "blind_room_day";
+  const started = Number(s.started_ms);
+  const last = Math.max(started, Number(s.last_ms ?? started));
+  const t0 = span?.startMs ?? started, t1 = span?.endMs ?? last;
+  if (spanTouchesBlindDay(s.room_id, started, started) || spanTouchesBlindDay(s.room_id, t0, t1)) return "blind_room_day";
+  return null;
+}

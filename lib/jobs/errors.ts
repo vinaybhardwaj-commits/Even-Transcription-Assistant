@@ -24,6 +24,7 @@ export const JOB_ERROR_CODES = [
   // stitch + transcribe_range
   "join_failed",
   "empty_range",
+  "blind_room_day",
   // the runner itself
   "unknown_kind",
   "unknown_step",

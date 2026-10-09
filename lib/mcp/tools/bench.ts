@@ -79,6 +79,7 @@
  *                     tool, not an option on this one, and a dry run of an open tape is safe.
  */
 
+import { guardSessionSpan } from "@/lib/voice-blind";
 import { findBenchSession, listBenchChunks, listBenchConsultMarks, listBenchEvents, listBenchSessions, newEventId, splitChunksBySource, type BenchChunkRow, type BenchEventRow, type BenchSessionRollupRow } from "@/lib/bench";
 import { renderBenchTimeline } from "@/lib/bench-timeline";
 import { getObjectBytes, signGetUrl } from "@/lib/r2";
@@ -340,6 +341,7 @@ const getSession: McpTool = {
     failSafe({ session: null as unknown, chunks: [] as unknown[], marks: [] as unknown[] }, async () => {
       const id = argStr(args, "session_id", 64);
       if (!id || !id.startsWith("bs_")) return { session: null, chunks: [], marks: [], error: "bad_session_id" };
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { session: null, chunks: [], marks: [], error: "blind_room_day" };
       const b = await loadSessionBundle(id);
       if (!b) return { session: null, chunks: [], marks: [], error: "session_not_found" };
       const { _raw, ...out } = b;
@@ -370,6 +372,7 @@ const getRecording: McpTool = {
       const modeRaw = argStr(args, "mode", 16) ?? "manifest";
       if (!["manifest", "timeline", "chunk", "zip"].includes(modeRaw)) return { mode: null, error: "bad_mode" };
       const mode = modeRaw as "manifest" | "timeline" | "chunk" | "zip";
+      if ((await guardSessionSpan(id)) === "blind_room_day") return { mode, error: "blind_room_day" };
       const b = await loadSessionBundle(id);
       if (!b) return { mode, error: "session_not_found" };
       const { session, chunks, backupChunks } = b._raw;
@@ -951,6 +954,8 @@ async function resolveRangeArgs(args: ToolArgs, ctx: ToolContext): Promise<Range
   if (!start) return { error: { ok: false, error: "invalid_start", hint: "HH:MM[:SS] IST or ISO" } };
   if (!end) return { error: { ok: false, error: "invalid_end", hint: "HH:MM[:SS] IST or ISO" } };
   if (!(end.ms > start.ms)) return { error: { ok: false, error: "end_before_start" } };
+  // B3: held out BEFORE any chunk, presign or R2 read (the session's own day, and every IST day the range touches)
+  if ((await guardSessionSpan(session.id, { startMs: start.ms, endMs: end.ms })) === "blind_room_day") return { error: { ok: false, error: "blind_room_day" } };
   const chunks = await listBenchChunks(session.id);
 
   // U4 — with a microphone named, the events are not consulted at all: a stated choice is never

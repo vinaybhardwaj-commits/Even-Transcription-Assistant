@@ -10,6 +10,7 @@
  * `progress.pieces` is the plan and `progress.done` is how far it got. Keys and ms only; no bytes.
  */
 
+import { guardSessionSpan } from "@/lib/voice-blind";
 import { listBenchChunks } from "@/lib/bench";
 import { resolveRange, type CoveringChunk, type RangeResolution } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService } from "@/lib/bench-join";
@@ -74,7 +75,9 @@ export const stitchKind: JobKind = {
 
 /** Step 1 — the plan, computed once. Every later claim reads it rather than recomputing it. */
 async function resolveStep(ctx: StepContext) {
-  const { start, end } = ctx.args as { start: number; end: number };
+  const { session_id, start, end } = ctx.args as { session_id: string; start: number; end: number };
+  // B3: the held-out rule before any piece is planned or cut
+  if ((await guardSessionSpan(session_id, { startMs: start, endMs: end })) === "blind_room_day") return failWith(jobError("blind_room_day"));
   const pieces = planPieces(start, end);
   if (!pieces.length) return failWith(jobError("empty_range"));
   return nextStep(STEPS.join, { pieces, done: [], total_ms: end - start });
