@@ -9,6 +9,11 @@
  *   - resolves the first argument: an inline template, a string concatenation, or an identifier — to a `const` in the
  *     same file or to an `export const` in the module it was imported from, followed transitively;
  *   - and REFUSES to guess: an argument it cannot resolve is reported as `unresolved`, which fails the test.
+ * THE BRAIN QUERY IS FOUND BY BINDING, NOT BY NAME. A module may import it as `query as brainQuery`, as a namespace
+ * (`import * as b` then `b.query`), through a barrel (`export { query as q } from`, `export * from`), by destructuring
+ * (`const { query: q } = await import(...)`, `const { query } = ns`) or by aliasing (`const q = query`). Each is tracked
+ * to the local name; a binding that escapes as a bare value (`run(query)`), a default import, or a dynamic import the
+ * scan cannot capture is reported as `unresolved`, which fails the test.
  * It reads SQL from string literals only (an interpolated `${x}` is resolved if it is a constant, else dropped).
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -43,17 +48,6 @@ function resolveSpec(from: string, spec: string, src: Sources): string | null {
   else return null;
   for (const c of [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`, base]) if (c in src) return c;
   return null;
-}
-
-const IMPORT_RE = /(?:import\s+(?:type\s+)?(?:[\s\S]*?)\s+from\s*|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/g;
-
-export function importersOfBrainPool(src: Sources): string[] {
-  const out: string[] = [];
-  for (const [f, text] of Object.entries(src)) {
-    if (f === BRAIN_DB) continue;
-    for (const m of text.matchAll(IMPORT_RE)) if (resolveSpec(f, m[1], src) === BRAIN_DB) { out.push(f); break; }
-  }
-  return out.sort();
 }
 
 /** Index of the end of the string/template literal that starts at i; templates nest `${ }`. */
@@ -202,19 +196,166 @@ export function tablesIn(sqlText: string): string[] {
   return [...out].sort();
 }
 
-const CALL_RE = /(?<![\w$])(?:query|(?:[A-Za-z_$][\w$]*|getPool\(\))\.query)\s*(?:<[^()]*>)?\s*\(/g;
+
+// ─── bindings ────────────────────────────────────────────────────────────────────────────────────────────────────────
+export type Kind = "query" | "getPool" | "ns";
+type Exports = Map<string, Kind>;
+type Bindings = { names: Map<string, Kind>; nsMaps: Map<string, Exports>; importsAny: boolean; unresolved: string[] };
+
+const ID = "[A-Za-z_$][\\w$]*";
+const IMPORT_STMT = new RegExp(`import\\s+(type\\s+)?(${ID})?\\s*,?\\s*(\\{[^}]*\\}|\\*\\s*as\\s+${ID})?\\s*from\\s*["']([^"']+)["']`, "g");
+const items = (list: string): Array<[string, string]> =>
+  list.replace(/[{}]/g, "").split(",").map((x) => x.trim().replace(/^type\s+/, "")).filter(Boolean).map((x) => {
+    const [a, b] = x.split(/\s+as\s+/);
+    return [a.trim(), (b ?? a).trim()] as [string, string];
+  });
+
+function exportsOf(file: string, src: Sources, memo: Map<string, Exports>, stack: Set<string>): Exports {
+  const hit = memo.get(file);
+  if (hit) return hit;
+  const out: Exports = new Map();
+  if (file === BRAIN_DB) { out.set("query", "query"); out.set("getPool", "getPool"); memo.set(file, out); return out; }
+  if (stack.has(file) || !(file in src)) return out;
+  stack.add(file);
+  const text = maskComments(src[file]);
+  for (const m of text.matchAll(/export\s+(?!type\b)\{([^}]*)\}\s*from\s*["']([^"']+)["']/g)) {
+    const t = resolveSpec(file, m[2], src);
+    if (!t) continue;
+    const ex = exportsOf(t, src, memo, stack);
+    for (const [a, b] of items(m[1])) { const k = ex.get(a); if (k) out.set(b, k); }
+  }
+  for (const m of text.matchAll(/export\s+\*\s+from\s*["']([^"']+)["']/g)) {
+    const t = resolveSpec(file, m[1], src);
+    if (t) for (const [k, v] of exportsOf(t, src, memo, stack)) if (k !== "default") out.set(k, v);
+  }
+  for (const m of text.matchAll(new RegExp(`export\\s+\\*\\s+as\\s+(${ID})\\s+from\\s*["']([^"']+)["']`, "g"))) {
+    const t = resolveSpec(file, m[2], src);
+    if (t && exportsOf(t, src, memo, stack).size) out.set(m[1], "ns");
+  }
+  const b = bindingsOf(file, src, memo, stack);
+  for (const m of text.matchAll(/export\s*\{([^}]*)\}(?!\s*from)/g)) for (const [a, c] of items(m[1])) { const k = b.names.get(a); if (k) out.set(c, k); }
+  for (const m of text.matchAll(new RegExp(`export\\s+(?:const|let)\\s+(${ID})\\s*=\\s*(${ID})\\s*[;\\n]`, "g"))) { const k = b.names.get(m[2]); if (k) out.set(m[1], k); }
+  stack.delete(file);
+  memo.set(file, out);
+  return out;
+}
+
+function bindingsOf(file: string, src: Sources, memo: Map<string, Exports>, stack: Set<string>): Bindings {
+  const text = maskComments(src[file] ?? "");
+  const r: Bindings = { names: new Map(), nsMaps: new Map(), importsAny: false, unresolved: [] };
+  const add = (local: string, k: Kind, ns?: Exports) => { r.names.set(local, k); if (ns) r.nsMaps.set(local, ns); };
+  const brainy = (spec: string): Exports | null => {
+    const t = resolveSpec(file, spec, src);
+    if (!t) return /(^|\/)brain\/db$/.test(spec) ? new Map() : null;
+    const ex = exportsOf(t, src, memo, stack);
+    return t === BRAIN_DB || ex.size ? ex : null;
+  };
+  for (const m of text.matchAll(IMPORT_STMT)) {
+    if (m[1]) continue;                                      // import type: no runtime binding
+    const ex = brainy(m[4]);
+    if (!ex) continue;
+    r.importsAny = true;
+    if (m[2]) { const k = ex.get("default"); if (k) add(m[2], k, k === "ns" ? ex : undefined); else r.unresolved.push(`default import ${m[2]} from ${m[4]} cannot be resolved`); }
+    if (m[3]?.startsWith("{")) for (const [a, b] of items(m[3])) { const k = ex.get(a); if (k) add(b, k, k === "ns" ? ex : undefined); }
+    else if (m[3]) add(m[3].replace(/^\*\s*as\s+/, ""), "ns", ex);
+  }
+  // dynamic import() / require(): captured only when bound by const/let/var; anything else on a brain module fails
+  const dyn = new RegExp(`(?:\\bimport|\\brequire)\\s*\\(\\s*["']([^"']+)["']\\s*\\)`, "g");
+  const captured = new RegExp(`(?:const|let|var)\\s+(\\{[^}]*\\}|${ID})\\s*=\\s*(?:await\\s+)?(?:import|require)\\s*\\(\\s*["']([^"']+)["']\\s*\\)`, "g");
+  let capturedN = 0;
+  for (const m of text.matchAll(captured)) {
+    const ex = brainy(m[2]);
+    if (!ex) continue;
+    capturedN += 1; r.importsAny = true;
+    if (m[1].startsWith("{")) for (const part of m[1].replace(/[{}]/g, "").split(",").map((x) => x.trim()).filter(Boolean)) { const [a, b] = part.split(":").map((x) => x.trim()); const k = ex.get(a); if (k) add(b ?? a, k, k === "ns" ? ex : undefined); }
+    else add(m[1], "ns", ex);
+  }
+  let dynN = 0;
+  for (const m of text.matchAll(dyn)) if (brainy(m[1])) dynN += 1;
+  if (dynN > capturedN) r.importsAny = true;
+  if (dynN > capturedN) r.unresolved.push(`${dynN - capturedN} dynamic import()/require() of the brain pool is not bound to a name`);
+  // aliases to a fixpoint: const q = query; const q = ns.query; const { query: q } = ns
+  for (let changed = true; changed;) {
+    changed = false;
+    const before = r.names.size;
+    for (const m of text.matchAll(new RegExp(`(?:const|let|var)\\s+(${ID})\\s*=\\s*(${ID})\\s*(?:[;\\n,)]|$)`, "g"))) {
+      const k = r.names.get(m[2]); if (k && !r.names.has(m[1])) add(m[1], k, r.nsMaps.get(m[2]));
+    }
+    for (const m of text.matchAll(new RegExp(`(?:const|let|var)\\s+(${ID})\\s*=\\s*(${ID})\\s*\\.\\s*(${ID})\\s*(?:[;\\n,)]|$)`, "g"))) {
+      const k = r.nsMaps.get(m[2])?.get(m[3]); if (k && !r.names.has(m[1])) add(m[1], k);
+    }
+    for (const m of text.matchAll(new RegExp(`(?:const|let|var)\\s*(\\{[^}]*\\})\\s*=\\s*(${ID})\\s*[;\\n]`, "g"))) {
+      const ex = r.nsMaps.get(m[2]); if (!ex) continue;
+      for (const part of m[1].replace(/[{}]/g, "").split(",").map((x) => x.trim()).filter(Boolean)) { const [a, b] = part.split(":").map((x) => x.trim()); const k = ex.get(a); if (k && !r.names.has(b ?? a)) add(b ?? a, k); }
+    }
+    changed = r.names.size > before;
+  }
+  return r;
+}
+
+/** The source with string and template TEXT blanked (the `${ }` expressions inside templates stay), so a word in a message is not a use. */
+function maskStrings(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "'" || c === '"') { const j = endOfLiteral(s, i); out += c + " ".repeat(Math.max(0, j - i - 1)) + s[j]; i = j; }
+    else if (c === "`") {
+      const j = endOfLiteral(s, i); out += "`";
+      for (let k = i + 1; k < j; k += 1) {
+        if (s[k] === "$" && s[k + 1] === "{") { const e = endOfBraces(s, k + 1); out += maskStrings(s.slice(k, e + 1)); k = e; }
+        else out += s[k] === "\n" ? "\n" : " ";
+      }
+      out += "`"; i = j;
+    } else out += c;
+  }
+  return out;
+}
+
+export function importersOfBrainPool(src: Sources): string[] {
+  const memo = new Map<string, Exports>();
+  return Object.keys(src).filter((f) => f !== BRAIN_DB && bindingsOf(f, src, memo, new Set()).importsAny).sort();
+}
+
+const GENERIC_QUERY = /(?<![\w$])[A-Za-z_$][\w$]*(?:\(\))?\s*\.\s*query\s*(?:<[^()]*>)?\s*\(/g;
 
 export function scanBrainPool(src: Sources): ScanResult {
-  const importers = importersOfBrainPool(src);
+  const memo = new Map<string, Exports>();
+  const importers = Object.keys(src).filter((f) => f !== BRAIN_DB && bindingsOf(f, src, memo, new Set()).importsAny).sort();
   const reads: Finding[] = [];
   const unresolved: ScanResult["unresolved"] = [];
   for (const f of importers) {
+    const b = bindingsOf(f, src, memo, new Set());
+    for (const u of b.unresolved) unresolved.push({ file: f, arg: u });
     const text = maskComments(src[f]);
-    for (const m of text.matchAll(CALL_RE)) {
-      const arg = expressionAt(text, m.index! + m[0].length, ",)");
+    const open = new Set<number>();                      // index just past each call's "(", so a call matched twice is read once
+    const note = (m: RegExpMatchArray) => open.add(m.index! + m[0].length);
+    for (const [name, k] of b.names) {
+      const n = name.replace(/\$/g, "\\$");
+      if (k === "query") for (const m of text.matchAll(new RegExp(`(?<![\\w$.])${n}\\s*(?:<[^()]*>)?\\s*\\(`, "g"))) note(m);
+      if (k === "ns") {
+        const ex = b.nsMaps.get(name);
+        for (const m of text.matchAll(new RegExp(`(?<![\\w$.])${n}\\s*\\.\\s*(${ID})\\s*(?:<[^()]*>)?\\s*\\(`, "g"))) if (ex?.get(m[1]) === "query") note(m);
+      }
+    }
+    for (const m of text.matchAll(GENERIC_QUERY)) note(m);
+    for (const at of [...open].sort((x, y) => x - y)) {
+      const arg = expressionAt(text, at, ",)");
       const sqlText = sqlOf(arg, f, src, new Set());
       if (sqlText === null) { unresolved.push({ file: f, arg: arg.trim().slice(0, 60) }); continue; }
       reads.push({ file: f, tables: tablesIn(sqlText) });
+    }
+    // an escape: the binding used as a bare value (run(query), arr = [query]) cannot be followed, so it fails
+    const noImports = maskStrings(text).replace(IMPORT_STMT, (x) => " ".repeat(x.length));
+    for (const [name, k] of b.names) {
+      const n = name.replace(/\$/g, "\\$");
+      for (const m of noImports.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])`, "g"))) {
+        const before = noImports.slice(Math.max(0, m.index! - 80), m.index!);
+        const after = noImports.slice(m.index! + name.length, m.index! + name.length + 80);
+        const call = k === "query" ? /^\s*(?:<[^()]*>)?\s*\(/ : k === "getPool" ? /^\s*\(/ : /^\s*\.\s*[\w$]+/;
+        const declSource = /(?:const|let|var)\s+[\w${}:,\s]+=\s*(?:await\s+)?$/.test(before);   // the source of an alias we track
+        const exported = /export\s*\{[^}]*$/.test(before);
+        if (!call.test(after) && !declSource && !exported && !/\bfunction\s+$|(?:const|let|var)\s+$/.test(before)) unresolved.push({ file: f, arg: `${name} escapes as a value` });
+      }
     }
   }
   return { importers, reads, unresolved };

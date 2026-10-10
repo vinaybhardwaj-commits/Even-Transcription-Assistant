@@ -134,3 +134,74 @@ describe("mutations the scan must catch (each a NAMED test)", () => {
     expect(tablesIn("DELETE FROM cue WHERE id = $1")).toEqual(["cue"]);
   });
 });
+
+describe("the brain query is found by BINDING, not by name (delta refute F2)", () => {
+  const ZZ = "lib/zz/reader.ts";
+  const BAD = "SELECT 1 FROM bench_session";
+  const only = (code: string): Sources => ({ ...REAL, [ZZ]: code });
+  const caught = (code: string) => expect(violations(only(code))).toContain(`${ZZ} reads bench_session`);
+
+  it("MF: `brainQuery(...)` (query as brainQuery) appended to the REAL lib/admin/rooms-live.ts is caught", () => {
+    expect(violations(withEdit("lib/admin/rooms-live.ts", `export async function mutantF() { return brainQuery(\`${BAD}\`); }`))).toContain("lib/admin/rooms-live.ts reads bench_session");
+  });
+  it("MG: the same in the REAL lib/mcp/tools/bench.ts, with room_turn_speaker", () => {
+    expect(violations(withEdit("lib/mcp/tools/bench.ts", "export async function mutantG() { return brainQuery(`SELECT 1 FROM room_turn_speaker`); }"))).toContain("lib/mcp/tools/bench.ts reads room_turn_speaker");
+  });
+  it("the real rooms-live.ts and bench.ts brain reads are now scanned (they were invisible)", () => {
+    const r = scanBrainPool(REAL);
+    for (const f of ["lib/admin/rooms-live.ts", "lib/mcp/tools/bench.ts"]) expect(r.reads.filter((x) => x.file === f).length, f).toBeGreaterThanOrEqual(3);
+  });
+
+  it("named import under another name", () => caught(`import { query as q } from "@/lib/brain/db";\nexport const f = () => q("${BAD}");`));
+  it("named import with a type argument", () => caught(`import { query as q } from "@/lib/brain/db";\nexport const f = () => q<{ id: string }>("${BAD}");`));
+  it("namespace import then ns.query", () => caught(`import * as brain from "@/lib/brain/db";\nexport const f = () => brain.query("${BAD}");`));
+  it("namespace import then a destructure", () => caught(`import * as brain from "@/lib/brain/db";\nconst { query: q } = brain;\nexport const f = () => q("${BAD}");`));
+  it("namespace import then an alias const q = ns.query", () => caught(`import * as brain from "@/lib/brain/db";\nconst q = brain.query;\nexport const f = () => q("${BAD}");`));
+  it("alias of an alias (const q2 = q)", () => caught(`import { query } from "@/lib/brain/db";\nconst q1 = query;\nconst q2 = q1;\nexport const f = () => q2("${BAD}");`));
+  it("dynamic import destructured: const { query: q } = await import(...)", () => caught(`export async function f() { const { query: q } = await import("@/lib/brain/db"); return q("${BAD}"); }`));
+  it("dynamic import as a namespace: const m = await import(...); m.query", () => caught(`export async function f() { const m = await import("@/lib/brain/db"); return m.query("${BAD}"); }`));
+  it("require destructure", () => caught(`const { query: q } = require("@/lib/brain/db");\nexport const f = () => q("${BAD}");`));
+  it("a barrel: export { query as bq } from the brain module, imported elsewhere", () => {
+    const src: Sources = { ...REAL, "lib/zz/barrel.ts": 'export { query as bq } from "@/lib/brain/db";', [ZZ]: `import { bq } from "./barrel";\nexport const f = () => bq("${BAD}");` };
+    expect(violations(src)).toContain(`${ZZ} reads bench_session`);
+  });
+  it("a barrel with export * from, and a re-export chain of two", () => {
+    const src: Sources = {
+      ...REAL,
+      "lib/zz/a.ts": 'export * from "@/lib/brain/db";',
+      "lib/zz/b.ts": 'export { query as deep } from "./a";',
+      [ZZ]: `import { deep } from "./b";\nexport const f = () => deep("${BAD}");`,
+    };
+    expect(violations(src)).toContain(`${ZZ} reads bench_session`);
+  });
+  it("a barrel's namespace: export * as db from, then db.query", () => {
+    const src: Sources = { ...REAL, "lib/zz/barrel.ts": 'export * as db from "@/lib/brain/db";', [ZZ]: `import { db } from "./barrel";\nexport const f = () => db.query("${BAD}");` };
+    expect(violations(src)).toContain(`${ZZ} reads bench_session`);
+  });
+  it("a local re-export (import then export { q })", () => {
+    const src: Sources = { ...REAL, "lib/zz/barrel.ts": 'import { query as q } from "@/lib/brain/db";\nexport { q as viaLocal };', [ZZ]: `import { viaLocal } from "./barrel";\nexport const f = () => viaLocal("${BAD}");` };
+    expect(violations(src)).toContain(`${ZZ} reads bench_session`);
+  });
+  it("getPool under another name: gp().query and pool.query", () => {
+    caught(`import { getPool as gp } from "@/lib/brain/db";\nexport const f = () => gp().query("${BAD}");`);
+    caught(`import { getPool as gp } from "@/lib/brain/db";\nexport const f = async () => { const pool = gp(); return pool.query("${BAD}"); };`);
+  });
+
+  it("FAILS (unresolved): the binding escapes as a bare value", () => {
+    const v = violations(only('import { query as q } from "@/lib/brain/db";\nconst run = (fn: unknown) => fn;\nexport const f = () => run(q);'));
+    expect(v.some((x) => x.startsWith(`${ZZ} has a query the scan cannot resolve: q escapes`))).toBe(true);
+  });
+  it("FAILS (unresolved): a default import of a brain module", () => {
+    const src: Sources = { ...REAL, "lib/zz/barrel.ts": 'export * from "@/lib/brain/db";', [ZZ]: 'import everything from "./barrel";\nexport const f = () => everything;' };
+    expect(violations(src).some((x) => x.includes("default import everything"))).toBe(true);
+  });
+  it("FAILS (unresolved): a dynamic import of the brain pool that is not bound to a name", () => {
+    expect(violations(only('export async function f() { return (await import("@/lib/brain/db")).query("SELECT 1 FROM cue"); }')).some((x) => x.includes("dynamic import()"))).toBe(true);
+  });
+  it("does not fail on the word `query` in a message, a comment or a type import", () => {
+    expect(violations(only('import { query } from "@/lib/brain/db";\nimport type { PoolClient } from "@/lib/brain/db";\n// query is used below\nexport const f = () => query("SELECT 1 FROM cue", []) && console.warn("marks query failed");'))).toEqual([]);
+  });
+  it("an unrelated module's own `query` is not the brain pool", () => {
+    expect(violations(only('import { query } from "@/lib/db-other";\nexport const f = () => query("SELECT 1 FROM bench_session");'))).toEqual([]);
+  });
+});
