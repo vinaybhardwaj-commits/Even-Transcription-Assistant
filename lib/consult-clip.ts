@@ -28,6 +28,11 @@ export type ClipReuse = { ok: true; existing: null; reuse: PalimpsestReuse; row:
  * The palimpsest's Sarvam tracks of exactly this cut, in the normal result shape; { reuse: null } when there is none; { missing: true } when the index lists an ok stt track whose R2 object is gone (it cannot
  * be checked against the cut); { unavailable: true } when the lookup could not be made. Throws nothing.
  */
+/** The one log line for track_missing: IDS AND CODES ONLY (consult_uid, the layer, the key's consult/room ids are not needed): never a transcript, a name, an R2 key or an error text. */
+export function logTrackMissing(consultUid: string, where: "preflight" | "consult_result"): void {
+  console.warn("[consult-reuse] track_missing", JSON.stringify({ consult_uid: consultUid, layer: "stt", at: where }));
+}
+
 export async function palimpsestFor(row: StoredIndexRow): Promise<{ unavailable: true } | { missing: true } | { reuse: PalimpsestReuse | null }> {
   const r = await findSarvamTracks(row.consult_uid, row.room_id, row.room_slug, row.cut_version, signatureVersion);
   if ("unavailable" in r) return { unavailable: true };
@@ -46,7 +51,7 @@ export async function preflightClip(consultUid: string, opts: { mode: "transcrib
   const pal = await palimpsestFor(row);
   if ("unavailable" in pal) return { ok: false, error: "reuse_lookup_unavailable" };
   // the index says the palimpsest HAS an ok track for this consult, but its object is gone from R2, so it cannot be checked against this cut: Sarvam is not silently paid for it. Only force:true goes on.
-  if ("missing" in pal && !opts.force) return { ok: false, error: "track_missing" };
+  if ("missing" in pal && !opts.force) { logTrackMissing(consultUid, "preflight"); return { ok: false, error: "track_missing" }; }
   if ("reuse" in pal && pal.reuse) return { ok: true, existing: null, reuse: pal.reuse, row };
   if (row.voice_isolated === true) return { ok: false, error: "consult_voice_isolated" };
   // the minutes are the duration floor the cap and the 30-minute limit rest on (max of container, size floor, index minutes x 60): without a positive figure that floor is gone

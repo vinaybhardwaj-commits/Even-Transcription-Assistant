@@ -408,43 +408,6 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     expect(none.doc.english_entries).toBeUndefined();
   });
 
-  it("(a) RESULTS STORED UNDER THE OLD cut_at VERSION ARE STILL FOUND after the version became the signature's: carried over by the sync of the same cut, so nothing is billed twice; a RE-CUT is not carried", async () => {
-    // the old release: rows carry no signature, so cut_version = cut_at
-    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" }), indexRow(UE, { cut_at: "2026-10-09T03:00:00+0530" })]);
-    putClips(UA, UE);
-    await tool({ action: "transcribe", consult_uid: UA, english: false });
-    await tool({ action: "transcribe", consult_uid: UE, english: false });
-    await drain();
-    expect((await results()).map((r) => r.cut_version).sort()).toEqual(["2026-10-09T02:00:00+0530", "2026-10-09T03:00:00+0530"]);
-    const calls = gwCalls();
-    // the new release's sync: the SAME cut of UA now has a signature; UE was RE-CUT meanwhile (a new cut_at)
-    publishIndex([withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" }), withSig(UE, { cut_at: "2026-10-12T09:00:00+0530" })]);
-    const r = await Sync.syncConsultIndex();
-    expect(r).toMatchObject({ ok: true, migrated_results: 1 });
-    const rs = await results();
-    expect(rs.find((x) => x.consult_uid === UA)!.cut_version).toMatch(/^sig:/);
-    expect(rs.find((x) => x.consult_uid === UE)!.cut_version).toBe("2026-10-09T03:00:00+0530"); // the earlier cut's result is not claimed by the new cut
-    // UA is answered from the stored result: no job, no gateway call
-    expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toMatchObject({ ok: true, existing: true, source: "scribe_sarvam", billed: false });
-    expect(gwCalls()).toBe(calls);
-    // UE (re-cut) is a real new ask
-    expect(await tool({ action: "transcribe", consult_uid: UE, english: false })).toMatchObject({ ok: true, status: "queued" });
-    // idempotent: syncing again carries nothing and breaks nothing
-    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 0 });
-  });
-
-  it("(a) a result already stored under the NEW form is never overwritten by the carry-over (the UNIQUE key holds)", async () => {
-    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
-    const old = (await St.getIndexRow(UA))!;
-    await St.recordResult({ consult_uid: UA, cut_version: old.cut_version, mode: "transcribe", english: false, num_speakers: null, job_id: "j_old", result_r2_key: "mcp-sarvam/j_old.json", model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
-    const sigRow = withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" });
-    const { signatureVersion } = await import("@/lib/consult-index/parse");
-    await St.recordResult({ consult_uid: UA, cut_version: signatureVersion(sigRow.signature)!, mode: "transcribe", english: false, num_speakers: null, job_id: "j_new", result_r2_key: "mcp-sarvam/j_new.json", model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
-    publishIndex([sigRow]);
-    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 0 });
-    expect((await results()).map((r) => r.job_id).sort()).toEqual(["j_new", "j_old"]);
-  });
-
   it("(b) an index row that says ok whose R2 object is MISSING is track_missing: Sarvam is NOT billed silently; only force:true goes on (tool, job, batch, consult_result)", async () => {
     await backfill([withSig(UA), withSig(UE)]);
     putClips(UA, UE);
@@ -494,60 +457,116 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     expect((await results()).map((x) => x.consult_uid).sort()).toEqual([UA, UE].sort());
   });
 
-  it("(A4) carry-over with BOTH english forms for one cut: each form moves independently; an existing new-form result for one form does not block the other, and is never overwritten", async () => {
-    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
-    const old = (await St.getIndexRow(UA))!;
-    const { signatureVersion } = await import("@/lib/consult-index/parse");
-    const sigRow = withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" });
-    const newV = signatureVersion(sigRow.signature)!;
-    const rec = (cut: string, english: boolean, job: string, mode = "transcribe") => St.recordResult({ consult_uid: UA, cut_version: cut, mode, english, num_speakers: null, job_id: job, result_r2_key: `mcp-sarvam/${job}.json`, model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
-    await rec(old.cut_version, true, "j_old_en");
-    await rec(old.cut_version, false, "j_old_noen");
-    await rec(old.cut_version, true, "j_old_codemix_en", "codemix");
-    await rec(newV, false, "j_new_noen"); // the new form already holds the english:false answer
-    publishIndex([sigRow]);
-    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 2 }); // english:true and the codemix one move; english:false (collision) stays
-    const rs = await q<Row>`SELECT job_id, cut_version, mode, english FROM consult_sarvam_result ORDER BY job_id`;
-    const by = Object.fromEntries(rs.map((r) => [r.job_id, r]));
-    expect(by.j_old_en.cut_version).toBe(newV);
-    expect(by.j_old_codemix_en.cut_version).toBe(newV);
-    expect(by.j_new_noen.cut_version).toBe(newV);
-    expect(by.j_old_noen.cut_version).toBe(old.cut_version); // not carried: the new form already has this (mode, english)
-    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 0 });
-  });
-
-  it("(A4b) carry-over keys on MODE as well: an existing new-form (transcribe, english) result does not block the old (codemix, english) one", async () => {
-    await backfill([indexRow(UE, { cut_at: "2026-10-09T05:00:00+0530" })]);
-    const old = (await St.getIndexRow(UE))!;
-    const { signatureVersion } = await import("@/lib/consult-index/parse");
-    const sigRow = withSig(UE, { cut_at: "2026-10-09T05:00:00+0530" });
-    const newV = signatureVersion(sigRow.signature)!;
-    const rec = (cut: string, mode: string, job: string) => St.recordResult({ consult_uid: UE, cut_version: cut, mode, english: true, num_speakers: null, job_id: job, result_r2_key: `mcp-sarvam/${job}.json`, model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
-    await rec(old.cut_version, "transcribe", "j_t_old");
-    await rec(old.cut_version, "codemix", "j_c_old");
-    await rec(newV, "transcribe", "j_t_new");
-    publishIndex([sigRow]);
-    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 1 });
-    const by = Object.fromEntries((await q<Row>`SELECT job_id, cut_version FROM consult_sarvam_result WHERE consult_uid = ${UE}`).map((r) => [r.job_id, r.cut_version]));
-    expect(by.j_c_old).toBe(newV); // moved: nothing at (codemix, true) on the new form
-    expect(by.j_t_old).toBe(old.cut_version); // collides with j_t_new: stays
-    expect(by.j_t_new).toBe(newV);
-  });
-
-  it("ATOMIC: the index upsert and the carry-over of results are ONE statement (no ask can see the new cut_version without its result)", async () => {
-    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
-    const old = (await St.getIndexRow(UA))!;
-    await St.recordResult({ consult_uid: UA, cut_version: old.cut_version, mode: "transcribe", english: false, num_speakers: null, job_id: "j_at", result_r2_key: "mcp-sarvam/j_at.json", model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
-    publishIndex([withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
+  it("(C1) NO CARRY-OVER across cut versions (the index holds no content identity of the clip): a result stays under the exact version it was stored with; a changed version is a NEW ask, never an inherited result", async () => {
+    // the old release: rows carry no signature, so cut_version = cut_at
+    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" }), indexRow(UE, { cut_at: "2026-10-09T03:00:00+0530" })]);
+    putClips(UA, UE);
+    await tool({ action: "transcribe", consult_uid: UA, english: false });
+    await tool({ action: "transcribe", consult_uid: UE, english: false });
+    await drain();
+    const stored = await q<Row>`SELECT consult_uid, cut_version, job_id FROM consult_sarvam_result ORDER BY consult_uid`;
+    expect(stored.map((r) => r.cut_version).sort()).toEqual(["2026-10-09T02:00:00+0530", "2026-10-09T03:00:00+0530"]);
+    // statements issued by the sync: none may write consult_sarvam_result
     const seen: string[] = [];
     const real = H.sql;
-    H.sql = ((strings: TemplateStringsArray, ...v: unknown[]) => { const t = strings.join("?"); if (/INSERT INTO consult_index AS c/.test(t) || /UPDATE consult_sarvam_result/.test(t)) seen.push(t); return real(strings, ...v); }) as never;
-    try { await Sync.syncConsultIndex(); } finally { H.sql = real; }
-    expect(seen).toHaveLength(1); // a single statement carries both the INSERT into consult_index and the UPDATE of consult_sarvam_result
-    expect(seen[0]).toMatch(/INSERT INTO consult_index/);
-    expect(seen[0]).toMatch(/UPDATE consult_sarvam_result/);
-    expect((await results())[0]!.cut_version).toMatch(/^sig:/);
-    expect((await St.getIndexRow(UA))!.cut_version).toMatch(/^sig:/);
+    H.sql = ((strings: TemplateStringsArray, ...v: unknown[]) => { seen.push(strings.join("?")); return real(strings, ...v); }) as never;
+    // UA: the SAME cut_at, now with a signature (the version changes FORM). UE: a RE-CUT: different audio (new cut_at and a different end) under a new version.
+    publishIndex([withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" }), withSig(UE, { cut_at: "2026-10-12T09:00:00+0530", signature: { ...sig(UE), end: 1791299999.5, cov: 0.7 } })]);
+    try { expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, inserted: 0, changed: 2 }); } finally { H.sql = real; }
+    expect(seen.filter((t) => /consult_sarvam_result/.test(t))).toEqual([]); // the sync never touches a result
+    expect(await q<Row>`SELECT consult_uid, cut_version, job_id FROM consult_sarvam_result ORDER BY consult_uid`).toEqual(stored); // byte for byte as stored
+    // neither is answered from the stored result: both are real new asks (the cost of the version change; the result is kept, readable as stale)
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toMatchObject({ ok: true, status: "queued" });
+    expect(await tool({ action: "transcribe", consult_uid: UE, english: false })).toMatchObject({ ok: true, status: "queued" });
+    await drain();
+    expect(gwCalls()).toBeGreaterThan(calls);
+    expect(await results()).toHaveLength(4);
+    // an older cut's result is still readable, flagged stale, never presented as the current cut's
+    await q`DELETE FROM consult_sarvam_result WHERE job_id NOT IN (${stored[0]!.job_id}, ${stored[1]!.job_id})`;
+    expect(await tool({ action: "consult_result", consult_uid: UE })).toMatchObject({ ok: true, stale: true });
+  });
+
+  it("(C2) the force:true Sarvam path takes consult clips only: a room window, a bench_window id, a session or any raw key is refused; every object it reads is under consult-clips/", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt", { dropObject: true }); // so force is what lets the ask through
+    // a bench window with a clip, a session, and a bench R2 object exist: none can be reached through force
+    pg.exec(`INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, clip_r2_key, grid_aligned, state, closed_at) VALUES ('bw_force1', 'bs_ci1', 'rd_ci1', ${T1 - 900_000}, ${T1}, 'primary', 'clips/bw_force1.webm', TRUE, 'transcribed', NOW());`);
+    H.r2.set("clips/bw_force1.webm", flac(120));
+    H.r2.set("bench/room/2026-10-06/bs_ci1/chunk_00000.webm", flac(120));
+    const calls = gwCalls();
+    const gets: string[] = [];
+    const r2 = await import("@/lib/r2");
+    const orig = (r2.getObjectBytes as unknown as { getMockImplementation: () => ((k: string) => Promise<Uint8Array | null>) | undefined }).getMockImplementation();
+    (r2.getObjectBytes as unknown as { mockImplementation: (f: (k: string) => Promise<Uint8Array | null>) => void }).mockImplementation(async (k: string) => { gets.push(k); return orig ? orig(k) : null; });
+    try {
+      for (const bad of [{ bench_window_id: "bw_force1" }, { room: SLUG }, { session_id: "bs_ci1" }, { from: "1" }, { to: "2" }, { from_ms: 1 }, { to_ms: 2 }]) {
+        expect(await tool({ action: "transcribe", consult_uid: UA, force: true, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
+        expect(await tool({ action: "transcribe", consult_uids: [UA], force: true, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
+        const j = await runner().then((r) => r.submitJob({ kind: "sarvam_transcribe", args: { consult_uid: UA, force: true, ...bad }, actor: "t", scopes: new Set(["invoke"] as const) })).catch((e: Error) => e);
+        expect(String((j as Error).message ?? (j as Error).constructor?.name), JSON.stringify(bad)).toMatch(/scope_consult_only|JobArgsError/);
+      }
+      // an id of a window / a raw R2 key given AS the consult_uid is not an indexed consult
+      for (const id of ["bw_force1", "clips/bw_force1.webm", "bench/room/2026-10-06/bs_ci1/chunk_00000.webm", "../bench/x"]) {
+        expect(await tool({ action: "transcribe", consult_uid: id, force: true }), id).toMatchObject({ ok: false });
+        expect((await tool({ action: "transcribe", consult_uid: id, force: true })).status).toBeUndefined();
+      }
+      expect(await tool({ action: "transcribe", consult_uid: "bw_force1", force: true })).toEqual({ ok: false, error: "consult_not_indexed" });
+      expect(gwCalls()).toBe(calls); // none of the above reached Sarvam
+      // keys that could name an object (window_id, clip_key, ...) are NOT arguments: the tool drops them, so they cannot select anything; the queued job carries only the consult and its options
+      for (const key of ["window_id", "clip_key", "clip_r2_key", "r2_key", "key", "object_id"]) {
+        await tool({ action: "transcribe", consult_uid: UA, force: true, [key]: "bw_force1" });
+      }
+      const queued = await jobsOfKind("sarvam_transcribe");
+      expect(queued).toHaveLength(1); // all six collapse onto the one open job for UA
+      expect(Object.keys(queued[0]!.args).sort()).toEqual(["consult_uid", "english", "force", "mode", "source"]);
+      expect(queued[0]!.args.consult_uid).toBe(UA);
+      // and the legitimate force ask (the open job above) reads ONLY consult-clips/ objects
+      await drain();
+    } finally {
+      (r2.getObjectBytes as unknown as { mockImplementation: (f: unknown) => void }).mockImplementation(orig as never);
+    }
+    expect(gwCalls()).toBeGreaterThan(calls);
+    const sent = gets.filter((k) => !k.startsWith("mcp-sarvam/"));
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every((k) => k.startsWith("consult-clips/"))).toBe(true);
+    expect(H.gw.upload.mock.calls.every((c) => (c[1] as Uint8Array).length === flac(120).length)).toBe(true);
+    // and the table itself cannot point a consult at a room window or a bench key
+    expect(fails(`INSERT INTO consult_index (consult_uid, room_id, room_slug, ist_date, t0_ms, t1_ms, clip_r2_key, cut_version, source_sha256) VALUES ('c2x', 'r', 's', '${DAY}', 1, 5, 'clips/bw_force1.webm', 'v', 'h');`)).toMatch(/key_chk/);
+    expect(fails(`INSERT INTO consult_index (consult_uid, room_id, room_slug, ist_date, t0_ms, t1_ms, clip_r2_key, cut_version, source_sha256) VALUES ('c2y', 'r', 's', '${DAY}', 1, 5, 'bench/a/b/c.webm', 'v', 'h');`)).toMatch(/key_chk/);
+  });
+
+  it("(C3) track_missing carries IDS AND CODES ONLY: the response is {ok:false, error}, the log line is consult_uid + layer + where; no key, text, name or error text anywhere", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt", { dropObject: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const a = await tool({ action: "transcribe", consult_uid: UA, english: false });
+      const b = await tool({ action: "consult_result", consult_uid: UA });
+      const j = await submit("sarvam_transcribe", { consult_uid: UA, english: false });
+      await drain();
+      const jr = await job(j.id);
+      expect(a).toEqual({ ok: false, error: "track_missing" });
+      expect(b).toEqual({ ok: false, error: "track_missing" });
+      expect(Object.keys(jr.result ?? {})).toEqual([]);
+      expect(String(jr.error)).toMatch(/^track_missing/);
+      expect(String(jr.error).length).toBeLessThan(60);
+      const lines = [...warn.mock.calls, ...logs.mock.calls, ...err.mock.calls].map((c) => c.map(String).join(" ")).filter((l) => /track_missing/.test(l));
+      expect(lines.length).toBeGreaterThanOrEqual(3);
+      for (const l of lines) {
+        const body = JSON.parse(l.slice(l.indexOf("{")));
+        expect(Object.keys(body).sort()).toEqual(["at", "consult_uid", "layer"]);
+        expect(body.consult_uid).toBe(UA);
+        expect(l).not.toMatch(/reb\/|consult-clips|mcp-sarvam|namaste|hello|DOCTORUID|sig:/);
+      }
+      expect(JSON.stringify([a, b, jr.error])).not.toMatch(/reb\/|consult-clips|namaste|hello|DOCTORUID/);
+    } finally {
+      warn.mockRestore(); logs.mockRestore(); err.mockRestore();
+    }
   });
 
   it("(b) force never overrides a track that EXISTS (it is still reused, not re-billed); force is not accepted for anything but a boolean", async () => {

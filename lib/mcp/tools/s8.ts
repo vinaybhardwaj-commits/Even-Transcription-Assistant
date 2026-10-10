@@ -17,7 +17,7 @@ import { JobArgsError, submitJob, UnknownKindError } from "@/lib/jobs/submit";
 import { errorCodeOf } from "@/lib/jobs/errors";
 import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, existingSummary, parseSarvamTranscribeArgs } from "@/lib/jobs/kinds/sarvam-transcribe";
 import { SARVAM_CONSULT_BATCH_KIND, parseBatchArgs } from "@/lib/jobs/kinds/sarvam-consult-batch";
-import { preflightClip } from "@/lib/consult-clip";
+import { logTrackMissing, preflightClip } from "@/lib/consult-clip";
 import { palimpsestAsResult } from "@/lib/consult-index/palimpsest-view";
 import { signatureVersion } from "@/lib/consult-index/parse";
 import { findSarvamTracks } from "@/lib/room-access/readers/reb-consult";
@@ -150,7 +150,7 @@ async function palimpsestResult(uid: string, row: IndexRowT, withText: boolean):
     const head = resultHead(v.result, row, []);
     return withText ? { ...head, ...consultResultView(v.doc, row.t0_ms) } : head;
   }
-  if (r.missing.includes("stt")) return { ok: false, error: "track_missing" };
+  if (r.missing.includes("stt")) { logTrackMissing(uid, "consult_result"); return { ok: false, error: "track_missing" }; }
   return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
 }
 

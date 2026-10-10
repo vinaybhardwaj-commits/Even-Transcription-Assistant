@@ -28,15 +28,13 @@ export async function finishSync(id: number, f: { status: "ok" | "failed"; error
 }
 
 /**
- * ONE STATEMENT (per batch of 200 rows): the index upsert and the carry-over of results to the new cut version are CTEs of the same SQL statement, so they commit together and no ask can see a row's
- * new cut_version without the result that belongs to it (they were two statements, with a window between them at the first signature-form sync; Neon HTTP has no interactive transactions, a tagged template is one).
- * THE CUT VERSION CHANGED FORM (cut_at -> sig:<hash of the cutter's signature>): a result stored under the OLD form belongs to the same cut exactly when the old version (a cut_at string) equals the row's cut_at NOW
- * (a re-cut changes cut_at, so an earlier cut's result is NOT carried); it is rewritten to the new form unless a result already exists there for the same (mode, english) (the UNIQUE key). Idempotent.
+ * NO CARRY-OVER OF RESULTS ACROSS CUT VERSIONS. An earlier release rewrote a stored result's cut_version when the version changed form (cut_at -> signature). That keyed on the cut TIME only: nothing proves the
+ * AUDIO is the same (a re-cut can reuse a cut_at, and the index stores no content identity of the clip: no etag, no sha256, no per-file hash), so a result could be handed to a different recording. It is DISABLED:
+ * a result is found only under the exact cut_version it was stored with (same-cut reuse); a changed version is a new ask. The statement below is ONLY the index upsert and never touches consult_sarvam_result.
  * Upsert rows (the BACKFILL is the first run: the mirror holds everything already cut). Returns how many rows were inserted and how many existing rows changed. An existing row is rewritten only if a field
  * differs; `sealed` is OR-ed (sticky); first_seen_at is kept; the bench session is the upstream's when it names one, else the session of that room that covers t0.
  */
-export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: string): Promise<{ inserted: number; changed: number; migrated: number }> {
-  let migrated = 0;
+export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: string): Promise<{ inserted: number; changed: number }> {
   let inserted = 0;
   let changed = 0;
   for (let i = 0; i < rows.length; i += BATCH) {
@@ -44,16 +42,8 @@ export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: stri
       WITH incoming AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows.slice(i, i + BATCH))}::jsonb)
           AS x(consult_uid text, room_id text, room_slug text, ist_date date, session_id text, t0_ms bigint, t1_ms bigint, clip_r2_key text, doctor_uid text, doctor_identified boolean,
-               cut_version text, cut_at text, code_commit text, sealed boolean, voice_isolated boolean, minutes numeric, bytes bigint, quality text, coverage numeric)
+               cut_version text, code_commit text, sealed boolean, voice_isolated boolean, minutes numeric, bytes bigint, quality text, coverage numeric)
       )
-      , moved AS (
-        UPDATE consult_sarvam_result r
-           SET cut_version = x.cut_version
-          FROM incoming x
-         WHERE r.consult_uid = x.consult_uid AND x.cut_at IS NOT NULL AND r.cut_version = x.cut_at AND r.cut_version <> x.cut_version
-           AND NOT EXISTS (SELECT 1 FROM consult_sarvam_result o WHERE o.consult_uid = r.consult_uid AND o.cut_version = x.cut_version AND o.mode = r.mode AND o.english = r.english)
-        RETURNING r.id
-      ), ups AS (
       INSERT INTO consult_index AS c (consult_uid, room_id, room_slug, ist_date, session_id, t0_ms, t1_ms, clip_r2_key, doctor_uid, doctor_identified, cut_version, code_commit, sealed,
                                       voice_isolated, minutes, bytes, quality, coverage, source_sha256)
       SELECT x.consult_uid, x.room_id, x.room_slug, x.ist_date,
@@ -72,14 +62,10 @@ export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: stri
                                EXCLUDED.cut_version, EXCLUDED.code_commit, EXCLUDED.voice_isolated, EXCLUDED.minutes, EXCLUDED.bytes, EXCLUDED.quality, EXCLUDED.coverage)
           OR (EXCLUDED.sealed AND NOT c.sealed)
       RETURNING (xmax = 0) AS inserted
-      )
-      SELECT 'm' AS k, count(*)::int AS n FROM moved
-      UNION ALL
-      SELECT CASE WHEN inserted THEN 'i' ELSE 'c' END, 1 FROM ups
-    `) as Array<{ k: "m" | "i" | "c"; n: number }>;
-    for (const r of out) (r.k === "m" ? (migrated += Number(r.n)) : r.k === "i" ? (inserted += 1) : (changed += 1));
+    `) as Array<{ inserted: boolean }>;
+    for (const r of out) (r.inserted ? (inserted += 1) : (changed += 1));
   }
-  return { inserted, changed, migrated };
+  return { inserted, changed };
 }
 
 
