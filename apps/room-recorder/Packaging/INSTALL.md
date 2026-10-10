@@ -47,14 +47,23 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    `pgrep -fl "room-recorder run"`
 6. **No approval click (0.1.32).** The pkg's postinstall installs the helper as a classic system
    LaunchDaemon, which macOS does not ask the user to approve: no Login Items prompt, no Screen
-   Sharing. Check it is loaded and answering (the first line must be the job, `state = running`):
-   `sudo launchctl print system/com.evenscribe.room-recorder.helper | head -20`
-   and that the app and the daemon plist are owned by root:
-   `ls -ld "/Applications/EvenScribe Room Recorder.app" /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`
-   Both must show `root  wheel`, and the plist `-rw-r--r--`. If `launchctl print` says it could not
-   find the service, load it by hand:
+   Sharing. The daemon does NOT run the file in the app bundle (an admin could swap that): the
+   postinstall copies the signed helper to `/Library/PrivilegedHelperTools/`, checks the copy against
+   the pinned code-signing requirement, and the daemon plist points there. Check it is loaded:
+   `sudo launchctl print system/com.evenscribe.room-recorder.helper | head -20` (`state = running`)
+   and that the copy and the plist are root-owned, the directory is not writable by the room user, and
+   the copy still carries our signature:
+   ```
+   ls -ld /Library/PrivilegedHelperTools /Library/PrivilegedHelperTools/com.evenscribe.room-recorder.helper /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist
+   codesign --verify --strict -R='=identifier "com.evenscribe.room-recorder.helper" and certificate leaf = H"187dd424fb866204111113d60c6f88a21d098edb"' /Library/PrivilegedHelperTools/com.evenscribe.room-recorder.helper && echo pinned-ok
+   ```
+   All three lines must show `root  wheel` (the directory and the copy `rwxr-xr-x`, the plist
+   `-rw-r--r--`) and the last command must print `pinned-ok`. If `launchctl print` cannot find the
+   service, load it by hand:
    `sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`
-   Installing the same pkg again is safe: it rewrites the same plist and reloads the job.
+   If the postinstall's log says the copy "does not satisfy the pinned code-signing requirement", it
+   changed nothing; the pkg was built wrong, do not use it. Installing the same pkg again is safe: it
+   stages and checks a new copy, boots the job out, swaps the copy in, and boots the job back in.
 7. **Re-grant the microphone** if asked. The app moved from `~/Applications` to `/Applications`, so
    macOS may ask again: **System Settings › Privacy & Security › Microphone**, switch ON
    **EvenScribe Room Recorder**. If it is already ON, leave it.
@@ -63,7 +72,9 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    `notAnswering` if the job is there but silent), `smappservice` (no system plist, so the app asks
    macOS to register the bundle's own daemon plist, which DOES need approval in Login Items), or `none`.
    While the system plist exists the app never calls `register()`: two registrations of one Mach
-   service would fight. `helper_registration_error` carries macOS's refusal in the other modes.
+   service would fight. If a room that ran 0.1.31 still holds an SMAppService registration of the same
+   label, the app removes it ONCE per start (`helper: removed a stale SMAppService registration` in
+   `launchd.log`; `sfltool dumpbtm | grep -A6 room-recorder` should then show no helper item). `helper_registration_error` carries macOS's refusal in the other modes.
 8. Wait about 90 seconds, then check this room's bench row: `mic_state=authorized`,
    `helper_mode=launchd`, `helper_registration=enabled`, `helper_xpc_ok=true`, `helper_version=0.2.0-h2`.
 
@@ -97,31 +108,60 @@ key, registers nothing and sends nothing unless `config.json` says `"fleet_clien
 only a hand on this Mac sets. Install 0.1.30 first; turn it on per room, later, when the server queues
 commands. It cannot be turned on by the server.
 
-## Updates only go up (0.1.30), and are OFF while the root daemon is installed (0.1.32)
+## Updates only go up (0.1.30)
 The self-updater installs a version only if it is HIGHER than the one running, and only into the
 bundle that is running. A channel that offers an older version is ignored, so withdrawing a release no
-longer rolls rooms back. To roll a room back, install the older pkg by hand.
+longer rolls rooms back. To roll a room back, use the rollback script below.
 
-With the system LaunchDaemon installed, **the self-updater is switched off** (the app logs
-`self-update is off: a root LaunchDaemon runs the helper from this bundle`). The updater swaps the
-whole bundle with a user-level move; that would leave a helper binary owned by the room user under a
-daemon that runs as root, and it cannot chown to root. So the bundle changes only through a pkg
-installed with `sudo installer`, which re-owns it to root:wheel and reloads the daemon. Rooms on
-0.1.32 therefore need each upgrade installed by hand (or by the fleet's root path when it exists).
-An admin user can still replace the bundle by hand (room accounts are admin); that was true before and
-is the known limit below.
+## The self-updater and the root helper (0.1.32)
+The self-updater is ON. The root daemon runs its own copy in `/Library/PrivilegedHelperTools`, so the
+updater swapping the app bundle (a user-level move) can no longer put anything under a root job. The
+updater never touches that copy, and its swap script never calls launchd's system domain. **A change to
+the helper itself therefore ships only by pkg** (through the fleet's root path when it exists, or
+`sudo installer` by hand): an app update leaves the old helper running, and the two talk over a versioned
+protocol (a request with a protocol version the helper does not know is refused, not misread).
 
-## Uninstall the helper daemon, or roll back to the app without it
-Both need `sudo`. The recorder app keeps running; only the root helper goes.
+## Uninstall the helper daemon only
+Needs `sudo`. The recorder app keeps running; only the root helper goes.
 ```
 sudo launchctl bootout system/com.evenscribe.room-recorder.helper
-sudo rm /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist
+sudo rm -f /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist /Library/PrivilegedHelperTools/com.evenscribe.room-recorder.helper
 ```
 Check: `sudo launchctl print system/com.evenscribe.room-recorder.helper` must say it could not find the
-service, and `ls /Library/LaunchDaemons | grep room-recorder` must print nothing. The app then reports
-`helper_mode=smappservice` (or `none`) and, from the next start, tries the old SMAppService path.
-The self-updater comes back as soon as the plist is gone. Installing the pkg again re-adds the daemon.
-To go back to 0.1.31 entirely: remove the daemon as above, then `sudo installer` the 0.1.31 pkg.
+service, and `ls /Library/LaunchDaemons /Library/PrivilegedHelperTools | grep room-recorder` must print
+nothing. At the next app start the app reports `helper_mode=smappservice` (or `none`) and, with no
+system plist, tries the old SMAppService path. Installing the pkg again re-adds the daemon.
+
+## Roll a room back to an older pkg (for example 0.1.32 to 0.1.31)
+**`sudo installer -pkg <older>` alone does NOT downgrade.** The pkgs mark the app bundle as
+version-checked, so Installer skips the app when a newer one is installed, and the room stays on the
+newer app. The newer app has to be removed first. `Packaging/rollback.sh` does the whole sequence, in
+an order that cannot leave the room without an app. Copy it and the older pkg to the room, then:
+```
+sudo sh rollback.sh /path/to/EvenScribe-Room-Recorder-0.1.31.pkg
+```
+It prints five numbered steps: (1) boots the recorder's LaunchAgent out for the console user; (2) boots
+the root daemon out and deletes its plist and its `/Library/PrivilegedHelperTools` copy; (3) MOVES the
+app to `EvenScribe Room Recorder.app.rollback-saved` (it does not delete it) and runs
+`pkgutil --forget com.evenscribe.room-recorder.pkg`; (4) runs `installer -pkg <older> -target /`; (5) if
+that succeeded, deletes the saved app and boots the agent back in, and if it FAILED, puts the saved app
+back and says so (the room then runs the newer app without the root helper; install the newer pkg
+again to restore it). Afterwards check `/Applications/EvenScribe Room Recorder.app/Contents/Info.plist`:
+`plutil -extract CFBundleShortVersionString raw "/Applications/EvenScribe Room Recorder.app/Contents/Info.plist"`
+must print the older version, and `pgrep -fl "room-recorder run"` must show the `/Applications` path.
+Rolling back to a pkg older than 0.1.32 leaves no root helper (those pkgs do not install one).
+
+The same commands by hand, if the script cannot be used (as root, in this order):
+```
+launchctl bootout gui/$(stat -f %u /dev/console)/com.evenscribe.room-recorder
+launchctl bootout system/com.evenscribe.room-recorder.helper
+rm -f /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist /Library/PrivilegedHelperTools/com.evenscribe.room-recorder.helper
+mv "/Applications/EvenScribe Room Recorder.app" "/Applications/EvenScribe Room Recorder.app.rollback-saved"
+pkgutil --forget com.evenscribe.room-recorder.pkg
+installer -pkg /path/to/older.pkg -target /
+```
+If `installer` succeeds, `rm -rf "/Applications/EvenScribe Room Recorder.app.rollback-saved"`. If it fails,
+`rm -rf "/Applications/EvenScribe Room Recorder.app"` and move the saved app back.
 
 ## Switches
 - Kill file: `sudo mkdir -p "/Library/Application Support/EvenScribe" && sudo touch "/Library/Application Support/EvenScribe/helper-disabled"`
@@ -130,9 +170,11 @@ To go back to 0.1.31 entirely: remove the daemon as above, then `sudo installer`
 - Safe mode starts by itself after 3 launches in a row that do not last a minute.
 
 ## Known limit
-The app's self-updater swaps the bundle with a user-level move, so an updated bundle is owned by
-the room user, not root. This undoes the pkg's root ownership for the bundle the helper runs from.
-Accepted for now; it needs a ruling before the update path ships.
+The app's self-updater swaps the bundle with a user-level move, so an updated app bundle is owned by the
+room user, not root. Since 0.1.32 that no longer matters for the helper: the root daemon runs its own
+root-only copy and nothing in the bundle. The app itself runs as the room user in any case. What an
+admin room user can still do by hand (they are admin, and could already `sudo`) is stop the daemon,
+delete its plist or its helper copy; that is detected (`helper_missing`) and not prevented.
 
 ## Building the pkg (on the Mini, Terminal.app, as V)
 `apps/room-recorder/Packaging/sign-and-package.sh`

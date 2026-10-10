@@ -153,6 +153,7 @@ import Testing
       if let failure { throw failure }
       status = statusAfterRegister
     }
+    func unregister() throws {}
   }
 
   static let refused = NSError(

@@ -32,7 +32,8 @@ readonly SIGNING_IDENTITY="187DD424FB866204111113D60C6F88A21D098EDB"
 readonly SIGNING_IDENTITY_NAME="EvenScribe Room Recorder Code Signing 1"
 readonly APP_NAME="EvenScribe Room Recorder.app"
 readonly PKG_IDENTIFIER="com.evenscribe.room-recorder.pkg"
-readonly LEAF_LOWER="$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')"
+LEAF_LOWER="$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+readonly LEAF_LOWER
 
 say() { /bin/echo "==> $*"; }
 die() { /bin/echo "sign-and-package: $*" >&2; exit 1; }
@@ -51,7 +52,7 @@ if [ -z "${ETA_FFMPEG_BINARY:-}" ]; then
   done
 fi
 [ -n "${ETA_FFMPEG_BINARY:-}" ] || die "no ffmpeg found. Set ETA_FFMPEG_BINARY=/path/to/ffmpeg and re-run."
-say "Encoder: ${ETA_FFMPEG_BINARY}"
+say "Encoder: ${ETA_FFMPEG_BINARY}; signing as ${SIGNING_IDENTITY_NAME}"
 
 # ─── 1. Build, assemble, sign, zip. build-bundle.sh fails loudly and leaves nothing on failure. ─
 say "Building and signing the bundle (build-bundle.sh)"
@@ -108,6 +109,33 @@ case "$HELPER_INFO" in
 esac
 /usr/bin/plutil -lint "${INSTALLED_APP}/Contents/Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist" >/dev/null \
   || die "the helper launchd plist is missing or does not lint"
+
+# The pkg's own postinstall, run for real against the signed payload in a sandbox (test mode: stub
+# launchctl, no chown, throwaway directories) with the REAL codesign. This proves the helper that ships
+# satisfies the pinned requirement AFTER being copied, which is exactly what the root daemon will rely on.
+say "Dry-running the pkg postinstall against the signed payload"
+DRY="$(/usr/bin/mktemp -d)"
+/bin/mkdir -p "${DRY}/apps" "${DRY}/daemons" "${DRY}/helpers"
+/bin/cp -R "$INSTALLED_APP" "${DRY}/apps/"
+/bin/cat > "${DRY}/launchctl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+/bin/chmod 755 "${DRY}/launchctl"
+ETA_POSTINSTALL_TEST=1 ETA_INSTALL_LOCATION="${DRY}/apps" ETA_DAEMON_DIR="${DRY}/daemons" \
+  ETA_HELPER_DIR="${DRY}/helpers" ETA_LAUNCHCTL="${DRY}/launchctl" ETA_SKIP_OWNERSHIP=1 \
+  /bin/sh "${SCRIPT_DIR}/pkg-scripts/postinstall" pkg "${DRY}/apps" / / \
+  || die "the pkg postinstall failed in the dry run"
+DRY_COPY="${DRY}/helpers/com.evenscribe.room-recorder.helper"
+[ -x "$DRY_COPY" ] || die "the dry run did not install the root helper copy"
+codesign --verify --strict \
+  -R "=identifier \"com.evenscribe.room-recorder.helper\" and certificate leaf = H\"${LEAF_LOWER}\"" "$DRY_COPY" \
+  || die "the root helper copy does not satisfy the pinned requirement"
+/usr/bin/plutil -lint "${DRY}/daemons/com.evenscribe.room-recorder.helper.plist" > /dev/null \
+  || die "the dry-run daemon plist does not lint"
+[ "$(/usr/bin/plutil -extract Program raw -o - "${DRY}/daemons/com.evenscribe.room-recorder.helper.plist")" = "$DRY_COPY" ] \
+  || die "the dry-run daemon plist does not point at the root helper copy"
+/bin/rm -rf "$DRY"
 /bin/rm -rf "$(/usr/bin/dirname "$EXPAND")"
 
 PKG_SHA="$(/usr/bin/shasum -a 256 "$PKG" | /usr/bin/awk '{print $1}')"

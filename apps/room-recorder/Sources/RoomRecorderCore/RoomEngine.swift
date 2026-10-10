@@ -830,16 +830,13 @@ public actor RoomEngine {
   /// itself once the `/Applications` install exists: the swap would put a new version where nothing
   /// is meant to run.
   static func updaterBundle(
-    bundleURL: URL, homeDirectory: URL, fileExists: (String) -> Bool,
-    systemHelperPlist: String = HelperIdentity.systemDaemonPlistPath
+    bundleURL: URL, homeDirectory: URL, fileExists: (String) -> Bool
   ) -> URL? {
     let bundle = bundleURL.standardizedFileURL
     guard bundle.pathExtension == "app" else { return nil }
-    // 0.1.32. A root LaunchDaemon runs the helper from inside this bundle. The updater swaps the
-    // WHOLE bundle with a user-level move, which would leave a user-owned helper binary referenced
-    // by a root job. It cannot chown to root, and it cannot swap everything but the helper, so while
-    // that job is installed the updater is off; a root-installed pkg is how the bundle changes.
-    if fileExists(systemHelperPlist) { return nil }
+    // The root helper daemon runs its own root-only copy in /Library/PrivilegedHelperTools, never code
+    // from this bundle, so the updater is free to swap the bundle (0.1.32 R2). It never touches that
+    // copy; a helper change ships only by pkg.
     let userApplications =
       homeDirectory.appendingPathComponent("Applications", isDirectory: true).standardizedFileURL.path + "/"
     if bundle.path.hasPrefix(userApplications), fileExists("/Applications/" + bundle.lastPathComponent) {

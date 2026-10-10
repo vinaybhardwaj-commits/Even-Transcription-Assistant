@@ -394,6 +394,29 @@ import Testing
     #expect(!roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.8"))
   }
 
+  // 0.1.32 R2: the root daemon runs its own copy in /Library/PrivilegedHelperTools, so the swap
+  // must leave it alone and stay in the user's launchd domain.
+  @Test func aRealSwapLeavesTheRootHelperCopyByteForByteAndLaunchctlInTheUserDomain() throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let helperDir = fixture.root.deletingLastPathComponent().appendingPathComponent("PrivilegedHelperTools")
+    try FileManager.default.createDirectory(at: helperDir, withIntermediateDirectories: true)
+    let copy = helperDir.appendingPathComponent("com.evenscribe.room-recorder.helper")
+    try Data("ROOT-HELPER-COPY".utf8).write(to: copy)
+    let before = try Data(contentsOf: copy)
+    let modified = try FileManager.default.attributesOfItem(atPath: copy.path)[.modificationDate] as? Date
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.99")
+
+    let run = try Self.runSwapScript(fixture, stagedBundle: staged, version: "0.1.99")
+    #expect(run.status == 0)
+    #expect(fixture.version(of: fixture.resident) == "0.1.99", "the bundle did swap")
+    #expect(try Data(contentsOf: copy) == before)
+    #expect(try FileManager.default.attributesOfItem(atPath: copy.path)[.modificationDate] as? Date == modified)
+    let launchctl = run.toolLog.split(separator: "\n").filter { $0.hasPrefix("launchctl ") }
+    #expect(!launchctl.isEmpty && launchctl.allSatisfy { !$0.contains("system") }, "\(launchctl)")
+  }
+
   @Test func aChannelOfferingALowerVersionStagesNothingAndDefersNothing() async throws {
     // The whole updater, not just the predicate: a 0.1.29 app on a channel that offers 0.1.28 with
     // the session CLOSED downloads nothing, spawns nothing and leaves no result file.

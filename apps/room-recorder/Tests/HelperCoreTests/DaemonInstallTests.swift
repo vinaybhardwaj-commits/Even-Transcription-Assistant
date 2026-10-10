@@ -7,52 +7,75 @@ import Testing
 // MARK: - The pkg postinstall, dry-run
 
 @Suite struct PostinstallScriptTests {
-  static var script: URL {
+  static var packaging: URL {
     URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-      .appendingPathComponent("Packaging/pkg-scripts/postinstall")
+      .appendingPathComponent("Packaging")
   }
+  static var script: URL { packaging.appendingPathComponent("pkg-scripts/postinstall") }
+  static let label = "com.evenscribe.room-recorder.helper"
 
   struct Sandbox {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent("postinstall-\(UUID().uuidString)")
     var apps: URL { base.appendingPathComponent("Applications") }
     var app: URL { apps.appendingPathComponent("EvenScribe Room Recorder.app") }
-    var helper: URL { app.appendingPathComponent("Contents/MacOS/room-recorder-helper") }
+    var bundleHelper: URL { app.appendingPathComponent("Contents/MacOS/room-recorder-helper") }
     var daemons: URL { base.appendingPathComponent("LaunchDaemons") }
-    var plist: URL { daemons.appendingPathComponent("com.evenscribe.room-recorder.helper.plist") }
+    var plist: URL { daemons.appendingPathComponent("\(PostinstallScriptTests.label).plist") }
+    var helperDir: URL { base.appendingPathComponent("PrivilegedHelperTools") }
+    var helperCopy: URL { helperDir.appendingPathComponent(PostinstallScriptTests.label) }
     var calls: URL { base.appendingPathComponent("launchctl.calls") }
+    var state: URL { base.appendingPathComponent("launchctl.state") }
+    var codesignCalls: URL { base.appendingPathComponent("codesign.calls") }
     var stub: URL { base.appendingPathComponent("launchctl") }
+    var codesignStub: URL { base.appendingPathComponent("codesign") }
 
-    init(withHelper: Bool = true, withApp: Bool = true, bootoutFails: Bool = false, bootstrapFails: Bool = false) throws {
+    /// `realCodesign`: do not stub codesign, so the pinned requirement is checked for real.
+    init(
+      withHelper: Bool = true, withApp: Bool = true, bootoutFails: Bool = false, bootstrapFails: Bool = false,
+      codesignFails: Bool = false, helperText: String = "#!/bin/sh\n# v1\n"
+    ) throws {
       try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
       if withApp {
-        try FileManager.default.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bundleHelper.deletingLastPathComponent(), withIntermediateDirectories: true)
         if withHelper {
-          try "#!/bin/sh\n".write(to: helper, atomically: true, encoding: .utf8)
-          try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+          try helperText.write(to: bundleHelper, atomically: true, encoding: .utf8)
+          try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundleHelper.path)
         }
       }
+      // The launchctl stub also records what sits at the helper copy's path at each call, so a test
+      // can see that the old file was running at bootout and the new one is there at bootstrap.
       try """
         #!/bin/sh
         echo "$@" >> '\(calls.path)'
+        echo "$1 helper=$(cat '\(helperCopy.path)' 2>/dev/null | tr -d '\\n')" >> '\(state.path)'
         case "$1" in
           bootout) exit \(bootoutFails ? 36 : 0) ;;
           bootstrap) exit \(bootstrapFails ? 5 : 0) ;;
         esac
         exit 0
         """.write(to: stub, atomically: true, encoding: .utf8)
-      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+      try """
+        #!/bin/sh
+        echo "$@" >> '\(codesignCalls.path)'
+        exit \(codesignFails ? 3 : 0)
+        """.write(to: codesignStub, atomically: true, encoding: .utf8)
+      for url in [stub, codesignStub] {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+      }
     }
 
-    func run() throws -> (status: Int32, output: String) {
+    func run(realCodesign: Bool = false, extraEnv: [String: String] = [:]) throws -> (status: Int32, output: String) {
       let process = Process()
       process.executableURL = URL(fileURLWithPath: "/bin/sh")
       process.arguments = [PostinstallScriptTests.script.path, "pkg", apps.path, "/", "/"]
-      process.environment = [
+      var environment = [
         "ETA_POSTINSTALL_TEST": "1", "ETA_INSTALL_LOCATION": apps.path, "ETA_DAEMON_DIR": daemons.path,
-        "ETA_LAUNCHCTL": stub.path, "ETA_SKIP_OWNERSHIP": "1", "ETA_LOG_PATH": "/var/log/room-recorder-helper.log",
-        "PATH": "/usr/bin:/bin",
+        "ETA_HELPER_DIR": helperDir.path, "ETA_LAUNCHCTL": stub.path, "ETA_SKIP_OWNERSHIP": "1",
+        "ETA_LOG_PATH": "/var/log/room-recorder-helper.log", "PATH": "/usr/bin:/bin",
       ]
+      if !realCodesign { environment["ETA_CODESIGN"] = codesignStub.path }
+      process.environment = environment.merging(extraEnv) { $1 }
       let pipe = Pipe()
       process.standardOutput = pipe
       process.standardError = pipe
@@ -62,9 +85,10 @@ import Testing
       return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
-    var launchctlCalls: [String] {
-      ((try? String(contentsOf: calls, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    func lines(_ url: URL) -> [String] {
+      ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
     }
+    var launchctlCalls: [String] { lines(calls) }
     func tearDown() { try? FileManager.default.removeItem(at: base) }
   }
 
@@ -78,65 +102,155 @@ import Testing
     guard (try? process.run()) != nil else { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
-    return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) : nil
+    return process.terminationStatus == 0
+      ? String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) : nil
   }
 
-  @Test func theScriptParsesUnderEveryShellItCouldRunUnder() throws {
-    // shellcheck is not installed on the Mini; `-n` is what is available.
-    for shell in ["/bin/sh", "/bin/dash", "/bin/bash"] {
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: shell)
-      process.arguments = ["-n", Self.script.path]
-      try process.run()
-      process.waitUntilExit()
-      #expect(process.terminationStatus == 0, "\(shell) -n")
+  private func mode(_ url: URL) -> Int {
+    ((try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.flatMap { $0 })?.intValue ?? -1
+  }
+
+  @Test func theScriptsParseUnderEveryShellAndPassShellcheck() throws {
+    let scripts = [Self.script, Self.packaging.appendingPathComponent("rollback.sh")]
+    for script in scripts {
+      for shell in ["/bin/sh", "/bin/dash", "/bin/bash"] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-n", script.path]
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0, "\(shell) -n \(script.lastPathComponent)")
+      }
+      #expect(FileManager.default.isExecutableFile(atPath: script.path))
     }
-    #expect(FileManager.default.isExecutableFile(atPath: Self.script.path))
+    // shellcheck is installed on the Mini (brew); when it is, it must find nothing at all.
+    for path in ["/opt/homebrew/bin/shellcheck", "/usr/local/bin/shellcheck"] where FileManager.default.isExecutableFile(atPath: path) {
+      for script in scripts {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["-s", "sh", script.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0, "shellcheck \(script.lastPathComponent): \(out)")
+      }
+      break
+    }
   }
 
-  @Test func itWritesTheDaemonPlistAndBootstrapsItIntoTheSystemDomain() throws {
+  @Test func itCopiesTheHelperToTheRootOnlyDirectoryAndPointsTheDaemonThere() throws {
     let box = try Sandbox()
     defer { box.tearDown() }
     let result = try box.run()
     #expect(result.status == 0, "\(result.output)")
     let path = box.plist.path
-    #expect(plistValue(path, "Label") == "com.evenscribe.room-recorder.helper")
-    #expect(plistValue(path, "Program") == box.helper.path)
-    #expect(plistValue(path, "ProgramArguments.0") == box.helper.path)
+    #expect(plistValue(path, "Label") == Self.label)
+    #expect(plistValue(path, "Program") == box.helperCopy.path, "NOT the bundle")
+    #expect(plistValue(path, "ProgramArguments.0") == box.helperCopy.path)
+    #expect(!(try String(contentsOf: box.plist, encoding: .utf8)).contains(".app/"), "no path into any bundle")
     #expect(plistValue(path, "MachServices.com\\.evenscribe\\.room-recorder\\.helper\\.xpc") == "true")
     #expect(plistValue(path, "RunAtLoad") == "true" && plistValue(path, "KeepAlive") == "true")
-    let mode = try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber
-    #expect(mode?.intValue == 0o644)
-    #expect(box.launchctlCalls == ["bootout system/com.evenscribe.room-recorder.helper", "bootstrap system \(path)"])
-    #expect(!FileManager.default.fileExists(atPath: path + ".tmp"), "no temp file left")
+    #expect(mode(box.plist) == 0o644)
+    // The copy is the bundle's helper, byte for byte, executable, and its directory is 755.
+    #expect(try Data(contentsOf: box.helperCopy) == Data(contentsOf: box.bundleHelper))
+    #expect(mode(box.helperCopy) == 0o755 && mode(box.helperDir) == 0o755)
+    #expect(box.launchctlCalls == ["bootout system/\(Self.label)", "bootstrap system \(path)"])
+    let leftovers = try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path)
+    #expect(leftovers == [Self.label], "no staged file left behind")
   }
 
-  @Test func theScriptsConstantsAreTheAppsConstants() throws {
-    // The Mach service name and the label are written in the shell script AND used by the app's XPC
-    // client; a drift between them would install a daemon nobody connects to.
+  @Test func theCopyIsVerifiedAgainstThePinnedRequirementBeforeAnythingIsReplaced() throws {
     let box = try Sandbox()
     defer { box.tearDown() }
     _ = try box.run()
-    #expect(plistValue(box.plist.path, "MachServices.com\\.evenscribe\\.room-recorder\\.helper\\.xpc") == "true")
+    let call = try #require(box.lines(box.codesignCalls).first)
+    #expect(call.hasPrefix("--verify --strict -R ="))
+    #expect(call.contains(HelperIdentity.requirementForHelper))
+    #expect(call.contains(box.helperDir.path), "the STAGED COPY is what is verified, not the bundle's file")
+  }
+
+  @Test func aCopyThatFailsVerificationChangesNothing() throws {
+    let box = try Sandbox(codesignFails: true)
+    defer { box.tearDown() }
+    // An earlier install is in place.
+    try FileManager.default.createDirectory(at: box.helperDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: box.daemons, withIntermediateDirectories: true)
+    try "OLD-HELPER".write(to: box.helperCopy, atomically: true, encoding: .utf8)
+    try "OLD-PLIST".write(to: box.plist, atomically: true, encoding: .utf8)
+    let result = try box.run()
+    #expect(result.status == 0, "the recorder app still installs")
+    #expect(result.output.contains("pinned code-signing requirement"))
+    #expect(try String(contentsOf: box.helperCopy, encoding: .utf8) == "OLD-HELPER")
+    #expect(try String(contentsOf: box.plist, encoding: .utf8) == "OLD-PLIST")
+    #expect(box.launchctlCalls.isEmpty, "the running daemon was not even bounced")
+    #expect(try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path) == [Self.label])
+  }
+
+  @Test func aSameLookingButForeignHelperIsRefusedByTheRealCodesignCheck() throws {
+    // No codesign stub: the real tool and the real pinned requirement. A copy of /bin/ls signed ad hoc
+    // with the helper's identifier is NOT signed by our leaf, so it must not be installed.
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    try FileManager.default.removeItem(at: box.bundleHelper)
+    try FileManager.default.copyItem(atPath: "/bin/ls", toPath: box.bundleHelper.path)
+    for args in [["--remove-signature"], ["--force", "--sign", "-", "--identifier", HelperIdentity.helperIdentifier]] {
+      let sign = Process()
+      sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+      sign.arguments = args + [box.bundleHelper.path]
+      sign.standardError = FileHandle.nullDevice
+      try sign.run()
+      sign.waitUntilExit()
+    }
+    let result = try box.run(realCodesign: true)
+    #expect(result.status == 0)
+    #expect(result.output.contains("pinned code-signing requirement"))
+    #expect(!FileManager.default.fileExists(atPath: box.plist.path))
+    #expect(!FileManager.default.fileExists(atPath: box.helperCopy.path))
+    #expect(box.launchctlCalls.isEmpty)
+  }
+
+  @Test func anUpgradeBootsTheOldHelperOutBeforeTheNewCopyIsInAndBootstrapsTheNewOne() throws {
+    let box = try Sandbox(helperText: "#!/bin/sh\n# v2\n")
+    defer { box.tearDown() }
+    try FileManager.default.createDirectory(at: box.helperDir, withIntermediateDirectories: true)
+    try "#!/bin/sh\n# v1\n".write(to: box.helperCopy, atomically: true, encoding: .utf8)
+    let result = try box.run()
+    #expect(result.status == 0)
+    let seen = box.lines(box.state)
+    #expect(seen.first == "bootout helper=#!/bin/sh# v1", "the OLD helper is still there when the job is booted out")
+    #expect(seen.last == "bootstrap helper=#!/bin/sh# v2", "the NEW helper is in place when the job is bootstrapped")
+    #expect(mode(box.helperCopy) == 0o755)
+  }
+
+  @Test func theScriptsConstantsAreTheAppsConstants() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    _ = try box.run()
     let text = try String(contentsOf: box.plist, encoding: .utf8)
     #expect(text.contains("<key>\(HelperIdentity.machServiceName)</key>"))
     #expect(text.contains("<string>\(HelperIdentity.helperIdentifier)</string>"))
-    #expect(box.plist.path.hasSuffix("/" + HelperIdentity.systemDaemonPlistPath.split(separator: "/").last!))
-    #expect(box.helper.lastPathComponent == HelperIdentity.helperExecutableName)
+    #expect(box.plist.lastPathComponent == HelperIdentity.systemDaemonPlistPath.split(separator: "/").last.map(String.init))
+    #expect(box.helperCopy.lastPathComponent == HelperIdentity.privilegedHelperPath.split(separator: "/").last.map(String.init))
+    #expect(box.helperDir.lastPathComponent == "PrivilegedHelperTools" && HelperIdentity.privilegedHelperPath.hasPrefix("/Library/PrivilegedHelperTools/"))
+    // The requirement the script enforces is the one the app enforces on the helper.
+    let source = try String(contentsOf: Self.script, encoding: .utf8)
+    #expect(source.contains("REQUIREMENT='\(HelperIdentity.requirementForHelper)'"))
   }
 
   @Test func runningItAgainIsIdempotent() throws {
     let box = try Sandbox()
     defer { box.tearDown() }
     _ = try box.run()
-    let first = try Data(contentsOf: box.plist)
+    let plistOnce = try Data(contentsOf: box.plist), helperOnce = try Data(contentsOf: box.helperCopy)
     let again = try box.run()
     #expect(again.status == 0)
-    #expect(try Data(contentsOf: box.plist) == first, "byte-identical on reinstall")
+    #expect(try Data(contentsOf: box.plist) == plistOnce && Data(contentsOf: box.helperCopy) == helperOnce)
     #expect(box.launchctlCalls.count == 4)
     #expect(Array(box.launchctlCalls[2...]) == Array(box.launchctlCalls[..<2]), "out then in, both times")
-    let leftovers = try FileManager.default.contentsOfDirectory(atPath: box.daemons.path)
-    #expect(leftovers == ["com.evenscribe.room-recorder.helper.plist"])
+    #expect(try FileManager.default.contentsOfDirectory(atPath: box.daemons.path) == ["\(Self.label).plist"])
+    #expect(try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path) == [Self.label])
   }
 
   @Test func aStalePlistFromAnOlderInstallIsReplaced() throws {
@@ -145,7 +259,7 @@ import Testing
     try FileManager.default.createDirectory(at: box.daemons, withIntermediateDirectories: true)
     try "stale".write(to: box.plist, atomically: true, encoding: .utf8)
     _ = try box.run()
-    #expect(plistValue(box.plist.path, "Program") == box.helper.path)
+    #expect(plistValue(box.plist.path, "Program") == box.helperCopy.path)
   }
 
   @Test func bootoutOfAJobThatIsNotLoadedDoesNotFailTheInstall() throws {
@@ -162,7 +276,7 @@ import Testing
     let result = try box.run()
     #expect(result.status == 0, "the recorder app is the product")
     #expect(result.output.contains("bootstrap system") && result.output.contains("failed"))
-    #expect(FileManager.default.fileExists(atPath: box.plist.path), "the plist is in place for the next boot")
+    #expect(FileManager.default.fileExists(atPath: box.plist.path) && FileManager.default.fileExists(atPath: box.helperCopy.path))
   }
 
   @Test func noHelperBinaryMeansNoDaemon() throws {
@@ -170,7 +284,7 @@ import Testing
     defer { box.tearDown() }
     let result = try box.run()
     #expect(result.status == 0)
-    #expect(!FileManager.default.fileExists(atPath: box.plist.path))
+    #expect(!FileManager.default.fileExists(atPath: box.plist.path) && !FileManager.default.fileExists(atPath: box.helperDir.path))
     #expect(box.launchctlCalls.isEmpty)
   }
 
@@ -184,28 +298,162 @@ import Testing
   @Test func theBundleIsMadeNonWritableForGroupAndOthers() throws {
     let box = try Sandbox()
     defer { box.tearDown() }
-    try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: box.helper.path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: box.bundleHelper.path)
     _ = try box.run()
-    let mode = (try FileManager.default.attributesOfItem(atPath: box.helper.path)[.posixPermissions] as? NSNumber)?.intValue ?? 0
-    #expect(mode & 0o022 == 0)
+    #expect(mode(box.bundleHelper) & 0o022 == 0)
   }
 
   @Test func theTestOverridesAreIgnoredUnlessTheTestFlagIsSet() throws {
-    // Without ETA_POSTINSTALL_TEST=1 the script must use the real paths and ignore the overrides. It is
-    // run here with a nonexistent install location (so it stops at "no app") and a launchctl stub
-    // that would record a call if it were honoured.
     let box = try Sandbox()
     defer { box.tearDown() }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
     process.arguments = [Self.script.path, "pkg", "/nonexistent-\(UUID().uuidString)"]
-    process.environment = ["ETA_LAUNCHCTL": box.stub.path, "ETA_DAEMON_DIR": box.daemons.path, "ETA_SKIP_OWNERSHIP": "1", "PATH": "/usr/bin:/bin"]
+    process.environment = [
+      "ETA_LAUNCHCTL": box.stub.path, "ETA_DAEMON_DIR": box.daemons.path, "ETA_HELPER_DIR": box.helperDir.path,
+      "ETA_CODESIGN": box.codesignStub.path, "ETA_SKIP_OWNERSHIP": "1", "PATH": "/usr/bin:/bin",
+    ]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     try process.run()
     process.waitUntilExit()
     #expect(process.terminationStatus == 1)
     #expect(box.launchctlCalls.isEmpty && !FileManager.default.fileExists(atPath: box.plist.path))
+    #expect(!FileManager.default.fileExists(atPath: box.helperDir.path))
+  }
+}
+
+// MARK: - Rollback to an older pkg (B2), dry-run
+
+@Suite struct RollbackScriptTests {
+  static var script: URL { PostinstallScriptTests.packaging.appendingPathComponent("rollback.sh") }
+  static let label = "com.evenscribe.room-recorder.helper"
+
+  struct Sandbox {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("rollback-\(UUID().uuidString)")
+    var app: URL { base.appendingPathComponent("Applications/EvenScribe Room Recorder.app") }
+    var saved: URL { URL(fileURLWithPath: app.path + ".rollback-saved") }
+    var daemons: URL { base.appendingPathComponent("LaunchDaemons") }
+    var plist: URL { daemons.appendingPathComponent("\(RollbackScriptTests.label).plist") }
+    var helperDir: URL { base.appendingPathComponent("PrivilegedHelperTools") }
+    var helperCopy: URL { helperDir.appendingPathComponent(RollbackScriptTests.label) }
+    var agentPlist: URL { base.appendingPathComponent("agent.plist") }
+    var log: URL { base.appendingPathComponent("calls.log") }
+    var pkg: URL { base.appendingPathComponent("older.pkg") }
+
+    init(installerFails: Bool = false, withAgent: Bool = true) throws {
+      let fm = FileManager.default
+      try fm.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+      try "NEWER".write(to: app.appendingPathComponent("Contents/marker"), atomically: true, encoding: .utf8)
+      try fm.createDirectory(at: daemons, withIntermediateDirectories: true)
+      try fm.createDirectory(at: helperDir, withIntermediateDirectories: true)
+      try "plist".write(to: plist, atomically: true, encoding: .utf8)
+      try "helper".write(to: helperCopy, atomically: true, encoding: .utf8)
+      if withAgent { try "agent".write(to: agentPlist, atomically: true, encoding: .utf8) }
+      try "pkg".write(to: pkg, atomically: true, encoding: .utf8)
+      for (name, body) in [
+        ("launchctl", "echo \"launchctl $*\" >> '\(log.path)'"),
+        ("pkgutil", "echo \"pkgutil $*\" >> '\(log.path)'"),
+        // The installer stub records whether the NEWER app is still on disk when it runs: it must not be.
+        ("installer", "echo \"installer $* app_present=$([ -e '\(app.path)' ] && echo yes || echo no) daemon_plist=$([ -e '\(plist.path)' ] && echo yes || echo no) helper_copy=$([ -e '\(helperCopy.path)' ] && echo yes || echo no)\" >> '\(log.path)'\nexit \(installerFails ? 1 : 0)"),
+      ] {
+        let url = base.appendingPathComponent(name)
+        try "#!/bin/sh\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+      }
+    }
+
+    func run(arguments: [String]? = nil) throws -> (status: Int32, output: String) {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = [RollbackScriptTests.script.path] + (arguments ?? [pkg.path])
+      process.environment = [
+        "ETA_ROLLBACK_TEST": "1", "ETA_APP": app.path, "ETA_DAEMON_DIR": daemons.path, "ETA_HELPER_DIR": helperDir.path,
+        "ETA_LAUNCHCTL": base.appendingPathComponent("launchctl").path, "ETA_INSTALLER": base.appendingPathComponent("installer").path,
+        "ETA_PKGUTIL": base.appendingPathComponent("pkgutil").path, "ETA_CONSOLE_UID": "501",
+        "ETA_AGENT_PLIST": agentPlist.path, "PATH": "/usr/bin:/bin",
+      ]
+      let pipe = Pipe()
+      process.standardOutput = pipe
+      process.standardError = pipe
+      try process.run()
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    var calls: [String] {
+      ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+    func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
+    func tearDown() { try? FileManager.default.removeItem(at: base) }
+  }
+
+  @Test func theNewerAppIsGoneBeforeTheOlderPkgIsInstalled() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0, "\(result.output)")
+    let calls = box.calls
+    #expect(calls == [
+      "launchctl bootout gui/501/com.evenscribe.room-recorder",
+      "launchctl bootout system/\(Self.label)",
+      "pkgutil --forget com.evenscribe.room-recorder.pkg",
+      "installer -pkg \(box.pkg.path) -target / app_present=no daemon_plist=no helper_copy=no",
+      "launchctl bootstrap gui/501 \(box.agentPlist.path)",
+    ], "order matters: this is the whole point of the script")
+    #expect(!box.exists(box.app) && !box.exists(box.saved) && !box.exists(box.plist) && !box.exists(box.helperCopy))
+  }
+
+  @Test func aFailedOlderInstallPutsTheNewerAppBackSoTheRoomIsNeverWithoutOne() throws {
+    let box = try Sandbox(installerFails: true)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 1)
+    #expect(box.exists(box.app) && !box.exists(box.saved))
+    #expect(try String(contentsOf: box.app.appendingPathComponent("Contents/marker"), encoding: .utf8) == "NEWER")
+    #expect(result.output.contains("WITHOUT the root helper"))
+    #expect(box.calls.last == "launchctl bootstrap gui/501 \(box.agentPlist.path)", "the agent is started again")
+  }
+
+  @Test func noAgentPlistMeansItSaysWhatToDoInsteadOfGuessing() throws {
+    let box = try Sandbox(withAgent: false)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("install-launch-agent"))
+    #expect(!box.calls.contains { $0.contains("bootstrap gui") })
+  }
+
+  @Test func itRefusesWithoutAPkgAndTouchesNothing() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    #expect(try box.run(arguments: []).status == 1)
+    #expect(try box.run(arguments: ["/nonexistent.pkg"]).status == 1)
+    #expect(box.calls.isEmpty && box.exists(box.app) && box.exists(box.plist) && box.exists(box.helperCopy))
+  }
+
+  @Test func itRefusesToRunOverAnEarlierSavedApp() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    try FileManager.default.createDirectory(at: box.saved, withIntermediateDirectories: true)
+    #expect(try box.run().status == 1)
+    #expect(box.calls.isEmpty && box.exists(box.app))
+  }
+
+  @Test func withoutTheTestFlagItWantsRoot() throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [Self.script.path, "/tmp/x.pkg"]
+    process.environment = ["PATH": "/usr/bin:/bin"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    try process.run()
+    let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    process.waitUntilExit()
+    if getuid() != 0 {
+      #expect(process.terminationStatus == 1 && out.contains("as root"))
+    }
   }
 }
 
@@ -215,13 +463,20 @@ import Testing
   final class Fake: HelperDaemonService, @unchecked Sendable {
     var status: String
     var registerCalls = 0
+    var unregisterCalls = 0
     var failure: Error?
+    var unregisterFailure: Error?
     init(_ status: String, failure: Error? = nil) { self.status = status; self.failure = failure }
     var registrationName: String { status }
     func register() throws {
       registerCalls += 1
       if let failure { throw failure }
       status = "enabled"
+    }
+    func unregister() throws {
+      unregisterCalls += 1
+      if let unregisterFailure { throw unregisterFailure }
+      status = "notRegistered"
     }
   }
   static func hello(ok: Bool) -> () -> HelperResponse? {
@@ -300,27 +555,88 @@ import Testing
   }
 }
 
-// MARK: - The updater must not leave a user-owned helper under a root daemon
+// MARK: - A stale BTM registration of the same label is removed once, in launchd mode only
 
-@Suite struct UpdaterRootOwnershipTests {
+@Suite struct StaleRegistrationTests {
+  private func run(_ service: HelperModeProbeTests.Fake, passes: Int, logs: inout [String]) -> [HelperBootstrap.Probe] {
+    var state = HelperRegistrationState()
+    var local: [String] = []
+    let probes = (0..<passes).map { _ in
+      HelperBootstrap.probe(
+        systemPlistExists: { true }, service: service, hello: HelperModeProbeTests.hello(ok: true),
+        openSettings: {}, state: &state, log: { local.append($0) })
+    }
+    logs = local
+    return probes
+  }
+
+  @Test func anEnabledOrApprovalPendingRegistrationIsUnregisteredExactlyOnce() {
+    for status in ["enabled", "requiresApproval"] {
+      let service = HelperModeProbeTests.Fake(status)
+      var logs: [String] = []
+      _ = run(service, passes: 5, logs: &logs)
+      #expect(service.unregisterCalls == 1, "\(status)")
+      #expect(service.registerCalls == 0)
+      #expect(logs.filter { $0.contains("removed a stale SMAppService registration") }.count == 1)
+    }
+  }
+
+  @Test func nothingToRemoveMeansNothingIsCalled() {
+    for status in ["notRegistered", "notFound"] {
+      let service = HelperModeProbeTests.Fake(status)
+      var logs: [String] = []
+      _ = run(service, passes: 3, logs: &logs)
+      #expect(service.unregisterCalls == 0 && service.registerCalls == 0, "\(status)")
+    }
+  }
+
+  @Test func aRefusedUnregisterIsLoggedAndNotRetriedAndTheModeIsStillLaunchd() {
+    let service = HelperModeProbeTests.Fake("enabled")
+    service.unregisterFailure = NSError(domain: "D", code: 9, userInfo: [NSLocalizedDescriptionKey: "refused"])
+    var logs: [String] = []
+    let probes = run(service, passes: 4, logs: &logs)
+    #expect(service.unregisterCalls == 1)
+    #expect(logs.contains { $0.contains("could not remove the stale SMAppService registration") && $0.contains("code=9") })
+    #expect(probes.allSatisfy { $0.mode == "launchd" && $0.registration == "enabled" })
+  }
+
+  @Test func theSMAppServicePathNeverUnregisters() {
+    let service = HelperModeProbeTests.Fake("notRegistered")
+    var state = HelperRegistrationState()
+    _ = HelperBootstrap.probe(
+      systemPlistExists: { false }, service: service, hello: HelperModeProbeTests.hello(ok: true),
+      openSettings: {}, state: &state, log: { _ in })
+    #expect(service.unregisterCalls == 0 && service.registerCalls == 1)
+  }
+}
+
+// MARK: - The updater is back on, and cannot reach the root helper copy
+
+@Suite struct UpdaterWithRootHelperCopyTests {
   let home = URL(fileURLWithPath: "/Users/room")
   let app = URL(fileURLWithPath: "/Applications/EvenScribe Room Recorder.app")
 
-  @Test func theUpdaterIsOffWhileTheRootDaemonRunsTheHelperFromTheBundle() {
-    #expect(RoomEngine.updaterBundle(bundleURL: app, homeDirectory: home, fileExists: { _ in true }) == nil)
-    #expect(
-      RoomEngine.updaterBundle(
-        bundleURL: URL(fileURLWithPath: "/Users/room/Applications/EvenScribe Room Recorder.app"),
-        homeDirectory: home, fileExists: { $0 == HelperIdentity.systemDaemonPlistPath }) == nil)
+  @Test func theSystemDaemonPlistNoLongerSwitchesTheUpdaterOff() {
+    var asked: [String] = []
+    let bundle = RoomEngine.updaterBundle(bundleURL: app, homeDirectory: home, fileExists: { asked.append($0); return true })
+    #expect(bundle == app)
+    #expect(!asked.contains("/Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist"), "the rule is gone")
   }
 
-  @Test func theRuleKeysOnTheSystemPlistAndNothingElse() {
-    #expect(RoomEngine.updaterBundle(bundleURL: app, homeDirectory: home, fileExists: { _ in false }) == app)
-    #expect(
-      RoomEngine.updaterBundle(bundleURL: app, homeDirectory: home, fileExists: { $0 == "/some/other.plist" }) == app)
-    // The path asked about is the one the postinstall writes.
-    var asked: [String] = []
-    _ = RoomEngine.updaterBundle(bundleURL: app, homeDirectory: home, fileExists: { asked.append($0); return false })
-    #expect(asked.contains("/Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist"))
+  @Test func theOtherRulesStillHold() {
+    let old = URL(fileURLWithPath: "/Users/room/Applications/EvenScribe Room Recorder.app")
+    #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { _ in false }) == old)
+    #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { $0 == "/Applications/EvenScribe Room Recorder.app" }) == nil)
+    #expect(RoomEngine.updaterBundle(bundleURL: URL(fileURLWithPath: "/tmp/room-recorder"), homeDirectory: home, fileExists: { _ in false }) == nil)
+  }
+
+  @Test func theSwapScriptNamesNothingOfTheRootDaemon() {
+    let script = RoomSwapScript.render(
+      residentBundleURL: app, stagedBundleURL: URL(fileURLWithPath: "/tmp/staged/EvenScribe Room Recorder.app"),
+      rootURL: URL(fileURLWithPath: "/Users/room/Library/Application Support/EvenScribe/RoomRecorder"), version: "0.1.99")
+    for forbidden in ["PrivilegedHelperTools", "LaunchDaemons", "bootstrap system", "bootout system", " system/", "room-recorder.helper"] {
+      #expect(!script.contains(forbidden), "\(forbidden)")
+    }
+    #expect(script.contains("gui/"), "it works the user's agent domain only")
   }
 }

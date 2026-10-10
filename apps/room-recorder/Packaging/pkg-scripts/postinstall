@@ -1,12 +1,20 @@
 #!/bin/sh
 # pkg postinstall, run by the installer as root.
 #
-#  1. A root helper must never execute user-writable code: make the installed bundle root:wheel.
-#  2. Install the privileged helper as a classic SYSTEM LaunchDaemon (0.1.32). This needs no user
-#     approval: it is not an SMAppService item, so macOS shows no Login Items prompt and there is
-#     nothing to click. The job runs the helper inside the installed bundle, offers the same Mach
-#     service the app's XPC client connects to, and is idempotent: running it again (a reinstall or an
-#     upgrade) rewrites the same plist and reloads the job.
+#  1. Make the installed bundle root:wheel.
+#  2. Install the privileged helper as a classic SYSTEM LaunchDaemon (0.1.32). That needs no user
+#     approval: it is not an SMAppService item, so macOS shows no Login Items prompt.
+#
+# ─── THE ROOT DAEMON RUNS A ROOT-ONLY COPY, NOT THE BUNDLE ────────────────────────────────
+# /Applications is `root:admin 775` and room accounts are admin, so any admin process can rename the
+# bundle aside and put its own file at the same path. launchd would then run that file as root.
+# So the helper is COPIED to /Library/PrivilegedHelperTools (root:wheel 755, in a root-owned
+# directory) and the daemon plist's Program points there. The copy keeps its signature. It is
+# verified against the pinned requirement BEFORE it replaces anything, so a bad copy leaves the
+# previous helper and daemon in place.
+#
+# Upgrade = this script again: stage + verify the new copy, bootout, swap it in, rewrite the plist,
+# bootstrap. Idempotent. The self-updater never touches the copy; a helper change ships by pkg only.
 #
 # $2 is the install location the installer was given (/Applications).
 #
@@ -19,44 +27,70 @@
 LABEL="com.evenscribe.room-recorder.helper"
 MACH_SERVICE="com.evenscribe.room-recorder.helper.xpc"
 APP_NAME="EvenScribe Room Recorder.app"
+# Mirrors HelperIdentity.requirementForHelper; a test keeps the two equal.
+REQUIREMENT='identifier "com.evenscribe.room-recorder.helper" and certificate leaf = H"187dd424fb866204111113d60c6f88a21d098edb"'
 
 if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
   INSTALL_LOCATION="${ETA_INSTALL_LOCATION:-/Applications}"
   DAEMON_DIR="${ETA_DAEMON_DIR:-/Library/LaunchDaemons}"
+  HELPER_DIR="${ETA_HELPER_DIR:-/Library/PrivilegedHelperTools}"
   LAUNCHCTL="${ETA_LAUNCHCTL:-/bin/launchctl}"
+  CODESIGN="${ETA_CODESIGN:-/usr/bin/codesign}"
   SKIP_OWNERSHIP="${ETA_SKIP_OWNERSHIP:-0}"
   LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
 else
   INSTALL_LOCATION="${2:-/Applications}"
   DAEMON_DIR="/Library/LaunchDaemons"
+  HELPER_DIR="/Library/PrivilegedHelperTools"
   LAUNCHCTL="/bin/launchctl"
+  CODESIGN="/usr/bin/codesign"
   SKIP_OWNERSHIP=0
   LOG_PATH="/var/log/room-recorder-helper.log"
 fi
 
 APP="$INSTALL_LOCATION/$APP_NAME"
-HELPER="$APP/Contents/MacOS/room-recorder-helper"
+BUNDLE_HELPER="$APP/Contents/MacOS/room-recorder-helper"
+HELPER="$HELPER_DIR/$LABEL"
 PLIST="$DAEMON_DIR/$LABEL.plist"
 
 say() { echo "room-recorder postinstall: $*"; }
+own() { [ "$SKIP_OWNERSHIP" = "1" ] || /usr/sbin/chown root:wheel "$@"; }
 
 [ -d "$APP" ] || { say "no app at $APP"; exit 1; }
 
-# 1. Ownership. The whole bundle, so no file the root daemon runs or loads can be changed by a room user.
-if [ "$SKIP_OWNERSHIP" != "1" ]; then
-  /usr/sbin/chown -R root:wheel "$APP"
-fi
+# 1. The whole bundle, so no file the app or the daemon's installer put there can be changed by a room user.
+[ "$SKIP_OWNERSHIP" = "1" ] || /usr/sbin/chown -R root:wheel "$APP"
 /bin/chmod -R go-w "$APP"
 
 # 2. The system LaunchDaemon.
-if [ ! -x "$HELPER" ]; then
-  say "no helper binary at $HELPER; the daemon is not installed"
+if [ ! -x "$BUNDLE_HELPER" ]; then
+  say "no helper binary at $BUNDLE_HELPER; the daemon is not installed"
   exit 0
 fi
 
+# 2a. Stage the copy in the root-only directory and verify it. Nothing live has been touched yet.
+/bin/mkdir -p "$HELPER_DIR"
+own "$HELPER_DIR"
+/bin/chmod 755 "$HELPER_DIR"
+STAGED="$HELPER.new.$$"
+/bin/rm -f "$STAGED"
+if ! /bin/cp "$BUNDLE_HELPER" "$STAGED"; then
+  say "could not copy the helper to $HELPER_DIR; the daemon is not changed"
+  /bin/rm -f "$STAGED"
+  exit 0
+fi
+own "$STAGED"
+/bin/chmod 755 "$STAGED"
+if ! "$CODESIGN" --verify --strict -R "=$REQUIREMENT" "$STAGED" > /dev/null 2>&1; then
+  say "the helper copy does not satisfy the pinned code-signing requirement; the daemon is not changed"
+  /bin/rm -f "$STAGED"
+  exit 0
+fi
+
+# 2b. The plist, in a temp file, linted.
 TMP="$PLIST.tmp.$$"
 /bin/mkdir -p "$DAEMON_DIR"
-/bin/cat > "$TMP" <<PLIST
+/bin/cat > "$TMP" <<PLIST_END
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -82,23 +116,22 @@ TMP="$PLIST.tmp.$$"
     <string>$LOG_PATH</string>
 </dict>
 </plist>
-PLIST
+PLIST_END
 
 if ! /usr/bin/plutil -lint "$TMP" > /dev/null 2>&1; then
-  say "the generated daemon plist did not lint; the daemon is not installed"
-  /bin/rm -f "$TMP"
+  say "the generated daemon plist did not lint; the daemon is not changed"
+  /bin/rm -f "$TMP" "$STAGED"
   exit 0
 fi
-if [ "$SKIP_OWNERSHIP" != "1" ]; then
-  /usr/sbin/chown root:wheel "$TMP"
-fi
+own "$TMP"
 /bin/chmod 644 "$TMP"
-/bin/mv -f "$TMP" "$PLIST"
 
-# Out, then in. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
+# 2c. Out, swap, in. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
 "$LAUNCHCTL" bootout "system/$LABEL" > /dev/null 2>&1
+/bin/mv -f "$STAGED" "$HELPER"
+/bin/mv -f "$TMP" "$PLIST"
 if "$LAUNCHCTL" bootstrap system "$PLIST"; then
-  say "helper daemon $LABEL loaded"
+  say "helper daemon $LABEL loaded from $HELPER"
 else
   say "launchctl bootstrap system $PLIST failed; the plist is in place and the job loads at the next boot"
 fi

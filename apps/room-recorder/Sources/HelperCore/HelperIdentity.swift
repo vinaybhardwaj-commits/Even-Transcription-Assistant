@@ -16,6 +16,9 @@ public enum HelperIdentity {
   /// Where the pkg's postinstall writes the system LaunchDaemon (0.1.32). Its presence is how the app
   /// knows the helper is a launchd job and must not also be registered through SMAppService.
   public static let systemDaemonPlistPath = "/Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist"
+  /// Where the pkg's postinstall puts the root daemon's own copy of the helper (root:wheel 755, in a
+  /// root-owned directory). The daemon plist's Program points here, never into the app bundle.
+  public static let privilegedHelperPath = "/Library/PrivilegedHelperTools/com.evenscribe.room-recorder.helper"
   public static let helperExecutableName = "room-recorder-helper"
   /// Lowercase SHA-1 of V's signing leaf, the form `codesign -R` and `RoomSelfUpdate` use.
   public static let pinnedLeafSHA1 = "187dd424fb866204111113d60c6f88a21d098edb"

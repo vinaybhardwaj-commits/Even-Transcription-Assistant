@@ -31,12 +31,30 @@ public final class HelperStatusCache: @unchecked Sendable {
 public protocol HelperDaemonService {
   var registrationName: String { get }
   func register() throws
+  /// Removes a registration made through SMAppService (a BTM item); not the launchd job.
+  func unregister() throws
 }
 
 struct SMAppDaemonService: HelperDaemonService {
   var registrationName: String { HelperRegistration.name(HelperRegistration.service.status) }
   func register() throws { try HelperRegistration.service.register() }
+
+  func unregister() throws {
+    // SMAppService offers only an async and a completion-handler form; wait for the handler.
+    let done = DispatchSemaphore(value: 0)
+    let box = UnregisterBox()
+    HelperRegistration.service.unregister { error in
+      box.error = error
+      done.signal()
+    }
+    guard done.wait(timeout: .now() + 10) == .success else { throw HelperUnregisterTimeout() }
+    if let error = box.error { throw error }
+  }
+
+  private final class UnregisterBox: @unchecked Sendable { var error: Error? }
 }
+
+struct HelperUnregisterTimeout: Error, CustomStringConvertible { var description: String { "unregister() did not answer in 10 s" } }
 
 /// App side of TS-H2 #39: register the helper at launch, keep probing it, and send the user to
 /// Login Items when macOS wants approval.
@@ -51,6 +69,8 @@ public struct HelperRegistrationState: Equatable, Sendable {
   /// `register()` calls made so far in this process.
   public var attempts = 0
   public var settingsOpened = false
+  /// A stale SMAppService registration is removed at most once per process (launchd mode only).
+  public var unregisterAttempted = false
   /// The last refusal, as `domain=… code=…: …`; cleared by a register() that is accepted.
   public var lastError: String?
   public init() {}
@@ -150,6 +170,19 @@ public enum HelperBootstrap {
     openSettings: () -> Void, state: inout HelperRegistrationState, log: (String) -> Void
   ) -> Probe {
     if systemPlistExists() {
+      // A room that ran 0.1.31 may hold a BTM registration of the SAME label (register() succeeded
+      // there). Two definitions of one job can collide at boot, so a registration that shows as
+      // enabled or requiresApproval is removed, once. A status of notRegistered/notFound means there
+      // is nothing to remove, and nothing is called.
+      if !state.unregisterAttempted, settled.contains(service.registrationName) {
+        state.unregisterAttempted = true
+        do {
+          try service.unregister()
+          log("helper: removed a stale SMAppService registration of the same label (launchd runs the job now)")
+        } catch {
+          log("helper: could not remove the stale SMAppService registration: \(describe(error))")
+        }
+      }
       let reply = hello()
       let answering = reply?.ok == true
       return Probe(
