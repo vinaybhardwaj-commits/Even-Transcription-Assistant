@@ -14,6 +14,8 @@ const S = vi.hoisted(() => ({
   recordHeartbeat: vi.fn(),
   releaseClaim: vi.fn(),
   signGetUrl: vi.fn(),
+  needsJob: vi.fn(),
+  submitJob: vi.fn(),
 }));
 vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
   ...(await orig<typeof import("@/lib/diarize-nemotron/store")>()),
@@ -22,7 +24,9 @@ vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
   recordIngest: S.recordIngest,
   recordHeartbeat: S.recordHeartbeat,
   releaseClaim: S.releaseClaim,
+  windowNeedsDiarizeJob: S.needsJob,
 }));
+vi.mock("@/lib/jobs/submit", async (orig) => ({ ...(await orig<Record<string, unknown>>()), submitJob: S.submitJob }));
 vi.mock("@/lib/r2", () => ({ signGetUrl: S.signGetUrl }));
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no sql in a route test"); } }));
 
@@ -183,28 +187,63 @@ describe("POST /ingest", () => {
     expect(S.recordIngest).not.toHaveBeenCalled();
   });
 
-  it("passes the validated body, derived counts and payload hash to the store", async () => {
+  it("passes the validated body, derived counts and payload hash to the store, and queues the window's diarize_window job", async () => {
     S.recordIngest.mockResolvedValue({ result: "stored", id: 7, label: "skipped" });
+    S.needsJob.mockResolvedValue(true);
+    S.submitJob.mockResolvedValue({ id: "job_1" });
     const r = await post(okBody);
     expect(r.status).toBe(200);
-    expect(await json(r)).toEqual({ ok: true, result: "stored", id: 7, label: "skipped" });
+    expect(await json(r)).toEqual({ ok: true, result: "stored", id: 7, label: "skipped", job: "submitted" });
     const [b, d, h] = S.recordIngest.mock.calls[0]!;
     expect(b).toMatchObject({ window_id: "bw_fake0001", status: "ok" });
     expect(d).toEqual({ speaker_count: 1, turn_count: 1, speech_ms: 1000, overlap_ms: 0 });
     expect(h).toMatch(/^[0-9a-f]{64}$/);
+    expect(S.submitJob).toHaveBeenCalledTimes(1);
+    expect(S.submitJob.mock.calls[0]![0]).toMatchObject({ kind: "diarize_window", args: { window_id: "bw_fake0001" }, actor: "nemotron_ingest" });
+    expect([...S.submitJob.mock.calls[0]![0].scopes]).toEqual(["invoke"]);
+  });
+
+  it("queues nothing when the window needs no job (already has its room row), and reports a deduped open job", async () => {
+    S.recordIngest.mockResolvedValue({ result: "duplicate" });
+    S.needsJob.mockResolvedValue(false);
+    expect(await json(await post(okBody))).toEqual({ ok: true, result: "duplicate", job: "none" });
+    expect(S.submitJob).not.toHaveBeenCalled();
+    S.needsJob.mockResolvedValue(true);
+    S.submitJob.mockResolvedValue({ id: "job_1", deduped: true });
+    expect(await json(await post(okBody))).toEqual({ ok: true, result: "duplicate", job: "deduped" });
+  });
+
+  it("a stored `failed` answer queues nothing, and does not even ask", async () => {
+    S.recordIngest.mockResolvedValue({ result: "stored", id: 8, label: "skipped" });
+    const failed = { ...okBody, status: "failed", error_code: "decode_failed", turns: [], audio_ms: 0, clip_sha256: null };
+    expect(await json(await post(failed))).toMatchObject({ result: "stored", job: "none" });
+    expect(S.needsJob).not.toHaveBeenCalled();
+    expect(S.submitJob).not.toHaveBeenCalled();
+  });
+
+  it("a held-out / unplaceable window is refused at submit: the answer stays stored, 200 job=refused; any other submit fault is 503 job_submit", async () => {
+    const { JobArgsError } = await import("@/lib/jobs/types");
+    S.recordIngest.mockResolvedValue({ result: "stored", id: 9, label: "skipped" });
+    S.needsJob.mockResolvedValue(true);
+    S.submitJob.mockRejectedValue(new JobArgsError("blind_room_day"));
+    expect(await json(await post(okBody))).toMatchObject({ result: "stored", job: "refused" });
+    S.submitJob.mockRejectedValue(new Error("db down"));
+    const r = await post(okBody);
+    expect(r.status).toBe(503);
+    expect(await json(r)).toEqual({ ok: false, error: "job_submit" });
   });
 
   it.each([
-    [{ result: "duplicate" }, 200],
     [{ result: "failure_recorded", attempts: 2 }, 200],
     [{ result: "no_live_claim" }, 200],
     [{ result: "unknown_window" }, 404],
     [{ result: "conflict" }, 409],
     [{ result: "room_day_mismatch" }, 409],
     [{ result: "blind_room_day" }, 403],
-  ])("store says %j → %i", async (out, status) => {
+  ])("store says %j → %i, and queues nothing", async (out, status) => {
     S.recordIngest.mockResolvedValue(out);
     expect((await post(okBody)).status).toBe(status);
+    expect(S.submitJob).not.toHaveBeenCalled();
   });
 
   it("503 on a store fault", async () => {

@@ -26,27 +26,40 @@ import { FlagValueError } from "@/lib/flags";
 import { lookupSegments, nemotronWindowPayload, pickQuery, type NemotronWindowRow } from "@/lib/diarize-segments";
 
 describe("the engine switch", () => {
-  it("knows nemotron, and the default is still local", () => {
+  it("knows all three engines (history stays legible), and the default is NEMOTRON, not local pyannote", () => {
     expect([...DIARIZE_ENGINES].sort()).toEqual(["local", "nemotron", "pyannoteai"]);
-    expect(diarizeEngine({})).toBe("local");
+    expect(diarizeEngine({})).toBe("nemotron");
+    expect(diarizeEngine({ DIARIZE_ENGINE: "" })).toBe("nemotron");
+    expect(diarizeEngine({ DIARIZE_ENGINE: "   " })).toBe("nemotron");
     expect(diarizeEngine({ DIARIZE_ENGINE: " Nemotron " })).toBe("nemotron");
     expect(() => diarizeEngine({ DIARIZE_ENGINE: "nemotron-3" })).toThrow(DiarizeEngineError);
   });
 
-  it("the push job runs local and pyannoteai, and THROWS on nemotron rather than falling through", () => {
-    expect([...PUSH_ENGINES].sort()).toEqual(["local", "pyannoteai"]);
-    expect(pushEngine({})).toBe("local");
-    expect(pushEngine({ DIARIZE_ENGINE: "pyannoteai" })).toBe("pyannoteai");
-    expect(() => pushEngine({ DIARIZE_ENGINE: "nemotron" })).toThrow(DiarizeEngineError);
-    expect(() => pushEngine({ DIARIZE_ENGINE: "nemotron" })).toThrow(/pull-based/);
-    expect(() => pushEngine({ DIARIZE_ENGINE: "typo" })).toThrow(DiarizeEngineError);
+  it("the room job runs nemotron ONLY: local and pyannoteai are refused by name, a typo throws, nothing falls through", () => {
+    expect([...PUSH_ENGINES]).toEqual(["nemotron"]);
+    expect(pushEngine({})).toBe("nemotron");
+    expect(pushEngine({ DIARIZE_ENGINE: "nemotron" })).toBe("nemotron");
+    for (const v of ["local", "pyannoteai", " PyannoteAI "]) {
+      expect(() => pushEngine({ DIARIZE_ENGINE: v }), v).toThrow(DiarizeEngineError);
+      expect(() => pushEngine({ DIARIZE_ENGINE: v }), v).toThrow(/refused for room diarization/);
+    }
+    expect(() => pushEngine({ DIARIZE_ENGINE: "typo" })).toThrow(/unrecognised value/);
   });
 
-  it("the diarize_window job asks pushEngine, not diarizeEngine", async () => {
+  it("an unrecognised value never echoes the value", () => {
+    const secretish = "sk-not-a-real-key-123";
+    let msg = "";
+    try { diarizeEngine({ DIARIZE_ENGINE: secretish }); } catch (e) { msg = String(e); }
+    expect(msg).not.toContain(secretish);
+    expect(msg).toMatch(/length 21/);
+  });
+
+  it("the diarize_window job asks pushEngine, imports no pyannote.ai client and no local /diarize call", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
-    expect(src).toMatch(/const engine: DiarizeEngine = pushEngine\(\);/);
+    expect(src).toMatch(/pushEngine\(\);/);
     expect(src).not.toMatch(/=\s*diarizeEngine\(\)/);
+    expect(src).not.toMatch(/diarize-pyannoteai|runDiarize|diarizeWindow\b|localLabelEnabled|submitDiarize|pollDiarize/);
   });
 
   it("scribe_diarize_segments passes engine raw, so an overlong value is refused rather than read as absent", async () => {

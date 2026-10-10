@@ -4,8 +4,10 @@
  * Auth: Bearer NEMOTRON_WORKER_TOKEN. 404 `disabled` while DIARIZE_NEMOTRON_SHADOW is off. Body ≤ 1 MB, checked
  * whole by lib/diarize-nemotron/validate.ts before any SQL.
  *
- *   200 { ok, result: "stored", id, label }        new row (label = teacher-label outcome: written | skipped | failed)
- *   200 { ok, result: "duplicate" }                identical re-post; nothing written
+ *   200 { ok, result: "stored", id, label, job }   new row (label = teacher-label outcome: written | skipped | failed;
+ *                                                  job = the diarize_window job it submitted: submitted | deduped | none | refused)
+ *   200 { ok, result: "duplicate", job }           identical re-post; nothing written (job only if a first submit was lost)
+ *   503 { ok:false, error: "job_submit" }          the row is stored but the job could not be queued: re-post, it is idempotent
  *   200 { ok, result: "failure_recorded", attempts } a non-terminal failure; the window will be offered again
  *   200 { ok, result: "no_live_claim" }            a failure from a worker that no longer holds the lease; nothing changes
  *   400 { ok:false, error }                         the first validation failure (a code, never the value)
@@ -16,7 +18,10 @@
  */
 import { NextRequest } from "next/server";
 import { gate, readJson, reply } from "@/lib/diarize-nemotron/http";
-import { recordIngest } from "@/lib/diarize-nemotron/store";
+import { recordIngest, windowNeedsDiarizeJob } from "@/lib/diarize-nemotron/store";
+import { DIARIZE_WINDOW_KIND } from "@/lib/jobs/kinds/diarize-window";
+import { JobArgsError } from "@/lib/jobs/types";
+import { submitJob } from "@/lib/jobs/submit";
 import { checkIngest } from "@/lib/diarize-nemotron/validate";
 
 export const runtime = "nodejs";
@@ -24,6 +29,24 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 15;
 
 const MAX_BODY_CHARS = 1_000_000;
+
+/**
+ * THE TRIGGER (D5): a stored Nemotron answer queues the window's `diarize_window` job — this route never writes
+ * room_diarize_window / room_turn_speaker itself (the job is their one writer). Only `ok` / `empty` answers
+ * queue; the job dedupes on window_id while one is open, and a window that already has an ok / no_speakers row
+ * (pyannote-era history, or this engine's own) is never queued again (windowNeedsDiarizeJob).
+ */
+async function queueDiarize(windowId: string, origin: string): Promise<"submitted" | "deduped" | "none" | "refused"> {
+  if (!(await windowNeedsDiarizeJob(windowId))) return "none";
+  try {
+    const job = await submitJob({ kind: DIARIZE_WINDOW_KIND, args: { window_id: windowId }, actor: "nemotron_ingest", origin, scopes: new Set(["invoke"] as const) });
+    return job.deduped ? "deduped" : "submitted";
+  } catch (e) {
+    // A held-out / unplaceable window is refused at submit: the answer is stored, no job is owed.
+    if (e instanceof JobArgsError) return "refused";
+    throw e;
+  }
+}
 
 export async function POST(req: NextRequest) {
   const shut = gate(req);
@@ -42,6 +65,20 @@ export async function POST(req: NextRequest) {
       case "conflict":
       case "room_day_mismatch":
         return reply(409, { ok: false, error: out.result });
+      case "stored":
+      case "duplicate": {
+        // a stored `failed` row is not an answer; "duplicate" re-checks, so a lost first submit is rescued by a re-post
+        let job: Awaited<ReturnType<typeof queueDiarize>> = "none";
+        if (v.body.status !== "failed") {
+          try {
+            job = await queueDiarize(v.body.window_id, req.nextUrl.origin);
+          } catch (e) {
+            console.warn("[nemotron] job submit failed:", e instanceof Error ? e.name : "error", `window=${v.body.window_id}`);
+            return reply(503, { ok: false, error: "job_submit" });
+          }
+        }
+        return reply(200, { ok: true, ...out, job });
+      }
       default:
         return reply(200, { ok: true, ...out });
     }

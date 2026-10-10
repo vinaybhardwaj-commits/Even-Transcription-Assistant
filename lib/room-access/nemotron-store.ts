@@ -257,3 +257,65 @@ export async function recordHeartbeat(workerId: string, payload: Record<string, 
     ON CONFLICT (worker_id) DO UPDATE SET last_seen_at = now(), payload = EXCLUDED.payload
   `;
 }
+
+export type NemotronResult = {
+  window_id: string;
+  room_day_id: string;
+  status: "ok" | "empty";
+  model: string;
+  model_rev: string;
+  config_hash: string;
+  machine: string;
+  audio_ms: number;
+  turns: Array<[number, number, string]>;
+};
+
+/**
+ * The window's newest stored Nemotron answer that has something to say (`ok` or `empty`; a `failed` row is
+ * not an answer). The diarize_window job reads this; it is the only thing the job needs from the shadow store.
+ */
+export async function loadNemotronResult(windowId: string): Promise<NemotronResult | null> {
+  const rows = (await sql`
+    SELECT window_id, room_day_id, status, model, model_rev, config_hash, machine, audio_ms, turns_json
+      FROM diarize_nemotron_window
+     WHERE window_id = ${windowId}::text AND status IN ('ok', 'empty')
+     ORDER BY received_at DESC, id DESC
+     LIMIT 1
+  `) as Array<Record<string, unknown>>;
+  const r = rows[0];
+  if (!r) return null;
+  const turns = Array.isArray(r.turns_json) ? (r.turns_json as Array<[number, number, string]>) : [];
+  return {
+    window_id: String(r.window_id),
+    room_day_id: String(r.room_day_id),
+    status: r.status === "empty" ? "empty" : "ok",
+    model: String(r.model),
+    model_rev: String(r.model_rev),
+    config_hash: String(r.config_hash),
+    machine: String(r.machine),
+    audio_ms: Number(r.audio_ms),
+    turns,
+  };
+}
+
+/** The room diarize row's state, and which engine wrote it (timing_json.engine.name; null for a row that predates provenance), or null when there is no row. */
+export async function roomDiarizeRow(windowId: string): Promise<{ state: string; engine: string | null } | null> {
+  const rows = (await sql`
+    SELECT state, timing_json->'engine'->>'name' AS engine FROM room_diarize_window WHERE window_id = ${windowId}::text LIMIT 1
+  `) as Array<{ state: string; engine: string | null }>;
+  return rows[0] ? { state: rows[0].state, engine: rows[0].engine } : null;
+}
+
+/**
+ * Does this window still need its diarize job? Yes when Nemotron has answered (`ok` / `empty`) and the room
+ * diarize row is absent or `failed` (recordDiarizeWindow replaces a failed row). An `ok` / `no_speakers` row —
+ * a row written by another engine (pyannote era) or by this one — means NO: nothing queues it again (D4).
+ */
+export async function windowNeedsDiarizeJob(windowId: string): Promise<boolean> {
+  const rows = (await sql`
+    SELECT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = ${windowId}::text AND n.status IN ('ok', 'empty')) AS answered,
+           (SELECT d.state FROM room_diarize_window d WHERE d.window_id = ${windowId}::text) AS state
+  `) as Array<{ answered: boolean; state: string | null }>;
+  const r = rows[0];
+  return !!r && r.answered === true && (r.state === null || r.state === "failed");
+}

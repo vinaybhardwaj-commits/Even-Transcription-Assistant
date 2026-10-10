@@ -1,5 +1,9 @@
 /**
- * /api/admin/diarize-windows — ENQUEUE room diarization. It writes nothing itself.
+ * /api/admin/diarize-windows — RETIRED (10 Oct 2026): a no-op that answers "retired: nemotron ingest drives
+ * diarize_window". Room diarization is triggered by /api/diarize/nemotron/ingest. The cron entry stays in
+ * vercel.json for now (to be removed in a later slice); the text below is the history of what this route did.
+ *
+ * (was) ENQUEUE room diarization. It writes nothing itself.
  *
  * Per eligible window (closed, grid-aligned, with a room_day and a joined clip, not yet diarized
  * and not already queued) this submits a `diarize_window` job and returns the job refs. The job is
@@ -79,7 +83,7 @@ async function run(req: NextRequest, actor: string) {
       `diarize enqueue had ${result.errors.length} failure(s): scanned=${result.scanned} enqueued=${result.enqueued.length} — an empty list here is NOT "nothing eligible"`,
     );
   }
-  return respondOk({ enabled: result.enabled, scanned: result.scanned, jobs: result.enqueued, exhausted: result.exhausted });
+  return respondOk({ enabled: result.enabled, scanned: result.scanned, jobs: result.enqueued, exhausted: result.exhausted, note: result.note });
 }
 
 export async function GET(req: NextRequest) {

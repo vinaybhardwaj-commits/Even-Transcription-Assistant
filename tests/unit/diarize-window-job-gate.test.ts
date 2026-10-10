@@ -14,9 +14,10 @@ const H = vi.hoisted(() => ({
   vadCalls: [] as number[],
   vadReply: { ok: true, spans: [{ start_ms: 0, end_ms: 4000 }] } as unknown,
   recorded: [] as Array<Record<string, unknown>>,
+  // what the nemotron path stores for the two turns below: the speaker index, plus the derived overlap flag
   segments: [
-    { start_ms: 0, end_ms: 5000, speaker_idx: 0 },
-    { start_ms: 5000, end_ms: 9000, speaker_idx: 1 },
+    { start_ms: 0, end_ms: 5000, speaker_idx: 0, overlap: false },
+    { start_ms: 5000, end_ms: 9000, speaker_idx: 1, overlap: false },
   ],
 }));
 
@@ -34,13 +35,27 @@ vi.mock("@/lib/stt/diarize-window", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    // The real gate logic runs inside the real diarizeWindow; only the service and the write are faked.
+    // The real gate logic runs inside the real finishDiarizeWindow; only the stored answer, the embed call and the write are faked.
     recordDiarizeWindow: async (row: Record<string, unknown>) => { H.recorded.push(row); },
     repairStaleDiarizeSegments: async () => ({ repaired: false }),
   };
 });
+// the room job is nemotron-only: its turns come from the stored answer, the Mini is asked only for embeddings, and the
+// local /diarize must never be reached
 vi.mock("@/lib/diarize", () => ({
-  runDiarize: async () => ({ ok: true, result: { speakers: [], transcript_segments: H.segments }, timing: null }),
+  runDiarize: async () => { throw new Error("the room job reached the local /diarize"); },
+}));
+vi.mock("@/lib/room-access/nemotron-store", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  roomDiarizeRow: async () => null,
+  loadNemotronResult: async () => ({
+    window_id: "bw_1", room_day_id: "rd_1", status: "ok", model: "m", model_rev: "r", config_hash: "h", machine: "box", audio_ms: 900000,
+    turns: [[0, 5000, "spk0"], [5000, 9000, "spk1"]],
+  }),
+}));
+vi.mock("@/lib/diarize-embed", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  embedSpeakers: async () => ({ ok: true, speakers: [], latencyMs: 1 }),
 }));
 vi.mock("@/lib/stt/speech-gate", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -88,7 +103,7 @@ describe("F1 — the drain path asks the VAD, and stores what it answered", () =
     const ok = H.recorded.find((r) => r.state !== "failed");
     const segs = ok!.segments as Array<Record<string, unknown>>;
     expect(segs).toEqual(H.segments);
-    for (const s of segs) expect(Object.keys(s).sort()).toEqual(["end_ms", "speaker_idx", "start_ms"]);
+    for (const s of segs) expect(Object.keys(s).sort()).toEqual(["end_ms", "overlap", "speaker_idx", "start_ms"]);
   });
 
   it("R5 — carries WHICH refusal it was: empty is not the same as unreachable", async () => {

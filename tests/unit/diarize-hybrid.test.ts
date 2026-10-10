@@ -1,6 +1,11 @@
 /**
  * The hybrid (pyannote.ai turns + Mini embeddings), the teacher labels, and the level gate.
  *
+ * RETIRED 10 Oct 2026 (pyannote is gone from production): every case that drove the job's pyannote.ai /
+ * local-comparison / level-gate path was removed with that path. What stays is the PURE half (span choice,
+ * embedding merge, attributionFor, judgeLevels, label store, spend counts). The job's identity logic —
+ * embed → match → turn rows — is proven for nemotron in tests/unit/nemo-primary-pg.test.ts.
+ *
  * The three things most likely to be wrong, and what each test is defending:
  *
  *  1. IDENTITY MUST BE EARNED. `attribution: "voiceprint"` may only appear when embeddings really
@@ -191,85 +196,8 @@ describe("mergeEmbeddings — only ever adds", () => {
   });
 });
 
-// ── 3. the hybrid end to end ─────────────────────────────────────────────────────────────────
-describe("the hybrid stores pyannote.ai turns with this system's identities", () => {
-  beforeEach(() => { process.env.DIARIZE_ENGINE = "pyannoteai"; });
-
-  it("embeds the speakers and stores a voiceprint attribution it EARNED", async () => {
-    turnsRow = [{ source_ref: "t1", start_ms: 2_000, end_ms: 5_000 }];
-    const out = await runStep("pyannote_poll", pollProgress);
-    expect(out.kind).toBe("done");
-    const embed = fetchCalls.find((c) => c.url.includes("/embed_speakers"));
-    expect(embed, "the Mini was asked for embeddings").toBeTruthy();
-    expect(storedEngine()).toMatchObject({ name: "pyannoteai", attribution: "voiceprint", model: "precision-4-fake" });
-    if (out.kind !== "done") throw new Error("x");
-    expect(out.result.speakers_embedded).toBe(2);
-  });
-
-  it("the WIRE carries the longest span per speaker and the summed total — the Mini's order depends on it", async () => {
-    // longestSpanPerSpeaker is pinned as a function above; this pins what actually crosses the
-    // HTTP boundary. The Mini orders its greedy match by total_speech_sec, so a wrong span or a
-    // wrong total does not fail — it names a different clinician.
-    await runStep("pyannote_poll", pollProgress);
-    const embed = fetchCalls.find((c) => c.url.includes("/embed_speakers"))!;
-    const form = embed.body as FormData;
-    const sent = JSON.parse(String(form.get("speakers")));
-    expect(sent).toEqual([
-      { idx: 0, start_s: 1, end_s: 9, total_speech_sec: 8 },      // SPEAKER_A, first to speak
-      { idx: 1, start_s: 10, end_s: 12, total_speech_sec: 2 },    // SPEAKER_B
-    ]);
-    // The threshold travels too — never the service's own stricter default.
-    expect(String(form.get("batch_threshold"))).toBe("0.65");
-    // AND THE CENTROIDS ACTUALLY CROSS THE WIRE. Without this, `centroids_offered: 1` could sit
-    // on a row whose request carried an empty list — the attribution bug one layer down, claiming
-    // a comparison against something that was never sent.
-    const wire = JSON.parse(String(form.get("clinician_centroids")));
-    expect(wire).toHaveLength(1);
-    expect(wire[0]).toMatchObject({ clinician_id: DOC.id, centroid_base64: "AAAA" });
-  });
-
-  it("the stored speakers carry embedding_base64, so speaker-calibration keeps its input", async () => {
-    await runStep("pyannote_poll", pollProgress);
-    const ins = sqlCalls.find((c) => /INSERT INTO room_diarize_window/.test(c.text))!;
-    const speakersJson = String(ins.values.find((v) => typeof v === "string" && v.includes("embedding_base64")));
-    expect(speakersJson).toContain("EMB0");
-    expect(speakersJson).toContain("EMB1");
-  });
-
-  it("a matched speaker reaches room_turn_speaker as a CLINICIAN, not no_match", async () => {
-    turnsRow = [{ source_ref: "t1", start_ms: 2_000, end_ms: 5_000 }];
-    await runStep("pyannote_poll", pollProgress);
-    const turn = sqlCalls.find((c) => /INSERT INTO room_turn_speaker/.test(c.text))!;
-    expect(turn.values).toContain(DOC.id);
-    expect(turn.values).toContain("clinician");
-  });
-
-  it("WHEN THE MINI IS UNREACHABLE the attribution is 'none' and the reason is recorded", async () => {
-    server.embedOk = false;
-    const out = await runStep("pyannote_poll", pollProgress);
-    expect(out.kind).toBe("done");
-    // "none" is the honest word: nothing was compared. It must never read as "nobody matched".
-    expect(storedEngine()).toMatchObject({ attribution: "none", embed_error: "embed_failed" });
-    if (out.kind !== "done") throw new Error("x");
-    expect(out.result.embed_error).toBe("embed_failed");
-    expect(out.result.speakers_embedded).toBe(0);
-  });
-
-  it("an embed answer with every embedding null is also 'none' — zero compared is zero", async () => {
-    server.embedBody = { ok: true, speakers: [{ idx: 0, embedding_base64: null }, { idx: 1, embedding_base64: null }] };
-    await runStep("pyannote_poll", pollProgress);
-    expect(storedEngine()).toMatchObject({ attribution: "none" });
-  });
-
-  it("the window is still stored when embeddings fail — the segmentation is not lost", async () => {
-    server.embedOk = false;
-    await runStep("pyannote_poll", pollProgress);
-    expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(true);
-  });
-});
-
 // ── 3b. attribution is earned on BOTH arms ──────────────────────────────────────────────────
-describe("attribution is earned, on the local arm too", () => {
+describe("attribution is earned — both halves", () => {
   it("attributionFor needs BOTH halves: something to compare, and something to compare against", async () => {
     const { attributionFor } = await import("@/lib/stt/diarize-window");
     expect(attributionFor([{ embedding_base64: "E" }], 1)).toBe("voiceprint");
@@ -282,47 +210,6 @@ describe("attribution is earned, on the local arm too", () => {
     expect(attributionFor([{ embedding_base64: "" }], 1)).toBe("none");
   });
 
-  it("LOCAL with an enrolled voiceprint and an embedding earns 'voiceprint'", async () => {
-    const out = await runStep("diarize");                    // engine unset = local
-    expect(out.kind).toBe("done");
-    expect(storedEngine()).toMatchObject({ name: "local", attribution: "voiceprint", centroids_offered: 1 });
-  });
-
-  it("LOCAL WITH NO ENROLLED VOICEPRINTS reports 'none' — the matcher compared against nothing", async () => {
-    // /diarize still runs its own matcher, but loadClinicianCentroids() returns [] when no active
-    // clinician has a voiceprint, so every turn lands no_match having been compared to nobody.
-    // Claiming "voiceprint" here is the same conflation the pyannote arm was written to close.
-    voicePrintRows = [];
-    await runStep("diarize");
-    expect(storedEngine()).toMatchObject({ name: "local", attribution: "none", centroids_offered: 0 });
-  });
-
-  it("LOCAL with centroids but no embedding back reports 'none'", async () => {
-    localOverride.result = {
-      speakers: [{ idx: 0, label: "S1", type: "other" }],     // no embedding_base64
-      transcript_segments: [{ start_ms: 0, end_ms: 3000, speaker_idx: 0 }],
-      overlap_windows: [], aggregates: {}, model_versions: {},
-    };
-    await runStep("diarize");
-    expect(storedEngine()).toMatchObject({ attribution: "none" });
-  });
-
-  it("THE HYBRID WITH NO ENROLLED VOICEPRINTS is 'none' even though embeddings came back", async () => {
-    // The hole on my own arm, found while fixing the Refuter's: counting embeddings alone claims
-    // an attribution on a day when nobody is enrolled.
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    voicePrintRows = [];
-    await runStep("pyannote_poll", pollProgress);
-    expect(storedEngine()).toMatchObject({ name: "pyannoteai", attribution: "none", centroids_offered: 0 });
-  });
-
-  it("the provenance carries the EVIDENCE for its own claim", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    await runStep("pyannote_poll", pollProgress);
-    const e = storedEngine();
-    expect(e.centroids_offered).toBe(1);
-    expect(e.attribution).toBe("voiceprint");
-  });
 });
 
 // ── 4. the level gate ────────────────────────────────────────────────────────────────────────
@@ -372,22 +259,6 @@ describe("the level gate stops a paid call only on evidence", () => {
     expect(v.verdict).toBe("silent");
   });
 
-  it("a flat level log skips the paid call and never contacts pyannote.ai", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    levelRows = Array.from({ length: 60 }, (_, i) => ({
-      sampled_at: new Date(i * 15_000).toISOString(), peak: 0, avg: null, zero_ratio: null,
-      session_open: true, tape_advancing: true, samples: 1,
-    }));
-    const out = await runStep("diarize");
-    expect(out.kind).toBe("done");
-    if (out.kind !== "done") throw new Error("x");
-    expect(out.result.skipped).toBe("silent_window");
-    expect(out.result.audio_seconds_sent).toBe(0);
-    // A window nothing ran on compared nothing; the row must not inherit a claim.
-    expect(storedEngine()).toMatchObject({ attribution: "none", audio_seconds_sent: 0 });
-    expect(fetchCalls.filter((c) => c.url.includes("/v1/diarize"))).toHaveLength(0);
-  });
-
   // ── THE DECISION, not the value. `unknown` is pinned as a RETURN of judgeLevels by the tests
   // above; these pin what the JOB DOES with it. ETA-Refuter's L1: `=== "silent"` mutated to
   // `!== "has_sound"` passed 91/91, because the two fail-safe tests below are guarded by `if (rd)`
@@ -396,71 +267,6 @@ describe("the level gate stops a paid call only on evidence", () => {
   // Each asserts the gate WAS consulted (a bench_level_sample read happened). Without that the
   // test would pass for the wrong reason the moment the gate stopped running, which is the exact
   // shape of the hole it is closing.
-  it("an UNKNOWN verdict still diarizes — a window we could not judge is not a window we judged silent", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    levelRows = [];                                        // no readings at all -> no_samples
-    const out = await runStep("diarize");
-    expect(sqlCalls.some((c) => /FROM bench_level_sample/.test(c.text)), "the gate really ran").toBe(true);
-    expect(out.kind).toBe("next");
-    expect(fetchCalls.some((c) => c.url.includes("/v1/diarize")), "the paid call was made").toBe(true);
-  });
-
-  it("THIN COVERAGE still diarizes — three quiet readings do not convict a 15-minute window", async () => {
-    // The direction matters: `!== "has_sound"` reads as MORE careful ("only pay when we know there
-    // is sound") and silently stores every thinly-logged window as no_speakers, asserting a
-    // judgement that was never made. It costs data, not money.
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    levelRows = [0, 1, 2].map((i) => ({
-      sampled_at: new Date(i * 15_000).toISOString(), peak: 0, avg: null, zero_ratio: null,
-      session_open: true, tape_advancing: true, samples: 1,
-    }));
-    const out = await runStep("diarize");
-    expect(sqlCalls.some((c) => /FROM bench_level_sample/.test(c.text)), "the gate really ran").toBe(true);
-    expect(out.kind).toBe("next");
-    if (out.kind !== "next") throw new Error("unreachable");
-    expect(out.progress.pyannoteai_job_id).toBeTruthy();
-  });
-
-  it("ONLY 'silent' skips — the three verdicts are not two", async () => {
-    // Named so the next person reading the job sees that `unknown` is a third state with its own
-    // behaviour, not a synonym for either neighbour.
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
-    const win = { start_ms: 0, end_ms: 900_000 };
-    const bucket = (t: number, peak: number) => ({ t_ms: t, peak, avg: null, zero_ratio: null, session_open: true, tape_advancing: true, samples: 1 });
-    const verdicts = new Set([
-      judgeLevels([], win).verdict,
-      judgeLevels([bucket(0, 0)], win).verdict,
-      judgeLevels(Array.from({ length: 60 }, (_, i) => bucket(i * 15_000, 0)), win).verdict,
-      judgeLevels([bucket(0, DEFAULT_ROOM_ENERGY_FLOOR)], win).verdict,
-    ]);
-    expect([...verdicts].sort()).toEqual(["has_sound", "silent", "unknown"]);
-    const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
-    expect(src, "the job skips on the one verdict, never on the absence of another").toContain('level.verdict === "silent"');
-  });
-
-  it("a room_day it cannot read NEVER skips — the gate fails safe, it does not fail the window", async () => {
-    // The window load deliberately no longer joins room_day (that join broke eleven e2e tests on a
-    // schema without the table). The gate resolves it separately and swallows the failure, because
-    // a cost guard that could not read its inputs must not stop a clinical window.
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    roomDayThrows = true;
-    levelRows = Array.from({ length: 60 }, (_, i) => ({
-      sampled_at: new Date(i * 15_000).toISOString(), peak: 0, avg: null, zero_ratio: null,
-      session_open: true, tape_advancing: true, samples: 1,
-    }));
-    const out = await runStep("diarize");
-    expect(out.kind).toBe("next");                       // submitted, not skipped
-    expect(fetchCalls.some((c) => c.url.includes("/v1/diarize"))).toBe(true);
-  });
-
-  it("a room_day row that is missing also never skips", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    roomDayRows = [];
-    const out = await runStep("diarize");
-    expect(out.kind).toBe("next");
-    expect(fetchCalls.some((c) => c.url.includes("/v1/diarize"))).toBe(true);
-  });
 
   it("the core window load does NOT join room_day — one engine's guard cannot break the other's query", () => {
     const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
@@ -479,136 +285,11 @@ describe("the level gate stops a paid call only on evidence", () => {
     expect(src).not.toContain("speechGateEnabled(");
   });
 
-  it("the local engine is NOT level-gated — its behaviour is not ours to change", async () => {
-    levelRows = Array.from({ length: 60 }, (_, i) => ({
-      sampled_at: new Date(i * 15_000).toISOString(), peak: 0, avg: null, zero_ratio: null,
-      session_open: true, tape_advancing: true, samples: 1,
-    }));
-    const out = await runStep("diarize");          // DIARIZE_ENGINE unset = local
-    expect(out.kind).toBe("done");
-    expect(local.calls).toBe(1);
-  });
 });
 
 // ── 5. teacher labels ────────────────────────────────────────────────────────────────────────
 describe("teacher labels", () => {
-  it("are OFF by default — no label row is written", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    await runStep("pyannote_poll", pollProgress);
-    expect(sqlCalls.some((c) => /INSERT INTO diarize_window_label/.test(c.text))).toBe(false);
-  });
-
-  it("ON, the teacher's raw turns are recorded with its DERIVED model and job id", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    await runStep("pyannote_poll", pollProgress);
-    const ins = sqlCalls.find((c) => /INSERT INTO diarize_window_label/.test(c.text))!;
-    expect(ins.values).toContain("pyannoteai");
-    expect(ins.values).toContain("precision-4-fake");
-    expect(ins.values).toContain("job-1");
-    expect(ins.values).toContain(900);
-  });
-
-  it("ON, the hybrid hands off to a local COMPARISON step", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    const out = await runStep("pyannote_poll", pollProgress);
-    expect(out.kind).toBe("next");
-    if (out.kind !== "next") throw new Error("x");
-    expect(out.step).toBe("local_label");
-  });
-
-  it("the comparison run WRITES NO TURNS and no window row — production is untouched", async () => {
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    const out = await runStep("local_label", { run_id: "r1", window_id: "w1", hybrid_result: { window_id: "w1" } });
-    expect(out.kind).toBe("done");
-    expect(local.calls).toBe(1);
-    expect(sqlCalls.some((c) => /INSERT INTO room_turn_speaker/.test(c.text))).toBe(false);
-    expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(false);
-    expect(sqlCalls.some((c) => /INSERT INTO diarize_window_label/.test(c.text))).toBe(true);
-  });
-
-  it("the comparison run is given NO centroids — it is measuring segmentation, not identity", async () => {
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    await runStep("local_label", { run_id: "r1", window_id: "w1" });
-    expect(local.lastCentroids).toEqual([]);
-  });
-
-  it("a failing comparison run NEVER fails the job", async () => {
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    local.ok = false;
-    const out = await runStep("local_label", { run_id: "r1", window_id: "w1", hybrid_result: { window_id: "w1" } });
-    expect(out.kind).toBe("done");
-    if (out.kind !== "done") throw new Error("x");
-    expect(out.result.local_label).toBe("diarize_failed");
-    expect(out.result.window_id).toBe("w1");
-  });
-
-  it("a label write that throws never fails the window", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    const { writeWindowLabel } = await import("@/lib/diarize-labels");
-    vi.spyOn(await import("@/lib/diarize-labels"), "writeWindowLabel").mockRejectedValue(new Error("table gone"));
-    const out = await runStep("pyannote_poll", pollProgress);
-    expect(["done", "next"]).toContain(out.kind);
-    expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(true);
-    expect(writeWindowLabel).toBeDefined();
-  });
-
   // ── DIARIZE_LOCAL_LABEL (Fable, 24 Sep 01:55): the comparison run off, the teacher's labels kept ──
-  it("LOCAL_LABEL=0: the teacher's label AND the clinical row are written, and NO comparison step follows", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    process.env.DIARIZE_LOCAL_LABEL = "0";
-    try {
-      const out = await runStep("pyannote_poll", pollProgress);
-      expect(out.kind).toBe("done");
-      const label = sqlCalls.find((c) => /INSERT INTO diarize_window_label/.test(c.text));
-      expect(label?.values).toContain("pyannoteai");
-      expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(true);
-      expect(local.calls).toBe(0);
-    } finally { delete (process.env as Record<string, string | undefined>).DIARIZE_LOCAL_LABEL; }
-  });
-
-  it("LOCAL_LABEL=0: a job ALREADY PARKED at local_label finishes at once, without touching the Mini", async () => {
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    process.env.DIARIZE_LOCAL_LABEL = "0";
-    try {
-      const out = await runStep("local_label", { run_id: "r1", window_id: "w1", hybrid_result: { window_id: "w1" } });
-      expect(out.kind).toBe("done");
-      if (out.kind !== "done") throw new Error("x");
-      expect(out.result.local_label).toBe("skipped_flag_off");
-      expect(out.result.window_id).toBe("w1");
-      expect(local.calls).toBe(0);
-      expect(sqlCalls.some((c) => /INSERT INTO diarize_window_label/.test(c.text))).toBe(false);
-    } finally { delete (process.env as Record<string, string | undefined>).DIARIZE_LOCAL_LABEL; }
-  });
-
-  it("the clinical row is already written when the hybrid hands off to the comparison step", async () => {
-    process.env.DIARIZE_ENGINE = "pyannoteai";
-    process.env.DIARIZE_TEACHER_LABELS = "1";
-    process.env.DIARIZE_LOCAL_LABEL = "1";
-    try {
-      const out = await runStep("pyannote_poll", pollProgress);
-      expect(out.kind).toBe("next");
-      if (out.kind !== "next") throw new Error("x");
-      expect(out.step).toBe("local_label");
-      expect(sqlCalls.some((c) => /INSERT INTO room_diarize_window/.test(c.text))).toBe(true);
-      expect(local.calls).toBe(0);
-    } finally { delete (process.env as Record<string, string | undefined>).DIARIZE_LOCAL_LABEL; }
-  });
-
-  it("LOCAL_LABEL: unset follows TEACHER_LABELS; set needs teacher labels too; strict on a typo", async () => {
-    const { localLabelEnabled } = await import("@/lib/diarize-engine");
-    const { FlagValueError } = await import("@/lib/flags");
-    expect(localLabelEnabled({})).toBe(false);
-    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1" })).toBe(true);
-    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1", DIARIZE_LOCAL_LABEL: "0" })).toBe(false);
-    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1", DIARIZE_LOCAL_LABEL: "1" })).toBe(true);
-    expect(localLabelEnabled({ DIARIZE_LOCAL_LABEL: "1" })).toBe(false);
-    expect(localLabelEnabled({ DIARIZE_TEACHER_LABELS: "0", DIARIZE_LOCAL_LABEL: "1" })).toBe(false);
-    expect(() => localLabelEnabled({ DIARIZE_TEACHER_LABELS: "1", DIARIZE_LOCAL_LABEL: "nope" })).toThrow(FlagValueError);
-  });
 
   it("the flag is strict — a typo throws rather than silently not collecting", async () => {
     const { teacherLabelsEnabled } = await import("@/lib/diarize-engine");

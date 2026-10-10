@@ -72,8 +72,9 @@ vi.mock("@/lib/bench-join", async (orig) => ({
 }));
 
 /**
- * The captured /diarize response shape. Two speakers: idx 0 matched to an enrolled clinician
- * (as a real match arrives — clinician_id AND confidence together), idx 1 unmatched.
+ * The room job is NEMOTRON-ONLY (10 Oct 2026): the window's turns come from a stored diarize_nemotron_window row
+ * (seeded by `ensureNemotron`) and the Mini is asked only for EMBEDDINGS (/embed_speakers). Two speakers: idx 0 is
+ * matched to an enrolled clinician (clinician_id AND confidence together, as a real match arrives), idx 1 is not.
  * Embeddings are real 192-float vectors so the stitch's cosine has something to work on.
  */
 const emb = (seed: number) => {
@@ -81,32 +82,32 @@ const emb = (seed: number) => {
   for (let i = 0; i < 192; i += 1) v[i] = Math.sin((i + 1) * seed) * 0.1;
   return Buffer.from(v.buffer).toString("base64");
 };
+/** The window ids the embed seam was called for (one per diarized window). The name is historical: it counted /diarize calls. */
 const DIARIZE_CALLS: string[] = [];
-/** The clinician ids offered to /diarize on each call, in call order. */
+/** The clinician ids offered to the embed call on each call, in call order. */
 const CENTROIDS_SENT: string[][] = [];
-/** Flip to make the service fail, so the harness can prove it notices. `noSpeakers`: a run that ends no_speakers (E25 R13). */
+/** Flip to make the embed service fail; `noSpeakers`: the window's Nemotron answer is `empty` (E25 R13). */
 const SVC = { fail: false, noSpeakers: false };
+/** The local pyannote /diarize must be UNREACHABLE from the room job. */
+const LOCAL_DIARIZE_CALLS: string[] = [];
 vi.mock("@/lib/diarize", () => ({
-  runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string; clinicianCentroids?: Array<{ clinician_id: string }> }) => {
-    DIARIZE_CALLS.push(opts.encounterId);
-    CENTROIDS_SENT.push((opts.clinicianCentroids ?? []).map((c) => c.clinician_id));
-    if (SVC.fail) return { ok: false, error: "service refused", retryable: false, latencyMs: 0 };
-    if (SVC.noSpeakers) return { ok: true, latencyMs: 1_000, result: { speakers: [], transcript_segments: [], overlap_windows: [], aggregates: {}, model_versions: {} } };
+  runDiarize: async (_a: unknown, _c: string, opts: { encounterId: string }) => {
+    LOCAL_DIARIZE_CALLS.push(opts.encounterId);
+    throw new Error("the room job reached the local /diarize");
+  },
+}));
+vi.mock("@/lib/diarize-embed", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  embedSpeakers: async (_a: unknown, _s: unknown, centroids: Array<{ clinician_id: string }>, opts: { label: string }) => {
+    DIARIZE_CALLS.push(opts.label);
+    CENTROIDS_SENT.push(centroids.map((c) => c.clinician_id));
+    if (SVC.fail) return { ok: false, error: "embed_failed", retryable: false };
     return {
-      ok: true, latencyMs: 68_300,
-      result: {
-        // The captured shape. idx 0 is MATCHED (clinician_id and confidence together, as a real
-        // match arrives); idx 1 is not. Speaker 0 holds the first half of the window, 1 the second.
-        speakers: [
-          { idx: 0, label: "Dr", type: "clinician", source: "auto", clinician_id: "doc_fake0001", confidence: 0.82, embedding_base64: emb(1) },
-          { idx: 1, label: "Patient", type: "patient", source: "heuristic", embedding_base64: emb(2) },
-        ],
-        transcript_segments: [
-          { start_ms: 0, end_ms: 450_000, speaker_idx: 0, overlap: false },
-          { start_ms: 450_000, end_ms: 900_000, speaker_idx: 1, overlap: false },
-        ],
-        overlap_windows: [], aggregates: {}, model_versions: {},
-      },
+      ok: true, latencyMs: 1_000,
+      speakers: [
+        { idx: 0, label: "Dr", type: "clinician", source: "auto", clinician_id: "doc_fake0001", confidence: 0.82, embedding_base64: emb(1) },
+        { idx: 1, embedding_base64: emb(2) },
+      ],
     };
   },
 }));
@@ -159,6 +160,9 @@ function schema(): void {
   exec(readFileSync("db/migrations/0097_room_span_emotion_speech.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
   // 0099 verbatim (E24): room_diarize_window.segments_run_id, and the emotion window's diarize_stale state.
   exec(readFileSync("db/migrations/0099_room_diarize_segments_run_id.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  // 0117 + 0140 verbatim: the label table, and the stored Nemotron answers the room job reads.
+  exec(readFileSync("db/migrations/0117_diarize_window_label.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
+  exec(readFileSync("db/migrations/0140_diarize_nemotron.sql", "utf8").replace(/INSERT INTO schema_migrations[\s\S]*?;/g, ""));
 }
 
 /** A 900 s window whose turns leave a clean gap near every 120 s mark, plus one deliberate straddle. */
@@ -194,11 +198,28 @@ beforeAll(() => {
 }, 180_000);
 afterAll(() => { if (HAVE_DOCKER) stopPg(); });
 
+let NEMO_REV = 0;
+/**
+ * What the Nemotron worker would have posted for this window: two speakers, 0-450 s and 450-900 s (or an `empty`
+ * answer under SVC.noSpeakers). A new revision per call, so a re-run reads the newest answer.
+ */
+async function ensureNemotron(windowId: string): Promise<void> {
+  const sql = G.__pgsql;
+  NEMO_REV += 1;
+  const empty = SVC.noSpeakers;
+  const turns = empty ? [] : [[0, 450_000, "spk0"], [450_000, 900_000, "spk1"]];
+  await sql`INSERT INTO diarize_nemotron_window (window_id, room_day_id, model, model_rev, config, config_hash, worker_id, machine, audio_ms,
+              turns_json, speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status)
+            VALUES (${windowId}, 'rd_1', 'nemo-test', ${`rev${NEMO_REV}`}, '{}'::jsonb, 'h', 'w', 'box', 900000,
+                    ${JSON.stringify(turns)}::jsonb, ${empty ? 0 : 2}, ${empty ? 0 : 2}, ${empty ? 0 : 900000}, 0, ${`p${NEMO_REV}`}, ${empty ? "empty" : "ok"})`;
+}
+
 /** Run the job to a terminal state through the real runner, returning the steps it took. */
 async function runJob(id: string, windowId: string): Promise<{ steps: string[]; status: string; result: Record<string, unknown> | null; error: string | null }> {
   const { insertJob, claimJobs } = await import("@/lib/jobs/store");
   const { runOneStep } = await import("@/lib/jobs/runner");
   const sql = G.__pgsql;
+  await ensureNemotron(windowId);
   await insertJob({ id, kind: "diarize_window", args: { window_id: windowId }, actor: "mcp:test" });
   const steps: string[] = [];
   for (let i = 0; i < 10; i += 1) {
@@ -213,8 +234,8 @@ async function runJob(id: string, windowId: string): Promise<{ steps: string[]; 
   return { steps, ...row[0]! };
 }
 
-describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, real postgres, ONE call", () => {
-  it("one step, one /diarize call, rows written and counted, every counter non-zero", async () => {
+describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, real postgres, ONE embed call (nemotron)", () => {
+  it("one step, one embed call, rows written and counted, every counter non-zero", async () => {
     const sql = G.__pgsql;
     DIARIZE_CALLS.length = 0;
     SVC.fail = false;
@@ -222,7 +243,8 @@ describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, rea
 
     // ── THE SHAPE ACTUALLY EXECUTED ────────────────────────────────────────────────────────
     expect(r.steps, "a whole window is ONE step now").toEqual(["(first)"]);
-    expect(DIARIZE_CALLS, "ONE /diarize call for the whole 900 s window").toEqual(["bw_e2e"]);
+    expect(DIARIZE_CALLS, "ONE embed call for the whole 900 s window").toEqual(["bw_e2e"]);
+    expect(LOCAL_DIARIZE_CALLS, "the local pyannote /diarize is never reached from the room job").toEqual([]);
     expect(r.status, `job must reach done; error=${r.error}`).toBe("done");
 
     // ── ROWS, COUNTED ──────────────────────────────────────────────────────────────────────
@@ -256,16 +278,23 @@ describe.skipIf(!HAVE_DOCKER)("C2 e2e — a 900 s window through runOneStep, rea
     expect(unnamed.length, "the unmatched speaker's turns must be recorded as no_match").toBeGreaterThan(0);
   }, 300_000);
 
-  it("FAILS FOR THE RIGHT REASON: a service refusal fails the job and writes nothing", async () => {
+  it("FAILS FOR THE RIGHT REASON: DIARIZE_ENGINE=local is REFUSED by name — the job fails, writes nothing, calls nothing", async () => {
     const sql = G.__pgsql;
     await sql`DELETE FROM room_turn_speaker WHERE window_id = 'bw_e2e'`;
-    SVC.fail = true;
-    const r = await runJob("job_e2e_fail", "bw_e2e");
-    SVC.fail = false;
-    expect(r.status, "a refused /diarize must never read as done").toBe("failed");
-    expect(String(r.error)).toContain("diarize_failed");
+    await sql`DELETE FROM room_diarize_window WHERE window_id = 'bw_e2e'`;
+    process.env.DIARIZE_ENGINE = "local";
+    const calls = DIARIZE_CALLS.length;
+    try {
+      const r = await runJob("job_e2e_fail", "bw_e2e");
+      expect(r.status, "a refused engine must never read as done").toBe("failed");
+      expect(String(r.error)).toContain("diarize_engine_refused");
+      expect(DIARIZE_CALLS.length, "no embed call").toBe(calls);
+      expect(LOCAL_DIARIZE_CALLS).toEqual([]);
+    } finally {
+      delete process.env.DIARIZE_ENGINE;
+    }
     const rows = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_e2e'`) as Array<{ n: number }>;
-    expect(rows[0]!.n, "a failed run writes no spans").toBe(0);
+    expect(rows[0]!.n, "a refused run writes no spans").toBe(0);
   }, 300_000);
 });
 
@@ -389,57 +418,49 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     }
   }, 300_000);
 
-  it("ONE RUN: the route enqueues, the job's write is REJECTED by postgres, and nothing reads as success", async () => {
+  it("ONE RUN: the job's write is REJECTED by postgres, and nothing reads as success", async () => {
     const sql = G.__pgsql;
     SVC.fail = false;
-    process.env.ROOM_DIARIZE_ENABLED = "1";
     await seedWindow("bw_rej", "sess_rej", 4 * WINDOW_MS, true);
     exec(`ALTER TABLE room_turn_speaker ADD CONSTRAINT t_refuse_rej CHECK (window_id <> 'bw_rej');`);
     try {
-      // 1. THE ROUTE — the real handler, on the cron door.
-      const res = await cronGet();
-      expect(res.status, "the enqueue itself succeeded, so the route says so").toBe(200);
-      const body = (await res.json()) as { jobs: Array<{ window_id: string; job_id: string }> };
-      const ref = body.jobs.find((j) => j.window_id === "bw_rej");
-      expect(ref, "the route must return the job ref for the window it queued").toBeTruthy();
+      // THE JOB — through the real runner, where the write is refused by a real constraint.
+      const r = await runJob("job_rej", "bw_rej");
+      expect(r.status, "the rejected write must surface as a FAILED job").toBe("failed");
+      expect(String(r.error)).toMatch(/step_threw|failed/);
 
-      // 2. THE JOB — through the real runner, where the write is refused by a real constraint.
-      await drainQueue("rej");
-      const job = (await sql`SELECT status, error FROM scribe_job WHERE id = ${ref!.job_id}`) as Array<{ status: string; error: string | null }>;
-      expect(job[0]!.status, "the rejected write must surface as a FAILED job").toBe("failed");
-      expect(String(job[0]!.error)).toMatch(/step_threw|failed/);
-
-      // 3. NOTHING reads as success: no spans, and no 'ok' state row for the calibration reader.
+      // NOTHING reads as success: no spans, and no 'ok' state row for the calibration reader.
       const spans = (await sql`SELECT count(*)::int AS n FROM room_turn_speaker WHERE window_id = 'bw_rej'`) as Array<{ n: number }>;
       const okRow = (await sql`SELECT count(*)::int AS n FROM room_diarize_window WHERE window_id = 'bw_rej' AND state = 'ok'`) as Array<{ n: number }>;
       expect(spans[0]!.n).toBe(0);
       expect(okRow[0]!.n, "a window whose spans were refused must not be recorded as diarized").toBe(0);
     } finally {
       exec(`ALTER TABLE room_turn_speaker DROP CONSTRAINT t_refuse_rej;`);
-      delete process.env.ROOM_DIARIZE_ENABLED;
     }
   }, 300_000);
 
-  it("a failed ENQUEUE returns a non-2xx — the route never looks like success when it could not queue", async () => {
+  it("the scheduled enqueue is RETIRED: with the flag ON and an eligible window, the route answers 200, says why, and queues NOTHING", async () => {
     const sql = G.__pgsql;
     process.env.ROOM_DIARIZE_ENABLED = "1";
     await seedWindow("bw_enq", "sess_enq", 5 * WINDOW_MS);
-    exec(`ALTER TABLE scribe_job ADD CONSTRAINT t_refuse_enq CHECK (args->>'window_id' IS DISTINCT FROM 'bw_enq');`);
     try {
+      const before = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;
       const res = await cronGet();
-      expect(res.status, "a refused enqueue must not be a 200").not.toBe(200);
-      const body = (await res.json()) as { error?: { code?: string } };
-      expect(body.error?.code).toBe("PIPELINE_FAILED");
-      const rows = (await sql`SELECT count(*)::int AS n FROM scribe_job WHERE args->>'window_id' = 'bw_enq'`) as Array<{ n: number }>;
-      expect(rows[0]!.n).toBe(0);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { data?: Record<string, unknown> } & Record<string, unknown>;
+      const d = (body.data ?? body) as { jobs: unknown[]; scanned: number; note: string };
+      expect(d.note).toBe("retired: nemotron ingest drives diarize_window");
+      expect(d.jobs).toEqual([]);
+      expect(d.scanned).toBe(0);
+      const after = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;
+      expect(after[0]!.n).toBe(before[0]!.n);
     } finally {
-      exec(`ALTER TABLE scribe_job DROP CONSTRAINT t_refuse_enq;`);
       delete process.env.ROOM_DIARIZE_ENABLED;
     }
   }, 300_000);
 });
 
-describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, the flag refuses to guess, a failed window retries BOUNDED", () => {
+describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, the flag refuses to guess (the enqueue itself is retired)", () => {
   it("AUTH: a bare x-vercel-cron header is 401 and writes nothing; CRON_SECRET and MIGRATION_SECRET are 200", async () => {
     const sql = G.__pgsql;
     process.env.ROOM_DIARIZE_ENABLED = "1";
@@ -497,84 +518,10 @@ describe.skipIf(!HAVE_DOCKER)("C2 pre-merge — the cron door needs a secret, th
       delete process.env.ROOM_DIARIZE_ENABLED;
     }
   }, 300_000);
-
-  it("RETRY: a failed window is re-enqueued until DIARIZE_MAX_ATTEMPTS, every failure is KEPT, and the stuck one is COUNTED", async () => {
-    const sql = G.__pgsql;
-    const { DIARIZE_MAX_ATTEMPTS } = await import("@/lib/stt/diarize-job");
-    expect(DIARIZE_MAX_ATTEMPTS).toBe(3);
-    // Only this test's windows are eligible, so every enqueue below is about them.
-    await sql`UPDATE bench_window SET grid_aligned = false`;
-    await seedWindow("bw_retry", "sess_retry", 7 * WINDOW_MS, true);
-    process.env.ROOM_DIARIZE_ENABLED = "1";
-    SVC.fail = true;
-    try {
-      const attemptsSeen: Array<number | null> = [];
-      for (let round = 1; round <= DIARIZE_MAX_ATTEMPTS; round += 1) {
-        const body = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string; retry_of_attempt: number | null }>; exhausted: number };
-        const job = body.jobs.find((j) => j.window_id === "bw_retry");
-        expect(job, `round ${round}: a failed window with attempts left must be enqueued`).toBeTruthy();
-        attemptsSeen.push(job!.retry_of_attempt);
-        await drainQueue(`retry_${round}`);
-        const row = (await sql`SELECT state, attempts, failure_history FROM room_diarize_window WHERE window_id = 'bw_retry'`) as Array<{ state: string; attempts: number; failure_history: Array<{ attempt: number; error: string }> }>;
-        expect(row[0]!.state).toBe("failed");
-        expect(row[0]!.attempts, `round ${round}`).toBe(round);
-        // THE FAILURE IS PRESERVED, NOT ERASED: each replaced attempt is in the history, in order.
-        expect(row[0]!.failure_history.map((h) => h.attempt)).toEqual(Array.from({ length: round - 1 }, (_, i) => i + 1));
-        for (const h of row[0]!.failure_history) expect(h.error).toBe("service refused");
-      }
-      expect(attemptsSeen, "the response says which attempt each retry follows").toEqual([null, 1, 2]);
-
-      // THE BOUND: attempts used up — not enqueued again, and VISIBLE on the response.
-      const DIARIZE_BEFORE = DIARIZE_CALLS.length;
-      const done = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string }>; exhausted: number };
-      expect(done.jobs.map((j) => j.window_id)).not.toContain("bw_retry");
-      expect(done.exhausted, "a window stuck at the bound is counted, never silent").toBe(1);
-      await drainQueue("retry_after");
-      expect(DIARIZE_CALLS.length, "no fourth /diarize call").toBe(DIARIZE_BEFORE);
-    } finally {
-      SVC.fail = false;
-      delete process.env.ROOM_DIARIZE_ENABLED;
-    }
-  }, 300_000);
-
-  it("RETRY THAT SUCCEEDS: the window becomes ok, keeps its failure history, and is final", async () => {
-    const sql = G.__pgsql;
-    await sql`UPDATE bench_window SET grid_aligned = false`;
-    await seedWindow("bw_retry_ok", "sess_retry_ok", 8 * WINDOW_MS, true);
-    process.env.ROOM_DIARIZE_ENABLED = "1";
-    try {
-      SVC.fail = true;
-      await cronGet(); await drainQueue("rok_1");
-      SVC.fail = false;
-      const body = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string; retry_of_attempt: number | null }> };
-      expect(body.jobs.find((j) => j.window_id === "bw_retry_ok")?.retry_of_attempt).toBe(1);
-      await drainQueue("rok_2");
-      const row = (await sql`SELECT state, attempts, error, failure_history, segments_run_id, last_run_id FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number; error: string | null; failure_history: Array<{ attempt: number; error: string }> }>;
-      expect(row[0]!.state).toBe("ok");
-      expect(row[0]!.attempts).toBe(2);
-      expect(row[0]!.error).toBeNull();
-      expect(row[0]!.failure_history).toHaveLength(1);
-      expect(row[0]!.failure_history[0]!.error, "the earlier failure survives the success").toBe("service refused");
-      // E24 R9: a failed row replaced by a success takes the successful run's segments — and its run id with them.
-      const ids = row[0] as unknown as { segments_run_id: string | null; last_run_id: string | null };
-      expect(ids.segments_run_id, "the retried run is the writer of the segments").toBe(ids.last_run_id);
-      expect(ids.segments_run_id).not.toBeNull();
-      const again = (await (await cronGet()).json()) as { jobs: Array<{ window_id: string }> };
-      expect(again.jobs.map((j) => j.window_id), "an ok window is final").not.toContain("bw_retry_ok");
-      // And the writer itself refuses to replace a final row.
-      const { recordDiarizeWindow } = await import("@/lib/stt/diarize-window");
-      await recordDiarizeWindow({ windowId: "bw_retry_ok", roomDayId: "rd_1", state: "failed", error: "late", speakers: null, segments: null, clipR2Key: null, timing: null, runId: "run_late" });
-      const still = (await sql`SELECT state, attempts FROM room_diarize_window WHERE window_id = 'bw_retry_ok'`) as Array<{ state: string; attempts: number }>;
-      expect(still[0]).toEqual({ state: "ok", attempts: 2 });
-    } finally {
-      SVC.fail = false;
-      delete process.env.ROOM_DIARIZE_ENABLED;
-    }
-  }, 300_000);
 });
 
-describe.skipIf(!HAVE_DOCKER)("C2 merge blocker 3 — only ACTIVE clinicians are offered to /diarize", () => {
-  it("a DISABLED or DELETED clinician's centroid is not sent to /diarize; an active one is", async () => {
+describe.skipIf(!HAVE_DOCKER)("C2 merge blocker 3 — only ACTIVE clinicians are offered to the embed/match call", () => {
+  it("a DISABLED or DELETED clinician's centroid is not sent to the Mini; an active one is", async () => {
     const sql = G.__pgsql;
     await sql`INSERT INTO clinician (id, full_name, status, deleted_at) VALUES
       (${makeFakeClinician(201).id}, ${makeFakeClinician(201).full_name}, 'active', NULL),
@@ -1297,7 +1244,7 @@ async function seedEmotionWindow(id: string, startMs: number, opts: { longRunS?:
   turns.push([`${id}|b2`, 1, after + 9500, after + 12000, "no_match", false, 2500]);
   intervals.push({ start_ms: after + 4000, end_ms: after + 9000, speaker_idx: 1 }, { start_ms: after + 9500, end_ms: after + 12000, speaker_idx: 1 });
   // E24 (0099): the seeded segments were written by the seeding run, unless a case says they are an older run's.
-  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, segments_run_id, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, ${JSON.stringify(intervals)}::jsonb, ${opts.segmentsRunId ?? `run_seed_${id}`}, ${`clips/${id}.webm`}, NULL, NULL, ${`run_seed_${id}`})`;
+  await sql`INSERT INTO room_diarize_window (window_id, room_day_id, state, speakers_json, segments_json, segments_run_id, clip_r2_key, error, timing_json, last_run_id) VALUES (${id}, 'rd_emo', 'ok', '[]'::jsonb, ${JSON.stringify(intervals)}::jsonb, ${opts.segmentsRunId ?? `run_seed_${id}`}, ${`clips/${id}.webm`}, NULL, '{"engine":{"name":"nemotron"}}'::jsonb, ${`run_seed_${id}`})`;
   for (const [ref, spk, s, e, reason, named, overlap] of turns) {
     await sql`INSERT INTO cue (id, room_day_id, type, source, source_ref, payload) VALUES (${`c_${ref}`}, 'rd_emo', 'stt_turn', 'replay', ${ref}, ${JSON.stringify({ start_ms: startMs + s, end_ms: startMs + e, window: { start_ms: startMs, end_ms: startMs + WINDOW_MS } })}::jsonb)`;
     if (named) {
@@ -1506,6 +1453,7 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
       const { insertJob, claimJobs } = await import("@/lib/jobs/store");
       const { runOneStep } = await import("@/lib/jobs/runner");
       SVC.fail = false;
+      await ensureNemotron("bw_emo_chg");
       await insertJob({ id: "job_emo_chg_diarize", kind: "diarize_window", args: { window_id: "bw_emo_chg" }, actor: "mcp:test" });
       for (let i = 0; i < 5; i += 1) {
         const c = (await claimJobs(3, 240_000, `r_chg_${i}`)).find((x) => x.id === "job_emo_chg_diarize");
@@ -1660,6 +1608,7 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     SVC.fail = false;
     const { insertJob, claimJobs } = await import("@/lib/jobs/store");
     const { runOneStep } = await import("@/lib/jobs/runner");
+    await ensureNemotron("bw_emo_stale");
     await insertJob({ id: "job_emo_stale_diarize", kind: "diarize_window", args: { window_id: "bw_emo_stale" }, actor: "mcp:test" });
     for (let i = 0; i < 5; i += 1) {
       const c = (await claimJobs(3, 240_000, `r_stale_${i}`)).find((x) => x.id === "job_emo_stale_diarize");
@@ -1706,6 +1655,7 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     const { insertJob, claimJobs } = await import("@/lib/jobs/store");
     const { runOneStep } = await import("@/lib/jobs/runner");
     const diarize = async (jobId: string) => {
+      await ensureNemotron("bw_emo_once");
       await insertJob({ id: jobId, kind: "diarize_window", args: { window_id: "bw_emo_once" }, actor: "mcp:test" });
       for (let i = 0; i < 5; i += 1) {
         const c = (await claimJobs(3, 240_000, `r_${jobId}_${i}`)).find((x) => x.id === jobId);

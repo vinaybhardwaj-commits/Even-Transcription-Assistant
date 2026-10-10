@@ -1,5 +1,6 @@
 /**
- * The room diarize ENQUEUER (lib/stt/diarize-job.ts), against a mocked database.
+ * The room diarize ENQUEUER (lib/stt/diarize-job.ts), against a mocked database. RETIRED 10 Oct 2026: it is a no-op
+ * now (the Nemotron ingest submits the diarize_window job); what stays proven is the flag parsing and that it does nothing.
  *
  * This used to test a pass that diarized windows inline and wrote three tables. C2 moved the work
  * onto the diarize_window job and deleted the cluster and turn writers, so what is left to prove is
@@ -116,43 +117,26 @@ describe("ROOM_DIARIZE_ENABLED — one name, and the retired one is ignored LOUD
   });
 });
 
-describe("the enqueue", () => {
+describe("the enqueue is RETIRED — the Nemotron ingest drives diarize_window", () => {
   beforeEach(() => { process.env.ROOM_DIARIZE_ENABLED = "1"; });
 
-  it("one diarize_window job per eligible window, with the window id and the caller as actor", async () => {
+  it("with the flag ON it still enqueues NOTHING, does no database work, and says why", async () => {
     responses = [[{ id: "bw_1" }, { id: "bw_2" }]];
     const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
-    expect(r.enqueued).toEqual([{ window_id: "bw_1", job_id: "job_1", retry_of_attempt: null }, { window_id: "bw_2", job_id: "job_2", retry_of_attempt: null }]);
-    expect(submitted.map((s) => s.kind)).toEqual(["diarize_window", "diarize_window"]);
-    expect(submitted[0]!.args).toEqual({ window_id: "bw_1" });
-    expect(submitted[0]!.actor).toBe("cron:test");
+    expect(r).toMatchObject({ enabled: true, scanned: 0, enqueued: [], exhausted: 0, errors: [], note: "retired: nemotron ingest drives diarize_window" });
+    expect(calls, "no scan").toHaveLength(0);
+    expect(submitted, "no job").toHaveLength(0);
   });
 
-  it("the scan means NOT YET DIARIZED or FAILED WITH ATTEMPTS LEFT, and NOT ALREADY QUEUED", async () => {
-    responses = [[]];
-    await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
-    const scan = calls[0]!.text;
-    const { DIARIZE_MAX_ATTEMPTS } = await import("@/lib/stt/diarize-job");
-    expect(scan).toMatch(/d\.window_id IS NULL OR \(d\.state = 'failed' AND d\.attempts < \?\)/);
-    expect(calls[0]!.values).toContain(DIARIZE_MAX_ATTEMPTS);
-    // The behavioural proof of the bound is the real-postgres retry test in c2-e2e-runner.test.ts.
-    // A job does not write its row until it finishes, so without this clause a backlog longer than
-    // one tick would enqueue the same window again every five minutes.
-    expect(scan).toMatch(/j\.kind = 'diarize_window'/);
-    expect(scan).toMatch(/j\.status IN \('queued', 'running'\)/);
+  it("the route answers with the retirement note on both doors' shared path", async () => {
+    const src = codeOf("app/api/admin/diarize-windows/route.ts");
+    expect(src).toMatch(/note: result\.note/);
   });
 
-  it("a DEGRADED READ is recorded, not swallowed — it must not look like 'nothing eligible'", async () => {
-    responses = [new Error("brain pool gone")];
-    const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
-    expect(r.enqueued).toHaveLength(0);
-    expect(r.errors.length, "the required sink is what makes an empty result honest").toBeGreaterThan(0);
-    expect(r.errors[0]).toContain("bench_window scan");
-  });
-
-  it("it WRITES NOTHING — every table has its one writer on the job", () => {
+  it("it WRITES NOTHING, and no longer holds a scan — every table has its one writer on the job", () => {
     const src = codeOf("lib/stt/diarize-job.ts");
     expect(src).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
+    expect(src).not.toMatch(/\bsql`|room_diarize_window|bench_window/);
   });
 });
 
