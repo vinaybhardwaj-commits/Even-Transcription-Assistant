@@ -63,7 +63,7 @@ export async function insertJevDecisions(rows: JevDecisionRow[]): Promise<{ ok: 
         id text, subject_type text, subject_id text, question_id text, prompt_version text,
         model text, answer jsonb, probabilities jsonb, confidence real, latency_ms int, input_tokens int
       )
-      ON CONFLICT (subject_type, subject_id, question_id, prompt_version) DO UPDATE SET
+      ON CONFLICT (subject_type, subject_id, question_id, prompt_version) WHERE question_set_sha256 IS NULL DO UPDATE SET
         model = EXCLUDED.model, answer = EXCLUDED.answer, probabilities = EXCLUDED.probabilities,
         confidence = EXCLUDED.confidence, latency_ms = EXCLUDED.latency_ms, input_tokens = EXCLUDED.input_tokens,
         created_at = now()

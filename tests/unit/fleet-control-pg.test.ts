@@ -316,7 +316,7 @@ beforeEach(async () => {
     it("a queued command that has expired is flipped to 'expired' and never delivered; one issued far in the future is held back", async () => {
       pg.exec(`INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, issued_at, expires_at, nonce, issuer_kind, issuer_id, key_id, signature)
         VALUES ('cmd_old', '${DEV}', '${MACHINE}', 'helper_status', now() - interval '200 seconds', now() - interval '5 seconds', 'n_old', 'operator', 'op', 'fk1', 'sig'),
-               ('cmd_future', '${DEV}', '${MACHINE}', 'helper_status', now() + interval '600 seconds', now() + interval '800 seconds', 'n_fut', 'operator', 'op', 'fk1', 'sig')`);
+               ('cmd_future', '${DEV}', '${MACHINE}', 'wake', now() + interval '600 seconds', now() + interval '800 seconds', 'n_fut', 'operator', 'op', 'fk1', 'sig')`);
       expect((await poll(deviceJwt(DEV, K))).json.commands).toEqual([]);
       expect(await q`SELECT cmd_id, state FROM fleet_commands ORDER BY cmd_id`).toEqual([{ cmd_id: "cmd_future", state: "queued" }, { cmd_id: "cmd_old", state: "expired" }]);
     });

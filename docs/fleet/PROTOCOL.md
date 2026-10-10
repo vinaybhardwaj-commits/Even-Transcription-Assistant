@@ -147,7 +147,7 @@ The helper re-applies the same rule as its local gate `clinic_hours_needs_approv
 A refusal is reported as a result with `outcome:"refused"` and `reason` = the code. The reference implementation is `verifyEnvelope` in `lib/fleet/envelope.ts`.
 
 ### 8.6 Who can queue a command (server side)
-Exactly one route: `POST /api/admin/fleet/commands`, admin cookie only, body `{device_id, verb, params?, approval_ref?, ttl_s?}` (ttl 30..900, default 300). One outstanding command per (device, verb). Every enqueue writes a `fleet_audit` row. Nothing queues automatically.
+Exactly one route: `POST /api/admin/fleet/commands`, admin cookie only, body `{device_id, verb, params?, approval_ref?, ttl_s?}` (ttl 30..900, default 300). One outstanding command per (device, verb), enforced by the database (migration 0151: partial unique index on queued/delivered rows), so parallel requests yield one command and `409 outstanding` for the rest; a command past its TTL stops counting. Every enqueue writes its `fleet_audit` row in the SAME statement as the command (both land or neither does). A delivered command whose TTL passed before its answer can still be answered (`refused/expired`). Nothing queues automatically.
 `GET /api/admin/fleet` (admin) and the MCP view `scribe_kiosks view=helper|commands` are read-only and never expose signatures, nonces, keys or result details.
 
 ### 8.7 Vectors (fixed FAKE key: seed 0x0b x 32; verified by tests/unit/fleet-h4-envelope.test.ts, which also checks them against an independent node script)

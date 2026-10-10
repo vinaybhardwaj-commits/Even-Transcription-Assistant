@@ -40,18 +40,28 @@ export async function windowsStartingIn(roomId: string, dayLo: number, dayHi: nu
 
 // --- scribe_jev_decisions -----------------------------------------------------------------------------------------------------------------
 /** Jev decisions. The held-out NOT EXISTS clauses are gone with the blind rule (V, 10 Oct); this reads jev_decision only, which is what brain_svc is granted (0144). */
-export async function listJevDecisions<T extends Row = Row>(f: { subjectType: string | null; subjectId: string | null; questionId: string | null; promptVersion: string | null; limit: number }) {
+export async function listJevDecisions<T extends Row = Row>(f: {
+  subjectType: string | null; subjectId: string | null; questionId: string | null; promptVersion: string | null; limit: number;
+  questionSetId?: string | null; questionSetSha256?: string | null; mode?: string | null; since?: string | null; mock?: boolean | null;
+}) {
   return query<T>(
     `SELECT id, subject_type, subject_id, question_id, prompt_version, model, answer, probabilities,
-            confidence, latency_ms, input_tokens, created_at
+            confidence, latency_ms, input_tokens, created_at,
+            question_set_id, question_set_version, question_set_sha256, order_variant, band, outcome, mode, mock, lane, call_id, job_id,
+            output_tokens, cost_usd, calibrated_p, evidence
        FROM jev_decision
       WHERE ($1::text IS NULL OR subject_type = $1)
         AND ($2::text IS NULL OR subject_id = $2)
         AND ($3::text IS NULL OR question_id = $3)
         AND ($4::text IS NULL OR prompt_version = $4)
+        AND ($6::text IS NULL OR question_set_id = $6)
+        AND ($7::text IS NULL OR question_set_sha256 = $7)
+        AND ($8::text IS NULL OR mode = $8)
+        AND ($9::timestamptz IS NULL OR created_at >= $9)
+        AND ($10::boolean IS NULL OR mock = $10)
       ORDER BY created_at DESC
       LIMIT $5`,
-    [f.subjectType, f.subjectId, f.questionId, f.promptVersion, f.limit],
+    [f.subjectType, f.subjectId, f.questionId, f.promptVersion, f.limit, f.questionSetId ?? null, f.questionSetSha256 ?? null, f.mode ?? null, f.since ?? null, f.mock ?? null],
   );
 }
 

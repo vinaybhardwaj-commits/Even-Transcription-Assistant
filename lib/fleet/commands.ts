@@ -29,15 +29,29 @@ export async function queueCommand(sql: FleetSql, e: unknown, publicKeys: Record
   if (!dev[0]) return { ok: false, reason: "unknown_device" };
   if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
   if (normalizeHostname(dev[0].machine) !== normalizeHostname(e.machine)) return { ok: false, reason: "machine_mismatch" };
+  // A command that already ran out of time stops being "outstanding" before we insert (0151's partial unique index counts queued/delivered rows).
+  await sql`
+    UPDATE fleet_commands SET state = 'expired'
+     WHERE device_id = ${e.device_id} AND verb = ${e.verb} AND state IN ('queued', 'delivered') AND expires_at <= now()
+  `;
+  // ONE statement: the command row and its audit row land together or not at all (a failing audit insert rolls the command back, so a signed command can never reach a Mac
+  // unaudited). ON CONFLICT DO NOTHING absorbs the three unique keys: cmd_id, (device, nonce) and 0151's one-outstanding-per-(device, verb), even under concurrent enqueues.
   const ins = await sql`
-    INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
-    VALUES (${e.cmd_id}, ${e.device_id}, ${e.machine}, ${e.verb}, ${JSON.stringify(e.params)}::jsonb, ${e.issued_at}::timestamptz, ${e.expires_at}::timestamptz, ${e.nonce}, ${e.issuer.kind}, ${e.issuer.id}, ${e.approval_ref}, ${e.key_id}, ${e.signature})
-    ON CONFLICT DO NOTHING
+    WITH ins AS (
+      INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
+      VALUES (${e.cmd_id}, ${e.device_id}, ${e.machine}, ${e.verb}, ${JSON.stringify(e.params)}::jsonb, ${e.issued_at}::timestamptz, ${e.expires_at}::timestamptz, ${e.nonce}, ${e.issuer.kind}, ${e.issuer.id}, ${e.approval_ref}, ${e.key_id}, ${e.signature})
+      ON CONFLICT DO NOTHING
+      RETURNING cmd_id, machine, verb, approval_ref, issuer_kind, issuer_id
+    )
+    INSERT INTO fleet_audit (actor, action, cmd_id, machine, summary)
+    SELECT issuer_kind || ':' || issuer_id, 'queue', cmd_id, machine, 'verb ' || verb || CASE WHEN approval_ref IS NULL THEN '' ELSE ' (approval_ref given)' END FROM ins
     RETURNING cmd_id
   `;
-  if (ins.length === 0) return { ok: false, reason: "duplicate" };
-  await sql`INSERT INTO fleet_audit (actor, action, cmd_id, machine, summary)
-    VALUES (${`${e.issuer.kind}:${e.issuer.id}`}, 'queue', ${e.cmd_id}, ${e.machine}, ${`verb ${e.verb}${e.approval_ref ? " (approval_ref given)" : ""}`})`;
+  if (ins.length === 0) {
+    // which key did it hit? the same cmd_id / nonce is a duplicate; otherwise a command for this (device, verb) is already outstanding
+    const dup = await sql`SELECT 1 FROM fleet_commands WHERE cmd_id = ${e.cmd_id} OR (device_id = ${e.device_id} AND nonce = ${e.nonce}) LIMIT 1`;
+    return { ok: false, reason: dup.length > 0 ? "duplicate" : "outstanding" };
+  }
   return { ok: true, cmd_id: e.cmd_id, expires_at: e.expires_at };
 }
 
@@ -66,11 +80,8 @@ export async function issueCommand(sql: FleetSql, signer: Signer, i: IssueInput)
   const dev = (await sql`SELECT machine, status FROM fleet_devices WHERE device_id = ${i.device_id}`) as Array<{ machine: string; status: string }>;
   if (!dev[0]) return { ok: false, reason: "unknown_device" };
   if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
-  // one outstanding command per (device, verb): a double click or a retry does not stack work on a Mac
-  const open = await sql`
-    SELECT 1 FROM fleet_commands WHERE device_id = ${i.device_id} AND verb = ${i.verb} AND expires_at > now() AND state IN ('queued', 'delivered') LIMIT 1
-  `;
-  if (open.length > 0) return { ok: false, reason: "outstanding" };
+  // One outstanding command per (device, verb) is enforced by the database (0151's partial unique index, mapped to `outstanding` in queueCommand): a double click,
+  // a retry or six parallel requests cannot stack work on a Mac. There is deliberately no check-then-insert here.
   const env: Envelope = buildSignedEnvelope({ device_id: i.device_id, machine: dev[0].machine, verb: i.verb, params: params as Record<string, unknown>, issuer: i.issuer, approval_ref: approval, ttl_s: ttl, nowMs }, signer);
   return queueCommand(sql, env, publicKeysOf(signer), nowMs);
 }

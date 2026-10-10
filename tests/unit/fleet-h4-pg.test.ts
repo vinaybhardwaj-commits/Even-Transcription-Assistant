@@ -27,6 +27,7 @@ const pg = pgContainer("eta-fleet-h4");
 
 import { signAdminJwt, signDoctorJwt } from "@/lib/auth";
 import { loadSigner } from "@/lib/fleet/signing";
+import { claimCommands } from "@/lib/fleet/poll";
 import { publicKeysOf, verifyEnvelope, type Envelope } from "@/lib/fleet/envelope";
 
 const q = async <T = Record<string, unknown>>(s: TemplateStringsArray, ...v: unknown[]) => (await H.sql(s, ...v)) as T[];
@@ -140,6 +141,62 @@ afterEach(() => { vi.useRealTimers(); });
       pg.exec(`UPDATE fleet_devices SET status = 'revoked' WHERE device_id = '${DEV2}'`);
       expect(await enqueue({ device_id: DEV2, verb: "helper_status" })).toMatchObject({ status: 409, json: { error: "device_revoked" } });
       expect(await enqueue({ device_id: "dev_" + "c".repeat(24), verb: "helper_status" })).toMatchObject({ status: 404, json: { error: "unknown_device" } });
+    });
+
+    it("F1: the command and its audit row are ONE statement — a failing audit insert leaves NO command, the route says 503, and nothing is ever served to the device", async () => {
+      pg.exec(`
+        CREATE OR REPLACE FUNCTION fleet_audit_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit is down'; END $$;
+        CREATE TRIGGER fleet_audit_boom BEFORE INSERT ON fleet_audit FOR EACH ROW EXECUTE FUNCTION fleet_audit_boom();
+      `);
+      try {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        expect(await enqueue({ device_id: DEV, verb: "wake" })).toMatchObject({ status: 503, json: { error: "db" } });
+        expect(await q`SELECT 1 FROM fleet_commands`).toHaveLength(0);
+        expect(await claimCommands(H.sql as never, DEV)).toEqual([]);
+        // and the operator's retry once audit is back is the FIRST and only command (no orphan stacked behind it)
+        pg.exec("DROP TRIGGER fleet_audit_boom ON fleet_audit");
+        expect((await enqueue({ device_id: DEV, verb: "wake" })).status).toBe(200);
+        expect(await q`SELECT 1 FROM fleet_commands`).toHaveLength(1);
+        expect(await q`SELECT 1 FROM fleet_audit`).toHaveLength(1);
+      } finally {
+        pg.exec("DROP TRIGGER IF EXISTS fleet_audit_boom ON fleet_audit; DROP FUNCTION IF EXISTS fleet_audit_boom()");
+      }
+    });
+
+    it("F2: SIX parallel enqueues of the same (device, verb) leave exactly ONE command and ONE audit row; the other five are a clean 409 outstanding", async () => {
+      const rs = await Promise.all(Array.from({ length: 6 }, () => enqueue({ device_id: DEV, verb: "wake" })));
+      expect(rs.filter((r) => r.status === 200)).toHaveLength(1);
+      expect(rs.filter((r) => r.status === 409 && r.json.error === "outstanding")).toHaveLength(5);
+      expect(await q`SELECT 1 FROM fleet_commands WHERE device_id = ${DEV} AND verb = 'wake'`).toHaveLength(1);
+      expect(await q`SELECT 1 FROM fleet_audit WHERE action = 'queue'`).toHaveLength(1);
+      // the same verb for another device, and another verb for the same device, are not blocked
+      const more = await Promise.all([enqueue({ device_id: DEV2, verb: "wake" }), enqueue({ device_id: DEV, verb: "helper_status" })]);
+      expect(more.map((r) => r.status)).toEqual([200, 200]);
+    });
+
+    it("F2: the index counts only queued/delivered — a done command frees its verb; an EXPIRED one (queued past its TTL, or delivered and unanswered) is flipped and frees it too; a late result for the delivered one is still accepted", async () => {
+      const first = await enqueue({ device_id: DEV, verb: "wake" });
+      pg.exec(`UPDATE fleet_commands SET state = 'delivered', delivery_count = 1, expires_at = now() - interval '1 second', issued_at = now() - interval '200 seconds' WHERE cmd_id = '${first.json.cmd_id}'`);
+      expect((await enqueue({ device_id: DEV, verb: "wake" })).status).toBe(200); // the stale delivered one no longer blocks
+      expect((await q<{ state: string }>`SELECT state FROM fleet_commands WHERE cmd_id = ${first.json.cmd_id}`)[0]!.state).toBe("expired");
+      const { recordResult } = await import("@/lib/fleet/results");
+      const late = await recordResult(H.sql as never, DEV, "EXAMPLE-MAC-A", { cmd_id: String(first.json.cmd_id), device_id: DEV, outcome: "refused", reason: "expired", started_at: new Date().toISOString(), finished_at: new Date().toISOString(), detail: {}, upload: null });
+      expect(late).toMatchObject({ ok: true, duplicate: false });
+      // a QUEUED command past its TTL frees the verb as well
+      pg.exec(`UPDATE fleet_commands SET expires_at = now() - interval '1 second', issued_at = now() - interval '200 seconds' WHERE device_id = '${DEV}' AND state = 'queued'`);
+      expect((await enqueue({ device_id: DEV, verb: "wake" })).status).toBe(200);
+      expect(await q`SELECT 1 FROM fleet_commands WHERE device_id = ${DEV} AND state IN ('queued', 'delivered')`).toHaveLength(1);
+      // a DONE command frees it too
+      pg.exec(`UPDATE fleet_commands SET state = 'done' WHERE device_id = '${DEV}' AND state = 'queued'`);
+      expect((await enqueue({ device_id: DEV, verb: "wake" })).status).toBe(200);
+    });
+
+    it("M14/M13: GET /api/admin/fleet refuses a junk cookie and a doctor's cookie; an admin token with an empty admin_id cannot enqueue", async () => {
+      expect((await overview("not.a.jwt")).status).toBe(401);
+      expect((await overview(await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.invalid", slug: "dr-fake" } as never))).status).toBe(401);
+      const empty = await signAdminJwt({ admin_id: "", email: "a@example.invalid" });
+      expect(await enqueue({ device_id: DEV, verb: "wake" }, { cookie: empty })).toMatchObject({ status: 401 });
+      expect(await q`SELECT 1 FROM fleet_commands`).toHaveLength(0);
     });
 
     it("no signing key configured: 503 signer_not_configured and nothing is queued; the secret is not in any response", async () => {

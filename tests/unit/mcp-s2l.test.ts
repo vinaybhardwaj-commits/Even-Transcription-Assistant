@@ -67,13 +67,13 @@ beforeEach(() => {
 });
 
 describe("registration", () => {
-  it("the tools are listed (54 in all), write / read scope, and scribe_health gained aspect=routes", async () => {
+  it("the tools are listed (56 in all), write / read scope, and scribe_health gained aspect=routes", async () => {
     expect(S.CALLABLE_TOOLS.get("scribe_steward_command")!.scope).toBe("write");
     expect(S.CALLABLE_TOOLS.get("scribe_lanes")!.scope).toBe("read");
     const req = new NextRequest("https://x/api/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     const body = (await (await handleMcpRpc(req, { token_id: "t", scopes: new Set(["read"]) } as never)).json()) as { result: { tools: Array<{ name: string; description: string; annotations: Row; inputSchema: Row }> } };
     const t = body.result.tools;
-    expect(t.length).toBe(54);
+    expect(t.length).toBe(56);
     const sc = t.find((x) => x.name === "scribe_steward_command")!;
     expect(sc.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
     expect(sc.description.length).toBeLessThanOrEqual(200);

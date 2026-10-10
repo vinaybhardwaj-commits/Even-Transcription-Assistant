@@ -107,7 +107,7 @@ describe("the closed catalogue", () => {
       ["self_test", {}], ["self_test", { volume_pct: 0 }], ["usb_reseat", { port: "1-2" }], ["restart_recorder", { force: true }], ["pieces_inventory", { since: "2026-10-10T00:00:00.000Z" }], ["wake", {}]];
     for (const [v, p] of ok) expect(paramsValid(v, p), `${v} ${JSON.stringify(p)}`).toBe(true);
     const bad: Array<[string, unknown]> = [["helper_status", { x: 1 }], ["wake", { cmd: "ls" }], ["collect_diag", {}], ["collect_diag", { scope: "all" }], ["collect_diag", { scope: "audio", log_lines: 501 }],
-      ["collect_diag", { scope: "audio", log_lines: 1.5 }], ["collect_diag", { scope: "audio", path: "/etc" }], ["select_audio_input", {}], ["select_audio_input", { device_uid: "" }], ["select_audio_input", { device_uid: "a", input_volume_pct: 101 }],
+      ["collect_diag", { scope: "audio", log_lines: 1.5 }], ["collect_diag", { scope: "audio", path: "/etc" }], ["select_audio_input", {}], ["select_audio_input", { device_uid: "" }], ["select_audio_input", { device_uid: "u".repeat(129) }], ["select_audio_input", { device_uid: "a\u0000b" }], ["select_audio_input", { device_uid: "a", input_volume_pct: 101 }],
       ["select_audio_input", { device_uid: "a", input_volume: 0.5 }], ["restart_recorder", { force: "yes" }], ["pieces_reupload", { since: "yesterday" }], ["usb_reseat", { port: "x".repeat(33) }], ["helper_status", null], ["helper_status", []], ["nope", {}]];
     for (const [v, p] of bad) expect(paramsValid(v, p), `${v} ${JSON.stringify(p)}`).toBe(false);
   });
@@ -191,6 +191,17 @@ describe("the reference verifier: every check, in order", () => {
     expect(verifyEnvelope(make(), ctx({ nonceSeen: () => true, machine: "X" }))).toMatchObject({ reason: "replay" });
     expect(verifyEnvelope(make({ verb: "bash" }), ctx({ machine: "X" }))).toMatchObject({ reason: "machine_mismatch" });
     expect(verifyEnvelope(make({ verb: "bash", params: { a: 1 } }), ctx())).toMatchObject({ reason: "verb_not_allowed" });
+  });
+
+  it("M3: a NON-CANONICAL base64 signature (same 64 bytes, different trailing bits) is refused", () => {
+    const e = make();
+    const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const last = e.signature[85]!;
+    const twin = B64[B64.indexOf(last) ^ 1]!; // differs only in the 4 unused low bits before "=="
+    const forged = e.signature.slice(0, 85) + twin + "==";
+    expect(Buffer.from(forged, "base64").equals(Buffer.from(e.signature, "base64"))).toBe(true); // same bytes
+    expect(forged).not.toBe(e.signature);
+    expect(verifyEnvelope({ ...e, signature: forged }, ctx())).toEqual({ ok: false, reason: "bad_signature" });
   });
 
   it("an envelope with a float in params can carry no valid signature (refused, not rounded)", () => {

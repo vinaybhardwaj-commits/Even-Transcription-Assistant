@@ -30,6 +30,8 @@ import { runNoteSafetyShadowAsync } from "@/lib/jev/note-safety-shadow";
 import { runClinicalRouteAsync } from "@/lib/jev/clinical-route";
 import { argInt, argStr, failSafe as baseFailSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext, type ToolResult } from "../registry";
 import { safeJevErrorMessage } from "@/lib/jev/safe-error";
+import { sql } from "@/lib/db";
+import { jevHealth } from "@/lib/jev/worker/health";
 
 /** registry.failSafe returns the thrown error's message; on the Jev path that message can be provider
  * or DB text (W27.7(a), verdict F2). Same degraded envelope, allowlisted message. */
@@ -158,6 +160,11 @@ const jevDecisions: McpTool = {
       question_id: { type: "string" },
       prompt_version: { type: "string" },
       limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+      question_set_id: { type: "string" },
+      question_set_sha256: { type: "string" },
+      mode: { type: "string", enum: ["bench", "shadow", "live"] },
+      since: { type: "string", description: "ISO timestamp: only rows created at or after it." },
+      mock: { type: "boolean", description: "true = only mock rows, false = only real rows." },
     },
     additionalProperties: false,
   },
@@ -168,7 +175,15 @@ const jevDecisions: McpTool = {
       const questionId = argStr(args, "question_id", 128);
       const promptVersion = argStr(args, "prompt_version", 64);
       const limit = argInt(args, "limit", 100, 1, 500);
-      const r = await listJevDecisions<DecisionRow & Record<string, unknown>>({ subjectType, subjectId, questionId, promptVersion, limit });
+      const mode = argStr(args, "mode", 16);
+      if (mode !== null && mode !== "bench" && mode !== "shadow" && mode !== "live") return { ok: false, error: "mode_invalid", decisions: [] };
+      const since = argStr(args, "since", 40);
+      if (since !== null && Number.isNaN(Date.parse(since))) return { ok: false, error: "since_invalid", decisions: [] };
+      const r = await listJevDecisions<DecisionRow & Record<string, unknown>>({
+        subjectType, subjectId, questionId, promptVersion, limit,
+        questionSetId: argStr(args, "question_set_id", 64), questionSetSha256: argStr(args, "question_set_sha256", 64), mode, since,
+        mock: typeof args.mock === "boolean" ? args.mock : null,
+      });
       return { ok: true, decisions: r.rows };
     }),
 };
@@ -215,4 +230,41 @@ const clinicalRouteReplay: McpTool = {
     }),
 };
 
-export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals, jevDecisions, noteSafetyReplay, clinicalRouteReplay];
+/**
+ * scribe_jev_question_sets (P1.6) — the registry as the DB mirrors it. READ scope. Question wording and option names are in it
+ * (they are not PHI); no state, no transcript, no key. Reads the APP pool, not the brain pool.
+ */
+const jevQuestionSets: McpTool = {
+  name: "scribe_jev_question_sets",
+  description:
+    "READS — the Jev question-set registry: id, version, use, status, content sha, model pin, bands, calibration ref, ratification, and each question's kind, option names, escape options and order. " +
+    "Wording and options only: never state, transcript or text from a subject.",
+  scope: "read",
+  inputSchema: { type: "object", properties: { id: { type: "string" }, status: { type: "string", enum: ["draft", "bench", "shadow", "live", "retired"] } }, additionalProperties: false },
+  handler: async (args: ToolArgs) =>
+    failSafe({ sets: [] as unknown[] }, async () => {
+      const id = argStr(args, "id", 64);
+      const status = argStr(args, "status", 16);
+      const sets = (await sql`
+        SELECT id, version, use, subject_type, state_schema, model_pin, content_sha256, status, bands, calibration_ref, created_by, ratified_by, ratified_at, created_at
+          FROM jev_question_set WHERE (${id}::text IS NULL OR id = ${id}) AND (${status}::text IS NULL OR status = ${status}) ORDER BY id, created_at DESC LIMIT 200`) as Array<Record<string, unknown>>;
+      const qs = sets.length === 0 ? [] : ((await sql`
+        SELECT question_set_id, version, question_id, kind, option_order, gate_question_id, escape_options, question_sha256, options
+          FROM jev_question WHERE question_set_id = ANY(${sets.map((x) => String(x.id))}::text[]) ORDER BY question_set_id, version, question_id`) as Array<Record<string, unknown>>);
+      return {
+        ok: true,
+        sets: sets.map((x) => ({ ...x, questions: qs.filter((q) => q.question_set_id === x.id && q.version === x.version).map(({ question_set_id: _a, version: _b, ...rest }) => rest) })),
+      };
+    }),
+};
+
+/** scribe_jev_health (P1.6) — breaker, budget, flag states, queue, mock share, last error class, drift alerts, per use. READ scope; numbers and closed codes only. */
+const jevHealthTool: McpTool = {
+  name: "scribe_jev_health",
+  description: "READS — Jev worker health per use: flag states (booleans only), live/shadow set versions, breaker state, today's calls/tokens/USD/errors/latency, budget left, queue depth, mock share, last error class, band mix, 24 h error classes, drift alerts. Numbers and closed codes; never text.",
+  scope: "read",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  handler: async () => failSafe({ uses: [] as unknown[] }, async () => ({ ok: true, ...(await jevHealth()) })),
+};
+
+export const JEV_TOOLS: McpTool[] = [jevWindowRun, jevSignals, jevDecisions, jevQuestionSets, jevHealthTool, noteSafetyReplay, clinicalRouteReplay];

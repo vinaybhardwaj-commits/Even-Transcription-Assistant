@@ -71,6 +71,8 @@ function briefs(): Record<string, string> {
     scribe_jev_window_run: "INVOKE scope; submits jev_window for a room-day, persists signal rows; no live-room command. Times UTC.",
     scribe_jev_signals: `${NO_ROOM_READ} Jev window signal rows for a room-day (phase, probabilities); never transcript text.`,
     scribe_jev_decisions: `${NO_ROOM_READ} Jev decision log rows (closed-vocabulary answers); never transcript or state text.`,
+    scribe_jev_question_sets: `${NO_ROOM_READ} Jev question-set registry (wording, options, status, sha, model pin); never subject text.`,
+    scribe_jev_health: `${NO_ROOM_READ} Jev worker health per use: breaker, budget, flags, queue, mock share; numbers and closed codes only.`,
     scribe_note_safety_replay: "INVOKE scope; shadow-evaluates note safety on one encounter's existing note; regenerates no note, shows nothing to clinicians. Times UTC.",
     scribe_clinical_route_replay: "INVOKE scope; classifies each window of a room-day as clinical or not; no live-room command. Times UTC.",
     scribe_room_levels: `${READ_LIVE} ${CAVEATS}`,
