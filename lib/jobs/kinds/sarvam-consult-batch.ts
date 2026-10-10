@@ -45,7 +45,7 @@ export function parseBatchArgs(raw: unknown): BatchArgs {
   return { consult_uids: uids, mode: p.data.mode, english: p.data.english, ...(p.data.num_speakers ? { num_speakers: p.data.num_speakers } : {}) };
 }
 
-type Child = { state: "queued" | "existing" | "refused" | "done" | "failed"; job_id?: string; code?: string };
+type Child = { state: "queued" | "existing" | "refused" | "done" | "failed"; job_id?: string; code?: string; source?: "palimpsest" };
 type Children = Record<string, Child>;
 const FINAL = new Set<Child["state"]>(["existing", "refused", "done", "failed"]);
 
@@ -74,6 +74,7 @@ async function fan(ctx: StepContext, a: BatchArgs): Promise<StepOutcome> {
     const pre = await preflightClip(uid, { mode: a.mode, english: a.english });
     if (!pre.ok) { children[uid] = { state: "refused", code: pre.error }; continue; }
     if (pre.existing) { children[uid] = { state: "existing", job_id: pre.existing.job_id }; continue; }
+    if (pre.reuse) { children[uid] = { state: "existing", source: "palimpsest" }; continue; }
     const { submitJob } = await import("../submit"); // lazy: submit imports the kind registry, which imports this file
     const job = await submitJob({
       kind: SARVAM_TRANSCRIBE_KIND, args: { consult_uid: uid, mode: a.mode, english: a.english, ...(a.num_speakers ? { num_speakers: a.num_speakers } : {}) },

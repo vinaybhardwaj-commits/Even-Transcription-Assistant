@@ -15,9 +15,9 @@ import { sql } from "@/lib/db";
 import { readJob } from "@/lib/jobs/store";
 import { JobArgsError, submitJob, UnknownKindError } from "@/lib/jobs/submit";
 import { errorCodeOf } from "@/lib/jobs/errors";
-import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, existingSummary, parseSarvamTranscribeArgs } from "@/lib/jobs/kinds/sarvam-transcribe";
+import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, existingSummary, parseSarvamTranscribeArgs, reuseSummary } from "@/lib/jobs/kinds/sarvam-transcribe";
 import { SARVAM_CONSULT_BATCH_KIND, parseBatchArgs } from "@/lib/jobs/kinds/sarvam-consult-batch";
-import { preflightClip } from "@/lib/consult-clip";
+import { palimpsestFor, preflightClip } from "@/lib/consult-clip";
 import { consultResultView } from "@/lib/consult-index/result-view";
 import { getIndexRow, latestSync, listIndexDay, listResults } from "@/lib/room-access/consult-index-store";
 import { SARVAM_TRANSLATE_KIND, parseSarvamTranslateArgs } from "@/lib/jobs/kinds/sarvam-translate";
@@ -60,8 +60,10 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
       // a consult clip comes from the consult_index table: not indexed / sealed / voice isolated / palimpsest already has it / audio unreadable are refused here; a result already stored for THIS CUT VERSION is returned, not re-sent
       if (parsed.source === "consult") {
         const pre = await preflightClip(parsed.consult_uid, { mode: parsed.mode, english: parsed.english });
-        if (!pre.ok) return { ok: false, error: pre.error, ...(pre.track ? { track: pre.track } : {}) };
+        if (!pre.ok) return { ok: false, error: pre.error };
         if (pre.existing) return { ok: true, existing: true, job_id: pre.existing.job_id, ...existingSummary(pre.existing), billed: false };
+        // the palimpsest already holds this cut's Sarvam track: it is returned (labelled), Sarvam is not called and nothing is queued
+        if (pre.reuse) return { ok: true, ...reuseSummary(pre.row.consult_uid, pre.row.cut_version, pre.reuse), billed: false };
       }
     } else {
       const parsed = parseSarvamTranslateArgs(raw);
@@ -117,6 +119,28 @@ async function consultClips(args: ToolArgs): Promise<Row> {
   };
 }
 
+/**
+ * No result of our own for this consult: the palimpsest's Sarvam track of THIS cut, labelled source palimpsest (model + revision, counts; text and absolute-UTC segments only with include_text).
+ * If the lookup cannot be made the answer says so (reuse_lookup_unavailable); it is never "no result".
+ */
+async function palimpsestResult(uid: string, row: NonNullable<Awaited<ReturnType<typeof getIndexRow>>>, withText: boolean): Promise<Row> {
+  const pal = await palimpsestFor(row);
+  if ("unavailable" in pal) return { ok: false, error: "reuse_lookup_unavailable" };
+  if (!pal.reuse) return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
+  const { stt, translate } = pal.reuse;
+  const head: Row = {
+    ok: true, consult_uid: uid, source: "palimpsest", cut_version: row.cut_version, current_cut_version: row.cut_version, stale: false, engine: "sarvam-saaras-v3", model_stt: stt?.model ?? null, model_rev: stt?.version ?? null,
+    stt_config_hash: stt?.config_hash ?? null, translate_config_hash: translate?.config_hash ?? null, stt_segments: stt?.segments.length ?? 0, translate_segments: translate?.segments.length ?? 0,
+    english: translate ? "available" : "not_in_palimpsest", clip: { t0_ms: row.t0_ms, t1_ms: row.t1_ms }, billed: false,
+  };
+  if (!withText) return head;
+  const seg = (t: { segments: Array<{ t0_ms: number; t1_ms: number; speaker: string | null; lang: string | null; text: string }> } | null) => (t ? t.segments.map((g) => ({ ...g })) : []);
+  return {
+    ...head, transcript: stt ? stt.segments.map((g) => g.text).join(" ").trim() : "", english_text: translate ? translate.segments.map((g) => g.text).join(" ").trim() : null,
+    segments: seg(stt), english_segments: seg(translate),
+  };
+}
+
 /** consult_result {consult_uid, cut_version?, include_text?}: the stored Sarvam result of a consult (model + revision always; transcript, English and segments with ABSOLUTE UTC times only with include_text). No Sarvam call. */
 async function consultResult(args: ToolArgs): Promise<Row> {
   const uid = argStr(args, "consult_uid", 128);
@@ -126,7 +150,7 @@ async function consultResult(args: ToolArgs): Promise<Row> {
   const asked: string | null = null;
   const results = await listResults(uid);
   const hit = asked ? results.find((r) => r.cut_version === asked) : (results.find((r) => r.cut_version === row.cut_version) ?? results[0]);
-  if (!hit) return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
+  if (!hit) return palimpsestResult(uid, row, argBool(args, "include_text"));
   const head: Row = {
     ok: true, consult_uid: uid, cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english, job_id: hit.job_id,
     model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s, speakers: hit.speaker_count,

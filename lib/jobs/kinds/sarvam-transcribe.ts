@@ -5,7 +5,7 @@
  * V's STANDING RULE (restated 08 Oct ~20:40): only isolated consult audio goes to Sarvam. No other room audio, never whole windows. So the sources are
  *   { encounter_id }  a doctor-recorded encounter (audio production already sends to Sarvam today)         scope "encounter"
  *   { consult_uid }   a clip cut by the CONSULT cutter, resolved through the consult_index table (0150); refusals: consult_not_indexed, consult_sealed, consult_voice_isolated,
- *                     mirror_minutes_missing, already_transcribed, audio_unreadable. A result for the SAME CUT VERSION and options already stored is returned, never re-sent.  scope "consult_clip"
+ *                     mirror_minutes_missing, reuse_lookup_unavailable, audio_unreadable. A live palimpsest sarvam-saaras-v3 track of the SAME CUT is reused (source palimpsest), not re-sent. A result for the SAME CUT VERSION and options already stored is returned, never re-sent.  scope "consult_clip"
  * Room / session arguments (room, from, to, session_id, from_ms, to_ms) are REFUSED with scope_consult_only.
  *
  *   prepare   gateway + cap check; the encounter's audio object, or the consult's index row + clip (an existing result for that cut ends the job here, before any Sarvam call)
@@ -172,12 +172,22 @@ async function prepareConsult(ctx: StepContext, a: Extract<SarvamTranscribeArgs,
   const pre = await preflightClip(a.consult_uid, { mode: a.mode, english: a.english });
   if (!pre.ok) return failWith(jobError(pre.error));
   if (pre.existing) return doneWith(existingSummary(pre.existing));
+  if (pre.reuse) return doneWith(reuseSummary(pre.row.consult_uid, pre.row.cut_version, pre.reuse));
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   return nextStep(STEPS.init, {
     clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", cut_version: pre.row.cut_version, clip_t0_ms: pre.row.t0_ms,
     ...(typeof pre.row.minutes === "number" && Number.isFinite(pre.row.minutes) ? { mirror_minutes: pre.row.minutes } : {}),
   });
+}
+
+/** What a job answers when the palimpsest already holds this cut's Sarvam track: counts and ids only, labelled source palimpsest (no Sarvam call was made, nothing was billed). */
+export function reuseSummary(uid: string, cutVersion: string, r: { stt: { config_hash: string; segments: unknown[]; model: string | null; version: string | null } | null; translate: { config_hash: string; segments: unknown[] } | null }): Record<string, unknown> {
+  return {
+    existing: true, source: "palimpsest", consult_uid: uid, cut_version: cutVersion, engine: "sarvam-saaras-v3", model: r.stt?.model ?? null, model_rev: r.stt?.version ?? null,
+    stt_config_hash: r.stt?.config_hash ?? null, stt_segments: r.stt?.segments.length ?? 0, translate_config_hash: r.translate?.config_hash ?? null, translate_segments: r.translate?.segments.length ?? 0,
+    english: r.translate ? "available" : "not_in_palimpsest",
+  };
 }
 
 /** What a job answers when the cut already has its result: pointers and counts only, flagged `existing` (no Sarvam call was made, nothing was billed). */
