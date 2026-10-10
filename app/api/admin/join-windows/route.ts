@@ -10,14 +10,12 @@
  * SHIPS DARK. Unless NEMOTRON_CLIP_JOIN_ENABLED and DIARIZE_NEMOTRON_SHADOW are both "1" this
  * returns `skipped: "flag_off"` having read nothing.
  *
- * QUIET WINDOW. 07:30-21:30 IST returns `skipped: "clinic_hours"` having read nothing.
- *
  * GET only, Bearer CRON_SECRET only. Ids and counts in the response; no room slugs.
  */
 import { NextRequest } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { respondOk, respondError } from "@/lib/respond";
-import { inClinicHours, joinOnlyWindow, listCliplessWindows } from "@/lib/stt/join-only";
+import { joinOnlyWindow, listCliplessWindows } from "@/lib/stt/join-only";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,8 +27,8 @@ const TIME_BUDGET_MS = 180_000;
 const DEFAULT_BATCH = 6;
 const MAX_BATCH = 12;
 
-/** D15: a live tape, or a bus we cannot read, ends the tick. Never compete with a recording. */
-const STOP_STEPS = new Set(["room_recording", "recording_unknown", "join_service_not_configured"]);
+/** V's ruling (10 Oct): the cutter runs while rooms record (skipRecordingHold), so only an unconfigured service ends the tick. */
+const STOP_STEPS = new Set(["join_service_not_configured"]);
 
 /** Whole-header, constant-time. An empty or unset secret never authorises. */
 function cronAuthorized(req: NextRequest): boolean {
@@ -52,8 +50,6 @@ export async function GET(req: NextRequest) {
   if (process.env.NEMOTRON_CLIP_JOIN_ENABLED !== "1" || process.env.DIARIZE_NEMOTRON_SHADOW !== "1") {
     return respondOk({ skipped: "flag_off" });
   }
-  // CLINIC HOURS, after the flags and before any DB read: the Mini serves the clinic 07:30-21:30 IST.
-  if (inClinicHours(new Date())) return respondOk({ skipped: "clinic_hours" });
 
   const t0 = Date.now();
   const batch = batchSize();
@@ -73,7 +69,7 @@ export async function GET(req: NextRequest) {
       stoppedAt = "time_budget";
       break;
     }
-    const r = await joinOnlyWindow(w.window_id, { includeTranscriptDisabled: true });
+    const r = await joinOnlyWindow(w.window_id, { includeTranscriptDisabled: true, skipRecordingHold: true });
     const key = r.ok ? (r.joined ? "joined" : "already_joined") : r.step;
     steps[key] = (steps[key] ?? 0) + 1;
     if (r.ok) {
