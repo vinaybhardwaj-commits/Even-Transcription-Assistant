@@ -62,14 +62,25 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    `-rw-r--r--`) and the last command must print `pinned-ok`. If `launchctl print` cannot find the
    service, load it by hand:
    `sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`
-   After bootstrapping, the postinstall asks launchd for the job BY NAME and logs every step to
-   `/var/log/evenscribe-room-recorder-install.log`: `grep postinstall /var/log/evenscribe-room-recorder-install.log | tail -20`.
-   A good install ends with `VERIFIED: com.evenscribe.room-recorder.helper is running`. If the job is
-   not loaded it bootstraps ONCE more (after 2 s); if it is loaded but not running it runs
-   `launchctl kickstart system/<label>` (never `-k`). If it still is not there the log ends with
-   `WARNING: ... NOT loaded` or `NOT running`; the app install itself still succeeds, so READ that log
-   after every install. The one-line cure is
-   `sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`.
+   The postinstall does not trust `launchctl` exit codes: `bootout` is asynchronous, and a `bootstrap`
+   fired while the old job is still being removed is refused ("in progress", error 5 or 37) or silently
+   leaves nothing (this is how 0.1.33 rooms ended up with no daemon). So it (1) boots the job out, then
+   asks `launchctl print system/<label>` once a second, up to 10 s, until the job is GONE; (2)
+   bootstraps, and if the job is not there afterwards retries up to 3 more times, 2 s apart; (3) if the
+   job is loaded but not running, runs `launchctl kickstart system/<label>` (never `-k`); (4) requires
+   `state = running` from `launchctl print`. Every step is logged to
+   `/var/log/evenscribe-room-recorder-install.log`:
+   `grep postinstall /var/log/evenscribe-room-recorder-install.log | tail -20`.
+   A good install ends with `VERIFIED: com.evenscribe.room-recorder.helper is running`.
+   **If every try is spent and the job is still not running, the postinstall exits 1 and the installer
+   reports the install as FAILED.** The app and the daemon plist are already on disk at that point, so
+   the failure is not a broken room: the log's last line says the one command that finishes it
+   (`sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`, or
+   `sudo launchctl kickstart system/com.evenscribe.room-recorder.helper` when it is loaded but idle).
+   A line starting `WARNING: ... is running, but no bootstrap succeeded` means an older definition of
+   the job is still running the previous helper code: `sudo launchctl bootout system/<label>` then the
+   bootstrap command. A helper that is missing from the bundle, or a copy that fails the signature check,
+   changes nothing and does NOT fail the install (there is nothing to load; the log says why).
    If the postinstall's log says the copy "does not satisfy the pinned code-signing requirement", it
    changed nothing; the pkg was built wrong, do not use it. Installing the same pkg again is safe: it
    stages and checks a new copy, boots the job out, swaps the copy in, and boots the job back in.

@@ -117,10 +117,14 @@ say "Dry-running the pkg postinstall against the signed payload"
 DRY="$(/usr/bin/mktemp -d)"
 /bin/mkdir -p "${DRY}/apps" "${DRY}/daemons" "${DRY}/helpers"
 /bin/cp -R "$INSTALLED_APP" "${DRY}/apps/"
-/bin/cat > "${DRY}/launchctl" <<'STUB'
+/bin/cat > "${DRY}/launchctl" <<STUB
 #!/bin/sh
-# Just enough of launchd for the postinstall's verification: a job that is loaded and running.
-[ "$1" = "print" ] && echo "state = running"
+# Just enough of launchd for the postinstall's verification: bootstrap loads a running job, bootout removes it.
+case "\$1" in
+  bootout) rm -f "${DRY}/loaded" ;;
+  bootstrap) touch "${DRY}/loaded" ;;
+  print) [ -f "${DRY}/loaded" ] || exit 113; echo "state = running" ;;
+esac
 exit 0
 STUB
 /bin/chmod 755 "${DRY}/launchctl"

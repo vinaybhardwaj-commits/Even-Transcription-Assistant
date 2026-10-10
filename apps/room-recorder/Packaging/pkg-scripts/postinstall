@@ -27,8 +27,10 @@
 #
 # $2 is the install location the installer was given (/Applications).
 #
-# The recorder app is the product; the helper is an addition to it. So a failure to install or load
-# the daemon is reported in the install log and does NOT fail the install (exit 0). A missing app does.
+# EXIT CODES. A missing app, or a daemon that is still not running after every try (see 2c), exits 1 and
+# the installer reports the failure; the app and the plist are already on disk by then, and the log says
+# the one command that finishes the job. A helper that is missing from the bundle, a failed copy or a
+# failed signature check changes nothing and exits 0: there is nothing to load, and the log says why.
 #
 # The ETA_* overrides exist for the dry-run test and are honoured ONLY when ETA_POSTINSTALL_TEST=1,
 # which the installer never sets.
@@ -201,17 +203,31 @@ fi
 own "$TMP"
 /bin/chmod 644 "$TMP"
 
-# 2c. Out, swap, in, VERIFY. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
-"$LAUNCHCTL" bootout "system/$LABEL" > /dev/null 2>&1
-/bin/mv -f "$STAGED" "$HELPER"
-/bin/mv -f "$TMP" "$PLIST"
-say "bootout done; new helper copy and plist are in place"
-
-# A successful `bootstrap` is not proof the job is there: on OPD 5 and OPD 6 (0.1.33) the job was gone
-# right after the install. So the job is asked for, by name, and must say it is running.
+# 2c. Out, WAIT, swap, in, VERIFY. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
+#
+# `bootout` is ASYNCHRONOUS: it returns before the job is gone, and a `bootstrap` issued meanwhile fails
+# ("in progress" / already loaded). On OPD 5 and OPD 6 (0.1.33) the job was not there after the install.
+# So: ask launchd by name until the job is gone (up to 10 s), bootstrap with up to 3 retries, and
+# insist on seeing `state = running` before saying the install worked.
 job_state() { "$LAUNCHCTL" print "system/$LABEL" 2>/dev/null; }
 job_running() { job_state | /usr/bin/grep -q "state = running"; }
 job_loaded() { job_state > /dev/null; }
+
+"$LAUNCHCTL" bootout "system/$LABEL" > /dev/null 2>&1
+waited=0
+while job_loaded && [ "$waited" -lt 10 ]; do
+  "$SLEEP" 1
+  waited=$((waited + 1))
+done
+if job_loaded; then
+  say "WARNING: $LABEL is still loaded $waited s after bootout; continuing anyway"
+else
+  say "bootout complete: $LABEL gone after $waited s"
+fi
+
+/bin/mv -f "$STAGED" "$HELPER"
+/bin/mv -f "$TMP" "$PLIST"
+say "new helper copy and plist are in place"
 
 bootstrap_once() {
   if "$LAUNCHCTL" bootstrap system "$PLIST"; then
@@ -222,23 +238,44 @@ bootstrap_once() {
   return 1
 }
 
-bootstrap_once
-if ! job_loaded; then
-  say "$LABEL is not loaded after bootstrap; retrying bootstrap once"
-  "$SLEEP" 2
-  bootstrap_once
-fi
+# One try plus up to three retries, 2 s apart. The loop ends only when a bootstrap SUCCEEDED and the job
+# is there: a bootstrap that returns 0 but leaves no job is a failure, and so is one that fails while an
+# older definition of the job is still loaded (it would keep running the old code).
+tries=0
+boot_ok=0
+while [ "$tries" -lt 4 ]; do
+  if [ "$tries" -gt 0 ]; then
+    say "$LABEL is not (re)loaded; retry $tries of 3 in 2 s"
+    "$SLEEP" 2
+  fi
+  tries=$((tries + 1))
+  if bootstrap_once && job_loaded; then
+    boot_ok=1
+    break
+  fi
+done
+
 if job_loaded && ! job_running; then
   # Loaded but not running: start it, WITHOUT -k (no kill of anything that is running).
   say "$LABEL is loaded but not running; kickstart (no -k)"
   "$LAUNCHCTL" kickstart "system/$LABEL" > /dev/null 2>&1
   "$SLEEP" 1
 fi
+
 if job_running; then
-  say "VERIFIED: $LABEL is running from $HELPER"
-elif job_loaded; then
-  say "WARNING: $LABEL is loaded but NOT running after kickstart; the app will report notAnswering. Check /var/log/room-recorder-helper.log"
-else
-  say "WARNING: $LABEL is NOT loaded after two bootstraps; the plist is in place and the job loads at the next boot, or run: sudo launchctl bootstrap system $PLIST"
+  if [ "$boot_ok" = "1" ]; then
+    say "VERIFIED: $LABEL is running from $HELPER (bootstrap attempts: $tries)"
+  else
+    say "WARNING: $LABEL is running, but no bootstrap succeeded in $tries attempts: it is the PREVIOUS definition and keeps the old helper code until it restarts. Run: sudo launchctl bootout system/$LABEL; sudo launchctl bootstrap system $PLIST"
+  fi
+  exit 0
 fi
-exit 0
+
+# The only non-zero exit of the daemon step: every try is spent and the job is still not running. The
+# installer reports the failure; the app and the plist are already in place, so the cure is one command.
+if job_loaded; then
+  say "FAILED: $LABEL is loaded but NOT running after kickstart. See /var/log/room-recorder-helper.log. Retry: sudo launchctl kickstart system/$LABEL"
+else
+  say "FAILED: $LABEL is NOT loaded after $tries bootstrap attempts. Retry: sudo launchctl bootstrap system $PLIST"
+fi
+exit 1

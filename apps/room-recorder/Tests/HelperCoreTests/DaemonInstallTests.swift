@@ -46,7 +46,8 @@ import Testing
     init(
       withHelper: Bool = true, withApp: Bool = true, bootoutFails: Bool = false, bootstrapFails: Bool = false,
       codesignFails: Bool = false, helperText: String = "#!/bin/sh\n# v1\n",
-      bootstrapFailures: Int = 0, bootstrapSilentLosses: Int = 0, runsAfter: Runs = .immediately
+      bootstrapFailures: Int = 0, bootstrapSilentLosses: Int = 0, runsAfter: Runs = .immediately,
+      preloaded: Bool = false, bootoutLingers: Int = 0
     ) throws {
       try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
       if withApp {
@@ -66,15 +67,25 @@ import Testing
         echo "$@" >> '\(calls.path)'
         echo "$1 helper=$(cat '\(helperCopy.path)' 2>/dev/null | tr -d '\\n')" >> '\(state.path)'
         D='\(base.path)'
+        # bootout is asynchronous: with a linger count N the job stays visible to the next N `print`s.
+        linger_active() { [ -f "$D/linger" ] && [ "$(cat "$D/linger")" -gt 0 ]; }
         case "$1" in
-          bootout) rm -f "$D/loaded" "$D/running"; exit \(bootoutFails ? 36 : 0) ;;
+          bootout)
+            if [ \(bootoutLingers) -gt 0 ] && [ -f "$D/loaded" ]; then echo \(bootoutLingers) > "$D/linger"
+            else rm -f "$D/loaded" "$D/running"; fi
+            exit \(bootoutFails ? 36 : 0) ;;
           bootstrap)
+            if linger_active; then exit 5; fi
             n=$(cat "$D/bootstrap.count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/bootstrap.count"
             if [ "$n" -le \(failures) ]; then exit 5; fi
             if [ "$n" -le \(failures + bootstrapSilentLosses) ]; then exit 0; fi
             touch "$D/loaded"; [ \(runsNow) = 1 ] && touch "$D/running"; exit 0 ;;
           kickstart) [ -f "$D/loaded" ] && [ \(kickRuns) = 1 ] && touch "$D/running"; exit 0 ;;
           print)
+            if [ -f "$D/linger" ]; then
+              k=$(cat "$D/linger")
+              if [ "$k" -gt 0 ]; then echo $((k - 1)) > "$D/linger"; else rm -f "$D/linger" "$D/loaded" "$D/running"; fi
+            fi
             [ -f "$D/loaded" ] || { echo "Could not find service" >&2; exit 113; }
             if [ -f "$D/running" ]; then echo "state = running"; else echo "state = not running"; fi
             exit 0 ;;
@@ -85,6 +96,10 @@ import Testing
         #!/bin/sh
         echo "$@" >> '\(sleepCalls.path)'
         """.write(to: sleepStub, atomically: true, encoding: .utf8)
+      if preloaded {
+        FileManager.default.createFile(atPath: base.appendingPathComponent("loaded").path, contents: Data())
+        FileManager.default.createFile(atPath: base.appendingPathComponent("running").path, contents: Data())
+      }
       try """
         #!/bin/sh
         echo "$@" >> '\(codesignCalls.path)'
@@ -309,12 +324,12 @@ import Testing
     #expect(box.actions.count == 2 && box.actions[1].hasPrefix("bootstrap system"))
   }
 
-  @Test func aBootstrapThatNeverTakesIsReportedLoudlyButDoesNotFailTheInstall() throws {
+  @Test func aBootstrapThatNeverTakesFailsTheInstallLoudly() throws {
     let box = try Sandbox(bootstrapFails: true)
     defer { box.tearDown() }
     let result = try box.run()
-    #expect(result.status == 0, "the recorder app is the product")
-    #expect(result.output.contains("WARNING") && result.output.contains("NOT loaded after two bootstraps"))
+    #expect(result.status == 1, "every try is spent and the job is not there: the installer must report it")
+    #expect(result.output.contains("FAILED") && result.output.contains("NOT loaded after 4 bootstrap attempts"))
     #expect(result.output.contains("sudo launchctl bootstrap system"), "it tells the operator the one command")
     #expect(FileManager.default.fileExists(atPath: box.plist.path) && FileManager.default.fileExists(atPath: box.helperCopy.path))
   }
@@ -350,14 +365,14 @@ import Testing
     #expect(log.split(separator: "\n").allSatisfy { $0.contains("room-recorder postinstall:") })
   }
 
-  @Test func aBootstrapThatReturnsZeroButLeavesNoJobIsRetriedOnce_theFieldBug() throws {
+  @Test func aBootstrapThatReturnsZeroButLeavesNoJobIsRetried_theFieldBug() throws {
     // OPD 5 and OPD 6 on 0.1.33: the job was gone right after the install.
     let box = try Sandbox(bootstrapSilentLosses: 1)
     defer { box.tearDown() }
     let result = try box.run()
     #expect(result.status == 0)
     #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 2)
-    #expect(result.output.contains("is not loaded after bootstrap; retrying bootstrap once"))
+    #expect(result.output.contains("is not (re)loaded; retry 1 of 3 in 2 s"))
     #expect(result.output.contains("VERIFIED"))
     #expect(box.lines(box.sleepCalls) == ["2"], "a 2 s gap before the retry")
   }
@@ -371,14 +386,15 @@ import Testing
     #expect(result.output.contains("failed"))
   }
 
-  @Test func neverMoreThanTwoBootstrapsAndNeverAKickstartOfAJobThatIsNotLoaded() throws {
-    let box = try Sandbox(bootstrapFailures: 5)
+  @Test func neverMoreThanFourBootstrapsAndNeverAKickstartOfAJobThatIsNotLoaded() throws {
+    let box = try Sandbox(bootstrapFailures: 9)
     defer { box.tearDown() }
     let result = try box.run()
-    #expect(result.status == 0)
-    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 2)
+    #expect(result.status == 1)
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 4, "one try plus three retries, no more")
+    #expect(box.lines(box.sleepCalls) == ["2", "2", "2"], "2 s between tries")
     #expect(!box.launchctlCalls.contains { $0.hasPrefix("kickstart") })
-    #expect(result.output.contains("WARNING: \(Self.label) is NOT loaded"))
+    #expect(result.output.contains("FAILED: \(Self.label) is NOT loaded"))
   }
 
   @Test func aJobLoadedButNotRunningIsKickstartedWithoutDashK() throws {
@@ -395,12 +411,94 @@ import Testing
     let box = try Sandbox(runsAfter: .never)
     defer { box.tearDown() }
     let result = try box.run()
-    #expect(result.status == 0, "the recorder app still installs; the warning is in the install log")
-    #expect(result.output.contains("loaded but NOT running after kickstart"))
+    #expect(result.status == 1, "loaded but never running after the kickstart: the installer must report it")
+    #expect(result.output.contains("FAILED") && result.output.contains("loaded but NOT running after kickstart"))
     #expect(!result.output.contains("VERIFIED"))
     #expect(box.launchctlCalls.filter { $0.hasPrefix("kickstart") }.count == 1, "one kickstart, no loop")
     let log = try String(contentsOf: box.installLog, encoding: .utf8)
     #expect(log.contains("NOT running"))
+  }
+
+  // ─── 0.1.34 R2: bootout is asynchronous; wait for it, retry up to three times, fail only if all fail ───
+
+  @Test func aBootoutThatLingersTwoPollsIsWaitedOutBeforeTheFirstBootstrap() throws {
+    let box = try Sandbox(preloaded: true, bootoutLingers: 2)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("VERIFIED"))
+    #expect(result.output.contains("bootout complete: \(Self.label) gone after 2 s"))
+    #expect(box.lines(box.sleepCalls) == ["1", "1"], "one second per poll, two polls")
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 1, "no bootstrap was fired into a job that was still being removed")
+    #expect(box.actions.first == "bootout system/\(Self.label)")
+  }
+
+  @Test func withoutTheWaitAFreshBootstrapWouldHaveBeenRefusedInProgress() throws {
+    // The stub refuses a bootstrap while the old job is still lingering, as launchd does. The script must
+    // therefore have polled first; this pins that the order bootout -> print... -> bootstrap holds.
+    let box = try Sandbox(preloaded: true, bootoutLingers: 3)
+    defer { box.tearDown() }
+    _ = try box.run()
+    let lines = box.launchctlCalls
+    let firstBootstrap = try #require(lines.firstIndex { $0.hasPrefix("bootstrap") })
+    let prints = lines[..<firstBootstrap].filter { $0.hasPrefix("print ") }.count
+    #expect(prints >= 4, "three lingering polls plus the one that found it gone: \(lines)")
+  }
+
+  @Test func aBootoutThatNeverFinishesIsWaitedForTenSecondsThenTheScriptCarriesOn() throws {
+    let box = try Sandbox(preloaded: true, bootoutLingers: 99)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(box.lines(box.sleepCalls).filter { $0 == "1" }.count >= 10)
+    #expect(result.output.contains("is still loaded 10 s after bootout; continuing anyway"))
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 4, "it still tries, with the retries")
+    // The old job is what is running: say so, do not call it verified.
+    #expect(result.status == 0 && !result.output.contains("VERIFIED") && result.output.contains("PREVIOUS definition"))
+  }
+
+  @Test func threeFailuresThenSuccessTakesOnTheFourthTry() throws {
+    let box = try Sandbox(bootstrapFailures: 3)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("VERIFIED") && result.output.contains("bootstrap attempts: 4"))
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 4)
+    #expect(box.lines(box.sleepCalls) == ["2", "2", "2"])
+  }
+
+  @Test func theFieldBugNeedingMoreThanOneRetryIsStillRecovered() throws {
+    let box = try Sandbox(bootstrapSilentLosses: 2)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("VERIFIED"))
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 3)
+  }
+
+  @Test func silentLossOnEveryTryFailsTheInstallAfterExactlyFourAttempts() throws {
+    let box = try Sandbox(bootstrapSilentLosses: 9)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 1 && result.output.contains("FAILED"))
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 4)
+  }
+
+  @Test func theNonZeroExitLeavesTheFilesInPlaceAndSaysTheOneCommand() throws {
+    let box = try Sandbox(bootstrapFails: true)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 1)
+    #expect(FileManager.default.fileExists(atPath: box.plist.path) && FileManager.default.fileExists(atPath: box.helperCopy.path))
+    #expect(result.output.contains("Retry: sudo launchctl bootstrap system \(box.plist.path)"))
+    let log = try String(contentsOf: box.installLog, encoding: .utf8)
+    #expect(log.contains("FAILED"), "the install log carries it too")
+  }
+
+  @Test func aNonZeroExitIsOnlyEverTheDaemonStepsOrAMissingApp() throws {
+    // A helper that cannot be installed for its own reasons changes nothing and does NOT fail the install.
+    let noHelper = try Sandbox(withHelper: false)
+    defer { noHelper.tearDown() }
+    #expect(try noHelper.run().status == 0)
+    let badCopy = try Sandbox(codesignFails: true)
+    defer { badCopy.tearDown() }
+    #expect(try badCopy.run().status == 0)
   }
 
   @Test func noKickstartDashKAnywhereInTheScript() throws {
