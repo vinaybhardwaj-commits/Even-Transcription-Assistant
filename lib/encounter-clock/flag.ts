@@ -25,3 +25,25 @@ export const ENCOUNTER_FUSION_SHADOW = "ENCOUNTER_FUSION_SHADOW";
 export function encounterFusionShadowEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return parseFlag(ENCOUNTER_FUSION_SHADOW, env);
 }
+
+/**
+ * ENCOUNTER_TIMELINE_SHADOW — epic #23 (f), shadow-runner v3. DEFAULT OFF. When on, an operator's E-shadow run also
+ * writes the pre-STT TIMELINE run (source 'timeline'): Pulse anchors + Nemotron turns + the level log, Jev reading
+ * the speaker-turn timeline (no text). Shadow only. The replay path (`timeline: true` on scribe_encounter_shadow_run)
+ * runs v3 regardless, per call, for E-7 scoring of past days.
+ */
+export const ENCOUNTER_TIMELINE_SHADOW = "ENCOUNTER_TIMELINE_SHADOW";
+
+export function encounterTimelineShadowEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return parseFlag(ENCOUNTER_TIMELINE_SHADOW, env);
+}
+
+/**
+ * ENCOUNTER_GATE_DIAR — epic #23 (d). DEFAULT OFF. When on, the timeline run judges each probe with gate v2, which
+ * takes the speech half from Nemotron turns instead of transcript text. Gate v1 is untouched and stays the default.
+ */
+export const ENCOUNTER_GATE_DIAR = "ENCOUNTER_GATE_DIAR";
+
+export function encounterGateDiarEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return parseFlag(ENCOUNTER_GATE_DIAR, env);
+}
