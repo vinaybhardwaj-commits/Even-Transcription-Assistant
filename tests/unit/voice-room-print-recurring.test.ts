@@ -98,14 +98,12 @@ describe("recurringVoice", () => {
     expect(recurringVoice(edge)).toMatchObject({ ok: true, n_windows: 6 });
   });
 
-  it("counts a doctor at cosine just over 0.55 and leaves one just under out", () => {
-    // wobble w gives cosine 1/sqrt(1+w^2) to the axis; pairwise between +w and -w: (1-w^2)/(1+w^2)
-    // w = 0.5: pairwise 0.6 (joins); w = 0.75: pairwise 0.28 (does not)
-    const near = Array.from({ length: 6 }, (_, i) => win(i, i % 2 ? "2026-10-03" : "2026-10-04", [sp("spk0", wob(DOC, i % 2 ? 0.5 : -0.5))]));
-    expect(recurringVoice(near)).toMatchObject({ ok: true, n_windows: 6 });
-    const far = Array.from({ length: 6 }, (_, i) => win(i, i % 2 ? "2026-10-03" : "2026-10-04", [sp("spk0", wob(DOC, i % 2 ? 0.75 : -0.75))]));
-    // same-sign windows are identical (cosine 1), so each half recurs with itself: 3 windows, under MIN_WINDOWS
-    expect(recurringVoice(far)).toMatchObject({ ok: false, reason: "too_few_windows", n_windows: 3 });
+  it("joins two windows at a pairwise cosine just over 0.55, and not just under", () => {
+    // +w and -w wobbles meet at cosine (1-w^2)/(1+w^2): w = 0.5373 gives 0.5520, w = 0.5404 gives 0.5479
+    const pair = (w: number) => Array.from({ length: 6 }, (_, i) => win(i, i % 2 ? "2026-10-03" : "2026-10-04", [sp("spk0", wob(DOC, i % 2 ? w : -w))]));
+    expect(recurringVoice(pair(0.5373))).toMatchObject({ ok: true, n_windows: 6 });
+    // under: each sign is its own voice of 3 identical windows on one day, under MIN_WINDOWS
+    expect(recurringVoice(pair(0.5404))).toMatchObject({ ok: false, reason: "too_few_windows", n_windows: 3 });
   });
 
   it("is deterministic under input order", () => {

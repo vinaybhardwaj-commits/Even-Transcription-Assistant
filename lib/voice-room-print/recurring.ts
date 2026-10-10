@@ -103,12 +103,10 @@ function bestSeed(cands: ReadonlyArray<Cand>, units: number, order: ReadonlyArra
   return top;
 }
 
-/** The voice's members: seed, one refinement against their mean, final mean. */
+/** The voice's members (one per unit, at or above SAME_VOICE to the seed) and their mean. */
 function grow(seed: Cand, cands: ReadonlyArray<Cand>, units: number): { centroid: Float32Array; members: Array<{ c: Cand; cos: number }> } {
-  const first = nearestPerUnit(seed.v, cands, units);
-  const centre = mean(first.map((m) => m.c.v));
-  const members = nearestPerUnit(centre, cands, units);
-  return { centroid: members.length > 0 ? mean(members.map((m) => m.c.v)) : centre, members };
+  const members = nearestPerUnit(seed.v, cands, units);
+  return { centroid: mean(members.map((m) => m.c.v)), members };
 }
 
 export function recurringVoice(units: ReadonlyArray<Unit>): RecurringResult {
