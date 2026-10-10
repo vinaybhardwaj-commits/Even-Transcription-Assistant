@@ -16,6 +16,7 @@
  * floats and non-ASCII are where the two serialisers differ.
  */
 import { createHash } from "node:crypto";
+import { windowProbsKey } from "./lab-keys";
 
 export const NEMOTRON_ENGINE = "nemotron";
 export const MAX_SPEAKERS = 8;
@@ -56,6 +57,8 @@ export type IngestBody = {
   status: IngestStatus;
   error_code: string | null;
   turns: Turn[];
+  /** Optional pointer to the window's per-frame probability file (migration 0143). NOT part of the result: payload_sha256 leaves it out. */
+  probs_r2_key?: string | null;
 };
 
 export type Derived = { speaker_count: number; turn_count: number; speech_ms: number; overlap_ms: number };
@@ -68,6 +71,8 @@ const INGEST_KEYS = [
   "window_id", "room_day_id", "engine", "model", "model_rev", "config", "config_hash", "worker_id",
   "machine", "audio_ms", "clip_sha256", "status", "error_code", "turns",
 ] as const;
+/** Keys a body MAY carry (a worker older than 0143 does not send them). */
+const OPTIONAL_INGEST_KEYS = ["probs_r2_key"] as const;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
@@ -151,7 +156,7 @@ function checkTurns(v: unknown, audioMs: number): { turns: Turn[] } | { error: s
 /** PURE — the whole ingest body, or the first reason it is refused. */
 export function checkIngest(raw: unknown): IngestCheck {
   if (!isObj(raw)) return { ok: false, error: "bad_body" };
-  for (const k of Object.keys(raw)) if (!(INGEST_KEYS as readonly string[]).includes(k)) return { ok: false, error: "unknown_field" };
+  for (const k of Object.keys(raw)) if (!(INGEST_KEYS as readonly string[]).includes(k) && !(OPTIONAL_INGEST_KEYS as readonly string[]).includes(k)) return { ok: false, error: "unknown_field" };
   for (const k of INGEST_KEYS) if (!(k in raw)) return { ok: false, error: `missing_${k}` };
   const b = raw as Record<(typeof INGEST_KEYS)[number], unknown>;
 
@@ -168,6 +173,9 @@ export function checkIngest(raw: unknown): IngestCheck {
   if (b.machine !== "box" && b.machine !== "hf") return { ok: false, error: "bad_machine" };
   if (b.status !== "ok" && b.status !== "empty" && b.status !== "failed") return { ok: false, error: "bad_status" };
   const status = b.status;
+  const probsKey = (raw as Record<string, unknown>).probs_r2_key;
+  if (probsKey !== undefined && probsKey !== null && (typeof probsKey !== "string" || probsKey !== windowProbsKey(b.window_id))) return { ok: false, error: "bad_probs_r2_key" };
+  if (typeof probsKey === "string" && status === "failed") return { ok: false, error: "files_with_failure" };
   if (!isInt(b.audio_ms) || b.audio_ms < 0 || b.audio_ms > MAX_AUDIO_MS) return { ok: false, error: "bad_audio_ms" };
   if (status !== "failed" && b.audio_ms === 0) return { ok: false, error: "bad_audio_ms" };
   if (b.clip_sha256 !== null && (typeof b.clip_sha256 !== "string" || !SHA_RE.test(b.clip_sha256))) return { ok: false, error: "bad_clip_sha256" };
@@ -197,6 +205,7 @@ export function checkIngest(raw: unknown): IngestCheck {
     status,
     error_code: b.error_code as string | null,
     turns: t.turns,
+    probs_r2_key: typeof probsKey === "string" ? probsKey : null,
   };
   const so = speechAndOverlap(t.turns);
   const derived: Derived = {
@@ -205,7 +214,8 @@ export function checkIngest(raw: unknown): IngestCheck {
     speech_ms: so.speech_ms,
     overlap_ms: so.overlap_ms,
   };
-  const { worker_id: _w, machine: _m, ...result } = body;
+  // the probability pointer is an artifact beside the result, not part of it: the same turns with or without it are a duplicate
+  const { worker_id: _w, machine: _m, probs_r2_key: _p, ...result } = body;
   return { ok: true, body, derived, payload_sha256: sha256Hex(canonicalJson(result)) };
 }
 

@@ -45,6 +45,10 @@ export const JOB_ERROR_CODES = [
   "router_job_lost",
   // diarize_window (Slice C2)
   "diarize_failed",
+  // nemotron_lab_run (0143): a window input with no clip, a span that could not be cut, a run no worker finished in time
+  "lab_input_unresolved",
+  "lab_cut_failed",
+  "lab_timeout",
   // the room job refuses DIARIZE_ENGINE=local|pyannoteai by name, before any call (nemotron is the only room engine)
   "diarize_engine_refused",
   "diarize_unavailable",
