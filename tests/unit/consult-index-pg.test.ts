@@ -330,49 +330,82 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     expect(full.transcript).toBe("namaste 0 namaste 1 namaste 2");
     expect(full.english).toBe("hello 0 hello 1 hello 2"); // the English TEXT, not a status word
     expect(full.language_code).toBe("hi-IN");
-    expect((full.segments as Row[])[1]).toEqual({ speaker_id: "SPEAKER_01", t0_ms: T1 - 120_000 + 4000, t1_ms: T1 - 120_000 + 7500, text: "namaste 1", language_code: "hi-IN" });
+    expect((full.segments as Row[])[1]).toEqual({ speaker_id: "SPEAKER_01", t0_ms: T1 - 120_000 + 4000, t1_ms: T1 - 120_000 + 7500, text: "namaste 1", english: "hello 1", language_code: "hi-IN" });
     expect((full.english_segments as Row[])[1]).toEqual({ speaker_id: "SPEAKER_01", t0_ms: T1 - 120_000 + 4000, t1_ms: T1 - 120_000 + 7500, text: "hello 1", source: "translate_pass" });
     expect(full).not.toHaveProperty("english_text");
     expect(full).not.toHaveProperty("stt_segments");
   });
 
-  it("SHAPE PARITY: a reused palimpsest result has EXACTLY the fields of scribe_sarvam's own result, field by field (transcribe answer, job result, consult_result head, consult_result with text)", async () => {
-    // one consult transcribed by US (the normal path), one answered from the palimpsest
+  it("SHAPE PARITY on the DEFAULT english:true path: a reused palimpsest result equals scribe_sarvam's own English-on result field by field (keys AND value types), segments carry their per-segment english", async () => {
     await backfill([withSig(UA), withSig(UE)]);
     putClips(UA, UE);
     putTrack(UE, "stt"); putTrack(UE, "translate");
-    await tool({ action: "transcribe", consult_uid: UA, english: false });
+    // UA is transcribed by US with the English pass ON (the default): the native pass in Devanagari, the English pass in English, same times
+    const nativeEntries = [{ speakerId: "0", start: 0, end: 3.5, transcript: "\u0928\u092e\u0938\u094d\u0924\u0947 \u0921\u0949\u0915\u094d\u091f\u0930", languageCode: "hi-IN" }, { speakerId: "1", start: 4, end: 7.5, transcript: "\u091c\u0940 \u092c\u0924\u093e\u0907\u090f", languageCode: "hi-IN" }];
+    const englishEntries = [{ speakerId: "0", start: 0, end: 3.5, transcript: "hello doctor", languageCode: "en-IN" }, { speakerId: "1", start: 4, end: 7.5, transcript: "yes please tell me", languageCode: "en-IN" }];
+    H.gw.result.mockReset();
+    H.gw.result.mockResolvedValueOnce({ ok: true, languageCode: "hi-IN", transcript: "native", entries: nativeEntries }).mockResolvedValueOnce({ ok: true, languageCode: "en-IN", transcript: "english", entries: englishEntries });
+    const first = await tool({ action: "transcribe", consult_uid: UA }); // english defaults to true
     await drain();
+    expect((await job(String(first.job_id))).status).toBe("done");
+    expect((await results())[0]).toMatchObject({ consult_uid: UA });
     const keys = (o: Row) => Object.keys(o).sort();
     const kinds = (o: Row) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v === null ? "null" : Array.isArray(v) ? "array" : typeof v]));
+    const same = (own: Row, pal: Row, what: string, except: string[] = []) => {
+      expect(keys(pal), what).toEqual(keys(own));
+      for (const [k, t] of Object.entries(kinds(own))) if (!except.includes(k)) expect(kinds(pal)[k], `${what}.${k}`).toBe(t);
+    };
 
-    // 1. the transcribe answer for an already-answered consult
-    const ownAns = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    // 1. the transcribe answer for an already-answered consult (own: job_id/source_job_id are strings; reused: null by design)
+    const ownAns = await tool({ action: "transcribe", consult_uid: UA });
     const palAns = await tool({ action: "transcribe", consult_uid: UE });
-    expect(ownAns).toMatchObject({ existing: true, source: "scribe_sarvam" });
-    expect(palAns).toMatchObject({ existing: true, source: "palimpsest" });
-    expect(keys(palAns)).toEqual(keys(ownAns));
+    expect(ownAns).toMatchObject({ existing: true, source: "scribe_sarvam", english_pass: "done" });
+    expect(palAns).toMatchObject({ existing: true, source: "palimpsest", english_pass: "done" });
+    same(ownAns, palAns, "transcribe answer", ["job_id", "source_job_id", "r2_key", "language_code"]);
     // 2. the job result
-    const ownJob = await submit("sarvam_transcribe", { consult_uid: UA, english: false });
+    const ownJob = await submit("sarvam_transcribe", { consult_uid: UA });
     const palJob = await submit("sarvam_transcribe", { consult_uid: UE });
     await drain();
-    const ownR = (await job(ownJob.id)).result!, palR = (await job(palJob.id)).result!;
-    expect(keys(palR)).toEqual(keys(ownR));
-    // 3. the consult_result head
+    same((await job(ownJob.id)).result!, (await job(palJob.id)).result!, "job result", ["source_job_id"]);
+    // 3. the head (NO filter: `billed` is on both)
     const ownHead = await tool({ action: "consult_result", consult_uid: UA });
     const palHead = await tool({ action: "consult_result", consult_uid: UE });
-    expect(keys(palHead).filter((k) => k !== "billed")).toEqual(keys(ownHead));
-    for (const [k, t] of Object.entries(kinds(ownHead))) if (t !== "null" && kinds(palHead)[k] !== "null") expect(kinds(palHead)[k], k).toBe(t);
-    // 4. consult_result with text: same top-level keys, same segment keys
+    expect(ownHead.billed).toBe(false);
+    expect(palHead.billed).toBe(false);
+    same(ownHead, palHead, "head", ["job_id", "created_at"]);
+    // 4. with text (NO filter)
     const ownFull = await tool({ action: "consult_result", consult_uid: UA, include_text: true });
     const palFull = await tool({ action: "consult_result", consult_uid: UE, include_text: true });
-    expect(keys(palFull).filter((k) => k !== "billed")).toEqual(keys(ownFull));
-    expect(typeof palFull.english).toBe("string"); // own with english:false is null; with English it is the same field holding the text
-    expect(keys((palFull.segments as Row[])[0]!)).toEqual(keys((ownFull.segments as Row[])[0]!));
-    // 5. the English segments: built by the SAME function from an own-shaped document
-    const { consultResultView } = await import("@/lib/consult-index/result-view");
-    const ownEng = consultResultView({ language_code: "hi-IN", duration_s: 1, speakers: [], transcript: "", english: "x", entries: [], english_entries: [{ speaker_id: "0", start_s: 0, end_s: 1, text: "x", source: "translate_pass", native_idx: 0 }] }, 0).english_segments[0]!;
-    expect(keys((palFull.english_segments as Row[])[0]!)).toEqual(keys(ownEng as Row));
+    same(ownFull, palFull, "with text", ["job_id", "created_at"]);
+    expect(typeof ownFull.english).toBe("string");
+    expect(typeof palFull.english).toBe("string");
+    // 5. segments: same keys, INCLUDING the per-segment english, on every segment
+    const ownSegs = ownFull.segments as Row[], palSegs = palFull.segments as Row[];
+    expect(palSegs).toHaveLength(3);
+    for (const g of ownSegs) expect(typeof g.english, "own segment english").toBe("string");
+    for (const g of palSegs) {
+      expect(keys(g)).toEqual(keys(ownSegs[0]!));
+      expect(typeof g.english).toBe("string");
+    }
+    expect(palSegs.map((g) => g.english)).toEqual(["hello 0", "hello 1", "hello 2"]); // each translate segment sits on the native entry it overlaps
+    // 6. english_segments: same keys on every element
+    const ownEng = ownFull.english_segments as Row[], palEng = palFull.english_segments as Row[];
+    expect(ownEng.length).toBeGreaterThan(0);
+    for (const g of palEng) expect(keys(g)).toEqual(keys(ownEng[0]!));
+  });
+
+  it("the per-segment english PAIRS BY TIME: a translate segment goes to the native entry it overlaps most; unpaired native entries carry ''; no translate track -> no entry carries english", async () => {
+    const { palimpsestAsResult } = await import("@/lib/consult-index/palimpsest-view");
+    const row = { consult_uid: UA, cut_version: "v", t0_ms: 1000, t1_ms: 1000 + 60_000 };
+    const seg = (t0: number, t1: number, text: string) => ({ t0_ms: 1000 + t0, t1_ms: 1000 + t1, speaker: "S", lang: "hi-IN", text });
+    const track = (segments: ReturnType<typeof seg>[]) => ({ layer: "stt" as const, engine: "sarvam-saaras-v3", model: "saaras:v3", version: "saaras-v3", config_hash: "h", r2_key: "k", segments });
+    // native: A 0-10 s, B 10-20 s, C 20-30 s (no English there). English: one long segment 2-12 s (overlaps A by 8 s, B by 2 s), one 11-19 s (B)
+    const v = palimpsestAsResult(row, track([seg(0, 10_000, "a"), seg(10_000, 20_000, "b"), seg(20_000, 30_000, "c")]), track([seg(2000, 12_000, "e1"), seg(11_000, 19_000, "e2")]));
+    expect(v.doc.entries.map((e) => e.english)).toEqual(["e1", "e2", ""]);
+    expect(v.doc.english_entries!.map((e) => e.native_idx)).toEqual([0, 1]);
+    const none = palimpsestAsResult(row, track([seg(0, 10_000, "a")]), null);
+    expect(none.doc.entries[0]).not.toHaveProperty("english");
+    expect(none.doc.english_entries).toBeUndefined();
   });
 
   it("(a) RESULTS STORED UNDER THE OLD cut_at VERSION ARE STILL FOUND after the version became the signature's: carried over by the sync of the same cut, so nothing is billed twice; a RE-CUT is not carried", async () => {
@@ -439,6 +472,82 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     await drain();
     expect((await job(jf.id)).status).toBe("done");
     expect(gwCalls()).toBeGreaterThan(calls2);
+  });
+
+  it("(B6) the BATCH with force:true: a consult whose indexed track object is missing is sent to Sarvam; without force it is refused track_missing", async () => {
+    await backfill([withSig(UA), withSig(UE)]);
+    putClips(UA, UE);
+    putTrack(UA, "stt", { dropObject: true });
+    putTrack(UE, "stt", { dropObject: true, hash: "e2" });
+    const calls = gwCalls();
+    const no = await tool({ action: "transcribe", consult_uids: [UA], english: false });
+    await drain();
+    expect(((await job(String(no.job_id))).result!.items as Row[])[0]).toMatchObject({ state: "refused", code: "track_missing" });
+    expect(gwCalls()).toBe(calls);
+    const yes = await tool({ action: "transcribe", consult_uids: [UA, UE], english: false, force: true });
+    expect(yes).toMatchObject({ ok: true, kind: "sarvam_consult_batch" });
+    await drain();
+    const r = (await job(String(yes.job_id))).result!;
+    expect(r).toMatchObject({ total: 2, done: 2, refused: 0, failed: 0 });
+    expect(gwCalls()).toBeGreaterThan(calls);
+    expect((await jobsOfKind("sarvam_transcribe")).filter((j) => j.args.force === true)).toHaveLength(2); // the children carry the flag
+    expect((await results()).map((x) => x.consult_uid).sort()).toEqual([UA, UE].sort());
+  });
+
+  it("(A4) carry-over with BOTH english forms for one cut: each form moves independently; an existing new-form result for one form does not block the other, and is never overwritten", async () => {
+    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
+    const old = (await St.getIndexRow(UA))!;
+    const { signatureVersion } = await import("@/lib/consult-index/parse");
+    const sigRow = withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" });
+    const newV = signatureVersion(sigRow.signature)!;
+    const rec = (cut: string, english: boolean, job: string, mode = "transcribe") => St.recordResult({ consult_uid: UA, cut_version: cut, mode, english, num_speakers: null, job_id: job, result_r2_key: `mcp-sarvam/${job}.json`, model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
+    await rec(old.cut_version, true, "j_old_en");
+    await rec(old.cut_version, false, "j_old_noen");
+    await rec(old.cut_version, true, "j_old_codemix_en", "codemix");
+    await rec(newV, false, "j_new_noen"); // the new form already holds the english:false answer
+    publishIndex([sigRow]);
+    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 2 }); // english:true and the codemix one move; english:false (collision) stays
+    const rs = await q<Row>`SELECT job_id, cut_version, mode, english FROM consult_sarvam_result ORDER BY job_id`;
+    const by = Object.fromEntries(rs.map((r) => [r.job_id, r]));
+    expect(by.j_old_en.cut_version).toBe(newV);
+    expect(by.j_old_codemix_en.cut_version).toBe(newV);
+    expect(by.j_new_noen.cut_version).toBe(newV);
+    expect(by.j_old_noen.cut_version).toBe(old.cut_version); // not carried: the new form already has this (mode, english)
+    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 0 });
+  });
+
+  it("(A4b) carry-over keys on MODE as well: an existing new-form (transcribe, english) result does not block the old (codemix, english) one", async () => {
+    await backfill([indexRow(UE, { cut_at: "2026-10-09T05:00:00+0530" })]);
+    const old = (await St.getIndexRow(UE))!;
+    const { signatureVersion } = await import("@/lib/consult-index/parse");
+    const sigRow = withSig(UE, { cut_at: "2026-10-09T05:00:00+0530" });
+    const newV = signatureVersion(sigRow.signature)!;
+    const rec = (cut: string, mode: string, job: string) => St.recordResult({ consult_uid: UE, cut_version: cut, mode, english: true, num_speakers: null, job_id: job, result_r2_key: `mcp-sarvam/${job}.json`, model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
+    await rec(old.cut_version, "transcribe", "j_t_old");
+    await rec(old.cut_version, "codemix", "j_c_old");
+    await rec(newV, "transcribe", "j_t_new");
+    publishIndex([sigRow]);
+    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 1 });
+    const by = Object.fromEntries((await q<Row>`SELECT job_id, cut_version FROM consult_sarvam_result WHERE consult_uid = ${UE}`).map((r) => [r.job_id, r.cut_version]));
+    expect(by.j_c_old).toBe(newV); // moved: nothing at (codemix, true) on the new form
+    expect(by.j_t_old).toBe(old.cut_version); // collides with j_t_new: stays
+    expect(by.j_t_new).toBe(newV);
+  });
+
+  it("ATOMIC: the index upsert and the carry-over of results are ONE statement (no ask can see the new cut_version without its result)", async () => {
+    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
+    const old = (await St.getIndexRow(UA))!;
+    await St.recordResult({ consult_uid: UA, cut_version: old.cut_version, mode: "transcribe", english: false, num_speakers: null, job_id: "j_at", result_r2_key: "mcp-sarvam/j_at.json", model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
+    publishIndex([withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
+    const seen: string[] = [];
+    const real = H.sql;
+    H.sql = ((strings: TemplateStringsArray, ...v: unknown[]) => { const t = strings.join("?"); if (/INSERT INTO consult_index AS c/.test(t) || /UPDATE consult_sarvam_result/.test(t)) seen.push(t); return real(strings, ...v); }) as never;
+    try { await Sync.syncConsultIndex(); } finally { H.sql = real; }
+    expect(seen).toHaveLength(1); // a single statement carries both the INSERT into consult_index and the UPDATE of consult_sarvam_result
+    expect(seen[0]).toMatch(/INSERT INTO consult_index/);
+    expect(seen[0]).toMatch(/UPDATE consult_sarvam_result/);
+    expect((await results())[0]!.cut_version).toMatch(/^sig:/);
+    expect((await St.getIndexRow(UA))!.cut_version).toMatch(/^sig:/);
   });
 
   it("(b) force never overrides a track that EXISTS (it is still reused, not re-billed); force is not accepted for anything but a boolean", async () => {

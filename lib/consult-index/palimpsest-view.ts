@@ -21,7 +21,22 @@ const text = (t: SarvamTrack | null): string => (t ? t.segments.map((g) => g.tex
 export function palimpsestAsResult(row: Pick<StoredIndexRow, "consult_uid" | "cut_version" | "t0_ms" | "t1_ms">, stt: SarvamTrack, translate: SarvamTrack | null): PalimpsestAsResult {
   const rel = (ms: number): number => (ms - row.t0_ms) / 1000;
   const entries: ResultEntry[] = stt.segments.map((g) => ({ speaker_id: g.speaker ?? "", start_s: rel(g.t0_ms), end_s: rel(g.t1_ms), text: g.text, language_code: g.lang }));
-  const english_entries: EnglishEntry[] = (translate?.segments ?? []).map((g) => ({ speaker_id: g.speaker ?? "", start_s: rel(g.t0_ms), end_s: rel(g.t1_ms), text: g.text, source: "translate_pass", native_idx: null }));
+  // PAIR the English with the native entries BY TIME, as our own English-on result does (every entry carries its `english`): each translate segment goes to the stt entry it overlaps most (the earlier on a tie);
+  // an entry that no translate segment overlaps gets "" (it is still present, like our own unpaired entries). Without a translate track no entry carries `english`, exactly like our english:false results.
+  const pairedTo: Array<number | null> = (translate?.segments ?? []).map((t) => {
+    let best = -1, bestOverlap = 0;
+    stt.segments.forEach((g, i) => {
+      const ov = Math.min(g.t1_ms, t.t1_ms) - Math.max(g.t0_ms, t.t0_ms);
+      if (ov > bestOverlap) { bestOverlap = ov; best = i; }
+    });
+    return best >= 0 ? best : null;
+  });
+  if (translate) {
+    const bucket: string[][] = entries.map(() => []);
+    translate.segments.forEach((t, j) => { const i = pairedTo[j]; if (i !== null && i !== undefined) bucket[i]!.push(t.text); });
+    entries.forEach((e, i) => { e.english = bucket[i]!.join(" ").trim(); });
+  }
+  const english_entries: EnglishEntry[] = (translate?.segments ?? []).map((g, j) => ({ speaker_id: g.speaker ?? "", start_s: rel(g.t0_ms), end_s: rel(g.t1_ms), text: g.text, source: "translate_pass", native_idx: pairedTo[j] ?? null }));
   const speakers = [...new Set(entries.map((e) => e.speaker_id).filter((s) => s !== ""))].sort();
   const transcript = text(stt);
   const english = text(translate);

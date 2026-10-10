@@ -134,7 +134,7 @@ function resultHead(hit: ResultRowT & { source?: string }, row: IndexRowT, other
     ok: true, consult_uid: hit.consult_uid, source: hit.source ?? "scribe_sarvam", cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english,
     job_id: hit.job_id || null, model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s,
     speakers: hit.speaker_count, transcript_chars: hit.transcript_chars, english_chars: hit.english_chars, english_pass: hit.english_pass, clip: { t0_ms: hit.t0_ms, t1_ms: row.t1_ms },
-    created_at: hit.created_at || null, other_cuts: others,
+    created_at: hit.created_at || null, other_cuts: others, billed: false, // reading a result bills nothing, ours or reused
   };
 }
 
@@ -147,7 +147,7 @@ async function palimpsestResult(uid: string, row: IndexRowT, withText: boolean):
   if ("unavailable" in r) return { ok: false, error: "reuse_lookup_unavailable" };
   if (r.found?.stt) {
     const v = palimpsestAsResult(row, r.found.stt, r.found.translate);
-    const head = { ...resultHead(v.result, row, []), billed: false };
+    const head = resultHead(v.result, row, []);
     return withText ? { ...head, ...consultResultView(v.doc, row.t0_ms) } : head;
   }
   if (r.missing.includes("stt")) return { ok: false, error: "track_missing" };
