@@ -1,0 +1,145 @@
+{
+  "id": "u10-timeline",
+  "version": "v2",
+  "use": "encounter_timeline",
+  "subject_type": "encounter",
+  "state_schema": "timeline-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "u10_kind",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is a speaker-turn timeline of one outpatient room around the moment a doctor opened a patient's record (t+00:00). Each row is 30 seconds. DOC is the room's doctor; the other letters are other voices. A null value means no evidence, not silence. Examination silences of 1 to 4 minutes with the same voices afterwards are part of the consult. The next patient's record opening (next_start) usually comes after this consult has ended. QUESTION: What kind of activity is this segment? RULES: A consult ends when the patient leaves the room (V, 10 Oct 2026). The end row is the last row in which the patient is still in the room. The doctor talking alone afterwards (typing, dictating, calling the next patient) is after the consult end. Note submission is the encounter end; it is not this question and not a choice here. A brief staff voice is not a new patient. Answer only from the timeline. ",
+        "criteria": {
+          "consultation": "One doctor and a patient (with or without companions) have a consultation.",
+          "multiple_consultations": "The segment holds more than one consultation, one after another.",
+          "staff_or_admin": "Staff or administrative talk, not a consultation.",
+          "doctor_alone_talk": "Only the doctor speaks (calls, dictation, notes aloud).",
+          "empty_room": "Nobody speaks; the room is empty or silent.",
+          "insufficient_evidence": "The timeline does not let you tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "u10_end_row",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is a speaker-turn timeline of one outpatient room around the moment a doctor opened a patient's record (t+00:00). Each row is 30 seconds. DOC is the room's doctor; the other letters are other voices. A null value means no evidence, not silence. Examination silences of 1 to 4 minutes with the same voices afterwards are part of the consult. The next patient's record opening (next_start) usually comes after this consult has ended. QUESTION: Which candidate row is the last row in which THIS consult's patient is still in the room? RULES: A consult ends when the patient leaves the room (V, 10 Oct 2026). The end row is the last row in which the patient is still in the room. The doctor talking alone afterwards (typing, dictating, calling the next patient) is after the consult end. Note submission is the encounter end; it is not this question and not a choice here. A brief staff voice is not a new patient. Answer only from the timeline. The candidates are listed in the state; pick one by its candidate key.",
+        "criteria": {
+          "cand_01": "Candidate row 1 of the candidate list in the state, in time order. Unused if the list has fewer than 1 candidates.",
+          "cand_02": "Candidate row 2 of the candidate list in the state, in time order. Unused if the list has fewer than 2 candidates.",
+          "cand_03": "Candidate row 3 of the candidate list in the state, in time order. Unused if the list has fewer than 3 candidates.",
+          "cand_04": "Candidate row 4 of the candidate list in the state, in time order. Unused if the list has fewer than 4 candidates.",
+          "cand_05": "Candidate row 5 of the candidate list in the state, in time order. Unused if the list has fewer than 5 candidates.",
+          "cand_06": "Candidate row 6 of the candidate list in the state, in time order. Unused if the list has fewer than 6 candidates.",
+          "cand_07": "Candidate row 7 of the candidate list in the state, in time order. Unused if the list has fewer than 7 candidates.",
+          "cand_08": "Candidate row 8 of the candidate list in the state, in time order. Unused if the list has fewer than 8 candidates.",
+          "cand_09": "Candidate row 9 of the candidate list in the state, in time order. Unused if the list has fewer than 9 candidates.",
+          "cand_10": "Candidate row 10 of the candidate list in the state, in time order. Unused if the list has fewer than 10 candidates.",
+          "cand_11": "Candidate row 11 of the candidate list in the state, in time order. Unused if the list has fewer than 11 candidates.",
+          "cand_12": "Candidate row 12 of the candidate list in the state, in time order. Unused if the list has fewer than 12 candidates.",
+          "continues_past_segment": "The patient is still in the room in the last row of the segment.",
+          "no_consultation_in_segment": "There is no consultation in this segment, so no end.",
+          "insufficient_evidence": "The timeline does not let you tell which candidate row is the end."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "no_consultation_in_segment",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "u10_kind",
+      "gate_requires": [
+        "consultation",
+        "multiple_consultations"
+      ]
+    },
+    {
+      "question_id": "u10_end_signal",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is a speaker-turn timeline of one outpatient room around the moment a doctor opened a patient's record (t+00:00). Each row is 30 seconds. DOC is the room's doctor; the other letters are other voices. A null value means no evidence, not silence. Examination silences of 1 to 4 minutes with the same voices afterwards are part of the consult. The next patient's record opening (next_start) usually comes after this consult has ended. QUESTION: What signal best marks the end of this consult in the timeline? RULES: A consult ends when the patient leaves the room (V, 10 Oct 2026). The end row is the last row in which the patient is still in the room. The doctor talking alone afterwards (typing, dictating, calling the next patient) is after the consult end. Note submission is the encounter end; it is not this question and not a choice here. A brief staff voice is not a new patient. Answer only from the timeline. Tie rule: if the patient leaves and the doctor talks alone, choose patient_side_voices_stop_doctor_alone even if a quiet stretch follows.",
+        "criteria": {
+          "patient_side_voices_stop_doctor_alone": "Voices other than DOC stop and DOC keeps talking or working alone. This marks the patient leaving; it is not the doctor finishing the note.",
+          "all_voices_stop_long_quiet": "Every voice stops and a long quiet stretch follows.",
+          "new_voice_arrives": "A new voice arrives after the consult voices.",
+          "tape_or_mic_loss": "The recording is lost (tape off or dead microphone).",
+          "cut_by_next_start": "The segment is cut by the next record opening.",
+          "not_applicable": "There is no consultation or no end to signal.",
+          "insufficient_evidence": "The timeline does not show a signal."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "u10_kind",
+      "gate_requires": [
+        "consultation",
+        "multiple_consultations"
+      ]
+    },
+    {
+      "question_id": "u10_start_offset",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is a speaker-turn timeline of one outpatient room around the moment a doctor opened a patient's record (t+00:00). Each row is 30 seconds. DOC is the room's doctor; the other letters are other voices. A null value means no evidence, not silence. Examination silences of 1 to 4 minutes with the same voices afterwards are part of the consult. The next patient's record opening (next_start) usually comes after this consult has ended. QUESTION: Did the consultation start at the anchor, or did the first patient-side speech come later? RULES: A consult ends when the patient leaves the room (V, 10 Oct 2026). The end row is the last row in which the patient is still in the room. The doctor talking alone afterwards (typing, dictating, calling the next patient) is after the consult end. Note submission is the encounter end; it is not this question and not a choice here. A brief staff voice is not a new patient. Answer only from the timeline. ",
+        "criteria": {
+          "before_anchor": "Patient-side speech clearly starts before t+00:00.",
+          "at_anchor": "The consultation starts within about one minute of t+00:00.",
+          "late_1_to_3_min": "The consultation starts one to three minutes after t+00:00.",
+          "late_over_3_min": "The consultation starts more than three minutes after t+00:00.",
+          "not_applicable": "There is no consultation in this segment.",
+          "insufficient_evidence": "The timeline does not let you tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "u10_kind",
+      "gate_requires": [
+        "consultation",
+        "multiple_consultations"
+      ]
+    },
+    {
+      "question_id": "u10_walk_in",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is a speaker-turn timeline of one outpatient room around the moment a doctor opened a patient's record (t+00:00). Each row is 30 seconds. DOC is the room's doctor; the other letters are other voices. A null value means no evidence, not silence. Examination silences of 1 to 4 minutes with the same voices afterwards are part of the consult. The next patient's record opening (next_start) usually comes after this consult has ended. QUESTION: Does anyone walk in during the consult? Party counts are computed in code; do not count. RULES: A consult ends when the patient leaves the room (V, 10 Oct 2026). The end row is the last row in which the patient is still in the room. The doctor talking alone afterwards (typing, dictating, calling the next patient) is after the consult end. Note submission is the encounter end; it is not this question and not a choice here. A brief staff voice is not a new patient. Answer only from the timeline. ",
+        "criteria": {
+          "none": "Nobody joins after the consult has started.",
+          "staff_brief_walk_in": "A staff member briefly joins and leaves.",
+          "companion_joins": "A companion joins the patient.",
+          "next_patient_early": "The next patient comes in before this consult has ended.",
+          "not_applicable": "There is no consultation in this segment.",
+          "insufficient_evidence": "The timeline does not let you tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "u10_kind",
+      "gate_requires": [
+        "consultation",
+        "multiple_consultations"
+      ]
+    }
+  ]
+}

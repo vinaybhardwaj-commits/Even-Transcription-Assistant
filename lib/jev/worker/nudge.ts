@@ -6,13 +6,12 @@
  */
 import { modeGate, type RealUse } from "./flags";
 import { sweepUse } from "./sweeper";
-import { getUse } from "./uses";
+import { usesOf } from "./uses";
 
 export async function nudgeJev(use: RealUse): Promise<void> {
   try {
     if (!modeGate(use, "shadow").ok) return;
-    const def = getUse(use);
-    if (def) await sweepUse(def, "nudge:jev");
+    for (const def of usesOf(use)) await sweepUse(def, "nudge:jev");
   } catch (e) {
     const code = (e as { code?: unknown } | null)?.code;
     console.warn("[jev] nudge failed", JSON.stringify({ use, code: typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? `db_error:${code}` : "nudge_failed" }));

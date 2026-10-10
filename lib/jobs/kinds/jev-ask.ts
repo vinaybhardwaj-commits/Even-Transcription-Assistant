@@ -24,6 +24,7 @@ import { askSubject, type BenchRow, type SetRef } from "@/lib/jev/worker/call";
 import { askBatch, assertMockFallbackSane, modeGate, REAL_USES, type JevMode, type RealUse } from "@/lib/jev/worker/flags";
 import { classifyDbError, policyOf } from "@/lib/jev/worker/errors";
 import { setSha, validateSetFile, type QuestionDef } from "@/lib/jev/worker/sets";
+import "@/lib/jev/worker/register";
 import { getUse } from "@/lib/jev/worker/uses";
 import { pendingSubjects } from "@/lib/jev/worker/sweeper";
 import { JobArgsError, doneWith, failWith, nextStep, withProgressPatch, type JobKind, type StepContext, type StepOutcome } from "../types";
@@ -95,7 +96,7 @@ async function plan(ctx: StepContext): Promise<StepOutcome> {
   const a = ctx.args as { use: RealUse; mode: JevMode; set_id: string; version: string; subject_ids?: string[] };
   const gate = modeGate(a.use, a.mode);
   if (!gate.ok) return doneWith({ skipped: gate.reason, calls: 0 });
-  const def = getUse(a.use);
+  const def = getUse(a.use, a.set_id);
   if (!def) return doneWith({ skipped: "no_use_registered", calls: 0 });
   const loaded = await loadSetForMode(a.use, a.mode, a.set_id, a.version);
   if (!loaded.ok) return doneWith({ skipped: "set_not_allowed", detail: loaded.detail, calls: 0 });
@@ -111,7 +112,7 @@ async function ask(ctx: StepContext): Promise<StepOutcome> {
   const a = ctx.args as { use: RealUse; mode: JevMode; set_id: string; version: string };
   const gate = modeGate(a.use, a.mode);   // re-checked every step: a flag switched off mid-job stops the next step
   if (!gate.ok) return doneWith({ ...summary(readProgress(ctx.progress)), skipped: gate.reason });
-  const def = getUse(a.use);
+  const def = getUse(a.use, a.set_id);
   if (!def) return doneWith({ ...summary(readProgress(ctx.progress)), skipped: "no_use_registered" });
   const loaded = await loadSetForMode(a.use, a.mode, a.set_id, a.version);
   if (!loaded.ok) return doneWith({ ...summary(readProgress(ctx.progress)), skipped: "set_not_allowed", detail: loaded.detail });
