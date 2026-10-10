@@ -406,6 +406,28 @@ beforeEach(async () => {
     };
     const send = (b: unknown, k: Key = K, dev = DEV) => { const text = JSON.stringify(b); return postResult(deviceJwt(dev, k, { method: "POST", body: text }), b, text); };
 
+    it("ATOMIC: the result, the command's move to done and the result's audit row are ONE statement — a failing audit insert leaves NO result row and the command stays delivered; the helper's retry then lands cleanly", async () => {
+      const id = await delivered();
+      pg.exec(`
+        CREATE OR REPLACE FUNCTION fleet_audit_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit is down'; END $$;
+        CREATE TRIGGER fleet_audit_boom BEFORE INSERT ON fleet_audit FOR EACH ROW EXECUTE FUNCTION fleet_audit_boom();
+      `);
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        expect(await send(body(id))).toMatchObject({ status: 503, json: { error: "db" } });
+        expect(await q`SELECT 1 FROM fleet_results`).toHaveLength(0);
+        expect((await q<{ state: string }>`SELECT state FROM fleet_commands WHERE cmd_id = ${id}`)[0]!.state).toBe("delivered");
+        expect(await q`SELECT 1 FROM fleet_audit WHERE action = 'result'`).toHaveLength(0);
+      } finally {
+        pg.exec("DROP TRIGGER IF EXISTS fleet_audit_boom ON fleet_audit; DROP FUNCTION IF EXISTS fleet_audit_boom()");
+        spy.mockRestore();
+      }
+      expect(await send(body(id))).toMatchObject({ status: 200, json: { ok: true, duplicate: false } });
+      expect(await q`SELECT 1 FROM fleet_results`).toHaveLength(1);
+      expect(await q`SELECT 1 FROM fleet_audit WHERE action = 'result'`).toHaveLength(1);
+      expect((await q<{ state: string }>`SELECT state FROM fleet_commands WHERE cmd_id = ${id}`)[0]!.state).toBe("done");
+    });
+
     it("BOUND TO THE ISSUED COMMAND: a delivered command takes its result once; state becomes done; an audit row; the answer is recorded", async () => {
       const id = await delivered();
       expect(await send(body(id))).toMatchObject({ status: 200, json: { ok: true, duplicate: false } });

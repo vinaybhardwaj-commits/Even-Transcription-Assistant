@@ -86,14 +86,23 @@ export async function recordResult(sql: FleetSql, signerDeviceId: string, machin
   // 'expired' with a delivery on record = it was handed to the helper and ran out of time before the answer arrived (the issuer flips stale rows so 0151's index frees the verb)
   const answerable = cmd[0].state === "delivered" || (cmd[0].state === "expired" && Number(cmd[0].delivery_count) > 0);
   if (!answerable) return { ok: false, status: 409, code: "not_delivered" };
+  // ONE statement: the result row, the command's move to 'done' and the result's audit row land together or not at all. If the audit insert fails, no result row is
+  // left (the command stays 'delivered' and the helper's retry is judged afresh). ON CONFLICT DO NOTHING absorbs a concurrent first answer: then nothing is written and
+  // the resend is judged against what is stored.
   const ins = await sql`
-    INSERT INTO fleet_results (cmd_id, device_id, outcome, reason, started_at, finished_at, detail, upload_key)
-    VALUES (${b.cmd_id}, ${signerDeviceId}, ${b.outcome}, ${b.reason}, ${b.started_at}::timestamptz, ${b.finished_at}::timestamptz, ${JSON.stringify(b.detail)}::jsonb, ${b.upload?.r2_key ?? null})
-    ON CONFLICT (cmd_id) DO NOTHING
+    WITH r AS (
+      INSERT INTO fleet_results (cmd_id, device_id, outcome, reason, started_at, finished_at, detail, upload_key)
+      VALUES (${b.cmd_id}, ${signerDeviceId}, ${b.outcome}, ${b.reason}, ${b.started_at}::timestamptz, ${b.finished_at}::timestamptz, ${JSON.stringify(b.detail)}::jsonb, ${b.upload?.r2_key ?? null})
+      ON CONFLICT (cmd_id) DO NOTHING
+      RETURNING cmd_id
+    ), u AS (
+      UPDATE fleet_commands SET state = 'done' WHERE cmd_id IN (SELECT cmd_id FROM r) AND device_id = ${signerDeviceId}
+      RETURNING cmd_id
+    )
+    INSERT INTO fleet_audit (actor, action, cmd_id, machine, summary)
+    SELECT ${`device:${signerDeviceId}`}, 'result', r.cmd_id, ${machine}, ${`outcome ${b.outcome}${b.reason ? ` (${b.reason})` : ""}`} FROM r
     RETURNING cmd_id
   `;
   if (ins.length === 0) return (await same()) ? { ok: true, status: 200, duplicate: true } : { ok: false, status: 409, code: "RESULT_CONFLICT" };
-  await sql`UPDATE fleet_commands SET state = 'done' WHERE cmd_id = ${b.cmd_id} AND device_id = ${signerDeviceId}`;
-  await sql`INSERT INTO fleet_audit (actor, action, cmd_id, machine, summary) VALUES (${`device:${signerDeviceId}`}, 'result', ${b.cmd_id}, ${machine}, ${`outcome ${b.outcome}${b.reason ? ` (${b.reason})` : ""}`})`;
   return { ok: true, status: 200, duplicate: false };
 }
