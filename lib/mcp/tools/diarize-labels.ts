@@ -13,7 +13,9 @@
  *
  * Read scope, counts only — no window ids, no room labels, no audio, no text.
  */
-import { failSafe, argInt, type McpTool, type ToolArgs } from "../registry";
+import { failSafe, argInt, argStr, type McpTool, type ToolArgs } from "../registry";
+import { readWorkerHeartbeats, readNemotronLatency24h } from "@/lib/room-access/nemotron-store";
+import { workerBoard } from "@/lib/diarize-nemotron/worker-health";
 import { blindLabelCount, dailyLabelCounts, eurPerAudioHour, EUR_PER_AUDIO_HOUR_ENV } from "@/lib/diarize-labels";
 
 /** The most days one call will summarise. */
@@ -29,13 +31,17 @@ const diarizeSpend: McpTool = {
     type: "object",
     properties: {
       days: { type: "integer", description: `IST days back to summarise, default ${DEFAULT_DAYS}, ceiling ${MAX_DAYS}.` },
+      engine: { type: "string", enum: ["local", "pyannoteai", "nemotron"], description: "Only this engine's rows. Omit for every engine (unchanged)." },
     },
     additionalProperties: false,
   },
   handler: async (args: ToolArgs) =>
     failSafe({ days: [] as unknown[] }, async () => {
       const days = argInt(args, "days", DEFAULT_DAYS, 1, MAX_DAYS);
-      const rows = await dailyLabelCounts({ days });
+      const engine = argStr(args, "engine", 16);
+      if (engine && !["local", "pyannoteai", "nemotron"].includes(engine)) return { days: [], error: "bad_engine" };
+      const all = await dailyLabelCounts({ days });
+      const rows = engine ? all.filter((r) => r.engine === engine) : all;
       const n_blind_excluded = await blindLabelCount({ days }); // K3-4: held-out labels are left out of every figure and counted
       const paid = rows.filter((r) => r.engine === "pyannoteai");
       return {
@@ -52,8 +58,33 @@ const diarizeSpend: McpTool = {
           estimated_eur: Math.round(paid.reduce((n, r) => n + (r.estimated_eur ?? 0), 0) * 10000) / 10000,
         },
         is: "estimated from stored audio seconds; pyannote.ai bills on its own measure",
+        // Epic #23 (i): Nemotron spend as the WORKER reports it on its heartbeat (HF jobs and USD, last 24 h). Never an invoice.
+        nemotron_hf_reported: await nemotronHfReported(),
       };
     }),
 };
 
-export const DIARIZE_LABEL_TOOLS: McpTool[] = [diarizeSpend];
+async function nemotronHfReported(): Promise<{ hf_jobs_24h: number | null; hf_usd_24h: number | null } | null> {
+  try {
+    const board = workerBoard(await readWorkerHeartbeats(), { windows_24h: 0, box_24h: 0, hf_24h: 0, p95_latency_s: null }, new Date());
+    const jobs = board.workers.map((w) => w.hf_jobs_24h).filter((x): x is number => x !== null);
+    return { hf_jobs_24h: jobs.length ? jobs.reduce((a, b) => a + b, 0) : null, hf_usd_24h: board.hf_usd_today_reported };
+  } catch {
+    return null;
+  }
+}
+
+const nemotronWorker: McpTool = {
+  name: "scribe_nemotron_worker",
+  description:
+    "Nemotron diarize worker health (epic #23 i), read-only: status ok|lagging|stale|down (stale = no heartbeat for over 10 min → alert; lagging = clinic hours 07:30-21:30 IST and p95 close-to-stored latency or the oldest waiting window over 30 min → warning), queue depth, oldest-waiting age, windows per hour, p95 latency, box vs HF share, reported HF USD, last error code, and each worker's last heartbeat. Ids, counts and timings only; no embeddings, no text. Read scope.",
+  scope: "read",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  handler: async () =>
+    failSafe({ board: null as unknown }, async () => {
+      const [rows, lat] = await Promise.all([readWorkerHeartbeats(), readNemotronLatency24h()]);
+      return { board: workerBoard(rows, lat, new Date()), asof: new Date().toISOString() };
+    }),
+};
+
+export const DIARIZE_LABEL_TOOLS: McpTool[] = [diarizeSpend, nemotronWorker];

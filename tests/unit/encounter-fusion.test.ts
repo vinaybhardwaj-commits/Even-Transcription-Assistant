@@ -372,7 +372,7 @@ describe("ENCOUNTER_FUSION_SHADOW", () => {
 describe("0118 vocabularies match the code", () => {
   it("encounter_hypothesis_run.source is exactly RUN_SOURCES", () => {
     const eff = effectiveCheckValues(MIGRATIONS, "encounter_hypothesis_run_source_chk", "source");
-    expect(eff.file).toBe("0118_encounter_fusion.sql");
+    expect(eff.file).toBe("0146_encounter_timeline.sql");
     expect([...eff.values].sort()).toEqual([...RUN_SOURCES].sort());
   });
   it("jev_decision.subject_type is exactly JEV_SUBJECT_TYPES, probe included", () => {

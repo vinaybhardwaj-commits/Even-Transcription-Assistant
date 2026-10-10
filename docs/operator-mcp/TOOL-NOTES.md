@@ -4,7 +4,7 @@ The long-form notes that used to live inside tool descriptions. Tier 2 §2.4 cut
 words each: a description is read by a model on every `tools/list`, so it pays for itself only if
 it carries the contract. The reasoning belongs here.
 
-## The surface: 52 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep; `scribe_help` and `scribe_usage`, S0, 8 Oct; `scribe_now`, `scribe_room` and `scribe_tape_day`, S1A, 8 Oct; `scribe_steward`, `scribe_kiosks` and `scribe_stt_windows`, S1B, 8 Oct; `scribe_reb_index`, S5A, 8 Oct; `scribe_sarvam`, S8A, 8 Oct; `scribe_steward_command`, `scribe_lanes` and the `routes` aspect of `scribe_health`, S2L, 8 Oct)
+## The surface: 53 listed tools, 52 names that answer (Slice E, 13 Sep; E18 R31, 16 Sep; J1-J3, 19 Sep; level log and segments, 22 Sep; E-5, the E-shadow run, J-CORE-2, the diarization teacher spend, the note-safety shadow and U6 clinical routing, 23 Sep; the room watchdog alert outbox, 24 Sep; `scribe_help` and `scribe_usage`, S0, 8 Oct; `scribe_now`, `scribe_room` and `scribe_tape_day`, S1A, 8 Oct; `scribe_steward`, `scribe_kiosks` and `scribe_stt_windows`, S1B, 8 Oct; `scribe_reb_index`, S5A, 8 Oct; `scribe_sarvam`, S8A, 8 Oct; `scribe_steward_command`, `scribe_lanes` and the `routes` aspect of `scribe_health`, S2L, 8 Oct)
 
 `tools/list` lists the registry's **52** primaries plus `scribe_jobs` (S3): **53** tools, one list for every caller (S1A, V's Q3 ruling: the
 Scribe MCP is for admins only, so everything is visible to everyone; see *Profiles*, below). The 41 before S1A were the lab list; S1A added `scribe_now`, `scribe_room` and `scribe_tape_day`, S1B added `scribe_steward`, `scribe_kiosks` and `scribe_stt_windows`, S5A added `scribe_reb_index`, S8A added `scribe_sarvam`, S2L added `scribe_steward_command` and `scribe_lanes`. `tools/call` accepts all of those **and every one of the 52 names**
@@ -70,6 +70,8 @@ no text for an encounter, a room window or a bench session, the same payload as
 `GET /api/diarize-segments`. It is listed on its own rather than as a `scribe_voice` view because a
 group member must appear in a committed live capture (`fixtures/mcp/`), and none exists for it yet.
 Both landed in the same deploy (23 Sep), so the heading above counts them together.
+Epic #23 ticket (i) (10 Oct) added the ungrouped read tool `scribe_nemotron_worker`: the Nemotron diarize worker's health (status ok|lagging|stale|down, backlog, oldest wait, windows per hour, p95 close-to-stored latency, box vs HF share, reported HF USD, last error code) from the stored heartbeats and 24 h of stored rows. Ids, counts and timings only. `scribe_diarize_spend` also gained an optional `engine` filter.
+
 The pyannote.ai hybrid (23 Sep) added one more ungrouped read tool, `scribe_diarize_spend`: per IST
 day, how many windows each diarizer labelled, how many audio-hours, and an ESTIMATE of the euros
 spent on the paid engine. The money is derived at read time from the audio seconds on each label
