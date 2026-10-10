@@ -108,13 +108,13 @@ afterAll(() => { if (HAVE) pg.stop(); });
     pg.exec(`DELETE FROM stt_subject_job`);
   });
 
-  it("diarize enqueue: held-out windows are not enqueued (and take no slot); the clean undiarized one is", async () => {
+  it("diarize enqueue: RETIRED (10 Oct 2026, the Nemotron ingest submits the job) — it enqueues nothing, held-out or clean", async () => {
     vi.resetModules();
     H.submitted.length = 0;
     const { enqueueDiarizeWindows } = await import("@/lib/stt/diarize-job");
     const r = await enqueueDiarizeWindows({ actor: "adm_test", log: () => {}, limit: 1 });
-    expect(H.submitted).toEqual(["bw_clean"]);
-    expect(r.n_blind_excluded).toBe(3);
+    expect(H.submitted).toEqual([]);
+    expect(r.note).toBe("retired: nemotron ingest drives diarize_window");
   });
 
   it("emotion enqueue: a diarized window placed on a held-out room-day is not enqueued; the clean diarized one is", async () => {

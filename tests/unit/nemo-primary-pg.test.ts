@@ -14,6 +14,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { readdirSync, readFileSync } from "node:fs";
 import { NextRequest } from "next/server";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const DOC = makeFakeClinician(1);
 
 const H = vi.hoisted(() => ({
   sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>,
@@ -110,7 +113,7 @@ const embedAnswer = () => ({
   ok: true,
   latencyMs: 12,
   speakers: [
-    { idx: 0, embedding_base64: f32(0), clinician_id: "doc_n1", label: "Dr Fake", type: "clinician", confidence: 0.93, source: "voiceprint" },
+    { idx: 0, embedding_base64: f32(0), clinician_id: "doc_n1", label: DOC.label, type: "clinician", confidence: 0.93, source: "voiceprint" },
     { idx: 1, embedding_base64: f32(1) },
   ],
 });
@@ -124,7 +127,7 @@ beforeAll(() => {
     INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('room_n1', 'nemo-room', 'Nemo Room', 'x', TRUE);
     INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_n1', 'room_n1', '${DAY}');
     INSERT INTO bench_session (id, room_id, started_at, ended_at, status) VALUES ('bs_n1', 'room_n1', '${DAY}T04:00:00Z', '${DAY}T20:00:00Z', 'ended');
-    INSERT INTO clinician (id, email, failed_pin_count, status, full_name, url_slug, url_token, pin_hash) VALUES ('doc_n1', 'doc_n1@example.invalid', 0, 'active', 'Dr Fake', 'dr-fake', 'tok_n1', 'x');
+    INSERT INTO clinician (id, email, failed_pin_count, status, full_name, url_slug, url_token, pin_hash) VALUES ('doc_n1', '${DOC.email}', 0, 'active', '${DOC.full_name}', 'dr-fake', 'tok_n1', 'x');
     INSERT INTO voice_print (doctor_id, centroid) VALUES ('doc_n1', decode('${f32(0)}', 'base64'));
   `);
 }, 300_000);
