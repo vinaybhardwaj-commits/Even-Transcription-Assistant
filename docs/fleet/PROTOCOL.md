@@ -64,7 +64,7 @@ Errors: 401 with one of `malformed|unknown_device|revoked|bad_signature|bad_audi
  "nonce":"<24-char base64 of 16 bytes>","issuer":{"kind":"operator|steward|bot","id":"…"},"approval_ref":"…"|null,"key_id":"fk1","signature":"<88-char base64>"}
 ```
 Every field is served as the issuer signed it (`machine` is the value stored when the command was queued, never the device's current registration), with one exception: `params` is stored as jsonb, so its KEYS COME BACK IN A DIFFERENT ORDER. Verify per PRD §5.3, which canonicalises (sorts keys) before checking the signature, so this is harmless; never verify over the raw bytes of the response. Timestamps are ISO-8601 UTC with EXACTLY milliseconds; `approval_ref` is ALWAYS present (string or `null`). The signature covers the canonical JSON of the envelope MINUS `signature`
-(keys sorted bytewise at every depth, no whitespace, UTF-8, integers only; PRD §5.3). Verify per PRD §5.3 (this slice does not sign; the signer and server keys arrive with #41).
+(see section 8 for the exact canonical form and the verifier). The signature is REAL from protocol v1.1 (TS-H4): the server signs every command with its Ed25519 key.
 Delivery is AT-LEAST-ONCE: a delivered command with no result is offered again after 30 s until it expires. Deduplicate on `cmd_id` and `nonce`. Never execute after `expires_at`; report `refused/expired` instead.
 At most 10 commands per poll, oldest first. A command is only ever served to the device it was issued to.
 
@@ -102,3 +102,69 @@ The results body (no trailing newline) and its hash:
 bsha = on8FSnX0CaYo7SsNSlFyxaqytNjjSkAxzSyDEGghZ7o
 ```
 Ed25519 is deterministic, so a correct client reproduces these tokens byte-for-byte from the seed and the claims in the order shown (`JSON` key order as listed in section 2; the server does not require an order, the vectors fix one).
+
+## 8. Envelope v2: signing, canonical form, catalogue, verifier (TS-H4 #41; protocol v1.1)
+
+### 8.1 What is signed
+`signature` = standard base64 (88 chars, padded) of the Ed25519 signature over the UTF-8 bytes of the CANONICAL JSON of the envelope WITHOUT the `signature` field. The remaining 12 fields are all present and signed:
+`v` (2) · `cmd_id` · `device_id` · `machine` · `verb` · `params` · `issued_at` · `expires_at` · `nonce` · `issuer` {`kind`,`id`} · `approval_ref` (string or `null`, always present) · `key_id`.
+The helper compiles in TWO server public keys (`fk1`, `fk2`: current and next) and verifies with the one named by `key_id`. The signing key is never served. Unknown `key_id` = `bad_signature`.
+
+### 8.2 Canonical JSON (what you must reproduce byte for byte)
+- Objects: keys sorted bytewise ascending at every depth; every key matches `^[a-z_][a-z0-9_]*$` (so no integer-like keys; an envelope with another key shape is malformed/bad_signature).
+- No whitespace between tokens. Output is UTF-8.
+- Numbers: INTEGERS ONLY, decimal, no exponent, no leading zeros, no `-0`, magnitude <= 2^53-1. The server never signs a float; if you receive one, the signature cannot be valid. (The two fractions in the PRD are integer percents: `input_volume_pct`, `volume_pct`, 0..100.)
+- Strings: `"` and `\` escaped as `\"` and `\\`; control characters U+0000..U+001F as `\b \f \n \r \t` or `\u00xx` (lowercase hex); EVERYTHING ELSE LITERALLY (non-ASCII, U+007F, U+2028, U+2029 are not escaped). Lone surrogates are refused. (This is ECMAScript `JSON.stringify` string escaping. Swift's `JSONSerialization`/`JSONEncoder` do NOT match it by default: write the serializer by hand.)
+- `true`, `false`, `null` literals; arrays keep their order.
+- Note: the poll response is ordinary JSON; `params` key ORDER in it is not the signed order. Re-canonicalise the parsed envelope, never hash the received bytes.
+
+### 8.3 The catalogue: 13 verbs, closed params (anything else is `verb_not_allowed` / `bad_params`)
+| verb | runs | privileged | params (all other keys refused) |
+|---|---|---|---|
+| `helper_status` | helper | no | `{}` |
+| `collect_diag` | helper | no | `scope` (required: `recorder\|audio\|power\|chrome\|helper`), `log_lines` (int 1..500) |
+| `report_diag` | app (XPC) | no | `{}` |
+| `coreaudiod_reset` | helper | YES | `{}` |
+| `usb_reseat` | helper | YES | `port` (string 1..32, optional; helper answers `unsupported` until hardware exists) |
+| `restart_recorder` | helper | YES | `force` (boolean, optional) |
+| `reload_launchagent` | helper | YES | `{}` |
+| `wake` | helper | no | `{}` |
+| `list_audio_inputs` | app | no | `{}` |
+| `select_audio_input` | app | no | `device_uid` (required, string 1..128), `input_volume_pct` (int 0..100) |
+| `self_test` | app | no | `volume_pct` (int 0..100, optional) |
+| `pieces_inventory` | app | no | `since` (ISO-8601 ms Z string, optional) |
+| `pieces_reupload` | app | no | `since` (ISO-8601 ms Z string, optional) |
+Strings must have no control characters and no surrogates. The split "5 helper + 5 app + 3 diagnose" follows #41/#42/#43; if the helper build disagrees about where a verb runs, say so: it is one line in `lib/fleet/verbs.ts`.
+
+### 8.4 Approval (`approval_ref`)
+`approval_ref` matches `^[A-Za-z0-9_-]{3,64}$`. The server REFUSES to issue a privileged verb inside clinic hours (07:30 inclusive to 21:30 exclusive, IST, every day) without one, and `restart_recorder` with `force:true` at ANY hour without one.
+The helper re-applies the same rule as its local gate `clinic_hours_needs_approval`. The server records that the reference was supplied; it does not (and cannot) check Vinay's GO itself.
+
+### 8.5 Verifier order (the helper must refuse at the FIRST failing step; reason codes go in the result)
+1 `malformed` (not exactly the 13 fields / wrong types / bad nonce / bad issuer kind) · 2 `bad_signature` (also: unknown `key_id`) · 3 `expired` (`expires_at - issued_at` <= 900 s, and `issued_at - 120 s` <= now <= `expires_at`) ·
+4 `replay` (nonce among the last 1,000 seen, kept root-only) · 5 `machine_mismatch` (`device_id` is not yours, or `machine` differs from yours after the repo's hostname normalisation) · 6 `verb_not_allowed` · 7 `bad_params` ·
+8 local gates (`session_open`, `no_console_user`, `clinic_hours_needs_approval`, `hid_active`) · 9 `rate_limited` (<= 10 privileged verbs per hour; <= 1 `coreaudiod_reset` per 30 min) · 10 `kill_switch`.
+A refusal is reported as a result with `outcome:"refused"` and `reason` = the code. The reference implementation is `verifyEnvelope` in `lib/fleet/envelope.ts`.
+
+### 8.6 Who can queue a command (server side)
+Exactly one route: `POST /api/admin/fleet/commands`, admin cookie only, body `{device_id, verb, params?, approval_ref?, ttl_s?}` (ttl 30..900, default 300). One outstanding command per (device, verb), enforced by the database (migration 0151: partial unique index on queued/delivered rows), so parallel requests yield one command and `409 outstanding` for the rest; a command past its TTL stops counting. Every enqueue writes its `fleet_audit` row in the SAME statement as the command (both land or neither does). A delivered command whose TTL passed before its answer can still be answered (`refused/expired`). Nothing queues automatically.
+`GET /api/admin/fleet` (admin) and the MCP view `scribe_kiosks view=helper|commands` are read-only and never expose signatures, nonces, keys or result details.
+
+### 8.7 Vectors (fixed FAKE key: seed 0x0b x 32; verified by tests/unit/fleet-h4-envelope.test.ts, which also checks them against an independent node script)
+```
+private seed (hex)     0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+public key (base64)    Zr5+Myx6RTMyvZ0Kf32wVfXF7xoGraZtmLOftoEMRzo=      (key_id "fk1")
+```
+Vector A (a diagnose command, `approval_ref` null). Canonical bytes (one line, no trailing newline):
+```
+{"approval_ref":null,"cmd_id":"cmd_00000000000000000001","device_id":"dev_000000000000000000000001","expires_at":"2026-10-10T07:05:00.000Z","issued_at":"2026-10-10T07:00:00.000Z","issuer":{"id":"op_example","kind":"operator"},"key_id":"fk1","machine":"EXAMPLE-MAC","nonce":"AAECAwQFBgcICQoLDA0ODw==","params":{"log_lines":200,"scope":"audio"},"v":2,"verb":"collect_diag"}
+```
+signature:
+```
+rvpslFmkoahEZ7Mng3sQodi3DMeNwysqjwzx0KUk62hODq+SeDJYH/lKo68Kxpyd0rZuYtunCSlhuCaga7+aAQ==
+```
+Vector B (forced restart with an approval_ref; same key): the envelope is vector A with `cmd_id` `cmd_00000000000000000002`, `verb` `restart_recorder`, `params` `{"force":true}`, `approval_ref` `go_example1`, `nonce` `EBESExQVFhcYGRobHB0eHw==`, `issued_at` `2026-10-10T07:10:00.000Z`, `expires_at` `2026-10-10T07:15:00.000Z`.
+signature:
+```
+5OGLMDD9y38GH6MO0eX4Y+dFqVGYqrFm7Ya3uClkmq1ChctvKmaWOUT/CP+IPubuC41cQKItO55iMhLCNwinDg==
+```

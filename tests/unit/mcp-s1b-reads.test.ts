@@ -272,7 +272,7 @@ describe("scribe_kiosks", () => {
   });
 
   it("rejects an unknown view; an unknown room reads no kiosk table", async () => {
-    expect(await run("scribe_kiosks", { view: "x" })).toMatchObject({ ok: false, error: "unknown_view", allowed: ["health", "versions", "devices", "power", "last_seen"] });
+    expect(await run("scribe_kiosks", { view: "x" })).toMatchObject({ ok: false, error: "unknown_view", allowed: ["health", "versions", "devices", "power", "last_seen", "helper", "commands"] });
     statements.length = 0;
     expect(await run("scribe_kiosks", { view: "health", room: "nope" })).toEqual({ ok: false, error: "unknown_room", room: "nope" });
     expect(statements.filter((s) => /room_install|kiosk_health/.test(s.text))).toEqual([]);

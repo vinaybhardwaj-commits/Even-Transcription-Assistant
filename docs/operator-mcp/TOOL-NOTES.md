@@ -362,3 +362,8 @@ The audit row's `variant` is the member that ran.
 including `x-scribe-profile`).
 
 `scripts/mcp-surface-report.ts` writes `fixtures/mcp/live-tools-list-<sha>.json` (default) and `-<sha>-lab.json` (the /lab selector); the two are identical since S1A.
+
+## scribe_kiosks views `helper` and `commands` (TS-H13 #50, 10 Oct 2026)
+Read scope, unchanged tool. `helper`: registered room-Mac helper devices (device id, room, machine, status, helper version, last long-poll age in seconds, queued/delivered/done/expired command counts). `commands`: the newest 20 signed commands per device
+(verb, closed params, state, issuer, whether an approval_ref was given, delivery count, and the result's outcome/reason/finish time) plus the newest 30 `fleet_audit` rows. `room` narrows both. Never returned: signatures, nonces, public keys, tokens, result `detail`.
+There is no MCP door that queues a command: the only enqueue is the admin-cookie route `POST /api/admin/fleet/commands`. Protocol: docs/fleet/PROTOCOL.md.

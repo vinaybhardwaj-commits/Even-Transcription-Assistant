@@ -30,6 +30,7 @@ import * as React from "react";
 import { BenchLevelMeter } from "@/components/admin/BenchLevelMeter";
 import { isDigitalSilence } from "@/lib/bench-meter";
 import { FleetAttentionBadge, FleetAttentionPanel, useFleetAttention } from "@/components/admin/FleetAttentionPanel";
+import { FleetHelperPanel } from "@/components/admin/FleetHelperPanel";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
 // lib/brain/db, and importing it here would pull a Postgres driver into the browser bundle.
 import {
@@ -969,6 +970,7 @@ export function BenchRoomsLive() {
       {/* FLEET ATTENTION — replaces the bare "Nothing needs attention." line, which this page printed with OPD 4 silent for four days. The
           panel says all-clear only when the server read every source and found nothing, and never while the list above has items. */}
       <FleetAttentionPanel state={fleetAttention} legacyCount={attention.length} nowMs={nowMs} />
+      <FleetHelperPanel />
 
       {/* CARDS, not rows (E1). A table is for comparing rooms; the operator is not comparing,
           they are scanning for trouble — so the worst condition promotes the whole card and finds

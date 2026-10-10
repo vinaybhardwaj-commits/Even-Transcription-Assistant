@@ -9,6 +9,7 @@
  * A missing table or column (SQLSTATE 42P01 / 42703) answers { not_collected: true, reason } for that view. No transcript text, no patient
  * identifier, no ticket signature or nonce, no storage key is returned.
  */
+import { fleetAudit, fleetCommands, fleetDevices } from "@/lib/fleet/read";
 import { windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
 import { windowDetailRow, windowRunSummaries, windowsStartingIn } from "@/lib/room-access/tool-reads";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
@@ -462,7 +463,7 @@ const steward: McpTool = {
 // scribe_kiosks
 // ---------------------------------------------------------------------------
 
-const KIOSK_VIEWS = ["health", "versions", "devices", "power", "last_seen"] as const;
+const KIOSK_VIEWS = ["health", "versions", "devices", "power", "last_seen", "helper", "commands"] as const;
 type KioskView = (typeof KIOSK_VIEWS)[number];
 
 type Install = { room_id: string; room_name: string; hostname: string | null; row: Row };
@@ -707,7 +708,8 @@ const kiosks: McpTool = {
   name: "scribe_kiosks",
   description:
     "Kiosk fleet, read-only; reads live kiosks' stored reports, sends no command. `view`: health (newest event per kind, 24 h), versions (app, OS, update channel, last update, extension), devices (audio inputs as stored), " +
-    "power (sleep/wake/shutdown events; not_collected when none stored), last_seen (newest signal per room with ages_s). `room` narrows to one room; omit for every enrolled kiosk (max 40). " +
+    "power (sleep/wake/shutdown events; not_collected when none stored), last_seen (newest signal per room with ages_s), helper (TS-H13: registered helper devices, last poll age, queued/delivered/done/expired command counts), " +
+    "commands (the last 20 signed commands per helper device with verb, state, issuer and outcome; counts and ids only, never signatures, nonces, keys or result details). `room` narrows to one room; omit for every enrolled kiosk (max 40). " +
     "Health payloads and log lines are never returned. Times UTC.",
   scope: "read",
   inputSchema: {
@@ -724,6 +726,14 @@ const kiosks: McpTool = {
     if (!view || !KIOSK_VIEWS.includes(view)) return { ok: false, error: "unknown_view", allowed: [...KIOSK_VIEWS] };
     const r = await optionalRoom(args);
     if ("error" in r) return r.error;
+    if (view === "helper" || view === "commands") {
+      const fleetBody = await guarded(async () =>
+        view === "helper"
+          ? { ok: true, devices: await fleetDevices(sql as never, r.room?.id ?? null) }
+          : { ok: true, commands: await fleetCommands(sql as never, { roomId: r.room?.id ?? null }), audit: await fleetAudit(sql as never, 30) },
+      );
+      return { view, ...(r.room ? { room: roomRef(r.room) } : {}), ...fleetBody };
+    }
     const body = await guarded(async () => {
       const list = await installs(r.room?.id ?? null);
       switch (view) {
@@ -732,6 +742,7 @@ const kiosks: McpTool = {
         case "devices": return kioskDevices(list);
         case "power": return kioskPower(list);
         case "last_seen": return kioskLastSeen(list);
+        default: return { ok: false, error: "unknown_view" };
       }
     });
     return { view, ...(r.room ? { room: roomRef(r.room) } : {}), ...body };

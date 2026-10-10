@@ -1,55 +1,89 @@
 /**
- * lib/fleet/commands.ts — queue a command for a device (TS-H3 #40). A LIBRARY ONLY: no route calls it, so nothing in this slice can send anything to a room Mac.
- * The issuer (operator UI / Steward / MCP, TS-H4 #41) builds and SIGNS the envelope v2 (canonical JSON, Ed25519, a server key id from FLEET_SERVER_KEY_IDS); this
- * function checks the SHAPE and the closed catalogue (FLEET_VERBS) and stores it. It does not verify the signature (the server's signing keys land with #41); the
- * helper verifies it against its compiled-in keys and refuses a bad one (`bad_signature`).
+ * lib/fleet/commands.ts — queue a SIGNED command for a device (TS-H3 #40, TS-H4 #41).
+ *
+ *   issueCommand(sql, signer, spec)   the only path an operator action takes: validate against the closed catalogue, apply the approval rule, build + sign envelope v2, store it.
+ *   queueCommand(sql, envelope, keys) storage with a gate: the envelope must be shaped, in the catalogue, closed-params, and carry a VALID SIGNATURE under `keys`. An unsigned,
+ *                                     forged or already-expired envelope is refused and nothing is stored. (The library is internal; the only route that calls it is the
+ *                                     admin-only POST /api/admin/fleet/commands.)
+ * Nothing here runs on a schedule. No cron, worker or poll handler ever calls these.
  */
+import { normalizeHostname } from "@/lib/encounter-windows/types";
 import type { FleetSql } from "./device-auth";
-import { FLEET_SERVER_KEY_IDS, isFleetVerb } from "./verbs";
+import { approvalProblem, buildSignedEnvelope, envelopeShapeOk, isoMs, verifyEnvelope, publicKeysOf, DEFAULT_TTL_S, MAX_TTL_S, MIN_TTL_S, type Envelope, type IssueSpec } from "./envelope";
+import type { Signer } from "./signing";
+import { isFleetVerb, paramsValid, CATALOGUE } from "./verbs";
 
-const KEY_RE = /^[a-z_][a-z0-9_]*$/;
-const ISO_MS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const MAX_PARAMS_BYTES = 2048;
-export const MAX_COMMAND_TTL_S = 900;
+export type QueueResult = { ok: true; cmd_id: string; expires_at: string } | { ok: false; reason: string };
 
-export type QueueInput = {
-  cmd_id: string; device_id: string; machine: string; verb: string; params: Record<string, unknown>;
-  issued_at: string; expires_at: string; nonce: string;
-  issuer: { kind: "operator" | "steward" | "bot"; id: string };
-  approval_ref: string | null; key_id: string; signature: string;
-};
-
-const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
-const paramsOk = (v: unknown, depth = 0): boolean =>
-  depth <= 4 && (Array.isArray(v) ? v.every((x) => paramsOk(x, depth + 1)) : isObj(v) ? Object.keys(v).every((k) => KEY_RE.test(k) && paramsOk(v[k], depth + 1)) : typeof v !== "number" || Number.isInteger(v));
-
-export type QueueResult = { ok: true } | { ok: false; reason: string };
-
-export async function queueCommand(sql: FleetSql, c: QueueInput): Promise<QueueResult> {
-  if (typeof c.cmd_id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(c.cmd_id)) return { ok: false, reason: "malformed" };
-  if (!isFleetVerb(c.verb)) return { ok: false, reason: "verb_not_allowed" };
-  if (!isObj(c.params) || !paramsOk(c.params) || Buffer.byteLength(JSON.stringify(c.params)) > MAX_PARAMS_BYTES) return { ok: false, reason: "bad_params" };
-  if (!ISO_MS_RE.test(c.issued_at) || !ISO_MS_RE.test(c.expires_at)) return { ok: false, reason: "bad_time" };
-  const ttl = (Date.parse(c.expires_at) - Date.parse(c.issued_at)) / 1000;
-  if (!(ttl > 0 && ttl <= MAX_COMMAND_TTL_S)) return { ok: false, reason: "bad_ttl" };
-  if (typeof c.nonce !== "string" || !/^[A-Za-z0-9+/]{22}==$/.test(c.nonce)) return { ok: false, reason: "bad_nonce" };
-  if (!(FLEET_SERVER_KEY_IDS as readonly string[]).includes(c.key_id)) return { ok: false, reason: "unknown_key_id" };
-  if (typeof c.signature !== "string" || !/^[A-Za-z0-9+/]{86}==$/.test(c.signature)) return { ok: false, reason: "bad_signature_shape" };
-  if (!["operator", "steward", "bot"].includes(c.issuer?.kind) || typeof c.issuer?.id !== "string" || c.issuer.id.length < 1 || c.issuer.id.length > 64) return { ok: false, reason: "bad_issuer" };
-  if (c.approval_ref !== null && !(typeof c.approval_ref === "string" && c.approval_ref.length >= 1 && c.approval_ref.length <= 64)) return { ok: false, reason: "bad_approval_ref" };
-  const dev = (await sql`SELECT machine, status FROM fleet_devices WHERE device_id = ${c.device_id}`) as Array<{ machine: string; status: string }>;
+export async function queueCommand(sql: FleetSql, e: unknown, publicKeys: Record<string, string>, nowMs: number = Date.now()): Promise<QueueResult> {
+  if (!envelopeShapeOk(e)) return { ok: false, reason: "malformed" };
+  if (!isFleetVerb(e.verb)) return { ok: false, reason: "verb_not_allowed" };
+  if (!paramsValid(e.verb, e.params) || Buffer.byteLength(JSON.stringify(e.params)) > MAX_PARAMS_BYTES) return { ok: false, reason: "bad_params" };
+  const ttlMs = Date.parse(e.expires_at) - Date.parse(e.issued_at);
+  if (!(ttlMs > 0 && ttlMs <= MAX_TTL_S * 1000)) return { ok: false, reason: "bad_ttl" };
+  // signature, TTL and expiry exactly as the helper will check them; the device/nonce steps are the database's (below)
+  const v = verifyEnvelope(e, { publicKeys, nowMs, nonceSeen: () => false, deviceId: e.device_id, machine: e.machine });
+  if (!v.ok) return { ok: false, reason: v.reason };
+  const dev = (await sql`SELECT machine, status FROM fleet_devices WHERE device_id = ${e.device_id}`) as Array<{ machine: string; status: string }>;
   if (!dev[0]) return { ok: false, reason: "unknown_device" };
   if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
-  if (dev[0].machine !== c.machine) return { ok: false, reason: "machine_mismatch" };
+  if (normalizeHostname(dev[0].machine) !== normalizeHostname(e.machine)) return { ok: false, reason: "machine_mismatch" };
+  // A command that already ran out of time stops being "outstanding" before we insert (0151's partial unique index counts queued/delivered rows).
+  await sql`
+    UPDATE fleet_commands SET state = 'expired'
+     WHERE device_id = ${e.device_id} AND verb = ${e.verb} AND state IN ('queued', 'delivered') AND expires_at <= now()
+  `;
+  // ONE statement: the command row and its audit row land together or not at all (a failing audit insert rolls the command back, so a signed command can never reach a Mac
+  // unaudited). ON CONFLICT DO NOTHING absorbs the three unique keys: cmd_id, (device, nonce) and 0151's one-outstanding-per-(device, verb), even under concurrent enqueues.
   const ins = await sql`
-    INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
-    VALUES (${c.cmd_id}, ${c.device_id}, ${c.machine}, ${c.verb}, ${JSON.stringify(c.params)}::jsonb, ${c.issued_at}::timestamptz, ${c.expires_at}::timestamptz, ${c.nonce}, ${c.issuer.kind}, ${c.issuer.id}, ${c.approval_ref}, ${c.key_id}, ${c.signature})
-    ON CONFLICT DO NOTHING
+    WITH ins AS (
+      INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
+      VALUES (${e.cmd_id}, ${e.device_id}, ${e.machine}, ${e.verb}, ${JSON.stringify(e.params)}::jsonb, ${e.issued_at}::timestamptz, ${e.expires_at}::timestamptz, ${e.nonce}, ${e.issuer.kind}, ${e.issuer.id}, ${e.approval_ref}, ${e.key_id}, ${e.signature})
+      ON CONFLICT DO NOTHING
+      RETURNING cmd_id, machine, verb, approval_ref, issuer_kind, issuer_id
+    )
+    INSERT INTO fleet_audit (actor, action, cmd_id, machine, summary)
+    SELECT issuer_kind || ':' || issuer_id, 'queue', cmd_id, machine, 'verb ' || verb || CASE WHEN approval_ref IS NULL THEN '' ELSE ' (approval_ref given)' END FROM ins
     RETURNING cmd_id
   `;
-  if (ins.length === 0) return { ok: false, reason: "duplicate" };
-  await sql`INSERT INTO fleet_audit (actor, action, cmd_id, machine, summary) VALUES (${`${c.issuer.kind}:${c.issuer.id}`}, 'queue', ${c.cmd_id}, ${c.machine}, ${`verb ${c.verb}`})`;
-  return { ok: true };
+  if (ins.length === 0) {
+    // which key did it hit? the same cmd_id / nonce is a duplicate; otherwise a command for this (device, verb) is already outstanding
+    const dup = await sql`SELECT 1 FROM fleet_commands WHERE cmd_id = ${e.cmd_id} OR (device_id = ${e.device_id} AND nonce = ${e.nonce}) LIMIT 1`;
+    return { ok: false, reason: dup.length > 0 ? "duplicate" : "outstanding" };
+  }
+  return { ok: true, cmd_id: e.cmd_id, expires_at: e.expires_at };
+}
+
+export type IssueInput = {
+  device_id: string;
+  verb: unknown;
+  params?: unknown;
+  approval_ref?: unknown;
+  ttl_s?: unknown;
+  issuer: IssueSpec["issuer"];
+  nowMs?: number;
+};
+
+/** Validate, apply the approval rule, sign, store. `reason` is one of: verb_not_allowed bad_params bad_ttl bad_approval_ref approval_required unknown_device device_revoked outstanding. */
+export async function issueCommand(sql: FleetSql, signer: Signer, i: IssueInput): Promise<QueueResult> {
+  const nowMs = i.nowMs ?? Date.now();
+  if (!isFleetVerb(i.verb)) return { ok: false, reason: "verb_not_allowed" };
+  const params = i.params === undefined ? {} : i.params;
+  if (typeof params !== "object" || params === null || Array.isArray(params) || !paramsValid(i.verb, params)) return { ok: false, reason: "bad_params" };
+  const ttl = i.ttl_s === undefined ? DEFAULT_TTL_S : i.ttl_s;
+  if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < MIN_TTL_S || ttl > MAX_TTL_S) return { ok: false, reason: "bad_ttl" };
+  const approval = i.approval_ref === undefined || i.approval_ref === null ? null : i.approval_ref;
+  if (approval !== null && typeof approval !== "string") return { ok: false, reason: "bad_approval_ref" };
+  const problem = approvalProblem(i.verb, params as Record<string, unknown>, approval, nowMs);
+  if (problem) return { ok: false, reason: problem };
+  const dev = (await sql`SELECT machine, status FROM fleet_devices WHERE device_id = ${i.device_id}`) as Array<{ machine: string; status: string }>;
+  if (!dev[0]) return { ok: false, reason: "unknown_device" };
+  if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
+  // One outstanding command per (device, verb) is enforced by the database (0151's partial unique index, mapped to `outstanding` in queueCommand): a double click,
+  // a retry or six parallel requests cannot stack work on a Mac. There is deliberately no check-then-insert here.
+  const env: Envelope = buildSignedEnvelope({ device_id: i.device_id, machine: dev[0].machine, verb: i.verb, params: params as Record<string, unknown>, issuer: i.issuer, approval_ref: approval, ttl_s: ttl, nowMs }, signer);
+  return queueCommand(sql, env, publicKeysOf(signer), nowMs);
 }
 
 /** Revoke a device's key (operator action; no route yet). A revoked device is answered 401 revoked and stops. */
@@ -59,3 +93,4 @@ export async function revokeDevice(sql: FleetSql, deviceId: string, actor: strin
   await sql`INSERT INTO fleet_audit (actor, action, machine, summary) VALUES (${actor}, 'revoke', ${(r[0] as { machine: string }).machine}, ${`device ${deviceId} revoked`})`;
   return true;
 }
+export { CATALOGUE, isoMs };
