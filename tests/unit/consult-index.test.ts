@@ -14,7 +14,7 @@ vi.mock("@/lib/consult-index/sync", () => ({ syncConsultIndex: S.sync }));
 vi.mock("@/lib/cookie", () => ({ readAdminCookie: async () => null }));
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no sql in a pure test"); } }));
 
-import { istWallToMs, normalizeRow, parseIndex, sha256Hex, spanOf } from "@/lib/consult-index/parse";
+import { istWallToMs, normalizeRow, parseIndex, sha256Hex, signatureVersion, spanOf } from "@/lib/consult-index/parse";
 import { consultResultView } from "@/lib/consult-index/result-view";
 import { BATCH_MAX_UIDS, parseBatchArgs } from "@/lib/jobs/kinds/sarvam-consult-batch";
 import { parseSarvamTranscribeArgs } from "@/lib/jobs/kinds/sarvam-transcribe";
@@ -54,12 +54,12 @@ describe("time: the cutter writes IST wall-clock strings and a UTC epoch", () =>
 });
 
 describe("normalizeRow", () => {
-  it("maps a cut, mirrored row: absolute span, clip key from validated parts, cut version = cut_at, sealed false, doctor_uid as recorded, no name", () => {
+  it("maps a cut, mirrored row: absolute span, clip key from validated parts, cut version = the signature's version, sealed false, doctor_uid as recorded, no name", () => {
     const n = normalizeRow(row());
     if (!("row" in n)) throw new Error("skipped");
     expect(n.row).toMatchObject({
       consult_uid: UID, room_id: "room_qyzghzaf", room_slug: "opd-7-y74w", ist_date: "2026-10-06", clip_r2_key: `consult-clips/2026-10-06/opd-7-y74w/${UID}/consult.flac`, t1_ms: 1791263093662,
-      cut_version: "2026-10-09T02:14:48+0530", code_commit: "ec8fa64", sealed: false, doctor_uid: "DOCTORUID1", doctor_identified: false, voice_isolated: false, minutes: 1.48, bytes: 105, quality: "unattributed", coverage: 1,
+      cut_version: signatureVersion({ doctor: "SIGSECRET" }), code_commit: "ec8fa64", sealed: false, doctor_uid: "DOCTORUID1", doctor_identified: false, voice_isolated: false, minutes: 1.48, bytes: 105, quality: "unattributed", coverage: 1,
     });
     const json = JSON.stringify(n.row);
     expect(json).not.toContain(DOC.full_name);
@@ -82,7 +82,7 @@ describe("normalizeRow", () => {
     ["a bad date", { ist_date: "06-10-2026" }, "bad_place"],
     ["a bad span", { span_start: "nope" }, "bad_span"],
     ["a prefix that is not this consult's", { r2: { status: "mirrored", bucket: "eta-audio", prefix: "consult-clips/2026-10-06/other/ZZZ" } }, "bad_prefix"],
-    ["no cut version", { cut_at: undefined }, "no_cut_version"],
+    ["no cut version", { cut_at: undefined, signature: undefined }, "no_cut_version"],
   ])("skips a row that is %s", (_n, over, why) => {
     expect(normalizeRow(row(over))).toEqual({ skip: why });
   });
@@ -118,7 +118,7 @@ describe("THE PUBLISHED SHAPE: the writer drops `status` and r2.status, and the 
   it("a published row is INDEXED (this is the regression: every such row used to be skipped as not_cut)", () => {
     const n = normalizeRow(published(row()));
     if (!("row" in n)) throw new Error(`skipped: ${JSON.stringify(n)}`);
-    expect(n.row).toMatchObject({ consult_uid: UID, clip_r2_key: `consult-clips/2026-10-06/opd-7-y74w/${UID}/consult.flac`, t1_ms: 1791263093662, cut_version: "2026-10-09T02:14:48+0530", sealed: false, doctor_uid: "DOCTORUID1" });
+    expect(n.row).toMatchObject({ consult_uid: UID, clip_r2_key: `consult-clips/2026-10-06/opd-7-y74w/${UID}/consult.flac`, t1_ms: 1791263093662, cut_version: signatureVersion({ doctor: "SIGSECRET" }), sealed: false, doctor_uid: "DOCTORUID1" });
   });
   it("bytes come from the per-file sizes when bytes_total is not published", () => {
     const n = normalizeRow(published(row()));
@@ -159,9 +159,33 @@ describe("THE PUBLISHED SHAPE: the writer drops `status` and r2.status, and the 
   });
 });
 
-describe("parseIndex: the mirror's integrity rule", () => {
+describe("the CUT VERSION is the cutter's signature (what palimpsest stamps on its tracks as config.clip_signature)", () => {
+  const SIG = { start: 1791296881.32, end: 1791297441.34, rule: "explicit_close+15s", mode: "fixed", doctor: "DOCTORUID1", print: true, cov: 1, room: "opd-7-y74w", day: "2026-10-06" };
+  it("is the same whatever the key order, and different when the clip changed (a re-cut)", () => {
+    const a = signatureVersion(SIG)!;
+    expect(a).toMatch(/^sig:[0-9a-f]{20}$/);
+    expect(signatureVersion(Object.fromEntries(Object.entries(SIG).reverse()))).toBe(a);
+    expect(signatureVersion({ ...SIG, end: 1791297999.99 })).not.toBe(a);
+    expect(signatureVersion({ ...SIG, cov: 0.8 })).not.toBe(a);
+    expect(signatureVersion({ ...SIG, search_end: 1 })).not.toBe(a);
+    expect(signatureVersion(JSON.parse(JSON.stringify(SIG)))).toBe(a); // a round trip through JSON (the track file) gives the same version
+  });
+  it("is null for no signature, so the row falls back to cut_at", () => {
+    for (const bad of [null, undefined, {}, [], "x", 5]) expect(signatureVersion(bad), String(bad)).toBeNull();
+    const n = normalizeRow(row({ signature: undefined }));
+    expect("row" in n && n.row.cut_version).toBe("2026-10-09T02:14:48+0530");
+  });
+  it("a row with a signature takes it; an explicit upstream cut_version still wins", () => {
+    const n = normalizeRow(row({ signature: SIG }));
+    expect("row" in n && n.row.cut_version).toBe(signatureVersion(SIG));
+    const m = normalizeRow(row({ signature: SIG, cut_version: "v9" }));
+    expect("row" in m && m.row.cut_version).toBe("v9");
+  });
+});
+
+describe("parseIndex: the mirror\'s integrity rule", () => {
   it("accepts a file whose sha256 equals the manifest's, and takes the LATEST line per consult_uid", () => {
-    const latest = lines(row({ cut_at: "2026-10-08T10:00:00+0530" }), row({ cut_at: "2026-10-09T10:00:00+0530" }));
+    const latest = lines(row({ cut_at: "2026-10-08T10:00:00+0530", signature: undefined }), row({ cut_at: "2026-10-09T10:00:00+0530", signature: undefined }));
     const r = parseIndex(latest, manifestFor(latest));
     if (!r.ok) throw new Error("integrity");
     expect(r.parsed.read).toBe(2);

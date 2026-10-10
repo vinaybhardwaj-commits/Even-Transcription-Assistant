@@ -7,9 +7,10 @@
 import { sql } from "@/lib/db";
 import type { IndexRow } from "@/lib/consult-index/parse";
 
-export type StoredIndexRow = IndexRow & { synced_at: string; first_seen_at: string };
+export type StoredIndexRow = Omit<IndexRow, "cut_at"> & { synced_at: string; first_seen_at: string };
 
 const BATCH = 200;
+
 
 export async function startSync(): Promise<number> {
   const rows = (await sql`INSERT INTO consult_index_sync DEFAULT VALUES RETURNING id`) as Array<{ id: number | string }>;
@@ -27,6 +28,9 @@ export async function finishSync(id: number, f: { status: "ok" | "failed"; error
 }
 
 /**
+ * NO CARRY-OVER OF RESULTS ACROSS CUT VERSIONS. An earlier release rewrote a stored result's cut_version when the version changed form (cut_at -> signature). That keyed on the cut TIME only: nothing proves the
+ * AUDIO is the same (a re-cut can reuse a cut_at, and the index stores no content identity of the clip: no etag, no sha256, no per-file hash), so a result could be handed to a different recording. It is DISABLED:
+ * a result is found only under the exact cut_version it was stored with (same-cut reuse); a changed version is a new ask. The statement below is ONLY the index upsert and never touches consult_sarvam_result.
  * Upsert rows (the BACKFILL is the first run: the mirror holds everything already cut). Returns how many rows were inserted and how many existing rows changed. An existing row is rewritten only if a field
  * differs; `sealed` is OR-ed (sticky); first_seen_at is kept; the bench session is the upstream's when it names one, else the session of that room that covers t0.
  */

@@ -131,3 +131,66 @@ export async function findRebTrack(uid: string, roomId: string, istDate: string,
   }
   return { found: null, n_integrity_skipped: skipped };
 }
+
+// ---- consult-reuse: the palimpsest's OWN Sarvam tracks of THIS cut, found before Sarvam is called again ---------------------------------------------------------------------
+export const SARVAM_TRACK_ENGINE = "sarvam-saaras-v3";
+export type SarvamTrackSegment = { t0_ms: number; t1_ms: number; speaker: string | null; lang: string | null; text: string };
+export type SarvamTrack = { layer: "stt" | "translate"; engine: string; model: string | null; version: string | null; config_hash: string; r2_key: string; segments: SarvamTrackSegment[] };
+export type SarvamReuse = { found: { stt: SarvamTrack | null; translate: SarvamTrack | null } | null; n_integrity_skipped: number; n_other_cut: number; missing: Array<"stt" | "translate"> } | { unavailable: true };
+
+/**
+ * A live (status ok, not shadow) engine sarvam-saaras-v3 track of this consult, FOR THIS CUT: the track's own config.clip_signature must give the same cut version as the index row's (`cutVersion`, from
+ * lib/consult-index/parse.ts signatureVersion). A track of another cut (the clip was re-cut after the track was made) is skipped and counted, never returned. The same key ownership (this uid, this room) and
+ * sha256 checks as every other palimpsest read. Newest first; the newest matching track of each layer (stt, translate) is returned.
+ *
+ * FAIL CLOSED. If the lookup cannot be made (the index table cannot be read, the lab store is not configured, or a read throws) the answer is { unavailable: true }, never "none": a caller that took a
+ * failure for "no track" would pay Sarvam for a consult that already has one. A track the INDEX says is ok but whose R2 object is gone cannot be checked against the cut (its signature is in the object),
+ * so it is reported in `missing` (by layer) and the caller must NOT silently pay Sarvam for it (track_missing; only force:true goes on).
+ */
+export async function findSarvamTracks(uid: string, roomId: string, roomSlug: string, cutVersion: string, signatureOf: (sig: unknown) => string | null): Promise<SarvamReuse> {
+  if (!UID_RE.test(uid)) return { found: null, n_integrity_skipped: 0, n_other_cut: 0, missing: [] };
+  const store = labStore();
+  if (!store) return { unavailable: true };
+  let rows: IndexRow[];
+  try {
+    rows = (await sql`
+      SELECT layer, engine, config_hash, r2_key, sha256
+        FROM reb_track_index
+       WHERE window_id = ${`consult-${uid}`}::text AND status = 'ok' AND shadow = false AND engine = ${SARVAM_TRACK_ENGINE}::text AND layer IN ('stt', 'translate')
+       ORDER BY finished_at DESC NULLS LAST, id DESC
+       LIMIT 40
+    `) as IndexRow[];
+  } catch {
+    return { unavailable: true };
+  }
+  const out: { stt: SarvamTrack | null; translate: SarvamTrack | null } = { stt: null, translate: null };
+  let skipped = 0, otherCut = 0;
+  const missing: Array<"stt" | "translate"> = [];
+  try {
+    for (const row of rows) {
+      const layer = row.layer === "stt" || row.layer === "translate" ? row.layer : null;
+      if (!layer || out[layer]) continue;
+      const m = REB_CONSULT_KEY.exec(String(row.r2_key));
+      if (!m || m[3] !== uid || (m[2] !== roomId && m[2] !== roomSlug)) { skipped += 1; continue; }
+      const obj = await store.get(row.r2_key);
+      if (!obj) { if (!missing.includes(layer)) missing.push(layer); continue; }
+      if (typeof row.sha256 !== "string" || sha256(obj.body) !== row.sha256.toLowerCase()) { skipped += 1; continue; }
+      let doc: { status?: unknown; engine?: unknown; model?: unknown; version?: unknown; segments?: unknown; config?: { clip_signature?: unknown } };
+      try { doc = JSON.parse(obj.body); } catch { skipped += 1; continue; }
+      if (doc?.status !== "ok" || doc.engine !== SARVAM_TRACK_ENGINE || !Array.isArray(doc.segments)) continue;
+      if (signatureOf(doc.config?.clip_signature) !== cutVersion) { otherCut += 1; continue; }
+      const segs: SarvamTrackSegment[] = [];
+      for (const g of doc.segments as Array<Record<string, unknown>>) {
+        if (!g || typeof g !== "object") continue;
+        const t0 = Number(g.t0_ms), t1 = Number(g.t1_ms);
+        if (!Number.isFinite(t0) || !Number.isFinite(t1)) continue;
+        segs.push({ t0_ms: t0, t1_ms: t1, speaker: typeof g.speaker === "string" ? g.speaker : null, lang: typeof g.lang === "string" ? g.lang : null, text: typeof g.text === "string" ? g.text : "" });
+      }
+      out[layer] = { layer, engine: SARVAM_TRACK_ENGINE, model: typeof doc.model === "string" ? doc.model : null, version: typeof doc.version === "string" ? doc.version : null, config_hash: String(row.config_hash), r2_key: row.r2_key, segments: segs };
+    }
+  } catch {
+    return { unavailable: true };
+  }
+  // a layer that WAS found is not missing (an older indexed row of it may be gone; the newest matching track is what counts)
+  return { found: out.stt || out.translate ? out : null, n_integrity_skipped: skipped, n_other_cut: otherCut, missing: missing.filter((l) => !out[l]) };
+}

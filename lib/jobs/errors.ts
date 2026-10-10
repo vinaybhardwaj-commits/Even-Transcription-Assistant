@@ -93,6 +93,8 @@ export const JOB_ERROR_CODES = [
   "mirror_minutes_missing",
   "already_transcribed",
   "audio_unreadable",
+  "reuse_lookup_unavailable",
+  "track_missing",
   "consult_batch_timeout",
   "duration_unknown",
   // the stubs

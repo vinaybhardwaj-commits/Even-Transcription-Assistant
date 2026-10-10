@@ -8,10 +8,11 @@
  * Fields read here: consult_uid, ist_date, room_id, room_slug, span_start / span_end ("YYYY-MM-DD HH:MM:SS.mmm" in IST, no zone), span_end_epoch (UTC seconds), cut_at, code_commit, minutes,
  * bytes (an object of file sizes), quality, coverage, voice_isolated, doctor_uid, doctor_identified, r2 {bucket, prefix}.
  * It carries NO session_id, cut_version or sealed field today: this module reads them if consult-lead adds them (sealed === true; cut_version as a string), and otherwise derives
- *   cut_version = the row's cut_at (a re-cut changes it), and sealed = false. UNVERIFIED against a live mirror: the mirror object itself was not read from here.
+ *   cut_version = signatureVersion(row.signature) (what palimpsest stamps on its tracks as config.clip_signature; the row's cut_at only if there is no signature), and sealed = false. UNVERIFIED against a live mirror: the mirror object itself was not read from here.
  *
  * INTEGRITY: sha256(latest.jsonl) must equal the manifest's sha256, else NO row is read. A row that is not a clean cut clip is skipped and COUNTED by reason, never silently dropped.
- * NO NAMES: doctor_name and signature are never read.
+ * NO NAMES: doctor_name is never read. `signature` (the cutter's clip signature: times, rule, mode, coverage, the room slug and an opaque doctor id) is read ONLY to be hashed into the cut version
+ * (signatureVersion) and is never stored or returned.
  */
 import { createHash } from "node:crypto";
 import { consultClipKey } from "@/lib/room-access/keys";
@@ -46,6 +47,17 @@ export type IndexRow = {
 
 export type SkipReason = "not_json" | "no_uid" | "not_cut" | "not_mirrored" | "no_clip_key" | "bad_place" | "bad_span" | "bad_prefix" | "no_cut_version";
 export type ParsedIndex = { rows: IndexRow[]; read: number; skipped: Record<string, number> };
+
+/**
+ * PURE: the CUT VERSION from the cutter's row `signature` ({start, end, rule, mode, doctor, print, cov, room, day, ...}). Palimpsest stamps the same object into every track it makes as
+ * config.clip_signature, so "the track is for this cut" is "the two signatures are equal" - measured on the box: 432 of 438 Sarvam tracks equal their row's signature, and the 6 that do not are
+ * clips that were RE-CUT after the track was made (a different end / coverage). The version is a short hash of the signature with its keys sorted, so key order cannot matter.
+ */
+export function signatureVersion(sig: unknown): string | null {
+  if (!sig || typeof sig !== "object" || Array.isArray(sig) || Object.keys(sig as object).length === 0) return null;
+  const canon = (v: unknown): string => (Array.isArray(v) ? `[${v.map(canon).join(",")}]` : v && typeof v === "object" ? `{${Object.keys(v as object).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}` : JSON.stringify(v));
+  return `sig:${sha256Hex(canon(sig)).slice(0, 20)}`;
+}
 
 export const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 
@@ -102,7 +114,7 @@ export function normalizeRow(r: Record<string, unknown>): { row: IndexRow } | { 
   // the clip key is built from validated parts only, and must be the prefix the cutter says it mirrored to
   const key = consultClipKey(date, slug, uid);
   if (`${r2.prefix.replace(/\/+$/, "")}/consult.flac` !== key) return { skip: "bad_prefix" };
-  const cutVersion = str(r.cut_version, 120) ?? str(r.cut_at, 120);
+  const cutVersion = str(r.cut_version, 120) ?? signatureVersion(r.signature) ?? str(r.cut_at, 120);
   if (!cutVersion) return { skip: "no_cut_version" };
   const doctor = typeof r.doctor_uid === "string" && DOCTOR_RE.test(r.doctor_uid) ? r.doctor_uid : null;
   return {
