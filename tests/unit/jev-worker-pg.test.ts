@@ -925,6 +925,41 @@ suite("the Jev worker on postgres:16", () => {
       }
     });
 
+
+    it("F6: pitch_type = no_pitch with recovery_discussion and cost_discussed UNANSWERED still closes recovery_appropriateness and cost_answered, in shadow AND bench", async () => {
+      await reset(); env({ ...ON });
+      const lines = Array.from({ length: 14 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+      const fake = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+      const { buildPitchState, setLocator, clearLocators } = await import("@/lib/jev/worker/builders/locators");
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: (id) => buildPitchState(id, fake) });
+      // Jev answers pitch_type = no_pitch and leaves recovery_discussion and cost_discussed OUT of its answers (no_answer)
+      const probe = (req: { questions: Record<string, { type: string; criteria?: Record<string, string> }> }) => {
+        const r = answer({ pitch_type: "no_pitch", recovery_appropriateness: "appropriate", cost_answered: "answered" })(req) as { answers: Record<string, unknown> };
+        delete r.answers.recovery_discussion; delete r.answers.cost_discussed;
+        return r;
+      };
+      H.script = probe;
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: [{ subject_id: "ckg#p1", at_s: 60 }] });
+      for (const id of ["recovery_appropriateness", "cost_answered"]) { const qq = rep.questions.find((x) => x.question_id === id)!; expect(qq.n_gated, `bench ${id}`).toBe(1); expect(qq.distribution, `bench ${id}`).toEqual({ gated_overwritten: 1 }); }
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow', ratified_by = 'test', ratified_at = now() WHERE id = 'pitch-uptake'`;
+      try {
+        env({ JEV_USE_CONSULT_RUBRIC: "1" });
+        clearLocators(); setLocator("ckg#p2", { at_ms: 60_000 });
+        H.script = probe;
+        await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "shadow", set_id: "pitch-uptake", version: "v0", subject_ids: ["ckg#p2"] }));
+        const d = await rows`SELECT question_id, outcome FROM jev_decision WHERE subject_id = 'ckg#p2' AND order_variant = 'derived'`;
+        expect(d.find((x) => x.question_id === "recovery_discussion")!.outcome).toBe("no_answer");
+        expect(d.find((x) => x.question_id === "cost_discussed")!.outcome).toBe("no_answer");
+        expect(d.find((x) => x.question_id === "recovery_appropriateness")!.outcome).toBe("gated_overwritten");
+        expect(d.find((x) => x.question_id === "cost_answered")!.outcome).toBe("gated_overwritten");
+        expect(d.find((x) => x.question_id === "pitch_type")!.outcome).toBe("answered");
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'draft', ratified_by = NULL, ratified_at = NULL WHERE id = 'pitch-uptake'`;
+        await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'pitch-uptake'`;
+        clearLocators();
+      }
+    });
+
     it("the P2 uses are registered in production code (one per set), and registering twice is harmless", () => {
       _clearUsesForTests(); registerP2Uses(); registerP2Uses();
       expect([...new Set(["u10-timeline", "encounter-end", "stt-quality", "stt-pick", "pitch-detect", "pitch-uptake", "chair-affect", "doubt"])].length).toBe(8);

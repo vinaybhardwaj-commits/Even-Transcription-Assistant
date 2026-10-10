@@ -395,10 +395,94 @@ describe("F5: gates are TRANSITIVE and evaluated against the post-gate value", (
     // all open
     expect(Object.values(run(three, { a: "go", b: "go", c: "go" }).out)).toEqual(["answered", "answered", "answered"]);
   });
-  it("an unanswered gate gives no opinion on its dependents, and a dependent that was never answered is not 'gated'", () => {
+  it("a closed ancestor closes the chain even through an UNANSWERED link; the unanswered row itself is not rewritten", () => {
     const three = [mk("a"), mk("b", "a"), mk("c", "b")];
     const rows = rowsFor(three); rows[1]!.outcome = "no_answer";
     applyGates(three, new Map([["a", ch("stop")]]), rows, benchFor(three));
-    expect(rows.map((r) => r.outcome)).toEqual(["answered", "no_answer", "answered"]);   // b stays no_answer; c's gate was not overwritten and has no answer: left alone
+    // F6: a (the root) is closed-by-answer for b, so b is closed WHATEVER its own outcome, and c behind it is closed with it (b stays no_answer: only answered rows are rewritten)
+    expect(rows.map((r) => r.outcome)).toEqual(["answered", "no_answer", "gated_overwritten"]);
+  });
+});
+
+describe("F6: a closed gate closes its dependents whatever the OUTCOME of the links in between", () => {
+  const ch = (choice: string): JevAnswer => ({ type: "choice", choice, probabilities: { [choice]: 1 }, confidence: 1 });
+  const PU = byId("pitch-uptake").questions;
+  const mkRows = (defs: QuestionDef[], noAnswer: Set<string>): WorkerDecision[] => defs.map((d) => ({ questionId: d.question_id, orderVariant: "derived", outcome: noAnswer.has(d.question_id) ? "no_answer" : "answered", band: "review", evidence: {} }) as unknown as WorkerDecision);
+  const bench = (defs: QuestionDef[]) => defs.map((d) => ({ subject_id: "s", question_id: d.question_id, variant: "derived", kind: "choice", value: "x", confidence: 1 }));
+
+  it("THE REFUTER'S PROBE: pitch_type = no_pitch, recovery_discussion and cost_discussed NO_ANSWER -> recovery_appropriateness and cost_answered are gated_overwritten (rows and bench)", () => {
+    const rows = mkRows(PU, new Set(["recovery_discussion", "cost_discussed"])), b = bench(PU);
+    applyGates(PU, new Map([["pitch_type", ch("no_pitch")]]), rows, b);
+    const out = Object.fromEntries(rows.map((r) => [r.questionId, r.outcome]));
+    expect(out.pitch_type).toBe("answered");
+    expect(out.recovery_discussion).toBe("no_answer");        // not answered, so not rewritten
+    expect(out.cost_discussed).toBe("no_answer");
+    expect(out.recovery_appropriateness).toBe("gated_overwritten");
+    expect(out.cost_answered).toBe("gated_overwritten");
+    for (const id of PU.map((d) => d.question_id).filter((x) => !["pitch_type", "recovery_discussion", "cost_discussed"].includes(x))) expect(out[id], id).toBe("gated_overwritten");
+    expect((b.find((x) => x.question_id === "cost_answered") as { gated?: boolean }).gated).toBe(true);
+  });
+
+  // an independent reference: walk the chain by hand
+  const directClose = (d: QuestionDef, defs: QuestionDef[], ans: Map<string, JevAnswer>): boolean => {
+    const g = ans.get(d.gate_question_id!);
+    if (!g || g.type !== "choice") return false;
+    if (d.gate_requires) return !d.gate_requires.includes(g.choice);
+    return Boolean(defs.find((x) => x.question_id === d.gate_question_id)?.escape_options?.includes(g.choice));
+  };
+  const mulberry = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+
+  it("PROPERTY over every real set: for random answered/no_answer patterns and random answers, NO dependent of a closed gate stays answered, and nothing else is rewritten", () => {
+    let trials = 0, closedSeen = 0;
+    for (const f of P2) {
+      const defs = f.questions;
+      if (!defs.some((d) => d.gate_question_id)) continue;
+      const rnd = mulberry(f.id.length * 7919);
+      for (let t = 0; t < 600; t += 1) {
+        const noAnswer = new Set(defs.filter(() => rnd() < 0.35).map((d) => d.question_id));
+        const ans = new Map<string, JevAnswer>();
+        for (const d of defs) {
+          if (noAnswer.has(d.question_id)) continue;
+          const keys = Object.keys((d.body as { criteria: Record<string, string> }).criteria);
+          ans.set(d.question_id, ch(keys[Math.floor(rnd() * keys.length)]!));
+        }
+        const rows = mkRows(defs, noAnswer), b = bench(defs);
+        applyGates(defs, ans, rows, b);
+        const out = new Map(rows.map((r) => [r.questionId, r.outcome]));
+        const by = new Map(defs.map((d) => [d.question_id, d]));
+        for (const d of defs) {
+          // reference: closed if it or any ancestor is closed by its direct gate's answer
+          let closed = false;
+          for (let cur: QuestionDef | undefined = d, hops = 0; cur?.gate_question_id && hops < 20; cur = by.get(cur.gate_question_id), hops += 1) if (directClose(cur, defs, ans)) { closed = true; break; }
+          const expected = closed && !noAnswer.has(d.question_id) ? "gated_overwritten" : noAnswer.has(d.question_id) ? "no_answer" : "answered";
+          expect(out.get(d.question_id), `${f.id}/${d.question_id} trial ${t}`).toBe(expected);
+          if (closed) closedSeen += 1;
+        }
+        trials += 1;
+      }
+    }
+    expect(trials).toBeGreaterThan(1000);
+    expect(closedSeen).toBeGreaterThan(500);   // the property really exercised closed chains
+  });
+
+  it("G5: a gate with NO gate_requires closes on the gate's own ESCAPE option (and a noul under 0.5); otherwise it stays open", () => {
+    const esc = (id: string, gate?: string): QuestionDef => ({ question_id: id, kind: "choice", body: { type: "choice", instructions: "x", criteria: { yes: "a", no: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], ...(gate ? { gate_question_id: gate } : {}) }) as unknown as QuestionDef;
+    const defs = [esc("a"), esc("b", "a"), esc("c", "b")];
+    const run = (a: JevAnswer) => { const rows = mkRows(defs, new Set()); applyGates(defs, new Map([["a", a]]), rows, bench(defs)); return rows.map((r) => r.outcome); };
+    expect(run(ch("insufficient_evidence"))).toEqual(["answered", "gated_overwritten", "gated_overwritten"]);
+    expect(run(ch("yes"))).toEqual(["answered", "answered", "answered"]);
+    const noul = [{ question_id: "n", kind: "noul", body: { type: "noul", instructions: "x" } }, { question_id: "m", kind: "noul", body: { type: "noul", instructions: "x" }, gate_question_id: "n" }] as unknown as QuestionDef[];
+    const lo = mkRows(noul, new Set()); applyGates(noul, new Map([["n", { type: "noul", noul: 0.2 } as JevAnswer]]), lo, bench(noul));
+    expect(lo.map((r) => r.outcome)).toEqual(["answered", "gated_overwritten"]);
+    const hi = mkRows(noul, new Set()); applyGates(noul, new Map([["n", { type: "noul", noul: 0.8 } as JevAnswer]]), hi, bench(noul));
+    expect(hi.map((r) => r.outcome)).toEqual(["answered", "answered"]);
+  });
+
+  it("a gate cycle does not hang and closes nothing by itself", () => {
+    const x = (id: string, gate: string): QuestionDef => ({ question_id: id, kind: "choice", body: { type: "choice", instructions: "x", criteria: { go: "a", stop: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], gate_question_id: gate, gate_requires: ["go"] }) as unknown as QuestionDef;
+    const defs = [x("p", "q"), x("q", "p")];
+    const rows = mkRows(defs, new Set());
+    expect(() => applyGates(defs, new Map([["p", ch("go")], ["q", ch("go")]]), rows, bench(defs))).not.toThrow();
+    expect(rows.map((r) => r.outcome)).toEqual(["answered", "answered"]);
   });
 });
