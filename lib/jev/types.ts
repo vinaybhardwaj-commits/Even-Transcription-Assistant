@@ -56,6 +56,13 @@ export class JevDisabledError extends Error {
   }
 }
 
+/** TYPESAFE_API_KEY is unset: refused BEFORE any fetch, so it is never an opaque `jev http 401` (PRD P0.4). */
+export class JevMissingKeyError extends Error {
+  constructor() {
+    super("config_missing_key");
+  }
+}
+
 /** state estimate over ~100k chars (~25k tokens); callers must chunk (spec §4). */
 export class JevStateTooLargeError extends Error {
   constructor(public chars: number) {

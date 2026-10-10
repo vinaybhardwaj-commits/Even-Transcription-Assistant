@@ -6,7 +6,7 @@
  * error classes, whose messages are constructed from status codes, provider error CODES and
  * counts — and everything else collapses to the error's constructor name.
  */
-import { JevBadResponseError, JevDisabledError, JevHttpError, JevStateTooLargeError } from "./types";
+import { JevBadResponseError, JevDisabledError, JevHttpError, JevMissingKeyError, JevStateTooLargeError } from "./types";
 
 /**
  * A Postgres error carries a five-character SQLSTATE in `code` (42501 insufficient_privilege, ...).
@@ -21,7 +21,7 @@ function pgCode(e: unknown): string | null {
 export function safeJevErrorMessage(e: unknown): string {
   const code = pgCode(e);
   if (code) return `db_error:${code}`;
-  if (e instanceof JevHttpError || e instanceof JevBadResponseError || e instanceof JevDisabledError || e instanceof JevStateTooLargeError) return e.message;
+  if (e instanceof JevHttpError || e instanceof JevBadResponseError || e instanceof JevDisabledError || e instanceof JevMissingKeyError || e instanceof JevStateTooLargeError) return e.message;
   if (e instanceof Error) return `jev_error: ${/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(e.name) ? e.name : "Error"}`;
   return "jev_error: non-error thrown";
 }

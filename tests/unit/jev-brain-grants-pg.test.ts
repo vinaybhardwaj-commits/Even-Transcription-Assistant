@@ -79,7 +79,8 @@ suite("brain_svc reads the Jev tables (real postgres:16, every migration)", () =
       INSERT INTO jev_window_signal (window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence, p_start, p_end, p_clinician, p_clinical, model, prompt_version, input_tokens, batch_id)
         VALUES ('bw_t', 'rd_t', 'bs_t', 0, 900000, 'history', '{"history":1}', 1, 0.1, 0.1, 0.5, 0.9, 'jev-x', 'v1', 10, 'b1');
       INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, answer)
-        VALUES ('jd_t', 'window', 'bw_t', 'phase', 'v1', 'jev-x', '{"choice":"history"}');
+        VALUES ('jd_t', 'window', 'bw_t', 'phase', 'v1', 'jev-x', '{"choice":"history"}'),
+               ('jd_u1', 'window', 'bw_t', 'u1_phase', 'u1-phase-w1', 'jev-x', '{"choice":"history"}');
     `);
   }, 240_000);
   afterAll(() => pg.stop());
@@ -99,10 +100,16 @@ suite("brain_svc reads the Jev tables (real postgres:16, every migration)", () =
     pg.exec(readFileSync(`db/migrations/${GRANT_FILE}`, "utf8"));
     const d = await decisions();
     expect(d.ok).toBe(true);
-    expect((d.decisions as Array<{ id: string }>).map((r) => r.id)).toEqual(["jd_t"]);
+    expect((d.decisions as Array<{ id: string }>).map((r) => r.id).sort()).toEqual(["jd_t", "jd_u1"]);
     const s = await signals();
     expect(s.ok).toBe(true);
     expect((s.signals as Array<{ window_id: string }>).map((r) => r.window_id)).toEqual(["bw_t"]);
+  });
+
+  it("scribe_jev_decisions {question_id:'u1_phase'} returns only prompt_version u1-phase-w1", async () => {
+    const d = (await tool("scribe_jev_decisions").handler({ question_id: "u1_phase" }, ctx)) as Record<string, unknown>;
+    expect(d.ok).toBe(true);
+    expect((d.decisions as Array<{ prompt_version: string }>).map((r) => r.prompt_version)).toEqual(["u1-phase-w1"]);
   });
 
   it("0144 is idempotent and SELECT-only: a re-run is clean and brain_svc gains no write", () => {
@@ -136,5 +143,13 @@ describe("safeJevErrorMessage maps Postgres errors to db_error:<code>", () => {
   it("does not mistake a Node system error for one", () => {
     expect(safeJevErrorMessage(Object.assign(new Error("boom"), { code: "EPIPE" }))).toBe("jev_error: Error");
     expect(safeJevErrorMessage(Object.assign(new Error("boom"), { code: "ECONNRESET" }))).toBe("jev_error: Error");
+  });
+});
+
+describe("a forced permission failure on a Jev MCP read (no docker needed)", () => {
+  it("DatabaseError{name:'error', code:'42501'} gives db_error:42501, not jev_error", () => {
+    const e = Object.assign(new Error('permission denied for table jev_decision'), { name: "error", code: "42501" });
+    expect(safeJevErrorMessage(e)).toBe("db_error:42501");
+    expect(safeJevErrorMessage(e)).not.toMatch(/jev_decision|permission/);
   });
 });
