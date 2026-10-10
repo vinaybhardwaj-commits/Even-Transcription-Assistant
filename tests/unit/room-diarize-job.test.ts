@@ -1,6 +1,7 @@
 /**
- * The room diarize ENQUEUER (lib/stt/diarize-job.ts), against a mocked database. RETIRED 10 Oct 2026: it is a no-op
- * now (the Nemotron ingest submits the diarize_window job); what stays proven is the flag parsing and that it does nothing.
+ * The room diarize SWEEPER (lib/stt/diarize-job.ts), against a mocked database. Since 10 Oct 2026 the Nemotron ingest
+ * submits the diarize_window job and this module only RE-DRIVES windows whose job left no ok row (R2-2); what is proven
+ * here is the ROOM_DIARIZE_ENABLED flag parsing and the sweeper's gates and shape. The real SQL: nemo-sweeper-pg.test.ts.
  *
  * This used to test a pass that diarized windows inline and wrote three tables. C2 moved the work
  * onto the diarize_window job and deleted the cluster and turn writers, so what is left to prove is
@@ -50,8 +51,8 @@ afterEach(() => {
   }
 });
 
-describe("the gate off is a TRUE no-op", () => {
-  it("no database work at all, not even the scan, and nothing enqueued", async () => {
+describe("the ROOM_DIARIZE_ENABLED flag is read but no longer matters", () => {
+  it("no database work at all with it off (and the shadow flag off), and nothing enqueued", async () => {
     const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
     expect(r.enabled).toBe(false);
     expect(r.scanned).toBe(0);
@@ -117,26 +118,46 @@ describe("ROOM_DIARIZE_ENABLED — one name, and the retired one is ignored LOUD
   });
 });
 
-describe("the enqueue is RETIRED — the Nemotron ingest drives diarize_window", () => {
+describe("the sweeper (R2-2) — against a mocked database; the real SQL is in nemo-sweeper-pg.test.ts", () => {
   beforeEach(() => { process.env.ROOM_DIARIZE_ENABLED = "1"; });
+  afterEach(() => { delete process.env.DIARIZE_NEMOTRON_SHADOW; delete process.env.DIARIZE_ENGINE; });
 
-  it("with the flag ON it still enqueues NOTHING, does no database work, and says why", async () => {
-    responses = [[{ id: "bw_1" }, { id: "bw_2" }]];
+  it("DIARIZE_NEMOTRON_SHADOW off: no database work, nothing queued, and it says why", async () => {
     const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
-    expect(r).toMatchObject({ enabled: true, scanned: 0, enqueued: [], exhausted: 0, errors: [], note: "retired: nemotron ingest drives diarize_window" });
-    expect(calls, "no scan").toHaveLength(0);
-    expect(submitted, "no job").toHaveLength(0);
+    expect(r).toMatchObject({ scanned: 0, enqueued: [], note: "sweeper off: DIARIZE_NEMOTRON_SHADOW is off" });
+    expect(calls).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
   });
 
-  it("the route answers with the retirement note on both doors' shared path", async () => {
-    const src = codeOf("app/api/admin/diarize-windows/route.ts");
-    expect(src).toMatch(/note: result\.note/);
+  it("a refused DIARIZE_ENGINE: idle, no database work, no doomed jobs", async () => {
+    process.env.DIARIZE_NEMOTRON_SHADOW = "1";
+    process.env.DIARIZE_ENGINE = "pyannoteai";
+    const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
+    expect(r.note).toMatch(/DIARIZE_ENGINE is refused/);
+    expect(calls).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
   });
 
-  it("it WRITES NOTHING, and no longer holds a scan — every table has its one writer on the job", () => {
+  it("flag on: one diarize_window job per window the sweep returns, with the window id and the caller as actor; the sweep SQL is room-access's", async () => {
+    process.env.DIARIZE_NEMOTRON_SHADOW = "1";
+    responses = [[{ window_id: "bw_1" }, { window_id: "bw_2" }], [{ n: 0 }]];
+    const r = await enqueueDiarizeWindows({ log: silent, actor: "cron:test" });
+    expect(r.enqueued.map((e) => e.window_id)).toEqual(["bw_1", "bw_2"]);
+    expect(submitted.map((s) => s.kind)).toEqual(["diarize_window", "diarize_window"]);
+    expect(submitted[0]!.args).toEqual({ window_id: "bw_1" });
+    expect(submitted[0]!.actor).toBe("cron:test");
+    const scan = calls.find((c) => /FROM bench_window w/.test(c.text))!.text;
+    expect(scan).toMatch(/n\.status IN \('ok', 'empty'\)/);
+    expect(scan).toMatch(/d\.state <> 'failed'/);
+    expect(scan).toMatch(/j\.status IN \('queued', 'running'\)/);
+    expect(scan).toMatch(/ORDER BY w\.start_ms ASC/);
+  });
+
+  it("the sweeper is code in lib/stt/diarize-job.ts WITHOUT any SQL of its own: it writes nothing and names no room table", () => {
     const src = codeOf("lib/stt/diarize-job.ts");
     expect(src).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
     expect(src).not.toMatch(/\bsql`|room_diarize_window|bench_window/);
+    expect(codeOf("app/api/admin/diarize-windows/route.ts")).toMatch(/note: result\.note/);
   });
 });
 

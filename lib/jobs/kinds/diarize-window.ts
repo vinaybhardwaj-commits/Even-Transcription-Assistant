@@ -24,7 +24,9 @@
  * ─── ATTRIBUTION IS EARNED ─────────────────────────────────────────────────────────────────────
  * Nemotron outputs turns and nothing else. Identity comes from the embeddings this job fetches, matched against
  * the enrolled centroids; `attribution` is `voiceprint` only when an embedding AND a centroid were both present
- * (attributionFor). A failed embed call is recorded as `embed_error`, never as "nobody matched".
+ * (attributionFor). A NON-retryable embed answer is recorded as `embed_error` (ok, attribution none), never as "nobody
+ * matched". A RETRYABLE one (Mini down, timeout, 5xx, network) throws so the runner retries; on the last attempt the
+ * window is written `failed`, never `ok` (R2-1).
  */
 import { randomUUID } from "node:crypto";
 import { getObjectBytes } from "@/lib/r2";
@@ -44,7 +46,7 @@ import { DiarizeEngineError, pushEngine, type DiarizeEngine } from "@/lib/diariz
 import { embedSpeakers, embeddedCount, longestSpanPerSpeaker, mergeEmbeddings } from "@/lib/diarize-embed";
 import { nemotronToSegments } from "@/lib/diarize-nemotron/segments";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
-import { JobArgsError, doneWith, failWith, type JobKind, type StepContext } from "../types";
+import { JobArgsError, MAX_FAILURES, doneWith, failWith, type JobKind, type StepContext } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
 import { windowArgHeldOut } from "@/lib/room-access/jobs";
 import { loadNemotronResult, roomDiarizeRow } from "@/lib/room-access/nemotron-store";
@@ -181,7 +183,21 @@ async function diarizeStep(ctx: StepContext) {
   } else {
     embedError = emb.error;
     // Named, never swallowed: a window with no embeddings is one where nobody COULD be named.
-    console.warn("[jobs] nemotron embeddings unavailable", JSON.stringify({ window: windowId, reason: emb.error }));
+    console.warn("[jobs] nemotron embeddings unavailable", JSON.stringify({ window: windowId, reason: emb.error, retryable: emb.retryable }));
+    if (emb.retryable) {
+      // R2-1: a Mini outage / timeout / 5xx / network error is NOT "nobody matched". The step THROWS, so the runner retries
+      // it (up to MAX_FAILURES). The attempt that would be the last first records the window `failed` — never `ok` — so the
+      // sweeper (lib/stt/diarize-job.ts) can re-drive it once the Mini is back; a throw alone would leave no row at all.
+      if (ctx.job.failures + 1 >= MAX_FAILURES) {
+        const failedProv = engineProvenance("nemotron", { ...answered, attribution: "none", centroids_offered: centroids.length, embed_error: emb.error });
+        await recordDiarizeWindow({
+          windowId, roomDayId: w.room_day_id, clipR2Key: w.clip_r2_key, runId,
+          state: "failed", error: `embed_failed:${emb.error}`, speakers: null, segments: null, timing: { engine: failedProv },
+        });
+      }
+      throw new Error(`embed_retryable:${emb.error}`);
+    }
+    // A NON-retryable answer (e.g. no span long enough to embed) is a real finding: ok, attribution none, embed_error recorded.
   }
 
   const provenance = engineProvenance("nemotron", {

@@ -439,7 +439,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
     }
   }, 300_000);
 
-  it("the scheduled enqueue is RETIRED: with the flag ON and an eligible window, the route answers 200, says why, and queues NOTHING", async () => {
+  it("the route is the SWEEPER: with DIARIZE_NEMOTRON_SHADOW off it answers 200, says why, and queues NOTHING even with an eligible window", async () => {
     const sql = G.__pgsql;
     process.env.ROOM_DIARIZE_ENABLED = "1";
     await seedWindow("bw_enq", "sess_enq", 5 * WINDOW_MS);
@@ -449,7 +449,7 @@ describe.skipIf(!HAVE_DOCKER)("C2 Ruling 2 — one writer per table, and the liv
       expect(res.status).toBe(200);
       const body = (await res.json()) as { data?: Record<string, unknown> } & Record<string, unknown>;
       const d = (body.data ?? body) as { jobs: unknown[]; scanned: number; note: string };
-      expect(d.note).toBe("retired: nemotron ingest drives diarize_window");
+      expect(d.note).toBe("sweeper off: DIARIZE_NEMOTRON_SHADOW is off");
       expect(d.jobs).toEqual([]);
       expect(d.scanned).toBe(0);
       const after = (await sql`SELECT count(*)::int AS n FROM scribe_job`) as Array<{ n: number }>;

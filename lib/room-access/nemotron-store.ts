@@ -319,3 +319,41 @@ export async function windowNeedsDiarizeJob(windowId: string): Promise<boolean> 
   const r = rows[0];
   return !!r && r.answered === true && (r.state === null || r.state === "failed");
 }
+
+/** The most failed `diarize_window` jobs one window may have had before the sweeper stops re-driving it. */
+export const SWEEP_MAX_FAILED_JOBS = 3;
+/** Windows the sweeper submits per tick. */
+export const SWEEP_LIMIT = 20;
+
+/**
+ * R2-2 — the windows the sweeper should re-drive: Nemotron has answered (`ok` / `empty`), the room diarize row is absent
+ * or `failed`, no `diarize_window` job is queued or running for it, and fewer than SWEEP_MAX_FAILED_JOBS of its jobs have
+ * FAILED (the job's own failure count, not room_diarize_window.attempts: a window whose job dies before it writes a row has
+ * no attempts to count). Held-out windows are excluded before the LIMIT. Oldest window first.
+ */
+export async function windowsToSweep(limit: number, blind: string[]): Promise<string[]> {
+  const rows = (await sql`
+    SELECT w.id AS window_id
+      FROM bench_window w
+     WHERE EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
+       AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state <> 'failed')
+       AND NOT EXISTS (SELECT 1 FROM scribe_job j WHERE j.kind = 'diarize_window' AND j.args->>'window_id' = w.id AND j.status IN ('queued', 'running'))
+       AND (SELECT count(*) FROM scribe_job j WHERE j.kind = 'diarize_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${SWEEP_MAX_FAILED_JOBS}::int
+       AND w.id <> ALL(${blind}::text[])
+     ORDER BY w.start_ms ASC
+     LIMIT ${limit}::int
+  `) as Array<{ window_id: string }>;
+  return rows.map((r) => r.window_id);
+}
+
+/** Windows the sweeper has given up on: answered, no ok row, and SWEEP_MAX_FAILED_JOBS failed jobs. Counted on every tick so a stuck window is never silent. */
+export async function countSweepExhausted(): Promise<number> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n
+      FROM bench_window w
+     WHERE EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
+       AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state <> 'failed')
+       AND (SELECT count(*) FROM scribe_job j WHERE j.kind = 'diarize_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') >= ${SWEEP_MAX_FAILED_JOBS}::int
+  `) as Array<{ n: number }>;
+  return Number(rows[0]?.n ?? 0);
+}

@@ -236,13 +236,13 @@ describe.runIf(HAVE)("the diarize_window job, nemotron path", () => {
     expect(H.embed).not.toHaveBeenCalled();
   });
 
-  it("an embed failure is recorded as embed_error, never as 'nobody matched'", async () => {
+  it("a NON-retryable embed failure is recorded as embed_error, never as 'nobody matched' (a retryable one throws: nemo-sweeper-pg.test.ts)", async () => {
     seedWindow("bw_job3");
     await post(body("bw_job3", "rd_n1"));
-    H.embed.mockImplementation(async () => ({ ok: false, error: "embed_failed", retryable: true }));
+    H.embed.mockImplementation(async () => ({ ok: false, error: "embed_bad_response", retryable: false }));
     expect((await runJob("bw_job3")).kind).toBe("done");
     const row = (await diarizeRow("bw_job3"))!;
-    expect(row.timing_json!.engine).toMatchObject({ attribution: "none", embed_error: "embed_failed" });
+    expect(row.timing_json!.engine).toMatchObject({ attribution: "none", embed_error: "embed_bad_response" });
     expect((await turnRows("bw_job3")).every((t) => t.role === null)).toBe(true);
   });
 

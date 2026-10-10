@@ -1,17 +1,21 @@
 /**
- * lib/stt/diarize-job.ts — RETIRED for rooms (10 Oct 2026): the scheduled enqueue is a no-op.
+ * lib/stt/diarize-job.ts — the room diarize SWEEPER (R2-2). It no longer chooses windows to diarize for pyannote.
  *
- * Room diarization is driven by the Nemotron ingest: /api/diarize/nemotron/ingest stores a window's turns and
- * submits the `diarize_window` job itself (app/api/diarize/nemotron/ingest/route.ts). This module used to SCAN
- * `bench_window` for windows with no `room_diarize_window` row and enqueue them for pyannote on a five-minute
- * cron; with pyannote gone from production that scan has nothing to enqueue and nothing it may call.
+ * Room diarization is TRIGGERED by the Nemotron ingest (app/api/diarize/nemotron/ingest/route.ts submits the
+ * `diarize_window` job when a window's answer is stored). This module is the RECOVERY for a window whose job ended without
+ * an ok / no_speakers row — a refused engine, a missing clip, a Mini outage that outlasted the retries, a lost submit — and
+ * nothing re-posts, because the worker already got its 200. The scheduled route (/api/admin/diarize-windows, every 5 minutes) calls it:
+ * with DIARIZE_NEMOTRON_SHADOW on it submits `diarize_window` for windows `windowsToSweep` returns (answered, row absent or
+ * failed, nothing open, fewer than SWEEP_MAX_FAILED_JOBS failed jobs; oldest first, at most SWEEP_LIMIT). No pyannote, no other engine.
  *
- * WHAT IS LEFT: the entry point and the flag name, so the cron route (still in vercel.json, FLAGGED for removal
- * in a later slice) answers a clean 200 that SAYS why it did nothing. `ROOM_DIARIZE_ENABLED` is still read
- * (strictly: a typo still throws) but no value of it enqueues anything. One writer per table stays the job.
+ * `ROOM_DIARIZE_ENABLED` is still READ (strictly: a typo still throws) but no value of it matters any more.
  */
 
 import { parseFlag } from "@/lib/flags";
+import { nemotronShadowEnabled, pushEngine, DiarizeEngineError } from "@/lib/diarize-engine";
+import { blindWindowIds } from "@/lib/room-access/check";
+import { SWEEP_LIMIT, SWEEP_MAX_FAILED_JOBS, countSweepExhausted, windowsToSweep } from "@/lib/room-access/nemotron-store";
+import { JobArgsError } from "@/lib/jobs/types";
 
 /**
  * THE ON-SWITCH. Renamed from SPEAKER_CLUSTERS_ENABLED in C2: clustering is deleted, and a name that
@@ -38,42 +42,69 @@ export function roomDiarizeEnabled(env: Record<string, string | undefined> = pro
   return parseFlag(ROOM_DIARIZE_ENABLED_ENV, env);
 }
 
-/** Bounded so one tick enqueues a handful of windows beside the Mini's serialised service. */
-export const DIARIZE_BATCH_LIMIT = 4;
-
-/**
- * THE RETRY BOUND. A window whose row is `failed` is re-enqueued until it has been attempted this
- * many times in total, and then left alone. 0074 made `failed` a permanent destination so a broken
- * clip could not hold the Mini's one diarize slot all night; that also meant a transient failure
- * blocked a window forever. Three attempts is the middle: a flaky tunnel gets two more chances, a
- * clip that is genuinely bad costs at most three calls. Every earlier failure is kept in
- * `failure_history` (0088), and windows at the bound are COUNTED on every enqueue response.
- */
-export const DIARIZE_MAX_ATTEMPTS = 3;
+/** Windows one sweep tick submits at most (R2-2). */
+export const DIARIZE_BATCH_LIMIT = SWEEP_LIMIT;
 
 type Logger = (msg: string) => void;
 
-/** The words the cron route and the admin POST answer with. */
-export const ROOM_DIARIZE_RETIRED = "retired: nemotron ingest drives diarize_window";
-
 export type DiarizeEnqueueResult = {
   enabled: boolean;
+  /** Windows the sweep found to re-drive this tick. */
   scanned: number;
   enqueued: Array<{ window_id: string; job_id: string; retry_of_attempt: number | null }>;
-  /** Always 0 now: nothing is scanned, so nothing can be at a retry bound. */
+  /** Windows at the failed-job cap: answered, still no ok row, no longer re-driven. */
   exhausted: number;
   n_blind_excluded: number;
   errors: string[];
-  /** Why nothing was enqueued: the scheduled enqueue is retired. */
   note: string;
 };
 
-/** A NO-OP, by design. It reads the flag (so a typo still throws and the retired-name warning still logs) and enqueues nothing. */
+export const ROOM_DIARIZE_SWEEP_OFF = "sweeper off: DIARIZE_NEMOTRON_SHADOW is off";
+export const ROOM_DIARIZE_SWEEP_REFUSED = "sweeper idle: DIARIZE_ENGINE is refused for room diarization";
+
+/**
+ * Re-drive the windows whose diarize job left no ok row. Deduped exactly as ingest is (the kind's dedupeOn on window_id, so a
+ * window with an open job is never queued twice). A submit that THROWS propagates, like every enqueue: a job that could not be
+ * queued must not be counted as queued. A held-out window refused at submit is skipped and not counted.
+ */
 export async function enqueueDiarizeWindows(
   opts: { limit?: number; log?: Logger; origin?: string; actor: string },
 ): Promise<DiarizeEnqueueResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
-  const enabled = roomDiarizeEnabled(process.env, log);
-  log(`[room-diarize] ${ROOM_DIARIZE_RETIRED} — enqueueing nothing (${ROOM_DIARIZE_ENABLED_ENV} is ${enabled ? "on" : "off"}, and no longer matters)`);
-  return { enabled, scanned: 0, enqueued: [], exhausted: 0, n_blind_excluded: 0, errors: [], note: ROOM_DIARIZE_RETIRED };
+  const result: DiarizeEnqueueResult = { enabled: false, scanned: 0, enqueued: [], exhausted: 0, n_blind_excluded: 0, errors: [], note: "" };
+  result.enabled = roomDiarizeEnabled(process.env, log);
+  if (!nemotronShadowEnabled()) {
+    result.note = ROOM_DIARIZE_SWEEP_OFF;
+    log(`[room-diarize] ${result.note}`);
+    return result;
+  }
+  try {
+    pushEngine();
+  } catch (e) {
+    // a refused engine would fail every job it submitted: say so here, once, instead of queueing 20 doomed jobs a tick
+    if (e instanceof DiarizeEngineError) {
+      result.note = ROOM_DIARIZE_SWEEP_REFUSED;
+      log(`[room-diarize] ${result.note}`);
+      return result;
+    }
+    throw e;
+  }
+  const limit = Math.max(1, Math.min(SWEEP_LIMIT, Math.trunc(opts.limit ?? SWEEP_LIMIT) || SWEEP_LIMIT));
+  const blind = await blindWindowIds();
+  result.n_blind_excluded = blind.length;
+  const ids = await windowsToSweep(limit, blind);
+  result.scanned = ids.length;
+  result.exhausted = await countSweepExhausted();
+  const { submitJob } = await import("@/lib/jobs/submit");
+  for (const id of ids) {
+    try {
+      const job = await submitJob({ kind: "diarize_window", args: { window_id: id }, actor: opts.actor, ...(opts.origin ? { origin: opts.origin } : {}), scopes: new Set(["invoke"] as const) });
+      if (!job.deduped) result.enqueued.push({ window_id: id, job_id: job.id, retry_of_attempt: null });
+    } catch (e) {
+      if (e instanceof JobArgsError) continue; // refused at submit (held out / unplaceable)
+      throw e;
+    }
+  }
+  log(`[room-diarize] sweep: ${result.enqueued.length} submitted of ${ids.length} found; ${result.exhausted} window(s) at the ${SWEEP_MAX_FAILED_JOBS}-failed-job cap`);
+  return result;
 }
