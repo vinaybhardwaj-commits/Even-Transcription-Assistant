@@ -358,8 +358,9 @@ function kioskAsleep(c: Ctx): Decision[] | null {
   const aAge = age(s.reachable.app_poll_at);
   // A kiosk-health SLEEP marker (bench rule R11: the newest power event is a sleep / darkwake, < 12 h old, no heartbeat since sleep + 180 s) is positive evidence that the
   // Mac is asleep, even when it has been silent for hours (overnight sleep): it overrides the 2 h reachability rule below, provided the poller does not see the Mac.
+  // Deliberately POLLER-ONLY, as on main (TS-E1 round 2, F1): the app poll must not switch this off, or a marker < 180 s old with a fresh heartbeat would fall through to a live scribe_start.
   const sleepAt = s.reachable.sleep_at ?? null;
-  const sleeping = sleepAt !== null && s.reachable.kh_enrolled === true && (pAge === null || pAge > ASLEEP_AFTER_MS) && (aAge === null || aAge > ASLEEP_AFTER_MS);
+  const sleeping = sleepAt !== null && s.reachable.kh_enrolled === true && (pAge === null || pAge > ASLEEP_AFTER_MS);
   // F4: with neither source heard in the last 2 h the room's reachability is unknown (e.g. a room with no poller and no kiosk-health): do not call it asleep.
   if (!sleeping && (pAge === null || pAge > REACHABILITY_DATA_MAX_AGE_MS) && (kAge === null || kAge > REACHABILITY_DATA_MAX_AGE_MS) && (aAge === null || aAge > REACHABILITY_DATA_MAX_AGE_MS)) {
     return [

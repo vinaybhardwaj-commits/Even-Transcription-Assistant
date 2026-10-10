@@ -5,6 +5,7 @@
  * every reboot. Cardiology rebooted 4 Oct 14:10 IST and its extension vanished (last ext row 14:09:27) while the tailnet poller kept saying
  * chrome_running=true, so nobody noticed for 24 h. This module reads state — never events — and says, per machine, which of seven things is true:
  *
+ *   poller_down  TS-E1: the Mac is reachable (heartbeats) but the poller is failing and the extension has been silent for 10 min: UNKNOWN, shown distinctly, never green.
  *   offline   TS-E1: the Mac is not `reachable` (lib/reachability.ts: the newest app poll / kiosk-health heartbeat / ok poller row is over 180 s old, or there is none).
  *             A failed SSH poll alone never makes it offline while a heartbeat is fresh. When no `reach` is supplied (hand-built inputs) the old poller test applies:
  *             the poller's newest row is not `ok` (unreachable), or it is older than POLLER_FRESH_S (5 min), or there is none. We cannot say anything
@@ -94,7 +95,7 @@ export function isExtHealthExcluded(hostname: string): boolean {
   return EXCLUDED_KEYS.has(normalizeHostname(hostname).toLowerCase());
 }
 
-export type ExtStatus = "ok" | "no_tab" | "missing" | "quiet" | "behind" | "offline" | "no_chrome";
+export type ExtStatus = "ok" | "no_tab" | "missing" | "quiet" | "behind" | "offline" | "no_chrome" | "poller_down";
 export type VersionState = "current" | "behind" | "unknown";
 
 /** A dotted-integer version (1–6 parts of 1–6 digits), or null. The SQL's guard regex is the same shape. */
@@ -270,6 +271,10 @@ export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: numb
       // so the console has been idle for (idle_s + the poll's age); measured on 5 Oct the idle counter trails the extension's age by ~50 s on a truly idle Mac.
       const idleSinceQuiet = idle !== null && extAge !== null && polAge !== null && idle + polAge >= extAge - QUIET_IDLE_MARGIN_S;
       status = tabClosed ? "no_tab" : idleSinceQuiet ? "quiet" : "missing";
+    } else if (!pol && !alive) {
+      // TS-E1: the Mac is reachable but the poller is failing, so Chrome / the console are unseen AND the extension is silent: its state is UNKNOWN, not ok. Green here
+      // would hide a dead extension (R8) or a closed Chrome (R10) behind Tailscale being off.
+      status = "poller_down";
     } else status = "ok"; // chrome_running unknown (the poller did not say): no evidence either way
     const rebootedAt = detectReboot(i.poller_recent, asOfMs, Number.isFinite(extMs) ? extMs : null);
     const behindSince = status === "behind" ? (i.behind_since ?? null) : null;
@@ -307,7 +312,7 @@ export type ExtHealthSummary = Record<ExtStatus, number> & { total: number };
 
 /** Counts by status, every key present. */
 export function summarizeExtHealth(rows: readonly Pick<ExtHealthRow, "status">[]): ExtHealthSummary {
-  const s: ExtHealthSummary = { ok: 0, no_tab: 0, missing: 0, quiet: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 };
+  const s: ExtHealthSummary = { ok: 0, no_tab: 0, missing: 0, quiet: 0, behind: 0, offline: 0, no_chrome: 0, poller_down: 0, total: 0 };
   for (const r of rows) {
     s[r.status]++;
     s.total++;

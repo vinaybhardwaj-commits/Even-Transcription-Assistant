@@ -246,11 +246,15 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(r.degraded).toBeUndefined();
   });
 
-  it("R1(b) — a Mac nobody has heard from in 2 h is `unknown`, not unreachable: nothing is raised", async () => {
+  it("R1(b) — F2: a Mac nobody has heard from in 3 h stays RED (unreachable), not unknown; a Mac never heard from is unknown", async () => {
     pg.exec(lastSeen("r4", "3 hours") + presence("poller", M4, "unreachable", "1 minute"));
     const r = await attention();
-    expect(r.items).toEqual([]);
-    expect(r.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "unknown", source: null });
+    expect(kindsOf(r)).toEqual(["r4:asleep"]);
+    expect(r.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "unreachable", source: "app_poll" });
+    pg.exec("UPDATE room_install SET last_seen_at = NULL WHERE room_id = 'r4';");
+    const never = await attention();
+    expect(never.items).toEqual([]);
+    expect(never.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "unknown", source: null });
   });
 
   it("R1(b) — an unreachable poller does not make a room red while its recording is demonstrably delivering audio", async () => {

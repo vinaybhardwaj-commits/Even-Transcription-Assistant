@@ -12,15 +12,16 @@
  * A FAILED poll is not an input at all: only `poller_ok_at` exists on the type, so a failed SSH poll cannot make a Mac unreachable while a heartbeat is fresh.
  *
  * `reachable`   newest evidence is at most REACH_FRESH_S old
- * `unreachable` evidence exists, but the newest is older than REACH_FRESH_S and not older than REACH_UNKNOWN_AFTER_S
- * `unknown`     no evidence at all in REACH_UNKNOWN_AFTER_S ("we never looked" is not "we looked and it is down")
+ * `unreachable` evidence exists, but the newest is older than REACH_FRESH_S, however old (a Mac silent for 3 h is still down: R1 stays red, as it did while the
+ *               poller wrote `unreachable` rows)
+ * `unknown`     no evidence at all ("we never looked" is not "we looked and it is down"). The loaders also report `unknown` when the heartbeat READ failed.
  *
  * PURE: no clock, no I/O. The caller passes asOf.
  */
 
 /** A heartbeat this fresh (or fresher) means the Mac is reachable. */
 export const REACH_FRESH_S = 180;
-/** With no evidence for this long, reachability is unknown rather than unreachable. */
+/** How far back a loader looks for a kiosk-health heartbeat. Not a reachability threshold: older evidence is still `unreachable`, never `unknown`. */
 export const REACH_UNKNOWN_AFTER_S = 2 * 3600;
 
 export type ReachState = "reachable" | "unreachable" | "unknown";
@@ -62,7 +63,6 @@ export function reachability(machine: ReachEvidence, asOf: number | string | Dat
   }
   if (best === null) return { state: "unknown", source: null, last_evidence_at: null, age_s: null };
   const age_s = Math.max(0, Math.floor((A - best.ts) / 1000));
-  if (age_s > REACH_UNKNOWN_AFTER_S) return { state: "unknown", source: null, last_evidence_at: null, age_s: null };
   return {
     state: age_s <= REACH_FRESH_S ? "reachable" : "unreachable",
     source: best.source,
@@ -73,7 +73,7 @@ export function reachability(machine: ReachEvidence, asOf: number | string | Dat
 
 /** What Bench says per room. */
 export function reachabilityLabel(r: Pick<Reachability, "state" | "source" | "age_s">): string {
-  if (r.state === "unknown" || r.source === null) return "reachability unknown (nothing heard in 2 h)";
+  if (r.state === "unknown" || r.source === null) return "reachability unknown (nothing on record)";
   const via = r.source === "app_poll" ? "app poll" : r.source === "kiosk_health" ? "kiosk-health" : "poller";
   return `${r.state} via ${via}, ${r.age_s}s ago`;
 }

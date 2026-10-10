@@ -33,11 +33,12 @@ describe("reachability(machine, asOf)", () => {
     expect(reachability({ kiosk_health_at: at(181) }, NOW).state).toBe("unreachable");
   });
 
-  it("neither seen in 2 h is unknown (never unreachable): 7200 s is still unreachable, 7201 s is unknown; nothing at all is unknown", () => {
-    expect(REACH_UNKNOWN_AFTER_S).toBe(7200);
+  it("F2: a Mac silent for over 2 h stays UNREACHABLE (R1 stays red); only no evidence at all is unknown", () => {
+    expect(REACH_UNKNOWN_AFTER_S).toBe(7200); // the heartbeat look-back, not a verdict threshold
     expect(reachability({ app_poll_at: at(7200) }, NOW).state).toBe("unreachable");
-    expect(reachability({ app_poll_at: at(7201), kiosk_health_at: at(9000) }, NOW)).toEqual({ state: "unknown", source: null, last_evidence_at: null, age_s: null });
-    expect(reachability({}, NOW).state).toBe("unknown");
+    expect(reachability({ app_poll_at: at(7201), kiosk_health_at: at(9000) }, NOW)).toMatchObject({ state: "unreachable", source: "app_poll", age_s: 7201 });
+    expect(reachability({ app_poll_at: at(3 * 86400) }, NOW)).toMatchObject({ state: "unreachable", age_s: 3 * 86400 });
+    expect(reachability({}, NOW)).toEqual({ state: "unknown", source: null, last_evidence_at: null, age_s: null });
     expect(reachability({ app_poll_at: null, kiosk_health_at: null, poller_ok_at: null }, NOW).state).toBe("unknown");
   });
 
@@ -112,7 +113,28 @@ describe("R1 with reachability", () => {
     expect(asleep(run(room({ poller: tailscaleOffPoller, reach: reachability({ app_poll_at: at(181) }, NOW) })))).toHaveLength(1);
   });
 
-  it("unknown (nothing in 2 h, or a source failed) raises nothing; it is not the same as down", () => {
+  it("F2: a Mac silent for 3 h (past the old 2 h unknown cut-off) is still RED", () => {
+    const items = asleep(run(room({ poller: tailscaleOffPoller, reach: reachability({ app_poll_at: at(3 * 3600), kiosk_health_at: at(4 * 3600) }, NOW) })));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ severity: "red", since: at(3 * 3600) });
+  });
+
+  it("M9: R1(b) is not raised while a recording session is demonstrably delivering audio, even though the Mac has been silent for 10 min", () => {
+    const reach = reachability({ app_poll_at: at(600) }, NOW);
+    const open = { id: "bs_1", status: "recording" as const, started_at: at(3600) };
+    const chunks = [{ session_id: "bs_1", source: "room", created_at: at(60), started_at: at(120), size_bytes: 400_000, duration_ms: 60_000 }];
+    const samples = [0, 30, 60, 90].map((s, i) => ({ sampled_at: at(120 - s), peak: 0.1 + i / 10, zero_ratio: 0.1 }));
+    expect(asleep(run(room({ poller: tailscaleOffPoller, reach, open_session: open, chunks, samples })))).toEqual([]);
+    // the same Mac with the audio gone is raised (so the exemption is the only reason for the empty list above)
+    expect(asleep(run(room({ poller: tailscaleOffPoller, reach, open_session: open, chunks: [], samples: [], last_sample_at: at(900), last_chunk_at: at(900) })))).not.toEqual([]);
+  });
+
+  it("M7/M9 threshold: R1(b) needs the silence to be >= 3 min (UNREACHABLE_AFTER_MS), measured from the last sign of life", () => {
+    expect(asleep(run(room({ reach: reachability({ app_poll_at: at(181) }, NOW) })))).toHaveLength(1);
+    expect(asleep(run(room({ reach: reachability({ app_poll_at: at(179) }, NOW) })))).toEqual([]);
+  });
+
+  it("unknown (no evidence at all, or the heartbeat READ failed) raises nothing; it is not the same as down", () => {
     expect(run(room({ poller: tailscaleOffPoller, reach: reachability({}, NOW) }))).toEqual([]);
     expect(run(room({ poller: tailscaleOffPoller, reach: { state: "unknown", source: null, last_evidence_at: null, age_s: null } }))).toEqual([]);
   });
@@ -154,10 +176,15 @@ describe("ext-health offline from reachability", () => {
     expect(ext({ reach: reachability({ app_poll_at: at(1) }, NOW), poller }).status).toBe("no_chrome");
   });
 
-  it("a reachable Mac with a failed poll and a silent extension is not offline and not a false no_chrome", () => {
+  it("F3: a reachable Mac with a failed poll and a SILENT extension is `poller_down` (unknown), never ok/green, and not offline or a false no_chrome", () => {
     const row = ext({ reach: reachability({ kiosk_health_at: at(30) }, NOW), last_ext: { ts: at(3600), event: "heartbeat", reason: null }, poller: { ts: at(30), state: "unreachable", chrome_running: false, console_user: null } });
-    expect(row.status).not.toBe("offline");
-    expect(row.status).not.toBe("no_chrome");
+    expect(row.status).toBe("poller_down");
+    expect(ext({ reach: reachability({ app_poll_at: at(1) }, NOW), last_ext: null }).status).toBe("poller_down");
+    // an extension that IS heard needs no poller: still ok / behind
+    expect(ext({ reach: reachability({ app_poll_at: at(1) }, NOW), poller: null }).status).toBe("ok");
+    expect(ext({ reach: reachability({ app_poll_at: at(1) }, NOW), poller: null, ext_version: "0.1.0.9" }).status).toBe("behind");
+    // with an ok, fresh poller the old verdicts are unchanged
+    expect(ext({ reach: reachability({ app_poll_at: at(1) }, NOW), last_ext: { ts: at(3600), event: "heartbeat", reason: null }, poller: { ts: at(30), state: "ok", chrome_running: true, console_user: "c", idle_s: 0 } }).status).toBe("missing");
   });
 
   it("legacy (no reach supplied): the poller alone decides offline", () => {
@@ -193,5 +220,66 @@ describe("Steward reachability", () => {
   it("kiosk_health_down stays quiet when neither the poller nor the app sees the Mac (that is the asleep rule's business)", () => {
     const s = healthy(T, { reachable: { poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 480), app_poll_at: sago(T, 3600) } });
     expect(decide(s).map((d) => d.rule)).not.toContain("kiosk_health_down");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 2, F1: no new LIVE start (path C) + the replay table
+// ---------------------------------------------------------------------------
+import { readyRecorder } from "../support/steward-fixtures";
+
+type Reach = { poller_ok_at?: string | null; kh_heartbeat_at?: string | null; app_poll_at?: string | null; sleep_at?: string | null };
+/** 10:00 IST, no session, recorder ready 900 s, 0 attempts (the refuter's replay baseline). */
+const roomWith = (reachable: Reach, at_ = T) => idle(at_, { reachable: { kh_enrolled: true, ...reachable }, recording: { recorder_history: readyRecorder(at_, 900) } });
+const firstOf = (s: Parameters<typeof decideRoom>[0], at_ = T) => decideRoom(s, DEFAULT_CONFIG, at_, EMPTY_RECENT)[0]!;
+
+describe("F1 — Steward: the app poll never switches off the sleep marker (path C)", () => {
+  it("C: sleep/display-off marker 200 s old, kiosk-health 30 s, poller 3600 s, app poll 2 s -> kiosk_asleep ticket:wake, NEVER scribe_start", () => {
+    const d = firstOf(roomWith({ sleep_at: sago(T, 200), kh_heartbeat_at: sago(T, 30), poller_ok_at: sago(T, 3600), app_poll_at: sago(T, 2) }));
+    expect(d).toMatchObject({ rule: "kiosk_asleep", action: "ticket:wake" });
+    expect(d.action).not.toBe("scribe_start");
+  });
+
+  /**
+   * The refuter's cases A-K, same inputs. `main` is what origin/main (d6fb7f2) decided for the same room. The invariant: where this branch starts and main did not,
+   * the start is shadow-only (start_gate_fail names a failed gate, so the LiveExecutor sends nothing). A case that starts LIVE where main did not is the defect.
+   */
+  const cases: Array<{ id: string; r: Reach; main: string; now?: string; session?: boolean }> = [
+    { id: "A tailscale-off, kh 30 s", r: { poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 30), app_poll_at: sago(T, 2) }, main: "scribe_start" },
+    { id: "B poller 3600 / kh 240 / app 2", r: { poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 240), app_poll_at: sago(T, 2) }, main: "ticket:wake" },
+    { id: "C marker 200 s, kh 30, poller 3600, app 2", r: { sleep_at: sago(T, 200), poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 30), app_poll_at: sago(T, 2) }, main: "ticket:wake" },
+    { id: "C2 marker, app stale", r: { sleep_at: sago(T, 200), poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 30), app_poll_at: sago(T, 3600) }, main: "ticket:wake" },
+    { id: "C3 marker, no app", r: { sleep_at: sago(T, 200), poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 30), app_poll_at: null }, main: "ticket:wake" },
+    { id: "C4 marker, poller ok", r: { sleep_at: sago(T, 200), poller_ok_at: sago(T, 30), kh_heartbeat_at: sago(T, 30), app_poll_at: sago(T, 2) }, main: "scribe_start" },
+    { id: "D kh 180.5 s, no app", r: { poller_ok_at: sago(T, 3600), kh_heartbeat_at: new Date(T - 180_500).toISOString(), app_poll_at: null }, main: "ticket:wake" },
+    { id: "E all 240 s", r: { poller_ok_at: sago(T, 240), kh_heartbeat_at: sago(T, 240), app_poll_at: sago(T, 240) }, main: "ticket:wake" },
+    { id: "F 21:40", r: { poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 30), app_poll_at: sago(T, 2) }, main: "none", now: "21:40" },
+    { id: "I only the app in 2 h", r: { poller_ok_at: null, kh_heartbeat_at: null, app_poll_at: sago(T, 600) }, main: "log_only" },
+  ];
+
+  for (const c of cases) {
+    it(`replay ${c.id}: no live start where main did not`, () => {
+      const at_ = c.now ? sist(c.now) : T;
+      const shifted: Reach = c.now ? Object.fromEntries(Object.entries(c.r).map(([k, v]) => [k, v === null ? null : new Date(at_ - (T - Date.parse(v as string))).toISOString()])) : c.r;
+      const d = firstOf(roomWith(shifted, at_), at_);
+      if (d.action === "scribe_start" && c.main !== "scribe_start") {
+        expect(d.inputs.start_gate_fail, "a start main did not make must be shadow-only").not.toBeNull();
+      }
+      // cases that are the same on both
+      if (["A", "C ", "C2", "C3", "C4", "E ", "F "].some((p) => c.id.startsWith(p))) expect(d.action).toBe(c.main);
+    });
+  }
+
+  it("replay G: recording, poller 3600 / kh 480 / app 1 -> kiosk_health_down restart ticket (a shadow ticket), never a start", () => {
+    const s = healthy(T, { reachable: { poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 480), app_poll_at: sago(T, 1) } });
+    const d = firstOf(s);
+    expect(d).toMatchObject({ rule: "kiosk_health_down", action: "ticket:restart_kiosk_health" });
+  });
+
+  it("replay J/K: a session open never produces scribe_start, with the Mac reachable or silent", () => {
+    for (const r of [{ poller_ok_at: sago(T, 30), kh_heartbeat_at: sago(T, 30), app_poll_at: sago(T, 1) }, { poller_ok_at: sago(T, 3600), kh_heartbeat_at: sago(T, 600), app_poll_at: sago(T, 1) }]) {
+      const s = healthy(T, { reachable: { ...r }, recording: { recorder_status: { state: "idle", session_open: false, received_at: sago(T, 20) } } });
+      expect(decideRoom(s, DEFAULT_CONFIG, T, EMPTY_RECENT).map((d) => d.action)).not.toContain("scribe_start");
+    }
   });
 });
