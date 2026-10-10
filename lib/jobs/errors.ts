@@ -45,6 +45,8 @@ export const JOB_ERROR_CODES = [
   "router_job_lost",
   // diarize_window (Slice C2)
   "diarize_failed",
+  // the room job refuses DIARIZE_ENGINE=local|pyannoteai by name, before any call (nemotron is the only room engine)
+  "diarize_engine_refused",
   "diarize_unavailable",
   "diarize_would_exceed_budget",
   // emotion_window (Slice C3)

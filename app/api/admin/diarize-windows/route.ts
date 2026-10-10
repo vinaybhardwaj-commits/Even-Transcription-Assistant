@@ -1,19 +1,10 @@
 /**
- * /api/admin/diarize-windows — ENQUEUE room diarization. It writes nothing itself.
- *
- * Per eligible window (closed, grid-aligned, with a room_day and a joined clip, not yet diarized
- * and not already queued) this submits a `diarize_window` job and returns the job refs. The job is
- * the only writer of `room_diarize_window` and `room_turn_speaker`. Speaker clustering has no
- * writer at all — see CLUSTERING_STATUS in lib/brain/state.ts.
- *
- * There is no `?dry=1` any more and no second path. `dry` used to diarize and store without
- * clustering, to accumulate calibration data; the job now stores that data on every run, so the
- * mode had nothing left to be different about.
- *
- * SHIPS DARK. `ROOM_DIARIZE_ENABLED` is the on-switch for the scheduled enqueue.
- * (Renamed from SPEAKER_CLUSTERS_ENABLED in C2; the old name is ignored and logged.) Unset, this is
- * a clean no-op. It exists because this route runs every five minutes and the job runner every
- * minute: without it, deploying this would start diarizing every closed window on the Mini.
+ * /api/admin/diarize-windows — the room diarize SWEEPER (R2-2). Room diarization is TRIGGERED by the Nemotron ingest
+ * (/api/diarize/nemotron/ingest submits the `diarize_window` job); this route, on its every-5-minutes cron and as an admin POST, RE-DRIVES
+ * windows whose job left no ok row: with DIARIZE_NEMOTRON_SHADOW on it submits `diarize_window` for each window Nemotron has
+ * answered whose room row is absent or failed (oldest first, at most 20, fewer than 3 failed jobs, nothing open). With the flag
+ * off, or DIARIZE_ENGINE refused, it answers 200 with a `note` and queues nothing. No pyannote, no other engine.
+ * The job is the only writer of `room_diarize_window` and `room_turn_speaker`.
  *
  * AUTH: Bearer CRON_SECRET or Bearer MIGRATION_SECRET on GET; admin cookie or Bearer MIGRATION_SECRET
  * on POST (the manual door).
@@ -79,7 +70,7 @@ async function run(req: NextRequest, actor: string) {
       `diarize enqueue had ${result.errors.length} failure(s): scanned=${result.scanned} enqueued=${result.enqueued.length} — an empty list here is NOT "nothing eligible"`,
     );
   }
-  return respondOk({ enabled: result.enabled, scanned: result.scanned, jobs: result.enqueued, exhausted: result.exhausted });
+  return respondOk({ enabled: result.enabled, scanned: result.scanned, jobs: result.enqueued, exhausted: result.exhausted, note: result.note });
 }
 
 export async function GET(req: NextRequest) {

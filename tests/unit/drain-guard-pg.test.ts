@@ -109,13 +109,24 @@ afterAll(() => { if (HAVE) pg.stop(); });
     pg.exec(`DELETE FROM stt_subject_job`);
   });
 
-  it("diarize enqueue: the oldest undiarized window is enqueued, formerly held-out or not; nothing excluded", async () => {
+  it("diarize sweeper: the oldest ANSWERED window without a room row is swept, formerly held-out or not; nothing is excluded; with the shadow flag off it queues nothing", async () => {
     vi.resetModules();
     H.submitted.length = 0;
-    const { enqueueDiarizeWindows } = await import("@/lib/stt/diarize-job");
-    const r = await enqueueDiarizeWindows({ actor: "adm_test", log: () => {}, limit: 1 });
-    expect(H.submitted).toEqual(["bw_win"]);
-    expect(r.n_blind_excluded ?? 0).toBe(0);
+    process.env.DIARIZE_NEMOTRON_SHADOW = "1";
+    pg.exec(`INSERT INTO diarize_nemotron_window (window_id, room_day_id, model, model_rev, config, config_hash, worker_id, machine, audio_ms, turns_json, speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status)
+             SELECT w.id, w.room_day_id, 'm', 'r', '{}', 'h', 'w', 'box', 900000, '[[0,1000,"spk0"]]', 1, 1, 1000, 0, 'p', 'ok' FROM bench_window w WHERE w.id IN ('bw_blind', 'bw_win', 'bw_clean')`);
+    try {
+      const { enqueueDiarizeWindows } = await import("@/lib/stt/diarize-job");
+      const r = await enqueueDiarizeWindows({ actor: "adm_test", log: () => {}, limit: 1 });
+      expect(H.submitted).toEqual(["bw_win"]); // oldest of the three answered windows (bw_win 1000 < bw_blind < bw_clean)
+      expect(r.n_blind_excluded).toBe(0);
+      process.env.DIARIZE_NEMOTRON_SHADOW = "0";
+      H.submitted.length = 0;
+      expect((await enqueueDiarizeWindows({ actor: "adm_test", log: () => {} })).enqueued).toEqual([]);
+      expect(H.submitted).toEqual([]);
+    } finally {
+      delete process.env.DIARIZE_NEMOTRON_SHADOW;
+    }
   });
 
   it("emotion enqueue: a diarized window placed on the formerly held-out room-day is enqueued like the clean one", async () => {

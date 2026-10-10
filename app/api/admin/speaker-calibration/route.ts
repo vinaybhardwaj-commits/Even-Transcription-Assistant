@@ -129,7 +129,7 @@ export async function GET(req: NextRequest) {
     threshold_env: SPEAKER_MATCH_THRESHOLD_ENV,
     // Said out loud rather than left to be inferred from an empty sweep.
     note: rows.length === 0
-      ? `no stored diarize results for ${sessionId}. With ROOM_DIARIZE_ENABLED=1, POST /api/admin/diarize-windows enqueues a diarize_window job per eligible window; every job stores the service's answer here. (There is no ?dry=1 any more — storing is what every run does.)`
+      ? `no stored diarize results for ${sessionId}. Room diarization is driven by the Nemotron ingest (/api/diarize/nemotron/ingest submits a diarize_window job per stored window; the scheduled enqueue is retired); every job stores its answer here.`
       : embeddings.length === 0
         ? "diarize results exist but carry no usable embeddings — the Mini returned speakers without embedding_base64, so clustering cannot be calibrated or performed"
         : null,

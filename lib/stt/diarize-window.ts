@@ -151,6 +151,9 @@ export type DiarizeEngineProvenance = {
    * zero means nothing could have been compared, whatever the engine did.
    */
   centroids_offered?: number;
+  /** Nemotron only: the stored answer this row was built from (diarize_nemotron_window), so a row can be traced to its revision and config. */
+  model_rev?: string | null;
+  config_hash?: string | null;
   /**
    * Why this engine was never called, when it was not. A window the engine found empty and a
    * window the engine never saw both land `no_speakers`, and only this tells them apart.
