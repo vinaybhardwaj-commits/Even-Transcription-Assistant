@@ -103,6 +103,8 @@ Vox-Profile is not pip-installable. `extractors/voxprofile_dim.py` is an adapter
 
 Odyssey's published `pipeline_utils.py` targets transformers 4. The extractor keeps that architecture locally (same module names, `post_init` for transformers 5) and does not execute the remote file.
 
+Transformers 5 loads Whisper with `dtype="auto"`. The Whisper-large-v3 config is fp16, and on CUDA that is a half conv bias against float32 mel features (`Input type (float) and bias type (c10::Half)`). The encoder and the Vox-Profile backbone are loaded in float32, and the mel features are cast to that dtype.
+
 `catalog.py` lists a `ram_gb` floor per model. Below that, `python -m tools.timbre.run` logs the reason, skips that model, and continues with the rest. The slow test skips the same way.
 
 ## Nemotron probability files

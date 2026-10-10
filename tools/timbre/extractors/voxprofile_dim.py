@@ -60,7 +60,9 @@ class VoxProfileExtractor(Extractor):
                 model = cls.from_pretrained(MODEL_ID, map_location="cpu")
             except TypeError:
                 model = cls.from_pretrained(MODEL_ID)
-            model.to(self.device).eval()
+            # A fp16 checkpoint must not stay half when the head and the mel
+            # features are float32. Cast before the device move.
+            model.float().to(self.device).eval()
             self._model = model
         return self._model
 
@@ -105,7 +107,10 @@ def _build_wrapper_class():
                 output_hidden_states=True,
                 max_source_positions=750,
             )
-            self.backbone_model = WhisperModel(cfg)
+            # Same fp16 trap as the plain Whisper encoder: the published config's
+            # dtype is float16, and transformers 5 will build the conv bias in half.
+            cfg.dtype = torch.float32
+            self.backbone_model = WhisperModel._from_config(cfg, dtype=torch.float32).float()
             self.register_buffer(
                 "embed_positions",
                 self.backbone_model.encoder.embed_positions.weight.detach().clone()[:750],
@@ -152,7 +157,7 @@ def _build_wrapper_class():
             features = self.feature_extractor(
                 waves, return_tensors="pt", sampling_rate=16_000, max_length=max_audio_len
             )
-            feats = features.input_features.to(device)
+            feats = features.input_features.to(device=device, dtype=_floating_dtype(self.backbone_model))
             if length is None:
                 lengths = torch.tensor([int(row.shape[0]) for row in x], device="cpu")
             else:
@@ -174,6 +179,15 @@ def _build_wrapper_class():
             return arousal, valence, dominance
 
     return VoxProfileWhisperDim
+
+
+def _floating_dtype(module):
+    import torch
+
+    for param in module.parameters():
+        if param.is_floating_point():
+            return param.dtype
+    return torch.float32
 
 
 def _dim_head(hidden_dim: int):

@@ -23,7 +23,7 @@ class WhisperEncoderExtractor(Extractor):
         if sr != 16_000:
             audio = _resample(audio, sr, 16_000)
         inputs = fe(audio, sampling_rate=16_000, return_tensors="pt")
-        feats = inputs.input_features.to(self.device)
+        feats = inputs.input_features.to(device=self.device, dtype=_floating_dtype(model))
         with torch.no_grad():
             hidden = model.encoder(feats).last_hidden_state
         enc_len = _encoder_frames(audio.size, hidden.shape[1])
@@ -41,13 +41,32 @@ class WhisperEncoderExtractor(Extractor):
             if self.device == "cuda" and not torch.cuda.is_available():
                 raise RuntimeError("cuda requested but not available")
             self._fe = WhisperFeatureExtractor.from_pretrained(MODEL_ID)
-            self._model = WhisperModel.from_pretrained(MODEL_ID, low_cpu_mem_usage=True).to(self.device).eval()
+            # transformers 5 defaults dtype to "auto". Whisper's config is fp16, and on
+            # CUDA that leaves a half conv bias against float32 mel features.
+            self._model = (
+                WhisperModel.from_pretrained(
+                    MODEL_ID,
+                    dtype=torch.float32,
+                    low_cpu_mem_usage=True,
+                )
+                .to(self.device)
+                .eval()
+            )
         return self._model, self._fe
 
     def close(self) -> None:
         self._model = None
         self._fe = None
         super().close()
+
+
+def _floating_dtype(module):
+    import torch
+
+    for param in module.parameters():
+        if param.is_floating_point():
+            return param.dtype
+    return torch.float32
 
 
 def _encoder_frames(n_samples: int, max_frames: int) -> int:
