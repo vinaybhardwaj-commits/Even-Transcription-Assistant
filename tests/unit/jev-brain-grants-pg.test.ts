@@ -36,7 +36,9 @@ const tool = (name: string) => JEV_TOOLS.find((t) => t.name === name)!;
 
 const GRANT_FILE = "0144_jev_brain_reader_grants.sql";
 const ALL = readdirSync("db/migrations").filter((f) => f.endsWith(".sql")).sort();
-const GRANTED = ["jev_window_signal", "jev_decision", "jev_window_text", "bench_window", "room_diarize_window"];
+const GRANTED = ["jev_window_signal", "jev_decision", "jev_window_text"];
+/** 0074's intent stands: brain_svc does not read room tables, before or after 0144. */
+const NOT_GRANTED = ["bench_window", "room_diarize_window", "jev_role_signal"];
 
 const lit = (v: unknown): string => {
   if (v === null || v === undefined) return "NULL";
@@ -110,6 +112,13 @@ suite("brain_svc reads the Jev tables (real postgres:16, every migration)", () =
     const d = (await tool("scribe_jev_decisions").handler({ question_id: "u1_phase" }, ctx)) as Record<string, unknown>;
     expect(d.ok).toBe(true);
     expect((d.decisions as Array<{ prompt_version: string }>).map((r) => r.prompt_version)).toEqual(["u1-phase-w1"]);
+  });
+
+  it("brain_svc still cannot SELECT the room tables (0074) or jev_role_signal", () => {
+    for (const t of NOT_GRANTED) {
+      const out = execFileSync("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-U", "postgres", "-d", "postgres", "-c", `SELECT has_table_privilege('brain_svc', '${t}', 'SELECT')`], { encoding: "utf8" }).trim();
+      expect(out, t).toBe("f");
+    }
   });
 
   it("0144 is idempotent and SELECT-only: a re-run is clean and brain_svc gains no write", () => {

@@ -9,13 +9,11 @@
 --   jev_window_signal  scribe_jev_signals (lib/mcp/tools/jev.ts), jev signals in lib/mcp/tools/fuse.ts
 --   jev_decision       scribe_jev_decisions -> listJevDecisions (lib/room-access/tool-reads.ts)
 --   jev_window_text    named by the order; no brain-pool reader today, granted for the J-tools
---   bench_window, room_diarize_window
---                      joined by listJevDecisions' held-out NOT EXISTS clauses; Postgres checks
---                      privilege on every relation in the statement, so the join alone 42501s.
---                      NOTE: 0074 deliberately granted brain_svc nothing on room_diarize_window;
---                      this reverses that for SELECT only, at the order's instruction.
 --   room_day           already SELECT-able by brain_svc (0053/0065): nothing to do.
--- NOT granted: jev_role_signal (no brain-pool reader).
+-- NOT granted: bench_window and room_diarize_window — 0074's intent stands: brain_svc does not read room
+-- tables. listJevDecisions used to join them for held-out NOT EXISTS clauses; the blind rule is lifted
+-- (V, 10 Oct), the clauses are gone, and so is the need.
+-- NOT granted either: jev_role_signal (no brain-pool reader).
 --
 -- GRANT-ONLY AND IDEMPOTENT. SELECT only: brain_svc gains no INSERT, UPDATE or DELETE. No data
 -- change. Wrapped as 0053 is: a database without the role (local, CI) is a notice, not an error.
@@ -30,8 +28,6 @@ BEGIN
   GRANT SELECT ON TABLE jev_window_signal TO brain_svc;
   GRANT SELECT ON TABLE jev_decision TO brain_svc;
   GRANT SELECT ON TABLE jev_window_text TO brain_svc;
-  GRANT SELECT ON TABLE bench_window TO brain_svc;
-  GRANT SELECT ON TABLE room_diarize_window TO brain_svc;
 END
 $$;
 
