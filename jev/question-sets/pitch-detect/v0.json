@@ -1,0 +1,130 @@
+{
+  "id": "pitch-detect",
+  "version": "v0",
+  "use": "consult_rubric",
+  "subject_type": "consult",
+  "state_schema": "transcript-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "pitch_investigation",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest a test or investigation to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: a blood test, scan, X-ray or other investigation the patient is asked to get. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests a test or investigation.",
+          "no": "The doctor does not suggest a test or investigation.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "pitch_procedure",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest a procedure to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: a minor procedure or intervention that is not an operation. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests a procedure.",
+          "no": "The doctor does not suggest a procedure.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "pitch_surgery",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest an operation to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: an operation or surgery. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests an operation.",
+          "no": "The doctor does not suggest an operation.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "pitch_medication",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest a medicine to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: starting, changing or stopping a medicine. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests a medicine.",
+          "no": "The doctor does not suggest a medicine.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "pitch_physio",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest physiotherapy or another therapy to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: physiotherapy, exercise or another therapy programme. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests physiotherapy or another therapy.",
+          "no": "The doctor does not suggest physiotherapy or another therapy.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "pitch_follow_up",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest a follow-up visit to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: coming back, a review visit or a referral. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests a follow-up visit.",
+          "no": "The doctor does not suggest a follow-up visit.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "pitch_other",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. QUESTION: Does the doctor suggest some other measurable action to the patient in this consultation? RULES: A pitch is any doctor suggestion whose patient compliance can be measured: any other action the patient is asked to take whose compliance can be measured. The doctor merely explaining a past result is not a pitch. Answer only from the transcript.",
+        "criteria": {
+          "yes": "The doctor suggests some other measurable action.",
+          "no": "The doctor does not suggest some other measurable action.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    }
+  ]
+}

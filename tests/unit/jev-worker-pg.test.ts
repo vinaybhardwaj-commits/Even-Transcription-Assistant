@@ -71,7 +71,7 @@ vi.mock("@/lib/brain/db", () => ({
   query: async (text: string, values: unknown[] = []) => {
     const rendered = render(text, values);
     const out = execFileSync("docker", ["exec", "-i", H.pg!.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"],
-      { input: `SELECT coalesce(jsonb_agg(q), '[]'::jsonb) FROM (${rendered.trim().replace(/;\s*$/, "")}) q;`, encoding: "utf8" });
+      { input: `RESET ROLE;\nSET ROLE brain_svc;\nSELECT coalesce(jsonb_agg(q), '[]'::jsonb) FROM (${rendered.trim().replace(/;\s*$/, "")}) q;`, encoding: "utf8" });
     return { rows: JSON.parse(out.trim().split("\n").pop()!) };
   },
 }));
@@ -99,6 +99,9 @@ import { JEV_SUBJECT_TYPES, JevHttpError } from "@/lib/jev/types";
 import { insertJevDecisions } from "@/lib/jev/decision-store";
 import { jevAskKind, parseJevAskArgs } from "@/lib/jobs/kinds/jev-ask";
 import { jevDriftKind } from "@/lib/jobs/kinds/jev-drift";
+import { runBench, BenchRefused } from "@/lib/jev/worker/bench";
+import { registerP2Uses } from "@/lib/jev/worker/register";
+import { resolveTimelineAnswer } from "@/lib/jev/worker/builders/timeline";
 import { breakerAdmit, getBreaker, recordOutcome } from "@/lib/jev/worker/breaker";
 import { JEV_SUBMIT_LOCK_KEY, submitJevAskCapped } from "@/lib/jev/worker/budget";
 import { claimSlot, GLOBAL_SLOTS } from "@/lib/jev/worker/slots";
@@ -159,6 +162,18 @@ suite("the Jev worker on postgres:16", () => {
     pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, answer) VALUES ('jd_legacy1', 'probe', 'pr_1', 'u1_phase', 'u1-phase-w1', 'jev-1.13.0', '{"type":"choice","choice":"history","probabilities":{"history":1},"confidence":1}');`);
     pg.exec(mig("0149_jev_worker.sql"));
     pg.exec(mig("0149_jev_worker.sql"));   // twice, cleanly
+    // STEP 0 (Fable's precondition): from here on every session runs as a NON-SUPERUSER "app role" that OWNS every object, as the migration role does in production,
+    // and the brain pool runs as brain_svc. So the whole suite below proves the grants, not a superuser's bypass of them.
+    pg.exec(`
+      CREATE ROLE eta_app NOLOGIN;
+      GRANT ALL ON SCHEMA public TO eta_app;
+      DO $$ DECLARE r record; BEGIN
+        FOR r IN SELECT format('ALTER TABLE %I.%I OWNER TO eta_app', schemaname, tablename) AS c FROM pg_tables WHERE schemaname = 'public' LOOP EXECUTE r.c; END LOOP;
+        FOR r IN SELECT format('ALTER VIEW %I.%I OWNER TO eta_app', schemaname, viewname) AS c FROM pg_views WHERE schemaname = 'public' LOOP EXECUTE r.c; END LOOP;
+        FOR r IN SELECT format('ALTER SEQUENCE %I.%I OWNER TO eta_app', schemaname, sequencename) AS c FROM pg_sequences WHERE schemaname = 'public' LOOP EXECUTE r.c; END LOOP;
+      END $$;
+      ALTER DATABASE postgres SET role = 'eta_app';
+    `);
     _clearUsesForTests();
     registerUse({
       use: "stt_quality", setId: "smoke", subjectType: "stt_run",
@@ -167,6 +182,46 @@ suite("the Jev worker on postgres:16", () => {
     });
   }, 300_000);
   afterAll(() => pg.stop());
+
+  // ── STEP 0: the grants, proved with the real roles ──────────────────────────────────────────────────────────────────────
+  describe("STEP 0 — the app role and brain_svc hold exactly the grants the worker and P2 need on the 0149 tables", () => {
+    const JEV_TABLES = ["jev_question_set", "jev_question", "jev_question_set_event", "jev_call", "jev_gold_label", "jev_breaker", "jev_drift_report", "jev_slot", "jev_decision", "jev_decision_current", "jev_cost_day"];
+    const priv = async (role: string, rel: string, p: string): Promise<boolean> => Boolean((await rows`SELECT has_table_privilege(${role}, ${rel}, ${p}) AS ok`)[0]!.ok);
+
+    it("the session is the app role, and it is NOT a superuser", async () => {
+      const r = await rows`SELECT current_user AS u, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su`;
+      expect(r[0]).toMatchObject({ u: "eta_app", su: false });
+    });
+    it("the app role can SELECT/INSERT/UPDATE/DELETE every 0149 table (and SELECT the views), and use the one sequence", async () => {
+      for (const t of JEV_TABLES) {
+        expect(await priv("eta_app", t, "SELECT"), `${t} select`).toBe(true);
+        if (!["jev_decision_current", "jev_cost_day"].includes(t)) for (const p of ["INSERT", "UPDATE", "DELETE"]) expect(await priv("eta_app", t, p), `${t} ${p}`).toBe(true);
+      }
+      expect(Boolean((await rows`SELECT has_sequence_privilege('eta_app', 'jev_question_set_event_seq_seq', 'USAGE') AS ok`)[0]!.ok)).toBe(true);
+    });
+    it("brain_svc reads jev_decision, jev_window_signal and jev_window_text (0144) and NOTHING else of Jev's, and writes nothing", async () => {
+      for (const t of ["jev_decision", "jev_window_signal", "jev_window_text"]) {
+        expect(await priv("brain_svc", t, "SELECT"), t).toBe(true);
+        for (const p of ["INSERT", "UPDATE", "DELETE"]) expect(await priv("brain_svc", t, p), `${t} ${p}`).toBe(false);
+      }
+      for (const t of JEV_TABLES.filter((x) => x !== "jev_decision")) expect(await priv("brain_svc", t, "SELECT"), `${t} must NOT be readable by brain_svc`).toBe(false);
+      expect(await priv("brain_svc", "jev_role_signal", "SELECT")).toBe(false);
+    });
+    it("the columns 0149 added to jev_decision ride the table-level grant: brain_svc can SELECT every one of them", async () => {
+      const cols = ["question_set_id", "question_set_version", "question_set_sha256", "order_variant", "option_order_sha256", "lane", "band", "calibrated_p", "outcome", "call_id", "job_id", "mode", "output_tokens", "cost_usd", "evidence", "state_sha256", "mock"];
+      for (const c of cols) expect(Boolean((await rows`SELECT has_column_privilege('brain_svc', 'jev_decision', ${c}, 'SELECT') AS ok`)[0]!.ok), c).toBe(true);
+    });
+    it("run AS brain_svc: the decisions reader works, and a read of jev_call is refused 42501", async () => {
+      const q = (text: string) => execFileSync("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { input: `RESET ROLE;\nSET ROLE brain_svc;\n${text}`, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+      expect(() => q("SELECT count(*) FROM jev_decision;")).not.toThrow();
+      expect(() => q("SELECT count(*) FROM jev_call;")).toThrow(/permission denied/);
+      expect(() => q("SELECT 1 FROM jev_question_set;")).toThrow(/permission denied/);
+      expect(() => q("INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, answer) VALUES ('x','probe','x','x','x','x','{}');")).toThrow(/permission denied/);
+    });
+    it("no migration is needed: 0149 grants nothing and nothing is missing (no 0152)", () => {
+      expect(readdirSync("db/migrations").filter((f) => f.startsWith("0152_"))).toEqual([]);
+    });
+  });
 
   // ── P1.1 ───────────────────────────────────────────────────────────────────────────────────────────────────────
   describe("P1.1 — the migration", () => {
@@ -203,8 +258,10 @@ suite("the Jev worker on postgres:16", () => {
   // ── P1.2 ───────────────────────────────────────────────────────────────────────────────────────────────────────
   describe("P1.2 — sync and status", () => {
     it("sync is idempotent: inserted, then unchanged; the DB mirror holds the questions", async () => {
-      expect((await syncQuestionSets()).map((s) => s.result)).toEqual(["inserted"]);
-      expect((await syncQuestionSets()).map((s) => s.result)).toEqual(["unchanged"]);
+      const first = await syncQuestionSets();
+      expect(first.length).toBe(QUESTION_SET_FILES.length);
+      expect(first.every((s) => s.result === "inserted")).toBe(true);
+      expect((await syncQuestionSets()).every((s) => s.result === "unchanged")).toBe(true);
       const q = await rows`SELECT question_id, kind, option_order FROM jev_question WHERE question_set_id = 'smoke' ORDER BY question_id`;
       expect(q.map((r) => r.question_id)).toEqual(["is_greeting", "tone"]);
       const s = await rows`SELECT status, model_pin FROM jev_question_set WHERE id = 'smoke'`;
@@ -620,6 +677,148 @@ suite("the Jev worker on postgres:16", () => {
     it("is dark with the worker flag off", async () => {
       const out = await jevDriftKind.run({ ...mkCtx("report", { ist_date: "2026-10-10" }, {}), args: { ist_date: "2026-10-10" } });
       expect(out).toMatchObject({ kind: "done", result: { skipped: "worker_disabled" } });
+    });
+  });
+
+  // ── P2: the real (draft) question sets, the bench runner, shadow ───────────────────────────────────────────────────────
+  describe("P2 — draft sets, the bench runner, shadow (Jev mocked)", () => {
+    const CANDS = { cand_01: "t+02:30", cand_02: "t+05:00", cand_03: "t+07:30" };
+    const fakeTimelineUse = (over: Partial<Parameters<typeof registerUse>[0]> = {}): Parameters<typeof registerUse>[0] => ({
+      use: "encounter_timeline", setId: "u10-timeline", subjectType: "encounter", eligible: async () => [],
+      build: async (id) => (id === "tl_big" ? { tooLarge: true, bytes: 99_999 } : id === "tl_none" ? null : { state: { setting: "room", rows: [], candidates: Object.entries(CANDS).map(([key, row]) => ({ key, row })) }, evidence: { segment: id, candidates: CANDS }, lane: "timeline" as const }),
+      resolve: resolveTimelineAnswer, ...over,
+    });
+    /** Answers by question: the wanted option when the question offers it, else its first option. */
+    const answer = (want: Record<string, string>) => (req: { questions: Record<string, { type: string; criteria?: Record<string, string> }> }) => {
+      const answers: Record<string, unknown> = {};
+      for (const [id, qq] of Object.entries(req.questions)) {
+        const keys = Object.keys(qq.criteria!);
+        const pick = want[id] && keys.includes(want[id]!) ? want[id]! : keys[0]!;
+        const probs: Record<string, number> = {};
+        keys.forEach((k) => { probs[k] = k === pick ? 0.7 : 0.3 / (keys.length - 1); });
+        answers[id] = { type: "choice", choice: pick, probabilities: probs, confidence: 0.7 };
+      }
+      return { model: "jev-1.13.0", answers, usage: { input_tokens: 2000, output_tokens: 30 }, latency_ms: 30 };
+    };
+    const reset = async () => { _clearUsesForTests(); await H.pg!.sql`DELETE FROM jev_breaker`; await H.pg!.sql`DELETE FROM jev_call`; await H.pg!.sql`DELETE FROM jev_slot`; };
+    const TL_ON = { JEV_WORKER_ENABLED: "1" };   // a no-text use needs no text lane
+
+    it("every P2 set landed as DRAFT after sync, and none is ratified (no set goes ratified in this branch)", async () => {
+      const r = await rows`SELECT id, status, ratified_by FROM jev_question_set WHERE id <> 'smoke' ORDER BY id`;
+      expect(r.map((x) => x.id)).toEqual(["chair-affect", "doubt", "encounter-end", "pitch-detect", "pitch-uptake", "stt-pick", "stt-quality", "u10-timeline"]);
+      for (const x of r) expect(x, x.id).toMatchObject({ status: "draft", ratified_by: null });
+    });
+
+    it("SHADOW IS OFF BY DEFAULT: with no flag, and with the worker flag alone, no P2 set runs in shadow; a DRAFT set is refused even with every flag on", async () => {
+      await reset(); registerP2Uses();
+      const sets: Array<[string, string, string]> = [["encounter_timeline", "u10-timeline", "v2"], ["encounter_timeline", "encounter-end", "v0"], ["stt_quality", "stt-quality", "v0"], ["stt_pick", "stt-pick", "v0"],
+        ["consult_rubric", "pitch-detect", "v0"], ["consult_rubric", "pitch-uptake", "v0"], ["consult_rubric", "chair-affect", "v0"], ["consult_rubric", "doubt", "v0"]];
+      for (const [use, id, version] of sets) {
+        const a = parseJevAskArgs({ use, mode: "shadow", set_id: id, version, subject_ids: ["x1"] });
+        expect((await runJob(a)).out, `${id} no flags`).toMatchObject({ result: { skipped: "worker_disabled" } });
+        env({ JEV_WORKER_ENABLED: "1", ETA_JEV_TEXT_LANE: "1" });
+        expect((await runJob(a)).out, `${id} worker only`).toMatchObject({ result: { skipped: "use_flag_off" } });
+        env({ ...ON, JEV_USE_ENCOUNTER_TIMELINE: "1", JEV_USE_CONSULT_RUBRIC: "1" });
+        expect((await runJob(a)).out, `${id} every flag`).toMatchObject({ result: { skipped: "set_not_allowed", detail: "status_draft_for_shadow" } });
+        for (const k of FLAGS) delete process.env[k];
+      }
+      expect(H.calls.length).toBe(0);
+      expect((await rows`SELECT count(*)::int AS n FROM jev_call`)[0]!.n).toBe(0);
+    });
+
+    it("BENCH: asks the set over a fixed list, writes LEDGER rows, NEVER a decision, and reports counts + accuracy vs labels (consult end: the row)", async () => {
+      await reset(); registerUse(fakeTimelineUse()); env(TL_ON);
+      await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'u10-timeline'`;
+      H.script = answer({ u10_kind: "consultation", u10_end_row: "cand_02", u10_end_signal: "patient_side_voices_stop_doctor_alone", u10_start_offset: "at_anchor", u10_walk_in: "none" });
+      const labels = [
+        { subject_id: "tl_1", question_id: "u10_end_row", label: "t+05:00" }, { subject_id: "tl_2", question_id: "u10_end_row", label: "t+05:00" }, { subject_id: "tl_3", question_id: "u10_end_row", label: "t+02:30" },
+        { subject_id: "tl_1", question_id: "u10_kind", label: "consultation" }, { subject_id: "tl_2", question_id: "u10_kind", label: "empty_room" }, { subject_id: "tl_3", question_id: "u10_kind", label: "insufficient_evidence" },
+      ];
+      const rep = await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1", "tl_2", "tl_3", "tl_big", "tl_none"], labels });
+      expect(rep).toMatchObject({ set: "u10-timeline", version: "v2", mode: "bench", in_sample: true, mock: false });
+      expect(rep.counts).toMatchObject({ subjects: 5, asked: 3, too_large: 1, no_state: 1, failed: 0, calls: 6 });
+      expect(rep.abstain_reasons).toEqual({ state_too_large: 1, no_state: 1 });
+      const endRow = rep.questions.find((x) => x.question_id === "u10_end_row")!;
+      expect(endRow.distribution).toEqual({ cand_02: 3 });
+      expect(endRow.vs_labels).toMatchObject({ n_labeled: 3, n_scored: 3, coverage: 1 });
+      expect(endRow.vs_labels!.accuracy).toBeCloseTo(2 / 3, 3);   // cand_02 = t+05:00 matches two of three labels
+      expect(endRow.vs_labels!.confusion).toEqual({ "t+05:00": { "t+05:00": 2 }, "t+02:30": { "t+05:00": 1 } });
+      const kind = rep.questions.find((x) => x.question_id === "u10_kind")!;
+      expect(kind.vs_labels).toMatchObject({ n_labeled: 3, n_scored: 3, n_escape_truth: 1, escape_recall: 0 });   // Jev answered "consultation" three times; one truth was an escape, so recall 0
+      expect(endRow.order_flip_rate).toBe(0);
+      // the ledger: 6 bench rows pinned to this set's hash; NO decision rows at all
+      const calls = await rows`SELECT mode, error_class, question_set_sha256, model_requested FROM jev_call`;
+      expect(calls.length).toBe(6);
+      for (const c of calls) expect(c).toMatchObject({ mode: "bench", error_class: null, model_requested: "jev-1.13.0" });
+      expect(new Set(calls.map((c) => c.question_set_sha256)).size).toBe(1);
+      expect((await rows`SELECT count(*)::int AS n FROM jev_decision WHERE question_set_id = 'u10-timeline'`)[0]!.n).toBe(0);
+      expect(JSON.stringify(rep)).not.toMatch(/transcript|ZZ-TEXT/);
+    });
+
+    it("MODEL PINNED: the bench sends exactly jev-1.13.0 to the client even when ETA_JEV_MODEL says otherwise", async () => {
+      await reset(); registerUse(fakeTimelineUse()); env({ ...TL_ON, ETA_JEV_MODEL: "jev-9.9.9" });
+      await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1"] });
+      expect(H.calls.length).toBeGreaterThan(0);
+      for (const c of H.calls) expect(c.model).toBe("jev-1.13.0");
+    });
+
+    it("the bench is gated like every worker path, and refuses what it must", async () => {
+      await reset(); registerUse(fakeTimelineUse());
+      const base = { use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1"] };
+      await expect(runBench(base)).rejects.toMatchObject({ reason: "worker_disabled" });
+      env(TL_ON);
+      await expect(runBench({ ...base, subjects: [] })).rejects.toMatchObject({ reason: "no_subjects" });
+      await expect(runBench({ ...base, setId: "no-such-set" })).rejects.toMatchObject({ reason: "no_use_registered" });
+      await expect(runBench({ ...base, use: "nope" })).rejects.toMatchObject({ reason: "bad_use" });
+      await expect(runBench({ ...base, version: "v9" })).rejects.toMatchObject({ reason: "set_not_allowed", detail: "not_synced" });
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'retired' WHERE id = 'u10-timeline'`;
+      try { await expect(runBench(base)).rejects.toMatchObject({ reason: "set_not_allowed", detail: "retired" }); } finally { await H.pg!.sql`UPDATE jev_question_set SET status = 'draft' WHERE id = 'u10-timeline'`; }
+      // a text set also needs the lane switch
+      registerUse({ use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: async () => [], build: async () => ({ state: { transcript: "x" }, evidence: {}, lane: "text" }) });
+      await expect(runBench({ use: "consult_rubric", setId: "chair-affect", version: "v0", subjects: ["c1"] })).rejects.toMatchObject({ reason: "text_lane_off" });
+      expect(H.calls.length).toBe(0);
+      expect(new BenchRefused("x")).toBeInstanceOf(Error);
+    });
+
+    it("a pre-gate abstain (patient-side speech under 3 turns) is a counted skip, not a call", async () => {
+      await reset(); env({ ...ON });
+      registerUse({ use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: async () => [], build: async (id) => (id === "c_quiet" ? { abstain: "patient_side_speech_lt_3_turns" } : { state: { transcript: `${SECRET_TEXT}` }, evidence: { consult_key: id }, lane: "text" }) });
+      H.script = answer({ distress: "low" });
+      const rep = await runBench({ use: "consult_rubric", setId: "chair-affect", version: "v0", subjects: ["c_quiet", "c_ok"] });
+      expect(rep.counts).toMatchObject({ subjects: 2, asked: 1, abstained: 1, calls: 2 });   // chair-affect asks 4 axes, each in both orders => 2 calls for the one asked subject
+      expect(rep.abstain_reasons).toEqual({ patient_side_speech_lt_3_turns: 1 });
+      expect(JSON.stringify(rep)).not.toContain(SECRET_TEXT);
+    });
+
+    it("SHADOW (only by test-ratifying a set): decisions carry prompt_version <set>@<version>+<order> on EVERY row, mode shadow, mock false, lane timeline; a closed gate overwrites its dependents in code", async () => {
+      await reset(); registerUse(fakeTimelineUse());
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow', ratified_by = 'test', ratified_at = now() WHERE id = 'u10-timeline'`;
+      try {
+        env({ ...TL_ON, JEV_USE_ENCOUNTER_TIMELINE: "1" });
+        H.script = answer({ u10_kind: "consultation", u10_end_row: "cand_02" });
+        const r = await runJob(parseJevAskArgs({ use: "encounter_timeline", mode: "shadow", set_id: "u10-timeline", version: "v2", subject_ids: ["tl_s1"] }));
+        expect(r.out).toMatchObject({ kind: "done", result: { subjects: 1, decisions: 15, calls: 2 } });
+        const d = await rows`SELECT question_id, order_variant, prompt_version, mode, mock, lane, outcome, model FROM jev_decision WHERE question_set_id = 'u10-timeline' AND subject_id = 'tl_s1'`;
+        expect(d.length).toBe(15);
+        for (const x of d) { expect(x.prompt_version, `${x.question_id}/${x.order_variant}`).toBe(`u10-timeline@v2+${x.order_variant}`); expect(x).toMatchObject({ mode: "shadow", mock: false, lane: "timeline", model: "jev-1.13.0" }); }
+        // gate: the kind says empty_room -> the four dependents are overwritten in code (raw answer kept), kind itself stays answered
+        H.script = answer({ u10_kind: "empty_room" });
+        await runJob(parseJevAskArgs({ use: "encounter_timeline", mode: "shadow", set_id: "u10-timeline", version: "v2", subject_ids: ["tl_s2"] }));
+        const g = await rows`SELECT question_id, outcome, band FROM jev_decision WHERE subject_id = 'tl_s2' AND order_variant = 'derived' ORDER BY question_id`;
+        expect(g.find((x) => x.question_id === "u10_kind")!.outcome).toBe("answered");
+        for (const id of ["u10_end_row", "u10_end_signal", "u10_start_offset", "u10_walk_in"]) expect(g.find((x) => x.question_id === id), id).toMatchObject({ outcome: "gated_overwritten", band: "abstain" });
+        // a live run of the same shadow set is refused
+        env({ JEV_ENCOUNTER_TIMELINE_LIVE: "1" });
+        expect((await runJob(parseJevAskArgs({ use: "encounter_timeline", mode: "live", set_id: "u10-timeline", version: "v2", subject_ids: ["tl_s3"] }))).out).toMatchObject({ result: { skipped: "set_not_allowed", detail: "status_shadow_for_live" } });
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'draft', ratified_by = NULL, ratified_at = NULL WHERE id = 'u10-timeline'`;
+        await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'u10-timeline'`;
+      }
+    });
+
+    it("the P2 uses are registered in production code (one per set), and registering twice is harmless", () => {
+      _clearUsesForTests(); registerP2Uses(); registerP2Uses();
+      expect([...new Set(["u10-timeline", "encounter-end", "stt-quality", "stt-pick", "pitch-detect", "pitch-uptake", "chair-affect", "doubt"])].length).toBe(8);
     });
   });
 });

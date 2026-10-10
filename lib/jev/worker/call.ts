@@ -28,7 +28,7 @@ export type SetRef = { id: string; version: string; sha: string; modelPin: strin
 export type BenchRow = { subject_id: string; question_id: string; variant: string; kind: string; value: string | number; confidence: number | null };
 
 export type AskOutcome =
-  | { kind: "done"; decisions: number; calls: number; errorClass: null; bench: BenchRow[]; inputTokens: number }
+  | { kind: "done"; decisions: number; calls: number; errorClass: null; bench: BenchRow[]; inputTokens: number; abstained?: string; evidence?: Record<string, unknown> }
   | { kind: "deferred"; why: "circuit_open" | "no_slot" | "budget_exceeded"; calls: number }
   | { kind: "failed"; errorClass: ErrorClass; retry: boolean; calls: number };
 
@@ -71,6 +71,13 @@ export async function askSubject(input: {
 
   // No builder output: the subject is no longer buildable. Recorded as no opinion, never a fabricated state.
   if (!build) return { kind: "done", decisions: 0, calls: 0, errorClass: null, bench: [], inputTokens: 0 };
+
+  if ("abstain" in build) {
+    // a deterministic pre-gate (PRD §2): the call is SKIPPED with a reason code, never sent to Jev
+    const rows: WorkerDecision[] = defs.map((d) => ({ ...base(), questionId: d.question_id, orderVariant: "derived", promptVersion: pv("derived"), optionOrderSha: null, answer: { type: "none" }, probabilities: null, confidence: null, band: ESCAPE_BAND, outcome: "no_answer", evidence: { abstain_reason: build.abstain } }));
+    if (mode !== "bench") await upsertDecisions(rows);
+    return { kind: "done", decisions: mode === "bench" ? 0 : rows.length, calls: 0, errorClass: null, bench: [], inputTokens: 0, abstained: build.abstain };
+  }
 
   if ("tooLarge" in build) {
     const rows: WorkerDecision[] = defs.map((d) => ({ ...base(), questionId: d.question_id, orderVariant: "derived", promptVersion: pv("derived"), optionOrderSha: null, answer: { type: "none" }, probabilities: null, confidence: null, band: ESCAPE_BAND, outcome: "state_too_large", evidence: { state_bytes: build.bytes } }));
@@ -189,12 +196,17 @@ export async function askSubject(input: {
     bench.push({ subject_id: subjectId, question_id: d.question_id, variant: "derived", kind: derived.type, value: val.value, confidence: val.confidence });
   }
 
-  // gates: a dependent question's derived answer is OVERWRITTEN in code when its gate says no; the raw answer is kept on the row.
+  // gates: a dependent question's derived answer is OVERWRITTEN in code when its gate says it is closed; the raw answer is kept on the row.
+  //   gate_requires (PRD §2 gating table): the gate answers that keep the question open; any other choice closes it.
+  //   without it: closed only when the gate's answer is one of the gate's own escape options (or a noul under 0.5).
   for (const d of defs) {
     if (!d.gate_question_id) continue;
     const g = derivedAnswer.get(d.gate_question_id);
+    if (!g) continue;                                          // the gate was not answered: no opinion on the dependent
     const gateDef = defs.find((x) => x.question_id === d.gate_question_id);
-    const closed = g?.type === "noul" ? g.noul < 0.5 : g?.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
+    let closed = false;
+    if (d.gate_requires) closed = g.type === "choice" ? !d.gate_requires.includes(g.choice) : false;
+    else closed = g.type === "noul" ? g.noul < 0.5 : g.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
     if (!closed) continue;
     const row = rows.find((r) => r.questionId === d.question_id && r.orderVariant === "derived");
     if (row && row.outcome === "answered") { row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id }; }

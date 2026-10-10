@@ -1,0 +1,63 @@
+{
+  "id": "encounter-end",
+  "version": "v0",
+  "use": "encounter_timeline",
+  "subject_type": "encounter",
+  "state_schema": "timeline-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "u11_after_consult_activity",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the speaker-turn timeline of one outpatient room from a consult's start until the next record opening. Each row is 30 seconds. DOC is the room's doctor. A null value means no evidence, not silence. QUESTION: What is the doctor doing in the quiet-or-solo stretch after the patient leaves? RULES: The encounter ends when the doctor submits the note (V, 10 Oct 2026). That is later than the consult end (the patient leaving). After the patient leaves, the doctor typing, dictating or working alone is still part of the encounter. The timeline cannot show a note being submitted; choose the candidate row where the doctor's work on this patient most plausibly ends, or say the evidence is insufficient. Answer only from the timeline. ",
+        "criteria": {
+          "doctor_alone_working": "Only DOC speaks, or the room is quiet with DOC present: typing, dictating or reading.",
+          "doctor_calls_next_patient": "DOC speaks and a new voice arrives.",
+          "next_patient_already_in": "Another patient is already in the room.",
+          "room_idle": "Nobody is present or speaking.",
+          "tape_or_mic_loss": "The recording is lost.",
+          "not_applicable": "There is no post-consult stretch.",
+          "insufficient_evidence": "The timeline does not let you tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "u11_work_end_row",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the speaker-turn timeline of one outpatient room from a consult's start until the next record opening. Each row is 30 seconds. DOC is the room's doctor. A null value means no evidence, not silence. QUESTION: Which candidate row is the last row of the doctor's work on THIS patient? RULES: The encounter ends when the doctor submits the note (V, 10 Oct 2026). That is later than the consult end (the patient leaving). After the patient leaves, the doctor typing, dictating or working alone is still part of the encounter. The timeline cannot show a note being submitted; choose the candidate row where the doctor's work on this patient most plausibly ends, or say the evidence is insufficient. Answer only from the timeline. ",
+        "criteria": {
+          "cand_01": "Candidate row 1 of the candidate list in the state, in time order. Unused if the list has fewer than 1 candidates.",
+          "cand_02": "Candidate row 2 of the candidate list in the state, in time order. Unused if the list has fewer than 2 candidates.",
+          "cand_03": "Candidate row 3 of the candidate list in the state, in time order. Unused if the list has fewer than 3 candidates.",
+          "cand_04": "Candidate row 4 of the candidate list in the state, in time order. Unused if the list has fewer than 4 candidates.",
+          "cand_05": "Candidate row 5 of the candidate list in the state, in time order. Unused if the list has fewer than 5 candidates.",
+          "cand_06": "Candidate row 6 of the candidate list in the state, in time order. Unused if the list has fewer than 6 candidates.",
+          "cand_07": "Candidate row 7 of the candidate list in the state, in time order. Unused if the list has fewer than 7 candidates.",
+          "cand_08": "Candidate row 8 of the candidate list in the state, in time order. Unused if the list has fewer than 8 candidates.",
+          "cand_09": "Candidate row 9 of the candidate list in the state, in time order. Unused if the list has fewer than 9 candidates.",
+          "cand_10": "Candidate row 10 of the candidate list in the state, in time order. Unused if the list has fewer than 10 candidates.",
+          "cand_11": "Candidate row 11 of the candidate list in the state, in time order. Unused if the list has fewer than 11 candidates.",
+          "cand_12": "Candidate row 12 of the candidate list in the state, in time order. Unused if the list has fewer than 12 candidates.",
+          "continues_past_segment": "The doctor is still working on this patient in the last row.",
+          "not_applicable": "There is no consultation in this segment.",
+          "insufficient_evidence": "The timeline does not let you tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "id": "chair-affect",
+  "version": "v0",
+  "use": "consult_rubric",
+  "subject_type": "consult",
+  "state_schema": "transcript-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "distress",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. RULES: Judge patient and attender lines only; ignore staff and phone talk and other consultations in the clip. Default to low when there is no clear sign. A prompted 'okay' is not high. The axis words are not a dump bin: choose medium or high only with a clear sign in the words. QUESTION: How much distress does the patient side show? Distress is fear, pain or anguish voiced in words.",
+        "criteria": {
+          "low": "No clear sign.",
+          "medium": "A clear but moderate sign.",
+          "high": "A strong, repeated or explicit sign.",
+          "not_applicable": "No patient-side speech to judge.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "confusion",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. RULES: Judge patient and attender lines only; ignore staff and phone talk and other consultations in the clip. Default to low when there is no clear sign. A prompted 'okay' is not high. The axis words are not a dump bin: choose medium or high only with a clear sign in the words. QUESTION: How much confusion does the patient side show? Confusion is not understanding what is being said or planned.",
+        "criteria": {
+          "low": "No clear sign.",
+          "medium": "A clear but moderate sign.",
+          "high": "A strong, repeated or explicit sign.",
+          "not_applicable": "No patient-side speech to judge.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "frustration",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. RULES: Judge patient and attender lines only; ignore staff and phone talk and other consultations in the clip. Default to low when there is no clear sign. A prompted 'okay' is not high. The axis words are not a dump bin: choose medium or high only with a clear sign in the words. QUESTION: How much frustration does the patient side show? Frustration is irritation at waiting, repetition or not being heard.",
+        "criteria": {
+          "low": "No clear sign.",
+          "medium": "A clear but moderate sign.",
+          "high": "A strong, repeated or explicit sign.",
+          "not_applicable": "No patient-side speech to judge.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "reassurance",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. RULES: Judge patient and attender lines only; ignore staff and phone talk and other consultations in the clip. Default to low when there is no clear sign. A prompted 'okay' is not high. The axis words are not a dump bin: choose medium or high only with a clear sign in the words. QUESTION: How much reassurance does the patient side show? Reassurance is the patient showing relief or being settled by what the doctor said.",
+        "criteria": {
+          "low": "No clear sign.",
+          "medium": "A clear but moderate sign.",
+          "high": "A strong, repeated or explicit sign.",
+          "not_applicable": "No patient-side speech to judge.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    }
+  ]
+}
