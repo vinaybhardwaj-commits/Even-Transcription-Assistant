@@ -76,12 +76,12 @@ describe("normalizeRow", () => {
     ["not cut", { status: "skipped" }, "not_cut"],
     ["deferred", { status: "deferred_long" }, "not_cut"],
     ["not mirrored", { r2: { status: "pending", prefix: "x" } }, "not_mirrored"],
-    ["no r2", { r2: undefined }, "not_mirrored"],
+    ["no r2", { r2: undefined }, "no_clip_key"],
     ["a bad uid", { consult_uid: "../x" }, "no_uid"],
     ["a bad slug", { room_slug: "opd 7/../x" }, "bad_place"],
     ["a bad date", { ist_date: "06-10-2026" }, "bad_place"],
     ["a bad span", { span_start: "nope" }, "bad_span"],
-    ["a prefix that is not this consult's", { r2: { status: "mirrored", prefix: "consult-clips/2026-10-06/other/ZZZ" } }, "bad_prefix"],
+    ["a prefix that is not this consult's", { r2: { status: "mirrored", bucket: "eta-audio", prefix: "consult-clips/2026-10-06/other/ZZZ" } }, "bad_prefix"],
     ["no cut version", { cut_at: undefined }, "no_cut_version"],
   ])("skips a row that is %s", (_n, over, why) => {
     expect(normalizeRow(row(over))).toEqual({ skip: why });
@@ -89,6 +89,73 @@ describe("normalizeRow", () => {
   it("an unsafe doctor_uid is dropped, not stored", () => {
     const n = normalizeRow(row({ doctor_uid: "x'; DROP TABLE y;--" }));
     expect("row" in n && n.row.doctor_uid).toBeNull();
+  });
+});
+
+/**
+ * THE WRITER'S SHAPE. tools/index_mirror.py (box; ~/oc/consult/cutter-deploy) keeps only status "cut" + r2.status "mirrored" cutter rows and PROJECTS them through
+ *   ALLOW = consult_uid window_id ist_date room_id room_slug span_start span_end span_end_epoch t_open t_close minutes bytes quality flags coverage voice_isolated doctor_uid doctor_identified cut_at code_commit signature r2
+ *   R2_ALLOW = bucket prefix files at
+ * so `status`, `bytes_total`, `path`, `doctor_name` and r2.status are NOT in a published row (its own test asserts exactly that). Values below are invented.
+ */
+const WRITER_ALLOW = ["consult_uid", "window_id", "ist_date", "room_id", "room_slug", "span_start", "span_end", "span_end_epoch", "t_open", "t_close", "minutes", "bytes", "quality", "flags", "coverage", "voice_isolated", "doctor_uid", "doctor_identified", "cut_at", "code_commit", "signature", "r2"];
+const WRITER_R2_ALLOW = ["bucket", "prefix", "files", "at"];
+/** What the writer would publish for a raw cutter row: the allowlisted keys that are present, r2 reduced to its allowlist. */
+const published = (raw: Record<string, unknown>): Record<string, unknown> => {
+  const out: Record<string, unknown> = Object.fromEntries(WRITER_ALLOW.filter((k) => k in raw && k !== "r2").map((k) => [k, raw[k]]));
+  const r2 = raw.r2 as Record<string, unknown>;
+  out.r2 = Object.fromEntries(WRITER_R2_ALLOW.filter((k) => k in r2).map((k) => [k, r2[k]]));
+  return out;
+};
+
+describe("THE PUBLISHED SHAPE: the writer drops `status` and r2.status, and the parser must still index the row (0 of 429 was indexed)", () => {
+  it("the fixture really is the writer's shape: no status, no bytes_total, no path, no name, r2 = bucket/prefix/files/at", () => {
+    const p = published(row({ path: "2026-10-06/x/y", doctor_name: DOC.full_name }));
+    expect(Object.keys(p).sort()).toEqual(WRITER_ALLOW.filter((k) => k in row() && k !== "r2").concat("r2").sort());
+    for (const k of ["status", "bytes_total", "path", "doctor_name", "close_reason", "computed_at"]) expect(p, k).not.toHaveProperty(k);
+    expect(Object.keys(p.r2 as object).sort()).toEqual(["at", "bucket", "files", "prefix"]);
+  });
+  it("a published row is INDEXED (this is the regression: every such row used to be skipped as not_cut)", () => {
+    const n = normalizeRow(published(row()));
+    if (!("row" in n)) throw new Error(`skipped: ${JSON.stringify(n)}`);
+    expect(n.row).toMatchObject({ consult_uid: UID, clip_r2_key: `consult-clips/2026-10-06/opd-7-y74w/${UID}/consult.flac`, t1_ms: 1791263093662, cut_version: "2026-10-09T02:14:48+0530", sealed: false, doctor_uid: "DOCTORUID1" });
+  });
+  it("bytes come from the per-file sizes when bytes_total is not published", () => {
+    const n = normalizeRow(published(row()));
+    expect("row" in n && n.row.bytes).toBe(105);
+    expect("row" in normalizeRow(published(row({ bytes: {} }))) && (normalizeRow(published(row({ bytes: {} }))) as { row: { bytes: number | null } }).row.bytes).toBeNull();
+    expect("row" in normalizeRow(row({ bytes_total: 777 })) && (normalizeRow(row({ bytes_total: 777 })) as { row: { bytes: number } }).row.bytes).toBe(777); // a raw cutter row still wins on its own total
+  });
+  it("a whole published file: every row indexed, none skipped as not_cut (the production run read 429 and wrote 0)", () => {
+    const rows = Array.from({ length: 5 }, (_, i) => published(row({ consult_uid: `CIpub${i}abcdefghijklmnop`, r2: { status: "mirrored", bucket: "eta-audio", prefix: `consult-clips/2026-10-06/opd-7-y74w/CIpub${i}abcdefghijklmnop`, files: 4, at: "x" } })));
+    const latest = lines(...rows);
+    const r = parseIndex(latest, manifestFor(latest, { rows: 5 }));
+    if (!r.ok) throw new Error("integrity");
+    expect(r.parsed.rows).toHaveLength(5);
+    expect(r.parsed.skipped).toEqual({});
+  });
+  it("rows WITHOUT a clip key are still refused: no r2, no bucket, no prefix, an empty prefix, a foreign bucket, a prefix that is not this consult's", () => {
+    const base = published(row());
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["no r2 at all", (({ r2: _r, ...rest }) => rest)(base as Record<string, unknown> & { r2: unknown }), "no_clip_key"],
+      ["r2 not an object", { ...base, r2: "mirrored" }, "no_clip_key"],
+      ["r2 an array", { ...base, r2: [] }, "no_clip_key"],
+      ["no prefix", { ...base, r2: { bucket: "eta-audio", files: 1 } }, "no_clip_key"],
+      ["an empty prefix", { ...base, r2: { bucket: "eta-audio", prefix: "" } }, "no_clip_key"],
+      ["no bucket", { ...base, r2: { prefix: `consult-clips/2026-10-06/opd-7-y74w/${UID}` } }, "no_clip_key"],
+      ["an empty bucket", { ...base, r2: { bucket: "", prefix: `consult-clips/2026-10-06/opd-7-y74w/${UID}` } }, "no_clip_key"],
+      ["a bucket that is not eta-audio", { ...base, r2: { bucket: "somewhere-else", prefix: `consult-clips/2026-10-06/opd-7-y74w/${UID}` } }, "bad_prefix"],
+      ["another consult's prefix", { ...base, r2: { bucket: "eta-audio", prefix: "consult-clips/2026-10-06/opd-7-y74w/ZZZ" } }, "bad_prefix"],
+      ["a traversal prefix", { ...base, r2: { bucket: "eta-audio", prefix: `consult-clips/../${UID}` } }, "bad_prefix"],
+    ];
+    for (const [why, r, want] of cases) expect(normalizeRow(r), why).toEqual({ skip: want });
+  });
+  it("a row that DOES carry a status (a raw cutter row) must still be cut + mirrored", () => {
+    expect(normalizeRow(published({ ...row(), status: "skipped" }))).toMatchObject({ row: expect.anything() }); // published() drops the status: the writer's filter already ran
+    expect(normalizeRow({ ...published(row()), status: "skipped" })).toEqual({ skip: "not_cut" });
+    expect(normalizeRow({ ...published(row()), status: "deferred_long" })).toEqual({ skip: "not_cut" });
+    expect(normalizeRow({ ...published(row()), r2: { ...(published(row()).r2 as object), status: "pending_mirror" } })).toEqual({ skip: "not_mirrored" });
+    expect(normalizeRow({ ...published(row()), r2: { ...(published(row()).r2 as object), status: "error" } })).toEqual({ skip: "not_mirrored" });
   });
 });
 

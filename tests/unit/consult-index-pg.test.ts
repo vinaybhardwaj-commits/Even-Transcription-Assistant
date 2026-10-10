@@ -259,6 +259,24 @@ describe.skipIf(!HAVE)("the sync (the first run is the backfill)", () => {
   });
 });
 
+describe.skipIf(!HAVE)("the sync of the PUBLISHED shape (the writer drops status and r2.status)", () => {
+  /** what tools/index_mirror.py publishes: ALLOW keys only, r2 = bucket/prefix/files/at */
+  const ALLOW = ["consult_uid", "window_id", "ist_date", "room_id", "room_slug", "span_start", "span_end", "span_end_epoch", "t_open", "t_close", "minutes", "bytes", "quality", "flags", "coverage", "voice_isolated", "doctor_uid", "doctor_identified", "cut_at", "code_commit", "signature", "r2"];
+  const publish = (r: Row): Row => ({ ...Object.fromEntries(ALLOW.filter((k) => k in r && k !== "r2").map((k) => [k, r[k]])), r2: Object.fromEntries(["bucket", "prefix", "files", "at"].filter((k) => k in r.r2).map((k) => [k, r.r2[k]])) });
+  it("indexes every published row (the first production sync read 429 and wrote 0) and can then be sent", async () => {
+    const pub = FIVE().map(publish);
+    expect(pub.every((r) => !("status" in r) && !("status" in r.r2))).toBe(true);
+    publishIndex(pub);
+    const r = await Sync.syncConsultIndex();
+    expect(r).toMatchObject({ ok: true, rows_read: 5, rows_written: 5, inserted: 5, rows_skipped: 0, skipped: {} });
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM consult_index`)[0]!.n).toBe(5);
+    expect((await St.getIndexRow(UA))).toMatchObject({ clip_r2_key: clipKey(UA), bytes: expect.any(Number) });
+    putClips(UA);
+    const out = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    expect(out).toMatchObject({ ok: true, status: "queued" });
+  });
+});
+
 describe.skipIf(!HAVE)("scribe_sarvam / sarvam_transcribe on a consult_uid", () => {
   it("resolves through the index, sends ONLY that cut clip, and stores the result with model + revision under the cut version", async () => {
     await backfill();
