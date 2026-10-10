@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0146 — Tailscale exit, TS-H3 (#40): the fleet control plane, SERVER side.
+-- Migration 0148 — Tailscale exit, TS-H3 (#40): the fleet control plane, SERVER side.
 --
 -- WHY. Clinic Macs are repaired over Tailscale SSH today. The Room Recorder's privileged helper will instead hold an outbound HTTPS long-poll to
 -- /api/fleet/poll, authenticated by a per-device Ed25519 key it registers here. This migration is the storage only. NOTHING in it, or in the routes that
@@ -105,5 +105,5 @@ CREATE TABLE IF NOT EXISTS fleet_control (
 );
 
 INSERT INTO schema_migrations (version, name)
-VALUES (146, '0146_fleet_control_plane')
+VALUES (148, '0148_fleet_control_plane')
 ON CONFLICT DO NOTHING;

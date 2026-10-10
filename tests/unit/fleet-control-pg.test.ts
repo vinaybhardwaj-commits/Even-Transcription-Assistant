@@ -1,5 +1,5 @@
 /**
- * TS-H3 (#40) — the fleet control plane, server side, on a REAL postgres:16 with EVERY migration (0146 fleet_*). Routes are called as functions; only the database
+ * TS-H3 (#40) — the fleet control plane, server side, on a REAL postgres:16 with EVERY migration (0148 fleet_*). Routes are called as functions; only the database
  * module is bridged to the container. Refused: bad signature, tampered token or body, replayed token, unknown device, expired token / registration proof, revoked or
  * retired device. Also: long-poll timeout, redelivery, kill switch, result binding to the issued command, and that no route can queue a command.
  * All ids are fake. No private key ever reaches the server: tests sign client-side with node:crypto.
