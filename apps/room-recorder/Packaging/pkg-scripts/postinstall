@@ -1,0 +1,8 @@
+#!/bin/sh
+# A root helper must never execute user-writable code: make the installed bundle root:wheel.
+# $2 is the install location the installer was given (/Applications).
+APP="${2:-/Applications}/EvenScribe Room Recorder.app"
+[ -d "$APP" ] || exit 1
+/usr/sbin/chown -R root:wheel "$APP"
+/bin/chmod -R go-w "$APP"
+exit 0

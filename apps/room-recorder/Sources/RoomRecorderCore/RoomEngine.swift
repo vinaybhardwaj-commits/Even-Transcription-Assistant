@@ -1282,9 +1282,9 @@ public actor RoomEngine {
         let reportedResult = pendingUpdateResult
         let signal = currentSignal()
         let heartbeat = currentHeartbeat()
-        let installFields = installID.map {
-          InstallPollFields(
-            installID: $0,
+        let installFields = installID.map { id -> InstallPollFields in
+          var fields = InstallPollFields(
+            installID: id,
             // The device the CONFIG says this room records from — the same string RoomEngine
             // hands `tapewriter --device`. The reader turns it into the name CoreAudio reports
             // for it right now, or nil when it is not attached.
@@ -1314,6 +1314,12 @@ public actor RoomEngine {
             levelSeq: signal.levelSeq,
             levelAt: signal.levelAt
           )
+          // TS-H2 #39. What the app last saw of the helper; nil until the first probe lands.
+          let helper = HelperStatusCache.shared.snapshot
+          fields.helperVersion = helper?.helperVersion
+          fields.helperRegistration = helper?.registration
+          fields.helperXPCOK = helper?.xpcOK
+          return fields
         }
         let response = try await remote.pollCommands(
           tabID: listenerTabID,

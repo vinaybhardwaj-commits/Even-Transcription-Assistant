@@ -38,6 +38,8 @@ readonly CERT_SHA256="903EDCE6F78C2199DFF45939D492041FED0C0A8394DDABB985278349BB
 readonly BUNDLE_ID="com.evenscribe.room-recorder"
 readonly FFMPEG_BUNDLE_ID="com.evenscribe.room-recorder.ffmpeg"
 readonly TAPEWRITER_BUNDLE_ID="com.evenscribe.room-recorder.tapewriter"
+readonly HELPER_BUNDLE_ID="com.evenscribe.room-recorder.helper"
+readonly HELPER_PLIST_NAME="com.evenscribe.room-recorder.helper.plist"
 readonly MIN_MACOS="15.0"
 readonly APP_NAME="EvenScribe Room Recorder.app"
 # ─── THE HARDENED RUNTIME REFUSES THE MICROPHONE WITHOUT AN ENTITLEMENT ──────────────────────
@@ -125,7 +127,7 @@ say "Building release binaries for macOS ${MIN_MACOS}"
 # One invocation per product. SwiftPM's `--product` is single-valued: passing it twice does not
 # build two products, it silently keeps the last one, and the build then dies at the assemble step
 # with `room-recorder was not built`. Observed 8 Sep on this script's first real run.
-for product in room-recorder tapewriter; do
+for product in room-recorder room-recorder-helper tapewriter; do
   (
     cd "$PACKAGE_DIR"
     swift build -c release \
@@ -136,18 +138,27 @@ done
 BIN_DIR="$(cd "$PACKAGE_DIR" && swift build -c release --show-bin-path)"
 [ -x "${BIN_DIR}/room-recorder" ] || die "room-recorder was not built"
 [ -x "${BIN_DIR}/tapewriter" ] || die "tapewriter was not built"
+[ -x "${BIN_DIR}/room-recorder-helper" ] || die "room-recorder-helper was not built"
 
 # ─── Assemble (§5.1) ─────────────────────────────────────────────────────────────────────────
 say "Assembling ${APP_NAME}"
 STAGE="${OUTPUT_ROOT}/stage"
 APP="${STAGE}/${APP_NAME}"
 /bin/rm -rf "$STAGE"
-/bin/mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Helpers" "${APP}/Contents/Resources/Licenses"
+/bin/mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Helpers" "${APP}/Contents/Library/LaunchDaemons" "${APP}/Contents/Resources/Licenses"
 
 /bin/cp "${BIN_DIR}/room-recorder" "${APP}/Contents/MacOS/room-recorder"
 /bin/cp "${BIN_DIR}/tapewriter" "${APP}/Contents/Helpers/tapewriter"
+# TS-H2 #39. The root helper lives in Contents/MacOS (the plist's BundleProgram is relative to the
+# bundle) and its launchd plist in Contents/Library/LaunchDaemons, where SMAppService looks.
+/bin/cp "${BIN_DIR}/room-recorder-helper" "${APP}/Contents/MacOS/room-recorder-helper"
+/bin/cp "${SCRIPT_DIR}/${HELPER_PLIST_NAME}" "${APP}/Contents/Library/LaunchDaemons/${HELPER_PLIST_NAME}"
+/bin/chmod 0644 "${APP}/Contents/Library/LaunchDaemons/${HELPER_PLIST_NAME}"
+/usr/bin/plutil -lint "${APP}/Contents/Library/LaunchDaemons/${HELPER_PLIST_NAME}" >/dev/null \
+  || die "the helper launchd plist did not lint"
 /bin/cp "$FFMPEG_SOURCE" "${APP}/Contents/Helpers/ffmpeg"
 /bin/chmod 0755 "${APP}/Contents/MacOS/room-recorder" \
+  "${APP}/Contents/MacOS/room-recorder-helper" \
   "${APP}/Contents/Helpers/tapewriter" "${APP}/Contents/Helpers/ffmpeg"
 
 # LGPL notices and the source lock ride inside the bundle (X2's condition for shipping).
@@ -192,6 +203,9 @@ say "Signing helpers"
 # entitlement. Least privilege, and it keeps the audio-input grant on the two binaries that need it.
 codesign --force --timestamp --options runtime \
   --identifier "$FFMPEG_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/ffmpeg"
+# The root helper takes no entitlements: it never touches the microphone.
+codesign --force --timestamp --options runtime \
+  --identifier "$HELPER_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/MacOS/room-recorder-helper"
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" \
   --identifier "$TAPEWRITER_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/tapewriter"
 
@@ -235,9 +249,9 @@ say "Verifying"
 codesign --verify --strict --verbose=4 \
   -R "= certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
   "$APP" || die "the signed bundle does not satisfy the pinned requirement"
-for helper in ffmpeg tapewriter; do
-  codesign --verify --strict "${APP}/Contents/Helpers/${helper}" \
-    || die "helper ${helper} failed verification"
+for helper in Helpers/ffmpeg Helpers/tapewriter MacOS/room-recorder-helper; do
+  codesign --verify --strict "${APP}/Contents/${helper}" \
+    || die "${helper} failed verification"
 done
 codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/grep -E "^Authority|^Identifier|^CDHash" || true
 

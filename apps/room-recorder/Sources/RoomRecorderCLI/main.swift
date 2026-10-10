@@ -190,6 +190,8 @@ private enum RoomRecorderCLI {
         // Hands the main thread to AppKit and never returns. The microphone is requested from
         // inside the run loop; see ResidentApplication for why that is the only order that works.
         ResidentApplication.run {
+          // TS-H2 #39. Registers the privileged helper and starts reporting its state.
+          HelperBootstrap.start()
           do {
             let bench = BenchClient(configuration: configuration)
             let recovery: (any RoomRetainedArchiveRecovering)?

@@ -91,6 +91,13 @@ public struct InstallPollFields: Equatable, Sendable {
   /// The wall clock of that checkpoint, ISO-8601, from the index record's own `wall_ns`.
   public var levelAt: String?
 
+  // ─── TS-H2 #39 ────────────────────────────────────────────────────────────────────────────
+  /// What the app last saw of the privileged helper. Set after init, from `HelperStatusCache`.
+  /// Nil means not measured and is sent as absence, like every field above.
+  public var helperVersion: String?
+  public var helperRegistration: String?
+  public var helperXPCOK: Bool?
+
   public init(
     installID: String,
     appVersion: String? = nil,
@@ -308,6 +315,12 @@ public struct InstallPollFields: Equatable, Sendable {
     if let levelSeq, levelSeq >= 0 {
       items.append(URLQueryItem(name: "level_seq", value: String(levelSeq)))
       add("level_at", levelAt)
+    }
+    // ── TS-H2 #39 ───────────────────────────────────────────────────────────────────────────
+    add("helper_version", helperVersion)
+    add("helper_registration", helperRegistration)
+    if let helperXPCOK {
+      items.append(URLQueryItem(name: "helper_xpc_ok", value: helperXPCOK ? "true" : "false"))
     }
     return items
   }

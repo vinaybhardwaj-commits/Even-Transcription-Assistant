@@ -12,6 +12,7 @@ var products: [Product] = [
   .library(name: "TapeCore", targets: ["TapeCore"]),
   .executable(name: "tapewriter", targets: ["tapewriter"]),
   .executable(name: "room-recorder", targets: ["RoomRecorderCLI"]),
+  .executable(name: "room-recorder-helper", targets: ["room-recorder-helper"]),
 ]
 
 var targets: [Target] = [
@@ -26,9 +27,23 @@ var targets: [Target] = [
       ? [.define("ETA_DURABILITY_FAULT_PROBE")]
       : []
   ),
+  .target(name: "HelperCore"),
   .target(
     name: "RoomRecorderCore",
-    dependencies: ["TapeCore", "TapeCapture"]
+    dependencies: ["TapeCore", "TapeCapture", "HelperCore"]
+  ),
+  .executableTarget(
+    name: "room-recorder-helper",
+    dependencies: ["HelperCore"],
+    exclude: ["Info.plist"],
+    linkerSettings: [
+      .unsafeFlags([
+        "-Xlinker", "-sectcreate",
+        "-Xlinker", "__TEXT",
+        "-Xlinker", "__info_plist",
+        "-Xlinker", "Sources/room-recorder-helper/Info.plist",
+      ])
+    ]
   ),
   .executableTarget(
     name: "tapewriter",
@@ -48,6 +63,7 @@ var targets: [Target] = [
     name: "RoomRecorderCLI",
     dependencies: ["RoomRecorderCore"]
   ),
+  .testTarget(name: "HelperCoreTests", dependencies: ["HelperCore", "RoomRecorderCore"]),
   .testTarget(
     name: "TapeCoreTests",
     dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore"],
