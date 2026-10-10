@@ -36,6 +36,13 @@ database credential. Nothing clinician-facing reads these rows.
 - `NEMOTRON_LAB=0` (or `--no-lab`) never asks `/lab/claim`. Embedders are local files only: `NEMOTRON_TITANET_NEMO` (a titanet-large `.nemo`) and `NEMOTRON_ECAPA_DIR` (a speechbrain ecapa directory); unset = `embedder_unavailable` on the item (turns kept)).
 - **UNVERIFIED on a live box:** the NeMo calls in `engine_nemo.py` (`include_tensor_outputs`, `postprocessing_yaml`, the two non-stock presets, the embedders). The tests use a stub engine.
 
+## HF overflow mode (`NEMOTRON_MACHINE=hf`)
+- Same code, same routes. With `NEMOTRON_MACHINE=hf` (or `--machine hf`) the worker asks `/pending?machine=hf`, posts `machine: "hf"`, never asks the LAB lane, and uses a worker id of its own (set `NEMOTRON_WORKER_ID`, e.g. `hf-<job>`).
+- The SERVER decides whether it may claim, at claim time (`lib/diarize-nemotron/overflow.ts`): `NEMO_HF_DAILY_USD_CAP` (default `0` = overflow OFF), `NEMO_HF_BACKLOG_THRESHOLD` (default 40: the eligible unclaimed backlog must EXCEED it) and `NEMO_HF_USD_PER_AUDIO_MIN` (default 1/60, an estimate). Spend today (IST) = ingested `machine='hf'` audio minutes + live unfinished HF claims at 15 min each (migration 0146 adds `diarize_nemotron_claim.machine`). The batch is shrunk to the whole windows that still fit under the cap and to what leaves the backlog at the threshold.
+- A closed gate is a normal `200 {windows: [], overflow: {allowed: false, reason: overflow_off|cap_reached|below_threshold}}`: the worker idles (`overflow_idle:<reason>`), it does not back off. A mistyped env value is `500 bad_flag`.
+- Never two workers on one window: the existing lease. A box and an HF worker racing for a window give it to exactly one.
+- Bound: two HF workers claiming at the same instant can each pass the cap check, so spend can exceed the cap by at most one batch each (8 windows). Run one HF worker.
+
 ## Engine version (what each row is keyed on)
 - Stock: `model = nvidia/Nemotron-3-Diarization`, `model_rev = f667ed73aee57d40cc39428eb768b4fd87a0a29e`. It comes from the pinned HF revision, loaded from the local HF cache with `HF_HUB_OFFLINE=1`.
 - `config` holds the offline 30.4 s setting: spkcache 264, fifo 40, chunk 340, right context 40, update period 300. `config_hash = c80a0d84…96c6`.
