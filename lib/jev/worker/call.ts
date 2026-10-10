@@ -58,6 +58,41 @@ function bandFor(def: QuestionDef, set: SetRef, a: JevAnswer, confidence: number
   return confidenceBand(confidence, def.bands ?? set.bands ?? undefined);
 }
 
+
+/**
+ * GATES (PRD §2 gating table), evaluated in DEPENDENCY ORDER against the POST-gate state: a dependent is overwritten in code when its gate says it is closed, and a gate
+ * that was itself overwritten counts as CLOSED for everything behind it, so a closed gate closes the whole chain (pitch_type = no_pitch -> uptake and EVERY per-pitch
+ * item, recovery_appropriateness and cost_answered included). The raw answer stays on the row; the bench row is marked `gated`, so the bench scores what shadow stores.
+ *   gate_requires: the gate answers that keep the question open; any other choice closes it.   Without it: closed when the gate answered one of its own escape options (or a noul under 0.5).
+ * Order independent: it repeats until nothing changes, so a dependent declared before its gate is handled the same.
+ */
+export function applyGates(defs: ReadonlyArray<QuestionDef>, derived: ReadonlyMap<string, JevAnswer>, rows: WorkerDecision[], bench: BenchRow[]): void {
+  const overwritten = new Set<string>();
+  for (let pass = 0; pass <= defs.length; pass += 1) {
+    let changed = false;
+    for (const d of defs) {
+      if (!d.gate_question_id || overwritten.has(d.question_id)) continue;
+      const row = rows.find((r) => r.questionId === d.question_id && r.orderVariant === "derived");
+      if (!row || row.outcome !== "answered") continue;
+      let closed = overwritten.has(d.gate_question_id);            // the gate was itself closed: everything behind it is closed
+      if (!closed) {
+        const g = derived.get(d.gate_question_id);
+        if (!g) continue;                                          // the gate was not answered: no opinion on the dependent
+        const gateDef = defs.find((x) => x.question_id === d.gate_question_id);
+        if (d.gate_requires) closed = g.type === "choice" ? !d.gate_requires.includes(g.choice) : false;
+        else closed = g.type === "noul" ? g.noul < 0.5 : g.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
+      }
+      if (!closed) continue;
+      row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id };
+      const br = bench.find((x) => x.question_id === d.question_id && x.variant === "derived");
+      if (br) br.gated = true;
+      overwritten.add(d.question_id);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+}
+
 export async function askSubject(input: {
   jobId: string | null; set: SetRef; defs: QuestionDef[]; mode: JevMode; subjectId: string; build: StateBuild | null; signal?: AbortSignal;
 }): Promise<AskOutcome> {
@@ -197,25 +232,7 @@ export async function askSubject(input: {
     bench.push({ subject_id: subjectId, question_id: d.question_id, variant: "derived", kind: derived.type, value: val.value, confidence: val.confidence });
   }
 
-  // gates: a dependent question's derived answer is OVERWRITTEN in code when its gate says it is closed; the raw answer is kept on the row.
-  //   gate_requires (PRD §2 gating table): the gate answers that keep the question open; any other choice closes it.
-  //   without it: closed only when the gate's answer is one of the gate's own escape options (or a noul under 0.5).
-  for (const d of defs) {
-    if (!d.gate_question_id) continue;
-    const g = derivedAnswer.get(d.gate_question_id);
-    if (!g) continue;                                          // the gate was not answered: no opinion on the dependent
-    const gateDef = defs.find((x) => x.question_id === d.gate_question_id);
-    let closed = false;
-    if (d.gate_requires) closed = g.type === "choice" ? !d.gate_requires.includes(g.choice) : false;
-    else closed = g.type === "noul" ? g.noul < 0.5 : g.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
-    if (!closed) continue;
-    const row = rows.find((r) => r.questionId === d.question_id && r.orderVariant === "derived");
-    if (row && row.outcome === "answered") {
-      row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id };
-      const br = bench.find((b) => b.question_id === d.question_id && b.variant === "derived");
-      if (br) br.gated = true;   // the bench scores the POST-gate answer, i.e. what shadow would store
-    }
-  }
+  applyGates(defs, derivedAnswer, rows, bench);
 
   let written = 0;
   if (mode !== "bench") written = await upsertDecisions(rows);

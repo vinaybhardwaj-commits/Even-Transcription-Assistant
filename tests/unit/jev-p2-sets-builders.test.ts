@@ -16,6 +16,9 @@ import { candidateRows, timelineJevState, resolveTimelineAnswer, MAX_CANDIDATES 
 import { buildSttPairState, buildSttRunState, repeatBucket, resolveSttPick, type RunRow } from "@/lib/jev/worker/builders/stt";
 import { buildDoubtState, buildPitchState, clearLocators, setLocator } from "@/lib/jev/worker/builders/locators";
 import { buildBenchReport } from "@/lib/jev/worker/bench-report";
+import { applyGates } from "@/lib/jev/worker/call";
+import type { JevAnswer } from "@/lib/jev/types";
+import type { WorkerDecision } from "@/lib/jev/worker/persist";
 import { buildSegment, type TimelineInput } from "@/lib/encounter-clock/timeline";
 import type { Anchor } from "@/lib/encounter-clock/anchors";
 
@@ -345,5 +348,57 @@ describe("F1: the bench report scores the POST-gate answer", () => {
       labels: [{ subject_id: "s2", question_id: "u10_end_row", label: "t+05:00" }],
     });
     expect(rep.questions.find((x) => x.question_id === "u10_end_row")!.vs_labels).toMatchObject({ n_scored: 1, accuracy: 0 });
+  });
+});
+
+describe("F5: gates are TRANSITIVE and evaluated against the post-gate value", () => {
+  const ch = (choice: string): JevAnswer => ({ type: "choice", choice, probabilities: { [choice]: 1 }, confidence: 1 });
+  const rowsFor = (defs: QuestionDef[]): WorkerDecision[] => defs.map((d) => ({ questionId: d.question_id, orderVariant: "derived", outcome: "answered", band: "review", evidence: {} }) as unknown as WorkerDecision);
+  const benchFor = (defs: QuestionDef[]) => defs.map((d) => ({ subject_id: "s", question_id: d.question_id, variant: "derived", kind: "choice", value: "x", confidence: 1 }));
+  const run = (defs: QuestionDef[], answers: Record<string, string>) => {
+    const rows = rowsFor(defs), bench = benchFor(defs);
+    applyGates(defs, new Map(Object.entries(answers).map(([k, v]) => [k, ch(v)])), rows, bench);
+    return { out: Object.fromEntries(rows.map((r) => [r.questionId, r.outcome])), gated: Object.fromEntries(bench.map((b) => [b.question_id, (b as { gated?: boolean }).gated === true])) };
+  };
+  const PU = byId("pitch-uptake").questions;
+  const PER_PITCH = PU.filter((d) => d.question_id !== "pitch_type").map((d) => d.question_id);
+
+  it("THE REFUTER'S PROBE: pitch_type = no_pitch, recovery_discussion = adequate, cost_discussed = yes -> recovery_appropriateness and cost_answered are gated too", () => {
+    const { out, gated } = run(PU, { pitch_type: "no_pitch", recovery_discussion: "adequate", cost_discussed: "yes", recovery_appropriateness: "appropriate", cost_answered: "answered", uptake: "accept" });
+    expect(out.pitch_type).toBe("answered");
+    for (const id of PER_PITCH) { expect(out[id], id).toBe("gated_overwritten"); expect(gated[id], `${id} bench row marked gated`).toBe(true); }
+    expect(gated.pitch_type).toBe(false);
+  });
+  it("a pitch_type escape (insufficient_evidence) closes the same chain", () => {
+    const { out } = run(PU, { pitch_type: "insufficient_evidence", recovery_discussion: "thorough_tailored", cost_discussed: "yes" });
+    for (const id of PER_PITCH) expect(out[id], id).toBe("gated_overwritten");
+  });
+  it("CONTROLS: a real pitch keeps the items open; each middle gate closes only ITS chain (recovery none / cost no)", () => {
+    expect(Object.values(run(PU, { pitch_type: "surgery", recovery_discussion: "adequate", cost_discussed: "yes" }).out).every((o) => o === "answered")).toBe(true);
+    const a = run(PU, { pitch_type: "medication", recovery_discussion: "none", cost_discussed: "yes" }).out;
+    expect(a.recovery_appropriateness).toBe("gated_overwritten");
+    expect(a.cost_answered).toBe("answered");
+    expect(a.uptake).toBe("answered");
+    const b = run(PU, { pitch_type: "medication", recovery_discussion: "adequate", cost_discussed: "no" }).out;
+    expect(b.cost_answered).toBe("gated_overwritten");
+    expect(b.recovery_appropriateness).toBe("answered");
+  });
+  const mk = (id: string, gate?: string, requires?: string[]): QuestionDef => ({ question_id: id, kind: "choice", body: { type: "choice", instructions: "x", criteria: { go: "a", stop: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], ...(gate ? { gate_question_id: gate, gate_requires: requires ?? ["go"] } : {}) }) as unknown as QuestionDef;
+  it("a THREE-LEVEL chain a > b > c, and a FOUR-level chain: closing the root closes every level, whatever the declaration order", () => {
+    const three = [mk("c", "b"), mk("b", "a"), mk("a")];          // dependents declared BEFORE their gates
+    const r3 = run(three, { a: "stop", b: "go", c: "go" });
+    expect(r3.out).toEqual({ a: "answered", b: "gated_overwritten", c: "gated_overwritten" });
+    const four = [mk("d", "c"), mk("c", "b"), mk("b", "a"), mk("a")];
+    expect(run(four, { a: "stop", b: "go", c: "go", d: "go" }).out).toEqual({ a: "answered", b: "gated_overwritten", c: "gated_overwritten", d: "gated_overwritten" });
+    // the middle of the chain closing closes only what is behind it
+    expect(run(three, { a: "go", b: "stop", c: "go" }).out).toEqual({ a: "answered", b: "answered", c: "gated_overwritten" });
+    // all open
+    expect(Object.values(run(three, { a: "go", b: "go", c: "go" }).out)).toEqual(["answered", "answered", "answered"]);
+  });
+  it("an unanswered gate gives no opinion on its dependents, and a dependent that was never answered is not 'gated'", () => {
+    const three = [mk("a"), mk("b", "a"), mk("c", "b")];
+    const rows = rowsFor(three); rows[1]!.outcome = "no_answer";
+    applyGates(three, new Map([["a", ch("stop")]]), rows, benchFor(three));
+    expect(rows.map((r) => r.outcome)).toEqual(["answered", "no_answer", "answered"]);   // b stays no_answer; c's gate was not overwritten and has no answer: left alone
   });
 });
