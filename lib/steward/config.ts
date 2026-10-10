@@ -28,6 +28,8 @@ export type Config = {
   caps: { actions_per_room_per_hour: number; policy_cycle_per_profile_per_day: number; start_retries: number };
   /** steward_config key `start_day_live` {"on": bool}: the LIVE start_day switch. Missing / malformed = false (fail-closed). scribe_start executes only if this is on AND the kill switch is off AND actionMode allows it. */
   start_day_live: boolean;
+  /** steward_config key `input_failover_live` ({"on": bool}, optional, default false): the Steward really enqueues set_audio_input (webcam first, TONOR backup; see input-failover.ts). The kill switch still wins. */
+  input_failover_live: boolean;
   priority: RoomClass[];
   rooms: Record<string, RoomOverride>;
   /** per-source read timeout of the sense step (steward_config key `source_timeout_ms`, optional: a number or {ms}); default 6000 */
@@ -53,6 +55,7 @@ export const DEFAULT_CONFIG: Config = {
   days: { mode: "every_day", closed: [] },
   caps: { actions_per_room_per_hour: 4, policy_cycle_per_profile_per_day: 1, start_retries: 3 },
   start_day_live: false,
+  input_failover_live: false,
   priority: ["ot", "opd", "clinic"],
   // NOT a fallback: rooms/schedule are FATAL when missing (see FATAL_CONFIG_KEYS). These are placeholders so the type is total.
   rooms: {},
@@ -166,6 +169,12 @@ export function parseConfig(rows: ReadonlyArray<{ key: string; value: unknown }>
   }
 
   // optional: absent = default and NOT invalid; present but malformed = default and invalid
+  if (raw.has("input_failover_live")) {
+    const v = raw.get("input_failover_live");
+    if (isObj(v) && typeof v.on === "boolean") cfg.input_failover_live = v.on;
+    else invalid.push("input_failover_live");
+  }
+
   if (raw.has("source_timeout_ms")) {
     const v = raw.get("source_timeout_ms");
     const ms = typeof v === "number" ? v : isObj(v) ? v.ms : undefined;
