@@ -574,6 +574,18 @@ const jobCount = async () => Number(((await H.sql!`SELECT count(*)::int AS n FRO
     expect(after.nBlindExcluded).toBe(before.nBlindExcluded);
     expect(after.nBlindExcluded).toBeGreaterThanOrEqual(2);
   });
+  it("LINT-FU /api/admin/stt-spend: an ORPHAN run (bench_window row gone) whose window id has turn rows on a held-out room-day is left out and counted in n_blind_excluded; an orphan with turn rows on a clean day, and one with none, still count", async () => {
+    const { sttSpendRaw } = await import("@/lib/room-access/tool-reads");
+    const sum = (r: Array<Record<string, unknown>>) => ({ n: r.reduce((a, x) => a + Number(x.n_runs), 0), cost: r.reduce((a, x) => a + Number(x.cost_usd_total), 0) });
+    const before = await sttSpendRaw();
+    pg.exec(`INSERT INTO transcription_run (id, subject_type, subject_id, engine, mode, tier, transcript_original, cost_usd) VALUES
+      ('tr_lf_held', 'bench_window', 'bw_lf_held', 'route', 'batch', 'asr', 'x', 0.5), ('tr_lf_clean', 'bench_window', 'bw_lf_clean', 'route', 'batch', 'asr', 'y', 0.25), ('tr_lf_none', 'bench_window', 'bw_lf_none', 'route', 'batch', 'asr', 'z', 0.125);
+      INSERT INTO room_turn_speaker (window_id, source_ref, room_day_id, speaker_idx, no_role_reason) VALUES ('bw_lf_held', 't1', 'rd_blind', 0, 'no_match'), ('bw_lf_clean', 't1', 'rd_clean', 0, 'no_match');`);
+    const after = await sttSpendRaw();
+    expect(sum(after.raw).n - sum(before.raw).n).toBe(2); // clean + none
+    expect(sum(after.raw).cost - sum(before.raw).cost).toBeCloseTo(0.375, 6); // the held-out orphan's 0.5 is not in the spend
+    expect(after.nBlindExcluded - before.nBlindExcluded).toBe(1);
+  });
   it("scribe_store_stats: chunk totals leave out chunks of a held-out session and count them", async () => {
     const { benchChunkTotals } = await import("@/lib/room-access/tool-reads");
     const { sessionsBlindAny } = await import("@/lib/room-access/check");
