@@ -11,6 +11,7 @@ import { findOpenJob, insertJob, newJobId } from "@/lib/jobs/store";
 import { breakerIsOpen } from "./breaker";
 import { dailyCapUsd, askBatch, liveFlagOn, modeGate, REAL_USES, type JevMode, type RealUse } from "./flags";
 import { reservationUsd, spentTodayUsd, submitJevAskCapped } from "./budget";
+import "./register";   // any entry into the sweeper (the cron route, a nudge) sees every registered use
 import { listUses, usesOf, type JevUseDef } from "./uses";
 
 export type SweepSkip = "worker_disabled" | "use_flag_off" | "text_lane_off" | "live_flag_off" | "circuit_open" | "budget_paused" | "no_set" | "open_job" | "nothing_pending" | "cap_would_overshoot";
