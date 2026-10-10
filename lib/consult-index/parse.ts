@@ -11,7 +11,8 @@
  *   cut_version = signatureVersion(row.signature) (what palimpsest stamps on its tracks as config.clip_signature; the row's cut_at only if there is no signature), and sealed = false. UNVERIFIED against a live mirror: the mirror object itself was not read from here.
  *
  * INTEGRITY: sha256(latest.jsonl) must equal the manifest's sha256, else NO row is read. A row that is not a clean cut clip is skipped and COUNTED by reason, never silently dropped.
- * NO NAMES: doctor_name and signature are never read.
+ * NO NAMES: doctor_name is never read. `signature` (the cutter's clip signature: times, rule, mode, coverage, the room slug and an opaque doctor id) is read ONLY to be hashed into the cut version
+ * (signatureVersion) and is never stored or returned.
  */
 import { createHash } from "node:crypto";
 import { consultClipKey } from "@/lib/room-access/keys";
@@ -33,6 +34,8 @@ export type IndexRow = {
   doctor_uid: string | null;
   doctor_identified: boolean | null;
   cut_version: string;
+  /** the cutter's cut time: NOT stored. The sync uses it to carry results stored under the old cut_at-form version over to the signature-form version of the SAME cut. */
+  cut_at: string | null;
   code_commit: string | null;
   sealed: boolean;
   voice_isolated: boolean | null;
@@ -120,7 +123,7 @@ export function normalizeRow(r: Record<string, unknown>): { row: IndexRow } | { 
     row: {
       consult_uid: uid, room_id: roomId, room_slug: slug, ist_date: date, t0_ms: span.t0, t1_ms: span.t1, clip_r2_key: key,
       doctor_uid: doctor, doctor_identified: typeof r.doctor_identified === "boolean" ? r.doctor_identified : null,
-      cut_version: cutVersion, code_commit: str(r.code_commit, 40), sealed: r.sealed === true,
+      cut_version: cutVersion, cut_at: str(r.cut_at, 120), code_commit: str(r.code_commit, 40), sealed: r.sealed === true,
       voice_isolated: typeof r.voice_isolated === "boolean" ? r.voice_isolated : null,
       minutes: num(r.minutes), bytes: num(r.bytes_total) ?? bytesOf(r.bytes), quality: str(r.quality, 40), coverage: num(r.coverage),
       session_id: typeof r.session_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(r.session_id) ? r.session_id : null,

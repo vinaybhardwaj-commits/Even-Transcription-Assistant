@@ -10,7 +10,7 @@ import { parseIndex } from "@/lib/consult-index/parse";
 import { finishSync, startSync, upsertIndexRows } from "@/lib/room-access/consult-index-store";
 
 export type SyncResult =
-  | { ok: true; sync_id: number; manifest_rows: number | null; rows_read: number; rows_written: number; inserted: number; changed: number; rows_skipped: number; skipped: Record<string, number> }
+  | { ok: true; sync_id: number; manifest_rows: number | null; rows_read: number; rows_written: number; inserted: number; changed: number; migrated_results: number; rows_skipped: number; skipped: Record<string, number> }
   | { ok: false; sync_id: number; error: "consult_index_unavailable" | "consult_index_integrity" | "sync_failed" };
 
 export async function syncConsultIndex(): Promise<SyncResult> {
@@ -32,10 +32,10 @@ export async function syncConsultIndex(): Promise<SyncResult> {
   const got = parseIndex(latest.body, man.body);
   if (!got.ok) return fail(got.error);
   try {
-    const { inserted, changed } = await upsertIndexRows(got.parsed.rows, got.manifest.sha256);
+    const { inserted, changed, migrated } = await upsertIndexRows(got.parsed.rows, got.manifest.sha256);
     const skipped = Object.values(got.parsed.skipped).reduce((a, b) => a + b, 0);
     await finishSync(id, { status: "ok", manifest_sha256: got.manifest.sha256, manifest_rows: got.manifest.rows, rows_read: got.parsed.read, rows_written: got.parsed.rows.length, rows_changed: changed, rows_skipped: skipped, skipped: got.parsed.skipped });
-    return { ok: true, sync_id: id, manifest_rows: got.manifest.rows, rows_read: got.parsed.read, rows_written: got.parsed.rows.length, inserted, changed, rows_skipped: skipped, skipped: got.parsed.skipped };
+    return { ok: true, sync_id: id, manifest_rows: got.manifest.rows, rows_read: got.parsed.read, rows_written: got.parsed.rows.length, inserted, changed, migrated_results: migrated, rows_skipped: skipped, skipped: got.parsed.skipped };
   } catch (e) {
     console.error("[consult-index] sync failed", JSON.stringify({ sync_id: id, err: String((e as Error)?.name ?? "error") }));
     return fail("sync_failed", { manifest_sha256: got.manifest.sha256 });

@@ -40,7 +40,7 @@ async function run() {
     return respondError("PIPELINE_FAILED", `consult index sync failed: ${String((e as Error)?.name ?? "error")}`);
   }
   if (!r.ok) return respondError("PIPELINE_FAILED", `consult index sync failed: ${r.error} (sync ${r.sync_id})`);
-  return respondOk({ sync_id: r.sync_id, manifest_rows: r.manifest_rows, rows_read: r.rows_read, rows_written: r.rows_written, inserted: r.inserted, changed: r.changed, rows_skipped: r.rows_skipped, skipped: r.skipped });
+  return respondOk({ sync_id: r.sync_id, manifest_rows: r.manifest_rows, rows_read: r.rows_read, rows_written: r.rows_written, inserted: r.inserted, changed: r.changed, migrated_results: r.migrated_results, rows_skipped: r.rows_skipped, skipped: r.skipped });
 }
 
 export async function GET(req: NextRequest) {

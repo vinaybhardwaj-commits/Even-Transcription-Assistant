@@ -283,12 +283,12 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
   const withSig = (uid: string, o: Row = {}) => indexRow(uid, { signature: sig(uid), ...o });
   const segs = (n: number, textOf: (i: number) => string) => Array.from({ length: n }, (_, i) => ({ t0_ms: T1 - 120_000 + i * 4000, t1_ms: T1 - 120_000 + i * 4000 + 3500, speaker: `SPEAKER_0${i % 2}`, lang: "hi-IN", text: textOf(i) }));
   /** write a palimpsest track into the (fake) lab bucket and index it in reb_track_index, as palimpsest does */
-  function putTrack(uid: string, layer: "stt" | "translate", o: { clipSig?: Row; engine?: string; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
+  function putTrack(uid: string, layer: "stt" | "translate", o: { dropObject?: boolean; clipSig?: Row; engine?: string; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
     const doc = { config: { clip_signature: o.clipSig ?? sig(uid), gateway: "x", job_parameters: {} }, config_hash: o.hash ?? "ab12cd34", engine: o.engine ?? "sarvam-saaras-v3", extras: {}, layer, machine: "m", model: "saaras:v3", reason: null, schema: "reb.track.v1",
       segments: segs(o.n ?? 3, (i) => (layer === "stt" ? `namaste ${i}` : `hello ${i}`)), status: o.status ?? "ok", version: "saaras-v3", window_id: `consult-${uid}` };
     const key = `reb/${DAY}/${ROOM}/_consults/${uid}/tracks/${layer}.${doc.engine}__saaras-v3__${doc.config_hash}.json`;
     const body = JSON.stringify(doc);
-    lab.set(key, { body, etag: "t" });
+    if (!o.dropObject) lab.set(key, { body, etag: "t" });
     pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, shadow, status, r2_key, sha256) VALUES ('consult-${uid}', '${DAY}', '${ROOM}', '${layer}', '${o.indexEngine ?? doc.engine}', 'saaras-v3', '${doc.config_hash}', ${o.shadow ? "true" : "false"}, 'ok', '${key}', '${o.shaWrong ? "0".repeat(64) : sha(body)}');`);
   }
   const noJobsNoGateway = async (calls: number, kind = "sarvam_transcribe") => { expect(gwCalls()).toBe(calls); expect(await jobsOfKind(kind)).toHaveLength(0); expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'stt.paid_call'`)[0]!.n).toBe(0); };
@@ -299,8 +299,8 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     putTrack(UA, "stt"); putTrack(UA, "translate");
     const calls = gwCalls();
     const out = await tool({ action: "transcribe", consult_uid: UA });
-    expect(out).toMatchObject({ ok: true, existing: true, source: "palimpsest", billed: false, consult_uid: UA, engine: "sarvam-saaras-v3", model: "saaras:v3", model_rev: "saaras-v3", stt_segments: 3, translate_segments: 3, english: "available" });
-    expect(out).not.toHaveProperty("job_id");
+    expect(out).toMatchObject({ ok: true, existing: true, source: "palimpsest", billed: false, consult_uid: UA, job_id: null, source_job_id: null, model_stt: "saaras:v3", model_translate: "saaras:v3", model_rev: "saaras-v3",
+      language_code: "hi-IN", duration_s: 120, speakers: 2, transcript_chars: "namaste 0 namaste 1 namaste 2".length, english_chars: "hello 0 hello 1 hello 2".length, english_pass: "done" });
     await noJobsNoGateway(calls);
     expect(H.heads).toEqual([]); // not even the clip was probed
     expect(JSON.stringify(out)).not.toMatch(/namaste|hello/);
@@ -315,22 +315,149 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     await drain();
     const r = await job(j.id);
     expect([r.status, r.error]).toEqual(["done", null]);
-    expect(r.result).toMatchObject({ existing: true, source: "palimpsest", consult_uid: UA, stt_segments: 3, english: "not_in_palimpsest" });
+    expect(r.result).toMatchObject({ existing: true, source: "palimpsest", consult_uid: UA, speakers: 2, english_chars: 0, english_pass: "not_requested" });
     expect(gwCalls()).toBe(calls);
     expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'stt.paid_call'`)[0]!.n).toBe(0);
   });
 
-  it("consult_result reads the palimpsest's track when we hold none: model + revision always, text and ABSOLUTE segments only with include_text", async () => {
+  it("consult_result reads the palimpsest's track when we hold none, in the NORMAL result shape: english = the translated TEXT, segments {speaker_id, language_code}, absolute times only with include_text", async () => {
     await backfill([withSig(UA)]);
     putTrack(UA, "stt"); putTrack(UA, "translate");
     const head = await tool({ action: "consult_result", consult_uid: UA });
-    expect(head).toMatchObject({ ok: true, source: "palimpsest", engine: "sarvam-saaras-v3", model_stt: "saaras:v3", model_rev: "saaras-v3", stt_segments: 3, translate_segments: 3, english: "available", billed: false, stale: false });
+    expect(head).toMatchObject({ ok: true, source: "palimpsest", model_stt: "saaras:v3", model_translate: "saaras:v3", model_rev: "saaras-v3", speakers: 2, english: true, english_pass: "done", stale: false, billed: false, job_id: null });
     expect(JSON.stringify(head)).not.toMatch(/namaste|hello|reb\//);
     const full = await tool({ action: "consult_result", consult_uid: UA, include_text: true });
     expect(full.transcript).toBe("namaste 0 namaste 1 namaste 2");
-    expect(full.english_text).toBe("hello 0 hello 1 hello 2");
-    expect((full.segments as Row[])[1]).toEqual({ t0_ms: T1 - 120_000 + 4000, t1_ms: T1 - 120_000 + 7500, speaker: "SPEAKER_01", lang: "hi-IN", text: "namaste 1" });
-    expect((full.english_segments as Row[])).toHaveLength(3);
+    expect(full.english).toBe("hello 0 hello 1 hello 2"); // the English TEXT, not a status word
+    expect(full.language_code).toBe("hi-IN");
+    expect((full.segments as Row[])[1]).toEqual({ speaker_id: "SPEAKER_01", t0_ms: T1 - 120_000 + 4000, t1_ms: T1 - 120_000 + 7500, text: "namaste 1", language_code: "hi-IN" });
+    expect((full.english_segments as Row[])[1]).toEqual({ speaker_id: "SPEAKER_01", t0_ms: T1 - 120_000 + 4000, t1_ms: T1 - 120_000 + 7500, text: "hello 1", source: "translate_pass" });
+    expect(full).not.toHaveProperty("english_text");
+    expect(full).not.toHaveProperty("stt_segments");
+  });
+
+  it("SHAPE PARITY: a reused palimpsest result has EXACTLY the fields of scribe_sarvam's own result, field by field (transcribe answer, job result, consult_result head, consult_result with text)", async () => {
+    // one consult transcribed by US (the normal path), one answered from the palimpsest
+    await backfill([withSig(UA), withSig(UE)]);
+    putClips(UA, UE);
+    putTrack(UE, "stt"); putTrack(UE, "translate");
+    await tool({ action: "transcribe", consult_uid: UA, english: false });
+    await drain();
+    const keys = (o: Row) => Object.keys(o).sort();
+    const kinds = (o: Row) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v === null ? "null" : Array.isArray(v) ? "array" : typeof v]));
+
+    // 1. the transcribe answer for an already-answered consult
+    const ownAns = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    const palAns = await tool({ action: "transcribe", consult_uid: UE });
+    expect(ownAns).toMatchObject({ existing: true, source: "scribe_sarvam" });
+    expect(palAns).toMatchObject({ existing: true, source: "palimpsest" });
+    expect(keys(palAns)).toEqual(keys(ownAns));
+    // 2. the job result
+    const ownJob = await submit("sarvam_transcribe", { consult_uid: UA, english: false });
+    const palJob = await submit("sarvam_transcribe", { consult_uid: UE });
+    await drain();
+    const ownR = (await job(ownJob.id)).result!, palR = (await job(palJob.id)).result!;
+    expect(keys(palR)).toEqual(keys(ownR));
+    // 3. the consult_result head
+    const ownHead = await tool({ action: "consult_result", consult_uid: UA });
+    const palHead = await tool({ action: "consult_result", consult_uid: UE });
+    expect(keys(palHead).filter((k) => k !== "billed")).toEqual(keys(ownHead));
+    for (const [k, t] of Object.entries(kinds(ownHead))) if (t !== "null" && kinds(palHead)[k] !== "null") expect(kinds(palHead)[k], k).toBe(t);
+    // 4. consult_result with text: same top-level keys, same segment keys
+    const ownFull = await tool({ action: "consult_result", consult_uid: UA, include_text: true });
+    const palFull = await tool({ action: "consult_result", consult_uid: UE, include_text: true });
+    expect(keys(palFull).filter((k) => k !== "billed")).toEqual(keys(ownFull));
+    expect(typeof palFull.english).toBe("string"); // own with english:false is null; with English it is the same field holding the text
+    expect(keys((palFull.segments as Row[])[0]!)).toEqual(keys((ownFull.segments as Row[])[0]!));
+    // 5. the English segments: built by the SAME function from an own-shaped document
+    const { consultResultView } = await import("@/lib/consult-index/result-view");
+    const ownEng = consultResultView({ language_code: "hi-IN", duration_s: 1, speakers: [], transcript: "", english: "x", entries: [], english_entries: [{ speaker_id: "0", start_s: 0, end_s: 1, text: "x", source: "translate_pass", native_idx: 0 }] }, 0).english_segments[0]!;
+    expect(keys((palFull.english_segments as Row[])[0]!)).toEqual(keys(ownEng as Row));
+  });
+
+  it("(a) RESULTS STORED UNDER THE OLD cut_at VERSION ARE STILL FOUND after the version became the signature's: carried over by the sync of the same cut, so nothing is billed twice; a RE-CUT is not carried", async () => {
+    // the old release: rows carry no signature, so cut_version = cut_at
+    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" }), indexRow(UE, { cut_at: "2026-10-09T03:00:00+0530" })]);
+    putClips(UA, UE);
+    await tool({ action: "transcribe", consult_uid: UA, english: false });
+    await tool({ action: "transcribe", consult_uid: UE, english: false });
+    await drain();
+    expect((await results()).map((r) => r.cut_version).sort()).toEqual(["2026-10-09T02:00:00+0530", "2026-10-09T03:00:00+0530"]);
+    const calls = gwCalls();
+    // the new release's sync: the SAME cut of UA now has a signature; UE was RE-CUT meanwhile (a new cut_at)
+    publishIndex([withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" }), withSig(UE, { cut_at: "2026-10-12T09:00:00+0530" })]);
+    const r = await Sync.syncConsultIndex();
+    expect(r).toMatchObject({ ok: true, migrated_results: 1 });
+    const rs = await results();
+    expect(rs.find((x) => x.consult_uid === UA)!.cut_version).toMatch(/^sig:/);
+    expect(rs.find((x) => x.consult_uid === UE)!.cut_version).toBe("2026-10-09T03:00:00+0530"); // the earlier cut's result is not claimed by the new cut
+    // UA is answered from the stored result: no job, no gateway call
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toMatchObject({ ok: true, existing: true, source: "scribe_sarvam", billed: false });
+    expect(gwCalls()).toBe(calls);
+    // UE (re-cut) is a real new ask
+    expect(await tool({ action: "transcribe", consult_uid: UE, english: false })).toMatchObject({ ok: true, status: "queued" });
+    // idempotent: syncing again carries nothing and breaks nothing
+    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 0 });
+  });
+
+  it("(a) a result already stored under the NEW form is never overwritten by the carry-over (the UNIQUE key holds)", async () => {
+    await backfill([indexRow(UA, { cut_at: "2026-10-09T02:00:00+0530" })]);
+    const old = (await St.getIndexRow(UA))!;
+    await St.recordResult({ consult_uid: UA, cut_version: old.cut_version, mode: "transcribe", english: false, num_speakers: null, job_id: "j_old", result_r2_key: "mcp-sarvam/j_old.json", model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
+    const sigRow = withSig(UA, { cut_at: "2026-10-09T02:00:00+0530" });
+    const { signatureVersion } = await import("@/lib/consult-index/parse");
+    await St.recordResult({ consult_uid: UA, cut_version: signatureVersion(sigRow.signature)!, mode: "transcribe", english: false, num_speakers: null, job_id: "j_new", result_r2_key: "mcp-sarvam/j_new.json", model_stt: "a", model_translate: "b", model_rev: "c", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: old.t0_ms });
+    publishIndex([sigRow]);
+    expect(await Sync.syncConsultIndex()).toMatchObject({ ok: true, migrated_results: 0 });
+    expect((await results()).map((r) => r.job_id).sort()).toEqual(["j_new", "j_old"]);
+  });
+
+  it("(b) an index row that says ok whose R2 object is MISSING is track_missing: Sarvam is NOT billed silently; only force:true goes on (tool, job, batch, consult_result)", async () => {
+    await backfill([withSig(UA), withSig(UE)]);
+    putClips(UA, UE);
+    putTrack(UA, "stt", { dropObject: true });
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toEqual({ ok: false, error: "track_missing" });
+    expect(await tool({ action: "consult_result", consult_uid: UA })).toEqual({ ok: false, error: "track_missing" });
+    const j = await submit("sarvam_transcribe", { consult_uid: UA, english: false });
+    await drain();
+    expect(String((await job(j.id)).error)).toContain("track_missing");
+    const b = await tool({ action: "transcribe", consult_uids: [UA], english: false });
+    await drain();
+    expect((await job(String(b.job_id))).result).toMatchObject({ refused: 1, done: 0 });
+    expect(((await job(String(b.job_id))).result!.items as Row[])[0]).toMatchObject({ state: "refused", code: "track_missing" });
+    expect(gwCalls()).toBe(calls);
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'stt.paid_call'`)[0]!.n).toBe(0);
+    // force:true: the caller says "I know, send it" -> Sarvam is called (tool, job, batch)
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false, force: true })).toMatchObject({ ok: true, status: "queued" });
+    await drain();
+    expect(gwCalls()).toBeGreaterThan(calls);
+    expect(await results()).toHaveLength(1);
+    const calls2 = gwCalls();
+    putTrack(UE, "stt", { dropObject: true });
+    const jf = await submit("sarvam_transcribe", { consult_uid: UE, english: false, force: true });
+    await drain();
+    expect((await job(jf.id)).status).toBe("done");
+    expect(gwCalls()).toBeGreaterThan(calls2);
+  });
+
+  it("(b) force never overrides a track that EXISTS (it is still reused, not re-billed); force is not accepted for anything but a boolean", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt");
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, force: true })).toMatchObject({ ok: true, source: "palimpsest", billed: false });
+    expect(gwCalls()).toBe(calls);
+    expect(await tool({ action: "transcribe", consult_uid: UA, force: "yes" })).toMatchObject({ ok: false, error: "bad_args" });
+  });
+
+  it("(b) a missing TRANSLATE object does not block: the stt is reused without English; a missing stt object with a good stt object elsewhere is not 'missing'", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt"); putTrack(UA, "translate", { dropObject: true });
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA })).toMatchObject({ ok: true, source: "palimpsest", english_chars: 0, english_pass: "not_requested" });
+    expect(gwCalls()).toBe(calls);
   });
 
   it("a track of ANOTHER CUT (the clip was re-cut after the track was made) is NOT reused: Sarvam is called", async () => {
@@ -416,7 +543,7 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     putClips(UA);
     putTrack(UA, "stt");
     const calls = gwCalls();
-    expect(await tool({ action: "transcribe", consult_uid: UA, english: true })).toMatchObject({ ok: true, source: "palimpsest", english: "not_in_palimpsest", translate_segments: 0 });
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: true })).toMatchObject({ ok: true, source: "palimpsest", english_chars: 0, english_pass: "not_requested", speakers: 2 });
     expect(gwCalls()).toBe(calls);
   });
 

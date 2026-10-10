@@ -7,9 +7,28 @@
 import { sql } from "@/lib/db";
 import type { IndexRow } from "@/lib/consult-index/parse";
 
-export type StoredIndexRow = IndexRow & { synced_at: string; first_seen_at: string };
+export type StoredIndexRow = Omit<IndexRow, "cut_at"> & { synced_at: string; first_seen_at: string };
 
 const BATCH = 200;
+
+/**
+ * THE CUT VERSION CHANGED FORM (cut_at -> sig:<hash of the cutter's signature>). A result stored under the OLD form belongs to the same cut exactly when the old version (a cut_at string) equals the row's
+ * cut_at NOW: a re-cut changes cut_at, so a result of an earlier cut keeps its old version and is NOT carried over. For those, the result's cut_version is rewritten to the new form, so the next ask finds it and
+ * nothing is billed twice. Idempotent; never overwrites a result already stored under the new form (the UNIQUE key).
+ */
+async function carryResultsOver(rows: readonly IndexRow[]): Promise<number> {
+  const forms = rows.filter((r) => r.cut_at && r.cut_version !== r.cut_at).map((r) => ({ consult_uid: r.consult_uid, cut_version: r.cut_version, cut_at: r.cut_at }));
+  if (forms.length === 0) return 0;
+  const moved = (await sql`
+    UPDATE consult_sarvam_result r
+       SET cut_version = x.cut_version
+      FROM jsonb_to_recordset(${JSON.stringify(forms)}::jsonb) AS x(consult_uid text, cut_version text, cut_at text)
+     WHERE r.consult_uid = x.consult_uid AND r.cut_version = x.cut_at AND r.cut_version <> x.cut_version
+       AND NOT EXISTS (SELECT 1 FROM consult_sarvam_result o WHERE o.consult_uid = r.consult_uid AND o.cut_version = x.cut_version AND o.mode = r.mode AND o.english = r.english)
+    RETURNING r.id
+  `) as Array<{ id: number }>;
+  return moved.length;
+}
 
 export async function startSync(): Promise<number> {
   const rows = (await sql`INSERT INTO consult_index_sync DEFAULT VALUES RETURNING id`) as Array<{ id: number | string }>;
@@ -30,7 +49,8 @@ export async function finishSync(id: number, f: { status: "ok" | "failed"; error
  * Upsert rows (the BACKFILL is the first run: the mirror holds everything already cut). Returns how many rows were inserted and how many existing rows changed. An existing row is rewritten only if a field
  * differs; `sealed` is OR-ed (sticky); first_seen_at is kept; the bench session is the upstream's when it names one, else the session of that room that covers t0.
  */
-export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: string): Promise<{ inserted: number; changed: number }> {
+export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: string): Promise<{ inserted: number; changed: number; migrated: number }> {
+  let migrated = 0;
   let inserted = 0;
   let changed = 0;
   for (let i = 0; i < rows.length; i += BATCH) {
@@ -38,7 +58,7 @@ export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: stri
       WITH incoming AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows.slice(i, i + BATCH))}::jsonb)
           AS x(consult_uid text, room_id text, room_slug text, ist_date date, session_id text, t0_ms bigint, t1_ms bigint, clip_r2_key text, doctor_uid text, doctor_identified boolean,
-               cut_version text, code_commit text, sealed boolean, voice_isolated boolean, minutes numeric, bytes bigint, quality text, coverage numeric)
+               cut_version text, cut_at text, code_commit text, sealed boolean, voice_isolated boolean, minutes numeric, bytes bigint, quality text, coverage numeric)
       )
       INSERT INTO consult_index AS c (consult_uid, room_id, room_slug, ist_date, session_id, t0_ms, t1_ms, clip_r2_key, doctor_uid, doctor_identified, cut_version, code_commit, sealed,
                                       voice_isolated, minutes, bytes, quality, coverage, source_sha256)
@@ -60,8 +80,9 @@ export async function upsertIndexRows(rows: readonly IndexRow[], sourceSha: stri
       RETURNING (xmax = 0) AS inserted
     `) as Array<{ inserted: boolean }>;
     for (const r of out) (r.inserted ? (inserted += 1) : (changed += 1));
+    migrated += await carryResultsOver(rows.slice(i, i + BATCH));
   }
-  return { inserted, changed };
+  return { inserted, changed, migrated };
 }
 
 

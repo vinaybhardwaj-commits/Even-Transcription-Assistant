@@ -94,6 +94,7 @@ export const JOB_ERROR_CODES = [
   "already_transcribed",
   "audio_unreadable",
   "reuse_lookup_unavailable",
+  "track_missing",
   "consult_batch_timeout",
   "duration_unknown",
   // the stubs

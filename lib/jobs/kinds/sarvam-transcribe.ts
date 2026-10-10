@@ -72,11 +72,13 @@ const Args = z.object({
   mode: z.enum(["transcribe", "codemix"]).default("transcribe"),
   english: z.boolean().default(true),
   num_speakers: z.number().int().min(1).max(6).optional(),
+  /** consult only: go on to Sarvam although the palimpsest lists a track whose R2 object is missing (track_missing). Never needed otherwise. */
+  force: z.boolean().optional(),
 }).strict();
 
 export type SarvamTranscribeArgs =
   | { source: "encounter"; encounter_id: string; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number }
-  | { source: "consult"; consult_uid: string; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number };
+  | { source: "consult"; consult_uid: string; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number; force?: boolean };
 
 /** PURE. Exactly one of encounter_id / consult_uid; any room or session argument is scope_consult_only. Throws JobArgsError. */
 export function parseSarvamTranscribeArgs(raw: unknown): SarvamTranscribeArgs {
@@ -88,7 +90,7 @@ export function parseSarvamTranscribeArgs(raw: unknown): SarvamTranscribeArgs {
   const a = p.data;
   const common = { mode: a.mode, english: a.english, ...(a.num_speakers ? { num_speakers: a.num_speakers } : {}) };
   if ((a.encounter_id === undefined) === (a.consult_uid === undefined)) throw new JobArgsError("give exactly one source: {encounter_id} or {consult_uid}");
-  return a.encounter_id !== undefined ? { source: "encounter", encounter_id: a.encounter_id, ...common } : { source: "consult", consult_uid: a.consult_uid!, ...common };
+  return a.encounter_id !== undefined ? { source: "encounter", encounter_id: a.encounter_id, ...common } : { source: "consult", consult_uid: a.consult_uid!, ...common, ...(a.force === true ? { force: true } : {}) };
 }
 
 /** Sarvam's states for a job that exists but has not been started (everything else means it has been started: running, completed or failed). */
@@ -169,10 +171,10 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
  * (so a capped day, or a gateway that is down, still answers an old question) and without one Sarvam call.
  */
 async function prepareConsult(ctx: StepContext, a: Extract<SarvamTranscribeArgs, { source: "consult" }>): Promise<StepOutcome> {
-  const pre = await preflightClip(a.consult_uid, { mode: a.mode, english: a.english });
+  const pre = await preflightClip(a.consult_uid, { mode: a.mode, english: a.english, force: a.force === true });
   if (!pre.ok) return failWith(jobError(pre.error));
   if (pre.existing) return doneWith(existingSummary(pre.existing));
-  if (pre.reuse) return doneWith(reuseSummary(pre.row.consult_uid, pre.row.cut_version, pre.reuse));
+  if (pre.reuse) return doneWith(existingSummary(pre.reuse.view.result));
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   return nextStep(STEPS.init, {
@@ -181,19 +183,10 @@ async function prepareConsult(ctx: StepContext, a: Extract<SarvamTranscribeArgs,
   });
 }
 
-/** What a job answers when the palimpsest already holds this cut's Sarvam track: counts and ids only, labelled source palimpsest (no Sarvam call was made, nothing was billed). */
-export function reuseSummary(uid: string, cutVersion: string, r: { stt: { config_hash: string; segments: unknown[]; model: string | null; version: string | null } | null; translate: { config_hash: string; segments: unknown[] } | null }): Record<string, unknown> {
-  return {
-    existing: true, source: "palimpsest", consult_uid: uid, cut_version: cutVersion, engine: "sarvam-saaras-v3", model: r.stt?.model ?? null, model_rev: r.stt?.version ?? null,
-    stt_config_hash: r.stt?.config_hash ?? null, stt_segments: r.stt?.segments.length ?? 0, translate_config_hash: r.translate?.config_hash ?? null, translate_segments: r.translate?.segments.length ?? 0,
-    english: r.translate ? "available" : "not_in_palimpsest",
-  };
-}
-
 /** What a job answers when the cut already has its result: pointers and counts only, flagged `existing` (no Sarvam call was made, nothing was billed). */
-export function existingSummary(r: ConsultResult): Record<string, unknown> {
+export function existingSummary(r: ConsultResult & { source?: string }): Record<string, unknown> {
   return {
-    existing: true, consult_uid: r.consult_uid, cut_version: r.cut_version, source_job_id: r.job_id, r2_key: r.result_r2_key, model_stt: r.model_stt, model_translate: r.model_translate, model_rev: r.model_rev,
+    existing: true, source: r.source ?? "scribe_sarvam", consult_uid: r.consult_uid, cut_version: r.cut_version, source_job_id: r.job_id || null, r2_key: r.result_r2_key, model_stt: r.model_stt, model_translate: r.model_translate, model_rev: r.model_rev,
     language_code: r.language_code, duration_s: r.duration_s, speakers: r.speaker_count, transcript_chars: r.transcript_chars, english_chars: r.english_chars, english_pass: r.english_pass ?? "not_requested",
   };
 }

@@ -28,9 +28,10 @@ const Args = z.object({
   mode: z.enum(["transcribe", "codemix"]).default("transcribe"),
   english: z.boolean().default(true),
   num_speakers: z.number().int().min(1).max(6).optional(),
+  force: z.boolean().optional(),
 }).strict();
 
-export type BatchArgs = { consult_uids: string[]; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number };
+export type BatchArgs = { consult_uids: string[]; mode: "transcribe" | "codemix"; english: boolean; num_speakers?: number; force?: boolean };
 
 /** PURE. Throws JobArgsError; a room or session argument is scope_consult_only, exactly as for a single ask. */
 export function parseBatchArgs(raw: unknown): BatchArgs {
@@ -42,7 +43,7 @@ export function parseBatchArgs(raw: unknown): BatchArgs {
   const bad = p.data.consult_uids.find((u) => !UID_RE.test(u));
   if (bad !== undefined) throw new JobArgsError("bad args: consult_uids must be plain ids");
   const uids = [...new Set(p.data.consult_uids)];
-  return { consult_uids: uids, mode: p.data.mode, english: p.data.english, ...(p.data.num_speakers ? { num_speakers: p.data.num_speakers } : {}) };
+  return { consult_uids: uids, mode: p.data.mode, english: p.data.english, ...(p.data.num_speakers ? { num_speakers: p.data.num_speakers } : {}), ...(p.data.force === true ? { force: true } : {}) };
 }
 
 type Child = { state: "queued" | "existing" | "refused" | "done" | "failed"; job_id?: string; code?: string; source?: "palimpsest" };
@@ -71,13 +72,13 @@ async function fan(ctx: StepContext, a: BatchArgs): Promise<StepOutcome> {
   const children: Children = { ...((ctx.progress.children as Children | undefined) ?? {}) };
   for (const uid of a.consult_uids) {
     if (children[uid]) continue; // a replayed claim never queues a consult twice
-    const pre = await preflightClip(uid, { mode: a.mode, english: a.english });
+    const pre = await preflightClip(uid, { mode: a.mode, english: a.english, force: a.force === true });
     if (!pre.ok) { children[uid] = { state: "refused", code: pre.error }; continue; }
     if (pre.existing) { children[uid] = { state: "existing", job_id: pre.existing.job_id }; continue; }
     if (pre.reuse) { children[uid] = { state: "existing", source: "palimpsest" }; continue; }
     const { submitJob } = await import("../submit"); // lazy: submit imports the kind registry, which imports this file
     const job = await submitJob({
-      kind: SARVAM_TRANSCRIBE_KIND, args: { consult_uid: uid, mode: a.mode, english: a.english, ...(a.num_speakers ? { num_speakers: a.num_speakers } : {}) },
+      kind: SARVAM_TRANSCRIBE_KIND, args: { consult_uid: uid, mode: a.mode, english: a.english, ...(a.num_speakers ? { num_speakers: a.num_speakers } : {}), ...(a.force === true ? { force: true } : {}) },
       actor: ctx.job.actor ?? "sarvam_consult_batch", scopes: new Set(["invoke"] as const),
     });
     children[uid] = { state: "queued", job_id: job.id };

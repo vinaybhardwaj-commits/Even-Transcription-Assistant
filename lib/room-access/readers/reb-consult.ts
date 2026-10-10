@@ -136,7 +136,7 @@ export async function findRebTrack(uid: string, roomId: string, istDate: string,
 export const SARVAM_TRACK_ENGINE = "sarvam-saaras-v3";
 export type SarvamTrackSegment = { t0_ms: number; t1_ms: number; speaker: string | null; lang: string | null; text: string };
 export type SarvamTrack = { layer: "stt" | "translate"; engine: string; model: string | null; version: string | null; config_hash: string; r2_key: string; segments: SarvamTrackSegment[] };
-export type SarvamReuse = { found: { stt: SarvamTrack | null; translate: SarvamTrack | null } | null; n_integrity_skipped: number; n_other_cut: number } | { unavailable: true };
+export type SarvamReuse = { found: { stt: SarvamTrack | null; translate: SarvamTrack | null } | null; n_integrity_skipped: number; n_other_cut: number; missing: Array<"stt" | "translate"> } | { unavailable: true };
 
 /**
  * A live (status ok, not shadow) engine sarvam-saaras-v3 track of this consult, FOR THIS CUT: the track's own config.clip_signature must give the same cut version as the index row's (`cutVersion`, from
@@ -144,10 +144,11 @@ export type SarvamReuse = { found: { stt: SarvamTrack | null; translate: SarvamT
  * sha256 checks as every other palimpsest read. Newest first; the newest matching track of each layer (stt, translate) is returned.
  *
  * FAIL CLOSED. If the lookup cannot be made (the index table cannot be read, the lab store is not configured, or a read throws) the answer is { unavailable: true }, never "none": a caller that took a
- * failure for "no track" would pay Sarvam for a consult that already has one. A track whose object is simply gone from R2 is skipped (it is not a usable track).
+ * failure for "no track" would pay Sarvam for a consult that already has one. A track the INDEX says is ok but whose R2 object is gone cannot be checked against the cut (its signature is in the object),
+ * so it is reported in `missing` (by layer) and the caller must NOT silently pay Sarvam for it (track_missing; only force:true goes on).
  */
 export async function findSarvamTracks(uid: string, roomId: string, roomSlug: string, cutVersion: string, signatureOf: (sig: unknown) => string | null): Promise<SarvamReuse> {
-  if (!UID_RE.test(uid)) return { found: null, n_integrity_skipped: 0, n_other_cut: 0 };
+  if (!UID_RE.test(uid)) return { found: null, n_integrity_skipped: 0, n_other_cut: 0, missing: [] };
   const store = labStore();
   if (!store) return { unavailable: true };
   let rows: IndexRow[];
@@ -164,6 +165,7 @@ export async function findSarvamTracks(uid: string, roomId: string, roomSlug: st
   }
   const out: { stt: SarvamTrack | null; translate: SarvamTrack | null } = { stt: null, translate: null };
   let skipped = 0, otherCut = 0;
+  const missing: Array<"stt" | "translate"> = [];
   try {
     for (const row of rows) {
       const layer = row.layer === "stt" || row.layer === "translate" ? row.layer : null;
@@ -171,7 +173,7 @@ export async function findSarvamTracks(uid: string, roomId: string, roomSlug: st
       const m = REB_CONSULT_KEY.exec(String(row.r2_key));
       if (!m || m[3] !== uid || (m[2] !== roomId && m[2] !== roomSlug)) { skipped += 1; continue; }
       const obj = await store.get(row.r2_key);
-      if (!obj) continue;
+      if (!obj) { if (!missing.includes(layer)) missing.push(layer); continue; }
       if (typeof row.sha256 !== "string" || sha256(obj.body) !== row.sha256.toLowerCase()) { skipped += 1; continue; }
       let doc: { status?: unknown; engine?: unknown; model?: unknown; version?: unknown; segments?: unknown; config?: { clip_signature?: unknown } };
       try { doc = JSON.parse(obj.body); } catch { skipped += 1; continue; }
@@ -189,5 +191,6 @@ export async function findSarvamTracks(uid: string, roomId: string, roomSlug: st
   } catch {
     return { unavailable: true };
   }
-  return { found: out.stt || out.translate ? out : null, n_integrity_skipped: skipped, n_other_cut: otherCut };
+  // a layer that WAS found is not missing (an older indexed row of it may be gone; the newest matching track is what counts)
+  return { found: out.stt || out.translate ? out : null, n_integrity_skipped: skipped, n_other_cut: otherCut, missing: missing.filter((l) => !out[l]) };
 }

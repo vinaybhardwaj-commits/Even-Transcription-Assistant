@@ -15,9 +15,12 @@ import { sql } from "@/lib/db";
 import { readJob } from "@/lib/jobs/store";
 import { JobArgsError, submitJob, UnknownKindError } from "@/lib/jobs/submit";
 import { errorCodeOf } from "@/lib/jobs/errors";
-import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, existingSummary, parseSarvamTranscribeArgs, reuseSummary } from "@/lib/jobs/kinds/sarvam-transcribe";
+import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, existingSummary, parseSarvamTranscribeArgs } from "@/lib/jobs/kinds/sarvam-transcribe";
 import { SARVAM_CONSULT_BATCH_KIND, parseBatchArgs } from "@/lib/jobs/kinds/sarvam-consult-batch";
-import { palimpsestFor, preflightClip } from "@/lib/consult-clip";
+import { preflightClip } from "@/lib/consult-clip";
+import { palimpsestAsResult } from "@/lib/consult-index/palimpsest-view";
+import { signatureVersion } from "@/lib/consult-index/parse";
+import { findSarvamTracks } from "@/lib/room-access/readers/reb-consult";
 import { consultResultView } from "@/lib/consult-index/result-view";
 import { getIndexRow, latestSync, listIndexDay, listResults } from "@/lib/room-access/consult-index-store";
 import { SARVAM_TRANSLATE_KIND, parseSarvamTranslateArgs } from "@/lib/jobs/kinds/sarvam-translate";
@@ -36,7 +39,7 @@ export const USAGE_DAYS_DEFAULT = 7;
 export const USAGE_DAYS_MAX = 30;
 
 /** The documented keys, plus the room-audio ones, which are passed on ONLY so the kind can refuse them by name (scope_consult_only). */
-const SUBMIT_KEYS = ["encounter_id", "consult_uid", "consult_uids", "mode", "english", "num_speakers", "transcription_run_id", ...ROOM_AUDIO_ARGS] as const;
+const SUBMIT_KEYS = ["encounter_id", "consult_uid", "consult_uids", "force", "mode", "english", "num_speakers", "transcription_run_id", ...ROOM_AUDIO_ARGS] as const;
 const submitArgs = (args: ToolArgs): Row => Object.fromEntries(SUBMIT_KEYS.filter((k) => args[k] !== undefined && args[k] !== null).map((k) => [k, args[k]]));
 const num = (v: unknown): number | null => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
 const round = (n: number, d = 4): number => Math.round(n * 10 ** d) / 10 ** d;
@@ -59,11 +62,11 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
       const parsed = parseSarvamTranscribeArgs(raw);
       // a consult clip comes from the consult_index table: not indexed / sealed / voice isolated / palimpsest already has it / audio unreadable are refused here; a result already stored for THIS CUT VERSION is returned, not re-sent
       if (parsed.source === "consult") {
-        const pre = await preflightClip(parsed.consult_uid, { mode: parsed.mode, english: parsed.english });
+        const pre = await preflightClip(parsed.consult_uid, { mode: parsed.mode, english: parsed.english, force: parsed.force === true });
         if (!pre.ok) return { ok: false, error: pre.error };
         if (pre.existing) return { ok: true, existing: true, job_id: pre.existing.job_id, ...existingSummary(pre.existing), billed: false };
         // the palimpsest already holds this cut's Sarvam track: it is returned (labelled), Sarvam is not called and nothing is queued
-        if (pre.reuse) return { ok: true, ...reuseSummary(pre.row.consult_uid, pre.row.cut_version, pre.reuse), billed: false };
+        if (pre.reuse) return { ok: true, existing: true, job_id: null, ...existingSummary(pre.reuse.view.result), billed: false };
       }
     } else {
       const parsed = parseSarvamTranslateArgs(raw);
@@ -119,44 +122,48 @@ async function consultClips(args: ToolArgs): Promise<Row> {
   };
 }
 
+type IndexRowT = NonNullable<Awaited<ReturnType<typeof getIndexRow>>>;
+type ResultRowT = Awaited<ReturnType<typeof listResults>>[number];
+
 /**
- * No result of our own for this consult: the palimpsest's Sarvam track of THIS cut, labelled source palimpsest (model + revision, counts; text and absolute-UTC segments only with include_text).
- * If the lookup cannot be made the answer says so (reuse_lookup_unavailable); it is never "no result".
+ * THE ONE HEAD. Our own stored results and the palimpsest's tracks (palimpsestAsResult) both go through this function, so the key sets are identical by construction; `source` says which it was
+ * ("scribe_sarvam" for a job of ours, "palimpsest" for a reused track). tests/unit/consult-index-pg.test.ts compares the two field by field.
  */
-async function palimpsestResult(uid: string, row: NonNullable<Awaited<ReturnType<typeof getIndexRow>>>, withText: boolean): Promise<Row> {
-  const pal = await palimpsestFor(row);
-  if ("unavailable" in pal) return { ok: false, error: "reuse_lookup_unavailable" };
-  if (!pal.reuse) return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
-  const { stt, translate } = pal.reuse;
-  const head: Row = {
-    ok: true, consult_uid: uid, source: "palimpsest", cut_version: row.cut_version, current_cut_version: row.cut_version, stale: false, engine: "sarvam-saaras-v3", model_stt: stt?.model ?? null, model_rev: stt?.version ?? null,
-    stt_config_hash: stt?.config_hash ?? null, translate_config_hash: translate?.config_hash ?? null, stt_segments: stt?.segments.length ?? 0, translate_segments: translate?.segments.length ?? 0,
-    english: translate ? "available" : "not_in_palimpsest", clip: { t0_ms: row.t0_ms, t1_ms: row.t1_ms }, billed: false,
-  };
-  if (!withText) return head;
-  const seg = (t: { segments: Array<{ t0_ms: number; t1_ms: number; speaker: string | null; lang: string | null; text: string }> } | null) => (t ? t.segments.map((g) => ({ ...g })) : []);
+function resultHead(hit: ResultRowT & { source?: string }, row: IndexRowT, others: string[]): Row {
   return {
-    ...head, transcript: stt ? stt.segments.map((g) => g.text).join(" ").trim() : "", english_text: translate ? translate.segments.map((g) => g.text).join(" ").trim() : null,
-    segments: seg(stt), english_segments: seg(translate),
+    ok: true, consult_uid: hit.consult_uid, source: hit.source ?? "scribe_sarvam", cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english,
+    job_id: hit.job_id || null, model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s,
+    speakers: hit.speaker_count, transcript_chars: hit.transcript_chars, english_chars: hit.english_chars, english_pass: hit.english_pass, clip: { t0_ms: hit.t0_ms, t1_ms: row.t1_ms },
+    created_at: hit.created_at || null, other_cuts: others,
   };
 }
 
-/** consult_result {consult_uid, cut_version?, include_text?}: the stored Sarvam result of a consult (model + revision always; transcript, English and segments with ABSOLUTE UTC times only with include_text). No Sarvam call. */
+/**
+ * No result of our own for this consult: the palimpsest's Sarvam track of THIS cut, in the normal result shape (palimpsestAsResult + resultHead + consultResultView), labelled source palimpsest.
+ * If the lookup cannot be made the answer says so (reuse_lookup_unavailable); it is never "no result". A track the index lists but whose object is gone is track_missing.
+ */
+async function palimpsestResult(uid: string, row: IndexRowT, withText: boolean): Promise<Row> {
+  const r = await findSarvamTracks(row.consult_uid, row.room_id, row.room_slug, row.cut_version, signatureVersion);
+  if ("unavailable" in r) return { ok: false, error: "reuse_lookup_unavailable" };
+  if (r.found?.stt) {
+    const v = palimpsestAsResult(row, r.found.stt, r.found.translate);
+    const head = { ...resultHead(v.result, row, []), billed: false };
+    return withText ? { ...head, ...consultResultView(v.doc, row.t0_ms) } : head;
+  }
+  if (r.missing.includes("stt")) return { ok: false, error: "track_missing" };
+  return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
+}
+
+/** consult_result {consult_uid, include_text?}: the stored Sarvam result of a consult (model + revision always; transcript, English and segments with ABSOLUTE UTC times only with include_text). No Sarvam call. */
 async function consultResult(args: ToolArgs): Promise<Row> {
   const uid = argStr(args, "consult_uid", 128);
   if (!uid || !UID_OK.test(uid)) return { ok: false, error: "consult_uid_invalid" };
   const row = await getIndexRow(uid);
   if (!row) return { ok: false, error: "consult_not_indexed" };
-  const asked: string | null = null;
   const results = await listResults(uid);
-  const hit = asked ? results.find((r) => r.cut_version === asked) : (results.find((r) => r.cut_version === row.cut_version) ?? results[0]);
+  const hit = results.find((r) => r.cut_version === row.cut_version) ?? results[0];
   if (!hit) return palimpsestResult(uid, row, argBool(args, "include_text"));
-  const head: Row = {
-    ok: true, consult_uid: uid, cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english, job_id: hit.job_id,
-    model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s, speakers: hit.speaker_count,
-    transcript_chars: hit.transcript_chars, english_chars: hit.english_chars, english_pass: hit.english_pass, clip: { t0_ms: hit.t0_ms, t1_ms: row.t1_ms }, created_at: hit.created_at,
-    other_cuts: results.filter((r) => r !== hit).map((r) => r.cut_version),
-  };
+  const head = resultHead(hit, row, results.filter((r) => r !== hit).map((r) => r.cut_version));
   if (!argBool(args, "include_text")) return head;
   let doc;
   try { doc = await readJson<import("@/lib/jobs/kinds/sarvam-common").ResultDoc>(hit.result_r2_key); } catch { return { ...head, content: null, content_note: "r2_read_failed" }; }
@@ -278,6 +285,7 @@ const sarvam: McpTool = {
       encounter_id: { type: "string" },
       consult_uid: { type: "string" },
       consult_uids: { type: "array", items: { type: "string" } },
+      force: { type: "boolean" },
       room_slug: { type: "string" },
       mode: { type: "string", enum: ["transcribe", "codemix"] },
       english: { type: "boolean" },
