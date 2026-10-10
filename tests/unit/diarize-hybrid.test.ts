@@ -2,8 +2,8 @@
  * The hybrid (pyannote.ai turns + Mini embeddings), the teacher labels, and the level gate.
  *
  * RETIRED 10 Oct 2026 (pyannote is gone from production): every case that drove the job's pyannote.ai /
- * local-comparison / level-gate path was removed with that path. What stays is the PURE half (span choice,
- * embedding merge, attributionFor, judgeLevels, label store, spend counts). The job's identity logic —
+ * local-comparison path was removed with that path. What stays is the PURE half (span choice,
+ * embedding merge, attributionFor, label store, spend counts). The job's identity logic —
  * embed → match → turn rows — is proven for nemotron in tests/unit/nemo-primary-pg.test.ts.
  *
  * The three things most likely to be wrong, and what each test is defending:
@@ -212,77 +212,14 @@ describe("attribution is earned — both halves", () => {
 
 });
 
-// ── 4. the level gate ────────────────────────────────────────────────────────────────────────
-describe("the level gate stops a paid call only on evidence", () => {
-  const win = { start_ms: 0, end_ms: 900_000 };
-  const bucket = (t: number, peak: number) => ({ t_ms: t, peak, avg: null, zero_ratio: null, session_open: true, tape_advancing: true, samples: 1 });
-  const full = (peak: number) => Array.from({ length: 60 }, (_, i) => bucket(i * 15_000, peak));
-
-  it("a fully covered window below the floor is SILENT", async () => {
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
-    const v = judgeLevels(full(DEFAULT_ROOM_ENERGY_FLOOR / 2), win);
-    expect(v).toMatchObject({ verdict: "silent", reason: "peak_below_floor", basis: "peak", active: 0 });
-  });
-
-  it("NO SAMPLES IS UNKNOWN, never silent", async () => {
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    expect(judgeLevels([], win)).toMatchObject({ verdict: "unknown", reason: "no_samples" });
-  });
-
-  it("THIN COVERAGE IS UNKNOWN — three quiet readings do not convict a 15-minute window", async () => {
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
-    const v = judgeLevels([bucket(0, 0), bucket(15_000, 0), bucket(30_000, DEFAULT_ROOM_ENERGY_FLOOR / 4)], win);
-    expect(v).toMatchObject({ verdict: "unknown", reason: "thin_coverage" });
-  });
-
-  it("ONE bucket above the floor is enough to spare the window, whatever the coverage", async () => {
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
-    const v = judgeLevels([bucket(0, DEFAULT_ROOM_ENERGY_FLOOR)], win);
-    expect(v).toMatchObject({ verdict: "has_sound", reason: "peak_above_floor", active: 1 });
-  });
-
-  it("the floor is the shared one, and the boundary is inclusive", async () => {
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
-    // Derived through the INVERSE: one step below the floor is silence, exactly at it is not.
-    expect(judgeLevels(full(DEFAULT_ROOM_ENERGY_FLOOR), win).verdict).toBe("has_sound");
-    expect(judgeLevels(full(DEFAULT_ROOM_ENERGY_FLOOR - 1e-9), win).verdict).toBe("silent");
-  });
-
-  it("samples outside the window are not counted", async () => {
-    const { judgeLevels } = await import("@/lib/diarize-level-gate");
-    const { DEFAULT_ROOM_ENERGY_FLOOR } = await import("@/lib/stt/window-measure");
-    const v = judgeLevels([...full(0), bucket(2_000_000, DEFAULT_ROOM_ENERGY_FLOOR * 10)], win);
-    expect(v.verdict).toBe("silent");
-  });
-
-  // ── THE DECISION, not the value. `unknown` is pinned as a RETURN of judgeLevels by the tests
-  // above; these pin what the JOB DOES with it. ETA-Refuter's L1: `=== "silent"` mutated to
-  // `!== "has_sound"` passed 91/91, because the two fail-safe tests below are guarded by `if (rd)`
-  // and so never reach the comparison at all — they pin resolution, not judgement.
-  //
-  // Each asserts the gate WAS consulted (a bench_level_sample read happened). Without that the
-  // test would pass for the wrong reason the moment the gate stopped running, which is the exact
-  // shape of the hole it is closing.
-
+// ── 4. the core window load ──────────────────────────────────────────────────────────────────
+describe("the core window load", () => {
   it("the core window load does NOT join room_day — one engine's guard cannot break the other's query", () => {
     const src = readFileSync("lib/jobs/kinds/diarize-window.ts", "utf8");
     const load = src.slice(src.indexOf("async function loadWindow"), src.indexOf("async function resolveRoomDay"));
     expect(load).toContain("FROM bench_window");
     expect(load).not.toContain("room_day rd");
     expect(load).not.toMatch(/JOIN/i);
-  });
-
-  it("IT DOES NOT NEED DIARIZE_SPEECH_GATE — that flag is unset in every test above", async () => {
-    expect(process.env.DIARIZE_SPEECH_GATE).toBeUndefined();
-    // Checked by what it IMPORTS, not by what its prose mentions: the file names the flag in a
-    // comment precisely to say it does not use it.
-    const src = readFileSync("lib/diarize-level-gate.ts", "utf8");
-    expect(src).not.toMatch(/^import[^;]*speech-gate/m);
-    expect(src).not.toContain("speechGateEnabled(");
   });
 
 });

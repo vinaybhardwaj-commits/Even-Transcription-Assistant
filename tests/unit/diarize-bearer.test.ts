@@ -13,7 +13,6 @@ vi.mock("@/lib/diarize-gate", () => ({
 
 import { runDiarize } from "@/lib/diarize";
 import { embedSpeakers } from "@/lib/diarize-embed";
-import { requestSpeechRegions } from "@/lib/diarize-vad-trim";
 import { runEnroll } from "@/lib/enroll";
 import { probePyannote } from "@/lib/mcp/tools/health";
 import { withDiarizeAuth } from "@/lib/service-access";
@@ -44,7 +43,6 @@ const RP = { pad_s: 0, merge_gap_s: 0, min_region_s: 0, threshold: 0.5, min_sile
 const POST_ROUTES: Array<[string, () => Promise<unknown>]> = [
   ["/diarize", () => runDiarize(new Uint8Array([1]), "audio/webm", { encounterId: "w" })],
   ["/embed_speakers", () => embedSpeakers(new Uint8Array([1]), SP, [], { batchThreshold: 0.65, label: "w" })],
-  ["/speech_regions", () => requestSpeechRegions(new Uint8Array([1]), RP, { label: "w", allowCut: [] })],
   ["/enroll", () => runEnroll(new Uint8Array([1]), "audio/webm")],
 ];
 
