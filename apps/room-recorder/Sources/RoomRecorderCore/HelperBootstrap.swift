@@ -46,38 +46,85 @@ struct SMAppDaemonService: HelperDaemonService {
 /// error from `register()` was dropped. Now every step is logged, the status and the last error
 /// are kept for status.json and the bench row, and `register()` is called on every start while
 /// the daemon is `notRegistered` (a no-op once registered).
+/// What one process remembers between registration passes.
+public struct HelperRegistrationState: Equatable, Sendable {
+  /// `register()` calls made so far in this process.
+  public var attempts = 0
+  public var settingsOpened = false
+  /// The last refusal, as `domain=… code=…: …`; cleared by a register() that is accepted.
+  public var lastError: String?
+  public init() {}
+
+  /// One attempt on start, plus one retry a probe interval (60 s) later. Then no more: a daemon that
+  /// macOS will not register is not made registrable by asking every minute, and the log must not fill.
+  public static let maxAttempts = 2
+}
+
 public enum HelperBootstrap {
-  /// One registration pass. Returns what to report. `openSettings` is called at most once per process.
+  /// Statuses where `register()` has nothing to do: it is on, or it is waiting for the user.
+  static let settled: Set<String> = ["enabled", "requiresApproval"]
+
+  /// `domain=SMAppServiceErrorDomain code=2: …`, bounded. The three things an operator needs.
+  public static func describe(_ error: Error) -> String {
+    let ns = error as NSError
+    return String("domain=\(ns.domain) code=\(ns.code): \(ns.localizedDescription)".prefix(200))
+  }
+
+  /// A refusal that is about the daemon's SIGNATURE rather than about approval or the plist.
+  /// INFERRED: Apple does not document the text. A self-signed leaf with no Team ID is the case
+  /// this is for; it is recognised by the words macOS uses or by the invalid-signature code (2) in
+  /// the ServiceManagement domain. The text is always logged whole, so a miss here loses nothing.
+  public static func looksLikeSigningFailure(_ error: Error) -> Bool {
+    let ns = error as NSError
+    let text = ns.localizedDescription.lowercased()
+    if ["signature", "code sign", "codesign", "team id", "not signed", "certificate"].contains(where: text.contains) {
+      return true
+    }
+    return ns.domain.contains("ServiceManagement") || ns.domain.contains("SMAppService") ? ns.code == 2 : false
+  }
+
+  /// One registration pass.
+  ///
+  /// `register()` is called whenever the daemon is anything other than `enabled` or
+  /// `requiresApproval` — `notRegistered` AND `notFound` (0.1.31: on OPD 6 the status read
+  /// `notFound` and the old code, which only tried on `notRegistered`, never asked) — at most
+  /// `HelperRegistrationState.maxAttempts` times per process. `openSettings` is called at most once.
   @discardableResult
   public static func registrationPass(
-    service: any HelperDaemonService, openSettings: () -> Void, settingsOpened: inout Bool,
+    service: any HelperDaemonService, openSettings: () -> Void, state: inout HelperRegistrationState,
     log: (String) -> Void
   ) -> (registration: String, error: String?) {
     var status = service.registrationName
-    if status == "notRegistered" {
+    if !settled.contains(status), state.attempts < HelperRegistrationState.maxAttempts {
+      state.attempts += 1
       do {
         try service.register()
-        log("helper: register() accepted")
+        state.lastError = nil
+        log("helper: register() accepted (attempt \(state.attempts), status was \(status))")
       } catch {
-        let text = String(String(describing: error).prefix(200))
-        log("helper: register() refused: \(text)")
-        return (service.registrationName, text)
+        let text = describe(error)
+        state.lastError = text
+        log("helper: register() refused (attempt \(state.attempts) of \(HelperRegistrationState.maxAttempts), status was \(status)): \(text)")
+        if looksLikeSigningFailure(error) {
+          log("helper: this is a SIGNING refusal: macOS will not register a daemon signed with a self-signed certificate that has no Team ID; the bundle is otherwise fine")
+        }
       }
       status = service.registrationName
     }
+    if settled.contains(status), status == "enabled" { state.lastError = nil }
     switch status {
     case "requiresApproval":
       log("helper: requires approval in System Settings › General › Login Items & Extensions")
-      if !settingsOpened {
-        settingsOpened = true
+      if !state.settingsOpened {
+        state.settingsOpened = true
         openSettings()
       }
     case "notFound":
-      log("helper: notFound — the daemon plist is not in this bundle, or the app is not in /Applications")
+      log("helper: notFound after \(state.attempts) register attempt(s) — the daemon plist is not in this bundle, or the app is not in /Applications")
     default:
       break
     }
-    return (status, nil)
+    return (status, state.lastError)
   }
 
   public static func start(
@@ -88,13 +135,13 @@ public enum HelperBootstrap {
   ) {
     guard Bundle.main.bundleURL.pathExtension == "app" else { return }
     Task.detached {
-      var openedSettings = false
+      var registration = HelperRegistrationState()
       var lastLogged = ""
       while !Task.isCancelled {
         let service = SMAppDaemonService()
         let result = registrationPass(
           service: service, openSettings: { SMAppService.openSystemSettingsLoginItems() },
-          settingsOpened: &openedSettings, log: log)
+          state: &registration, log: log)
         var version: String?
         var xpcOK: Bool?
         if result.registration == "enabled" {

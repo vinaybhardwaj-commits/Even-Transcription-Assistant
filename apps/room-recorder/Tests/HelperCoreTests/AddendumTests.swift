@@ -133,7 +133,7 @@ import Testing
   }
 }
 
-// MARK: - C. The helper is registered at start, and the answer is kept
+// MARK: - C. The helper is registered at start, and the answer is kept (0.1.31: notFound too, bounded)
 
 @Suite struct HelperRegistrationPassTests {
   final class FakeService: HelperDaemonService, @unchecked Sendable {
@@ -153,66 +153,131 @@ import Testing
       status = statusAfterRegister
     }
   }
-  struct Refused: Error, CustomStringConvertible { var description: String { "Operation not permitted" } }
 
-  @Test func aNotRegisteredDaemonIsRegisteredAndReportedEnabled() {
+  static let refused = NSError(
+    domain: "SMAppServiceErrorDomain", code: 1,
+    userInfo: [NSLocalizedDescriptionKey: "Operation not permitted"])
+  static let signing = NSError(
+    domain: "SMAppServiceErrorDomain", code: 2,
+    userInfo: [NSLocalizedDescriptionKey: "The code signature of the service is invalid"])
+
+  private func pass(_ service: FakeService, _ state: inout HelperRegistrationState, logs: inout [String], opens: inout Int)
+    -> (registration: String, error: String?)
+  {
+    var local: [String] = []
+    var count = 0
+    let result = HelperBootstrap.registrationPass(
+      service: service, openSettings: { count += 1 }, state: &state, log: { local.append($0) })
+    logs += local
+    opens += count
+    return result
+  }
+
+  @Test func notRegisteredIsRegisteredOnce() {
     let service = FakeService("notRegistered")
-    var opened = false
-    var logs: [String] = []
-    let result = HelperBootstrap.registrationPass(service: service, openSettings: {}, settingsOpened: &opened, log: { logs.append($0) })
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    let result = pass(service, &state, logs: &logs, opens: &opens)
     #expect(service.registerCalls == 1 && result.registration == "enabled" && result.error == nil)
     #expect(logs.contains { $0.contains("register() accepted") })
   }
 
-  @Test func anEnabledDaemonIsNotRegisteredAgain() {
-    let service = FakeService("enabled")
-    var opened = false
-    _ = HelperBootstrap.registrationPass(service: service, openSettings: {}, settingsOpened: &opened, log: { _ in })
-    _ = HelperBootstrap.registrationPass(service: service, openSettings: {}, settingsOpened: &opened, log: { _ in })
-    #expect(service.registerCalls == 0)
+  @Test func notFoundIsRegisteredToo_theOPD6Case() {
+    let service = FakeService("notFound")
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    let result = pass(service, &state, logs: &logs, opens: &opens)
+    #expect(service.registerCalls == 1, "0.1.30 never asked on notFound")
+    #expect(result.registration == "enabled")
+  }
+
+  @Test func enabledAndRequiresApprovalAreNeverRegisteredAgain() {
+    for status in ["enabled", "requiresApproval"] {
+      let service = FakeService(status)
+      var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+      for _ in 0..<5 { _ = pass(service, &state, logs: &logs, opens: &opens) }
+      #expect(service.registerCalls == 0, "\(status)")
+    }
   }
 
   @Test func approvalOpensSettingsOnceAndIsReported() {
     let service = FakeService("notRegistered", after: "requiresApproval")
-    var opened = false
-    var opens = 0
-    var logs: [String] = []
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
     for _ in 0..<3 {
-      let r = HelperBootstrap.registrationPass(service: service, openSettings: { opens += 1 }, settingsOpened: &opened, log: { logs.append($0) })
-      #expect(r.registration == "requiresApproval")
+      #expect(pass(service, &state, logs: &logs, opens: &opens).registration == "requiresApproval")
     }
-    #expect(opens == 1)
-    #expect(service.registerCalls == 1)
+    #expect(opens == 1 && service.registerCalls == 1)
     #expect(logs.contains { $0.contains("requires approval") })
   }
 
-  @Test func aRefusedRegisterIsLoggedAndKeptNotSwallowed() {
-    let service = FakeService("notRegistered", failure: Refused())
-    var opened = false
-    var logs: [String] = []
-    let result = HelperBootstrap.registrationPass(service: service, openSettings: {}, settingsOpened: &opened, log: { logs.append($0) })
-    #expect(result.registration == "notRegistered")
-    #expect(result.error == "Operation not permitted")
-    #expect(logs.contains { $0.contains("register() refused: Operation not permitted") })
+  @Test func aRefusalIsRecordedWithDomainCodeAndText() {
+    let service = FakeService("notFound", failure: Self.refused)
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    let result = pass(service, &state, logs: &logs, opens: &opens)
+    #expect(result.registration == "notFound")
+    #expect(result.error == "domain=SMAppServiceErrorDomain code=1: Operation not permitted")
+    #expect(state.lastError == result.error)
+    #expect(logs.contains { $0.contains("register() refused (attempt 1 of 2") && $0.contains("code=1") })
   }
 
-  @Test func notFoundIsLoggedAndNothingIsRegistered() {
-    let service = FakeService("notFound")
-    var opened = false
-    var logs: [String] = []
-    let result = HelperBootstrap.registrationPass(service: service, openSettings: {}, settingsOpened: &opened, log: { logs.append($0) })
-    #expect(service.registerCalls == 0 && result.registration == "notFound")
-    #expect(logs.contains { $0.contains("notFound") })
+  @Test func aSigningRefusalIsCalledOutPlainly() {
+    let service = FakeService("notFound", failure: Self.signing)
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    _ = pass(service, &state, logs: &logs, opens: &opens)
+    #expect(logs.contains { $0.contains("SIGNING refusal") && $0.contains("Team ID") })
+    // ...and an ordinary refusal is not mislabelled.
+    let other = FakeService("notFound", failure: Self.refused)
+    var s2 = HelperRegistrationState(); var l2: [String] = []; var o2 = 0
+    _ = pass(other, &s2, logs: &l2, opens: &o2)
+    #expect(!l2.contains { $0.contains("SIGNING refusal") })
   }
 
-  @Test func statusJSONCarriesTheRegistrationAndTheError() throws {
-    let status = RoomRecorderStatus(state: .ready, helperRegistration: "requiresApproval", helperRegistrationError: "nope")
-    let data = try JSONEncoder().encode(status)
-    let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-    #expect(object["helper_registration"] as? String == "requiresApproval")
-    #expect(object["helper_registration_error"] as? String == "nope")
-    let back = try JSONDecoder().decode(RoomRecorderStatus.self, from: data)
-    #expect(back.helperRegistration == "requiresApproval")
+  @Test func signingRecognition() {
+    #expect(HelperBootstrap.looksLikeSigningFailure(Self.signing))
+    #expect(HelperBootstrap.looksLikeSigningFailure(NSError(domain: "x", code: 9, userInfo: [NSLocalizedDescriptionKey: "No Team ID in the signature"])))
+    #expect(!HelperBootstrap.looksLikeSigningFailure(Self.refused))
+    #expect(!HelperBootstrap.looksLikeSigningFailure(NSError(domain: "Other", code: 2, userInfo: [NSLocalizedDescriptionKey: "boom"])))
+  }
+
+  @Test func neverMoreThanOneAttemptPlusOneRetry_noTightLoop() {
+    let service = FakeService("notFound", failure: Self.refused)
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    for _ in 0..<50 { _ = pass(service, &state, logs: &logs, opens: &opens) }
+    #expect(service.registerCalls == 2)
+    #expect(logs.filter { $0.contains("register() refused") }.count == 2, "the log does not fill either")
+  }
+
+  @Test func theErrorSurvivesLaterProbesThatDoNotAttempt() {
+    let service = FakeService("notFound", failure: Self.refused)
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    for _ in 0..<4 { _ = pass(service, &state, logs: &logs, opens: &opens) }
+    #expect(pass(service, &state, logs: &logs, opens: &opens).error?.contains("Operation not permitted") == true)
+  }
+
+  @Test func theRetryCanSucceedAndClearsTheError() {
+    let service = FakeService("notFound", failure: Self.refused)
+    var state = HelperRegistrationState(); var logs: [String] = []; var opens = 0
+    _ = pass(service, &state, logs: &logs, opens: &opens)
+    service.failure = nil
+    let result = pass(service, &state, logs: &logs, opens: &opens)
+    #expect(result.registration == "enabled" && result.error == nil && service.registerCalls == 2)
+  }
+
+  @Test func theDescriptionIsBounded() {
+    let long = NSError(domain: "D", code: 3, userInfo: [NSLocalizedDescriptionKey: String(repeating: "x", count: 500)])
+    #expect(HelperBootstrap.describe(long).count == 200)
+  }
+
+  @Test func statusJSONAndTheBenchRowCarryTheError() throws {
+    let status = RoomRecorderStatus(state: .ready, helperRegistration: "notFound", helperRegistrationError: "domain=D code=2: nope")
+    let object = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as? [String: Any])
+    #expect(object["helper_registration"] as? String == "notFound")
+    #expect(object["helper_registration_error"] as? String == "domain=D code=2: nope")
+    var fields = InstallPollFields(installID: "i", tapeAdvancing: true)
+    #expect(!fields.queryItems().map(\.name).contains("helper_registration_error"), "absent until measured")
+    fields.helperRegistration = "notFound"
+    fields.helperRegistrationError = String(repeating: "e", count: 300)
+    let items = Dictionary(uniqueKeysWithValues: fields.queryItems().map { ($0.name, $0.value ?? "") })
+    #expect(items["helper_registration"] == "notFound")
+    #expect(items["helper_registration_error"]?.count == 200)
     // An old status.json without the keys still decodes.
     let old = try JSONEncoder().encode(RoomRecorderStatus(state: .ready))
     #expect(try JSONDecoder().decode(RoomRecorderStatus.self, from: old).helperRegistration == nil)

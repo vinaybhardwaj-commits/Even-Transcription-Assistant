@@ -1396,6 +1396,7 @@ public actor RoomEngine {
           fields.helperVersion = helper?.helperVersion
           fields.helperRegistration = helper?.registration
           fields.helperXPCOK = helper?.xpcOK
+          fields.helperRegistrationError = HelperStatusCache.shared.registrationError
           return fields
         }
         let response = try await remote.pollCommands(
