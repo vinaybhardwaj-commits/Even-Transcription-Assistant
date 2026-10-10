@@ -1,0 +1,10 @@
+# Gitleaks config for this repo: the default ruleset plus ONE narrow allowance.
+# tests/unit/fleet-jws-vector.test.ts holds three throwaway JWTs signed with a fixed-seed key (32 x 0x07) used as cross-language test vectors for the fleet
+# protocol (docs/fleet/PROTOCOL.md). Current files carry an inline gitleaks:allow; the commit below is the one historical commit that added them before the
+# annotation existed, and history cannot be rewritten on a shared branch. Nothing else is allowed.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "fixed-seed test-vector JWTs, first commit only"
+commits = ["8f85e6bf9b1d757c88c84d70eb5b73ffb021e679"]
