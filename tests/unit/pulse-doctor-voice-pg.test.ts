@@ -2,7 +2,8 @@
  * pulse-doctor-voice-pg.test.ts — 0142 and every SQL statement of lib/room-access/pulse-doctor-voice.ts against real
  * Postgres 16: which windows label a Pulse doctor, which doctors are due a build, the one-statement generation write
  * and the run log. Times are fixed IST instants typed here; the lookback is passed wide so the fixture never ages out.
- * Every id is fake; the held-out pair is the one the identity pg test types by hand.
+ * Every id is fake. The held-out rule was lifted on 10 Oct (BLIND_ROOM_DAYS is empty): the formerly held-out pair, typed
+ * here as the identity pg test does, is now served like any other day, and the chooser counts 0 excluded.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -97,7 +98,7 @@ beforeAll(async () => {
   consult(R, { wh: U1, quality: "unclosed", from: at(A, "15:00"), to: null }); W.open = nemo(R, A, at(A, "15:00"));
   // a non-ok Nemotron row inside U1's time: out
   consult(R, { wh: U1, from: at(A, "16:00"), to: at(A, "16:15") }); W.empty = nemo(R, A, at(A, "16:00"), "empty");
-  // a held-out room-day, fully U1's: out, and counted
+  // a formerly held-out room-day, fully U1's: in since the rule was lifted
   consult(BLIND_ROOM, { wh: U1, from: at(BLIND_DAY, "10:00"), to: at(BLIND_DAY, "10:15") }); W.blind = nemo(BLIND_ROOM, BLIND_DAY, at(BLIND_DAY, "10:00"));
   // U2 owns three whole windows on two days: below MIN_WINDOWS
   consult(R, { wh: U2, from: at(B, "14:00"), to: at(B, "14:30") }); nemo(R, B, at(B, "14:00")); nemo(R, B, at(B, "14:15"));
@@ -134,15 +135,13 @@ describe.runIf(HAVE)("migration 0142", () => {
 });
 
 describe.runIf(HAVE)("which windows label a doctor", () => {
-  it("U1: the six whole windows and the half-covered one, newest first; every other case left out; the held-out window counted", async () => {
+  it("U1: the six whole windows, the half-covered one and the formerly held-out one, newest first; every other case left out; nothing excluded", async () => {
     const S = await import("@/lib/room-access/pulse-doctor-voice");
     const r = await S.doctorWindows(U1, WIDE, 50);
-    expect(r.windows.map((w) => w.window_id)).toEqual([W["b09:15"], W["b09:00"], W.half, W["a09:45"], W["a09:30"], W["a09:15"], W["a09:00"]]);
+    expect(r.windows.map((w) => w.window_id)).toEqual([W["b09:15"], W["b09:00"], W.half, W["a09:45"], W["a09:30"], W["a09:15"], W["a09:00"], W.blind]);
     expect(r.windows[0]).toMatchObject({ day: "2026-10-05", clip_r2_key: `clips/bs_${W["b09:15"]}/a.webm` });
     expect(typeof r.windows[0]!.row_id).toBe("number");
-    const blindCount = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM bench_window w JOIN room_day rd ON rd.id = w.room_day_id WHERE rd.room_id = '${BLIND_ROOM}' AND rd.ist_date = '${BLIND_DAY}'`))[0]!.n;
-    expect(blindCount).toBe(1);
-    expect(r.n_blind_excluded).toBe(blindCount);
+    expect(r.n_blind_excluded).toBe(0);
   });
 
   it("honours the limit and the lookback", async () => {
@@ -160,15 +159,15 @@ describe.runIf(HAVE)("which windows label a doctor", () => {
 });
 
 describe.runIf(HAVE)("which doctors are due a build", () => {
-  it("U1 (7 windows) is due and U2 (3) is not; a recent run or an open job takes U1 out", async () => {
+  it("U1 (8 windows) is due and U2 (3) is not; a recent run or an open job takes U1 out", async () => {
     const S = await import("@/lib/room-access/pulse-doctor-voice");
-    expect((await S.doctorsToBuild(WIDE, 4, 20, 10)).uids).toEqual([{ uid: U1, windows: 7 }]);
-    expect((await S.doctorsToBuild(WIDE, 3, 20, 10)).uids).toEqual([{ uid: U1, windows: 7 }, { uid: U2, windows: 3 }]);
+    expect((await S.doctorsToBuild(WIDE, 4, 20, 10)).uids).toEqual([{ uid: U1, windows: 8 }]);
+    expect((await S.doctorsToBuild(WIDE, 3, 20, 10)).uids).toEqual([{ uid: U1, windows: 8 }, { uid: U2, windows: 3 }]);
     pg.exec(`INSERT INTO scribe_job (id, kind, args, status) VALUES ('job_fake1', 'pulse_doctor_voice', '{"pulse_doctor_uid": "${U1}"}', 'queued');`);
     expect((await S.doctorsToBuild(WIDE, 4, 20, 10)).uids).toEqual([]);
     pg.exec(`UPDATE scribe_job SET status = 'done' WHERE id = 'job_fake1';
              INSERT INTO pulse_doctor_voice_run (pulse_doctor_uid, outcome, reason, created_at) VALUES ('${U1}', 'refused', 'low_support', now() - interval '21 hours');`);
-    expect((await S.doctorsToBuild(WIDE, 4, 20, 10)).uids).toEqual([{ uid: U1, windows: 7 }]);
+    expect((await S.doctorsToBuild(WIDE, 4, 20, 10)).uids).toEqual([{ uid: U1, windows: 8 }]);
     await S.recordDoctorVoiceRun({ uid: U1, outcome: "refused", reason: "too_few_days", windows_offered: 7, windows_embedded: 7, n_windows: 5, n_days: 1, runner_up_windows: 0, n_blind_excluded: 1 });
     expect((await S.doctorsToBuild(WIDE, 4, 20, 10)).uids).toEqual([]);
   });
