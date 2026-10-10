@@ -31,7 +31,8 @@ const { findBanned } = await import("@/lib/rubrics/engines/evr");
 const S = await import("@/lib/mcp/surface");
 
 const UID = (n: number) => `PrescUid${String(n).padStart(2, "0")}AaaaaaaaaaaaaZ`.slice(0, 24).padEnd(24, "A");
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const { FORMER_BLIND_PAIRS } = await import("../support/former-blind-pairs");
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 const warehouse: string[] = [];
 const EVEN = "docEvenAaaaaaaaaaaaaaaaaaa", ODD = "docOddAaaaaaaaaaaaaaaaaaaa"; // opaque doctor ids
 const mk = (n: number, o: Row = {}): Row => ({ unit_key: `k${n}`, unit_kind: "consult", version: "0.1.0", room_id: "r1", ist_date: "2026-10-05", score: { label: "discrepancy report", severity: "none", n_findings: 0 }, findings: [], ...o });
@@ -57,20 +58,21 @@ describe("guards", () => {
     expect(await buildBoard({ ...ARGS, from: "2026-01-01", to: "2026-10-01" })).toMatchObject({ ok: false, error: "range_too_long" });
     expect(await buildBoard({ ...ARGS, from: "2026-07-01", to: "2026-09-30" })).toMatchObject({ ok: true }); // 92 days exactly
   });
-  it("a filter naming a held-out (room, day) is refused blind_room_day before any query; the same room on another day is not", async () => {
-    expect(await buildBoard({ ...ARGS, from: BD, to: BD, room: BR })).toMatchObject({ ok: false, error: "blind_room_day" });
-    expect(statements).toEqual([]);
+  it("a filter naming a formerly held-out (room, day) is served (queried), like the same room on another day (rule lifted 10 Oct 2026)", async () => {
+    expect(BLIND_ROOM_DAYS).toHaveLength(0);
+    expect(await buildBoard({ ...ARGS, from: BD, to: BD, room: BR })).toMatchObject({ ok: true });
+    expect(statements.some((s) => /FROM rubric_result/.test(s.text))).toBe(true);
     expect(await buildBoard({ ...ARGS, from: "2026-10-01", to: "2026-10-01", room: BR })).toMatchObject({ ok: true });
   });
-  it("held-out pairs and held-out room-hour keys are excluded IN THE QUERY (all 14 pairs passed), counted apart in board_meta.n_blind_excluded", async () => {
+  it("the NOT EXISTS exclusion stays in the query but is passed EMPTY arrays (the former 14 pairs are not excluded); the count is reported in board_meta.n_blind_excluded", async () => {
     blindCount = 3;
     resultRows = [mk(1)];
     const out = await buildBoard({ ...ARGS, by: "room" });
     const q = statements.find((s) => /FROM rubric_result/.test(s.text) && !/count\(\*\)/.test(s.text))!;
     expect(q.text).toMatch(/NOT EXISTS[\s\S]*unnest[\s\S]*b\.d = rubric_result\.ist_date AND b\.r2 = rubric_result\.room_id[\s\S]*unit_kind = 'room_hour'[\s\S]*split_part/);
     expect(q.text.indexOf("NOT EXISTS")).toBeLessThan(q.text.indexOf("LIMIT"));
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([, r]) => r));
+    expect(q.values).toContainEqual([]);
+    for (const [d, r] of FORMER_BLIND_PAIRS) expect(q.values.some((v) => Array.isArray(v) && ((v as unknown[]).includes(d) || (v as unknown[]).includes(r)))).toBe(false);
     expect(out).toMatchObject({ ok: true, board_meta: { n_blind_excluded: 3 } });
   });
 });

@@ -81,6 +81,7 @@ beforeAll(() => {
       ('c8','rd3','stt_turn','w4:t2','{"start_ms":${W4 + 6000},"end_ms":${W4 + 9000},"text":"hotel","window":{"start_ms":${W4},"end_ms":${W4 + 60000}}}');
     INSERT INTO room_turn_speaker (window_id, source_ref, speaker_idx, overlap_ms, room_day_id, clinician_id, role, match_confidence, no_role_reason) VALUES
       ('w1','w1:t1',0,10000,'rd1','clin_a','clinician',0.9,NULL), ('w1','w1:t2',1,12000,'rd1',NULL,NULL,NULL,'no_match'), ('w1','w1:t3',0,10000,'rd1','clin_a','clinician',0.88,NULL),
+      ('w3','w3:t1',0,5000,'rd2','clin_c','clinician',0.85,NULL),
       ('w4','w4:t1',0,5000,'rd3','clin_b','clinician',0.8,NULL), ('w4','w4:t2',1,3000,'rd3',NULL,NULL,NULL,'no_match');
     INSERT INTO jev_window_text VALUES ('w1','rd1','English text of w1','run_english',18), ('w2','rd1',NULL,'not_ready',0), ('w3','rd2','x','native_en',1), ('w4','rd3','y','native_en',1);
     INSERT INTO room_span_emotion VALUES ('w1','dr1',0,60000,0,0,0,10000,'scored',.1,.0,.2,.0,.3,.3,.1,'happiness',.3), ('w1','dr1',0,60000,1,1,8000,20000,'skipped',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
@@ -140,18 +141,19 @@ describe.runIf(HAVE)("the readers on fixtures", () => {
     expect(await R.readAudioHour("r1", "2026-10-08", 3)).toMatchObject({ ok: false, reason: "no_data" });
     expect(await R.readAudioHour("r1; DROP TABLE x", "2026-10-08", 3)).toMatchObject({ ok: false, reason: "bad_unit_key" });
     expect(await R.readAudioHour("r1", "2026-13-40", 3)).toMatchObject({ ok: false, reason: "bad_unit_key" });
-    // the held-out pair is refused by EVERY reader, audio_state included, before any fetch; the neighbour day of the same room is not
+    // the formerly held-out pair (lifted 10 Oct 2026) is served like its neighbour day: the data is actually fetched
     statements.length = 0;
-    expect(await R.readAudioHour("room_qyzghzaf", "2026-08-23", 10)).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(statements).toEqual([]); // no query was made at all
+    expect(await R.readAudioHour("room_qyzghzaf", "2026-08-23", 10)).toMatchObject({ ok: true });
+    expect(statements.length).toBeGreaterThan(0);
     expect(await R.readAudioHour("room_qyzghzaf", "2026-08-24", 10)).toMatchObject({ ok: true });
     expect(await R.listAudioHours({ from: "2026-10-08", to: "2026-10-08", limit: 100 })).toMatchObject({ keys: ["r1:2026-10-08:10", "r1:2026-10-08:11"], truncated: false, blind_excluded: 0 });
-    expect(await R.listAudioHours({ from: "2026-08-23", to: "2026-08-24", limit: 100 })).toMatchObject({ keys: ["room_qyzghzaf:2026-08-24:10"], blind_excluded: 1 }); // the blind hour is never offered
+    expect(await R.listAudioHours({ from: "2026-08-23", to: "2026-08-24", limit: 100 })).toMatchObject({ blind_excluded: 0 });
+    expect((await R.listAudioHours({ from: "2026-08-23", to: "2026-08-24", limit: 100 })).keys).toContain("room_qyzghzaf:2026-08-24:10");
     expect(await R.listAudioHours({ rooms: ["r1"], from: "2026-10-08", to: "2026-10-08", limit: 1 })).toMatchObject({ keys: ["r1:2026-10-08:10"], truncated: true });
     expect(R.parseRoomHourKey("r1:2026-10-08:10")).toEqual({ room_id: "r1", ist_date: "2026-10-08", hour: 10 });
     expect(R.parseRoomHourKey("r1:2026-10-08:25")).toBeNull();
   });
-  it("turns: the cue timings joined to room_turn_speaker; text only when asked; the blind room-day is refused", async () => {
+  it("turns: the cue timings joined to room_turn_speaker; text only when asked; the formerly blind room-day is served", async () => {
     const R = await import("@/lib/rubrics/readers");
     const got = await R.readWindowTurns("w1");
     expect(got.ok && got.data.turns.map((t) => [t.start_ms, t.end_ms, t.speaker_idx, t.role])).toEqual([[W1, W1 + 10000, 0, "clinician"], [W1 + 8000, W1 + 20000, 1, null], [W1 + 25000, W1 + 35000, 0, "clinician"], [W1 + 40000, W1 + 42000, null, null]]);
@@ -160,42 +162,44 @@ describe.runIf(HAVE)("the readers on fixtures", () => {
     const withText = await R.readWindowTurns("w1", { includeText: true });
     expect(withText.ok && withText.data.turns.map((t) => t.text)).toEqual(["alpha", "bravo", "charlie", "delta"]);
     statements.length = 0;
-    expect(await R.readWindowTurns("w3")).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(statements.some((q) => /FROM cue|room_turn_speaker|room_diarize_window/.test(q.text))).toBe(false); // the cues were never read
+    expect(await R.readWindowTurns("w3")).toMatchObject({ ok: true });
+    expect(statements.some((q) => /FROM cue|room_turn_speaker|room_diarize_window/.test(q.text))).toBe(true); // the cues were read
     expect(await R.readWindowTurns("w4")).toMatchObject({ ok: true, data: { attributed: 2 } }); // the next day of the same room
     expect(await R.readWindowTurns("nope")).toMatchObject({ ok: false, reason: "not_found" });
   });
-  it("window_english: success sources only, text only on request, blind refused; emotion: scored spans only; stubs answer not_implemented", async () => {
+  it("window_english: success sources only, text only on request, formerly blind served; emotion: scored spans only; stubs answer not_implemented", async () => {
     const R = await import("@/lib/rubrics/readers");
     const a = await R.readWindowEnglish("w1");
     expect(a).toMatchObject({ ok: true, data: { source: "run_english", char_count: 18, english: null } });
     expect((await R.readWindowEnglish("w1", { includeText: true }) as { data: { english: string } }).data.english).toBe("English text of w1");
     expect(await R.readWindowEnglish("w2")).toMatchObject({ ok: false, reason: "no_data" });
     statements.length = 0;
-    expect(await R.readWindowEnglish("w3")).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(statements.some((q) => /jev_window_text/.test(q.text))).toBe(false);
+    expect(await R.readWindowEnglish("w3")).not.toMatchObject({ reason: "blind_room_day" });
+    expect(statements.some((q) => /jev_window_text/.test(q.text))).toBe(true);
     expect(await R.readWindowEnglish("w4")).toMatchObject({ ok: true });
     const e = await R.readWindowEmotion("w1");
     expect(e.ok && e.data.spans).toHaveLength(1);
     expect(e.ok && e.data.spans[0]).toMatchObject({ speaker_idx: 0, top_label: "happiness", scores: { happiness: 0.3 } });
     statements.length = 0;
-    expect(await R.readWindowEmotion("w3")).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(statements.some((q) => /room_span_emotion/.test(q.text))).toBe(false);
+    expect(await R.readWindowEmotion("w3")).not.toMatchObject({ reason: "blind_room_day" });
+    expect(statements.some((q) => /room_span_emotion/.test(q.text))).toBe(true);
     expect(await R.readPulseRecord("x")).toMatchObject({ ok: false, reason: "not_found" }); // S7-2: a real reader; unknown consult
   });
-  it("consult_span: the open and close, the overlapping windows with absolute times; an open consult and a blind day are refused", async () => {
+  it("consult_span: the open and close, the overlapping windows with absolute times; an open consult is refused, a formerly blind day is served", async () => {
     const R = await import("@/lib/rubrics/readers");
     const c = await R.readConsultSpan("enc1@m1");
     expect(c.ok && c.data).toMatchObject({ room_id: "r1", ist_date: "2026-10-08", t_close_ms: Date.parse(IST("10:00:30")) });
     expect(c.ok && c.data.windows).toEqual([{ window_id: "w1", abs_start_ms: Date.parse(IST("10:00:00")), abs_end_ms: Date.parse(IST("10:01:00")) }]);
     expect(await R.readConsultSpan("enc2@m1")).toMatchObject({ ok: false, reason: "no_data" });
     statements.length = 0;
-    expect(await R.readConsultSpan("enc3@m2")).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(statements.some((q) => /bench_window/.test(q.text))).toBe(false); // the windows were never looked up
+    expect(await R.readConsultSpan("enc3@m2")).toMatchObject({ ok: true });
+    expect(statements.some((q) => /bench_window/.test(q.text))).toBe(true); // the windows were looked up
     expect(await R.readConsultSpan("enc4@m2")).toMatchObject({ ok: true, data: { room_id: "room_qyzghzaf", ist_date: "2026-08-24" } });
     expect(await R.readConsultSpan("nope")).toMatchObject({ ok: false, reason: "not_found" });
     expect(await R.listConsultKeys({ from: "2026-10-08", to: "2026-10-08", limit: 10 })).toEqual({ keys: ["enc1@m1"], truncated: false, blind_excluded: 0 });
-    expect(await R.listConsultKeys({ from: "2026-08-23", to: "2026-08-24", limit: 10 })).toEqual({ keys: ["enc4@m2"], truncated: false, blind_excluded: 1 });
+    const wideKeys = await R.listConsultKeys({ from: "2026-08-23", to: "2026-08-24", limit: 10 });
+    expect(wideKeys).toMatchObject({ truncated: false, blind_excluded: 0 });
+    expect([...wideKeys.keys].sort()).toEqual(["enc3@m2", "enc4@m2"]);
   });
 });
 
@@ -232,22 +236,22 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
 
   it("rubric_run on room_mic_quality (a draft: lab:true + explicit units): results in Neon with the right numbers, evidence in R2, a skipped unit with its reason, the run row closed", async () => {
     const { job, steps } = await runJob("rubric_run", { rubric_id: "room_mic_quality", lab: true, unit_keys: ["r1:2026-10-08:10", "r1:2026-10-08:11", "room_qyzghzaf:2026-08-24:10", "r1:2026-10-08:03", "room_qyzghzaf:2026-08-23:10"] });
-    expect(job).toMatchObject({ status: "done", result: { rubric_id: "room_mic_quality", version: "0.1.0", units_planned: 5, ok: 3, failed: 0, skipped: 2, blind_room_days: 1 } });
+    expect(job).toMatchObject({ status: "done", result: { rubric_id: "room_mic_quality", version: "0.1.0", units_planned: 5, ok: 4, failed: 0, skipped: 1, blind_room_days: 0 } });
     expect(steps).toEqual(["resolve", "evaluate", "finish"]);
     const rows = (await pg.sql`SELECT unit_key, status, score, findings, lab, room_id, ist_date::text AS d FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
     const by = Object.fromEntries(rows.map((r) => [r.unit_key, r]));
     expect(by["r1:2026-10-08:10"]).toMatchObject({ status: "ok", lab: true, room_id: "r1", d: "2026-10-08", findings: ["muted", "clipping"], score: { recorded_min: 50, muted_min: 10, speech_min: 50 } });
     expect(by["r1:2026-10-08:11"].findings).toEqual(["low_recording", "off", "no_speech"]);
     expect(by["room_qyzghzaf:2026-08-24:10"].findings).toEqual(["low_recording", "dead"]); // the NEXT day of the held-out room is scored
-    expect(by["room_qyzghzaf:2026-08-23:10"]).toBeUndefined(); // the held-out pair: no row, no evidence
-    expect([...mem.keys()].some((k) => k.includes("2026-08-23"))).toBe(false);
+    expect(by["room_qyzghzaf:2026-08-23:10"]).toMatchObject({ status: "ok", room_id: "room_qyzghzaf" }); // the formerly held-out pair is scored: a row and its evidence
+    expect([...mem.keys()].some((k) => k.includes("2026-08-23"))).toBe(true);
     expect(by["r1:2026-10-08:03"]).toMatchObject({ status: "skipped", score: { reason: "no_audio_state" } });
     const ev = JSON.parse(mem.get("rubric/room_mic_quality/0.1.0/r1:2026-10-08:10.json")!);
     expect(ev).toMatchObject({ rubric_id: "room_mic_quality", unit_key: "r1:2026-10-08:10", lab: true, status: "ok", score: { recorded_min: 50 } });
     expect(by["r1:2026-10-08:10"].score.evidence_key).toBe("rubric/room_mic_quality/0.1.0/r1:2026-10-08:10.json");
     expect(mem.has("rubric/room_mic_quality/0.1.0/r1:2026-10-08:03.json")).toBe(false); // a skipped unit has no evidence
     const run = (await pg.sql`SELECT kind, units_planned, units_ok, units_failed, finished_at FROM rubric_run`)[0] as Record<string, any>;
-    expect(run).toMatchObject({ kind: "run", units_planned: 5, units_ok: 3, units_failed: 0 });
+    expect(run).toMatchObject({ kind: "run", units_planned: 5, units_ok: 4, units_failed: 0 });
     expect(run.finished_at).not.toBeNull();
     // a rerun REPLACES the result (unique key), it does not add a row
     await runJob("rubric_run", { rubric_id: "room_mic_quality", lab: true, unit_keys: ["r1:2026-10-08:10"] });
@@ -256,41 +260,38 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     expect(JSON.stringify(await pg.sql`SELECT * FROM rubric_result`)).not.toMatch(/alpha|bravo|charlie/);
   });
 
-  it("rubric_run on talk_time windows: the numbers from the fixture, blind room-day and missing diarization skipped with their reasons, never failed", async () => {
+  it("rubric_run on talk_time windows: the numbers from the fixture, formerly blind room-day scored, missing diarization skipped with their reasons, never failed", async () => {
     const { job } = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "window", unit_keys: ["w1", "w2", "w3", "w4", "nope"] });
-    expect(job).toMatchObject({ status: "done", result: { ok: 2, failed: 0, skipped: 3, blind_room_days: 1 } });
+    expect(job).toMatchObject({ status: "done", result: { ok: 3, failed: 0, skipped: 2, blind_room_days: 0 } });
     const rows = (await pg.sql`SELECT unit_key, status, score, room_id FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
     const by = Object.fromEntries(rows.map((r) => [r.unit_key, r]));
     expect(by.w1).toMatchObject({ status: "ok", room_id: "r1", score: { doctor_talk_ms: 20000, other_talk_ms: 12000, doctor_share: 0.625, interruptions: 1, overlap_ms: 2000, longest_monologue_ms: 12000, speakers: 2 } });
     expect(by.w2.score.reason).toBe("no_diarization"); // w2 has a turn cue but no room_turn_speaker row: nobody attributed
-    expect(by.w3).toBeUndefined(); // held-out: nothing written
+    expect(by.w3).toMatchObject({ status: "ok" }); // formerly held-out: scored and written
     expect(by.w4).toMatchObject({ status: "ok", room_id: "room_qyzghzaf", score: { doctor_talk_ms: 5000, other_talk_ms: 3000 } });
     expect(by.nope).toBeUndefined(); // no such window: its room and date are unknown, so NO row is written (counted as unresolved)
     expect(job.result.unresolved).toBe(1);
   });
 
-  it("rubric_run on talk_time consults: the turns of the overlapping windows clipped to the span; a blind consult is skipped", async () => {
+  it("rubric_run on talk_time consults: the turns of the overlapping windows clipped to the span; a formerly blind consult is scored", async () => {
     const { job } = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "consult", unit_keys: ["enc1@m1", "enc3@m2", "enc2@m1"] });
-    expect(job).toMatchObject({ status: "done", result: { ok: 1, skipped: 2, blind_room_days: 1 } });
+    expect(job).toMatchObject({ status: "done", result: { ok: 2, skipped: 1, blind_room_days: 0 } });
     const r = (await pg.sql`SELECT unit_key, status, score FROM rubric_result WHERE unit_key = 'enc1@m1'`)[0] as Record<string, any>;
     expect(r).toMatchObject({ status: "ok", score: { span_ms: 30000, doctor_talk_ms: 15000, other_talk_ms: 12000, interruptions: 1 } });
-    expect(await pg.sql`SELECT 1 FROM rubric_result WHERE unit_key = 'enc3@m2'`).toEqual([]);
+    expect((await pg.sql`SELECT 1 FROM rubric_result WHERE unit_key = 'enc3@m2'`).length).toBe(1);
   });
 
-  it("the WRITERS refuse the held-out set too: upsertResult and writeEvidence throw blind_room_day before any statement or put, by columns or by a room-hour key", async () => {
+  it("the WRITERS accept the formerly held-out pair: upsertResult and writeEvidence write by columns or by a room-hour key (nothing throws)", async () => {
     const St = await import("@/lib/rubrics/store");
-    const { BlindRoomDayError } = await import("@/lib/rubrics/blind-room-days");
     const base = { rubric_id: "room_mic_quality", version: "0.1.0", unit_kind: "room_hour", run_id: "rub_x", status: "ok" as const, score: { a: 1 }, findings: [], lab: true };
-    statements.length = 0;
-    await expect(St.upsertResult({ ...base, unit_key: "k", room_id: "room_ux92qpws", ist_date: "2026-09-13" })).rejects.toThrow(BlindRoomDayError);
-    await expect(St.upsertResult({ ...base, unit_key: "room_ux92qpws:2026-09-13:10", room_id: null, ist_date: null })).rejects.toThrow(BlindRoomDayError); // the pair is in the key
-    await expect(St.writeEvidence("room_mic_quality", "0.1.0", "k", {}, { room_id: "room_ux92qpws", ist_date: "2026-09-13" })).rejects.toThrow(BlindRoomDayError);
-    await expect(St.writeEvidence("room_mic_quality", "0.1.0", "room_ux92qpws:2026-09-13:10", {})).rejects.toThrow(BlindRoomDayError);
-    expect(statements).toEqual([]);
-    expect(mem.size).toBe(0);
     await pg.sql`INSERT INTO rubric_run (run_id, rubric_id, version, kind) VALUES ('rub_x', 'room_mic_quality', '0.1.0', 'run')`;
-    await St.upsertResult({ ...base, unit_key: "room_ux92qpws:2026-09-12:10", room_id: "room_ux92qpws", ist_date: "2026-09-12" }); // the day before: fine
-    expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(1);
+    await St.upsertResult({ ...base, unit_key: "k", room_id: "room_ux92qpws", ist_date: "2026-09-13" });
+    await St.upsertResult({ ...base, unit_key: "room_ux92qpws:2026-09-13:10", room_id: null, ist_date: null });
+    await St.writeEvidence("room_mic_quality", "0.1.0", "k", {}, { room_id: "room_ux92qpws", ist_date: "2026-09-13" });
+    await St.writeEvidence("room_mic_quality", "0.1.0", "room_ux92qpws:2026-09-13:10", {});
+    await St.upsertResult({ ...base, unit_key: "room_ux92qpws:2026-09-12:10", room_id: "room_ux92qpws", ist_date: "2026-09-12" }); // the day before, as before
+    expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(3);
+    expect(mem.size).toBeGreaterThan(0);
   });
 
   it("G56 — the consult frame is ABSOLUTE epoch ms: the covering window is found although its session began two hours earlier; a session-relative frame would find none (this test fails if it comes back)", async () => {
@@ -336,14 +337,14 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     expect(await pg.sql`SELECT 1 FROM rubric_result`).toEqual([]);
   });
 
-  it("G52 — the talk_time window listing excludes held-out windows in the query and reports blind_excluded", async () => {
+  it("G52 — the talk_time window listing lists the formerly held-out windows too, blind_excluded 0", async () => {
     const { resolveUnits } = await import("@/lib/rubrics/engines");
     const { getRubric } = await import("@/lib/rubrics/registry");
     const plan = await resolveUnits(getRubric("talk_time")!, "window", { rooms: ["room_qyzghzaf"], from: "2026-08-23", to: "2026-08-24", limit: 10 });
-    expect(plan).toEqual({ keys: ["w4"], truncated: false, blind_excluded: 1 });
+    expect(plan).toEqual({ keys: ["w3", "w4"], truncated: false, blind_excluded: 0 });
     const wide = await resolveUnits(getRubric("talk_time")!, "window", { from: "2026-08-23", to: "2026-09-22", limit: 10 }); // no room filter: every room, 31 days
-    expect(wide).toMatchObject({ keys: ["w4"], blind_excluded: 1 });
-    expect(await resolveUnits(getRubric("talk_time")!, "window", { rooms: ["room_qyzghzaf"], from: "2026-08-23", to: "2026-08-24", limit: 1 })).toEqual({ keys: ["w4"], truncated: false, blind_excluded: 1 }); // the limit counts real units only
+    expect(wide).toMatchObject({ keys: ["w3", "w4"], blind_excluded: 0 });
+    expect(await resolveUnits(getRubric("talk_time")!, "window", { rooms: ["room_qyzghzaf"], from: "2026-08-23", to: "2026-08-24", limit: 1 })).toMatchObject({ keys: ["w3"], truncated: true, blind_excluded: 0 });
   });
 
   it("G55 mirror — the fixture table carries the real 0085 CHECKs: a clinician row needs an id and a confidence, an identity needs the claim, a role-less row needs a reason", () => {
@@ -407,15 +408,15 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     expect(rows.map((r) => r.unit_key)).toEqual(["n_ok"]);
   });
 
-  it("S7-1 consult_text: the speaker lines of a consult from the turns of its windows (t from the open, doctor / other / unknown), blind refused before any text query; llm rubric_run + rubric_bench through the real runner with a fake model", async () => {
+  it("S7-1 consult_text: the speaker lines of a consult from the turns of its windows (t from the open, doctor / other / unknown), formerly blind served; llm rubric_run + rubric_bench through the real runner with a fake model", async () => {
     const R = await import("@/lib/rubrics/readers");
     const LLM = await import("@/lib/rubrics/llm");
     const t = await R.readConsultText("enc1@m1");
     expect(t.ok && t.data.source).toBe("window_english");
     expect(t.ok && t.data.lines.map((l) => [l.t_ms, l.speaker, l.text])).toEqual([[0, "doctor", "alpha"], [8000, "other", "bravo"], [25000, "doctor", "charlie"]]); // delta (40 s) is after the close; the unknown turn would read "unknown"
     statements.length = 0;
-    expect(await R.readConsultText("enc3@m2")).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(statements.some((q) => /cue|jev_window_text/.test(q.text))).toBe(false);
+    expect(await R.readConsultText("enc3@m2")).toMatchObject({ ok: true });
+    expect(statements.some((q) => /cue|jev_window_text/.test(q.text))).toBe(true);
     expect(await R.readConsultText("enc2@m1")).toMatchObject({ ok: false }); // open consult
     expect(await R.readConsultText("nope")).toMatchObject({ ok: false, reason: "not_found" });
 
@@ -425,15 +426,15 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify(good), model: "fake/model", latency_ms: 1 }; });
     try {
       const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
-      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "consult_chair_affect", version: "1.1.0", ok: 1, skipped: 2, blind_room_days: 1 } });
-      expect(calls).toBe(1); // the blind consult and the unknown key never reached the model
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "consult_chair_affect", version: "1.1.0", ok: 2, skipped: 1, blind_room_days: 0 } });
+      expect(calls).toBe(2); // the formerly blind consult reached the model like enc1; the unknown key did not
       const rows = (await pg.sql`SELECT unit_key, status, score, findings, lab FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
-      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]); // no row without a room and date; none for the blind day
+      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1", "enc3@m2"]); // no row without a room and date; one for the formerly blind day
       expect(rows[0]).toMatchObject({ status: "ok", lab: true, score: { distress: "low", uptake_codes: ["accept"] } });
       expect(JSON.stringify(rows)).not.toMatch(/alpha|bravo|charlie/); // no transcript text in the table
       const evKey = `rubric/consult_chair_affect/1.1.0/${"enc1@m1"}.json`; // (built, so no literal reads as an email address)
       expect(JSON.parse(mem.get(evKey)!).quotes ?? JSON.parse(mem.get(evKey)!).evidence.quotes.length).toBeTruthy();
-      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
+      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(true); // its evidence is stored
 
       // bench: gold from the lab store (JSONL), Meet text from the lab store, no rubric_result rows
       mem.set("rubric/bench/consult_chair_affect/gold.jsonl", [{ unit_key: "m001", expected: { distress: "low", uptake_codes: ["accept"] } }, { unit_key: "m002", expected: { distress: "high" } }].map((x) => JSON.stringify(x)).join("\n") + "\n");
@@ -616,7 +617,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     }
   });
 
-  it("S71-R5 Q2 — a row carrying BOTH room_id and room_ids is checked against the UNION: a blind room_id with clean room_ids is blind_room_day, 0 reads, 0 calls", async () => {
+  it("S71-R5 Q2 — a row carrying BOTH room_id and room_ids is checked against the UNION: the formerly blind room_id with clean room_ids is scored: 1 call", async () => {
     const LLM = await import("@/lib/rubrics/llm");
     let calls = 0;
     LLM.setRubricChatForTests(async () => { calls++; return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
@@ -625,35 +626,35 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       mem.set("rubric/bench/consult_surgical_pitch/human_v.jsonl", rows);
       mem.set("rubric/bench/consult_surgical_pitch/text/hv-q2.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "No-op needed." }] }));
       const b = await runJob("rubric_bench", { rubric_id: "consult_surgical_pitch", set: "human_v" });
-      expect(b.job).toMatchObject({ status: "done", result: { n: 1, unscored: 1 } });
-      expect(calls).toBe(0);
+      expect(b.job).toMatchObject({ status: "done", result: { n: 1, unscored: 0 } });
+      expect(calls).toBe(1);
     } finally {
       LLM.setRubricChatForTests(null);
     }
   });
 
-  it("S7-2 encounter_vs_record through the real runner: record (fake warehouse) vs tape (fake model) -> a discrepancy report; blind skipped before the warehouse; read-only; evr_perturb bench selects its windows at run time", async () => {
+  it("S7-2 encounter_vs_record through the real runner: record (fake warehouse) vs tape (fake model) -> a discrepancy report; formerly blind consult served; read-only; evr_perturb bench selects its windows at run time", async () => {
     const LLM = await import("@/lib/rubrics/llm");
     const REC = await import("@/lib/rubrics/evr/record");
     await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc1AaaaaaaaaaaZ', warehouse_prescription_uid = 'recA' WHERE consult_key = 'enc1@m1'`;
     await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc3AaaaaaaaaaaZ', warehouse_prescription_uid = 'recB' WHERE consult_key = 'enc3@m2'`;
     const queries: string[] = [];
-    REC.setMetabaseForTests(async (q) => { queries.push(q); return [{ rec_uid: "recA", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [
-      { generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }, { generic_name: "Warfarin", strength: "5 mg", frequency: "OD" }], investigations: [], refer_to: [], advice: [] }]; });
-    LLM.setRubricChatForTests(async () => ({ content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "250 mg", freq: "twice a day", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }));
+    REC.setMetabaseForTests(async (q) => { queries.push(q); const rec = (uid: string) => ({ rec_uid: uid, uploaded_at: uid === "recB" ? "2026-08-23T10:00:00Z" : "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [
+      { generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }, { generic_name: "Warfarin", strength: "5 mg", frequency: "OD" }], investigations: [], refer_to: [], advice: [] }); return [rec("recA"), rec("recB")]; });
+    LLM.setRubricChatForTests(async (req: unknown) => ({ content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "250 mg", freq: "twice a day", quote: JSON.stringify(req).includes("foxtrot") ? "foxtrot" : "alpha" }] }), model: "fake/model", latency_ms: 1 }));
     try {
       const run = await runJob("rubric_run", { rubric_id: "encounter_vs_record", lab: true, unit_keys: ["enc1@m1", "enc3@m2", "nope"] });
-      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "encounter_vs_record", ok: 1, skipped: 2, blind_room_days: 1 } });
-      expect(queries).toHaveLength(1); // the blind consult never reached the warehouse
+      expect(run.job).toMatchObject({ status: "done", result: { rubric_id: "encounter_vs_record", ok: 2, skipped: 1, blind_room_days: 0 } });
+      expect(queries).toHaveLength(2); // the formerly blind consult reached the warehouse too
       expect(queries[0]).toMatch(/^SELECT /);
       const rows = (await pg.sql`SELECT unit_key, status, score, findings FROM rubric_result`) as Array<Record<string, any>>;
-      expect(rows.map((r) => r.unit_key)).toEqual(["enc1@m1"]);
-      expect(rows[0]).toMatchObject({ status: "ok", score: { label: "discrepancy report", severity: "obvious", n_findings: 2 } });
-      expect(rows[0].findings).toEqual(["obvious:in_record_not_said:drug", "obvious:value_mismatch:dose"]);
+      expect(rows.map((r) => r.unit_key).sort()).toEqual(["enc1@m1", "enc3@m2"]);
+      expect(rows.find((r) => r.unit_key === "enc1@m1")).toMatchObject({ status: "ok", score: { label: "discrepancy report", severity: "obvious", n_findings: 2 } });
+      expect(rows.find((r) => r.unit_key === "enc1@m1")!.findings).toEqual(["obvious:in_record_not_said:drug", "obvious:value_mismatch:dose"]);
       expect(JSON.stringify(rows)).not.toMatch(/Warfarin|Alphamox|alpha/); // no record or tape text in the table
       const ev = JSON.parse(mem.get(`rubric/encounter_vs_record/0.1.0/${"enc1@m1"}.json`)!);
       expect(JSON.stringify(ev)).toContain("no support found");
-      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(false);
+      expect([...mem.keys()].some((k) => k.includes("enc3"))).toBe(true);
       // evr_perturb: the file holds a header only; the windows are selected in the job (enc1@m1 qualifies; the open and the blind consults do not)
       mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", JSON.stringify({ header: { selection: "closed windows from 2026-10-02 with a prescription uid, not held out, with a stored transcript; md5 order by seed", seed: 5, n_windows: 40 } }) + "\n");
       queries.length = 0;
@@ -666,13 +667,14 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(rep.baseline_flag_rate.obvious).toBe(1); // the original holds the unsupported Warfarin: reported as a flag rate, not as a label
       expect(rep.note).toMatch(/NOT negatives/);
       expect(JSON.stringify(rep)).not.toMatch(/Warfarin|Alphamox/);
-      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(1); // the bench wrote no result row
-      // an EXPLICIT blind unit_key row (R2): refused blind_room_day, counted, and the warehouse is never asked for it
+      expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(2); // the bench wrote no result row (still the 2 from the run)
+      // an EXPLICIT formerly-blind unit_key row (R2): served like any, the warehouse is asked for it
       mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, { unit_key: "enc1@m1" }, { unit_key: "enc3@m2" }].map((x) => JSON.stringify(x)).join("\n") + "\n");
       queries.length = 0;
       const bb = await runJob("rubric_bench", { rubric_id: "encounter_vs_record", set: "evr_perturb" });
-      expect(bb.job).toMatchObject({ status: "done", result: { n: 1, windows_skipped: { blind_room_day: 1 } } });
-      expect(queries).toHaveLength(1); // enc1 only
+      expect(bb.job).toMatchObject({ status: "done", result: { n: 2 } });
+      expect(queries.length).toBe(2); // enc1 and the formerly blind enc3 both reach the warehouse
+      expect((bb.job.result.windows_skipped ?? {}).blind_room_day ?? 0).toBe(0);
       // evr_perturb is for encounter_vs_record only
       const { KIND_BY_NAME } = await import("@/lib/jobs/kinds");
       expect(() => KIND_BY_NAME.get("rubric_bench")!.parseArgs({ rubric_id: "consult_surgical_pitch", set: "evr_perturb" })).toThrow();
@@ -1012,7 +1014,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       }
     });
 
-    it("a held-out consult is refused BEFORE the index or R2 is touched", async () => {
+    it("a formerly held-out consult is read like any other: the index and the store are consulted", async () => {
       const L = await import("@/lib/sarvam-lab");
       const spy = vi.fn();
       L.setLabStoreForTests({ get: async (k) => { spy(k); return null; }, put: async () => "ok", list: async () => [] });
@@ -1021,9 +1023,8 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
         statements.length = 0;
         const { readConsultText } = await import("@/lib/rubrics/readers/consult-text");
         const t = await readConsultText("enc3@m2", {});
-        expect(t).toMatchObject({ ok: false, reason: "blind_room_day" });
-        expect(statements.some((q) => /reb_track_index/.test(q.text))).toBe(false);
-        expect(spy).not.toHaveBeenCalled();
+        expect(t).toMatchObject({ ok: true });
+        expect(statements.some((q) => /reb_track_index/.test(q.text))).toBe(true);
       } finally {
         L.setLabStoreForTests({ get: async (k) => (mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null), put: async (k, b) => { mem.set(k, b); return "ok"; }, list: async (p) => [...mem.keys()].filter((k) => k.startsWith(p)) });
       }
@@ -1152,8 +1153,8 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(out.groups).toEqual([{ group: "docBoardOpaqueAaaaaaaaaa", version: "0.1.0", n_units: 1, below_min_n: true }]);
       const wide = await buildBoard({ rubric_id: "encounter_vs_record", from: "2026-08-01", to: "2026-10-31", lab: true, by: "room", min_n: 3 });
       if (!wide.ok) throw new Error(JSON.stringify(wide));
-      expect(wide.board_meta).toMatchObject({ n_rows: 2, n_blind_excluded: 1 }); // enc1 and encZ; the held-out row is excluded in SQL and counted
-      expect(wide.groups.map((g) => g.group)).toEqual(["r1"]);
+      expect(wide.board_meta).toMatchObject({ n_rows: 3, n_blind_excluded: 0 }); // enc1, encZ and the formerly held-out row: nothing is excluded
+      expect(wide.groups.map((g) => g.group)).toEqual(["r1", "room_qyzghzaf"]);
     } finally {
       REC.setMetabaseForTests(null);
       await pg.exec(`DELETE FROM rubric_result; DELETE FROM rubric_run;`);

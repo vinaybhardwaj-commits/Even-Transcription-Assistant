@@ -186,7 +186,7 @@ describe("consult_surgical_pitch", () => {
   });
 });
 
-describe("gates: lab only, blind room-days, bench wiring", () => {
+describe("gates: lab only, blind room-days (lifted), bench wiring", () => {
   it("draft llm rubrics run only with lab:true and only for the consult unit; the other llm rubrics stay unwired", () => {
     expect(canRun(affect, { lab: false })).toMatchObject({ error: "lab_required" });
     expect(canRun(affect, { lab: true, unit: "consult" })).toBeNull();
@@ -194,15 +194,14 @@ describe("gates: lab only, blind room-days, bench wiring", () => {
     expect(canRun(getRubric("care_sentiment")!, { lab: true })).toMatchObject({ error: "engine_not_available" });
     expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true })).toMatchObject({ error: "engine_not_available" });
   });
-  it("a consult in a held-out room-day is skipped blind_room_day BEFORE its text is read or a model is called", async () => {
+  it("a consult in a formerly held-out room-day is NOT skipped blind_room_day (rule lifted 10 Oct 2026): its text is read", async () => {
     let called = 0;
     L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
     consultRows = [{ room_id: "room_qyzghzaf", ist_date: "2026-09-15" }];
     queries.length = 0;
     const out = await evaluateUnit(affect, "consult", "enc_x");
-    expect(out).toMatchObject({ status: "skipped", reason: "blind_room_day", room_id: "room_qyzghzaf" });
-    expect(called).toBe(0);
-    expect(queries.some((q) => /jev_window_text|stt_turn|cue/.test(q))).toBe(false);
+    expect(out).not.toMatchObject({ reason: "blind_room_day" });
+    expect(queries.length).toBeGreaterThan(1); // past the pair lookup: the consult text was queried
   });
   it("an unknown consult key is skipped in a normal run, but in a bench it reads the Meet text from the lab store (no room, no model call without text)", async () => {
     let called = 0;
@@ -283,17 +282,17 @@ describe("S71-E G69 — an excerpt unit is bench-only", () => {
 describe("S71-R4 G70 — an excerpt is placed and meets the held-out check before any read or model call", () => {
   const BLIND = (() => { const [d, r] = ["2026-09-23", "room_4ggnkg5x"]; return { d, r }; })();
   const spyReads = () => vi.spyOn(Map.prototype, "has");
-  it("an excerpt placed on a blind (room, date) is skipped blind_room_day with 0 lab-store reads and 0 model calls", async () => {
+  it("an excerpt placed on a formerly blind (room, date) is scored like any other: lab-store read and 1 model call", async () => {
     let called = 0;
     L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
     store.set("rubric/bench/consult_chair_affect/text/hv-b.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
     const reads = spyReads();
     reads.mockClear();
     const out = await evaluateUnit(affect, "consult", "hv-b", { excerpt: true, bench: true, room_id: BLIND.r, ist_date: BLIND.d });
-    expect(out).toMatchObject({ status: "skipped", reason: "blind_room_day", room_id: BLIND.r, ist_date: BLIND.d });
-    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-b"))).toBe(false);
+    expect(out).toMatchObject({ status: "ok" });
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-b"))).toBe(true);
     reads.mockRestore();
-    expect(called).toBe(0);
+    expect(called).toBe(1);
   });
   it("an excerpt with no room, no date or a malformed one is refused excerpt_unplaced: 0 reads, 0 calls; a placed, not-blind one is scored", async () => {
     let called = 0;
@@ -312,42 +311,41 @@ describe("S71-R4 G70 — an excerpt is placed and meets the held-out check befor
   });
 });
 
-describe("S71-R4b — an excerpt may name several candidate rooms: blind if ANY candidate is blind", () => {
-  it("room_ids: one blind candidate refuses with 0 store reads and 0 model calls; all clear is scored; a bad candidate is unplaced; room_id alone still works; parseBenchSet keeps the list", async () => {
+describe("S71-R4b — an excerpt may name several candidate rooms: a formerly blind candidate does not refuse", () => {
+  it("room_ids: a formerly blind candidate is scored in either order; a bad candidate is unplaced; room_id alone still works; parseBenchSet keeps the list", async () => {
     let called = 0;
     L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
     store.set("rubric/bench/consult_chair_affect/text/hv-m.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
     const reads = vi.spyOn(Map.prototype, "has");
     reads.mockClear();
     const date = "2026-09-23"; // 4ggnkg5x is held out on this date; r1 is not
-    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "room_4ggnkg5x"], ist_date: date })).toMatchObject({ status: "skipped", reason: "blind_room_day" });
-    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["room_4ggnkg5x", "r1"], ist_date: date })).toMatchObject({ status: "skipped", reason: "blind_room_day" }); // order does not matter
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "room_4ggnkg5x"], ist_date: date })).toMatchObject({ status: "ok" });
+    expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["room_4ggnkg5x", "r1"], ist_date: date })).toMatchObject({ status: "ok" }); // order does not matter
     expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "bad room!"], ist_date: date })).toMatchObject({ status: "skipped", reason: "excerpt_unplaced" });
     expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: [], ist_date: date })).toMatchObject({ status: "skipped", reason: "excerpt_unplaced" });
-    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-m"))).toBe(false);
     reads.mockRestore();
-    expect(called).toBe(0);
+    expect(called).toBe(2);
     expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_ids: ["r1", "r2"], ist_date: date })).toMatchObject({ status: "ok" });
     expect(await evaluateUnit(affect, "consult", "hv-m", { excerpt: true, bench: true, room_id: "r1", ist_date: date })).toMatchObject({ status: "ok" });
-    expect(called).toBe(2);
+    expect(called).toBe(4);
     const { parseBenchSet } = await import("@/lib/rubrics/bench");
     expect(parseBenchSet({ unit: "consult", items: [{ unit_key: "k", room_ids: ["a", "b"], ist_date: "2026-10-08", expected: { x: 1 } }] })!.items[0]).toMatchObject({ room_ids: ["a", "b"], ist_date: "2026-10-08" });
   });
 });
 
-describe("S71-R5 Q2 — room_id and room_ids are checked as a UNION", () => {
-  it("a blind room_id with clean room_ids is blind_room_day with 0 store reads and 0 model calls; neither field replaces the other", async () => {
+describe("S71-R5 Q2 — room_id and room_ids are a UNION, and a formerly blind one in either field is served", () => {
+  it("a formerly blind room_id or room_ids entry is scored, not skipped; the store is read", async () => {
     let called = 0;
     L.setRubricChatForTests(async () => { called++; return answer(AFFECT_OK); });
     store.set("rubric/bench/consult_chair_affect/text/hv-q2.json", JSON.stringify({ lines: [{ t_s: 0, speaker: "unknown", text: "He advised for surgery." }] }));
     const reads = vi.spyOn(Map.prototype, "has");
     reads.mockClear();
     for (const o of [{ room_id: "room_4ggnkg5x", room_ids: ["r1", "r2"] }, { room_id: "r1", room_ids: ["r2", "room_4ggnkg5x"] }]) {
-      expect(await evaluateUnit(affect, "consult", "hv-q2", { excerpt: true, bench: true, ist_date: "2026-09-23", ...o }), JSON.stringify(o)).toMatchObject({ status: "skipped", reason: "blind_room_day" });
+      expect(await evaluateUnit(affect, "consult", "hv-q2", { excerpt: true, bench: true, ist_date: "2026-09-23", ...o }), JSON.stringify(o)).toMatchObject({ status: "ok" });
     }
-    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-q2"))).toBe(false);
+    expect(reads.mock.calls.some((c) => String(c[0]).includes("hv-q2"))).toBe(true);
     reads.mockRestore();
-    expect(called).toBe(0);
+    expect(called).toBe(2);
     expect(await evaluateUnit(affect, "consult", "hv-q2", { excerpt: true, bench: true, ist_date: "2026-09-23", room_id: "r1", room_ids: ["r2"] })).toMatchObject({ status: "ok" });
   });
 });

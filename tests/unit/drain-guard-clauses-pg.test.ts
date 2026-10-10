@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS } from "../support/former-blind-pairs";
 
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v), { transaction: async () => [] }) }));
@@ -15,7 +15,7 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 300_000 });
 
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-drain-guard-clauses");
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 const addDay = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 const PREV = addDay(BD, -1), NEXT = addDay(BD, 1), CLEAN_DAY = "2026-10-05";
 const ist = (d: string, hhmm: string) => new Date(Date.parse(`${d}T${hhmm}:00+05:30`)).toISOString();
@@ -53,8 +53,10 @@ beforeAll(() => {
 afterAll(() => { if (HAVE) pg.stop(); });
 
 (HAVE ? describe : describe.skip)("blindWindowIds: every clause alone", () => {
-  it("holds out exactly the windows only one clause each can catch, and keeps the neighbours of the held-out day", async () => {
+  it("holds out nothing: the formerly held-out windows (and their neighbours) are all served", async () => {
     const { blindWindowIds } = await import("@/lib/room-access/check");
-    expect((await blindWindowIds()).sort()).toEqual(["w_bd", "w_cross", "w_emo", "w_rts", "w_sib", "w_sibrts", "w_txt"]);
+    expect(await blindWindowIds()).toEqual([]); // lifted 10 Oct 2026: nothing is held out, every clause is a no-op
+    const { windowsBlindAny } = await import("@/lib/room-access/check");
+    expect([...(await windowsBlindAny(["w_rts", "w_txt", "w_emo", "w_sib", "w_sibrts", "w_cross", "w_bd", "w_ok", "w_prev", "w_next"]))]).toEqual([]);
   });
 });

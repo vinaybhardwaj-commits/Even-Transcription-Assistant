@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { JOIN_MAX_MS } from "@/lib/bench-join";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS as BLIND_ROOM_DAYS } from "../support/former-blind-pairs";
 
 const H = vi.hoisted(() => ({
   statements: [] as string[],
@@ -70,11 +70,11 @@ beforeEach(() => {
 });
 
 describe("the seam's blind guard", () => {
-  it("a. refuses a blind window: no service call, no UPDATE", async () => {
+  it("a. a window on a formerly blind pair is joined like any clear window", async () => {
     H.lookup = "blind";
-    expect(await seam()).toEqual({ ok: false, error: "blind_room_day" });
-    expect(H.joinCalls).toBe(0);
-    expect(updates()).toEqual([]);
+    expect(await seam()).toEqual({ ok: true, key: "clips/sess_1/w1.webm" });
+    expect(H.joinCalls).toBe(1);
+    expect(updates().length).toBe(1);
   });
 
   it.each(["throws", "null_day", "no_row"] as const)("b. fails closed on %s", async (mode) => {

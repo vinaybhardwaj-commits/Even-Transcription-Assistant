@@ -45,27 +45,27 @@ beforeAll(() => {
 afterAll(() => { if (HAVE) pg.stop(); });
 
 describe.runIf(HAVE)("voice console on real postgres", () => {
-  it("overview: the real SQL runs; counts, percentiles, generations, centroid counts, matches and losses are right; the held-out and unplaced turns are excluded and counted", async () => {
+  it("overview: the real SQL runs; counts, percentiles, generations, centroid counts, matches and losses are right; the formerly held-out turns count like any other, the unplaced turn is excluded and counted", async () => {
     const C = await import("@/lib/voice-console");
     const o = await C.consoleOverview() as { clinicians: Array<Record<string, any>>; summary: Record<string, number>; n_blind_excluded: number; n_unplaced_excluded: number };
     expect(o.summary).toEqual({ total: 3, matchable: 2 });
     const a = o.clinicians.find((x) => x.clinician_id === "docA")!, b = o.clinicians.find((x) => x.clinician_id === "docB")!;
     expect(a).toMatchObject({ samples: { enrollment: 2, enrollment_included: 1, passive: 3, passive_included: 2 }, passive_match_confidence: { p10: 0.72, p50: 0.8, p90: 0.88 },
-      generations: { count: 2, latest_generation: 2, latest_origin: "room_audio" }, centroids: [{ domain: "room_primary", active: 1, retired: 1 }], n_matched_30d: 4, n_lost_30d: 1 });
-    expect(b).toMatchObject({ matchable: false, clinician_status: "disabled", n_matched_30d: 1, n_lost_30d: 1 });
-    expect(o.n_blind_excluded).toBe(2); // b1, b2 on a held-out pair
+      generations: { count: 2, latest_generation: 2, latest_origin: "room_audio" }, centroids: [{ domain: "room_primary", active: 1, retired: 1 }], n_matched_30d: 6, n_lost_30d: 1 }); // t1-t4 plus the formerly blind b1, b2
+    expect(b).toMatchObject({ matchable: false, clinician_status: "disabled", n_matched_30d: 1, n_lost_30d: 2 });
+    expect(o.n_blind_excluded).toBe(0); // b1, b2 sit on a formerly held-out pair and now count as ordinary turns
     expect(o.n_unplaced_excluded).toBe(1); // u1 has no room-day
     expect(JSON.stringify(o)).not.toMatch(/secret|samples_json/);
   });
-  it("clinician: generation provenance counts only, centroid rows with no vector, the daily series excludes the held-out day", async () => {
+  it("clinician: generation provenance counts only, centroid rows with no vector, the daily series includes the formerly held-out day", async () => {
     const C = await import("@/lib/voice-console");
     const r = await C.consoleClinician("docA") as Record<string, any>;
     expect(r.generation_history.map((g: any) => [g.generation, g.provenance_counts])).toEqual([[1, {}], [2, { windows: 4, speech_s: 61.5 }]]);
     expect(r.voice_centroids.map((c: any) => [c.generation, c.retired_by, c.retired_reason])).toEqual([[1, "actor_x", "superseded_by:vc2"], [2, null, null]]);
     expect(JSON.stringify(r)).not.toMatch(/mf_secret|embedding\b"?:\s*\[/);
-    expect(r.daily_30d).toHaveLength(1);
-    expect(r.daily_30d[0]).toMatchObject({ n_matched: 4 });
-    expect(r.daily_30d[0].match_confidence_p50).toBeCloseTo(0.825, 3);
+    expect(r.daily_30d).toHaveLength(2);
+    expect(r.daily_30d.map((d: any) => [d.day, d.n_matched])).toEqual([["2026-09-13", 2], [r.daily_30d[1].day, 4]]);
+    expect(r.daily_30d[1].match_confidence_p50).toBeCloseTo(0.825, 3);
   });
   it("pairs: active prints only, cosine 3 dp from the stored bytes, the 30-day contested counts, the floor", async () => {
     const C = await import("@/lib/voice-console");
@@ -76,7 +76,7 @@ describe.runIf(HAVE)("voice console on real postgres", () => {
     await pg.exec(`UPDATE clinician SET status = 'active' WHERE id = 'docB'`);
     const q = await C.consolePairs() as { pairs: any[] };
     expect(q.pairs).toEqual([
-      { a: "docA", b: "docB", cosine: 0.8, a_won_b_lost_30d: 1, b_won_a_lost_30d: 1, n_contested_30d: 2 }, // the blind row b2 is not counted
+      { a: "docA", b: "docB", cosine: 0.8, a_won_b_lost_30d: 2, b_won_a_lost_30d: 1, n_contested_30d: 3 }, // the formerly blind row b2 is counted
       { a: "docB", b: "docC", cosine: 0.748, a_won_b_lost_30d: 0, b_won_a_lost_30d: 0, n_contested_30d: 0 },
     ]);
     expect((await C.consolePairs(0.1) as { min_cosine: number }).min_cosine).toBe(0.5);
