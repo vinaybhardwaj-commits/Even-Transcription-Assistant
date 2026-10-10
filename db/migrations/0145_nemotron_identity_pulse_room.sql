@@ -1,4 +1,4 @@
--- 0144_nemotron_identity_pulse_room.sql — the 'pulse_room' centroid set on the Nemotron identity pass (suggest-only, DARK).
+-- 0145_nemotron_identity_pulse_room.sql — the 'pulse_room' centroid set on the Nemotron identity pass (suggest-only, DARK).
 --
 -- Additive and idempotent; no grants. The set is read only when IDENT_CENTROID_SET=pulse_room (default unchanged).
 -- Its centroids are the ACTIVE pulse_doctor_voice rows (0142) of embedding_model speechbrain/spkrec-ecapa-voxceleb,
@@ -46,7 +46,7 @@ COMMENT ON COLUMN diarize_nemotron_speaker.pulse_doctor_uid IS
   'pulse_room set only: the Pulse doctor uid a speaker matched (best cosine >= 0.65 and margin >= 0.05). A suggestion; never a clinician id.';
 
 INSERT INTO schema_migrations (version, name)
-VALUES (144, '0144_nemotron_identity_pulse_room')
+VALUES (145, '0145_nemotron_identity_pulse_room')
 ON CONFLICT DO NOTHING;
 
 COMMIT;

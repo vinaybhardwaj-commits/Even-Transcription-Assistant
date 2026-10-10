@@ -105,7 +105,7 @@ describe("SUGGEST-ONLY (grep level)", () => {
     expect([...new Set(targets)].sort()).toEqual(["diarize_nemotron_identity", "diarize_nemotron_speaker"]);
     expect(w).toMatch(/SELECT ident\.window_row_id, 'pulse_room', x\.speaker_label, x\.speech_ms, NULL, NULL, NULL, NULL/);
   });
-  it("no source file outside the tables' own writer and 0144 writes room_turn_speaker.clinician_id, the warehouse or consulting_doctor_uid from pulse_room", () => {
+  it("no source file outside the tables' own writer and 0145 writes room_turn_speaker.clinician_id, the warehouse or consulting_doctor_uid from pulse_room", () => {
     for (const f of ["lib/diarize-nemotron/identity.ts", "lib/jobs/kinds/nemotron-identity.ts", "lib/room-access/nemotron-identity.ts", "tools/pulse-room-centroids/load.py"]) {
       const c = code(read(f));
       expect(c, f).not.toMatch(/room_turn_speaker/i);

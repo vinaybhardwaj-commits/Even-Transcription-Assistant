@@ -1,5 +1,5 @@
 /**
- * pulse-room-pg.test.ts — the 'pulse_room' centroid set on the nemotron_identity job, against real Postgres 16 (0141, 0142, 0144).
+ * pulse-room-pg.test.ts — the 'pulse_room' centroid set on the nemotron_identity job, against real Postgres 16 (0141, 0142, 0145).
  *
  * Proves: the loader offers only ACTIVE rows of the exact ECAPA model, keyed by Pulse uid; a speaker matches at
  * 0.651 / margin 0.051 and abstains at 0.649 and at margin 0.049, recording both cosines; the voice_print path is
@@ -22,7 +22,7 @@ vi.mock("@/lib/diarize-embed", async (orig) => ({ ...(await orig<typeof import("
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 
 const HAVE = dockerAvailable();
-const pg = pgContainer("eta-pulse-room-0144");
+const pg = pgContainer("eta-pulse-room-0145");
 const MODEL = "speechbrain/spkrec-ecapa-voxceleb";
 
 const FIXTURE_DDL = `
@@ -83,7 +83,7 @@ beforeAll(async () => {
   if (!HAVE) return;
   pg.start();
   pg.exec(FIXTURE_DDL);
-  for (const m of ["0113_voice_centroid", "0117_diarize_window_label", "0140_diarize_nemotron", "0141_diarize_nemotron_identity", "0142_pulse_doctor_voice", "0144_nemotron_identity_pulse_room"]) {
+  for (const m of ["0113_voice_centroid", "0117_diarize_window_label", "0140_diarize_nemotron", "0141_diarize_nemotron_identity", "0142_pulse_doctor_voice", "0145_nemotron_identity_pulse_room"]) {
     pg.exec(readFileSync(`db/migrations/${m}.sql`, "utf8"));
   }
   pg.exec(`INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_1', 'room_fake1', '2026-10-01');
@@ -112,10 +112,10 @@ describe("REQUIRED PROOF ran, or was skipped deliberately", () => {
   });
 });
 
-describe.runIf(HAVE)("migration 0144", () => {
+describe.runIf(HAVE)("migration 0145", () => {
   it("applies a second time without error and registers once", async () => {
-    pg.exec(readFileSync("db/migrations/0144_nemotron_identity_pulse_room.sql", "utf8"));
-    expect((await q<{ n: number }>("SELECT count(*)::int AS n FROM schema_migrations WHERE version = 144"))[0]!.n).toBe(1);
+    pg.exec(readFileSync("db/migrations/0145_nemotron_identity_pulse_room.sql", "utf8"));
+    expect((await q<{ n: number }>("SELECT count(*)::int AS n FROM schema_migrations WHERE version = 145"))[0]!.n).toBe(1);
   });
   it("adds no vector, bytea, array or name column", async () => {
     const cols = await q<{ n: number }>(`SELECT count(*)::int AS n FROM information_schema.columns

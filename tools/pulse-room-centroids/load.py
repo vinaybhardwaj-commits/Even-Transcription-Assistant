@@ -8,13 +8,16 @@ It NEVER connects to a database and never writes a file: its only output is the 
 refusal on stderr, exit 1). The SQL carries the vectors, which are voice biometric data at rest (0142): do not paste
 it into a ticket, a log or a commit.
 
-One JSON per Pulse doctor:
-    { "doctor_ref": "<20-char Pulse uid>", "embedding_model": "speechbrain/spkrec-ecapa-voxceleb",
-      "embedding": [192 finite floats, L2 norm ~1],
-      optional: "n_windows", "n_days", "windows_offered", "support" }
-Refused, for the whole directory, when ANY file: is not a JSON object; has a dim other than 192, a non-finite value or
-a norm outside 1 +- 0.01; names a model other than the exact id; has a doctor_ref that is not a 20-char alphanumeric
-uid; carries a key that looks like a name (name, email, phone, ...) at any depth; or repeats another file's doctor_ref.
+One JSON per Pulse doctor, EXACTLY this shape (an unknown or missing top-level key refuses the file):
+    { "doctor_ref": "<20-char Pulse uid>", "embedding_model": "speechbrain/spkrec-ecapa-voxceleb", "revision": "<str>",
+      "dim": 192, "embedding": [192 finite floats, L2 norm ~1], "n_segments": <int >= 1>,
+      "source": { "room_id": "<str>", "window_ids": ["<window id>", ...] } }
+Mapping onto pulse_doctor_voice (the pack has no day count or support): n_windows = windows_offered = the number of
+DISTINCT window_ids; n_days = 1 and support = 1.0 (placeholders, listed in source.defaulted); n_segments, revision, room_id and
+window_ids are kept in the `source` jsonb. Refused, for the whole directory, when ANY file: is not a JSON object; has a dim other
+than 192 (or dim != len(embedding)), a non-finite value or a norm outside 1 +- 0.01; names a model other than the exact id (an
+unknown model is refused); has a doctor_ref that is not a 20-char alphanumeric uid; carries a key that looks like a name
+(name, email, phone, ...) at any depth; or repeats another file's doctor_ref.
 
 The SQL is one transaction. Per doctor it is ONE statement, as lib/room-access/pulse-doctor-voice.ts writeDoctorVoice:
 it retires the active row for (uid, model) with who and why, and inserts the next generation (source 'room_mic_pack').
@@ -33,7 +36,8 @@ NORM_TOL = 0.01
 SOURCE = "room_mic_pack"
 UID_RE = re.compile(r"^[A-Za-z0-9]{20}$")
 NAME_KEY_RE = re.compile(r"name|email|phone|mobile|address|patient|label|speaker", re.I)
-OPTIONAL_INTS = ("n_windows", "n_days", "windows_offered")
+TOP_KEYS = {"doctor_ref", "embedding_model", "revision", "dim", "embedding", "n_segments", "source"}
+SOURCE_KEYS = {"room_id", "window_ids"}
 
 
 class PackError(Exception):
@@ -60,33 +64,40 @@ def validate(doc, fname):
     bad = _name_keys(doc)
     if bad:
         raise PackError(f"{fname}: name-like field(s) present: {', '.join(sorted(bad))}")
-    ref = doc.get("doctor_ref")
+    keys = set(doc)
+    if keys != TOP_KEYS:
+        raise PackError(f"{fname}: keys must be exactly {sorted(TOP_KEYS)} (missing {sorted(TOP_KEYS - keys)}, unknown {sorted(keys - TOP_KEYS)})")
+    ref = doc["doctor_ref"]
     if not isinstance(ref, str) or not UID_RE.match(ref):
         raise PackError(f"{fname}: doctor_ref is not a 20-char Pulse uid")
-    if doc.get("embedding_model") != MODEL:
+    if doc["embedding_model"] != MODEL:
         raise PackError(f"{fname}: embedding_model must be exactly {MODEL}")
-    emb = doc.get("embedding")
-    if not isinstance(emb, list) or len(emb) != DIM:
-        raise PackError(f"{fname}: embedding must be a list of {DIM} numbers")
+    rev = doc["revision"]
+    if not isinstance(rev, str) or not rev.strip():
+        raise PackError(f"{fname}: revision must be a non-empty string")
+    emb = doc["embedding"]
+    if isinstance(doc["dim"], bool) or doc["dim"] != DIM or not isinstance(emb, list) or len(emb) != DIM:
+        raise PackError(f"{fname}: dim and embedding must both be {DIM}")
     for x in emb:
         if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
             raise PackError(f"{fname}: embedding has a non-finite or non-numeric value")
     norm = math.sqrt(sum(float(x) * float(x) for x in emb))
     if abs(norm - 1.0) > NORM_TOL:
         raise PackError(f"{fname}: embedding norm {norm:.4f} is not 1 +- {NORM_TOL}")
-    counts = {}
-    for k in OPTIONAL_INTS:
-        v = doc.get(k, 1)
-        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
-            raise PackError(f"{fname}: {k} must be a positive integer")
-        counts[k] = v
-    if counts["windows_offered"] < counts["n_windows"]:
-        raise PackError(f"{fname}: windows_offered < n_windows")
-    support = doc.get("support", 1.0)
-    if isinstance(support, bool) or not isinstance(support, (int, float)) or not (0 < support <= 1):
-        raise PackError(f"{fname}: support must be in (0, 1]")
-    return {"uid": ref, "embedding": [float(x) for x in emb], "support": float(support), **counts,
-            "defaulted": sorted(k for k in (*OPTIONAL_INTS, "support") if k not in doc)}
+    nseg = doc["n_segments"]
+    if isinstance(nseg, bool) or not isinstance(nseg, int) or nseg < 1:
+        raise PackError(f"{fname}: n_segments must be a positive integer")
+    src = doc["source"]
+    if not isinstance(src, dict) or set(src) != SOURCE_KEYS:
+        raise PackError(f"{fname}: source must have exactly {sorted(SOURCE_KEYS)}")
+    wids = src["window_ids"]
+    if not isinstance(src["room_id"], str) or not src["room_id"] or not isinstance(wids, list) \
+            or not wids or not all(isinstance(w, str) and w for w in wids):
+        raise PackError(f"{fname}: source needs a room_id and a non-empty list of window_ids")
+    n_windows = len(set(wids))
+    return {"uid": ref, "embedding": [float(x) for x in emb], "support": 1.0, "n_windows": n_windows, "n_days": 1,
+            "windows_offered": n_windows, "revision": rev, "n_segments": nseg, "room_id": src["room_id"],
+            "window_ids": sorted(set(wids)), "defaulted": ["n_days", "support"]}
 
 
 def _q(s):
@@ -96,7 +107,9 @@ def _q(s):
 def statement(rec, file_sha256, fname):
     """The one statement for one doctor: retire the active row, insert the next generation."""
     pid = "pdv_" + file_sha256[:12]
-    source = json.dumps({"source": SOURCE, "file": fname, "file_sha256": file_sha256, "defaulted": rec["defaulted"]}, sort_keys=True)
+    source = json.dumps({"source": SOURCE, "file": fname, "file_sha256": file_sha256, "revision": rec["revision"],
+                         "n_segments": rec["n_segments"], "room_id": rec["room_id"], "window_ids": rec["window_ids"],
+                         "defaulted": rec["defaulted"]}, sort_keys=True)
     vec = ", ".join(repr(x) for x in rec["embedding"])
     uid, model = _q(rec["uid"]), _q(MODEL)
     return f"""WITH retired AS (

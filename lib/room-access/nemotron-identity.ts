@@ -115,7 +115,7 @@ export async function recordIdentityOk(
 
 /**
  * The pulse_room pass and its speakers in one statement (as recordIdentityOk). Suggest-only: clinician_id,
- * match_confidence and the losing candidate are written NULL by construction (0144 refuses anything else).
+ * match_confidence and the losing candidate are written NULL by construction (0145 refuses anything else).
  */
 export async function recordPulseRoomOk(
   rowId: number, speakers: PulseRoomSpeakerRow[], centroidsOffered: number, embedded: number,
