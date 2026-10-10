@@ -7,6 +7,9 @@
  * P1.5 sweeper and nudges.   P1.6 MCP tools and scribe_usage.   P1.7 the drift job.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
+
+// Many tests here run several docker/psql round trips: a per-FILE timeout (not the global one) keeps them deterministic under load.
+vi.setConfig({ testTimeout: 120_000 });
 import { execFile, execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
@@ -116,7 +119,7 @@ const rows = async (q: TemplateStringsArray, ...v: unknown[]) => (await H.pg!.sq
 const ctx: ToolContext = { origin: "https://preview.example", actor: "test-actor", scopes: new Set(["read"]) };
 const tool = (name: string) => [...JEV_TOOLS, ...META_TOOLS].find((t) => t.name === name)!;
 
-const FLAGS = ["JEV_WORKER_ENABLED", "ETA_JEV_TEXT_LANE", "ETA_JEV_MOCK", "ETA_JEV_ENABLED", "JEV_STATE_HMAC_KEY", "JEV_DAILY_USD_CAP", "JEV_STT_QUALITY_LIVE", ...Object.values(USE_FLAG)];
+const FLAGS = ["JEV_SLOT_WAIT_MS", "ETA_JEV_MODEL", "JEV_WORKER_ENABLED", "ETA_JEV_TEXT_LANE", "ETA_JEV_MOCK", "ETA_JEV_ENABLED", "JEV_STATE_HMAC_KEY", "JEV_DAILY_USD_CAP", "JEV_STT_QUALITY_LIVE", ...Object.values(USE_FLAG)];
 const env = (o: Record<string, string>) => Object.assign(process.env, o);
 afterEach(() => { for (const k of FLAGS) delete process.env[k]; H.script = null; H.calls.length = 0; H.dropLock = false; H.dwell = false; });
 const ON = { JEV_WORKER_ENABLED: "1", ETA_JEV_TEXT_LANE: "1", JEV_USE_STT_QUALITY: "1" };
@@ -335,6 +338,70 @@ suite("the Jev worker on postgres:16", () => {
     });
   });
 
+  // ── survivors of the first refute (M2, M6, M10, M14, M18): each is a gate that must be pinned by a test ────────────────
+  describe("the gates a refuter's mutants found unpinned", () => {
+    const freshAll = async () => { await H.pg!.sql`DELETE FROM jev_breaker`; await H.pg!.sql`DELETE FROM jev_call`; await H.pg!.sql`DELETE FROM jev_slot`; };
+    const progress = (subjects: string[]) => ({ subjects, i: 0, decisions: 0, calls: 0, tokens: 0, failed: [], bench: [], bench_dropped: 0 });
+
+    it("M10: the worker sends EXACTLY the set's model pin (jev-1.13.0) to the client, even when ETA_JEV_MODEL says otherwise", async () => {
+      await freshAll(); env({ ...ON, ETA_JEV_MODEL: "jev-9.9.9" });
+      await runJob(argsFor("shadow", { subject_ids: ["run_pin"] }));
+      expect(H.calls.length).toBeGreaterThan(0);
+      for (const c of H.calls) expect(c.model, "every call carries the pin").toBe("jev-1.13.0");
+    });
+
+    it("M2: a flag switched OFF between steps stops the NEXT step (the gate is re-checked every step)", async () => {
+      await freshAll(); env(ON);
+      const a = argsFor("shadow", { subject_ids: ["run_g1", "run_g2"] });
+      const planned = await jevAskKind.run(mkCtx("plan", a, {}));
+      expect(planned.kind).toBe("next");
+      delete process.env.JEV_WORKER_ENABLED;
+      const out = await jevAskKind.run(mkCtx("ask", a, (planned as { progress: Record<string, unknown> }).progress));
+      expect(out).toMatchObject({ kind: "done", result: { skipped: "worker_disabled" } });
+      expect(H.calls.length).toBe(0);
+    });
+
+    it("M6: a set whose DB mirror no longer equals the deployed file's hash never runs (plan AND ask)", async () => {
+      await freshAll(); env(ON);
+      const real = String((await rows`SELECT content_sha256 FROM jev_question_set WHERE id = 'smoke'`)[0]!.content_sha256);
+      await H.pg!.sql`UPDATE jev_question_set SET content_sha256 = ${"f".repeat(64)} WHERE id = 'smoke'`;
+      try {
+        expect((await runJob(argsFor("shadow", { subject_ids: ["run_h"] }))).out).toMatchObject({ result: { skipped: "set_not_allowed", detail: "hash_mismatch" } });
+        const mid = await jevAskKind.run(mkCtx("ask", argsFor("shadow", { subject_ids: ["run_h"] }), progress(["run_h"])));
+        expect(mid).toMatchObject({ kind: "done", result: { skipped: "set_not_allowed", detail: "hash_mismatch" } });
+        expect(H.calls.length).toBe(0);
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET content_sha256 = ${real} WHERE id = 'smoke'`;
+      }
+    });
+
+    it("M14: the per-STEP budget stop: an ask step over the day's cap defers with no call, even though plan was not run", async () => {
+      await freshAll(); env({ ...ON, JEV_DAILY_USD_CAP: "0.0001" });
+      await H.pg!.sql`INSERT INTO jev_call (id, use, mode, cost_usd) VALUES ('jc_m14', 'stt_quality', 'shadow', 0.0002)`;
+      const out = await jevAskKind.run(mkCtx("ask", argsFor("shadow", { subject_ids: ["run_b1"] }), progress(["run_b1"])));
+      expect(out).toMatchObject({ kind: "done", result: { skipped: "budget_exceeded", subjects: 1, asked: 0 } });
+      expect(H.calls.length).toBe(0);
+    });
+
+    it("M18: live mode needs a set whose status is LIVE (a shadow set is refused even with every flag on)", async () => {
+      await freshAll(); env({ ...ON, JEV_STT_QUALITY_LIVE: "1" });
+      const r = await runJob(argsFor("live", { subject_ids: ["run_l"] }));
+      expect(r.out).toMatchObject({ result: { skipped: "set_not_allowed", detail: "status_shadow_for_live" } });
+      expect(H.calls.length).toBe(0);
+    });
+
+    it("a shadow run with the set at status 'draft' is refused too, and a RETIRED set runs in no mode", async () => {
+      await freshAll(); env(ON);
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'retired' WHERE id = 'smoke'`;
+      try {
+        for (const m of ["bench", "shadow"] as const) expect((await runJob(argsFor(m, { subject_ids: ["run_r"] }))).out).toMatchObject({ result: { skipped: "set_not_allowed", detail: "retired" } });
+        expect(H.calls.length).toBe(0);
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow' WHERE id = 'smoke'`;
+      }
+    });
+  });
+
   // ── P1.4 ───────────────────────────────────────────────────────────────────────────────────────────────────────
   describe("P1.4 — fault injection, breaker, budget, cap, slots", () => {
     const fresh = async () => { await H.pg!.sql`DELETE FROM jev_breaker`; await H.pg!.sql`DELETE FROM jev_call`; await H.pg!.sql`DELETE FROM jev_slot`; };
@@ -393,7 +460,7 @@ suite("the Jev worker on postgres:16", () => {
       expect(H.calls.length).toBe(0);
     });
     it("slots: with every global slot taken the step waits (next ask), it does not fail and does not call", async () => {
-      await fresh(); env(ON);
+      await fresh(); env({ ...ON, JEV_SLOT_WAIT_MS: "250" });   // the wait is injectable: the step defers in a quarter of a second, not five
       for (let i = 0; i < GLOBAL_SLOTS; i += 1) expect(await claimSlot("job_x")).toMatch(/^slot_/);
       expect(await claimSlot("job_x")).toBeNull();
       const out = await jevAskKind.run(mkCtx("ask", argsFor("shadow", { subject_ids: ["run_f1"] }), { subjects: ["run_f1"], i: 0, decisions: 0, calls: 0, tokens: 0, failed: [], bench: [], bench_dropped: 0 }));

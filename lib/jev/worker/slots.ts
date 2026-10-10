@@ -27,8 +27,15 @@ export async function releaseSlot(slotId: string): Promise<void> {
   await sql`DELETE FROM jev_slot WHERE slot_id = ${slotId}`;
 }
 
+/** How long a step waits for a slot before it defers. JEV_SLOT_WAIT_MS overrides it (a test sets it short); junk falls back to the default. */
+export const SLOT_WAIT_MS = 5_000;
+export function slotWaitMs(): number {
+  const n = Number(process.env.JEV_SLOT_WAIT_MS);
+  return Number.isFinite(n) && n >= 0 && n <= 60_000 ? n : SLOT_WAIT_MS;
+}
+
 /** Wait for a slot (bounded): the caller defers the step if none frees. */
-export async function acquireSlot(jobId: string | null, waitMs = 5_000): Promise<string | null> {
+export async function acquireSlot(jobId: string | null, waitMs = slotWaitMs()): Promise<string | null> {
   const t0 = Date.now();
   for (;;) {
     const s = await claimSlot(jobId);
