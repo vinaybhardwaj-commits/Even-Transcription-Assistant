@@ -946,7 +946,7 @@ describe("start_day_live and the live-start gates", () => {
     expect(db.state.table[0]).toMatchObject({ rule: "start_gate_hold", params: { reason: "day_state_unreadable" } });
   });
 
-  it("a missing mic sends NO start, not even the first; 2 present ticks later the start goes (streak waived)", async () => {
+  it("a missing mic sends NO start, not even the first; 2 present ticks later the normal gates apply: the start waits for the 5-min recorder streak (no waiver)", async () => {
     const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
     let present = false;
     senseWith((id, A) => ({ ...liveReady(id, A), audio: { ...liveReady(id, A).audio, default_input_present: present, devices_at: ago(A, 60), configured_device: "TONOR TM20" }, start_attempts: [] }));
@@ -956,11 +956,15 @@ describe("start_day_live and the live-start gates", () => {
     expect(l.scribeStart).not.toHaveBeenCalled();
     expect(db.state.table.filter((r) => r.rule === "device_missing" && r.action === "alert")).toHaveLength(1);
     present = true;
-    // a recorder that has been ready for only 40 s: the streak is waived on a mic return
+    // a recorder that has been ready for only 40 s: held even after the 2 present ticks
     senseWith((id, A) => ({ ...liveReady(id, A), recording: { ...liveReady(id, A).recording, recorder_history: { latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "no", ready_since: ago(A, 40), ready_samples: 2 } }, start_attempts: [] }));
     await run(db.sql, t0 + 10 * MIN, withSpy(l));
     expect(l.scribeStart).not.toHaveBeenCalled();
     await run(db.sql, t0 + 11 * MIN, withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    // the recorder has now been ready for 6 min: the start goes
+    senseWith((id, A) => ({ ...liveReady(id, A), start_attempts: [] }));
+    await run(db.sql, t0 + 12 * MIN, withSpy(l));
     expect(l.scribeStart).toHaveBeenCalledTimes(1);
   });
 

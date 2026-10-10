@@ -177,6 +177,7 @@ describe("one start path (10 Oct port): only executor.ts can queue a start_day; 
     const code = (f: string) => src(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     const withInsert = files.filter((f) => /\binsertCommand\s*\(/.test(code(f)));
     expect(withInsert.sort()).toEqual(["executor.ts", "input-failover.ts"]);
+    expect(files.filter((f) => /INSERT\s+INTO\s+bench_command/i.test(code(f))).sort()).toEqual([]);
     expect(files.filter((f) => /kind:\s*"start_day"|LIVE_COMMAND_KIND/.test(code(f)))).toEqual(["executor.ts"]);
     expect(files.filter((f) => /kind:\s*"set_audio_input"/.test(code(f)))).toEqual(["input-failover.ts"]);
     expect(files.filter((f) => /from "\.\/startday"/.test(src(f)))).toEqual([]);

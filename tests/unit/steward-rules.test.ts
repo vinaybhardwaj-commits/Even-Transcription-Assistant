@@ -342,14 +342,17 @@ describe("not recording: start, backoff, max tries", () => {
     expect(decideRoom(unknown, DEFAULT_CONFIG, A3, mem1)[0]).toMatchObject({ rule: "waiting_for_mic", params: { mic_ticks: 0 } });
   });
 
-  it("G1 mic return: the 5-min recorder streak is waived (newest recorder.status ready and <= 7 min old); every other gate still applies", () => {
+  it("G1 mic return (fix-up 2): NO waiver — with the marker present the normal recorder_ready (5 min, 2 samples) still holds the start; every other gate applies as before", () => {
     const A = T + 5 * 60_000;
     const mem = recent([{ ts: new Date(A - 60_000).toISOString(), rule: "waiting_for_mic", action: "log_only", params: { mic_ticks: 1 }, outcome: null }]);
     const under = { latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "no", ready_since: ago(A, 40), ready_samples: 2 };
     const mk = (over: DeepPartial<RoomSense>) => idle(A, { audio: { default_input_present: true }, reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: under }, ...over });
-    const ok = first(mk({}), A, mem);
-    expect(ok).toMatchObject({ action: "scribe_start" });
-    expect(ok.inputs).toMatchObject({ mic_return: true, start_gate_fail: null });
+    const held = first(mk({}), A, mem);
+    expect(held).toMatchObject({ action: "scribe_start" });
+    expect(held.inputs).toMatchObject({ mic_return: true, start_gate_fail: "recorder_ready_under_5m" });
+    // a full 5-min streak starts like any other start
+    const full = { ...under, ready_since: ago(A, 360), ready_samples: 6 };
+    expect(first(mk({ recording: { recorder_history: full } }), A, mem).inputs).toMatchObject({ mic_return: true, start_gate_fail: null });
     // the same state without a waiting episode: the streak applies
     expect(first(mk({}), A).inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m" });
     // stale recorder row, stale kiosk-health: still held
@@ -1043,7 +1046,7 @@ describe("fix-up 10 Oct: mic-return episode, mic_returned_but_silent", () => {
     const A = T + 4 * 60_000;
     const mem = recent([missing(T), marker(T + 60_000)]);
     // still in the episode: the waiver applies
-    expect(first(back(A), A, mem).inputs).toMatchObject({ mic_return: true, start_gate_fail: null });
+    expect(first(back(A), A, mem).inputs).toMatchObject({ mic_return: true, start_gate_fail: "recorder_ready_under_5m" });
     // a session (not a steward attempt) started after the marker: the episode is closed, the normal 5-min streak applies
     const withSession = back(A, { session_start_today_at: new Date(T + 2 * 60_000).toISOString() });
     const closed = first(withSession, A, mem);

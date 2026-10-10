@@ -419,6 +419,18 @@ describe("the loop", () => {
     }
   });
 
+  it("fix-up 2 (C): in shadow, the same would-switch (reason + target) is written at most once per 10 min; a different target is not swallowed", async () => {
+    const db = fakeDb({ cfg: BASE_CFG(), levels: ZERO95 });
+    const { port, calls } = fakePort();
+    for (let m = 0; m < 10; m++) await tick(db, port, A0 + m * MIN);
+    expect(calls.insert).toHaveLength(0);
+    expect(rules(db, SWITCH_RULE)).toHaveLength(1);
+    // the target changed (the webcam is gone, only the built-in-free TONOR list differs): a row for another uid is a new row
+    const other = fakeDb({ cfg: BASE_CFG(), levels: ZERO95, devices: [TONOR, { name: "Other Webcam", uid: "uid-other", is_default: false }] });
+    await tick(other, port, A0);
+    expect(rules(other, SWITCH_RULE)).toHaveLength(1);
+  });
+
   it("zero for 60 s only: no command; quiet room: no command", async () => {
     for (const levels of [[{ ago: 60, z: 1 }, { ago: 5, z: 1 }], [{ ago: 60, z: 0.001 }, { ago: 5, z: 0.001 }]]) {
       const db = fakeDb({ levels });

@@ -33,7 +33,7 @@ import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, parseConfig, type
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, PENDING_PREFIX, isDeferredAck, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { START_NO_ACK_FAIL_S } from "./start-schedule";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
-import { HOLD_RULE, alertInputDecision, defaultInputPort, enumChange, enumDecision, evaluateInputFailover, failoverEligible, holdDecision, readInputStates, readZeroSince, sendSwitch, shouldArmFailover, switchDecision, type InputPort, type InputState } from "./input-failover";
+import { HOLD_RULE, SWITCH_RULE, alertInputDecision, defaultInputPort, enumChange, enumDecision, evaluateInputFailover, failoverEligible, holdDecision, readInputStates, readZeroSince, sendSwitch, shouldArmFailover, switchDecision, type InputPort, type InputState } from "./input-failover";
 import { senseAll } from "./sense";
 import { SourceTimeout, raceTimeout } from "./timeout";
 import type { StewardSql } from "./tickets";
@@ -768,6 +768,9 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         if (!r.sent) return emit(holdDecision(d, { kind: "hold", reason: "not_listening", facts: v.facts }), false, 71, "shadow", r.result);
         return emit(switchDecision(d, room, v), false, 72, "live", r.result);
       }
+      // fix-up 2 (C): a shadow / kill_switch would-switch repeats while the zero continues; write at most one per room per 10 min while the reason and the target are unchanged (log only; live is unchanged)
+      const sameShadow = recent.some((r) => r.rule === SWITCH_RULE && r.outcome === "shadow" && r.params.reason === v.reason && r.params.to_uid === v.to.uid && A - Date.parse(r.ts) < 10 * 60_000);
+      if (sameShadow) return;
       emit(switchDecision(d, room, v), false, 72, "shadow", cfg.kill_switch ? "kill_switch" : "shadow: would set_audio_input");
     };
 

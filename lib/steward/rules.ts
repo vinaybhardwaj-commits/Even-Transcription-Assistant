@@ -413,14 +413,7 @@ const inLiveClamp = (A: number): boolean => {
   return msOfDay >= LIVE_CLAMP_START_MS && msOfDay < LIVE_CLAMP_END_MS;
 };
 
-function micReturnRecorderReady(c: Ctx): boolean {
-  const h = c.s.recording.recorder_history;
-  if (!h || !h.ready_since) return false;
-  const latest = c.age(h.latest_at);
-  return latest !== null && latest <= START_GATE_RECORDER_LATEST_MAX_MS;
-}
-
-function startGates(c: Ctx, micReturn = false): { gates: Record<string, boolean>; fail: string | null } {
+function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | null } {
   const { s, age } = c;
   const khAge = age(s.reachable.kh_heartbeat_at);
   const readyFor = recorderReadyForMs(c);
@@ -430,8 +423,7 @@ function startGates(c: Ctx, micReturn = false): { gates: Record<string, boolean>
     room_eligible: !isNeverLiveRoom(s.room_id),
     no_open_session: s.recording.session_open === false,
     kiosk_health_fresh: khAge !== null && khAge <= START_GATE_KH_MAX_MS,
-    // coming back from waiting_for_mic the 5-min streak is waived: the newest recorder.status must still be ready (session_open false) and <= 7 min old
-    recorder_ready: micReturn ? micReturnRecorderReady(c) : readyFor !== null && readyFor >= START_GATE_RECORDER_READY_MS,
+    recorder_ready: readyFor !== null && readyFor >= START_GATE_RECORDER_READY_MS,
   };
   let fail: string | null = null;
   if (s.reachable.kh_enrolled !== true || (khAge === null && !s.recording.recorder_history)) fail = "no_kiosk_health";
@@ -458,7 +450,7 @@ const deviceSeenAgain = (c: Ctx): boolean => c.s.audio.default_input_present ===
 // ---------------------------------------------------------------------------
 // Port of the 9 Oct start gates (V, 9 Oct 2026). Main's not_recording -> scribe_start stays the ONLY start path; these gates only ever HOLD it (a log_only row with the reason).
 //   G1 waiting_for_mic          the room's input device is missing: no start, ever (not even one attempt). One alert per IST day. A return needs 2 consecutive present ticks, then the
-//                               normal gates apply (window, kiosk-health, no session); the 5-min recorder-ready streak is waived when the newest recorder.status is ready and <= 7 min old.
+//                               normal gates apply (window, kiosk-health, no session); main's normal recorder_ready (5 min, 2 samples) applies like any other start (fix-up 2: no waiver).
 //   G2 day_ended_by_operator    a non-steward end_day acked at or after 20:00 IST today closes the day for the Steward.
 //   G3 late_start_blocked       at or after 20:30 IST: no start if the room already had a session today.
 //   G4 day_state_unreadable     from 20:00 IST the reads behind G2/G3 failed: no start (fail safe).
@@ -481,7 +473,7 @@ export function dayGate(s: Pick<RoomSense, "day">, A: number): "day_ended_by_ope
 }
 
 type MicWait = { inEpisode: boolean; confirmed: boolean; alertedToday: boolean };
-/** a mic-return waiver that the room has stayed present for this long is over: the normal 5-min recorder streak applies (this is what closes an episode in shadow, where no start ever follows) */
+/** the room has been present this long since the marker row: the waiting episode is over (this is what closes an episode in shadow, where no start ever follows) */
 export const MIC_RETURN_STREAK_MS = 5 * 60_000;
 /** PURE. A waiting_for_mic episode from the room's own decision rows (no new table): this IST day's waiting rows newer than the day's last session start of ANY kind (a steward attempt, the
  *  Kiosk Bot or an operator: s.session_start_today_at, re-homed sessions excluded) and than the day's last steward start attempt. It is confirmed when a "mic present, 1 of 2" row
@@ -594,7 +586,7 @@ function notRecording(c: Ctx): Decision[] {
       "not_recording",
     );
   }
-  const g = startGates(c, micReturn);
+  const g = startGates(c);
   return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(micReturn ? { mic_return: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
 }
 
