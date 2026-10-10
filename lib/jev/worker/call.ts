@@ -25,7 +25,8 @@ import { acquireSlot, releaseSlot } from "./slots";
 import type { StateBuild } from "./uses";
 
 export type SetRef = { id: string; version: string; sha: string; modelPin: string; use: string; subjectType: string; bands?: { act: number; caution: number } | null };
-export type BenchRow = { subject_id: string; question_id: string; variant: string; kind: string; value: string | number; confidence: number | null };
+export type BenchRow = { subject_id: string; question_id: string; variant: string; kind: string; value: string | number; confidence: number | null;
+  /** The question's gate closed it: shadow would store `gated_overwritten`, so the bench scores it as an abstain, not as the raw answer (F1). */ gated?: true };
 
 export type AskOutcome =
   | { kind: "done"; decisions: number; calls: number; errorClass: null; bench: BenchRow[]; inputTokens: number; abstained?: string; evidence?: Record<string, unknown> }
@@ -209,7 +210,11 @@ export async function askSubject(input: {
     else closed = g.type === "noul" ? g.noul < 0.5 : g.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
     if (!closed) continue;
     const row = rows.find((r) => r.questionId === d.question_id && r.orderVariant === "derived");
-    if (row && row.outcome === "answered") { row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id }; }
+    if (row && row.outcome === "answered") {
+      row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id };
+      const br = bench.find((b) => b.question_id === d.question_id && b.variant === "derived");
+      if (br) br.gated = true;   // the bench scores the POST-gate answer, i.e. what shadow would store
+    }
   }
 
   let written = 0;

@@ -15,6 +15,7 @@ import { transcriptState, MIN_PATIENT_TURNS } from "@/lib/jev/worker/builders/tr
 import { candidateRows, timelineJevState, resolveTimelineAnswer, MAX_CANDIDATES } from "@/lib/jev/worker/builders/timeline";
 import { buildSttPairState, buildSttRunState, repeatBucket, resolveSttPick, type RunRow } from "@/lib/jev/worker/builders/stt";
 import { buildDoubtState, buildPitchState, clearLocators, setLocator } from "@/lib/jev/worker/builders/locators";
+import { buildBenchReport } from "@/lib/jev/worker/bench-report";
 import { buildSegment, type TimelineInput } from "@/lib/encounter-clock/timeline";
 import type { Anchor } from "@/lib/encounter-clock/anchors";
 
@@ -142,10 +143,26 @@ describe("transcript-v1: pre-gates, focus and excerpt", () => {
     const s = transcriptState("ck_secret", ct(mk(4)), { focus: { at_ms: 65_000, hint: "investigation" } });
     if (!("state" in s)) throw new Error("expected a state");
     expect(Object.keys(s.state as object).sort()).toEqual(["focus", "transcript"]);
-    expect((s.state as { focus: Record<string, string> }).focus).toEqual({ near: "01:05", suggestion_type_hint: "investigation" });
+    expect((s.state as { focus: Record<string, string> }).focus).toEqual({ near: "01:05" });   // the type hint is a scoring label and is NOT sent (F2)
+    expect(JSON.stringify(s.state)).not.toMatch(/investigation|suggestion_type_hint|hint/);
     expect(JSON.stringify(s.state)).not.toContain("ck_secret");
     expect(JSON.stringify(s.state)).toMatch(/\[00:00\] PATIENT-SIDE: line 0/);
     expect(s.lane).toBe("text");
+  });
+  it("F2: no hint reaches Jev state, whatever the locator carries (pitch and doubt builders, direct and via the locator store)", async () => {
+    const lines = Array.from({ length: 12 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+    const read = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+    clearLocators();
+    setLocator("ckx#p1", { at_ms: 60_000, hint: "SURGERY-HINT-XYZ" });
+    setLocator("ckx#d1", { at_ms: 60_000, hint: "SURGERY-HINT-XYZ", text: "is it safe" });
+    for (const build of [buildPitchState("ckx#p1", read), buildDoubtState("ckx#d1", read)]) {
+      const st = await build;
+      if (!st || !("state" in st)) throw new Error("expected a state");
+      expect(JSON.stringify(st.state)).not.toContain("SURGERY-HINT-XYZ");
+      expect(JSON.stringify(st.state)).not.toMatch(/hint/);
+      expect(JSON.stringify(st.evidence)).not.toContain("SURGERY-HINT-XYZ");
+    }
+    clearLocators();
   });
   it("a doubt excerpt is -45 s .. +150 s around the doubt and nothing else", () => {
     const lines = Array.from({ length: 30 }, (_, i) => ({ t_ms: i * 20_000, speaker: "other" as const, speaker_idx: 0, text: `line ${i}` }));
@@ -297,5 +314,36 @@ describe("shadow rows are used by nothing; the bench CLI refuses without argumen
     try { execFileSync("npx", ["tsx", "scripts/jev-bench.ts"], { stdio: "pipe", timeout: 90_000, env: { ...process.env, DATABASE_URL: "" } }); } catch (e) { code = (e as { status?: number }).status ?? -1; err = String((e as { stderr?: Buffer }).stderr ?? ""); }
     expect(code).toBe(2);
     expect(err).toMatch(/usage: --use <use> --set <id@version> --subjects/);
+  });
+});
+
+describe("F1: the bench report scores the POST-gate answer", () => {
+  const defs = [
+    { question_id: "u10_kind", kind: "choice", body: { type: "choice", instructions: "x", criteria: { consultation: "a", empty_room: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"] },
+    { question_id: "u10_end_row", kind: "choice", body: { type: "choice", instructions: "x", criteria: { cand_01: "a", cand_02: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], gate_question_id: "u10_kind", gate_requires: ["consultation"] },
+  ] as unknown as QuestionDef[];
+  const row = (subject_id: string, question_id: string, value: string, gated?: true) => ({ subject_id, question_id, variant: "derived", kind: "choice", value, confidence: 0.7, ...(gated ? { gated } : {}) });
+  const outcome = (id: string, rows: ReturnType<typeof row>[]) => ({ subject_id: id, status: "asked" as const, rows, evidence: { candidates: { cand_01: "t+02:00", cand_02: "t+05:00" } }, tokens: 1, calls: 2 });
+  const resolve = (_q: string, v: string, ev: Record<string, unknown>) => ((ev.candidates as Record<string, string>)[v] ?? v);
+
+  it("a gated answer is counted as an abstain (n_gated) and is NOT scored against a label", () => {
+    const rep = buildBenchReport({
+      set: { id: "u10-timeline", version: "v2", sha: "a".repeat(64), use: "encounter_timeline" }, defs, resolve, mock: false, usdPerToken: 0,
+      outcomes: [outcome("s1", [row("s1", "u10_kind", "consultation"), row("s1", "u10_end_row", "cand_02")]), outcome("s2", [row("s2", "u10_kind", "empty_room"), row("s2", "u10_end_row", "cand_02", true)])],
+      labels: [{ subject_id: "s1", question_id: "u10_end_row", label: "t+05:00" }, { subject_id: "s2", question_id: "u10_end_row", label: "t+05:00" }],
+    });
+    const q = rep.questions.find((x) => x.question_id === "u10_end_row")!;
+    expect(q.n_gated).toBe(1);
+    expect(q.distribution).toEqual({ cand_02: 1, gated_overwritten: 1 });
+    expect(q.vs_labels).toMatchObject({ n_labeled: 2, n_scored: 1, coverage: 0.5, accuracy: 1 });   // s2's raw cand_02 is NOT scored
+    expect(q.vs_labels!.confusion).toEqual({ "t+05:00": { "t+05:00": 1 } });
+  });
+  it("without the gated flag the same row WOULD be scored (so the flag is what changes the number)", () => {
+    const rep = buildBenchReport({
+      set: { id: "u10-timeline", version: "v2", sha: "a".repeat(64), use: "encounter_timeline" }, defs, resolve, mock: false, usdPerToken: 0,
+      outcomes: [outcome("s2", [row("s2", "u10_kind", "empty_room"), row("s2", "u10_end_row", "cand_01")])],
+      labels: [{ subject_id: "s2", question_id: "u10_end_row", label: "t+05:00" }],
+    });
+    expect(rep.questions.find((x) => x.question_id === "u10_end_row")!.vs_labels).toMatchObject({ n_scored: 1, accuracy: 0 });
   });
 });

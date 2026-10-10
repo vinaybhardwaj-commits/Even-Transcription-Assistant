@@ -856,6 +856,44 @@ suite("the Jev worker on postgres:16", () => {
       }
     });
 
+
+    it("F1: with u10_kind = empty_room the bench scores NO cand row (the gate closed it); the raw answers are not in the accuracy", async () => {
+      await reset(); registerUse(fakeTimelineUse()); env(TL_ON);
+      H.script = answer({ u10_kind: "empty_room", u10_end_row: "cand_02" });
+      const rep = await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1", "tl_2"], labels: [
+        { subject_id: "tl_1", question_id: "u10_end_row", label: "t+05:00" }, { subject_id: "tl_2", question_id: "u10_end_row", label: "t+05:00" }] });
+      for (const id of ["u10_end_row", "u10_end_signal", "u10_start_offset", "u10_walk_in"]) {
+        const qq = rep.questions.find((x) => x.question_id === id)!;
+        expect(qq.n_gated, id).toBe(2);
+        expect(qq.distribution, id).toEqual({ gated_overwritten: 2 });
+      }
+      const er = rep.questions.find((x) => x.question_id === "u10_end_row")!;
+      expect(er.vs_labels).toMatchObject({ n_labeled: 2, n_scored: 0, coverage: 0 });
+      expect(Object.keys(er.vs_labels!.confusion)).toEqual([]);
+      expect(rep.questions.find((x) => x.question_id === "u10_kind")!.distribution).toEqual({ empty_room: 2 });   // the gate question itself is scored as answered
+      // and a kind that keeps the gate open DOES score the end row (the control)
+      await H.pg!.sql`DELETE FROM jev_call`;
+      H.script = answer({ u10_kind: "consultation", u10_end_row: "cand_02" });
+      const open = await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1"], labels: [{ subject_id: "tl_1", question_id: "u10_end_row", label: "t+05:00" }] });
+      expect(open.questions.find((x) => x.question_id === "u10_end_row")!.vs_labels).toMatchObject({ n_scored: 1, accuracy: 1 });
+    });
+
+    it("F2: the subjects-file hint is a LABEL only: it never reaches the state Jev reads, and it scores pitch_type", async () => {
+      await reset(); env({ ...ON });
+      const lines = Array.from({ length: 14 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+      const fake = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+      const { buildPitchState } = await import("@/lib/jev/worker/builders/locators");
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: (id) => buildPitchState(id, fake) });
+      H.script = answer({ pitch_type: "surgery" });
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: [{ subject_id: "ckh#p1", at_s: 60, hint: "HINT-SURGERY-ZZ" }, { subject_id: "ckh#p2", at_s: 120, hint: "surgery" }] });
+      expect(H.calls.length).toBeGreaterThan(0);
+      for (const c of H.calls) { expect(JSON.stringify(c.state)).not.toMatch(/HINT-SURGERY-ZZ|suggestion_type_hint|"hint"/); expect(JSON.stringify(c.state)).not.toMatch(/surgery/i); }
+      // the hint scored pitch_type: p2's label "surgery" matched Jev's answer, p1's odd label did not
+      const pt = rep.questions.find((x) => x.question_id === "pitch_type")!;
+      expect(pt.vs_labels).toMatchObject({ n_labeled: 2, n_scored: 2 });
+      expect(pt.vs_labels!.accuracy).toBeCloseTo(0.5, 3);
+    });
+
     it("the P2 uses are registered in production code (one per set), and registering twice is harmless", () => {
       _clearUsesForTests(); registerP2Uses(); registerP2Uses();
       expect([...new Set(["u10-timeline", "encounter-end", "stt-quality", "stt-pick", "pitch-detect", "pitch-uptake", "chair-affect", "doubt"])].length).toBe(8);

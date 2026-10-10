@@ -13,7 +13,7 @@ export type SubjectOutcome = { subject_id: string; status: "asked" | "abstained"
 export type Resolve = (questionId: string, value: string, evidence: Record<string, unknown>) => string;
 
 export type QuestionReport = {
-  question_id: string; kind: string; n_derived: number; n_abstained: number; abstain_rate: number | null; mean_confidence: number | null;
+  question_id: string; kind: string; n_derived: number; n_abstained: number; n_gated: number; abstain_rate: number | null; mean_confidence: number | null;
   distribution: Record<string, number>; order_flip_rate: number | null; n_flip_pairs: number;
   vs_labels?: { n_labeled: number; n_scored: number; coverage: number | null; accuracy: number | null; kappa: number | null; escape_recall: number | null; n_escape_truth: number; confusion: Record<string, Record<string, number>> };
 };
@@ -51,21 +51,23 @@ export function buildBenchReport(input: {
   const questions: QuestionReport[] = [];
   for (const d of defs) {
     const escapes = new Set(d.escape_options ?? []);
-    const derived: Array<{ subject: string; value: string; conf: number | null; evidence: Record<string, unknown> }> = [];
+    const derived: Array<{ subject: string; value: string; conf: number | null; evidence: Record<string, unknown>; gated: boolean }> = [];
     let flipPairs = 0, flips = 0;
     for (const o of outcomes) {
       const rows = o.rows.filter((r) => r.question_id === d.question_id);
       const dr = rows.find((r) => r.variant === "derived");
-      if (dr) derived.push({ subject: o.subject_id, value: String(dr.value), conf: dr.confidence, evidence: o.evidence ?? {} });
+      if (dr) derived.push({ subject: o.subject_id, value: dr.gated ? "gated_overwritten" : String(dr.value), conf: dr.confidence, evidence: o.evidence ?? {}, gated: dr.gated === true });
       const f = rows.find((r) => r.variant === "fwd"), v = rows.find((r) => r.variant === "rev");
       if (f && v) { flipPairs += 1; if (String(f.value) !== String(v.value)) flips += 1; }
     }
     const resolved = derived.map((x) => ({ ...x, mapped: input.resolve ? input.resolve(d.question_id, x.value, x.evidence) : x.value }));
     const distribution: Record<string, number> = {};
     for (const x of resolved) distribution[x.value] = (distribution[x.value] ?? 0) + 1;
-    const abstained = derived.filter((x) => escapes.has(x.value)).length;
+    const isAbstain = (x: { value: string; gated: boolean }): boolean => x.gated || escapes.has(x.value);
+    const abstained = derived.filter(isAbstain).length;
+    const nGated = derived.filter((x) => x.gated).length;
     const q: QuestionReport = {
-      question_id: d.question_id, kind: d.kind, n_derived: derived.length, n_abstained: abstained, abstain_rate: derived.length ? r4(abstained / derived.length) : null,
+      question_id: d.question_id, kind: d.kind, n_derived: derived.length, n_abstained: abstained, n_gated: nGated, abstain_rate: derived.length ? r4(abstained / derived.length) : null,
       mean_confidence: derived.length ? r4(derived.reduce((a, x) => a + (x.conf ?? 0), 0) / derived.length) : null,
       distribution, order_flip_rate: flipPairs ? r4(flips / flipPairs) : null, n_flip_pairs: flipPairs,
     };
@@ -73,7 +75,7 @@ export function buildBenchReport(input: {
     if (labels.length) {
       const lab = new Map(labels.map((l) => [l.subject_id, l.label]));
       const labeled = resolved.filter((x) => lab.has(x.subject));
-      const scored = labeled.filter((x) => !escapes.has(x.value));
+      const scored = labeled.filter((x) => !isAbstain(x));
       const pairs = scored.map((x) => [lab.get(x.subject)!, x.mapped] as const);
       const truthEsc = labeled.filter((x) => escapes.has(lab.get(x.subject)!));
       const confusion: Record<string, Record<string, number>> = {};
@@ -81,7 +83,7 @@ export function buildBenchReport(input: {
       q.vs_labels = {
         n_labeled: labeled.length, n_scored: scored.length, coverage: labeled.length ? r4(scored.length / labeled.length) : null,
         accuracy: pairs.length ? r4(pairs.filter(([t, p]) => t === p).length / pairs.length) : null, kappa: cohenKappa(pairs),
-        escape_recall: truthEsc.length ? r4(truthEsc.filter((x) => escapes.has(x.value)).length / truthEsc.length) : null, n_escape_truth: truthEsc.length, confusion,
+        escape_recall: truthEsc.length ? r4(truthEsc.filter(isAbstain).length / truthEsc.length) : null, n_escape_truth: truthEsc.length, confusion,
       };
     }
     questions.push(q);

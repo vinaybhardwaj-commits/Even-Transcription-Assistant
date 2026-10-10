@@ -20,6 +20,7 @@ export function formatLines(lines: ReadonlyArray<ConsultLine>): string {
   return lines.map((l) => `[${mmss(l.t_ms)}] ${ROLE[l.speaker]}: ${l.text}`).join("\n");
 }
 
+/** `hint` is a SCORING label only (bench): it is not read by any builder. */
 export type Focus = { at_ms: number; hint?: string; text?: string };
 
 /** PURE. The state for one consult (whole clip), optionally with a FOCUS marker (a pitch's or doubt's time and, for a doubt, its extracted text). */
@@ -36,7 +37,9 @@ export function transcriptState(
   if (patientTurns < MIN_PATIENT_TURNS) return { abstain: "patient_side_speech_lt_3_turns" };
   const transcript = formatLines(lines);
   const state: Record<string, unknown> = { transcript };
-  if (opts.focus) state.focus = { near: mmss(opts.focus.at_ms), ...(opts.focus.hint ? { suggestion_type_hint: opts.focus.hint } : {}), ...(opts.focus.text ? { doubt_text: opts.focus.text } : {}) };
+  // The FOCUS names a time (and, for a doubt, the extracted doubt text). It NEVER names the suggestion's type: `hint` is the operator's label for scoring and must not reach
+  // Jev, or pitch_type's accuracy is circular (V's refuter, F2).
+  if (opts.focus) state.focus = { near: mmss(opts.focus.at_ms), ...(opts.focus.text ? { doubt_text: opts.focus.text } : {}) };
   const tokens = estimateTokens(JSON.stringify(state));
   if (tokens > STATE_TOKEN_BUDGET) return { tooLarge: true, bytes: JSON.stringify(state).length };
   return {
