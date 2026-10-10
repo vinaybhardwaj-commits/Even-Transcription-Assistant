@@ -192,8 +192,14 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   /// fleet card can say why an assignment is not taking. Absent means false. Nothing but a hand on
   /// this Mac sets it: no command, no enrol, no server field writes it.
   public var channelLocked: Bool
+  /// 0.1.30. The outbound long-poll command client (TS-H3/H4). OFF unless a hand on this Mac sets
+  /// `fleet_client_enabled: true` in config.json; nothing the server sends turns it on. Absent means
+  /// off, so 0.1.30 can be installed before the server queues anything. Not an init parameter, on
+  /// purpose: no code path builds a configuration with it already on.
+  public var fleetClientEnabled: Bool = false
 
   enum CodingKeys: String, CodingKey {
+    case fleetClientEnabled = "fleet_client_enabled"
     case origin
     case roomSlug = "room_slug"
     case deviceUID = "device_uid"
@@ -349,6 +355,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       // a JSON boolean is refused with the file, as every other typed key here is.
       channelLocked: values.decodeIfPresent(Bool.self, forKey: .channelLocked) ?? false
     )
+    fleetClientEnabled = try values.decodeIfPresent(Bool.self, forKey: .fleetClientEnabled) ?? false
   }
 
   public func residentArchiveEligibility(archiveRootURL: URL) -> RoomResidentArchiveEligibility {
@@ -392,10 +399,17 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   /// A planned event, not an error: "mic_mode_reset" when the tapewriter watchdog reset Mic Mode in place.
   public var lastEvent: String?
   public var lastEventAt: Date?
+  /// 0.1.30. What macOS says about the privileged helper: `enabled`, `requiresApproval`,
+  /// `notRegistered` or `notFound`. Nil until the app has looked.
+  public var helperRegistration: String?
+  /// The last reason `register()` refused, bounded; nil while it has not.
+  public var helperRegistrationError: String?
 
   enum CodingKeys: String, CodingKey {
     case state
     case sessionID = "session_id"
+    case helperRegistration = "helper_registration"
+    case helperRegistrationError = "helper_registration_error"
     case pendingPieceCount = "pending_piece_count"
     case lastError = "last_error"
     case updatedAt = "updated_at"
@@ -412,8 +426,12 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     updatedAt: Date = Date(),
     micMode: MicModeStatus? = nil,
     lastEvent: String? = nil,
-    lastEventAt: Date? = nil
+    lastEventAt: Date? = nil,
+    helperRegistration: String? = nil,
+    helperRegistrationError: String? = nil
   ) {
+    self.helperRegistration = helperRegistration
+    self.helperRegistrationError = helperRegistrationError.map { String($0.prefix(200)) }
     self.state = state
     self.sessionID = sessionID
     self.pendingPieceCount = max(0, pendingPieceCount)

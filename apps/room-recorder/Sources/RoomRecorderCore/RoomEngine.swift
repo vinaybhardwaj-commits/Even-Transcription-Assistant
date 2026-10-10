@@ -1,5 +1,6 @@
 import CryptoKit
 import Darwin
+import FleetCore
 import Foundation
 import TapeCapture
 import TapeCore
@@ -804,11 +805,16 @@ public actor RoomEngine {
   public static func defaultUpdater(
     configuration: RoomConfiguration,
     remote: any RoomEngineRemote,
-    rootURL: URL
+    rootURL: URL,
+    bundleURL: URL = Bundle.main.bundleURL,
+    version: String? = BuildInfo.appVersion,
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+    fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
   ) -> RoomUpdater? {
-    guard let version = BuildInfo.appVersion, !version.isEmpty else { return nil }
-    let bundle = Bundle.main.bundleURL.standardizedFileURL
-    guard bundle.pathExtension == "app" else { return nil }
+    guard let version, !version.isEmpty else { return nil }
+    guard
+      let bundle = updaterBundle(bundleURL: bundleURL, homeDirectory: homeDirectory, fileExists: fileExists)
+    else { return nil }
     return RoomUpdater(
       rootURL: rootURL,
       residentBundleURL: bundle,
@@ -816,6 +822,23 @@ public actor RoomEngine {
       channel: configuration.updateChannel,
       fetcher: RoomEngineReleaseFetcher(remote: remote)
     )
+  }
+
+  /// The bundle an updater may replace, or nil. The bundle that is RUNNING is the bundle that gets
+  /// replaced: never another path (0.1.30). A stale copy under `~/Applications` must not update
+  /// itself once the `/Applications` install exists: the swap would put a new version where nothing
+  /// is meant to run.
+  static func updaterBundle(
+    bundleURL: URL, homeDirectory: URL, fileExists: (String) -> Bool
+  ) -> URL? {
+    let bundle = bundleURL.standardizedFileURL
+    guard bundle.pathExtension == "app" else { return nil }
+    let userApplications =
+      homeDirectory.appendingPathComponent("Applications", isDirectory: true).standardizedFileURL.path + "/"
+    if bundle.path.hasPrefix(userApplications), fileExists("/Applications/" + bundle.lastPathComponent) {
+      return nil
+    }
+    return bundle
   }
 
   private init(
@@ -4144,7 +4167,9 @@ public actor RoomEngine {
         lastError: lastError,
         micMode: currentMicMode(),
         lastEvent: lastEvent?.name,
-        lastEventAt: lastEvent?.at))
+        lastEventAt: lastEvent?.at,
+        helperRegistration: HelperStatusCache.shared.snapshot?.registration,
+        helperRegistrationError: HelperStatusCache.shared.registrationError))
   }
 
   /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the
@@ -4503,5 +4528,63 @@ struct TapeGrowthProbe {
       let number = attributes[.size] as? NSNumber
     else { return nil }
     return number.uint64Value
+  }
+}
+
+
+// MARK: - 0.1.30: the fleet client's way into the engine
+
+extension RoomEngine {
+  /// Whether a recording session is open now. Read by the fleet client's local gate.
+  public var fleetSessionOpen: Bool { sessionIsOpen }
+
+  /// Arms the restart a `restart_recorder` asked for. Called only after the result is safely posted.
+  public func armFleetRestart() { restartRequested = true }
+
+  /// Runs one of the app-side fleet verbs through the same code the desk's bench verbs use, so every
+  /// existing gate (open session, resident lane, self-test conditions) applies unchanged. Nothing is
+  /// acknowledged on the bench: the fleet client posts the result. `detail` is a closed summary; the
+  /// full diag report is not put into it.
+  public func runFleetAppVerb(_ verb: FleetVerb, params: FleetParams, commandID: String) -> FleetExecResult {
+    func command(_ kind: BenchCommandKind, _ args: JSONValue) -> BenchCommand {
+      BenchCommand(id: commandID, kind: kind, args: args, createdAt: nil)
+    }
+    func failure(_ result: CommandResult) -> FleetExecResult {
+      FleetExecResult(outcome: .failed, reason: result.error ?? result.audioInput.map { _ in "audio_input" } ?? "failed")
+    }
+    switch verb {
+    case .reportDiag:
+      var args: [String: JSONValue] = [:]
+      if let n = params.raw["log_lines"]?.intValue { args["log_lines"] = .number(Double(n)) }
+      let result = reportDiag(command(.reportDiag, args.isEmpty ? .null : .object(args)))
+      guard result.ok else { return failure(result) }
+      var detail: [String: FleetJSON] = ["session_open": .bool(sessionIsOpen)]
+      if case .object(let report)? = result.verb?.diag, case .array(let lines)? = report["log_lines"] {
+        detail["log_lines"] = .int(Int64(lines.count))
+      }
+      if let version = BuildInfo.appVersion { detail["app_version"] = .string(version) }
+      return FleetExecResult(outcome: .ok, detail: detail)
+    case .restartRecorder:
+      var args: [String: JSONValue] = [:]
+      if let force = params.raw["force"]?.boolValue { args["force"] = .bool(force) }
+      let result = restartEngine(command(.restartEngine, args.isEmpty ? .null : .object(args)))
+      guard result.ok else { return failure(result) }
+      return FleetExecResult(
+        outcome: .ok, detail: ["restarting": .bool(true)],
+        afterResultPosted: { [weak self] in await self?.armFleetRestart() })
+    case .selfTest:
+      var args: [String: JSONValue] = [:]
+      if let pct = params.raw["volume_pct"]?.intValue { args["volume"] = .number(Double(pct) / 100) }
+      let result = startSelfTest(command(.selfTest, args.isEmpty ? .null : .object(args)))
+      return result.ok ? FleetExecResult(outcome: .ok, detail: ["started": .bool(true)]) : failure(result)
+    case .selectAudioInput:
+      var args: [String: JSONValue] = [:]
+      if let uid = params.raw["device_uid"]?.stringValue { args["device_uid"] = .string(uid) }
+      if let pct = params.raw["input_volume_pct"]?.intValue { args["input_volume"] = .number(Double(pct) / 100) }
+      let result = applyAudioInput(command(.setAudioInput, .object(args)))
+      return result.ok ? FleetExecResult(outcome: .ok, detail: ["applied": .bool(true)]) : failure(result)
+    case .helperStatus, .collectDiag:
+      return FleetExecResult(outcome: .unsupported, reason: "not_an_app_verb")
+    }
   }
 }

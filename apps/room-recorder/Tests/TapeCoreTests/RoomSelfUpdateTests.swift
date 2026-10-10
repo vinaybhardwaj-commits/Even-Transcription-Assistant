@@ -383,14 +383,34 @@ import Testing
 
   // MARK: - Step 2: what counts as an update
 
-  @Test func aLowerVersionIsAnUpdate_becauseThatIsHowWithdrawRollsBack() {
-    // NOT `>`. `latestRelease` orders by published_at, so withdrawing the newest row makes the
-    // route answer with the one BEFORE it — a lower version — and every Mac walks backwards at its
-    // next check. A greater-than here would leave withdraw with nothing to do.
-    #expect(roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.7"))
+  @Test func aLowerVersionIsNeverAnUpdate_0_1_30() {
+    // REVERSED in 0.1.30 (gating-lead addendum B). It used to be "a different version is an update",
+    // so that withdrawing the newest release walked every Mac back to the one before. On the OPD 6
+    // proof install that rule had a 0.1.29 app deferring a DOWNGRADE to 0.1.28. A room now moves
+    // only upwards; a rollback is a deliberate act. See RoomUpdateOrderingTests for the full table.
+    #expect(!roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.7"))
     #expect(roomUpdateIsAvailable(running: "0.1.7", offered: "0.1.8"))
     #expect(roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.9-test"))
     #expect(!roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.8"))
+  }
+
+  @Test func aChannelOfferingALowerVersionStagesNothingAndDefersNothing() async throws {
+    // The whole updater, not just the predicate: a 0.1.29 app on a channel that offers 0.1.28 with
+    // the session CLOSED downloads nothing, spawns nothing and leaves no result file.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let bytes = Data("a plausible zip".utf8)
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let downloader = StubDownloader(bytes: bytes)
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.29",
+      channel: "test", fetcher: StubFetcher(release: descriptor(version: "0.1.28", bytes: bytes)),
+      downloader: downloader, runner: runner, log: { _ in })
+    #expect(await updater.check(sessionIsOpen: false) == .upToDate)
+    #expect(await updater.check(sessionIsOpen: true) == .upToDate, "not even a deferral message for a downgrade")
+    #expect(await runner.spawned.isEmpty)
+    #expect(Self.readResult(fixture) == nil)
+    #expect(!FileManager.default.fileExists(atPath: fixture.staging.path))
   }
 
   @Test func anUnbundledBinaryNeverUpdatesItself() {

@@ -29,9 +29,10 @@ var targets: [Target] = [
       : []
   ),
   .target(name: "HelperCore"),
+  .target(name: "FleetCore"),
   .target(
     name: "RoomRecorderCore",
-    dependencies: ["TapeCore", "TapeCapture", "HelperCore"]
+    dependencies: ["TapeCore", "TapeCapture", "HelperCore", "FleetCore"]
   ),
   .executableTarget(
     name: "room-recorder-helper",
@@ -64,7 +65,7 @@ var targets: [Target] = [
     name: "RoomRecorderCLI",
     dependencies: ["RoomRecorderCore"]
   ),
-  .testTarget(name: "HelperCoreTests", dependencies: ["HelperCore", "RoomRecorderCore"]),
+  .testTarget(name: "HelperCoreTests", dependencies: ["HelperCore", "FleetCore", "RoomRecorderCore"]),
   .testTarget(
     name: "TapeCoreTests",
     dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore"],

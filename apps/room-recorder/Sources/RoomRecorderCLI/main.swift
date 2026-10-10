@@ -184,6 +184,11 @@ private enum RoomRecorderCLI {
             Data("room-recorder: break-on-launch present; exiting 1\n".utf8))
           exit(1)
         }
+        // 0.1.30. Config paths that point outside the running bundle (an old ~/Applications copy)
+        // are rewritten to this bundle's own tools before anything reads them.
+        RoomConfigurationRebase.apply(root: root, log: { message in
+          FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+        })
         // Refuses with needs_enrol and exits 0 if the keychain holds no session — before any
         // application is created, so a Mac that was never enrolled does not sit in a run loop.
         let configuration = try RoomEngine.startingConfiguration(rootURL: root)
@@ -218,6 +223,10 @@ private enum RoomRecorderCLI {
             // 0.1.25: auto-start at clinic open is OPT-IN per Mac (an `auto-start-on` file beside
             // config.json). Absent, this build behaves exactly as 0.1.24 does.
             if RoomAutoStartMarker(root: root).optedIn() { await engine.enableAutoStart() }
+            // 0.1.30. The outbound command client; a no-op unless config.json turns it on.
+            FleetBootstrap.start(configuration: configuration, root: root, engine: engine, log: { message in
+              FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+            })
             // 0.1.29. The instance lock is held, so no other app is running: any tapewriter still
             // writing with launchd as its parent belongs to an instance that is gone. Stop it
             // before a new capture starts next to it. Ids are logged; no file is touched.
@@ -292,6 +301,8 @@ private enum RoomRecorderCLI {
       case "install-launch-agent":
         try arguments.rejectOptions(except: ["--root"])
         _ = try RoomPersistence(root: root).loadConfiguration()
+        // 0.1.30. Run from the new bundle, this is also where a room's config learns the new paths.
+        RoomConfigurationRebase.apply(root: root, log: { print($0) })
         let executable =
           Bundle.main.executableURL
           ?? URL(

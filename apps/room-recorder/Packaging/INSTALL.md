@@ -38,6 +38,11 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    A retired or never-enrolled app now idles instead of exiting. That is deliberate: it is how it
    stays stopped under `KeepAlive true`.
    A Mac that was never enrolled needs the usual bootstrap paste first; this step does not enrol.
+   **0.1.30 also fixes the tool paths.** `install-launch-agent` (and every app start) rewrites
+   `tapewriter_path` and `ffmpeg_path` in `config.json` to the copies inside the running bundle, and
+   prints one line per change. Check, after step 5, that neither points into `~/Applications`:
+   `plutil -p "$HOME/Library/Application Support/EvenScribe/RoomRecorder/config.json" | grep -E "tapewriter_path|ffmpeg_path"`
+   Both must start with `/Applications/EvenScribe Room Recorder.app/`.
 5. Check the right app is running. The path in the output must start with `/Applications/`:
    `pgrep -fl "room-recorder run"`
 6. **Approve the background item.** On first launch macOS shows *Background Items Added*. If it does
@@ -47,6 +52,11 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
 7. **Re-grant the microphone** if asked. The app moved from `~/Applications` to `/Applications`, so
    macOS may ask again: **System Settings › Privacy & Security › Microphone**, switch ON
    **EvenScribe Room Recorder**. If it is already ON, leave it.
+   Since 0.1.30 the app calls `SMAppService` `register` on every start (a no-op once registered) and
+   logs the answer to `launchd.log` (`helper: registration is …`). The answer is also in
+   `status.json` (`helper_registration`, plus `helper_registration_error` when macOS refused) and on the
+   bench row. `requiresApproval` means approve it in the pane above, over Screen Sharing if need be.
+   `notFound` means the bundle has no daemon plist, or the app is not running from `/Applications`.
 8. Wait about 90 seconds, then check this room's bench row: `mic_state=authorized`,
    `helper_registration=enabled`, `helper_xpc_ok=true`, `helper_version=0.2.0-h2`.
 
@@ -73,6 +83,17 @@ proven until this step. Record for each room:
 - `sfltool dumpbtm | grep -A6 room-recorder` lines (no secrets), or a screenshot of Login Items.
 - The `helper_registration` value after step 8.
 - If it stays `requiresApproval` after step 6, or shows `notFound`: stop and report. Do not retry in a loop.
+
+## The command client (0.1.30), off by default
+0.1.30 contains the outbound long-poll client for the signed command channel. It is OFF: it reads no
+key, registers nothing and sends nothing unless `config.json` says `"fleet_client_enabled": true`, which
+only a hand on this Mac sets. Install 0.1.30 first; turn it on per room, later, when the server queues
+commands. It cannot be turned on by the server.
+
+## Updates only go up (0.1.30)
+The self-updater installs a version only if it is HIGHER than the one running, and only into the
+bundle that is running. A channel that offers an older version is ignored, so withdrawing a release no
+longer rolls rooms back. To roll a room back, install the older pkg by hand.
 
 ## Switches
 - Kill file: `sudo mkdir -p "/Library/Application Support/EvenScribe" && sudo touch "/Library/Application Support/EvenScribe/helper-disabled"`

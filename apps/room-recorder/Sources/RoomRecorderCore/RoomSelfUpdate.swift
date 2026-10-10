@@ -583,19 +583,51 @@ public struct RoomUpdateSchedule: Equatable, Sendable {
   }
 }
 
-/// PURE — §13.3 step 2. A DIFFERENT version is an update, in either direction.
+/// PURE — §13.3 step 2. An update is a version that sorts STRICTLY ABOVE the running one.
 ///
-/// NOT `>`, and the asymmetry is the entire rollback mechanism. `latestRelease` orders by
-/// `published_at`, not by version, so withdrawing the newest row makes the route answer with the
-/// one before it — a LOWER version — and every Mac walks backwards at its next check. Turning this
-/// into a greater-than would leave withdraw with nothing to do and a bad build in four rooms.
+/// ─── 0.1.30: NEVER DOWN, NEVER SIDEWAYS ───────────────────────────────────────────────────
+/// This used to read "a DIFFERENT version is an update, in either direction", on purpose: the
+/// release route orders by `published_at`, so withdrawing the newest row made it answer with an
+/// older version and every Mac walked back to it. On the OPD 6 proof install a 0.1.29 app logged
+/// "update to 0.1.28 deferred" — it would have downgraded itself the moment the session closed.
+/// Rolling a room back is now a deliberate act (publish a higher number, or the pkg), not something
+/// a channel can do. A version this code cannot order is not an update.
 public func roomUpdateIsAvailable(running: String?, offered: String) -> Bool {
   guard let running, !running.isEmpty else {
     // No version at all is an unbundled `swift run` binary. It has no release identity, must not
     // claim one, and must never swap a bundle it is not running from.
     return false
   }
-  return running != offered
+  guard let have = RoomVersion(running), let want = RoomVersion(offered) else { return false }
+  return want > have
+}
+
+/// `major.minor.patch…` as integers. A suffix after `-` or `+` (a build tag) is ignored for ordering.
+public struct RoomVersion: Comparable, Equatable, Sendable {
+  public let parts: [Int]
+
+  public init?(_ text: String) {
+    let core = text.split(whereSeparator: { $0 == "-" || $0 == "+" }).first.map(String.init) ?? ""
+    let pieces = core.split(separator: ".", omittingEmptySubsequences: false)
+    guard !pieces.isEmpty, pieces.count <= 4 else { return nil }
+    var numbers: [Int] = []
+    for piece in pieces {
+      guard !piece.isEmpty, piece.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(piece) else {
+        return nil
+      }
+      numbers.append(n)
+    }
+    parts = numbers
+  }
+
+  public static func < (a: RoomVersion, b: RoomVersion) -> Bool {
+    let n = max(a.parts.count, b.parts.count)
+    for i in 0..<n {
+      let x = i < a.parts.count ? a.parts[i] : 0, y = i < b.parts.count ? b.parts[i] : 0
+      if x != y { return x < y }
+    }
+    return false
+  }
 }
 
 // MARK: - The seams
