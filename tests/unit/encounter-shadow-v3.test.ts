@@ -132,6 +132,26 @@ describe("runTimelineShadowForRoomDay", () => {
   });
 });
 
+describe("doctor_present threshold is 5 s (pinned literal; kills M12)", () => {
+  // one DOC turn inside the probe slot [10:00, 11:00) of the day, plus a long other voice so the probes are speech
+  const withDoc = (ms: number) => evidence({
+    windows: evidence().windows.map((w) => w.window_id === "bw_0"
+      ? { ...w, turns: [{ start_ms: 10 * MIN + 20_000, end_ms: 10 * MIN + 20_000 + ms, speaker_idx: 0 }, { start_ms: 8 * MIN, end_ms: 14 * MIN, speaker_idx: 1 }] }
+      : { ...w, turns: [] }),
+  });
+  const yes = async (ms: number) => {
+    const written: Written = [];
+    await runTimelineShadowForRoomDay({ ...IN, gate_diar: true }, deps({ written, ev: withDoc(ms) }));
+    return written[0]!.intervals[0]!.doctor_present;
+  };
+  it("5000 ms of DOC speech in the slot counts; 4999 ms does not; never false", async () => {
+    expect((await yes(5_000)).yes).toBeGreaterThanOrEqual(1);
+    const under = await yes(4_999);
+    expect(under.yes).toBe(0);
+    expect(under.no).toBe(0);
+  });
+});
+
 describe("pure helpers", () => {
   it("docUidOf follows doctor_source", () => {
     expect(docUidOf(anchor())).toBe("doc_uid_1");

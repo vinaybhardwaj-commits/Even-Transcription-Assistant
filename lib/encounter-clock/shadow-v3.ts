@@ -130,7 +130,7 @@ export function rowFacts(built: Extract<BuiltSegment, { ok: true }>): RowFact[] 
     const spk = (r as TimelineRow).spk ?? null;
     const doc_s = spk?.DOC ?? 0;
     const other_s = spk ? Object.entries(spk).filter(([l]) => l !== "DOC").reduce((s, [, v]) => s + v, 0) : 0;
-    return { start_ms: m.start_ms, end_ms: m.end_ms, sound: r.sound, speech_s: r.speech_s, doc_s, other_s };
+    return { start_ms: m.start_ms, end_ms: m.end_ms, sound: r.sound, speech_s: r.speech_s, doc_s, other_s, voices: spk ? Object.keys(spk) : [] };
   });
 }
 
@@ -240,7 +240,7 @@ export async function runTimelineShadowForRoomDay(
 
   // ── fuse each consult, then make them disjoint
   const total: SegmentFusionCounts = {
-    veto_end_speech_continues: 0, veto_kind_no_speech: 0, contradiction_end_vs_click: 0, click_late: 0,
+    veto_end_speech_continues: 0, veto_kind_no_speech: 0, veto_end_no_speech: 0, contradiction_end_vs_click: 0, click_late: 0,
     late_start_applied: 0, late_start_refused: 0,
   };
   type Fused = SegmentFusion & { segment: Extract<BuiltSegment, { ok: true }> };

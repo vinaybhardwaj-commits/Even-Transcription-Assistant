@@ -1,7 +1,7 @@
 /** gate v2 (epic #23 d): every truth-table row, the v1 default untouched, and the flags. */
 import { describe, it, expect } from "vitest";
 import {
-  gateProbeV2, diarizedSpeechMs, DIAR_SPEECH_MIN_MS, DIAR_NONE_MAX_MS, GATE_V2_VERSION, type DiarEvidence,
+  gateProbeV2, diarizedSpeechMs, GATE_V2_VERSION, type DiarEvidence,
 } from "@/lib/encounter-clock/gate-v2";
 import { gateProbe, GATE_VERSION } from "@/lib/encounter-clock/gate";
 import { encounterGateDiarEnabled, encounterTimelineShadowEnabled } from "@/lib/encounter-clock/flag";
@@ -26,15 +26,15 @@ describe("gate v2 truth table", () => {
   it("no energy and no coverage → unjudged no_energy_evidence", () =>
     expect(g(null as never, null)).toMatchObject({ verdict: "unjudged", reason: "no_energy_evidence", diar_coverage: false, diarized_speech_ms: null }));
   it("energy active + diarized speech at the minimum → speech", () =>
-    expect(g(active as never, covered([[0, DIAR_SPEECH_MIN_MS]]))).toMatchObject({ verdict: "speech", reason: "diarized_speech", diarized_speech_ms: DIAR_SPEECH_MIN_MS }));
+    expect(g(active as never, covered([[0, 8_000]]))).toMatchObject({ verdict: "speech", reason: "diarized_speech", diarized_speech_ms: 8_000 }));
   it("one ms under the minimum is not speech", () =>
-    expect(g(active as never, covered([[0, DIAR_SPEECH_MIN_MS - 1]]))).toMatchObject({ verdict: "unjudged", reason: "diar_speech_short" }));
+    expect(g(active as never, covered([[0, 7_999]]))).toMatchObject({ verdict: "unjudged", reason: "diar_speech_short" }));
   it("energy active + covered + under 2 s → non_speech no_diarized_speech", () => {
-    expect(g(active as never, covered([[0, DIAR_NONE_MAX_MS - 1]]))).toMatchObject({ verdict: "non_speech", reason: "no_diarized_speech" });
+    expect(g(active as never, covered([[0, 1_999]]))).toMatchObject({ verdict: "non_speech", reason: "no_diarized_speech" });
     expect(g(active as never, covered([]))).toMatchObject({ verdict: "non_speech", reason: "no_diarized_speech", diarized_speech_ms: 0 });
   });
   it("exactly 2 s is in the short band, not non_speech", () =>
-    expect(g(active as never, covered([[0, DIAR_NONE_MAX_MS]]))).toMatchObject({ verdict: "unjudged", reason: "diar_speech_short" }));
+    expect(g(active as never, covered([[0, 2_000]]))).toMatchObject({ verdict: "unjudged", reason: "diar_speech_short" }));
   it("energy quiet + diarized speech → unjudged halves_disagree", () =>
     expect(g(quiet as never, covered([[0, 30_000]]))).toMatchObject({ verdict: "unjudged", reason: "halves_disagree" }));
   it("energy quiet + none → non_speech quiet_room", () =>

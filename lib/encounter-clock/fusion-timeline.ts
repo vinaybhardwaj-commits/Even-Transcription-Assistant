@@ -15,8 +15,8 @@
  * An End click AFTER the next Start, or more than 10 min past the last speech, is LATE: it is not rank 1 and the
  * end falls to rank 4 at the latest (a late click never wins, a Jev or acoustic end earlier than it still can).
  *
- * ACOUSTIC VETO. A Jev end in a row with ≥ 20 s of speech where speech goes on in the next row is rejected. A Jev
- * "consultation" over zero diarized speech is rejected. Every veto and contradiction is COUNTED, never silent.
+ * ACOUSTIC VETO. A Jev end in a row with ≥ 20 s of speech where the SAME voices go on into the next row is
+ * rejected (a new voice arriving does not veto). A Jev end over zero diarized speech is DROPPED, never chosen. Every veto and contradiction is COUNTED, never silent.
  * JEV MAY VETO, NEVER PERFORM: with no Jev answer the ranks 1, 3–6 still produce an end.
  */
 import type { Anchor } from "@/lib/encounter-clock/anchors";
@@ -46,6 +46,8 @@ export type RowFact = {
   speech_s: number | null;
   doc_s: number;
   other_s: number;
+  /** Speaker letters heard in the row (DOC, B, C, …), segment-local. [] for a silent or compressed row. */
+  voices: ReadonlyArray<string>;
 };
 
 export type JevReading = {
@@ -71,6 +73,8 @@ export type SegmentFusionInput = {
 export type SegmentFusionCounts = {
   veto_end_speech_continues: number;
   veto_kind_no_speech: number;
+  /** A Jev end in a segment with zero diarized speech: DROPPED, never chosen at rank 2. */
+  veto_end_no_speech: number;
   contradiction_end_vs_click: number;
   click_late: number;
   late_start_applied: number;
@@ -105,15 +109,16 @@ export function acousticClose(rows: ReadonlyArray<RowFact>, from_ms: number): { 
 export function fuseSegment(input: SegmentFusionInput): SegmentFusion {
   const { anchor, rows, meta, jev } = input;
   const counts: SegmentFusionCounts = {
-    veto_end_speech_continues: 0, veto_kind_no_speech: 0, contradiction_end_vs_click: 0, click_late: 0,
+    veto_end_speech_continues: 0, veto_kind_no_speech: 0, veto_end_no_speech: 0, contradiction_end_vs_click: 0, click_late: 0,
     late_start_applied: 0, late_start_refused: 0,
   };
   let start = anchor.start_ms - PRE_START_MS;
 
-  // ── start: only a confident late start, and only if no doctor+other speech precedes the new start
+  // ── start: only a confident late start, and only if NO doctor+other speech precedes the new start. The rows
+  //    before the anchor ([START − 60 s, START)) count: speech there means the consult began on time.
   if (jev?.late_start_p != null && jev.late_start_p >= LATE_START_P) {
-    const firstBoth = rows.find((r) => r.end_ms > anchor.start_ms && r.doc_s > 0 && r.other_s > 0);
-    if (firstBoth && firstBoth.start_ms > start) { start = firstBoth.start_ms; counts.late_start_applied++; }
+    const firstBoth = rows.find((r) => r.doc_s > 0 && r.other_s > 0);
+    if (firstBoth && firstBoth.start_ms >= anchor.start_ms && firstBoth.start_ms > start) { start = firstBoth.start_ms; counts.late_start_applied++; }
     else counts.late_start_refused++;
   }
 
@@ -137,11 +142,15 @@ export function fuseSegment(input: SegmentFusionInput): SegmentFusion {
 
   // ── rank 2: Jev's end row (computed first so a contradiction with the click is counted either way)
   let jevEnd: number | null = null;
-  if (jev?.end_row && jev.end_row !== END_CONTINUES && jev.end_row !== END_CANNOT_TELL && (jev.end_conf ?? 0) >= END_ACT) {
+  if (jev?.end_row && zeroSpeech && jev.end_row !== END_CONTINUES && jev.end_row !== END_CANNOT_TELL && (jev.end_conf ?? 0) >= END_ACT) {
+    counts.veto_end_no_speech++; // a Jev end over zero diarized speech is dropped
+  } else if (jev?.end_row && jev.end_row !== END_CONTINUES && jev.end_row !== END_CANNOT_TELL && (jev.end_conf ?? 0) >= END_ACT) {
     const k = meta.findIndex((m) => m.t === jev.end_row);
     if (k >= 0) {
       const row = rows[k]!, next = rows[k + 1];
-      if ((row.speech_s ?? 0) >= VETO_SPEECH_S && (next?.speech_s ?? 0) > 0) counts.veto_end_speech_continues++;
+      // ≥ 20 s in the row AND the SAME voices go on into the next row; a new voice arriving does not veto
+      const sameVoicesContinue = !!next && row.voices.some((v) => next.voices.includes(v));
+      if ((row.speech_s ?? 0) >= VETO_SPEECH_S && sameVoicesContinue) counts.veto_end_speech_continues++;
       else {
         const inRow = input.speech.filter((s) => s.end_ms > row.start_ms && s.start_ms < row.end_ms).map((s) => Math.min(s.end_ms, row.end_ms));
         jevEnd = inRow.length ? Math.max(...inRow) : row.start_ms;
