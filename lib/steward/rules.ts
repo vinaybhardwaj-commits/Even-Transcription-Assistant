@@ -481,16 +481,45 @@ export function dayGate(s: Pick<RoomSense, "day">, A: number): "day_ended_by_ope
 }
 
 type MicWait = { inEpisode: boolean; confirmed: boolean; alertedToday: boolean };
-/** PURE. A waiting_for_mic episode from the room's own decision rows (no new table): this IST day's waiting rows newer than the day's last steward start attempt. It is confirmed when a
- *  "mic present, 1 of 2" row (mic_ticks >= 1) is newer than the last "missing" row (mic_ticks 0): the second present tick is the one that goes on to the start gates. */
+/** a mic-return waiver that the room has stayed present for this long is over: the normal 5-min recorder streak applies (this is what closes an episode in shadow, where no start ever follows) */
+export const MIC_RETURN_STREAK_MS = 5 * 60_000;
+/** PURE. A waiting_for_mic episode from the room's own decision rows (no new table): this IST day's waiting rows newer than the day's last session start of ANY kind (a steward attempt, the
+ *  Kiosk Bot or an operator: s.session_start_today_at, re-homed sessions excluded) and than the day's last steward start attempt. It is confirmed when a "mic present, 1 of 2" row
+ *  (mic_ticks >= 1) is newer than the last "missing" row (mic_ticks 0): the second present tick is the one that goes on to the start gates. Once the mic has been present for
+ *  MIC_RETURN_STREAK_MS since that marker row the episode is closed (no all-day waiver, also in shadow). */
 function micWait(c: Ctx): MicWait {
   const midnight = istMidnightOf(c.A);
   const today = c.recent.room.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= c.A);
   const lastAttempt = Math.max(-Infinity, ...(c.s.start_attempts ?? []).map((a) => new Date(a.created_at).getTime()).filter((t) => Number.isFinite(t)));
-  const waits = today.filter((r) => r.rule === WAITING_RULE && Date.parse(r.ts) > lastAttempt).sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  const lastSession = c.s.session_start_today_at ? Date.parse(c.s.session_start_today_at) : -Infinity;
+  const closedAt = Math.max(lastAttempt, Number.isFinite(lastSession) ? lastSession : -Infinity);
+  const waits = today.filter((r) => r.rule === WAITING_RULE && Date.parse(r.ts) > closedAt).sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
   const lastMissing = waits.reduce((t, r) => (Number(r.params.mic_ticks) === 0 ? Date.parse(r.ts) : t), -Infinity);
-  const confirmed = waits.some((r) => Number(r.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && Date.parse(r.ts) > lastMissing);
-  return { inEpisode: waits.length > 0, confirmed, alertedToday: today.some((r) => r.rule === "device_missing" && r.action === "alert") };
+  const marker = waits.find((r) => Number(r.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && Date.parse(r.ts) > lastMissing);
+  const confirmed = marker !== undefined;
+  const streakOver = marker !== undefined && c.A - Date.parse(marker.ts) >= MIC_RETURN_STREAK_MS;
+  return { inEpisode: waits.length > 0 && !streakOver, confirmed, alertedToday: today.some((r) => r.rule === "device_missing" && r.action === "alert") };
+}
+
+/** mic_returned_but_silent: the session that followed a mic return (a session started after the episode's "mic present" marker row, today) has digital zero from its start: the trailing zero
+ *  run began within 30 s of the session start (D1: the run is anchored to the session start, not to the start command) and has lasted >= 2 min. ONE alert per episode (an alert row newer than the marker). */
+export const MIC_SILENT_RULE = "mic_returned_but_silent";
+export const MIC_SILENT_AFTER_MS = 120_000;
+const MIC_SILENT_START_TOLERANCE_MS = 30_000;
+function micReturnSilent(c: Ctx): Decision[] {
+  const { s } = c;
+  if (s.recording.session_open !== true || !s.recording.session_started_at || !s.audio.silent_while_recording_since) return [];
+  const t0 = Date.parse(s.recording.session_started_at);
+  const since = Date.parse(s.audio.silent_while_recording_since);
+  if (!Number.isFinite(t0) || !Number.isFinite(since) || since > t0 + MIC_SILENT_START_TOLERANCE_MS || c.A - t0 < MIC_SILENT_AFTER_MS || c.A - since < MIC_SILENT_AFTER_MS) return [];
+  const midnight = istMidnightOf(c.A);
+  const rows = c.recent.room.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= c.A);
+  const lastMissing = rows.reduce((t, r) => (r.rule === WAITING_RULE && Number(r.params.mic_ticks) === 0 ? Math.max(t, Date.parse(r.ts)) : t), -Infinity);
+  const markers = rows.filter((r) => r.rule === WAITING_RULE && Number(r.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && Date.parse(r.ts) > lastMissing && Date.parse(r.ts) <= t0);
+  const marker = markers.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0];
+  if (!marker) return [];
+  if (rows.some((r) => r.rule === MIC_SILENT_RULE && r.action === "alert" && Date.parse(r.ts) >= Date.parse(marker.ts))) return [];
+  return [mk(c, MIC_SILENT_RULE, "alert", { room_id: s.room_id, room: s.room_name }, `room ${s.room_name} started recording after its microphone came back, but the tape has been digital zero since the session began (2 min); nothing was stopped`, "never a restart: the mic is physical", "error", {}, { session_started_at: s.recording.session_started_at, silent_since: s.audio.silent_while_recording_since })];
 }
 
 function notRecording(c: Ctx): Decision[] {
@@ -901,6 +930,7 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
   if (deviceEpisodeOpen(c) && deviceSeenAgain(c)) {
     ds.push(mk(c, "device_missing", "log_only", { state: "back" }, `room ${sense.room_name}: the input device is back; the missing-device episode is closed`, null, "info", {}, {}));
   }
+  ds.push(...micReturnSilent(c));
   return ds;
 }
 

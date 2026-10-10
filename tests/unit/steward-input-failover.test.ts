@@ -236,6 +236,53 @@ describe("rule 7: anti-flap", () => {
   });
 });
 
+describe("fix-up 10 Oct: only live outcomes count toward the cap and the spacing; the session-start webcam switch is exempt from the spacing", () => {
+  const zero = (A: number, over: Partial<FailoverInput> = {}) => input(A, { zeroSince: A - 120 * S, ...over });
+  it("ruling 3: shadow and kill_switch rows do not count toward the 4/day cap or the 10-min spacing", () => {
+    const shadow = [0, 1, 2, 3].map((i) => ({ ...sw(A0, 0, "failover_zero", "shadow"), ts: new Date(ist("07:30") + i * 30 * MIN).toISOString() }));
+    expect(evaluateInputFailover(zero(A0, { recent: shadow })).kind).toBe("switch");
+    expect(evaluateInputFailover(zero(A0, { recent: [sw(A0, 2 * 60, "failover_zero", "shadow")], zeroSince: A0 - 200 * S })).kind).toBe("switch");
+    expect(evaluateInputFailover(zero(A0, { recent: [sw(A0, 2 * 60, "failover_zero", "shadow")], zeroSince: A0 - 200 * S }))).toMatchObject({ zero_s: 200 });
+    // live rows still count: ok and failed
+    const live = [0, 1, 2].map((i) => ({ ...sw(A0, 0, "failover_zero", "ok"), ts: new Date(ist("07:30") + i * 30 * MIN).toISOString() }));
+    const four = [...live, { ...sw(A0, 0, "failover_zero", "failed"), ts: new Date(ist("09:00")).toISOString() }];
+    expect(evaluateInputFailover(zero(A0, { recent: four }))).toMatchObject({ kind: "hold", reason: "daily_cap" });
+    expect(evaluateInputFailover(zero(A0, { recent: [sw(A0, 6 * 60, "failover_zero", "failed")], zeroSince: A0 - 200 * S }))).toMatchObject({ kind: "hold", reason: "spacing" });
+    // a mixed day: three shadow + three live rows = 3 live, still allowed
+    const mixed = [...shadow.slice(0, 3), ...live];
+    expect(evaluateInputFailover(zero(A0, { recent: mixed })).kind).toBe("switch");
+  });
+  it("ruling 3: a shadow session-start row still means the session had its session-start check (no repeat every tick)", () => {
+    const start = (a: number) => new Date(a - 5 * MIN).toISOString();
+    const cur = state("TONOR TM20", [C270, TONOR]);
+    const first = evaluateInputFailover(input(A0, { session: { open: true, status: "recording", started_at: start(A0) }, input: cur }));
+    expect(first).toMatchObject({ kind: "switch", reason: "session_start_webcam" });
+    const again = evaluateInputFailover(input(A0, { session: { open: true, status: "recording", started_at: start(A0) }, input: cur, recent: [sw(A0, 60, "session_start_webcam", "shadow")] }));
+    expect(again.kind).toBe("none");
+  });
+  it("ruling 4: the session-start webcam switch is not blocked by the spacing, but the cap still stops it", () => {
+    const cur = state("TONOR TM20", [C270, TONOR]);
+    const sess = { open: true, status: "recording" as const, started_at: new Date(A0 - 5 * MIN).toISOString() };
+    // a live switch 3 min ago (before this session) would hold a failover for spacing; the session-start switch goes through
+    const prior = sw(A0, 8 * 60, "failover_zero");
+    expect(evaluateInputFailover(input(A0, { session: sess, input: cur, recent: [prior] }))).toMatchObject({ kind: "switch", reason: "session_start_webcam" });
+    // the cap still applies: four live switches today
+    const four = [0, 1, 2, 3].map((i) => ({ ...sw(A0, 0, "failover_zero"), ts: new Date(ist("07:30") + i * 30 * MIN).toISOString() }));
+    expect(evaluateInputFailover(input(A0, { session: sess, input: cur, recent: four }))).toMatchObject({ kind: "hold", reason: "daily_cap" });
+  });
+  it("ruling 4: a session-start switch does not start the spacing clock for a later failover, but counts toward the cap", () => {
+    const sess = { open: true, status: "recording" as const, started_at: new Date(A0 - 20 * MIN).toISOString() };
+    const cur = state("C270 HD WEBCAM", [C270, TONOR]);
+    const ss = sw(A0, 6 * 60, "session_start_webcam");
+    // the webcam is dead 6 min after the session-start switch: the failover to the TONOR is not held for spacing
+    const v = evaluateInputFailover(input(A0, { session: sess, input: cur, recent: [ss], zeroSince: A0 - 5 * MIN }));
+    expect(v).toMatchObject({ kind: "switch", reason: "failover_zero", to: { name: "TONOR TM20" } });
+    // three live failovers + the session-start switch = 4: the cap holds
+    const three = [0, 1, 2].map((i) => ({ ...sw(A0, 0, "failover_zero"), ts: new Date(ist("07:30") + i * 30 * MIN).toISOString() }));
+    expect(evaluateInputFailover(input(A0, { session: sess, input: cur, recent: [...three, ss], zeroSince: A0 - 5 * MIN }))).toMatchObject({ kind: "hold", reason: "daily_cap" });
+  });
+});
+
 describe("enumeration memory", () => {
   it("a row is written only when the uid set changes", () => {
     const st = state("TONOR TM20", [C270, TONOR]);

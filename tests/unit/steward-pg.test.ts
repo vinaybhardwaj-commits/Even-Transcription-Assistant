@@ -329,6 +329,34 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     pg.exec(`DELETE FROM bench_command`);
   }, 120_000);
 
+  it("fix-up 10 Oct through the real sense queries: a re-homed session is not a session today (G3, session_start_today_at); an end_day with a NULL source counts as an operator's (G2)", async () => {
+    const NIGHT = Date.parse("2026-10-06T21:14:00+05:30");
+    pg.exec(`DELETE FROM bench_command`);
+    // the migrated column is NOT NULL; the statement must still not lose a NULL source if one ever appears, so the constraint is lifted for this test only
+    pg.exec(`ALTER TABLE bench_command ALTER COLUMN source DROP NOT NULL`);
+    pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+      ('cmd_n1', '${CLINIC_A}', 'end_day', 'acked', NULL, '2026-10-06T21:08:50+05:30', '2026-10-06T21:09:00+05:30')`);
+    const roster = [CLINIC_A, CLINIC_B].map((room_id) => ({ room_id, room_name: room_id, machine: null, klass: "clinic" as const, flags: [], kind: "clinic" as const, state_flags: null, device_name: null }));
+    const before = await senseAll(sql, NIGHT, roster, []);
+    expect(before.get(CLINIC_A)!.day).toEqual({ operator_end_at: "2026-10-06T15:39:00.000Z", session_today: true });
+    expect(typeof before.get(CLINIC_A)!.session_start_today_at).toBe("string");
+    pg.exec(`UPDATE bench_session SET notes = 're-homed after reap of bs_x' WHERE id IN ('bs_a_old', 'bs_b')`);
+    try {
+      const after = await senseAll(sql, NIGHT, roster, []);
+      expect(after.get(CLINIC_A)!.day).toMatchObject({ session_today: false });
+      expect(after.get(CLINIC_B)!.day).toMatchObject({ session_today: false });
+      expect(after.get(CLINIC_A)!.session_start_today_at).toBeNull();
+      // read every tick, not only from 20:00 IST
+      const noon = await senseAll(sql, Date.parse("2026-10-06T19:00:00+05:30"), roster, []);
+      expect(noon.get(CLINIC_A)!.day).toBeUndefined();
+      expect(noon.get(CLINIC_A)!.session_start_today_at).toBeNull();
+    } finally {
+      pg.exec(`UPDATE bench_session SET notes = NULL WHERE id IN ('bs_a_old', 'bs_b')`);
+      pg.exec(`DELETE FROM bench_command`);
+      pg.exec(`ALTER TABLE bench_command ALTER COLUMN source SET NOT NULL`);
+    }
+  }, 120_000);
+
   it("GET /api/cron/steward through the real tables; the bearer is checked", async () => {
     const SAVED = process.env.CRON_SECRET;
     process.env.CRON_SECRET = "cron-pg";

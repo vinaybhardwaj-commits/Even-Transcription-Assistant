@@ -111,6 +111,8 @@ export type FailoverVerdict =
   | { kind: "alert"; reason: "no_alternate" | "still_zero_after_switch"; devices: string[]; facts: Record<string, unknown> };
 
 const isSwitchRow = (r: RecentAction): boolean => r.rule === SWITCH_RULE;
+/** a switch that really went out (outcome ok, or failed on insert): a shadow / kill_switch row changed nothing on the Mac and counts toward neither the cap nor the spacing */
+const isLiveSwitchRow = (r: RecentAction): boolean => isSwitchRow(r) && (r.outcome === "ok" || r.outcome === "failed");
 
 /** PURE. At most one verdict per room per tick. */
 export function evaluateInputFailover(inp: FailoverInput): FailoverVerdict {
@@ -134,9 +136,14 @@ export function evaluateInputFailover(inp: FailoverInput): FailoverVerdict {
   facts.tonor_enumerated = !!tonor;
 
   const switches = recent.filter(isSwitchRow).sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
-  const last = switches[0];
+  // fable ruling 3: only LIVE outcomes count toward the 4/day cap and the 10-min spacing (shadow rows still say "this session already had its switch")
+  const liveSwitches = switches.filter(isLiveSwitchRow);
+  const last = liveSwitches[0];
   const lastTs = last ? Date.parse(last.ts) : null;
-  const today = switches.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= A);
+  // fable ruling 4: a session-start webcam switch is exempt from the spacing (neither blocked by it nor the start of its clock) but counts toward the cap
+  const lastSpaced = liveSwitches.find((r) => r.params.reason !== "session_start_webcam");
+  const spacedTs = lastSpaced ? Date.parse(lastSpaced.ts) : null;
+  const today = liveSwitches.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= A);
   facts.switches_today = today.length;
 
   // hold after an alert: until the enumeration changes (a later input_failover_enum row) or the next session
@@ -147,9 +154,9 @@ export function evaluateInputFailover(inp: FailoverInput): FailoverVerdict {
   const sessionAlerted = alertTs !== null && (!Number.isFinite(sessionStart) || alertTs >= sessionStart);
   const held = sessionAlerted && !enums.some((r) => Date.parse(r.ts) > (alertTs as number));
 
-  const gate = (vanishedOk: boolean): FailoverVerdict | null => {
+  const gate = (vanishedOk: boolean, spaced = true): FailoverVerdict | null => {
     if (today.length >= MAX_SWITCHES_PER_DAY) return { kind: "hold", reason: "daily_cap", facts };
-    if (lastTs !== null && A - lastTs < MIN_BETWEEN_SWITCHES_MS && !vanishedOk) return { kind: "hold", reason: "spacing", facts: { ...facts, since_last_switch_s: Math.round((A - lastTs) / 1000) } };
+    if (spaced && spacedTs !== null && A - spacedTs < MIN_BETWEEN_SWITCHES_MS && !vanishedOk) return { kind: "hold", reason: "spacing", facts: { ...facts, since_last_switch_s: Math.round((A - spacedTs) / 1000) } };
     return null;
   };
 
@@ -166,7 +173,7 @@ export function evaluateInputFailover(inp: FailoverInput): FailoverVerdict {
   // rule 3: session start
   const sessionSwitch = Number.isFinite(sessionStart) ? switches.some((r) => Date.parse(r.ts) >= sessionStart) : true;
   if (Number.isFinite(sessionStart) && A - sessionStart <= SESSION_START_WINDOW_MS && !sessionSwitch && webcam && curKind !== "webcam" && cur !== webcam) {
-    const g = gate(vanished);
+    const g = gate(vanished, false);
     if (g) return g;
     return { kind: "switch", reason: "session_start_webcam", to: webcam, from: inp_.current_name, zero_s: null, facts };
   }

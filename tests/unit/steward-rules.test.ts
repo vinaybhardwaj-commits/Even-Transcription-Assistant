@@ -1030,3 +1030,77 @@ describe("(b) one inputs builder: every row of every rule carries the reachabili
     expect(decideRoom(sleeping, DEFAULT_CONFIG, T)[0]!.inputs).toMatchObject({ sleep_marker: true, last_chunk_s: null, kh_heartbeat_s: 400 });
   });
 });
+
+// ---------------------------------------------------------------------------
+describe("fix-up 10 Oct: mic-return episode, mic_returned_but_silent", () => {
+  const rowAt = (ts: number, rule: string, action: string, params: Record<string, unknown>): RecentAction => ({ ts: new Date(ts).toISOString(), rule, action, params, outcome: null });
+  const tried = [failedAttempt(T, 3000)];
+  const back = (A: number, over: DeepPartial<RoomSense> = {}) => idle(A, { audio: { default_input_present: true, devices_at: ago(A, 30) }, start_attempts: tried, reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: { latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "no", ready_since: ago(A, 40), ready_samples: 2 } }, ...over });
+  const marker = (ts: number) => rowAt(ts, "waiting_for_mic", "log_only", { mic_ticks: 1 });
+  const missing = (ts: number) => rowAt(ts, "waiting_for_mic", "log_only", { mic_ticks: 0 });
+
+  it("ruling 1: ANY session start after the episode closes it (Kiosk Bot or operator); a session before it does not", () => {
+    const A = T + 4 * 60_000;
+    const mem = recent([missing(T), marker(T + 60_000)]);
+    // still in the episode: the waiver applies
+    expect(first(back(A), A, mem).inputs).toMatchObject({ mic_return: true, start_gate_fail: null });
+    // a session (not a steward attempt) started after the marker: the episode is closed, the normal 5-min streak applies
+    const withSession = back(A, { session_start_today_at: new Date(T + 2 * 60_000).toISOString() });
+    const closed = first(withSession, A, mem);
+    expect(closed.inputs.mic_return).toBeUndefined();
+    expect(closed.inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m" });
+    // a session that started BEFORE the missing row does not close it
+    const older = back(A, { session_start_today_at: new Date(T - 60 * 60_000).toISOString() });
+    expect(first(older, A, mem).inputs).toMatchObject({ mic_return: true });
+  });
+
+  it("ruling 1: in shadow (no start ever follows) the episode closes after 5 min of present ticks: no all-day waiver", () => {
+    const m = T + 60_000;
+    const mem = recent([missing(T), marker(m)]);
+    const at = (min: number) => m + min * 60_000;
+    expect(first(back(at(4)), at(4), mem).inputs).toMatchObject({ mic_return: true });
+    const late = first(back(at(5)), at(5), mem);
+    expect(late.inputs.mic_return).toBeUndefined();
+    expect(late.inputs).toMatchObject({ start_gate_fail: "recorder_ready_under_5m" });
+    expect(first(back(at(300)), at(300), mem).inputs.mic_return).toBeUndefined();
+    // a flap after that is a NEW episode: waiting again, then the marker again
+    const f = at(301);
+    const flapMem = recent([missing(T), marker(m), missing(f)]);
+    expect(first(back(at(302)), at(302), flapMem)).toMatchObject({ rule: "waiting_for_mic", params: { mic_ticks: 1 } });
+  });
+
+  describe("ruling 5: mic_returned_but_silent", () => {
+    const S0 = T + 30 * 60_000;
+    const live = (A: number, startedAgoS: number, silentAgoS: number | null, over: DeepPartial<RoomSense> = {}) =>
+      healthy(A, { recording: { session_open: true, session_status: "recording", session_started_at: ago(A, startedAgoS) }, audio: { silent_while_recording_since: silentAgoS === null ? null : ago(A, silentAgoS) }, ...over });
+    const alertsOf = (ds: ReturnType<typeof decideRoom>) => ds.filter((d) => d.rule === "mic_returned_but_silent");
+    const mem = (extra: RecentAction[] = []) => recent([missing(T), marker(T + 60_000), ...extra]);
+
+    it("fires once when the first 2 min of the session that followed a mic return are digital zero", () => {
+      const A = S0 + 130_000; // session began at S0
+      const ds = decideRoom(live(A, 130, 130), DEFAULT_CONFIG, A, mem());
+      expect(alertsOf(ds)).toHaveLength(1);
+      expect(alertsOf(ds)[0]).toMatchObject({ action: "alert", params: { room_id: expect.any(String) } });
+      // the alert row is in memory: the next tick adds nothing
+      expect(alertsOf(decideRoom(live(A + 60_000, 190, 190), DEFAULT_CONFIG, A + 60_000, mem([rowAt(A, "mic_returned_but_silent", "alert", {})])))).toHaveLength(0);
+    });
+    it("D1: a zero run that began only later in the session (the first minutes had sound) does not fire", () => {
+      const A = S0 + 600_000;
+      expect(alertsOf(decideRoom(live(A, 600, 130), DEFAULT_CONFIG, A, mem()))).toHaveLength(0);
+    });
+    it("not before 2 min of session and zero; not without a mic-return episode; not when the mic flapped away again before the session", () => {
+      const early = S0 + 100_000;
+      expect(alertsOf(decideRoom(live(early, 100, 100), DEFAULT_CONFIG, early, mem()))).toHaveLength(0);
+      const A = S0 + 130_000;
+      expect(alertsOf(decideRoom(live(A, 130, 130), DEFAULT_CONFIG, A, EMPTY_RECENT))).toHaveLength(0);
+      expect(alertsOf(decideRoom(live(A, 130, 130), DEFAULT_CONFIG, A, mem([missing(T + 20 * 60_000)])))).toHaveLength(0);
+      // a marker newer than the session start belongs to a later return, not to this session
+      expect(alertsOf(decideRoom(live(A, 130, 130), DEFAULT_CONFIG, A, recent([missing(T), marker(S0 + 60_000)])))).toHaveLength(0);
+    });
+    it("a second mic-return episode the same day can alert again", () => {
+      const A = S0 + 130_000;
+      const m2 = [rowAt(T + 10 * 60_000, "mic_returned_but_silent", "alert", {}), missing(T + 20 * 60_000), marker(T + 21 * 60_000)];
+      expect(alertsOf(decideRoom(live(A, 130, 130), DEFAULT_CONFIG, A, recent([missing(T), marker(T + 60_000), ...m2])))).toHaveLength(1);
+    });
+  });
+});
