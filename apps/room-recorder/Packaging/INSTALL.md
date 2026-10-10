@@ -13,7 +13,8 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
 ## At the room (all in Terminal, as the room's admin user)
 1. Check the file. It must print `OK`:
    `shasum -a 256 -c EvenScribe-Room-Recorder-<version>.pkg.sha256`
-2. Install into `/Applications` (owned by root). Type the admin password:
+2. Install into `/Applications`. Type the admin password. The pkg hands the app to the room user (the console
+   user) so the self-updater keeps working; only the helper side is root-owned (step 6):
    `sudo installer -pkg EvenScribe-Room-Recorder-<version>.pkg -target /`
 3. Check the installed bundle. It prints nothing and returns 0:
    `codesign --verify --deep --strict "/Applications/EvenScribe Room Recorder.app"`
@@ -113,13 +114,23 @@ The self-updater installs a version only if it is HIGHER than the one running, a
 bundle that is running. A channel that offers an older version is ignored, so withdrawing a release no
 longer rolls rooms back. To roll a room back, use the rollback script below.
 
-## The self-updater and the root helper (0.1.32)
+## The self-updater and the root helper (0.1.32, ownership fixed in 0.1.33)
 The self-updater is ON. The root daemon runs its own copy in `/Library/PrivilegedHelperTools`, so the
 updater swapping the app bundle (a user-level move) can no longer put anything under a root job. The
 updater never touches that copy, and its swap script never calls launchd's system domain. **A change to
 the helper itself therefore ships only by pkg** (through the fleet's root path when it exists, or
 `sudo installer` by hand): an app update leaves the old helper running, and the two talk over a versioned
 protocol (a request with a protocol version the helper does not know is refused, not misread).
+
+**Who owns the app bundle.** The room user, not root. 0.1.29 to 0.1.32 left it `root:wheel` and
+write-protected, which let the updater work ONCE: the second swap could not delete or reuse the
+`.previous` aside copy, failed, and was held. From 0.1.33 the postinstall chowns the bundle to the
+console user (or, at the login window, the one user who has the recorder's LaunchAgent), keeps it
+non-writable for group and others, and deletes any `.previous` or `.failed` that an earlier swap left
+root-owned. Installing the 0.1.33 pkg over a 0.1.29 to 0.1.32 room therefore repairs the updater. If it
+cannot tell which user runs the recorder, it says so in the install log and leaves the ownership alone.
+Check after installing: `ls -ld "/Applications/EvenScribe Room Recorder.app"` shows the room user, and
+`ls -d /Applications/*.previous /Applications/*.failed 2>/dev/null` shows nothing root-owned.
 
 ## Uninstall the helper daemon only
 Needs `sudo`. The recorder app keeps running; only the root helper goes.
@@ -170,11 +181,12 @@ If `installer` succeeds, `rm -rf "/Applications/EvenScribe Room Recorder.app.rol
 - Safe mode starts by itself after 3 launches in a row that do not last a minute.
 
 ## Known limit
-The app's self-updater swaps the bundle with a user-level move, so an updated app bundle is owned by the
-room user, not root. Since 0.1.32 that no longer matters for the helper: the root daemon runs its own
-root-only copy and nothing in the bundle. The app itself runs as the room user in any case. What an
-admin room user can still do by hand (they are admin, and could already `sudo`) is stop the daemon,
-delete its plist or its helper copy; that is detected (`helper_missing`) and not prevented.
+The app bundle is owned by the room user (so it can update itself), which means an admin room user can
+replace it. That cannot reach root: the daemon runs only its root-owned, signature-checked copy in
+`/Library/PrivilegedHelperTools`, and the helper accepts XPC clients only if they are signed by our
+certificate with the app's identifier. What an admin room user can still do by hand (they could already
+`sudo`) is stop the daemon, or delete its plist or helper copy; that is detected (`helper_missing`) and
+not prevented.
 
 ## Building the pkg (on the Mini, Terminal.app, as V)
 `apps/room-recorder/Packaging/sign-and-package.sh`

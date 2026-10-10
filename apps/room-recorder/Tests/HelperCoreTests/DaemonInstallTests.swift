@@ -29,6 +29,9 @@ import Testing
     var codesignCalls: URL { base.appendingPathComponent("codesign.calls") }
     var stub: URL { base.appendingPathComponent("launchctl") }
     var codesignStub: URL { base.appendingPathComponent("codesign") }
+    var chownStub: URL { base.appendingPathComponent("chown") }
+    var chownCalls: URL { base.appendingPathComponent("chown.calls") }
+    var usersDir: URL { base.appendingPathComponent("Users") }
 
     /// `realCodesign`: do not stub codesign, so the pinned requirement is checked for real.
     init(
@@ -60,7 +63,12 @@ import Testing
         echo "$@" >> '\(codesignCalls.path)'
         exit \(codesignFails ? 3 : 0)
         """.write(to: codesignStub, atomically: true, encoding: .utf8)
-      for url in [stub, codesignStub] {
+      try """
+        #!/bin/sh
+        echo "$@" >> '\(chownCalls.path)'
+        exit 0
+        """.write(to: chownStub, atomically: true, encoding: .utf8)
+      for url in [stub, codesignStub, chownStub] {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
       }
     }
@@ -73,6 +81,7 @@ import Testing
         "ETA_POSTINSTALL_TEST": "1", "ETA_INSTALL_LOCATION": apps.path, "ETA_DAEMON_DIR": daemons.path,
         "ETA_HELPER_DIR": helperDir.path, "ETA_LAUNCHCTL": stub.path, "ETA_SKIP_OWNERSHIP": "1",
         "ETA_LOG_PATH": "/var/log/room-recorder-helper.log", "PATH": "/usr/bin:/bin",
+        "ETA_USERS_DIR": usersDir.path, "ETA_CONSOLE_USER": "alice",
       ]
       if !realCodesign { environment["ETA_CODESIGN"] = codesignStub.path }
       process.environment = environment.merging(extraEnv) { $1 }
@@ -293,6 +302,112 @@ import Testing
     defer { box.tearDown() }
     #expect(try box.run().status == 1)
     #expect(box.launchctlCalls.isEmpty)
+  }
+
+  // ─── 0.1.33: the app bundle belongs to the room user; only the helper side is root ─────────────
+
+  /// Runs with ownership ON and chown replaced by a recorder, since a test cannot become root.
+  private func runOwning(_ box: Sandbox, extra: [String: String] = [:]) throws -> (status: Int32, output: String) {
+    try box.run(extraEnv: ["ETA_SKIP_OWNERSHIP": "0", "ETA_CHOWN": box.chownStub.path].merging(extra) { $1 })
+  }
+
+  @Test func theBundleIsHandedToTheConsoleUserAndNeverToRoot() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let result = try runOwning(box)
+    #expect(result.status == 0, "\(result.output)")
+    let chowns = box.lines(box.chownCalls)
+    #expect(chowns.contains("-R alice:staff \(box.app.path)"), "\(chowns)")
+    #expect(!chowns.contains { $0.contains("root:wheel") && $0.contains(box.app.path) }, "no root ownership of the bundle")
+    #expect(!chowns.contains { $0.hasPrefix("-R root") }, "nothing is chowned to root recursively any more")
+  }
+
+  @Test func theHelperCopyItsDirectoryAndThePlistStayRootWheel() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    _ = try runOwning(box)
+    let chowns = box.lines(box.chownCalls)
+    #expect(chowns.contains("root:wheel \(box.helperDir.path)"))
+    #expect(chowns.contains { $0.hasPrefix("root:wheel \(box.helperCopy.path).new.") }, "the staged copy, before it is moved in")
+    #expect(chowns.contains { $0.hasPrefix("root:wheel \(box.plist.path).tmp.") })
+    // and the installed layout is the 0.1.32 one
+    #expect(plistValue(box.plist.path, "Program") == box.helperCopy.path)
+    #expect(mode(box.helperCopy) == 0o755 && mode(box.helperDir) == 0o755 && mode(box.plist) == 0o644)
+    #expect(box.launchctlCalls == ["bootout system/\(Self.label)", "bootstrap system \(box.plist.path)"])
+  }
+
+  @Test func theBundleStaysWritableByItsOwnerAndNotByOthers() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: box.app.path)  // as a root-owned install leaves it
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: box.bundleHelper.path)
+    _ = try runOwning(box)
+    #expect(mode(box.app) & 0o200 != 0 && mode(box.bundleHelper) & 0o200 != 0, "the owner can write")
+    #expect(mode(box.app) & 0o022 == 0 && mode(box.bundleHelper) & 0o022 == 0, "group and others cannot")
+  }
+
+  @Test func atTheLoginWindowTheUserWhoHasTheRecordersAgentIsTheRoomUser() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let agents = box.usersDir.appendingPathComponent("alice/Library/LaunchAgents")
+    try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+    try "x".write(to: agents.appendingPathComponent("com.evenscribe.room-recorder.plist"), atomically: true, encoding: .utf8)
+    let me = NSUserName()
+    let result = try runOwning(box, extra: ["ETA_CONSOLE_USER": "loginwindow"])
+    #expect(result.status == 0)
+    #expect(box.lines(box.chownCalls).contains { $0.hasPrefix("-R \(me):") && $0.hasSuffix(box.app.path) }, "\(box.lines(box.chownCalls))")
+  }
+
+  @Test func ifNoSingleRoomUserCanBeFoundTheBundleOwnershipIsLeftAloneAndSaidSo() throws {
+    for agentCount in [0, 2] {
+      let box = try Sandbox()
+      defer { box.tearDown() }
+      for index in 0..<agentCount {
+        let agents = box.usersDir.appendingPathComponent("user\(index)/Library/LaunchAgents")
+        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+        try "x".write(to: agents.appendingPathComponent("com.evenscribe.room-recorder.plist"), atomically: true, encoding: .utf8)
+      }
+      let result = try runOwning(box, extra: ["ETA_CONSOLE_USER": "root"])
+      #expect(result.status == 0)
+      #expect(result.output.contains("could not tell which user runs the recorder"))
+      #expect(!box.lines(box.chownCalls).contains { $0.contains(box.app.path) }, "agents: \(agentCount)")
+      #expect(box.launchctlCalls.count == 2, "the helper side still installs")
+    }
+  }
+
+  @Test func aRootOwnedPreviousAndFailedLeftByAnEarlierSwapAreRemoved() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let previous = URL(fileURLWithPath: box.app.path + ".previous"), failed = URL(fileURLWithPath: box.app.path + ".failed")
+    for aside in [previous, failed] {
+      try FileManager.default.createDirectory(at: aside.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+      try "old".write(to: aside.appendingPathComponent("Contents/f"), atomically: true, encoding: .utf8)
+    }
+    // "Root" is this test's own uid, the only owner a test can create.
+    let result = try runOwning(box, extra: ["ETA_ROOT_UID": String(getuid())])
+    #expect(result.status == 0)
+    #expect(!FileManager.default.fileExists(atPath: previous.path) && !FileManager.default.fileExists(atPath: failed.path))
+    #expect(result.output.contains("removed the root-owned"))
+    #expect(FileManager.default.fileExists(atPath: box.app.path), "the app itself is untouched")
+  }
+
+  @Test func aPreviousTheRoomUserOwnsIsLeftForTheUpdaterToHandle() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let previous = URL(fileURLWithPath: box.app.path + ".previous")
+    try FileManager.default.createDirectory(at: previous.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+    _ = try runOwning(box)  // ROOT_UID stays 0, and this test's files are not owned by uid 0
+    #expect(FileManager.default.fileExists(atPath: previous.path), "the rollback copy a normal swap keeps is not destroyed")
+  }
+
+  @Test func reinstallingOverARootOwnedBundleReownsItEveryTime() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    _ = try runOwning(box)
+    _ = try runOwning(box)
+    let owned = box.lines(box.chownCalls).filter { $0 == "-R alice:staff \(box.app.path)" }
+    #expect(owned.count == 2)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path) == [Self.label])
   }
 
   @Test func theBundleIsMadeNonWritableForGroupAndOthers() throws {

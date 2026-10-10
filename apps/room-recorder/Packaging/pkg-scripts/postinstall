@@ -1,7 +1,7 @@
 #!/bin/sh
 # pkg postinstall, run by the installer as root.
 #
-#  1. Make the installed bundle root:wheel.
+#  1. Hand the installed app bundle to the console user, and clear what an earlier swap left root-owned.
 #  2. Install the privileged helper as a classic SYSTEM LaunchDaemon (0.1.32). That needs no user
 #     approval: it is not an SMAppService item, so macOS shows no Login Items prompt.
 #
@@ -15,6 +15,15 @@
 #
 # Upgrade = this script again: stage + verify the new copy, bootout, swap it in, rewrite the plist,
 # bootstrap. Idempotent. The self-updater never touches the copy; a helper change ships by pkg only.
+#
+# ─── THE APP BUNDLE BELONGS TO THE CONSOLE USER (0.1.33) ──────────────────────────────────
+# The root daemon runs only the verified copy above and pins its XPC client's signature, so the bundle
+# no longer needs root ownership. It used to be left root:wheel go-w, and that broke the self-updater
+# after ONE update: the next swap does `rm -rf .previous` and `mv bundle .previous` as the room user,
+# and neither works on a tree the user cannot write. So the bundle is chowned to the console user (as
+# before 0.1.29), and a `.previous` / `.failed` that an earlier swap left root-owned (the 0.1.29-0.1.32
+# state) is removed here, as root, so the next swap has a clean slate. The helper copy, its directory
+# and the daemon plist stay root:wheel, exactly as in 0.1.32.
 #
 # $2 is the install location the installer was given (/Applications).
 #
@@ -36,6 +45,10 @@ if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
   HELPER_DIR="${ETA_HELPER_DIR:-/Library/PrivilegedHelperTools}"
   LAUNCHCTL="${ETA_LAUNCHCTL:-/bin/launchctl}"
   CODESIGN="${ETA_CODESIGN:-/usr/bin/codesign}"
+  CHOWN="${ETA_CHOWN:-/usr/sbin/chown}"
+  CONSOLE_USER_OVERRIDE="${ETA_CONSOLE_USER:-}"
+  USERS_DIR="${ETA_USERS_DIR:-/Users}"
+  ROOT_UID="${ETA_ROOT_UID:-0}"
   SKIP_OWNERSHIP="${ETA_SKIP_OWNERSHIP:-0}"
   LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
 else
@@ -44,6 +57,10 @@ else
   HELPER_DIR="/Library/PrivilegedHelperTools"
   LAUNCHCTL="/bin/launchctl"
   CODESIGN="/usr/bin/codesign"
+  CHOWN="/usr/sbin/chown"
+  CONSOLE_USER_OVERRIDE=""
+  USERS_DIR="/Users"
+  ROOT_UID=0
   SKIP_OWNERSHIP=0
   LOG_PATH="/var/log/room-recorder-helper.log"
 fi
@@ -54,13 +71,53 @@ HELPER="$HELPER_DIR/$LABEL"
 PLIST="$DAEMON_DIR/$LABEL.plist"
 
 say() { echo "room-recorder postinstall: $*"; }
-own() { [ "$SKIP_OWNERSHIP" = "1" ] || /usr/sbin/chown root:wheel "$@"; }
+own() { [ "$SKIP_OWNERSHIP" = "1" ] || "$CHOWN" root:wheel "$@"; }
+
+# The user who runs the recorder: the console user, or, at the login window or over SSH, the one user
+# who has the recorder's LaunchAgent. Prints nothing when it cannot tell.
+room_user() {
+  if [ -n "$CONSOLE_USER_OVERRIDE" ]; then
+    console="$CONSOLE_USER_OVERRIDE"
+  else
+    console="$(/usr/bin/stat -f %Su /dev/console 2>/dev/null)"
+  fi
+  case "$console" in
+    ""|root|loginwindow) ;;
+    *) echo "$console"; return ;;
+  esac
+  found=""
+  count=0
+  for agent in "$USERS_DIR"/*/Library/LaunchAgents/com.evenscribe.room-recorder.plist; do
+    [ -f "$agent" ] || continue
+    count=$((count + 1))
+    found="$(/usr/bin/stat -f %Su "$agent")"
+  done
+  [ "$count" = "1" ] && echo "$found"
+}
 
 [ -d "$APP" ] || { say "no app at $APP"; exit 1; }
 
-# 1. The whole bundle, so no file the app or the daemon's installer put there can be changed by a room user.
-[ "$SKIP_OWNERSHIP" = "1" ] || /usr/sbin/chown -R root:wheel "$APP"
-/bin/chmod -R go-w "$APP"
+# 1. The bundle goes to the room user; root-owned leftovers of earlier swaps go away.
+# `.previous` and `.failed` are the updater's aside copies. Removed only when something in them is
+# owned by root, which is what a 0.1.29-0.1.32 swap left; a user-owned one the updater handles itself.
+for aside in "$APP.previous" "$APP.failed"; do
+  if [ -e "$aside" ] && [ -n "$(/usr/bin/find "$aside" -user "$ROOT_UID" -print -quit 2>/dev/null)" ]; then
+    /bin/rm -rf "$aside"
+    say "removed the root-owned $aside left by an earlier update"
+  fi
+done
+ROOM_USER="$(room_user)"
+if [ -n "$ROOM_USER" ] && [ "$SKIP_OWNERSHIP" != "1" ]; then
+  ROOM_GROUP="$(/usr/bin/id -gn "$ROOM_USER" 2>/dev/null)"
+  "$CHOWN" -R "$ROOM_USER:${ROOM_GROUP:-staff}" "$APP"
+  /bin/chmod -R u+rwX,go-w "$APP"
+  say "app bundle owned by $ROOM_USER"
+elif [ -z "$ROOM_USER" ]; then
+  say "could not tell which user runs the recorder; the bundle ownership is left as the installer made it"
+  /bin/chmod -R go-w "$APP"
+else
+  /bin/chmod -R u+rwX,go-w "$APP"
+fi
 
 # 2. The system LaunchDaemon.
 if [ ! -x "$BUNDLE_HELPER" ]; then

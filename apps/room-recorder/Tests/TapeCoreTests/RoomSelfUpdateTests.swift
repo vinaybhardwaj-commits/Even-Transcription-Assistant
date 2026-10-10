@@ -417,6 +417,52 @@ import Testing
     #expect(!launchctl.isEmpty && launchctl.allSatisfy { !$0.contains("system") }, "\(launchctl)")
   }
 
+  // 0.1.33 (refuter F1): the pkg used to leave the bundle root:wheel go-w, so the SECOND swap could not
+  // remove or reuse `.previous`. The bundle now belongs to the room user.
+  @Test func twoSuccessiveSwapsSucceedOnAUserOwnedTree() throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let helperDir = fixture.root.deletingLastPathComponent().appendingPathComponent("PrivilegedHelperTools")
+    try FileManager.default.createDirectory(at: helperDir, withIntermediateDirectories: true)
+    let copy = helperDir.appendingPathComponent("com.evenscribe.room-recorder.helper")
+    try Data("ROOT-HELPER-COPY".utf8).write(to: copy)
+    var versions: [String] = []
+    for version in ["0.1.8", "0.1.9", "0.1.10"] {
+      let staged = fixture.root.appendingPathComponent("staged-\(version)/EvenScribe Room Recorder.app")
+      try fixture.writeBundle(at: staged, version: version)
+      let run = try Self.runSwapScript(fixture, stagedBundle: staged, version: version)
+      #expect(run.status == 0, "swap to \(version)")
+      #expect(Self.readResult(fixture)?.outcome == .ok, "swap to \(version)")
+      versions.append(fixture.version(of: fixture.resident) ?? "?")
+    }
+    #expect(versions == ["0.1.8", "0.1.9", "0.1.10"])
+    #expect(fixture.version(of: fixture.previous) == "0.1.9", "the rollback copy is the version just before")
+    #expect(try Data(contentsOf: copy) == Data("ROOT-HELPER-COPY".utf8), "no swap touches the root helper copy")
+  }
+
+  @Test func controlATreeTheUserCannotWriteBlocksTheSecondSwap_thatWasTheDefect() throws {
+    // Stands in for the root-owned tree the old pkg left: `a-w` on the whole bundle. If this stops
+    // failing, the test above is no longer proving anything about ownership.
+    let fixture = try Fixture.make()
+    defer {
+      _ = try? Process.run(URL(fileURLWithPath: "/bin/chmod"), arguments: ["-R", "u+w", fixture.applications.path])
+      fixture.tearDown()
+    }
+    let first = fixture.root.appendingPathComponent("staged-a/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: first, version: "0.1.8")
+    #expect(try Self.runSwapScript(fixture, stagedBundle: first, version: "0.1.8").status == 0)
+    let lock = Process()
+    lock.executableURL = URL(fileURLWithPath: "/bin/chmod")
+    lock.arguments = ["-R", "a-w", fixture.resident.path, fixture.previous.path]
+    try lock.run()
+    lock.waitUntilExit()
+    let second = fixture.root.appendingPathComponent("staged-b/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: second, version: "0.1.9")
+    let run = try Self.runSwapScript(fixture, stagedBundle: second, version: "0.1.9")
+    #expect(run.status != 0 || Self.readResult(fixture)?.outcome != .ok, "a tree the user cannot write must block the swap")
+    #expect(fixture.version(of: fixture.resident) != "0.1.9")
+  }
+
   @Test func aChannelOfferingALowerVersionStagesNothingAndDefersNothing() async throws {
     // The whole updater, not just the predicate: a 0.1.29 app on a channel that offers 0.1.28 with
     // the session CLOSED downloads nothing, spawns nothing and leaves no result file.
