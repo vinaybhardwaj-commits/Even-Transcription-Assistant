@@ -16,7 +16,7 @@
  * end falls to rank 4 at the latest (a late click never wins, a Jev or acoustic end earlier than it still can).
  *
  * ACOUSTIC VETO. A Jev end in a row with ≥ 20 s of speech where the SAME voices go on into the next row is
- * rejected (a new voice arriving does not veto). A Jev end over zero diarized speech is DROPPED, never chosen. Every veto and contradiction is COUNTED, never silent.
+ * rejected (the ending consult's NON-DOCTOR voices; a new voice, or the doctor alone, does not veto). A Jev end over zero diarized speech is DROPPED, never chosen. Every veto and contradiction is COUNTED, never silent.
  * JEV MAY VETO, NEVER PERFORM: with no Jev answer the ranks 1, 3–6 still produce an end.
  */
 import type { Anchor } from "@/lib/encounter-clock/anchors";
@@ -48,6 +48,8 @@ export type RowFact = {
   other_s: number;
   /** Speaker letters heard in the row (DOC, B, C, …), segment-local. [] for a silent or compressed row. */
   voices: ReadonlyArray<string>;
+  /** Seconds of speech per speaker letter in the row (the timeline's `spk`). {} for a silent or compressed row. */
+  voice_s: Readonly<Record<string, number>>;
 };
 
 export type JevReading = {
@@ -75,6 +77,8 @@ export type SegmentFusionCounts = {
   veto_kind_no_speech: number;
   /** A Jev end in a segment with zero diarized speech: DROPPED, never chosen at rank 2. */
   veto_end_no_speech: number;
+  /** Vetoes decided with the doctor's identity unknown (no row labelled DOC): the old any-shared-voice rule was used. */
+  veto_doctor_unknown: number;
   contradiction_end_vs_click: number;
   click_late: number;
   late_start_applied: number;
@@ -109,7 +113,7 @@ export function acousticClose(rows: ReadonlyArray<RowFact>, from_ms: number): { 
 export function fuseSegment(input: SegmentFusionInput): SegmentFusion {
   const { anchor, rows, meta, jev } = input;
   const counts: SegmentFusionCounts = {
-    veto_end_speech_continues: 0, veto_kind_no_speech: 0, veto_end_no_speech: 0, contradiction_end_vs_click: 0, click_late: 0,
+    veto_end_speech_continues: 0, veto_kind_no_speech: 0, veto_end_no_speech: 0, veto_doctor_unknown: 0, contradiction_end_vs_click: 0, click_late: 0,
     late_start_applied: 0, late_start_refused: 0,
   };
   let start = anchor.start_ms - PRE_START_MS;
@@ -148,9 +152,21 @@ export function fuseSegment(input: SegmentFusionInput): SegmentFusion {
     const k = meta.findIndex((m) => m.t === jev.end_row);
     if (k >= 0) {
       const row = rows[k]!, next = rows[k + 1];
-      // ≥ 20 s in the row AND the SAME voices go on into the next row; a new voice arriving does not veto
-      const sameVoicesContinue = !!next && row.voices.some((v) => next.voices.includes(v));
-      if ((row.speech_s ?? 0) >= VETO_SPEECH_S && sameVoicesContinue) counts.veto_end_speech_continues++;
+      // RULING (settled): "same voices" = the same NON-doctor voices. The doctor is in almost every row, so DOC never
+      // counts. The veto needs >= 20 s of continuing speech in the NEXT row from the ending consult's non-doctor
+      // voices: DOC+C (new patient) and DOC alone (finishing up) do not veto; DOC+B continuing does.
+      // Doctor identity unknown (no row of the segment is labelled DOC): no voice is the doctor, and the previous
+      // rule (>= 20 s in the row and any shared voice goes on) is kept and flagged.
+      const doctorKnown = rows.some((r) => r.voices.includes("DOC"));
+      let vetoed: boolean;
+      if (!doctorKnown) {
+        vetoed = (row.speech_s ?? 0) >= VETO_SPEECH_S && !!next && row.voices.some((v) => next.voices.includes(v));
+        if (vetoed) counts.veto_doctor_unknown++;
+      } else {
+        const cont = !next ? 0 : row.voices.filter((v) => v !== "DOC").reduce((sum, v) => sum + (next.voice_s[v] ?? 0), 0);
+        vetoed = cont >= VETO_SPEECH_S;
+      }
+      if (vetoed) counts.veto_end_speech_continues++;
       else {
         const inRow = input.speech.filter((s) => s.end_ms > row.start_ms && s.start_ms < row.end_ms).map((s) => Math.min(s.end_ms, row.end_ms));
         jevEnd = inRow.length ? Math.max(...inRow) : row.start_ms;

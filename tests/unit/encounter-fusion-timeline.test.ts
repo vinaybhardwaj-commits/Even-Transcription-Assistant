@@ -8,6 +8,14 @@ import type { Anchor } from "@/lib/encounter-clock/anchors";
 
 const S = 1_790_000_000_000; // anchor start
 const MIN = 60_000;
+/** voice_s from the row's doc_s / other_s (other_s split evenly across the non-DOC letters). */
+const vs = (r: RowFact | Omit<RowFact, "voice_s">): RowFact => {
+  const others = r.voices.filter((v) => v !== "DOC");
+  const voice_s: Record<string, number> = {};
+  if (r.voices.includes("DOC")) voice_s.DOC = r.doc_s;
+  for (const v of others) voice_s[v] = r.other_s / others.length;
+  return { ...r, voice_s };
+};
 const PRE = 60_000; // PRD: Start = Pulse t_open − 60 s (literal, not imported)
 const anchor = (o: Partial<Anchor> = {}): Anchor => ({
   consult_key: "c1", room_id: "room_fake1", start_ms: S, close_kind: "open", end_clicked: false, end_click_ms: null, end_weak_ms: null,
@@ -20,7 +28,7 @@ function scenario(speechUntilMin: number, totalMin = 40, o: { docOnlyTailMin?: n
   for (let a = S - PRE; a < S + totalMin * MIN; a += 30_000) {
     const speaking = a >= S && a < S + speechUntilMin * MIN;
     const docTail = o.docOnlyTailMin != null && a >= S + speechUntilMin * MIN && a < S + (speechUntilMin + o.docOnlyTailMin) * MIN;
-    rows.push({ start_ms: a, end_ms: a + 30_000, sound: speaking || docTail ? "active" : "quiet", speech_s: speaking ? 25 : docTail ? 20 : 0, doc_s: speaking ? 15 : docTail ? 20 : 0, other_s: speaking ? 10 : 0, voices: speaking ? ["DOC", "B"] : docTail ? ["DOC"] : [] });
+    rows.push(vs({ start_ms: a, end_ms: a + 30_000, sound: speaking || docTail ? "active" : "quiet", speech_s: speaking ? 25 : docTail ? 20 : 0, doc_s: speaking ? 15 : docTail ? 20 : 0, other_s: speaking ? 10 : 0, voices: speaking ? ["DOC", "B"] : docTail ? ["DOC"] : [] }));
     meta.push({ t: relLabel(a - S), start_ms: a, end_ms: a + 30_000, probe_first: null, probe_last: null });
   }
   const speech = [{ start_ms: S, end_ms: S + speechUntilMin * MIN + (o.docOnlyTailMin ?? 0) * MIN }];
@@ -113,6 +121,7 @@ describe("vetoes are counted", () => {
   it("Jev end in a row with >= 20 s speech where speech continues is rejected", () => {
     const sc = scenario(10);
     const mid = sc.meta.find((m) => m.start_ms === S + 5 * MIN)!;
+    sc.rows.forEach((r) => { if (r.voice_s.B) r.voice_s = { DOC: 5, B: 20 }; }); // B carries 20 s into the next row
     const r = run(anchor(), jev({ end_row: mid.t, end_conf: 0.99 }), sc);
     expect(r.counts.veto_end_speech_continues).toBe(1);
     expect(r.rank).toBe(3);
@@ -134,7 +143,7 @@ describe("vetoes are counted", () => {
 
 describe("acousticClose and disjoint", () => {
   it("needs ACOUSTIC_QUIET_ROWS consecutive closing rows; tape_off outranks dead_mic outranks quiet", () => {
-    const mk = (sounds: string[]): RowFact[] => sounds.map((s, i) => ({ start_ms: i * 30_000, end_ms: i * 30_000 + 30_000, sound: s, speech_s: 0, doc_s: 0, other_s: 0, voices: [] }));
+    const mk = (sounds: string[]): RowFact[] => sounds.map((s, i) => vs({ start_ms: i * 30_000, end_ms: i * 30_000 + 30_000, sound: s, speech_s: 0, doc_s: 0, other_s: 0, voices: [] }));
     expect(acousticClose(mk(["active", "quiet", "quiet", "active", "quiet"]), 0)).toBeNull();
     expect(acousticClose(mk(["active", "quiet", "dead_mic", "tape_off"]), 0)).toMatchObject({ ms: 30_000, by: "tape_off" });
     expect(acousticClose(mk(["quiet", "quiet", "quiet"]), 0)).toMatchObject({ by: "non_speech" });
@@ -151,7 +160,7 @@ const talkRow = { sound: "active", speech_s: 25, doc_s: 12, other_s: 12, voices:
 function grid(fill: (a: number) => Partial<RowFact>, totalMin = 30) {
   const rows: RowFact[] = [], meta: RowMeta[] = [];
   for (let a = S - PRE; a < S + totalMin * MIN; a += 30_000) {
-    rows.push({ start_ms: a, end_ms: a + 30_000, sound: "quiet", speech_s: 0, doc_s: 0, other_s: 0, voices: [], ...fill(a) });
+    rows.push(vs({ start_ms: a, end_ms: a + 30_000, sound: "quiet", speech_s: 0, doc_s: 0, other_s: 0, voices: [], ...fill(a) }));
     meta.push({ t: relLabel(a - S), start_ms: a, end_ms: a + 30_000, probe_first: null, probe_last: null });
   }
   return { rows, meta };
@@ -183,7 +192,7 @@ describe("refuter probes P1-P3 (round 2 fixes D1-D3)", () => {
     expect(r.end_ms).toBe(S + 10 * MIN);
   });
   it("P2 control: the SAME voices going on into the next row still veto", () => {
-    const g = grid((a) => (a >= S && a < S + 14 * MIN ? { sound: "active", speech_s: 25, doc_s: 12, other_s: 13, voices: ["DOC", "B"] } : {}));
+    const g = grid((a) => (a >= S && a < S + 14 * MIN ? { sound: "active", speech_s: 25, doc_s: 5, other_s: 20, voices: ["DOC", "B"] } : {}));
     const speech = [{ start_ms: S, end_ms: S + 14 * MIN }];
     const r = fuseSegment({ anchor: anchor(), meta: g.meta, rows: g.rows, speech, doc_speech: speech, jev: jev({ end_row: "t+09:30", end_conf: 0.95 }) });
     expect(r.counts.veto_end_speech_continues).toBe(1);
@@ -215,5 +224,38 @@ describe("PRD values pinned as literals (kills M3 cap, M7 snap)", () => {
     const g = grid(() => ({ sound: "active", speech_s: 25, doc_s: 0, other_s: 25, voices: ["B"] }), 40);
     const r = fuseSegment({ anchor: anchor(), meta: g.meta, rows: g.rows, speech: [{ start_ms: S, end_ms: S + 40 * MIN }], doc_speech: [], jev: null });
     expect(r).toMatchObject({ closed_by: "cap_90m", end_ms: S + 90 * 60_000 });
+  });
+});
+
+// ── Refuter round 2 (D2 ruling): "same voices" = the same NON-doctor voices; the doctor never counts ────────────────
+describe("refuter R2a/R2b + control: the doctor's voice never counts towards the veto", () => {
+  const consult = { sound: "active", speech_s: 25, doc_s: 5, other_s: 20, voices: ["DOC", "B"] };
+  const run = (after: Partial<RowFact>, ending: Partial<RowFact> = consult) => {
+    const g = grid((a) => (a >= S && a < S + 10 * MIN ? ending : a >= S + 10 * MIN && a < S + 14 * MIN ? { sound: "active", ...after } : {}));
+    return fuseSegment({ anchor: anchor(), meta: g.meta, rows: g.rows, speech: [{ start_ms: S, end_ms: S + 14 * MIN }],
+      doc_speech: [{ start_ms: S, end_ms: S + 14 * MIN }], jev: jev({ end_row: "t+09:30", end_conf: 0.95 }) });
+  };
+  it("R2a DOC+B then DOC+C (new patient, doctor talking) does NOT veto", () => {
+    const r = run({ speech_s: 25, doc_s: 20, other_s: 5, voices: ["DOC", "C"] });
+    expect({ veto: r.counts.veto_end_speech_continues, by: r.closed_by }).toEqual({ veto: 0, by: "jev_end" });
+  });
+  it("R2b DOC+B then DOC alone (doctor finishing up) does NOT veto", () => {
+    const r = run({ speech_s: 20, doc_s: 20, other_s: 0, voices: ["DOC"] });
+    expect({ veto: r.counts.veto_end_speech_continues, by: r.closed_by }).toEqual({ veto: 0, by: "jev_end" });
+  });
+  it("control: DOC+B continuing with >= 20 s from B DOES veto", () => {
+    const r = run({ speech_s: 25, doc_s: 5, other_s: 20, voices: ["DOC", "B"] });
+    expect(r.counts.veto_end_speech_continues).toBe(1);
+    expect(r.closed_by).not.toBe("jev_end");
+  });
+  it("control edge: B continuing for 19 s does not veto, 20 s does (literal 20)", () => {
+    expect(run({ speech_s: 24, doc_s: 5, other_s: 19, voices: ["DOC", "B"] }).counts.veto_end_speech_continues).toBe(0);
+    expect(run({ speech_s: 25, doc_s: 5, other_s: 20, voices: ["DOC", "B"] }).counts.veto_end_speech_continues).toBe(1);
+  });
+  it("doctor identity unknown (no row labelled DOC): the old any-shared-voice rule applies and is flagged", () => {
+    const noDoc = { sound: "active", speech_s: 25, doc_s: 0, other_s: 25, voices: ["B", "C"] };
+    const r = run({ speech_s: 20, doc_s: 0, other_s: 20, voices: ["B"] }, noDoc);
+    expect(r.counts.veto_end_speech_continues).toBe(1);
+    expect(r.counts.veto_doctor_unknown).toBe(1);
   });
 });
