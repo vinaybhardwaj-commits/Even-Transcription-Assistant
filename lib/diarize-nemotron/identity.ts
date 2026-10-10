@@ -21,13 +21,13 @@ import { sql } from "@/lib/db";
 import { parseFlag } from "@/lib/flags";
 import type { EmbeddedSpeaker, EmbedRequestSpeaker } from "@/lib/diarize-embed";
 import type { ClinicianCentroid } from "@/lib/stt/diarize-window";
-import { shadowMatch, shadowTrusted, type ShadowGuard } from "@/lib/stt/losing-score";
+import { cosine, decodeFloat32, shadowMatch, shadowTrusted, type ShadowGuard } from "@/lib/stt/losing-score";
 import type { Anchor } from "@/lib/encounter-clock/anchors";
 import type { SpeakerRole, TimelineInput } from "@/lib/encounter-clock/timeline";
 
 export const NEMOTRON_IDENTITY_ENABLED_ENV = "NEMOTRON_IDENTITY_ENABLED";
 export const IDENT_CENTROID_SET_ENV = "IDENT_CENTROID_SET";
-export const CENTROID_SETS = ["voice_print", "voice_centroid:room_primary", "confirmed6"] as const;
+export const CENTROID_SETS = ["voice_print", "voice_centroid:room_primary", "confirmed6", "pulse_room"] as const;
 export type CentroidSet = (typeof CENTROID_SETS)[number];
 /** A failed pass is retried until this many attempts, then left failed. */
 export const IDENTITY_MAX_ATTEMPTS = 3;
@@ -176,6 +176,77 @@ export function speakerIdentities(
   return { speakers: rows, embedded: embeddedCount, guard, trusted };
 }
 
+// ── pulse_room: room-mic centroids per PULSE doctor uid (SUGGEST-ONLY) ────────────────────────────────
+
+/** The one model the pack's centroids and the Mini's /embed_speakers share; rows of any other model are never offered. */
+export const PULSE_ROOM_EMBEDDING_MODEL = "speechbrain/spkrec-ecapa-voxceleb";
+/** pulse_room matches only at a best cosine at or above this ... */
+export const PULSE_ROOM_MIN_COSINE = 0.65;
+/** ... and only when the best leads the runner-up by at least this; otherwise it abstains. */
+export const PULSE_ROOM_MIN_MARGIN = 0.05;
+/** Float slack so a value that is exactly on an edge in decimal is not lost to binary rounding (0.70 - 0.65 < 0.05). */
+const PULSE_ROOM_EPS = 1e-6;
+
+export type PulseRoomDecision = "match" | "abstain";
+
+/** PURE — the decision rule. A missing runner-up (a one-centroid set) has no margin to show, so it abstains. */
+export function decidePulseRoom(best: number | null, runnerUp: number | null): PulseRoomDecision {
+  if (best === null || runnerUp === null) return "abstain";
+  return best >= PULSE_ROOM_MIN_COSINE - PULSE_ROOM_EPS && best - runnerUp >= PULSE_ROOM_MIN_MARGIN - PULSE_ROOM_EPS ? "match" : "abstain";
+}
+
+/** A pulse_room speaker row: never a clinician id; a Pulse uid only on a match; both cosines always where compared. */
+export type PulseRoomSpeaker = {
+  speaker_label: string;
+  speech_ms: number;
+  decision: PulseRoomDecision | "not_compared";
+  pulse_doctor_uid: string | null;
+  best_cosine: number | null;
+  runner_up_cosine: number | null;
+  centroids_offered: number;
+  attribution: "voiceprint" | "none";
+};
+
+/**
+ * PURE — one row per Nemotron speaker against the pulse_room centroids (`clinician_id` of each centroid is the Pulse
+ * uid). The app computes the cosines itself from the embedding the Mini returns; the Mini's own match, if it made
+ * one, is ignored, because it knows neither the margin rule nor that these ids are not clinicians. Not greedy: two
+ * speakers may both be suggested the same uid. Ids and scores only.
+ */
+export function pulseRoomIdentities(
+  segs: ReadonlyArray<NemoSegment>,
+  plan: EmbedPlan,
+  embedded: ReadonlyArray<EmbeddedSpeaker>,
+  centroids: ReadonlyArray<ClinicianCentroid>,
+): { speakers: PulseRoomSpeaker[]; embedded: number } {
+  const speech = speechMsBySpeaker(segs);
+  const byRank = new Map(embedded.map((e) => [e.idx, e] as const));
+  const vecs = centroids
+    .map((c) => ({ uid: c.clinician_id, v: decodeFloat32(c.centroid_base64) }))
+    .filter((c): c is { uid: string; v: Float32Array } => c.v !== null);
+  let embeddedCount = 0;
+  const rows = plan.request.map((r): PulseRoomSpeaker => {
+    const idx = plan.speakerOfRank.get(r.idx)!;
+    const emb = decodeFloat32(byRank.get(r.idx)?.embedding_base64);
+    if (emb) embeddedCount++;
+    const base = { speaker_label: label(idx), speech_ms: speech.get(idx) ?? 0, centroids_offered: centroids.length };
+    if (!emb || vecs.length === 0) {
+      return { ...base, decision: "not_compared", pulse_doctor_uid: null, best_cosine: null, runner_up_cosine: null, attribution: "none" };
+    }
+    const scored = vecs.map((c) => ({ uid: c.uid, score: cosine(emb, c.v) })).sort((a, b) => b.score - a.score || (a.uid < b.uid ? -1 : 1));
+    const best = scored[0]!, runner = scored[1] ?? null;
+    const decision = decidePulseRoom(best.score, runner ? runner.score : null);
+    return {
+      ...base, decision,
+      pulse_doctor_uid: decision === "match" ? best.uid : null,
+      best_cosine: best.score, runner_up_cosine: runner ? runner.score : null,
+      attribution: "voiceprint",
+    };
+  });
+  rows.sort((a, b) => Number(a.speaker_label.slice(3)) - Number(b.speaker_label.slice(3)));
+  return { speakers: rows, embedded: embeddedCount };
+}
+
 // ── per-turn identity, probes, hypotheses ─────────────────────────────────────────────────────────────
 
 /** A stretch of one window's audio: one speaker (with their match, if any), or two at once (`straddle`, no name). */
@@ -292,6 +363,22 @@ export async function loadCentroidSet(set: CentroidSet): Promise<{ ok: true; cen
       centroids: rows
         .filter((r) => Array.isArray(r.embedding) && r.embedding.length > 0)
         .map((r) => ({ clinician_id: r.clinician_id, full_name: r.full_name ?? r.clinician_id, centroid_base64: encodeFloat32(r.embedding!.map(Number)) })),
+    };
+  }
+  if (set === "pulse_room") {
+    // Pulse doctor uid in the clinician_id slot: the Mini only embeds; pulseRoomIdentities does the matching.
+    const rows = (await sql`
+      SELECT pulse_doctor_uid, embedding
+        FROM pulse_doctor_voice
+       WHERE retired_at IS NULL
+         AND embedding_model = ${PULSE_ROOM_EMBEDDING_MODEL}
+       ORDER BY pulse_doctor_uid
+    `) as Array<{ pulse_doctor_uid: string; embedding: number[] | null }>;
+    return {
+      ok: true,
+      centroids: rows
+        .filter((r) => Array.isArray(r.embedding) && r.embedding.length > 0)
+        .map((r) => ({ clinician_id: r.pulse_doctor_uid, full_name: r.pulse_doctor_uid, centroid_base64: encodeFloat32(r.embedding!.map(Number)) })),
     };
   }
   return { ok: false, error: "centroid_set_undefined" };

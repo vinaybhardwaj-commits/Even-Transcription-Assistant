@@ -28,6 +28,14 @@ database credential. Nothing clinician-facing reads these rows.
 - At startup it deletes this user's `nemo-w-*` temp dirs that are over an hour old, left behind by a killed run. Model output with NaN or inf times posts `infer_failed`.
 - Never logged: clip URLs, the token, turns, audio paths. The log and `status.json` carry ids, codes, counts and timings.
 
+## LAB lane and probabilities (migration 0143)
+- **Lab jobs.** `nemotron_lab_run` (submitted with `scribe_job_submit`, lab only) queues items in `nemotron_lab_item`. The worker asks `GET /api/diarize/nemotron/lab/claim` ONLY when `/pending` answered 200 with no windows, so a production window is never delayed by lab work; the server also answers `reason: production_pending` and claims nothing while any window is claimable. One lab item per cycle, the same rate cap and the same `~/gpu.lock` per inference (and per embedding) as production.
+- **Allow-list.** The server validates the overrides (preset enum, post-processing `key: number`, a bounded list of front-end steps, speaker limits, `return_probs`, `return_embeddings` ecapa|titanet); the worker validates AGAIN (`lab.py`) before anything reaches ffmpeg or NeMo, and builds the ffmpeg `-af` string from numbers only. A refused spec posts `failed / bad_spec` and fetches nothing.
+- **Results** go to `POST /api/diarize/nemotron/lab/ingest` and land only in `nemotron_lab_item`. Probability / embedding files are PUT to presigned URLs for keys the SERVER chose (`lab/nemotron/<run>/<idx>/…`); a failed upload posts `failed / upload_failed` (retried up to 3 attempts).
+- **Production probabilities.** `/pending` now also returns `probs_key` + `probs_put_url`; the worker saves the per-frame speaker probabilities (80 ms frames, NLP1: gzip, u8-quantised) there and posts `probs_r2_key`. Best effort: a failed upload posts the window without the pointer. An older server that sends no URL gets the old body exactly.
+- `NEMOTRON_LAB=0` (or `--no-lab`) never asks `/lab/claim`. Embedders are local files only: `NEMOTRON_TITANET_NEMO` (a titanet-large `.nemo`) and `NEMOTRON_ECAPA_DIR` (a speechbrain ecapa directory); unset = `embedder_unavailable` on the item (turns kept)).
+- **UNVERIFIED on a live box:** the NeMo calls in `engine_nemo.py` (`include_tensor_outputs`, `postprocessing_yaml`, the two non-stock presets, the embedders). The tests use a stub engine.
+
 ## Engine version (what each row is keyed on)
 - Stock: `model = nvidia/Nemotron-3-Diarization`, `model_rev = f667ed73aee57d40cc39428eb768b4fd87a0a29e`. It comes from the pinned HF revision, loaded from the local HF cache with `HF_HUB_OFFLINE=1`.
 - `config` holds the offline 30.4 s setting: spkcache 264, fifo 40, chunk 340, right context 40, update period 300. `config_hash = c80a0d84…96c6`.

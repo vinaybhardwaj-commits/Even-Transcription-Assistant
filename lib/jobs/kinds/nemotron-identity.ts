@@ -24,12 +24,13 @@ import {
   IDENTITY_MAX_ATTEMPTS,
   embedPlan,
   loadCentroidSet,
+  pulseRoomIdentities,
   segmentsFromTurns,
   speakerIdentities,
   type CentroidSet,
   type SpeakerIdentity,
 } from "@/lib/diarize-nemotron/identity";
-import { nemotronRowHeldOut, readIdentityRow, recordIdentityFailure, recordIdentityOk } from "@/lib/room-access/nemotron-identity";
+import { nemotronRowHeldOut, readIdentityRow, recordIdentityFailure, recordIdentityOk, recordPulseRoomOk } from "@/lib/room-access/nemotron-identity";
 import { JobArgsError, doneWith, type JobKind, type StepContext, type StepOutcome } from "../types";
 
 export const NEMOTRON_IDENTITY_KIND = "nemotron_identity";
@@ -73,6 +74,17 @@ async function run(ctx: StepContext): Promise<StepOutcome> {
   const emb = await embedSpeakers(bytes, plan.request, loaded.centroids, { batchThreshold: DIARIZE_BATCH_THRESHOLD, label: row.window_id });
   if (!emb.ok) return fail(emb.error, false);
 
+  if (set === "pulse_room") {
+    // Suggest-only: its own pure matcher and its own writer; nothing below this branch runs for it.
+    const pr = pulseRoomIdentities(segs, plan, emb.speakers, loaded.centroids);
+    const wrotePr = await recordPulseRoomOk(rowId, pr.speakers, loaded.centroids.length, pr.embedded);
+    const matchedPr = pr.speakers.filter((s) => s.decision === "match").length;
+    console.log("[nemotron-identity] ok", JSON.stringify({
+      window: row.window_id, set, speakers: pr.speakers.length, embedded: pr.embedded, matched: matchedPr,
+      abstained: pr.speakers.filter((s) => s.decision === "abstain").length, centroids: loaded.centroids.length, wrote: wrotePr,
+    }));
+    return doneWith({ state: wrotePr ? "ok" : "already_ok", speakers: pr.speakers.length, embedded: pr.embedded, matched: matchedPr });
+  }
   const out = speakerIdentities(segs, plan, emb.speakers, loaded.centroids, DIARIZE_BATCH_THRESHOLD);
   const wrote = await recordIdentityOk(rowId, set, out.speakers, loaded.centroids.length, out.embedded, out.trusted);
   const matched = out.speakers.filter((s) => s.clinician_id).length;

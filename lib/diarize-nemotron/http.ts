@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import { FlagValueError } from "@/lib/flags";
 import { nemotronShadowEnabled } from "@/lib/diarize-engine";
 import { checkWorkerBearer } from "./auth";
+import { nemotronLabEnabled } from "./lab";
 
 export const reply = (status: number, body: Record<string, unknown>) =>
   NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
@@ -42,4 +43,19 @@ export async function readJson(req: Request, maxChars: number): Promise<{ body: 
   } catch {
     return { fail: reply(400, { ok: false, error: "bad_json" }) };
   }
+}
+
+/**
+ * The LAB lane's gate: the worker bearer and the shadow flag (as `gate`), then NEMOTRON_LAB_ENABLED. Off → 404 `lab_disabled`, before any table is touched.
+ */
+export function labGate(req: Request, labEnabled: () => boolean = nemotronLabEnabled): NextResponse | null {
+  const shut = gate(req);
+  if (shut) return shut;
+  try {
+    if (!labEnabled()) return reply(404, { ok: false, error: "lab_disabled" });
+  } catch (e) {
+    if (e instanceof FlagValueError) return reply(500, { ok: false, error: "bad_flag" });
+    throw e;
+  }
+  return null;
 }
