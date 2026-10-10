@@ -157,7 +157,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const NEW = ["question_set_id", "question_set_sha256", "mode", "since", "mock"];
         const props = (t.inputSchema as Row & { properties: Row }).properties;
         for (const n of NEW) expect(props[n], n).toBeDefined();
-        // and subject_type's enum is JEV_SUBJECT_TYPES, which 0146 grew by consult, pitch, stt_run, stt_pair, doubt
+        // and subject_type's enum is JEV_SUBJECT_TYPES, which 0149 grew by consult, pitch, stt_run, stt_pair, doubt
         expect((props.subject_type as Row).enum).toEqual([...JEV_SUBJECT_TYPES]);
         const rest = Object.fromEntries(Object.entries(props).filter(([k]) => !NEW.includes(k)));
         const baseSchema = P.withOverrides(t.name, P.shortSchema(base.inputSchema)) as Row & { properties: Row };

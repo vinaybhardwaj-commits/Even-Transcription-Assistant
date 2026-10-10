@@ -1,5 +1,5 @@
 /**
- * Jev worker P1 on a REAL postgres:16 with EVERY migration applied (0146 applied TWICE). Jev is MOCKED: the client is a script, there is no network and no
+ * Jev worker P1 on a REAL postgres:16 with EVERY migration applied (0149 applied TWICE). Jev is MOCKED: the client is a script, there is no network and no
  * real call. Window/subject ids only; the one distinctive string below ("ZZ-TEXT-ZZ") stands for transcript text and must never reach a row or `progress`.
  *
  * P1.1 migration, CHECK drift, backfill, the legacy writer.   P1.2 sync, hash, status moves.   P1.3 the jev_ask step machine, replay, no text, mock rows.
@@ -151,11 +151,11 @@ suite("the Jev worker on postgres:16", () => {
     pg.start();
     H.pg = pg as never;
     pg.exec(`CREATE ROLE brain_svc NOLOGIN;`);
-    for (const f of ALL) if (!f.startsWith("0146_")) pg.exec(mig(f));
-    // legacy rows BEFORE 0146: the backfill and the legacy writer's key
+    for (const f of ALL) if (!f.startsWith("0149_")) pg.exec(mig(f));
+    // legacy rows BEFORE 0149: the backfill and the legacy writer's key
     pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, answer) VALUES ('jd_legacy1', 'probe', 'pr_1', 'u1_phase', 'u1-phase-w1', 'jev-1.13.0', '{"type":"choice","choice":"history","probabilities":{"history":1},"confidence":1}');`);
-    pg.exec(mig("0146_jev_worker.sql"));
-    pg.exec(mig("0146_jev_worker.sql"));   // twice, cleanly
+    pg.exec(mig("0149_jev_worker.sql"));
+    pg.exec(mig("0149_jev_worker.sql"));   // twice, cleanly
     _clearUsesForTests();
     registerUse({
       use: "stt_quality", setId: "smoke", subjectType: "stt_run",
@@ -175,7 +175,7 @@ suite("the Jev worker on postgres:16", () => {
       expect(idx.map((r) => r.indexname)).toEqual(expect.arrayContaining(["uq_jev_decision_legacy_key", "uq_jev_decision_worker_key"]));
       expect(idx.map((r) => r.indexname)).not.toContain("uq_jev_decision_subject_question_version");
       const g = await rows`SELECT table_name FROM information_schema.role_table_grants WHERE grantee = 'brain_svc' AND table_name LIKE 'jev\\_%' ORDER BY 1`;
-      expect(g.map((r) => r.table_name), "only 0144's three tables are granted; 0146 grants nothing").toEqual(["jev_decision", "jev_window_signal", "jev_window_text"]);
+      expect(g.map((r) => r.table_name), "only 0144's three tables are granted; 0149 grants nothing").toEqual(["jev_decision", "jev_window_signal", "jev_window_text"]);
     });
     it("the subject_type CHECK is exactly JEV_SUBJECT_TYPES (drift test), pitch included", async () => {
       const c = await rows`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'jev_decision_subject_type_chk'`;

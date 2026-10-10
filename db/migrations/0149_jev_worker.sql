@@ -1,5 +1,5 @@
 -- =====================================================================
--- 0146 — the Jev worker: versioned question sets, a call ledger, a breaker, a decision log widened (Jev P1 #55, PRD §4-§6, §9)
+-- 0149 — the Jev worker: versioned question sets, a call ledger, a breaker, a decision log widened (Jev P1 #55, PRD §4-§6, §9)
 --
 -- ADDITIVE AND IDEMPOTENT. Every table is CREATE ... IF NOT EXISTS; every column is ADD COLUMN IF NOT EXISTS; every
 -- CHECK is dropped-if-exists and re-added; the one backfill is `WHERE question_set_id IS NULL`, so a second run touches
@@ -210,7 +210,7 @@ COMMENT ON TABLE jev_call IS 'One row per Jev systemOne call (ledger and dead le
 COMMENT ON TABLE jev_breaker IS 'Circuit breaker, one row per use, in the DATABASE because serverless instances share no memory. PRD §9.2.';
 
 INSERT INTO schema_migrations (version, name)
-VALUES (146, '0146_jev_worker')
+VALUES (149, '0149_jev_worker')
 ON CONFLICT DO NOTHING;
 
 COMMIT;

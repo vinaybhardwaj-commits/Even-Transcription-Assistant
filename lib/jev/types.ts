@@ -27,7 +27,7 @@ export type JevRequest = { state: unknown; questions: Record<string, JevQuestion
  * CHECK all answer to it, and a drift test compares the CHECK's values against it. 'probe' (0118) is a
  * 60 s slice of a room-day, asked about by the E-6 fusion.
  *
- * 0146 (Jev P1) added the worker's subjects: consult, pitch (<consult_key>#p<n>), stt_run, stt_pair, doubt (<consult_key>#d<n>).
+ * 0149 (Jev P1) added the worker's subjects: consult, pitch (<consult_key>#p<n>), stt_run, stt_pair, doubt (<consult_key>#d<n>).
  *
  * 'turn' is DUAL-USE (W41 F3, eta-refuter-2 PASS on jev-fix/f3-legacy-askjev @ 1acfe40, condition
  * accepted): NOTESAFE's own use is one room_turn row; lib/jobs/kinds/jev-role.ts's Arm D role job
