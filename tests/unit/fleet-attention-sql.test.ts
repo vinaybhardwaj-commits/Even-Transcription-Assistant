@@ -153,6 +153,8 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
       expect(r.items).toEqual([]);
       expect(r.kiosk_health).toBeUndefined();
       expect(warn).toHaveBeenCalledTimes(1);
+      // TS-E1: a failed kiosk-health read makes reachability UNKNOWN for every Mac, never a poller-only verdict
+      expect(r.reachability?.every((x) => x.state === "unknown")).toBe(true);
       warn.mockRestore();
     } finally {
       pg.exec(noRecord("db/migrations/0126_kiosk_health_events.sql") + noRecord("db/migrations/0127_kiosk_health_machine_received_idx.sql"));
@@ -209,8 +211,12 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
 
   // ---- R1 (b): the poller has not reached the Mac for 3 minutes -------------------------------------------------------------------------------
 
-  it("R1(b) — the poller's newest row `unreachable` for >= 3 min, matched on the RAW hostname; since is where the current unreachable run began; a newer ok clears it", async () => {
-    pg.exec([
+  // TS-E1 (#36): "unreachable" is now judged from the Mac's own heartbeats (room_install.last_seen_at, the kiosk-health heartbeat, an ok poller row), not from
+  // the poller's failure. The poller's `unreachable` rows below are the Tailscale-off noise that used to raise this.
+  const lastSeen = (room: string, ago: string) => `UPDATE room_install SET last_seen_at = now() - interval '${ago}' WHERE room_id = '${room}';`;
+
+  it("R1(b) — nothing heard from the Mac (app poll 15 min ago, poller failing) for > 180 s; since is the last sign of life; a newer ok poller row clears it", async () => {
+    pg.exec(lastSeen("r4", "15 minutes") + [
       presence("poller", M4, "ok", "30 minutes", '{"locked": false}'),
       presence("poller", M4, "ok", "20 minutes", '{"locked": false}'),
       presence("poller", M4, "unreachable", "15 minutes", '{"locked": false}'),
@@ -219,17 +225,32 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     ].join("\n"));
     const r = await attention();
     expect(kindsOf(r)).toEqual(["r4:asleep"]);
-    expect(r.items[0]!.detail).toContain("unreachable on the network since");
+    expect(r.items[0]!.detail).toContain("unreachable since");
     expect(minutesBetween(r.items[0]!.since, Date.now() - 15 * 60_000)).toBeLessThan(1);
+    expect(r.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "unreachable", source: "app_poll" });
     pg.exec(presence("poller", M4, "ok", "10 seconds", '{"locked": false}'));
     expect(await attention().then((x) => x.items)).toEqual([]);
   });
 
-  it("R1(b) — not yet 3 minutes, or a poller row older than 10 minutes (the poller itself may be down), raises nothing", async () => {
-    pg.exec([presence("poller", M4, "ok", "30 minutes"), presence("poller", M4, "unreachable", "2 minutes"), presence("poller", M4, "unreachable", "1 minute")].join("\n"));
-    expect(await attention().then((x) => x.items)).toEqual([]);
-    pg.exec(`TRUNCATE pulse_presence_events;` + [presence("poller", M4, "ok", "40 minutes"), presence("poller", M4, "unreachable", "22 minutes"), presence("poller", M4, "unreachable", "12 minutes")].join("\n"));
-    expect(await attention().then((x) => x.items)).toEqual([]);
+  it("R1(b) — TAILSCALE OFF: the poller says `unreachable` for an hour but the app polled 2 s ago (or kiosk-health 40 s ago): nothing is raised, and Bench names the source", async () => {
+    const failing = [presence("poller", M4, "ok", "90 minutes"), presence("poller", M4, "unreachable", "60 minutes"), presence("poller", M4, "unreachable", "10 minutes"), presence("poller", M4, "unreachable", "1 minute")].join("\n");
+    pg.exec(lastSeen("r4", "2 seconds") + failing);
+    let r = await attention();
+    expect(r.items).toEqual([]);
+    expect(r.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "reachable", source: "app_poll" });
+    // the app is quiet but the kiosk-health daemon still heartbeats
+    pg.exec(lastSeen("r4", "20 minutes") + `INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES (now() - interval '40 seconds', '${M4}', 'b', 1, 'daemon', 'heartbeat', now() - interval '40 seconds', '{}'::jsonb);`);
+    r = await attention();
+    expect(r.items.filter((i) => i.kind === "asleep")).toEqual([]);
+    expect(r.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "reachable", source: "kiosk_health" });
+    expect(r.degraded).toBeUndefined();
+  });
+
+  it("R1(b) — a Mac nobody has heard from in 2 h is `unknown`, not unreachable: nothing is raised", async () => {
+    pg.exec(lastSeen("r4", "3 hours") + presence("poller", M4, "unreachable", "1 minute"));
+    const r = await attention();
+    expect(r.items).toEqual([]);
+    expect(r.reachability?.find((x) => x.room_id === "r4")).toMatchObject({ state: "unknown", source: null });
   });
 
   it("R1(b) — an unreachable poller does not make a room red while its recording is demonstrably delivering audio", async () => {
@@ -240,8 +261,8 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     expect(kindsOf(await attention())).not.toContain("r6:asleep");
   });
 
-  it("R1(b) — POLLER KEYS ACROSS THE 5 Oct RENAME: a run of `unreachable` rows that began under the short key (consul4) and continues under the full hostname is ONE run", async () => {
-    pg.exec([
+  it("R1(b) — POLLER KEYS ACROSS THE 5 Oct RENAME: an `ok` row filed under the short key (consul4) is the newest sign of life and ends an unreachable verdict", async () => {
+    pg.exec(lastSeen("r7", "40 minutes") + [
       presence("poller", "consul4", "ok", "60 minutes", '{"locked": false}'),
       presence("poller", "consul4", "unreachable", "40 minutes", '{"locked": false}'),
       presence("poller", "consul4", "unreachable", "30 minutes", '{"locked": false}'),
@@ -252,7 +273,7 @@ describe.runIf(HAVE_DOCKER)("getFleetAttention against postgres", () => {
     const r = await attention();
     expect(kindsOf(r)).toEqual(["r7:asleep"]);
     expect(minutesBetween(r.items[0]!.since, Date.now() - 40 * 60_000)).toBeLessThan(1);
-    // an `ok` under the SHORT key, newer than the unreachable run's start, ends the run: the newest row wins and `since` would restart
+    // an `ok` under the SHORT key is a sign of life: reachable via the poller
     pg.exec(presence("poller", "consul4", "ok", "30 seconds"));
     expect(await attention().then((x) => x.items)).toEqual([]);
   });

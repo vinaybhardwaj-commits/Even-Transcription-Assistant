@@ -35,6 +35,7 @@
  * A blocked decision is log_only with the blocking condition in why_not.
  */
 import { createHash } from "node:crypto";
+import { reachability } from "@/lib/reachability";
 import { IST_OFFSET_MS, isNeverLiveRoom, istMidnightOf, windowAt, type Config, type WindowState } from "./config";
 import type { RoomSense } from "./sense";
 import { paramsValid, type StewardAction } from "./tickets";
@@ -204,6 +205,7 @@ function ages(c: Ctx): Record<string, unknown> {
   const { s, age } = c;
   return {
     poller_ok_s: secs(age(s.reachable.poller_ok_at)),
+    app_poll_s: secs(age(s.reachable.app_poll_at)),
     kh_heartbeat_s: secs(age(s.reachable.kh_heartbeat_at)),
     last_chunk_s: secs(age(s.recording.last_chunk_24h_at ?? s.recording.last_chunk_at)),
     recorder_status_s: secs(age(s.recording.recorder_status?.received_at)),
@@ -351,26 +353,29 @@ function kioskAsleep(c: Ctx): Decision[] | null {
   if (chunkAge !== null && chunkAge < ASLEEP_NO_CHUNK_MS) return null;
   const pAge = age(s.reachable.poller_ok_at);
   const kAge = age(s.reachable.kh_heartbeat_at);
+  // TS-E1: the Room Recorder's own app poll (HTTPS) is a third sign of life. A Mac whose tailnet poller and kiosk-health daemon are both quiet but whose app is
+  // still polling is not asleep; the bench poll is also what survives Tailscale being switched off.
+  const aAge = age(s.reachable.app_poll_at);
   // A kiosk-health SLEEP marker (bench rule R11: the newest power event is a sleep / darkwake, < 12 h old, no heartbeat since sleep + 180 s) is positive evidence that the
   // Mac is asleep, even when it has been silent for hours (overnight sleep): it overrides the 2 h reachability rule below, provided the poller does not see the Mac.
   const sleepAt = s.reachable.sleep_at ?? null;
-  const sleeping = sleepAt !== null && s.reachable.kh_enrolled === true && (pAge === null || pAge > ASLEEP_AFTER_MS);
+  const sleeping = sleepAt !== null && s.reachable.kh_enrolled === true && (pAge === null || pAge > ASLEEP_AFTER_MS) && (aAge === null || aAge > ASLEEP_AFTER_MS);
   // F4: with neither source heard in the last 2 h the room's reachability is unknown (e.g. a room with no poller and no kiosk-health): do not call it asleep.
-  if (!sleeping && (pAge === null || pAge > REACHABILITY_DATA_MAX_AGE_MS) && (kAge === null || kAge > REACHABILITY_DATA_MAX_AGE_MS)) {
+  if (!sleeping && (pAge === null || pAge > REACHABILITY_DATA_MAX_AGE_MS) && (kAge === null || kAge > REACHABILITY_DATA_MAX_AGE_MS) && (aAge === null || aAge > REACHABILITY_DATA_MAX_AGE_MS)) {
     return [
-      mk(c, "sense_degraded", "log_only", {}, "no presence-poller or kiosk-health data in the last 2 h: reachability cannot be judged", "kiosk_asleep not emitted: no reachability data in 2 h", "warn", {
+      mk(c, "sense_degraded", "log_only", {}, "no app-poll, presence-poller or kiosk-health data in the last 2 h: reachability cannot be judged", "kiosk_asleep not emitted: no reachability data in 2 h", "warn", {
         missing: [...new Set([...s.missing, "reachability_2h"])].sort(),
       }),
     ];
   }
-  const pStale = pAge === null || pAge > ASLEEP_AFTER_MS;
-  const kStale = kAge === null || kAge > ASLEEP_AFTER_MS;
-  if (!sleeping && !(pStale && kStale)) return null;
+  // The same verdict Bench and R1 use (lib/reachability.ts): the newest of the three signs of life, 180 s fresh.
+  const reach = reachability({ app_poll_at: s.reachable.app_poll_at, kiosk_health_at: s.reachable.kh_heartbeat_at, poller_ok_at: s.reachable.poller_ok_at }, c.A);
+  if (!sleeping && reach.state === "reachable") return null;
   // positive failure signal for the fleet count only when the machine was awake today (it spoke since IST midnight / the window start)
   const floor = todayFloor(c);
-  const awakeToday = atOrAfter(s.reachable.poller_ok_at, floor) || atOrAfter(s.reachable.kh_heartbeat_at, floor);
-  const out: Decision[] = [mk(c, "kiosk_asleep", "ticket:wake", {}, "poller and kiosk-health heartbeat both stale > 3 min and no fresh chunk: the Mac looks asleep", null, "error", {}, { awake_today: awakeToday, sleep_marker_at: sleepAt })];
-  if ((pAge === null || pAge > ASLEEP_MESSAGE_AFTER_MS) && (kAge === null || kAge > ASLEEP_MESSAGE_AFTER_MS)) {
+  const awakeToday = atOrAfter(s.reachable.poller_ok_at, floor) || atOrAfter(s.reachable.kh_heartbeat_at, floor) || atOrAfter(s.reachable.app_poll_at, floor);
+  const out: Decision[] = [mk(c, "kiosk_asleep", "ticket:wake", {}, "app poll, poller and kiosk-health heartbeat all stale > 3 min and no fresh chunk: the Mac looks asleep", null, "error", {}, { awake_today: awakeToday, sleep_marker_at: sleepAt })];
+  if ((pAge === null || pAge > ASLEEP_MESSAGE_AFTER_MS) && (kAge === null || kAge > ASLEEP_MESSAGE_AFTER_MS) && (aAge === null || aAge > ASLEEP_MESSAGE_AFTER_MS)) {
     out.push(mk(c, "kiosk_asleep", "message", { kind: "asleep_10m", needs_hands: true, text: "kiosk unreachable for 10+ min inside the window — needs hands" }, "still unreachable after 10 min", "wake ticket did not bring the Mac back", "error", {}, { awake_today: awakeToday, sleep_marker_at: sleepAt }));
   }
   return awakeToday ? fcAll(out, "kiosk_asleep") : out;
@@ -624,13 +629,15 @@ function sessionDied(c: Ctx): Decision[] | null {
 function kioskHealthDown(c: Ctx): Decision[] | null {
   const { s, age } = c;
   if (s.reachable.kh_enrolled !== true) return null;
+  // TS-E1: "the Mac is up" = the poller saw it OR the Room Recorder app is polling (HTTPS). Tailscale being off must not hide a dead kiosk-health daemon.
   const pAge = age(s.reachable.poller_ok_at);
-  if (pAge === null || pAge > ASLEEP_AFTER_MS) return null; // the poller is not ok: that is the asleep rule's business
+  const aAge = age(s.reachable.app_poll_at);
+  if (reachability({ app_poll_at: s.reachable.app_poll_at, poller_ok_at: s.reachable.poller_ok_at }, c.A).state !== "reachable") return null; // neither sees the Mac: that is the asleep rule's business
   const kAge = age(s.reachable.kh_heartbeat_at);
   if (kAge !== null && kAge <= KH_DOWN_AFTER_MS) return null;
   // positive failure signal for the fleet count only when kiosk-health had reported today (silent AFTER reporting, not never enrolled-and-quiet)
   const reportedToday = atOrAfter(s.reachable.kh_heartbeat_at, todayFloor(c));
-  const out: Decision[] = [mk(c, "kiosk_health_down", "ticket:restart_kiosk_health", {}, "no kiosk-health heartbeat for 5 min while the poller is ok", null, "warn", {}, { reported_today: reportedToday })];
+  const out: Decision[] = [mk(c, "kiosk_health_down", "ticket:restart_kiosk_health", {}, "no kiosk-health heartbeat for 5 min while the Mac is up (poller ok or app polling)", null, "warn", {}, { reported_today: reportedToday })];
   if (kAge === null || kAge >= KH_DOWN_MESSAGE_AFTER_MS) {
     out.push(mk(c, "kiosk_health_down", "message", { kind: "kh_down_10m", needs_hands: true, text: "kiosk-health daemon still down after 10 min — needs hands" }, "still down after 10 min", "restart_kiosk_health did not bring it back", "warn", {}, { reported_today: reportedToday }));
   }

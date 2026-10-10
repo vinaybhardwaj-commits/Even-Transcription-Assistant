@@ -9,7 +9,8 @@
  *
  * R1 asleep (kind id kept; plain words "Mac not capturing")
  *                           a session is open AND the Mac is screen-locked or unreachable AND there is no audio evidence (no chunk in 10 min, or
- *                           <= 1 distinct level value in 120 s); OR the tailnet poller's newest row has been `unreachable` for >= 3 min. Red.
+ *                           <= 1 distinct level value in 120 s); OR the Mac is `unreachable` (TS-E1, lib/reachability.ts: no app poll, kiosk-health heartbeat or ok poller row
+ *                           for > 180 s, and one within 2 h). A failed tailnet SSH poll alone never counts while a heartbeat is fresh. Red.
  *                           A LOCKED SCREEN ALONE IS NOT A FAULT: rooms record normally under a locked screen (OPD 5 recorded all morning at
  *                           idle_s ~31,000 with locked=true; OPD 6/5/1 were remote-started at 09:13 under locked screens). Any audio evidence
  *                           clears R1 at once. See the comment on `resolveLockState` for what this cannot yet tell apart.
@@ -51,6 +52,7 @@
  */
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
+import { reachability, type Reachability } from "@/lib/reachability";
 import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
@@ -197,6 +199,11 @@ export type RoomAttentionInputs = {
   /** R1: raw ext events — any subset that includes the newest lock-determining ones; ordering is not assumed. */
   ext_events: PresenceEventLite[];
   poller: PollerLite | null;
+  /**
+   * TS-E1: the Mac's reachability from heartbeats (lib/reachability.ts). Supplied: it decides R1's "unreachable" and the poller's `unreachable` row is
+   * ignored. Absent (hand-built inputs only; the loader always supplies it, `unknown` when a source failed): the legacy poller-only rule.
+   */
+  reach?: Reachability;
   /** R5: genuine ext activity (login/active/focused heartbeat/encounter_*) in the last ACTIVITY_WINDOW_MS */
   recent_activity: { first_at: string; last_at: string } | null;
   /** The room's open bench_session (recording or paused), or null. */
@@ -276,6 +283,7 @@ export function classifyExtEvent(e: PresenceEventLite): "locked" | "awake" | nul
 export function resolveLockState(
   extEvents: readonly PresenceEventLite[],
   poller: PollerLite | null,
+  reach?: Reachability | null,
 ): { down: boolean; since: string | null; by: "locked" | "unreachable" | null } {
   let ext: { state: "locked" | "awake"; ts: number } | null = null;
   for (const e of extEvents) {
@@ -285,7 +293,16 @@ export function resolveLockState(
     if (!ext || ts >= ext.ts) ext = { state, ts };
   }
   let pol: { state: "locked" | "unreachable" | "awake"; ts: number; since: string } | null = null;
-  if (poller) {
+  if (reach) {
+    // TS-E1: "unreachable" comes from the Mac's own heartbeats, never from a failed SSH poll. The poller still says locked / awake while it can see the Mac.
+    if (reach.state === "unreachable" && reach.last_evidence_at) {
+      pol = { state: "unreachable", ts: Date.parse(reach.last_evidence_at), since: reach.last_evidence_at };
+    } else if (poller && poller.state !== "unreachable") {
+      const ts = Date.parse(poller.ts);
+      const state = poller.locked ? "locked" : poller.state === "ok" ? "awake" : null;
+      if (state && Number.isFinite(ts)) pol = { state, ts, since: poller.asleep_since ?? new Date(ts).toISOString() };
+    }
+  } else if (poller) {
     const ts = Date.parse(poller.ts);
     const state = poller.state === "unreachable" ? "unreachable" : poller.locked ? "locked" : poller.state === "ok" ? "awake" : null;
     if (state && Number.isFinite(ts)) pol = { state, ts, since: poller.asleep_since ?? new Date(ts).toISOString() };
@@ -407,7 +424,7 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
     //  (b) the poller's newest row is `unreachable` and has been for >= 3 minutes (with or without a session) — unless a recording session is
     //      demonstrably delivering audio, in which case the poller's failure to reach the Mac is a network fact, not a capture fact.
     // A locked screen with NO session open produces nothing: see resolveLockState for why.
-    const lock = resolveLockState(r.ext_events, r.poller);
+    const lock = resolveLockState(r.ext_events, r.poller, r.reach);
     if (recording && lock.down && lock.since && !audioOk) {
       const starts: number[] = [];
       if (!levelsMoving) {
@@ -432,7 +449,19 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
         `Go to ${name}: check the microphone cable and that the recorder app is running on the Mac, and restart the recorder app if the levels stay flat.`,
       );
     }
-    if (r.poller && r.poller.state === "unreachable" && !(recording && audioOk)) {
+    if (r.reach) {
+      // TS-E1: unreachable = the newest heartbeat from the Mac itself is over 180 s old (and not over 2 h: that is `unknown`, which raises nothing).
+      const lastEvidence = r.reach.last_evidence_at ? Date.parse(r.reach.last_evidence_at) : NaN;
+      if (r.reach.state === "unreachable" && Number.isFinite(lastEvidence) && now - lastEvidence >= UNREACHABLE_AFTER_MS && !(recording && audioOk)) {
+        mk(
+          "asleep",
+          "red",
+          lastEvidence,
+          `The Mac in ${name} has been unreachable since ${fmtIst(new Date(lastEvidence).toISOString(), now)} (nothing heard from it).`,
+          `Check the Mac in ${name} is on, awake and connected to the network, and that the recorder app is running.`,
+        );
+      }
+    } else if (r.poller && r.poller.state === "unreachable" && !(recording && audioOk)) {
       const pollTs = Date.parse(r.poller.ts);
       const unreachableSince = r.poller.unreachable_since ? Date.parse(r.poller.unreachable_since) : NaN;
       if (
@@ -756,12 +785,12 @@ async function safe<T>(source: string, degraded: string[], fn: () => Promise<T>,
   }
 }
 
-type RoomRow = { room_id: string; room_name: string; hostname: string | null };
+type RoomRow = { room_id: string; room_name: string; hostname: string | null; last_seen_at?: unknown };
 
 export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{ inputs: AttentionInputs; degraded: string[] }> {
   // The fleet itself is the one read that is allowed to abort: with no room list there is nothing to say.
   const roomRows = (await sql`
-    SELECT r.id AS room_id, r.name AS room_name, ri.hostname
+    SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.last_seen_at
       FROM room_install ri
       JOIN room r ON r.id = ri.room_id
      WHERE ri.retired_at IS NULL AND ri.enrolled_at IS NOT NULL AND r.disabled_at IS NULL
@@ -778,6 +807,12 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
       return { n, raw: r.hostname as string, legacy: legacyPollerKey(n) };
     });
   const mj = JSON.stringify(machines);
+
+  // R11-R17 and TS-E1 reachability — kiosk-health evidence for the same machines (every spelling), same asOf. Started here so ext-health can reuse it (one read).
+  // A failed read (readKioskHealth's ok:false, or a throw) is an empty map plus the "kiosk_health" source marked degraded, so "nothing needs attention" is not
+  // shown on the strength of evidence that was never read, and every Mac's reachability is `unknown`, not a poller-only guess.
+  const kioskKeys = [...new Set(roomRows.filter((r) => r.hostname && !isExtHealthExcluded(r.hostname)).flatMap((r) => machineKeys(r.hostname as string)))];
+  const khP = safe("kiosk_health", degraded, () => readKioskHealth(sql as never, kioskKeys, new Date(nowMs).toISOString()), { snapshots: new Map<string, KioskHealthSnapshot>(), ok: false });
 
   const [extLatest, activity, poller, sessions, samples, lastSamples, chunks, windows, outbox, reapedRows, listenerRows, failed, extRows] = await Promise.all([
     // R1 — the newest lock-determining ext event per machine (same predicate as classifyExtEvent).
@@ -946,13 +981,17 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
        ORDER BY c.room_id, c.acked_at DESC
     `) as Array<{ room_id: string; acked_at: unknown; error: string | null }>, []),
     // R8/R9 — the extension's health per presence machine (excluded machines have no row). Its own source name, so a failure degrades only R8/R9.
-    safe("ext_health", degraded, () => extHealth(sql, { asOf: nowMs, rooms: roomRows }), [] as ExtHealthRow[]),
+    safe("ext_health", degraded, async () => {
+      const k = await khP;
+      const rooms = roomRows.map((r) => {
+        const snap = r.hostname ? k.snapshots.get(normalizeHostname(r.hostname)) : undefined;
+        return { ...r, kiosk_health: { ok: k.ok, at: snap?.last_heartbeat_received_at ?? null } };
+      });
+      return extHealth(sql, { asOf: nowMs, rooms });
+    }, [] as ExtHealthRow[]),
   ]);
   const extHealthBy = new Map(extRows.filter((x) => x.room_id).map((x) => [x.room_id as string, x]));
-  // R11-R17 — kiosk-health evidence for the same machines (every spelling), same asOf. A failed read (readKioskHealth's ok:false, or a throw) is an empty
-  // map plus the "kiosk_health" source marked degraded, so "nothing needs attention" is not shown on the strength of evidence that was never read.
-  const kioskKeys = [...new Set(roomRows.filter((r) => r.hostname && !isExtHealthExcluded(r.hostname)).flatMap((r) => machineKeys(r.hostname as string)))];
-  const kh = await safe("kiosk_health", degraded, () => readKioskHealth(sql as never, kioskKeys, new Date(nowMs).toISOString()), { snapshots: new Map<string, KioskHealthSnapshot>(), ok: true });
+  const kh = await khP;
   if (!kh.ok) degraded.push("kiosk_health");
   const kioskHealth = kh.snapshots;
 
@@ -1045,6 +1084,14 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     frozenSince.set(roomId, toIso(since[0]?.since));
   }
 
+  // TS-E1 — reachability from the Mac's own heartbeats. A failed kiosk-health read makes every Mac `unknown` (and is already marked degraded): never the
+  // poller-only verdict, which is the false-"unreachable" this replaces.
+  const reachFor = (r: RoomRow, key: string | null, pollerOkTs: string | null): Reachability => {
+    if (!kh.ok) return { state: "unknown", source: null, last_evidence_at: null, age_s: null };
+    const snap = key ? kioskHealth.get(key) : undefined;
+    return reachability({ app_poll_at: toIso(r.last_seen_at), kiosk_health_at: snap?.last_heartbeat_received_at ?? null, poller_ok_at: pollerOkTs }, nowMs);
+  };
+
   const rooms: RoomAttentionInputs[] = roomRows.map((r) => {
     const key = r.hostname ? normalizeHostname(r.hostname) : null;
     const act = key ? actBy.get(key) : undefined;
@@ -1061,6 +1108,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
       room_name: r.room_name,
       machine: r.hostname,
       ext_events: key ? (extBy.get(key) ?? []) : [],
+      reach: reachFor(r, key, pol?.state === "ok" ? polTs : null),
       poller:
         pol && polTs
           ? { ts: polTs, state: pol.state, locked: pol.locked === "true", asleep_since: toIso(pol.asleep_since), unreachable_since: toIso(pol.unreachable_since) }
@@ -1107,6 +1155,9 @@ export async function getFleetAttention(nowMs: number = Date.now()): Promise<Fle
     generated_at: new Date(nowMs).toISOString(),
     items: computeAttention(inputs),
     rooms_checked: inputs.rooms.length,
+    ...(inputs.rooms.some((r) => r.reach)
+      ? { reachability: inputs.rooms.filter((r) => r.reach).map((r) => ({ room_id: r.room_id, room_name: r.room_name, state: r.reach!.state, source: r.reach!.source, age_s: r.reach!.age_s })) }
+      : {}),
     ...(inputs.kiosk_health && inputs.kiosk_health.size > 0 ? { kiosk_health: summarizeKioskHealth(inputs.kiosk_health, nowMs) } : {}),
     ...(degraded.length ? { degraded: [...new Set(degraded)] } : {}),
   };

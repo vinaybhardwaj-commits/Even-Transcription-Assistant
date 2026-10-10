@@ -5,7 +5,9 @@
  * every reboot. Cardiology rebooted 4 Oct 14:10 IST and its extension vanished (last ext row 14:09:27) while the tailnet poller kept saying
  * chrome_running=true, so nobody noticed for 24 h. This module reads state — never events — and says, per machine, which of seven things is true:
  *
- *   offline   the poller's newest row is not `ok` (unreachable), or it is older than POLLER_FRESH_S (5 min), or there is none. We cannot say anything
+ *   offline   TS-E1: the Mac is not `reachable` (lib/reachability.ts: the newest app poll / kiosk-health heartbeat / ok poller row is over 180 s old, or there is none).
+ *             A failed SSH poll alone never makes it offline while a heartbeat is fresh. When no `reach` is supplied (hand-built inputs) the old poller test applies:
+ *             the poller's newest row is not `ok` (unreachable), or it is older than POLLER_FRESH_S (5 min), or there is none. We cannot say anything
  *             about the extension of a Mac we cannot see; a separate rule (fleet-attention R1) owns "Mac unreachable".
  *   no_chrome poller ok and chrome_running=false, whatever the extension's age: Chrome is down, so the extension cannot report (R10, amber).
  *   ok / behind   an extension event arrived inside EXT_ALIVE_S (10 min): the extension is alive. `behind` when its version is below EXT_TARGET_VERSION.
@@ -41,6 +43,7 @@
  * DB half (tagged templates, bound parameters, no sql.unsafe — the Neon HTTP driver has none); `extHealth(db, {asOf})` is both together.
  */
 import type { WindowsDb } from "./db";
+import { REACH_UNKNOWN_AFTER_S, reachability, type Reachability } from "@/lib/reachability";
 import { machineKeys } from "./machine-keys";
 import { normalizeHostname } from "./types";
 
@@ -48,7 +51,7 @@ import { normalizeHostname } from "./types";
 export const EXT_TARGET_VERSION = "0.1.2";
 /** An extension event newer than this means the extension is alive. */
 export const EXT_ALIVE_S = 10 * 60;
-/** A poller row older than this says nothing about now: the machine is `offline` for our purposes. */
+/** Legacy rule only (no `reach` supplied). A poller row older than this says nothing about now: the machine is `offline` for our purposes. */
 export const POLLER_FRESH_S = 5 * 60;
 /** A tab_closed logout newer than this explains a quiet extension (no Pulse tab), so the status is no_tab rather than missing. */
 export const NO_TAB_WINDOW_S = 2 * 3600;
@@ -142,6 +145,11 @@ export type ExtHealthInput = {
   last_ext: { ts: string; event: string; reason: string | null } | null;
   /** The newest ext_version the machine has reported (not necessarily on the newest event), or null. */
   ext_version: string | null;
+  /**
+   * TS-E1: the Mac's reachability from heartbeats (lib/reachability.ts). Supplied: `offline` means not `reachable`, and the poller below is only a supplement
+   * (chrome_running, idle_s, console_user), used when it is `ok` and fresh. Absent: the legacy rule, where the poller alone decides `offline`.
+   */
+  reach?: Reachability;
   /** The newest poller row. `state` is the poller's own verdict ("ok" | "unreachable"); `idle_s` the console's idle seconds. */
   poller: { ts: string; state: string | null; chrome_running: boolean | null; console_user: string | null; idle_s?: number | null } | null;
   /** When the machine's CURRENT run of behind-target versions began (the first ext row after its last at-or-above-target row); null when unknown. */
@@ -162,6 +170,8 @@ export type ExtHealthRow = {
   ext_age_s: number | null;
   ext_version: string | null;
   version_state: VersionState;
+  /** TS-E1: reachability and the source that decided it; null when the input carried none (legacy). */
+  reach?: Reachability | null;
   poller: { ok: boolean; chrome_running: boolean | null; console_user: string | null; age_s: number | null; idle_s: number | null };
   status: ExtStatus;
   /** status === "behind" only: when the run of behind-target versions began, else null. */
@@ -245,11 +255,15 @@ export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: numb
     const vState = versionState(i.ext_version, target);
     const alive = extAge !== null && extAge < EXT_ALIVE_S;
 
+    // TS-E1: reachable from heartbeats when supplied, else the legacy poller-only test. The poller's chrome/idle fields are used only while it is ok and fresh.
+    const reachable = i.reach ? i.reach.state === "reachable" : pollerOk;
+    const pol = pollerOk ? i.poller : null;
+
     let status: ExtStatus;
-    if (!pollerOk) status = "offline";
-    else if (i.poller!.chrome_running === false) status = "no_chrome"; // Chrome is down: the extension cannot report, whatever its age
+    if (!reachable) status = "offline";
+    else if (pol?.chrome_running === false) status = "no_chrome"; // Chrome is down: the extension cannot report, whatever its age
     else if (alive) status = vState === "behind" ? "behind" : "ok";
-    else if (i.poller!.chrome_running === true) {
+    else if (pol?.chrome_running === true) {
       const tabClosed =
         i.last_ext?.event === "logout" && (i.last_ext.reason ?? "").includes("tab_closed") && extAge !== null && extAge < NO_TAB_WINDOW_S;
       // Nobody has touched the Mac since the extension went quiet: an idle Mac with no Pulse page, not a lost install. The poll can be up to a minute old,
@@ -269,6 +283,7 @@ export function computeExtHealth(inputs: readonly ExtHealthInput[], asOfMs: numb
       ext_age_s: extAge,
       ext_version: i.ext_version ?? null,
       version_state: vState,
+      reach: i.reach ?? null,
       poller: {
         ok: pollerOk,
         chrome_running: i.poller ? i.poller.chrome_running : null,
@@ -310,12 +325,23 @@ const toIso = (x: unknown): string | null => {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
 
-export type ExtHealthRoom = { room_id: string; room_name: string; hostname: string | null };
+/** `last_seen_at` = room_install.last_seen_at (the app poll). Absent = the loader reads it itself. */
+export type ExtHealthRoom = {
+  room_id: string;
+  room_name: string;
+  hostname: string | null;
+  last_seen_at?: unknown;
+  /**
+   * The caller's own kiosk-health read, so the heartbeat is not read twice: `ok:false` = that read failed (reachability is `unknown`), else `at` is the
+   * newest heartbeat's received_at (null = none). Absent = the loader reads it.
+   */
+  kiosk_health?: { ok: boolean; at: string | null };
+};
 
 /** The enrolled, un-retired, enabled rooms with a hostname (the fleet). The exclusion list is applied by loadExtHealthInputs. */
 export async function loadExtHealthRooms(db: WindowsDb): Promise<ExtHealthRoom[]> {
   const rows = (await db`
-    SELECT r.id AS room_id, r.name AS room_name, ri.hostname
+    SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.last_seen_at
       FROM room_install ri
       JOIN room r ON r.id = ri.room_id
      WHERE ri.retired_at IS NULL AND ri.enrolled_at IS NOT NULL AND r.disabled_at IS NULL AND ri.hostname IS NOT NULL
@@ -506,9 +532,41 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
     console.warn(`[ext-health] guard read failed: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
   }
 
+  // TS-E1 — the newest kiosk-health heartbeat per machine (2 h): reachability's second source. One bounded read; on a failure every Mac reads `unknown`
+  // (never `reachable`, never the legacy poller-only verdict), so a failed read cannot hide a dead Mac or invent a live one.
+  const khBy = new Map<string, string>();
+  let khOk = true;
+  const needRead = fleet.some((r) => r.kiosk_health === undefined);
+  if (needRead) try {
+    const allKeys = [...new Set(machines.flatMap((m) => m.keys))];
+    const khRows = (await db`
+      SELECT k.machine, max(k.received_at) AS at
+        FROM kiosk_health_events k
+       WHERE k.machine = ANY(${allKeys}::text[]) AND k.kind = 'heartbeat'
+         AND k.received_at > ${new Date(A - REACH_UNKNOWN_AFTER_S * 1000).toISOString()}::timestamptz AND k.received_at <= ${hi}::timestamptz
+       GROUP BY k.machine
+    `) as unknown as Array<{ machine: string; at: unknown }>;
+    for (const m of machines) {
+      let best: string | null = null;
+      for (const row of khRows) {
+        const at = toIso(row.at);
+        if (at && m.keys.includes(row.machine) && (best === null || Date.parse(at) > Date.parse(best))) best = at;
+      }
+      if (best) khBy.set(m.n, best);
+    }
+  } catch (e) {
+    khOk = false;
+    console.warn(`[ext-health] kiosk-health heartbeat read failed: ${e instanceof Error ? e.message.slice(0, 120) : "error"}`);
+  }
+
   return fleet.map((r): ExtHealthInput => {
     const n = normalizeHostname(r.hostname as string);
     const e = by.get(n);
+    const pollOkTs = e?.poller_state === "ok" ? toIso(e?.poller_ts) : null;
+    const supplied = r.kiosk_health;
+    const reach: Reachability = (supplied ? supplied.ok : khOk)
+      ? reachability({ app_poll_at: toIso(r.last_seen_at), kiosk_health_at: supplied ? supplied.at : (khBy.get(n) ?? null), poller_ok_at: pollOkTs }, A)
+      : { state: "unknown", source: null, last_evidence_at: null, age_s: null };
     const extTs = toIso(e?.ext_ts);
     const polTs = toIso(e?.poller_ts);
     return {
@@ -517,6 +575,7 @@ export async function loadExtHealthInputs(db: WindowsDb, asOf: Date, rooms?: rea
       room_name: r.room_name,
       last_ext: extTs ? { ts: extTs, event: e?.ext_event ?? "", reason: e?.ext_reason ?? null } : null,
       ext_version: e?.ver ?? null,
+      reach,
       poller: polTs
         ? {
             ts: polTs,
