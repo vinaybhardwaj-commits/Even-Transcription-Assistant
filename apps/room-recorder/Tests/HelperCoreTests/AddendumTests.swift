@@ -123,7 +123,8 @@ import Testing
   @Test func theUpdaterReplacesTheRunningBundleAndNothingElse() {
     let home = URL(fileURLWithPath: "/Users/room")
     let applications = URL(fileURLWithPath: "/Applications/EvenScribe Room Recorder.app")
-    #expect(RoomEngine.updaterBundle(bundleURL: applications, homeDirectory: home, fileExists: { _ in true }) == applications)
+    // (/Applications present, no system helper plist: the ordinary case.)
+    #expect(RoomEngine.updaterBundle(bundleURL: applications, homeDirectory: home, fileExists: { _ in false }) == applications)
     // A copy under ~/Applications with no /Applications install yet is the pre-pkg state: it may update itself.
     let old = URL(fileURLWithPath: "/Users/room/Applications/EvenScribe Room Recorder.app")
     #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { _ in false }) == old)

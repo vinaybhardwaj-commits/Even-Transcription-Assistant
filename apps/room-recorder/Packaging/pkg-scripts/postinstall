@@ -1,8 +1,105 @@
 #!/bin/sh
-# A root helper must never execute user-writable code: make the installed bundle root:wheel.
+# pkg postinstall, run by the installer as root.
+#
+#  1. A root helper must never execute user-writable code: make the installed bundle root:wheel.
+#  2. Install the privileged helper as a classic SYSTEM LaunchDaemon (0.1.32). This needs no user
+#     approval: it is not an SMAppService item, so macOS shows no Login Items prompt and there is
+#     nothing to click. The job runs the helper inside the installed bundle, offers the same Mach
+#     service the app's XPC client connects to, and is idempotent: running it again (a reinstall or an
+#     upgrade) rewrites the same plist and reloads the job.
+#
 # $2 is the install location the installer was given (/Applications).
-APP="${2:-/Applications}/EvenScribe Room Recorder.app"
-[ -d "$APP" ] || exit 1
-/usr/sbin/chown -R root:wheel "$APP"
+#
+# The recorder app is the product; the helper is an addition to it. So a failure to install or load
+# the daemon is reported in the install log and does NOT fail the install (exit 0). A missing app does.
+#
+# The ETA_* overrides exist for the dry-run test and are honoured ONLY when ETA_POSTINSTALL_TEST=1,
+# which the installer never sets.
+
+LABEL="com.evenscribe.room-recorder.helper"
+MACH_SERVICE="com.evenscribe.room-recorder.helper.xpc"
+APP_NAME="EvenScribe Room Recorder.app"
+
+if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
+  INSTALL_LOCATION="${ETA_INSTALL_LOCATION:-/Applications}"
+  DAEMON_DIR="${ETA_DAEMON_DIR:-/Library/LaunchDaemons}"
+  LAUNCHCTL="${ETA_LAUNCHCTL:-/bin/launchctl}"
+  SKIP_OWNERSHIP="${ETA_SKIP_OWNERSHIP:-0}"
+  LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
+else
+  INSTALL_LOCATION="${2:-/Applications}"
+  DAEMON_DIR="/Library/LaunchDaemons"
+  LAUNCHCTL="/bin/launchctl"
+  SKIP_OWNERSHIP=0
+  LOG_PATH="/var/log/room-recorder-helper.log"
+fi
+
+APP="$INSTALL_LOCATION/$APP_NAME"
+HELPER="$APP/Contents/MacOS/room-recorder-helper"
+PLIST="$DAEMON_DIR/$LABEL.plist"
+
+say() { echo "room-recorder postinstall: $*"; }
+
+[ -d "$APP" ] || { say "no app at $APP"; exit 1; }
+
+# 1. Ownership. The whole bundle, so no file the root daemon runs or loads can be changed by a room user.
+if [ "$SKIP_OWNERSHIP" != "1" ]; then
+  /usr/sbin/chown -R root:wheel "$APP"
+fi
 /bin/chmod -R go-w "$APP"
+
+# 2. The system LaunchDaemon.
+if [ ! -x "$HELPER" ]; then
+  say "no helper binary at $HELPER; the daemon is not installed"
+  exit 0
+fi
+
+TMP="$PLIST.tmp.$$"
+/bin/mkdir -p "$DAEMON_DIR"
+/bin/cat > "$TMP" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>Program</key>
+    <string>$HELPER</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HELPER</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>$MACH_SERVICE</key>
+        <true/>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>$LOG_PATH</string>
+</dict>
+</plist>
+PLIST
+
+if ! /usr/bin/plutil -lint "$TMP" > /dev/null 2>&1; then
+  say "the generated daemon plist did not lint; the daemon is not installed"
+  /bin/rm -f "$TMP"
+  exit 0
+fi
+if [ "$SKIP_OWNERSHIP" != "1" ]; then
+  /usr/sbin/chown root:wheel "$TMP"
+fi
+/bin/chmod 644 "$TMP"
+/bin/mv -f "$TMP" "$PLIST"
+
+# Out, then in. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
+"$LAUNCHCTL" bootout "system/$LABEL" > /dev/null 2>&1
+if "$LAUNCHCTL" bootstrap system "$PLIST"; then
+  say "helper daemon $LABEL loaded"
+else
+  say "launchctl bootstrap system $PLIST failed; the plist is in place and the job loads at the next boot"
+fi
 exit 0

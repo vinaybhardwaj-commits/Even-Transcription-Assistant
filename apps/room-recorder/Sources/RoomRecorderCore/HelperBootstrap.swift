@@ -127,6 +127,47 @@ public enum HelperBootstrap {
     return (status, state.lastError)
   }
 
+  /// What one probe found.
+  public struct Probe: Equatable, Sendable {
+    public var mode: String
+    public var registration: String
+    public var helperVersion: String?
+    public var xpcOK: Bool?
+    public var error: String?
+  }
+
+  /// One probe of the helper, in whichever mode it runs (0.1.32).
+  ///
+  /// - `launchd`: the pkg installed a system LaunchDaemon (its plist exists). The job needs no
+  ///   approval and is not an SMAppService item, so `register()` is NEVER called while it is there:
+  ///   two registrations of one Mach service would fight. The status is `enabled` when the helper
+  ///   answers a hello over XPC, `notAnswering` when it does not.
+  /// - `smappservice`: no system plist; the bundle's own daemon plist is registered as before
+  ///   (`registrationPass`).
+  /// - `none`: neither exists (`SMAppService` says notFound even after the attempts).
+  public static func probe(
+    systemPlistExists: () -> Bool, service: any HelperDaemonService, hello: () -> HelperResponse?,
+    openSettings: () -> Void, state: inout HelperRegistrationState, log: (String) -> Void
+  ) -> Probe {
+    if systemPlistExists() {
+      let reply = hello()
+      let answering = reply?.ok == true
+      return Probe(
+        mode: "launchd", registration: answering ? "enabled" : "notAnswering",
+        helperVersion: reply?.detail["helper_version"], xpcOK: answering, error: nil)
+    }
+    let result = registrationPass(service: service, openSettings: openSettings, state: &state, log: log)
+    var version: String?
+    var xpcOK: Bool?
+    if result.registration == "enabled" {
+      let reply = hello()
+      xpcOK = reply?.ok == true
+      version = reply?.detail["helper_version"]
+    }
+    let mode = result.registration == "notFound" ? "none" : "smappservice"
+    return Probe(mode: mode, registration: result.registration, helperVersion: version, xpcOK: xpcOK, error: result.error)
+  }
+
   public static func start(
     probeInterval: TimeInterval = 60,
     log: @escaping @Sendable (String) -> Void = { message in
@@ -138,24 +179,17 @@ public enum HelperBootstrap {
       var registration = HelperRegistrationState()
       var lastLogged = ""
       while !Task.isCancelled {
-        let service = SMAppDaemonService()
-        let result = registrationPass(
-          service: service, openSettings: { SMAppService.openSystemSettingsLoginItems() },
-          state: &registration, log: log)
-        var version: String?
-        var xpcOK: Bool?
-        if result.registration == "enabled" {
-          let reply = HelperClient().hello()
-          xpcOK = reply?.ok == true
-          version = reply?.detail["helper_version"]
-          if xpcOK == false, lastLogged != "xpc_down" { log("helper: enabled but hello over XPC failed"); lastLogged = "xpc_down" }
-        }
+        let found = probe(
+          systemPlistExists: { FileManager.default.fileExists(atPath: HelperIdentity.systemDaemonPlistPath) },
+          service: SMAppDaemonService(), hello: { HelperClient().hello() },
+          openSettings: { SMAppService.openSystemSettingsLoginItems() }, state: &registration, log: log)
         HelperStatusCache.shared.set(
-          HelperSnapshot(registration: result.registration, helperVersion: version, xpcOK: xpcOK),
-          error: result.error)
-        if lastLogged != result.registration {
-          log("helper: registration is \(result.registration)")
-          lastLogged = result.registration
+          HelperSnapshot(registration: found.registration, helperVersion: found.helperVersion, xpcOK: found.xpcOK, mode: found.mode),
+          error: found.error)
+        let summary = "\(found.mode)/\(found.registration)/\(found.xpcOK.map(String.init(describing:)) ?? "-")"
+        if lastLogged != summary {
+          log("helper: mode \(found.mode), registration \(found.registration)" + (found.xpcOK == false ? ", XPC not answering" : ""))
+          lastLogged = summary
         }
         try? await Task.sleep(nanoseconds: UInt64(probeInterval * 1_000_000_000))
       }

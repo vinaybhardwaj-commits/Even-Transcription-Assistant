@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import FleetCore
+import HelperCore
 import Foundation
 import TapeCapture
 import TapeCore
@@ -829,10 +830,16 @@ public actor RoomEngine {
   /// itself once the `/Applications` install exists: the swap would put a new version where nothing
   /// is meant to run.
   static func updaterBundle(
-    bundleURL: URL, homeDirectory: URL, fileExists: (String) -> Bool
+    bundleURL: URL, homeDirectory: URL, fileExists: (String) -> Bool,
+    systemHelperPlist: String = HelperIdentity.systemDaemonPlistPath
   ) -> URL? {
     let bundle = bundleURL.standardizedFileURL
     guard bundle.pathExtension == "app" else { return nil }
+    // 0.1.32. A root LaunchDaemon runs the helper from inside this bundle. The updater swaps the
+    // WHOLE bundle with a user-level move, which would leave a user-owned helper binary referenced
+    // by a root job. It cannot chown to root, and it cannot swap everything but the helper, so while
+    // that job is installed the updater is off; a root-installed pkg is how the bundle changes.
+    if fileExists(systemHelperPlist) { return nil }
     let userApplications =
       homeDirectory.appendingPathComponent("Applications", isDirectory: true).standardizedFileURL.path + "/"
     if bundle.path.hasPrefix(userApplications), fileExists("/Applications/" + bundle.lastPathComponent) {
@@ -1397,6 +1404,7 @@ public actor RoomEngine {
           fields.helperRegistration = helper?.registration
           fields.helperXPCOK = helper?.xpcOK
           fields.helperRegistrationError = HelperStatusCache.shared.registrationError
+          fields.helperMode = helper?.mode
           return fields
         }
         let response = try await remote.pollCommands(
@@ -4170,7 +4178,8 @@ public actor RoomEngine {
         lastEvent: lastEvent?.name,
         lastEventAt: lastEvent?.at,
         helperRegistration: HelperStatusCache.shared.snapshot?.registration,
-        helperRegistrationError: HelperStatusCache.shared.registrationError))
+        helperRegistrationError: HelperStatusCache.shared.registrationError,
+        helperMode: HelperStatusCache.shared.snapshot?.mode))
   }
 
   /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the

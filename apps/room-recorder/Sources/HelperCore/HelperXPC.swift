@@ -63,11 +63,15 @@ public struct HelperSnapshot: Equatable, Sendable {
   public var registration: String
   public var helperVersion: String?
   public var xpcOK: Bool?
+  /// `launchd` (a system LaunchDaemon the pkg installed), `smappservice` (the bundle's own daemon plist,
+  /// registered by the app) or `none` (neither is there). Nil until the app has looked.
+  public var mode: String?
 
-  public init(registration: String, helperVersion: String?, xpcOK: Bool?) {
+  public init(registration: String, helperVersion: String?, xpcOK: Bool?, mode: String? = nil) {
     self.registration = registration
     self.helperVersion = helperVersion
     self.xpcOK = xpcOK
+    self.mode = mode
   }
 }
 

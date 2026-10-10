@@ -102,6 +102,8 @@ public struct InstallPollFields: Equatable, Sendable {
   public var helperXPCOK: Bool?
   /// 0.1.31. Why `register()` last refused, `domain=… code=…: …`, bounded to 200. Absent when it has not.
   public var helperRegistrationError: String?
+  /// 0.1.32. `launchd`, `smappservice` or `none`.
+  public var helperMode: String?
 
   public init(
     installID: String,
@@ -331,6 +333,7 @@ public struct InstallPollFields: Equatable, Sendable {
     // ── TS-H2 #39 ───────────────────────────────────────────────────────────────────────────
     add("helper_version", helperVersion)
     add("helper_registration", helperRegistration)
+    add("helper_mode", helperMode)
     add("helper_registration_error", helperRegistrationError.map { String($0.prefix(200)) })
     if let helperXPCOK {
       items.append(URLQueryItem(name: "helper_xpc_ok", value: helperXPCOK ? "true" : "false"))

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import HelperCore
 import RoomRecorderCore
 
 private let usage = """
@@ -197,6 +198,10 @@ private enum RoomRecorderCLI {
         ResidentApplication.run {
           // TS-H2 #39. Registers the privileged helper and starts reporting its state.
           HelperBootstrap.start()
+          if FileManager.default.fileExists(atPath: HelperIdentity.systemDaemonPlistPath) {
+            FileHandle.standardError.write(Data(
+              "room-recorder: self-update is off: a root LaunchDaemon runs the helper from this bundle; update with the pkg\n".utf8))
+          }
           do {
             let bench = BenchClient(configuration: configuration)
             let recovery: (any RoomRetainedArchiveRecovering)?

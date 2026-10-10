@@ -45,20 +45,27 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    Both must start with `/Applications/EvenScribe Room Recorder.app/`.
 5. Check the right app is running. The path in the output must start with `/Applications/`:
    `pgrep -fl "room-recorder run"`
-6. **Approve the background item.** On first launch macOS shows *Background Items Added*. If it does
-   not, open **System Settings › General › Login Items & Extensions** and under *Allow in the
-   Background* switch ON **EvenScribe Room Recorder** (the helper). Enter the admin password if asked.
-   The app opens this pane itself once if approval is pending.
+6. **No approval click (0.1.32).** The pkg's postinstall installs the helper as a classic system
+   LaunchDaemon, which macOS does not ask the user to approve: no Login Items prompt, no Screen
+   Sharing. Check it is loaded and answering (the first line must be the job, `state = running`):
+   `sudo launchctl print system/com.evenscribe.room-recorder.helper | head -20`
+   and that the app and the daemon plist are owned by root:
+   `ls -ld "/Applications/EvenScribe Room Recorder.app" /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`
+   Both must show `root  wheel`, and the plist `-rw-r--r--`. If `launchctl print` says it could not
+   find the service, load it by hand:
+   `sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`
+   Installing the same pkg again is safe: it rewrites the same plist and reloads the job.
 7. **Re-grant the microphone** if asked. The app moved from `~/Applications` to `/Applications`, so
    macOS may ask again: **System Settings › Privacy & Security › Microphone**, switch ON
    **EvenScribe Room Recorder**. If it is already ON, leave it.
-   Since 0.1.30 the app calls `SMAppService` `register` on every start (a no-op once registered) and
-   logs the answer to `launchd.log` (`helper: registration is …`). The answer is also in
-   `status.json` (`helper_registration`, plus `helper_registration_error` when macOS refused) and on the
-   bench row. `requiresApproval` means approve it in the pane above, over Screen Sharing if need be.
-   `notFound` means the bundle has no daemon plist, or the app is not running from `/Applications`.
+   The app reports how the helper runs as `helper_mode` in `status.json` and on the bench row:
+   `launchd` (the system daemon above; `helper_registration` is `enabled` once it answers over XPC,
+   `notAnswering` if the job is there but silent), `smappservice` (no system plist, so the app asks
+   macOS to register the bundle's own daemon plist, which DOES need approval in Login Items), or `none`.
+   While the system plist exists the app never calls `register()`: two registrations of one Mach
+   service would fight. `helper_registration_error` carries macOS's refusal in the other modes.
 8. Wait about 90 seconds, then check this room's bench row: `mic_state=authorized`,
-   `helper_registration=enabled`, `helper_xpc_ok=true`, `helper_version=0.2.0-h2`.
+   `helper_mode=launchd`, `helper_registration=enabled`, `helper_xpc_ok=true`, `helper_version=0.2.0-h2`.
 
 ## Remove the old ~/Applications copy (only after steps 5 and 8 pass)
 Never delete it before the new app is the one running.
@@ -90,10 +97,31 @@ key, registers nothing and sends nothing unless `config.json` says `"fleet_clien
 only a hand on this Mac sets. Install 0.1.30 first; turn it on per room, later, when the server queues
 commands. It cannot be turned on by the server.
 
-## Updates only go up (0.1.30)
+## Updates only go up (0.1.30), and are OFF while the root daemon is installed (0.1.32)
 The self-updater installs a version only if it is HIGHER than the one running, and only into the
 bundle that is running. A channel that offers an older version is ignored, so withdrawing a release no
 longer rolls rooms back. To roll a room back, install the older pkg by hand.
+
+With the system LaunchDaemon installed, **the self-updater is switched off** (the app logs
+`self-update is off: a root LaunchDaemon runs the helper from this bundle`). The updater swaps the
+whole bundle with a user-level move; that would leave a helper binary owned by the room user under a
+daemon that runs as root, and it cannot chown to root. So the bundle changes only through a pkg
+installed with `sudo installer`, which re-owns it to root:wheel and reloads the daemon. Rooms on
+0.1.32 therefore need each upgrade installed by hand (or by the fleet's root path when it exists).
+An admin user can still replace the bundle by hand (room accounts are admin); that was true before and
+is the known limit below.
+
+## Uninstall the helper daemon, or roll back to the app without it
+Both need `sudo`. The recorder app keeps running; only the root helper goes.
+```
+sudo launchctl bootout system/com.evenscribe.room-recorder.helper
+sudo rm /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist
+```
+Check: `sudo launchctl print system/com.evenscribe.room-recorder.helper` must say it could not find the
+service, and `ls /Library/LaunchDaemons | grep room-recorder` must print nothing. The app then reports
+`helper_mode=smappservice` (or `none`) and, from the next start, tries the old SMAppService path.
+The self-updater comes back as soon as the plist is gone. Installing the pkg again re-adds the daemon.
+To go back to 0.1.31 entirely: remove the daemon as above, then `sudo installer` the 0.1.31 pkg.
 
 ## Switches
 - Kill file: `sudo mkdir -p "/Library/Application Support/EvenScribe" && sudo touch "/Library/Application Support/EvenScribe/helper-disabled"`

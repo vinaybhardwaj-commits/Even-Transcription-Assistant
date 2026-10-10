@@ -404,8 +404,11 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   public var helperRegistration: String?
   /// The last reason `register()` refused, bounded; nil while it has not.
   public var helperRegistrationError: String?
+  /// 0.1.32. `launchd`, `smappservice` or `none`; see `HelperSnapshot.mode`.
+  public var helperMode: String?
 
   enum CodingKeys: String, CodingKey {
+    case helperMode = "helper_mode"
     case state
     case sessionID = "session_id"
     case helperRegistration = "helper_registration"
@@ -428,8 +431,10 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     lastEvent: String? = nil,
     lastEventAt: Date? = nil,
     helperRegistration: String? = nil,
-    helperRegistrationError: String? = nil
+    helperRegistrationError: String? = nil,
+    helperMode: String? = nil
   ) {
+    self.helperMode = helperMode
     self.helperRegistration = helperRegistration
     self.helperRegistrationError = helperRegistrationError.map { String($0.prefix(200)) }
     self.state = state
