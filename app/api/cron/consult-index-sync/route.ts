@@ -1,5 +1,5 @@
 /**
- * /api/cron/consult-index-sync — hourly sync of CONSULT's name-free index (R2 eta-lab-results consult/index/) into consult_index (0146); the first run is the backfill of every consult already cut.
+ * /api/cron/consult-index-sync — hourly sync of CONSULT's name-free index (R2 eta-lab-results consult/index/) into consult_index (0147); the first run is the backfill of every consult already cut.
  *
  * AUTH: Bearer CRON_SECRET or Bearer MIGRATION_SECRET on GET (the schedule); admin cookie or Bearer MIGRATION_SECRET on POST (the manual door). The bare x-vercel-cron header authorises nothing.
  * 200 { ok, sync_id, manifest_rows, rows_read, rows_written, inserted, changed, rows_skipped, skipped }; a store/integrity/db failure is a non-200 PIPELINE_FAILED, so "0 rows" never means "could not look".

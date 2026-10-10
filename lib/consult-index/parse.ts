@@ -1,5 +1,5 @@
 /**
- * lib/consult-index/parse.ts — PURE: CONSULT's name-free index (R2 eta-lab-results consult/index/latest.jsonl + manifest.json) to rows of the consult_index table (0146).
+ * lib/consult-index/parse.ts — PURE: CONSULT's name-free index (R2 eta-lab-results consult/index/latest.jsonl + manifest.json) to rows of the consult_index table (0147).
  *
  * THE FORMAT, as the cutter writes it (measured on the box 10 Oct, field NAMES only): one JSON object per line, append-only upstream (the latest line per consult_uid wins); the mirror keeps
  * rows with status "cut" whose r2.status is "mirrored". Fields read here: consult_uid, ist_date, room_id, room_slug, span_start / span_end ("YYYY-MM-DD HH:MM:SS.mmm" in IST, no zone),

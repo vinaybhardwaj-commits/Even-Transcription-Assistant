@@ -4,7 +4,7 @@
  *
  * V's STANDING RULE (restated 08 Oct ~20:40): only isolated consult audio goes to Sarvam. No other room audio, never whole windows. So the sources are
  *   { encounter_id }  a doctor-recorded encounter (audio production already sends to Sarvam today)         scope "encounter"
- *   { consult_uid }   a clip cut by the CONSULT cutter, resolved through the consult_index table (0146); refusals: consult_not_indexed, consult_sealed, consult_voice_isolated,
+ *   { consult_uid }   a clip cut by the CONSULT cutter, resolved through the consult_index table (0147); refusals: consult_not_indexed, consult_sealed, consult_voice_isolated,
  *                     mirror_minutes_missing, already_transcribed, audio_unreadable. A result for the SAME CUT VERSION and options already stored is returned, never re-sent.  scope "consult_clip"
  * Room / session arguments (room, from, to, session_id, from_ms, to_ms) are REFUSED with scope_consult_only.
  *

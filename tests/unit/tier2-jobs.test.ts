@@ -406,7 +406,7 @@ describe("submit", () => {
 });
 
 describe("the seven kinds", () => {
-  it("all twenty are registered (sarvam_consult_batch adds the batch form of consult Sarvam, 0146; nemotron_lab_run adds the Nemotron lab lane, 0143; S8A adds sarvam_transcribe and sarvam_translate, S7-0 rubric_run and rubric_bench, epic #23 c nemotron_identity, 0142 pulse_doctor_voice), and the three stubs fail not_implemented", async () => {
+  it("all twenty are registered (sarvam_consult_batch adds the batch form of consult Sarvam, 0147; nemotron_lab_run adds the Nemotron lab lane, 0143; S8A adds sarvam_transcribe and sarvam_translate, S7-0 rubric_run and rubric_bench, epic #23 c nemotron_identity, 0142 pulse_doctor_voice), and the three stubs fail not_implemented", async () => {
     // Slice C1 adds route_transcribe — the router's long transport. Slice J0 adds jev_english; J2/J3 add
     // jev_window and jev_role (bench-only, ETA-JEV-ARM-D). The list stays EXACT (toEqual, not a contains)
     // so a kind that appears without being intended still fails here.

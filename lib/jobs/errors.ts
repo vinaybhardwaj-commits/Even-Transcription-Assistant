@@ -85,7 +85,7 @@ export const JOB_ERROR_CODES = [
   "bench_set_missing",
   "bench_metric_unsupported",
   "consult_index_unavailable",
-  // consult index (0146): the Sarvam consult path
+  // consult index (0147): the Sarvam consult path
   "consult_index_integrity",
   "consult_not_indexed",
   "consult_sealed",

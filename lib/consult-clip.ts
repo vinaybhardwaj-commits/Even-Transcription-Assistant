@@ -1,7 +1,7 @@
 /**
  * lib/consult-clip.ts — may this consult go to Sarvam, and where is its audio? ONE function for the tool's pre-flight and the job's prepare step.
  * Order (each step before the next, so a refusal costs the least):
- *   1. the consult_index row (0146): none -> consult_not_indexed
+ *   1. the consult_index row (0147): none -> consult_not_indexed
  *   2. sealed -> consult_sealed;  voice_isolated -> consult_voice_isolated (the cutter's isolation flag; that output is not identity and is not sent);  no positive minutes -> mirror_minutes_missing
  *   3. a result for THIS cut version and these options already exists -> returned as `existing` (idempotent: never sent, never billed twice)
  *   4. a palimpsest stt / translate track already exists -> already_transcribed with the track reference (no double spend)

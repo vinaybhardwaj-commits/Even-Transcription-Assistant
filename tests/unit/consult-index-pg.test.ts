@@ -1,8 +1,8 @@
 /**
- * consult-index-pg.test.ts — the Scribe consult index on postgres:16 with EVERY migration (0146 included), through the real job runner and the real MCP tool. R2 (clips, results), the lab store (the name-free
+ * consult-index-pg.test.ts — the Scribe consult index on postgres:16 with EVERY migration (0147 included), through the real job runner and the real MCP tool. R2 (clips, results), the lab store (the name-free
  * index mirror, the Sarvam ledger) and the Sarvam gateway are fakes: no real call is made, no key is read. All ids are fake. DOCKER: CI host only.
  *
- *   1. migration 0146: twice, registers once, constraints hold;
+ *   1. migration 0147: twice, registers once, constraints hold;
  *   2. the hourly sync: the first run is the BACKFILL; a re-run changes nothing; a re-cut updates; `sealed` is sticky; a sha256 mismatch writes nothing; a missing mirror is consult_index_unavailable;
  *   3. scribe_sarvam / sarvam_transcribe on a consult_uid resolve through the index and send only that cut clip; the result is stored with model + revision under (consult_uid, cut_version);
  *   4. IDEMPOTENCY: the same cut asked again is answered from the stored result: no job, no gateway call, billed:false; a re-cut is a new ask;
@@ -182,12 +182,12 @@ beforeEach(() => {
 });
 afterEach(() => { C.setLabStoreForTests(null); });
 
-describe.skipIf(!HAVE)("migration 0146", () => {
+describe.skipIf(!HAVE)("migration 0147", () => {
   it("applies twice, registers once, and its constraints hold", async () => {
-    const text = readFileSync("db/migrations/0146_consult_index.sql", "utf8");
+    const text = readFileSync("db/migrations/0147_consult_index.sql", "utf8");
     pg.exec(text);
     pg.exec(text);
-    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 146`)[0]!.n).toBe(1);
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 147`)[0]!.n).toBe(1);
     const ins = (cols: string) => fails(`INSERT INTO consult_index (consult_uid, room_id, room_slug, ist_date, t0_ms, t1_ms, clip_r2_key, cut_version, source_sha256) VALUES (${cols});`);
     expect(ins(`'m1', 'r', 's', '${DAY}', 5, 5, 'consult-clips/a/b', 'v', 'h'`)).toMatch(/span_chk/);
     expect(ins(`'m2', 'r', 's', '${DAY}', 1, 5, 'bench/a/b', 'v', 'h'`)).toMatch(/key_chk/);
