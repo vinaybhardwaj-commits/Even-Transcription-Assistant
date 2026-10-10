@@ -29,6 +29,37 @@ describe("measureAudioMs", () => {
     expect(measureAudioMs(webm({ clusters }))).toBe(1439 * 5_000 + 2_500);
   });
 
+  it("flac (the CONSULT clips): STREAMINFO total samples / rate; the longer of that and a size floor (a header cannot understate); total samples 0 = unknown = null", () => {
+    // 44.1 kHz stereo 16-bit, 90 s claimed, a small file
+    const flac = (opts: { rate: number; channels: number; bits: number; samples: number; extra?: number }): Uint8Array => {
+      const b = new Uint8Array(42 + (opts.extra ?? 0));
+      b.set([0x66, 0x4c, 0x61, 0x43, 0x00, 0x00, 0x00, 0x22]); // "fLaC", STREAMINFO (last-flag 0, type 0), length 34
+      b[8] = 0x10; b[9] = 0x00; b[10] = 0x10; b[11] = 0x00; // block sizes
+      b[18] = (opts.rate >> 12) & 0xff; b[19] = (opts.rate >> 4) & 0xff;
+      b[20] = ((opts.rate & 0x0f) << 4) | (((opts.channels - 1) & 0x07) << 1) | (((opts.bits - 1) >> 4) & 0x01);
+      b[21] = (((opts.bits - 1) & 0x0f) << 4) | (Math.floor(opts.samples / 2 ** 32) & 0x0f);
+      const lo = opts.samples >>> 0;
+      b[22] = (lo >>> 24) & 0xff; b[23] = (lo >>> 16) & 0xff; b[24] = (lo >>> 8) & 0xff; b[25] = lo & 0xff;
+      return b;
+    };
+    expect(measureAudioMs(flac({ rate: 44_100, channels: 2, bits: 16, samples: 44_100 * 90 }))).toBe(90_000);
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 30 * 60 }))).toBe(1_800_000);
+    expect(measureAudioMs(flac({ rate: 48_000, channels: 1, bits: 24, samples: 48_000 * 5 * 3600 }))).toBe(18_000_000); // a sample count above 2^32 (36 bits)
+    // the header claims 10 s but the file holds 1.6 MB of 16 kHz mono 16-bit (>= 50 s at the raw ceiling): the size floor wins
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 10, extra: 1_600_000 }))).toBe(10_000); // the header claim wins over a smaller byte floor
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 0 }))).toBeNull();
+    // S8C-2: the byte floor is a TRUE lower bound (576000 B/s = raw 96 kHz x 24-bit x 2 ch): a crafted 15 MB file claiming ONE sample reads at least 26 s whatever params it names, and a real clip is never overstated
+    const big = (o: { rate: number; channels: number; bits: number; samples: number }) => flac({ ...o, extra: 15_000_000 - 42 });
+    expect(measureAudioMs(big({ rate: 16_000, channels: 1, bits: 16, samples: 1 }))).toBeGreaterThanOrEqual(26_000);
+    expect(measureAudioMs(big({ rate: 48_000, channels: 2, bits: 24, samples: 1 }))).toBeGreaterThanOrEqual(26_000);
+    // a real-shaped clip: 10 minutes of 16 kHz mono in about 4 MB reads as exactly its 10 minutes (header claim), not longer
+    expect(measureAudioMs(flac({ rate: 16_000, channels: 1, bits: 16, samples: 16_000 * 600, extra: 4_000_000 - 42 }))).toBe(600_000);
+    // only the cutter's format: rate 8k-96k, 1-2 channels, 16 or 24 bits; anything else is unknown (null), never guessed
+    for (const bad of [{ rate: 655_350, channels: 8, bits: 32 }, { rate: 7_999, channels: 1, bits: 16 }, { rate: 96_001, channels: 1, bits: 16 }, { rate: 16_000, channels: 3, bits: 16 }, { rate: 16_000, channels: 1, bits: 8 }, { rate: 16_000, channels: 1, bits: 32 }, { rate: 16_000, channels: 1, bits: 20 }]) expect(measureAudioMs(big({ ...bad, samples: 1 })), JSON.stringify(bad)).toBeNull();
+    for (const ok of [{ rate: 8_000, channels: 1, bits: 16 }, { rate: 96_000, channels: 2, bits: 24 }, { rate: 44_100, channels: 2, bits: 16 }]) expect(measureAudioMs(flac({ ...ok, samples: ok.rate * 60 }))).toBe(60_000);
+    expect(measureAudioMs(new Uint8Array([0x66, 0x4c, 0x61, 0x43, 0x01, 0, 0, 0x22, ...new Array(40).fill(0)]))).toBeNull(); // first block is not STREAMINFO
+  });
+
   it("nothing readable -> null (the caller refuses, it does not guess)", () => {
     expect(measureAudioMs(new Uint8Array(0))).toBeNull();
     expect(measureAudioMs(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]))).toBeNull();
