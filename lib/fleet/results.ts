@@ -71,7 +71,7 @@ export type ResultOutcome = { ok: true; status: 200; duplicate: boolean } | { ok
 
 export async function recordResult(sql: FleetSql, signerDeviceId: string, machine: string, b: ResultBody): Promise<ResultOutcome> {
   if (b.device_id !== signerDeviceId) return { ok: false, status: 403, code: "device_mismatch" };
-  const cmd = (await sql`SELECT cmd_id, device_id, state FROM fleet_commands WHERE cmd_id = ${b.cmd_id}`) as Array<{ cmd_id: string; device_id: string; state: string }>;
+  const cmd = (await sql`SELECT cmd_id, device_id, state, delivery_count FROM fleet_commands WHERE cmd_id = ${b.cmd_id}`) as Array<{ cmd_id: string; device_id: string; state: string; delivery_count: number }>;
   // a command issued to another device is indistinguishable from one that does not exist
   if (!cmd[0] || cmd[0].device_id !== signerDeviceId) return { ok: false, status: 404, code: "unknown_command" };
   const same = async (): Promise<boolean> => {
@@ -83,7 +83,9 @@ export async function recordResult(sql: FleetSql, signerDeviceId: string, machin
     return !!x && x.outcome === b.outcome && x.reason === b.reason && x.upload_key === (b.upload?.r2_key ?? null) && x.s && x.f && x.d; // jsonb = jsonb: key order and whitespace do not matter
   };
   if (cmd[0].state === "done") return (await same()) ? { ok: true, status: 200, duplicate: true } : { ok: false, status: 409, code: "RESULT_CONFLICT" };
-  if (cmd[0].state !== "delivered") return { ok: false, status: 409, code: "not_delivered" };
+  // 'expired' with a delivery on record = it was handed to the helper and ran out of time before the answer arrived (the issuer flips stale rows so 0151's index frees the verb)
+  const answerable = cmd[0].state === "delivered" || (cmd[0].state === "expired" && Number(cmd[0].delivery_count) > 0);
+  if (!answerable) return { ok: false, status: 409, code: "not_delivered" };
   const ins = await sql`
     INSERT INTO fleet_results (cmd_id, device_id, outcome, reason, started_at, finished_at, detail, upload_key)
     VALUES (${b.cmd_id}, ${signerDeviceId}, ${b.outcome}, ${b.reason}, ${b.started_at}::timestamptz, ${b.finished_at}::timestamptz, ${JSON.stringify(b.detail)}::jsonb, ${b.upload?.r2_key ?? null})
