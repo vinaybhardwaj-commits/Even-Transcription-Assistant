@@ -1,0 +1,33 @@
+{
+  "id": "stt-quality",
+  "version": "v0",
+  "use": "stt_quality",
+  "subject_type": "stt_run",
+  "state_schema": "stt-span-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "stt_usable",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is a transcript of part of an outpatient consultation, produced by speech recognition. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. Some lines may be garbled. Code features are given as buckets (repeat_ratio, chars_per_s, language). Judge the words; numbers, doses and dates are compared in code, not by you. QUESTION: Is this transcript usable for clinical analysis? RULES: A hallucinated repeated phrase counts as garbled. A short transcript that is clean is still usable. Answer only from the text.",
+        "criteria": {
+          "usable": "The text reads as real speech in the right language and is clean enough to analyse.",
+          "partly_usable": "Some spans are garbled but most is usable.",
+          "unusable_garbled": "Most of the text is garbled, repeated or nonsense.",
+          "unusable_wrong_language": "The text is in a language that is not what was spoken.",
+          "no_speech_text": "There is no speech in the text.",
+          "not_applicable": "The text is not a transcript of a consultation.",
+          "insufficient_evidence": "The text is too short or too unclear to judge."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ]
+    }
+  ]
+}

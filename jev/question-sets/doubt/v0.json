@@ -1,0 +1,93 @@
+{
+  "id": "doubt",
+  "version": "v0",
+  "use": "consult_rubric",
+  "subject_type": "doubt",
+  "state_schema": "doubt-excerpt-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "doubt_type",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is an excerpt of an outpatient consultation around one doubt a patient or companion raised: the doubt text with its time, then the lines from 45 seconds before to 150 seconds after. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. You are not shown anyone's earlier coding. Answer only from the excerpt. QUESTION: What is the doubt about?",
+        "criteria": {
+          "cost": "Cost or payment.",
+          "recovery": "Recovery or time off.",
+          "risk": "Risks or complications.",
+          "need_for_surgery": "Whether the intervention is needed.",
+          "alternatives": "Alternatives.",
+          "timing": "When to do it.",
+          "logistics": "Practical arrangements.",
+          "seriousness": "How serious the condition is.",
+          "other": "Something else.",
+          "not_a_doubt": "The excerpt does not hold a doubt.",
+          "insufficient_evidence": "The excerpt is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_a_doubt",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "raised_by",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is an excerpt of an outpatient consultation around one doubt a patient or companion raised: the doubt text with its time, then the lines from 45 seconds before to 150 seconds after. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. You are not shown anyone's earlier coding. Answer only from the excerpt. QUESTION: Who raised the doubt?",
+        "criteria": {
+          "patient": "The patient.",
+          "family": "A family member or companion.",
+          "unclear": "It is unclear who.",
+          "insufficient_evidence": "The excerpt is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "answered",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is an excerpt of an outpatient consultation around one doubt a patient or companion raised: the doubt text with its time, then the lines from 45 seconds before to 150 seconds after. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. You are not shown anyone's earlier coding. Answer only from the excerpt. QUESTION: Was the doubt answered? RULES: fully means the doctor addressed the whole doubt in the excerpt.",
+        "criteria": {
+          "fully": "Fully answered.",
+          "partly": "Partly answered.",
+          "deflected_to_desk": "Sent to the front desk or someone else.",
+          "ignored": "Not answered.",
+          "insufficient_evidence": "The excerpt is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "answer_quality",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is an excerpt of an outpatient consultation around one doubt a patient or companion raised: the doubt text with its time, then the lines from 45 seconds before to 150 seconds after. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. You are not shown anyone's earlier coding. Answer only from the excerpt. QUESTION: How good is the answer? RULES: A garbled recognised reply is not vague; use insufficient_evidence when the words are unreadable.",
+        "criteria": {
+          "clear_specific": "Clear and specific.",
+          "vague": "Vague.",
+          "inaccurate_misleading": "Inaccurate or misleading.",
+          "no_answer": "There is no answer.",
+          "insufficient_evidence": "The excerpt is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    }
+  ]
+}

@@ -25,6 +25,8 @@ export type QuestionDef = {
   body: JevQuestion;
   option_order?: (typeof OPTION_ORDERS)[number];
   gate_question_id?: string | null;
+  /** The gate question's options that keep THIS question open; any other gate answer overwrites it in code (the raw answer is kept). Absent = open unless the gate answer is one of the gate's escape options. */
+  gate_requires?: string[];
   escape_options?: string[];
   bands?: { act: number; caution: number } | null;
   calibration?: { method: "temperature" | "isotonic" | "none"; params_sha?: string } | null;
@@ -81,7 +83,15 @@ export function validateSetFile(raw: unknown): QuestionSetFile {
       for (const e of q.escape_options ?? []) if (!keys.includes(e)) bad(`${q.question_id}: escape option ${e} is not one of its options`);
     } else if ((q.option_order ?? "forward") !== "forward") bad(`${q.question_id}: only a choice has an option order`);
   }
-  for (const q of f.questions as QuestionDef[]) if (q.gate_question_id && !seen.has(q.gate_question_id)) bad(`${q.question_id}: gate_question_id names no question of this set`);
+  for (const q of f.questions as QuestionDef[]) {
+    if (q.gate_question_id && !seen.has(q.gate_question_id)) bad(`${q.question_id}: gate_question_id names no question of this set`);
+    if (q.gate_requires !== undefined) {
+      const gate = (f.questions as QuestionDef[]).find((x) => x.question_id === q.gate_question_id);
+      if (!gate || gate.kind !== "choice") bad(`${q.question_id}: gate_requires needs a gate_question_id that names a choice`);
+      const opts = Object.keys((gate!.body as { criteria: Record<string, unknown> }).criteria);
+      if (!Array.isArray(q.gate_requires) || q.gate_requires.length === 0 || q.gate_requires.some((o) => !opts.includes(o))) bad(`${q.question_id}: gate_requires must be a non-empty subset of ${q.gate_question_id}'s options`);
+    }
+  }
   return f as QuestionSetFile;
 }
 
@@ -94,7 +104,7 @@ export function hashableBody(body: JevQuestion): unknown {
 export function questionSha(q: QuestionDef): string {
   return hashOf({
     question_id: q.question_id, kind: q.kind, body: hashableBody(q.body), option_order: q.option_order ?? "forward",
-    gate_question_id: q.gate_question_id ?? null, escape_options: q.escape_options ?? [],
+    gate_question_id: q.gate_question_id ?? null, gate_requires: q.gate_requires, escape_options: q.escape_options ?? [],
   });
 }
 

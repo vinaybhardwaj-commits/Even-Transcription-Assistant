@@ -1,0 +1,414 @@
+{
+  "id": "pitch-uptake",
+  "version": "v0",
+  "use": "consult_rubric",
+  "subject_type": "pitch",
+  "state_schema": "transcript-pitch-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "pitch_type",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: What type of suggestion is it? RULES: Any of the seven types is a pitch. Surgery is not a special case.",
+        "criteria": {
+          "investigation": "The suggestion is a investigation.",
+          "procedure": "The suggestion is a procedure.",
+          "surgery": "The suggestion is a surgery.",
+          "medication": "The suggestion is a medication.",
+          "physio": "The suggestion is a physio.",
+          "follow_up": "The suggestion is a follow up.",
+          "other": "The suggestion is a other.",
+          "no_pitch": "There is no doctor suggestion near that time.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "no_pitch",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "uptake",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: How does the patient (or companion) respond to this pitch? RULES: Judge the patient-side response, not the doctor. A cost objection that blocks the plan is cost_block.",
+        "criteria": {
+          "accept": "Agrees to do it.",
+          "hedge": "Agrees with reservations.",
+          "defer": "Wants to decide later or consult others.",
+          "question": "Asks questions without deciding.",
+          "cost_block": "Raises cost as the obstacle.",
+          "decline": "Refuses.",
+          "unheard": "There is no audible patient response.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "pb_benefits",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Does the doctor explain the benefits of this suggestion? RULES: Recovery burden (time off, rest, no lifting, physio, diet, dressing, stay, soreness) is not a risk. Answer only from the transcript.",
+        "criteria": {
+          "yes": "Yes: the doctor explains the benefits.",
+          "no": "No: the doctor does not explains the benefits.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "pb_risk_any",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Does the doctor mention any risk of this suggestion? RULES: Recovery burden (time off, rest, no lifting, physio, diet, dressing, stay, soreness) is not a risk. Answer only from the transcript.",
+        "criteria": {
+          "yes": "Yes: the doctor mentions a risk.",
+          "no": "No: the doctor does not mentions a risk.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "pb_real_complication",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Does the doctor mention a real complication that could happen? RULES: Recovery burden (time off, rest, no lifting, physio, diet, dressing, stay, soreness) is not a risk. Answer only from the transcript.",
+        "criteria": {
+          "yes": "Yes: the doctor mentions a real complication.",
+          "no": "No: the doctor does not mentions a real complication.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "pb_alternatives",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Does the doctor mention alternatives to this suggestion? RULES: Recovery burden (time off, rest, no lifting, physio, diet, dressing, stay, soreness) is not a risk. Answer only from the transcript.",
+        "criteria": {
+          "yes": "Yes: the doctor mentions alternatives.",
+          "no": "No: the doctor does not mentions alternatives.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "pb_timing",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Does the doctor say when it should be done? RULES: Recovery burden (time off, rest, no lifting, physio, diet, dressing, stay, soreness) is not a risk. Answer only from the transcript.",
+        "criteria": {
+          "yes": "Yes: the doctor says when.",
+          "no": "No: the doctor does not says when.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "recovery_discussion",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: How much does the doctor discuss recovery after this suggestion? RULES: Only the course after the intervention counts; recovery burden is its own item, not a risk.",
+        "criteria": {
+          "none": "No recovery discussion.",
+          "mentioned_only": "Recovery is mentioned in passing.",
+          "adequate": "The main points of recovery are explained.",
+          "thorough_tailored": "Recovery is explained thoroughly and tailored to the patient.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "recovery_appropriateness",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Is the recovery description appropriate? RULES: Judge only when recovery was discussed.",
+        "criteria": {
+          "appropriate": "Fair and complete.",
+          "minimising_or_misleading": "Plays recovery down or misleads.",
+          "overstated": "Makes recovery sound worse than it is.",
+          "no_recovery_discussion": "There was no recovery discussion.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "no_recovery_discussion",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "recovery_discussion",
+      "gate_requires": [
+        "mentioned_only",
+        "adequate",
+        "thorough_tailored"
+      ]
+    },
+    {
+      "question_id": "urgency",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: How does the doctor frame the urgency of this suggestion? RULES: Tie rule: 'not an emergency' followed by a scare scenario is fear_based. Not fear-based: a scenario told to explain why this patient can wait; a fear the patient voices; an honest finding for a test; a genuinely acute case.",
+        "criteria": {
+          "fear_based": "Urgency is driven by fear of a bad outcome.",
+          "urgent_clinical": "A genuine clinical urgency.",
+          "explicitly_non_urgent": "Stated to be non-urgent.",
+          "neutral_or_unstated": "No urgency framing.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "decider",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Who decides whether to go ahead? RULES: Judge from who is treated as the decision-maker.",
+        "criteria": {
+          "patient": "The patient.",
+          "family": "A family member.",
+          "shared": "Shared between them.",
+          "unclear": "It is unclear.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "teach_back",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Does the doctor check the patient's understanding by asking them to repeat it back? RULES: Rare; answer none unless there is a clear sign.",
+        "criteria": {
+          "none": "No check of understanding.",
+          "partial": "A partial check.",
+          "full": "A full teach-back.",
+          "not_applicable": "There is no pitch.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "not_applicable",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "cost_discussed",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: Is the cost of this suggestion discussed?",
+        "criteria": {
+          "yes": "Cost is discussed.",
+          "no": "Cost is not discussed.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "pitch_type",
+      "gate_requires": [
+        "investigation",
+        "procedure",
+        "surgery",
+        "medication",
+        "physio",
+        "follow_up",
+        "other"
+      ]
+    },
+    {
+      "question_id": "cost_answered",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: This is the transcript of one outpatient consultation. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. ROLE is doctor, patient-side or unknown. Ignore speech-recognition garbage and talk that is not part of this consultation. FOCUS: The state names ONE pitch (a doctor suggestion) by the time near which it is made. Judge only that pitch and what the transcript says about it. QUESTION: If cost was raised, was the cost question answered? RULES: no_cost_question when cost was not discussed.",
+        "criteria": {
+          "answered": "A clear answer was given.",
+          "partial": "A partial answer.",
+          "not_answered": "No answer.",
+          "no_cost_question": "Cost was not raised.",
+          "insufficient_evidence": "The transcript is too unclear to tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "no_cost_question",
+        "insufficient_evidence"
+      ],
+      "gate_question_id": "cost_discussed",
+      "gate_requires": [
+        "yes"
+      ]
+    }
+  ]
+}

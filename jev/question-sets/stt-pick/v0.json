@@ -1,0 +1,52 @@
+{
+  "id": "stt-pick",
+  "version": "v0",
+  "use": "stt_pick",
+  "subject_type": "stt_pair",
+  "state_schema": "stt-pair-v1",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p2",
+  "questions": [
+    {
+      "question_id": "stt_pick",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: Two speech-recognition versions, version_A and version_B, transcribed the same short span of an outpatient consultation. Which engine made which is hidden. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. Numbers, doses and dates are compared in code. QUESTION: Which version is the more faithful transcript of what was said? RULES: Prefer the version a clinician could rely on. Do not prefer a version for length or fluency alone.",
+        "criteria": {
+          "version_A": "Version A is clearly the more faithful.",
+          "version_B": "Version B is clearly the more faithful.",
+          "both_equivalent": "Both are equally faithful.",
+          "neither": "Neither is usable.",
+          "insufficient_evidence": "You cannot tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "neither",
+        "insufficient_evidence"
+      ]
+    },
+    {
+      "question_id": "meaning_change",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "CONTEXT: Two speech-recognition versions, version_A and version_B, transcribed the same short span of an outpatient consultation. Which engine made which is hidden. Lines look like [mm:ss] ROLE: native text [EN: English gloss]. Numbers, doses and dates are compared in code. QUESTION: Do the two versions differ in clinical meaning? RULES: Spelling-only and homophone differences are not clinical differences. A negation flip changes meaning.",
+        "criteria": {
+          "same_meaning": "The two versions mean the same.",
+          "negation_flip": "One version negates what the other affirms.",
+          "laterality_or_site": "They differ on left or right, or on a body site.",
+          "drug_or_procedure_name": "They name a different drug or procedure.",
+          "other_clinical_change": "They differ in some other clinically relevant way.",
+          "non_clinical_difference": "They differ only in non-clinical wording or spelling.",
+          "insufficient_evidence": "You cannot tell."
+        }
+      },
+      "option_order": "both",
+      "escape_options": [
+        "insufficient_evidence"
+      ]
+    }
+  ]
+}
