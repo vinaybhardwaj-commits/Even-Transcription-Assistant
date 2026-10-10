@@ -11,9 +11,9 @@
  *                      endpoints (the Mini) and hold up clinic audio. POOL_BULK_FALLBACK_LIVE=1 lets bulk
  *                      fall through to the ordinary list after it (default OFF; R3, Fable's ruling).
  *
- * ONE SERVICE, FOUR ROUTES (R2). eta-diarize serves /diarize, /embed_speakers, /speech_regions and /enroll, and a
- * twin need not serve all four (c3 is embed/VAD only). Each route is its own pool with its own breaker:
- * DIARIZE_EMBED_URLS, DIARIZE_VAD_URLS and DIARIZE_ENROLL_URLS (and their _BULK_URLS), each falling back to the
+ * ONE SERVICE, THREE POOLED ROUTES (R2). eta-diarize serves /diarize, /embed_speakers and /enroll (and a legacy /speech_regions
+ * that no app code calls any more), and a twin need not serve all of them (c3 is embed only). Each route is its own pool with its own breaker:
+ * DIARIZE_EMBED_URLS and DIARIZE_ENROLL_URLS (and their _BULK_URLS), each falling back to the
  * DIARIZE_BASE_URLS / DIARIZE_BULK_URLS lists and then to DIARIZE_BASE_URL. A 404 for the route is failover:
  * that endpoint does not serve it.
  *
@@ -58,7 +58,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { serviceAccessProblems } from "@/lib/service-access";
 
-export const POOL_SERVICES = ["whisper", "join", "diarize", "diarize_embed", "diarize_vad", "diarize_enroll", "emotion", "indic", "router"] as const;
+export const POOL_SERVICES = ["whisper", "join", "diarize", "diarize_embed", "diarize_enroll", "emotion", "indic", "router"] as const;
 export type PoolService = (typeof POOL_SERVICES)[number];
 
 type Env = Record<string, string | undefined>;
@@ -72,7 +72,6 @@ export const POOL_ENV: Record<PoolService, { single: string; list: string; bulk:
   join: { single: "AUDIO_JOIN_URL", list: "AUDIO_JOIN_URLS", bulk: "AUDIO_JOIN_BULK_URLS" },
   diarize: { single: "DIARIZE_BASE_URL", list: "DIARIZE_BASE_URLS", bulk: "DIARIZE_BULK_URLS" },
   diarize_embed: { single: "DIARIZE_BASE_URL", list: "DIARIZE_EMBED_URLS", bulk: "DIARIZE_EMBED_BULK_URLS", inherit: "diarize" },
-  diarize_vad: { single: "DIARIZE_BASE_URL", list: "DIARIZE_VAD_URLS", bulk: "DIARIZE_VAD_BULK_URLS", inherit: "diarize" },
   diarize_enroll: { single: "DIARIZE_BASE_URL", list: "DIARIZE_ENROLL_URLS", bulk: "DIARIZE_ENROLL_BULK_URLS", inherit: "diarize" },
   emotion: { single: "EMOTION_BASE_URL", list: "EMOTION_BASE_URLS", bulk: "EMOTION_BULK_URLS" },
   // STT-STACK-PARITY (Fable, 24 Sep): the other two thirds of the production stack. Until these existed a

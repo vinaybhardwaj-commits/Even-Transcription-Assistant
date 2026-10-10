@@ -640,7 +640,10 @@ class Worker:
             log.info("vram_short free_mib=%d need_mib=%d", free, self.cfg.min_free_vram_mib)
             return not self._wait(self.cfg.vram_poll_s, "waiting_vram")
         limit = max(1, min(self.cfg.concurrency, room, 8))
-        q = urllib.parse.urlencode({"worker_id": self.cfg.worker_id, "limit": limit})
+        params = {"worker_id": self.cfg.worker_id, "limit": limit}
+        if self.cfg.machine == "hf":
+            params["machine"] = "hf"  # OVERFLOW mode: the server claims for us only above its backlog threshold and under its daily cost cap
+        q = urllib.parse.urlencode(params)
         status, out = self.api.call("GET", f"/api/diarize/nemotron/pending?{q}")
         if status != 200:
             code = str(out.get("error") or f"http_{status}")
@@ -650,6 +653,12 @@ class Worker:
             return not self._wait(d, f"backoff:{code}")
         self.backoff.reset()
         windows = [w for w in out.get("windows", []) if isinstance(w, dict)]
+        if not windows and self.cfg.machine == "hf":
+            # Overflow is closed (off, cap reached, or backlog under the threshold) or simply empty: idle. Never the LAB lane, never a back-off.
+            ov = out.get("overflow") if isinstance(out.get("overflow"), dict) else {}
+            reason = ov.get("reason") if ov.get("reason") in ("overflow_off", "cap_reached", "below_threshold") else "empty"
+            log.info("overflow idle reason=%s", reason)
+            return not self._wait(self.cfg.idle_poll_s, f"overflow_idle:{reason}")
         if not windows:
             # LAB LANE: only here, when production has nothing to offer THIS instant (a non-200 /pending never reaches this line)
             if self.cfg.lab and self.lab_cycle():
@@ -691,6 +700,8 @@ class Worker:
             body = {"worker_id": self.cfg.worker_id, "host": safe_token(socket.gethostname()) or "unknown",
                     "gpu": self.gpu_name(), "model_rev": self.engine.model_rev, "config_hash": config_hash(self.engine.config),
                     "queue_depth": self.in_flight, "windows_24h": len(self.done)}
+            if self.cfg.machine == "hf":
+                body["machine"] = "hf"
             if self.last_ok_at:
                 body["last_ok_at"] = self.last_ok_at
             if self.last_error_code:
@@ -819,6 +830,8 @@ def main(argv=None) -> int:
     p.add_argument("--state-file", default=env("NEMOTRON_STATE_FILE", f"{home}/.local/state/eta-nemotron/status.json"))
     p.add_argument("--finetune-ckpt", default=env("NEMOTRON_FINETUNE_CKPT"), help="a .nemo fine-tune; unset = STOCK model")
     p.add_argument("--device", default=env("NEMOTRON_DEVICE", "cuda"))
+    p.add_argument("--machine", choices=("box", "hf"), default=env("NEMOTRON_MACHINE") or "box",
+                   help="box (default) or hf: the OVERFLOW worker, claimed for only above the server's backlog threshold and under its daily cost cap (NEMOTRON_MACHINE)")
     p.add_argument("--no-lab", action="store_true", default=env("NEMOTRON_LAB", "1") in ("0", "false", "no", "off"),
                    help="never ask /lab/claim (NEMOTRON_LAB=0)")
     a = p.parse_args(argv)
@@ -839,9 +852,9 @@ def main(argv=None) -> int:
     import engine_nemo  # the GPU stack loads only here
     engine = engine_nemo.NemotronEngine(device=a.device, finetune_ckpt=a.finetune_ckpt)
 
-    cfg = Config(base_url=a.base_url, worker_id=a.worker_id, concurrency=max(1, a.concurrency),
+    cfg = Config(base_url=a.base_url, worker_id=a.worker_id, machine=a.machine, concurrency=max(1, a.concurrency),
                  rate_per_hour=max(1, a.rate_per_hour), min_free_vram_mib=a.min_free_vram_mib,
-                 gpu_lock=a.gpu_lock or None, tmp_root=a.tmp_root, state_file=a.state_file, lab=not a.no_lab)
+                 gpu_lock=a.gpu_lock or None, tmp_root=a.tmp_root, state_file=a.state_file, lab=not a.no_lab and a.machine != "hf")
     stop = threading.Event()
     worker = Worker(cfg, Api(cfg.base_url, token), engine, stop=stop)
 

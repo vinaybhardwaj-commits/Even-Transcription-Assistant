@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const S = vi.hoisted(() => ({
   claimPending: vi.fn(),
   countExhausted: vi.fn(),
+  overflowUsage: vi.fn(),
   recordIngest: vi.fn(),
   recordHeartbeat: vi.fn(),
   releaseClaim: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
   ...(await orig<typeof import("@/lib/diarize-nemotron/store")>()),
   claimPending: S.claimPending,
   countExhausted: S.countExhausted,
+  overflowUsage: S.overflowUsage,
   recordIngest: S.recordIngest,
   recordHeartbeat: S.recordHeartbeat,
   releaseClaim: S.releaseClaim,
@@ -142,7 +144,7 @@ describe("GET /pending", () => {
     S.signGetUrl.mockResolvedValue("https://r2.test/signed");
     const r = await pending(req("/api/diarize/nemotron/pending?worker_id=box-t4-1&limit=99", { method: "GET" }));
     expect(r.status).toBe(200);
-    expect(S.claimPending).toHaveBeenCalledWith("box-t4-1", 8);
+    expect(S.claimPending).toHaveBeenCalledWith("box-t4-1", 8, "box");
     expect(S.signGetUrl).toHaveBeenCalledWith({ key: "clips/fake1.webm", expiresInSeconds: 1800 });
     expect(await json(r)).toEqual({
       ok: true,
@@ -167,6 +169,85 @@ describe("GET /pending", () => {
     expect(r.status).toBe(503);
     expect(await json(r)).toEqual({ ok: false, error: "clip_sign" });
     expect(S.releaseClaim.mock.calls).toEqual([["box-t4-1", "bw_1"], ["box-t4-1", "bw_2"]]);
+  });
+});
+
+describe("GET /pending, machine=hf (HF overflow: threshold + daily cost cap at claim time)", () => {
+  const OV = ["NEMO_HF_DAILY_USD_CAP", "NEMO_HF_BACKLOG_THRESHOLD", "NEMO_HF_USD_PER_AUDIO_MIN"] as const;
+  const ovSaved: Record<string, string | undefined> = {};
+  const W = { window_id: "bw_1", room_day_id: "rd_1", start_ms: 1000, end_ms: 901000, clip_r2_key: "clips/fake1.webm", attempts: 1 };
+  const hf = (extra = "") => pending(req(`/api/diarize/nemotron/pending?worker_id=hf-w1&machine=hf${extra}`, { method: "GET" }));
+  beforeEach(() => {
+    for (const k of OV) { ovSaved[k] = process.env[k]; delete process.env[k]; }
+    process.env.NEMOTRON_WORKER_TOKEN = TOKEN;
+    process.env.DIARIZE_NEMOTRON_SHADOW = "1";
+    S.countExhausted.mockResolvedValue(0);
+    S.signGetUrl.mockResolvedValue("https://r2.test/signed");
+    S.claimPending.mockResolvedValue([W]);
+  });
+  afterEach(() => { for (const k of OV) { if (ovSaved[k] === undefined) delete process.env[k]; else process.env[k] = ovSaved[k]; } });
+
+  it("default cap 0 = overflow OFF: 200, no windows, no claim, and the usage query is not even run", async () => {
+    const r = await hf();
+    expect(r.status).toBe(200);
+    expect(await json(r)).toEqual({ ok: true, windows: [], exhausted: 0, overflow: { allowed: false, reason: "overflow_off" } });
+    expect(S.claimPending).not.toHaveBeenCalled();
+  });
+
+  it("below the backlog threshold: nothing is claimed", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "5";
+    S.overflowUsage.mockResolvedValue({ backlog: 40, hfIngestedMs: 0, hfLiveClaims: 0 });
+    const r = await hf();
+    expect((await json(r)).overflow).toEqual({ allowed: false, reason: "below_threshold" });
+    expect(S.claimPending).not.toHaveBeenCalled();
+  });
+
+  it("over the threshold and under the cap: claims as machine hf, with the limit shrunk to keep the backlog at the threshold", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "5";
+    S.overflowUsage.mockResolvedValue({ backlog: 42, hfIngestedMs: 0, hfLiveClaims: 0 });
+    const r = await hf("&limit=8");
+    expect(r.status).toBe(200);
+    expect(S.claimPending).toHaveBeenCalledWith("hf-w1", 2, "hf");
+    expect(((await json(r)).windows as unknown[]).length).toBe(1);
+  });
+
+  it("cap reached from RECORDED minutes: nothing is claimed", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "1"; // $1 at the default $1/h = 60 audio min
+    S.overflowUsage.mockResolvedValue({ backlog: 500, hfIngestedMs: 50 * 60000, hfLiveClaims: 0 }); // 50 min used: room for 0 more whole windows (10 min left)
+    const r = await hf();
+    expect((await json(r)).overflow).toEqual({ allowed: false, reason: "cap_reached" });
+    expect(S.claimPending).not.toHaveBeenCalled();
+  });
+
+  it("live HF claims count against the cap before their rows exist", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "1";
+    S.overflowUsage.mockResolvedValue({ backlog: 500, hfIngestedMs: 0, hfLiveClaims: 4 }); // 4 x 15 = 60 min in flight
+    expect((await json(await hf())).overflow).toEqual({ allowed: false, reason: "cap_reached" });
+    expect(S.claimPending).not.toHaveBeenCalled();
+  });
+
+  it("the cap shrinks the batch to the whole windows that still fit", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "1";
+    S.overflowUsage.mockResolvedValue({ backlog: 500, hfIngestedMs: 15 * 60000, hfLiveClaims: 0 }); // 45 min left = 3 windows
+    await hf("&limit=8");
+    expect(S.claimPending).toHaveBeenCalledWith("hf-w1", 3, "hf");
+  });
+
+  it("a mistyped overflow env is a 500 bad_flag, never read as 0", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "five";
+    const r = await hf();
+    expect(r.status).toBe(500);
+    expect(await json(r)).toEqual({ ok: false, error: "bad_flag" });
+    expect(S.claimPending).not.toHaveBeenCalled();
+  });
+
+  it("an unknown machine is 400, and the box path never consults overflow settings", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "five"; // would 500 an hf call
+    expect((await pending(req("/api/diarize/nemotron/pending?worker_id=w&machine=gpu", { method: "GET" }))).status).toBe(400);
+    const r = await pending(req("/api/diarize/nemotron/pending?worker_id=box-1", { method: "GET" }));
+    expect(r.status).toBe(200);
+    expect(S.claimPending).toHaveBeenCalledWith("box-1", 4, "box");
+    expect(S.overflowUsage).not.toHaveBeenCalled();
   });
 });
 

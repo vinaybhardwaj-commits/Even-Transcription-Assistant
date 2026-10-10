@@ -89,7 +89,7 @@ export type JobRow = {
 
 /** What one step returns. `next` continues the machine; `result` ends it; `fail` stops it for good. */
 export type StepOutcome =
-  | { kind: "next"; step: string; progress: Record<string, unknown> }
+  | { kind: "next"; step: string; progress: Record<string, unknown>; /** hold the job back this many seconds before the next claim (a step that waits on OTHER jobs, so it does not starve them: claims are oldest-first) */ delay_s?: number }
   | { kind: "done"; result: Record<string, unknown> }
   | { kind: "fail"; error: string };
 
@@ -102,7 +102,7 @@ export const progressPatchOf = (e: unknown): Record<string, unknown> | null => {
   return p && typeof p === "object" && !Array.isArray(p) ? (p as Record<string, unknown>) : null;
 };
 
-export const nextStep = (step: string, progress: Record<string, unknown> = {}): StepOutcome => ({ kind: "next", step, progress });
+export const nextStep = (step: string, progress: Record<string, unknown> = {}, delayS?: number): StepOutcome => ({ kind: "next", step, progress, ...(delayS && delayS > 0 ? { delay_s: Math.min(600, Math.round(delayS)) } : {}) });
 export const doneWith = (result: Record<string, unknown>): StepOutcome => ({ kind: "done", result });
 export const failWith = (error: string): StepOutcome => ({ kind: "fail", error });
 

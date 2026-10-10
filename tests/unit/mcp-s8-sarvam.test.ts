@@ -75,7 +75,7 @@ describe("registration", () => {
 
   it("room-restricted tokens are refused; unknown action is named", async () => {
     expect((await rpc({ action: "health" }, ["read"], ["room_x"])).status).toBe(403);
-    expect(await run({ action: "nope" })).toMatchObject({ ok: false, error: "unknown_action", allowed: ["transcribe", "translate", "status", "result", "usage", "health"] });
+    expect(await run({ action: "nope" })).toMatchObject({ ok: false, error: "unknown_action", allowed: ["transcribe", "translate", "status", "result", "usage", "health", "consult_clips", "consult_result"] });
     expect(await run({})).toMatchObject({ ok: false, error: "unknown_action" });
   });
 });
@@ -100,8 +100,8 @@ describe("transcribe / translate", () => {
     expect(props).toEqual(expect.arrayContaining(["encounter_id", "consult_uid", "transcription_run_id"]));
   });
 
-  it("a consult uid answers consult_index_unavailable (no resolver yet) without queueing", async () => {
-    expect(await run({ action: "transcribe", consult_uid: "cu_9" })).toEqual({ ok: false, error: "consult_index_unavailable" });
+  it("a consult uid that the index does not hold answers consult_not_indexed without queueing (the real index is covered by consult-index-pg.test.ts)", async () => {
+    expect(await run({ action: "transcribe", consult_uid: "cu_9" })).toEqual({ ok: false, error: "consult_not_indexed" });
     expect(inserted).toEqual([]);
   });
 
