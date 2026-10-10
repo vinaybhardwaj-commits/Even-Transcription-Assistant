@@ -93,6 +93,50 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
       "sql`TABLE other_t`", "sql`TABLE my_bench_window`", "sql`COPY other_t TO STDOUT`", "sql`COPY cue_id FROM STDIN`", "sql`TRUNCATE other_t`", "sql`TRUNCATE other_t, other_u CASCADE`", "sql`TRUNCATE TABLE bench_window_silence`",
       "sql`SELECT a FROM x JOIN y USING (cue)`", "const m = 'truncate the cue list';"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
   });
+  it("LINT-FU L1/L2/residuals: brackets nested to ANY depth (1-6) in FROM / JOIN / USING, FROM-list tails, TRUNCATE [TABLE] [ONLY] lists, LOCK, bracketed USING sources — every form x all 19 tables x depth 1-6: misses = 0", () => {
+    const o = (n: number) => "(".repeat(n), c = (n: number) => ")".repeat(n);
+    const forms: Array<[string, (t: string, n: number) => string]> = [
+      ["from-group", (t, n) => `sql\`SELECT 1 FROM ${o(n)}${t} w JOIN x ON true${c(n)}\``],
+      ["from-group-alias-last", (t, n) => `sql\`SELECT 1 FROM ${o(n)}x JOIN y ON true) JOIN ${t} z ON true${c(n - 1)}\``],
+      ["from-list-tail", (t, n) => `sql\`SELECT 1 FROM a, ${o(n)}${t} w JOIN x ON true${c(n)}\``],
+      ["from-left-leaning", (t, n) => `sql\`SELECT 1 FROM ${o(n)}${t} w JOIN x ON true${c(1)}${" JOIN y ON true)".repeat(n - 1)} JOIN z ON true\``],
+      ["from-group-then-comma-item", (t, n) => `sql\`SELECT 1 FROM ${o(n)}x w JOIN y ON true${c(n)}, ${t} z WHERE 1=1\``],
+      ["from-inner-list", (t, n) => `sql\`SELECT 1 FROM ${o(n)}a, (${t} w)${c(n)}\``],
+      ["from-nested-then-where", (t, n) => `sql\`SELECT 1 FROM ${o(n)}${t} w${c(n)} WHERE 1=1\``],
+      ["join-group", (t, n) => `sql\`SELECT 1 FROM x JOIN ${o(n)}${t} w JOIN y ON true${c(n)} ON true\``],
+      ["delete-using", (t, _n) => `sql\`DELETE FROM a USING ${t} w WHERE true\``],
+      ["delete-using-group", (t, n) => `sql\`DELETE FROM a USING ${o(n)}${t} w JOIN x ON true${c(n)} WHERE true\``],
+      ["merge-using-group", (t, n) => `sql\`MERGE INTO a USING ${o(n)}${t}${c(n)} s ON a.id = s.id WHEN MATCHED THEN DELETE\``],
+      ["table", (t, _n) => `sql\`TABLE ${t}\``],
+      ["copy", (t, _n) => `sql\`COPY ${t} TO STDOUT\``],
+      ["truncate", (t, _n) => `sql\`TRUNCATE ${t}\``],
+      ["truncate-list", (t, _n) => `sql\`TRUNCATE other_t, ${t} CASCADE\``],
+      ["truncate-table-list", (t, _n) => `sql\`TRUNCATE TABLE a, ${t}\``],
+      ["truncate-table-only-list", (t, _n) => `sql\`TRUNCATE TABLE ONLY a, ${t} RESTART IDENTITY\``],
+      ["truncate-only-list", (t, _n) => `sql\`TRUNCATE ONLY a, public."${t}"\``],
+      ["lock", (t, _n) => `sql\`LOCK ${t}\``],
+      ["lock-table-list", (t, _n) => `sql\`LOCK TABLE a, ONLY ${t} IN ACCESS EXCLUSIVE MODE\``],
+    ];
+    const misses: string[] = [];
+    for (const [name, mk] of forms) for (const t of ROOM_TABLES) for (let n = 1; n <= 6; n++) {
+      const src = mk(t, n);
+      if (!scanSource("lib/x.ts", src).some((v) => v.what === t)) misses.push(`${name} ${t} depth ${n}: ${src}`);
+    }
+    expect(ROOM_TABLES).toHaveLength(19);
+    expect(misses).toEqual([]);
+    // the exact forms the refuters named, one each
+    for (const f of ["FROM (((T w JOIN x ON true)))", "FROM a, (((T w JOIN x ON true)))", "FROM (((T w JOIN x) JOIN y) JOIN z)", "TRUNCATE TABLE a, T", "TRUNCATE TABLE ONLY a, T", "DELETE FROM a USING (T w JOIN x ON true)", "MERGE INTO a USING (T) s ON true", "LOCK T"]) {
+      expect(scanSource("lib/x.ts", `sql\`${f.replace(/\bT\b/g, "cue")}\``).map((v) => v.what), f).toContain("cue");
+    }
+    // brackets that cannot balance inside the literal fail closed
+    expect(scanSource("lib/x.ts", "sql`SELECT 1 FROM ((((cue w JOIN x ON true)`").map((v) => v.what)).toContain("cue");
+    expect(scanSource("lib/x.ts", "sql`SELECT 1 FROM ((a w JOIN x ON true) JOIN y ON true, cue`").map((v) => v.what)).toContain("cue");
+    expect(scanSource("lib/x.ts", "sql`SELECT 1 FROM ((a w JOIN x ON true) JOIN y ON true, other_t`")).toEqual([]);
+    // clean twins: the same shapes over non-room tables, look-alikes, columns, and a call
+    for (const ok of ["sql`SELECT 1 FROM (((other_t w JOIN x ON true)))`", "sql`SELECT 1 FROM a, (((bench_window_silence w JOIN x) JOIN y) JOIN z)`", "sql`TRUNCATE TABLE a, other_t`", "sql`TRUNCATE TABLE ONLY a, my_cue`", "sql`LOCK other_t`",
+      "sql`LOCK TABLE a, other_t IN ACCESS EXCLUSIVE MODE`", "sql`DELETE FROM a USING (other_t w JOIN x ON true)`", "sql`MERGE INTO a USING (other_t) s ON true`", "sql`SELECT 1 FROM x JOIN y USING (cue)`",
+      "sql`SELECT count(cue) FROM (((other_t w JOIN x ON true)))`", "sql`SELECT 1 FROM (SELECT count(cue) AS n FROM other_t) q`"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
+  });
   it("REL3-FU2 F2-1: SQL comments between FROM / JOIN and a table do not hide it; a comment opener inside a SQL string does not eat real SQL", () => {
     for (const t of ROOM_TABLES) {
       for (const f of [`sql\`SELECT 1 FROM /* x */ ${t}\``, `sql\`SELECT 1 FROM -- note\n ${t}\``, `sql\`SELECT 1 FROM /* a */ /* b */ ${t} z\``, `sql\`SELECT 1 FROM a JOIN /* x */ ${t} ON true\``,

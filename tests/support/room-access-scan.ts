@@ -5,9 +5,11 @@
  * dollar-quote ($$ / $tag$) or an E'...' string AND names any gated table (FAIL CLOSED: those forms are not parsed), or (c) a literal that builds / reads an R2 room-audio key prefix, in a file outside
  * lib/room-access/ that is not on the allowlist. TS comments are ignored.
  * KNOWN LIMITS (not scanned): SQL assembled by string concatenation or built in a variable across literals (a table name in one piece, FROM in another); a table name from a variable or a config value;
- * SQL read from a file; dynamic identifiers; a table reached through a VIEW or function that is not gated. LINT-FU: the former residual forms are scanned now: FROM (bench_window w JOIN x ...) (a bracketed join group, also
- * JOIN (...)), DELETE ... USING <table>, TABLE <table>, COPY <table>, TRUNCATE <table>[, ...]. Still not scanned: a name carried by a bare word in prose with no SQL keyword before it; a table named only after a comma in a
- * USING / COPY / TABLE list (only the first name after the keyword is seen; TRUNCATE takes a full list).
+ * SQL read from a file; dynamic identifiers; a table reached through a VIEW or function that is not gated; bare prose with no SQL keyword before the table name. LINT-FU: the former residual forms are scanned: a
+ * FROM list is walked with a real paren-depth count (a table at ANY bracket depth in an item or a join group, FROM (((T w JOIN x) JOIN y) JOIN z)); a FROM whose brackets do not balance inside the literal FAILS CLOSED
+ * (any gated table word in the rest of the literal is a violation); JOIN (T ..); DELETE .. USING T / USING (T ..) and MERGE INTO a USING (T) s; TABLE T (also CREATE / ALTER / DROP TABLE); COPY T; LOCK [TABLE] [ONLY] a, T;
+ * TRUNCATE [TABLE] [ONLY] a, T (the WHOLE comma list). Still not scanned: only the first name after COPY / TABLE (TRUNCATE and LOCK read the whole list); `JOIN y USING (T)` outside a DELETE / MERGE statement is
+ * a column list, not a table, and passes.
  */
 export const ROOM_TABLES = [
   "room_turn_speaker", "room_diarize_window", "bench_window", "bench_session", "speaker_cluster", "room_speaker_cluster_member", "diarize_window_label",
@@ -20,12 +22,28 @@ export const KEY_PREFIXES = ["bench/", "clips/", "vad-trim/", "reb/", "consult-c
 
 const NAME = `(?:"?[A-Za-z_][\\w$]*"?\\s*\\.\\s*)?"?(${ROOM_TABLES.join("|")})"?(?![\\w$])`;
 // G-1: a table may be quoted ("bench_window"), schema-qualified (public.bench_window, "public"."bench_window") and may be any item of a comma FROM list
-// LINT-FU: JOIN may open a bracketed group (JOIN (bench_window w JOIN ...)), and DELETE ... USING <table>, TABLE <table> (also TRUNCATE TABLE, CREATE / ALTER / DROP TABLE), COPY <table> are the same table named
+// LINT-FU: JOIN may open a bracketed group (JOIN (bench_window w JOIN ...)); DELETE ... USING <table>, TABLE <table> (also CREATE / ALTER / DROP TABLE) and COPY <table> are the same table named
 const KW_RE = new RegExp(`\\b(?:JOIN\\s+(?:\\(\\s*)*|(?:UPDATE|INTO|USING|TABLE|COPY)\\s+)(?:ONLY\\s+)?${NAME}`, "gi");
-// LINT-FU: TRUNCATE [ONLY] a, b, c (a comma list; TRUNCATE TABLE is caught by the TABLE pattern above)
-const TRUNC_RE = /\bTRUNCATE\s+(?!TABLE\b)([^;]*)/gi;
-const FROM_RE = /\bFROM\s+((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)(?=\s(?:WHERE|GROUP|ORDER|LIMIT|JOIN|LEFT|RIGHT|INNER|CROSS|FULL|NATURAL|ON|UNION|HAVING|RETURNING|SET|FOR|OFFSET)\b|\)|;|$)/gi;
-const ITEM_RE = new RegExp(`^\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "i"); // LINT-FU: a bracketed join group FROM (bench_window w JOIN x ...) / FROM ((cue c ...))
+// USING (T w JOIN ..) / MERGE INTO a USING (T) s: a bracketed source — only in a DELETE or MERGE statement, where USING names a source; after a JOIN, USING (col) is a column list
+const USING_PAREN_RE = new RegExp(`\\bUSING\\s+\\(\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "gi");
+// TRUNCATE [TABLE] [ONLY] a, b, c and LOCK [TABLE] [ONLY] a, b IN .. MODE: the whole comma list
+const LIST_RE = /\b(?:TRUNCATE|LOCK)\s+(?:TABLE\s+)?([^;]*?)(?=\sIN\s|;|$)/gi;
+const FROM_KW = /\bFROM\s+/gi;
+const FROM_END = /^\s(?:WHERE|GROUP|ORDER|LIMIT|JOIN|LEFT|RIGHT|INNER|CROSS|FULL|NATURAL|ON|UNION|HAVING|RETURNING|SET|FOR|OFFSET)\b/i;
+const ITEM_RE = new RegExp(`^\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "id"); // a bracketed join group FROM (bench_window w JOIN x ...) at any depth
+// a bracket run that opens an item or a group (not a call: count(cue) has an identifier char before the bracket) followed by a gated table
+const GROUP_RE = new RegExp(`(?<![\\w$])\\(\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "gid");
+/** the extent of a FROM list starting at `from`: a real bracket-depth walk; ends at depth 0 on a clause keyword or ';', or at a bracket that closes the enclosing group. balanced=false: the text ran out inside an open bracket. */
+export function fromSpan(text: string, from: number): { end: number; balanced: boolean } {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "(") depth++;
+    else if (c === ")") { if (depth === 0) return { end: i, balanced: true }; depth--; }
+    else if (depth === 0 && (c === ";" || (/\s/.test(c) && FROM_END.test(text.slice(i, i + 12))))) return { end: i, balanced: true };
+  }
+  return { end: text.length, balanced: depth === 0 };
+}
 const KEY_RE = new RegExp(`[\`'"](?:${KEY_PREFIXES.map((p) => p.replace(/[/-]/g, (c) => `\\${c}`)).join("|")})`, "g");
 
 /** The bodies of the string and template literals in comment-stripped code, with their start offsets. */
@@ -128,21 +146,25 @@ export function scanSource(file: string, src: string): Violation[] {
     const unparsed = /\$(?:[A-Za-z_]\w*)?\$/.test(lit0.text) || /(?<![A-Za-z0-9_])[Ee]'/.test(lit0.text) || (/(?<![A-Za-z0-9_$])[Ee]$/.test(code.slice(Math.max(0, lit0.at - 3), lit0.at - 1)) && code[lit0.at - 1] === "'");
     if (unparsed) for (const t of ROOM_TABLES) { const w = new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i").exec(lit0.text); if (w) add("sql", t, lit0.at + w.index); }
     for (const m of lit.text.matchAll(KW_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
-    for (const m of lit.text.matchAll(TRUNC_RE)) {
-      let off = m.index! + m[0].indexOf(m[1]!);
-      for (const item of splitList(m[1]!)) { const t = ITEM_RE.exec(item); if (t) add("sql", t[1]!.toLowerCase(), lit.at + off + (t.index ?? 0)); off += item.length + 1; }
-    }
-    // REL3-FU2 G3-1: every FROM is looked at, INCLUDING the ones inside parentheses (derived tables, LATERAL, subqueries in a JOIN): the scan resumes right after each FROM keyword instead of
-    // skipping the span a match consumed; FROM ONLY <table> is the same table
-    const re = new RegExp(FROM_RE.source, "gi");
-    for (let m = re.exec(lit.text); m; m = re.exec(lit.text)) {
-      let off = m.index! + m[0].indexOf(m[1]!);
-      for (const item of splitList(m[1]!)) {
+    if (/\b(?:DELETE|MERGE)\b/i.test(lit.text)) for (const m of lit.text.matchAll(USING_PAREN_RE)) add("sql", m[1]!.toLowerCase(), lit.at + m.index!);
+    const addItems = (list: string, base: number): void => {
+      let off = base;
+      for (const item of splitList(list)) {
         const t = ITEM_RE.exec(item);
-        if (t) add("sql", t[1]!.toLowerCase(), lit.at + off + (t.index ?? 0));
+        if (t) add("sql", t[1]!.toLowerCase(), lit.at + off + (t as RegExpExecArray & { indices: Array<[number, number]> }).indices[1]![0]);
         off += item.length + 1;
       }
-      re.lastIndex = m.index! + 4;
+    };
+    for (const m of lit.text.matchAll(LIST_RE)) addItems(m[1]!, m.index! + m[0].indexOf(m[1]!));
+    // REL3-FU2 G3-1: every FROM is looked at, INCLUDING the ones inside parentheses (derived tables, LATERAL, subqueries in a JOIN): the scan resumes right after each FROM keyword; FROM ONLY <table> is the same table.
+    // LINT-FU: the list is cut by a real bracket-depth walk (any depth); its depth-0 comma items and every bracket-opened group inside it are looked at; unbalanced brackets fail closed
+    for (const m of lit.text.matchAll(FROM_KW)) {
+      const start = m.index! + m[0].length;
+      const { end, balanced } = fromSpan(lit.text, start);
+      const span = lit.text.slice(start, end);
+      addItems(span, start);
+      for (const g of span.matchAll(GROUP_RE)) add("sql", g[1]!.toLowerCase(), lit.at + start + (g as RegExpMatchArray & { indices: Array<[number, number]> }).indices[1]![0]);
+      if (!balanced) for (const t of ROOM_TABLES) { const w = new RegExp(`(?<![A-Za-z0-9_])${t}(?![A-Za-z0-9_])`, "i").exec(span); if (w) add("sql", t, lit.at + start + w.index); }
     }
   }
   for (const m of code.matchAll(KEY_RE)) add("key", m[0].slice(1), m.index!);
