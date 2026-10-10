@@ -28,6 +28,9 @@ import type { StewardSql } from "./tickets";
 
 export type RecorderStatus = { state: string | null; session_open: boolean | null; received_at: string };
 
+/** the late-evening start gates read their data from this IST time of day (20:00) */
+export const DAY_GATES_FROM_MS = 20 * 3_600_000;
+
 export type RoomSense = {
   room_id: string;
   room_name: string;
@@ -85,6 +88,8 @@ export type RoomSense = {
   };
   /** this room's steward start_day commands since IST midnight (bench_command source 'steward'), oldest first; null = unreadable */
   start_attempts: StartAttempt[] | null;
+  /** the late-evening start gates (rules.ts G2/G3/G4): read only from 20:00 IST. operator_end_at = newest NON-steward end_day acked in this IST day at or after 20:00 IST; session_today = the room started a bench session this IST day. undefined = not read (before 20:00 IST); null = the read failed. */
+  day?: { operator_end_at: string | null; session_today: boolean } | null;
   /** every input that was null (source failed, or the machine simply has no row), by name */
   missing: string[];
 };
@@ -276,6 +281,26 @@ export async function senseAll(
        AND s.started_at <= ${hi}::timestamptz
   `) as unknown as SessionRow[], [] as SessionRow[]);
   const openRoomIds = [...new Set(sess.v.map((s) => s.room_id))];
+
+  // 1b — the late-evening start gates (G2 operator end_day, G3 any session today). Read only from 20:00 IST: before that neither gate can apply.
+  const lateEvening = A - istMidnightOf(A) >= DAY_GATES_FROM_MS;
+  const [operatorEndR, sessionTodayR] = lateEvening
+    ? await Promise.all([
+        safe("bench_command_end_day", degraded, async () => (await sql`
+          SELECT c.room_id, max(c.acked_at) AS acked_at
+            FROM bench_command c
+           WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'end_day' AND c.source <> 'steward' AND c.acked_at IS NOT NULL
+             AND c.acked_at >= ${new Date(istMidnightOf(A) + DAY_GATES_FROM_MS).toISOString()}::timestamptz AND c.acked_at <= ${hi}::timestamptz
+           GROUP BY c.room_id
+        `) as unknown as Array<{ room_id: string; acked_at: string | Date | null }>, [] as Array<{ room_id: string; acked_at: string | Date | null }>),
+        safe("bench_session_today", degraded, async () => (await sql`
+          SELECT DISTINCT s.room_id FROM bench_session s
+           WHERE s.room_id = ANY(${ids}::text[]) AND s.started_at >= ${dayStartIso}::timestamptz AND s.started_at <= ${hi}::timestamptz
+        `) as unknown as Array<{ room_id: string }>, [] as Array<{ room_id: string }>),
+      ])
+    : [null, null];
+  const operatorEndBy = new Map((operatorEndR?.v ?? []).map((x) => [x.room_id, toIso(x.acked_at)] as const));
+  const sessionTodayIds = new Set((sessionTodayR?.v ?? []).map((x) => x.room_id));
 
   const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR, recorderR] = await Promise.all([
     // 2 — chunks of the open sessions, last 30 min (R3 silence by rate).
@@ -683,6 +708,7 @@ export async function senseAll(
         default_input_name: dev?.default_input_name ?? null,
       },
       start_attempts: startAttempts,
+      ...(lateEvening ? { day: operatorEndR?.ok && sessionTodayR?.ok ? { operator_end_at: operatorEndBy.get(r.room_id) ?? null, session_today: sessionTodayIds.has(r.room_id) } : null } : {}),
       missing,
     });
   }

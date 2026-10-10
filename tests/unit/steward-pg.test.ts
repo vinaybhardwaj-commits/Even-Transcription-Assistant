@@ -25,6 +25,7 @@ vi.mock("@/lib/bench", () => ({
 import { GET as cron } from "@/app/api/cron/steward/route";
 import { GET as decisionsRoute } from "@/app/api/admin/steward/decisions/route";
 import { leaseLock, runSteward } from "@/lib/steward/loop";
+import { senseAll } from "@/lib/steward/sense";
 import { OCCUPANCY_ROW_LIMIT, scopedOccupancy } from "@/lib/steward/occupancy-read";
 import type { StewardSql } from "@/lib/steward/tickets";
 
@@ -306,6 +307,26 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     const a = (await decisions()).find((r) => r.room_id === CLINIC_A)!;
     expect(a.action).not.toBe("scribe_start");
     pg.exec(`UPDATE bench_listener SET paused = false WHERE room_id = '${CLINIC_A}'`);
+  }, 120_000);
+
+  it("G2/G3 through the real sense queries: an operator end_day acked at 21:09 IST is seen at 21:14 IST; a steward end_day and a pre-20:00 one are not; a session started today is seen; before 20:00 IST nothing is read", async () => {
+    const NIGHT = Date.parse("2026-10-06T21:14:00+05:30");
+    pg.exec(`DELETE FROM bench_command`);
+    pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+      ('cmd_e1', '${CLINIC_A}', 'end_day', 'acked', 'mcp', '2026-10-06T21:08:50+05:30', '2026-10-06T21:09:00+05:30'),
+      ('cmd_e2', '${CLINIC_B}', 'end_day', 'acked', 'steward', '2026-10-06T21:00:50+05:30', '2026-10-06T21:01:00+05:30'),
+      ('cmd_e3', '${CLINIC_B}', 'end_day', 'acked', 'mcp', '2026-10-06T19:00:50+05:30', '2026-10-06T19:01:00+05:30')`);
+    const roster = [CLINIC_A, CLINIC_B].map((room_id) => ({ room_id, room_name: room_id, machine: null, klass: "clinic" as const, flags: [], kind: "clinic" as const, state_flags: null, device_name: null }));
+    const degraded: string[] = [];
+    const night = await senseAll(sql, NIGHT, roster, degraded);
+    expect(degraded).not.toContain("bench_command_end_day");
+    expect(degraded).not.toContain("bench_session_today");
+    expect(night.get(CLINIC_A)!.day).toEqual({ operator_end_at: "2026-10-06T15:39:00.000Z", session_today: true });
+    expect(night.get(CLINIC_B)!.day).toMatchObject({ operator_end_at: null });
+    // before 20:00 IST the day state is not read at all
+    const noon = await senseAll(sql, Date.parse("2026-10-06T19:00:00+05:30"), roster, []);
+    expect(noon.get(CLINIC_A)!.day).toBeUndefined();
+    pg.exec(`DELETE FROM bench_command`);
   }, 120_000);
 
   it("GET /api/cron/steward through the real tables; the bearer is checked", async () => {

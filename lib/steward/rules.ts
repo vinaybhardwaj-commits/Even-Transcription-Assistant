@@ -413,7 +413,14 @@ const inLiveClamp = (A: number): boolean => {
   return msOfDay >= LIVE_CLAMP_START_MS && msOfDay < LIVE_CLAMP_END_MS;
 };
 
-function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | null } {
+function micReturnRecorderReady(c: Ctx): boolean {
+  const h = c.s.recording.recorder_history;
+  if (!h || !h.ready_since) return false;
+  const latest = c.age(h.latest_at);
+  return latest !== null && latest <= START_GATE_RECORDER_LATEST_MAX_MS;
+}
+
+function startGates(c: Ctx, micReturn = false): { gates: Record<string, boolean>; fail: string | null } {
   const { s, age } = c;
   const khAge = age(s.reachable.kh_heartbeat_at);
   const readyFor = recorderReadyForMs(c);
@@ -423,7 +430,8 @@ function startGates(c: Ctx): { gates: Record<string, boolean>; fail: string | nu
     room_eligible: !isNeverLiveRoom(s.room_id),
     no_open_session: s.recording.session_open === false,
     kiosk_health_fresh: khAge !== null && khAge <= START_GATE_KH_MAX_MS,
-    recorder_ready: readyFor !== null && readyFor >= START_GATE_RECORDER_READY_MS,
+    // coming back from waiting_for_mic the 5-min streak is waived: the newest recorder.status must still be ready (session_open false) and <= 7 min old
+    recorder_ready: micReturn ? micReturnRecorderReady(c) : readyFor !== null && readyFor >= START_GATE_RECORDER_READY_MS,
   };
   let fail: string | null = null;
   if (s.reachable.kh_enrolled !== true || (khAge === null && !s.recording.recorder_history)) fail = "no_kiosk_health";
@@ -446,6 +454,45 @@ function deviceEpisodeOpen(c: Ctx): boolean {
 /** the device is SEEN again: the newest audio.devices row says a default input is present and no USB removal is pending */
 const deviceSeenAgain = (c: Ctx): boolean => c.s.audio.default_input_present === true && c.s.audio.usb_removed_recent !== true;
 
+
+// ---------------------------------------------------------------------------
+// Port of the 9 Oct start gates (V, 9 Oct 2026). Main's not_recording -> scribe_start stays the ONLY start path; these gates only ever HOLD it (a log_only row with the reason).
+//   G1 waiting_for_mic          the room's input device is missing: no start, ever (not even one attempt). One alert per IST day. A return needs 2 consecutive present ticks, then the
+//                               normal gates apply (window, kiosk-health, no session); the 5-min recorder-ready streak is waived when the newest recorder.status is ready and <= 7 min old.
+//   G2 day_ended_by_operator    a non-steward end_day acked at or after 20:00 IST today closes the day for the Steward.
+//   G3 late_start_blocked       at or after 20:30 IST: no start if the room already had a session today.
+//   G4 day_state_unreadable     from 20:00 IST the reads behind G2/G3 failed: no start (fail safe).
+// ---------------------------------------------------------------------------
+export const WAITING_RULE = "waiting_for_mic";
+export const START_HOLD_RULE = "start_gate_hold";
+export const MIC_RETURN_TICKS = 2;
+const OPERATOR_END_FROM_MS = 20 * 3_600_000;
+const LATE_START_FROM_MS = (20 * 60 + 30) * 60_000;
+const istMsOfDay = (A: number): number => (((A + IST_OFFSET_MS) % 86_400_000) + 86_400_000) % 86_400_000;
+
+/** PURE. The first failing late-evening gate (G2, G3, G4) or null. Nothing applies before 20:00 IST. */
+export function dayGate(s: Pick<RoomSense, "day">, A: number): "day_ended_by_operator" | "late_start_blocked" | "day_state_unreadable" | null {
+  const ms = istMsOfDay(A);
+  if (ms < OPERATOR_END_FROM_MS) return null;
+  if (!s.day) return "day_state_unreadable";
+  if (s.day.operator_end_at) return "day_ended_by_operator";
+  if (ms >= LATE_START_FROM_MS && s.day.session_today) return "late_start_blocked";
+  return null;
+}
+
+type MicWait = { inEpisode: boolean; confirmed: boolean; alertedToday: boolean };
+/** PURE. A waiting_for_mic episode from the room's own decision rows (no new table): this IST day's waiting rows newer than the day's last steward start attempt. It is confirmed when a
+ *  "mic present, 1 of 2" row (mic_ticks >= 1) is newer than the last "missing" row (mic_ticks 0): the second present tick is the one that goes on to the start gates. */
+function micWait(c: Ctx): MicWait {
+  const midnight = istMidnightOf(c.A);
+  const today = c.recent.room.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= c.A);
+  const lastAttempt = Math.max(-Infinity, ...(c.s.start_attempts ?? []).map((a) => new Date(a.created_at).getTime()).filter((t) => Number.isFinite(t)));
+  const waits = today.filter((r) => r.rule === WAITING_RULE && Date.parse(r.ts) > lastAttempt).sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  const lastMissing = waits.reduce((t, r) => (Number(r.params.mic_ticks) === 0 ? Date.parse(r.ts) : t), -Infinity);
+  const confirmed = waits.some((r) => Number(r.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && Date.parse(r.ts) > lastMissing);
+  return { inEpisode: waits.length > 0, confirmed, alertedToday: today.some((r) => r.rule === "device_missing" && r.action === "alert") };
+}
+
 function notRecording(c: Ctx): Decision[] {
   const { s, cfg } = c;
   const L = s.listener;
@@ -457,6 +504,36 @@ function notRecording(c: Ctx): Decision[] {
   }
   const v = startVerdict(s.start_attempts, c.A, cfg.caps.start_retries);
   const attempts = v.attempts;
+  // G4 / G2 / G3: the late-evening gates (a deliberate end of the day is respected; no new day starts at the end of it)
+  const dg = dayGate(s, c.A);
+  if (dg) {
+    return [
+      mk(c, START_HOLD_RULE, "log_only", { reason: dg }, `inside the window with no session, but ${dg === "day_ended_by_operator" ? "an operator ended the day (end_day acked at or after 20:00 IST)" : dg === "late_start_blocked" ? "it is past 20:30 IST and the room already had a session today" : "the day state could not be read"}`, `scribe_start held: ${dg}`, dg === "day_state_unreadable" ? "warn" : "info", {}, {
+        day_gate: dg,
+        operator_end_at: s.day?.operator_end_at ?? null,
+        session_today: s.day?.session_today ?? null,
+      }),
+    ];
+  }
+  // G1: the microphone, above the exhausted / backoff / pending checks: a room whose mic is unplugged is never started (not even one attempt)
+  const wait = micWait(c);
+  const missing = deviceMissing(c);
+  const present = !missing && s.audio.default_input_present === true && s.audio.usb_removed_recent !== true;
+  let micReturn = false;
+  if (missing || (wait.inEpisode && !present)) {
+    const device = deviceLabel(s);
+    const ds = [mk(c, WAITING_RULE, "log_only", { mic_ticks: 0 }, `room ${s.room_name}: the input device "${device}" is missing; no start is sent until it is back for 2 consecutive ticks`, "scribe_start held: waiting_for_mic", "warn", {}, { attempts, device_missing: missing })];
+    if (!wait.alertedToday) {
+      ds.push(mk(c, "device_missing", "alert", { room_id: s.room_id, room: s.room_name, device }, `room ${s.room_name} cannot start: the input device "${device}" is missing; no start is sent until it is back`, "scribe_start held: waiting_for_mic", "error", {}, { attempts }));
+    }
+    return fcAll(ds, "not_recording");
+  }
+  if (wait.inEpisode) {
+    if (!wait.confirmed) {
+      return [mk(c, WAITING_RULE, "log_only", { mic_ticks: 1 }, `room ${s.room_name}: the input device is back (1 of ${MIC_RETURN_TICKS} ticks)`, "scribe_start held: waiting_for_mic (mic back, 1 of 2 ticks)", "info", {}, { attempts, mic_return: "1 of 2 ticks" })];
+    }
+    micReturn = true;
+  }
   // a 4th attempt is never issued in an IST day: start_exhausted (log_only) plus a needs-hands message
   if (v.kind === "exhausted") {
     return fcAll(
@@ -477,33 +554,6 @@ function notRecording(c: Ctx): Decision[] {
       "not_recording",
     );
   }
-  // device missing: ONE live attempt, then an alert naming the room and the device, and no more attempts until the device is back
-  if (deviceMissing(c) && attempts >= 1) {
-    const device = deviceLabel(s);
-    // F2: ONE alert row per missing episode. An episode opens with the alert and closes when the device is seen again (decideRoom appends the closing row); while it is open, inputs only.
-    if (deviceEpisodeOpen(c)) {
-      return fcAll(
-        [mk(c, "device_missing_hold", "log_only", {}, `room ${s.room_name}: the input device "${device}" is still missing (alert already raised for this episode); no starts until it reappears`, "scribe_start held: input device missing (episode open)", "warn", {}, { attempts, device_missing_episode: "open" })],
-        "not_recording",
-      );
-    }
-    return fcAll(
-      [
-        mk(
-          c,
-          "device_missing",
-          "alert",
-          { room_id: s.room_id, room: s.room_name, device },
-          `room ${s.room_name} cannot start: the input device "${device}" is missing; one start was tried today and no more are sent until it reappears`,
-          "scribe_start held: input device missing after one attempt",
-          "error",
-          {},
-          { attempts },
-        ),
-      ],
-      "not_recording",
-    );
-  }
   if (v.kind === "pending") {
     return [mk(c, "not_recording", "log_only", {}, "inside the window with no session; the last start_day has not resolved yet", "scribe_start held: previous start_day pending", "info", {}, { attempts })];
   }
@@ -515,8 +565,8 @@ function notRecording(c: Ctx): Decision[] {
       "not_recording",
     );
   }
-  const g = startGates(c);
-  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(c) ? { device_missing: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
+  const g = startGates(c, micReturn);
+  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(micReturn ? { mic_return: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
 }
 
 // ---------------------------------------------------------------------------
