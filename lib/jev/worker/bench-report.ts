@@ -15,7 +15,7 @@ export type Resolve = (questionId: string, value: string, evidence: Record<strin
 export type QuestionReport = {
   question_id: string; kind: string; n_derived: number; n_abstained: number; n_gated: number; abstain_rate: number | null; mean_confidence: number | null;
   distribution: Record<string, number>; order_flip_rate: number | null; n_flip_pairs: number;
-  vs_labels?: { n_labeled: number; n_scored: number; coverage: number | null; accuracy: number | null; kappa: number | null; escape_recall: number | null; n_escape_truth: number; confusion: Record<string, Record<string, number>> };
+  vs_labels?: { n_labeled: number; n_scored: number; n_abstained_labeled: number; n_failed_labeled: number; n_deferred_labeled: number; n_not_run_labeled: number; coverage: number | null; accuracy: number | null; kappa: number | null; escape_recall: number | null; n_escape_truth: number; confusion: Record<string, Record<string, number>> };
 };
 export type BenchReport = {
   set: string; version: string; sha8: string; use: string; mode: "bench"; in_sample: true; mock: boolean;
@@ -73,17 +73,30 @@ export function buildBenchReport(input: {
     };
     const labels = (input.labels ?? []).filter((l) => l.question_id === d.question_id);
     if (labels.length) {
+      // THE LABELLED SET IS THE LABELS FILE'S, over ALL outcomes (F7): a labelled subject that hit a pre-gate, was too large, had no stored data, got no Jev answer or an off-menu one
+      // is an ABSTAIN in the coverage denominator, never dropped. Only subjects that were never run to a decision - failed or deferred (or absent from the run) - are listed separately.
       const lab = new Map(labels.map((l) => [l.subject_id, l.label]));
-      const labeled = resolved.filter((x) => lab.has(x.subject));
-      const scored = labeled.filter((x) => !isAbstain(x));
-      const pairs = scored.map((x) => [lab.get(x.subject)!, x.mapped] as const);
-      const truthEsc = labeled.filter((x) => escapes.has(lab.get(x.subject)!));
+      const statusOf = new Map(outcomes.map((o) => [o.subject_id, o.status]));
+      const byDerived = new Map(resolved.map((x) => [x.subject, x]));
+      let nFailed = 0, nDeferred = 0, nNotRun = 0;
+      const ran: Array<{ subject: string; label: string; d: (typeof resolved)[number] | undefined }> = [];
+      for (const [subject, label] of lab) {
+        const st = statusOf.get(subject);
+        if (st === undefined) nNotRun += 1;
+        else if (st === "failed") nFailed += 1;
+        else if (st === "deferred") nDeferred += 1;
+        else ran.push({ subject, label, d: byDerived.get(subject) });
+      }
+      const answered = ran.filter((x) => x.d !== undefined && !isAbstain(x.d));
+      const pairs = answered.map((x) => [x.label, x.d!.mapped] as const);
+      const truthEsc = ran.filter((x) => escapes.has(x.label));
       const confusion: Record<string, Record<string, number>> = {};
       for (const [t, p] of pairs) { (confusion[t] ??= {})[p] = ((confusion[t] ??= {})[p] ?? 0) + 1; }
       q.vs_labels = {
-        n_labeled: labeled.length, n_scored: scored.length, coverage: labeled.length ? r4(scored.length / labeled.length) : null,
+        n_labeled: ran.length, n_scored: answered.length, n_abstained_labeled: ran.length - answered.length, coverage: ran.length ? r4(answered.length / ran.length) : null,
+        n_failed_labeled: nFailed, n_deferred_labeled: nDeferred, n_not_run_labeled: nNotRun,
         accuracy: pairs.length ? r4(pairs.filter(([t, p]) => t === p).length / pairs.length) : null, kappa: cohenKappa(pairs),
-        escape_recall: truthEsc.length ? r4(truthEsc.filter(isAbstain).length / truthEsc.length) : null, n_escape_truth: truthEsc.length, confusion,
+        escape_recall: truthEsc.length ? r4(truthEsc.filter((x) => x.d === undefined || isAbstain(x.d)).length / truthEsc.length) : null, n_escape_truth: truthEsc.length, confusion,
       };
     }
     questions.push(q);

@@ -960,6 +960,22 @@ suite("the Jev worker on postgres:16", () => {
       }
     });
 
+
+    it("F7: through runBench, labelled subjects that abstain, are too large or get no Jev answer lower COVERAGE (4 labelled, 1 answered -> 0.25)", async () => {
+      await reset(); env({ ...ON });
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: async (id) =>
+        id === "f7_abstain" ? { abstain: "no_locator" } : id === "f7_big" ? { tooLarge: true, bytes: 99_999 } : { state: { marker: id }, evidence: { consult_key: id }, lane: "text" as const } });
+      H.script = (req) => {
+        const r = answer({ pitch_type: "surgery" })(req) as { answers: Record<string, unknown> };
+        if ((req.state as { marker?: string }).marker === "f7_omit") delete r.answers.pitch_type;   // Jev leaves pitch_type unanswered for this subject
+        return r;
+      };
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: ["f7_ok", "f7_omit", "f7_abstain", "f7_big"],
+        labels: ["f7_ok", "f7_omit", "f7_abstain", "f7_big"].map((subject_id) => ({ subject_id, question_id: "pitch_type", label: "surgery" })) });
+      const v = rep.questions.find((x) => x.question_id === "pitch_type")!.vs_labels!;
+      expect(v).toMatchObject({ n_labeled: 4, n_scored: 1, n_abstained_labeled: 3, coverage: 0.25, accuracy: 1 });
+    });
+
     it("the P2 uses are registered in production code (one per set), and registering twice is harmless", () => {
       _clearUsesForTests(); registerP2Uses(); registerP2Uses();
       expect([...new Set(["u10-timeline", "encounter-end", "stt-quality", "stt-pick", "pitch-detect", "pitch-uptake", "chair-affect", "doubt"])].length).toBe(8);

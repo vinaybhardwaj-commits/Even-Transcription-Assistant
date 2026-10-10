@@ -486,3 +486,42 @@ describe("F6: a closed gate closes its dependents whatever the OUTCOME of the li
     expect(rows.map((r) => r.outcome)).toEqual(["answered", "answered"]);
   });
 });
+
+describe("F7: the bench scorer's labelled set is the LABELS FILE's, over every outcome", () => {
+  const pt = [{ question_id: "pitch_type", kind: "choice", body: { type: "choice", instructions: "x", criteria: { surgery: "a", medication: "b", no_pitch: "c", insufficient_evidence: "d" } }, escape_options: ["no_pitch", "insufficient_evidence"] }] as unknown as QuestionDef[];
+  const set = { id: "pitch-uptake", version: "v0", sha: "a".repeat(64), use: "consult_rubric" };
+  const dRow = (subject_id: string, value: string) => ({ subject_id, question_id: "pitch_type", variant: "derived", kind: "choice", value, confidence: 0.8 });
+  const out = (subject_id: string, status: "asked" | "abstained" | "too_large" | "no_state" | "failed" | "deferred", rows: ReturnType<typeof dRow>[] = []) => ({ subject_id, status, rows, tokens: 0, calls: 0 });
+  const lab = (subject_id: string, label: string) => ({ subject_id, question_id: "pitch_type", label });
+  const report = (outcomes: ReturnType<typeof out>[], labels: ReturnType<typeof lab>[]) => buildBenchReport({ set, defs: pt, outcomes, labels, mock: false, usdPerToken: 0 }).questions[0]!.vs_labels!;
+
+  it("THE REFUTER'S PROBE: 4 labelled, 1 answered (the rest: Jev omitted, no_locator pre-gate, too large) -> coverage 0.25, not 1.0", () => {
+    const v = report(
+      [out("a", "asked", [dRow("a", "surgery")]), out("b", "asked", []) /* Jev omitted the answer */, out("c", "abstained"), out("d", "too_large")],
+      [lab("a", "surgery"), lab("b", "surgery"), lab("c", "medication"), lab("d", "surgery")],
+    );
+    expect(v).toMatchObject({ n_labeled: 4, n_scored: 1, n_abstained_labeled: 3, coverage: 0.25, accuracy: 1 });
+  });
+  it("an off-menu answer (no derived row) and a subject with no stored data (no_state) are abstains in the denominator too", () => {
+    const v = report([out("a", "asked", [dRow("a", "surgery")]), out("b", "asked", []), out("c", "no_state")], [lab("a", "surgery"), lab("b", "surgery"), lab("c", "surgery")]);
+    expect(v).toMatchObject({ n_labeled: 3, n_scored: 1, coverage: 0.3333 });
+  });
+  it("FAILED, DEFERRED and never-run labelled subjects are listed separately and are NOT in the coverage denominator", () => {
+    const v = report([out("a", "asked", [dRow("a", "surgery")]), out("b", "failed"), out("c", "deferred")], [lab("a", "surgery"), lab("b", "surgery"), lab("c", "surgery"), lab("ghost", "surgery")]);
+    expect(v).toMatchObject({ n_labeled: 1, n_scored: 1, coverage: 1, n_failed_labeled: 1, n_deferred_labeled: 1, n_not_run_labeled: 1 });
+  });
+  it("escape recall is over the SAME full set: a truth-escape subject that was pre-gated or unanswered counts as an abstain (recall 1), one Jev answered does not", () => {
+    const v = report(
+      [out("a", "asked", [dRow("a", "surgery")]), out("b", "abstained"), out("c", "asked", []), out("d", "asked", [dRow("d", "no_pitch")])],
+      [lab("a", "no_pitch"), lab("b", "no_pitch"), lab("c", "insufficient_evidence"), lab("d", "no_pitch")],
+    );
+    expect(v.n_escape_truth).toBe(4);
+    expect(v.escape_recall).toBe(0.75);   // b, c (never answered) and d (Jev chose the escape) abstained; a (Jev said surgery) did not
+  });
+  it("only ANSWERED non-abstained subjects enter accuracy, kappa and the confusion matrix", () => {
+    const v = report([out("a", "asked", [dRow("a", "surgery")]), out("b", "asked", [dRow("b", "medication")]), out("c", "abstained")], [lab("a", "surgery"), lab("b", "surgery"), lab("c", "surgery")]);
+    expect(v.confusion).toEqual({ surgery: { surgery: 1, medication: 1 } });
+    expect(v.accuracy).toBe(0.5);
+    expect(v).toMatchObject({ n_labeled: 3, n_scored: 2, coverage: 0.6667 });
+  });
+});
