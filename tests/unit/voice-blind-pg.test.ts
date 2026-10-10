@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS as BLIND_ROOM_DAYS } from "../support/former-blind-pairs";
 
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v), { transaction: async () => [] }) }));
@@ -45,9 +45,15 @@ beforeAll(() => {
 afterAll(() => { if (HAVE) pg.stop(); });
 
 (HAVE ? describe : describe.skip)("the session view on real postgres", () => {
-  it("G1 (REL2-R4): a session with ANY held-out window (bench, diarize or both) is refused WHOLE, as scribe_get_session refuses it: 403, no window", async () => {
+  it("G1 (REL2-R4, lifted): a session with formerly held-out windows (bench, diarize or both) is served WHOLE; only the unplaced window drops out and is counted", async () => {
     const { lookupSegments } = await import("@/lib/diarize-segments");
-    expect(await lookupSegments({ session_id: "bs1" }, { blindGuard: true })).toEqual({ ok: false, status: 403, error: "blind_room_day" });
+    const r = await lookupSegments({ session_id: "bs1" }, { blindGuard: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const p = r.payload as { windows: Array<{ window_id: string }>; n_blind_excluded: number; n_unplaced_excluded: number };
+    expect(p.windows.map((w) => w.window_id).sort()).toEqual(["w_bench_blind", "w_both_blind", "w_clean", "w_only_bench_clean", "w_rdw_blind"]); // formerly blind windows are served; only the unplaced one drops
+    expect(p.n_blind_excluded).toBe(0);
+    expect(p.n_unplaced_excluded).toBe(1);
   });
   it("Y2 (unchanged): in a session with no held-out window, the unplaced window drops out and is counted; only placed windows are returned", async () => {
     const { lookupSegments } = await import("@/lib/diarize-segments");

@@ -1,5 +1,5 @@
 /**
- * S8A6 (GATING G62, G64, G65, G66) — the held-out set at the reads and writes of the rubric store, with sql and the lab store MOCKED (no docker, so these run under ETA_ALLOW_SKIP_E2E=1 too).
+ * S8A6 (GATING G62, G64, G65, G66) — the held-out set (LIFTED by V 10 Oct 2026, now EMPTY: formerly blind pairs are served and written like any day; the NULL-pair rule stays) at the reads and writes of the rubric store, with sql and the lab store MOCKED (no docker, so these run under ETA_ALLOW_SKIP_E2E=1 too).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -25,7 +25,8 @@ const { BLIND_ROOM_DAYS, BlindRoomDayError } = await import("@/lib/rubrics/blind
 const { listConsultKeys } = await import("@/lib/rubrics/readers/consult-span");
 const { listAudioHours, AUDIO_ROWS_MAX } = await import("@/lib/rubrics/readers/audio-state");
 
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const { FORMER_BLIND_PAIRS } = await import("../support/former-blind-pairs");
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 const run = async (args: Row) => (await S.CALLABLE_TOOLS.get("scribe_rubric")!.handler(args, { origin: "https://x", actor: "mcp:t", scopes: new Set(["read"]) } as never)) as Row;
 
 beforeEach(() => {
@@ -33,28 +34,30 @@ beforeEach(() => {
   L.setLabStoreForTests({ get: async (k) => { gets.push(k); return mem.has(k) ? { body: mem.get(k)!, etag: "e" } : null; }, put: async (k, b) => { puts.push(k); mem.set(k, b); return "ok"; }, list: async () => [] });
 });
 
-describe("G62 — the results read refuses and filters the held-out set", () => {
-  it("a (room, date) filter that names a blind pair is refused blind_room_day before any query; a neighbour day is not", async () => {
-    expect(await run({ action: "results", rooms: [BR], from: BD, to: BD })).toMatchObject({ ok: false, error: "blind_room_day" });
-    expect(await run({ action: "results", rooms: [BR], from: BD })).toMatchObject({ ok: false, error: "blind_room_day" });
-    expect(await run({ action: "results", rooms: [BR], to: BD })).toMatchObject({ ok: false, error: "blind_room_day" });
-    expect(statements).toEqual([]);
+describe("G62 — the results read serves the formerly held-out pairs (set lifted)", () => {
+  it("a (room, date) filter that names a formerly blind pair is served (queried), like a neighbour day", async () => {
+    expect(BLIND_ROOM_DAYS).toHaveLength(0);
+    expect(await run({ action: "results", rooms: [BR], from: BD, to: BD })).toMatchObject({ ok: true });
+    expect(await run({ action: "results", rooms: [BR], from: BD })).toMatchObject({ ok: true });
+    expect(await run({ action: "results", rooms: [BR], to: BD })).toMatchObject({ ok: true });
+    expect(statements.some((s) => /FROM rubric_result/.test(s.text))).toBe(true);
     expect(await run({ action: "results", rooms: [BR], from: "2026-10-01", to: "2026-10-01" })).toMatchObject({ ok: true, count: 0 });
     expect(await run({ action: "results", rooms: ["r1"], from: BD, to: BD })).toMatchObject({ ok: true }); // another room on that date
   });
-  it("listResults excludes blind (room_id, ist_date) pairs AND blind room-hour keys in the query itself, passing all 14 pairs", async () => {
+  it("listResults keeps its NOT EXISTS exclusion in the query but passes EMPTY pair arrays, so the former 14 pairs are not excluded", async () => {
     await Store.listResults({ limit: 10 });
     const q = statements.find((s) => /FROM rubric_result/.test(s.text))!;
     expect(q.text).toMatch(/NOT EXISTS[\s\S]*unnest[\s\S]*b\.d = rubric_result\.ist_date AND b\.r = rubric_result\.room_id[\s\S]*unit_kind = 'room_hour'[\s\S]*split_part[\s\S]*ORDER BY[\s\S]*LIMIT/);
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([, r]) => r));
+    expect(q.values).toContainEqual([]);
+    for (const [d, r] of FORMER_BLIND_PAIRS) expect(q.values.some((v) => Array.isArray(v) && ((v as unknown[]).includes(d) || (v as unknown[]).includes(r)))).toBe(false);
   });
-  it("readEvidence checks BEFORE the store: a blind pair or a blind room-hour key is never fetched; an ordinary key is", async () => {
+  it("readEvidence fetches a formerly blind pair and a formerly blind room-hour key like any other key", async () => {
     mem.set("rubric/talk_time/0.1.0/w1.json", "{\"ok\":1}");
     mem.set(`rubric/room_mic_quality/0.1.0/${BR}:${BD}:10.json`, "{\"secret\":1}");
-    await expect(Store.readEvidence("rubric/talk_time/0.1.0/w1.json", { room_id: BR, ist_date: BD })).rejects.toBeInstanceOf(BlindRoomDayError);
-    await expect(Store.readEvidence(`rubric/room_mic_quality/0.1.0/${BR}:${BD}:10.json`)).rejects.toBeInstanceOf(BlindRoomDayError);
-    expect(gets).toEqual([]);
+    expect(await Store.readEvidence("rubric/talk_time/0.1.0/w1.json", { room_id: BR, ist_date: BD })).toEqual({ ok: 1 });
+    expect(await Store.readEvidence(`rubric/room_mic_quality/0.1.0/${BR}:${BD}:10.json`)).toEqual({ secret: 1 });
+    expect(gets).toHaveLength(2);
+    gets.length = 0;
     expect(await Store.readEvidence("rubric/talk_time/0.1.0/w1.json", { room_id: "r1", ist_date: "2026-10-01" })).toEqual({ ok: 1 });
     expect(gets).toEqual(["rubric/talk_time/0.1.0/w1.json"]);
   });
@@ -73,32 +76,33 @@ describe("G62 — the results read refuses and filters the held-out set", () => 
     expect((r.results as Row[])[0]).toMatchObject({ evidence: null });
     expect(gets).toEqual([]);
   });
-  it("include_text on a blind row that got in by other means serves the row's counterpart as evidence:null and fetches nothing", async () => {
+  it("include_text on a formerly blind row serves its evidence like any other row (the store is fetched)", async () => {
     mem.set("rubric/talk_time/0.1.0/wb.json", "{\"secret\":1}");
     answer = (t) => (/FROM rubric_result/.test(t) ? [{ rubric_id: "talk_time", unit_key: "wb", room_id: BR, ist_date: BD, status: "ok", score: { evidence_key: "rubric/talk_time/0.1.0/wb.json" }, findings: [] }] : []);
     const r = await run({ action: "results", include_text: true });
-    expect((r.results as Row[])[0]).toMatchObject({ evidence: null });
-    expect(gets).toEqual([]);
+    expect((r.results as Row[])[0]).toMatchObject({ evidence: { secret: 1 } });
+    expect(gets).toEqual(["rubric/talk_time/0.1.0/wb.json"]);
   });
 });
 
-describe("G66 — the writers refuse the held-out set, proven without docker", () => {
+describe("G66 — the writers accept the formerly held-out pairs, proven without docker", () => {
   const base = { rubric_id: "talk_time", version: "0.1.0", unit_kind: "window", unit_key: "w1", run_id: "rub_1", status: "ok" as const, score: { a: 1 }, findings: [], lab: true };
-  it("upsertResult throws BlindRoomDayError before any statement, by columns and by a room-hour key (this dies if the check is removed)", async () => {
-    for (const [d, r] of BLIND_ROOM_DAYS) {
-      await expect(Store.upsertResult({ ...base, room_id: r, ist_date: d })).rejects.toBeInstanceOf(BlindRoomDayError);
-      await expect(Store.upsertResult({ ...base, unit_kind: "room_hour", unit_key: `${r}:${d}:09`, room_id: null, ist_date: null })).rejects.toBeInstanceOf(BlindRoomDayError);
+  it("upsertResult writes a formerly blind pair, by columns and by a room-hour key", async () => {
+    for (const [d, r] of FORMER_BLIND_PAIRS) {
+      statements.length = 0;
+      await Store.upsertResult({ ...base, room_id: r, ist_date: d });
+      expect(statements.some((s) => /INSERT INTO rubric_result/.test(s.text)), `${d}|${r}`).toBe(true);
+      statements.length = 0;
+      await Store.upsertResult({ ...base, unit_kind: "room_hour", unit_key: `${r}:${d}:09`, room_id: null, ist_date: null });
+      expect(statements.some((s) => /INSERT INTO rubric_result/.test(s.text)), `${d}|${r} room_hour`).toBe(true);
     }
-    expect(statements).toEqual([]);
-    await Store.upsertResult({ ...base, room_id: "r1", ist_date: "2026-10-01" });
-    expect(statements.some((s) => /INSERT INTO rubric_result/.test(s.text))).toBe(true);
   });
-  it("writeEvidence throws before any put, by pair and by a room-hour name; an ordinary write puts once", async () => {
-    await expect(Store.writeEvidence("talk_time", "0.1.0", "w1", { x: 1 }, { room_id: BR, ist_date: BD })).rejects.toBeInstanceOf(BlindRoomDayError);
-    await expect(Store.writeEvidence("room_mic_quality", "0.1.0", `${BR}:${BD}:03`, { x: 1 })).rejects.toBeInstanceOf(BlindRoomDayError);
-    expect(puts).toEqual([]);
+  it("writeEvidence puts for a formerly blind pair and room-hour name, like an ordinary write", async () => {
+    expect(await Store.writeEvidence("talk_time", "0.1.0", "w1", { x: 1 }, { room_id: BR, ist_date: BD })).toBe("rubric/talk_time/0.1.0/w1.json");
+    expect(await Store.writeEvidence("room_mic_quality", "0.1.0", `${BR}:${BD}:03`, { x: 1 })).toBe(`rubric/room_mic_quality/0.1.0/${BR}:${BD}:03.json`);
+    expect(puts).toHaveLength(2);
     expect(await Store.writeEvidence("talk_time", "0.1.0", "w1", { x: 1 }, { room_id: "r1", ist_date: "2026-10-01" })).toBe("rubric/talk_time/0.1.0/w1.json");
-    expect(puts).toHaveLength(1);
+    expect(puts).toHaveLength(3);
   });
 });
 
@@ -111,7 +115,7 @@ describe("G64 / G65 — consult listing filters in SQL before the LIMIT; the aud
     expect(q.text.indexOf("NOT EXISTS")).toBeGreaterThan(0);
     expect(q.text.indexOf("NOT EXISTS")).toBeLessThan(q.text.indexOf("LIMIT"));
     expect(q.values).toContain(3); // limit + 1
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
+    expect(q.values).toContainEqual([]); // empty held-out arrays
   });
   it("listAudioHours: truncated is true when the row cap is hit, false at exactly the cap", async () => {
     const mk = (n: number) => Array.from({ length: n }, (_, i) => ({ room_id: "r1", ts_start: new Date(Date.UTC(2026, 9, 1, 0, 0, 0) + i * 1000), ts_end: new Date(Date.UTC(2026, 9, 1, 0, 0, 0) + i * 1000 + 500) }));

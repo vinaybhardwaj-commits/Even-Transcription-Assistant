@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { NextRequest } from "next/server";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS } from "../support/former-blind-pairs";
 
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => H.sql!(s, ...v), { transaction: async () => [] }) }));
@@ -17,7 +17,7 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 300_000 });
 
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-rel3-mf");
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 const CLEAN = "2026-10-05";
 const man = async (id: string) => (await import("@/app/api/bench/sessions/[id]/manifest/route")).GET(new NextRequest("http://x/m"), { params: Promise.resolve({ id }) });
 
@@ -42,11 +42,11 @@ beforeAll(() => {
 });
 afterAll(() => { if (HAVE) pg.stop(); });
 
-(HAVE ? describe : describe.skip)("REL3-MF: the manifest route refuses a session with a window held out by turn rows", () => {
-  it("clean-day session whose window has turn rows on a held-out room-day -> 403 blind_room_day, nothing served", async () => {
+(HAVE ? describe : describe.skip)("REL3-MF: the manifest route serves a session with a window whose turn rows sit on a formerly held-out day", () => {
+  it("clean-day session whose window has turn rows on a formerly held-out room-day -> 200 with its chunk (lifted)", async () => {
     const res = await man("bs_turn");
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ ok: false, error: "blind_room_day" });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(await res.text()).chunks).toHaveLength(1);
   });
   it("the clean session -> 200 with its chunk", async () => {
     const res = await man("bs_clean");

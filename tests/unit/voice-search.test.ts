@@ -14,7 +14,7 @@ vi.mock("@/lib/db", () => ({
     return [];
   },
 }));
-const { BLIND_ROOM_DAYS } = await import("@/lib/rubrics/blind-room-days");
+const { FORMER_BLIND_PAIRS: BLIND_ROOM_DAYS } = await import("../support/former-blind-pairs");
 const V = await import("@/lib/voice-search");
 const S = await import("@/lib/mcp/surface");
 const [BD, BR] = BLIND_ROOM_DAYS[0]!;
@@ -38,10 +38,10 @@ const vectorReads = () => statements.filter((s) => /ORDER BY d\.window_id, sp->>
 beforeEach(() => { statements.length = 0; answers = []; });
 
 describe("the query window passes the blind / unplaced rule first", () => {
-  it("a held-out query window is blind_room_day, an unplaced or unknown one window_unplaced, and NO other read happens", async () => {
+  it("a formerly held-out query window is searched like any other; an unplaced or unknown one is window_unplaced and NO other read happens", async () => {
     answers = [PLACE_BLIND, QVEC, ...COUNTS(3), CANDS([])];
-    expect(await V.voiceSearch(Q_WIN)).toEqual({ ok: false, error: "blind_room_day" });
-    expect(statements).toHaveLength(1); // the placement read, nothing else
+    expect(await V.voiceSearch(Q_WIN)).toMatchObject({ ok: true }); // a formerly held-out query window is searched like any clean one
+    expect(statements.length).toBeGreaterThan(1);
     statements.length = 0; answers = [PLACE_NONE, QVEC, ...COUNTS(3), CANDS([])];
     expect(await V.voiceSearch(Q_WIN)).toEqual({ ok: false, error: "window_unplaced" });
     expect(statements).toHaveLength(1);
@@ -52,14 +52,14 @@ describe("the query window passes the blind / unplaced rule first", () => {
 });
 
 describe("candidates and scope", () => {
-  it("held-out pairs are excluded IN SQL and counted, unplaced windows counted, the vector query carries the exclusion and the scope", async () => {
+  it("the blind exclusion is bound to the (empty) live list, unplaced windows counted, the vector query carries the exclusion and the scope", async () => {
     answers = [PLACE_OK, QVEC, ...COUNTS(2, 4, 3), CANDS([{ window_id: "wa", room_id: "r1", ist_date: "2026-10-02", idx: "0", b64: vec(0.9) }])];
     const r = await V.voiceSearch(Q_WIN) as Row;
     expect(r).toMatchObject({ ok: true, n_blind_excluded: 4, n_unplaced_excluded: 3, n_windows_in_scope: 2, label: "voice similarity, not identity" });
     const v = vectorReads()[0]!;
     expect(v.text).toMatch(/NOT \(EXISTS \(SELECT 1 FROM room_day r1, unnest\(\?::date\[\], \?::text\[\]\) AS b\(d, r\) WHERE r1\.id IN \(d\.room_day_id, w\.room_day_id\) AND b\.d = r1\.ist_date AND b\.r = r1\.room_id\) OR EXISTS \(SELECT 1 FROM room_turn_speaker t JOIN room_day r2 ON r2\.id = t\.room_day_id/); // Y1 + B2: bench, diarize AND the window's turn rows' own room-days // Y1: either placement
-    expect(v.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
-    expect(v.values).toContainEqual(BLIND_ROOM_DAYS.map(([, x]) => x));
+    expect(v.values).not.toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d)); // the former pairs are not bound
+    expect(v.values.filter((x) => Array.isArray(x) && x.length === 0).length).toBeGreaterThanOrEqual(2); // empty date[] and room[]
     expect(v.values).toContainEqual(["r1"]);
     expect(v.values).toContain("2026-10-01");
     expect(v.values).toContain("2026-10-07");
@@ -156,6 +156,6 @@ describe("transient and vector-free", () => {
     const t = S.CALLABLE_TOOLS.get("scribe_voice_console")!;
     expect(t.scope).toBe("read");
     answers = [PLACE_BLIND];
-    expect(await t.handler({ action: "search", ...Q_WIN }, { origin: "x", actor: "a", scopes: new Set(["read"]) } as never)).toEqual({ ok: false, error: "blind_room_day" });
+    expect(await t.handler({ action: "search", ...Q_WIN }, { origin: "x", actor: "a", scopes: new Set(["read"]) } as never)).not.toMatchObject({ error: "blind_room_day" });
   });
 });

@@ -19,34 +19,28 @@ vi.mock("@/lib/db", () => ({
 const warehouse: string[] = [];
 const REC = await import("@/lib/rubrics/evr/record");
 const { BLIND_ROOM_DAYS } = await import("@/lib/rubrics/blind-room-days");
+const { FORMER_BLIND_PAIRS } = await import("../support/former-blind-pairs");
 const { readPulseRecord } = await import("@/lib/rubrics/readers/pulse-record");
 const { readConsultText } = await import("@/lib/rubrics/readers/consult-text");
 const { selectEvrWindows } = await import("@/lib/rubrics/evr/select");
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 
 beforeEach(() => {
   statements.length = 0; warehouse.length = 0; pair = { room_id: BR, ist_date: BD, consult_key: "enc_x@m1", t_open: "2026-09-13T04:00:00Z", t_close: "2026-09-13T04:10:00Z", quality: "clean", attribution: "rows" }; // a CLOSED window: only the held-out check can stop the span read
   REC.setMetabaseForTests(async (q) => { warehouse.push(q); return []; });
 });
 
-describe("each guard on its own", () => {
-  it("pulse_record: a held-out consult is refused blind_room_day BEFORE the window row is read and before the warehouse (remove only this guard and the warehouse is called)", async () => {
-    expect(await readPulseRecord("enc_x@m1")).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(warehouse).toEqual([]);
-    expect(statements.some((s) => /warehouse_prescription_uid/.test(s.text))).toBe(false);
-    pair = { room_id: "r1", ist_date: "2026-10-08" };
-    statements.length = 0;
-    await readPulseRecord("enc_x@m1");
-    expect(statements.some((s) => /warehouse_prescription_uid/.test(s.text))).toBe(true); // control: an ordinary consult does reach the window row
+describe("held-out rule LIFTED 10 Oct 2026: a formerly held-out pair is served by each reader", () => {
+  it("pulse_record: a formerly held-out consult is NOT refused blind_room_day: the window row is read (the guard is a no-op)", async () => {
+    expect(BLIND_ROOM_DAYS).toHaveLength(0);
+    expect(await readPulseRecord("enc_x@m1")).not.toMatchObject({ reason: "blind_room_day" });
+    expect(statements.some((s) => /warehouse_prescription_uid/.test(s.text))).toBe(true);
   });
-  it("consult_text: a held-out consult is refused before any bench-window or cue query (the consult_span guard, reached through the reader)", async () => {
-    // the window row for readConsultSpan carries t_open / t_close so only the blind check can stop it
-    const { sql } = await import("@/lib/db");
-    void sql;
-    expect(await readConsultText("enc_x@m1")).toMatchObject({ ok: false });
-    expect(statements.some((s) => /FROM bench_window|FROM cue|jev_window_text/.test(s.text))).toBe(false);
+  it("consult_text: a formerly held-out consult is not refused blind_room_day (the consult_span guard is a no-op)", async () => {
+    expect(await readConsultText("enc_x@m1")).not.toMatchObject({ reason: "blind_room_day" });
+    expect(statements.some((s) => /FROM eta_encounter_windows/.test(s.text))).toBe(true);
   });
-  it("select.ts: the window selection excludes the held-out pairs IN THE QUERY, before ORDER BY / LIMIT, passing all 14 pairs (remove only the NOT EXISTS and this fails)", async () => {
+  it("select.ts: the window selection still has its NOT EXISTS before ORDER BY / LIMIT, but passes EMPTY arrays, so the former pairs are not excluded", async () => {
     await selectEvrWindows(40, 5);
     const q = statements.find((s) => /FROM eta_encounter_windows w/.test(s.text))!;
     expect(q).toBeDefined();
@@ -55,7 +49,10 @@ describe("each guard on its own", () => {
     expect(i).toBeLessThan(o);
     expect(o).toBeLessThan(l);
     expect(q.text).toMatch(/unnest\(\?::date\[\], \?::text\[\]\)/);
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([, r]) => r));
+    expect(q.values).toContainEqual([]);
+    for (const [d, r] of FORMER_BLIND_PAIRS) {
+      expect(q.values.some((v) => Array.isArray(v) && (v as unknown[]).includes(d))).toBe(false);
+      expect(q.values.some((v) => Array.isArray(v) && (v as unknown[]).includes(r))).toBe(false);
+    }
   });
 });
