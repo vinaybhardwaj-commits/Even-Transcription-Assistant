@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
-  LAB_PRESETS, LabArgsError, checkLabIngest, decodeNlp, encodeNlp, labEmbeddingsKey, labProbsKey, parseLabArgs, parseLabInputs, parseLabSpec,
+  LAB_EXPERIMENTAL_PRESETS, LAB_PRESETS, LabArgsError, labSpecNotes, checkLabIngest, decodeNlp, encodeNlp, labEmbeddingsKey, labProbsKey, parseLabArgs, parseLabInputs, parseLabSpec,
   parsePostprocessingYaml, probsRawBytes, specHash, windowProbsKey, nemotronLabEnabled,
 } from "@/lib/diarize-nemotron/lab";
 import { checkIngest, configHash } from "@/lib/diarize-nemotron/validate";
@@ -149,6 +149,45 @@ describe("inputs: window ids, two R2 prefixes, session spans", () => {
   });
 });
 
+describe("C4: unknown keys are refused everywhere in the inputs", () => {
+  it("an unknown top-level input key is refused by parseLabInputs itself (not only by parseLabArgs)", () => {
+    refuses(() => parseLabInputs({ windows: ["bw_1"], url: "https://x" }), /argument not allowed/);
+    refuses(() => parseLabInputs({ windows: ["bw_1"], shell: "id" }), /argument not allowed/);
+    expect(parseLabInputs({ windows: ["bw_1"], overrides: {} })).toHaveLength(1); // overrides is the one non-input key a caller may send alongside
+  });
+  it("an unknown span key is refused, not ignored", () => {
+    const span = { session_id: "bs_x", start: 0, end: 1000 };
+    for (const extra of [{ path: "/etc/passwd" }, { url: "https://x" }, { start_ms: 5 }, { Source: "primary" }, { cmd: "id" }]) {
+      refuses(() => parseLabInputs({ spans: [{ ...span, ...extra }] }), /span key not allowed/);
+    }
+    expect(parseLabInputs({ spans: [{ ...span, source: "backup" }] })[0]).toMatchObject({ source: "backup" });
+  });
+  it("an unknown or mistyped span source is refused (it is no longer coerced to primary)", () => {
+    for (const source of ["Primary", "both", "", "backup ", 1, null, true, ["primary"]]) {
+      refuses(() => parseLabInputs({ spans: [{ session_id: "bs_x", start: 0, end: 1000, source }] }), /span source must be/);
+    }
+    expect(parseLabInputs({ spans: [{ session_id: "bs_x", start: 0, end: 1000 }] })[0]).toMatchObject({ source: "primary" }); // absent = the default, still fine
+  });
+  it("through parseLabArgs as well, and the job's stored args still re-parse", () => {
+    refuses(() => parseLabArgs({ spans: [{ session_id: "bs_x", start: 0, end: 10, source: "x" }] }), /span source/);
+    const once = parseLabArgs({ spans: [{ session_id: "bs_x", start: 0, end: 10_000, source: "backup" }], windows: ["bw_1"] });
+    expect(once.inputs).toHaveLength(2);
+  });
+});
+
+describe("C2: latency_10s is accepted and marked experimental", () => {
+  it("is in the allow-list and in the experimental list; the others are not experimental", () => {
+    expect(LAB_PRESETS).toContain("latency_10s");
+    expect([...LAB_EXPERIMENTAL_PRESETS]).toEqual(["latency_10s"]);
+    expect(parseLabSpec({ preset: "latency_10s" }).preset).toBe("latency_10s");
+  });
+  it("labSpecNotes says so for latency_10s and nothing for the rest", () => {
+    expect(labSpecNotes(parseLabSpec({ preset: "latency_10s" }))).toEqual(["preset_latency_10s_experimental"]);
+    expect(labSpecNotes(parseLabSpec({ preset: "latency_1.04s" }))).toEqual([]);
+    expect(labSpecNotes(parseLabSpec(undefined))).toEqual([]);
+  });
+});
+
 describe("the lab flag is strict", () => {
   it("unset/0 = off, 1 = on, a typo throws", () => {
     expect(nemotronLabEnabled({})).toBe(false);
@@ -200,6 +239,15 @@ describe("lab ingest body: a closed shape", () => {
     ["an error code on success", { error_code: "boom" }, "error_code_without_failure"],
   ])("refuses %s", (_n, over, code) => {
     expect(checkLabIngest(labBody(over))).toEqual({ ok: false, error: code });
+  });
+  it("embed_error is optional: a code on an ok row is kept; on a failed row or as a non-code it is refused", () => {
+    const v = checkLabIngest(labBody({ embed_error: "embedder_unavailable" }));
+    expect(v.ok && v.body.embed_error).toBe("embedder_unavailable");
+    const none = checkLabIngest(labBody());
+    expect(none.ok && none.body.embed_error).toBeNull();
+    expect(checkLabIngest(labBody({ embed_error: "Not A Code!" }))).toEqual({ ok: false, error: "bad_embed_error" });
+    expect(checkLabIngest(labBody({ embed_error: 5 }))).toEqual({ ok: false, error: "bad_embed_error" });
+    expect(checkLabIngest(labBody({ status: "failed", error_code: "x", turns: [], clip_sha256: null, audio_ms: 0, embed_error: "embedder_unavailable" }))).toEqual({ ok: false, error: "bad_embed_error" });
   });
   it("accepts a failed row (no turns, no files) and an empty row", () => {
     expect(checkLabIngest(labBody({ status: "failed", error_code: "infer_failed", turns: [], clip_sha256: null, audio_ms: 0 })).ok).toBe(true);
@@ -279,16 +327,17 @@ describe("NLP1: the probability / embedding file", () => {
     expect(() => encodeNlp([[0, 1], [0.5]], "u8")).toThrow(/ragged/);
   });
   it("sizes a 15-minute window: raw bytes by arithmetic, and the gzip of a realistic sparse matrix is smaller", () => {
-    expect(probsRawBytes(900_000)).toBe(11_250 * 4);
+    expect(probsRawBytes(900_000)).toBe(11_250 * 8); // the model emits 8 speaker columns (measured on the box)
+    expect(probsRawBytes(900_000, 4)).toBe(11_250 * 4);
     const frames = 11_250;
     let seed = 12345; // deterministic jitter, so the size is not the artefact of a perfectly regular matrix
     const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
     const rows = Array.from({ length: frames }, (_, i) => {
       const talker = Math.floor(i / 60) % 3; // turns of ~4.8 s
-      return [0, 1, 2, 3].map((s) => Math.min(1, Math.max(0, (s === talker ? 0.9 : 0.04) + (rnd() - 0.5) * 0.2)));
+      return [0, 1, 2, 3, 4, 5, 6, 7].map((s) => Math.min(1, Math.max(0, (s === talker ? 0.9 : 0.04) + (rnd() - 0.5) * 0.2)));
     });
     const bytes = encodeNlp(rows, "u8").length;
     expect(bytes).toBeLessThan(probsRawBytes(900_000));
-    console.log(`[nlp1-size] 15-min window, 4 speakers, ${frames} frames: raw u8 ${probsRawBytes(900_000)} B, gzip of a SYNTHETIC jittered matrix ${bytes} B`);
+    console.log(`[nlp1-size] 15-min window, 8 speaker columns, ${frames} frames: raw u8 ${probsRawBytes(900_000)} B, gzip of a SYNTHETIC jittered matrix ${bytes} B`);
   });
 });

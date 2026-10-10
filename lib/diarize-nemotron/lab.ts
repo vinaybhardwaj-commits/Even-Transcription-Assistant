@@ -24,6 +24,10 @@ export const nemotronLabEnabled = (env: Record<string, string | undefined> = pro
 
 export const LAB_PRESETS = ["offline_30.4s", "latency_10s", "latency_1.04s"] as const;
 export type LabPreset = (typeof LAB_PRESETS)[number];
+/** Accepted but flaky on the box: latency_10s crashed 1 run in 3 in the refuter's smoke (a torch inductor launcher error). No retry loop; the job result says so. */
+export const LAB_EXPERIMENTAL_PRESETS: readonly LabPreset[] = ["latency_10s"];
+/** PURE: the caveats that travel with a spec into the job's progress and result. */
+export const labSpecNotes = (spec: { preset: LabPreset }): string[] => (LAB_EXPERIMENTAL_PRESETS.includes(spec.preset) ? [`preset_${spec.preset}_experimental`] : []);
 export const LAB_EMBEDDERS = ["ecapa", "titanet"] as const;
 export type LabEmbedder = (typeof LAB_EMBEDDERS)[number];
 
@@ -225,6 +229,7 @@ export type LabInput =
   | { kind: "r2_key"; r2_key: string }
   | { kind: "span"; session_id: string; start_ms: number; end_ms: number; source: "primary" | "backup" };
 
+const SPAN_KEYS = ["session_id", "start", "end", "source"];
 export const LAB_SPAN_MAX_MS = 30 * 60 * 1000;
 
 const asMsStrict = (v: unknown, what: string): number => {
@@ -238,6 +243,7 @@ const asMsStrict = (v: unknown, what: string): number => {
 
 /** PURE — the three input forms of a lab job, flattened and bounded. At least one item; at most LAB_MAX_ITEMS in all. */
 export function parseLabInputs(raw: Record<string, unknown>): LabInput[] {
+  for (const k of Object.keys(raw)) if (!(LAB_INPUT_FIELDS as readonly string[]).includes(k) && k !== "overrides") throw new LabArgsError(`argument not allowed: ${k.slice(0, 24)}`);
   const out: LabInput[] = [];
   if (raw.windows !== undefined) {
     if (!Array.isArray(raw.windows)) throw new LabArgsError("windows must be a list of window ids");
@@ -259,6 +265,8 @@ export function parseLabInputs(raw: Record<string, unknown>): LabInput[] {
     if (!Array.isArray(raw.spans)) throw new LabArgsError("spans must be a list");
     for (const s of raw.spans) {
       if (!isObj(s) || typeof s.session_id !== "string" || !ID_RE.test(s.session_id)) throw new LabArgsError("a span needs a session_id");
+      for (const k of Object.keys(s)) if (!SPAN_KEYS.includes(k)) throw new LabArgsError(`span key not allowed: ${k.slice(0, 24)}`);
+      if (s.source !== undefined && s.source !== "primary" && s.source !== "backup") throw new LabArgsError("span source must be primary or backup");
       const start = asMsStrict(s.start, "span start");
       const end = asMsStrict(s.end, "span end");
       if (end <= start) throw new LabArgsError("span end must be after start");
@@ -308,12 +316,15 @@ export type LabIngestBody = {
   embeddings_r2_key: string | null;
   embeddings_dims: number | null;
   infer_s: number | null;
+  /** Optional: the turns are kept but the embeddings could not be made (embedder_unavailable). */
+  embed_error?: string | null;
 };
 
 const LAB_INGEST_KEYS = [
   "run_id", "idx", "worker_id", "status", "error_code", "model", "model_rev", "config", "spec_hash", "audio_ms", "clip_sha256", "turns",
   "probs_r2_key", "embeddings_r2_key", "embeddings_dims", "infer_s",
 ] as const;
+const LAB_OPTIONAL_KEYS = ["embed_error"] as const;
 
 export type LabIngestCheck = { ok: true; body: LabIngestBody; derived: { speaker_count: number; turn_count: number; speech_ms: number; overlap_ms: number } } | { ok: false; error: string };
 
@@ -337,7 +348,7 @@ function overlapAndSpeech(turns: Array<[number, number, string]>): { speech_ms: 
 /** PURE — a lab ingest body, or the first reason it is refused. Keys (probs/embeddings) are checked against the server's own keys by the route. */
 export function checkLabIngest(raw: unknown): LabIngestCheck {
   if (!isObj(raw)) return { ok: false, error: "bad_body" };
-  for (const k of Object.keys(raw)) if (!(LAB_INGEST_KEYS as readonly string[]).includes(k)) return { ok: false, error: "unknown_field" };
+  for (const k of Object.keys(raw)) if (!(LAB_INGEST_KEYS as readonly string[]).includes(k) && !(LAB_OPTIONAL_KEYS as readonly string[]).includes(k)) return { ok: false, error: "unknown_field" };
   for (const k of LAB_INGEST_KEYS) if (!(k in raw)) return { ok: false, error: `missing_${k}` };
   const b = raw as Record<(typeof LAB_INGEST_KEYS)[number], unknown>;
   if (typeof b.run_id !== "string" || !ID_RE.test(b.run_id)) return { ok: false, error: "bad_run_id" };
@@ -386,6 +397,8 @@ export function checkLabIngest(raw: unknown): LabIngestCheck {
   if (b.infer_s !== null && (typeof b.infer_s !== "number" || !Number.isFinite(b.infer_s) || b.infer_s < 0 || b.infer_s > 86_400)) return { ok: false, error: "bad_infer_s" };
   if (status === "failed" && (b.probs_r2_key !== null || b.embeddings_r2_key !== null)) return { ok: false, error: "files_with_failure" };
 
+  const embedError = (raw as Record<string, unknown>).embed_error;
+  if (embedError !== undefined && embedError !== null && (typeof embedError !== "string" || !CODE_RE.test(embedError) || status === "failed")) return { ok: false, error: "bad_embed_error" };
   const so = overlapAndSpeech(turns);
   return {
     ok: true,
@@ -394,6 +407,7 @@ export function checkLabIngest(raw: unknown): LabIngestCheck {
       config: b.config as LabIngestBody["config"], spec_hash: b.spec_hash, audio_ms: b.audio_ms, clip_sha256: b.clip_sha256 as string | null, turns,
       probs_r2_key: b.probs_r2_key as string | null, embeddings_r2_key: b.embeddings_r2_key as string | null,
       embeddings_dims: b.embeddings_dims as number | null, infer_s: b.infer_s as number | null,
+      embed_error: typeof embedError === "string" ? embedError : null,
     },
     derived: { speaker_count: labels.size, turn_count: turns.length, speech_ms: so.speech_ms, overlap_ms: so.overlap_ms },
   };
@@ -483,9 +497,9 @@ export function decodeNlp(buf: Uint8Array): { header: NlpHeader; rows: number[][
 }
 
 /**
- * PURE — the stored size of one 15-minute window's probabilities, as the arithmetic stands: 80 ms frames x speakers x 1 byte (u8),
+ * PURE — the stored size of one 15-minute window's probabilities, as the arithmetic stands: 80 ms frames x 8 speaker columns (the model emits 8, measured on the box) x 1 byte (u8),
  * before gzip. Gzip only shrinks it (sparse near-0/near-1 probabilities compress well); the report gives the measured figure.
  */
-export function probsRawBytes(audioMs: number, speakers = 4, frameMs = 80): number {
+export function probsRawBytes(audioMs: number, speakers = 8, frameMs = 80): number {
   return Math.ceil(audioMs / frameMs) * speakers;
 }

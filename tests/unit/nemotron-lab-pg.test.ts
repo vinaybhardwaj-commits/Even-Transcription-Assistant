@@ -200,6 +200,18 @@ describe.skipIf(!HAVE)("the lab store", () => {
     expect((await item("run_exp", 0)).state).toBe("queued");
   });
 
+  it("embed_error is stored with an ok result that kept its turns (embedder_unavailable)", async () => {
+    win("bw_ee");
+    await L.insertLabRun("run_emb", lab.parseLabSpec({ return_embeddings: "ecapa" }), lab.parseLabInputs({ windows: ["bw_ee"] }), null);
+    await L.claimLabItems("box-1", 1);
+    const spec = lab.parseLabSpec({ return_embeddings: "ecapa" });
+    const v = lab.checkLabIngest({ run_id: "run_emb", idx: 0, worker_id: "box-1", status: "ok", error_code: null, model: "m", model_rev: "r", config: { a: 1 }, spec_hash: lab.specHash(spec), audio_ms: 900000, clip_sha256: "b".repeat(64), turns: [[0, 1000, "spk0"]], probs_r2_key: null, embeddings_r2_key: null, embeddings_dims: null, infer_s: 1, embed_error: "embedder_unavailable" });
+    if (!v.ok) throw new Error(v.error);
+    expect(await L.recordLabIngest(v.body, v.derived)).toEqual({ result: "stored", state: "ok" });
+    const row = await item("run_emb", 0);
+    expect([row.state, row.embed_error, row.turn_count, row.embeddings_r2_key]).toEqual(["ok", "embedder_unavailable", 1, null]);
+    expect((await L.labItemSummaries("run_emb"))[0]!.embed_error).toBe("embedder_unavailable");
+  });
   it("an empty answer is stored as empty", async () => {
     win("bw_i3");
     await L.insertLabRun("run_emp", SPEC, lab.parseLabInputs({ windows: ["bw_i3"] }), null);
@@ -245,7 +257,7 @@ describe.skipIf(!HAVE)("the lab store", () => {
     expect(await L.labProgress("run_prog")).toEqual({ total: 3, queued: 0, ok: 1, empty: 1, failed: 1, deadline_passed: false });
     const sums = await L.labItemSummaries("run_prog");
     expect(sums.map((s) => [s.idx, s.state, s.has_probs])).toEqual([[0, "ok", true], [1, "empty", false], [2, "failed", false]]);
-    expect(Object.keys(sums[0]!).sort()).toEqual(["audio_ms", "error_code", "has_embeddings", "has_probs", "idx", "speaker_count", "state", "turn_count"]);
+    expect(Object.keys(sums[0]!).sort()).toEqual(["audio_ms", "embed_error", "error_code", "has_embeddings", "has_probs", "idx", "speaker_count", "state", "turn_count"]);
     expect(await L.labProgress("run_none")).toBeNull();
   });
 });
@@ -397,7 +409,7 @@ describe.skipIf(!HAVE)("nemotron_lab_run through claimJobs + runOneStep", () => 
 
   it("queues, writes the run, waits for the worker, and finishes with counts only", async () => {
     win("bw_j1"); win("bw_j2");
-    const j = await submit({ windows: ["bw_j1", "bw_j2"], overrides: { return_probs: true, postprocessing_yaml: "onset: 0.4" } });
+    const j = await submit({ windows: ["bw_j1", "bw_j2"], overrides: { return_probs: true, postprocessing_yaml: "onset: 0.4", preset: "latency_10s" } });
     expect((await step(j.id))?.step ?? null).toBe("prepare");
     expect((await job(j.id)).step).toBe("cut");
     const run = (await q<{ spec: any; n_items: number }>`SELECT spec, n_items FROM nemotron_lab_run WHERE job_id = ${j.id}`)[0]!;
@@ -428,7 +440,7 @@ describe.skipIf(!HAVE)("nemotron_lab_run through claimJobs + runOneStep", () => 
     expect(fin?.outcome).toBe("done");
     const done = await job(j.id);
     expect(done.status).toBe("done");
-    expect(done.result).toMatchObject({ run_id: j.id, total: 2, ok: 1, empty: 0, failed: 1 });
+    expect(done.result).toMatchObject({ run_id: j.id, total: 2, ok: 1, empty: 0, failed: 1, notes: ["preset_latency_10s_experimental"] });
     expect(done.result!.items.map((i: any) => [i.idx, i.state, i.has_probs])).toEqual([[0, "ok", true], [1, "failed", false]]);
     expect(JSON.stringify(done.result)).not.toMatch(/spk0|turns/); // counts and ids, never the turns
   });

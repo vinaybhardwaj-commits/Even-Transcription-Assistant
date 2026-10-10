@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS nemotron_lab_item (
   probs_r2_key       text,
   embeddings_r2_key  text,
   embeddings_dims    integer,
+  embed_error        text,
   infer_s            real,
   received_at        timestamptz,
   CONSTRAINT nemotron_lab_item_pk PRIMARY KEY (run_id, idx),

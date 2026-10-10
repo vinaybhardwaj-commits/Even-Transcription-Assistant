@@ -181,7 +181,7 @@ export async function recordLabIngest(b: LabIngestBody, d: { speaker_count: numb
          SET state = ${b.status}::text, error_code = NULL, model = ${b.model}::text, model_rev = ${b.model_rev}::text, config = ${JSON.stringify(b.config)}::jsonb,
              audio_ms = ${b.audio_ms}::int, clip_sha256 = ${b.clip_sha256}::text, turns_json = ${JSON.stringify(b.turns)}::jsonb,
              speaker_count = ${d.speaker_count}::int, turn_count = ${d.turn_count}::int, speech_ms = ${d.speech_ms}::int, overlap_ms = ${d.overlap_ms}::int,
-             probs_r2_key = ${b.probs_r2_key}::text, embeddings_r2_key = ${b.embeddings_r2_key}::text, embeddings_dims = ${b.embeddings_dims}::int,
+             embed_error = ${b.embed_error ?? null}::text, probs_r2_key = ${b.probs_r2_key}::text, embeddings_r2_key = ${b.embeddings_r2_key}::text, embeddings_dims = ${b.embeddings_dims}::int,
              infer_s = ${b.infer_s}::real, received_at = now(), lease_until = now()
        WHERE run_id = ${b.run_id} AND idx = ${b.idx} AND worker_id = ${b.worker_id} AND state = 'queued' AND lease_until > now()
       RETURNING state
@@ -208,13 +208,13 @@ export async function recordLabIngest(b: LabIngestBody, d: { speaker_count: numb
 }
 
 /** What the job's result carries: ids and counts only. */
-export async function labItemSummaries(jobId: string): Promise<Array<{ idx: number; state: string; error_code: string | null; audio_ms: number | null; speaker_count: number; turn_count: number; has_probs: boolean; has_embeddings: boolean }>> {
+export async function labItemSummaries(jobId: string): Promise<Array<{ idx: number; state: string; error_code: string | null; embed_error: string | null; audio_ms: number | null; speaker_count: number; turn_count: number; has_probs: boolean; has_embeddings: boolean }>> {
   const rows = (await sql`
-    SELECT idx, state, error_code, audio_ms, speaker_count, turn_count, (probs_r2_key IS NOT NULL) AS has_probs, (embeddings_r2_key IS NOT NULL) AS has_embeddings
+    SELECT idx, state, error_code, embed_error, audio_ms, speaker_count, turn_count, (probs_r2_key IS NOT NULL) AS has_probs, (embeddings_r2_key IS NOT NULL) AS has_embeddings
       FROM nemotron_lab_item WHERE run_id = ${jobId} ORDER BY idx
   `) as Array<Record<string, unknown>>;
   return rows.map((r) => ({
-    idx: Number(r.idx), state: String(r.state), error_code: (r.error_code as string | null) ?? null, audio_ms: r.audio_ms === null ? null : Number(r.audio_ms),
+    idx: Number(r.idx), state: String(r.state), error_code: (r.error_code as string | null) ?? null, embed_error: (r.embed_error as string | null) ?? null, audio_ms: r.audio_ms === null ? null : Number(r.audio_ms),
     speaker_count: Number(r.speaker_count), turn_count: Number(r.turn_count), has_probs: r.has_probs === true, has_embeddings: r.has_embeddings === true,
   }));
 }

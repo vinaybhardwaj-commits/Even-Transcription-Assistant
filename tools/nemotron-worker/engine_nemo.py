@@ -159,8 +159,12 @@ class NemotronEngine:
             path = os.environ.get(TITANET_ENV)
             if not path:
                 raise labmod.EmbedderUnavailable()
-            from nemo.collections.asr.models import EncDecSpeakerLabelModel
-
+            try:
+                from nemo.collections.asr.models import EncDecSpeakerLabelModel
+            except ImportError:
+                raise labmod.EmbedderUnavailable() from None
+            if not os.path.isfile(path):
+                raise labmod.EmbedderUnavailable()
             if getattr(self, "_titanet", None) is None:
                 self._titanet = EncDecSpeakerLabelModel.restore_from(path, map_location="cuda").eval()
             rows = []
@@ -174,8 +178,12 @@ class NemotronEngine:
             d = os.environ.get(ECAPA_ENV)
             if not d:
                 raise labmod.EmbedderUnavailable()
-            from speechbrain.inference.speaker import EncoderClassifier
-
+            try:
+                from speechbrain.inference.speaker import EncoderClassifier
+            except ImportError:  # speechbrain is not in the live worker's venv, and nothing is installed into it
+                raise labmod.EmbedderUnavailable() from None
+            if not os.path.isdir(d):
+                raise labmod.EmbedderUnavailable()
             if getattr(self, "_ecapa", None) is None:
                 self._ecapa = EncoderClassifier.from_hparams(source=d, savedir=d, run_opts={"device": "cuda"})
             rows = []

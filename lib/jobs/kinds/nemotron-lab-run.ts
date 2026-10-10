@@ -15,7 +15,7 @@ import { clipKeyHeldOut, sessionRangeHeldOut, windowHeldOut } from "@/lib/room-a
 import { listBenchChunks } from "@/lib/bench";
 import { resolveRange } from "@/lib/bench-range";
 import { buildJoinRequest, callJoinService } from "@/lib/bench-join";
-import { LabArgsError, NEMOTRON_LAB_ENABLED_ENV, nemotronLabEnabled, parseLabArgs, type LabInput, type LabSpec } from "@/lib/diarize-nemotron/lab";
+import { LabArgsError, NEMOTRON_LAB_ENABLED_ENV, labSpecNotes, nemotronLabEnabled, parseLabArgs, type LabInput, type LabSpec } from "@/lib/diarize-nemotron/lab";
 import { failLabItem, insertLabRun, labItemSummaries, labProgress, setItemClip, spansToCut, unresolvedWindowItems } from "@/lib/room-access/nemotron-lab-store";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError } from "../errors";
@@ -85,7 +85,7 @@ export const nemotronLabRunKind: JobKind = {
         await insertLabRun(jobId, spec, inputs, ctx.job.actor ?? null);
         const bad = await unresolvedWindowItems(jobId);
         if (bad.length) return failWith(jobError("lab_input_unresolved", `items ${bad.join(",")}`));
-        return nextStep(STEPS.cut, { items: inputs.length });
+        return nextStep(STEPS.cut, { items: inputs.length, notes: labSpecNotes(spec) });
       }
 
       case STEPS.cut: {
@@ -108,7 +108,7 @@ export const nemotronLabRunKind: JobKind = {
           }
           await setItemClip(jobId, s.idx, joined.key);
         }
-        return nextStep(STEPS.wait, { items: ctx.progress.items ?? null });
+        return nextStep(STEPS.wait, { items: ctx.progress.items ?? null, notes: ctx.progress.notes ?? [] });
       }
 
       case STEPS.wait: {
@@ -118,10 +118,10 @@ export const nemotronLabRunKind: JobKind = {
           if (!p) return failWith(jobError("lab_input_unresolved", "run row missing"));
           if (p.queued === 0) {
             const items = await labItemSummaries(jobId);
-            return doneWith({ run_id: jobId, total: p.total, ok: p.ok, empty: p.empty, failed: p.failed, items });
+            return doneWith({ run_id: jobId, total: p.total, ok: p.ok, empty: p.empty, failed: p.failed, notes: ctx.progress.notes ?? [], items });
           }
           if (p.deadline_passed) return failWith(jobError("lab_timeout", `${p.queued} of ${p.total} items unfinished`));
-          if (Date.now() + LAB_POLL_INTERVAL_MS >= deadline) return nextStep(STEPS.wait, { queued: p.queued, total: p.total });
+          if (Date.now() + LAB_POLL_INTERVAL_MS >= deadline) return nextStep(STEPS.wait, { queued: p.queued, total: p.total, notes: ctx.progress.notes ?? [] });
           await sleep(LAB_POLL_INTERVAL_MS);
         }
       }

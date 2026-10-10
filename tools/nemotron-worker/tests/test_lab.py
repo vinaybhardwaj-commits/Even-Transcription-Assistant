@@ -41,9 +41,10 @@ def spec(**o):
 
 class LabEngine(StubEngine):
     """The stub plus the lab/probability API of engine_nemo.NemotronEngine."""
-    def __init__(self, probs=None, emb=None, lab_raise=None, **kw):
+    def __init__(self, probs=None, emb=None, lab_raise=None, probs_raise=None, embed_raise=None, **kw):
         super().__init__(**kw)
         self.probs, self.emb, self.lab_raise = probs, emb, lab_raise
+        self.probs_raise, self.embed_raise = probs_raise, embed_raise
         self.lab_specs, self.embed_calls, self.prob_calls = [], [], 0
         self.lock_path = None
         self.lock_was_held = []
@@ -71,6 +72,8 @@ class LabEngine(StubEngine):
     def diarize_with_probs(self, wav):
         self.prob_calls += 1
         self.lock_was_held.append(self._lock_held())
+        if self.probs_raise:
+            raise self.probs_raise
         return super().diarize(wav), self.probs
 
     def diarize_lab(self, wav, sp):
@@ -82,6 +85,8 @@ class LabEngine(StubEngine):
 
     def embed_speakers(self, wav, turns, kind):
         self.embed_calls.append((kind, [t[2] for t in turns]))
+        if self.embed_raise:
+            raise self.embed_raise
         self.lock_was_held.append(self._lock_held())
         return self.emb
 
@@ -331,7 +336,6 @@ class LabLane(Base):
         cases = [
             (LabEngine(lab_raise=RuntimeError("CUDA out of memory")), spec(), "gpu_oom"),
             (LabEngine(lab_raise=ValueError("x")), spec(), "infer_failed"),
-            (LabEngine(lab_raise=lab.EmbedderUnavailable()), spec(), "embedder_unavailable"),
             (LabEngine(segments=[(0, float("nan"), "a")]), spec(), "infer_failed"),
             (LabEngine(emb=None), spec(return_embeddings="titanet"), None),  # embed returns None: no files, still posts the turns
         ]
@@ -342,6 +346,35 @@ class LabLane(Base):
             b = self.srv.lab_posts[-1]
             self.assertEqual(b["error_code"], code, repr(code))
             self.assertTmpEmpty()
+
+    def test_a_missing_embedder_keeps_the_turns_and_says_why(self):
+        for exc in (lab.EmbedderUnavailable(), ModuleNotFoundError("No module named 'speechbrain'"), ImportError("x")):
+            self.srv.lab_posts.clear()
+            sp = spec(return_probs=True, return_embeddings="ecapa")
+            it = lab_item(self.srv, sp=sp, probs_key="lab/nemotron/job_t1/0/probs.nlp", probs_put_url=self.srv.base + "/put/probs",
+                          embeddings_key="lab/nemotron/job_t1/0/emb.nlp", embeddings_put_url=self.srv.base + "/put/emb")
+            self.srv.lab_claim = [(200, {"ok": True, "items": [it]})]
+            self.srv.puts.clear()
+            eng = LabEngine(probs=P, embed_raise=exc)
+            w = self.make_lab(eng)
+            w.step()
+            b = self.srv.lab_posts[0]
+            self.assertEqual((b["status"], b["error_code"], b["embed_error"]), ("ok", None, "embedder_unavailable"), repr(exc))
+            self.assertTrue(b["turns"], "the turns are kept")
+            self.assertEqual((b["embeddings_r2_key"], b["embeddings_dims"]), (None, None))
+            self.assertEqual(b["probs_r2_key"], "lab/nemotron/job_t1/0/probs.nlp", "the probabilities that WERE made are still saved")
+            self.assertEqual([p[0] for p in self.srv.puts], ["/put/probs"])
+            self.assertTmpEmpty()
+
+    def test_a_working_embedder_sends_no_embed_error(self):
+        self.srv.lab_claim = [(200, {"ok": True, "items": [lab_item(self.srv)]})]
+        self.make_lab().step()
+        self.assertNotIn("embed_error", self.srv.lab_posts[0])
+
+    def test_a_real_inference_failure_in_embedding_is_still_a_failure(self):
+        self.srv.lab_claim = [(200, {"ok": True, "items": [lab_item(self.srv, sp=spec(return_embeddings="ecapa"))]})]
+        self.make_lab(LabEngine(embed_raise=RuntimeError("CUDA out of memory"))).step()
+        self.assertEqual((self.srv.lab_posts[0]["status"], self.srv.lab_posts[0]["error_code"]), ("failed", "gpu_oom"))
 
     def test_a_front_end_decode_failure_is_frontend_failed_and_a_plain_one_decode_failed(self):
         self.srv.clips["/clips/bad"] = (200, b"BAD-bytes")
@@ -475,6 +508,38 @@ class ProductionProbabilities(Base):
         self.srv.pending = [(200, {"ok": True, "windows": [self.window(probs_key="k", probs_put_url=self.srv.base + "/put/p")], "exhausted": 0})]
         self.make_p(eng).step()
         self.assertEqual((self.srv.posts[0]["status"], self.srv.puts), ("ok", []))
+
+    def test_C1_a_raising_probabilities_path_falls_back_to_plain_diarize(self):
+        # the refuter's fake engine: diarize_with_probs raises (a NeMo upgrade changed the return shape), diarize() is fine
+        for exc in (ValueError("not enough values to unpack"), TypeError("x"), RuntimeError("CUDA out of memory")):
+            self.srv.posts.clear()
+            self.srv.puts.clear()
+            self.logbuf.truncate(0); self.logbuf.seek(0)
+            eng = LabEngine(probs=P, probs_raise=exc)
+            self.srv.pending = [(200, {"ok": True, "windows": [self.window(probs_key="k", probs_put_url=self.srv.base + "/put/p")], "exhausted": 0})]
+            self.make_p(eng).step()
+            b = self.srv.posts[0]
+            self.assertEqual((b["status"], b["error_code"], "probs_r2_key" in b), ("ok", None, False), repr(exc))
+            self.assertEqual(b["turns"], [[200, 1100, "spk0"], [1000, 2500, "spk1"]])
+            self.assertEqual(self.srv.puts, [])
+            self.assertEqual(eng.calls, 1, "plain diarize ran once")
+            self.assertIn("probs_path_failed", self.logbuf.getvalue())
+            self.assertIn(type(exc).__name__, self.logbuf.getvalue())
+            self.assertNotIn(str(exc), self.logbuf.getvalue(), "the exception text is never logged")
+
+    def test_C1_the_fallback_result_equals_a_run_that_never_asked_for_probabilities(self):
+        self.srv.pending = [(200, {"ok": True, "windows": [self.window(probs_key="k", probs_put_url=self.srv.base + "/put/p")], "exhausted": 0})]
+        self.make_p(LabEngine(probs=P, probs_raise=ValueError("x"))).step()
+        self.srv.pending = [(200, {"ok": True, "windows": [self.window()], "exhausted": 0})]
+        self.make_p(LabEngine()).step()
+        a, b = self.srv.posts
+        self.assertEqual(a, b)
+
+    def test_C1_only_when_plain_diarize_also_fails_is_the_window_a_failure(self):
+        eng = LabEngine(probs=P, probs_raise=ValueError("x"), raise_exc=RuntimeError("boom"))
+        self.srv.pending = [(200, {"ok": True, "windows": [self.window(probs_key="k", probs_put_url=self.srv.base + "/put/p")], "exhausted": 0})]
+        self.make_p(eng).step()
+        self.assertEqual((self.srv.posts[0]["status"], self.srv.posts[0]["error_code"]), ("failed", "infer_failed"))
 
     def test_a_none_matrix_posts_without_a_pointer(self):
         eng = LabEngine(probs=None)

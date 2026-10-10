@@ -416,9 +416,14 @@ class Worker:
                     return "abandoned"
                 t1 = time.monotonic()
                 try:
+                    segments = None
                     if w.get("probs_put_url") and hasattr(self.engine, "diarize_with_probs"):
-                        segments, probs = self.engine.diarize_with_probs(wav)
-                    else:
+                        try:
+                            segments, probs = self.engine.diarize_with_probs(wav)
+                        except Exception as pe:  # probabilities are optional: never infer_failed because of them (never str(pe))
+                            segments, probs = None, None
+                            log.warning("window=%s probs_path_failed type=%s (falling back to plain diarize)", wid, type(pe).__name__)
+                    if segments is None:
                         segments = self.engine.diarize(wav)
                 except Exception as e:  # never str(e): an engine message could carry a path
                     fail = "gpu_oom" if "out of memory" in repr(e).lower() else "infer_failed"
@@ -503,11 +508,11 @@ class Worker:
                 self.in_flight = 0
         return True
 
-    def _lab_body(self, it: dict, *, status: str, error_code, audio_ms: int, sha, turns: list, config: dict, probs_key, emb_key, emb_dims, infer_s) -> dict:
+    def _lab_body(self, it: dict, *, status: str, error_code, audio_ms: int, sha, turns: list, config: dict, probs_key, emb_key, emb_dims, infer_s, embed_error=None) -> dict:
         return {"run_id": it["run_id"], "idx": it["idx"], "worker_id": self.cfg.worker_id, "status": status, "error_code": error_code,
                 "model": self.engine.model, "model_rev": self.engine.model_rev, "config": config, "spec_hash": it["spec_hash"],
                 "audio_ms": audio_ms, "clip_sha256": sha, "turns": turns, "probs_r2_key": probs_key,
-                "embeddings_r2_key": emb_key, "embeddings_dims": emb_dims, "infer_s": infer_s}
+                "embeddings_r2_key": emb_key, "embeddings_dims": emb_dims, "infer_s": infer_s, **({"embed_error": embed_error} if embed_error else {})}
 
     def process_lab(self, it: dict) -> str:
         """Fetch, decode through the allow-listed front-end, infer under the GPU lock, delete the audio, upload the probability /
@@ -515,7 +520,7 @@ class Worker:
         t0 = time.monotonic()
         tag = f"{it.get('run_id')}/{it.get('idx')}"
         sha, audio_ms, turns, fail = None, 0, [], None
-        probs_rows, emb_rows, infer_s = None, None, None
+        probs_rows, emb_rows, infer_s, embed_error = None, None, None, None
         config = dict(self.engine.config)
         try:
             spec = labmod.validate_spec(it.get("spec"))
@@ -550,11 +555,14 @@ class Worker:
                     segments = labmod.filter_speakers(segments, spec["max_speakers"], spec["min_speech_ms"])
                     turns = to_turns(segments, audio_ms)
                     if spec["return_embeddings"] and turns:
-                        emb_rows = self.engine.embed_speakers(wav, turns, spec["return_embeddings"])
+                        try:
+                            emb_rows = self.engine.embed_speakers(wav, turns, spec["return_embeddings"])
+                        except (labmod.EmbedderUnavailable, ImportError):
+                            # the turns are good: keep them, say the embeddings could not be made (a missing library / model file is not an inference failure)
+                            emb_rows, embed_error = None, "embedder_unavailable"
+                            log.warning("lab=%s embedder_unavailable (turns kept)", tag)
                 except TurnsError as e:
                     fail, turns = e.code, []
-                except labmod.EmbedderUnavailable:
-                    fail, turns = "embedder_unavailable", []
                 except Exception as e:  # never str(e): an engine message could carry a path
                     fail = "gpu_oom" if "out of memory" in repr(e).lower() else "infer_failed"
                     log.warning("lab=%s %s type=%s", tag, fail, type(e).__name__)
@@ -586,7 +594,7 @@ class Worker:
                                   sha=sha, turns=[], config=config, probs_key=None, emb_key=None, emb_dims=None, infer_s=infer_s)
         else:
             body = self._lab_body(it, status="ok" if turns else "empty", error_code=None, audio_ms=audio_ms, sha=sha, turns=turns, config=config,
-                                  probs_key=probs_key, emb_key=emb_key, emb_dims=emb_dims, infer_s=infer_s)
+                                  probs_key=probs_key, emb_key=emb_key, emb_dims=emb_dims, infer_s=infer_s, embed_error=embed_error)
         outcome = self.post_lab_ingest(body)
         log.info("lab=%s attempt=%s status=%s outcome=%s turns=%d spk=%d audio_s=%d infer_s=%s wall_s=%.1f", tag, it.get("attempt"), body["status"],
                  outcome, len(turns), len({t[2] for t in turns}), audio_ms // 1000, infer_s if infer_s is not None else "-", time.monotonic() - t0)
