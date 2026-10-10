@@ -38,7 +38,7 @@ export const ALLOWLIST: Record<string, { max: number; why: string }> = {
   "lib/rooms-live/read.ts": { max: 4, why: "live-ops view bound to OPEN sessions or the current IST day by construction (no date argument can name a past held-out pair)" },
   "lib/steward/executor.ts": { max: 2, why: "Room Steward senses and acts on the live fleet (open sessions, today); not a caller-facing reader" },
   "lib/steward/loop.ts": { max: 2, why: "Room Steward senses and acts on the live fleet (open sessions, today); not a caller-facing reader" },
-  "lib/steward/sense.ts": { max: 10, why: "steward gates G2/G3 read today's bench_session and end_day command (fleet/steward-gates-main, fable GO #11211)" },
+  "lib/steward/sense.ts": { max: 11, why: "steward gates G2/G3 read today's bench_session and end_day command (fleet/steward-gates-main, fable GO #11211); G1 72 h newest audio.devices row (fable ruling 10 Oct)" },
   "lib/stt/auto-drain.ts": { max: 8, why: "production pipeline CHOOSER: picks its own windows, leaves held-out ones out through room-access blindWindowIds, filtering the scan result in JS before it ranks/caps (no SQL LIMIT; exact n_blind_excluded); still names bench_window/room_diarize_window in its own scan" },
   "lib/stt/diarize-window.ts": { max: 4, why: "production pipeline writer/reaper/planner: only closes, expires or plans rows, chooses no window for processing; MCP-submitted work is guarded by the job hook" },
   "lib/stt/fanout.ts": { max: 13, why: "STT-lab fan-out of ENCOUNTER audio to engines and its run bookkeeping (lab pipeline, not a caller-facing reader of window transcripts)" },

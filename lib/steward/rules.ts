@@ -400,7 +400,12 @@ const deviceMissing = (c: Ctx): boolean => {
  * the decision to START, the newest row saying default_input_present=false counts at ANY age (the newest row IS "no later add / present=true row"; sense reads the room's newest row,
  * up to 24 h back), and so does the install DEVICE_MISSING flag (the chosen device is not enumerated). deviceMissing above is unchanged for every other caller.
  */
-const g1DeviceMissing = (c: Ctx): boolean => deviceMissing(c) || c.s.audio.default_input_present === false || c.s.audio.device_missing_flag === true;
+const g1DeviceMissing = (c: Ctx): boolean =>
+  deviceMissing(c) ||
+  c.s.audio.default_input_present === false ||
+  c.s.audio.device_missing_flag === true ||
+  // the 24 h read has no row (Monday after a closed Sunday): the newest row within 72 h, if it says absent, still holds. A later present row IS the newest row, so it clears.
+  (c.s.audio.default_input_present === null && c.s.audio.last_72h?.present === false);
 /** a device signal that is NOT evidence (flag only, or an absent row older than 6 h): recorded in inputs, never acted on */
 const deviceAnnotation = (c: Ctx): string | null => {
   if (deviceMissing(c)) return null;

@@ -87,6 +87,8 @@ export type RoomSense = {
     configured_device?: string | null;
     /** the default input's name in the newest audio.devices row, null when unknown */
     default_input_name?: string | null;
+    /** G1 only: the newest audio.devices row within 72 h (default_input_present, received_at); read for the roster, used only when the 24 h read has no row (default_input_present null). null = none in 72 h or the read failed. */
+    last_72h?: { present: boolean; at: string } | null;
   };
   /** this room's steward start_day commands since IST midnight (bench_command source 'steward'), oldest first; null = unreadable */
   start_attempts: StartAttempt[] | null;
@@ -309,7 +311,7 @@ export async function senseAll(
   const operatorEndBy = new Map((operatorEndR?.v ?? []).map((x) => [x.room_id, toIso(x.acked_at)] as const));
   const sessionStartBy = new Map((sessionTodayR?.v ?? []).map((x) => [x.room_id, toIso(x.started_at)] as const));
 
-  const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR, recorderR] = await Promise.all([
+  const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR, recorderR, audio72R] = await Promise.all([
     // 2 — chunks of the open sessions, last 30 min (R3 silence by rate).
     safe("bench_chunk", degraded, async () => (await sql`
       SELECT s.room_id, c.created_at, c.started_at, c.size_bytes, c.duration_ms
@@ -452,6 +454,16 @@ export async function senseAll(
        ORDER BY k.machine, k.received_at DESC
        LIMIT 3000
     `) as unknown as RecorderRow[], [] as RecorderRow[]),
+    // 16 — G1 ONLY (fable ruling 10 Oct): the newest audio.devices row per machine within 72 h (boolean default_input_present only, the same table and columns readKioskHealth reads, whose bound is 24 h).
+    //      Used only when the 24 h read has no row: Monday after a closed Sunday must still hold on an unplug from before the weekend.
+    safe("kiosk_health_audio_72h", degraded, async () => (await sql`
+      SELECT DISTINCT ON (k.machine) k.machine, k.ts, k.received_at, (k.payload->>'default_input_present')::boolean AS present
+        FROM kiosk_health_events k
+       WHERE k.machine = ANY(${khKeysExpanded}::text[]) AND k.kind = 'audio.devices'
+         AND jsonb_typeof(k.payload->'default_input_present') = 'boolean'
+         AND k.received_at > ${hi}::timestamptz - interval '72 hours' AND k.received_at <= ${hi}::timestamptz
+       ORDER BY k.machine, k.ts DESC, k.received_at DESC
+    `) as unknown as Array<{ machine: string; ts: unknown; received_at: unknown; present: boolean | null }>, [] as Array<{ machine: string; ts: unknown; received_at: unknown; present: boolean | null }>),
   ]);
 
   const sessBy = new Map<string, SessionRow>();
@@ -484,6 +496,7 @@ export async function senseAll(
     if (a) a.push(p);
     else audioBy.set(k, [p]);
   }
+  const audio72By = new Map(audio72R.v.map((a) => [lc(canonicalMachine(a.machine)), a] as const));
   const khBy = new Map([...khR.v.entries()].map(([k, s]) => [lc(k), s]));
   const extHealthBy = new Map(extHealthR.v.map((r) => [lc(r.machine), r]));
   const occBy = new Map(occR.v.map((o) => [lc(o.machine), o]));
@@ -713,6 +726,11 @@ export async function senseAll(
         silent_while_recording_since: silentSince,
         configured_device: r.device_name ?? null,
         default_input_name: dev?.default_input_name ?? null,
+        last_72h: (() => {
+          const a = key && audio72R.ok ? audio72By.get(key) : undefined;
+          const at = a ? toIso(a.received_at) : null;
+          return a && at && typeof a.present === "boolean" ? { present: a.present, at } : null;
+        })(),
       },
       start_attempts: startAttempts,
       session_start_today_at: sessionTodayR?.ok ? sessionStartBy.get(r.room_id) ?? null : null,
