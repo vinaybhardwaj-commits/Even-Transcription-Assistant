@@ -443,3 +443,25 @@ export async function countSweepExhausted(blind: string[]): Promise<number> {
   `) as Array<{ n: number }>;
   return Number(rows[0]?.n ?? 0);
 }
+
+/** Every worker's last heartbeat (ids, counts and timings only), newest first. */
+export async function readWorkerHeartbeats(): Promise<Array<{ worker_id: string; last_seen_at: string | Date; payload: Record<string, unknown> | null }>> {
+  return (await sql`
+    SELECT worker_id, last_seen_at, payload FROM diarize_nemotron_worker ORDER BY last_seen_at DESC LIMIT 20
+  `) as Array<{ worker_id: string; last_seen_at: string | Date; payload: Record<string, unknown> | null }>;
+}
+
+/** 24 h of stored ok|empty rows: count, box vs hf, and p95 of (stored − window end), in seconds. */
+export async function readNemotronLatency24h(): Promise<{ windows_24h: number; box_24h: number; hf_24h: number; p95_latency_s: number | null }> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n,
+           count(*) FILTER (WHERE n.machine = 'box')::int AS box,
+           count(*) FILTER (WHERE n.machine = 'hf')::int AS hf,
+           percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (n.received_at - to_timestamp(w.end_ms / 1000.0)))) AS p95
+      FROM diarize_nemotron_window n
+      JOIN bench_window w ON w.id = n.window_id
+     WHERE n.status IN ('ok', 'empty') AND n.received_at > now() - interval '24 hours'
+  `) as Array<{ n: number; box: number; hf: number; p95: number | string | null }>;
+  const r = rows[0];
+  return { windows_24h: Number(r?.n ?? 0), box_24h: Number(r?.box ?? 0), hf_24h: Number(r?.hf ?? 0), p95_latency_s: r?.p95 == null ? null : Math.max(0, Number(r.p95)) };
+}

@@ -47,7 +47,14 @@ export const isMatchSource = (v: unknown): v is MatchSource =>
 
 export { CLOSED_BY, type ClosedBy };
 
+/** Which evidence placed the END of a timeline-run interval (0146). */
+export const ORIGINS = ["anchor", "acoustic", "jev"] as const;
+export type Origin = (typeof ORIGINS)[number];
+export const isOrigin = (v: unknown): v is Origin => typeof v === "string" && (ORIGINS as readonly string[]).includes(v);
+
 export type HypothesisInterval = {
+  /** Timeline runs only (0146). Absent on acoustic and fused intervals. */
+  origin?: Origin;
   start_ms: number;
   end_ms: number;
   speech_probes: number;
@@ -72,7 +79,7 @@ export type HypothesisInterval = {
  * the E-shadow keeps working on a database without it; only the fused path (flag on, or an explicit
  * replay, both of which Fable enables after applying 0118) touches `source`.
  */
-export const RUN_SOURCES = ["acoustic", "fused"] as const;
+export const RUN_SOURCES = ["acoustic", "fused", "timeline"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
 export const isRunSource = (v: unknown): v is RunSource =>
   typeof v === "string" && (RUN_SOURCES as readonly string[]).includes(v);
@@ -134,7 +141,7 @@ export function checkInterval(h: HypothesisInterval): RunProblem[] {
     Number.isInteger(h.merged_from) && h.merged_from >= 1 &&
     !!h.doctor_present && nonNegInt(h.doctor_present.yes) && nonNegInt(h.doctor_present.no) &&
     nonNegInt(h.doctor_present.unknown);
-  if (!ok) out.push("bad_interval");
+  if (!ok || (h.origin !== undefined && !isOrigin(h.origin))) out.push("bad_interval");
   const id = h.identity;
   if (id) {
     const good =
@@ -191,6 +198,7 @@ export function intervalRows(runId: string, roomDayId: string, intervals: Hypoth
     match_source: h.identity?.match_source ?? null,
     centroid_id: h.identity?.centroid_id ?? null,
     doctor_cosine: h.identity ? h.identity.doctor_cosine : null,
+    origin: h.origin ?? null,
   }));
 }
 
@@ -207,7 +215,34 @@ export async function writeHypothesisRun(input: HypothesisRunInput): Promise<Wri
   // Two statements, identical but for the run's `source` column: an acoustic write must not mention a
   // column that exists only after 0118 (see RUN_SOURCES). A test pins that both write the same
   // interval columns, so the copies cannot drift apart.
-  const res = (input.source === "fused" ? await sql`
+  // The timeline statement is the fused one plus the source value 'timeline' and the `origin` column (0146).
+  const res = (input.source === "timeline" ? await sql`
+    WITH run AS (
+      INSERT INTO encounter_hypothesis_run
+        (id, room_day_id, smoother_version, gate_version, params,
+         probes_total, probes_speech, probes_non_speech, probes_unjudged, n_hypotheses, source)
+      VALUES (${runId}, ${input.room_day_id}, ${input.smoother_version}, ${input.gate_version},
+              ${JSON.stringify(input.params ?? {})}::jsonb,
+              ${input.probes.total}, ${input.probes.speech}, ${input.probes.non_speech}, ${input.probes.unjudged},
+              ${rows.length}, 'timeline')
+      RETURNING id
+    ), ins AS (
+      INSERT INTO encounter_hypothesis
+        (id, run_id, room_day_id, start_ms, end_ms, speech_probes, non_speech_probes, unjudged_ms,
+         longest_unjudged_run_ms, dead_mic_ms, closed_by, merged_from, doctor_yes, doctor_no, doctor_unknown,
+         clinician_id, match_source, centroid_id, doctor_cosine, origin)
+      SELECT x.id, run.id, x.room_day_id, x.start_ms, x.end_ms, x.speech_probes, x.non_speech_probes, x.unjudged_ms,
+             x.longest_unjudged_run_ms, x.dead_mic_ms, x.closed_by, x.merged_from, x.doctor_yes, x.doctor_no,
+             x.doctor_unknown, x.clinician_id, x.match_source, x.centroid_id, x.doctor_cosine, x.origin
+        FROM run, jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(
+          id text, room_day_id text, start_ms bigint, end_ms bigint, speech_probes int, non_speech_probes int,
+          unjudged_ms bigint, longest_unjudged_run_ms bigint, dead_mic_ms bigint, closed_by text, merged_from int,
+          doctor_yes int, doctor_no int, doctor_unknown int, clinician_id text, match_source text,
+          centroid_id text, doctor_cosine real, origin text)
+      RETURNING id
+    )
+    SELECT (SELECT id FROM run) AS run_id, (SELECT count(*) FROM ins)::int AS inserted
+  ` : input.source === "fused" ? await sql`
     WITH run AS (
       INSERT INTO encounter_hypothesis_run
         (id, room_day_id, smoother_version, gate_version, params,
@@ -329,7 +364,19 @@ export function rowToRun(r: Row, hypotheses: StoredHypothesis[]): StoredRun {
   };
 }
 
-async function hypothesesOf(runId: string): Promise<StoredHypothesis[]> {
+async function hypothesesOf(runId: string, withOrigin = false): Promise<StoredHypothesis[]> {
+  // `origin` exists only after 0146, so only a timeline-run read mentions it
+  if (withOrigin) {
+    const t = (await sql`
+      SELECT id, run_id, room_day_id, start_ms, end_ms, speech_probes, non_speech_probes, unjudged_ms,
+             longest_unjudged_run_ms, dead_mic_ms, closed_by, merged_from, doctor_yes, doctor_no, doctor_unknown,
+             clinician_id, match_source, centroid_id, doctor_cosine, origin
+        FROM encounter_hypothesis
+       WHERE run_id = ${runId}
+       ORDER BY start_ms
+    `) as Row[];
+    return t.map((r) => ({ ...rowToHypothesis(r), ...(isOrigin(r.origin) ? { origin: r.origin } : {}) }));
+  }
   const rows = (await sql`
     SELECT id, run_id, room_day_id, start_ms, end_ms, speech_probes, non_speech_probes, unjudged_ms,
            longest_unjudged_run_ms, dead_mic_ms, closed_by, merged_from, doctor_yes, doctor_no, doctor_unknown,
@@ -393,7 +440,7 @@ export async function readLatestRun(
   `) as Row[];
   const r = rows[0];
   if (!r) return { run: null, runs_for_day: 0 };
-  return { run: rowToRun(r, await hypothesesOf(String(r.id))), runs_for_day: num(r.runs_for_day) };
+  return { run: rowToRun(r, await hypothesesOf(String(r.id), r.source === "timeline")), runs_for_day: num(r.runs_for_day) };
 }
 
 /** PURE — is this the database saying `encounter_hypothesis_run.source` does not exist (0118 not applied)? */

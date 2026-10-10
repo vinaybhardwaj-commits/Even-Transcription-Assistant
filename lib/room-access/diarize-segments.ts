@@ -91,6 +91,11 @@ export type WindowSegments = {
   /** True when the stored segments came from an older run than the window's last (0099). */
   segments_stale: boolean;
   source: string;
+  /** engine=nemotron only: which engine, model revision and machine produced the stored turns. */
+  engine?: "nemotron";
+  model?: string;
+  model_rev?: string | null;
+  machine?: string | null;
   speakers: SpeakerTiming[];
   segments: SegmentTiming[];
 };
@@ -311,6 +316,7 @@ export type NemotronWindowRow = {
   received_at: unknown;
   start_ms: unknown;
   end_ms: unknown;
+  model?: unknown;
   model_rev: unknown;
   machine: unknown;
   turns_json: unknown;
@@ -365,6 +371,10 @@ export function nemotronWindowPayload(row: NemotronWindowRow): WindowSegments {
     // The newest stored row for the window is what is returned, so it is never stale relative to itself.
     segments_stale: false,
     source,
+    engine: "nemotron",
+    model: str(row.model) ?? undefined,
+    model_rev: rev,
+    machine: machine && PRODUCER_PART_RE.test(machine) ? machine : null,
     speakers,
     segments,
   };
@@ -419,7 +429,7 @@ export async function lookupSegments(q: SegmentsQuery, opts: { blindGuard?: bool
     }
     const rows = (await sql`
       SELECT n.window_id, w.session_id, n.room_day_id, w.source_mic, n.status, n.received_at,
-             w.start_ms, w.end_ms, n.model_rev, n.machine, n.turns_json,
+             w.start_ms, w.end_ms, n.model, n.model_rev, n.machine, n.turns_json,
              nrd.room_id AS shadow_room_id, nrd.ist_date::text AS shadow_ist_date
         FROM diarize_nemotron_window n
         JOIN bench_window w ON w.id = n.window_id

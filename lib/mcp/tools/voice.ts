@@ -20,10 +20,11 @@ import { findRoomDay, roomExists, readClustersForDay, CLUSTERING_STATUS } from "
 import { listSamples } from "@/lib/voice-samples";
 import { signGetUrl } from "@/lib/r2";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
-import { readLatestRun, readRun } from "@/lib/encounter-hypotheses";
+import { readLatestRun, readRun, isRunSource } from "@/lib/encounter-hypotheses";
 import { runShadowForRoomDay } from "@/lib/encounter-clock/shadow-io";
 import { runFusionShadowForRoomDay } from "@/lib/encounter-clock/shadow-v2";
-import { encounterFusionShadowEnabled } from "@/lib/encounter-clock/flag";
+import { encounterFusionShadowEnabled, encounterTimelineShadowEnabled, encounterGateDiarEnabled } from "@/lib/encounter-clock/flag";
+import { runTimelineShadowForRoomDay } from "@/lib/encounter-clock/shadow-v3";
 import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
@@ -221,6 +222,7 @@ const encounterHypotheses: McpTool = {
       room_slug: { type: "string" },
       ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
       smoother_version: { type: "string", description: `Which smoother's runs to read; default the current ${SMOOTHER_VERSION}. Pass "any" to take the newest run whatever produced it.` },
+      source: { type: "string", enum: ["acoustic", "fused", "timeline"], description: "Take the latest run of this source. timeline = the pre-STT timeline run (epic #23 f): its intervals carry origin (anchor|acoustic|jev) and closed_by may be pulse_end, jev_end, next_start, last_doc_turn or cap_90m. With source and no smoother_version, every smoother version is read." },
     },
     additionalProperties: false,
   },
@@ -229,7 +231,9 @@ const encounterHypotheses: McpTool = {
       // The store is append-only, so the answer is the LATEST run of one smoother version. Readers
       // key on (room-day, version) through readLatestRun; nothing here queries the table itself.
       const askedVersion = argStr(args, "smoother_version", 80);
-      const version = askedVersion === "any" ? undefined : askedVersion || SMOOTHER_VERSION;
+      const askedSource = argStr(args, "source", 16);
+      if (askedSource && !isRunSource(askedSource)) return { run: null, error: "bad_source" };
+      const version = askedVersion === "any" ? undefined : askedVersion || (askedSource ? undefined : SMOOTHER_VERSION);
       const runId = argStr(args, "run_id", 64);
       if (runId) {
         const run = await readRun(runId);
@@ -253,7 +257,7 @@ const encounterHypotheses: McpTool = {
         resolved = { room_id: room.id, ist_date: d.date };
       }
       if (await roomDayIsBlind(roomDayId)) return { run: null, error: "blind_room_day" }; // SWEEP (REL2-R3): also when the room-day id was given directly
-      const r = await readLatestRun(roomDayId, version);
+      const r = await readLatestRun(roomDayId, version, askedSource ? (askedSource as never) : undefined);
       return { ...resolved, room_day_id: roomDayId, smoother_version: version ?? "any", runs_for_day: r.runs_for_day, run: r.run };
     }),
 };
@@ -270,7 +274,7 @@ const encounterHypotheses: McpTool = {
 const encounterShadowRun: McpTool = {
   name: "scribe_encounter_shadow_run",
   description:
-    "Run the encounter clock over one room-day and store the hypotheses (E-5). Operator triggered. Reads the level log and the transcripts already stored for that day — no STT, no audio fetch, no clinician-facing write. Pass room_day_id, or room_id/room_slug + ist_date. Returns the run id, the run it supersedes, and a numbers-only summary including every rollback trigger from the flag-on plan. A rerun appends a new run; readers take the latest. E-6: with ENCOUNTER_FUSION_SHADOW on, or fusion:true for a one-off replay of a past day, it also asks Jev about each probe and writes a second, FUSED run (source 'fused') beside the acoustic one — still shadow only.",
+    "Run the encounter clock over one room-day and store the hypotheses (E-5). Operator triggered. Reads the level log and the transcripts already stored for that day — no STT, no audio fetch, no clinician-facing write. Pass room_day_id, or room_id/room_slug + ist_date. Returns the run id, the run it supersedes, and a numbers-only summary including every rollback trigger from the flag-on plan. A rerun appends a new run; readers take the latest. E-6: with ENCOUNTER_FUSION_SHADOW on, or fusion:true for a one-off replay of a past day, it also asks Jev about each probe and writes a second, FUSED run (source 'fused') beside the acoustic one — still shadow only. Epic #23 (f): with ENCOUNTER_TIMELINE_SHADOW on, or timeline:true for a one-off replay, it runs the pre-STT timeline run instead (source 'timeline').",
   scope: "invoke",
   inputSchema: {
     type: "object",
@@ -279,6 +283,10 @@ const encounterShadowRun: McpTool = {
       room_id: { type: "string" },
       room_slug: { type: "string" },
       ist_date: { type: "string", description: "YYYY-MM-DD (Asia/Kolkata); default today" },
+      timeline: {
+        type: "boolean",
+        description: "Epic #23 (f) replay: run shadow-runner v3 (the pre-STT timeline run, source 'timeline') for this call even with ENCOUNTER_TIMELINE_SHADOW off. Reads Pulse anchors, stored Nemotron turns and the level log — no transcript. Requires migration 0146. Uses gate v2 when ENCOUNTER_GATE_DIAR is on.",
+      },
       fusion: {
         type: "boolean",
         description: "E-6 replay: run shadow-runner v2 (acoustic + fused) for this call even with ENCOUNTER_FUSION_SHADOW off — for E-7 scoring of past days. Requires migration 0118.",
@@ -302,13 +310,19 @@ const encounterShadowRun: McpTool = {
       if (await roomDayIsBlind(roomDayId)) return { ok: false, error: "blind_room_day" };
       // v2 when asked for this call (replay) or when the fusion flag is on; the flag parser throws on an
       // unrecognised value, which failSafe reports rather than reading it as off.
+      const timelineReplay = argBool(args, "timeline");
+      // v3 writes its own 'timeline' run beside whichever acoustic/fused run follows; a replay-only call stops after it
+      const v3 = timelineReplay || encounterTimelineShadowEnabled()
+        ? await runTimelineShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date, gate_diar: encounterGateDiarEnabled() })
+        : null;
+      if (timelineReplay && v3) return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v3", replay: true, ...v3 };
       const replay = argBool(args, "fusion");
       if (replay || encounterFusionShadowEnabled()) {
         const v2 = await runFusionShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
-        return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v2", replay, ...v2 };
+        return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v2", replay, ...v2, ...(v3 ? { timeline: v3 } : {}) };
       }
       const res = await runShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
-      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v1", ...res };
+      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v1", ...res, ...(v3 ? { timeline: v3 } : {}) };
     }),
 };
 
