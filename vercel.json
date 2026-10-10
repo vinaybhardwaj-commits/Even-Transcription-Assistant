@@ -42,6 +42,10 @@
       "schedule": "*/2 * * * *"
     },
     {
+      "path": "/api/cron/jev-sweep",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/jobs/run",
       "schedule": "* * * * *"
     },

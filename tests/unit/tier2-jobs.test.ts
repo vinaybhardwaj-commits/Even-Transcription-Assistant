@@ -411,7 +411,7 @@ describe("the seven kinds", () => {
     // jev_window and jev_role (bench-only, ETA-JEV-ARM-D). The list stays EXACT (toEqual, not a contains)
     // so a kind that appears without being intended still fails here.
     expect(JOB_KIND_NAMES.sort()).toEqual(
-      ["audio_measure", "day_manifest", "diarize_window", "emotion_window", "jev_english", "jev_role", "jev_window", "nemotron_identity", "nemotron_lab_run", "pulse_doctor_voice", "room_window", "route_transcribe", "rubric_bench", "rubric_run", "sarvam_transcribe", "sarvam_translate", "stitch", "stt_fanout", "transcribe_range"].sort(),
+      ["audio_measure", "day_manifest", "diarize_window", "emotion_window", "jev_ask", "jev_drift", "jev_english", "jev_role", "jev_window", "nemotron_identity", "nemotron_lab_run", "pulse_doctor_voice", "room_window", "route_transcribe", "rubric_bench", "rubric_run", "sarvam_transcribe", "sarvam_translate", "stitch", "stt_fanout", "transcribe_range"].sort(),
     );
     // diarize_clip is GONE (C2 D3): diarize_window implements it for real.
     // emotion_clip is GONE (C3): emotion_window implements it for real.

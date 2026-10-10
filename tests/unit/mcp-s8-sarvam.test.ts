@@ -66,7 +66,7 @@ describe("registration", () => {
     expect(S.LAB_TOOLS.includes(t)).toBe(true);
     const req = new NextRequest("https://x/api/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     const body = (await (await handleMcpRpc(req, { token_id: "t", scopes: new Set(["read"]) } as never)).json()) as { result: { tools: Array<{ name: string; description: string; annotations: Row }> } };
-    expect(body.result.tools.length).toBe(53);
+    expect(body.result.tools.length).toBe(55);
     const listed = body.result.tools.find((x) => x.name === "scribe_sarvam")!;
     expect(listed.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
     expect(listed.description.length).toBeLessThanOrEqual(200);

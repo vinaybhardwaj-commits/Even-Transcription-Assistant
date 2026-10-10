@@ -377,7 +377,7 @@ describe("0118 vocabularies match the code", () => {
   });
   it("jev_decision.subject_type is exactly JEV_SUBJECT_TYPES, probe included", () => {
     const eff = effectiveCheckValues(MIGRATIONS, "jev_decision_subject_type_chk", "subject_type");
-    expect(eff.file).toBe("0118_encounter_fusion.sql");
+    expect(eff.file).toBe("0146_jev_worker.sql");   // Jev P1 widened it (consult, pitch, stt_run, stt_pair, doubt)
     expect([...eff.values].sort()).toEqual([...JEV_SUBJECT_TYPES].sort());
     expect(JEV_SUBJECT_TYPES).toContain("probe");
   });

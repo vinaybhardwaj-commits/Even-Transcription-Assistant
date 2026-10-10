@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import { NextRequest } from "next/server";
 import { readFileSync } from "node:fs";
+import { JEV_SUBJECT_TYPES } from "@/lib/jev/types";
 
 type Row = Record<string, unknown>;
 const auditInserts: unknown[][] = [];
@@ -93,7 +94,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the S1, S5, S8 and S2L additions", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(53);
+    expect(all).toHaveLength(55);
     for (const n of OPERATOR_13) expect(all).toContain(n);
     for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_sarvam", "scribe_steward_command", "scribe_lanes", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
@@ -146,6 +147,22 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         expect(withoutKindEnum(t.inputSchema), t.name).toEqual(withoutKindEnum(P.shortSchema(base.inputSchema)));
         const kindProp = (t.inputSchema as Row & { properties: Row }).properties.kind;
         if (kindProp) expect(kindProp).toMatchObject({ enum: JOB_KIND_NAMES });
+      } else if (t.name === "scribe_usage") {
+        // Jev P1 (#55) added ONE optional property, `include` (enum ["jev"]); everything else must still match main
+        const { include, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
+        expect(include).toMatchObject({ type: "string", enum: ["jev"] });
+        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema)));
+      } else if (t.name === "scribe_jev_decisions") {
+        // Jev P1 (#55) added FIVE optional filters (question_set_id, question_set_sha256, mode, since, mock); everything else must still match main
+        const NEW = ["question_set_id", "question_set_sha256", "mode", "since", "mock"];
+        const props = (t.inputSchema as Row & { properties: Row }).properties;
+        for (const n of NEW) expect(props[n], n).toBeDefined();
+        // and subject_type's enum is JEV_SUBJECT_TYPES, which 0146 grew by consult, pitch, stt_run, stt_pair, doubt
+        expect((props.subject_type as Row).enum).toEqual([...JEV_SUBJECT_TYPES]);
+        const rest = Object.fromEntries(Object.entries(props).filter(([k]) => !NEW.includes(k)));
+        const baseSchema = P.withOverrides(t.name, P.shortSchema(base.inputSchema)) as Row & { properties: Row };
+        expect({ ...(t.inputSchema as Row), properties: { ...rest, subject_type: { ...(rest.subject_type as Row), enum: undefined } } }, t.name)
+          .toEqual({ ...baseSchema, properties: { ...baseSchema.properties, subject_type: { ...(baseSchema.properties.subject_type as Row), enum: undefined } } });
       } else if (t.name === "scribe_diarize_segments") {
         // epic #23 (b) added ONE optional property, `engine` (enum ["nemotron"]); everything else must still match main
         const { engine, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
@@ -155,7 +172,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jev_health", "scribe_jev_question_sets", "scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
@@ -413,11 +430,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 39,600 characters (measured 39,526: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property + job kinds nemotron_identity and pulse_doctor_voice in three kind enums)", async () => {
+  it("budget: the full tools/list result stays at or under 40,900 characters (measured 40,829: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property + job kinds nemotron_identity, pulse_doctor_voice and nemotron_lab_run in three kind enums + Jev P1: scribe_jev_question_sets, scribe_jev_health, five scribe_jev_decisions filters, scribe_usage include, jev_ask and jev_drift in the kind enums)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_600);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(40_900);
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; 0143: the nemotron_lab_run job kind) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {

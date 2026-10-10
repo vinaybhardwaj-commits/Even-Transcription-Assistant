@@ -9,6 +9,7 @@
  */
 import { sql } from "@/lib/db";
 import { argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { jevHealth } from "@/lib/jev/worker/health";
 
 type Surface = typeof import("../surface");
 const surface = (): Promise<Surface> => import("../surface");
@@ -149,12 +150,15 @@ const usage: McpTool = {
     properties: {
       since_hours: { type: "number", minimum: 1, maximum: USAGE_MAX_HOURS, default: USAGE_DEFAULT_HOURS, description: "Look-back window in hours." },
       tool: { type: "string", description: "Only calls whose target tool is this name (as called, e.g. scribe_rooms)." },
+      include: { type: "string", enum: ["jev"], description: "jev: add the Jev worker section: per use and IST day, calls, tokens, USD, error classes, breaker state and budget left. Absent = output unchanged." },
     },
     additionalProperties: false,
   },
   handler: async (args: ToolArgs) => {
     const hours = argInt(args, "since_hours", USAGE_DEFAULT_HOURS, 1, USAGE_MAX_HOURS);
     const tool = argStr(args, "tool", 128);
+    const include = argStr(args, "include", 16);
+    if (include !== null && include !== "jev") return { ok: false, error: "include_invalid", since_hours: hours, total: 0, per_tool: [], per_actor: [] };
     return failSafe({ since_hours: hours, total: 0, per_tool: [] as unknown[], per_actor: [] as unknown[] }, async () => {
       // Bound parameters only. `tool` is passed as NULL or text; ::text keeps the NULL typed.
       const [perTool, perActor, totalRows] = await Promise.all([
@@ -214,9 +218,26 @@ const usage: McpTool = {
           };
         }),
         per_actor: (perActor as Array<Record<string, unknown>>).map((r) => ({ actor: String(r.actor), calls: num(r.calls) })),
+        ...(include === "jev" ? { jev: await jevUsage() } : {}),
       };
     });
   },
 };
+
+/** include:"jev" — per use and IST day (today and the last 7), straight from the call ledger and the breaker; reconciles with jev_call sums. Numbers and closed codes. */
+async function jevUsage(): Promise<Record<string, unknown>> {
+  const h = await jevHealth();
+  const days = (await sql`
+    SELECT (created_at AT TIME ZONE 'Asia/Kolkata')::date::text AS ist_date, use, count(*)::int AS calls, coalesce(sum(input_tokens), 0)::bigint AS tokens_in,
+           coalesce(sum(cost_usd), 0) AS usd, coalesce(jsonb_object_agg(cls, c) FILTER (WHERE cls IS NOT NULL), '{}'::jsonb) AS error_classes
+      FROM (SELECT created_at, use, input_tokens, cost_usd, error_class AS cls, count(*) OVER (PARTITION BY (created_at AT TIME ZONE 'Asia/Kolkata')::date, use, error_class) AS c
+              FROM jev_call WHERE created_at >= now() - interval '8 days') t
+     GROUP BY 1, 2 ORDER BY 1 DESC, 2`) as Array<Record<string, unknown>>;
+  return {
+    budget: h.budget,
+    per_use_day: days.map((d) => ({ ist_date: String(d.ist_date), use: String(d.use), calls: num(d.calls), tokens_in: num(d.tokens_in), usd: num(d.usd), error_classes: d.error_classes })),
+    breaker: h.uses.map((u) => ({ use: u.use, state: u.breaker.state, reason_class: u.breaker.reason_class })),
+  };
+}
 
 export const META_TOOLS: McpTool[] = [help, usage];

@@ -7,7 +7,7 @@ vi.mock("@/lib/db", () => ({ sql: Object.assign(async () => [], { transaction: a
 const { JOB_KINDS, assertHeldOutDeclared } = await import("@/lib/jobs/kinds");
 
 const EXPECT: Record<string, boolean> = {
-  transcribe_range: true, stitch: true, route_transcribe: true, room_window: true, diarize_window: true, nemotron_identity: true, nemotron_lab_run: true, pulse_doctor_voice: true, emotion_window: true, jev_english: true, jev_window: true, jev_role: true,
+  transcribe_range: true, stitch: true, route_transcribe: true, room_window: true, diarize_window: true, nemotron_identity: true, nemotron_lab_run: true, pulse_doctor_voice: true, emotion_window: true, jev_english: true, jev_window: true, jev_role: true, jev_ask: false, jev_drift: false,
   sarvam_transcribe: false, sarvam_translate: false, rubric_run: true, rubric_bench: false, audio_measure: true, stt_fanout: true, day_manifest: true,
 };
 
