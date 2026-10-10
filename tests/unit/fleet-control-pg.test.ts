@@ -13,6 +13,8 @@ import { SignJWT } from "jose";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
 process.env.JWT_SECRET_DOCTOR = "test-secret-for-fleet-control-plane-tests-only";
+// A fixed FAKE signing key (seed 0x09 x 32): tests only, never a credential.
+process.env.FLEET_COMMAND_SIGNING_KEY = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, 9)]).toString("base64"); // gitleaks:allow
 
 const H = vi.hoisted(() => ({ sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]> }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => H.sql(s, ...v) }));
@@ -24,7 +26,9 @@ const pg = pgContainer("eta-fleet-h3");
 import { b64url, sha256b64url, signJws } from "@/lib/fleet/jws";
 import { FLEET_AUD, FLEET_REGISTER_AUD, claimJti } from "@/lib/fleet/device-auth";
 import { claimCommands, longPoll, type Clock } from "@/lib/fleet/poll";
-import { queueCommand, revokeDevice, type QueueInput } from "@/lib/fleet/commands";
+import { queueCommand as queueRaw, revokeDevice } from "@/lib/fleet/commands";
+import { buildSignedEnvelope, publicKeysOf, type Envelope } from "@/lib/fleet/envelope";
+import { signEnvelope, loadSigner } from "@/lib/fleet/signing";
 import { signRoomJwt } from "@/lib/room-auth";
 
 const q = async <T = Record<string, unknown>>(s: TemplateStringsArray, ...v: unknown[]) => (await H.sql(s, ...v)) as T[];
@@ -79,11 +83,19 @@ async function postResult(token: string | null, body: unknown, rawBody?: string)
 
 let seq = 0;
 const iso = (offsetS: number) => new Date(Date.now() + offsetS * 1000).toISOString();
-const cmdFor = (deviceId: string, machine: string, over: Partial<QueueInput> = {}): QueueInput => ({
-  cmd_id: `cmd_h3_${++seq}`, device_id: deviceId, machine, verb: "helper_status", params: {},
-  issued_at: iso(-1), expires_at: iso(240), nonce: Buffer.from(randomUUID().replace(/-/g, "").slice(0, 16)).toString("base64"),
-  issuer: { kind: "operator", id: "op_fake" }, approval_ref: null, key_id: "fk1", signature: Buffer.alloc(64, 7).toString("base64"), ...over,
-});
+const SIGNER = loadSigner()!;
+const KEYS = publicKeysOf(SIGNER);
+const queueCommand = (sql: never, c: unknown) => queueRaw(sql, c, KEYS);
+/** A signed envelope v2 for a device; `over` is applied BEFORE signing unless it carries its own `signature`. */
+const cmdFor = (deviceId: string, machine: string, over: Partial<Envelope> = {}): Envelope => {
+  const { signature, ...unsigned } = {
+    ...buildSignedEnvelope({ device_id: deviceId, machine, verb: "helper_status", params: {}, issuer: { kind: "operator", id: "op_fake" }, approval_ref: null, ttl_s: 240, nowMs: Date.now() - 1000 }, SIGNER),
+    cmd_id: `cmd_h3_${++seq}`,
+    ...over,
+  };
+  void signature;
+  return { ...unsigned, signature: over.signature ?? signEnvelope(unsigned, SIGNER) };
+};
 
 let K: Key;
 let DEV: string;
@@ -286,7 +298,7 @@ beforeEach(async () => {
 
     it("DELIVERY: the envelope is served exactly as queued (ms timestamps, approval_ref null, issuer object); not re-sent within 30 s; re-sent after; never after expiry", async () => {
       const c = cmdFor(DEV, MACHINE, { verb: "collect_diag", params: { scope: "audio", log_lines: 200 }, approval_ref: "go_fake1" });
-      expect(await queueCommand(H.sql as never, c)).toEqual({ ok: true });
+      expect(await queueCommand(H.sql as never, c)).toMatchObject({ ok: true });
       const r1 = await poll(deviceJwt(DEV, K));
       const env = (r1.json.commands as Array<Record<string, unknown>>)[0]!;
       expect(env).toMatchObject({ v: 2, cmd_id: c.cmd_id, device_id: DEV, machine: MACHINE, verb: "collect_diag", params: { scope: "audio", log_lines: 200 }, nonce: c.nonce, issuer: { kind: "operator", id: "op_fake" }, approval_ref: "go_fake1", key_id: "fk1", signature: c.signature });
@@ -311,7 +323,7 @@ beforeEach(async () => {
 
     it("F2: the envelope serves the machine the command was ISSUED for, even after a same-key re-registration under another spelling", async () => {
       const c = cmdFor(DEV, MACHINE);
-      expect(await queueCommand(H.sql as never, c)).toEqual({ ok: true });
+      expect(await queueCommand(H.sql as never, c)).toMatchObject({ ok: true });
       const again = await register(K, { body: { machine: "EHRC-HOME’s Mac mini" } }); // normalises equal to MACHINE
       expect(again.status).toBe(200);
       expect((await q<{ machine: string }>`SELECT machine FROM fleet_devices WHERE device_id = ${DEV}`)[0]!.machine).toBe("EHRC-HOME’s Mac mini");
@@ -350,9 +362,9 @@ beforeEach(async () => {
     it("REFUSED: a verb outside the catalogue (shell-ish), loose params, a bad key id, a ttl over 900 s, an unknown or revoked device, a wrong machine", async () => {
       const s = H.sql as never;
       for (const verb of ["bash", "exec", "shell", "rm -rf /", "sudo pmset", "helper_status; id"]) expect(await queueCommand(s, cmdFor(DEV, MACHINE, { verb })), verb).toEqual({ ok: false, reason: "verb_not_allowed" });
-      expect(await queueCommand(s, cmdFor(DEV, MACHINE, { params: { "Bad Key": 1 } }))).toEqual({ ok: false, reason: "bad_params" });
-      expect(await queueCommand(s, cmdFor(DEV, MACHINE, { params: { x: 1.5 } }))).toEqual({ ok: false, reason: "bad_params" });
-      expect(await queueCommand(s, cmdFor(DEV, MACHINE, { key_id: "fk9" }))).toEqual({ ok: false, reason: "unknown_key_id" });
+      expect(await queueCommand(s, cmdFor(DEV, MACHINE, { params: { "Bad Key": 1 }, signature: "A".repeat(86) + "==" }))).toEqual({ ok: false, reason: "bad_params" });
+      expect(await queueCommand(s, cmdFor(DEV, MACHINE, { params: { x: 1.5 }, signature: "A".repeat(86) + "==" }))).toEqual({ ok: false, reason: "bad_params" });
+      expect(await queueCommand(s, cmdFor(DEV, MACHINE, { key_id: "fk9" }))).toEqual({ ok: false, reason: "bad_signature" });
       expect(await queueCommand(s, cmdFor(DEV, MACHINE, { expires_at: iso(1200) }))).toEqual({ ok: false, reason: "bad_ttl" });
       expect(await queueCommand(s, cmdFor("dev_" + "1".repeat(24), MACHINE))).toEqual({ ok: false, reason: "unknown_device" });
       expect(await queueCommand(s, cmdFor(DEV, "OTHER-MAC"))).toEqual({ ok: false, reason: "machine_mismatch" });
@@ -363,27 +375,30 @@ beforeEach(async () => {
 
     it("the same command id, or the same nonce for a device, queues once", async () => {
       const c = cmdFor(DEV, MACHINE);
-      expect(await queueCommand(H.sql as never, c)).toEqual({ ok: true });
+      expect(await queueCommand(H.sql as never, c)).toMatchObject({ ok: true });
       expect(await queueCommand(H.sql as never, c)).toEqual({ ok: false, reason: "duplicate" });
       expect(await queueCommand(H.sql as never, cmdFor(DEV, MACHINE, { nonce: c.nonce }))).toEqual({ ok: false, reason: "duplicate" });
     });
 
-    it("NO ROUTE under app/api/fleet imports the command queue, and none can run a process", () => {
+    it("the device-facing routes never queue anything; exactly ONE route (admin-only) can; no cron, job or worker reaches the queue", () => {
       const walk = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]));
-      const files = [...walk("app/api/fleet"), ...walk("lib/fleet")].filter((f) => f.endsWith(".ts"));
-      expect(files.length).toBeGreaterThan(5);
-      for (const f of files) {
+      const fleet = [...walk("app/api/fleet"), ...walk("lib/fleet")].filter((f) => f.endsWith(".ts"));
+      expect(fleet.length).toBeGreaterThan(5);
+      for (const f of fleet) {
         const src = readFileSync(f, "utf8");
-        if (f.startsWith("app/")) expect(src, f).not.toMatch(/fleet\/commands|queueCommand|revokeDevice/);
+        if (f.startsWith("app/")) expect(src, f).not.toMatch(/fleet\/commands|queueCommand|issueCommand|revokeDevice/);
         expect(src, f).not.toMatch(/child_process|execFile|execSync|spawn\(|(?<![.\w])exec\(|eval\(|new Function/);
       }
+      const callers = [...walk("app"), ...walk("lib"), ...walk("scripts")].filter((f) => /\.(ts|tsx|mjs)$/.test(f) && !f.startsWith("lib/fleet/")).filter((f) => /issueCommand|queueCommand/.test(readFileSync(f, "utf8")));
+      expect(callers).toEqual(["app/api/admin/fleet/commands/route.ts"]);
+      expect(readFileSync("vercel.json", "utf8")).not.toMatch(/fleet/);
     });
   });
 
   // -------------------------------------------------------------------- results
   describe("POST /api/fleet/results", () => {
     const body = (cmd: string, over: Record<string, unknown> = {}) => ({ cmd_id: cmd, device_id: DEV, outcome: "ok", reason: null, started_at: iso(-3), finished_at: iso(-2), detail: { exit: 0, notes: "done" }, ...over });
-    const delivered = async (over: Partial<QueueInput> = {}) => {
+    const delivered = async (over: Partial<Envelope> = {}) => {
       const c = cmdFor(DEV, MACHINE, over);
       await queueCommand(H.sql as never, c);
       await poll(deviceJwt(DEV, K));
