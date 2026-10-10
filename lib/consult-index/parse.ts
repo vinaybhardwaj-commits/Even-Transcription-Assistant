@@ -1,9 +1,12 @@
 /**
  * lib/consult-index/parse.ts — PURE: CONSULT's name-free index (R2 eta-lab-results consult/index/latest.jsonl + manifest.json) to rows of the consult_index table (0150).
  *
- * THE FORMAT, as the cutter writes it (measured on the box 10 Oct, field NAMES only): one JSON object per line, append-only upstream (the latest line per consult_uid wins); the mirror keeps
- * rows with status "cut" whose r2.status is "mirrored". Fields read here: consult_uid, ist_date, room_id, room_slug, span_start / span_end ("YYYY-MM-DD HH:MM:SS.mmm" in IST, no zone),
- * span_end_epoch (UTC seconds), cut_at, code_commit, minutes, bytes (an object per file), quality, coverage, voice_isolated, doctor_uid, doctor_identified, r2 {status, bucket, prefix}.
+ * THE FORMAT, as the WRITER publishes it (tools/index_mirror.py on the box, ALLOW / R2_ALLOW; its own test asserts both): one JSON object per line, the latest cutter row per consult_uid, kept ONLY if the
+ * cutter row was status "cut" AND r2.status "mirrored" - and then PROJECTED through an allowlist that DROPS `status`, `bytes_total`, `path`, `doctor_name` and r2.status. So a published row carries NO `status`
+ * and r2 is exactly {bucket, prefix, files, at}: "cut + mirrored" is implied by the row being there with an r2 key, and is NOT a field. (The first version of this parser required status === "cut" and
+ * r2.status === "mirrored" and so skipped every published row: 0 of 429.) A row that DOES carry a status (a raw cutter row) must still say cut / mirrored.
+ * Fields read here: consult_uid, ist_date, room_id, room_slug, span_start / span_end ("YYYY-MM-DD HH:MM:SS.mmm" in IST, no zone), span_end_epoch (UTC seconds), cut_at, code_commit, minutes,
+ * bytes (an object of file sizes), quality, coverage, voice_isolated, doctor_uid, doctor_identified, r2 {bucket, prefix}.
  * It carries NO session_id, cut_version or sealed field today: this module reads them if consult-lead adds them (sealed === true; cut_version as a string), and otherwise derives
  *   cut_version = the row's cut_at (a re-cut changes it), and sealed = false. UNVERIFIED against a live mirror: the mirror object itself was not read from here.
  *
@@ -41,7 +44,7 @@ export type IndexRow = {
   session_id: string | null;
 };
 
-export type SkipReason = "not_json" | "no_uid" | "not_cut" | "not_mirrored" | "bad_place" | "bad_span" | "bad_prefix" | "no_cut_version";
+export type SkipReason = "not_json" | "no_uid" | "not_cut" | "not_mirrored" | "no_clip_key" | "bad_place" | "bad_span" | "bad_prefix" | "no_cut_version";
 export type ParsedIndex = { rows: IndexRow[]; read: number; skipped: Record<string, number> };
 
 export const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
@@ -73,20 +76,32 @@ export function spanOf(r: Record<string, unknown>): { t0: number; t1: number } |
   return { t0: t1 - (b - a), t1 };
 }
 
+/** PURE: total bytes from `bytes_total` (a raw cutter row) or the sum of the per-file sizes in `bytes` (the published shape); null when neither is numbers. */
+function bytesOf(v: unknown): number | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const sizes = Object.values(v as Record<string, unknown>).filter((x): x is number => typeof x === "number" && Number.isFinite(x) && x >= 0);
+  return sizes.length > 0 ? sizes.reduce((a, b) => a + b, 0) : null;
+}
+
 /** PURE: one upstream line to a row, or the reason it is not indexable. */
 export function normalizeRow(r: Record<string, unknown>): { row: IndexRow } | { skip: SkipReason } {
   const uid = r.consult_uid;
   if (typeof uid !== "string" || !UID_RE.test(uid)) return { skip: "no_uid" };
-  if (r.status !== "cut") return { skip: "not_cut" };
-  const r2 = r.r2 && typeof r.r2 === "object" ? (r.r2 as Record<string, unknown>) : null;
-  if (!r2 || r2.status !== "mirrored") return { skip: "not_mirrored" };
+  // the published row has NO status field (the writer drops it after keeping only cut rows); a row that does carry one must say "cut"
+  if (r.status !== undefined && r.status !== "cut") return { skip: "not_cut" };
+  const r2 = r.r2 && typeof r.r2 === "object" && !Array.isArray(r.r2) ? (r.r2 as Record<string, unknown>) : null;
+  if (!r2) return { skip: "no_clip_key" };
+  if (r2.status !== undefined && r2.status !== "mirrored") return { skip: "not_mirrored" };
+  // what makes it a mirrored clip in the published shape: the R2 key parts. Without them there is no clip to send.
+  if (typeof r2.bucket !== "string" || !r2.bucket || typeof r2.prefix !== "string" || !r2.prefix) return { skip: "no_clip_key" };
+  if (r2.bucket !== "eta-audio") return { skip: "bad_prefix" };
   const slug = r.room_slug, date = r.ist_date, roomId = r.room_id;
   if (typeof slug !== "string" || !SLUG_RE.test(slug) || typeof date !== "string" || !DATE_RE.test(date) || typeof roomId !== "string" || !SLUG_RE.test(roomId)) return { skip: "bad_place" };
   const span = spanOf(r);
   if (!span) return { skip: "bad_span" };
   // the clip key is built from validated parts only, and must be the prefix the cutter says it mirrored to
   const key = consultClipKey(date, slug, uid);
-  if (typeof r2.prefix === "string" && `${r2.prefix.replace(/\/+$/, "")}/consult.flac` !== key) return { skip: "bad_prefix" };
+  if (`${r2.prefix.replace(/\/+$/, "")}/consult.flac` !== key) return { skip: "bad_prefix" };
   const cutVersion = str(r.cut_version, 120) ?? str(r.cut_at, 120);
   if (!cutVersion) return { skip: "no_cut_version" };
   const doctor = typeof r.doctor_uid === "string" && DOCTOR_RE.test(r.doctor_uid) ? r.doctor_uid : null;
@@ -96,7 +111,7 @@ export function normalizeRow(r: Record<string, unknown>): { row: IndexRow } | { 
       doctor_uid: doctor, doctor_identified: typeof r.doctor_identified === "boolean" ? r.doctor_identified : null,
       cut_version: cutVersion, code_commit: str(r.code_commit, 40), sealed: r.sealed === true,
       voice_isolated: typeof r.voice_isolated === "boolean" ? r.voice_isolated : null,
-      minutes: num(r.minutes), bytes: num(r.bytes_total), quality: str(r.quality, 40), coverage: num(r.coverage),
+      minutes: num(r.minutes), bytes: num(r.bytes_total) ?? bytesOf(r.bytes), quality: str(r.quality, 40), coverage: num(r.coverage),
       session_id: typeof r.session_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(r.session_id) ? r.session_id : null,
     },
   };
