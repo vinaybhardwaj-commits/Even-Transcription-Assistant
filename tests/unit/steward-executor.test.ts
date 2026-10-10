@@ -168,3 +168,18 @@ describe("the live executor can only emit start_day — never stop, restart, pau
     for (const k of ["end_day", "pause_day", "resume_day", "restart_engine", "close_orphan", "set_audio_input", "check_update_now", "report_diag", "self_test"]) expect(src.includes(k), k).toBe(false);
   });
 });
+
+describe("one start path (10 Oct port): only executor.ts can queue a start_day; only input-failover.ts queues anything else", () => {
+  it("lib/steward: the start_day command kind is written in executor.ts alone; set_audio_input in input-failover.ts alone; nothing imports a second start module", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const files = readdirSync("lib/steward").filter((f) => f.endsWith(".ts"));
+    const src = (f: string) => readFileSync(`lib/steward/${f}`, "utf8");
+    const code = (f: string) => src(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const withInsert = files.filter((f) => /\binsertCommand\s*\(/.test(code(f)));
+    expect(withInsert.sort()).toEqual(["executor.ts", "input-failover.ts"]);
+    expect(files.filter((f) => /kind:\s*"start_day"|LIVE_COMMAND_KIND/.test(code(f)))).toEqual(["executor.ts"]);
+    expect(files.filter((f) => /kind:\s*"set_audio_input"/.test(code(f)))).toEqual(["input-failover.ts"]);
+    expect(files.filter((f) => /from "\.\/startday"/.test(src(f)))).toEqual([]);
+    expect(files).not.toContain("startday.ts");
+  });
+});
