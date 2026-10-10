@@ -67,7 +67,7 @@ export function createHttpJevClient(deps: { fetchImpl?: FetchFn } = {}): JevClie
       const stateStr = JSON.stringify(req.state ?? null);
       if (stateStr.length > STATE_CHAR_GUARD) throw new JevStateTooLargeError(stateStr.length);
 
-      const model = req.model ?? process.env.ETA_JEV_MODEL ?? "jev-latest";
+      const model = req.model ?? process.env.ETA_JEV_MODEL ?? "jev-1.13.0";
       const timeoutMs = envInt("ETA_JEV_TIMEOUT_MS", 15_000);
       const apiKey = process.env.TYPESAFE_API_KEY ?? "";
 

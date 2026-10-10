@@ -73,7 +73,7 @@ describe("J1 — jev client: request shape", () => {
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe("https://api.typesafe.ai/v1/systemone");
       const body = JSON.parse(init.body as string);
-      expect(body).toMatchObject({ model: "jev-latest", questions: { q1: { type: "noul", instructions: "x" } } });
+      expect(body).toMatchObject({ model: "jev-1.13.0", questions: { q1: { type: "noul", instructions: "x" } } });
       expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-key");
       return new Response(JSON.stringify({ model: "jev-latest", answers: { q1: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 10, output_tokens: 2 } }), { status: 200 });
     });
