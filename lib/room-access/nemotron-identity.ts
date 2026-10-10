@@ -32,6 +32,18 @@ export type IdentitySpeakerRow = {
   attribution: string;
 };
 
+/** The pulse_room speaker row (lib/diarize-nemotron/identity.ts PulseRoomSpeaker). */
+export type PulseRoomSpeakerRow = {
+  speaker_label: string;
+  speech_ms: number;
+  decision: string;
+  pulse_doctor_uid: string | null;
+  best_cosine: number | null;
+  runner_up_cosine: number | null;
+  centroids_offered: number;
+  attribution: string;
+};
+
 /** The job's held-out guard: a row id is placed through its window. A row that does not exist is not refused (the kind reports row_missing). */
 export async function nemotronRowHeldOut(rowId: number): Promise<HeldOutVerdict | null> {
   const rows = (await sql`SELECT window_id FROM diarize_nemotron_window WHERE id = ${rowId} LIMIT 1`) as Array<{ window_id: string }>;
@@ -93,6 +105,41 @@ export async function recordIdentityOk(
         FROM ident, jsonb_to_recordset(${JSON.stringify(speakers)}::jsonb) AS x(
           speaker_label text, speech_ms integer, clinician_id text, match_confidence real,
           losing_clinician_id text, losing_score real, centroids_offered integer, attribution text)
+      ON CONFLICT ON CONSTRAINT diarize_nemotron_speaker_pk DO NOTHING
+      RETURNING 1
+    )
+    SELECT (SELECT count(*) FROM ident)::int AS passes
+  `) as Array<{ passes: number }>;
+  return Number(rows[0]?.passes ?? 0) > 0;
+}
+
+/**
+ * The pulse_room pass and its speakers in one statement (as recordIdentityOk). Suggest-only: clinician_id,
+ * match_confidence and the losing candidate are written NULL by construction (0144 refuses anything else).
+ */
+export async function recordPulseRoomOk(
+  rowId: number, speakers: PulseRoomSpeakerRow[], centroidsOffered: number, embedded: number,
+): Promise<boolean> {
+  const rows = (await sql`
+    WITH ident AS (
+      INSERT INTO diarize_nemotron_identity
+        (window_row_id, centroid_set, state, attempts, error_code, centroids_offered, speakers_embedded, shadow_trusted)
+      VALUES (${rowId}, 'pulse_room', 'ok', 1, NULL, ${centroidsOffered}, ${embedded}, NULL)
+      ON CONFLICT ON CONSTRAINT diarize_nemotron_identity_pk DO UPDATE
+         SET state = 'ok', attempts = diarize_nemotron_identity.attempts + 1, error_code = NULL,
+             centroids_offered = EXCLUDED.centroids_offered, speakers_embedded = EXCLUDED.speakers_embedded,
+             shadow_trusted = NULL, updated_at = now()
+       WHERE diarize_nemotron_identity.state = 'failed'
+      RETURNING window_row_id
+    ), spk AS (
+      INSERT INTO diarize_nemotron_speaker
+        (window_row_id, centroid_set, speaker_label, speech_ms, clinician_id, match_confidence, losing_clinician_id, losing_score,
+         centroids_offered, attribution, decision, pulse_doctor_uid, match_source, best_cosine, runner_up_cosine)
+      SELECT ident.window_row_id, 'pulse_room', x.speaker_label, x.speech_ms, NULL, NULL, NULL, NULL,
+             x.centroids_offered, x.attribution, x.decision, x.pulse_doctor_uid, 'pulse_room', x.best_cosine, x.runner_up_cosine
+        FROM ident, jsonb_to_recordset(${JSON.stringify(speakers)}::jsonb) AS x(
+          speaker_label text, speech_ms integer, decision text, pulse_doctor_uid text, best_cosine real, runner_up_cosine real,
+          centroids_offered integer, attribution text)
       ON CONFLICT ON CONSTRAINT diarize_nemotron_speaker_pk DO NOTHING
       RETURNING 1
     )
