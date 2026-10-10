@@ -1,0 +1,27 @@
+{
+  "id": "smoke",
+  "version": "v0",
+  "use": "stt_quality",
+  "subject_type": "stt_run",
+  "state_schema": "synthetic-v0",
+  "model_pin": "jev-1.13.0",
+  "created_by": "builder:jev-p1",
+  "questions": [
+    {
+      "question_id": "is_greeting",
+      "kind": "noul",
+      "body": { "type": "noul", "instructions": "Is the text a greeting?" }
+    },
+    {
+      "question_id": "tone",
+      "kind": "choice",
+      "body": {
+        "type": "choice",
+        "instructions": "What is the tone of the text?",
+        "criteria": { "friendly": "The text is warm", "neutral": "The text is plain", "unclear": "The tone cannot be told" }
+      },
+      "option_order": "both",
+      "escape_options": ["unclear"]
+    }
+  ]
+}
