@@ -29,15 +29,24 @@ import Testing
     var codesignCalls: URL { base.appendingPathComponent("codesign.calls") }
     var stub: URL { base.appendingPathComponent("launchctl") }
     var codesignStub: URL { base.appendingPathComponent("codesign") }
+    var sleepStub: URL { base.appendingPathComponent("sleep") }
+    var sleepCalls: URL { base.appendingPathComponent("sleep.calls") }
+    var installLog: URL { base.appendingPathComponent("install.log") }
     var chownStub: URL { base.appendingPathComponent("chown") }
     var chownCalls: URL { base.appendingPathComponent("chown.calls") }
     var usersDir: URL { base.appendingPathComponent("Users") }
     var pinFile: URL { base.appendingPathComponent("EvenScribe/update-pin") }
 
     /// `realCodesign`: do not stub codesign, so the pinned requirement is checked for real.
+    /// How the fake launchd treats the job. `bootstrapFailures`: the first N bootstraps exit 5.
+    /// `bootstrapSilentLosses`: the first N bootstraps exit 0 but the job is not there (the field bug).
+    /// `runsAfter`: .immediately, .afterKickstart (loaded, idle until kickstarted) or .never.
+    enum Runs { case immediately, afterKickstart, never }
+
     init(
       withHelper: Bool = true, withApp: Bool = true, bootoutFails: Bool = false, bootstrapFails: Bool = false,
-      codesignFails: Bool = false, helperText: String = "#!/bin/sh\n# v1\n"
+      codesignFails: Bool = false, helperText: String = "#!/bin/sh\n# v1\n",
+      bootstrapFailures: Int = 0, bootstrapSilentLosses: Int = 0, runsAfter: Runs = .immediately
     ) throws {
       try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
       if withApp {
@@ -49,16 +58,33 @@ import Testing
       }
       // The launchctl stub also records what sits at the helper copy's path at each call, so a test
       // can see that the old file was running at bootout and the new one is there at bootstrap.
+      let failures = bootstrapFails ? 99 : bootstrapFailures
+      let runsNow = runsAfter == .immediately ? 1 : 0
+      let kickRuns = runsAfter == .never ? 0 : 1
       try """
         #!/bin/sh
         echo "$@" >> '\(calls.path)'
         echo "$1 helper=$(cat '\(helperCopy.path)' 2>/dev/null | tr -d '\\n')" >> '\(state.path)'
+        D='\(base.path)'
         case "$1" in
-          bootout) exit \(bootoutFails ? 36 : 0) ;;
-          bootstrap) exit \(bootstrapFails ? 5 : 0) ;;
+          bootout) rm -f "$D/loaded" "$D/running"; exit \(bootoutFails ? 36 : 0) ;;
+          bootstrap)
+            n=$(cat "$D/bootstrap.count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/bootstrap.count"
+            if [ "$n" -le \(failures) ]; then exit 5; fi
+            if [ "$n" -le \(failures + bootstrapSilentLosses) ]; then exit 0; fi
+            touch "$D/loaded"; [ \(runsNow) = 1 ] && touch "$D/running"; exit 0 ;;
+          kickstart) [ -f "$D/loaded" ] && [ \(kickRuns) = 1 ] && touch "$D/running"; exit 0 ;;
+          print)
+            [ -f "$D/loaded" ] || { echo "Could not find service" >&2; exit 113; }
+            if [ -f "$D/running" ]; then echo "state = running"; else echo "state = not running"; fi
+            exit 0 ;;
         esac
         exit 0
         """.write(to: stub, atomically: true, encoding: .utf8)
+      try """
+        #!/bin/sh
+        echo "$@" >> '\(sleepCalls.path)'
+        """.write(to: sleepStub, atomically: true, encoding: .utf8)
       try """
         #!/bin/sh
         echo "$@" >> '\(codesignCalls.path)'
@@ -69,7 +95,7 @@ import Testing
         echo "$@" >> '\(chownCalls.path)'
         exit 0
         """.write(to: chownStub, atomically: true, encoding: .utf8)
-      for url in [stub, codesignStub, chownStub] {
+      for url in [stub, codesignStub, chownStub, sleepStub] {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
       }
     }
@@ -83,6 +109,7 @@ import Testing
         "ETA_HELPER_DIR": helperDir.path, "ETA_LAUNCHCTL": stub.path, "ETA_SKIP_OWNERSHIP": "1",
         "ETA_LOG_PATH": "/var/log/room-recorder-helper.log", "PATH": "/usr/bin:/bin",
         "ETA_USERS_DIR": usersDir.path, "ETA_CONSOLE_USER": "alice", "ETA_PIN_FILE": pinFile.path,
+        "ETA_SLEEP": sleepStub.path, "ETA_INSTALL_LOG": installLog.path,
       ]
       if !realCodesign { environment["ETA_CODESIGN"] = codesignStub.path }
       process.environment = environment.merging(extraEnv) { $1 }
@@ -99,6 +126,8 @@ import Testing
       ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
     }
     var launchctlCalls: [String] { lines(calls) }
+    /// Everything but the `print` queries the verification makes.
+    var actions: [String] { launchctlCalls.filter { !$0.hasPrefix("print ") } }
     func tearDown() { try? FileManager.default.removeItem(at: base) }
   }
 
@@ -166,7 +195,7 @@ import Testing
     // The copy is the bundle's helper, byte for byte, executable, and its directory is 755.
     #expect(try Data(contentsOf: box.helperCopy) == Data(contentsOf: box.bundleHelper))
     #expect(mode(box.helperCopy) == 0o755 && mode(box.helperDir) == 0o755)
-    #expect(box.launchctlCalls == ["bootout system/\(Self.label)", "bootstrap system \(path)"])
+    #expect(box.actions == ["bootout system/\(Self.label)", "bootstrap system \(path)"])
     let leftovers = try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path)
     #expect(leftovers == [Self.label], "no staged file left behind")
   }
@@ -230,7 +259,7 @@ import Testing
     #expect(result.status == 0)
     let seen = box.lines(box.state)
     #expect(seen.first == "bootout helper=#!/bin/sh# v1", "the OLD helper is still there when the job is booted out")
-    #expect(seen.last == "bootstrap helper=#!/bin/sh# v2", "the NEW helper is in place when the job is bootstrapped")
+    #expect(seen.first { $0.hasPrefix("bootstrap") } == "bootstrap helper=#!/bin/sh# v2", "the NEW helper is in place when the job is bootstrapped")
     #expect(mode(box.helperCopy) == 0o755)
   }
 
@@ -257,8 +286,8 @@ import Testing
     let again = try box.run()
     #expect(again.status == 0)
     #expect(try Data(contentsOf: box.plist) == plistOnce && Data(contentsOf: box.helperCopy) == helperOnce)
-    #expect(box.launchctlCalls.count == 4)
-    #expect(Array(box.launchctlCalls[2...]) == Array(box.launchctlCalls[..<2]), "out then in, both times")
+    #expect(box.actions.count == 4)
+    #expect(Array(box.actions[2...]) == Array(box.actions[..<2]), "out then in, both times")
     #expect(try FileManager.default.contentsOfDirectory(atPath: box.daemons.path) == ["\(Self.label).plist"])
     #expect(try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path) == [Self.label])
   }
@@ -277,15 +306,16 @@ import Testing
     defer { box.tearDown() }
     let result = try box.run()
     #expect(result.status == 0)
-    #expect(box.launchctlCalls.count == 2 && box.launchctlCalls[1].hasPrefix("bootstrap system"))
+    #expect(box.actions.count == 2 && box.actions[1].hasPrefix("bootstrap system"))
   }
 
-  @Test func aFailedBootstrapIsReportedButDoesNotFailTheInstall() throws {
+  @Test func aBootstrapThatNeverTakesIsReportedLoudlyButDoesNotFailTheInstall() throws {
     let box = try Sandbox(bootstrapFails: true)
     defer { box.tearDown() }
     let result = try box.run()
     #expect(result.status == 0, "the recorder app is the product")
-    #expect(result.output.contains("bootstrap system") && result.output.contains("failed"))
+    #expect(result.output.contains("WARNING") && result.output.contains("NOT loaded after two bootstraps"))
+    #expect(result.output.contains("sudo launchctl bootstrap system"), "it tells the operator the one command")
     #expect(FileManager.default.fileExists(atPath: box.plist.path) && FileManager.default.fileExists(atPath: box.helperCopy.path))
   }
 
@@ -303,6 +333,80 @@ import Testing
     defer { box.tearDown() }
     #expect(try box.run().status == 1)
     #expect(box.launchctlCalls.isEmpty)
+  }
+
+  // ─── 0.1.34: after bootstrap the job is ASKED FOR, retried once, and the result logged ─────────
+
+  @Test func aHealthyInstallIsVerifiedByNameAndLogged() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("VERIFIED: \(Self.label) is running"))
+    #expect(box.launchctlCalls.contains("print system/\(Self.label)"))
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 1, "no retry when it took the first time")
+    #expect(!box.launchctlCalls.contains { $0.hasPrefix("kickstart") })
+    let log = try String(contentsOf: box.installLog, encoding: .utf8)
+    #expect(log.contains("bootstrap system") && log.contains("VERIFIED"), "\(log)")
+    #expect(log.split(separator: "\n").allSatisfy { $0.contains("room-recorder postinstall:") })
+  }
+
+  @Test func aBootstrapThatReturnsZeroButLeavesNoJobIsRetriedOnce_theFieldBug() throws {
+    // OPD 5 and OPD 6 on 0.1.33: the job was gone right after the install.
+    let box = try Sandbox(bootstrapSilentLosses: 1)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0)
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 2)
+    #expect(result.output.contains("is not loaded after bootstrap; retrying bootstrap once"))
+    #expect(result.output.contains("VERIFIED"))
+    #expect(box.lines(box.sleepCalls) == ["2"], "a 2 s gap before the retry")
+  }
+
+  @Test func aBootstrapThatFailsOnceIsRetriedOnceAndThenTakes() throws {
+    let box = try Sandbox(bootstrapFailures: 1)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("VERIFIED"))
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 2)
+    #expect(result.output.contains("failed"))
+  }
+
+  @Test func neverMoreThanTwoBootstrapsAndNeverAKickstartOfAJobThatIsNotLoaded() throws {
+    let box = try Sandbox(bootstrapFailures: 5)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0)
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 2)
+    #expect(!box.launchctlCalls.contains { $0.hasPrefix("kickstart") })
+    #expect(result.output.contains("WARNING: \(Self.label) is NOT loaded"))
+  }
+
+  @Test func aJobLoadedButNotRunningIsKickstartedWithoutDashK() throws {
+    let box = try Sandbox(runsAfter: .afterKickstart)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("VERIFIED"))
+    let kicks = box.launchctlCalls.filter { $0.hasPrefix("kickstart") }
+    #expect(kicks == ["kickstart system/\(Self.label)"], "exactly one, and no -k")
+    #expect(box.actions.filter { $0.hasPrefix("bootstrap") }.count == 1, "loaded, so no second bootstrap")
+  }
+
+  @Test func aJobThatNeverRunsIsReportedNotHidden() throws {
+    let box = try Sandbox(runsAfter: .never)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0, "the recorder app still installs; the warning is in the install log")
+    #expect(result.output.contains("loaded but NOT running after kickstart"))
+    #expect(!result.output.contains("VERIFIED"))
+    #expect(box.launchctlCalls.filter { $0.hasPrefix("kickstart") }.count == 1, "one kickstart, no loop")
+    let log = try String(contentsOf: box.installLog, encoding: .utf8)
+    #expect(log.contains("NOT running"))
+  }
+
+  @Test func noKickstartDashKAnywhereInTheScript() throws {
+    let source = try String(contentsOf: Self.script, encoding: .utf8)
+    #expect(!source.contains("kickstart -k"), "-k would kill a running job, and must never touch the app's agent")
+    #expect(!source.contains("gui/"), "the script never touches a user's agent domain")
   }
 
   // ─── 0.1.33: the app bundle belongs to the room user; only the helper side is root ─────────────
@@ -334,7 +438,7 @@ import Testing
     // and the installed layout is the 0.1.32 one
     #expect(plistValue(box.plist.path, "Program") == box.helperCopy.path)
     #expect(mode(box.helperCopy) == 0o755 && mode(box.helperDir) == 0o755 && mode(box.plist) == 0o644)
-    #expect(box.launchctlCalls == ["bootout system/\(Self.label)", "bootstrap system \(box.plist.path)"])
+    #expect(box.actions == ["bootout system/\(Self.label)", "bootstrap system \(box.plist.path)"])
   }
 
   @Test func theBundleStaysWritableByItsOwnerAndNotByOthers() throws {
@@ -372,7 +476,7 @@ import Testing
       #expect(result.status == 0)
       #expect(result.output.contains("could not tell which user runs the recorder"))
       #expect(!box.lines(box.chownCalls).contains { $0.contains(box.app.path) }, "agents: \(agentCount)")
-      #expect(box.launchctlCalls.count == 2, "the helper side still installs")
+      #expect(box.actions.count == 2, "the helper side still installs")
     }
   }
 
@@ -780,58 +884,97 @@ import Testing
   }
 }
 
-// MARK: - A stale BTM registration of the same label is removed once, in launchd mode only
+// MARK: - Launchd mode touches SMAppService not at all (0.1.34)
 
-@Suite struct StaleRegistrationTests {
-  private func run(_ service: HelperModeProbeTests.Fake, passes: Int, logs: inout [String]) -> [HelperBootstrap.Probe] {
-    var state = HelperRegistrationState()
-    var local: [String] = []
-    let probes = (0..<passes).map { _ in
-      HelperBootstrap.probe(
-        systemPlistExists: { true }, service: service, hello: HelperModeProbeTests.hello(ok: true),
-        openSettings: {}, state: &state, log: { local.append($0) })
-    }
-    logs = local
-    return probes
-  }
+/// Counts EVERY touch: a status read, register, and unregister.
+final class StrictService: HelperDaemonService, @unchecked Sendable {
+  var statusReads = 0, registerCalls = 0, unregisterCalls = 0
+  let status: String
+  init(_ status: String) { self.status = status }
+  var registrationName: String { statusReads += 1; return status }
+  func register() throws { registerCalls += 1 }
+  /// Not part of the protocol any more; kept here so a mutant that re-adds the call is counted.
+  func unregister() throws { unregisterCalls += 1 }
+  var touches: Int { statusReads + registerCalls + unregisterCalls }
+}
 
-  @Test func anEnabledOrApprovalPendingRegistrationIsUnregisteredExactlyOnce() {
-    for status in ["enabled", "requiresApproval"] {
-      let service = HelperModeProbeTests.Fake(status)
+@Suite struct LaunchdModeTouchesNoSMAppServiceTests {
+  @Test func everyStatusInLaunchdModeMakesZeroCalls() {
+    // 0.1.33 called unregister() here and launchd removed the system job ("removing service: ...").
+    for status in ["enabled", "requiresApproval", "notRegistered", "notFound"] {
+      let service = StrictService(status)
+      var state = HelperRegistrationState()
       var logs: [String] = []
-      _ = run(service, passes: 5, logs: &logs)
-      #expect(service.unregisterCalls == 1, "\(status)")
-      #expect(service.registerCalls == 0)
-      #expect(logs.filter { $0.contains("removed a stale SMAppService registration") }.count == 1)
+      for answering in [true, false, true] {
+        let result = HelperBootstrap.probe(
+          systemPlistExists: { true }, service: service, hello: HelperModeProbeTests.hello(ok: answering),
+          openSettings: {}, state: &state, log: { logs.append($0) })
+        #expect(result.mode == "launchd" && result.registration == (answering ? "enabled" : "notAnswering"))
+        #expect(result.error == nil)
+      }
+      #expect(service.touches == 0, "\(status): status reads \(service.statusReads), register \(service.registerCalls), unregister \(service.unregisterCalls)")
+      #expect(logs.isEmpty, "and nothing about SMAppService is logged either")
     }
   }
 
-  @Test func nothingToRemoveMeansNothingIsCalled() {
-    for status in ["notRegistered", "notFound"] {
-      let service = HelperModeProbeTests.Fake(status)
-      var logs: [String] = []
-      _ = run(service, passes: 3, logs: &logs)
-      #expect(service.unregisterCalls == 0 && service.registerCalls == 0, "\(status)")
-    }
+  @Test func theStateHasNoUnregisterBookkeepingLeft() {
+    #expect(HelperRegistrationState() == HelperRegistrationState())
+    #expect(HelperRegistrationState.maxAttempts == 2)
   }
 
-  @Test func aRefusedUnregisterIsLoggedAndNotRetriedAndTheModeIsStillLaunchd() {
-    let service = HelperModeProbeTests.Fake("enabled")
-    service.unregisterFailure = NSError(domain: "D", code: 9, userInfo: [NSLocalizedDescriptionKey: "refused"])
-    var logs: [String] = []
-    let probes = run(service, passes: 4, logs: &logs)
-    #expect(service.unregisterCalls == 1)
-    #expect(logs.contains { $0.contains("could not remove the stale SMAppService registration") && $0.contains("code=9") })
-    #expect(probes.allSatisfy { $0.mode == "launchd" && $0.registration == "enabled" })
+  @Test func theSourceNeverNamesUnregisterOutsideItsExplanation() throws {
+    let source = try String(
+      contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Sources/RoomRecorderCore/HelperBootstrap.swift"), encoding: .utf8)
+    let code = source.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+    #expect(!code.contains { $0.contains("unregister") }, "no code line calls or declares unregister")
   }
 
-  @Test func theSMAppServicePathNeverUnregisters() {
-    let service = HelperModeProbeTests.Fake("notRegistered")
+  @Test func theSMAppServicePathStillRegistersWhenThereIsNoSystemPlist() {
+    let service = StrictService("notRegistered")
     var state = HelperRegistrationState()
     _ = HelperBootstrap.probe(
       systemPlistExists: { false }, service: service, hello: HelperModeProbeTests.hello(ok: true),
       openSettings: {}, state: &state, log: { _ in })
-    #expect(service.unregisterCalls == 0 && service.registerCalls == 1)
+    #expect(service.registerCalls == 1 && service.unregisterCalls == 0)
+  }
+}
+
+// MARK: - status.json carries what FLEET asked for (0.1.34)
+
+@Suite struct StatusJSONHelperFieldsTests {
+  @Test func xpcOkAndVersionAreInStatusJSONWithTheNamesFLEETReads() throws {
+    let status = RoomRecorderStatus(
+      state: .ready, helperRegistration: "enabled", helperMode: "launchd", helperXPCOK: true, helperVersion: "0.2.0-h2")
+    let object = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as? [String: Any])
+    #expect(object["helper_xpc_ok"] as? Bool == true)
+    #expect(object["helper_version"] as? String == "0.2.0-h2")
+    #expect(object["helper_mode"] as? String == "launchd" && object["helper_registration"] as? String == "enabled")
+  }
+
+  @Test func aSilentHelperIsFalseNotAbsent() throws {
+    let status = RoomRecorderStatus(state: .ready, helperRegistration: "notAnswering", helperMode: "launchd", helperXPCOK: false)
+    let object = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(status)) as? [String: Any])
+    #expect(object["helper_xpc_ok"] as? Bool == false, "false is a fact FLEET needs; it must not vanish")
+    #expect(object["helper_version"] == nil)
+  }
+
+  @Test func unmeasuredIsAbsentAndOldFilesStillDecode() throws {
+    let object = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(RoomRecorderStatus(state: .ready))) as? [String: Any])
+    #expect(object["helper_xpc_ok"] == nil && object["helper_version"] == nil)
+    let back = try JSONDecoder().decode(RoomRecorderStatus.self, from: JSONEncoder().encode(RoomRecorderStatus(state: .ready, helperXPCOK: true, helperVersion: "1")))
+    #expect(back.helperXPCOK == true && back.helperVersion == "1")
+  }
+
+  @Test func theEngineWritesThemFromTheProbe() throws {
+    // The cache the engine reads is the cache the probe fills.
+    HelperStatusCache.shared.set(HelperSnapshot(registration: "enabled", helperVersion: "0.2.0-h2", xpcOK: true, mode: "launchd"), error: nil)
+    defer { HelperStatusCache.shared.set(nil) }
+    let snapshot = try #require(HelperStatusCache.shared.snapshot)
+    let status = RoomRecorderStatus(
+      state: .ready, helperRegistration: snapshot.registration, helperMode: snapshot.mode, helperXPCOK: snapshot.xpcOK,
+      helperVersion: snapshot.helperVersion)
+    #expect(status.helperXPCOK == true && status.helperVersion == "0.2.0-h2")
   }
 }
 

@@ -119,15 +119,19 @@ DRY="$(/usr/bin/mktemp -d)"
 /bin/cp -R "$INSTALLED_APP" "${DRY}/apps/"
 /bin/cat > "${DRY}/launchctl" <<'STUB'
 #!/bin/sh
+# Just enough of launchd for the postinstall's verification: a job that is loaded and running.
+[ "$1" = "print" ] && echo "state = running"
 exit 0
 STUB
 /bin/chmod 755 "${DRY}/launchctl"
 ETA_POSTINSTALL_TEST=1 ETA_INSTALL_LOCATION="${DRY}/apps" ETA_DAEMON_DIR="${DRY}/daemons" \
   ETA_HELPER_DIR="${DRY}/helpers" ETA_LAUNCHCTL="${DRY}/launchctl" ETA_SKIP_OWNERSHIP=1 \
+  ETA_INSTALL_LOG="${DRY}/install.log" ETA_SLEEP=/usr/bin/true ETA_PIN_FILE="${DRY}/update-pin" \
   /bin/sh "${SCRIPT_DIR}/pkg-scripts/postinstall" pkg "${DRY}/apps" / / \
   || die "the pkg postinstall failed in the dry run"
 DRY_COPY="${DRY}/helpers/com.evenscribe.room-recorder.helper"
 [ -x "$DRY_COPY" ] || die "the dry run did not install the root helper copy"
+/usr/bin/grep -q "VERIFIED" "${DRY}/install.log" || die "the dry run did not reach VERIFIED"
 codesign --verify --strict \
   -R "=identifier \"com.evenscribe.room-recorder.helper\" and certificate leaf = H\"${LEAF_LOWER}\"" "$DRY_COPY" \
   || die "the root helper copy does not satisfy the pinned requirement"

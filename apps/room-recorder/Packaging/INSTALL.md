@@ -62,6 +62,14 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    `-rw-r--r--`) and the last command must print `pinned-ok`. If `launchctl print` cannot find the
    service, load it by hand:
    `sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`
+   After bootstrapping, the postinstall asks launchd for the job BY NAME and logs every step to
+   `/var/log/evenscribe-room-recorder-install.log`: `grep postinstall /var/log/evenscribe-room-recorder-install.log | tail -20`.
+   A good install ends with `VERIFIED: com.evenscribe.room-recorder.helper is running`. If the job is
+   not loaded it bootstraps ONCE more (after 2 s); if it is loaded but not running it runs
+   `launchctl kickstart system/<label>` (never `-k`). If it still is not there the log ends with
+   `WARNING: ... NOT loaded` or `NOT running`; the app install itself still succeeds, so READ that log
+   after every install. The one-line cure is
+   `sudo launchctl bootstrap system /Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist`.
    If the postinstall's log says the copy "does not satisfy the pinned code-signing requirement", it
    changed nothing; the pkg was built wrong, do not use it. Installing the same pkg again is safe: it
    stages and checks a new copy, boots the job out, swaps the copy in, and boots the job back in.
@@ -72,10 +80,14 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    `launchd` (the system daemon above; `helper_registration` is `enabled` once it answers over XPC,
    `notAnswering` if the job is there but silent), `smappservice` (no system plist, so the app asks
    macOS to register the bundle's own daemon plist, which DOES need approval in Login Items), or `none`.
-   While the system plist exists the app never calls `register()`: two registrations of one Mach
-   service would fight. If a room that ran 0.1.31 still holds an SMAppService registration of the same
-   label, the app removes it ONCE per start (`helper: removed a stale SMAppService registration` in
-   `launchd.log`; `sfltool dumpbtm | grep -A6 room-recorder` should then show no helper item). `helper_registration_error` carries macOS's refusal in the other modes.
+   While the system plist exists the app makes **no SMAppService call at all**: not `register`, not
+   `unregister`, not even a status read (0.1.34). In 0.1.33 the app's `unregister()` for this label made
+   launchd log `removing service: com.evenscribe.room-recorder.helper` and the daemon vanished at the
+   app's first start (OPD 5 and OPD 6); launchd owns the job in this mode. In the other modes
+   `helper_registration_error` carries macOS's refusal. If a room that ran 0.1.31 shows a leftover
+   background-item entry (`sfltool dumpbtm | grep -A6 room-recorder`), leave it and report it.
+   `status.json` also carries `helper_xpc_ok` (did the helper answer a hello over XPC) and
+   `helper_version`, beside `helper_mode` and `helper_registration`.
 8. Wait about 90 seconds, then check this room's bench row: `mic_state=authorized`,
    `helper_mode=launchd`, `helper_registration=enabled`, `helper_xpc_ok=true`, `helper_version=0.2.0-h2`.
 

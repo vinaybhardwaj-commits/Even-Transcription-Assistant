@@ -2,6 +2,7 @@ import Foundation
 import Testing
 
 @testable import FleetCore
+@testable import HelperCore
 @testable import RoomRecorderCore
 @testable import TapeCapture
 @testable import TapeCore
@@ -261,6 +262,26 @@ import Testing
   // -------------------------------------------------------------------------
   // 0.1.30: the same verbs, reached from the fleet client
   // -------------------------------------------------------------------------
+
+  @Test func theEngineWritesTheHelperProbeIntoStatusJSONOnDisk() async throws {
+    // 0.1.34: FLEET reads status.json and could not see helper_xpc_ok or helper_version.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root); HelperStatusCache.shared.set(nil) }
+    HelperStatusCache.shared.set(
+      HelperSnapshot(registration: "enabled", helperVersion: "0.2.0-h2", xpcOK: true, mode: "launchd"), error: nil)
+    let events = EventLog()
+    let remote = VerbRemote(polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
+    task.cancel()
+    try await task.value
+    let raw = try Data(contentsOf: root.appendingPathComponent("status.json"))
+    let object = try #require(try JSONSerialization.jsonObject(with: raw) as? [String: Any])
+    #expect(object["helper_xpc_ok"] as? Bool == true)
+    #expect(object["helper_version"] as? String == "0.2.0-h2")
+    #expect(object["helper_mode"] as? String == "launchd" && object["helper_registration"] as? String == "enabled")
+  }
 
   @Test func theFleetRestartRefusesAnOpenSessionAndOtherwiseWaitsForTheResult() async throws {
     let root = R4Fixture.temporaryRoot()

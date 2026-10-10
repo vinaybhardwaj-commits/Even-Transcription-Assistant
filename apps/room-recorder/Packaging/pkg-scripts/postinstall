@@ -52,6 +52,8 @@ if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
   PIN_FILE="${ETA_PIN_FILE:-/Library/Application Support/EvenScribe/update-pin}"
   SKIP_OWNERSHIP="${ETA_SKIP_OWNERSHIP:-0}"
   LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
+  INSTALL_LOG="${ETA_INSTALL_LOG:-/var/log/evenscribe-room-recorder-install.log}"
+  SLEEP="${ETA_SLEEP:-/bin/sleep}"
 else
   INSTALL_LOCATION="${2:-/Applications}"
   DAEMON_DIR="/Library/LaunchDaemons"
@@ -65,6 +67,8 @@ else
   PIN_FILE="/Library/Application Support/EvenScribe/update-pin"
   SKIP_OWNERSHIP=0
   LOG_PATH="/var/log/room-recorder-helper.log"
+  INSTALL_LOG="/var/log/evenscribe-room-recorder-install.log"
+  SLEEP="/bin/sleep"
 fi
 
 APP="$INSTALL_LOCATION/$APP_NAME"
@@ -72,7 +76,11 @@ BUNDLE_HELPER="$APP/Contents/MacOS/room-recorder-helper"
 HELPER="$HELPER_DIR/$LABEL"
 PLIST="$DAEMON_DIR/$LABEL.plist"
 
-say() { echo "room-recorder postinstall: $*"; }
+# Every step goes to the installer's output AND to a log that survives it.
+say() {
+  echo "room-recorder postinstall: $*"
+  echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') room-recorder postinstall: $*" >> "$INSTALL_LOG" 2>/dev/null
+}
 own() { [ "$SKIP_OWNERSHIP" = "1" ] || "$CHOWN" root:wheel "$@"; }
 
 # The user who runs the recorder: the console user, or, at the login window or over SSH, the one user
@@ -193,13 +201,44 @@ fi
 own "$TMP"
 /bin/chmod 644 "$TMP"
 
-# 2c. Out, swap, in. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
+# 2c. Out, swap, in, VERIFY. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
 "$LAUNCHCTL" bootout "system/$LABEL" > /dev/null 2>&1
 /bin/mv -f "$STAGED" "$HELPER"
 /bin/mv -f "$TMP" "$PLIST"
-if "$LAUNCHCTL" bootstrap system "$PLIST"; then
-  say "helper daemon $LABEL loaded from $HELPER"
+say "bootout done; new helper copy and plist are in place"
+
+# A successful `bootstrap` is not proof the job is there: on OPD 5 and OPD 6 (0.1.33) the job was gone
+# right after the install. So the job is asked for, by name, and must say it is running.
+job_state() { "$LAUNCHCTL" print "system/$LABEL" 2>/dev/null; }
+job_running() { job_state | /usr/bin/grep -q "state = running"; }
+job_loaded() { job_state > /dev/null; }
+
+bootstrap_once() {
+  if "$LAUNCHCTL" bootstrap system "$PLIST"; then
+    say "launchctl bootstrap system $PLIST: ok"
+    return 0
+  fi
+  say "launchctl bootstrap system $PLIST: failed"
+  return 1
+}
+
+bootstrap_once
+if ! job_loaded; then
+  say "$LABEL is not loaded after bootstrap; retrying bootstrap once"
+  "$SLEEP" 2
+  bootstrap_once
+fi
+if job_loaded && ! job_running; then
+  # Loaded but not running: start it, WITHOUT -k (no kill of anything that is running).
+  say "$LABEL is loaded but not running; kickstart (no -k)"
+  "$LAUNCHCTL" kickstart "system/$LABEL" > /dev/null 2>&1
+  "$SLEEP" 1
+fi
+if job_running; then
+  say "VERIFIED: $LABEL is running from $HELPER"
+elif job_loaded; then
+  say "WARNING: $LABEL is loaded but NOT running after kickstart; the app will report notAnswering. Check /var/log/room-recorder-helper.log"
 else
-  say "launchctl bootstrap system $PLIST failed; the plist is in place and the job loads at the next boot"
+  say "WARNING: $LABEL is NOT loaded after two bootstraps; the plist is in place and the job loads at the next boot, or run: sudo launchctl bootstrap system $PLIST"
 fi
 exit 0

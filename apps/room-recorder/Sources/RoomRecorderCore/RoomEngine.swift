@@ -4176,7 +4176,9 @@ public actor RoomEngine {
         lastEventAt: lastEvent?.at,
         helperRegistration: HelperStatusCache.shared.snapshot?.registration,
         helperRegistrationError: HelperStatusCache.shared.registrationError,
-        helperMode: HelperStatusCache.shared.snapshot?.mode))
+        helperMode: HelperStatusCache.shared.snapshot?.mode,
+        helperXPCOK: HelperStatusCache.shared.snapshot?.xpcOK,
+        helperVersion: HelperStatusCache.shared.snapshot?.helperVersion))
   }
 
   /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the

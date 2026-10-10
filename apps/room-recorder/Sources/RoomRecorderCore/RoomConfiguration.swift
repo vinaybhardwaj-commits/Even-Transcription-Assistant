@@ -406,8 +406,14 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   public var helperRegistrationError: String?
   /// 0.1.32. `launchd`, `smappservice` or `none`; see `HelperSnapshot.mode`.
   public var helperMode: String?
+  /// 0.1.34. Whether the helper answered a hello over XPC at the last probe, and the version it gave.
+  /// FLEET could not see either: they were on the bench row only. Nil until the app has probed.
+  public var helperXPCOK: Bool?
+  public var helperVersion: String?
 
   enum CodingKeys: String, CodingKey {
+    case helperXPCOK = "helper_xpc_ok"
+    case helperVersion = "helper_version"
     case helperMode = "helper_mode"
     case state
     case sessionID = "session_id"
@@ -432,8 +438,12 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     lastEventAt: Date? = nil,
     helperRegistration: String? = nil,
     helperRegistrationError: String? = nil,
-    helperMode: String? = nil
+    helperMode: String? = nil,
+    helperXPCOK: Bool? = nil,
+    helperVersion: String? = nil
   ) {
+    self.helperXPCOK = helperXPCOK
+    self.helperVersion = helperVersion
     self.helperMode = helperMode
     self.helperRegistration = helperRegistration
     self.helperRegistrationError = helperRegistrationError.map { String($0.prefix(200)) }
