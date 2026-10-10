@@ -72,7 +72,7 @@ function indexRow(uid: string, o: Row = {}): Row {
   const wall = (ms: number) => new Date(ms + 19_800_000).toISOString().replace("T", " ").replace("Z", "");
   return {
     consult_uid: uid, ist_date: DAY, room_slug: SLUG, room_id: ROOM, doctor_uid: "DOCTORUID1", doctor_name: DOC.full_name, window_id: 1, status: "cut", quality: "clean", code_commit: "abc1234",
-    span_start: wall(end - 120_000), span_end: wall(end), span_end_epoch: end / 1000, minutes: 2, coverage: 1, bytes_total: 5000, voice_isolated: false, doctor_identified: true,
+    span_start: wall(end - 120_000), span_end: wall(end), span_end_epoch: end / 1000, minutes: 2, coverage: 1, bytes: { "consult.flac": 4000, "timeline.json": 1000 }, bytes_total: 5000, voice_isolated: false, doctor_identified: true,
     cut_at: `2026-10-09T0${(cutSeq += 1) % 10}:00:00+0530`, r2: { status: "mirrored", bucket: "eta-audio", prefix: `consult-clips/${DAY}/${SLUG}/${uid}`, files: 4, at: "x" }, ...o,
   };
 }
@@ -270,7 +270,7 @@ describe.skipIf(!HAVE)("the sync of the PUBLISHED shape (the writer drops status
     const r = await Sync.syncConsultIndex();
     expect(r).toMatchObject({ ok: true, rows_read: 5, rows_written: 5, inserted: 5, rows_skipped: 0, skipped: {} });
     expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM consult_index`)[0]!.n).toBe(5);
-    expect((await St.getIndexRow(UA))).toMatchObject({ clip_r2_key: clipKey(UA), bytes: expect.any(Number) });
+    expect((await St.getIndexRow(UA))).toMatchObject({ clip_r2_key: clipKey(UA), bytes: 5000 });
     putClips(UA);
     const out = await tool({ action: "transcribe", consult_uid: UA, english: false });
     expect(out).toMatchObject({ ok: true, status: "queued" });
