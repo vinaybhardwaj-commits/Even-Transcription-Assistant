@@ -42,7 +42,7 @@ beforeAll(() => {
   H.sql = pg.sql as never;
   const cent = Buffer.from(new Float32Array(192).fill(0).map((_, i) => (i === 0 ? 1 : 0)).buffer).toString("base64");
   pg.exec(`
-    INSERT INTO room_day VALUES ('rd_clean', 'r1', '2026-10-05'), ('rd_blind', '${BR}', '${BD}');
+    INSERT INTO room_day VALUES ('rd_clean', 'r1', (now() AT TIME ZONE 'Asia/Kolkata')::date - 2), ('rd_blind', '${BR}', '${BD}');
     -- the sweep windows: one placement each held out
     INSERT INTO bench_window VALUES ('sJev', 'bs1', 'rd_clean'), ('sEmo', 'bs1', 'rd_clean'), ('sRts', 'bs1', 'rd_clean'), ('sRdw', 'bs1', 'rd_clean'), ('sBench', 'bs1', 'rd_blind'), ('sClean', 'bs1', 'rd_clean');
     INSERT INTO room_diarize_window (window_id, room_day_id) VALUES ('sJev', 'rd_clean'), ('sEmo', 'rd_clean'), ('sRts', 'rd_clean'), ('sRdw', 'rd_blind'), ('sBench', 'rd_clean'), ('sClean', 'rd_clean');
@@ -100,7 +100,11 @@ afterAll(() => { if (HAVE) pg.stop(); });
     expect(ov.clinicians.find((x) => x.clinician_id === "docB")!.n_lost_30d).toBe(2); // wOK's and wRts t1's losing rows
     expect(ov.n_blind_excluded ?? 0).toBe(0);
     const cl = await C.consoleClinician("docA") as { daily_30d: Array<Record<string, any>>; n_blind_excluded: number };
-    expect(cl.daily_30d.reduce((n, d) => n + Number(d.n_matched), 0)).toBeGreaterThanOrEqual(2); // wOK + wBench on the clean day, plus whichever rows fall in the 30-day window
+    // The series is the last 30 IST days: the clean day (today - 2) always sits inside it with 4 rows (wOK t1, wRts t1+t2, wRdw t1);
+    // the former pair's day (wBench t1) is inside only while it is within 29 days of today, so the expectation follows the clock.
+    const istToday = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+    const formerInside = Date.parse(`${BD}T00:00:00Z`) >= Date.parse(`${istToday}T00:00:00Z`) - 29 * 86_400_000;
+    expect(cl.daily_30d.reduce((n, d) => n + Number(d.n_matched), 0)).toBe(4 + (formerInside ? 1 : 0));
     expect(cl.n_blind_excluded ?? 0).toBe(0);
     const pairs = await C.consolePairs(0.5) as { pairs: Array<Record<string, any>>; n_blind_excluded: number };
     expect(pairs.pairs[0]).toMatchObject({ a_won_b_lost_30d: 2, n_contested_30d: 2 });
@@ -108,7 +112,8 @@ afterAll(() => { if (HAVE) pg.stop(); });
   });
   it("voice search: candidates on the formerly held-out placements are returned and nothing is excluded; a query window whose turn rows sit on that day is searched", async () => {
     const { voiceSearch } = await import("@/lib/voice-search");
-    const scope = { rooms: ["r1", BR], from: "2026-10-01", to: "2026-10-07" };
+    const istDay = (offset: number) => new Date(Date.now() + 5.5 * 3_600_000 + offset * 86_400_000).toISOString().slice(0, 10); // the clean room-day is today - 2
+    const scope = { rooms: ["r1", BR], from: istDay(-5), to: istDay(0) };
     const r = await voiceSearch({ window_id: "q", speaker_idx: 0, ...scope, min_cosine: 0.5 }) as { ok: boolean; hits: Array<Record<string, any>>; n_blind_excluded: number };
     expect(r.ok).toBe(true);
     expect(r.hits.map((h) => h.window_id).sort()).toEqual(["wBench", "wOK", "wRts"]); // wRdw sits on the formerly held-out DATE, outside this 7-day scope (14-day cap)

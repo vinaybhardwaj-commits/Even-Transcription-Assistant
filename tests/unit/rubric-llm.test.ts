@@ -200,8 +200,9 @@ describe("gates: lab only, blind room-days (lifted), bench wiring", () => {
     consultRows = [{ room_id: "room_qyzghzaf", ist_date: "2026-09-15" }];
     queries.length = 0;
     const out = await evaluateUnit(affect, "consult", "enc_x");
-    expect(out).not.toMatchObject({ reason: "blind_room_day" });
-    expect(queries.length).toBeGreaterThan(1); // past the pair lookup: the consult text was queried
+    expect(out).toMatchObject({ status: "skipped", reason: "no_data" }); // not blind_room_day: past the pair lookup, the mocked store holds no text for it
+    expect(called).toBe(0);
+    expect(queries.length).toBeGreaterThan(1); // the consult text was queried
   });
   it("an unknown consult key is skipped in a normal run, but in a bench it reads the Meet text from the lab store (no room, no model call without text)", async () => {
     let called = 0;
