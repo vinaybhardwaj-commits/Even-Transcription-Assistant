@@ -1,0 +1,8 @@
+.venv/
+results/
+__pycache__/
+.pytest_cache/
+*.pyc
+smoke-cache/
+*.parquet
+*.tmp
