@@ -39,7 +39,7 @@
     },
     {
       "path": "/api/admin/join-windows",
-      "schedule": "*/5 * * * *"
+      "schedule": "*/2 * * * *"
     },
     {
       "path": "/api/jobs/run",
