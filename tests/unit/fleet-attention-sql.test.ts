@@ -745,7 +745,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
       extRow(M7, "heartbeat", "26 hours", '{"ext_version":"0.1.0.36"}'), extRow(M7, "active", "25 hours", '{"ext_version":"0.1.0.36"}'),
       presence("poller", M7, "ok", "30 seconds", POLLER_OK()), presence("poller", M7, "ok", "90 seconds", POLLER_OK()),
       // r6 — alive, current
-      extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.1.40","tab_focus":false}'), presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
+      extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.2.40","tab_focus":false}'), presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
       // r4 — poller unreachable
       extRow(M4, "heartbeat", "9 hours", '{"ext_version":"0.1.0.36"}'), presence("poller", M4, "unreachable", "30 seconds", '{"state":"unreachable"}'),
     ].join("\n"));
@@ -753,7 +753,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
     const by = Object.fromEntries(rows.map((r) => [r.room_id, r]));
     expect(by.r7).toMatchObject({ status: "missing", ext_version: "0.1.0.36", version_state: "behind", poller: { ok: true, chrome_running: true, console_user: "console-a" } });
     expect(by.r7!.ext_age_s).toBeGreaterThan(25 * 3600 - 5);
-    expect(by.r6).toMatchObject({ status: "ok", version_state: "current", ext_version: "0.1.1.40" });
+    expect(by.r6).toMatchObject({ status: "ok", version_state: "current", ext_version: "0.1.2.40" });
     expect(by.r4).toMatchObject({ status: "offline" });
 
     const r = await attention();
@@ -770,7 +770,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
 
   it("no_tab: a tab_closed logout 30 minutes ago on a reachable Mac with Chrome running is not missing and raises nothing", async () => {
     pg.exec([
-      extRow(M7, "heartbeat", "2 hours", '{"ext_version":"0.1.1.40"}'), extRow(M7, "logout", "30 minutes", '{"ext_version":"0.1.1.40","reason":"tab_closed"}'),
+      extRow(M7, "heartbeat", "2 hours", '{"ext_version":"0.1.2.40"}'), extRow(M7, "logout", "30 minutes", '{"ext_version":"0.1.2.40","reason":"tab_closed"}'),
       presence("poller", M7, "ok", "30 seconds", POLLER_OK()),
     ].join("\n"));
     expect((await extHealthNow()).find((r) => r.room_id === "r7")).toMatchObject({ status: "no_tab" });
@@ -779,7 +779,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
 
   it("behind: alive on 0.1.0.36 since 90 min ago (after an at-target row at 100 min, with a garbage version in the middle that must not break the cast) = behind, behind_since ~90 min, and ONE amber fleet-level R9 row", async () => {
     pg.exec([
-      extRow(M6, "heartbeat", "110 minutes", '{"ext_version":"0.1.1.40"}'), extRow(M6, "heartbeat", "100 minutes", '{"ext_version":"0.1.1.40"}'),
+      extRow(M6, "heartbeat", "110 minutes", '{"ext_version":"0.1.2.40"}'), extRow(M6, "heartbeat", "100 minutes", '{"ext_version":"0.1.2.40"}'),
       extRow(M6, "heartbeat", "90 minutes", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "75 minutes", '{"ext_version":"junk"}'),
       extRow(M6, "heartbeat", "50 minutes", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "20 seconds", '{"ext_version":"0.1.0.36"}'),
       extRow(M6, "heartbeat", "10 seconds", '{"tab_focus":false}'), // a row with no version at all
@@ -791,14 +791,14 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
     expect(minutesBetween(row.behind_since as string, dbNow - 90 * 60_000)).toBeLessThan(3);
     const item = (await attention()).items.find((i) => i.kind === "extension_behind")!;
     expect(item).toMatchObject({ room_id: "fleet", room_name: "Fleet", machine: null, severity: "amber" });
-    expect(item.detail).toContain("1 room on old extension builds: OPD 6 (0.1.0.36); update to 0.1.1.40.");
+    expect(item.detail).toContain("1 room on old extension builds: OPD 6 (0.1.0.36); update to 0.1.2.");
     expect(item.detail).not.toContain("at least");
     expect(item.action).toContain("Update the Pulse Presence extension");
   });
 
   it("behind for under an hour raises nothing yet; a machine behind for the whole 2 h look-back is dated by its floor (a lower bound), says 'at least 2 h', and two such rooms are ONE row", async () => {
     pg.exec([
-      extRow(M6, "heartbeat", "30 minutes", '{"ext_version":"0.1.1.40"}'), extRow(M6, "heartbeat", "20 minutes", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.0.36"}'),
+      extRow(M6, "heartbeat", "30 minutes", '{"ext_version":"0.1.2.40"}'), extRow(M6, "heartbeat", "20 minutes", '{"ext_version":"0.1.0.36"}'), extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.0.36"}'),
       presence("poller", M6, "ok", "20 seconds", POLLER_OK("console-b")),
     ].join("\n"));
     expect(kindsOf(await attention()).filter((k) => k.includes("extension"))).toEqual([]);
@@ -816,7 +816,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (R8 / R9)", () =>
     const r = await attention();
     expect(kindsOf(r).filter((k) => k.includes("extension"))).toEqual(["fleet:extension_behind"]);
     const item = r.items.find((i) => i.kind === "extension_behind")!;
-    expect(item.detail).toBe("2 rooms on old extension builds: OPD 6 (0.1.0.36), OPD 4 (0.1.0.33); update to 0.1.1.40. Behind for at least 2 h.");
+    expect(item.detail).toBe("2 rooms on old extension builds: OPD 6 (0.1.0.36), OPD 4 (0.1.0.33); update to 0.1.2. Behind for at least 2 h.");
   });
 
   it("EXCLUDED machines (Home Office, ORB3, ORB2) never appear, even silent with an ok poller and Chrome running; the clinic Macs still do", async () => {
@@ -895,7 +895,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
 
   it("no_chrome: poller ok + chrome_running=false (after chrome_running=true earlier) = no_chrome, chrome_down_since is where the false run began, AMBER R10 and NO R8 — a stale extension no longer reads as missing", async () => {
     pg.exec([
-      extRow(M7, "heartbeat", "3 hours", '{"ext_version":"0.1.1.40"}'),
+      extRow(M7, "heartbeat", "3 hours", '{"ext_version":"0.1.2.40"}'),
       pollerRow(M7, "ok", "3 hours", POLLER_OK()), pollerRow(M7, "ok", "50 minutes", POLLER_OK()),
       pollerRow(M7, "ok", "40 minutes", POLLER_OK("console-a", false)), pollerRow(M7, "ok", "20 minutes", POLLER_OK("console-a", false)), pollerRow(M7, "ok", "30 seconds", POLLER_OK("console-a", false)),
     ].join("\n"));
@@ -917,7 +917,7 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
   });
 
   it("missing stays RED when chrome_running=true, and a never-chrome-true history still resolves a start (24 h look-back)", async () => {
-    pg.exec([extRow(M7, "heartbeat", "5 hours", '{"ext_version":"0.1.1.40"}'), pollerRow(M7, "ok", "30 seconds", POLLER_OK())].join("\n"));
+    pg.exec([extRow(M7, "heartbeat", "5 hours", '{"ext_version":"0.1.2.40"}'), pollerRow(M7, "ok", "30 seconds", POLLER_OK())].join("\n"));
     expect(kindsOf(await attention()).filter((k) => k.startsWith("r7:"))).toEqual(["r7:extension_missing"]);
     pg.exec(`TRUNCATE pulse_presence_events;` + [pollerRow(M7, "ok", "2 hours", POLLER_OK("console-a", false)), pollerRow(M7, "ok", "30 seconds", POLLER_OK("console-a", false))].join("\n"));
     const row = (await extHealthNow()).find((r) => r.room_id === "r7")!;
@@ -927,12 +927,12 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
 
   it("rebooted_recently: unreachable 8 min and 6 min ago, back 5 min ago with idle_s 3 = flagged; R8's action names the IST time; a fresh blip with idle_s 4000 is not a reboot", async () => {
     pg.exec([
-      extRow(M7, "heartbeat", "3 hours", '{"ext_version":"0.1.1.40"}'),
+      extRow(M7, "heartbeat", "3 hours", '{"ext_version":"0.1.2.40"}'),
       pollerRow(M7, "ok", "20 minutes", '{"state":"ok","chrome_running":true,"idle_s":5000}'),
       pollerRow(M7, "unreachable", "8 minutes", '{"state":"unreachable"}'), pollerRow(M7, "unreachable", "6 minutes", '{"state":"unreachable"}'),
       pollerRow(M7, "ok", "5 minutes", '{"state":"ok","chrome_running":true,"idle_s":3}'), pollerRow(M7, "ok", "1 minute", '{"state":"ok","chrome_running":true,"idle_s":63}'),
       // r6: a blip with the console still idle for hours — not a restart
-      extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.1.40"}'),
+      extRow(M6, "heartbeat", "10 seconds", '{"ext_version":"0.1.2.40"}'),
       pollerRow(M6, "ok", "9 minutes", '{"state":"ok","chrome_running":true,"idle_s":4000}'), pollerRow(M6, "unreachable", "7 minutes", '{"state":"unreachable"}'),
       pollerRow(M6, "ok", "2 minutes", '{"state":"ok","chrome_running":true,"idle_s":4100}'),
     ].join("\n"));
@@ -948,12 +948,12 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
 
   it("rebooted_recently from the idle drop alone (the Cardiology 14:09 pattern): the poller stays ok, idle_s falls 1088 -> 0 while the extension dies with the reboot = flagged, status missing, R8 names the time", async () => {
     pg.exec([
-      extRow(M7, "active", "12 minutes 30 seconds", '{"ext_version":"0.1.1.40"}'), // the last extension row: 30 s before the drop
+      extRow(M7, "active", "12 minutes 30 seconds", '{"ext_version":"0.1.2.40"}'), // the last extension row: 30 s before the drop
       pollerRow(M7, "ok", "14 minutes", '{"state":"ok","chrome_running":true,"idle_s":1028}'), pollerRow(M7, "ok", "13 minutes", '{"state":"ok","chrome_running":true,"idle_s":1088}'),
       pollerRow(M7, "ok", "12 minutes", '{"state":"ok","chrome_running":true,"idle_s":0}'), pollerRow(M7, "ok", "11 minutes", '{"state":"ok","chrome_running":true,"idle_s":30}'),
       pollerRow(M7, "ok", "30 seconds", '{"state":"ok","chrome_running":true,"idle_s":630}'),
       // r6: the same idle drop, but the extension kept talking for 6 more minutes — a user back at the desk, not a reboot
-      extRow(M6, "heartbeat", "20 seconds", '{"ext_version":"0.1.1.40"}'), extRow(M6, "heartbeat", "6 minutes", '{"ext_version":"0.1.1.40"}'),
+      extRow(M6, "heartbeat", "20 seconds", '{"ext_version":"0.1.2.40"}'), extRow(M6, "heartbeat", "6 minutes", '{"ext_version":"0.1.2.40"}'),
       pollerRow(M6, "ok", "14 minutes", '{"state":"ok","chrome_running":true,"idle_s":1028}'), pollerRow(M6, "ok", "12 minutes", '{"state":"ok","chrome_running":true,"idle_s":0}'),
     ].join("\n"));
     const rows = await extHealthNow();
@@ -967,8 +967,8 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
 
   it("quiet vs missing: the same silent extension (last row 30 min ago); a console idle since before it went quiet = quiet and raises NOTHING, a console used after = missing, RED", async () => {
     pg.exec([
-      extRow(M7, "heartbeat", "30 minutes", '{"ext_version":"0.1.1.40"}'), pollerRow(M7, "ok", "20 seconds", '{"state":"ok","chrome_running":true,"idle_s":1810}'),
-      extRow(M6, "heartbeat", "30 minutes", '{"ext_version":"0.1.1.40"}'), pollerRow(M6, "ok", "20 seconds", '{"state":"ok","chrome_running":true,"idle_s":120}'),
+      extRow(M7, "heartbeat", "30 minutes", '{"ext_version":"0.1.2.40"}'), pollerRow(M7, "ok", "20 seconds", '{"state":"ok","chrome_running":true,"idle_s":1810}'),
+      extRow(M6, "heartbeat", "30 minutes", '{"ext_version":"0.1.2.40"}'), pollerRow(M6, "ok", "20 seconds", '{"state":"ok","chrome_running":true,"idle_s":120}'),
     ].join("\n"));
     const rows = await extHealthNow();
     expect(rows.find((r) => r.room_id === "r7")).toMatchObject({ status: "quiet", poller: { idle_s: 1810 } });
@@ -979,15 +979,15 @@ describe.runIf(HAVE_DOCKER)("extension health against postgres (no_chrome / R10,
   it("as_of REPLAY finds POLLER rows under every spelling (the pre-5-Oct short key consul4, the raw hostname) and ext rows under the full hostname; rows newer than as_of are ignored", async () => {
     pg.exec([
       // r7: poller under the short key, 3 h ago; ext under the canonical key
-      pollerRow("consul4", "ok", "3 hours 20 seconds", '{"state":"ok","chrome_running":true,"idle_s":5}'), extRow(M7, "heartbeat", "3 hours 10 seconds", '{"ext_version":"0.1.1.40"}'),
+      pollerRow("consul4", "ok", "3 hours 20 seconds", '{"state":"ok","chrome_running":true,"idle_s":5}'), extRow(M7, "heartbeat", "3 hours 10 seconds", '{"ext_version":"0.1.2.40"}'),
       // r6: poller under the raw hostname spelling (smart apostrophe, "(2)"); ext under the canonical key (extension lookups use the full hostname only)
       pollerRow("EHRC-OPD6’s Mac mini (2)", "ok", "3 hours 20 seconds", '{"state":"ok","chrome_running":true}'), extRow(M6, "heartbeat", "3 hours 5 seconds", '{"ext_version":"0.1.0.36"}'),
       // everything newer than as_of: must not be seen
-      pollerRow(M7, "unreachable", "1 minute", '{"state":"unreachable"}'), pollerRow(M4, "ok", "10 seconds", POLLER_OK()), extRow(M4, "heartbeat", "10 seconds", '{"ext_version":"0.1.1.40"}'),
+      pollerRow(M7, "unreachable", "1 minute", '{"state":"unreachable"}'), pollerRow(M4, "ok", "10 seconds", POLLER_OK()), extRow(M4, "heartbeat", "10 seconds", '{"ext_version":"0.1.2.40"}'),
     ].join("\n"));
     const asOf = new Date(Date.now() - 3 * 3_600_000);
     const rows = await extHealthNow(asOf);
-    expect(rows.find((r) => r.room_id === "r7")).toMatchObject({ status: "ok", ext_version: "0.1.1.40", poller: { ok: true, chrome_running: true, idle_s: 5 } });
+    expect(rows.find((r) => r.room_id === "r7")).toMatchObject({ status: "ok", ext_version: "0.1.2.40", poller: { ok: true, chrome_running: true, idle_s: 5 } });
     expect(rows.find((r) => r.room_id === "r6")).toMatchObject({ status: "behind", ext_version: "0.1.0.36", poller: { ok: true } });
     expect(rows.find((r) => r.room_id === "r4")).toMatchObject({ status: "offline", last_ext_ts: null });
   });
