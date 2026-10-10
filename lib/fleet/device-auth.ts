@@ -1,5 +1,5 @@
 /**
- * lib/fleet/device-auth.ts — per-device request authentication for /api/fleet/* (TS-H3 #40). Wire format: PROTOCOL.md (ts-h3).
+ * lib/fleet/device-auth.ts — per-device request authentication for /api/fleet/* (TS-H3 #40). Wire format: docs/fleet/PROTOCOL.md.
  *
  * `Authorization: Device <JWS>`; the JWS is EdDSA over the device's registered Ed25519 key.
  *   header  { alg:"EdDSA", typ:"JWT", kid:<device_id> }

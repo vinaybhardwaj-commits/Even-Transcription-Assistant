@@ -1,5 +1,5 @@
 /**
- * POST /api/fleet/register — bind a device's Ed25519 public key to a room install (TS-H3 #40). Wire format and rules: lib/fleet/register.ts and PROTOCOL.md.
+ * POST /api/fleet/register — bind a device's Ed25519 public key to a room install (TS-H3 #40). Wire format and rules: lib/fleet/register.ts and docs/fleet/PROTOCOL.md.
  * Auth: `Authorization: Bearer <room session JWT>` + a proof-of-possession JWS in the body. 201 first registration, 200 the same key again.
  * Errors (JSON {ok:false,error}): 400 bad_*, 401 room_auth|bad_proof|bad_signature|expired|replay|…, 403 room_mismatch|machine_mismatch, 404 unknown_install, 409 KEY_CONFLICT|REVOKED|RETIRED, 413, 503 db.
  * Acts on nothing: it writes one fleet_devices row and one fleet_audit row.
