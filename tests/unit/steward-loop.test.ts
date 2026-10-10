@@ -893,7 +893,7 @@ describe("start_day_live and the live-start gates", () => {
     expect(db.state.table[0]).toMatchObject({ action: "scribe_start", mode: "live", result: "skipped: budget" });
   });
 
-  it("F2: 90 minutes of ticks with the device missing write exactly ONE alert row; the device back closes the episode, a new disappearance alerts again", async () => {
+  it("F2 (G1): 90 minutes of ticks with the device missing write exactly ONE alert row and waiting_for_mic rows; the device back closes the episode once; a new disappearance the same IST day does not alert again", async () => {
     const db = fakeDb({ cfg: { ...open, shadow: { global: true, actions: {} } } });
     let present: boolean | null = false;
     senseWith((id, A) => idle(A, { room_id: id, room_name: "Cardiology", audio: { default_input_present: present, devices_at: ago(A, 600), configured_device: "TONOR TM20" }, start_attempts: [failedAttempt(A, 3000)] }));
@@ -901,13 +901,71 @@ describe("start_day_live and the live-start gates", () => {
     const alerts = () => db.state.table.filter((r) => r.rule === "device_missing" && r.action === "alert");
     expect(alerts()).toHaveLength(1);
     expect(alerts()[0]!.params).toMatchObject({ room: "Cardiology", device: "TONOR TM20" });
-    expect(db.state.table.some((r) => r.rule === "device_missing_hold")).toBe(true);
+    expect(db.state.table.some((r) => r.rule === "waiting_for_mic")).toBe(true);
+    expect(db.state.table.some((r) => r.action === "scribe_start")).toBe(false);
     present = true;
     for (let m = 90; m < 95; m++) await run(db.sql, T + m * MIN);
     expect(db.state.table.filter((r) => r.rule === "device_missing" && r.action === "log_only" && (r.params as { state?: string }).state === "back")).toHaveLength(1);
+    // tick 1 of the return is a marker row, tick 2 on is the normal start decision
+    expect(db.state.table.filter((r) => r.rule === "waiting_for_mic" && (r.params as { mic_ticks?: number }).mic_ticks === 1)).toHaveLength(1);
     present = false;
     for (let m = 95; m < 100; m++) await run(db.sql, T + m * MIN);
-    expect(alerts()).toHaveLength(2);
+    expect(alerts()).toHaveLength(1);
+  });
+
+  it("replay of the 9 Oct incident (live start path): end_day (mcp) acked 21:09 IST, tick at 21:14 IST -> start_gate_hold day_ended_by_operator, the executor is never called; the next IST day starts", async () => {
+    const D = "2026-10-09";
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    const endedAt = new Date(ist("21:09", D)).toISOString();
+    senseWith((id, A) => ({ ...liveReady(id, A), day: { operator_end_at: endedAt, session_today: true } }));
+    const l = spy();
+    await run(db.sql, ist("21:14", D), withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    expect(db.state.table).toHaveLength(1);
+    expect(db.state.table[0]).toMatchObject({ rule: "start_gate_hold", action: "log_only", params: { reason: "day_ended_by_operator" } });
+    // 20:31 IST with a session that day and no operator end: held; with no session that day: goes
+    senseWith((id, A) => ({ ...liveReady(id, A), day: { operator_end_at: null, session_today: true } }));
+    await run(db.sql, ist("20:31", D), withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    expect(db.state.table.at(-1)).toMatchObject({ params: { reason: "late_start_blocked" } });
+    senseWith((id, A) => ({ ...liveReady(id, A), day: { operator_end_at: null, session_today: false } }));
+    await run(db.sql, ist("20:35", D), withSpy(l));
+    expect(l.scribeStart).toHaveBeenCalledTimes(1);
+    // the next IST morning: no gates apply
+    senseWith((id, A) => ({ ...liveReady(id, A), day: undefined }));
+    await run(db.sql, ist("08:00", "2026-10-10"), withSpy(l));
+    expect(l.scribeStart).toHaveBeenCalledTimes(2);
+  });
+
+  it("an unreadable day state (null) from 20:00 IST sends nothing", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    senseWith((id, A) => ({ ...liveReady(id, A), day: null }));
+    const l = spy();
+    await run(db.sql, ist("20:10"), withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    expect(db.state.table[0]).toMatchObject({ rule: "start_gate_hold", params: { reason: "day_state_unreadable" } });
+  });
+
+  it("a missing mic sends NO start, not even the first; 2 present ticks later the normal gates apply: the start waits for the 5-min recorder streak (no waiver)", async () => {
+    const db = fakeDb({ cfg: { ...open, ...LIVE_ON } });
+    let present = false;
+    senseWith((id, A) => ({ ...liveReady(id, A), audio: { ...liveReady(id, A).audio, default_input_present: present, devices_at: ago(A, 60), configured_device: "TONOR TM20" }, start_attempts: [] }));
+    const l = spy();
+    const t0 = ist("08:00");
+    for (let m = 0; m < 10; m++) await run(db.sql, t0 + m * MIN, withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    expect(db.state.table.filter((r) => r.rule === "device_missing" && r.action === "alert")).toHaveLength(1);
+    present = true;
+    // a recorder that has been ready for only 40 s: held even after the 2 present ticks
+    senseWith((id, A) => ({ ...liveReady(id, A), recording: { ...liveReady(id, A).recording, recorder_history: { latest_at: ago(A, 20), latest_state: "ready", latest_session_open: "no", ready_since: ago(A, 40), ready_samples: 2 } }, start_attempts: [] }));
+    await run(db.sql, t0 + 10 * MIN, withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    await run(db.sql, t0 + 11 * MIN, withSpy(l));
+    expect(l.scribeStart).not.toHaveBeenCalled();
+    // the recorder has now been ready for 6 min: the start goes
+    senseWith((id, A) => ({ ...liveReady(id, A), start_attempts: [] }));
+    await run(db.sql, t0 + 12 * MIN, withSpy(l));
+    expect(l.scribeStart).toHaveBeenCalledTimes(1);
   });
 
   describe("the switches are read again from steward_config immediately before each live send", () => {
