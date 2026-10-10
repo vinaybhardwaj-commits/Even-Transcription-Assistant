@@ -452,6 +452,74 @@ function deviceEpisodeOpen(c: Ctx): boolean {
 /** the device is SEEN again: the newest audio.devices row says a default input is present and no USB removal is pending */
 const deviceSeenAgain = (c: Ctx): boolean => c.s.audio.default_input_present === true && c.s.audio.usb_removed_recent !== true;
 
+
+// ---------------------------------------------------------------------------
+// Port of the 9 Oct start gates (V, 9 Oct 2026). Main's not_recording -> scribe_start stays the ONLY start path; these gates only ever HOLD it (a log_only row with the reason).
+//   G1 waiting_for_mic          the room's input device is missing: no start, ever (not even one attempt). One alert per IST day. A return needs 2 consecutive present ticks, then the
+//                               normal gates apply (window, kiosk-health, no session); main's normal recorder_ready (5 min, 2 samples) applies like any other start (fix-up 2: no waiver).
+//   G2 day_ended_by_operator    a non-steward end_day acked at or after 20:00 IST today closes the day for the Steward.
+//   G3 late_start_blocked       at or after 20:30 IST: no start if the room already had a session today.
+//   G4 day_state_unreadable     from 20:00 IST the reads behind G2/G3 failed: no start (fail safe).
+// ---------------------------------------------------------------------------
+export const WAITING_RULE = "waiting_for_mic";
+export const START_HOLD_RULE = "start_gate_hold";
+export const MIC_RETURN_TICKS = 2;
+const OPERATOR_END_FROM_MS = 20 * 3_600_000;
+const LATE_START_FROM_MS = (20 * 60 + 30) * 60_000;
+const istMsOfDay = (A: number): number => (((A + IST_OFFSET_MS) % 86_400_000) + 86_400_000) % 86_400_000;
+
+/** PURE. The first failing late-evening gate (G2, G3, G4) or null. Nothing applies before 20:00 IST. */
+export function dayGate(s: Pick<RoomSense, "day">, A: number): "day_ended_by_operator" | "late_start_blocked" | "day_state_unreadable" | null {
+  const ms = istMsOfDay(A);
+  if (ms < OPERATOR_END_FROM_MS) return null;
+  if (!s.day) return "day_state_unreadable";
+  if (s.day.operator_end_at) return "day_ended_by_operator";
+  if (ms >= LATE_START_FROM_MS && s.day.session_today) return "late_start_blocked";
+  return null;
+}
+
+type MicWait = { inEpisode: boolean; confirmed: boolean; alertedToday: boolean };
+/** the room has been present this long since the marker row: the waiting episode is over (this is what closes an episode in shadow, where no start ever follows) */
+export const MIC_RETURN_STREAK_MS = 5 * 60_000;
+/** PURE. A waiting_for_mic episode from the room's own decision rows (no new table): this IST day's waiting rows newer than the day's last session start of ANY kind (a steward attempt, the
+ *  Kiosk Bot or an operator: s.session_start_today_at, re-homed sessions excluded) and than the day's last steward start attempt. It is confirmed when a "mic present, 1 of 2" row
+ *  (mic_ticks >= 1) is newer than the last "missing" row (mic_ticks 0): the second present tick is the one that goes on to the start gates. Once the mic has been present for
+ *  MIC_RETURN_STREAK_MS since that marker row the episode is closed (no all-day waiver, also in shadow). */
+function micWait(c: Ctx): MicWait {
+  const midnight = istMidnightOf(c.A);
+  const today = c.recent.room.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= c.A);
+  const lastAttempt = Math.max(-Infinity, ...(c.s.start_attempts ?? []).map((a) => new Date(a.created_at).getTime()).filter((t) => Number.isFinite(t)));
+  const lastSession = c.s.session_start_today_at ? Date.parse(c.s.session_start_today_at) : -Infinity;
+  const closedAt = Math.max(lastAttempt, Number.isFinite(lastSession) ? lastSession : -Infinity);
+  const waits = today.filter((r) => r.rule === WAITING_RULE && Date.parse(r.ts) > closedAt).sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  const lastMissing = waits.reduce((t, r) => (Number(r.params.mic_ticks) === 0 ? Date.parse(r.ts) : t), -Infinity);
+  const marker = waits.find((r) => Number(r.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && Date.parse(r.ts) > lastMissing);
+  const confirmed = marker !== undefined;
+  const streakOver = marker !== undefined && c.A - Date.parse(marker.ts) >= MIC_RETURN_STREAK_MS;
+  return { inEpisode: waits.length > 0 && !streakOver, confirmed, alertedToday: today.some((r) => r.rule === "device_missing" && r.action === "alert") };
+}
+
+/** mic_returned_but_silent: the session that followed a mic return (a session started after the episode's "mic present" marker row, today) has digital zero from its start: the trailing zero
+ *  run began within 30 s of the session start (D1: the run is anchored to the session start, not to the start command) and has lasted >= 2 min. ONE alert per episode (an alert row newer than the marker). */
+export const MIC_SILENT_RULE = "mic_returned_but_silent";
+export const MIC_SILENT_AFTER_MS = 120_000;
+const MIC_SILENT_START_TOLERANCE_MS = 30_000;
+function micReturnSilent(c: Ctx): Decision[] {
+  const { s } = c;
+  if (s.recording.session_open !== true || !s.recording.session_started_at || !s.audio.silent_while_recording_since) return [];
+  const t0 = Date.parse(s.recording.session_started_at);
+  const since = Date.parse(s.audio.silent_while_recording_since);
+  if (!Number.isFinite(t0) || !Number.isFinite(since) || since > t0 + MIC_SILENT_START_TOLERANCE_MS || c.A - t0 < MIC_SILENT_AFTER_MS || c.A - since < MIC_SILENT_AFTER_MS) return [];
+  const midnight = istMidnightOf(c.A);
+  const rows = c.recent.room.filter((r) => Date.parse(r.ts) >= midnight && Date.parse(r.ts) <= c.A);
+  const lastMissing = rows.reduce((t, r) => (r.rule === WAITING_RULE && Number(r.params.mic_ticks) === 0 ? Math.max(t, Date.parse(r.ts)) : t), -Infinity);
+  const markers = rows.filter((r) => r.rule === WAITING_RULE && Number(r.params.mic_ticks) >= MIC_RETURN_TICKS - 1 && Date.parse(r.ts) > lastMissing && Date.parse(r.ts) <= t0);
+  const marker = markers.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0];
+  if (!marker) return [];
+  if (rows.some((r) => r.rule === MIC_SILENT_RULE && r.action === "alert" && Date.parse(r.ts) >= Date.parse(marker.ts))) return [];
+  return [mk(c, MIC_SILENT_RULE, "alert", { room_id: s.room_id, room: s.room_name }, `room ${s.room_name} started recording after its microphone came back, but the tape has been digital zero since the session began (2 min); nothing was stopped`, "never a restart: the mic is physical", "error", {}, { session_started_at: s.recording.session_started_at, silent_since: s.audio.silent_while_recording_since })];
+}
+
 function notRecording(c: Ctx): Decision[] {
   const { s, cfg } = c;
   const L = s.listener;
@@ -463,6 +531,36 @@ function notRecording(c: Ctx): Decision[] {
   }
   const v = startVerdict(s.start_attempts, c.A, cfg.caps.start_retries);
   const attempts = v.attempts;
+  // G4 / G2 / G3: the late-evening gates (a deliberate end of the day is respected; no new day starts at the end of it)
+  const dg = dayGate(s, c.A);
+  if (dg) {
+    return [
+      mk(c, START_HOLD_RULE, "log_only", { reason: dg }, `inside the window with no session, but ${dg === "day_ended_by_operator" ? "an operator ended the day (end_day acked at or after 20:00 IST)" : dg === "late_start_blocked" ? "it is past 20:30 IST and the room already had a session today" : "the day state could not be read"}`, `scribe_start held: ${dg}`, dg === "day_state_unreadable" ? "warn" : "info", {}, {
+        day_gate: dg,
+        operator_end_at: s.day?.operator_end_at ?? null,
+        session_today: s.day?.session_today ?? null,
+      }),
+    ];
+  }
+  // G1: the microphone, above the exhausted / backoff / pending checks: a room whose mic is unplugged is never started (not even one attempt)
+  const wait = micWait(c);
+  const missing = deviceMissing(c);
+  const present = !missing && s.audio.default_input_present === true && s.audio.usb_removed_recent !== true;
+  let micReturn = false;
+  if (missing || (wait.inEpisode && !present)) {
+    const device = deviceLabel(s);
+    const ds = [mk(c, WAITING_RULE, "log_only", { mic_ticks: 0 }, `room ${s.room_name}: the input device "${device}" is missing; no start is sent until it is back for 2 consecutive ticks`, "scribe_start held: waiting_for_mic", "warn", {}, { attempts, device_missing: missing })];
+    if (!wait.alertedToday) {
+      ds.push(mk(c, "device_missing", "alert", { room_id: s.room_id, room: s.room_name, device }, `room ${s.room_name} cannot start: the input device "${device}" is missing; no start is sent until it is back`, "scribe_start held: waiting_for_mic", "error", {}, { attempts }));
+    }
+    return fcAll(ds, "not_recording");
+  }
+  if (wait.inEpisode) {
+    if (!wait.confirmed) {
+      return [mk(c, WAITING_RULE, "log_only", { mic_ticks: 1 }, `room ${s.room_name}: the input device is back (1 of ${MIC_RETURN_TICKS} ticks)`, "scribe_start held: waiting_for_mic (mic back, 1 of 2 ticks)", "info", {}, { attempts, mic_return: "1 of 2 ticks" })];
+    }
+    micReturn = true;
+  }
   // a 4th attempt is never issued in an IST day: start_exhausted (log_only) plus a needs-hands message
   if (v.kind === "exhausted") {
     return fcAll(
@@ -483,33 +581,6 @@ function notRecording(c: Ctx): Decision[] {
       "not_recording",
     );
   }
-  // device missing: ONE live attempt, then an alert naming the room and the device, and no more attempts until the device is back
-  if (deviceMissing(c) && attempts >= 1) {
-    const device = deviceLabel(s);
-    // F2: ONE alert row per missing episode. An episode opens with the alert and closes when the device is seen again (decideRoom appends the closing row); while it is open, inputs only.
-    if (deviceEpisodeOpen(c)) {
-      return fcAll(
-        [mk(c, "device_missing_hold", "log_only", {}, `room ${s.room_name}: the input device "${device}" is still missing (alert already raised for this episode); no starts until it reappears`, "scribe_start held: input device missing (episode open)", "warn", {}, { attempts, device_missing_episode: "open" })],
-        "not_recording",
-      );
-    }
-    return fcAll(
-      [
-        mk(
-          c,
-          "device_missing",
-          "alert",
-          { room_id: s.room_id, room: s.room_name, device },
-          `room ${s.room_name} cannot start: the input device "${device}" is missing; one start was tried today and no more are sent until it reappears`,
-          "scribe_start held: input device missing after one attempt",
-          "error",
-          {},
-          { attempts },
-        ),
-      ],
-      "not_recording",
-    );
-  }
   if (v.kind === "pending") {
     return [mk(c, "not_recording", "log_only", {}, "inside the window with no session; the last start_day has not resolved yet", "scribe_start held: previous start_day pending", "info", {}, { attempts })];
   }
@@ -522,7 +593,7 @@ function notRecording(c: Ctx): Decision[] {
     );
   }
   const g = startGates(c);
-  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(deviceMissing(c) ? { device_missing: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
+  return [mk(c, "not_recording", "scribe_start", {}, "inside the window, no session open, kiosk reachable", null, "warn", {}, { attempts, live_clamp: LIVE_CLAMP_LABEL, start_gates: g.gates, start_gate_fail: g.fail, ...(micReturn ? { mic_return: true } : {}), ...(deviceAnnotation(c) ? { device_signal_not_evidence: deviceAnnotation(c) } : {}) })];
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +930,7 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
   if (deviceEpisodeOpen(c) && deviceSeenAgain(c)) {
     ds.push(mk(c, "device_missing", "log_only", { state: "back" }, `room ${sense.room_name}: the input device is back; the missing-device episode is closed`, null, "info", {}, {}));
   }
+  ds.push(...micReturnSilent(c));
   return ds;
 }
 
