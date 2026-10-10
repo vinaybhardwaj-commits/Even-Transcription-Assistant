@@ -40,7 +40,7 @@ async function run(req: NextRequest, actor: string) {
   const limit = Number.isFinite(raw) && raw > 0 ? Math.min(IDENTITY_BATCH_LIMIT, Math.trunc(raw)) : IDENTITY_BATCH_LIMIT;
   try {
     const r = await enqueueNemotronIdentity({ limit, origin: req.nextUrl.origin, actor });
-    return respondOk({ enabled: r.enabled, centroid_set: r.centroid_set, scanned: r.scanned, jobs: r.enqueued });
+    return respondOk({ enabled: r.enabled, centroid_set: r.centroid_set, scanned: r.scanned, n_blind_excluded: r.n_blind_excluded, jobs: r.enqueued });
   } catch (e) {
     // a bad flag or centroid-set value, a failed read or a failed submit: never a 200 that reads as "nothing to do"
     return respondError("PIPELINE_FAILED", `nemotron identity enqueue failed: ${e instanceof Error ? e.name : "error"} — no job refs are valid for this call`);

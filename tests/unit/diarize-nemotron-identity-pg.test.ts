@@ -34,6 +34,13 @@ CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL, room_d
 CREATE TABLE clinician (id text PRIMARY KEY, full_name text, status text NOT NULL, deleted_at timestamptz);
 CREATE TABLE voice_print (doctor_id text PRIMARY KEY, centroid bytea);
 CREATE TABLE scribe_job (id text PRIMARY KEY, kind text NOT NULL, args jsonb NOT NULL, status text NOT NULL);
+-- what lib/room-access/check.ts reads to place a window (the held-out guard and the chooser's blindWindowIds)
+CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL, ended_at timestamptz);
+CREATE TABLE bench_chunk (session_id text NOT NULL, ended_at timestamptz);
+CREATE TABLE room_diarize_window (window_id text PRIMARY KEY, room_day_id text);
+CREATE TABLE room_turn_speaker (window_id text, room_day_id text);
+CREATE TABLE jev_window_text (window_id text, room_day_id text);
+CREATE TABLE room_span_emotion (window_id text, room_day_id text);
 `;
 /** One (IST date, room) pair of the held-out set, typed by hand (as diarize-nemotron-pg.test.ts). */
 const BLIND_DAY = "2026-09-28";
@@ -61,8 +68,11 @@ const runJob = (row_id: number, centroid_set = "voice_print") =>
 let nextWin = 0;
 async function nemoRow(o: { rd?: string; status?: "ok" | "empty"; turns?: unknown } = {}): Promise<number> {
   const w = `bw_fake${String(++nextWin).padStart(4, "0")}`;
-  pg.exec(`INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, state, grid_aligned, clip_r2_key)
-           VALUES ('${w}', 's', '${o.rd ?? "rd_1"}', 0, 900000, 'closed', true, 'clips/${w}.webm');`);
+  // each window gets its own session, in the room and on the IST day of its room-day
+  const [room, day] = o.rd === "rd_blind" ? [BLIND_ROOM, BLIND_DAY] : ["room_fake1", "2026-10-01"];
+  pg.exec(`INSERT INTO bench_session (id, room_id, started_at, ended_at) VALUES ('bs_${w}', '${room}', '${day} 10:00+05:30', '${day} 11:00+05:30');
+           INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, state, grid_aligned, clip_r2_key)
+           VALUES ('${w}', 'bs_${w}', '${o.rd ?? "rd_1"}', 0, 900000, 'closed', true, 'clips/${w}.webm');`);
   const turns = JSON.stringify(o.turns ?? [[0, 10000, "spk0"], [10000, 15000, "spk1"], [20000, 50000, "spk0"], [50000, 120000, "spk1"]]);
   const rows = await q<{ id: string }>(`INSERT INTO diarize_nemotron_window (window_id, room_day_id, engine, model, model_rev, config, config_hash,
       worker_id, machine, audio_ms, turns_json, speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status, error_code)
@@ -206,6 +216,15 @@ describe.runIf(HAVE)("the job", () => {
     expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_identity WHERE window_row_id IN (${blind}, ${empty})`))[0]!.n).toBe(0);
   });
 
+  it("the held-out guard places a row through its window: blind refused, clean passes, a missing row is left to the kind, a bad id fails closed", async () => {
+    const guard = kind.nemotronIdentityKind.heldOut!;
+    expect(kind.nemotronIdentityKind.roomData).toBe(true);
+    expect(await guard({ row_id: await nemoRow({ rd: "rd_blind" }), centroid_set: "voice_print" })).toBe("blind_room_day");
+    expect(await guard({ row_id: await nemoRow(), centroid_set: "voice_print" })).toBeNull();
+    expect(await guard({ row_id: 999_999_999, centroid_set: "voice_print" })).toBeNull();
+    expect(await guard({ row_id: "x", centroid_set: "voice_print" })).toBe("window_unplaced");
+  });
+
   it("room_primary centroids come from voice_centroid, active and unretired only", async () => {
     pg.exec(`INSERT INTO voice_centroid (id, clinician_id, domain, embedding, embedding_model, embedding_dim, n_samples)
              VALUES ('vc_fake1', '${B}', 'room_primary', '{0,1,0}', 'ecapa', 3, 5), ('vc_fake2', '${GONE}', 'room_primary', '{1,0,0}', 'ecapa', 3, 5),
@@ -221,7 +240,7 @@ describe.runIf(HAVE)("the job", () => {
 describe.runIf(HAVE)("the enqueue", () => {
   it("off: queues nothing and reads nothing", async () => {
     delete process.env.NEMOTRON_IDENTITY_ENABLED;
-    expect(await enq.enqueueNemotronIdentity({ actor: "t" })).toEqual({ enabled: false, centroid_set: null, scanned: 0, enqueued: [] });
+    expect(await enq.enqueueNemotronIdentity({ actor: "t" })).toEqual({ enabled: false, centroid_set: null, scanned: 0, n_blind_excluded: 0, enqueued: [] });
     expect(H.submit).not.toHaveBeenCalled();
   });
 
@@ -233,6 +252,7 @@ describe.runIf(HAVE)("the enqueue", () => {
     const exhausted = await nemoRow();
     const queued = await nemoRow();
     await nemoRow({ status: "empty", turns: [] });
+    await nemoRow({ rd: "rd_blind" }); // a fresh ok row on a held-out day: never chosen, counted
     pg.exec(`INSERT INTO diarize_nemotron_identity (window_row_id, centroid_set, state, attempts, error_code) VALUES
       (${retry}, 'voice_print', 'failed', 2, 'embed_failed'), (${exhausted}, 'voice_print', 'failed', 3, 'embed_failed');
       INSERT INTO diarize_nemotron_identity (window_row_id, centroid_set, state) VALUES (${done}, 'voice_print', 'ok');
@@ -243,6 +263,9 @@ describe.runIf(HAVE)("the enqueue", () => {
     try {
       const r = await enq.enqueueNemotronIdentity({ actor: "cron:test" });
       expect(r.enqueued).toEqual([{ row_id: fresh, job_id: "job_new1", retry: false }, { row_id: retry, job_id: "job_new2", retry: true }]);
+      const blindWindows = (await q<{ n: number }>("SELECT count(*)::int AS n FROM bench_window WHERE room_day_id = 'rd_blind'"))[0]!.n;
+      expect(blindWindows).toBeGreaterThan(0);
+      expect(r.n_blind_excluded).toBe(blindWindows);
       expect(H.submit.mock.calls[0]![0]).toMatchObject({ kind: "nemotron_identity", args: { row_id: fresh, centroid_set: "voice_print" }, actor: "cron:test" });
     } finally {
       delete process.env.NEMOTRON_IDENTITY_ENABLED;
