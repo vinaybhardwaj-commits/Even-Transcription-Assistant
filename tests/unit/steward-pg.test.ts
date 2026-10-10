@@ -357,6 +357,23 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     }
   }, 120_000);
 
+  it("G1 72 h through the real sense query: the newest boolean audio.devices row within 72 h is returned per machine (an unplug 40 h old, then a later add); older than 72 h and non-boolean rows are not", async () => {
+    const roster = [CLINIC_A].map((room_id) => ({ room_id, room_name: room_id, machine: null, klass: "clinic" as const, flags: [], kind: "clinic" as const, state_flags: null, device_name: null }));
+    const ins = (seq: number, minAgo: number, payload: string) =>
+      pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES ('${at(minAgo)}', 'clinic-a-mac', 'boot72', ${seq}, 'daemon', 'audio.devices', '${at(minAgo)}', '${payload}'::jsonb)`);
+    try {
+      ins(9001, 80 * 60, '{"default_input_present": true}'); // 80 h: outside 72 h
+      ins(9002, 40 * 60, '{"default_input_present": false}'); // 40 h: the unplug
+      const rosterA = await senseAll(sql, AS_OF, roster.map((r) => ({ ...r, machine: "clinic-a-mac" })), []);
+      expect(rosterA.get(CLINIC_A)!.audio.last_72h).toMatchObject({ present: false });
+      expect(Date.parse(rosterA.get(CLINIC_A)!.audio.last_72h!.at)).toBe(AS_OF - 40 * 3600_000);
+      ins(9003, 10 * 60, '{"default_input_present": true}'); // 10 h later add: the newest row now says present
+      expect((await senseAll(sql, AS_OF, roster.map((r) => ({ ...r, machine: "clinic-a-mac" })), [])).get(CLINIC_A)!.audio.last_72h).toMatchObject({ present: true });
+    } finally {
+      pg.exec(`DELETE FROM kiosk_health_events WHERE boot_id = 'boot72'`);
+    }
+  }, 120_000);
+
   it("GET /api/cron/steward through the real tables; the bearer is checked", async () => {
     const SAVED = process.env.CRON_SECRET;
     process.env.CRON_SECRET = "cron-pg";
