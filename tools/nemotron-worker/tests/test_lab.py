@@ -297,6 +297,13 @@ class LabLane(Base):
         self.assertEqual(len(self.srv.pending_calls), 2)
         self.assertEqual(w.state, "rate_capped")
 
+    def test_lab_cycle_itself_refuses_when_the_cap_is_spent(self):
+        self.srv.lab_claim = [(200, {"ok": True, "items": [lab_item(self.srv)]})]
+        w = self.make_lab(rate_per_hour=1)
+        w.started.append(w.clock())
+        self.assertFalse(w.lab_cycle())
+        self.assertEqual(self.srv.lab_calls, [])
+
     def test_production_and_lab_share_one_rate_cap(self):
         self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_1")], "exhausted": 0})]
         self.srv.lab_claim = [(200, {"ok": True, "items": [lab_item(self.srv)]})]
