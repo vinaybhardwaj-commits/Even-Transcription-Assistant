@@ -137,8 +137,8 @@ describe("sarvam_transcribe: prepare", () => {
     expect(await run(enc)).toEqual({ kind: "fail", error: "sarvam_gateway_not_configured" });
     expect(statements.filter((s) => /encounter/.test(s.text))).toEqual([]);
   });
-  it("a consult uid answers consult_index_unavailable (the resolver is not wired)", async () => {
-    expect(await run({ source: "consult", consult_uid: "cu_9", mode: "transcribe", english: true })).toEqual({ kind: "fail", error: "consult_index_unavailable" });
+  it("a consult uid that the index does not hold fails consult_not_indexed (the real index is covered by consult-index-pg.test.ts)", async () => {
+    expect(await run({ source: "consult", consult_uid: "cu_9", mode: "transcribe", english: true })).toEqual({ kind: "fail", error: "consult_not_indexed" });
   });
   it("today's minutes at the cap -> sarvam_daily_cap", async () => {
     answer = (text) => (/FROM audit_log/.test(text) ? [{ minutes: 240 }] : []);

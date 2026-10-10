@@ -46,7 +46,7 @@ const BLIND_ROOMS = BLIND_ROOM_DAYS.map(([, r]) => r);
  * audio never waits behind the backlog (Orchestrator ruling, 9 Oct 2026). A window is offered when it has no Nemotron
  * row at all (any revision), and either no claim, or an expired, unfinished claim with attempts left.
  */
-export async function claimPending(workerId: string, limit: number): Promise<ClaimedWindow[]> {
+export async function claimPending(workerId: string, limit: number, machine: "box" | "hf" = "box"): Promise<ClaimedWindow[]> {
   const rows = (await sql`
     WITH cand AS (
       SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key
@@ -64,10 +64,10 @@ export async function claimPending(workerId: string, limit: number): Promise<Cla
        ORDER BY w.start_ms DESC
        LIMIT ${limit}
     ), claimed AS (
-      INSERT INTO diarize_nemotron_claim AS c (window_id, worker_id, claimed_at, lease_until, attempts)
-      SELECT id, ${workerId}::text, now(), now() + make_interval(mins => ${LEASE_MINUTES}::int), 1 FROM cand
+      INSERT INTO diarize_nemotron_claim AS c (window_id, worker_id, claimed_at, lease_until, attempts, machine)
+      SELECT id, ${workerId}::text, now(), now() + make_interval(mins => ${LEASE_MINUTES}::int), 1, ${machine}::text FROM cand
       ON CONFLICT (window_id) DO UPDATE
-         SET worker_id = EXCLUDED.worker_id, claimed_at = now(), lease_until = EXCLUDED.lease_until,
+         SET worker_id = EXCLUDED.worker_id, claimed_at = now(), lease_until = EXCLUDED.lease_until, machine = EXCLUDED.machine,
              attempts = c.attempts + 1
        WHERE c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}
       RETURNING c.window_id, c.attempts
@@ -84,6 +84,35 @@ export async function claimPending(workerId: string, limit: number): Promise<Cla
     clip_r2_key: String(r.clip_r2_key),
     attempts: Number(r.attempts),
   }));
+}
+
+/**
+ * HF overflow inputs (one statement): the backlog (eligible, unclaimed windows: the same eligibility as claimPending, minus any with a live
+ * or exhausted claim) and today's HF usage, IST day. `ingested_ms` = audio_ms of stored rows with machine = 'hf'; `live_claims` = unfinished HF
+ * claims whose lease is live (their rows do not exist yet, so the cap would otherwise miss a batch in flight). A window both claimed and
+ * ingested counts once: a finished claim has done_at set.
+ */
+export async function overflowUsage(): Promise<{ backlog: number; hfIngestedMs: number; hfLiveClaims: number }> {
+  const rows = (await sql`
+    SELECT
+      (SELECT count(*)::int
+         FROM bench_window w
+         JOIN room_day rd ON rd.id = w.room_day_id
+         LEFT JOIN diarize_nemotron_claim c ON c.window_id = w.id
+        WHERE w.state IN ('closed', 'transcribed')
+          AND w.grid_aligned = TRUE
+          AND w.room_day_id IS NOT NULL
+          AND w.clip_r2_key IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id)
+          AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+          AND (c.window_id IS NULL OR (c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}))) AS backlog,
+      (SELECT COALESCE(sum(audio_ms), 0)::bigint FROM diarize_nemotron_window
+        WHERE machine = 'hf' AND (received_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS hf_ingested_ms,
+      (SELECT count(*)::int FROM diarize_nemotron_claim
+        WHERE machine = 'hf' AND done_at IS NULL AND lease_until > now()) AS hf_live_claims
+  `) as Array<{ backlog: number; hf_ingested_ms: number | string; hf_live_claims: number }>;
+  const r = rows[0];
+  return { backlog: Number(r?.backlog ?? 0), hfIngestedMs: Number(r?.hf_ingested_ms ?? 0), hfLiveClaims: Number(r?.hf_live_claims ?? 0) };
 }
 
 /**
@@ -413,4 +442,26 @@ export async function countSweepExhausted(blind: string[]): Promise<number> {
      WHERE j.failed >= ${SWEEP_MAX_FAILED_JOBS}::int
   `) as Array<{ n: number }>;
   return Number(rows[0]?.n ?? 0);
+}
+
+/** Every worker's last heartbeat (ids, counts and timings only), newest first. */
+export async function readWorkerHeartbeats(): Promise<Array<{ worker_id: string; last_seen_at: string | Date; payload: Record<string, unknown> | null }>> {
+  return (await sql`
+    SELECT worker_id, last_seen_at, payload FROM diarize_nemotron_worker ORDER BY last_seen_at DESC LIMIT 20
+  `) as Array<{ worker_id: string; last_seen_at: string | Date; payload: Record<string, unknown> | null }>;
+}
+
+/** 24 h of stored ok|empty rows: count, box vs hf, and p95 of (stored − window end), in seconds. */
+export async function readNemotronLatency24h(): Promise<{ windows_24h: number; box_24h: number; hf_24h: number; p95_latency_s: number | null }> {
+  const rows = (await sql`
+    SELECT count(*)::int AS n,
+           count(*) FILTER (WHERE n.machine = 'box')::int AS box,
+           count(*) FILTER (WHERE n.machine = 'hf')::int AS hf,
+           percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (n.received_at - to_timestamp(w.end_ms / 1000.0)))) AS p95
+      FROM diarize_nemotron_window n
+      JOIN bench_window w ON w.id = n.window_id
+     WHERE n.status IN ('ok', 'empty') AND n.received_at > now() - interval '24 hours'
+  `) as Array<{ n: number; box: number; hf: number; p95: number | string | null }>;
+  const r = rows[0];
+  return { windows_24h: Number(r?.n ?? 0), box_24h: Number(r?.box ?? 0), hf_24h: Number(r?.hf ?? 0), p95_latency_s: r?.p95 == null ? null : Math.max(0, Number(r.p95)) };
 }

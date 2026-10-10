@@ -33,6 +33,7 @@ import { actionMode, buildRoster, isNeverLiveRoom, loadConfig, parseConfig, type
 import { LIVE_EXECUTOR_DISABLED, LiveExecutor, PENDING_PREFIX, isDeferredAck, ShadowExecutor, dispatch, type Executor } from "./executor";
 import { START_NO_ACK_FAIL_S } from "./start-schedule";
 import { FAILING_RULES, FLEET_HOLD_MS, decideRoom, failingClass, fleetDecisions, type Decision, type RecentAction, type RecentContext } from "./rules";
+import { HOLD_RULE, SWITCH_RULE, alertInputDecision, defaultInputPort, enumChange, enumDecision, evaluateInputFailover, failoverEligible, holdDecision, readInputStates, readZeroSince, sendSwitch, shouldArmFailover, switchDecision, type InputPort, type InputState } from "./input-failover";
 import { senseAll } from "./sense";
 import { SourceTimeout, raceTimeout } from "./timeout";
 import type { StewardSql } from "./tickets";
@@ -115,6 +116,8 @@ export type RunOptions = {
   lock?: LoopLock;
   now?: () => number;
   executorFor?: (live: boolean) => Executor;
+  /** the lib/bench-commands functions the input failover calls (default: imported lazily) */
+  inputPort?: InputPort;
 };
 
 // ---------------------------------------------------------------------------
@@ -467,7 +470,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     let rosterRows: RosterRow[] = [];
     try {
       rosterRows = (await sql`
-        SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.state_flags, ri.expected_device_name AS device_name
+        SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.state_flags, ri.expected_device_name AS device_name, ri.last_seen_at
           FROM room r
           LEFT JOIN room_install ri ON ri.room_id = r.id AND ri.retired_at IS NULL AND ri.enrolled_at IS NOT NULL
          WHERE r.disabled_at IS NULL
@@ -707,6 +710,70 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
       rows.push(rowOf(d, primary, seq, mode, result));
     };
 
+    // --- input failover (input-failover.ts): webcam first, TONOR backup. Two extra reads, only for the eligible clinic rooms; shadow rows unless input_failover_live is on AND the kill switch is off.
+    //     It can enqueue set_audio_input and nothing else; it never touches the start path.
+    const emit = (d: Decision, primary: boolean, seq: number, mode: "shadow" | "live", result: string | null): void => {
+      rows.push(rowOf(d, primary, seq, mode, result));
+    };
+    const failoverArmed = shouldArmFailover(cfg);
+    let inputPort: InputPort | null = opts.inputPort ?? null;
+    const getInputPort = async (): Promise<InputPort | null> => {
+      try {
+        inputPort = inputPort ?? (await defaultInputPort());
+      } catch {
+        degrade("input_failover_port");
+      }
+      return inputPort;
+    };
+    let inputStates = new Map<string, InputState>();
+    let zeroSince = new Map<string, number | null>();
+    {
+      const eligible = roster.filter((r) => senses.has(r.room_id) && failoverEligible({ room_name: r.room_name, flags: r.flags }, cfg, r.room_id));
+      if (eligible.length > 0 && !memoryDegraded) {
+        const left = Math.max(1_000, Math.min(cfg.source_timeout_ms, senseDeadline - now()));
+        const st = await readInputStates(sql, eligible.map((r) => r.room_id), left);
+        if (st === null) degrade("input_failover");
+        else inputStates = st;
+        const open = eligible.filter((r) => senses.get(r.room_id)?.recording.session_open === true).map((r) => r.room_id);
+        const zs = await readZeroSince(sql, open, A, left);
+        if (zs === null) degrade("input_failover_levels");
+        else zeroSince = zs;
+      }
+    }
+    const failoverFlow = async (room: { room_id: string; room_name: string }, sense: NonNullable<ReturnType<typeof senses.get>>, d: Decision, recent: RecentAction[]): Promise<void> => {
+      const st = inputStates.get(room.room_id) ?? null;
+      const ec = enumChange(st, recent);
+      if (ec) emit(enumDecision(d, ec), false, 70, "shadow", null);
+      if (!st || sense.recording.session_open !== true) return;
+      const port = await getInputPort();
+      const v = evaluateInputFailover({
+        roomId: room.room_id,
+        roomName: room.room_name,
+        A,
+        session: { open: sense.recording.session_open, status: sense.recording.session_status, started_at: sense.recording.session_started_at },
+        input: st,
+        zeroSince: zeroSince.get(room.room_id) ?? null,
+        recent,
+        appTooOld: port ? port.tooOld(st.app_version) : false,
+      });
+      if (v.kind === "none") return;
+      if (v.kind === "alert") return emit(alertInputDecision(d, room, v), false, 72, "shadow", `alert: ${v.reason}`);
+      if (v.kind === "hold") {
+        const dup = recent.some((r) => r.rule === HOLD_RULE && r.params.reason === v.reason && A - Date.parse(r.ts) < 15 * 60_000);
+        if (!dup) emit(holdDecision(d, v), false, 71, "shadow", `held: ${v.reason}`);
+        return;
+      }
+      if (failoverArmed && port) {
+        const r = await sendSwitch(port, room.room_id, v.to.uid, A);
+        if (!r.sent) return emit(holdDecision(d, { kind: "hold", reason: "not_listening", facts: v.facts }), false, 71, "shadow", r.result);
+        return emit(switchDecision(d, room, v), false, 72, "live", r.result);
+      }
+      // fix-up 2 (C): a shadow / kill_switch would-switch repeats while the zero continues; write at most one per room per 10 min while the reason and the target are unchanged (log only; live is unchanged)
+      const sameShadow = recent.some((r) => r.rule === SWITCH_RULE && r.outcome === "shadow" && r.params.reason === v.reason && r.params.to_uid === v.to.uid && A - Date.parse(r.ts) < 10 * 60_000);
+      if (sameShadow) return;
+      emit(switchDecision(d, room, v), false, 72, "shadow", cfg.kill_switch ? "kill_switch" : "shadow: would set_audio_input");
+    };
+
     let processed = 0;
     let fleetDs: Decision[] = [];
     // R4 (F44.1): fire -> collect is try/finally. If anything throws between a send and the collect, every in-flight row is still settled (none is left "sending");
@@ -723,6 +790,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         if (!sense) continue;
         processed++;
         const ds = decideRoom(sense, cfg, A, recentFor(room.room_id, fleetCtx));
+        if (ds[0] && !memoryDegraded && inputStates.has(room.room_id)) await failoverFlow(room, sense, ds[0], mem.recentRows.get(room.room_id) ?? []);
         const last = mem.lastPrimary.get(room.room_id);
         const lastTs = last ? toIso(last.ts) : null;
         for (let i = 0; i < ds.length; i++) {

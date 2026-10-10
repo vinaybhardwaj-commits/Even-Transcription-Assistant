@@ -64,6 +64,8 @@ afterAll(() => {
 const JOB_KIND_TOOLS = new Set(["scribe_job_submit", "scribe_job_status", "scribe_job_list"]);
 /** scribe_health's `aspect` enum and prose grew by `routes` (S2L); nothing else about it may differ from main */
 const ASPECT_TOOLS = new Set(["scribe_health"]);
+/** tool -> the one optional property epic #23 added (hypotheses source, shadow-run timeline replay, diarize-spend engine). */
+const EPIC23_PROP: Record<string, string> = { scribe_encounter_hypotheses: "source", scribe_encounter_shadow_run: "timeline", scribe_diarize_spend: "engine" };
 /** scribe_voice gained the `console` view (S6A) with its action / min_cosine arguments; nothing else about it may differ from main */
 const CONSOLE_TOOLS = new Set(["scribe_voice"]);
 /**
@@ -94,7 +96,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the S1, S5, S8 and S2L additions", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(55);
+    expect(all).toHaveLength(56);
     for (const n of OPERATOR_13) expect(all).toContain(n);
     for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_sarvam", "scribe_steward_command", "scribe_lanes", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
@@ -168,11 +170,16 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const { engine, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
         expect(engine).toMatchObject({ type: "string", enum: ["nemotron"] });
         expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema)));
+      } else if (EPIC23_PROP[t.name]) {
+        // epic #23 (f, i) added ONE optional property to each of these; everything else must still match main
+        const { [EPIC23_PROP[t.name]!]: added, ...rest } = (t.inputSchema as Row & { properties: Row }).properties;
+        expect(added, t.name).toBeDefined();
+        expect({ ...(t.inputSchema as Row), properties: rest }, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema)));
       } else expect(t.inputSchema, t.name).toEqual(P.withOverrides(t.name, P.shortSchema(base.inputSchema))); // Z1/Z2: overrides are the only departure from the plain 32-char cut
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jev_health", "scribe_jev_question_sets", "scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jev_health", "scribe_jev_question_sets", "scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_nemotron_worker", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
@@ -215,6 +222,12 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const added = " engine=nemotron (window_id only) reads the SHADOW Nemotron turns instead of production's; omit it for production.";
         expect(String(out.help)).toContain(added);
         expect(String(out.help).replace(added, ""), t.name).toBe(t.description);
+        continue;
+      }
+      if (t.name === "scribe_encounter_shadow_run") {
+        // epic #23 (f) appended one sentence about the timeline run; the text before it is main's exactly
+        expect(String(out.help).startsWith(t.description.replace(/"$/, "")), t.name).toBe(true);
+        expect(String(out.help)).toContain("ENCOUNTER_TIMELINE_SHADOW");
         continue;
       }
       expect(out.help, t.name).toBe(t.description);
@@ -430,11 +443,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 40,900 characters (measured 40,829: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property + job kinds nemotron_identity, pulse_doctor_voice and nemotron_lab_run in three kind enums + Jev P1: scribe_jev_question_sets, scribe_jev_health, five scribe_jev_decisions filters, scribe_usage include, jev_ask and jev_drift in the kind enums)", async () => {
+  it("budget: the full tools/list result stays at or under 41,750 characters (measured 41,694 = main's 40,448 + Jev P1 +1,246: scribe_jev_question_sets, scribe_jev_health, five scribe_jev_decisions filters, scribe_usage include, jev_ask and jev_drift in the kind enums; main's 40,448 was with BOTH the consult index and epic #23 f/i: scribe_nemotron_worker plus the timeline/source/engine properties, +646 over main's 39,802; consult index alone: scribe_sarvam consult_uids / room_slug / two actions and the sarvam_consult_batch kind in three enums; was 39,583 on main, the limit was 39,600; earlier: 39,526: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property + job kinds nemotron_identity and pulse_doctor_voice in three kind enums)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(40_900);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(41_750);
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; 0143: the nemotron_lab_run job kind) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {

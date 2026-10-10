@@ -79,8 +79,19 @@ export type TapeOff = { start_ms: number; end_ms: number };
  *   "content_boundary"  the E-6 fusion split the encounter where Jev placed a boundary (a new patient's
  *                       consultation starts inside a long acoustic run). The acoustic smoother never
  *                       emits it; only lib/encounter-clock/fusion.ts does, and 0118 admits it.
+ *
+ * The last five are written ONLY by the pre-STT timeline run (fusion-timeline.ts, 0146): the acoustic smoother
+ * and the E-6 fusion never emit them.
+ *   "pulse_end"     a real End click, corroborated by the last diarized speech
+ *   "jev_end"       Jev's end row at the act band, snapped to the last diarized turn in that row
+ *   "next_start"    the next Start minus 15 s
+ *   "last_doc_turn" the consult doctor's last diarized turn plus 30 s
+ *   "cap_90m"       the 90-minute ceiling
  */
-export const CLOSED_BY = ["non_speech", "unjudged_gap", "tape_off", "dead_mic", "end_of_input", "content_boundary"] as const;
+export const CLOSED_BY = [
+  "non_speech", "unjudged_gap", "tape_off", "dead_mic", "end_of_input", "content_boundary",
+  "pulse_end", "jev_end", "next_start", "last_doc_turn", "cap_90m",
+] as const;
 export type ClosedBy = (typeof CLOSED_BY)[number];
 export const isClosedBy = (v: unknown): v is ClosedBy =>
   typeof v === "string" && (CLOSED_BY as readonly string[]).includes(v);

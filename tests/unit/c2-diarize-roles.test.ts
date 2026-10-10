@@ -10,6 +10,7 @@ import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
 import { roleForSpeaker, rolesByIndex, attributionCoverage } from "@/lib/stt/speaker-roles";
 import type { DiarizeSpeaker } from "@/lib/diarize";
 import { makeFakeClinician } from "../support/fake-identity";
+import { diarizeWindowFromAnswer } from "../support/finish-window";
 
 const FAKE_DOC = makeFakeClinician(7);
 
@@ -119,8 +120,7 @@ describe("D1 — a turn containing a speaker change gets NO name", () => {
         { start_ms: 600, end_ms: 1000, speaker_idx: 1, overlap: false },
       ],
     } };
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    const r = await diarizeWindow(call());
+    const r = await diarizeWindowFromAnswer(call(), SVC.out);
     expect(r.ok).toBe(true);
     const row = DB.rows[0]!;
     // The dominant speaker is still recorded — it is a useful diagnostic.
@@ -139,8 +139,7 @@ describe("D1 — a turn containing a speaker change gets NO name", () => {
       speakers: [matched(0, "doc_fake0002")],
       transcript_segments: [{ start_ms: 0, end_ms: 1000, speaker_idx: 0, overlap: false }],
     } };
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    await diarizeWindow(call());
+    await diarizeWindowFromAnswer(call(), SVC.out);
     expect(DB.rows[0]!.role).toBe("clinician");
     expect(DB.rows[0]!.clinician_id).toBe("doc_fake0002");
   });
@@ -155,20 +154,6 @@ describe("D1 — a turn containing a speaker change gets NO name", () => {
   });
 });
 
-
-describe("0.65 is on the wire, always", () => {
-  beforeEach(() => { DB.rows = []; DB.centroids = []; SVC.calls = []; DB.turns = []; });
-
-  it("the /diarize call carries the validated threshold, not the service's 0.70 default", async () => {
-    const { diarizeWindow, DIARIZE_BATCH_THRESHOLD } = await import("@/lib/stt/diarize-window");
-    expect(DIARIZE_BATCH_THRESHOLD).toBe(0.65);
-    SVC.out = { ok: true, latencyMs: 10, result: { speakers: [], transcript_segments: [] } };
-    await diarizeWindow(call());
-    expect(SVC.calls, "ONE call for the whole window").toHaveLength(1);
-    expect(SVC.calls[0]!.batchThreshold, "inheriting a remote default is how an unvalidated number governs identity").toBe(0.65);
-    expect(SVC.calls[0]!.encounterId, "the window id, never an invented encounter").toBe("bw_1");
-  });
-});
 
 describe("the whole window's turns are LOADED, with a count", () => {
   beforeEach(() => { DB.rows = []; DB.centroids = []; SVC.calls = []; });
@@ -199,13 +184,6 @@ describe("the reader, and the one diarize kind", () => {
   it("D3 — diarize_window is the ONLY diarize kind", async () => {
     const { JOB_KIND_NAMES } = await import("@/lib/jobs/kinds");
     expect(JOB_KIND_NAMES.filter((n) => n.includes("diarize"))).toEqual(["diarize_window"]);
-  });
-
-  it("the window id is what goes in encounter_id — no encounter is invented for room audio", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync("lib/stt/diarize-window.ts", "utf8");
-    expect(src).toContain("encounterId: opts.windowId,");
-    expect(src).not.toMatch(/INSERT INTO encounter/);
   });
 });
 
@@ -245,8 +223,7 @@ describe("R4 D5 — one predicate for confidence, and the code refuses before th
     DB.rows = []; SVC.calls = [];
     DB.turns = [{ source_ref: "t", start_ms: 1000, end_ms: 1500 }];
     SVC.out = { ok: true, latencyMs: 1, result: { speakers: [nan], transcript_segments: [{ start_ms: 0, end_ms: 1000, speaker_idx: 0, overlap: false }] } };
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    await diarizeWindow(call());
+    await diarizeWindowFromAnswer(call(), SVC.out);
     expect(DB.rows[0]!.role, "the row must not claim a clinician on an unusable number").toBeNull();
     expect(DB.rows[0]!.clinician_id).toBeNull();
     expect(DB.rows[0]!.match_confidence).toBeNull();

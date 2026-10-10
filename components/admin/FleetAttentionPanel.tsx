@@ -13,6 +13,7 @@
 import * as React from "react";
 import type { AttentionItem, FleetAttentionResponse } from "@/lib/fleet-attention-format";
 import { KIND_LABEL, fmtFor } from "@/lib/fleet-attention-format";
+import { reachabilityLabel } from "@/lib/reachability";
 
 export const FLEET_ATTENTION_POLL_MS = 30_000;
 
@@ -103,6 +104,19 @@ export function FleetAttentionPanel({
         <p className="text-caption font-semibold text-warning-700" role="alert">
           Some checks could not run this time ({degraded.join(", ")}) — this list may be incomplete.
         </p>
+      ) : null}
+
+      {data?.reachability && data.reachability.length > 0 ? (
+        <details className="text-caption text-even-ink-500" data-testid="fleet-reachability">
+          <summary className="cursor-pointer">Mac reachability ({data.reachability.filter((x) => x.state === "reachable").length}/{data.reachability.length} reachable)</summary>
+          <ul className="mt-1 space-y-0.5">
+            {data.reachability.map((x) => (
+              <li key={x.room_id} data-testid={`fleet-reachability-${x.room_id}`}>
+                <span className="font-semibold text-even-navy-800">{x.room_name}</span> — {reachabilityLabel(x)}
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
 
       {items.length > 0 ? (

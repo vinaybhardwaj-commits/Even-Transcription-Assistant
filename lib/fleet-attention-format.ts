@@ -62,6 +62,8 @@ export type FleetAttentionResponse = {
   rooms_checked: number;
   /** Per canonical machine; absent when kiosk-health evidence could not be read (or no machine reported). */
   kiosk_health?: Record<string, KioskHealthSummaryLite>;
+  /** TS-E1: per room, whether the Mac is reachable and which sign of life decided it (app poll / kiosk-health / poller). Absent when no room has a Mac. */
+  reachability?: Array<{ room_id: string; room_name: string; state: "reachable" | "unreachable" | "unknown"; source: "app_poll" | "kiosk_health" | "poller" | null; age_s: number | null }>;
   /** Data sources that could not be read this call. Non-empty means "nothing needs attention" must NOT be shown. */
   degraded?: string[];
 };

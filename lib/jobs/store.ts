@@ -186,7 +186,21 @@ export async function claimJobs(limit = 1, leaseMs = LEASE_MS, runner: string | 
  * `lease_until` is released so the next claim may take it. Clearing the owner here is what made a
  * between-steps row match a null-runner write.
  */
-export async function saveStep(id: string, step: string, progress: Record<string, unknown>, runner: string): Promise<number> {
+export async function saveStep(id: string, step: string, progress: Record<string, unknown>, runner: string, delayS = 0): Promise<number> {
+  // A step that waits on OTHER jobs may ask to be held back (delay_s): the lease is then pushed out instead of released. The ordinary path below is unchanged.
+  if (delayS > 0) {
+    const held = (await sql`
+      UPDATE scribe_job
+         SET step        = ${step},
+             progress    = ${JSON.stringify(progress)}::jsonb,
+             lease_until = now() + make_interval(secs => ${Math.round(delayS)}),
+             status      = 'running',
+             updated_at  = now()
+       WHERE id = ${id} AND status = 'running' AND lease_owner = ${runner}
+      RETURNING id
+    `) as Array<Record<string, unknown>>;
+    return held.length;
+  }
   const rows = (await sql`
     UPDATE scribe_job
        SET step        = ${step},

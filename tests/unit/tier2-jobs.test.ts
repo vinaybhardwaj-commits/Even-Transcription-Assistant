@@ -406,12 +406,12 @@ describe("submit", () => {
 });
 
 describe("the seven kinds", () => {
-  it("all nineteen are registered (nemotron_lab_run adds the Nemotron lab lane, 0143; S8A adds sarvam_transcribe and sarvam_translate, S7-0 rubric_run and rubric_bench, epic #23 c nemotron_identity, 0142 pulse_doctor_voice), and the three stubs fail not_implemented", async () => {
+  it("all twenty are registered (sarvam_consult_batch adds the batch form of consult Sarvam, 0150; nemotron_lab_run adds the Nemotron lab lane, 0143; S8A adds sarvam_transcribe and sarvam_translate, S7-0 rubric_run and rubric_bench, epic #23 c nemotron_identity, 0142 pulse_doctor_voice), and the three stubs fail not_implemented", async () => {
     // Slice C1 adds route_transcribe — the router's long transport. Slice J0 adds jev_english; J2/J3 add
     // jev_window and jev_role (bench-only, ETA-JEV-ARM-D). The list stays EXACT (toEqual, not a contains)
     // so a kind that appears without being intended still fails here.
     expect(JOB_KIND_NAMES.sort()).toEqual(
-      ["audio_measure", "day_manifest", "diarize_window", "emotion_window", "jev_ask", "jev_drift", "jev_english", "jev_role", "jev_window", "nemotron_identity", "nemotron_lab_run", "pulse_doctor_voice", "room_window", "route_transcribe", "rubric_bench", "rubric_run", "sarvam_transcribe", "sarvam_translate", "stitch", "stt_fanout", "transcribe_range"].sort(),
+      ["audio_measure", "day_manifest", "diarize_window", "emotion_window", "jev_ask", "jev_drift", "jev_english", "jev_role", "jev_window", "nemotron_identity", "nemotron_lab_run", "pulse_doctor_voice", "room_window", "route_transcribe", "rubric_bench", "rubric_run", "sarvam_consult_batch", "sarvam_transcribe", "sarvam_translate", "stitch", "stt_fanout", "transcribe_range"].sort(),
     );
     // diarize_clip is GONE (C2 D3): diarize_window implements it for real.
     // emotion_clip is GONE (C3): emotion_window implements it for real.

@@ -15,7 +15,11 @@ import { sql } from "@/lib/db";
 import { readJob } from "@/lib/jobs/store";
 import { JobArgsError, submitJob, UnknownKindError } from "@/lib/jobs/submit";
 import { errorCodeOf } from "@/lib/jobs/errors";
-import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, parseSarvamTranscribeArgs } from "@/lib/jobs/kinds/sarvam-transcribe";
+import { ROOM_AUDIO_ARGS, SARVAM_TRANSCRIBE_KIND, existingSummary, parseSarvamTranscribeArgs } from "@/lib/jobs/kinds/sarvam-transcribe";
+import { SARVAM_CONSULT_BATCH_KIND, parseBatchArgs } from "@/lib/jobs/kinds/sarvam-consult-batch";
+import { preflightClip } from "@/lib/consult-clip";
+import { consultResultView } from "@/lib/consult-index/result-view";
+import { getIndexRow, latestSync, listIndexDay, listResults } from "@/lib/room-access/consult-index-store";
 import { SARVAM_TRANSLATE_KIND, parseSarvamTranslateArgs } from "@/lib/jobs/kinds/sarvam-translate";
 import { labStoreConfigured } from "@/lib/sarvam-lab";
 import { SARVAM_DAILY_CAP_MINUTES, SARVAM_ENGINE, dailyCapRefusal, istDayStartIso, readJson, resultKey, sarvamMinutesToday } from "@/lib/jobs/kinds/sarvam-common";
@@ -25,14 +29,14 @@ import { isRealDate, notCollectedReason } from "./s1";
 
 type Row = Record<string, unknown>;
 
-export const SARVAM_ACTIONS = ["transcribe", "translate", "status", "result", "usage", "health"] as const;
+export const SARVAM_ACTIONS = ["transcribe", "translate", "status", "result", "usage", "health", "consult_clips", "consult_result"] as const;
 type Action = (typeof SARVAM_ACTIONS)[number];
-export const SARVAM_KINDS = [SARVAM_TRANSCRIBE_KIND, SARVAM_TRANSLATE_KIND] as const;
+export const SARVAM_KINDS = [SARVAM_TRANSCRIBE_KIND, SARVAM_TRANSLATE_KIND, SARVAM_CONSULT_BATCH_KIND] as const;
 export const USAGE_DAYS_DEFAULT = 7;
 export const USAGE_DAYS_MAX = 30;
 
 /** The documented keys, plus the room-audio ones, which are passed on ONLY so the kind can refuse them by name (scope_consult_only). */
-const SUBMIT_KEYS = ["encounter_id", "consult_uid", "mode", "english", "num_speakers", "transcription_run_id", ...ROOM_AUDIO_ARGS] as const;
+const SUBMIT_KEYS = ["encounter_id", "consult_uid", "consult_uids", "mode", "english", "num_speakers", "transcription_run_id", ...ROOM_AUDIO_ARGS] as const;
 const submitArgs = (args: ToolArgs): Row => Object.fromEntries(SUBMIT_KEYS.filter((k) => args[k] !== undefined && args[k] !== null).map((k) => [k, args[k]]));
 const num = (v: unknown): number | null => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
 const round = (n: number, d = 4): number => Math.round(n * 10 ** d) / 10 ** d;
@@ -40,11 +44,25 @@ const round = (n: number, d = 4): number => Math.round(n * 10 ** d) / 10 ** d;
 async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<Row> {
   const raw = submitArgs(args);
   // 1. validate by the kind's own parser, so a refusal is typed and nothing is queued
+  // a list of consult_uids is ONE batch job (progress through scribe_job_status)
+  if (kind === SARVAM_TRANSCRIBE_KIND && raw.consult_uids !== undefined) {
+    try { parseBatchArgs(Object.fromEntries(Object.entries(raw).filter(([k]) => k !== "encounter_id" && k !== "consult_uid"))); } catch (e) {
+      if (e instanceof JobArgsError) return e.reason.startsWith("scope_consult_only") ? { ok: false, error: "scope_consult_only", detail: e.reason.replace(/^scope_consult_only:\s*/, "") } : { ok: false, error: "bad_args", kind: SARVAM_CONSULT_BATCH_KIND, detail: e.reason };
+      throw e;
+    }
+    if (raw.encounter_id !== undefined || raw.consult_uid !== undefined) return { ok: false, error: "bad_args", kind: SARVAM_CONSULT_BATCH_KIND, detail: "give consult_uids on its own" };
+    if (!gatewayConfigured()) return { ok: false, error: "sarvam_gateway_not_configured" };
+    return enqueue(SARVAM_CONSULT_BATCH_KIND, raw, ctx);
+  }
   try {
     if (kind === SARVAM_TRANSCRIBE_KIND) {
       const parsed = parseSarvamTranscribeArgs(raw);
-      // a consult clip comes from the CONSULT cutter's index, whose resolver is not wired yet
-      if (parsed.source === "consult") return { ok: false, error: "consult_index_unavailable" };
+      // a consult clip comes from the consult_index table: not indexed / sealed / voice isolated / palimpsest already has it / audio unreadable are refused here; a result already stored for THIS CUT VERSION is returned, not re-sent
+      if (parsed.source === "consult") {
+        const pre = await preflightClip(parsed.consult_uid, { mode: parsed.mode, english: parsed.english });
+        if (!pre.ok) return { ok: false, error: pre.error, ...(pre.track ? { track: pre.track } : {}) };
+        if (pre.existing) return { ok: true, existing: true, job_id: pre.existing.job_id, ...existingSummary(pre.existing), billed: false };
+      }
     } else {
       const parsed = parseSarvamTranslateArgs(raw);
       if (parsed.kind === "transcription_run") {
@@ -62,6 +80,10 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
     const cap = await dailyCapRefusal();
     if (cap) return { ok: false, ...cap };
   }
+  return enqueue(kind, raw, ctx);
+}
+
+async function enqueue(kind: string, raw: Row, ctx: ToolContext): Promise<Row> {
   try {
     const job = await submitJob({ kind, args: raw, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
     // S4: an open job for the same source is returned, not duplicated
@@ -71,6 +93,51 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
     if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind };
     throw e; // ToolScopeError -> the door's 403
   }
+}
+
+const UID_OK = /^[A-Za-z0-9_-]{1,128}$/;
+const publicClip = (r: Awaited<ReturnType<typeof getIndexRow>> & object): Row => ({
+  consult_uid: r.consult_uid, ist_date: r.ist_date, room_slug: r.room_slug, room_id: r.room_id, session_id: r.session_id, t0_ms: r.t0_ms, t1_ms: r.t1_ms, minutes: r.minutes, cut_version: r.cut_version,
+  sealed: r.sealed, voice_isolated: r.voice_isolated, quality: r.quality, coverage: r.coverage,
+  // as the cutter recorded it: a hint, never identity (VP-ACC-01 failed); the warehouse consulting_doctor_uid is the doctor truth
+  doctor_uid: r.doctor_uid, doctor_identified: r.doctor_identified, doctor_uid_note: "cutter record; not identity",
+});
+
+/** consult_clips {ist_date, room_slug?}: the index for one IST day (counts + rows), from the consult_index table. */
+async function consultClips(args: ToolArgs): Promise<Row> {
+  const date = argStr(args, "ist_date", 10), room = argStr(args, "room_slug", 64);
+  if (!date || !isRealDate(date)) return { ok: false, error: "invalid_ist_date" };
+  if (room && !/^[A-Za-z0-9_-]{1,64}$/.test(room)) return { ok: false, error: "invalid_room" };
+  const limit = 100;
+  const day = await listIndexDay(date, room, limit);
+  const sync = await latestSync();
+  return {
+    ok: true, ist_date: date, count: day.total, sealed: day.rows.filter((r) => r.sealed).length, voice_isolated: day.rows.filter((r) => r.voice_isolated === true).length, truncated: day.total > day.rows.length,
+    rows: day.rows.map(publicClip), index_sync: sync ? { status: sync.status, finished_at: sync.finished_at, rows_written: sync.rows_written, error_code: sync.error_code } : null,
+  };
+}
+
+/** consult_result {consult_uid, cut_version?, include_text?}: the stored Sarvam result of a consult (model + revision always; transcript, English and segments with ABSOLUTE UTC times only with include_text). No Sarvam call. */
+async function consultResult(args: ToolArgs): Promise<Row> {
+  const uid = argStr(args, "consult_uid", 128);
+  if (!uid || !UID_OK.test(uid)) return { ok: false, error: "consult_uid_invalid" };
+  const row = await getIndexRow(uid);
+  if (!row) return { ok: false, error: "consult_not_indexed" };
+  const asked: string | null = null;
+  const results = await listResults(uid);
+  const hit = asked ? results.find((r) => r.cut_version === asked) : (results.find((r) => r.cut_version === row.cut_version) ?? results[0]);
+  if (!hit) return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
+  const head: Row = {
+    ok: true, consult_uid: uid, cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english, job_id: hit.job_id,
+    model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s, speakers: hit.speaker_count,
+    transcript_chars: hit.transcript_chars, english_chars: hit.english_chars, english_pass: hit.english_pass, clip: { t0_ms: hit.t0_ms, t1_ms: row.t1_ms }, created_at: hit.created_at,
+    other_cuts: results.filter((r) => r !== hit).map((r) => r.cut_version),
+  };
+  if (!argBool(args, "include_text")) return head;
+  let doc;
+  try { doc = await readJson<import("@/lib/jobs/kinds/sarvam-common").ResultDoc>(hit.result_r2_key); } catch { return { ...head, content: null, content_note: "r2_read_failed" }; }
+  if (!doc) return { ...head, content: null, content_note: "no_stored_text" };
+  return { ...head, ...consultResultView(doc, hit.t0_ms) };
 }
 
 async function loadSarvamJob(args: ToolArgs): Promise<{ job: NonNullable<Awaited<ReturnType<typeof readJob>>> } | { error: Row }> {
@@ -171,8 +238,8 @@ const sarvam: McpTool = {
   name: "scribe_sarvam",
   description:
     "Sarvam speech AI through the Even AWS gateway (saaras:v3 transcription with speaker labels, mayura:v1 translation); Sarvam is zero-data-retention. Reads and writes the job queue and one R2 result object per job; touches no room; " +
-    "never writes a clinical table. ONLY ISOLATED CONSULT AUDIO goes to Sarvam (V's standing rule): `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a clip from the CONSULT cutter; " +
-    "answers consult_index_unavailable until that resolver exists); options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
+    "never writes a clinical table. ONLY ISOLATED CONSULT AUDIO goes to Sarvam (V's standing rule): `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a cut clip, resolved by the consult index; refusals consult_not_indexed, consult_sealed, consult_voice_isolated; a result stored for the same cut returns billed:false) or {consult_uids:[<=25]} (one batch job); " +
+    "consult_clips {ist_date, room_slug?}; consult_result {consult_uid, include_text?} (model + revision; text and absolute-UTC segments with include_text); options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
     "Both queue a job and need invoke scope. status / result {job_id} (include_text returns the stored JSON: transcript, speaker-labelled entries, English); usage {ist_date | days <= 30}: gateway minutes, estimated cost, calls, Sarvam jobs and runs; " +
     "health: configured env names, lab_store_configured, credential check, STS expiry (Sarvam is not called). " +
     `A daily cap of ${SARVAM_DAILY_CAP_MINUTES} audio minutes applies, counting earlier queued jobs. Results are written to R2 mcp-sarvam/<job_id>.json; the job row carries counts only. Usage is also logged to the shared Sarvam ledger (sarvam.call.v1) and lane file. Times UTC.`,
@@ -186,6 +253,8 @@ const sarvam: McpTool = {
       include_text: { type: "boolean" },
       encounter_id: { type: "string" },
       consult_uid: { type: "string" },
+      consult_uids: { type: "array", items: { type: "string" } },
+      room_slug: { type: "string" },
       mode: { type: "string", enum: ["transcribe", "codemix"] },
       english: { type: "boolean" },
       num_speakers: { type: "integer", minimum: 1, maximum: 6 },
@@ -220,6 +289,8 @@ const sarvam: McpTool = {
           return { ...base, content: null, content_note: "r2_read_failed" };
         }
       }
+      case "consult_clips": return consultClips(args);
+      case "consult_result": return consultResult(args);
       case "usage": return usage(args);
       case "health": return { ok: true, ...(await gatewayHealth()), lab_store_configured: labStoreConfigured() };
     }

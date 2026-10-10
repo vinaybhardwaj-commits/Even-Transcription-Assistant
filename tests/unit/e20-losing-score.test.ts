@@ -10,6 +10,7 @@
  * Vectors are synthetic and constructed so each cosine is known exactly: a speaker embedding is
  * cos θ · e_a + sin θ · e_z, where e_a is centroid a's axis and e_z an axis no centroid uses.
  */
+import { diarizeWindowFromAnswer } from "../support/finish-window";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { shadowMatch, shadowTrusted, cosine, decodeFloat32, SCORE_BASIS_APP_RECOMPUTED } from "@/lib/stt/losing-score";
 import { windowStart, windowEnd } from "@/lib/stt/window-bounds";
@@ -124,13 +125,11 @@ vi.mock("@/lib/db", () => ({
     return [];
   },
 }));
-vi.mock("@/lib/diarize", () => ({ runDiarize: async () => SVC.out }));
 
 const WIN = { start: windowStart(0), end: windowEnd(900_000) };
 const CENTS = [centroid("doc_a", 0), centroid("doc_b", 1)];
 const run = async () => {
-  const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-  return diarizeWindow({ windowId: "bw_e20", roomDayId: "rd_1", window: WIN, audio: new Uint8Array([1]), runId: "run_e20", centroids: CENTS });
+  return diarizeWindowFromAnswer({ windowId: "bw_e20", roomDayId: "rd_1", window: WIN, runId: "run_e20", centroids: CENTS }, SVC.out);
 };
 const byRef = (ref: string) => DB.rows.find((r) => r.source_ref === ref)!;
 const segs = [
@@ -188,8 +187,7 @@ describe("the write — only an exclusive no_match turn, and a named turn exactl
 
   it("no centroids offered: nothing to lose to, so no losing candidate and nothing to check", async () => {
     SVC.out = { ok: true, latencyMs: 1, result: { speakers: [unmatchedSp(0, toward([[0, 0.5]])), unmatchedSp(1, toward([[1, 0.4]]))], transcript_segments: segs } };
-    const { diarizeWindow } = await import("@/lib/stt/diarize-window");
-    await diarizeWindow({ windowId: "bw_e20", roomDayId: "rd_1", window: WIN, audio: new Uint8Array([1]), runId: "run_e20", centroids: [] });
+    await diarizeWindowFromAnswer({ windowId: "bw_e20", roomDayId: "rd_1", window: WIN, runId: "run_e20", centroids: [] }, SVC.out);
     expect(DB.rows.every((x) => x.losing_score === null)).toBe(true);
   });
 });

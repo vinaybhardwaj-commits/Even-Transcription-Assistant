@@ -66,7 +66,7 @@ describe("registration", () => {
     expect(S.LAB_TOOLS.includes(t)).toBe(true);
     const req = new NextRequest("https://x/api/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     const body = (await (await handleMcpRpc(req, { token_id: "t", scopes: new Set(["read"]) } as never)).json()) as { result: { tools: Array<{ name: string; description: string; annotations: Row }> } };
-    expect(body.result.tools.length).toBe(55);
+    expect(body.result.tools.length).toBe(56);
     const listed = body.result.tools.find((x) => x.name === "scribe_sarvam")!;
     expect(listed.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
     expect(listed.description.length).toBeLessThanOrEqual(200);
@@ -75,7 +75,7 @@ describe("registration", () => {
 
   it("room-restricted tokens are refused; unknown action is named", async () => {
     expect((await rpc({ action: "health" }, ["read"], ["room_x"])).status).toBe(403);
-    expect(await run({ action: "nope" })).toMatchObject({ ok: false, error: "unknown_action", allowed: ["transcribe", "translate", "status", "result", "usage", "health"] });
+    expect(await run({ action: "nope" })).toMatchObject({ ok: false, error: "unknown_action", allowed: ["transcribe", "translate", "status", "result", "usage", "health", "consult_clips", "consult_result"] });
     expect(await run({})).toMatchObject({ ok: false, error: "unknown_action" });
   });
 });
@@ -100,8 +100,8 @@ describe("transcribe / translate", () => {
     expect(props).toEqual(expect.arrayContaining(["encounter_id", "consult_uid", "transcription_run_id"]));
   });
 
-  it("a consult uid answers consult_index_unavailable (no resolver yet) without queueing", async () => {
-    expect(await run({ action: "transcribe", consult_uid: "cu_9" })).toEqual({ ok: false, error: "consult_index_unavailable" });
+  it("a consult uid that the index does not hold answers consult_not_indexed without queueing (the real index is covered by consult-index-pg.test.ts)", async () => {
+    expect(await run({ action: "transcribe", consult_uid: "cu_9" })).toEqual({ ok: false, error: "consult_not_indexed" });
     expect(inserted).toEqual([]);
   });
 

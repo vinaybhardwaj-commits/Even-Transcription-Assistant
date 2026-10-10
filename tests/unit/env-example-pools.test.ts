@@ -10,8 +10,8 @@ const example = readFileSync(".env.example", "utf8");
 const names = [...Object.values(POOL_ENV).flatMap((e) => [e.list, e.bulk]), BULK_AGE_MINUTES_ENV, BULK_FALLBACK_LIVE_ENV];
 
 describe(".env.example — the pool settings", () => {
-  it("there are 20 of them, and every one is present as a COMMENTED-OUT line (default off)", () => {
-    expect(new Set(names).size).toBe(20);
+  it("there are 18 of them, and every one is present as a COMMENTED-OUT line (default off)", () => {
+    expect(new Set(names).size).toBe(18);
     for (const n of names) {
       expect(example, n).toMatch(new RegExp(`^# ${n}=`, "m"));
       expect(example, `${n} must not be an ACTIVE assignment`).not.toMatch(new RegExp(`^${n}=`, "m"));

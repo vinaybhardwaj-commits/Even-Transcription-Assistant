@@ -161,7 +161,7 @@ export async function runOneStep(job: JobRow, runner: string): Promise<StepRepor
   if (outcome.kind === "fail") {
     return lost(await failJob(job.id, outcome.error, runner)) ?? { ...base, step, outcome: "failed", ms: Date.now() - started };
   }
-  return lost(await saveStep(job.id, outcome.step, outcome.progress, runner)) ?? { ...base, step, outcome: "advanced", ms: Date.now() - started };
+  return lost(await saveStep(job.id, outcome.step, outcome.progress, runner, outcome.delay_s ?? 0)) ?? { ...base, step, outcome: "advanced", ms: Date.now() - started };
 }
 
 /**
