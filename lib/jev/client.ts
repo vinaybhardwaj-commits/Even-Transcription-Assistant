@@ -22,7 +22,7 @@ import { parseFlag, FlagValueError } from "@/lib/flags";
 import { openTrace } from "@/lib/llm-trace/log";
 import { getMockJevClient } from "./mock";
 import { safeJevErrorMessage } from "./safe-error";
-import { JevBadResponseError, JevDisabledError, JevHttpError, JevStateTooLargeError, type JevClient, type JevRequest, type JevResult } from "./types";
+import { JevBadResponseError, JevDisabledError, JevHttpError, JevStateTooLargeError, JevMissingKeyError, type JevClient, type JevRequest, type JevResult } from "./types";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const STATE_CHAR_GUARD = 100_000; // ~25k tokens (spec §4)
@@ -67,9 +67,13 @@ export function createHttpJevClient(deps: { fetchImpl?: FetchFn } = {}): JevClie
       const stateStr = JSON.stringify(req.state ?? null);
       if (stateStr.length > STATE_CHAR_GUARD) throw new JevStateTooLargeError(stateStr.length);
 
-      const model = req.model ?? process.env.ETA_JEV_MODEL ?? "jev-latest";
-      const timeoutMs = envInt("ETA_JEV_TIMEOUT_MS", 15_000);
+      // A typed refusal before the trace is opened and before any fetch: an empty Bearer would
+      // otherwise surface as an opaque `jev http 401`.
       const apiKey = process.env.TYPESAFE_API_KEY ?? "";
+      if (!apiKey) throw new JevMissingKeyError();
+
+      const model = req.model ?? process.env.ETA_JEV_MODEL ?? "jev-1.13.0";
+      const timeoutMs = envInt("ETA_JEV_TIMEOUT_MS", 15_000);
 
       const trace =
         opts?.trace ??

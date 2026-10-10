@@ -40,13 +40,14 @@ describe("pair-keyed reads (a room and an IST date, or a room-day id)", () => {
     expect((await call("scribe_encounter_shadow_run", { room_id: "r1", ist_date: "2026-10-05", room_day_id: "rd_b" })).error).not.toBe("blind_room_day");
     expect(content(/encounter_hypothesis_run/).length).toBeGreaterThan(0);
   });
-  it("scribe_jev_signals serves a formerly held-out room-day id (the signal table is read); scribe_jev_decisions excludes no subject (the unnest list is empty)", async () => {
+  it("scribe_jev_signals serves a formerly held-out room-day id (the signal table is read); scribe_jev_decisions excludes no subject (no held-out clauses, no room tables in its SQL)", async () => {
     answers = [PLACE_BLIND_DAY];
     expect(await call("scribe_jev_signals", { room_day_id: "rd_b" })).toMatchObject({ ok: true, room_day_id: "rd_b" });
     expect(brainQueries.filter((q) => /jev_window_signal/.test(q.text)).length).toBeGreaterThan(0);
     await call("scribe_jev_decisions", {});
     const q = brainQueries.find((x) => /FROM jev_decision/.test(x.text))!;
-    expect(q.params.slice(-2)).toEqual([[], []]);
+    expect(q.text).not.toMatch(/unnest|room_day|bench_window|room_diarize_window|NOT EXISTS/);
+    expect(q.params).toEqual([null, null, null, null, 100]);
   });
   it("scribe_fuse_report: a formerly held-out day (and a scratch day replaying it) is served", async () => {
     answers = [[/FROM room_day WHERE id|room_day_by_id|FROM room_day rd/, [{ id: "rd_b", room_id: BR, ist_date: BD, scratch: false }]]];

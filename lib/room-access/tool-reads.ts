@@ -39,7 +39,7 @@ export async function windowsStartingIn(roomId: string, dayLo: number, dayHi: nu
 }
 
 // --- scribe_jev_decisions -----------------------------------------------------------------------------------------------------------------
-/** Jev decisions, a decision about a held-out room-day or about a window with ANY held-out placement is never served (SQL). */
+/** Jev decisions. The held-out NOT EXISTS clauses are gone with the blind rule (V, 10 Oct); this reads jev_decision only, which is what brain_svc is granted (0144). */
 export async function listJevDecisions<T extends Row = Row>(f: { subjectType: string | null; subjectId: string | null; questionId: string | null; promptVersion: string | null; limit: number }) {
   return query<T>(
     `SELECT id, subject_type, subject_id, question_id, prompt_version, model, answer, probabilities,
@@ -49,11 +49,9 @@ export async function listJevDecisions<T extends Row = Row>(f: { subjectType: st
         AND ($2::text IS NULL OR subject_id = $2)
         AND ($3::text IS NULL OR question_id = $3)
         AND ($4::text IS NULL OR prompt_version = $4)
-        AND NOT EXISTS (SELECT 1 FROM room_day r1, unnest($6::date[], $7::text[]) AS b(d, r) WHERE r1.id = jev_decision.subject_id AND b.d = r1.ist_date AND b.r = r1.room_id)
-        AND NOT EXISTS (SELECT 1 FROM bench_window bw LEFT JOIN room_diarize_window dw ON dw.window_id = bw.id, room_day r1, unnest($6::date[], $7::text[]) AS b(d, r) WHERE bw.id = jev_decision.subject_id AND r1.id IN (bw.room_day_id, dw.room_day_id) AND b.d = r1.ist_date AND b.r = r1.room_id)
       ORDER BY created_at DESC
       LIMIT $5`,
-    [f.subjectType, f.subjectId, f.questionId, f.promptVersion, f.limit, HELD_DAYS, HELD_ROOMS],
+    [f.subjectType, f.subjectId, f.questionId, f.promptVersion, f.limit],
   );
 }
 

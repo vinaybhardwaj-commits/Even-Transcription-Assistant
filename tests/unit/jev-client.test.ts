@@ -24,7 +24,8 @@ vi.mock("@/lib/llm-trace/log", () => ({
 }));
 
 import { createHttpJevClient, _resetJevClientForTests } from "@/lib/jev/client";
-import { JevDisabledError, JevStateTooLargeError } from "@/lib/jev/types";
+import { JevDisabledError, JevMissingKeyError, JevStateTooLargeError } from "@/lib/jev/types";
+import { getMockJevClient } from "@/lib/jev/mock";
 import { FlagValueError } from "@/lib/flags";
 
 const OLD_ENV = { ...process.env };
@@ -32,6 +33,7 @@ const OLD_ENV = { ...process.env };
 beforeEach(() => {
   traceCalls.length = 0;
   process.env = { ...OLD_ENV };
+  process.env.TYPESAFE_API_KEY = "test-key";   // the key check is now a refusal; tests that need none delete it
   _resetJevClientForTests();
 });
 
@@ -73,7 +75,7 @@ describe("J1 — jev client: request shape", () => {
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe("https://api.typesafe.ai/v1/systemone");
       const body = JSON.parse(init.body as string);
-      expect(body).toMatchObject({ model: "jev-latest", questions: { q1: { type: "noul", instructions: "x" } } });
+      expect(body).toMatchObject({ model: "jev-1.13.0", questions: { q1: { type: "noul", instructions: "x" } } });
       expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-key");
       return new Response(JSON.stringify({ model: "jev-latest", answers: { q1: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 10, output_tokens: 2 } }), { status: 200 });
     });
@@ -207,5 +209,33 @@ describe("F5 — the trace is finalised on every non-success exit path", () => {
     const fin = traceCalls[0]!.finalise[0] as { status: string; error_message: string };
     expect(fin.status).toBe("errored");
     expect(fin.error_message).toBe("jev_aborted");
+  });
+});
+
+describe("P0.4 — config_missing_key, and the mock never echoes a model", () => {
+  it("an unset TYPESAFE_API_KEY is refused BEFORE any fetch and before a trace opens", async () => {
+    process.env.ETA_JEV_ENABLED = "1";
+    delete process.env.TYPESAFE_API_KEY;
+    const fetchImpl = vi.fn();
+    const c = createHttpJevClient({ fetchImpl: fetchImpl as never });
+    const err = await c.systemOne({ state: {}, questions: { q1: { type: "noul", instructions: "x" } } }).catch((e) => e);
+    expect(err).toBeInstanceOf(JevMissingKeyError);
+    expect(err.message).toBe("config_missing_key");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(traceCalls.length).toBe(0);
+  });
+
+  it("an empty key is the same refusal", async () => {
+    process.env.ETA_JEV_ENABLED = "1";
+    process.env.TYPESAFE_API_KEY = "";
+    const fetchImpl = vi.fn();
+    const c = createHttpJevClient({ fetchImpl: fetchImpl as never });
+    await expect(c.systemOne({ state: {}, questions: { q1: { type: "noul", instructions: "x" } } })).rejects.toBeInstanceOf(JevMissingKeyError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("the mock answers `jev-mock` even when the caller passes a model", async () => {
+    const r = await getMockJevClient().systemOne({ state: {}, questions: { q1: { type: "noul", instructions: "x" } }, model: "jev-1.13.0" });
+    expect(r.model).toBe("jev-mock");
   });
 });

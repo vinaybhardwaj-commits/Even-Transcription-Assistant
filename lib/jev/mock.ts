@@ -54,7 +54,8 @@ export function getMockJevClient(): JevClient {
       }
       const input_tokens = estimateTokens(req.state, req.questions);
       return {
-        model: req.model ?? "jev-mock",
+        // Never the caller's model: a mock answer must not be mistakable for a real model's (PRD P0.4).
+        model: "jev-mock",
         answers,
         usage: { input_tokens, output_tokens: Object.keys(req.questions).length * 8 },
         latency_ms: 1,
