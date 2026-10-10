@@ -26,7 +26,6 @@ import { transcribeWithWhisper } from "@/lib/whisper";
 import { callJoinService, joinVerdict } from "@/lib/bench-join";
 import { runDiarize } from "@/lib/diarize";
 import { embedSpeakers } from "@/lib/diarize-embed";
-import { requestSpeechRegions } from "@/lib/diarize-vad-trim";
 import { runEnroll } from "@/lib/enroll";
 import { emotionHealth, scoreSegments, EMOTION_FALLBACK_URL } from "@/lib/emotion/client";
 import { withServedBy } from "@/lib/jobs/runner";
@@ -35,7 +34,7 @@ import { roomWindowKind } from "@/lib/jobs/kinds/room-window";
 const POOL_VARS = [
   "WHISPER_BASE_URL", "WHISPER_BASE_URLS", "WHISPER_BULK_URLS",
   "AUDIO_JOIN_URL", "AUDIO_JOIN_URLS", "AUDIO_JOIN_BULK_URLS", "AUDIO_JOIN_TOKEN",
-  "DIARIZE_BASE_URL", "DIARIZE_BASE_URLS", "DIARIZE_BULK_URLS", "DIARIZE_EMBED_URLS", "DIARIZE_VAD_URLS", "DIARIZE_ENROLL_URLS",
+  "DIARIZE_BASE_URL", "DIARIZE_BASE_URLS", "DIARIZE_BULK_URLS", "DIARIZE_EMBED_URLS", "DIARIZE_ENROLL_URLS",
   "POOL_BULK_FALLBACK_LIVE",
   "EMOTION_BASE_URL", "EMOTION_BASE_URLS", "EMOTION_BULK_URLS", "EMOTION_SEGMENTS_SECRET",
   "BULK_AGE_MINUTES",
@@ -320,14 +319,6 @@ describe("eta-diarize: /diarize, /embed_speakers, /speech_regions, /enroll share
     expect(calls).toEqual(["https://mini/embed_speakers"]);
     expect(refused.ok).toBe(false);
   });
-  it("/speech_regions honours its own env argument for the pool", async () => {
-    const env = { DIARIZE_BASE_URLS: "https://mini,https://box" };
-    route = (u) => (u.startsWith("https://mini") ? "throw" : { status: 200, body: { ok: true, regions: [], total_samples: 16000, sample_rate: 16000 } });
-    const params = { pad_s: 0, merge_gap_s: 0, min_region_s: 0, threshold: 0.5, min_silence_ms: 100, speech_pad_ms: 30, min_speech_ms: 250 } as never;
-    const r = await requestSpeechRegions(new Uint8Array([1]), params, { label: "w", allowCut: [], env });
-    expect(calls).toEqual(["https://mini/speech_regions", "https://box/speech_regions"]);
-    expect(r.ok && r.served_by).toBe("https://box");
-  });
   it("/enroll NO-ENV IDENTITY and failover", async () => {
     process.env.DIARIZE_BASE_URL = "https://mini";
     route = () => ({ status: 200, body: { ok: true, embedding_base64: "AAAA" } });
@@ -461,7 +452,6 @@ describe("R2 — each eta-diarize route is its own pool", () => {
       .toEqual(["https://mini", "https://c3", "https://box"]);
     expect(poolEndpoints("diarize", {}, { DIARIZE_BASE_URLS: "https://mini,https://box", DIARIZE_EMBED_URLS: "https://c3" }))
       .toEqual(["https://mini", "https://box"]);
-    expect(poolConfigured("diarize_vad", { DIARIZE_BASE_URLS: "https://mini" })).toBe(true);
   });
   it("the refuter's probe: [mini (down), c3 (no /diarize: 404), box] reaches the box", async () => {
     process.env.DIARIZE_BASE_URLS = "https://mini,https://c3,https://box";

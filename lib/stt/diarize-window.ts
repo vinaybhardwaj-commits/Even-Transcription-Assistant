@@ -21,7 +21,7 @@
  */
 import { gateSegments, speechGateEnabled, type WindowSpeech } from "./speech-gate";
 import { sql } from "@/lib/db";
-import { runDiarize, type DiarizeSpeaker } from "@/lib/diarize";
+import type { DiarizeSpeaker } from "@/lib/diarize";
 import type { DiarizeEngine } from "@/lib/diarize-engine";
 import { parseDiarizeSegments, type DiarizeSegment, type TurnSpan } from "./speaker-clusters";
 import { rolesByIndex, UNATTRIBUTED, noRole, bindTurnsExclusive, type SpanRole } from "./speaker-roles";
@@ -210,94 +210,6 @@ export type DiarizeWindowOutcome = {
   /** E20: the control on the app-side recomputation, for THIS window (lib/stt/losing-score.ts). */
   shadow: { matched_checked: number; disagreements: number; unmatched_above_threshold: number; unrecomputable: number; max_abs_diff: number | null; trusted: boolean };
 };
-
-/**
- * Diarize a whole window and write its spans.
- *
- * `encounter_id` carries the WINDOW id, deliberately. The service treats that field as opaque — a
- * required Form value echoed back and used nowhere else, touching no database — so inventing an
- * `encounter` row for room audio to satisfy a field name would be creating clinical records to
- * please a string.
- */
-export async function diarizeWindow(opts: {
-  windowId: string;
-  roomDayId: string;
-  window: { start: WindowStartMs; end: WindowEndMs };
-  audio: Uint8Array;
-  contentType?: string;
-  centroids?: ClinicianCentroid[];
-  /** One id per run, stamped on every turn row this run writes (0090). */
-  runId: string;
-  /**
-   * What the VAD said about this window's audio, when the caller asked it. Supplied by the caller
-   * rather than fetched here so this function stays testable without a service, and so a caller
-   * that has no VAD simply does not pass one — which judges nothing.
-   */
-  speech?: WindowSpeech;
-  /**
-   * Set when this local run is standing in for an engine that did not deliver. It changes nothing
-   * about the diarization — it is recorded on the row, so a reader can see that this window's
-   * spans came from a different engine than its neighbours'.
-   */
-  fallback?: { from: DiarizeEngine; reason: string };
-}): Promise<
-  | { ok: true; outcome: DiarizeWindowOutcome; speakers: DiarizeSpeaker[]; segments: unknown[]; timing: unknown }
-  | { ok: false; error: string; retryable: boolean; timing: unknown }
-> {
-  const centroids = opts.centroids ?? (await loadClinicianCentroids());
-
-  const res = await runDiarize(opts.audio, opts.contentType ?? "audio/webm", {
-    encounterId: opts.windowId,
-    clinicianCentroids: centroids,
-    // The validated floor, on the wire, every time — never the service's own 0.70 default.
-    batchThreshold: DIARIZE_BATCH_THRESHOLD,
-  });
-  // Branch on `ok`. /diarize returns real 4xx, but its sibling /enroll answers 200 with ok:false,
-  // and a client that reads status learns the wrong lesson from whichever it meets first.
-  if (!res.ok) return { ok: false, error: res.error, retryable: res.retryable === true, timing: res.timing ?? null };
-
-  return {
-    ok: true,
-    ...(await finishDiarizeWindow(
-      { ...opts, centroids },
-      {
-        speakers: (res.result.speakers ?? []) as DiarizeSpeaker[],
-        rawSegments: parseDiarizeSegments(res.result.transcript_segments),
-        timing: res.timing ?? null,
-        latencyMs: res.latencyMs ?? null,
-        provenance: {
-          name: "local",
-          // DERIVED, like pyannote.ai's: the service reports `model_versions`, and when it reports
-          // nothing readable the label is null rather than the name of the service we called.
-          model: localModelLabel(res.result.model_versions),
-          job_id: null,
-          // The local service matches enrolled voiceprints inside itself — this is the engine that
-          // can name a clinician, and the only one.
-          // EARNED, not asserted. The local service runs its own matcher, but a matcher handed
-          // an empty centroid list compares nothing — see attributionFor.
-          attribution: attributionFor((res.result.speakers ?? []) as DiarizeSpeaker[], centroids.length),
-          centroids_offered: centroids.length,
-          fallback_from: opts.fallback?.from ?? null,
-          fallback_reason: opts.fallback?.reason ?? null,
-          audio_seconds_sent: null,
-        },
-      },
-    )),
-  };
-}
-
-/** The local service's own model label, when it gives one. Never the name of the service. */
-export function localModelLabel(modelVersions: unknown): string | null {
-  if (typeof modelVersions === "string" && modelVersions.trim()) return modelVersions.trim();
-  if (typeof modelVersions === "object" && modelVersions !== null) {
-    const o = modelVersions as Record<string, unknown>;
-    // The Mini reports a map of component -> version. `diarization` is the one that names the
-    // segmenter; anything else is a component we are not claiming to have identified.
-    const v = o.diarization ?? o.diarize ?? o.pyannote;
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return null;
-}
 
 /**
  * Speaker rows for an engine that returns LABELS AND NOTHING ELSE.

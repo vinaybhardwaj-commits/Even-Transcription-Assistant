@@ -17,7 +17,6 @@ vi.mock("@/lib/diarize-gate", () => ({
 import { transcribeWithWhisper } from "@/lib/whisper";
 import { runDiarize } from "@/lib/diarize";
 import { embedSpeakers } from "@/lib/diarize-embed";
-import { requestSpeechRegions } from "@/lib/diarize-vad-trim";
 import { runEnroll } from "@/lib/enroll";
 import { emotionHealth, scoreSegments } from "@/lib/emotion/client";
 import { routeTranscribe, submitRouteJob, pollRouteJob } from "@/lib/stt/eta-router";
@@ -71,7 +70,6 @@ const CALLERS: Array<[string, () => Promise<unknown>]> = [
   ["whisper probe (health tool)", () => runWhisperProbe({ readFixture: async () => new Uint8Array([1]), fetchImpl: svcFetch })],
   ["diarize /diarize", () => runDiarize(new Uint8Array([1]), "audio/webm", { encounterId: "w" })],
   ["diarize /embed_speakers", () => embedSpeakers(new Uint8Array([1]), SP, [], { batchThreshold: 0.65, label: "w" })],
-  ["diarize /speech_regions", () => requestSpeechRegions(new Uint8Array([1]), RP, { label: "w", allowCut: [] })],
   ["diarize /enroll", () => runEnroll(new Uint8Array([1]), "audio/webm")],
   ["pyannote /health probe", () => probePyannote()],
   ["emotion /health", () => emotionHealth(svcFetch)],
