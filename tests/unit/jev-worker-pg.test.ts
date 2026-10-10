@@ -816,6 +816,46 @@ suite("the Jev worker on postgres:16", () => {
       }
     });
 
+
+    it("C2: a bench subject that ABSTAINS (no locator; patient-side speech too short) or is TOO LARGE writes 0 jev_decision rows, and makes no call", async () => {
+      await reset(); env({ ...ON });
+      await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id IN ('pitch-uptake', 'chair-affect')`;
+      const countDecisions = async () => (await rows`SELECT count(*)::int AS n FROM jev_decision WHERE question_set_id IN ('pitch-uptake', 'chair-affect')`)[0]!.n;
+      // (1) the REAL pitch builder with no locator: abstain no_locator (no DB read, no call)
+      registerP2Uses();
+      const real = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: ["ck#p1", "ck#p2"] });
+      expect(real.counts).toMatchObject({ subjects: 2, abstained: 2, asked: 0, calls: 0 });
+      expect(real.abstain_reasons).toEqual({ no_locator: 2 });
+      expect(await countDecisions()).toBe(0);
+      // (2) a builder that abstains for short patient-side speech, and one over the token budget
+      _clearUsesForTests();
+      registerUse({ use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: async () => [], build: async (id) =>
+        (id === "c_short" ? { abstain: "patient_side_speech_lt_3_turns" } : id === "c_big" ? { tooLarge: true, bytes: 250_000 } : { state: { transcript: "x" }, evidence: { consult_key: id }, lane: "text" as const }) });
+      H.script = answer({});
+      const rep = await runBench({ use: "consult_rubric", setId: "chair-affect", version: "v0", subjects: ["c_short", "c_big"] });
+      expect(rep.counts).toMatchObject({ subjects: 2, abstained: 1, too_large: 1, asked: 0, calls: 0 });
+      expect(rep.abstain_reasons).toEqual({ patient_side_speech_lt_3_turns: 1, state_too_large: 1 });
+      expect(H.calls.length).toBe(0);
+      expect(await countDecisions()).toBe(0);
+      // (3) the same two through the jev_ask BENCH job
+      const job = await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "bench", set_id: "chair-affect", version: "v0", subject_ids: ["c_short", "c_big"] }));
+      expect(job.out).toMatchObject({ kind: "done", result: { subjects: 2, decisions: 0, calls: 0 } });
+      expect(await countDecisions()).toBe(0);
+      expect((await rows`SELECT count(*)::int AS n FROM jev_call`)[0]!.n).toBe(0);
+      // control: the SAME subjects in SHADOW (a ratified set) DO write their typed rows, so the zero above is the bench rule and not an artefact
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow', ratified_by = 'test', ratified_at = now() WHERE id = 'chair-affect'`;
+      try {
+        env({ JEV_USE_CONSULT_RUBRIC: "1" });
+        await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "shadow", set_id: "chair-affect", version: "v0", subject_ids: ["c_short", "c_big"] }));
+        const shadow = await rows`SELECT subject_id, outcome FROM jev_decision WHERE question_set_id = 'chair-affect' AND order_variant = 'derived' ORDER BY subject_id, question_id`;
+        expect(shadow.length).toBe(8);   // 2 subjects x 4 questions
+        expect(new Set(shadow.map((x) => `${x.subject_id}/${x.outcome}`))).toEqual(new Set(["c_short/no_answer", "c_big/state_too_large"]));
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'draft', ratified_by = NULL, ratified_at = NULL WHERE id = 'chair-affect'`;
+        await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'chair-affect'`;
+      }
+    });
+
     it("the P2 uses are registered in production code (one per set), and registering twice is harmless", () => {
       _clearUsesForTests(); registerP2Uses(); registerP2Uses();
       expect([...new Set(["u10-timeline", "encounter-end", "stt-quality", "stt-pick", "pitch-detect", "pitch-uptake", "chair-affect", "doubt"])].length).toBe(8);
