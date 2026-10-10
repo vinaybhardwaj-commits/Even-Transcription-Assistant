@@ -6,7 +6,7 @@
  *   claims  { iss:<device_id>, aud:"evenscribe-fleet", iat, exp, jti, htm:"GET"|"POST", htu:"/api/fleet/…" , bsha? }
  * exp - iat <= 300; iat may be at most 120 s in the future and exp at most 120 s in the past (clock skew). `htm` + `htu` bind the token to ONE request line;
  * on a POST `bsha` = base64url(SHA-256(raw body bytes)) binds it to ONE body, so a captured token cannot carry a different body. A `jti` is accepted once per signer
- * (fleet_jti, kept 15 min, longer than the 420 s a token can be accepted for).
+ * (fleet_jti, kept 15 min, longer than the 540 s a token can be accepted for: iat up to 120 s ahead, then 300 s lifetime, then 120 s past exp).
  *
  * Refusal reasons (all HTTP 401 except where noted): malformed · unknown_device · revoked · bad_signature · bad_audience · expired · not_yet_valid · ttl_too_long · request_mismatch · replay.
  */

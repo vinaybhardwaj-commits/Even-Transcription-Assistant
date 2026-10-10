@@ -42,8 +42,8 @@ export async function queueCommand(sql: FleetSql, c: QueueInput): Promise<QueueR
   if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
   if (dev[0].machine !== c.machine) return { ok: false, reason: "machine_mismatch" };
   const ins = await sql`
-    INSERT INTO fleet_commands (cmd_id, device_id, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
-    VALUES (${c.cmd_id}, ${c.device_id}, ${c.verb}, ${JSON.stringify(c.params)}::jsonb, ${c.issued_at}::timestamptz, ${c.expires_at}::timestamptz, ${c.nonce}, ${c.issuer.kind}, ${c.issuer.id}, ${c.approval_ref}, ${c.key_id}, ${c.signature})
+    INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
+    VALUES (${c.cmd_id}, ${c.device_id}, ${c.machine}, ${c.verb}, ${JSON.stringify(c.params)}::jsonb, ${c.issued_at}::timestamptz, ${c.expires_at}::timestamptz, ${c.nonce}, ${c.issuer.kind}, ${c.issuer.id}, ${c.approval_ref}, ${c.key_id}, ${c.signature})
     ON CONFLICT DO NOTHING
     RETURNING cmd_id
   `;

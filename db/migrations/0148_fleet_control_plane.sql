@@ -40,6 +40,8 @@ CREATE INDEX IF NOT EXISTS fleet_devices_machine_idx ON fleet_devices (machine);
 CREATE TABLE IF NOT EXISTS fleet_commands (
   cmd_id          text PRIMARY KEY,
   device_id       text NOT NULL REFERENCES fleet_devices (device_id),
+  -- the machine value the issuer SIGNED into the envelope, stored as issued: a later re-registration under another spelling must not change what is served
+  machine         text NOT NULL,
   verb            text NOT NULL,
   params          jsonb NOT NULL DEFAULT '{}'::jsonb,
   issued_at       timestamptz NOT NULL,

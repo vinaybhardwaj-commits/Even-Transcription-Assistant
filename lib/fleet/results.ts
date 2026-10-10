@@ -76,11 +76,11 @@ export async function recordResult(sql: FleetSql, signerDeviceId: string, machin
   if (!cmd[0] || cmd[0].device_id !== signerDeviceId) return { ok: false, status: 404, code: "unknown_command" };
   const same = async (): Promise<boolean> => {
     const r = (await sql`
-      SELECT outcome, reason, upload_key, detail::text AS detail, started_at = ${b.started_at}::timestamptz AS s, finished_at = ${b.finished_at}::timestamptz AS f
+      SELECT outcome, reason, upload_key, detail = ${JSON.stringify(b.detail)}::jsonb AS d, started_at = ${b.started_at}::timestamptz AS s, finished_at = ${b.finished_at}::timestamptz AS f
         FROM fleet_results WHERE cmd_id = ${b.cmd_id}
-    `) as Array<{ outcome: string; reason: string | null; upload_key: string | null; detail: string; s: boolean; f: boolean }>;
+    `) as Array<{ outcome: string; reason: string | null; upload_key: string | null; d: boolean; s: boolean; f: boolean }>;
     const x = r[0];
-    return !!x && x.outcome === b.outcome && x.reason === b.reason && x.upload_key === (b.upload?.r2_key ?? null) && x.s && x.f && JSON.stringify(JSON.parse(x.detail)) === JSON.stringify(b.detail);
+    return !!x && x.outcome === b.outcome && x.reason === b.reason && x.upload_key === (b.upload?.r2_key ?? null) && x.s && x.f && x.d; // jsonb = jsonb: key order and whitespace do not matter
   };
   if (cmd[0].state === "done") return (await same()) ? { ok: true, status: 200, duplicate: true } : { ok: false, status: 409, code: "RESULT_CONFLICT" };
   if (cmd[0].state !== "delivered") return { ok: false, status: 409, code: "not_delivered" };

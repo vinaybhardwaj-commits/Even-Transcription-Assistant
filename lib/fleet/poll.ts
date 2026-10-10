@@ -9,7 +9,9 @@
  * again after REDELIVER_AFTER_S, until it expires; the helper dedups on cmd_id / nonce. A command past expires_at is never delivered (queued ones are flipped to
  * 'expired' here), and one whose issued_at is more than 120 s in the future is held back. At most MAX_BATCH per poll, oldest first.
  *
- * Envelope bytes: every field is served exactly as the issuer signed it. Timestamps are ISO-8601 UTC with milliseconds; `approval_ref` is always present (string or null);
+ * Envelope: every field is served as the issuer signed it, including `machine` (stored on the command at queue time, never read from fleet_devices). `params` comes back
+ * from jsonb with its keys reordered; verification canonicalises first (PRD §5.3), so that is harmless.
+ * Timestamps are ISO-8601 UTC with milliseconds; `approval_ref` is always present (string or null);
  * `issuer` is {kind,id}. This code never signs and never alters a command.
  */
 import type { FleetSql } from "./device-auth";
@@ -71,13 +73,13 @@ export async function claimCommands(sql: FleetSql, deviceId: string): Promise<En
           ORDER BY issued_at, cmd_id
           LIMIT ${MAX_BATCH}
           FOR UPDATE SKIP LOCKED)
-      RETURNING cmd_id, device_id, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature
+      RETURNING cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature
     )
-    SELECT c.cmd_id, c.device_id, d.machine, c.verb, c.params,
+    SELECT c.cmd_id, c.device_id, c.machine, c.verb, c.params,
            to_char(c.issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS issued_at,
            to_char(c.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS expires_at,
            c.nonce, c.issuer_kind, c.issuer_id, c.approval_ref, c.key_id, c.signature
-      FROM c JOIN fleet_devices d ON d.device_id = c.device_id
+      FROM c
      ORDER BY c.issued_at, c.cmd_id
   `) as Row[];
   return rows.map((r) => ({

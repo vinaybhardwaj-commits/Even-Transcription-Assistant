@@ -183,6 +183,11 @@ beforeEach(async () => {
       expect(await poll("not.a.jws")).toMatchObject({ status: 401, json: { error: "malformed" } });
     });
 
+    it("REFUSED: iss must equal kid (a genuine signature by the device's key, but the claims name another issuer)", async () => {
+      expect(await poll(deviceJwt(DEV, K, { claims: { iss: "dev_" + "2".repeat(24) } }))).toMatchObject({ status: 401, json: { error: "malformed" } });
+      expect(await poll(deviceJwt(DEV, K, { claims: { iss: undefined } }))).toMatchObject({ status: 401, json: { error: "malformed" } });
+    });
+
     it("REFUSED: UNKNOWN DEVICE (a valid signature by a key the server never registered)", async () => {
       const stranger = newKey();
       expect(await poll(deviceJwt("dev_" + "0".repeat(24), stranger))).toMatchObject({ status: 401, json: { error: "unknown_device" } });
@@ -297,11 +302,21 @@ beforeEach(async () => {
     });
 
     it("a queued command that has expired is flipped to 'expired' and never delivered; one issued far in the future is held back", async () => {
-      pg.exec(`INSERT INTO fleet_commands (cmd_id, device_id, verb, issued_at, expires_at, nonce, issuer_kind, issuer_id, key_id, signature)
-        VALUES ('cmd_old', '${DEV}', 'helper_status', now() - interval '200 seconds', now() - interval '5 seconds', 'n_old', 'operator', 'op', 'fk1', 'sig'),
-               ('cmd_future', '${DEV}', 'helper_status', now() + interval '600 seconds', now() + interval '800 seconds', 'n_fut', 'operator', 'op', 'fk1', 'sig')`);
+      pg.exec(`INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, issued_at, expires_at, nonce, issuer_kind, issuer_id, key_id, signature)
+        VALUES ('cmd_old', '${DEV}', '${MACHINE}', 'helper_status', now() - interval '200 seconds', now() - interval '5 seconds', 'n_old', 'operator', 'op', 'fk1', 'sig'),
+               ('cmd_future', '${DEV}', '${MACHINE}', 'helper_status', now() + interval '600 seconds', now() + interval '800 seconds', 'n_fut', 'operator', 'op', 'fk1', 'sig')`);
       expect((await poll(deviceJwt(DEV, K))).json.commands).toEqual([]);
       expect(await q`SELECT cmd_id, state FROM fleet_commands ORDER BY cmd_id`).toEqual([{ cmd_id: "cmd_future", state: "queued" }, { cmd_id: "cmd_old", state: "expired" }]);
+    });
+
+    it("F2: the envelope serves the machine the command was ISSUED for, even after a same-key re-registration under another spelling", async () => {
+      const c = cmdFor(DEV, MACHINE);
+      expect(await queueCommand(H.sql as never, c)).toEqual({ ok: true });
+      const again = await register(K, { body: { machine: "EHRC-HOME’s Mac mini" } }); // normalises equal to MACHINE
+      expect(again.status).toBe(200);
+      expect((await q<{ machine: string }>`SELECT machine FROM fleet_devices WHERE device_id = ${DEV}`)[0]!.machine).toBe("EHRC-HOME’s Mac mini");
+      const env = ((await poll(deviceJwt(DEV, K))).json.commands as Array<Record<string, unknown>>)[0]!;
+      expect(env.machine).toBe(MACHINE);
     });
 
     it("a device receives only ITS OWN commands", async () => {
@@ -391,6 +406,16 @@ beforeEach(async () => {
       expect(await send(b)).toMatchObject({ status: 200, json: { duplicate: true } });
       expect(await send({ ...b, outcome: "failed" })).toMatchObject({ status: 409, json: { error: "RESULT_CONFLICT" } });
       expect((await q<{ outcome: string }>`SELECT outcome FROM fleet_results`)[0]!.outcome).toBe("ok");
+    });
+
+    it("F1: an identical resend whose detail keys are NOT in jsonb order is still 200 duplicate:true (a helper retrying after a lost response); a changed value is 409", async () => {
+      const id = await delivered();
+      const text = (d: string) => `{"cmd_id":"${id}","device_id":"${DEV}","outcome":"ok","reason":null,"started_at":"2026-10-10T07:00:00.000Z","finished_at":"2026-10-10T07:00:01.000Z","detail":${d}}`;
+      const post = (t: string) => postResult(deviceJwt(DEV, K, { method: "POST", body: t }), null, t);
+      expect(await post(text('{"notes":"done","exit":0}'))).toMatchObject({ status: 200, json: { duplicate: false } });
+      expect(await post(text('{"notes":"done","exit":0}'))).toMatchObject({ status: 200, json: { duplicate: true } });
+      expect(await post(text('{ "exit": 0, "notes": "done" }'))).toMatchObject({ status: 200, json: { duplicate: true } });
+      expect(await post(text('{"notes":"done","exit":1}'))).toMatchObject({ status: 409, json: { error: "RESULT_CONFLICT" } });
     });
 
     it("REFUSED: a result for a command that was never delivered (409), for an unknown command (404)", async () => {
