@@ -271,8 +271,12 @@ enum RoomInstallIDSource: Equatable, Sendable {
 
 /// What `run()` decided the process should do when it returned (§13.3 steps 7 and 9).
 public enum RoomEngineExit: Equatable, Sendable {
-  /// The ordinary stop: retired, superseded, cancelled. Exit 0 and stay stopped.
+  /// The engine returned for any reason other than the two below (cancelled, finished). The CLI
+  /// exits 0 and the LaunchAgent, which is `KeepAlive true` since 0.1.29, starts it again.
   case stopped
+  /// The server refused this install as retired or superseded (§4.5 rule 3). A deliberate stop:
+  /// the CLI parks the process instead of exiting, so `KeepAlive true` cannot restart it.
+  case retired
   /// A swap script now owns the bundle and the restart. Exit 64 (R3-4).
   case handedOverToUpdate(version: String)
 }
@@ -1480,6 +1484,7 @@ public actor RoomEngine {
           log("retry as install \(refused) also refused (409 RETIRED); stopping")
         }
         retiredByServer = true
+        exitReason = .retired
         lastError = "retired: this install was superseded by a newer enrolment"
         FileHandle.standardError.write(
           Data(
@@ -3074,8 +3079,8 @@ public actor RoomEngine {
 
   // MARK: - Tier 1 §3: the three operator verbs
 
-  /// `restart_engine`'s exit. NOT 0: the LaunchAgent relaunches only on a non-zero exit
-  /// (`KeepAlive: {SuccessfulExit: false}`, R2 §2.4). NOT 1, which is any error, and NOT 64, which is
+  /// `restart_engine`'s exit. Non-zero by habit from before 0.1.29, when the LaunchAgent relaunched
+  /// only on a non-zero exit; it is now `KeepAlive true` and restarts on any. NOT 1, which is any error, and NOT 64, which is
   /// the self-update handover (`RoomSelfUpdate.handoverExitCode`). 75 is sysexits' EX_TEMPFAIL —
   /// "try again" — and is distinct in launchd.log.
   public static let restartExitCode: Int32 = 75

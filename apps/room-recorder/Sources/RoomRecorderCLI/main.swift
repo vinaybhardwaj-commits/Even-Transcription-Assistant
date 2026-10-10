@@ -218,6 +218,12 @@ private enum RoomRecorderCLI {
             // 0.1.25: auto-start at clinic open is OPT-IN per Mac (an `auto-start-on` file beside
             // config.json). Absent, this build behaves exactly as 0.1.24 does.
             if RoomAutoStartMarker(root: root).optedIn() { await engine.enableAutoStart() }
+            // 0.1.29. The instance lock is held, so no other app is running: any tapewriter still
+            // writing with launchd as its parent belongs to an instance that is gone. Stop it
+            // before a new capture starts next to it. Ids are logged; no file is touched.
+            OrphanTapewriterReaper.reap(log: { message in
+              FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+            })
             try await engine.run()
             switch await engine.exitReason {
             case .handedOverToUpdate(let version):
@@ -235,8 +241,12 @@ private enum RoomRecorderCLI {
 
                   """.utf8))
               return RoomSelfUpdate.handoverExitCode
+            case .retired:
+              // §4.5 rule 3: a deliberate stop. The LaunchAgent is `KeepAlive true`, so exiting
+              // would restart a retired copy for ever. Park instead; nothing polls or records.
+              await RoomLaunchAgent.parkForever()
             case .stopped:
-              // A clean return is the retired case (§4.5 rule 3): stop, and stay stopped.
+              // Any other clean return. Exit 0; launchd starts the app again (0.1.29).
               return 0
             }
           } catch {
@@ -295,32 +305,9 @@ private enum RoomRecorderCLI {
         let plistURL = launchAgents.appendingPathComponent(
           "com.evenscribe.room-recorder.plist", isDirectory: false)
         let logPath = root.appendingPathComponent("launchd.log").path
-        let plist: [String: Any] = [
-          "Label": "com.evenscribe.room-recorder",
-          "ProgramArguments": [executable.standardizedFileURL.path, "run", "--root", root.path],
-          "RunAtLoad": true,
-          // §4.5 rule 3 / R2 §2.4. NOT `KeepAlive: true`, which restarts on ANY exit: a retired
-          // install stops deliberately and cleanly, and an unconditional KeepAlive would have
-          // launchd relaunch it in a tight loop for ever, polling 409s. `SuccessfulExit: false`
-          // means "restart only when it exits non-zero", so a crash is still covered and a
-          // deliberate stop is honoured.
-          "KeepAlive": ["SuccessfulExit": false],
-          // R3-11. The plist carried no ThrottleInterval, so launchd's default of 10 seconds
-          // applied: a bundle that cannot launch would retry six times a minute for ever. Thirty
-          // seconds is what that fixes, and it is ALL it fixes.
-          //
-          // ─── IT DOES NOT PROTECT THE SWAP, AND THE FIRST CUT OF THIS COMMENT SAID IT DID ────
-          // Corrected in Fix 1. `ThrottleInterval` is a minimum interval between STARTS, and a
-          // resident app that has been running for hours spent it long ago — so exiting 64 gets an
-          // immediate respawn and the swap script is racing the new process from the moment it is
-          // spawned. What actually protects the staging directory is the handover marker
-          // (`RoomSelfUpdate.handoverMarkerURL`, F3); what stops a failed swap looping is the
-          // attempt ledger (F2). Neither of those is this number.
-          "ThrottleInterval": 30,
-          "ProcessType": "Interactive",
-          "StandardOutPath": logPath,
-          "StandardErrorPath": logPath,
-        ]
+        // 0.1.29: `KeepAlive true`; see RoomLaunchAgent for why and for the two deliberate stops.
+        let plist = RoomLaunchAgent.plist(
+          executablePath: executable.standardizedFileURL.path, rootPath: root.path, logPath: logPath)
         let data = try PropertyListSerialization.data(
           fromPropertyList: plist, format: .xml, options: 0)
         try data.write(to: plistURL, options: .atomic)
@@ -332,12 +319,11 @@ private enum RoomRecorderCLI {
         throw CLIError("unknown command: \(arguments.command)\n\(usage)")
       }
     } catch RoomEngineError.needsEnrolment {
-      // EXIT ZERO, and the zero is the whole point. The LaunchAgent carries
-      // `KeepAlive = { SuccessfulExit: false }`, so a non-zero exit here would have launchd
-      // restart the app immediately, for ever, each time failing the same way — the thrash §2.4
-      // exists to prevent. RoomEngine.load has already written `needs_enrol` and said why on
-      // stderr; there is nothing left to retry, so the process stops and stays stopped.
-      exit(0)
+      // PARK, do not exit. The LaunchAgent is `KeepAlive true` (0.1.29), so any exit here would have
+      // launchd restart the app every ThrottleInterval, each time failing the same way — the
+      // thrash §2.4 exists to prevent. RoomEngine.load has already written `needs_enrol` and said
+      // why on stderr; there is nothing left to retry. Enrolling again restarts it by hand.
+      RoomLaunchAgent.parkForeverBlocking()
     } catch {
       let message = "room-recorder: \(error.localizedDescription)\n"
       FileHandle.standardError.write(Data(message.utf8))

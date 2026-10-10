@@ -81,16 +81,23 @@ import Testing
 
   /// A directory of stub tools that go on PATH ahead of the real ones, so no test can boot a real
   /// LaunchAgent out or need a real signing certificate.
-  static func stubTools(codesignExit: Int32, log: URL) throws -> URL {
+  static func stubTools(codesignExit: Int32, log: URL, residentVersionFile: URL? = nil) throws -> URL {
     let bin = URL(fileURLWithPath: NSTemporaryDirectory())
       .appendingPathComponent("r3-stubs-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     for (name, exit) in [("launchctl", Int32(0)), ("codesign", codesignExit)] {
       let tool = bin.appendingPathComponent(name, isDirectory: false)
+      // 0.1.29. For launchctl only: also record which version sits at the resident path at the
+      // moment of each call, in a second file, so a test can prove WHEN the agent was out. The
+      // first file's lines are unchanged.
+      let snapshot =
+        (name == "launchctl" && residentVersionFile != nil)
+        ? "echo \"$1 resident=$(cat '\(residentVersionFile!.path)' 2>/dev/null || echo none)\" >> '\(log.path).state'\n"
+        : ""
       try """
         #!/bin/bash
         echo "\(name) $*" >> '\(log.path)'
-        exit \(exit)
+        \(snapshot)exit \(exit)
         """.write(to: tool, atomically: true, encoding: .utf8)
       try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
     }
@@ -140,7 +147,9 @@ import Testing
       "one rendezvous per run; two would deadlock on the same FIFO")
     let toolLog = fixture.root.appendingPathComponent("tools.log", isDirectory: false)
     FileManager.default.createFile(atPath: toolLog.path, contents: nil)
-    let stubs = try stubTools(codesignExit: codesignExit, log: toolLog)
+    let stubs = try stubTools(
+      codesignExit: codesignExit, log: toolLog,
+      residentVersionFile: fixture.resident.appendingPathComponent("version.txt"))
     defer { try? FileManager.default.removeItem(at: stubs) }
 
     var script = RoomSwapScript.render(
@@ -639,6 +648,44 @@ import Testing
     #expect(result.outcome == .ok)
     #expect(result.version == "0.1.8")
     #expect(result.reason == nil)
+  }
+
+  @Test func theAgentIsOutWhileTheBundlesMoveSoAlwaysOnKeepAliveCannotFightTheSwap() throws {
+    // 0.1.29. The LaunchAgent is `KeepAlive true`: launchd restarts the app on ANY exit. The swap
+    // is safe under that only if the agent is booted out BEFORE the first bundle move and booted
+    // back in AFTER the last one. The stub records the version at the resident path at each
+    // launchctl call: the old one at `bootout`, the new one at `bootstrap`, and nothing between.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.8")
+
+    let run = try Self.runSwapScript(fixture, stagedBundle: staged, version: "0.1.8")
+    #expect(run.status == 0)
+    let state = try String(
+      contentsOf: fixture.root.appendingPathComponent("tools.log.state"), encoding: .utf8
+    ).split(separator: "\n").map(String.init)
+    #expect(state.first == "bootout resident=0.1.7")
+    #expect(state.last == "bootstrap resident=0.1.8")
+    #expect(state.filter { $0.hasPrefix("bootout") }.count == 1)
+    #expect(state.count == 2, "no launchctl call may land while the bundles are moving: \(state)")
+  }
+
+  @Test func aRolledBackSwapBootsTheAgentBackInOnTheOldBundle() throws {
+    // The failure side of the same guarantee: a bundle that fails verification is put back, and the
+    // agent only comes back after the old one is at the resident path again.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.8")
+
+    _ = try Self.runSwapScript(fixture, stagedBundle: staged, version: "0.1.8", codesignExit: 1)
+    let state = try String(
+      contentsOf: fixture.root.appendingPathComponent("tools.log.state"), encoding: .utf8
+    ).split(separator: "\n").map(String.init)
+    #expect(state.first == "bootout resident=0.1.7")
+    #expect(state.last == "bootstrap resident=0.1.7")
+    #expect(fixture.version(of: fixture.resident) == "0.1.7")
   }
 
   @Test func theNewBundleWritesThePlistBeforeTheAgentIsBootstrapped() throws {

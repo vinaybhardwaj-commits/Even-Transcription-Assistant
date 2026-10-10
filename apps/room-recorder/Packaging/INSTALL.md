@@ -29,6 +29,14 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    ```
    The `plutil` line must print `/Applications/EvenScribe Room Recorder.app/Contents/MacOS/room-recorder`.
    If it prints anything else, stop; do not run the `bootstrap` line.
+   This also installs the 0.1.29 plist: `KeepAlive` is now `true`, so launchd restarts the app after
+   ANY exit, a clean one included. Check it before the `bootstrap` line (it must print `true`):
+   `plutil -extract KeepAlive raw ~/Library/LaunchAgents/com.evenscribe.room-recorder.plist`
+   An old plist (`SuccessfulExit` instead of `true`) means this step was skipped; a room left on it
+   stays stopped after a clean exit. The agent is only re-read at `bootout` then `bootstrap`; a
+   `kickstart` does not reload the file.
+   A retired or never-enrolled app now idles instead of exiting. That is deliberate: it is how it
+   stays stopped under `KeepAlive true`.
    A Mac that was never enrolled needs the usual bootstrap paste first; this step does not enrol.
 5. Check the right app is running. The path in the output must start with `/Applications/`:
    `pgrep -fl "room-recorder run"`

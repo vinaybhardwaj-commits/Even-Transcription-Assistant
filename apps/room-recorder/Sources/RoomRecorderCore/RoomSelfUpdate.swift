@@ -17,12 +17,14 @@ import Foundation
 /// that no code ever restored would have been the fifth.
 ///
 /// ─── EXIT 64 IS A FAIL-SAFE, NOT A STATUS ────────────────────────────────────────────────────
-/// The LaunchAgent carries `KeepAlive = {"SuccessfulExit": false}`: launchd restarts the app on a
-/// NON-ZERO exit and leaves it stopped on zero. `needs_enrol` and the retired 409 both exit zero
-/// on purpose. Exit 1 already means any error. 64 is a third value, distinct in `launchd.log`, and
-/// its non-zero-ness is the safety: if the swap script dies before it boots the agent out, launchd
-/// starts the OLD app again and the room keeps recording on the version it has. Nothing is lost by
-/// an update that does not happen; a room that stops recording is a clinic day.
+/// Since 0.1.29 the LaunchAgent carries `KeepAlive = true`: launchd restarts the app on ANY exit.
+/// (Before that it was `{SuccessfulExit: false}` and a clean exit left a room unattended for a day.)
+/// The swap is unchanged by this: the app exited 64 and was restarted at once under the old
+/// setting too, and the script's `bootout` is what stops that restart before any bundle moves.
+/// Exit 1 already means any error. 64 is a third value, distinct in `launchd.log`, and the restart
+/// is the safety: if the swap script dies before it boots the agent out, launchd starts the OLD app
+/// again and the room keeps recording on the version it has. Nothing is lost by an update that does
+/// not happen; a room that stops recording is a clinic day.
 ///
 /// ─── THE EXPECTED SIGNER IS COMPILED IN, NEVER SERVED (R3-5) ─────────────────────────────────
 /// `pinnedRequirement` below is a constant in this binary. The release route returns where to get
@@ -78,9 +80,9 @@ public enum RoomSelfUpdate {
   /// stopped — and from 1, which already means any error. So an update restart is readable in
   /// `launchd.log` and separable from a crash.
   ///
-  /// ITS NON-ZERO-NESS IS THE FAIL-SAFE, not its value. `KeepAlive` is `{"SuccessfulExit": false}`,
-  /// so launchd restarts the app on any non-zero exit: if the swap script dies before it boots the
-  /// agent out, the OLD app comes back and the room keeps recording on the version it has.
+  /// THE RESTART IS THE FAIL-SAFE, not the value. `KeepAlive` is `true` (0.1.29), so launchd
+  /// restarts the app on any exit: if the swap script dies before it boots the agent out, the OLD
+  /// app comes back and the room keeps recording on the version it has.
   public static let handoverExitCode: Int32 = 64
 
   // MARK: - Paths under the app root
