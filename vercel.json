@@ -26,6 +26,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/admin/pulse-doctor-voice",
+      "schedule": "0 21 * * *"
+    },
+    {
       "path": "/api/admin/emotion-windows",
       "schedule": "*/5 * * * *"
     },
