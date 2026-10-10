@@ -45,7 +45,7 @@ import { machineKeys } from "./machine-keys";
 import { normalizeHostname } from "./types";
 
 /** The extension build the fleet should be on. Compared as dotted integers (0.1.1.39 > 0.1.0.40 > 0.1.0.9). */
-export const EXT_TARGET_VERSION = "0.1.1.40";
+export const EXT_TARGET_VERSION = "0.1.2";
 /** An extension event newer than this means the extension is alive. */
 export const EXT_ALIVE_S = 10 * 60;
 /** A poller row older than this says nothing about now: the machine is `offline` for our purposes. */

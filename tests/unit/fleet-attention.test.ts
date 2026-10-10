@@ -731,9 +731,9 @@ describe("R8 extension_missing / R9 extension_behind", () => {
     expect(f).toHaveLength(1);
     expect(items).toHaveLength(1);
     expect(f[0]).toMatchObject({ room_id: "fleet", room_name: "Fleet", machine: null, kind: "extension_behind", severity: "amber" });
-    expect(f[0]!.detail).toBe("3 rooms on old extension builds: OPD 6 (0.1.0.34), OPD 5 (0.1.0.33), Third Floor Consultation (0.1.0.38); update to 0.1.1.40.");
+    expect(f[0]!.detail).toBe("3 rooms on old extension builds: OPD 6 (0.1.0.34), OPD 5 (0.1.0.33), Third Floor Consultation (0.1.0.38); update to 0.1.2.");
     expect(f[0]!.since).toBe(iso("2026-10-05 13:00:00")); // the earliest
-    expect(f[0]!.action).toContain("Update the Pulse Presence extension to 0.1.1.40");
+    expect(f[0]!.action).toContain("Update the Pulse Presence extension to 0.1.2");
     expect(f[0]!.action).not.toMatch(/re-?run|install|policy/i);
     expect(f[0]!.detail.trim().endsWith(".") && f[0]!.action.trim().endsWith(".")).toBe(true);
   });
@@ -746,7 +746,7 @@ describe("R8 extension_missing / R9 extension_behind", () => {
 
   it("R9 says \"at least 2 h\" when a room's behind_since is the loader's look-back floor, and nothing of the kind otherwise", () => {
     const floor = fleetRow(run(NOW, roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:00:00"), { behind_at_floor: true })), roomOf(behindRow("OPD 6", "0.1.0.34", iso("2026-10-05 14:00:00")))));
-    expect(floor[0]!.detail.endsWith("update to 0.1.1.40. Behind for at least 2 h.")).toBe(true);
+    expect(floor[0]!.detail.endsWith("update to 0.1.2. Behind for at least 2 h.")).toBe(true);
     const plain = fleetRow(run(NOW, roomOf(behindRow("OPD 5", "0.1.0.33", iso("2026-10-05 13:30:00")))));
     expect(plain[0]!.detail).not.toContain("at least");
   });
@@ -793,7 +793,7 @@ describe("R8 reboot note / R10 chrome_not_running", () => {
     room_name: "Cardiology OPD",
     last_ext_ts: iso("2026-10-05 14:20:00"),
     ext_age_s: 40 * 60,
-    ext_version: "0.1.1.40",
+    ext_version: "0.1.2.40",
     version_state: "current",
     poller: { ok: true, chrome_running: true, console_user: "console-a", age_s: 20, idle_s: null },
     status: "missing",
