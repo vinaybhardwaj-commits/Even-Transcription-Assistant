@@ -4,10 +4,11 @@
  *
  * V's STANDING RULE (restated 08 Oct ~20:40): only isolated consult audio goes to Sarvam. No other room audio, never whole windows. So the sources are
  *   { encounter_id }  a doctor-recorded encounter (audio production already sends to Sarvam today)         scope "encounter"
- *   { consult_uid }   a clip cut by the CONSULT cutter (resolver pending: answers consult_index_unavailable)  scope "consult_clip"
+ *   { consult_uid }   a clip cut by the CONSULT cutter, resolved through the consult_index table (0146); refusals: consult_not_indexed, consult_sealed, consult_voice_isolated,
+ *                     mirror_minutes_missing, already_transcribed, audio_unreadable. A result for the SAME CUT VERSION and options already stored is returned, never re-sent.  scope "consult_clip"
  * Room / session arguments (room, from, to, session_id, from_ms, to_ms) are REFUSED with scope_consult_only.
  *
- *   prepare   gateway + cap check; the encounter's audio object (or, for a consult, consult_index_unavailable)
+ *   prepare   gateway + cap check; the encounter's audio object, or the consult's index row + clip (an existing result for that cut ends the job here, before any Sarvam call)
  *   init      read the clip, MEASURE its duration from the container (never trust the DB / client value), refuse unknown or > 30 min, re-check the cap
  *             counting earlier unaudited jobs, create the Sarvam batch job and PERSIST its id
  *   upload    upload-files + Azure PUT (re-runnable: it overwrites the blob)
@@ -25,6 +26,8 @@ import { sql } from "@/lib/db";
 import { JOIN_MAX_MS } from "@/lib/bench-join";
 import { measureAudioMs } from "@/lib/audio-duration";
 import { getObjectBytes, headObject } from "@/lib/r2";
+import { preflightClip } from "@/lib/consult-clip";
+import { recordResult, type ConsultResult } from "@/lib/room-access/consult-index-store";
 import { gatewayConfigured } from "@/lib/sarvam-gateway";
 import { chunkText, gwBatchInit, gwBatchResult, gwBatchStartJob, gwBatchStatus, gwBatchUpload, gwTranslateChunk, SARVAM_GW_STT_MODEL, SARVAM_GW_TRANSLATE_MODEL, type Fail } from "@/lib/sarvam-gw";
 import { SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
@@ -101,7 +104,7 @@ export const sarvamTranscribeKind: JobKind = {
   name: SARVAM_TRANSCRIBE_KIND,
   first: STEPS.prepare,
   roomData: false,
-  roomDataNote: "source is a doctor-PWA encounter (no room placement); a room audio argument is refused at parse (scope_consult_only)",
+  roomDataNote: "source is a doctor-PWA encounter or a cut consult clip resolved through consult_index (the held-out rule is lifted, V 10 Oct); a room audio argument is refused at parse (scope_consult_only)",
   scope: "invoke",
   parseArgs: (raw) => parseSarvamTranscribeArgs(raw) as unknown as Record<string, unknown>,
   // S4: one open job per source; a second ask for the same encounter / consult gets the open job's id back
@@ -144,10 +147,9 @@ const scopeOf = (ctx: StepContext): SarvamScope => (ctx.progress.scope === "cons
 
 // --- prepare --------------------------------------------------------------------------------------------------------------------------------
 async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
-  if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   const a = ctx.args as unknown as SarvamTranscribeArgs;
-  // a consult clip comes from the CONSULT cutter's index; its resolver is not wired yet
-  if (a.source === "consult") return failWith(jobError("consult_index_unavailable"));
+  if (a.source === "consult") return prepareConsult(ctx, a);
+  if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   const rows = (await sql`SELECT audio_object_key FROM encounter WHERE id = ${a.encounter_id}::text LIMIT 1`) as Array<{ audio_object_key: string | null }>;
   const enc = rows[0];
@@ -160,6 +162,30 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
     /* the init step reads the bytes and fails by name if the object is gone */
   }
   return nextStep(STEPS.init, { clip_key: enc.audio_object_key, content_type: contentType, scope: "encounter", ref: a.encounter_id, source_kind: "encounter" });
+}
+
+/**
+ * A consult clip: the index row and every refusal first (lib/consult-clip.ts). A result already stored for this cut version and these options ends the job HERE, before the gateway or the cap is looked at
+ * (so a capped day, or a gateway that is down, still answers an old question) and without one Sarvam call.
+ */
+async function prepareConsult(ctx: StepContext, a: Extract<SarvamTranscribeArgs, { source: "consult" }>): Promise<StepOutcome> {
+  const pre = await preflightClip(a.consult_uid, { mode: a.mode, english: a.english });
+  if (!pre.ok) return failWith(jobError(pre.error));
+  if (pre.existing) return doneWith(existingSummary(pre.existing));
+  if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
+  if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
+  return nextStep(STEPS.init, {
+    clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", cut_version: pre.row.cut_version, clip_t0_ms: pre.row.t0_ms,
+    ...(typeof pre.row.minutes === "number" && Number.isFinite(pre.row.minutes) ? { mirror_minutes: pre.row.minutes } : {}),
+  });
+}
+
+/** What a job answers when the cut already has its result: pointers and counts only, flagged `existing` (no Sarvam call was made, nothing was billed). */
+export function existingSummary(r: ConsultResult): Record<string, unknown> {
+  return {
+    existing: true, consult_uid: r.consult_uid, cut_version: r.cut_version, source_job_id: r.job_id, r2_key: r.result_r2_key, model_stt: r.model_stt, model_translate: r.model_translate, model_rev: r.model_rev,
+    language_code: r.language_code, duration_s: r.duration_s, speakers: r.speaker_count, transcript_chars: r.transcript_chars, english_chars: r.english_chars, english_pass: r.english_pass ?? "not_requested",
+  };
 }
 
 // --- init -----------------------------------------------------------------------------------------------------------------------------------
@@ -198,8 +224,11 @@ async function initStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
   const bytes = await getObjectBytes(clipKey);
   if (!bytes) return failWith(jobError("clip_missing_in_r2"));
   // F2: the duration is MEASURED from the audio's own container. A NULL or understated database / client value cannot get past this.
-  const ms = measureAudioMs(bytes);
-  if (ms === null) return failWith(jobError("duration_unknown"));
+  const measured = measureAudioMs(bytes);
+  if (measured === null) return failWith(jobError("duration_unknown"));
+  // a consult clip is never shorter than the index says (max of the container, the size floor in measureAudioMs and the index minutes x 60)
+  const mirrorMs = typeof ctx.progress.mirror_minutes === "number" && Number.isFinite(ctx.progress.mirror_minutes) ? ctx.progress.mirror_minutes * 60_000 : 0;
+  const ms = Math.max(measured, mirrorMs);
   if (ms > JOIN_MAX_MS) return failWith(jobError("window_too_long"));
   const minutes = ms / 60_000;
   // S8A4: an English-track job makes TWO Sarvam passes over the audio, so it asks the cap for both
@@ -372,10 +401,11 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   } catch {
     throw new Error("result_write_failed"); // transient by nature: retried under MAX_FAILURES, the Sarvam output is still downloadable
   }
+  if (!wantEnglish) await recordConsult(ctx, doc); // a consult's result is registered under its cut version before the job reports done (a throw retries the step; nothing is re-sent to Sarvam)
   await ledgerBatch(ctx, "ok", 200, ctx.progress.throttled === true);
   // S8A4: the English track comes from the AUDIO: a second saaras:v3 pass in translate mode, whatever the file-level language_code says
   if (wantEnglish) return nextStep(STEPS.enInit, { ...ctx.progress, total_entries: entries.length, language_code: res.languageCode });
-  return doneWith(summary(ctx.job.id, doc));
+  return doneWith({ ...summary(ctx.job.id, doc), ...consultFields(ctx) });
 }
 
 // --- en_finish: download the English pass, align, settle what is unpaired --------------------------------------------------------------------
@@ -441,8 +471,32 @@ async function finishDoc(ctx: StepContext, key: string, doc: ResultDoc, mayuraCh
   } catch {
     throw new Error("result_write_failed");
   }
+  await recordConsult(ctx, doc);
   if (mayuraChars > 0) await ledgerTranslation(ctx, "ok", mayuraChars, 200, throttled);
-  return doneWith(summary(ctx.job.id, doc));
+  return doneWith({ ...summary(ctx.job.id, doc), ...consultFields(ctx) });
+}
+
+/** Which cut a consult job's result belongs to (ids only). */
+const consultFields = (ctx: StepContext): Record<string, unknown> =>
+  (ctx.args as unknown as SarvamTranscribeArgs).source === "consult" ? { consult_uid: (ctx.args as { consult_uid: string }).consult_uid, cut_version: ctx.progress.cut_version ?? null } : {};
+
+/** Our code identity, recorded with every consult result beside the vendor's model revision. */
+export const PIPELINE_REV = `sarvam-consult-1:${(process.env.VERCEL_GIT_COMMIT_SHA ?? "dev").slice(0, 12)}`;
+
+/**
+ * Register the finished result of a consult under (consult_uid, cut_version, mode, english): the UNIQUE key is what makes the next ask for this cut a lookup, not a second bill.
+ * Model + revision are recorded. A no-op for an encounter source, or when another job already registered this cut.
+ */
+async function recordConsult(ctx: StepContext, doc: ResultDoc): Promise<void> {
+  const a = ctx.args as unknown as SarvamTranscribeArgs;
+  const cut = ctx.progress.cut_version;
+  if (a.source !== "consult" || typeof cut !== "string" || !cut) return;
+  await recordResult({
+    consult_uid: a.consult_uid, cut_version: cut, mode: a.mode, english: a.english, num_speakers: a.num_speakers ?? null, job_id: ctx.job.id, result_r2_key: resultKey(ctx.job.id),
+    model_stt: SARVAM_GW_STT_MODEL, model_translate: SARVAM_GW_TRANSLATE_MODEL, model_rev: SARVAM_GW_STT_MODEL, pipeline_rev: PIPELINE_REV, language_code: doc.language_code, duration_s: doc.duration_s,
+    speaker_count: doc.speakers.length, transcript_chars: doc.transcript.length, english_chars: doc.english?.length ?? 0, english_pass: doc.english_pass ?? "not_requested",
+    t0_ms: num(ctx.progress.clip_t0_ms) || 0,
+  });
 }
 
 function summary(jobId: string, doc: ResultDoc): Record<string, unknown> {

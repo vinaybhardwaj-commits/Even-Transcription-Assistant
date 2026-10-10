@@ -85,6 +85,15 @@ export const JOB_ERROR_CODES = [
   "bench_set_missing",
   "bench_metric_unsupported",
   "consult_index_unavailable",
+  // consult index (0146): the Sarvam consult path
+  "consult_index_integrity",
+  "consult_not_indexed",
+  "consult_sealed",
+  "consult_voice_isolated",
+  "mirror_minutes_missing",
+  "already_transcribed",
+  "audio_unreadable",
+  "consult_batch_timeout",
   "duration_unknown",
   // the stubs
   "not_implemented",
