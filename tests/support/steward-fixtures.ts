@@ -42,6 +42,8 @@ export function healthy(A: number, over: DeepPartial<RoomSense> = {}): RoomSense
     occupancy: { state: "nobody", idle_s: 900, identity_fault: false },
     audio: { default_input_present: true, usb_removed_recent: false, device_missing_flag: false, silent_while_recording_since: null },
     start_attempts: [],
+    // the late-evening gates read this from 20:00 IST: a quiet day by default (no operator end_day, no session yet)
+    day: { operator_end_at: null, session_today: false },
     missing: [],
   };
   return merge(base, over);

@@ -28,6 +28,9 @@ import type { StewardSql } from "./tickets";
 
 export type RecorderStatus = { state: string | null; session_open: boolean | null; received_at: string };
 
+/** the late-evening start gates read their data from this IST time of day (20:00) */
+export const DAY_GATES_FROM_MS = 20 * 3_600_000;
+
 export type RoomSense = {
   room_id: string;
   room_name: string;
@@ -87,6 +90,10 @@ export type RoomSense = {
   };
   /** this room's steward start_day commands since IST midnight (bench_command source 'steward'), oldest first; null = unreadable */
   start_attempts: StartAttempt[] | null;
+  /** the late-evening start gates (rules.ts G2/G3/G4): read only from 20:00 IST. operator_end_at = newest NON-steward end_day acked in this IST day at or after 20:00 IST; session_today = the room started a bench session this IST day. undefined = not read (before 20:00 IST); null = the read failed. */
+  day?: { operator_end_at: string | null; session_today: boolean } | null;
+  /** newest bench session started this IST day, any status, re-homed sessions excluded (the REHOME note test of main's start schedule); null = none today OR the read failed (an episode is then not closed) */
+  session_start_today_at?: string | null;
   /** every input that was null (source failed, or the machine simply has no row), by name */
   missing: string[];
 };
@@ -278,6 +285,29 @@ export async function senseAll(
        AND s.started_at <= ${hi}::timestamptz
   `) as unknown as SessionRow[], [] as SessionRow[]);
   const openRoomIds = [...new Set(sess.v.map((s) => s.room_id))];
+
+  // 1b — session starts today (any status; a re-homed session after a reap is not a start, the same REHOME note test as main's start schedule). Read every tick: G3 (from 20:30 IST) and the
+  //      close of a waiting_for_mic episode both need it. Then the operator end_day, read only from 20:00 IST (G2).
+  const lateEvening = A - istMidnightOf(A) >= DAY_GATES_FROM_MS;
+  const [sessionTodayR, operatorEndR] = await Promise.all([
+    safe("bench_session_today", degraded, async () => (await sql`
+      SELECT s.room_id, max(s.started_at) AS started_at FROM bench_session s
+       WHERE s.room_id = ANY(${ids}::text[]) AND s.started_at >= ${dayStartIso}::timestamptz AND s.started_at <= ${hi}::timestamptz
+         AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
+       GROUP BY s.room_id
+    `) as unknown as Array<{ room_id: string; started_at: string | Date | null }>, [] as Array<{ room_id: string; started_at: string | Date | null }>),
+    lateEvening
+      ? safe("bench_command_end_day", degraded, async () => (await sql`
+          SELECT c.room_id, max(c.acked_at) AS acked_at
+            FROM bench_command c
+           WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'end_day' AND c.source IS DISTINCT FROM 'steward' AND c.acked_at IS NOT NULL
+             AND c.acked_at >= ${new Date(istMidnightOf(A) + DAY_GATES_FROM_MS).toISOString()}::timestamptz AND c.acked_at <= ${hi}::timestamptz
+           GROUP BY c.room_id
+        `) as unknown as Array<{ room_id: string; acked_at: string | Date | null }>, [] as Array<{ room_id: string; acked_at: string | Date | null }>)
+      : Promise.resolve(null),
+  ]);
+  const operatorEndBy = new Map((operatorEndR?.v ?? []).map((x) => [x.room_id, toIso(x.acked_at)] as const));
+  const sessionStartBy = new Map((sessionTodayR?.v ?? []).map((x) => [x.room_id, toIso(x.started_at)] as const));
 
   const [chunksR, levelsR, listenerR, attemptsR, pollerR, extR, presR, winR, chromeR, audioR, khR, extHealthR, occR, lastChunkR, recorderR] = await Promise.all([
     // 2 — chunks of the open sessions, last 30 min (R3 silence by rate).
@@ -685,6 +715,8 @@ export async function senseAll(
         default_input_name: dev?.default_input_name ?? null,
       },
       start_attempts: startAttempts,
+      session_start_today_at: sessionTodayR?.ok ? sessionStartBy.get(r.room_id) ?? null : null,
+      ...(lateEvening ? { day: operatorEndR?.ok && sessionTodayR?.ok ? { operator_end_at: operatorEndBy.get(r.room_id) ?? null, session_today: sessionStartBy.has(r.room_id) } : null } : {}),
       missing,
     });
   }
