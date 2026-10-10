@@ -126,7 +126,7 @@ public enum RoomCommandDecider {
     case .endDay:
       return phase == .recording || phase == .paused || phase == .failed
         ? .end : .refuse("no_active_session")
-    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .unknown:
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .unknown:
       // Not a day-lifecycle command. `RoomEngine.handle` dispatches these before it asks here
       // (R4, Tier 1 §3); a caller that asks anyway is refused rather than handed a phase decision.
       return .refuse("unsupported_kind")
@@ -559,6 +559,8 @@ public actor RoomEngine {
   private var lastError: String?
   private var lastPieceEndedAt: Date?
   private var needsActiveReconciliation = false
+  private var lastMicMode: MicModeStatus?
+  private var lastEvent: (name: String, at: Date)?
   private var reconciledServerStateKnown = false
   private var reconciledServerSessionID: String?
   private var reconciledServerSessionStatus: BenchSessionStatus?
@@ -582,6 +584,42 @@ public actor RoomEngine {
   /// GROWING, so one reading is never enough — the first poll of a session reports false, and
   /// that is correct rather than pessimistic: nothing has been shown to advance yet.
   private var lastDurableSampleIndex: Int64?
+  /// 0.1.25 — the plain path's `tape_advancing`: the durable PCM file's size, poll to poll.
+  private var tapeGrowth = TapeGrowthProbe()
+
+  // ─── 0.1.25: AUTO-START AT CLINIC OPEN ─────────────────────────────────────────────────────
+  /// The clock the schedule reads. `var` so a test can put the room inside or outside its window.
+  var autoStartClock: @Sendable () -> Date = { Date() }
+  /// The window rules. NIL = auto-start OFF, which is what every engine is until the resident app
+  /// turns it on: a test, a `swift run` binary or an unbundled build must never start a day just
+  /// because the wall clock happens to be inside a clinic window.
+  var autoStartSchedule: RoomSchedule?
+
+  /// The resident app calls this once after `load`. The clinic default until the server delivers a
+  /// per-room schedule.
+  public func enableAutoStart(
+    schedule: RoomSchedule = .defaultClinic,
+    clock: @escaping @Sendable () -> Date = { Date() }
+  ) {
+    autoStartSchedule = schedule
+    autoStartClock = clock
+  }
+  /// A failed start (offline, pending uploads) is tried again after a minute, not every loop.
+  private var autoStartRetryAfter = Date.distantPast
+
+  // ─── 0.1.25: SELF-TEST ──────────────────────────────────────────────────────────────────────
+  private var selfTestRunning = false
+  /// A self-test tapewriter that ignored its interrupt. While it lives the mic is claimed: no
+  /// start, adopt or second self-test may open another capture beside it (eta-refuter R1).
+  private var selfTestLingering: (any RoomCaptureProcess)?
+  private var selfTestHoldsMic: Bool { selfTestRunning || selfTestLingering?.isRunning == true }
+  /// Where the pinned pack lives. Nil = the app bundle's `Resources/SelfTest`. A test sets it.
+  var selfTestPackDirectory: URL?
+  var selfTestPlayer: any SelfTestPlaying = BuiltInSpeakerPlayer()
+  var selfTestLeadSeconds = 1.5
+  var selfTestGapSeconds = 0.5
+  /// Hard cap on a run (eta-refuter B3).
+  var selfTestMaxSeconds = 180.0
   /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
   private var retiredByServer = false
 
@@ -1074,7 +1112,18 @@ public actor RoomEngine {
   private var sessionIsOpen: Bool { phase == .recording || phase == .paused }
 
   /// True only when the index is present now, was present before, and GREW.
+  ///
+  /// ─── 0.1.25: THE PLAIN PATH FOLLOWS `tape.pcm`, NOT `tape.idx` ─────────────────────────────
+  /// The question is "did audio bytes reach disk since the last poll", and the file that holds
+  /// them is `tape.pcm`. The index is tapewriter's own bookkeeping written beside it: a checkpoint
+  /// that lags, a marker record that repeats the last `samples`, or a torn last line the tail
+  /// reader leaves for later all made a growing tape read as stationary. The resident lane has no
+  /// plain segment and keeps its index comparison.
   private func tapeIsAdvancing() -> Bool {
+    if let capture {
+      return tapeGrowth.advanced(pcm: capture.pcmURL)
+    }
+    tapeGrowth.reset()
     let current = currentDurableSampleIndex()
     defer { lastDurableSampleIndex = current }
     guard let current, let previous = lastDurableSampleIndex else { return false }
@@ -1248,6 +1297,7 @@ public actor RoomEngine {
         lastError = bounded(error)
         try? saveStatus()
       }
+      await autoStartIfDue()
 
       if Date() >= uploadRetryAfter {
         do {
@@ -1445,7 +1495,20 @@ public actor RoomEngine {
       } catch {
         lastError = bounded(error)
         try? saveStatus(preferred: .offline)
-        try await Task.sleep(nanoseconds: backoffNanoseconds)
+        // Sleep the poll back-off in 1 s slices. A capture process that exits meanwhile is
+        // finished at once, not after the full back-off.
+        var remaining = backoffNanoseconds
+        while remaining > 0 {
+          let slice = min(remaining, 1_000_000_000)
+          try await Task.sleep(nanoseconds: slice)
+          remaining -= slice
+          do {
+            try await finishUnexpectedCaptureIfNeeded()
+          } catch {
+            lastError = bounded(error)
+            try? saveStatus()
+          }
+        }
         backoffNanoseconds = min(backoffNanoseconds * 2, 30_000_000_000)
       }
     }
@@ -1698,7 +1761,7 @@ public actor RoomEngine {
       completedCommands[command.id] = result
       await acknowledge(command, result: result)
       return
-    case .checkUpdateNow, .reportDiag, .restartEngine:
+    case .checkUpdateNow, .reportDiag, .restartEngine, .selfTest:
       // Tier 1 §3. Like set_audio_input: not the day, not journaled, decided once and remembered.
       await handleOperatorVerb(command)
       return
@@ -1720,8 +1783,12 @@ public actor RoomEngine {
     } else {
       overridePause = false
     }
-    let decision = RoomCommandDecider.decide(
+    var decision = RoomCommandDecider.decide(
       kind: command.kind, phase: phase, overridePause: overridePause)
+    // 0.1.25: the mic and speaker belong to a self-test for its minute; a start waits.
+    if selfTestHoldsMic, command.kind == .startDay, decision == .start || decision == .resume {
+      decision = .refuse("self_test_running")
+    }
     let result: CommandResult
     do {
       switch decision {
@@ -2281,7 +2348,7 @@ public actor RoomEngine {
     case .pauseDay: return .pauseDay
     case .resumeDay: return .resumeDay
     case .endDay: return .endDay
-    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .unknown: return nil
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .unknown: return nil
     }
   }
 
@@ -2395,7 +2462,7 @@ public actor RoomEngine {
   )? {
     switch (kind, success) {
     case (.setAudioInput, _), (.checkUpdateNow, _), (.reportDiag, _), (.restartEngine, _),
-      (.unknown, _):
+      (.selfTest, _), (.unknown, _):
       return nil
     case (.startDay, true):
       return (.startAckReady, .startAckObserved, .startAckOutcomeUnobservable)
@@ -3026,7 +3093,7 @@ public actor RoomEngine {
 
   static func isOperatorVerb(_ kind: BenchCommandKind) -> Bool {
     switch kind {
-    case .checkUpdateNow, .reportDiag, .restartEngine: return true
+    case .checkUpdateNow, .reportDiag, .restartEngine, .selfTest: return true
     default: return false
     }
   }
@@ -3049,6 +3116,8 @@ public actor RoomEngine {
       result = reportDiag(command)
     case .restartEngine:
       result = restartEngine(command)
+    case .selfTest:
+      result = startSelfTest(command)
     default:
       return
     }
@@ -3271,28 +3340,20 @@ public actor RoomEngine {
   /// The production `helperVersion`: the helper's first non-empty output line and its exit status,
   /// bounded, or nil when it could not be run. Five seconds at most — it must not hold a report up.
   public static func runHelperVersion(_ path: String, _ arguments: [String]) -> String? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = arguments
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    do {
-      try process.run()
-    } catch {
-      return nil
-    }
-    let deadline = Date().addingTimeInterval(5)
-    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-    if process.isRunning {
-      process.terminate()
-      return "no answer within 5 s"
-    }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    let first = String(decoding: data, as: UTF8.self)
+    guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+    guard
+      let result = RoomSubprocess.run(
+        executable: URL(fileURLWithPath: path),
+        arguments: arguments,
+        timeout: 5,
+        captureStdout: true,
+        captureStderr: true)
+    else { return "no answer within 5 s" }
+    let combined = result.stdout + result.stderr
+    let first = String(decoding: combined, as: UTF8.self)
       .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
       .first { !$0.isEmpty } ?? ""
-    return "\(first.prefix(200)) (exit \(process.terminationStatus))"
+    return "\(first.prefix(200)) (exit \(result.status))"
   }
 
   // MARK: - Tier 1 §3: the heartbeat
@@ -3415,7 +3476,16 @@ public actor RoomEngine {
   /// and the next loop reopens the session's capture on the restored device.
   private func switchRecordingDevice(to uid: String, commandID: String) -> CommandResult? {
     let previousUID = configuration.deviceUID
-    guard uid != previousUID else { return nil }
+    // ─── 0.1.25: THE SAME UID IS A REOPEN, NOT A NO-OP ────────────────────────────────────────
+    // A `set_audio_input` naming the device already in use used to ack "applied" and reopen
+    // nothing (25 Sep: the desk believed it had bounced OPD 4's mic). It now closes and reopens the
+    // running segment exactly as a device change does, with no config write. It is reachable ONLY
+    // from a desk command: no recovery loop calls this, so a flapping device cannot spin it.
+    if uid == previousUID {
+      guard let running = capture, running.process.isRunning else { return nil }
+      log("recording device \(uid) reopened by the desk (same device)")
+      return reopenRunningCapture(commandID: commandID, deviceUID: uid, restoreUID: nil)
+    }
     do {
       try saveDeviceUID(uid)
     } catch {
@@ -3424,14 +3494,150 @@ public actor RoomEngine {
     log("recording device set to \(uid) by the desk (was \(previousUID))")
     // Idle, paused, or nothing running: the next capture opens on the new device by itself.
     guard let running = capture, running.process.isRunning else { return nil }
+    return reopenRunningCapture(commandID: commandID, deviceUID: uid, restoreUID: previousUID)
+  }
+
+  /// 0.1.25 — start the day by itself at clinic open. Only the plain capture path (the resident
+  /// archive lane is off on every Mac and journals its own control commands), only from `.ready`,
+  /// at most once per window, never when a desk started, paused or ended the day, and never when
+  /// the `auto-start-off` file or a Dietary slug says not to. The rule is `RoomAutoStart.decide`.
+  private func autoStartIfDue() async {
+    guard residentControlJournal == nil, residentRuntimeFactory == nil,
+      residentCaptureOwner == nil, !needsActiveReconciliation
+    else { return }
+    guard let schedule = autoStartSchedule, !selfTestHoldsMic else { return }
+    let now = autoStartClock()
+    let marker = RoomAutoStartMarker(root: persistence.root)
+    // A day started by hand (or adopted at launch) counts as this window's start, so a desk
+    // `end_day` later in the window is not undone by the next loop or a relaunch.
+    if phase == .recording, let window = schedule.activeWindow(at: now),
+      (marker.read() ?? .min) < window.startMs
+    {
+      marker.write(windowStartMs: window.startMs)
+      return
+    }
+    guard now >= autoStartRetryAfter else { return }
+    let decision = RoomAutoStart.decide(
+      schedule: schedule, now: now, phase: phase,
+      lastStartedWindowMs: marker.read(),
+      disabled: RoomAutoStart.disabledBySlug(configuration.roomSlug) || marker.killSwitchPresent())
+    guard case .start(let windowStartMs) = decision else { return }
+    log("auto-start: clinic window open, no day started; starting")
+    do {
+      try await beginOrResume(commandID: "auto-\(windowStartMs)")
+      marker.write(windowStartMs: windowStartMs)
+      log("auto-start: day started")
+    } catch {
+      lastError = bounded(error)
+      autoStartRetryAfter = now.addingTimeInterval(60)
+      log("auto-start failed (\(bounded(error, limit: 120))); retrying in 60 s")
+      try? saveStatus(preferred: .offline)
+    }
+  }
+
+  /// Test seam: the pack, the speaker and the clock the self-test reads (and the auto-start clock).
+  func configureSelfTestForTests(
+    pack: URL, speaker: any SelfTestPlaying, clock: Date, maxSeconds: Double = 180
+  ) {
+    selfTestMaxSeconds = maxSeconds
+    selfTestPackDirectory = pack
+    selfTestPlayer = speaker
+    selfTestLeadSeconds = 0.05
+    selfTestGapSeconds = 0.02
+    autoStartClock = { clock }
+  }
+
+  /// Test seam: pretend a self-test capture that ignored its interrupt is still alive.
+  func holdMicForTests(_ process: any RoomCaptureProcess) { selfTestLingering = process }
+
+  /// 0.1.25 — `self_test`. Decided and acked at once; the run itself is a background task that owns
+  /// the speaker and the mic for about a minute. Never a session: a run writes only into
+  /// `selftest/<run>/`, and every refusal is named in the ack.
+  private func startSelfTest(_ command: BenchCommand) -> CommandResult {
+    if residentCaptureOwner != nil || residentRuntimeFactory != nil {
+      return verbFailure("resident_archive_unsupported")
+    }
+    if capture != nil { return verbFailure("capture_active") }
+    if let why = SelfTestGate.refusal(
+      sessionOpen: sessionIsOpen, alreadyRunning: selfTestHoldsMic,
+      ready: phase == .ready && !needsActiveReconciliation && !hasActiveCapture,
+      now: autoStartClock(),
+      schedule: autoStartSchedule ?? .defaultClinic, roomSlug: configuration.roomSlug)
+    {
+      log("self_test refused: \(why)")
+      return verbFailure(why)
+    }
+    let directory =
+      selfTestPackDirectory
+      ?? Bundle.main.resourceURL?.appendingPathComponent("SelfTest", isDirectory: true)
+    guard let directory else { return verbFailure("pack_missing") }
+    let pack: [SelfTestStimulus]
+    do {
+      pack = try SelfTestPack.load(directory: directory)
+    } catch {
+      log("self_test refused: pack (\(bounded(error, limit: 80)))")
+      return verbFailure("pack_invalid: \(bounded(error, limit: 80))")
+    }
+    var volume = 0.5
+    if case .object(let arguments) = command.args, case .some(.number(let asked)) = arguments["volume"],
+      asked.isFinite
+    {
+      volume = min(max(asked, 0.2), 0.8)
+    }
+    let runID = "st_\(UUID().uuidString.prefix(8).lowercased())"
+    let runDirectory = persistence.root.appendingPathComponent("selftest", isDirectory: true)
+      .appendingPathComponent(runID, isDirectory: true)
+    do {
+      try createPrivateDirectory(runDirectory)
+    } catch {
+      return verbFailure("selftest_dir_failed")
+    }
+    selfTestRunning = true
+    let runner = SelfTestRunner(
+      pack: pack, packSHA256: SelfTestPack.packHash(directory: directory),
+      player: selfTestPlayer, launcher: captureLauncher,
+      tapewriter: URL(fileURLWithPath: configuration.tapewriterPath),
+      micDeviceUID: configuration.deviceUID, roomSlug: configuration.roomSlug,
+      appVersion: BuildInfo.appVersion, volume: volume, leadSeconds: selfTestLeadSeconds,
+      gapSeconds: selfTestGapSeconds, maxSeconds: selfTestMaxSeconds, log: log)
+    let runsLog = runDirectory.deletingLastPathComponent().appendingPathComponent("runs.log")
+    Task {
+      let outcome = await runner.run(runID: runID, directory: runDirectory)
+      await self.selfTestFinished(outcome, runsLog: runsLog)
+    }
+    return CommandResult(ok: true, sessionID: nil, error: nil)
+  }
+
+  private func selfTestFinished(_ outcome: SelfTestRunOutcome, runsLog: URL) {
+    let manifest = outcome.manifest
+    selfTestLingering = outcome.lingering
+    selfTestRunning = false
+    let line =
+      "\(Self.iso8601(Date())) \(manifest.runID) volume=\(manifest.speakerVolume) "
+      + "played=\(manifest.stimuli.count) pcm_bytes=\(manifest.pcmBytes) \(manifest.outcome)\n"
+    if let handle = try? FileHandle(forWritingTo: runsLog) {
+      defer { try? handle.close() }
+      _ = try? handle.seekToEnd()
+      try? handle.write(contentsOf: Data(line.utf8))
+    } else {
+      try? Data(line.utf8).write(to: runsLog)
+    }
+  }
+
+  /// Close the running segment as a pause closes it and open the next one of the same session.
+  /// `restoreUID` is the device to put back if the reopen fails (nil for a same-device reopen,
+  /// where there is nothing to put back). Nil on success; otherwise the failure to ack.
+  private func reopenRunningCapture(
+    commandID: String, deviceUID uid: String, restoreUID: String?
+  ) -> CommandResult? {
     do {
       try stopCaptureAndPublishFinal(reason: .pause(commandID: commandID))
       try startCapture(trigger: .reconciliation)
       return nil
     } catch {
       let switchError = bounded(error, limit: 120)
-      log("device switch to \(uid) failed (\(switchError)); back to \(previousUID)")
-      restoreDeviceUID(previousUID)
+      log("device switch to \(uid) failed (\(switchError)); back to \(restoreUID ?? uid)")
+      if let restoreUID { restoreDeviceUID(restoreUID) }
       // Only when no segment is retained: a retained one is a dead capture whose audio has not
       // been cut yet, and `finishUnexpectedCaptureIfNeeded` must cut it before anything replaces it.
       if capture == nil {
@@ -3481,6 +3687,9 @@ public actor RoomEngine {
 
   private func startCapture(trigger: RoomResidentCaptureStartContext.Trigger) throws {
     guard !hasActiveCapture else { throw RoomEngineError.captureAlreadyActive }
+    // 0.1.25 (eta-refuter B2): the mic belongs to a running self-test. A reconciliation or adopt
+    // that reaches here waits for the next loop rather than opening a second tapewriter on it.
+    guard !selfTestHoldsMic else { throw RoomEngineError.io("self_test_running") }
     guard let sessionID else { throw RoomEngineError.noActiveSession }
     if let residentCaptureOwner {
       if residentCaptureOwner.requiresFinalization {
@@ -3658,9 +3867,10 @@ public actor RoomEngine {
     }
     nextPieceIndex = segment.nextPieceIndex
     capture = nil
+    let exitStatus = segment.process.terminationStatus ?? -1
     phase = .failed
     needsActiveReconciliation = true
-    throw RoomEngineError.captureExited(segment.process.terminationStatus ?? -1)
+    throw RoomEngineError.captureExited(exitStatus)
   }
 
   private func stopCaptureAndPublishFinal(reason: RoomResidentCaptureStopReason) throws {
@@ -3926,7 +4136,28 @@ public actor RoomEngine {
         state: state,
         sessionID: sessionID,
         pendingPieceCount: pending,
-        lastError: lastError))
+        lastError: lastError,
+        micMode: currentMicMode(),
+        lastEvent: lastEvent?.name,
+        lastEventAt: lastEvent?.at))
+  }
+
+  /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the
+  /// process exits so the status still says what the guard last did.
+  private func currentMicMode() -> MicModeStatus? {
+    if let directory = capture?.directory, let fresh = MicModeStatus.read(directory: directory) {
+      lastMicMode = fresh
+      if let event = fresh.lastEvent, let at = Self.parseISO8601(fresh.at) {
+        lastEvent = (event, at)
+      }
+    }
+    return lastMicMode
+  }
+
+  private static func parseISO8601(_ text: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.date(from: text)
   }
 
   private static func iso8601(_ date: Date) -> String {
@@ -3941,6 +4172,7 @@ public actor RoomEngine {
       currentSessionID: sessionID,
       nextSessionID: nextSessionID,
       pieceEndedAt: lastPieceEndedAt)
+    if nextSessionID != sessionID { lastEvent = nil }
     sessionID = nextSessionID
   }
 }
@@ -4239,4 +4471,32 @@ private func bounded(_ error: Error, limit: Int = 500) -> String {
   String(
     (error as? LocalizedError)?.errorDescription?.prefix(limit)
       ?? String(describing: error).prefix(limit))
+}
+
+/// 0.1.25 — did `tape.pcm` GROW since the previous reading? One reading is never enough (the first
+/// reading of a file reports false), a different file starts again (a device switch opens a new
+/// `seg_` directory, and comparing two files' sizes proves nothing), and a missing or unreadable
+/// file forgets everything so a dead file's size is never compared with a live one's.
+struct TapeGrowthProbe {
+  private var last: (url: URL, size: UInt64)?
+
+  mutating func reset() { last = nil }
+
+  mutating func advanced(pcm: URL?) -> Bool {
+    guard let pcm, let size = Self.size(of: pcm) else {
+      last = nil
+      return false
+    }
+    defer { last = (pcm, size) }
+    guard let last, last.url == pcm else { return false }
+    return size > last.size
+  }
+
+  private static func size(of url: URL) -> UInt64? {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+      attributes[.type] as? FileAttributeType == .typeRegular,
+      let number = attributes[.size] as? NSNumber
+    else { return nil }
+    return number.uint64Value
+  }
 }

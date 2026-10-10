@@ -49,7 +49,7 @@ final class CaptureSession: @unchecked Sendable {
 
   }
 
-  private let engine = AVAudioEngine()
+  private let engine: AVAudioEngine
   private let ring: AudioRing
   private let state: State
   let captureGeneration: UInt64
@@ -61,6 +61,8 @@ final class CaptureSession: @unchecked Sendable {
     captureGeneration: UInt64 = 0,
     resumeAfterNS: UInt64? = nil
   ) throws {
+    MicModeGuard.enforceStandardForMainBundle()
+    engine = AVAudioEngine()
     self.ring = ring
     self.captureGeneration = captureGeneration
     let nextMidnight = try ArchiveISTDay.nextMidnight(now: { Date() })
@@ -160,6 +162,7 @@ public enum Recorder {
     requestedDeviceUID: String?,
     unsignedDevelopmentArchive: UnsignedDevelopmentArchiveOptions? = nil
   ) throws {
+    MicModeStatusSink.directory = outputDirectory
     try requireMicrophonePermission()
     let validatedDevice = try AudioDevices.selected(uid: requestedDeviceUID)
     let stableDeviceUID = validatedDevice.uid
@@ -266,9 +269,11 @@ public enum Recorder {
     var lossBoundary: (monoNS: UInt64, wallNS: UInt64)?
     var lossMarkedDeviceLost = false
     var retryAfterNS = UInt64.max
+    var micModeWatchdog = MicModeWatchdog()
 
     while !stopping.load(ordering: .acquiring) {
       if writer.hasFailed { break }
+      if capture != nil { micModeWatchdog.tick(nowNS: monotonicNowNS()) }
       if let active = capture,
         !AudioDevices.isAlive(currentDevice) || active.hasStoppedProducing
       {

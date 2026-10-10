@@ -45,6 +45,10 @@ public struct MachineFacts: Equatable, Sendable {
   /// Release R4 (D4). Whether that volume is settable. Nil when the device is not attached or
   /// CoreAudio would not answer; false — measured — when the device has no input volume control.
   public var inputVolumeSettable: Bool?
+  /// 0.1.25 — "ok" or "lost": whether the CONFIGURED device is in the attached-device list read in
+  /// the same breath. Nil when either half was not measured (no configured device, or CoreAudio
+  /// would not list). Additive; an older server ignores the key.
+  public var deviceState: String?
 
   public init(
     micState: String,
@@ -58,7 +62,8 @@ public struct MachineFacts: Equatable, Sendable {
     inputDevices: [AudioInputDeviceEntry]? = nil,
     inputVolume: Double? = nil,
     inputVolumeSettable: Bool? = nil,
-    inputDeviceUID: String? = nil
+    inputDeviceUID: String? = nil,
+    deviceState: String? = nil
   ) {
     self.inputDeviceUID = inputDeviceUID
     self.micState = micState
@@ -72,6 +77,16 @@ public struct MachineFacts: Equatable, Sendable {
     self.inputDevices = inputDevices
     self.inputVolume = inputVolume
     self.inputVolumeSettable = inputVolumeSettable
+    self.deviceState = deviceState
+  }
+
+  /// 0.1.25 — the pure rule. Nil unless BOTH a configured uid and a device list were measured:
+  /// "we looked and it is not there" and "we could not look" are different facts.
+  public static func deviceState(
+    configuredUID: String?, devices: [AudioInputDeviceEntry]?
+  ) -> String? {
+    guard let configuredUID, !configuredUID.isEmpty, let devices else { return nil }
+    return devices.contains(where: { $0.uid == configuredUID }) ? "ok" : "lost"
   }
 }
 
@@ -79,7 +94,9 @@ public enum MachineFactsReader {
   public static let launchAgentLabel = "com.evenscribe.room-recorder"
 
   /// Read everything §5.5 asks for. Cheap enough to run on every poll: one AVFoundation call
-  /// that reads a cached TCC answer, two short subprocesses, and three sysctl-class lookups.
+  /// that reads a cached TCC answer, three short subprocesses (`pmset`, `launchctl`, `scutil`),
+  /// and three sysctl-class lookups. Those three helpers used to allocate a `Pipe()` each poll
+  /// and leak it for the life of the process.
   ///
   /// `inputDeviceUID` IS REQUIRED AND HAS NO DEFAULT, deliberately. It is the device the config
   /// says this room records from, and only the caller holding the configuration knows it. A
@@ -87,6 +104,7 @@ public enum MachineFactsReader {
   /// shape of mistake the `install:` parameter was given no default to prevent.
   public static func read(inputDeviceUID: String?) -> MachineFacts {
     let volume = inputVolume(forUID: inputDeviceUID)
+    let devices = AudioInputDevices.list()
     return MachineFacts(
       micState: microphoneState(),
       neverSleep: neverSleep(),
@@ -96,10 +114,11 @@ public enum MachineFactsReader {
       hardwareModel: hardwareModel(),
       osVersion: osVersion(),
       inputDeviceName: inputDeviceName(forUID: inputDeviceUID),
-      inputDevices: AudioInputDevices.list(),
+      inputDevices: devices,
       inputVolume: volume?.value,
       inputVolumeSettable: volume?.settable,
-      inputDeviceUID: inputDeviceUID
+      inputDeviceUID: inputDeviceUID,
+      deviceState: MachineFacts.deviceState(configuredUID: inputDeviceUID, devices: devices)
     )
   }
 
@@ -265,25 +284,18 @@ public enum MachineFactsReader {
   /// loop and a wedged subprocess must not stall the heartbeat of a recording room.
   static func runTool(_ path: String, _ arguments: [String], timeout: TimeInterval = 3) -> String? {
     guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = arguments
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
-    do { try process.run() } catch { return nil }
-
-    let deadline = Date().addingTimeInterval(timeout)
-    while process.isRunning && Date() < deadline {
-      usleep(20_000)
-    }
-    if process.isRunning {
-      process.terminate()
-      return nil
-    }
-    guard process.terminationStatus == 0 else { return nil }
-    guard let data = try? pipe.fileHandleForReading.readToEnd(), !data.isEmpty else { return nil }
-    let text = String(decoding: data, as: UTF8.self)
+    // Called three times on every engine poll (~1.5 s), including while recording — this is the
+    // PIPE leak that kept climbing after kickstart (Home Office bs_tgys4atu). No Pipe().
+    guard
+      let result = RoomSubprocess.run(
+        executable: URL(fileURLWithPath: path),
+        arguments: arguments,
+        timeout: timeout,
+        captureStdout: true,
+        captureStderr: false),
+      result.status == 0, !result.stdout.isEmpty
+    else { return nil }
+    let text = String(decoding: result.stdout, as: UTF8.self)
       .trimmingCharacters(in: .whitespacesAndNewlines)
     return text.isEmpty ? nil : text
   }

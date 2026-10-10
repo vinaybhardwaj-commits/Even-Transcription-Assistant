@@ -64,6 +64,9 @@ public struct InstallPollFields: Equatable, Sendable {
   public var zeroRatio: Double?
   /// D10. Every input device attached now, the default marked. Read-only.
   public var inputDevices: [AudioInputDeviceEntry]?
+  /// 0.1.25. "ok" or "lost", whether the configured device is attached. Additive: the server
+  /// ignores an unknown key until the release that reads it.
+  public var deviceState: String?
 
   // ─── RELEASE R4 (D4) ──────────────────────────────────────────────────────────────────────
   /// The input volume, 0–1, of the device this app records from (`deviceUID`). Nil when that
@@ -127,7 +130,8 @@ public struct InstallPollFields: Equatable, Sendable {
     channelLocked: Bool? = nil,
     selectedInputUID: String? = nil,
     levelSeq: Int64? = nil,
-    levelAt: String? = nil
+    levelAt: String? = nil,
+    deviceState: String? = nil
   ) {
     self.selectedInputUID = selectedInputUID
     self.levelSeq = levelSeq
@@ -158,6 +162,7 @@ public struct InstallPollFields: Equatable, Sendable {
     self.clipCount = clipCount
     self.silenceMS = silenceMS
     self.channelLocked = channelLocked
+    self.deviceState = deviceState
   }
 
   /// Build from a live machine reading. `tapeAdvancing` comes from the caller because only the
@@ -212,7 +217,8 @@ public struct InstallPollFields: Equatable, Sendable {
       channelLocked: channelLocked,
       selectedInputUID: facts.inputDeviceUID,
       levelSeq: levelSeq,
-      levelAt: levelAt
+      levelAt: levelAt,
+      deviceState: facts.deviceState
     )
   }
 
@@ -289,6 +295,10 @@ public struct InstallPollFields: Equatable, Sendable {
     add("zero_ratio", Self.unitString(zeroRatio))
     // D10. One JSON array, beside `input_device_name`, not instead of it.
     add("input_devices", inputDevices.flatMap { Self.inputDevicesJSON($0, selectedUID: selectedInputUID) })
+    // 0.1.25. Only the two strings the server will learn to read; anything else is not sent.
+    if let deviceState, deviceState == "ok" || deviceState == "lost" {
+      items.append(URLQueryItem(name: "device_state", value: deviceState))
+    }
     // ── Release R4 (D4) ─────────────────────────────────────────────────────────────────────
     // Beside `input_device_name`, about the same device. The volume in four decimals, dropped
     // when outside 0–1 like `peak`; settable as `"true"`/`"false"`, absent when not measured.
