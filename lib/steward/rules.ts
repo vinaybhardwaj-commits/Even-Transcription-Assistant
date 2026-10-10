@@ -395,6 +395,12 @@ const deviceMissing = (c: Ctx): boolean => {
   const rowAge = c.age(a.devices_at);
   return (a.default_input_present === false && rowAge !== null && rowAge <= DEVICE_EVIDENCE_MAX_MS) || a.usb_removed_recent === true;
 };
+/**
+ * G1 ONLY (the not-recording start gate; fable ruling 10 Oct): audio.devices is event-driven, so an overnight unplug leaves an "absent" row hours old that is still the newest word. For
+ * the decision to START, the newest row saying default_input_present=false counts at ANY age (the newest row IS "no later add / present=true row"; sense reads the room's newest row,
+ * up to 24 h back), and so does the install DEVICE_MISSING flag (the chosen device is not enumerated). deviceMissing above is unchanged for every other caller.
+ */
+const g1DeviceMissing = (c: Ctx): boolean => deviceMissing(c) || c.s.audio.default_input_present === false || c.s.audio.device_missing_flag === true;
 /** a device signal that is NOT evidence (flag only, or an absent row older than 6 h): recorded in inputs, never acted on */
 const deviceAnnotation = (c: Ctx): string | null => {
   if (deviceMissing(c)) return null;
@@ -544,7 +550,7 @@ function notRecording(c: Ctx): Decision[] {
   }
   // G1: the microphone, above the exhausted / backoff / pending checks: a room whose mic is unplugged is never started (not even one attempt)
   const wait = micWait(c);
-  const missing = deviceMissing(c);
+  const missing = g1DeviceMissing(c);
   const present = !missing && s.audio.default_input_present === true && s.audio.usb_removed_recent !== true;
   let micReturn = false;
   if (missing || (wait.inEpisode && !present)) {
