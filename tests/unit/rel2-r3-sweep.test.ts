@@ -47,7 +47,7 @@ describe("pair-keyed reads (a room and an IST date, or a room-day id)", () => {
     await call("scribe_jev_decisions", {});
     const q = brainQueries.find((x) => /FROM jev_decision/.test(x.text))!;
     expect(q.text).not.toMatch(/unnest|room_day|bench_window|room_diarize_window|NOT EXISTS/);
-    expect(q.params).toEqual([null, null, null, null, 100]);
+    expect(q.params).toEqual([null, null, null, null, 100, null, null, null, null, null]);
   });
   it("scribe_fuse_report: a formerly held-out day (and a scratch day replaying it) is served", async () => {
     answers = [[/FROM room_day WHERE id|room_day_by_id|FROM room_day rd/, [{ id: "rd_b", room_id: BR, ist_date: BD, scratch: false }]]];

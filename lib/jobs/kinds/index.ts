@@ -21,6 +21,8 @@ import { emotionWindowKind } from "./emotion-window";
 import { jevEnglishKind } from "./jev-english";
 import { jevWindowKind } from "./jev-window";
 import { jevRoleKind } from "./jev-role";
+import { jevAskKind } from "./jev-ask";
+import { jevDriftKind } from "./jev-drift";
 import { sarvamTranscribeKind } from "./sarvam-transcribe";
 import { sarvamTranslateKind } from "./sarvam-translate";
 import { sarvamConsultBatchKind } from "./sarvam-consult-batch";
@@ -28,7 +30,7 @@ import { rubricRunKind } from "./rubric-run";
 import { rubricBenchKind } from "./rubric-bench";
 import { STUB_KINDS } from "./stubs";
 
-export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, nemotronIdentityKind, nemotronLabRunKind, pulseDoctorVoiceKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, sarvamConsultBatchKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
+export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, nemotronIdentityKind, nemotronLabRunKind, pulseDoctorVoiceKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, jevAskKind, jevDriftKind, sarvamTranscribeKind, sarvamTranslateKind, sarvamConsultBatchKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
 /**
  * K3-2: the registry REFUSES a kind that has not answered "does it read room data?", and one that does but has no held-out guard. Pure, exported so a test can feed it a bad kind. Thrown at load.
  */
