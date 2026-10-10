@@ -443,11 +443,11 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     }
   });
 
-  it("budget: the full tools/list result stays at or under 41,750 characters (measured 41,694 = main's 40,448 + Jev P1 +1,246: scribe_jev_question_sets, scribe_jev_health, five scribe_jev_decisions filters, scribe_usage include, jev_ask and jev_drift in the kind enums; main's 40,448 was with BOTH the consult index and epic #23 f/i: scribe_nemotron_worker plus the timeline/source/engine properties, +646 over main's 39,802; consult index alone: scribe_sarvam consult_uids / room_slug / two actions and the sarvam_consult_batch kind in three enums; was 39,583 on main, the limit was 39,600; earlier: 39,526: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property + job kinds nemotron_identity and pulse_doctor_voice in three kind enums)", async () => {
+  it("budget: the full tools/list result stays at or under 41,800 characters (consult-reuse: scribe_sarvam force, +21 chars, measured 41,757 with TS-H4; before it: measured 41,694 = main's 40,448 + Jev P1 +1,246: scribe_jev_question_sets, scribe_jev_health, five scribe_jev_decisions filters, scribe_usage include, jev_ask and jev_drift in the kind enums; main's 40,448 was with BOTH the consult index and epic #23 f/i: scribe_nemotron_worker plus the timeline/source/engine properties, +646 over main's 39,802; consult index alone: scribe_sarvam consult_uids / room_slug / two actions and the sarvam_consult_batch kind in three enums; was 39,583 on main, the limit was 39,600; earlier: 39,526: S6-DIET + S6B search + S4 ticket views + main 7a66f27 engine property + job kinds nemotron_identity and pulse_doctor_voice in three kind enums)", async () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(41_750);
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(41_800);
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (consult-reuse: scribe_sarvam force; S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; TS-H13: the helper and commands views of scribe_kiosks; 0143: the nemotron_lab_run job kind; TS-H13: the helper and commands views of scribe_kiosks) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
