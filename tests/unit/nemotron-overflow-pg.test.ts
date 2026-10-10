@@ -1,6 +1,6 @@
 /**
- * nemotron-overflow-pg.test.ts — REQUIRED PROOF for the HF overflow on postgres:16 (migration 0146 + the store's claim and usage SQL):
- *   1. 0146 applies twice, registers once, defaults existing claims to 'box', and its CHECK refuses another machine;
+ * nemotron-overflow-pg.test.ts — REQUIRED PROOF for the HF overflow on postgres:16 (migration 0147 + the store's claim and usage SQL):
+ *   1. 0147 applies twice, registers once, defaults existing claims to 'box', and its CHECK refuses another machine;
  *   2. claimPending(…, 'hf') records machine = hf; a re-claim after the lease lapses takes the new machine; the default is box;
  *   3. overflowUsage: backlog = eligible unclaimed windows (not live-claimed, not answered); hf minutes = TODAY's (IST) ingested hf rows only;
  *      live unfinished hf claims count, finished or expired ones do not, box rows and claims never do;
@@ -17,7 +17,7 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-nemo-overflow");
-const M146 = "db/migrations/0146_nemotron_claim_machine.sql";
+const M147 = "db/migrations/0147_nemotron_claim_machine.sql";
 
 const FIXTURE_DDL = `
 CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text, applied_at timestamptz DEFAULT now());
@@ -45,9 +45,9 @@ beforeAll(async () => {
   pg.exec(readFileSync("db/migrations/0117_diarize_window_label.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0140_diarize_nemotron.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0143_nemotron_lab.sql", "utf8"));
-  // a claim that predates 0146 must read as box afterwards
+  // a claim that predates 0147 must read as box afterwards
   pg.exec(`INSERT INTO diarize_nemotron_claim (window_id, worker_id, lease_until) VALUES ('bw_old', 'box-0', now() + interval '10 minutes');`);
-  pg.exec(readFileSync(M146, "utf8"));
+  pg.exec(readFileSync(M147, "utf8"));
   pg.exec(`INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_1', 'room_fake1', '2026-10-01');`);
   H.sql = pg.sql as never;
   store = await import("@/lib/diarize-nemotron/store");
@@ -61,10 +61,10 @@ describe("REQUIRED PROOF ran, or was skipped deliberately", () => {
   });
 });
 
-describe.runIf(HAVE)("migration 0146", () => {
+describe.runIf(HAVE)("migration 0147", () => {
   it("applies a second time, registers once, and a pre-existing claim is box", async () => {
-    pg.exec(readFileSync(M146, "utf8"));
-    expect((await q<{ n: number }>("SELECT count(*)::int AS n FROM schema_migrations WHERE version = 146"))[0]!.n).toBe(1);
+    pg.exec(readFileSync(M147, "utf8"));
+    expect((await q<{ n: number }>("SELECT count(*)::int AS n FROM schema_migrations WHERE version = 147"))[0]!.n).toBe(1);
     expect((await q<{ machine: string }>("SELECT machine FROM diarize_nemotron_claim WHERE window_id = 'bw_old'"))[0]!.machine).toBe("box");
     pg.exec(`DELETE FROM diarize_nemotron_claim;`);
   });

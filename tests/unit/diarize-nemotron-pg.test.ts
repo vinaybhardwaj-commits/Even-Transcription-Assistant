@@ -61,7 +61,7 @@ beforeAll(async () => {
   pg.exec(readFileSync("db/migrations/0117_diarize_window_label.sql", "utf8"));
   pg.exec(readFileSync(MIGRATION, "utf8"));
   pg.exec(readFileSync("db/migrations/0143_nemotron_lab.sql", "utf8")); // the ingest INSERT names probs_r2_key (0143)
-  pg.exec(readFileSync("db/migrations/0146_nemotron_claim_machine.sql", "utf8")); // claimPending writes claim.machine (0146)
+  pg.exec(readFileSync("db/migrations/0147_nemotron_claim_machine.sql", "utf8")); // claimPending writes claim.machine (0147)
   // the encounter windows (0123 + 0124), for the anchors' blind refusal
   pg.exec(readFileSync("db/migrations/0123_eta_encounter_windows.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0124_encounter_windows_warehouse_attribution.sql", "utf8"));
