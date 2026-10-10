@@ -283,13 +283,13 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
   const withSig = (uid: string, o: Row = {}) => indexRow(uid, { signature: sig(uid), ...o });
   const segs = (n: number, textOf: (i: number) => string) => Array.from({ length: n }, (_, i) => ({ t0_ms: T1 - 120_000 + i * 4000, t1_ms: T1 - 120_000 + i * 4000 + 3500, speaker: `SPEAKER_0${i % 2}`, lang: "hi-IN", text: textOf(i) }));
   /** write a palimpsest track into the (fake) lab bucket and index it in reb_track_index, as palimpsest does */
-  function putTrack(uid: string, layer: "stt" | "translate", o: { clipSig?: Row; engine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
+  function putTrack(uid: string, layer: "stt" | "translate", o: { clipSig?: Row; engine?: string; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
     const doc = { config: { clip_signature: o.clipSig ?? sig(uid), gateway: "x", job_parameters: {} }, config_hash: o.hash ?? "ab12cd34", engine: o.engine ?? "sarvam-saaras-v3", extras: {}, layer, machine: "m", model: "saaras:v3", reason: null, schema: "reb.track.v1",
       segments: segs(o.n ?? 3, (i) => (layer === "stt" ? `namaste ${i}` : `hello ${i}`)), status: o.status ?? "ok", version: "saaras-v3", window_id: `consult-${uid}` };
     const key = `reb/${DAY}/${ROOM}/_consults/${uid}/tracks/${layer}.${doc.engine}__saaras-v3__${doc.config_hash}.json`;
     const body = JSON.stringify(doc);
     lab.set(key, { body, etag: "t" });
-    pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, shadow, status, r2_key, sha256) VALUES ('consult-${uid}', '${DAY}', '${ROOM}', '${layer}', '${doc.engine}', 'saaras-v3', '${doc.config_hash}', ${o.shadow ? "true" : "false"}, 'ok', '${key}', '${o.shaWrong ? "0".repeat(64) : sha(body)}');`);
+    pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, shadow, status, r2_key, sha256) VALUES ('consult-${uid}', '${DAY}', '${ROOM}', '${layer}', '${o.indexEngine ?? doc.engine}', 'saaras-v3', '${doc.config_hash}', ${o.shadow ? "true" : "false"}, 'ok', '${key}', '${o.shaWrong ? "0".repeat(64) : sha(body)}');`);
   }
   const noJobsNoGateway = async (calls: number, kind = "sarvam_transcribe") => { expect(gwCalls()).toBe(calls); expect(await jobsOfKind(kind)).toHaveLength(0); expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'stt.paid_call'`)[0]!.n).toBe(0); };
 
@@ -356,6 +356,8 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     putTrack(UA, "stt", { status: "failed", hash: "m2" });
     putTrack(UA, "stt", { shadow: true, hash: "m3" });
     putTrack(UA, "stt", { shaWrong: true, hash: "m4" });
+    putTrack(UA, "stt", { indexEngine: "medasr", engine: "sarvam-saaras-v3", hash: "m5" }); // indexed as another engine: the index filter alone must refuse it
+    putTrack(UA, "stt", { indexEngine: "sarvam-saaras-v3", engine: "medasr", hash: "m6" }); // indexed as sarvam but the track itself says another engine: the track is checked too
     const calls = gwCalls();
     expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toMatchObject({ ok: true, status: "queued" });
     await drain();
