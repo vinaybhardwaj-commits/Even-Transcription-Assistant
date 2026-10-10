@@ -624,3 +624,49 @@ class Hardening(Base):
         self.assertGreaterEqual(int(m.group(1)), 150)
         self.assertIn('seq 1 "$STOP_WAIT_S"', sh)
         self.assertNotIn("NEMOTRON_BASE_URL is required", sh)
+
+
+class Overflow(Base):
+    """machine='hf': the HF overflow worker. The server decides when it may claim; the worker asks, idles when told no, and never uses the LAB lane."""
+
+    def test_box_default_sends_no_machine_param(self):
+        self.make().step()
+        self.assertNotIn("machine", self.srv.pending_calls[0])
+
+    def test_hf_asks_with_machine_and_posts_machine_hf(self):
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_hf1")], "exhausted": 0})]
+        w = self.make(machine="hf")
+        self.assertTrue(w.step())
+        self.assertEqual(self.srv.pending_calls[0]["machine"], ["hf"])
+        self.assertEqual(self.srv.posts[0]["machine"], "hf")
+        self.assertEqual(self.srv.posts[0]["window_id"], "bw_fake_hf1")
+        self.assertTmpEmpty()
+
+    def test_hf_idles_without_backoff_on_each_closed_reason_and_never_asks_lab(self):
+        for reason in ("overflow_off", "cap_reached", "below_threshold"):
+            with self.subTest(reason=reason):
+                self.clock.sleeps.clear()
+                self.srv.pending = [(200, {"ok": True, "windows": [], "exhausted": 0, "overflow": {"allowed": False, "reason": reason}})]
+                w = self.make(machine="hf", lab=True)
+                self.assertTrue(w.step())
+                self.assertEqual(self.clock.sleeps, [60], "idle poll, not a doubling back-off")
+                self.assertEqual(w.state, f"overflow_idle:{reason}")
+                self.assertEqual(self.srv.posts, [])
+        self.assertEqual(self.srv.lab_calls, [], "an overflow worker never claims lab work")
+
+    def test_hf_unknown_reason_is_not_echoed(self):
+        self.srv.pending = [(200, {"ok": True, "windows": [], "exhausted": 0, "overflow": {"allowed": False, "reason": "x y\nz" * 20}})]
+        w = self.make(machine="hf")
+        w.step()
+        self.assertEqual(w.state, "overflow_idle:empty")
+
+    def test_hf_400_bad_machine_backs_off(self):
+        self.srv.pending = [(400, {"ok": False, "error": "bad_machine"})]
+        w = self.make(machine="hf")
+        w.step()
+        self.assertEqual(self.clock.sleeps, [30])
+        self.assertEqual(w.last_error_code, "bad_machine")
+
+    def test_box_still_uses_lab_lane_when_empty(self):
+        self.make(lab=True).step()
+        self.assertEqual(len(self.srv.lab_calls), 1)
