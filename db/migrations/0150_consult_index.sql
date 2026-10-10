@@ -1,4 +1,4 @@
--- 0147_consult_index.sql — the Scribe consult index (consult_uid -> cut clip) and Sarvam results per consult_uid.
+-- 0150_consult_index.sql — the Scribe consult index (consult_uid -> cut clip) and Sarvam results per consult_uid.
 --
 -- Additive and idempotent; no grants. One transaction (as 0140).
 --
@@ -94,7 +94,7 @@ COMMENT ON TABLE consult_sarvam_result IS
   'The Sarvam result of one cut of one consult: R2 pointer (mcp-sarvam/<job>.json), model + revision, counts. UNIQUE (consult_uid, cut_version, mode, english) = never billed twice for the same cut. No text here.';
 
 INSERT INTO schema_migrations (version, name)
-VALUES (147, '0147_consult_index')
+VALUES (150, '0150_consult_index')
 ON CONFLICT DO NOTHING;
 
 COMMIT;

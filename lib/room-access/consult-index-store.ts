@@ -1,5 +1,5 @@
 /**
- * lib/room-access/consult-index-store.ts — the ONLY SQL on consult_index, consult_index_sync and consult_sarvam_result (migration 0147), plus the one bench_session read that places a consult in a session.
+ * lib/room-access/consult-index-store.ts — the ONLY SQL on consult_index, consult_index_sync and consult_sarvam_result (migration 0150), plus the one bench_session read that places a consult in a session.
  *
  * Neon HTTP: one statement per call, tagged template, every value bound and CAST where it lands in a select list. The upsert is ONE statement per batch (a jsonb array of rows), and an unchanged row is not
  * rewritten. `sealed` can only be raised by a sync, never cleared. A result row is inserted ON CONFLICT DO NOTHING on its UNIQUE key: the second writer of the same cut changes nothing.

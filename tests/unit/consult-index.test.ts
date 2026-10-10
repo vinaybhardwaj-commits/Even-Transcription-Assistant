@@ -1,5 +1,5 @@
 /**
- * consult-index.test.ts — PURE checks for the consult index (lib/consult-index/*, migration 0147): the mirror's integrity rule, the row mapping (IST wall clock vs the UTC epoch, the clip key, the cut version,
+ * consult-index.test.ts — PURE checks for the consult index (lib/consult-index/*, migration 0150): the mirror's integrity rule, the row mapping (IST wall clock vs the UTC epoch, the clip key, the cut version,
  * the sealed flag), what is skipped and counted, that no name is ever read, the absolute-time view of a stored result, the batch/consult argument parsers, and the cron route's auth. All ids are fake.
  */
 import { createHash } from "node:crypto";

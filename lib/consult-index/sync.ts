@@ -1,5 +1,5 @@
 /**
- * lib/consult-index/sync.ts — the hourly sync of CONSULT's name-free index into consult_index (0147). The FIRST run is the backfill: the mirror holds every consult already cut, and each run reads all of it.
+ * lib/consult-index/sync.ts — the hourly sync of CONSULT's name-free index into consult_index (0150). The FIRST run is the backfill: the mirror holds every consult already cut, and each run reads all of it.
  *
  * Reads R2 eta-lab-results consult/index/latest.jsonl + manifest.json through the guarded lab store (GET of exactly those two keys; SCRIBE_LAB_R2_* env names), checks sha256(latest.jsonl) against the manifest
  * (a mismatch writes NOTHING and records consult_index_integrity), and upserts. Every run leaves a consult_index_sync row (counts and reasons, never content). A missing store or object is
