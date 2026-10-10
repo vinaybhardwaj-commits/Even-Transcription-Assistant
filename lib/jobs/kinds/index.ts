@@ -15,6 +15,7 @@ import { routeTranscribeKind } from "./route-transcribe";
 import { roomWindowKind } from "./room-window";
 import { diarizeWindowKind } from "./diarize-window";
 import { nemotronIdentityKind } from "./nemotron-identity";
+import { nemotronLabRunKind } from "./nemotron-lab-run";
 import { pulseDoctorVoiceKind } from "./pulse-doctor-voice";
 import { emotionWindowKind } from "./emotion-window";
 import { jevEnglishKind } from "./jev-english";
@@ -26,7 +27,7 @@ import { rubricRunKind } from "./rubric-run";
 import { rubricBenchKind } from "./rubric-bench";
 import { STUB_KINDS } from "./stubs";
 
-export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, nemotronIdentityKind, pulseDoctorVoiceKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
+export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, nemotronIdentityKind, nemotronLabRunKind, pulseDoctorVoiceKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
 /**
  * K3-2: the registry REFUSES a kind that has not answered "does it read room data?", and one that does but has no held-out guard. Pure, exported so a test can feed it a bad kind. Thrown at load.
  */

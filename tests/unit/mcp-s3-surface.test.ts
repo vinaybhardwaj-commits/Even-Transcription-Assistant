@@ -420,7 +420,7 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(39_600);
   });
 
-  it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
+  it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; 0143: the nemotron_lab_run job kind) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {
     const { body } = await door("tools/list");
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k]) => k !== "description").map(([k, v]) => [k, strip(v)])) : o;
     const sortKeys = (o: unknown): unknown => Array.isArray(o) ? o.map(sortKeys) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => [k, sortKeys(v)])) : o;

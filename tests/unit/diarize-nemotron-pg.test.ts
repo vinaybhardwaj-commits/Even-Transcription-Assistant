@@ -60,6 +60,7 @@ beforeAll(async () => {
   // 0117 first, as production has it, so 0140's widening of its CHECK is proven against the real constraint.
   pg.exec(readFileSync("db/migrations/0117_diarize_window_label.sql", "utf8"));
   pg.exec(readFileSync(MIGRATION, "utf8"));
+  pg.exec(readFileSync("db/migrations/0143_nemotron_lab.sql", "utf8")); // the ingest INSERT names probs_r2_key (0143)
   // the encounter windows (0123 + 0124), for the anchors' blind refusal
   pg.exec(readFileSync("db/migrations/0123_eta_encounter_windows.sql", "utf8"));
   pg.exec(readFileSync("db/migrations/0124_encounter_windows_warehouse_attribution.sql", "utf8"));

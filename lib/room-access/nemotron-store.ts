@@ -87,6 +87,29 @@ export async function claimPending(workerId: string, limit: number): Promise<Cla
 }
 
 /**
+ * LAB LANE GUARD: would claimPending offer ANY window right now? The same eligibility as claimPending's candidate query (kept beside it so the two
+ * cannot drift; tests/unit/nemotron-lab-pg.test.ts seeds both and compares). The lab claim route answers "production_pending" while this is true.
+ */
+export async function productionPendingExists(): Promise<boolean> {
+  const rows = (await sql`
+    SELECT EXISTS (
+      SELECT 1
+        FROM bench_window w
+        JOIN room_day rd ON rd.id = w.room_day_id
+        LEFT JOIN diarize_nemotron_claim c ON c.window_id = w.id
+       WHERE w.state IN ('closed', 'transcribed')
+         AND w.grid_aligned = TRUE
+         AND w.room_day_id IS NOT NULL
+         AND w.clip_r2_key IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id)
+         AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+         AND (c.window_id IS NULL OR (c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}))
+    ) AS pending
+  `) as Array<{ pending: boolean }>;
+  return rows[0]?.pending === true;
+}
+
+/**
  * Give back a claim this worker took but was never handed (the clip URL could not be signed): the attempt is
  * refunded and the lease released. A first claim is deleted (attempts cannot go below 1); a later one steps back.
  * Only a live, unfinished lease held by `workerId` is touched.
@@ -136,11 +159,11 @@ async function insertRow(b: IngestBody, d: Derived, payloadSha: string): Promise
   const rows = (await sql`
     INSERT INTO diarize_nemotron_window
       (window_id, room_day_id, engine, model, model_rev, config, config_hash, worker_id, machine, audio_ms,
-       clip_sha256, turns_json, speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status, error_code)
+       clip_sha256, turns_json, speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status, error_code, probs_r2_key)
     SELECT w.id, w.room_day_id, ${b.engine}::text, ${b.model}::text, ${b.model_rev}::text, ${JSON.stringify(b.config)}::jsonb,
            ${b.config_hash}::text, ${b.worker_id}::text, ${b.machine}::text, ${b.audio_ms}::int, ${b.clip_sha256}::text,
            ${JSON.stringify(b.turns)}::jsonb, ${d.speaker_count}::int, ${d.turn_count}::int, ${d.speech_ms}::int, ${d.overlap_ms}::int,
-           ${payloadSha}::text, ${b.status}::text, ${b.error_code}::text
+           ${payloadSha}::text, ${b.status}::text, ${b.error_code}::text, ${b.probs_r2_key ?? null}::text
       FROM bench_window w
      WHERE w.id = ${b.window_id} AND w.room_day_id = ${b.room_day_id}
     ON CONFLICT ON CONSTRAINT diarize_nemotron_window_once DO NOTHING
@@ -159,6 +182,14 @@ async function explainNoInsert(b: IngestBody, payloadSha: string): Promise<Inges
   if (existing[0]) return existing[0].payload_sha256 === payloadSha ? { result: "duplicate" } : { result: "conflict" };
   const w = (await sql`SELECT room_day_id FROM bench_window WHERE id = ${b.window_id} LIMIT 1`) as Array<{ room_day_id: string | null }>;
   return w[0] ? { result: "room_day_mismatch" } : { result: "unknown_window" };
+}
+
+/** Set the probability pointer on the row this body's key names, only where it is still NULL. */
+async function attachProbsKey(b: IngestBody): Promise<void> {
+  await sql`
+    UPDATE diarize_nemotron_window SET probs_r2_key = ${b.probs_r2_key ?? null}::text
+     WHERE window_id = ${b.window_id} AND engine = ${b.engine} AND model_rev = ${b.model_rev} AND config_hash = ${b.config_hash} AND probs_r2_key IS NULL
+  `;
 }
 
 /** Close the claim once a row is stored. Harmless when there is no claim (a parity backfill posts unclaimed). */
@@ -209,6 +240,8 @@ async function storeRow(b: IngestBody, d: Derived, payloadSha: string): Promise<
     const why = await explainNoInsert(b, payloadSha);
     // a row already holds the key (same or different payload): the window is done, never re-offered
     if (why.result === "duplicate" || why.result === "conflict") await finishClaim(b.window_id);
+    // a re-post that now carries the probability pointer the first post lacked (an upload that failed once) adds it; it never replaces one
+    if (why.result === "duplicate" && b.probs_r2_key) await attachProbsKey(b);
     return why;
   }
   await finishClaim(b.window_id);

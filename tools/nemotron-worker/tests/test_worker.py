@@ -43,6 +43,9 @@ class FakeServer:
         self.auth_seen = set()
         self.elsewhere = 0  # requests that reached a redirect target (must stay 0)
         self.on_ingest = None
+        # LAB lane (0143): scripted lab/claim answers, recorded lab/ingest posts, and a presigned-PUT sink
+        self.lab_claim, self.lab_calls, self.lab_posts, self.lab_ingest = [], [], [], []
+        self.puts, self.put_status = [], 200
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -73,7 +76,16 @@ class FakeServer:
                     srv.pending_calls.append(parse_qs(u.query))
                     st, b = srv.pending.pop(0) if srv.pending else (200, {"ok": True, "windows": [], "exhausted": 0})
                     return self._send(st, b)
+                if u.path == "/api/diarize/nemotron/lab/claim":
+                    srv.lab_calls.append(parse_qs(u.query))
+                    st, b = srv.lab_claim.pop(0) if srv.lab_claim else (200, {"ok": True, "items": []})
+                    return self._send(st, b)
                 self._send(404, {"error": "nope"})
+
+            def do_PUT(self):
+                n = int(self.headers.get("content-length") or 0)
+                srv.puts.append((self.path, self.rfile.read(n), self.headers.get("content-type")))
+                self._send(srv.put_status, {"ok": True})
 
             def do_POST(self):
                 if self.path.startswith("/elsewhere"):
@@ -86,6 +98,10 @@ class FakeServer:
                     if srv.on_ingest:
                         srv.on_ingest(body)
                     st, b = srv.ingest.pop(0) if srv.ingest else (200, {"ok": True, "result": "stored", "id": "x"})
+                    return self._send(st, b)
+                if self.path == "/api/diarize/nemotron/lab/ingest":
+                    srv.lab_posts.append(body)
+                    st, b = srv.lab_ingest.pop(0) if srv.lab_ingest else (200, {"ok": True, "result": "stored", "state": "ok"})
                     return self._send(st, b)
                 if self.path == "/api/diarize/nemotron/heartbeat":
                     srv.heartbeats.append(body)

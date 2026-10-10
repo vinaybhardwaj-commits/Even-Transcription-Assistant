@@ -4,6 +4,7 @@
  * Auth: Bearer NEMOTRON_WORKER_TOKEN. 404 `disabled` while DIARIZE_NEMOTRON_SHADOW is off. Body ≤ 1 MB, checked
  * whole by lib/diarize-nemotron/validate.ts before any SQL.
  *
+ *   (0143) an optional body key `probs_r2_key` (must equal lab/nemotron-probs/<window_id>.nlp) is stored when the object exists; the reply then says probs: stored | missing (absent when no pointer was sent).
  *   200 { ok, result: "stored", id, label, job }   new row (label = teacher-label outcome: written | skipped | failed;
  *                                                  job = the diarize_window job it submitted: submitted | deduped | none | refused)
  *   200 { ok, result: "duplicate", job }           identical re-post; nothing written (job only if a first submit was lost)
@@ -23,6 +24,7 @@ import { DIARIZE_WINDOW_KIND } from "@/lib/jobs/kinds/diarize-window";
 import { JobArgsError } from "@/lib/jobs/types";
 import { submitJob } from "@/lib/jobs/submit";
 import { checkIngest } from "@/lib/diarize-nemotron/validate";
+import { headObject } from "@/lib/r2";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -55,6 +57,14 @@ export async function POST(req: NextRequest) {
   if ("fail" in read) return read.fail;
   const v = checkIngest(read.body);
   if (!v.ok) return reply(400, { ok: false, error: v.error });
+  // (0143) the probability pointer is stored only if the object is really there; a missing one is dropped, not recorded
+  let probs: "none" | "stored" | "missing" = "none";
+  if (v.body.probs_r2_key) {
+    if ((await headObject(v.body.probs_r2_key)).size === null) {
+      v.body.probs_r2_key = null;
+      probs = "missing";
+    } else probs = "stored";
+  }
   try {
     const out = await recordIngest(v.body, v.derived, v.payload_sha256);
     switch (out.result) {
@@ -77,7 +87,7 @@ export async function POST(req: NextRequest) {
             return reply(503, { ok: false, error: "job_submit" });
           }
         }
-        return reply(200, { ok: true, ...out, job });
+        return reply(200, { ok: true, ...out, job, ...(probs === "none" ? {} : { probs }) });
       }
       default:
         return reply(200, { ok: true, ...out });

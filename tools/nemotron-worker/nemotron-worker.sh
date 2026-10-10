@@ -10,7 +10,8 @@
 # stop sends SIGTERM and waits up to STOP_WAIT_S (180 s; at least 150) for the window in hand to be posted; it never
 # sends SIGKILL itself. Another base URL needs NEMOTRON_BASE_URL plus NEMOTRON_ALLOW_OTHER_BASE_URL=1 (worker.py enforces it).
 # Other knobs (all optional): NEMOTRON_PYTHON, NEMOTRON_CONCURRENCY, NEMOTRON_RATE_PER_HOUR, NEMOTRON_MIN_FREE_VRAM_MIB,
-# NEMOTRON_GPU_LOCK, NEMOTRON_TMP_ROOT, NEMOTRON_FINETUNE_CKPT (unset = stock model), NEMOTRON_WORKER_ID.
+# NEMOTRON_GPU_LOCK, NEMOTRON_TMP_ROOT, NEMOTRON_FINETUNE_CKPT (unset = stock model), NEMOTRON_WORKER_ID, NEMOTRON_LAB (0 = never ask the lab lane),
+# NEMOTRON_TITANET_NEMO / NEMOTRON_ECAPA_DIR (local embedder files for lab jobs; unset = embedder_unavailable).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

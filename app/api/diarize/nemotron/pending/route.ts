@@ -9,12 +9,15 @@
  *   clip_url     a presigned R2 GET, 30 min.
  *   clip_sha256  always null today: bench_window stores no clip hash. The worker hashes what it fetched and posts that.
  *   exhausted    windows that used all 3 attempts with nothing stored.
+ *   probs_key / probs_put_url  (0143) where the worker may PUT the window's per-frame probabilities (NLP1) and the key to post back as `probs_r2_key`.
+ *                Best effort: if a PUT URL cannot be signed the two fields are simply absent (probabilities never fail a window).
  * 503 { error: "clip_sign" } when a clip URL cannot be signed: every window claimed in that call is given back
  *   (attempt refunded, lease released), so an R2 outage never burns attempts.
  * Ids, times and URLs only. Never audio, never text.
  */
 import { NextRequest } from "next/server";
-import { signGetUrl } from "@/lib/r2";
+import { signGetUrl, signPutUrl } from "@/lib/r2";
+import { windowProbsKey } from "@/lib/diarize-nemotron/lab-keys";
 import { gate, reply } from "@/lib/diarize-nemotron/http";
 import { CLIP_URL_SECONDS, claimPending, countExhausted, releaseClaim } from "@/lib/diarize-nemotron/store";
 import { isWorkerId, pendingLimit } from "@/lib/diarize-nemotron/validate";
@@ -22,6 +25,8 @@ import { isWorkerId, pendingLimit } from "@/lib/diarize-nemotron/validate";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 15;
+
+const PROBS_PUT_SECONDS = 3600;
 
 export async function GET(req: NextRequest) {
   const shut = gate(req);
@@ -39,6 +44,16 @@ export async function GET(req: NextRequest) {
       for (const w of claimed) await releaseClaim(workerId, w.window_id);
       return reply(503, { ok: false, error: "clip_sign" });
     }
+    const probs = await Promise.all(
+      claimed.map(async (w) => {
+        try {
+          const key = windowProbsKey(w.window_id);
+          return { probs_key: key, probs_put_url: await signPutUrl({ key, contentType: "application/octet-stream", expiresInSeconds: PROBS_PUT_SECONDS }) };
+        } catch {
+          return {};
+        }
+      }),
+    );
     const windows = claimed.map((w, i) => ({
       window_id: w.window_id,
       room_day_id: w.room_day_id,
@@ -47,6 +62,7 @@ export async function GET(req: NextRequest) {
       clip_url: urls[i],
       clip_sha256: null,
       attempt: w.attempts,
+      ...probs[i],
     }));
     return reply(200, { ok: true, windows, exhausted: await countExhausted() });
   } catch (e) {
