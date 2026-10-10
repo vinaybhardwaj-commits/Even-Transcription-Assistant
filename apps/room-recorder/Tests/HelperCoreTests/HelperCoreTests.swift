@@ -283,4 +283,31 @@ private func refusal(_ data: Data) -> HelperRefusal? {
     let reply = roundTrip(requirement: "identifier \"\(id)\"")
     #expect(reply?.ok == true)
   }
+
+  // ─── The APP side: the client must refuse a helper that does not match the pinned requirement ──
+
+  /// An in-process "helper" whose own side accepts this process, so only the CLIENT's check is
+  /// under test. The helper here is this test runner, which is not signed by our leaf.
+  private func clientHello(requirement: String, serverRequirement: String) -> HelperResponse? {
+    let delegate = HelperListenerDelegate(
+      service: HelperService(safeMode: false), requirement: serverRequirement)
+    let listener = NSXPCListener.anonymous()
+    listener.delegate = delegate
+    listener.resume()
+    defer { listener.invalidate() }
+    return HelperClient(endpoint: listener.endpoint, requirement: requirement).hello(timeout: 5)
+  }
+
+  @Test func appRefusesAHelperThatDoesNotMatchThePinnedRequirement() throws {
+    let id = try #require(ownIdentifier())
+    let serverAccepts = "identifier \"\(id)\""
+    #expect(clientHello(requirement: HelperIdentity.requirementForHelper, serverRequirement: serverAccepts) == nil)
+  }
+
+  @Test func appAcceptsAHelperThatMatchesTheRequirementItIsGiven() throws {
+    // Control for the refusal above: same wiring, a requirement the "helper" does satisfy.
+    let id = try #require(ownIdentifier())
+    let requirement = "identifier \"\(id)\""
+    #expect(clientHello(requirement: requirement, serverRequirement: requirement)?.ok == true)
+  }
 }

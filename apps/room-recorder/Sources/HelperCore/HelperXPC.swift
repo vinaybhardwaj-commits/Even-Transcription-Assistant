@@ -88,20 +88,26 @@ public enum HelperRegistration {
 
 /// App → helper client. The helper's identity is checked on the app's side of the connection.
 public final class HelperClient: @unchecked Sendable {
-  private let machService: String
+  private let makeConnection: () -> NSXPCConnection
   private let requirement: String
 
   public init(
     machService: String = HelperIdentity.machServiceName,
     requirement: String = HelperIdentity.requirementForHelper
   ) {
-    self.machService = machService
+    self.makeConnection = { NSXPCConnection(machServiceName: machService, options: .privileged) }
+    self.requirement = requirement
+  }
+
+  /// For tests: connect to an in-process listener instead of the helper's mach service.
+  init(endpoint: NSXPCListenerEndpoint, requirement: String) {
+    self.makeConnection = { NSXPCConnection(listenerEndpoint: endpoint) }
     self.requirement = requirement
   }
 
   /// One hello. Nil on timeout, refusal or a peer that fails the requirement.
   public func hello(timeout: TimeInterval = 3) -> HelperResponse? {
-    let connection = NSXPCConnection(machServiceName: machService, options: .privileged)
+    let connection = makeConnection()
     connection.remoteObjectInterface = NSXPCInterface(with: HelperXPCProtocol.self)
     connection.setCodeSigningRequirement(requirement)
     connection.resume()
