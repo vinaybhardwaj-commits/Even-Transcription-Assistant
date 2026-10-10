@@ -44,6 +44,8 @@ import wave
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+import lab as labmod  # the LAB lane's pure helpers (allow-list re-check, ffmpeg filter string, NLP1 files, presigned PUT)
+
 log = logging.getLogger("nemotron-worker")
 
 MAX_SPEAKERS = 8  # validate.ts MAX_SPEAKERS
@@ -202,10 +204,14 @@ class DecodeError(Exception):
     pass
 
 
-def ffmpeg_decode(src: str, wav: str) -> int:
-    """Decode to 16 kHz mono s16 WAV; returns audio_ms. DecodeError on any failure (terminal: decode_failed)."""
-    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", src, "-ar", "16000", "-ac", "1",
-                        "-c:a", "pcm_s16le", wav], capture_output=True, timeout=600)
+def ffmpeg_decode(src: str, wav: str, af: Optional[str] = None) -> int:
+    """Decode to 16 kHz mono s16 WAV; returns audio_ms. DecodeError on any failure (terminal: decode_failed).
+    `af` (LAB lane only) is a filter string built by lab.build_af from validated NUMBERS; it is one argv element, never a shell string."""
+    cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", src]
+    if af:
+        cmd += ["-af", af]
+    cmd += ["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav]
+    r = subprocess.run(cmd, capture_output=True, timeout=600)
     if r.returncode != 0:
         raise DecodeError("ffmpeg")
     try:
@@ -308,6 +314,8 @@ class Config:
     fetch_timeout_s: float = 180.0
     ingest_retries: int = 4
     state_file: Optional[str] = None
+    lab: bool = True  # ask /lab/claim when production has nothing pending (the server answers 404 until NEMOTRON_LAB_ENABLED)
+    put_schemes: tuple = ("https",)  # widened only by the tests' local fake server
 
 
 class Backoff:
@@ -388,7 +396,7 @@ class Worker:
         wid = w["window_id"]
         tmp = tempfile.mkdtemp(prefix="nemo-w-", dir=self.cfg.tmp_root)
         os.chmod(tmp, 0o700)
-        sha, audio_ms, turns, fail, timing = None, 0, [], None, {}
+        sha, audio_ms, turns, fail, timing, probs = None, 0, [], None, {}, None
         try:
             src, wav = os.path.join(tmp, "clip.bin"), os.path.join(tmp, "clip.wav")
             try:
@@ -408,7 +416,10 @@ class Worker:
                     return "abandoned"
                 t1 = time.monotonic()
                 try:
-                    segments = self.engine.diarize(wav)
+                    if w.get("probs_put_url") and hasattr(self.engine, "diarize_with_probs"):
+                        segments, probs = self.engine.diarize_with_probs(wav)
+                    else:
+                        segments = self.engine.diarize(wav)
                 except Exception as e:  # never str(e): an engine message could carry a path
                     fail = "gpu_oom" if "out of memory" in repr(e).lower() else "infer_failed"
                     log.warning("window=%s %s type=%s", wid, fail, type(e).__name__)
@@ -428,6 +439,16 @@ class Worker:
                               clip_sha256=sha, turns=[])
         else:
             body = self._body(w, status="ok" if turns else "empty", error_code=None, audio_ms=audio_ms, clip_sha256=sha, turns=turns)
+            # (0143) per-frame probabilities, best effort: an upload that fails leaves the pointer out and the window is posted anyway
+            if probs and w.get("probs_put_url") and w.get("probs_key"):
+                try:
+                    blob = labmod.pack_nlp(probs, "u8", {"frame_ms": 80, "window_id": w["window_id"], "model_rev": self.engine.model_rev})
+                    if labmod.put_object(w["probs_put_url"], blob, schemes=self.cfg.put_schemes):
+                        body["probs_r2_key"] = w["probs_key"]
+                    else:
+                        log.warning("window=%s probs_upload_failed (posting without the pointer)", wid)
+                except Exception as e:  # never str(e)
+                    log.warning("window=%s probs_pack_failed type=%s", wid, type(e).__name__)
         outcome = self.post_ingest(body)
         spk = len({t[2] for t in turns})
         log.info("window=%s attempt=%s status=%s outcome=%s turns=%d spk=%d audio_s=%d infer_s=%s wall_s=%.1f",
@@ -451,6 +472,138 @@ class Worker:
                 return code
             if i < self.cfg.ingest_retries:
                 self.retry_sleep(min(60.0, 5.0 * (3 ** i)))  # NOT cut short by a stop
+        return "ingest_gave_up"
+
+    # -- the LAB lane (nemotron_lab_run, migration 0143) -----------------------------------------------------------
+
+    def lab_cycle(self) -> bool:
+        """Claim ONE lab item and run it. True when an item was processed (the loop goes round again without idling).
+        The rate cap is shared with production (self.started); the GPU lock is taken per inference exactly as for a production window.
+        Any non-200, 404 lab_disabled, or reason=production_pending is just 'nothing to do': the caller idles."""
+        if self._rate_room() <= 0:
+            return False
+        q = urllib.parse.urlencode({"worker_id": self.cfg.worker_id, "limit": 1})
+        status, out = self.api.call("GET", f"/api/diarize/nemotron/lab/claim?{q}")
+        if status != 200:
+            if status != 404:  # 404 = the lane is off: expected, not an error
+                self.last_error_code = str(out.get("error") or f"http_{status}")
+            return False
+        items = [i for i in out.get("items", []) if isinstance(i, dict)]
+        if not items:
+            return False
+        self.state = "working_lab"
+        self.started.append(self.clock())
+        with self._mu:
+            self.in_flight = 1
+        self.write_state()
+        try:
+            self.process_lab(items[0])
+        finally:
+            with self._mu:
+                self.in_flight = 0
+        return True
+
+    def _lab_body(self, it: dict, *, status: str, error_code, audio_ms: int, sha, turns: list, config: dict, probs_key, emb_key, emb_dims, infer_s) -> dict:
+        return {"run_id": it["run_id"], "idx": it["idx"], "worker_id": self.cfg.worker_id, "status": status, "error_code": error_code,
+                "model": self.engine.model, "model_rev": self.engine.model_rev, "config": config, "spec_hash": it["spec_hash"],
+                "audio_ms": audio_ms, "clip_sha256": sha, "turns": turns, "probs_r2_key": probs_key,
+                "embeddings_r2_key": emb_key, "embeddings_dims": emb_dims, "infer_s": infer_s}
+
+    def process_lab(self, it: dict) -> str:
+        """Fetch, decode through the allow-listed front-end, infer under the GPU lock, delete the audio, upload the probability /
+        embedding files to the keys the SERVER chose, post to /lab/ingest. Returns the outcome code."""
+        t0 = time.monotonic()
+        tag = f"{it.get('run_id')}/{it.get('idx')}"
+        sha, audio_ms, turns, fail = None, 0, [], None
+        probs_rows, emb_rows, infer_s = None, None, None
+        config = dict(self.engine.config)
+        try:
+            spec = labmod.validate_spec(it.get("spec"))
+            af = labmod.build_af(spec["frontend"])
+            config = dict(self.engine.lab_config(spec)) if hasattr(self.engine, "lab_config") else dict(self.engine.config)
+        except labmod.SpecError as e:
+            log.warning("lab=%s bad_spec reason=%s", tag, e)
+            spec, af, fail = None, None, "bad_spec"
+        tmp = tempfile.mkdtemp(prefix="nemo-w-", dir=self.cfg.tmp_root)
+        os.chmod(tmp, 0o700)
+        try:
+            src, wav = os.path.join(tmp, "clip.bin"), os.path.join(tmp, "clip.wav")
+            if fail is None:
+                try:
+                    sha, _n = self.fetch(it["clip_url"], src, self.cfg.max_clip_bytes, self.cfg.fetch_timeout_s)
+                except FetchError as e:
+                    fail = "fetch_failed"
+                    log.warning("lab=%s fetch_failed reason=%s", tag, e)
+            if fail is None:
+                try:
+                    audio_ms = self.decode(src, wav, af) if af else self.decode(src, wav)
+                except DecodeError:
+                    fail, audio_ms = ("frontend_failed" if af else "decode_failed"), 0
+            if fail is None:
+                if not self.gpu.acquire():
+                    log.info("lab=%s abandoned_on_stop (lease will lapse)", tag)
+                    self._note("abandoned")
+                    return "abandoned"
+                t1 = time.monotonic()
+                try:
+                    segments, probs_rows = self.engine.diarize_lab(wav, spec)
+                    segments = labmod.filter_speakers(segments, spec["max_speakers"], spec["min_speech_ms"])
+                    turns = to_turns(segments, audio_ms)
+                    if spec["return_embeddings"] and turns:
+                        emb_rows = self.engine.embed_speakers(wav, turns, spec["return_embeddings"])
+                except TurnsError as e:
+                    fail, turns = e.code, []
+                except labmod.EmbedderUnavailable:
+                    fail, turns = "embedder_unavailable", []
+                except Exception as e:  # never str(e): an engine message could carry a path
+                    fail = "gpu_oom" if "out of memory" in repr(e).lower() else "infer_failed"
+                    log.warning("lab=%s %s type=%s", tag, fail, type(e).__name__)
+                finally:
+                    self.gpu.release()
+                    infer_s = round(time.monotonic() - t1, 2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)  # audio gone before anything is uploaded or posted
+
+        probs_key = emb_key = emb_dims = None
+        if fail is None and spec["return_probs"] and probs_rows:
+            ok = bool(it.get("probs_put_url")) and bool(it.get("probs_key")) and labmod.put_object(
+                it["probs_put_url"], labmod.pack_nlp(probs_rows, "u8", {"frame_ms": 80, "run_id": it["run_id"], "idx": it["idx"]}), schemes=self.cfg.put_schemes)
+            if ok:
+                probs_key = it["probs_key"]
+            else:
+                fail = "upload_failed"
+        if fail is None and spec["return_embeddings"] and emb_rows:
+            ok = bool(it.get("embeddings_put_url")) and bool(it.get("embeddings_key")) and labmod.put_object(
+                it["embeddings_put_url"], labmod.pack_nlp(emb_rows, "f16", {"embedder": spec["return_embeddings"], "run_id": it["run_id"], "idx": it["idx"]}),
+                schemes=self.cfg.put_schemes)
+            if ok:
+                emb_key, emb_dims = it["embeddings_key"], len(emb_rows[0])
+            else:
+                fail = "upload_failed"
+
+        if fail is not None:
+            body = self._lab_body(it, status="failed", error_code=fail, audio_ms=audio_ms if fail not in ("decode_failed", "frontend_failed") else 0,
+                                  sha=sha, turns=[], config=config, probs_key=None, emb_key=None, emb_dims=None, infer_s=infer_s)
+        else:
+            body = self._lab_body(it, status="ok" if turns else "empty", error_code=None, audio_ms=audio_ms, sha=sha, turns=turns, config=config,
+                                  probs_key=probs_key, emb_key=emb_key, emb_dims=emb_dims, infer_s=infer_s)
+        outcome = self.post_lab_ingest(body)
+        log.info("lab=%s attempt=%s status=%s outcome=%s turns=%d spk=%d audio_s=%d infer_s=%s wall_s=%.1f", tag, it.get("attempt"), body["status"],
+                 outcome, len(turns), len({t[2] for t in turns}), audio_ms // 1000, infer_s if infer_s is not None else "-", time.monotonic() - t0)
+        self._note(outcome, fail)
+        return outcome
+
+    def post_lab_ingest(self, body: dict) -> str:
+        """As post_ingest: retry only network / 5xx, with the identical body; never cut short by a stop."""
+        for i in range(self.cfg.ingest_retries + 1):
+            status, out = self.api.call("POST", "/api/diarize/nemotron/lab/ingest", body)
+            if status == 200:
+                return str(out.get("result", "ok"))
+            code = str(out.get("error") or f"http_{status}")
+            if status in (400, 401, 403, 404, 409, 413, 422):
+                return code
+            if i < self.cfg.ingest_retries:
+                self.retry_sleep(min(60.0, 5.0 * (3 ** i)))
         return "ingest_gave_up"
 
     # -- the loop -----------------------------------------------------------------------------------------------
@@ -490,6 +643,9 @@ class Worker:
         self.backoff.reset()
         windows = [w for w in out.get("windows", []) if isinstance(w, dict)]
         if not windows:
+            # LAB LANE: only here, when production has nothing to offer THIS instant (a non-200 /pending never reaches this line)
+            if self.cfg.lab and self.lab_cycle():
+                return not self.stop.is_set()
             return not self._wait(self.cfg.idle_poll_s, "idle")
         self.state = "working"
         for _ in windows:
@@ -655,6 +811,8 @@ def main(argv=None) -> int:
     p.add_argument("--state-file", default=env("NEMOTRON_STATE_FILE", f"{home}/.local/state/eta-nemotron/status.json"))
     p.add_argument("--finetune-ckpt", default=env("NEMOTRON_FINETUNE_CKPT"), help="a .nemo fine-tune; unset = STOCK model")
     p.add_argument("--device", default=env("NEMOTRON_DEVICE", "cuda"))
+    p.add_argument("--no-lab", action="store_true", default=env("NEMOTRON_LAB", "1") in ("0", "false", "no", "off"),
+                   help="never ask /lab/claim (NEMOTRON_LAB=0)")
     a = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S%z")
@@ -675,7 +833,7 @@ def main(argv=None) -> int:
 
     cfg = Config(base_url=a.base_url, worker_id=a.worker_id, concurrency=max(1, a.concurrency),
                  rate_per_hour=max(1, a.rate_per_hour), min_free_vram_mib=a.min_free_vram_mib,
-                 gpu_lock=a.gpu_lock or None, tmp_root=a.tmp_root, state_file=a.state_file)
+                 gpu_lock=a.gpu_lock or None, tmp_root=a.tmp_root, state_file=a.state_file, lab=not a.no_lab)
     stop = threading.Event()
     worker = Worker(cfg, Api(cfg.base_url, token), engine, stop=stop)
 
