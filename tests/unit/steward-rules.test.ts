@@ -264,21 +264,52 @@ describe("not recording: start, backoff, max tries", () => {
     expect(first(idle(T, { start_attempts: [failedAttempt(T, 3000)] }), T).action).toBe("scribe_start");
   });
 
-  it("F23: device_missing needs evidence younger than 6 h: an 'absent' audio row 6 h 1 s old, or the DEVICE_MISSING flag alone, only annotates inputs and the start schedule goes on", () => {
+  it("G1 evidence (10 Oct): for the START gate an 'absent' audio row counts at ANY age (14 h, no devices_at), as does the install DEVICE_MISSING flag; a later present row or no signal does not hold", () => {
     const tried = [failedAttempt(T, 3000)];
-    const stale = first(idle(T, { audio: { default_input_present: false, devices_at: ago(T, 6 * 3600 + 1) }, start_attempts: tried }), T);
-    expect(stale).toMatchObject({ rule: "not_recording", action: "scribe_start" });
-    expect(stale.inputs).toMatchObject({ device_signal_not_evidence: "audio_row_older_than_6h" });
-    expect(stale.inputs).not.toHaveProperty("device_missing");
-    const flag = first(idle(T, { audio: { default_input_present: true, device_missing_flag: true }, start_attempts: tried }), T);
-    expect(flag).toMatchObject({ action: "scribe_start" });
-    expect(flag.inputs).toMatchObject({ device_signal_not_evidence: "install_flag_only" });
-    // no devices_at at all (age unknown) is not evidence either
-    expect(first(idle(T, { audio: { default_input_present: false }, start_attempts: tried }), T).action).toBe("scribe_start");
-    // exactly 6 h old still counts
-    expect(first(idle(T, { audio: { default_input_present: false, devices_at: ago(T, 6 * 3600) }, start_attempts: tried }), T)).toMatchObject({ rule: "waiting_for_mic", action: "log_only" });
-    // a USB removal with no usb_added since is evidence
-    expect(first(idle(T, { audio: { usb_removed_recent: true }, start_attempts: tried }), T)).toMatchObject({ rule: "waiting_for_mic", action: "log_only" });
+    const hold = (a: DeepPartial<RoomSense["audio"]>) => first(idle(T, { audio: a, start_attempts: tried }), T);
+    // absent row 14 h old, nothing newer (the newest audio.devices row IS the newest word): waiting_for_mic, never a start
+    expect(hold({ default_input_present: false, devices_at: ago(T, 14 * 3600) })).toMatchObject({ rule: "waiting_for_mic", action: "log_only", params: { mic_ticks: 0 } });
+    expect(hold({ default_input_present: false, devices_at: ago(T, 6 * 3600 + 1) })).toMatchObject({ rule: "waiting_for_mic" });
+    expect(hold({ default_input_present: false })).toMatchObject({ rule: "waiting_for_mic" });
+    // the absent row followed by a later add: the newest row says present -> no hold (the start schedule goes on)
+    expect(hold({ default_input_present: true, devices_at: ago(T, 600) })).toMatchObject({ rule: "not_recording", action: "scribe_start" });
+    // install DEVICE_MISSING flag (chosen device not enumerated) holds, alone
+    expect(hold({ default_input_present: true, device_missing_flag: true })).toMatchObject({ rule: "waiting_for_mic", action: "log_only" });
+    expect(hold({ default_input_present: null, device_missing_flag: true })).toMatchObject({ rule: "waiting_for_mic" });
+    // a USB removal with no usb_added since is evidence as before
+    expect(hold({ usb_removed_recent: true })).toMatchObject({ rule: "waiting_for_mic" });
+    // no signal at all (no row, no flag): nothing to hold on
+    expect(hold({ default_input_present: null, device_missing_flag: false })).toMatchObject({ action: "scribe_start" });
+    // and the flag clears: present row, no flag -> the 2-tick return starts
+    const A = T + 60_000;
+    const mem = recent([{ ts: new Date(T).toISOString(), rule: "waiting_for_mic", action: "log_only", params: { mic_ticks: 0 }, outcome: null }]);
+    expect(first(idle(A, { audio: { default_input_present: true, device_missing_flag: false }, start_attempts: tried }), A, mem)).toMatchObject({ rule: "waiting_for_mic", params: { mic_ticks: 1 } });
+  });
+
+  it("G1 72 h (10 Oct): Monday 07:30 IST, the 24 h read has no row, the newest row within 72 h is an unplug 40 h old -> waiting_for_mic; a later present row clears it", () => {
+    const M = ist("07:30", "2026-10-12"); // a Monday after a closed Sunday
+    const tried = [failedAttempt(M, 3000)];
+    const room = (audio: DeepPartial<RoomSense["audio"]>) => idle(M, { audio: { default_input_present: null, devices_at: null, ...audio }, start_attempts: tried, reachable: { kh_heartbeat_at: ago(M, 30) }, recording: { recorder_history: readyRecorder(M, 600) } });
+    const gone = { last_72h: { present: false, at: ago(M, 40 * 3600) } };
+    expect(first(room(gone), M)).toMatchObject({ rule: "waiting_for_mic", action: "log_only", params: { mic_ticks: 0 } });
+    // the newest row within 72 h is a present one (a later add): no hold
+    expect(first(room({ last_72h: { present: true, at: ago(M, 30 * 3600) } }), M)).toMatchObject({ rule: "not_recording", action: "scribe_start" });
+    // no row in 72 h: nothing to hold on
+    expect(first(room({ last_72h: null }), M)).toMatchObject({ action: "scribe_start" });
+    // the 24 h read wins when it has a row: a present 24 h row is not overridden by an older 72 h absent one
+    expect(first(room({ default_input_present: true, devices_at: ago(M, 600), ...gone }), M)).toMatchObject({ action: "scribe_start" });
+    // after the unplug the room comes back: present row -> marker tick, then the normal gates
+    const mem = recent([{ ts: new Date(M).toISOString(), rule: "waiting_for_mic", action: "log_only", params: { mic_ticks: 0 }, outcome: null }]);
+    const A = M + 60_000;
+    expect(first(idle(A, { audio: { default_input_present: true, devices_at: ago(A, 20) }, start_attempts: tried }), A, mem)).toMatchObject({ rule: "waiting_for_mic", params: { mic_ticks: 1 } });
+  });
+
+  it("G1 evidence: recording-path behaviour unchanged — mic_fault and deviceMissing's 6 h rule are not touched (a 14 h old absent row with a consult open is still the same mic_fault; the 6 h limit still applies to the annotation)", () => {
+    const mic = healthy(T, { consult_open: true, consult_started_at: ago(T, 300), audio: { default_input_present: false, devices_at: ago(T, 14 * 3600) } });
+    expect(decideRoom(mic, DEFAULT_CONFIG, T, EMPTY_RECENT)[0]).toMatchObject({ rule: "mic_fault", action: "message" });
+    // a healthy recording room with an old absent row and no consult: no new decision from the G1 evidence
+    const quiet = healthy(T, { audio: { default_input_present: false, devices_at: ago(T, 14 * 3600) } });
+    expect(decideRoom(quiet, DEFAULT_CONFIG, T, EMPTY_RECENT).map((d) => d.rule)).not.toContain("waiting_for_mic");
   });
 
   it("F18: recorder.status session_open is the daemon's \"yes\" / \"no\" / \"unknown\": no = closed, yes = open, unknown = null (NOT closed); booleans and the legacy true/false strings are accepted too", () => {
@@ -929,7 +960,8 @@ describe("F2: params are stable across minutes (the dedupe key is (room, rule, a
     ];
     for (const [s, r] of scenarios) {
       for (const d of decideRoom(s, DEFAULT_CONFIG, T, r)) {
-        for (const [k, v] of Object.entries(d.params)) expect(typeof v === "number" ? `${d.rule}.${k} is a number` : "ok").toBe("ok");
+        // waiting_for_mic.mic_ticks is the episode marker (0 = missing, 1 = back), a fixed enum that cannot count up
+        for (const [k, v] of Object.entries(d.params)) expect(typeof v === "number" && !(d.rule === "waiting_for_mic" && k === "mic_ticks") ? `${d.rule}.${k} is a number` : "ok").toBe("ok");
       }
     }
   });
