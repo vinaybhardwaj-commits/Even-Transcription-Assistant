@@ -192,7 +192,8 @@ export async function listCliplessWindows(opts: {
           WHERE b.day = d.ist_date::text AND b.room = d.room_id
        )
        AND (${include} OR r.transcript_enabled = TRUE)
-     ORDER BY w.start_ms ASC
+     -- newest first (V, 10 Oct): Pulse consults start on 2 Oct, so recent clips are the ones the room-print builder can use
+     ORDER BY w.start_ms DESC
      LIMIT ${limit}
   `) as Array<{ window_id: string; transcript_enabled: boolean }>;
 }

@@ -112,11 +112,13 @@ describe("A FAILED UPDATE IS NOT A SUCCESS, and it does not leave bytes behind",
 });
 
 describe("the listing's order is part of its contract", () => {
-  it("is OLDEST FIRST — an operator asking for a handful gets the backlog, not the newest", async () => {
+  // V, 10 Oct 2026: NEWEST FIRST, reversing the earlier oldest-first rule. Pulse consults start on 2 Oct, and the
+  // Nemotron room-print builder can only learn from windows that overlap them, so recent clips come first.
+  it("is NEWEST FIRST — recent windows, which overlap Pulse consults, get clips before the backlog", async () => {
     const { listCliplessWindows } = await import("@/lib/stt/join-only");
     await listCliplessWindows({ limit: 5 });
     const q = H.statements.find((s) => /FROM bench_window/i.test(s) && /clip_r2_key IS NULL/i.test(s))!;
-    expect(q).toMatch(/ORDER BY\s+w\.start_ms\s+ASC/i);
-    expect(q).not.toMatch(/ORDER BY\s+w\.start_ms\s+DESC/i);
+    expect(q).toMatch(/ORDER BY\s+w\.start_ms\s+DESC/i);
+    expect(q).not.toMatch(/ORDER BY\s+w\.start_ms\s+ASC/i);
   });
 });

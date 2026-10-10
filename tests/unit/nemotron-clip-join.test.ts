@@ -192,7 +192,7 @@ describe("the route", () => {
 
 describe("e. the listing SQL", () => {
   beforeEach(() => { vi.doUnmock("@/lib/stt/join-only"); });
-  it("excludes the blind pairs (from the constant) and requires grid_aligned, oldest first", async () => {
+  it("excludes the blind pairs (from the constant) and requires grid_aligned, newest first (V, 10 Oct)", async () => {
     const { listCliplessWindows } = await import("@/lib/stt/join-only");
     await listCliplessWindows({ limit: 5, includeTranscriptDisabled: true });
     // the DRAIN-GUARD blind-id lookup (room-access) runs first; the listing is the statement that selects the candidate windows
@@ -204,7 +204,7 @@ describe("e. the listing SQL", () => {
     expect(q).toMatch(/\(w\.end_ms - w\.start_ms\) <= \?/);   // L2a: D2 cap, parameter = JOIN_MAX_MS
     expect(H.params[qi]).toContain(JOIN_MAX_MS);
     expect(q).toMatch(/EXISTS \(SELECT 1 FROM bench_chunk c WHERE c\.session_id = w\.session_id\)/);   // L2b
-    expect(q).toMatch(/ORDER BY w\.start_ms ASC/);
+    expect(q).toMatch(/ORDER BY w\.start_ms DESC/);
     expect(q).not.toMatch(/room_[a-z0-9]{8}/);   // no hand-copied pair in the text
   });
 });
