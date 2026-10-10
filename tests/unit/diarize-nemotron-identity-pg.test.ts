@@ -2,7 +2,7 @@
  * diarize-nemotron-identity-pg.test.ts — 0141 and the nemotron_identity job against real Postgres 16 (epic #23 c).
  *
  * Proves the SQL the job and the enqueue send: the one-statement ok write (pass + speakers, nothing on a second
- * run), the failed-pass attempt counting and the terminal bound, the constraints, the blind refusal, both
+ * run), the failed-pass attempt counting and the terminal bound, the constraints, the former blind refusal (now processed), both
  * centroid loaders, and the enqueue's choice of rows. The Mini and R2 are fakes; every vector is typed by hand.
  * All ids are fake.
  */
@@ -207,19 +207,24 @@ describe.runIf(HAVE)("the job", () => {
     ]);
   });
 
-  it("a blind room-day and a non-ok row are skipped and nothing is written", async () => {
-    const blind = await nemoRow({ rd: "rd_blind" });
+  it("a formerly blind room-day is processed like any day; a non-ok row is still skipped and nothing is written for it", async () => {
+    const formerlyBlind = await nemoRow({ rd: "rd_blind" });
     const empty = await nemoRow({ status: "empty", turns: [] });
-    expect(await runJob(blind)).toMatchObject({ result: { skipped: "blind_room_day" } });
+    H.embed.mockResolvedValueOnce({ ok: true, latencyMs: 1, speakers: [] });
+    const done = await runJob(formerlyBlind);
+    expect(JSON.stringify(done)).not.toContain("blind_room_day");
+    expect(H.embed).toHaveBeenCalledTimes(1);
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_identity WHERE window_row_id = ${formerlyBlind}`))[0]!.n).toBeGreaterThan(0);
+    H.embed.mockClear();
     expect(await runJob(empty)).toMatchObject({ result: { skipped: "not_ok" } });
     expect(H.embed).not.toHaveBeenCalled();
-    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_identity WHERE window_row_id IN (${blind}, ${empty})`))[0]!.n).toBe(0);
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_identity WHERE window_row_id = ${empty}`))[0]!.n).toBe(0);
   });
 
-  it("the held-out guard places a row through its window: blind refused, clean passes, a missing row is left to the kind, a bad id fails closed", async () => {
+  it("the held-out guard places a row through its window: a formerly blind row passes, clean passes, a missing row is left to the kind, a bad id fails closed", async () => {
     const guard = kind.nemotronIdentityKind.heldOut!;
     expect(kind.nemotronIdentityKind.roomData).toBe(true);
-    expect(await guard({ row_id: await nemoRow({ rd: "rd_blind" }), centroid_set: "voice_print" })).toBe("blind_room_day");
+    expect(await guard({ row_id: await nemoRow({ rd: "rd_blind" }), centroid_set: "voice_print" })).toBeNull();
     expect(await guard({ row_id: await nemoRow(), centroid_set: "voice_print" })).toBeNull();
     expect(await guard({ row_id: 999_999_999, centroid_set: "voice_print" })).toBeNull();
     expect(await guard({ row_id: "x", centroid_set: "voice_print" })).toBe("window_unplaced");
@@ -252,7 +257,7 @@ describe.runIf(HAVE)("the enqueue", () => {
     const exhausted = await nemoRow();
     const queued = await nemoRow();
     await nemoRow({ status: "empty", turns: [] });
-    await nemoRow({ rd: "rd_blind" }); // a fresh ok row on a held-out day: never chosen, counted
+    const formerlyBlind = await nemoRow({ rd: "rd_blind" }); // a fresh ok row on a formerly held-out day: chosen like any other
     pg.exec(`INSERT INTO diarize_nemotron_identity (window_row_id, centroid_set, state, attempts, error_code) VALUES
       (${retry}, 'voice_print', 'failed', 2, 'embed_failed'), (${exhausted}, 'voice_print', 'failed', 3, 'embed_failed');
       INSERT INTO diarize_nemotron_identity (window_row_id, centroid_set, state) VALUES (${done}, 'voice_print', 'ok');
@@ -262,11 +267,11 @@ describe.runIf(HAVE)("the enqueue", () => {
     H.submit.mockImplementation(async () => ({ id: `job_new${++n}` }));
     try {
       const r = await enq.enqueueNemotronIdentity({ actor: "cron:test" });
-      expect(r.enqueued).toEqual([{ row_id: fresh, job_id: "job_new1", retry: false }, { row_id: retry, job_id: "job_new2", retry: true }]);
-      const blindWindows = (await q<{ n: number }>("SELECT count(*)::int AS n FROM bench_window WHERE room_day_id = 'rd_blind'"))[0]!.n;
-      expect(blindWindows).toBeGreaterThan(0);
-      expect(r.n_blind_excluded).toBe(blindWindows);
-      expect(H.submit.mock.calls[0]![0]).toMatchObject({ kind: "nemotron_identity", args: { row_id: fresh, centroid_set: "voice_print" }, actor: "cron:test" });
+      expect(r.enqueued.filter((e) => !e.retry).map((e) => e.row_id).sort()).toEqual([fresh, formerlyBlind].sort());
+      expect(r.enqueued.filter((e) => e.retry).map((e) => e.row_id)).toEqual([retry]);
+      expect(r.enqueued.map((e) => e.retry)).toEqual([false, false, true]); // new ok rows first, then the failed pass
+      expect(r.n_blind_excluded).toBe(0);
+      expect(H.submit.mock.calls[0]![0]).toMatchObject({ kind: "nemotron_identity", args: { centroid_set: "voice_print" }, actor: "cron:test" });
     } finally {
       delete process.env.NEMOTRON_IDENTITY_ENABLED;
     }

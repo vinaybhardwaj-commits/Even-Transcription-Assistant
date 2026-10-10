@@ -290,7 +290,7 @@ describe.runIf(HAVE)("store: heartbeat", () => {
   });
 });
 
-describe.runIf(HAVE)("BLIND room-days (N1, N2): a held-out day never reaches the worker, the store or the anchors", () => {
+describe.runIf(HAVE)("formerly BLIND room-days (N1, N2; rule lifted by V 10 Oct 2026): such a day is processed like any clean day", () => {
   beforeEach(() => {
     pg.exec(`DELETE FROM diarize_nemotron_window; DELETE FROM diarize_nemotron_claim; DELETE FROM bench_window; DELETE FROM eta_encounter_windows;
       INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, state, grid_aligned, clip_r2_key) VALUES
@@ -298,27 +298,24 @@ describe.runIf(HAVE)("BLIND room-days (N1, N2): a held-out day never reaches the
         ('bw_blind', 's', 'rd_blind', 5000, 905000, 'closed', true, 'clips/x');`);
   });
 
-  it("guard: the hand-typed pair is in the held-out set, and rd_1's is not", async () => {
+  it("guard: the hand-typed pair is no longer in the held-out set (nor is rd_1's)", async () => {
     const { isBlindRoomDay } = await import("@/lib/rubrics/blind-room-days");
-    expect(isBlindRoomDay(BLIND_DAY, BLIND_ROOM)).toBe(true);
+    expect(isBlindRoomDay(BLIND_DAY, BLIND_ROOM)).toBe(false);
     expect(isBlindRoomDay("2026-10-01", "room_fake1")).toBe(false);
   });
 
-  it("N1 claim: a blind room-day's window is never offered, even though it is otherwise eligible and newer", async () => {
-    expect((await store.claimPending("box-1", 8)).map((w) => w.window_id)).toEqual(["bw_a"]);
+  it("N1 claim: a formerly blind room-day's window is offered like any other, newest first", async () => {
+    expect((await store.claimPending("box-1", 8)).map((w) => w.window_id)).toEqual(["bw_blind", "bw_a"]);
     expireLeases();
-    expect(await store.claimPending("box-2", 8)).toMatchObject([{ window_id: "bw_a", attempts: 2 }]);
-    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_claim WHERE window_id = 'bw_blind'`))[0]!.n).toBe(0);
+    expect((await store.claimPending("box-2", 8)).map((w) => [w.window_id, w.attempts])).toEqual([["bw_blind", 2], ["bw_a", 2]]);
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_claim WHERE window_id = 'bw_blind'`))[0]!.n).toBe(1);
   });
 
-  it("N1 ingest: a post for a blind window is refused blind_room_day, whatever its status, and nothing is written", async () => {
-    expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_blind" })).toEqual({ result: "blind_room_day" });
+  it("N1 ingest: a post for a formerly blind window is stored (never refused blind_room_day)", async () => {
+    expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_blind" })).toMatchObject({ result: "stored" });
     expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_blind", status: "failed", error_code: "decode_failed", turns: [], clip_sha256: null, audio_ms: 0 }))
-      .toEqual({ result: "blind_room_day" });
-    // the window's OWN room-day decides: posting an ordinary room_day_id does not get it in
-    expect(await ingest({ window_id: "bw_blind", room_day_id: "rd_1" })).toEqual({ result: "blind_room_day" });
-    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_window`))[0]!.n).toBe(0);
-    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_claim`))[0]!.n).toBe(0);
+      .toEqual({ result: "no_live_claim" }); // the first post consumed the claim; the point is that it is no longer a blind_room_day refusal
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_window WHERE window_id = 'bw_blind'`))[0]!.n).toBe(1);
     // an ordinary window still stores
     expect(await ingest()).toMatchObject({ result: "stored" });
   });
@@ -328,16 +325,18 @@ describe.runIf(HAVE)("BLIND room-days (N1, N2): a held-out day never reaches the
   const seedWindows = (...v: string[]) =>
     pg.exec(`INSERT INTO eta_encounter_windows (consult_key, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version) VALUES ${v.join(", ")};`);
 
-  it("N2 anchors: a blind (room, IST day) is refused before any read", async () => {
+  it("N2 anchors: a formerly blind (room, IST day) is not refused; its anchors are returned", async () => {
     const { loadAnchors } = await import("@/lib/encounter-clock/anchors");
     seedWindows(win("k_blind", BLIND_ROOM, "2026-09-28T04:30:00Z")); // 10:00 IST on the blind day
     const calls: number[] = [];
     const spy = ((s: TemplateStringsArray, ...v: unknown[]) => { calls.push(1); return pg.sql(s, ...v); }) as never;
-    expect(await loadAnchors(spy, BLIND_ROOM, BLIND_DAY)).toEqual({ refused: "blind_room_day" });
-    expect(calls).toEqual([]);
+    const out = await loadAnchors(spy, BLIND_ROOM, BLIND_DAY);
+    if ("refused" in out) throw new Error("a formerly blind day must not be refused");
+    expect(out.anchors.map((a) => a.consult_key)).toEqual(["k_blind"]);
+    expect(calls.length).toBeGreaterThan(0);
   });
 
-  it("N2 anchors: the day before a blind day reads normally, but a look-ahead on the blind day is dropped", async () => {
+  it("N2 anchors: the day before a formerly blind day reads normally and its look-ahead onto that day is kept", async () => {
     const { loadAnchors } = await import("@/lib/encounter-clock/anchors");
     seedWindows(
       win("k_before", BLIND_ROOM, "2026-09-27T04:30:00Z"), // 10:00 IST 27 Sep
@@ -347,7 +346,7 @@ describe.runIf(HAVE)("BLIND room-days (N1, N2): a held-out day never reaches the
     );
     const blindNext = await loadAnchors(pg.sql as never, BLIND_ROOM, "2026-09-27");
     if ("refused" in blindNext) throw new Error("27 Sep is not blind");
-    expect(blindNext.anchors.map((a) => [a.consult_key, a.next_start_ms])).toEqual([["k_before", null]]);
+    expect(blindNext.anchors.map((a) => [a.consult_key, a.next_start_ms])).toEqual([["k_before", Date.parse("2026-09-28T04:30:00Z")]]);
     const control = await loadAnchors(pg.sql as never, "room_fake1", "2026-09-27");
     if ("refused" in control) throw new Error("room_fake1 is not blind");
     expect(control.anchors.map((a) => [a.consult_key, a.next_start_ms])).toEqual([["k_ok1", Date.parse("2026-09-28T04:30:00Z")]]);

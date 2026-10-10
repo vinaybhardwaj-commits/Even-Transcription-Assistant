@@ -1,10 +1,11 @@
 /**
+ * (10 Oct 2026: the held-out rule is LIFTED, BLIND_ROOM_DAYS is empty. The formerly held-out pair is now an ordinary day: every reader below SERVES / COUNTS it and nothing is excluded.)
  * REL2-R3 (GATING #10632) on a real postgres:16 — the either-placement rule over EVERY placement a turn row has: its own room_turn_speaker.room_day_id, its bench_window.room_day_id and its
  * room_diarize_window.room_day_id. B1 (scribe_window_speakers), B2 (the voice console and voice search), and the sweep's other readers (added below the B2 block).
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS } from "../support/former-blind-pairs";
 
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), statements: [] as string[] }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push(s.join("?")); return H.sql!(s, ...v); }, { transaction: async () => [] }) }));
@@ -12,7 +13,7 @@ vi.setConfig({ testTimeout: 60_000, hookTimeout: 180_000 });
 
 const HAVE = dockerAvailable();
 const pg = pgContainer("eta-rel2-r3-blind");
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 const vec = (c: number): string => { const f = new Float32Array(192); f[0] = c; f[1] = Math.sqrt(Math.max(0, 1 - c * c)); return Buffer.from(f.buffer).toString("base64"); };
 const spk = (idx: number, c: number) => ({ idx, embedding_base64: vec(c) });
 
@@ -41,7 +42,7 @@ beforeAll(() => {
   H.sql = pg.sql as never;
   const cent = Buffer.from(new Float32Array(192).fill(0).map((_, i) => (i === 0 ? 1 : 0)).buffer).toString("base64");
   pg.exec(`
-    INSERT INTO room_day VALUES ('rd_clean', 'r1', '2026-10-05'), ('rd_blind', '${BR}', '${BD}');
+    INSERT INTO room_day VALUES ('rd_clean', 'r1', (now() AT TIME ZONE 'Asia/Kolkata')::date - 2), ('rd_blind', '${BR}', '${BD}');
     -- the sweep windows: one placement each held out
     INSERT INTO bench_window VALUES ('sJev', 'bs1', 'rd_clean'), ('sEmo', 'bs1', 'rd_clean'), ('sRts', 'bs1', 'rd_clean'), ('sRdw', 'bs1', 'rd_clean'), ('sBench', 'bs1', 'rd_blind'), ('sClean', 'bs1', 'rd_clean');
     INSERT INTO room_diarize_window (window_id, room_day_id) VALUES ('sJev', 'rd_clean'), ('sEmo', 'rd_clean'), ('sRts', 'rd_clean'), ('sRdw', 'rd_blind'), ('sBench', 'rd_clean'), ('sClean', 'rd_clean');
@@ -73,63 +74,66 @@ beforeAll(() => {
 });
 afterAll(() => { if (HAVE) pg.stop(); });
 
-(HAVE ? describe : describe.skip)("B1 scribe_window_speakers: a clean window whose turn rows sit on a held-out day is refused", () => {
+(HAVE ? describe : describe.skip)("B1 scribe_window_speakers: a window whose turn rows sit on a formerly held-out day is served", () => {
   const speakers = async (args: Record<string, unknown>) => {
     const { CALLABLE_TOOLS } = await import("@/lib/mcp/surface");
     return (await CALLABLE_TOOLS.get("scribe_window_speakers")!.handler({ ...args }, { origin: "x", actor: "a", scopes: new Set(["read"]) } as never)) as Record<string, any>;
   };
-  it("GATING repro: window wRts (bench and diarize placement clean, its rows on a held-out day) = blind_room_day and no span (it was 1 span before); a window with a clean row is served; the room-day filter refuses too", async () => {
-    expect(await speakers({ window_id: "wRts" })).toMatchObject({ error: "blind_room_day", spans: [] });
-    expect(await speakers({ window_id: "wRdw" })).toMatchObject({ error: "blind_room_day", spans: [] }); // the diarize row and the rows held out
-    const ok = await speakers({ window_id: "wOK" });
-    expect(ok.error).toBeUndefined();
-    expect(ok.spans).toHaveLength(1);
-    expect(await speakers({ room_day_id: "rd_blind" })).toMatchObject({ error: "blind_room_day" });
-    // a clean room-day listing that would reach a window with a held-out placement is refused as a whole (wBench: bench held out, rows clean)
-    expect(await speakers({ window_id: "wBench" })).toMatchObject({ error: "blind_room_day" });
+  it("lifted: window wRts / wRdw / wBench (rows on the formerly held-out day) are SERVED with their spans, no error; the room-day filter serves too", async () => {
+    for (const w of ["wRts", "wRdw", "wBench", "wOK"]) {
+      const r = await speakers({ window_id: w });
+      expect(r.error, w).toBeUndefined();
+      expect(r.spans.length, w).toBeGreaterThan(0);
+    }
+    expect((await speakers({ window_id: "wOK" })).spans).toHaveLength(1);
+    const day = await speakers({ room_day_id: "rd_blind" });
+    expect(day.error).toBeUndefined();
   });
 });
 
-(HAVE ? describe : describe.skip)("B2 the voice console and voice search: a turn row with ANY held-out placement is excluded and counted", () => {
-  it("GATING repro: the console counts only the clean row: n_matched 0 for the held-out ones (bench clean, diarize + turn rows held out), n_blind_excluded counts them", async () => {
+(HAVE ? describe : describe.skip)("B2 the voice console and voice search: turn rows on the formerly held-out day are counted and searched like any other", () => {
+  it("lifted: the console counts every matched row (wOK, wRts t1+t2, wRdw t1, wBench t1 = 5), the losing rows too, and excludes nothing", async () => {
     const C = await import("@/lib/voice-console");
     const ov = await C.consoleOverview() as { clinicians: Array<Record<string, any>>; n_blind_excluded: number };
     const a = ov.clinicians.find((x) => x.clinician_id === "docA")!;
-    expect(a.n_matched_30d).toBe(1); // wOK only
-    expect(ov.clinicians.find((x) => x.clinician_id === "docB")!.n_lost_30d).toBe(1); // wOK's losing row; wRts t1's is held out
-    expect(ov.n_blind_excluded).toBe(4); // wRts t1, t2, wRdw t1, wBench t1: the held-out ones by ANY placement
+    expect(a.n_matched_30d).toBe(5);
+    expect(ov.clinicians.find((x) => x.clinician_id === "docB")!.n_lost_30d).toBe(2); // wOK's and wRts t1's losing rows
+    expect(ov.n_blind_excluded ?? 0).toBe(0);
     const cl = await C.consoleClinician("docA") as { daily_30d: Array<Record<string, any>>; n_blind_excluded: number };
-    expect(cl.daily_30d).toEqual([expect.objectContaining({ day: "2026-10-05", n_matched: 1 })]);
-    expect(cl.n_blind_excluded).toBe(4);
+    // The series is the last 30 IST days: the clean day (today - 2) always sits inside it with 4 rows (wOK t1, wRts t1+t2, wRdw t1);
+    // the former pair's day (wBench t1) is inside only while it is within 29 days of today, so the expectation follows the clock.
+    const istToday = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+    const formerInside = Date.parse(`${BD}T00:00:00Z`) >= Date.parse(`${istToday}T00:00:00Z`) - 29 * 86_400_000;
+    expect(cl.daily_30d.reduce((n, d) => n + Number(d.n_matched), 0)).toBe(4 + (formerInside ? 1 : 0));
+    expect(cl.n_blind_excluded ?? 0).toBe(0);
     const pairs = await C.consolePairs(0.5) as { pairs: Array<Record<string, any>>; n_blind_excluded: number };
-    expect(pairs.pairs[0]).toMatchObject({ a_won_b_lost_30d: 1, n_contested_30d: 1 }); // wRts t1's contested row is held out and not counted
-    expect(pairs.n_blind_excluded).toBe(4);
+    expect(pairs.pairs[0]).toMatchObject({ a_won_b_lost_30d: 2, n_contested_30d: 2 });
+    expect(pairs.n_blind_excluded ?? 0).toBe(0);
   });
-  it("voice search: candidates whose diarize, bench OR turn-row placement is held out are excluded and counted; a query window whose turn rows are held out is refused", async () => {
+  it("voice search: candidates on the formerly held-out placements are returned and nothing is excluded; a query window whose turn rows sit on that day is searched", async () => {
     const { voiceSearch } = await import("@/lib/voice-search");
-    const scope = { rooms: ["r1", BR], from: "2026-10-01", to: "2026-10-07" };
+    const istDay = (offset: number) => new Date(Date.now() + 5.5 * 3_600_000 + offset * 86_400_000).toISOString().slice(0, 10); // the clean room-day is today - 2
+    const scope = { rooms: ["r1", BR], from: istDay(-5), to: istDay(0) };
     const r = await voiceSearch({ window_id: "q", speaker_idx: 0, ...scope, min_cosine: 0.5 }) as { ok: boolean; hits: Array<Record<string, any>>; n_blind_excluded: number };
     expect(r.ok).toBe(true);
-    expect(r.hits.map((h) => h.window_id)).toEqual(["wOK"]); // wRts (turn rows), wRdw (diarize + rows) and wBench (bench) are all held out by one placement or another
-    expect(r.n_blind_excluded).toBeGreaterThanOrEqual(2);
-    expect(await voiceSearch({ window_id: "wRts", speaker_idx: 0, ...scope })).toEqual({ ok: false, error: "blind_room_day" });
+    expect(r.hits.map((h) => h.window_id).sort()).toEqual(["wBench", "wOK", "wRts"]); // wRdw sits on the formerly held-out DATE, outside this 7-day scope (14-day cap)
+    expect(r.n_blind_excluded ?? 0).toBe(0);
+    expect(await voiceSearch({ window_id: "wRts", speaker_idx: 0, ...scope })).toMatchObject({ ok: true });
   });
 });
 
 (HAVE ? describe : describe.skip)("SWEEP: every placement of a window, on real SQL", () => {
-  it("windowBlindAny / windowsBlindAny: held out by the diarize row, the turn rows, the window text, the emotion rows or the bench placement; a clean window and an unknown id are not", async () => {
+  it("windowBlindAny / windowsBlindAny: no placement (diarize row, turn rows, window text, emotion rows, bench) holds a window out any more; an unknown id is not either", async () => {
     const V = await import("@/lib/room-access/check");
-    for (const w of ["sJev", "sEmo", "sRts", "sRdw", "sBench"]) expect(await V.windowBlindAny(w), w).toBe(true);
-    expect(await V.windowBlindAny("sClean")).toBe(false);
+    for (const w of ["sJev", "sEmo", "sRts", "sRdw", "sBench", "sClean"]) expect(await V.windowBlindAny(w), w).toBe(false);
     expect(await V.windowBlindAny("nope")).toBe(false);
-    expect([...(await V.windowsBlindAny(["sJev", "sEmo", "sRts", "sRdw", "sBench", "sClean", "nope"]))].sort()).toEqual(["sBench", "sEmo", "sJev", "sRdw", "sRts"]);
+    expect([...(await V.windowsBlindAny(["sJev", "sEmo", "sRts", "sRdw", "sBench", "sClean", "nope"]))]).toEqual([]);
   });
-  it("the readers: a window held out only by its window-text or emotion row is refused by blindGuardWindow (before any content)", async () => {
+  it("the readers: blindGuardWindow lets every window through (null), including those placed on the formerly held-out day", async () => {
     const { blindGuardWindow } = await import("@/lib/rubrics/readers/common");
-    for (const w of ["sJev", "sEmo", "sRts", "sRdw"]) expect(await blindGuardWindow(w), w).toMatchObject({ ok: false, reason: "blind_room_day" });
-    expect(await blindGuardWindow("sClean")).toBeNull();
+    for (const w of ["sJev", "sEmo", "sRts", "sRdw", "sBench", "sClean"]) expect(await blindGuardWindow(w), w).toBeNull();
   });
-  it("consult_uid is NOT unique: a consult is refused if ANY row of its key or uid is on a held-out pair, whichever order the rows come in (consultPair, readConsultSpan, readPulseRecord); a unique clean uid is served", async () => {
+  it("consult_uid is NOT unique: every row order of a key or uid is SERVED now (consultPair, readConsultSpan, readPulseRecord); the warehouse is asked for the record", async () => {
     const C = await import("@/lib/rubrics/readers/common");
     const { readConsultSpan } = await import("@/lib/rubrics/readers/consult-span");
     const { readPulseRecord } = await import("@/lib/rubrics/readers/pulse-record");
@@ -137,33 +141,30 @@ afterAll(() => { if (HAVE) pg.stop(); });
     const queried: string[] = [];
     REC.setMetabaseForTests(async (q) => { queried.push(q); return []; });
     try {
-      for (const key of ["u1_clean@m1", "u1_blind@m2", "u2_clean@m1", "u2_blind@m2", "k_dup_a", "k_dup_b"]) {
-        expect(await readConsultSpan(key), key).toMatchObject({ ok: false, reason: "blind_room_day" });
-        expect(await readPulseRecord(key), key).toMatchObject({ ok: false, reason: "blind_room_day" });
+      for (const key of ["u1_clean@m1", "u1_blind@m2", "u2_clean@m1", "u2_blind@m2", "k_dup_a", "k_dup_b", "u3_clean@m1"]) {
+        const span = await readConsultSpan(key);
+        expect(span, key).toMatchObject({ ok: true });
+        expect(await readPulseRecord(key), key).not.toMatchObject({ reason: "blind_room_day" });
         expect(C.isRefusal(await C.consultPair(key)) ? "refused" : "pair", key).toBe("pair");
-        const pair = await C.consultPair(key) as { room_id: string; ist_date: string };
-        expect(`${pair.room_id}/${pair.ist_date}`, key).toBe(`${BR}/${BD}`); // the held-out pair is what comes back, so every caller's blindRefusal fires
       }
-      expect(queried).toEqual([]); // the warehouse was never asked
-      expect(await readConsultSpan("u3_clean@m1")).toMatchObject({ ok: true });
+      expect(await C.blindPairOfUid("ConsultUid1AaaaaaaaaaaaaaZ")).toBeNull();
       expect(await C.blindPairOfUid("ConsultUid3AaaaaaaaaaaaaaZ")).toBeNull();
       expect(await C.blindPairOfUid(null)).toBeNull();
     } finally {
       REC.setMetabaseForTests(null);
     }
   });
-  it("selectEvrWindows leaves out a consult whose uid has a held-out sibling row, in either order, and keeps the clean unique one", async () => {
+  it("selectEvrWindows keeps every consult now: the siblings of a formerly held-out uid are selected like the unique clean one", async () => {
     const { selectEvrWindows } = await import("@/lib/rubrics/evr/select");
     const keys = await selectEvrWindows(50, 1);
-    expect(keys).toContain("u3_clean@m1");
-    for (const k of ["u1_clean@m1", "u2_clean@m1"]) expect(keys, k).not.toContain(k);
+    for (const k of ["u1_clean@m1", "u2_clean@m1", "u3_clean@m1"]) expect(keys, k).toContain(k);
   });
 });
 
-(HAVE ? describe : describe.skip)("B3 guardSessionSpan on real SQL: the session's day, the range's days (both midnight directions) and its windows' placements", () => {
+(HAVE ? describe : describe.skip)("B3 guardSessionSpan on real SQL: no session or range is refused any more", () => {
   const dayStart = Date.parse(`${BD}T00:00:00+05:30`);
   const iso = (ms: number) => new Date(ms).toISOString();
-  it("sessions: on the held-out day, ending into it, starting before it, a clean window-only session with a held-out window placement, and a clean session far away", async () => {
+  it("sessions on, ending into, starting before the formerly held-out day, and elsewhere: all null", async () => {
     const { guardSessionSpan } = await import("@/lib/room-access/check");
     pg.exec(`
       INSERT INTO bench_session (id, room_id, started_at, ended_at) VALUES
@@ -176,17 +177,10 @@ afterAll(() => { if (HAVE) pg.stop(); });
       INSERT INTO bench_window (id, session_id, room_day_id) VALUES ('bwWin', 'bsWin', 'rd_blind'), ('bwFar', 'bsFar', 'rd_clean');
       INSERT INTO bench_chunk (session_id, ended_at) VALUES ('bsBefore', '${iso(dayStart + 600_000)}');
     `);
-    expect(await guardSessionSpan("bsOn")).toBe("blind_room_day");
-    expect(await guardSessionSpan("bsWin")).toBe("blind_room_day"); // clean room and day; one of its windows is placed on a held-out room-day
-    expect(await guardSessionSpan("bsBefore")).toBe("blind_room_day"); // started the evening before; its last CHUNK ends inside the held-out day
-    expect(await guardSessionSpan("bsAfter")).toBe(null); // starts and ends the day after
-    // a range on the clean session crossing midnight INTO the held-out day (forward), and one reaching BACK from the next day into it
-    expect(await guardSessionSpan("bsAfter", { startMs: dayStart + 86_400_000 - 600_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe("blind_room_day");
-    expect(await guardSessionSpan("bsAfter", { startMs: dayStart - 600_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe("blind_room_day");
-    expect(await guardSessionSpan("bsAfter", { startMs: dayStart + 86_400_000 + 60_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe(null);
-    expect(await guardSessionSpan("bsOn", { startMs: dayStart + 86_400_000 + 60_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe("blind_room_day"); // the range is on the next day, the SESSION began on the held-out one
-    expect(await guardSessionSpan("bsFar")).toBe(null);
-    expect(await guardSessionSpan("bsOtherRoom")).toBe(null); // same date, a room that is not held out on it
-    expect(await guardSessionSpan("bs_unknown")).toBe(null);
+    // lifted: the guard answers null for every session and range, whichever day or placement it touches
+    for (const id of ["bsOn", "bsWin", "bsBefore", "bsAfter", "bsFar", "bsOtherRoom", "bs_unknown"]) expect(await guardSessionSpan(id), id).toBe(null);
+    expect(await guardSessionSpan("bsAfter", { startMs: dayStart + 86_400_000 - 600_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe(null);
+    expect(await guardSessionSpan("bsAfter", { startMs: dayStart - 600_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe(null);
+    expect(await guardSessionSpan("bsOn", { startMs: dayStart + 86_400_000 + 60_000, endMs: dayStart + 86_400_000 + 600_000 })).toBe(null);
   });
 });

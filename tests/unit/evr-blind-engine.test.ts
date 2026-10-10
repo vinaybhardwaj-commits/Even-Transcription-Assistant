@@ -1,11 +1,11 @@
 /**
- * S7-2-R2 R2 — the engine-level held-out guards pinned ON THEIR OWN. The readers that would also refuse (consult_text, pulse_record) are STUBBED to succeed, so a test here fails when only
+ * S7-2-R2 R2 — held-out rule LIFTED by V 10 Oct 2026: a formerly held-out consult is now PROCESSED like any other (the guards in engines/index.ts are no-ops on the empty set). Originally: the engine-level guards pinned ON THEIR OWN. The readers that would also refuse (consult_text, pulse_record) are STUBBED to succeed, so a test here fails when only
  * the guard in engines/index.ts is removed: evaluateEvrPerturbUnit (bench) and the llm-unit guard (rubric_run / bench of a consult).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS } from "../support/former-blind-pairs";
 
-const [BD, BR] = BLIND_ROOM_DAYS[0]!;
+const [BD, BR] = FORMER_BLIND_PAIRS[0]!;
 const calls = { text: 0, record: 0, chat: 0 };
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray) => {
@@ -28,15 +28,21 @@ const affect = getRubric("consult_chair_affect")!;
 
 beforeEach(() => { calls.text = calls.record = calls.chat = 0; L.setRubricChatForTests(async () => { calls.chat++; return { content: "{}", model: "m", latency_ms: 1 }; }); });
 
-describe("engine guards on their own", () => {
-  it("evaluateEvrPerturbUnit: a held-out consult returns blind_room_day with 0 text reads, 0 record reads, 0 model calls (readers stubbed to succeed)", async () => {
-    expect(await evaluateEvrPerturbUnit(evr, "enc_x@m1", 5)).toMatchObject({ ok: false, reason: "blind_room_day", calls: 0 });
-    expect(calls).toEqual({ text: 0, record: 0, chat: 0 });
+describe("engine guards are no-ops now: a formerly held-out consult is processed", () => {
+  it("the held-out set is empty and the former pair is not blind", async () => {
+    const B = await import("@/lib/rubrics/blind-room-days");
+    expect(B.BLIND_ROOM_DAYS).toHaveLength(0);
+    expect(B.isBlindRoomDay(BD, BR)).toBe(false);
   });
-  it("the llm-unit guard: evaluateUnit of an llm rubric on a held-out consult is skipped blind_room_day with 0 text reads and 0 model calls (readers stubbed to succeed)", async () => {
+  it("evaluateEvrPerturbUnit: a formerly held-out consult is NOT refused blind_room_day; the record reader is reached", async () => {
+    const out = await evaluateEvrPerturbUnit(evr, "enc_x@m1", 5);
+    expect(out).not.toMatchObject({ reason: "blind_room_day" });
+    expect(calls.record).toBeGreaterThan(0);
+  });
+  it("evaluateUnit of an llm rubric on a formerly held-out consult is not skipped blind_room_day; its text is read", async () => {
     for (const r of [evr, affect]) {
-      expect(await evaluateUnit(r, "consult", "enc_x@m1"), r.id).toMatchObject({ status: "skipped", reason: "blind_room_day" });
+      expect(await evaluateUnit(r, "consult", "enc_x@m1"), r.id).not.toMatchObject({ reason: "blind_room_day" });
     }
-    expect(calls).toEqual({ text: 0, record: 0, chat: 0 });
+    expect(calls.text).toBeGreaterThan(0);
   });
 });

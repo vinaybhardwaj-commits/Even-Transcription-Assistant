@@ -1,10 +1,10 @@
 /**
- * S6B — voice search on a real postgres:16 (bound parameters, as the Neon driver sends them), fixture vectors: held-out pairs and unplaced windows are excluded IN SQL and counted,
+ * S6B — voice search on a real postgres:16 (bound parameters, as the Neon driver sends them), fixture vectors: formerly held-out pairs are ordinary; unplaced windows are excluded IN SQL and counted,
  * the ranking is by real cosine over stored embeddings, the clinician a hit matched comes from room_turn_speaker, and nothing is written.
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS as BLIND_ROOM_DAYS } from "../support/former-blind-pairs";
 
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), statements: [] as string[] }));
 vi.mock("@/lib/db", () => ({ sql: Object.assign((s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push(s.join("?")); return H.sql!(s, ...v); }, { transaction: async () => [] }) }));
@@ -61,30 +61,30 @@ afterAll(() => { if (HAVE) pg.stop(); });
 const maybe = HAVE ? describe : describe.skip;
 maybe("voice search on real postgres", () => {
   const SCOPE = { rooms: ["r1", "r2", BR], from: "2026-10-01", to: "2026-10-07" };
-  it("a window speaker query: real cosines, ranked, own speaker out, held-out and unplaced windows out and counted, failed and out-of-range windows invisible, bad dims counted", async () => {
+  it("a window speaker query: real cosines, ranked, own speaker out, formerly held-out windows served, unplaced windows out and counted, failed and out-of-range windows invisible, bad dims counted", async () => {
     const { voiceSearch } = await import("@/lib/voice-search");
     const r = await voiceSearch({ window_id: "q", speaker_idx: 0, ...SCOPE }) as { ok: boolean; hits: Array<Record<string, unknown>>; n_blind_excluded: number; n_unplaced_excluded: number; n_bad_dim: number; n_speakers_compared: number; n_windows_in_scope: number };
     expect(r.ok).toBe(true);
-    expect(r.hits.map((h) => [h.window_id, h.speaker_idx, h.cosine, h.clinician_id, h.clinician_ambiguous])).toEqual([["wa", 0, 0.91, "docA", false], ["wb", 0, 0.8, null, true], ["q", 1, 0.7, null, false], ["wc", 3, 0.66, null, false]]);
+    expect(r.hits.map((h) => [h.window_id, h.speaker_idx, h.cosine, h.clinician_id, h.clinician_ambiguous])).toEqual([["wsplit", 0, 0.99, null, false], ["wa", 0, 0.91, "docA", false], ["wb", 0, 0.8, null, true], ["q", 1, 0.7, null, false], ["wc", 3, 0.66, null, false]]);
     expect(r.hits[0]).toMatchObject({ room_id: "r1", ist_date: "2026-10-02" });
-    expect(r.n_blind_excluded).toBe(1); // wsplit (Y1: either placement held out); the range itself holds no held-out date
+    expect(r.n_blind_excluded).toBe(0); // wsplit (bench placement on a formerly held-out day) is now a normal hit
     expect(r.n_unplaced_excluded).toBe(1);
     expect(r.n_bad_dim).toBe(4); // wbad (10 floats) + three entries with an idx that is not a non-negative integer (S2)
-    expect(r.n_windows_in_scope).toBe(6); // q, wa, wb, wc, wbad, widx
-    expect(JSON.stringify(r)).not.toMatch(/embedding|wblind|wun|wold|wfail|wsplit|evil/);
+    expect(r.n_windows_in_scope).toBe(7); // q, wa, wb, wc, wbad, widx, wsplit
+    expect(JSON.stringify(r)).not.toMatch(/embedding|wblind|wun|wold|wfail|evil/);
   });
-  it("a scope that reaches a held-out room-day excludes it in SQL and counts it; the query window on a held-out day is refused", async () => {
+  it("a scope that reaches a formerly held-out room-day includes it; a query window on that day is searched; an unplaced one is refused", async () => {
     const { voiceSearch } = await import("@/lib/voice-search");
     const r = await voiceSearch({ window_id: "q", speaker_idx: 0, rooms: [BR], from: BD, to: BD }) as { ok: boolean; hits: unknown[]; n_blind_excluded: number };
-    expect(r).toMatchObject({ ok: true, hits: [], n_blind_excluded: 1 });
-    expect(await voiceSearch({ window_id: "wblind", speaker_idx: 0, ...SCOPE })).toEqual({ ok: false, error: "blind_room_day" });
+    expect(r).toMatchObject({ ok: true, hits: [{ window_id: "wblind", cosine: 0.99 }], n_blind_excluded: 0 });
+    expect(await voiceSearch({ window_id: "wblind", speaker_idx: 0, ...SCOPE })).toMatchObject({ ok: true });
     expect(await voiceSearch({ window_id: "wun", speaker_idx: 0, ...SCOPE })).toEqual({ ok: false, error: "window_unplaced" });
   });
   it("a clinician query uses the active centroid; a disabled clinician has none; nothing was ever written", async () => {
     const { voiceSearch } = await import("@/lib/voice-search");
     const r = await voiceSearch({ clinician_id: "docA", ...SCOPE, min_cosine: 0.9 }) as { hits: Array<Record<string, unknown>>; query: unknown };
     expect(r.query).toEqual({ kind: "clinician" });
-    expect(r.hits.map((h) => [h.window_id, h.cosine])).toEqual([["q", 1], ["wa", 0.91]]);
+    expect(r.hits.map((h) => [h.window_id, h.cosine])).toEqual([["q", 1], ["wsplit", 0.99], ["wa", 0.91]]);
     expect(await voiceSearch({ clinician_id: "docOff", ...SCOPE })).toEqual({ ok: false, error: "no_voiceprint" });
     for (const s of H.statements) expect(s.trimStart()).toMatch(/^SELECT/);
     expect(pg.sql`SELECT count(*)::int AS n FROM room_turn_speaker`).resolves.toEqual([{ n: 5 }]);

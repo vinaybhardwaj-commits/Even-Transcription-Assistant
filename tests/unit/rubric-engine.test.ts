@@ -176,35 +176,34 @@ describe("the lab allowlist (S7-0): rubric/ in, reb/ out", () => {
   });
 });
 
-describe("the blind room-days (S7-0-R2): the held-out set, 14 fixed (IST day, room) pairs", () => {
-  it("14 pairs, all distinct, ids and dates only; a known pair is refused, a neighbour day of the same room is not; malformed input is not blind", async () => {
+describe("the blind room-days (S7-0-R2): LIFTED by V 10 Oct 2026, the held-out set is empty", () => {
+  it("the set is empty; the formerly blind pairs are not blind; malformed input is not blind", async () => {
     const B2 = await import("@/lib/rubrics/blind-room-days");
-    expect(B2.BLIND_ROOM_DAYS).toHaveLength(14);
-    expect(new Set(B2.BLIND_ROOM_DAYS.map(([d, r]) => `${d}|${r}`)).size).toBe(14);
-    for (const [d, r] of B2.BLIND_ROOM_DAYS) { expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/); expect(r).toMatch(/^room_[a-z0-9]{8}$/); }
-    expect(B2.BLIND_ROOM_DAYS_SOURCE).toEqual({ heldout: "heldout.py f672c1ef", union_sha16: "f07171dcb708d080" });
-    expect(B2.isBlindRoomDay("2026-09-13", "room_ux92qpws")).toBe(true);
-    expect(B2.isBlindRoomDay("2026-09-13T04:00:00Z", "room_ux92qpws")).toBe(true); // a timestamp is cut to its date
-    expect(B2.isBlindRoomDay("2026-09-12", "room_ux92qpws")).toBe(false);
-    expect(B2.isBlindRoomDay("2026-09-14", "room_qyzghzaf")).toBe(false); // same day as another pair, other room
-    expect(B2.isBlindRoomDay("2026-09-13", "room_qyzghzaf")).toBe(false);
+    const { FORMER_BLIND_PAIRS } = await import("../support/former-blind-pairs");
+    expect(B2.BLIND_ROOM_DAYS).toHaveLength(0);
+    expect(FORMER_BLIND_PAIRS).toHaveLength(14);
+    expect(B2.BLIND_ROOM_DAYS_SOURCE.lifted).toBe("lifted by V 10 Oct 2026");
+    expect(B2.BLIND_ROOM_DAYS_SOURCE.was).toEqual({ heldout: "heldout.py f672c1ef", union_sha16: "f07171dcb708d080" });
+    for (const [d, r] of FORMER_BLIND_PAIRS) {
+      expect(B2.isBlindRoomDay(d, r), `${d}|${r}`).toBe(false);
+      expect(B2.isBlindRoomDay(`${d}T04:00:00Z`, r)).toBe(false);
+      expect(B2.isBlindRoomDay(d, r.replace("room_", "room_scratch_"))).toBe(false);
+    }
     for (const bad of [[null, "x"], ["2026-09-13", null], [undefined, undefined], ["", ""]] as const) expect(B2.isBlindRoomDay(bad[0], bad[1])).toBe(false);
   });
-  it("it matches the held-out set from heldout.py (union sha16 pinned inline; the 14 pairs pinned by a sha256 of the sorted list), and the module holds no label or name", async () => {
-    const B2 = await import("@/lib/rubrics/blind-room-days");
-    const { createHash } = await import("node:crypto");
+  it("the former pairs are 14 distinct ids-and-dates pairs (test data), and the module holds no label or name", async () => {
+    const { FORMER_BLIND_PAIRS } = await import("../support/former-blind-pairs");
     const src = readFileSync("lib/rubrics/blind-room-days.ts", "utf8");
-    expect(/OPD\d|label/i.test(src.replace(/label\.?s?\b[^\n]*\n/gi, ""))).toBe(false);
-    expect(B2.BLIND_ROOM_DAYS).toHaveLength(14);
-    expect(B2.BLIND_ROOM_DAYS_SOURCE).toEqual({ heldout: "heldout.py f672c1ef", union_sha16: "f07171dcb708d080" });
-    const sorted = B2.BLIND_ROOM_DAYS.map(([d, r]) => `${d}|${r}`).sort();
-    expect(createHash("sha256").update(`${sorted.join("\n")}\n`).digest("hex")).toBe("9f8e9c9bf0f9dee88bb6c514c9cf57668c4f6067681e41ff1756aaa124041b71");
+    expect(/OPD\d|label/i.test(src.replace(/label\.?s?\b[^\n]*\n/gi, "").replace(/[^\n]*LIFTED[^\n]*\n/g, ""))).toBe(false);
+    expect(new Set(FORMER_BLIND_PAIRS.map(([d, r]) => `${d}|${r}`)).size).toBe(14);
+    for (const [d, r] of FORMER_BLIND_PAIRS) { expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/); expect(r).toMatch(/^room_[a-z0-9]{8}$/); }
   });
-  it("the old heuristic is gone: the readers module exports no database-backed isBlindRoomDay, and the audio_state reader refuses the pair too", async () => {
+  it("the readers module exports no database-backed isBlindRoomDay, and the audio_state reader no longer refuses a formerly blind pair", async () => {
     const C = await import("@/lib/rubrics/readers/common");
     expect((C as Record<string, unknown>).isBlindRoomDay).toBeUndefined();
     const { readAudioHour } = await import("@/lib/rubrics/readers/audio-state");
-    expect(await readAudioHour("room_ux92qpws", "2026-09-13", 10)).toMatchObject({ ok: false, reason: "blind_room_day" });
+    const out = await readAudioHour("room_ux92qpws", "2026-09-13", 10);
+    expect((out as { reason?: string }).reason).not.toBe("blind_room_day");
   });
 });
 
