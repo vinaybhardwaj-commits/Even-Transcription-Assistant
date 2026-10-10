@@ -32,6 +32,7 @@ import Testing
     var chownStub: URL { base.appendingPathComponent("chown") }
     var chownCalls: URL { base.appendingPathComponent("chown.calls") }
     var usersDir: URL { base.appendingPathComponent("Users") }
+    var pinFile: URL { base.appendingPathComponent("EvenScribe/update-pin") }
 
     /// `realCodesign`: do not stub codesign, so the pinned requirement is checked for real.
     init(
@@ -81,7 +82,7 @@ import Testing
         "ETA_POSTINSTALL_TEST": "1", "ETA_INSTALL_LOCATION": apps.path, "ETA_DAEMON_DIR": daemons.path,
         "ETA_HELPER_DIR": helperDir.path, "ETA_LAUNCHCTL": stub.path, "ETA_SKIP_OWNERSHIP": "1",
         "ETA_LOG_PATH": "/var/log/room-recorder-helper.log", "PATH": "/usr/bin:/bin",
-        "ETA_USERS_DIR": usersDir.path, "ETA_CONSOLE_USER": "alice",
+        "ETA_USERS_DIR": usersDir.path, "ETA_CONSOLE_USER": "alice", "ETA_PIN_FILE": pinFile.path,
       ]
       if !realCodesign { environment["ETA_CODESIGN"] = codesignStub.path }
       process.environment = environment.merging(extraEnv) { $1 }
@@ -410,6 +411,45 @@ import Testing
     #expect(try FileManager.default.contentsOfDirectory(atPath: box.helperDir.path) == [Self.label])
   }
 
+  // ─── 0.1.34: a pkg install ends a rollback pin ───────────────────────────────────────────────────
+
+  @Test func aPkgInstallRemovesTheUpdatePin() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    try FileManager.default.createDirectory(at: box.pinFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "0.1.31\n".write(to: box.pinFile, atomically: true, encoding: .utf8)
+    let result = try box.run()
+    #expect(result.status == 0)
+    #expect(!FileManager.default.fileExists(atPath: box.pinFile.path))
+    #expect(result.output.contains("removed the update pin"))
+    #expect(FileManager.default.fileExists(atPath: box.plist.path), "the rest of the install still ran")
+  }
+
+  @Test func noPinMeansNothingIsSaidOrDone() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && !result.output.contains("update pin"))
+  }
+
+  @Test func thePinGoesEvenWhenThereIsNoHelperToInstall() throws {
+    let box = try Sandbox(withHelper: false)
+    defer { box.tearDown() }
+    try FileManager.default.createDirectory(at: box.pinFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "0.1.31".write(to: box.pinFile, atomically: true, encoding: .utf8)
+    _ = try box.run()
+    #expect(!FileManager.default.fileExists(atPath: box.pinFile.path))
+  }
+
+  @Test func aMissingAppLeavesThePinAlone() throws {
+    let box = try Sandbox(withApp: false)
+    defer { box.tearDown() }
+    try FileManager.default.createDirectory(at: box.pinFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "0.1.31".write(to: box.pinFile, atomically: true, encoding: .utf8)
+    #expect(try box.run().status == 1)
+    #expect(FileManager.default.fileExists(atPath: box.pinFile.path), "a failed install does not lift a rollback")
+  }
+
   @Test func theBundleIsMadeNonWritableForGroupAndOthers() throws {
     let box = try Sandbox()
     defer { box.tearDown() }
@@ -455,8 +495,11 @@ import Testing
     var agentPlist: URL { base.appendingPathComponent("agent.plist") }
     var log: URL { base.appendingPathComponent("calls.log") }
     var pkg: URL { base.appendingPathComponent("older.pkg") }
+    var pinFile: URL { base.appendingPathComponent("EvenScribe/update-pin") }
+    var chownCalls: URL { base.appendingPathComponent("chown.calls") }
 
-    init(installerFails: Bool = false, withAgent: Bool = true) throws {
+    /// `installedVersion`: what the "older pkg" lays down in the app's Info.plist (nil: it lays down none).
+    init(installerFails: Bool = false, withAgent: Bool = true, installedVersion: String? = "0.1.31") throws {
       let fm = FileManager.default
       try fm.createDirectory(at: app.appendingPathComponent("Contents"), withIntermediateDirectories: true)
       try "NEWER".write(to: app.appendingPathComponent("Contents/marker"), atomically: true, encoding: .utf8)
@@ -470,7 +513,8 @@ import Testing
         ("launchctl", "echo \"launchctl $*\" >> '\(log.path)'"),
         ("pkgutil", "echo \"pkgutil $*\" >> '\(log.path)'"),
         // The installer stub records whether the NEWER app is still on disk when it runs: it must not be.
-        ("installer", "echo \"installer $* app_present=$([ -e '\(app.path)' ] && echo yes || echo no) daemon_plist=$([ -e '\(plist.path)' ] && echo yes || echo no) helper_copy=$([ -e '\(helperCopy.path)' ] && echo yes || echo no)\" >> '\(log.path)'\nexit \(installerFails ? 1 : 0)"),
+        ("chown", "echo \"$@\" >> '\(chownCalls.path)'"),
+        ("installer", "echo \"installer $* app_present=$([ -e '\(app.path)' ] && echo yes || echo no) daemon_plist=$([ -e '\(plist.path)' ] && echo yes || echo no) helper_copy=$([ -e '\(helperCopy.path)' ] && echo yes || echo no) pin_present=$([ -e '\(pinFile.path)' ] && echo yes || echo no)\" >> '\(log.path)'\n\(installerFails || installedVersion == nil ? "" : "mkdir -p '\(app.path)/Contents' && /usr/bin/plutil -create xml1 '\(app.path)/Contents/Info.plist' && /usr/bin/plutil -replace CFBundleShortVersionString -string '\(installedVersion!)' '\(app.path)/Contents/Info.plist'")\nexit \(installerFails ? 1 : 0)"),
       ] {
         let url = base.appendingPathComponent(name)
         try "#!/bin/sh\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
@@ -486,7 +530,8 @@ import Testing
         "ETA_ROLLBACK_TEST": "1", "ETA_APP": app.path, "ETA_DAEMON_DIR": daemons.path, "ETA_HELPER_DIR": helperDir.path,
         "ETA_LAUNCHCTL": base.appendingPathComponent("launchctl").path, "ETA_INSTALLER": base.appendingPathComponent("installer").path,
         "ETA_PKGUTIL": base.appendingPathComponent("pkgutil").path, "ETA_CONSOLE_UID": "501",
-        "ETA_AGENT_PLIST": agentPlist.path, "PATH": "/usr/bin:/bin",
+        "ETA_AGENT_PLIST": agentPlist.path, "ETA_PIN_FILE": pinFile.path,
+        "ETA_CHOWN": base.appendingPathComponent("chown").path, "PATH": "/usr/bin:/bin",
       ]
       let pipe = Pipe()
       process.standardOutput = pipe
@@ -514,10 +559,12 @@ import Testing
       "launchctl bootout gui/501/com.evenscribe.room-recorder",
       "launchctl bootout system/\(Self.label)",
       "pkgutil --forget com.evenscribe.room-recorder.pkg",
-      "installer -pkg \(box.pkg.path) -target / app_present=no daemon_plist=no helper_copy=no",
+      "installer -pkg \(box.pkg.path) -target / app_present=no daemon_plist=no helper_copy=no pin_present=no",
       "launchctl bootstrap gui/501 \(box.agentPlist.path)",
     ], "order matters: this is the whole point of the script")
-    #expect(!box.exists(box.app) && !box.exists(box.saved) && !box.exists(box.plist) && !box.exists(box.helperCopy))
+    // The "older pkg" has laid its own app down; the NEWER one (its marker file) is gone, and so is the saved copy.
+    #expect(box.exists(box.app) && !box.exists(box.app.appendingPathComponent("Contents/marker")))
+    #expect(!box.exists(box.saved) && !box.exists(box.plist) && !box.exists(box.helperCopy))
   }
 
   @Test func aFailedOlderInstallPutsTheNewerAppBackSoTheRoomIsNeverWithoutOne() throws {
@@ -529,6 +576,69 @@ import Testing
     #expect(try String(contentsOf: box.app.appendingPathComponent("Contents/marker"), encoding: .utf8) == "NEWER")
     #expect(result.output.contains("WITHOUT the root helper"))
     #expect(box.calls.last == "launchctl bootstrap gui/501 \(box.agentPlist.path)", "the agent is started again")
+  }
+
+  // ─── 0.1.34: the rollback pin ───────────────────────────────────────────────────────────────────
+
+  @Test func aSuccessfulRollbackPinsTheInstalledVersionAsRoot() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0, "\(result.output)")
+    #expect(try String(contentsOf: box.pinFile, encoding: .utf8) == "0.1.31\n")
+    let mode = (try FileManager.default.attributesOfItem(atPath: box.pinFile.path)[.posixPermissions] as? NSNumber)?.intValue
+    #expect(mode == 0o644)
+    let chowns = try String(contentsOf: box.chownCalls, encoding: .utf8).split(separator: "\n").map(String.init)
+    #expect(chowns.count == 1 && chowns[0].hasPrefix("root:wheel ") && chowns[0].contains("update-pin"), "\(chowns)")
+    #expect(result.output.contains("pinned at 0.1.31"))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: box.pinFile.deletingLastPathComponent().path) == ["update-pin"], "no temp file left")
+  }
+
+  @Test func theRollbackPinsTheVersionTheOlderPkgLaidDownWhateverThatIs() throws {
+    let box = try Sandbox(installedVersion: "0.1.29")
+    defer { box.tearDown() }
+    _ = try box.run()
+    #expect(try String(contentsOf: box.pinFile, encoding: .utf8) == "0.1.29\n")
+  }
+
+  @Test func theInstallerRunsBeforeThePinIsWritten() throws {
+    // A pkg that itself clears the pin (0.1.34 and later) must not undo the pin the rollback then sets.
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    try FileManager.default.createDirectory(at: box.pinFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "0.1.99\n".write(to: box.pinFile, atomically: true, encoding: .utf8)
+    _ = try box.run()
+    #expect(box.calls.contains { $0.contains("pin_present=yes") }, "the old pin was still there when the installer ran")
+    #expect(try String(contentsOf: box.pinFile, encoding: .utf8) == "0.1.31\n", "and is replaced afterwards")
+  }
+
+  @Test func aFailedRollbackWritesNoPinAndLeavesAnExistingOne() throws {
+    let box = try Sandbox(installerFails: true)
+    defer { box.tearDown() }
+    #expect(try box.run().status == 1)
+    #expect(!FileManager.default.fileExists(atPath: box.pinFile.path))
+    let box2 = try Sandbox(installerFails: true)
+    defer { box2.tearDown() }
+    try FileManager.default.createDirectory(at: box2.pinFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try "0.1.30\n".write(to: box2.pinFile, atomically: true, encoding: .utf8)
+    #expect(try box2.run().status == 1)
+    #expect(try String(contentsOf: box2.pinFile, encoding: .utf8) == "0.1.30\n")
+  }
+
+  @Test func ifTheInstalledVersionCannotBeReadNoPinIsWrittenAndItSaysSo() throws {
+    let box = try Sandbox(installedVersion: nil)
+    defer { box.tearDown() }
+    let result = try box.run()
+    #expect(result.status == 0 && result.output.contains("NO pin was written"))
+    #expect(!FileManager.default.fileExists(atPath: box.pinFile.path))
+  }
+
+  @Test func theVersionIsReducedToVersionCharactersBeforeItIsWritten() throws {
+    let box = try Sandbox(installedVersion: "0.1.31; rm -rf /")
+    defer { box.tearDown() }
+    _ = try box.run()
+    let text = try String(contentsOf: box.pinFile, encoding: .utf8)
+    #expect(text == "0.1.31rm-rf\n" || text.allSatisfy { $0.isLetter || $0.isNumber || ".-_+\n".contains($0) }, "\(text)")
   }
 
   @Test func noAgentPlistMeansItSaysWhatToDoInsteadOfGuessing() throws {

@@ -49,6 +49,7 @@ if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
   CONSOLE_USER_OVERRIDE="${ETA_CONSOLE_USER:-}"
   USERS_DIR="${ETA_USERS_DIR:-/Users}"
   ROOT_UID="${ETA_ROOT_UID:-0}"
+  PIN_FILE="${ETA_PIN_FILE:-/Library/Application Support/EvenScribe/update-pin}"
   SKIP_OWNERSHIP="${ETA_SKIP_OWNERSHIP:-0}"
   LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
 else
@@ -61,6 +62,7 @@ else
   CONSOLE_USER_OVERRIDE=""
   USERS_DIR="/Users"
   ROOT_UID=0
+  PIN_FILE="/Library/Application Support/EvenScribe/update-pin"
   SKIP_OWNERSHIP=0
   LOG_PATH="/var/log/room-recorder-helper.log"
 fi
@@ -96,6 +98,14 @@ room_user() {
 }
 
 [ -d "$APP" ] || { say "no app at $APP"; exit 1; }
+
+# 0. A pkg install is a deliberate act by someone with root, and it ends a rollback pin (0.1.34): the
+#    self-updater may go forward again. rollback.sh writes the pin AFTER its own installer run, so a
+#    rollback to a pkg that also does this still ends up pinned.
+if [ -e "$PIN_FILE" ]; then
+  /bin/rm -f "$PIN_FILE"
+  say "removed the update pin $PIN_FILE"
+fi
 
 # 1. The bundle goes to the room user; root-owned leftovers of earlier swaps go away.
 # `.previous` and `.failed` are the updater's aside copies. Removed only when something in them is

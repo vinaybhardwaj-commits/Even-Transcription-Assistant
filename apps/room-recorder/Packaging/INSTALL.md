@@ -151,7 +151,7 @@ an order that cannot leave the room without an app. Copy it and the older pkg to
 ```
 sudo sh rollback.sh /path/to/EvenScribe-Room-Recorder-0.1.31.pkg
 ```
-It prints five numbered steps: (1) boots the recorder's LaunchAgent out for the console user; (2) boots
+It prints five numbered steps (the last one now includes the **update pin**, below): (1) boots the recorder's LaunchAgent out for the console user; (2) boots
 the root daemon out and deletes its plist and its `/Library/PrivilegedHelperTools` copy; (3) MOVES the
 app to `EvenScribe Room Recorder.app.rollback-saved` (it does not delete it) and runs
 `pkgutil --forget com.evenscribe.room-recorder.pkg`; (4) runs `installer -pkg <older> -target /`; (5) if
@@ -161,6 +161,21 @@ again to restore it). Afterwards check `/Applications/EvenScribe Room Recorder.a
 `plutil -extract CFBundleShortVersionString raw "/Applications/EvenScribe Room Recorder.app/Contents/Info.plist"`
 must print the older version, and `pgrep -fl "room-recorder run"` must show the `/Applications` path.
 Rolling back to a pkg older than 0.1.32 leaves no root helper (those pkgs do not install one).
+
+**The update pin (0.1.34).** Without it a room rolled back to 0.1.31 would update itself straight back
+up to whatever the channel offers. So the last step of a successful rollback writes
+`/Library/Application Support/EvenScribe/update-pin` (root:wheel 644) holding the version that is now
+installed, and the self-updater ignores any offered version ABOVE it (one at or below it, and above the
+running version, is still taken). It logs `update to X skipped: this Mac was rolled back and pinned at Y`
+to `launchd.log`. Look at it with `cat "/Library/Application Support/EvenScribe/update-pin"`. A failed
+rollback writes no pin and leaves an existing one alone. If the installed version cannot be read, the
+script says `NO pin was written` and the room can climb again; pin it by hand as root:
+`echo 0.1.31 | sudo tee "/Library/Application Support/EvenScribe/update-pin"`.
+**Any pkg install clears the pin** (its postinstall deletes the file), which is how the fleet's root
+path or `sudo installer` of a newer pkg lets the room move forward again; so does
+`sudo rm "/Library/Application Support/EvenScribe/update-pin"`. A pin file that is there but is not a
+version holds EVERY update and says so in the log: fix or remove it as root. Rolling back is therefore
+a deliberate, sticky act, and moving forward again is one too.
 
 The same commands by hand, if the script cannot be used (as root, in this order):
 ```

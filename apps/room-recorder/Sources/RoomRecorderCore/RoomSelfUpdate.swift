@@ -630,6 +630,44 @@ public struct RoomVersion: Comparable, Equatable, Sendable {
   }
 }
 
+// MARK: - The rollback pin (0.1.34)
+
+/// A root-owned file that stops this Mac updating itself FORWARD past a version someone rolled it back to.
+///
+/// `rollback.sh` writes the rolled-back version here as its last step; a pkg install (the fleet's root
+/// path, or `sudo installer`) deletes it. The self-updater already never goes down, but a room rolled
+/// back to 0.1.31 would otherwise climb straight back to whatever the channel offers. With a pin, an
+/// offered version ABOVE the pin is ignored; one at or below it (and above the running version) is
+/// still taken.
+///
+/// FAIL CLOSED: a pin file that is there but cannot be read as a version holds every update, and says
+/// so. The file is root-written; garbage in it means something is wrong, not that nothing is pinned.
+public enum RoomUpdatePin {
+  public static let defaultPath = "/Library/Application Support/EvenScribe/update-pin"
+  public static var defaultURL: URL { URL(fileURLWithPath: defaultPath, isDirectory: false) }
+
+  public enum Verdict: Equatable, Sendable {
+    case noPin
+    case allowed(pin: String)
+    case held(pin: String)
+    case unreadable
+  }
+
+  /// PURE: is `offered` above the pin text? `pinText` nil means no pin file.
+  public static func verdict(offered: String, pinText: String?) -> Verdict {
+    guard let pinText else { return .noPin }
+    let trimmed = pinText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let pin = RoomVersion(trimmed), let want = RoomVersion(offered) else { return .unreadable }
+    return want > pin ? .held(pin: trimmed) : .allowed(pin: trimmed)
+  }
+
+  /// `nil` when there is no file; the text otherwise (possibly empty or garbage, which `verdict` refuses).
+  public static func read(at url: URL) -> String? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+  }
+}
+
 // MARK: - The seams
 
 /// Fetching the release descriptor. R3-9 lives at this boundary: ANY answer other than a 200 is
@@ -762,6 +800,8 @@ public struct RoomUpdater: Sendable {
   let fetcher: any RoomReleaseFetching
   let downloader: any RoomUpdateDownloading
   let runner: any RoomUpdateCommandRunning
+  /// 0.1.34. Where the rollback pin lives; a test points it at a temp file.
+  let pinURL: URL
   let now: @Sendable () -> Date
   let log: @Sendable (String) -> Void
 
@@ -773,6 +813,7 @@ public struct RoomUpdater: Sendable {
     fetcher: any RoomReleaseFetching,
     downloader: any RoomUpdateDownloading = FoundationUpdateDownloader(),
     runner: any RoomUpdateCommandRunning = FoundationUpdateCommandRunner(),
+    pinURL: URL = RoomUpdatePin.defaultURL,
     now: @escaping @Sendable () -> Date = { Date() },
     log: @escaping @Sendable (String) -> Void = { message in
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
@@ -785,6 +826,7 @@ public struct RoomUpdater: Sendable {
     self.fetcher = fetcher
     self.downloader = downloader
     self.runner = runner
+    self.pinURL = pinURL
     self.now = now
     self.log = log
   }
@@ -840,6 +882,22 @@ public struct RoomUpdater: Sendable {
       // A version match also means the ledger is spent: whatever went wrong before, this Mac is
       // now running what its channel offers.
       RoomUpdateAttempts.clear(root: rootURL)
+      return .upToDate
+    }
+    // 0.1.34. THE ROLLBACK PIN. Before the loop-breaker, the session guard and the download: a Mac that
+    // was rolled back on purpose does not so much as look at a version above its pin.
+    switch RoomUpdatePin.verdict(offered: release.version, pinText: RoomUpdatePin.read(at: pinURL)) {
+    case .noPin, .allowed:
+      break
+    case .held(let pin):
+      log(
+        "update to \(release.version) skipped: this Mac was rolled back and pinned at \(pin). "
+          + "A pkg install clears the pin.")
+      return .upToDate
+    case .unreadable:
+      log(
+        "update to \(release.version) skipped: \(pinURL.path) exists but is not a version, so every update is held "
+          + "until it is fixed or removed (as root).")
       return .upToDate
     }
     // F2. THE LOOP-BREAKER. Two failures on this exact version and the Mac stops asking for it

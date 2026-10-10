@@ -463,6 +463,104 @@ import Testing
     #expect(fixture.version(of: fixture.resident) != "0.1.9")
   }
 
+  // MARK: - 0.1.34: the rollback pin
+
+  @Test func thePinVerdictTable() {
+    let table: [(String, String?, RoomUpdatePin.Verdict)] = [
+      ("0.1.33", nil, .noPin),
+      ("0.1.33", "0.1.31\n", .held(pin: "0.1.31")),
+      ("0.1.32", "0.1.31", .held(pin: "0.1.31")),
+      ("0.1.31", "0.1.31", .allowed(pin: "0.1.31")),  // at the pin: allowed
+      ("0.1.30", "0.1.31", .allowed(pin: "0.1.31")),
+      ("0.1.10", "0.1.9", .held(pin: "0.1.9")),  // numeric, not lexical
+      ("0.1.9", "0.1.10", .allowed(pin: "0.1.10")),
+      ("0.1.33", "", .unreadable),  // there but empty: fail closed
+      ("0.1.33", "banana", .unreadable),
+      ("0.1.33", "0.1.x\n", .unreadable),
+      ("banana", "0.1.31", .unreadable),
+    ]
+    for (offered, pin, expected) in table {
+      #expect(RoomUpdatePin.verdict(offered: offered, pinText: pin) == expected, "offered \(offered), pin \(pin ?? "none")")
+    }
+    #expect(RoomUpdatePin.defaultPath == "/Library/Application Support/EvenScribe/update-pin")
+  }
+
+  private func pinnedUpdater(
+    _ fixture: Fixture, running: String, offered: String, pin: String?, runner: RecordingRunner
+  ) throws -> RoomUpdater {
+    let pinURL = fixture.root.appendingPathComponent("update-pin-test")
+    try? FileManager.default.removeItem(at: pinURL)
+    if let pin { try pin.write(to: pinURL, atomically: true, encoding: .utf8) }
+    let bytes = Data("a plausible zip".utf8)
+    runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = offered
+    return RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: running, channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: offered, bytes: bytes)), downloader: StubDownloader(bytes: bytes),
+      runner: runner, pinURL: pinURL, log: { _ in })
+  }
+
+  @Test func anOfferedVersionAboveThePinIsIgnoredBeforeAnythingIsDownloadedOrDeferred() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = try pinnedUpdater(fixture, running: "0.1.7", offered: "0.1.10", pin: "0.1.8\n", runner: runner)
+    #expect(await updater.check(sessionIsOpen: false) == .upToDate)
+    #expect(await updater.check(sessionIsOpen: true) == .upToDate, "not even the 'deferred while recording' answer")
+    #expect(await runner.spawned.isEmpty)
+    #expect(Self.readResult(fixture) == nil && !FileManager.default.fileExists(atPath: fixture.staging.path))
+  }
+
+  @Test func anOfferedVersionAtOrBelowThePinIsStillTaken() async throws {
+    for offered in ["0.1.8", "0.1.9"] {
+      let fixture = try Fixture.make()
+      defer { fixture.tearDown() }
+      let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+      let updater = try pinnedUpdater(fixture, running: "0.1.7", offered: offered, pin: "0.1.9", runner: runner)
+      #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: offered), "offered \(offered)")
+    }
+  }
+
+  @Test func noPinFileMeansNoPin() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = try pinnedUpdater(fixture, running: "0.1.7", offered: "0.1.99", pin: nil, runner: runner)
+    #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: "0.1.99"))
+  }
+
+  @Test func aPinThatIsNotAVersionHoldsEveryUpdateAndSaysWhy() async throws {
+    for garbage in ["", "banana\n", "0.1.x"] {
+      let fixture = try Fixture.make()
+      defer { fixture.tearDown() }
+      let logged = LockedStrings()
+      let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+      var updater = try pinnedUpdater(fixture, running: "0.1.7", offered: "0.1.8", pin: garbage, runner: runner)
+      updater = RoomUpdater(
+        rootURL: updater.rootURL, residentBundleURL: updater.residentBundleURL, runningVersion: "0.1.7", channel: "stable",
+        fetcher: StubFetcher(release: descriptor(version: "0.1.8", bytes: Data("z".utf8))), downloader: StubDownloader(bytes: Data("z".utf8)),
+        runner: runner, pinURL: updater.pinURL, log: { logged.add($0) })
+      #expect(await updater.check(sessionIsOpen: false) == .upToDate, "pin text '\(garbage)'")
+      #expect(await runner.spawned.isEmpty)
+      #expect(logged.all.contains { $0.contains("is not a version") }, "\(logged.all)")
+    }
+  }
+
+  @Test func theHeldLogLineNamesThePinAndTheWayOut() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let logged = LockedStrings()
+    let runner = RecordingRunner(exitCodes: [:])
+    let pinURL = fixture.root.appendingPathComponent("pin")
+    try "0.1.31".write(to: pinURL, atomically: true, encoding: .utf8)
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.30", channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: "0.1.33", bytes: Data("z".utf8))), downloader: StubDownloader(bytes: Data("z".utf8)),
+      runner: runner, pinURL: pinURL, log: { logged.add($0) })
+    _ = await updater.check(sessionIsOpen: false)
+    #expect(logged.all.contains { $0.contains("pinned at 0.1.31") && $0.contains("pkg install clears the pin") })
+  }
+
   @Test func aChannelOfferingALowerVersionStagesNothingAndDefersNothing() async throws {
     // The whole updater, not just the predicate: a 0.1.29 app on a channel that offers 0.1.28 with
     // the session CLOSED downloads nothing, spawns nothing and leaves no result file.
@@ -2090,6 +2188,13 @@ import Testing
 private struct StubFetcher: RoomReleaseFetching {
   let release: RoomReleaseDescriptor?
   func fetchRelease(channel: String) async -> RoomReleaseDescriptor? { release }
+}
+
+private final class LockedStrings: @unchecked Sendable {
+  private let lock = NSLock()
+  private var items: [String] = []
+  func add(_ s: String) { lock.lock(); items.append(s); lock.unlock() }
+  var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
 }
 
 private struct StubDownloader: RoomUpdateDownloading {
