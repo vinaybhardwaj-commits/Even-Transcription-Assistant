@@ -5,13 +5,17 @@
 
 One parquet per model, a merged ``features.parquet`` (raw columns plus baseline
 deltas), and ``manifest.json``. Re-running skips windows whose status is
-``ok`` or ``nan``. ``error`` rows are retried. Writes are atomic.
+``ok`` or ``nan``. ``error`` rows are retried. A model that does not fit in
+RAM is skipped, with the reason logged, and the other models still run.
+Writes are atomic.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 import traceback
 from pathlib import Path
 
@@ -21,8 +25,11 @@ import pandas as pd
 from tools.timbre import HARNESS_VERSION
 from tools.timbre.audio import read_audio
 from tools.timbre.baseline import add_baselines, baseline_columns
-from tools.timbre.catalog import SPECS, resolve_model_names
+from tools.timbre.catalog import SPEC_BY_NAME, SPECS, resolve_model_names
+from tools.timbre.mem import InsufficientMemory, mem_available_gb
 from tools.timbre.windows import Window, load_windows
+
+log = logging.getLogger("tools.timbre.run")
 
 DONE = {"ok", "nan"}
 META_COLS = (
@@ -61,19 +68,30 @@ def run(
     }
     built = extractors or {}
     for name in names:
+        spec = SPEC_BY_NAME[name]
         ext = built.get(name)
-        if ext is None:
-            from tools.timbre.extractors.base import build_extractor
-
-            ext = build_extractor(name, device)
         try:
-            manifest["models"][name] = _run_model(name, ext, windows, out)
+            if ext is None:
+                reason = _ram_skip_reason(spec)
+                if reason:
+                    _log_skip(name, reason)
+                    manifest["models"][name] = _skipped_model(spec, reason)
+                else:
+                    from tools.timbre.extractors.base import build_extractor
+
+                    ext = build_extractor(name, device)
+                    manifest["models"][name] = _run_model(name, ext, windows, out)
+            else:
+                manifest["models"][name] = _run_model(name, ext, windows, out)
+        except InsufficientMemory as e:
+            _log_skip(name, str(e))
+            manifest["models"][name] = _skipped_model(spec, str(e))
         finally:
             close = getattr(ext, "close", None)
             if close is not None and extractors is None:
                 close()
         _write_json(out / "manifest.json", manifest)
-    merged = _merge(out, names)
+    merged = _merge(out, names, windows)
     if len(merged):
         merged = add_baselines(merged, baseline_columns(merged.columns))
     _write_parquet(merged, out / "features.parquet")
@@ -129,6 +147,8 @@ def _one_window(extractor, window: Window) -> dict:
         try:
             audio, sr = read_audio(window.audio_path)
             result = extractor.extract(audio, sr)
+        except InsufficientMemory:
+            raise
         except Exception as e:
             result = _failed(extractor, f"{type(e).__name__}: {e}"[:240], 0.0)
     return {**base, **_flatten(result)}
@@ -205,13 +225,51 @@ def _completed(path: Path) -> tuple[set[str], list[dict]]:
     return done, kept
 
 
-def _merge(out: Path, names: list[str]) -> pd.DataFrame:
+def _ram_skip_reason(spec) -> str | None:
+    have = mem_available_gb()
+    if have < spec.ram_gb:
+        return f"{spec.name}: need about {spec.ram_gb:.1f} GB available RAM, have {have:.1f} GB"
+    return None
+
+
+def _log_skip(name: str, reason: str) -> None:
+    log.warning("skip %s: %s", name, reason)
+    print(f"skip {name}: {reason}", file=sys.stderr)
+
+
+def _skipped_model(spec, reason: str) -> dict:
+    return {
+        "model_id": spec.model_id,
+        "extractor_version": spec.extractor_version,
+        "kind": spec.kind,
+        "licence": spec.licence,
+        "skipped": True,
+        "reason": reason,
+        "completed": [],
+        "errors": [],
+        "infer_s_ok": 0.0,
+        "audio_s_ok": 0.0,
+        "s_per_audio_s": None,
+    }
+
+
+def _merge(out: Path, names: list[str], windows: list[Window] | None = None) -> pd.DataFrame:
+    """Join model columns on ``window_id`` only.
+
+    Metadata comes from the windows table once. Extra CSV columns are not
+    taken from each per-model parquet, so a second model cannot collide with
+    the first on ``outcome`` / ``doctor_uid8`` / ``source_pack`` / ``diar_src``.
+    """
+    meta = pd.DataFrame([_meta(w) for w in windows]) if windows else pd.DataFrame(columns=["window_id"])
+    audio = None
     frames = []
     for name in names:
         path = out / f"{name}.parquet"
         if not path.is_file():
             continue
         df = pd.read_parquet(path)
+        if "window_id" not in df.columns:
+            continue
         rename = {
             "status": f"{name}__status",
             "reason": f"{name}__reason",
@@ -222,15 +280,22 @@ def _merge(out: Path, names: list[str]) -> pd.DataFrame:
             "extractor_version": f"{name}__extractor_version",
         }
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        if "audio_s" in df.columns and frames:
-            df = df.drop(columns=["audio_s"])
-        frames.append(df)
-    if not frames:
+        if audio is None and "audio_s" in df.columns and "audio_s" not in meta.columns:
+            audio = df.loc[:, ["window_id", "audio_s"]]
+        keep = [c for c in df.columns if c == "window_id" or str(c).startswith(f"{name}__")]
+        frames.append(df.loc[:, keep])
+    if not len(meta) and not frames:
         return pd.DataFrame()
-    merged = frames[0]
-    for df in frames[1:]:
-        drop = [c for c in META_COLS if c != "window_id" and c in df.columns]
-        merged = merged.merge(df.drop(columns=drop, errors="ignore"), on="window_id", how="outer")
+    merged = meta
+    if audio is not None and len(merged):
+        merged = merged.merge(audio, on="window_id", how="left")
+    elif audio is not None:
+        merged = audio
+    for df in frames:
+        if not len(merged):
+            merged = df
+            continue
+        merged = merged.merge(df, on="window_id", how="left")
     return merged
 
 

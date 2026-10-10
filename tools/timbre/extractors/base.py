@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from tools.timbre.catalog import SPEC_BY_NAME, ModelSpec
+from tools.timbre.mem import InsufficientMemory
 from tools.timbre.vad import VAD_VERSION, speech_guard
 
 
@@ -41,6 +42,10 @@ class Extractor:
             emb = None if embedding is None else np.asarray(embedding, dtype=np.float64).reshape(-1)
             feats = {k: _finite_or_nan(v) for k, v in features.items()}
             return self._row("ok", None, audio_s, time.perf_counter() - t0, feats, emb)
+        except InsufficientMemory:
+            # The runner skips this model and continues. A per-window error would
+            # be retried on the next run and would keep the gate in the hot path.
+            raise
         except Exception as e:  # a model failure is a row, not a crashed batch
             return self._row("error", _short_error(e), audio_s, time.perf_counter() - t0, {}, None)
 

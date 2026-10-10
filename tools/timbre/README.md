@@ -103,7 +103,7 @@ Vox-Profile is not pip-installable. `extractors/voxprofile_dim.py` is an adapter
 
 Odyssey's published `pipeline_utils.py` targets transformers 4. The extractor keeps that architecture locally (same module names, `post_init` for transformers 5) and does not execute the remote file.
 
-`catalog.py` lists a `ram_gb` floor per model. Below that, load is refused (`InsufficientMemory`) and the slow test skips.
+`catalog.py` lists a `ram_gb` floor per model. Below that, `python -m tools.timbre.run` logs the reason, skips that model, and continues with the rest. The slow test skips the same way.
 
 ## Nemotron probability files
 
@@ -141,3 +141,5 @@ Measured on a CPU box with about 4.7 GB MemAvailable, Python 3.11, torch 2.14.1+
 | `voxprofile_whisper_dim.v1` | skipped | needs 12 GB free; this box had ~4.7 |
 
 The first call in a fresh process is slower because it loads the checkpoint. Re-run with `make -C tools/timbre test-all`. Results land in `TIMBRE_SMOKE_LOG` (default `/tmp/timbre-smoke-timings.json`). A model under its `ram_gb` floor, or missing its Python package, is skipped. A loaded model that returns a non-finite score fails.
+
+On a shared 8-vCPU box the same CPU path was about 5× slower than the table above. audEERING there was about 0.23 s per second of audio, against 0.048 s here.
