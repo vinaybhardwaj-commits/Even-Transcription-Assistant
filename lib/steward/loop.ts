@@ -467,7 +467,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
     let rosterRows: RosterRow[] = [];
     try {
       rosterRows = (await sql`
-        SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.state_flags, ri.expected_device_name AS device_name
+        SELECT r.id AS room_id, r.name AS room_name, ri.hostname, ri.state_flags, ri.expected_device_name AS device_name, ri.last_seen_at
           FROM room r
           LEFT JOIN room_install ri ON ri.room_id = r.id AND ri.retired_at IS NULL AND ri.enrolled_at IS NOT NULL
          WHERE r.disabled_at IS NULL

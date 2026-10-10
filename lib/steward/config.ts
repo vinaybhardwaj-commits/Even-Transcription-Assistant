@@ -236,8 +236,8 @@ export function actionMode(cfg: Config, action: string): ActionMode {
 /** "EHRC-CONSUL2’s Mac mini (2)" -> "EHRC-CONSUL2s-Mac-mini-2" (same rule as lib/encounter-windows/types.ts normalizeHostname; copied so this module has no imports). */
 export const normalizeMachine = (h: string): string => h.replace(/’/g, "").replace(/'/g, "").replace(/\s*\((\d+)\)/, "-$1").replace(/\s+/g, "-");
 
-export type RosterRow = { room_id: string; room_name: string; hostname: string | null; state_flags?: unknown; device_name?: string | null };
-export type RosterRoom = { room_id: string; room_name: string; machine: string | null; klass: RoomClass; flags: string[]; kind: ScheduleKind; state_flags: unknown; /** room_install.expected_device_name: the input device the room should be on */ device_name: string | null };
+export type RosterRow = { room_id: string; room_name: string; hostname: string | null; state_flags?: unknown; device_name?: string | null; /** room_install.last_seen_at: the Room Recorder app's bench poll (TS-E1 reachability) */ last_seen_at?: unknown };
+export type RosterRoom = { room_id: string; room_name: string; machine: string | null; klass: RoomClass; flags: string[]; kind: ScheduleKind; state_flags: unknown; /** room_install.last_seen_at as ISO (TS-E1), null = never */ last_seen_at?: string | null; /** room_install.expected_device_name: the input device the room should be on */ device_name: string | null };
 
 export const EXCLUDED_FLAGS: readonly string[] = ["test", "dev"];
 /** rooms whose id starts with this are dev/test scratch rooms (lib/brain/scratch.ts SCRATCH_ROOM_PREFIX, copied: this module has no imports) and never join the roster. */
@@ -262,7 +262,7 @@ export function buildRoster(rows: readonly RosterRow[], cfg: Config): RosterRoom
     if (flags.some((f) => EXCLUDED_FLAGS.includes(f.toLowerCase()))) continue;
     const klass: RoomClass = o?.class ?? "clinic";
     const machine = o?.machine ?? (r.hostname ? normalizeMachine(r.hostname) : null);
-    out.push({ room_id: r.room_id, room_name: r.room_name, machine, klass, flags, kind: klass === "ot" ? "ot" : "clinic", state_flags: r.state_flags ?? null, device_name: r.device_name ?? null });
+    out.push({ room_id: r.room_id, room_name: r.room_name, machine, klass, flags, kind: klass === "ot" ? "ot" : "clinic", state_flags: r.state_flags ?? null, device_name: r.device_name ?? null, last_seen_at: r.last_seen_at === null || r.last_seen_at === undefined ? null : new Date(r.last_seen_at as string).toISOString() });
   }
   const rank = (k: RoomClass): number => {
     const i = cfg.priority.indexOf(k);

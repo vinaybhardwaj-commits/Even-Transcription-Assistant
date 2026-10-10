@@ -562,7 +562,7 @@ describe("exclusions — Home Office, ORB3, ORB2 never appear", () => {
 
 describe("summarizeExtHealth", () => {
   it("counts every status, all keys present", () => {
-    expect(summarizeExtHealth([])).toEqual({ ok: 0, no_tab: 0, missing: 0, quiet: 0, behind: 0, offline: 0, no_chrome: 0, total: 0 });
+    expect(summarizeExtHealth([])).toEqual({ ok: 0, no_tab: 0, missing: 0, quiet: 0, behind: 0, offline: 0, no_chrome: 0, poller_down: 0, total: 0 });
     const rows = computeExtHealth(
       [
         mk({ machine: "m1" }),
@@ -576,7 +576,7 @@ describe("summarizeExtHealth", () => {
       ],
       NOW,
     );
-    expect(summarizeExtHealth(rows)).toEqual({ ok: 1, no_tab: 1, missing: 1, quiet: 1, behind: 2, offline: 1, no_chrome: 1, total: 8 });
+    expect(summarizeExtHealth(rows)).toEqual({ ok: 1, no_tab: 1, missing: 1, quiet: 1, behind: 2, offline: 1, no_chrome: 1, poller_down: 0, total: 8 });
   });
 });
 
@@ -628,6 +628,26 @@ describe("loadExtHealthInputs / extHealth", () => {
     expect(rows[1]).toMatchObject({ behind_since: ago(4 * 3600), version_state: "behind" });
     expect(rows[0]!.poller.idle_s).toBe(1200.5); // numeric text from the driver, coerced
     expect(rows[1]!.poller.idle_s).toBeNull();
+  });
+
+  it("M5: when the loader's kiosk-health heartbeat read FAILS, reachability is unknown for every Mac (offline), never reachable on the app poll alone", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rooms = ROOMS.map((r) => ({ ...r, last_seen_at: ago(1) })); // the app polled 1 s ago
+    const failing = (q: Q): unknown => {
+      if (/FROM kiosk_health_events/.test(q.text)) throw new Error("relation \"kiosk_health_events\" does not exist");
+      return responder(q);
+    };
+    const { db } = fakeDb(failing);
+    const rows = await extHealth(db, { asOf: NOW, rooms });
+    expect(rows.map((r) => r.status)).toEqual(["offline", "offline"]);
+    expect(rows.every((r) => r.reach?.state === "unknown")).toBe(true);
+    // the same rooms with the read healthy: the app poll alone makes them reachable
+    const ok = await extHealth(fakeDb(responder).db, { asOf: NOW, rooms });
+    expect(ok.every((r) => r.reach?.state === "reachable" && r.reach.source === "app_poll")).toBe(true);
+    // a caller-supplied failed read (fleet-attention's single read) is the same
+    const supplied = await extHealth(fakeDb(responder).db, { asOf: NOW, rooms: rooms.map((r) => ({ ...r, kiosk_health: { ok: false, at: null } })) });
+    expect(supplied.every((r) => r.reach?.state === "unknown" && r.status === "offline")).toBe(true);
+    warn.mockRestore();
   });
 
   it("every machine is matched under all its spellings: canonical, raw hostname, and the pre-5-Oct poller short key (so an as_of replay finds old rows)", async () => {

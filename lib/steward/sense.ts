@@ -53,6 +53,8 @@ export type RoomSense = {
   listener: { listening: boolean | null; paused: boolean | null };
   reachable: {
     poller_ok_at: string | null;
+    /** TS-E1: room_install.last_seen_at, the Room Recorder app's 1.5 s bench poll (HTTPS, independent of the tailnet). Absent = not supplied. */
+    app_poll_at?: string | null;
     kh_heartbeat_at: string | null;
     kh_enrolled: boolean | null;
     /** the kiosk-health sleep marker (bench rule R11 derivation, see khSleepMarker): ISO ts of a sleep/darkwake/display-off event with no wake and no heartbeat since, else null */
@@ -261,7 +263,7 @@ export async function senseAll(
   const khKeysExpanded = expandKeys(khKeys);
   /** every spelling pulse_presence_events may carry for the roster machines (canonical + legacy keys) */
   const occKeys = [...new Set([...khKeys, ...uniqMachines.map((m) => m.n)])];
-  const extRooms: ExtHealthRoom[] = withMachine.map((r) => ({ room_id: r.room_id, room_name: r.room_name, hostname: r.machine as string }));
+  const extRooms: ExtHealthRoom[] = withMachine.map((r) => ({ room_id: r.room_id, room_name: r.room_name, hostname: r.machine as string, last_seen_at: r.last_seen_at ?? null }));
 
   if (roster.length === 0) return new Map();
 
@@ -660,7 +662,7 @@ export async function senseAll(
         recorder_status,
       },
       listener,
-      reachable: { poller_ok_at: toIso(poll?.ts), kh_heartbeat_at: khHb, kh_enrolled: khR.ok ? (kh ? kh.enrolled : false) : null, sleep_at: khR.ok ? khSleepMarker(kh, A) : null },
+      reachable: { poller_ok_at: toIso(poll?.ts), app_poll_at: r.last_seen_at ?? null, kh_heartbeat_at: khHb, kh_enrolled: khR.ok ? (kh ? kh.enrolled : false) : null, sleep_at: khR.ok ? khSleepMarker(kh, A) : null },
       chrome: {
         running: prof?.running ?? boolOrNull(poll?.chrome) ?? null,
         active,
