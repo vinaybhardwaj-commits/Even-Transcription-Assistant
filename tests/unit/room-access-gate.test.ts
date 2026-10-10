@@ -102,6 +102,11 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
       ["from-left-leaning", (t, n) => `sql\`SELECT 1 FROM ${o(n)}${t} w JOIN x ON true${c(1)}${" JOIN y ON true)".repeat(n - 1)} JOIN z ON true\``],
       ["from-group-then-comma-item", (t, n) => `sql\`SELECT 1 FROM ${o(n)}x w JOIN y ON true${c(n)}, ${t} z WHERE 1=1\``],
       ["from-inner-list", (t, n) => `sql\`SELECT 1 FROM ${o(n)}a, (${t} w)${c(n)}\``],
+      ["from-join-using-then-comma", (t, n) => `sql\`SELECT 1 FROM a JOIN x USING (id), ${o(n)}${t} w JOIN y ON true${c(n)}\``],
+      ["from-join-on-then-comma", (t, n) => `sql\`SELECT 1 FROM a JOIN x ON true, ${o(n)}${t} w${c(n)} WHERE 1=1\``],
+      ["from-cross-join-then-comma", (t, n) => `sql\`SELECT 1 FROM a CROSS JOIN x, ${o(n)}${t} w${c(n)}\``],
+      ["from-natural-join-then-comma", (t, n) => `sql\`SELECT 1 FROM a NATURAL JOIN x, ${o(n)}${t} w${c(n)}\``],
+      ["from-left-join-on-expr-then-comma", (t, n) => `sql\`SELECT 1 FROM a LEFT JOIN x ON (a.id = x.id AND f(a.k, x.k)), ${o(n)}${t} w${c(n)} ORDER BY 1\``],
       ["from-nested-then-where", (t, n) => `sql\`SELECT 1 FROM ${o(n)}${t} w${c(n)} WHERE 1=1\``],
       ["join-group", (t, n) => `sql\`SELECT 1 FROM x JOIN ${o(n)}${t} w JOIN y ON true${c(n)} ON true\``],
       ["delete-using", (t, _n) => `sql\`DELETE FROM a USING ${t} w WHERE true\``],
@@ -135,7 +140,7 @@ describe("GUARD — nothing outside lib/room-access/ touches room data", () => {
     // clean twins: the same shapes over non-room tables, look-alikes, columns, and a call
     for (const ok of ["sql`SELECT 1 FROM (((other_t w JOIN x ON true)))`", "sql`SELECT 1 FROM a, (((bench_window_silence w JOIN x) JOIN y) JOIN z)`", "sql`TRUNCATE TABLE a, other_t`", "sql`TRUNCATE TABLE ONLY a, my_cue`", "sql`LOCK other_t`",
       "sql`LOCK TABLE a, other_t IN ACCESS EXCLUSIVE MODE`", "sql`DELETE FROM a USING (other_t w JOIN x ON true)`", "sql`MERGE INTO a USING (other_t) s ON true`", "sql`SELECT 1 FROM x JOIN y USING (cue)`",
-      "sql`SELECT count(cue) FROM (((other_t w JOIN x ON true)))`", "sql`SELECT 1 FROM (SELECT count(cue) AS n FROM other_t) q`"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
+      "sql`SELECT count(cue) FROM (((other_t w JOIN x ON true)))`", "sql`SELECT 1 FROM a JOIN x USING (id), other_t w`", "sql`SELECT 1 FROM a JOIN x ON true, other_t w`", "sql`SELECT 1 FROM a CROSS JOIN x, other_t w`", "sql`SELECT 1 FROM a NATURAL JOIN x, (other_t w JOIN y ON true)`", "sql`SELECT 1 FROM a JOIN x USING (cue), my_cue w`", "sql`SELECT 1 FROM (SELECT count(cue) AS n FROM other_t) q`"]) expect(scanSource("lib/x.ts", ok), ok).toEqual([]);
   });
   it("REL3-FU2 F2-1: SQL comments between FROM / JOIN and a table do not hide it; a comment opener inside a SQL string does not eat real SQL", () => {
     for (const t of ROOM_TABLES) {

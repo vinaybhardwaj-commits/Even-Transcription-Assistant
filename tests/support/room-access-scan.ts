@@ -29,11 +29,12 @@ const USING_PAREN_RE = new RegExp(`\\bUSING\\s+\\(\\s*(?:\\(\\s*)*(?:ONLY\\s+)?$
 // TRUNCATE [TABLE] [ONLY] a, b, c and LOCK [TABLE] [ONLY] a, b IN .. MODE: the whole comma list
 const LIST_RE = /\b(?:TRUNCATE|LOCK)\s+(?:TABLE\s+)?([^;]*?)(?=\sIN\s|;|$)/gi;
 const FROM_KW = /\bFROM\s+/gi;
-const FROM_END = /^\s(?:WHERE|GROUP|ORDER|LIMIT|JOIN|LEFT|RIGHT|INNER|CROSS|FULL|NATURAL|ON|UNION|HAVING|RETURNING|SET|FOR|OFFSET)\b/i;
+// JOIN / LEFT / CROSS / NATURAL / ON / USING do NOT end the list: `FROM a JOIN x USING (id), T w` has T as a later comma item
+const FROM_END = /^\s(?:WHERE|GROUP|ORDER|LIMIT|UNION|INTERSECT|EXCEPT|HAVING|RETURNING|SET|FOR|OFFSET|WINDOW|FETCH)\b/i;
 const ITEM_RE = new RegExp(`^\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "id"); // a bracketed join group FROM (bench_window w JOIN x ...) at any depth
-// a bracket run that opens an item or a group (not a call: count(cue) has an identifier char before the bracket) followed by a gated table
-const GROUP_RE = new RegExp(`(?<![\\w$])\\(\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "gid");
-/** the extent of a FROM list starting at `from`: a real bracket-depth walk; ends at depth 0 on a clause keyword or ';', or at a bracket that closes the enclosing group. balanced=false: the text ran out inside an open bracket. */
+// a bracket run that opens an item or a group (not a call: count(cue) has an identifier char before the bracket; not a USING (col) column list) followed by a gated table
+const GROUP_RE = new RegExp(`(?<![\\w$])(?<!\\bUSING\\s+)\\(\\s*(?:\\(\\s*)*(?:ONLY\\s+)?${NAME}`, "gid");
+/** the extent of a FROM list starting at `from`: a real bracket-depth walk; ends at depth 0 on a clause keyword (WHERE / GROUP / ORDER / ..., not a JOIN form) or ';', or at a bracket that closes the enclosing group. balanced=false: the text ran out inside an open bracket. */
 export function fromSpan(text: string, from: number): { end: number; balanced: boolean } {
   let depth = 0;
   for (let i = from; i < text.length; i++) {
