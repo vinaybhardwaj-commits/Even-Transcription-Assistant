@@ -96,13 +96,12 @@ describe("the route", () => {
   const SECRET = "s3cret-for-test";
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-10-09T16:30:00Z"));   // 22:00 IST, outside clinic hours
+    vi.setSystemTime(new Date("2026-10-10T04:30:00Z"));   // 10:00 IST, mid-clinic: the cutter runs
     vi.stubEnv("CRON_SECRET", SECRET);
     vi.stubEnv("NEMOTRON_CLIP_JOIN_ENABLED", "1");
     vi.stubEnv("DIARIZE_NEMOTRON_SHADOW", "1");
     vi.stubEnv("NEMOTRON_CLIP_JOIN_BATCH", "");
     vi.doMock("@/lib/stt/join-only", async (orig) => ({
-      inClinicHours: ((await orig()) as { inClinicHours: (d: Date) => boolean }).inClinicHours,
       listCliplessWindows: async (o: unknown) => { H.listOpts.push(o); return H.list; },
       joinOnlyWindow: async (id: string, o: unknown) => {
         H.joinOnlyOpts.push(o);
@@ -142,7 +141,8 @@ describe("the route", () => {
     H.list = [{ window_id: "a", transcript_enabled: false }, { window_id: "b", transcript_enabled: false }];
     const body = await (await call(`Bearer ${SECRET}`)).json();
     expect(H.listOpts[0]).toEqual({ limit: 6, includeTranscriptDisabled: true });
-    expect(H.joinOnlyOpts).toEqual([{ includeTranscriptDisabled: true }, { includeTranscriptDisabled: true }]);
+    const OPTS = { includeTranscriptDisabled: true, skipRecordingHold: true };   // mutant: route passes no skipRecordingHold -> fails
+    expect(H.joinOnlyOpts).toEqual([OPTS, OPTS]);
     expect(body.joined).toBe(2);
     vi.stubEnv("NEMOTRON_CLIP_JOIN_BATCH", "99");
     await call(`Bearer ${SECRET}`);
@@ -155,52 +155,30 @@ describe("the route", () => {
     expect((H.listOpts[3] as { limit: number }).limit).toBe(3);
   });
 
-  it.each(["room_recording", "recording_unknown", "join_service_not_configured"])(
-    "d. stops the tick at %s", async (step) => {
-      H.list = ["a", "b", "c"].map((window_id) => ({ window_id, transcript_enabled: false }));
-      H.joinOnlySteps = { b: { ok: false, step } };
-      const body = await (await call(`Bearer ${SECRET}`)).json();
-      expect(H.joinOnlyOpts.length).toBe(2);   // c never attempted
-      expect(body.stopped_at).toBe(step);
-      expect(body.joined).toBe(1);
-    });
+  it("d. stops the tick at join_service_not_configured", async () => {
+    H.list = ["a", "b", "c"].map((window_id) => ({ window_id, transcript_enabled: false }));
+    H.joinOnlySteps = { b: { ok: false, step: "join_service_not_configured" } };
+    const body = await (await call(`Bearer ${SECRET}`)).json();
+    expect(H.joinOnlyOpts.length).toBe(2);   // c never attempted
+    expect(body.stopped_at).toBe("join_service_not_configured");
+    expect(body.joined).toBe(1);
+  });
 
-  // IST = UTC+05:30: 07:30 IST is 02:00Z, 21:30 IST is 16:00Z.
-  it.each([
-    ["07:29 IST runs", "2026-10-09T01:59:00Z", false],
-    ["07:30 IST skipped", "2026-10-09T02:00:00Z", true],
-    ["21:29 IST skipped", "2026-10-09T15:59:00Z", true],
-    ["21:30 IST runs", "2026-10-09T16:00:00Z", false],
-  ])("clinic hours: %s", async (_n, iso, skipped) => {
-    vi.setSystemTime(new Date(iso));
+  it.each(["room_recording", "recording_unknown"])("V 10 Oct: %s no longer stops the tick (and the route asks to skip the hold)", async (step) => {
+    H.list = ["a", "b", "c"].map((window_id) => ({ window_id, transcript_enabled: false }));
+    H.joinOnlySteps = { b: { ok: false, step } };
+    const body = await (await call(`Bearer ${SECRET}`)).json();
+    expect(H.joinOnlyOpts.length).toBe(3);
+    expect(body.stopped_at).toBeNull();
+    expect(H.joinOnlyOpts.every((o) => (o as { skipRecordingHold?: boolean }).skipRecordingHold === true)).toBe(true);
+  });
+
+  it("a tick at 10:00 IST with flags on and no room recording lists and joins", async () => {
     H.list = [{ window_id: "a", transcript_enabled: false }];
     const body = await (await call(`Bearer ${SECRET}`)).json();
-    if (skipped) {
-      expect(body).toEqual({ skipped: "clinic_hours" });
-      expect(H.sqlCalls).toBe(0);
-      expect(H.listOpts.length).toBe(0);
-    } else {
-      expect(body.skipped).toBeUndefined();
-      expect(H.listOpts.length).toBe(1);
-    }
-  });
-
-  it("L1: a tick that would pass 180 s stops before the next join, and counts it", async () => {
-    H.list = ["a", "b", "c", "d"].map((window_id) => ({ window_id, transcript_enabled: false }));
-    H.joinMs = 100_000;   // a: 0->100 s, b: 100->200 s, then 200 s > 180 s: c is never started
-    const body = await (await call(`Bearer ${SECRET}`)).json();
-    expect(H.joinOnlyOpts.length).toBe(2);
-    expect(body.stopped_at).toBe("time_budget");
-    expect(body.steps.time_budget).toBe(1);
-    expect(body.joined).toBe(2);
-  });
-
-  it("L2: join_failed windows are counted in the response", async () => {
-    H.list = ["a", "b"].map((window_id) => ({ window_id, transcript_enabled: false }));
-    H.joinOnlySteps = { a: { ok: false, step: "join_failed" }, b: { ok: false, step: "join_failed" } };
-    const body = await (await call(`Bearer ${SECRET}`)).json();
-    expect(body.join_failed).toBe(2);
-    expect(H.joinOnlyOpts.length).toBe(2);   // transient: keeps going
+    expect(body.skipped).toBeUndefined();
+    expect(H.listOpts.length).toBe(1);
+    expect(body.joined).toBe(1);
   });
 
   it("a blind refusal for one window does not stop the tick", async () => {

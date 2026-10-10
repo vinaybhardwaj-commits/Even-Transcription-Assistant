@@ -76,7 +76,7 @@ export type JoinOnlyOutcome =
  */
 export async function joinOnlyWindow(
   windowId: string,
-  opts: { includeTranscriptDisabled?: boolean; now?: Date } = {},
+  opts: { includeTranscriptDisabled?: boolean; skipRecordingHold?: boolean; now?: Date } = {},
 ): Promise<JoinOnlyOutcome> {
   const t0 = Date.now();
   const ms = () => Date.now() - t0;
@@ -125,15 +125,19 @@ export async function joinOnlyWindow(
   //
   //    BACKING OFF IS RETURNING. There is no retry loop here and there must not be one: the caller
   //    stops for the day, and the window is still there tomorrow.
-  const recording = await roomsRecordingNow(opts.now ?? new Date());
-  if (!recording.known) {
-    // The bus could not be read, so we cannot prove nothing is recording. The MCP tool proceeds
-    // and carries the reason, because a clinician asking to listen back is waiting. Nothing waits
-    // on a backlog, so it holds instead. FAIL-SAFE BY CHOICE — flagged in the handoff.
-    return no("recording_unknown", recording.reason.slice(0, 120));
+  //    `skipRecordingHold` is V's ruling (10 Oct) for the scheduled Nemotron cutter ONLY: it cuts
+  //    while rooms record. The default, and every other caller (MCP listen-back), keeps D15 as is.
+  if (!opts.skipRecordingHold) {
+    const recording = await roomsRecordingNow(opts.now ?? new Date());
+    if (!recording.known) {
+      // The bus could not be read, so we cannot prove nothing is recording. The MCP tool proceeds
+      // and carries the reason, because a clinician asking to listen back is waiting. Nothing waits
+      // on a backlog, so it holds instead. FAIL-SAFE BY CHOICE — flagged in the handoff.
+      return no("recording_unknown", recording.reason.slice(0, 120));
+    }
+    // COUNT ONLY. The check knows room slugs; a backfill log must not.
+    if (recording.rooms.length > 0) return no("room_recording", `${recording.rooms.length} recording`);
   }
-  // COUNT ONLY. The check knows room slugs; a backfill log must not.
-  if (recording.rooms.length > 0) return no("room_recording", `${recording.rooms.length} recording`);
 
   // 6. THE SEAM — the drain's own join step, not a second copy of it.
   const join = await joinClipForWindow({ windowId, sessionId: w.session_id, covering, startMs, endMs, source });
@@ -191,14 +195,4 @@ export async function listCliplessWindows(opts: {
      ORDER BY w.start_ms ASC
      LIMIT ${limit}
   `) as Array<{ window_id: string; transcript_enabled: boolean }>;
-}
-
-/**
- * Clinic hours, 07:30 to 21:30 IST: the join service runs on the Mini, and no bulk traffic goes
- * through the Mini then (standing rule). IST is UTC+05:30 computed by hand from the injected clock —
- * no locale, no Intl. [07:30, 21:30) is quiet: 07:30 is inside, 21:30 is outside.
- */
-export function inClinicHours(now: Date): boolean {
-  const istMinutes = (Math.floor(now.getTime() / 60_000) + 330) % 1440;
-  return istMinutes >= 7 * 60 + 30 && istMinutes < 21 * 60 + 30;
 }

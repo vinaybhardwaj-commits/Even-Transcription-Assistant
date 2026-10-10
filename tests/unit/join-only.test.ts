@@ -63,7 +63,7 @@ function ctx(over: Record<string, unknown> = {}) {
   };
 }
 
-async function run(opts?: { includeTranscriptDisabled?: boolean }) {
+async function run(opts?: { includeTranscriptDisabled?: boolean; skipRecordingHold?: boolean }) {
   const { joinOnlyWindow } = await import("@/lib/stt/join-only");
   return joinOnlyWindow("w1", opts);
 }
@@ -134,6 +134,26 @@ describe("THE TWO DECISIONS ARE SEPARATE — and the second one is a parameter",
     H.recording = { known: true, rooms: [{ room_id: "room_9" }] };
     const r = await run({ includeTranscriptDisabled: true });
     expect(r).toMatchObject({ ok: false, step: "room_recording" });
+    expect(H.joins).toEqual([]);
+  });
+});
+
+describe("D15 — the cron cutter's skipRecordingHold (V, 10 Oct); the default keeps the hold", () => {
+  it("with skipRecordingHold a recording room does not stop the join, and the bus is not even asked", async () => {
+    H.recording = { known: true, rooms: [{ room_id: "room_9" }] };
+    const r = await run({ skipRecordingHold: true });
+    expect(r).toMatchObject({ ok: true, joined: true });
+    expect(H.joins.length).toBe(1);
+  });
+
+  it("with skipRecordingHold an unreadable bus does not stop the join either", async () => {
+    H.recording = { known: false, reason: "bus down" };
+    expect(await run({ skipRecordingHold: true })).toMatchObject({ ok: true, joined: true });
+  });
+
+  it("without it the hold is exactly as before", async () => {
+    H.recording = { known: true, rooms: [{ room_id: "room_9" }] };
+    expect(await run({})).toMatchObject({ ok: false, step: "room_recording" });
     expect(H.joins).toEqual([]);
   });
 });
