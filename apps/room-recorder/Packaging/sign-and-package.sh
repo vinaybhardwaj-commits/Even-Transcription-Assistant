@@ -99,9 +99,13 @@ codesign --verify --strict --deep --verbose=2 \
   || die "the app inside the pkg does not verify against the pinned leaf"
 codesign --verify --strict "${INSTALLED_APP}/Contents/MacOS/room-recorder-helper" \
   || die "the helper inside the pkg does not verify"
-codesign -dv "${INSTALLED_APP}/Contents/MacOS/room-recorder-helper" 2>&1 \
-  | /usr/bin/grep -q "Identifier=com.evenscribe.room-recorder.helper" \
-  || die "the helper's signing identifier is not com.evenscribe.room-recorder.helper"
+# Captured, not piped into `grep -q`: grep exits at the first match, codesign then dies of SIGPIPE,
+# and `pipefail` turns a correct identifier into a failure.
+HELPER_INFO="$(codesign -dv "${INSTALLED_APP}/Contents/MacOS/room-recorder-helper" 2>&1)"
+case "$HELPER_INFO" in
+  *"Identifier=com.evenscribe.room-recorder.helper"*) ;;
+  *) die "the helper's signing identifier is not com.evenscribe.room-recorder.helper" ;;
+esac
 /usr/bin/plutil -lint "${INSTALLED_APP}/Contents/Library/LaunchDaemons/com.evenscribe.room-recorder.helper.plist" >/dev/null \
   || die "the helper launchd plist is missing or does not lint"
 /bin/rm -rf "$(/usr/bin/dirname "$EXPAND")"
