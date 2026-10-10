@@ -21,23 +21,24 @@ const { evaluateUnit } = await import("@/lib/rubrics/engines");
 const { getRubric } = await import("@/lib/rubrics/registry");
 beforeEach(() => { calls.audio = 0; calls.turns = 0; calls.span = 0; });
 
-describe("the pre-check alone refuses a held-out pair (the readers here do not guard)", () => {
-  it("a room-hour on the pair: refused before the audio reader", async () => {
+describe("a formerly held-out pair is read and scored like any day (rule lifted 10 Oct 2026)", () => {
+  it("a room-hour on the pair: the audio reader is called and it is scored", async () => {
     const out = await evaluateUnit(getRubric("room_mic_quality")!, "room_hour", "room_ux92qpws:2026-09-13:10");
-    expect(out).toMatchObject({ status: "skipped", reason: "blind_room_day", room_id: "room_ux92qpws", ist_date: "2026-09-13" });
-    expect(calls.audio).toBe(0);
+    expect(out.status).toBe("ok");
+    expect(out).not.toMatchObject({ reason: "blind_room_day" });
+    expect(calls.audio).toBe(1);
   });
-  it("a window whose room-day is the pair: refused before the turns reader", async () => {
+  it("a window whose room-day is the pair: the turns reader is called", async () => {
     const out = await evaluateUnit(getRubric("talk_time")!, "window", "w_any");
-    expect(out).toMatchObject({ status: "skipped", reason: "blind_room_day" });
-    expect(calls.turns).toBe(0);
+    expect(out).not.toMatchObject({ reason: "blind_room_day" });
+    expect(calls.turns).toBeGreaterThan(0);
   });
-  it("a consult on the pair: refused before the span reader and the turns reader", async () => {
+  it("a consult on the pair: the span reader is called", async () => {
     const out = await evaluateUnit(getRubric("talk_time")!, "consult", "enc@m");
-    expect(out).toMatchObject({ status: "skipped", reason: "blind_room_day" });
-    expect(calls.span + calls.turns).toBe(0);
+    expect(out).not.toMatchObject({ reason: "blind_room_day" });
+    expect(calls.span).toBeGreaterThan(0);
   });
-  it("control: a nearby NON-held-out day (09-17) of the same room is read and scored with the same unguarded readers (so the refusals above are the pre-check, not a stub that refuses everything)", async () => {
+  it("control: a nearby day (09-17) of the same room behaves the same way", async () => {
     const out = await evaluateUnit(getRubric("room_mic_quality")!, "room_hour", "room_ux92qpws:2026-09-17:10");
     expect(out.status).toBe("ok");
     expect(calls.audio).toBe(1);

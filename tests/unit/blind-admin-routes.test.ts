@@ -1,10 +1,10 @@
 /**
- * The held-out room-day guard on the two admin routes that read a bench session's data:
+ * The (now no-op, rule lifted by V 10 Oct 2026) held-out room-day guard on the two admin routes that read a bench session's data:
  * /api/admin/speaker-calibration and /api/bench/sessions/{id}/manifest. Each guard is pinned on its own
  * (remove only that route's guard and only that route's blind test fails). Mocked, no database.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import { FORMER_BLIND_PAIRS as BLIND_ROOM_DAYS } from "../support/former-blind-pairs";
 
 const [BD, BR] = BLIND_ROOM_DAYS.find(([d]) => d === "2026-09-13")!;
 const dayBefore = "2026-09-12";
@@ -15,7 +15,7 @@ let session: { id: string; room_id: string; started_at: string; ended_at: string
 let lookupFails = false;
 let chunksFail = false;
 let windowRows: unknown[] = [];
-let chunkRows: Array<{ started_at: string }> = [];
+let chunkRows: Array<{ started_at: string; ended_at?: string }> = [];
 const windowQueries: Array<{ text: string; values: unknown[] }> = [];
 vi.mock("@/lib/db", () => ({
   sql: async (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -46,12 +46,11 @@ const mk = (room_id: string, started_at: string, ended_at: string | null = null)
 beforeEach(() => { dataReads.length = 0; windowQueries.length = 0; session = null; lookupFails = false; chunksFail = false; windowRows = []; chunkRows = []; });
 
 describe("speaker-calibration", () => {
-  it("blind session: 403 blind_room_day and no data query runs", async () => {
+  it("formerly blind session: 200, data is read", async () => {
     mk(BR, `${BD}T05:00:00Z`);
     const res = await callCal();
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ ok: false, error: "blind_room_day" });
-    expect(dataReads).toEqual([]);
+    expect(res.status).toBe(200);
+    expect(dataReads.some((q) => /room_diarize_window/.test(q))).toBe(true);
   });
   it("non-blind session: reads as before", async () => {
     mk(BR, "2026-10-08T05:00:00Z");
@@ -59,21 +58,21 @@ describe("speaker-calibration", () => {
     expect(res.status).toBe(200);
     expect(dataReads.some((q) => /room_diarize_window/.test(q))).toBe(true);
   });
-  it("IST edge: 18:29Z on the day before is not blind, 18:31Z is", async () => {
+  it("IST edge: both 18:29Z and 18:31Z on the day before a formerly blind day are served", async () => {
     mk(BR, `${dayBefore}T18:29:00Z`);
     expect((await callCal()).status).toBe(200);
     dataReads.length = 0;
     mk(BR, `${dayBefore}T18:31:00Z`);
-    expect((await callCal()).status).toBe(403);
-    expect(dataReads).toEqual([]);
+    expect((await callCal()).status).toBe(200);
+    expect(dataReads.some((q) => /room_diarize_window/.test(q))).toBe(true);
   });
 });
 
 describe("speaker-calibration fails closed", () => {
-  it("ended_at on a blind IST day (started the day before): 403, no window read", async () => {
+  it("ended_at on a formerly blind IST day (started the day before): 200, window read", async () => {
     mk(BR, `${dayBefore}T05:00:00Z`, `${BD}T05:00:00Z`);
-    expect((await callCal()).status).toBe(403);
-    expect(dataReads).toEqual([]);
+    expect((await callCal()).status).toBe(200);
+    expect(dataReads.some((q) => /room_diarize_window/.test(q))).toBe(true);
   });
   it("bench_session lookup DB error: 503 db and no window read", async () => {
     mk(BR, "2026-10-08T05:00:00Z");
@@ -87,23 +86,23 @@ describe("speaker-calibration fails closed", () => {
     expect((await callCal()).status).toBe(404);
     expect(dataReads).toEqual([]);
   });
-  it("window read excludes blind room-days in SQL (bound to BLIND_ROOM_DAYS), from the window's own room_day", async () => {
+  it("window read keeps the SQL exclusion shape, bound to the EMPTY live list (not the former pairs), from the window's own room_day", async () => {
     mk(BR, "2026-10-08T05:00:00Z");
     await callCal();
     const q = windowQueries[0]!;
     expect(q.text).toMatch(/JOIN room_day rd ON rd\.id = w\.room_day_id/);
     expect(q.text).toMatch(/NOT EXISTS \(SELECT 1 FROM unnest\(\?::date\[\], \?::text\[\]\) AS b\(d, r\) WHERE b\.d = rd\.ist_date AND b\.r = rd\.room_id\)/);
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
-    expect(q.values).toContainEqual(BLIND_ROOM_DAYS.map(([, r]) => r));
+    expect(q.values).not.toContainEqual(BLIND_ROOM_DAYS.map(([d]) => d));
+    expect(q.values.filter((x) => Array.isArray(x) && x.length === 0).length).toBeGreaterThanOrEqual(2);
   });
-  it("a window whose room_day is blind while the session dates are not: row excluded from the result", async () => {
+  it("a window whose room_day is a formerly blind pair while the session dates are not: row kept in the result", async () => {
     mk("room_other", "2026-10-08T05:00:00Z");
     windowRows = [
       { window_id: "w1", speakers_json: [], ist_date: BD, room_id: BR },
       { window_id: "w2", speakers_json: [], ist_date: "2026-10-08", room_id: BR },
     ];
     const body = await (await callCal()).json();
-    expect(body.windows_with_results).toBe(1);
+    expect(body.windows_with_results).toBe(2);
   });
 });
 
@@ -129,25 +128,23 @@ describe("bench manifest", () => {
     expect(await res.json()).toEqual({ ok: false, error: "db" });
     expect(dataReads).toEqual(["chunks"]);
   });
-  it("ended_at on a blind IST day (started the day before): 403, no chunk read", async () => {
+  it("ended_at on a formerly blind IST day (started the day before): 200, chunks and events read", async () => {
     mk(BR, `${dayBefore}T05:00:00Z`, `${BD}T05:00:00Z`);
-    expect((await callMan()).status).toBe(403);
-    expect(dataReads).toEqual([]);
+    expect((await callMan()).status).toBe(200);
+    expect(dataReads).toEqual(["chunks", "events"]);
   });
-  it("a chunk runs past ended_at onto a blind IST day: 403 and nothing served", async () => {
+  it("a chunk runs past ended_at onto a formerly blind IST day: served 200", async () => {
     mk(BR, `${dayBefore}T05:00:00Z`, `${dayBefore}T08:00:00Z`);
-    chunkRows = [{ started_at: `${dayBefore}T06:00:00Z` }, { started_at: `${BD}T05:00:00Z` }];
+    chunkRows = [{ started_at: `${dayBefore}T06:00:00Z`, ended_at: `${dayBefore}T06:10:00Z` }, { started_at: `${BD}T05:00:00Z`, ended_at: `${BD}T05:10:00Z` }];
     const res = await callMan();
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ ok: false, error: "blind_room_day" });
-    expect(dataReads).not.toContain("events");
+    expect(res.status).toBe(200);
+    expect(dataReads).toContain("events");
   });
-  it("blind session: 403 blind_room_day and no chunk or event read", async () => {
+  it("formerly blind session: 200, chunks and events read", async () => {
     mk(BR, `${BD}T05:00:00Z`);
     const res = await callMan();
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ ok: false, error: "blind_room_day" });
-    expect(dataReads).toEqual([]);
+    expect(res.status).toBe(200);
+    expect(dataReads).toEqual(["chunks", "events"]);
   });
   it("non-blind session: manifest as before", async () => {
     mk(BR, "2026-10-08T05:00:00Z");
@@ -155,16 +152,16 @@ describe("bench manifest", () => {
     expect(res.status).toBe(200);
     expect(dataReads).toEqual(["chunks", "events"]);
   });
-  it("a blind date in a different room is not blind", async () => {
+  it("a formerly blind date in a different room is served", async () => {
     mk("room_other", `${BD}T05:00:00Z`);
     expect((await callMan()).status).toBe(200);
   });
-  it("IST edge: 18:29Z on the day before is not blind, 18:31Z is", async () => {
+  it("IST edge: both 18:29Z and 18:31Z on the day before a formerly blind day are served", async () => {
     mk(BR, `${dayBefore}T18:29:00Z`);
     expect((await callMan()).status).toBe(200);
     dataReads.length = 0;
     mk(BR, `${dayBefore}T18:31:00Z`);
-    expect((await callMan()).status).toBe(403);
-    expect(dataReads).toEqual([]);
+    expect((await callMan()).status).toBe(200);
+    expect(dataReads).toEqual(["chunks", "events"]);
   });
 });

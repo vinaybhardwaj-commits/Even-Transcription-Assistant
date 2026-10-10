@@ -14,6 +14,7 @@ import { stitchKind } from "./stitch";
 import { routeTranscribeKind } from "./route-transcribe";
 import { roomWindowKind } from "./room-window";
 import { diarizeWindowKind } from "./diarize-window";
+import { nemotronIdentityKind } from "./nemotron-identity";
 import { emotionWindowKind } from "./emotion-window";
 import { jevEnglishKind } from "./jev-english";
 import { jevWindowKind } from "./jev-window";
@@ -24,7 +25,7 @@ import { rubricRunKind } from "./rubric-run";
 import { rubricBenchKind } from "./rubric-bench";
 import { STUB_KINDS } from "./stubs";
 
-export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
+export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, nemotronIdentityKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, sarvamTranscribeKind, sarvamTranslateKind, rubricRunKind, rubricBenchKind, ...STUB_KINDS];
 /**
  * K3-2: the registry REFUSES a kind that has not answered "does it read room data?", and one that does but has no held-out guard. Pure, exported so a test can feed it a bad kind. Thrown at load.
  */
