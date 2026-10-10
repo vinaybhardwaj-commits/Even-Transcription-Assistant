@@ -3,6 +3,9 @@
  * the sealed flag), what is skipped and counted, that no name is ever read, the absolute-time view of a stored result, the batch/consult argument parsers, and the cron route's auth. All ids are fake.
  */
 import { createHash } from "node:crypto";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const DOC = makeFakeClinician(2);
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +23,7 @@ import { GET, POST } from "@/app/api/cron/consult-index-sync/route";
 const UID = "73jf39ondtahkp3mf728infj0o";
 /** A row as the cutter writes it (field names measured on the box); the values are invented. */
 const row = (o: Record<string, unknown> = {}): Record<string, unknown> => ({
-  consult_uid: UID, ist_date: "2026-10-06", room_slug: "opd-7-y74w", room_id: "room_qyzghzaf", doctor_uid: "DOCTORUID1", doctor_name: "A Fake Name", window_id: 123,
+  consult_uid: UID, ist_date: "2026-10-06", room_slug: "opd-7-y74w", room_id: "room_qyzghzaf", doctor_uid: "DOCTORUID1", doctor_name: DOC.full_name, window_id: 123,
   t_open: "2026-10-06 10:34:24.848", t_close: "2026-10-06 10:34:52.081", quality: "unattributed", status: "cut", code_commit: "ec8fa64", signature: { doctor: "SIGSECRET" },
   flags: [], doctor_identified: false, span_start: "2026-10-06 10:33:24.848", span_end: "2026-10-06 10:34:53.662", span_end_epoch: 1791263093.662, minutes: 1.48, coverage: 1.0,
   bytes: { "consult.flac": 100, "timeline.json": 5 }, bytes_total: 105, voice_isolated: false, cut_at: "2026-10-09T02:14:48+0530",
@@ -59,7 +62,7 @@ describe("normalizeRow", () => {
       cut_version: "2026-10-09T02:14:48+0530", code_commit: "ec8fa64", sealed: false, doctor_uid: "DOCTORUID1", doctor_identified: false, voice_isolated: false, minutes: 1.48, bytes: 105, quality: "unattributed", coverage: 1,
     });
     const json = JSON.stringify(n.row);
-    expect(json).not.toContain("A Fake Name");
+    expect(json).not.toContain(DOC.full_name);
     expect(json).not.toContain("SIGSECRET");
     expect(Object.keys(n.row)).not.toContain("doctor_name");
     expect(Object.keys(n.row)).not.toContain("signature");

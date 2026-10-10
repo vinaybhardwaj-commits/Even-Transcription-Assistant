@@ -14,6 +14,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const DOC = makeFakeClinician(1);
 
 type Row = Record<string, any>;
 const H = vi.hoisted(() => ({
@@ -68,7 +71,7 @@ function indexRow(uid: string, o: Row = {}): Row {
   const end = T1 + Math.max(k, 0) * 600_000;
   const wall = (ms: number) => new Date(ms + 19_800_000).toISOString().replace("T", " ").replace("Z", "");
   return {
-    consult_uid: uid, ist_date: DAY, room_slug: SLUG, room_id: ROOM, doctor_uid: "DOCTORUID1", doctor_name: "Fake Doctor Name", window_id: 1, status: "cut", quality: "clean", code_commit: "abc1234",
+    consult_uid: uid, ist_date: DAY, room_slug: SLUG, room_id: ROOM, doctor_uid: "DOCTORUID1", doctor_name: DOC.full_name, window_id: 1, status: "cut", quality: "clean", code_commit: "abc1234",
     span_start: wall(end - 120_000), span_end: wall(end), span_end_epoch: end / 1000, minutes: 2, coverage: 1, bytes_total: 5000, voice_isolated: false, doctor_identified: true,
     cut_at: `2026-10-09T0${(cutSeq += 1) % 10}:00:00+0530`, r2: { status: "mirrored", bucket: "eta-audio", prefix: `consult-clips/${DAY}/${SLUG}/${uid}`, files: 4, at: "x" }, ...o,
   };
@@ -209,7 +212,7 @@ describe.skipIf(!HAVE)("the sync (the first run is the backfill)", () => {
     expect(rows.find((x) => x.consult_uid === UC)!.sealed).toBe(true);
     expect(rows.find((x) => x.consult_uid === UB)!.voice_isolated).toBe(true);
     // no name anywhere in the table
-    expect(JSON.stringify(rows)).not.toContain("Fake Doctor Name");
+    expect(JSON.stringify(rows)).not.toContain(DOC.full_name);
     const log = (await q<Row>`SELECT status, rows_read, rows_written, rows_skipped, skipped, manifest_rows FROM consult_index_sync ORDER BY id DESC LIMIT 1`)[0]!;
     expect(log).toMatchObject({ status: "ok", rows_read: 7, rows_written: 5, rows_skipped: 2, manifest_rows: 7 });
   });
@@ -509,7 +512,7 @@ describe.skipIf(!HAVE)("reading results and the index through the MCP", () => {
     const rows = out.rows as Row[];
     expect(rows.map((r) => r.t0_ms)).toEqual([...rows.map((r) => r.t0_ms)].sort((a, b) => a - b));
     expect(rows[0]).toMatchObject({ doctor_uid: "DOCTORUID1", doctor_uid_note: "cutter record; not identity", session_id: "bs_ci1" });
-    expect(JSON.stringify(out)).not.toMatch(/Fake Doctor Name|consult-clips|signature/);
+    expect(JSON.stringify(out)).not.toMatch(new RegExp(`${DOC.full_name}|consult-clips|signature`));
     expect(await tool({ action: "consult_clips", ist_date: DAY, room_slug: "another-room" })).toMatchObject({ ok: true, count: 0 });
     expect(await tool({ action: "consult_clips", ist_date: "2026-13-45" })).toEqual({ ok: false, error: "invalid_ist_date" });
     expect(await tool({ action: "consult_clips" })).toEqual({ ok: false, error: "invalid_ist_date" });
