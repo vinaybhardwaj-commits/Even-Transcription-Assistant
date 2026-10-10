@@ -149,8 +149,8 @@ describe("the sweeper (R2-2) — against a mocked database; the real SQL is in n
     const scan = calls.find((c) => /FROM bench_window w/.test(c.text))!.text;
     expect(scan).toMatch(/n\.status IN \('ok', 'empty'\)/);
     expect(scan).toMatch(/d\.state <> 'failed'/);
-    expect(scan).toMatch(/j\.status IN \('queued', 'running'\)/);
-    expect(scan).toMatch(/ORDER BY w\.start_ms ASC/);
+    expect(scan).toMatch(/j\.status IN \('failed', 'queued', 'running'\)/);
+    expect(scan).toMatch(/ORDER BY c\.start_ms ASC/);
   });
 
   it("the sweeper is code in lib/stt/diarize-job.ts WITHOUT any SQL of its own: it writes nothing and names no room table", () => {

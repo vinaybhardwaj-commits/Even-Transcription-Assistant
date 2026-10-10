@@ -94,7 +94,7 @@ export async function enqueueDiarizeWindows(
   result.n_blind_excluded = blind.length;
   const ids = await windowsToSweep(limit, blind);
   result.scanned = ids.length;
-  result.exhausted = await countSweepExhausted();
+  result.exhausted = await countSweepExhausted(blind);
   const { submitJob } = await import("@/lib/jobs/submit");
   for (const id of ids) {
     try {

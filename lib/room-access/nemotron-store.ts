@@ -326,34 +326,58 @@ export const SWEEP_MAX_FAILED_JOBS = 3;
 export const SWEEP_LIMIT = 20;
 
 /**
- * R2-2 — the windows the sweeper should re-drive: Nemotron has answered (`ok` / `empty`), the room diarize row is absent
- * or `failed`, no `diarize_window` job is queued or running for it, and fewer than SWEEP_MAX_FAILED_JOBS of its jobs have
- * FAILED (the job's own failure count, not room_diarize_window.attempts: a window whose job dies before it writes a row has
- * no attempts to count). Held-out windows are excluded before the LIMIT. Oldest window first.
+ * R2-2 / R3 — the windows the sweeper should re-drive: Nemotron has answered (`ok` / `empty`), the room diarize row is absent
+ * or `failed`, the window is not held out, no `diarize_window` job is queued or running for it, and fewer than SWEEP_MAX_FAILED_JOBS
+ * of its jobs have FAILED (the job's own failure count, not room_diarize_window.attempts: a window whose job dies before it writes a
+ * row has no attempts to count). Oldest window first.
+ *
+ * COST (R3). The candidates are MATERIALISED first; scribe_job is then read ONCE, grouped by window, over only the rows that can matter
+ * (status failed / queued / running — scribe_job_status_created_idx) and LEFT JOINed. The first version ran a correlated count(*) over
+ * scribe_job per candidate window: ~350 s per tick at 30k windows / 600k jobs. No migration.
  */
 export async function windowsToSweep(limit: number, blind: string[]): Promise<string[]> {
   const rows = (await sql`
-    SELECT w.id AS window_id
-      FROM bench_window w
-     WHERE EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
-       AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state <> 'failed')
-       AND NOT EXISTS (SELECT 1 FROM scribe_job j WHERE j.kind = 'diarize_window' AND j.args->>'window_id' = w.id AND j.status IN ('queued', 'running'))
-       AND (SELECT count(*) FROM scribe_job j WHERE j.kind = 'diarize_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') < ${SWEEP_MAX_FAILED_JOBS}::int
-       AND w.id <> ALL(${blind}::text[])
-     ORDER BY w.start_ms ASC
+    WITH cand AS MATERIALIZED (
+      SELECT w.id, w.start_ms
+        FROM bench_window w
+       WHERE EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
+         AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state <> 'failed')
+         AND w.id <> ALL(${blind}::text[])
+    ), jobs AS (
+      SELECT j.args->>'window_id' AS window_id,
+             count(*) FILTER (WHERE j.status = 'failed') AS failed,
+             bool_or(j.status IN ('queued', 'running')) AS open
+        FROM scribe_job j
+       WHERE j.kind = 'diarize_window' AND j.status IN ('failed', 'queued', 'running')
+       GROUP BY 1
+    )
+    SELECT c.id AS window_id
+      FROM cand c LEFT JOIN jobs j ON j.window_id = c.id
+     WHERE COALESCE(j.open, false) = false AND COALESCE(j.failed, 0) < ${SWEEP_MAX_FAILED_JOBS}::int
+     ORDER BY c.start_ms ASC
      LIMIT ${limit}::int
   `) as Array<{ window_id: string }>;
   return rows.map((r) => r.window_id);
 }
 
-/** Windows the sweeper has given up on: answered, no ok row, and SWEEP_MAX_FAILED_JOBS failed jobs. Counted on every tick so a stuck window is never silent. */
-export async function countSweepExhausted(): Promise<number> {
+/** Windows the sweeper has given up on: answered, no ok row, not held out, and SWEEP_MAX_FAILED_JOBS failed jobs. Counted on every tick so a stuck window is never silent. Same shape as windowsToSweep. */
+export async function countSweepExhausted(blind: string[]): Promise<number> {
   const rows = (await sql`
+    WITH cand AS MATERIALIZED (
+      SELECT w.id
+        FROM bench_window w
+       WHERE EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
+         AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state <> 'failed')
+         AND w.id <> ALL(${blind}::text[])
+    ), jobs AS (
+      SELECT j.args->>'window_id' AS window_id, count(*) AS failed
+        FROM scribe_job j
+       WHERE j.kind = 'diarize_window' AND j.status = 'failed'
+       GROUP BY 1
+    )
     SELECT count(*)::int AS n
-      FROM bench_window w
-     WHERE EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
-       AND NOT EXISTS (SELECT 1 FROM room_diarize_window d WHERE d.window_id = w.id AND d.state <> 'failed')
-       AND (SELECT count(*) FROM scribe_job j WHERE j.kind = 'diarize_window' AND j.args->>'window_id' = w.id AND j.status = 'failed') >= ${SWEEP_MAX_FAILED_JOBS}::int
+      FROM cand c JOIN jobs j ON j.window_id = c.id
+     WHERE j.failed >= ${SWEEP_MAX_FAILED_JOBS}::int
   `) as Array<{ n: number }>;
   return Number(rows[0]?.n ?? 0);
 }
