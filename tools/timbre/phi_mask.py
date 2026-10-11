@@ -73,9 +73,19 @@ _HOUSE = re.compile(
 _STREET = re.compile(
     r"(?i)\b\d{1,4}\s+(?:[A-Za-z]+\s+){0,3}(?:street|st\.?|road|rd\.?|nagar|colony|lane|marg)\b"
 )
-# A letter in Latin or in the four clinic scripts. Digits are not a name.
-_LETTER = r"[^\W\d_]"
-_NAME_TOK = rf"{_LETTER}(?:{_LETTER}|['.\-]){{0,40}}"
+# A letter in Latin or in the four clinic scripts, plus the vowel signs and
+# viramas in those blocks. Those marks are not `\w`, so a Kannada or Tamil
+# name would otherwise split in the middle and only the last consonant would
+# be eligible for a cue. Digits are not a name. A period is not part of a
+# token: it was gluing the previous word ("slept. Lakshmi-garu") into the name.
+_INDIC_MARK = (
+    r"\u0900-\u0903\u093A-\u094F\u0951-\u0957\u0962-\u0963"
+    r"\u0B82-\u0B83\u0BBE-\u0BCD\u0BD7"
+    r"\u0C00-\u0C04\u0C3E-\u0C56\u0C62-\u0C63"
+    r"\u0C81-\u0C84\u0CBC-\u0CCD\u0CD5-\u0CD6\u0CE2-\u0CE3"
+)
+_LETTER = rf"(?:[^\W\d_]|[{_INDIC_MARK}])"
+_NAME_TOK = rf"{_LETTER}(?:{_LETTER}|['\-]){{0,40}}"
 _NAME_GRP = rf"({_NAME_TOK}(?:\s+{_NAME_TOK}){{0,2}})"
 _HONORIFIC = re.compile(
     rf"(?i)\b(?:mr|mrs|ms|miss|shri|shrimati|smt|sri|thiru|thirumathi)\.?\s+{_NAME_GRP}"

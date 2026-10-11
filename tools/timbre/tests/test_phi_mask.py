@@ -75,9 +75,11 @@ def test_indic_digits_honorifics_and_native_phone_and_id():
     )
     masked = mask_phi(raw)
     assert "ರಮೇಶ" not in masked.text
+    assert "ೇಶ" not in masked.text
     assert "Suresh" not in masked.text
     assert "Lakshmi" not in masked.text
     assert "ரமேஷ்" not in masked.text
+    assert "ேஷ்" not in masked.text
     assert "ನೋವು" in masked.text
     assert "வலி" in masked.text
     assert "pain avare" in masked.text
