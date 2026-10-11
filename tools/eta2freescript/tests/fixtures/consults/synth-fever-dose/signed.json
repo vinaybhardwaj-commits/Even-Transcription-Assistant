@@ -1,0 +1,26 @@
+{
+ "medicines": [
+  {
+   "name": "Paracetamol 1000 mg",
+   "strength": "1000 mg",
+   "frequency": "TDS",
+   "duration": "3 days"
+  }
+ ],
+ "diagnoses": [
+  "Viral fever"
+ ],
+ "icd_codes": [
+  "B34.9"
+ ],
+ "investigations": [
+  "CBC"
+ ],
+ "comorbidities": [],
+ "advice": "Plenty of oral fluids, rest",
+ "follow_up": {
+  "type": "FOLLOW_UP_WITH_REPORTS",
+  "date": "2026-10-12",
+  "text": "Review with CBC"
+ }
+}

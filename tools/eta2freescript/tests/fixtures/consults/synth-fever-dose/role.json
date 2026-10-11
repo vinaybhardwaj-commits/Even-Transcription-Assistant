@@ -1,0 +1,98 @@
+{
+ "layer": "role",
+ "engine": "llm-roles",
+ "status": "ok",
+ "config_hash": "synthcfg01",
+ "window_id": "consult-synthetic",
+ "segments": [
+  {
+   "t0_ms": 1791174600300,
+   "t1_ms": 1791174604300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174605300,
+   "t1_ms": 1791174611300,
+   "speaker": "1",
+   "role": "patient"
+  },
+  {
+   "t0_ms": 1791174612300,
+   "t1_ms": 1791174617300,
+   "speaker": "1",
+   "role": "patient"
+  },
+  {
+   "t0_ms": 1791174618300,
+   "t1_ms": 1791174624300,
+   "speaker": "1",
+   "role": "patient"
+  },
+  {
+   "t0_ms": 1791174625300,
+   "t1_ms": 1791174629300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174630300,
+   "t1_ms": 1791174638300,
+   "speaker": "1",
+   "role": "patient"
+  },
+  {
+   "t0_ms": 1791174640300,
+   "t1_ms": 1791174653300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174655300,
+   "t1_ms": 1791174664300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174665300,
+   "t1_ms": 1791174671300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174672300,
+   "t1_ms": 1791174677300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174678300,
+   "t1_ms": 1791174684300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174685300,
+   "t1_ms": 1791174689300,
+   "speaker": "0",
+   "role": "doctor"
+  },
+  {
+   "t0_ms": 1791174690300,
+   "t1_ms": 1791174692300,
+   "speaker": "1",
+   "role": "patient"
+  }
+ ],
+ "extras": {
+  "map": {
+   "0": "doctor",
+   "1": "patient"
+  },
+  "attender_present": false,
+  "two_consults": {
+   "flag": false
+  },
+  "diar_partial": false
+ }
+}

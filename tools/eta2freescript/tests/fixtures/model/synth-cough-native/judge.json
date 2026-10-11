@@ -1,0 +1,97 @@
+{
+ "drugs_ref": [
+  {
+   "ref_idx": 0,
+   "name": "Ascoril LS syrup",
+   "said_aloud": "named",
+   "evidence_turns": [
+    5
+   ],
+   "matched_pred_idx": 0,
+   "matched_kept_k": null,
+   "match": "same_generic",
+   "dose": {
+    "strength": "match",
+    "frequency": "match",
+    "duration": "match"
+   },
+   "slot_k": null,
+   "slot_fields": {}
+  },
+  {
+   "ref_idx": 1,
+   "name": "Levocetirizine 5 mg",
+   "said_aloud": "regimen_only",
+   "evidence_turns": [
+    6
+   ],
+   "matched_pred_idx": null,
+   "matched_kept_k": null,
+   "match": "none",
+   "dose": {},
+   "slot_k": 0,
+   "slot_fields": {
+    "frequency": "match",
+    "duration": "match"
+   }
+  }
+ ],
+ "drugs_pred": [
+  {
+   "pred_idx": 0,
+   "label": "Ascoril 5 ml",
+   "matched_ref_idx": 0,
+   "tape_supported": "yes",
+   "order_status_ok": true,
+   "issue": null
+  }
+ ],
+ "comorbidities_pred": [],
+ "kept_out_review": [],
+ "completion_review": [
+  {
+   "c": 0,
+   "kind": "regimen_slot",
+   "verdict": "needed",
+   "why": "tablet unnamed"
+  }
+ ],
+ "diagnosis": {
+  "ref": "Acute pharyngitis",
+  "pred": "Acute pharyngitis",
+  "match": "exact",
+  "icd_ref": "J02.9",
+  "icd_pred": "J02.9",
+  "icd_match": "exact",
+  "dx_oversplit": false
+ },
+ "investigations_ref": [],
+ "investigations_pred": [],
+ "referrals_pred": [],
+ "advice_ref": [
+  {
+   "text": "gargles",
+   "said_aloud": "yes",
+   "matched": true
+  }
+ ],
+ "advice_pred": [
+  {
+   "text": "Gargle with warm water",
+   "matched_ref": true,
+   "tape_supported": "yes"
+  }
+ ],
+ "advice_too_long": false,
+ "follow_up": {
+  "ref": "2026-10-19",
+  "pred": "2026-10-19",
+  "match": "match",
+  "type_ok": true
+ },
+ "hallucinations": [],
+ "omissions_said_aloud": [],
+ "omissions_not_said_aloud": [],
+ "stage_b_additions": [],
+ "comment": "Synthetic fixture."
+}
