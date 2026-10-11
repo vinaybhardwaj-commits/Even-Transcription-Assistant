@@ -8,7 +8,7 @@ import pytest
 
 def test_names_are_unique_and_licensed():
     names = [s.name for s in SPECS]
-    assert len(names) == len(set(names)) == 8
+    assert len(names) == len(set(names)) == 9
     for spec in SPECS:
         assert spec.licence
         assert spec.commercial_note

@@ -69,6 +69,8 @@ def _smoke_audio():
 @pytest.mark.slow
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
 def test_extractor_runs_on_cpu(spec):
+    if spec.kind == "api":
+        pytest.skip("api extractors are covered by mocked HTTP tests")
     have = mem_available_gb()
     if have < spec.ram_gb:
         _record(spec, status="skipped", reason=f"ram {have:.2f} < {spec.ram_gb:.1f}")

@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 smoke-cache/
+clef-cache/
 *.parquet
 *.tmp
 text-cache/

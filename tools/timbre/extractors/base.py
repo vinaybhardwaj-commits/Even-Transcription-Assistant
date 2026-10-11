@@ -144,4 +144,8 @@ def build_extractor(name: str, device: str = "cpu") -> Extractor:
         from tools.timbre.extractors.wavlm_aniemore import WavLMAniemoreExtractor
 
         return WavLMAniemoreExtractor(spec, device)
+    if name == "clef_omni_valence.v1":
+        from tools.timbre.extractors.clef_omni import ClefOmniExtractor
+
+        return ClefOmniExtractor(spec, device)
     raise KeyError(name)
