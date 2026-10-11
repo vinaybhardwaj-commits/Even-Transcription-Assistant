@@ -3,16 +3,14 @@ import Foundation
 
 // Round-6: the chrome collector (Local State two keys, extension version dirs, pgrep) for the presence signal.
 
-/// Runs real `plutil` (so the fixture Local State files are parsed the way the daemon parses them) and fakes pgrep.
-/// Records every command so a test can prove nothing else was run or read.
+/// Fakes pgrep and refuses everything else (0.1.36 R2: no tool runs on a user path any more; Local State is parsed in process,
+/// as the room user). Records every command so a test can prove nothing else was run.
 private final class ChromeRunner: CommandRunner {
     var chromeRunning: CommandResult = CommandResult(status: 0, stdout: "123\n", stderr: "")
-    private let real = ProcessRunner()
     private(set) var argvs: [[String]] = []
     func run(_ exe: String, _ args: [String], timeout: TimeInterval) -> CommandResult {
         argvs.append([exe] + args)
         if exe == Tool.pgrep { return chromeRunning }
-        if exe == Tool.plutil { return real.run(exe, args, timeout: timeout) }
         return CommandResult(status: 127, stdout: "", stderr: "unmocked: \(exe)", timedOut: false, launchError: nil)
     }
 }
@@ -45,7 +43,7 @@ private func chromeRig(state fixture: String?, ext: [String: [String]] = [:], ru
     runner.chromeRunning = running ? CommandResult(status: 0, stdout: "123\n", stderr: "") : CommandResult(status: 1, stdout: "", stderr: "")
     let clock = FakeClock(Date(timeIntervalSince1970: 1_790_000_000))
     var cfg = Config(machine: "m"); cfg.consoleUser = "kiosk"
-    let ctx = Context(config: cfg, runner: runner, clock: clock, sleeper: RecordingSleeper(), state: MemoryState(), homeOverride: home)
+    let ctx = Context(config: cfg, runner: runner, clock: clock, sleeper: RecordingSleeper(), state: MemoryState(), files: UnprivilegedUserFiles(), homeOverride: home)
     return ChromeRig(home: home, runner: runner, collector: ChromeCollector(ctx: ctx), clock: clock)
 }
 
@@ -63,21 +61,17 @@ func runR6Tests() {
         checkEq(p["presence_ok"] as? Bool, true)
     }
 
-    test("R6 chrome: reads only the two Local State keys, pgrep and a directory listing; nothing else") {
+    test("R6 chrome: reads only the two Local State keys, in process; pgrep is the only command that runs") {
         let r = chromeRig(state: "chrome_localstate_default.json", ext: ["Default": ["1.0_0"]])
         _ = r.collector.poll()
-        let plutil = r.runner.argvs.filter { $0[0] == Tool.plutil }
-        checkEq(plutil.count, 2)
-        checkEq(Set(plutil.map { $0[2] }), ["profile.last_used", "profile.last_active_profiles"])
-        check(plutil.allSatisfy { $0[1] == "-extract" && $0[0] == Tool.plutil && $0.last == r.dataDir + "/Local State" })
         for a in r.runner.argvs {
-            check(a[0] == Tool.plutil || a[0] == Tool.pgrep, "only plutil and pgrep run: \(a)")
+            check(a[0] == Tool.pgrep, "only pgrep runs; no tool is pointed at a user's file: \(a)")
             check(!a.joined(separator: " ").contains("Preferences") && !a.joined(separator: " ").contains("Cookies")
-                  && !a.joined(separator: " ").contains("Login Data"))
+                  && !a.joined(separator: " ").contains("Login Data") && !a.joined(separator: " ").contains("Local State"))
         }
         let pg = r.runner.argvs.first { $0[0] == Tool.pgrep }!
         checkEq(pg, [Tool.pgrep, "-x", "-u", "kiosk", "Google Chrome"])
-        check(!Tool.plutil.isEmpty && Tool.plutil == "/usr/bin/plutil")
+        check(!Tool.all.contains("/usr/bin/plutil"), "plutil is not even on the tool list any more")
     }
 
     test("R6 chrome: Guest Profile as last_used -> guest, presence_ok false, alert reason guest on the first flip") {
@@ -207,7 +201,7 @@ func runR6Tests() {
     }
 
     test("R6 chrome: no console user -> no sample, no events, a note") {
-        let ctx = Context(config: Config(machine: "m"), runner: FakeRunner(), clock: FakeClock(Date()), sleeper: RecordingSleeper(), state: MemoryState())
+        let ctx = Context(config: Config(machine: "m"), runner: FakeRunner(), clock: FakeClock(Date()), sleeper: RecordingSleeper(), state: MemoryState(), files: UnprivilegedUserFiles())
         let fr = ctx.runner as! FakeRunner
         fr.on("/usr/bin/stat", stdout: "root\n")
         let res = ChromeCollector(ctx: ctx).poll()

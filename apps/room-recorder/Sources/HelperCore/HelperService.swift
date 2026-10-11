@@ -1,5 +1,6 @@
 import FleetCore
 import Foundation
+import KioskHealthCore
 
 /// The seam #40 plugs the outbound long-poll into. The helper starts it after the XPC listener is
 /// up and stops it on shutdown. This slice ships the null implementation: the helper opens no
@@ -109,7 +110,7 @@ public struct LaunchLedger: Codable, Equatable, Sendable {
   public mutating func recordStable() { unstableLaunches = 0 }
 
   public static func load(from url: URL) -> LaunchLedger {
-    guard let data = try? Data(contentsOf: url),
+    guard let data = HardenedFile.readWhole(url.path, maxBytes: 65_536),
       let ledger = try? JSONDecoder().decode(LaunchLedger.self, from: data)
     else { return LaunchLedger() }
     return ledger

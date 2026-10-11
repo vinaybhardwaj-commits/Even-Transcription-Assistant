@@ -190,17 +190,17 @@ func runDriftConfigRecorderTests() {
         let d = tmpDir("tail").path
         let f = d + "/t.log"
         write(f, "a one\nb error two\n")
-        let r1 = Tail.read(path: f, pos: nil)!
+        let r1 = Tail.read(io: tailIO, path: f, pos: nil)!
         checkEq(r1.lines, [], "history is not shipped on first sight")
-        let r2 = Tail.read(path: f, pos: r1.pos)!
+        let r2 = Tail.read(io: tailIO, path: f, pos: r1.pos)!
         checkEq(r2.lines, [])
         let h = FileHandle(forWritingAtPath: f)!
         _ = try? h.seekToEnd(); try? h.write(contentsOf: "c three\nd par".data(using: .utf8)!); try? h.close()
-        let r3 = Tail.read(path: f, pos: r2.pos)!
+        let r3 = Tail.read(io: tailIO, path: f, pos: r2.pos)!
         checkEq(r3.lines, ["c three"], "half-written line not consumed")
         let h2 = FileHandle(forWritingAtPath: f)!
         _ = try? h2.seekToEnd(); try? h2.write(contentsOf: "tial\n".data(using: .utf8)!); try? h2.close()
-        checkEq(Tail.read(path: f, pos: r3.pos)!.lines, ["d partial"])
+        checkEq(Tail.read(io: tailIO, path: f, pos: r3.pos)!.lines, ["d partial"])
     }
 
     test("tail: rotation and truncation restart from zero, an old file is skipped on first sight") {
@@ -208,18 +208,18 @@ func runDriftConfigRecorderTests() {
         let f = d + "/t.log"
         write(f, "old1\nold2\n")
         let now = Date()
-        let r1 = Tail.read(path: f, pos: nil)!
+        let r1 = Tail.read(io: tailIO, path: f, pos: nil)!
         try? FileManager.default.removeItem(atPath: f)
         write(f, "new1\n")
-        let r2 = Tail.read(path: f, pos: r1.pos)!
+        let r2 = Tail.read(io: tailIO, path: f, pos: r1.pos)!
         checkEq(r2.lines, ["new1"], "rotated (new inode)")
         write(f, "x\n")   // truncate in place (same inode, smaller)
-        let r3 = Tail.read(path: f, pos: TailPos(inode: r2.pos.inode, offset: 9999))!
+        let r3 = Tail.read(io: tailIO, path: f, pos: TailPos(inode: r2.pos.inode, offset: 9999))!
         checkEq(r3.lines, ["x"])
         let stale = d + "/stale.log"
         write(stale, "ancient error\n")
         setMTime(stale, now.addingTimeInterval(-3 * 86400))
-        checkEq(Tail.read(path: stale, pos: nil)!.lines, [])
+        checkEq(Tail.read(io: tailIO, path: stale, pos: nil)!.lines, [])
     }
 
     test("recorder log filter and 200-lines-per-minute limiter") {

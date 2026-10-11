@@ -33,7 +33,7 @@ private func daemonStart(_ rig: R9Rig, clock: FakeClock? = nil) -> (RecorderLogC
     let c = clock ?? FakeClock(Date(timeIntervalSince1970: 1_790_000_000))
     var cfg = Config(machine: "m"); cfg.consoleUser = "kiosk"
     let ctx = Context(config: cfg, runner: FakeRunner(), clock: c, sleeper: RecordingSleeper(),
-                      state: FileState(url: rig.stateURL), homeOverride: rig.home)
+                      state: FileState(url: rig.stateURL), files: UnprivilegedUserFiles(), homeOverride: rig.home)
     return (RecorderLogCollector(ctx: ctx), c)
 }
 

@@ -21,26 +21,24 @@ enum Tail {
     ///
     /// Note for readers of the audio events: ECHO's `audio.error` hal_error lines come from "Google Chrome Helper
     /// AppleUSBHostUserClient", not from the recorder. They are NOT filtered here (decision deferred).
-    static func read(path: String, pos: TailPos?, newFileSince: Date? = nil, maxBytes: Int = 256 * 1024) -> (lines: [String], pos: TailPos)? {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value,
-              let ino = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value else { return nil }
+    static func read(io: UserIO, path: String, pos: TailPos?, newFileSince: Date? = nil, maxBytes: Int = 256 * 1024) -> (lines: [String], pos: TailPos)? {
+        // A plain file with one link, looked at as the room user: a symlink, a hard link or a FIFO planted at a log path reads as nothing.
+        guard let info = io.info(path), info.isRegular, info.nlink == 1 else { return nil }
+        let size = info.size, ino = info.inode
         var offset: UInt64
         if let p = pos, p.inode == ino, p.offset <= size {
             offset = p.offset
         } else if pos != nil {
             offset = 0   // rotated or truncated: start over
-        } else if let since = newFileSince, let born = attrs[.creationDate] as? Date, born > since {
+        } else if let since = newFileSince, let born = info.created, born > since {
             offset = 0   // created after we started watching: every line in it is new
         } else {
             return ([], TailPos(inode: ino, offset: size))   // first sight: tail -n 0
         }
         guard size > offset else { return ([], TailPos(inode: ino, offset: size)) }
-        guard let h = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { try? h.close() }
-        do { try h.seek(toOffset: offset) } catch { return nil }
         let want = Int(min(UInt64(maxBytes), size - offset))
-        guard let data = try? h.read(upToCount: want), !data.isEmpty else { return ([], TailPos(inode: ino, offset: offset)) }
+        guard let data = io.readRange(path, offset: offset, maxBytes: want) else { return nil }
+        guard !data.isEmpty else { return ([], TailPos(inode: ino, offset: offset)) }
         // Consume only up to the last newline so a half-written line is read next time.
         guard let lastNL = data.lastIndex(of: 0x0A) else {
             // No newline in a full-size chunk: consume it all to avoid getting stuck on a giant line.
@@ -145,21 +143,20 @@ final class RecorderLogCollector {
     init(ctx: Context) { self.ctx = ctx }
 
     /// launchd.log plus tapewriter.log in the newest few capture sessions.
-    func discoverLogs(recorderDir: String) -> [String] {
-        let fm = FileManager.default
+    func discoverLogs(io: UserIO, recorderDir: String) -> [String] {
         var out: [String] = []
         let launchd = recorderDir + "/launchd.log"
-        if fm.fileExists(atPath: launchd) { out.append(launchd) }
+        if io.isPlainFile(launchd) { out.append(launchd) }
         let captures = recorderDir + "/captures"
-        let sessions = ((try? fm.contentsOfDirectory(atPath: captures)) ?? [])
+        let sessions = (io.entries(captures) ?? [])
             .map { captures + "/" + $0 }
-            .compactMap { p -> (String, Date)? in FS.mtime(p).map { (p, $0) } }
+            .compactMap { p -> (String, Date)? in io.info(p).flatMap { $0.isDirectory ? ($0.mtime) : nil }.map { (p, $0) } }
             .sorted { $0.1 > $1.1 }
             .prefix(5)
         for (s, _) in sessions {
-            for seg in (try? fm.contentsOfDirectory(atPath: s)) ?? [] {
+            for seg in io.entries(s) ?? [] {
                 let tw = s + "/" + seg + "/tapewriter.log"
-                if fm.fileExists(atPath: tw) { out.append(tw) }
+                if io.isPlainFile(tw) { out.append(tw) }
             }
         }
         return out
@@ -167,7 +164,7 @@ final class RecorderLogCollector {
 
     func poll() -> CollectorResult {
         var res = CollectorResult()
-        guard let dir = ctx.recorderDir(), FileManager.default.fileExists(atPath: dir) else {
+        guard let io = ctx.userIO(), let dir = ctx.recorderDir(), io.isDirectory(dir) else {
             res.notes.append("recorder dir not found (no console user or recorder not installed)")
             return res
         }
@@ -178,9 +175,9 @@ final class RecorderLogCollector {
         if firstPollAt == nil { firstPollAt = now }
         let collapsed = collapser.closeExpired(now: now)
         var tails = (ctx.state.get(Self.tailsKey) as? [String: [NSNumber]]) ?? [:]
-        for path in discoverLogs(recorderDir: dir) {
+        for path in discoverLogs(io: io, recorderDir: dir) {
             let pos = tails[path].flatMap { $0.count == 2 ? TailPos(inode: $0[0].uint64Value, offset: $0[1].uint64Value) : nil }
-            guard let (lines, newPos) = Tail.read(path: path, pos: pos, newFileSince: newFileSince) else { continue }
+            guard let (lines, newPos) = Tail.read(io: io, path: path, pos: pos, newFileSince: newFileSince) else { continue }
             tails[path] = [NSNumber(value: newPos.inode), NSNumber(value: newPos.offset)]
             let rel = path.hasPrefix(dir + "/") ? String(path.dropFirst(dir.count + 1)) : path
             for l in lines where RecorderLogFilter.matches(l) {
@@ -199,7 +196,7 @@ final class RecorderLogCollector {
                                                           "redaction": Self.redaction]))
         }
         // Forget tails for files that no longer exist so the state file cannot grow without bound.
-        tails = tails.filter { FileManager.default.fileExists(atPath: $0.key) }
+        tails = tails.filter { io.info($0.key) != nil }
         ctx.state.set(Self.tailsKey, tails)
         let dropped = limiter.takeDropped()
         if dropped > 0 {
@@ -229,7 +226,8 @@ final class RecorderLogCollector {
 
     /// status.json: emit when the fingerprint changes, and at least every `statusRefresh` seconds.
     func statusEvents(dir: String, force: Bool = false) -> [DraftEvent] {
-        guard let data = FileManager.default.contents(atPath: dir + "/status.json") else { return [] }
+        // status.json is the room user's file: read as that user, plain file with one link, at most 64 KB.
+        guard let io = ctx.userIO(), let data = io.readWhole(dir + "/status.json", maxBytes: 65_536) else { return [] }
         let st = RecorderStatusParser.parse(data)
         let fp = Self.statusFingerprint(st)
         let now = ctx.clock.now()
@@ -244,7 +242,7 @@ final class RecorderLogCollector {
             "session_open": RecorderStatusParser.sessionOpen(st).rawValue,
         ]
         if let mm = st.micMode { p["mic_mode"] = mm }   // absent (not null) when status.json has none
-        if let m = FS.mtime(dir + "/status.json") { p["file_mtime"] = TimeFmt.iso(m) }
+        if let m = io.mtime(dir + "/status.json") { p["file_mtime"] = TimeFmt.iso(m) }
         return [DraftEvent("recorder.status", p)]
     }
 }

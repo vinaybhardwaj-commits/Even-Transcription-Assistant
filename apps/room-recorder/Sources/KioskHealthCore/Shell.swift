@@ -93,10 +93,9 @@ enum Tool {
     static let defaults = "/usr/bin/defaults"
     static let stat = "/usr/bin/stat"
     static let ps = "/bin/ps"
-    static let plutil = "/usr/bin/plutil"
     /// The whole list. The standalone daemon also had caffeinate, killall and shutdown for its DarkWake watchdog, audio
     /// ladder and reboot rung; those actions are NOT part of this port, and neither are their tools.
-    static let all: Set<String> = [pmset, ioreg, systemProfiler, log, pgrep, defaults, stat, ps, plutil]
+    static let all: Set<String> = [pmset, ioreg, systemProfiler, log, pgrep, defaults, stat, ps]
 }
 
 /// Path of the running binary, so helper sub-commands can be spawned in a crash-isolated child.

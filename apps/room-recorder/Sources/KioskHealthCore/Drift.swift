@@ -105,6 +105,8 @@ final class DriftCollector {
     private let ctx: Context
     /// The drift set as of the previous check; nil until the first one.
     private var last: [String: DriftItem]?
+    /// What the recorder app's Info.plist said when somebody was last logged in to read it as.
+    private var lastApp: (found: Bool, version: String?)?
     static let summaryDateKey = "drift.summary_date"
     static let summaryMinute = 9 * 60   // 09:00 IST
     init(ctx: Context) { self.ctx = ctx }
@@ -132,16 +134,24 @@ final class DriftCollector {
         let al = ctx.runner.run(Tool.defaults, ["read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"], timeout: 5)
         if al.ok { st.autologinUser = al.stdout.trimmed }
 
-        for path in candidateAppPaths() {
-            let plist = path + "/Contents/Info.plist"
-            if let data = FileManager.default.contents(atPath: plist) {
-                st.recorderAppFound = true
-                if let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
-                    st.recorderVersion = obj["CFBundleShortVersionString"] as? String
+        // The bundle is user-owned since 0.1.33, so its Info.plist is read as the room user (plain file, one link, 256 KB).
+        // With nobody logged in there is no user to read as: the last answer stands, and nothing is read as root.
+        if let io = ctx.userIO() {
+            lastApp = (false, nil)
+            for path in candidateAppPaths() {
+                if let data = io.readWhole(path + "/Contents/Info.plist", maxBytes: 262_144) {
+                    var version: String?
+                    if let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
+                        version = obj["CFBundleShortVersionString"] as? String
+                    }
+                    lastApp = (true, version)
+                    break
                 }
-                break
             }
+        } else {
+            notes.append("recorder app not read: no console user")
         }
+        if let app = lastApp { st.recorderAppFound = app.found; st.recorderVersion = app.version }
 
         var policyPaths = ["/Library/Managed Preferences/com.google.Chrome.plist"]
         if let u = ctx.consoleUser() { policyPaths.append("/Library/Managed Preferences/\(u)/com.google.Chrome.plist") }

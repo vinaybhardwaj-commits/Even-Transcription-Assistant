@@ -1,6 +1,7 @@
 import Darwin
 import FleetCore
 import Foundation
+import KioskHealthCore
 
 /// #44 (TS-H7): the helper keeps the Chrome enterprise policy for the Pulse Presence extension in place.
 ///
@@ -141,9 +142,8 @@ public struct SystemChromePolicyFiles: ChromePolicyFiles {
   public init(setOwner: Bool = true) { self.setOwner = setOwner }
 
   public func read(_ path: String) -> Data? {
-    var info = stat()
-    guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= 4 * 1024 * 1024 else { return nil }
-    return FileManager.default.contents(atPath: path)
+    // Plain file, one link, no symlink: the same reader every root read of the helper uses (0.1.36 R2).
+    HardenedFile.readWhole(path, maxBytes: 4 * 1024 * 1024)
   }
 
   public func writeAtomic(_ path: String, data: Data, mode: UInt16) -> Bool {

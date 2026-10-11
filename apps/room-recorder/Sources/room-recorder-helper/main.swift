@@ -38,7 +38,7 @@ let monitor = HelperMonitor(
 var kiosk: KioskHealthEngine?
 if !safeMode {
   do {
-    kiosk = try KioskHealthEngine(stateDir: KioskHealthHost.stateDirectory, logPath: KioskHealthHost.logPath)
+    kiosk = try KioskHealthEngine(stateDir: KioskHealthHost.stateDirectory, logPath: KioskHealthHost.logPath, files: HelperUserFiles())
   } catch {
     log("kiosk-health engine not started: \(error)")
   }

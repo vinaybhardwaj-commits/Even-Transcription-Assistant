@@ -181,7 +181,7 @@ final class FakeKioskSink: KioskSinkPoster, @unchecked Sendable {
   init() throws {
     engine = try KioskHealthEngine(
       stateDir: dir.appendingPathComponent("spool").path, logPath: dir.appendingPathComponent("k.log").path,
-      legacyConfigPath: dir.appendingPathComponent("none.json").path)
+      files: UnprivilegedUserFiles(), legacyConfigPath: dir.appendingPathComponent("none.json").path)
     delegate = HelperListenerDelegate(service: HelperService(safeMode: false, kiosk: engine), requirement: Loopback.ownRequirement)
     listener.delegate = delegate
     listener.resume()

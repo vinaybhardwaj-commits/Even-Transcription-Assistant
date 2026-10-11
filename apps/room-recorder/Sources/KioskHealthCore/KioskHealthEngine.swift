@@ -58,7 +58,11 @@ public final class KioskHealthEngine: @unchecked Sendable {
     private var started = false
 
     /// Production: the identity comes from the standalone daemon's config when there is one, else the host name.
-    public convenience init(stateDir: String, logPath: String, legacyConfigPath: String = KioskHealthEngine.legacyConfigPath) throws {
+    /// `files` is how every path under a user's home is read. Production passes the privilege-dropped reader
+    /// (`HelperUserFiles`); there is no default, and `UnprivilegedUserFiles` refuses to run as root.
+    public convenience init(
+        stateDir: String, logPath: String, files: UserFileAccess, legacyConfigPath: String = KioskHealthEngine.legacyConfigPath
+    ) throws {
         var config = Config(machine: Config.defaultMachine())
         let legacy = Config.load(path: legacyConfigPath)
         if FileManager.default.fileExists(atPath: legacyConfigPath) {
@@ -76,10 +80,10 @@ public final class KioskHealthEngine: @unchecked Sendable {
         config.token = nil
         config.spoolDir = stateDir
         config.logPath = logPath
-        try self.init(config: config, runner: ProcessRunner(), clock: SystemClock())
+        try self.init(config: config, runner: ProcessRunner(), clock: SystemClock(), files: files)
     }
 
-    init(config: Config, runner: CommandRunner, clock: Clock) throws {
+    init(config: Config, runner: CommandRunner, clock: Clock, files: UserFileAccess) throws {
         self.config = config
         log = OwnLog(path: config.logPath)
         guard let lock = InstanceLock.acquire(dir: config.spoolDir) else {
@@ -92,7 +96,7 @@ public final class KioskHealthEngine: @unchecked Sendable {
         spool = try Spool(dir: dir, capBytes: Spool.defaultCap(post: config.post),
                           protectedCeilingBytes: Spool.defaultProtectedCeiling(post: config.post))
         let state = FileState(url: dir.appendingPathComponent("state.json"))
-        ctx = Context(config: config, runner: runner, state: state)
+        ctx = Context(config: config, runner: runner, state: state, files: files)
 
         let boot = currentBootID()
         let seqStore = SeqStore(dir: dir)

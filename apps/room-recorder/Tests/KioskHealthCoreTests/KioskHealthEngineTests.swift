@@ -27,7 +27,7 @@ private func events(_ batch: KioskHealthEngine.Batch?) -> [[String: Any]] {
     let clock = FakeClock(Date(timeIntervalSince1970: 1_790_000_000))
 
     func engine(_ dir: URL, source: String = "helper") throws -> KioskHealthEngine {
-        try KioskHealthEngine(config: engineConfig(source: source, dir: dir), runner: FakeRunner(), clock: clock)
+        try KioskHealthEngine(config: engineConfig(source: source, dir: dir), runner: FakeRunner(), clock: clock, files: UnprivilegedUserFiles())
     }
 
     // ─── the envelope ──────────────────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ private func events(_ batch: KioskHealthEngine.Batch?) -> [[String: Any]] {
              "token":"SECRET-LEGACY-TOKEN","post":true,"baseline":{"sleep":0,"womp":1},
              "actions":{"darkwake_watchdog":true,"audio_ladder":true,"reboot_rung":true},"console_user":"kiosk"}
             """.utf8).write(to: legacy)
-        let e = try KioskHealthEngine(stateDir: dir.appendingPathComponent("spool").path, logPath: dir.appendingPathComponent("l.log").path, legacyConfigPath: legacy.path)
+        let e = try KioskHealthEngine(stateDir: dir.appendingPathComponent("spool").path, logPath: dir.appendingPathComponent("l.log").path, files: UnprivilegedUserFiles(), legacyConfigPath: legacy.path)
         let c = e.config
         #expect(c.machine == "OPD-6.local" && c.roomID == "room-6" && c.installID == "inst_6" && c.consoleUser == "kiosk")
         #expect(c.source == "helper" && c.token == nil, "the old token is not carried over")
@@ -166,7 +166,7 @@ private func events(_ batch: KioskHealthEngine.Batch?) -> [[String: Any]] {
 
     @Test func withoutALegacyConfigTheHostNameIsTheMachine() throws {
         let dir = tmpDir("eng-nolegacy")
-        let e = try KioskHealthEngine(stateDir: dir.appendingPathComponent("s").path, logPath: dir.appendingPathComponent("l").path, legacyConfigPath: dir.appendingPathComponent("absent.json").path)
+        let e = try KioskHealthEngine(stateDir: dir.appendingPathComponent("s").path, logPath: dir.appendingPathComponent("l").path, files: UnprivilegedUserFiles(), legacyConfigPath: dir.appendingPathComponent("absent.json").path)
         #expect(e.config.machine == Config.defaultMachine() && e.config.source == "helper")
     }
 
@@ -185,7 +185,7 @@ private func events(_ batch: KioskHealthEngine.Batch?) -> [[String: Any]] {
             let r = runner.run(tool, ["-n"], timeout: 2)
             #expect(r.launchError?.contains("tool not allowed") == true, "\(tool) must not run")
         }
-        #expect(Tool.all == ["/usr/bin/pmset", "/usr/sbin/ioreg", "/usr/sbin/system_profiler", "/usr/bin/log", "/usr/bin/pgrep", "/usr/bin/defaults", "/usr/bin/stat", "/bin/ps", "/usr/bin/plutil"])
+        #expect(Tool.all == ["/usr/bin/pmset", "/usr/sbin/ioreg", "/usr/sbin/system_profiler", "/usr/bin/log", "/usr/bin/pgrep", "/usr/bin/defaults", "/usr/bin/stat", "/bin/ps"])
     }
 
     @Test func noActionNoNetworkAndNoCoreAudioOrCoreGraphicsAnywhereInTheSources() throws {

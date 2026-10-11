@@ -5,12 +5,10 @@ import Foundation
 // newest mtime under <profile>/Local Extension Settings/<id>/ within 10 min if HID idle < 120 s. Stat and listing only.
 
 private final class WRunner: CommandRunner {
-    private let real = ProcessRunner()
     private(set) var argvs: [[String]] = []
     func run(_ exe: String, _ args: [String], timeout: TimeInterval) -> CommandResult {
         argvs.append([exe] + args)
         if exe == Tool.pgrep { return CommandResult(status: 0, stdout: "1\n", stderr: "") }
-        if exe == Tool.plutil { return real.run(exe, args, timeout: timeout) }
         return CommandResult(status: 127, stdout: "", stderr: "unmocked: \(exe)", timedOut: false, launchError: nil)
     }
 }
@@ -50,7 +48,7 @@ private func wrig(state: String = "chrome_localstate_default.json", profiles: [S
     }
     let runner = WRunner()
     var cfg = Config(machine: "m"); cfg.consoleUser = "kiosk"
-    let ctx = Context(config: cfg, runner: runner, clock: clock, sleeper: RecordingSleeper(), state: MemoryState(), homeOverride: home)
+    let ctx = Context(config: cfg, runner: runner, clock: clock, sleeper: RecordingSleeper(), state: MemoryState(), files: UnprivilegedUserFiles(), homeOverride: home)
     let c = ChromeCollector(ctx: ctx)
     c.hidIdle = { idle }
     return WRig(home: home, collector: c, clock: clock, runner: runner)
@@ -142,14 +140,12 @@ func runR11bTests() {
         checkEq(p["presence_ok"] as? Bool, false, "still no_profile: the older rule is unchanged")
     }
 
-    test("R11b stat and listing only: unreadable (mode 000) worker files do not matter, and only plutil/pgrep ever run") {
+    test("R11b stat and listing only: unreadable (mode 000) worker files do not matter, and only pgrep ever runs") {
         let r = wrig(workerAges: ["Default": [15]], idle: 4)   // wrig makes every worker file mode 000
         let f = "\(r.dataDir)/Default/\(ChromeProbe.workerStorageDir)/\(ChromeProbe.extensionID)/000000.log"
         check(FileHandle(forReadingAtPath: f) == nil, "fixture file really is unreadable")
         checkEq(r.collector.sample().0?.failure, nil)
-        for a in r.runner.argvs { check(a[0] == Tool.plutil || a[0] == Tool.pgrep, "\(a)") }
-        let plutil = r.runner.argvs.filter { $0[0] == Tool.plutil }
-        checkEq(Set(plutil.map { $0[2] }), ["profile.last_used", "profile.last_active_profiles"])
+        for a in r.runner.argvs { check(a[0] == Tool.pgrep, "\(a)") }
     }
 
     test("R11b chrome.profile is not re-emitted every minute just because the age and idle seconds tick") {

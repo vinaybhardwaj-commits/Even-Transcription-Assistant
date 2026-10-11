@@ -95,13 +95,6 @@ final class ChromeCollector {
 
     init(ctx: Context) { self.ctx = ctx }
 
-    private func extract(_ key: String, format: String, file: String) -> String {
-        let r = ctx.runner.run(Tool.plutil, ["-extract", key, format, "-o", "-", file], timeout: 10)
-        guard r.ok else { return "" }
-        let t = r.stdout.trimmed
-        return ChromeProbe.isNullText(t) ? "" : t
-    }
-
     /// Chrome running for the console user: 0 = yes, 1 = no, anything else (launch failure, timeout) = unknown.
     private func chromeRunning(user: String) -> Bool? {
         let r = ctx.runner.run(Tool.pgrep, ["-x", "-u", user, "Google Chrome"], timeout: 5)
@@ -111,62 +104,78 @@ final class ChromeCollector {
         return nil
     }
 
-    private func versions(dataDir: String, profile: String) -> [String] {
+    private func versions(io: UserIO, dataDir: String, profile: String) -> [String] {
         let dir = "\(dataDir)/\(profile)/Extensions/\(ChromeProbe.extensionID)"
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         var out: [String] = []
-        for n in names where !n.hasPrefix(".") {
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: "\(dir)/\(n)", isDirectory: &isDir), isDir.boolValue { out.append(n) }
+        for n in io.entries(dir) ?? [] where !n.hasPrefix(".") {
+            if io.isDirectory("\(dir)/\(n)") { out.append(n) }
         }
         return out.sorted()
     }
 
-    /// Newest mtime of <profile>/Local Extension Settings/<id>/ and of the entries listed in it. Directory listing and stat only:
-    /// no file is opened, no content is read, and nothing else in the profile is touched.
-    private func workerMtime(dataDir: String, profile: String) -> Date? {
+    /// Newest mtime of <profile>/Local Extension Settings/<id>/ and of the entries listed in it. Listing and lstat only, as the
+    /// room user: no file is opened, no content is read, and nothing else in the profile is touched.
+    private func workerMtime(io: UserIO, dataDir: String, profile: String) -> Date? {
         let dir = "\(dataDir)/\(profile)/\(ChromeProbe.workerStorageDir)/\(ChromeProbe.extensionID)"
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else { return nil }
-        var newest = FS.mtime(dir) ?? .distantPast
-        for n in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] {
-            if let m = FS.mtime("\(dir)/\(n)"), m > newest { newest = m }
+        guard let top = io.info(dir), top.isDirectory else { return nil }
+        var newest = top.mtime
+        for n in io.entries(dir) ?? [] {
+            if let m = io.mtime("\(dir)/\(n)"), m > newest { newest = m }
         }
         return newest
     }
 
     /// Profile directories present in the Chrome user-data dir (names only), for the case where no active profile is known.
-    private func allProfileDirs(dataDir: String) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: dataDir)) ?? [])
+    private func allProfileDirs(io: UserIO, dataDir: String) -> [String] {
+        (io.entries(dataDir) ?? [])
             .filter { $0 == "Default" || $0.hasPrefix("Profile ") }
             .filter { ChromeProbe.safeProfile($0) }
             .sorted()
     }
 
+    /// Local State is big, but only two keys of it are used. It is read as the room user (plain file, one link, 4 MiB at most)
+    /// and parsed here; no tool runs on it.
+    static let localStateMaxBytes = 4 * 1024 * 1024
+
+    static func localStateKeys(_ data: Data) -> (lastUsed: String?, active: [String])? {
+        guard let root = J.parse(data: data) as? [String: Any] else { return nil }
+        guard let profile = root["profile"] as? [String: Any] else { return (nil, []) }
+        var lastUsed: String?
+        if let s = profile["last_used"] as? String, !ChromeProbe.isNullText(s) { lastUsed = s }
+        var active: [String] = []
+        if let arr = profile["last_active_profiles"] as? [Any] {
+            for case let s as String in arr where ChromeProbe.safeProfile(s) && !active.contains(s) { active.append(s) }
+        }
+        return (lastUsed, active)
+    }
+
     /// One reading, or nil (with a note) if it could not be taken: no console user, or pgrep failed.
     func sample() -> (ChromeSample?, [String]) {
-        guard let user = ctx.consoleUser(), let home = ctx.consoleHome() else { return (nil, ["chrome: no console user"]) }
-        guard let running = chromeRunning(user: user) else { return (nil, ["chrome: pgrep did not answer; sample skipped"]) }
+        guard let io = ctx.userIO(), let home = ctx.consoleHome() else { return (nil, ["chrome: no console user"]) }
+        guard let running = chromeRunning(user: io.user) else { return (nil, ["chrome: pgrep did not answer; sample skipped"]) }
         let dataDir = home + ChromeProbe.userDataSuffix
         let state = dataDir + "/Local State"
         var notes: [String] = []
         var lastUsed: String?
         var active: [String] = []
-        if FileManager.default.fileExists(atPath: state) {
-            let lu = extract("profile.last_used", format: "raw", file: state)
-            lastUsed = lu.isEmpty ? nil : lu
-            active = ChromeProbe.parseActive(extract("profile.last_active_profiles", format: "json", file: state))
+        if io.info(state) != nil {
+            if let data = io.readWhole(state, maxBytes: Self.localStateMaxBytes), let keys = Self.localStateKeys(data) {
+                lastUsed = keys.lastUsed
+                active = keys.active
+            } else {
+                notes.append("chrome: Local State could not be read (not a plain file, too large or not JSON)")
+            }
         } else {
             notes.append("chrome: Local State not found")
         }
         if active.isEmpty, let l = lastUsed, ChromeProbe.safeProfile(l) { active = [l] }
         var ext: [String: [String]] = [:]
-        for p in active { ext[p] = versions(dataDir: dataDir, profile: p) }
+        for p in active { ext[p] = versions(io: io, dataDir: dataDir, profile: p) }
         var sample = ChromeSample(running: running, lastUsed: lastUsed, active: active, ext: ext)
         // the worker evidence: the active profile(s); if none is known, the newest across every profile (and the payload says so)
-        let scoped = active.isEmpty ? allProfileDirs(dataDir: dataDir) : active
+        let scoped = active.isEmpty ? allProfileDirs(io: io, dataDir: dataDir) : active
         sample.workerScope = active.isEmpty ? "all_profiles" : "active"
-        let newest = scoped.compactMap { workerMtime(dataDir: dataDir, profile: $0) }.max()
+        let newest = scoped.compactMap { workerMtime(io: io, dataDir: dataDir, profile: $0) }.max()
         if let m = newest {
             sample.workerDirFound = true
             sample.workerAgeS = max(0, Int(ctx.clock.now().timeIntervalSince(m)))

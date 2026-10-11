@@ -119,13 +119,16 @@ final class FakeRunner: CommandRunner {
 
 let fakeSelf = "/fake/kiosk-health"
 
+/// The collectors' disk access in the tests: the hardened reads, as the test's own (non-root) user.
+let tailIO = UserIO(files: UnprivilegedUserFiles(), user: "tester")
+
 func makeCtx(runner: FakeRunner = FakeRunner(), config: Config? = nil, now: Date? = nil,
              home: String? = nil, state: StateStore = MemoryState()) -> (Context, FakeClock, RecordingSleeper) {
     var cfg = config ?? Config(machine: "test-mac")
     if config == nil { cfg.consoleUser = "kiosk" }
     let clock = FakeClock(now ?? Date(timeIntervalSince1970: 1_790_000_000))
     let sleeper = RecordingSleeper()
-    let ctx = Context(config: cfg, runner: runner, clock: clock, sleeper: sleeper, state: state, homeOverride: home)
+    let ctx = Context(config: cfg, runner: runner, clock: clock, sleeper: sleeper, state: state, files: UnprivilegedUserFiles(), homeOverride: home)
     ctx.selfPath = fakeSelf
     return (ctx, clock, sleeper)
 }

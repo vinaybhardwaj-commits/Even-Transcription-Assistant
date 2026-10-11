@@ -92,7 +92,7 @@ struct Config {
     /// Load config; a missing/unreadable file yields defaults with a note (never an error, never post:true).
     static func load(path: String?) -> Config {
         let p = path ?? defaultPath
-        guard let data = FileManager.default.contents(atPath: p) else {
+        guard let data = HardenedFile.readWhole(p, maxBytes: 1_048_576) else {
             var c = Config(machine: defaultMachine())
             c.notes.append("config not found at \(p); using defaults (post:false)")
             return c

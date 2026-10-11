@@ -1,5 +1,6 @@
 import FleetCore
 import Foundation
+import KioskHealthCore
 
 /// The outcome of one signed command, as the helper reports it.
 public struct HelperCommandOutcome: Equatable, Sendable {
@@ -58,7 +59,7 @@ public final class HelperCommandRunner: @unchecked Sendable {
   // MARK: State (root-only, nonces and ceilings)
 
   private func loadState() -> FleetState {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+    guard let data = HardenedFile.readWhole(statePath, maxBytes: 4 * 1024 * 1024),
       let state = try? JSONDecoder().decode(FleetState.self, from: data)
     else { return FleetState() }
     return state

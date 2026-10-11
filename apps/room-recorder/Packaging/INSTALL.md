@@ -233,6 +233,14 @@ fetches a batch over XPC (`kioskBatch`), posts it to `/api/kiosk-health` as the 
 400 quarantines it, a 401 pauses an hour, anything else backs off. The standalone daemon keeps running beside it (the
 shadow period); the two use different state directories and logs. Identity (`machine`, `room_id`, `install_id`) and the
 power baseline are read from the standalone daemon's config when it exists; its token and sink URL are never read.
+**Every file under a room user's home is read AS that user** (0.1.36 R2): the collectors' reads, stats and listings
+(`launchd.log`, `tapewriter.log`, `status.json`, the recorder's `Info.plist`, Chrome's `Local State` and extension
+directories) run on a thread that has taken the user's identity, open with `O_NOFOLLOW|O_NONBLOCK`, accept only a plain
+file with ONE link under a size cap (64 KB status, 256 KB plist, 4 MiB Local State), and list only real directories. A symlink,
+a hard link to a root-only file or a FIFO planted at one of those paths yields nothing. No tool (`plutil` is gone) is
+run on a user's file. If the thread cannot take the identity, nothing is read; there is no fallback to root. The
+helper's own root reads (fleet state, ledger, power time, Chrome policy files, the standalone config) refuse
+hard-linked files as well.
 
 ## Updates only go up (0.1.30)
 The self-updater installs a version only if it is HIGHER than the one running, and only into the

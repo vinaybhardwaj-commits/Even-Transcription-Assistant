@@ -99,20 +99,19 @@ struct RecorderSnapshot {
 
 enum RecorderState {
     /// Newest mtime among the files of the newest capture segment (tape.pcm / tape.idx / tapewriter.log).
-    static func newestTape(recorderDir: String) -> (Date, String)? {
-        let fm = FileManager.default
+    static func newestTape(io: UserIO, recorderDir: String) -> (Date, String)? {
         let captures = recorderDir + "/captures"
-        guard let sessions = try? fm.contentsOfDirectory(atPath: captures) else { return nil }
+        guard let sessions = io.entries(captures) else { return nil }
         let dirs = sessions.map { captures + "/" + $0 }
-            .compactMap { p -> (String, Date)? in FS.mtime(p).map { (p, $0) } }
+            .compactMap { p -> (String, Date)? in io.info(p).flatMap { $0.isDirectory ? $0.mtime : nil }.map { (p, $0) } }
             .sorted { $0.1 > $1.1 }
         for (sessionDir, _) in dirs.prefix(3) {
             var best: (Date, String)?
-            for seg in (try? fm.contentsOfDirectory(atPath: sessionDir)) ?? [] {
+            for seg in io.entries(sessionDir) ?? [] {
                 let segDir = sessionDir + "/" + seg
-                for f in (try? fm.contentsOfDirectory(atPath: segDir)) ?? [] {
+                for f in io.entries(segDir) ?? [] {
                     let path = segDir + "/" + f
-                    if let m = FS.mtime(path), best == nil || m > best!.0 { best = (m, f) }
+                    if let m = io.mtime(path), best == nil || m > best!.0 { best = (m, f) }
                 }
             }
             if let b = best { return b }
@@ -127,11 +126,11 @@ enum RecorderState {
     /// status.json all read as `.unknown` (treated as open by every action), and a tape file modified within the
     /// last 120 s reads as `.yes` even when status.json claims the recorder is idle.
     static func read(_ ctx: Context) -> RecorderSnapshot {
-        guard let dir = ctx.recorderDir(), FileManager.default.fileExists(atPath: dir) else {
+        guard let io = ctx.userIO(), let dir = ctx.recorderDir(), io.isDirectory(dir) else {
             return RecorderSnapshot(status: RecorderStatus(), open: .unknown, newestTapeMTime: nil, newestTapeFile: nil, recorderDirFound: false)
         }
-        let status = RecorderStatusParser.parse(FileManager.default.contents(atPath: dir + "/status.json"))
-        let tape = newestTape(recorderDir: dir)
+        let status = RecorderStatusParser.parse(io.readWhole(dir + "/status.json", maxBytes: 65_536))
+        let tape = newestTape(io: io, recorderDir: dir)
         var open = RecorderStatusParser.sessionOpen(status)
         if let t = tape?.0, ctx.clock.now().timeIntervalSince(t) < tapeFreshSeconds { open = .yes }
         return RecorderSnapshot(status: status, open: open,

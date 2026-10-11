@@ -1,5 +1,6 @@
 import FleetCore
 import Foundation
+import KioskHealthCore
 
 /// #43: the power baseline and the 07:05 power-on, enforced by the root helper.
 ///
@@ -72,7 +73,8 @@ public struct PowerPolicy: Sendable {
 
   /// The time a `schedule_poweron` last set, from a root-only file; nil (use the default) if none or not an HH:MM.
   public static func storedTime(at path: String) -> String? {
-    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    guard let bytes = HardenedFile.readWhole(path, maxBytes: 64) else { return nil }
+    let text = String(decoding: bytes, as: UTF8.self)
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.range(of: "^([01][0-9]|2[0-3]):[0-5][0-9]$", options: .regularExpression) != nil ? trimmed : nil
   }
