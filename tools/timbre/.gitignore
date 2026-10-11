@@ -8,3 +8,5 @@ smoke-cache/
 *.tmp
 text-cache/
 *.cost.jsonl
+scale-out/
+cache/
