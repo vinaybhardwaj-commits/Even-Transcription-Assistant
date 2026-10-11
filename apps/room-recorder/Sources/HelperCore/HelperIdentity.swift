@@ -29,7 +29,7 @@ public enum HelperIdentity {
   public static let ledgerFileName = "helper-launches.json"
 
   /// The helper's own version. Bumped with the helper's behaviour, not with the app's.
-  public static let helperVersion = "0.2.0-h2"
+  public static let helperVersion = "0.2.1-h3"
   public static let protocolVersion = 1
 
   /// `identifier "<id>" and certificate leaf = H"<sha1>"`. The leaf pin is what refuses an

@@ -18,6 +18,9 @@ public struct FleetEnvelope: Equatable, Sendable {
   public var signature: String
   /// The envelope minus `signature`, canonicalised: the bytes the server signed.
   public var signedBytes: Data
+  /// The whole envelope (signature included) in canonical form: what is forwarded to the helper, which
+  /// verifies it again for itself.
+  public var forwardJSON: String
 
   static let fields: Set<String> = [
     "v", "cmd_id", "device_id", "machine", "verb", "params", "issued_at", "expires_at", "nonce",
@@ -46,7 +49,7 @@ public struct FleetEnvelope: Equatable, Sendable {
     var approval: String?
     switch o["approval_ref"] {
     case .some(.null): approval = nil
-    case .some(.string(let s)) where (1...64).contains(s.utf8.count): approval = s
+    case .some(.string(let s)) where matches(s, approvalPattern): approval = s
     default: return nil
     }
     var unsigned = o
@@ -54,9 +57,12 @@ public struct FleetEnvelope: Equatable, Sendable {
     return FleetEnvelope(
       cmdID: cmdID, deviceID: deviceID, machine: machine, verb: verb, params: params, issuedAt: issuedAt,
       expiresAt: expiresAt, nonce: nonce, issuerKind: kind, issuerID: issuerID, approvalRef: approval,
-      keyID: keyID, signature: signature, signedBytes: FleetJSON.object(unsigned).canonicalData)
+      keyID: keyID, signature: signature, signedBytes: FleetJSON.object(unsigned).canonicalData,
+      forwardJSON: json.canonical)
   }
 
+  /// §8.4.
+  static let approvalPattern = "^[A-Za-z0-9_-]{3,64}$"
   static let isoMs = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
 
   static func matches(_ text: String, _ pattern: String) -> Bool {
@@ -80,6 +86,7 @@ public enum FleetRefusal: String, Error, Equatable, Sendable {
   case verbNotAllowed = "verb_not_allowed"
   case badParams = "bad_params"
   case sessionOpen = "session_open"
+  case noConsoleUser = "no_console_user"
   case clinicHoursNeedsApproval = "clinic_hours_needs_approval"
   case rateLimited = "rate_limited"
   case killSwitch = "kill_switch"
@@ -88,18 +95,35 @@ public enum FleetRefusal: String, Error, Equatable, Sendable {
 /// What the app knows at the moment a command arrives; read by the gates.
 public struct FleetGateState: Equatable, Sendable {
   public var sessionOpen: Bool
-  public init(sessionOpen: Bool) { self.sessionOpen = sessionOpen }
+  /// Is there a GUI session for the `gui/<uid>` verbs? The app is running in one, so for the app it is true.
+  public var consoleUserPresent: Bool
+  public init(sessionOpen: Bool, consoleUserPresent: Bool = true) {
+    self.sessionOpen = sessionOpen
+    self.consoleUserPresent = consoleUserPresent
+  }
+}
+
+/// What step 9 needs: how many privileged verbs ran in the last hour, and how long since a coreaudiod reset.
+public struct FleetRateState: Equatable, Sendable {
+  public var privilegedInLastHour: Int
+  public var secondsSinceLastReset: Int?
+  public init(privilegedInLastHour: Int = 0, secondsSinceLastReset: Int? = nil) {
+    self.privilegedInLastHour = privilegedInLastHour
+    self.secondsSinceLastReset = secondsSinceLastReset
+  }
 }
 
 /// The compiled-in server signing keys (PRD §5.3: "current + next"; the signer is never served).
 ///
-/// ─── EMPTY UNTIL THE SERVER BUILDER SUPPLIES THEM ────────────────────────────────────────
-/// PROTOCOL.md §4: "the signer and server keys arrive with #41". The public keys for `fk1` and `fk2`
-/// were not available to this build, and a key invented here would be a key nobody holds. With the
-/// table empty every command is refused `bad_signature`: fail-safe, and the client is off by default.
+/// `fk1` is compiled in (0.1.35); `fk2` joins it when the server rotates. A command naming any other
+/// key id is refused `bad_signature`. Tests use their own keys through `FleetVerifier(serverKeys:)`.
 public enum FleetServerKeys {
   /// key id → standard base64 of the 32-byte Ed25519 public key.
-  public static let compiled: [String: String] = [:]
+  public static let compiled: [String: String] = [
+    // The server's current envelope-signing key (11 Oct 2026, FLEET). A public key; the signer is never served.
+    "fk1": "wpYSW+ClvmAYrb8qvuCJ8aFj2yX0aoujdK14ALOkcb8="
+    // "fk2": the NEXT key, added when the server rotates.
+  ]
 
   public static func resolve(_ table: [String: String] = compiled) -> [String: Data] {
     table.compactMapValues { text in
@@ -114,6 +138,7 @@ public struct FleetVerifier: Sendable {
   public static let maxTTL: TimeInterval = 900
   public static let skew: TimeInterval = 120
   public static let rateCeilingPerHour = 10
+  public static let resetGapSeconds = 30 * 60
 
   public var serverKeys: [String: Data]
   public var deviceID: String
@@ -137,7 +162,7 @@ public struct FleetVerifier: Sendable {
   ///   - killSwitch: the poll's `kill_switch.global`.
   public func verify(
     _ json: FleetJSON, now: Date, nonceSeen: (String) -> Bool, gates: FleetGateState,
-    privilegedRunsInLastHour: Int, killSwitch: Bool
+    rates: FleetRateState, killSwitch: Bool, handles: ((FleetVerb) -> Bool)? = nil
   ) -> Result<Accepted, FleetRefusal> {
     // 1. shape
     guard let envelope = FleetEnvelope.parse(json) else { return .failure(.malformed) }
@@ -159,15 +184,18 @@ public struct FleetVerifier: Sendable {
       return .failure(.machineMismatch)
     }
     // 6. allow-list
-    guard let verb = FleetVerb(rawValue: envelope.verb) else { return .failure(.verbNotAllowed) }
+    guard let verb = FleetVerb(rawValue: envelope.verb), handles?(verb) ?? true else {
+      return .failure(.verbNotAllowed)
+    }
     // 7. closed params
     guard let params = verb.parseParams(envelope.params) else { return .failure(.badParams) }
     // 8. local gates
-    if let refusal = verb.gate(params: params, approvalRef: envelope.approvalRef, state: gates) {
+    if let refusal = verb.gate(params: params, approvalRef: envelope.approvalRef, state: gates, now: now) {
       return .failure(refusal)
     }
-    // 9. device rate ceiling (privileged verbs only)
-    if verb.isPrivileged, privilegedRunsInLastHour >= Self.rateCeilingPerHour {
+    // 9. device rate ceilings: <= 10 privileged verbs an hour, <= 1 coreaudiod reset per 30 minutes
+    if verb.isPrivileged, rates.privilegedInLastHour >= Self.rateCeilingPerHour { return .failure(.rateLimited) }
+    if verb == .coreaudiodReset, let since = rates.secondsSinceLastReset, since < Self.resetGapSeconds {
       return .failure(.rateLimited)
     }
     // 10. kill switch

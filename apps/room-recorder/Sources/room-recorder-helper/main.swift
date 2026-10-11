@@ -24,11 +24,37 @@ let safeMode = ledger.recordLaunch()
 ledger.save(to: ledgerURL)
 if safeMode { log("safe mode: \(LaunchLedger.safeModeThreshold) unstable launches in a row") }
 
-let service = HelperService(safeMode: safeMode)
+// 0.1.35: the helper verifies and runs signed commands for itself, keeps the power baseline, and watches the app.
+let tools = ProcessSystemTools()
+let environment = SystemEnvironment(tools: tools)
+let watchdog = AppWatchdog(env: environment, tools: tools, log: log)
+let monitor = HelperMonitor(
+  env: environment, tools: tools, watchdog: watchdog, safeMode: safeMode,
+  heartbeatPath: support.appendingPathComponent(HelperPaths.heartbeatFile).path, log: log)
+let runner = HelperCommandRunner(
+  env: environment, tools: tools, watchdog: watchdog,
+  statePath: support.appendingPathComponent(HelperPaths.fleetStateFile).path, safeMode: safeMode, log: log)
+let service = HelperService(safeMode: safeMode, runner: runner, statusDetail: { monitor.statusDetail() })
 let delegate = HelperListenerDelegate(service: service)
 let listener = NSXPCListener(machServiceName: HelperIdentity.machServiceName)
 listener.delegate = delegate
 listener.resume()
+
+// Power baseline now, then every 15 minutes; the watchdog and the heartbeat every 30 s. Safe mode (three
+// unstable launches in a row) keeps the diagnostics and the XPC answers but touches neither power nor the app.
+if !safeMode {
+  DispatchQueue.global().async { monitor.enforcePower() }
+  let powerTimer = DispatchSource.makeTimerSource(queue: .global())
+  powerTimer.schedule(deadline: .now() + HelperMonitor.powerInterval, repeating: HelperMonitor.powerInterval)
+  powerTimer.setEventHandler { monitor.enforcePower() }
+  powerTimer.resume()
+  let watchdogTimer = DispatchSource.makeTimerSource(queue: .global())
+  watchdogTimer.schedule(deadline: .now() + 30, repeating: 30)
+  watchdogTimer.setEventHandler { monitor.tick() }
+  watchdogTimer.resume()
+  // Held for the life of the process.
+  _ = [powerTimer, watchdogTimer] as [Any]
+}
 
 // #40 plugs the outbound long-poll in here.
 let channel: HelperControlChannel = NullControlChannel()

@@ -1,13 +1,17 @@
 import Foundation
 
-/// The CLOSED protocol between the app and the helper (TS-H2 #39): five verbs, and nothing that
+/// The CLOSED protocol between the app and the helper (TS-H2 #39): six verbs, and nothing that
 /// takes a command line. There is no field in a request that a helper could hand to a shell.
+///
+/// `runSignedCommand` (0.1.35) carries a server-signed fleet envelope. The helper does not trust the app's
+/// word that it is genuine: it verifies the signature itself (`HelperCommandRunner`).
 public enum HelperVerb: String, CaseIterable, Sendable {
   case hello
   case appStatus
   case helperStatus
   case runAppVerb
   case requestBundleUpdate
+  case runSignedCommand
 }
 
 /// The app-side catalogue `runAppVerb` may name: the bench verbs the app already runs, minus the
@@ -28,6 +32,7 @@ public enum HelperCommand: Equatable, Sendable {
   case helperStatus
   case runAppVerb(AppVerb, params: [String: String])
   case requestBundleUpdate
+  case runSignedCommand(envelope: String, deviceID: String, machine: String)
 }
 
 public enum HelperRefusal: String, Error, Equatable, Sendable {
@@ -49,6 +54,9 @@ public enum HelperCodec {
     var appVerb: String?
     var params: [String: String]?
     var clientVersion: String?
+    var envelope: String?
+    var deviceID: String?
+    var machine: String?
   }
 
   public static func encode(_ command: HelperCommand) throws -> Data {
@@ -60,6 +68,11 @@ public enum HelperCodec {
     case .appStatus: wire.verb = HelperVerb.appStatus.rawValue
     case .helperStatus: wire.verb = HelperVerb.helperStatus.rawValue
     case .requestBundleUpdate: wire.verb = HelperVerb.requestBundleUpdate.rawValue
+    case .runSignedCommand(let envelope, let deviceID, let machine):
+      wire.verb = HelperVerb.runSignedCommand.rawValue
+      wire.envelope = envelope
+      wire.deviceID = deviceID
+      wire.machine = machine
     case .runAppVerb(let verb, let params):
       wire.verb = HelperVerb.runAppVerb.rawValue
       wire.appVerb = verb.rawValue
@@ -81,6 +94,13 @@ public enum HelperCodec {
     case .appStatus: return .appStatus
     case .helperStatus: return .helperStatus
     case .requestBundleUpdate: return .requestBundleUpdate
+    case .runSignedCommand:
+      guard let envelope = wire.envelope, !envelope.isEmpty, envelope.utf8.count <= 6_000,
+        let deviceID = wire.deviceID, deviceID.range(of: "^dev_[0-9a-f]{24}$", options: .regularExpression) != nil,
+        let machine = wire.machine, (1...128).contains(machine.utf8.count),
+        machine.unicodeScalars.allSatisfy({ $0.value >= 0x20 })
+      else { throw HelperRefusal.badParams }
+      return .runSignedCommand(envelope: envelope, deviceID: deviceID, machine: machine)
     case .runAppVerb:
       guard let name = wire.appVerb, let appVerb = AppVerb(rawValue: name) else {
         throw HelperRefusal.verbNotAllowed

@@ -192,11 +192,10 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   /// fleet card can say why an assignment is not taking. Absent means false. Nothing but a hand on
   /// this Mac sets it: no command, no enrol, no server field writes it.
   public var channelLocked: Bool
-  /// 0.1.30. The outbound long-poll command client (TS-H3/H4). OFF unless a hand on this Mac sets
-  /// `fleet_client_enabled: true` in config.json; nothing the server sends turns it on. Absent means
-  /// off, so 0.1.30 can be installed before the server queues anything. Not an init parameter, on
-  /// purpose: no code path builds a configuration with it already on.
-  public var fleetClientEnabled: Bool = false
+  /// The outbound long-poll command client (TS-H3/H4). ON by default since 0.1.35, when the server's `fk1` was
+  /// compiled in: absent means on, and a hand on this Mac turns it off with `"fleet_client_enabled": false` in
+  /// config.json. Nothing the server sends can change it. Not an init parameter, on purpose.
+  public var fleetClientEnabled: Bool = true
 
   enum CodingKeys: String, CodingKey {
     case fleetClientEnabled = "fleet_client_enabled"
@@ -355,7 +354,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       // a JSON boolean is refused with the file, as every other typed key here is.
       channelLocked: values.decodeIfPresent(Bool.self, forKey: .channelLocked) ?? false
     )
-    fleetClientEnabled = try values.decodeIfPresent(Bool.self, forKey: .fleetClientEnabled) ?? false
+    fleetClientEnabled = try values.decodeIfPresent(Bool.self, forKey: .fleetClientEnabled) ?? true
   }
 
   public func residentArchiveEligibility(archiveRootURL: URL) -> RoomResidentArchiveEligibility {
@@ -410,8 +409,16 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   /// FLEET could not see either: they were on the bench row only. Nil until the app has probed.
   public var helperXPCOK: Bool?
   public var helperVersion: String?
+  /// 0.1.35. What the helper reports about itself (#43/#46): its state, the power-on schedule it holds, and any
+  /// pmset settings it found off baseline (comma-joined). Nil until it has answered.
+  public var helperState: String?
+  public var powerSchedule: String?
+  public var pmsetDrift: String?
 
   enum CodingKeys: String, CodingKey {
+    case helperState = "helper_state"
+    case powerSchedule = "power_schedule"
+    case pmsetDrift = "pmset_drift"
     case helperXPCOK = "helper_xpc_ok"
     case helperVersion = "helper_version"
     case helperMode = "helper_mode"
@@ -440,8 +447,14 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     helperRegistrationError: String? = nil,
     helperMode: String? = nil,
     helperXPCOK: Bool? = nil,
-    helperVersion: String? = nil
+    helperVersion: String? = nil,
+    helperState: String? = nil,
+    powerSchedule: String? = nil,
+    pmsetDrift: String? = nil
   ) {
+    self.helperState = helperState
+    self.powerSchedule = powerSchedule
+    self.pmsetDrift = pmsetDrift
     self.helperXPCOK = helperXPCOK
     self.helperVersion = helperVersion
     self.helperMode = helperMode

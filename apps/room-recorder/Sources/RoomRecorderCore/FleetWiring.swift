@@ -104,32 +104,51 @@ public struct URLSessionFleetTransport: FleetTransport {
   }
 }
 
-/// Runs a verified command: app verbs through the engine, `helper_status` over XPC to the helper,
-/// `collect_diag` not at all yet (the server's upload slice does not exist).
-struct EngineFleetExecutor: FleetExecutor {
-  let engine: RoomEngine
+/// Runs a verified command. App verbs go through the engine. Helper verbs go to the root helper over XPC as the
+/// SIGNED ENVELOPE, which the helper verifies again for itself; the app's word is not what the helper trusts.
+/// What the executor needs of the engine, so a test can stand in for it.
+protocol FleetAppVerbRunning: Sendable {
+  func runFleetAppVerb(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult
+}
 
-  func execute(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult {
-    switch verb {
-    case .helperStatus:
-      let reply = await Task.detached { HelperClient().hello() }.value
-      var detail: [String: FleetJSON] = [
-        "registration": .string(HelperStatusCache.shared.snapshot?.registration ?? "unknown")
-      ]
-      guard let reply, reply.ok else {
-        return FleetExecResult(outcome: .failed, reason: "helper_unreachable", detail: detail)
+extension RoomEngine: FleetAppVerbRunning {}
+
+struct EngineFleetExecutor: FleetExecutor {
+  let engine: any FleetAppVerbRunning
+  var helper: @Sendable () -> HelperClient = { HelperClient() }
+  /// How long to wait for the helper's answer; a coreaudiod reset or a power change can take a few seconds.
+  var helperTimeout: TimeInterval = 40
+
+  func execute(_ verb: FleetVerb, params: FleetParams, envelope: FleetEnvelope) async -> FleetExecResult {
+    if !verb.runsOnHelper || verb == .restartRecorder {
+      // restart_recorder is the app's own `restart_engine` (exits after the result is posted); see the engine.
+      return await engine.runFleetAppVerb(verb, params: params, commandID: envelope.cmdID)
+    }
+    let timeout = helperTimeout
+    if verb == .reloadLaunchagent {
+      // The helper boots this very app out, so the answer is posted FIRST and the helper is asked afterwards.
+      let forward = { @Sendable in
+        _ = await Task.detached { helper().runSignedCommand(envelope: envelope.forwardJSON, deviceID: envelope.deviceID, machine: envelope.machine, timeout: timeout) }.value
       }
-      detail["helper_version"] = .string(reply.detail["helper_version"] ?? "")
-      detail["safe_mode"] = .bool(reply.detail["safe_mode"] == "true")
-      return FleetExecResult(outcome: .ok, detail: detail)
-    case .collectDiag:
-      // Validated (scope, log_lines) and then declined: there is no upload route to send a bundle to,
-      // and a bundle that stays on the Mac helps nobody. The server sees why.
-      return FleetExecResult(
-        outcome: .unsupported, reason: "upload_not_available",
-        detail: ["scope": params.raw["scope"] ?? .null])
-    case .reportDiag, .selectAudioInput, .selfTest, .restartRecorder:
-      return await engine.runFleetAppVerb(verb, params: params, commandID: commandID)
+      return FleetExecResult(outcome: .ok, detail: ["reloading": .bool(true)], afterResultPosted: forward)
+    }
+    let reply = await Task.detached {
+      helper().runSignedCommand(envelope: envelope.forwardJSON, deviceID: envelope.deviceID, machine: envelope.machine, timeout: timeout)
+    }.value
+    return Self.result(from: reply)
+  }
+
+  /// The helper's `outcome`, `reason` and `detail_json`, back into a result. No answer is `helper_unreachable`.
+  static func result(from reply: HelperResponse?) -> FleetExecResult {
+    guard let reply else { return FleetExecResult(outcome: .failed, reason: "helper_unreachable") }
+    let reason = reply.detail["reason"].flatMap { $0.isEmpty ? nil : $0 }
+    let detail =
+      reply.detail["detail_json"].flatMap { try? FleetJSON.parse(Data($0.utf8)).objectValue } ?? [:]
+    switch reply.detail["outcome"] {
+    case "ok": return FleetExecResult(outcome: .ok, reason: reason, detail: detail)
+    case "unsupported": return FleetExecResult(outcome: .unsupported, reason: reason, detail: detail)
+    case "refused": return FleetExecResult(outcome: .failed, reason: "helper_refused_" + (reason ?? "unknown"), detail: detail)
+    default: return FleetExecResult(outcome: .failed, reason: reason ?? "helper_failed", detail: detail)
     }
   }
 }
@@ -154,7 +173,8 @@ public enum FleetBootstrap {
         enabled: true, installID: installID, machine: machine, hwModel: MachineFactsReader.hardwareModel(),
         helperVersion: HelperStatusCache.shared.snapshot?.helperVersion),
       transport: URLSessionFleetTransport(origin: configuration.origin), keys: KeychainFleetKeyStore(),
-      store: FileFleetStateStore(root: root), executor: EngineFleetExecutor(engine: engine),
+      store: FileFleetStateStore(root: root),
+      executor: EngineFleetExecutor(engine: engine),
       roomSession: { session }, gates: { FleetGateState(sessionOpen: await engine.fleetSessionOpen) }, log: log)
     log("fleet client: on")
     Task.detached { await client.run() }

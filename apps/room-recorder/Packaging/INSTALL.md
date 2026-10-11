@@ -126,11 +126,40 @@ proven until this step. Record for each room:
 - The `helper_registration` value after step 8.
 - If it stays `requiresApproval` after step 6, or shows `notFound`: stop and report. Do not retry in a loop.
 
-## The command client (0.1.30), off by default
-0.1.30 contains the outbound long-poll client for the signed command channel. It is OFF: it reads no
-key, registers nothing and sends nothing unless `config.json` says `"fleet_client_enabled": true`, which
-only a hand on this Mac sets. Install 0.1.30 first; turn it on per room, later, when the server queues
-commands. It cannot be turned on by the server.
+## Signed commands are live (0.1.35)
+The app polls the server for commands over HTTPS (outbound only, no inbound port) and the root helper runs the
+ones that need root. It is **ON by default**; turn it off on one Mac with `"fleet_client_enabled": false` in
+`config.json` (a hand on the Mac; nothing the server sends can change it). A command is run only if it is a v2
+envelope **signed with the server's key `fk1`** (compiled into both the app and the helper), addressed to THIS
+device and machine, inside its time window, and with a nonce never seen before. The root helper verifies every
+envelope itself before acting, so a tampered app cannot make it do anything the server did not sign.
+
+The catalogue is closed: `helper_status`, `collect_diag` (answers `unsupported` until an upload route exists),
+`report_diag`, `list_audio_inputs`, `select_audio_input`, `coreaudiod_reset`, `usb_reseat` (always `unsupported`),
+`self_test`, `restart_recorder`, `reload_launchagent`, `pieces_inventory`, `pieces_reupload`, `wake`,
+`pmset_enforce`, `schedule_poweron`. No shell, no file path, no autologin. Gates: a reset, restart or reload is
+refused while a session is open (a restart can be forced with `force` AND an `approval_ref`); the four privileged
+verbs need an `approval_ref` between 07:30 and 21:30 IST; at most 10 privileged verbs an hour and one
+coreaudiod reset per 30 minutes; the GUI verbs need someone at the console. A refusal comes back as a result with
+the reason (`replay`, `expired`, `machine_mismatch`, `session_open`, ...).
+
+## Power and the app watchdog (0.1.35, the helper)
+- **Power baseline.** At helper start and every 15 minutes the helper sets `sleep 0, disksleep 0, displaysleep 0,
+  powernap 0, autorestart 1, womp 1` (only what differs) and re-asserts `pmset repeat wakeorpoweron MTWRFSU
+  07:05:00`; a manual change is reverted at the next pass and logged. Autologin is never touched.
+- **Watchdog.** Every 30 s the helper checks for a console user and for the app process. If the app is gone it
+  puts the LaunchAgent plist back when it is missing, then `bootstrap`s it (or `kickstart`s it, never `-k`),
+  backing off 30 s, 1, 2, 4, then 5 minutes. At the login window it does nothing and records
+  `app_state=no_console_user`. It will NOT fight a recorder that stopped for `needs_enrol`, an update in flight
+  (`update-handover.json` under 30 minutes old), or an operator: `touch` a file called `watchdog-hold` in
+  `~/Library/Application Support/EvenScribe/RoomRecorder/` to keep the helper's hands off the app, delete it to
+  give it back.
+- **What to read.** `/Library/Application Support/EvenScribe/helper-heartbeat.json` (root-written, readable by
+  all) has `app_state`, `console_user`, `power_schedule`, `pmset_drift`, `watchdog_failures`. The app reports the
+  same on its bench poll and in `status.json` as `helper_state`, `power_schedule`, `pmset_drift`.
+- **Not built:** the helper cannot post its own heartbeat to the server (the device key lives with the app in the
+  room user's keychain), so nothing reports while nobody is logged in except that local file; and the helper checks
+  the app by its process, not by an XPC hello to the app.
 
 ## Updates only go up (0.1.30)
 The self-updater installs a version only if it is HIGHER than the one running, and only into the

@@ -1402,6 +1402,9 @@ public actor RoomEngine {
           fields.helperXPCOK = helper?.xpcOK
           fields.helperRegistrationError = HelperStatusCache.shared.registrationError
           fields.helperMode = helper?.mode
+          fields.helperState = helper?.helperState
+          fields.powerSchedule = helper?.powerSchedule
+          fields.pmsetDrift = helper?.pmsetDrift
           return fields
         }
         let response = try await remote.pollCommands(
@@ -4178,7 +4181,10 @@ public actor RoomEngine {
         helperRegistrationError: HelperStatusCache.shared.registrationError,
         helperMode: HelperStatusCache.shared.snapshot?.mode,
         helperXPCOK: HelperStatusCache.shared.snapshot?.xpcOK,
-        helperVersion: HelperStatusCache.shared.snapshot?.helperVersion))
+        helperVersion: HelperStatusCache.shared.snapshot?.helperVersion,
+        helperState: HelperStatusCache.shared.snapshot?.helperState,
+        powerSchedule: HelperStatusCache.shared.snapshot?.powerSchedule,
+        pmsetDrift: HelperStatusCache.shared.snapshot?.pmsetDrift))
   }
 
   /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the
@@ -4554,7 +4560,7 @@ extension RoomEngine {
   /// existing gate (open session, resident lane, self-test conditions) applies unchanged. Nothing is
   /// acknowledged on the bench: the fleet client posts the result. `detail` is a closed summary; the
   /// full diag report is not put into it.
-  public func runFleetAppVerb(_ verb: FleetVerb, params: FleetParams, commandID: String) -> FleetExecResult {
+  public func runFleetAppVerb(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult {
     func command(_ kind: BenchCommandKind, _ args: JSONValue) -> BenchCommand {
       BenchCommand(id: commandID, kind: kind, args: args, createdAt: nil)
     }
@@ -4563,9 +4569,7 @@ extension RoomEngine {
     }
     switch verb {
     case .reportDiag:
-      var args: [String: JSONValue] = [:]
-      if let n = params.raw["log_lines"]?.intValue { args["log_lines"] = .number(Double(n)) }
-      let result = reportDiag(command(.reportDiag, args.isEmpty ? .null : .object(args)))
+      let result = reportDiag(command(.reportDiag, .null))
       guard result.ok else { return failure(result) }
       var detail: [String: FleetJSON] = ["session_open": .bool(sessionIsOpen)]
       if case .object(let report)? = result.verb?.diag, case .array(let lines)? = report["log_lines"] {
@@ -4574,6 +4578,9 @@ extension RoomEngine {
       if let version = BuildInfo.appVersion { detail["app_version"] = .string(version) }
       return FleetExecResult(outcome: .ok, detail: detail)
     case .restartRecorder:
+      // The app is reachable (it is the one asking), so the restart is the app's own `restart_engine`: it exits
+      // for launchd to relaunch AFTER the result is posted. The helper's `kickstart -k` would kill this process
+      // before the answer left the building.
       var args: [String: JSONValue] = [:]
       if let force = params.raw["force"]?.boolValue { args["force"] = .bool(force) }
       let result = restartEngine(command(.restartEngine, args.isEmpty ? .null : .object(args)))
@@ -4592,8 +4599,55 @@ extension RoomEngine {
       if let pct = params.raw["input_volume_pct"]?.intValue { args["input_volume"] = .number(Double(pct) / 100) }
       let result = applyAudioInput(command(.setAudioInput, .object(args)))
       return result.ok ? FleetExecResult(outcome: .ok, detail: ["applied": .bool(true)]) : failure(result)
-    case .helperStatus, .collectDiag:
+    case .listAudioInputs:
+      guard let devices = audioInputs.inputDevices() else {
+        return FleetExecResult(outcome: .failed, reason: "devices_unreadable")
+      }
+      let shown = devices.prefix(16).map { device -> FleetJSON in
+        .object([
+          "name": .string(String(device.name.prefix(40))), "uid": .string(String(device.uid.prefix(64))),
+          "is_default": .bool(device.isDefault),
+        ])
+      }
+      return FleetExecResult(
+        outcome: .ok,
+        detail: [
+          "count": .int(Int64(devices.count)), "devices": .array(Array(shown)),
+          "selected_uid": .string(String(configuration.deviceUID.prefix(64))),
+        ])
+    case .piecesInventory:
+      guard let pending = try? spool.pending() else { return FleetExecResult(outcome: .failed, reason: "spool_unreadable") }
+      return FleetExecResult(outcome: .ok, detail: Self.inventoryDetail(pending, since: params.raw["since"]?.stringValue))
+    case .piecesReupload:
+      // Re-drives the EXISTING uploader over what is still in the spool; nothing is copied or sent by hand.
+      // (Pieces the server already verified are gone from the spool, so there is nothing of them to send.)
+      guard let before = try? spool.pending() else { return FleetExecResult(outcome: .failed, reason: "spool_unreadable") }
+      do {
+        _ = try await drainPending()
+      } catch {
+        return FleetExecResult(outcome: .failed, reason: "upload_failed", detail: ["pending_before": .int(Int64(before.count))])
+      }
+      let after = (try? spool.pending().count) ?? -1
+      return FleetExecResult(
+        outcome: .ok, detail: ["pending_before": .int(Int64(before.count)), "pending_after": .int(Int64(after))])
+    case .helperStatus, .collectDiag, .coreaudiodReset, .usbReseat, .reloadLaunchagent, .wake, .pmsetEnforce,
+      .schedulePoweron:
       return FleetExecResult(outcome: .unsupported, reason: "not_an_app_verb")
     }
+  }
+
+  /// Counts, bytes and timestamps only: no session ids, no file names, no content.
+  static func inventoryDetail(_ pending: [RoomSpooledPiece], since: String?) -> [String: FleetJSON] {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let cutoff = since.flatMap { formatter.date(from: $0) }
+    let shown = pending.filter { cutoff == nil || $0.manifest.startedAt >= cutoff! }
+    var detail: [String: FleetJSON] = [
+      "pending_count": .int(Int64(shown.count)), "pending_total": .int(Int64(pending.count)),
+      "bytes": .int(shown.reduce(0) { $0 + $1.manifest.sizeBytes }),
+    ]
+    if let oldest = shown.map(\.manifest.startedAt).min() { detail["oldest_started_at"] = .string(formatter.string(from: oldest)) }
+    if let newest = shown.map(\.manifest.startedAt).max() { detail["newest_started_at"] = .string(formatter.string(from: newest)) }
+    return detail
   }
 }

@@ -66,12 +66,23 @@ public struct HelperSnapshot: Equatable, Sendable {
   /// `launchd` (a system LaunchDaemon the pkg installed), `smappservice` (the bundle's own daemon plist,
   /// registered by the app) or `none` (neither is there). Nil until the app has looked.
   public var mode: String?
+  /// From the helper's `helperStatus` answer (0.1.35): its own state, the power schedule it holds and any
+  /// pmset settings it found off baseline. Nil when it did not answer.
+  public var helperState: String?
+  public var powerSchedule: String?
+  public var pmsetDrift: String?
 
-  public init(registration: String, helperVersion: String?, xpcOK: Bool?, mode: String? = nil) {
+  public init(
+    registration: String, helperVersion: String?, xpcOK: Bool?, mode: String? = nil, helperState: String? = nil,
+    powerSchedule: String? = nil, pmsetDrift: String? = nil
+  ) {
     self.registration = registration
     self.helperVersion = helperVersion
     self.xpcOK = xpcOK
     self.mode = mode
+    self.helperState = helperState
+    self.powerSchedule = powerSchedule
+    self.pmsetDrift = pmsetDrift
   }
 }
 
@@ -111,12 +122,26 @@ public final class HelperClient: @unchecked Sendable {
 
   /// One hello. Nil on timeout, refusal or a peer that fails the requirement.
   public func hello(timeout: TimeInterval = 3) -> HelperResponse? {
+    send(.hello(clientVersion: nil), timeout: timeout)
+  }
+
+  /// The helper's own account of itself: version, safe mode, app state, power schedule, pmset drift.
+  public func helperStatus(timeout: TimeInterval = 5) -> HelperResponse? {
+    send(.helperStatus, timeout: timeout)
+  }
+
+  /// Hands a server-signed envelope to the helper, which verifies it again before it does anything.
+  public func runSignedCommand(envelope: String, deviceID: String, machine: String, timeout: TimeInterval = 40) -> HelperResponse? {
+    send(.runSignedCommand(envelope: envelope, deviceID: deviceID, machine: machine), timeout: timeout)
+  }
+
+  func send(_ command: HelperCommand, timeout: TimeInterval) -> HelperResponse? {
     let connection = makeConnection()
     connection.remoteObjectInterface = NSXPCInterface(with: HelperXPCProtocol.self)
     connection.setCodeSigningRequirement(requirement)
     connection.resume()
     defer { connection.invalidate() }
-    guard let request = try? HelperCodec.encode(.hello(clientVersion: nil)) else { return nil }
+    guard let request = try? HelperCodec.encode(command) else { return nil }
     let done = DispatchSemaphore(value: 0)
     let box = ResponseBox()
     let proxy = connection.remoteObjectProxyWithErrorHandler { _ in done.signal() }

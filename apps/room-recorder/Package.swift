@@ -28,7 +28,7 @@ var targets: [Target] = [
       ? [.define("ETA_DURABILITY_FAULT_PROBE")]
       : []
   ),
-  .target(name: "HelperCore"),
+  .target(name: "HelperCore", dependencies: ["FleetCore"]),
   .target(name: "FleetCore"),
   .target(
     name: "RoomRecorderCore",

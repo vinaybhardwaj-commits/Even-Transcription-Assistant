@@ -57,7 +57,9 @@ public struct FleetExecResult: Sendable {
 }
 
 public protocol FleetExecutor: Sendable {
-  func execute(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult
+  /// `envelope` is the verified envelope; the app forwards it whole to the root helper for the verbs that
+  /// run there, and the helper verifies it again for itself.
+  func execute(_ verb: FleetVerb, params: FleetParams, envelope: FleetEnvelope) async -> FleetExecResult
 }
 
 public struct FleetClientConfig: Sendable {
@@ -293,9 +295,12 @@ public actor FleetClient {
     }
     let started = clock()
     let verifier = FleetVerifier(serverKeys: serverKeys, deviceID: deviceID, machine: config.machine)
+    let rates = FleetRateState(
+      privilegedInLastHour: state.privilegedRuns(inHourBefore: now()),
+      secondsSinceLastReset: state.lastCoreaudiodReset.map { now() - $0 })
     let verdict = verifier.verify(
       json, now: started, nonceSeen: { [state] in state.nonceSeen($0) }, gates: await gates(),
-      privilegedRunsInLastHour: state.privilegedRuns(inHourBefore: now()), killSwitch: killSwitch)
+      rates: rates, killSwitch: killSwitch)
     switch verdict {
     case .failure(let refusal):
       // Without a cmd_id there is nothing to report against; the server will offer it again until it expires.
@@ -309,8 +314,9 @@ public actor FleetClient {
     case .success(let accepted):
       state.remember(nonce: accepted.envelope.nonce)
       if accepted.verb.isPrivileged { state.recordPrivilegedRun(at: now()) }
+      if accepted.verb == .coreaudiodReset { state.lastCoreaudiodReset = now() }
       persist()
-      let result = await executor.execute(accepted.verb, params: accepted.params, commandID: accepted.envelope.cmdID)
+      let result = await executor.execute(accepted.verb, params: accepted.params, envelope: accepted.envelope)
       await finish(
         cmdID: accepted.envelope.cmdID, deviceID: deviceID, outcome: result.outcome.rawValue,
         reason: result.reason, detail: result.detail, started: started, after: result.afterResultPosted)

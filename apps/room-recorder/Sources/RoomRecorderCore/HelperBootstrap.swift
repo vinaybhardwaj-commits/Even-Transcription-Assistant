@@ -135,6 +135,9 @@ public enum HelperBootstrap {
     public var helperVersion: String?
     public var xpcOK: Bool?
     public var error: String?
+    public var helperState: String?
+    public var powerSchedule: String?
+    public var pmsetDrift: String?
   }
 
   /// One probe of the helper, in whichever mode it runs (0.1.32).
@@ -160,7 +163,9 @@ public enum HelperBootstrap {
       let answering = reply?.ok == true
       return Probe(
         mode: "launchd", registration: answering ? "enabled" : "notAnswering",
-        helperVersion: reply?.detail["helper_version"], xpcOK: answering, error: nil)
+        helperVersion: reply?.detail["helper_version"], xpcOK: answering, error: nil,
+        helperState: answering ? reply?.detail["state"] : "not_answering",
+        powerSchedule: reply?.detail["power_schedule"], pmsetDrift: reply?.detail["pmset_drift"])
     }
     let result = registrationPass(service: service, openSettings: openSettings, state: &state, log: log)
     var version: String?
@@ -187,10 +192,12 @@ public enum HelperBootstrap {
       while !Task.isCancelled {
         let found = probe(
           systemPlistExists: { FileManager.default.fileExists(atPath: HelperIdentity.systemDaemonPlistPath) },
-          service: SMAppDaemonService(), hello: { HelperClient().hello() },
+          service: SMAppDaemonService(), hello: { HelperClient().helperStatus() },
           openSettings: { SMAppService.openSystemSettingsLoginItems() }, state: &registration, log: log)
         HelperStatusCache.shared.set(
-          HelperSnapshot(registration: found.registration, helperVersion: found.helperVersion, xpcOK: found.xpcOK, mode: found.mode),
+          HelperSnapshot(
+            registration: found.registration, helperVersion: found.helperVersion, xpcOK: found.xpcOK, mode: found.mode,
+            helperState: found.helperState, powerSchedule: found.powerSchedule, pmsetDrift: found.pmsetDrift),
           error: found.error)
         let summary = "\(found.mode)/\(found.registration)/\(found.xpcOK.map(String.init(describing:)) ?? "-")"
         if lastLogged != summary {

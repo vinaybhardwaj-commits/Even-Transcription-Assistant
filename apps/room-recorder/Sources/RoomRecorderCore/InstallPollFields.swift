@@ -104,6 +104,10 @@ public struct InstallPollFields: Equatable, Sendable {
   public var helperRegistrationError: String?
   /// 0.1.32. `launchd`, `smappservice` or `none`.
   public var helperMode: String?
+  /// 0.1.35. The helper's own account of itself, as the app read it over XPC.
+  public var helperState: String?
+  public var powerSchedule: String?
+  public var pmsetDrift: String?
 
   public init(
     installID: String,
@@ -334,6 +338,9 @@ public struct InstallPollFields: Equatable, Sendable {
     add("helper_version", helperVersion)
     add("helper_registration", helperRegistration)
     add("helper_mode", helperMode)
+    add("helper_state", helperState)
+    add("power_schedule", powerSchedule)
+    add("pmset_drift", pmsetDrift)
     add("helper_registration_error", helperRegistrationError.map { String($0.prefix(200)) })
     if let helperXPCOK {
       items.append(URLQueryItem(name: "helper_xpc_ok", value: helperXPCOK ? "true" : "false"))

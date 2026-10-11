@@ -1,3 +1,4 @@
+import FleetCore
 import Foundation
 
 /// The seam #40 plugs the outbound long-poll into. The helper starts it after the XPC listener is
@@ -20,9 +21,15 @@ public final class NullControlChannel: HelperControlChannel {
 /// allow-listed and then answered `not_implemented`; "no root work beyond hello" (#39).
 public final class HelperService: @unchecked Sendable {
   public let safeMode: Bool
+  private let runner: HelperCommandRunner?
+  private let statusDetail: (@Sendable () -> [String: String])?
 
-  public init(safeMode: Bool) {
+  public init(
+    safeMode: Bool, runner: HelperCommandRunner? = nil, statusDetail: (@Sendable () -> [String: String])? = nil
+  ) {
     self.safeMode = safeMode
+    self.runner = runner
+    self.statusDetail = statusDetail
   }
 
   public func handle(_ request: Data) -> Data {
@@ -36,13 +43,24 @@ public final class HelperService: @unchecked Sendable {
   }
 
   func respond(to command: HelperCommand) -> HelperResponse {
-    let base = [
+    var base = [
       "helper_version": HelperIdentity.helperVersion,
       "safe_mode": safeMode ? "true" : "false",
     ]
     switch command {
-    case .hello, .helperStatus:
+    case .hello:
       return HelperResponse(ok: true, code: "ok", detail: base)
+    case .helperStatus:
+      for (key, value) in statusDetail?() ?? [:] { base[key] = value }
+      return HelperResponse(ok: true, code: "ok", detail: base)
+    case .runSignedCommand(let envelope, let deviceID, let machine):
+      guard let runner else { return HelperResponse(ok: false, code: "not_implemented", detail: base) }
+      let outcome = runner.run(envelopeJSON: envelope, deviceID: deviceID, machine: machine)
+      var detail = base
+      detail["outcome"] = outcome.kind.rawValue
+      detail["reason"] = outcome.reason ?? ""
+      detail["detail_json"] = FleetJSON.object(outcome.detail).canonical
+      return HelperResponse(ok: outcome.kind == .ok, code: outcome.reason ?? outcome.kind.rawValue, detail: detail)
     case .appStatus, .runAppVerb, .requestBundleUpdate:
       return HelperResponse(ok: false, code: "not_implemented", detail: base)
     }

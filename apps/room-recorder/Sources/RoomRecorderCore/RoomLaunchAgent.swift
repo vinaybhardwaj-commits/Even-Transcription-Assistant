@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import HelperCore
 
 /// The recorder's per-user LaunchAgent plist, stated once so `install-launch-agent` and its test
 /// read the same dictionary.
@@ -18,16 +19,8 @@ public enum RoomLaunchAgent {
   public static let throttleInterval = 30
 
   public static func plist(executablePath: String, rootPath: String, logPath: String) -> [String: Any] {
-    [
-      "Label": label,
-      "ProgramArguments": [executablePath, "run", "--root", rootPath],
-      "RunAtLoad": true,
-      "KeepAlive": true,
-      "ThrottleInterval": throttleInterval,
-      "ProcessType": "Interactive",
-      "StandardOutPath": logPath,
-      "StandardErrorPath": logPath,
-    ]
+    // One definition, shared with the root helper's watchdog, which rewrites this file when it goes missing.
+    LaunchAgentPlist.dictionary(executablePath: executablePath, rootPath: rootPath, logPath: logPath)
   }
 
   /// A retired install, or a Mac that was never enrolled, is a deliberate stop: there is nothing
