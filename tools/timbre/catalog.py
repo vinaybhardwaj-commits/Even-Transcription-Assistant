@@ -9,7 +9,7 @@ from dataclasses import dataclass
 class ModelSpec:
     name: str
     model_id: str
-    kind: str  # prosody | dimensional | embedding | categorical
+    kind: str  # prosody | dimensional | embedding | categorical | api
     licence: str
     commercial_note: str
     # Minimum MemAvailable before this harness will try to load the weights.
@@ -91,6 +91,19 @@ SPECS: tuple[ModelSpec, ...] = (
         commercial_note="This is the ETA baseline that writes room_emotion_window (migration 0089). Production on the Mini serves the int8 subfolder; this harness loads the fp32 root of the same repo so transformers can run it without a quantisation runtime. Seven labels: anger, disgust, enthusiasm, fear, happiness, neutral, sadness.",
         ram_gb=3.5,
         aliases=("wavlm", "aniemore", "baseline"),
+    ),
+    ModelSpec(
+        name="clef_omni_valence.v1",
+        model_id="@cf/cloudflare/clef-omni",
+        kind="api",
+        licence="Cloudflare Workers AI terms for Clef-omni. Patient-window audio to Workers AI is approved for Timbre.",
+        commercial_note=(
+            "Valence only. Billed at US$0.15 per million input tokens. "
+            "Requires TIMBRE_CLEF=1 and CF_WORKERS_AI_TOKEN (or TIMBRE_CLEF_MOCK=1). "
+            "No local weights. arousal_ev is diagnostic and is not the Timbre arousal score."
+        ),
+        ram_gb=0.2,
+        aliases=("clef", "clef_omni", "clef_valence"),
     ),
 )
 

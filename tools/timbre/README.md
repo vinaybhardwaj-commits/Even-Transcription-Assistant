@@ -188,6 +188,7 @@ No checkpoint id was substituted. The Aniemore row is the same Hugging Face repo
 | `emotion2vec_plus_large.v1` | `emotion2vec/emotion2vec_plus_large` | card says `other` (FunASR model-license); FunASR code is MIT |
 | `whisper_large_v3_encoder.v1` | `openai/whisper-large-v3` encoder, mean-pooled | MIT |
 | `wavlm_aniemore.v1` | `Aniemore/wavlm-emotion-v1-crosslingual` | MIT (follows `microsoft/wavlm-large`) |
+| `clef_omni_valence.v1` | `@cf/cloudflare/clef-omni` (Workers AI) | Cloudflare Workers AI terms. Patient audio is approved for Timbre. |
 
 Commercial openSMILE and audEERING licences are being procured (architecture issue #81, T-12). MSP-Podcast terms may still bind the Odyssey, Vox-Profile, and audEERING dimensional checkpoints. emotion2vec attribution is called out in that same issue.
 
@@ -275,3 +276,42 @@ Measured on a CPU box with about 4.7 GB MemAvailable, Python 3.11, torch 2.14.1+
 The first call in a fresh process is slower because it loads the checkpoint. Re-run with `make -C tools/timbre test-all`. Results land in `TIMBRE_SMOKE_LOG` (default `/tmp/timbre-smoke-timings.json`). A model under its `ram_gb` floor, or missing its Python package, is skipped. A loaded model that returns a non-finite score fails.
 
 On a shared 8-vCPU box the same CPU path was about 5× slower than the table above. audEERING there was about 0.23 s per second of audio, against 0.048 s here.
+
+## Clef-omni valence
+
+`clef_omni_valence.v1` is an API extractor (no local weights). It posts one 16 kHz mono WAV per patient window to Workers AI `@cf/cloudflare/clef-omni`. Question set `timbre-clef-v1` asks a 1–5 valence score (very negative … very positive), a diagnostic 1–5 arousal score, and three noul questions (`anxious`, `engaged`, `one_patient`). The valence column is the expected value of the 1–5 distribution. `arousal_ev` is not the Timbre arousal score.
+
+The call refuses unless `TIMBRE_CLEF=1`. `TIMBRE_CLEF_MOCK=1` is a deterministic offline mock and still needs that switch. Auth is `CF_WORKERS_AI_TOKEN`. `CF_ACCOUNT_ID` may be omitted when `R2_ENDPOINT` is `https://<account>.r2.cloudflarestorage.com`.
+
+```bash
+TIMBRE_CLEF=1 CF_WORKERS_AI_TOKEN=... CF_ACCOUNT_ID=... \
+  python -m tools.timbre.clef_omni \
+  --windows windows.csv --audio-dir DIR --out results/clef/
+
+TIMBRE_CLEF=1 TIMBRE_CLEF_MOCK=1 \
+  python -m tools.timbre.clef_omni \
+  --windows windows.csv --audio-dir DIR --out results/clef/
+```
+
+Optional: `TIMBRE_CLEF_CACHE`, `TIMBRE_CLEF_COST_LOG`. Default concurrency is 4. Clips over 8 MiB or 300 s are refused, and a request never carries more than 4 clips. Retries back off on 429 and 5xx. The cache key is the wav sha256 plus `timbre-clef-v1`. A billed cost-log line is that call's input tokens times US$0.15 per million. Mock runs and cache hits are logged with `billed` false. Logs do not contain audio or the token.
+
+When the windows CSV already has `purity` and `pure_patient_s`, a window that fails `PurityRule` is `unscorable` with reason `purity` and no valence. Columns that were never written are not treated as a failure. `python -m tools.timbre.run --models clef_omni_valence.v1` uses the same client but does not read those purity columns.
+
+`calibrate.py` centre-scales Odyssey arousal and Clef valence per room, else per `doctor_uid8`, else with the global median and IQR (minimum cell size default 8). An isotonic map fitted on gold batches 1 and 2 then sends the centred value onto the 1–5 rater scale. The raw column is kept. The JSON stores aggregates only.
+
+```bash
+python -m tools.timbre.calibrate fit \
+  --scores results/features.parquet --labels gold.csv \
+  --score-col odyssey_wavlm_dim.v1__arousal --gold-col arousal \
+  --out results/odyssey_arousal.calib.json
+
+python -m tools.timbre.calibrate fit \
+  --scores results/features.parquet --labels gold.csv \
+  --score-col clef_omni_valence.v1__valence --gold-col valence \
+  --out results/clef_valence.calib.json
+
+python -m tools.timbre.calibrate apply \
+  --scores results/features.parquet \
+  --calibration results/clef_valence.calib.json \
+  --out results/features.calibrated.parquet
+```
