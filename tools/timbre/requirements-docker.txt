@@ -1,0 +1,8 @@
+# Image dependencies on top of a CUDA torch base. Torch itself comes from the
+# image (pytorch/pytorch); do not add the CPU wheel here.
+-r requirements-fast.txt
+transformers>=4.44
+opensmile>=2.5
+huggingface_hub>=0.24
+safetensors>=0.4
+boto3>=1.34

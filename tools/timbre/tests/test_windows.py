@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from tools.timbre.audio import read_audio, synth_speech, write_wav
-from tools.timbre.windows import WindowsError, load_windows
+from tools.timbre.windows import Clip, WindowsError, generate_windows, load_clips, load_windows, window_id_at
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -71,6 +71,48 @@ def test_missing_column_and_bad_id(tmp_path):
     )
     with pytest.raises(WindowsError, match="path"):
         load_windows(path_id)
+
+
+def test_generate_windows_uses_the_seven_digit_id_and_drops_a_short_tail():
+    clip = Clip(
+        clip_id="synthA",
+        room="ROOM-A",
+        date="2026-01-01",
+        duration_s=25,
+        r2_key="consult-clips/synth/a.wav",
+        lang="en",
+        phase="consult",
+        role="patient",
+        doctor_uid8="d0000001",
+    )
+    rows = generate_windows(clip, window_s=10, hop_s=10)
+    assert [r.window_id for r in rows] == ["synthA_p0000000", "synthA_p0010000"]
+    assert rows[0].clip_id == "synthA"
+    assert rows[0].end_s == 10
+    assert rows[1].start_s == 10
+    assert rows[0].meta["r2_key"].endswith(".wav")
+    assert rows[0].meta["doctor_uid8"] == "d0000001"
+    assert window_id_at("synthA", 0) == rows[0].window_id
+
+
+def test_generate_windows_cap_and_bad_clip_id():
+    clip = Clip("synthB", "ROOM-B", "2026-01-02", 30, "consult-clips/synth/b.wav")
+    with pytest.raises(WindowsError, match="cap"):
+        generate_windows(clip, window_s=0.001, hop_s=0.001, max_windows=2)
+    with pytest.raises(WindowsError, match="path"):
+        window_id_at("a/b", 0)
+
+
+def test_load_clips_rejects_a_duplicate(tmp_path):
+    path = tmp_path / "clips.csv"
+    path.write_text(
+        "clip_id,room,date,r2_key,duration_s\n"
+        "synthA,ROOM-A,2026-01-01,consult-clips/a.wav,4\n"
+        "synthA,ROOM-A,2026-01-01,consult-clips/a.wav,4\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(WindowsError, match="duplicate"):
+        load_clips(path)
 
 
 def test_write_wav_round_trip(tmp_path):
