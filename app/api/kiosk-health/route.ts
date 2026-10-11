@@ -6,7 +6,7 @@
  *       OR Authorization: Device <room session JWT> (TS-H10 #47: the room app posts the helper's spooled events with its existing device credential, verified exactly as the bench
  *       poll verifies it). A Device post may carry only source "helper", only for a Mac that belongs to the JWT's own room, and never kind steward.result; any other event is
  *       rejected by name (wrong_source · machine_not_in_room · room_mismatch · kind_not_allowed). An invalid Device token → 401.
- * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, a DIFFERENT source, ts within 2 s) is already stored is not stored again; it is counted in
+ * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, the OTHER source of the daemon/helper pair, ts within 2 s) is already stored AND not yet used by another event is not stored again (pairing is one-to-one, nearest first); it is counted in
  * `deduped` and recorded in kiosk_health_dedupe (migration 0154).
  * Idempotent on (machine, boot_id, seq): replays of a spooled batch insert nothing new and still answer 200.
  *
@@ -25,7 +25,7 @@ import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-healt
 import { tokenOk } from "@/lib/kiosk-health-auth";
 import { verifyRoomJwt } from "@/lib/room-auth";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
-import { loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
+import { loadLedgerNear, loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
 import { applyStewardResults, STEWARD_RESULT_KIND } from "@/lib/steward/results";
 import type { StewardSql } from "@/lib/steward/tickets";
 
@@ -138,7 +138,7 @@ export async function POST(req: NextRequest) {
   // Cross-source de-duplication (the shadow period): skip an event whose twin from the OTHER source is already stored.
   let deduped = 0;
   try {
-    const { keep, dropped } = splitTwins(rows, await loadStoredNear(sql as never, rows));
+    const { keep, dropped } = splitTwins(rows, await loadStoredNear(sql as never, rows), await loadLedgerNear(sql as never, rows));
     if (dropped.length > 0) {
       rows = keep;
       deduped = dropped.length;

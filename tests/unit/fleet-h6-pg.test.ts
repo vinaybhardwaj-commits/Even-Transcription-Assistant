@@ -303,15 +303,66 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
       expect((await kh(batch, await device())).json).toMatchObject({ accepted: 0, duplicates: 1, deduped: 0 });
     });
 
-    it("a failing dedupe lookup stores everything (a duplicate beats a lost event) and still answers 200", async () => {
+    describe("ONE-TO-ONE pairing: distinct events are never lost (refute F1)", () => {
+      const sleepAt = (o: number, source: string, seq: number, payload: Record<string, unknown>, boot = `b-${source}`) => ev(seq, source, o, { boot_id: boot, payload });
+      const payloads = async () => (await q<{ source: string; payload: { n: number } }>`SELECT source, payload FROM kiosk_health_events ORDER BY id`).map((r) => `${r.source}:${r.payload.n}`);
+
+      it("THE PROBE: one stored daemon event, then 3 DISTINCT helper events at -1.5 s, 0, +1.5 s -> 2 accepted (their payloads stored), exactly 1 deduped (the nearest)", async () => {
+        await kh({ events: [sleepAt(0, "daemon", 1, { n: 0 })] }, BEARER);
+        const r = await kh({ events: [sleepAt(-1500, "helper", 1, { n: 1 }), sleepAt(0, "helper", 2, { n: 2 }), sleepAt(1500, "helper", 3, { n: 3 })] }, await device());
+        expect(r.json).toMatchObject({ accepted: 2, deduped: 1, duplicates: 0, rejected: 0 });
+        expect(await payloads()).toEqual(["daemon:0", "helper:1", "helper:3"]); // the helper event at 0 (the nearest) was the twin
+        const led = await q<{ source: string; twin_source: string; ts: string; twin_ts: string }>`SELECT source, twin_source, ts, twin_ts FROM kiosk_health_dedupe`;
+        expect(led.map((l) => [l.source, l.twin_source, new Date(l.ts).toISOString(), new Date(l.twin_ts).toISOString()])).toEqual([["helper", "daemon", "2026-10-11T10:00:00.000Z", "2026-10-11T10:00:00.000Z"]]);
+      });
+
+      it("THE REVERSE: one stored helper event, then 2 daemon events within 1 s -> 1 accepted, 1 deduped", async () => {
+        await kh({ events: [sleepAt(0, "helper", 1, { n: 0 })] }, await device());
+        const r = await kh({ events: [sleepAt(-900, "daemon", 1, { n: 1 }), sleepAt(300, "daemon", 2, { n: 2 })] }, BEARER);
+        expect(r.json).toMatchObject({ accepted: 1, deduped: 1 });
+        expect(await payloads()).toEqual(["helper:0", "daemon:1"]);
+      });
+
+      it("a stored event that has ALREADY absorbed one is not reusable in a LATER batch; a replay of the skipped batch is skipped again without using another twin", async () => {
+        await kh({ events: [sleepAt(0, "daemon", 1, { n: 0 })] }, BEARER);
+        const batch = { events: [sleepAt(-1500, "helper", 1, { n: 1 }), sleepAt(0, "helper", 2, { n: 2 }), sleepAt(1500, "helper", 3, { n: 3 })] };
+        await kh(batch, await device());
+        // the same batch again (a lost response): idempotency covers the two stored, the skipped one stays skipped
+        expect((await kh(batch, await device())).json).toMatchObject({ accepted: 0, duplicates: 2, deduped: 1 });
+        expect(await q`SELECT 1 FROM kiosk_health_dedupe`).toHaveLength(1);
+        expect((await stored()).length).toBe(3);
+        // a NEW helper event next to the already-used daemon event has no twin left
+        expect((await kh({ events: [sleepAt(200, "helper", 4, { n: 4 })] }, await device())).json).toMatchObject({ accepted: 1, deduped: 0 });
+        expect(await payloads()).toEqual(["daemon:0", "helper:1", "helper:3", "helper:4"]);
+      });
+
+      it("repeats on both sides pair off: two daemon events and three helper events -> two absorbed, one kept", async () => {
+        await kh({ events: [sleepAt(0, "daemon", 1, { n: 0 }), sleepAt(1000, "daemon", 2, { n: 1 })] }, BEARER);
+        const r = await kh({ events: [sleepAt(0, "helper", 1, { n: 2 }), sleepAt(1000, "helper", 2, { n: 3 }), sleepAt(500, "helper", 3, { n: 4 })] }, await device());
+        expect(r.json).toMatchObject({ accepted: 1, deduped: 2 });
+      });
+    });
+
+    it("C1: only the daemon/helper pair — a guard event and a daemon event 0.5 s apart BOTH land on the old Bearer path; so do guard vs helper and steward vs daemon", async () => {
+      const r = await kh({ events: [ev(1, "guard", 0), ev(2, "daemon", 500, { boot_id: "b-d" }), ev(3, "steward", 100, { boot_id: "b-s" })] }, BEARER);
+      expect(r.json).toMatchObject({ accepted: 3, deduped: 0 });
+      // a helper event 200 ms from the daemon event IS a twin of it (the pair), and only of it: guard and steward rows are never candidates
+      expect((await kh({ events: [ev(4, "helper", 300, { boot_id: "b-h" })] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
+      expect(await q<{ twin_source: string }>`SELECT twin_source FROM kiosk_health_dedupe`).toEqual([{ twin_source: "daemon" }]);
+      expect((await stored()).map((r) => r.source).sort()).toEqual(["daemon", "guard", "steward"]);
+    });
+
+    it("K17: a FAILING dedupe lookup stores everything (a duplicate beats a lost event) and still answers 200", async () => {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      pg.exec("ALTER TABLE kiosk_health_events RENAME COLUMN source TO source_x");
+      await kh({ events: [ev(1, "daemon", 0)] }, BEARER);
+      pg.exec("ALTER TABLE kiosk_health_dedupe RENAME TO kiosk_health_dedupe_x");
       try {
-        // the insert itself needs the column too, so the lookup AND the insert fail: the answer is the existing 503 for a database fault
-        const r = await kh({ events: [ev(1, "helper", 0)] }, await device());
-        expect(r.status).toBe(503);
+        const r = await kh({ events: [ev(1, "helper", 100, { boot_id: "b-h" })] }, await device());
+        expect(r.status).toBe(200);
+        expect(r.json).toMatchObject({ accepted: 1, deduped: 0 }); // would have been a twin; the lookup could not run, so it is stored
+        expect((await stored()).length).toBe(2);
       } finally {
-        pg.exec("ALTER TABLE kiosk_health_events RENAME COLUMN source_x TO source");
+        pg.exec("ALTER TABLE kiosk_health_dedupe_x RENAME TO kiosk_health_dedupe");
       }
     });
   });
