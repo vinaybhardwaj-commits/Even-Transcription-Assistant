@@ -6,29 +6,27 @@ Container, matching tools/nemotron-worker/lab.py and lib/diarize-nemotron/lab.ts
 
 The worker's packer sets ``rows`` to the frame count and writes ``rows * cols``
 payload bytes (``cols`` = speaker slots). u8 values are ``round(p * scale)`` with
-``scale`` 255.
+``scale`` 255. Column ``i`` is NeMo ``speaker_i`` (the tensor from
+``diarize_with_probs``). That is not ETA ``spk{i}``: ``to_turns`` renames labels
+to ``spk0``, ``spk1``, … in first-speech order. ``slots.align_labels`` joins the
+two when turns are available.
 
-Open question (architecture issue #70, Designer comment, 10 Oct 2026): every
-object under ``eta-audio/lab/nemotron-probs/bw_<room>_<window_start_ms>_primary.nlp``
-decompresses to 720,197 bytes with header ``rows=90003, cols=8, frame_ms=80``.
-That length is a canonical (90003 × 8) matrix plus a short JSON header, so
-``rows`` = frames is the payload-valid reading and the duration is 7200.24 s,
-not the 900 s of a 15-minute window.
-
-Two timebases both land on 900.03 s, and they are the same number when cols is 8:
-
-* treat header ``rows`` as frames × cols: ``(90003 / 8) * 80 ms``
-* treat header ``rows`` as frames at a 10 ms hop: ``90003 * 10 ms``
-
-90003 is not divisible by 8, so the product reading cannot reshape this payload
-without dropping a 3-frame remainder. A 10 ms hop fits the stored shape exactly.
-The worker hardcodes ``frame_ms: 80`` in ``pack_nlp`` regardless of the tensor
-hop, which is why a wrong timebase is plausible. This module does not guess a
-reshape. It decodes whichever layout the byte length supports, returns a
-``(frames, speakers)`` float array, and sets ``duration_ok`` from the selected
-timebase against the expected window (default 900 s).
+Frame step. The worker hardcodes ``frame_ms: 80`` in ``pack_nlp`` regardless of
+the tensor hop (``tools/nemotron-worker/worker.py``). Production objects are
+``rows=90003``, ``cols=8``, so the stored matrix is 90,003 frames, not
+``90003/8``. ``90003 * 10 ms = 900.03 s``, the 15-minute bench window;
+``90003 * 80 ms = 7200.24 s``. ``resolve_frame_step`` infers the hop from the
+known duration and the frame count, snaps to a whole millisecond in 1..100 ms
+when the ratio is within 2%, and uses that hop when it explains the duration
+better than the header. The header value is kept when it already fits, and when
+the ratio is not a sane hop (a 100-frame file is not assigned a 9 s step just
+because the caller passed 900 s). A disagreement is a ``FrameStepWarning`` and
+is copied onto ``NlpLoad.frame_step_warning``. This reader still does not
+reshape the payload.
 
 R2 fetch is optional and read-only (GetObject on ``lab/nemotron-probs/*.nlp``).
+Credentials, when ``client`` is omitted: ``R2_ENDPOINT``, ``R2_ACCESS_KEY_ID``,
+``R2_SECRET_ACCESS_KEY``. Tests pass a fake client and do not read those.
 """
 
 from __future__ import annotations
@@ -37,6 +35,7 @@ import gzip
 import json
 import os
 import struct
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,17 +48,29 @@ EXPECTED_WINDOW_S = 900.0
 DEFAULT_TOL_S = 5.0
 MAX_HEADER_BYTES = 1_000_000
 
-OPEN_QUESTION = (
-    "Production NLP1 objects are payload-valid as rows=frames (90003 x 8 u8, "
-    "frame_ms 80 -> 7200.24 s), which fails a 900 s check. (rows/cols)*80 ms and "
-    "rows*10 ms are both 900.03 s when cols=8, but 90003 % 8 == 3 so the product "
-    "reading cannot reshape the measured payload. A 10 ms hop fits the stored shape. "
-    "The reader reports both and does not drop samples."
+# Whole-millisecond hops this container has meant. 100 ms is an upper bound,
+# not a third production hop: it rejects a ratio such as 9 s/frame when the
+# caller passes a 900 s duration for a short file.
+_MAX_SANE_HOP_MS = 100
+_SNAP_REL = 0.02
+_DISAGREE_MS = 0.5
+
+FRAME_STEP_NOTE = (
+    "The packer writes frame_ms 80. Production objects are 90003 x 8 frames; "
+    "90003 * 10 ms = 900.03 s (the bench window) and 90003 * 80 ms = 7200.24 s. "
+    "resolve_frame_step infers the hop from the known duration and the frame count. "
+    "The header hop is kept when it already fits, or when the ratio is not a "
+    "whole-millisecond hop in 1..100 ms. Samples are not dropped and the matrix "
+    "is not reshaped."
 )
 
 
 class NlpError(ValueError):
     pass
+
+
+class FrameStepWarning(UserWarning):
+    """The header ``frame_ms`` does not match duration / frame count."""
 
 
 @dataclass
@@ -69,13 +80,16 @@ class NlpLoad:
     interpretation: str
     frames: int
     speakers: int
-    frame_ms: float
-    duration_s: float
+    frame_ms: float  # hop to use, in milliseconds. Not always the header value.
+    duration_s: float  # frames * frame_ms. The header clock stays on candidates.
     duration_ok: bool
     expected_duration_s: float
     tol_s: float
     candidates: list[dict] = field(default_factory=list)
     sanity: dict = field(default_factory=dict)
+    header_frame_ms: float = 0.0
+    inferred_frame_ms: float | None = None  # raw duration/frames ratio, before snapping
+    frame_step_warning: str | None = None
 
 
 def nlp_object_key(room_token: str, window_start_ms: int) -> str:
@@ -140,7 +154,12 @@ def load_nlp(
     expected_duration_s: float = EXPECTED_WINDOW_S,
     tol_s: float = DEFAULT_TOL_S,
 ) -> NlpLoad:
-    """Decode an NLP1 gzip blob or a path to one. See the module docstring."""
+    """Decode an NLP1 gzip blob or a path to one.
+
+    ``expected_duration_s`` is the audio length the caller already knows (a bench
+    window is 900 s). It is the duration ``resolve_frame_step`` divides by the
+    frame count. A header hop that disagrees with that ratio warns.
+    """
     blob = source if isinstance(source, (bytes, bytearray)) else Path(source).read_bytes()
     try:
         raw = gzip.decompress(bytes(blob))
@@ -158,7 +177,98 @@ def load_nlp(
     if not isinstance(header, dict):
         raise NlpError("NLP1 header must be a JSON object")
     payload = raw[8 + hlen :]
-    return _decode(header, payload, expected_duration_s=expected_duration_s, tol_s=tol_s)
+    loaded = _decode(header, payload, expected_duration_s=expected_duration_s, tol_s=tol_s)
+    if loaded.frame_step_warning:
+        warnings.warn(loaded.frame_step_warning, FrameStepWarning, stacklevel=2)
+    return loaded
+
+
+def load_probs_source(
+    source: bytes | Path | str,
+    *,
+    client=None,
+    expected_duration_s: float = EXPECTED_WINDOW_S,
+    tol_s: float = DEFAULT_TOL_S,
+) -> NlpLoad:
+    """Load NLP1 bytes, a filesystem path, or an ``lab/nemotron-probs/*.nlp`` key.
+
+    A key is fetched with ``fetch_nlp_object`` (GetObject only). Pass ``client``
+    in tests. A real run with ``client=None`` reads ``R2_ENDPOINT``,
+    ``R2_ACCESS_KEY_ID`` and ``R2_SECRET_ACCESS_KEY`` and never prints them.
+    """
+    if isinstance(source, str) and source.startswith(KEY_PREFIX):
+        blob = fetch_nlp_object(source, client=client)
+        return load_nlp(blob, expected_duration_s=expected_duration_s, tol_s=tol_s)
+    return load_nlp(source, expected_duration_s=expected_duration_s, tol_s=tol_s)
+
+
+def resolve_frame_step(
+    n_frames: int,
+    header_frame_ms: float,
+    duration_s: float,
+    *,
+    tol_s: float,
+) -> dict:
+    """Infer the hop from ``duration_s / n_frames`` and compare it to the header.
+
+    The snapped hop replaces the header only when all of these hold: the raw
+    ratio is within 2% of a whole millisecond in 1..100 ms, that hop lands
+    inside ``tol_s`` of ``duration_s``, and it is strictly closer than the
+    header hop. Otherwise the header hop is kept. Either disagreement is
+    returned as ``warning`` (the caller raises ``FrameStepWarning``).
+    """
+    header = float(header_frame_ms)
+    known = float(duration_s)
+    tol = float(tol_s)
+    n = int(n_frames)
+    if n < 0:
+        raise NlpError("n_frames must be >= 0")
+    if header <= 0 or known <= 0 or tol < 0:
+        raise NlpError("header frame_ms and duration_s must be > 0")
+    if n == 0:
+        return {
+            "frame_ms": header,
+            "header_frame_ms": header,
+            "inferred_ms": None,
+            "snapped": False,
+            "adopted": False,
+            "warning": None,
+            "duration_s": 0.0,
+        }
+    raw = known * 1000.0 / n
+    snapped_i = int(round(raw))
+    snap_ok = 1 <= snapped_i <= _MAX_SANE_HOP_MS and abs(raw - snapped_i) <= _SNAP_REL * snapped_i
+    inferred = float(snapped_i) if snap_ok else raw
+    header_duration = n * header / 1000.0
+    inferred_duration = n * inferred / 1000.0
+    header_err = abs(header_duration - known)
+    inferred_err = abs(inferred_duration - known)
+    disagrees = abs(inferred - header) > _DISAGREE_MS
+    adopted = bool(snap_ok and disagrees and inferred_err <= tol and inferred_err < header_err)
+    if adopted:
+        warning = (
+            f"header frame_ms {header:g} disagrees with {inferred:g} ms "
+            f"inferred from {known:g} s / {n} frames; using {inferred:g} ms"
+        )
+        step, duration = inferred, inferred_duration
+    else:
+        step, duration = header, header_duration
+        if abs(raw - header) > _DISAGREE_MS and header_err > tol:
+            warning = (
+                f"header frame_ms {header:g} disagrees with {raw:.3f} ms "
+                f"inferred from {known:g} s / {n} frames; header step kept"
+            )
+        else:
+            warning = None
+    return {
+        "frame_ms": float(step),
+        "header_frame_ms": header,
+        "inferred_ms": float(raw),
+        "snapped": bool(snap_ok),
+        "adopted": adopted,
+        "warning": warning,
+        "duration_s": float(duration),
+    }
 
 
 def patient_frames(
@@ -241,29 +351,46 @@ def _decode(header: dict, payload: bytes, *, expected_duration_s: float, tol_s: 
             f"({rows * cols} bytes) nor rows=frames*cols ({rows} bytes)"
         )
     chosen = _select(candidates, expected_duration_s, tol_s)
-    duration_ok = abs(chosen["duration_s"] - float(expected_duration_s)) <= float(tol_s)
+    probs = chosen["probs"]
+    resolved = resolve_frame_step(
+        int(probs.shape[0]),
+        frame_ms,
+        float(expected_duration_s),
+        tol_s=float(tol_s),
+    )
+    duration_s = float(resolved["duration_s"])
+    duration_ok = abs(duration_s - float(expected_duration_s)) <= float(tol_s)
     hypotheses = {
         "rows_are_frames_s": rows * frame_ms / 1000.0,
         "rows_over_cols_s": (rows / cols) * frame_ms / 1000.0,
         "ten_ms_if_rows_are_frames_s": rows * 0.010,
     }
-    probs = chosen["probs"]
-    warnings = []
+    notes: list[str] = []
     if probs.size and float(np.nanmax(probs)) > 1.01:
-        warnings.append("values_exceed_1_check_scale")
+        notes.append("values_exceed_1_check_scale")
+    if resolved["warning"]:
+        notes.append(resolved["warning"])
     sanity = {
-        "open_question": OPEN_QUESTION,
+        "frame_step_note": FRAME_STEP_NOTE,
         "payload_bytes": len(payload),
         "header_rows": rows,
         "header_cols": cols,
         "frame_ms": frame_ms,
+        "header_duration_s": int(probs.shape[0]) * frame_ms / 1000.0,
         "scale": scale,
         "hypotheses_s": hypotheses,
         "duration_ok": duration_ok,
         "expected_duration_s": float(expected_duration_s),
         "tol_s": float(tol_s),
         "selected": chosen["interpretation"],
-        "warnings": warnings,
+        "frame_step": {
+            "header_frame_ms": resolved["header_frame_ms"],
+            "inferred_ms": resolved["inferred_ms"],
+            "resolved_frame_ms": resolved["frame_ms"],
+            "adopted": resolved["adopted"],
+            "warning": resolved["warning"],
+        },
+        "warnings": notes,
         "tie_note": chosen.get("tie_note"),
     }
     return NlpLoad(
@@ -272,13 +399,16 @@ def _decode(header: dict, payload: bytes, *, expected_duration_s: float, tol_s: 
         interpretation=chosen["interpretation"],
         frames=int(probs.shape[0]),
         speakers=int(probs.shape[1]),
-        frame_ms=frame_ms,
-        duration_s=float(chosen["duration_s"]),
+        frame_ms=float(resolved["frame_ms"]),
+        duration_s=duration_s,
         duration_ok=bool(duration_ok),
         expected_duration_s=float(expected_duration_s),
         tol_s=float(tol_s),
         candidates=[{k: v for k, v in c.items() if k != "probs"} | {"shape": list(c["probs"].shape)} for c in candidates],
         sanity=sanity,
+        header_frame_ms=float(resolved["header_frame_ms"]),
+        inferred_frame_ms=None if resolved["inferred_ms"] is None else float(resolved["inferred_ms"]),
+        frame_step_warning=resolved["warning"],
     )
 
 

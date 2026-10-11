@@ -10,6 +10,8 @@ from tools.timbre.purity import (
     PurityRule,
     auroc_low_is_positive,
     embedding_purity,
+    frame_patient_scores,
+    fuse_purity,
     probs_purity,
     threshold_table,
 )
@@ -57,6 +59,14 @@ def test_probs_purity_dominance_overlap_and_doctor():
     assert s["pure_patient_s"] == pytest.approx(0.6)
     assert s["overlap_s"] == pytest.approx(0.2)
     assert s["doctor_s"] == pytest.approx(0.4)
+    frames = frame_patient_scores(p, 0, doctor_slot=1)
+    assert frames["pure"].sum() == 60
+    assert frames["patient_dominance"].shape == (100,)
+    assert frames["second_speaker_p"].shape == (100,)
+    # 60 frames of 0.9 dominance, 20 of 0.2, 20 of -0.95.
+    assert s["dominance_mean"] == pytest.approx(0.39)
+    assert s["second_speaker_p_mean"] == pytest.approx(0.12)
+    assert s["second_speaker_p_max"] == pytest.approx(0.6)
     # A doctor voiceprint hit on the first 10 patient frames removes them too.
     dc = np.zeros(100)
     dc[:10] = 0.7
@@ -70,6 +80,80 @@ def test_probs_purity_validation():
     with pytest.raises(PurityError):
         probs_purity(np.full((5, 2), np.nan), 0)
     assert probs_purity(np.zeros((5, 2)), 0)["purity"] is None
+
+
+def test_fuse_takes_the_worse_source_and_one_rule_decides():
+    fused = fuse_purity(
+        embedding={
+            "source": "embedding",
+            "purity": 0.9,
+            "pure_patient_s": 5.0,
+            "other_frac": 0.1,
+            "cos_patient_mean": 0.4,
+            "n_frames": 10,
+            "dominance_mean": 0.5,
+        },
+        probs={
+            "source": "probs",
+            "purity": 0.7,
+            "pure_patient_s": 4.0,
+            "other_frac": 0.4,
+            "n_frames": 20,
+            "dominance_mean": 0.3,
+            "second_speaker_p_mean": 0.2,
+            "second_speaker_p_max": 0.55,
+            "overlap_s": 1.0,
+        },
+    )
+    assert fused["source"] == "fused"
+    assert fused["purity"] == pytest.approx(0.7)
+    assert fused["pure_patient_s"] == pytest.approx(4.0)
+    assert fused["other_frac"] == pytest.approx(0.4)
+    assert fused["cos_patient_mean"] == pytest.approx(0.4)
+    assert fused["second_speaker_p_mean"] == pytest.approx(0.2)
+    assert fused["dominance_mean"] is None
+    assert fused["dominance_probs"] == pytest.approx(0.3)
+    judged = PurityRule().judge(
+        embedding={
+            "source": "embedding",
+            "purity": 0.9,
+            "pure_patient_s": 5.0,
+            "other_frac": 0.1,
+            "cos_patient_mean": 0.4,
+            "n_frames": 10,
+            "dominance_mean": 0.5,
+        },
+        probs={
+            "source": "probs",
+            "purity": 0.7,
+            "pure_patient_s": 4.0,
+            "other_frac": 0.4,
+            "n_frames": 20,
+            "dominance_mean": 0.3,
+            "cos_patient_mean": None,
+        },
+    )
+    assert judged["keep"] is True
+    assert judged["rule"]["min_purity"] == 0.6
+
+    low_cos = {
+        "source": "embedding",
+        "purity": 0.9,
+        "pure_patient_s": 5.0,
+        "cos_patient_mean": 0.2,
+        "n_frames": 10,
+    }
+    high_probs = {"source": "probs", "purity": 1.0, "pure_patient_s": 6.0, "n_frames": 12, "cos_patient_mean": None}
+    assert PurityRule().judge(embedding=low_cos, probs=high_probs)["keep"] is False
+
+    missing = fuse_purity(
+        embedding={"purity": None, "pure_patient_s": 0.0, "n_frames": 0},
+        probs={"purity": 0.9, "pure_patient_s": 5.0, "n_frames": 10},
+    )
+    assert missing["purity"] is None
+    assert PurityRule().passes(missing) is False
+    with pytest.raises(PurityError):
+        fuse_purity()
 
 
 def test_rule_defaults():
