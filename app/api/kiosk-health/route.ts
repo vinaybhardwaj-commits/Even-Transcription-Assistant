@@ -2,7 +2,12 @@
  * POST /api/kiosk-health — sink for the W1 on-device kiosk-health daemon (one row per event, append-only, table kiosk_health_events, migration 0126).
  *
  * Body: { events: [ { machine, room_id, install_id, boot_id, seq, source, kind, ts, payload } ... ] }, 1..500 items.
- * Auth: Authorization: Bearer ${KIOSK_HEALTH_INGEST_TOKEN}, constant-time compare. Missing/wrong → 401. Env unset → 500 (logged once).
+ * Auth: EITHER Authorization: Bearer ${KIOSK_HEALTH_INGEST_TOKEN}, constant-time compare (missing/wrong → 401; env unset → 500, logged once) — the standalone daemon, unchanged —
+ *       OR Authorization: Device <room session JWT> (TS-H10 #47: the room app posts the helper's spooled events with its existing device credential, verified exactly as the bench
+ *       poll verifies it). A Device post may carry only source "helper", only for a Mac that belongs to the JWT's own room, and never kind steward.result; any other event is
+ *       rejected by name (wrong_source · machine_not_in_room · room_mismatch · kind_not_allowed). An invalid Device token → 401.
+ * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, the OTHER source of the daemon/helper pair, ts within 2 s) is already stored AND not yet used by another event is not stored again (pairing is one-to-one, nearest first); it is counted in
+ * `deduped` and recorded in kiosk_health_dedupe (migration 0154).
  * Idempotent on (machine, boot_id, seq): replays of a spooled batch insert nothing new and still answer 200.
  *
  * Responses (the daemon deletes spooled lines only on 2xx):
@@ -18,6 +23,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-health-ingest";
 import { tokenOk } from "@/lib/kiosk-health-auth";
+import { verifyRoomJwt } from "@/lib/room-auth";
+import { normalizeHostname } from "@/lib/encounter-windows/types";
+import { loadLedgerNear, loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
 import { applyStewardResults, STEWARD_RESULT_KIND } from "@/lib/steward/results";
 import type { StewardSql } from "@/lib/steward/tickets";
 
@@ -58,15 +66,28 @@ async function insertChunk(rows: KioskHealthRow[]): Promise<number> {
 }
 
 export async function POST(req: NextRequest) {
-  const expected = process.env.KIOSK_HEALTH_INGEST_TOKEN?.trim(); // a token saved with a trailing newline must still match
-  if (!expected) {
-    if (!warnedUnset) {
-      warnedUnset = true;
-      console.error("[kiosk-health] KIOSK_HEALTH_INGEST_TOKEN is not set; ingest disabled");
+  const authz = req.headers.get("authorization") ?? "";
+  // TS-H10: the room app's device credential (the same room session JWT its bench poll carries) in the Authorization header; the daemon's bearer path below is unchanged.
+  let deviceRoom: string | null = null;
+  if (authz.startsWith("Device ")) {
+    try {
+      const claims = await verifyRoomJwt(authz.slice("Device ".length).trim());
+      deviceRoom = typeof claims.room_id === "string" && claims.room_id ? claims.room_id : null;
+    } catch {
+      deviceRoom = null;
     }
-    return reply(500, { ok: false, error: "not_configured" });
+    if (!deviceRoom) return reply(401, { ok: false, error: "unauthorized" });
+  } else {
+    const expected = process.env.KIOSK_HEALTH_INGEST_TOKEN?.trim(); // a token saved with a trailing newline must still match
+    if (!expected) {
+      if (!warnedUnset) {
+        warnedUnset = true;
+        console.error("[kiosk-health] KIOSK_HEALTH_INGEST_TOKEN is not set; ingest disabled");
+      }
+      return reply(500, { ok: false, error: "not_configured" });
+    }
+    if (!tokenOk(authz, expected)) return reply(401, { ok: false, error: "unauthorized" });
   }
-  if (!tokenOk(req.headers.get("authorization") ?? "", expected)) return reply(401, { ok: false, error: "unauthorized" });
 
   const declared = Number(req.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_BODY_CHARS) return reply(413, { ok: false, error: "body_too_large" });
@@ -88,16 +109,55 @@ export async function POST(req: NextRequest) {
   if (v.error) return reply(400, { ok: false, error: v.error });
 
   const rejected = [...v.rejected];
+  let rows = v.rows;
+
+  // A Device post is confined to its own room: the helper's source, this room's Macs, no steward results.
+  if (deviceRoom !== null) {
+    let mine: string[] = [];
+    try {
+      const installs = (await sql`SELECT hostname FROM room_install WHERE room_id = ${deviceRoom} AND retired_at IS NULL AND hostname IS NOT NULL`) as Array<{ hostname: string }>;
+      mine = installs.map((i) => normalizeHostname(i.hostname).toLowerCase());
+    } catch {
+      console.warn("[kiosk-health] device room lookup failed");
+      return reply(503, { ok: false, error: "db" });
+    }
+    const kept: KioskHealthRow[] = [];
+    for (const r of rows) {
+      const why =
+        r.source !== "helper" ? "wrong_source"
+        : r.kind === STEWARD_RESULT_KIND ? "kind_not_allowed"
+        : r.room_id !== null && r.room_id !== deviceRoom ? "room_mismatch"
+        : !mine.includes(normalizeHostname(r.machine).toLowerCase()) ? "machine_not_in_room"
+        : null;
+      if (why) rejected.push({ index: -1, reason: why });
+      else kept.push(r);
+    }
+    rows = kept;
+  }
+
+  // Cross-source de-duplication (the shadow period): skip an event whose twin from the OTHER source is already stored.
+  let deduped = 0;
+  try {
+    const { keep, dropped } = splitTwins(rows, await loadStoredNear(sql as never, rows), await loadLedgerNear(sql as never, rows));
+    if (dropped.length > 0) {
+      rows = keep;
+      deduped = dropped.length;
+      await recordDropped(sql as never, dropped);
+    }
+  } catch {
+    console.warn(`[kiosk-health] dedupe lookup failed, storing all rows=${rows.length}`); // a failed lookup stores everything: a duplicate is better than a lost event
+  }
+
   let accepted = 0;
   let attempted = 0; // valid rows whose insert outcome is known (inserted or duplicate)
-  for (let i = 0; i < v.rows.length; i += CHUNK) {
-    const chunk = v.rows.slice(i, i + CHUNK);
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
     try {
       accepted += await insertChunk(chunk);
       attempted += chunk.length;
     } catch (e) {
       if (!isDataFault(e)) {
-        console.warn(`[kiosk-health] insert failed: infrastructure fault, rows=${v.rows.length}`);
+        console.warn(`[kiosk-health] insert failed: infrastructure fault, rows=${rows.length}`);
         return reply(503, { ok: false, error: "db" });
       }
       // Postgres refused something in this chunk's data. Go row by row so good rows still land; refused rows count as rejected.
@@ -107,7 +167,7 @@ export async function POST(req: NextRequest) {
           attempted++;
         } catch (e2) {
           if (!isDataFault(e2)) {
-            console.warn(`[kiosk-health] insert failed: infrastructure fault, rows=${v.rows.length}`);
+            console.warn(`[kiosk-health] insert failed: infrastructure fault, rows=${rows.length}`);
             return reply(503, { ok: false, error: "db" });
           }
           rejected.push({ index: -1, reason: "db_data_fault" });
@@ -117,7 +177,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Room Steward (0128): apply steward.result events to their tickets AFTER the events are stored. Never changes the response; applyStewardResults does not throw.
-  const stewardRows = v.rows.filter((r) => r.kind === STEWARD_RESULT_KIND);
+  const stewardRows = rows.filter((r) => r.kind === STEWARD_RESULT_KIND);
   if (stewardRows.length > 0) {
     try {
       await applyStewardResults(sql as unknown as StewardSql, stewardRows);
@@ -131,6 +191,7 @@ export async function POST(req: NextRequest) {
     ok: true,
     accepted,
     duplicates,
+    deduped,
     rejected: rejected.length,
     rejected_reasons: rejected.slice(0, REASONS_CAP),
   });

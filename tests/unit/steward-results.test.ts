@@ -2,7 +2,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const M = vi.hoisted(() => ({ sql: vi.fn() }));
-vi.mock("@/lib/db", () => ({ sql: M.sql }));
+// TS-H10: the kiosk-health route first reads for cross-source twins (one tagged SELECT); it answers "none" here so these tests keep counting only the INSERT and the steward update.
+const isTwinLookup = (a: unknown[]): boolean => Array.isArray(a[0]) && (a[0] as string[]).join("?").match(/SELECT machine, kind, source, ts(, twin_source, twin_ts)? FROM kiosk_health_(events|dedupe)/) !== null;
+vi.mock("@/lib/db", () => ({ sql: (...a: unknown[]) => (isTwinLookup(a) ? Promise.resolve([]) : M.sql(...a)) }));
 
 import { applyStewardResults, truncateDetail, validateResultPayload, type StewardResultRow } from "@/lib/steward/results";
 import { POST } from "@/app/api/kiosk-health/route";

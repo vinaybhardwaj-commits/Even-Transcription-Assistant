@@ -15,6 +15,8 @@
  * `issuer` is {kind,id}. This code never signs and never alters a command.
  */
 import type { FleetSql } from "./device-auth";
+import { extensionToken } from "./commands";
+import { TOKEN_REDACTED } from "./verbs";
 
 export const MAX_WAIT_S = 25;
 export const POLL_INTERVAL_MS = 1500;
@@ -62,6 +64,9 @@ type Row = {
 
 /** One claim pass: flip expired queued commands, then take the deliverable ones. */
 export async function claimCommands(sql: FleetSql, deviceId: string): Promise<Envelope[]> {
+  // a chrome_policy_apply is held back (not delivered, not consumed) while the server has no extension token to put back into it
+  const token = extensionToken();
+  const tokenAvailable = token !== null;
   await sql`UPDATE fleet_commands SET state = 'expired' WHERE device_id = ${deviceId} AND state = 'queued' AND expires_at <= now()`;
   const rows = (await sql`
     WITH c AS (
@@ -70,6 +75,7 @@ export async function claimCommands(sql: FleetSql, deviceId: string): Promise<En
          SELECT cmd_id FROM fleet_commands
           WHERE device_id = ${deviceId} AND expires_at > now() AND issued_at <= now() + interval '120 seconds'
             AND (state = 'queued' OR (state = 'delivered' AND delivered_at < now() - ${`${REDELIVER_AFTER_S} seconds`}::interval))
+            AND (verb <> 'chrome_policy_apply' OR ${tokenAvailable}::boolean)
           ORDER BY issued_at, cmd_id
           LIMIT ${MAX_BATCH}
           FOR UPDATE SKIP LOCKED)
@@ -88,7 +94,8 @@ export async function claimCommands(sql: FleetSql, deviceId: string): Promise<En
     device_id: r.device_id,
     machine: r.machine,
     verb: r.verb,
-    params: r.params,
+    // the stored copy carries a marker; the signed value (the real token) goes back in here, into the response to this device's own authenticated poll and nowhere else
+    params: r.verb === "chrome_policy_apply" && token !== null && r.params.token === TOKEN_REDACTED ? { ...r.params, token } : r.params,
     issued_at: r.issued_at,
     expires_at: r.expires_at,
     nonce: r.nonce,

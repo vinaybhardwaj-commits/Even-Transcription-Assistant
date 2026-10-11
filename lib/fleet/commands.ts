@@ -13,9 +13,17 @@ import type { FleetSql } from "./device-auth";
 import { APPROVAL_REF_RE } from "./verbs";
 import { approvalProblem, buildSignedEnvelope, envelopeShapeOk, isoMs, verifyEnvelope, publicKeysOf, DEFAULT_TTL_S, MAX_TTL_S, MIN_TTL_S, type Envelope, type IssueSpec } from "./envelope";
 import type { Signer } from "./signing";
-import { isFleetVerb, paramsValid, CATALOGUE, CEILINGS, SESSION_GATED_VERBS, type FleetVerb } from "./verbs";
+import { isFleetVerb, paramsValid, adminParamsValid, inClinicHours, CATALOGUE, CEILINGS, CHROME_RESTART_VERBS, SESSION_GATED_VERBS, TOKEN_REDACTED, type FleetVerb } from "./verbs";
 
 export const MAX_PARAMS_BYTES = 2048;
+/** What is STORED for a command's params. chrome_policy_apply's token is replaced by TOKEN_REDACTED: the database, the audit, the read views and every log never hold it. */
+export function storedParams(verb: string, params: Record<string, unknown>): Record<string, unknown> {
+  return verb === "chrome_policy_apply" && "token" in params ? { ...params, token: TOKEN_REDACTED } : params;
+}
+
+/** The extension ingest token from server-side config (env). Trimmed; null when unset. Never logged, never returned. */
+export const extensionToken = (env: Record<string, string | undefined> = process.env): string | null => env.PRESENCE_INGEST_TOKEN?.trim() || null;
+
 export type QueueResult = { ok: true; cmd_id: string; expires_at: string } | { ok: false; reason: string };
 
 export async function queueCommand(sql: FleetSql, e: unknown, publicKeys: Record<string, string>, nowMs: number = Date.now()): Promise<QueueResult> {
@@ -41,7 +49,7 @@ export async function queueCommand(sql: FleetSql, e: unknown, publicKeys: Record
   const ins = await sql`
     WITH ins AS (
       INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, params, issued_at, expires_at, nonce, issuer_kind, issuer_id, approval_ref, key_id, signature)
-      VALUES (${e.cmd_id}, ${e.device_id}, ${e.machine}, ${e.verb}, ${JSON.stringify(e.params)}::jsonb, ${e.issued_at}::timestamptz, ${e.expires_at}::timestamptz, ${e.nonce}, ${e.issuer.kind}, ${e.issuer.id}, ${e.approval_ref}, ${e.key_id}, ${e.signature})
+      VALUES (${e.cmd_id}, ${e.device_id}, ${e.machine}, ${e.verb}, ${JSON.stringify(storedParams(e.verb, e.params))}::jsonb, ${e.issued_at}::timestamptz, ${e.expires_at}::timestamptz, ${e.nonce}, ${e.issuer.kind}, ${e.issuer.id}, ${e.approval_ref}, ${e.key_id}, ${e.signature})
       ON CONFLICT DO NOTHING
       RETURNING cmd_id, machine, verb, approval_ref, issuer_kind, issuer_id
     )
@@ -102,17 +110,29 @@ export type IssueInput = {
 export async function issueCommand(sql: FleetSql, signer: Signer, i: IssueInput): Promise<QueueResult> {
   const nowMs = i.nowMs ?? Date.now();
   if (!isFleetVerb(i.verb)) return { ok: false, reason: "verb_not_allowed" };
-  const params = i.params === undefined ? {} : i.params;
-  if (typeof params !== "object" || params === null || Array.isArray(params) || !paramsValid(i.verb, params)) return { ok: false, reason: "bad_params" };
+  const adminParams = i.params === undefined ? {} : i.params;
+  if (typeof adminParams !== "object" || adminParams === null || Array.isArray(adminParams) || !adminParamsValid(i.verb, adminParams)) return { ok: false, reason: "bad_params" };
+  // TS-H7: relaunching Chrome closes the doctors' Pulse window: refused in clinic hours whatever the approval
+  if ((CHROME_RESTART_VERBS as readonly string[]).includes(i.verb) && inClinicHours(nowMs)) return { ok: false, reason: "clinic_hours_no_chrome_restart" };
+  let params: Record<string, unknown> = adminParams as Record<string, unknown>;
   const ttl = i.ttl_s === undefined ? DEFAULT_TTL_S : i.ttl_s;
   if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < MIN_TTL_S || ttl > MAX_TTL_S) return { ok: false, reason: "bad_ttl" };
   const approval = i.approval_ref === undefined || i.approval_ref === null ? null : i.approval_ref;
   if (approval !== null && typeof approval !== "string") return { ok: false, reason: "bad_approval_ref" };
   const badRef = approval !== null && !APPROVAL_REF_RE.test(approval);
   if (badRef) return { ok: false, reason: "bad_approval_ref" };
-  const dev = (await sql`SELECT machine, status, room_id FROM fleet_devices WHERE device_id = ${i.device_id}`) as Array<{ machine: string; status: string; room_id: string }>;
+  const dev = (await sql`
+    SELECT d.machine, d.status, d.room_id, r.name AS room_name FROM fleet_devices d LEFT JOIN room r ON r.id = d.room_id WHERE d.device_id = ${i.device_id}
+  `) as Array<{ machine: string; status: string; room_id: string; room_name: string | null }>;
   if (!dev[0]) return { ok: false, reason: "unknown_device" };
   if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
+  if (i.verb === "chrome_policy_apply") {
+    // the server fills machine_id, room and the token from its own config and signs them; the operator supplied at most update_url
+    const token = extensionToken();
+    if (!token) return { ok: false, reason: "extension_token_not_configured" };
+    params = { machine_id: normalizeHostname(dev[0].machine), room: dev[0].room_name ?? dev[0].room_id, token, ...(typeof params.update_url === "string" ? { update_url: params.update_url } : {}) };
+    if (!paramsValid(i.verb, params)) return { ok: false, reason: "bad_params" };
+  }
   const gateIn: GateIn = { deviceId: i.device_id, roomId: dev[0].room_id, verb: i.verb, params: params as Record<string, unknown>, approvalRef: approval, nowMs };
   const session = await sessionGate(sql, gateIn);
   if (session) return { ok: false, reason: session };

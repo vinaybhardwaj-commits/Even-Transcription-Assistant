@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 15;
 
 const BODY_KEYS = new Set(["device_id", "verb", "params", "approval_ref", "ttl_s"]);
-const STATUS: Record<string, number> = { unknown_device: 404, device_revoked: 409, outstanding: 409, duplicate: 409, session_open: 409, rate_limited: 429 };
+const STATUS: Record<string, number> = { unknown_device: 404, device_revoked: 409, outstanding: 409, duplicate: 409, session_open: 409, rate_limited: 429, clinic_hours_no_chrome_restart: 409, extension_token_not_configured: 503 };
 
 export async function POST(req: NextRequest) {
   const cookie = await readAdminCookie();
