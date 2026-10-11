@@ -14,6 +14,9 @@
  * machine=hf (optional; default box) is the HF overflow worker (lib/diarize-nemotron/overflow.ts). It is offered windows only while
  *   NEMO_HF_DAILY_USD_CAP > 0 (default 0 = OFF), the day's recorded HF minutes are under the cap, and the backlog exceeds
  *   NEMO_HF_BACKLOG_THRESHOLD; otherwise 200 { windows: [], overflow: { allowed: false, reason } }. A bad env value is 500 bad_flag.
+ * PROBS lane (lib/diarize-nemotron/probs-lane.ts): when a BOX worker's claim finds no production window, windows that have turns
+ *   but no probability file are offered instead (probs_only: true; never without a probs_put_url). Their ingest only sets the
+ *   pointer. Any error in the lane is logged and answered as "no windows", never as a failed claim.
  * 503 { error: "clip_sign" } when a clip URL cannot be signed: every window claimed in that call is given back
  *   (attempt refunded, lease released), so an R2 outage never burns attempts.
  * Ids, times and URLs only. Never audio, never text.
@@ -22,7 +25,8 @@ import { NextRequest } from "next/server";
 import { signGetUrl, signPutUrl } from "@/lib/r2";
 import { windowProbsKey } from "@/lib/diarize-nemotron/lab-keys";
 import { gate, reply } from "@/lib/diarize-nemotron/http";
-import { CLIP_URL_SECONDS, claimPending, countExhausted, overflowUsage, releaseClaim } from "@/lib/diarize-nemotron/store";
+import { CLIP_URL_SECONDS, PROBS_CLAIM_PREFIX, claimPending, claimProbsBackfill, countExhausted, overflowUsage, releaseClaim, type ClaimedWindow } from "@/lib/diarize-nemotron/store";
+import { probsBackfillEnabled } from "@/lib/diarize-nemotron/probs-lane";
 import { OverflowConfigError, WINDOW_AUDIO_MIN, overflowConfig, overflowDecision, parseMachine } from "@/lib/diarize-nemotron/overflow";
 import { isWorkerId, pendingLimit } from "@/lib/diarize-nemotron/validate";
 
@@ -31,6 +35,20 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 15;
 
 const PROBS_PUT_SECONDS = 3600;
+
+/** The claim row key a window was leased under (the PROBS lane prefixes it). */
+const claimKey = (w: ClaimedWindow) => (w.probs_only ? PROBS_CLAIM_PREFIX + w.window_id : w.window_id);
+
+/** PROBS-lane windows for a box worker whose production claim came back empty; [] on any error (the lane never fails a claim). */
+async function probsLane(workerId: string, limit: number): Promise<ClaimedWindow[]> {
+  try {
+    if (!probsBackfillEnabled()) return [];
+    return await claimProbsBackfill(workerId, limit, "box");
+  } catch (e) {
+    console.warn("[nemotron] probs lane skipped:", e instanceof Error ? e.name : "error");
+    return [];
+  }
+}
 
 export async function GET(req: NextRequest) {
   const shut = gate(req);
@@ -59,13 +77,14 @@ export async function GET(req: NextRequest) {
       if (!d.allow) return reply(200, { ok: true, windows: [], exhausted: await countExhausted(), overflow: { allowed: false, reason: d.reason } });
       limit = d.limit;
     }
-    const claimed = await claimPending(workerId, limit, machine);
+    let claimed = await claimPending(workerId, limit, machine);
+    if (claimed.length === 0 && machine === "box") claimed = await probsLane(workerId, limit);
     let urls: string[];
     try {
       urls = await Promise.all(claimed.map((w) => signGetUrl({ key: w.clip_r2_key, expiresInSeconds: CLIP_URL_SECONDS })));
     } catch (e) {
       console.warn("[nemotron] clip sign failed; giving back", claimed.length, "claim(s):", e instanceof Error ? e.name : "error");
-      for (const w of claimed) await releaseClaim(workerId, w.window_id);
+      for (const w of claimed) await releaseClaim(workerId, claimKey(w));
       return reply(503, { ok: false, error: "clip_sign" });
     }
     const probs = await Promise.all(
@@ -78,7 +97,13 @@ export async function GET(req: NextRequest) {
         }
       }),
     );
-    const windows = claimed.map((w, i) => ({
+    // a PROBS-lane window is pointless without somewhere to put the file: give its claim back (attempt refunded) and drop it
+    const keep: number[] = [];
+    for (let i = 0; i < claimed.length; i++) {
+      if (claimed[i].probs_only && !(probs[i] as { probs_put_url?: string }).probs_put_url) await releaseClaim(workerId, claimKey(claimed[i]));
+      else keep.push(i);
+    }
+    const windows = keep.map((i) => ({ w: claimed[i], i })).map(({ w, i }) => ({
       window_id: w.window_id,
       room_day_id: w.room_day_id,
       start_ms: w.start_ms,
@@ -87,6 +112,7 @@ export async function GET(req: NextRequest) {
       clip_sha256: null,
       attempt: w.attempts,
       ...probs[i],
+      ...(w.probs_only ? { probs_only: true } : {}),
     }));
     return reply(200, { ok: true, windows, exhausted: await countExhausted() });
   } catch (e) {

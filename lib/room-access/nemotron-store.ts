@@ -35,7 +35,17 @@ export type ClaimedWindow = {
   end_ms: number;
   clip_r2_key: string;
   attempts: number;
+  /** PROBS lane: the window already has its turns; it is re-run only so its per-frame probabilities (.nlp) land in R2. */
+  probs_only?: boolean;
 };
+
+/**
+ * PROBS lane (Architecture #23 follow-up, 11 Oct 2026). Windows stored before 0143 (or whose probability upload failed) have
+ * turns but no probs_r2_key, so Timbre finds no .nlp for them. They are re-offered, at the LOWEST production priority, under a
+ * claim row keyed `probs:<window_id>` in diarize_nemotron_claim: the same lease, the same 3-attempt bound, the same
+ * one-statement race settlement, and no migration. A prefixed key never collides with a real window id (`bw_…`).
+ */
+export const PROBS_CLAIM_PREFIX = "probs:";
 
 /** The held-out set as the two parallel arrays the claim query unnests: [IST date], [room_id]. */
 const BLIND_DAYS = BLIND_ROOM_DAYS.map(([d]) => d);
@@ -84,6 +94,86 @@ export async function claimPending(workerId: string, limit: number, machine: "bo
     clip_r2_key: String(r.clip_r2_key),
     attempts: Number(r.attempts),
   }));
+}
+
+/**
+ * Claim up to `limit` PROBS-lane windows for `workerId`, newest first: a window that has an ok|empty Nemotron row, none of
+ * whose rows carries a probs_r2_key, with a joined clip, not BLIND, and either no `probs:` claim or an expired, unfinished one
+ * with attempts left. The caller offers these only when claimPending returned nothing, so live intake always goes first.
+ */
+export async function claimProbsBackfill(workerId: string, limit: number, machine: "box" | "hf" = "box"): Promise<ClaimedWindow[]> {
+  const rows = (await sql`
+    WITH cand AS (
+      SELECT w.id, w.room_day_id, w.start_ms, w.end_ms, w.clip_r2_key
+        FROM bench_window w
+        JOIN room_day rd ON rd.id = w.room_day_id
+        LEFT JOIN diarize_nemotron_claim c ON c.window_id = ${PROBS_CLAIM_PREFIX}::text || w.id
+       WHERE w.room_day_id IS NOT NULL
+         AND w.clip_r2_key IS NOT NULL
+         AND EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty'))
+         AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.probs_r2_key IS NOT NULL)
+         AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+         AND (c.window_id IS NULL OR (c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}))
+       ORDER BY w.start_ms DESC
+       LIMIT ${limit}
+    ), claimed AS (
+      INSERT INTO diarize_nemotron_claim AS c (window_id, worker_id, claimed_at, lease_until, attempts, machine)
+      SELECT ${PROBS_CLAIM_PREFIX}::text || id, ${workerId}::text, now(), now() + make_interval(mins => ${LEASE_MINUTES}::int), 1, ${machine}::text FROM cand
+      ON CONFLICT (window_id) DO UPDATE
+         SET worker_id = EXCLUDED.worker_id, claimed_at = now(), lease_until = EXCLUDED.lease_until, machine = EXCLUDED.machine,
+             attempts = c.attempts + 1
+       WHERE c.done_at IS NULL AND c.lease_until < now() AND c.attempts < ${MAX_ATTEMPTS}
+      RETURNING c.window_id, c.attempts
+    )
+    SELECT cand.id AS window_id, cand.room_day_id, cand.start_ms, cand.end_ms, cand.clip_r2_key, claimed.attempts
+      FROM cand JOIN claimed ON claimed.window_id = ${PROBS_CLAIM_PREFIX}::text || cand.id
+     ORDER BY cand.start_ms DESC
+  `) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    window_id: String(r.window_id),
+    room_day_id: String(r.room_day_id),
+    start_ms: Number(r.start_ms),
+    end_ms: Number(r.end_ms),
+    clip_r2_key: String(r.clip_r2_key),
+    attempts: Number(r.attempts),
+    probs_only: true,
+  }));
+}
+
+/** The attempt count of a live, unfinished PROBS-lane claim this worker holds on the window, or null. */
+async function liveProbsClaim(windowId: string, workerId: string): Promise<number | null> {
+  const rows = (await sql`
+    SELECT attempts FROM diarize_nemotron_claim
+     WHERE window_id = ${PROBS_CLAIM_PREFIX}::text || ${windowId}::text AND worker_id = ${workerId} AND done_at IS NULL AND lease_until > now()
+     LIMIT 1
+  `) as Array<{ attempts: number }>;
+  return rows[0] ? Number(rows[0].attempts) : null;
+}
+
+/**
+ * A post for a window this worker holds under a PROBS-lane claim. The stored turns are NEVER touched (no insert, no 409 on a
+ * slightly different re-run): only the probability pointer is set, where every row of that (revision, config) still lacks one.
+ * A post without a pointer (the upload failed, or the run failed) is an attempt: the lease is released for a retry, and the
+ * claim is finished on the last attempt, so the lane is bounded (3 tries per window, ever). Answered as `duplicate` so any
+ * worker version moves on.
+ */
+async function recordProbsIngest(b: IngestBody, attempts: number): Promise<IngestOutcome> {
+  const key = PROBS_CLAIM_PREFIX + b.window_id;
+  if (b.status !== "failed" && b.probs_r2_key) {
+    await attachProbsKey(b);
+    await sql`UPDATE diarize_nemotron_claim SET done_at = now(), lease_until = now() WHERE window_id = ${key} AND done_at IS NULL`;
+    return { result: "duplicate" };
+  }
+  const code = b.status === "failed" ? b.error_code ?? "failed" : "probs_missing";
+  await sql`
+    UPDATE diarize_nemotron_claim
+       SET lease_until = now(),
+           done_at = CASE WHEN attempts >= ${MAX_ATTEMPTS}::int THEN now() ELSE NULL END,
+           last_error_code = ${code}::text,
+           failure_history = failure_history || jsonb_build_array(jsonb_build_object('at', now(), 'worker_id', ${b.worker_id}::text, 'error_code', ${code}::text))
+     WHERE window_id = ${key} AND worker_id = ${b.worker_id} AND done_at IS NULL
+  `;
+  return b.status === "failed" ? { result: "failure_recorded", attempts } : { result: "duplicate" };
 }
 
 /**
@@ -159,6 +249,7 @@ export async function countExhausted(): Promise<number> {
   const rows = (await sql`
     SELECT count(*)::int AS n FROM diarize_nemotron_claim c
      WHERE c.done_at IS NULL AND c.attempts >= ${MAX_ATTEMPTS} AND c.lease_until < now()
+       AND c.window_id NOT LIKE 'probs:%'
        AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = c.window_id)
   `) as Array<{ n: number }>;
   return Number(rows[0]?.n ?? 0);
@@ -291,6 +382,9 @@ async function storeRow(b: IngestBody, d: Derived, payloadSha: string): Promise<
 export async function recordIngest(b: IngestBody, d: Derived, payloadSha: string): Promise<IngestOutcome> {
   // N1: a blind room-day's window is refused before anything is written, whatever the status
   if (await windowIsBlind(b.window_id)) return { result: "blind_room_day" };
+  // PROBS lane: a re-run for the probability file only; the stored turns stay exactly as they are
+  const probsAttempts = await liveProbsClaim(b.window_id, b.worker_id);
+  if (probsAttempts !== null) return recordProbsIngest(b, probsAttempts);
   if (b.status !== "failed") return storeRow(b, d, payloadSha);
 
   const code = b.error_code!;
@@ -451,17 +545,46 @@ export async function readWorkerHeartbeats(): Promise<Array<{ worker_id: string;
   `) as Array<{ worker_id: string; last_seen_at: string | Date; payload: Record<string, unknown> | null }>;
 }
 
-/** 24 h of stored ok|empty rows: count, box vs hf, and p95 of (stored − window end), in seconds. */
-export async function readNemotronLatency24h(): Promise<{ windows_24h: number; box_24h: number; hf_24h: number; p95_latency_s: number | null }> {
+/**
+ * 24 h of stored ok|empty rows: count, box vs hf (all lanes, backfill included). The p95 is LIVE lag only (Architecture #23
+ * follow-up, 11 Oct 2026): over eligible windows that ENDED in the last 24 h, lag = (first ok|empty row's received_at, or now()
+ * while still unanswered) − window end, in seconds. Before this, a backfill of week-old windows reported a 4-day "p95" while
+ * live intake was minutes behind; and a window still waiting was invisible. `live_windows_24h` is that window count.
+ */
+export async function readNemotronLatency24h(): Promise<{ windows_24h: number; box_24h: number; hf_24h: number; p95_latency_s: number | null; live_windows_24h: number }> {
   const rows = (await sql`
-    SELECT count(*)::int AS n,
-           count(*) FILTER (WHERE n.machine = 'box')::int AS box,
-           count(*) FILTER (WHERE n.machine = 'hf')::int AS hf,
-           percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (n.received_at - to_timestamp(w.end_ms / 1000.0)))) AS p95
-      FROM diarize_nemotron_window n
-      JOIN bench_window w ON w.id = n.window_id
-     WHERE n.status IN ('ok', 'empty') AND n.received_at > now() - interval '24 hours'
-  `) as Array<{ n: number; box: number; hf: number; p95: number | string | null }>;
+    WITH stored AS (
+      SELECT count(*)::int AS n,
+             count(*) FILTER (WHERE n.machine = 'box')::int AS box,
+             count(*) FILTER (WHERE n.machine = 'hf')::int AS hf
+        FROM diarize_nemotron_window n
+       WHERE n.status IN ('ok', 'empty') AND n.received_at > now() - interval '24 hours'
+    ), live AS (
+      SELECT extract(epoch FROM (COALESCE(
+               (SELECT min(n.received_at) FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty')),
+               now()) - to_timestamp(w.end_ms / 1000.0))) AS lag_s
+        FROM bench_window w
+        JOIN room_day rd ON rd.id = w.room_day_id
+       WHERE w.state IN ('closed', 'transcribed')
+         AND w.grid_aligned = TRUE
+         AND w.clip_r2_key IS NOT NULL
+         AND w.end_ms > (extract(epoch FROM now() - interval '24 hours') * 1000)::bigint
+         -- a window whose only answer is a stored failed row is never going to be answered: it is counted by exhausted, not here
+         AND NOT (EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status = 'failed')
+                  AND NOT EXISTS (SELECT 1 FROM diarize_nemotron_window n WHERE n.window_id = w.id AND n.status IN ('ok', 'empty')))
+         AND NOT EXISTS (SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r) WHERE b.d = rd.ist_date AND b.r = rd.room_id)
+    )
+    SELECT stored.n, stored.box, stored.hf,
+           (SELECT count(*)::int FROM live) AS live_n,
+           (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lag_s) FROM live) AS p95
+      FROM stored
+  `) as Array<{ n: number; box: number; hf: number; live_n: number; p95: number | string | null }>;
   const r = rows[0];
-  return { windows_24h: Number(r?.n ?? 0), box_24h: Number(r?.box ?? 0), hf_24h: Number(r?.hf ?? 0), p95_latency_s: r?.p95 == null ? null : Math.max(0, Number(r.p95)) };
+  return {
+    windows_24h: Number(r?.n ?? 0),
+    box_24h: Number(r?.box ?? 0),
+    hf_24h: Number(r?.hf ?? 0),
+    p95_latency_s: r?.p95 == null ? null : Math.max(0, Number(r.p95)),
+    live_windows_24h: Number(r?.live_n ?? 0),
+  };
 }
