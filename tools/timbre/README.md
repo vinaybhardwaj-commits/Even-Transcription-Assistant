@@ -315,3 +315,69 @@ python -m tools.timbre.calibrate apply \
   --calibration results/clef_valence.calib.json \
   --out results/features.calibrated.parquet
 ```
+
+## v1 pipeline
+
+`python -m tools.timbre.pipeline` is the production-shaped path. It does not write a clinical note. Output under `--out` is private: it contains window ids and must not be committed. The log line is counts only.
+
+Order of operations:
+
+1. Sessions/clips (local `--audio-dir` or R2 `--r2`) plus a speaker source (`--speaker nemotron` or `--speaker segments`) and doctor voiceprints.
+2. Patient windows from `nemotron_windows` (Nemotron probabilities) or from an existing `--windows` CSV.
+3. `PurityRule.judge`. Purity and pure-patient seconds are the worse of the embedding score and the Nemotron probability score. A failed window is `unscorable` with a reason (`no_voiceprint`, `no_patient`, `low_purity`, `short_pure_speech`, `low_patient_cosine`, `overlap`, `too_short`, `attender_speaks_for_patient`) and is not sent to a model.
+4. Odyssey WavLM-dim arousal, direct. audEERING MSP-dim runs only when Odyssey does not return a finite arousal (`audeering_fallback`).
+5. Clef-omni valence, audio only, when `TIMBRE_CLEF=1`. The stored value is the 1–5 expected value.
+6. `calibrate.py` apply, per room then per doctor, from the saved JSON files.
+7. Per-window table (`windows.parquet`: raw and calibrated arousal/valence, purity, reason) and per-consult aggregates (`consults.json`: median, trajectory open/mid/close, percent of windows scorable).
+
+The Jev text lane v2 is off unless `--text-lane` is set. It also needs `TIMBRE_TEXT_LANE=1`. Question set is `timbre-text-v2`. Transcript text is not written to the table or the log.
+
+```bash
+TIMBRE_CLEF=1 CF_WORKERS_AI_TOKEN=... HF_TOKEN=... \
+  R2_ENDPOINT=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=eta-audio \
+  python -m tools.timbre.pipeline \
+  --sessions clips.csv \
+  --audio-dir /path/to/clips \
+  --speaker nemotron \
+  --nemotron-dir /path/to/nlp \
+  --voiceprints voiceprints.json \
+  --embeddings-dir /path/to/frame-embeddings \
+  --calibration-arousal results/odyssey_arousal.calib.json \
+  --calibration-valence results/clef_valence.calib.json \
+  --out results/v1/
+
+# local windows CSV, no R2
+TIMBRE_CLEF=1 TIMBRE_CLEF_MOCK=1 \
+  python -m tools.timbre.pipeline \
+  --windows windows.csv --audio-dir /path/to/windows --out results/v1/
+
+# optional text lane (off by default)
+TIMBRE_CLEF=1 TIMBRE_TEXT_LANE=1 \
+  python -m tools.timbre.pipeline \
+  --windows windows.csv --audio-dir DIR --text-lane --text-in patient.jsonl --out results/v1/
+```
+
+`CF_ACCOUNT_ID` may be omitted when `R2_ENDPOINT` is `https://<account>.r2.cloudflarestorage.com`. `HF_TOKEN` is read by the Hugging Face libraries when Odyssey or audEERING weights are downloaded. The pipeline does not print it.
+
+Voiceprints JSON is `{"d0…": [centroid floats]}` or `{"doctors": {"d0…": {"centroid": [...]}}}`. Frame embeddings are `<clip_id>.npy` with shape `(frames, dim)`, aligned to the Nemotron hop. A windows CSV may instead carry `cos_patient` / `probs`, or the aggregate columns `purity`, `pure_patient_s`, and `cos_patient_mean`.
+
+### Evaluation (no leakage)
+
+Calibration for the gold report is cross-fitted. With `--batch-col` and two or more batches, the map is fit on batch 1 and applied to batch 2, then the reverse. `--cv room-day` uses GroupKFold on `room|date` instead. A single batch falls through to that room-day split. A fold that shares a window with the rows it scores is refused. The report has raw and calibrated Spearman and CCC per batch and pooled, plus the per-room scorable rate. Window ids are not in the report or the log.
+
+```bash
+python -m tools.timbre.pipeline evaluate \
+  --scores results/v1/windows.parquet \
+  --gold-labels batch1.csv batch2.csv \
+  --batch-col batch \
+  --out results/v1/eval.json
+
+python -m tools.timbre.pipeline evaluate \
+  --scores results/v1/windows.parquet \
+  --gold-labels gold.csv \
+  --batch-col batch \
+  --cv room-day \
+  --out results/v1/eval-roomday.json
+```
+
+`--gold-labels` and `--batch-col` are also accepted on the score command. That run still cross-fits; it does not score a window with a map fit on that window.
