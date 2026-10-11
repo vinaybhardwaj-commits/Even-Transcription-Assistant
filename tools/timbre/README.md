@@ -86,7 +86,7 @@ Locked metric snapshots live in `baselines/` (aggregates only; see `baselines/RE
 
 ### Patient purity
 
-`purity.py` scores how much of a window is the patient alone, from per-frame speaker evidence: speaker-embedding cosines (`embedding_purity`) or Nemotron per-frame probabilities (`probs_purity`). `PurityRule()` is the batch-1-validated keep rule (purity >= 0.6, >= 3 s pure patient speech, mean patient cosine >= 0.30). It loads no audio or model.
+`purity.py` scores how much of a window is the patient alone, from per-frame speaker evidence: speaker-embedding cosines (`embedding_purity`) or Nemotron per-frame probabilities (`probs_purity`). `frame_patient_scores` is the per-frame Nemotron view (patient dominance and the second-highest speaker probability). `PurityRule()` is the one keep rule (purity >= 0.6, >= 3 s pure patient speech, mean patient cosine >= 0.30). `PurityRule.judge(embedding=..., probs=...)` fuses both scores first: purity and pure-patient seconds are the worse of the two. It loads no audio or model.
 
 Optional `--outcomes outcomes.csv` joins accept/defer and unresolved-doubt counts after dropping hidden-repeat rows. That hook is not the pre-registered T-8 likelihood-ratio test.
 
@@ -123,15 +123,53 @@ Optional reader for `eta-audio/lab/nemotron-probs/bw_<room>_<window_start_ms>_pr
 
 ```python
 from tools.timbre.nemotron_probs import load_nlp, patient_frames
-loaded = load_nlp(path)          # or gzip bytes
+loaded = load_nlp(path, expected_duration_s=900)  # or gzip bytes
 mask = patient_frames(loaded.probs, doctor_slot=0, thr=0.5)
 ```
 
-The container matches `tools/nemotron-worker/lab.py`: gzip of `NLP1`, a little-endian header length, a JSON header, then a `u8` matrix scaled by `scale` (255).
+The container matches `tools/nemotron-worker/lab.py`: gzip of `NLP1`, a little-endian header length, a JSON header, then a `u8` matrix scaled by `scale` (255). Column `i` is NeMo `speaker_i`. ETA turn labels `spkN` are a different index (first-speech order); see slot mapping below.
 
-**Open question.** Measured production objects decompress to 720,197 bytes with `rows=90003`, `cols=8`, `frame_ms=80`. That is a canonical 90003×8 matrix, so the payload-valid reading is `rows` = frames and the duration is **7200.24 s**, which fails the 900 s check (`duration_ok` is false). Two other timebases both equal 900.03 s when `cols` is 8: `(rows/cols)*80 ms`, and `rows*10 ms`. They are the same number, and `90003 % 8 == 3`, so the product reading cannot reshape these bytes without dropping three frames. A 10 ms hop fits the stored shape. The worker writes `frame_ms: 80` in `pack_nlp` regardless of the tensor hop. This reader does not guess and does not drop samples. `loaded.sanity` carries both hypotheses. A file whose bytes actually are `frames*cols` with duration near 900 s selects that layout and sets `duration_ok`.
+**Frame step.** The worker writes `frame_ms: 80` in every file. Production objects are `rows=90003`, `cols=8`, which is 90,003 frames. `90003 × 10 ms = 900.03 s` (the 15-minute window). `90003 × 80 ms = 7200.24 s`. `load_nlp` infers the hop as duration / frame count (`resolve_frame_step`), snaps to a whole millisecond in 1..100 ms when the ratio is within 2%, and uses that hop when it explains the known duration better than the header. Pass the real audio length as `expected_duration_s` (a bench window is 900). A disagreement raises `FrameStepWarning` and is stored on `loaded.frame_step_warning`. The header value stays on `loaded.header_frame_ms` and `loaded.header["frame_ms"]`. A ratio that is not a sane hop (a 100-frame file against a 900 s duration) keeps the header and still warns. The matrix is not reshaped and no samples are dropped. `loaded.frame_ms` is the hop to use. `loaded.candidates[].duration_s` is still the header clock.
 
-R2 fetch is optional and read-only (`GetObject` only, keys under `lab/nemotron-probs/*.nlp`). It uses `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` when you call `fetch_nlp_object`. Those variables are not required for the tests.
+R2 fetch is optional and read-only (`GetObject` only, keys under `lab/nemotron-probs/*.nlp`). `fetch_nlp_object` / `--r2-key` read these environment variables and never print them:
+
+- `R2_ENDPOINT`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+
+The bucket is `eta-audio`. Tests pass a fake `client` and do not set the variables.
+
+## Patient slots and windows
+
+`slots.py` decides which probability column is the doctor and which is the patient.
+
+* Doctor, ETA signal: an identity row with a clinician id and cosine >= 0.65 (`DIARIZE_BATCH_THRESHOLD`). A `speaker_label` of `spkN` is aligned onto a column with `turns` (`align_labels`); it is not used as the column index. A claim under 0.65 does not fall through to the centroid.
+* Doctor, centroid: cosine of each column's ECAPA vector to the doctor centroid. The vector is the mean of that column's dominant frames (`frame_embeddings`) or a row of `slot_embeddings`. Accept at cosine >= 0.65 with a lead of 0.05 over the next column (`PULSE_ROOM_MIN_MARGIN`).
+* If the ETA signal and the centroid name different columns, status is `ambiguous`.
+* Patient: the other column with the most exclusive talk (only speaker at or above 0.5). A runner-up with at least 75% of that talk is `ambiguous` (translator or attender). Confidence is the minimum of the doctor cosine and `1 - rival_talk/patient_talk`. Explicit `--doctor-slot` and `--patient-slot` skip the match (confidence 1, source `given`).
+
+`nemotron_windows.py` keeps frames where the patient column passes `frame_patient_scores`, then slices those spans to 3–15 s with at least 3 pure seconds. An ambiguous decision writes no windows. The CSV is the candidate-window schema (`window_id,room,date,lang,phase,start_s,end_s,patient_speech_s,role`) plus `diar_src=nemotron`. `window_id` is `<clip_id>_p<start_ms, 7 digits>`.
+
+```bash
+python -m tools.timbre.nemotron_windows \
+  --nlp timeline.nlp --duration-s 900 \
+  --clip-id CLIP --room ROOM --date 2026-01-01 --lang en --phase open \
+  --embeddings slots.npy --centroid doctor.npy \
+  --out windows.csv
+```
+
+`slots.npy` is `(speakers, dim)`, `doctor.npy` is the centroid. `--frame-embeddings` is `(frames, dim)` instead of `--embeddings`. `--eta-json` is an identity dict or list, and `--turns-json` is `[[start_ms, end_ms, "spkN"], ...]` when the identity uses labels. Exit 0 when the map is ok (the CSV may still be header-only if no span is long enough), exit 3 when the map is ambiguous, exit 1 on a bad file.
+
+```bash
+python -m tools.timbre.nemotron_windows \
+  --r2-key lab/nemotron-probs/bw_ROOM_STARTMS_primary.nlp \
+  --duration-s 900 \
+  --clip-id CLIP --room ROOM --date 2026-01-01 --lang en --phase open \
+  --embeddings slots.npy --centroid doctor.npy \
+  --out windows.csv
+```
+
+That key form is `bw_<room>_<window_start_ms>_primary.nlp` under `lab/nemotron-probs/`. The command reads `R2_ENDPOINT`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` from the environment.
 
 ## Fixtures
 
