@@ -250,6 +250,42 @@ def test_scalar_matrix_skips_non_finite_columns():
     assert _scalar_matrix(df[["m__status"]], "m") is None
 
 
+def test_include_rel_is_opt_in_for_the_scalar_ridge(labels_df):
+    feats = _scalar_features(n_noise=0)
+    # The raw loudness column already tracks arousal. Replace it with a constant
+    # and put the signal only in the doctor-relative column.
+    feats["egemaps_v02.v1__loudness_sma3_amean"] = 1.0
+    feats["egemaps_v02.v1__loudness_sma3_amean__rel_doctor"] = [float((i % 5) + 1) for i in range(20)]
+    feats["egemaps_v02.v1__loudness_sma3_amean__delta_self"] = [float((i % 5) + 1) for i in range(20)]
+    off = evaluate(labels_df, feats, scalar_ridge=True, include_rel=False)
+    row_off = next(r for r in off["models"] if r["model"] == "egemaps_v02.v1")
+    assert row_off["arousal_source"] is None
+    assert off["include_rel"] is False
+    on = evaluate(labels_df, feats, scalar_ridge=True, include_rel=True)
+    row = next(r for r in on["models"] if r["model"] == "egemaps_v02.v1")
+    assert row["arousal_source"] == "ridge_oof_scalar"
+    assert row["n_scalar_features"] == 1  # delta_self stays out; the constant raw column has no variance
+    assert row["arousal_spearman"] > 0.8
+    assert on["include_rel"] is True
+
+
+def test_include_rel_concatenates_onto_the_embedding_ridge(labels_df):
+    rows = []
+    for i in range(20):
+        arousal = (i % 5) + 1
+        rows.append(
+            {
+                "window_id": f"w{i}",
+                "whisper_large_v3_encoder.v1__embedding": [0.0, 0.0, 0.0],
+                "whisper_large_v3_encoder.v1__rel_doctor_cosine": float(arousal),
+            }
+        )
+    report = evaluate(labels_df, pd.DataFrame(rows), include_rel=True)
+    row = next(r for r in report["models"] if r["model"] == "whisper_large_v3_encoder.v1")
+    assert row["arousal_source"] == "ridge_oof"
+    assert row["arousal_ccc"] > 0.8
+
+
 def test_direct_and_embedding_models_ignore_scalar_flag(labels_df):
     feats = pd.DataFrame(
         {
@@ -259,5 +295,5 @@ def test_direct_and_embedding_models_ignore_scalar_flag(labels_df):
             "audeering_msp_dim.v1__dominance": [0.5] * 20,
         }
     )
-    row = evaluate(labels_df, feats, scalar_ridge=True)["models"][0]
+    row = evaluate(labels_df, feats, scalar_ridge=True, include_rel=True)["models"][0]
     assert row["arousal_source"] == "direct"

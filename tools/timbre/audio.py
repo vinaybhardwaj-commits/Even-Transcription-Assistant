@@ -42,6 +42,40 @@ def synth_silence(sr: int = TARGET_SR, seconds: float = 1.0) -> np.ndarray:
     return np.zeros(int(sr * seconds), dtype=np.float32)
 
 
+def read_spans(path: Path | str, spans: list[tuple[float, float]], sr: int = TARGET_SR) -> np.ndarray:
+    """Concatenate ``[start_s, end_s)`` slices of a 16 kHz mono file.
+
+    The same contract as ``read_audio``: mono, 16 kHz, finite samples. Spans that
+    fall outside the file are clipped. An empty selection returns a length-0 array.
+    """
+    import soundfile as sf
+
+    pieces: list[np.ndarray] = []
+    with sf.SoundFile(str(path)) as handle:
+        if int(handle.channels) != 1:
+            raise ValueError(f"expected mono, got {int(handle.channels)} channels")
+        if int(handle.samplerate) != int(sr):
+            raise ValueError(f"expected {int(sr)} Hz, got {int(handle.samplerate)}")
+        n = int(handle.frames)
+        rate = int(handle.samplerate)
+        for start_s, end_s in spans:
+            a = int(round(float(start_s) * rate))
+            b = int(round(float(end_s) * rate))
+            a = max(0, min(n, a))
+            b = max(0, min(n, b))
+            if b <= a:
+                continue
+            handle.seek(a)
+            chunk = np.asarray(handle.read(b - a, dtype="float32", always_2d=False), dtype=np.float32)
+            pieces.append(chunk.reshape(-1))
+    if not pieces:
+        return np.zeros(0, dtype=np.float32)
+    out = np.concatenate(pieces)
+    if not np.isfinite(out).all():
+        raise ValueError("non-finite samples")
+    return out
+
+
 def read_audio(path: Path | str) -> tuple[np.ndarray, int]:
     """Load a wav or flac as float32 mono at 16 kHz. Refuses anything else."""
     import soundfile as sf
