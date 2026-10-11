@@ -21,6 +21,10 @@ window / clip id here; those stay on the analysis box.
 (`tools/timbre/purity.py`) separates windows the rater flagged as not-patient or as containing
 another voice (AUROC about 0.7) and the recommended keep rule (purity >= 0.6, >= 3 s pure
 patient speech, mean patient cosine >= 0.30). Label batch 2 is selected with that rule.
+`PurityRule.judge` applies it to the worse of the embedding score and the Nemotron
+probability score. Candidate windows can be cut from Nemotron timelines with
+`python -m tools.timbre.nemotron_windows` (see the harness README). The thresholds
+are unchanged.
 
 Re-run (on the box, with the labels file that is not in git):
 
