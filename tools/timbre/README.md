@@ -59,6 +59,10 @@ Outputs, under `--out`:
 
 Re-running is safe. Status `ok` and `nan` are finished and skipped. Status `error` is retried. Parquet and JSON writes are atomic (`*.tmp` then replace). A parquet that cannot be read is renamed `*.corrupt` and that model starts over.
 
+### Scale runner
+
+`python -m tools.timbre.scale` scores a list of consults: read-only audio from R2 bucket `eta-audio`, windows from `windows.generate_windows` (or a windows CSV), then `PurityRule`. Output is sharded and resumable. The default model set is the batch-1 provisional arousal pair (Odyssey WavLM-dim, audEERING MSP-dim) plus Vox-Profile Whisper-dim and eGeMAPS. Device `auto` uses CUDA when it is available. Whisper-family models stay on the float32 load. `--dry-run` writes a plan and a cost estimate and does not fetch audio. The population report is aggregates by room, `doctor_uid8`, and day. Queue files, shard parquets, and the audio cache are private and must not be committed. See `SCALE.md` for env vars and launch commands.
+
 ### Speech guard
 
 `speech_guard` (`vad.py`, version `energy-spectral-v1`) runs before every extractor. Silence (RMS under 1e-3) and a narrow tone (energy concentrated on one FFT bin and low spectral flatness) return status `nan` and NaN features. The model is not called. This is an energy check so a sine wave is not scored as an emotion. It is not a clinical VAD.

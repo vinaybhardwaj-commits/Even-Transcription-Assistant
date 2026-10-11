@@ -6,3 +6,5 @@ __pycache__/
 smoke-cache/
 *.parquet
 *.tmp
+scale-out/
+cache/
