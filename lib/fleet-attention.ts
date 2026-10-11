@@ -53,6 +53,7 @@
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { reachability, type Reachability } from "@/lib/reachability";
+import { helperAttention, isMissingTable, readHelperHeartbeats, signalsFor, type HelperSignals } from "@/lib/fleet/helper-health";
 import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
@@ -230,6 +231,10 @@ export type RoomAttentionInputs = {
   reaped?: { created_at: string; body: string; phase: "clinic_hours" | "overnight" } | null;
   /** Arch #16: when the room's kiosk last polled (bench_listener.last_poll_at); null = never; absent = not supplied (no rule). */
   listener_last_poll_at?: string | null;
+  /**
+   * TS-H9 #46: the helper's signals for a room that has an ACTIVE helper device (app_missing / helper_missing). Absent = no helper fleet for this room (or its read failed): no rule.
+   */
+  helper?: HelperSignals | null;
   /** R8/R9: the machine's extension health row (lib/encounter-windows/ext-health.ts), or absent/null (no machine, excluded machine, or source degraded). */
   ext?: ExtHealthRow | null;
 };
@@ -476,6 +481,12 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
           `Check the Mac in ${name} is on, awake and connected to the network, and that the recorder app is running.`,
         );
       }
+    }
+
+    // app_missing (red) / helper_missing (amber), TS-H9 #46: only for rooms with an active helper device. See lib/fleet/helper-health.ts for the exact definitions.
+    if (r.helper) {
+      const h = helperAttention(r.helper, now, name);
+      if (h) mk(h.kind, h.severity, h.since_ms, h.detail, h.action);
     }
 
     // R2 — CAPTURE FROZEN. CoreAudio stopping delivery freezes the meter to ONE value (4,220 identical samples on OPD 6 from 01:36:52).
@@ -1092,6 +1103,31 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     return reachability({ app_poll_at: toIso(r.last_seen_at), kiosk_health_at: snap?.last_heartbeat_received_at ?? null, poller_ok_at: pollerOkTs }, nowMs);
   };
 
+  // TS-H9 #46 — the helper fleet: only rooms with an ACTIVE registered helper get signals. A database without the fleet tables yet (0148 not applied) is "no helper fleet",
+  // not a fault; any other failure is marked degraded so a missing rule is never shown as all clear.
+  const helperBy = new Map<string, HelperSignals>();
+  try {
+    const devs = (await sql`
+      SELECT room_id, status,
+             to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS registered_at,
+             to_char(last_poll_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_poll_at
+        FROM fleet_devices WHERE room_id = ANY(${ids}::text[]) AND status = 'active'
+    `) as Array<{ room_id: string; status: string; registered_at: string | null; last_poll_at: string | null }>;
+    if (devs.length > 0) {
+      const hosts = roomRows.filter((r) => r.hostname && devs.some((d) => d.room_id === r.room_id)).map((r) => r.hostname as string);
+      const beats = await readHelperHeartbeats(sql as never, hosts, nowMs);
+      for (const r of roomRows) {
+        const d = devs.find((x) => x.room_id === r.room_id);
+        if (d) helperBy.set(r.room_id, signalsFor(d, r.hostname, beats, toIso(r.last_seen_at)));
+      }
+    }
+  } catch (e) {
+    if (!isMissingTable(e)) {
+      console.error("[fleet-attention] could not read helper_fleet:", e instanceof Error ? e.message.slice(0, 200) : "error");
+      degraded.push("helper_fleet");
+    }
+  }
+
   const rooms: RoomAttentionInputs[] = roomRows.map((r) => {
     const key = r.hostname ? normalizeHostname(r.hostname) : null;
     const act = key ? actBy.get(key) : undefined;
@@ -1142,6 +1178,7 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
       // A failed listener read supplies NOTHING (undefined = no rule), never null: null means "no row" and would read as a dead kiosk.
       ...(degraded.includes("bench_listener") ? {} : { listener_last_poll_at: listenerPollBy.get(r.room_id) ?? null }),
       ext: extHealthBy.get(r.room_id) ?? null,
+      ...(helperBy.has(r.room_id) ? { helper: helperBy.get(r.room_id)! } : {}),
     };
   });
 

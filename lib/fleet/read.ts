@@ -3,6 +3,7 @@
  * never a signature, nonce, public key, token or result `detail` (the closed per-verb object stays in the database).
  */
 import type { FleetSql } from "./device-auth";
+import { helperAttention, readHelperHeartbeats, signalsFor, type HelperHealth } from "./helper-health";
 
 export const COMMANDS_PER_DEVICE = 20;
 export const MAX_DEVICES = 60;
@@ -11,6 +12,15 @@ export type DeviceView = {
   device_id: string; room_id: string; room_name: string | null; machine: string; status: string; helper_version: string | null;
   registered_at: string | null; last_poll_at: string | null; last_poll_age_s: number | null;
   commands: { queued: number; delivered: number; done: number; expired: number };
+  /** TS-H9/H6: what the helper's own heartbeat says (sanitised), read-only. Null health = no heartbeat in 24 h. */
+  helper: {
+    heartbeat_age_s: number | null;
+    health: HelperHealth | null;
+    /** bench poll age of the room's recorder app, for context */
+    bench_age_s: number | null;
+    /** the #46 attention rule that holds right now, if any (app_missing / helper_missing) */
+    attention: { kind: "app_missing" | "helper_missing"; severity: "red" | "amber"; detail: string } | null;
+  };
 };
 export type CommandView = {
   cmd_id: string; device_id: string; verb: string; params: Record<string, unknown>; state: string; issued_at: string; expires_at: string;
@@ -19,9 +29,10 @@ export type CommandView = {
 };
 
 
-export async function fleetDevices(sql: FleetSql, roomId: string | null = null): Promise<DeviceView[]> {
+export async function fleetDevices(sql: FleetSql, roomId: string | null = null, nowMs: number = Date.now()): Promise<DeviceView[]> {
   const rows = (await sql`
-    SELECT d.device_id, d.room_id, r.name AS room_name, d.machine, d.status, d.helper_version,
+    SELECT d.device_id, ri.hostname,
+           to_char(ri.last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS bench_at, d.room_id, r.name AS room_name, d.machine, d.status, d.helper_version,
            to_char(d.registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS registered_at,
            to_char(d.last_poll_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_poll_at,
            floor(extract(epoch FROM now() - d.last_poll_at))::int AS last_poll_age_s,
@@ -31,16 +42,31 @@ export async function fleetDevices(sql: FleetSql, roomId: string | null = null):
            (SELECT count(*) FROM fleet_commands c WHERE c.device_id = d.device_id AND (c.state = 'expired' OR (c.state = 'queued' AND c.expires_at <= now())))::int AS expired
       FROM fleet_devices d
       LEFT JOIN room r ON r.id = d.room_id
+      LEFT JOIN room_install ri ON ri.install_id = d.install_id
      WHERE (${roomId}::text IS NULL OR d.room_id = ${roomId}::text)
      ORDER BY r.name NULLS LAST, d.device_id
      LIMIT ${MAX_DEVICES}
   `) as Array<Record<string, unknown>>;
-  return rows.map((r) => ({
+  const heartbeats = await readHelperHeartbeats(sql, rows.map((r) => r.hostname as string | null).filter((h): h is string => typeof h === "string" && h.length > 0), nowMs);
+  return rows.map((r) => {
+    const hostname = (r.hostname as string | null) ?? null;
+    const sig = signalsFor(
+      { status: String(r.status), registered_at: (r.registered_at as string | null) ?? null, last_poll_at: (r.last_poll_at as string | null) ?? null },
+      hostname, heartbeats, (r.bench_at as string | null) ?? null,
+    );
+    const att = helperAttention(sig, nowMs, String(r.room_name ?? r.room_id));
+    const age = (iso: string | null): number | null => (iso ? Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 1000)) : null);
+    return {
     device_id: String(r.device_id), room_id: String(r.room_id), room_name: (r.room_name as string | null) ?? null, machine: String(r.machine), status: String(r.status),
     helper_version: (r.helper_version as string | null) ?? null, registered_at: (r.registered_at as string | null) ?? null, last_poll_at: (r.last_poll_at as string | null) ?? null,
     last_poll_age_s: r.last_poll_age_s === null || r.last_poll_age_s === undefined ? null : Number(r.last_poll_age_s),
     commands: { queued: Number(r.queued), delivered: Number(r.delivered), done: Number(r.done), expired: Number(r.expired) },
-  }));
+    helper: {
+      heartbeat_age_s: age(sig.heartbeat_at), health: sig.heartbeat, bench_age_s: age(sig.bench_at),
+      attention: att ? { kind: att.kind, severity: att.severity, detail: att.detail } : null,
+    },
+    };
+  });
 }
 
 /** The newest `perDevice` commands of each device (default 20), newest first, each with its result's outcome. Optionally one device. */

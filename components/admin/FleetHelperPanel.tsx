@@ -7,7 +7,12 @@
  */
 import * as React from "react";
 
-type Device = { device_id: string; room_id: string; room_name: string | null; machine: string; status: string; helper_version: string | null; last_poll_age_s: number | null; commands: { queued: number; delivered: number; done: number; expired: number } };
+type Health = { app_state: string | null; xpc_ok: boolean | null; console_user: boolean | null; registration: string | null; power_schedule: string | null; pmset_drift: string[]; chrome_policy: string | null; safe_mode: boolean | null };
+type Device = {
+  device_id: string; room_id: string; room_name: string | null; machine: string; status: string; helper_version: string | null; last_poll_age_s: number | null;
+  commands: { queued: number; delivered: number; done: number; expired: number };
+  helper?: { heartbeat_age_s: number | null; health: Health | null; bench_age_s: number | null; attention: { kind: "app_missing" | "helper_missing"; severity: "red" | "amber"; detail: string } | null };
+};
 type Command = { cmd_id: string; device_id: string; verb: string; state: string; issued_at: string; outcome: string | null; reason: string | null };
 type Data = { devices: Device[]; commands: Command[] };
 
@@ -41,6 +46,18 @@ export function FleetHelperPanel() {
           <li key={d.device_id} data-testid={`fleet-device-${d.device_id}`}>
             <span className="font-semibold text-even-navy-800">{d.room_name ?? d.room_id}</span> — {d.status}, helper {d.helper_version ?? "?"}, last poll{" "}
             {d.last_poll_age_s === null ? "never" : `${d.last_poll_age_s}s ago`}; queued {d.commands.queued}, delivered {d.commands.delivered}, done {d.commands.done}, expired {d.commands.expired}
+            {d.helper?.attention ? (
+              <p className={d.helper.attention.severity === "red" ? "font-semibold text-danger-700" : "font-semibold text-warning-700"} data-testid={`fleet-attention-${d.helper.attention.kind}`}>
+                {d.helper.attention.kind === "app_missing" ? "Recorder app not running" : "Helper not reporting"}: {d.helper.attention.detail}
+              </p>
+            ) : null}
+            {d.helper?.health ? (
+              <p data-testid={`fleet-health-${d.device_id}`}>
+                Helper heartbeat {d.helper.heartbeat_age_s}s ago · app {d.helper.health.app_state ?? "?"} · XPC {d.helper.health.xpc_ok === null ? "?" : d.helper.health.xpc_ok ? "ok" : "down"} · power schedule{" "}
+                {d.helper.health.power_schedule ?? "not reported"} · pmset drift {d.helper.health.pmset_drift.length === 0 ? "none" : d.helper.health.pmset_drift.join(", ")}
+                {d.helper.health.chrome_policy ? ` · Chrome policy ${d.helper.health.chrome_policy}` : ""}
+              </p>
+            ) : null}
             <ul className="ml-4 list-disc">
               {data.commands.filter((c) => c.device_id === d.device_id).slice(0, 5).map((c) => (
                 <li key={c.cmd_id}>{c.verb}: {c.outcome ? `${c.outcome}${c.reason ? ` (${c.reason})` : ""}` : c.state}</li>

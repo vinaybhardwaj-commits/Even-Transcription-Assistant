@@ -4,7 +4,7 @@
  * free-form command text. A privileged verb in clinic hours (07:30-21:30 IST), or restart_recorder with force, needs `approval_ref`. The server signs envelope v2 with the key in
  * FLEET_COMMAND_SIGNING_KEY; every enqueue writes a fleet_audit row. It queues; the helper fetches it on its next poll. Nothing is sent to a Mac from here.
  * 200 {ok, cmd_id, expires_at} · 400 bad body / verb_not_allowed / bad_params / bad_ttl / bad_approval_ref / approval_required · 401 admin_required · 404 unknown_device ·
- * 409 device_revoked | outstanding | duplicate · 503 signer_not_configured | db.
+ * 409 device_revoked | outstanding | duplicate | session_open · 429 rate_limited · 503 signer_not_configured | db.
  */
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 15;
 
 const BODY_KEYS = new Set(["device_id", "verb", "params", "approval_ref", "ttl_s"]);
-const STATUS: Record<string, number> = { unknown_device: 404, device_revoked: 409, outstanding: 409, duplicate: 409 };
+const STATUS: Record<string, number> = { unknown_device: 404, device_revoked: 409, outstanding: 409, duplicate: 409, session_open: 409, rate_limited: 429 };
 
 export async function POST(req: NextRequest) {
   const cookie = await readAdminCookie();

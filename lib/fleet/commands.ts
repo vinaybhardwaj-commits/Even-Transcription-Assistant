@@ -9,9 +9,10 @@
  */
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import type { FleetSql } from "./device-auth";
+import { APPROVAL_REF_RE } from "./verbs";
 import { approvalProblem, buildSignedEnvelope, envelopeShapeOk, isoMs, verifyEnvelope, publicKeysOf, DEFAULT_TTL_S, MAX_TTL_S, MIN_TTL_S, type Envelope, type IssueSpec } from "./envelope";
 import type { Signer } from "./signing";
-import { isFleetVerb, paramsValid, CATALOGUE } from "./verbs";
+import { isFleetVerb, paramsValid, CATALOGUE, CEILINGS, SESSION_GATED_VERBS, type FleetVerb } from "./verbs";
 
 export const MAX_PARAMS_BYTES = 2048;
 export type QueueResult = { ok: true; cmd_id: string; expires_at: string } | { ok: false; reason: string };
@@ -55,6 +56,37 @@ export async function queueCommand(sql: FleetSql, e: unknown, publicKeys: Record
   return { ok: true, cmd_id: e.cmd_id, expires_at: e.expires_at };
 }
 
+/**
+ * The gates the SERVER applies at enqueue time beyond the approval rule (#42): (1) a reset/restart verb while the device's room has an OPEN session (recording or paused)
+ * needs an approval_ref, and restart_recorder needs force:true as well (`session_open`); (2) the per-device ceilings (`rate_limited`): at most 1 coreaudiod_reset per 30 min and
+ * at most 10 privileged verbs per hour. Best effort under concurrency (a count, then an insert); the helper compiles in the same numbers as its own last line of defence.
+ */
+type GateIn = { deviceId: string; roomId: string; verb: FleetVerb; params: Record<string, unknown>; approvalRef: string | null; nowMs: number };
+
+/** (1) the session gate. Evaluated BEFORE the clinic-hours approval rule: an open session is the more specific reason to tell the operator. */
+export async function sessionGate(sql: FleetSql, g: GateIn): Promise<string | null> {
+  if (!(SESSION_GATED_VERBS as readonly string[]).includes(g.verb)) return null;
+  const open = await sql`SELECT 1 FROM bench_session WHERE room_id = ${g.roomId} AND status IN ('recording', 'paused') LIMIT 1`;
+  return open.length > 0 && (g.approvalRef === null || (g.verb === "restart_recorder" && g.params.force !== true)) ? "session_open" : null;
+}
+
+/** (2) the per-device ceilings. */
+export async function ceilingGate(sql: FleetSql, g: GateIn): Promise<string | null> {
+  const counted = async (verb: string | null, windowS: number): Promise<number> => {
+    const since = isoMs(g.nowMs - windowS * 1000);
+    const rows = (await sql`
+      SELECT count(*)::int AS n FROM fleet_commands
+       WHERE device_id = ${g.deviceId} AND issued_at > ${since}::timestamptz AND (state <> 'expired' OR delivery_count > 0)
+         AND (${verb}::text IS NULL OR verb = ${verb}::text) AND (${verb}::text IS NOT NULL OR verb = ANY(${PRIVILEGED_VERBS}::text[]))
+    `) as Array<{ n: number }>;
+    return Number(rows[0]?.n ?? 0);
+  };
+  if (g.verb === "coreaudiod_reset" && (await counted("coreaudiod_reset", CEILINGS.coreaudiod_reset.windowS)) >= CEILINGS.coreaudiod_reset.max) return "rate_limited";
+  if (CATALOGUE[g.verb].privileged && (await counted(null, CEILINGS.privileged.windowS)) >= CEILINGS.privileged.max) return "rate_limited";
+  return null;
+}
+const PRIVILEGED_VERBS = (Object.keys(CATALOGUE) as FleetVerb[]).filter((v) => CATALOGUE[v].privileged);
+
 export type IssueInput = {
   device_id: string;
   verb: unknown;
@@ -75,11 +107,18 @@ export async function issueCommand(sql: FleetSql, signer: Signer, i: IssueInput)
   if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < MIN_TTL_S || ttl > MAX_TTL_S) return { ok: false, reason: "bad_ttl" };
   const approval = i.approval_ref === undefined || i.approval_ref === null ? null : i.approval_ref;
   if (approval !== null && typeof approval !== "string") return { ok: false, reason: "bad_approval_ref" };
-  const problem = approvalProblem(i.verb, params as Record<string, unknown>, approval, nowMs);
-  if (problem) return { ok: false, reason: problem };
-  const dev = (await sql`SELECT machine, status FROM fleet_devices WHERE device_id = ${i.device_id}`) as Array<{ machine: string; status: string }>;
+  const badRef = approval !== null && !APPROVAL_REF_RE.test(approval);
+  if (badRef) return { ok: false, reason: "bad_approval_ref" };
+  const dev = (await sql`SELECT machine, status, room_id FROM fleet_devices WHERE device_id = ${i.device_id}`) as Array<{ machine: string; status: string; room_id: string }>;
   if (!dev[0]) return { ok: false, reason: "unknown_device" };
   if (dev[0].status !== "active") return { ok: false, reason: "device_revoked" };
+  const gateIn: GateIn = { deviceId: i.device_id, roomId: dev[0].room_id, verb: i.verb, params: params as Record<string, unknown>, approvalRef: approval, nowMs };
+  const session = await sessionGate(sql, gateIn);
+  if (session) return { ok: false, reason: session };
+  const problem = approvalProblem(i.verb, params as Record<string, unknown>, approval, nowMs);
+  if (problem) return { ok: false, reason: problem };
+  const ceiling = await ceilingGate(sql, gateIn);
+  if (ceiling) return { ok: false, reason: ceiling };
   // One outstanding command per (device, verb) is enforced by the database (0151's partial unique index, mapped to `outstanding` in queueCommand): a double click,
   // a retry or six parallel requests cannot stack work on a Mac. There is deliberately no check-then-insert here.
   const env: Envelope = buildSignedEnvelope({ device_id: i.device_id, machine: dev[0].machine, verb: i.verb, params: params as Record<string, unknown>, issuer: i.issuer, approval_ref: approval, ttl_s: ttl, nowMs }, signer);
