@@ -205,7 +205,7 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
     });
 
     it("the operator cannot supply it or anything else for this verb: token / machine_id / room in params are refused and not echoed", async () => {
-      for (const params of [{ token: "operator-picked-secret-12345" }, { machine_id: "X" }, { room: "X" }, { token: TOKEN }]) {
+      for (const params of [{ token: "operator-picked-secret-12345" /* gitleaks:allow (made-up) */ }, { machine_id: "X" }, { room: "X" }, { token: TOKEN }]) {
         const r = await enqueue({ device_id: DEV, verb: "chrome_policy_apply", params });
         expect(r).toMatchObject({ status: 400, json: { error: "bad_params" } });
         expect(JSON.stringify(r.json)).not.toMatch(/operator-picked|EXTTOKEN/);

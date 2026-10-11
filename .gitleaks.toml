@@ -6,5 +6,8 @@
 useDefault = true
 
 [allowlist]
-description = "fixed-seed test-vector JWTs, first commit only"
-commits = ["8f85e6bf9b1d757c88c84d70eb5b73ffb021e679"]
+description = "made-up test strings, first commit that added each (history cannot be rewritten)"
+commits = [
+  "8f85e6bf9b1d757c88c84d70eb5b73ffb021e679", # fleet JWT test vectors (fixed-seed throwaway key)
+  "61b686f5c43054df80e0119cffd2d684ccad155f", # fleet-h6-pg: a made-up "operator-picked" token string in a refusal test
+]
