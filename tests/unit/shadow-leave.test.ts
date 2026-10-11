@@ -149,9 +149,10 @@ describe("runTimelineLeaveForRoomDay", () => {
     expect(b.written[0]!.gate_version).toBe("encounter-clock-gate-v2");
   });
 
-  it("a calibrated fit may use Jev; the default runner ships with no fit", () => {
+  it("the default runner uses the stored fit (LEAVE_CALIBRATION), not an inline one", () => {
     const src = readFileSync("lib/encounter-clock/shadow-leave.ts", "utf8");
-    expect(src).toContain("calibration: emptyCalibration()");
+    expect(src).toContain("calibration: LEAVE_CALIBRATION");
+    expect(src).not.toContain("calibration: emptyCalibration()");
     expect(src).toContain("model: TIMELINE_MODEL_PIN");
     expect(src).not.toMatch(/temperature/);
     const cal = fitCalibration(Array.from({ length: 8 }, (_, i) => ({ raw: (i + 1) / 10, correct: true })));

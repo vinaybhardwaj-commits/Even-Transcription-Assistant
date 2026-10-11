@@ -22,7 +22,8 @@ import { hashOf } from "@/lib/jev/worker/canonical";
 import {
   answerCacheKey, memoryCache, timelineQuestionSetSha, TIMELINE_MODEL_PIN, type AnswerCache, type CachedReading,
 } from "@/lib/encounter-clock/timeline-cache";
-import { emptyCalibration, type Calibration } from "@/lib/encounter-clock/timeline-calibration";
+import { type Calibration } from "@/lib/encounter-clock/timeline-calibration";
+import { LEAVE_CALIBRATION } from "@/lib/encounter-clock/timeline-calibration-fit";
 import { buildRowFeatures, featuresAreWordFree, FEATURES_VERSION, type FeatureRow } from "@/lib/encounter-clock/timeline-features";
 import { buildTimeline, checkTimelineGrammar, ROW_MS, type BuiltSegment, type TimelineInput, type TimelineRow } from "@/lib/encounter-clock/timeline";
 import { loadTimelineEvidence, type TimelineEvidence } from "@/lib/room-access/encounter-timeline-io";
@@ -183,7 +184,7 @@ function defaultDeps(): LeaveDeps {
     ask: (state, asks) => askJev(state, asks, { model: TIMELINE_MODEL_PIN }),
     remember: defaultRemember,
     write: writeLeaveRun,
-    calibration: emptyCalibration(),
+    calibration: LEAVE_CALIBRATION,
     cache: memoryCache(),
   };
 }
