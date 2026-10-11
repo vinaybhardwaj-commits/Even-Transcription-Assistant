@@ -23,6 +23,8 @@ from ..note import filler_lines
 from ..prompts import load_prompt, parse_json
 from ..validate import check
 
+_COMPLETION_KINDS = ("regimen_slot", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated", "boundary_review")
+
 JUDGE = "judge-v3"
 REF_KEYS = ("medicines", "diagnoses", "icd_codes", "investigations", "comorbidities", "advice", "plan", "follow_up")
 
@@ -84,6 +86,15 @@ def metrics(rec: dict, art: dict, log: dict | None = None) -> dict:
     held = [k for k in kept if "[held_back_inferred_order]" in k["text"]]
     quarantined = [k for k in kept if "[boundary_quarantine]" in k["text"]]
     kor, cr = j.get("kept_out_review", []), j.get("completion_review", [])
+    # Verdicts are counted only for drug_history and held-back orders. A regimen slot or a boundary item in the
+    # same review list is not a held-back order, and used to inflate held_back_true_orders.
+    def _review_text(x) -> str:
+        k = x.get("k")
+        if isinstance(k, int) and 0 <= k < len(kept):
+            return kept[k].get("text") or ""
+        return x.get("item") or ""
+
+    held_reviews = [x for x in kor if any(tag in _review_text(x) for tag in ("[held_back_inferred_order]", "[drug_history]"))]
     com = j.get("comorbidities_pred", [])
     dose = [(x.get("dose") or {}).get(f) for x in dr if x.get("matched_pred_idx") is not None for f in ("strength", "frequency", "duration")]
     dose = [v for v in dose if v in ("match", "close", "mismatch", "pred_missing")]
@@ -103,10 +114,11 @@ def metrics(rec: dict, art: dict, log: dict | None = None) -> dict:
         "n_regimen_slots": len(slots), "slots_captured": sum(1 for x in unnamed if x.get("slot_k") is not None),
         "slots_captured_regimen_only": sum(1 for x in regonly if x.get("slot_k") is not None),
         "n_held_back": len(held), "n_quarantined": len(quarantined),
-        "held_true_order": sum(1 for x in kor if x.get("verdict") == "true_order_held_back"),
-        "held_halluc_prevented": sum(1 for x in kor if x.get("verdict") == "hallucination_prevented"),
-        "held_unclear": sum(1 for x in kor if x.get("verdict") == "unclear"),
+        "held_true_order": sum(1 for x in held_reviews if x.get("verdict") == "true_order_held_back"),
+        "held_halluc_prevented": sum(1 for x in held_reviews if x.get("verdict") == "hallucination_prevented"),
+        "held_unclear": sum(1 for x in held_reviews if x.get("verdict") == "unclear"),
         "n_completion_required": len(art.get("completion_required") or []),
+        **{f"n_completion_{k}": sum(1 for c in (art.get("completion_required") or []) if c.get("kind") == k) for k in _COMPLETION_KINDS},
         "completion_needed": sum(1 for x in cr if x.get("verdict") == "needed"),
         "completion_unneeded": sum(1 for x in cr if x.get("verdict") == "unneeded"),
         "n_comorbidities_pred": len(com), "comorbidities_valid": sum(1 for x in com if x.get("valid")),

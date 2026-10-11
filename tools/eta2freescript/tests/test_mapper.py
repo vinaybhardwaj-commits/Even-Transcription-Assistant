@@ -149,12 +149,17 @@ def test_unnamed_drug_becomes_regimen_slot_never_a_medicine():
     assert len(kept(a, "[regimen_slot] Name this drug")) == 2
 
 
-def test_drug_history_continue_prompt():
-    dh = [{"name_as_said": "amlodipine", "text": "Takes amlodipine", "current": True, "reported_by": "attendant", "source_turns": [2]},
-          {"name_as_said": "an old syrup", "text": "Took a syrup last month", "current": False, "source_turns": [1]}]
-    a = art_of(drug_history=dh)
+def test_drug_history_continue_prompt_needs_a_doctor_signal():
+    mentioned = [{"name_as_said": "amlodipine", "text": "Takes amlodipine", "current": True, "reported_by": "attendant", "source_turns": [2]}]
+    a = art_of(drug_history=mentioned)
+    assert "drug_history" not in kinds(a)
+    discussed = [{"name_as_said": "amlodipine", "text": "Continue amlodipine", "current": True, "reported_by": "doctor", "source_turns": [4]}]
+    lines = [(0, 4, "0", "What is the problem?"), (5, 10, "1", "Fever."), (11, 15, "2", "He takes amlodipine."),
+             (16, 20, "0", "Throat is red."), (21, 30, "0", "Continue the amlodipine.")]
+    a = art_of(c=mk_consult(lines, roles=DOC), examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [3]}],
+               drug_history=discussed)
     assert kinds(a) == ["drug_history"] and a["completion_required"][0]["prompt"] == "Continue amlodipine?"
-    a = art_of(drug_history=dh[:1], prescription=[rx(generic="amlodipine", strength="5 mg", decision_turn=4, source_turns=[2, 4])])
+    a = art_of(drug_history=mentioned, prescription=[rx(generic="amlodipine", brand_as_said="Amlong", strength="5 mg", decision_turn=4, source_turns=[2, 4])])
     assert "drug_history" not in kinds(a)
 
 

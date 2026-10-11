@@ -42,7 +42,7 @@ def test_knee_boundary_quarantine_and_fallback(replay_out):
     assert "pantoprazole" not in art["note_text"].lower() and "medicines" not in art["gp_extraction"]
     assert art["clip_boundary"]["quarantined_turns"] == [0, 1, 2]
     assert {"role_track_two_consults", "second_patient_voice", "stage_a_topic"} <= set(art["clip_boundary"]["reasons"])
-    assert sorted(c["kind"] for c in art["completion_required"]) == ["boundary_review", "drug_history", "exam_missing", "regimen_slot"]
+    assert sorted(c["kind"] for c in art["completion_required"]) == ["boundary_review", "exam_missing", "regimen_slot"]
     assert art["gp_extraction"]["comorbidities"][0]["duration"] == {"value": 60, "unit": "MONTHS"}
     assert art["gp_extraction"]["follow_up"]["followup_type"] == "IF_REQUIRED"
     assert art["encounter"]["transcript"]["role_track"]["two_consults"] is True

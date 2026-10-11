@@ -11,6 +11,7 @@ client and phi_guard.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
@@ -35,6 +36,24 @@ class Options:
     stage_b: str = f"stageB-{STAGE_B_VERSION}"
     stage_b_enabled: bool = True
     write_v01: bool = True
+
+
+def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
+    """Deterministic note. If carried-over free text still names a kept-out order, drop that free text and render again.
+    The fallback must not fail C4: a C4 failure used to mean no artifact was written at all."""
+    det = sanitize_note(render_note(art["gp_extraction"], flags, banned))
+    shadow = dict(art)
+    shadow["note_text"] = det
+    if not any(e.startswith("C4") for e in check(shadow)):
+        return det
+    gx = copy.deepcopy(art["gp_extraction"])
+    for m in gx.get("medicines") or []:
+        m.pop("instructions", None)
+    for inv in gx.get("further_investigations") or []:
+        inv.pop("instruction", None)
+    for ref in gx.get("referrals") or []:
+        ref.pop("notes", None)
+    return sanitize_note(render_note(gx, flags))
 
 
 def role_context(c: Consult) -> str:
@@ -67,7 +86,14 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     if not c.role_track:
         apply_inferred_roles(c.turns, enc.get("speaker_roles") or [])
     bnd = B.detect(c, enc.get("consult_boundary"))
-    bnd.quarantined |= pre.quarantined
+    # A pre-Stage-A quarantine must not put back a turn Stage A left as this patient (the long-gap bug).
+    cb = enc.get("consult_boundary") if isinstance(enc.get("consult_boundary"), dict) else None
+    if cb is not None and "foreign_turns" in cb:
+        foreign = {t for t in (cb.get("foreign_turns") or []) if isinstance(t, int) and 0 <= t < len(c.turns)}
+        pre_keep = pre.quarantined - (set(range(len(c.turns))) - foreign)
+    else:
+        pre_keep = pre.quarantined
+    bnd.quarantined |= pre_keep
     for r in pre.reasons:
         if r not in bnd.reasons:
             bnd.reasons.append(r)
@@ -79,7 +105,8 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     prompts = [prompt_path(opts.stage_a)] + ([prompt_path(opts.stage_b)] if opts.stage_b_enabled else [])
     art = build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty)
     flags = flags_by_pointer(art)
-    det = sanitize_note(render_note(art["gp_extraction"], flags))
+    banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
+    det = _fallback_note(art, flags, banned)
     log = {"uid": c.uid, "speaker_source": c.speaker_source, "english_source": c.english_source,
            "boundary": art["clip_boundary"], "completion_required": len(art["completion_required"]),
            "guard_issues": enc["_guard"]["issues"]}

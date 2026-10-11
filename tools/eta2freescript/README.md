@@ -62,7 +62,7 @@ deterministic note fallback.
 - **C1:** every `completion_required.item_id` names a kept-out provenance item.
 - **C2:** no `boundary_quarantined` item is in `gp_extraction`.
 - **C3:** every quarantined turn is inside the transcript.
-- **C4:** a note order line names no kept-out order that its own entry does not also name.
+- **C4:** a note order line names no kept-out order that its own entry does not also name. Instructions, investigation text and referral notes are scrubbed of kept-out drug names before render. If the deterministic fallback would still fail C4, that free text is dropped and the note is rendered again, so a fallback always writes an artifact.
 
 C4 closes a G6 gap. G6 checks that each line names its own entry, not that it names nothing else. A drug absent from the
 whole artifact still cannot be caught without a drug lexicon; the judge's `stage_b_additions` counts those.
@@ -140,7 +140,7 @@ Nothing in it is ever guessed into `gp_extraction`.
 | kind | raised when | the provenance item (`json_pointer: null`) |
 |---|---|---|
 | `regimen_slot` | a regimen was said without a drug name ("apply this gel twice a day") | `[regimen_slot] Name this drug - form=…; frequency=…; duration=…` |
-| `drug_history` | a patient or attendant reported a current drug that the doctor did not continue or stop | `[drug_history] <name> - …`; prompt `Continue <name>?` |
+| `drug_history` | a current drug the doctor discussed continuing or stopping, or a current chronic medicine whose history names a diagnosis or comorbidity, and the doctor did not already continue it. A near-miss brand of a continued drug (Concord / Concor) is the same drug and raises no prompt. Names that are not catalogue-like are one shared note, not one prompt each | `[drug_history] <name>`; prompt `Continue <name>?`, or one `Patient mentioned other medicines` |
 | `exam_missing` | no examination finding was said aloud, or a part was examined with no finding said | `[exam_missing] …` |
 | `dose_unstated` | an emitted medicine has no stated strength, frequency or duration | `[dose_unstated] <name> - strength, duration not said aloud`; `detail` = the medicine's item_id |
 | `follow_up_unstated` | a follow-up was said with no interval or date (type not IF_REQUIRED) | `[follow_up_unstated] …` |
@@ -163,8 +163,9 @@ A consumer should block signing until each entry is resolved or dismissed by the
 | `role_track_two_consults:gap_outside_clip` | flag only |
 | `second_patient_voice` | quarantine applied |
 | `second_patient_voice:interleaved` | flag only |
-| `long_gap` | quarantine applied |
-| `long_gap:unconfirmed` | flag only |
+| `second_patient_voice:unconfirmed` | flag only (a late second patient voice, with no Stage A foreign label) |
+| `long_gap` | quarantine applied to turns Stage A labelled as another consult, or (with no labels) to an early short side that has a speaker the rest of the clip does not. A turn Stage A left as the current patient is never quarantined |
+| `long_gap:unconfirmed` | flag only (late short side, or no stranger speaker) |
 | `stage_a_topic` | quarantine applied |
 | `stage_a_topic:unlocalised` | flag only |
 
@@ -220,7 +221,7 @@ fails if the committed file is stale (`python -m tools.eta2freescript.schema.bui
    - It must not overwrite content the doctor has already typed.
 2. **Review UI for `completion_required`.**
    - "Name this drug" for each regimen slot: show the captured form, frequency and duration, and let the doctor pick the drug in one tap.
-   - A "Continue X?" prompt for each patient-reported drug.
+   - A "Continue X?" prompt only when the doctor discussed continuing or stopping that drug, or it is a current chronic medicine relevant to the diagnosis. Other patient-mentioned names are one "Patient mentioned other medicines" note.
    - "Enter finding" for a missing exam, and "enter dose" for an unstated dose.
    - A boundary banner showing the quarantined items.
    - In v1, 83% of signed drugs were never named aloud, so this UI is the main lever on drug recall.

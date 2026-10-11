@@ -114,7 +114,14 @@ class GatewayClient(ModelClient):
 
     def _chat(self, alias, prompt, system, max_tokens, temperature, tag):
         t0 = time.time()
-        text, resp = self.gw.chat(alias, prompt, system=system, max_tokens=max_tokens, temperature=temperature, raw=True)
+        for attempt in range(3):
+            try:
+                text, resp = self.gw.chat(alias, prompt, system=system, max_tokens=max_tokens, temperature=temperature, raw=True)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(10 * (attempt + 1))
         u = resp.get("usage", {})
         self.ledger.record(alias, tag, time.time() - t0, u.get("inputTokens", 0), u.get("outputTokens", 0), resp.get("stopReason"))
         return text

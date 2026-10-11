@@ -21,6 +21,9 @@ def pct(a: int, b: int) -> str:
     return f"{a}/{b} ({100 * a / b:.0f}%)" if b else "n/a"
 
 
+COMPLETION_KINDS = ("regimen_slot", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated", "boundary_review")
+
+
 def head(rs: list[dict]) -> dict:
     if not rs:
         return {"consults": 0}
@@ -45,6 +48,7 @@ def head(rs: list[dict]) -> dict:
         "held_back_hallucinations_prevented": s("held_halluc_prevented"), "held_back_unclear": s("held_unclear"),
         "boundary_quarantined_items": s("n_quarantined"),
         "completion_required_items": s("n_completion_required"),
+        "completion_required_by_type": {k: s(f"n_completion_{k}") for k in COMPLETION_KINDS},
         "completion_required_needed": pct(s("completion_needed"), s("n_completion_required")),
         "completion_required_unneeded": s("completion_unneeded"),
         "dx_per_consult": round(s("n_dx_pred") / len(rs), 2), "dx_oversplit_consults": sum(1 for r in rs if r.get("dx_oversplit") in ("True", True)),

@@ -23,6 +23,7 @@ v2 rules:
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import re
 import uuid
 
@@ -30,7 +31,7 @@ from .boundary import Boundary
 from .followup import map_follow_up
 from .guard import NON_DOCTOR, rx_turns
 from .ingest import Consult
-from .note import FILLER
+from .note import FILLER, drop_clauses
 from .validate import V
 
 MAPPER_VERSION = "2.0.0"
@@ -40,8 +41,19 @@ MAX_SECONDARY_DX = 3
 ADVICE_MAX_ITEMS = 5
 ADVICE_MAX_CHARS = 300
 FORM_WORDS = {"cream", "tablet", "tab", "syrup", "syp", "capsule", "cap", "ointment", "lotion", "spray", "drops", "gel",
-              "powder", "medicine", "injection", "nasal spray", "drug", "tablets", "medicines"}
+              "powder", "medicine", "injection", "nasal spray", "drug", "tablets", "medicines", "drugs"}
+# A class the doctor said ("statin", "cholesterol medicine") is not a drug name. It goes to a regimen slot.
+CLASS_WORDS = {"statin", "statins", "antibiotic", "antibiotics", "painkiller", "painkillers", "ppi", "antacid", "antacids",
+               "steroid", "steroids", "analgesic", "analgesics", "antihypertensive", "nsaid", "nsaids", "diuretic", "diuretics",
+               "antihistamine", "antihistamines", "antifungal", "antifungals", "antiviral", "antivirals", "anticoagulant",
+               "antipyretic", "bronchodilator", "inhaler", "antidepressant", "anxiolytic", "sedative", "anticonvulsant",
+               "antiepileptic", "antimalarial", "anthelmintic", "decongestant", "expectorant", "mucolytic", "laxative",
+               "probiotic", "multivitamin", "vitamin", "supplement", "sartan", "cholesterol", "painkiller"}
+CLASS_PHRASES = {"beta blocker", "beta-blocker", "calcium channel blocker", "ace inhibitor", "blood thinner",
+                 "cholesterol medicine", "sugar medicine", "bp medicine", "pain medicine", "pain killer"}
 FORM_PREFIX = re.compile(r"^(tab|tablet|cap|capsule|syp|syrup|inj|injection)\.?\s+", re.I)
+NO_NAME_NOTE = re.compile(r"\b(no name|not named|unnamed|name not (?:spoken|said|heard|given)|no drug name|class only|only a class|only the class)\b", re.I)
+CONTINUE_CUE = re.compile(r"\b(continu\w*|discontinu\w*|stop(?:ped|ping)?|keep taking|restart|still taking|carry on)\b", re.I)
 SYMPTOM_LIKE = re.compile(r"\b(pain|ache|aches|borderline|elevated|raised|high|low|fever|cough|cold|weakness|fatigue|giddiness|"
                           r"dizziness|headache|swelling|itching|burning|vomiting|nausea|loose motions?|constipation|symptoms?)\b", re.I)
 SOCIAL_TYPES = {"social", "place", "travel", "occupation"}
@@ -53,9 +65,53 @@ def iso(ms: int) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, IST).isoformat(timespec="seconds")
 
 
+def _name_text(rx: dict) -> str:
+    return FORM_PREFIX.sub("", (rx.get("generic") or rx.get("brand_as_said") or "").strip().lower()).strip()
+
+
+def is_class_name(text: str | None) -> bool:
+    """True when the string is a drug class (or a class plus filler), not a catalogue name."""
+    n = FORM_PREFIX.sub("", (text or "").strip().lower())
+    if not n or n in FORM_WORDS:
+        return False
+    if n in CLASS_WORDS or n in CLASS_PHRASES:
+        return True
+    toks = [t for t in re.split(r"[\s/-]+", n) if t and t not in STOP]
+    return bool(toks) and all(t in CLASS_WORDS or t in CLASS_PHRASES or t in FORM_WORDS or t in {"medicine", "medicines", "drug", "drugs"} for t in toks)
+
+
+def unnamed_reason(rx: dict) -> str | None:
+    """Why this prescription is not a named medicine: a Stage A no-name note, or the 'name' is a class."""
+    if NO_NAME_NOTE.search(str(rx.get("name_interpretation") or "")):
+        return "no_name_note"
+    if is_class_name(_name_text(rx)):
+        return "class"
+    n = _name_text(rx)
+    return None if n and n not in FORM_WORDS else "unnamed"
+
+
 def is_named(rx: dict) -> bool:
-    n = (rx.get("generic") or rx.get("brand_as_said") or "").strip().lower()
-    return bool(n) and n not in FORM_WORDS
+    return unnamed_reason(rx) is None
+
+
+def class_label(rx: dict) -> str | None:
+    for cand in (rx.get("drug_class_said"), rx.get("generic"), rx.get("brand_as_said")):
+        if is_class_name(cand):
+            return FORM_PREFIX.sub("", str(cand).strip())
+    return None
+
+
+def catalogue_like(name: str | None) -> bool:
+    """A name that looks like one drug (letters, a vowel, not a class, not a sentence), not STT garble."""
+    raw = (name or "").strip()
+    if not raw or len(raw) > 40 or is_class_name(raw):
+        return False
+    toks = [t for t in re.findall(r"[A-Za-z]{4,}", raw) if t.lower() not in FORM_WORDS and t.lower() not in CLASS_WORDS and t.lower() not in STOP]
+    if not toks or len(toks) > 2:
+        return False
+    if any(re.search(r"(.)\1\1", t) for t in toks):
+        return False
+    return any(sum(c in "aeiou" for c in t.lower()) > 0 for t in toks)
 
 
 def duration(d) -> tuple[dict | None, str | None]:
@@ -91,6 +147,7 @@ class Builder:
         self.prov: list[dict] = []
         self.completion: list[dict] = []
         self.n = 0
+        self.continued_names: list[str] = []
         self.role_conf = {str(r.get("speaker", "")).lstrip("Ss"): float(r.get("confidence") or 0) for r in enc.get("speaker_roles") or []}
 
     # --- helpers
@@ -283,8 +340,13 @@ class Builder:
             regimen = ", ".join(str(rx[k]) for k in ("strength", "route", "frequency", "duration", "instructions") if rx.get(k))
             heard = [rx.get("brand_as_said_as_heard"), rx.get("generic_as_heard")]
             if not is_named(rx):
-                self.slot({"dosage_form": rx.get("dosage_form") or brand, "frequency": rx.get("frequency"), "duration": rx.get("duration"),
-                           "timing": rx.get("instructions"), "source_turns": turns, "confidence": rx.get("confidence")}, lead=dec)
+                form = rx.get("dosage_form")
+                if not form and brand and str(brand).strip().lower() in FORM_WORDS:
+                    form = brand
+                self.slot({"dosage_form": form, "frequency": rx.get("frequency"), "duration": rx.get("duration"),
+                           "timing": rx.get("instructions"), "strength": rx.get("strength"), "drug_class_said": class_label(rx),
+                           "source_turns": turns, "confidence": rx.get("confidence"),
+                           "quote_turn": dec if isinstance(dec, int) else None}, lead=dec)
                 continue
             label = generic or brand
             name = FORM_PREFIX.sub("", label).strip()
@@ -311,6 +373,7 @@ class Builder:
             if generic and brand and not stripped and brand.lower() not in generic.lower():
                 m["aliases"] = [brand]
             meds.append(m)
+            self.continued_names.extend([x for x in names + V.med_names(m) if x])
             item = self.P("medicine", f"{'Continue ' if action in ('continue', 'change') else ''}{name}" + (f" - {regimen}" if regimen else ""),
                           "continued" if action in ("continue", "change") else "prescribed", turns, rx.get("confidence") or 0.5,
                           f"/medicines/{len(meds) - 1}", fl, names=names, lead=dec)
@@ -323,31 +386,78 @@ class Builder:
             self.gx["medicines"] = meds
         for s in self.enc.get("regimen_slots") or []:
             self.slot(s, lead=s.get("quote_turn"))
-        self.drug_history(meds)
+        self.drug_history()
 
     def slot(self, s: dict, lead=None):
         turns = self.turns(s) + ([s["quote_turn"]] if isinstance(s.get("quote_turn"), int) and s["quote_turn"] not in self.turns(s) else [])
-        desc = "; ".join(f"{k}={s.get(src)}" for k, src in (("form", "dosage_form"), ("frequency", "frequency"), ("duration", "duration"),
-                                                              ("timing", "timing"), ("class", "drug_class_said"), ("indication", "indication_said")))
+        desc = "; ".join(f"{k}={s.get(src)}" for k, src in (("form", "dosage_form"), ("strength", "strength"), ("frequency", "frequency"),
+                                                              ("duration", "duration"), ("timing", "timing"), ("class", "drug_class_said"),
+                                                              ("indication", "indication_said")) if s.get(src))
         if self.quarantined(turns):
             self.quarantine("medicine", f"[regimen_slot] {desc}", turns, names=[], lead=lead)
             return
-        fl = [flag for f, flag in (("frequency", "frequency_unstated"), ("duration", "duration_unstated")) if not s.get(f)] + ["strength_unstated"]
+        fl = [flag for f, flag in (("strength", "strength_unstated"), ("frequency", "frequency_unstated"), ("duration", "duration_unstated")) if not s.get(f)]
         it = self.P("medicine", f"[regimen_slot] Name this drug - {desc}", "discussed_only", turns, min(float(s.get("confidence") or 0.5), 0.5), None, fl, names=[], lead=lead)
         self.review("regimen_slot", it, "Name this drug", desc)
 
-    def drug_history(self, meds):
+    def _matches_continued(self, nm: str) -> bool:
+        """True when `nm` is the drug the doctor continued, including a one-edit brand (Concord / Concor)."""
+        pool = [n for n in self.continued_names if n]
+        if not nm or not pool:
+            return False
+        if V.same_drug([nm], pool):
+            return True
+        ta, tb = V.name_tokens([nm]), V.name_tokens(pool)
+        return any(difflib.SequenceMatcher(None, a, b).ratio() >= 0.80 for a in ta for b in tb)
+
+    def _doctor_discussed(self, it: dict) -> bool:
+        texts = [it.get("text") or ""]
+        for t in it.get("source_turns") or []:
+            if isinstance(t, int) and 0 <= t < len(self.c.turns) and self.c.turns[t].role == "doctor":
+                texts.append(self.c.turns[t].text)
+        return any(CONTINUE_CUE.search(x or "") for x in texts)
+
+    def _relevant_chronic(self, it: dict) -> bool:
+        """A current medicine whose history text shares a word with a diagnosis or comorbidity."""
+        if it.get("current") is not True:
+            return False
+        blob = f"{it.get('text') or ''} {it.get('name_as_said') or ''}".lower()
+        labels = [d.get("label") or "" for d in self.enc.get("diagnoses") or []]
+        labels += [c.get("name") or "" for c in self.enc.get("comorbidities") or []]
+        for lab in labels:
+            words = [w for w in re.findall(r"[a-z]{5,}", lab.lower()) if w not in STOP]
+            if any(w in blob for w in words):
+                return True
+        return False
+
+    def drug_history(self):
+        garbled: list[tuple[str, list[int], str]] = []
         for it in self.enc.get("drug_history") or []:
-            nm = it.get("name_as_said") or ""
+            nm = (it.get("name_as_said") or "").strip()
             tl = self.turns(it)
+            text = it.get("text") or ""
             if self.quarantined(tl):
-                self.quarantine("medicine", f"[drug_history] {nm} - {it.get('text', '')}", tl, names=[nm] if nm else [])
+                self.quarantine("medicine", f"[drug_history] {nm} - {text}", tl, names=[nm] if nm else [])
                 continue
-            addressed = bool(nm) and any(V.same_drug([nm], V.med_names(m)) for m in meds)
-            item = self.P("medicine", f"[drug_history] {nm} - {it.get('text', '')} (current={it.get('current')}, reported_by={it.get('reported_by')})",
-                          "discussed_only", tl, 0.8, None, names=[nm] if nm else [])
-            if not addressed and it.get("current") is not False:
-                self.review("drug_history", item, f"Continue {nm or 'this medicine'}?", it.get("text"))
+            if nm and self._matches_continued(nm):
+                self.P("medicine", f"[drug_history] {nm} - {text} (already in the doctor's order)", "discussed_only", tl, 0.8, None, names=[nm])
+                continue
+            if not catalogue_like(nm):
+                if it.get("current") is False:
+                    self.P("medicine", f"[drug_history] {nm} - {text}", "discussed_only", tl, 0.5, None, names=[nm] if nm else [])
+                    continue
+                garbled.append((nm, tl, text))
+                continue
+            item = self.P("medicine", f"[drug_history] {nm} - {text} (current={it.get('current')}, reported_by={it.get('reported_by')})",
+                          "discussed_only", tl, 0.8, None, names=[nm])
+            if it.get("current") is not False and (self._doctor_discussed(it) or self._relevant_chronic(it)):
+                self.review("drug_history", item, f"Continue {nm}?", text)
+        if garbled:
+            names = [nm for nm, _, _ in garbled if nm]
+            turns = sorted({t for _, tl, _ in garbled for t in tl})
+            detail = "; ".join(f"{nm}: {tx}" if nm else tx for nm, _, tx in garbled)[:200]
+            item = self.P("medicine", "[drug_history] patient mentioned other medicines", "discussed_only", turns, 0.5, None, names=[])
+            self.review("drug_history", item, "Patient mentioned other medicines", detail)
 
     def investigations(self, plan_txt):
         inv = []
@@ -484,7 +594,45 @@ class Builder:
         self.advice()
         self.follow_up()
         self.boundary()
+        self._scrub_free_text()
         return self.gx, self.prov
+
+    def _scrub_free_text(self) -> None:
+        """A kept-out drug named inside an order's free text fails C4, including on the deterministic note."""
+        banned = [n for p in self.prov if not p.get("json_pointer") for n in (p.get("names") or []) if n]
+        if not banned:
+            return
+
+        def clean(text, own) -> str:
+            if not text:
+                return ""
+
+            def drop(clause: str) -> bool:
+                return any(V.same_drug([n], [clause]) and not V.same_drug([n], own or []) for n in banned)
+
+            return drop_clauses(text, drop)
+
+        for m in self.gx.get("medicines") or []:
+            if m.get("instructions"):
+                cleaned = clean(m["instructions"], V.med_names(m))
+                if cleaned:
+                    m["instructions"] = cleaned
+                else:
+                    m.pop("instructions", None)
+        for inv in self.gx.get("further_investigations") or []:
+            if inv.get("instruction"):
+                cleaned = clean(inv["instruction"], [inv.get("name"), inv.get("raw_name")])
+                if cleaned:
+                    inv["instruction"] = cleaned
+                else:
+                    inv.pop("instruction", None)
+        for ref in self.gx.get("referrals") or []:
+            if ref.get("notes"):
+                cleaned = clean(ref["notes"], [ref.get("speciality")])
+                if cleaned:
+                    ref["notes"] = cleaned
+                else:
+                    ref.pop("notes", None)
 
 
 def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, code_sha: str, specialty: str | None = None) -> dict:
