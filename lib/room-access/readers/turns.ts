@@ -9,7 +9,14 @@
 import { sql } from "@/lib/db";
 import { blindGuardWindow, refuse, type ReadResult } from "@/lib/room-access/readers/common";
 
-export type Turn = { source_ref: string; start_ms: number; end_ms: number; speaker_idx: number | null; role: string | null; overlap_ms: number | null; text?: string | null };
+/** Fine-grained speaker role from a REB `role.llm-roles` track (Arch #91). Absent unless that join ran. */
+export const REB_SPEAKER_ROLES = ["doctor", "patient", "attender", "staff", "other", "unknown"] as const;
+export type RebSpeakerRole = (typeof REB_SPEAKER_ROLES)[number];
+/**
+ * `role` is the diarizer's clinician mark (`"clinician"` | null), unchanged by Arch #91.
+ * `reb_role` is the optional fine-grained label from `role.llm-roles` (doctor/patient/attender/staff/other/unknown).
+ */
+export type Turn = { source_ref: string; start_ms: number; end_ms: number; speaker_idx: number | null; role: string | null; overlap_ms: number | null; text?: string | null; reb_role?: RebSpeakerRole };
 export type WindowTurns = { window_id: string; room_day_id: string; start_ms: number; end_ms: number; diarize_state: string | null; turns: Turn[]; attributed: number };
 
 export async function readWindowTurns(windowId: string, opts: { includeText?: boolean } = {}): Promise<ReadResult<WindowTurns>> {

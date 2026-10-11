@@ -20,7 +20,7 @@ import { SARVAM_CONSULT_BATCH_KIND, parseBatchArgs } from "@/lib/jobs/kinds/sarv
 import { logTrackMissing, preflightClip } from "@/lib/consult-clip";
 import { palimpsestAsResult } from "@/lib/consult-index/palimpsest-view";
 import { signatureVersion } from "@/lib/consult-index/parse";
-import { findSarvamTracks } from "@/lib/room-access/readers/reb-consult";
+import { findSarvamTracks, readRebRoleFlags, type RebRoleFlags } from "@/lib/room-access/readers/reb-consult";
 import { consultResultView } from "@/lib/consult-index/result-view";
 import { getIndexRow, latestSync, listIndexDay, listResults } from "@/lib/room-access/consult-index-store";
 import { SARVAM_TRANSLATE_KIND, parseSarvamTranslateArgs } from "@/lib/jobs/kinds/sarvam-translate";
@@ -129,12 +129,13 @@ type ResultRowT = Awaited<ReturnType<typeof listResults>>[number];
  * THE ONE HEAD. Our own stored results and the palimpsest's tracks (palimpsestAsResult) both go through this function, so the key sets are identical by construction; `source` says which it was
  * ("scribe_sarvam" for a job of ours, "palimpsest" for a reused track). tests/unit/consult-index-pg.test.ts compares the two field by field.
  */
-function resultHead(hit: ResultRowT & { source?: string }, row: IndexRowT, others: string[]): Row {
+function resultHead(hit: ResultRowT & { source?: string; reb_role_flags?: RebRoleFlags }, row: IndexRowT, others: string[]): Row {
   return {
     ok: true, consult_uid: hit.consult_uid, source: hit.source ?? "scribe_sarvam", cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english,
     job_id: hit.job_id || null, model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s,
     speakers: hit.speaker_count, transcript_chars: hit.transcript_chars, english_chars: hit.english_chars, english_pass: hit.english_pass, clip: { t0_ms: hit.t0_ms, t1_ms: row.t1_ms },
     created_at: hit.created_at || null, other_cuts: others, billed: false, // reading a result bills nothing, ours or reused
+    ...(hit.reb_role_flags ? { reb_role_flags: hit.reb_role_flags } : {}),
   };
 }
 
@@ -146,7 +147,8 @@ async function palimpsestResult(uid: string, row: IndexRowT, withText: boolean):
   const r = await findSarvamTracks(row.consult_uid, row.room_id, row.room_slug, row.cut_version, signatureVersion);
   if ("unavailable" in r) return { ok: false, error: "reuse_lookup_unavailable" };
   if (r.found?.stt) {
-    const v = palimpsestAsResult(row, r.found.stt, r.found.translate);
+    const flags = await readRebRoleFlags(row.consult_uid, row.room_id, row.room_slug);
+    const v = palimpsestAsResult(row, r.found.stt, r.found.translate, flags);
     const head = resultHead(v.result, row, []);
     return withText ? { ...head, ...consultResultView(v.doc, row.t0_ms) } : head;
   }
