@@ -188,16 +188,29 @@ Stage A emits `follow_up {type, interval{value,unit}, date, when, condition, wit
 fails if the committed file is stale (`python -m tools.eta2freescript.schema.build_v02 --check`).
 
 1. **Speakers: attender → attendant, plus staff / other.**
-   - REB roles are doctor/patient/attender/staff/other/unknown. v0.1 has doctor/patient/attendant/unknown.
-   - v0.2 maps REB `attender` to `attendant`, the v0.1 spelling, and adds `staff` and `other`. It also adds `speaker_source: role_track`.
-   - The v0.1 projection (`artifact.v0.1.json`) maps staff/other to `unknown` and role_track to `diarisation`, so a v0.1 consumer and the vendored G-rules still work.
-   - v0.2 also adds the required top-level `completion_required` and `clip_boundary`, `encounter.transcript.speaker_source` / `role_track`, the provenance kind `clip_boundary`, and the flags `boundary_quarantined` and `doctor_dose_precedence`. These need a new version because v0.1 has `additionalProperties: false`.
+   - The vendored artifact speaker enum is `doctor|patient|attendant|unknown`. It has no `staff`, and it spells
+     `attendant` where the REB role track says `attender` (REB: doctor/patient/attender/staff/other/unknown).
+   - At ingestion (`ARTIFACT_SPEAKER` in `ingest.py`), REB `attender` is mapped to `attendant`. Stage A's inferred roles
+     take the same map, so an `attender` string never reaches the artifact.
+   - v0.2 adds `staff` and `other` to `ProvenanceItem.speaker`, and `speaker_source: role_track`. A staff or other turn
+     validates as v0.2; the v0.1 projection (`to_v01` → `artifact.v0.1.json`) remaps staff/other to `unknown` and
+     `role_track` to `diarisation`, so the vendored validator and a v0.1 consumer still accept the projection. A raw
+     v0.2 artifact with `speaker: staff` handed to the v0.1 schema without projection fails the enum check — that is
+     why the bump exists. Covered by `tests/test_schema_notes.py`.
+   - v0.2 also adds the required top-level `completion_required` and `clip_boundary`, `encounter.transcript.speaker_source`
+     / `role_track`, the provenance kind `clip_boundary`, and the flags `boundary_quarantined` and
+     `doctor_dose_precedence`. These need a new version because v0.1 has `additionalProperties: false`.
 2. **DurationUnit: MONTHS×12 vs YEARS.**
-   - The vendor schema allows only DAYS/WEEKS/MONTHS in `LlmDuration`, 1–1000, and says "Years are emitted as MONTHS x 12". The mapper does that: "diabetes for 5 years" becomes 60 MONTHS.
-   - If Pulse's `evenpb.DurationUnit` has YEARS, this conversion loses the doctor's unit and renders "60 months" where the doctor said "5 years".
-   - The 1–1000 range also caps a duration at 83 years; anything longer is not representable and is kept in provenance only.
-   - **Open for Pulse:** confirm the `DurationUnit` enum. If YEARS exists, v0.3 should widen `LlmDuration.unit` and drop the conversion.
-   - v0.2 deliberately does NOT widen it, so every v0.2 `gp_extraction` stays valid against v0.1.
+   - The enum file actually vendored (`vendor/freescript-w38/eta-freescript-artifact.schema.json`, `LlmDuration.unit`)
+     is `DAYS|WEEKS|MONTHS` only, range 1–1000. Its description says: "Years are emitted as MONTHS x 12."
+   - Pulse code has a `YEARS` `DurationUnit`. That is a real discrepancy: following Pulse would write `unit: "YEARS"`
+     into `gp_extraction`, which the vendored schema (and therefore the G-rules) rejects.
+   - This tool follows the vendored file. `mapper.duration` converts YEARS → MONTHS×12 ("diabetes for 5 years" →
+     60 MONTHS). v0.2 deliberately does NOT widen the unit, so every v0.2 `gp_extraction` stays valid against v0.1.
+   - Cost of following the vendor: the doctor's unit is lost ("60 months" where they said "5 years"), and the 1–1000
+     range caps a duration at 83 years; anything longer is kept in provenance only.
+   - **Open for Pulse:** reconcile `evenpb.DurationUnit` with the w38 artifact schema. If YEARS is the intended
+     contract, v0.3 should widen `LlmDuration.unit` and drop the conversion. Covered by `tests/test_schema_notes.py`.
 
 ## Pulse-side needs (owned by Pulse)
 
