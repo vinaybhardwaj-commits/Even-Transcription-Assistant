@@ -255,18 +255,26 @@ def outcome_linkage(labels: pd.DataFrame, outcomes: pd.DataFrame) -> dict:
     return report
 
 
-def comparison_table(labels: pd.DataFrame, features: pd.DataFrame, *, scalar_ridge: bool = False) -> pd.DataFrame:
+def comparison_table(
+    labels: pd.DataFrame,
+    features: pd.DataFrame,
+    *,
+    scalar_ridge: bool = False,
+    include_rel: bool = False,
+) -> pd.DataFrame:
     """One row per model found in ``features`` (columns prefixed by the model name).
 
     ``scalar_ridge`` adds a grouped-CV ridge head on a model's scalar feature columns when
     it has neither direct arousal/valence nor an embedding (openSMILE eGeMAPS / ComParE).
+    ``include_rel`` adds ``__rel_doctor``, ``__rel_doctor_ratio`` and ``__rel_doctor_cosine``
+    to that head, and concatenates the same columns onto an embedding ridge.
     """
     usable = labels.loc[usable_mask(labels) & ~labels["is_repeat"].astype(bool)].copy()
     joined = usable.merge(features, on="window_id", how="inner", suffixes=("", "_feat"))
     models = _models_in(features.columns)
     rows = []
     for name in models:
-        rows.append(_one_model(name, joined, scalar_ridge=scalar_ridge))
+        rows.append(_one_model(name, joined, scalar_ridge=scalar_ridge, include_rel=include_rel))
     return pd.DataFrame(rows)
 
 
@@ -276,12 +284,14 @@ def evaluate(
     outcomes: pd.DataFrame | None = None,
     *,
     scalar_ridge: bool = False,
+    include_rel: bool = False,
 ) -> dict:
-    table = comparison_table(labels, features, scalar_ridge=scalar_ridge)
+    table = comparison_table(labels, features, scalar_ridge=scalar_ridge, include_rel=include_rel)
     report = {
         "n_labels": int(len(labels)),
         "n_usable_primary": int((usable_mask(labels) & ~labels["is_repeat"].astype(bool)).sum()),
         "intra_rater": intra_rater(labels),
+        "include_rel": bool(include_rel),
         "models": table.to_dict(orient="records"),
         "outcomes": None if outcomes is None else outcome_linkage(labels, outcomes),
     }
@@ -294,11 +304,12 @@ def evaluate_files(
     outcomes_csv: Path | str | None = None,
     *,
     scalar_ridge: bool = False,
+    include_rel: bool = False,
 ) -> dict:
     labels = load_labels(labels_csv)
     features = pd.read_parquet(features_parquet)
     outcomes = pd.read_csv(outcomes_csv, dtype=str, keep_default_na=False) if outcomes_csv else None
-    return evaluate(labels, features, outcomes, scalar_ridge=scalar_ridge)
+    return evaluate(labels, features, outcomes, scalar_ridge=scalar_ridge, include_rel=include_rel)
 
 
 REPORT_NAME = "report.json"
@@ -341,7 +352,7 @@ def _finite(obj):
     return obj
 
 
-def _one_model(name: str, joined: pd.DataFrame, *, scalar_ridge: bool = False) -> dict:
+def _one_model(name: str, joined: pd.DataFrame, *, scalar_ridge: bool = False, include_rel: bool = False) -> dict:
     row = {
         "model": name,
         "n": int(len(joined)),
@@ -375,6 +386,10 @@ def _one_model(name: str, joined: pd.DataFrame, *, scalar_ridge: bool = False) -
     emb_col = f"{name}__embedding"
     X = _embedding_matrix(joined[emb_col]) if emb_col in joined.columns else None
     groups = joined["room_day"].to_numpy() if "room_day" in joined.columns else joined["window_id"].to_numpy()
+    if include_rel and X is not None and X.size:
+        rel = _rel_matrix(joined, name)
+        if rel is not None and rel.shape[0] == X.shape[0]:
+            X = np.concatenate([X, rel], axis=1)
     if X is not None and X.size:
         if row["arousal_source"] is None:
             pred_a = grouped_oof(X, joined["arousal"].to_numpy(dtype=np.float64), groups, task="ridge")
@@ -389,7 +404,7 @@ def _one_model(name: str, joined: pd.DataFrame, *, scalar_ridge: bool = False) -
         if flags:
             row["flag_macro_f1"] = flag_macro_f1(X, flags, groups)["macro_f1"]
     elif scalar_ridge and row["arousal_source"] is None:
-        S = _scalar_matrix(joined, name)
+        S = _scalar_matrix(joined, name, include_rel=include_rel)
         if S is not None:
             alpha = float(max(1, S.shape[1]))
             pred_a = grouped_oof(S, joined["arousal"].to_numpy(dtype=np.float64), groups, task="ridge", alpha=alpha)
@@ -424,30 +439,67 @@ _NON_FEATURE_SUFFIXES = (
 )
 
 
-def _scalar_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4) -> np.ndarray | None:
+def _is_rel_feature(feat: str) -> bool:
+    return feat.endswith("__rel_doctor") or feat.endswith("__rel_doctor_ratio") or feat == "rel_doctor_cosine"
+
+
+def _scalar_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4, include_rel: bool = False) -> np.ndarray | None:
     """Numeric ``<name>__<feature>`` columns as a matrix.
 
-    Skips bookkeeping columns, baseline deltas (``__delta_self`` / ``__rel_doctor``), and any
-    column with a non-finite value or no variance. ``None`` when nothing usable is left.
+    Skips bookkeeping columns and baseline deltas (``__delta_self`` / ``__rel_doctor``).
+    ``include_rel`` puts the doctor-relative columns back in. Raw columns still need a
+    finite value on every row. Relative columns may contain NaN; a row with any NaN is
+    left out of the ridge fit. A column with no variance is dropped. ``None`` when
+    nothing usable is left.
     """
     prefix = f"{name}__"
-    cols = []
+    raw_cols = []
+    rel_cols = []
     for c in joined.columns:
         text = str(c)
         if not text.startswith(prefix):
             continue
         feat = text[len(prefix):]
+        if _is_rel_feature(feat):
+            if include_rel:
+                rel_cols.append(c)
+            continue
         if "__" in feat or feat in _NON_FEATURE_SUFFIXES:
             continue
-        cols.append(c)
-    if not cols or len(joined) < min_rows:
+        raw_cols.append(c)
+    if len(joined) < min_rows:
         return None
-    block = joined[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
-    keep = np.all(np.isfinite(block), axis=0)
+    raw = _numeric_block(joined, raw_cols, allow_nan=False)
+    rel = _numeric_block(joined, rel_cols, allow_nan=True) if include_rel else None
+    if raw is None and rel is None:
+        return None
+    if raw is None:
+        return rel
+    if rel is None:
+        return raw
+    return np.concatenate([raw, rel], axis=1)
+
+
+def _rel_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4) -> np.ndarray | None:
+    prefix = f"{name}__"
+    cols = [c for c in joined.columns if str(c).startswith(prefix) and _is_rel_feature(str(c)[len(prefix):])]
+    if len(joined) < min_rows:
+        return None
+    return _numeric_block(joined, cols, allow_nan=True)
+
+
+def _numeric_block(frame: pd.DataFrame, cols: list, *, allow_nan: bool) -> np.ndarray | None:
+    if not cols:
+        return None
+    block = frame[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    if allow_nan:
+        keep = np.isfinite(block).sum(axis=0) >= 2
+    else:
+        keep = np.all(np.isfinite(block), axis=0)
     if keep.any():
-        sd = np.nanstd(np.where(np.isfinite(block), block, np.nan), axis=0)
-        keep &= np.nan_to_num(sd) > 0
-    if not keep.any():
+        sd = np.nanstd(block, axis=0)
+        keep = keep & (np.nan_to_num(sd) > 0)
+    if not np.any(keep):
         return None
     return block[:, keep]
 
@@ -585,8 +637,19 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="fit a grouped-CV ridge head on scalar features (eGeMAPS, ComParE) for models without direct scores or embeddings",
     )
+    p.add_argument(
+        "--include-rel",
+        action="store_true",
+        help="add __rel_doctor, __rel_doctor_ratio and __rel_doctor_cosine to the ridge heads",
+    )
     args = p.parse_args(argv)
-    report = evaluate_files(args.labels, args.features, args.outcomes, scalar_ridge=args.scalar_ridge)
+    report = evaluate_files(
+        args.labels,
+        args.features,
+        args.outcomes,
+        scalar_ridge=args.scalar_ridge,
+        include_rel=args.include_rel,
+    )
     out = write_report(report, args.out)
     print(out)
 

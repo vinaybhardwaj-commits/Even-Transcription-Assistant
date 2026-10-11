@@ -96,6 +96,23 @@ def test_committed_fixture_nlp():
     assert loaded.probs[1, 1] == pytest.approx(1.0, abs=1 / 255)
 
 
+def test_doctor_frames_keeps_only_the_doctor():
+    from tools.timbre.nemotron_probs import doctor_frames
+
+    probs = np.array(
+        [
+            [0.90, 0.05, 0.02, 0.01],  # doctor
+            [0.05, 0.80, 0.05, 0.05],  # patient
+            [0.05, 0.70, 0.60, 0.00],  # overlap
+            [0.10, 0.20, 0.20, 0.10],  # nobody
+            [0.00, 0.50, 0.49, 0.00],  # patient, other just under thr
+        ],
+        dtype=np.float64,
+    )
+    mask = doctor_frames(probs, doctor_slot=0, thr=0.5)
+    assert mask.tolist() == [True, False, False, False, False]
+
+
 def test_patient_frames_drops_doctor_and_overlap():
     probs = np.array(
         [
