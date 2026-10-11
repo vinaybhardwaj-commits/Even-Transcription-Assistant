@@ -89,18 +89,19 @@ describe("canonical JSON", () => {
 });
 
 describe("the closed catalogue", () => {
-  it("is exactly 15 verbs: 3 diagnose, 5 helper, 2 power, 5 app; 4 are privileged", () => {
-    expect(FLEET_VERBS).toHaveLength(15);
+  it("is exactly 20 verbs: 3 diagnose, 5 helper, 2 power, 5 chrome/legacy, 5 app; 6 are privileged", () => {
+    expect(FLEET_VERBS).toHaveLength(20);
+    expect(FLEET_VERBS.filter((v) => CATALOGUE[v].group === "chrome").sort()).toEqual(["chrome_policy_apply", "chrome_relaunch", "open_pulse", "policy_cycle", "retire_legacy"]);
     expect(FLEET_VERBS.filter((v) => CATALOGUE[v].group === "power").sort()).toEqual(["pmset_enforce", "schedule_poweron"]);
     const by = (g: string) => FLEET_VERBS.filter((v) => CATALOGUE[v].group === g).sort();
     expect(by("diagnose")).toEqual(["collect_diag", "helper_status", "report_diag"]);
     expect(by("helper")).toEqual(["coreaudiod_reset", "reload_launchagent", "restart_recorder", "usb_reseat", "wake"]);
     expect(by("app")).toEqual(["list_audio_inputs", "pieces_inventory", "pieces_reupload", "select_audio_input", "self_test"]);
-    expect(FLEET_VERBS.filter((v) => CATALOGUE[v].privileged).sort()).toEqual(["coreaudiod_reset", "reload_launchagent", "restart_recorder", "usb_reseat"]);
+    expect(FLEET_VERBS.filter((v) => CATALOGUE[v].privileged).sort()).toEqual(["chrome_relaunch", "coreaudiod_reset", "policy_cycle", "reload_launchagent", "restart_recorder", "usb_reseat"]);
     expect(FLEET_VERBS.filter((v) => CATALOGUE[v].group === "diagnose").every((v) => CATALOGUE[v].readOnly)).toBe(true);
   });
   it("allow-list: shell-shaped names and near misses are not verbs", () => {
-    for (const bad of ["bash", "sh", "exec", "shell", "run", "sudo", "pmset", "update_bundle", "breakglass_enable", "chrome_relaunch", "rotate_identity", "helper_status ", "HELPER_STATUS", "__proto__", "constructor", "toString", "", null, 7]) expect(isFleetVerb(bad), String(bad)).toBe(false);
+    for (const bad of ["bash", "sh", "exec", "shell", "run", "sudo", "pmset", "update_bundle", "breakglass_enable", "chrome_restart", "rotate_identity", "helper_status ", "HELPER_STATUS", "__proto__", "constructor", "toString", "", null, 7]) expect(isFleetVerb(bad), String(bad)).toBe(false);
     for (const v of FLEET_VERBS) expect(isFleetVerb(v)).toBe(true);
   });
   it("params are CLOSED per verb: unknown keys, wrong types, out-of-range values are refused", () => {

@@ -18,7 +18,7 @@ describe("power verbs (#43) and gates constants (#42)", () => {
   it("both are helper verbs in the power group, unprivileged; `wake` stays a helper verb", () => {
     for (const v of ["pmset_enforce", "schedule_poweron"] as const) expect(CATALOGUE[v]).toMatchObject({ group: "power", runs: "helper", privileged: false, readOnly: false });
     expect(CATALOGUE.wake).toMatchObject({ group: "helper", privileged: false });
-    expect(FLEET_VERBS).toHaveLength(15);
+    expect(FLEET_VERBS).toHaveLength(20);
   });
   it("the session-gated set is the four privileged reset/restart verbs; the ceilings are 1 reset per 30 min and 10 privileged per hour", () => {
     expect([...SESSION_GATED_VERBS].sort()).toEqual(["coreaudiod_reset", "reload_launchagent", "restart_recorder", "usb_reseat"]);

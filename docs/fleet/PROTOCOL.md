@@ -118,7 +118,7 @@ The helper compiles in TWO server public keys (`fk1`, `fk2`: current and next) a
 - `true`, `false`, `null` literals; arrays keep their order.
 - Note: the poll response is ordinary JSON; `params` key ORDER in it is not the signed order. Re-canonicalise the parsed envelope, never hash the received bytes.
 
-### 8.3 The catalogue: 15 verbs, closed params (anything else is `verb_not_allowed` / `bad_params`)
+### 8.3 The catalogue: 20 verbs, closed params (anything else is `verb_not_allowed` / `bad_params`)
 | verb | runs | privileged | params (all other keys refused) |
 |---|---|---|---|
 | `helper_status` | helper | no | `{}` |
@@ -133,14 +133,21 @@ The helper compiles in TWO server public keys (`fk1`, `fk2`: current and next) a
 | `select_audio_input` | app | no | `device_uid` (required, string 1..128), `input_volume_pct` (int 0..100) |
 | `pmset_enforce` | helper | no | `{}` (the baseline is compiled into the helper: sleep 0, disksleep 0, displaysleep 0, powernap 0, autorestart 1, womp 1; the result reports the diff) |
 | `schedule_poweron` | helper | no | `time` (optional, `HH:MM` 24-hour zero padded; the helper uses 07:05 when absent) |
+| `chrome_policy_apply` | helper | no | `machine_id` (the machine's normalised hostname, 1..128), `room` (the room's name, 1..128), `token` (printable ASCII 8..256, no spaces), `update_url` (optional; only `https://www.evenscribe.app/ext/[<dir>/]update.xml`). **The server fills `machine_id`, `room` and `token` itself** (see 8.8); an operator may only suggest `update_url` |
+| `chrome_relaunch` | helper | YES | `profile` (optional, string 1..64). **Refused 07:30-21:30 IST even with an approval_ref** (`clinic_hours_no_chrome_restart`) |
+| `open_pulse` | helper | no | `profile` (required, string 1..64) |
+| `policy_cycle` | helper | YES | `profile` (optional, string 1..64). Same clinic-hours refusal as `chrome_relaunch` |
+| `retire_legacy` | helper | no | `component` (required, only `presence-guard`; `kiosk-health` is NOT retirable), `purge_secrets` (optional boolean) |
 | `self_test` | app | no | `volume_pct` (int 0..100, optional) |
 | `pieces_inventory` | app | no | `since` (ISO-8601 ms Z string, optional) |
 | `pieces_reupload` | app | no | `since` (ISO-8601 ms Z string, optional) |
-Strings must have no control characters and no surrogates. The split "3 diagnose + 5 helper + 2 power + 5 app" follows #41/#42/#43 (`wake` is #43's, listed with the helper verbs); if the helper build disagrees about where a verb runs, say so: it is one line in `lib/fleet/verbs.ts`.
+Strings must have no control characters and no surrogates. The split "3 diagnose + 5 helper + 2 power + 5 chrome/legacy + 5 app" follows #41/#42/#43 (`wake` is #43's, listed with the helper verbs); if the helper build disagrees about where a verb runs, say so: it is one line in `lib/fleet/verbs.ts`.
 
 ### 8.4 Approval (`approval_ref`)
 `approval_ref` matches `^[A-Za-z0-9_-]{3,64}$`. The server REFUSES to issue a privileged verb inside clinic hours (07:30 inclusive to 21:30 exclusive, IST, every day) without one, and `restart_recorder` with `force:true` at ANY hour without one.
 The helper re-applies the same rule as its local gate `clinic_hours_needs_approval`.
+
+**Chrome restarts (#44), also enforced at enqueue:** `chrome_relaunch` and `policy_cycle` close the doctors' Pulse window, so the server refuses them from 07:30 to 21:30 IST EVEN WITH an `approval_ref` (HTTP 409 `clinic_hours_no_chrome_restart`). The helper applies the same rule as its local gate (`clinic_hours_no_chrome_restart`). Outside those hours they need no approval (they still count as privileged for the 10-per-hour ceiling).
 
 **Session gate (#42), also enforced at enqueue:** while the device's room has an OPEN session (`bench_session` recording or paused), `coreaudiod_reset`, `usb_reseat`, `restart_recorder` and `reload_launchagent` are refused with `session_open` (HTTP 409) unless an `approval_ref` is given, and `restart_recorder` additionally needs `force:true`. The helper re-checks the live session itself (local gate `session_open`).
 
@@ -200,3 +207,17 @@ The server stores them AFTER it has answered the poll (a deferred, best-effort w
 - `app_missing` (red): no bench poll for over 3 min, between 07:30 and 21:30 IST, for an install whose last report had `console_user` true. Never raised outside those hours or for an install that never polled. The attention list additionally drops it when R1 already reports the whole Mac unreachable (one red row per fault); the per-device Bench / MCP view shows it from the poll alone.
 
 Bench (the helper panel) and `scribe_kiosks view=helper` show these fields and the derived state read-only. The server never sends a command because of them.
+
+### 8.8 The extension token in `chrome_policy_apply` (TS-H7 #44)
+The token is the extension's ingest token, SERVER-SIDE CONFIG (the deploy environment), never operator input. When an operator enqueues `chrome_policy_apply` the server builds `{machine_id, room, token[, update_url]}` itself, signs that, and stores the command with `token` replaced by the marker
+`"[redacted:server_token]"`; the database, the audit log, the admin and MCP views, the enqueue response and the logs never hold the real value. The real value is put back ONLY into the envelope served to the target device's own authenticated `GET /api/fleet/poll`, so the
+helper receives exactly the params that were signed (verify as usual). Consequences the helper may see: (a) if the server's token is rotated between enqueue and delivery the delivered token differs from the signed one and the envelope fails `bad_signature` (re-issue); (b) while the server has no token
+configured the command is simply not delivered (it stays queued until it expires). The helper must never log, echo or put the token in a result `detail`.
+
+## 10. POST /api/kiosk-health from the app with the device credential (TS-H10 #47)
+The helper has no server credential, so the room APP posts the helper's spooled events: `POST /api/kiosk-health` with `Authorization: Device <room session JWT>` (the same JWT its bench poll sends in the `eta_room_session` cookie, `aud` "room"; invalid = 401). The body and event shapes are exactly the
+daemon's: `{ "events": [ { machine, room_id, install_id, boot_id, seq, source, kind, ts, payload } ] }`, 1..500 events, ~3 MB. The standalone daemon keeps using `Authorization: Bearer <ingest token>` unchanged.
+A Device post is confined to its own room: every event must have `source` `"helper"`, a `machine` that is one of THIS room's Macs (hostname compared after the usual normalisation), a `room_id` that is absent or this room's, and a `kind` other than `steward.result`. Each event that is not is rejected by name in `rejected_reasons`
+(`wrong_source`, `machine_not_in_room`, `room_mismatch`, `kind_not_allowed`) and the rest of the batch is still stored. Idempotency on `(machine, boot_id, seq)` is unchanged (replays are `duplicates`).
+**Cross-source de-duplication (shadow period):** an event is NOT stored when the same Mac (any hostname spelling) already has an event of the same `kind` from a DIFFERENT `source` with `ts` within 2 s (inclusive); it is counted in the response's `deduped` and recorded (identity only) in `kiosk_health_dedupe`. Events of the same source are never twins.
+Response: `200 {ok, accepted, duplicates, deduped, rejected, rejected_reasons}`; `503 {error:"db"}` on a database fault (keep the spool and retry); `401` unauthorized; `413` body over 3 MB.
