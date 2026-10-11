@@ -78,6 +78,16 @@ Embeddings and the seven WavLM class probabilities are not z-scored.
 python -m tools.timbre.evaluate --labels labels.csv --features results/features.parquet --out results/eval.json
 ```
 
+`--out` takes a file or a directory (an existing directory, or a path ending in `/`); a directory gets `report.json`. The report is strict JSON (NaN becomes `null`).
+
+`--scalar-ridge` adds a room-day grouped-CV ridge head on scalar features for models that have neither direct arousal/valence nor an embedding (eGeMAPS, ComParE). The penalty scales with the feature count. Rows report `arousal_source = ridge_oof_scalar`.
+
+Locked metric snapshots live in `baselines/` (aggregates only; see `baselines/README.md`).
+
+### Patient purity
+
+`purity.py` scores how much of a window is the patient alone, from per-frame speaker evidence: speaker-embedding cosines (`embedding_purity`) or Nemotron per-frame probabilities (`probs_purity`). `PurityRule()` is the batch-1-validated keep rule (purity >= 0.6, >= 3 s pure patient speech, mean patient cosine >= 0.30). It loads no audio or model.
+
 Optional `--outcomes outcomes.csv` joins accept/defer and unresolved-doubt counts after dropping hidden-repeat rows. That hook is not the pre-registered T-8 likelihood-ratio test.
 
 Gold rows with `not_patient` or `unusable` are excluded. Hidden repeats (`is_repeat`) score intra-rater quadratic weighted kappa, Spearman, CCC, and exact agreement. Arousal and valence use Lin's CCC (0–1 model outputs are mapped onto 1–5 first) and Spearman. When a model has no direct A/V columns, a grouped-CV ridge head on its embedding produces the CCC. Flags `engaged`, `anxious`, `resistant`, `words_ne_tone` (CSV alias `words_tone_mismatch`) use a grouped-CV logistic head and macro-F1. Groups are `room|date`.

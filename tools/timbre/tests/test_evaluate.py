@@ -159,3 +159,105 @@ def test_committed_labels_fixture_parses():
     pair = df.loc[df.window_id == "synth_a", "words_ne_tone"].tolist()
     assert pair == [False, True]
     assert bool(df.loc[df.window_id == "synth_b", "unusable"].item())
+
+
+def test_write_report_accepts_a_directory(tmp_path):
+    from tools.timbre.evaluate import REPORT_NAME, write_report
+
+    out_dir = tmp_path / "eval"
+    out_dir.mkdir()
+    written = write_report({"x": 1.0, "bad": float("nan"), "nested": [np.float64("inf")]}, out_dir)
+    assert written == out_dir / REPORT_NAME
+    import json
+
+    data = json.loads(written.read_text(encoding="utf-8"))  # strict JSON: no NaN tokens
+    assert data == {"x": 1.0, "bad": None, "nested": [None]}
+    # A trailing separator on a path that does not exist yet is also a directory.
+    written2 = write_report({"y": 2}, str(tmp_path / "new_dir") + "/")
+    assert written2 == tmp_path / "new_dir" / REPORT_NAME
+    # A file path still writes that file.
+    written3 = write_report({"z": 3}, tmp_path / "report-a.json")
+    assert written3 == tmp_path / "report-a.json"
+    assert not list(tmp_path.glob("**/*.tmp"))
+
+
+def test_cli_out_directory(tmp_path, labels_df):
+    from tools.timbre.evaluate import main
+
+    labels = tmp_path / "labels.csv"
+    labels.write_text(_labels_text(), encoding="utf-8")
+    feats = pd.DataFrame(
+        {
+            "window_id": [f"w{i}" for i in range(20)],
+            "audeering_msp_dim.v1__arousal": [(i % 5) / 4 for i in range(20)],
+            "audeering_msp_dim.v1__valence": [(4 - (i % 5)) / 4 for i in range(20)],
+        }
+    )
+    fpath = tmp_path / "features.parquet"
+    feats.to_parquet(fpath)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    main(["--labels", str(labels), "--features", str(fpath), "--out", str(out_dir)])
+    assert (out_dir / "report.json").is_file()
+
+
+def _scalar_features(n_noise: int = 3) -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(20):
+        arousal = (i % 5) + 1
+        rec = {
+            "window_id": f"w{i}",
+            "egemaps_v02.v1__status": "ok",
+            "egemaps_v02.v1__infer_s": 0.01,
+            "egemaps_v02.v1__loudness_sma3_amean": float(arousal) + 0.01 * rng.standard_normal(),
+            "egemaps_v02.v1__loudness_sma3_amean__delta_self": 99.0,  # derived, must be ignored
+            "egemaps_v02.v1__constant": 1.0,  # no variance, must be ignored
+        }
+        for k in range(n_noise):
+            rec[f"egemaps_v02.v1__noise{k}"] = float(rng.standard_normal())
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def test_scalar_ridge_head_is_opt_in(labels_df):
+    feats = _scalar_features()
+    off = evaluate(labels_df, feats)
+    row_off = next(r for r in off["models"] if r["model"] == "egemaps_v02.v1")
+    assert row_off["arousal_source"] is None
+    on = evaluate(labels_df, feats, scalar_ridge=True)
+    row = next(r for r in on["models"] if r["model"] == "egemaps_v02.v1")
+    assert row["arousal_source"] == "ridge_oof_scalar"
+    assert row["valence_source"] == "ridge_oof_scalar"
+    assert row["n_scalar_features"] == 4  # loudness + 3 noise; status/infer_s/delta/constant dropped
+    assert row["arousal_spearman"] > 0.8
+    assert row["flag_macro_f1"] is not None
+
+
+def test_scalar_matrix_skips_non_finite_columns():
+    from tools.timbre.evaluate import _scalar_matrix
+
+    df = pd.DataFrame(
+        {
+            "m__a": [1.0, 2.0, 3.0, 4.0],
+            "m__b": [1.0, np.nan, 3.0, 4.0],
+            "m__status": ["ok"] * 4,
+            "m__embedding": [[0.0]] * 4,
+        }
+    )
+    X = _scalar_matrix(df, "m")
+    assert X.shape == (4, 1)
+    assert _scalar_matrix(df[["m__status"]], "m") is None
+
+
+def test_direct_and_embedding_models_ignore_scalar_flag(labels_df):
+    feats = pd.DataFrame(
+        {
+            "window_id": [f"w{i}" for i in range(20)],
+            "audeering_msp_dim.v1__arousal": [(i % 5) / 4 for i in range(20)],
+            "audeering_msp_dim.v1__valence": [(4 - (i % 5)) / 4 for i in range(20)],
+            "audeering_msp_dim.v1__dominance": [0.5] * 20,
+        }
+    )
+    row = evaluate(labels_df, feats, scalar_ridge=True)["models"][0]
+    assert row["arousal_source"] == "direct"

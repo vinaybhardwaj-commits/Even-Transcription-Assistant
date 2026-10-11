@@ -146,8 +146,11 @@ def dimension_scores(gold_a, gold_v, pred_a, pred_v) -> dict:
     }
 
 
-def grouped_oof(X, y, groups, *, task: str) -> np.ndarray:
-    """Out-of-fold predictions. ``task`` is ``ridge`` or ``logistic``. NaN where a fold could not fit."""
+def grouped_oof(X, y, groups, *, task: str, alpha: float = 1.0) -> np.ndarray:
+    """Out-of-fold predictions. ``task`` is ``ridge`` or ``logistic``. NaN where a fold could not fit.
+
+    ``alpha`` is the ridge penalty (standardised features). The logistic head ignores it.
+    """
     from sklearn.linear_model import LogisticRegression, Ridge
     from sklearn.model_selection import GroupKFold
     from sklearn.preprocessing import StandardScaler
@@ -181,7 +184,7 @@ def grouped_oof(X, y, groups, *, task: str) -> np.ndarray:
             clf.fit(Xtr, yu[train].astype(int))
             local[test] = clf.predict(Xte).astype(np.float64)
         elif task == "ridge":
-            reg = Ridge(alpha=1.0, random_state=0)
+            reg = Ridge(alpha=float(alpha), random_state=0)
             reg.fit(Xtr, yu[train])
             local[test] = reg.predict(Xte)
         else:
@@ -252,19 +255,29 @@ def outcome_linkage(labels: pd.DataFrame, outcomes: pd.DataFrame) -> dict:
     return report
 
 
-def comparison_table(labels: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
-    """One row per model found in ``features`` (columns prefixed by the model name)."""
+def comparison_table(labels: pd.DataFrame, features: pd.DataFrame, *, scalar_ridge: bool = False) -> pd.DataFrame:
+    """One row per model found in ``features`` (columns prefixed by the model name).
+
+    ``scalar_ridge`` adds a grouped-CV ridge head on a model's scalar feature columns when
+    it has neither direct arousal/valence nor an embedding (openSMILE eGeMAPS / ComParE).
+    """
     usable = labels.loc[usable_mask(labels) & ~labels["is_repeat"].astype(bool)].copy()
     joined = usable.merge(features, on="window_id", how="inner", suffixes=("", "_feat"))
     models = _models_in(features.columns)
     rows = []
     for name in models:
-        rows.append(_one_model(name, joined))
+        rows.append(_one_model(name, joined, scalar_ridge=scalar_ridge))
     return pd.DataFrame(rows)
 
 
-def evaluate(labels: pd.DataFrame, features: pd.DataFrame, outcomes: pd.DataFrame | None = None) -> dict:
-    table = comparison_table(labels, features)
+def evaluate(
+    labels: pd.DataFrame,
+    features: pd.DataFrame,
+    outcomes: pd.DataFrame | None = None,
+    *,
+    scalar_ridge: bool = False,
+) -> dict:
+    table = comparison_table(labels, features, scalar_ridge=scalar_ridge)
     report = {
         "n_labels": int(len(labels)),
         "n_usable_primary": int((usable_mask(labels) & ~labels["is_repeat"].astype(bool)).sum()),
@@ -275,22 +288,60 @@ def evaluate(labels: pd.DataFrame, features: pd.DataFrame, outcomes: pd.DataFram
     return report
 
 
-def evaluate_files(labels_csv: Path | str, features_parquet: Path | str, outcomes_csv: Path | str | None = None) -> dict:
+def evaluate_files(
+    labels_csv: Path | str,
+    features_parquet: Path | str,
+    outcomes_csv: Path | str | None = None,
+    *,
+    scalar_ridge: bool = False,
+) -> dict:
     labels = load_labels(labels_csv)
     features = pd.read_parquet(features_parquet)
     outcomes = pd.read_csv(outcomes_csv, dtype=str, keep_default_na=False) if outcomes_csv else None
-    return evaluate(labels, features, outcomes)
+    return evaluate(labels, features, outcomes, scalar_ridge=scalar_ridge)
 
 
-def write_report(report: dict, path: Path | str) -> None:
-    p = Path(path)
+REPORT_NAME = "report.json"
+
+
+def report_path(path: Path | str) -> Path:
+    """Where ``write_report`` puts the JSON.
+
+    ``--out`` may name a file (``results/eval.json``) or a directory. A directory is an
+    existing directory, or a path written with a trailing separator; the report then goes
+    to ``<dir>/report.json``.
+    """
+    text = str(path)
+    p = Path(text)
+    if p.is_dir() or text.endswith(("/", "\\")):
+        return p / REPORT_NAME
+    return p
+
+
+def write_report(report: dict, path: Path | str) -> Path:
+    """Atomic, strict JSON (NaN and inf become null). Returns the file written."""
+    p = report_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(report, indent=2, default=_json_default), encoding="utf-8")
+    text = json.dumps(_finite(report), indent=2, default=_json_default, allow_nan=False)
+    tmp.write_text(text, encoding="utf-8")
     tmp.replace(p)
+    return p
 
 
-def _one_model(name: str, joined: pd.DataFrame) -> dict:
+def _finite(obj):
+    """Recursively replace non-finite floats with None so the report is valid JSON."""
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        val = float(obj)
+        return val if np.isfinite(val) else None
+    return obj
+
+
+def _one_model(name: str, joined: pd.DataFrame, *, scalar_ridge: bool = False) -> dict:
     row = {
         "model": name,
         "n": int(len(joined)),
@@ -337,7 +388,68 @@ def _one_model(name: str, joined: pd.DataFrame) -> dict:
         flags = {f: joined[f].to_numpy(dtype=np.float64) for f in FLAG_TARGETS if f in joined.columns}
         if flags:
             row["flag_macro_f1"] = flag_macro_f1(X, flags, groups)["macro_f1"]
+    elif scalar_ridge and row["arousal_source"] is None:
+        S = _scalar_matrix(joined, name)
+        if S is not None:
+            alpha = float(max(1, S.shape[1]))
+            pred_a = grouped_oof(S, joined["arousal"].to_numpy(dtype=np.float64), groups, task="ridge", alpha=alpha)
+            pred_v = grouped_oof(S, joined["valence"].to_numpy(dtype=np.float64), groups, task="ridge", alpha=alpha)
+            row["arousal_ccc"] = concordance_ccc(joined["arousal"], pred_a)
+            row["valence_ccc"] = concordance_ccc(joined["valence"], pred_v)
+            row["arousal_spearman"] = spearman(joined["arousal"], pred_a)
+            row["valence_spearman"] = spearman(joined["valence"], pred_v)
+            row["arousal_source"] = "ridge_oof_scalar"
+            row["valence_source"] = "ridge_oof_scalar"
+            row["n_scalar_features"] = int(S.shape[1])
+            row["ridge_alpha"] = alpha
+            flags = {f: joined[f].to_numpy(dtype=np.float64) for f in FLAG_TARGETS if f in joined.columns}
+            if flags:
+                row["flag_macro_f1"] = flag_macro_f1(S, flags, groups)["macro_f1"]
     return row
+
+
+# Per-model columns that are bookkeeping or derived, not acoustic features.
+_NON_FEATURE_SUFFIXES = (
+    "status",
+    "reason",
+    "infer_s",
+    "revision",
+    "vad",
+    "model_id",
+    "extractor_version",
+    "embedding",
+    "arousal",
+    "valence",
+    "dominance",
+)
+
+
+def _scalar_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4) -> np.ndarray | None:
+    """Numeric ``<name>__<feature>`` columns as a matrix.
+
+    Skips bookkeeping columns, baseline deltas (``__delta_self`` / ``__rel_doctor``), and any
+    column with a non-finite value or no variance. ``None`` when nothing usable is left.
+    """
+    prefix = f"{name}__"
+    cols = []
+    for c in joined.columns:
+        text = str(c)
+        if not text.startswith(prefix):
+            continue
+        feat = text[len(prefix):]
+        if "__" in feat or feat in _NON_FEATURE_SUFFIXES:
+            continue
+        cols.append(c)
+    if not cols or len(joined) < min_rows:
+        return None
+    block = joined[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+    keep = np.all(np.isfinite(block), axis=0)
+    if keep.any():
+        sd = np.nanstd(np.where(np.isfinite(block), block, np.nan), axis=0)
+        keep &= np.nan_to_num(sd) > 0
+    if not keep.any():
+        return None
+    return block[:, keep]
 
 
 def _embedding_matrix(series: pd.Series) -> np.ndarray | None:
@@ -467,10 +579,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--labels", required=True)
     p.add_argument("--features", required=True)
     p.add_argument("--outcomes", default=None)
-    p.add_argument("--out", required=True)
+    p.add_argument("--out", required=True, help="report file, or a directory (writes report.json inside)")
+    p.add_argument(
+        "--scalar-ridge",
+        action="store_true",
+        help="fit a grouped-CV ridge head on scalar features (eGeMAPS, ComParE) for models without direct scores or embeddings",
+    )
     args = p.parse_args(argv)
-    report = evaluate_files(args.labels, args.features, args.outcomes)
-    write_report(report, args.out)
+    report = evaluate_files(args.labels, args.features, args.outcomes, scalar_ridge=args.scalar_ridge)
+    out = write_report(report, args.out)
+    print(out)
 
 
 if __name__ == "__main__":
