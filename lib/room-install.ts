@@ -26,7 +26,7 @@
  * retire lands first, by construction, every time.
  */
 
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { customAlphabet } from "nanoid";
 import { sql } from "@/lib/db";
@@ -1195,11 +1195,17 @@ export function cleanPmsetDrift(v: unknown): string | null {
  * TS-H5 (0153) — what the app says about its helper, as a SECOND, best-effort statement (the main poll UPDATE is pinned to one round trip and must never be able to fail
  * because of telemetry). Skipped entirely unless the poll carried at least one of these fields, so every older app costs nothing. COALESCE like the other measurements;
  * `helper_bad_since` is maintained here, not reported: it starts when helper_state/helper_xpc_ok first read bad and clears on the first good reading, and a poll that
- * carries neither leaves it alone. Errors are logged by name and swallowed.
+ * carries neither leaves it alone. Errors are caught and logged as the install id and the error code/name only (never the message, which can quote a value).
+ *
+ * IT RUNS AFTER THE POLL'S ANSWER, NEVER BEFORE (`deferHelperWrite`): a lock held on the row, a slow trigger or an extra round trip must not delay the 1.5 s poll of every
+ * 0.1.35+ app in the fleet. See deferHelperWrite for how.
  */
+/** Did this poll carry at least one helper field? (An app below 0.1.35 carries none: nothing is scheduled at all.) */
+export const carriesHelperFields = (f: ReturnType<typeof cleanPollFields>): boolean =>
+  [f.helper_version, f.helper_registration, f.helper_xpc_ok, f.helper_state, f.console_user, f.power_schedule, f.pmset_drift].some((x) => x !== null);
+
 export async function writeHelperFields(sql: (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>, installId: string, f: ReturnType<typeof cleanPollFields>): Promise<void> {
-  const any = [f.helper_version, f.helper_registration, f.helper_xpc_ok, f.helper_state, f.console_user, f.power_schedule, f.pmset_drift].some((x) => x !== null);
-  if (!any) return;
+  if (!carriesHelperFields(f)) return;
   try {
     await sql`
       UPDATE room_install
@@ -1218,7 +1224,22 @@ export async function writeHelperFields(sql: (s: TemplateStringsArray, ...v: unk
        WHERE install_id = ${installId} AND retired_at IS NULL
     `;
   } catch (e) {
-    console.error("[room-install] helper fields not stored:", e instanceof Error ? e.message.slice(0, 160) : "error");
+    const code = (e as { code?: unknown } | null)?.code;
+    console.error(`[room-install] helper fields not stored install=${installId} code=${typeof code === "string" ? code.slice(0, 16) : e instanceof Error ? e.name.slice(0, 32) : "error"}`);
+  }
+}
+
+/**
+ * Run the helper-fields write AFTER the response has gone: next/server `after()` inside a request (the repo's usual pattern), and where there is no request scope
+ * (a script, a unit test) a macrotask (`setTimeout 0`), which is still after the caller has its answer. Either way the work never throws into the poll: writeHelperFields
+ * catches its own errors, and a scheduler fault is caught here too.
+ */
+export function deferHelperWrite(work: () => Promise<void>): void {
+  const run = () => work().catch(() => {});
+  try {
+    after(run);
+  } catch {
+    setTimeout(() => void run(), 0);
   }
 }
 
@@ -1595,7 +1616,7 @@ export async function applyInstallPoll(
     `) as InstallPollReturn[];
 
     if (rows.length > 0) {
-      await writeHelperFields(sql as never, f.install_id, f);
+      if (carriesHelperFields(f)) deferHelperWrite(() => writeHelperFields(sql as never, f.install_id, f));
       await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, silenceMs: f.silence_ms, now });
       // Tier 2 §2.2 — ONCE PER TRANSITION, not once per poll. The clear fires on exactly the poll
       // where the Mac first reports the channel it was assigned, so this is that poll and no other:

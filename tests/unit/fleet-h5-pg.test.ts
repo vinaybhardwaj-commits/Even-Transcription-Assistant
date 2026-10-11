@@ -13,9 +13,19 @@ const KEY = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"
 process.env.FLEET_COMMAND_SIGNING_KEY = KEY;
 
 const H = vi.hoisted(() => ({
+  /** next/server after(): captured so a test decides WHEN the deferred write runs; "throw" simulates no request scope (the setTimeout fallback) */
+  afterMode: "capture" as "capture" | "throw",
+  deferred: [] as Array<() => unknown>,
   sql: (async () => []) as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>,
   cookie: null as string | null,
   statements: [] as string[],
+}));
+vi.mock("next/server", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  after: (fn: () => unknown) => {
+    if (H.afterMode === "throw") throw new Error("after() outside a request scope");
+    H.deferred.push(fn);
+  },
 }));
 vi.mock("@/lib/db", () => ({ sql: (s: TemplateStringsArray, ...v: unknown[]) => { H.statements.push(s.join("?")); return H.sql(s, ...v); } }));
 vi.mock("@/lib/cookie", async (orig) => ({ ...(await orig<Record<string, unknown>>()), readAdminCookie: async () => H.cookie }));
@@ -65,6 +75,8 @@ afterAll(() => { if (HAVE) pg.stop(); });
 const HOST = "EHRC-H5s-Mac-mini";
 beforeEach(() => {
   if (!HAVE) return;
+  H.afterMode = "capture";
+  H.deferred.length = 0;
   process.env.FLEET_COMMAND_SIGNING_KEY = KEY;
   pg.exec(`
     TRUNCATE fleet_results, fleet_commands, fleet_devices, fleet_jti, fleet_control, fleet_audit, kiosk_health_events RESTART IDENTITY CASCADE;
@@ -154,7 +166,14 @@ const rawCmd = (id: string, dev: string, verb: string, state: string, issuedAgoS
 
   describe("what the APP reports on its bench poll (no helper heartbeat): stored, shown read-only, and the attention rules", () => {
     const GOOD = { install_id: "inst_h5_1", helper_version: "0.2.0", helper_registration: "enabled", helper_xpc_ok: true, helper_state: "ok", console_user: true, power_schedule: "MTWRFSU 07:05", pmset_drift: "sleep" };
-    const poll = async (over: Record<string, unknown> = {}) => (await import("@/lib/room-install")).applyInstallPoll({ ...GOOD, ...over } as never, {});
+    /** the poll's answer, THEN the deferred helper write run to completion (what the runtime does after the response) */
+    const flush = async () => { const fns = H.deferred.splice(0); for (const f of fns) await f(); };
+    const poll = async (over: Record<string, unknown> = {}) => {
+      const out = await (await import("@/lib/room-install")).applyInstallPoll({ ...GOOD, ...over } as never, {});
+      await flush();
+      return out;
+    };
+    const pollNoFlush = async (over: Record<string, unknown> = {}) => (await import("@/lib/room-install")).applyInstallPoll({ ...GOOD, ...over } as never, {});
     const row = async () => (await q<Record<string, any>>`SELECT helper_version, helper_registration, helper_xpc_ok, helper_state, console_user, power_schedule, pmset_drift, helper_bad_since FROM room_install WHERE install_id = 'inst_h5_1'`)[0]!;
     const DAY = Date.parse("2026-10-11T10:00:00+05:30");
     const at = (secBefore: number) => new Date(DAY - secBefore * 1000).toISOString();
@@ -190,14 +209,51 @@ const rawCmd = (id: string, dev: string, verb: string, state: string, issuedAgoS
       expect((await row()).helper_bad_since).not.toBeNull();
     });
 
+    it("F1: the helper write runs AFTER the poll's answer — a 3 s trigger on that write does not delay the poll, and the write still lands", async () => {
+      pg.exec(`
+        CREATE OR REPLACE FUNCTION h5_slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.helper_state = 'slow' THEN PERFORM pg_sleep(3); END IF; RETURN NEW; END $$;
+        CREATE TRIGGER h5_slow BEFORE UPDATE ON room_install FOR EACH ROW EXECUTE FUNCTION h5_slow();
+      `);
+      try {
+        const t0 = Date.now();
+        const out = await pollNoFlush({ helper_state: "slow" });
+        const answered = Date.now() - t0;
+        expect(out).toMatchObject({ ok: true });
+        expect(answered, `the poll took ${answered} ms; the slow write must not be on its path`).toBeLessThan(1500);
+        expect(H.deferred).toHaveLength(1); // scheduled with after(), not run
+        expect((await row()).helper_state).toBeNull(); // not written yet when the answer went out
+        const t1 = Date.now();
+        await flush(); // what the runtime does once the response is sent
+        expect(Date.now() - t1).toBeGreaterThanOrEqual(2900); // the 3 s is spent HERE, off the response path
+        expect((await row()).helper_state).toBe("slow");
+      } finally {
+        pg.exec("DROP TRIGGER IF EXISTS h5_slow ON room_install; DROP FUNCTION IF EXISTS h5_slow()");
+      }
+    });
+
+    it("F1: outside a request scope (after() unavailable) the write is still deferred past the caller's answer (macrotask), and an old app's poll schedules nothing", async () => {
+      H.afterMode = "throw";
+      await pollNoFlush({ helper_state: "xpc_down", helper_xpc_ok: false });
+      expect((await row()).helper_state).toBeNull(); // the answer came back before the write ran
+      for (let i = 0; i < 100 && (await row()).helper_state === null; i += 1) await new Promise((r) => setTimeout(r, 50));
+      expect((await row()).helper_state).toBe("xpc_down");
+      H.afterMode = "capture";
+      await pollNoFlush({ helper_state: undefined, helper_xpc_ok: undefined, helper_version: undefined, helper_registration: undefined, console_user: undefined, power_schedule: undefined, pmset_drift: undefined });
+      expect(H.deferred).toHaveLength(0);
+    });
+
     it("a failing helper write NEVER fails the poll (best effort, logged by name)", async () => {
-      vi.spyOn(console, "error").mockImplementation(() => {});
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
       pg.exec(`
         CREATE OR REPLACE FUNCTION h5_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.helper_state = 'boom' THEN RAISE EXCEPTION 'helper write down'; END IF; RETURN NEW; END $$;
         CREATE TRIGGER h5_boom BEFORE UPDATE ON room_install FOR EACH ROW EXECUTE FUNCTION h5_boom();
       `);
       try {
         expect(await poll({ helper_state: "boom" })).toMatchObject({ ok: true });
+        const logged = err.mock.calls.map((c) => c.join(" ")).join("\n");
+        expect(logged).toContain("install=inst_h5_1");
+        expect(logged).toMatch(/code=\w+/); // P0001 on the real driver; the psql test harness carries no SQLSTATE
+        expect(logged).not.toContain("helper write down"); // the database's message can quote a value: ids and the error code only
         expect((await row()).helper_state).toBeNull();
         expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM room_install WHERE install_id = 'inst_h5_1' AND last_seen_at > now() - interval '5 seconds'`)[0]!.n).toBe(1); // the main poll write still landed
       } finally {

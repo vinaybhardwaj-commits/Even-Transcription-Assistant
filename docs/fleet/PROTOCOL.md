@@ -190,11 +190,13 @@ reading in place (a poll without a field never clears it). Each is validated on 
 | `power_schedule` | text <= 64, no control characters, e.g. `MTWRFSU 07:05` | `power_schedule` |
 | `pmset_drift` | comma-separated names of pmset settings that drifted from the baseline, each `^[a-z0-9_.-]{1,48}$`, at most 20; the empty string means "none drifted" | `pmset_drift` (jsonb array) |
 
+The server stores them AFTER it has answered the poll (a deferred, best-effort write that can neither delay nor fail the poll); the next poll's answer never waits on it.
+
 `helper_bad_since` is NOT reported by the app: the server sets it when `helper_state` is not `ok` (or `helper_xpc_ok` is `false`) and clears it on the first good reading; a poll that carries neither field leaves it alone.
 (Field spellings are the server's definition; the server ignores unknown query keys, so a client that spells one differently simply reports nothing for it.)
 
 **Attention rules the server derives (3 minutes = 180 s):**
 - `helper_missing` (amber): the app is polling (a bench poll within 3 min) AND it has reported `helper_state` other than `ok`, or `helper_xpc_ok` false, continuously for over 3 min. A room whose app has never reported helper state raises nothing.
-- `app_missing` (red): no bench poll for over 3 min, between 07:30 and 21:30 IST, for an install whose last report had `console_user` true. Never raised outside those hours, for an install that never polled, or when the whole Mac is already reported unreachable.
+- `app_missing` (red): no bench poll for over 3 min, between 07:30 and 21:30 IST, for an install whose last report had `console_user` true. Never raised outside those hours or for an install that never polled. The attention list additionally drops it when R1 already reports the whole Mac unreachable (one red row per fault); the per-device Bench / MCP view shows it from the poll alone.
 
 Bench (the helper panel) and `scribe_kiosks view=helper` show these fields and the derived state read-only. The server never sends a command because of them.
