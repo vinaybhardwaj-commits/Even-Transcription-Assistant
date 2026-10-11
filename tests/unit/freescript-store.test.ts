@@ -1,5 +1,5 @@
 /**
- * freescript-store.test.ts — migration 0156, the ingest validator and the HMAC. Ids are synthetic.
+ * freescript-store.test.ts — migration 0157, the ingest validator and the HMAC. Ids are synthetic.
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -11,8 +11,8 @@ import { checkFreescriptHmac, signFreescript } from "@/lib/freescript/auth";
 import { freescriptEnabled } from "@/lib/freescript/flag";
 import { INGEST_SQL } from "@/lib/freescript/ingest-sql";
 
-const MIG = "db/migrations/0156_freescript.sql";
-const DOWN = "db/rollbacks/0156_freescript.down.sql";
+const MIG = "db/migrations/0157_freescript.sql";
+const DOWN = "db/rollbacks/0157_freescript.down.sql";
 const H64 = "ab".repeat(32);
 
 const payload = (over: Record<string, unknown> = {}) => ({
@@ -29,15 +29,15 @@ const payload = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-describe("migration 0156", () => {
+describe("migration 0157", () => {
   const up = readFileSync(MIG, "utf8");
-  it("follows 0155 and the down-migration is not applied by the migrator", () => {
+  it("follows 0156 and the down-migration is not applied by the migrator", () => {
     const files = readdirSync("db/migrations").filter((f) => /^\d{4}_.*\.sql$/.test(f));
-    expect(files.filter((f) => f.startsWith("0156_"))).toEqual(["0156_freescript.sql"]);
-    expect(files.some((f) => f.startsWith("0155_"))).toBe(true);
+    expect(files.filter((f) => f.startsWith("0157_"))).toEqual(["0157_freescript.sql"]);
+    expect(files.some((f) => f.startsWith("0156_"))).toBe(true);
     expect(existsSync(DOWN)).toBe(true);
     expect(readdirSync("db/migrations").some((f) => /down/i.test(f))).toBe(false);
-    expect(readFileSync(DOWN, "utf8")).toMatch(/DELETE FROM schema_migrations WHERE version = 156/);
+    expect(readFileSync(DOWN, "utf8")).toMatch(/DELETE FROM schema_migrations WHERE version = 157/);
   });
   it("is additive and records itself", () => {
     const ddl = up.replace(/--.*$/gm, "").replace(/ON DELETE CASCADE/g, "");
@@ -45,7 +45,7 @@ describe("migration 0156", () => {
     expect(up).toContain("CREATE TABLE IF NOT EXISTS freescript_run");
     expect(up).toContain("CREATE TABLE IF NOT EXISTS freescript_artifact");
     expect(up).toContain("CREATE OR REPLACE VIEW freescript_latest");
-    expect(up).toMatch(/VALUES \(156, '0156_freescript'\)/);
+    expect(up).toMatch(/VALUES \(157, '0157_freescript'\)/);
     expect(up).not.toMatch(/\bGRANT\b/i);
   });
   it("has the asked columns and no transcript column", () => {
@@ -70,9 +70,11 @@ describe("validatePayload", () => {
 });
 
 describe("flag and hmac", () => {
-  it("is off when unset and on only for a recognised value", () => {
-    expect(freescriptEnabled({})).toBe(false);
+  it("is on when unset, off for the kill switch, and throws on junk", () => {
+    expect(freescriptEnabled({})).toBe(true);
     expect(freescriptEnabled({ ETA_FREESCRIPT: "0" })).toBe(false);
+    expect(freescriptEnabled({ ETA_FREESCRIPT: "" })).toBe(false);
+    expect(freescriptEnabled({ ETA_FREESCRIPT: "off" })).toBe(false);
     expect(freescriptEnabled({ ETA_FREESCRIPT: "1" })).toBe(true);
     expect(() => freescriptEnabled({ ETA_FREESCRIPT: "maybe" })).toThrow(/unrecognised/);
   });

@@ -475,7 +475,7 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
       scribe_rubric: ["never Pulse", "touches no room", "run/bench need invoke", "lab:true"],
       scribe_sarvam: ["ZDR", "no room audio", "submits need invoke"],
       scribe_timbre: ["Read-only", "display-only", "Not a surgery predictor", "never neutral or a ranking"],
-      scribe_freescript: ["ETA_FREESCRIPT=1", "needs invoke", "No transcript text"],
+      scribe_freescript: ["ETA_FREESCRIPT=0", "needs invoke", "No transcript text"],
       scribe_jobs: ["status/list need read, submit needs invoke, cancel needs write", "no live-room command"],
       scribe_job_submit: ["INVOKE scope", "no live-room command"],
       scribe_job_cancel: ["WRITE", "no room command"],

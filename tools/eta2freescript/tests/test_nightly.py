@@ -30,21 +30,23 @@ def _folder(root, uid, day_ms=T0, role_ok=True, transcript=True):
     return d
 
 
-def test_flag_off_by_default_and_zero_wins():
+def test_flag_on_by_default_and_zero_is_the_kill_switch():
+    assert flag_enabled({}) is True
     assert flag_enabled({}, False) is False
     assert flag_enabled({}, True) is True
     assert flag_enabled({"ETA_FREESCRIPT": "0"}, True) is False
     assert flag_enabled({"ETA_FREESCRIPT": "1"}, False) is True
     with pytest.raises(NightlyError):
-        flag_enabled({"ETA_FREESCRIPT": "maybe"}, False)
+        flag_enabled({"ETA_FREESCRIPT": "maybe"}, True)
 
 
-def test_load_config_unset_stays_off(tmp_path):
+def test_load_config_defaults_on(tmp_path):
     cfg_path = tmp_path / "n.json"
-    cfg_path.write_text(json.dumps({"enabled": True, "data": "x"}))
-    assert load_config(str(cfg_path), {})["enabled"] is True
-    assert load_config(str(cfg_path), {"ETA_FREESCRIPT": "0"})["enabled"] is False
-    assert load_config(None, {})["enabled"] is False
+    cfg_path.write_text(json.dumps({"enabled": False, "data": "x"}))
+    assert load_config(str(cfg_path), {})["enabled"] is False
+    assert load_config(str(cfg_path), {"ETA_FREESCRIPT": "1"})["enabled"] is True
+    assert load_config(None, {})["enabled"] is True
+    assert load_config(None, {"ETA_FREESCRIPT": "0"})["enabled"] is False
 
 
 def test_select_day_needs_sarvam_and_role_track_and_drops_text(tmp_path):

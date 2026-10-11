@@ -1,5 +1,5 @@
 /**
- * mcp-freescript.test.ts — scribe_freescript. SQL is faked. Ids are synthetic. The flag is off unless a test turns it on.
+ * mcp-freescript.test.ts — scribe_freescript. SQL is faked. Ids are synthetic. Unset is on; tests set 0 to close the door.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -67,7 +67,7 @@ describe("registration", () => {
     for (const p of ["operator", "lab"] as const) expect(toolsForProfile(p).map((t) => t.name)).toContain("scribe_freescript");
     const listed = listedTool("scribe_freescript")!;
     expect(listed.description.length).toBeLessThanOrEqual(200);
-    expect(listed.description).toMatch(/ETA_FREESCRIPT=1/);
+    expect(listed.description).toMatch(/ETA_FREESCRIPT=0/);
     expect(listed.description).toMatch(/needs invoke/);
     expect(listed.description).toMatch(/No transcript text/);
   });
@@ -78,13 +78,15 @@ describe("registration", () => {
   });
 });
 
-describe("the door is off by default", () => {
-  it("read and run do nothing when the flag is unset", async () => {
-    delete process.env.ETA_FREESCRIPT;
+describe("the kill switch", () => {
+  it("read and run do nothing when ETA_FREESCRIPT is 0, and an unset flag still reads", async () => {
+    process.env.ETA_FREESCRIPT = "0";
     expect(await freescriptCall({ encounter_id: "synth-fs-1" }, CTX)).toEqual({ ok: false, error: "disabled" });
     expect(await freescriptCall({ action: "run", consult_uid: "synth-fs-1" }, CTX)).toEqual({ ok: false, error: "disabled" });
     expect(H.calls).toHaveLength(0);
     expect(H.submit).toHaveLength(0);
+    delete process.env.ETA_FREESCRIPT;
+    expect(await freescriptCall({ encounter_id: "synth-fs-1" }, READ)).toMatchObject({ ok: true, selector: "encounter" });
   });
 });
 
@@ -133,11 +135,11 @@ describe("the job kind never runs the pipeline", () => {
     expect(parseFreescriptArgs({ room: "synth-room", date: "2026-10-05" })).toEqual({ room: "synth-room", ist_date: "2026-10-05" });
     expect(() => parseFreescriptArgs({ consult_uid: "synth-fs-1", room: "synth-room", ist_date: "2026-10-05" })).toThrow(/one_selector/);
   });
-  it("precheck refuses while the flag is off", async () => {
+  it("precheck allows an unset flag and refuses the kill switch", async () => {
     delete process.env.ETA_FREESCRIPT;
-    await expect(freescriptKind.precheck?.({})).rejects.toThrow(/freescript_disabled/);
-    process.env.ETA_FREESCRIPT = "1";
     await freescriptKind.precheck?.({});
+    process.env.ETA_FREESCRIPT = "0";
+    await expect(freescriptKind.precheck?.({})).rejects.toThrow(/freescript_disabled/);
   });
   it("accept only records a wait; await_box finishes from a stored row and carries no transcript", async () => {
     const job = { id: "job_synth1", created_at: "2026-10-05T00:00:00.000Z" } as never;

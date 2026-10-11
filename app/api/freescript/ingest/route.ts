@@ -1,7 +1,7 @@
 /**
- * POST /api/freescript/ingest — the box posts one eta2freescript result (migration 0156).
+ * POST /api/freescript/ingest — the box posts one eta2freescript result (migration 0157).
  *
- * 404 `disabled` while ETA_FREESCRIPT is not on. Auth: HMAC (lib/freescript/auth.ts, FREESCRIPT_INGEST_SECRET).
+ * 404 `disabled` when ETA_FREESCRIPT is 0 (unset is on). Auth: HMAC (lib/freescript/auth.ts, FREESCRIPT_INGEST_SECRET).
  * Body ≤ 2 MB. Writes through the APP connection. No transcript text is accepted.
  *
  *   200 { ok, run_id, inserted: 1|0 }     inserted 0 = the same artifact was already stored

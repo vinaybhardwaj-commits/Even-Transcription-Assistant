@@ -1,4 +1,4 @@
-"""Nightly FreeScript run. Off unless ETA_FREESCRIPT=1 (unset and 0 both stay off; any other value is an error).
+"""Nightly FreeScript run. On unless ETA_FREESCRIPT is 0 (unset stays on; any other value is an error).
 
     python -m tools.eta2freescript.nightly plan [--date YYYY-MM-DD] [--data DIR]
     python -m tools.eta2freescript.nightly run  [--date YYYY-MM-DD] [--data DIR] [--dry-run]
@@ -28,7 +28,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"", "0", "false", "no", "off"}
 
 DEFAULTS = {
-    "enabled": False,
+    "enabled": True,
     "data": "",
     "out": "",
     "app_url": "",
@@ -41,7 +41,12 @@ class NightlyError(RuntimeError):
     pass
 
 
-def flag_enabled(env: dict, config_enabled: bool) -> bool:
+def flag_enabled(env: dict, config_enabled: bool = True) -> bool:
+    """Unset is on. 0/false/no/off is the kill switch and beats a config that says on.
+
+    1/true/yes/on beats a config that says off. When the env var is absent, ``config_enabled``
+    is used; the nightly default for that is on.
+    """
     raw = env.get("ETA_FREESCRIPT")
     if raw is None:
         return bool(config_enabled)

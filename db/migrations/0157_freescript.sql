@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0156 — FreeScript door: stored eta2freescript artifacts.
+-- Migration 0157 — FreeScript door: stored eta2freescript artifacts.
 --
 -- WHAT. The output of `python -m tools.eta2freescript` (and tools/eta2freescript/nightly.py), posted by the box to
 -- POST /api/freescript/ingest. Two tables:
@@ -16,8 +16,8 @@
 -- pulse_link already names one. room_slug / ist_date / doctor_uid8 are placement for the read tool, not identity.
 --
 -- ADDITIVE AND IDEMPOTENT. CREATE ... IF NOT EXISTS / CREATE OR REPLACE VIEW. No existing table is altered.
--- GRANTS: none (app-owned, like 0155; brain_svc gets nothing). Down-migration: db/rollbacks/0156_freescript.down.sql
--- (run by hand, never from here). The door stays closed unless ETA_FREESCRIPT is on.
+-- GRANTS: none (app-owned, like 0155; brain_svc gets nothing). Down-migration: db/rollbacks/0157_freescript.down.sql
+-- (run by hand, never from here). The door is on unless ETA_FREESCRIPT is 0.
 -- =====================================================================
 
 BEGIN;
@@ -99,14 +99,14 @@ SELECT DISTINCT ON (r.consult_uid)
  ORDER BY r.consult_uid, r.created_at DESC, r.id DESC;
 
 COMMENT ON TABLE freescript_run IS
-  'One eta2freescript result (0156). consult_uid, optional prescription_uid, schema version, validator, generator SHAs, cost. No transcript text.';
+  'One eta2freescript result (0157). consult_uid, optional prescription_uid, schema version, validator, generator SHAs, cost. No transcript text.';
 COMMENT ON TABLE freescript_artifact IS
-  'The FreeScript artifact JSON and completion_required for one freescript_run (0156). No transcript segments.';
+  'The FreeScript artifact JSON and completion_required for one freescript_run (0157). No transcript segments.';
 COMMENT ON VIEW freescript_latest IS
   'Per consult_uid, the newest freescript_run plus its artifact. Readers use this so a re-post of the same inputs does not double-count.';
 
 INSERT INTO schema_migrations (version, name)
-VALUES (156, '0156_freescript')
+VALUES (157, '0157_freescript')
 ON CONFLICT DO NOTHING;
 
 COMMIT;

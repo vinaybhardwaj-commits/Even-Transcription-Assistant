@@ -1,5 +1,5 @@
 /**
- * lib/freescript/store.ts — validate and load one eta2freescript result (migration 0156).
+ * lib/freescript/store.ts — validate and load one eta2freescript result (migration 0157).
  *
  * The box posts this. Validation is structural and refuses transcript-shaped fields (a code, never the value).
  * Writes through the APP connection (@/lib/db), never brain_svc. Idempotent on consult_uid + input_sha256.

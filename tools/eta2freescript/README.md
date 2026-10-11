@@ -7,8 +7,8 @@ track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.2` art
 
 The pipeline runs **off Vercel**, on the box. It reads a local folder. Only the model calls leave the process, and
 `phi_guard.py` allows nothing but Bedrock Anthropic Claude on the `converse` route. A Scribe door
-(`scribe_freescript`, `POST /api/freescript/ingest`, migration 0156) can store the artifact afterwards. That door is
-**off unless `ETA_FREESCRIPT` is on** (unset = off). Transcript text is not stored.
+(`scribe_freescript`, `POST /api/freescript/ingest`, migration 0157) can store the artifact afterwards. That door is
+**on unless `ETA_FREESCRIPT` is 0** (unset = on; that value is the kill switch). Transcript text is not stored.
 
 Ported from the v1 prototype (`encounter-to-rx`, 35-consult scale-up, 11 Oct 2026). The prototype's v0 and v1 prompts
 are kept unchanged under `prompts/` for reproducibility. The vendored w38 validator, schema and examples sit unchanged
@@ -131,7 +131,7 @@ python -m tools.eta2freescript aggregate --out /tmp/e2fs
 
 ## Scribe door
 
-Off unless `ETA_FREESCRIPT` is on. The Python pipeline still does not run on Vercel.
+On unless `ETA_FREESCRIPT` is 0. The Python pipeline still does not run on Vercel.
 
 - `scribe_freescript` `action=read` with one selector (`encounter_id` or `consult_uid`, `room`+`date`, or `doctor_uid8`+range) returns the stored artifact, `completion_required` and the validator status.
 - `scribe_freescript` `action=run` (needs invoke) queues a `freescript` job. The box drains it; the Vercel step only waits.

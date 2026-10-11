@@ -1,8 +1,8 @@
 /**
  * lib/mcp/tools/freescript.ts — scribe_freescript. Stored FreeScript artifacts, plus a run action that queues the box.
  *
- * Read scope at the door (like scribe_sarvam). action=run needs invoke, enforced by submitJob. Off unless ETA_FREESCRIPT
- * is on. Reads the 0156 tables through the APP connection (@/lib/db). Never returns transcript segments.
+ * Read scope at the door (like scribe_sarvam). action=run needs invoke, enforced by submitJob. On unless
+ * ETA_FREESCRIPT is 0. Reads the 0157 tables through the APP connection (@/lib/db). Never returns transcript segments.
  *
  * Read selectors, exactly one: encounter_id | consult_uid | room+date | doctor_uid8+date_from+date_to (<= 92 days).
  * action=run accepts encounter_id/consult_uid or room+date and queues kind `freescript`. The pipeline runs on the box.
@@ -32,7 +32,7 @@ const dayOf = (v: unknown): string => (v instanceof Date ? v.toISOString().slice
 const n = (v: unknown): number | null => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
 
 const HELP = [
-  "Stored FreeScript artifacts (tables freescript_run / freescript_artifact, migration 0156). The door is off unless ETA_FREESCRIPT is on.",
+  "Stored FreeScript artifacts (tables freescript_run / freescript_artifact, migration 0157). On unless ETA_FREESCRIPT is 0.",
   "action=read (default) takes EXACTLY ONE selector: encounter_id or consult_uid; room + date (IST YYYY-MM-DD); or doctor_uid8 + date_from + date_to (at most 92 days).",
   "Returns the artifact, completion_required and the validator status (ok plus error codes). No transcript text.",
   "action=run queues a freescript job for the box (needs invoke) and returns { job_id }. The Python pipeline runs off Vercel: transcripts go only to Bedrock Claude via phi_guard.",

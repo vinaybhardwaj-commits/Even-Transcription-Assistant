@@ -1,7 +1,7 @@
 /**
  * GET /api/freescript/pending — jobs the box runner should pick up. No transcript, no artifact.
  *
- * 404 while ETA_FREESCRIPT is off. Auth: HMAC over `${ts}.GET ${path}` (lib/freescript/auth.ts).
+ * 404 when ETA_FREESCRIPT is 0 (unset is on). Auth: HMAC over `${ts}.GET ${path}` (lib/freescript/auth.ts).
  *   200 { ok, jobs: [{ job_id, consult_uid?, room?, ist_date? }] }
  */
 import { NextRequest, NextResponse } from "next/server";
