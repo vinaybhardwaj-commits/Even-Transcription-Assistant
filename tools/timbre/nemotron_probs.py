@@ -174,6 +174,24 @@ def patient_frames(
     (default: ``thr``). Two speakers at or above ``thr`` is overlap and the frame
     is dropped. The doctor alone above ``thr`` is dropped.
     """
+    return _single_speaker_mask(probs, doctor_slot, thr, overlap_thr, doctor=False)
+
+
+def doctor_frames(
+    probs: np.ndarray,
+    doctor_slot: int,
+    thr: float,
+    overlap_thr: float | None = None,
+) -> np.ndarray:
+    """Boolean mask of single-speaker doctor frames. Mirror of ``patient_frames``.
+
+    A frame is kept when exactly one speaker is ``>= thr``, that speaker is
+    ``doctor_slot``, and every other speaker is ``< overlap_thr`` (default: ``thr``).
+    """
+    return _single_speaker_mask(probs, doctor_slot, thr, overlap_thr, doctor=True)
+
+
+def _single_speaker_mask(probs, doctor_slot: int, thr: float, overlap_thr, *, doctor: bool) -> np.ndarray:
     arr = np.asarray(probs, dtype=np.float64)
     if arr.ndim != 2 or arr.shape[1] < 1:
         raise NlpError("probs must be (frames, speakers)")
@@ -191,8 +209,8 @@ def patient_frames(
     others = arr.copy()
     others[np.arange(arr.shape[0]), winner] = -np.inf
     max_other = others.max(axis=1) if arr.shape[1] > 1 else np.full(arr.shape[0], -np.inf)
-    keep = single & (winner != slot) & (max_other < ov)
-    return keep
+    want = winner == slot if doctor else winner != slot
+    return single & want & (max_other < ov)
 
 
 def fetch_nlp_object(key: str, *, bucket: str = BUCKET, client=None) -> bytes:

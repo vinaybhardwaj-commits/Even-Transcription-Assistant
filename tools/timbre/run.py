@@ -8,6 +8,9 @@ deltas), and ``manifest.json``. Re-running skips windows whose status is
 ``ok`` or ``nan``. ``error`` rows are retried. A model that does not fit in
 RAM is skipped, with the reason logged, and the other models still run.
 Writes are atomic.
+
+``--doctor-ref`` also scores the nearest doctor speech on the same clip and
+writes patient-minus-doctor columns. See ``doctor_ref.py``.
 """
 
 from __future__ import annotations
@@ -26,6 +29,13 @@ from tools.timbre import HARNESS_VERSION
 from tools.timbre.audio import read_audio
 from tools.timbre.baseline import add_baselines, baseline_columns
 from tools.timbre.catalog import SPEC_BY_NAME, SPECS, resolve_model_names
+from tools.timbre.doctor_ref import (
+    DoctorRefError,
+    DoctorRefSettings,
+    extract_doctor_references,
+    prepare_plans,
+    write_relative_columns,
+)
 from tools.timbre.mem import InsufficientMemory, mem_available_gb
 from tools.timbre.windows import Window, load_windows
 
@@ -53,11 +63,13 @@ def run(
     models: str = "all",
     device: str = "cpu",
     extractors: dict | None = None,
+    doctor_ref: DoctorRefSettings | None = None,
 ) -> dict:
     names = resolve_model_names(models)
     windows = load_windows(windows_csv, audio_dir)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    plans = prepare_plans(windows, doctor_ref) if doctor_ref is not None else None
     manifest = {
         "harness": "timbre",
         "harness_version": HARNESS_VERSION,
@@ -66,7 +78,15 @@ def run(
         "n_windows": len(windows),
         "models": {},
     }
+    if doctor_ref is not None:
+        manifest["doctor_ref"] = {
+            "budget_s": doctor_ref.budget_s,
+            "horizon_s": doctor_ref.horizon_s,
+            "n_windows": len(windows),
+            "n_with_spans": int(sum(1 for p in plans or [] if p.spans)),
+        }
     built = extractors or {}
+    doctor_extracts: dict[str, dict] = {}
     for name in names:
         spec = SPEC_BY_NAME[name]
         ext = built.get(name)
@@ -83,6 +103,10 @@ def run(
                     manifest["models"][name] = _run_model(name, ext, windows, out)
             else:
                 manifest["models"][name] = _run_model(name, ext, windows, out)
+            if plans is not None and doctor_ref is not None and ext is not None and not manifest["models"][name].get("skipped"):
+                by_window, stats = extract_doctor_references(ext, plans, doctor_ref)
+                doctor_extracts[name] = by_window
+                manifest["models"][name]["doctor_ref"] = stats
         except InsufficientMemory as e:
             _log_skip(name, str(e))
             manifest["models"][name] = _skipped_model(spec, str(e))
@@ -94,6 +118,8 @@ def run(
     merged = _merge(out, names, windows)
     if len(merged):
         merged = add_baselines(merged, baseline_columns(merged.columns))
+    if plans is not None and len(merged):
+        merged = write_relative_columns(merged, plans, doctor_extracts)
     _write_parquet(merged, out / "features.parquet")
     manifest["merged_rows"] = int(len(merged))
     manifest["merged_cols"] = int(len(merged.columns))
@@ -331,17 +357,57 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--models", default="all", help="all, or a comma-separated list of model names")
     p.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
+    p.add_argument(
+        "--doctor-ref",
+        action="store_true",
+        help="score each patient window against the nearest doctor speech on the same clip",
+    )
+    p.add_argument("--clip-audio-dir", default=None, help="16 kHz mono clip files named <clip_id>.wav or .flac")
+    p.add_argument("--segments", default=None, help="diarization segments, CSV / JSON / JSONL, times on the clip clock")
+    p.add_argument("--nemotron-dir", default=None, help="directory of NLP1 probability files, one per clip")
+    p.add_argument("--doctor-budget-s", type=float, default=15.0, help="max seconds of doctor speech per window")
+    p.add_argument("--doctor-horizon-s", type=float, default=60.0, help="only doctor speech within this many seconds of the window")
+    p.add_argument("--doctor-slot", type=int, default=None, help="doctor speaker slot when the window row does not carry one")
+    p.add_argument("--doctor-thr", type=float, default=0.5, help="Nemotron probability threshold for a doctor frame")
     args = p.parse_args(argv)
     if args.models.strip() == "list":
         for spec in SPECS:
             print(f"{spec.name}\t{spec.model_id}\t{spec.kind}")
         return
     try:
-        manifest = run(args.windows, args.audio_dir, args.out, models=args.models, device=args.device)
+        settings = doctor_settings_from_args(args)
+        manifest = run(
+            args.windows,
+            args.audio_dir,
+            args.out,
+            models=args.models,
+            device=args.device,
+            doctor_ref=settings,
+        )
+    except DoctorRefError as e:
+        print(f"doctor-ref: {e}", file=sys.stderr)
+        sys.exit(2)
     except Exception:
         traceback.print_exc()
         raise
     print(f"wrote {args.out} models={len(manifest['models'])} windows={manifest['n_windows']}")
+
+
+def doctor_settings_from_args(args) -> DoctorRefSettings | None:
+    """Build settings from the CLI. ``None`` when ``--doctor-ref`` is off."""
+    if not getattr(args, "doctor_ref", False):
+        return None
+    if not args.clip_audio_dir:
+        raise DoctorRefError("--doctor-ref needs --clip-audio-dir")
+    return DoctorRefSettings(
+        clip_audio_dir=args.clip_audio_dir,
+        segments_path=args.segments,
+        nemotron_dir=args.nemotron_dir,
+        budget_s=args.doctor_budget_s,
+        horizon_s=args.doctor_horizon_s,
+        doctor_slot=args.doctor_slot,
+        doctor_thr=args.doctor_thr,
+    )
 
 
 if __name__ == "__main__":

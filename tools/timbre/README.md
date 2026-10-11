@@ -68,9 +68,63 @@ Re-running is safe. Status `ok` and `nan` are finished and skipped. Status `erro
 For openSMILE functionals and for arousal / dominance / valence, `baseline.py` adds:
 
 - `{col}__delta_self` — z-score against that patient's strictly earlier windows in the same `clip_id` (sample std, at least two earlier finite values).
-- `{col}__rel_doctor` — `(x - doctor_mean) / patient_earlier_std` when doctor rows exist (`role=doctor`, or a separate doctor frame).
+- `{col}__rel_doctor` — `(x - doctor_mean) / patient_earlier_std` when doctor rows exist (`role=doctor`, or a separate doctor frame). This stays empty when the windows file has no doctor rows. `--doctor-ref` replaces it, for the columns listed below, with patient minus the doctor reference audio.
 
 Embeddings and the seven WavLM class probabilities are not z-scored.
+
+### Doctor reference
+
+`--doctor-ref` builds a doctor reference for each patient window from the same clip, then runs every selected extractor on that audio. The reference is the doctor's own segments nearest the window: at most `--doctor-budget-s` seconds (default 15), and only speech within `--doctor-horizon-s` seconds (default 60). A longer segment is clipped on the side closest to the window. The extractor result is cached per clip and span, so windows that share a span do not score it twice.
+
+Two inputs, same selector:
+
+- **Diarization segments** (`--segments` CSV, JSON list, or JSONL). Times are on the clip clock (`start_s`/`end_s` or `start_ms`/`end_ms`). A segment is the doctor when `role` is `doctor` or `clinician`, or when `speaker_idx` matches the window's `doctor_speaker_idx` / `doctor_slot` (or `--doctor-slot` when the row is blank). Overlap segments are dropped. `doctor_uid8` filters only when both the segment and the window have it. A `segments_json` column on the windows CSV is used for a clip that is not in `--segments`.
+- **Nemotron probabilities** (`--nemotron-dir`). Used when `diar_src` is `nemotron` (even if `--segments` is also passed), and when a clip has no segments. Files are gzip NLP1, looked up as `<clip_id>.nlp`, `<window_id>.nlp`, or the path in `nlp_path` / `nlp_key`. Doctor frames are single-speaker frames of the doctor slot at `--doctor-thr` (default 0.5). Frame 0 is clip time `nlp_origin_s` (default 0).
+
+Clip audio is `<clip_id>.wav` or `.flac` in `--clip-audio-dir`, 16 kHz mono, on the same clock as `start_s`. It is not the per-window file in `--audio-dir`.
+
+Columns added for arousal, valence, dominance, and for eGeMAPS F0, loudness and rate:
+
+- `{col}__rel_doctor` — patient minus doctor.
+- `{col}__rel_doctor_ratio` — where a ratio is meaningful. Linear loudness and rate use patient/doctor when both are > 0. F0 level features are semitones, so the ratio is the Hz ratio `2 ** ((patient − doctor) / 12)`. Slopes, spread, and dB loudness stay difference-only.
+- `{model}__rel_doctor_cosine` — cosine of the two embeddings.
+
+`doctor_ref_source`, `doctor_ref_status`, `doctor_ref_reason`, `doctor_ref_s` and `doctor_ref_n_spans` record the selection. `doctor_ref_s` is 0 when doctor speech was sought and none fell inside the horizon. A missing source, missing slot, or missing probability file leaves `doctor_ref_s` empty and sets the reason (`no_source`, `doctor_slot_missing`, `nlp_missing`, `doctor_unidentified`, `clip_audio_missing`, …).
+
+```bash
+python -m tools.timbre.run \
+    --windows windows.csv \
+    --audio-dir /path/to/window-wavs \
+    --clip-audio-dir /path/to/clip-wavs \
+    --segments /path/to/segments.jsonl \
+    --out results/ \
+    --models all \
+    --device cpu \
+    --doctor-ref \
+    --doctor-budget-s 15 \
+    --doctor-horizon-s 60
+```
+
+Nemotron, when the windows CSV carries `diar_src=nemotron` and `doctor_slot` (or you pass `--doctor-slot`):
+
+```bash
+python -m tools.timbre.run \
+    --windows windows.csv \
+    --audio-dir /path/to/window-wavs \
+    --clip-audio-dir /path/to/clip-wavs \
+    --nemotron-dir /path/to/nlp \
+    --out results/ \
+    --models all \
+    --device cpu \
+    --doctor-ref \
+    --doctor-slot 0
+```
+
+A segments JSONL row looks like this (synthetic ids):
+
+```json
+{"clip_id":"synth_consultA","start_ms":1500,"end_ms":4000,"speaker_idx":0,"role":"doctor","overlap":false,"doctor_uid8":"d0000001"}
+```
 
 ### Labels
 
@@ -81,6 +135,17 @@ python -m tools.timbre.evaluate --labels labels.csv --features results/features.
 `--out` takes a file or a directory (an existing directory, or a path ending in `/`); a directory gets `report.json`. The report is strict JSON (NaN becomes `null`).
 
 `--scalar-ridge` adds a room-day grouped-CV ridge head on scalar features for models that have neither direct arousal/valence nor an embedding (eGeMAPS, ComParE). The penalty scales with the feature count. Rows report `arousal_source = ridge_oof_scalar`.
+
+`--include-rel` puts `__rel_doctor`, `__rel_doctor_ratio` and `__rel_doctor_cosine` into that scalar head, and concatenates them onto an embedding ridge. Without the flag those columns are left out (a relative column is often missing on windows that had no doctor speech; a row with any missing relative value is left out of the fit). For eGeMAPS pass both flags. Direct arousal/valence scores are unchanged.
+
+```bash
+python -m tools.timbre.evaluate \
+    --labels labels.csv \
+    --features results/features.parquet \
+    --out results/eval.json \
+    --scalar-ridge \
+    --include-rel
+```
 
 Locked metric snapshots live in `baselines/` (aggregates only; see `baselines/README.md`).
 

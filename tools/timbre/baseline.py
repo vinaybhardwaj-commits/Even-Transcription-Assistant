@@ -9,6 +9,12 @@ For each prosodic and dimensional feature:
   same tape are present. The doctor mean is every doctor window on that clip,
   not only the earlier ones. Without a patient std the column is NaN.
 
+``doctor_ref.py`` (``--doctor-ref``) is a different feature. It overwrites
+``__rel_doctor`` on arousal, valence, dominance and on eGeMAPS F0, loudness and
+rate with patient minus that window's doctor reference, and adds a ratio column
+where the scale supports one. Every other ``__rel_doctor`` column stays the
+z-score defined here. With ``--doctor-ref`` off, nothing in this module changes.
+
 Doctor rows themselves are the reference and are not z-scored. Embeddings and
 categorical probabilities are not z-scored.
 """
@@ -36,6 +42,8 @@ _SKIP_SUFFIXES = (
     "__audio_s",
     "__delta_self",
     "__rel_doctor",
+    "__rel_doctor_ratio",
+    "__rel_doctor_cosine",
 )
 
 
