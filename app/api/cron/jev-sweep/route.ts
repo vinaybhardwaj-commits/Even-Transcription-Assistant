@@ -10,6 +10,7 @@ import { timingSafeEqual } from "node:crypto";
 import { respondError, respondOk } from "@/lib/respond";
 import { workerEnabled } from "@/lib/jev/worker/flags";
 import { syncQuestionSets } from "@/lib/jev/worker/sync";
+import "@/lib/jev/worker/register";   // the P2 uses: without this import the sweeper's registry is EMPTY in this module graph and the cron enqueues nothing
 import { sweepJev } from "@/lib/jev/worker/sweeper";
 import { classifyDbError } from "@/lib/jev/worker/errors";
 

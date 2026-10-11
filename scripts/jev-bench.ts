@@ -5,7 +5,7 @@
  *   JEV_WORKER_ENABLED=1 ETA_JEV_TEXT_LANE=1 ETA_JEV_ENABLED=1 TYPESAFE_API_KEY=... DATABASE_URL=... \
  *     npx tsx scripts/jev-bench.ts --use consult_rubric --set pitch-detect@v0 --subjects subjects.json [--labels labels.json] [--out report.json] [--concurrency 2]
  *
- *   subjects.json  ["consult_key", ...]  or  [{"subject_id": "ck#p1", "at_s": 312, "hint": "investigation"}, ...]   (pitch/doubt subjects need at_s; a doubt may carry "text")
+ *   subjects.json  ["consult_key", ...]  or  [{"subject_id": "ck#p1", "at_s": 312, "hint": "investigation"}, ...]   (pitch/doubt subjects need at_s; "hint" is a SCORING LABEL for pitch_type and is never sent to Jev; a doubt may carry "text", the extracted doubt)
  *   labels.json    [{"subject_id": "...", "question_id": "...", "label": "<option key, or a row label for u10_end_row>"}, ...]
  * Exit 0 with a report; 2 on a refusal (flags, unsynced set, no subjects). A DRAFT set is bench-only by design. Dev numbers are IN-SAMPLE.
  */

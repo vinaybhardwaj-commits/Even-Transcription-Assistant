@@ -25,7 +25,8 @@ import { acquireSlot, releaseSlot } from "./slots";
 import type { StateBuild } from "./uses";
 
 export type SetRef = { id: string; version: string; sha: string; modelPin: string; use: string; subjectType: string; bands?: { act: number; caution: number } | null };
-export type BenchRow = { subject_id: string; question_id: string; variant: string; kind: string; value: string | number; confidence: number | null };
+export type BenchRow = { subject_id: string; question_id: string; variant: string; kind: string; value: string | number; confidence: number | null;
+  /** The question's gate closed it: shadow would store `gated_overwritten`, so the bench scores it as an abstain, not as the raw answer (F1). */ gated?: true };
 
 export type AskOutcome =
   | { kind: "done"; decisions: number; calls: number; errorClass: null; bench: BenchRow[]; inputTokens: number; abstained?: string; evidence?: Record<string, unknown> }
@@ -55,6 +56,47 @@ function bandFor(def: QuestionDef, set: SetRef, a: JevAnswer, confidence: number
   if (a.type === "choice" && def.escape_options?.includes(a.choice)) return ESCAPE_BAND;
   if (mock || !def.calibration || def.calibration.method === "none") return "review";
   return confidenceBand(confidence, def.bands ?? set.bands ?? undefined);
+}
+
+
+/**
+ * GATES (PRD §2 gating table). A question is CLOSED when any ancestor along its gate chain is closed, WHATEVER that ancestor's own row outcome is (answered, no_answer, off-menu...),
+ * or when its direct gate's answer closes it. So a closed gate closes the whole chain below it even where Jev never answered a middle link (pitch_type = no_pitch closes uptake and
+ * EVERY per-pitch item, recovery_appropriateness and cost_answered included). Only rows that are `answered` are rewritten (to gated_overwritten, band abstain; the raw answer stays on
+ * the row) and their bench rows marked `gated`, so the bench scores what shadow stores. A gate that is itself open and unanswered gives NO OPINION on its dependents.
+ *   gate_requires: the gate answers that keep the question open; any other choice closes it.   Without it: closed when the gate answered one of its own escape options (or a noul under 0.5).
+ * A gate cycle (validateSetFile does not forbid one) cannot hang: the walk treats a revisited question as open.
+ */
+export function applyGates(defs: ReadonlyArray<QuestionDef>, derived: ReadonlyMap<string, JevAnswer>, rows: WorkerDecision[], bench: BenchRow[]): void {
+  const byId = new Map(defs.map((d) => [d.question_id, d]));
+  const memo = new Map<string, boolean>();
+  const closedBy = (d: QuestionDef): boolean => {
+    const g = derived.get(d.gate_question_id!);
+    if (!g) return false;                                        // the direct gate was not answered (and is not closed): no opinion
+    const gateDef = byId.get(d.gate_question_id!);
+    if (d.gate_requires) return g.type === "choice" ? !d.gate_requires.includes(g.choice) : false;
+    return g.type === "noul" ? g.noul < 0.5 : g.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
+  };
+  const isClosed = (id: string, stack: Set<string>): boolean => {
+    const d = byId.get(id);
+    if (!d?.gate_question_id) return false;
+    const hit = memo.get(id);
+    if (hit !== undefined) return hit;
+    if (stack.has(id)) return false;                             // a cycle: treated as open
+    stack.add(id);
+    const closed = isClosed(d.gate_question_id, stack) || closedBy(d);
+    stack.delete(id);
+    memo.set(id, closed);
+    return closed;
+  };
+  for (const d of defs) {
+    if (!d.gate_question_id || !isClosed(d.question_id, new Set())) continue;
+    const row = rows.find((r) => r.questionId === d.question_id && r.orderVariant === "derived");
+    if (!row || row.outcome !== "answered") continue;
+    row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id };
+    const br = bench.find((x) => x.question_id === d.question_id && x.variant === "derived");
+    if (br) br.gated = true;
+  }
 }
 
 export async function askSubject(input: {
@@ -196,21 +238,7 @@ export async function askSubject(input: {
     bench.push({ subject_id: subjectId, question_id: d.question_id, variant: "derived", kind: derived.type, value: val.value, confidence: val.confidence });
   }
 
-  // gates: a dependent question's derived answer is OVERWRITTEN in code when its gate says it is closed; the raw answer is kept on the row.
-  //   gate_requires (PRD §2 gating table): the gate answers that keep the question open; any other choice closes it.
-  //   without it: closed only when the gate's answer is one of the gate's own escape options (or a noul under 0.5).
-  for (const d of defs) {
-    if (!d.gate_question_id) continue;
-    const g = derivedAnswer.get(d.gate_question_id);
-    if (!g) continue;                                          // the gate was not answered: no opinion on the dependent
-    const gateDef = defs.find((x) => x.question_id === d.gate_question_id);
-    let closed = false;
-    if (d.gate_requires) closed = g.type === "choice" ? !d.gate_requires.includes(g.choice) : false;
-    else closed = g.type === "noul" ? g.noul < 0.5 : g.type === "choice" ? Boolean(gateDef?.escape_options?.includes(g.choice)) : false;
-    if (!closed) continue;
-    const row = rows.find((r) => r.questionId === d.question_id && r.orderVariant === "derived");
-    if (row && row.outcome === "answered") { row.outcome = "gated_overwritten"; row.band = ESCAPE_BAND; row.evidence = { ...row.evidence, gate: d.gate_question_id }; }
-  }
+  applyGates(defs, derivedAnswer, rows, bench);
 
   let written = 0;
   if (mode !== "bench") written = await upsertDecisions(rows);

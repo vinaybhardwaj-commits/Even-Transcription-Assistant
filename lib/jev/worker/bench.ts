@@ -39,7 +39,11 @@ export async function runBench(input: {
   if (!loaded.ok) throw new BenchRefused("set_not_allowed", loaded.detail);
   const subjects = input.subjects.map((s) => (typeof s === "string" ? { subject_id: s } : s));
   if (subjects.length === 0) throw new BenchRefused("no_subjects");
-  for (const s of subjects) if (s.at_s !== undefined) setLocator(s.subject_id, { at_ms: Math.round(s.at_s * 1000), ...(s.hint ? { hint: s.hint } : {}), ...(s.text ? { text: s.text } : {}) });
+  for (const s of subjects) if (s.at_s !== undefined) setLocator(s.subject_id, { at_ms: Math.round(s.at_s * 1000), ...(s.text ? { text: s.text } : {}) });
+  // A subject's `hint` (the operator's idea of the pitch type) is a LABEL for scoring pitch_type, never an input: it is not given to any builder or to Jev (F2).
+  const hintLabels: BenchLabel[] = subjects.filter((s) => s.hint).map((s) => ({ subject_id: s.subject_id, question_id: "pitch_type", label: s.hint! }));
+  const explicit = new Set((input.labels ?? []).map((l) => `${l.subject_id}|${l.question_id}`));
+  const labels = [...(input.labels ?? []), ...hintLabels.filter((l) => !explicit.has(`${l.subject_id}|${l.question_id}`))];
 
   const outcomes: SubjectOutcome[] = new Array(subjects.length);
   let stopped: string | undefined;
@@ -62,7 +66,7 @@ export async function runBench(input: {
   await Promise.all(Array.from({ length: Math.max(1, Math.min(4, input.concurrency ?? 2)) }, worker));
   const done = outcomes.map((o, i) => o ?? { subject_id: subjects[i]!.subject_id, status: "deferred" as const, reason: stopped ?? "not_run", rows: [], tokens: 0, calls: 0 });
   return buildBenchReport({
-    set: { id: loaded.set.id, version: loaded.set.version, sha: loaded.set.sha, use: loaded.set.use }, defs: loaded.defs, outcomes: done, labels: input.labels,
+    set: { id: loaded.set.id, version: loaded.set.version, sha: loaded.set.sha, use: loaded.set.use }, defs: loaded.defs, outcomes: done, labels: labels.length ? labels : undefined,
     resolve: def.resolve, mock: parseFlag("ETA_JEV_MOCK"), usdPerToken: JEV_INPUT_TOKEN_COST_USD, stopped,
   });
 }

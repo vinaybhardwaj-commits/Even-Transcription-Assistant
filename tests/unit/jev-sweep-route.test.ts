@@ -38,6 +38,22 @@ describe("the sweeper route", () => {
     expect((await call("Bearer cron-secret-for-test")).status).toBe(500);
     expect(H.sql).toBe(0);
   });
+  it("C1: the route's own module graph sees ALL EIGHT P2 uses (the sweeper's registry is not empty there)", async () => {
+    vi.resetModules();                                             // a fresh graph: only what the route itself pulls in
+    const uses = await import("@/lib/jev/worker/uses");
+    expect(uses.listUses().length, "nothing registered before the route is loaded").toBe(0);
+    await import("@/app/api/cron/jev-sweep/route");
+    expect(uses.listUses().map((u) => `${u.use}/${u.setId}`).sort()).toEqual([
+      "consult_rubric/chair-affect", "consult_rubric/doubt", "consult_rubric/pitch-detect", "consult_rubric/pitch-uptake",
+      "encounter_timeline/encounter-end", "encounter_timeline/u10-timeline", "stt_pick/stt-pick", "stt_quality/stt-quality",
+    ]);
+  });
+  it("C1: a nudge (which does not go through the route) sees them too, via the sweeper", async () => {
+    vi.resetModules();
+    const uses = await import("@/lib/jev/worker/uses");
+    await import("@/lib/jev/worker/nudge");
+    expect(uses.listUses().length).toBe(8);
+  });
   it("vercel.json schedules it every 5 minutes", async () => {
     const cfg = JSON.parse((await import("node:fs")).readFileSync("vercel.json", "utf8")) as { crons: Array<{ path: string; schedule: string }> };
     expect(cfg.crons.find((c) => c.path === "/api/cron/jev-sweep")).toEqual({ path: "/api/cron/jev-sweep", schedule: "*/5 * * * *" });

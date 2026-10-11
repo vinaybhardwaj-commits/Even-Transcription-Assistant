@@ -15,6 +15,10 @@ import { transcriptState, MIN_PATIENT_TURNS } from "@/lib/jev/worker/builders/tr
 import { candidateRows, timelineJevState, resolveTimelineAnswer, MAX_CANDIDATES } from "@/lib/jev/worker/builders/timeline";
 import { buildSttPairState, buildSttRunState, repeatBucket, resolveSttPick, type RunRow } from "@/lib/jev/worker/builders/stt";
 import { buildDoubtState, buildPitchState, clearLocators, setLocator } from "@/lib/jev/worker/builders/locators";
+import { buildBenchReport } from "@/lib/jev/worker/bench-report";
+import { applyGates } from "@/lib/jev/worker/call";
+import type { JevAnswer } from "@/lib/jev/types";
+import type { WorkerDecision } from "@/lib/jev/worker/persist";
 import { buildSegment, type TimelineInput } from "@/lib/encounter-clock/timeline";
 import type { Anchor } from "@/lib/encounter-clock/anchors";
 
@@ -142,10 +146,26 @@ describe("transcript-v1: pre-gates, focus and excerpt", () => {
     const s = transcriptState("ck_secret", ct(mk(4)), { focus: { at_ms: 65_000, hint: "investigation" } });
     if (!("state" in s)) throw new Error("expected a state");
     expect(Object.keys(s.state as object).sort()).toEqual(["focus", "transcript"]);
-    expect((s.state as { focus: Record<string, string> }).focus).toEqual({ near: "01:05", suggestion_type_hint: "investigation" });
+    expect((s.state as { focus: Record<string, string> }).focus).toEqual({ near: "01:05" });   // the type hint is a scoring label and is NOT sent (F2)
+    expect(JSON.stringify(s.state)).not.toMatch(/investigation|suggestion_type_hint|hint/);
     expect(JSON.stringify(s.state)).not.toContain("ck_secret");
     expect(JSON.stringify(s.state)).toMatch(/\[00:00\] PATIENT-SIDE: line 0/);
     expect(s.lane).toBe("text");
+  });
+  it("F2: no hint reaches Jev state, whatever the locator carries (pitch and doubt builders, direct and via the locator store)", async () => {
+    const lines = Array.from({ length: 12 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+    const read = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+    clearLocators();
+    setLocator("ckx#p1", { at_ms: 60_000, hint: "SURGERY-HINT-XYZ" });
+    setLocator("ckx#d1", { at_ms: 60_000, hint: "SURGERY-HINT-XYZ", text: "is it safe" });
+    for (const build of [buildPitchState("ckx#p1", read), buildDoubtState("ckx#d1", read)]) {
+      const st = await build;
+      if (!st || !("state" in st)) throw new Error("expected a state");
+      expect(JSON.stringify(st.state)).not.toContain("SURGERY-HINT-XYZ");
+      expect(JSON.stringify(st.state)).not.toMatch(/hint/);
+      expect(JSON.stringify(st.evidence)).not.toContain("SURGERY-HINT-XYZ");
+    }
+    clearLocators();
   });
   it("a doubt excerpt is -45 s .. +150 s around the doubt and nothing else", () => {
     const lines = Array.from({ length: 30 }, (_, i) => ({ t_ms: i * 20_000, speaker: "other" as const, speaker_idx: 0, text: `line ${i}` }));
@@ -297,5 +317,211 @@ describe("shadow rows are used by nothing; the bench CLI refuses without argumen
     try { execFileSync("npx", ["tsx", "scripts/jev-bench.ts"], { stdio: "pipe", timeout: 90_000, env: { ...process.env, DATABASE_URL: "" } }); } catch (e) { code = (e as { status?: number }).status ?? -1; err = String((e as { stderr?: Buffer }).stderr ?? ""); }
     expect(code).toBe(2);
     expect(err).toMatch(/usage: --use <use> --set <id@version> --subjects/);
+  });
+});
+
+describe("F1: the bench report scores the POST-gate answer", () => {
+  const defs = [
+    { question_id: "u10_kind", kind: "choice", body: { type: "choice", instructions: "x", criteria: { consultation: "a", empty_room: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"] },
+    { question_id: "u10_end_row", kind: "choice", body: { type: "choice", instructions: "x", criteria: { cand_01: "a", cand_02: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], gate_question_id: "u10_kind", gate_requires: ["consultation"] },
+  ] as unknown as QuestionDef[];
+  const row = (subject_id: string, question_id: string, value: string, gated?: true) => ({ subject_id, question_id, variant: "derived", kind: "choice", value, confidence: 0.7, ...(gated ? { gated } : {}) });
+  const outcome = (id: string, rows: ReturnType<typeof row>[]) => ({ subject_id: id, status: "asked" as const, rows, evidence: { candidates: { cand_01: "t+02:00", cand_02: "t+05:00" } }, tokens: 1, calls: 2 });
+  const resolve = (_q: string, v: string, ev: Record<string, unknown>) => ((ev.candidates as Record<string, string>)[v] ?? v);
+
+  it("a gated answer is counted as an abstain (n_gated) and is NOT scored against a label", () => {
+    const rep = buildBenchReport({
+      set: { id: "u10-timeline", version: "v2", sha: "a".repeat(64), use: "encounter_timeline" }, defs, resolve, mock: false, usdPerToken: 0,
+      outcomes: [outcome("s1", [row("s1", "u10_kind", "consultation"), row("s1", "u10_end_row", "cand_02")]), outcome("s2", [row("s2", "u10_kind", "empty_room"), row("s2", "u10_end_row", "cand_02", true)])],
+      labels: [{ subject_id: "s1", question_id: "u10_end_row", label: "t+05:00" }, { subject_id: "s2", question_id: "u10_end_row", label: "t+05:00" }],
+    });
+    const q = rep.questions.find((x) => x.question_id === "u10_end_row")!;
+    expect(q.n_gated).toBe(1);
+    expect(q.distribution).toEqual({ cand_02: 1, gated_overwritten: 1 });
+    expect(q.vs_labels).toMatchObject({ n_labeled: 2, n_scored: 1, coverage: 0.5, accuracy: 1 });   // s2's raw cand_02 is NOT scored
+    expect(q.vs_labels!.confusion).toEqual({ "t+05:00": { "t+05:00": 1 } });
+  });
+  it("without the gated flag the same row WOULD be scored (so the flag is what changes the number)", () => {
+    const rep = buildBenchReport({
+      set: { id: "u10-timeline", version: "v2", sha: "a".repeat(64), use: "encounter_timeline" }, defs, resolve, mock: false, usdPerToken: 0,
+      outcomes: [outcome("s2", [row("s2", "u10_kind", "empty_room"), row("s2", "u10_end_row", "cand_01")])],
+      labels: [{ subject_id: "s2", question_id: "u10_end_row", label: "t+05:00" }],
+    });
+    expect(rep.questions.find((x) => x.question_id === "u10_end_row")!.vs_labels).toMatchObject({ n_scored: 1, accuracy: 0 });
+  });
+});
+
+describe("F5: gates are TRANSITIVE and evaluated against the post-gate value", () => {
+  const ch = (choice: string): JevAnswer => ({ type: "choice", choice, probabilities: { [choice]: 1 }, confidence: 1 });
+  const rowsFor = (defs: QuestionDef[]): WorkerDecision[] => defs.map((d) => ({ questionId: d.question_id, orderVariant: "derived", outcome: "answered", band: "review", evidence: {} }) as unknown as WorkerDecision);
+  const benchFor = (defs: QuestionDef[]) => defs.map((d) => ({ subject_id: "s", question_id: d.question_id, variant: "derived", kind: "choice", value: "x", confidence: 1 }));
+  const run = (defs: QuestionDef[], answers: Record<string, string>) => {
+    const rows = rowsFor(defs), bench = benchFor(defs);
+    applyGates(defs, new Map(Object.entries(answers).map(([k, v]) => [k, ch(v)])), rows, bench);
+    return { out: Object.fromEntries(rows.map((r) => [r.questionId, r.outcome])), gated: Object.fromEntries(bench.map((b) => [b.question_id, (b as { gated?: boolean }).gated === true])) };
+  };
+  const PU = byId("pitch-uptake").questions;
+  const PER_PITCH = PU.filter((d) => d.question_id !== "pitch_type").map((d) => d.question_id);
+
+  it("THE REFUTER'S PROBE: pitch_type = no_pitch, recovery_discussion = adequate, cost_discussed = yes -> recovery_appropriateness and cost_answered are gated too", () => {
+    const { out, gated } = run(PU, { pitch_type: "no_pitch", recovery_discussion: "adequate", cost_discussed: "yes", recovery_appropriateness: "appropriate", cost_answered: "answered", uptake: "accept" });
+    expect(out.pitch_type).toBe("answered");
+    for (const id of PER_PITCH) { expect(out[id], id).toBe("gated_overwritten"); expect(gated[id], `${id} bench row marked gated`).toBe(true); }
+    expect(gated.pitch_type).toBe(false);
+  });
+  it("a pitch_type escape (insufficient_evidence) closes the same chain", () => {
+    const { out } = run(PU, { pitch_type: "insufficient_evidence", recovery_discussion: "thorough_tailored", cost_discussed: "yes" });
+    for (const id of PER_PITCH) expect(out[id], id).toBe("gated_overwritten");
+  });
+  it("CONTROLS: a real pitch keeps the items open; each middle gate closes only ITS chain (recovery none / cost no)", () => {
+    expect(Object.values(run(PU, { pitch_type: "surgery", recovery_discussion: "adequate", cost_discussed: "yes" }).out).every((o) => o === "answered")).toBe(true);
+    const a = run(PU, { pitch_type: "medication", recovery_discussion: "none", cost_discussed: "yes" }).out;
+    expect(a.recovery_appropriateness).toBe("gated_overwritten");
+    expect(a.cost_answered).toBe("answered");
+    expect(a.uptake).toBe("answered");
+    const b = run(PU, { pitch_type: "medication", recovery_discussion: "adequate", cost_discussed: "no" }).out;
+    expect(b.cost_answered).toBe("gated_overwritten");
+    expect(b.recovery_appropriateness).toBe("answered");
+  });
+  const mk = (id: string, gate?: string, requires?: string[]): QuestionDef => ({ question_id: id, kind: "choice", body: { type: "choice", instructions: "x", criteria: { go: "a", stop: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], ...(gate ? { gate_question_id: gate, gate_requires: requires ?? ["go"] } : {}) }) as unknown as QuestionDef;
+  it("a THREE-LEVEL chain a > b > c, and a FOUR-level chain: closing the root closes every level, whatever the declaration order", () => {
+    const three = [mk("c", "b"), mk("b", "a"), mk("a")];          // dependents declared BEFORE their gates
+    const r3 = run(three, { a: "stop", b: "go", c: "go" });
+    expect(r3.out).toEqual({ a: "answered", b: "gated_overwritten", c: "gated_overwritten" });
+    const four = [mk("d", "c"), mk("c", "b"), mk("b", "a"), mk("a")];
+    expect(run(four, { a: "stop", b: "go", c: "go", d: "go" }).out).toEqual({ a: "answered", b: "gated_overwritten", c: "gated_overwritten", d: "gated_overwritten" });
+    // the middle of the chain closing closes only what is behind it
+    expect(run(three, { a: "go", b: "stop", c: "go" }).out).toEqual({ a: "answered", b: "answered", c: "gated_overwritten" });
+    // all open
+    expect(Object.values(run(three, { a: "go", b: "go", c: "go" }).out)).toEqual(["answered", "answered", "answered"]);
+  });
+  it("a closed ancestor closes the chain even through an UNANSWERED link; the unanswered row itself is not rewritten", () => {
+    const three = [mk("a"), mk("b", "a"), mk("c", "b")];
+    const rows = rowsFor(three); rows[1]!.outcome = "no_answer";
+    applyGates(three, new Map([["a", ch("stop")]]), rows, benchFor(three));
+    // F6: a (the root) is closed-by-answer for b, so b is closed WHATEVER its own outcome, and c behind it is closed with it (b stays no_answer: only answered rows are rewritten)
+    expect(rows.map((r) => r.outcome)).toEqual(["answered", "no_answer", "gated_overwritten"]);
+  });
+});
+
+describe("F6: a closed gate closes its dependents whatever the OUTCOME of the links in between", () => {
+  const ch = (choice: string): JevAnswer => ({ type: "choice", choice, probabilities: { [choice]: 1 }, confidence: 1 });
+  const PU = byId("pitch-uptake").questions;
+  const mkRows = (defs: QuestionDef[], noAnswer: Set<string>): WorkerDecision[] => defs.map((d) => ({ questionId: d.question_id, orderVariant: "derived", outcome: noAnswer.has(d.question_id) ? "no_answer" : "answered", band: "review", evidence: {} }) as unknown as WorkerDecision);
+  const bench = (defs: QuestionDef[]) => defs.map((d) => ({ subject_id: "s", question_id: d.question_id, variant: "derived", kind: "choice", value: "x", confidence: 1 }));
+
+  it("THE REFUTER'S PROBE: pitch_type = no_pitch, recovery_discussion and cost_discussed NO_ANSWER -> recovery_appropriateness and cost_answered are gated_overwritten (rows and bench)", () => {
+    const rows = mkRows(PU, new Set(["recovery_discussion", "cost_discussed"])), b = bench(PU);
+    applyGates(PU, new Map([["pitch_type", ch("no_pitch")]]), rows, b);
+    const out = Object.fromEntries(rows.map((r) => [r.questionId, r.outcome]));
+    expect(out.pitch_type).toBe("answered");
+    expect(out.recovery_discussion).toBe("no_answer");        // not answered, so not rewritten
+    expect(out.cost_discussed).toBe("no_answer");
+    expect(out.recovery_appropriateness).toBe("gated_overwritten");
+    expect(out.cost_answered).toBe("gated_overwritten");
+    for (const id of PU.map((d) => d.question_id).filter((x) => !["pitch_type", "recovery_discussion", "cost_discussed"].includes(x))) expect(out[id], id).toBe("gated_overwritten");
+    expect((b.find((x) => x.question_id === "cost_answered") as { gated?: boolean }).gated).toBe(true);
+  });
+
+  // an independent reference: walk the chain by hand
+  const directClose = (d: QuestionDef, defs: QuestionDef[], ans: Map<string, JevAnswer>): boolean => {
+    const g = ans.get(d.gate_question_id!);
+    if (!g || g.type !== "choice") return false;
+    if (d.gate_requires) return !d.gate_requires.includes(g.choice);
+    return Boolean(defs.find((x) => x.question_id === d.gate_question_id)?.escape_options?.includes(g.choice));
+  };
+  const mulberry = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+
+  it("PROPERTY over every real set: for random answered/no_answer patterns and random answers, NO dependent of a closed gate stays answered, and nothing else is rewritten", () => {
+    let trials = 0, closedSeen = 0;
+    for (const f of P2) {
+      const defs = f.questions;
+      if (!defs.some((d) => d.gate_question_id)) continue;
+      const rnd = mulberry(f.id.length * 7919);
+      for (let t = 0; t < 600; t += 1) {
+        const noAnswer = new Set(defs.filter(() => rnd() < 0.35).map((d) => d.question_id));
+        const ans = new Map<string, JevAnswer>();
+        for (const d of defs) {
+          if (noAnswer.has(d.question_id)) continue;
+          const keys = Object.keys((d.body as { criteria: Record<string, string> }).criteria);
+          ans.set(d.question_id, ch(keys[Math.floor(rnd() * keys.length)]!));
+        }
+        const rows = mkRows(defs, noAnswer), b = bench(defs);
+        applyGates(defs, ans, rows, b);
+        const out = new Map(rows.map((r) => [r.questionId, r.outcome]));
+        const by = new Map(defs.map((d) => [d.question_id, d]));
+        for (const d of defs) {
+          // reference: closed if it or any ancestor is closed by its direct gate's answer
+          let closed = false;
+          for (let cur: QuestionDef | undefined = d, hops = 0; cur?.gate_question_id && hops < 20; cur = by.get(cur.gate_question_id), hops += 1) if (directClose(cur, defs, ans)) { closed = true; break; }
+          const expected = closed && !noAnswer.has(d.question_id) ? "gated_overwritten" : noAnswer.has(d.question_id) ? "no_answer" : "answered";
+          expect(out.get(d.question_id), `${f.id}/${d.question_id} trial ${t}`).toBe(expected);
+          if (closed) closedSeen += 1;
+        }
+        trials += 1;
+      }
+    }
+    expect(trials).toBeGreaterThan(1000);
+    expect(closedSeen).toBeGreaterThan(500);   // the property really exercised closed chains
+  });
+
+  it("G5: a gate with NO gate_requires closes on the gate's own ESCAPE option (and a noul under 0.5); otherwise it stays open", () => {
+    const esc = (id: string, gate?: string): QuestionDef => ({ question_id: id, kind: "choice", body: { type: "choice", instructions: "x", criteria: { yes: "a", no: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], ...(gate ? { gate_question_id: gate } : {}) }) as unknown as QuestionDef;
+    const defs = [esc("a"), esc("b", "a"), esc("c", "b")];
+    const run = (a: JevAnswer) => { const rows = mkRows(defs, new Set()); applyGates(defs, new Map([["a", a]]), rows, bench(defs)); return rows.map((r) => r.outcome); };
+    expect(run(ch("insufficient_evidence"))).toEqual(["answered", "gated_overwritten", "gated_overwritten"]);
+    expect(run(ch("yes"))).toEqual(["answered", "answered", "answered"]);
+    const noul = [{ question_id: "n", kind: "noul", body: { type: "noul", instructions: "x" } }, { question_id: "m", kind: "noul", body: { type: "noul", instructions: "x" }, gate_question_id: "n" }] as unknown as QuestionDef[];
+    const lo = mkRows(noul, new Set()); applyGates(noul, new Map([["n", { type: "noul", noul: 0.2 } as JevAnswer]]), lo, bench(noul));
+    expect(lo.map((r) => r.outcome)).toEqual(["answered", "gated_overwritten"]);
+    const hi = mkRows(noul, new Set()); applyGates(noul, new Map([["n", { type: "noul", noul: 0.8 } as JevAnswer]]), hi, bench(noul));
+    expect(hi.map((r) => r.outcome)).toEqual(["answered", "answered"]);
+  });
+
+  it("a gate cycle does not hang and closes nothing by itself", () => {
+    const x = (id: string, gate: string): QuestionDef => ({ question_id: id, kind: "choice", body: { type: "choice", instructions: "x", criteria: { go: "a", stop: "b", insufficient_evidence: "c" } }, escape_options: ["insufficient_evidence"], gate_question_id: gate, gate_requires: ["go"] }) as unknown as QuestionDef;
+    const defs = [x("p", "q"), x("q", "p")];
+    const rows = mkRows(defs, new Set());
+    expect(() => applyGates(defs, new Map([["p", ch("go")], ["q", ch("go")]]), rows, bench(defs))).not.toThrow();
+    expect(rows.map((r) => r.outcome)).toEqual(["answered", "answered"]);
+  });
+});
+
+describe("F7: the bench scorer's labelled set is the LABELS FILE's, over every outcome", () => {
+  const pt = [{ question_id: "pitch_type", kind: "choice", body: { type: "choice", instructions: "x", criteria: { surgery: "a", medication: "b", no_pitch: "c", insufficient_evidence: "d" } }, escape_options: ["no_pitch", "insufficient_evidence"] }] as unknown as QuestionDef[];
+  const set = { id: "pitch-uptake", version: "v0", sha: "a".repeat(64), use: "consult_rubric" };
+  const dRow = (subject_id: string, value: string) => ({ subject_id, question_id: "pitch_type", variant: "derived", kind: "choice", value, confidence: 0.8 });
+  const out = (subject_id: string, status: "asked" | "abstained" | "too_large" | "no_state" | "failed" | "deferred", rows: ReturnType<typeof dRow>[] = []) => ({ subject_id, status, rows, tokens: 0, calls: 0 });
+  const lab = (subject_id: string, label: string) => ({ subject_id, question_id: "pitch_type", label });
+  const report = (outcomes: ReturnType<typeof out>[], labels: ReturnType<typeof lab>[]) => buildBenchReport({ set, defs: pt, outcomes, labels, mock: false, usdPerToken: 0 }).questions[0]!.vs_labels!;
+
+  it("THE REFUTER'S PROBE: 4 labelled, 1 answered (the rest: Jev omitted, no_locator pre-gate, too large) -> coverage 0.25, not 1.0", () => {
+    const v = report(
+      [out("a", "asked", [dRow("a", "surgery")]), out("b", "asked", []) /* Jev omitted the answer */, out("c", "abstained"), out("d", "too_large")],
+      [lab("a", "surgery"), lab("b", "surgery"), lab("c", "medication"), lab("d", "surgery")],
+    );
+    expect(v).toMatchObject({ n_labeled: 4, n_scored: 1, n_abstained_labeled: 3, coverage: 0.25, accuracy: 1 });
+  });
+  it("an off-menu answer (no derived row) and a subject with no stored data (no_state) are abstains in the denominator too", () => {
+    const v = report([out("a", "asked", [dRow("a", "surgery")]), out("b", "asked", []), out("c", "no_state")], [lab("a", "surgery"), lab("b", "surgery"), lab("c", "surgery")]);
+    expect(v).toMatchObject({ n_labeled: 3, n_scored: 1, coverage: 0.3333 });
+  });
+  it("FAILED, DEFERRED and never-run labelled subjects are listed separately and are NOT in the coverage denominator", () => {
+    const v = report([out("a", "asked", [dRow("a", "surgery")]), out("b", "failed"), out("c", "deferred")], [lab("a", "surgery"), lab("b", "surgery"), lab("c", "surgery"), lab("ghost", "surgery")]);
+    expect(v).toMatchObject({ n_labeled: 1, n_scored: 1, coverage: 1, n_failed_labeled: 1, n_deferred_labeled: 1, n_not_run_labeled: 1 });
+  });
+  it("escape recall is over the SAME full set: a truth-escape subject that was pre-gated or unanswered counts as an abstain (recall 1), one Jev answered does not", () => {
+    const v = report(
+      [out("a", "asked", [dRow("a", "surgery")]), out("b", "abstained"), out("c", "asked", []), out("d", "asked", [dRow("d", "no_pitch")])],
+      [lab("a", "no_pitch"), lab("b", "no_pitch"), lab("c", "insufficient_evidence"), lab("d", "no_pitch")],
+    );
+    expect(v.n_escape_truth).toBe(4);
+    expect(v.escape_recall).toBe(0.75);   // b, c (never answered) and d (Jev chose the escape) abstained; a (Jev said surgery) did not
+  });
+  it("only ANSWERED non-abstained subjects enter accuracy, kappa and the confusion matrix", () => {
+    const v = report([out("a", "asked", [dRow("a", "surgery")]), out("b", "asked", [dRow("b", "medication")]), out("c", "abstained")], [lab("a", "surgery"), lab("b", "surgery"), lab("c", "surgery")]);
+    expect(v.confusion).toEqual({ surgery: { surgery: 1, medication: 1 } });
+    expect(v.accuracy).toBe(0.5);
+    expect(v).toMatchObject({ n_labeled: 3, n_scored: 2, coverage: 0.6667 });
   });
 });

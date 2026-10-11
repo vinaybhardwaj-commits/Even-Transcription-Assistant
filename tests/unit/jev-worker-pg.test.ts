@@ -816,6 +816,166 @@ suite("the Jev worker on postgres:16", () => {
       }
     });
 
+
+    it("C2: a bench subject that ABSTAINS (no locator; patient-side speech too short) or is TOO LARGE writes 0 jev_decision rows, and makes no call", async () => {
+      await reset(); env({ ...ON });
+      await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id IN ('pitch-uptake', 'chair-affect')`;
+      const countDecisions = async () => (await rows`SELECT count(*)::int AS n FROM jev_decision WHERE question_set_id IN ('pitch-uptake', 'chair-affect')`)[0]!.n;
+      // (1) the REAL pitch builder with no locator: abstain no_locator (no DB read, no call)
+      registerP2Uses();
+      const real = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: ["ck#p1", "ck#p2"] });
+      expect(real.counts).toMatchObject({ subjects: 2, abstained: 2, asked: 0, calls: 0 });
+      expect(real.abstain_reasons).toEqual({ no_locator: 2 });
+      expect(await countDecisions()).toBe(0);
+      // (2) a builder that abstains for short patient-side speech, and one over the token budget
+      _clearUsesForTests();
+      registerUse({ use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: async () => [], build: async (id) =>
+        (id === "c_short" ? { abstain: "patient_side_speech_lt_3_turns" } : id === "c_big" ? { tooLarge: true, bytes: 250_000 } : { state: { transcript: "x" }, evidence: { consult_key: id }, lane: "text" as const }) });
+      H.script = answer({});
+      const rep = await runBench({ use: "consult_rubric", setId: "chair-affect", version: "v0", subjects: ["c_short", "c_big"] });
+      expect(rep.counts).toMatchObject({ subjects: 2, abstained: 1, too_large: 1, asked: 0, calls: 0 });
+      expect(rep.abstain_reasons).toEqual({ patient_side_speech_lt_3_turns: 1, state_too_large: 1 });
+      expect(H.calls.length).toBe(0);
+      expect(await countDecisions()).toBe(0);
+      // (3) the same two through the jev_ask BENCH job
+      const job = await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "bench", set_id: "chair-affect", version: "v0", subject_ids: ["c_short", "c_big"] }));
+      expect(job.out).toMatchObject({ kind: "done", result: { subjects: 2, decisions: 0, calls: 0 } });
+      expect(await countDecisions()).toBe(0);
+      expect((await rows`SELECT count(*)::int AS n FROM jev_call`)[0]!.n).toBe(0);
+      // control: the SAME subjects in SHADOW (a ratified set) DO write their typed rows, so the zero above is the bench rule and not an artefact
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow', ratified_by = 'test', ratified_at = now() WHERE id = 'chair-affect'`;
+      try {
+        env({ JEV_USE_CONSULT_RUBRIC: "1" });
+        await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "shadow", set_id: "chair-affect", version: "v0", subject_ids: ["c_short", "c_big"] }));
+        const shadow = await rows`SELECT subject_id, outcome FROM jev_decision WHERE question_set_id = 'chair-affect' AND order_variant = 'derived' ORDER BY subject_id, question_id`;
+        expect(shadow.length).toBe(8);   // 2 subjects x 4 questions
+        expect(new Set(shadow.map((x) => `${x.subject_id}/${x.outcome}`))).toEqual(new Set(["c_short/no_answer", "c_big/state_too_large"]));
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'draft', ratified_by = NULL, ratified_at = NULL WHERE id = 'chair-affect'`;
+        await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'chair-affect'`;
+      }
+    });
+
+
+    it("F1: with u10_kind = empty_room the bench scores NO cand row (the gate closed it); the raw answers are not in the accuracy", async () => {
+      await reset(); registerUse(fakeTimelineUse()); env(TL_ON);
+      H.script = answer({ u10_kind: "empty_room", u10_end_row: "cand_02" });
+      const rep = await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1", "tl_2"], labels: [
+        { subject_id: "tl_1", question_id: "u10_end_row", label: "t+05:00" }, { subject_id: "tl_2", question_id: "u10_end_row", label: "t+05:00" }] });
+      for (const id of ["u10_end_row", "u10_end_signal", "u10_start_offset", "u10_walk_in"]) {
+        const qq = rep.questions.find((x) => x.question_id === id)!;
+        expect(qq.n_gated, id).toBe(2);
+        expect(qq.distribution, id).toEqual({ gated_overwritten: 2 });
+      }
+      const er = rep.questions.find((x) => x.question_id === "u10_end_row")!;
+      expect(er.vs_labels).toMatchObject({ n_labeled: 2, n_scored: 0, coverage: 0 });
+      expect(Object.keys(er.vs_labels!.confusion)).toEqual([]);
+      expect(rep.questions.find((x) => x.question_id === "u10_kind")!.distribution).toEqual({ empty_room: 2 });   // the gate question itself is scored as answered
+      // and a kind that keeps the gate open DOES score the end row (the control)
+      await H.pg!.sql`DELETE FROM jev_call`;
+      H.script = answer({ u10_kind: "consultation", u10_end_row: "cand_02" });
+      const open = await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1"], labels: [{ subject_id: "tl_1", question_id: "u10_end_row", label: "t+05:00" }] });
+      expect(open.questions.find((x) => x.question_id === "u10_end_row")!.vs_labels).toMatchObject({ n_scored: 1, accuracy: 1 });
+    });
+
+    it("F2: the subjects-file hint is a LABEL only: it never reaches the state Jev reads, and it scores pitch_type", async () => {
+      await reset(); env({ ...ON });
+      const lines = Array.from({ length: 14 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+      const fake = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+      const { buildPitchState } = await import("@/lib/jev/worker/builders/locators");
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: (id) => buildPitchState(id, fake) });
+      H.script = answer({ pitch_type: "surgery" });
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: [{ subject_id: "ckh#p1", at_s: 60, hint: "HINT-SURGERY-ZZ" }, { subject_id: "ckh#p2", at_s: 120, hint: "surgery" }] });
+      expect(H.calls.length).toBeGreaterThan(0);
+      for (const c of H.calls) { expect(JSON.stringify(c.state)).not.toMatch(/HINT-SURGERY-ZZ|suggestion_type_hint|"hint"/); expect(JSON.stringify(c.state)).not.toMatch(/surgery/i); }
+      // the hint scored pitch_type: p2's label "surgery" matched Jev's answer, p1's odd label did not
+      const pt = rep.questions.find((x) => x.question_id === "pitch_type")!;
+      expect(pt.vs_labels).toMatchObject({ n_labeled: 2, n_scored: 2 });
+      expect(pt.vs_labels!.accuracy).toBeCloseTo(0.5, 3);
+    });
+
+
+    it("F5: pitch_type = no_pitch closes the WHOLE chain in the bench AND in shadow (recovery_appropriateness and cost_answered included)", async () => {
+      await reset(); env({ ...ON });
+      const lines = Array.from({ length: 14 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+      const fake = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+      const { buildPitchState, setLocator, clearLocators } = await import("@/lib/jev/worker/builders/locators");
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: (id) => buildPitchState(id, fake) });
+      const probe = answer({ pitch_type: "no_pitch", recovery_discussion: "adequate", cost_discussed: "yes", recovery_appropriateness: "appropriate", cost_answered: "answered", uptake: "accept" });
+      const PER_PITCH = ["uptake", "pb_benefits", "pb_risk_any", "pb_real_complication", "pb_alternatives", "pb_timing", "recovery_discussion", "recovery_appropriateness", "urgency", "decider", "teach_back", "cost_discussed", "cost_answered"];
+      // BENCH
+      H.script = probe;
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: [{ subject_id: "ckf#p1", at_s: 60 }] });
+      for (const id of PER_PITCH) { const qq = rep.questions.find((x) => x.question_id === id)!; expect(qq.n_gated, `bench ${id}`).toBe(1); expect(qq.distribution, `bench ${id}`).toEqual({ gated_overwritten: 1 }); }
+      expect(rep.questions.find((x) => x.question_id === "pitch_type")!.distribution).toEqual({ no_pitch: 1 });
+      // SHADOW (a test-ratified set)
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow', ratified_by = 'test', ratified_at = now() WHERE id = 'pitch-uptake'`;
+      try {
+        env({ JEV_USE_CONSULT_RUBRIC: "1" });
+        clearLocators(); setLocator("ckf#p2", { at_ms: 60_000 });
+        H.script = probe;
+        await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "shadow", set_id: "pitch-uptake", version: "v0", subject_ids: ["ckf#p2"] }));
+        const d = await rows`SELECT question_id, outcome, band FROM jev_decision WHERE subject_id = 'ckf#p2' AND order_variant = 'derived'`;
+        expect(d.find((x) => x.question_id === "pitch_type")!.outcome).toBe("answered");
+        for (const id of PER_PITCH) expect(d.find((x) => x.question_id === id), `shadow ${id}`).toMatchObject({ outcome: "gated_overwritten", band: "abstain" });
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'draft', ratified_by = NULL, ratified_at = NULL WHERE id = 'pitch-uptake'`;
+        await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'pitch-uptake'`;
+        clearLocators();
+      }
+    });
+
+
+    it("F6: pitch_type = no_pitch with recovery_discussion and cost_discussed UNANSWERED still closes recovery_appropriateness and cost_answered, in shadow AND bench", async () => {
+      await reset(); env({ ...ON });
+      const lines = Array.from({ length: 14 }, (_, i) => ({ t_ms: i * 20_000, speaker: (i % 2 ? "other" : "doctor") as "other" | "doctor", speaker_idx: 0, text: `line ${i}` }));
+      const fake = { read: async () => ({ ok: true as const, data: { lines, source: "window_english" as const } }) };
+      const { buildPitchState, setLocator, clearLocators } = await import("@/lib/jev/worker/builders/locators");
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: (id) => buildPitchState(id, fake) });
+      // Jev answers pitch_type = no_pitch and leaves recovery_discussion and cost_discussed OUT of its answers (no_answer)
+      const probe = (req: { questions: Record<string, { type: string; criteria?: Record<string, string> }> }) => {
+        const r = answer({ pitch_type: "no_pitch", recovery_appropriateness: "appropriate", cost_answered: "answered" })(req) as { answers: Record<string, unknown> };
+        delete r.answers.recovery_discussion; delete r.answers.cost_discussed;
+        return r;
+      };
+      H.script = probe;
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: [{ subject_id: "ckg#p1", at_s: 60 }] });
+      for (const id of ["recovery_appropriateness", "cost_answered"]) { const qq = rep.questions.find((x) => x.question_id === id)!; expect(qq.n_gated, `bench ${id}`).toBe(1); expect(qq.distribution, `bench ${id}`).toEqual({ gated_overwritten: 1 }); }
+      await H.pg!.sql`UPDATE jev_question_set SET status = 'shadow', ratified_by = 'test', ratified_at = now() WHERE id = 'pitch-uptake'`;
+      try {
+        env({ JEV_USE_CONSULT_RUBRIC: "1" });
+        clearLocators(); setLocator("ckg#p2", { at_ms: 60_000 });
+        H.script = probe;
+        await runJob(parseJevAskArgs({ use: "consult_rubric", mode: "shadow", set_id: "pitch-uptake", version: "v0", subject_ids: ["ckg#p2"] }));
+        const d = await rows`SELECT question_id, outcome FROM jev_decision WHERE subject_id = 'ckg#p2' AND order_variant = 'derived'`;
+        expect(d.find((x) => x.question_id === "recovery_discussion")!.outcome).toBe("no_answer");
+        expect(d.find((x) => x.question_id === "cost_discussed")!.outcome).toBe("no_answer");
+        expect(d.find((x) => x.question_id === "recovery_appropriateness")!.outcome).toBe("gated_overwritten");
+        expect(d.find((x) => x.question_id === "cost_answered")!.outcome).toBe("gated_overwritten");
+        expect(d.find((x) => x.question_id === "pitch_type")!.outcome).toBe("answered");
+      } finally {
+        await H.pg!.sql`UPDATE jev_question_set SET status = 'draft', ratified_by = NULL, ratified_at = NULL WHERE id = 'pitch-uptake'`;
+        await H.pg!.sql`DELETE FROM jev_decision WHERE question_set_id = 'pitch-uptake'`;
+        clearLocators();
+      }
+    });
+
+
+    it("F7: through runBench, labelled subjects that abstain, are too large or get no Jev answer lower COVERAGE (4 labelled, 1 answered -> 0.25)", async () => {
+      await reset(); env({ ...ON });
+      registerUse({ use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: async () => [], build: async (id) =>
+        id === "f7_abstain" ? { abstain: "no_locator" } : id === "f7_big" ? { tooLarge: true, bytes: 99_999 } : { state: { marker: id }, evidence: { consult_key: id }, lane: "text" as const } });
+      H.script = (req) => {
+        const r = answer({ pitch_type: "surgery" })(req) as { answers: Record<string, unknown> };
+        if ((req.state as { marker?: string }).marker === "f7_omit") delete r.answers.pitch_type;   // Jev leaves pitch_type unanswered for this subject
+        return r;
+      };
+      const rep = await runBench({ use: "consult_rubric", setId: "pitch-uptake", version: "v0", subjects: ["f7_ok", "f7_omit", "f7_abstain", "f7_big"],
+        labels: ["f7_ok", "f7_omit", "f7_abstain", "f7_big"].map((subject_id) => ({ subject_id, question_id: "pitch_type", label: "surgery" })) });
+      const v = rep.questions.find((x) => x.question_id === "pitch_type")!.vs_labels!;
+      expect(v).toMatchObject({ n_labeled: 4, n_scored: 1, n_abstained_labeled: 3, coverage: 0.25, accuracy: 1 });
+    });
+
     it("the P2 uses are registered in production code (one per set), and registering twice is harmless", () => {
       _clearUsesForTests(); registerP2Uses(); registerP2Uses();
       expect([...new Set(["u10-timeline", "encounter-end", "stt-quality", "stt-pick", "pitch-detect", "pitch-uptake", "chair-affect", "doubt"])].length).toBe(8);
