@@ -56,7 +56,7 @@ const keysDeep = (o: unknown, out = new Set<string>()): Set<string> => {
 describe("registration", () => {
   it("is published once, read scope, listed for every profile with a short brief", () => {
     expect(PUBLISHED_TOOLS.filter((t) => t.name === "scribe_timbre")).toHaveLength(1);
-    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 1]!.name).toBe("scribe_timbre"); // appended, never inserted
+    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 2]!.name).toBe("scribe_timbre"); // appended, never inserted; scribe_freescript follows it
     expect(CALLABLE_TOOLS.get("scribe_timbre")!.scope).toBe("read");
     expect(LAB_TOOLS.some((t) => t.name === "scribe_timbre")).toBe(true);
     for (const p of ["operator", "lab"] as const) expect(toolsForProfile(p).map((t) => t.name)).toContain("scribe_timbre");

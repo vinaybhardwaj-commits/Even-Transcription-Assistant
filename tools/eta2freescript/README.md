@@ -5,9 +5,10 @@ track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.2` art
 (= `pulsepb.GPLlmExtraction`), `note_text` under the 11 FreeScript headings, per-item `provenance`, a
 `completion_required` list for the doctor, and a `clip_boundary` verdict.
 
-**Offline tool. Not wired to production.** It reads a local folder and writes a local folder. Nothing is pushed to Pulse,
-the app or any database, and no production code path or migration is touched. Only the model calls leave the process,
-and `phi_guard.py` allows nothing but Bedrock Anthropic Claude on the `converse` route.
+The pipeline runs **off Vercel**, on the box. It reads a local folder. Only the model calls leave the process, and
+`phi_guard.py` allows nothing but Bedrock Anthropic Claude on the `converse` route. A Scribe door
+(`scribe_freescript`, `POST /api/freescript/ingest`, migration 0156) can store the artifact afterwards. That door is
+**off unless `ETA_FREESCRIPT` is on** (unset = off). Transcript text is not stored.
 
 Ported from the v1 prototype (`encounter-to-rx`, 35-consult scale-up, 11 Oct 2026). The prototype's v0 and v1 prompts
 are kept unchanged under `prompts/` for reproducibility. The vendored w38 validator, schema and examples sit unchanged
@@ -127,6 +128,15 @@ python -m tools.eta2freescript run --all --data $F/consults --client replay --re
 python -m tools.eta2freescript eval --data $F/consults --client replay --replay $F/model --out /tmp/e2fs --workers 1
 python -m tools.eta2freescript aggregate --out /tmp/e2fs
 ```
+
+## Scribe door
+
+Off unless `ETA_FREESCRIPT` is on. The Python pipeline still does not run on Vercel.
+
+- `scribe_freescript` `action=read` with one selector (`encounter_id` or `consult_uid`, `room`+`date`, or `doctor_uid8`+range) returns the stored artifact, `completion_required` and the validator status.
+- `scribe_freescript` `action=run` (needs invoke) queues a `freescript` job. The box drains it; the Vercel step only waits.
+- `POST /api/freescript/ingest` stores one result (HMAC `FREESCRIPT_INGEST_SECRET`, same shape as the Timbre ingest). A transcript-shaped field is refused.
+- `python -m tools.eta2freescript.nightly run` pulls the day's consults that have a Sarvam transcript and a role track, runs the pipeline and posts. See `NIGHTLY.md`.
 
 ## The `completion_required` contract
 

@@ -97,6 +97,8 @@ export const JOB_ERROR_CODES = [
   "track_missing",
   "consult_batch_timeout",
   "duration_unknown",
+  // freescript: the box did not post an artifact before the wait elapsed
+  "box_timeout",
   // the stubs
   "not_implemented",
 ] as const;
