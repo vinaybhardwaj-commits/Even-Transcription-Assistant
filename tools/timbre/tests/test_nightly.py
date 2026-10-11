@@ -141,6 +141,7 @@ def test_prepared_parts_flow(tmp_path, monkeypatch):
     assert nightly.run("2026-10-10", cfg, runner=runner, fetch=lambda *a: body, preparer=preparer) == 1  # fake pipeline fails -> nothing stored
     cmd = seen["cmd"]
     assert "--r2" not in cmd and cmd[cmd.index("--audio-dir") + 1].endswith("/prep/audio") and cmd[cmd.index("--voiceprints") + 1].endswith("/prep/voiceprints.json")
+    assert cmd[cmd.index("--embeddings-dir") + 1].endswith("/prep/emb") and cmd[cmd.index("--slot-embeddings-dir") + 1].endswith("/prep/slots")
     work = Path(cmd[cmd.index("--out") + 1]).parent
     clip = json.loads((work / "clips.jsonl").read_text().splitlines()[0])
     assert clip["clip_id"] == "c1-s0" and clip["consult_uid"] == "c1" and clip["offset_ms"] == 120_000 and clip["diarize_ref"] == "bw_tok_0_primary.nlp"

@@ -12,6 +12,7 @@ the CONSULT cutter and has none of these, so this module builds them:
   counted as ``no_diarization`` in the run scope and not stored (it is not "no patient", and never "neutral").
 * Voiceprints: the clinician centroid set (``[{pulse_doctor_uid, b64}]``, base64 float32[192] ECAPA) keyed by the first 8
   characters of the Pulse doctor uid (= ``doctor_uid8``).
+* Frame embeddings (``emb/``): ECAPA every 0.5 s (1.5 s windows), aligned to the Nemotron frames, for embedding purity.
 * Slot embeddings: per speaker column, ECAPA over up to 12 of its longest exclusive runs (>= 1.5 s, 3 s centre crops),
   the same recipe as the T-8 Nemotron study (prep_slots).
 
@@ -125,6 +126,28 @@ def slot_embeddings(probs: np.ndarray, frame_ms: float, wav: np.ndarray, embed) 
     return emb
 
 
+def frame_embeddings(wav: np.ndarray, n_frames: int, frame_ms: float, embed, *, win_s: float = 1.5, hop_s: float = 0.5, batch: int = 64) -> np.ndarray:
+    """(n_frames, 192) float32: ECAPA over win_s windows every hop_s; each Nemotron frame takes its nearest window's vector.
+
+    The pipeline's embedding purity (patient vs doctor cosine per frame) needs frame-aligned embeddings; this is the
+    coarse, frame-aligned version (hop_s resolution), not a per-10-ms model.
+    """
+    total_s = len(wav) / SR
+    centers = np.arange(win_s / 2, max(total_s - win_s / 2, win_s / 2) + 1e-9, hop_s)
+    chunks = []
+    for c in centers:
+        a = int(max(0.0, c - win_s / 2) * SR)
+        chunks.append(np.ascontiguousarray(wav[a: a + int(win_s * SR)]))
+    vecs = []
+    for i in range(0, len(chunks), batch):
+        part = [x if len(x) >= int(0.5 * SR) else np.pad(x, (0, int(0.5 * SR) - len(x))) for x in chunks[i: i + batch]]
+        vecs.append(np.asarray(embed(part), dtype=np.float32))
+    table = np.concatenate(vecs, axis=0) if vecs else np.zeros((1, 192), dtype=np.float32)
+    t = (np.arange(int(n_frames)) + 0.5) * frame_ms / 1000.0
+    idx = np.clip(np.rint((t - win_s / 2) / hop_s).astype(int), 0, len(table) - 1)
+    return table[idx]
+
+
 def ecapa_embedder(model_dir: str, device: str = "cpu"):
     import torch
     from speechbrain.inference.speaker import EncoderClassifier
@@ -145,8 +168,8 @@ def ecapa_embedder(model_dir: str, device: str = "cpu"):
     return embed
 
 
-def prepare(consults: list[dict], work: Path, *, embed, fetch_audio=None, fetch_nlp=None, list_windows=None) -> Prepared:
-    """Writes work/audio/<clip>.wav, work/nlp/<clip>.nlp, work/slots/<clip>.npy for every scored part."""
+def prepare(consults: list[dict], work: Path, *, embed, fetch_audio=None, fetch_nlp=None, list_windows=None, decode=decode_16k) -> Prepared:
+    """Writes work/audio/<clip>.wav, work/nlp/<clip>.nlp, work/slots/<clip>.npy, work/emb/<clip>.npy for every scored part."""
     import soundfile as sf
 
     from tools.timbre.nemotron_probs import NlpError, load_nlp, nlp_object_key, pack_nlp
@@ -173,7 +196,7 @@ def prepare(consults: list[dict], work: Path, *, embed, fetch_audio=None, fetch_
                                 pass
                 return found
 
-    for sub in ("audio", "nlp", "slots"):
+    for sub in ("audio", "nlp", "slots", "emb"):
         (work / sub).mkdir(parents=True, exist_ok=True)
     out = Prepared()
     have: dict[str, set[int]] = {}
@@ -197,7 +220,7 @@ def prepare(consults: list[dict], work: Path, *, embed, fetch_audio=None, fetch_
             out.no_diarization.append(uid)
             continue
         try:
-            wav = decode_16k(fetch_audio(c["clip_r2_key"]))
+            wav = decode(fetch_audio(c["clip_r2_key"]))
         except Exception:  # noqa: BLE001 — counted; the consult is not stored
             out.audio_errors.append(uid)
             continue
@@ -229,6 +252,7 @@ def prepare(consults: list[dict], work: Path, *, embed, fetch_audio=None, fetch_
             sf.write(work / "audio" / f"{clip_id}.wav", seg, SR, subtype="PCM_16")
             (work / "nlp" / f"{clip_id}.nlp").write_bytes(pack_nlp(sub, frame_ms=fm))
             np.save(work / "slots" / f"{clip_id}.npy", slot_embeddings(sub, fm, seg, embed))
+            np.save(work / "emb" / f"{clip_id}.npy", frame_embeddings(seg, sub.shape[0], fm, embed))
             out.clips.append({**c, "clip_id": clip_id, "offset_ms": a - t0, "duration_s": round(dur_s, 3), "nemotron_ref": nlp_object_key(tok, ws).rsplit("/", 1)[-1]})
         if not any(x["consult_uid"] == uid for x in out.clips):
             out.no_diarization.append(uid)

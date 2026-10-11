@@ -15,5 +15,5 @@
   "prepare": true,
   "centroids": "/home/eta/timbre-nightly/centroids.json",
   "ecapa_model": "/home/eta/eta-data/voice-linkage/models/ecapa",
-  "ecapa_device": "cpu"
+  "ecapa_device": "cuda:0"
 }

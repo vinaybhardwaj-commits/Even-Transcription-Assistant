@@ -183,7 +183,7 @@ def pipeline_cmd(cfg: dict, sessions: Path, out: Path, prep: Path | None = None)
         if cfg.get(key):
             cmd += [flag, str(cfg[key])]
     if prep is not None:  # nightly_prepare outputs replace the configured dirs
-        for flag, sub in (("--audio-dir", "audio"), ("--nemotron-dir", "nlp"), ("--slot-embeddings-dir", "slots")):
+        for flag, sub in (("--audio-dir", "audio"), ("--nemotron-dir", "nlp"), ("--slot-embeddings-dir", "slots"), ("--embeddings-dir", "emb")):
             if flag in cmd:
                 i = cmd.index(flag)
                 del cmd[i:i + 2]

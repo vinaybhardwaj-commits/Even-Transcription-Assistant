@@ -70,7 +70,8 @@ def test_prepare_end_to_end_with_fakes(tmp_path):
     nope = {**c, "consult_uid": "cu_fake_2", "session_id": "bs_toknone"}
     out = npp.prepare([c, nope], tmp_path, embed=lambda ch: np.ones((len(ch), 192)) / np.sqrt(192),
                       fetch_audio=lambda key: buf.getvalue(), fetch_nlp=lambda key: blob,
-                      list_windows=lambda tok: {ws} if tok == "tokfake1" else set())
+                      list_windows=lambda tok: {ws} if tok == "tokfake1" else set(),
+                      decode=lambda blob: sf.read(io.BytesIO(blob), dtype="float32")[0])  # CI has no ffmpeg
     assert [p["clip_id"] for p in out.clips] == ["cu_fake_1-s0"]
     part = out.clips[0]
     assert part["offset_ms"] == 0 and part["duration_s"] == pytest.approx(120.0, abs=0.1) and part["nemotron_ref"] == f"bw_tokfake1_{ws}_primary.nlp"
@@ -80,6 +81,23 @@ def test_prepare_end_to_end_with_fakes(tmp_path):
     ld = load_nlp(tmp_path / "nlp" / "cu_fake_1-s0.nlp", expected_duration_s=part["duration_s"], tol_s=6.0)
     assert ld.probs.shape[0] == int(120_000 / fm) and ld.probs.shape[1] == 2
     assert np.load(tmp_path / "slots" / "cu_fake_1-s0.npy").shape == (2, 192)
+    assert np.load(tmp_path / "emb" / "cu_fake_1-s0.npy").shape == (int(120_000 / fm), 192)
+
+
+def test_frame_embeddings_align_to_frames():
+    wav = np.zeros(10 * npp.SR, dtype=np.float32)
+    seen = []
+
+    def embed(chunks):
+        out = np.zeros((len(chunks), 192))
+        for i in range(len(chunks)):
+            out[i, len(seen) % 192] = 1.0
+            seen.append(1)
+        return out
+
+    emb = npp.frame_embeddings(wav, 1000, 10.0, embed)
+    assert emb.shape == (1000, 192) and len(seen) == 18  # centres 0.75 .. 9.25 s every 0.5 s
+    assert emb[0].argmax() == 0 and emb[-1].argmax() == 17
 
 
 def test_store_offset_ms_makes_times_consult_relative():
