@@ -304,7 +304,7 @@ private func refusal(_ result: Result<FleetVerifier.Accepted, FleetRefusal>) -> 
   }
 
   @Test func verbsOutsideTheCatalogueAreRefused() {
-    for verb in ["update_bundle", "rollback_bundle", "breakglass_enable", "chrome_relaunch", "bash", "exec", "rotate_identity", "x"] {
+    for verb in ["update_bundle", "rollback_bundle", "breakglass_enable", "kill_chrome", "bash", "exec", "rotate_identity", "x"] {
       #expect(refusal(server.verify(server.envelope(verb: verb))) == .verbNotAllowed, "\(verb)")
     }
   }
@@ -314,21 +314,25 @@ private func refusal(_ result: Result<FleetVerifier.Accepted, FleetRefusal>) -> 
     #expect(refusal(server.verify(server.envelope(verb: "../etc/passwd"))) == .malformed)
   }
 
-  @Test func theCatalogueIsTheFifteenAndNothingElse() {
+  @Test func theCatalogueIsTheTwentyAndNothingElse() {
     #expect(
       Set(FleetVerb.allCases.map(\.rawValue))
         == [
           "helper_status", "collect_diag", "report_diag", "list_audio_inputs", "select_audio_input", "coreaudiod_reset",
           "usb_reseat", "self_test", "restart_recorder", "reload_launchagent", "pieces_inventory", "pieces_reupload",
           "wake", "pmset_enforce", "schedule_poweron",
+          // 0.1.36
+          "chrome_policy_apply", "chrome_relaunch", "open_pulse", "policy_cycle", "retire_legacy",
         ])
     // PROTOCOL §8.3: who runs what, and which are privileged.
     let helperVerbs: Set<FleetVerb> = [
       .helperStatus, .collectDiag, .coreaudiodReset, .usbReseat, .restartRecorder, .reloadLaunchagent, .wake, .pmsetEnforce,
-      .schedulePoweron,
+      .schedulePoweron, .chromePolicyApply, .chromeRelaunch, .openPulse, .policyCycle, .retireLegacy,
     ]
     #expect(Set(FleetVerb.allCases.filter(\.runsOnHelper)) == helperVerbs)
-    #expect(Set(FleetVerb.allCases.filter(\.isPrivileged)) == [.coreaudiodReset, .usbReseat, .restartRecorder, .reloadLaunchagent])
+    #expect(
+      Set(FleetVerb.allCases.filter(\.isPrivileged))
+        == [.coreaudiodReset, .usbReseat, .restartRecorder, .reloadLaunchagent, .chromeRelaunch, .policyCycle])
   }
 
   @Test func closedParams() {

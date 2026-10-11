@@ -88,6 +88,8 @@ public enum FleetRefusal: String, Error, Equatable, Sendable {
   case sessionOpen = "session_open"
   case noConsoleUser = "no_console_user"
   case clinicHoursNeedsApproval = "clinic_hours_needs_approval"
+  /// 0.1.36: Chrome is never restarted 07:30-21:30 IST, approval or not.
+  case clinicHoursNoChromeRestart = "clinic_hours_no_chrome_restart"
   case rateLimited = "rate_limited"
   case killSwitch = "kill_switch"
 }

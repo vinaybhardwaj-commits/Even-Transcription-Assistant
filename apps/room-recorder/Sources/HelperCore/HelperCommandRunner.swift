@@ -27,6 +27,8 @@ public final class HelperCommandRunner: @unchecked Sendable {
   private let tools: SystemTools
   private let power: PowerPolicy
   private let watchdog: AppWatchdog?
+  private let chrome: ChromePolicyReconciler?
+  private let retirement: LegacyRetirement?
   private let statePath: String
   private let powerTimePath: String
   private let safeMode: Bool
@@ -35,7 +37,8 @@ public final class HelperCommandRunner: @unchecked Sendable {
 
   public init(
     serverKeys: [String: Data] = FleetServerKeys.resolve(), env: HelperEnvironment, tools: SystemTools,
-    watchdog: AppWatchdog? = nil, statePath: String,
+    watchdog: AppWatchdog? = nil, chrome: ChromePolicyReconciler? = nil, retirement: LegacyRetirement? = nil,
+    statePath: String,
     powerTimePath: String = HelperIdentity.supportDirectory + "/" + HelperPaths.powerTimeFile, safeMode: Bool = false,
     log: @escaping @Sendable (String) -> Void
   ) {
@@ -44,6 +47,8 @@ public final class HelperCommandRunner: @unchecked Sendable {
     self.tools = tools
     self.power = PowerPolicy(tools: tools)
     self.watchdog = watchdog
+    self.chrome = chrome
+    self.retirement = retirement
     self.statePath = statePath
     self.powerTimePath = powerTimePath
     self.safeMode = safeMode
@@ -196,6 +201,23 @@ public final class HelperCommandRunner: @unchecked Sendable {
       // Remember the time, root-only, so the 15-minute re-assertion keeps THIS time and not the default.
       PowerPolicy.saveStoredTime(time, at: powerTimePath)
       return HelperCommandOutcome(.ok, detail: ["power_schedule": .string(schedule)])
+    case .chromePolicyApply:
+      guard let chrome else { return HelperCommandOutcome(.unsupported, reason: "chrome_policy_not_available") }
+      guard let config = ChromePolicyConfig(params: params) else { return HelperCommandOutcome(.refused, reason: FleetRefusal.badParams.rawValue) }
+      return chrome.apply(config)
+    case .chromeRelaunch:
+      guard let chrome else { return HelperCommandOutcome(.unsupported, reason: "chrome_policy_not_available") }
+      return chrome.relaunch(profile: params.raw["profile"]?.stringValue)
+    case .openPulse:
+      guard let chrome else { return HelperCommandOutcome(.unsupported, reason: "chrome_policy_not_available") }
+      guard let profile = params.raw["profile"]?.stringValue else { return HelperCommandOutcome(.refused, reason: FleetRefusal.badParams.rawValue) }
+      return chrome.openPulse(profile: profile)
+    case .policyCycle:
+      guard let chrome else { return HelperCommandOutcome(.unsupported, reason: "chrome_policy_not_available") }
+      return chrome.cycle(profile: params.raw["profile"]?.stringValue)
+    case .retireLegacy:
+      guard let retirement else { return HelperCommandOutcome(.unsupported, reason: "retire_not_available") }
+      return retirement.retire(purgeSecrets: params.raw["purge_secrets"]?.boolValue == true)
     case .reportDiag, .listAudioInputs, .selectAudioInput, .selfTest, .piecesInventory, .piecesReupload:
       return HelperCommandOutcome(.refused, reason: FleetRefusal.verbNotAllowed.rawValue)
     }

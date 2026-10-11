@@ -279,11 +279,29 @@ import Testing
     #expect(!tools.calls.contains { $0.contains("autologin") || $0.contains("sh -c") || $0.contains("kcpassword") })
   }
 
+  @Test func sudoAndKillallAreNamedInChromePolicyAndNowhereElseInTheHelper() throws {
+    let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("Sources")
+    for directory in ["HelperCore", "room-recorder-helper"] {
+      let folder = sources.appendingPathComponent(directory)
+      for name in try FileManager.default.contentsOfDirectory(atPath: folder.path) where name.hasSuffix(".swift") {
+        let text = try String(contentsOf: folder.appendingPathComponent(name), encoding: .utf8)
+        let usesSudo = text.contains("\"/usr/bin/sudo\"")
+        #expect(!usesSudo || ["ChromePolicy.swift", "HelperSystem.swift"].contains(name), "\(name) names sudo")
+      }
+    }
+  }
+
   @Test func theRealToolRunnerRefusesAnythingNotOnItsList() {
     let real = ProcessSystemTools()
     #expect(real.run("/bin/sh", ["-c", "true"]) == ToolResult(status: 127, output: "not allowed"))
-    #expect(real.run("/usr/bin/sudo", ["true"]).status == 127)
-    #expect(ProcessSystemTools.allowed == ["/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps"])
+    #expect(real.run("/usr/bin/su", ["-c", "true"]).status == 127)
+    #expect(real.run("/bin/bash", ["-c", "true"]).status == 127)
+    // 0.1.36 added three, for Chrome policy (#44): killall (cfprefsd), ioreg (HID idle) and sudo (so Chrome never starts as root).
+    #expect(
+      ProcessSystemTools.allowed == [
+        "/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps", "/usr/bin/killall", "/usr/sbin/ioreg", "/usr/bin/sudo",
+      ])
     #expect(real.run("/usr/sbin/chown", ["0:0", "/tmp/x"]).status == 127, "the helper cannot chown anything")
   }
 }

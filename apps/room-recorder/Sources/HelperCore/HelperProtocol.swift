@@ -12,6 +12,9 @@ public enum HelperVerb: String, CaseIterable, Sendable {
   case runAppVerb
   case requestBundleUpdate
   case runSignedCommand
+  /// 0.1.36 (#47): the app asks for the next batch of kiosk-health events, and reports what the sink answered.
+  case kioskBatch
+  case kioskReport
 }
 
 /// The app-side catalogue `runAppVerb` may name: the bench verbs the app already runs, minus the
@@ -33,6 +36,9 @@ public enum HelperCommand: Equatable, Sendable {
   case runAppVerb(AppVerb, params: [String: String])
   case requestBundleUpdate
   case runSignedCommand(envelope: String, deviceID: String, machine: String)
+  case kioskBatch
+  /// `status` 0 = no HTTP answer (a transport error). `body` is the sink's reply, reduced to what the helper reads.
+  case kioskReport(batchID: String, status: Int, reason: String, body: String)
 }
 
 public enum HelperRefusal: String, Error, Equatable, Sendable {
@@ -57,6 +63,10 @@ public enum HelperCodec {
     var envelope: String?
     var deviceID: String?
     var machine: String?
+    var batchID: String?
+    var status: Int?
+    var reason: String?
+    var body: String?
   }
 
   public static func encode(_ command: HelperCommand) throws -> Data {
@@ -73,6 +83,13 @@ public enum HelperCodec {
       wire.envelope = envelope
       wire.deviceID = deviceID
       wire.machine = machine
+    case .kioskBatch: wire.verb = HelperVerb.kioskBatch.rawValue
+    case .kioskReport(let batchID, let status, let reason, let body):
+      wire.verb = HelperVerb.kioskReport.rawValue
+      wire.batchID = batchID
+      wire.status = status
+      wire.reason = reason
+      wire.body = body
     case .runAppVerb(let verb, let params):
       wire.verb = HelperVerb.runAppVerb.rawValue
       wire.appVerb = verb.rawValue
@@ -94,6 +111,15 @@ public enum HelperCodec {
     case .appStatus: return .appStatus
     case .helperStatus: return .helperStatus
     case .requestBundleUpdate: return .requestBundleUpdate
+    case .kioskBatch: return .kioskBatch
+    case .kioskReport:
+      guard let id = wire.batchID, (1...160).contains(id.utf8.count),
+        id.range(of: "^[A-Za-z0-9:._#-]+$", options: .regularExpression) != nil,
+        let status = wire.status, (0...599).contains(status),
+        let reason = wire.reason, reason.utf8.count <= 160, !reason.unicodeScalars.contains(where: { $0.value < 0x20 }),
+        let body = wire.body, body.utf8.count <= 4_096
+      else { throw HelperRefusal.badParams }
+      return .kioskReport(batchID: id, status: status, reason: reason, body: body)
     case .runSignedCommand:
       guard let envelope = wire.envelope, !envelope.isEmpty, envelope.utf8.count <= 6_000,
         let deviceID = wire.deviceID, deviceID.range(of: "^dev_[0-9a-f]{24}$", options: .regularExpression) != nil,

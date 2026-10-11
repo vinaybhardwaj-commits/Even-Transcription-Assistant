@@ -15,6 +15,12 @@ public final class NullControlChannel: HelperControlChannel {
   public func stop() {}
 }
 
+/// What the service needs of the kiosk-health engine (#47): hand out a batch, take the sink's answer.
+public protocol KioskRelay: Sendable {
+  func relayBatch() -> (id: String, body: Data, count: Int)?
+  func relayReport(batchID: String, status: Int, body: Data, reason: String) -> String
+}
+
 /// Turns a request into a response. Pure: no I/O, no clock, so a test can drive it with bytes.
 ///
 /// In this slice only `hello` and `helperStatus` do anything. The other three verbs are decoded,
@@ -23,13 +29,16 @@ public final class HelperService: @unchecked Sendable {
   public let safeMode: Bool
   private let runner: HelperCommandRunner?
   private let statusDetail: (@Sendable () -> [String: String])?
+  private let kiosk: KioskRelay?
 
   public init(
-    safeMode: Bool, runner: HelperCommandRunner? = nil, statusDetail: (@Sendable () -> [String: String])? = nil
+    safeMode: Bool, runner: HelperCommandRunner? = nil, statusDetail: (@Sendable () -> [String: String])? = nil,
+    kiosk: KioskRelay? = nil
   ) {
     self.safeMode = safeMode
     self.runner = runner
     self.statusDetail = statusDetail
+    self.kiosk = kiosk
   }
 
   public func handle(_ request: Data) -> Data {
@@ -61,6 +70,20 @@ public final class HelperService: @unchecked Sendable {
       detail["reason"] = outcome.reason ?? ""
       detail["detail_json"] = FleetJSON.object(outcome.detail).canonical
       return HelperResponse(ok: outcome.kind == .ok, code: outcome.reason ?? outcome.kind.rawValue, detail: detail)
+    case .kioskBatch:
+      guard let kiosk else { return HelperResponse(ok: false, code: "not_implemented", detail: base) }
+      guard let batch = kiosk.relayBatch() else {
+        base["count"] = "0"
+        return HelperResponse(ok: true, code: "ok", detail: base)
+      }
+      base["count"] = String(batch.count)
+      base["batch_id"] = batch.id
+      base["body"] = String(decoding: batch.body, as: UTF8.self)
+      return HelperResponse(ok: true, code: "ok", detail: base)
+    case .kioskReport(let batchID, let status, let reason, let body):
+      guard let kiosk else { return HelperResponse(ok: false, code: "not_implemented", detail: base) }
+      base["outcome"] = kiosk.relayReport(batchID: batchID, status: status, body: Data(body.utf8), reason: reason)
+      return HelperResponse(ok: true, code: "ok", detail: base)
     case .appStatus, .runAppVerb, .requestBundleUpdate:
       return HelperResponse(ok: false, code: "not_implemented", detail: base)
     }

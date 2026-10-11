@@ -33,6 +33,14 @@ final class FakeEnv: HelperEnvironment, @unchecked Sendable {
   var ages: [String: TimeInterval] = [:]
   var writes: [(path: String, data: Data, uid: UInt32, gid: UInt32)] = []
   var writeResult: UserWriteResult = .written
+  /// Age of the root-owned install marker; nil = no install in flight.
+  var installAge: TimeInterval?
+  /// When set, answers instead of `installAge` (a test points it at the real marker reader).
+  var installProbe: (@Sendable () -> TimeInterval?)?
+  func installMarkerAge() -> TimeInterval? { installProbe?() ?? installAge }
+  /// Directory listings by path.
+  var directories: [String: [String]] = [:]
+  func userDirectoryEntries(_ path: String, uid: UInt32, gid: UInt32) -> [String]? { directories[path] }
 
   /// A healthy idle app: it has written a `ready` status. (A running app with NO readable status counts as a session.)
   init() { setStatus("ready") }

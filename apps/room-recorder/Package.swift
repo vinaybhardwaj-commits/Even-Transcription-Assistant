@@ -28,7 +28,12 @@ var targets: [Target] = [
       ? [.define("ETA_DURABILITY_FAULT_PROBE")]
       : []
   ),
-  .target(name: "HelperCore", dependencies: ["FleetCore"]),
+  .target(name: "HelperCore", dependencies: ["FleetCore", "KioskHealthCore"]),
+  // The kiosk-health collectors (0.1.36, #47). IOKit and CoreFoundation only: CoreAudio and CoreGraphics are
+  // deliberately NOT linked, because touching them makes macOS run TCC checks for a headless root daemon.
+  .target(
+    name: "KioskHealthCore",
+    linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
   .target(name: "FleetCore"),
   .target(
     name: "RoomRecorderCore",
@@ -36,7 +41,7 @@ var targets: [Target] = [
   ),
   .executableTarget(
     name: "room-recorder-helper",
-    dependencies: ["HelperCore"],
+    dependencies: ["HelperCore", "KioskHealthCore"],
     exclude: ["Info.plist"],
     linkerSettings: [
       .unsafeFlags([
@@ -65,7 +70,9 @@ var targets: [Target] = [
     name: "RoomRecorderCLI",
     dependencies: ["RoomRecorderCore"]
   ),
-  .testTarget(name: "HelperCoreTests", dependencies: ["HelperCore", "FleetCore", "RoomRecorderCore"]),
+  .testTarget(name: "HelperCoreTests", dependencies: ["HelperCore", "FleetCore", "RoomRecorderCore", "KioskHealthCore"]),
+  .testTarget(
+    name: "KioskHealthCoreTests", dependencies: ["KioskHealthCore"], exclude: ["Fixtures"]),
   .testTarget(
     name: "TapeCoreTests",
     dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore"],

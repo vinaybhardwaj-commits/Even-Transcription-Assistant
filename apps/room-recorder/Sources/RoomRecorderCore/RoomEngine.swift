@@ -4670,7 +4670,7 @@ extension RoomEngine {
       return FleetExecResult(
         outcome: .ok, detail: ["pending_before": .int(Int64(before.count)), "pending_after": .int(Int64(after))])
     case .helperStatus, .collectDiag, .coreaudiodReset, .usbReseat, .reloadLaunchagent, .wake, .pmsetEnforce,
-      .schedulePoweron:
+      .schedulePoweron, .chromePolicyApply, .chromeRelaunch, .openPulse, .policyCycle, .retireLegacy:
       return FleetExecResult(outcome: .unsupported, reason: "not_an_app_verb")
     }
   }

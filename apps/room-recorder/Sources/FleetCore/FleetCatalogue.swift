@@ -1,7 +1,8 @@
 import Foundation
 
 /// The signed command catalogue this build will run: PROTOCOL.md §8.3 (13 verbs, closed params) plus the two
-/// power verbs of #43 that §8.3 does not list yet (`pmset_enforce`, `schedule_poweron`). CLOSED: a verb that is
+/// power verbs of #43 that §8.3 does not list yet (`pmset_enforce`, `schedule_poweron`) plus the five of 0.1.36
+/// (#44 `chrome_policy_apply`, `chrome_relaunch`, `open_pulse`, `policy_cycle`; #48 `retire_legacy`). CLOSED: a verb that is
 /// not a case here is refused `verb_not_allowed`. No shell, no file path, no key access, no network
 /// configuration.
 public enum FleetVerb: String, CaseIterable, Sendable {
@@ -24,13 +25,19 @@ public enum FleetVerb: String, CaseIterable, Sendable {
   case wake
   case pmsetEnforce = "pmset_enforce"
   case schedulePoweron = "schedule_poweron"
+  // Chrome policy for the Pulse Presence extension (#44), and the retirement of what it replaces (#48)
+  case chromePolicyApply = "chrome_policy_apply"
+  case chromeRelaunch = "chrome_relaunch"
+  case openPulse = "open_pulse"
+  case policyCycle = "policy_cycle"
+  case retireLegacy = "retire_legacy"
 
   /// §8.3 "privileged": these four need approval inside clinic hours and count against the hourly ceiling.
   /// `pmset_enforce` and `schedule_poweron` restore a fixed baseline and are NOT privileged; the server's
   /// catalogue must say the same or the two sides would refuse different things.
   public var isPrivileged: Bool {
     switch self {
-    case .coreaudiodReset, .usbReseat, .restartRecorder, .reloadLaunchagent: return true
+    case .coreaudiodReset, .usbReseat, .restartRecorder, .reloadLaunchagent, .chromeRelaunch, .policyCycle: return true
     default: return false
     }
   }
@@ -39,7 +46,7 @@ public enum FleetVerb: String, CaseIterable, Sendable {
   public var runsOnHelper: Bool {
     switch self {
     case .helperStatus, .collectDiag, .coreaudiodReset, .usbReseat, .restartRecorder, .reloadLaunchagent,
-      .wake, .pmsetEnforce, .schedulePoweron:
+      .wake, .pmsetEnforce, .schedulePoweron, .chromePolicyApply, .chromeRelaunch, .openPulse, .policyCycle, .retireLegacy:
       return true
     case .reportDiag, .listAudioInputs, .selectAudioInput, .selfTest, .piecesInventory, .piecesReupload:
       return false
@@ -48,6 +55,14 @@ public enum FleetVerb: String, CaseIterable, Sendable {
 
   public static let collectScopes: Set<String> = ["recorder", "audio", "power", "chrome", "helper"]
   public static let maxLogLines: Int64 = 500
+  /// The only legacy components `retire_legacy` knows. `kiosk-health` is NOT here: its standalone daemon also runs
+  /// actions (DarkWake watchdog, audio ladder) the helper does not carry, so removing it needs its own ruling.
+  public static let retirableComponents: Set<String> = ["presence-guard"]
+
+  /// A Chrome profile directory: `Default` or `Profile N`. The guest profile and anything with a path in it are not valid.
+  public static func isChromeProfile(_ text: String) -> Bool {
+    text.range(of: "^(Default|Profile [0-9]{1,3})$", options: .regularExpression) != nil
+  }
 
   /// A string with no control characters (U+0000...U+001F). Lone surrogates never get this far: the parser refuses them.
   static func cleanString(_ value: FleetJSON?, length: ClosedRange<Int>) -> String? {
@@ -99,6 +114,32 @@ public enum FleetVerb: String, CaseIterable, Sendable {
       guard only(["since"]) else { return nil }
       if let since = raw["since"] { guard isoMs(since) else { return nil } }
       return FleetParams(raw)
+    case .chromePolicyApply:
+      // The Pulse Presence extension's own config (TS-E2): machine_id, room, token. Closed, bounded, no control characters.
+      guard only(["machine_id", "room", "token", "update_url"]),
+        let machine = Self.cleanString(raw["machine_id"], length: 1...128),
+        machine.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil,
+        Self.cleanString(raw["room"], length: 1...64) != nil,
+        let token = Self.cleanString(raw["token"], length: 8...256),
+        token.range(of: "^[A-Za-z0-9._~+/=-]+$", options: .regularExpression) != nil
+      else { return nil }
+      if let url = raw["update_url"] {
+        guard let text = Self.cleanString(url, length: 16...256), text.hasPrefix("https://"), !text.contains(" ") else { return nil }
+      }
+      return FleetParams(raw)
+    case .chromeRelaunch, .policyCycle:
+      guard only(["profile"]) else { return nil }
+      if let profile = raw["profile"] { guard let text = profile.stringValue, Self.isChromeProfile(text) else { return nil } }
+      return FleetParams(raw)
+    case .openPulse:
+      guard only(["profile"]), let profile = raw["profile"]?.stringValue, Self.isChromeProfile(profile) else { return nil }
+      return FleetParams(raw)
+    case .retireLegacy:
+      guard only(["component", "purge_secrets"]), let component = raw["component"]?.stringValue,
+        Self.retirableComponents.contains(component)
+      else { return nil }
+      if let purge = raw["purge_secrets"] { guard purge.boolValue != nil else { return nil } }
+      return FleetParams(raw)
     case .schedulePoweron:
       guard only(["time"]) else { return nil }
       if let time = raw["time"] {
@@ -123,10 +164,13 @@ public enum FleetVerb: String, CaseIterable, Sendable {
     }
     // The gui verbs need a GUI session to talk to.
     switch self {
-    case .restartRecorder, .reloadLaunchagent:
+    case .restartRecorder, .reloadLaunchagent, .chromeRelaunch, .openPulse, .policyCycle:
       if !state.consoleUserPresent { return .noConsoleUser }
     default: break
     }
+    // Chrome is never restarted in clinic hours, with or without an approval (0.1.36 order). Opening Pulse in a
+    // profile does not restart anything, and applying the policy only writes a file.
+    if (self == .chromeRelaunch || self == .policyCycle), FleetClock.inClinicHours(now) { return .clinicHoursNoChromeRestart }
     // Inside clinic hours a privileged verb needs an approval_ref; a FORCED restart needs one at any hour.
     if isPrivileged, FleetClock.inClinicHours(now), !approved { return .clinicHoursNeedsApproval }
     if self == .restartRecorder || self == .selectAudioInput, forced, !approved { return .clinicHoursNeedsApproval }

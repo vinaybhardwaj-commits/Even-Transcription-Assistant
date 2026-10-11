@@ -137,7 +137,8 @@ envelope itself before acting, so a tampered app cannot make it do anything the 
 The catalogue is closed: `helper_status`, `collect_diag` (answers `unsupported` until an upload route exists),
 `report_diag`, `list_audio_inputs`, `select_audio_input`, `coreaudiod_reset`, `usb_reseat` (always `unsupported`),
 `self_test`, `restart_recorder`, `reload_launchagent`, `pieces_inventory`, `pieces_reupload`, `wake`,
-`pmset_enforce`, `schedule_poweron`. No shell, no file path, no autologin. Gates: a reset, restart or reload is
+`pmset_enforce`, `schedule_poweron`, and from 0.1.36 `chrome_policy_apply`, `chrome_relaunch`, `open_pulse`,
+`policy_cycle`, `retire_legacy` (see below). No shell, no file path, no autologin. Gates: a reset, restart or reload is
 refused while a session is open (`restart_recorder` and `select_audio_input`, which reopens the running segment,
 can be forced with `force` AND an `approval_ref`; the reset and the reload have no force); the four privileged
 verbs need an `approval_ref` between 07:30 and 21:30 IST; at most 10 privileged verbs an hour and one
@@ -182,6 +183,56 @@ the reason (`replay`, `expired`, `machine_mismatch`, `session_open`, ...).
 - **Not built:** the helper cannot post its own heartbeat to the server (the device key lives with the app in the
   room user's keychain), so nothing reports while nobody is logged in except that local file; and the helper checks
   the app by its process, not by an XPC hello to the app.
+
+## An install does not fight the watchdog (0.1.36)
+The pkg's `preinstall` writes a root-owned file, `/Library/Application Support/EvenScribe/install-in-progress`,
+before the payload replaces the app; the `postinstall` writes it again and removes it on EVERY way out (success,
+a failed daemon step, a missing app, a signal). While it is there and younger than 30 minutes the helper's
+watchdog reports `app_state=installing` and does nothing: no `bootstrap`, no `kickstart`, no plist write, no
+backoff. A marker left by an installer that was killed between the two scripts ages out by itself after 30
+minutes. A marker that is a symlink, a directory, or not owned by root is ignored, so a room user cannot switch
+the watchdog off with it.
+
+## Chrome policy for the Pulse Presence extension (0.1.36, #44)
+The helper replaces the standalone presence-guard. With a config stored (sent once by the signed
+`chrome_policy_apply{machine_id, room, token}`; kept in `/Library/Application Support/EvenScribe/helper-chrome-policy.json`,
+root, mode 600), it keeps `/Library/Managed Preferences/com.google.Chrome.plist` right:
+- our `ExtensionInstallForcelist` entry (`<extension id>;https://www.evenscribe.app/ext/<machine_id>/update.xml`, or the
+  `update_url` the command carried) and the extension's `3rdparty.extensions.<id>` block `{machine_id, room, token}`;
+  **every other key, every other forcelist entry and every other extension's `3rdparty` block is kept as it was**;
+- every 60 s, and every 10 s for the first 300 s after boot until two checks in a row are clean (macOS regenerates
+  the managed preferences a few seconds after boot and strips the file); a rewrite is a temp file in the same
+  directory, `fsync`, `root:wheel`, mode 644, `rename`, then `killall cfprefsd`;
+- the relaunch rung: when the extension is installed in NO profile of the console user (directory names only are
+  read), the console has been idle more than 600 s (`ioreg`), the last rewrite is older than 3 minutes, no relaunch
+  has answered that rewrite, and the last relaunch is more than 30 minutes old, Chrome is quit (`SIGTERM`, up to 15 s,
+  then `SIGKILL`) and opened again AS THE ROOM USER (`launchctl asuser <uid> sudo -u <user> open ...`). **Never between
+  07:30 and 21:30 IST.** Nothing under a profile except directory names is read: no cookies, no tokens, no Preferences.
+- The token is in the managed plist and the config only. It is in no log line, no event, no result.
+- Signed verbs: `chrome_policy_apply`, `chrome_relaunch{profile?}`, `open_pulse{profile}`, `policy_cycle{profile?}`.
+  `chrome_relaunch` and `policy_cycle` are refused `clinic_hours_no_chrome_restart` 07:30-21:30 IST, approval or not.
+- Events: `chrome.policy {reason: missing|stripped|boot|rewrite_failed|relaunch|chrome_relaunch|policy_cycle|window_open}`
+  on the kiosk-health stream (never the token). `chrome.profile` / `presence_ok` come from the Chrome collector below.
+
+## Retiring the standalone presence-guard (0.1.36, #48)
+`retire_legacy{component:"presence-guard"}` boots `com.eta.presence-guard` out, waits up to 10 s for launchd to let
+go, and MOVES its plist, script, env file (the old token) and state directory into
+`/Library/Application Support/EvenScribe/retired/presence-guard-<epoch>/` (root-only, with a `RESTORE.txt` of the exact
+`mv` and `launchctl bootstrap` lines). It refuses `policy_not_active` unless the helper's own policy is stored and the live
+managed plist was checked right within the last 5 minutes. `purge_secrets:true` deletes the env file instead of
+archiving it. To undo by hand: follow `RESTORE.txt`. Running it again on a retired Mac answers `already_retired`.
+
+## Kiosk health inside the helper (0.1.36, #47)
+The helper runs the kiosk-health collectors (power, display, assertions, audio, HID, drift, recorder logs, Chrome,
+heartbeat) with the standalone daemon's own code and tests, **observing only**: its DarkWake watchdog, audio ladder
+and reboot rung are NOT in the helper, and the helper cannot name `killall`, `shutdown` or `caffeinate` for them.
+Events carry the standalone envelope with `source:"helper"`. They are spooled to
+`/Library/Application Support/EvenScribe/kiosk-health/spool` (root); the helper holds no server credential, so the APP
+fetches a batch over XPC (`kioskBatch`), posts it to `/api/kiosk-health` as the enrolled device, and reports the answer
+(`kioskReport`). The helper deletes nothing until the sink has said 2xx with its own reply; a 413 halves the batch, a
+400 quarantines it, a 401 pauses an hour, anything else backs off. The standalone daemon keeps running beside it (the
+shadow period); the two use different state directories and logs. Identity (`machine`, `room_id`, `install_id`) and the
+power baseline are read from the standalone daemon's config when it exists; its token and sink URL are never read.
 
 ## Updates only go up (0.1.30)
 The self-updater installs a version only if it is HIGHER than the one running, and only into the

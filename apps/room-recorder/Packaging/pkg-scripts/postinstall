@@ -56,6 +56,7 @@ if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
   LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
   INSTALL_LOG="${ETA_INSTALL_LOG:-/var/log/evenscribe-room-recorder-install.log}"
   SLEEP="${ETA_SLEEP:-/bin/sleep}"
+  SUPPORT_DIR="${ETA_SUPPORT_DIR:-/Library/Application Support/EvenScribe}"
 else
   INSTALL_LOCATION="${2:-/Applications}"
   DAEMON_DIR="/Library/LaunchDaemons"
@@ -71,6 +72,22 @@ else
   LOG_PATH="/var/log/room-recorder-helper.log"
   INSTALL_LOG="/var/log/evenscribe-room-recorder-install.log"
   SLEEP="/bin/sleep"
+  SUPPORT_DIR="/Library/Application Support/EvenScribe"
+fi
+
+# The watchdog hold (0.1.36). The helper's watchdog relaunches a missing app; during an install the app is
+# missing on purpose. The preinstall wrote this root-owned marker; it is written again here (a fleet or manual
+# run of this script has no preinstall) and removed on EVERY exit, including a failed install and a signal. A
+# marker left by a killed installer ages out after 30 minutes on the watchdog's side.
+INSTALL_MARKER="$SUPPORT_DIR/install-in-progress"
+# shellcheck disable=SC2329  # run by the EXIT trap below
+clear_install_marker() { /bin/rm -f "$INSTALL_MARKER"; }
+trap clear_install_marker EXIT
+trap 'exit 1' HUP INT TERM
+/bin/mkdir -p "$SUPPORT_DIR"
+if echo "postinstall running $(/bin/date '+%Y-%m-%d %H:%M:%S')" > "$INSTALL_MARKER"; then
+  /bin/chmod 644 "$INSTALL_MARKER"
+  [ "${ETA_POSTINSTALL_TEST:-}" = "1" ] || /usr/sbin/chown root:wheel "$INSTALL_MARKER"
 fi
 
 APP="$INSTALL_LOCATION/$APP_NAME"

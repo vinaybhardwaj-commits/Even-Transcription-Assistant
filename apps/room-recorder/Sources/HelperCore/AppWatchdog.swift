@@ -8,6 +8,7 @@ import Foundation
 ///  · a recorder that stopped on purpose: `status.json` says `needs_enrol`;
 ///  · an operator: a `watchdog-hold` file in the app's root;
 ///  · an update in flight: `update-handover.json` younger than the 30 minute grace;
+///  · a pkg install in flight (0.1.36): the root-owned `install-in-progress` marker younger than 30 minutes;
 ///  · the helper's own kill file (the helper does not run at all then).
 /// At the login window there is nobody to run the app for, so it does nothing and reports `no_console_user`.
 public enum WatchdogAppState: String, Equatable, Sendable {
@@ -18,6 +19,8 @@ public enum WatchdogAppState: String, Equatable, Sendable {
   case needsEnrol = "needs_enrol"
   case held
   case updating
+  /// A pkg install is replacing the app (the root-owned install marker is there and fresh).
+  case installing
 }
 
 public final class AppWatchdog: @unchecked Sendable {
@@ -69,6 +72,9 @@ public final class AppWatchdog: @unchecked Sendable {
       reset()
       return .running
     }
+    // An install is replacing the app: the app is missing on purpose. The marker is root's, so it is checked
+    // before anything of the room user's, and it neither counts as a failure nor moves the backoff.
+    if let age = env.installMarkerAge(), age < HelperPaths.installMarkerGrace { return .installing }
     guard let root = env.roomRoot(uid: user.uid), let plist = env.agentPlistPath(uid: user.uid) else { return .missing }
     if AppStatusSnapshot.read(env: env, root: root, uid: user.uid, gid: user.gid)?.needsEnrol == true { return .needsEnrol }
     // The hold and the handover marker live in the room user's own directory: the room user is the operator of

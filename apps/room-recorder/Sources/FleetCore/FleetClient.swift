@@ -348,6 +348,30 @@ public actor FleetClient {
     if state.results.first(where: { $0.cmdID == cmdID })?.posted == true, let after { await after() }
   }
 
+  // MARK: Other routes the device may post to
+
+  /// The only route besides `/api/fleet/*` this device authenticates to: the kiosk-health sink (#47, 0.1.36).
+  public static let kioskHealthPath = "/api/kiosk-health"
+
+  /// A device-authenticated POST of `body` to the kiosk-health sink, with a fresh token bound to this method, path and
+  /// body. Nil when the device is not enrolled, the client has stopped, or the request never got an HTTP answer.
+  public func postKioskHealth(_ body: Data, timeout: TimeInterval = 30) async -> FleetResponse? {
+    guard config.enabled else { return nil }
+    if state.installID == nil { loadState() }
+    guard state.stoppedReason == nil, let deviceID = state.deviceID else { return nil }
+    do {
+      return try await transport.send(
+        FleetRequest(
+          method: "POST", path: Self.kioskHealthPath,
+          headers: [
+            "Authorization": "Device \(try token(method: "POST", path: Self.kioskHealthPath, body: body, deviceID: deviceID))",
+            "Content-Type": "application/json",
+          ], body: body, timeout: timeout))
+    } catch {
+      return nil
+    }
+  }
+
   // MARK: Results
 
   /// Re-send anything that has not been acknowledged. Each attempt gets a new token.

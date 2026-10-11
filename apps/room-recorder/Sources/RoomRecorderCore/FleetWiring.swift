@@ -174,15 +174,33 @@ public enum FleetBootstrap {
       return
     }
     let session = configuration.etaRoomSession
-    let client = FleetClient(
+    let client = makeClient(
       config: FleetClientConfig(
         enabled: true, installID: installID, machine: machine, hwModel: MachineFactsReader.hardwareModel(),
         helperVersion: HelperStatusCache.shared.snapshot?.helperVersion),
-      transport: URLSessionFleetTransport(origin: configuration.origin), keys: KeychainFleetKeyStore(),
-      store: FileFleetStateStore(root: root),
-      executor: EngineFleetExecutor(engine: engine),
-      roomSession: { session }, gates: gateProvider(engine), log: log)
+      app: engine, transport: URLSessionFleetTransport(origin: configuration.origin), keys: KeychainFleetKeyStore(),
+      store: FileFleetStateStore(root: root), roomSession: { session }, log: log)
     log("fleet client: on")
     Task.detached { await client.run() }
+    // #47: the kiosk-health events the helper spools go to the sink with this device's credential.
+    let relay = KioskHealthRelay(sink: client, link: HelperKioskLink(), log: log)
+    Task.detached { await relay.run() }
+  }
+
+  /// The one place the client is assembled, and the only one `start` uses. The gates and the executor are built
+  /// HERE from `app`, so a caller cannot hand the client a gate that ignores the engine (0.1.35 R3 passed a
+  /// constant `false` once, and nothing noticed). Everything else a test wants to replace is a parameter.
+  static func makeClient(
+    config: FleetClientConfig, app: any FleetAppVerbRunning, transport: FleetTransport, keys: FleetKeyStore,
+    store: FleetStateStore, serverKeys: [String: Data] = FleetServerKeys.resolve(),
+    roomSession: @escaping @Sendable () -> String?, clock: @escaping @Sendable () -> Date = { Date() },
+    sleep: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
+    makeJTI: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+    log: @escaping @Sendable (String) -> Void
+  ) -> FleetClient {
+    FleetClient(
+      config: config, transport: transport, keys: keys, store: store, executor: EngineFleetExecutor(engine: app),
+      serverKeys: serverKeys, roomSession: roomSession, gates: gateProvider(app), clock: clock, sleep: sleep,
+      makeJTI: makeJTI, log: log)
   }
 }

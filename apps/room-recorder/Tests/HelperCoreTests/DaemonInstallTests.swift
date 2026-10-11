@@ -36,6 +36,11 @@ import Testing
     var chownCalls: URL { base.appendingPathComponent("chown.calls") }
     var usersDir: URL { base.appendingPathComponent("Users") }
     var pinFile: URL { base.appendingPathComponent("EvenScribe/update-pin") }
+    /// Stands in for /Library/Application Support/EvenScribe; the install marker lives here.
+    var support: URL { base.appendingPathComponent("EvenScribeSupport") }
+    var marker: URL { support.appendingPathComponent("install-in-progress") }
+    /// One line per launchctl call: the verb and whether the install marker was there at that moment.
+    var markerLog: URL { base.appendingPathComponent("marker.log") }
 
     /// `realCodesign`: do not stub codesign, so the pinned requirement is checked for real.
     /// How the fake launchd treats the job. `bootstrapFailures`: the first N bootstraps exit 5.
@@ -66,6 +71,7 @@ import Testing
         #!/bin/sh
         echo "$@" >> '\(calls.path)'
         echo "$1 helper=$(cat '\(helperCopy.path)' 2>/dev/null | tr -d '\\n')" >> '\(state.path)'
+        if [ -e '\(marker.path)' ]; then echo "$1 marker=present" >> '\(markerLog.path)'; else echo "$1 marker=absent" >> '\(markerLog.path)'; fi
         D='\(base.path)'
         # bootout is asynchronous: with a linger count N the job stays visible to the next N `print`s.
         linger_active() { [ -f "$D/linger" ] && [ "$(cat "$D/linger")" -gt 0 ]; }
@@ -124,7 +130,7 @@ import Testing
         "ETA_HELPER_DIR": helperDir.path, "ETA_LAUNCHCTL": stub.path, "ETA_SKIP_OWNERSHIP": "1",
         "ETA_LOG_PATH": "/var/log/room-recorder-helper.log", "PATH": "/usr/bin:/bin",
         "ETA_USERS_DIR": usersDir.path, "ETA_CONSOLE_USER": "alice", "ETA_PIN_FILE": pinFile.path,
-        "ETA_SLEEP": sleepStub.path, "ETA_INSTALL_LOG": installLog.path,
+        "ETA_SLEEP": sleepStub.path, "ETA_INSTALL_LOG": installLog.path, "ETA_SUPPORT_DIR": support.path,
       ]
       if !realCodesign { environment["ETA_CODESIGN"] = codesignStub.path }
       process.environment = environment.merging(extraEnv) { $1 }
@@ -165,7 +171,9 @@ import Testing
   }
 
   @Test func theScriptsParseUnderEveryShellAndPassShellcheck() throws {
-    let scripts = [Self.script, Self.packaging.appendingPathComponent("rollback.sh")]
+    let scripts = [
+      Self.script, Self.packaging.appendingPathComponent("pkg-scripts/preinstall"), Self.packaging.appendingPathComponent("rollback.sh"),
+    ]
     for script in scripts {
       for shell in ["/bin/sh", "/bin/dash", "/bin/bash"] {
         let process = Process()

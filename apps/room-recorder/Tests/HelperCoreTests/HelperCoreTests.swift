@@ -40,10 +40,10 @@ private func refusal(_ data: Data) -> HelperRefusal? {
 }
 
 @Suite struct HelperCodecTests {
-  @Test func theVerbSetIsClosedAtSix() {
+  @Test func theVerbSetIsClosedAtEight() {
     #expect(
       Set(HelperVerb.allCases.map(\.rawValue))
-        == ["hello", "appStatus", "helperStatus", "runAppVerb", "requestBundleUpdate", "runSignedCommand"])
+        == ["hello", "appStatus", "helperStatus", "runAppVerb", "requestBundleUpdate", "runSignedCommand", "kioskBatch", "kioskReport"])
   }
 
   @Test func theAppVerbAllowListIsPinned() {
@@ -104,7 +104,7 @@ private func refusal(_ data: Data) -> HelperRefusal? {
     for command in [HelperCommand.hello(clientVersion: nil), .helperStatus] {
       let reply = try call(service, command)
       #expect(reply.ok)
-      #expect(reply.detail["helper_version"] == "0.2.1-h3")
+      #expect(reply.detail["helper_version"] == "0.2.2-h4")
       #expect(reply.detail["safe_mode"] == "false")
     }
     #expect(try call(HelperService(safeMode: true), .helperStatus).detail["safe_mode"] == "true")

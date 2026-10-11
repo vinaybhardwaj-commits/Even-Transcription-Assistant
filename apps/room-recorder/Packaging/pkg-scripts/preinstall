@@ -1,0 +1,28 @@
+#!/bin/sh
+# pkg preinstall, run by the installer as root BEFORE the payload replaces the app.
+#
+# The helper's watchdog (#46) relaunches the app whenever it is missing. An install makes the app missing on
+# purpose, so this writes a root-owned marker the watchdog honours (see HelperPaths.installMarkerFile). The
+# postinstall removes it on every exit path. If the installer dies between the two scripts the marker simply
+# ages out: the watchdog ignores one older than 30 minutes.
+#
+# The ETA_* overrides are honoured ONLY when ETA_POSTINSTALL_TEST=1, which the installer never sets.
+
+if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
+  SUPPORT_DIR="${ETA_SUPPORT_DIR:-/Library/Application Support/EvenScribe}"
+  INSTALL_LOG="${ETA_INSTALL_LOG:-/var/log/evenscribe-room-recorder-install.log}"
+else
+  SUPPORT_DIR="/Library/Application Support/EvenScribe"
+  INSTALL_LOG="/var/log/evenscribe-room-recorder-install.log"
+fi
+MARKER="$SUPPORT_DIR/install-in-progress"
+
+/bin/mkdir -p "$SUPPORT_DIR"
+/bin/rm -f "$MARKER"
+if echo "pkg install started $(/bin/date '+%Y-%m-%d %H:%M:%S')" > "$MARKER"; then
+  /bin/chmod 644 "$MARKER"
+  [ "${ETA_POSTINSTALL_TEST:-}" = "1" ] || /usr/sbin/chown root:wheel "$MARKER"
+  echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') room-recorder preinstall: watchdog hold written" >> "$INSTALL_LOG" 2>/dev/null
+fi
+# Never fail the install over the marker: without it the worst case is the watchdog relaunching the old app.
+exit 0

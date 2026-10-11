@@ -10,6 +10,11 @@ public enum HelperPaths {
   /// The scheduled power-on time the last `schedule_poweron` set; absent means the default 07:05.
   public static let powerTimeFile = "helper-power-time"
   public static let agentLabel = "com.evenscribe.room-recorder"
+  /// Written by the pkg's preinstall and postinstall (root-owned, in `supportDirectory`) while an install replaces the
+  /// app, and removed when the install ends. The watchdog does not relaunch the app while it is there and younger than
+  /// `installMarkerGrace`; an installer killed mid-way cannot leave the watchdog off for ever.
+  public static let installMarkerFile = "install-in-progress"
+  public static let installMarkerGrace: TimeInterval = 30 * 60
 }
 
 public struct ToolResult: Equatable, Sendable {
@@ -31,7 +36,13 @@ public struct ProcessSystemTools: SystemTools {
   /// The only programs the helper will start. Anything else answers 127 without running.
   /// `chown` is deliberately NOT here (0.1.35 R2): the helper writes a user's files as that user and never changes
   /// ownership of anything by path.
-  public static let allowed: Set<String> = ["/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps"]
+  ///
+  /// 0.1.36 adds three, all for Chrome policy (#44): `killall` (only ever `cfprefsd`), `ioreg` (HID idle time) and `sudo`
+  /// (only ever `launchctl asuser <uid> sudo -u <console user> open|Chrome`, so Chrome never starts as root). No argument
+  /// of any of them comes from a command's params except a validated Chrome profile directory name.
+  public static let allowed: Set<String> = [
+    "/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps", "/usr/bin/killall", "/usr/sbin/ioreg", "/usr/bin/sudo",
+  ]
   public var timeout: TimeInterval = 30
   public init(timeout: TimeInterval = 30) { self.timeout = timeout }
 
@@ -123,6 +134,17 @@ public protocol HelperEnvironment: Sendable {
   /// Writes `data` as the user to `path` (mode 0644), through a temp file in the same directory and a rename.
   /// Refuses a symlink anywhere on the path from the home down.
   func writeUserFile(_ path: String, data: Data, uid: UInt32, gid: UInt32) -> UserWriteResult
+  /// Age of the root-owned install marker, or nil when there is none. A marker that is a symlink, is not a plain
+  /// file or is not owned by root counts as none: a room user cannot switch the watchdog off by creating one.
+  func installMarkerAge() -> TimeInterval?
+  /// Entry NAMES of a directory, listed as the user with no symlink followed at the end: dotfiles skipped, at most
+  /// 500 names. Nil when the path is missing, not a plain directory, or cannot be listed as that user. Never reads a file.
+  func userDirectoryEntries(_ path: String, uid: UInt32, gid: UInt32) -> [String]?
+}
+
+extension HelperEnvironment {
+  public func installMarkerAge() -> TimeInterval? { nil }
+  public func userDirectoryEntries(_ path: String, uid: UInt32, gid: UInt32) -> [String]? { nil }
 }
 
 public struct SystemEnvironment: HelperEnvironment {
@@ -130,11 +152,45 @@ public struct SystemEnvironment: HelperEnvironment {
   let tools: SystemTools
   let user: UserContext
   let homeOverride: String?
+  let markerDirectory: String
 
-  public init(tools: SystemTools = ProcessSystemTools(), user: UserContext = ThreadUserContext(), homeOverride: String? = nil) {
+  public init(
+    tools: SystemTools = ProcessSystemTools(), user: UserContext = ThreadUserContext(), homeOverride: String? = nil,
+    markerDirectory: String = HelperPaths.supportDirectory, markerOwner: uid_t = 0
+  ) {
     self.tools = tools
     self.user = user
     self.homeOverride = homeOverride
+    self.markerDirectory = markerDirectory
+    self.markerOwner = markerOwner
+  }
+
+  public func installMarkerAge() -> TimeInterval? {
+    var info = stat()
+    guard lstat(markerDirectory + "/" + HelperPaths.installMarkerFile, &info) == 0,
+      (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == markerOwner
+    else { return nil }
+    return Date().timeIntervalSince1970 - TimeInterval(info.st_mtimespec.tv_sec)
+  }
+
+  /// root in production. A test points this at its own uid, since it cannot make a root-owned file.
+  let markerOwner: uid_t
+
+  public func userDirectoryEntries(_ path: String, uid: UInt32, gid: UInt32) -> [String]? {
+    user.run(uid: uid, gid: gid) { () -> [String]? in
+      var info = stat()
+      guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR, let directory = opendir(path) else { return nil }
+      defer { closedir(directory) }
+      var names: [String] = []
+      while let entry = readdir(directory), names.count < 500 {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) {
+          $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) { String(cString: $0) }
+        }
+        if name.hasPrefix(".") { continue }
+        names.append(name)
+      }
+      return names.sorted()
+    } ?? nil
   }
 
   public func consoleUser() -> (uid: UInt32, gid: UInt32, name: String)? {

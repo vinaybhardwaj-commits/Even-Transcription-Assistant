@@ -135,6 +135,16 @@ public final class HelperClient: @unchecked Sendable {
     send(.runSignedCommand(envelope: envelope, deviceID: deviceID, machine: machine), timeout: timeout)
   }
 
+  /// The next batch of kiosk-health events (#47). `detail["count"]` is "0" when there is nothing to send.
+  public func kioskBatch(timeout: TimeInterval = 10) -> HelperResponse? {
+    send(.kioskBatch, timeout: timeout)
+  }
+
+  /// What the sink answered for a batch. `status` 0 means the post never got an HTTP answer.
+  public func kioskReport(batchID: String, status: Int, reason: String, body: String, timeout: TimeInterval = 10) -> HelperResponse? {
+    send(.kioskReport(batchID: batchID, status: status, reason: reason, body: body), timeout: timeout)
+  }
+
   func send(_ command: HelperCommand, timeout: TimeInterval) -> HelperResponse? {
     let connection = makeConnection()
     connection.remoteObjectInterface = NSXPCInterface(with: HelperXPCProtocol.self)

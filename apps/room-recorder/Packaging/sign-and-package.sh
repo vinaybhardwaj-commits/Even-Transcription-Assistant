@@ -128,11 +128,18 @@ esac
 exit 0
 STUB
 /bin/chmod 755 "${DRY}/launchctl"
+# The preinstall writes the watchdog hold; the postinstall must remove it again on its way out (0.1.36).
+ETA_POSTINSTALL_TEST=1 ETA_SUPPORT_DIR="${DRY}/support" ETA_INSTALL_LOG="${DRY}/install.log" \
+  /bin/sh "${SCRIPT_DIR}/pkg-scripts/preinstall" pkg "${DRY}/apps" / / \
+  || die "the pkg preinstall failed in the dry run"
+[ -f "${DRY}/support/install-in-progress" ] || die "the dry-run preinstall did not write the watchdog hold"
 ETA_POSTINSTALL_TEST=1 ETA_INSTALL_LOCATION="${DRY}/apps" ETA_DAEMON_DIR="${DRY}/daemons" \
   ETA_HELPER_DIR="${DRY}/helpers" ETA_LAUNCHCTL="${DRY}/launchctl" ETA_SKIP_OWNERSHIP=1 \
   ETA_INSTALL_LOG="${DRY}/install.log" ETA_SLEEP=/usr/bin/true ETA_PIN_FILE="${DRY}/update-pin" \
+  ETA_SUPPORT_DIR="${DRY}/support" \
   /bin/sh "${SCRIPT_DIR}/pkg-scripts/postinstall" pkg "${DRY}/apps" / / \
   || die "the pkg postinstall failed in the dry run"
+[ ! -e "${DRY}/support/install-in-progress" ] || die "the dry-run postinstall left the watchdog hold in place"
 DRY_COPY="${DRY}/helpers/com.evenscribe.room-recorder.helper"
 [ -x "$DRY_COPY" ] || die "the dry run did not install the root helper copy"
 /usr/bin/grep -q "VERIFIED" "${DRY}/install.log" || die "the dry run did not reach VERIFIED"

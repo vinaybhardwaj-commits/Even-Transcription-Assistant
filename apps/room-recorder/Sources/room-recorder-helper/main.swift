@@ -1,5 +1,6 @@
 import Foundation
 import HelperCore
+import KioskHealthCore
 
 // The root helper (TS-H2 #39). Runs from the launchd plist inside the app bundle. This slice
 // answers `hello` and `helperStatus` over XPC and does nothing else.
@@ -31,10 +32,27 @@ let watchdog = AppWatchdog(env: environment, tools: tools, log: log)
 let monitor = HelperMonitor(
   env: environment, tools: tools, watchdog: watchdog, safeMode: safeMode,
   heartbeatPath: support.appendingPathComponent(HelperPaths.heartbeatFile).path, log: log)
+
+// 0.1.36 (#47): the kiosk-health collectors run here, spooling to a root-only directory; the app, which holds the device
+// credential, takes the batches over XPC and posts them. Safe mode keeps to diagnostics, so no engine then.
+var kiosk: KioskHealthEngine?
+if !safeMode {
+  do {
+    kiosk = try KioskHealthEngine(stateDir: KioskHealthHost.stateDirectory, logPath: KioskHealthHost.logPath)
+  } catch {
+    log("kiosk-health engine not started: \(error)")
+  }
+}
+
+// 0.1.36 (#44, #48): the Chrome policy for the Pulse Presence extension, and the retirement of the standalone guard.
+let chrome = ChromePolicyReconciler(tools: tools, env: environment, emit: KioskHealthHost.event(kiosk), log: log)
+let retirement = LegacyRetirement(tools: tools, policyActive: { chrome.isActive() }, log: log)
+monitor.extraStatus = { ["chrome_policy": chrome.statusWord, "kiosk_spool": String(kiosk?.spoolDepth ?? -1)] }
+
 let runner = HelperCommandRunner(
-  env: environment, tools: tools, watchdog: watchdog,
+  env: environment, tools: tools, watchdog: watchdog, chrome: chrome, retirement: retirement,
   statePath: support.appendingPathComponent(HelperPaths.fleetStateFile).path, safeMode: safeMode, log: log)
-let service = HelperService(safeMode: safeMode, runner: runner, statusDetail: { monitor.statusDetail() })
+let service = HelperService(safeMode: safeMode, runner: runner, statusDetail: { monitor.statusDetail() }, kiosk: kiosk)
 let delegate = HelperListenerDelegate(service: service)
 let listener = NSXPCListener(machServiceName: HelperIdentity.machServiceName)
 listener.delegate = delegate
@@ -52,6 +70,14 @@ if !safeMode {
   watchdogTimer.schedule(deadline: .now() + 30, repeating: 30)
   watchdogTimer.setEventHandler { monitor.tick() }
   watchdogTimer.resume()
+  // The Chrome policy: first pass after 5 s, then every 10 s inside the boot window and every minute after.
+  func policyPass() {
+    chrome.check()
+    chrome.relaunchIfDue()
+    DispatchQueue.global().asyncAfter(deadline: .now() + chrome.nextDelay()) { policyPass() }
+  }
+  DispatchQueue.global().asyncAfter(deadline: .now() + 5) { policyPass() }
+  kiosk?.start()
   // Held for the life of the process.
   _ = [powerTimer, watchdogTimer] as [Any]
 }
@@ -72,6 +98,7 @@ stableTimer.resume()
 signal(SIGTERM, SIG_IGN)
 let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 termSource.setEventHandler {
+  kiosk?.stop()
   channel.stop()
   ledger.recordStable()
   ledger.save(to: ledgerURL)

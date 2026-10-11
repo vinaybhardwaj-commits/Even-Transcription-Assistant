@@ -43,6 +43,8 @@ public final class HelperMonitor: @unchecked Sendable {
   private let lock = NSLock()
   private var schedule = "none"
   private var drift: [String] = []
+  /// More words for the status answer (the Chrome policy's state, the kiosk-health spool depth). Set once, at start.
+  public var extraStatus: (@Sendable () -> [String: String])?
 
   public init(
     env: HelperEnvironment, tools: SystemTools, watchdog: AppWatchdog, safeMode: Bool, heartbeatPath: String,
@@ -98,11 +100,11 @@ public final class HelperMonitor: @unchecked Sendable {
   /// What the `helperStatus` XPC verb adds to its answer (all strings).
   public func statusDetail() -> [String: String] {
     let beat = snapshot()
-    return [
+    return (extraStatus?() ?? [:]).merging([
       "state": beat.state, "app_state": beat.appState, "console_user": beat.consoleUser ? "true" : "false",
       "power_schedule": beat.powerSchedule, "pmset_drift": beat.pmsetDrift.joined(separator: ","),
       "watchdog_failures": String(beat.watchdogFailures),
-    ]
+    ]) { $1 }
   }
 
   private func write(_ beat: HelperHeartbeat) {
