@@ -11,12 +11,15 @@ from tools.timbre.jev_text import (
     ENDPOINT,
     JevCallError,
     PROMPT_VERSION,
+    PROMPT_VERSION_V2,
     TextLaneDisabled,
+    TextLaneError,
     TextLaneFlagError,
     TransportResponse,
     _mock_answers,
     cost_usd,
     questions,
+    questions_v2,
     score_window,
 )
 from tools.timbre.text_lane import load_operator_text, main, score_rows, summarise
@@ -283,6 +286,150 @@ def test_operator_csv_and_score_cli_gate(tmp_path, monkeypatch, capsys):
     assert saved["model"] == "jev-mock"
     blob = out.read_text(encoding="utf-8") + cost.read_text(encoding="utf-8") + capsys.readouterr().out
     assert "cough" not in blob
+
+
+def test_v2_scores_native_text_and_keeps_the_affect_dimensions():
+    script = Script([200])
+    native = "ನಿದ್ದೆ ಬರುತ್ತಿಲ್ಲ"
+    gloss = "sleep is poor"
+    row = score_window(
+        native,
+        gloss=gloss,
+        window_id="synth_w",
+        env=ENV,
+        transport=script,
+        sleep=script.sleep,
+        rng=_rng(),
+        question_set=PROMPT_VERSION_V2,
+    )
+    _url, body, _headers, _timeout = script.requests[0]
+    assert set(body["state"]) == {"window_text", "window_gloss"}
+    assert native in body["state"]["window_text"]
+    assert body["state"]["window_gloss"] == gloss
+    affect = set(questions())
+    asked = set(body["questions"])
+    assert affect <= asked
+    assert asked - affect == {"timbre_language", "timbre_code_mixed", "timbre_basis_language"}
+    preface = body["questions"]["timbre_valence"]["instructions"]
+    assert "window_gloss" in preface
+    assert "flattens valence" in preface
+    assert "window_gloss" not in questions()["timbre_valence"]["instructions"]
+    assert row["status"] == "ok"
+    assert row["valence"] == 3
+    assert row["arousal"] == 2
+    assert row["model"] == "jev-1.13.0"
+    assert row["prompt_version"] == PROMPT_VERSION_V2
+    assert row["language"] == "kn"
+    assert row["code_mixed"] is False
+    assert row["basis_language"] == "native+gloss"
+    assert "jev_language" not in row
+    assert native not in json.dumps({k: v for k, v in row.items() if k != "text_sha256"})
+
+
+def test_v1_ignores_a_gloss_and_does_not_add_language_fields():
+    script = Script([200])
+    row = score_window(
+        SENTENCE,
+        gloss="sleep is poor",
+        window_id="synth_w",
+        env=ENV,
+        transport=script,
+        sleep=script.sleep,
+        rng=_rng(),
+    )
+    body = script.requests[0][1]
+    assert set(body["state"]) == {"window_text"}
+    assert "window_gloss" not in body["state"]
+    assert "timbre_language" not in body["questions"]
+    assert "language" not in row
+    assert "basis_language" not in row
+    assert row["prompt_version"] == PROMPT_VERSION
+
+
+def test_mock_v2_fills_language_locally_and_stays_complete():
+    def transport(*_a, **_k):
+        raise AssertionError("mock opened a socket")
+
+    env = {"TIMBRE_TEXT_LANE": "1", "TIMBRE_JEV_MOCK": "1"}
+    row = score_window(
+        "ನಿದ್ದೆ ಬರುತ್ತಿಲ್ಲ",
+        window_id="synth_w",
+        env=env,
+        transport=transport,
+        question_set=PROMPT_VERSION_V2,
+    )
+    assert row["status"] == "ok"
+    assert row["model"] == "jev-mock"
+    assert row["valence"] == 3
+    assert row["language"] == "kn"
+    assert row["code_mixed"] is False
+    assert row["basis_language"] == "native"
+    assert set(questions_v2()) - set(questions()) == {
+        "timbre_language",
+        "timbre_code_mixed",
+        "timbre_basis_language",
+    }
+
+
+def test_scripted_language_does_not_replace_the_local_detector():
+    answers = _mock_answers()
+    answers["timbre_language"] = {"type": "choice", "choice": "en", "confidence": 0.9, "probabilities": {}}
+    answers["timbre_code_mixed"] = {"type": "noul", "noul": 0.9}
+    answers["timbre_basis_language"] = {"type": "choice", "choice": "gloss", "confidence": 0.8, "probabilities": {}}
+    script = Script([200], answers=answers)
+    row = score_window(
+        "ನಿದ್ದೆ ಬರುತ್ತಿಲ್ಲ",
+        window_id="synth_w",
+        env=ENV,
+        transport=script,
+        sleep=script.sleep,
+        rng=_rng(),
+        question_set=PROMPT_VERSION_V2,
+    )
+    assert row["status"] == "ok"
+    assert row["language"] == "kn"
+    assert row["code_mixed"] is False
+    assert row["basis_language"] == "native"
+    assert row["jev_language"] == "en"
+    assert row["jev_code_mixed"] is True
+    assert row["jev_basis"] == "gloss"
+
+
+def test_gloss_residual_blocks_the_call(monkeypatch):
+    from tools.timbre.phi_mask import MaskResult, mask_phi
+
+    calls = []
+
+    def transport(*_a, **_k):
+        calls.append(1)
+        return _ok_body()
+
+    def fake(text: str) -> MaskResult:
+        if text == "LEAK":
+            return MaskResult(text=text, counts={}, residual=("phone",))
+        return mask_phi(text)
+
+    monkeypatch.setattr("tools.timbre.jev_text.mask_phi", fake)
+    row = score_window(
+        "ನಿದ್ದೆ ಬರುತ್ತಿಲ್ಲ",
+        gloss="LEAK",
+        window_id="synth_w",
+        env=ENV,
+        transport=transport,
+        question_set=PROMPT_VERSION_V2,
+    )
+    assert row["status"] == "residual_phi"
+    assert calls == []
+    blob = json.dumps(row)
+    assert "LEAK" not in blob
+    assert "ನಿದ್ದೆ" not in blob
+
+
+def test_unknown_question_set_does_not_echo_the_name():
+    with pytest.raises(TextLaneError) as exc:
+        score_window(SENTENCE, window_id="synth_w", env=ENV, question_set="timbre-text-v9-secret")
+    assert "v9" not in str(exc.value)
+    assert "secret" not in str(exc.value)
 
 
 def _rng():

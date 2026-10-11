@@ -2,8 +2,10 @@
 
     python -m tools.timbre.text_lane mask --in windows.csv --out masked.jsonl
     python -m tools.timbre.text_lane from-stt --in stt.jsonl --out masked.jsonl
+    python -m tools.timbre.text_lane attribute --in stt.jsonl --out patient.jsonl
     TIMBRE_TEXT_LANE=1 TIMBRE_JEV_MOCK=1 python -m tools.timbre.text_lane score \\
-        --in masked.jsonl --out scores.jsonl --cache text-cache --cost-log scores.cost.jsonl
+        --question-set timbre-text-v2 --in patient.jsonl --out scores.jsonl \\
+        --cache text-cache --cost-log scores.cost.jsonl
 
 ``mask`` and ``from-stt`` stay on the machine. ``score`` refuses unless
 ``TIMBRE_TEXT_LANE`` is on. Stdout is counts only. The masked JSONL is the
@@ -19,8 +21,11 @@ import re
 import sys
 from pathlib import Path
 
+from tools.timbre.attribute import AttributionError, attribute_window
 from tools.timbre.jev_text import (
     JevCallError,
+    PROMPT_VERSION,
+    PROMPT_VERSION_V2,
     TextLaneError,
     TextLaneFlagError,
     append_cost,
@@ -36,6 +41,11 @@ _TEXT_COLUMNS = ("text", "masked_text", "patient_text")
 
 def load_operator_text(path: Path | str) -> list[tuple[str, str]]:
     """CSV or JSON/JSONL of window_id plus text. Errors do not echo the cell."""
+    return [(row["window_id"], row["text"]) for row in load_operator_rows(path)]
+
+
+def load_operator_rows(path: Path | str) -> list[dict]:
+    """Same files as ``load_operator_text``, plus an optional gloss column."""
     src = Path(path)
     raw = src.read_text(encoding="utf-8")
     if not raw.strip():
@@ -71,7 +81,7 @@ def load_operator_text(path: Path | str) -> list[tuple[str, str]]:
 
 
 def score_rows(
-    rows: list[tuple[str, str]],
+    rows: list[tuple[str, str]] | list[dict],
     *,
     env: dict[str, str] | None = None,
     cache_dir: Path | str | None = None,
@@ -79,11 +89,13 @@ def score_rows(
     transport=None,
     sleep=None,
     rng=None,
+    question_set: str = PROMPT_VERSION,
 ) -> list[dict]:
     """Score every window. One HTTP failure becomes a row; a missing key aborts."""
     require_text_lane(env)
     out: list[dict] = []
-    for window_id, text in rows:
+    for item in rows:
+        window_id, text, gloss = _score_input(item)
         try:
             row = score_window(
                 text,
@@ -93,6 +105,8 @@ def score_rows(
                 transport=transport,
                 sleep=sleep,
                 rng=rng,
+                gloss=gloss,
+                question_set=question_set,
             )
         except JevCallError as exc:
             if str(exc) == "config_missing_key":
@@ -167,6 +181,39 @@ def mask_file(src: Path | str, dest: Path | str) -> dict:
     return {"windows": len(written), "residual": residual, "tags": tag_counts}
 
 
+def attribute_file(src: Path | str, dest: Path | str) -> dict:
+    """Patient-only native text, coverage, and confidence. Stdout stays a count."""
+    windows = load_stt_windows(src)
+    written = []
+    statuses: dict[str, int] = {}
+    residual = 0
+    coverage = []
+    confidence = []
+    for window in windows:
+        try:
+            row = attribute_window(window)
+        except (AttributionError, ValueError) as exc:
+            raise TextLaneError(str(exc)) from None
+        statuses[row.status] = statuses.get(row.status, 0) + 1
+        if row.mask is not None and row.mask.residual:
+            residual += 1
+        if row.status == "ok":
+            coverage.append(row.coverage_pct)
+            confidence.append(row.attribution_confidence)
+        written.append(row.as_row())
+    _write_jsonl(written, dest)
+    return {
+        "windows": len(written),
+        "ok": statuses.get("ok", 0),
+        "no_patient_speaker": statuses.get("no_patient_speaker", 0),
+        "not_patient_attributed": statuses.get("not_patient_attributed", 0),
+        "no_turns": statuses.get("no_turns", 0),
+        "residual": residual,
+        "mean_coverage_pct": (sum(coverage) / len(coverage)) if coverage else 0.0,
+        "mean_attribution_confidence": (sum(confidence) / len(confidence)) if confidence else 0.0,
+    }
+
+
 def from_stt_file(src: Path | str, dest: Path | str) -> dict:
     windows = load_stt_windows(src)
     extracted = [patient_text_from_window(w) for w in windows]
@@ -204,7 +251,10 @@ def _write_jsonl(rows: list[dict], path: Path | str) -> None:
     tmp.replace(dest)
 
 
-def _pair(obj: object) -> tuple[str, str]:
+_GLOSS_COLUMNS = ("gloss", "english", "transcript_english", "window_gloss")
+
+
+def _pair(obj: object) -> dict:
     if not isinstance(obj, dict):
         raise TextLaneError("row is not an object")
     window_id = obj.get("window_id")
@@ -213,14 +263,27 @@ def _pair(obj: object) -> tuple[str, str]:
     window_id = window_id.strip()
     if not _safe_id(window_id):
         raise TextLaneError("window_id is not a safe id")
+    text = None
     for key in _TEXT_COLUMNS:
         val = obj.get(key)
         if isinstance(val, str):
-            return window_id, val
-    raise TextLaneError("row is missing text")
+            text = val
+            break
+    if text is None:
+        raise TextLaneError("row is missing text")
+    gloss = None
+    for key in _GLOSS_COLUMNS:
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip():
+            gloss = val
+            break
+    row = {"window_id": window_id, "text": text}
+    if gloss is not None:
+        row["gloss"] = gloss
+    return row
 
 
-def _from_csv(raw: str) -> list[tuple[str, str]]:
+def _from_csv(raw: str) -> list[dict]:
     reader = csv.DictReader(io.StringIO(raw))
     fields = reader.fieldnames or []
     if "window_id" not in fields:
@@ -228,6 +291,7 @@ def _from_csv(raw: str) -> list[tuple[str, str]]:
     col = next((c for c in _TEXT_COLUMNS if c in fields), None)
     if col is None:
         raise TextLaneError("csv is missing text")
+    gloss_col = next((c for c in _GLOSS_COLUMNS if c in fields), None)
     rows = []
     for rec in reader:
         window_id = (rec.get("window_id") or "").strip()
@@ -235,17 +299,36 @@ def _from_csv(raw: str) -> list[tuple[str, str]]:
             raise TextLaneError("row is missing window_id")
         if not _safe_id(window_id):
             raise TextLaneError("window_id is not a safe id")
-        rows.append((window_id, rec.get(col) or ""))
+        row = {"window_id": window_id, "text": rec.get(col) or ""}
+        if gloss_col and (rec.get(gloss_col) or "").strip():
+            row["gloss"] = rec.get(gloss_col) or ""
+        rows.append(row)
     return rows
+
+
+def _score_input(item: tuple | dict) -> tuple[str, str, str | None]:
+    if isinstance(item, tuple):
+        window_id, text = item[0], item[1]
+        gloss = item[2] if len(item) > 2 else None
+        return window_id, text, gloss if isinstance(gloss, str) else None
+    if isinstance(item, dict):
+        window_id = item.get("window_id")
+        text = item.get("text") or item.get("patient_text") or ""
+        gloss = item.get("gloss") or item.get("english") or item.get("transcript_english")
+        if not isinstance(window_id, str) or not isinstance(text, str):
+            raise TextLaneError("row is missing text")
+        return window_id, text, gloss if isinstance(gloss, str) else None
+    raise TextLaneError("row is missing text")
 
 
 def _safe_id(window_id: str) -> bool:
     return re.fullmatch(r"[A-Za-z0-9_.:|\-]{1,80}", window_id) is not None
 
 
-def _reject_duplicate_ids(rows: list[tuple[str, str]]) -> None:
+def _reject_duplicate_ids(rows: list[dict]) -> None:
     seen: set[str] = set()
-    for window_id, _text in rows:
+    for row in rows:
+        window_id = row["window_id"]
         if window_id in seen:
             raise TextLaneError("duplicate window_id")
         seen.add(window_id)
@@ -269,11 +352,21 @@ def main(argv: list[str] | None = None) -> None:
     stt_p.add_argument("--in", dest="src", required=True)
     stt_p.add_argument("--out", required=True)
 
+    attr_p = sub.add_parser("attribute", help="patient-only native text from a timeline, then mask")
+    attr_p.add_argument("--in", dest="src", required=True)
+    attr_p.add_argument("--out", required=True)
+
     score_p = sub.add_parser("score", help="score masked text with Jev (TIMBRE_TEXT_LANE=1)")
     score_p.add_argument("--in", dest="src", required=True)
     score_p.add_argument("--out", required=True)
     score_p.add_argument("--cache", default=None)
     score_p.add_argument("--cost-log", default=None)
+    score_p.add_argument(
+        "--question-set",
+        default=PROMPT_VERSION,
+        choices=(PROMPT_VERSION, PROMPT_VERSION_V2),
+        help="timbre-text-v1 (English-era) or timbre-text-v2 (native, gloss is an aid)",
+    )
 
     args = p.parse_args(argv)
     try:
@@ -283,14 +376,22 @@ def main(argv: list[str] | None = None) -> None:
         if args.cmd == "from-stt":
             _print_summary(from_stt_file(args.src, args.out))
             return
+        if args.cmd == "attribute":
+            _print_summary(attribute_file(args.src, args.out))
+            return
         if args.cmd == "score":
             try:
                 require_text_lane()
             except (TextLaneError, TextLaneFlagError) as exc:
                 print(str(exc), file=sys.stderr)
                 raise SystemExit(2) from None
-            rows = load_operator_text(args.src)
-            scored = score_rows(rows, cache_dir=args.cache, cost_log=args.cost_log)
+            rows = load_operator_rows(args.src) if args.question_set == PROMPT_VERSION_V2 else load_operator_text(args.src)
+            scored = score_rows(
+                rows,
+                cache_dir=args.cache,
+                cost_log=args.cost_log,
+                question_set=args.question_set,
+            )
             write_scores(scored, args.out)
             _print_summary(summarise(scored))
             return

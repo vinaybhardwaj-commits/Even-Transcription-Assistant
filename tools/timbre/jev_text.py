@@ -40,7 +40,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from tools.timbre.phi_mask import mask_phi
+from tools.timbre.lang import LanguageHit, detect_language
+from tools.timbre.phi_mask import MaskResult, mask_phi
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-1.13.0"
@@ -49,6 +50,9 @@ MAX_ATTEMPTS = 3
 INPUT_TOKEN_COST_USD = 42e-9
 TIMEOUT_MS_DEFAULT = 15_000
 PROMPT_VERSION = "timbre-text-v1"
+PROMPT_VERSION_V2 = "timbre-text-v2"
+LANGUAGE_CHOICES = ("kn", "hi", "ta", "te", "en", "code_mixed", "other")
+BASIS_CHOICES = ("native", "gloss")
 
 FLAG_TRUTHY = ("1", "true", "yes", "on")
 FLAG_FALSY = ("", "0", "false", "no", "off")
@@ -83,6 +87,15 @@ _PREFACE = (
     "The state key window_text is already masked. You have no audio. "
     "Judge the words only. Do not quote the transcript."
 )
+_PREFACE_V2 = (
+    "You are scoring one patient's own words from a clinic window. "
+    "window_text is those words in the language they spoke "
+    "(Kannada, Hindi, Tamil, Telugu, English, or code-mixed), already masked. "
+    "window_gloss, when present, is an English aid only. "
+    "Score the native wording. Do not let the gloss override the native affect. "
+    "A translation into English flattens valence, so the gloss is a dictionary, not the source. "
+    "You have no audio. Do not quote the transcript."
+)
 
 _COST_KEYS = (
     "window_id",
@@ -105,6 +118,10 @@ _FORBIDDEN_KEYS = frozenset(
         "transcript",
         "transcript_english",
         "transcript_original",
+        "transcript_native",
+        "window_gloss",
+        "gloss",
+        "native",
         "quote",
         "state",
         "masked_text",
@@ -169,16 +186,79 @@ def require_text_lane(env: dict[str, str] | None = None) -> None:
 
 def questions() -> dict:
     """Version `timbre-text-v1`. One systemOne fan-out. No free-text reason."""
+    return _affect_questions(_PREFACE)
+
+
+def questions_v2() -> dict:
+    """Version `timbre-text-v2`. Same affect dimensions, plus language metadata.
+
+    The three extra questions do not change valence, arousal, or the flags.
+    A missing language answer is not ``incomplete``: the lane's own script
+    detector fills ``language`` / ``code_mixed``, and ``basis_language`` is
+    which string this call scored.
+    """
+    out = _affect_questions(_PREFACE_V2)
+    out["timbre_language"] = {
+        "type": "choice",
+        "instructions": (
+            f"{_PREFACE_V2} Which language is window_text mainly in? "
+            "Pick code_mixed when more than one language is doing real work. Do not quote."
+        ),
+        "criteria": {
+            "kn": "Kannada.",
+            "hi": "Hindi.",
+            "ta": "Tamil.",
+            "te": "Telugu.",
+            "en": "English.",
+            "code_mixed": "More than one of these languages in the same window.",
+            "other": "A language outside that list.",
+        },
+    }
+    out["timbre_code_mixed"] = {
+        "type": "noul",
+        "instructions": (
+            f"{_PREFACE_V2} The patient's words mix two or more languages "
+            "(including English words inside an Indic sentence)."
+        ),
+        "criteria": {
+            "true": "More than one language is present.",
+            "false": "One language accounts for the words.",
+        },
+    }
+    out["timbre_basis_language"] = {
+        "type": "choice",
+        "instructions": (
+            f"{_PREFACE_V2} Which text did you score? "
+            "Pick native when window_text is the source, even if window_gloss helped you read a word. "
+            "Pick gloss only when you had to score English because the native wording was missing. Do not quote."
+        ),
+        "criteria": {
+            "native": "The scores come from window_text.",
+            "gloss": "The scores come from the English gloss.",
+        },
+    }
+    return out
+
+
+def questions_for(version: str = PROMPT_VERSION) -> dict:
+    if version == PROMPT_VERSION:
+        return questions()
+    if version == PROMPT_VERSION_V2:
+        return questions_v2()
+    raise TextLaneError("unknown question set")
+
+
+def _affect_questions(preface: str) -> dict:
     return {
         "timbre_valence": {
             "type": "score",
-            "instructions": f"{_PREFACE} How pleasant or unpleasant is the patient's affect, from the words alone?",
+            "instructions": f"{preface} How pleasant or unpleasant is the patient's affect, from the words alone?",
             "criteria": list(VALENCE_LEVELS),
         },
         "timbre_arousal": {
             "type": "score",
             "instructions": (
-                f"{_PREFACE} How much distress or arousal is in the patient's words? "
+                f"{preface} How much distress or arousal is in the patient's words? "
                 "This is one scale, not two."
             ),
             "criteria": list(AROUSAL_LEVELS),
@@ -186,7 +266,7 @@ def questions() -> dict:
         "timbre_engaged": {
             "type": "noul",
             "instructions": (
-                f"{_PREFACE} The patient is engaged: answering, elaborating, or taking part, "
+                f"{preface} The patient is engaged: answering, elaborating, or taking part, "
                 "rather than withdrawn or monosyllabic."
             ),
             "criteria": {
@@ -197,7 +277,7 @@ def questions() -> dict:
         "timbre_resistant": {
             "type": "noul",
             "instructions": (
-                f"{_PREFACE} The patient resists: refuses, argues, dismisses, or pushes away "
+                f"{preface} The patient resists: refuses, argues, dismisses, or pushes away "
                 "the line of questions or advice."
             ),
             "criteria": {
@@ -208,7 +288,7 @@ def questions() -> dict:
         "timbre_unresolved_doubt": {
             "type": "noul",
             "instructions": (
-                f"{_PREFACE} Something medically important is left unresolved: a question, "
+                f"{preface} Something medically important is left unresolved: a question, "
                 "a contradiction, or a plan the patient has not accepted or understood."
             ),
             "criteria": {
@@ -219,7 +299,7 @@ def questions() -> dict:
         "timbre_doubt_reason": {
             "type": "choice",
             "instructions": (
-                f"{_PREFACE} If something is unresolved, pick the one closed code that names it. "
+                f"{preface} If something is unresolved, pick the one closed code that names it. "
                 "If nothing is unresolved, pick none. Do not quote."
             ),
             "criteria": {
@@ -234,8 +314,8 @@ def questions() -> dict:
     }
 
 
-def question_sha256() -> str:
-    payload = json.dumps(questions(), sort_keys=True, separators=(",", ":"))
+def question_sha256(version: str = PROMPT_VERSION) -> str:
+    payload = json.dumps(questions_for(version), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -243,8 +323,12 @@ def text_sha256(masked: str) -> str:
     return hashlib.sha256(masked.encode("utf-8")).hexdigest()
 
 
-def cache_key(masked: str, model: str) -> str:
-    blob = "\0".join((PROMPT_VERSION, model, question_sha256(), masked))
+def cache_key(masked: str, model: str, *, version: str = PROMPT_VERSION, gloss: str = "") -> str:
+    """v1 with no gloss keeps the original key. v2 includes the question set and the gloss."""
+    parts = [version, model, question_sha256(version), masked]
+    if version != PROMPT_VERSION or gloss:
+        parts.append(gloss)
+    blob = "\0".join(parts)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -269,18 +353,30 @@ def score_window(
     transport: Transport | None = None,
     sleep: SleepFn | None = None,
     rng: random.Random | None = None,
+    gloss: str | None = None,
+    question_set: str = PROMPT_VERSION,
 ) -> dict:
-    """Mask, refuse residual identifiers, then score. The return value has no transcript."""
+    """Mask, refuse residual identifiers, then score. The return value has no transcript.
+
+    ``question_set`` ``timbre-text-v1`` scores ``text`` and ignores ``gloss``.
+    ``timbre-text-v2`` scores native ``text`` and may attach ``gloss`` as an English aid.
+    """
     require_text_lane(env)
-    if not isinstance(text, str):
+    version = _question_set(question_set)
+    if not isinstance(text, str) or (gloss is not None and not isinstance(gloss, str)):
         raise TextLaneError("refusing non-text state")
-    masked = mask_phi(text)
+    scored_src, gloss_src, basis = _sources(text, gloss or "", version)
+    detected = detect_language(scored_src) if version == PROMPT_VERSION_V2 else None
+    masked = mask_phi(scored_src)
+    masked_gloss = mask_phi(gloss_src) if gloss_src.strip() else None
+    residual = _combined_residual(masked, masked_gloss)
     sha = text_sha256(masked.text)
+    gloss_text = masked_gloss.text if masked_gloss is not None else ""
     base = {
         "window_id": window_id,
         "text_sha256": sha,
         "char_count": len(masked.text),
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": version,
         "cache_hit": False,
         "input_tokens": 0,
         "output_tokens": 0,
@@ -289,11 +385,15 @@ def score_window(
         "http_status": None,
         "model": None,
     }
-    if masked.residual:
+    if version == PROMPT_VERSION_V2 and detected is not None:
+        base["language"] = detected.language
+        base["code_mixed"] = detected.code_mixed
+        base["basis_language"] = basis
+    if residual:
         return _public(base, status="residual_phi")
     if not masked.text.strip():
         return _public(base, status="empty")
-    if len(masked.text) > STATE_CHAR_GUARD:
+    if len(masked.text) + len(gloss_text) > STATE_CHAR_GUARD:
         return _public(base, status="too_large")
 
     src = env if env is not None else _environ()
@@ -302,9 +402,9 @@ def score_window(
     # The mock must not share a cache entry with a real model, and a real call must
     # not accept a jev-mock file.
     model = "jev-mock" if mocking else configured
-    key = cache_key(masked.text, model)
+    key = cache_key(masked.text, model, version=version, gloss=gloss_text)
     if cache_dir is not None:
-        cached = _cache_read(Path(cache_dir), key, model)
+        cached = _cache_read(Path(cache_dir), key, model, version)
         if cached is not None:
             cached.update(
                 {
@@ -323,8 +423,11 @@ def score_window(
             return _public(cached, status="ok")
 
     if mocking:
-        parsed = _parse_answers(_mock_answers(), model="jev-mock")
+        mock_answers = _mock_answers()
+        parsed = _parse_answers(mock_answers, model="jev-mock")
         parsed.update(base)
+        if version == PROMPT_VERSION_V2 and detected is not None:
+            _attach_language(parsed, mock_answers, detected, basis)
         parsed["model"] = "jev-mock"
         parsed["cache_hit"] = False
         _cache_write(cache_dir, key, parsed, requested_model=model)
@@ -334,7 +437,7 @@ def score_window(
     if not api_key:
         raise JevCallError("config_missing_key")
     timeout_s = _timeout_s(src)
-    body = _request_body(masked.text, configured)
+    body = _request_body(masked.text, configured, gloss=gloss_text, version=version)
     status, payload, latency_ms = _call(
         body,
         api_key,
@@ -343,11 +446,14 @@ def score_window(
         sleep=sleep,
         rng=rng or random.Random(),
     )
-    parsed = _parse_answers(payload.get("answers") or {}, model=str(payload.get("model") or configured))
+    answers = payload.get("answers") or {}
+    parsed = _parse_answers(answers, model=str(payload.get("model") or configured))
+    parsed.update(base)
+    if version == PROMPT_VERSION_V2 and detected is not None:
+        _attach_language(parsed, answers, detected, basis)
     usage = payload.get("usage") or {}
     in_tok = int(usage.get("input_tokens") or 0)
     out_tok = int(usage.get("output_tokens") or 0)
-    parsed.update(base)
     parsed["model"] = str(payload.get("model") or model)
     parsed["input_tokens"] = in_tok
     parsed["output_tokens"] = out_tok
@@ -416,7 +522,7 @@ def public_score(row: dict) -> dict:
     else:
         doubt_obj = {"value": bool(doubt_val), "reason": reason or "cannot_tell"}
     arousal = _num(row.get("arousal"))
-    return {
+    out = {
         "window_id": row.get("window_id"),
         "valence": _num(row.get("valence")),
         "arousal": arousal,
@@ -437,6 +543,17 @@ def public_score(row: dict) -> dict:
         "status": row.get("status"),
         "reason_rejected": bool(row.get("reason_rejected")),
     }
+    if row.get("prompt_version") == PROMPT_VERSION_V2 or row.get("basis_language"):
+        out["language"] = row.get("language") or "unknown"
+        out["code_mixed"] = bool(row.get("code_mixed"))
+        out["basis_language"] = row.get("basis_language")
+        if row.get("jev_language") in LANGUAGE_CHOICES:
+            out["jev_language"] = row.get("jev_language")
+        if row.get("jev_code_mixed") is not None:
+            out["jev_code_mixed"] = bool(row.get("jev_code_mixed"))
+        if row.get("jev_basis") in BASIS_CHOICES:
+            out["jev_basis"] = row.get("jev_basis")
+    return out
 
 
 def _public(row: dict, *, status: str) -> dict:
@@ -445,13 +562,72 @@ def _public(row: dict, *, status: str) -> dict:
     return public_score(row)
 
 
-def _request_body(masked: str, model: str) -> dict:
+def _request_body(masked: str, model: str, *, gloss: str = "", version: str = PROMPT_VERSION) -> dict:
     if not isinstance(masked, str):
         raise TextLaneError("refusing non-text state")
     state = {"window_text": masked}
-    if set(state) - {"window_text"}:
+    if version == PROMPT_VERSION_V2 and gloss:
+        state["window_gloss"] = gloss
+    if set(state) - {"window_text", "window_gloss"}:
         raise TextLaneError("refusing non-text state")
-    return {"model": model, "state": state, "questions": questions()}
+    if version == PROMPT_VERSION and set(state) != {"window_text"}:
+        raise TextLaneError("refusing non-text state")
+    return {"model": model, "state": state, "questions": questions_for(version)}
+
+
+def _question_set(name: str) -> str:
+    if name in (PROMPT_VERSION, PROMPT_VERSION_V2):
+        return name
+    raise TextLaneError("unknown question set")
+
+
+def _sources(text: str, gloss: str, version: str) -> tuple[str, str, str]:
+    """What is scored, the gloss aid, and the basis label.
+
+    v1 ignores the gloss. v2 scores native text. English is the scored string
+    only when the native string is empty.
+    """
+    if version != PROMPT_VERSION_V2:
+        return text, "", "native"
+    if text.strip() and gloss.strip():
+        return text, gloss, "native+gloss"
+    if text.strip():
+        return text, "", "native"
+    if gloss.strip():
+        return gloss, "", "gloss"
+    return text, "", "none"
+
+
+def _combined_residual(masked: MaskResult, gloss: MaskResult | None) -> tuple[str, ...]:
+    found = list(masked.residual)
+    if gloss is not None:
+        for kind in gloss.residual:
+            if kind not in found:
+                found.append(kind)
+    return tuple(found)
+
+
+def _attach_language(parsed: dict, answers: dict, detected: LanguageHit, basis: str) -> None:
+    """Local script detection is what evaluation buckets on.
+
+    Jev is asked the same three questions. A valid answer is stored beside the
+    local one and does not replace it: a wrong language guess must not move a
+    window into another bucket. A missing answer is not ``incomplete``.
+    """
+    parsed["language"] = detected.language
+    parsed["code_mixed"] = detected.code_mixed
+    parsed["basis_language"] = basis
+    if not isinstance(answers, dict):
+        return
+    jev_lang, _rejected = _choice_answer(answers.get("timbre_language"), LANGUAGE_CHOICES)
+    if jev_lang:
+        parsed["jev_language"] = jev_lang
+    mix = _noul_answer(answers.get("timbre_code_mixed"))
+    if mix is not None:
+        parsed["jev_code_mixed"] = mix["value"]
+    jev_basis, _rejected = _choice_answer(answers.get("timbre_basis_language"), BASIS_CHOICES)
+    if jev_basis:
+        parsed["jev_basis"] = jev_basis
 
 
 def _call(
@@ -603,10 +779,14 @@ def _noul_answer(answer: object) -> dict | None:
 
 
 def _reason_answer(answer: object) -> tuple[str | None, bool]:
+    return _choice_answer(answer, DOUBT_REASONS)
+
+
+def _choice_answer(answer: object, allowed: tuple[str, ...]) -> tuple[str | None, bool]:
     if not isinstance(answer, dict) or answer.get("type") != "choice":
         return None, False
     choice = answer.get("choice")
-    if choice in DOUBT_REASONS:
+    if choice in allowed:
         return str(choice), False
     # Not stored. A free-text choice could be a quote.
     return None, True
@@ -629,7 +809,7 @@ def _mock_answers() -> dict:
     }
 
 
-def _cache_read(cache_dir: Path, key: str, model: str) -> dict | None:
+def _cache_read(cache_dir: Path, key: str, model: str, version: str = PROMPT_VERSION) -> dict | None:
     path = _cache_path(cache_dir, key)
     if not path.is_file():
         return None
@@ -641,9 +821,9 @@ def _cache_read(cache_dir: Path, key: str, model: str) -> dict | None:
         return None
     if set(obj) & _FORBIDDEN_KEYS:
         return None
-    if obj.get("prompt_version") != PROMPT_VERSION or obj.get("requested_model") != model:
+    if obj.get("prompt_version") != version or obj.get("requested_model") != model:
         return None
-    if obj.get("question_sha256") != question_sha256():
+    if obj.get("question_sha256") != question_sha256(version):
         return None
     if obj.get("status") != "ok":
         return None
@@ -659,7 +839,7 @@ def _cache_write(cache_dir: Path | str | None, key: str, row: dict, *, requested
     path = _cache_path(Path(cache_dir), key)
     path.parent.mkdir(parents=True, exist_ok=True)
     stored = public_score(row)
-    stored["question_sha256"] = question_sha256()
+    stored["question_sha256"] = question_sha256(str(row.get("prompt_version") or PROMPT_VERSION))
     stored["requested_model"] = requested_model
     stored["status"] = "ok"
     if set(stored) & _FORBIDDEN_KEYS:

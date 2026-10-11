@@ -10,12 +10,14 @@ import numpy as np
 import pytest
 
 from tools.timbre.nemotron_probs import (
+    FrameStepWarning,
     NlpError,
     fetch_nlp_object,
     load_nlp,
     nlp_object_key,
     pack_nlp,
     patient_frames,
+    resolve_frame_step,
 )
 
 FIX = __import__("pathlib").Path(__file__).resolve().parents[1] / "fixtures"
@@ -59,20 +61,57 @@ def test_rows_are_frames_times_cols_layout_hits_900s():
     assert loaded.probs[3, 2] == pytest.approx(128 / 255, abs=1e-9)
 
 
-def test_production_shaped_header_fails_900s_check():
-    """rows=90003, cols=8, frame_ms=80 is the shape reported for the R2 objects."""
+def test_resolve_frame_step_production_ratio_is_10ms():
+    step = resolve_frame_step(90003, 80, 900.0, tol_s=5)
+    assert step["adopted"] is True
+    assert step["frame_ms"] == 10
+    assert step["duration_s"] == pytest.approx(900.03)
+    assert step["inferred_ms"] == pytest.approx(900_000 / 90003)
+    assert "using 10" in step["warning"]
+
+
+def test_resolve_frame_step_keeps_a_header_that_already_fits():
+    step = resolve_frame_step(11250, 80, 900.0, tol_s=5)
+    assert step["adopted"] is False
+    assert step["frame_ms"] == 80
+    assert step["warning"] is None
+
+
+def test_resolve_frame_step_does_not_invent_a_hop():
+    """100 frames over a claimed 900 s is not a 9 s step. Keep the header and warn."""
+    step = resolve_frame_step(100, 80, 900.0, tol_s=5)
+    assert step["adopted"] is False
+    assert step["frame_ms"] == 80
+    assert step["snapped"] is False
+    assert "header step kept" in step["warning"]
+
+
+def test_production_shaped_header_infers_10ms():
+    """rows=90003, cols=8, frame_ms=80 is the R2 object shape. The hop is 10 ms."""
     probs = np.zeros((90003, 8), dtype=np.float64)
     probs[0, 1] = 1.0
     blob = pack_nlp(probs, frame_ms=80, interpretation="rows_are_frames", extra={"model_rev": "test"})
-    loaded = load_nlp(blob)  # default expected duration is 900 s
+    with pytest.warns(FrameStepWarning, match="using 10"):
+        loaded = load_nlp(blob)  # default expected duration is 900 s
     assert loaded.interpretation == "rows_are_frames"
     assert loaded.probs.shape == (90003, 8)
-    assert loaded.duration_s == pytest.approx(7200.24)
-    assert loaded.duration_ok is False
+    assert loaded.frame_ms == pytest.approx(10)
+    assert loaded.duration_s == pytest.approx(900.03)
+    assert loaded.duration_ok
+    assert loaded.header_frame_ms == pytest.approx(80)
     assert loaded.sanity["hypotheses_s"]["rows_over_cols_s"] == pytest.approx(900.03)
     assert loaded.sanity["hypotheses_s"]["ten_ms_if_rows_are_frames_s"] == pytest.approx(900.03)
+    assert loaded.sanity["frame_step"]["adopted"] is True
     assert loaded.probs[0, 1] == pytest.approx(1.0, abs=1 / 255)
-    assert "open_question" in loaded.sanity
+    assert "frame_step_note" in loaded.sanity
+
+
+def test_load_nlp_keeps_header_when_the_ratio_is_not_a_hop():
+    blob = pack_nlp(np.zeros((100, 2)), frame_ms=80)
+    with pytest.warns(FrameStepWarning, match="header step kept"):
+        loaded = load_nlp(blob, expected_duration_s=900.0)
+    assert loaded.frame_ms == pytest.approx(80)
+    assert loaded.duration_ok is False
 
 
 def test_payload_length_must_match_a_layout():
