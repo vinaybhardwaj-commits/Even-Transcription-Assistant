@@ -29,8 +29,9 @@ export function encounterFusionShadowEnabled(env: Record<string, string | undefi
 /**
  * ENCOUNTER_TIMELINE_SHADOW — epic #23 (f), shadow-runner v3. DEFAULT OFF. When on, an operator's E-shadow run also
  * writes the pre-STT TIMELINE run (source 'timeline'): Pulse anchors + Nemotron turns + the level log, Jev reading
- * the speaker-turn timeline (no text). Shadow only. The replay path (`timeline: true` on scribe_encounter_shadow_run)
- * runs v3 regardless, per call, for E-7 scoring of past days.
+ * the speaker-turn timeline (no text). The same switch also writes the calibrated patient-leave lane into
+ * encounter_timeline_shadow (migration 0156). Shadow only. The replay path (`timeline: true` on
+ * scribe_encounter_shadow_run) runs both regardless, per call, for E-7 scoring of past days.
  */
 export const ENCOUNTER_TIMELINE_SHADOW = "ENCOUNTER_TIMELINE_SHADOW";
 

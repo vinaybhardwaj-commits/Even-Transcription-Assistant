@@ -25,6 +25,7 @@ import { runShadowForRoomDay } from "@/lib/encounter-clock/shadow-io";
 import { runFusionShadowForRoomDay } from "@/lib/encounter-clock/shadow-v2";
 import { encounterFusionShadowEnabled, encounterTimelineShadowEnabled, encounterGateDiarEnabled } from "@/lib/encounter-clock/flag";
 import { runTimelineShadowForRoomDay } from "@/lib/encounter-clock/shadow-v3";
+import { runTimelineLeaveForRoomDay } from "@/lib/encounter-clock/shadow-leave";
 import { SMOOTHER_VERSION } from "@/lib/encounter-clock/smooth";
 import { lookupSegments, SESSION_WINDOW_LIMIT_DEFAULT, SESSION_WINDOW_LIMIT_MAX } from "@/lib/diarize-segments";
 import { probePyannote } from "./health";
@@ -311,18 +312,25 @@ const encounterShadowRun: McpTool = {
       // v2 when asked for this call (replay) or when the fusion flag is on; the flag parser throws on an
       // unrecognised value, which failSafe reports rather than reading it as off.
       const timelineReplay = argBool(args, "timeline");
-      // v3 writes its own 'timeline' run beside whichever acoustic/fused run follows; a replay-only call stops after it
-      const v3 = timelineReplay || encounterTimelineShadowEnabled()
-        ? await runTimelineShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date, gate_diar: encounterGateDiarEnabled() })
+      // v3 writes its own 'timeline' run beside whichever acoustic/fused run follows; a replay-only call stops after it.
+      // The leave lane writes encounter_timeline_shadow (0156) on the same switch. A leave failure is reported beside v3.
+      const wantTimeline = timelineReplay || encounterTimelineShadowEnabled();
+      const gate_diar = encounterGateDiarEnabled();
+      const v3 = wantTimeline
+        ? await runTimelineShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date, gate_diar })
         : null;
-      if (timelineReplay && v3) return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v3", replay: true, ...v3 };
+      const leave = wantTimeline
+        ? await runTimelineLeaveForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date, gate_diar }).catch(() => ({ ok: false as const, error: "leave_failed" as const }))
+        : null;
+      const timelineExtra = { ...(v3 ? { timeline: v3 } : {}), ...(leave ? { leave } : {}) };
+      if (timelineReplay && v3) return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v3", replay: true, ...v3, ...(leave ? { leave } : {}) };
       const replay = argBool(args, "fusion");
       if (replay || encounterFusionShadowEnabled()) {
         const v2 = await runFusionShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
-        return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v2", replay, ...v2, ...(v3 ? { timeline: v3 } : {}) };
+        return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v2", replay, ...v2, ...timelineExtra };
       }
       const res = await runShadowForRoomDay({ room_id: room.id, room_day_id: roomDayId, ist_date: d.date });
-      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v1", ...res, ...(v3 ? { timeline: v3 } : {}) };
+      return { room_id: room.id, ist_date: d.date, room_day_id: roomDayId, runner: "v1", ...res, ...timelineExtra };
     }),
 };
 

@@ -96,7 +96,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
   it("the default list is every listed tool: the 13 operator names, the lab families, scribe_jobs and the S1, S5, S8 and S2L additions", async () => {
     const all = await names();
     expect(all).toHaveLength(S.LAB_TOOLS.length);
-    expect(all).toHaveLength(57);
+    expect(all).toHaveLength(58);
     for (const n of OPERATOR_13) expect(all).toContain(n);
     for (const n of ["scribe_now", "scribe_room", "scribe_tape_day", "scribe_steward", "scribe_kiosks", "scribe_stt_windows", "scribe_reb_index", "scribe_sarvam", "scribe_steward_command", "scribe_lanes", "scribe_fuse_report", "scribe_jev_signals"]) expect(all).toContain(n);
     expect(new Set(all).size).toBe(all.length);
@@ -179,7 +179,7 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
       compared++;
     }
     expect(compared).toBe(41);
-    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_jev_health", "scribe_jev_question_sets", "scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_nemotron_worker", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day", "scribe_timbre"]);
+    expect(all.map((t) => t.name).filter((n) => !mainBy.has(n)).sort()).toEqual(["scribe_encounter_timeline", "scribe_jev_health", "scribe_jev_question_sets", "scribe_jobs", "scribe_kiosks", "scribe_lanes", "scribe_nemotron_worker", "scribe_now", "scribe_reb_index", "scribe_room", "scribe_rubric", "scribe_sarvam", "scribe_steward", "scribe_steward_command", "scribe_stt_windows", "scribe_tape_day", "scribe_timbre"]);
     // shortened descriptions only: same keys, types, enums, required, bounds as the registry's schema
     const strip = (o: unknown): unknown => Array.isArray(o) ? o.map(strip) : o && typeof o === "object" ? Object.fromEntries(Object.entries(o as Row).filter(([k, v]) => !(k === "description" && typeof v === "string")).map(([k, v]) => [k, strip(v)])) : o;
     for (const t of all) expect(strip(t.inputSchema), t.name).toEqual(strip(S.CALLABLE_TOOLS.get(t.name)!.inputSchema));
@@ -447,7 +447,7 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(42_800); // Timbre T-15 (#85): scribe_timbre, +~950 chars (measured 42,7xx); was 41,800
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(43_500); // epic #23 (i): scribe_encounter_timeline, measured 43,348; was 42,800 after Timbre
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (consult-reuse: scribe_sarvam force; S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; TS-H13: the helper and commands views of scribe_kiosks; 0143: the nemotron_lab_run job kind; TS-H13: the helper and commands views of scribe_kiosks) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {

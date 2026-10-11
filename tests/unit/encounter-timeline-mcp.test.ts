@@ -1,7 +1,7 @@
 /** Dispatch of the timeline run from scribe_encounter_shadow_run, and the `source` argument of scribe_encounter_hypotheses. v3 and the store are mocked. */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const H = vi.hoisted(() => ({ v1: 0, v3: [] as unknown[], latest: [] as unknown[][] }));
+const H = vi.hoisted(() => ({ v1: 0, v3: [] as unknown[], leave: [] as unknown[], latest: [] as unknown[][] }));
 vi.mock("@/lib/room-access/check", async (orig) => ({ ...((await orig()) as object), roomDayIsBlind: async () => false }));
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no database in this test"); } }));
 vi.mock("@/lib/encounter-clock/shadow-io", async (orig) => ({
@@ -10,6 +10,9 @@ vi.mock("@/lib/encounter-clock/shadow-io", async (orig) => ({
 }));
 vi.mock("@/lib/encounter-clock/shadow-v3", () => ({
   runTimelineShadowForRoomDay: async (a: unknown) => { H.v3.push(a); return { ok: true, run_id: "ehr_tl" }; },
+}));
+vi.mock("@/lib/encounter-clock/shadow-leave", () => ({
+  runTimelineLeaveForRoomDay: async (a: unknown) => { H.leave.push(a); return { ok: true, run_id: "ets_fake", consults: 0, cache_hits: 0, jev_asked: 0, summary: {} }; },
 }));
 vi.mock("@/lib/encounter-hypotheses", async (orig) => ({
   ...(await orig<typeof import("@/lib/encounter-hypotheses")>()),
@@ -28,33 +31,38 @@ const hyp = VOICE_TOOLS.find((t) => t.name === "scribe_encounter_hypotheses")!;
 const ctx = { origin: "https://x", actor: "t", scopes: new Set(["invoke" as const, "read" as const]) };
 const call = (t: typeof run, args: Record<string, unknown>) => t.handler({ room_day_id: "rd_mcp", room_id: "room_x", ...args }, ctx as never) as Promise<Record<string, unknown>>;
 
-afterEach(() => { H.v1 = 0; H.v3 = []; H.latest = []; vi.unstubAllEnvs(); });
+afterEach(() => { H.v1 = 0; H.v3 = []; H.leave = []; H.latest = []; vi.unstubAllEnvs(); });
 
 describe("scribe_encounter_shadow_run → timeline", () => {
   it("default: flag off, no replay → v3 never runs", async () => {
     vi.stubEnv(ENCOUNTER_TIMELINE_SHADOW, "");
     expect(await call(run, {})).toMatchObject({ runner: "v1" });
     expect(H.v3).toHaveLength(0);
+    expect(H.leave).toHaveLength(0);
   });
   it("timeline:true → v3 only (replay), gate v2 off unless ENCOUNTER_GATE_DIAR", async () => {
     vi.stubEnv(ENCOUNTER_GATE_DIAR, "");
     expect(await call(run, { timeline: true })).toMatchObject({ runner: "v3", replay: true, run_id: "ehr_tl" });
     expect(H.v1).toBe(0);
     expect(H.v3[0]).toMatchObject({ gate_diar: false });
+    expect(H.leave[0]).toMatchObject({ gate_diar: false });
     vi.stubEnv(ENCOUNTER_GATE_DIAR, "1");
     await call(run, { timeline: true });
     expect(H.v3[1]).toMatchObject({ gate_diar: true });
+    expect(H.leave[1]).toMatchObject({ gate_diar: true });
   });
   it("flag on → v3 runs beside v1 and the answer carries both", async () => {
     vi.stubEnv(ENCOUNTER_TIMELINE_SHADOW, "1");
-    expect(await call(run, {})).toMatchObject({ runner: "v1", timeline: { run_id: "ehr_tl" } });
+    expect(await call(run, {})).toMatchObject({ runner: "v1", timeline: { run_id: "ehr_tl" }, leave: { run_id: "ets_fake" } });
     expect(H.v3).toHaveLength(1);
+    expect(H.leave).toHaveLength(1);
   });
   it("a typo in the flag runs nothing", async () => {
     vi.stubEnv(ENCOUNTER_TIMELINE_SHADOW, "maybe");
     expect((await call(run, {})).ok).toBe(false);
     expect(H.v1).toBe(0);
     expect(H.v3).toHaveLength(0);
+    expect(H.leave).toHaveLength(0);
   });
 });
 
