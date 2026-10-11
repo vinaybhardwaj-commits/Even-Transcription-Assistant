@@ -1235,7 +1235,7 @@ export async function writeHelperFields(sql: (s: TemplateStringsArray, ...v: unk
  * catches its own errors, and a scheduler fault is caught here too.
  */
 export function deferHelperWrite(work: () => Promise<void>): void {
-  const run = () => work().catch(() => {});
+  const run = () => work().catch((e) => console.error(`[room-install] deferred helper write fault ${e instanceof Error ? e.name.slice(0, 32) : "error"}`));
   try {
     after(run);
   } catch {
