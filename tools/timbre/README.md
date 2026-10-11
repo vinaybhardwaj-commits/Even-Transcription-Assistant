@@ -92,6 +92,17 @@ Optional `--outcomes outcomes.csv` joins accept/defer and unresolved-doubt count
 
 Gold rows with `not_patient` or `unusable` are excluded. Hidden repeats (`is_repeat`) score intra-rater quadratic weighted kappa, Spearman, CCC, and exact agreement. Arousal and valence use Lin's CCC (0–1 model outputs are mapped onto 1–5 first) and Spearman. When a model has no direct A/V columns, a grouped-CV ridge head on its embedding produces the CCC. Flags `engaged`, `anxious`, `resistant`, `words_ne_tone` (CSV alias `words_tone_mismatch`) use a grouped-CV logistic head and macro-F1. Groups are `room|date`.
 
+### Text lane and fusion
+
+`TEXT_LANE.md` is the operator note. Jev scores masked patient text only, behind `TIMBRE_TEXT_LANE=1`, and never sees audio. `--fusion` (with `--text-scores`) adds voice-only, text-only, and late-fused Spearman / CCC / macro-F1 on one room-day GroupKFold. Without that flag the report is unchanged.
+
+```bash
+python -m tools.timbre.text_lane mask --in windows.csv --out masked.jsonl
+TIMBRE_TEXT_LANE=1 TIMBRE_JEV_MOCK=1 python -m tools.timbre.text_lane score --in masked.jsonl --out scores.jsonl
+python -m tools.timbre.evaluate --labels labels.csv --features results/features.parquet \
+  --out results/eval.json --fusion --text-scores scores.jsonl --voice-model audeering_msp_dim.v1
+```
+
 ## Models
 
 No checkpoint id was substituted. The Aniemore row is the same Hugging Face repo production uses; this harness loads the fp32 root, while the Mini serves the int8 subfolder.
@@ -135,7 +146,7 @@ R2 fetch is optional and read-only (`GetObject` only, keys under `lab/nemotron-p
 
 ## Fixtures
 
-`fixtures/` is synthetic. `audio/synth_consultA_p0000000.wav` is a one-second harmonic stack from `synth_speech`. `tiny.nlp` is a 2×2 matrix. `windows.csv` and `labels.csv` use invented ids. No patient audio and no real consult is in this tree.
+`fixtures/` is synthetic. `audio/synth_consultA_p0000000.wav` is a one-second harmonic stack from `synth_speech`. `tiny.nlp` is a 2×2 matrix. `windows.csv` and `labels.csv` use invented ids. `fixtures/text/` is invented sentences and a Scribe-shaped speaker export. No patient audio and no real consult is in this tree.
 
 ## Smoke timings
 
