@@ -1,0 +1,28 @@
+name: eta2freescript-tests
+
+on:
+  pull_request:
+    paths:
+      - "tools/eta2freescript/**"
+      - ".github/workflows/eta2freescript-tests.yml"
+  push:
+    paths:
+      - "tools/eta2freescript/**"
+      - ".github/workflows/eta2freescript-tests.yml"
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies (no model SDK)
+        run: python -m pip install -r tools/eta2freescript/requirements.txt
+      - name: v0.2 schema matches its generator
+        run: python -m tools.eta2freescript.schema.build_v02 --check
+      - name: Vendored validator self-test and examples
+        run: python tools/eta2freescript/vendor/freescript-w38/validate_artifact.py tools/eta2freescript/vendor/freescript-w38/examples/*.json
+      - name: Unit tests (synthetic fixtures, mocked model calls)
+        run: python -m pytest -c tools/eta2freescript/pytest.ini tools/eta2freescript/tests -q

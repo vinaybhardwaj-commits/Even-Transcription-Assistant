@@ -1,0 +1,8 @@
+# Run output holds transcript text; it never belongs in the repo.
+_eta2freescript/
+out/
+results/
+__pycache__/
+.pytest_cache/
+*.pyc
+usage.jsonl

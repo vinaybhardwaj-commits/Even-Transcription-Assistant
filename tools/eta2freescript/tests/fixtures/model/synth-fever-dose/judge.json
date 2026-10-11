@@ -1,0 +1,87 @@
+{
+ "drugs_ref": [
+  {
+   "ref_idx": 0,
+   "name": "Paracetamol 1000 mg",
+   "said_aloud": "named",
+   "evidence_turns": [
+    7
+   ],
+   "matched_pred_idx": 0,
+   "matched_kept_k": null,
+   "match": "exact",
+   "dose": {
+    "strength": "match",
+    "frequency": "match",
+    "duration": "match"
+   },
+   "slot_k": null,
+   "slot_fields": {}
+  }
+ ],
+ "drugs_pred": [
+  {
+   "pred_idx": 0,
+   "label": "paracetamol 1 g",
+   "matched_ref_idx": 0,
+   "tape_supported": "yes",
+   "order_status_ok": true,
+   "issue": null
+  }
+ ],
+ "comorbidities_pred": [],
+ "kept_out_review": [],
+ "completion_review": [],
+ "diagnosis": {
+  "ref": "Viral fever",
+  "pred": "Viral fever",
+  "match": "exact",
+  "icd_ref": "B34.9",
+  "icd_pred": "B34.9",
+  "icd_match": "exact",
+  "dx_oversplit": false
+ },
+ "investigations_ref": [
+  {
+   "name": "CBC",
+   "said_aloud": "yes",
+   "matched": true
+  }
+ ],
+ "investigations_pred": [
+  {
+   "name": "CBC",
+   "matched_ref": true,
+   "tape_supported": "yes",
+   "order_status_ok": true,
+   "issue": null
+  }
+ ],
+ "referrals_pred": [],
+ "advice_ref": [
+  {
+   "text": "fluids",
+   "said_aloud": "yes",
+   "matched": true
+  }
+ ],
+ "advice_pred": [
+  {
+   "text": "Drink plenty of water",
+   "matched_ref": true,
+   "tape_supported": "yes"
+  }
+ ],
+ "advice_too_long": false,
+ "follow_up": {
+  "ref": "with CBC",
+  "pred": "with reports 2026-10-12",
+  "match": "match",
+  "type_ok": true
+ },
+ "hallucinations": [],
+ "omissions_said_aloud": [],
+ "omissions_not_said_aloud": [],
+ "stage_b_additions": [],
+ "comment": "Synthetic fixture."
+}

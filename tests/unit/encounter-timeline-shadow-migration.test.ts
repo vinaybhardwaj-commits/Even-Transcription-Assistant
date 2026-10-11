@@ -8,10 +8,11 @@ const down = readFileSync("db/rollbacks/0156_encounter_timeline_shadow.down.sql"
 const writer = readFileSync("lib/encounter-clock/shadow-leave.ts", "utf8");
 
 describe("0156 encounter_timeline_shadow", () => {
-  it("is the next migration and does not grant", () => {
+  it("is present once, sits just before 0157, and does not grant", () => {
     const nums = readdirSync("db/migrations").filter((f) => /^\d{4}_.+\.sql$/.test(f)).map((f) => f.slice(0, 4));
     expect(nums.filter((n) => n === "0156")).toEqual(["0156"]);
-    expect(Math.max(...nums.map(Number))).toBe(156);
+    expect(nums.filter((n) => n === "0157")).toEqual(["0157"]);
+    expect(Math.max(...nums.map(Number))).toBe(157);
     expect(up).not.toMatch(/\bGRANT\b/);
     expect(up).toMatch(/INSERT INTO schema_migrations \(version, name\)\s+VALUES \(156, '0156_encounter_timeline_shadow'\)/);
     const tables = up.slice(up.indexOf("CREATE TABLE"));

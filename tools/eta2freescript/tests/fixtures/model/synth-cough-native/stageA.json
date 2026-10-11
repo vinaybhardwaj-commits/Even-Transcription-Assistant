@@ -1,0 +1,152 @@
+{
+ "schema": "even.encounter.v2",
+ "speaker_roles": [
+  {
+   "speaker": "S0",
+   "role": "doctor",
+   "confidence": 0.9
+  },
+  {
+   "speaker": "S1",
+   "role": "patient",
+   "confidence": 0.9
+  }
+ ],
+ "language_notes": "Romanised and Devanagari Hindi, no English pass",
+ "chief_complaint": {
+  "text": "Cough and sore throat",
+  "duration": "3 days",
+  "basis": "said",
+  "source_turns": [
+   1
+  ]
+ },
+ "hpi": [
+  {
+   "text": "No fever",
+   "basis": "said",
+   "source_turns": [
+    3
+   ]
+  }
+ ],
+ "comorbidities": [],
+ "history": [],
+ "drug_history": [],
+ "allergy_history": [],
+ "examination": [
+  {
+   "performed": "Throat",
+   "finding": "red",
+   "basis": "said",
+   "source_turns": [
+    4
+   ]
+  },
+  {
+   "performed": "Chest",
+   "finding": "clear",
+   "basis": "said",
+   "source_turns": [
+    4
+   ]
+  }
+ ],
+ "vitals": [],
+ "assessment": {
+  "summary": "Upper respiratory infection",
+  "basis": "inferred",
+  "source_turns": [
+   1,
+   4
+  ]
+ },
+ "diagnoses": [
+  {
+   "label": "Acute pharyngitis",
+   "rank": "primary",
+   "doctor_named": false,
+   "status": "provisional",
+   "basis": "inferred",
+   "icd10_suggestion": "J02.9",
+   "icd10_confidence": 0.5,
+   "source_turns": [
+    1,
+    4
+   ]
+  }
+ ],
+ "plan": [],
+ "prescription": [
+  {
+   "action": "start",
+   "decision_turn": 5,
+   "generic": null,
+   "brand_as_said": "Ascoril",
+   "name_interpretation": null,
+   "strength": "5 ml",
+   "strength_said_by": "doctor",
+   "strength_turn": 5,
+   "dosage_form": "syrup",
+   "route": "oral",
+   "frequency": "3 times a day",
+   "duration": "5 days",
+   "instructions": null,
+   "basis": "said",
+   "confidence": 0.8,
+   "source_quote_turn": 5,
+   "source_turns": [
+    5
+   ]
+  }
+ ],
+ "regimen_slots": [
+  {
+   "dosage_form": "tablet",
+   "frequency": "once at night",
+   "duration": "5 days",
+   "timing": "at bedtime",
+   "drug_class_said": null,
+   "indication_said": null,
+   "quote_turn": 6,
+   "source_turns": [
+    6
+   ],
+   "confidence": 0.6
+  }
+ ],
+ "investigations": [],
+ "advice": [
+  {
+   "text": "Gargle with warm water",
+   "basis": "said",
+   "source_turns": [
+    7
+   ]
+  }
+ ],
+ "follow_up": {
+  "type": "MANDATORY_FOLLOW_UP",
+  "interval": {
+   "value": 2,
+   "unit": "WEEKS"
+  },
+  "date": null,
+  "when": null,
+  "condition": null,
+  "with_reports": false,
+  "with_referral": false,
+  "basis": "said",
+  "source_turns": [
+   8
+  ]
+ },
+ "referrals": [],
+ "red_flags_safety_net": [],
+ "consult_boundary": {
+  "suspected": false,
+  "foreign_turns": [],
+  "reason": null
+ },
+ "uncertainties": []
+}

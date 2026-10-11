@@ -1,0 +1,264 @@
+{
+  "schema_version": "eta.freescript.v0.1",
+  "artifact_id": "00000000-0000-4000-8000-000000000001",
+  "supersedes": null,
+  "created_at": "2026-09-20T10:30:00+05:30",
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "0.1",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "model": "none (hand-authored)",
+    "model_provider": "none",
+    "zdr": true,
+    "temperature": 0
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-1",
+    "room": "EXAMPLE-ROOM",
+    "window_start": "2026-09-20T10:00:00+05:30",
+    "window_end": "2026-09-20T10:15:00+05:30",
+    "languages": [
+      "en",
+      "hi"
+    ],
+    "transcript": {
+      "segment_count": 14,
+      "diarised": false,
+      "english_source": "mt:gemini-3.8-flash"
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "gp_extraction": {
+    "presenting_complaints": {
+      "symptoms": "Fever for 2 days with body ache. Took paracetamol at home once.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Acute viral fever",
+          "is_differential_diagnosis": true,
+          "raw_name": "viral fever",
+          "aliases": [
+            "Viral fever"
+          ]
+        }
+      ]
+    },
+    "examination": "Temperature 100.2 F. Throat mildly congested. Chest clear.",
+    "medicines": [
+      {
+        "name": "Paracetamol 650",
+        "frequency": "TDS",
+        "duration": "3 days",
+        "instructions": "after food, only if fever",
+        "raw_name": "Dolo 650",
+        "aliases": [
+          "Dolo 650",
+          "Calpol 650"
+        ]
+      }
+    ],
+    "further_investigations": [
+      {
+        "name": "Complete Blood Count",
+        "urgent": false,
+        "instruction": "",
+        "raw_name": "CBC",
+        "aliases": [
+          "CBC",
+          "Haemogram"
+        ]
+      }
+    ],
+    "follow_up": {
+      "followup_type": "IF_REQUIRED",
+      "follow_up_instructions": "come back if fever lasts beyond 3 days"
+    },
+    "general_advice": "Drink plenty of fluids. Rest."
+  },
+  "note_text": "Co-morbidities:\nPresenting Complaint: Fever for 2 days with body ache. Took paracetamol at home once.\nExamination: Temp 100.2 F. Throat mildly congested. Chest clear.\nDiagnoses: Likely viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Dolo 650 TDS x 3 days after food, only if fever\nFurther Investigation: CBC\nFollow up: If required; come back if fever lasts beyond 3 days\nRefer to:\nGeneral Advice: Plenty of fluids. Rest.",
+  "provenance": [
+    {
+      "item_id": "e1-sym",
+      "kind": "symptoms",
+      "text": "fever 2 days, body ache",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "patient",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:1",
+          "t0": "2026-09-20T10:01:05+05:30",
+          "t1": "2026-09-20T10:01:12+05:30",
+          "quote_en": "I have had fever since two days and body pain",
+          "lang": "hi"
+        }
+      ],
+      "confidence": 0.85,
+      "json_pointer": "/presenting_complaints/symptoms",
+      "flags": [
+        "translation_uncertain"
+      ]
+    },
+    {
+      "item_id": "e1-home",
+      "kind": "medicine",
+      "text": "Paracetamol taken at home by patient",
+      "status": "discussed_only",
+      "negated": false,
+      "speaker": "patient",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:2",
+          "t0": "2026-09-20T10:01:20+05:30",
+          "t1": "2026-09-20T10:01:24+05:30",
+          "quote_en": "I took one paracetamol last night",
+          "lang": "hi"
+        }
+      ],
+      "confidence": 0.8,
+      "json_pointer": null,
+      "flags": []
+    },
+    {
+      "item_id": "e1-exam",
+      "kind": "examination",
+      "text": "temp 100.2 F, throat congested, chest clear",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "doctor",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:5",
+          "t0": "2026-09-20T10:03:10+05:30",
+          "t1": "2026-09-20T10:03:30+05:30",
+          "quote_en": "temperature is 100.2, throat is a little red, chest is clear",
+          "lang": "en"
+        }
+      ],
+      "confidence": 0.9,
+      "json_pointer": "/examination",
+      "flags": []
+    },
+    {
+      "item_id": "e1-dx",
+      "kind": "diagnosis",
+      "text": "likely viral fever",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "doctor",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:7",
+          "t0": "2026-09-20T10:04:00+05:30",
+          "t1": "2026-09-20T10:04:05+05:30",
+          "quote_en": "looks like a viral fever",
+          "lang": "en"
+        }
+      ],
+      "confidence": 0.8,
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "flags": []
+    },
+    {
+      "item_id": "e1-med",
+      "kind": "medicine",
+      "text": "Dolo 650 three times a day for 3 days",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "doctor",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:8",
+          "t0": "2026-09-20T10:04:10+05:30",
+          "t1": "2026-09-20T10:04:22+05:30",
+          "quote_en": "take Dolo 650 three times a day after food for three days, only if there is fever",
+          "lang": "en"
+        }
+      ],
+      "confidence": 0.9,
+      "json_pointer": "/medicines/0",
+      "flags": []
+    },
+    {
+      "item_id": "e1-cbc",
+      "kind": "investigation",
+      "text": "CBC",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "doctor",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:9",
+          "t0": "2026-09-20T10:04:25+05:30",
+          "t1": "2026-09-20T10:04:28+05:30",
+          "quote_en": "get a CBC done",
+          "lang": "en"
+        }
+      ],
+      "confidence": 0.9,
+      "json_pointer": "/further_investigations/0",
+      "flags": []
+    },
+    {
+      "item_id": "e1-fu",
+      "kind": "follow_up",
+      "text": "return if fever beyond 3 days",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "doctor",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:11",
+          "t0": "2026-09-20T10:05:00+05:30",
+          "t1": "2026-09-20T10:05:06+05:30",
+          "quote_en": "if fever does not go in three days come back",
+          "lang": "en"
+        }
+      ],
+      "confidence": 0.9,
+      "json_pointer": "/follow_up",
+      "flags": []
+    },
+    {
+      "item_id": "e1-adv",
+      "kind": "advice",
+      "text": "fluids and rest",
+      "status": "prescribed",
+      "negated": false,
+      "speaker": "doctor",
+      "speaker_source": "model_inferred",
+      "evidence": [
+        {
+          "segment_ref": "EXAMPLE-W1:10",
+          "t0": "2026-09-20T10:04:40+05:30",
+          "t1": "2026-09-20T10:04:45+05:30",
+          "quote_en": "drink lots of water and take rest",
+          "lang": "en"
+        }
+      ],
+      "confidence": 0.9,
+      "json_pointer": "/general_advice",
+      "flags": []
+    }
+  ]
+}

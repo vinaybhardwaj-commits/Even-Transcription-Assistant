@@ -1,0 +1,201 @@
+{
+ "schema": "even.encounter.v2",
+ "speaker_roles": [
+  {
+   "speaker": "S0",
+   "role": "doctor",
+   "confidence": 1.0
+  },
+  {
+   "speaker": "S1",
+   "role": "patient",
+   "confidence": 1.0
+  },
+  {
+   "speaker": "S2",
+   "role": "patient",
+   "confidence": 1.0
+  },
+  {
+   "speaker": "S3",
+   "role": "attendant",
+   "confidence": 1.0
+  }
+ ],
+ "language_notes": "English",
+ "chief_complaint": {
+  "text": "Right knee pain",
+  "duration": "2 months",
+  "basis": "said",
+  "source_turns": [
+   4
+  ]
+ },
+ "hpi": [
+  {
+   "text": "Worse on stairs",
+   "basis": "said",
+   "source_turns": [
+    4
+   ]
+  }
+ ],
+ "comorbidities": [
+  {
+   "name": "Diabetes mellitus",
+   "duration": {
+    "value": 5,
+    "unit": "YEARS"
+   },
+   "on_treatment": true,
+   "basis": "said",
+   "source_turns": [
+    5,
+    7
+   ]
+  }
+ ],
+ "history": [],
+ "drug_history": [
+  {
+   "name_as_said": "metformin",
+   "text": "Takes metformin for sugar",
+   "current": true,
+   "reported_by": "attendant",
+   "source_turns": [
+    5
+   ]
+  }
+ ],
+ "allergy_history": [],
+ "examination": [
+  {
+   "performed": "Right knee",
+   "finding": null,
+   "basis": "said",
+   "source_turns": [
+    8
+   ]
+  }
+ ],
+ "vitals": [],
+ "assessment": {
+  "summary": "Knee pain, likely degenerative",
+  "basis": "inferred",
+  "source_turns": [
+   4
+  ]
+ },
+ "diagnoses": [
+  {
+   "label": "Osteoarthritis of right knee",
+   "rank": "primary",
+   "doctor_named": false,
+   "status": "provisional",
+   "basis": "inferred",
+   "icd10_suggestion": "M17.11",
+   "icd10_confidence": 0.5,
+   "source_turns": [
+    4,
+    10
+   ]
+  },
+  {
+   "label": "Knee pain",
+   "rank": "secondary",
+   "doctor_named": false,
+   "status": "confirmed",
+   "basis": "said",
+   "icd10_suggestion": "M25.561",
+   "icd10_confidence": 0.5,
+   "source_turns": [
+    4
+   ]
+  }
+ ],
+ "plan": [],
+ "prescription": [
+  {
+   "action": "continue",
+   "decision_turn": 0,
+   "generic": "pantoprazole",
+   "brand_as_said": null,
+   "name_interpretation": null,
+   "strength": "40 mg",
+   "strength_said_by": "doctor",
+   "strength_turn": 0,
+   "dosage_form": "tablet",
+   "route": "oral",
+   "frequency": "once daily before breakfast",
+   "duration": "2 weeks",
+   "instructions": "before breakfast",
+   "basis": "said",
+   "confidence": 0.8,
+   "source_quote_turn": 0,
+   "source_turns": [
+    0
+   ]
+  }
+ ],
+ "regimen_slots": [
+  {
+   "dosage_form": "gel",
+   "frequency": "twice a day",
+   "duration": "10 days",
+   "timing": null,
+   "drug_class_said": null,
+   "indication_said": "knee pain",
+   "quote_turn": 9,
+   "source_turns": [
+    9
+   ],
+   "confidence": 0.7
+  }
+ ],
+ "investigations": [
+  {
+   "name": "X-ray right knee",
+   "order_status": "ordered",
+   "timing": null,
+   "decision_turn": 10,
+   "basis": "said",
+   "source_turns": [
+    10
+   ]
+  }
+ ],
+ "advice": [
+  {
+   "text": "Avoid climbing stairs",
+   "basis": "said",
+   "source_turns": [
+    11
+   ]
+  }
+ ],
+ "follow_up": {
+  "type": null,
+  "interval": null,
+  "date": null,
+  "when": null,
+  "condition": "Come back if the pain does not settle",
+  "with_reports": false,
+  "with_referral": false,
+  "basis": "said",
+  "source_turns": [
+   12
+  ]
+ },
+ "referrals": [],
+ "red_flags_safety_net": [],
+ "consult_boundary": {
+  "suspected": true,
+  "foreign_turns": [
+   0,
+   1,
+   2
+  ],
+  "reason": "goodbye to a previous patient before a new greeting"
+ },
+ "uncertainties": []
+}

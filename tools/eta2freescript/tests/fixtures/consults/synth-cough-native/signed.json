@@ -1,0 +1,28 @@
+{
+ "medicines": [
+  {
+   "name": "Ascoril LS syrup",
+   "strength": "5 ml",
+   "frequency": "TDS",
+   "duration": "5 days"
+  },
+  {
+   "name": "Levocetirizine 5 mg",
+   "frequency": "HS",
+   "duration": "5 days"
+  }
+ ],
+ "diagnoses": [
+  "Acute pharyngitis"
+ ],
+ "icd_codes": [
+  "J02.9"
+ ],
+ "investigations": [],
+ "comorbidities": [],
+ "advice": "Warm water gargles",
+ "follow_up": {
+  "type": "MANDATORY_FOLLOW_UP",
+  "date": "2026-10-19"
+ }
+}
