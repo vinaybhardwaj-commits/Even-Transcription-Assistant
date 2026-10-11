@@ -1,0 +1,4 @@
+item_id,window_id,is_repeat,arousal,valence,engaged,anxious,resistant,words_tone_mismatch,not_patient,unusable,confidence,room,date
+1,synth_a,0,3,3,1,0,0,0,0,0,medium,ROOM-A,2026-01-01
+2,synth_a,1,3,4,1,0,0,1,0,0,medium,ROOM-A,2026-01-01
+3,synth_b,0,1,1,0,0,0,0,0,1,low,ROOM-A,2026-01-01
