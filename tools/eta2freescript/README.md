@@ -1,0 +1,271 @@
+# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.0.0 · stageB-v4 · eta.freescript.v0.2)
+
+Turns one isolated OPD consult (an ETA cut clip with its Sarvam transcript and, when present, the REB `role.llm-roles`
+track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.2` artifact holding `gp_extraction`
+(= `pulsepb.GPLlmExtraction`), `note_text` under the 11 FreeScript headings, per-item `provenance`, a
+`completion_required` list for the doctor, and a `clip_boundary` verdict.
+
+**Offline tool. Not wired to production.** It reads a local folder and writes a local folder. Nothing is pushed to Pulse,
+the app or any database, and no production code path or migration is touched. Only the model calls leave the process,
+and `phi_guard.py` allows nothing but Bedrock Anthropic Claude on the `converse` route.
+
+Ported from the v1 prototype (`encounter-to-rx`, 35-consult scale-up, 11 Oct 2026). The prototype's v0 and v1 prompts
+are kept unchanged under `prompts/` for reproducibility. The vendored w38 validator, schema and examples sit unchanged
+under `vendor/freescript-w38/`.
+
+## Flow
+
+```
+<data>/<uid>/transcript.json (Sarvam)  +  <data>/<uid>/role.json (REB role.llm-roles, optional)
+        │ ingest.py      join roles onto turns: exact (t0,t1,speaker) → largest same-speaker overlap → extras.map → unknown
+        │                attender → attendant; staff / other kept (v0.2). No role track → roles inferred by Stage A.
+        │                English pass used when present (--english auto); native / code-mixed segments otherwise.
+        ▼
+boundary.py (pre)   two_consults flag (+gap_at_s), second patient voice at a clip edge, long gap with a stranger
+        │           → quarantined turns, shown to Stage A as "[QUARANTINED: possible other consult]"
+        ▼
+Stage A  prompts/stageA-v2.md (Bedrock Sonnet, T=0) → even.encounter.v2 JSON (encounter.json)
+        ▼
+boundary.py (post)  + Stage A's consult_boundary.foreign_turns (topic discontinuity)
+guard.py            citations; DOCTOR DOSE PRECEDENCE; numeric support (no number not on the cited tape)
+        ▼
+mapper.py           hold-back, coarse diagnoses, social drop, advice cap, typed follow-up, quarantine,
+        │           sparse fields → kept-out review items + completion_required
+        ▼
+Stage B  prompts/stageB-v4.md (Bedrock Sonnet, input = gp_extraction + flags only) → note_text
+        ▼
+sanitize_note → validate.py (v0.2 schema + vendored G1–G6 on the v0.1 projection + C1–C4)
+        │  LLM note invalid (or the call failed) → deterministic note_text. Still invalid → artifact NOT written.
+        ▼
+<out>/<uid>/artifact.json  (+ artifact.v0.1.json projection, artifact.validation.json, encounter.json, stageA.raw.txt)
+```
+
+Rules kept from the prototype: the hold-back rule (an order reaches `gp_extraction` only with `basis: said` and a
+doctor decision turn), the dose guard, `phi_guard`, `sanitize_note` (no filler lines), the vendored validator, and the
+deterministic note fallback.
+
+### What v2 changes
+
+| # | Change | Where |
+|---|---|---|
+| 1 | Input is the Sarvam transcript plus the REB role track. Without a role track, roles are inferred and `speaker_source` is `model_inferred`. Native-script / code-mixed transcripts work, and the English pass is optional. | `ingest.py`, `pipeline.role_context` |
+| 2 | Follow-up always carries a vendor `FollowUpType`, plus a `followup_date` computed from the stated interval or date. | `followup.py` |
+| 3 | The doctor's stated strength beats a brand or strength the patient names (the "Dolo 650" vs "paracetamol 1 g" failure). A patient-only strength is nulled, and a conflicting brand number is stripped (the original is kept as `*_as_heard`). | `guard.dose_precedence` |
+| 4 | Diagnoses: one primary and at most 3 secondaries. A symptom is not a separate diagnosis unless the doctor names it as one, and near-duplicates are merged. | `mapper.Builder.diagnoses` |
+| 5 | Social and place detail is dropped from the presenting complaint unless Stage A marks it `clinically_relevant`. | `mapper.Builder.presenting` |
+| 6 | Advice is limited to items said aloud by the doctor, near-duplicates are merged, and the total is capped at 5 items / 300 characters. | `mapper.Builder.advice` |
+| 7 | Clip-boundary guard: turns from the previous or next patient are quarantined. Orders citing them are kept out with `[boundary_quarantine]` and the `boundary_quarantined` flag, and the artifact is flagged. | `boundary.py`, mapper |
+| 8 | Sparse fields are never guessed. Each one becomes a kept-out review item and a `completion_required` entry. | mapper |
+
+### Validator rules added for v0.2 (`validate.py`)
+
+- **C1:** every `completion_required.item_id` names a kept-out provenance item.
+- **C2:** no `boundary_quarantined` item is in `gp_extraction`.
+- **C3:** every quarantined turn is inside the transcript.
+- **C4:** a note order line names no kept-out order that its own entry does not also name.
+
+C4 closes a G6 gap. G6 checks that each line names its own entry, not that it names nothing else. A drug absent from the
+whole artifact still cannot be caught without a drug lexicon; the judge's `stage_b_additions` counts those.
+
+## Folder contract (input)
+
+One folder per consult uid. **Real consults live only on the box. Never commit one and never copy one to the cloud.**
+
+```
+<data>/<uid>/transcript.json   {consult_uid, clip:{t0_ms,t1_ms,room_slug}, language_code, model_translate,
+                                english_segments:[{t0_ms,t1_ms,speaker_id,text}],
+                                native_segments:[{t0_ms,t1_ms,speaker_id,text,lang}]}   (either list may be absent)
+<data>/<uid>/stt.json          optional palimpsest stt track; native segments when transcript.json has none
+<data>/<uid>/role.json         optional REB role.llm-roles track (layer "role", engine "llm-roles", status "ok"):
+                                segments:[{t0_ms,t1_ms,speaker,role}], extras:{map, attender_present,
+                                two_consults:{flag,gap_at_s}|bool, diar_partial}, config_hash
+<data>/<uid>/meta.json         optional {room, specialty, consult_uid, prescription_uid, link_status, link_basis}
+<data>/<uid>/signed.json       eval only: the signed Pulse note, normalised (see eval/judge.py)
+```
+
+A role track whose status is not `ok`, or whose layer or engine is wrong, is ignored. The consult then runs as
+`model_inferred`.
+
+## Run
+
+Python 3.11+. From the repo root:
+
+```bash
+python -m pip install -r tools/eta2freescript/requirements-bedrock.txt   # jsonschema + boto3 (AWS creds/region from env)
+
+# pipeline: one consult, several, or the whole folder
+python -m tools.eta2freescript run --consult <uid> --data /path/to/consults --out /path/to/out
+python -m tools.eta2freescript run --all --data /path/to/consults --out /path/to/out --workers 5
+
+# eval against signed notes (Opus judge-v3, cached), then the headline table
+python -m tools.eta2freescript eval --data /path/to/consults --out /path/to/out --judge opus
+python -m tools.eta2freescript aggregate --out /path/to/out          # → <out>/eval/headline.json
+
+python -m tools.eta2freescript validate /path/to/out/*/artifact.json
+```
+
+`eval` judges every consult in `--data` that has both an artifact in `--out` and a `signed.json` (`--consult UID...` narrows
+it), and skips the rest with a reason. The useful run flags are:
+
+- `--client bedrock|gateway|replay`: `gateway` uses the box `evengw`, with `ETA2FS_EVENGW_PATH` pointing at its directory. `replay` reads stored outputs from `--replay DIR`.
+- `--english auto|on|off`: whether to use the English pass.
+- `--no-role-track`: ignore `role.json`, to A/B test the role track.
+- `--no-stage-b`: deterministic note only.
+- `--stage-a-version v1|v2` and `--stage-b-version v3|v4`: choose prompt versions.
+
+Model ids default to the global inference profiles `global.anthropic.claude-sonnet-4-6` and
+`global.anthropic.claude-opus-4-6-v1`. Override one with `ETA2FS_BEDROCK_SONNET`, `ETA2FS_BEDROCK_OPUS` or
+`ETA2FS_BEDROCK_HAIKU`. A non-Claude override is refused (exit 2) before any transcript is read.
+
+Outputs are written with umask 077. `<out>/usage.jsonl` records tokens and USD per call (counts only, never text).
+
+The offline replay over the synthetic fixtures is what CI effectively runs:
+
+```bash
+F=tools/eta2freescript/tests/fixtures
+python -m tools.eta2freescript run --all --data $F/consults --client replay --replay $F/model --out /tmp/e2fs --workers 1
+python -m tools.eta2freescript eval --data $F/consults --client replay --replay $F/model --out /tmp/e2fs --workers 1
+python -m tools.eta2freescript aggregate --out /tmp/e2fs
+```
+
+## The `completion_required` contract
+
+`completion_required` is a top-level list in the artifact. Each entry tells the doctor what the tape did not supply.
+Nothing in it is ever guessed into `gp_extraction`.
+
+```json
+{"kind": "regimen_slot", "item_id": "med7", "prompt": "Name this drug", "detail": "form=gel; frequency=twice a day; ..."}
+```
+
+| kind | raised when | the provenance item (`json_pointer: null`) |
+|---|---|---|
+| `regimen_slot` | a regimen was said without a drug name ("apply this gel twice a day") | `[regimen_slot] Name this drug - form=…; frequency=…; duration=…` |
+| `drug_history` | a patient or attendant reported a current drug that the doctor did not continue or stop | `[drug_history] <name> - …`; prompt `Continue <name>?` |
+| `exam_missing` | no examination finding was said aloud, or a part was examined with no finding said | `[exam_missing] …` |
+| `dose_unstated` | an emitted medicine has no stated strength, frequency or duration | `[dose_unstated] <name> - strength, duration not said aloud`; `detail` = the medicine's item_id |
+| `follow_up_unstated` | a follow-up was said with no interval or date (type not IF_REQUIRED) | `[follow_up_unstated] …` |
+| `boundary_review` | the clip may hold another patient's consult | the first `boundary_quarantined` item, or a `clip_boundary` item when nothing was quarantined; `detail` = the reasons |
+
+Guarantees, enforced by the validator:
+
+- every `item_id` resolves to a provenance item with `json_pointer: null` (C1);
+- nothing quarantined is in `gp_extraction` (C2);
+- the note never names a kept-out order (G6 + C4).
+
+A consumer should block signing until each entry is resolved or dismissed by the doctor.
+
+`clip_boundary` is `{suspected, quarantined_turns[], reasons[]}`. These are the reasons:
+
+| reason | what it means |
+|---|---|
+| `role_track_two_consults` | quarantine applied |
+| `role_track_two_consults:no_gap` | flag only |
+| `role_track_two_consults:gap_outside_clip` | flag only |
+| `second_patient_voice` | quarantine applied |
+| `second_patient_voice:interleaved` | flag only |
+| `long_gap` | quarantine applied |
+| `long_gap:unconfirmed` | flag only |
+| `stage_a_topic` | quarantine applied |
+| `stage_a_topic:unlocalised` | flag only |
+
+## Follow-up
+
+Stage A emits `follow_up {type, interval{value,unit}, date, when, condition, with_reports, with_referral}`.
+`followup.py` maps it to the vendor `LlmFollowUp`:
+
+- **Type:** `followup_type` is one of the vendor `FollowUpType` values. When Stage A gives none, it is inferred:
+  - reports and a referral → `FOLLOW_UP_WITH_REPORT_AND_REFERRAL_PRESCRIPTION`;
+  - reports only → `FOLLOW_UP_WITH_REPORTS`;
+  - a referral only → `FOLLOW_UP_WITH_REFERRAL_PRESCRIPTION`;
+  - a condition only ("come back if…") → `IF_REQUIRED`;
+  - otherwise → `MANDATORY_FOLLOW_UP`.
+- **Date:** `followup_date` is the visit date (clip start, IST) plus the interval. Month arithmetic clamps to the month end, and a year counts as 12 months. A stated date is used only if it is valid and not before the visit.
+- **Interval:** `LlmFollowUp` has no interval field, so the interval goes into `follow_up_instructions` ("Review after 2 weeks"). Pulse receives the interval as text plus a computed date.
+
+## Schema notes (v0.2 bump)
+
+`schema/eta-freescript-artifact.v0.2.schema.json` is generated from the vendored v0.1 by `schema/build_v02.py`. CI
+fails if the committed file is stale (`python -m tools.eta2freescript.schema.build_v02 --check`).
+
+1. **Speakers: attender → attendant, plus staff / other.**
+   - REB roles are doctor/patient/attender/staff/other/unknown. v0.1 has doctor/patient/attendant/unknown.
+   - v0.2 maps REB `attender` to `attendant`, the v0.1 spelling, and adds `staff` and `other`. It also adds `speaker_source: role_track`.
+   - The v0.1 projection (`artifact.v0.1.json`) maps staff/other to `unknown` and role_track to `diarisation`, so a v0.1 consumer and the vendored G-rules still work.
+   - v0.2 also adds the required top-level `completion_required` and `clip_boundary`, `encounter.transcript.speaker_source` / `role_track`, the provenance kind `clip_boundary`, and the flags `boundary_quarantined` and `doctor_dose_precedence`. These need a new version because v0.1 has `additionalProperties: false`.
+2. **DurationUnit: MONTHS×12 vs YEARS.**
+   - The vendor schema allows only DAYS/WEEKS/MONTHS in `LlmDuration`, 1–1000, and says "Years are emitted as MONTHS x 12". The mapper does that: "diabetes for 5 years" becomes 60 MONTHS.
+   - If Pulse's `evenpb.DurationUnit` has YEARS, this conversion loses the doctor's unit and renders "60 months" where the doctor said "5 years".
+   - The 1–1000 range also caps a duration at 83 years; anything longer is not representable and is kept in provenance only.
+   - **Open for Pulse:** confirm the `DurationUnit` enum. If YEARS exists, v0.3 should widen `LlmDuration.unit` and drop the conversion.
+   - v0.2 deliberately does NOT widen it, so every v0.2 `gp_extraction` stays valid against v0.1.
+
+## Pulse-side needs (owned by Pulse)
+
+1. **Structured ingest endpoint.**
+   - `hospitalGPMapper.Build` is unexported, so there is no way to hand Pulse a `GPLlmExtraction` without going through its Gemini extractor, which re-extracts from text and carries its known defects.
+   - Pulse needs an exported, draft-only ingest that takes `gp_extraction` plus `note_text`. It should bind on `pulse_link.consult_uid`; the ETA consult uid is taken as the Pulse `consult_uid` with `link_status: probable`, unverified per consult.
+   - It must not overwrite content the doctor has already typed.
+2. **Review UI for `completion_required`.**
+   - "Name this drug" for each regimen slot: show the captured form, frequency and duration, and let the doctor pick the drug in one tap.
+   - A "Continue X?" prompt for each patient-reported drug.
+   - "Enter finding" for a missing exam, and "enter dose" for an unstated dose.
+   - A boundary banner showing the quarantined items.
+   - In v1, 83% of signed drugs were never named aloud, so this UI is the main lever on drug recall.
+3. **P0 security, before any ingest is switched on.**
+   - `parsePrescription` lacks server-side checks for ownership (the caller owns the consult), draft state (the prescription is still a draft) and the feature flag.
+   - Signed prescription PDFs are served from public URLs.
+   - Both must be fixed before ETA output can reach a prescription.
+4. **Enums.** Confirm `FollowUpType` and `DurationUnit` (see the schema notes). Also decide whether ICD codes need a field; `GPLlmExtraction` has none, so the ICD suggestion stays in provenance text.
+5. **ZDR.** `generator.zdr: true` assumes the Bedrock account does not retain prompts. That is the Bedrock default, but the account setting is unconfirmed.
+
+## v1 baseline (prototype, 35 consults, 8 specialties, 53 signed drugs)
+
+| Measure | v1 |
+|---|---|
+| Signed drugs never named aloud | 44/53 (83%) |
+| Drug recall, named aloud | 7/9 |
+| Drug precision | 8/12, 0 without tape support |
+| Regimen-slot capture, regimen-only drugs | 18/21 |
+| Hallucinations | 6 (0.17 per consult) |
+| Validator, final | 35/35; Stage B LLM note without fallback 29/35 |
+| Cost | Sonnet drafting ~$0.07/consult; Opus judging ~$0.07/consult |
+
+v2 has not yet been run on real consults. The numbers above are the prototype's, and the targets for v2 are the v2
+rules. Rerun `run` + `eval` + `aggregate` on the box set and compare `headline.json` against this table. `judge-v3` adds
+`completion_review` (is each completion item needed?), `[boundary_quarantine]` verdicts, `dx_oversplit`,
+`advice_too_long` and `follow_up.type_ok`.
+
+## Tests
+
+```bash
+python -m pip install -r tools/eta2freescript/requirements.txt
+python -m pytest -c tools/eta2freescript/pytest.ini tools/eta2freescript/tests -q
+```
+
+CI runs this in `.github/workflows/eta2freescript-tests.yml`, only when `tools/eta2freescript/**` changes. The suite:
+
+- uses only `FakeClient` / `ReplayClient`, never imports boto3, and makes no network call;
+- runs on three SYNTHETIC consults, generated by `tests/fixtures/build_fixtures.py`, with no real person, number or uid;
+- checks that the fixtures regenerate byte-identically;
+- scans the whole tool for the identity shapes the repo bans (doctor slug, person fields, "Dr X", emails, clinician ids, phone and Aadhaar shapes).
+
+## Files
+
+| path | role |
+|---|---|
+| `__main__.py` | CLI: run / eval / aggregate / validate |
+| `ingest.py` | folder contract, role-track join, native fallback, Stage A transcript format |
+| `boundary.py` | clip-boundary signals and quarantine |
+| `guard.py` | citations, doctor dose precedence, numeric support (English + Hindi number words) |
+| `followup.py` | FollowUpType and date |
+| `mapper.py` | encounter v2 → artifact v0.2 |
+| `note.py` | headings, `sanitize_note`, deterministic note |
+| `validate.py` | v0.2 schema, v0.1 projection, vendored G1–G6, C1–C4 |
+| `pipeline.py` | one consult end to end |
+| `models.py` | Bedrock / gateway / replay / fake clients, usage ledger |
+| `phi_guard.py` | Bedrock Claude converse only |
+| `prompts/` | stageA-v0/v1/**v2**, stageB-v0…v3/**v4**, judge-v0…v2/**v3** |
+| `eval/` | `judge.py` (judge + metrics + results.csv), `aggregate.py` (headline.json + cost) |
+| `schema/` | `build_v02.py` and the generated v0.2 schema |
+| `vendor/freescript-w38/` | the w38 validator, v0.1 schema, examples and mutants, unchanged |
+| `tests/` | unit tests, synthetic fixtures |
