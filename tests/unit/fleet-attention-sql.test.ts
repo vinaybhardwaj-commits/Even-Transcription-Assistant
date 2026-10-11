@@ -55,7 +55,8 @@ beforeAll(() => {
     CREATE TABLE room (id text PRIMARY KEY, slug text, name text, disabled_at timestamptz);
     CREATE TABLE room_install (
       install_id text PRIMARY KEY, room_id text NOT NULL, hostname text, enrolled_at timestamptz, retired_at timestamptz,
-      last_seen_at timestamptz, tape_advancing boolean, session_open boolean, disk_free_bytes bigint, state_flags jsonb);
+      last_seen_at timestamptz, tape_advancing boolean, session_open boolean, disk_free_bytes bigint, state_flags jsonb,
+      helper_state text, helper_xpc_ok boolean, helper_bad_since timestamptz, console_user boolean);
     CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL, started_at timestamptz NOT NULL DEFAULT now(), ended_at timestamptz, status text NOT NULL DEFAULT 'recording', notes text);
     CREATE INDEX bench_session_room_started_idx ON bench_session (room_id, started_at DESC);
     CREATE TABLE bench_chunk (id text PRIMARY KEY, session_id text NOT NULL, source text NOT NULL DEFAULT 'primary', idx int NOT NULL DEFAULT 0,

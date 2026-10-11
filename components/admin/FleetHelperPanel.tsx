@@ -7,11 +7,11 @@
  */
 import * as React from "react";
 
-type Health = { app_state: string | null; xpc_ok: boolean | null; console_user: boolean | null; registration: string | null; power_schedule: string | null; pmset_drift: string[]; chrome_policy: string | null; safe_mode: boolean | null };
+type Health = { helper_version: string | null; helper_registration: string | null; helper_xpc_ok: boolean | null; helper_state: string | null; console_user: boolean | null; power_schedule: string | null; pmset_drift: string[] };
 type Device = {
   device_id: string; room_id: string; room_name: string | null; machine: string; status: string; helper_version: string | null; last_poll_age_s: number | null;
   commands: { queued: number; delivered: number; done: number; expired: number };
-  helper?: { heartbeat_age_s: number | null; health: Health | null; bench_age_s: number | null; attention: { kind: "app_missing" | "helper_missing"; severity: "red" | "amber"; detail: string } | null };
+  helper?: { health: Health | null; bad_for_s: number | null; bench_age_s: number | null; attention: { kind: "app_missing" | "helper_missing"; severity: "red" | "amber"; detail: string } | null };
 };
 type Command = { cmd_id: string; device_id: string; verb: string; state: string; issued_at: string; outcome: string | null; reason: string | null };
 type Data = { devices: Device[]; commands: Command[] };
@@ -53,9 +53,9 @@ export function FleetHelperPanel() {
             ) : null}
             {d.helper?.health ? (
               <p data-testid={`fleet-health-${d.device_id}`}>
-                Helper heartbeat {d.helper.heartbeat_age_s}s ago · app {d.helper.health.app_state ?? "?"} · XPC {d.helper.health.xpc_ok === null ? "?" : d.helper.health.xpc_ok ? "ok" : "down"} · power schedule{" "}
-                {d.helper.health.power_schedule ?? "not reported"} · pmset drift {d.helper.health.pmset_drift.length === 0 ? "none" : d.helper.health.pmset_drift.join(", ")}
-                {d.helper.health.chrome_policy ? ` · Chrome policy ${d.helper.health.chrome_policy}` : ""}
+                From the app: bench poll {d.helper.bench_age_s === null ? "never" : `${d.helper.bench_age_s}s ago`} · helper {d.helper.health.helper_state ?? "state not reported"} · XPC{" "}
+                {d.helper.health.helper_xpc_ok === null ? "?" : d.helper.health.helper_xpc_ok ? "ok" : "down"} · power schedule {d.helper.health.power_schedule ?? "not reported"} · pmset drift{" "}
+                {d.helper.health.pmset_drift.length === 0 ? "none" : d.helper.health.pmset_drift.join(", ")}
               </p>
             ) : null}
             <ul className="ml-4 list-disc">

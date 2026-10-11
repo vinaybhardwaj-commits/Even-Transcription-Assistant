@@ -1008,6 +1008,16 @@ export type InstallPollFields = {
   silence_ms?: string | number | null;
   /** The Mac's config.json pins its channel; it ignores `assigned_channel`. */
   channel_locked?: boolean | null;
+  // ── TS-H5/H6/H9 (0153). Sent by app 0.1.35 and later; every earlier app omits all of them. ──
+  helper_version?: string | null;
+  helper_registration?: string | null;
+  helper_xpc_ok?: boolean | null;
+  /** 'ok' or a short reason code */
+  helper_state?: string | null;
+  console_user?: boolean | null;
+  power_schedule?: string | null;
+  /** comma-separated pmset setting names that drifted */
+  pmset_drift?: string | null;
 };
 
 /**
@@ -1066,6 +1076,14 @@ export function cleanPollFields(raw: InstallPollFields): {
   clip_count: number | null;
   silence_ms: number | null;
   channel_locked: boolean | null;
+  helper_version: string | null;
+  helper_registration: string | null;
+  helper_xpc_ok: boolean | null;
+  helper_state: string | null;
+  console_user: boolean | null;
+  power_schedule: string | null;
+  /** normalised JSON text of a <= 20 element array of short tokens, or null */
+  pmset_drift: string | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -1139,7 +1157,69 @@ export function cleanPollFields(raw: InstallPollFields): {
     clip_count: wholeNumber(raw.clip_count, CLIP_COUNT_MAX),
     silence_ms: wholeNumber(raw.silence_ms, Number.MAX_SAFE_INTEGER),
     channel_locked: typeof raw.channel_locked === "boolean" ? raw.channel_locked : null,
+    // ── TS-H5/H6/H9 (0153). Each field on its own, dropped if malformed, never a refusal; absent stays absent. ──
+    helper_version: (() => {
+      const v = str(raw.helper_version, 32);
+      return v && /^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(v) ? v : null;
+    })(),
+    helper_registration: (() => {
+      const v = str(raw.helper_registration, 24);
+      return v === "enabled" || v === "requires_approval" || v === "not_registered" ? v : null;
+    })(),
+    helper_xpc_ok: typeof raw.helper_xpc_ok === "boolean" ? raw.helper_xpc_ok : null,
+    helper_state: (() => {
+      const v = str(raw.helper_state, 32);
+      return v && /^[a-z][a-z_]{0,31}$/.test(v) ? v : null;
+    })(),
+    console_user: typeof raw.console_user === "boolean" ? raw.console_user : null,
+    power_schedule: (() => {
+      const v = str(raw.power_schedule, 64);
+      return v && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(v) ? v : null;
+    })(),
+    pmset_drift: cleanPmsetDrift(raw.pmset_drift),
   };
+}
+
+/** PURE — TS-H5. `a,b,c` (or "" for none) to the JSON text of at most 20 short tokens [a-z0-9_.-]{1,48}; anything malformed is "not reported" (null), never a partial list. */
+export function cleanPmsetDrift(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (t === "") return "[]";
+  if (t.length > 1200) return null;
+  const parts = t.split(",").map((x) => x.trim());
+  if (parts.length > 20 || !parts.every((x) => /^[a-z0-9_.-]{1,48}$/.test(x))) return null;
+  return JSON.stringify([...new Set(parts)]);
+}
+
+/**
+ * TS-H5 (0153) — what the app says about its helper, as a SECOND, best-effort statement (the main poll UPDATE is pinned to one round trip and must never be able to fail
+ * because of telemetry). Skipped entirely unless the poll carried at least one of these fields, so every older app costs nothing. COALESCE like the other measurements;
+ * `helper_bad_since` is maintained here, not reported: it starts when helper_state/helper_xpc_ok first read bad and clears on the first good reading, and a poll that
+ * carries neither leaves it alone. Errors are logged by name and swallowed.
+ */
+export async function writeHelperFields(sql: (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>, installId: string, f: ReturnType<typeof cleanPollFields>): Promise<void> {
+  const any = [f.helper_version, f.helper_registration, f.helper_xpc_ok, f.helper_state, f.console_user, f.power_schedule, f.pmset_drift].some((x) => x !== null);
+  if (!any) return;
+  try {
+    await sql`
+      UPDATE room_install
+         SET helper_version      = COALESCE(${f.helper_version}::text,      helper_version),
+             helper_registration = COALESCE(${f.helper_registration}::text, helper_registration),
+             helper_xpc_ok       = COALESCE(${f.helper_xpc_ok}::boolean,    helper_xpc_ok),
+             helper_state        = COALESCE(${f.helper_state}::text,        helper_state),
+             console_user        = COALESCE(${f.console_user}::boolean,     console_user),
+             power_schedule      = COALESCE(${f.power_schedule}::text,      power_schedule),
+             pmset_drift         = COALESCE(${f.pmset_drift}::jsonb,        pmset_drift),
+             helper_bad_since    = CASE
+               WHEN ${f.helper_state}::text IS NULL AND ${f.helper_xpc_ok}::boolean IS NULL THEN helper_bad_since
+               WHEN (${f.helper_state}::text IS NOT NULL AND ${f.helper_state}::text <> 'ok') OR ${f.helper_xpc_ok}::boolean IS FALSE THEN COALESCE(helper_bad_since, now())
+               ELSE NULL
+             END
+       WHERE install_id = ${installId} AND retired_at IS NULL
+    `;
+  } catch (e) {
+    console.error("[room-install] helper fields not stored:", e instanceof Error ? e.message.slice(0, 160) : "error");
+  }
 }
 
 /** PURE — Tier 1 §3. A whole number in 0..max, as digits or a number, or null. */
@@ -1515,6 +1595,7 @@ export async function applyInstallPoll(
     `) as InstallPollReturn[];
 
     if (rows.length > 0) {
+      await writeHelperFields(sql as never, f.install_id, f);
       await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, silenceMs: f.silence_ms, now });
       // Tier 2 §2.2 — ONCE PER TRANSITION, not once per poll. The clear fires on exactly the poll
       // where the Mac first reports the channel it was assigned, so this is that poll and no other:

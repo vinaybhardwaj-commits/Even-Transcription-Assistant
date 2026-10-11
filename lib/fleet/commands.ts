@@ -8,6 +8,7 @@
  * Nothing here runs on a schedule. No cron, worker or poll handler ever calls these.
  */
 import { normalizeHostname } from "@/lib/encounter-windows/types";
+import { roomHasOpenSession } from "@/lib/room-access/fleet-session";
 import type { FleetSql } from "./device-auth";
 import { APPROVAL_REF_RE } from "./verbs";
 import { approvalProblem, buildSignedEnvelope, envelopeShapeOk, isoMs, verifyEnvelope, publicKeysOf, DEFAULT_TTL_S, MAX_TTL_S, MIN_TTL_S, type Envelope, type IssueSpec } from "./envelope";
@@ -66,8 +67,8 @@ type GateIn = { deviceId: string; roomId: string; verb: FleetVerb; params: Recor
 /** (1) the session gate. Evaluated BEFORE the clinic-hours approval rule: an open session is the more specific reason to tell the operator. */
 export async function sessionGate(sql: FleetSql, g: GateIn): Promise<string | null> {
   if (!(SESSION_GATED_VERBS as readonly string[]).includes(g.verb)) return null;
-  const open = await sql`SELECT 1 FROM bench_session WHERE room_id = ${g.roomId} AND status IN ('recording', 'paused') LIMIT 1`;
-  return open.length > 0 && (g.approvalRef === null || (g.verb === "restart_recorder" && g.params.force !== true)) ? "session_open" : null;
+  const open = await roomHasOpenSession(sql, g.roomId);
+  return open && (g.approvalRef === null || (g.verb === "restart_recorder" && g.params.force !== true)) ? "session_open" : null;
 }
 
 /** (2) the per-device ceilings. */

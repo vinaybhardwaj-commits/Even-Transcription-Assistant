@@ -53,7 +53,7 @@ Allow the HTTP client a timeout of at least 35 s (server maxDuration 35).
 ```
 `kill_switch.global:true` (optional `reason`): no commands are served; keep polling at the normal cadence. An empty `commands` after the wait is NORMAL: re-poll immediately.
 Errors: 401 with one of `malformed|unknown_device|revoked|bad_signature|bad_audience|expired|not_yet_valid|ttl_too_long|request_mismatch|replay` · 400 `bad_wait` · 503 `db`.
-- `401 revoked` or `401 unknown_device`: the key is dead. STOP polling, report via heartbeat, wait for re-enrolment.
+- `401 revoked` or `401 unknown_device`: the key is dead. STOP polling, report it through the app (the app reports `helper_state` on its bench poll, section 9), wait for re-enrolment.
 - `401 expired|not_yet_valid`: your clock is off (>120 s); fix time, do not hammer.
 - `401 replay|bad_signature|request_mismatch|malformed`: a client bug; log, back off.
 - Other errors and network failures: backoff 1, 2, 4 ... 60 s, then re-poll. Reset to immediate re-poll after any 200.
@@ -175,12 +175,26 @@ signature:
 5OGLMDD9y38GH6MO0eX4Y+dFqVGYqrFm7Ya3uClkmq1ChctvKmaWOUT/CP+IPubuC41cQKItO55iMhLCNwinDg==
 ```
 
-## 9. Helper heartbeat fields the server reads (TS-H6 #43, TS-H9 #46; read-only)
-The helper's `helper.heartbeat` kiosk-health event (every 60 s, source `helper`, stored by the existing ingest) carries these payload fields. The server sanitises each one (type, length, closed vocabulary) and ignores everything else:
-`helper_version`, `app_version` (strings <= 32) · `registration` (`enabled|requires_approval|not_registered`) · `xpc_ok`, `console_user`, `session_open`, `safe_mode` (booleans) ·
-`app_state` (`running|missing|no_console_user|needs_enrol|retired`) · `power_schedule` (string <= 64, e.g. `MTWRFSU 07:05`) · `pmset_drift` (array of <= 20 short tokens, each <= 48) · `chrome_policy` (string <= 32) · `poll_last_ok_s` (integer 0..86400).
-Bench (the helper panel) and `scribe_kiosks view=helper` show them read-only.
+## 9. What the APP reports about the helper and the power schedule (TS-H6 #43, TS-H9 #46; read-only on the server)
+**There is no helper heartbeat.** The helper has no server credential for telemetry. Everything the server learns about the helper, the power schedule and the console arrives on the room APP's own bench poll
+(`GET /api/bench/commands`, the ~1.5 s poll with the room session cookie that already carries `install_id`, `app_version`, ...). These query fields are OPTIONAL; an app that omits them leaves the last
+reading in place (a poll without a field never clears it). Each is validated on its own and dropped if malformed; an unknown or malformed value is "not reported", never a refusal of the poll.
+
+| query field | value | stored as |
+|---|---|---|
+| `helper_version` | version string, `^[0-9A-Za-z][0-9A-Za-z._+-]*$`, <= 32 | `room_install.helper_version` |
+| `helper_registration` | `enabled` \| `requires_approval` \| `not_registered` | `helper_registration` |
+| `helper_xpc_ok` | `true` \| `false` | `helper_xpc_ok` |
+| `helper_state` | `ok`, or a short lower-case reason code `^[a-z][a-z_]{0,31}$` (e.g. `xpc_down`, `not_registered`, `stopped`). `ok` is the only healthy value | `helper_state` |
+| `console_user` | `true` \| `false`: a console (GUI) user was logged in at this poll | `console_user` |
+| `power_schedule` | text <= 64, no control characters, e.g. `MTWRFSU 07:05` | `power_schedule` |
+| `pmset_drift` | comma-separated names of pmset settings that drifted from the baseline, each `^[a-z0-9_.-]{1,48}$`, at most 20; the empty string means "none drifted" | `pmset_drift` (jsonb array) |
+
+`helper_bad_since` is NOT reported by the app: the server sets it when `helper_state` is not `ok` (or `helper_xpc_ok` is `false`) and clears it on the first good reading; a poll that carries neither field leaves it alone.
+(Field spellings are the server's definition; the server ignores unknown query keys, so a client that spells one differently simply reports nothing for it.)
 
 **Attention rules the server derives (3 minutes = 180 s):**
-- `app_missing` (red): the helper heartbeat is fresh, `console_user` is true, and the app has not polled the bench for over 3 min. Not raised for `app_state` `needs_enrol`, `retired` or `no_console_user` (deliberate or unattended states): do not spam relaunches there either.
-- `helper_missing` (amber): the device is registered and active, the app polled within 3 min, and the helper has been silent (no heartbeat and no long-poll) for over 3 min.
+- `helper_missing` (amber): the app is polling (a bench poll within 3 min) AND it has reported `helper_state` other than `ok`, or `helper_xpc_ok` false, continuously for over 3 min. A room whose app has never reported helper state raises nothing.
+- `app_missing` (red): no bench poll for over 3 min, between 07:30 and 21:30 IST, for an install whose last report had `console_user` true. Never raised outside those hours, for an install that never polled, or when the whole Mac is already reported unreachable.
+
+Bench (the helper panel) and `scribe_kiosks view=helper` show these fields and the derived state read-only. The server never sends a command because of them.

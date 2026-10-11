@@ -53,7 +53,7 @@
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { reachability, type Reachability } from "@/lib/reachability";
-import { helperAttention, isMissingTable, readHelperHeartbeats, signalsFor, type HelperSignals } from "@/lib/fleet/helper-health";
+import { helperAttention, isMissingSchema, type HelperSignals } from "@/lib/fleet/helper-health";
 import { BEHIND_LOOKBACK_H, EXT_TARGET_VERSION, extHealth, isExtHealthExcluded, type ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 import { POLLER_LEGACY_KEYS, legacyPollerKey, machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { readKioskHealth, type KioskHealthSnapshot } from "@/lib/kiosk-health-read";
@@ -232,7 +232,7 @@ export type RoomAttentionInputs = {
   /** Arch #16: when the room's kiosk last polled (bench_listener.last_poll_at); null = never; absent = not supplied (no rule). */
   listener_last_poll_at?: string | null;
   /**
-   * TS-H9 #46: the helper's signals for a room that has an ACTIVE helper device (app_missing / helper_missing). Absent = no helper fleet for this room (or its read failed): no rule.
+   * TS-H9 #46: what the room's app reports about its helper, from the bench poll (app_missing / helper_missing). Absent = not supplied (or the read failed): no rule.
    */
   helper?: HelperSignals | null;
   /** R8/R9: the machine's extension health row (lib/encounter-windows/ext-health.ts), or absent/null (no machine, excluded machine, or source degraded). */
@@ -483,10 +483,11 @@ export function computeAttention(inputs: AttentionInputs): AttentionItem[] {
       }
     }
 
-    // app_missing (red) / helper_missing (amber), TS-H9 #46: only for rooms with an active helper device. See lib/fleet/helper-health.ts for the exact definitions.
+    // app_missing (red) / helper_missing (amber), TS-H9 #46, from what the app reports on its bench poll. See lib/fleet/helper-health.ts for the exact definitions.
     if (r.helper) {
       const h = helperAttention(r.helper, now, name);
-      if (h) mk(h.kind, h.severity, h.since_ms, h.detail, h.action);
+      // one red row per fault: if R1 already says the whole Mac is unreachable, "the recorder app stopped" adds nothing
+      if (h && !(h.kind === "app_missing" && out.some((i) => i.room_id === r.room_id && i.kind === "asleep"))) mk(h.kind, h.severity, h.since_ms, h.detail, h.action);
     }
 
     // R2 — CAPTURE FROZEN. CoreAudio stopping delivery freezes the meter to ONE value (4,220 identical samples on OPD 6 from 01:36:52).
@@ -1103,26 +1104,28 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
     return reachability({ app_poll_at: toIso(r.last_seen_at), kiosk_health_at: snap?.last_heartbeat_received_at ?? null, poller_ok_at: pollerOkTs }, nowMs);
   };
 
-  // TS-H9 #46 — the helper fleet: only rooms with an ACTIVE registered helper get signals. A database without the fleet tables yet (0148 not applied) is "no helper fleet",
-  // not a fault; any other failure is marked degraded so a missing rule is never shown as all clear.
+  // TS-H9 #46 — what each app says about its helper (room_install, migration 0153; written from the app's own bench poll — there is no helper heartbeat). A database without the
+  // columns yet is "nothing reported", not a fault; any other failure is marked degraded so a missing rule is never shown as all clear.
   const helperBy = new Map<string, HelperSignals>();
   try {
-    const devs = (await sql`
-      SELECT room_id, status,
-             to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS registered_at,
-             to_char(last_poll_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_poll_at
-        FROM fleet_devices WHERE room_id = ANY(${ids}::text[]) AND status = 'active'
-    `) as Array<{ room_id: string; status: string; registered_at: string | null; last_poll_at: string | null }>;
-    if (devs.length > 0) {
-      const hosts = roomRows.filter((r) => r.hostname && devs.some((d) => d.room_id === r.room_id)).map((r) => r.hostname as string);
-      const beats = await readHelperHeartbeats(sql as never, hosts, nowMs);
-      for (const r of roomRows) {
-        const d = devs.find((x) => x.room_id === r.room_id);
-        if (d) helperBy.set(r.room_id, signalsFor(d, r.hostname, beats, toIso(r.last_seen_at)));
-      }
+    const hrows = (await sql`
+      SELECT room_id, helper_state, helper_xpc_ok, console_user,
+             to_char(helper_bad_since AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS helper_bad_since
+        FROM room_install
+       WHERE room_id = ANY(${ids}::text[]) AND retired_at IS NULL AND enrolled_at IS NOT NULL
+    `) as Array<{ room_id: string; helper_state: string | null; helper_xpc_ok: boolean | null; console_user: boolean | null; helper_bad_since: string | null }>;
+    for (const h of hrows) {
+      const base = roomRows.find((x) => x.room_id === h.room_id);
+      helperBy.set(h.room_id, {
+        bench_at: toIso(base?.last_seen_at),
+        helper_state: h.helper_state ?? null,
+        helper_xpc_ok: h.helper_xpc_ok ?? null,
+        helper_bad_since: h.helper_bad_since ?? null,
+        console_user: h.console_user ?? null,
+      });
     }
   } catch (e) {
-    if (!isMissingTable(e)) {
+    if (!isMissingSchema(e)) {
       console.error("[fleet-attention] could not read helper_fleet:", e instanceof Error ? e.message.slice(0, 200) : "error");
       degraded.push("helper_fleet");
     }

@@ -708,7 +708,7 @@ const kiosks: McpTool = {
   name: "scribe_kiosks",
   description:
     "Kiosk fleet, read-only; reads live kiosks' stored reports, sends no command. `view`: health (newest event per kind, 24 h), versions (app, OS, update channel, last update, extension), devices (audio inputs as stored), " +
-    "power (sleep/wake/shutdown events; not_collected when none stored), last_seen (newest signal per room with ages_s), helper (TS-H13: registered helper devices, last poll age, queued/delivered/done/expired command counts, the helper heartbeat fields incl. power_schedule and pmset_drift, and the app_missing / helper_missing attention state), " +
+    "power (sleep/wake/shutdown events; not_collected when none stored), last_seen (newest signal per room with ages_s), helper (TS-H13: registered helper devices, last poll age, queued/delivered/done/expired command counts, what the room app reports about its helper on its bench poll incl. power_schedule and pmset_drift (there is no helper heartbeat), and the app_missing / helper_missing attention state), " +
     "commands (the last 20 signed commands per helper device with verb, state, issuer and outcome; counts and ids only, never signatures, nonces, keys or result details). `room` narrows to one room; omit for every enrolled kiosk (max 40). " +
     "Health payloads and log lines are never returned. Times UTC.",
   scope: "read",

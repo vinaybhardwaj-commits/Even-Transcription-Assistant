@@ -27,6 +27,7 @@ const pg = pgContainer("eta-fleet-h5");
 import { signAdminJwt, signDoctorJwt } from "@/lib/auth";
 import { loadSigner } from "@/lib/fleet/signing";
 import { claimCommands } from "@/lib/fleet/poll";
+import { fleetDevices } from "@/lib/fleet/read";
 import { publicKeysOf, verifyEnvelope, type Envelope } from "@/lib/fleet/envelope";
 
 const q = async <T = Record<string, unknown>>(s: TemplateStringsArray, ...v: unknown[]) => (await H.sql(s, ...v)) as T[];
@@ -81,9 +82,6 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
-const beat = (host: string, secAgo: number, payload: Record<string, unknown>, seq = 1) =>
-  pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES
-    (now() - interval '${secAgo} seconds', '${host}', 'b', ${seq}, 'helper', 'helper.heartbeat', now() - interval '${secAgo} seconds', '${JSON.stringify(payload)}'::jsonb)`);
 const openSession = (room: string, status = "recording") => pg.exec(`INSERT INTO bench_session (id, room_id, started_at, status) VALUES ('bs_${room}_${status}', '${room}', now() - interval '10 minutes', '${status}')`);
 const rawCmd = (id: string, dev: string, verb: string, state: string, issuedAgoS: number, delivered = 0) =>
   pg.exec(`INSERT INTO fleet_commands (cmd_id, device_id, machine, verb, issued_at, expires_at, nonce, issuer_kind, issuer_id, key_id, signature, state, delivery_count)
@@ -154,85 +152,118 @@ const rawCmd = (id: string, dev: string, verb: string, state: string, issuedAgoS
     });
   });
 
-  describe("heartbeat fields shown read-only (#43) and the attention rules (#46) on Bench and the MCP door", () => {
-    const GOOD = { helper_version: "0.2.0", app_version: "0.1.30", registration: "enabled", xpc_ok: true, app_state: "running", console_user: true, session_open: false, power_schedule: "MTWRFSU 07:05", pmset_drift: ["sleep"], chrome_policy: "ok", poll_last_ok_s: 3, safe_mode: false };
+  describe("what the APP reports on its bench poll (no helper heartbeat): stored, shown read-only, and the attention rules", () => {
+    const GOOD = { install_id: "inst_h5_1", helper_version: "0.2.0", helper_registration: "enabled", helper_xpc_ok: true, helper_state: "ok", console_user: true, power_schedule: "MTWRFSU 07:05", pmset_drift: "sleep" };
+    const poll = async (over: Record<string, unknown> = {}) => (await import("@/lib/room-install")).applyInstallPoll({ ...GOOD, ...over } as never, {});
+    const row = async () => (await q<Record<string, any>>`SELECT helper_version, helper_registration, helper_xpc_ok, helper_state, console_user, power_schedule, pmset_drift, helper_bad_since FROM room_install WHERE install_id = 'inst_h5_1'`)[0]!;
+    const DAY = Date.parse("2026-10-11T10:00:00+05:30");
+    const at = (secBefore: number) => new Date(DAY - secBefore * 1000).toISOString();
+    const setRow = (set: string) => pg.exec(`UPDATE room_install SET ${set} WHERE install_id = 'inst_h5_1'`);
 
-    it("power_schedule and pmset_drift from the NEWEST heartbeat are shown; hostile payload fields are sanitised away; a stale-only host shows no health", async () => {
-      beat(HOST, 300, { ...GOOD, power_schedule: "OLD", pmset_drift: [] }, 1);
-      beat(HOST, 20, { ...GOOD, token: "SECRETMARK", power_schedule: "MTWRFSU 07:05", app_state: "bogus" }, 2);
-      const r = await overview();
-      const d = (r.json.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV)!;
-      expect(d.helper.health).toMatchObject({ power_schedule: "MTWRFSU 07:05", pmset_drift: ["sleep"], app_state: null, xpc_ok: true, console_user: true });
-      expect(d.helper.heartbeat_age_s).toBe(20);
-      expect(JSON.stringify(r.json)).not.toContain("SECRETMARK");
-      expect((r.json.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV2)!.helper.health).toBeNull();
+    it("power_schedule, pmset_drift, helper fields and console_user arrive on the poll and are stored; hostile/malformed values are dropped field by field", async () => {
+      expect(await poll()).toMatchObject({ ok: true });
+      expect(await row()).toMatchObject({ helper_version: "0.2.0", helper_registration: "enabled", helper_xpc_ok: true, helper_state: "ok", console_user: true, power_schedule: "MTWRFSU 07:05", pmset_drift: ["sleep"], helper_bad_since: null });
+      await poll({ helper_state: "Not OK; DROP", power_schedule: "line1\nline2", pmset_drift: "ok,BAD TOKEN", helper_registration: "hacked" });
+      expect(await row()).toMatchObject({ helper_state: "ok", power_schedule: "MTWRFSU 07:05", pmset_drift: ["sleep"], helper_registration: "enabled" }); // the old readings stand
     });
 
-    it("app_missing: helper heartbeat fresh + console user + no bench poll for over 3 min -> RED on the device view, on the MCP view, and in the live attention loader", async () => {
-      beat(HOST, 20, GOOD);
-      pg.exec(`UPDATE room_install SET last_seen_at = now() - interval '4 minutes' WHERE install_id = 'inst_h5_1'`);
-      const r = await overview();
-      const d = (r.json.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV)!;
-      expect(d.helper.attention).toMatchObject({ kind: "app_missing", severity: "red" });
-      const mcp = await kiosks({ view: "helper" });
-      expect(((mcp.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV))!.helper.attention.kind).toBe("app_missing");
-      const { getFleetAttention } = await import("@/lib/fleet-attention");
-      const att = await getFleetAttention(Date.now());
-      expect(att.items.filter((i) => i.room_id === "room_h5a" && i.kind === "app_missing")).toHaveLength(1);
-      expect(att.items.find((i) => i.room_id === "room_h5a" && i.kind === "app_missing")).toMatchObject({ severity: "red" });
-      expect(att.items.some((i) => i.room_id === "room_h5b" && (i.kind === "app_missing" || i.kind === "helper_missing"))).toBe(false);
-      expect(att.degraded ?? []).not.toContain("helper_fleet");
+    it("a poll that omits the fields (an app below 0.1.35) changes nothing and costs no second statement", async () => {
+      await poll();
+      H.statements.length = 0;
+      await poll({ helper_version: undefined, helper_registration: undefined, helper_xpc_ok: undefined, helper_state: undefined, console_user: undefined, power_schedule: undefined, pmset_drift: undefined });
+      expect(H.statements.filter((t) => /helper_state/.test(t))).toEqual([]);
+      expect(await row()).toMatchObject({ helper_state: "ok", console_user: true, power_schedule: "MTWRFSU 07:05" });
     });
 
-    it("app_missing is NOT raised for needs_enrol / no_console_user (no relaunch spam at the login window)", async () => {
-      pg.exec(`UPDATE room_install SET last_seen_at = now() - interval '4 minutes' WHERE install_id = 'inst_h5_1'`);
-      beat(HOST, 20, { ...GOOD, app_state: "no_console_user", console_user: false });
-      const { getFleetAttention } = await import("@/lib/fleet-attention");
-      expect((await getFleetAttention(Date.now())).items.some((i) => i.kind === "app_missing")).toBe(false);
-      beat(HOST, 10, { ...GOOD, app_state: "needs_enrol" }, 2);
-      expect((await getFleetAttention(Date.now())).items.some((i) => i.kind === "app_missing")).toBe(false);
+    it("helper_bad_since: starts at the first bad reading, is kept (not moved) by later bad readings, is left alone by a poll with neither field, and clears on the first good one", async () => {
+      await poll({ helper_state: "xpc_down", helper_xpc_ok: false });
+      const first = (await row()).helper_bad_since;
+      expect(first).not.toBeNull();
+      pg.exec(`SELECT pg_sleep(0.05)`);
+      await poll({ helper_state: "stopped", helper_xpc_ok: false });
+      expect((await row()).helper_bad_since).toBe(first);
+      await poll({ helper_state: undefined, helper_xpc_ok: undefined, power_schedule: "MTWRFSU 07:05" });
+      expect((await row()).helper_bad_since).toBe(first);
+      await poll({ helper_state: "ok", helper_xpc_ok: true });
+      expect((await row()).helper_bad_since).toBeNull();
+      await poll({ helper_state: "ok", helper_xpc_ok: false }); // xpc false alone is bad
+      expect((await row()).helper_bad_since).not.toBeNull();
     });
 
-    it("helper_missing: app polling, helper silent for over 3 min -> AMBER; a fresh long-poll clears it; an unregistered room never raises it", async () => {
-      pg.exec(`UPDATE fleet_devices SET last_poll_at = now() - interval '5 minutes', registered_at = now() - interval '1 day' WHERE device_id = '${DEV}'`);
-      const { getFleetAttention } = await import("@/lib/fleet-attention");
-      const a = await getFleetAttention(Date.now());
-      expect(a.items.find((i) => i.room_id === "room_h5a" && i.kind === "helper_missing")).toMatchObject({ severity: "amber" });
-      const view = ((await overview()).json.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV)!;
-      expect(view.helper.attention).toMatchObject({ kind: "helper_missing", severity: "amber" });
-      pg.exec(`UPDATE fleet_devices SET last_poll_at = now() - interval '10 seconds' WHERE device_id = '${DEV}'`);
-      expect((await getFleetAttention(Date.now())).items.some((i) => i.kind === "helper_missing")).toBe(false);
-      pg.exec(`UPDATE fleet_devices SET status = 'revoked', last_poll_at = now() - interval '9 minutes' WHERE device_id = '${DEV}'`);
-      expect((await getFleetAttention(Date.now())).items.some((i) => i.room_id === "room_h5a" && i.kind === "helper_missing")).toBe(false);
-    });
-
-    it("rooms with NO helper device get no helper rule and no degraded flag (the fleet is just not there)", async () => {
-      pg.exec(`TRUNCATE fleet_devices CASCADE`);
-      const { getFleetAttention } = await import("@/lib/fleet-attention");
-      const a = await getFleetAttention(Date.now());
-      expect(a.items.some((i) => i.kind === "app_missing" || i.kind === "helper_missing")).toBe(false);
-      expect(a.degraded ?? []).not.toContain("helper_fleet");
-    });
-
-    it("a FAILING helper read is marked degraded (never a silent all-clear)", async () => {
+    it("a failing helper write NEVER fails the poll (best effort, logged by name)", async () => {
       vi.spyOn(console, "error").mockImplementation(() => {});
-      pg.exec(`ALTER TABLE fleet_devices RENAME TO fleet_devices_x`);
+      pg.exec(`
+        CREATE OR REPLACE FUNCTION h5_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.helper_state = 'boom' THEN RAISE EXCEPTION 'helper write down'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER h5_boom BEFORE UPDATE ON room_install FOR EACH ROW EXECUTE FUNCTION h5_boom();
+      `);
       try {
-        const { getFleetAttention } = await import("@/lib/fleet-attention");
-        expect((await getFleetAttention(Date.now())).degraded).toContain("helper_fleet");
+        expect(await poll({ helper_state: "boom" })).toMatchObject({ ok: true });
+        expect((await row()).helper_state).toBeNull();
+        expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM room_install WHERE install_id = 'inst_h5_1' AND last_seen_at > now() - interval '5 seconds'`)[0]!.n).toBe(1); // the main poll write still landed
       } finally {
-        pg.exec(`ALTER TABLE fleet_devices_x RENAME TO fleet_devices`);
+        pg.exec("DROP TRIGGER IF EXISTS h5_boom ON room_install; DROP FUNCTION IF EXISTS h5_boom()");
       }
     });
 
-    it("the views stay read-only and carry no secret", async () => {
-      beat(HOST, 20, { ...GOOD, token: "SECRETMARK" });
+    it("Bench / admin view and the MCP view show the app-reported health read-only; no secret or signature anywhere", async () => {
+      await poll();
+      const r = await overview();
+      const d = (r.json.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV)!;
+      expect(d.helper.health).toMatchObject({ helper_version: "0.2.0", helper_state: "ok", helper_xpc_ok: true, power_schedule: "MTWRFSU 07:05", pmset_drift: ["sleep"], console_user: true });
+      expect((r.json.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV2)!.helper.health).toBeNull(); // that app has not reported
       H.statements.length = 0;
       const mcp = await kiosks({ view: "helper" });
-      await overview();
-      expect(H.statements.filter((s) => /\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)\b/i.test(s))).toEqual([]);
-      const text = JSON.stringify(mcp);
-      for (const s of ["SECRETMARK", "signature", "nonce", "public_key", PUB]) expect(text, s).not.toContain(s);
+      expect(((mcp.devices as Array<Record<string, any>>).find((x) => x.device_id === DEV))!.helper.health.pmset_drift).toEqual(["sleep"]);
+      expect(H.statements.filter((t) => /\b(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)\b/i.test(t))).toEqual([]);
+      const text = JSON.stringify([r.json, mcp]);
+      for (const x of ["signature", "nonce", "public_key", PUB, KEY]) expect(text, x).not.toContain(x);
+    });
+
+    it("helper_missing (AMBER): the app is polling, the helper has read bad for over 3 min — on the device view and in the live attention loader; clears when the app reports ok; not raised for an app that never reported", async () => {
+      const { getFleetAttention } = await import("@/lib/fleet-attention");
+      setRow(`last_seen_at = '${at(2)}', helper_state = 'xpc_down', helper_xpc_ok = false, helper_bad_since = '${at(240)}', console_user = true`);
+      const a = await getFleetAttention(DAY);
+      expect(a.items.find((i) => i.room_id === "room_h5a" && i.kind === "helper_missing")).toMatchObject({ severity: "amber" });
+      const dev = (await fleetDevices(H.sql as never, null, DAY)).find((x) => x.device_id === DEV)!;
+      expect(dev.helper.attention).toMatchObject({ kind: "helper_missing", severity: "amber" });
+      expect(dev.helper.bad_for_s).toBe(240);
+      expect(a.items.some((i) => i.room_id === "room_h5b" && (i.kind === "helper_missing" || i.kind === "app_missing"))).toBe(false); // room B never reported
+      setRow(`helper_state = 'ok', helper_xpc_ok = true, helper_bad_since = NULL`);
+      expect((await getFleetAttention(DAY)).items.some((i) => i.kind === "helper_missing")).toBe(false);
+    });
+
+    it("app_missing (RED): no bench poll for over 3 min in clinic hours, last report had a console user — on the device view and in the loader; not at night, not without a console user, not when the Mac is already unreachable (one red row)", async () => {
+      const { getFleetAttention } = await import("@/lib/fleet-attention");
+      setRow(`last_seen_at = '${at(240)}', console_user = true, helper_state = 'ok', helper_xpc_ok = true, helper_bad_since = NULL`);
+      // the Mac is UP (its kiosk-health daemon is still talking), only the recorder app has gone quiet
+      pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES ('${at(20)}', '${HOST}', 'b', 1, 'daemon', 'heartbeat', '${at(20)}', '{}'::jsonb)`);
+      const items = (await getFleetAttention(DAY)).items.filter((i) => i.room_id === "room_h5a");
+      expect(items.find((i) => i.kind === "app_missing")).toMatchObject({ severity: "red" });
+      expect(items.some((i) => i.kind === "asleep")).toBe(false);
+      // ...but when NOTHING hears from the Mac, R1 already says it is unreachable and app_missing is not a second red row for the same fault
+      pg.exec(`DELETE FROM kiosk_health_events`);
+      const both = (await getFleetAttention(DAY)).items.filter((i) => i.room_id === "room_h5a");
+      expect(both.some((i) => i.kind === "asleep")).toBe(true);
+      expect(both.some((i) => i.kind === "app_missing")).toBe(false);
+      pg.exec(`INSERT INTO kiosk_health_events (received_at, machine, boot_id, seq, source, kind, ts, payload) VALUES ('${at(20)}', '${HOST}', 'b', 2, 'daemon', 'heartbeat', '${at(20)}', '{}'::jsonb)`);
+      const dev = (await fleetDevices(H.sql as never, null, DAY)).find((x) => x.device_id === DEV)!;
+      expect(dev.helper.attention).toMatchObject({ kind: "app_missing", severity: "red" });
+      const NIGHT = Date.parse("2026-10-11T22:00:00+05:30");
+      setRow(`last_seen_at = '${new Date(NIGHT - 240_000).toISOString()}'`);
+      expect((await getFleetAttention(NIGHT)).items.some((i) => i.kind === "app_missing")).toBe(false);
+      setRow(`last_seen_at = '${at(240)}', console_user = false`);
+      expect((await getFleetAttention(DAY)).items.some((i) => i.kind === "app_missing")).toBe(false);
+    });
+
+    it("a FAILING helper read is marked degraded (never a silent all-clear); a poll-driven rule never needs the fleet tables", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      pg.exec(`ALTER TABLE room_install RENAME COLUMN helper_state TO helper_state_x`);
+      try {
+        const { getFleetAttention } = await import("@/lib/fleet-attention");
+        expect((await getFleetAttention(DAY)).degraded).toContain("helper_fleet");
+      } finally {
+        pg.exec(`ALTER TABLE room_install RENAME COLUMN helper_state_x TO helper_state`);
+      }
     });
   });
 
@@ -240,6 +271,6 @@ const rawCmd = (id: string, dev: string, verb: string, state: string, issuedAgoS
     const walk = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(`${d}/${e.name}`) : [`${d}/${e.name}`]));
     const callers = [...walk("app"), ...walk("lib"), ...walk("scripts")].filter((f) => /\.(ts|tsx|mjs)$/.test(f) && !f.startsWith("lib/fleet/")).filter((f) => /issueCommand|queueCommand/.test(readFileSync(f, "utf8")));
     expect(callers).toEqual(["app/api/admin/fleet/commands/route.ts"]);
-    for (const f of ["lib/fleet/helper-health.ts", "lib/fleet/read.ts"]) expect(readFileSync(f, "utf8"), f).not.toMatch(/issueCommand|queueCommand|INSERT INTO|UPDATE fleet|DELETE FROM/);
+    for (const f of ["lib/fleet/helper-health.ts", "lib/fleet/read.ts"]) expect(readFileSync(f, "utf8"), f).not.toMatch(/issueCommand|queueCommand|INSERT INTO|UPDATE |DELETE FROM/);
   });
 });

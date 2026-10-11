@@ -183,6 +183,14 @@ export async function GET(req: NextRequest) {
         clip_count: sp.get("clip_count"),
         silence_ms: sp.get("silence_ms"),
         channel_locked: tri("channel_locked"),
+        // ── TS-H5/H6/H9 (0153). Sent by app 0.1.35 and later, all optional. `cleanPollFields` bounds each; `tri` keeps absent absent. ──
+        helper_version: sp.get("helper_version"),
+        helper_registration: sp.get("helper_registration"),
+        helper_xpc_ok: tri("helper_xpc_ok"),
+        helper_state: sp.get("helper_state"),
+        console_user: tri("console_user"),
+        power_schedule: sp.get("power_schedule"),
+        pmset_drift: sp.get("pmset_drift"),
       }
     : undefined;
 

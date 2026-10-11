@@ -3,7 +3,7 @@
  * never a signature, nonce, public key, token or result `detail` (the closed per-verb object stays in the database).
  */
 import type { FleetSql } from "./device-auth";
-import { helperAttention, readHelperHeartbeats, signalsFor, type HelperHealth } from "./helper-health";
+import { hasReportedHelper, healthFromRow, helperAttention, isMissingSchema, type HelperHealth } from "./helper-health";
 
 export const COMMANDS_PER_DEVICE = 20;
 export const MAX_DEVICES = 60;
@@ -12,10 +12,11 @@ export type DeviceView = {
   device_id: string; room_id: string; room_name: string | null; machine: string; status: string; helper_version: string | null;
   registered_at: string | null; last_poll_at: string | null; last_poll_age_s: number | null;
   commands: { queued: number; delivered: number; done: number; expired: number };
-  /** TS-H9/H6: what the helper's own heartbeat says (sanitised), read-only. Null health = no heartbeat in 24 h. */
+  /** TS-H9/H6: what the room APP reports about its helper on the bench poll (there is no helper heartbeat), read-only. Null health = the app has not reported any (app below 0.1.35). */
   helper: {
-    heartbeat_age_s: number | null;
     health: HelperHealth | null;
+    /** seconds helper_state / xpc have been continuously bad, or null */
+    bad_for_s: number | null;
     /** bench poll age of the room's recorder app, for context */
     bench_age_s: number | null;
     /** the #46 attention rule that holds right now, if any (app_missing / helper_missing) */
@@ -31,7 +32,7 @@ export type CommandView = {
 
 export async function fleetDevices(sql: FleetSql, roomId: string | null = null, nowMs: number = Date.now()): Promise<DeviceView[]> {
   const rows = (await sql`
-    SELECT d.device_id, ri.hostname,
+    SELECT d.device_id, d.install_id,
            to_char(ri.last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS bench_at, d.room_id, r.name AS room_name, d.machine, d.status, d.helper_version,
            to_char(d.registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS registered_at,
            to_char(d.last_poll_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_poll_at,
@@ -47,14 +48,34 @@ export async function fleetDevices(sql: FleetSql, roomId: string | null = null, 
      ORDER BY r.name NULLS LAST, d.device_id
      LIMIT ${MAX_DEVICES}
   `) as Array<Record<string, unknown>>;
-  const heartbeats = await readHelperHeartbeats(sql, rows.map((r) => r.hostname as string | null).filter((h): h is string => typeof h === "string" && h.length > 0), nowMs);
+  // what each app reports about its helper: columns from migration 0153, read separately so a database without them yet still shows the rest of the view
+  type HelperRow = Record<string, unknown>;
+  const helperRows = new Map<string, HelperRow>();
+  try {
+    const ids = rows.map((r) => String(r.install_id));
+    const hr = (await sql`
+      SELECT install_id, helper_version, helper_registration, helper_xpc_ok, helper_state, console_user, power_schedule, pmset_drift,
+             to_char(helper_bad_since AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS helper_bad_since
+        FROM room_install WHERE install_id = ANY(${ids}::text[])
+    `) as HelperRow[];
+    for (const h of hr) helperRows.set(String(h.install_id), h);
+  } catch (e) {
+    if (!isMissingSchema(e)) throw e;
+  }
   return rows.map((r) => {
-    const hostname = (r.hostname as string | null) ?? null;
-    const sig = signalsFor(
-      { status: String(r.status), registered_at: (r.registered_at as string | null) ?? null, last_poll_at: (r.last_poll_at as string | null) ?? null },
-      hostname, heartbeats, (r.bench_at as string | null) ?? null,
+    const h = helperRows.get(String(r.install_id)) ?? {};
+    const health = healthFromRow(h);
+    const att = helperAttention(
+      {
+        bench_at: (r.bench_at as string | null) ?? null,
+        helper_state: health.helper_state,
+        helper_xpc_ok: health.helper_xpc_ok,
+        helper_bad_since: (h.helper_bad_since as string | null) ?? null,
+        console_user: health.console_user,
+      },
+      nowMs,
+      String(r.room_name ?? r.room_id),
     );
-    const att = helperAttention(sig, nowMs, String(r.room_name ?? r.room_id));
     const age = (iso: string | null): number | null => (iso ? Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 1000)) : null);
     return {
     device_id: String(r.device_id), room_id: String(r.room_id), room_name: (r.room_name as string | null) ?? null, machine: String(r.machine), status: String(r.status),
@@ -62,7 +83,9 @@ export async function fleetDevices(sql: FleetSql, roomId: string | null = null, 
     last_poll_age_s: r.last_poll_age_s === null || r.last_poll_age_s === undefined ? null : Number(r.last_poll_age_s),
     commands: { queued: Number(r.queued), delivered: Number(r.delivered), done: Number(r.done), expired: Number(r.expired) },
     helper: {
-      heartbeat_age_s: age(sig.heartbeat_at), health: sig.heartbeat, bench_age_s: age(sig.bench_at),
+      health: hasReportedHelper(health) || health.console_user !== null ? health : null,
+      bad_for_s: age((h.helper_bad_since as string | null) ?? null),
+      bench_age_s: age((r.bench_at as string | null) ?? null),
       attention: att ? { kind: att.kind, severity: att.severity, detail: att.detail } : null,
     },
     };
