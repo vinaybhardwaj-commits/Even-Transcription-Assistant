@@ -1,0 +1,273 @@
+"""tools/timbre/nightly.py — the Timbre nightly job (Architecture #79, T-10). GO from Vinay, 11 Oct 2026.
+
+    python -m tools.timbre.nightly run [--date YYYY-MM-DD] [--config tools/timbre/deploy/nightly.json] [--dry-run]
+    python -m tools.timbre.nightly plan [--date ...]          # list what would be scored; fetches nothing, scores nothing
+
+Steps, for the previous IST day by default:
+  1. GET  <app>/api/timbre/consults?date=D   (HMAC, TIMBRE_INGEST_SECRET). The app reads consult_index (0150) and drops
+     held-out room-days (BLIND_ROOM_DAYS) BEFORE anything is returned, so no blind audio is ever fetched.
+  2. Budget: estimated Clef cost (~1k input tokens per 10 s window at US$0.15/M) is checked against `budget_usd_daily`;
+     consults past the cap (time order) are dropped and the run is stored as state `partial`.
+  3. Runs `python -m tools.timbre.pipeline score` (Odyssey arousal, audEERING fallback, Clef-omni valence via Cloudflare
+     Workers AI, the saved calibration maps; the text lane stays OFF unless `text_lane` is true). WavLM Aniemore is not used.
+  4. Writes run.json + clips.jsonl and POSTs one payload to <app>/api/timbre/ingest (tools/timbre/store.py): one
+     transaction per run, idempotent; a re-run is a new run row and readers use affect_consult_latest.
+Retention (36 months, every Timbre table) is the app cron /api/cron/timbre-retention, not this job.
+
+SWITCHABLE: nothing runs unless `enabled` is true (config) or TIMBRE_NIGHTLY_ENABLED=1; TIMBRE_NIGHTLY_ENABLED=0 always
+wins (the off switch). Compute target `lab_gpu` | `hf_gpu` (both cleared by Vinay) is config / TIMBRE_COMPUTE.
+No database credential lives here; no transcript text, names or audio leave the host except as scores.
+Exit codes: 0 ok / disabled / nothing to do, 2 partial (budget), 1 failed. A failed or partial run prints `ALERT` lines.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+IST = timezone(timedelta(hours=5, minutes=30))
+WINDOW_S = 10.0
+TOKENS_PER_WINDOW = 1000
+USD_PER_M_TOKENS = 0.15
+
+DEFAULTS: dict = {
+    "enabled": False,
+    "compute": "lab_gpu",
+    "device": "cuda",
+    "worker_id": "timbre-nightly",
+    "app_url": "",
+    "workdir": "/var/lib/timbre-nightly",
+    "budget_usd_daily": 2.0,
+    "max_consults": 400,
+    "speaker": "nemotron",
+    "nemotron_dir": None,
+    "segments": None,
+    "voiceprints": None,
+    "embeddings_dir": None,
+    "slot_embeddings_dir": None,
+    "calibration_arousal": "",
+    "calibration_valence": "",
+    "calibration_git_sha": "",
+    "calibration_fit_on": "gold_batches_1_2",
+    "text_lane": False,
+    "pipeline_timeout_s": 6 * 3600,
+    "pipeline_version": "timbre-v1",
+    "arousal_model_id": "odyssey_wavlm_dim.v1",
+    "arousal_model_rev": "00d0e12ba9bf957f5aeea36e8663c8c61cb50ac9",
+    "fallback_model_id": "audeering_msp_dim.v1",
+    "fallback_model_rev": "6eba34a2485ea31cb03600241787c3a5edab8626",
+    "valence_model_id": "@cf/cloudflare/clef-omni",
+    "valence_model_rev": None,
+    "clef_question_set": "timbre-clef-v1",
+    "purity_rule_version": "purity-rule-v1",
+    "purity_rule_json": {"min_purity": 0.6, "min_pure_s": 3.0, "min_cos_patient_mean": 0.3},
+    "nemotron_model_rev": None,
+}
+ENV_OVERRIDES = {
+    "TIMBRE_COMPUTE": "compute",
+    "TIMBRE_APP_URL": "app_url",
+    "TIMBRE_WORKDIR": "workdir",
+    "TIMBRE_BUDGET_USD_DAILY": "budget_usd_daily",
+    "TIMBRE_DEVICE": "device",
+}
+
+
+class NightlyError(RuntimeError):
+    pass
+
+
+def load_config(path: str | None, env: dict | None = None) -> dict:
+    env = os.environ if env is None else env
+    cfg = dict(DEFAULTS)
+    if path:
+        cfg.update(json.loads(Path(path).read_text(encoding="utf-8")))
+    for var, key in ENV_OVERRIDES.items():
+        if env.get(var, "").strip():
+            cfg[key] = float(env[var]) if key == "budget_usd_daily" else env[var].strip()
+    flag = env.get("TIMBRE_NIGHTLY_ENABLED", "").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        cfg["enabled"] = False
+    elif flag in ("1", "true", "on", "yes"):
+        cfg["enabled"] = True
+    elif flag:
+        raise NightlyError("TIMBRE_NIGHTLY_ENABLED has an unrecognised value")
+    if cfg["compute"] not in ("lab_gpu", "hf_gpu", "cpu_dev"):
+        raise NightlyError("compute must be lab_gpu, hf_gpu or cpu_dev")
+    return cfg
+
+
+def previous_ist_day(now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return (now.astimezone(IST).date() - timedelta(days=1)).isoformat()
+
+
+def sign_get(path_and_query: str, secret: str, ts: int) -> str:
+    """HMAC-SHA256(secret, f"{ts}.GET {path_and_query}") — lib/timbre/auth.ts::checkTimbreGet."""
+    return hmac.new(secret.encode(), f"{ts}.GET {path_and_query}".encode(), hashlib.sha256).hexdigest()
+
+
+def fetch_consults(app_url: str, day: str, secret: str, timeout: float = 60.0) -> dict:
+    pq = "/api/timbre/consults?" + urllib.parse.urlencode({"date": day})
+    ts = int(time.time())
+    req = urllib.request.Request(app_url.rstrip("/") + pq, headers={"x-timbre-ts": str(ts), "x-timbre-signature": sign_get(pq, secret, ts)})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (operator-configured URL)
+        body = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(body, dict) or not body.get("ok") or not isinstance(body.get("consults"), list):
+        raise NightlyError("consults route returned an unexpected body")
+    return body
+
+
+def estimate_usd(duration_s: float) -> float:
+    return max(1.0, duration_s / WINDOW_S) * TOKENS_PER_WINDOW * USD_PER_M_TOKENS / 1e6
+
+
+def plan(consults: list[dict], cfg: dict) -> tuple[list[dict], dict]:
+    """Time-ordered; drops unsealed / clipless rows, and everything past max_consults or the daily budget."""
+    rows = sorted((c for c in consults if c.get("clip_r2_key") and c.get("sealed", True)), key=lambda c: (int(c.get("t0_ms") or 0), c["consult_uid"]))
+    kept, spend, cut_budget, cut_max = [], 0.0, 0, 0
+    for c in rows:
+        dur = max(0.0, (int(c["t1_ms"]) - int(c["t0_ms"])) / 1000.0)
+        usd = estimate_usd(dur)
+        if len(kept) >= int(cfg["max_consults"]):
+            cut_max += 1
+            continue
+        if spend + usd > float(cfg["budget_usd_daily"]):
+            cut_budget += 1
+            continue
+        kept.append({**c, "duration_s": dur})
+        spend += usd
+    info = {"eligible": len(rows), "kept": len(kept), "dropped_budget": cut_budget, "dropped_max": cut_max, "skipped_unsealed_or_no_clip": len(consults) - len(rows), "cost_usd_est": round(spend, 4)}
+    return kept, info
+
+
+def write_inputs(kept: list[dict], day: str, work: Path, speaker: str = "nemotron") -> tuple[Path, Path]:
+    import csv
+
+    work.mkdir(parents=True, exist_ok=True)
+    sessions, clips = work / "sessions.csv", work / "clips.jsonl"
+    with sessions.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["clip_id", "room", "date", "duration_s", "lang", "phase", "doctor_uid8", "r2_key"])
+        for c in kept:
+            w.writerow([c["consult_uid"], c.get("room_slug") or c.get("room_id") or "", day, f"{c['duration_s']:.3f}", "", "consult", c.get("doctor_uid8") or "", c["clip_r2_key"]])
+    with clips.open("w", encoding="utf-8") as fh:
+        for c in kept:
+            fh.write(json.dumps({
+                "clip_id": c["consult_uid"], "consult_uid": c["consult_uid"], "cut_version": c["cut_version"], "t0_ms": int(c["t0_ms"]),
+                "ist_date": day, "room_id": c.get("room_id"), "room_slug": c.get("room_slug"), "session_id": c.get("session_id"),
+                "doctor_uid8": c.get("doctor_uid8"), "diarize_engine": speaker, "diarize_ref": None,
+            }, sort_keys=True) + "\n")
+    return sessions, clips
+
+
+def pipeline_cmd(cfg: dict, sessions: Path, out: Path) -> list[str]:
+    cmd = [sys.executable, "-m", "tools.timbre.pipeline", "score", "--sessions", str(sessions), "--out", str(out), "--r2",
+           "--device", str(cfg["device"]), "--speaker", str(cfg["speaker"]),
+           "--calibration-arousal", str(cfg["calibration_arousal"]), "--calibration-valence", str(cfg["calibration_valence"])]
+    for key, flag in (("nemotron_dir", "--nemotron-dir"), ("segments", "--segments"), ("voiceprints", "--voiceprints"),
+                      ("embeddings_dir", "--embeddings-dir"), ("slot_embeddings_dir", "--slot-embeddings-dir")):
+        if cfg.get(key):
+            cmd += [flag, str(cfg[key])]
+    if cfg.get("text_lane"):
+        cmd.append("--text-lane")
+    return cmd
+
+
+def git_sha() -> str:
+    sha = os.environ.get("TIMBRE_GIT_SHA", "").strip()
+    if not sha:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+    if len(sha) != 40:
+        raise NightlyError("cannot determine a 40-char git sha (set TIMBRE_GIT_SHA)")
+    return sha
+
+
+def manifest(cfg: dict, day: str, info: dict, *, sha: str, started: str, finished: str, gpu_s: float, state: str, withheld_blind: int) -> dict:
+    keys = ("pipeline_version", "compute", "device", "worker_id", "nemotron_model_rev", "arousal_model_id", "arousal_model_rev",
+            "fallback_model_id", "fallback_model_rev", "valence_model_id", "valence_model_rev", "clef_question_set",
+            "purity_rule_version", "purity_rule_json", "calibration_git_sha", "calibration_fit_on")
+    m = {k: cfg.get(k) for k in keys}
+    m.update({
+        "git_sha": sha, "speaker_source": cfg["speaker"], "text_lane_on": bool(cfg.get("text_lane")), "state": state,
+        "scope_json": {"job": "timbre-nightly", "ist_date": day, "withheld_blind_room_days": withheld_blind, **info},
+        "timing_json": {"wall_s": round((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds(), 1)},
+        "gpu_seconds": round(gpu_s, 1), "cost_usd_est": info["cost_usd_est"], "started_at": started, "finished_at": finished,
+        "calibration_arousal_path": cfg["calibration_arousal"], "calibration_valence_path": cfg["calibration_valence"],
+    })
+    m["calibration_git_sha"] = m.get("calibration_git_sha") or sha
+    return m
+
+
+def run(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fetch=fetch_consults, post=None) -> int:
+    if not cfg["enabled"]:
+        print("[timbre-nightly] disabled (TIMBRE_NIGHTLY_ENABLED / config enabled) — nothing to do")
+        return 0
+    secret = os.environ.get("TIMBRE_INGEST_SECRET", "").strip()
+    if not cfg["app_url"] or not secret:
+        print("ALERT [timbre-nightly] app_url or TIMBRE_INGEST_SECRET not set")
+        return 1
+    started = datetime.now(timezone.utc).isoformat()
+    body = fetch(cfg["app_url"], day, secret)
+    kept, info = plan(body["consults"], cfg)
+    withheld = int(body.get("withheld_blind") or 0)
+    print(f"[timbre-nightly] {day}: {info} withheld_blind={withheld}")
+    if not kept:
+        print("[timbre-nightly] nothing to score")
+        return 0
+    if dry_run:
+        return 0
+    work = Path(cfg["workdir"]) / day / datetime.now(timezone.utc).strftime("%H%M%S")
+    sessions, clips = write_inputs(kept, day, work, str(cfg["speaker"]))
+    out = work / "out"
+    t0 = time.monotonic()
+    proc = runner(pipeline_cmd(cfg, sessions, out), timeout=int(cfg["pipeline_timeout_s"]), check=False)
+    gpu_s = time.monotonic() - t0
+    if getattr(proc, "returncode", 1) != 0 or not (out / "windows.parquet").is_file():
+        print(f"ALERT [timbre-nightly] pipeline failed for {day} (exit {getattr(proc, 'returncode', '?')}); nothing stored")
+        return 1
+    state = "partial" if info["dropped_budget"] or info["dropped_max"] else "ok"
+    man = manifest(cfg, day, info, sha=git_sha(), started=started, finished=datetime.now(timezone.utc).isoformat(), gpu_s=gpu_s, state=state, withheld_blind=withheld)
+    man_path = work / "run.json"
+    man_path.write_text(json.dumps(man, indent=2, sort_keys=True), encoding="utf-8")
+    from tools.timbre import store
+
+    payload = store.build_from_files(str(out / "windows.parquet"), str(man_path), str(clips), str(out / "consults.json") if (out / "consults.json").is_file() else None)
+    result = (post or store.post_payload)(payload, cfg["app_url"].rstrip("/") + "/api/timbre/ingest", secret)
+    print(f"[timbre-nightly] stored: {json.dumps(result, sort_keys=True)}")
+    if state == "partial":
+        print(f"ALERT [timbre-nightly] {day} is PARTIAL: {info['dropped_budget']} consult(s) over the daily budget, {info['dropped_max']} over max_consults")
+        return 2
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="tools.timbre.nightly")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("run", "plan"):
+        s = sub.add_parser(name)
+        s.add_argument("--date", default=None, help="IST date; default the previous IST day")
+        s.add_argument("--config", default=os.environ.get("TIMBRE_NIGHTLY_CONFIG"))
+        if name == "run":
+            s.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+    day = args.date or previous_ist_day()
+    date.fromisoformat(day)
+    try:
+        cfg = load_config(args.config)
+        return run(day, cfg, dry_run=(args.cmd == "plan" or bool(getattr(args, "dry_run", False))))
+    except Exception as exc:  # noqa: BLE001 — every failure is one ALERT line and exit 1
+        print(f"ALERT [timbre-nightly] {day} failed: {type(exc).__name__}: {str(exc)[:300]}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

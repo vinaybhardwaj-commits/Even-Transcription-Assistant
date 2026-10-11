@@ -483,7 +483,7 @@ describe("7 - gate true joins emotion to the right turn through source_refs", ()
 
     const tape = await getRoomDayTape("room_1", "2026-01-01", {
       now: () => t0 + SLOT_MS * 2,
-      env: { EMOTION_ENABLED: "1", EMOTION_SURFACE_ENABLED: "1" },
+      env: { EMOTION_ENABLED: "1", EMOTION_WAVLM_RETIRED: "0", EMOTION_SURFACE_ENABLED: "1" },
     });
     expect(tape).not.toBeNull();
     expect(tape!.emotion).toEqual({ compute_enabled: true, surface_enabled: true });

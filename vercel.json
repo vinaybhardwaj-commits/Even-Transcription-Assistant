@@ -74,6 +74,10 @@
       "schedule": "35 21 * * *"
     },
     {
+      "path": "/api/cron/timbre-retention",
+      "schedule": "50 21 * * *"
+    },
+    {
       "path": "/api/cron/steward",
       "schedule": "* * * * *"
     },

@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "compute": "lab_gpu",
+  "device": "cuda",
+  "worker_id": "lab-gpu-timbre-nightly",
+  "app_url": "https://<eta-app-host>",
+  "workdir": "/var/lib/timbre-nightly",
+  "budget_usd_daily": 2.0,
+  "max_consults": 400,
+  "speaker": "nemotron",
+  "nemotron_dir": "/var/lib/timbre-nightly/nlp",
+  "voiceprints": "/var/lib/timbre-nightly/voiceprints.json",
+  "embeddings_dir": "/var/lib/timbre-nightly/emb",
+  "calibration_arousal": "/opt/timbre/calib/odyssey_arousal.calib.json",
+  "calibration_valence": "/opt/timbre/calib/clef_valence.calib.json",
+  "calibration_git_sha": "c9a7ea640a09fd60bcb291c893bd85cf8e1a74a0",
+  "text_lane": false
+}

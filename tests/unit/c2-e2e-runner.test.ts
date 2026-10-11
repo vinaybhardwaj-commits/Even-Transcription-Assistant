@@ -1279,10 +1279,11 @@ async function runEmotionJob(jobId: string, windowId: string) {
 describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distribution, its own failure domain", () => {
   const realFetch = globalThis.fetch;
   beforeAll(() => { globalThis.fetch = fakeEmotionFetch(realFetch) as typeof fetch; });
-  afterAll(() => { globalThis.fetch = realFetch; delete process.env.EMOTION_ENABLED; delete process.env.EMOTION_SEGMENTS_SECRET; });
+  afterAll(() => { globalThis.fetch = realFetch; delete process.env.EMOTION_ENABLED; delete process.env.EMOTION_WAVLM_RETIRED; delete process.env.EMOTION_SEGMENTS_SECRET; });
   const reset = () => {
     Object.assign(EMO, { cap: 60, minSpeech: 1.5, segmentsCap: undefined, healthStatus: 200, healthOk: true, lastAuth: null, loaded: true, healthDown: false, callsDown: false, refuseIndex: -1, calls: [], onCall: null });
     process.env.EMOTION_ENABLED = "1";
+    process.env.EMOTION_WAVLM_RETIRED = "0";
     process.env.EMOTION_SEGMENTS_SECRET = "test-emotion-secret";
   };
 
@@ -1296,6 +1297,12 @@ describe.skipIf(!HAVE_DOCKER)("C3 — emotion_window: one writer, the full distr
     process.env.EMOTION_ENABLED = "maybe";
     const r2 = await runEmotionJob("job_emo_bad", "bw_emo_off");
     expect(String(r2.error)).toMatch(/^emotion_disabled: EMOTION_ENABLED has an unrecognised value/);
+    // Timbre #79: WavLM retired. EMOTION_ENABLED=1 with EMOTION_WAVLM_RETIRED unset (the shipped state) still writes nothing.
+    process.env.EMOTION_ENABLED = "1";
+    delete process.env.EMOTION_WAVLM_RETIRED;
+    const r3 = await runEmotionJob("job_emo_retired", "bw_emo_off");
+    expect(r3.status).toBe("failed");
+    expect(String(r3.error)).toMatch(/^emotion_disabled: .*EMOTION_WAVLM_RETIRED/);
     const n = (await G.__pgsql`SELECT (SELECT count(*) FROM room_span_emotion WHERE window_id = 'bw_emo_off')::int AS s, (SELECT count(*) FROM room_emotion_window WHERE window_id = 'bw_emo_off')::int AS w`) as Array<{ s: number; w: number }>;
     expect(n[0]).toEqual({ s: 0, w: 0 });
     expect(EMO.calls).toHaveLength(0);
