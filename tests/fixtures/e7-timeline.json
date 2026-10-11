@@ -1,0 +1,15 @@
+{
+  "room_id": "room_fake1",
+  "pulse": [
+    { "start_ms": 0, "end_ms": 100000, "close_kind": "clicked_end", "end_clicked": true },
+    { "start_ms": 200000, "end_ms": 260000, "close_kind": "url_clear", "end_clicked": false }
+  ],
+  "cuts": [
+    { "start_ms": 5000, "end_ms": 90000 }
+  ],
+  "shadow": [
+    { "start_ms": 0, "end_ms": 40000 },
+    { "start_ms": 50000, "end_ms": 100000 },
+    { "start_ms": 400000, "end_ms": 450000 }
+  ]
+}

@@ -61,7 +61,8 @@ describe("registration", () => {
     const names = PUBLISHED_TOOLS.map((t) => t.name);
     expect(names.filter((n) => n === "scribe_freescript")).toHaveLength(1);
     expect(names.at(-1)).toBe("scribe_freescript");
-    expect(names.indexOf("scribe_timbre")).toBe(names.length - 2);
+    expect(names.at(-2)).toBe("scribe_encounter_timeline");
+    expect(names.indexOf("scribe_timbre")).toBe(names.length - 3);
     expect(CALLABLE_TOOLS.get("scribe_freescript")!.scope).toBe("read");
     expect(LAB_TOOLS.some((t) => t.name === "scribe_freescript")).toBe(true);
     for (const p of ["operator", "lab"] as const) expect(toolsForProfile(p).map((t) => t.name)).toContain("scribe_freescript");
