@@ -9,6 +9,11 @@ ridge head (arousal/valence from embeddings). Rows with ``not_patient`` or
 doubts). If that CSV also carries ``text_score`` and ``voice_score``, it
 reports the two AUROCs and their difference. That is a descriptive hook, not
 the pre-registered T-8 likelihood-ratio test.
+
+``--fusion`` is opt-in. It compares voice-only, text-only, and late-fused
+heads on the same room-day GroupKFold: ridge for arousal and valence, logistic
+for the flags, over voice dimensions concatenated with Jev text dimensions.
+The default report is unchanged when the flag is absent.
 """
 
 from __future__ import annotations
@@ -276,6 +281,9 @@ def evaluate(
     outcomes: pd.DataFrame | None = None,
     *,
     scalar_ridge: bool = False,
+    fusion_text: pd.DataFrame | None = None,
+    voice_cols: list[str] | None = None,
+    voice_model: str | None = None,
 ) -> dict:
     table = comparison_table(labels, features, scalar_ridge=scalar_ridge)
     report = {
@@ -285,6 +293,14 @@ def evaluate(
         "models": table.to_dict(orient="records"),
         "outcomes": None if outcomes is None else outcome_linkage(labels, outcomes),
     }
+    if fusion_text is not None:
+        report["fusion"] = fusion_comparison(
+            labels,
+            features,
+            fusion_text,
+            voice_cols=voice_cols,
+            voice_model=voice_model,
+        )
     return report
 
 
@@ -294,11 +310,23 @@ def evaluate_files(
     outcomes_csv: Path | str | None = None,
     *,
     scalar_ridge: bool = False,
+    text_scores: Path | str | None = None,
+    voice_cols: list[str] | None = None,
+    voice_model: str | None = None,
 ) -> dict:
     labels = load_labels(labels_csv)
     features = pd.read_parquet(features_parquet)
     outcomes = pd.read_csv(outcomes_csv, dtype=str, keep_default_na=False) if outcomes_csv else None
-    return evaluate(labels, features, outcomes, scalar_ridge=scalar_ridge)
+    fusion_text = load_text_scores(text_scores) if text_scores else None
+    return evaluate(
+        labels,
+        features,
+        outcomes,
+        scalar_ridge=scalar_ridge,
+        fusion_text=fusion_text,
+        voice_cols=voice_cols,
+        voice_model=voice_model,
+    )
 
 
 REPORT_NAME = "report.json"
@@ -424,12 +452,8 @@ _NON_FEATURE_SUFFIXES = (
 )
 
 
-def _scalar_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4) -> np.ndarray | None:
-    """Numeric ``<name>__<feature>`` columns as a matrix.
-
-    Skips bookkeeping columns, baseline deltas (``__delta_self`` / ``__rel_doctor``), and any
-    column with a non-finite value or no variance. ``None`` when nothing usable is left.
-    """
+def _scalar_column_names(joined: pd.DataFrame, name: str) -> list[str]:
+    """``<name>__<feature>`` columns that are acoustic scalars, not bookkeeping or deltas."""
     prefix = f"{name}__"
     cols = []
     for c in joined.columns:
@@ -440,6 +464,16 @@ def _scalar_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4) -> np.
         if "__" in feat or feat in _NON_FEATURE_SUFFIXES:
             continue
         cols.append(c)
+    return cols
+
+
+def _scalar_matrix(joined: pd.DataFrame, name: str, *, min_rows: int = 4) -> np.ndarray | None:
+    """Numeric ``<name>__<feature>`` columns as a matrix.
+
+    Skips bookkeeping columns, baseline deltas (``__delta_self`` / ``__rel_doctor``), and any
+    column with a non-finite value or no variance. ``None`` when nothing usable is left.
+    """
+    cols = _scalar_column_names(joined, name)
     if not cols or len(joined) < min_rows:
         return None
     block = joined[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
@@ -572,6 +606,228 @@ def _json_default(obj):
     raise TypeError(type(obj).__name__)
 
 
+FUSION_TEXT_DIMS = (
+    "text_valence",
+    "text_arousal",
+    "text_engaged",
+    "text_resistant",
+    "text_unresolved_doubt",
+    "text_confidence",
+)
+_DIRECT_VOICE_DIMS = ("arousal", "valence", "dominance")
+
+
+def load_text_scores(path: Path | str) -> pd.DataFrame:
+    """Jev score JSONL or CSV. Transcript fields are ignored and never copied into the frame."""
+    rows = _read_score_rows(path)
+    records = []
+    for obj in rows:
+        window_id = obj.get("window_id")
+        if not isinstance(window_id, str) or not window_id.strip():
+            raise EvalError("text scores row is missing window_id")
+        rec: dict = {"window_id": window_id.strip()}
+        if obj.get("status") not in (None, "", "ok"):
+            for col in FUSION_TEXT_DIMS:
+                rec[col] = np.nan
+            records.append(rec)
+            continue
+        rec["text_valence"] = _dim_number(obj.get("valence"))
+        arousal = obj.get("arousal", obj.get("distress"))
+        rec["text_arousal"] = _dim_number(arousal)
+        rec["text_engaged"] = _dim_number(obj.get("engaged"))
+        rec["text_resistant"] = _dim_number(obj.get("resistant"))
+        doubt = obj.get("unresolved_doubt")
+        if isinstance(doubt, dict):
+            rec["text_unresolved_doubt"] = _dim_number(doubt.get("value"))
+        else:
+            rec["text_unresolved_doubt"] = _dim_number(doubt)
+        rec["text_confidence"] = _dim_number(obj.get("confidence"))
+        records.append(rec)
+    if not records:
+        raise EvalError("text scores file is empty")
+    frame = pd.DataFrame(records)
+    if frame["window_id"].duplicated().any():
+        raise EvalError("text scores have a duplicate window_id")
+    return frame
+
+
+def voice_dimension_columns(
+    features: pd.DataFrame,
+    *,
+    model: str | None = None,
+    explicit: list[str] | None = None,
+) -> list[str]:
+    """Voice dimensions for the fusion head.
+
+    An explicit list is used as given. Otherwise a model's direct arousal, valence,
+    and dominance columns are the voice dims. Scalar functionals are used only when
+    that model has no direct dimensional scores.
+    """
+    if explicit:
+        missing = [c for c in explicit if c not in features.columns]
+        if missing:
+            raise EvalError("voice columns missing from features")
+        return list(explicit)
+    names = _models_in(features.columns)
+    if model is None:
+        if len(names) != 1:
+            raise EvalError("fusion needs --voice-model or --voice-cols")
+        model = names[0]
+    elif not any(str(c).startswith(f"{model}__") for c in features.columns):
+        raise EvalError("voice model is not in the features")
+    direct = []
+    for dim in _DIRECT_VOICE_DIMS:
+        col = f"{model}__{dim}"
+        if col not in features.columns:
+            continue
+        arr = pd.to_numeric(features[col], errors="coerce")
+        if arr.notna().any():
+            direct.append(col)
+    if direct:
+        return direct
+    kept = []
+    for col in _scalar_column_names(features, model):
+        arr = pd.to_numeric(features[col], errors="coerce").to_numpy(dtype=np.float64)
+        finite = arr[np.isfinite(arr)]
+        if finite.size >= 4 and float(np.std(finite)) > 0:
+            kept.append(col)
+    if not kept:
+        raise EvalError("no voice dimensions for the selected model")
+    return kept
+
+
+def fusion_comparison(
+    labels: pd.DataFrame,
+    features: pd.DataFrame,
+    text_scores: pd.DataFrame,
+    *,
+    voice_cols: list[str] | None = None,
+    voice_model: str | None = None,
+) -> dict:
+    """Voice-only vs text-only vs late fusion on one shared room-day GroupKFold cohort.
+
+    Late fusion concatenates the voice dimensions and the text dimensions, then fits
+    the same heads: ridge (alpha 1) for arousal and valence, logistic for the flags.
+    """
+    vcols = voice_dimension_columns(features, model=voice_model, explicit=voice_cols)
+    text = text_scores.copy()
+    tcols = [c for c in FUSION_TEXT_DIMS if c in text.columns]
+    if "text_valence" not in tcols or "text_arousal" not in tcols:
+        raise EvalError("text scores are missing valence and arousal")
+    usable = labels.loc[usable_mask(labels) & ~labels["is_repeat"].astype(bool)].copy()
+    joined = usable.merge(features, on="window_id", how="inner", suffixes=("", "_feat"))
+    joined = joined.merge(text, on="window_id", how="inner")
+    for col in vcols + tcols:
+        joined[col] = pd.to_numeric(joined[col], errors="coerce")
+    finite = np.ones(len(joined), dtype=bool)
+    for col in vcols + tcols + ["arousal", "valence"]:
+        finite &= np.isfinite(pd.to_numeric(joined[col], errors="coerce").to_numpy(dtype=np.float64))
+    work = joined.loc[finite].reset_index(drop=True)
+    groups = work["room_day"].to_numpy() if len(work) else np.array([])
+    gold_a = work["arousal"].to_numpy(dtype=np.float64) if len(work) else np.array([])
+    gold_v = work["valence"].to_numpy(dtype=np.float64) if len(work) else np.array([])
+    return {
+        "n": int(len(work)),
+        "n_joined": int(len(joined)),
+        "n_dropped_nonfinite": int((~finite).sum()) if len(joined) else 0,
+        "n_groups": int(pd.unique(groups).size) if len(work) else 0,
+        "group": "room_day",
+        "ridge_alpha": 1.0,
+        "voice_cols": vcols,
+        "text_cols": tcols,
+        "conditions": {
+            "voice_only": _fusion_condition(work, vcols, gold_a, gold_v, groups),
+            "text_only": _fusion_condition(work, tcols, gold_a, gold_v, groups),
+            "late_fused": _fusion_condition(work, vcols + tcols, gold_a, gold_v, groups),
+        },
+    }
+
+
+def _fusion_condition(work: pd.DataFrame, cols: list[str], gold_a, gold_v, groups) -> dict:
+    if len(work) == 0 or not cols:
+        return {
+            "n_features": int(len(cols)),
+            "arousal_spearman": None,
+            "arousal_ccc": None,
+            "valence_spearman": None,
+            "valence_ccc": None,
+            "flag_macro_f1": None,
+            "per_flag": {},
+        }
+    X = work[cols].to_numpy(dtype=np.float64)
+    pred_a = grouped_oof(X, gold_a, groups, task="ridge")
+    pred_v = grouped_oof(X, gold_v, groups, task="ridge")
+    flags = {name: work[name].to_numpy(dtype=np.float64) for name in FLAG_TARGETS if name in work.columns}
+    f1 = flag_macro_f1(X, flags, groups) if flags else {"macro_f1": None, "per_flag": {}}
+    return {
+        "n_features": int(len(cols)),
+        "arousal_spearman": spearman(gold_a, pred_a),
+        "arousal_ccc": concordance_ccc(gold_a, pred_a),
+        "valence_spearman": spearman(gold_v, pred_v),
+        "valence_ccc": concordance_ccc(gold_v, pred_v),
+        "flag_macro_f1": f1["macro_f1"],
+        "per_flag": f1["per_flag"],
+    }
+
+
+def _read_score_rows(path: Path | str) -> list[dict]:
+    src = Path(path)
+    try:
+        raw = src.read_text(encoding="utf-8")
+    except OSError:
+        raise EvalError("text scores file could not be read") from None
+    if not raw.strip():
+        return []
+    head = raw.lstrip()
+    try:
+        if src.suffix.lower() == ".csv" or head.lower().startswith("window_id"):
+            frame = pd.read_csv(src, dtype=str, keep_default_na=False)
+            return frame.to_dict(orient="records")
+        if head[0] == "[":
+            data = json.loads(raw)
+            if not isinstance(data, list):
+                raise EvalError("text scores file is not valid JSON or JSONL")
+            return [row for row in data if isinstance(row, dict)]
+        if head[0] == "{" and "\n" not in raw.strip():
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise EvalError("text scores file is not valid JSON or JSONL")
+            return [data]
+        rows = []
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if isinstance(item, dict):
+                rows.append(item)
+        return rows
+    except json.JSONDecodeError:
+        raise EvalError("text scores file is not valid JSON or JSONL") from None
+    except EvalError:
+        raise
+    except Exception:
+        raise EvalError("text scores file could not be read") from None
+
+
+def _dim_number(val) -> float:
+    if val is None:
+        return float("nan")
+    if isinstance(val, (bool, np.bool_)):
+        return float(val)
+    if isinstance(val, (int, float, np.floating, np.integer)):
+        return float(val)
+    text = str(val).strip()
+    if text == "":
+        return float("nan")
+    lowered = text.lower()
+    if lowered in _TRUE or lowered in _FALSE:
+        return float(_as_bool(text))
+    try:
+        return float(text)
+    except ValueError:
+        return float("nan")
+
+
 def main(argv: list[str] | None = None) -> None:
     import argparse
 
@@ -585,8 +841,29 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="fit a grouped-CV ridge head on scalar features (eGeMAPS, ComParE) for models without direct scores or embeddings",
     )
+    p.add_argument(
+        "--fusion",
+        action="store_true",
+        help="compare voice-only, text-only, and late-fused heads (requires --text-scores)",
+    )
+    p.add_argument("--text-scores", default=None, help="Jev text-score JSONL or CSV (with --fusion)")
+    p.add_argument("--voice-model", default=None, help="feature prefix whose arousal/valence/dominance are the voice dims")
+    p.add_argument("--voice-cols", default=None, help="comma-separated voice dimension columns (overrides --voice-model)")
     args = p.parse_args(argv)
-    report = evaluate_files(args.labels, args.features, args.outcomes, scalar_ridge=args.scalar_ridge)
+    if args.fusion and not args.text_scores:
+        p.error("--fusion requires --text-scores")
+    if not args.fusion and (args.text_scores or args.voice_model or args.voice_cols):
+        p.error("--text-scores, --voice-model and --voice-cols require --fusion")
+    voice_cols = [c.strip() for c in args.voice_cols.split(",") if c.strip()] if args.voice_cols else None
+    report = evaluate_files(
+        args.labels,
+        args.features,
+        args.outcomes,
+        scalar_ridge=args.scalar_ridge,
+        text_scores=args.text_scores if args.fusion else None,
+        voice_cols=voice_cols,
+        voice_model=args.voice_model,
+    )
     out = write_report(report, args.out)
     print(out)
 

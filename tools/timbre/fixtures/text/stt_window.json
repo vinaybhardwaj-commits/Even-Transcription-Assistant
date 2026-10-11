@@ -1,0 +1,11 @@
+{
+  "window_id": "synth_text_a",
+  "speakers": [
+    {"idx": 0, "type": "clinician"},
+    {"idx": 1, "type": "patient"}
+  ],
+  "turns": [
+    {"speaker_idx": 0, "role": "clinician", "start_ms": 0, "end_ms": 300, "text": "How is the cough today?"},
+    {"speaker_idx": 1, "role": "unattributed", "start_ms": 300, "end_ms": 900, "text": "It is worse at night."}
+  ]
+}
