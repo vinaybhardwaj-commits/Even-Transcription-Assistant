@@ -53,7 +53,7 @@ Allow the HTTP client a timeout of at least 35 s (server maxDuration 35).
 ```
 `kill_switch.global:true` (optional `reason`): no commands are served; keep polling at the normal cadence. An empty `commands` after the wait is NORMAL: re-poll immediately.
 Errors: 401 with one of `malformed|unknown_device|revoked|bad_signature|bad_audience|expired|not_yet_valid|ttl_too_long|request_mismatch|replay` · 400 `bad_wait` · 503 `db`.
-- `401 revoked` or `401 unknown_device`: the key is dead. STOP polling, report via heartbeat, wait for re-enrolment.
+- `401 revoked` or `401 unknown_device`: the key is dead. STOP polling, report it through the app (the app reports `helper_state` on its bench poll, section 9), wait for re-enrolment.
 - `401 expired|not_yet_valid`: your clock is off (>120 s); fix time, do not hammer.
 - `401 replay|bad_signature|request_mismatch|malformed`: a client bug; log, back off.
 - Other errors and network failures: backoff 1, 2, 4 ... 60 s, then re-poll. Reset to immediate re-poll after any 200.
@@ -118,7 +118,7 @@ The helper compiles in TWO server public keys (`fk1`, `fk2`: current and next) a
 - `true`, `false`, `null` literals; arrays keep their order.
 - Note: the poll response is ordinary JSON; `params` key ORDER in it is not the signed order. Re-canonicalise the parsed envelope, never hash the received bytes.
 
-### 8.3 The catalogue: 13 verbs, closed params (anything else is `verb_not_allowed` / `bad_params`)
+### 8.3 The catalogue: 15 verbs, closed params (anything else is `verb_not_allowed` / `bad_params`)
 | verb | runs | privileged | params (all other keys refused) |
 |---|---|---|---|
 | `helper_status` | helper | no | `{}` |
@@ -131,14 +131,20 @@ The helper compiles in TWO server public keys (`fk1`, `fk2`: current and next) a
 | `wake` | helper | no | `{}` |
 | `list_audio_inputs` | app | no | `{}` |
 | `select_audio_input` | app | no | `device_uid` (required, string 1..128), `input_volume_pct` (int 0..100) |
+| `pmset_enforce` | helper | no | `{}` (the baseline is compiled into the helper: sleep 0, disksleep 0, displaysleep 0, powernap 0, autorestart 1, womp 1; the result reports the diff) |
+| `schedule_poweron` | helper | no | `time` (optional, `HH:MM` 24-hour zero padded; the helper uses 07:05 when absent) |
 | `self_test` | app | no | `volume_pct` (int 0..100, optional) |
 | `pieces_inventory` | app | no | `since` (ISO-8601 ms Z string, optional) |
 | `pieces_reupload` | app | no | `since` (ISO-8601 ms Z string, optional) |
-Strings must have no control characters and no surrogates. The split "5 helper + 5 app + 3 diagnose" follows #41/#42/#43; if the helper build disagrees about where a verb runs, say so: it is one line in `lib/fleet/verbs.ts`.
+Strings must have no control characters and no surrogates. The split "3 diagnose + 5 helper + 2 power + 5 app" follows #41/#42/#43 (`wake` is #43's, listed with the helper verbs); if the helper build disagrees about where a verb runs, say so: it is one line in `lib/fleet/verbs.ts`.
 
 ### 8.4 Approval (`approval_ref`)
 `approval_ref` matches `^[A-Za-z0-9_-]{3,64}$`. The server REFUSES to issue a privileged verb inside clinic hours (07:30 inclusive to 21:30 exclusive, IST, every day) without one, and `restart_recorder` with `force:true` at ANY hour without one.
-The helper re-applies the same rule as its local gate `clinic_hours_needs_approval`. The server records that the reference was supplied; it does not (and cannot) check Vinay's GO itself.
+The helper re-applies the same rule as its local gate `clinic_hours_needs_approval`.
+
+**Session gate (#42), also enforced at enqueue:** while the device's room has an OPEN session (`bench_session` recording or paused), `coreaudiod_reset`, `usb_reseat`, `restart_recorder` and `reload_launchagent` are refused with `session_open` (HTTP 409) unless an `approval_ref` is given, and `restart_recorder` additionally needs `force:true`. The helper re-checks the live session itself (local gate `session_open`).
+
+**Ceilings per device, also enforced at enqueue (HTTP 429 `rate_limited`):** at most 1 `coreaudiod_reset` per 30 minutes and at most 10 privileged verbs per hour, counted from issue time (a command that expired undelivered does not count). The enqueue count is best effort under concurrency; the helper compiles in the same numbers as its own last line of defence (verifier step 9). The server records that the reference was supplied; it does not (and cannot) check Vinay's GO itself.
 
 ### 8.5 Verifier order (the helper must refuse at the FIRST failing step; reason codes go in the result)
 1 `malformed` (not exactly the 13 fields / wrong types / bad nonce / bad issuer kind) · 2 `bad_signature` (also: unknown `key_id`) · 3 `expired` (`expires_at - issued_at` <= 900 s, and `issued_at - 120 s` <= now <= `expires_at`) ·
@@ -168,3 +174,29 @@ signature:
 ```
 5OGLMDD9y38GH6MO0eX4Y+dFqVGYqrFm7Ya3uClkmq1ChctvKmaWOUT/CP+IPubuC41cQKItO55iMhLCNwinDg==
 ```
+
+## 9. What the APP reports about the helper and the power schedule (TS-H6 #43, TS-H9 #46; read-only on the server)
+**There is no helper heartbeat.** The helper has no server credential for telemetry. Everything the server learns about the helper, the power schedule and the console arrives on the room APP's own bench poll
+(`GET /api/bench/commands`, the ~1.5 s poll with the room session cookie that already carries `install_id`, `app_version`, ...). These query fields are OPTIONAL; an app that omits them leaves the last
+reading in place (a poll without a field never clears it). Each is validated on its own and dropped if malformed; an unknown or malformed value is "not reported", never a refusal of the poll.
+
+| query field | value | stored as |
+|---|---|---|
+| `helper_version` | version string, `^[0-9A-Za-z][0-9A-Za-z._+-]*$`, <= 32 | `room_install.helper_version` |
+| `helper_registration` | `enabled` \| `requires_approval` \| `not_registered` | `helper_registration` |
+| `helper_xpc_ok` | `true` \| `false` | `helper_xpc_ok` |
+| `helper_state` | `ok`, or a short lower-case reason code `^[a-z][a-z_]{0,31}$` (e.g. `xpc_down`, `not_registered`, `stopped`). `ok` is the only healthy value | `helper_state` |
+| `console_user` | `true` \| `false`: a console (GUI) user was logged in at this poll | `console_user` |
+| `power_schedule` | text <= 64, no control characters, e.g. `MTWRFSU 07:05` | `power_schedule` |
+| `pmset_drift` | comma-separated names of pmset settings that drifted from the baseline, each `^[a-z0-9_.-]{1,48}$`, at most 20; the empty string means "none drifted" | `pmset_drift` (jsonb array) |
+
+The server stores them AFTER it has answered the poll (a deferred, best-effort write that can neither delay nor fail the poll); the next poll's answer never waits on it.
+
+`helper_bad_since` is NOT reported by the app: the server sets it when `helper_state` is not `ok` (or `helper_xpc_ok` is `false`) and clears it on the first good reading; a poll that carries neither field leaves it alone.
+(Field spellings are the server's definition; the server ignores unknown query keys, so a client that spells one differently simply reports nothing for it.)
+
+**Attention rules the server derives (3 minutes = 180 s):**
+- `helper_missing` (amber): the app is polling (a bench poll within 3 min) AND it has reported `helper_state` other than `ok`, or `helper_xpc_ok` false, continuously for over 3 min. A room whose app has never reported helper state raises nothing.
+- `app_missing` (red): no bench poll for over 3 min, between 07:30 and 21:30 IST, for an install whose last report had `console_user` true. Never raised outside those hours or for an install that never polled. The attention list additionally drops it when R1 already reports the whole Mac unreachable (one red row per fault); the per-device Bench / MCP view shows it from the poll alone.
+
+Bench (the helper panel) and `scribe_kiosks view=helper` show these fields and the derived state read-only. The server never sends a command because of them.

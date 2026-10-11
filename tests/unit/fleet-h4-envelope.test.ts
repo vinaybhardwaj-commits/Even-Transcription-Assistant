@@ -89,8 +89,9 @@ describe("canonical JSON", () => {
 });
 
 describe("the closed catalogue", () => {
-  it("is exactly 13 verbs: 3 diagnose, 5 helper, 5 app; 4 are privileged", () => {
-    expect(FLEET_VERBS).toHaveLength(13);
+  it("is exactly 15 verbs: 3 diagnose, 5 helper, 2 power, 5 app; 4 are privileged", () => {
+    expect(FLEET_VERBS).toHaveLength(15);
+    expect(FLEET_VERBS.filter((v) => CATALOGUE[v].group === "power").sort()).toEqual(["pmset_enforce", "schedule_poweron"]);
     const by = (g: string) => FLEET_VERBS.filter((v) => CATALOGUE[v].group === g).sort();
     expect(by("diagnose")).toEqual(["collect_diag", "helper_status", "report_diag"]);
     expect(by("helper")).toEqual(["coreaudiod_reset", "reload_launchagent", "restart_recorder", "usb_reseat", "wake"]);
@@ -99,7 +100,7 @@ describe("the closed catalogue", () => {
     expect(FLEET_VERBS.filter((v) => CATALOGUE[v].group === "diagnose").every((v) => CATALOGUE[v].readOnly)).toBe(true);
   });
   it("allow-list: shell-shaped names and near misses are not verbs", () => {
-    for (const bad of ["bash", "sh", "exec", "shell", "run", "sudo", "pmset_enforce", "schedule_poweron", "update_bundle", "breakglass_enable", "chrome_relaunch", "rotate_identity", "helper_status ", "HELPER_STATUS", "__proto__", "constructor", "toString", "", null, 7]) expect(isFleetVerb(bad), String(bad)).toBe(false);
+    for (const bad of ["bash", "sh", "exec", "shell", "run", "sudo", "pmset", "update_bundle", "breakglass_enable", "chrome_relaunch", "rotate_identity", "helper_status ", "HELPER_STATUS", "__proto__", "constructor", "toString", "", null, 7]) expect(isFleetVerb(bad), String(bad)).toBe(false);
     for (const v of FLEET_VERBS) expect(isFleetVerb(v)).toBe(true);
   });
   it("params are CLOSED per verb: unknown keys, wrong types, out-of-range values are refused", () => {

@@ -29,7 +29,9 @@ export type AttentionKind =
   | "config_drift"
   | "recovery_failed"
   | "presence_cannot_run"
-  | "recorder_update_failing";
+  | "recorder_update_failing"
+  | "app_missing"
+  | "helper_missing";
 
 export type AttentionItem = {
   room_id: string;
@@ -90,6 +92,8 @@ export const KIND_LABEL: Record<AttentionKind, string> = {
   recovery_failed: "Automatic recovery failed",
   presence_cannot_run: "Presence cannot run",
   recorder_update_failing: "Recorder update failing",
+  app_missing: "Recorder app not running",
+  helper_missing: "Helper not reporting",
 };
 
 /** "for 3 h 12 m", "for 45 m", "for under a minute", "for 4 d 3 h". Never negative. */
