@@ -8,9 +8,15 @@ GO from Vinay, 11 Oct 2026 17:01 IST. Storage is #78 (migration 0155, `STORE.md`
    held-out room-days before it answers, so no blind audio is ever fetched. Unsealed / clipless consults are skipped.
 2. Daily budget: ~1k Clef input tokens per 10 s window at US$0.15/M. Consults past `budget_usd_daily` or `max_consults`
    (time order) are dropped and the run is stored `partial` (exit 2, `ALERT` line).
-3. `python -m tools.timbre.pipeline score --r2 ...`: Odyssey WavLM-dim arousal (audEERING MSP-dim fallback), Clef-omni
+3. **Prepare** (`tools/timbre/nightly_prepare.py`, `prepare: true`): consult clips carry no speaker evidence, so each consult
+   is cut into PARTS at the 15-minute Nemotron window edges (Nemotron's speaker columns are not stable across windows).
+   Per part: 16 kHz audio from the consult flac, the window's `lab/nemotron-probs/*.nlp` sliced to the part, ECAPA slot
+   embeddings, and doctor voiceprints from the clinician centroid set (`doctor_uid8` = first 8 chars of the Pulse uid).
+   Parts under 20 s or without an `.nlp` are skipped; a consult with no part left is counted `no_diarization` in the run
+   scope and not stored. Parts are stored consult-relative (`offset_ms` in clips.jsonl).
+4. `python -m tools.timbre.pipeline score ...`: Odyssey WavLM-dim arousal (audEERING MSP-dim fallback), Clef-omni
    valence via Cloudflare Workers AI, the saved v1 calibration maps, text lane OFF. WavLM Aniemore is not in any scoring path.
-4. `run.json` + `clips.jsonl` → `tools/timbre/store.py` → `POST /api/timbre/ingest`: one transaction per run, raw AND
+5. `run.json` + `clips.jsonl` → `tools/timbre/store.py` → `POST /api/timbre/ingest`: one transaction per run, raw AND
    calibrated A/V stored, idempotent (a re-post is `inserted:0`; a re-run is a new run row; readers use `affect_consult_latest`).
 Exit codes: 0 ok / disabled / nothing to do, 2 partial, 1 failed (nothing stored). Every failure prints one `ALERT` line.
 

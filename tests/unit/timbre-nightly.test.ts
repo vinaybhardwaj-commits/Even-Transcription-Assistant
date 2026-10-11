@@ -57,16 +57,17 @@ describe("GET /api/timbre/consults", () => {
   it("400 on a bad date", async () => {
     for (const d of ["2026-13-01", "2026-02-30", "yesterday", ""]) expect((await consultsGET(signed(`/api/timbre/consults?date=${d}`))).status).toBe(400);
   });
-  it("drops blind room-days before answering (counted, never named), skips unsealed/clipless rows, doctor_uid8 only", async () => {
+  it("drops blind room-days before answering (counted, never named), skips clipless/unclosed rows (not unsealed), doctor_uid8 only", async () => {
     M.blind.add("2026-10-10|room_blind");
-    M.listIndexDay.mockResolvedValue({ total: 4, rows: [row(), row({ consult_uid: "cu_fake_2", room_id: "room_blind", room_slug: "opd-blind" }), row({ consult_uid: "cu_fake_3", sealed: false }), row({ consult_uid: "cu_fake_4", clip_r2_key: null })] });
+    M.listIndexDay.mockResolvedValue({ total: 5, rows: [row(), row({ consult_uid: "cu_fake_2", room_id: "room_blind", room_slug: "opd-blind" }), row({ consult_uid: "cu_fake_3", quality: "unclosed" }), row({ consult_uid: "cu_fake_5", sealed: false }), row({ consult_uid: "cu_fake_4", clip_r2_key: null })] });
     const res = await consultsGET(signed("/api/timbre/consults?date=2026-10-10"));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(M.listIndexDay).toHaveBeenCalledWith("2026-10-10", null, 2000);
-    expect(body).toMatchObject({ ok: true, date: "2026-10-10", withheld_blind: 1, skipped: 2, total: 4 });
-    expect(body.consults).toHaveLength(1);
-    expect(body.consults[0]).toEqual({ consult_uid: "cu_fake_1", cut_version: "sig:x", t0_ms: 1000, t1_ms: 301000, clip_r2_key: "clips/fake/cu_fake_1.ogg", room_id: "room_fake", room_slug: "opd-fake", session_id: "sess_fake", doctor_uid8: "docFAKE1", minutes: 5 });
+    expect(body).toMatchObject({ ok: true, date: "2026-10-10", withheld_blind: 1, skipped: 2, total: 5 });
+    expect(body.consults).toHaveLength(2);
+    expect(body.consults[1]).toMatchObject({ consult_uid: "cu_fake_5", sealed: false });
+    expect(body.consults[0]).toEqual({ consult_uid: "cu_fake_1", cut_version: "sig:x", t0_ms: 1000, t1_ms: 301000, clip_r2_key: "clips/fake/cu_fake_1.ogg", room_id: "room_fake", room_slug: "opd-fake", session_id: "sess_fake", doctor_uid8: "docFAKE1", minutes: 5, quality: "ok", sealed: true });
     expect(JSON.stringify(body)).not.toMatch(/room_blind|opd-blind|rest-of-uid/);
   });
   it("adds no SQL outside the consult_index store", () => {

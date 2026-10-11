@@ -59,6 +59,10 @@ DEFAULTS: dict = {
     "calibration_git_sha": "",
     "calibration_fit_on": "gold_batches_1_2",
     "text_lane": False,
+    "prepare": True,
+    "centroids": "",
+    "ecapa_model": "",
+    "ecapa_device": "cpu",
     "pipeline_timeout_s": 6 * 3600,
     "pipeline_version": "timbre-v1",
     "arousal_model_id": "odyssey_wavlm_dim.v1",
@@ -131,8 +135,8 @@ def estimate_usd(duration_s: float) -> float:
 
 
 def plan(consults: list[dict], cfg: dict) -> tuple[list[dict], dict]:
-    """Time-ordered; drops unsealed / clipless rows, and everything past max_consults or the daily budget."""
-    rows = sorted((c for c in consults if c.get("clip_r2_key") and c.get("sealed", True)), key=lambda c: (int(c.get("t0_ms") or 0), c["consult_uid"]))
+    """Time-ordered; drops clipless rows, and everything past max_consults or the daily budget."""
+    rows = sorted((c for c in consults if c.get("clip_r2_key")), key=lambda c: (int(c.get("t0_ms") or 0), c["consult_uid"]))
     kept, spend, cut_budget, cut_max = [], 0.0, 0, 0
     for c in rows:
         dur = max(0.0, (int(c["t1_ms"]) - int(c["t0_ms"])) / 1000.0)
@@ -149,7 +153,8 @@ def plan(consults: list[dict], cfg: dict) -> tuple[list[dict], dict]:
     return kept, info
 
 
-def write_inputs(kept: list[dict], day: str, work: Path, speaker: str = "nemotron") -> tuple[Path, Path]:
+def write_inputs(kept: list[dict], day: str, work: Path, speaker: str = "nemotron", *, local_audio: bool = False) -> tuple[Path, Path]:
+    """kept: consults, or prepared PARTS (clip_id, offset_ms, duration_s; local_audio=True: audio is in the prepare dir)."""
     import csv
 
     work.mkdir(parents=True, exist_ok=True)
@@ -158,25 +163,37 @@ def write_inputs(kept: list[dict], day: str, work: Path, speaker: str = "nemotro
         w = csv.writer(fh)
         w.writerow(["clip_id", "room", "date", "duration_s", "lang", "phase", "doctor_uid8", "r2_key"])
         for c in kept:
-            w.writerow([c["consult_uid"], c.get("room_slug") or c.get("room_id") or "", day, f"{c['duration_s']:.3f}", "", "consult", c.get("doctor_uid8") or "", c["clip_r2_key"]])
+            w.writerow([c.get("clip_id") or c["consult_uid"], c.get("room_slug") or c.get("room_id") or "", day, f"{c['duration_s']:.3f}", "", "consult", c.get("doctor_uid8") or "", "" if local_audio else c["clip_r2_key"]])
     with clips.open("w", encoding="utf-8") as fh:
         for c in kept:
             fh.write(json.dumps({
-                "clip_id": c["consult_uid"], "consult_uid": c["consult_uid"], "cut_version": c["cut_version"], "t0_ms": int(c["t0_ms"]),
-                "ist_date": day, "room_id": c.get("room_id"), "room_slug": c.get("room_slug"), "session_id": c.get("session_id"),
-                "doctor_uid8": c.get("doctor_uid8"), "diarize_engine": speaker, "diarize_ref": None,
+                "clip_id": c.get("clip_id") or c["consult_uid"], "consult_uid": c["consult_uid"], "cut_version": c["cut_version"], "t0_ms": int(c["t0_ms"]),
+                "offset_ms": int(c.get("offset_ms") or 0), "ist_date": day, "room_id": c.get("room_id"), "room_slug": c.get("room_slug"),
+                "session_id": c.get("session_id"), "doctor_uid8": c.get("doctor_uid8"), "diarize_engine": speaker, "diarize_ref": c.get("nemotron_ref"),
             }, sort_keys=True) + "\n")
     return sessions, clips
 
 
-def pipeline_cmd(cfg: dict, sessions: Path, out: Path) -> list[str]:
-    cmd = [sys.executable, "-m", "tools.timbre.pipeline", "score", "--sessions", str(sessions), "--out", str(out), "--r2",
+def pipeline_cmd(cfg: dict, sessions: Path, out: Path, prep: Path | None = None) -> list[str]:
+    cmd = [sys.executable, "-m", "tools.timbre.pipeline", "score", "--sessions", str(sessions), "--out", str(out),
            "--device", str(cfg["device"]), "--speaker", str(cfg["speaker"]),
            "--calibration-arousal", str(cfg["calibration_arousal"]), "--calibration-valence", str(cfg["calibration_valence"])]
     for key, flag in (("nemotron_dir", "--nemotron-dir"), ("segments", "--segments"), ("voiceprints", "--voiceprints"),
                       ("embeddings_dir", "--embeddings-dir"), ("slot_embeddings_dir", "--slot-embeddings-dir")):
         if cfg.get(key):
             cmd += [flag, str(cfg[key])]
+    if prep is not None:  # nightly_prepare outputs replace the configured dirs
+        for flag, sub in (("--audio-dir", "audio"), ("--nemotron-dir", "nlp"), ("--slot-embeddings-dir", "slots")):
+            if flag in cmd:
+                i = cmd.index(flag)
+                del cmd[i:i + 2]
+            cmd += [flag, str(prep / sub)]
+        if "--voiceprints" in cmd:
+            i = cmd.index("--voiceprints")
+            del cmd[i:i + 2]
+        cmd += ["--voiceprints", str(prep / "voiceprints.json")]
+    else:
+        cmd.append("--r2")
     if cfg.get("text_lane"):
         cmd.append("--text-lane")
     return cmd
@@ -207,7 +224,7 @@ def manifest(cfg: dict, day: str, info: dict, *, sha: str, started: str, finishe
     return m
 
 
-def run(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fetch=fetch_consults, post=None) -> int:
+def run(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fetch=fetch_consults, post=None, preparer=None) -> int:
     if not cfg["enabled"]:
         print("[timbre-nightly] disabled (TIMBRE_NIGHTLY_ENABLED / config enabled) — nothing to do")
         return 0
@@ -226,10 +243,31 @@ def run(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fe
     if dry_run:
         return 0
     work = Path(cfg["workdir"]) / day / datetime.now(timezone.utc).strftime("%H%M%S")
-    sessions, clips = write_inputs(kept, day, work, str(cfg["speaker"]))
-    out = work / "out"
+    prep_dir = None
     t0 = time.monotonic()
-    proc = runner(pipeline_cmd(cfg, sessions, out), timeout=int(cfg["pipeline_timeout_s"]), check=False)
+    if cfg.get("prepare") and cfg["speaker"] == "nemotron":
+        prep_dir = work / "prep"
+        prep_dir.mkdir(parents=True, exist_ok=True)
+        if preparer is None:
+            from tools.timbre import nightly_prepare
+
+            nightly_prepare.voiceprints_from_centroids(str(cfg["centroids"]), prep_dir / "voiceprints.json")
+            embed = nightly_prepare.ecapa_embedder(str(cfg["ecapa_model"]), str(cfg.get("ecapa_device") or "cpu"))
+            prepared = nightly_prepare.prepare(kept, prep_dir, embed=embed)
+        else:
+            prepared = preparer(kept, prep_dir)
+        info.update({"prepared_parts": len(prepared.clips), "no_diarization": len(prepared.no_diarization),
+                     "audio_errors": len(prepared.audio_errors), "parts_short": prepared.parts_short, "parts_no_nlp": prepared.parts_no_nlp})
+        print(f"[timbre-nightly] prepared: {len(prepared.clips)} part(s) from {len({c['consult_uid'] for c in prepared.clips})} consult(s); "
+              f"no_diarization={len(prepared.no_diarization)} audio_errors={len(prepared.audio_errors)}")
+        if not prepared.clips:
+            print("[timbre-nightly] no consult has Nemotron diarization for this day; nothing to score")
+            return 0
+        sessions, clips = write_inputs(prepared.clips, day, work, str(cfg["speaker"]), local_audio=True)
+    else:
+        sessions, clips = write_inputs(kept, day, work, str(cfg["speaker"]))
+    out = work / "out"
+    proc = runner(pipeline_cmd(cfg, sessions, out, prep_dir), timeout=int(cfg["pipeline_timeout_s"]), check=False)
     gpu_s = time.monotonic() - t0
     if getattr(proc, "returncode", 1) != 0 or not (out / "windows.parquet").is_file():
         print(f"ALERT [timbre-nightly] pipeline failed for {day} (exit {getattr(proc, 'returncode', '?')}); nothing stored")

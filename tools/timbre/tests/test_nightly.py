@@ -84,7 +84,7 @@ def test_run_end_to_end_with_fake_pipeline(tmp_path, monkeypatch):
     """Fake pipeline writes windows.parquet; the real store builds the payload; the post is captured."""
     monkeypatch.setenv("TIMBRE_INGEST_SECRET", "k")
     monkeypatch.setenv("TIMBRE_GIT_SHA", "c" * 40)
-    cfg = dict(nightly.DEFAULTS, enabled=True, app_url="https://app.test", workdir=str(tmp_path), compute="lab_gpu",
+    cfg = dict(nightly.DEFAULTS, enabled=True, prepare=False, app_url="https://app.test", workdir=str(tmp_path), compute="lab_gpu",
                calibration_arousal=str(BACKFILL_CAL / "odyssey_arousal.calib.json"), calibration_valence=str(BACKFILL_CAL / "clef_valence.calib.json"),
                budget_usd_daily=nightly.estimate_usd(300) * 1.5)
 
@@ -115,7 +115,34 @@ def test_run_end_to_end_with_fake_pipeline(tmp_path, monkeypatch):
 @pytest.mark.skipif(not Path("/workspace/timbre-go/backfill/scale-segments.windows.parquet").is_file(), reason="needs box backfill data")
 def test_failed_pipeline_stores_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("TIMBRE_INGEST_SECRET", "k")
-    cfg = dict(nightly.DEFAULTS, enabled=True, app_url="https://app.test", workdir=str(tmp_path))
+    cfg = dict(nightly.DEFAULTS, enabled=True, prepare=False, app_url="https://app.test", workdir=str(tmp_path))
     posted = []
     rc = nightly.run("2026-10-10", cfg, runner=lambda *a, **k: SimpleNamespace(returncode=3), fetch=lambda *a: {"ok": True, "consults": [consult("c1", 1)]}, post=lambda *a: posted.append(a))
     assert rc == 1 and posted == []
+
+
+def test_prepared_parts_flow(tmp_path, monkeypatch):
+    """prepare on: parts become pipeline clips with offset_ms and local audio; nothing prepared -> nothing scored, exit 0."""
+    from tools.timbre.nightly_prepare import Prepared
+
+    monkeypatch.setenv("TIMBRE_INGEST_SECRET", "k")
+    cfg = dict(nightly.DEFAULTS, enabled=True, app_url="https://app.test", workdir=str(tmp_path))
+    seen = {}
+
+    def runner(cmd, timeout, check):
+        seen["cmd"] = cmd
+        return SimpleNamespace(returncode=5)
+
+    def preparer(kept, prep):
+        part = {**kept[0], "clip_id": "c1-s0", "offset_ms": 120_000, "duration_s": 60.0, "nemotron_ref": "bw_tok_0_primary.nlp"}
+        return Prepared(clips=[part], no_diarization=["c2"])
+
+    body = {"ok": True, "consults": [consult("c1", 1000), consult("c2", 2000)]}
+    assert nightly.run("2026-10-10", cfg, runner=runner, fetch=lambda *a: body, preparer=preparer) == 1  # fake pipeline fails -> nothing stored
+    cmd = seen["cmd"]
+    assert "--r2" not in cmd and cmd[cmd.index("--audio-dir") + 1].endswith("/prep/audio") and cmd[cmd.index("--voiceprints") + 1].endswith("/prep/voiceprints.json")
+    work = Path(cmd[cmd.index("--out") + 1]).parent
+    clip = json.loads((work / "clips.jsonl").read_text().splitlines()[0])
+    assert clip["clip_id"] == "c1-s0" and clip["consult_uid"] == "c1" and clip["offset_ms"] == 120_000 and clip["diarize_ref"] == "bw_tok_0_primary.nlp"
+    assert pd.read_csv(work / "sessions.csv", dtype=str, keep_default_na=False).iloc[0]["r2_key"] == ""
+    assert nightly.run("2026-10-10", cfg, runner=runner, fetch=lambda *a: body, preparer=lambda k, p: Prepared(no_diarization=["c1", "c2"])) == 0
