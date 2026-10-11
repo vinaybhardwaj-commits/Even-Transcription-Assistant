@@ -66,5 +66,6 @@ public struct HelperUserFiles: UserFileAccess {
   public func readRange(_ path: String, user: String, offset: UInt64, maxBytes: Int) -> Data? {
     asUser(user) { HardenedFile.readRange(path, offset: offset, maxBytes: maxBytes) }
   }
+  public func linkTarget(_ path: String, user: String) -> String? { asUser(user) { HardenedFile.linkTarget(path) } }
   public func entries(_ path: String, user: String) -> [String]? { asUser(user) { HardenedFile.entries(path) } }
 }

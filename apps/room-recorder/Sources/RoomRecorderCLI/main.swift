@@ -220,6 +220,9 @@ private enum RoomRecorderCLI {
               remoteFactory: { _ in bench },
               retainedArchiveRecovery: recovery
             )
+            // 0.1.37 (#45): after every bench poll the server answered, tell the root helper this version is alive.
+            let beat = HelperBeat()
+            await engine.setOnBenchPollOK { beat.ping() }
             // 0.1.25: auto-start at clinic open is OPT-IN per Mac (an `auto-start-on` file beside
             // config.json). Absent, this build behaves exactly as 0.1.24 does.
             if RoomAutoStartMarker(root: root).optedIn() { await engine.enableAutoStart() }

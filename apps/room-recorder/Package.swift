@@ -75,7 +75,7 @@ var targets: [Target] = [
     name: "KioskHealthCoreTests", dependencies: ["KioskHealthCore"], exclude: ["Fixtures"]),
   .testTarget(
     name: "TapeCoreTests",
-    dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore"],
+    dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore", "HelperCore"],
     swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
 ]
 

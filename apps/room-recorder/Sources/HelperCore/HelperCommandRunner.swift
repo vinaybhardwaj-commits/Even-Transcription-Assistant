@@ -85,13 +85,8 @@ public final class HelperCommandRunner: @unchecked Sendable {
     let epoch = Int(now.timeIntervalSince1970)
     let user = env.consoleUser()
     let root = user.flatMap { env.roomRoot(uid: $0.uid) }
-    // FAIL CLOSED: a running app whose status cannot be read (missing, a symlink, too big, a FIFO) counts as a
-    // session in progress, so a reset or a restart waits rather than cutting a consultation.
-    let sessionOpen: Bool = {
-      guard let user, env.appRunning(uid: user.uid) else { return false }
-      guard let root else { return true }
-      return AppStatusSnapshot.read(env: env, root: root, uid: user.uid, gid: user.gid)?.sessionOpen ?? true
-    }()
+    // FAIL CLOSED (see SessionProbe): a running app whose status cannot be read counts as a session in progress.
+    let sessionOpen = SessionProbe.isOpen(env: env)
     let verifier = FleetVerifier(serverKeys: serverKeys, deviceID: deviceID, machine: machine)
     let verdict = verifier.verify(
       json, now: now, nonceSeen: { state.nonceSeen($0) },

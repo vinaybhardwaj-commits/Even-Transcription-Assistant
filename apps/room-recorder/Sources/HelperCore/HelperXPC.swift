@@ -71,11 +71,20 @@ public struct HelperSnapshot: Equatable, Sendable {
   public var helperState: String?
   public var powerSchedule: String?
   public var pmsetDrift: String?
+  /// 0.1.37 (#45): where the helper's whole-bundle update is. `step` is the last step's word (with its reason after a colon),
+  /// `version` the release it is working on, `result` ok / rolled_back / failed once it has finished.
+  public var updateStep: String?
+  public var updateVersion: String?
+  public var updateResult: String?
 
   public init(
     registration: String, helperVersion: String?, xpcOK: Bool?, mode: String? = nil, helperState: String? = nil,
-    powerSchedule: String? = nil, pmsetDrift: String? = nil
+    powerSchedule: String? = nil, pmsetDrift: String? = nil, updateStep: String? = nil, updateVersion: String? = nil,
+    updateResult: String? = nil
   ) {
+    self.updateStep = updateStep
+    self.updateVersion = updateVersion
+    self.updateResult = updateResult
     self.registration = registration
     self.helperVersion = helperVersion
     self.xpcOK = xpcOK
@@ -143,6 +152,21 @@ public final class HelperClient: @unchecked Sendable {
   /// What the sink answered for a batch. `status` 0 means the post never got an HTTP answer.
   public func kioskReport(batchID: String, status: Int, reason: String, body: String, timeout: TimeInterval = 10) -> HelperResponse? {
     send(.kioskReport(batchID: batchID, status: status, reason: reason, body: body), timeout: timeout)
+  }
+
+  /// 0.1.37 (#45). `detail["answer"]` is `accepted`, `in_progress` or `refused:<reason>`.
+  public func updateOffer(record: String, signature: String, deviceID: String, machine: String, timeout: TimeInterval = 10) -> HelperResponse? {
+    send(.updateOffer(record: record, signature: signature, deviceID: deviceID, machine: machine), timeout: timeout)
+  }
+
+  /// The app's proof of life: a successful bench poll, running `version`.
+  public func appBeat(version: String, timeout: TimeInterval = 5) -> HelperResponse? {
+    send(.appBeat(version: version), timeout: timeout)
+  }
+
+  /// 0.1.37 (#49).
+  public func stewardTickets(json: String, deviceID: String, machine: String, timeout: TimeInterval = 40) -> HelperResponse? {
+    send(.stewardTickets(json: json, deviceID: deviceID, machine: machine), timeout: timeout)
   }
 
   func send(_ command: HelperCommand, timeout: TimeInterval) -> HelperResponse? {

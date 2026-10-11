@@ -47,12 +47,27 @@ if !safeMode {
 // 0.1.36 (#44, #48): the Chrome policy for the Pulse Presence extension, and the retirement of the standalone guard.
 let chrome = ChromePolicyReconciler(tools: tools, env: environment, emit: KioskHealthHost.event(kiosk), log: log)
 let retirement = LegacyRetirement(tools: tools, policyActive: { chrome.isActive() }, log: log)
-monitor.extraStatus = { ["chrome_policy": chrome.statusWord, "kiosk_spool": String(kiosk?.spoolDepth ?? -1)] }
+monitor.extraStatus = {
+  ["chrome_policy": chrome.statusWord, "kiosk_spool": String(kiosk?.spoolDepth ?? -1), "kiosk_machine": kiosk?.machine ?? ""]
+    .merging(updater.statusDetail()) { $1 }
+}
+
+// 0.1.37 (#45): the whole-bundle update. Reads the installed bundle as the room user; snapshots it as the room user.
+let userFiles = HelperUserFiles()
+let updater = BundleUpdater(
+  env: environment, tools: tools, disk: SystemUpdateDisk(reader: userFiles), reader: userFiles, log: log)
 
 let runner = HelperCommandRunner(
   env: environment, tools: tools, watchdog: watchdog, chrome: chrome, retirement: retirement,
   statePath: support.appendingPathComponent(HelperPaths.fleetStateFile).path, safeMode: safeMode, log: log)
-let service = HelperService(safeMode: safeMode, runner: runner, statusDetail: { monitor.statusDetail() }, kiosk: kiosk)
+// 0.1.37 (#49): steward tickets. The machine is the kiosk-health machine, the name the server issued the ticket for.
+let steward = StewardExecutor(
+  machine: { kiosk?.machine ?? "" }, env: environment, tools: tools, chrome: chrome,
+  restartCollectors: { kiosk?.restartCollectors() ?? false }, isUpdating: { updater.isBusy },
+  envelopeRunner: { envelope, deviceID, machine in runner.run(envelopeJSON: envelope, deviceID: deviceID, machine: machine) },
+  emit: KioskHealthHost.event(kiosk), log: log)
+let service = HelperService(
+  safeMode: safeMode, runner: runner, statusDetail: { monitor.statusDetail() }, kiosk: kiosk, updates: updater, steward: steward)
 let delegate = HelperListenerDelegate(service: service)
 let listener = NSXPCListener(machServiceName: HelperIdentity.machServiceName)
 listener.delegate = delegate
@@ -78,6 +93,12 @@ if !safeMode {
   }
   DispatchQueue.global().asyncAfter(deadline: .now() + 5) { policyPass() }
   kiosk?.start()
+  // The update machine: every 30 s it moves one step (and right after an offer). A restart of the helper resumes from disk.
+  let updateTimer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "helper.update"))
+  updateTimer.schedule(deadline: .now() + 20, repeating: 30)
+  updateTimer.setEventHandler { updater.tick() }
+  updateTimer.resume()
+  _ = [updateTimer] as [Any]
   // Held for the life of the process.
   _ = [powerTimer, watchdogTimer] as [Any]
 }

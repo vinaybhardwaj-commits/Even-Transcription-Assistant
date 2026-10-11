@@ -42,6 +42,10 @@ public struct ProcessSystemTools: SystemTools {
   /// of any of them comes from a command's params except a validated Chrome profile directory name.
   public static let allowed: Set<String> = [
     "/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps", "/usr/bin/killall", "/usr/sbin/ioreg", "/usr/bin/sudo",
+    // 0.1.37 (#45), for the whole-bundle update only: `pkgutil --expand-full` of a pkg whose sha256 matched, and
+    // `codesign --verify` of what came out of it and of the bundle snapshot. `installer` is never run by the helper itself:
+    // a one-shot launchd job runs it (see BundleUpdater).
+    "/usr/sbin/pkgutil", "/usr/bin/codesign",
   ]
   public var timeout: TimeInterval = 30
   public init(timeout: TimeInterval = 30) { self.timeout = timeout }

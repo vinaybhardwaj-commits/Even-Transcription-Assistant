@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import HelperCore
 
 /// Self-update (Install and Fleet PRD §13.3, Build R3).
 ///
@@ -192,19 +193,29 @@ public struct RoomReleaseDescriptor: Codable, Equatable, Sendable {
   public let sha256: String
   public let sizeBytes: Int64
   public let blobURL: String
+  /// 0.1.37 (#45). The server-signed record the ROOT HELPER acts on (`pkg_url`, `pkg_sha256`, `cohort`, ... inside it), and its
+  /// Ed25519 signature. Both absent from a server that does not speak #45; the user-level updater then works as before.
+  public let record: JSONValue?
+  public let recordSignature: String?
 
   enum CodingKeys: String, CodingKey {
     case version
     case sha256
     case sizeBytes = "size_bytes"
     case blobURL = "blob_url"
+    case record
+    case recordSignature = "record_signature"
   }
 
-  public init(version: String, sha256: String, sizeBytes: Int64, blobURL: String) {
+  public init(
+    version: String, sha256: String, sizeBytes: Int64, blobURL: String, record: JSONValue? = nil, recordSignature: String? = nil
+  ) {
     self.version = version
     self.sha256 = sha256
     self.sizeBytes = sizeBytes
     self.blobURL = blobURL
+    self.record = record
+    self.recordSignature = recordSignature
   }
 }
 
@@ -602,72 +613,6 @@ public func roomUpdateIsAvailable(running: String?, offered: String) -> Bool {
   return want > have
 }
 
-/// `major.minor.patch…` as integers. A suffix after `-` or `+` (a build tag) is ignored for ordering.
-public struct RoomVersion: Comparable, Equatable, Sendable {
-  public let parts: [Int]
-
-  public init?(_ text: String) {
-    let core = text.split(whereSeparator: { $0 == "-" || $0 == "+" }).first.map(String.init) ?? ""
-    let pieces = core.split(separator: ".", omittingEmptySubsequences: false)
-    guard !pieces.isEmpty, pieces.count <= 4 else { return nil }
-    var numbers: [Int] = []
-    for piece in pieces {
-      guard !piece.isEmpty, piece.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(piece) else {
-        return nil
-      }
-      numbers.append(n)
-    }
-    parts = numbers
-  }
-
-  public static func < (a: RoomVersion, b: RoomVersion) -> Bool {
-    let n = max(a.parts.count, b.parts.count)
-    for i in 0..<n {
-      let x = i < a.parts.count ? a.parts[i] : 0, y = i < b.parts.count ? b.parts[i] : 0
-      if x != y { return x < y }
-    }
-    return false
-  }
-}
-
-// MARK: - The rollback pin (0.1.34)
-
-/// A root-owned file that stops this Mac updating itself FORWARD past a version someone rolled it back to.
-///
-/// `rollback.sh` writes the rolled-back version here as its last step; a pkg install (the fleet's root
-/// path, or `sudo installer`) deletes it. The self-updater already never goes down, but a room rolled
-/// back to 0.1.31 would otherwise climb straight back to whatever the channel offers. With a pin, an
-/// offered version ABOVE the pin is ignored; one at or below it (and above the running version) is
-/// still taken.
-///
-/// FAIL CLOSED: a pin file that is there but cannot be read as a version holds every update, and says
-/// so. The file is root-written; garbage in it means something is wrong, not that nothing is pinned.
-public enum RoomUpdatePin {
-  public static let defaultPath = "/Library/Application Support/EvenScribe/update-pin"
-  public static var defaultURL: URL { URL(fileURLWithPath: defaultPath, isDirectory: false) }
-
-  public enum Verdict: Equatable, Sendable {
-    case noPin
-    case allowed(pin: String)
-    case held(pin: String)
-    case unreadable
-  }
-
-  /// PURE: is `offered` above the pin text? `pinText` nil means no pin file.
-  public static func verdict(offered: String, pinText: String?) -> Verdict {
-    guard let pinText else { return .noPin }
-    let trimmed = pinText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let pin = RoomVersion(trimmed), let want = RoomVersion(offered) else { return .unreadable }
-    return want > pin ? .held(pin: trimmed) : .allowed(pin: trimmed)
-  }
-
-  /// `nil` when there is no file; the text otherwise (possibly empty or garbage, which `verdict` refuses).
-  public static func read(at url: URL) -> String? {
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-  }
-}
-
 // MARK: - The seams
 
 /// Fetching the release descriptor. R3-9 lives at this boundary: ANY answer other than a 200 is
@@ -785,6 +730,9 @@ public enum RoomUpdateAttempt: Equatable, Sendable {
   /// F2. This version has failed twice on this Mac and is not being attempted again until the hold
   /// expires or a different version appears. NOTHING was downloaded.
   case heldAfterRepeatedFailure(version: String)
+  /// 0.1.37 (#45). The root helper took the release (or already has it): it downloads, verifies, installs and rolls back by
+  /// itself. This app does nothing for this version, and does not fall back to its own updater.
+  case handedToHelper(version: String, answer: String)
 }
 
 /// The steps of §13.3, with every piece of the outside world injected.
@@ -804,6 +752,9 @@ public struct RoomUpdater: Sendable {
   let pinURL: URL
   let now: @Sendable () -> Date
   let log: @Sendable (String) -> Void
+  /// 0.1.37 (#45). Hands the server-signed record to the root helper and says what it answered: `accepted`, `in_progress`,
+  /// `refused:<reason>`, or `unavailable` (no helper, an older helper, nobody answered). Nil in a test that does not care.
+  public var helperOffer: (@Sendable (RoomReleaseDescriptor) async -> String)?
 
   public init(
     rootURL: URL,
@@ -909,6 +860,16 @@ public struct RoomUpdater: Sendable {
         "update to \(release.version) held: it has failed \(attempts?.failures ?? 0) times on this Mac. "
           + "Publish a different version, or withdraw this one, to clear the hold.")
       return .heldAfterRepeatedFailure(version: release.version)
+    }
+    // 0.1.37 (#45). A release that carries the server's signed record is the ROOT HELPER's to install: it downloads, verifies,
+    // waits for a quiet room, installs and rolls back by itself. Only "no helper answered" falls back to the code below; a
+    // refusal (bad signature, not eligible, held ...) is the helper's verdict and is not worked around.
+    if release.record != nil, let offer = helperOffer {
+      let answer = await offer(release)
+      if answer != "unavailable" {
+        log("update to \(release.version): the root helper answered \(answer)")
+        return .handedToHelper(version: release.version, answer: answer)
+      }
     }
     // §13.3 step 3, BEFORE the download and not after it. A clinic Mac recording a consultation
     // must not spend its disk and its network on ~90 MB it has already decided not to install.

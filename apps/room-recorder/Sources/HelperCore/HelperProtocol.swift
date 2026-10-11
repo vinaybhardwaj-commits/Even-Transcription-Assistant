@@ -15,6 +15,11 @@ public enum HelperVerb: String, CaseIterable, Sendable {
   /// 0.1.36 (#47): the app asks for the next batch of kiosk-health events, and reports what the sink answered.
   case kioskBatch
   case kioskReport
+  /// 0.1.37 (#45): the app hands over a server-signed release record; the app proves it is alive on a version; the app hands
+  /// over the steward tickets it fetched (#49).
+  case updateOffer
+  case appBeat
+  case stewardTickets
 }
 
 /// The app-side catalogue `runAppVerb` may name: the bench verbs the app already runs, minus the
@@ -39,6 +44,9 @@ public enum HelperCommand: Equatable, Sendable {
   case kioskBatch
   /// `status` 0 = no HTTP answer (a transport error). `body` is the sink's reply, reduced to what the helper reads.
   case kioskReport(batchID: String, status: Int, reason: String, body: String)
+  case updateOffer(record: String, signature: String, deviceID: String, machine: String)
+  case appBeat(version: String)
+  case stewardTickets(json: String, deviceID: String, machine: String)
 }
 
 public enum HelperRefusal: String, Error, Equatable, Sendable {
@@ -67,6 +75,10 @@ public enum HelperCodec {
     var status: Int?
     var reason: String?
     var body: String?
+    var record: String?
+    var signature: String?
+    var version: String?
+    var tickets: String?
   }
 
   public static func encode(_ command: HelperCommand) throws -> Data {
@@ -90,6 +102,20 @@ public enum HelperCodec {
       wire.status = status
       wire.reason = reason
       wire.body = body
+    case .updateOffer(let record, let signature, let deviceID, let machine):
+      wire.verb = HelperVerb.updateOffer.rawValue
+      wire.record = record
+      wire.signature = signature
+      wire.deviceID = deviceID
+      wire.machine = machine
+    case .appBeat(let version):
+      wire.verb = HelperVerb.appBeat.rawValue
+      wire.version = version
+    case .stewardTickets(let json, let deviceID, let machine):
+      wire.verb = HelperVerb.stewardTickets.rawValue
+      wire.tickets = json
+      wire.deviceID = deviceID
+      wire.machine = machine
     case .runAppVerb(let verb, let params):
       wire.verb = HelperVerb.runAppVerb.rawValue
       wire.appVerb = verb.rawValue
@@ -112,6 +138,21 @@ public enum HelperCodec {
     case .helperStatus: return .helperStatus
     case .requestBundleUpdate: return .requestBundleUpdate
     case .kioskBatch: return .kioskBatch
+    case .updateOffer:
+      guard let record = wire.record, (1...4_096).contains(record.utf8.count), let signature = wire.signature, signature.utf8.count == 88,
+        let deviceID = wire.deviceID, deviceID.range(of: "^dev_[0-9a-f]{24}$", options: .regularExpression) != nil,
+        let machine = wire.machine, (1...128).contains(machine.utf8.count), machine.unicodeScalars.allSatisfy({ $0.value >= 0x20 })
+      else { throw HelperRefusal.badParams }
+      return .updateOffer(record: record, signature: signature, deviceID: deviceID, machine: machine)
+    case .appBeat:
+      guard let version = wire.version, (1...32).contains(version.utf8.count), RoomVersion(version) != nil else { throw HelperRefusal.badParams }
+      return .appBeat(version: version)
+    case .stewardTickets:
+      guard let json = wire.tickets, (1...6_000).contains(json.utf8.count),
+        let deviceID = wire.deviceID, deviceID.range(of: "^dev_[0-9a-f]{24}$", options: .regularExpression) != nil || deviceID.isEmpty,
+        let machine = wire.machine, machine.utf8.count <= 128, machine.unicodeScalars.allSatisfy({ $0.value >= 0x20 })
+      else { throw HelperRefusal.badParams }
+      return .stewardTickets(json: json, deviceID: deviceID, machine: machine)
     case .kioskReport:
       guard let id = wire.batchID, (1...160).contains(id.utf8.count),
         id.range(of: "^[A-Za-z0-9:._#-]+$", options: .regularExpression) != nil,

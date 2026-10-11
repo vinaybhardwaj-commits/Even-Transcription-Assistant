@@ -22,6 +22,18 @@ public protocol KioskRelay: Sendable {
   func relayReport(batchID: String, status: Int, body: Data, reason: String) -> String
 }
 
+/// What the service needs of the bundle updater (#45).
+public protocol UpdateRelay: Sendable {
+  /// `accepted` / `in_progress` / `refused:<reason>`.
+  func offerUpdate(record: String, signature: String, deviceID: String, machine: String) -> String
+  func noteAppBeat(version: String)
+}
+
+/// What the service needs of the steward ticket executor (#49): the number of tickets that got a result.
+public protocol StewardRelay: Sendable {
+  func receiveTickets(json: String, deviceID: String, machine: String) -> Int
+}
+
 /// Turns a request into a response. Pure: no I/O, no clock, so a test can drive it with bytes.
 ///
 /// In this slice only `hello` and `helperStatus` do anything. The other three verbs are decoded,
@@ -31,15 +43,19 @@ public final class HelperService: @unchecked Sendable {
   private let runner: HelperCommandRunner?
   private let statusDetail: (@Sendable () -> [String: String])?
   private let kiosk: KioskRelay?
+  private let updates: UpdateRelay?
+  private let steward: StewardRelay?
 
   public init(
     safeMode: Bool, runner: HelperCommandRunner? = nil, statusDetail: (@Sendable () -> [String: String])? = nil,
-    kiosk: KioskRelay? = nil
+    kiosk: KioskRelay? = nil, updates: UpdateRelay? = nil, steward: StewardRelay? = nil
   ) {
     self.safeMode = safeMode
     self.runner = runner
     self.statusDetail = statusDetail
     self.kiosk = kiosk
+    self.updates = updates
+    self.steward = steward
   }
 
   public func handle(_ request: Data) -> Data {
@@ -84,6 +100,20 @@ public final class HelperService: @unchecked Sendable {
     case .kioskReport(let batchID, let status, let reason, let body):
       guard let kiosk else { return HelperResponse(ok: false, code: "not_implemented", detail: base) }
       base["outcome"] = kiosk.relayReport(batchID: batchID, status: status, body: Data(body.utf8), reason: reason)
+      return HelperResponse(ok: true, code: "ok", detail: base)
+    case .updateOffer(let record, let signature, let deviceID, let machine):
+      // Safe mode keeps to diagnostics: it neither updates nor runs tickets.
+      guard let updates, !safeMode else { return HelperResponse(ok: false, code: safeMode ? "safe_mode" : "not_implemented", detail: base) }
+      let answer = updates.offerUpdate(record: record, signature: signature, deviceID: deviceID, machine: machine)
+      base["answer"] = answer
+      return HelperResponse(ok: true, code: "ok", detail: base)
+    case .appBeat(let version):
+      guard let updates else { return HelperResponse(ok: false, code: "not_implemented", detail: base) }
+      updates.noteAppBeat(version: version)
+      return HelperResponse(ok: true, code: "ok", detail: base)
+    case .stewardTickets(let json, let deviceID, let machine):
+      guard let steward, !safeMode else { return HelperResponse(ok: false, code: safeMode ? "safe_mode" : "not_implemented", detail: base) }
+      base["results"] = String(steward.receiveTickets(json: json, deviceID: deviceID, machine: machine))
       return HelperResponse(ok: true, code: "ok", detail: base)
     case .appStatus, .runAppVerb, .requestBundleUpdate:
       return HelperResponse(ok: false, code: "not_implemented", detail: base)

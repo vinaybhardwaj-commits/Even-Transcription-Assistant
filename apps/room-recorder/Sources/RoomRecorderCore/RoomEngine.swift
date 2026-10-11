@@ -820,13 +820,18 @@ public actor RoomEngine {
     guard
       let bundle = updaterBundle(bundleURL: bundleURL, homeDirectory: homeDirectory, fileExists: fileExists)
     else { return nil }
-    return RoomUpdater(
+    var updater = RoomUpdater(
       rootURL: rootURL,
       residentBundleURL: bundle,
       runningVersion: version,
       channel: configuration.updateChannel,
       fetcher: RoomEngineReleaseFetcher(remote: remote)
     )
+    // 0.1.37 (#45): a release that carries the server's signed record goes to the root helper first.
+    updater.helperOffer = { release in
+      await Task.detached { HelperUpdateOffer.offer(release, root: rootURL) }.value
+    }
+    return updater
   }
 
   /// The bundle an updater may replace, or nil. The bundle that is RUNNING is the bundle that gets
@@ -1263,6 +1268,10 @@ public actor RoomEngine {
     case .handedOver(let version):
       updateSchedule.deferredWhileRecording = false
       return (version, attempt)
+    case .handedToHelper:
+      // The helper is on it, and it checks the session itself. Nothing for this process to do.
+      updateSchedule.deferredWhileRecording = false
+      return (nil, attempt)
     }
   }
 
@@ -1274,6 +1283,11 @@ public actor RoomEngine {
   /// test files this build's file contract does not open. The CLI reads this after `run()`
   /// returns, which is the only place the answer is wanted.
   public private(set) var exitReason: RoomEngineExit = .stopped
+
+  /// 0.1.37 (#45). Called after every bench poll that the server answered: the helper's update health check wants exactly
+  /// that proof, from this version. The CLI sets it; a test leaves it nil.
+  public var onBenchPollOK: (@Sendable () -> Void)?
+  public func setOnBenchPollOK(_ hook: @escaping @Sendable () -> Void) { onBenchPollOK = hook }
 
   /// Run until the room stops, or until a swap script takes the bundle over (§13.3 step 7).
   ///
@@ -1409,6 +1423,9 @@ public actor RoomEngine {
           fields.helperState = helper?.helperState
           fields.powerSchedule = helper?.powerSchedule
           fields.pmsetDrift = helper?.pmsetDrift
+          fields.helperUpdateStep = helper?.updateStep
+          fields.helperUpdateVersion = helper?.updateVersion
+          fields.helperUpdateResult = helper?.updateResult
           return fields
         }
         let response = try await remote.pollCommands(
@@ -1422,6 +1439,8 @@ public actor RoomEngine {
         // 0.1.17. A no-op unless the one RETIRED retry is in flight, in which case this poll
         // returning is what proves config's id is live.
         retryAfterRetiredAccepted()
+        // 0.1.37 (#45). The helper's update health check: a successful bench poll, running this version.
+        onBenchPollOK?()
         // ─── THE CANARY IS ACKNOWLEDGED HERE (Release B1, §14.2 step 5, B1-D3) ─────────────
         //
         // `pollCommands` RETURNED. That is the definition of a working build, and it is the whole
@@ -3230,6 +3249,9 @@ public actor RoomEngine {
     case .heldAfterRepeatedFailure(let version):
       verb.offeredVersion = version
       verb.held = true
+    case .handedToHelper(let version, _):
+      // The root helper has it. It checks the session itself, so for the operator this is "offered, not deferred".
+      verb.offeredVersion = version
     case .upToDate, .none, .stopped, .handedOver:
       break
     }

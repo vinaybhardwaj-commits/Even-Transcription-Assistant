@@ -301,6 +301,7 @@ import Testing
     #expect(
       ProcessSystemTools.allowed == [
         "/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps", "/usr/bin/killall", "/usr/sbin/ioreg", "/usr/bin/sudo",
+        "/usr/sbin/pkgutil", "/usr/bin/codesign",
       ])
     #expect(real.run("/usr/sbin/chown", ["0:0", "/tmp/x"]).status == 127, "the helper cannot chown anything")
   }

@@ -242,6 +242,48 @@ run on a user's file. If the thread cannot take the identity, nothing is read; t
 helper's own root reads (fleet state, ledger, power time, Chrome policy files, the standalone config) refuse
 hard-linked files as well.
 
+## The helper updates the whole app (0.1.37, #45)
+When the release route returns the server's signed **release record** (`record` + `record_signature`), the app hands it to the
+root helper instead of updating itself; only "no helper answered" (no helper, an older helper, safe mode) leaves the old
+user-level updater in charge for that version. The helper acts on nothing but the signature (key `fk1`, already compiled in):
+a record is for ONE device and machine, lives at most a day, names an `https` package on `www.evenscribe.app` or the Vercel
+blob host, and carries its sha256, its size, `min_helper`, a `cohort` and a `rollout_pct`.
+- **Cohorts.** `all`; a named cohort (`home_office`, `audiometry`, `opd1`) when the server lists it in this device's
+  `device_cohorts`; or `pct`: this device takes it when its bucket is under `rollout_pct`, the bucket being the first four
+  bytes of SHA-256 of `<device_id>|<version>`, big-endian, modulo 100 (the server computes the same number).
+- **Order.** download (https, allowed host, redirects fenced, size capped) · sha256 and size against the record ·
+  `pkgutil --expand-full` into a root-only directory · `codesign --verify --deep --strict` of the app and of the helper inside
+  against the pinned leaf and identifier · the version inside against the record · WAIT until no session is open · snapshot the
+  installed app AS THE ROOM USER into `/Library/Application Support/EvenScribe/rollback/<version>.app` and verify it ·
+  run `installer` as a **one-shot launchd job** (not a child of the helper: the pkg's postinstall restarts the helper, and a
+  new helper process picks up `phase: installing` from `helper-update.json`) · restart the app only outside a session ·
+  require an `appBeat` from the NEW version (the app sends one after each bench poll the server answered) within 5 minutes.
+- **Rollback.** No beat in 5 minutes, or a half-installed bundle: the snapshot is copied to a root-only staging directory,
+  handed to the room user, the failed bundle is moved aside (`rollback/failed-<version>.app`), the snapshot moved in, the
+  agent restarted, and it must beat as the OLD version within 5 minutes. A rollback never runs under a session either.
+  The helper's own copy in `/Library/PrivilegedHelperTools` is NOT rolled back (use `rollback.sh` for that).
+- **Never during a recording.** The session probe is the signed commands' own (recording, paused, or an unreadable status all
+  count as open). It is checked before the snapshot, after it, before the restart and before a rollback; the pin
+  (`update-pin`) and the two-failures-then-6-hours hold apply as for the user updater. The watchdog's `install-in-progress`
+  marker is held from the snapshot until the update is over. Nothing in this flow reads or deletes the recorder's folder.
+- **Reported** on the bench poll as `helper_update_step`, `helper_update_version`, `helper_update_result`: `offered`,
+  `downloading`, `downloaded`, `verified`, `deferred_session_open`, `snapshotting`, `installing`, `installed`,
+  `health_wait`, `health_failed`, `rolling_back`, `restored`, then `ok` / `rolled_back` / `failed:<reason>`; and `refused:<reason>`.
+- **Unproven until a room:** the real download, `pkgutil`/`codesign` on a real pkg, a real `installer` job surviving the
+  helper's own restart, and `kickstart -k` under launchd. The pkg has no Installer signature, so `spctl -a -t install` is not run.
+
+## Steward tickets run in the helper (0.1.37, #49)
+The app fetches `GET /api/steward/tickets` as the enrolled device and hands the list to the helper over XPC; the helper
+verifies each ticket against the PINNED key `6275a79b` (canonical JSON, Ed25519, exactly the server's rules: shape, signature,
+window of at most 900 s, allow-list, params, machine) and runs it: `wake`, `open_pulse`, `relaunch_chrome`, `policy_cycle`,
+`restart_recorder_app` (the recorder's launchd job), `restart_kiosk_health` (the helper's own collectors). Every ticket
+gets one `steward.result` event (`done`, `failed`, `rejected`, `expired`, `unsupported`). Refused: a replayed nonce (root-only
+ledger), a second ticket for the same action in one fetch, `relaunch_chrome` / `policy_cycle` / `restart_recorder_app` between
+07:30 and 21:30 IST (a ticket carries no approval), `restart_recorder_app` under ANY open session (recording, paused or
+unreadable), any restart while an update is in flight, and more than 10 restarts an hour. A v2 envelope in the list goes to
+the helper's own signed-command runner. The machine name is the kiosk-health machine, which the helper reports as
+`kiosk_machine` on its status.
+
 ## Updates only go up (0.1.30)
 The self-updater installs a version only if it is HIGHER than the one running, and only into the
 bundle that is running. A channel that offers an older version is ignored, so withdrawing a release no

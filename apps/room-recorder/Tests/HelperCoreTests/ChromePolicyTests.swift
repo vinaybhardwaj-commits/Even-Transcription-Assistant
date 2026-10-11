@@ -38,7 +38,7 @@ final class ChromeWorld: @unchecked Sendable {
   var diesOn: Set<Int32> = [SIGTERM]
   private(set) var signals: [(Int32, Int32)] = []
   private(set) var sleeps = 0
-  private(set) var events: [HelperEvent] = []
+  var events: [HelperEvent] = []
   private(set) var logs: [String] = []
   var hidIdleNanoseconds: UInt64? = 900 * 1_000_000_000
   var otherUserLines = ""

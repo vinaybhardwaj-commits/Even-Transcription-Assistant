@@ -138,6 +138,9 @@ public enum HelperBootstrap {
     public var helperState: String?
     public var powerSchedule: String?
     public var pmsetDrift: String?
+    public var updateStep: String?
+    public var updateVersion: String?
+    public var updateResult: String?
   }
 
   /// One probe of the helper, in whichever mode it runs (0.1.32).
@@ -165,7 +168,10 @@ public enum HelperBootstrap {
         mode: "launchd", registration: answering ? "enabled" : "notAnswering",
         helperVersion: reply?.detail["helper_version"], xpcOK: answering, error: nil,
         helperState: answering ? reply?.detail["state"] : "not_answering",
-        powerSchedule: reply?.detail["power_schedule"], pmsetDrift: reply?.detail["pmset_drift"])
+        powerSchedule: reply?.detail["power_schedule"], pmsetDrift: reply?.detail["pmset_drift"],
+        updateStep: reply?.detail["update_step"].map { step in
+          reply?.detail["update_detail"].map { step + ":" + $0 } ?? step
+        }, updateVersion: reply?.detail["update_version"], updateResult: reply?.detail["update_result"])
     }
     let result = registrationPass(service: service, openSettings: openSettings, state: &state, log: log)
     var version: String?
@@ -197,7 +203,8 @@ public enum HelperBootstrap {
         HelperStatusCache.shared.set(
           HelperSnapshot(
             registration: found.registration, helperVersion: found.helperVersion, xpcOK: found.xpcOK, mode: found.mode,
-            helperState: found.helperState, powerSchedule: found.powerSchedule, pmsetDrift: found.pmsetDrift),
+            helperState: found.helperState, powerSchedule: found.powerSchedule, pmsetDrift: found.pmsetDrift,
+            updateStep: found.updateStep, updateVersion: found.updateVersion, updateResult: found.updateResult),
           error: found.error)
         let summary = "\(found.mode)/\(found.registration)/\(found.xpcOK.map(String.init(describing:)) ?? "-")"
         if lastLogged != summary {

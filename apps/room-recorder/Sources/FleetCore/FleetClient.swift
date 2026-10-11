@@ -372,6 +372,25 @@ public actor FleetClient {
     }
   }
 
+  /// The only other GET this device authenticates to (#49, 0.1.37): its steward repair tickets, signed by the server and
+  /// verified by the root helper, not here. Nil when not enrolled, stopped, or no HTTP answer.
+  public static let stewardTicketsPath = "/api/steward/tickets"
+
+  public func fetchStewardTickets(machine: String, timeout: TimeInterval = 20) async -> FleetResponse? {
+    guard config.enabled else { return nil }
+    if state.installID == nil { loadState() }
+    guard state.stoppedReason == nil, let deviceID = state.deviceID else { return nil }
+    do {
+      return try await transport.send(
+        FleetRequest(
+          method: "GET", path: Self.stewardTicketsPath, query: ["machine": machine],
+          headers: ["Authorization": "Device \(try token(method: "GET", path: Self.stewardTicketsPath, body: nil, deviceID: deviceID))"],
+          body: nil, timeout: timeout))
+    } catch {
+      return nil
+    }
+  }
+
   // MARK: Results
 
   /// Re-send anything that has not been acknowledged. Each attempt gets a new token.

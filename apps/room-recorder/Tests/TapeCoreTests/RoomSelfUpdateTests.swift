@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 @testable import RoomRecorderCore
+@testable import HelperCore
 
 /// Build R3 §13.3 — self-update, proved rather than argued.
 ///

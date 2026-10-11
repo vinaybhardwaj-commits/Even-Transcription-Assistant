@@ -18,6 +18,8 @@ public struct UserFileInfo: Equatable, Sendable {
     public var isRegular: Bool
     public var isDirectory: Bool
     public var isSymlink: Bool
+    /// Permission bits (`st_mode & 0o7777`).
+    public var mode: UInt16
 }
 
 public protocol UserFileAccess: Sendable {
@@ -28,6 +30,8 @@ public protocol UserFileAccess: Sendable {
     func readWhole(_ path: String, user: String, maxBytes: Int) -> Data?
     /// Up to `maxBytes` of a plain, singly-linked file from `offset`.
     func readRange(_ path: String, user: String, offset: UInt64, maxBytes: Int) -> Data?
+    /// Where a symlink points, read as `user`. Nil when it is not a symlink.
+    func linkTarget(_ path: String, user: String) -> String?
     /// Entry names of a plain directory (not a symlink to one), without `.` and `..`, at most 2,000.
     func entries(_ path: String, user: String) -> [String]?
 }
@@ -44,7 +48,8 @@ public enum HardenedFile {
         func date(_ t: timespec) -> Date { Date(timeIntervalSince1970: TimeInterval(t.tv_sec) + TimeInterval(t.tv_nsec) / 1e9) }
         return UserFileInfo(
             size: UInt64(max(s.st_size, 0)), mtime: date(s.st_mtimespec), created: date(s.st_birthtimespec), inode: UInt64(s.st_ino),
-            nlink: s.st_nlink, isRegular: mode == S_IFREG, isDirectory: mode == S_IFDIR, isSymlink: mode == S_IFLNK)
+            nlink: s.st_nlink, isRegular: mode == S_IFREG, isDirectory: mode == S_IFDIR, isSymlink: mode == S_IFLNK,
+            mode: UInt16(s.st_mode & 0o7777))
     }
 
     /// Opens without following a final symlink and without blocking on a FIFO, then checks the OPEN descriptor (not the
@@ -86,6 +91,15 @@ public enum HardenedFile {
         return data.prefix(done)
     }
 
+    public static func linkTarget(_ path: String) -> String? {
+        var s = stat()
+        guard lstat(path, &s) == 0, (s.st_mode & S_IFMT) == S_IFLNK else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let n = readlink(path, &buffer, Int(PATH_MAX))
+        guard n > 0 else { return nil }
+        return String(cString: Array(buffer.prefix(n)) + [0])
+    }
+
     public static func entries(_ path: String) -> [String]? {
         var s = stat()
         guard lstat(path, &s) == 0, (s.st_mode & S_IFMT) == S_IFDIR, let dir = opendir(path) else { return nil }
@@ -112,5 +126,6 @@ public struct UnprivilegedUserFiles: UserFileAccess {
     public func readRange(_ path: String, user: String, offset: UInt64, maxBytes: Int) -> Data? {
         allowed ? HardenedFile.readRange(path, offset: offset, maxBytes: maxBytes) : nil
     }
+    public func linkTarget(_ path: String, user: String) -> String? { allowed ? HardenedFile.linkTarget(path) : nil }
     public func entries(_ path: String, user: String) -> [String]? { allowed ? HardenedFile.entries(path) : nil }
 }

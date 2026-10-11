@@ -69,7 +69,7 @@ public struct FleetEnvelope: Equatable, Sendable {
     text.range(of: pattern, options: .regularExpression) != nil
   }
 
-  static func date(_ iso: String) -> Date? {
+  public static func date(_ iso: String) -> Date? {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.date(from: iso)

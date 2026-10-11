@@ -56,6 +56,7 @@ public final class KioskHealthEngine: @unchecked Sendable {
     private var lastNote: [String: String] = [:]
     private let queues: [String: DispatchQueue]
     private var started = false
+    private var notifierStarted = false
 
     /// Production: the identity comes from the standalone daemon's config when there is one, else the host name.
     /// `files` is how every path under a user's home is read. Production passes the privilege-dropped reader
@@ -223,8 +224,11 @@ public final class KioskHealthEngine: @unchecked Sendable {
         for n in config.notes { log.warn(n) }
         if getuid() != 0 { log.warn("not running as root: collectors that need root will degrade") }
 
-        if !notifier.start() { log.warn("IORegisterForSystemPower failed; relying on pmset log for sleep/wake") }
-        notifier.onMessage = { [weak self] m in self?.onPowerMessage(m) }
+        if !notifierStarted {
+            notifierStarted = true
+            if !notifier.start() { log.warn("IORegisterForSystemPower failed; relying on pmset log for sleep/wake") }
+            notifier.onMessage = { [weak self] m in self?.onPowerMessage(m) }
+        }
 
         emitter.emit(heartbeat.build(started: true))
         emitter.flush()
@@ -247,6 +251,23 @@ public final class KioskHealthEngine: @unchecked Sendable {
             OwnLog.rotate(path: config.logPath, maxBytes: log.maxBytes, keep: log.keep)
             spool.resync()
         }
+    }
+
+    /// The machine name on every event, which is also the name Room Steward tickets are issued for.
+    public var machine: String { config.machine }
+
+    /// #49 `restart_kiosk_health`: stop every collector timer and start them again from the top (a fresh pmset/ioreg read, a
+    /// new heartbeat with `event: start`). The spool, the sequence numbers and the delivery state are not touched.
+    @discardableResult
+    public func restartCollectors() -> Bool {
+        guard started else { return false }
+        emitter.flush()
+        for t in timers { t.cancel() }
+        timers.removeAll()
+        started = false
+        audioProfileCount = 0
+        start()
+        return started
     }
 
     /// Flush what is buffered. Called on the helper's SIGTERM.

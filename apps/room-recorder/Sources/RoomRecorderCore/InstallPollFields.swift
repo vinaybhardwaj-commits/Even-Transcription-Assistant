@@ -108,6 +108,10 @@ public struct InstallPollFields: Equatable, Sendable {
   public var helperState: String?
   public var powerSchedule: String?
   public var pmsetDrift: String?
+  /// 0.1.37 (#45). The helper's whole-bundle update, step by step.
+  public var helperUpdateStep: String?
+  public var helperUpdateVersion: String?
+  public var helperUpdateResult: String?
 
   public init(
     installID: String,
@@ -341,6 +345,9 @@ public struct InstallPollFields: Equatable, Sendable {
     add("helper_state", helperState)
     add("power_schedule", powerSchedule)
     add("pmset_drift", pmsetDrift)
+    add("helper_update_step", helperUpdateStep.map { String($0.prefix(120)) })
+    add("helper_update_version", helperUpdateVersion.map { String($0.prefix(32)) })
+    add("helper_update_result", helperUpdateResult.map { String($0.prefix(32)) })
     add("helper_registration_error", helperRegistrationError.map { String($0.prefix(200)) })
     if let helperXPCOK {
       items.append(URLQueryItem(name: "helper_xpc_ok", value: helperXPCOK ? "true" : "false"))

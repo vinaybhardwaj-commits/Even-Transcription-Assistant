@@ -80,7 +80,7 @@ enum EventKind {
     /// Kinds that must flush to disk immediately.
     static func isProtected(_ kind: String) -> Bool {
         kind.hasPrefix("power.") || kind.hasPrefix("audio.") || kind.hasPrefix("watchdog.") || kind.hasPrefix("ladder.")
-            || kind.hasPrefix("spool.") || kind == "chrome.alert"
+            || kind.hasPrefix("spool.") || kind == "chrome.alert" || kind.hasPrefix("steward.")
     }
 
     /// Kinds the spool may delete (whole segments, oldest first) to stay under its cap. Everything else,

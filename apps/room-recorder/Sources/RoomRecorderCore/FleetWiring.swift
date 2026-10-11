@@ -185,6 +185,10 @@ public enum FleetBootstrap {
     // #47: the kiosk-health events the helper spools go to the sink with this device's credential.
     let relay = KioskHealthRelay(sink: client, link: HelperKioskLink(), log: log)
     Task.detached { await relay.run() }
+    // #49: the steward's repair tickets, fetched here (the app holds the credential) and verified and run by the helper.
+    let stewards = StewardTicketRelay(
+      source: client, link: HelperStewardLink(), deviceID: { FileFleetStateStore(root: root).load().deviceID }, log: log)
+    Task.detached { await stewards.run() }
   }
 
   /// The one place the client is assembled, and the only one `start` uses. The gates and the executor are built
