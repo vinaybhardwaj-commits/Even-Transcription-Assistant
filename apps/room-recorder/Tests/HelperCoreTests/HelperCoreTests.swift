@@ -40,10 +40,10 @@ private func refusal(_ data: Data) -> HelperRefusal? {
 }
 
 @Suite struct HelperCodecTests {
-  @Test func theVerbSetIsClosedAtFive() {
+  @Test func theVerbSetIsClosedAtSix() {
     #expect(
       Set(HelperVerb.allCases.map(\.rawValue))
-        == ["hello", "appStatus", "helperStatus", "runAppVerb", "requestBundleUpdate"])
+        == ["hello", "appStatus", "helperStatus", "runAppVerb", "requestBundleUpdate", "runSignedCommand"])
   }
 
   @Test func theAppVerbAllowListIsPinned() {
@@ -104,7 +104,7 @@ private func refusal(_ data: Data) -> HelperRefusal? {
     for command in [HelperCommand.hello(clientVersion: nil), .helperStatus] {
       let reply = try call(service, command)
       #expect(reply.ok)
-      #expect(reply.detail["helper_version"] == "0.2.0-h2")
+      #expect(reply.detail["helper_version"] == "0.2.1-h3")
       #expect(reply.detail["safe_mode"] == "false")
     }
     #expect(try call(HelperService(safeMode: true), .helperStatus).detail["safe_mode"] == "true")
@@ -162,11 +162,11 @@ private func refusal(_ data: Data) -> HelperRefusal? {
 
   @Test func helperFieldsAreSentWhenKnown() {
     var fields = InstallPollFields(installID: "i", tapeAdvancing: true)
-    fields.helperVersion = "0.2.0-h2"
+    fields.helperVersion = "0.2.1-h3"
     fields.helperRegistration = "enabled"
     fields.helperXPCOK = false
     let items = Dictionary(uniqueKeysWithValues: fields.queryItems().map { ($0.name, $0.value ?? "") })
-    #expect(items["helper_version"] == "0.2.0-h2")
+    #expect(items["helper_version"] == "0.2.1-h3")
     #expect(items["helper_registration"] == "enabled")
     #expect(items["helper_xpc_ok"] == "false")
   }

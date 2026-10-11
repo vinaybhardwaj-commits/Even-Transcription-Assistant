@@ -330,6 +330,55 @@ import Testing
     #expect(!FleetJSON.object(result.detail).canonical.contains("eta_room_session"))
   }
 
+  @Test func theFleetListsAudioInputsAsClosedDetail() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    let result = await engine.runFleetAppVerb(.listAudioInputs, params: FleetParams([:]), commandID: "cmd_l")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["count"]?.intValue != nil && result.detail["devices"]?.arrayValue != nil)
+    #expect(result.detail["selected_uid"]?.stringValue != nil)
+    #expect(FleetClient.detailIsClosed(result.detail))
+  }
+
+  @Test func theFleetPiecesInventoryIsCountsAndTimestampsOnly() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    let result = await engine.runFleetAppVerb(.piecesInventory, params: FleetParams([:]), commandID: "cmd_i")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["pending_count"] == .int(0) && result.detail["pending_total"] == .int(0) && result.detail["bytes"] == .int(0))
+    #expect(Set(result.detail.keys).isSubset(of: ["pending_count", "pending_total", "bytes", "oldest_started_at", "newest_started_at"]))
+    #expect(FleetClient.detailIsClosed(result.detail))
+    let filtered = await engine.runFleetAppVerb(
+      .piecesInventory, params: FleetParams(["since": .string("2026-10-10T07:00:00.000Z")]), commandID: "cmd_i2")
+    #expect(filtered.outcome == .ok)
+  }
+
+  @Test func theFleetPiecesReuploadRedrivesTheExistingUploaderAndTouchesNothingElse() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let result = await engine.runFleetAppVerb(.piecesReupload, params: FleetParams([:]), commandID: "cmd_r")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["pending_before"] == .int(0) && result.detail["pending_after"] == .int(0))
+  }
+
+  @Test func theHelperVerbsAreNotTheAppsToRun() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    for verb in [FleetVerb.coreaudiodReset, .reloadLaunchagent, .wake, .pmsetEnforce, .schedulePoweron, .helperStatus, .usbReseat, .collectDiag] {
+      let result = await engine.runFleetAppVerb(verb, params: FleetParams([:]), commandID: "cmd_h")
+      #expect(result.outcome == .unsupported && result.reason == "not_an_app_verb", "\(verb)")
+    }
+  }
+
   @Test func theFleetAudioInputRefusesWhatTheDeskWouldRefuse() async throws {
     let root = R4Fixture.temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }

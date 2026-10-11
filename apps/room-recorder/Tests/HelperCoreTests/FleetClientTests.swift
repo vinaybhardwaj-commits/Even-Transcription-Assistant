@@ -47,8 +47,8 @@ final class RecordingExecutor: FleetExecutor, @unchecked Sendable {
   private let lock = NSLock()
   private(set) var ran: [(FleetVerb, String)] = []
   var result = FleetExecResult(outcome: .ok, detail: ["lines": .int(3)])
-  func execute(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult {
-    lock.lock(); ran.append((verb, commandID)); lock.unlock()
+  func execute(_ verb: FleetVerb, params: FleetParams, envelope: FleetEnvelope) async -> FleetExecResult {
+    lock.lock(); ran.append((verb, envelope.cmdID)); lock.unlock()
     return result
   }
   var count: Int { lock.lock(); defer { lock.unlock() }; return ran.count }
@@ -61,8 +61,8 @@ final class Counter: @unchecked Sendable {
 }
 
 private func json(_ text: String) -> Data { Data(text.utf8) }
-private struct NoBody: Error {}
-private func parseObject(_ data: Data?) throws -> [String: FleetJSON] {
+struct NoBody: Error {}
+func parseObject(_ data: Data?) throws -> [String: FleetJSON] {
   guard let data, let object = try FleetJSON.parse(data).objectValue else { throw NoBody() }
   return object
 }
@@ -288,7 +288,7 @@ private func bearer(_ request: FleetRequest, _ scheme: String) -> String {
   }
 
   @Test func aGoodCommandRunsAndItsResultIsPostedSigned() async throws {
-    let r = rig { [$0.envelope(cmdID: "cmd_a", verb: "report_diag", params: ["log_lines": .int(5)])] }
+    let r = rig { [$0.envelope(cmdID: "cmd_a", verb: "report_diag")] }
     #expect(await r.client.pollOnce() == .handled(1))
     #expect(r.executor.ran.map { "\($0.0.rawValue)/\($0.1)" } == ["report_diag/cmd_a"])
     let posted = try #require(r.transport.requests.last)
@@ -357,11 +357,11 @@ private func bearer(_ request: FleetRequest, _ scheme: String) -> String {
   @Test func theTenPerHourCeilingStopsTheEleventhPrivilegedRun() async throws {
     // The server serves at most ten per poll, so the eleventh arrives in the next one.
     let r = rig { server in
-      return (0..<10).map { server.envelope(cmdID: "cmd_a\($0)", verb: "select_audio_input", params: ["device_uid": .string("u")]) }
+      return (0..<10).map { server.envelope(cmdID: "cmd_a\($0)", verb: "reload_launchagent", approval: "go_test") }
     }
     _ = await r.client.pollOnce()
     #expect(r.executor.count == 10)
-    let signed = r.serverRef.envelope(cmdID: "cmd_b0", verb: "select_audio_input", params: ["device_uid": .string("u")])
+    let signed = r.serverRef.envelope(cmdID: "cmd_b0", verb: "reload_launchagent", approval: "go_test")
     r.transport.handler = { request in
       request.path == "/api/fleet/poll"
         ? pollBody(commands: [signed])
@@ -388,11 +388,11 @@ private func bearer(_ request: FleetRequest, _ scheme: String) -> String {
   @Test func theAfterResultStepRunsOnlyOnceTheServerHasTheResult() async throws {
     final class Flag: @unchecked Sendable { var fired = 0 }
     let flag = Flag()
-    let failing = rig({ [$0.envelope(cmdID: "cmd_restart", verb: "restart_recorder")] }, resultStatus: 503)
+    let failing = rig({ [$0.envelope(cmdID: "cmd_restart", verb: "restart_recorder", approval: "go_test")] }, resultStatus: 503)
     failing.executor.result = FleetExecResult(outcome: .ok, afterResultPosted: { flag.fired += 1 })
     _ = await failing.client.pollOnce()
     #expect(flag.fired == 0, "a restart must not run before the result is safe")
-    let good = rig { [$0.envelope(cmdID: "cmd_restart", verb: "restart_recorder")] }
+    let good = rig { [$0.envelope(cmdID: "cmd_restart", verb: "restart_recorder", approval: "go_test")] }
     good.executor.result = FleetExecResult(outcome: .ok, afterResultPosted: { flag.fired += 1 })
     _ = await good.client.pollOnce()
     #expect(flag.fired == 1)

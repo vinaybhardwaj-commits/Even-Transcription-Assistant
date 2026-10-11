@@ -13,14 +13,14 @@ import Testing
     return try JSONDecoder().decode(RoomConfiguration.self, from: Data(json.utf8))
   }
 
-  @Test func theFleetClientIsOffInAnOldConfigAndInANewOne() throws {
-    #expect(try config().fleetClientEnabled == false)
+  @Test func theFleetClientIsOnInAnOldConfigAndInANewOne_since0_1_35() throws {
+    #expect(try config().fleetClientEnabled == true)
     let fresh = try RoomConfiguration(
       origin: URL(string: "https://evenscribe.app")!, roomSlug: "r", deviceUID: "u", tapewriterPath: "/t", ffmpegPath: "/f")
-    #expect(fresh.fleetClientEnabled == false)
+    #expect(fresh.fleetClientEnabled == true)
   }
 
-  @Test func onlyAnExplicitTrueInConfigJSONTurnsItOn() throws {
+  @Test func onlyAnExplicitFalseInConfigJSONTurnsItOff() throws {
     #expect(try config(extra: #","fleet_client_enabled":true"#).fleetClientEnabled == true)
     #expect(try config(extra: #","fleet_client_enabled":false"#).fleetClientEnabled == false)
     #expect(throws: (any Error).self) { try config(extra: #","fleet_client_enabled":"yes""#) }
@@ -28,12 +28,12 @@ import Testing
 
   @Test func theFlagSurvivesASaveAndLoad() throws {
     var on = try config()
-    on.fleetClientEnabled = true
+    on.fleetClientEnabled = false
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("flag-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     let persistence = RoomPersistence(root: root)
     try persistence.saveConfiguration(on)
-    #expect(try persistence.loadConfiguration().fleetClientEnabled == true)
+    #expect(try persistence.loadConfiguration().fleetClientEnabled == false, "an explicit off survives a save and load")
   }
 }
 
