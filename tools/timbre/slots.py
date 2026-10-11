@@ -1,5 +1,8 @@
 """Which Nemotron probability column is the doctor, and which is the patient.
 
+The text lane names columns with this module. The 10 ms hop lives in
+``nemotron_probs.resolve_frame_step``.
+
 Column ``i`` of the probability matrix is NeMo ``speaker_i`` — the tensor
 ``diarize_with_probs`` stores, packed by ``pack_nlp``. ETA's stored turn label
 ``spkN`` is not that index. ``tools/nemotron-worker/worker.py`` ``to_turns``

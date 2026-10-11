@@ -14,15 +14,17 @@ two when turns are available.
 Frame step. The worker hardcodes ``frame_ms: 80`` in ``pack_nlp`` regardless of
 the tensor hop (``tools/nemotron-worker/worker.py``). Production objects are
 ``rows=90003``, ``cols=8``, so the stored matrix is 90,003 frames, not
-``90003/8``. ``90003 * 10 ms = 900.03 s``, the 15-minute bench window;
+``90003/8`` (``90003 % 8 == 3``, so that reading cannot reshape the payload).
+``90003 * 10 ms = 900.03 s``, the 15-minute bench window;
 ``90003 * 80 ms = 7200.24 s``. ``resolve_frame_step`` infers the hop from the
 known duration and the frame count, snaps to a whole millisecond in 1..100 ms
 when the ratio is within 2%, and uses that hop when it explains the duration
 better than the header. The header value is kept when it already fits, and when
 the ratio is not a sane hop (a 100-frame file is not assigned a 9 s step just
 because the caller passed 900 s). A disagreement is a ``FrameStepWarning`` and
-is copied onto ``NlpLoad.frame_step_warning``. This reader still does not
-reshape the payload.
+is copied onto ``NlpLoad.frame_step_warning``. Samples are not dropped and the
+matrix is not reshaped. Column ``i`` is NeMo ``speaker_i``.
+``slots.align_labels`` joins that to an ETA ``spkN`` label.
 
 R2 fetch is optional and read-only (GetObject on ``lab/nemotron-probs/*.nlp``).
 Credentials, when ``client`` is omitted: ``R2_ENDPOINT``, ``R2_ACCESS_KEY_ID``,

@@ -66,6 +66,36 @@ def test_existing_tags_are_not_rewritten():
     assert masked.counts == {}
 
 
+def test_indic_digits_honorifics_and_native_phone_and_id():
+    raw = (
+        "ಶ್ರೀ ರಮೇಶ ಅವರೆ ನೋವು. Suresh ji slept. Lakshmi-garu is here. "
+        "Call ೯೮೭೬೫೪೩೨೧೦. आधार २३४५ ६७८९ ०१२३. "
+        "திரு ரமேஷ் வலி. ౯౮౭౬౫౪౩౨౧౦. "
+        "೯೨ ವರ್ಷ. ೪೦ ವರ್ಷ. pain avare stays a symptom. Dr Shah said rest."
+    )
+    masked = mask_phi(raw)
+    assert "ರಮೇಶ" not in masked.text
+    assert "ೇಶ" not in masked.text
+    assert "Suresh" not in masked.text
+    assert "Lakshmi" not in masked.text
+    assert "ரமேஷ்" not in masked.text
+    assert "ேஷ்" not in masked.text
+    assert "ನೋವು" in masked.text
+    assert "வலி" in masked.text
+    assert "pain avare" in masked.text
+    assert "Dr Shah" in masked.text
+    assert "೪೦" in masked.text or "40" in masked.text
+    assert "೯೨" not in masked.text
+    assert "೯೮೭೬೫೪೩೨೧೦" not in masked.text
+    assert "२३४५" not in masked.text
+    assert "౯౮౭౬౫౪౩౨౧౦" not in masked.text
+    assert masked.counts[TAG_PATIENT_NAME] >= 4
+    assert masked.counts[TAG_PHONE] >= 2
+    assert masked.counts[TAG_ID] >= 1
+    assert masked.counts[TAG_AGE] >= 1
+    assert masked.residual == ()
+
+
 def test_counts_do_not_contain_the_source_span():
     raw = "Mr Example Person phone 9123456780"
     masked = mask_phi(raw)

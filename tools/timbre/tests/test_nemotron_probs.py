@@ -94,6 +94,7 @@ def test_resolve_frame_step_does_not_invent_a_hop():
     assert step["adopted"] is False
     assert step["frame_ms"] == 80
     assert step["duration_s"] == pytest.approx(8.0)
+    assert step["snapped"] is False
     assert "header step kept" in step["warning"]
 
 
@@ -114,6 +115,7 @@ def test_production_shaped_header_infers_10ms():
     assert loaded.candidates[0]["duration_s"] == pytest.approx(7200.24)
     assert loaded.sanity["header_duration_s"] == pytest.approx(7200.24)
     assert loaded.sanity["hypotheses_s"]["rows_are_frames_s"] == pytest.approx(7200.24)
+    assert loaded.sanity["hypotheses_s"]["rows_over_cols_s"] == pytest.approx(900.03)
     assert loaded.sanity["hypotheses_s"]["ten_ms_if_rows_are_frames_s"] == pytest.approx(900.03)
     assert loaded.sanity["frame_step"]["adopted"] is True
     assert "frame_step_note" in loaded.sanity

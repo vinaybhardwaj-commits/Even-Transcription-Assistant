@@ -23,12 +23,15 @@ decision superseded doctor-ref for v1; the code remains for an explicit run.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 FLAG_TARGETS = ("engaged", "anxious", "resistant", "words_ne_tone")
+LANGUAGE_MIN_N = 20
+_LANG_TOKEN = re.compile(r"^[a-z0-9_+]{1,32}$")
 FLAG_ALIASES = {
     "engaged": ("engaged",),
     "anxious": ("anxious",),
@@ -295,6 +298,7 @@ def evaluate(
     scalar_ridge: bool = False,
     include_rel: bool = False,
     fusion_text: pd.DataFrame | None = None,
+    fusion_text_v1: pd.DataFrame | None = None,
     voice_cols: list[str] | None = None,
     voice_model: str | None = None,
 ) -> dict:
@@ -314,6 +318,7 @@ def evaluate(
             fusion_text,
             voice_cols=voice_cols,
             voice_model=voice_model,
+            text_scores_v1=fusion_text_v1,
         )
     return report
 
@@ -326,6 +331,7 @@ def evaluate_files(
     scalar_ridge: bool = False,
     include_rel: bool = False,
     text_scores: Path | str | None = None,
+    text_scores_v1: Path | str | None = None,
     voice_cols: list[str] | None = None,
     voice_model: str | None = None,
 ) -> dict:
@@ -333,6 +339,7 @@ def evaluate_files(
     features = pd.read_parquet(features_parquet)
     outcomes = pd.read_csv(outcomes_csv, dtype=str, keep_default_na=False) if outcomes_csv else None
     fusion_text = load_text_scores(text_scores) if text_scores else None
+    fusion_v1 = load_text_scores(text_scores_v1) if text_scores_v1 else None
     return evaluate(
         labels,
         features,
@@ -340,6 +347,7 @@ def evaluate_files(
         scalar_ridge=scalar_ridge,
         include_rel=include_rel,
         fusion_text=fusion_text,
+        fusion_text_v1=fusion_v1,
         voice_cols=voice_cols,
         voice_model=voice_model,
     )
@@ -703,6 +711,7 @@ def load_text_scores(path: Path | str) -> pd.DataFrame:
         else:
             rec["text_unresolved_doubt"] = _dim_number(doubt)
         rec["text_confidence"] = _dim_number(obj.get("confidence"))
+        _copy_language_fields(obj, rec)
         records.append(rec)
     if not records:
         raise EvalError("text scores file is empty")
@@ -764,6 +773,7 @@ def fusion_comparison(
     *,
     voice_cols: list[str] | None = None,
     voice_model: str | None = None,
+    text_scores_v1: pd.DataFrame | None = None,
 ) -> dict:
     """Voice-only vs text-only vs late fusion on one shared room-day GroupKFold cohort.
 
@@ -787,7 +797,7 @@ def fusion_comparison(
     groups = work["room_day"].to_numpy() if len(work) else np.array([])
     gold_a = work["arousal"].to_numpy(dtype=np.float64) if len(work) else np.array([])
     gold_v = work["valence"].to_numpy(dtype=np.float64) if len(work) else np.array([])
-    return {
+    report = {
         "n": int(len(work)),
         "n_joined": int(len(joined)),
         "n_dropped_nonfinite": int((~finite).sum()) if len(joined) else 0,
@@ -802,6 +812,126 @@ def fusion_comparison(
             "late_fused": _fusion_condition(work, vcols + tcols, gold_a, gold_v, groups),
         },
     }
+    if _frame_has_language(work):
+        report["language_min_n"] = LANGUAGE_MIN_N
+        report["by_language"] = _by_language(work, vcols, tcols)
+    if text_scores_v1 is not None:
+        v1 = fusion_comparison(
+            labels,
+            features,
+            text_scores_v1,
+            voice_cols=list(vcols),
+            voice_model=None,
+        )
+        report["versions"] = {
+            "v1": {"question_set": "timbre-text-v1", "n": v1["n"], "conditions": v1["conditions"], "by_language": v1.get("by_language")},
+            "v2": {
+                "question_set": "timbre-text-v2",
+                "n": report["n"],
+                "conditions": report["conditions"],
+                "by_language": report.get("by_language"),
+            },
+            "delta_v2_minus_v1": _version_deltas(report, v1),
+        }
+    return report
+
+
+def _copy_language_fields(obj: dict, rec: dict) -> None:
+    """Keep a short language code. A sentence in this field is not a language."""
+    lang = _clean_lang(obj.get("language"))
+    if lang:
+        rec["language"] = lang
+    if "code_mixed" in obj and obj.get("code_mixed") not in (None, ""):
+        rec["code_mixed"] = _as_mixed(obj.get("code_mixed"))
+
+
+def _clean_lang(val) -> str | None:
+    if val is None or (isinstance(val, float) and not np.isfinite(val)):
+        return None
+    text = str(val).strip().lower()
+    if text in ("", "nan", "none"):
+        return None
+    if not _LANG_TOKEN.fullmatch(text):
+        return "other"
+    return text
+
+
+def _as_mixed(val) -> bool:
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, (int, float, np.integer, np.floating)) and not isinstance(val, bool):
+        if isinstance(val, float) and not np.isfinite(val):
+            return False
+        return bool(val)
+    return str(val).strip().lower() in _TRUE
+
+
+def _frame_has_language(df: pd.DataFrame) -> bool:
+    if "code_mixed" in df.columns and any(_as_mixed(v) for v in df["code_mixed"].tolist()):
+        return True
+    for col in ("language", "lang"):
+        if col not in df.columns:
+            continue
+        if any(_clean_lang(v) for v in df[col].tolist()):
+            return True
+    return False
+
+
+def _buckets(df: pd.DataFrame) -> pd.Series:
+    """Speech language. A label ``lang`` wins, then the score's ``language``.
+
+    ``code_mixed`` on the score, or a language code of ``code_mixed``, is its own bucket.
+    """
+    n = len(df)
+    langs = df["language"] if "language" in df.columns else pd.Series([None] * n, index=df.index)
+    labs = df["lang"] if "lang" in df.columns else pd.Series([None] * n, index=df.index)
+    mixed = df["code_mixed"] if "code_mixed" in df.columns else pd.Series([False] * n, index=df.index)
+    out = []
+    for i in range(n):
+        if _as_mixed(mixed.iloc[i]):
+            out.append("code_mixed")
+            continue
+        chosen = _clean_lang(labs.iloc[i]) or _clean_lang(langs.iloc[i]) or "unknown"
+        out.append(chosen)
+    return pd.Series(out, index=df.index)
+
+
+def _by_language(work: pd.DataFrame, vcols: list[str], tcols: list[str]) -> dict:
+    buckets = _buckets(work)
+    report = {}
+    for name in sorted(set(buckets.tolist())):
+        sub = work.loc[buckets == name].reset_index(drop=True)
+        n = int(len(sub))
+        gold_a = sub["arousal"].to_numpy(dtype=np.float64) if n else np.array([])
+        gold_v = sub["valence"].to_numpy(dtype=np.float64) if n else np.array([])
+        groups = sub["room_day"].to_numpy() if n else np.array([])
+        report[name] = {
+            "n": n,
+            "validation": "ok" if n >= LANGUAGE_MIN_N else "not validated",
+            "conditions": {
+                "voice_only": _fusion_condition(sub, vcols, gold_a, gold_v, groups),
+                "text_only": _fusion_condition(sub, tcols, gold_a, gold_v, groups),
+                "late_fused": _fusion_condition(sub, vcols + tcols, gold_a, gold_v, groups),
+            },
+        }
+    return report
+
+
+def _version_deltas(v2: dict, v1: dict) -> dict:
+    pairs = (
+        ("text_only", "valence_spearman"),
+        ("text_only", "valence_ccc"),
+        ("text_only", "arousal_spearman"),
+        ("text_only", "arousal_ccc"),
+        ("late_fused", "valence_spearman"),
+        ("late_fused", "valence_ccc"),
+    )
+    out = {}
+    for cond, metric in pairs:
+        a = v2["conditions"][cond].get(metric)
+        b = v1["conditions"][cond].get(metric)
+        out[f"{cond}_{metric}"] = None if a is None or b is None else float(a) - float(b)
+    return out
 
 
 def _fusion_condition(work: pd.DataFrame, cols: list[str], gold_a, gold_v, groups) -> dict:
@@ -912,14 +1042,19 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="compare voice-only, text-only, and late-fused heads (requires --text-scores)",
     )
-    p.add_argument("--text-scores", default=None, help="Jev text-score JSONL or CSV (with --fusion)")
+    p.add_argument("--text-scores", default=None, help="Jev text-score JSONL or CSV, v2 native when comparing (with --fusion)")
+    p.add_argument(
+        "--text-scores-v1",
+        default=None,
+        help="v1 English Jev scores, compared with --text-scores on the same labels",
+    )
     p.add_argument("--voice-model", default=None, help="feature prefix whose arousal/valence/dominance are the voice dims")
     p.add_argument("--voice-cols", default=None, help="comma-separated voice dimension columns (overrides --voice-model)")
     args = p.parse_args(argv)
     if args.fusion and not args.text_scores:
         p.error("--fusion requires --text-scores")
-    if not args.fusion and (args.text_scores or args.voice_model or args.voice_cols):
-        p.error("--text-scores, --voice-model and --voice-cols require --fusion")
+    if not args.fusion and (args.text_scores or args.text_scores_v1 or args.voice_model or args.voice_cols):
+        p.error("--text-scores, --text-scores-v1, --voice-model and --voice-cols require --fusion")
     voice_cols = [c.strip() for c in args.voice_cols.split(",") if c.strip()] if args.voice_cols else None
     report = evaluate_files(
         args.labels,
@@ -928,6 +1063,7 @@ def main(argv: list[str] | None = None) -> None:
         scalar_ridge=args.scalar_ridge,
         include_rel=args.include_rel,
         text_scores=args.text_scores if args.fusion else None,
+        text_scores_v1=args.text_scores_v1 if args.fusion else None,
         voice_cols=voice_cols,
         voice_model=args.voice_model,
     )
