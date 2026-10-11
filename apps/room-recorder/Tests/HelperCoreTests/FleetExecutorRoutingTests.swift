@@ -9,6 +9,8 @@ import Testing
 /// Stands in for the engine and records which app verbs it was asked to run.
 final class FakeAppRunner: FleetAppVerbRunning, @unchecked Sendable {
   private let lock = NSLock()
+  var sessionOpen = false
+  var fleetSessionOpen: Bool { get async { sessionOpen } }
   private(set) var asked: [String] = []
   var result = FleetExecResult(outcome: .ok, detail: ["from_app": .bool(true)])
   func runFleetAppVerb(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult {

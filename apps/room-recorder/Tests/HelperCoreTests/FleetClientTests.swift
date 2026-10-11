@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 @testable import FleetCore
+@testable import RoomRecorderCore
 
 // MARK: - Fakes
 
@@ -93,6 +94,7 @@ struct Rig {
 
   init(
     enabled: Bool = true, session: String? = "room-jwt", withDevice: Bool = true, kill: Bool = false,
+    sessionOpen: Bool = false,
     responder: @escaping @Sendable (FleetRequest, TestServer) throws -> FleetResponse
   ) {
     let server = TestServer()
@@ -110,7 +112,7 @@ struct Rig {
     client = FleetClient(
       config: FleetClientConfig(enabled: enabled, installID: "inst_1", machine: TestServer.machine, hwModel: "Macmini9,1", helperVersion: "0.2.0-h2"),
       transport: transport, keys: keys, store: store, executor: executor,
-      serverKeys: ["fk1": server.publicKey], roomSession: { session }, gates: { FleetGateState(sessionOpen: false) },
+      serverKeys: ["fk1": server.publicKey], roomSession: { session }, gates: { FleetGateState(sessionOpen: sessionOpen) },
       clock: { TestServer.now }, sleep: { slept.add($0) }, makeJTI: { "jti-\(counter.next())-padding" }, log: { _ in })
     self.serverRef = server
   }
@@ -345,6 +347,27 @@ private func bearer(_ request: FleetRequest, _ scheme: String) -> String {
     // ...but with a NEW token each time.
     let jtis = r.transport.requests.filter { $0.path == "/api/fleet/results" }.map { claims(of: bearer($0, "Device"))["jti"]?.stringValue }
     #expect(Set(jtis).count == 2)
+  }
+
+  @Test func anOpenSessionStopsARestartAtTheAppBeforeAnythingRuns() async throws {
+    // The app's own gate, fed by the engine. (The wiring used to be untested: a constant `false` here survived.)
+    let r = Rig(sessionOpen: true) { request, server in
+      request.path == "/api/fleet/poll"
+        ? pollBody(commands: [server.envelope(cmdID: "cmd_busy", verb: "restart_recorder", approval: "go_test")])
+        : FleetResponse(status: 200, body: json(#"{"ok":true,"duplicate":false}"#))
+    }
+    _ = await r.client.pollOnce()
+    #expect(r.executor.count == 0)
+    #expect(try results(r).first?["reason"]?.stringValue == "session_open")
+  }
+
+  @Test func theGateProviderReadsTheEnginesSessionFreshEachTime() async {
+    let app = FakeAppRunner()
+    let gates = FleetBootstrap.gateProvider(app)
+    app.sessionOpen = false
+    #expect(await gates() == FleetGateState(sessionOpen: false))
+    app.sessionOpen = true
+    #expect(await gates() == FleetGateState(sessionOpen: true), "a session that opens later is seen")
   }
 
   @Test func theKillSwitchRefusesDeliveredCommands() async throws {

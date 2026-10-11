@@ -28,13 +28,15 @@ public final class HelperCommandRunner: @unchecked Sendable {
   private let power: PowerPolicy
   private let watchdog: AppWatchdog?
   private let statePath: String
+  private let powerTimePath: String
   private let safeMode: Bool
   private let log: @Sendable (String) -> Void
   private let lock = NSLock()
 
   public init(
     serverKeys: [String: Data] = FleetServerKeys.resolve(), env: HelperEnvironment, tools: SystemTools,
-    watchdog: AppWatchdog? = nil, statePath: String, safeMode: Bool = false,
+    watchdog: AppWatchdog? = nil, statePath: String,
+    powerTimePath: String = HelperIdentity.supportDirectory + "/" + HelperPaths.powerTimeFile, safeMode: Bool = false,
     log: @escaping @Sendable (String) -> Void
   ) {
     self.serverKeys = serverKeys
@@ -43,6 +45,7 @@ public final class HelperCommandRunner: @unchecked Sendable {
     self.power = PowerPolicy(tools: tools)
     self.watchdog = watchdog
     self.statePath = statePath
+    self.powerTimePath = powerTimePath
     self.safeMode = safeMode
     self.log = log
   }
@@ -76,9 +79,13 @@ public final class HelperCommandRunner: @unchecked Sendable {
     let epoch = Int(now.timeIntervalSince1970)
     let user = env.consoleUser()
     let root = user.flatMap { env.roomRoot(uid: $0.uid) }
-    let sessionOpen =
-      user.map { env.appRunning(uid: $0.uid) } == true
-      && (root.flatMap { AppStatusSnapshot.read(env: env, root: $0)?.sessionOpen } ?? false)
+    // FAIL CLOSED: a running app whose status cannot be read (missing, a symlink, too big, a FIFO) counts as a
+    // session in progress, so a reset or a restart waits rather than cutting a consultation.
+    let sessionOpen: Bool = {
+      guard let user, env.appRunning(uid: user.uid) else { return false }
+      guard let root else { return true }
+      return AppStatusSnapshot.read(env: env, root: root, uid: user.uid, gid: user.gid)?.sessionOpen ?? true
+    }()
     let verifier = FleetVerifier(serverKeys: serverKeys, deviceID: deviceID, machine: machine)
     let verdict = verifier.verify(
       json, now: now, nonceSeen: { state.nonceSeen($0) },
@@ -92,6 +99,11 @@ public final class HelperCommandRunner: @unchecked Sendable {
       log("helper refused a command: \(refusal.rawValue)")
       return HelperCommandOutcome(.refused, reason: refusal.rawValue)
     case .success(let accepted):
+      // Safe mode (three unstable launches in a row) keeps to diagnostics: it must not change the machine.
+      if safeMode, accepted.verb != .helperStatus, accepted.verb != .collectDiag {
+        log("helper in safe mode refused \(accepted.verb.rawValue)")
+        return HelperCommandOutcome(.refused, reason: "safe_mode")
+      }
       state.remember(nonce: accepted.envelope.nonce)
       if accepted.verb.isPrivileged { state.recordPrivilegedRun(at: epoch) }
       if accepted.verb == .coreaudiodReset { state.lastCoreaudiodReset = epoch }
@@ -138,13 +150,21 @@ public final class HelperCommandRunner: @unchecked Sendable {
         return HelperCommandOutcome(.failed, reason: FleetRefusal.noConsoleUser.rawValue)
       }
       var rewritten = false
-      if !env.fileExists(plist) {
+      switch env.userFileKind(plist, uid: user.uid, gid: user.gid) {
+      case .regular:
+        break
+      case .symlink, .other:
+        return HelperCommandOutcome(.refused, reason: "unsafe_path")
+      case .missing:
         guard let data = LaunchAgentPlist.data(
           executablePath: "/Applications/EvenScribe Room Recorder.app/Contents/MacOS/room-recorder",
-          rootPath: root, logPath: root + "/launchd.log"),
-          env.writeUserFile(plist, data: data, uid: user.uid, gid: user.gid)
+          rootPath: root, logPath: root + "/launchd.log")
         else { return HelperCommandOutcome(.failed, reason: "plist_not_written") }
-        rewritten = true
+        switch env.writeUserFile(plist, data: data, uid: user.uid, gid: user.gid) {
+        case .written: rewritten = true
+        case .refusedUnsafePath: return HelperCommandOutcome(.refused, reason: "unsafe_path")
+        case .failed: return HelperCommandOutcome(.failed, reason: "plist_not_written")
+        }
       }
       _ = tools.run("/bin/launchctl", ["bootout", "gui/\(user.uid)/\(HelperPaths.agentLabel)"])
       let result = tools.run("/bin/launchctl", ["bootstrap", "gui/\(user.uid)", plist])
@@ -170,9 +190,12 @@ public final class HelperCommandRunner: @unchecked Sendable {
       let set = tools.run("/usr/bin/pmset", ["repeat", "wakeorpoweron", "MTWRFSU", "\(time):00"])
       guard set.status == 0 else { return HelperCommandOutcome(.failed, reason: "pmset_\(set.status)") }
       let schedule = power.powerSchedule(time: time)
-      return schedule == "none"
-        ? HelperCommandOutcome(.failed, reason: "schedule_not_visible", detail: ["time": .string(time)])
-        : HelperCommandOutcome(.ok, detail: ["power_schedule": .string(schedule)])
+      guard schedule != "none" else {
+        return HelperCommandOutcome(.failed, reason: "schedule_not_visible", detail: ["time": .string(time)])
+      }
+      // Remember the time, root-only, so the 15-minute re-assertion keeps THIS time and not the default.
+      PowerPolicy.saveStoredTime(time, at: powerTimePath)
+      return HelperCommandOutcome(.ok, detail: ["power_schedule": .string(schedule)])
     case .reportDiag, .listAudioInputs, .selectAudioInput, .selfTest, .piecesInventory, .piecesReupload:
       return HelperCommandOutcome(.refused, reason: FleetRefusal.verbNotAllowed.rawValue)
     }

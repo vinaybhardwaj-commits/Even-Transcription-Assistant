@@ -108,6 +108,7 @@ public struct URLSessionFleetTransport: FleetTransport {
 /// SIGNED ENVELOPE, which the helper verifies again for itself; the app's word is not what the helper trusts.
 /// What the executor needs of the engine, so a test can stand in for it.
 protocol FleetAppVerbRunning: Sendable {
+  var fleetSessionOpen: Bool { get async }
   func runFleetAppVerb(_ verb: FleetVerb, params: FleetParams, commandID: String) async -> FleetExecResult
 }
 
@@ -154,6 +155,11 @@ struct EngineFleetExecutor: FleetExecutor {
 }
 
 public enum FleetBootstrap {
+  /// The app's local gate state, read FRESH at each command: an open session is what stops a reset or a restart.
+  static func gateProvider(_ app: any FleetAppVerbRunning) -> @Sendable () async -> FleetGateState {
+    { FleetGateState(sessionOpen: await app.fleetSessionOpen) }
+  }
+
   /// Starts the client when, and only when, `fleet_client_enabled` is true in config.json.
   public static func start(
     configuration: RoomConfiguration, root: URL, engine: RoomEngine,
@@ -175,7 +181,7 @@ public enum FleetBootstrap {
       transport: URLSessionFleetTransport(origin: configuration.origin), keys: KeychainFleetKeyStore(),
       store: FileFleetStateStore(root: root),
       executor: EngineFleetExecutor(engine: engine),
-      roomSession: { session }, gates: { FleetGateState(sessionOpen: await engine.fleetSessionOpen) }, log: log)
+      roomSession: { session }, gates: gateProvider(engine), log: log)
     log("fleet client: on")
     Task.detached { await client.run() }
   }

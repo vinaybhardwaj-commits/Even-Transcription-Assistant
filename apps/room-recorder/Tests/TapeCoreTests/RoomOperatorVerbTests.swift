@@ -299,6 +299,24 @@ import Testing
     try await task.value
   }
 
+  @Test func aRestartAcceptedWhileIdleIsDroppedIfASessionOpensBeforeItFires() async throws {
+    // accepted -> result posted -> (a consultation starts) -> the armed restart must NOT cut it.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
+    #expect(await engine.fleetSessionOpen)
+    await engine.armFleetRestart(forced: false)
+    try await R4Fixture.waitUntil { await remote.pollCount >= 3 }
+    #expect(!events.all.contains { $0.hasPrefix("exit:") }, "the session was not interrupted")
+    await engine.armFleetRestart(forced: true)  // a forced and approved restart was authorised over an open session
+    try await task.value
+    #expect(events.all.contains("exit:\(RoomEngine.restartExitCode)"))
+  }
+
   @Test func theFleetRestartExitsOnlyAfterTheResultStepRuns() async throws {
     let root = R4Fixture.temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }

@@ -70,6 +70,25 @@ public struct PowerPolicy: Sendable {
 
   // MARK: Scheduled power-on
 
+  /// The time a `schedule_poweron` last set, from a root-only file; nil (use the default) if none or not an HH:MM.
+  public static func storedTime(at path: String) -> String? {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.range(of: "^([01][0-9]|2[0-3]):[0-5][0-9]$", options: .regularExpression) != nil ? trimmed : nil
+  }
+
+  /// The default time clears the file, so "07:05" means "no override".
+  public static func saveStoredTime(_ time: String, at path: String) {
+    if time == defaultPowerOn {
+      try? FileManager.default.removeItem(atPath: path)
+      return
+    }
+    try? FileManager.default.createDirectory(
+      at: URL(fileURLWithPath: path).deletingLastPathComponent(), withIntermediateDirectories: true)
+    try? Data((time + "\n").utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+  }
+
   /// Does `pmset -g sched` say there is a repeating power-on at `time` ("HH:MM", 24 h) EVERY day?
   /// INFERRED format: `wakepoweron at 7:05AM every day`.
   public static func scheduleMatches(_ sched: String, time: String) -> Bool {

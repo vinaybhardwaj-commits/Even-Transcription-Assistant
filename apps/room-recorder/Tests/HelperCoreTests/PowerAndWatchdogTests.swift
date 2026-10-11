@@ -122,6 +122,27 @@ final class FakePmset: @unchecked Sendable {
     #expect(PowerPolicy(tools: cleared.tools).powerSchedule() == "MTWRFSU 07:05")
   }
 
+  @Test func theFifteenMinutePassKeepsTheTimeASchedulePoweronSet() {
+    let pmset = FakePmset()
+    let env = FakeEnv()
+    let timePath = tempPath("power-time")
+    PowerPolicy.saveStoredTime("06:45", at: timePath)
+    let monitor = HelperMonitor(
+      env: env, tools: pmset.tools, watchdog: AppWatchdog(env: env, tools: pmset.tools, log: { _ in }), safeMode: false,
+      heartbeatPath: tempPath("hb.json"), powerTimePath: timePath, log: { _ in })
+    monitor.enforcePower()
+    #expect(pmset.tools.actions.contains("/usr/bin/pmset repeat wakeorpoweron MTWRFSU 06:45:00"))
+    #expect(!pmset.tools.actions.contains { $0.contains("07:05") }, "the default is not forced back over a chosen time")
+    #expect(monitor.statusDetail()["power_schedule"] == "MTWRFSU 06:45")
+  }
+
+  @Test func aStoredTimeThatIsNotAClockTimeIsIgnored() {
+    let path = tempPath("power-time")
+    try? "25:99\n".write(toFile: path, atomically: true, encoding: .utf8)
+    #expect(PowerPolicy.storedTime(at: path) == nil)
+    #expect(PowerPolicy.storedTime(at: tempPath("none")) == nil)
+  }
+
   @Test func aMonitorTickRevertsAManualChangeWithinTheInterval() {
     let pmset = FakePmset(["sleep": 30, "disksleep": 0, "displaysleep": 0, "powernap": 0, "autorestart": 1, "womp": 1])
     let env = FakeEnv()
@@ -244,11 +265,28 @@ final class FakePmset: @unchecked Sendable {
 
   @Test func aPlistItCannotWriteIsLoggedAndBacksOffNotRetriedInALoop() {
     env.appIsRunning = false
-    env.failWrites = true
+    env.writeResult = .failed
     let watchdog = dog()
     #expect(watchdog.tick() == .missing)
     #expect(watchdog.tick() == .missing)
     #expect(tools.calls.isEmpty && watchdog.consecutiveFailures == 1, "the second tick is inside the backoff")
+  }
+
+  @Test func aPlistThatIsASymlinkIsNeverWrittenOverOrLoaded() {
+    env.appIsRunning = false
+    env.files[FakeEnv.plist] = Data("x".utf8)
+    env.symlinks = [FakeEnv.plist]
+    let watchdog = dog()
+    #expect(watchdog.tick() == .missing)
+    #expect(tools.calls.isEmpty && env.writes.isEmpty)
+  }
+
+  @Test func anUnsafePlistPathIsRefusedAndBacksOff() {
+    env.appIsRunning = false
+    env.writeResult = .refusedUnsafePath
+    let watchdog = dog()
+    #expect(watchdog.tick() == .missing && watchdog.consecutiveFailures == 1)
+    #expect(tools.calls.isEmpty)
   }
 
   @Test func itOnlyEverUsesTheUsersGuiDomain() {

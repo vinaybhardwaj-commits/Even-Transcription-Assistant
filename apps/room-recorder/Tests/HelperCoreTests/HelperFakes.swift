@@ -29,24 +29,32 @@ final class FakeEnv: HelperEnvironment, @unchecked Sendable {
   var appIsRunning = true
   var clock = TestServer.night
   var files: [String: Data] = [:]
+  var symlinks = Set<String>()
   var ages: [String: TimeInterval] = [:]
   var writes: [(path: String, data: Data, uid: UInt32, gid: UInt32)] = []
-  var failWrites = false
+  var writeResult: UserWriteResult = .written
+
+  /// A healthy idle app: it has written a `ready` status. (A running app with NO readable status counts as a session.)
+  init() { setStatus("ready") }
 
   func consoleUser() -> (uid: UInt32, gid: UInt32, name: String)? { console }
   func appRunning(uid: UInt32) -> Bool { appIsRunning }
   func now() -> Date { clock }
-  func fileExists(_ path: String) -> Bool { lock.lock(); defer { lock.unlock() }; return files[path] != nil }
-  func read(_ path: String) -> Data? { lock.lock(); defer { lock.unlock() }; return files[path] }
-  func fileAge(_ path: String) -> TimeInterval? { ages[path] }
   func homeDirectory(uid: UInt32) -> String? { "/Users/room" }
-  func writeUserFile(_ path: String, data: Data, uid: UInt32, gid: UInt32) -> Bool {
-    if failWrites { return false }
+  func userFileKind(_ path: String, uid: UInt32, gid: UInt32) -> UserFileKind {
+    lock.lock(); defer { lock.unlock() }
+    if symlinks.contains(path) { return .symlink }
+    return files[path] != nil ? .regular : .missing
+  }
+  func readUserFile(_ path: String, uid: UInt32, gid: UInt32) -> Data? { lock.lock(); defer { lock.unlock() }; return files[path] }
+  func userFileAge(_ path: String, uid: UInt32, gid: UInt32) -> TimeInterval? { ages[path] }
+  func writeUserFile(_ path: String, data: Data, uid: UInt32, gid: UInt32) -> UserWriteResult {
+    guard writeResult == .written else { return writeResult }
     lock.lock()
     files[path] = data
     writes.append((path, data, uid, gid))
     lock.unlock()
-    return true
+    return .written
   }
 
   static let root = "/Users/room/Library/Application Support/EvenScribe/RoomRecorder"

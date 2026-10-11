@@ -154,6 +154,25 @@ the reason (`replay`, `expired`, `machine_mismatch`, `session_open`, ...).
   (`update-handover.json` under 30 minutes old), or an operator: `touch` a file called `watchdog-hold` in
   `~/Library/Application Support/EvenScribe/RoomRecorder/` to keep the helper's hands off the app, delete it to
   give it back.
+- **The helper never writes as root into a room user's home.** The LaunchAgent plist is written AS the room
+  user (the helper runs the write on a thread that has taken that user's identity, so the kernel applies the
+  user's own permissions), through a temp file and a rename. It refuses a symlink anywhere on the path from the
+  home down, refuses to replace anything that is not a plain file, and runs no `chown` or by-path `chmod` at all
+  (`chown` is not on the helper's tool list). A refused write is reported as `unsafe_path` (`reload_launchagent`)
+  or logged (`watchdog: ... refused`). Files the helper READS from the user's directory (`status.json`, the
+  hold and handover markers) are read the same way: as the user, never through a symlink, never a FIFO, at most
+  64 KB. If the helper cannot take the user's identity it writes and reads nothing; it never falls back to root.
+- **Open session means a session.** A reset, reload or restart is refused when the app is running and its
+  `status.json` says recording or paused, AND when the app is running but its status cannot be read at all
+  (fail closed). An app that is not running cannot have a session.
+- **Safe mode.** After three unstable helper launches in a row the helper answers only `helper_status` and
+  `collect_diag`; any other signed command is refused `safe_mode` and not consumed.
+- **A power-on time that was set is kept.** `schedule_poweron` with another time stores it in
+  `/Library/Application Support/EvenScribe/helper-power-time` (root, mode 600); the 15-minute pass re-asserts THAT
+  time. Setting 07:05 clears the file. To go back by hand: `sudo rm` that file and run `pmset_enforce`.
+- **A restart waits for a quiet room.** A `restart_recorder` accepted while idle is re-checked just before it
+  fires; if a session opened in the meantime it is dropped (logged `fleet restart dropped`) unless it was forced
+  and approved.
 - **What to read.** `/Library/Application Support/EvenScribe/helper-heartbeat.json` (root-written, readable by
   all) has `app_state`, `console_user`, `power_schedule`, `pmset_drift`, `watchdog_failures`. The app reports the
   same on its bench poll and in `status.json` as `helper_state`, `power_schedule`, `pmset_drift`.

@@ -4554,7 +4554,17 @@ extension RoomEngine {
   public var fleetSessionOpen: Bool { sessionIsOpen }
 
   /// Arms the restart a `restart_recorder` asked for. Called only after the result is safely posted.
-  public func armFleetRestart() { restartRequested = true }
+  ///
+  /// The session is looked at AGAIN here: the command was accepted while the room was idle, and a consultation
+  /// may have started in the seconds since. An unforced restart then waits (it is dropped, and logged); a forced one
+  /// was already approved over an open session.
+  public func armFleetRestart(forced: Bool = false) {
+    if sessionIsOpen, !forced {
+      log("fleet restart dropped: a session opened after the command was accepted")
+      return
+    }
+    restartRequested = true
+  }
 
   /// Runs one of the app-side fleet verbs through the same code the desk's bench verbs use, so every
   /// existing gate (open session, resident lane, self-test conditions) applies unchanged. Nothing is
@@ -4587,7 +4597,7 @@ extension RoomEngine {
       guard result.ok else { return failure(result) }
       return FleetExecResult(
         outcome: .ok, detail: ["restarting": .bool(true)],
-        afterResultPosted: { [weak self] in await self?.armFleetRestart() })
+        afterResultPosted: { [weak self] in await self?.armFleetRestart(forced: params.raw["force"]?.boolValue == true) })
     case .selfTest:
       var args: [String: JSONValue] = [:]
       if let pct = params.raw["volume_pct"]?.intValue { args["volume"] = .number(Double(pct) / 100) }

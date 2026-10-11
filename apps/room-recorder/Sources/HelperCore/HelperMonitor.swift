@@ -38,6 +38,7 @@ public final class HelperMonitor: @unchecked Sendable {
   public let watchdog: AppWatchdog
   private let safeMode: Bool
   private let heartbeatPath: String
+  private let powerTimePath: String
   private let log: @Sendable (String) -> Void
   private let lock = NSLock()
   private var schedule = "none"
@@ -45,8 +46,10 @@ public final class HelperMonitor: @unchecked Sendable {
 
   public init(
     env: HelperEnvironment, tools: SystemTools, watchdog: AppWatchdog, safeMode: Bool, heartbeatPath: String,
+    powerTimePath: String = HelperIdentity.supportDirectory + "/" + HelperPaths.powerTimeFile,
     log: @escaping @Sendable (String) -> Void
   ) {
+    self.powerTimePath = powerTimePath
     self.env = env
     self.power = PowerPolicy(tools: tools)
     self.watchdog = watchdog
@@ -62,12 +65,13 @@ public final class HelperMonitor: @unchecked Sendable {
       log("power: reverted \(report.driftBefore.joined(separator: ", ")); now \(report.driftAfter.isEmpty ? "at baseline" : "still off: \(report.driftAfter.joined(separator: ", "))")")
     }
     if !report.failures.isEmpty { log("power: could not apply \(report.failures.joined(separator: ", "))") }
-    let sched = power.assertSchedule()
-    if sched.changed { log("power: the scheduled power-on was missing; set \(PowerPolicy.defaultPowerOn) every day") }
+    let time = PowerPolicy.storedTime(at: powerTimePath) ?? PowerPolicy.defaultPowerOn
+    let sched = power.assertSchedule(time: time)
+    if sched.changed { log("power: the scheduled power-on was missing; set \(time) every day") }
     if !sched.ok { log("power: could not set the scheduled power-on") }
     lock.lock()
     drift = report.driftAfter
-    schedule = power.powerSchedule()
+    schedule = power.powerSchedule(time: time)
     lock.unlock()
   }
 

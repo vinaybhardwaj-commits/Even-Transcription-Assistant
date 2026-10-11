@@ -114,8 +114,9 @@ import Testing
 
   @Test func withNoConsoleUserTheGuiVerbsRefuseAndTheRootOnesRun() {
     env.console = nil
-    #expect(run(runner(), envelope("restart_recorder")).reason == "no_console_user")
-    #expect(run(runner(), envelope("reload_launchagent")).reason == "no_console_user")
+    // REFUSED by the gate, not "failed" later: a helper that assumed a console user would fail inside the verb.
+    #expect(run(runner(), envelope("restart_recorder")) == HelperCommandOutcome(.refused, reason: "no_console_user"))
+    #expect(run(runner(), envelope("reload_launchagent")) == HelperCommandOutcome(.refused, reason: "no_console_user"))
     #expect(run(runner(), envelope("coreaudiod_reset")).kind == .ok)
     #expect(run(runner(), envelope("wake")).kind == .ok)
   }
@@ -183,10 +184,67 @@ import Testing
   }
 
   @Test func reloadFailsHonestlyIfThePlistCannotBeWritten() {
-    env.failWrites = true
+    env.writeResult = .failed
     let outcome = run(runner(), envelope("reload_launchagent"))
     #expect(outcome == HelperCommandOutcome(.failed, reason: "plist_not_written"))
     #expect(tools.actions.isEmpty)
+  }
+
+  @Test func aPlistPathThatIsASymlinkIsRefusedAndNothingIsBootedOut() {
+    env.files[FakeEnv.plist] = Data("x".utf8)
+    env.symlinks = [FakeEnv.plist]
+    let outcome = run(runner(), envelope("reload_launchagent"))
+    #expect(outcome == HelperCommandOutcome(.refused, reason: "unsafe_path"))
+    #expect(tools.actions.isEmpty, "not even a bootout")
+  }
+
+  @Test func aWriteTheEnvironmentRefusesAsUnsafeIsARefusalNotAFailure() {
+    env.writeResult = .refusedUnsafePath
+    #expect(run(runner(), envelope("reload_launchagent")) == HelperCommandOutcome(.refused, reason: "unsafe_path"))
+    #expect(tools.actions.isEmpty)
+  }
+
+  @Test func aRunningAppWhoseStatusCannotBeReadCountsAsASessionInProgress() {
+    // status.json missing (or a symlink, or too big, or a FIFO: all read as nil): fail CLOSED.
+    env.files[FakeEnv.root + "/status.json"] = nil
+    #expect(run(runner(), envelope("coreaudiod_reset")).reason == "session_open")
+    #expect(tools.actions.isEmpty)
+    env.setStatus("ready")
+    #expect(run(runner(), envelope("coreaudiod_reset")).kind == .ok)
+    // ...and an app that is not running cannot have a session, whatever it left behind.
+    let gone = FakeEnv()
+    gone.appIsRunning = false
+    let r = HelperCommandRunner(serverKeys: ["fk1": server.publicKey], env: gone, tools: FakeTools(), statePath: tempPath("s.json"), log: { _ in })
+    #expect(r.run(envelopeJSON: server.envelope(at: gone.clock, verb: "coreaudiod_reset").canonical, deviceID: TestServer.deviceID, machine: TestServer.machine).kind == .ok)
+  }
+
+  @Test func inSafeModeOnlyDiagnosticsRunAndNothingIsConsumed() {
+    let safe = runner(safeMode: true)
+    for verb in ["coreaudiod_reset", "wake", "pmset_enforce", "schedule_poweron", "reload_launchagent", "restart_recorder"] {
+      #expect(run(safe, envelope(verb, cmdID: "cmd_\(verb)")) == HelperCommandOutcome(.refused, reason: "safe_mode"), "\(verb)")
+    }
+    #expect(tools.actions.isEmpty)
+    #expect(run(safe, envelope("helper_status")).kind == .ok)
+    #expect(run(safe, envelope("collect_diag", ["scope": .string("power")])).kind == .unsupported)
+    // A refused envelope is not spent: the same one runs once safe mode ends.
+    let nonce = TestServer.freshNonce()
+    let held = envelope("wake", nonce: nonce)
+    #expect(run(safe, held).reason == "safe_mode")
+    #expect(run(runner(), held).kind == .ok)
+  }
+
+  @Test func scheduleAtAnotherTimeIsRememberedAndTheDefaultClearsIt() throws {
+    let timePath = tempPath("power-time")
+    let r = HelperCommandRunner(
+      serverKeys: ["fk1": server.publicKey], env: env, tools: tools, statePath: statePath, powerTimePath: timePath, log: { _ in })
+    let pmset = FakePmset()
+    let r2 = HelperCommandRunner(
+      serverKeys: ["fk1": server.publicKey], env: env, tools: pmset.tools, statePath: statePath, powerTimePath: timePath, log: { _ in })
+    _ = r
+    #expect(run(r2, envelope("schedule_poweron", ["time": .string("06:45")])).kind == .ok)
+    #expect(PowerPolicy.storedTime(at: timePath) == "06:45")
+    #expect(run(r2, envelope("schedule_poweron", ["time": .string("07:05")], cmdID: "cmd_2")).kind == .ok)
+    #expect(PowerPolicy.storedTime(at: timePath) == nil, "the default means no override")
   }
 
   @Test func wakeIsCaffeinateFiveSeconds() {
@@ -225,6 +283,7 @@ import Testing
     let real = ProcessSystemTools()
     #expect(real.run("/bin/sh", ["-c", "true"]) == ToolResult(status: 127, output: "not allowed"))
     #expect(real.run("/usr/bin/sudo", ["true"]).status == 127)
-    #expect(ProcessSystemTools.allowed == ["/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps", "/usr/sbin/chown"])
+    #expect(ProcessSystemTools.allowed == ["/bin/launchctl", "/usr/bin/pmset", "/usr/bin/caffeinate", "/bin/ps"])
+    #expect(real.run("/usr/sbin/chown", ["0:0", "/tmp/x"]).status == 127, "the helper cannot chown anything")
   }
 }

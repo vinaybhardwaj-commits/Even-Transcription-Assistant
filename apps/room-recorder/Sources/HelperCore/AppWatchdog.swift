@@ -70,9 +70,13 @@ public final class AppWatchdog: @unchecked Sendable {
       return .running
     }
     guard let root = env.roomRoot(uid: user.uid), let plist = env.agentPlistPath(uid: user.uid) else { return .missing }
-    if AppStatusSnapshot.read(env: env, root: root)?.needsEnrol == true { return .needsEnrol }
-    if env.fileExists(root + "/watchdog-hold") { return .held }
-    if let age = env.fileAge(root + "/update-handover.json"), age < Self.handoverGrace { return .updating }
+    if AppStatusSnapshot.read(env: env, root: root, uid: user.uid, gid: user.gid)?.needsEnrol == true { return .needsEnrol }
+    // The hold and the handover marker live in the room user's own directory: the room user is the operator of
+    // this Mac, so being able to hold the watchdog is a feature (see INSTALL.md), and every read is done AS them.
+    if env.userFileKind(root + "/watchdog-hold", uid: user.uid, gid: user.gid) != .missing { return .held }
+    if let age = env.userFileAge(root + "/update-handover.json", uid: user.uid, gid: user.gid), age < Self.handoverGrace {
+      return .updating
+    }
 
     let now = env.now()
     lock.lock()
@@ -80,15 +84,29 @@ public final class AppWatchdog: @unchecked Sendable {
     lock.unlock()
     if waiting { return .missing }
 
-    if !env.fileExists(plist) {
+    // The plist is the room user's file. Root never writes it as root, never follows a symlink to it, and never
+    // loads one that is not a plain file.
+    switch env.userFileKind(plist, uid: user.uid, gid: user.gid) {
+    case .regular:
+      break
+    case .symlink, .other:
+      log("watchdog: the LaunchAgent plist is not a plain file; not touching it")
+      return fail(now)
+    case .missing:
       let logPath = root + "/launchd.log"
-      guard let data = LaunchAgentPlist.data(executablePath: appExecutable, rootPath: root, logPath: logPath),
-        env.writeUserFile(plist, data: data, uid: user.uid, gid: user.gid)
-      else {
+      guard let data = LaunchAgentPlist.data(executablePath: appExecutable, rootPath: root, logPath: logPath) else {
+        return fail(now)
+      }
+      switch env.writeUserFile(plist, data: data, uid: user.uid, gid: user.gid) {
+      case .written:
+        log("watchdog: restored the missing LaunchAgent plist")
+      case .refusedUnsafePath:
+        log("watchdog: the LaunchAgent plist path is not safe to write (a symlink on the way); refused")
+        return fail(now)
+      case .failed:
         log("watchdog: the LaunchAgent plist is missing and could not be rewritten")
         return fail(now)
       }
-      log("watchdog: restored the missing LaunchAgent plist")
     }
     let domain = "gui/\(user.uid)"
     var result = tools.run("/bin/launchctl", ["bootstrap", domain, plist])
