@@ -7,7 +7,8 @@ Inputs (all box/GPU-host private; this module never prints ids or scores, counts
 * ``run.json``         run manifest written by the nightly job (``tools/timbre/nightly.py``) or by hand for a backfill
 * ``clips.jsonl``      one line per pipeline ``clip_id``: the ETA keys it maps to
                        ``{clip_id, consult_uid, cut_version, t0_ms, ist_date, room_id?, room_slug?, room_label?, session_id?,
-                         doctor_uid8?, diarize_engine, diarize_ref?, speaker_idx?, doctor_slot?}``
+                         doctor_uid8?, diarize_engine, diarize_ref?, speaker_idx?, doctor_slot?, offset_ms?}``
+                       (offset_ms: start of a consult PART inside its consult; stored times stay consult-relative)
 * the two calibration JSON files named in the manifest
 
 Output: one JSON *payload* ``{version, calibration_arousal, calibration_valence, run, windows, consults}`` whose keys are the
@@ -193,7 +194,12 @@ def ensure_calibrated(frame: pd.DataFrame, cal_a: dict | None, cal_v: dict | Non
 def map_window(row: dict, clip: dict, *, text_lane_on: bool) -> dict:
     """One pipeline row -> one ``affect_window`` row (column names are the table's)."""
     start_s, end_s = float(row["start_s"]), float(row["end_s"])
-    start_ms, end_ms = int(round(start_s * 1000)), int(round(end_s * 1000))
+    # offset_ms: a pipeline clip that is one PART of a consult (tools/timbre/nightly_prepare.py cuts a consult at Nemotron
+    # window edges) carries its start inside the consult; stored times are always consult-relative.
+    off = int(clip.get("offset_ms") or 0)
+    if off < 0:
+        raise StoreError("offset_ms must be >= 0")
+    start_ms, end_ms = int(round(start_s * 1000)) + off, int(round(end_s * 1000)) + off
     if end_ms <= start_ms:
         end_ms = start_ms + 1
     t0 = clip.get("t0_ms")

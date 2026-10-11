@@ -34,3 +34,26 @@ export function checkTimbreHmac(
   const got = Buffer.from(sig, "hex");
   return want.length === got.length && timingSafeEqual(want, got) ? null : { status: 401, error: "unauthorized" };
 }
+
+/** GET variant for /api/timbre/consults: hex HMAC-SHA256(secret, `${ts}.GET ${pathAndQuery}`) — tools/timbre/nightly.py::sign_get. */
+export function signTimbreGet(pathAndQuery: string, secret: string, ts: number): string {
+  return createHmac("sha256", secret).update(`${ts}.GET ${pathAndQuery}`).digest("hex");
+}
+
+export function checkTimbreGet(
+  headers: Headers,
+  pathAndQuery: string,
+  env: Record<string, string | undefined> = process.env,
+  nowS: number = Math.floor(Date.now() / 1000),
+): TimbreAuthFailure | null {
+  const secret = env[TIMBRE_INGEST_SECRET_ENV]?.trim();
+  if (!secret) return { status: 503, error: "not_configured" };
+  const tsText = (headers.get("x-timbre-ts") ?? "").trim();
+  const sig = (headers.get("x-timbre-signature") ?? "").trim().toLowerCase();
+  if (!/^\d{9,11}$/.test(tsText) || !/^[0-9a-f]{64}$/.test(sig)) return { status: 401, error: "unauthorized" };
+  const ts = Number(tsText);
+  if (Math.abs(nowS - ts) > MAX_SKEW_S) return { status: 401, error: "stale" };
+  const want = Buffer.from(signTimbreGet(pathAndQuery, secret, ts), "hex");
+  const got = Buffer.from(sig, "hex");
+  return want.length === got.length && timingSafeEqual(want, got) ? null : { status: 401, error: "unauthorized" };
+}

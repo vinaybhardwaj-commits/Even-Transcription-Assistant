@@ -28,11 +28,16 @@ describe("the two emotion gates", () => {
   it("EMOTION_ENABLED gates compute; canSurfaceEmotion needs BOTH flags", async () => {
     const { emotionEnabled, canSurfaceEmotion } = await import("@/lib/emotion/gate");
     expect(emotionEnabled({})).toBe(false);
-    expect(emotionEnabled({ EMOTION_ENABLED: "1" })).toBe(true);
+    expect(emotionEnabled({ EMOTION_ENABLED: "1", EMOTION_WAVLM_RETIRED: "0" })).toBe(true);
+    // Timbre #79: WavLM is retired unless EMOTION_WAVLM_RETIRED is explicitly off — EMOTION_ENABLED alone writes nothing
+    expect(emotionEnabled({ EMOTION_ENABLED: "1" })).toBe(false);
+    expect(emotionEnabled({ EMOTION_ENABLED: "1", EMOTION_WAVLM_RETIRED: "1" })).toBe(false);
+    expect(() => emotionEnabled({ EMOTION_ENABLED: "1", EMOTION_WAVLM_RETIRED: "sure" })).toThrow();
     expect(canSurfaceEmotion({})).toBe(false);
     expect(canSurfaceEmotion({ EMOTION_SURFACE_ENABLED: "1" }), "nothing surfaces that is not computed").toBe(false);
     expect(canSurfaceEmotion({ EMOTION_ENABLED: "1" })).toBe(false);
-    expect(canSurfaceEmotion({ EMOTION_ENABLED: "1", EMOTION_SURFACE_ENABLED: "on" })).toBe(true);
+    expect(canSurfaceEmotion({ EMOTION_ENABLED: "1", EMOTION_WAVLM_RETIRED: "0", EMOTION_SURFACE_ENABLED: "on" })).toBe(true);
+    expect(canSurfaceEmotion({ EMOTION_ENABLED: "1", EMOTION_SURFACE_ENABLED: "on" })).toBe(false);
     expect(() => canSurfaceEmotion({ EMOTION_ENABLED: "1", EMOTION_SURFACE_ENABLED: "sure" })).toThrow();
   });
 
