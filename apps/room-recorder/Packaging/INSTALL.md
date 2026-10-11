@@ -138,7 +138,8 @@ The catalogue is closed: `helper_status`, `collect_diag` (answers `unsupported` 
 `report_diag`, `list_audio_inputs`, `select_audio_input`, `coreaudiod_reset`, `usb_reseat` (always `unsupported`),
 `self_test`, `restart_recorder`, `reload_launchagent`, `pieces_inventory`, `pieces_reupload`, `wake`,
 `pmset_enforce`, `schedule_poweron`. No shell, no file path, no autologin. Gates: a reset, restart or reload is
-refused while a session is open (a restart can be forced with `force` AND an `approval_ref`); the four privileged
+refused while a session is open (`restart_recorder` and `select_audio_input`, which reopens the running segment,
+can be forced with `force` AND an `approval_ref`; the reset and the reload have no force); the four privileged
 verbs need an `approval_ref` between 07:30 and 21:30 IST; at most 10 privileged verbs an hour and one
 coreaudiod reset per 30 minutes; the GUI verbs need someone at the console. A refusal comes back as a result with
 the reason (`replay`, `expired`, `machine_mismatch`, `session_open`, ...).
@@ -170,9 +171,11 @@ the reason (`replay`, `expired`, `machine_mismatch`, `session_open`, ...).
 - **A power-on time that was set is kept.** `schedule_poweron` with another time stores it in
   `/Library/Application Support/EvenScribe/helper-power-time` (root, mode 600); the 15-minute pass re-asserts THAT
   time. Setting 07:05 clears the file. To go back by hand: `sudo rm` that file and run `pmset_enforce`.
-- **A restart waits for a quiet room.** A `restart_recorder` accepted while idle is re-checked just before it
-  fires; if a session opened in the meantime it is dropped (logged `fleet restart dropped`) unless it was forced
-  and approved.
+- **A restart waits for a quiet room.** A `restart_recorder` accepted while idle is re-checked at the moment the
+  recorder would exit (and again when it is armed); if a session opened in the meantime it is dropped unless it
+  was forced and approved. The server was already told "restarting" and a result cannot be changed afterwards, so
+  the drop is recorded in the log (`fleet restart dropped ... superseded_session_open`) and in `status.json` as
+  `last_event: superseded_session_open`. Re-issue the command when the room is quiet.
 - **What to read.** `/Library/Application Support/EvenScribe/helper-heartbeat.json` (root-written, readable by
   all) has `app_state`, `console_user`, `power_schedule`, `pmset_drift`, `watchdog_failures`. The app reports the
   same on its bench poll and in `status.json` as `helper_state`, `power_schedule`, `pmset_drift`.

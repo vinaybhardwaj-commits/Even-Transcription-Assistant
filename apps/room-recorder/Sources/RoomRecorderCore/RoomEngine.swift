@@ -545,6 +545,10 @@ public actor RoomEngine {
   private let helperVersion: @Sendable (String, [String]) -> String?
   /// Tier 1 §3. Set once a `restart_engine` ack has landed; `run()` stops and exits on it.
   private var restartRequested = false
+  /// 0.1.35 R3. The pending restart came from a `restart_recorder` command, and whether that command was forced
+  /// (and, since the server checked it, approved). The desk's own `restart_engine` leaves both false.
+  private var fleetRestartPending = false
+  private var fleetRestartForced = false
   /// Tier 1 §3. The PCM reader behind `clip_count` and `silence_ms`, for the running plain capture.
   private var pcmMeter: PCMTailMeter?
   /// Tier 1 §3. A locked channel's refusal of an assignment is said once, not every 1.5 s.
@@ -1484,6 +1488,7 @@ public actor RoomEngine {
         // Tier 1 §3. A forced check that handed over, or a restart whose ack landed, ends the loop
         // here — before the scheduled check below, and before another poll can hand this process
         // more work it will not live to finish.
+        dropFleetRestartIfASessionOpened()
         if handedOverToUpdateVersion != nil || restartRequested { break }
 
         // ─── BUILD R3 — the update check (§13.3 steps 1 to 7) ────────────────────────────────
@@ -4560,10 +4565,29 @@ extension RoomEngine {
   /// was already approved over an open session.
   public func armFleetRestart(forced: Bool = false) {
     if sessionIsOpen, !forced {
-      log("fleet restart dropped: a session opened after the command was accepted")
+      supersedeFleetRestart("armed")
       return
     }
     restartRequested = true
+    fleetRestartPending = true
+    fleetRestartForced = forced
+  }
+
+  /// The check at the moment the restart would FIRE: the loop is about to stop the capture and exit. A restart that
+  /// was accepted while idle is dropped if a consultation started since, unless the command carried force and an
+  /// approval_ref. The result was posted long before (it said "restarting"), so what is left to say it is in the
+  /// log and in `status.json`'s `last_event`: `superseded_session_open`.
+  func dropFleetRestartIfASessionOpened() {
+    guard restartRequested, fleetRestartPending, !fleetRestartForced, sessionIsOpen else { return }
+    restartRequested = false
+    supersedeFleetRestart("firing")
+  }
+
+  private func supersedeFleetRestart(_ moment: String) {
+    fleetRestartPending = false
+    fleetRestartForced = false
+    lastEvent = ("superseded_session_open", Date())
+    log("fleet restart dropped at \(moment): superseded_session_open (a session was open and the command was not forced and approved)")
   }
 
   /// Runs one of the app-side fleet verbs through the same code the desk's bench verbs use, so every
@@ -4604,6 +4628,11 @@ extension RoomEngine {
       let result = startSelfTest(command(.selfTest, args.isEmpty ? .null : .object(args)))
       return result.ok ? FleetExecResult(outcome: .ok, detail: ["started": .bool(true)]) : failure(result)
     case .selectAudioInput:
+      // It REOPENS the running segment, so over an open session it needs force (the verifier has already required
+      // an approval_ref with it). Checked here too, against the engine's own live state, not only the gate's.
+      if sessionIsOpen, params.raw["force"]?.boolValue != true {
+        return FleetExecResult(outcome: .failed, reason: "session_open")
+      }
       var args: [String: JSONValue] = [:]
       if let uid = params.raw["device_uid"]?.stringValue { args["device_uid"] = .string(uid) }
       if let pct = params.raw["input_volume_pct"]?.intValue { args["input_volume"] = .number(Double(pct) / 100) }

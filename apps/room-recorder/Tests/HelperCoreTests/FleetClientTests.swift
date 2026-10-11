@@ -94,7 +94,7 @@ struct Rig {
 
   init(
     enabled: Bool = true, session: String? = "room-jwt", withDevice: Bool = true, kill: Bool = false,
-    sessionOpen: Bool = false,
+    sessionOpen: Bool = false, gates: (@Sendable () async -> FleetGateState)? = nil,
     responder: @escaping @Sendable (FleetRequest, TestServer) throws -> FleetResponse
   ) {
     let server = TestServer()
@@ -112,7 +112,7 @@ struct Rig {
     client = FleetClient(
       config: FleetClientConfig(enabled: enabled, installID: "inst_1", machine: TestServer.machine, hwModel: "Macmini9,1", helperVersion: "0.2.0-h2"),
       transport: transport, keys: keys, store: store, executor: executor,
-      serverKeys: ["fk1": server.publicKey], roomSession: { session }, gates: { FleetGateState(sessionOpen: sessionOpen) },
+      serverKeys: ["fk1": server.publicKey], roomSession: { session }, gates: gates ?? { FleetGateState(sessionOpen: sessionOpen) },
       clock: { TestServer.now }, sleep: { slept.add($0) }, makeJTI: { "jti-\(counter.next())-padding" }, log: { _ in })
     self.serverRef = server
   }
@@ -359,6 +359,99 @@ private func bearer(_ request: FleetRequest, _ scheme: String) -> String {
     _ = await r.client.pollOnce()
     #expect(r.executor.count == 0)
     #expect(try results(r).first?["reason"]?.stringValue == "session_open")
+  }
+
+  // ─── an open session, every disruptive verb ────────────────────────────────────────────────────
+
+  private func openRoomRig(
+    _ envelopes: @escaping @Sendable (TestServer) -> [FleetJSON], app: FakeAppRunner
+  ) -> Rig {
+    // The REAL provider, fed by the (fake) engine: the old wiring passed a constant `false` and nothing noticed.
+    Rig(gates: FleetBootstrap.gateProvider(app)) { request, server in
+      request.path == "/api/fleet/poll"
+        ? pollBody(commands: envelopes(server))
+        : FleetResponse(status: 200, body: json(#"{"ok":true,"duplicate":false}"#))
+    }
+  }
+
+  @Test func withASessionOpenEveryDisruptiveVerbIsRefusedWithoutForceAndApproval() async throws {
+    let app = FakeAppRunner()
+    app.sessionOpen = true
+    let r = openRoomRig({ server in
+      [
+        server.envelope(cmdID: "cmd_reset", verb: "coreaudiod_reset", approval: "go_test"),
+        server.envelope(cmdID: "cmd_reload", verb: "reload_launchagent", approval: "go_test"),
+        server.envelope(cmdID: "cmd_restart", verb: "restart_recorder", approval: "go_test"),
+        server.envelope(cmdID: "cmd_select", verb: "select_audio_input", params: ["device_uid": .string("u")], approval: "go_test"),
+        server.envelope(cmdID: "cmd_restart_f", verb: "restart_recorder", params: ["force": .bool(true)]),
+        server.envelope(cmdID: "cmd_select_f", verb: "select_audio_input", params: ["device_uid": .string("u"), "force": .bool(true)]),
+      ]
+    }, app: app)
+    _ = await r.client.pollOnce()
+    #expect(r.executor.count == 0, "nothing ran")
+    let got = try results(r).map { "\($0["cmd_id"]!.stringValue!):\($0["reason"]!.stringValue!)" }
+    #expect(got == [
+      "cmd_reset:session_open", "cmd_reload:session_open", "cmd_restart:session_open", "cmd_select:session_open",
+      "cmd_restart_f:session_open", "cmd_select_f:session_open",
+    ], "approval alone is not force; force alone is not approval: \(got)")
+  }
+
+  @Test func forceWithAnApprovalRefIsTheOnlyWayInOverAnOpenSession() async throws {
+    let app = FakeAppRunner()
+    app.sessionOpen = true
+    let r = openRoomRig({ server in
+      [
+        server.envelope(cmdID: "cmd_restart", verb: "restart_recorder", params: ["force": .bool(true)], approval: "go_test"),
+        server.envelope(cmdID: "cmd_select", verb: "select_audio_input", params: ["device_uid": .string("u"), "force": .bool(true)], approval: "go_test"),
+      ]
+    }, app: app)
+    _ = await r.client.pollOnce()
+    #expect(r.executor.ran.map(\.1) == ["cmd_restart", "cmd_select"])
+    #expect(try results(r).map { $0["outcome"]!.stringValue! } == ["ok", "ok"])
+  }
+
+  @Test func coreaudiodResetAndReloadHaveNoForceSoTheyAreNeverAcceptedOverAnOpenSession() async throws {
+    let app = FakeAppRunner()
+    app.sessionOpen = true
+    let r = openRoomRig({ server in
+      [
+        server.envelope(cmdID: "cmd_reset", verb: "coreaudiod_reset", params: ["force": .bool(true)], approval: "go_test"),
+        server.envelope(cmdID: "cmd_reload", verb: "reload_launchagent", params: ["force": .bool(true)], approval: "go_test"),
+      ]
+    }, app: app)
+    _ = await r.client.pollOnce()
+    #expect(r.executor.count == 0)
+    #expect(try results(r).map { $0["reason"]!.stringValue! } == ["bad_params", "bad_params"], "force is not in their closed schema")
+  }
+
+  @Test func theSameVerbsRunWhenTheRoomIsQuiet() async throws {
+    let app = FakeAppRunner()
+    app.sessionOpen = false
+    let r = openRoomRig({ server in
+      [
+        server.envelope(cmdID: "cmd_reset", verb: "coreaudiod_reset", approval: "go_test"),
+        server.envelope(cmdID: "cmd_restart", verb: "restart_recorder", approval: "go_test"),
+        server.envelope(cmdID: "cmd_select", verb: "select_audio_input", params: ["device_uid": .string("u")]),
+      ]
+    }, app: app)
+    _ = await r.client.pollOnce()
+    #expect(r.executor.count == 3)
+  }
+
+  @Test func theGateFollowsTheEngineBetweenPolls() async throws {
+    let app = FakeAppRunner()
+    let polls = Counter()
+    let r = openRoomRig({ server in
+      // poll 1 and poll 2 each carry a DIFFERENT command (own id and nonce)
+      let n = polls.next()
+      return [server.envelope(cmdID: "cmd_poll\(n)", verb: "restart_recorder", approval: "go_test")]
+    }, app: app)
+    app.sessionOpen = true
+    _ = await r.client.pollOnce()
+    #expect(r.executor.count == 0, "the session is open now")
+    app.sessionOpen = false
+    _ = await r.client.pollOnce()
+    #expect(r.executor.ran.map(\.1) == ["cmd_poll2"], "the provider read the engine again: the quiet room is seen")
   }
 
   @Test func theGateProviderReadsTheEnginesSessionFreshEachTime() async {

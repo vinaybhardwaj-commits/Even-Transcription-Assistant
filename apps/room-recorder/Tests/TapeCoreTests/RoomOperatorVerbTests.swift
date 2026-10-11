@@ -317,6 +317,70 @@ import Testing
     #expect(events.all.contains("exit:\(RoomEngine.restartExitCode)"))
   }
 
+  @Test func aRestartArmedWhileIdleDoesNotFireIfASessionOpensBeforeTheLoopWouldExit() async throws {
+    // The firing moment: armed with the room idle, then start_day arrives in the very poll the loop is handling.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [Self.command("cmd_start", "start_day", nil)], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    #expect(await !engine.fleetSessionOpen)
+    await engine.armFleetRestart(forced: false)  // accepted idle
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 3 }
+    #expect(await engine.fleetSessionOpen, "the consultation started")
+    #expect(!events.all.contains { $0.hasPrefix("exit:") }, "and the restart did NOT fire over it")
+    let status = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("status.json"))) as? [String: Any]
+    #expect(status?["last_event"] as? String == "superseded_session_open")
+    task.cancel()
+    try await task.value
+  }
+
+  @Test func aForcedAndApprovedRestartStillFiresOverASessionThatOpenedMeanwhile() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [Self.command("cmd_start", "start_day", nil)], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    await engine.armFleetRestart(forced: true)
+    let task = Task { try await engine.run() }
+    // Bounded: if the forced restart were wrongly dropped the loop would run on for ever.
+    try await R4Fixture.waitUntil { events.all.contains("exit:\(RoomEngine.restartExitCode)") || false }
+    task.cancel()
+    _ = try? await task.value
+    #expect(events.all.contains("exit:\(RoomEngine.restartExitCode)"))
+  }
+
+  @Test func theDesksOwnRestartIsNotTouchedByTheFleetRule() async throws {
+    // restart_engine from the bench already refuses an open session at accept time (existing behaviour); it must not
+    // pick up the fleet's firing-time drop.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [Self.command("cmd_r", "restart_engine", "{}")], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    try await engine.run()
+    #expect(events.all == ["ack:cmd_r", "exit:75"])
+  }
+
+  @Test func theFleetAudioInputOverAnOpenSessionNeedsForceAtTheEngineToo() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
+    #expect(await engine.fleetSessionOpen)
+    let plain = await engine.runFleetAppVerb(.selectAudioInput, params: FleetParams(["device_uid": .string("not-attached")]), commandID: "cmd_s1")
+    #expect(plain.outcome == .failed && plain.reason == "session_open")
+    let forced = await engine.runFleetAppVerb(
+      .selectAudioInput, params: FleetParams(["device_uid": .string("not-attached"), "force": .bool(true)]), commandID: "cmd_s2")
+    #expect(forced.reason == "device_not_present", "past the session gate, then the desk's own checks")
+    task.cancel()
+    try await task.value
+  }
+
   @Test func theFleetRestartExitsOnlyAfterTheResultStepRuns() async throws {
     let root = R4Fixture.temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }

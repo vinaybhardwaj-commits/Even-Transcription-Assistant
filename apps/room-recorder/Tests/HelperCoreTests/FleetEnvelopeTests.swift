@@ -356,6 +356,8 @@ private func refusal(_ result: Result<FleetVerifier.Accepted, FleetRefusal>) -> 
     #expect(bad("select_audio_input", [:]) && bad("select_audio_input", ["input_volume_pct": .int(50)]), "device_uid is required")
     #expect(bad("select_audio_input", ["device_uid": .string("u"), "input_volume_pct": .int(101)]))
     #expect(bad("select_audio_input", ["device_uid": .string(String(repeating: "u", count: 129))]))
+    #expect(ok("select_audio_input", ["device_uid": .string("u"), "force": .bool(true)]) == false, "force without approval is refused, not malformed")
+    #expect(bad("select_audio_input", ["device_uid": .string("u"), "force": .string("yes")]))
     #expect(ok("self_test", [:]) && ok("self_test", ["volume_pct": .int(0)]) && ok("self_test", ["volume_pct": .int(100)]))
     #expect(bad("self_test", ["volume_pct": .int(101)]) && bad("self_test", ["volume": .int(50)]))
     #expect(ok("pieces_inventory", ["since": .string("2026-10-10T07:00:00.000Z")]) && ok("pieces_reupload", [:]))
@@ -410,6 +412,21 @@ private func refusal(_ result: Result<FleetVerifier.Accepted, FleetRefusal>) -> 
     #expect(v("restart_recorder", approval: "go_ok1") == .sessionOpen, "approval alone is not force")
     // harmless verbs run during a session
     for verb in ["helper_status", "wake", "pmset_enforce", "list_audio_inputs", "report_diag", "pieces_inventory"] { #expect(v(verb) == nil, "\(verb)") }
+  }
+
+  @Test func changingTheAudioInputOverAnOpenSessionNeedsForceAndApproval() {
+    func v(_ params: [String: FleetJSON], approval: String? = nil, open: Bool = true) -> FleetRefusal? {
+      var all = params
+      all["device_uid"] = .string("BuiltInMic")
+      return refusal(server.verify(server.envelope(at: night, verb: "select_audio_input", params: all, approval: approval), sessionOpen: open, now: night))
+    }
+    #expect(v([:]) == .sessionOpen && v([:], approval: "go_ok1") == .sessionOpen)
+    #expect(v(["force": .bool(true)]) == .sessionOpen, "force alone")
+    #expect(v(["force": .bool(true)], approval: "go_ok1") == nil)
+    #expect(v(["force": .bool(false)], approval: "go_ok1") == .sessionOpen)
+    #expect(v([:], open: false) == nil, "a quiet room needs neither")
+    #expect(v(["force": .bool(true)], open: false) == .clinicHoursNeedsApproval, "forced at any hour needs an approval_ref, as for restart")
+    #expect(v(["force": .bool(true)], approval: "go_ok1", open: false) == nil)
   }
 
   @Test func guiVerbsNeedAConsoleUserAndCoreaudiodDoesNot() {

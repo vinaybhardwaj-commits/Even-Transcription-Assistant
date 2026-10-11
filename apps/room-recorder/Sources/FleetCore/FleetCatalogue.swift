@@ -84,9 +84,12 @@ public enum FleetVerb: String, CaseIterable, Sendable {
       return FleetParams(raw)
     case .selectAudioInput:
       // Volume is a whole percent: envelopes carry integers only, so 0.5 cannot be signed.
-      guard only(["device_uid", "input_volume_pct"]), Self.cleanString(raw["device_uid"], length: 1...128) != nil
+      // `force` (boolean, optional) is the R3 ruling: changing the input reopens the running segment, so over an open
+      // session it needs force AND an approval_ref, like the other disruptive verbs.
+      guard only(["device_uid", "input_volume_pct", "force"]), Self.cleanString(raw["device_uid"], length: 1...128) != nil
       else { return nil }
       if let pct = raw["input_volume_pct"] { guard let n = pct.intValue, (0...100).contains(n) else { return nil } }
+      if let force = raw["force"] { guard force.boolValue != nil else { return nil } }
       return FleetParams(raw)
     case .selfTest:
       guard only(["volume_pct"]) else { return nil }
@@ -114,7 +117,7 @@ public enum FleetVerb: String, CaseIterable, Sendable {
     switch self {
     case .coreaudiodReset, .reloadLaunchagent:
       if state.sessionOpen { return .sessionOpen }
-    case .restartRecorder:
+    case .restartRecorder, .selectAudioInput:
       if state.sessionOpen, !(forced && approved) { return .sessionOpen }
     default: break
     }
@@ -126,7 +129,7 @@ public enum FleetVerb: String, CaseIterable, Sendable {
     }
     // Inside clinic hours a privileged verb needs an approval_ref; a FORCED restart needs one at any hour.
     if isPrivileged, FleetClock.inClinicHours(now), !approved { return .clinicHoursNeedsApproval }
-    if self == .restartRecorder, forced, !approved { return .clinicHoursNeedsApproval }
+    if self == .restartRecorder || self == .selectAudioInput, forced, !approved { return .clinicHoursNeedsApproval }
     return nil
   }
 }
