@@ -1,0 +1,26 @@
+{
+  "name": "even-jev-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Even fork of jev-review: hardened jev_review plus jev_ask for prompt experiments.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/server.js --banner:js=\"#!/usr/bin/env node\"",
+    "check": "tsc --noEmit",
+    "test": "tsc --project tsconfig.test.json && node --test .test-dist/test/**/*.test.js",
+    "validate": "npm run check && npm test && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  },
+  "license": "MIT"
+}

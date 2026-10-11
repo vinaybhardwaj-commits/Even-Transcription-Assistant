@@ -1,0 +1,14 @@
+#!/bin/bash
+# hx <machine> <herdr args...> : run herdr on a fleet machine directly over multiplexed ssh.
+# ~40x faster than `herdr --machine <hex>` for the box (0.16 s vs 6 s, measured 8 Oct 04:50). herdr-lead.
+m=$1; shift
+case "$m" in
+  mini|-) exec /opt/homebrew/bin/herdr "$@" ;;
+  box|eta-lab-t4) host=e2e-lab ;;
+  c3|eta-ci-c3) host=e2e-ci ;;
+  asus) host=${HX_HOST_ASUS:?hx: set HX_HOST_ASUS (user@host) in your environment} ;;
+  yoga) host=${HX_HOST_YOGA:?hx: set HX_HOST_YOGA (user@host) in your environment} ;;
+  *) echo "hx: unknown machine $m (mini|box|c3|asus|yoga)" >&2; exit 2 ;;
+esac
+q=$(printf ' %q' "$@")
+exec ssh -n -o ConnectTimeout=8 "$host" "PATH=\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH; herdr$q"

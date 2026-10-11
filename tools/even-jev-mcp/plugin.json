@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "even-jev-mcp",
+  "version": "0.2.0",
+  "description": "Even fork of jev-review: hardened jev_review plus jev_ask for prompt experiments.",
+  "author": {
+    "name": "Jev Review contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "mcp",
+    "software-quality",
+    "jev"
+  ]
+}

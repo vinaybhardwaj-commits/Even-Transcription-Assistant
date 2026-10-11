@@ -1,0 +1,31 @@
+{
+  "name": "even-jev-mcp",
+  "version": "0.2.0",
+  "description": "Even fork of jev-review: hardened jev_review plus jev_ask for prompt experiments.",
+  "author": {
+    "name": "Jev Review contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "mcp",
+    "software-quality",
+    "jev"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Even Jev MCP",
+    "shortDescription": "Evaluate code quality with Jev, plus arbitrary Jev question experiments",
+    "longDescription": "Use Jev scores as a repeated feedback loop: implement, score, diagnose weak dimensions, improve, validate, and rescore with the user's local Jev API key. Also exposes jev_ask for testing Jev questions and criteria wording against arbitrary state.",
+    "developerName": "Jev Review contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "MCP tools",
+      "Agent Skill",
+      "Code review"
+    ],
+    "defaultPrompt": [
+      "Call jev_review only when the user or a brief explicitly asks for a Jev quality review of a diff. Call jev_ask only when explicitly asked to test a Jev question, criteria wording, or state shape. Never send .env files, credentials, or patient data. Both tools transmit the supplied content to api.typesafe.ai."
+    ]
+  }
+}
