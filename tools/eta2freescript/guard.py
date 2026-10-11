@@ -22,7 +22,11 @@ NON_DOCTOR = {"patient", "attendant", "staff", "other"}
 NUM_WORDS = {"half": "0.5", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
              "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12", "fifteen": "15", "twenty": "20",
              "thirty": "30", "forty": "40", "fifty": "50", "hundred": "100", "five hundred": "500", "thousand": "1000"}
-_NUMW = re.compile(r"\b(" + "|".join(sorted(map(re.escape, NUM_WORDS), key=len, reverse=True)) + r")\b", re.I)
+# Romanised Hindi number words, read only on turns whose language is not English ("do" is an English word).
+NUM_WORDS_HI = {"aadha": "0.5", "ek": "1", "do": "2", "teen": "3", "char": "4", "chaar": "4", "paanch": "5", "panch": "5",
+                "chhe": "6", "saat": "7", "aath": "8", "nau": "9", "das": "10", "pandrah": "15", "bees": "20", "tees": "30"}
+_rx = lambda words: re.compile(r"\b(" + "|".join(sorted(map(re.escape, words), key=len, reverse=True)) + r")\b", re.I)
+_NUMW, _NUMW_HI = _rx(NUM_WORDS), _rx(NUM_WORDS_HI)
 STRENGTH = re.compile(r"(\d+(?:\.\d+)?)\s*(mg|milligrams?|mcg|micrograms?|µg|gm?s?|grams?|ml|iu|units?|%)(?![a-z])", re.I)
 EMBEDDED = re.compile(r"\b(\d{2,4}(?:\.\d+)?)\b")
 UNIT = {"mg": ("mass", 1.0), "milligram": ("mass", 1.0), "milligrams": ("mass", 1.0), "mcg": ("mass", 0.001),
@@ -31,14 +35,21 @@ UNIT = {"mg": ("mass", 1.0), "milligram": ("mass", 1.0), "milligrams": ("mass", 
         "grams": ("mass", 1000.0), "ml": ("vol", 1.0), "iu": ("iu", 1.0), "unit": ("iu", 1.0), "units": ("iu", 1.0), "%": ("pct", 1.0)}
 
 
-def numerals(text: str) -> str:
-    return _NUMW.sub(lambda m: NUM_WORDS[m.group(1).lower()], text or "")
+def numerals(text: str, lang: str = "en") -> str:
+    out = _NUMW.sub(lambda m: NUM_WORDS[m.group(1).lower()], text or "")
+    if lang != "en":
+        out = _NUMW_HI.sub(lambda m: NUM_WORDS_HI[m.group(1).lower()], out)
+    return out
 
 
-def strengths(text: str) -> list[tuple[str, tuple[str, float]]]:
+def cited_text(turns: list[Turn], idx) -> str:
+    return " ".join(numerals(turns[t].text, turns[t].lang) for t in idx).lower()
+
+
+def strengths(text: str, lang: str = "en") -> list[tuple[str, tuple[str, float]]]:
     """[(as written, (dimension, value in base unit))] for every strength in a text, number words read as digits."""
     out = []
-    for m in STRENGTH.finditer(numerals(text)):
+    for m in STRENGTH.finditer(numerals(text, lang)):
         dim, k = UNIT[m.group(2).lower()]
         out.append((f"{m.group(1)} {m.group(2).lower()}", (dim, round(float(m.group(1)) * k, 4))))
     return out
@@ -107,14 +118,14 @@ def dose_precedence(rx: dict, turns: list[Turn], issues: list[str], where: str) 
     other = [turns[t] for t in cited if turns[t].role in NON_DOCTOR]
     doc_str = []
     for t in doc:
-        for s in strengths(t.text):
+        for s in strengths(t.text, t.lang):
             if s[1] not in [x[1] for x in doc_str]:
                 doc_str.append(s)
     brand_nums = {f: _embedded(rx.get(f)) for f in ("brand_as_said", "generic")}
     cur = norm_strength(rx.get("strength"))
     if doc_str:
         doc_norms = [x[1] for x in doc_str]
-        dec_str = strengths(turns[dec].text) if isinstance(dec, int) and turns[dec].role == "doctor" else []
+        dec_str = strengths(turns[dec].text, turns[dec].lang) if isinstance(dec, int) and turns[dec].role == "doctor" else []
         chosen = None
         if len(dec_str) == 1:
             chosen = dec_str[0]
@@ -140,8 +151,8 @@ def dose_precedence(rx: dict, turns: list[Turn], issues: list[str], where: str) 
                 rx["_dose_precedence"] = True
                 issues.append(f"{where}: embedded strength {num} in {f} conflicts with doctor's {chosen[0]} -> stripped")
         return
-    doc_text = numerals(" ".join(t.text for t in doc)).lower()
-    other_text = numerals(" ".join(t.text for t in other)).lower()
+    doc_text = " ".join(numerals(t.text, t.lang) for t in doc).lower()
+    other_text = " ".join(numerals(t.text, t.lang) for t in other).lower()
     if rx.get("strength"):
         nums = re.findall(r"\d+(?:\.\d+)?", numerals(str(rx["strength"])))
         if nums and all(x in other_text for x in nums) and not all(x in doc_text for x in nums):
@@ -154,14 +165,16 @@ def dose_precedence(rx: dict, turns: list[Turn], issues: list[str], where: str) 
             issues.append(f"{where}: embedded strength {num} in {f} heard only from a non-doctor speaker -> stripped")
 
 
-def numeric_support(obj: dict, fields, cited: str, issues: list[str], where: str) -> None:
+def numeric_support(obj: dict, fields, cited: str, issues: list[str], where: str, english: bool = True) -> None:
+    """Numbers must appear in the cited turns. A word-only value is checked word by word on English turns only: on
+    native / code-mixed turns Stage A's English wording cannot match the tape literally."""
     for f in fields:
         v = obj.get(f)
         if not v:
             continue
         nums = re.findall(r"\d+(?:\.\d+)?", numerals(str(v)))
         words = [w for w in re.findall(r"[a-z]+", str(v).lower()) if len(w) > 3]
-        ok = all(x in cited for x in nums) if nums else (any(w in cited for w in words) or f in ("route", "timing"))
+        ok = all(x in cited for x in nums) if nums else (not english or any(w in cited for w in words) or f in ("route", "timing"))
         if not ok:
             obj[f + "_model_value"], obj[f] = v, None
             issues.append(f"{where}.{f}={v!r} not found in cited turns -> nulled")
@@ -174,12 +187,12 @@ def guard(enc: dict, turns: list[Turn]) -> dict:
     for i, rx in enumerate(enc.get("prescription") or []):
         where = f"prescription[{i}]"
         dose_precedence(rx, turns, issues, where)
-        cited = numerals(" ".join(turns[t].text for t in rx_turns(rx))).lower()
-        numeric_support(rx, DOSE_FIELDS, cited, issues, where)
+        idx = rx_turns(rx)
+        numeric_support(rx, DOSE_FIELDS, cited_text(turns, idx), issues, where, all(turns[t].lang == "en" for t in idx))
         rx["missing_fields"] = [f for f in ("strength", "frequency", "duration") if not rx.get(f)]
     for i, s in enumerate(enc.get("regimen_slots") or []):
         st = list(s.get("source_turns") or []) + ([s["quote_turn"]] if isinstance(s.get("quote_turn"), int) else [])
-        cited = numerals(" ".join(turns[t].text for t in st)).lower()
-        numeric_support(s, ("frequency", "duration", "timing"), cited, issues, f"regimen_slots[{i}]")
+        numeric_support(s, ("frequency", "duration", "timing"), cited_text(turns, st), issues, f"regimen_slots[{i}]",
+                        all(turns[t].lang == "en" for t in st))
     enc["_guard"] = {"issues": issues, "n_turns": n}
     return enc

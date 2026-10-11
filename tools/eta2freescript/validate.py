@@ -6,6 +6,9 @@ G-rule still runs unchanged and a v0.1 consumer can read the projection, and (c)
   C1 every completion_required item_id names a provenance item that is kept out (json_pointer null)
   C2 no provenance item flagged boundary_quarantined is in gp_extraction
   C3 every quarantined turn index is inside the transcript (segment_count)
+  C4 an order line of note_text names no kept-out order (held back, quarantined, drug history) that its own
+     gp_extraction entry does not also name. G6 checks a line names its entry, not that it names nothing else.
+     A drug absent from the whole artifact cannot be caught without a lexicon; the judge's stage_b_additions counts it.
 
   python -m tools.eta2freescript validate FILE...
 """
@@ -96,6 +99,16 @@ def check(art: dict) -> list[str]:
     bad = [t for t in art["clip_boundary"]["quarantined_turns"] if t >= n]
     if bad:
         errs.append(f"C3 quarantined turns {bad} outside the transcript ({n} segments)")
+    sec = V.note_sections(art["note_text"])
+    for kind, (path, heading) in V.ORDER_LISTS.items():
+        entries, lines = V.list_at(art["gp_extraction"], path), sec.get(heading, [])
+        out = [p for p in art["provenance"] if p["kind"] == kind and p["json_pointer"] is None and p.get("names")]
+        if len(entries) != len(lines):
+            continue
+        for i, (line, m) in enumerate(zip(lines, entries)):
+            for p in out:
+                if V.same_drug(p["names"], [line]) and not V.same_drug(p["names"], V.entry_names(m)):
+                    errs.append(f"C4 {p['item_id']}: kept-out {kind} named in note {heading} line {i}")
     return errs
 
 

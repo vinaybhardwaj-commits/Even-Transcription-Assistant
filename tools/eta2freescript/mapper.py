@@ -81,7 +81,7 @@ def near_duplicate(a: str, b: str) -> bool:
     if na and nb and (na in nb or nb in na):
         return True
     ta, tb = _tokens(a), _tokens(b)
-    return bool(ta and tb) and len(ta & tb) / len(ta | tb) >= 0.6
+    return min(len(ta), len(tb)) >= 2 and len(ta & tb) / min(len(ta), len(tb)) >= 0.66
 
 
 class Builder:
@@ -303,11 +303,12 @@ class Builder:
                 continue
             if rx.get("strength"):
                 name = f"{name} {rx['strength']}"
-            m = {"name": name, "raw_name": brand or generic}
+            stripped = bool(rx.get("brand_as_said_as_heard")) and bool(generic)
+            m = {"name": name, "raw_name": generic if stripped else (brand or generic)}
             for k in ("frequency", "duration", "instructions"):
                 if rx.get(k):
                     m[k] = str(rx[k]).replace(":", " -")
-            if generic and brand and brand.lower() not in generic.lower():
+            if generic and brand and not stripped and brand.lower() not in generic.lower():
                 m["aliases"] = [brand]
             meds.append(m)
             item = self.P("medicine", f"{'Continue ' if action in ('continue', 'change') else ''}{name}" + (f" - {regimen}" if regimen else ""),
