@@ -448,7 +448,8 @@ def frx(art: dict) -> list[str]:
         st = med.get("strength") if isinstance(med.get("strength"), dict) else {}
         if st.get("evidence_state") == "heard_in_room":
             val, unit = str(st.get("value") or ""), str(st.get("unit") or "")
-            if not val or not unit or val not in name or unit.lower() not in name.lower():
+            # A brand strength spoken without a unit ("Telma 20") keeps the number and omits the unit.
+            if not val or val not in name or (unit and unit.lower() not in name.lower()):
                 e.append(f"FRX-M2 /medicines/{i}/name must contain the heard strength value and unit")
         elif re.search(r"\d", name):
             e.append(f"FRX-M2 /medicines/{i}/name contains a strength number that was not heard")
@@ -485,7 +486,7 @@ def frx(art: dict) -> list[str]:
             if source_name and not resolvable(source_name):
                 e.append(f"FRX-M10 /medicines/{i} raw_name or alias does not resolve to the medication catalogue")
                 break
-            if source_name and not same_molecules(name, source_name):
+            if source_name and molecules(name) and molecules(source_name) and not same_molecules(name, source_name):
                 source_molecules = molecules(source_name) or frozenset()
                 name_molecules = molecules(name) or frozenset()
                 grouped = frozenset().union(*(
@@ -701,7 +702,20 @@ def frx(art: dict) -> list[str]:
         needs_date = fu.get("followup_type") != "IF_REQUIRED" and (interval or _date_heard(owners[0] if owners else None))
         if needs_date:
             got = fu.get("followup_date")
-            if not (isinstance(got, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", got) and visit_ok):
+            # A date that cannot be resolved is blanked and handed to the doctor.
+            # The rest of the artefact (investigations, plans) stays.
+            handed = (
+                not got
+                and any(
+                    isinstance(p, dict) and isinstance(p.get("follow_up"), dict)
+                    and p["follow_up"].get("date_state") == "not_said_in_room"
+                    and _covered(art, p.get("item_id"), {"follow_up_unstated"})
+                    for p in fu_prov
+                )
+            )
+            if handed:
+                pass
+            elif not (isinstance(got, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", got) and visit_ok):
                 e.append("FRX-F2 followup_date must be present and valid")
             else:
                 start = datetime.fromisoformat(visit).date()

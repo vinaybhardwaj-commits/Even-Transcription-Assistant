@@ -6,9 +6,11 @@ from conftest import build_artifact, empty_encounter, mk_consult
 
 from tools.eta2freescript.ingest import _native_span, format_transcript, load_consult
 from tools.eta2freescript.medication_safety import (
+    catalogue_hit,
     dose_bound,
     native_supports,
     normalize_numbers,
+    resolvable,
     same_molecules,
 )
 from tools.eta2freescript.validate import check, frx
@@ -36,8 +38,12 @@ def _rx(**over):
 def test_m12_antibiotic_cannot_pick_up_the_syrups_10_ml():
     a = _art("Take azithromycin tablet. Take Ascoril syrup 10 ml.",
              _rx(generic="azithromycin", strength="10 ml"))
-    assert "medicines" not in a["gp_extraction"]
-    assert a["slots"][0]["flags"] == ["dose_binding_conflict"]
+    med = a["gp_extraction"]["medicines"][0]
+    owner = next(p for p in a["provenance"] if p.get("json_pointer") == "/medicines/0")
+    assert med["name"] == "azithromycin" and "10" not in med["name"]
+    assert "dose_binding_conflict" in owner["flags"]
+    assert owner["medicine"]["strength"]["evidence_state"] == "not_said_in_room"
+    assert any(c["kind"] == "dose_unstated" for c in a["completion_required"])
     assert check(a) == []
 
 
@@ -122,8 +128,12 @@ def test_m12_uses_native_clause_binding_when_translation_splits_the_dose():
 def test_m12_infers_tablet_form_from_the_quote():
     a = _art("Take azithromycin tablet 10 ml.",
              _rx(generic="azithromycin", strength="10 ml", dosage_form=None))
-    assert "medicines" not in a["gp_extraction"]
-    assert "dose_binding_conflict" in a["slots"][0]["flags"]
+    med = a["gp_extraction"]["medicines"][0]
+    owner = next(p for p in a["provenance"] if p.get("json_pointer") == "/medicines/0")
+    assert med["name"] == "azithromycin"
+    assert "dose_binding_conflict" in owner["flags"]
+    assert any(c["kind"] == "dose_unstated" for c in a["completion_required"])
+    assert check(a) == []
 
 
 def test_m13_implausible_strength_is_removed_and_reviewed():
@@ -178,3 +188,34 @@ def test_ingest_aligns_native_span_and_prompt_presents_it_first(tmp_path):
 @pytest.mark.parametrize("word", ["पांच", "ಐದು", "ஐந்து", "ఐదు", "അഞ്ച്"])
 def test_native_number_words_cover_five_required_languages(word):
     assert "5" in normalize_numbers(word)
+
+
+@pytest.mark.parametrize("spoken", [
+    "Menopace", "Mounjaro", "Sompraz", "Ultra Magnesium", "Soframycin",
+    "Telma 20", "Telma 40", "Unienzyme", "Telvas 40", "Glycomet Trio 2",
+    "Daflon", "Ecosprin AV", "Silodal",
+])
+def test_catalogue_resolves_spoken_brands(spoken):
+    assert catalogue_hit(spoken)
+    assert resolvable(spoken)
+    a = _art(f"Take {spoken} once a day.", _rx(generic=spoken, frequency="once a day"))
+    assert a["gp_extraction"]["medicines"][0]["name"].lower().startswith(spoken.split()[0].lower())
+    assert "unresolved_name" not in (a["slots"][0]["flags"] if a["slots"] else [])
+    assert check(a) == []
+
+
+def test_fuzzy_brand_spelling_resolves_and_a_garbled_antibiotic_does_not():
+    assert catalogue_hit("Sompras")
+    assert catalogue_hit("Azithroxyz") is None
+    assert not resolvable("Azithroxyz")
+    a = _art("Take Azithroxyz twice a day.", _rx(generic="Azithroxyz", frequency="twice a day"))
+    assert "medicines" not in a["gp_extraction"]
+    assert "unresolved_name" in a["slots"][0]["flags"]
+    assert check(a) == []
+
+
+def test_m12_another_drug_on_the_same_turn_does_not_unbind_a_dose():
+    a = _art("Take pantoprazole 40 mg and paracetamol 500 mg.",
+             _rx(generic="pantoprazole", strength="40 mg"))
+    assert a["gp_extraction"]["medicines"][0]["name"] == "pantoprazole 40 mg"
+    assert check(a) == []

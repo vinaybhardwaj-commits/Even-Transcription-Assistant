@@ -21,6 +21,8 @@ FOLLOW_UP_TYPES = ("IF_REQUIRED", "MANDATORY_FOLLOW_UP", "FOLLOW_UP_WITH_REPORTS
                    "FOLLOW_UP_WITH_REFERRAL_PRESCRIPTION", "FOLLOW_UP_WITH_REPORT_AND_REFERRAL_PRESCRIPTION")
 INTERVAL_UNITS = ("DAYS", "WEEKS", "MONTHS", "YEARS")
 REPORT_RE = re.compile(r"\breports?\b|\bresults?\b", re.I)
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+WEEKDAY_RE = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
 
 
 def add_interval(d: dt.date, value: int, unit: str) -> dt.date:
@@ -53,6 +55,20 @@ def _date(s, visit: dt.date) -> dt.date | None:
     return d if d >= visit else None
 
 
+def weekday_in(text: str | None) -> str | None:
+    m = WEEKDAY_RE.search(text or "")
+    return m.group(1).lower() if m else None
+
+
+def next_weekday(visit: dt.date, name: str) -> dt.date:
+    """The next occurrence of `name` strictly after `visit`."""
+    target = WEEKDAYS.index(name.lower())
+    ahead = (target - visit.weekday()) % 7
+    if ahead == 0:
+        ahead = 7
+    return visit + dt.timedelta(days=ahead)
+
+
 def interval_text(v: int, u: str) -> str:
     unit = u.lower().rstrip("s")
     return f"after {v} {unit}{'' if v == 1 else 's'}"
@@ -76,15 +92,22 @@ def follow_up_type(fu: dict, has_interval_or_date: bool) -> str:
     return "MANDATORY_FOLLOW_UP"
 
 
-def map_follow_up(fu: dict | None, visit: dt.date) -> tuple[dict | None, list[str]]:
-    """(LlmFollowUp or None, notes). Notes name what is missing: 'interval_unstated' when a definite follow-up has no date."""
+def map_follow_up(fu: dict | None, visit: dt.date, heard: str = "") -> tuple[dict | None, list[str]]:
+    """(LlmFollowUp or None, notes). Notes name what is missing: 'interval_unstated' when a definite follow-up has no date.
+
+    A spoken weekday is the next occurrence after visit_date_ist. An interval, when one was heard, still wins.
+    """
     if not isinstance(fu, dict):
         return None, []
     iv = interval_of(fu)
     date = _date(fu.get("date"), visit)
+    spoken = " ".join(str(fu.get(k) or "") for k in ("date", "when", "condition")) + " " + (heard or "")
+    weekday = None if iv or date else weekday_in(spoken)
     if date is None and iv:
         date = add_interval(visit, *iv)
-    said = any(fu.get(k) for k in ("when", "condition")) or iv or date or fu.get("type") in FOLLOW_UP_TYPES
+    elif date is None and weekday:
+        date = next_weekday(visit, weekday)
+    said = any(fu.get(k) for k in ("when", "condition")) or iv or date or weekday or fu.get("type") in FOLLOW_UP_TYPES
     if not said:
         return None, []
     parts = []
