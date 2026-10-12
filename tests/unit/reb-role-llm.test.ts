@@ -339,6 +339,60 @@ describe("readRebConsult", () => {
     expect(JSON.stringify(got)).not.toContain(LEAK);
   });
 
+  describe("stt layer chooses by engine preference, not age", () => {
+    const en = [seg(1000, "0", "alpha"), seg(4000, "1", "beta")];
+    const native = [seg(1000, "0", "alpha-native", "hi-IN"), seg(4000, "1", "beta-native", "hi-IN")];
+    const medasrBody = (extras: Record<string, unknown>) => JSON.stringify({ status: "ok", layer: "stt", engine: "medasr", segments: en, extras });
+    const putEngine = (engine: string, cfg: string, body: string, version = "v1") => {
+      const r2_key = keyOf(`stt.${engine}__${version}__${cfg}`);
+      mem.set(r2_key, body);
+      H.trackRows.push({ layer: "stt", engine, version, config_hash: cfg, r2_key, sha256: sha(body) } as never);
+    };
+
+    it("sarvam en plus a newer medasr (lang en, source_language hi): sarvam is used", async () => {
+      putEngine("medasr", "newmedas", medasrBody({ source_language: "hi-IN" })); // newest (first)
+      putEngine("sarvam-saaras-v3", "oldsarv1", sttBody(en));
+      const got = await readRebConsult(span());
+      expect(got.found).toMatchObject({ source: "reb_stt_en", config_hash: "oldsarv1" });
+    });
+
+    it("only medasr en: nothing is found", async () => {
+      putEngine("medasr", "medasr01", medasrBody({}));
+      expect((await readRebConsult(span())).found).toBeNull();
+    });
+
+    it("sarvam native plus medasr en: nothing is found (no fallback to medasr)", async () => {
+      putEngine("medasr", "medasr01", medasrBody({}));
+      putEngine("sarvam-saaras-v3", "sarvnat1", sttBody(native));
+      expect((await readRebConsult(span())).found).toBeNull();
+    });
+
+    it("two sarvam rows: the latest finished (first) is used", async () => {
+      putEngine("sarvam-saaras-v3", "sarvnew1", sttBody(en));
+      putEngine("sarvam-saaras-v3", "sarvold1", sttBody(en));
+      expect((await readRebConsult(span())).found?.config_hash).toBe("sarvnew1");
+    });
+
+    it("a caa-version sarvam row is ignored", async () => {
+      putEngine("sarvam-saaras-v3", "caarow01", sttBody(en), "caa-v2");
+      expect((await readRebConsult(span())).found).toBeNull();
+      putEngine("sarvam-saaras-v3", "plainrow", sttBody(en));
+      expect((await readRebConsult(span())).found?.config_hash).toBe("plainrow");
+    });
+
+    it("a sarvam row whose extras.source_language is not English is never English, whatever its segment lang", async () => {
+      const body = JSON.stringify({ status: "ok", layer: "stt", engine: "sarvam-saaras-v3", segments: en, extras: { source_language: "ta-IN" } });
+      putEngine("sarvam-saaras-v3", "tamilsrc", body);
+      expect((await readRebConsult(span())).found).toBeNull();
+    });
+
+    it("a translate track is still used ahead of any stt row", async () => {
+      putEngine("sarvam-saaras-v3", "oldsarv1", sttBody(en));
+      put("translate", "trcfg001", JSON.stringify({ status: "ok", layer: "translate", engine: "sarvam-saaras-v3", segments: en, extras: {} }));
+      expect((await readRebConsult(span())).found).toMatchObject({ source: "reb_translate", config_hash: "trcfg001" });
+    });
+  });
+
   it("an unrecognised flag value throws and is not read as off", async () => {
     put("stt", "sttcfg01", sttBody([seg(1000, "0", "alpha")]));
     process.env.ETA_REB_ROLE_LLM = "maybe";
