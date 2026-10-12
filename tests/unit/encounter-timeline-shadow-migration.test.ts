@@ -14,7 +14,7 @@ describe("0156 encounter_timeline_shadow", () => {
     expect(nums.filter((n) => n === "0157")).toEqual(["0157"]);
     expect(nums.filter((n) => n === "0158")).toEqual(["0158"]);
     expect(nums.filter((n) => n === "0159")).toEqual(["0159"]);
-    expect(Math.max(...nums.map(Number))).toBe(159);
+    expect(Math.max(...nums.map(Number))).toBeGreaterThanOrEqual(159); // a floor, not a pin: later migrations (0160+) must not break this test
     expect(up).not.toMatch(/\bGRANT\b/);
     expect(up).toMatch(/INSERT INTO schema_migrations \(version, name\)\s+VALUES \(156, '0156_encounter_timeline_shadow'\)/);
     const tables = up.slice(up.indexOf("CREATE TABLE"));
