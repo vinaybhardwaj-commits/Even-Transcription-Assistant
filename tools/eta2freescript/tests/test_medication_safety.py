@@ -191,9 +191,9 @@ def test_native_number_words_cover_five_required_languages(word):
 
 
 @pytest.mark.parametrize("spoken", [
-    "Menopace", "Mounjaro", "Sompraz", "Ultra Magnesium", "Soframycin",
-    "Telma 20", "Telma 40", "Unienzyme", "Telvas 40", "Glycomet Trio 2",
-    "Daflon", "Ecosprin AV", "Silodal",
+    "Menopace", "Menopace Iso", "Mounjaro", "Sompraz", "Ultra Magnesium", "Soframycin",
+    "Telma 20", "Telma 40", "Unienzyme", "Glycomet Trio 2",
+    "Daflon", "Ecosprin AV", "Silodal 4",
 ])
 def test_catalogue_resolves_spoken_brands(spoken):
     assert catalogue_hit(spoken)

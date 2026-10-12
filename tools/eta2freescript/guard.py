@@ -218,6 +218,12 @@ _MEAL_FREQ = re.compile(
     re.I,
 )
 _FREQ_CODE = re.compile(r"\b(bd|tds|od|qid|hs|sos)\b", re.I)
+_PROSE_FREQ = re.compile(
+    r"\b(?:once|twice|thrice|one time|two times|three times|four times)\s+(?:a|per)\s+(?:day|week)\b"
+    r"|\b(?:once|twice)\s+daily\b|\bweekly\b",
+    re.I,
+)
+_NUM_SCHED = re.compile(r"\b\d-\d-\d\b")
 
 
 def own_clauses(turns: list[Turn], idx: list[int], labels: list[str]) -> str:
@@ -255,11 +261,77 @@ def _phrase_in(value, blob: str) -> bool:
     return val.lower() in low
 
 
+def _canon_freq(text: str) -> str:
+    if _FREQ_CODE.fullmatch(text or ""):
+        return text.upper()
+    return text
+
+
+def _freq_rank(text: str) -> int:
+    """Lower is kept. A day or week phrase beats SOS. 1-0-1 and BD beat a meal phrase."""
+    if _PROSE_FREQ.search(text or ""):
+        return 0
+    if _NUM_SCHED.search(text or ""):
+        return 1
+    code = _FREQ_CODE.search(text or "")
+    if code and code.group(1).lower() == "sos":
+        return 3
+    if code:
+        return 2
+    if _MEAL_FREQ.search(text or ""):
+        return 4
+    return 5
+
+
+def _owned_frequencies(pieces: list[str], labels: list[str]) -> list[tuple[int, str]]:
+    found = []
+    for clause in pieces:
+        for kind, pat in (("prose", _PROSE_FREQ), ("numeric", _NUM_SCHED), ("code", _FREQ_CODE), ("meal", _MEAL_FREQ)):
+            for match in pat.finditer(clause):
+                text = match.group(0)
+                if not _near_own_drug(clause, labels, text):
+                    continue
+                found.append((_freq_rank(text), text))
+    return found
+
+
+def _apply_owned_frequency(obj: dict, pieces: list[str], labels: list[str]) -> None:
+    """The frequency nearest this drug replaces a meal phrase or another drug's code."""
+    found = _owned_frequencies(pieces, labels)
+    if not found:
+        return
+    found.sort(key=lambda item: item[0])
+    best = _canon_freq(found[0][1])
+    meal = next((text for rank, text in found if rank == 4), None)
+    if meal and _freq_rank(best) < 4 and not obj.get("instructions"):
+        obj["instructions"] = meal
+    current = str(obj.get("frequency") or "")
+    if not current or _freq_rank(current) > _freq_rank(best) or not _phrase_in(current, " ".join(pieces)):
+        obj["frequency"] = best
+
+
 def _prefer_spoken_code(obj: dict, blob: str) -> None:
-    """A spoken BD/TDS/OD/QID/HS/SOS is the frequency. It is not rewritten as a meal phrase."""
+    """A spoken BD/TDS/OD/QID/HS/SOS or 1-0-1 is the frequency. It is not rewritten as a meal phrase.
+
+    SOS does not replace a day or week phrase in the same words. The caller passes this drug's clause.
+    """
+    if _NUM_SCHED.search(blob or "") and _MEAL_FREQ.search(str(obj.get("frequency") or "")):
+        if not obj.get("instructions"):
+            meal = _MEAL_FREQ.search(blob or "")
+            if meal:
+                obj["instructions"] = meal.group(0)
+        obj["frequency"] = _NUM_SCHED.search(blob or "").group(0)
+        return
     code = _FREQ_CODE.search(blob or "")
     freq = str(obj.get("frequency") or "")
+    prose = _PROSE_FREQ.search(blob or "")
+    if prose and freq.lower() == "sos":
+        obj["frequency"] = prose.group(0)
+        return
     if not code or not _MEAL_FREQ.search(freq):
+        return
+    if prose and code.group(1).lower() == "sos":
+        obj["frequency"] = prose.group(0)
         return
     if _MEAL_FREQ.search(blob) and not obj.get("instructions"):
         meal = _MEAL_FREQ.search(blob)
@@ -290,19 +362,22 @@ def _near_own_drug(clause: str, labels: list[str], value: str) -> bool:
     if pos < 0:
         return False
     own = []
+    own_words = set()
     for lab in labels:
         words = [w for w in re.findall(r"[a-z0-9]+", str(lab).lower()) if len(w) >= 4 or w.isdigit()]
+        own_words.update(words)
+        if not _name_in(clause, lab):
+            continue
         for word in words:
             at = clause.lower().find(word)
-            if at >= 0 and _name_in(clause, lab):
+            if at >= 0:
                 own.append(at)
-                break
     if not own:
         return False
     others = []
     for match in re.finditer(r"[A-Za-z][A-Za-z-]{3,}", clause):
         word = match.group(0)
-        if any(_name_in(word, lab) for lab in labels):
+        if word.lower() in own_words or any(_name_in(word, lab) for lab in labels):
             continue
         if catalogue_hit(word):
             others.append(match.start())
@@ -313,7 +388,7 @@ def _near_own_drug(clause: str, labels: list[str], value: str) -> bool:
 
 def _only_near_another_drug(turns: list[Turn], idx: list[int], labels: list[str], value: str) -> bool:
     """True when every sighting of this regimen sits with a catalogue drug that is not this one."""
-    from .medication_safety import _clauses, catalogue_hit
+    from .medication_safety import _clauses, _name_in, catalogue_hit
     seen = False
     for t in idx:
         if not isinstance(t, int) or not 0 <= t < len(turns) or turns[t].role in NON_DOCTOR:
@@ -325,8 +400,14 @@ def _only_near_another_drug(turns: list[Turn], idx: list[int], labels: list[str]
             if _near_own_drug(clause, labels, value):
                 return False
             named = False
+            label_words = {
+                w for lab in labels for w in re.findall(r"[a-z0-9]+", str(lab).lower()) if len(w) >= 4 or w.isdigit()
+            }
             for match in re.finditer(r"[A-Za-z][A-Za-z-]{3,}", clause):
-                if catalogue_hit(match.group(0)):
+                word = match.group(0)
+                if word.lower() in label_words or any(_name_in(word, lab) for lab in labels):
+                    continue
+                if catalogue_hit(word):
                     named = True
                     break
             if not named:
@@ -385,6 +466,7 @@ def bind_regimen_to_clause(obj: dict, turns: list[Turn], idx: list[int], issues:
             if val and not any(_near_own_drug(clause, labels, str(val)) for clause in pieces):
                 obj[field] = None
     _prefer_spoken_code(obj, blob)
+    _apply_owned_frequency(obj, pieces, labels)
 
 
 def recover_regimen(obj: dict, turns: list[Turn], idx: list[int], issues: list[str], where: str, fields=("frequency", "duration", "route")) -> None:

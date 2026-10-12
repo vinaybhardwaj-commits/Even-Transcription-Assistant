@@ -2,10 +2,11 @@
 
 Names resolve against the curated molecule map and the db13 medication catalogue
 (`data/drug-lexicon.json`: brand and generic names only). Matching folds case, spacing,
-punctuation and a trailing strength or unit. Release is an exact name, a brand plus its
-variant or strength suffix, or one short extra token. A loose spelling (Atolip for Atorlip,
-Sompras for Sompraz) does not release. A single ingredient word does not release a longer
-multi-ingredient line, and a letter in a brand is not a molecule.
+punctuation and a trailing strength or unit. Release is an exact normalised name or a
+curated alias. A prefix, a one-token-short name, a truncated stem and a loose spelling
+(Atolip for Atorlip, Sompras for Sompraz, Daflo for Daflon) do not release. An English
+or clinical-instruction word is never a drug. A match that would change the molecule
+is refused. A letter in a brand is not a molecule.
 Strength ranges are broad plausibility bounds, not dosing advice.
 """
 from __future__ import annotations
@@ -383,6 +384,30 @@ _CUE_WORDS = {
     "the", "for", "from", "then", "withdraw", "withdrawn", "discontinue", "discontinued",
 }
 _UNIT_WORDS = {"mg", "mcg", "g", "ml", "iu"}
+# Advice and regimen words that exist as brands (Pause is tranexamic acid) and must never release.
+_INSTRUCTION_WORDS = {
+    "pause", "stop", "stopped", "stopping", "continue", "continued", "continuing",
+    "start", "started", "starting", "restart", "resume", "withhold", "withdraw",
+    "drug", "drugs", "medicine", "medicines", "medication", "medications",
+    "tablet", "tablets", "syrup", "syrups", "capsule", "capsules", "cream", "gel",
+    "drops", "spray", "ointment", "injection", "injections", "dose", "doses",
+    "take", "taking", "apply", "applied", "applying", "give", "given", "use", "using",
+    "advice", "advise", "advised", "daily", "weekly", "once", "twice", "thrice",
+    "before", "after", "food", "meal", "meals", "breakfast", "dinner", "lunch", "bedtime",
+    "sos", "bd", "tds", "od", "qid", "hs",
+}
+# Heard form -> released only when db13 has that brand (same alpha tokens, or one joined token).
+# The value is the heard name. It is not a longer SKU and it is not a different molecule.
+_CURATED_ALIASES = {
+    ("daflon",): "Daflon",
+    ("ultra", "magnesium"): "Ultra Magnesium",
+    ("galvus", "met"): "Galvus Met",
+    ("uni", "enzyme"): "Uni Enzyme",
+    ("menopace", "iso"): "Menopace Iso",
+    ("silodal", "4"): "Silodal 4",
+    ("mounjaro",): "Mounjaro",
+    ("sompraz",): "Sompraz",
+}
 _LEXICON = Path(__file__).resolve().parents[2] / "data" / "drug-lexicon.json"
 
 
@@ -406,10 +431,10 @@ def _stem_tokens(text: str | None) -> tuple[str, ...]:
     return tuple(t for t in norm_tokens(text) if not t.isdigit())
 
 
-def _tail_is_strength_or_form(extra: tuple[str, ...]) -> bool:
-    """A brand may be followed by a strength. It may not swallow a longer ingredient list."""
-    rest = [t for t in extra if not t.isdigit()]
-    return not rest
+def instruction_only(text: str | None) -> bool:
+    """True when every word left after normalisation is an instruction, not a brand."""
+    alpha = [t for t in norm_tokens(text) if t.isalpha()]
+    return bool(alpha) and all(t in _INSTRUCTION_WORDS for t in alpha)
 
 
 def is_dose_change(left, right) -> bool:
@@ -438,8 +463,7 @@ def is_dose_change(left, right) -> bool:
 class _Catalogue:
     def __init__(self) -> None:
         self.exact: dict[tuple[str, ...], str] = {}
-        self.by_first: dict[str, list[tuple[tuple[str, ...], str, str]]] = {}
-        self.by_letter: dict[str, dict[str, str]] = {}
+        self.by_alpha: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
         names: list[str] = []
         if _LEXICON.exists():
             try:
@@ -452,12 +476,10 @@ class _Catalogue:
             toks = norm_tokens(display)
             if not toks:
                 continue
-            stem = "".join(t for t in toks if not t.isdigit())
             self.exact.setdefault(toks, display)
-            self.by_first.setdefault(toks[0], []).append((toks, stem, display))
-            if len(stem) >= 4:
-                self.by_letter.setdefault(stem[0], {})
-                self.by_letter[stem[0]].setdefault(stem, display)
+            alpha = tuple(t for t in toks if not t.isdigit())
+            if alpha:
+                self.by_alpha.setdefault(alpha, []).append(toks)
 
 
 _CATALOGUE: _Catalogue | None = None
@@ -470,66 +492,68 @@ def _catalogue() -> _Catalogue:
     return _CATALOGUE
 
 
-def _subsequence(query: tuple[str, ...], entry: tuple[str, ...]) -> bool:
-    i = 0
-    for tok in entry:
-        if i < len(query) and tok == query[i]:
-            i += 1
-    return i == len(query)
+def _alpha(toks: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(t for t in toks if not t.isdigit())
 
 
-def _extra_alpha_ok(query: tuple[str, ...], entry: tuple[str, ...]) -> bool:
-    """Telvas 40 may match Telvas H 40; a pile of extra words may not."""
-    extra = [t for t in entry if t not in query and not t.isdigit()]
-    return len(extra) <= 1 and all(len(t) <= 2 for t in extra)
+def _alias_backed(toks: tuple[str, ...], cat: _Catalogue) -> bool:
+    """A curated alias is backed only by a db13 row with the same brand tokens.
+
+    Extra strength digits on the row are allowed. An extra word (Sompraz D, Telvas H,
+    Daflo) is not. Two heard tokens may join to one catalogue token (Uni Enzyme).
+    """
+    alpha = _alpha(toks)
+    digits = [t for t in toks if t.isdigit()]
+    keys = [alpha]
+    if len(alpha) > 1:
+        keys.append(("".join(alpha),))
+    for key in keys:
+        for entry in cat.by_alpha.get(key, []):
+            if digits and any(d not in entry for d in digits):
+                continue
+            if _alpha(entry) != key:
+                continue
+            return True
+    return False
+
+
+def _same_brand(query: str, display: str) -> bool:
+    """The released name is the heard brand. A shorter stem (Daflon -> Daflo) is not."""
+    q = _alpha(norm_tokens(query))
+    d = _alpha(norm_tokens(display))
+    if not q or not d or q == d:
+        return bool(q) and q == d
+    return len(q) > 1 and ("".join(q),) == d
+
+
+def _changes_molecule(query: str, display: str) -> bool:
+    if not _same_brand(query, display):
+        return True
+    heard, got = molecules(query), molecules(display)
+    return bool(heard and got and heard != got)
 
 
 def catalogue_hit(text: str | None) -> str | None:
-    """A db13 catalogue display name this string resolves to, or None.
+    """The heard name when it is an exact db13 brand or a curated alias, else None.
 
-    Exact after normalisation, then a brand-stem prefix, then one short extra token
-    (Telvas 40 / Telvas H 40). A one-letter spelling change does not release a drug,
-    and the display name's strength is not part of the match result the caller should copy.
+    Prefix and one-token-short matches do not release. The heard string is not
+    truncated to force a hit. An instruction word never releases, even when a
+    brand of that spelling is in the catalogue.
     """
+    if instruction_only(text):
+        return None
     toks = norm_tokens(text)
     if sum(len(t) for t in toks if not t.isdigit()) < 4:
         return None
     cat = _catalogue()
-    if toks in cat.exact:
-        return cat.exact[toks]
-    pool = cat.by_first.get(toks[0], []) if toks else []
-    for entry, _stem, display in pool:
-        if len(entry) >= len(toks) and entry[: len(toks)] == toks and _tail_is_strength_or_form(entry[len(toks):]):
-            return display
-    stem_toks = tuple(t for t in toks if not t.isdigit())
-    if stem_toks and stem_toks != toks:
-        for entry, _stem, display in pool:
-            entry_stem = tuple(t for t in entry if not t.isdigit())
-            if entry_stem[: len(stem_toks)] == stem_toks and _tail_is_strength_or_form(entry_stem[len(stem_toks):]):
-                return display
-    for entry, _stem, display in pool:
-        if _subsequence(toks, entry) and _extra_alpha_ok(toks, entry):
-            return display
-    letters = [t for t in toks if t.isalpha()]
-    digits = [t for t in toks if t.isdigit()]
-    if len(letters) >= 2:
-        glued = tuple(["".join(letters), *digits])
-        if glued != toks and sum(len(t) for t in letters) >= 4:
-            return _catalogue_match(glued, cat)
-    return None
-
-
-def _catalogue_match(toks: tuple[str, ...], cat: _Catalogue) -> str | None:
-    """One exact or strength-suffix match for an already-normalised token tuple. No second glue pass."""
-    if sum(len(t) for t in toks if not t.isdigit()) < 4:
+    display = cat.exact.get(toks)
+    if display is None:
+        heard = _CURATED_ALIASES.get(toks)
+        if heard and _alias_backed(toks, cat):
+            display = heard
+    if not display or _changes_molecule(text or "", display):
         return None
-    if toks in cat.exact:
-        return cat.exact[toks]
-    pool = cat.by_first.get(toks[0], [])
-    for entry, _stem, display in pool:
-        if len(entry) >= len(toks) and entry[: len(toks)] == toks and _tail_is_strength_or_form(entry[len(toks):]):
-            return display
-    return None
+    return display
 
 
 _SPAN_SKIP = {

@@ -38,12 +38,12 @@ from .guard import (
 from .ingest import Consult, Turn
 from .note import FILLER, drop_clauses, scrub_identity
 from .medication_safety import (
-    _clauses, _name_in, catalogue_hit, dose_bound, key as name_key, molecules, native_supports, norm_tokens,
-    number_tokens, plausible_strength, resolvable, spoken_catalogue_name,
+    _clauses, _name_in, catalogue_hit, dose_bound, instruction_only, key as name_key, molecules, native_supports,
+    norm_tokens, number_tokens, plausible_strength, resolvable, spoken_catalogue_name,
 )
 from .validate import CLASS_WORDS as V_CLASS, DEPT, DR_NAME, SLOT_STOP, V
 
-MAPPER_VERSION = "2.8.0"
+MAPPER_VERSION = "2.9.0"
 SCHEMA_VERSION = "eta.freescript.v0.3"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_SECONDARY_DX = 3
@@ -97,7 +97,7 @@ ADVISE = re.compile(
 SURGERY_WORD = re.compile(r"\b(surgery|operation|procedure)\b", re.I)
 EXCLUDED_PROCEDURE = re.compile(
     r"\b(dressings?|physiotherapy|physio|tmt|treadmill(?:\s+test)?|exercise\s+(?:ecg|stress|tolerance|test)"
-    r"|ift|interferential(?:\s+therapy)?|microscop(?:y|ic|e))\b",
+    r"|ift|interferential(?:\s+therapy)?|microscop(?:y|ic|e)|pap(?:\s+|-)?smear|papanicolaou|pap(?:\s+|-)?test)\b",
     re.I,
 )
 SPECIFIC_PROCEDURE = re.compile(
@@ -560,13 +560,25 @@ class Builder:
             flags.append("implausible_strength")
         return out, flags
 
+    def _heard_name(self, rx: dict, *extra) -> str:
+        """The name the doctor said. Never the placeholder 'drug', and never a truncated stem."""
+        for cand in (rx.get("_heard_name"), rx.get("brand_as_said"), rx.get("generic"), *extra):
+            text = str(cand or "").strip()
+            if not text or text.lower() in {"drug", "medicine", "medication", "unnamed drug"}:
+                continue
+            if instruction_only(text):
+                continue
+            return text
+        return ""
+
     def _unsafe_slot(self, rx: dict, turns, lead, flags: list[str]) -> None:
-        key = rx.get("brand_as_said") or rx.get("generic") or ""
+        key = self._heard_name(rx)
+        shown = None if not key or drugish_token(key) else key
         self.slot({"dosage_form": rx.get("dosage_form"), "frequency": rx.get("frequency"), "duration": rx.get("duration"),
-                   "timing": rx.get("instructions"), "strength": None, "drug_class_said": None,
+                   "timing": rx.get("instructions"), "strength": None, "drug_class_said": shown,
                    "source_turns": turns, "confidence": min(float(rx.get("confidence") or 0.5), 0.5),
                    "quote_turn": lead if isinstance(lead, int) else None, "_flags": flags,
-                   "_drug_key": key}, lead=lead)
+                   "_drug_key": key, "_heard_name": key}, lead=lead)
 
     conf_of = staticmethod(lambda it: 0.8 if it.get("basis") == "said" else 0.55)
 
@@ -730,6 +742,9 @@ class Builder:
         for rx in self.enc.get("prescription") or []:
             action = rx.get("action") or "start"
             generic, brand = rx.get("generic"), rx.get("brand_as_said")
+            heard_name = str(brand or generic or "").strip()
+            if instruction_only(heard_name):
+                continue
             turns = rx_turns(rx)
             dec = rx.get("decision_turn")
             fl = [flag for f, flag in (("strength", "strength_unstated"), ("frequency", "frequency_unstated"), ("duration", "duration_unstated")) if not rx.get(f)]
@@ -739,7 +754,7 @@ class Builder:
                 fl.append("translation_uncertain")
             regimen = ", ".join(str(rx[k]) for k in ("strength", "route", "frequency", "duration", "instructions") if rx.get(k))
             heard = [rx.get("brand_as_said_as_heard"), rx.get("generic_as_heard")]
-            label = generic or brand or class_label(rx) or "drug"
+            label = generic or brand or class_label(rx) or heard_name
             if action == "stop":
                 names = [label, generic, brand]
                 self.P("medicine", f"Stop {label}", "stopped", turns, rx.get("confidence") or 0.5, None, fl + ["negation_cue_nearby"], names=names, negated=True, lead=dec)
@@ -778,7 +793,13 @@ class Builder:
             doctor_blob = self._doctor_text(turns, dec)
             rx = self._drop_unspoken_derivations(rx, doctor_blob)
             generic, brand = rx.get("generic"), rx.get("brand_as_said")
-            label = generic or brand or class_label(rx) or "drug"
+            if heard_name and not (generic or brand):
+                rx["_heard_name"] = heard_name
+            elif brand or generic:
+                rx["_heard_name"] = str(brand or generic).strip()
+            label = generic or brand or self._heard_name(rx, heard_name) or class_label(rx)
+            if not label or instruction_only(label):
+                continue
             name = strip_form_prefix(label)
             names = [name, generic, brand, rx.get("_aligned_generic")] + heard
             if self._withdrawn_here(rx, turns, dec):
@@ -834,6 +855,9 @@ class Builder:
                 continue
             parts = components_of(rx)
             if parts and len(parts) >= 2:
+                bind_regimen_to_clause(
+                    rx, self.c.turns, [t for t in (turns or []) if isinstance(t, int)], [], "combination",
+                )
                 for part in parts:
                     self._emit_medicine(rx, part["generic"], part.get("brand"), part.get("strength"), turns, dec, action, meds, names)
                 continue
@@ -852,10 +876,13 @@ class Builder:
                 rx["strength"] = None
             name = self._strip_unsupported(name, blob)
             if not name or m1_rejected(name):
+                heard_key = self._heard_name(rx, name, label)
+                shown = None if not heard_key or drugish_token(heard_key) else heard_key
                 self.slot({"dosage_form": rx.get("dosage_form"), "frequency": rx.get("frequency"), "duration": rx.get("duration"),
-                           "timing": rx.get("instructions"), "strength": None, "drug_class_said": name or label,
+                           "timing": rx.get("instructions"), "strength": None, "drug_class_said": shown,
                            "source_turns": turns, "confidence": rx.get("confidence"),
-                           "quote_turn": dec if isinstance(dec, int) else None}, lead=dec)
+                           "quote_turn": dec if isinstance(dec, int) else None,
+                           "_drug_key": heard_key, "_heard_name": heard_key}, lead=dec)
                 continue
             stripped = bool(rx.get("brand_as_said_as_heard")) and bool(generic)
             m = {"name": name, "raw_name": generic if stripped else (brand or generic)}
@@ -1240,13 +1267,7 @@ class Builder:
             slot["flags"] = sorted(set(slot.get("flags") or []) | {str(x) for x in s["_flags"] if x})
         comp = next((c for c in self.completion if c.get("item_id") == sid and c.get("kind") == "pick_drug"), None)
         if comp:
-            detail = " ".join(x for x in [
-                slot["form"].get("text"), slot["frequency"].get("text"),
-                ("x " + slot["duration"]["text"]) if slot["duration"].get("text") else None,
-                slot["timing"].get("text"),
-            ] if x)
-            if detail:
-                comp["detail"] = detail[:200]
+            comp["detail"] = self._slot_detail(slot, sid)
 
     def slot(self, s: dict, lead=None):
         s = dict(s)
@@ -1289,6 +1310,13 @@ class Builder:
         self.slots.append(slot)
         if ident:
             self._slot_ids[ident] = sid
+        heard = str(s.get("_heard_name") or s.get("_drug_key") or "").strip()
+        self.completion.append({
+            "kind": "pick_drug", "item_id": sid, "prompt": "Name this drug",
+            "detail": self._slot_detail(parts, sid, heard),
+        })
+
+    def _slot_detail(self, parts: dict, sid: str, heard: str = "") -> str:
         detail = " ".join(x for x in [
             parts["form"].get("text"), parts["frequency"].get("text"),
             ("x " + parts["duration"]["text"]) if parts["duration"].get("text") else None,
@@ -1297,7 +1325,12 @@ class Builder:
         extra = ", ".join(x for x in [parts["class"].get("text"), ("for " + parts["indication"]["text"]) if parts["indication"].get("text") else None] if x)
         if extra:
             detail = f"{detail} ({extra})".strip()
-        self.completion.append({"kind": "pick_drug", "item_id": sid, "prompt": "Name this drug", "detail": (detail or "unnamed drug")[:200]})
+        heard = str(heard or self._slot_keys.get(sid) or "").strip()
+        if heard.lower() in {"drug", "medicine", "medication", "unnamed drug"} or instruction_only(heard):
+            heard = ""
+        if heard and heard.lower() not in detail.lower():
+            detail = f"{heard} {detail}".strip()
+        return (detail or "unnamed drug")[:200]
 
     def _strip_slot_numbers(self, parts: dict, ev: list) -> None:
         """A number on a slot must be in the cited quote. Otherwise that part is unsaid."""
@@ -1416,20 +1449,23 @@ class Builder:
 
     def _emit_released(self, meds: list, spoken: str, clause: str, turns, dec) -> None:
         blob = clause or ""
-        parts = components_of({"brand_as_said": spoken, "generic": None, "strength": None})
-        if parts and len(parts) >= 2:
-            blank = {"strength": None, "frequency": None, "duration": None, "instructions": None, "confidence": 0.8}
-            for part in parts:
-                self._emit_medicine(blank, part["generic"], spoken, None, turns, dec, "start", meds, [spoken, part["generic"]])
-            return
-        name = self._strip_unsupported(strip_form_prefix(spoken), blob)
-        if not name or m1_rejected(name):
-            return
-        rx = {"generic": name, "strength": None, "frequency": None, "duration": None, "instructions": None, "confidence": 0.8}
+        rx = {
+            "brand_as_said": spoken, "generic": None, "strength": None, "frequency": None,
+            "duration": None, "instructions": None, "confidence": 0.8,
+        }
         if blob:
             fake = Turn(idx=0, t0_ms=0, t1_ms=0, speaker="0", text=blob, lang="en", role="doctor")
             recover_regimen(rx, [fake], [0], [], "release", ("frequency", "duration"))
             bind_regimen_to_clause(rx, [fake], [0], [], "release")
+        parts = components_of({"brand_as_said": spoken, "generic": None, "strength": None})
+        if parts and len(parts) >= 2:
+            for part in parts:
+                self._emit_medicine(rx, part["generic"], spoken, None, turns, dec, "start", meds, [spoken, part["generic"]])
+            return
+        name = self._strip_unsupported(strip_form_prefix(spoken), blob)
+        if not name or m1_rejected(name):
+            return
+        rx["generic"] = name
         m = {"name": name, "raw_name": spoken}
         for k in ("frequency", "duration"):
             if rx.get(k) and self._numbers_supported(str(rx[k]), blob):
@@ -1612,7 +1648,16 @@ class Builder:
                 rf"\b{re.escape(name)}\b(?:\s+(?:is|was|are|were))?\s+not\b",
                 re.I,
             )
-            if before.search(piece) or after.search(piece):
+            decline = re.compile(
+                rf"\b(?:declin\w*|refus\w*|advis\w*\s+against|against|not\s+keen(?:\s+on)?)\b"
+                rf"(?:\s+{gap}){{0,4}}\s+{re.escape(name)}\b",
+                re.I,
+            )
+            declined = re.compile(
+                rf"\b{re.escape(name)}\b(?:\s+(?:is|was|are|were|has|been|being))?\s+(?:declin\w*|refus\w*|against)\b",
+                re.I,
+            )
+            if before.search(piece) or after.search(piece) or decline.search(piece) or declined.search(piece):
                 return True
         return False
 
