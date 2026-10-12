@@ -1,8 +1,9 @@
-"""Keep a finished prescription when one field fails FRX-F2 or FRX-M3.
+"""Keep a finished prescription when one field fails FRX-F2, FRX-M3, or FRX-PR2.
 
-A spoken weekday is resolved to the next occurrence after visit_date_ist. A date or a
-number that still fails is removed from that field and recorded in completion_required.
-Investigations, plans and the other medicines stay.
+A spoken weekday is resolved to the next occurrence after visit_date_ist. A date, a
+number, or a conditional procedure that still fails is removed from that field and
+recorded in completion_required. Investigations, advice, follow-up and the other
+medicines stay.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ def soften_f2_m3(art: dict) -> list[str]:
     """Blank or resolve fields that would reject the artefact. Returns the errors cleared."""
     cleared: list[str] = []
     for _ in range(8):
-        errs = [e for e in frx(art) if e.startswith("FRX-F2") or e.startswith("FRX-M3")]
+        errs = [e for e in frx(art) if e.startswith(("FRX-F2", "FRX-M3", "FRX-PR2"))]
         if not errs:
             return cleared
         progressed = False
@@ -34,6 +35,8 @@ def soften_f2_m3(art: dict) -> list[str]:
         for e in errs:
             if e.startswith("FRX-M3") and _blank_m3(art, e):
                 progressed = True
+        if any(e.startswith("FRX-PR2") for e in errs) and _blank_pr2(art):
+            progressed = True
         if not progressed:
             return cleared
         cleared.extend(errs)
@@ -102,6 +105,82 @@ def _blank_follow_up(art: dict) -> bool:
         "detail": owner.get("item_id"),
     })
     return True
+
+
+def _blank_pr2(art: dict) -> bool:
+    """A conditional procedure that fails PR2 is kept out, with surgery_confirm, and the rest stays."""
+    gx = art.get("gp_extraction") if isinstance(art.get("gp_extraction"), dict) else {}
+    pom = gx.setdefault("plan_of_management", {})
+    recs = pom.get("surgery_or_procedure_recommendations")
+    if not isinstance(recs, list):
+        recs = []
+    prov = art.get("provenance") if isinstance(art.get("provenance"), list) else []
+    comp = art.setdefault("completion_required", [])
+    plan = str(pom.get("management_plan") or "")
+    changed = False
+    for p in prov:
+        if not isinstance(p, dict) or p.get("kind") != "procedure":
+            continue
+        proc = p.get("procedure") if isinstance(p.get("procedure"), dict) else {}
+        conditional = proc.get("advised_kind") == "conditional" or p.get("status") == "conditional"
+        if not conditional:
+            continue
+        ptr = str(p.get("json_pointer") or "")
+        m = re.fullmatch(r"/plan_of_management/surgery_or_procedure_recommendations/(\d+)", ptr)
+        if m and recs:
+            idx = int(m.group(1))
+            if 0 <= idx < len(recs):
+                recs.pop(idx)
+                _renumber_procedure_pointers(prov, idx)
+                changed = True
+        if p.get("json_pointer") is not None:
+            p["json_pointer"] = None
+            changed = True
+        text = str(p.get("text") or "").strip()
+        if text and text not in plan:
+            plan = (plan + " " + text).strip()
+            pom["management_plan"] = plan
+            changed = True
+        if not any(isinstance(c, dict) and c.get("kind") == "surgery_confirm" for c in comp):
+            comp.append({
+                "kind": "surgery_confirm",
+                "item_id": p.get("item_id"),
+                "prompt": f"Confirm {text}"[:200] or "Confirm this procedure",
+                "detail": text[:200],
+            })
+            changed = True
+    if recs:
+        pom["surgery_or_procedure_recommendations"] = recs
+        pom["requires_surgery_or_procedure"] = True
+    else:
+        pom.pop("surgery_or_procedure_recommendations", None)
+        if any(
+            isinstance(p, dict) and p.get("kind") == "procedure"
+            and (p.get("status") == "conditional" or (p.get("procedure") or {}).get("advised_kind") == "conditional")
+            for p in prov
+        ):
+            if pom.get("requires_surgery_or_procedure") is not False:
+                pom["requires_surgery_or_procedure"] = False
+                changed = True
+        elif pom.get("requires_surgery_or_procedure") is True:
+            pom["requires_surgery_or_procedure"] = False
+            changed = True
+    return changed
+
+
+def _renumber_procedure_pointers(prov: list, removed: int) -> None:
+    for p in prov:
+        if not isinstance(p, dict):
+            continue
+        ptr = str(p.get("json_pointer") or "")
+        m = re.fullmatch(r"/plan_of_management/surgery_or_procedure_recommendations/(\d+)", ptr)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        if idx == removed:
+            p["json_pointer"] = None
+        elif idx > removed:
+            p["json_pointer"] = f"/plan_of_management/surgery_or_procedure_recommendations/{idx - 1}"
 
 
 def _blank_m3(art: dict, err: str) -> bool:

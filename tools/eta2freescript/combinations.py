@@ -1,14 +1,17 @@
 """Known fixed-dose combinations. One medicine per component; the brand is kept.
 
-A name that is not in this table stays one medicine. Ascoril is a single product here and is not expanded.
+Expansion comes from a composition the db13 catalogue attests, never from a model guess.
+A brand with no attested composition stays one medicine. Ascoril is a single product here and is not expanded.
 Strengths are filled only for a pack size this table records (the digits the doctor said). Anything else
 leaves the component strength empty so the mapper can mark it completion_required.
 """
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 # Letters only, after a trailing pack number is removed. "Telma" alone is not a combination.
+# attest_brand / attest_composition must both appear in data/drug-lexicon.json or the row is not used.
 CATALOGUE: dict[str, dict] = {
     "augmentin": {
         "components": ("amoxicillin", "clavulanic acid"),
@@ -17,10 +20,25 @@ CATALOGUE: dict[str, dict] = {
     "telmaam": {"components": ("telmisartan", "amlodipine"), "packs": {}},
     "telmah": {"components": ("telmisartan", "hydrochlorothiazide"), "packs": {}},
     "glycometgp": {"components": ("metformin", "glimepiride"), "packs": {}},
+    "glycomettrio": {
+        "components": ("metformin", "glimepiride", "voglibose"),
+        "packs": {},
+        "attest_brand": "glycomet trio",
+        "attest_composition": "glimepiride voglibose metformin",
+    },
     "janumet": {"components": ("sitagliptin", "metformin"), "packs": {}},
     "foracort": {"components": ("formoterol", "budesonide"), "packs": {}},
     "seroflo": {"components": ("salmeterol", "fluticasone"), "packs": {}},
+    "duonase": {
+        "components": ("azelastine", "fluticasone"),
+        "packs": {},
+        "attest_brand": "duonase",
+        "attest_composition": "azelastine hydrochloride fluticasone propionate",
+    },
 }
+
+_LEXICON = Path(__file__).resolve().parents[2] / "data" / "drug-lexicon.json"
+_LEXICON_BLOB: str | None = None
 
 _SPLIT = re.compile(r"\s+(?:\+|and|with)\s+", re.I)
 
@@ -54,9 +72,34 @@ def _split_name(text: str | None) -> list[str] | None:
     return parts
 
 
+def _lexicon_blob() -> str:
+    global _LEXICON_BLOB
+    if _LEXICON_BLOB is None:
+        try:
+            _LEXICON_BLOB = _LEXICON.read_text(encoding="utf-8").lower()
+        except OSError:
+            _LEXICON_BLOB = ""
+    return _LEXICON_BLOB
+
+
+def _attested(entry: dict) -> bool:
+    """A composition is used only when db13 contains both the brand and the molecule string."""
+    brand = entry.get("attest_brand")
+    composition = entry.get("attest_composition")
+    if not brand or not composition:
+        return True
+    blob = _lexicon_blob()
+    return str(brand).lower() in blob and str(composition).lower() in blob
+
+
+def _known_molecule_parts(parts: list[str]) -> bool:
+    from .medication_safety import molecules, resolvable
+    return all(molecules(p) or resolvable(p) for p in parts)
+
+
 def _from_catalog(brand: str | None, generic: str | None, strength) -> list[dict] | None:
     hit = CATALOGUE.get(_brand_key(brand)) or CATALOGUE.get(_brand_key(generic))
-    if not hit:
+    if not hit or not _attested(hit):
         return None
     pack = _pack_token(strength, brand)
     strengths = hit["packs"].get(pack) if pack else None
@@ -68,29 +111,23 @@ def _from_catalog(brand: str | None, generic: str | None, strength) -> list[dict
 
 
 def components_of(rx: dict) -> list[dict] | None:
-    """Two or more components, or None when the order is one drug.
+    """Two or more catalogue components, or None when the order stays one drug.
 
-    Each item is {generic, strength|None, brand|None}. An explicit Stage A `components` list is used as given.
+    Each item is {generic, strength|None, brand|None}. A Stage A `components` list is ignored:
+    a wrong molecule (pioglitazone on Glycomet Trio) must not reach the list. A spoken generic
+    that already names two catalogue molecules ("amoxicillin and clavulanic acid") still splits.
     """
     brand = (rx.get("brand_as_said") or "").strip()
     generic = (rx.get("generic") or "").strip()
-    explicit = rx.get("components")
-    if isinstance(explicit, list) and len(explicit) >= 2:
-        out = []
-        for c in explicit:
-            if not isinstance(c, dict):
-                return None
-            g = str(c.get("generic") or "").strip()
-            if not g:
-                return None
-            st = c.get("strength")
-            out.append({"generic": g, "strength": str(st).strip() if st else None, "brand": brand or None})
-        return out
     hit = _from_catalog(brand, generic, rx.get("strength"))
     if hit:
+        label = (brand or generic).strip()
+        if label and not any(part.get("brand") for part in hit):
+            for part in hit:
+                part["brand"] = label
         return hit
-    split = _split_name(generic) or (None if brand and _from_catalog(brand, None, None) else _split_name(brand))
-    if not split:
+    split = _split_name(generic)
+    if not split or not _known_molecule_parts(split):
         return None
     spoken = brand or None
     return [{"generic": g, "strength": None, "brand": spoken if spoken and _brand_key(spoken) != _brand_key(g) else None} for g in split]

@@ -2,18 +2,19 @@
 
 Names resolve against the curated molecule map and the db13 medication catalogue
 (`data/drug-lexicon.json`: brand and generic names only). Matching folds case, spacing,
-punctuation and a trailing strength. A close brand spelling can match; a garbled name cannot.
+punctuation and a trailing strength. Release is an exact name, a brand-stem prefix, or one
+short extra token. A loose spelling (Atolip for Atorlip, Sompras for Sompraz) does not release.
 Strength ranges are broad plausibility bounds, not dosing advice.
 """
 from __future__ import annotations
 
-import difflib
 import json
 import re
 import unicodedata
 from pathlib import Path
 
 from .combinations import CATALOGUE as COMBINATION_CATALOGUE
+from .combinations import _attested as _composition_attested
 
 FORM_WORDS = {
     "tab", "tablet", "tablets", "cap", "capsule", "capsules", "syp", "syrup", "injection",
@@ -28,6 +29,7 @@ GENERICS = {
     "desloratadine", "diclofenac", "domperidone", "doxycycline", "duloxetine", "empagliflozin",
     "esomeprazole", "etoricoxib", "famotidine", "fexofenadine", "fluconazole", "fluticasone",
     "folic acid", "formoterol", "furosemide", "gabapentin", "glimepiride", "gliclazide",
+    "azelastine", "voglibose",
     "hydrochlorothiazide", "hydroxychloroquine", "ibuprofen", "insulin", "itraconazole",
     "lactulose", "levocetirizine", "levothyroxine", "linezolid", "losartan", "metformin",
     "methotrexate", "metoprolol", "metronidazole", "montelukast", "moxifloxacin",
@@ -59,7 +61,8 @@ BRANDS: dict[str, frozenset[str]] = {
     "xarelto": frozenset({"rivaroxaban"}),
 }
 for _brand, _entry in COMBINATION_CATALOGUE.items():
-    BRANDS[_brand] = frozenset(_entry["components"])
+    if _composition_attested(_entry):
+        BRANDS[_brand] = frozenset(_entry["components"])
 
 # Native-script spellings needed to prove the molecule when an English translation is present.
 NATIVE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -444,8 +447,8 @@ def catalogue_hit(text: str | None) -> str | None:
     """A db13 catalogue display name this string resolves to, or None.
 
     Exact after normalisation, then a brand-stem prefix, then one short extra token
-    (Telvas 40 / Telvas H 40), then a close brand spelling. The first two letters and a
-    similar length are required, so a garbled antibiotic does not hit.
+    (Telvas 40 / Telvas H 40). A one-letter spelling change does not release a drug,
+    and the display name's strength is not part of the match result the caller should copy.
     """
     toks = norm_tokens(text)
     if sum(len(t) for t in toks if not t.isdigit()) < 4:
@@ -466,18 +469,29 @@ def catalogue_hit(text: str | None) -> str | None:
     for entry, _stem, display in pool:
         if _subsequence(toks, entry) and _extra_alpha_ok(toks, entry):
             return display
-    qstem = "".join(stem_toks)
-    if len(qstem) < 6:
-        return None
-    best, best_r = None, 0.0
-    for stem, display in cat.by_letter.get(qstem[0], {}).items():
-        # Same first two letters and a close length. 0.86 keeps Sompras/Sompraz and
-        # rejects a garbled antibiotic (Azithroxyz vs azithromycin is about 0.73). Sompras/Sompraz is 0.857.
-        if abs(len(stem) - len(qstem)) > 2 or stem[:2] != qstem[:2]:
-            continue
-        ratio = difflib.SequenceMatcher(None, qstem, stem).ratio()
-        if ratio > best_r:
-            best, best_r = display, ratio
-    if best is not None and best_r >= 0.85:
-        return best
     return None
+
+
+_SPAN_SKIP = {
+    "start", "take", "tablet", "capsule", "once", "twice", "daily", "weekly",
+    "with", "from", "your", "this", "that", "dose", "pain", "only", "give",
+}
+
+
+def spoken_catalogue_name(text: str | None) -> str | None:
+    """The spoken span that catalogue-matches, not the SKU display name (which can carry a strength)."""
+    words = re.findall(r"[A-Za-z0-9]+", text or "")
+    best = None
+    best_n = 0
+    for i in range(len(words)):
+        for n in range(min(4, len(words) - i), 0, -1):
+            chunk_words = words[i:i + n]
+            if n == 1 and chunk_words[0].lower() in _SPAN_SKIP:
+                continue
+            chunk = " ".join(chunk_words)
+            if catalogue_hit(chunk) is None:
+                continue
+            if n > best_n:
+                best, best_n = chunk, n
+            break
+    return best

@@ -32,13 +32,18 @@ import uuid
 from .boundary import Boundary
 from .combinations import components_of
 from .followup import add_interval, map_follow_up
-from .guard import CONTINUE_QUOTE, NON_DOCTOR, NUM_WORDS, NUM_WORDS_HI, numerals, recover_regimen, rx_turns
-from .ingest import Consult
+from .guard import (
+    CONTINUE_QUOTE, NON_DOCTOR, NUM_WORDS, NUM_WORDS_HI, bind_regimen_to_clause, numerals, recover_regimen, rx_turns,
+)
+from .ingest import Consult, Turn
 from .note import FILLER, drop_clauses, scrub_identity
-from .medication_safety import dose_bound, molecules, native_supports, plausible_strength, resolvable
+from .medication_safety import (
+    _name_in, catalogue_hit, dose_bound, key as name_key, molecules, native_supports, plausible_strength, resolvable,
+    spoken_catalogue_name,
+)
 from .validate import CLASS_WORDS as V_CLASS, DEPT, DR_NAME, SLOT_STOP, V
 
-MAPPER_VERSION = "2.6.0"
+MAPPER_VERSION = "2.7.0"
 SCHEMA_VERSION = "eta.freescript.v0.3"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_SECONDARY_DX = 3
@@ -77,8 +82,12 @@ ROUTINE_GROUPS = (
     ("esr", "erythrocyte sedimentation"),
     ("crp", "c-reactive", "c reactive"),
 )
+_PROC_BODY = (
+    r"[a-z]+(?:ectomy|otomy|ostomy|oplasty|oscopy|centesis)|cataract(?:\s+(?:extraction|surgery))?"
+    r"|biopsy|biopsies|excision|debridement"
+)
 PROC_NAME = re.compile(
-    r"\b((?:laparoscopic|open|endoscopic|robotic)\s+)?([a-z]+(?:ectomy|otomy|ostomy|oplasty|oscopy|centesis)|cataract(?:\s+(?:extraction|surgery))?)\b",
+    rf"\b((?:laparoscopic|open|endoscopic|robotic)\s+)?({_PROC_BODY})\b",
     re.I,
 )
 ADVISE = re.compile(
@@ -87,15 +96,23 @@ ADVISE = re.compile(
 )
 SURGERY_WORD = re.compile(r"\b(surgery|operation|procedure)\b", re.I)
 EXCLUDED_PROCEDURE = re.compile(
-    r"\b(dressings?|physiotherapy|physio|tmt|treadmill(?:\s+test)?|exercise\s+(?:ecg|stress|tolerance|test))\b",
+    r"\b(dressings?|physiotherapy|physio|tmt|treadmill(?:\s+test)?|exercise\s+(?:ecg|stress|tolerance|test)"
+    r"|ift|interferential(?:\s+therapy)?|microscop(?:y|ic|e))\b",
     re.I,
 )
-SPECIFIC_PROCEDURE = re.compile(r"(?:ectomy|otomy|ostomy|oplasty|oscopy|centesis|cataract)\b", re.I)
+SPECIFIC_PROCEDURE = re.compile(
+    r"(?:ectomy|otomy|ostomy|oplasty|oscopy|centesis|cataract|biopsy|biopsies|excision|debridement)\b",
+    re.I,
+)
 ORDER_PROC = re.compile(
-    r"\b(?:do|doing|get|arrange[d]?)\s+(?:an?\s+)?(?:[a-z]+\s+){0,3}"
-    r"([a-z]+(?:ectomy|otomy|ostomy|oplasty|oscopy|centesis)|endoscopy)\b",
+    rf"\b(?:do|doing|get|arrange[d]?)\s+(?:an?\s+)?(?:[a-z]+\s+){{0,3}}({_PROC_BODY}|endoscopy)\b",
     re.I,
 )
+_PRESCRIBE = re.compile(
+    r"\b(take|start|prescrib\w*|continu\w*|giv\w*|use|apply|tablet|capsule|injection|inj|once|twice|daily|weekly|bd|tds|od|qid|hs|sos)\b",
+    re.I,
+)
+_REFER_CUE = re.compile(r"\b(refer\w*|opinion|specialist)\b", re.I)
 SOCIAL_TYPES = {"social", "place", "travel", "occupation"}
 ORDER_KINDS = {"medicine", "investigation", "procedure", "referral"}
 SPEAKERS = {"doctor", "patient", "attendant", "staff", "other", "unknown"}
@@ -304,7 +321,14 @@ def numbers_supported(text: str, blob: str) -> bool:
 
 
 def excluded_procedure(name: str | None) -> bool:
-    return bool(EXCLUDED_PROCEDURE.search(name or ""))
+    """Dressing, physio, TMT, IFT and microscopy are not surgery. A real procedure in the same name still is."""
+    text = name or ""
+    if not EXCLUDED_PROCEDURE.search(text):
+        return False
+    for match in PROC_NAME.finditer(text):
+        if not EXCLUDED_PROCEDURE.search(match.group(0)):
+            return False
+    return True
 
 
 def generic_procedure(name: str | None) -> bool:
@@ -344,6 +368,7 @@ class Builder:
         self.completion: list[dict] = []
         self.slots: list[dict] = []
         self._slot_ids: dict[tuple, str] = {}
+        self._slot_keys: dict[str, str] = {}
         self.facts = {"allergies": [], "vitals": []}
         self.n = 0
         self.continued_names: list[str] = []
@@ -495,8 +520,11 @@ class Builder:
         emitted = name
         components = components_of(out) or []
         component_names = [str(x.get("generic") or "") for x in components]
-        emitted_ok = all(resolvable(x) for x in component_names) if component_names else resolvable(emitted)
-        if not emitted_ok or (brand and not resolvable(brand)):
+        if component_names:
+            emitted_ok = all(resolvable(x) for x in component_names)
+        else:
+            emitted_ok = resolvable(emitted)
+        if not emitted_ok:
             flags.append("unresolved_name")
         checks = component_names or ([generic] if generic else [])
         if brand and checks:
@@ -741,6 +769,33 @@ class Builder:
                 if state == "inferred":
                     self.review("inferred_confirm", held, f"Confirm {label}", label)
                 continue
+            doctor_blob = self._doctor_text(turns, dec)
+            spoken_only = None
+            if not self._doctor_named_drug(rx, doctor_blob):
+                spoken_only = self._sole_cited_catalogue_name(turns, dec)
+                patient_said = self._patient_named_drug(rx, turns)
+                if spoken_only and patient_said:
+                    spoken_only = None
+                if not spoken_only and patient_said:
+                    self.P("medicine", f"[drug_history] {label} - not prescribed in this consult", "drug_history",
+                           turns, min(rx.get("confidence") or 0.5, 0.5), None, names=[], lead=dec)
+                    continue
+            if spoken_only:
+                label = spoken_only
+                generic = None
+                brand = spoken_only
+                rx = dict(rx)
+                rx["generic"] = None
+                rx["brand_as_said"] = spoken_only
+                name = strip_form_prefix(label)
+                names = [name, spoken_only]
+            elif brand and _name_in(doctor_blob, str(brand)) and (
+                components_of(rx)
+                or not (generic and _name_in(doctor_blob, str(generic)) and resolvable(str(generic)))
+            ):
+                label = str(brand).strip()
+                name = strip_form_prefix(label)
+                names = [name, generic, brand] + heard
             rx, safety = self._medicine_safety(rx, name, turns, dec)
             fl.extend(safety)
             # An uncertain dose on a resolved name stays on the list (dose_unstated).
@@ -804,11 +859,84 @@ class Builder:
                 r = self.P("medicine", f"[dose_unstated] {name} - {', '.join(missing)} not said aloud", "discussed_only", turns, 0.5, None,
                            [f"{f}_unstated" for f in missing], names=[], lead=dec)
                 self.review("dose_unstated", r, f"Enter {', '.join(missing)} for {name}", item["item_id"])
-        if meds:
-            self.gx["medicines"] = meds
         for s in self.enc.get("regimen_slots") or []:
             self.slot(s, lead=s.get("quote_turn"))
+        self._release_catalogue_slots(meds)
+        self._dedupe_combination_rows(meds)
+        if meds:
+            self.gx["medicines"] = meds
         self.drug_history()
+
+    def _doctor_text(self, turns, dec) -> str:
+        idx = []
+        if isinstance(dec, int):
+            idx.append(dec)
+        for t in turns or []:
+            if t not in idx:
+                idx.append(t)
+        parts = []
+        for t in idx:
+            if not isinstance(t, int) or not 0 <= t < len(self.c.turns):
+                continue
+            if self.c.turns[t].role in NON_DOCTOR:
+                continue
+            parts.append(self.c.turns[t].text or "")
+        return " ".join(parts)
+
+    def _doctor_named_drug(self, rx: dict, blob: str) -> bool:
+        labels = [rx.get("brand_as_said"), rx.get("generic")]
+        return any(lab and _name_in(blob, str(lab)) for lab in labels)
+
+    def _patient_named_drug(self, rx: dict, turns) -> bool:
+        labels = [rx.get("brand_as_said"), rx.get("generic")]
+        for t in turns or []:
+            if not isinstance(t, int) or not 0 <= t < len(self.c.turns):
+                continue
+            if self.c.turns[t].role not in NON_DOCTOR:
+                continue
+            text = self.c.turns[t].text or ""
+            if any(lab and _name_in(text, str(lab)) for lab in labels):
+                return True
+        return False
+
+    def _sole_cited_catalogue_name(self, turns, dec) -> str | None:
+        """The one catalogue drug the doctor prescribed in this order's own turns, if there is exactly one."""
+        from .medication_safety import _clauses
+        idx = []
+        if isinstance(dec, int):
+            idx.append(dec)
+        for t in turns or []:
+            if t not in idx:
+                idx.append(t)
+        found: list[str] = []
+        for t in idx:
+            if not isinstance(t, int) or not 0 <= t < len(self.c.turns):
+                continue
+            if self.c.turns[t].role in NON_DOCTOR:
+                continue
+            text = self.c.turns[t].text or ""
+            for clause in _clauses(text) or ([text] if text.strip() else []):
+                if not _PRESCRIBE.search(clause):
+                    continue
+                spoken = spoken_catalogue_name(clause)
+                if spoken and catalogue_hit(spoken):
+                    found.append(spoken)
+        uniq = list(dict.fromkeys(s.lower() for s in found))
+        if len(uniq) == 1:
+            return next(s for s in found if s.lower() == uniq[0])
+        return None
+
+    def _referral_for_this_consult(self, turns) -> bool:
+        """A referral needs the doctor's own referral cue on a turn that belongs to this consult."""
+        for t in turns or []:
+            if not isinstance(t, int) or t in self.b.quarantined or not 0 <= t < len(self.c.turns):
+                continue
+            turn = self.c.turns[t]
+            if turn.role in NON_DOCTOR:
+                continue
+            if _REFER_CUE.search(turn.text or ""):
+                return True
+        return False
 
     def _explicit_continue(self, action, dec, turns) -> bool:
         if action not in ("continue", "change"):
@@ -906,18 +1034,22 @@ class Builder:
         return {"text": str(text).replace(":", " -"), "evidence_state": "heard_in_room"}
 
     def _fill_slot_regimen(self, s: dict, turns: list[int]) -> None:
-        """Keep a spoken frequency and duration on a slot. Copy them from the tape when the field is empty."""
-        key = str(s.get("_drug_key") or "").strip().lower()
-        bits = [w for w in re.findall(r"[a-z]{4,}", key)]
-        own = []
-        for t in turns:
-            if not isinstance(t, int) or not 0 <= t < len(self.c.turns):
-                continue
-            text = (self.c.turns[t].text or "").lower()
-            if bits and not any(w in text for w in bits):
-                continue
-            own.append(t)
-        use = own or [t for t in turns if isinstance(t, int) and 0 <= t < len(self.c.turns)]
+        """Frequency and duration come from the clause that names this drug. Another drug's SOS does not attach."""
+        drug_key = str(s.get("_drug_key") or "").strip()
+        if drug_key:
+            obj = {
+                "_drug_key": drug_key,
+                "frequency": s.get("frequency") or None,
+                "duration": s.get("duration") or None,
+                "timing": s.get("timing") or None,
+                "instructions": s.get("timing") or None,
+            }
+            bind_regimen_to_clause(obj, self.c.turns, turns, [], "slot")
+            s["frequency"] = obj.get("frequency")
+            s["duration"] = obj.get("duration")
+            s["timing"] = obj.get("timing") if obj.get("timing") else obj.get("instructions")
+            return
+        use = [t for t in turns if isinstance(t, int) and 0 <= t < len(self.c.turns)]
         blob = {"frequency": s.get("frequency") or None, "duration": s.get("duration") or None}
         recover_regimen(blob, self.c.turns, use, [], "slot", ("frequency", "duration"))
         if blob.get("frequency"):
@@ -1000,6 +1132,8 @@ class Builder:
                 "confidence": min(float(s.get("confidence") or 0.5), 0.5), "json_pointer": None}
         if s.get("_flags"):
             slot["flags"] = sorted(set(str(x) for x in s["_flags"] if x))
+        if s.get("_drug_key"):
+            self._slot_keys[sid] = str(s["_drug_key"])
         self.slots.append(slot)
         if ident:
             self._slot_ids[ident] = sid
@@ -1058,6 +1192,167 @@ class Builder:
             if any(w in blob for w in words):
                 return True
         return False
+
+    def _already_listed(self, meds: list, spoken: str) -> bool:
+        for m in meds:
+            if not isinstance(m, dict):
+                continue
+            for cand in (m.get("name"), m.get("raw_name"), *(m.get("aliases") or [])):
+                if cand and (_name_in(str(cand), spoken) or _name_in(spoken, str(cand))):
+                    return True
+        return False
+
+    def _release_catalogue_slots(self, meds: list) -> None:
+        """A slot becomes a medicine only when the doctor’s clause has an exact catalogue name."""
+        drop_ids = set()
+        for slot in list(self.slots):
+            spoken, clause, turns, dec = self._slot_catalogue_release(slot)
+            if not spoken:
+                continue
+            drop_ids.add(slot.get("slot_id"))
+            if self._already_listed(meds, spoken):
+                continue
+            self._emit_released(meds, spoken, clause, turns, dec)
+        if not drop_ids:
+            return
+        self.slots = [s for s in self.slots if s.get("slot_id") not in drop_ids]
+        self.completion = [
+            c for c in self.completion
+            if not (c.get("kind") == "pick_drug" and c.get("item_id") in drop_ids)
+        ]
+        self._slot_ids = {k: v for k, v in self._slot_ids.items() if v not in drop_ids}
+        self._slot_keys = {k: v for k, v in self._slot_keys.items() if k not in drop_ids}
+
+    def _slot_catalogue_release(self, slot: dict):
+        from .medication_safety import _clauses
+        sid = slot.get("slot_id")
+        drug_key = self._slot_keys.get(sid) or ""
+        flags = set(slot.get("flags") or [])
+        if flags & {"translation_conflict", "molecule_conflict"}:
+            return None, "", [], None
+        if "unresolved_name" not in flags:
+            return None, "", [], None
+        turns = self._cited_turn_ids(slot.get("evidence"))
+        decision = slot.get("decision") if isinstance(slot.get("decision"), dict) else {}
+        dec = decision.get("turn") if isinstance(decision.get("turn"), int) else (turns[0] if turns else None)
+        found: list[tuple[str, str]] = []
+        for t in turns:
+            if not isinstance(t, int) or not 0 <= t < len(self.c.turns):
+                continue
+            if self.c.turns[t].role in NON_DOCTOR:
+                continue
+            text = self.c.turns[t].text or ""
+            for clause in _clauses(text) or ([text] if text.strip() else []):
+                if not _PRESCRIBE.search(clause):
+                    continue
+                spoken = spoken_catalogue_name(clause)
+                if not spoken or not catalogue_hit(spoken):
+                    continue
+                if drug_key and _name_in(clause, drug_key):
+                    return spoken, clause, turns, dec
+                found.append((spoken, clause))
+        if drug_key and any(
+            isinstance(t, int) and 0 <= t < len(self.c.turns) and _name_in(self.c.turns[t].text or "", drug_key)
+            for t in turns
+        ):
+            return None, "", turns, dec
+        uniq = list(dict.fromkeys(n for n, _ in found))
+        if len(uniq) == 1:
+            clause = next(c for n, c in found if n == uniq[0])
+            return uniq[0], clause, turns, dec
+        return None, "", turns, dec
+
+    def _emit_released(self, meds: list, spoken: str, clause: str, turns, dec) -> None:
+        blob = clause or ""
+        parts = components_of({"brand_as_said": spoken, "generic": None, "strength": None})
+        if parts and len(parts) >= 2:
+            blank = {"strength": None, "frequency": None, "duration": None, "instructions": None, "confidence": 0.8}
+            for part in parts:
+                self._emit_medicine(blank, part["generic"], spoken, None, turns, dec, "start", meds, [spoken, part["generic"]])
+            return
+        name = self._strip_unsupported(strip_form_prefix(spoken), blob)
+        if not name or m1_rejected(name):
+            return
+        rx = {"generic": name, "strength": None, "frequency": None, "duration": None, "instructions": None, "confidence": 0.8}
+        if blob:
+            fake = Turn(idx=0, t0_ms=0, t1_ms=0, speaker="0", text=blob, lang="en", role="doctor")
+            recover_regimen(rx, [fake], [0], [], "release", ("frequency", "duration"))
+            bind_regimen_to_clause(rx, [fake], [0], [], "release")
+        m = {"name": name, "raw_name": spoken}
+        for k in ("frequency", "duration"):
+            if rx.get(k) and self._numbers_supported(str(rx[k]), blob):
+                m[k] = str(rx[k])
+            elif rx.get(k) and not re.search(r"\d", str(rx[k])):
+                m[k] = str(rx[k])
+        meds.append(m)
+        self.continued_names.extend([spoken, name])
+        lead = dec if isinstance(dec, int) else None
+        item = self.P("medicine", name + (f" - {m['frequency']}" if m.get("frequency") else ""),
+                      "prescribed", turns, 0.8, f"/medicines/{len(meds) - 1}", names=[spoken, name], lead=lead)
+        item["medicine"] = self._medicine_parts(rx, turns or [], False)
+        missing = [f for f in ("strength", "frequency", "duration") if not rx.get(f) and not m.get(f)]
+        if missing:
+            r = self.P("medicine", f"[dose_unstated] {name} - {', '.join(missing)} not said aloud",
+                       "discussed_only", turns, 0.5, None, [f"{f}_unstated" for f in missing], names=[], lead=lead)
+            self.review("dose_unstated", r, f"Enter {', '.join(missing)} for {name}", item["item_id"])
+
+    def _dedupe_combination_rows(self, meds: list) -> None:
+        """A combination brand and a separate line for one of its molecules list that molecule once."""
+        seen = set()
+        drop = set()
+        for i, m in enumerate(meds):
+            ident = (name_key(m.get("name")), name_key(m.get("raw_name")))
+            if ident in seen and ident != ("", ""):
+                drop.add(i)
+            else:
+                seen.add(ident)
+        combo = set()
+        for m in meds:
+            raw = str(m.get("raw_name") or "")
+            if not components_of({"brand_as_said": raw, "generic": None, "strength": None}):
+                continue
+            mols = molecules(m.get("name")) or frozenset()
+            keys = {name_key(x) for x in mols} if mols else {name_key(m.get("name"))}
+            combo |= {k for k in keys if k}
+        if combo:
+            for i, m in enumerate(meds):
+                if i in drop:
+                    continue
+                raw = str(m.get("raw_name") or "")
+                if components_of({"brand_as_said": raw, "generic": None, "strength": None}):
+                    continue
+                mols = molecules(m.get("name")) or frozenset()
+                keys = {name_key(x) for x in mols} if mols else {name_key(m.get("name"))}
+                keys.discard("")
+                if keys and keys <= combo:
+                    drop.add(i)
+        self._forget_medicine_rows(meds, drop)
+
+    def _forget_medicine_rows(self, meds: list, drop: set[int]) -> None:
+        if not drop:
+            return
+        new_at = {}
+        n = 0
+        for i in range(len(meds)):
+            if i in drop:
+                new_at[i] = None
+            else:
+                new_at[i] = n
+                n += 1
+        for p in self.prov:
+            ptr = str(p.get("json_pointer") or "")
+            m = re.fullmatch(r"/medicines/(\d+)", ptr)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            nxt = new_at.get(idx)
+            if nxt is None:
+                p["json_pointer"] = None
+                p["status"] = "discussed_only"
+                p["names"] = []
+            elif nxt != idx:
+                p["json_pointer"] = f"/medicines/{nxt}"
+        meds[:] = [m for i, m in enumerate(meds) if i not in drop]
 
     def drug_history(self):
         garbled: list[tuple[str, list[int], str]] = []
@@ -1141,7 +1436,7 @@ class Builder:
                 self.quarantine("referral", f"Refer to {to}", tl, names=[to])
                 continue
             dec = tl[0] if tl else None
-            if it.get("basis") == "said" and it.get("for_this_patient", True) is True and not self.by_non_doctor(dec) and speciality_ok(to):
+            if it.get("basis") == "said" and it.get("for_this_patient", True) is True and not self.by_non_doctor(dec) and speciality_ok(to) and self._referral_for_this_consult(tl):
                 refs.append({"speciality": to} | ({"notes": str(it["reason"]).replace(":", " -")} if it.get("reason") else {}))
                 item = self.P("referral", f"Refer to {to}", "prescribed", tl, 0.8, f"/referrals/{len(refs) - 1}", names=[to], lead=dec)
                 item["for_this_patient"] = True
@@ -1262,28 +1557,27 @@ class Builder:
                 add(nm, tl or [dec], dec, it.get("notes"), it.get("scheduled_date"), kind, it.get("raw_name"))
             else:
                 self.P("procedure", f"[held_back_inferred_order] {nm}", "discussed_only", tl, 0.5, None, names=[nm], lead=dec)
-        if not recs and not any(p.get("kind") == "procedure" and (p.get("procedure") or {}).get("advised_kind") == "conditional" for p in self.prov):
-            for i, t in enumerate(self.c.turns):
-                if t.role != "doctor" or i in self.b.quarantined:
-                    continue
-                for nm in self._procedure_names(t.text):
-                    if CONDITIONAL_PROC.search(t.text or ""):
-                        conditional(nm, t.text, [i], i)
-                    else:
-                        add(nm, [i], i)
-            for p in self.enc.get("plan") or []:
-                if p.get("basis") != "said" or not p.get("text"):
-                    continue
-                tl = self.unquarantined(self.turns(p))
-                if self.turns(p) and not tl:
-                    continue
-                if tl and all(self.c.turns[t].role in NON_DOCTOR for t in tl):
-                    continue
-                for nm in self._procedure_names(p["text"]):
-                    if CONDITIONAL_PROC.search(p["text"]):
-                        conditional(nm, p["text"], tl, tl[0] if tl else None)
-                    else:
-                        add(nm, tl, tl[0] if tl else None)
+        for i, t in enumerate(self.c.turns):
+            if t.role != "doctor" or i in self.b.quarantined:
+                continue
+            for nm in self._procedure_names(t.text):
+                if CONDITIONAL_PROC.search(t.text or ""):
+                    conditional(nm, t.text, [i], i)
+                else:
+                    add(nm, [i], i)
+        for p in self.enc.get("plan") or []:
+            if p.get("basis") != "said" or not p.get("text"):
+                continue
+            tl = self.unquarantined(self.turns(p))
+            if self.turns(p) and not tl:
+                continue
+            if tl and all(self.c.turns[t].role in NON_DOCTOR for t in tl):
+                continue
+            for nm in self._procedure_names(p["text"]):
+                if CONDITIONAL_PROC.search(p["text"]):
+                    conditional(nm, p["text"], tl, tl[0] if tl else None)
+                else:
+                    add(nm, tl, tl[0] if tl else None)
         pom = self.gx.setdefault("plan_of_management", {}) if (recs or any(p.get("kind") == "procedure" for p in self.prov)) else None
         if recs:
             pom["requires_surgery_or_procedure"] = True

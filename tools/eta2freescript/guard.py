@@ -173,6 +173,8 @@ def dose_precedence(rx: dict, turns: list[Turn], issues: list[str], where: str) 
 # Spoken regimen, copied verbatim. Prose before codes, so "twice a day" wins over a BD on the same turn.
 _FREQ = [
     re.compile(r"\b(?:once|twice|thrice|one time|two times|three times|four times)\s+(?:a|per)\s+day\b", re.I),
+    re.compile(r"\b(?:once|twice)\s+(?:a|per)\s+week\b", re.I),
+    re.compile(r"\bweekly\b", re.I),
     re.compile(r"\b(?:once|twice)\s+daily\b", re.I),
     re.compile(r"\b(?:at night|in the morning|after food|before food|after meals|before meals|after breakfast|before breakfast|at bedtime|after dinner|before dinner)\b", re.I),
     re.compile(r"\bevery\s+\d+\s+hours?\b", re.I),
@@ -209,6 +211,86 @@ def _regimen_turns(idx: list[int], turns: list[Turn]) -> list[Turn]:
     if known and all(t.role == "unknown" for t in known):
         return known
     return []
+
+
+_MEAL_FREQ = re.compile(
+    r"\b(?:before|after)\s+(?:breakfast|food|meals|dinner)\b|\bat bedtime\b|\bin the morning\b|\bat night\b",
+    re.I,
+)
+_FREQ_CODE = re.compile(r"\b(bd|tds|od|qid|hs|sos)\b", re.I)
+
+
+def own_clauses(turns: list[Turn], idx: list[int], labels: list[str]) -> str:
+    """Clauses, from non-patient turns, that name this drug. Another drug's clause is not included."""
+    from .medication_safety import _clauses, _name_in
+    parts: list[str] = []
+    wanted = [str(lab) for lab in labels if lab and str(lab).strip()]
+    if not wanted:
+        return ""
+    for t in idx:
+        if not isinstance(t, int) or not 0 <= t < len(turns):
+            continue
+        if turns[t].role in NON_DOCTOR:
+            continue
+        text = turns[t].text or ""
+        for clause in _clauses(text) or ([text] if text.strip() else []):
+            if any(_name_in(clause, lab) for lab in wanted):
+                parts.append(clause)
+    return " ".join(parts)
+
+
+def _phrase_in(value, blob: str) -> bool:
+    if not value or not str(value).strip():
+        return False
+    low = blob.lower()
+    val = str(value).strip()
+    if _FREQ_CODE.fullmatch(val) and _FREQ_CODE.search(low):
+        return True
+    words = [w for w in re.findall(r"[a-z]+", val.lower()) if len(w) > 3]
+    nums = re.findall(r"\d+(?:\.\d+)?", val)
+    if nums and not all(n in low for n in nums):
+        return False
+    if words:
+        return any(w in low for w in words)
+    return val.lower() in low
+
+
+def _prefer_spoken_code(obj: dict, blob: str) -> None:
+    """A spoken BD/TDS/OD/QID/HS/SOS is the frequency. It is not rewritten as a meal phrase."""
+    code = _FREQ_CODE.search(blob or "")
+    freq = str(obj.get("frequency") or "")
+    if not code or not _MEAL_FREQ.search(freq):
+        return
+    if _MEAL_FREQ.search(blob) and not obj.get("instructions"):
+        meal = _MEAL_FREQ.search(blob)
+        if meal:
+            obj["instructions"] = meal.group(0)
+    obj["frequency"] = code.group(1).upper()
+
+
+def bind_regimen_to_clause(obj: dict, turns: list[Turn], idx: list[int], issues: list[str], where: str) -> None:
+    """Frequency, duration and timing come from the clause that names this drug."""
+    labels = [str(obj.get(k) or "") for k in ("brand_as_said", "generic", "_drug_key") if obj.get(k)]
+    if not labels:
+        return
+    if any(isinstance(t, int) and 0 <= t < len(turns) and turns[t].lang != "en" for t in idx):
+        return
+    blob = own_clauses(turns, idx, labels)
+    fields = ("frequency", "duration", "instructions", "timing")
+    # No clause names this drug ("take this twice a day"). Keep the turn-level regimen.
+    if not blob:
+        return
+    _prefer_spoken_code(obj, blob)
+    for field in fields:
+        val = obj.get(field)
+        if val and not _phrase_in(val, blob):
+            obj[field + "_model_value"] = val
+            obj[field] = None
+            issues.append(f"{where}: {field} is not in this drug's clause")
+    if not obj.get("frequency") or not obj.get("duration"):
+        fake = Turn(idx=0, t0_ms=0, t1_ms=0, speaker="0", text=blob, lang="en", role="doctor")
+        recover_regimen(obj, [fake], [0], issues, where, ("frequency", "duration"))
+    _prefer_spoken_code(obj, blob)
 
 
 def recover_regimen(obj: dict, turns: list[Turn], idx: list[int], issues: list[str], where: str, fields=("frequency", "duration", "route")) -> None:
@@ -250,6 +332,7 @@ def guard(enc: dict, turns: list[Turn]) -> dict:
         idx = rx_turns(rx)
         numeric_support(rx, DOSE_FIELDS, cited_text(turns, idx), issues, where, all(turns[t].lang == "en" for t in idx))
         recover_regimen(rx, turns, idx, issues, where)
+        bind_regimen_to_clause(rx, turns, idx, issues, where)
         rx["missing_fields"] = [f for f in ("strength", "frequency", "duration") if not rx.get(f)]
     for i, s in enumerate(enc.get("regimen_slots") or []):
         st = list(s.get("source_turns") or []) + ([s["quote_turn"]] if isinstance(s.get("quote_turn"), int) else [])

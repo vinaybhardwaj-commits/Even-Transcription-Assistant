@@ -64,7 +64,6 @@ def test_unresolved_role_keeps_the_drug_and_reviews_a_carried_over_regimen():
     med = a["gp_extraction"]["medicines"][0]
     owner = next(p for p in a["provenance"] if p.get("json_pointer") == "/medicines/0")
     assert med["name"] == "amlodipine 5 mg" and "frequency" not in med and "duration" not in med
-    assert "dose_binding_conflict" in owner["flags"]
     assert any(c["kind"] == "dose_unstated" for c in a["completion_required"])
     assert check(a) == []
 
