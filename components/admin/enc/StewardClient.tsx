@@ -45,7 +45,7 @@ function ItemCard({ item, onDecide, busy }: { item: StewardItem; onDecide?: (id:
             {item.kind}
             {item.ist_date ? ` - ${item.ist_date}` : ""}
             {item.room_id ? <> - <Link href={`/admin/rooms/${item.room_id}${item.ist_date ? `/${item.ist_date}` : ""}`} className="text-even-blue-600 hover:underline">room</Link></> : null}
-            {item.consult_uid ? <> - <Link href={`/admin/encounters/${item.consult_uid}`} className="text-even-blue-600 hover:underline">encounter</Link></> : null}
+            {item.consult_uid && item.room_id && item.ist_date ? <> - <Link href={`/admin/rooms/${item.room_id}/${item.ist_date}#consult-${item.consult_uid}`} className="text-even-blue-600 hover:underline">consult</Link></> : null}
             {item.proposed_action ? ` - proposes ${item.proposed_action.type}` : ""}
           </p>
           {item.body_md ? <p className="text-caption text-even-navy-800/80 mt-1 whitespace-pre-wrap">{item.body_md}</p> : null}

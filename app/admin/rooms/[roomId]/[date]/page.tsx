@@ -13,6 +13,7 @@ import { verifyAdminJwt } from "@/lib/auth";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { RoomDayTapeClient } from "@/components/admin/rooms/RoomDayTapeClient";
 import { RoomDayTimeline } from "@/components/admin/enc/RoomDayTimeline";
+import { EncIsolationSections } from "@/components/admin/enc/EncIsolationSections";
 import { getRoomDayTape } from "@/lib/room-day/admin";
 import { getRoomDayDetail } from "@/lib/enc/queries";
 import { parseIstDate, tapeSpansFromSlots, type TapeSpan } from "@/lib/enc/view";
@@ -45,7 +46,13 @@ export default async function AdminRoomDayTapePage({ params }: { params: Promise
 
   return (
     <AdminShell adminEmail={email} active="rooms" pageTitle={date} breadcrumb="Rooms">
-      <RoomDayTimeline date={date} day={enc.day} isolations={enc.isolations} tape={tape} />
+      <RoomDayTimeline roomId={roomId} date={date} day={enc.day} isolations={enc.isolations} tape={tape} />
+      {enc.isolations.map((iso) => (
+        <div key={iso.consult_uid} id={`consult-${iso.consult_uid}`} className="scroll-mt-20" data-testid="enc-consult">
+          <p className="text-caption text-even-ink-500 mb-1">Consult {iso.consult_uid}</p>
+          <EncIsolationSections iso={iso} />
+        </div>
+      ))}
       <RoomDayTapeClient roomId={roomId} istDate={date} />
     </AdminShell>
   );

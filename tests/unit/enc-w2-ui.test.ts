@@ -183,14 +183,15 @@ describe("renders", () => {
   it("timeline: encounter links, boundary colours, gap marks; nothing without data", () => {
     const isos = [isoRow(), isoRow({ consult_uid: "uid-2", pqm_step_uid: "step-2", t_start: t("11:00"), t_end: t("11:15"), status: "planned" })];
     const tape = [{ start_ms: ms("09:00"), end_ms: ms("10:30"), recorded: true }, { start_ms: ms("10:30"), end_ms: ms("11:30"), recorded: false }];
-    const html = renderToStaticMarkup(React.createElement(RoomDayTimeline, { date: DATE, day: dayRow(), isolations: isos, tape }));
-    expect(html).toContain('href="/admin/encounters/uid-1"');
-    expect(html).not.toContain('href="/admin/encounters/uid-2"');
+    const html = renderToStaticMarkup(React.createElement(RoomDayTimeline, { roomId: "room-a", date: DATE, day: dayRow(), isolations: isos, tape }));
+    expect(html).toContain(`href="/admin/rooms/room-a/${DATE}#consult-uid-1"`);
+    expect(html).not.toContain("#consult-uid-2");
+    expect(html).not.toContain("/admin/encounters/");
     expect(html).toContain("bg-even-blue-600");
     expect(html).toContain('data-gap="tape"');
     expect(html).toContain('data-gap="visit"');
     expect(html).toContain("1 visit(s) have no isolated encounter");
-    expect(renderToStaticMarkup(React.createElement(RoomDayTimeline, { date: DATE, day: null, isolations: [], tape: [] }))).toBe("");
+    expect(renderToStaticMarkup(React.createElement(RoomDayTimeline, { roomId: "room-a", date: DATE, day: null, isolations: [], tape: [] }))).toBe("");
   });
   it("encounter sections: render nothing when absent; parts and rx only when present", () => {
     expect(renderToStaticMarkup(React.createElement(EncIsolationSections, { iso: null }))).toBe("");

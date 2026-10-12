@@ -296,7 +296,7 @@ export async function getStewardRuns(limit = 30): Promise<StewardRun[]> {
 /** Settings, and today's spend (sum of cost_usd over runs started on the current IST calendar day). */
 export async function getStewardSettings(): Promise<{ settings: StewardSettings; spend_today_usd: number }> {
   try {
-    const rows = (await sql`SELECT key, value FROM steward_settings`) as Array<{ key: string; value: unknown }>;
+    const rows = (await sql`SELECT key, value FROM steward_settings WHERE key IN ('enabled', 'mode', 'daily_cap_usd', 'model_id')`) as Array<{ key: string; value: unknown }>;
     const spend = (await sql`
       SELECT COALESCE(SUM(cost_usd), 0)::float8 AS spend
         FROM steward_run

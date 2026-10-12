@@ -3,7 +3,7 @@ import type { EncIsolation } from "@/lib/enc/queries";
 import { BOUNDARY_COLOR } from "@/lib/enc/view";
 
 /**
- * ENC sections on /admin/encounters/[id] (contract UI item 3): Isolation, Parts, Rx check.
+ * ENC sections, rendered per consult on /admin/rooms/[roomId]/[date]#consult-<uid> (contract UI item 3): Isolation, Parts, Rx check.
  * Each section renders nothing when its data is absent; with no isolation row at all the component renders nothing.
  * Ids, times, counts and flags only. The audio player and transcript stay in EncounterDetailAdminClient.
  */

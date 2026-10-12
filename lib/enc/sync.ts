@@ -3,12 +3,12 @@
  *
  * Reads through the guarded lab store (GET only, SCRIBE_LAB_R2_* env names). For each date whose manifest sha256 differs from the one recorded at the last good sync:
  * the file bytes are hashed and compared to the manifest (a mismatch writes NOTHING for that date), every row is checked against its zod schema,
- * then upserted. The date's sha is recorded only when every row of the date was valid and written. Counts and codes only; never a row.
+ * then written in ONE transaction (upsert, and delete of that date's rows absent from the files). The date's sha is recorded only when every row of the date was valid and written. Counts and codes only; never a row.
  */
 import { createHash } from "node:crypto";
 import { labStore } from "@/lib/sarvam-lab";
 import { IST_DATE, isolationRowSchema, manifestEntrySchema, roomDayRowSchema, type IsolationRow, type ManifestEntry, type RoomDayRow } from "@/lib/enc/schemas";
-import { readSyncedShas, upsertIsolations, upsertRoomDays, writeSyncedSha, type SyncedSha } from "@/lib/enc/store";
+import { readSyncedShas, replaceDate, writeSyncedSha, type SyncedSha } from "@/lib/enc/store";
 
 export const ENC_MANIFEST_KEY = "enc/manifest.json";
 export const encDailyKey = (d: string): string => `enc/daily/${d}.json`;
@@ -18,7 +18,7 @@ export const MAX_DATES_PER_RUN = 40;
 
 export const sha256Hex = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 
-export type DateOutcome = "ok" | "unchanged" | "missing" | "sha_mismatch" | "bad_rows" | "db_failed";
+export type DateOutcome = "ok" | "unchanged" | "deferred" | "missing" | "sha_mismatch" | "bad_rows" | "db_failed";
 export type EncSyncResult =
   | { ok: true; dates_in_manifest: number; dates_changed: number; dates_ok: number; room_days_written: number; isolations_written: number; rows_skipped: number; outcomes: Record<string, number> }
   | { ok: false; error: "enc_unavailable" | "enc_manifest_bad" };
@@ -53,27 +53,29 @@ export function parseDaily(body: string, date: string): { rows: RoomDayRow[]; sk
   let j: unknown;
   try { j = JSON.parse(body); } catch { return null; }
   if (!Array.isArray(j)) return null;
-  const rows: RoomDayRow[] = [];
+  const byRoom = new Map<string, RoomDayRow>();
   let skipped = 0;
   for (const r of j) {
     const p = roomDayRowSchema.safeParse(r);
-    if (p.success && p.data.ist_date === date) rows.push(p.data); else skipped++;
+    if (p.success && p.data.ist_date === date) { byRoom.delete(p.data.room_id); byRoom.set(p.data.room_id, p.data); } else skipped++;
   }
-  return { rows, skipped };
+  // a repeated (date, room_id) keeps the LAST row: one ON CONFLICT statement cannot touch a row twice
+  return { rows: [...byRoom.values()], skipped };
 }
 
 /** PURE. Isolation file: JSON lines of enc_isolation rows. */
 export function parseIsolation(body: string, date: string): { rows: IsolationRow[]; skipped: number } {
-  const rows: IsolationRow[] = [];
+  const byUid = new Map<string, IsolationRow>();
   let skipped = 0;
   for (const line of body.split("\n")) {
     if (line.trim() === "") continue;
     let j: unknown;
     try { j = JSON.parse(line); } catch { skipped++; continue; }
     const p = isolationRowSchema.safeParse(j);
-    if (p.success && p.data.ist_date === date) rows.push(p.data); else skipped++;
+    if (p.success && p.data.ist_date === date) { byUid.delete(p.data.consult_uid); byUid.set(p.data.consult_uid, p.data); } else skipped++;
   }
-  return { rows, skipped };
+  // a repeated consult_uid keeps the LAST row (the cutter index is append-only, latest row wins)
+  return { rows: [...byUid.values()], skipped };
 }
 
 export async function syncEnc(): Promise<EncSyncResult> {
@@ -86,8 +88,9 @@ export async function syncEnc(): Promise<EncSyncResult> {
   if (!parsed) return { ok: false, error: "enc_manifest_bad" };
 
   const synced = await readSyncedShas();
-  const dates = changedDates(parsed.entries, synced);
-  const outcomes: Record<string, number> = { ok: 0, unchanged: parsed.entries.size - dates.length, missing: 0, sha_mismatch: 0, bad_rows: 0, db_failed: 0 };
+  const allChanged = changedDates(parsed.entries, synced, Infinity);
+  const dates = allChanged.slice(0, MAX_DATES_PER_RUN);
+  const outcomes: Record<string, number> = { ok: 0, unchanged: parsed.entries.size - allChanged.length, deferred: allChanged.length - dates.length, missing: 0, sha_mismatch: 0, bad_rows: 0, db_failed: 0 };
   let roomDays = 0, isolations = 0, skippedRows = 0;
 
   for (const d of dates) {
@@ -116,9 +119,9 @@ async function syncOneDate(d: string, e: ManifestEntry): Promise<{ outcome: Date
   if (!dr) return none("bad_rows");
   const ir = iso ? parseIsolation(iso.body, d) : { rows: [] as IsolationRow[], skipped: 0 };
   try {
-    const rd = await upsertRoomDays(dr.rows);
-    const is = await upsertIsolations(ir.rows);
     const skipped = dr.skipped + ir.skipped;
+    // F7: a clean re-sync also deletes the date's rows that the new files no longer carry (one transaction). A date with a skipped row only upserts.
+    const { room_days: rd, isolations: is } = await replaceDate(d, dr.rows, ir.rows, skipped === 0);
     // A date with a skipped row is not marked synced: the next run reads it again.
     if (skipped === 0) await writeSyncedSha(d, { sha256: e.sha256, isolation_sha256: e.isolation_sha256 ?? null });
     return { outcome: skipped === 0 ? "ok" : "bad_rows", room_days: rd, isolations: is, skipped };

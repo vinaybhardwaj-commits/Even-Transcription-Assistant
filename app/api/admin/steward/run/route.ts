@@ -2,6 +2,7 @@
  * POST /api/admin/steward/run — the steward (box) opens or closes a run. Bearer ENC_STEWARD_TOKEN.
  *   { op: "create", mode: "advise"|"act", model? }            -> 200 { ok, id }
  *   { op: "close", id, status: "ok"|"failed"|"capped", tokens_in?, tokens_out?, cost_usd?, summary_md? } -> 200 { ok } | 409 not_open
+ * While the steward is disabled: 423. While the settings mode is not "act", opening a run with mode "act" is 409 advise_mode.
  * summary_md passes the PHI guard (ids and counts only). Logs carry codes only.
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -19,17 +20,16 @@ export async function POST(req: NextRequest) {
   const a = stewardAuth(req);
   if (a === "not_configured") return json({ ok: false, error: "not_configured" }, 503);
   if (a !== "ok") return json({ ok: false, error: "unauthorized" }, 401);
-  try {
-    if (!(await getStewardGate()).enabled) return json({ ok: false, error: "steward_disabled" }, 423);
-  } catch {
-    return json({ ok: false, error: "db" }, 503);
-  }
+  let gate;
+  try { gate = await getStewardGate(); } catch { return json({ ok: false, error: "db" }, 503); }
+  if (!gate.enabled) return json({ ok: false, error: "steward_disabled" }, 423);
   const b = await readJsonBody(req);
   if (!b.ok) return json({ ok: false, error: b.status === 413 ? "bad_body" : "bad_json" }, b.status);
   const p = runBodySchema.safeParse(b.body);
   if (!p.success) return json({ ok: false, error: "validation_failed" }, 400);
   try {
     if (p.data.op === "create") {
+      if (p.data.mode === "act" && gate.mode !== "act") return json({ ok: false, error: "advise_mode" }, 409);
       const id = await createRun(p.data.mode, p.data.model ?? null);
       return json({ ok: true, id });
     }

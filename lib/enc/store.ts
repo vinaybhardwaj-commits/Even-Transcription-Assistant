@@ -1,6 +1,6 @@
 /**
  * lib/enc/store.ts — the ONLY SQL on the ENC tables (enc_room_day, enc_isolation, steward_run, steward_item, steward_settings).
- * Neon HTTP: one statement per call, tagged template, every value bound. Upserts are one statement per batch (a jsonb array of rows).
+ * Neon HTTP: one statement per call, tagged template, every value bound. Upserts are one statement per batch (a jsonb array of rows); a date's re-sync is one sql.transaction.
  * Item state changes are ONE conditional UPDATE (WHERE state = <from>), so a lost race changes nothing.
  */
 import { sql } from "@/lib/db";
@@ -8,58 +8,59 @@ import type { IsolationRow, ItemCreate, ItemState, RoomDayRow } from "@/lib/enc/
 
 const BATCH = 200;
 
-export async function upsertRoomDays(rows: readonly RoomDayRow[]): Promise<number> {
-  let n = 0;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const out = (await sql`
-      WITH incoming AS (
-        SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows.slice(i, i + BATCH))}::jsonb)
-          AS x(ist_date date, room_id text, visits int, placed int, isolated int, isolated_pulse int, isolated_pqm int, not_isolated int,
-               lane_sarvam int, lane_nemotron int, lane_role int, lane_parts int, rx_matched int, tape_hours numeric, status text,
-               alerts jsonb, computed_at timestamptz, source text)
-      )
-      INSERT INTO enc_room_day AS d (ist_date, room_id, visits, placed, isolated, isolated_pulse, isolated_pqm, not_isolated,
-                                     lane_sarvam, lane_nemotron, lane_role, lane_parts, rx_matched, tape_hours, status, alerts, computed_at, source)
-      SELECT x.ist_date, x.room_id, x.visits, x.placed, x.isolated, x.isolated_pulse, x.isolated_pqm, x.not_isolated,
-             x.lane_sarvam, x.lane_nemotron, x.lane_role, x.lane_parts, x.rx_matched, x.tape_hours, x.status, x.alerts, x.computed_at, x.source
-        FROM incoming x
-      ON CONFLICT (ist_date, room_id) DO UPDATE
-         SET visits = EXCLUDED.visits, placed = EXCLUDED.placed, isolated = EXCLUDED.isolated, isolated_pulse = EXCLUDED.isolated_pulse,
-             isolated_pqm = EXCLUDED.isolated_pqm, not_isolated = EXCLUDED.not_isolated, lane_sarvam = EXCLUDED.lane_sarvam,
-             lane_nemotron = EXCLUDED.lane_nemotron, lane_role = EXCLUDED.lane_role, lane_parts = EXCLUDED.lane_parts,
-             rx_matched = EXCLUDED.rx_matched, tape_hours = EXCLUDED.tape_hours, status = EXCLUDED.status, alerts = EXCLUDED.alerts,
-             computed_at = EXCLUDED.computed_at, source = EXCLUDED.source
-      RETURNING 1 AS one
-    `) as unknown[];
-    n += out.length;
-  }
-  return n;
-}
+const roomDayUpsert = (rows: readonly RoomDayRow[]) => sql`
+  WITH incoming AS (
+    SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+      AS x(ist_date date, room_id text, visits int, placed int, isolated int, isolated_pulse int, isolated_pqm int, not_isolated int,
+           lane_sarvam int, lane_nemotron int, lane_role int, lane_parts int, rx_matched int, tape_hours numeric, status text,
+           alerts jsonb, computed_at timestamptz, source text)
+  )
+  INSERT INTO enc_room_day AS d (ist_date, room_id, visits, placed, isolated, isolated_pulse, isolated_pqm, not_isolated,
+                                 lane_sarvam, lane_nemotron, lane_role, lane_parts, rx_matched, tape_hours, status, alerts, computed_at, source)
+  SELECT x.ist_date, x.room_id, x.visits, x.placed, x.isolated, x.isolated_pulse, x.isolated_pqm, x.not_isolated,
+         x.lane_sarvam, x.lane_nemotron, x.lane_role, x.lane_parts, x.rx_matched, x.tape_hours, x.status, x.alerts, x.computed_at, x.source
+    FROM incoming x
+  ON CONFLICT (ist_date, room_id) DO UPDATE
+     SET visits = EXCLUDED.visits, placed = EXCLUDED.placed, isolated = EXCLUDED.isolated, isolated_pulse = EXCLUDED.isolated_pulse,
+         isolated_pqm = EXCLUDED.isolated_pqm, not_isolated = EXCLUDED.not_isolated, lane_sarvam = EXCLUDED.lane_sarvam,
+         lane_nemotron = EXCLUDED.lane_nemotron, lane_role = EXCLUDED.lane_role, lane_parts = EXCLUDED.lane_parts,
+         rx_matched = EXCLUDED.rx_matched, tape_hours = EXCLUDED.tape_hours, status = EXCLUDED.status, alerts = EXCLUDED.alerts,
+         computed_at = EXCLUDED.computed_at, source = EXCLUDED.source
+`;
 
-export async function upsertIsolations(rows: readonly IsolationRow[]): Promise<number> {
-  let n = 0;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const out = (await sql`
-      WITH incoming AS (
-        SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows.slice(i, i + BATCH))}::jsonb)
-          AS x(consult_uid text, ist_date date, room_id text, doctor_uid text, t_start timestamptz, t_end timestamptz, boundary_source text,
-               room_source text, confidence numeric, status text, skip_reason text, r2_prefix text, lanes jsonb, parts jsonb, rx jsonb, pqm_step_uid text)
-      )
-      INSERT INTO enc_isolation AS e (consult_uid, ist_date, room_id, doctor_uid, t_start, t_end, boundary_source, room_source, confidence,
-                                      status, skip_reason, r2_prefix, lanes, parts, rx, pqm_step_uid, updated_at)
-      SELECT x.consult_uid, x.ist_date, x.room_id, x.doctor_uid, x.t_start, x.t_end, x.boundary_source, x.room_source, x.confidence,
-             x.status, x.skip_reason, x.r2_prefix, COALESCE(x.lanes, '{}'::jsonb), x.parts, x.rx, x.pqm_step_uid, now()
-        FROM incoming x
-      ON CONFLICT (consult_uid) DO UPDATE
-         SET ist_date = EXCLUDED.ist_date, room_id = EXCLUDED.room_id, doctor_uid = EXCLUDED.doctor_uid, t_start = EXCLUDED.t_start,
-             t_end = EXCLUDED.t_end, boundary_source = EXCLUDED.boundary_source, room_source = EXCLUDED.room_source,
-             confidence = EXCLUDED.confidence, status = EXCLUDED.status, skip_reason = EXCLUDED.skip_reason, r2_prefix = EXCLUDED.r2_prefix,
-             lanes = EXCLUDED.lanes, parts = EXCLUDED.parts, rx = EXCLUDED.rx, pqm_step_uid = EXCLUDED.pqm_step_uid, updated_at = now()
-      RETURNING 1 AS one
-    `) as unknown[];
-    n += out.length;
+const isolationUpsert = (rows: readonly IsolationRow[]) => sql`
+  WITH incoming AS (
+    SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+      AS x(consult_uid text, ist_date date, room_id text, doctor_uid text, t_start timestamptz, t_end timestamptz, boundary_source text,
+           room_source text, confidence numeric, status text, skip_reason text, r2_prefix text, lanes jsonb, parts jsonb, rx jsonb, pqm_step_uid text)
+  )
+  INSERT INTO enc_isolation AS e (consult_uid, ist_date, room_id, doctor_uid, t_start, t_end, boundary_source, room_source, confidence,
+                                  status, skip_reason, r2_prefix, lanes, parts, rx, pqm_step_uid, updated_at)
+  SELECT x.consult_uid, x.ist_date, x.room_id, x.doctor_uid, x.t_start, x.t_end, x.boundary_source, x.room_source, x.confidence,
+         x.status, x.skip_reason, x.r2_prefix, COALESCE(x.lanes, '{}'::jsonb), x.parts, x.rx, x.pqm_step_uid, now()
+    FROM incoming x
+  ON CONFLICT (consult_uid) DO UPDATE
+     SET ist_date = EXCLUDED.ist_date, room_id = EXCLUDED.room_id, doctor_uid = EXCLUDED.doctor_uid, t_start = EXCLUDED.t_start,
+         t_end = EXCLUDED.t_end, boundary_source = EXCLUDED.boundary_source, room_source = EXCLUDED.room_source,
+         confidence = EXCLUDED.confidence, status = EXCLUDED.status, skip_reason = EXCLUDED.skip_reason, r2_prefix = EXCLUDED.r2_prefix,
+         lanes = EXCLUDED.lanes, parts = EXCLUDED.parts, rx = EXCLUDED.rx, pqm_step_uid = EXCLUDED.pqm_step_uid, updated_at = now()
+`;
+
+/**
+ * Re-syncs ONE date in ONE non-interactive transaction (sql.transaction): upserts the date's rows, and, when `prune` is true,
+ * first deletes the rows of that date that the new files no longer carry. Rows must already be unique per key (the parsers keep the last).
+ * `prune` is false when any row of the date was skipped as invalid: a bad row must not delete its old good copy.
+ */
+export async function replaceDate(date: string, days: readonly RoomDayRow[], isos: readonly IsolationRow[], prune: boolean): Promise<{ room_days: number; isolations: number }> {
+  const stmts: unknown[] = [];
+  if (prune) {
+    stmts.push(sql`DELETE FROM enc_room_day WHERE ist_date = ${date}::date AND room_id <> ALL(${days.map((r) => r.room_id)}::text[])`);
+    stmts.push(sql`DELETE FROM enc_isolation WHERE ist_date = ${date}::date AND consult_uid <> ALL(${isos.map((r) => r.consult_uid)}::text[])`);
   }
-  return n;
+  for (let i = 0; i < days.length; i += BATCH) stmts.push(roomDayUpsert(days.slice(i, i + BATCH)));
+  for (let i = 0; i < isos.length; i += BATCH) stmts.push(isolationUpsert(isos.slice(i, i + BATCH)));
+  if (stmts.length > 0) await (sql as unknown as { transaction: (q: unknown[]) => Promise<unknown[]> }).transaction(stmts);
+  return { room_days: days.length, isolations: isos.length };
 }
 
 // --- sync memory (steward_settings, key enc_sync:<date>, value {sha256, isolation_sha256}) ------------------------------------------------

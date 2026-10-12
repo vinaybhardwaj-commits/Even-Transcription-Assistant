@@ -2,6 +2,7 @@
  * /api/admin/steward/items — Bearer ENC_STEWARD_TOKEN.
  *   POST { run_id, kind, ist_date, room_id?, consult_uid?, title, body_md, proposed_action? } -> 200 { ok, id } | 409 run_not_open | 422 phi_rejected
  *   GET ?state=approved (default "approved"; any item state)                                  -> 200 { ok, items }
+ * While mode is not "act": a kind "action" item is 409; a suggestion/question may carry proposed_action, stored as ADVISORY (GET returns advisory:true). Disabled: 423.
  * title and body_md pass the PHI guard on write (long digit runs, emails, phones are refused). Logs carry codes only.
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -45,7 +46,9 @@ export async function GET(req: NextRequest) {
   const state = req.nextUrl.searchParams.get("state") ?? "approved";
   if (!(ITEM_STATES as readonly string[]).includes(state)) return json({ ok: false, error: "validation_failed" }, 400);
   try {
-    return json({ ok: true, items: await listItemsByState(state as ItemState) });
+    // advisory: while the settings mode is not "act", every proposed_action is a suggestion only and must not be executed.
+    const gate = await getStewardGate();
+    return json({ ok: true, advisory: gate.mode !== "act", items: await listItemsByState(state as ItemState) });
   } catch (e) {
     console.error("[steward] item list failed", JSON.stringify({ err: String((e as Error)?.name ?? "error") }));
     return json({ ok: false, error: "db" }, 503);

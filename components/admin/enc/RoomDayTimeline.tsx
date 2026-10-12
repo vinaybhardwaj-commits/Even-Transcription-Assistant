@@ -7,10 +7,10 @@ import { StatusChip } from "@/components/admin/enc/DailyCoverageClient";
 /**
  * The ENC timeline strip on /admin/rooms/[roomId]/[date] (contract UI item 2). Pure render from props, no state.
  * Lanes: tape coverage, PQM visits (red = no cut encounter over it), encounters coloured by boundary_source.
- * Red on the tape lane = a span with no recording. Click an encounter to open /admin/encounters/{consult_uid}.
+ * Red on the tape lane = a span with no recording. Click an encounter to jump to its Isolation / Parts / Rx sections on the same page (#consult-<uid>).
  * Renders nothing when there is no ENC data for the day (before W1 lands, or a room with no export).
  */
-export function RoomDayTimeline({ date, day, isolations, tape }: { date: string; day: EncRoomDay | null; isolations: EncIsolation[]; tape: TapeSpan[] }) {
+export function RoomDayTimeline({ roomId, date, day, isolations, tape }: { roomId: string; date: string; day: EncRoomDay | null; isolations: EncIsolation[]; tape: TapeSpan[] }) {
   if (!day && isolations.length === 0) return null;
   const m = buildTimeline(date, isolations, tape);
   const alert = day ? topAlert(day.alerts) : null;
@@ -70,10 +70,10 @@ export function RoomDayTimeline({ date, day, isolations, tape }: { date: string;
               {m.encounters.map((e) => (
                 <Link
                   key={e.id}
-                  href={`/admin/encounters/${e.id}`}
+                  href={`/admin/rooms/${roomId}/${date}#consult-${e.id}`}
                   className={`absolute inset-y-0 rounded ${BOUNDARY_COLOR[e.boundary_source].bar} opacity-90 hover:opacity-100 focus:outline focus:outline-2 focus:outline-even-navy-800`}
                   style={pos(e)}
-                  title={`${e.label} - open encounter`}
+                  title={`${e.label} - show isolation details`}
                   aria-label={`Encounter, boundary ${e.label}`}
                 />
               ))}

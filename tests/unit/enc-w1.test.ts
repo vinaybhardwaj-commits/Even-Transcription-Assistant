@@ -16,6 +16,7 @@ const S = vi.hoisted(() => ({
   created: [] as unknown[],
   admin: null as string | null,
   gate: { enabled: true, mode: "advise" } as { enabled: boolean; mode: string },
+  replaced: [] as Array<{ d: string; prune: boolean; days: number; isos: number }>,
   settings: [] as Array<Record<string, unknown>>,
   openRuns: new Set<string>(),
 }));
@@ -23,8 +24,7 @@ vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no sql in a unit test
 vi.mock("@/lib/enc/store", () => ({
   readSyncedShas: async () => new Map(S.synced),
   writeSyncedSha: async (d: string, v: unknown) => { S.written.push([d, v]); },
-  upsertRoomDays: async (rows: unknown[]) => { S.roomDays.push(...rows); return rows.length; },
-  upsertIsolations: async (rows: unknown[]) => { S.isolations.push(...rows); return rows.length; },
+  replaceDate: async (d: string, days: unknown[], isos: unknown[], prune: boolean) => { S.roomDays.push(...days); S.isolations.push(...isos); S.replaced.push({ d, prune, days: days.length, isos: isos.length }); return { room_days: days.length, isolations: isos.length }; },
   getStewardGate: async () => ({ ...S.gate }),
   upsertStewardSettings: async (p: Record<string, unknown>) => { S.settings.push(p); },
   createRun: async () => "11111111-1111-4111-8111-111111111111",
@@ -54,7 +54,7 @@ import { POST as resultPost } from "@/app/api/admin/steward/items/[id]/result/ro
 
 const D = "2026-10-11";
 const ROOM = "room_fake0001";
-const UID = "fakeconsultuid0000001";
+const UID = "73jf39ondtahkp3mf728infj0o";
 const RUN = "11111111-1111-4111-8111-111111111111";
 const ITEM = "33333333-3333-4333-8333-333333333333";
 const TOKEN = "fake-steward-token-for-tests";
@@ -95,7 +95,7 @@ const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
   S.synced.clear(); S.roomDays.length = 0; S.isolations.length = 0; S.written.length = 0; S.items.clear(); S.moves.length = 0; S.created.length = 0;
-  S.settings.length = 0; S.gate = { enabled: true, mode: "advise" }; S.admin = null; S.openRuns = new Set([RUN]);
+  S.settings.length = 0; S.replaced.length = 0; S.gate = { enabled: true, mode: "advise" }; S.admin = null; S.openRuns = new Set([RUN]);
   setLabStoreForTests(null);
   process.env.ENC_STEWARD_TOKEN = TOKEN;
   process.env.CRON_SECRET = "fake-cron"; process.env.MIGRATION_SECRET = "fake-mig";
@@ -415,5 +415,70 @@ describe("W2 client and W1 route agree", () => {
     expect(settingsPatchSchema.safeParse({ enabled: true }).success).toBe(true);
     expect(settingsPatchSchema.safeParse({ mode: "advise" }).success).toBe(true);
     expect(settingsPatchSchema.safeParse({ key: "enabled", value: true }).success).toBe(false);
+  });
+});
+
+describe("refuter fixes", () => {
+  it("F1: duplicate consult_uid in the isolation file keeps the LAST row; duplicate (date, room_id) in the daily file keeps the LAST row", () => {
+    const i = parseIsolation([JSON.stringify(isoRow({ confidence: 0.1 })), JSON.stringify(isoRow({ consult_uid: "other-uid-0001" })), JSON.stringify(isoRow({ confidence: 0.8 }))].join("\n"), D);
+    expect(i.rows.length).toBe(2); expect(i.skipped).toBe(0);
+    expect(i.rows.find((x) => x.consult_uid === UID)!.confidence).toBe(0.8);
+    const d = parseDaily(JSON.stringify([dayRow({ visits: 1 }), dayRow({ room_id: "room_b", visits: 5 }), dayRow({ visits: 9 })]), D)!;
+    expect(d.rows.length).toBe(2); expect(d.skipped).toBe(0);
+    expect(d.rows.find((x) => x.room_id === ROOM)!.visits).toBe(9);
+  });
+  it("F1: a duplicated file syncs: one write per uid, date recorded as synced", async () => {
+    const iso = [JSON.stringify(isoRow()), JSON.stringify(isoRow({ confidence: 0.5 }))].join("\n") + "\n";
+    setupLab({ iso });
+    const r = await syncEnc();
+    expect(r.ok && r.outcomes.ok).toBe(1);
+    expect(S.isolations.length).toBe(1); expect(S.written.length).toBe(1);
+  });
+  it("F2: the refuter's four strings and the rest of the rule set are refused", () => {
+    for (const t of ["UHID EH12345678", "MRN: E123456789", "phone9876543210", "9876543210abc", "mob 12", "Mobile: 5", "uhid 123456", "ref ABC1234567"]) {
+      expect(phiGuard(t), t).not.toBeNull();
+    }
+  });
+  it("F2: ids, counts, dates, uuids and times still pass", () => {
+    for (const t of [`consult ${UID} in room_fake0001 on ${D}`, `run ${RUN}`, "8 of 9 isolated, tape 7.5 h, 12345 tokens, cost 0.42 usd", "10:00 to 10:10", "ph low", "mobility 3"]) {
+      expect(phiGuard(t), t).toBeNull();
+    }
+  });
+  it("F4: advise mode accepts a suggestion that carries proposed_action; GET marks the list advisory; an 'act' run is 409", async () => {
+    const pa = { type: "recut", args: { consult_uid: UID } };
+    expect((await itemsPost(req("/api/admin/steward/items", { body: { run_id: RUN, kind: "suggestion", ist_date: D, title: "t", body_md: "b", proposed_action: pa } }))).status).toBe(200);
+    expect(S.created[0]).toMatchObject({ proposed_action: pa });
+    const g = await (await itemsGet(req("/api/admin/steward/items?state=approved", { method: "GET" }))).json();
+    expect(g.advisory).toBe(true);
+    expect((await runPost(req("/api/admin/steward/run", { body: { op: "create", mode: "act" } }))).status).toBe(409);
+    S.gate.mode = "act";
+    expect((await runPost(req("/api/admin/steward/run", { body: { op: "create", mode: "act" } }))).status).toBe(200);
+    expect((await (await itemsGet(req("/api/admin/steward/items?state=approved", { method: "GET" }))).json()).advisory).toBe(false);
+  });
+  it("F6: dates past the cap are counted as deferred, not unchanged", async () => {
+    const daily = JSON.stringify([dayRow()]); const iso = JSON.stringify(isoRow()) + "\n";
+    const m: Record<string, unknown> = {};
+    const files: Record<string, string> = {};
+    for (let k = 1; k <= 45; k++) {
+      const d = `2026-${String(Math.floor((k - 1) / 28) + 7).padStart(2, "0")}-${String(((k - 1) % 28) + 1).padStart(2, "0")}`;
+      m[d] = { sha256: sha256Hex(daily), rows: 1, isolation_sha256: sha256Hex(iso), isolation_rows: 1 };
+      files[encDailyKey(d)] = daily; files[encIsolationKey(d)] = iso;
+    }
+    files["enc/manifest.json"] = JSON.stringify(m);
+    setLabStoreForTests(fakeLab(files));
+    const total = Object.keys(m).length;
+    const r = await syncEnc();
+    expect(r.ok && r.dates_changed).toBe(40);
+    expect(r.ok && r.outcomes.deferred).toBe(total - 40);
+    expect(r.ok && r.outcomes.unchanged).toBe(0);
+  });
+  it("F7: a clean date is replaced with prune; a date with a skipped row only upserts", async () => {
+    setupLab();
+    await syncEnc();
+    expect(S.replaced).toEqual([{ d: D, prune: true, days: 1, isos: 1 }]);
+    S.replaced.length = 0; S.synced.clear();
+    setupLab({ daily: JSON.stringify([dayRow(), dayRow({ status: "bad" })]) });
+    await syncEnc();
+    expect(S.replaced[0]).toMatchObject({ d: D, prune: false });
   });
 });
