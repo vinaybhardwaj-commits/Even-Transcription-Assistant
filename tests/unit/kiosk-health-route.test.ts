@@ -1,7 +1,9 @@
 /** POST /api/kiosk-health — auth, size limits, chunking, duplicate accounting and DB-fault behaviour. sql is mocked. */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const M = vi.hoisted(() => ({ sql: vi.fn() }));
+const M = vi.hoisted(() => ({ sql: vi.fn(), auth: vi.fn() }));
+// TS-H8: the Device credential is the per-device Ed25519 JWS (lib/fleet/device-auth.ts, proven on a real postgres in fleet-h6-pg); here it is a controlled answer.
+vi.mock("@/lib/fleet/device-auth", async (orig) => ({ ...(await orig<Record<string, unknown>>()), authenticateDevice: (...a: unknown[]) => M.auth(...a) }));
 // TS-H10: the route first looks for cross-source twins with ONE tagged-template read; it answers "none" here so these tests keep counting only the INSERTs (the dedupe itself is proven
 // on a real postgres in fleet-h6-pg.test.ts and in kiosk-health-dedupe.test.ts).
 const isTwinLookup = (a: unknown[]): boolean => Array.isArray(a[0]) && (a[0] as string[]).join("?").match(/SELECT machine, kind, source, ts(, twin_source, twin_ts)? FROM kiosk_health_(events|dedupe)/) !== null;
@@ -9,9 +11,7 @@ vi.mock("@/lib/db", () => ({ sql: (...a: unknown[]) => (isTwinLookup(a) ? Promis
 
 import { POST } from "@/app/api/kiosk-health/route";
 import { NextRequest } from "next/server";
-import { signRoomJwt } from "@/lib/room-auth";
 
-process.env.JWT_SECRET_DOCTOR = "test-secret-for-kiosk-health-device-path-only";
 const TOKEN = "tok-123";
 const SAVED = process.env.KIOSK_HEALTH_INGEST_TOKEN;
 const ev = (seq: number, o: Record<string, unknown> = {}) => ({
@@ -149,54 +149,58 @@ describe("POST /api/kiosk-health", () => {
 });
 
 
-describe("POST /api/kiosk-health — Authorization: Device <room session JWT> (TS-H10 #47)", () => {
-  const device = async (room = "r1") => `Device ${await signRoomJwt({ room_id: room, slug: "s" })}`;
+describe("POST /api/kiosk-health — Authorization: Device <device JWS> (TS-H10 #47, TS-H8)", () => {
+  const DEVICE = { device_id: "dev_" + "a".repeat(24), install_id: "i1", room_id: "r1", machine: "EHRC-OPD1’s Mac mini", public_key: "k", status: "active" };
+  const asDevice = () => M.auth.mockResolvedValueOnce({ ok: true, device: DEVICE });
   const hev = (seq: number, o: Record<string, unknown> = {}) => ev(seq, { source: "helper", machine: "EHRC-OPD1s-Mac-mini", ...o });
-  const installs = (...hostnames: string[]) => M.sql.mockResolvedValueOnce(hostnames.map((hostname) => ({ hostname })));
+  beforeEach(() => M.auth.mockReset());
 
-  it("401 for an invalid, expired-style, wrong-secret or empty Device token; the database is never touched; a Bearer value in the Device slot does not work", async () => {
+  it("401 when the device credential does not verify (bad signature, replay, unknown device, expired...); the database is never touched; the body and request line are what was verified", async () => {
+    M.auth.mockResolvedValueOnce({ ok: false, status: 401, code: "bad_signature" });
     expect((await POST(post({ events: [hev(1)] }, "Device not.a.jwt"))).status).toBe(401);
-    expect((await POST(post({ events: [hev(1)] }, "Device "))).status).toBe(401);
-    expect((await POST(post({ events: [hev(1)] }, `Device ${TOKEN}`))).status).toBe(401);
-    expect((await POST(post({ events: [hev(1)] }, "Device"))).status).toBe(401); // no space: not the Device scheme, and not the bearer token either
     expect(M.sql).not.toHaveBeenCalled();
+    const body = { events: [hev(1)] };
+    M.auth.mockResolvedValueOnce({ ok: false, status: 401, code: "replay" });
+    await POST(post(body, "Device abc"));
+    expect(M.auth.mock.calls[1]![1]).toMatchObject({ authorization: "Device abc", method: "POST", path: "/api/kiosk-health", bodyText: JSON.stringify(body) });
   });
 
-  it("a valid Device token stores the helper's events for its own room's Mac; it works with the daemon's env token UNSET (separate credential)", async () => {
+  it("no space after the scheme is not the Device scheme (and is not the daemon token either)", async () => {
+    expect((await POST(post({ events: [hev(1)] }, "Device"))).status).toBe(401);
+    expect(M.auth).not.toHaveBeenCalled();
+  });
+
+  it("a device-authenticated post stores the helper's events for ITS OWN Mac; it works with the daemon's env token UNSET (separate credential)", async () => {
     delete process.env.KIOSK_HEALTH_INGEST_TOKEN;
-    installs("EHRC-OPD1’s Mac mini");
+    asDevice();
     M.sql.mockResolvedValueOnce(idsFor(2));
-    const res = await POST(post({ events: [hev(1), hev(2, { kind: "power.sleep" })] }, await device()));
+    const res = await POST(post({ events: [hev(1), hev(2, { kind: "power.sleep" })] }, "Device x"));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, accepted: 2, duplicates: 0, rejected: 0, deduped: 0 });
   });
 
-  it("only source helper, only this room's Macs, only this room's id, never steward.result: each refusal is named and the rest of the batch still lands", async () => {
-    installs("EHRC-OPD1s-Mac-mini");
-    M.sql.mockResolvedValueOnce(idsFor(1));
+  it("only source helper, only the device's own Mac, only its room id: each refusal is named and the rest of the batch still lands; steward.result IS allowed", async () => {
+    asDevice();
+    M.sql.mockResolvedValueOnce(idsFor(2));
     const res = await POST(post({ events: [
       hev(1),
       hev(2, { source: "daemon" }),
       hev(3, { machine: "EHRC-OPD9s-Mac-mini" }),
       hev(4, { room_id: "r2" }),
-      hev(5, { kind: "steward.result" }),
-    ] }, await device("r1")));
+      hev(5, { kind: "steward.result", payload: { ticket_id: "t1", nonce: "n1", outcome: "done" } }),
+    ] }, "Device x"));
     const j = await res.json();
     expect(res.status).toBe(200);
-    expect(j).toMatchObject({ accepted: 1, rejected: 4 });
-    expect((j.rejected_reasons as Array<{ reason: string }>).map((r) => r.reason).sort()).toEqual(["kind_not_allowed", "machine_not_in_room", "room_mismatch", "wrong_source"]);
+    expect(j).toMatchObject({ accepted: 2, rejected: 3 });
+    expect((j.rejected_reasons as Array<{ reason: string }>).map((r) => r.reason).sort()).toEqual(["machine_not_in_room", "room_mismatch", "wrong_source"]);
   });
 
-  it("a room with no Mac of that name rejects everything (nothing is inserted); a lookup fault is 503 so the spool retries", async () => {
-    installs();
-    expect((await (await POST(post({ events: [hev(1)] }, await device()))).json())).toMatchObject({ accepted: 0, rejected: 1 });
-    M.sql.mockRejectedValueOnce(new Error("db down"));
-    expect((await POST(post({ events: [hev(1)] }, await device()))).status).toBe(503);
-  });
-
-  it("the daemon's Bearer path is unchanged by all of this: still 401 without the token, still stores source daemon for any Mac", async () => {
+  it("an auth lookup fault is 503 so the spool retries; the daemon's Bearer path is unchanged", async () => {
+    M.auth.mockRejectedValueOnce(new Error("db down"));
+    expect((await POST(post({ events: [hev(1)] }, "Device x"))).status).toBe(503);
     expect((await POST(post({ events: [ev(1)] }, null))).status).toBe(401);
     M.sql.mockResolvedValueOnce(idsFor(1));
     expect((await POST(post({ events: [ev(1, { machine: "anything-at-all" })] }))).status).toBe(200);
+    expect(M.auth).toHaveBeenCalledTimes(1);
   });
 });

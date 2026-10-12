@@ -39,6 +39,10 @@ export type HelperHealth = {
   power_schedule: string | null;
   /** pmset settings that drifted from the baseline */
   pmset_drift: string[];
+  /** TS-H8: what the helper's whole-bundle update last reported through the app (display only) */
+  helper_update_step: string | null;
+  helper_update_version: string | null;
+  helper_update_result: string | null;
 };
 
 export type HelperAttention = { kind: "app_missing" | "helper_missing"; severity: "red" | "amber"; since_ms: number; detail: string; action: string };
@@ -93,12 +97,15 @@ export function healthFromRow(r: Record<string, unknown>): HelperHealth {
     console_user: typeof r.console_user === "boolean" ? r.console_user : null,
     power_schedule: textOrNull(r.power_schedule, 64),
     pmset_drift: drift,
+    helper_update_step: textOrNull(r.helper_update_step, 32),
+    helper_update_version: textOrNull(r.helper_update_version, 32),
+    helper_update_result: textOrNull(r.helper_update_result, 32),
   };
 }
 
 /** Whether the row has reported anything about its helper at all (an app below 0.1.35 has not). */
 export const hasReportedHelper = (h: HelperHealth): boolean =>
-  h.helper_version !== null || h.helper_registration !== null || h.helper_xpc_ok !== null || h.helper_state !== null || h.power_schedule !== null || h.pmset_drift.length > 0;
+  h.helper_version !== null || h.helper_registration !== null || h.helper_xpc_ok !== null || h.helper_state !== null || h.power_schedule !== null || h.pmset_drift.length > 0 || h.helper_update_step !== null || h.helper_update_result !== null;
 
 /** Postgres undefined_column (42703) / undefined_table (42P01), by code only (G2): a database without 0153 yet is "no helper fields", not a fault. */
 export const isMissingSchema = (e: unknown): boolean => {

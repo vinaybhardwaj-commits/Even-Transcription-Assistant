@@ -123,9 +123,15 @@ async function poll(token: string) {
 }
 const deviceToken = () => signJws({ alg: "EdDSA", typ: "JWT", kid: DEV }, { iss: DEV, aud: "evenscribe-fleet", iat: now(), exp: now() + 300, jti: randomUUID(), htm: "GET", htu: "/api/fleet/poll" }, DEVKEY.priv);
 
-async function kh(body: unknown, authorization: string) {
+/** `authorization` is a ready header value, or DEVICE to sign THIS body with the device key (htm POST, htu /api/kiosk-health, bsha = hash of the exact body, fresh jti) */
+const DEVICE = "DEVICE";
+async function kh(body: unknown, authorization: string, opts: { tamper?: boolean } = {}) {
   const { POST } = await import("@/app/api/kiosk-health/route");
-  const res = await POST(new NextRequest("https://x.test/api/kiosk-health", { method: "POST", body: JSON.stringify(body), headers: { authorization, "content-type": "application/json" } }));
+  const text = JSON.stringify(body);
+  const header = authorization === DEVICE
+    ? `Device ${signJws({ alg: "EdDSA", typ: "JWT", kid: DEV }, { iss: DEV, aud: "evenscribe-fleet", iat: now(), exp: now() + 300, jti: randomUUID(), htm: "POST", htu: "/api/kiosk-health", bsha: sha256b64url(Buffer.from(text, "utf8")) }, DEVKEY.priv)}`
+    : authorization;
+  const res = await POST(new NextRequest("https://x.test/api/kiosk-health", { method: "POST", body: opts.tamper ? text.replace('"x":1', '"x":2') : text, headers: { authorization: header, "content-type": "application/json" } }));
   return { status: res.status, json: (await res.json()) as Record<string, any> };
 }
 const ev = (seq: number, source: string, tsOffsetMs: number, o: Record<string, unknown> = {}) => ({
@@ -254,14 +260,27 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
 
   describe("#47 POST /api/kiosk-health with a Device credential, and cross-source de-duplication", () => {
     const BEARER = `Bearer ${DAEMON_TOKEN}`;
-    const device = async (room = "room_h6a") => `Device ${await signRoomJwt({ room_id: room, slug: "s" })}`;
+    const device = async () => DEVICE;
 
-    it("a helper event for this room's Mac is stored with source helper; another room's Mac, source daemon, and steward.result are rejected by name", async () => {
-      const r = await kh({ events: [ev(1, "helper", 0), ev(2, "daemon", 0, { boot_id: "b2" }), ev(3, "helper", 0, { machine: "EHRC-H6Bs-Mac-mini", boot_id: "b3" }), ev(4, "helper", 0, { kind: "steward.result", boot_id: "b4" })] }, await device());
+    it("a helper event for this device's Mac is stored with source helper; another Mac, source daemon and another room are rejected by name; steward.result is accepted", async () => {
+      const r = await kh({ events: [ev(1, "helper", 0), ev(2, "daemon", 0, { boot_id: "b2" }), ev(3, "helper", 0, { machine: "EHRC-H6Bs-Mac-mini", boot_id: "b3" }), ev(4, "helper", 0, { kind: "steward.result", boot_id: "b4", payload: { ticket_id: "t", nonce: "n", outcome: "done" } }), ev(5, "helper", 0, { room_id: "room_h6b", boot_id: "b5" })] }, await device());
       expect(r.status).toBe(200);
-      expect(r.json).toMatchObject({ accepted: 1, rejected: 3, deduped: 0 });
-      expect((r.json.rejected_reasons as Array<{ reason: string }>).map((x) => x.reason).sort()).toEqual(["kind_not_allowed", "machine_not_in_room", "wrong_source"]);
-      expect(await stored()).toEqual([{ source: "helper", kind: "power.sleep" }]);
+      expect(r.json).toMatchObject({ accepted: 2, rejected: 3, deduped: 0 });
+      expect((r.json.rejected_reasons as Array<{ reason: string }>).map((x) => x.reason).sort()).toEqual(["machine_not_in_room", "room_mismatch", "wrong_source"]);
+      expect(await stored()).toEqual([{ source: "helper", kind: "power.sleep" }, { source: "helper", kind: "steward.result" }]);
+    });
+
+    it("the device credential is a real Ed25519 JWS bound to the body: garbage, a room session JWT, a tampered body, a replayed token and a revoked device are all 401 and store nothing", async () => {
+      expect((await kh({ events: [ev(1, "helper", 0)] }, "Device garbage")).status).toBe(401);
+      expect((await kh({ events: [ev(1, "helper", 0)] }, `Device ${await signRoomJwt({ room_id: "room_h6a", slug: "s" })}`)).status).toBe(401); // the old (wrong) credential
+      expect((await kh({ events: [ev(1, "helper", 0, { payload: { x: 1 } })] }, DEVICE, { tamper: true })).status).toBe(401);
+      const body = { events: [ev(1, "helper", 0)] };
+      const tok = `Device ${signJws({ alg: "EdDSA", typ: "JWT", kid: DEV }, { iss: DEV, aud: "evenscribe-fleet", iat: now(), exp: now() + 300, jti: randomUUID(), htm: "POST", htu: "/api/kiosk-health", bsha: sha256b64url(Buffer.from(JSON.stringify(body), "utf8")) }, DEVKEY.priv)}`;
+      expect((await kh(body, tok)).status).toBe(200);
+      expect((await kh(body, tok)).status).toBe(401); // replay
+      pg.exec(`UPDATE fleet_devices SET status = 'revoked' WHERE device_id = '${DEV}'`);
+      expect((await kh({ events: [ev(2, "helper", 0)] }, DEVICE)).status).toBe(401);
+      expect((await stored()).length).toBe(1);
     });
 
     it("an invalid Device token is 401 and stores nothing; the daemon's Bearer path still works and still stores any source", async () => {

@@ -3,9 +3,10 @@
  *
  * Body: { events: [ { machine, room_id, install_id, boot_id, seq, source, kind, ts, payload } ... ] }, 1..500 items.
  * Auth: EITHER Authorization: Bearer ${KIOSK_HEALTH_INGEST_TOKEN}, constant-time compare (missing/wrong → 401; env unset → 500, logged once) — the standalone daemon, unchanged —
- *       OR Authorization: Device <room session JWT> (TS-H10 #47: the room app posts the helper's spooled events with its existing device credential, verified exactly as the bench
- *       poll verifies it). A Device post may carry only source "helper", only for a Mac that belongs to the JWT's own room, and never kind steward.result; any other event is
- *       rejected by name (wrong_source · machine_not_in_room · room_mismatch · kind_not_allowed). An invalid Device token → 401.
+ *       OR Authorization: Device <device JWS> (TS-H10 #47, corrected in TS-H8): the room app posts the helper's spooled events with its per-device Ed25519 credential, exactly the
+ *       token it signs for /api/fleet/* (lib/fleet/device-auth.ts: aud evenscribe-fleet, htm POST, htu /api/kiosk-health, bsha = hash of THIS body, single-use jti). A Device post may
+ *       carry only source "helper", only for the device's OWN Mac and room; steward.result is allowed (the app reports ticket results here) and only touches that Mac's tickets.
+ *       Any other event is rejected by name (wrong_source · machine_not_in_room · room_mismatch). An invalid Device token → 401.
  * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, the OTHER source of the daemon/helper pair, ts within 2 s) is already stored AND not yet used by another event is not stored again (pairing is one-to-one, nearest first); it is counted in
  * `deduped` and recorded in kiosk_health_dedupe (migration 0154).
  * Idempotent on (machine, boot_id, seq): replays of a spooled batch insert nothing new and still answer 200.
@@ -23,7 +24,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-health-ingest";
 import { tokenOk } from "@/lib/kiosk-health-auth";
-import { verifyRoomJwt } from "@/lib/room-auth";
+import { authenticateDevice, type DeviceRow } from "@/lib/fleet/device-auth";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { loadLedgerNear, loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
 import { applyStewardResults, STEWARD_RESULT_KIND } from "@/lib/steward/results";
@@ -67,16 +68,26 @@ async function insertChunk(rows: KioskHealthRow[]): Promise<number> {
 
 export async function POST(req: NextRequest) {
   const authz = req.headers.get("authorization") ?? "";
-  // TS-H10: the room app's device credential (the same room session JWT its bench poll carries) in the Authorization header; the daemon's bearer path below is unchanged.
-  let deviceRoom: string | null = null;
+  // TS-H10/H8: the room app's per-device credential (an Ed25519 JWS bound to this method, path and body); the daemon's bearer path below is unchanged.
+  let device: DeviceRow | null = null;
+  let preRead: string | null = null;
   if (authz.startsWith("Device ")) {
+    const declaredDevice = Number(req.headers.get("content-length"));
+    if (Number.isFinite(declaredDevice) && declaredDevice > MAX_BODY_CHARS) return reply(413, { ok: false, error: "body_too_large" });
     try {
-      const claims = await verifyRoomJwt(authz.slice("Device ".length).trim());
-      deviceRoom = typeof claims.room_id === "string" && claims.room_id ? claims.room_id : null;
+      preRead = await req.text();
     } catch {
-      deviceRoom = null;
+      return reply(400, { ok: false, error: "bad_json" });
     }
-    if (!deviceRoom) return reply(401, { ok: false, error: "unauthorized" });
+    if (preRead.length > MAX_BODY_CHARS) return reply(413, { ok: false, error: "body_too_large" });
+    try {
+      const auth = await authenticateDevice(sql as never, { authorization: authz, method: "POST", path: req.nextUrl.pathname, bodyText: preRead, nowMs: Date.now() });
+      if (!auth.ok) return reply(401, { ok: false, error: "unauthorized" });
+      device = auth.device;
+    } catch {
+      console.warn("[kiosk-health] device auth lookup failed");
+      return reply(503, { ok: false, error: "db" });
+    }
   } else {
     const expected = process.env.KIOSK_HEALTH_INGEST_TOKEN?.trim(); // a token saved with a trailing newline must still match
     if (!expected) {
@@ -93,7 +104,7 @@ export async function POST(req: NextRequest) {
   if (Number.isFinite(declared) && declared > MAX_BODY_CHARS) return reply(413, { ok: false, error: "body_too_large" });
   let text: string;
   try {
-    text = await req.text();
+    text = preRead ?? (await req.text());
   } catch {
     return reply(400, { ok: false, error: "bad_json" });
   }
@@ -111,23 +122,15 @@ export async function POST(req: NextRequest) {
   const rejected = [...v.rejected];
   let rows = v.rows;
 
-  // A Device post is confined to its own room: the helper's source, this room's Macs, no steward results.
-  if (deviceRoom !== null) {
-    let mine: string[] = [];
-    try {
-      const installs = (await sql`SELECT hostname FROM room_install WHERE room_id = ${deviceRoom} AND retired_at IS NULL AND hostname IS NOT NULL`) as Array<{ hostname: string }>;
-      mine = installs.map((i) => normalizeHostname(i.hostname).toLowerCase());
-    } catch {
-      console.warn("[kiosk-health] device room lookup failed");
-      return reply(503, { ok: false, error: "db" });
-    }
+  // A Device post is confined to its own device: the helper's source, this device's Mac and room. steward.result is allowed: it only touches tickets of that same machine.
+  if (device !== null) {
+    const myMachine = normalizeHostname(device.machine).toLowerCase();
     const kept: KioskHealthRow[] = [];
     for (const r of rows) {
       const why =
         r.source !== "helper" ? "wrong_source"
-        : r.kind === STEWARD_RESULT_KIND ? "kind_not_allowed"
-        : r.room_id !== null && r.room_id !== deviceRoom ? "room_mismatch"
-        : !mine.includes(normalizeHostname(r.machine).toLowerCase()) ? "machine_not_in_room"
+        : r.room_id !== null && r.room_id !== device.room_id ? "room_mismatch"
+        : normalizeHostname(r.machine).toLowerCase() !== myMachine ? "machine_not_in_room"
         : null;
       if (why) rejected.push({ index: -1, reason: why });
       else kept.push(r);
