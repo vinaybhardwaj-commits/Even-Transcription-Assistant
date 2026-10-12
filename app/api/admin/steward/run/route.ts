@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonBody, stewardAuth } from "@/lib/enc/auth";
 import { phiGuard } from "@/lib/enc/phi-guard";
 import { runBodySchema } from "@/lib/enc/schemas";
-import { closeRun, createRun } from "@/lib/enc/store";
+import { closeRun, createRun, getStewardGate } from "@/lib/enc/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +19,11 @@ export async function POST(req: NextRequest) {
   const a = stewardAuth(req);
   if (a === "not_configured") return json({ ok: false, error: "not_configured" }, 503);
   if (a !== "ok") return json({ ok: false, error: "unauthorized" }, 401);
+  try {
+    if (!(await getStewardGate()).enabled) return json({ ok: false, error: "steward_disabled" }, 423);
+  } catch {
+    return json({ ok: false, error: "db" }, 503);
+  }
   const b = await readJsonBody(req);
   if (!b.ok) return json({ ok: false, error: b.status === 413 ? "bad_body" : "bad_json" }, b.status);
   const p = runBodySchema.safeParse(b.body);

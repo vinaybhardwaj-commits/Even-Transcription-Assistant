@@ -49,13 +49,13 @@ export const isolationRowSchema = z.object({
 }).strict();
 export type IsolationRow = z.infer<typeof isolationRowSchema>;
 
-/** One manifest entry per date. sha256 is of enc/daily/<date>.json; isolation_sha256 (optional) is of enc/isolation/<date>.jsonl. */
+/** One manifest entry per date. sha256 is of enc/daily/<date>.json; isolation_sha256 (required) is of enc/isolation/<date>.jsonl. */
 export const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 export const manifestEntrySchema = z.object({
   sha256: sha256Schema,
   rows: count,
-  isolation_sha256: sha256Schema.optional(),
-  isolation_rows: count.optional(),
+  isolation_sha256: sha256Schema,
+  isolation_rows: count,
 }).passthrough();
 export type ManifestEntry = z.infer<typeof manifestEntrySchema>;
 

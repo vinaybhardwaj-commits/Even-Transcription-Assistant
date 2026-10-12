@@ -15,6 +15,7 @@ const S = vi.hoisted(() => ({
   moves: [] as Array<{ id: string; from: string; to: string; decided_by?: unknown; result?: unknown }>,
   created: [] as unknown[],
   admin: null as string | null,
+  gate: { enabled: true, mode: "advise" } as { enabled: boolean; mode: string },
   settings: [] as Array<Record<string, unknown>>,
   openRuns: new Set<string>(),
 }));
@@ -24,6 +25,7 @@ vi.mock("@/lib/enc/store", () => ({
   writeSyncedSha: async (d: string, v: unknown) => { S.written.push([d, v]); },
   upsertRoomDays: async (rows: unknown[]) => { S.roomDays.push(...rows); return rows.length; },
   upsertIsolations: async (rows: unknown[]) => { S.isolations.push(...rows); return rows.length; },
+  getStewardGate: async () => ({ ...S.gate }),
   upsertStewardSettings: async (p: Record<string, unknown>) => { S.settings.push(p); },
   createRun: async () => "11111111-1111-4111-8111-111111111111",
   closeRun: async (id: string) => S.openRuns.has(id),
@@ -93,7 +95,7 @@ const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
   S.synced.clear(); S.roomDays.length = 0; S.isolations.length = 0; S.written.length = 0; S.items.clear(); S.moves.length = 0; S.created.length = 0;
-  S.settings.length = 0; S.admin = null; S.openRuns = new Set([RUN]);
+  S.settings.length = 0; S.gate = { enabled: true, mode: "advise" }; S.admin = null; S.openRuns = new Set([RUN]);
   setLabStoreForTests(null);
   process.env.ENC_STEWARD_TOKEN = TOKEN;
   process.env.CRON_SECRET = "fake-cron"; process.env.MIGRATION_SECRET = "fake-mig";
@@ -128,16 +130,16 @@ describe("schemas", () => {
 
 describe("sync parsing", () => {
   it("manifest: ignores non-date keys, drops a bad entry, rejects a non-object", () => {
-    const m = parseManifest(JSON.stringify({ [D]: { sha256: "a".repeat(64), rows: 1 }, "2026-10-10": { sha256: "nope", rows: 1 }, other: 1 }));
+    const m = parseManifest(JSON.stringify({ [D]: { sha256: "a".repeat(64), rows: 1, isolation_sha256: "b".repeat(64), isolation_rows: 1 }, "2026-10-10": { sha256: "nope", rows: 1 }, "2026-10-09": { sha256: "a".repeat(64), rows: 1 }, other: 1 }));
     expect([...m!.entries.keys()]).toEqual([D]);
-    expect(m!.dropped).toBe(1);
+    expect(m!.dropped).toBe(2);
     expect(parseManifest("[]")).toBeNull();
     expect(parseManifest("not json")).toBeNull();
   });
   it("changedDates: only dates whose sha differs from the recorded one, newest first", () => {
-    const e = (s: string) => ({ sha256: s.repeat(64), rows: 1 });
+    const e = (s: string) => ({ sha256: s.repeat(64), rows: 1, isolation_sha256: s.repeat(64), isolation_rows: 1 });
     const entries = new Map([["2026-10-09", e("a")], ["2026-10-10", e("b")], ["2026-10-11", e("c")]]);
-    const synced = new Map([["2026-10-09", { sha256: "a".repeat(64), isolation_sha256: null }], ["2026-10-10", { sha256: "x".repeat(64), isolation_sha256: null }]]);
+    const synced = new Map([["2026-10-09", { sha256: "a".repeat(64), isolation_sha256: "a".repeat(64) }], ["2026-10-10", { sha256: "x".repeat(64), isolation_sha256: "b".repeat(64) }]]);
     expect(changedDates(entries, synced)).toEqual(["2026-10-11", "2026-10-10"]);
     expect(changedDates(entries, synced, 1)).toEqual(["2026-10-11"]);
   });
@@ -267,7 +269,7 @@ describe("PHI guard on body_md", () => {
     expect((await itemsPost(req("/api/admin/steward/items", { body: { ...base, kind: "nope" } }))).status).toBe(400);
   });
   it("POST result: PHI in result is refused with 422", async () => {
-    S.items.set(ITEM, "approved");
+    S.gate.mode = "act"; S.items.set(ITEM, "approved");
     const r = await resultPost(req(`/api/admin/steward/items/${ITEM}/result`, { body: { ok: true, result: { note: "call 9876543210" } } }), params(ITEM));
     expect(r.status).toBe(422);
     expect(S.items.get(ITEM)).toBe("approved");
@@ -303,7 +305,7 @@ describe("state transitions", () => {
     expect((await decide(req("/api/admin/steward/items/not-a-uuid", { method: "PATCH", token: null, body: { state: "approved" } }), params("not-a-uuid"))).status).toBe(400);
   });
   it("result: approved -> done / failed; an open item cannot get a result; a done item cannot be changed again", async () => {
-    S.items.set(ITEM, "open");
+    S.gate.mode = "act"; S.items.set(ITEM, "open");
     const r = (body: unknown) => resultPost(req(`/api/admin/steward/items/${ITEM}/result`, { body }), params(ITEM));
     expect((await r({ ok: true, result: { n: 1 } })).status).toBe(409);
     S.items.set(ITEM, "approved");
@@ -315,6 +317,7 @@ describe("state transitions", () => {
     expect((await (await r({ ok: false, result: { reason: "timeout" } })).json()).state).toBe("failed");
   });
   it("result for an unknown item is 404", async () => {
+    S.gate.mode = "act";
     expect((await resultPost(req(`/api/admin/steward/items/${ITEM}/result`, { body: { ok: true } }), params(ITEM))).status).toBe(404);
   });
 });
@@ -347,5 +350,58 @@ describe("PATCH steward settings", () => {
     expect((await patch({ daily_cap_usd: 0 })).status).toBe(200);
     expect((await patch({ daily_cap_usd: 50 })).status).toBe(200);
     expect(S.settings.length).toBe(2);
+  });
+});
+
+describe("advise mode and the kill switch", () => {
+  const item = (o: Record<string, unknown> = {}) => ({ run_id: RUN, kind: "suggestion", ist_date: D, title: "t", body_md: "b", ...o });
+  const action = item({ kind: "action", proposed_action: { type: "recut", args: { consult_uid: UID } } });
+  const result = (ok: boolean) => resultPost(req(`/api/admin/steward/items/${ITEM}/result`, { body: { ok, result: {} } }), params(ITEM));
+
+  it("mode advise (and mode absent): a kind 'action' item is 409, a suggestion and a question are accepted", async () => {
+    expect((await itemsPost(req("/api/admin/steward/items", { body: action }))).status).toBe(409);
+    expect(S.created.length).toBe(0);
+    expect((await itemsPost(req("/api/admin/steward/items", { body: item() }))).status).toBe(200);
+    expect((await itemsPost(req("/api/admin/steward/items", { body: item({ kind: "question" }) }))).status).toBe(200);
+  });
+  it("mode act: an action item is accepted", async () => {
+    S.gate.mode = "act";
+    expect((await itemsPost(req("/api/admin/steward/items", { body: action }))).status).toBe(200);
+  });
+  it("mode advise: a result with ok:true (done) is 409 and the item does not move; ok:false (failed) is allowed", async () => {
+    S.items.set(ITEM, "approved");
+    expect((await result(true)).status).toBe(409);
+    expect(S.items.get(ITEM)).toBe("approved");
+    expect((await result(false)).status).toBe(200);
+    expect(S.items.get(ITEM)).toBe("failed");
+  });
+  it("enabled=false: every steward POST is 423 and writes nothing; GET still reads", async () => {
+    S.gate.enabled = false; S.items.set(ITEM, "approved");
+    expect((await runPost(req("/api/admin/steward/run", { body: { op: "create", mode: "advise" } }))).status).toBe(423);
+    expect((await itemsPost(req("/api/admin/steward/items", { body: item() }))).status).toBe(423);
+    expect((await result(false)).status).toBe(423);
+    expect(S.created.length).toBe(0); expect(S.moves.length).toBe(0);
+    expect((await itemsGet(req("/api/admin/steward/items?state=approved", { method: "GET" }))).status).toBe(200);
+  });
+  it("a bad token is still 401 when the steward is disabled (auth first)", async () => {
+    S.gate.enabled = false;
+    expect((await runPost(req("/api/admin/steward/run", { token: "wrong", body: { op: "create", mode: "advise" } }))).status).toBe(401);
+  });
+});
+
+describe("manifest needs both files", () => {
+  it("an entry without isolation_sha256 is dropped, so its date is never synced", async () => {
+    const daily = JSON.stringify([dayRow()]);
+    setLabStoreForTests(fakeLab({ "enc/manifest.json": JSON.stringify({ [D]: { sha256: sha256Hex(daily), rows: 1 } }), [encDailyKey(D)]: daily }));
+    const r = await syncEnc();
+    expect(r.ok && r.dates_in_manifest).toBe(0);
+    expect(S.roomDays.length).toBe(0);
+  });
+  it("a missing isolation file is 'missing' and writes nothing", async () => {
+    const daily = JSON.stringify([dayRow()]);
+    setLabStoreForTests(fakeLab({ "enc/manifest.json": JSON.stringify({ [D]: { sha256: sha256Hex(daily), rows: 1, isolation_sha256: "c".repeat(64), isolation_rows: 1 } }), [encDailyKey(D)]: daily }));
+    const r = await syncEnc();
+    expect(r.ok && r.outcomes.missing).toBe(1);
+    expect(S.roomDays.length).toBe(0);
   });
 });

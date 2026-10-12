@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonBody, stewardAuth } from "@/lib/enc/auth";
 import { phiGuard } from "@/lib/enc/phi-guard";
 import { ITEM_STATES, itemCreateSchema, type ItemState } from "@/lib/enc/schemas";
-import { createItem, listItemsByState } from "@/lib/enc/store";
+import { createItem, getStewardGate, listItemsByState } from "@/lib/enc/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,10 +19,14 @@ export async function POST(req: NextRequest) {
   const a = stewardAuth(req);
   if (a === "not_configured") return json({ ok: false, error: "not_configured" }, 503);
   if (a !== "ok") return json({ ok: false, error: "unauthorized" }, 401);
+  let gate;
+  try { gate = await getStewardGate(); } catch { return json({ ok: false, error: "db" }, 503); }
+  if (!gate.enabled) return json({ ok: false, error: "steward_disabled" }, 423);
   const b = await readJsonBody(req);
   if (!b.ok) return json({ ok: false, error: b.status === 413 ? "bad_body" : "bad_json" }, b.status);
   const p = itemCreateSchema.safeParse(b.body);
   if (!p.success) return json({ ok: false, error: "validation_failed" }, 400);
+  if (p.data.kind === "action" && gate.mode !== "act") return json({ ok: false, error: "advise_mode" }, 409);
   const hit = phiGuard(p.data.body_md) ?? phiGuard(p.data.title);
   if (hit) return json({ ok: false, error: "phi_rejected", rule: hit }, 422);
   try {

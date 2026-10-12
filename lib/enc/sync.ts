@@ -106,13 +106,12 @@ async function syncOneDate(d: string, e: ManifestEntry): Promise<{ outcome: Date
   let daily, iso = null;
   try {
     daily = await store.get(encDailyKey(d));
-    if (e.isolation_sha256) iso = await store.get(encIsolationKey(d));
+    iso = await store.get(encIsolationKey(d));
   } catch {
     return none("missing");
   }
-  if (!daily || (e.isolation_sha256 && !iso)) return none("missing");
-  if (sha256Hex(daily.body) !== e.sha256) return none("sha_mismatch");
-  if (iso && sha256Hex(iso.body) !== e.isolation_sha256) return none("sha_mismatch");
+  if (!daily || !iso) return none("missing");
+  if (sha256Hex(daily.body) !== e.sha256 || sha256Hex(iso.body) !== e.isolation_sha256) return none("sha_mismatch");
   const dr = parseDaily(daily.body, d);
   if (!dr) return none("bad_rows");
   const ir = iso ? parseIsolation(iso.body, d) : { rows: [] as IsolationRow[], skipped: 0 };
