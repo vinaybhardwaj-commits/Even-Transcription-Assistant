@@ -162,6 +162,30 @@ export async function freescriptRead(args: ToolArgs): Promise<Row> {
   }
 }
 
+/** Every stored artifact for one IST day. The eta2freescript_offline hook reads this. No Pulse write. */
+export async function freescriptDayRead(istDate: string): Promise<Row> {
+  const closed = gate();
+  if (closed) return closed;
+  if (!realDate(istDate)) return { ok: false, error: "bad_date" };
+  const cap = FREESCRIPT_LIMIT_MAX;
+  try {
+    const rows = (await sql`
+      SELECT run_id, consult_uid, prescription_uid, schema_version, room_slug, room_id, ist_date, doctor_uid8,
+             validator_ok, validator_errors, generator_code_sha, generator_prompt_sha, model_id, cost_usd, created_at,
+             artifact, completion_required
+        FROM freescript_latest
+       WHERE ist_date = ${istDate}::date
+       ORDER BY consult_uid
+       LIMIT ${cap + 1}`) as Row[];
+    const truncated = rows.length > cap;
+    const slice = rows.slice(0, cap);
+    const kept = slice.filter((r) => !blind(r));
+    return { ok: true, selector: "ist_date", ist_date: istDate, n: kept.length, truncated, withheld_blind: slice.length - kept.length, rows: kept.map(rowView) };
+  } catch (e) {
+    return { ok: false, error: `db_error:${sqlState(e)}` };
+  }
+}
+
 async function queue(args: ToolArgs, ctx: ToolContext): Promise<Row> {
   const parsed = parseSelector(args);
   if (!parsed.ok) return parsed;

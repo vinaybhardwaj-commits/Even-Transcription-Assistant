@@ -59,6 +59,12 @@ describe("migration 0157", () => {
 
 describe("validatePayload", () => {
   it("accepts a synthetic artifact", () => expect(validatePayload(payload())).toMatchObject({ ok: true }));
+  it("accepts an eta.freescript.v0.3 artifact", () => {
+    expect(validatePayload(payload({
+      schema_version: "eta.freescript.v0.3",
+      artifact: { schema_version: "eta.freescript.v0.3", gp_extraction: { medicines: [] }, note_text: "Medication:" },
+    }))).toMatchObject({ ok: true });
+  });
   it("refuses transcript-shaped fields", () => {
     const art = { schema_version: "eta.freescript.v0.2", encounter: { transcript: { segments: [{ text: "x" }] } } };
     expect(validatePayload(payload({ artifact: art }))).toEqual({ ok: false, error: "transcript_field" });
@@ -85,6 +91,18 @@ describe("flag and hmac", () => {
     expect(checkFreescriptHmac(h(now, "aa"), "{}", {})).toEqual({ status: 503, error: "not_configured" });
     expect(checkFreescriptHmac(h(now, signFreescript("{}", "s3cret", now)), "{}", env, now)).toBeNull();
     expect(checkFreescriptHmac(h(now - 3600, signFreescript("{}", "s3cret", now - 3600)), "{}", env, now)).toEqual({ status: 401, error: "stale" });
+  });
+});
+
+describe("migration 0158", () => {
+  const up = readFileSync("db/migrations/0158_freescript_v03.sql", "utf8");
+  it("lets v0.3 through the schema check and records itself", () => {
+    expect(up).toContain("'eta.freescript.v0.3'");
+    expect(up).toContain("'eta.freescript.v0.1'");
+    expect(up).toContain("'eta.freescript.v0.2'");
+    expect(up).toMatch(/VALUES \(158, '0158_freescript_v03'\)/);
+    expect(up).not.toMatch(/\bGRANT\b/i);
+    expect(readFileSync("db/rollbacks/0158_freescript_v03.down.sql", "utf8")).toMatch(/DELETE FROM schema_migrations WHERE version = 158/);
   });
 });
 

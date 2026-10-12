@@ -4,7 +4,7 @@ import json
 import pytest
 from conftest import build_artifact, empty_encounter, mk_consult
 
-from tools.eta2freescript.eval.aggregate import head
+from tools.eta2freescript.eval.aggregate import COMPLETION_KINDS, head
 from tools.eta2freescript.eval.judge import metrics
 from tools.eta2freescript.models import FakeClient, GatewayClient, UsageLedger
 from tools.eta2freescript.note import sanitize_note
@@ -43,9 +43,8 @@ def test_class_word_and_no_name_note_become_a_slot_with_strength():
     art = build_artifact(c, empty_encounter(
         examination=[{"performed": "General", "finding": "well", "basis": "said", "source_turns": [0]}], prescription=[rx]))
     assert "medicines" not in art["gp_extraction"]
-    assert art["completion_required"][0]["kind"] == "regimen_slot"
-    text = next(p["text"] for p in art["provenance"] if p["text"].startswith("[regimen_slot]"))
-    assert "statin" in text and "10 mg" in text
+    assert art["completion_required"][0]["kind"] == "pick_drug"
+    assert "statin" in json.dumps(art["slots"][0]) and "10 mg" in json.dumps(art["slots"][0])
     # A no-name note blocks a guessed generic too.
     rx["generic"] = "atorvastatin"
     rx["name_interpretation"] = "name not spoken, class only"
@@ -109,7 +108,7 @@ def test_held_back_metrics_ignore_slots_and_aggregate_splits_completion(replay_o
     row = metrics(rec, art, {})
     assert row["held_true_order"] == 1 and row["held_halluc_prevented"] == 1 and row["held_unclear"] == 0
     h = head([row])
-    assert set(h["completion_required_by_type"]) == {"regimen_slot", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated", "boundary_review"}
+    assert set(h["completion_required_by_type"]) == set(COMPLETION_KINDS)
     assert sum(h["completion_required_by_type"].values()) == h["completion_required_items"]
 
 

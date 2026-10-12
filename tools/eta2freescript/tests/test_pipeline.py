@@ -15,7 +15,7 @@ def test_every_synthetic_consult_yields_a_valid_artifact(replay_out):
     for uid, lg in logs.items():
         assert lg["final_valid"], (uid, lg["final_errors"])
         art = json.loads((out / uid / "artifact.json").read_text())
-        assert check(art) == [] and art["schema_version"] == "eta.freescript.v0.2"
+        assert check(art) == [] and art["schema_version"] == "eta.freescript.v0.3"
         assert V.check(json.loads((out / uid / "artifact.v0.1.json").read_text())) == []
         assert json.loads((out / uid / "artifact.validation.json").read_text())["written"] is True
     assert "boto3" not in sys.modules
@@ -31,7 +31,7 @@ def test_fever_doctor_dose_and_follow_up(replay_out):
     assert [d["diagnosis_or_impression"] for d in gx["presenting_complaints"]["diagnoses"]] == ["Viral fever"]
     assert "market" not in gx["presenting_complaints"]["symptoms"]
     assert gx["general_advice"].lower().count("water") == 1
-    assert art["completion_required"] == [] and not art["clip_boundary"]["suspected"]
+    assert [c["kind"] for c in art["completion_required"]] == ["inferred_confirm"] and not art["clip_boundary"]["suspected"]
 
 
 def test_knee_boundary_quarantine_and_fallback(replay_out):
@@ -42,7 +42,8 @@ def test_knee_boundary_quarantine_and_fallback(replay_out):
     assert "pantoprazole" not in art["note_text"].lower() and "medicines" not in art["gp_extraction"]
     assert art["clip_boundary"]["quarantined_turns"] == [0, 1, 2]
     assert {"role_track_two_consults", "second_patient_voice", "stage_a_topic"} <= set(art["clip_boundary"]["reasons"])
-    assert sorted(c["kind"] for c in art["completion_required"]) == ["boundary_review", "exam_missing", "regimen_slot"]
+    assert sorted(c["kind"] for c in art["completion_required"]) == [
+        "boundary_review", "drug_history", "exam_missing", "inferred_confirm", "pick_drug"]
     assert art["gp_extraction"]["comorbidities"][0]["duration"] == {"value": 60, "unit": "MONTHS"}
     assert art["gp_extraction"]["follow_up"]["followup_type"] == "IF_REQUIRED"
     assert art["encounter"]["transcript"]["role_track"]["two_consults"] is True
@@ -58,7 +59,7 @@ def test_native_consult_without_role_track(replay_out):
     assert art["encounter"]["transcript"]["role_track"] is None
     assert [m["name"] for m in art["gp_extraction"]["medicines"]] == ["Ascoril 5 ml"]
     assert art["gp_extraction"]["follow_up"]["followup_date"] == "2026-10-19"
-    assert [c["kind"] for c in art["completion_required"]] == ["regimen_slot"]
+    assert [c["kind"] for c in art["completion_required"]] == ["inferred_confirm", "pick_drug"]
 
 
 def test_fake_client_drives_both_stages(tmp_path):

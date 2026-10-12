@@ -1,6 +1,6 @@
 """ETA consult transcript (+ REB role track) -> eta.freescript artifact for Pulse FreeScript. Offline tool; pushes nothing."""
 
-PIPELINE_VERSION = "2.0.0"
+PIPELINE_VERSION = "2.2.0"
 STAGE_A_VERSION = "v2"
 STAGE_B_VERSION = "v4"
 JUDGE_VERSION = "v3"

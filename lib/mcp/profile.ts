@@ -90,7 +90,7 @@ function briefs(): Record<string, string> {
     scribe_timbre: "Read-only Timbre patient-voice affect per encounter/room-day/doctor cell. Raw=default for trends; calibrated=display-only 1-5. Not a surgery predictor; never neutral or a ranking. Times UTC.",
     scribe_encounter_timeline: "Read-only shadow consult boundaries for one room-day: start/end, confidence, reason codes, agreement vs Pulse and cuts. No text. Times UTC.",
     scribe_freescript: "Job queue read/write. Reads stored FreeScript artifacts. action=read|run; run queues a box job and needs invoke. On unless ETA_FREESCRIPT=0. No transcript text. Times UTC.",
-    scribe_sarvam: "Job queue read/write; consult audio/text only to Sarvam (ZDR); no room audio. Times UTC. action=transcribe|translate|status|result|usage|health|consult_clips|consult_result; submits need invoke.",
+    scribe_sarvam: "Job queue read/write; consult audio/text only to Sarvam (ZDR); no room audio. Times UTC. consult_result accepts consult_uids or ist_date. Text only with include_text. submits need invoke.",
     scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow only on request.",
     scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why|history|ticket_log|ticket_summary|live; why needs room + at (+-15 min). No ticket signatures.",
     scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen|helper|commands; room optional.",

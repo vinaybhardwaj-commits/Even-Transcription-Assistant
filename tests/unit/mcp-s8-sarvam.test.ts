@@ -323,3 +323,27 @@ describe("health", () => {
     expect(JSON.stringify(out)).not.toContain("SECRET BODY");
   });
 });
+
+describe("consult_result batch", () => {
+  it("accepts consult_uids and does not return consult_uid_invalid", async () => {
+    const out = await run({ action: "consult_result", consult_uids: ["synthuid01", "synthuid02"] });
+    expect(out.ok).toBe(true);
+    expect(out.selector).toBe("consult_uids");
+    expect(out.n).toBe(2);
+    expect(out.include_text).toBe(false);
+    expect(JSON.stringify(out)).not.toContain("consult_uid_invalid");
+    expect(JSON.stringify(out)).not.toMatch(/"transcript"|"segments"/);
+    expect(writes()).toEqual([]);
+  });
+
+  it("accepts an IST day and refuses a bad one", async () => {
+    const day = await run({ action: "consult_result", ist_date: "2026-10-05" });
+    expect(day).toMatchObject({ ok: true, selector: "ist_date", ist_date: "2026-10-05", n: 0, rows: [] });
+    expect(await run({ action: "consult_result", ist_date: "2026-13-40" })).toEqual({ ok: false, error: "invalid_ist_date" });
+  });
+
+  it("refuses more than 25 uids", async () => {
+    const uids = Array.from({ length: 26 }, (_, i) => `synthuid${String(i).padStart(2, "0")}`);
+    expect(await run({ action: "consult_result", consult_uids: uids })).toMatchObject({ ok: false, error: "bad_args" });
+  });
+});

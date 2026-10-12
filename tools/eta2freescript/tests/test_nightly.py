@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tools.eta2freescript.nightly import NightlyError, consult_eligible, flag_enabled, jobs_to_rows, load_config, run, select_day
+from tools.eta2freescript.nightly import NightlyError, consult_eligible, flag_enabled, include_sealed, jobs_to_rows, load_config, role_doc_from_feed, run, select_day
 from tools.eta2freescript.store import payload_from_artifact, redact, sign
 
 # 2026-10-05 04:30:00Z == 10:00 IST
@@ -105,6 +105,29 @@ def test_pending_consult_is_included_and_a_missing_folder_is_counted(tmp_path):
     assert rows[0]["job_id"] == "job_abc123" and rows[0]["uid"] == "synth-a"
     assert missing == ["synth-nope"]
     assert MARKER not in json.dumps(rows)
+
+
+def test_sealed_consult_is_included_once_a_role_track_is_filled(tmp_path):
+    _folder(tmp_path, "synth-sealed", role_ok=False)
+    role = {"layer": "role", "engine": "llm-roles", "status": "ok",
+            "segments": [{"t0_ms": 0, "t1_ms": 1000, "speaker": "0", "role": "doctor", "text": MARKER}]}
+    rows, missing = include_sealed(tmp_path, "2026-10-05", ["synth-sealed", "synth-none"], lambda uid: role if uid == "synth-sealed" else None)
+    assert [r["uid"] for r in rows] == ["synth-sealed"]
+    assert missing == ["synth-none"]
+    written = json.loads((tmp_path / "synth-sealed" / "role.json").read_text())
+    assert MARKER not in json.dumps(written)
+    assert "text" not in json.dumps(written["segments"])
+    again, missing_again = include_sealed(tmp_path, "2026-10-05", ["synth-sealed"], lambda uid: role)
+    assert [r["uid"] for r in again] == ["synth-sealed"] and missing_again == []
+
+
+def test_role_feed_row_becomes_a_role_file_without_text():
+    doc = role_doc_from_feed({
+        "segments": [{"t0_ms": 1, "t1_ms": 2, "speaker": "0", "role": "doctor", "text": MARKER}],
+        "flags": {"attender_present": False, "two_consults": False, "diar_partial": False},
+    })
+    assert doc["status"] == "ok" and doc["extras"]["two_consults"] == {"flag": False}
+    assert MARKER not in json.dumps(doc)
 
 
 def test_sign_matches_the_ts_construction():
