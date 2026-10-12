@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const M = vi.hoisted(() => ({ sql: vi.fn() }));
 // TS-H10: the route first looks for cross-source twins with ONE tagged-template read; it answers "none" here so these tests keep counting only the INSERTs (the dedupe itself is proven
 // on a real postgres in fleet-h6-pg.test.ts and in kiosk-health-dedupe.test.ts).
-const isTwinLookup = (a: unknown[]): boolean => Array.isArray(a[0]) && (a[0] as string[]).join("?").match(/SELECT machine, kind, source, ts(, twin_source, twin_ts)? FROM kiosk_health_(events|dedupe)/) !== null;
+const isTwinLookup = (a: unknown[]): boolean => Array.isArray(a[0]) && (a[0] as string[]).join("?").match(/SELECT machine, kind, source, ts(, twin_source, twin_ts(, boot_id, seq)?)? FROM kiosk_health_(events|dedupe)/) !== null;
 vi.mock("@/lib/db", () => ({ sql: (...a: unknown[]) => (isTwinLookup(a) ? Promise.resolve([]) : M.sql(...a)) }));
 
 import { POST } from "@/app/api/kiosk-health/route";

@@ -89,3 +89,58 @@ describe("splitTwins: ONE-TO-ONE — distinct events are never lost", () => {
     expect(splitTwins([row({ seq: 1 }), row({ seq: 2, source: "helper", ts: off(100) })], []).dropped).toHaveLength(0);
   });
 });
+
+describe("C1: a replay is keyed on (machine, source, boot_id, seq), not on ts (refuter probe R8)", () => {
+  const idLed = (o: Partial<LedgerRef> = {}): LedgerRef => led({ boot_id: "b1", seq: 1, ...o });
+  it("R8: a NEW event with the SAME ts as an absorbed one but another seq / boot_id is NOT a replay: it is kept (its twin is already used)", () => {
+    // the daemon event at 0 has absorbed helper (b1, 1); a different helper event at the same ts arrives
+    const ledger = [idLed({ ts: off(0), twin_ts: off(0) })];
+    for (const fresh of [{ boot_id: "b1", seq: 2 }, { boot_id: "b2", seq: 1 }, { boot_id: "b2", seq: 9 }]) {
+      const out = splitTwins([row({ ...fresh, ts: off(0) })], [ref()], ledger);
+      expect(out.dropped, JSON.stringify(fresh)).toHaveLength(0);
+      expect(out.keep, JSON.stringify(fresh)).toHaveLength(1);
+    }
+  });
+  it("a TRUE replay (same machine, source, boot_id, seq) is skipped again with the original twin, and uses no further twin", () => {
+    const out = splitTwins([row({ boot_id: "b1", seq: 1, ts: off(0) }), row({ boot_id: "b1", seq: 5, ts: off(700) })], [ref(), ref({ ts: off(700) })], [idLed({ ts: off(0), twin_ts: off(0) })]);
+    expect(out.dropped.map((d) => d.row.seq).sort()).toEqual([1, 5]);
+    expect(out.dropped.find((d) => d.row.seq === 1)).toMatchObject({ twin_source: "daemon", twin_ts: off(0) });
+    // the replay did not consume the twin at 700: the new event (seq 5) took it as its OWN twin, and a further new event at 700 finds nothing left
+    expect(splitTwins([row({ boot_id: "b1", seq: 6, ts: off(700) })], [ref(), ref({ ts: off(700) })], [idLed({ ts: off(0), twin_ts: off(0) }), idLed({ seq: 5, ts: off(700), twin_ts: off(700) })]).keep).toHaveLength(1);
+  });
+  it("the replay identity includes the SOURCE and the MACHINE: the same boot_id/seq from the other source, or another Mac, is a different event", () => {
+    const ledger = [idLed({ ts: off(0), twin_ts: off(0) })];
+    expect(splitTwins([row({ source: "daemon", boot_id: "b1", seq: 1, ts: off(0) })], [ref({ source: "helper" })], ledger).dropped).toHaveLength(1); // twin of a stored helper event, NOT a replay: its twin is found fresh
+    expect(splitTwins([row({ machine: "EHRC-OPD2s-Mac-mini", boot_id: "b1", seq: 1, ts: off(0) })], [ref({ machine: "EHRC-OPD2s-Mac-mini" })], ledger).dropped).toHaveLength(1);
+  });
+  it("FALLBACK to ts: a ledger row from before 0160 (no boot_id/seq) still recognises a replay by (machine, kind, source, ts); an event that carries no ids is matched by ts against any ledger row", () => {
+    const legacy = [led({ ts: off(0), twin_ts: off(0) })];
+    expect(splitTwins([row({ boot_id: "b9", seq: 9, ts: off(0) })], [ref()], legacy).dropped).toHaveLength(1);
+    const noIds = { boot_id: "", seq: Number.NaN } as Partial<KioskHealthRow>;
+    expect(splitTwins([row({ ...noIds, ts: off(0) })], [ref()], [idLed({ ts: off(0), twin_ts: off(0) })]).dropped).toHaveLength(1);
+    expect(splitTwins([row({ ...noIds, ts: off(0) })], [ref()], [led({ ts: off(100), twin_ts: off(0) })]).keep).toHaveLength(1); // not a replay (other ts), and the stored twin is already used by the ledger row: kept
+  });
+  it("an id'd ledger row is NOT matched by ts alone for an id'd incoming event (that was the bug)", () => {
+    const out = splitTwins([row({ boot_id: "b2", seq: 7, ts: off(0) })], [], [idLed({ ts: off(0), twin_ts: off(0) })]);
+    expect(out.keep).toHaveLength(1);
+    expect(out.dropped).toHaveLength(0);
+  });
+});
+
+describe("C1-R2: seq is a bigint (the envelope accepts up to 2^53)", () => {
+  const BIG = 2 ** 31; // does not fit int32
+  const idLed = (o: Partial<LedgerRef> = {}): LedgerRef => led({ boot_id: "b1", seq: BIG, ts: off(0), twin_ts: off(0), ...o });
+  it("a ledger row whose seq arrives as a STRING (the driver returns bigint as text) is an id'd row: a true replay is recognised, a distinct seq is kept", () => {
+    for (const seq of [String(BIG), BIG, String(2 ** 53), 2 ** 53]) {
+      const replay = splitTwins([row({ boot_id: "b1", seq: Number(seq), ts: off(0) })], [ref()], [idLed({ seq })]);
+      expect(replay.dropped, `replay ${seq}`).toHaveLength(1);
+      expect(replay.dropped[0]!.replay).toBe(true);
+      const other = splitTwins([row({ boot_id: "b1", seq: Number(seq) - 1, ts: off(0) })], [ref()], [idLed({ seq })]);
+      expect(other.keep, `distinct ${seq}`).toHaveLength(1);
+    }
+  });
+  it("an id'd ledger row with a string seq is NOT mistaken for a pre-migration row (that would make it match by ts alone)", () => {
+    const out = splitTwins([row({ boot_id: "b2", seq: 7, ts: off(0) })], [], [idLed({ seq: String(BIG) })]);
+    expect(out.keep).toHaveLength(1);
+  });
+});
