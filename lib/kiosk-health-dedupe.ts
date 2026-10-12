@@ -25,7 +25,7 @@ const inPair = (source: string): boolean => (TWIN_SOURCES as readonly string[]).
 
 export type StoredRef = { machine: string; kind: string; source: string; ts: string | Date };
 /** one row of kiosk_health_dedupe: an incoming event that was skipped, and the stored event (source `twin_source`, ts `twin_ts`) that absorbed it */
-export type LedgerRef = { machine: string; kind: string; source: string; ts: string | Date; twin_source: string; twin_ts: string | Date; boot_id?: string | null; seq?: number | null };
+export type LedgerRef = { machine: string; kind: string; source: string; ts: string | Date; twin_source: string; twin_ts: string | Date; boot_id?: string | null; /** bigint: the Neon driver returns it as a string above 2^31 */ seq?: number | string | null };
 export type Dropped = { row: KioskHealthRow; twin_source: string; twin_ts: string; /** true when the event was recognised as a REPLAY of one already on the ledger: counted as deduped, never recorded a second time */ replay?: boolean };
 
 const keyOf = (machine: string): string => matchKey(canonicalMachine(machine));
@@ -41,7 +41,8 @@ export function splitTwins(rows: readonly KioskHealthRow[], stored: readonly Sto
   const skippedById = new Map<string, LedgerRef>();
   const skippedByTsLegacy = new Map<string, LedgerRef>();
   const skippedByTsAll = new Map<string, LedgerRef>();
-  const hasIds = (x: { boot_id?: string | null; seq?: number | null }): boolean => typeof x.boot_id === "string" && x.boot_id !== "" && typeof x.seq === "number" && Number.isFinite(x.seq);
+  const hasIds = (x: { boot_id?: string | null; seq?: number | string | null }): boolean =>
+    typeof x.boot_id === "string" && x.boot_id !== "" && ((typeof x.seq === "number" && Number.isFinite(x.seq)) || (typeof x.seq === "string" && /^\d{1,16}$/.test(x.seq)));
   for (const l of ledger) {
     const tt = ms(l.twin_ts);
     const t = ms(l.ts);
@@ -144,7 +145,7 @@ export async function recordDropped(sql: Sql, all: readonly Dropped[]): Promise<
       INSERT INTO kiosk_health_dedupe (machine, kind, source, twin_source, ts, twin_ts, boot_id, seq)
       SELECT * FROM unnest(${dropped.map((d) => d.row.machine)}::text[], ${dropped.map((d) => d.row.kind)}::text[], ${dropped.map((d) => d.row.source)}::text[],
                            ${dropped.map((d) => d.twin_source)}::text[], ${dropped.map((d) => d.row.ts)}::timestamptz[], ${dropped.map((d) => d.twin_ts)}::timestamptz[],
-                           ${dropped.map((d) => d.row.boot_id)}::text[], ${dropped.map((d) => d.row.seq)}::int[])
+                           ${dropped.map((d) => d.row.boot_id)}::text[], ${dropped.map((d) => d.row.seq)}::bigint[])
       ON CONFLICT DO NOTHING
     `;
   } catch {

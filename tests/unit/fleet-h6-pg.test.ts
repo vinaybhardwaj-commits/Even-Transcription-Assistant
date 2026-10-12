@@ -337,6 +337,26 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
         expect(await q`SELECT 1 FROM kiosk_health_dedupe`).toHaveLength(1); // not a second row: the old one answered it
       });
 
+      it("seq ABOVE 2^31 (the envelope accepts up to 2^53): the skipped event is recorded, its replay is deduped again, and a DISTINCT event next to the same twin is kept (not lost)", async () => {
+        const BIG = 2 ** 31 + 5;
+        await kh({ events: [at(0, "daemon", 1, "b-d", 0)] }, BEARER);
+        const big = at(500, "helper", BIG, "b-h", 1);
+        expect((await kh({ events: [big] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
+        expect(await q<{ seq: string | number }>`SELECT seq FROM kiosk_health_dedupe`).toHaveLength(1);
+        expect(Number((await q<{ seq: string | number }>`SELECT seq FROM kiosk_health_dedupe`)[0]!.seq)).toBe(BIG); // stored, not out of range
+        expect((await kh({ events: [big] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1, duplicates: 0 }); // the replay
+        expect(await q`SELECT 1 FROM kiosk_health_dedupe`).toHaveLength(1);
+        // the twin is used up: a DISTINCT helper event (seq 5) at about the same time is stored, not swallowed
+        expect((await kh({ events: [at(600, "helper", 5, "b-h", 2)] }, await device())).json).toMatchObject({ accepted: 1, deduped: 0 });
+        // the top of the range
+        const top = at(40_000, "helper", 2 ** 53, "b-h", 3);
+        await kh({ events: [at(40_000, "daemon", 2, "b-d", 4)] }, BEARER);
+        expect((await kh({ events: [top] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
+        expect((await kh({ events: [top] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
+        expect(await q`SELECT 1 FROM kiosk_health_dedupe`).toHaveLength(2);
+        expect((await q<{ data_type: string }>`SELECT data_type FROM information_schema.columns WHERE table_name = 'kiosk_health_dedupe' AND column_name = 'seq'`)[0]!.data_type).toBe("bigint");
+      });
+
       it("migration 0160: applies twice, registers once; the old (machine, kind, source, ts) unique index survives only for rows WITHOUT boot_id; id'd rows are unique on (machine, source, boot_id, seq)", async () => {
         const sqlText = readFileSync("db/migrations/0160_kiosk_health_dedupe_boot_seq.sql", "utf8");
         pg.exec(sqlText);

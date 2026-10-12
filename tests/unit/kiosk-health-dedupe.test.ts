@@ -126,3 +126,21 @@ describe("C1: a replay is keyed on (machine, source, boot_id, seq), not on ts (r
     expect(out.dropped).toHaveLength(0);
   });
 });
+
+describe("C1-R2: seq is a bigint (the envelope accepts up to 2^53)", () => {
+  const BIG = 2 ** 31; // does not fit int32
+  const idLed = (o: Partial<LedgerRef> = {}): LedgerRef => led({ boot_id: "b1", seq: BIG, ts: off(0), twin_ts: off(0), ...o });
+  it("a ledger row whose seq arrives as a STRING (the driver returns bigint as text) is an id'd row: a true replay is recognised, a distinct seq is kept", () => {
+    for (const seq of [String(BIG), BIG, String(2 ** 53), 2 ** 53]) {
+      const replay = splitTwins([row({ boot_id: "b1", seq: Number(seq), ts: off(0) })], [ref()], [idLed({ seq })]);
+      expect(replay.dropped, `replay ${seq}`).toHaveLength(1);
+      expect(replay.dropped[0]!.replay).toBe(true);
+      const other = splitTwins([row({ boot_id: "b1", seq: Number(seq) - 1, ts: off(0) })], [ref()], [idLed({ seq })]);
+      expect(other.keep, `distinct ${seq}`).toHaveLength(1);
+    }
+  });
+  it("an id'd ledger row with a string seq is NOT mistaken for a pre-migration row (that would make it match by ts alone)", () => {
+    const out = splitTwins([row({ boot_id: "b2", seq: 7, ts: off(0) })], [], [idLed({ seq: String(BIG) })]);
+    expect(out.keep).toHaveLength(1);
+  });
+});

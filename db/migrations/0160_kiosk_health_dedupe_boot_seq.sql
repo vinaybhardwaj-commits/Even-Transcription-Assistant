@@ -7,7 +7,7 @@
 -- no boot_id/seq (boot_id IS NULL), and for an event that carries neither.
 --
 -- CHANGES (one transaction, idempotent on a re-run):
---   1. kiosk_health_dedupe gains boot_id text and seq integer, both NULLable (old rows keep NULL).
+--   1. kiosk_health_dedupe gains boot_id text and seq BIGINT (the envelope accepts a seq up to 2^53 and kiosk_health_events.seq is bigint), both NULLable (old rows keep NULL).
 --   2. The 0154 unique index (machine, kind, source, ts) is DROPPED and re-created as a PARTIAL unique index WHERE boot_id IS NULL, so it still protects every old row and any
 --      id-less insert; left as it was, it would make the second event with a shared ts fail to record (ON CONFLICT DO NOTHING) and its own replay unrecognisable.
 --   3. A new partial unique index on (machine, source, boot_id, seq) WHERE boot_id IS NOT NULL: a replayed skipped event is recorded once.
@@ -17,7 +17,7 @@
 BEGIN;
 
 ALTER TABLE kiosk_health_dedupe ADD COLUMN IF NOT EXISTS boot_id text;
-ALTER TABLE kiosk_health_dedupe ADD COLUMN IF NOT EXISTS seq integer;
+ALTER TABLE kiosk_health_dedupe ADD COLUMN IF NOT EXISTS seq bigint;
 
 DROP INDEX IF EXISTS kiosk_health_dedupe_uidx;
 CREATE UNIQUE INDEX IF NOT EXISTS kiosk_health_dedupe_uidx_legacy ON kiosk_health_dedupe (machine, kind, source, ts) WHERE boot_id IS NULL;
