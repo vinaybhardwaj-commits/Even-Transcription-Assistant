@@ -23,8 +23,8 @@ from . import boundary as B
 from .guard import guard
 from .ingest import Consult, apply_inferred_roles, format_transcript
 from .mapper import build
-from .models import ModelClient
-from .note import FILLER, HEADINGS, flags_by_pointer, render_note, sanitize_note
+from .models import ModelClient, cost_for_uid
+from .note import FILLER, HEADINGS, flags_by_pointer, render_note, repair_note, sanitize_note
 from .prompts import clean_text, code_paths, load_prompt, parse_json, prompt_path, sha
 from .validate import check, to_v01
 
@@ -122,6 +122,14 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
                                                  if l.partition(":")[0] in HEADINGS and l.partition(":")[2].strip())
             art["note_text"] = sanitize_note(txt)
             llm_errs = check(art)
+            if llm_errs:
+                art["note_text"] = sanitize_note(repair_note(txt, art["gp_extraction"], flags, banned))
+                repaired = check(art)
+                log["note_repaired"] = not repaired
+                if not repaired:
+                    llm_errs = []
+                else:
+                    llm_errs = repaired
         except Exception as e:  # a failed Stage B call falls back like an invalid note
             llm_errs = [f"stageB call failed: {type(e).__name__}"]
     if llm_errs is None or llm_errs:
@@ -129,6 +137,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     log["llm_note_errors"] = llm_errs
     log["llm_note_valid"] = llm_errs == []
     log["note_source"] = f"llm_{opts.stage_b}" if llm_errs == [] else "deterministic_fallback"
+    log["cost_usd"] = cost_for_uid(getattr(client, "ledger", None), c.uid)
     final = check(art)
     log.update({"final_errors": final, "final_valid": not final, "written": not final,
                 "secs_stageA": round(secs_a, 1), "secs_stageB": round(time.time() - t1, 1), "secs_total": round(time.time() - t0, 1)})
@@ -136,6 +145,6 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         (od / "artifact.json").write_text(json.dumps(art, indent=1, ensure_ascii=False), encoding="utf-8")
         if opts.write_v01:
             (od / "artifact.v0.1.json").write_text(json.dumps(to_v01(art), indent=1, ensure_ascii=False), encoding="utf-8")
-    (od / "artifact.validation.json").write_text(json.dumps(log, indent=1, ensure_ascii=False), encoding="utf-8")
-    log["artifact"] = art if not final else None
+    (od / "artifact.validation.json").write_text(json.dumps({k: v for k, v in log.items() if k != "artifact"}, indent=1, ensure_ascii=False), encoding="utf-8")
+    log["artifact"] = art
     return log

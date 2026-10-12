@@ -97,6 +97,34 @@ def test_run_posts_redacted_artifact_and_stays_quiet_when_off(tmp_path, capsys):
     assert "posted" in out
 
 
+def test_a_failed_artifact_is_posted_as_rejected_with_cost(tmp_path, capsys):
+    _folder(tmp_path, "synth-a")
+    posted = {}
+
+    def run_one(_uid):
+        return {"final_valid": False, "final_errors": ["FRX-A1 general_advice must be at most 300 characters and 5 items"],
+                "cost_usd": 0.0123, "artifact": {
+                    "schema_version": "eta.freescript.v0.2",
+                    "encounter": {"eta_encounter_id": "synth-a", "room": "synth-room", "transcript": {"segment_count": 1}},
+                    "pulse_link": {"consult_uid": "synth-a"},
+                    "generator": {"code_sha256": "a" * 64, "prompt_sha256": "b" * 64, "model": "anthropic.claude"},
+                    "gp_extraction": {}, "completion_required": [], "note_text": "Medication:",
+                }}
+
+    def post(body):
+        posted["body"] = body
+        return {"ok": True, "inserted": 1, "run_id": 2}
+
+    cfg = {"enabled": True, "data": str(tmp_path), "app_url": "https://app.test", "max_consults": 40}
+    assert run(cfg, "2026-10-05", run_one=run_one, post=post, pending=False) == 2
+    body = posted["body"]
+    assert body["validator"]["ok"] is False
+    assert body["validator"]["errors"][0].startswith("FRX-A1")
+    assert body["cost_usd"] == 0.0123
+    out = capsys.readouterr().out
+    assert "rejected" in out and "FRX-A1" not in out
+
+
 def test_pending_consult_is_included_and_a_missing_folder_is_counted(tmp_path):
     _folder(tmp_path, "synth-a")
     rows, missing = jobs_to_rows(

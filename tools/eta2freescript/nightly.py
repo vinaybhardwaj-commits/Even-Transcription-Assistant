@@ -291,11 +291,11 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post) -> dic
     """Run and post. ``run_one(uid) -> pipeline log``. ``post(payload) -> response``. Prints counts only."""
     cap = int(cfg.get("max_consults") or 40)
     chosen, overflow = rows[:cap], rows[cap:]
-    posted, failed, skipped = 0, 0, len(overflow)
+    posted, rejected, failed, skipped = 0, 0, 0, len(overflow)
     if dry_run:
         for r in chosen:
             print(r["uid"], r.get("ist_date"), "dry-run")
-        return {"dry_run": True, "n": len(chosen), "skipped": skipped, "posted": 0, "failed": 0}
+        return {"dry_run": True, "n": len(chosen), "skipped": skipped, "posted": 0, "rejected": 0, "failed": 0}
     data, out = Path(cfg["data"]), Path(cfg.get("out") or str(Path(cfg["data"]) / "_eta2freescript"))
     out.mkdir(parents=True, exist_ok=True)
     for r in chosen:
@@ -306,13 +306,16 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post) -> dic
             print(r["uid"], "ERROR", type(e).__name__, flush=True)
             continue
         art = log.get("artifact") if isinstance(log, dict) else None
-        if not isinstance(art, dict) or not log.get("final_valid"):
+        if not isinstance(art, dict):
             failed += 1
             print(r["uid"], "not-valid", flush=True)
             continue
+        valid = bool(log.get("final_valid"))
+        cost = log.get("cost_usd")
         body = payload_from_artifact(
-            art, errors=log.get("final_errors") or [], cost_usd=None, job_id=r.get("job_id"),
-            room_slug=r.get("room_slug"), ist_date=r.get("ist_date"), doctor_uid8=r.get("doctor_uid8"),
+            art, errors=log.get("final_errors") or [],
+            cost_usd=cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+            job_id=r.get("job_id"), room_slug=r.get("room_slug"), ist_date=r.get("ist_date"), doctor_uid8=r.get("doctor_uid8"),
         )
         try:
             res = post(body)
@@ -320,11 +323,17 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post) -> dic
             failed += 1
             print(r["uid"], "POST", type(e).__name__, flush=True)
             continue
-        posted += 1 if isinstance(res, dict) and res.get("ok") else 0
-        failed += 0 if isinstance(res, dict) and res.get("ok") else 1
-        print(r["uid"], "posted" if isinstance(res, dict) and res.get("ok") else "post-rejected",
-              "inserted=" + str((res or {}).get("inserted")), flush=True)
-    return {"dry_run": False, "n": len(chosen), "skipped": skipped, "posted": posted, "failed": failed}
+        ok = isinstance(res, dict) and res.get("ok")
+        if ok and valid:
+            posted += 1
+            print(r["uid"], "posted", "inserted=" + str(res.get("inserted")), flush=True)
+        elif ok:
+            rejected += 1
+            print(r["uid"], "rejected", flush=True)
+        else:
+            failed += 1
+            print(r["uid"], "post-rejected", "inserted=" + str((res or {}).get("inserted")), flush=True)
+    return {"dry_run": False, "n": len(chosen), "skipped": skipped, "posted": posted, "rejected": rejected, "failed": failed}
 
 
 def _post_factory(cfg: dict, secret: str):
@@ -392,10 +401,11 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         return 1
     summary = execute(rows, cfg, dry_run=dry_run, run_one=run_one, post=sender or (lambda _p: {"ok": True, "inserted": 0}))
     summary["missing"] = len(missing) + len(sealed_missing)
-    print(json.dumps({k: summary[k] for k in ("dry_run", "n", "posted", "failed", "skipped", "missing")}))
+    print(json.dumps({k: summary[k] for k in ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing")}))
+    stored = summary["posted"] + summary.get("rejected", 0)
     if summary["failed"] or missing or sealed_missing:
-        return 1 if summary["posted"] == 0 and not dry_run else 2
-    if summary["skipped"]:
+        return 1 if stored == 0 and not dry_run else 2
+    if summary.get("rejected") or summary["skipped"]:
         return 2
     return 0
 
@@ -442,9 +452,12 @@ def _drain(cfg: dict, dry_run: bool) -> int:
     rows, missing = jobs_to_rows(jobs, data)
     summary = execute(rows, cfg, dry_run=dry_run, run_one=None, post=None if dry_run else _post_factory(cfg, secret))
     summary["missing"] = len(missing)
-    print(json.dumps({k: summary[k] for k in ("dry_run", "n", "posted", "failed", "skipped") if k in summary} | {"missing": len(missing)}))
+    print(json.dumps({k: summary[k] for k in ("dry_run", "n", "posted", "rejected", "failed", "skipped") if k in summary} | {"missing": len(missing)}))
+    stored = summary.get("posted", 0) + summary.get("rejected", 0)
     if summary.get("failed") or missing:
-        return 1 if summary.get("posted", 0) == 0 and not dry_run else 2
+        return 1 if stored == 0 and not dry_run else 2
+    if summary.get("rejected"):
+        return 2
     return 0
 
 

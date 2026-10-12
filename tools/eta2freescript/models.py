@@ -45,6 +45,27 @@ class UsageLedger:
                 f.write(json.dumps(rec) + "\n")
 
 
+def cost_for_uid(ledger: UsageLedger | None, uid: str) -> float | None:
+    """Sum USD already written for this consult. Tags are ``stageA-v2:<uid>`` and ``stageB-v4:<uid>``. No model call."""
+    path = getattr(ledger, "path", None)
+    if not path or not Path(path).exists() or not uid:
+        return None
+    total = 0.0
+    found = False
+    suffix = ":" + uid
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if str(rec.get("tag") or "").endswith(suffix):
+            total += float(rec.get("usd") or 0)
+            found = True
+    return round(total, 5) if found else None
+
+
 class ModelClient:
     ledger: UsageLedger = UsageLedger(None)
 
