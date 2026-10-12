@@ -42,8 +42,10 @@ export const labWritable = (key: string): boolean => WRITE_ALLOW.some((r) => r.t
 export const REB_CONSULT_KEY = /^reb\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/_consults\/([A-Za-z0-9]{10,60})\/(?:tracks\/[A-Za-z0-9._-]{1,200}\.json|manifest\.json)$/;
 /** CONSULT's index mirror: exactly these two objects, GET only (nothing else under consult/ is readable, and nothing is writable). */
 export const CONSULT_INDEX_KEYS = ["consult/index/latest.jsonl", "consult/index/manifest.json"] as const;
+/** ENC module: the box's daily export, GET only: enc/manifest.json, enc/daily/<ist_date>.json, enc/isolation/<ist_date>.jsonl. */
+export const ENC_READ_KEY = /^enc\/(?:manifest\.json|daily\/\d{4}-\d{2}-\d{2}\.json|isolation\/\d{4}-\d{2}-\d{2}\.jsonl)$/;
 export const labReadable = (key: string): boolean =>
-  !key.includes("..") && ((READ_ALLOW_PREFIXES.some((p) => key.startsWith(p)) && !isRebKey(key)) || REB_CONSULT_KEY.test(key) || (CONSULT_INDEX_KEYS as readonly string[]).includes(key));
+  !key.includes("..") && ((READ_ALLOW_PREFIXES.some((p) => key.startsWith(p)) && !isRebKey(key)) || REB_CONSULT_KEY.test(key) || (CONSULT_INDEX_KEYS as readonly string[]).includes(key) || ENC_READ_KEY.test(key));
 function assertWritable(key: string): void {
   if (!labWritable(key)) throw new Error("lab_key_not_writable");
 }
