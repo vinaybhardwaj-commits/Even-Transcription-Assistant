@@ -4,7 +4,7 @@
 -- WHAT. 0157's schema check listed eta.freescript.v0.1 and v0.2. The pipeline now emits
 -- eta.freescript.v0.3. This replaces that check. v0.1 and v0.2 still pass. No row is rewritten.
 --
--- ADDITIVE. Drops and recreates one check constraint. No GRANT. Down-migration:
+-- ADDITIVE. Drops and recreates one check constraint. GRANTS: none. Down-migration:
 -- db/rollbacks/0158_freescript_v03.down.sql (run by hand, never from here).
 -- =====================================================================
 
