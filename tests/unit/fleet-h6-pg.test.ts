@@ -303,6 +303,58 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
       expect((await kh(batch, await device())).json).toMatchObject({ accepted: 0, duplicates: 1, deduped: 0 });
     });
 
+    describe("C1: the replay key is (machine, source, boot_id, seq) (migration 0155), R8", () => {
+      const at = (o: number, source: string, seq: number, boot: string, n: number) => ev(seq, source, o, { boot_id: boot, payload: { n } });
+      const ledger = () => q<{ source: string; boot_id: string | null; seq: number | null }>`SELECT source, boot_id, seq FROM kiosk_health_dedupe ORDER BY id`;
+
+      it("R8: a NEW helper event with the SAME ts as an absorbed one (another seq, or another boot_id) is ACCEPTED and stored; a true replay of the absorbed one is deduped again", async () => {
+        await kh({ events: [at(0, "daemon", 1, "b-d", 0)] }, BEARER); // the stored twin
+        const first = at(500, "helper", 1, "b-h", 1);
+        expect((await kh({ events: [first] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
+        expect(await ledger()).toEqual([{ source: "helper", boot_id: "b-h", seq: 1 }]); // the ledger now names the event by boot_id/seq
+        // same machine, kind, source and ts as the absorbed event, a different seq: a DISTINCT event, previously lost as a "replay"
+        expect((await kh({ events: [at(500, "helper", 2, "b-h", 2)] }, await device())).json).toMatchObject({ accepted: 1, deduped: 0, duplicates: 0 });
+        // a different boot_id (the Mac rebooted; seq restarted) with the same ts
+        expect((await kh({ events: [at(500, "helper", 1, "b-h2", 3)] }, await device())).json).toMatchObject({ accepted: 1, deduped: 0 });
+        expect((await q<{ payload: { n: number } }>`SELECT payload FROM kiosk_health_events ORDER BY id`).map((r) => r.payload.n)).toEqual([0, 2, 3]);
+        // the TRUE replay of the absorbed event (same boot_id and seq): skipped again, nothing stored, no second ledger row, no second twin used
+        expect((await kh({ events: [first] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1, duplicates: 0 });
+        expect(await ledger()).toHaveLength(1);
+        expect((await stored()).length).toBe(3);
+      });
+
+      it("the same-ts case in the OTHER direction: an absorbed DAEMON event, then a distinct daemon event with the same ts is stored", async () => {
+        await kh({ events: [at(0, "helper", 1, "b-h", 0)] }, await device());
+        expect((await kh({ events: [at(300, "daemon", 1, "b-d", 1)] }, BEARER)).json).toMatchObject({ accepted: 0, deduped: 1 });
+        expect((await kh({ events: [at(300, "daemon", 2, "b-d", 2)] }, BEARER)).json).toMatchObject({ accepted: 1, deduped: 0 });
+        expect((await kh({ events: [at(300, "daemon", 1, "b-d", 1)] }, BEARER)).json).toMatchObject({ accepted: 0, deduped: 1 });
+      });
+
+      it("FALLBACK: a ledger row written BEFORE 0155 (no boot_id/seq) still recognises a replay by ts", async () => {
+        await kh({ events: [at(0, "daemon", 1, "b-d", 0)] }, BEARER);
+        pg.exec(`INSERT INTO kiosk_health_dedupe (machine, kind, source, twin_source, ts, twin_ts) VALUES ('EHRC-H6s-Mac-mini', 'power.sleep', 'helper', 'daemon', '2026-10-11T10:00:00.500Z', '2026-10-11T10:00:00.000Z');`);
+        expect((await kh({ events: [at(500, "helper", 7, "b-h", 7)] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
+        expect(await q`SELECT 1 FROM kiosk_health_dedupe`).toHaveLength(1); // not a second row: the old one answered it
+      });
+
+      it("migration 0155: applies twice, registers once; the old (machine, kind, source, ts) unique index survives only for rows WITHOUT boot_id; id'd rows are unique on (machine, source, boot_id, seq)", async () => {
+        const sqlText = readFileSync("db/migrations/0155_kiosk_health_dedupe_boot_seq.sql", "utf8");
+        pg.exec(sqlText);
+        pg.exec(sqlText);
+        expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 155`)[0]!.n).toBe(1);
+        const idx = (await q<{ indexname: string }>`SELECT indexname FROM pg_indexes WHERE tablename = 'kiosk_health_dedupe'`).map((r) => r.indexname);
+        expect(idx).toEqual(expect.arrayContaining(["kiosk_health_dedupe_uidx_legacy", "kiosk_health_dedupe_uidx_id"]));
+        expect(idx).not.toContain("kiosk_health_dedupe_uidx");
+        const ins = (cols: string) => { try { pg.exec(`INSERT INTO kiosk_health_dedupe (machine, kind, source, twin_source, ts, twin_ts${cols.includes("b1") ? ", boot_id, seq" : ""}) VALUES (${cols});`); return ""; } catch (e) { return String((e as { stderr?: unknown }).stderr ?? e); } };
+        const base = "'M', 'k', 'helper', 'daemon', '2026-10-11T10:00:00Z', '2026-10-11T10:00:00Z'";
+        expect(ins(base)).toBe("");
+        expect(ins(base)).toMatch(/uidx_legacy/); // an id-less duplicate is still refused
+        expect(ins(`${base}, 'b1', 1`)).toBe(""); // an id'd row with the same ts is a different event
+        expect(ins(`${base}, 'b1', 1`)).toMatch(/uidx_id/);
+        expect(ins(`${base}, 'b1', 2`)).toBe("");
+      });
+    });
+
     describe("ONE-TO-ONE pairing: distinct events are never lost (refute F1)", () => {
       const sleepAt = (o: number, source: string, seq: number, payload: Record<string, unknown>, boot = `b-${source}`) => ev(seq, source, o, { boot_id: boot, payload });
       const payloads = async () => (await q<{ source: string; payload: { n: number } }>`SELECT source, payload FROM kiosk_health_events ORDER BY id`).map((r) => `${r.source}:${r.payload.n}`);

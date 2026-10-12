@@ -8,7 +8,8 @@
  * PAIRING IS ONE-TO-ONE. A stored event absorbs AT MOST ONE incoming event (it is "consumed"); candidate pairs are taken nearest-ts first, so three distinct helper events around one
  * daemon event lose exactly one (the nearest), never all three. Twins already consumed by earlier batches are read back from kiosk_health_dedupe (migration 0154: `twin_ts` names the
  * stored event that absorbed each skipped one). A skipped event is recorded with its identity only; a REPLAY of a skipped event (a spooled batch re-sent after a lost response) is
- * recognised by that identity and skipped again without using up another twin. Events from the SAME source are never twins of each other (a sender may repeat a kind within 2 s).
+ * recognised by that identity and skipped again without using up another twin. THE REPLAY IDENTITY IS (machine, source, boot_id, seq) (migration 0155): a NEW event that only shares a ts with an
+ * absorbed one has another boot_id/seq and is NOT a replay (refuter probe R8). ts is the identity only for ledger rows written before 0155 (no boot_id/seq) and for an event that carries neither. Events from the SAME source are never twins of each other (a sender may repeat a kind within 2 s).
  * Idempotency on (machine, boot_id, seq) is unchanged and applies first.
  */
 import { canonicalMachine, expandKeys, matchKey } from "@/lib/kiosk-health-read";
@@ -24,8 +25,8 @@ const inPair = (source: string): boolean => (TWIN_SOURCES as readonly string[]).
 
 export type StoredRef = { machine: string; kind: string; source: string; ts: string | Date };
 /** one row of kiosk_health_dedupe: an incoming event that was skipped, and the stored event (source `twin_source`, ts `twin_ts`) that absorbed it */
-export type LedgerRef = { machine: string; kind: string; source: string; ts: string | Date; twin_source: string; twin_ts: string | Date };
-export type Dropped = { row: KioskHealthRow; twin_source: string; twin_ts: string };
+export type LedgerRef = { machine: string; kind: string; source: string; ts: string | Date; twin_source: string; twin_ts: string | Date; boot_id?: string | null; seq?: number | null };
+export type Dropped = { row: KioskHealthRow; twin_source: string; twin_ts: string; /** true when the event was recognised as a REPLAY of one already on the ledger: counted as deduped, never recorded a second time */ replay?: boolean };
 
 const keyOf = (machine: string): string => matchKey(canonicalMachine(machine));
 const ms = (t: string | Date): number => (t instanceof Date ? t.getTime() : Date.parse(t));
@@ -36,7 +37,11 @@ type Slot = { machine: string; kind: string; source: string; t: number; free: nu
 export function splitTwins(rows: readonly KioskHealthRow[], stored: readonly StoredRef[], ledger: readonly LedgerRef[] = []): { keep: KioskHealthRow[]; dropped: Dropped[] } {
   // consumption already on record: twin identity -> how many incoming events it has absorbed; skipped identity -> its record (for replays)
   const used = new Map<string, number>();
-  const skipped = new Map<string, LedgerRef>();
+  // a skipped event is found again (a replay) by (machine, source, boot_id, seq) when the ledger row has them; by ts only for ledger rows from before 0155 (no ids) or an incoming event with no ids
+  const skippedById = new Map<string, LedgerRef>();
+  const skippedByTsLegacy = new Map<string, LedgerRef>();
+  const skippedByTsAll = new Map<string, LedgerRef>();
+  const hasIds = (x: { boot_id?: string | null; seq?: number | null }): boolean => typeof x.boot_id === "string" && x.boot_id !== "" && typeof x.seq === "number" && Number.isFinite(x.seq);
   for (const l of ledger) {
     const tt = ms(l.twin_ts);
     const t = ms(l.ts);
@@ -44,7 +49,12 @@ export function splitTwins(rows: readonly KioskHealthRow[], stored: readonly Sto
       const k = `${keyOf(l.machine)}|${l.kind}|${l.twin_source}|${tt}`;
       used.set(k, (used.get(k) ?? 0) + 1);
     }
-    if (Number.isFinite(t)) skipped.set(`${keyOf(l.machine)}|${l.kind}|${l.source}|${t}`, l);
+    if (hasIds(l)) skippedById.set(`${keyOf(l.machine)}|${l.source}|${l.boot_id}|${Number(l.seq)}`, l);
+    if (Number.isFinite(t)) {
+      const tk = `${keyOf(l.machine)}|${l.kind}|${l.source}|${t}`;
+      skippedByTsAll.set(tk, l);
+      if (!hasIds(l)) skippedByTsLegacy.set(tk, l);
+    }
   }
   // the stored events of the pair, with the capacity each still has
   const slots = new Map<string, Slot>();
@@ -63,9 +73,10 @@ export function splitTwins(rows: readonly KioskHealthRow[], stored: readonly Sto
   rows.forEach((r, i) => {
     const t = ms(r.ts);
     if (!inPair(r.source) || !Number.isFinite(t)) return;
-    const again = skipped.get(`${keyOf(r.machine)}|${r.kind}|${r.source}|${t}`);
+    const tsKey = `${keyOf(r.machine)}|${r.kind}|${r.source}|${t}`;
+    const again = hasIds(r) ? (skippedById.get(`${keyOf(r.machine)}|${r.source}|${r.boot_id}|${r.seq}`) ?? skippedByTsLegacy.get(tsKey)) : skippedByTsAll.get(tsKey);
     if (again) {
-      dropped.set(i, { row: r, twin_source: again.twin_source, twin_ts: new Date(ms(again.twin_ts)).toISOString() }); // a replay: skipped again, no second twin used
+      dropped.set(i, { row: r, twin_source: again.twin_source, twin_ts: new Date(ms(again.twin_ts)).toISOString(), replay: true }); // a replay: skipped again, no second twin used
       return;
     }
     const mk = keyOf(r.machine);
@@ -118,20 +129,22 @@ export async function loadLedgerNear(sql: Sql, rows: readonly KioskHealthRow[]):
   const w = span(rows);
   if (!w) return [];
   return (await sql`
-    SELECT machine, kind, source, ts, twin_source, twin_ts FROM kiosk_health_dedupe
+    SELECT machine, kind, source, ts, twin_source, twin_ts, boot_id, seq FROM kiosk_health_dedupe
      WHERE machine = ANY(${w.keys}::text[]) AND kind = ANY(${w.kinds}::text[]) AND ((twin_ts >= ${w.lo}::timestamptz AND twin_ts <= ${w.hi}::timestamptz) OR (ts >= ${w.lo}::timestamptz AND ts <= ${w.hi}::timestamptz))
      LIMIT ${DEDUPE_LOOKUP_LIMIT}
   `) as LedgerRef[];
 }
 
 /** Record what was skipped (identity only, no payload). Best effort: a failure is logged by count and never changes the response. */
-export async function recordDropped(sql: Sql, dropped: readonly Dropped[]): Promise<void> {
+export async function recordDropped(sql: Sql, all: readonly Dropped[]): Promise<void> {
+  const dropped = all.filter((d) => d.replay !== true); // a replay is already on the ledger (under its ts or its ids): recording it again would double-count it
   if (dropped.length === 0) return;
   try {
     await sql`
-      INSERT INTO kiosk_health_dedupe (machine, kind, source, twin_source, ts, twin_ts)
+      INSERT INTO kiosk_health_dedupe (machine, kind, source, twin_source, ts, twin_ts, boot_id, seq)
       SELECT * FROM unnest(${dropped.map((d) => d.row.machine)}::text[], ${dropped.map((d) => d.row.kind)}::text[], ${dropped.map((d) => d.row.source)}::text[],
-                           ${dropped.map((d) => d.twin_source)}::text[], ${dropped.map((d) => d.row.ts)}::timestamptz[], ${dropped.map((d) => d.twin_ts)}::timestamptz[])
+                           ${dropped.map((d) => d.twin_source)}::text[], ${dropped.map((d) => d.row.ts)}::timestamptz[], ${dropped.map((d) => d.twin_ts)}::timestamptz[],
+                           ${dropped.map((d) => d.row.boot_id)}::text[], ${dropped.map((d) => d.row.seq)}::int[])
       ON CONFLICT DO NOTHING
     `;
   } catch {
