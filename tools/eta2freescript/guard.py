@@ -183,6 +183,7 @@ _FREQ = [
 ]
 _DUR = [
     re.compile(r"\bfor\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:days?|weeks?|months?)\b", re.I),
+    re.compile(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:days?|weeks?|months?)\b", re.I),
     re.compile(r"\b(?:ek|do|teen|char|paanch|panch|chhe|saat|aath|nau|das|pandrah|bees|tees|\d+)\s+din\b", re.I),
 ]
 _ROUTE = [
