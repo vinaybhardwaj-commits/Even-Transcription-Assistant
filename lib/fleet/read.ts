@@ -54,7 +54,7 @@ export async function fleetDevices(sql: FleetSql, roomId: string | null = null, 
   try {
     const ids = rows.map((r) => String(r.install_id));
     const hr = (await sql`
-      SELECT install_id, helper_version, helper_registration, helper_xpc_ok, helper_state, console_user, power_schedule, pmset_drift,
+      SELECT install_id, helper_version, helper_registration, helper_xpc_ok, helper_state, console_user, power_schedule, pmset_drift, helper_update_step, helper_update_version, helper_update_result,
              to_char(helper_bad_since AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS helper_bad_since
         FROM room_install WHERE install_id = ANY(${ids}::text[])
     `) as HelperRow[];

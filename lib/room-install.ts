@@ -1018,6 +1018,10 @@ export type InstallPollFields = {
   power_schedule?: string | null;
   /** comma-separated pmset setting names that drifted */
   pmset_drift?: string | null;
+  // ── TS-H8 (0161). Sent by app 0.1.37 and later: what the helper's whole-bundle update is doing. ──
+  helper_update_step?: string | null;
+  helper_update_version?: string | null;
+  helper_update_result?: string | null;
 };
 
 /**
@@ -1084,6 +1088,9 @@ export function cleanPollFields(raw: InstallPollFields): {
   power_schedule: string | null;
   /** normalised JSON text of a <= 20 element array of short tokens, or null */
   pmset_drift: string | null;
+  helper_update_step: string | null;
+  helper_update_version: string | null;
+  helper_update_result: string | null;
 } {
   const str = (v: unknown, max: number): string | null => {
     if (typeof v !== "string") return null;
@@ -1177,6 +1184,19 @@ export function cleanPollFields(raw: InstallPollFields): {
       return v && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(v) ? v : null;
     })(),
     pmset_drift: cleanPmsetDrift(raw.pmset_drift),
+    // ── TS-H8 (0161): a lower-case reason/step code, a version, a result code; each dropped on its own if malformed ──
+    helper_update_step: (() => {
+      const v = str(raw.helper_update_step, 32);
+      return v && /^[a-z][a-z_]{0,31}$/.test(v) ? v : null;
+    })(),
+    helper_update_version: (() => {
+      const v = str(raw.helper_update_version, 32);
+      return v && /^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$/.test(v) ? v : null;
+    })(),
+    helper_update_result: (() => {
+      const v = str(raw.helper_update_result, 32);
+      return v && /^[a-z][a-z_]{0,31}$/.test(v) ? v : null;
+    })(),
   };
 }
 
@@ -1202,7 +1222,7 @@ export function cleanPmsetDrift(v: unknown): string | null {
  */
 /** Did this poll carry at least one helper field? (An app below 0.1.35 carries none: nothing is scheduled at all.) */
 export const carriesHelperFields = (f: ReturnType<typeof cleanPollFields>): boolean =>
-  [f.helper_version, f.helper_registration, f.helper_xpc_ok, f.helper_state, f.console_user, f.power_schedule, f.pmset_drift].some((x) => x !== null);
+  [f.helper_version, f.helper_registration, f.helper_xpc_ok, f.helper_state, f.console_user, f.power_schedule, f.pmset_drift, f.helper_update_step, f.helper_update_version, f.helper_update_result].some((x) => x !== null);
 
 export async function writeHelperFields(sql: (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>, installId: string, f: ReturnType<typeof cleanPollFields>): Promise<void> {
   if (!carriesHelperFields(f)) return;
@@ -1216,6 +1236,9 @@ export async function writeHelperFields(sql: (s: TemplateStringsArray, ...v: unk
              console_user        = COALESCE(${f.console_user}::boolean,     console_user),
              power_schedule      = COALESCE(${f.power_schedule}::text,      power_schedule),
              pmset_drift         = COALESCE(${f.pmset_drift}::jsonb,        pmset_drift),
+             helper_update_step    = COALESCE(${f.helper_update_step}::text,    helper_update_step),
+             helper_update_version = COALESCE(${f.helper_update_version}::text, helper_update_version),
+             helper_update_result  = COALESCE(${f.helper_update_result}::text,  helper_update_result),
              helper_bad_since    = CASE
                WHEN ${f.helper_state}::text IS NULL AND ${f.helper_xpc_ok}::boolean IS NULL THEN helper_bad_since
                WHEN (${f.helper_state}::text IS NOT NULL AND ${f.helper_state}::text <> 'ok') OR ${f.helper_xpc_ok}::boolean IS FALSE THEN COALESCE(helper_bad_since, now())

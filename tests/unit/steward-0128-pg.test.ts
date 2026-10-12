@@ -73,6 +73,8 @@ describe.skipIf(!HAVE_DOCKER)("0128 room steward over real postgres", () => {
     pg.exec(mig("0131_rooms_live_claim.sql")); // the retention cron also touches rooms_live_claim
     pg.exec(mig("0128_room_steward.sql"));
     pg.exec(mig("0128_room_steward.sql")); // idempotent
+    pg.exec(mig("0148_fleet_control_plane.sql")); // TS-H8: an unmatched steward.result is also tried against fleet_commands (a v2 item), so those tables must exist
+    pg.exec(mig("0151_fleet_outstanding_command.sql"));
     expect(await rows`SELECT version, name FROM schema_migrations WHERE version = 128`).toEqual([{ version: 128, name: "0128_room_steward" }]);
 
     const cfg = await rows`SELECT key, value FROM steward_config ORDER BY key`;
