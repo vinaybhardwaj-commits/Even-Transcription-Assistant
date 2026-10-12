@@ -11,7 +11,7 @@ import datetime as dt
 import re
 
 from .followup import next_weekday, weekday_in
-from .validate import _covered, _quotes, frx
+from .validate import _covered, _drugish, _quotes, frx, to_v01, V, without_dose_change_conflicts
 
 _M3 = re.compile(
     r"FRX-M3 (/(medicines|slots)/(\d+))/(name|frequency|duration|strength) "
@@ -346,3 +346,216 @@ def _kept_out(art: dict, kind: str, text: str) -> dict:
     }
     art.setdefault("provenance", []).append(item)
     return item
+
+
+_M_INDEX = re.compile(r"FRX-M(?P<rule>\d+) /medicines/(?P<idx>\d+)")
+_G3_INDEX = re.compile(r"G3 \S+: .+ matches gp_extraction/medicines/(?P<idx>\d+)")
+_G6_LINE = re.compile(r"G6 note Medication line \d+ does not name gp_extraction/medicines/(?P<idx>\d+)")
+_G4_ITEM = re.compile(r"G4 (?P<item>\S+):")
+_M7_POINTER = re.compile(r"FRX-M7 (?P<item>\S+) kept-out drug has a json_pointer")
+_M7_NAME = re.compile(r"FRX-M7 (?P<item>\S+) name matches a sent medicine")
+_G6_ANY = re.compile(r"^G6 ")
+
+
+def recover_medicine_rules(art: dict) -> list[str]:
+    """Blank or slot one failing medicine. A schema or structure error still rejects the artefact."""
+    cleared: list[str] = []
+    seen: tuple[str, ...] | None = None
+    for _ in range(8):
+        errs = _medicine_failures(art)
+        if not errs:
+            return cleared
+        sig = tuple(errs)
+        if sig == seen:
+            return cleared
+        seen = sig
+        if _note_ready(art) and any(_G6_ANY.match(e) for e in errs) and _rerender(art):
+            cleared.extend(errs)
+            continue
+        idxs = _medicine_indexes(art, errs)
+        if not idxs:
+            return cleared
+        for idx, unresolved in sorted(idxs.items(), reverse=True):
+            _slot_or_blank(art, idx, unresolved)
+        if _note_ready(art):
+            _rerender(art)
+        cleared.extend(errs)
+    return cleared
+
+
+def _note_ready(art: dict) -> bool:
+    return str(art.get("note_text") or "").startswith("Co-morbidities:")
+
+
+def _medicine_failures(art: dict) -> list[str]:
+    try:
+        found = [e for e in frx(art) if e.startswith("FRX-M")]
+    except Exception:
+        return []
+    if not _note_ready(art):
+        return found
+    try:
+        g_errs = [
+            e for e in V.check(to_v01(art))
+            if e.startswith("G3 ") and "/medicines/" in e
+            or e.startswith("G6 ") and ("Medication" in e or "/medicines" in e)
+            or e.startswith("G4 ")
+        ]
+        found.extend(without_dose_change_conflicts(art, g_errs))
+    except Exception:
+        return found
+    return found
+
+
+def _pointer_index(art: dict, item_id: str) -> int | None:
+    for p in art.get("provenance") or []:
+        if not isinstance(p, dict) or p.get("item_id") != item_id:
+            continue
+        m = re.fullmatch(r"/medicines/(\d+)", str(p.get("json_pointer") or ""))
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _m7_indexes(art: dict, item_id: str) -> list[int]:
+    from .medication_safety import is_dose_change
+    prov = next((p for p in (art.get("provenance") or []) if isinstance(p, dict) and p.get("item_id") == item_id), None)
+    if not isinstance(prov, dict):
+        return []
+    gx = art.get("gp_extraction") if isinstance(art.get("gp_extraction"), dict) else {}
+    meds = gx.get("medicines") if isinstance(gx.get("medicines"), list) else []
+    labels = [str(x) for x in (prov.get("names") or []) if x] + [str(prov.get("text") or "")]
+    out = []
+    for i, med in enumerate(meds):
+        if not isinstance(med, dict):
+            continue
+        if not any(V.same_drug([nm], V.med_names(med)) for nm in (prov.get("names") or [])):
+            continue
+        if is_dose_change(labels, [str(x) for x in V.med_names(med) if x]):
+            continue
+        out.append(i)
+    return out
+
+
+def _medicine_indexes(art: dict, errs: list[str]) -> dict[int, bool]:
+    out: dict[int, bool] = {}
+
+    def mark(idx: int | None, unresolved: bool) -> None:
+        if idx is None or idx < 0:
+            return
+        out[idx] = out.get(idx, False) or unresolved
+
+    for err in errs:
+        hit = _M_INDEX.search(err)
+        if hit:
+            mark(int(hit.group("idx")), hit.group("rule") in {"8", "10"})
+            continue
+        hit = _G3_INDEX.search(err)
+        if hit:
+            mark(int(hit.group("idx")), False)
+            continue
+        hit = _G6_LINE.search(err)
+        if hit:
+            mark(int(hit.group("idx")), False)
+            continue
+        hit = _G4_ITEM.match(err)
+        if hit:
+            mark(_pointer_index(art, hit.group("item")), False)
+            continue
+        hit = _M7_POINTER.match(err)
+        if hit:
+            mark(_pointer_index(art, hit.group("item")), False)
+            continue
+        hit = _M7_NAME.match(err)
+        if hit:
+            for idx in _m7_indexes(art, hit.group("item")):
+                mark(idx, False)
+    return out
+
+
+def _safe_heard(text, blob: str) -> dict:
+    raw = str(text or "").strip()
+    if not raw or _drugish(raw):
+        return {"evidence_state": "not_said_in_room"}
+    _numbers_supported, _strip = _number_tools()
+    if not _numbers_supported(raw, blob):
+        return {"evidence_state": "not_said_in_room"}
+    return {"text": raw.replace(":", " -"), "evidence_state": "heard_in_room"}
+
+
+def _blank_part() -> dict:
+    return {"evidence_state": "not_said_in_room"}
+
+
+def _slot_or_blank(art: dict, idx: int, unresolved: bool) -> None:
+    gx = art.get("gp_extraction") if isinstance(art.get("gp_extraction"), dict) else {}
+    meds = gx.get("medicines") if isinstance(gx.get("medicines"), list) else []
+    if idx >= len(meds) or not isinstance(meds[idx], dict):
+        return
+    med = meds[idx]
+    owners = [
+        p for p in (art.get("provenance") or [])
+        if isinstance(p, dict) and p.get("json_pointer") == f"/medicines/{idx}"
+    ]
+    owner = owners[0] if owners else None
+    blob = " ".join(_quotes(owner)) if owner else ""
+    med_block = owner.get("medicine") if owner and isinstance(owner.get("medicine"), dict) else {}
+    strength = med_block.get("strength") if isinstance(med_block.get("strength"), dict) else {}
+    strength_text = strength.get("text") or strength.get("value")
+    heard = {
+        "frequency": _safe_heard(med.get("frequency"), blob),
+        "duration": _safe_heard(med.get("duration"), blob),
+        "timing": _safe_heard(med.get("instructions"), blob),
+        "strength": _safe_heard(strength_text, blob),
+    }
+    any_heard = any(part.get("evidence_state") == "heard_in_room" for part in heard.values())
+    if unresolved or any_heard:
+        _add_unresolved_slot(art, owner, heard, unresolved)
+    _demote_medicine(art, idx)
+
+
+def _add_unresolved_slot(art: dict, owner: dict | None, heard: dict, unresolved: bool) -> None:
+    ids = {s.get("slot_id") for s in (art.get("slots") or []) if isinstance(s, dict)}
+    n = 1
+    while f"slotR{n}" in ids:
+        n += 1
+    sid = f"slotR{n}"
+    parts = {field: _blank_part() for field in ("form", "frequency", "duration", "timing", "class", "indication", "strength")}
+    for field, part in heard.items():
+        if part.get("evidence_state") == "heard_in_room":
+            parts[field] = part
+    decision = owner.get("decision") if owner and isinstance(owner.get("decision"), dict) else None
+    evidence = list(owner.get("evidence") or []) if owner else []
+    slot = {
+        "slot_id": sid,
+        **parts,
+        "decision": decision,
+        "evidence": evidence,
+        "confidence": 0.5,
+        "json_pointer": None,
+    }
+    if unresolved:
+        slot["flags"] = ["unresolved_name"]
+    art.setdefault("slots", []).append(slot)
+    detail = " ".join(part.get("text") for part in (parts["frequency"], parts["duration"], parts["timing"]) if part.get("text"))
+    art.setdefault("completion_required", []).append({
+        "kind": "pick_drug",
+        "item_id": sid,
+        "prompt": "Name this drug",
+        "detail": (detail or "unnamed drug")[:200],
+    })
+
+
+def _rerender(art: dict) -> bool:
+    from .note import flags_by_pointer, render_note, sanitize_note
+    flags = flags_by_pointer(art)
+    banned = [
+        n for p in (art.get("provenance") or [])
+        if isinstance(p, dict) and not p.get("json_pointer")
+        for n in (p.get("names") or []) if n
+    ]
+    new = sanitize_note(render_note(art.get("gp_extraction") or {}, flags, banned))
+    if new == art.get("note_text"):
+        return False
+    art["note_text"] = new
+    return True

@@ -2,8 +2,10 @@
 
 Names resolve against the curated molecule map and the db13 medication catalogue
 (`data/drug-lexicon.json`: brand and generic names only). Matching folds case, spacing,
-punctuation and a trailing strength. Release is an exact name, a brand-stem prefix, or one
-short extra token. A loose spelling (Atolip for Atorlip, Sompras for Sompraz) does not release.
+punctuation and a trailing strength or unit. Release is an exact name, a brand plus its
+variant or strength suffix, or one short extra token. A loose spelling (Atolip for Atorlip,
+Sompras for Sompraz) does not release. A single ingredient word does not release a longer
+multi-ingredient line, and a letter in a brand is not a molecule.
 Strength ranges are broad plausibility bounds, not dosing advice.
 """
 from __future__ import annotations
@@ -374,7 +376,13 @@ def dose_bound(name: str, aliases: list[str], strength: str | None, quotes: list
 _PACK_WORDS = FORM_WORDS | {
     "sr", "xr", "er", "dt", "pr", "md", "kit", "skin", "oral", "forte", "plus", "gold",
     "dsr", "respules", "suspension", "lotion", "powder", "shampoo", "soap", "cream",
+    "inj",
 }
+_CUE_WORDS = {
+    "stop", "stopped", "stopping", "start", "started", "take", "taking", "and", "with",
+    "the", "for", "from", "then", "withdraw", "withdrawn", "discontinue", "discontinued",
+}
+_UNIT_WORDS = {"mg", "mcg", "g", "ml", "iu"}
 _LEXICON = Path(__file__).resolve().parents[2] / "data" / "drug-lexicon.json"
 
 
@@ -388,10 +396,43 @@ def norm_tokens(text: str | None) -> tuple[str, ...]:
         if m:
             out.append(m.group(1))
             continue
-        if w in _PACK_WORDS:
+        if w in _PACK_WORDS or w in _UNIT_WORDS:
             continue
         out.append(w)
     return tuple(out)
+
+
+def _stem_tokens(text: str | None) -> tuple[str, ...]:
+    return tuple(t for t in norm_tokens(text) if not t.isdigit())
+
+
+def _tail_is_strength_or_form(extra: tuple[str, ...]) -> bool:
+    """A brand may be followed by a strength. It may not swallow a longer ingredient list."""
+    rest = [t for t in extra if not t.isdigit()]
+    return not rest
+
+
+def is_dose_change(left, right) -> bool:
+    """Stopping strength X and starting strength Y of the same drug is a dose change."""
+    def nums(labels) -> set[str]:
+        found = set()
+        for label in labels:
+            found.update(number_tokens(str(label or "")))
+        return found
+
+    def stem(labels) -> set[str]:
+        out = set()
+        for label in labels:
+            out.update(t for t in _stem_tokens(str(label or "")) if t not in _CUE_WORDS)
+        return out
+
+    left_nums, right_nums = nums(left), nums(right)
+    if not left_nums or not right_nums or left_nums & right_nums:
+        return False
+    left_stem, right_stem = stem(left), stem(right)
+    if left_stem and left_stem == right_stem:
+        return True
+    return any(same_molecules(str(a or ""), str(b or "")) for a in left for b in right)
 
 
 class _Catalogue:
@@ -456,18 +497,37 @@ def catalogue_hit(text: str | None) -> str | None:
     cat = _catalogue()
     if toks in cat.exact:
         return cat.exact[toks]
-    pool = cat.by_first.get(toks[0], [])
+    pool = cat.by_first.get(toks[0], []) if toks else []
     for entry, _stem, display in pool:
-        if len(entry) >= len(toks) and entry[: len(toks)] == toks:
+        if len(entry) >= len(toks) and entry[: len(toks)] == toks and _tail_is_strength_or_form(entry[len(toks):]):
             return display
     stem_toks = tuple(t for t in toks if not t.isdigit())
     if stem_toks and stem_toks != toks:
         for entry, _stem, display in pool:
             entry_stem = tuple(t for t in entry if not t.isdigit())
-            if entry_stem[: len(stem_toks)] == stem_toks:
+            if entry_stem[: len(stem_toks)] == stem_toks and _tail_is_strength_or_form(entry_stem[len(stem_toks):]):
                 return display
     for entry, _stem, display in pool:
         if _subsequence(toks, entry) and _extra_alpha_ok(toks, entry):
+            return display
+    letters = [t for t in toks if t.isalpha()]
+    digits = [t for t in toks if t.isdigit()]
+    if len(letters) >= 2:
+        glued = tuple(["".join(letters), *digits])
+        if glued != toks and sum(len(t) for t in letters) >= 4:
+            return _catalogue_match(glued, cat)
+    return None
+
+
+def _catalogue_match(toks: tuple[str, ...], cat: _Catalogue) -> str | None:
+    """One exact or strength-suffix match for an already-normalised token tuple. No second glue pass."""
+    if sum(len(t) for t in toks if not t.isdigit()) < 4:
+        return None
+    if toks in cat.exact:
+        return cat.exact[toks]
+    pool = cat.by_first.get(toks[0], [])
+    for entry, _stem, display in pool:
+        if len(entry) >= len(toks) and entry[: len(toks)] == toks and _tail_is_strength_or_form(entry[len(toks):]):
             return display
     return None
 
@@ -479,7 +539,10 @@ _SPAN_SKIP = {
 
 
 def spoken_catalogue_name(text: str | None) -> str | None:
-    """The spoken span that catalogue-matches, not the SKU display name (which can carry a strength)."""
+    """The spoken span that catalogue-matches, not the SKU display name (which can carry a strength).
+
+    A trailing letter stays with the brand. "Clinda K" is not the shorter catalogue name "Clinda".
+    """
     words = re.findall(r"[A-Za-z0-9]+", text or "")
     best = None
     best_n = 0
@@ -487,6 +550,9 @@ def spoken_catalogue_name(text: str | None) -> str | None:
         for n in range(min(4, len(words) - i), 0, -1):
             chunk_words = words[i:i + n]
             if n == 1 and chunk_words[0].lower() in _SPAN_SKIP:
+                continue
+            nxt = words[i + n] if i + n < len(words) else ""
+            if nxt.isalpha() and len(nxt) == 1 and catalogue_hit(" ".join(words[i:i + n + 1])) is None:
                 continue
             chunk = " ".join(chunk_words)
             if catalogue_hit(chunk) is None:

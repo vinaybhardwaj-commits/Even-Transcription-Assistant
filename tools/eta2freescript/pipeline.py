@@ -138,8 +138,9 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     log["llm_note_valid"] = llm_errs == []
     log["note_source"] = f"llm_{opts.stage_b}" if llm_errs == [] else "deterministic_fallback"
     log["cost_usd"] = cost_for_uid(getattr(client, "ledger", None), c.uid)
-    from .recover import soften_f2_m3
+    from .recover import recover_medicine_rules, soften_f2_m3
     recovered = soften_f2_m3(art)
+    recovered += recover_medicine_rules(art)
     if recovered:
         flags = flags_by_pointer(art)
         banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]

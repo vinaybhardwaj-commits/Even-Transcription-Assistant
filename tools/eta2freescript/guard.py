@@ -268,28 +268,122 @@ def _prefer_spoken_code(obj: dict, blob: str) -> None:
     obj["frequency"] = code.group(1).upper()
 
 
+def _value_pos(clause: str, value: str) -> int:
+    low = clause.lower()
+    val = str(value or "").strip().lower()
+    if not val:
+        return -1
+    pos = low.find(val)
+    if pos >= 0:
+        return pos
+    code = _FREQ_CODE.search(val)
+    if code:
+        hit = re.search(rf"\b{re.escape(code.group(1))}\b", low)
+        return hit.start() if hit else -1
+    return -1
+
+
+def _near_own_drug(clause: str, labels: list[str], value: str) -> bool:
+    """A regimen word belongs to this drug when it sits nearer this name than another catalogue drug."""
+    from .medication_safety import _name_in, catalogue_hit
+    pos = _value_pos(clause, value)
+    if pos < 0:
+        return False
+    own = []
+    for lab in labels:
+        words = [w for w in re.findall(r"[a-z0-9]+", str(lab).lower()) if len(w) >= 4 or w.isdigit()]
+        for word in words:
+            at = clause.lower().find(word)
+            if at >= 0 and _name_in(clause, lab):
+                own.append(at)
+                break
+    if not own:
+        return False
+    others = []
+    for match in re.finditer(r"[A-Za-z][A-Za-z-]{3,}", clause):
+        word = match.group(0)
+        if any(_name_in(word, lab) for lab in labels):
+            continue
+        if catalogue_hit(word):
+            others.append(match.start())
+    if not others:
+        return True
+    return min(abs(pos - p) for p in own) <= min(abs(pos - p) for p in others)
+
+
+def _only_near_another_drug(turns: list[Turn], idx: list[int], labels: list[str], value: str) -> bool:
+    """True when every sighting of this regimen sits with a catalogue drug that is not this one."""
+    from .medication_safety import _clauses, catalogue_hit
+    seen = False
+    for t in idx:
+        if not isinstance(t, int) or not 0 <= t < len(turns) or turns[t].role in NON_DOCTOR:
+            continue
+        for clause in _clauses(turns[t].text or "") or [turns[t].text or ""]:
+            if _value_pos(clause, value) < 0:
+                continue
+            seen = True
+            if _near_own_drug(clause, labels, value):
+                return False
+            named = False
+            for match in re.finditer(r"[A-Za-z][A-Za-z-]{3,}", clause):
+                if catalogue_hit(match.group(0)):
+                    named = True
+                    break
+            if not named:
+                return False
+    return seen
+
+
+def _own_pieces(turns: list[Turn], idx: list[int], labels: list[str]) -> list[str]:
+    from .medication_safety import _clauses, _name_in
+    pieces = []
+    for t in idx:
+        if not isinstance(t, int) or not 0 <= t < len(turns) or turns[t].role in NON_DOCTOR:
+            continue
+        for clause in _clauses(turns[t].text or "") or [turns[t].text or ""]:
+            if any(_name_in(clause, lab) for lab in labels):
+                pieces.append(clause)
+    return pieces
+
+
 def bind_regimen_to_clause(obj: dict, turns: list[Turn], idx: list[int], issues: list[str], where: str) -> None:
-    """Frequency, duration and timing come from the clause that names this drug."""
+    """Frequency, duration and timing come from the words nearest this drug, not the next drug."""
     labels = [str(obj.get(k) or "") for k in ("brand_as_said", "generic", "_drug_key") if obj.get(k)]
     if not labels:
         return
     if any(isinstance(t, int) and 0 <= t < len(turns) and turns[t].lang != "en" for t in idx):
         return
-    blob = own_clauses(turns, idx, labels)
+    pieces = _own_pieces(turns, idx, labels)
     fields = ("frequency", "duration", "instructions", "timing")
-    # No clause names this drug ("take this twice a day"). Keep the turn-level regimen.
-    if not blob:
+    # No clause names this drug ("take this twice a day"). Keep a turn-level regimen,
+    # but do not keep a regimen that sits on a different catalogue drug.
+    if not pieces:
+        for field in fields:
+            val = obj.get(field)
+            if val and _only_near_another_drug(turns, idx, labels, str(val)):
+                obj[field + "_model_value"] = val
+                obj[field] = None
+                issues.append(f"{where}: {field} belongs to another drug")
         return
+    blob = " ".join(pieces)
     _prefer_spoken_code(obj, blob)
+
+    def belongs(val: str) -> bool:
+        return _phrase_in(val, blob) and any(_near_own_drug(clause, labels, val) for clause in pieces)
+
     for field in fields:
         val = obj.get(field)
-        if val and not _phrase_in(val, blob):
+        if val and not belongs(str(val)):
             obj[field + "_model_value"] = val
             obj[field] = None
             issues.append(f"{where}: {field} is not in this drug's clause")
     if not obj.get("frequency") or not obj.get("duration"):
         fake = Turn(idx=0, t0_ms=0, t1_ms=0, speaker="0", text=blob, lang="en", role="doctor")
         recover_regimen(obj, [fake], [0], issues, where, ("frequency", "duration"))
+        for field in ("frequency", "duration"):
+            val = obj.get(field)
+            if val and not any(_near_own_drug(clause, labels, str(val)) for clause in pieces):
+                obj[field] = None
     _prefer_spoken_code(obj, blob)
 
 
@@ -316,7 +410,13 @@ def numeric_support(obj: dict, fields, cited: str, issues: list[str], where: str
             continue
         nums = re.findall(r"\d+(?:\.\d+)?", numerals(str(v)))
         words = [w for w in re.findall(r"[a-z]+", str(v).lower()) if len(w) > 3]
-        ok = all(x in cited for x in nums) if nums else (not english or any(w in cited for w in words) or f in ("route", "timing"))
+        if nums:
+            ok = all(x in cited for x in nums)
+        elif words:
+            ok = (not english) or any(w in cited for w in words) or f in ("route", "timing")
+        else:
+            # A short code (BD, SOS) is supported when the citation says that code.
+            ok = (not english) or f in ("route", "timing") or str(v).lower() in cited.lower()
         if not ok:
             obj[f + "_model_value"], obj[f] = v, None
             issues.append(f"{where}.{f}={v!r} not found in cited turns -> nulled")
