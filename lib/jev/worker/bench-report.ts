@@ -44,7 +44,10 @@ export function buildBenchReport(input: {
   const by = (s: SubjectOutcome["status"]) => outcomes.filter((o) => o.status === s).length;
   const abstain_reasons: Record<string, number> = {}, failed_reasons: Record<string, number> = {};
   for (const o of outcomes) {
-    if (o.status === "abstained" || o.status === "too_large" || o.status === "no_state") abstain_reasons[o.reason ?? o.status] = (abstain_reasons[o.reason ?? o.status] ?? 0) + 1;
+    if (o.status === "abstained" || o.status === "too_large" || o.status === "no_state") {
+      const k = o.status === "no_state" ? `no_state:${o.reason ?? "no_reason"}` : (o.reason ?? o.status);
+      abstain_reasons[k] = (abstain_reasons[k] ?? 0) + 1;
+    }
     if (o.status === "failed" || o.status === "deferred") failed_reasons[o.reason ?? o.status] = (failed_reasons[o.reason ?? o.status] ?? 0) + 1;
   }
   const tokens = outcomes.reduce((a, o) => a + o.tokens, 0);

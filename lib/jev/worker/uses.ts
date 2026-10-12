@@ -9,10 +9,17 @@
 import type { JevSubjectType } from "../types";
 import type { RealUse } from "./flags";
 
+export const UNBUILDABLE_REASONS = ["bad_unit_key", "not_found", "no_data", "blind_room_day", "not_implemented", "bad_id", "build_error", "read_refused"] as const;
+export type UnbuildableReason = (typeof UNBUILDABLE_REASONS)[number];
+/** Maps a reader refusal to the closed vocabulary; anything outside it becomes read_refused, so free text can never reach a report. */
+export const unbuildableFrom = (reason: string): UnbuildableReason => ((UNBUILDABLE_REASONS as readonly string[]).includes(reason) ? (reason as UnbuildableReason) : "read_refused");
+
 export type StateBuild =
   | { tooLarge: true; bytes: number }
   /** A deterministic pre-gate failed (PRD §2: e.g. patient-side speech under 3 turns, an unusable transcript): the call is SKIPPED and the row says why. */
   | { abstain: string }
+  /** The builder could not build, and says why with a CLOSED code (UnbuildableReason), never text. The call is skipped exactly as for a null build; bench records it as no_state:<reason>. */
+  | { unbuildable: UnbuildableReason }
   | { state: unknown; /** ids only: window_ids, nemotron_row_ids, consult_key... */ evidence: Record<string, unknown>; lane: "timeline" | "text" };
 
 export interface JevUseDef {

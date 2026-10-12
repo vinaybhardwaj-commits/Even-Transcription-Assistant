@@ -737,7 +737,7 @@ suite("the Jev worker on postgres:16", () => {
       const rep = await runBench({ use: "encounter_timeline", setId: "u10-timeline", version: "v2", subjects: ["tl_1", "tl_2", "tl_3", "tl_big", "tl_none"], labels });
       expect(rep).toMatchObject({ set: "u10-timeline", version: "v2", mode: "bench", in_sample: true, mock: false });
       expect(rep.counts).toMatchObject({ subjects: 5, asked: 3, too_large: 1, no_state: 1, failed: 0, calls: 6 });
-      expect(rep.abstain_reasons).toEqual({ state_too_large: 1, no_state: 1 });
+      expect(rep.abstain_reasons).toEqual({ state_too_large: 1, "no_state:no_reason": 1 });
       const endRow = rep.questions.find((x) => x.question_id === "u10_end_row")!;
       expect(endRow.distribution).toEqual({ cand_02: 3 });
       expect(endRow.vs_labels).toMatchObject({ n_labeled: 3, n_scored: 3, coverage: 1 });

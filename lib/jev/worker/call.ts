@@ -112,7 +112,7 @@ export async function askSubject(input: {
   const pv = (v: string) => `${set.id}@${set.version}+${v}`;
 
   // No builder output: the subject is no longer buildable. Recorded as no opinion, never a fabricated state.
-  if (!build) return { kind: "done", decisions: 0, calls: 0, errorClass: null, bench: [], inputTokens: 0 };
+  if (!build || "unbuildable" in build) return { kind: "done", decisions: 0, calls: 0, errorClass: null, bench: [], inputTokens: 0 };
 
   if ("abstain" in build) {
     // a deterministic pre-gate (PRD §2): the call is SKIPPED with a reason code, never sent to Jev

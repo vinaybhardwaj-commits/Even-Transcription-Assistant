@@ -8,7 +8,7 @@
  */
 import { readConsultText, type ConsultText } from "@/lib/rubrics/readers/consult-text";
 import { transcriptState, type Focus } from "./transcript";
-import type { StateBuild } from "../uses";
+import { unbuildableFrom, type StateBuild } from "../uses";
 
 const locators = new Map<string, Focus>();
 export const setLocator = (subjectId: string, f: Focus): void => { locators.set(subjectId, f); };
@@ -24,28 +24,28 @@ export const defaultReadDeps: ReadDeps = { read: async (k) => { const r = await 
 
 export async function buildPitchState(subjectId: string, deps: ReadDeps = defaultReadDeps): Promise<StateBuild | null> {
   const m = SUBJECT_P.exec(subjectId);
-  if (!m) return null;
+  if (!m) return { unbuildable: "bad_id" };
   const focus = locators.get(subjectId);
   if (!focus) return { abstain: "no_locator" };
   const got = await deps.read(m[1]!);
-  if (!got.ok) return null;
+  if (!got.ok) return { unbuildable: unbuildableFrom(got.reason) };
   return transcriptState(m[1]!, got.data, { focus });
 }
 
 export async function buildDoubtState(subjectId: string, deps: ReadDeps = defaultReadDeps): Promise<StateBuild | null> {
   const m = SUBJECT_D.exec(subjectId);
-  if (!m) return null;
+  if (!m) return { unbuildable: "bad_id" };
   const focus = locators.get(subjectId);
   if (!focus) return { abstain: "no_locator" };
   const got = await deps.read(m[1]!);
-  if (!got.ok) return null;
+  if (!got.ok) return { unbuildable: unbuildableFrom(got.reason) };
   return transcriptState(m[1]!, got.data, { focus, excerpt: { before_ms: DOUBT_BEFORE_MS, after_ms: DOUBT_AFTER_MS } });
 }
 
 /** A consult subject (pitch-detect, chair-affect): the whole clip. */
 export async function buildConsultState(consultKey: string, deps: ReadDeps = defaultReadDeps): Promise<StateBuild | null> {
-  if (!/^[A-Za-z0-9_.:@-]{1,120}$/.test(consultKey)) return null;
+  if (!/^[A-Za-z0-9_.:@-]{1,120}$/.test(consultKey)) return { unbuildable: "bad_id" };
   const got = await deps.read(consultKey);
-  if (!got.ok) return null;
+  if (!got.ok) return { unbuildable: unbuildableFrom(got.reason) };
   return transcriptState(consultKey, got.data);
 }

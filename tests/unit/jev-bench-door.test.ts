@@ -115,6 +115,25 @@ describe("POST /api/admin/jev/bench", () => {
     expect(text).not.toContain(SENTINEL);
     expect(text).not.toMatch(/TYPESAFE|api[_-]?key/i);
   });
+  it("CRON_SECRET unset is 401 even with a bearer header, and nothing runs", async () => {
+    vi.stubEnv("CRON_SECRET", "");
+    expect((await post(good)).status).toBe(401);
+    expect((await post(good, "Bearer ")).status).toBe(401);
+    expect(H.sync + H.systemOne).toBe(0);
+  });
+  it("the response never contains state text or evidence text, even with a sentinel placed in both", async () => {
+    const { _clearUsesForTests, registerUse } = await import("@/lib/jev/worker/uses");
+    _clearUsesForTests();
+    registerUse({ use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: async () => [],
+      build: async (id) => (id === "c_nostate" ? { unbuildable: "no_data" as const } : { state: { transcript: SENTINEL }, evidence: { consult_key: id, note: SENTINEL }, lane: "text" as const }) });
+    const r = await post({ ...good, subjects: ["c_a", "c_nostate"] });
+    expect(r.status).toBe(200);
+    const text = await r.text();
+    expect(text).not.toContain(SENTINEL);
+    const j = JSON.parse(text);
+    expect(j.abstain_reasons).toEqual({ "no_state:no_data": 1 });
+    expect(JSON.stringify(j)).not.toContain("evidence");
+  });
   it("an open breaker or a spent cap with nothing run is 409 with the closed reason", async () => {
     H.breakerOpen = true;
     expect(await (await post(good)).json()).toEqual({ error: { code: "circuit_open" } });
@@ -132,6 +151,11 @@ describe("GET /api/admin/jev/bench/subjects", () => {
     const { NextRequest } = await import("next/server");
     return GET(new NextRequest(`http://localhost/api/admin/jev/bench/subjects${qs}`, { headers: auth ? { authorization: auth } : {} }));
   };
+  it("CRON_SECRET unset is 401", async () => {
+    vi.stubEnv("CRON_SECRET", "");
+    expect((await get("?use=consult_rubric")).status).toBe(401);
+    expect((await get("?use=consult_rubric", "Bearer ")).status).toBe(401);
+  });
   it("401 without the bearer; ids only with it; bad use/limit are 400", async () => {
     expect((await get("?use=consult_rubric", null)).status).toBe(401);
     expect((await get("?use=consult_rubric", "Bearer nope")).status).toBe(401);

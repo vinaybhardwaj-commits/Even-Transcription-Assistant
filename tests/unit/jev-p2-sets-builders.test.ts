@@ -14,7 +14,7 @@ import { estimateTokens, overBudget, STATE_TOKEN_BUDGET } from "@/lib/jev/worker
 import { transcriptState, MIN_PATIENT_TURNS } from "@/lib/jev/worker/builders/transcript";
 import { candidateRows, timelineJevState, resolveTimelineAnswer, MAX_CANDIDATES } from "@/lib/jev/worker/builders/timeline";
 import { buildSttPairState, buildSttRunState, repeatBucket, resolveSttPick, type RunRow } from "@/lib/jev/worker/builders/stt";
-import { buildDoubtState, buildPitchState, clearLocators, setLocator } from "@/lib/jev/worker/builders/locators";
+import { buildConsultState, buildDoubtState, buildPitchState, clearLocators, setLocator } from "@/lib/jev/worker/builders/locators";
 import { buildBenchReport } from "@/lib/jev/worker/bench-report";
 import { applyGates } from "@/lib/jev/worker/call";
 import type { JevAnswer } from "@/lib/jev/types";
@@ -281,7 +281,7 @@ describe("pitch and doubt locators (enumerated by code or the agent, never by Je
     clearLocators();
     expect(await buildPitchState("ck#p1", read)).toEqual({ abstain: "no_locator" });
     expect(await buildDoubtState("ck#d1", read)).toEqual({ abstain: "no_locator" });
-    expect(await buildPitchState("ck_no_pitch_suffix", read)).toBeNull();
+    expect(await buildPitchState("ck_no_pitch_suffix", read)).toEqual({ unbuildable: "bad_id" });
   });
   it("a pitch state is the whole clip + a focus marker; a doubt state is the excerpt and never carries any coding", async () => {
     clearLocators();
@@ -523,5 +523,30 @@ describe("F7: the bench scorer's labelled set is the LABELS FILE's, over every o
     expect(v.confusion).toEqual({ surgery: { surgery: 1, medication: 1 } });
     expect(v.accuracy).toBe(0.5);
     expect(v).toMatchObject({ n_labeled: 3, n_scored: 2, coverage: 0.6667 });
+  });
+});
+
+describe("unbuildable reasons (closed vocabulary)", () => {
+  const refuse = (reason: string) => ({ read: async () => ({ ok: false as const, reason }) });
+  it("the consult builder carries the reader's refusal reason; an off-menu reason becomes read_refused; a bad key is bad_id", async () => {
+    for (const r of ["bad_unit_key", "not_found", "no_data", "blind_room_day"]) expect(await buildConsultState("ck", refuse(r))).toEqual({ unbuildable: r });
+    expect(await buildConsultState("ck", refuse("some free text with spaces"))).toEqual({ unbuildable: "read_refused" });
+    expect(await buildConsultState("bad key!", refuse("no_data"))).toEqual({ unbuildable: "bad_id" });
+  });
+  it("pitch and doubt builders carry the reason too", async () => {
+    clearLocators();
+    setLocator("ck#p1", { at_ms: 1000 }); setLocator("ck#d1", { at_ms: 1000 });
+    expect(await buildPitchState("ck#p1", refuse("not_found"))).toEqual({ unbuildable: "not_found" });
+    expect(await buildDoubtState("ck#d1", refuse("no_data"))).toEqual({ unbuildable: "no_data" });
+  });
+  it("the report breaks no_state down by reason, and leaves other abstain reasons as they were", () => {
+    const o = (subject_id: string, status: "no_state" | "abstained", reason: string) => ({ subject_id, status, reason, rows: [], tokens: 0, calls: 0 });
+    const rep = buildBenchReport({
+      set: { id: "s", version: "v0", sha: "0".repeat(64), use: "consult_rubric" }, defs: [],
+      outcomes: [o("a", "no_state", "no_data"), o("b", "no_state", "no_data"), o("c", "no_state", "build_error"), o("d", "abstained", "no_locator")],
+      mock: false, usdPerToken: 0,
+    });
+    expect(rep.counts.no_state).toBe(3);
+    expect(rep.abstain_reasons).toEqual({ "no_state:no_data": 2, "no_state:build_error": 1, no_locator: 1 });
   });
 });
