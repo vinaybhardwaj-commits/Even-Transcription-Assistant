@@ -147,7 +147,7 @@ describe("sarvam_transcribe: prepare", () => {
   it("an encounter: its audio object and content type, scope and ref recorded; the DATABASE duration is not even selected", async () => {
     answer = (text) => (/FROM encounter/.test(text) ? [{ audio_object_key: "enc/enc_1.webm" }] : []);
     headType = "audio/ogg";
-    expect(await run(enc)).toEqual({ kind: "next", step: "init", progress: { clip_key: "enc/enc_1.webm", content_type: "audio/ogg", scope: "encounter", ref: "enc_1", source_kind: "encounter" } });
+    expect(await run(enc)).toEqual({ kind: "next", step: "init", progress: { clip_key: "enc/enc_1.webm", content_type: "audio/ogg", scope: "encounter", ref: "enc_1", source_kind: "encounter", use: "production" } });
     expect(statements.find((s) => /FROM encounter/.test(s.text))!.text).not.toMatch(/duration/);
     answer = () => [];
     expect(await run(enc)).toEqual({ kind: "fail", error: "source_not_found" });
@@ -562,7 +562,7 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
     });
     expect(ledgerLines()).toEqual([{
       caller: "scribe-mcp", machine: "vercel", job_id: "job_t1", request_id: "sj_9", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
-      started_at: "2026-10-08T06:00:00.000Z", finished_at: expect.any(String), status: "ok", http_status: 200, throttled: false, scope: "encounter", ref: "enc_1",
+      started_at: "2026-10-08T06:00:00.000Z", finished_at: expect.any(String), status: "ok", http_status: 200, throttled: false, scope: "encounter", ref: "enc_1", use: "production",
     }]);
     expect(JSON.stringify(ledgerLines())).not.toContain("namaste"); // no text in the ledger
   });
@@ -723,7 +723,7 @@ describe("D — ledger and lane", () => {
     const l = lane();
     expect(l).toMatchObject({ caller: "scribe-mcp", machine: "vercel", updated_at: expect.any(String) });
     expect(l.active).toEqual([{ job_id: "job_other", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 300, started_at: "2026-10-08T06:30:00.000Z", scope: "encounter" }]);
-    expect(l.today).toEqual({ jobs: 1, audio_min: 10, failed: 0, throttled: 0 }); // the line this job just wrote
+    expect(l.today).toEqual({ jobs: 1, audio_min: 10, failed: 0, throttled: 0, by_use: { production: 1 }, by_scope: { encounter: 1 }, by_status: { ok: 1 } }); // the line this job just wrote
     expect(l.all_time).toEqual({ jobs: 3, audio_min: 20 }); // 2 earlier lines (one ok 10 min, one failed) + today's
     expect(JSON.stringify(l)).not.toMatch(/ref|enc_1|transcript/);
   });
@@ -769,7 +769,7 @@ describe("D3 — the allowlist", () => {
 
   it("tally lines: ok minutes only, failures and throttles counted, torn lines skipped", () => {
     const body = [{ status: "ok", audio_s: 90 }, { status: "ok", audio_s: 30, throttled: true }, { status: "failed", audio_s: 600 }].map((l) => JSON.stringify(l)).join("\n") + "\n{torn";
-    expect(L.tallyOf(body)).toEqual({ jobs: 3, audio_min: 2, failed: 1, throttled: 1 });
+    expect(L.tallyOf(body)).toEqual({ jobs: 3, audio_min: 2, failed: 1, throttled: 1, by_use: { production: 3 }, by_scope: { unknown: 3 }, by_status: { ok: 2, failed: 1 } }); // a line without use reads as production
   });
 });
 

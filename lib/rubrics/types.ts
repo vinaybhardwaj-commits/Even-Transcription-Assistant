@@ -7,7 +7,7 @@ import { z } from "zod";
 export const RUBRIC_UNITS = ["window", "consult", "room_hour", "stay"] as const;
 export type RubricUnit = (typeof RUBRIC_UNITS)[number];
 /** Reader names a rubric may declare as inputs. every reader is implemented (consult_text since S7-1, pulse_record since S7-2); `external` = the data comes from outside the MCP. */
-export const READER_NAMES = ["window_english", "turns", "emotion", "audio_state", "consult_span", "consult_text", "pulse_record", "external"] as const;
+export const READER_NAMES = ["window_english", "turns", "emotion", "audio_state", "consult_span", "consult_text", "pulse_record", "stay_record", "external"] as const;
 export type ReaderName = (typeof READER_NAMES)[number];
 export const RUBRIC_ENGINES = ["code", "jev", "llm_zdr"] as const;
 export type RubricEngine = (typeof RUBRIC_ENGINES)[number];

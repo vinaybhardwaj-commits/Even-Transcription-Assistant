@@ -17,6 +17,7 @@ import { capRefusal, cappedGuard } from "@/lib/rubrics/llm-cap";
 import { JobArgsError, type JobRow } from "./types";
 import { ToolScopeError } from "@/lib/mcp/registry";
 import type { McpScope } from "@/lib/mcp/auth";
+import { callerClassOf, type CallerClass } from "@/lib/stt/o4-scope";
 
 export class UnknownKindError extends Error {
   constructor(public kind: string) {
@@ -61,6 +62,8 @@ export async function submitJob(input: {
    * exactly how the shims got past it.
    */
   scopes?: ReadonlySet<McpScope>;
+  /** O5: "mcp" when the call came through an authenticated MCP tool; anything else is production. */
+  callerClass?: CallerClass;
 }): Promise<JobRow & { deduped?: boolean }> {
   const kind = KIND_BY_NAME.get(input.kind);
   if (!kind) throw new UnknownKindError(input.kind);
@@ -69,7 +72,8 @@ export async function submitJob(input: {
     throw new ToolScopeError(kind.scope, { kind: kind.name, kind_scope: kind.scope });
   }
   // Throws JobArgsError, which the tool turns into a refusal — a job that cannot run never queues.
-  const args = kind.parseArgs(input.args);
+  // O5: the caller class is set by the MCP tool layer only (never read from the args); unknown = production
+  const args = kind.parseArgs(input.args, callerClassOf(input.callerClass));
   // An ARGUMENT that needs more than the kind does (room_window's switch_override needs `write`). Checked on the PARSED args,
   // here, for the same reason the kind check is here: three submit paths, and a rule in one of them is not a rule.
   const extra = kind.scopeForArgs?.(args) ?? null;

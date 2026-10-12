@@ -192,7 +192,9 @@ describe("gates: lab only, blind room-days (lifted), bench wiring", () => {
     expect(canRun(affect, { lab: true, unit: "consult" })).toBeNull();
     expect(canRun(pitch, { lab: true, unit: "window" })).toMatchObject({ error: "unit_not_supported" });
     expect(canRun(getRubric("care_sentiment")!, { lab: true })).toMatchObject({ error: "engine_not_available" });
-    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true })).toMatchObject({ error: "engine_not_available" });
+    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true, unit: "stay" })).toBeNull(); // S7-3: wired (draft: lab:true), stay unit only
+    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: false })).toMatchObject({ error: "lab_required" });
+    expect(canRun(getRubric("ehrc_surgical_outcome")!, { lab: true, unit: "consult" })).toMatchObject({ error: "unit_not_supported" });
   });
   it("a consult in a formerly held-out room-day is NOT skipped blind_room_day (rule lifted 10 Oct 2026): its text is read", async () => {
     let called = 0;

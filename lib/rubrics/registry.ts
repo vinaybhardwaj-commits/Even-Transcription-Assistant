@@ -15,6 +15,7 @@ import careSentiment from "@/rubrics/care_sentiment/rubric.json";
 import encounterVsRecord from "@/rubrics/encounter_vs_record/rubric.json";
 import affectPrompt from "@/rubrics/consult_chair_affect/prompt.json";
 import pitchPrompt from "@/rubrics/consult_surgical_pitch/prompt.json";
+import ehrcPrompt from "@/rubrics/ehrc_surgical_outcome/prompt.json";
 import evrPrompt from "@/rubrics/encounter_vs_record/prompt.json";
 import { RubricFile, rubricProblems, type Rubric, type RubricUnit } from "./types";
 
@@ -24,7 +25,7 @@ export const REGISTERED_IDS: readonly string[] = ["room_mic_quality", "talk_time
 
 /** The prompt files beside the rubrics (statically imported, so the bundler ships them). */
 export type PromptFile = { version: string; rubric_id: string; note: string; rules: string[]; user_header: string };
-export const RUBRIC_PROMPTS: Readonly<Record<string, PromptFile>> = { consult_chair_affect: affectPrompt as PromptFile, consult_surgical_pitch: pitchPrompt as PromptFile, encounter_vs_record: evrPrompt as PromptFile };
+export const RUBRIC_PROMPTS: Readonly<Record<string, PromptFile>> = { consult_chair_affect: affectPrompt as PromptFile, consult_surgical_pitch: pitchPrompt as PromptFile, ehrc_surgical_outcome: ehrcPrompt as PromptFile, encounter_vs_record: evrPrompt as PromptFile };
 /** Files that exist beside the rubrics, for the cross-field checks (prompt, bench). A build-time list; the test compares it with the disk. */
 const KNOWN_FILES = new Set<string>(Object.keys(RUBRIC_PROMPTS).map((id) => `${id}/prompt.json`));
 export const knownFile = (rel: string): boolean => KNOWN_FILES.has(rel);
@@ -53,7 +54,7 @@ export const getRubric = (id: string): Rubric | null => RUBRIC_BY_ID.get(id) ?? 
 export const unitsOf = (r: Rubric): RubricUnit[] => [...new Set<RubricUnit>([r.unit, ...(r.units ?? [])])];
 
 /** The llm_zdr rubrics whose engine exists (S7-1). A new llm_zdr rubric is not runnable until it is listed here with its engine. */
-export const LLM_WIRED: ReadonlySet<string> = new Set(["consult_chair_affect", "consult_surgical_pitch", "encounter_vs_record"]);
+export const LLM_WIRED: ReadonlySet<string> = new Set(["consult_chair_affect", "consult_surgical_pitch", "encounter_vs_record", "ehrc_surgical_outcome"]);
 
 export type RunRefusal = { ok: false; error: "unknown_rubric" | "lab_required" | "engine_not_available" | "unit_not_supported"; detail?: string };
 /** May this rubric run on these units? Pure. A non-production rubric needs lab:true (and explicit units); an llm_zdr / jev engine does not run in this slice. */
