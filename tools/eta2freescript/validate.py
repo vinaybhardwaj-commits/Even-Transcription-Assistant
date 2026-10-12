@@ -10,7 +10,8 @@ G-rule still runs unchanged and a v0.1 consumer can read the projection, and (c)
      gp_extraction entry does not also name. G6 checks a line names its entry, not that it names nothing else.
      A drug absent from the whole artifact cannot be caught without a lexicon; the judge's stage_b_additions counts it.
 v0.3 artifacts: the same projection, plus the finished-prescription rules FRX-* in this file
-(docs/eta2freescript/FINISHED-RX-SPEC.md section 7). FRX-M8 is a warning and does not block the write.
+(docs/eta2freescript/FINISHED-RX-SPEC.md section 7), plus the post-run medication safety rules M9-M13.
+M8 is upgraded to blocking. D4 is advisory and does not block the write.
 
   python -m tools.eta2freescript validate FILE...
 """
@@ -27,6 +28,7 @@ import jsonschema
 
 from .followup import add_interval
 from .guard import CONTINUE_QUOTE, NUM_WORDS, NUM_WORDS_HI, numerals
+from .medication_safety import dose_bound, molecules, native_supports, plausible_strength, resolvable, same_molecules
 
 PKG = Path(__file__).resolve().parent
 VENDOR = PKG / "vendor" / "freescript-w38"
@@ -55,15 +57,11 @@ FOLLOW_TYPES = {
 }
 COMPLETION_KINDS = {
     "pick_drug", "dose_unstated", "drug_history", "exam_missing", "follow_up_unstated", "follow_up_missing",
-    "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review",
+    "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review", "lab_dx_conflict",
 }
 ORDER_KINDS = {"medicine", "investigation", "procedure", "referral"}
 SPEAKERS = {"doctor", "patient", "attendant", "staff", "other", "unknown"}
 CLASS_WORDS = {"statin", "antibiotic", "painkiller", "ppi", "antacid", "vitamin", "medicine", "tablet", "syrup", "cream", "gel", "drops"}
-CATALOGUE = {
-    "paracetamol", "ibuprofen", "amoxicillin", "clavulanic", "pantoprazole", "metformin", "bisoprolol",
-    "telmisartan", "amlodipine", "atorvastatin", "diclofenac", "glimepiride",
-}
 FORM_PREFIX = re.compile(r"^(tab|tablet|cap|capsule|syp|syrup|inj|injection)\b", re.I)
 ICD = re.compile(r"^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4})?$")
 SEG = re.compile(r"^[^:]+:\d+$")
@@ -300,7 +298,7 @@ def _part_state(part) -> str | None:
 
 
 def frx(art: dict) -> list[str]:
-    """Finished-prescription rules. FRX-M8 is included here and filtered out of check()."""
+    """Finished-prescription and medication safety rules. FRX-D4 is advisory and filtered out of check()."""
     e: list[str] = []
     gx = art.get("gp_extraction") if isinstance(art.get("gp_extraction"), dict) else {}
     prov = art.get("provenance") if isinstance(art.get("provenance"), list) else []
@@ -478,8 +476,55 @@ def frx(art: dict) -> list[str]:
             quote = str((owners[0].get("decision") or {}).get("quote") or "")
             if not (med.get("explicit_continue") is True and CONTINUE_QUOTE.search(quote)):
                 e.append(f"FRX-M6 /medicines/{i} continued without explicit_continue and a continuation quote")
-        if not (m.get("aliases") or []) and not _catalogue_hit(name):
-            e.append(f"FRX-M8 (WARN) /medicines/{i} name has no alias and no catalogue hit")
+        if not resolvable(name):
+            e.append(f"FRX-M8 /medicines/{i} name has no alias and no catalogue hit")
+        if not resolvable(name):
+            e.append(f"FRX-M10 /medicines/{i}/name does not resolve to the medication catalogue")
+        source_names = [str(m.get("raw_name") or "")] + [str(x) for x in (m.get("aliases") or [])]
+        for source_name in source_names:
+            if source_name and not resolvable(source_name):
+                e.append(f"FRX-M10 /medicines/{i} raw_name or alias does not resolve to the medication catalogue")
+                break
+            if source_name and not same_molecules(name, source_name):
+                source_molecules = molecules(source_name) or frozenset()
+                name_molecules = molecules(name) or frozenset()
+                grouped = frozenset().union(*(
+                    molecules(str(other.get("name") or "")) or frozenset()
+                    for other in meds
+                    if isinstance(other, dict) and any(
+                        molecules(str(candidate or "")) == source_molecules
+                        for candidate in [other.get("raw_name"), *(other.get("aliases") or [])]
+                    )
+                ))
+                if not (len(source_molecules) > 1 and name_molecules <= source_molecules and grouped == source_molecules):
+                    e.append(f"FRX-M11 /medicines/{i} name and heard brand resolve to different molecules")
+                    break
+        if owners:
+            heard = source_names + [str(x) for x in (owners[0].get("names") or [])]
+            native = " ".join(str(ev.get("quote_native") or "") for ev in (owners[0].get("evidence") or []) if isinstance(ev, dict)).strip()
+            vals = [str(m.get(k) or "") for k in ("name", "frequency", "duration", "instructions")]
+            st_text = str(st.get("text") or "")
+            if st_text:
+                vals.append(st_text)
+            if native and not native_supports(name, vals, native):
+                e.append(f"FRX-M9 /medicines/{i} name or number is not supported by quote_native")
+            quotes = _quotes(owners[0]) + [
+                str(ev.get("quote_native"))
+                for ev in (owners[0].get("evidence") or [])
+                if isinstance(ev, dict) and ev.get("quote_native")
+            ]
+            bound_values = [
+                ("strength", st_text, med.get("dosage_form")),
+                ("frequency", str(m.get("frequency") or ""), None),
+                ("duration", str(m.get("duration") or ""), None),
+            ]
+            for field, value, form in bound_values:
+                if value and not dose_bound(name, heard, value, quotes, form):
+                    e.append(f"FRX-M12 /medicines/{i} {field} is not bound to this drug in one clause")
+            if st_text and not plausible_strength(name, st_text):
+                e.append(f"FRX-M13 /medicines/{i} strength is outside the molecule plausibility range")
+            if "implausible_strength" in (owners[0].get("flags") or []) and st.get("evidence_state") != "not_said_in_room":
+                e.append(f"FRX-M13 /medicines/{i} implausible strength was not removed")
 
     for p in prov:
         if not isinstance(p, dict):
@@ -509,7 +554,10 @@ def frx(art: dict) -> list[str]:
             blob_exp = " ".join(numerals(str(ev.get("quote") or ""), (ev.get("lang") or "en")) for ev in (s.get("evidence") or []) if isinstance(ev, dict))
             if field in ("frequency", "duration", "strength"):
                 _m3(e, f"/slots/{j}/{field}", val, blob_raw, blob_exp)
-        if not heard:
+        safety_flags = set(s.get("flags") or []) & {
+            "translation_conflict", "unresolved_name", "molecule_conflict", "dose_binding_conflict",
+        }
+        if not heard and not safety_flags:
             e.append(f"FRX-S1 /slots/{j} needs at least one heard_in_room part")
         sid = s.get("slot_id")
         hits = [c for c in comp if c.get("kind") == "pick_drug" and c.get("item_id") == sid]
@@ -599,6 +647,18 @@ def frx(art: dict) -> list[str]:
                     e.append(f"FRX-D2 diagnoses/{i} icd10 code appears inside diagnosis_or_impression")
             if i > 0 and SYMPTOM_LIKE.search(str(d.get("diagnosis_or_impression") or "")) and diag.get("doctor_named") is not True:
                 e.append(f"FRX-D3 diagnoses/{i} symptom-like secondary needs doctor_named")
+    labels = [str((d or {}).get("diagnosis_or_impression") or "").lower() for d in dxs if isinstance(d, dict)]
+    if any(re.search(r"\bpre[- ]?diabet", x) for x in labels):
+        vitals = ((art.get("room_facts") or {}).get("vitals") if isinstance(art.get("room_facts"), dict) else None) or []
+        for v in vitals:
+            if not isinstance(v, dict) or not re.search(r"\bhba1c\b|\bhb\s*a1c\b|glycated", str(v.get("name") or ""), re.I):
+                continue
+            m = re.search(r"\d+(?:\.\d+)?", str(v.get("value") or ""))
+            if m and float(m.group(0)) >= 6.5:
+                covered = any(c.get("kind") == "lab_dx_conflict" for c in comp if isinstance(c, dict))
+                suffix = "" if covered else " and completion_required lab_dx_conflict is missing"
+                e.append("FRX-D4 (WARN) heard HbA1c >= 6.5 conflicts with a pre-diabetes label" + suffix)
+                break
 
     pom = gx.get("plan_of_management") if isinstance(gx.get("plan_of_management"), dict) else {}
     recs = pom.get("surgery_or_procedure_recommendations") if isinstance(pom.get("surgery_or_procedure_recommendations"), list) else []
@@ -714,11 +774,6 @@ def _class_name(name: str) -> bool:
     return tok in CLASS_WORDS or n in CLASS_WORDS
 
 
-def _catalogue_hit(name: str) -> bool:
-    toks = set(re.findall(r"[a-z]{4,}", name.lower()))
-    return bool(toks & CATALOGUE)
-
-
 def _m3(e, where, value, raw, expanded):
     if value is None:
         return
@@ -773,7 +828,7 @@ def check(art: dict) -> list[str]:
         except Exception as ex:
             errs.append(f"v0.1 projection: {type(ex).__name__}: {ex}")
         _c_rules(art, errs, slots=True)
-        errs += [x for x in frx(art) if not x.startswith("FRX-M8")]
+        errs += [x for x in frx(art) if not x.startswith("FRX-D4")]
         return errs
     errs = _schema_errors(art, schema_v02(), "schema-v0.2")
     if errs:

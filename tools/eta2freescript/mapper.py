@@ -35,9 +35,10 @@ from .followup import add_interval, map_follow_up
 from .guard import CONTINUE_QUOTE, NON_DOCTOR, NUM_WORDS, NUM_WORDS_HI, numerals, rx_turns
 from .ingest import Consult
 from .note import FILLER, drop_clauses, scrub_identity
+from .medication_safety import dose_bound, molecules, native_supports, plausible_strength, resolvable
 from .validate import CLASS_WORDS as V_CLASS, DEPT, DR_NAME, SLOT_STOP, V
 
-MAPPER_VERSION = "2.3.0"
+MAPPER_VERSION = "2.4.0"
 SCHEMA_VERSION = "eta.freescript.v0.3"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_SECONDARY_DX = 3
@@ -346,8 +347,11 @@ class Builder:
         for t in self._pick_turns(turns, lead, cap):
             s = self.c.turns[t]
             spk = s.role if s.role in SPEAKERS else "unknown"
-            out.append({"segment_ref": f"{self.c.uid}:{t}", "t0": iso(s.t0_ms), "t1": iso(s.t1_ms),
-                        "quote_en": s.text, "quote": s.text, "lang": s.lang, "speaker": spk, "speaker_source": src})
+            ev = {"segment_ref": f"{self.c.uid}:{t}", "t0": iso(s.t0_ms), "t1": iso(s.t1_ms),
+                  "quote_en": s.text, "quote": s.text, "lang": s.lang, "speaker": spk, "speaker_source": src}
+            if s.native_text:
+                ev["quote_native"] = s.native_text
+            out.append(ev)
         return out
 
     @staticmethod
@@ -446,6 +450,50 @@ class Builder:
         if all(r in NON_DOCTOR for r in roles):
             return False
         return True
+
+    def _medicine_safety(self, rx: dict, name: str, turns, lead) -> tuple[dict, list[str]]:
+        """Return a copy with unsafe dose fields removed, plus flags that hold out the name."""
+        out = dict(rx)
+        flags: list[str] = []
+        brand = str(out.get("brand_as_said") or "").strip()
+        generic = str(out.get("generic") or "").strip()
+        emitted = name
+        components = components_of(out) or []
+        component_names = [str(x.get("generic") or "") for x in components]
+        emitted_ok = all(resolvable(x) for x in component_names) if component_names else resolvable(emitted)
+        if not emitted_ok or (brand and not resolvable(brand)):
+            flags.append("unresolved_name")
+        checks = component_names or ([generic] if generic else [])
+        if brand and resolvable(brand) and checks:
+            heard_molecules = molecules(brand)
+            mapped_molecules = frozenset().union(*(molecules(x) or frozenset() for x in checks))
+            if not mapped_molecules or mapped_molecules != heard_molecules:
+                flags.append("molecule_conflict")
+        picked = self._pick_turns(turns, lead)
+        native = " ".join(self.c.turns[t].native_text or "" for t in picked).strip()
+        values = [str(out.get(k) or "") for k in ("strength", "frequency", "duration", "instructions", "route")]
+        native_names = component_names or [emitted]
+        if native and any(not native_supports(x, values, native) for x in native_names):
+            flags.append("translation_conflict")
+        quotes = [text for t in picked for text in (self.c.turns[t].text, self.c.turns[t].native_text) if text]
+        aliases = [x for x in (brand, generic, *component_names) if x]
+        for field in ("strength", "frequency", "duration"):
+            value = out.get(field)
+            binding_name = brand or (component_names[0] if component_names else emitted)
+            if value and not dose_bound(binding_name, aliases, str(value), quotes, out.get("dosage_form") if field == "strength" else None):
+                out[field] = None
+                flags.append("dose_binding_conflict")
+        plausibility_name = brand or (component_names[0] if len(component_names) == 1 else emitted)
+        if out.get("strength") and not plausible_strength(plausibility_name, str(out["strength"])):
+            out["strength"] = None
+            flags.append("implausible_strength")
+        return out, flags
+
+    def _unsafe_slot(self, rx: dict, turns, lead, flags: list[str]) -> None:
+        self.slot({"dosage_form": rx.get("dosage_form"), "frequency": rx.get("frequency"), "duration": rx.get("duration"),
+                   "timing": rx.get("instructions"), "strength": None, "drug_class_said": None,
+                   "source_turns": turns, "confidence": min(float(rx.get("confidence") or 0.5), 0.5),
+                   "quote_turn": lead if isinstance(lead, int) else None, "_flags": flags}, lead=lead)
 
     conf_of = staticmethod(lambda it: 0.8 if it.get("basis") == "said" else 0.55)
 
@@ -654,6 +702,14 @@ class Builder:
                 if state == "inferred":
                     self.review("inferred_confirm", held, f"Confirm {label}", label)
                 continue
+            rx, safety = self._medicine_safety(rx, name, turns, dec)
+            fl.extend(safety)
+            hard = {"translation_conflict", "unresolved_name", "molecule_conflict", "dose_binding_conflict"}
+            if hard & set(safety):
+                self._unsafe_slot(rx, turns, dec, safety)
+                self.P("medicine", f"[held_back_unsafe_medicine] {label}", "discussed_only", turns, 0.5, None,
+                       safety, names=[x for x in names if x], lead=dec)
+                continue
             parts = components_of(rx)
             if parts and len(parts) >= 2:
                 for part in parts:
@@ -745,6 +801,7 @@ class Builder:
         return {"strength": strength, "frequency": self._heard_part(rx.get("frequency")),
                 "duration": self._heard_part(rx.get("duration")),
                 "timing": self._heard_part(rx.get("instructions") or rx.get("route")),
+                "dosage_form": rx.get("dosage_form"),
                 "explicit_continue": explicit}
 
     def _emit_medicine(self, rx, generic, brand, strength, turns, dec, action, meds, names):
@@ -803,7 +860,7 @@ class Builder:
         if self.quarantined(turns):
             self.quarantine("medicine", "unnamed drug in a quarantined turn", turns, names=[], lead=lead)
             return
-        if not any(s.get(k) for k in ("dosage_form", "frequency", "duration", "timing", "strength", "drug_class_said", "indication_said")):
+        if not any(s.get(k) for k in ("dosage_form", "frequency", "duration", "timing", "strength", "drug_class_said", "indication_said")) and not s.get("_flags"):
             return
         self.n += 1
         sid = f"slot{self.n}"
@@ -821,10 +878,12 @@ class Builder:
             "indication": self._slot_part(s.get("indication_said")),
             "strength": self._slot_part(s.get("strength")),
         }
-        if not any(p.get("evidence_state") == "heard_in_room" for p in parts.values()):
+        if not any(p.get("evidence_state") == "heard_in_room" for p in parts.values()) and not s.get("_flags"):
             return
         slot = {"slot_id": sid, **parts, "decision": dec, "evidence": ev,
                 "confidence": min(float(s.get("confidence") or 0.5), 0.5), "json_pointer": None}
+        if s.get("_flags"):
+            slot["flags"] = sorted(set(str(x) for x in s["_flags"] if x))
         self.slots.append(slot)
         detail = " ".join(x for x in [
             parts["form"].get("text"), parts["frequency"].get("text"),
@@ -1198,6 +1257,7 @@ class Builder:
         self.follow_up()
         self.boundary()
         self.room_facts()
+        self.lab_dx_conflicts()
         self._scrub_free_text()
         self._scrub_identity()
         return self.gx, self.prov
@@ -1241,6 +1301,26 @@ class Builder:
             vitals.append({"name": str(it.get("name") or "")[:40], "value": str(it.get("value") or "")[:40]})
             self.P("vital", f"{it.get('name') or 'vital'} {it.get('value') or ''}".strip(), "discussed_only", self.turns(it), 0.8, None)
         self.facts = {"allergies": allergies, "vitals": vitals}
+
+    def lab_dx_conflicts(self) -> None:
+        """Warn, but do not rewrite, when a heard diagnostic lab crosses a deterministic label threshold."""
+        labels = [
+            str(d.get("diagnosis_or_impression") or "").lower()
+            for d in ((self.gx.get("presenting_complaints") or {}).get("diagnoses") or [])
+            if isinstance(d, dict)
+        ]
+        if not any(re.search(r"\bpre[- ]?diabet", x) for x in labels):
+            return
+        for v in self.enc.get("vitals") or []:
+            if not isinstance(v, dict) or not re.search(r"\bhba1c\b|\bhb\s*a1c\b|glycated", str(v.get("name") or ""), re.I):
+                continue
+            m = re.search(r"\d+(?:\.\d+)?", str(v.get("value") or ""))
+            if not m or float(m.group(0)) < 6.5:
+                continue
+            turns = self.unquarantined(self.turns(v))
+            item = self.P("diagnosis", "[lab_dx_conflict] heard HbA1c conflicts with the diagnosis label",
+                          "discussed_only", turns, 0.5, None, ["lab_dx_conflict"])
+            self.review("lab_dx_conflict", item, "Review diagnosis against the heard HbA1c")
 
     def _scrub_free_text(self) -> None:
         """A kept-out drug named inside an order's free text fails C4, including on the deterministic note."""

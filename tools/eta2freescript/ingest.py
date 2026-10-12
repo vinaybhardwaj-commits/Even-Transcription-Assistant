@@ -38,6 +38,8 @@ class Turn:
     speaker: str  # Sarvam diarisation label, e.g. "0"
     text: str
     lang: str = "en"
+    native_text: str | None = None
+    native_lang: str | None = None
     role: str = "unknown"  # artifact speaker vocabulary (ARTIFACT_SPEAKER values)
     role_source: str = "none"  # role_track | model_inferred | none
 
@@ -93,6 +95,36 @@ def _segments(raw: dict, stt: dict | None, english: str) -> tuple[list[dict], st
             return eng, "native" if lang == "en" else f"mt:{raw.get('model_translate') or 'sarvam'}"
         raise ValueError(f"{raw.get('consult_uid')}: transcript has no segments")
     return native, "native" if lang == "en" else f"none:native-{lang}"
+
+
+def _native_span(g: dict, native: list[dict], default_lang: str) -> tuple[str | None, str | None]:
+    """Join overlapping native segments for one English segment. Prefer the same diarisation speaker."""
+    try:
+        a, b = int(g["t0_ms"]), int(g["t1_ms"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    sp = _label(g.get("speaker_id", g.get("speaker")))
+    hits = []
+    for n in native:
+        try:
+            na, nb = int(n["t0_ms"]), int(n["t1_ms"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        overlap = min(b, nb) - max(a, na)
+        if overlap <= 0:
+            continue
+        nsp = _label(n.get("speaker_id", n.get("speaker")))
+        native_share = overlap / max(1, nb - na)
+        hits.append((nsp == sp, overlap, native_share, na, n))
+    if not hits:
+        return None, None
+    same = [h for h in hits if h[0]]
+    pool = same or hits
+    use = [h for h in pool if h[2] >= 0.5] or [max(pool, key=lambda h: h[1])]
+    use.sort(key=lambda h: h[3])
+    text = ". ".join(str(h[4].get("text") or "").strip() for h in use if str(h[4].get("text") or "").strip())
+    langs = [str(h[4].get("lang") or default_lang).split("-")[0] for h in use]
+    return (text or None), (langs[0] if text and langs else None)
 
 
 def _label(v) -> str | None:
@@ -171,6 +203,7 @@ def load_consult(data_dir: Path, uid: str, english: str = "auto", use_role_track
     if raw is None:
         raise FileNotFoundError(f"{d}/transcript.json not found")
     segs, english_source = _segments(raw, _read(d / "stt.json"), english)
+    native = raw.get("native_segments") or (_read(d / "stt.json") or {}).get("segments") or []
     clip = raw.get("clip") or {}
     lang = (raw.get("language_code") or "und")
     turns = []
@@ -179,8 +212,11 @@ def load_consult(data_dir: Path, uid: str, english: str = "auto", use_role_track
         if not text:
             continue
         sp = _label(g.get("speaker_id", g.get("speaker")))
+        nt, nl = (None, None)
+        if english_source.startswith("mt:"):
+            nt, nl = _native_span(g, native, lang)
         turns.append(Turn(idx=len(turns), t0_ms=int(g["t0_ms"]), t1_ms=int(g["t1_ms"]), speaker=sp if sp is not None else "?",
-                          text=text, lang=(g.get("lang") or lang).split("-")[0]))
+                          text=text, lang=(g.get("lang") or lang).split("-")[0], native_text=nt, native_lang=nl))
     if not turns:
         raise ValueError(f"{uid}: transcript has no non-empty segments")
     t0 = int(clip.get("t0_ms") or turns[0].t0_ms)
@@ -207,5 +243,8 @@ def format_transcript(c: Consult, quarantined: set[int] = frozenset()) -> str:
         rel = max(0, (t.t0_ms - c.clip_t0_ms) // 1000)
         who = f"S{t.speaker}" + (f"|{t.role}" if t.role_source == "role_track" else "")
         q = " [QUARANTINED: possible other consult]" if t.idx in quarantined else ""
-        out.append(f"T{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} {t.text}")
+        if t.native_text:
+            out.append(f"T{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} NATIVE[{t.native_lang or c.lang}]: {t.native_text} | ENGLISH: {t.text}")
+        else:
+            out.append(f"T{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} {t.text}")
     return "\n".join(out)
