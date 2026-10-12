@@ -21,7 +21,8 @@ def pct(a: int, b: int) -> str:
     return f"{a}/{b} ({100 * a / b:.0f}%)" if b else "n/a"
 
 
-COMPLETION_KINDS = ("regimen_slot", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated", "boundary_review")
+COMPLETION_KINDS = ("regimen_slot", "pick_drug", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated",
+                     "follow_up_missing", "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review")
 
 
 def head(rs: list[dict]) -> dict:

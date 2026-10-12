@@ -1,7 +1,7 @@
-# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.1.0 · stageB-v4 · eta.freescript.v0.2)
+# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.2.0 · stageB-v4 · eta.freescript.v0.3)
 
 Turns one isolated OPD consult (an ETA cut clip with its Sarvam transcript and, when present, the REB `role.llm-roles`
-track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.2` artifact holding `gp_extraction`
+track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.3` artifact holding `gp_extraction`
 (= `pulsepb.GPLlmExtraction`), `note_text` under the 11 FreeScript headings, per-item `provenance`, a
 `completion_required` list for the doctor, and a `clip_boundary` verdict.
 
@@ -37,7 +37,7 @@ mapper.py           hold-back, coarser-parent diagnoses, unspoken routine panels
         ▼
 Stage B  prompts/stageB-v4.md (Bedrock Sonnet, input = gp_extraction + flags only) → note_text
         ▼
-sanitize_note → validate.py (v0.2 schema + vendored G1–G6 on the v0.1 projection + C1–C4)
+sanitize_note → validate.py (v0.3 schema + vendored G1–G6 on the v0.1 projection + C1–C4 + FRX-*)
         │  LLM note invalid (or the call failed) → deterministic note_text. Still invalid → artifact NOT written.
         ▼
 <out>/<uid>/artifact.json  (+ artifact.v0.1.json projection, artifact.validation.json, encounter.json, stageA.raw.txt)
@@ -160,21 +160,25 @@ Unset bearer tokens are 503 `not_configured`. A mismatch is 401.
 Nothing in it is ever guessed into `gp_extraction`.
 
 ```json
-{"kind": "regimen_slot", "item_id": "med7", "prompt": "Name this drug", "detail": "form=gel; frequency=twice a day; ..."}
+{"kind": "pick_drug", "item_id": "slot7", "prompt": "Name this drug", "detail": "gel twice a day x two weeks"}
 ```
 
-| kind | raised when | the provenance item (`json_pointer: null`) |
+| kind | raised when | where it points |
 |---|---|---|
-| `regimen_slot` | a regimen was said without a drug name ("apply this gel twice a day") | `[regimen_slot] Name this drug - form=…; frequency=…; duration=…` |
-| `drug_history` | a current drug the doctor discussed continuing or stopping, or a current chronic medicine whose history names a diagnosis or comorbidity, and the doctor did not already continue it. A near-miss brand of a continued drug (Concord / Concor) is the same drug and raises no prompt. Names that are not catalogue-like are one shared note, not one prompt each | `[drug_history] <name>`; prompt `Continue <name>?`, or one `Patient mentioned other medicines` |
+| `pick_drug` | a regimen was said without a drug name ("apply this gel twice a day") | a `slots[]` entry (`json_pointer` null), not a guessed medicine |
+| `drug_history` | a current patient-reported catalogue drug the doctor did not already order. A near-miss brand of an ordered drug (Concord / Concor) is the same drug and raises no prompt. Names that are not catalogue-like are one shared note, not one prompt each | `[drug_history] <name>`; prompt `Continue <name>?`, or one `Patient mentioned other medicines` |
 | `exam_missing` | no examination finding was said aloud, or a part was examined with no finding said | `[exam_missing] …` |
 | `dose_unstated` | an emitted medicine has no stated strength, frequency or duration | `[dose_unstated] <name> - strength, duration not said aloud`; `detail` = the medicine's item_id |
-| `follow_up_unstated` | a follow-up was said with no interval or date (type not IF_REQUIRED) | `[follow_up_unstated] …` |
+| `follow_up_unstated` | a follow-up was said with no interval or date (type not IF_REQUIRED) | `[follow_up_unstated] …`; `detail` = the follow-up item_id |
+| `follow_up_missing` | nothing about follow-up was heard. No default is invented | a kept-out follow-up item, `evidence_state` `not_said_in_room` |
+| `surgery_confirm` | a procedure was discussed only conditionally ("if not better") | the conditional procedure item; it is not a recommendation and the surgery flag stays false |
+| `inferred_confirm` | an inferred order or diagnosis, offered for one tap | the inferred item (`json_pointer` null, confidence ≤ 0.6) |
+| `allergy_check` | an allergy was heard in the room | the allergy item in `room_facts` |
 | `boundary_review` | the clip may hold another patient's consult | the first `boundary_quarantined` item, or a `clip_boundary` item when nothing was quarantined; `detail` = the reasons |
 
 Guarantees, enforced by the validator:
 
-- every `item_id` resolves to a provenance item with `json_pointer: null` (C1);
+- every `item_id` resolves to a kept-out provenance item or to a pick-drug slot (C1, FRX-C1);
 - nothing quarantined is in `gp_extraction` (C2);
 - the note never names a kept-out order (G6 + C4).
 
@@ -236,8 +240,11 @@ fails if the committed file is stale (`python -m tools.eta2freescript.schema.bui
      60 MONTHS). v0.2 deliberately does NOT widen the unit, so every v0.2 `gp_extraction` stays valid against v0.1.
    - Cost of following the vendor: the doctor's unit is lost ("60 months" where they said "5 years"), and the 1–1000
      range caps a duration at 83 years; anything longer is kept in provenance only.
-   - **Open for Pulse:** reconcile `evenpb.DurationUnit` with the w38 artifact schema. If YEARS is the intended
-     contract, v0.3 should widen `LlmDuration.unit` and drop the conversion. Covered by `tests/test_schema_notes.py`.
+   - **Decision (open question 1, 2026-10-12).** The default stays MONTHS×12, because that passes both the vendored
+     w38 schema and Pulse. v0.3's schema allows `YEARS`. Set `ETA_FREESCRIPT_EMIT_YEARS=1` to emit YEARS once Pulse
+     confirms; unset or `0` keeps the conversion. An unrecognised value raises. `to_v01` rewrites a representable
+     YEARS value back to MONTHS×12 so the w38 validator still passes. 90 YEARS is not representable as MONTHS
+     (1080 > 1000) while the switch is off.
 
 ## Pulse-side needs (owned by Pulse)
 

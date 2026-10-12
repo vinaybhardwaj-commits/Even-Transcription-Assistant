@@ -44,7 +44,7 @@ def art_of(c=None, b=None, **enc):
 def test_said_order_with_doctor_decision_is_emitted():
     a = art_of(prescription=[rx()])
     assert [m["name"] for m in a["gp_extraction"]["medicines"]] == ["paracetamol 500 mg"]
-    assert a["completion_required"] == []
+    assert kinds(a) == ["follow_up_missing"]
 
 
 @pytest.mark.parametrize("change,why", [({"basis": "inferred"}, "no doctor decision turn"), ({"decision_turn": None}, "no doctor decision turn"),
@@ -125,9 +125,9 @@ def test_near_duplicate():
 
 def test_exam_missing_when_nothing_said():
     a = art_of(examination=[])
-    assert kinds(a) == ["exam_missing"] and kept(a, "[exam_missing]")
+    assert kinds(a) == ["exam_missing", "follow_up_missing"] and kept(a, "[exam_missing]")
     a = art_of(examination=[{"performed": "Abdomen", "finding": None, "basis": "said", "source_turns": [3]}])
-    assert kinds(a) == ["exam_missing"] and a["completion_required"][0]["detail"] == "Abdomen"
+    assert kinds(a) == ["exam_missing", "follow_up_missing"] and a["completion_required"][0]["detail"] == "Abdomen"
     assert "examination" not in a["gp_extraction"]
 
 
@@ -137,28 +137,28 @@ def test_dose_unstated_review():
                prescription=[rx(strength=None, duration=None, decision_turn=1, source_quote_turn=1, source_turns=[1])])
     assert a["gp_extraction"]["medicines"][0]["name"] == "paracetamol"
     c = a["completion_required"]
-    assert kinds(a) == ["dose_unstated"] and "strength, duration" in c[0]["prompt"]
+    assert kinds(a) == ["dose_unstated", "follow_up_missing"] and "strength, duration" in c[0]["prompt"]
 
 
 def test_unnamed_drug_becomes_regimen_slot_never_a_medicine():
     a = art_of(prescription=[rx(generic=None, brand_as_said="tablet", strength=None)],
                regimen_slots=[{"dosage_form": "cream", "frequency": "twice a day", "duration": None, "quote_turn": 4, "source_turns": [4]}])
     assert "medicines" not in a["gp_extraction"]
-    assert kinds(a) == ["regimen_slot", "regimen_slot"]
-    assert all(c["prompt"] == "Name this drug" for c in a["completion_required"])
-    assert len(kept(a, "[regimen_slot] Name this drug")) == 2
+    assert kinds(a) == ["pick_drug", "pick_drug", "follow_up_missing"]
+    assert all(c["prompt"] == "Name this drug" for c in a["completion_required"] if c["kind"] == "pick_drug")
+    assert len(a["slots"]) == 2
 
 
-def test_drug_history_continue_prompt_needs_a_doctor_signal():
+def test_drug_history_continue_prompt_for_an_unaddressed_current_drug():
     mentioned = [{"name_as_said": "amlodipine", "text": "Takes amlodipine", "current": True, "reported_by": "attendant", "source_turns": [2]}]
     a = art_of(drug_history=mentioned)
-    assert "drug_history" not in kinds(a)
+    assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in a["completion_required"])
     discussed = [{"name_as_said": "amlodipine", "text": "Continue amlodipine", "current": True, "reported_by": "doctor", "source_turns": [4]}]
     lines = [(0, 4, "0", "What is the problem?"), (5, 10, "1", "Fever."), (11, 15, "2", "He takes amlodipine."),
              (16, 20, "0", "Throat is red."), (21, 30, "0", "Continue the amlodipine.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [3]}],
                drug_history=discussed)
-    assert kinds(a) == ["drug_history"] and a["completion_required"][0]["prompt"] == "Continue amlodipine?"
+    assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in a["completion_required"])
     a = art_of(drug_history=mentioned, prescription=[rx(generic="amlodipine", brand_as_said="Amlong", strength="5 mg", decision_turn=4, source_turns=[2, 4])])
     assert "drug_history" not in kinds(a)
 
@@ -181,7 +181,8 @@ def test_boundary_quarantined_orders_kept_out_with_review():
     assert "medicines" not in gx and "further_investigations" not in gx
     q = [p for p in a["provenance"] if "boundary_quarantined" in p["flags"]]
     assert len(q) == 2 and all(p["json_pointer"] is None for p in q)
-    assert kinds(a) == ["boundary_review"] and a["completion_required"][0]["item_id"] == q[0]["item_id"]
+    review = next(c for c in a["completion_required"] if c["kind"] == "boundary_review")
+    assert review["item_id"] == q[0]["item_id"]
     assert a["clip_boundary"] == {"suspected": True, "quarantined_turns": [2], "reasons": ["role_track_two_consults"]}
 
 
@@ -190,7 +191,7 @@ def test_boundary_suspected_without_quarantine_gets_a_clip_item():
     b.add("role_track_two_consults:no_gap")
     a = art_of(b=b)
     cb = [p for p in a["provenance"] if p["kind"] == "clip_boundary"]
-    assert len(cb) == 1 and kinds(a) == ["boundary_review"]
+    assert len(cb) == 1 and "boundary_review" in kinds(a)
 
 
 def test_years_become_months_and_cap():
@@ -250,9 +251,9 @@ def test_combination_brand_splits_into_components_and_keeps_the_brand():
         generic=None, brand_as_said="Augmentin 625", strength="625 mg", frequency="twice a day", duration="5 days",
         decision_turn=0, source_quote_turn=0, source_turns=[0])])
     meds = a["gp_extraction"]["medicines"]
-    assert [m["name"] for m in meds] == ["amoxicillin 500 mg", "clavulanic acid 125 mg"]
+    assert [m["name"] for m in meds] == ["amoxicillin", "clavulanic acid"]
     assert all(m["raw_name"] == "Augmentin 625" and m["aliases"] == ["Augmentin 625"] for m in meds)
-    assert "dose_unstated" not in kinds(a)
+    assert "dose_unstated" in kinds(a)
 
 
 def test_telma_am_and_a_generic_plus_split_and_ascoril_stays_one():

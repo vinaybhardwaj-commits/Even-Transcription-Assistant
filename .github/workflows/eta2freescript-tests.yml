@@ -22,6 +22,8 @@ jobs:
         run: python -m pip install -r tools/eta2freescript/requirements.txt
       - name: v0.2 schema matches its generator
         run: python -m tools.eta2freescript.schema.build_v02 --check
+      - name: v0.3 schema matches its generator
+        run: python -m tools.eta2freescript.schema.build_v03 --check
       - name: Vendored validator self-test and examples
         run: python tools/eta2freescript/vendor/freescript-w38/validate_artifact.py tools/eta2freescript/vendor/freescript-w38/examples/*.json
       - name: Unit tests (synthetic fixtures, mocked model calls)

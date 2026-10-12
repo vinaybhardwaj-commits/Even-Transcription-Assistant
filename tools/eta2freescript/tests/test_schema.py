@@ -13,6 +13,12 @@ def test_committed_v02_schema_is_up_to_date():
     assert build_v02.main(["--check"]) == 0
 
 
+def test_committed_v03_schema_is_up_to_date():
+    from tools.eta2freescript.schema import build_v03
+    assert build_v03.main(["--check"]) == 0
+    assert build_v03.build()["properties"]["schema_version"]["const"] == "eta.freescript.v0.3"
+
+
 def test_v02_speakers_flags_and_kinds():
     s = schema_v02()
     d = s["$defs"] if "$defs" in s else s["definitions"]

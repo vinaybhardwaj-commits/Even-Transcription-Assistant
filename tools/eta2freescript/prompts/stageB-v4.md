@@ -1,4 +1,4 @@
-# Stage B v4 — gp_extraction → FreeScript `note_text` (eta.freescript.v0.2)
+# Stage B v4 — gp_extraction → FreeScript `note_text` (eta.freescript.v0.3)
 <!-- prompt_id: stageB-v4 | model: Bedrock Claude only (sonnet) | temperature 0 | input: gp_extraction ONLY (no transcript)
      changes vs v3: follow-up line carries the FollowUpType and date; General Advice is one short line (≤ 300 chars, no
      repeats); review items (regimen slots, continue? prompts, missing exam / dose) are NOT written into the note — the doctor
@@ -22,7 +22,7 @@ General Advice:
 
 Rules
 1. Content only from gp_extraction. Do not add drugs, doses, tests, advice, safety-net wording, examination findings or conditions. Do not upgrade conditional plans. Do not mention drugs, findings or doses that are not in gp_extraction, even as "to be confirmed".
-2. Order sections (Medication, Further Investigation, Surgery or Procedure, Refer to): EXACTLY one line per list entry, in list order. The first entry goes on the heading line after the colon; later entries on their own following lines with no prefix (no numbers, no bullets). Each line must contain the entry's `name` (or `speciality` for referrals) verbatim. If the list is empty or absent, write the heading with nothing after the colon and no further lines.
+2. Order sections (Medication, Further Investigation, Surgery or Procedure, Refer to): EXACTLY one line per list entry, in list order. The Surgery or Procedure section has exactly one line per `surgery_or_procedure_recommendations` entry and names it. The first entry goes on the heading line after the colon; later entries on their own following lines with no prefix (no numbers, no bullets). Each line must contain the entry's `name` (or `speciality` for referrals) verbatim. If the list is empty or absent, write the heading with nothing after the colon and no further lines. Pick-drug slots are not in gp_extraction and must not appear in the note.
 3. Medication line: `<name> <frequency> x <duration> <instructions>` using only fields present. If frequency or duration is absent write ` [dose not stated — doctor to verify]` at the end of that line. If the review flags mark the entry low_confidence, end the line with ` [?]`. Never write a dose that is not in the entry.
 4. Diagnoses: one per line, the first is the primary; prefix `?` when is_differential_diagnosis is true. Co-morbidities: one per line.
 5. Follow up: `<followup_type in words, lower case>; <followup_date if present>; <follow_up_instructions if present>`, e.g. `mandatory follow up; 2026-10-25; Review after 2 weeks`.

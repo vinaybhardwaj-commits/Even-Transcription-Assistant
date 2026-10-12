@@ -19,6 +19,11 @@ from .ingest import Turn
 
 DOSE_FIELDS = ("strength", "frequency", "duration", "route")
 NON_DOCTOR = {"patient", "attendant", "staff", "other"}
+# A continuation the doctor actually said. "continued" counts. Hindi cues are the ones the room uses for "keep taking".
+CONTINUE_QUOTE = re.compile(
+    r"\b(continu\w*|keep (taking|using)|same (tablet|medicine)|carry on|jaari|jari rakh\w*|chalu rakh\w*|wahi (tablet|dawai|dawa)|continue kar\w*)\b",
+    re.I,
+)
 NUM_WORDS = {"half": "0.5", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
              "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12", "fifteen": "15", "twenty": "20",
              "thirty": "30", "forty": "40", "fifty": "50", "hundred": "100", "five hundred": "500", "thousand": "1000"}

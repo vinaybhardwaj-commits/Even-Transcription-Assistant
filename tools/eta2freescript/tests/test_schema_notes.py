@@ -141,9 +141,9 @@ def test_years_become_months_times_twelve_and_pass_schema():
     assert V.check(to_v01(art)) == []
 
 
-def test_years_unit_in_gp_extraction_fails_both_schemas():
-    """A consumer that wrote YEARS into gp_extraction (Pulse's DurationUnit) would fail the vendored schema."""
-    c = mk_consult([(0, 3, "1", "Sugar for years."), (4, 8, "0", "Continue.")], roles={"0": "doctor", "1": "patient"})
+def test_years_unit_is_accepted_on_v03_and_projects_to_months():
+    """v0.3 may say YEARS. The v0.1 projection rewrites a representable value to MONTHS x 12 for the w38 validator."""
+    c = mk_consult([(0, 3, "1", "Sugar for years."), (4, 8, "0", "Continue metformin.")], roles={"0": "doctor", "1": "patient"})
     art = build_artifact(c, empty_encounter(
         comorbidities=[{"name": "Diabetes mellitus", "duration": {"value": 2, "unit": "YEARS"}, "basis": "said",
                         "source_turns": [0]}],
@@ -152,6 +152,7 @@ def test_years_unit_in_gp_extraction_fails_both_schemas():
     assert art["gp_extraction"]["comorbidities"][0]["duration"]["unit"] == "MONTHS"
     bad = copy.deepcopy(art)
     bad["gp_extraction"]["comorbidities"][0]["duration"] = {"value": 5, "unit": "YEARS"}
-    assert any("YEARS" in e or "is not one of" in e for e in check(bad))
+    assert check(bad) == [], check(bad)
     v1 = to_v01(bad)
-    assert any("YEARS" in e or "is not one of" in e for e in V.check(v1))
+    assert v1["gp_extraction"]["comorbidities"][0]["duration"] == {"value": 60, "unit": "MONTHS"}
+    assert V.check(v1) == [], V.check(v1)

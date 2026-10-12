@@ -15,7 +15,7 @@ const UID8 = /^[A-Za-z0-9]{8}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ROOM = /^[A-Za-z0-9_.\- ]{1,96}$/;
 const JOB = /^job_[A-Za-z0-9_-]{4,80}$/;
-const SCHEMAS = new Set(["eta.freescript.v0.1", "eta.freescript.v0.2"]);
+const SCHEMAS = new Set(["eta.freescript.v0.1", "eta.freescript.v0.2", "eta.freescript.v0.3"]);
 const TRANSCRIPT_KEYS = new Set([
   "segments", "english_segments", "native_segments", "transcript_text", "audio", "audio_path", "clip_url",
   "r2_key", "presigned_url", "patient_name", "patient_label",

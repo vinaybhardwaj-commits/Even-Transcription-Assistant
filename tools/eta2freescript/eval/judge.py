@@ -23,7 +23,8 @@ from ..note import filler_lines
 from ..prompts import load_prompt, parse_json
 from ..validate import check
 
-_COMPLETION_KINDS = ("regimen_slot", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated", "boundary_review")
+_COMPLETION_KINDS = ("regimen_slot", "pick_drug", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated",
+                       "follow_up_missing", "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review")
 
 JUDGE = "judge-v3"
 REF_KEYS = ("medicines", "diagnoses", "icd_codes", "investigations", "comorbidities", "advice", "plan", "follow_up")
@@ -82,7 +83,7 @@ def metrics(rec: dict, art: dict, log: dict | None = None) -> dict:
                 x["slot_k"] = None
             else:
                 used.add(x["slot_k"])
-    slots = [k for k in kept if k["text"].startswith("[regimen_slot]")]
+    slots = [k for k in kept if str(k.get("text") or "").startswith("[regimen_slot]")] + list(art.get("slots") or [])
     held = [k for k in kept if "[held_back_inferred_order]" in k["text"]]
     quarantined = [k for k in kept if "[boundary_quarantine]" in k["text"]]
     kor, cr = j.get("kept_out_review", []), j.get("completion_review", [])

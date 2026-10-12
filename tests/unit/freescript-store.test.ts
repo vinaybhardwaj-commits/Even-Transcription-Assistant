@@ -59,6 +59,12 @@ describe("migration 0157", () => {
 
 describe("validatePayload", () => {
   it("accepts a synthetic artifact", () => expect(validatePayload(payload())).toMatchObject({ ok: true }));
+  it("accepts an eta.freescript.v0.3 artifact", () => {
+    expect(validatePayload(payload({
+      schema_version: "eta.freescript.v0.3",
+      artifact: { schema_version: "eta.freescript.v0.3", gp_extraction: { medicines: [] }, note_text: "Medication:" },
+    }))).toMatchObject({ ok: true });
+  });
   it("refuses transcript-shaped fields", () => {
     const art = { schema_version: "eta.freescript.v0.2", encounter: { transcript: { segments: [{ text: "x" }] } } };
     expect(validatePayload(payload({ artifact: art }))).toEqual({ ok: false, error: "transcript_field" });
