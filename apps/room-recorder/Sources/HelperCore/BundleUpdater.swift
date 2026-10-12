@@ -61,6 +61,9 @@ public final class BundleUpdater: @unchecked Sendable {
     public var restartedAt: Int?
     public var beatVersion: String?
     public var beatAt: Int?
+    /// Rollback only: both renames are done, the old bundle is back at the install path, and only the agent restart and the
+    /// health wait remain. Persisted so a restart never swaps a second time.
+    public var swapped: Bool?
     public var failures: [String: Failure] = [:]
     public var updatedAt = 0
 
@@ -73,6 +76,7 @@ public final class BundleUpdater: @unchecked Sendable {
       case restartedAt = "restarted_at"
       case beatVersion = "beat_version"
       case beatAt = "beat_at"
+      case swapped
       case updatedAt = "updated_at"
     }
     public init() {}
@@ -224,6 +228,7 @@ public final class BundleUpdater: @unchecked Sendable {
       $0.result = nil
       $0.deadline = nil
       $0.restartedAt = nil
+      $0.swapped = nil
     }
     step("offered")
     return .accepted(step: "offered")
@@ -435,29 +440,42 @@ public final class BundleUpdater: @unchecked Sendable {
   // rollback
   private func rollBack() {
     let s = current
-    guard let snapshot = s.snapshot, let user = env.consoleUser() else {
-      return s.phase == "rollback_pending" && env.consoleUser() == nil ? step("deferred_no_console_user") : fail("rollback_impossible")
-    }
-    let domain = "gui/\(user.uid)"
+    guard let snapshot = s.snapshot else { return fail("rollback_impossible") }
     let restore = staging + "/restore.app"
-    // CRASH-SAFE (0.1.37 R2, B3). The swap is two renames: the failed bundle aside, then the restored copy in. A crash or a power
-    // cut between them leaves NO app at appPath. A helper that finds `rolling_back` with nothing at appPath finishes the swap
-    // from the copy it already staged, or, if that is gone too, rebuilds the copy from the snapshot first. No session can be
-    // open: there is no app to run one.
-    if s.phase == "rolling_back", !disk.exists(appPath) {
-      step("resuming_rollback", detail: "no app at the install path")
-      if !disk.exists(restore) {
+
+    // ─── THE RESUME COMES FIRST, AND NEEDS NO USER (0.1.37 R3) ──────────────────────────────────────────────────────────
+    // The swap is two renames: the failed bundle aside, then the restored copy in. A crash or a POWER CUT between them leaves
+    // NO app at the install path, and after a power cut the Mac is at the login window: there is no console user. Putting the
+    // app back is a rename and needs nobody, so it is done before anything asks who is logged in. What does need the user
+    // (the copy's ownership, the agent restart, the health wait) WAITS for one; it never fails and never goes idle while
+    // there is no app and a staged copy or a snapshot exists.
+    if s.phase == "rolling_back", s.swapped != true {
+      if !disk.exists(appPath) {
+        if disk.exists(restore) {
+          step("resuming_rollback", detail: "no app at the install path")
+          guard disk.rename(restore, to: appPath) else { return finish("failed", reason: "restore_rename_failed", countFailure: true) }
+          mutate { $0.swapped = true }
+          return finalizeRollback()
+        }
+        // The staged copy is gone too: it is rebuilt from the snapshot, and its ownership needs the room user.
+        guard let user = env.consoleUser() else { return step("deferred_no_console_user", detail: "no app; waiting for a user to rebuild it") }
+        step("resuming_rollback", detail: "no app and no staged copy")
         guard disk.exists(snapshot), disk.ensureDirectory(staging),
           tools.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "=" + Self.appRequirement, snapshot]).status == 0,
           disk.restoreTree(from: snapshot, to: restore, uid: user.uid, gid: user.gid)
         else { return finish("failed", reason: "no_app_and_no_snapshot", countFailure: true) }
+        guard disk.rename(restore, to: appPath) else { return finish("failed", reason: "restore_rename_failed", countFailure: true) }
+        mutate { $0.swapped = true }
+        return finalizeRollback()
       }
-      guard disk.rename(restore, to: appPath) else { return finish("failed", reason: "restore_rename_failed", countFailure: true) }
-      return restoredNow(domain: domain, user: user)
     }
+    if s.phase == "rolling_back", s.swapped == true { return finalizeRollback() }
+
+    guard let user = env.consoleUser() else { return step("deferred_no_console_user") }
+    let domain = "gui/\(user.uid)"
     if SessionProbe.isOpen(env: env) { return step("rollback_deferred_session_open") }
     disk.touchInstallMarker()
-    mutate { $0.phase = "rolling_back" }
+    mutate { $0.phase = "rolling_back"; $0.swapped = false }
     step("rolling_back")
     guard disk.exists(snapshot),
       tools.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "=" + Self.appRequirement, snapshot]).status == 0
@@ -476,17 +494,25 @@ public final class BundleUpdater: @unchecked Sendable {
     let failedAside = rollbackDirectory + "/failed-\(s.version ?? "unknown").app"
     disk.remove(failedAside)
     guard disk.rename(appPath, to: failedAside) else { return finish("failed", reason: "bundle_not_moved_aside", countFailure: true) }
-    // <- a crash here leaves no app; the branch at the top finishes the swap on the next start
+    // <- a crash or a power cut here leaves no app; the resume above finishes the swap on the next start, with or without a user
     guard disk.rename(restore, to: appPath) else {
       _ = disk.rename(failedAside, to: appPath)
       return finish("failed", reason: "restore_rename_failed", countFailure: true)
     }
-    restoredNow(domain: domain, user: user)
+    mutate { $0.swapped = true }
+    finalizeRollback()
+  }
+
+  /// The old bundle is in place. Start its agent and wait for it to beat: both need the room user, so with nobody logged in
+  /// this waits (the agent starts by itself when the user logs in, and the health wait begins when the helper has seen them).
+  private func finalizeRollback() {
+    guard let user = env.consoleUser() else { return step("deferred_no_console_user", detail: "the old app is back; waiting for a user") }
+    restoredNow(domain: "gui/\(user.uid)", user: user)
   }
 
   private func restoredNow(domain: String, user: (uid: UInt32, gid: UInt32, name: String)) {
     if let plist = env.agentPlistPath(uid: user.uid) { _ = tools.run("/bin/launchctl", ["bootstrap", domain, plist]) }
-    mutate { $0.phase = "rollback_health"; $0.restartedAt = epoch(); $0.deadline = epoch() + Int(Self.healthWindow) }
+    mutate { $0.phase = "rollback_health"; $0.restartedAt = epoch(); $0.deadline = epoch() + Int(Self.healthWindow); $0.swapped = nil }
     step("restored")
   }
 

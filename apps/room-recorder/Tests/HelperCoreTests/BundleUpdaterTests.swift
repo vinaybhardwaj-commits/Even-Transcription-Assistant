@@ -729,6 +729,68 @@ extension UpdateRig {
     #expect(resumed.current.result == "rolled_back" && !r.markerExists)
   }
 
+  // R3: after a POWER CUT the Mac is at the login window; there is no console user. Putting the app back needs nobody.
+  @Test func aPowerCutBetweenTheRenamesStillGetsTheAppBackWithNobodyLoggedIn() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let original = r.fingerprint(r.app)
+    let resumed = try crashBetweenTheRenames(r)
+    r.env.console = nil  // the login window
+    resumed.tick()
+    #expect(FileManager.default.fileExists(atPath: r.app), "the app is back at the install path without a user")
+    #expect(r.fingerprint(r.app) == original)
+    #expect(resumed.current.phase == "rolling_back" && resumed.current.step == "deferred_no_console_user", "it waits; it does not fail and does not go idle")
+    #expect(resumed.current.result == nil && r.markerExists)
+    #expect(!r.tools.calls.contains { $0.hasPrefix("/bin/launchctl bootstrap gui") }, "nothing that needs a user was attempted")
+    for _ in 0..<4 { r.advance(30); resumed.tick() }
+    #expect(resumed.current.phase == "rolling_back" && resumed.current.step == "deferred_no_console_user", "and it keeps waiting")
+    // someone logs in
+    r.env.console = (501, 20, "room")
+    resumed.tick()
+    #expect(resumed.current.phase == "rollback_health" && r.tools.calls.contains { $0.hasPrefix("/bin/launchctl bootstrap gui/501") })
+    #expect(!r.tools.calls.contains { $0.contains("bootout gui") }, "no second swap: the restored app is not stopped and replaced again")
+    r.advance(20); resumed.appBeat(version: "0.1.36"); resumed.tick()
+    #expect(resumed.current.phase == "idle" && resumed.current.result == "rolled_back" && !r.markerExists)
+    #expect(r.fingerprint(r.app) == original)
+  }
+
+  @Test func noUserAndNoStagedCopyRebuildsFromTheSnapshotOnceSomeoneLogsInAndNeverGoesIdle() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let original = r.fingerprint(r.app)
+    let resumed = try crashBetweenTheRenames(r, keepRestoreCopy: false)
+    r.env.console = nil
+    for _ in 0..<5 { resumed.tick(); r.advance(30) }
+    #expect(resumed.current.phase == "rolling_back" && resumed.current.step == "deferred_no_console_user", "waiting, not idle")
+    #expect(!FileManager.default.fileExists(atPath: r.app) && FileManager.default.fileExists(atPath: r.rollback + "/0.1.36.app"))
+    r.env.console = (501, 20, "room")
+    resumed.tick()
+    #expect(r.fingerprint(r.app) == original && resumed.current.phase == "rollback_health")
+    resumed.appBeat(version: "0.1.36"); r.advance(5); resumed.tick()
+    #expect(resumed.current.result == "rolled_back")
+  }
+
+  @Test func ifTheSwapWasFinishedBeforeTheCrashOnlyTheAgentRestartIsLeft() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let first = r.updater()
+    try r.driveToRollbackPending(first)
+    first.tick()  // a whole rollback: swapped, agent restarted, waiting for the old version to beat
+    #expect(first.current.phase == "rollback_health")
+    // the state as a power cut right after the second rename leaves it: swapped, still rolling_back, no user afterwards
+    var state = try JSONDecoder().decode(BundleUpdater.State.self, from: Data(contentsOf: URL(fileURLWithPath: r.statePath)))
+    state.phase = "rolling_back"; state.swapped = true
+    try JSONEncoder().encode(state).write(to: URL(fileURLWithPath: r.statePath))
+    let before = r.fingerprint(r.app)
+    let resumed = r.updater()
+    r.env.console = nil
+    resumed.tick()
+    #expect(resumed.current.step == "deferred_no_console_user" && r.fingerprint(r.app) == before)
+    r.env.console = (501, 20, "room")
+    let bootoutsBefore = r.tools.calls.filter { $0.contains("bootout gui") }.count
+    resumed.tick()
+    #expect(resumed.current.phase == "rollback_health")
+    #expect(r.tools.calls.filter { $0.contains("bootout gui") }.count == bootoutsBefore, "it did not swap a second time")
+    #expect(r.fingerprint(r.app) == before)
+  }
+
   @Test func ifTheStagedCopyIsGoneToo_theSnapshotIsCopiedAgain() throws {
     let r = try UpdateRig(); defer { r.tearDown() }
     let resumed = try crashBetweenTheRenames(r, keepRestoreCopy: false)
