@@ -11,7 +11,7 @@ import { spendMeter, splitItems } from "@/lib/enc/view";
  *
  * Writes go to the contract's admin session routes (W1 builds them; this file only calls the paths):
  *   PATCH /api/admin/steward/items/{id}  body {state: "approved" | "rejected"}   (documented: "Admin UI approve/reject: PATCH state")
- *   PATCH /api/admin/steward/settings    body {key, value}                       (ASSUMED path, not in the contract)
+ *   PATCH /api/admin/steward/settings    body {enabled?, mode?, daily_cap_usd?, model_id?}  (W1 route; mode "act" is 409)
  * The page is admin-gated by the server component; there is no per-role split in this app's admin.
  */
 const card = "bg-even-white rounded-xl border border-even-ink-200 p-4";
@@ -100,7 +100,7 @@ export function StewardClient({
   const setSetting = async (key: "enabled" | "mode", value: boolean | string) => {
     setBusy(true);
     setError(null);
-    const err = await patchJson("/api/admin/steward/settings", { key, value });
+    const err = await patchJson("/api/admin/steward/settings", { [key]: value });
     if (err) setError(`Could not save the setting: ${err}`);
     else setLocalSettings((cur) => ({ ...cur, [key]: value }) as StewardSettings);
     setBusy(false);

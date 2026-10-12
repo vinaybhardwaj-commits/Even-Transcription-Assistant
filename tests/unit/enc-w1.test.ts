@@ -405,3 +405,15 @@ describe("manifest needs both files", () => {
     expect(S.roomDays.length).toBe(0);
   });
 });
+
+describe("W2 client and W1 route agree", () => {
+  it("the steward page sends one setting as { <name>: value }, which the route's schema accepts; the old { key, value } shape is refused", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync("components/admin/enc/StewardClient.tsx", "utf8");
+    expect(src).toContain('patchJson("/api/admin/steward/settings", { [key]: value })');
+    const { settingsPatchSchema } = await import("@/lib/enc/schemas");
+    expect(settingsPatchSchema.safeParse({ enabled: true }).success).toBe(true);
+    expect(settingsPatchSchema.safeParse({ mode: "advise" }).success).toBe(true);
+    expect(settingsPatchSchema.safeParse({ key: "enabled", value: true }).success).toBe(false);
+  });
+});

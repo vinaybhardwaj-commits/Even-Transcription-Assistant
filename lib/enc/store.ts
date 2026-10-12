@@ -146,9 +146,9 @@ export async function upsertStewardSettings(patch: Record<string, unknown>): Pro
   }
 }
 
-/** The steward's kill switch and mode. Absent enabled means enabled; absent or unknown mode means advise. */
+/** The steward's kill switch and mode. Absent enabled means DISABLED (same as the admin page); absent or unknown mode means advise. */
 export async function getStewardGate(): Promise<{ enabled: boolean; mode: "advise" | "act" }> {
   const rows = (await sql`SELECT key, value FROM steward_settings WHERE key IN ('enabled', 'mode')`) as Array<{ key: string; value: unknown }>;
   const get = (k: string) => rows.find((r) => r.key === k)?.value;
-  return { enabled: get("enabled") !== false, mode: get("mode") === "act" ? "act" : "advise" };
+  return { enabled: get("enabled") === true, mode: get("mode") === "act" ? "act" : "advise" };
 }
