@@ -13,6 +13,9 @@ final class MemoryPolicyFiles: ChromePolicyFiles, @unchecked Sendable {
   private(set) var writes: [(path: String, mode: UInt16)] = []
   var failWritesTo: Set<String> = []
   func read(_ path: String) -> Data? { lock.lock(); defer { lock.unlock() }; return store[path] }
+  func present(_ path: String) -> Bool { lock.lock(); defer { lock.unlock() }; return store[path] != nil || unreadable.contains(path) }
+  /// Paths that are THERE but cannot be read (a link, a FIFO).
+  var unreadable: Set<String> = []
   func writeAtomic(_ path: String, data: Data, mode: UInt16) -> Bool {
     lock.lock(); defer { lock.unlock() }
     guard !failWritesTo.contains(path) else { return false }

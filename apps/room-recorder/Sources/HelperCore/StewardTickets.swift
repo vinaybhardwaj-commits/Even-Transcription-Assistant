@@ -27,6 +27,20 @@ public enum StewardKeys {
   public static let ticketKeyID = "6275a79b"
   /// The 32 raw bytes of the Ed25519 public key in `lib/steward/ticket-public-key.ts`, standard base64.
   public static let ticketPublicKey = "gNWhOdzRnAxIYueVlkBbGV9TLdG9G71rO/tSIDwB4jI="
+
+  /// The key id of a raw Ed25519 public key as `lib/steward/ticket-public-key.ts` defines it: the first 8 hex of the SHA-256
+  /// of the SPKI DER (the 12-byte Ed25519 prefix and the 32 key bytes).
+  public static func keyID(of raw: Data) -> String {
+    let spki = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) + raw
+    return SHA256.hash(data: spki).prefix(4).map { String(format: "%02x", $0) }.joined()
+  }
+
+  /// The compiled-in key, or nil if it is not 32 bytes or does not hash to the pinned id: a corrupted constant refuses
+  /// every ticket instead of trusting a different key.
+  public static func pinned(keyText: String = ticketPublicKey, expectedID: String = ticketKeyID) -> Data? {
+    guard let raw = FleetB64.fromStd(keyText), raw.count == 32, keyID(of: raw) == expectedID else { return nil }
+    return raw
+  }
 }
 
 public enum StewardAction: String, CaseIterable, Sendable {
@@ -37,10 +51,11 @@ public enum StewardAction: String, CaseIterable, Sendable {
   case restartRecorderApp = "restart_recorder_app"
   case restartKioskHealth = "restart_kiosk_health"
 
-  /// Disturbs the room's screen or the recorder's process: ticketed ceiling of 10 an hour, no clinic hours.
+  /// Stops and starts something: Chrome, the recorder, or the helper's collectors. ONE gate covers all four (B2, 0.1.37 R2):
+  /// no update in flight, not in clinic hours, no open session of any kind, at most 10 an hour.
   var restartsSomething: Bool {
     switch self {
-    case .relaunchChrome, .policyCycle, .restartRecorderApp: return true
+    case .relaunchChrome, .policyCycle, .restartRecorderApp, .restartKioskHealth: return true
     default: return false
     }
   }
@@ -183,7 +198,7 @@ public final class StewardExecutor: @unchecked Sendable {
     envelopeRunner: (@Sendable (_ envelope: String, _ deviceID: String, _ machine: String) -> HelperCommandOutcome)? = nil,
     emit: @escaping @Sendable (HelperEvent) -> Void, log: @escaping @Sendable (String) -> Void
   ) {
-    self.publicKey = publicKey ?? FleetB64.fromStd(StewardKeys.ticketPublicKey) ?? Data()
+    self.publicKey = publicKey ?? StewardKeys.pinned() ?? Data()
     self.machine = machine
     self.env = env
     self.tools = tools
@@ -197,8 +212,11 @@ public final class StewardExecutor: @unchecked Sendable {
     self.log = log
   }
 
-  private func loadState() -> StewardState {
-    files.read(statePath).flatMap { try? JSONDecoder().decode(StewardState.self, from: $0) } ?? StewardState()
+  /// nil when the ledger EXISTS and cannot be read (corrupt, a link, a FIFO): then nothing is run, because an unreadable ledger
+  /// must not be treated as an empty one, which would let an old ticket be replayed. A missing file is a fresh ledger.
+  private func loadState() -> StewardState? {
+    if let data = files.read(statePath) { return try? JSONDecoder().decode(StewardState.self, from: data) }
+    return files.present(statePath) ? nil : StewardState()
   }
   private func saveState(_ state: StewardState) {
     if let data = try? JSONEncoder().encode(state) { _ = files.writeAtomic(statePath, data: data, mode: 0o600) }
@@ -217,8 +235,13 @@ public final class StewardExecutor: @unchecked Sendable {
   public func receive(ticketsJSON: String, deviceID: String = "", fleetMachine: String = "") -> [Report] {
     lock.lock(); defer { lock.unlock() }
     guard let root = try? FleetJSON.parse(Data(ticketsJSON.utf8)), let list = root.objectValue?["tickets"]?.arrayValue else { return [] }
-    var state = loadState()
     var reports: [Report] = []
+    // The batch's key id, when it names one, must be ours (B2/R2: checked in code, not only in a test).
+    if let kid = root.objectValue?["key_id"]?.stringValue, kid != StewardKeys.ticketKeyID {
+      return rejectAll(list, why: "unknown_key_id")
+    }
+    guard !publicKey.isEmpty else { return rejectAll(list, why: "key_not_pinned") }
+    guard var state = loadState() else { return rejectAll(list, why: "state_unreadable") }
     var actionsThisBatch = Set<String>()
     let now = env.now()
     for item in list.prefix(10) {
@@ -253,6 +276,23 @@ public final class StewardExecutor: @unchecked Sendable {
     return reports
   }
 
+  /// Every ticket in the list gets a `rejected` result with `why`, and nothing runs or is written.
+  private func rejectAll(_ list: [FleetJSON], why: String) -> [Report] {
+    log("steward: all tickets refused: \(why)")
+    var reports: [Report] = []
+    for item in list.prefix(10) {
+      let ticket = item.objectValue?["ticket"]?.objectValue
+      let envelope = item.objectValue?["envelope"]?.objectValue
+      guard let id = ticket?["ticket_id"]?.stringValue ?? envelope?["cmd_id"]?.stringValue,
+        let nonce = ticket?["nonce"]?.stringValue ?? envelope?["nonce"]?.stringValue, (1...64).contains(id.utf8.count), (1...64).contains(nonce.utf8.count)
+      else { continue }
+      let report = Report(ticketID: id, nonce: nonce, outcome: "rejected", detail: why)
+      reports.append(report)
+      emit(HelperEvent("steward.result", ["ticket_id": .string(id), "nonce": .string(nonce), "outcome": .string("rejected"), "detail": .string(why)]))
+    }
+    return reports
+  }
+
   private func handle(_ json: FleetJSON, signature: String, state: inout StewardState, actionsThisBatch: inout Set<String>, now: Date) -> Report? {
     let verdict = StewardTicket.verify(ticket: json, signature: signature, publicKey: publicKey, machine: machine(), now: now)
     let id = json.objectValue?["ticket_id"]?.stringValue
@@ -279,7 +319,10 @@ public final class StewardExecutor: @unchecked Sendable {
     if action.restartsSomething {
       if isUpdating() { return refuse(.updateInProgress) }
       if FleetClock.inClinicHours(now) { return refuse(.clinicHours) }
+      // The same fail-closed probe the signed commands use: recording, paused or an unreadable status all count as a session.
+      if SessionProbe.isOpen(env: env) { return refuse(.sessionOpen) }
       if state.restartRuns.count >= Self.restartCeilingPerHour { return refuse(.rateLimited) }
+      state.restartRuns.append(epoch)
     }
     let user = env.consoleUser()
     let result: HelperCommandOutcome
@@ -294,18 +337,13 @@ public final class StewardExecutor: @unchecked Sendable {
     case .relaunchChrome:
       guard let chrome else { return refuse(.unsupported) }
       guard user != nil else { return refuse(.noConsoleUser) }
-      state.restartRuns.append(epoch)
       result = chrome.relaunch(profile: ticket.params["profile"]?.stringValue)
     case .policyCycle:
       guard let chrome else { return refuse(.unsupported) }
       guard user != nil else { return refuse(.noConsoleUser) }
-      state.restartRuns.append(epoch)
       result = chrome.cycle(profile: ticket.params["profile"]?.stringValue)
     case .restartRecorderApp:
       guard let user else { return refuse(.noConsoleUser) }
-      // NEVER under a session. The same fail-closed probe the signed commands use.
-      if SessionProbe.isOpen(env: env) { return refuse(.sessionOpen) }
-      state.restartRuns.append(epoch)
       let run = tools.run("/bin/launchctl", ["kickstart", "-k", "gui/\(user.uid)/\(HelperPaths.agentLabel)"])
       result = run.status == 0 ? HelperCommandOutcome(.ok) : HelperCommandOutcome(.failed, reason: "launchctl_\(run.status)")
     case .restartKioskHealth:

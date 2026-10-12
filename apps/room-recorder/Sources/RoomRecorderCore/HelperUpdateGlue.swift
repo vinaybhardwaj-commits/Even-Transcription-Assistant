@@ -137,14 +137,21 @@ struct StewardTicketRelay: Sendable {
     guard let root = try? FleetJSON.parse(body), let list = root.objectValue?["tickets"]?.arrayValue else { return [] }
     var out: [String] = []
     var current: [FleetJSON] = []
+    // The server names the key that signed the list; the helper checks it against the pinned id, so it travels with every piece.
+    let keyID = root.objectValue?["key_id"]
+    func piece(_ tickets: [FleetJSON]) -> String {
+      var object: [String: FleetJSON] = ["tickets": .array(tickets)]
+      if let keyID { object["key_id"] = keyID }
+      return FleetJSON.object(object).canonical
+    }
     func flush() {
       guard !current.isEmpty else { return }
-      out.append(FleetJSON.object(["tickets": .array(current)]).canonical)
+      out.append(piece(current))
       current = []
     }
     for item in list.prefix(10) {
       let next = current + [item]
-      if next.count > perCall || FleetJSON.object(["tickets": .array(next)]).canonical.utf8.count > maxBytes { flush() }
+      if next.count > perCall || piece(next).utf8.count > maxBytes { flush() }
       current.append(item)
     }
     flush()

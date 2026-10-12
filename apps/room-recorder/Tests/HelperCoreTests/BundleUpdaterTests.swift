@@ -38,6 +38,8 @@ final class UpdateRig: @unchecked Sendable {
   var helperVersion = "0.2.2-h4"
   var markerSeenDuring: [String: Bool] = [:]
   var onSnapshot: (() -> Void)?
+  var onRestore: (() -> Void)?
+  var failRenames = false
 
   init() throws {
     try FileManager.default.createDirectory(atPath: support, withIntermediateDirectories: true)
@@ -125,7 +127,7 @@ final class UpdateRig: @unchecked Sendable {
     func write(_ d: Data, to p: String, mode: UInt16) -> Bool { inner.write(d, to: p, mode: mode) }
     func read(_ p: String, maxBytes: Int) -> Data? { inner.read(p, maxBytes: maxBytes) }
     func remove(_ p: String) { inner.remove(p) }
-    func rename(_ a: String, to b: String) -> Bool { inner.rename(a, to: b) }
+    func rename(_ a: String, to b: String) -> Bool { rig.failRenames ? false : inner.rename(a, to: b) }
     func sha256(ofFileAt p: String) -> String? { inner.sha256(ofFileAt: p) }
     func size(ofFileAt p: String) -> Int64? { inner.size(ofFileAt: p) }
     func snapshotBundle(_ a: String, user: String, to d: String) -> Bool {
@@ -133,7 +135,11 @@ final class UpdateRig: @unchecked Sendable {
       rig.onSnapshot?()
       return ok
     }
-    func restoreTree(from s: String, to d: String, uid: UInt32, gid: UInt32) -> Bool { inner.restoreTree(from: s, to: d, uid: uid, gid: gid) }
+    func restoreTree(from s: String, to d: String, uid: UInt32, gid: UInt32) -> Bool {
+      let ok = inner.restoreTree(from: s, to: d, uid: uid, gid: gid)
+      rig.onRestore?()
+      return ok
+    }
     func download(_ u: URL, to p: String, maxBytes: Int64) -> Bool { inner.download(u, to: p, maxBytes: maxBytes) }
     func touchInstallMarker() { inner.touchInstallMarker() }
     func clearInstallMarker() { inner.clearInstallMarker() }
@@ -645,6 +651,125 @@ final class UpdateRig: @unchecked Sendable {
       let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///") }.joined(separator: "\n")
       for word in ["captures", "tape.pcm", "tapewriter", "RoomRecorder/", "removeItem(atPath: roomRoot"] { #expect(!code.contains(word), "\(name) mentions \(word)") }
     }
+  }
+}
+
+// ─── 0.1.37 R2: the three blockers and the hardening ───────────────────────────────────────────────
+
+extension UpdateRig {
+  /// Installs 0.1.37, restarts, lets the five minutes pass with no beat: the updater now wants to roll back.
+  func driveToRollbackPending(_ u: BundleUpdater) throws {
+    _ = offer(record(), updater: u); u.tick()
+    try finishInstall(version: "0.1.37"); u.tick()
+    advance(400)
+    env.setStatus("ready")
+  }
+  var restoreDir: String { support + "/update/staging/restore.app" }
+}
+
+@Suite(.serialized) struct BundleUpdaterR2Tests {
+  // B1: the session is looked at again, last, before the recorder is stopped
+  @Test func aSessionThatOpensDuringTheRestoreCopyDefersTheBootoutAndCutsNothing() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let u = r.updater()
+    try r.driveToRollbackPending(u)
+    r.onRestore = { r.env.setStatus("recording") }  // a consultation starts while the snapshot is being copied
+    u.tick()
+    #expect(u.current.phase == "rollback_pending" && u.current.step == "rollback_deferred_session_open")
+    #expect(!r.tools.calls.contains { $0.contains("bootout gui") }, "the recorder was not stopped")
+    #expect(r.installedVersion == "0.1.37", "the installed bundle was not moved")
+    #expect(!FileManager.default.fileExists(atPath: r.restoreDir), "the unused copy is removed")
+    #expect(!FileManager.default.fileExists(atPath: r.rollback + "/failed-0.1.37.app"))
+    // the session ends: the rollback goes through
+    r.onRestore = nil
+    r.env.setStatus("ready"); u.tick()
+    #expect(r.installedVersion == "0.1.36" && u.current.phase == "rollback_health")
+  }
+
+  @Test func theSessionReProbeIsFailClosedToo() throws {
+    for status in ["paused", "garbage"] {
+      let r = try UpdateRig(); defer { r.tearDown() }
+      let u = r.updater()
+      try r.driveToRollbackPending(u)
+      r.onRestore = { if status == "paused" { r.env.setStatus("paused") } else { r.env.files[FakeEnv.root + "/status.json"] = Data("junk".utf8) } }
+      u.tick()
+      #expect(u.current.step == "rollback_deferred_session_open" && !r.tools.calls.contains { $0.contains("bootout gui") }, "\(status)")
+    }
+  }
+
+  // B3: a crash between the two renames resumes to an installed app
+  /// The disk exactly as a crash between the renames leaves it: phase rolling_back, the failed bundle aside, a staged restore copy,
+  /// NO app at the install path.
+  func crashBetweenTheRenames(_ r: UpdateRig, keepRestoreCopy: Bool = true) throws -> BundleUpdater {
+    let first = r.updater()
+    try r.driveToRollbackPending(first)
+    #expect(first.current.phase == "health", "the five minutes have passed but no pass has noticed yet")
+    var state = try JSONDecoder().decode(BundleUpdater.State.self, from: Data(contentsOf: URL(fileURLWithPath: r.statePath)))
+    state.phase = "rolling_back"
+    try JSONEncoder().encode(state).write(to: URL(fileURLWithPath: r.statePath))
+    if keepRestoreCopy {
+      try? FileManager.default.createDirectory(atPath: r.support + "/update/staging", withIntermediateDirectories: true)
+      try FileManager.default.copyItem(atPath: r.rollback + "/0.1.36.app", toPath: r.restoreDir)
+    }
+    try FileManager.default.moveItem(atPath: r.app, toPath: r.rollback + "/failed-0.1.37.app")  // the first rename happened
+    #expect(!FileManager.default.fileExists(atPath: r.app))
+    return r.updater()  // the helper restarted: a new object on the same state file
+  }
+
+  @Test func aCrashBetweenTheRenamesResumesToTheOldAppByteForByte() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let original = r.fingerprint(r.app)  // 0.1.36, as installed before the update began
+    let resumed = try crashBetweenTheRenames(r)
+    resumed.tick()
+    #expect(FileManager.default.fileExists(atPath: r.app), "there is an app again")
+    #expect(r.installedVersion == "0.1.36" && resumed.current.phase == "rollback_health" && resumed.current.step == "restored")
+    #expect(r.fingerprint(r.app) == original, "byte for byte what was installed before the update")
+    #expect(r.tools.calls.contains { $0.hasPrefix("/bin/launchctl bootstrap gui/501") }, "the agent is started again")
+    resumed.appBeat(version: "0.1.36"); resumed.tick()
+    #expect(resumed.current.result == "rolled_back" && !r.markerExists)
+  }
+
+  @Test func ifTheStagedCopyIsGoneToo_theSnapshotIsCopiedAgain() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let resumed = try crashBetweenTheRenames(r, keepRestoreCopy: false)
+    resumed.tick()
+    #expect(r.installedVersion == "0.1.36" && resumed.current.phase == "rollback_health")
+    #expect(r.fingerprint(r.app) == r.fingerprint(r.rollback + "/0.1.36.app"))
+  }
+
+  @Test func aFinishNeverDeletesTheStagedCopyWhileThereIsNoApp() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let resumed = try crashBetweenTheRenames(r)
+    r.failRenames = true  // the second rename keeps failing on resume
+    resumed.tick()
+    #expect(resumed.current.phase == "idle" && resumed.current.detail == "restore_rename_failed")
+    #expect(FileManager.default.fileExists(atPath: r.restoreDir), "the only whole bundle left is not thrown away")
+    #expect(!FileManager.default.fileExists(atPath: r.app))
+  }
+
+  @Test func withNoAppNoCopyAndNoSnapshotItIsReportedLoudly() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let resumed = try crashBetweenTheRenames(r, keepRestoreCopy: false)
+    try FileManager.default.removeItem(atPath: r.rollback + "/0.1.36.app")
+    resumed.tick()
+    #expect(resumed.current.result == "failed" && resumed.current.detail == "no_app_and_no_snapshot")
+  }
+
+  // hardening: nothing but digits and dots builds a path or a plist
+  @Test func aVersionThatCouldBuildAPathOrBreakAPlistIsNotAVersion() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    for bad in ["0.1.37-beta", "0.1.37+x", "../../etc", "0.1.37</string><key>x", "0.1.37/../x", "0.1.37 ", "", "1.2.3.4.5", "v1"] {
+      #expect(r.offer(r.record(version: bad), updater: r.updater()) == .refused(.malformed), "\(bad)")
+    }
+    #expect(r.offer(r.record(version: "0.1.37"), updater: r.updater()) == .accepted(step: "offered"))
+    #expect(ReleaseRecord.isPlainVersion("1") && ReleaseRecord.isPlainVersion("1.2.3.4") && !ReleaseRecord.isPlainVersion("1.2.3.4.5"))
+  }
+
+  @Test func anInstalledVersionThatIsNotPlainBuildsNoRootPath() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    try r.makeApp(at: r.app, version: "../../Library/x", body: "old")
+    #expect(r.offer(r.record(), updater: r.updater()) == .refused(.unknownInstalled))
+    #expect(!FileManager.default.fileExists(atPath: r.rollback), "nothing was created from it")
   }
 }
 

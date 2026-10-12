@@ -215,8 +215,122 @@ extension ChromeWorld {
     #expect(s.send(s.executor(), "restart_kiosk_health")?.outcome == "done" && s.restarts == 1)
     s.restartOK = false
     #expect(s.send(s.executor(), "restart_kiosk_health")?.outcome == "failed")
-    #expect(s.send(s.executor(collectors: false), "restart_kiosk_health")?.outcome == "unsupported")
+    #expect(s.send(s.executor(collectors: false), "restart_kiosk_health")?.detail == "unsupported")
     #expect(s.w.tools.calls.isEmpty)
+  }
+
+  // B2 (R2): ONE gate for every action that restarts something
+  static let restartActions: [(String, [String: FleetJSON])] = [
+    ("relaunch_chrome", ["profile": .string("Default")]), ("policy_cycle", ["profile": .string("Default")]),
+    ("restart_recorder_app", [:]), ("restart_kiosk_health", [:]),
+  ]
+
+  @Test func everyRestartActionIsRefusedUnderAnOpenPausedOrUnreadableSession() {
+    for (action, params) in Self.restartActions {
+      for status in ["recording", "paused", "garbage"] {
+        let s = StewardWorld()
+        s.w.storeConfig()
+        if status == "garbage" { s.w.env.files[FakeEnv.root + "/status.json"] = Data("junk".utf8) } else { s.w.env.setStatus(status) }
+        let r = s.send(s.executor(), action, params)
+        #expect(r?.outcome == "rejected" && r?.detail == "session_open", "\(action) under \(status): \(String(describing: r?.detail))")
+        #expect(s.w.tools.calls.isEmpty && s.w.signals.isEmpty && s.restarts == 0, "\(action) under \(status) touched something")
+      }
+    }
+  }
+
+  @Test func everyRestartActionRunsWhenTheRoomIsQuietAtNight() {
+    for (action, params) in Self.restartActions {
+      let s = StewardWorld()
+      s.w.storeConfig()
+      #expect(s.send(s.executor(), action, params)?.outcome == "done", "\(action)")
+    }
+  }
+
+  @Test func everyRestartActionIsRefusedInClinicHoursAndDuringAnUpdate() {
+    for (action, params) in Self.restartActions {
+      let day = StewardWorld()
+      day.w.env.clock = ChromeCatalogueTests.day
+      day.w.storeConfig()
+      #expect(day.send(day.executor(), action, params)?.detail == "clinic_hours_no_restart", "\(action) in clinic hours")
+      let busy = StewardWorld()
+      busy.updating = true
+      busy.w.storeConfig()
+      #expect(busy.send(busy.executor(), action, params)?.detail == "update_in_progress", "\(action) during an update")
+      #expect(day.restarts == 0 && busy.restarts == 0)
+    }
+  }
+
+  @Test func theTenAnHourCeilingCountsEveryRestartActionTogether() {
+    let s = StewardWorld()
+    s.w.storeConfig()
+    var outcomes: [String] = []
+    for i in 0..<12 {
+      let (action, params) = Self.restartActions[i % 4]
+      outcomes.append(s.send(s.executor(), action, params)?.detail ?? "?")
+    }
+    #expect(outcomes.filter { $0 == "rate_limited" }.count == 2, "\(outcomes)")
+  }
+
+  @Test func wakeAndOpenPulseAreNotRestartsAndNeedNoQuietRoom() {
+    let s = StewardWorld()
+    s.w.env.setStatus("recording")
+    s.w.env.directories[ChromeWorld.base] = ["Default"]
+    #expect(s.send(s.executor(), "wake")?.outcome == "done")
+    #expect(s.send(s.executor(), "open_pulse", ["profile": .string("Default")])?.outcome == "done")
+  }
+
+  // hardening: the key id is checked in code; a corrupt ledger fails closed
+  @Test func theKeyIDIsComputedFromTheKeyAndMustMatchThePinnedOne() throws {
+    let raw = try #require(FleetB64.fromStd(StewardKeys.ticketPublicKey))
+    #expect(StewardKeys.keyID(of: raw) == "6275a79b" && StewardKeys.pinned() == raw)
+    var other = raw
+    other[0] ^= 1
+    #expect(StewardKeys.keyID(of: other) != StewardKeys.ticketKeyID, "any other key has another id")
+  }
+
+  @Test func aCorruptedConstantTrustsNothing() {
+    // one character of the key changed: it is still 32 bytes, but it is not the key with the pinned id
+    let wrong = "gNWhOdzRnAxIYueVlkBbGV9TLdG9G71rO/tSIDwB4jA="
+    #expect(StewardKeys.pinned(keyText: wrong) == nil)
+    #expect(StewardKeys.pinned(keyText: "short") == nil)
+    #expect(StewardKeys.pinned(expectedID: "00000000") == nil, "and a different expected id refuses the right key")
+    #expect(StewardKeys.pinned() != nil)
+  }
+
+  @Test func aBatchThatNamesAnotherKeyIsRejectedWholeAndNothingRuns() {
+    let s = StewardWorld()
+    let t = s.maker.ticket(action: "wake", issued: s.now.addingTimeInterval(-5))
+    func batch(_ keyID: String?) -> String {
+      var o: [String: FleetJSON] = ["tickets": .array([.object(["ticket": t, "signature": .string(s.maker.sign(t))])])]
+      if let keyID { o["key_id"] = .string(keyID) }
+      return FleetJSON.object(o).canonical
+    }
+    let wrong = s.executor().receive(ticketsJSON: batch("deadbeef"))
+    #expect(wrong.map(\.detail) == ["unknown_key_id"] && s.w.tools.calls.isEmpty)
+    #expect(s.executor().receive(ticketsJSON: batch("6275a79b")).first?.outcome == "done", "the right id is accepted")
+    let t2 = s.maker.ticket(action: "wake", issued: s.now.addingTimeInterval(-4))
+    let none = FleetJSON.object(["tickets": .array([.object(["ticket": t2, "signature": .string(s.maker.sign(t2))])])]).canonical
+    #expect(s.executor().receive(ticketsJSON: none).first?.outcome == "done", "a list that names no key is judged by the signature alone")
+  }
+
+  @Test func aCorruptLedgerRefusesEveryTicketAndIsNotResetByThem() {
+    let s = StewardWorld()
+    s.w.files.put(s.statePath, Data("{ not json".utf8))
+    let t = s.maker.ticket(action: "wake", issued: s.now.addingTimeInterval(-5))
+    let r = s.executor().receive(ticketsJSON: s.maker.batch([t]))
+    #expect(r.map(\.detail) == ["state_unreadable"] && r.map(\.outcome) == ["rejected"])
+    #expect(s.w.tools.calls.isEmpty)
+    #expect(s.w.files.read(s.statePath) == Data("{ not json".utf8), "the damaged file is left for a person to look at")
+    #expect(s.events.map(\.kind) == ["steward.result"], "and it is reported")
+  }
+
+  @Test func aLedgerThatIsThereButUnreadableAlsoFailsClosed_aMissingOneIsFresh() {
+    let s = StewardWorld()
+    s.w.files.unreadable = [s.statePath]  // a link or a FIFO at the ledger path
+    let t = s.maker.ticket(action: "wake", issued: s.now.addingTimeInterval(-5))
+    #expect(s.executor().receive(ticketsJSON: s.maker.batch([t])).first?.detail == "state_unreadable")
+    let fresh = StewardWorld()
+    #expect(fresh.executor().receive(ticketsJSON: fresh.maker.batch([fresh.maker.ticket(action: "wake", issued: fresh.now.addingTimeInterval(-5))])).first?.outcome == "done")
   }
 
   @Test func noTicketRunsWhileAnUpdateIsInFlight() {
@@ -228,6 +342,12 @@ extension ChromeWorld {
       #expect(s.send(s.executor(), action, params)?.detail == "update_in_progress", "\(action)")
     }
     #expect(s.send(s.executor(), "wake")?.outcome == "done", "a wake disturbs nothing")
+  }
+
+  @Test func theChunksKeepTheServersKeyIDSoTheHelperCanCheckIt() {
+    let body = Data(FleetJSON.object(["ok": .bool(true), "key_id": .string("6275a79b"), "tickets": .array([.object(["ticket": .object([:]), "signature": .string("s")])])]).canonical.utf8)
+    let pieces = StewardTicketRelay.chunks(body)
+    #expect(pieces.count == 1 && pieces[0].contains("\"key_id\":\"6275a79b\""))
   }
 
   @Test func withNobodyAtTheConsoleTheGuiActionsAreRefused() {

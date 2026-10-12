@@ -132,6 +132,8 @@ public enum ChromePolicyPlist {
 public protocol ChromePolicyFiles: Sendable {
   /// A plain file's bytes, nil when missing, unreadable, not a plain file or a symlink.
   func read(_ path: String) -> Data?
+  /// Is anything at the path (any kind, a link included)? Lets a caller tell "missing" from "there but unreadable".
+  func present(_ path: String) -> Bool
   /// Temp file in the same directory, fsync, owner root:wheel, `mode`, then rename. False on any failure; the original is untouched.
   func writeAtomic(_ path: String, data: Data, mode: UInt16) -> Bool
 }
@@ -144,6 +146,11 @@ public struct SystemChromePolicyFiles: ChromePolicyFiles {
   public func read(_ path: String) -> Data? {
     // Plain file, one link, no symlink: the same reader every root read of the helper uses (0.1.36 R2).
     HardenedFile.readWhole(path, maxBytes: 4 * 1024 * 1024)
+  }
+
+  public func present(_ path: String) -> Bool {
+    var info = stat()
+    return lstat(path, &info) == 0
   }
 
   public func writeAtomic(_ path: String, data: Data, mode: UInt16) -> Bool {

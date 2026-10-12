@@ -48,7 +48,7 @@ public struct ReleaseRecord: Equatable, Sendable {
   /// nil unless the object is EXACTLY the sixteen fields, each the right type and inside its bounds.
   public static func parse(_ json: FleetJSON) -> ReleaseRecord? {
     guard let o = json.objectValue, Set(o.keys) == fields, o["v"]?.intValue == 1,
-      let version = o["version"]?.stringValue, RoomVersion(version) != nil, version.utf8.count <= 32,
+      let version = o["version"]?.stringValue, isPlainVersion(version),
       let channel = o["channel"]?.stringValue, ["stable", "test"].contains(channel),
       let urlText = o["pkg_url"]?.stringValue, let url = validatedURL(urlText),
       let sha = o["pkg_sha256"]?.stringValue, sha.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
@@ -74,6 +74,11 @@ public struct ReleaseRecord: Equatable, Sendable {
       version: version, channel: channel, pkgURL: url, pkgSHA256: sha, pkgSize: size, minHelper: minHelper, cohort: cohort,
       rolloutPct: Int(pct), deviceCohorts: names, deviceID: device, machine: machine, issuedAt: issued, expiresAt: expires,
       nonce: nonce, keyID: keyID, signedBytes: json.canonicalData)
+  }
+
+  /// `1`, `0.1.37`, up to four numeric parts. The version builds root-side paths and a plist, so nothing else is allowed in it.
+  static func isPlainVersion(_ text: String) -> Bool {
+    text.utf8.count <= 32 && text.range(of: "^[0-9]+(\\.[0-9]+){0,3}$", options: .regularExpression) != nil
   }
 
   /// https, an allowed host, no credentials, no port, no query or fragment games.

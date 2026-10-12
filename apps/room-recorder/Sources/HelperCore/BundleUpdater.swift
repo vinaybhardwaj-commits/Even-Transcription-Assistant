@@ -168,7 +168,7 @@ public final class BundleUpdater: @unchecked Sendable {
     guard let user = env.consoleUser() else { return nil }
     guard let data = reader.readWhole(appPath + "/Contents/Info.plist", user: user.name, maxBytes: 262_144),
       let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-      let version = plist["CFBundleShortVersionString"] as? String, !version.isEmpty
+      let version = plist["CFBundleShortVersionString"] as? String, ReleaseRecord.isPlainVersion(version)
     else { return nil }
     return version
   }
@@ -274,7 +274,8 @@ public final class BundleUpdater: @unchecked Sendable {
       }
       if result == "ok", let version { $0.failures[version] = nil }
     }
-    disk.remove(staging)
+    // Never delete the staged restore copy while there is no app at the install path: it may be the only whole bundle left (B3).
+    if !(disk.exists(staging + "/restore.app") && !disk.exists(appPath)) { disk.remove(staging) }
     disk.clearInstallMarker()
     log("update: finished \(result)\(reason.map { " (\($0))" } ?? "")")
   }
@@ -437,6 +438,23 @@ public final class BundleUpdater: @unchecked Sendable {
     guard let snapshot = s.snapshot, let user = env.consoleUser() else {
       return s.phase == "rollback_pending" && env.consoleUser() == nil ? step("deferred_no_console_user") : fail("rollback_impossible")
     }
+    let domain = "gui/\(user.uid)"
+    let restore = staging + "/restore.app"
+    // CRASH-SAFE (0.1.37 R2, B3). The swap is two renames: the failed bundle aside, then the restored copy in. A crash or a power
+    // cut between them leaves NO app at appPath. A helper that finds `rolling_back` with nothing at appPath finishes the swap
+    // from the copy it already staged, or, if that is gone too, rebuilds the copy from the snapshot first. No session can be
+    // open: there is no app to run one.
+    if s.phase == "rolling_back", !disk.exists(appPath) {
+      step("resuming_rollback", detail: "no app at the install path")
+      if !disk.exists(restore) {
+        guard disk.exists(snapshot), disk.ensureDirectory(staging),
+          tools.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "=" + Self.appRequirement, snapshot]).status == 0,
+          disk.restoreTree(from: snapshot, to: restore, uid: user.uid, gid: user.gid)
+        else { return finish("failed", reason: "no_app_and_no_snapshot", countFailure: true) }
+      }
+      guard disk.rename(restore, to: appPath) else { return finish("failed", reason: "restore_rename_failed", countFailure: true) }
+      return restoredNow(domain: domain, user: user)
+    }
     if SessionProbe.isOpen(env: env) { return step("rollback_deferred_session_open") }
     disk.touchInstallMarker()
     mutate { $0.phase = "rolling_back" }
@@ -444,19 +462,29 @@ public final class BundleUpdater: @unchecked Sendable {
     guard disk.exists(snapshot),
       tools.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "=" + Self.appRequirement, snapshot]).status == 0
     else { return finish("failed", reason: "snapshot_missing_or_invalid", countFailure: true) }
-    let restore = staging + "/restore.app"
     guard disk.ensureDirectory(staging), disk.restoreTree(from: snapshot, to: restore, uid: user.uid, gid: user.gid) else {
       return finish("failed", reason: "restore_copy_failed", countFailure: true)
     }
-    let domain = "gui/\(user.uid)"
+    // The copy and the verify above took seconds, and a consultation may have started in them. LOOKED AT AGAIN, last, before the
+    // first thing that touches the running app (B1): the bootout below stops the recorder.
+    if SessionProbe.isOpen(env: env) {
+      disk.remove(restore)
+      mutate { $0.phase = "rollback_pending" }
+      return step("rollback_deferred_session_open")
+    }
     _ = tools.run("/bin/launchctl", ["bootout", "\(domain)/\(HelperPaths.agentLabel)"])
     let failedAside = rollbackDirectory + "/failed-\(s.version ?? "unknown").app"
     disk.remove(failedAside)
     guard disk.rename(appPath, to: failedAside) else { return finish("failed", reason: "bundle_not_moved_aside", countFailure: true) }
+    // <- a crash here leaves no app; the branch at the top finishes the swap on the next start
     guard disk.rename(restore, to: appPath) else {
       _ = disk.rename(failedAside, to: appPath)
       return finish("failed", reason: "restore_rename_failed", countFailure: true)
     }
+    restoredNow(domain: domain, user: user)
+  }
+
+  private func restoredNow(domain: String, user: (uid: UInt32, gid: UInt32, name: String)) {
     if let plist = env.agentPlistPath(uid: user.uid) { _ = tools.run("/bin/launchctl", ["bootstrap", domain, plist]) }
     mutate { $0.phase = "rollback_health"; $0.restartedAt = epoch(); $0.deadline = epoch() + Int(Self.healthWindow) }
     step("restored")
