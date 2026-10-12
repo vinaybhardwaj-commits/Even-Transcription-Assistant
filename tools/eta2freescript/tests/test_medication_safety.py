@@ -199,14 +199,24 @@ def test_catalogue_resolves_spoken_brands(spoken):
     assert catalogue_hit(spoken)
     assert resolvable(spoken)
     a = _art(f"Take {spoken} once a day.", _rx(generic=spoken, frequency="once a day"))
-    assert a["gp_extraction"]["medicines"][0]["name"].lower().startswith(spoken.split()[0].lower())
+    meds = a["gp_extraction"]["medicines"]
+    if spoken == "Glycomet Trio 2":
+        assert [m["name"] for m in meds] == ["metformin", "glimepiride", "voglibose"]
+        assert all(m["raw_name"] == "Glycomet Trio 2" for m in meds)
+    else:
+        assert meds[0]["name"].lower().startswith(spoken.split()[0].lower())
     assert "unresolved_name" not in (a["slots"][0]["flags"] if a["slots"] else [])
     assert check(a) == []
 
 
-def test_fuzzy_brand_spelling_resolves_and_a_garbled_antibiotic_does_not():
-    assert catalogue_hit("Sompras")
+def test_loose_fuzzy_brand_spelling_does_not_release():
+    """Atolip/Atorlip is 0.92 and Sompras/Sompraz is 0.86. Neither is exact enough to release."""
+    assert catalogue_hit("Sompraz")
+    assert catalogue_hit("Sompras") is None
+    assert catalogue_hit("Atolip") is None
+    assert catalogue_hit("Atolip A") is None
     assert catalogue_hit("Azithroxyz") is None
+    assert not resolvable("Atolip A")
     assert not resolvable("Azithroxyz")
     a = _art("Take Azithroxyz twice a day.", _rx(generic="Azithroxyz", frequency="twice a day"))
     assert "medicines" not in a["gp_extraction"]
