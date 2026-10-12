@@ -8,8 +8,8 @@
  * PAIRING IS ONE-TO-ONE. A stored event absorbs AT MOST ONE incoming event (it is "consumed"); candidate pairs are taken nearest-ts first, so three distinct helper events around one
  * daemon event lose exactly one (the nearest), never all three. Twins already consumed by earlier batches are read back from kiosk_health_dedupe (migration 0154: `twin_ts` names the
  * stored event that absorbed each skipped one). A skipped event is recorded with its identity only; a REPLAY of a skipped event (a spooled batch re-sent after a lost response) is
- * recognised by that identity and skipped again without using up another twin. THE REPLAY IDENTITY IS (machine, source, boot_id, seq) (migration 0155): a NEW event that only shares a ts with an
- * absorbed one has another boot_id/seq and is NOT a replay (refuter probe R8). ts is the identity only for ledger rows written before 0155 (no boot_id/seq) and for an event that carries neither. Events from the SAME source are never twins of each other (a sender may repeat a kind within 2 s).
+ * recognised by that identity and skipped again without using up another twin. THE REPLAY IDENTITY IS (machine, source, boot_id, seq) (migration 0160): a NEW event that only shares a ts with an
+ * absorbed one has another boot_id/seq and is NOT a replay (refuter probe R8). ts is the identity only for ledger rows written before 0160 (no boot_id/seq) and for an event that carries neither. Events from the SAME source are never twins of each other (a sender may repeat a kind within 2 s).
  * Idempotency on (machine, boot_id, seq) is unchanged and applies first.
  */
 import { canonicalMachine, expandKeys, matchKey } from "@/lib/kiosk-health-read";
@@ -37,7 +37,7 @@ type Slot = { machine: string; kind: string; source: string; t: number; free: nu
 export function splitTwins(rows: readonly KioskHealthRow[], stored: readonly StoredRef[], ledger: readonly LedgerRef[] = []): { keep: KioskHealthRow[]; dropped: Dropped[] } {
   // consumption already on record: twin identity -> how many incoming events it has absorbed; skipped identity -> its record (for replays)
   const used = new Map<string, number>();
-  // a skipped event is found again (a replay) by (machine, source, boot_id, seq) when the ledger row has them; by ts only for ledger rows from before 0155 (no ids) or an incoming event with no ids
+  // a skipped event is found again (a replay) by (machine, source, boot_id, seq) when the ledger row has them; by ts only for ledger rows from before 0160 (no ids) or an incoming event with no ids
   const skippedById = new Map<string, LedgerRef>();
   const skippedByTsLegacy = new Map<string, LedgerRef>();
   const skippedByTsAll = new Map<string, LedgerRef>();

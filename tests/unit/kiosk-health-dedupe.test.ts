@@ -113,7 +113,7 @@ describe("C1: a replay is keyed on (machine, source, boot_id, seq), not on ts (r
     expect(splitTwins([row({ source: "daemon", boot_id: "b1", seq: 1, ts: off(0) })], [ref({ source: "helper" })], ledger).dropped).toHaveLength(1); // twin of a stored helper event, NOT a replay: its twin is found fresh
     expect(splitTwins([row({ machine: "EHRC-OPD2s-Mac-mini", boot_id: "b1", seq: 1, ts: off(0) })], [ref({ machine: "EHRC-OPD2s-Mac-mini" })], ledger).dropped).toHaveLength(1);
   });
-  it("FALLBACK to ts: a ledger row from before 0155 (no boot_id/seq) still recognises a replay by (machine, kind, source, ts); an event that carries no ids is matched by ts against any ledger row", () => {
+  it("FALLBACK to ts: a ledger row from before 0160 (no boot_id/seq) still recognises a replay by (machine, kind, source, ts); an event that carries no ids is matched by ts against any ledger row", () => {
     const legacy = [led({ ts: off(0), twin_ts: off(0) })];
     expect(splitTwins([row({ boot_id: "b9", seq: 9, ts: off(0) })], [ref()], legacy).dropped).toHaveLength(1);
     const noIds = { boot_id: "", seq: Number.NaN } as Partial<KioskHealthRow>;

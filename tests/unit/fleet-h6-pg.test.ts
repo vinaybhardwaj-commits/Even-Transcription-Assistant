@@ -303,7 +303,7 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
       expect((await kh(batch, await device())).json).toMatchObject({ accepted: 0, duplicates: 1, deduped: 0 });
     });
 
-    describe("C1: the replay key is (machine, source, boot_id, seq) (migration 0155), R8", () => {
+    describe("C1: the replay key is (machine, source, boot_id, seq) (migration 0160), R8", () => {
       const at = (o: number, source: string, seq: number, boot: string, n: number) => ev(seq, source, o, { boot_id: boot, payload: { n } });
       const ledger = () => q<{ source: string; boot_id: string | null; seq: number | null }>`SELECT source, boot_id, seq FROM kiosk_health_dedupe ORDER BY id`;
 
@@ -330,18 +330,18 @@ const stored = async () => q<{ source: string; kind: string }>`SELECT source, ki
         expect((await kh({ events: [at(300, "daemon", 1, "b-d", 1)] }, BEARER)).json).toMatchObject({ accepted: 0, deduped: 1 });
       });
 
-      it("FALLBACK: a ledger row written BEFORE 0155 (no boot_id/seq) still recognises a replay by ts", async () => {
+      it("FALLBACK: a ledger row written BEFORE 0160 (no boot_id/seq) still recognises a replay by ts", async () => {
         await kh({ events: [at(0, "daemon", 1, "b-d", 0)] }, BEARER);
         pg.exec(`INSERT INTO kiosk_health_dedupe (machine, kind, source, twin_source, ts, twin_ts) VALUES ('EHRC-H6s-Mac-mini', 'power.sleep', 'helper', 'daemon', '2026-10-11T10:00:00.500Z', '2026-10-11T10:00:00.000Z');`);
         expect((await kh({ events: [at(500, "helper", 7, "b-h", 7)] }, await device())).json).toMatchObject({ accepted: 0, deduped: 1 });
         expect(await q`SELECT 1 FROM kiosk_health_dedupe`).toHaveLength(1); // not a second row: the old one answered it
       });
 
-      it("migration 0155: applies twice, registers once; the old (machine, kind, source, ts) unique index survives only for rows WITHOUT boot_id; id'd rows are unique on (machine, source, boot_id, seq)", async () => {
-        const sqlText = readFileSync("db/migrations/0155_kiosk_health_dedupe_boot_seq.sql", "utf8");
+      it("migration 0160: applies twice, registers once; the old (machine, kind, source, ts) unique index survives only for rows WITHOUT boot_id; id'd rows are unique on (machine, source, boot_id, seq)", async () => {
+        const sqlText = readFileSync("db/migrations/0160_kiosk_health_dedupe_boot_seq.sql", "utf8");
         pg.exec(sqlText);
         pg.exec(sqlText);
-        expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 155`)[0]!.n).toBe(1);
+        expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 160`)[0]!.n).toBe(1);
         const idx = (await q<{ indexname: string }>`SELECT indexname FROM pg_indexes WHERE tablename = 'kiosk_health_dedupe'`).map((r) => r.indexname);
         expect(idx).toEqual(expect.arrayContaining(["kiosk_health_dedupe_uidx_legacy", "kiosk_health_dedupe_uidx_id"]));
         expect(idx).not.toContain("kiosk_health_dedupe_uidx");

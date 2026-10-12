@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0155 — TS-H6 follow-up C1: kiosk_health_dedupe keys a REPLAY on (machine, source, boot_id, seq), not on ts.
+-- Migration 0160 — TS-H6 follow-up C1: kiosk_health_dedupe keys a REPLAY on (machine, source, boot_id, seq), not on ts.
 --
 -- WHY. 0154 recorded a skipped event by (machine, kind, source, ts) and recognised a replay by that same identity, so a NEW event that merely shares a ts with an absorbed one
 -- (same Mac, kind and source, a different boot_id/seq) was taken for a replay and dropped: a distinct event lost (refuter probe R8). Every posted event carries boot_id and seq
@@ -24,7 +24,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS kiosk_health_dedupe_uidx_legacy ON kiosk_healt
 CREATE UNIQUE INDEX IF NOT EXISTS kiosk_health_dedupe_uidx_id ON kiosk_health_dedupe (machine, source, boot_id, seq) WHERE boot_id IS NOT NULL;
 
 INSERT INTO schema_migrations (version, name)
-VALUES (155, '0155_kiosk_health_dedupe_boot_seq')
+VALUES (160, '0160_kiosk_health_dedupe_boot_seq')
 ON CONFLICT DO NOTHING;
 
 COMMIT;
