@@ -94,6 +94,18 @@ describe("flag and hmac", () => {
   });
 });
 
+describe("migration 0158", () => {
+  const up = readFileSync("db/migrations/0158_freescript_v03.sql", "utf8");
+  it("lets v0.3 through the schema check and records itself", () => {
+    expect(up).toContain("'eta.freescript.v0.3'");
+    expect(up).toContain("'eta.freescript.v0.1'");
+    expect(up).toContain("'eta.freescript.v0.2'");
+    expect(up).toMatch(/VALUES \(158, '0158_freescript_v03'\)/);
+    expect(up).not.toMatch(/\bGRANT\b/i);
+    expect(readFileSync("db/rollbacks/0158_freescript_v03.down.sql", "utf8")).toMatch(/DELETE FROM schema_migrations WHERE version = 158/);
+  });
+});
+
 describe("ingest SQL", () => {
   it("is one statement and names no transcript column", () => {
     expect(INGEST_SQL.startsWith("WITH p AS (SELECT $1::jsonb AS j)")).toBe(true);
