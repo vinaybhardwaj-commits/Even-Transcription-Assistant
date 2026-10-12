@@ -51,7 +51,8 @@ export type AdminNavKey =
   | "bench"
   | "rooms"
   | "rooms-live"
-  | "jev";
+  | "jev"
+  | "steward";
 
 type NavItem = {
   key: AdminNavKey;
@@ -73,7 +74,8 @@ const NAV: NavItem[] = [
   { key: "rooms", label: "Rooms", href: "/admin/rooms", icon: "▦", section: "observe" },
   { key: "rooms-live", label: "Rooms Live", href: "/rooms-live", icon: "▣", section: "observe" },
   { key: "jev", label: "Jev", href: "/admin/jev", icon: "◇", section: "observe" },
-  { key: "admins",     label: "Admins",     href: "/admin/admins",   icon: "◑", section: "configure" },
+  { key: "steward", label: "Steward", href: "/admin/steward", icon: "◆", section: "observe" },
+  { key: "admins",     label: "Admins",    href: "/admin/admins",   icon: "◑", section: "configure" },
   { key: "system-map", label: "System map", href: "/admin/system-map", icon: "▦", section: "configure" },
   { key: "settings",   label: "Settings",   href: "/admin/settings", icon: "◧", section: "configure" },
 ];
