@@ -28,7 +28,9 @@ import jsonschema
 
 from .followup import add_interval
 from .guard import CONTINUE_QUOTE, NUM_WORDS, NUM_WORDS_HI, numerals
-from .medication_safety import dose_bound, molecules, native_supports, plausible_strength, resolvable, same_molecules
+from .medication_safety import (
+    dose_bound, is_dose_change, molecules, native_supports, plausible_strength, resolvable, same_molecules,
+)
 
 PKG = Path(__file__).resolve().parent
 VENDOR = PKG / "vendor" / "freescript-w38"
@@ -533,10 +535,16 @@ def frx(art: dict) -> list[str]:
         if p.get("status") in ("stopped", "not_given", "discussed_only", "drug_history") or p.get("negated") is True:
             if p.get("json_pointer") is not None:
                 e.append(f"FRX-M7 {p.get('item_id')} kept-out drug has a json_pointer")
-            for nm in p.get("names") or []:
-                if any(V.same_drug([nm], V.med_names(m)) for m in meds if isinstance(m, dict)):
-                    e.append(f"FRX-M7 {p.get('item_id')} name matches a sent medicine")
-                    break
+            stopped_labels = [str(x) for x in (p.get("names") or []) if x] + [str(p.get("text") or "")]
+            for m in meds:
+                if not isinstance(m, dict):
+                    continue
+                if not any(V.same_drug([nm], V.med_names(m)) for nm in (p.get("names") or [])):
+                    continue
+                if is_dose_change(stopped_labels, [str(x) for x in V.med_names(m) if x]):
+                    continue
+                e.append(f"FRX-M7 {p.get('item_id')} name matches a sent medicine")
+                break
 
     for j, s in enumerate(slots):
         if not isinstance(s, dict):
@@ -832,13 +840,36 @@ def _date_heard(p) -> bool:
     return bool(re.search(r"\b\d{4}-\d{2}-\d{2}\b|\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", " ".join(_quotes(p)), re.I))
 
 
+def without_dose_change_conflicts(art: dict, errs: list[str]) -> list[str]:
+    """Stopping strength X and listing strength Y of the same drug is not a stopped-drug clash."""
+    gx = art.get("gp_extraction") if isinstance(art.get("gp_extraction"), dict) else {}
+    meds = gx.get("medicines") if isinstance(gx.get("medicines"), list) else []
+    prov = {p.get("item_id"): p for p in (art.get("provenance") or []) if isinstance(p, dict)}
+    kept = []
+    for err in errs:
+        g3 = re.match(r"G3 (\S+): .+ matches gp_extraction/medicines/(\d+)", err)
+        g6 = re.match(r"G6 (\S+): \S+ medicine named in note Medication", err)
+        item_id = g3.group(1) if g3 else (g6.group(1) if g6 else None)
+        if item_id and item_id in prov:
+            stopped = prov[item_id]
+            labels = [str(x) for x in (stopped.get("names") or []) if x] + [str(stopped.get("text") or "")]
+            targets = [meds[int(g3.group(2))]] if g3 and int(g3.group(2)) < len(meds) else meds
+            if any(
+                isinstance(med, dict) and is_dose_change(labels, [str(x) for x in V.med_names(med) if x])
+                for med in targets
+            ):
+                continue
+        kept.append(err)
+    return kept
+
+
 def check(art: dict) -> list[str]:
     if art.get("schema_version") == "eta.freescript.v0.1":
         return V.check(art)
     if art.get("schema_version") == "eta.freescript.v0.3":
         errs = _schema_errors(art, schema_v03(), "schema-v0.3")
         try:
-            errs += V.check(to_v01(art))
+            errs += without_dose_change_conflicts(art, V.check(to_v01(art)))
         except Exception as ex:
             errs.append(f"v0.1 projection: {type(ex).__name__}: {ex}")
         _c_rules(art, errs, slots=True)

@@ -38,12 +38,12 @@ from .guard import (
 from .ingest import Consult, Turn
 from .note import FILLER, drop_clauses, scrub_identity
 from .medication_safety import (
-    _name_in, catalogue_hit, dose_bound, key as name_key, molecules, native_supports, plausible_strength, resolvable,
-    spoken_catalogue_name,
+    _clauses, _name_in, catalogue_hit, dose_bound, key as name_key, molecules, native_supports, norm_tokens,
+    number_tokens, plausible_strength, resolvable, spoken_catalogue_name,
 )
 from .validate import CLASS_WORDS as V_CLASS, DEPT, DR_NAME, SLOT_STOP, V
 
-MAPPER_VERSION = "2.7.0"
+MAPPER_VERSION = "2.8.0"
 SCHEMA_VERSION = "eta.freescript.v0.3"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_SECONDARY_DX = 3
@@ -110,6 +110,12 @@ ORDER_PROC = re.compile(
 )
 _PRESCRIBE = re.compile(
     r"\b(take|start|prescrib\w*|continu\w*|giv\w*|use|apply|tablet|capsule|injection|inj|once|twice|daily|weekly|bd|tds|od|qid|hs|sos)\b",
+    re.I,
+)
+_START_CUE = re.compile(r"\b(start|prescrib\w*|take|giv\w*|appl\w*|add)\w*\b", re.I)
+_WITHDRAW = re.compile(r"\b(stop(?:ped|ping)?|withdrawn?|withdrawing|discontinu\w*)\b", re.I)
+_NO_CHANGE = re.compile(
+    r"\b(not changing(?:\s+any)?(?:\s+(?:medicine|medication|drug)s?)?|no changes?(?:\s+to\s+(?:the\s+)?(?:medicine|medication|drug)s?)?|not going to change)\b",
     re.I,
 )
 _REFER_CUE = re.compile(r"\b(refer\w*|opinion|specialist)\b", re.I)
@@ -770,6 +776,20 @@ class Builder:
                     self.review("inferred_confirm", held, f"Confirm {label}", label)
                 continue
             doctor_blob = self._doctor_text(turns, dec)
+            rx = self._drop_unspoken_derivations(rx, doctor_blob)
+            generic, brand = rx.get("generic"), rx.get("brand_as_said")
+            label = generic or brand or class_label(rx) or "drug"
+            name = strip_form_prefix(label)
+            names = [name, generic, brand, rx.get("_aligned_generic")] + heard
+            if self._withdrawn_here(rx, turns, dec):
+                self.P("medicine", f"Stop {label}", "stopped", turns, rx.get("confidence") or 0.5, None,
+                       fl + ["negation_cue_nearby"], names=[x for x in (label, generic, brand) if x], negated=True, lead=dec)
+                plan_txt.append((f"Stop {label}.", turns))
+                continue
+            if self._unchanged_medicine(rx, turns, dec):
+                self.P("medicine", f"[drug_history] {label} - not a new prescription", "drug_history",
+                       turns, min(rx.get("confidence") or 0.5, 0.5), None, names=[], lead=dec)
+                continue
             spoken_only = None
             if not self._doctor_named_drug(rx, doctor_blob):
                 spoken_only = self._sole_cited_catalogue_name(turns, dec)
@@ -789,18 +809,24 @@ class Builder:
                 rx["brand_as_said"] = spoken_only
                 name = strip_form_prefix(label)
                 names = [name, spoken_only]
-            elif brand and _name_in(doctor_blob, str(brand)) and (
-                components_of(rx)
-                or not (generic and _name_in(doctor_blob, str(generic)) and resolvable(str(generic)))
-            ):
+                bind_regimen_to_clause(
+                    rx, self.c.turns, [t for t in (turns or []) if isinstance(t, int)], [], "spoken",
+                )
+            elif self._prefer_longer_brand(brand, generic, doctor_blob, rx):
                 label = str(brand).strip()
                 name = strip_form_prefix(label)
-                names = [name, generic, brand] + heard
+                names = [name, generic, brand, rx.get("_aligned_generic")] + heard
             rx, safety = self._medicine_safety(rx, name, turns, dec)
             fl.extend(safety)
+            dose_conflict_hold = self._spoken_strength_conflicts(rx, str(brand or generic or label or ""))
+            if dose_conflict_hold:
+                safety.append("dose_binding_conflict")
+                fl.append("dose_binding_conflict")
             # An uncertain dose on a resolved name stays on the list (dose_unstated).
-            # Translation, an unresolved name, and a molecule swap still hold the drug out.
+            # Translation, an unresolved name, a molecule swap, and a conflicting spoken strength hold the drug out.
             hard = {"translation_conflict", "unresolved_name", "molecule_conflict"}
+            if dose_conflict_hold:
+                hard.add("dose_binding_conflict")
             if hard & set(safety):
                 self._unsafe_slot(rx, turns, dec, safety)
                 self.P("medicine", f"[held_back_unsafe_medicine] {label}", "discussed_only", turns, 0.5, None,
@@ -899,31 +925,157 @@ class Builder:
                 return True
         return False
 
-    def _sole_cited_catalogue_name(self, turns, dec) -> str | None:
-        """The one catalogue drug the doctor prescribed in this order's own turns, if there is exactly one."""
-        from .medication_safety import _clauses
+    def _cited_clauses(self, turns, dec) -> list[str]:
         idx = []
         if isinstance(dec, int):
             idx.append(dec)
         for t in turns or []:
             if t not in idx:
                 idx.append(t)
-        found: list[str] = []
+        out = []
         for t in idx:
             if not isinstance(t, int) or not 0 <= t < len(self.c.turns):
                 continue
             if self.c.turns[t].role in NON_DOCTOR:
                 continue
             text = self.c.turns[t].text or ""
-            for clause in _clauses(text) or ([text] if text.strip() else []):
-                if not _PRESCRIBE.search(clause):
-                    continue
-                spoken = spoken_catalogue_name(clause)
-                if spoken and catalogue_hit(spoken):
-                    found.append(spoken)
-        uniq = list(dict.fromkeys(s.lower() for s in found))
+            out.extend(_clauses(text) or ([text] if text.strip() else []))
+        return out
+
+    def _drop_unspoken_derivations(self, rx: dict, blob: str) -> dict:
+        """A molecule or form the model guessed from a brand letter is not a prescription."""
+        out = dict(rx)
+        generic = str(out.get("generic") or "").strip()
+        brand = str(out.get("brand_as_said") or "").strip()
+        composition = {str(part.get("generic") or "").lower() for part in (components_of(out) or [])}
+        brand_spoken = bool(brand and _name_in(blob, str(brand)))
+        if generic and brand_spoken and generic.lower() not in composition and not _name_in(blob, generic):
+            brand_mols = molecules(str(brand))
+            generic_mols = molecules(generic)
+            # A different molecule stays so the conflict hold still fires.
+            # The same molecule stays on the name list (Amlong / amlodipine).
+            # A letter in the brand (Clinda K -> potassium) is dropped.
+            if not (brand_mols and generic_mols and brand_mols.isdisjoint(generic_mols)):
+                if brand_mols and generic_mols and brand_mols == generic_mols:
+                    out["_aligned_generic"] = generic
+                out["generic"] = None
+        for field in ("dosage_form", "route"):
+            val = str(out.get(field) or "").strip()
+            if val and val.lower() not in blob.lower():
+                out[field] = None
+        if brand and not _name_in(blob, brand):
+            out["brand_as_said"] = None
+        return out
+
+    def _prefer_longer_brand(self, brand, generic, blob: str, rx: dict) -> bool:
+        """Menopace Iso wins over Menopace. A spoken generic that is itself the drug does not."""
+        if not brand or not _name_in(blob, str(brand)):
+            return False
+        if components_of(rx):
+            return True
+        if not (generic and _name_in(blob, str(generic)) and resolvable(str(generic))):
+            return True
+        if not catalogue_hit(str(brand)):
+            return False
+        gtoks, btoks = norm_tokens(str(generic)), norm_tokens(str(brand))
+        return bool(gtoks) and len(btoks) > len(gtoks) and btoks[: len(gtoks)] == gtoks
+
+    def _spoken_strength_conflicts(self, rx: dict, spoken: str) -> bool:
+        """The model dose is a different number from the strength the doctor said in the name."""
+        model = number_tokens(str(rx.get("strength_model_value") or ""))
+        heard = number_tokens(spoken)
+        return bool(model and heard and set(model).isdisjoint(heard))
+
+    def _cue_pos(self, clause: str, cue: re.Pattern) -> int:
+        hit = cue.search(clause or "")
+        return hit.start() if hit else -1
+
+    def _name_anchor(self, clause: str, name: str) -> int:
+        """Where this name sits. A strength token picks Telma 40 out of a clause that also says Telma 20."""
+        low = clause.lower()
+        words = [w for w in re.findall(r"[a-z0-9]+", name.lower()) if len(w) >= 4 or w.isdigit()]
+        digits = [w for w in words if w.isdigit()]
+        alphas = [w for w in words if not w.isdigit()]
+        if digits:
+            for dig in digits:
+                start = 0
+                while True:
+                    hit = re.search(rf"(?<![0-9]){re.escape(dig)}(?![0-9])", low[start:])
+                    if not hit:
+                        break
+                    at = start + hit.start()
+                    window_from = max(0, at - 30)
+                    window = low[window_from:at]
+                    spots = [window.rfind(a) for a in alphas if window.rfind(a) >= 0]
+                    if spots:
+                        return window_from + max(spots)
+                    if not alphas:
+                        return at
+                    start = at + len(dig)
+        found = []
+        for word in words:
+            hit = re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", low)
+            if hit:
+                found.append(hit.start())
+        return min(found) if found else -1
+
+    def _cue_nearer_than(self, clause: str, name: str, keep: re.Pattern, other: re.Pattern) -> bool:
+        """True when `keep` sits nearer this drug than `other` does."""
+        own = self._name_anchor(clause, name)
+        if own < 0:
+            return False
+        keep_at, other_at = self._cue_pos(clause, keep), self._cue_pos(clause, other)
+        if keep_at < 0:
+            return False
+        if other_at < 0:
+            return True
+        return abs(keep_at - own) <= abs(other_at - own)
+
+    def _withdrawn_here(self, rx: dict, turns, dec) -> bool:
+        name = str(rx.get("brand_as_said") or rx.get("generic") or "").strip()
+        if not name:
+            return False
+        for clause in self._cited_clauses(turns, dec):
+            if not _name_in(clause, name) or not _WITHDRAW.search(clause):
+                continue
+            if _START_CUE.search(clause) and self._cue_nearer_than(clause, name, _START_CUE, _WITHDRAW):
+                continue
+            return True
+        return False
+
+    def _unchanged_medicine(self, rx: dict, turns, dec) -> bool:
+        """'Not changing any medicine' is not a new prescription. A separate start clause still is."""
+        if not any(
+            isinstance(t, int) and 0 <= t < len(self.c.turns) and self.c.turns[t].role not in NON_DOCTOR
+            and _NO_CHANGE.search(self.c.turns[t].text or "")
+            for t in ([dec] if isinstance(dec, int) else []) + list(turns or [])
+        ):
+            return False
+        name = str(rx.get("brand_as_said") or rx.get("generic") or "").strip()
+        for clause in self._cited_clauses(turns, dec):
+            if _NO_CHANGE.search(clause):
+                continue
+            if name and _name_in(clause, name) and _START_CUE.search(clause):
+                return False
+        return True
+
+    def _sole_cited_catalogue_name(self, turns, dec) -> str | None:
+        """The one catalogue drug the doctor prescribed in this order's own turns, if there is exactly one."""
+        found: list[str] = []
+        started: list[str] = []
+        for clause in self._cited_clauses(turns, dec):
+            if not _PRESCRIBE.search(clause):
+                continue
+            spoken = spoken_catalogue_name(clause)
+            if not spoken or not catalogue_hit(spoken):
+                continue
+            found.append(spoken)
+            if _START_CUE.search(clause):
+                started.append(spoken)
+        pool = started or found
+        uniq = list(dict.fromkeys(s.lower() for s in pool))
         if len(uniq) == 1:
-            return next(s for s in found if s.lower() == uniq[0])
+            return next(s for s in pool if s.lower() == uniq[0])
         return None
 
     def _referral_for_this_consult(self, turns) -> bool:
@@ -1445,6 +1597,25 @@ class Builder:
         if refs:
             self.gx["referrals"] = refs
 
+    def _negated_procedure(self, text: str, name: str) -> bool:
+        """'No surgery' is not advice to operate. The negation has to govern this name."""
+        clause = text or ""
+        for piece in _clauses(clause) or [clause]:
+            if name.lower() not in piece.lower():
+                continue
+            gap = r"(?:advis\w*|recommend\w*|a|an|the|this|that|any|for|to|of|do|doing|get)"
+            before = re.compile(
+                rf"\b(?:no|not|never|without|avoid|don'?t|do not)\b(?:\s+{gap}){{0,3}}\s+{re.escape(name)}\b",
+                re.I,
+            )
+            after = re.compile(
+                rf"\b{re.escape(name)}\b(?:\s+(?:is|was|are|were))?\s+not\b",
+                re.I,
+            )
+            if before.search(piece) or after.search(piece):
+                return True
+        return False
+
     def _procedure_names(self, text: str) -> list[str]:
         if excluded_procedure(text) and not specific_procedure_names(text):
             return []
@@ -1455,7 +1626,7 @@ class Builder:
             found.append(SURGERY_WORD.search(text).group(1))
         if any(SPECIFIC_PROCEDURE.search(n) for n in found):
             found = [n for n in found if not generic_procedure(n)]
-        return found
+        return [nm for nm in found if not self._negated_procedure(text, nm)]
 
     def _prefer_specific(self, nm: str, tl, raw):
         if excluded_procedure(nm):
@@ -1554,17 +1725,29 @@ class Builder:
                 self.review("inferred_confirm", held, f"Confirm {nm}", nm)
                 continue
             if it.get("basis") == "said" and isinstance(dec, int) and not self.by_non_doctor(dec):
-                add(nm, tl or [dec], dec, it.get("notes"), it.get("scheduled_date"), kind, it.get("raw_name"))
+                cited = " ".join(
+                    self.c.turns[t].text or "" for t in (tl or [])
+                    if isinstance(t, int) and 0 <= t < len(self.c.turns)
+                )
+                own = next((c for c in (_clauses(cited) or [cited]) if nm.lower() in c.lower()), cited)
+                notes = str(it.get("notes") or "")
+                if self._negated_procedure(own or cited, nm) or self._negated_procedure(notes, nm):
+                    continue
+                item_kind = kind
+                if CONDITIONAL_PROC.search(own or "") or CONDITIONAL_PROC.search(notes):
+                    item_kind = "conditional"
+                add(nm, tl or [dec], dec, it.get("notes"), it.get("scheduled_date"), item_kind, it.get("raw_name"))
             else:
                 self.P("procedure", f"[held_back_inferred_order] {nm}", "discussed_only", tl, 0.5, None, names=[nm], lead=dec)
         for i, t in enumerate(self.c.turns):
             if t.role != "doctor" or i in self.b.quarantined:
                 continue
-            for nm in self._procedure_names(t.text):
-                if CONDITIONAL_PROC.search(t.text or ""):
-                    conditional(nm, t.text, [i], i)
-                else:
-                    add(nm, [i], i)
+            for clause in _clauses(t.text or "") or [t.text or ""]:
+                for nm in self._procedure_names(clause):
+                    if CONDITIONAL_PROC.search(clause):
+                        conditional(nm, clause, [i], i)
+                    else:
+                        add(nm, [i], i)
         for p in self.enc.get("plan") or []:
             if p.get("basis") != "said" or not p.get("text"):
                 continue
@@ -1573,11 +1756,12 @@ class Builder:
                 continue
             if tl and all(self.c.turns[t].role in NON_DOCTOR for t in tl):
                 continue
-            for nm in self._procedure_names(p["text"]):
-                if CONDITIONAL_PROC.search(p["text"]):
-                    conditional(nm, p["text"], tl, tl[0] if tl else None)
-                else:
-                    add(nm, tl, tl[0] if tl else None)
+            for clause in _clauses(p["text"]) or [p["text"]]:
+                for nm in self._procedure_names(clause):
+                    if CONDITIONAL_PROC.search(clause):
+                        conditional(nm, clause, tl, tl[0] if tl else None)
+                    else:
+                        add(nm, tl, tl[0] if tl else None)
         pom = self.gx.setdefault("plan_of_management", {}) if (recs or any(p.get("kind") == "procedure" for p in self.prov)) else None
         if recs:
             pom["requires_surgery_or_procedure"] = True
@@ -1880,6 +2064,7 @@ def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, co
         "completion_required": bl.completion, "clip_boundary": b.as_json(),
         "slots": bl.slots, "room_facts": bl.facts,
     }
-    from .recover import soften_f2_m3
+    from .recover import recover_medicine_rules, soften_f2_m3
     soften_f2_m3(art)
+    recover_medicine_rules(art)
     return art

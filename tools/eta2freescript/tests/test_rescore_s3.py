@@ -90,7 +90,6 @@ def test_a_patient_history_drug_is_not_a_new_prescription():
 def test_mounjaro_telma_and_daflon_resolve_without_an_invented_strength():
     cases = [
         ("Start Mounjaro once a week.", "tirzepatide", "Mounjaro", "once a week"),
-        ("Take Telma 40 once a day.", "olmesartan", "Telma 40", None),
         ("Start Daflon one tablet twice a day.", "diosmin", "Daflon", None),
     ]
     for line, generic, brand, freq in cases:
@@ -102,6 +101,16 @@ def test_mounjaro_telma_and_daflon_resolve_without_an_invented_strength():
         assert med["name"].lower().startswith(brand.split()[0].lower())
         assert "10" not in med["name"]
         assert "unresolved_name" not in (a["slots"][0]["flags"] if a["slots"] else [])
+    lines = [(0, 8, "0", "Take Telma 40 once a day.")]
+    held = art_of(c=mk_consult(lines, roles=DOC), examination=[], prescription=[rx(
+        generic="olmesartan", brand_as_said="Telma 40", strength="10 mg", frequency=None, duration=None,
+        decision_turn=0, source_quote_turn=0, source_turns=[0])])
+    assert "medicines" not in held["gp_extraction"]
+    assert any("dose_binding_conflict" in (s.get("flags") or []) for s in held["slots"])
+    listed = art_of(c=mk_consult(lines, roles=DOC), examination=[], prescription=[rx(
+        generic="olmesartan", brand_as_said="Telma 40", strength=None, frequency="once a day", duration=None,
+        decision_turn=0, source_quote_turn=0, source_turns=[0])])
+    assert listed["gp_extraction"]["medicines"][0]["name"].lower().startswith("telma 40")
 
 
 def test_unresolved_model_name_releases_when_the_doctor_said_the_catalogue_brand():
