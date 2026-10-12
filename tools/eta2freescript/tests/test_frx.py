@@ -1,7 +1,7 @@
 """Finished-prescription rules (FRX-*). Examples A and B are the spec's synthetic consults.
 
 Pass: the built artefact has no finding for that rule. Fail: one mutation of A or B, and frx() reports it.
-FRX-M8 is a warning: it is in frx() and absent from check().
+FRX-D4 is a warning: it is in frx() and absent from check(). Medication rules M8-M13 block.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ DOC = {"0": "doctor", "1": "patient"}
 
 # Every code frx() can emit. A pass and a fail below name each one.
 CODES = (
-    "E1 E2 E3 P1 P2 P3 P4 P5 M1 M2 M3 M4 M5 M6 M7 M8 "
-    "S1 S2 S3 I1 I2 R1 A1 A2 D1 D2 D3 PR1 PR2 PR3 F1 F2 F3 F4 C1 C2"
+    "E1 E2 E3 P1 P2 P3 P4 P5 M1 M2 M3 M4 M5 M6 M7 M8 M9 M10 M11 M12 M13 "
+    "S1 S2 S3 I1 I2 R1 A1 A2 D1 D2 D3 D4 PR1 PR2 PR3 F1 F2 F3 F4 C1 C2"
 ).split()
 
 
@@ -244,6 +244,18 @@ def test_frx_pass(code):
         "item_id": "medstop", "kind": "medicine", "text": "Stop paracetamol", "status": "stopped", "negated": True,
         "json_pointer": None, "names": ["paracetamol"], "evidence_state": "heard_in_room"})),
     ("M8", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "Zzyzx 1 g")),
+    ("M9", "a", lambda a: _med(a)["evidence"][0].__setitem__("quote_native", "ರಿವರಾಕ್ಸಾಬಾನ್ 10 mg")),
+    ("M10", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "Zzyzx 1 g")),
+    ("M11", "a", lambda a: (
+        a["gp_extraction"]["medicines"][0].__setitem__("name", "omeprazole 20 mg"),
+        a["gp_extraction"]["medicines"][0].__setitem__("raw_name", "Voquezna"))),
+    ("M12", "a", lambda a: (
+        a["gp_extraction"]["medicines"][0].__setitem__("name", "paracetamol 10 ml"),
+        _med(a)["medicine"]["strength"].update({"text": "10 ml", "value": "10", "unit": "ml"}),
+        _med(a)["medicine"].__setitem__("dosage_form", "tablet"))),
+    ("M13", "a", lambda a: (
+        a["gp_extraction"]["medicines"][0].__setitem__("name", "paracetamol 9400 mg"),
+        _med(a)["medicine"]["strength"].update({"text": "9400 mg", "value": "9400", "unit": "mg"}))),
     ("S1", "a", lambda a: a["slots"][0]["form"].__setitem__("text", "Paracetamol")),
     ("S2", "a", lambda a: _drop(a, "pick_drug")),
     ("S3", "a", lambda a: a["slots"][0]["timing"].__setitem__("text", "None")),
@@ -256,6 +268,9 @@ def test_frx_pass(code):
     ("D2", "a", lambda a: next(p for p in a["provenance"] if p.get("json_pointer") == "/presenting_complaints/diagnoses/0")["diagnosis"]["icd10"].__setitem__("code", "BP")),
     ("D3", "a", lambda a: a["gp_extraction"]["presenting_complaints"]["diagnoses"].append(
         {"diagnosis_or_impression": "Knee pain", "is_differential_diagnosis": False, "raw_name": "knee pain"})),
+    ("D4", "a", lambda a: (
+        a["gp_extraction"]["presenting_complaints"]["diagnoses"][0].__setitem__("diagnosis_or_impression", "Pre-diabetes"),
+        a["room_facts"]["vitals"].append({"name": "HbA1c", "value": "6.8"}))),
     ("PR1", "a", lambda a: a["gp_extraction"]["plan_of_management"].__setitem__("requires_surgery_or_procedure", False)),
     ("PR2", "a", lambda a: _proc(a).__setitem__("json_pointer", None)),
     ("PR3", "a", lambda a: a["gp_extraction"]["plan_of_management"]["surgery_or_procedure_recommendations"][0].__setitem__("name", "")),
@@ -276,12 +291,18 @@ def test_frx_fail(code, which, mutate):
     assert hits(art, code), frx(art)
 
 
-def test_frx_m8_warns_and_does_not_block():
+def test_frx_m8_blocks_an_unresolvable_name():
     art = example_a()
     art["gp_extraction"]["medicines"][0]["name"] = "Zzyzx 1 g"
     art["gp_extraction"]["medicines"][0]["aliases"] = []
     assert hits(art, "M8")
-    assert check(art) == [], check(art)
+    assert any(e.startswith("FRX-M8") for e in check(art))
+
+
+def test_frx_m10_blocks_an_unresolvable_heard_alias():
+    art = example_a()
+    art["gp_extraction"]["medicines"][0]["aliases"] = ["Zzyzx"]
+    assert any(e.startswith("FRX-M10") for e in check(art))
 
 
 def test_frx_m4_patient_source_passes_when_the_doctor_value_is_kept():

@@ -22,7 +22,7 @@ V03 = HERE / "eta-freescript-artifact.v0.3.schema.json"
 
 COMPLETION_KINDS = [
     "pick_drug", "dose_unstated", "drug_history", "exam_missing", "follow_up_unstated", "follow_up_missing",
-    "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review",
+    "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review", "lab_dx_conflict",
 ]
 KEPT_OUT = ["stopped", "not_given", "discussed_only", "conditional", "already_done", "asked_only", "drug_history"]
 EVIDENCE_STATE = ["heard_in_room", "inferred", "not_said_in_room"]
@@ -77,6 +77,7 @@ def build() -> dict:
                 "evidence": {"type": "array"},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 0.6},
                 "json_pointer": {"type": "null"},
+                "flags": {"type": "array", "items": {"type": "string"}},
             },
         },
     }
@@ -112,6 +113,10 @@ def build() -> dict:
     props["investigation"] = {"type": "object"}
     props["procedure"] = {"type": "object"}
     props["follow_up"] = {"type": "object"}
+    props["flags"]["items"]["enum"] += [
+        "translation_conflict", "unresolved_name", "molecule_conflict",
+        "dose_binding_conflict", "implausible_strength", "lab_dx_conflict",
+    ]
     for clause in pi.get("allOf", []):
         enum = clause.get("if", {}).get("properties", {}).get("status", {}).get("enum")
         if enum and "discussed_only" in enum and "prescribed" not in enum:

@@ -1,4 +1,4 @@
-# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.3.0 · stageB-v4 · eta.freescript.v0.3)
+# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.4.0 · stageB-v4 · eta.freescript.v0.3)
 
 Turns one isolated OPD consult (an ETA cut clip with its Sarvam transcript and, when present, the REB `role.llm-roles`
 track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.3` artifact holding `gp_extraction`
@@ -13,6 +13,14 @@ The pipeline runs **off Vercel**, on the box. It reads a local folder. Only the 
 Ported from the v1 prototype (`encounter-to-rx`, 35-consult scale-up, 11 Oct 2026). The prototype's v0 and v1 prompts
 are kept unchanged under `prompts/` for reproducibility. The vendored w38 validator, schema and examples sit unchanged
 under `vendor/freescript-w38/`.
+
+Medication safety is deterministic after Stage A. When a translated consult also has native spans, every emitted
+medicine name and number must agree with `quote_native`; Kannada, Hindi, Tamil, Telugu and Malayalam digits and number
+words are normalised. Names must resolve through the explicit generic/brand catalogue, a brand cannot change molecule,
+and a dose must occur with that drug in the same segment (or clause when more than one drug is named). Tablet/ml and
+syrup/mg mismatches block the item. Implausible strengths are removed and raised as `dose_unstated`. Unsafe names become
+`pick_drug` slots with a safety flag instead of medicines. `medication_safety.py` contains the catalogue and broad,
+reviewable single-dose plausibility bounds; unknown names are held out, never fuzzy-matched.
 
 ## Flow
 

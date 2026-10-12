@@ -56,11 +56,12 @@ def test_hold_back(change, why):
     assert len(held) == 1 and why in held[0]["text"]
 
 
-def test_non_doctor_decision_not_held_without_role_track():
+def test_unresolved_role_with_regimen_carryover_is_held_for_review():
     c = mk_consult(LINES, role_track=False)
     a = build_artifact(c, empty_encounter(examination=EXAM, prescription=[rx(decision_turn=2, source_turns=[2], strength="5 mg", generic="amlodipine",
                                                                                  frequency=None, duration=None)]))
-    assert a["gp_extraction"]["medicines"][0]["raw_name"] == "amlodipine"
+    assert "medicines" not in a["gp_extraction"]
+    assert "dose_binding_conflict" in a["slots"][0]["flags"]
 
 
 def test_stopped_drug_negated_and_kept_out():
@@ -159,7 +160,10 @@ def test_drug_history_continue_prompt_for_an_unaddressed_current_drug():
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [3]}],
                drug_history=discussed)
     assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in a["completion_required"])
-    a = art_of(drug_history=mentioned, prescription=[rx(generic="amlodipine", brand_as_said="Amlong", strength="5 mg", decision_turn=4, source_turns=[2, 4])])
+    lines = LINES[:4] + [(21, 30, "0", "Continue Amlong 5 mg once a day.")] + LINES[5:]
+    a = art_of(c=mk_consult(lines, roles=DOC), drug_history=mentioned,
+               prescription=[rx(generic="amlodipine", brand_as_said="Amlong", strength="5 mg",
+                                frequency="once a day", decision_turn=4, source_turns=[2, 4])])
     assert "drug_history" not in kinds(a)
 
 
@@ -320,6 +324,7 @@ def test_stage_a_prompt_names_surgery_combinations_and_routine_panels():
     text = Path("tools/eta2freescript/prompts/stageA-v2.md").read_text()
     assert "procedures" in text and "components" in text and "routine panel" in text
     assert "verbatim" in text and "coarser parent" in text
+    assert "NATIVE text first" in text and "turn 40 into 940" in text
 
 
 def test_dose_precedence_flag_and_raw_name():

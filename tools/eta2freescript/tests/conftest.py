@@ -26,9 +26,12 @@ def mk_consult(lines, roles=None, role_track=True, lang="en", flags=None, clip_s
     """lines: [(t0_s, t1_s, speaker, text)]. roles: speaker -> artifact role."""
     from tools.eta2freescript.ingest import Consult, RoleFlags, Turn
     turns = []
-    for i, (a, b, sp, text) in enumerate(lines):
+    for i, line in enumerate(lines):
+        a, b, sp, text = line[:4]
+        native = line[4] if len(line) > 4 else None
         role = (roles or {}).get(sp, "unknown")
         turns.append(Turn(idx=i, t0_ms=T0 + int(a * 1000), t1_ms=T0 + int(b * 1000), speaker=sp, text=text, lang=lang,
+                          native_text=native, native_lang=lang if native else None,
                           role=role if role_track else "unknown", role_source="role_track" if role_track else "none"))
     end = T0 + int((clip_s if clip_s is not None else lines[-1][1] + 1) * 1000)
     return Consult(uid="synth-unit", turns=turns, clip_t0_ms=T0, clip_t1_ms=end, language_code=lang,
