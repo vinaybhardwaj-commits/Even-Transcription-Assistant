@@ -264,7 +264,7 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
       try { doc = JSON.parse(obj.body); } catch { skipped += 1; continue; }
       const got = linesFromTrack(doc, span.t_open_ms, span.t_close_ms, layer);
       if (!got || got.lines.length === 0) continue;
-      if (layer === "stt" && !got.allEnglish) break; // a native-language stt track is not text we can score: fall back
+      if (layer === "stt" && !got.allEnglish) continue; // a native or lang-less stt row is not text we can score: try the next older stt row; none wholly English falls through to window_english
       const joined = await joinRoleTrack(uid, span.room_id, store, layer, doc, span.t_open_ms, span.t_close_ms, got);
       skipped += joined.skipped;
       return {

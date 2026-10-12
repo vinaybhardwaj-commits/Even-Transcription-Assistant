@@ -339,6 +339,48 @@ describe("readRebConsult", () => {
     expect(JSON.stringify(got)).not.toContain(LEAK);
   });
 
+  describe("stt layer takes the newest wholly-English row", () => {
+    const en = [seg(1000, "0", "alpha"), seg(4000, "1", "beta")];
+    const native = [seg(1000, "0", "alpha-native", "hi-IN"), seg(4000, "1", "beta-native", "hi-IN")];
+    const langless = en.map((g) => { const { lang: _l, ...rest } = g; return rest; });
+
+    it("a newer lang-less stt row is skipped and the older wholly-English row is used and named", async () => {
+      put("stt", "newmedas", sttBody(langless)); // newest (first)
+      put("stt", "oldsarv1", sttBody(en));
+      const got = await readRebConsult(span());
+      expect(got.found).toMatchObject({ source: "reb_stt_en", config_hash: "oldsarv1" });
+      expect(got.found?.lines.map((l) => l.text)).toEqual(["alpha", "beta"]);
+    });
+
+    it("a newer native stt row is skipped the same way", async () => {
+      put("stt", "newnativ", sttBody(native));
+      put("stt", "oldsarv1", sttBody(en));
+      const got = await readRebConsult(span());
+      expect(got.found).toMatchObject({ source: "reb_stt_en", config_hash: "oldsarv1" });
+    });
+
+    it("a newer wholly-English row wins over an older one", async () => {
+      put("stt", "newen001", sttBody(en));
+      put("stt", "oldsarv1", sttBody(en));
+      expect((await readRebConsult(span())).found?.config_hash).toBe("newen001");
+    });
+
+    it("every stt row native or lang-less: nothing found, so the caller falls through to window_english", async () => {
+      put("stt", "newmedas", sttBody(langless));
+      put("stt", "oldnativ", sttBody(native));
+      const got = await readRebConsult(span());
+      expect(got.found).toBeNull();
+    });
+
+    it("a translate track is still used ahead of any stt row", async () => {
+      put("stt", "newmedas", sttBody(langless));
+      put("stt", "oldsarv1", sttBody(en));
+      put("translate", "trcfg001", JSON.stringify({ status: "ok", layer: "translate", engine: "sarvam-saaras-v3", segments: en, extras: {} }));
+      const got = await readRebConsult(span());
+      expect(got.found).toMatchObject({ source: "reb_translate", config_hash: "trcfg001" });
+    });
+  });
+
   it("an unrecognised flag value throws and is not read as off", async () => {
     put("stt", "sttcfg01", sttBody([seg(1000, "0", "alpha")]));
     process.env.ETA_REB_ROLE_LLM = "maybe";
