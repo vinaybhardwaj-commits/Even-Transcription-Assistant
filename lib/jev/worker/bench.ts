@@ -59,8 +59,13 @@ export async function runBench(input: {
       const i = next++;
       if (i >= subjects.length || stopped) return;
       const id = subjects[i]!.subject_id;
-      const build = await def.build(id).catch(() => null);
-      if (build === null) { outcomes[i] = { subject_id: id, status: "no_state", reason: "no_state", rows: [], tokens: 0, calls: 0 }; continue; }
+      let thrown = false;
+      const build = await def.build(id).catch(() => { thrown = true; return null; });   // a thrown error is metadata only: its message is never kept
+      if (build === null || "unbuildable" in build) {
+        const reason = thrown ? "build_error" : build === null ? "no_reason" : build.unbuildable;
+        outcomes[i] = { subject_id: id, status: "no_state", reason, rows: [], tokens: 0, calls: 0 };
+        continue;
+      }
       const out = await askSubject({ jobId: `bench_${id.slice(0, 40)}`, set: loaded.set, defs: loaded.defs, mode: "bench", subjectId: id, build, signal: input.signal });
       const evidence = "evidence" in build ? build.evidence : {};
       if (out.kind === "deferred") { stopped = out.why; outcomes[i] = { subject_id: id, status: "deferred", reason: out.why, rows: [], tokens: 0, calls: out.calls }; continue; }
