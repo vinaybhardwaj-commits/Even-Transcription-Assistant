@@ -134,3 +134,14 @@ export async function moveItem(id: string, from: ItemState, to: ItemState, f: { 
   `) as unknown[];
   return rows.length === 1;
 }
+
+/** Upserts each given steward setting (key text, value jsonb). One statement per key. */
+export async function upsertStewardSettings(patch: Record<string, unknown>): Promise<void> {
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) continue;
+    await sql`
+      INSERT INTO steward_settings (key, value) VALUES (${k}::text, ${JSON.stringify(v)}::jsonb)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+    `;
+  }
+}

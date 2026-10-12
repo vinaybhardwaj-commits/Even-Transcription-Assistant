@@ -95,3 +95,12 @@ export type ItemCreate = z.infer<typeof itemCreateSchema>;
 
 export const itemResultSchema = z.object({ ok: z.boolean(), result: z.record(z.string().max(64), z.union([z.string().max(300), z.number(), z.boolean(), z.null()])).default({}) }).strict();
 export const itemDecisionSchema = z.object({ state: z.enum(["approved", "rejected"]) }).strict();
+
+/** PATCH /api/admin/steward/settings: any of these keys, at least one. mode "act" is parsed here and refused (409) by the route until phase 3 is approved. */
+export const settingsPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  mode: z.enum(STEWARD_MODES).optional(),
+  daily_cap_usd: z.number().min(0).max(50).optional(),
+  model_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:\/-]+$/).optional(),
+}).strict().refine((v) => Object.keys(v).length > 0, "empty_patch");
+export type SettingsPatch = z.infer<typeof settingsPatchSchema>;

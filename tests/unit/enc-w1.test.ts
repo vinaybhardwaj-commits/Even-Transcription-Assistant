@@ -15,6 +15,7 @@ const S = vi.hoisted(() => ({
   moves: [] as Array<{ id: string; from: string; to: string; decided_by?: unknown; result?: unknown }>,
   created: [] as unknown[],
   admin: null as string | null,
+  settings: [] as Array<Record<string, unknown>>,
   openRuns: new Set<string>(),
 }));
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no sql in a unit test"); } }));
@@ -23,6 +24,7 @@ vi.mock("@/lib/enc/store", () => ({
   writeSyncedSha: async (d: string, v: unknown) => { S.written.push([d, v]); },
   upsertRoomDays: async (rows: unknown[]) => { S.roomDays.push(...rows); return rows.length; },
   upsertIsolations: async (rows: unknown[]) => { S.isolations.push(...rows); return rows.length; },
+  upsertStewardSettings: async (p: Record<string, unknown>) => { S.settings.push(p); },
   createRun: async () => "11111111-1111-4111-8111-111111111111",
   closeRun: async (id: string) => S.openRuns.has(id),
   createItem: async (v: { run_id: string }) => { S.created.push(v); return S.openRuns.has(v.run_id) ? "22222222-2222-4222-8222-222222222222" : null; },
@@ -45,6 +47,7 @@ import { GET as syncGet, POST as syncPost } from "@/app/api/admin/enc-sync/route
 import { POST as runPost } from "@/app/api/admin/steward/run/route";
 import { GET as itemsGet, POST as itemsPost } from "@/app/api/admin/steward/items/route";
 import { PATCH as decide } from "@/app/api/admin/steward/items/[id]/route";
+import { PATCH as settingsPatch } from "@/app/api/admin/steward/settings/route";
 import { POST as resultPost } from "@/app/api/admin/steward/items/[id]/result/route";
 
 const D = "2026-10-11";
@@ -90,7 +93,7 @@ const params = (id: string) => ({ params: Promise.resolve({ id }) });
 
 beforeEach(() => {
   S.synced.clear(); S.roomDays.length = 0; S.isolations.length = 0; S.written.length = 0; S.items.clear(); S.moves.length = 0; S.created.length = 0;
-  S.admin = null; S.openRuns = new Set([RUN]);
+  S.settings.length = 0; S.admin = null; S.openRuns = new Set([RUN]);
   setLabStoreForTests(null);
   process.env.ENC_STEWARD_TOKEN = TOKEN;
   process.env.CRON_SECRET = "fake-cron"; process.env.MIGRATION_SECRET = "fake-mig";
@@ -313,5 +316,36 @@ describe("state transitions", () => {
   });
   it("result for an unknown item is 404", async () => {
     expect((await resultPost(req(`/api/admin/steward/items/${ITEM}/result`, { body: { ok: true } }), params(ITEM))).status).toBe(404);
+  });
+});
+
+describe("PATCH steward settings", () => {
+  const patch = (body: unknown) => settingsPatch(req("/api/admin/steward/settings", { method: "PATCH", token: null, body }));
+  it("needs an admin session; the steward bearer alone is 401", async () => {
+    expect((await settingsPatch(req("/api/admin/steward/settings", { method: "PATCH", body: { enabled: true } }))).status).toBe(401);
+    expect(S.settings.length).toBe(0);
+  });
+  it("upserts any of enabled, mode advise, daily_cap_usd, model_id", async () => {
+    S.admin = "adm1";
+    const r = await patch({ enabled: true, mode: "advise", daily_cap_usd: 5, model_id: "fake.model-v1:0" });
+    expect(r.status).toBe(200);
+    expect(S.settings[0]).toEqual({ enabled: true, mode: "advise", daily_cap_usd: 5, model_id: "fake.model-v1:0" });
+    expect((await patch({ enabled: false })).status).toBe(200);
+    expect(S.settings[1]).toEqual({ enabled: false });
+  });
+  it("mode act is 409 and writes nothing", async () => {
+    S.admin = "adm1";
+    expect((await patch({ mode: "act" })).status).toBe(409);
+    expect((await patch({ enabled: true, mode: "act" })).status).toBe(409);
+    expect(S.settings.length).toBe(0);
+  });
+  it("refuses an empty body, a cap outside 0..50, a wrong type and an unknown key", async () => {
+    S.admin = "adm1";
+    for (const b of [{}, { daily_cap_usd: 51 }, { daily_cap_usd: -1 }, { enabled: "yes" }, { mode: "root" }, { model_id: "" }, { other: 1 }]) {
+      expect((await patch(b)).status).toBe(400);
+    }
+    expect((await patch({ daily_cap_usd: 0 })).status).toBe(200);
+    expect((await patch({ daily_cap_usd: 50 })).status).toBe(200);
+    expect(S.settings.length).toBe(2);
   });
 });
