@@ -1018,7 +1018,7 @@ export type InstallPollFields = {
   power_schedule?: string | null;
   /** comma-separated pmset setting names that drifted */
   pmset_drift?: string | null;
-  // ── TS-H8 (0156). Sent by app 0.1.37 and later: what the helper's whole-bundle update is doing. ──
+  // ── TS-H8 (0161). Sent by app 0.1.37 and later: what the helper's whole-bundle update is doing. ──
   helper_update_step?: string | null;
   helper_update_version?: string | null;
   helper_update_result?: string | null;
@@ -1184,7 +1184,7 @@ export function cleanPollFields(raw: InstallPollFields): {
       return v && !/[\u0000-\u001f\u007f\u2028\u2029]/.test(v) ? v : null;
     })(),
     pmset_drift: cleanPmsetDrift(raw.pmset_drift),
-    // ── TS-H8 (0156): a lower-case reason/step code, a version, a result code; each dropped on its own if malformed ──
+    // ── TS-H8 (0161): a lower-case reason/step code, a version, a result code; each dropped on its own if malformed ──
     helper_update_step: (() => {
       const v = str(raw.helper_update_step, 32);
       return v && /^[a-z][a-z_]{0,31}$/.test(v) ? v : null;

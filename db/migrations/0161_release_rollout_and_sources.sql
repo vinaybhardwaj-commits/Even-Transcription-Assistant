@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0156 — TS-H8 (#45) / TS-H12 (#49) for room app 0.1.37.
+-- Migration 0161 — TS-H8 (#45) / TS-H12 (#49) for room app 0.1.37.
 --
 --  1. fleet_release_rollout   which version of the whole room bundle (the pkg the root helper installs) is open to which group of Macs. ONE row per (version, channel), written
 --                             only by an admin action (POST /api/admin/fleet/releases/rollout, audited in fleet_audit). No row = the version is offered to NOBODY by the helper path.
@@ -57,5 +57,5 @@ END
 $$;
 
 INSERT INTO schema_migrations (version, name)
-VALUES (156, '0156_release_rollout_and_sources')
+VALUES (161, '0161_release_rollout_and_sources')
 ON CONFLICT DO NOTHING;

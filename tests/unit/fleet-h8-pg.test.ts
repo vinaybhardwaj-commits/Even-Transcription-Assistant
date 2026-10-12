@@ -1,5 +1,5 @@
 /**
- * TS-H8 (#45) + TS-H12 (#49) server side on a REAL postgres:16 with EVERY migration (incl. 0156): the signed release record (cohorts, rollout stage, bucket, unsigned fallback), the admin
+ * TS-H8 (#45) + TS-H12 (#49) server side on a REAL postgres:16 with EVERY migration (incl. 0161): the signed release record (cohorts, rollout stage, bucket, unsigned fallback), the admin
  * actions that are the ONLY way a version reaches a cohort (audited, atomic), /api/steward/tickets and /api/kiosk-health with the per-device credential, the (machine, boot_id, seq,
  * source) key, v2-item results via steward.result, and the helper-update progress fields. Keys are FIXED FAKE seeds. All ids are fake.
  */
@@ -338,7 +338,7 @@ const PUBKEYS = { fk1: publicKeysOf(SIGNER).fk1! };
     });
   });
 
-  describe("kiosk-health: the dedupe key includes source (0156)", () => {
+  describe("kiosk-health: the dedupe key includes source (0161)", () => {
     it("a daemon event and a helper event that share (machine, boot_id, seq) are BOTH stored; a replay from the same source is still a duplicate", async () => {
       const d = await kh({ events: [evt(1, "daemon", { ts: "2026-10-11T10:00:00.000Z" })] }, `Bearer ${DAEMON_TOKEN}`);
       expect(d.json).toMatchObject({ accepted: 1 });
@@ -353,9 +353,9 @@ const PUBKEYS = { fk1: publicKeysOf(SIGNER).fk1! };
       expect(rows).toEqual([{ n: 4 }]);
     });
 
-    it("the migration is idempotent: applying 0156 again changes nothing", () => {
-      expect(() => pg.exec(readFileSync("db/migrations/0156_release_rollout_and_sources.sql", "utf8"))).not.toThrow();
-      expect(() => pg.exec(readFileSync("db/migrations/0156_release_rollout_and_sources.sql", "utf8"))).not.toThrow();
+    it("the migration is idempotent: applying 0161 again changes nothing", () => {
+      expect(() => pg.exec(readFileSync("db/migrations/0161_release_rollout_and_sources.sql", "utf8"))).not.toThrow();
+      expect(() => pg.exec(readFileSync("db/migrations/0161_release_rollout_and_sources.sql", "utf8"))).not.toThrow();
     });
   });
 
