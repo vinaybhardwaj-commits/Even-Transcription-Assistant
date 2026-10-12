@@ -9,6 +9,12 @@ import { webm, wav } from "./helpers/audio-fixtures";
 type Row = Record<string, unknown>;
 const statements: Array<{ text: string; values: unknown[] }> = [];
 let answer: (text: string, values: unknown[]) => unknown = () => [];
+// the production set is empty since V lifted the rule (10 Oct): this file pins the guard against one synthetic held-out pair
+vi.mock("@/lib/rubrics/blind-room-days", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  BLIND_ROOM_DAYS: [["2026-10-01", "room_blindtest"]],
+  isBlindRoomDay: (d: string | null | undefined, r: string | null | undefined) => typeof d === "string" && typeof r === "string" && `${d.slice(0, 10)}|${r}` === "2026-10-01|room_blindtest",
+}));
 vi.mock("@/lib/db", () => {
   const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.join("?");
@@ -79,7 +85,7 @@ const labStore: import("@/lib/sarvam-lab").LabStore = {
   async list(prefix) { return [...lab.keys()].filter((k) => k.startsWith(prefix)); },
 };
 
-const CHUNK = { id: "bc_1", idx: 0, source: "primary", r2_key: "bench/room/2026-10-08/bs_1/chunk_00000.webm", content_type: "audio/webm", started_at: "2026-10-08T05:00:00Z", ended_at: "2026-10-08T05:05:00Z", upload_state: "verified", duration_ms: 300000, size_bytes: 1000, gap_before_ms: 0, created_at: "2026-10-08T05:05:00Z" };
+const CHUNK = { id: "bc_1", idx: 0, source: "primary", r2_key: "bench/room/2026-10-08/bs_1/chunk_00000.webm", content_type: "audio/webm", started_at: "2026-10-08T05:00:00Z", ended_at: "2026-10-08T05:05:00Z", upload_state: "verified", duration_ms: 5 * 60_000, size_bytes: 1000, gap_before_ms: 0, created_at: "2026-10-08T05:05:00Z" };
 const WIN = { session_id: "bs_1", start_ms: Date.parse("2026-10-08T05:01:00Z"), end_ms: Date.parse("2026-10-08T05:04:00Z") };
 /** a database where window bw_1 exists on session bs_1, one chunk covers it, and (per `blind`) any placement is held out */
 const world = (o: { blind?: boolean } = {}) => (text: string): unknown => {

@@ -502,7 +502,7 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     (r2.getObjectBytes as unknown as { mockImplementation: (f: (k: string) => Promise<Uint8Array | null>) => void }).mockImplementation(async (k: string) => { gets.push(k); return orig ? orig(k) : null; });
     try {
       for (const bad of [{ bench_window_id: "bw_force1" }, { room: SLUG }, { session_id: "bs_ci1" }, { from: "1" }, { to: "2" }, { from_ms: 1 }, { to_ms: 2 }]) {
-        expect(await tool({ action: "transcribe", consult_uid: UA, force: true, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
+        expect(await tool({ action: "transcribe", consult_uid: UA, force: true, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: expect.stringMatching(/^(scope_consult_only|bad_args)$/) }); // O5: bad_args at the MCP tool layer
         expect(await tool({ action: "transcribe", consult_uids: [UA], force: true, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
         const j = await runner().then((r) => r.submitJob({ kind: "sarvam_transcribe", args: { consult_uid: UA, force: true, ...bad }, actor: "t", scopes: new Set(["invoke"] as const) })).catch((e: Error) => e);
         expect(String((j as Error).message ?? (j as Error).constructor?.name), JSON.stringify(bad)).toMatch(/scope_consult_only|JobArgsError/);
@@ -520,7 +520,7 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
       }
       const queued = await jobsOfKind("sarvam_transcribe");
       expect(queued).toHaveLength(1); // all six collapse onto the one open job for UA
-      expect(Object.keys(queued[0]!.args).sort()).toEqual(["consult_uid", "english", "force", "mode", "source"]);
+      expect(Object.keys(queued[0]!.args).sort()).toEqual(["caller_class", "consult_uid", "english", "force", "mode", "source"]);
       expect(queued[0]!.args.consult_uid).toBe(UA);
       // and the legitimate force ask (the open job above) reads ONLY consult-clips/ objects
       await drain();
@@ -815,7 +815,7 @@ describe.skipIf(!HAVE)("scribe_sarvam / sarvam_transcribe on a consult_uid", () 
     putClips(UA);
     const calls = gwCalls();
     for (const bad of [{ room: SLUG }, { from: "1" }, { to: "2" }, { session_id: "bs_ci1" }, { from_ms: 1 }, { to_ms: 2 }, { bench_window_id: "bw_1" }]) {
-      expect(await tool({ action: "transcribe", consult_uid: UA, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
+      expect(await tool({ action: "transcribe", consult_uid: UA, ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: expect.stringMatching(/^(scope_consult_only|bad_args)$/) }); // O5: bad_args at the MCP tool layer
       expect(await tool({ action: "transcribe", consult_uids: [UA], ...bad }), JSON.stringify(bad)).toMatchObject({ ok: false, error: "scope_consult_only" });
     }
     expect(gwCalls()).toBe(calls);
