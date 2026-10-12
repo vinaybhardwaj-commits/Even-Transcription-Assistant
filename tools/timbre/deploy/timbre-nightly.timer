@@ -1,0 +1,12 @@
+# /etc/systemd/system/timbre-nightly.timer — 02:30 IST daily (21:00 UTC), after the consult-index sync has the previous day.
+# Change OnCalendar to move it; `systemctl disable --now timbre-nightly.timer` (or TIMBRE_NIGHTLY_ENABLED=0) switches it off.
+[Unit]
+Description=Timbre nightly (#79) schedule
+
+[Timer]
+OnCalendar=*-*-* 21:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

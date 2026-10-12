@@ -1,0 +1,134 @@
+{
+ "drugs_ref": [
+  {
+   "ref_idx": 0,
+   "name": "Diclofenac gel",
+   "said_aloud": "regimen_only",
+   "evidence_turns": [
+    9
+   ],
+   "matched_pred_idx": null,
+   "matched_kept_k": null,
+   "match": "none",
+   "dose": {},
+   "slot_k": 2,
+   "slot_fields": {
+    "frequency": "match",
+    "duration": "match"
+   }
+  },
+  {
+   "ref_idx": 1,
+   "name": "Metformin 500 mg",
+   "said_aloud": "named",
+   "evidence_turns": [
+    5
+   ],
+   "matched_pred_idx": null,
+   "matched_kept_k": 3,
+   "match": "none",
+   "dose": {},
+   "slot_k": null,
+   "slot_fields": {}
+  }
+ ],
+ "drugs_pred": [],
+ "comorbidities_pred": [
+  {
+   "name": "Diabetes mellitus",
+   "valid": true,
+   "category": null
+  }
+ ],
+ "kept_out_review": [
+  {
+   "k": 0,
+   "item": "pantoprazole",
+   "verdict": "hallucination_prevented",
+   "why": "previous patient's order"
+  }
+ ],
+ "completion_review": [
+  {
+   "c": 0,
+   "kind": "exam_missing",
+   "verdict": "unclear",
+   "why": ""
+  },
+  {
+   "c": 1,
+   "kind": "regimen_slot",
+   "verdict": "needed",
+   "why": "gel unnamed"
+  },
+  {
+   "c": 2,
+   "kind": "drug_history",
+   "verdict": "needed",
+   "why": "metformin continued in reference"
+  },
+  {
+   "c": 3,
+   "kind": "boundary_review",
+   "verdict": "needed",
+   "why": "previous patient at clip start"
+  }
+ ],
+ "diagnosis": {
+  "ref": "Osteoarthritis knee",
+  "pred": "Osteoarthritis of right knee",
+  "match": "exact",
+  "icd_ref": "M17.1",
+  "icd_pred": "M17.11",
+  "icd_match": "category",
+  "dx_oversplit": false
+ },
+ "investigations_ref": [
+  {
+   "name": "X-ray knee",
+   "said_aloud": "yes",
+   "matched": true
+  }
+ ],
+ "investigations_pred": [
+  {
+   "name": "X-ray right knee",
+   "matched_ref": true,
+   "tape_supported": "yes",
+   "order_status_ok": true,
+   "issue": null
+  }
+ ],
+ "referrals_pred": [],
+ "advice_ref": [
+  {
+   "text": "Avoid stairs",
+   "said_aloud": "yes",
+   "matched": true
+  }
+ ],
+ "advice_pred": [
+  {
+   "text": "Avoid climbing stairs",
+   "matched_ref": true,
+   "tape_supported": "yes"
+  }
+ ],
+ "advice_too_long": false,
+ "follow_up": {
+  "ref": "SOS",
+  "pred": "if required",
+  "match": "match",
+  "type_ok": true
+ },
+ "hallucinations": [],
+ "omissions_said_aloud": [],
+ "omissions_not_said_aloud": [
+  {
+   "field": "medicine",
+   "item": "metformin dose"
+  }
+ ],
+ "stage_b_additions": [],
+ "comment": "Synthetic fixture."
+}

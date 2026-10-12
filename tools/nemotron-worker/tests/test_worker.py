@@ -670,3 +670,53 @@ class Overflow(Base):
     def test_box_still_uses_lab_lane_when_empty(self):
         self.make(lab=True).step()
         self.assertEqual(len(self.srv.lab_calls), 1)
+
+
+class ErrorClearing(Base):
+    """An error is cleared only by the success of the operation that failed (Architecture #23 follow-up, 11 Oct 2026):
+    the box worker showed last_error_code='network' for hours after it had gone back to storing windows."""
+
+    def test_pending_network_error_cleared_by_next_good_pending(self):
+        w = self.make()
+        real = w.api
+        w.api = worker.Api("http://127.0.0.1:9", TOKEN, timeout_s=2)  # nothing listens on port 9
+        w.step()
+        self.assertEqual(w.last_error_code, "network")
+        w.api = real
+        w.step()  # 200, no windows: the pending call itself succeeded
+        self.assertIsNone(w.last_error_code)
+
+    def test_window_failure_cleared_by_a_stored_window(self):
+        self.srv.clips["/clips/bad"] = (200, b"BAD audio")
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_1", "/clips/bad")], "exhausted": 0}),
+                            (200, {"ok": True, "windows": [self.srv.window("bw_fake_2")], "exhausted": 0})]
+        self.srv.ingest = [(200, {"ok": True, "result": "failure_recorded", "attempts": 1})]
+        w = self.make()
+        w.step()
+        self.assertIsNotNone(w.last_error_code)
+        w.step()
+        self.assertEqual(w.counts["stored"], 1)
+        self.assertIsNone(w.last_error_code)
+
+    def test_window_failure_not_cleared_by_an_empty_pending(self):
+        self.srv.clips["/clips/bad"] = (200, b"BAD audio")
+        self.srv.pending = [(200, {"ok": True, "windows": [self.srv.window("bw_fake_1", "/clips/bad")], "exhausted": 0})]
+        self.srv.ingest = [(200, {"ok": True, "result": "failure_recorded", "attempts": 1})]
+        w = self.make()
+        w.step()
+        code = w.last_error_code
+        self.assertIsNotNone(code)
+        w.step()  # a good /pending with nothing in it says nothing about windows
+        self.assertEqual(w.last_error_code, code)
+
+    def test_fatal_is_never_cleared(self):
+        w = self.make()
+        w._set_error("bad_machine", "fatal")
+        w._clear_error("fatal")
+        w._clear_error("pending")
+        self.assertEqual(w.last_error_code, "bad_machine")
+
+
+class DefaultRateCap(unittest.TestCase):
+    def test_default_cap_is_600_per_hour(self):
+        self.assertEqual(worker.Config(base_url="https://x", worker_id="box-t").rate_per_hour, 600)

@@ -124,6 +124,7 @@ beforeEach(() => {
   HEALTH = { ok: true, max_duration_s: 60, min_speech_s: 1.5, silence_rms: 0.008, loaded: true };
   ANSWER = classified;
   process.env.EMOTION_ENABLED = "1";
+  process.env.EMOTION_WAVLM_RETIRED = "0";
   process.env.EMOTION_SEGMENTS_SECRET = "test-secret";
   process.env.EMOTION_BASE_URL = "https://emotion.test";
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {

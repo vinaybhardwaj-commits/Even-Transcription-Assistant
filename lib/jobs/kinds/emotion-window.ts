@@ -131,7 +131,7 @@ async function fail(p: Pick<Progress, "window_id" | "room_day_id" | "diarize_run
 async function prepare(ctx: StepContext): Promise<StepOutcome> {
   let on: boolean;
   try { on = emotionEnabled(); } catch (e) { return failWith(jobError("emotion_disabled", String((e as Error).message).slice(0, 160))); }
-  if (!on) return failWith(jobError("emotion_disabled", "EMOTION_ENABLED is off"));
+  if (!on) return failWith(jobError("emotion_disabled", "EMOTION_ENABLED is off or WavLM is retired (EMOTION_WAVLM_RETIRED, Timbre #79)"));
   if (!emotionSecretConfigured()) return failWith(jobError("emotion_not_configured", `${EMOTION_SECRET_ENV} is not set`));
 
   const windowId = String(ctx.args.window_id ?? "");

@@ -15,7 +15,8 @@ export const CLINIC_START_MIN = 7 * 60 + 30;
 export const CLINIC_END_MIN = 21 * 60 + 30;
 
 export type WorkerRow = { worker_id: string; last_seen_at: string | Date; payload: Record<string, unknown> | null };
-export type LatencyStats = { windows_24h: number; box_24h: number; hf_24h: number; p95_latency_s: number | null };
+/** p95_latency_s is LIVE lag (windows that ended in the last 24 h, unanswered ones counted at now()); live_windows_24h is that count. */
+export type LatencyStats = { windows_24h: number; box_24h: number; hf_24h: number; p95_latency_s: number | null; live_windows_24h?: number };
 
 export type WorkerStatus = "ok" | "lagging" | "stale" | "down";
 
@@ -32,6 +33,8 @@ export type WorkerBoard = {
   oldest_wait_s: number | null;
   windows_per_hour: number | null;
   p95_latency_s: number | null;
+  /** how many live windows (ended in the last 24 h) the p95 is over; null when the reader did not say */
+  p95_live_windows: number | null;
   box_share: number | null;
   hf_share: number | null;
   hf_usd_today_reported: number | null;
@@ -83,6 +86,7 @@ export function workerBoard(rows: ReadonlyArray<WorkerRow>, lat: LatencyStats, n
     queue_depth: sum((w) => w.queue_depth), oldest_wait_s,
     windows_per_hour: lat.windows_24h ? Math.round((lat.windows_24h / 24) * 10) / 10 : lat.windows_24h === 0 ? 0 : null,
     p95_latency_s: lat.p95_latency_s === null ? null : Math.round(lat.p95_latency_s),
+    p95_live_windows: lat.live_windows_24h ?? null,
     box_share: total ? Math.round((lat.box_24h / total) * 1000) / 1000 : null,
     hf_share: total ? Math.round((lat.hf_24h / total) * 1000) / 1000 : null,
     hf_usd_today_reported: sum((w) => w.hf_usd_24h),

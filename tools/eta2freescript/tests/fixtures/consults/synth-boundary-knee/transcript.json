@@ -1,0 +1,90 @@
+{
+ "consult_uid": "synth-boundary-knee",
+ "clip": {
+  "t0_ms": 1791174600000,
+  "t1_ms": 1791174750000,
+  "room_slug": "synth-room-2"
+ },
+ "language_code": "en-IN",
+ "model_translate": null,
+ "english_segments": [
+  {
+   "t0_ms": 1791174600000,
+   "t1_ms": 1791174607000,
+   "speaker_id": "0",
+   "text": "So continue pantoprazole 40 before breakfast for two weeks."
+  },
+  {
+   "t0_ms": 1791174608000,
+   "t1_ms": 1791174613000,
+   "speaker_id": "2",
+   "text": "Okay, thank you, I will come next month."
+  },
+  {
+   "t0_ms": 1791174614000,
+   "t1_ms": 1791174616000,
+   "speaker_id": "0",
+   "text": "Take care."
+  },
+  {
+   "t0_ms": 1791174670000,
+   "t1_ms": 1791174675000,
+   "speaker_id": "0",
+   "text": "Come in. What happened to your knee?"
+  },
+  {
+   "t0_ms": 1791174676000,
+   "t1_ms": 1791174684000,
+   "speaker_id": "1",
+   "text": "Right knee pain for two months, worse on stairs."
+  },
+  {
+   "t0_ms": 1791174685000,
+   "t1_ms": 1791174691000,
+   "speaker_id": "3",
+   "text": "She also takes metformin for sugar."
+  },
+  {
+   "t0_ms": 1791174692000,
+   "t1_ms": 1791174695000,
+   "speaker_id": "0",
+   "text": "How long have you had sugar?"
+  },
+  {
+   "t0_ms": 1791174696000,
+   "t1_ms": 1791174698000,
+   "speaker_id": "1",
+   "text": "Five years."
+  },
+  {
+   "t0_ms": 1791174704000,
+   "t1_ms": 1791174710000,
+   "speaker_id": "0",
+   "text": "Let me examine the knee."
+  },
+  {
+   "t0_ms": 1791174720000,
+   "t1_ms": 1791174727000,
+   "speaker_id": "0",
+   "text": "Apply this gel twice a day for ten days."
+  },
+  {
+   "t0_ms": 1791174728000,
+   "t1_ms": 1791174733000,
+   "speaker_id": "0",
+   "text": "Get an X-ray of the right knee."
+  },
+  {
+   "t0_ms": 1791174734000,
+   "t1_ms": 1791174739000,
+   "speaker_id": "0",
+   "text": "Avoid climbing stairs."
+  },
+  {
+   "t0_ms": 1791174740000,
+   "t1_ms": 1791174746000,
+   "speaker_id": "0",
+   "text": "Come back if the pain does not settle."
+  }
+ ]
+}

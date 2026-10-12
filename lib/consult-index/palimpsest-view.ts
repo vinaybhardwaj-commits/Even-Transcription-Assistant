@@ -7,18 +7,23 @@
  * Field mapping: speaker_id <- the track's speaker label ("" when the stt track has none); language_code <- the segment's lang; transcript / english <- the segment texts joined; speakers <- distinct labels;
  * english_pass "done" when a translate track exists, else "not_requested"; model_stt / model_rev <- the track's model / version; model_translate <- the translate track's model (the English pass is saaras translate
  * mode), else mayura:v1 as for our own results; job_id null (no job ran); created_at null (the track carries no time we can vouch for).
+ * Arch #91: reb_role_flags { attender_present, two_consults, diar_partial } is attached only when the caller passes those booleans. Absent otherwise, so the key set is unchanged.
  */
 import type { ResultDoc, ResultEntry, EnglishEntry } from "@/lib/jobs/kinds/sarvam-common";
 import type { ConsultResult, StoredIndexRow } from "@/lib/room-access/consult-index-store";
-import type { SarvamTrack } from "@/lib/room-access/readers/reb-consult";
+import type { RebRoleFlags, SarvamTrack } from "@/lib/room-access/readers/reb-consult";
 
 export const PALIMPSEST_SOURCE = "palimpsest";
 
-export type PalimpsestAsResult = { result: ConsultResult & { source: "palimpsest" }; doc: ResultDoc };
+export type PalimpsestAsResult = { result: ConsultResult & { source: "palimpsest"; reb_role_flags?: RebRoleFlags }; doc: ResultDoc };
 
 const text = (t: SarvamTrack | null): string => (t ? t.segments.map((g) => g.text).join(" ").trim() : "");
 
-export function palimpsestAsResult(row: Pick<StoredIndexRow, "consult_uid" | "cut_version" | "t0_ms" | "t1_ms">, stt: SarvamTrack, translate: SarvamTrack | null): PalimpsestAsResult {
+/**
+ * `roleFlags`, when passed, is the three booleans from the role.llm-roles extras (attender_present, two_consults, diar_partial). Counts only.
+ * Omitted: the result object is unchanged. Callers pass it only after ETA_REB_ROLE_LLM resolved on and a role track passed the same checks as the text read.
+ */
+export function palimpsestAsResult(row: Pick<StoredIndexRow, "consult_uid" | "cut_version" | "t0_ms" | "t1_ms">, stt: SarvamTrack, translate: SarvamTrack | null, roleFlags?: RebRoleFlags | null): PalimpsestAsResult {
   const rel = (ms: number): number => (ms - row.t0_ms) / 1000;
   const entries: ResultEntry[] = stt.segments.map((g) => ({ speaker_id: g.speaker ?? "", start_s: rel(g.t0_ms), end_s: rel(g.t1_ms), text: g.text, language_code: g.lang }));
   // PAIR the English with the native entries BY TIME, as our own English-on result does (every entry carries its `english`): each translate segment goes to the stt entry it overlaps most (the earlier on a tie);
@@ -51,6 +56,7 @@ export function palimpsestAsResult(row: Pick<StoredIndexRow, "consult_uid" | "cu
     model_stt: stt.model ?? "saaras:v3", model_translate: translate?.model ?? "mayura:v1", model_rev: stt.version ?? stt.model ?? "saaras-v3", pipeline_rev: "palimpsest",
     language_code, duration_s, speaker_count: speakers.length, transcript_chars: transcript.length, english_chars: english.length, english_pass: doc.english_pass ?? "not_requested", t0_ms: row.t0_ms, created_at: "",
     source: PALIMPSEST_SOURCE,
-  } as ConsultResult & { source: "palimpsest" };
+    ...(roleFlags ? { reb_role_flags: roleFlags } : {}),
+  } as ConsultResult & { source: "palimpsest"; reb_role_flags?: RebRoleFlags };
   return { result, doc };
 }

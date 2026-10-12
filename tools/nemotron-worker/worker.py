@@ -301,7 +301,7 @@ class Config:
     worker_id: str
     machine: str = "box"
     concurrency: int = 1
-    rate_per_hour: int = 60
+    rate_per_hour: int = 600  # was 60 (Architecture #23 follow-up, 11 Oct 2026): 60/h cannot even keep up with 4 rooms of live intake
     idle_poll_s: float = 60.0
     heartbeat_s: float = 60.0
     backoff_min_s: float = 30.0
@@ -354,6 +354,7 @@ class Worker:
         self.in_flight = 0
         self.last_ok_at: Optional[str] = None
         self.last_error_code: Optional[str] = None
+        self._error_op: Optional[str] = None  # which operation set last_error_code: only that operation's success clears it
         self.state = "starting"
         self.fatal: Optional[str] = None
         self._mu = threading.Lock()
@@ -381,12 +382,21 @@ class Worker:
             json.dump(snap, f, sort_keys=True)
         os.replace(tmp, self.cfg.state_file)
 
+    def _set_error(self, code: str, op: str) -> None:
+        """Record an error and the operation it came from ('pending', 'window', 'lab', 'fatal'). Caller need not hold _mu."""
+        self.last_error_code, self._error_op = code, op
+
+    def _clear_error(self, op: str) -> None:
+        """An error is cleared only by the success of the operation that failed (a 'fatal' is never cleared)."""
+        if self._error_op == op and op != "fatal":
+            self.last_error_code, self._error_op = None, None
+
     def _note(self, result: str, error_code: Optional[str] = None) -> None:
         with self._mu:
             self.counts[result] += 1
             self.done.append(self.clock())
             if error_code:
-                self.last_error_code = error_code
+                self._set_error(error_code, "window")
 
     # -- one window ---------------------------------------------------------------------------------------------
 
@@ -463,6 +473,7 @@ class Worker:
         if body["status"] != "failed" and outcome in ("stored", "duplicate"):
             with self._mu:
                 self.last_ok_at = _iso(self.clock())
+                self._clear_error("window")
         return outcome
 
     def post_ingest(self, body: dict) -> str:
@@ -491,8 +502,9 @@ class Worker:
         status, out = self.api.call("GET", f"/api/diarize/nemotron/lab/claim?{q}")
         if status != 200:
             if status != 404:  # 404 = the lane is off: expected, not an error
-                self.last_error_code = str(out.get("error") or f"http_{status}")
+                self._set_error(str(out.get("error") or f"http_{status}"), "lab")
             return False
+        self._clear_error("lab")
         items = [i for i in out.get("items", []) if isinstance(i, dict)]
         if not items:
             return False
@@ -647,11 +659,12 @@ class Worker:
         status, out = self.api.call("GET", f"/api/diarize/nemotron/pending?{q}")
         if status != 200:
             code = str(out.get("error") or f"http_{status}")
-            self.last_error_code = code
+            self._set_error(code, "pending")
             d = self.backoff.next()
             log.info("pending status=%d code=%s backoff_s=%.0f", status, code, d)
             return not self._wait(d, f"backoff:{code}")
         self.backoff.reset()
+        self._clear_error("pending")
         windows = [w for w in out.get("windows", []) if isinstance(w, dict)]
         if not windows and self.cfg.machine == "hf":
             # Overflow is closed (off, cap reached, or backlog under the threshold) or simply empty: idle. Never the LAB lane, never a back-off.
@@ -715,7 +728,7 @@ class Worker:
         log.error("hard_error code=%s: not following, stopping the worker", e.code)
         with self._mu:
             self.fatal = e.code
-            self.last_error_code = e.code
+            self._set_error(e.code, "fatal")
         self.stop.set()
 
     def heartbeat_loop(self) -> None:
@@ -823,7 +836,7 @@ def main(argv=None) -> int:
     p.add_argument("--token-file", default=env("NEMOTRON_TOKEN_FILE", f"{home}/.config/eta-nemotron/token"))
     p.add_argument("--worker-id", default=env("NEMOTRON_WORKER_ID") or default_worker_id())
     p.add_argument("--concurrency", type=int, default=int(env("NEMOTRON_CONCURRENCY", "1")))
-    p.add_argument("--rate-per-hour", type=int, default=int(env("NEMOTRON_RATE_PER_HOUR", "60")))
+    p.add_argument("--rate-per-hour", type=int, default=int(env("NEMOTRON_RATE_PER_HOUR", "600")))
     p.add_argument("--min-free-vram-mib", type=int, default=int(env("NEMOTRON_MIN_FREE_VRAM_MIB", "2048")))
     p.add_argument("--gpu-lock", default=env("NEMOTRON_GPU_LOCK", f"{home}/gpu.lock"), help="'' disables the lock")
     p.add_argument("--tmp-root", default=env("NEMOTRON_TMP_ROOT"))

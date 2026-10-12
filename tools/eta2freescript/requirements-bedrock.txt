@@ -1,0 +1,3 @@
+# Live runs against Bedrock (--client bedrock). Never needed for the tests.
+-r requirements.txt
+boto3>=1.34
