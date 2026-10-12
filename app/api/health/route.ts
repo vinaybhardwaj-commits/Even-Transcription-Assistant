@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { consultIndexMirrorHealth } from "@/lib/consult-index/mirror-status";
 import { probeWhisperTranscription } from "@/lib/health/whisper-probe";
 import { fetchOllamaModels } from "@/lib/health/ollama-probe";
 
@@ -7,6 +8,9 @@ import { fetchOllamaModels } from "@/lib/health/ollama-probe";
  * GET /api/health
  * Probes APP_DATABASE, KB_DATABASE, Ollama tunnel, Whisper tunnel,
  * Resend (domains list), and R2 (HeadBucket on eta-audio).
+ * consult_index_mirror is red when the lab index lags the newest REB stt/role
+ * track by more than 30 minutes during 09:00-20:00 IST, or the last index-mirror
+ * run exited non-zero. The block carries lag_minutes, exit_code and reason.
  * Returns per-service { ok, latency_ms } + overall ok flag.
  */
 
@@ -41,7 +45,7 @@ async function probe(fn: () => Promise<ProbeDetail | void>): Promise<ProbeResult
 }
 
 export async function GET() {
-  const [db, kb, llm, whisper, resend, r2] = await Promise.all([
+  const [db, kb, llm, whisper, resend, r2, consult_index_mirror] = await Promise.all([
     probe(async () => {
       await sql`SELECT 1 AS ok`;
     }),
@@ -109,9 +113,10 @@ export async function GET() {
       });
       await client.send(new HeadBucketCommand({ Bucket: bkt }));
     }),
+    consultIndexMirrorHealth(),
   ]);
 
-  const ok = db.ok && kb.ok && llm.ok && whisper.ok && resend.ok && r2.ok;
+  const ok = db.ok && kb.ok && llm.ok && whisper.ok && resend.ok && r2.ok && consult_index_mirror.ok;
 
   return NextResponse.json(
     {
@@ -120,6 +125,7 @@ export async function GET() {
       region: process.env.VERCEL_REGION ?? "local",
       now: new Date().toISOString(),
       services: { db, kb, llm, whisper, resend, r2 },
+      consult_index_mirror,
     },
     { status: ok ? 200 : 503 }
   );

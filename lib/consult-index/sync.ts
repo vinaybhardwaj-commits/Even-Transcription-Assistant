@@ -7,7 +7,8 @@
  */
 import { labStore, CONSULT_INDEX_KEYS } from "@/lib/sarvam-lab";
 import { parseIndex } from "@/lib/consult-index/parse";
-import { finishSync, startSync, upsertIndexRows } from "@/lib/room-access/consult-index-store";
+import { parseReportedAt, sqlState } from "@/lib/consult-index/mirror-staleness";
+import { finishSync, recordManifestMirrorExit, startSync, upsertIndexRows } from "@/lib/room-access/consult-index-store";
 
 export type SyncResult =
   | { ok: true; sync_id: number; manifest_rows: number | null; rows_read: number; rows_written: number; inserted: number; changed: number; rows_skipped: number; skipped: Record<string, number> }
@@ -33,6 +34,17 @@ export async function syncConsultIndex(): Promise<SyncResult> {
   if (!got.ok) return fail(got.error);
   try {
     const { inserted, changed } = await upsertIndexRows(got.parsed.rows, got.manifest.sha256);
+    const reportedAt = got.manifest.exit_code === null ? null : parseReportedAt(got.manifest.generated_at);
+    if (got.manifest.exit_code !== null && reportedAt) {
+      try {
+        await recordManifestMirrorExit({ exit_code: got.manifest.exit_code, reason: got.manifest.exit_reason, reported_at: reportedAt });
+      } catch (e) {
+        const st = sqlState(e);
+        // 42P01: 0162 is not applied yet. The index rows themselves are in. The exit stays unstored until the table exists; a later sync writes it.
+        if (st !== "42P01") throw e;
+        console.error("[consult-index] mirror exit not stored", JSON.stringify({ sync_id: id, sqlstate: st }));
+      }
+    }
     const skipped = Object.values(got.parsed.skipped).reduce((a, b) => a + b, 0);
     await finishSync(id, { status: "ok", manifest_sha256: got.manifest.sha256, manifest_rows: got.manifest.rows, rows_read: got.parsed.read, rows_written: got.parsed.rows.length, rows_changed: changed, rows_skipped: skipped, skipped: got.parsed.skipped });
     return { ok: true, sync_id: id, manifest_rows: got.manifest.rows, rows_read: got.parsed.read, rows_written: got.parsed.rows.length, inserted, changed, rows_skipped: skipped, skipped: got.parsed.skipped };

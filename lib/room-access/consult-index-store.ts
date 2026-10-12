@@ -1,11 +1,13 @@
 /**
- * lib/room-access/consult-index-store.ts — the ONLY SQL on consult_index, consult_index_sync and consult_sarvam_result (migration 0150), plus the one bench_session read that places a consult in a session.
+ * lib/room-access/consult-index-store.ts — the ONLY SQL on consult_index, consult_index_sync and consult_sarvam_result (migration 0150), plus the one bench_session read that places a consult in a session,
+ * plus index_mirror_run (0162) and the one max() that compares consult_index to reb_track_index for the mirror staleness guard.
  *
  * Neon HTTP: one statement per call, tagged template, every value bound and CAST where it lands in a select list. The upsert is ONE statement per batch (a jsonb array of rows), and an unchanged row is not
  * rewritten. `sealed` can only be raised by a sync, never cleared. A result row is inserted ON CONFLICT DO NOTHING on its UNIQUE key: the second writer of the same cut changes nothing.
  */
 import { sql } from "@/lib/db";
 import type { IndexRow } from "@/lib/consult-index/parse";
+import { sanitizeExitReason } from "@/lib/consult-index/mirror-staleness";
 
 export type StoredIndexRow = Omit<IndexRow, "cut_at"> & { synced_at: string; first_seen_at: string };
 
@@ -97,6 +99,73 @@ export async function listIndexDay(date: string, room: string | null, limit: num
      LIMIT ${limit}::int
   `) as Array<Record<string, unknown>>;
   return { rows: rows.map(toRow), total: rows[0] ? Number(rows[0].total) : 0 };
+}
+
+const finite = (v: unknown): number | null => {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * The two clocks the staleness guard compares. mirror is max consult end. reb is max stt/role track end
+ * (t1_ms; if no such track has a t1, the newest finished_at or indexed_at). Shadow tracks are not a clock.
+ * One statement. No row, no uid, no room.
+ */
+export async function readMirrorClocks(): Promise<{ mirror_t1_ms: number | null; reb_t1_ms: number | null }> {
+  const rows = (await sql`
+    SELECT
+      (SELECT max(t1_ms)::float8 FROM consult_index) AS mirror_t1_ms,
+      COALESCE(
+        (SELECT max(t1_ms)::float8 FROM reb_track_index WHERE shadow = false AND layer IN ('stt', 'role')),
+        (SELECT (EXTRACT(EPOCH FROM max(COALESCE(finished_at, indexed_at))) * 1000)::float8
+           FROM reb_track_index WHERE shadow = false AND layer IN ('stt', 'role'))
+      ) AS reb_t1_ms
+  `) as Array<{ mirror_t1_ms: unknown; reb_t1_ms: unknown }>;
+  const r = rows[0];
+  return { mirror_t1_ms: finite(r?.mirror_t1_ms), reb_t1_ms: finite(r?.reb_t1_ms) };
+}
+
+export type MirrorRunRow = { exit_code: number; reason: string | null };
+
+/** The latest index-mirror exit, by the run's own reported_at (then id). Null when no run has been stored. */
+export async function latestMirrorRun(): Promise<MirrorRunRow | null> {
+  const rows = (await sql`
+    SELECT exit_code::int AS exit_code, reason
+      FROM index_mirror_run
+     ORDER BY reported_at DESC, id DESC
+     LIMIT 1
+  `) as Array<{ exit_code: unknown; reason: unknown }>;
+  const r = rows[0];
+  if (!r) return null;
+  const exit_code = finite(r.exit_code);
+  if (exit_code === null || !Number.isInteger(exit_code)) return null;
+  return { exit_code, reason: sanitizeExitReason(r.reason) };
+}
+
+/** The box posts one finished run. reported_at is the server clock: a client cannot back-date a success over a failure. */
+export async function insertIngestMirrorRun(run: { exit_code: number; reason: string | null }): Promise<void> {
+  await sql`
+    INSERT INTO index_mirror_run (exit_code, reason, source, reported_at)
+    VALUES (${run.exit_code}::int, ${run.reason}::text, 'ingest', now())
+  `;
+}
+
+/**
+ * Copy an exit the manifest already carried. The same (reported_at, exit_code, reason) is not inserted again,
+ * so the hourly sync of an unchanged manifest does not bury a newer ingest under an older generation:
+ * health orders by reported_at, and a repeat of the same generation adds no row.
+ */
+export async function recordManifestMirrorExit(run: { exit_code: number; reason: string | null; reported_at: string }): Promise<void> {
+  await sql`
+    INSERT INTO index_mirror_run (exit_code, reason, source, reported_at)
+    SELECT ${run.exit_code}::int, ${run.reason}::text, 'manifest', ${run.reported_at}::timestamptz
+     WHERE NOT EXISTS (
+       SELECT 1 FROM index_mirror_run
+        WHERE source = 'manifest' AND reported_at = ${run.reported_at}::timestamptz
+          AND exit_code = ${run.exit_code}::int AND reason IS NOT DISTINCT FROM ${run.reason}::text
+     )
+  `;
 }
 
 export type LatestSync = { id: number; started_at: string; finished_at: string | null; status: string; error_code: string | null; manifest_rows: number | null; rows_read: number; rows_written: number; rows_changed: number; rows_skipped: number } | null;

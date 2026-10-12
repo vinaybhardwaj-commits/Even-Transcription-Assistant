@@ -9,12 +9,16 @@
  *   - NEW Pyannote probe: GET {DIARIZE_BASE_URL}/health, 5s timeout, soft-fail;
  *   - listeners: bench_listener rows (S2) — room_id, slug, last_poll_at, listening (≤10 s),
  *     recording (kiosk-reported session), paused; [] + note "bus not migrated" before 0044.
+ *   - consult_index_mirror: lag of the newest consult_index entry behind the newest REB stt/role
+ *     track, and the last index-mirror exit. Red over 30 minutes during 09:00-20:00 IST, or on a
+ *     non-zero exit at any hour.
  * scribe_system_map = the same picture + flag states + env NAMES (set/unset booleans only).
  * No secrets, ever. Every sub-probe soft-fails to { ok:false }.
  */
 
 import { GET as appHealthGET } from "@/app/api/health/route";
 import { GET as brainHealthGET } from "@/app/api/brain/health/route";
+import type { MirrorHealth } from "@/lib/consult-index/mirror-staleness";
 import * as flags from "@/lib/live-flags";
 import { probe, type McpTool, argDetail, DETAIL_SCHEMA, type ToolArgs } from "../registry";
 import { probeSttEngines, type EngineHealth } from "./stt";
@@ -42,7 +46,9 @@ export async function probePyannote(): Promise<PyannoteProbe> {
   return { ...r, base_url_env: "DIARIZE_BASE_URL", configured: true };
 }
 
-type AppHealth = { ok: boolean; sha?: string; region?: string; now?: string; services?: Record<string, { ok: boolean; latency_ms: number; error?: string }> };
+type AppHealth = { ok: boolean; sha?: string; region?: string; now?: string; services?: Record<string, { ok: boolean; latency_ms: number; error?: string }>; consult_index_mirror?: MirrorHealth };
+
+const MIRROR_UNREAD: MirrorHealth = { ok: false, lag_minutes: null, threshold_minutes: 30, clinic_hours: false, exit_code: null, reason: null, error: "no_probe" };
 type BrainHealth = { ok: boolean; now?: string; db?: unknown; config?: unknown; service?: string; home?: string; version?: string | null };
 
 async function appHealth(): Promise<AppHealth & { degraded?: boolean; error?: string }> {
@@ -117,13 +123,15 @@ export async function composeHealth() {
     latency_ms: e.health.latencyMs,
     ...(e.health.error ? { error: e.health.error } : {}),
   }));
-  const ok = Boolean(app.ok) && Boolean(brain.ok) && pyannote.ok && engines.filter((e) => e.enabled && !e.virtual).every((e) => e.ok);
+  const mirror = app.consult_index_mirror ?? MIRROR_UNREAD;
+  const ok = Boolean(app.ok) && Boolean(brain.ok) && pyannote.ok && engines.filter((e) => e.enabled && !e.virtual).every((e) => e.ok) && mirror.ok;
   return {
     ok,
     now: new Date().toISOString(),
     sha: app.sha ?? process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? "local",
     region: app.region ?? process.env.VERCEL_REGION ?? "local",
     services,
+    consult_index_mirror: mirror,
     brain: { ...brain, ok: Boolean(brain.ok) },
     pyannote,
     stt: { engines, ...(stt.degraded ? { degraded: true, error: stt.error } : {}) },
@@ -150,12 +158,12 @@ const ENV_NAMES = [
   "BRAIN_SERVICE_TOKEN", "SCRIBE_MCP_TOKEN", "ADMIN_TOKEN", "MIGRATION_SECRET",
   "R2_ACCOUNT_ID", "R2_BUCKET", "WHISPER_BASE_URL", "INDICCONFORMER_BASE_URL", "DIARIZE_BASE_URL",
   "OLLAMA_BASE_URL", "DEEPGRAM_API_KEY", "SARVAM_API_KEY", "ELEVENLABS_API_KEY",
-  "RESEND_API_KEY", "GCP_SA_KEY", "GEMINI_MODEL",
+  "RESEND_API_KEY", "GCP_SA_KEY", "GEMINI_MODEL", "INDEX_MIRROR_INGEST_TOKEN",
 ] as const;
 
 const scribeHealth: McpTool = {
   name: "scribe_health",
-  description: "Composite health: app DB, KB DB, R2, Whisper, Ollama, Resend (from /api/health), brain (/api/brain/health), every STT engine (adapter probe), Pyannote (Mini /health, 5s), and Bench listeners (empty until the S2 command bus).",
+  description: "Composite health: app DB, KB DB, R2, Whisper, Ollama, Resend (from /api/health), brain (/api/brain/health), every STT engine (adapter probe), Pyannote (Mini /health, 5s), Bench listeners (empty until the S2 command bus), and the lab consult-index mirror (red when its newest entry lags the newest REB stt/role track by more than 30 minutes during 09:00-20:00 IST, or the last index-mirror run exited non-zero; lag_minutes, exit_code and reason are on consult_index_mirror).",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () => composeHealth(),

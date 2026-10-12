@@ -15,6 +15,7 @@
  * (signatureVersion) and is never stored or returned.
  */
 import { createHash } from "node:crypto";
+import { readManifestExit } from "@/lib/consult-index/mirror-staleness";
 import { consultClipKey } from "@/lib/room-access/keys";
 
 export const UID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -129,17 +130,18 @@ export function normalizeRow(r: Record<string, unknown>): { row: IndexRow } | { 
   };
 }
 
-export type IndexParse = { ok: true; parsed: ParsedIndex; manifest: { sha256: string; rows: number | null; generated_at: string | null } } | { ok: false; error: "consult_index_integrity" };
+export type IndexParse = { ok: true; parsed: ParsedIndex; manifest: { sha256: string; rows: number | null; generated_at: string | null; exit_code: number | null; exit_reason: string | null } } | { ok: false; error: "consult_index_integrity" };
 
 /**
  * PURE: the whole mirror. sha256(latest.jsonl) must equal the manifest's, else consult_index_integrity and NO rows. The latest line per consult_uid wins (upstream appends).
  * Every line that is not indexable is counted under its reason.
  */
 export function parseIndex(latestBody: string, manifestBody: string): IndexParse {
-  let m: { sha256?: unknown; rows?: unknown; generated_at?: unknown };
+  let m: { sha256?: unknown; rows?: unknown; generated_at?: unknown; exit_code?: unknown; exit_reason?: unknown; reason?: unknown };
   try { m = JSON.parse(manifestBody); } catch { return { ok: false, error: "consult_index_integrity" }; }
   const want = typeof m?.sha256 === "string" ? m.sha256.toLowerCase() : "";
   if (!/^[0-9a-f]{64}$/.test(want) || sha256Hex(latestBody) !== want) return { ok: false, error: "consult_index_integrity" };
+  const exit = readManifestExit(m);
   const skipped: Record<string, number> = {};
   const bump = (k: string) => { skipped[k] = (skipped[k] ?? 0) + 1; };
   const latest = new Map<string, Record<string, unknown>>();
@@ -160,5 +162,5 @@ export function parseIndex(latestBody: string, manifestBody: string): IndexParse
     if ("row" in n) rows.push(n.row);
     else bump(n.skip);
   }
-  return { ok: true, parsed: { rows, read, skipped }, manifest: { sha256: want, rows: typeof m.rows === "number" ? m.rows : null, generated_at: typeof m.generated_at === "string" ? m.generated_at : null } };
+  return { ok: true, parsed: { rows, read, skipped }, manifest: { sha256: want, rows: typeof m.rows === "number" ? m.rows : null, generated_at: typeof m.generated_at === "string" ? m.generated_at : null, exit_code: exit.exit_code, exit_reason: exit.reason } };
 }
