@@ -16,7 +16,7 @@ import { askSubject, type BenchRow } from "./call";
 import { buildBenchReport, type BenchLabel, type BenchReport, type SubjectOutcome } from "./bench-report";
 import { setLocator } from "./builders/locators";
 import "./register";
-import { modeGate, REAL_USES, type RealUse } from "./flags";
+import { modeGate, REAL_USES, type GateVerdict, type RealUse } from "./flags";
 import { getUse, type JevUseDef } from "./uses";
 
 export type BenchSubject = { subject_id: string; at_s?: number; hint?: string; text?: string };
@@ -28,10 +28,16 @@ export class BenchRefused extends Error {
 
 export async function runBench(input: {
   use: string; setId: string; version: string; subjects: ReadonlyArray<BenchSubject | string>; labels?: ReadonlyArray<BenchLabel>; concurrency?: number; signal?: AbortSignal;
-}, deps: { getUse?: (use: string, setId: string) => JevUseDef | undefined } = {}): Promise<BenchReport> {
+}, deps: {
+  getUse?: (use: string, setId: string) => JevUseDef | undefined;
+  /** Replaces the flag gate (the server door gates on its own flags and never reads JEV_WORKER_ENABLED). Absent = modeGate, as the script and the job use it. */
+  gate?: (use: RealUse) => GateVerdict;
+  /** Receives the per-subject outcomes (closed answers, ids) before the report is built. */
+  onOutcomes?: (outcomes: ReadonlyArray<SubjectOutcome>) => void;
+} = {}): Promise<BenchReport> {
   if (!(REAL_USES as readonly string[]).includes(input.use)) throw new BenchRefused("bad_use");
   const use = input.use as RealUse;
-  const gate = modeGate(use, "bench");
+  const gate = deps.gate ? deps.gate(use) : modeGate(use, "bench");
   if (!gate.ok) throw new BenchRefused(gate.reason);
   const def = (deps.getUse ?? getUse)(use, input.setId);
   if (!def) throw new BenchRefused("no_use_registered", `${use}/${input.setId}`);
@@ -64,7 +70,9 @@ export async function runBench(input: {
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(4, input.concurrency ?? 2)) }, worker));
-  const done = outcomes.map((o, i) => o ?? { subject_id: subjects[i]!.subject_id, status: "deferred" as const, reason: stopped ?? "not_run", rows: [], tokens: 0, calls: 0 });
+  // Array.from, not .map: `outcomes` is sparse when a stop (circuit_open / budget_exceeded) leaves subjects unrun, and .map skips holes.
+  const done = Array.from(outcomes, (o, i) => o ?? { subject_id: subjects[i]!.subject_id, status: "deferred" as const, reason: stopped ?? "not_run", rows: [], tokens: 0, calls: 0 });
+  deps.onOutcomes?.(done);
   return buildBenchReport({
     set: { id: loaded.set.id, version: loaded.set.version, sha: loaded.set.sha, use: loaded.set.use }, defs: loaded.defs, outcomes: done, labels: labels.length ? labels : undefined,
     resolve: def.resolve, mock: parseFlag("ETA_JEV_MOCK"), usdPerToken: JEV_INPUT_TOKEN_COST_USD, stopped,
