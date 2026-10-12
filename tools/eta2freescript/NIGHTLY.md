@@ -9,9 +9,12 @@ Bedrock Claude through `phi_guard` and are not posted.
 `python -m tools.eta2freescript.nightly run` for the previous IST day:
 
 1. Local folders under `data` that have `transcript.json` (Sarvam) and `role.json` with `status: ok`, whose clip starts that day.
-2. `GET /api/freescript/pending` (HMAC, `FREESCRIPT_INGEST_SECRET`): `scribe_freescript` `action=run` jobs. A consult whose folder is not on the box is counted missing and is not fetched.
-3. `python -m tools.eta2freescript` for each selected consult (Bedrock, on this host).
-4. `POST /api/freescript/ingest` with the artifact, `completion_required`, validator result, generator SHAs and cost. A re-post of the same artifact is `inserted: 0` and stamps `job_id` when the job is still waiting.
+2. When `REB_INDEX_READ_TOKEN` and `FREESCRIPT_APP_URL` are set: `GET /api/sarvam/consult-results?ist_date=&sealed=1` (Bearer). Every sealed uid is added. A missing `role.json` is filled from `GET /api/reb/roles?consult_uid=` (roles and times only; segment text is not written). A sealed uid with no transcript on disk is counted missing and is not fetched as audio.
+3. `GET /api/freescript/pending` (HMAC, `FREESCRIPT_INGEST_SECRET`): `scribe_freescript` `action=run` jobs. A consult whose folder is not on the box is counted missing and is not fetched.
+4. `python -m tools.eta2freescript` for each selected consult (Bedrock, on this host).
+5. `POST /api/freescript/ingest` with the artifact, `completion_required`, validator result, generator SHAs and cost. A re-post of the same artifact is `inserted: 0` and stamps `job_id` when the job is still waiting.
+
+The optional `eta2freescript_offline` hook reads what was stored: `GET /api/freescript/day?ist_date=YYYY-MM-DD` with the same HMAC (`x-freescript-ts`, `x-freescript-signature` over `` `${ts}.GET ${path}?${query}` ``). There is no Pulse write.
 
 `plan` lists uids and dates and runs nothing. `drain` takes pending jobs only.
 
@@ -21,10 +24,11 @@ Exit codes: 0 disabled / nothing to do / ok, 2 partial (over `max_consults`, or 
 
 | switch | where | effect |
 |---|---|---|
-| `ETA_FREESCRIPT` | Vercel env and the box | kill switch. Unset is on. `0` / `false` / `no` / `off` closes ingest, pending, `scribe_freescript`, and this job |
-| `FREESCRIPT_INGEST_SECRET` | Vercel env and the box | HMAC for ingest and pending. The box holds no database credential |
+| `ETA_FREESCRIPT` | Vercel env and the box | kill switch. Unset is on. `0` / `false` / `no` / `off` closes ingest, pending, the day read, `scribe_freescript`, and this job |
+| `FREESCRIPT_INGEST_SECRET` | Vercel env and the box | HMAC for ingest, pending, and `GET /api/freescript/day`. The box holds no database credential |
 | `FREESCRIPT_APP_URL` | box | the app origin, no trailing path |
 | `FREESCRIPT_DATA` | box | the consult folder (one subdirectory per uid) |
+| `REB_INDEX_READ_TOKEN` | Vercel env and the box | Bearer for `GET /api/sarvam/consult-results` and `GET /api/reb/roles`. `REB_INDEX_TOKEN` is accepted on those routes too. Unset means the nightly skips the sealed-consult feed |
 
 ## Install
 

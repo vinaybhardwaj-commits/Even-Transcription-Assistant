@@ -1,4 +1,4 @@
-# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.0.0 · stageB-v4 · eta.freescript.v0.2)
+# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.1.0 · stageB-v4 · eta.freescript.v0.2)
 
 Turns one isolated OPD consult (an ETA cut clip with its Sarvam transcript and, when present, the REB `role.llm-roles`
 track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.2` artifact holding `gp_extraction`
@@ -30,7 +30,9 @@ Stage A  prompts/stageA-v2.md (Bedrock Sonnet, T=0) → even.encounter.v2 JSON (
 boundary.py (post)  + Stage A's consult_boundary.foreign_turns (topic discontinuity)
 guard.py            citations; DOCTOR DOSE PRECEDENCE; numeric support (no number not on the cited tape)
         ▼
-mapper.py           hold-back, coarse diagnoses, social drop, advice cap, typed follow-up, quarantine,
+mapper.py           hold-back, coarser-parent diagnoses, unspoken routine panels dropped, combination brands
+        │           split into components (brand kept), surgery flag + procedure name, spoken regimen carried,
+        │           social drop, advice cap, typed follow-up, quarantine,
         │           sparse fields → kept-out review items + completion_required
         ▼
 Stage B  prompts/stageB-v4.md (Bedrock Sonnet, input = gp_extraction + flags only) → note_text
@@ -136,7 +138,21 @@ On unless `ETA_FREESCRIPT` is 0. The Python pipeline still does not run on Verce
 - `scribe_freescript` `action=read` with one selector (`encounter_id` or `consult_uid`, `room`+`date`, or `doctor_uid8`+range) returns the stored artifact, `completion_required` and the validator status.
 - `scribe_freescript` `action=run` (needs invoke) queues a `freescript` job. The box drains it; the Vercel step only waits.
 - `POST /api/freescript/ingest` stores one result (HMAC `FREESCRIPT_INGEST_SECRET`, same shape as the Timbre ingest). A transcript-shaped field is refused.
-- `python -m tools.eta2freescript.nightly run` pulls the day's consults that have a Sarvam transcript and a role track, runs the pipeline and posts. See `NIGHTLY.md`.
+- `GET /api/freescript/day?ist_date=YYYY-MM-DD` is the `eta2freescript_offline` hook: stored artifacts for that IST day (same HMAC, `FREESCRIPT_INGEST_SECRET`). 404 when `ETA_FREESCRIPT` is 0. No Pulse write.
+- `python -m tools.eta2freescript.nightly run` posts an artifact for every sealed consult that day, plus folders that already have a Sarvam transcript and a role track. See `NIGHTLY.md`.
+
+## Box reads
+
+Read-only. No Pulse write. The Sarvam and role routes are not behind `ETA_FREESCRIPT`.
+
+| route | auth env | query |
+|---|---|---|
+| `GET /api/sarvam/consult-results` | Bearer `REB_INDEX_READ_TOKEN` or `REB_INDEX_TOKEN` | `ist_date` or `consult_uids` (comma, max 25). `sealed=1` keeps sealed rows. `include_text=1` opts into transcript text (default is heads). |
+| `scribe_sarvam` `action=consult_result` | the Scribe MCP token (read) | `consult_uid`, `consult_uids[]`, or `ist_date`. Same heads. `include_text` for text. |
+| `GET /api/reb/roles` | Bearer `REB_INDEX_READ_TOKEN` or `REB_INDEX_TOKEN` | `consult_uid`, `consult_uids`, or `ist_date`. REB `role.llm-roles` from R2: roles and times only. Does not flip `ETA_REB_ROLE_LLM`. |
+| `GET /api/freescript/day` | HMAC `FREESCRIPT_INGEST_SECRET` (`x-freescript-ts`, `x-freescript-signature` over `` `${ts}.GET ${path}?${query}` ``) | `ist_date`. The offline hook. |
+
+Unset bearer tokens are 503 `not_configured`. A mismatch is 401.
 
 ## The `completion_required` contract
 

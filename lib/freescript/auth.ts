@@ -1,5 +1,5 @@
 /**
- * lib/freescript/auth.ts — HMAC for POST /api/freescript/ingest and GET /api/freescript/pending.
+ * lib/freescript/auth.ts — HMAC for POST /api/freescript/ingest, GET /api/freescript/pending and GET /api/freescript/day.
  *
  * The box holds FREESCRIPT_INGEST_SECRET and no database credential. Headers: x-freescript-ts (unix seconds) and
  * x-freescript-signature = hex HMAC-SHA256(secret, `${ts}.${rawBody}`) for POST, or `${ts}.GET ${pathAndQuery}` for GET.

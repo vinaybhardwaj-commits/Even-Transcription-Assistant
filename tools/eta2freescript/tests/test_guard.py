@@ -60,6 +60,20 @@ def test_unknown_roles_keep_prototype_behaviour():
     assert r["strength"] == "650 mg" and r["brand_as_said"] == "Dolo 650"
 
 
+def test_a_code_is_replaced_by_the_spoken_regimen():
+    c = consult("Cough.", "Take this twice a day for five days.")
+    r = guard(empty_encounter(prescription=[rx(frequency="BD", duration=None)]), c.turns)["prescription"][0]
+    assert r["frequency"] == "twice a day" and r["duration"] == "for five days"
+    assert "frequency" not in r["missing_fields"] and "duration" not in r["missing_fields"]
+
+
+def test_no_spoken_regimen_stays_empty():
+    c = consult("Cough.", "Take this syrup.")
+    r = guard(empty_encounter(prescription=[rx(frequency="BD", duration="5 days")]), c.turns)["prescription"][0]
+    assert r["frequency"] is None and r["duration"] is None
+    assert r["missing_fields"] == ["strength", "frequency", "duration"]
+
+
 def test_numeric_support_nulls_invented_values():
     c = consult("Cough.", "Take this syrup twice a day.")
     r = guard(empty_encounter(prescription=[rx(generic="ambroxol", frequency="twice a day", duration="5 days")]), c.turns)["prescription"][0]

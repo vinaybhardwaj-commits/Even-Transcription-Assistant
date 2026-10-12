@@ -82,7 +82,7 @@ def _valid(st, n):
 
 def check_citations(enc: dict, n: int, issues: list[str]) -> None:
     for key in ("hpi", "history", "comorbidities", "drug_history", "allergy_history", "examination", "plan", "investigations",
-                "advice", "referrals", "red_flags_safety_net", "diagnoses", "regimen_slots", "prescription"):
+                "advice", "referrals", "red_flags_safety_net", "diagnoses", "regimen_slots", "prescription", "procedures"):
         for i, it in enumerate(enc.get(key) or []):
             if not isinstance(it, dict):
                 continue
@@ -165,6 +165,60 @@ def dose_precedence(rx: dict, turns: list[Turn], issues: list[str], where: str) 
             issues.append(f"{where}: embedded strength {num} in {f} heard only from a non-doctor speaker -> stripped")
 
 
+# Spoken regimen, copied verbatim. Prose before codes, so "twice a day" wins over a BD on the same turn.
+_FREQ = [
+    re.compile(r"\b(?:once|twice|thrice|one time|two times|three times|four times)\s+(?:a|per)\s+day\b", re.I),
+    re.compile(r"\b(?:once|twice)\s+daily\b", re.I),
+    re.compile(r"\b(?:at night|in the morning|after food|before food|after meals|before meals|after breakfast|before breakfast|at bedtime|after dinner|before dinner)\b", re.I),
+    re.compile(r"\bevery\s+\d+\s+hours?\b", re.I),
+    re.compile(r"\b(?:din mein |din me )?(?:ek|do|teen|char) baar\b", re.I),
+    re.compile(r"\b(?:subah shaam|raat ko|khane ke baad|khane se pehle)\b", re.I),
+    re.compile(r"\b\d-\d-\d\b"),
+    re.compile(r"\b(?:bd|tds|od|qid|hs|sos)\b", re.I),
+]
+_DUR = [
+    re.compile(r"\bfor\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:days?|weeks?|months?)\b", re.I),
+    re.compile(r"\b(?:ek|do|teen|char|paanch|panch|chhe|saat|aath|nau|das|pandrah|bees|tees|\d+)\s+din\b", re.I),
+]
+_ROUTE = [
+    re.compile(r"\b(?:by mouth|orally|oral|inhale|inhalation|apply locally|local application|topical|nasal|intravenous|intramuscular|subcutaneous)\b", re.I),
+]
+
+
+def _spoken(patterns, turns: list[Turn]) -> str | None:
+    for t in turns:
+        for p in patterns:
+            m = p.search(t.text or "")
+            if m:
+                return m.group(0)
+    return None
+
+
+def _regimen_turns(idx: list[int], turns: list[Turn]) -> list[Turn]:
+    """Doctor turns when the role track named a doctor. With every cited role unknown, the cited turns."""
+    known = [turns[t] for t in idx if 0 <= t < len(turns)]
+    doc = [t for t in known if t.role == "doctor"]
+    if doc:
+        return doc
+    if known and all(t.role == "unknown" for t in known):
+        return known
+    return []
+
+
+def recover_regimen(obj: dict, turns: list[Turn], idx: list[int], issues: list[str], where: str, fields=("frequency", "duration", "route")) -> None:
+    """Where a field is empty, copy a regimen phrase the tape actually said. Never invent one."""
+    src = _regimen_turns(idx, turns)
+    if not src:
+        return
+    for field, patterns in (("frequency", _FREQ), ("duration", _DUR), ("route", _ROUTE)):
+        if field not in fields or obj.get(field):
+            continue
+        got = _spoken(patterns, src)
+        if got:
+            obj[field] = got
+            issues.append(f"{where}: {field} copied from the tape")
+
+
 def numeric_support(obj: dict, fields, cited: str, issues: list[str], where: str, english: bool = True) -> None:
     """Numbers must appear in the cited turns. A word-only value is checked word by word on English turns only: on
     native / code-mixed turns Stage A's English wording cannot match the tape literally."""
@@ -189,10 +243,13 @@ def guard(enc: dict, turns: list[Turn]) -> dict:
         dose_precedence(rx, turns, issues, where)
         idx = rx_turns(rx)
         numeric_support(rx, DOSE_FIELDS, cited_text(turns, idx), issues, where, all(turns[t].lang == "en" for t in idx))
+        recover_regimen(rx, turns, idx, issues, where)
         rx["missing_fields"] = [f for f in ("strength", "frequency", "duration") if not rx.get(f)]
     for i, s in enumerate(enc.get("regimen_slots") or []):
         st = list(s.get("source_turns") or []) + ([s["quote_turn"]] if isinstance(s.get("quote_turn"), int) else [])
-        numeric_support(s, ("frequency", "duration", "timing"), cited_text(turns, st), issues, f"regimen_slots[{i}]",
+        where = f"regimen_slots[{i}]"
+        numeric_support(s, ("frequency", "duration", "timing"), cited_text(turns, st), issues, where,
                         all(turns[t].lang == "en" for t in st))
+        recover_regimen(s, turns, st, issues, where, ("frequency", "duration"))
     enc["_guard"] = {"issues": issues, "n_turns": n}
     return enc

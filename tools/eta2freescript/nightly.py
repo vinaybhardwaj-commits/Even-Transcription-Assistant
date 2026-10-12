@@ -134,6 +134,97 @@ def select_day(data: Path, day: str) -> list[dict]:
     return found
 
 
+def _role_without_text(doc: dict) -> dict:
+    """role.json the pipeline can join. Segment text is dropped before the file is written."""
+    segs = []
+    for s in doc.get("segments") or []:
+        if not isinstance(s, dict):
+            continue
+        segs.append({k: s[k] for k in ("t0_ms", "t1_ms", "speaker", "role") if k in s})
+    out = {k: doc[k] for k in ("layer", "engine", "status", "config_hash", "extras") if k in doc}
+    out.setdefault("layer", "role")
+    out.setdefault("engine", "llm-roles")
+    out.setdefault("status", "ok")
+    out["segments"] = segs
+    return out
+
+
+def include_sealed(data: Path, day: str, uids: list[str], role_for=None) -> tuple[list[dict], list[str]]:
+    """Every sealed consult whose folder has a transcript. A missing role.json may be filled from role_for.
+
+    role_for(uid) -> a role track dict, or None. Returns (rows, missing uids). Ids only; no segment text.
+    """
+    from .ingest import valid_role_doc
+    rows = select_day(data, day)
+    have = {r["uid"] for r in rows}
+    missing: list[str] = []
+    for uid in uids:
+        if not isinstance(uid, str) or not uid or uid in have:
+            continue
+        folder = data / uid
+        role_path = folder / "role.json"
+        if role_for and not role_path.exists():
+            doc = role_for(uid)
+            if isinstance(doc, dict) and valid_role_doc(_role_without_text(doc)):
+                folder.mkdir(parents=True, exist_ok=True)
+                role_path.write_text(json.dumps(_role_without_text(doc)), encoding="utf-8")
+        row = consult_eligible(folder, day) if folder.is_dir() else None
+        if row:
+            rows.append(row)
+            have.add(uid)
+        else:
+            missing.append(uid)
+    return rows, missing
+
+
+def fetch_sealed_uids(app_url: str, token: str, day: str, timeout_s: int = 30) -> list[str]:
+    """GET /api/sarvam/consult-results?ist_date=&sealed=1. Bearer REB_INDEX_READ_TOKEN. Uids only."""
+    path = f"/api/sarvam/consult-results?ist_date={day}&sealed=1"
+    req = urllib.request.Request(app_url.rstrip("/") + path, method="GET")
+    req.add_header("authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        body = json.loads(resp.read().decode())
+    rows = body.get("rows") if isinstance(body, dict) else None
+    out = []
+    if isinstance(rows, list):
+        for r in rows:
+            uid = r.get("consult_uid") if isinstance(r, dict) else None
+            if isinstance(uid, str) and uid:
+                out.append(uid)
+    return out
+
+
+def role_doc_from_feed(row: dict) -> dict | None:
+    """A /api/reb/roles row -> role.json. Flags become extras. Text is not copied."""
+    segs = row.get("segments")
+    if not isinstance(segs, list) or not segs:
+        return None
+    flags = row.get("flags") if isinstance(row.get("flags"), dict) else {}
+    extras: dict = {}
+    if isinstance(flags.get("attender_present"), bool):
+        extras["attender_present"] = flags["attender_present"]
+    if isinstance(flags.get("two_consults"), bool):
+        extras["two_consults"] = {"flag": flags["two_consults"]}
+    if isinstance(flags.get("diar_partial"), bool):
+        extras["diar_partial"] = flags["diar_partial"]
+    return _role_without_text({
+        "layer": "role", "engine": "llm-roles", "status": "ok",
+        "config_hash": row.get("config_hash"), "segments": segs, "extras": extras,
+    })
+
+
+def fetch_role_doc(app_url: str, token: str, uid: str, timeout_s: int = 30) -> dict | None:
+    path = f"/api/reb/roles?consult_uid={uid}"
+    req = urllib.request.Request(app_url.rstrip("/") + path, method="GET")
+    req.add_header("authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        body = json.loads(resp.read().decode())
+    rows = body.get("rows") if isinstance(body, dict) else None
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None
+    return role_doc_from_feed(rows[0])
+
+
 def fetch_pending(app_url: str, secret: str, timeout_s: int = 30) -> list[dict]:
     path = "/api/freescript/pending"
     ts = int(datetime.now(timezone.utc).timestamp())
@@ -245,7 +336,7 @@ def _post_factory(cfg: dict, secret: str):
     return post
 
 
-def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None) -> int:
+def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None, sealed=None, roles=None) -> int:
     if not cfg.get("enabled"):
         print("disabled")
         return 0
@@ -255,6 +346,31 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         return 1
     rows = select_day(data, day)
     secret = os.environ.get("FREESCRIPT_INGEST_SECRET", "").strip()
+    reb_token = os.environ.get("REB_INDEX_READ_TOKEN", "").strip()
+    sealed_missing: list[str] = []
+    if sealed is not False:
+        uids = None
+        if callable(sealed):
+            uids = sealed(day)
+        elif isinstance(sealed, list):
+            uids = sealed
+        elif reb_token and cfg.get("app_url"):
+            try:
+                uids = fetch_sealed_uids(cfg["app_url"], reb_token, day)
+            except Exception as e:
+                print("sealed", type(e).__name__)
+                uids = []
+        if uids is not None:
+            def role_for(uid: str):
+                if callable(roles):
+                    return roles(uid)
+                if reb_token and cfg.get("app_url"):
+                    try:
+                        return fetch_role_doc(cfg["app_url"], reb_token, uid)
+                    except Exception:
+                        return None
+                return None
+            rows, sealed_missing = include_sealed(data, day, list(uids), role_for)
     missing: list[str] = []
     if cfg.get("app_url") and secret and pending is not False:
         try:
@@ -267,7 +383,7 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         for r in extra:
             if r["uid"] not in have:
                 rows.append(r)
-    if not rows and not missing:
+    if not rows and not missing and not sealed_missing:
         print("nothing", day)
         return 0
     sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
@@ -275,9 +391,9 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         print("no ingest target")
         return 1
     summary = execute(rows, cfg, dry_run=dry_run, run_one=run_one, post=sender or (lambda _p: {"ok": True, "inserted": 0}))
-    summary["missing"] = len(missing)
+    summary["missing"] = len(missing) + len(sealed_missing)
     print(json.dumps({k: summary[k] for k in ("dry_run", "n", "posted", "failed", "skipped", "missing")}))
-    if summary["failed"] or missing:
+    if summary["failed"] or missing or sealed_missing:
         return 1 if summary["posted"] == 0 and not dry_run else 2
     if summary["skipped"]:
         return 2

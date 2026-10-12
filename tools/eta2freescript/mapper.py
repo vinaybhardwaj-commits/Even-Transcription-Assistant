@@ -28,13 +28,14 @@ import re
 import uuid
 
 from .boundary import Boundary
+from .combinations import components_of
 from .followup import map_follow_up
 from .guard import NON_DOCTOR, rx_turns
 from .ingest import Consult
 from .note import FILLER, drop_clauses
 from .validate import V
 
-MAPPER_VERSION = "2.0.0"
+MAPPER_VERSION = "2.1.0"
 SCHEMA_VERSION = "eta.freescript.v0.2"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 MAX_SECONDARY_DX = 3
@@ -56,6 +57,29 @@ NO_NAME_NOTE = re.compile(r"\b(no name|not named|unnamed|name not (?:spoken|said
 CONTINUE_CUE = re.compile(r"\b(continu\w*|discontinu\w*|stop(?:ped|ping)?|keep taking|restart|still taking|carry on)\b", re.I)
 SYMPTOM_LIKE = re.compile(r"\b(pain|ache|aches|borderline|elevated|raised|high|low|fever|cough|cold|weakness|fatigue|giddiness|"
                           r"dizziness|headache|swelling|itching|burning|vomiting|nausea|loose motions?|constipation|symptoms?)\b", re.I)
+# Laterality and acuity are not a separate diagnosis. The coarser parent is the one with fewer remaining words.
+DX_MODIFIERS = {"acute", "chronic", "left", "right", "bilateral", "mild", "severe", "both", "unilateral", "recurrent",
+                "early", "late", "upper", "lower", "suspected", "possible", "probable"}
+# Routine panels the model emits without anyone saying them. A spoken name or synonym stays.
+ROUTINE_GROUPS = (
+    ("cbc", "complete blood count", "hemogram"),
+    ("rft", "renal function", "kidney function", "kft"),
+    ("lft", "liver function"),
+    ("urine routine", "urine r/m", "urine microscopy"),
+    ("fbs", "fasting blood sugar", "fasting sugar"),
+    ("rbs", "random blood sugar"),
+    ("hba1c", "glycated haemoglobin", "glycated hemoglobin", "hb a1c"),
+    ("lipid profile", "lipid panel"),
+    ("thyroid profile", "thyroid function", "tsh"),
+    ("esr", "erythrocyte sedimentation"),
+    ("crp", "c-reactive", "c reactive"),
+)
+PROC_NAME = re.compile(
+    r"\b((?:laparoscopic|open|endoscopic|robotic)\s+)?([a-z]+(?:ectomy|otomy|ostomy|oplasty|oscopy|centesis)|cataract(?:\s+(?:extraction|surgery))?)\b",
+    re.I,
+)
+ADVISE = re.compile(r"\b(advis\w*|recommend\w*|need(?:s|ed)?|plan(?:ned)?|book(?:ed)?|go for|posted for|listed for|schedule\w*)\b", re.I)
+SURGERY_WORD = re.compile(r"\b(surgery|operation|procedure)\b", re.I)
 SOCIAL_TYPES = {"social", "place", "travel", "occupation"}
 ORDER_KINDS = {"medicine", "investigation", "procedure", "referral"}
 STOP = set("the a an and or of to for in on with your you please do not be is are it this that daily".split())
@@ -138,6 +162,37 @@ def near_duplicate(a: str, b: str) -> bool:
         return True
     ta, tb = _tokens(a), _tokens(b)
     return min(len(ta), len(tb)) >= 2 and len(ta & tb) / min(len(ta), len(tb)) >= 0.66
+
+
+def _content_count(s: str) -> int:
+    return len({w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOP and w not in DX_MODIFIERS and len(w) > 2})
+
+
+def coarser(a: str, b: str) -> str:
+    """The parent label: fewer content words after laterality and acuity are stripped. A tie keeps the shorter string."""
+    ca, cb = _content_count(a), _content_count(b)
+    if ca != cb:
+        return a if ca < cb else b
+    return a if len(a) <= len(b) else b
+
+
+def _alias_in(alias: str, text: str) -> bool:
+    if " " not in alias and len(alias) <= 6:
+        return re.search(rf"\b{re.escape(alias)}\b", text, re.I) is not None
+    return alias.lower() in text.lower()
+
+
+def routine_aliases(name: str) -> tuple[str, ...] | None:
+    n = (name or "").lower()
+    for group in ROUTINE_GROUPS:
+        if any(_alias_in(a, n) for a in group):
+            return group
+    return None
+
+
+def routine_spoken(aliases: tuple[str, ...], texts: list[str]) -> bool:
+    blob = " ".join(texts)
+    return any(_alias_in(a, blob) for a in aliases)
 
 
 class Builder:
@@ -279,10 +334,27 @@ class Builder:
             if tl and not self.unquarantined(tl):
                 self.quarantine("diagnosis", lab, tl)
                 continue
-            if any(near_duplicate(lab, x[0]) for x in cand):
-                self.P("diagnosis", f"[diagnosis_merged] {lab}", "discussed_only", tl, 0.5, None)
+            merged = False
+            keep_tl = self.unquarantined(tl)
+            for i, (old_lab, old_d, old_tl) in enumerate(cand):
+                if not near_duplicate(lab, old_lab):
+                    continue
+                parent = coarser(old_lab, lab)
+                child = lab if parent == old_lab else old_lab
+                turns = list(dict.fromkeys(list(old_tl) + keep_tl))
+                use = old_d
+                if old_d.get("rank") != "primary" and d.get("rank") == "primary":
+                    use = d
+                if parent != old_lab:
+                    cand[i] = (parent, use, turns)
+                elif d.get("rank") == "primary" and old_d.get("rank") != "primary":
+                    cand[i] = (old_lab, d, turns)
+                self.P("diagnosis", f"[diagnosis_merged] {child}", "discussed_only", tl, 0.5, None)
+                merged = True
+                break
+            if merged:
                 continue
-            cand.append((lab, d, self.unquarantined(tl)))
+            cand.append((lab, d, keep_tl))
         if not cand:
             return
         prim = next((x for x in cand if x[1].get("rank") == "primary"), cand[0])
@@ -363,6 +435,11 @@ class Builder:
                 self.P("medicine", f"[held_back_inferred_order] {label} ({action}; {why}) - {regimen or 'regimen not stated'}",
                        "discussed_only", turns, min(rx.get("confidence") or 0.5, 0.5), None, fl, names=names, lead=dec)
                 continue
+            parts = components_of(rx)
+            if parts and len(parts) >= 2:
+                for part in parts:
+                    self._emit_medicine(rx, part["generic"], part.get("brand"), part.get("strength"), turns, dec, action, meds, names)
+                continue
             if rx.get("strength"):
                 name = f"{name} {rx['strength']}"
             stripped = bool(rx.get("brand_as_said_as_heard")) and bool(generic)
@@ -370,6 +447,8 @@ class Builder:
             for k in ("frequency", "duration", "instructions"):
                 if rx.get(k):
                     m[k] = str(rx[k]).replace(":", " -")
+            if not m.get("instructions") and rx.get("route"):
+                m["instructions"] = str(rx["route"]).replace(":", " -")
             if generic and brand and not stripped and brand.lower() not in generic.lower():
                 m["aliases"] = [brand]
             meds.append(m)
@@ -387,6 +466,34 @@ class Builder:
         for s in self.enc.get("regimen_slots") or []:
             self.slot(s, lead=s.get("quote_turn"))
         self.drug_history()
+
+    def _emit_medicine(self, rx, generic, brand, strength, turns, dec, action, meds, names):
+        """One component of a combination. The brand stays on raw_name and aliases. A missing regimen is completion_required."""
+        name = FORM_PREFIX.sub("", str(generic or brand or "")).strip()
+        if strength:
+            name = f"{name} {strength}".strip()
+        spoken = (brand or "").strip()
+        m = {"name": name, "raw_name": spoken or generic}
+        if spoken and spoken.lower() not in name.lower():
+            m["aliases"] = [spoken]
+        for k in ("frequency", "duration", "instructions"):
+            if rx.get(k):
+                m[k] = str(rx[k]).replace(":", " -")
+        if not m.get("instructions") and rx.get("route"):
+            m["instructions"] = str(rx["route"]).replace(":", " -")
+        meds.append(m)
+        self.continued_names.extend([x for x in names + V.med_names(m) if x])
+        regimen = ", ".join(str(rx[k]) for k in ("route", "frequency", "duration", "instructions") if rx.get(k))
+        if strength:
+            regimen = f"{strength}, {regimen}" if regimen else strength
+        item = self.P("medicine", f"{'Continue ' if action in ('continue', 'change') else ''}{name}" + (f" - {regimen}" if regimen else ""),
+                      "continued" if action in ("continue", "change") else "prescribed", turns, rx.get("confidence") or 0.5,
+                      f"/medicines/{len(meds) - 1}", names=names + [generic, spoken], lead=dec)
+        missing = [f for f, present in (("strength", strength), ("frequency", rx.get("frequency")), ("duration", rx.get("duration"))) if not present]
+        if missing:
+            r = self.P("medicine", f"[dose_unstated] {name} - {', '.join(missing)} not said aloud", "discussed_only", turns, 0.5, None,
+                       [f"{f}_unstated" for f in missing], names=[], lead=dec)
+            self.review("dose_unstated", r, f"Enter {', '.join(missing)} for {name}", item["item_id"])
 
     def slot(self, s: dict, lead=None):
         turns = self.turns(s) + ([s["quote_turn"]] if isinstance(s.get("quote_turn"), int) and s["quote_turn"] not in self.turns(s) else [])
@@ -470,6 +577,11 @@ class Builder:
             if self.quarantined(tl):
                 self.quarantine("investigation", f"{nm} ({st})", tl, names=[nm])
                 continue
+            aliases = routine_aliases(nm)
+            cited = [self.c.turns[t].text for t in tl if 0 <= t < len(self.c.turns)]
+            if aliases and not routine_spoken(aliases, cited):
+                self.P("investigation", f"[routine_not_spoken] {nm}", "discussed_only", tl, 0.5, None, names=[nm])
+                continue
             dec = it.get("decision_turn") if isinstance(it.get("decision_turn"), int) else (tl[0] if tl else None)
             if st == "ordered" and it.get("basis") == "said" and not self.by_non_doctor(dec):
                 e = {"name": nm, "raw_name": nm}
@@ -504,6 +616,70 @@ class Builder:
                 self.P("referral", f"[held_back_inferred_order] {to}", "discussed_only", tl, 0.5, None, names=[to])
         if refs:
             self.gx["referrals"] = refs
+
+    def _procedure_names(self, text: str) -> list[str]:
+        if not ADVISE.search(text or ""):
+            return []
+        found = []
+        for m in PROC_NAME.finditer(text or ""):
+            found.append(re.sub(r"\s+", " ", m.group(0)).strip())
+        if not found and SURGERY_WORD.search(text or ""):
+            word = SURGERY_WORD.search(text).group(1)
+            found.append(word)
+        return found
+
+    def procedures(self):
+        """requires_surgery_or_procedure and the procedure name, when the doctor advises surgery."""
+        recs: list[dict] = []
+        seen: set[str] = set()
+
+        def add(nm: str, tl, dec, notes=None, scheduled=None):
+            key = nm.lower()
+            if not nm or key in seen:
+                return
+            seen.add(key)
+            e = {"name": nm[:120], "raw_name": nm[:120]}
+            if isinstance(scheduled, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", scheduled):
+                e["scheduled_date"] = scheduled
+            if notes:
+                e["notes"] = str(notes).replace(":", " -")[:300]
+            recs.append(e)
+            self.P("procedure", nm, "prescribed", tl, 0.8, f"/plan_of_management/surgery_or_procedure_recommendations/{len(recs) - 1}",
+                   names=[nm], lead=dec)
+
+        for it in self.enc.get("procedures") or []:
+            nm = (it.get("name") or "").strip()
+            if not nm:
+                continue
+            tl = self.turns(it)
+            if self.quarantined(tl):
+                self.quarantine("procedure", nm, tl, names=[nm])
+                continue
+            dec = it.get("decision_turn") if isinstance(it.get("decision_turn"), int) else None
+            if it.get("basis") == "said" and isinstance(dec, int) and not self.by_non_doctor(dec):
+                add(nm, tl or [dec], dec, it.get("notes"), it.get("scheduled_date"))
+            else:
+                self.P("procedure", f"[held_back_inferred_order] {nm}", "discussed_only", tl, 0.5, None, names=[nm], lead=dec)
+        if not recs:
+            for i, t in enumerate(self.c.turns):
+                if t.role != "doctor" or i in self.b.quarantined:
+                    continue
+                for nm in self._procedure_names(t.text):
+                    add(nm, [i], i)
+            for p in self.enc.get("plan") or []:
+                if p.get("basis") != "said" or not p.get("text"):
+                    continue
+                tl = self.unquarantined(self.turns(p))
+                if self.turns(p) and not tl:
+                    continue
+                if self.c.role_track and tl and all(self.c.turns[t].role in NON_DOCTOR for t in tl):
+                    continue
+                for nm in self._procedure_names(p["text"]):
+                    add(nm, tl, tl[0] if tl else None)
+        if recs:
+            pom = self.gx.setdefault("plan_of_management", {})
+            pom["requires_surgery_or_procedure"] = True
+            pom["surgery_or_procedure_recommendations"] = recs
 
     def plan(self, plan_txt):
         said = []
@@ -589,6 +765,7 @@ class Builder:
         plan_txt: list[tuple[str, list[int]]] = []
         self.medicines(plan_txt)
         self.investigations(plan_txt)
+        self.procedures()
         self.plan(plan_txt)
         self.referrals()
         self.advice()
