@@ -47,7 +47,7 @@ export async function enqueueEmotionWindows(opts: { actor: string; origin?: stri
   const log = opts.log ?? ((m: string) => console.log(m));
   const result: EmotionEnqueueResult = { enabled: false, busy: false, enqueued: [], exhausted: 0, n_blind_excluded: 0 };
   if (!emotionEnabled()) {
-    log(`[emotion] ${EMOTION_ENABLED_ENV} is off — enqueueing nothing (this is the shipped state)`);
+    log(`[emotion] ${EMOTION_ENABLED_ENV} is off or WavLM is retired (EMOTION_WAVLM_RETIRED, Timbre #79) — enqueueing nothing (this is the shipped state)`);
     return result;
   }
   result.enabled = true;

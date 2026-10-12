@@ -1,0 +1,90 @@
+{
+ "consult_uid": "synth-fever-dose",
+ "clip": {
+  "t0_ms": 1791174600000,
+  "t1_ms": 1791174694000,
+  "room_slug": "synth-room-1"
+ },
+ "language_code": "en-IN",
+ "model_translate": null,
+ "english_segments": [
+  {
+   "t0_ms": 1791174600000,
+   "t1_ms": 1791174604000,
+   "speaker_id": "0",
+   "text": "Good morning, please sit. What is the problem?"
+  },
+  {
+   "t0_ms": 1791174605000,
+   "t1_ms": 1791174611000,
+   "speaker_id": "1",
+   "text": "I have fever for three days and body pain."
+  },
+  {
+   "t0_ms": 1791174612000,
+   "t1_ms": 1791174617000,
+   "speaker_id": "1",
+   "text": "I took Dolo 650 at home twice."
+  },
+  {
+   "t0_ms": 1791174618000,
+   "t1_ms": 1791174624000,
+   "speaker_id": "1",
+   "text": "I work at the vegetable market and came by bus today."
+  },
+  {
+   "t0_ms": 1791174625000,
+   "t1_ms": 1791174629000,
+   "speaker_id": "0",
+   "text": "Any cough or burning while passing urine?"
+  },
+  {
+   "t0_ms": 1791174630000,
+   "t1_ms": 1791174638000,
+   "speaker_id": "1",
+   "text": "No cough. My BP was a little high at the pharmacy."
+  },
+  {
+   "t0_ms": 1791174640000,
+   "t1_ms": 1791174653000,
+   "speaker_id": "0",
+   "text": "Let me check. Temperature is 101, throat is red, chest is clear."
+  },
+  {
+   "t0_ms": 1791174655000,
+   "t1_ms": 1791174664000,
+   "speaker_id": "0",
+   "text": "This looks like a viral fever. Take paracetamol 1 g three times a day for three days."
+  },
+  {
+   "t0_ms": 1791174665000,
+   "t1_ms": 1791174671000,
+   "speaker_id": "0",
+   "text": "Get a CBC test done today."
+  },
+  {
+   "t0_ms": 1791174672000,
+   "t1_ms": 1791174677000,
+   "speaker_id": "0",
+   "text": "Drink plenty of water and take rest."
+  },
+  {
+   "t0_ms": 1791174678000,
+   "t1_ms": 1791174684000,
+   "speaker_id": "0",
+   "text": "Drink lots of water, at least three litres."
+  },
+  {
+   "t0_ms": 1791174685000,
+   "t1_ms": 1791174689000,
+   "speaker_id": "0",
+   "text": "Come back after one week with the CBC report."
+  },
+  {
+   "t0_ms": 1791174690000,
+   "t1_ms": 1791174692000,
+   "speaker_id": "1",
+   "text": "Okay, thank you."
+  }
+ ]
+}

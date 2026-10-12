@@ -27,7 +27,7 @@ vi.mock("@/lib/r2", () => ({ headObject: async () => ({ size: null, content_type
 vi.mock("@/lib/whisper", () => ({ transcribeWithWhisper: async () => ({ ok: false, error: "not_called", latency_ms: 0 }) }));
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 300_000 });
 
-const ENV = { ROOM_AUTO_DRAIN_ENABLED: "1", AUTO_DRAIN_BATCH_LIMIT: "10", ROOM_DIARIZE_ENABLED: "1", EMOTION_ENABLED: "1", EMOTION_SEGMENTS_SECRET: "x", EMOTION_BATCH_LIMIT: "10" };
+const ENV = { ROOM_AUTO_DRAIN_ENABLED: "1", AUTO_DRAIN_BATCH_LIMIT: "10", ROOM_DIARIZE_ENABLED: "1", EMOTION_ENABLED: "1", EMOTION_WAVLM_RETIRED: "0", EMOTION_SEGMENTS_SECRET: "x", EMOTION_BATCH_LIMIT: "10" };
 Object.assign(process.env, ENV);
 
 const HAVE = dockerAvailable();

@@ -1,0 +1,74 @@
+{
+ "consult_uid": "synth-cough-native",
+ "clip": {
+  "t0_ms": 1791174600000,
+  "t1_ms": 1791174651000,
+  "room_slug": "synth-room-3"
+ },
+ "language_code": "hi-IN",
+ "native_segments": [
+  {
+   "t0_ms": 1791174600000,
+   "t1_ms": 1791174603000,
+   "speaker_id": "0",
+   "text": "Namaste, batao kya hua?",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174604000,
+   "t1_ms": 1791174609000,
+   "speaker_id": "1",
+   "text": "तीन दिन से खांसी है और गले में दर्द।",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174610000,
+   "t1_ms": 1791174613000,
+   "speaker_id": "0",
+   "text": "Bukhar hai? Saans phoolti hai?",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174614000,
+   "t1_ms": 1791174616000,
+   "speaker_id": "1",
+   "text": "Bukhar nahi hai.",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174618000,
+   "t1_ms": 1791174624000,
+   "speaker_id": "0",
+   "text": "Gala laal hai, chest clear hai.",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174626000,
+   "t1_ms": 1791174633000,
+   "speaker_id": "0",
+   "text": "Ascoril syrup 5 ml din mein teen baar, paanch din.",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174634000,
+   "t1_ms": 1791174640000,
+   "speaker_id": "0",
+   "text": "Aur ek tablet raat ko sone se pehle, paanch din.",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174641000,
+   "t1_ms": 1791174645000,
+   "speaker_id": "0",
+   "text": "Garam paani se garare karo.",
+   "lang": "hi"
+  },
+  {
+   "t0_ms": 1791174646000,
+   "t1_ms": 1791174649000,
+   "speaker_id": "0",
+   "text": "Do hafte baad dikhana.",
+   "lang": "hi"
+  }
+ ]
+}

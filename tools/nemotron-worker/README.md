@@ -21,7 +21,7 @@ database credential. Nothing clinician-facing reads these rows.
 - Manners:
   - Waits for free VRAM before each claim (default 2048 MiB) and takes `~/gpu.lock` per inference, the box's per-job convention.
   - Runs under `nice -n 10` and `ionice -c 3`.
-  - Rate cap: 60 windows/hour by default.
+  - Rate cap: 600 windows/hour by default (was 60 until 11 Oct 2026: 60/h could not keep up with live intake plus a backlog). Set `NEMOTRON_RATE_PER_HOUR` lower on a shared GPU.
 - SIGTERM stops new claims. A fetched window is finished and posted, then the worker exits 0. A window still waiting for the GPU is abandoned unposted: its lease lapses and the server offers it again.
 - Base URL: `https://www.evenscribe.app` by default. Any other host is refused unless `NEMOTRON_ALLOW_OTHER_BASE_URL=1` is set.
 - Any 3xx from the server is never followed: the worker exits with code 3, since a redirect would carry the bearer to another host. Clips are fetched over https only, with no redirects; anything else posts `fetch_failed`.

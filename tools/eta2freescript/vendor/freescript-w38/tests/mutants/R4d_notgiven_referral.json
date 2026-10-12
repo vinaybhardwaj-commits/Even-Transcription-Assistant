@@ -1,0 +1,324 @@
+{
+ "schema_version": "eta.freescript.v0.1",
+ "artifact_id": "00000000-0000-4000-8000-000000000002",
+ "supersedes": null,
+ "created_at": "2026-09-20T10:30:00+05:30",
+ "generator": {
+  "name": "hand-authored-example",
+  "version": "0.1",
+  "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prompt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "model": "none (hand-authored)",
+  "model_provider": "none",
+  "zdr": true,
+  "temperature": 0
+ },
+ "encounter": {
+  "eta_encounter_id": "EXAMPLE-ENC-2",
+  "room": "EXAMPLE-ROOM",
+  "window_start": "2026-09-20T10:00:00+05:30",
+  "window_end": "2026-09-20T10:15:00+05:30",
+  "languages": [
+   "en"
+  ],
+  "transcript": {
+   "segment_count": 11,
+   "diarised": false,
+   "english_source": "native"
+  },
+  "doctor": {
+   "pulse_doctor_uid": null,
+   "specialty": "General Practitioner"
+  }
+ },
+ "pulse_link": {
+  "type_of_prescription": "HOSPITAL_GP",
+  "individual_uid": null,
+  "hospital_uid": null,
+  "consult_uid": null,
+  "prescription_uid": null,
+  "draft_exists": "unknown",
+  "link_status": "none",
+  "link_basis": null
+ },
+ "gp_extraction": {
+  "presenting_complaints": {
+   "symptoms": "Dry cough for 5 days. No fever. No chest pain. No breathlessness.",
+   "diagnoses": [
+    {
+     "diagnosis_or_impression": "Acute upper respiratory tract infection",
+     "is_differential_diagnosis": false,
+     "raw_name": "URTI",
+     "aliases": [
+      "Upper respiratory tract infection"
+     ]
+    }
+   ]
+  },
+  "examination": "Chest clear on auscultation. SpO2 98%.",
+  "medicines": [
+   {
+    "name": "Levocetirizine 5",
+    "frequency": "HS",
+    "duration": "5 days",
+    "instructions": "at night",
+    "raw_name": "levocetirizine 5",
+    "aliases": [
+     "Levocet",
+     "Xyzal"
+    ]
+   }
+  ],
+  "plan_of_management": {
+   "management_plan": "Symptomatic treatment. No antibiotics needed at present. Chest X-ray not needed now.",
+   "requires_surgery_or_procedure": false
+  },
+  "general_advice": "Steam inhalation twice daily. Warm water gargles.",
+  "referrals": [
+   {
+    "speciality": "Cardiology"
+   }
+  ]
+ },
+ "note_text": "Co-morbidities:\nPresenting Complaint: Dry cough x 5 days. No fever, no chest pain, no breathlessness.\nExamination: Chest clear. SpO2 98%.\nDiagnoses: URTI\nPlan of Management: Symptomatic. No antibiotics needed at present. Chest X-ray not needed now.\nSurgery or Procedure:\nMedication: Levocetirizine 5 mg HS x 5 days\nFurther Investigation:\nFollow up:\nRefer to: Cardiology\nGeneral Advice: Steam inhalation twice daily. Warm water gargles.",
+ "provenance": [
+  {
+   "item_id": "e2-sym",
+   "kind": "symptoms",
+   "text": "dry cough 5 days; denies fever, chest pain, breathlessness",
+   "status": "prescribed",
+   "negated": true,
+   "speaker": "patient",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:1",
+     "t0": "2026-09-20T10:00:40+05:30",
+     "t1": "2026-09-20T10:00:50+05:30",
+     "quote_en": "cough for five days, dry",
+     "lang": "en"
+    },
+    {
+     "segment_ref": "EXAMPLE-W1:2",
+     "t0": "2026-09-20T10:00:55+05:30",
+     "t1": "2026-09-20T10:01:02+05:30",
+     "quote_en": "no fever, no chest pain, no problem breathing",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": "/presenting_complaints/symptoms",
+   "flags": []
+  },
+  {
+   "item_id": "e2-exam",
+   "kind": "examination",
+   "text": "chest clear, SpO2 98",
+   "status": "prescribed",
+   "negated": false,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:4",
+     "t0": "2026-09-20T10:02:10+05:30",
+     "t1": "2026-09-20T10:02:20+05:30",
+     "quote_en": "chest is clear, saturation 98",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": "/examination",
+   "flags": []
+  },
+  {
+   "item_id": "e2-dx",
+   "kind": "diagnosis",
+   "text": "URTI",
+   "status": "prescribed",
+   "negated": false,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:6",
+     "t0": "2026-09-20T10:03:00+05:30",
+     "t1": "2026-09-20T10:03:04+05:30",
+     "quote_en": "this is a simple URTI",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": "/presenting_complaints/diagnoses/0",
+   "flags": []
+  },
+  {
+   "item_id": "e2-abx",
+   "kind": "medicine",
+   "text": "Azithromycin",
+   "names": [
+    "azithromycin",
+    "Azithromycin 500",
+    "Azithral",
+    "Zithromax"
+   ],
+   "status": "not_given",
+   "negated": true,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:7",
+     "t0": "2026-09-20T10:03:05+05:30",
+     "t1": "2026-09-20T10:03:15+05:30",
+     "quote_en": "you asked for azithromycin but you don't need an antibiotic now",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": null,
+   "flags": [
+    "negation_cue_nearby"
+   ]
+  },
+  {
+   "item_id": "e2-cxr",
+   "kind": "investigation",
+   "text": "Chest X-ray",
+   "names": [
+    "Chest X-ray",
+    "CXR",
+    "X-ray chest PA view"
+   ],
+   "status": "not_given",
+   "negated": true,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:8",
+     "t0": "2026-09-20T10:03:16+05:30",
+     "t1": "2026-09-20T10:03:22+05:30",
+     "quote_en": "no need for a chest X-ray right now",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": null,
+   "flags": [
+    "negation_cue_nearby"
+   ]
+  },
+  {
+   "item_id": "e2-plan",
+   "kind": "management_plan",
+   "text": "symptomatic; no antibiotic; no X-ray now",
+   "status": "prescribed",
+   "negated": false,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:7",
+     "t0": "2026-09-20T10:03:05+05:30",
+     "t1": "2026-09-20T10:03:15+05:30",
+     "quote_en": "you don't need an antibiotic now",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.85,
+   "json_pointer": "/plan_of_management/management_plan",
+   "flags": []
+  },
+  {
+   "item_id": "e2-med",
+   "kind": "medicine",
+   "text": "Levocetirizine 5 mg at night for 5 days",
+   "status": "prescribed",
+   "negated": false,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:9",
+     "t0": "2026-09-20T10:03:30+05:30",
+     "t1": "2026-09-20T10:03:40+05:30",
+     "quote_en": "take levocetirizine 5 at night for five days",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": "/medicines/0",
+   "flags": []
+  },
+  {
+   "item_id": "e2-adv",
+   "kind": "advice",
+   "text": "steam inhalation, gargles",
+   "status": "prescribed",
+   "negated": false,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:10",
+     "t0": "2026-09-20T10:03:45+05:30",
+     "t1": "2026-09-20T10:03:52+05:30",
+     "quote_en": "do steam twice a day and warm water gargles",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": "/general_advice",
+   "flags": []
+  },
+  {
+   "item_id": "ref-no",
+   "kind": "referral",
+   "text": "Cardiology referral not needed",
+   "names": [
+    "Cardiology",
+    "cardiologist"
+   ],
+   "status": "not_given",
+   "negated": true,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:6",
+     "t0": "2026-09-20T10:03:00+05:30",
+     "t1": "2026-09-20T10:03:04+05:30",
+     "quote_en": "this is a simple URTI",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": null,
+   "flags": [
+    "negation_cue_nearby"
+   ]
+  },
+  {
+   "item_id": "ref-yes",
+   "kind": "referral",
+   "text": "Cardiology",
+   "status": "prescribed",
+   "negated": false,
+   "speaker": "doctor",
+   "speaker_source": "model_inferred",
+   "evidence": [
+    {
+     "segment_ref": "EXAMPLE-W1:6",
+     "t0": "2026-09-20T10:03:00+05:30",
+     "t1": "2026-09-20T10:03:04+05:30",
+     "quote_en": "this is a simple URTI",
+     "lang": "en"
+    }
+   ],
+   "confidence": 0.9,
+   "json_pointer": "/referrals/0",
+   "flags": []
+  }
+ ]
+}

@@ -50,3 +50,10 @@ describe("workerBoard figures", () => {
     expect(workerBoard([row(1, NOON)], lat({ windows_24h: 0, box_24h: 0, hf_24h: 0, p95_latency_s: null }), NOON)).toMatchObject({ windows_per_hour: 0, box_share: null, p95_latency_s: null });
   });
 });
+
+describe("p95 basis (Architecture #23 follow-up): the board says how many live windows the p95 is over", () => {
+  it("passes live_windows_24h through, and null when the reader did not say", () => {
+    expect(workerBoard([row(30, NOON)], { ...lat(), live_windows_24h: 37 }, NOON).p95_live_windows).toBe(37);
+    expect(workerBoard([row(30, NOON)], lat(), NOON).p95_live_windows).toBeNull();
+  });
+});

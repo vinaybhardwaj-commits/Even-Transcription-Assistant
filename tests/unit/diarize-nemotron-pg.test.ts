@@ -283,6 +283,79 @@ describe.runIf(HAVE)("store: ingest", () => {
   });
 });
 
+describe.runIf(HAVE)("store: PROBS lane (windows with turns but no .nlp; Architecture #23 follow-up)", () => {
+  const PK = (id: string) => `lab/nemotron-probs/${id}.nlp`;
+  beforeEach(() => {
+    pg.exec(`DELETE FROM diarize_nemotron_window; DELETE FROM diarize_nemotron_claim; DELETE FROM bench_window;
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, state, grid_aligned, clip_r2_key) VALUES
+        ('bw_a', 's', 'rd_1', 1000, 901000, 'closed', true, 'clips/a'),
+        ('bw_b', 's', 'rd_1', 2000, 902000, 'transcribed', true, 'clips/b'),
+        ('bw_c', 's', 'rd_1', 3000, 903000, 'closed', true, 'clips/c');`);
+  });
+  /** bw_a and bw_b stored WITHOUT a pointer (pre-0143), bw_c with one: only bw_b, bw_a are re-offered, newest first. */
+  const seed = async () => {
+    await store.claimPending("box-1", 8);
+    await ingest();
+    await ingest({ window_id: "bw_b" });
+    await ingest({ window_id: "bw_c", probs_r2_key: PK("bw_c") });
+  };
+
+  it("guard: the hand-typed key is the server's key", async () => {
+    const { windowProbsKey } = await import("@/lib/diarize-nemotron/lab-keys");
+    expect(windowProbsKey("bw_a")).toBe(PK("bw_a"));
+  });
+
+  it("offers only answered windows with no pointer, newest first, flagged probs_only, under a probs: claim; production sees nothing new", async () => {
+    await seed();
+    const got = await store.claimProbsBackfill("box-1", 8);
+    expect(got.map((w) => [w.window_id, w.attempts, w.probs_only])).toEqual([["bw_b", 1, true], ["bw_a", 1, true]]);
+    const keys = await q<{ k: string }>(`SELECT window_id AS k FROM diarize_nemotron_claim WHERE window_id LIKE 'probs:%' ORDER BY 1`);
+    expect(keys.map((r) => r.k)).toEqual(["probs:bw_a", "probs:bw_b"]);
+    expect(await store.claimPending("box-1", 8)).toEqual([]); // the production lane is untouched
+    expect(await store.claimProbsBackfill("box-2", 8)).toEqual([]); // a live lease is nobody else's
+    expect(await store.countExhausted()).toBe(0);
+  });
+
+  it("a post under the probs claim sets ONLY the pointer, even when the re-run's turns differ; the turns row is untouched", async () => {
+    await seed();
+    await store.claimProbsBackfill("box-1", 8);
+    const before = await q(`SELECT payload_sha256, turns_json::text AS t FROM diarize_nemotron_window WHERE window_id = 'bw_a'`);
+    const out = await ingest({ turns: [[0, 4300, "spk0"]], probs_r2_key: PK("bw_a") });
+    expect(out).toEqual({ result: "duplicate" });
+    const after = await q(`SELECT payload_sha256, turns_json::text AS t, probs_r2_key AS k FROM diarize_nemotron_window WHERE window_id = 'bw_a'`);
+    expect(after).toEqual([{ ...before[0], k: PK("bw_a") }]);
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_window`))[0]!.n).toBe(3);
+    expect((await q<{ done: boolean }>(`SELECT done_at IS NOT NULL AS done FROM diarize_nemotron_claim WHERE window_id = 'probs:bw_a'`))[0]!.done).toBe(true);
+    expireLeases();
+    expect((await store.claimProbsBackfill("box-1", 8)).map((w) => w.window_id)).toEqual(["bw_b"]);
+  });
+
+  it("a post without a pointer, or a failure, is an attempt: released, and finished on the third; the lane is bounded", async () => {
+    await seed();
+    for (let i = 1; i <= 3; i++) {
+      expect(await store.claimProbsBackfill("box-1", 1)).toMatchObject([{ window_id: "bw_b", attempts: i }]);
+      const out = i === 2 ? await ingest({ window_id: "bw_b", status: "failed", error_code: "fetch_failed", turns: [] }) : await ingest({ window_id: "bw_b" });
+      expect(out.result).toBe(i === 2 ? "failure_recorded" : "duplicate");
+    }
+    const c = (await q<{ done: boolean; codes: string }>(`SELECT done_at IS NOT NULL AS done, last_error_code AS codes FROM diarize_nemotron_claim WHERE window_id = 'probs:bw_b'`))[0]!;
+    expect(c).toEqual({ done: true, codes: "probs_missing" });
+    expect((await store.claimProbsBackfill("box-1", 8)).map((w) => w.window_id)).toEqual(["bw_a"]);
+    // a failure under the probs lane never wrote a failed row beside the answer, and the answer still has no pointer
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM diarize_nemotron_window WHERE window_id = 'bw_b'`))[0]!.n).toBe(1);
+    expect(await store.countExhausted()).toBe(0);
+  });
+
+  it("releaseClaim with the probs: key refunds a probs claim; a worker without the probs lease goes through the normal path", async () => {
+    await seed();
+    await store.claimProbsBackfill("box-1", 1); // bw_b
+    await store.releaseClaim("box-1", "probs:bw_b");
+    expect(await store.claimProbsBackfill("box-2", 1)).toMatchObject([{ window_id: "bw_b", attempts: 1 }]);
+    // box-1 no longer holds it: its post is an ordinary re-post (identical turns = duplicate) and sets nothing it lacked
+    expect(await ingest({ window_id: "bw_b" })).toEqual({ result: "duplicate" });
+    expect((await q<{ k: string | null }>(`SELECT probs_r2_key AS k FROM diarize_nemotron_window WHERE window_id = 'bw_b'`))[0]!.k).toBeNull();
+  });
+});
+
 describe.runIf(HAVE)("store: heartbeat", () => {
   it("upserts one row per worker with the latest payload", async () => {
     await store.recordHeartbeat("box-1", { queue_depth: 3 });

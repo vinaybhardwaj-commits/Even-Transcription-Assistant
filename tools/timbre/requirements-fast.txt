@@ -1,0 +1,9 @@
+# Direct dependencies for the offline suite (`pytest -m 'not slow'`).
+# Pins match the lock resolved for Python 3.11. Transitive packages come in with them.
+numpy==2.4.6
+pandas==3.0.6
+pyarrow==26.0.0
+soundfile==0.14.0
+scipy==1.17.1
+scikit-learn==1.9.1
+pytest==9.1.1

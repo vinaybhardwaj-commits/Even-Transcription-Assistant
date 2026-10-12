@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const S = vi.hoisted(() => ({
   claimPending: vi.fn(),
+  claimProbsBackfill: vi.fn(),
+  signPutUrl: vi.fn(),
   countExhausted: vi.fn(),
   overflowUsage: vi.fn(),
   recordIngest: vi.fn(),
@@ -21,6 +23,7 @@ const S = vi.hoisted(() => ({
 vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
   ...(await orig<typeof import("@/lib/diarize-nemotron/store")>()),
   claimPending: S.claimPending,
+  claimProbsBackfill: S.claimProbsBackfill,
   countExhausted: S.countExhausted,
   overflowUsage: S.overflowUsage,
   recordIngest: S.recordIngest,
@@ -29,7 +32,7 @@ vi.mock("@/lib/diarize-nemotron/store", async (orig) => ({
   windowNeedsDiarizeJob: S.needsJob,
 }));
 vi.mock("@/lib/jobs/submit", async (orig) => ({ ...(await orig<Record<string, unknown>>()), submitJob: S.submitJob }));
-vi.mock("@/lib/r2", () => ({ signGetUrl: S.signGetUrl }));
+vi.mock("@/lib/r2", () => ({ signGetUrl: S.signGetUrl, signPutUrl: S.signPutUrl }));
 vi.mock("@/lib/db", () => ({ sql: () => { throw new Error("no sql in a route test"); } }));
 
 import { GET as pending } from "@/app/api/diarize/nemotron/pending/route";
@@ -65,6 +68,8 @@ beforeEach(() => {
   process.env.NEMOTRON_WORKER_TOKEN = TOKEN;
   process.env.DIARIZE_NEMOTRON_SHADOW = "1";
   for (const f of Object.values(S)) f.mockReset();
+  S.claimProbsBackfill.mockResolvedValue([]); // the PROBS lane has nothing unless a test says so
+  S.signPutUrl.mockRejectedValue(new Error("unsigned")); // as before this mock existed: no PUT URL unless a test says so
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => {
@@ -169,6 +174,77 @@ describe("GET /pending", () => {
     expect(r.status).toBe(503);
     expect(await json(r)).toEqual({ ok: false, error: "clip_sign" });
     expect(S.releaseClaim.mock.calls).toEqual([["box-t4-1", "bw_1"], ["box-t4-1", "bw_2"]]);
+  });
+});
+
+describe("GET /pending, PROBS lane (turns but no .nlp; Architecture #23 follow-up)", () => {
+  const PW = { window_id: "bw_p1", room_day_id: "rd_1", start_ms: 1000, end_ms: 901000, clip_r2_key: "clips/p1.webm", attempts: 1, probs_only: true };
+  const call = (q = "worker_id=box-t4-1") => pending(req(`/api/diarize/nemotron/pending?${q}`, { method: "GET" }));
+  const savedFlag = process.env.NEMOTRON_PROBS_BACKFILL;
+  afterEach(() => { if (savedFlag === undefined) delete process.env.NEMOTRON_PROBS_BACKFILL; else process.env.NEMOTRON_PROBS_BACKFILL = savedFlag; });
+
+  it("is asked only when production has nothing, and its windows carry probs_only and the PUT URL", async () => {
+    delete process.env.NEMOTRON_PROBS_BACKFILL; // unset = ON
+    S.claimPending.mockResolvedValue([]);
+    S.claimProbsBackfill.mockResolvedValue([PW]);
+    S.signGetUrl.mockResolvedValue("https://r2.test/get");
+    S.signPutUrl.mockResolvedValue("https://r2.test/put");
+    S.countExhausted.mockResolvedValue(0);
+    const r = await call();
+    expect(r.status).toBe(200);
+    expect(S.claimProbsBackfill).toHaveBeenCalledWith("box-t4-1", 4, "box");
+    expect((await json(r)).windows).toEqual([{ window_id: "bw_p1", room_day_id: "rd_1", start_ms: 1000, end_ms: 901000, clip_url: "https://r2.test/get",
+      clip_sha256: null, attempt: 1, probs_key: "lab/nemotron-probs/bw_p1.nlp", probs_put_url: "https://r2.test/put", probs_only: true }]);
+  });
+
+  it("live intake first: a production window means the lane is never consulted", async () => {
+    S.claimPending.mockResolvedValue([{ ...PW, window_id: "bw_live", probs_only: undefined }]);
+    S.signGetUrl.mockResolvedValue("https://r2.test/get");
+    S.signPutUrl.mockResolvedValue("https://r2.test/put");
+    const r = await call();
+    expect(r.status).toBe(200);
+    expect(S.claimProbsBackfill).not.toHaveBeenCalled();
+    expect((await json(r)).windows).toMatchObject([{ window_id: "bw_live" }]);
+  });
+
+  it("never offered to HF overflow", async () => {
+    process.env.NEMO_HF_DAILY_USD_CAP = "50"; // overflow OPEN, production empty
+    S.overflowUsage.mockResolvedValue({ backlog: 10_000, hfIngestedMs: 0, hfLiveClaims: 0 });
+    S.claimPending.mockResolvedValue([]);
+    S.countExhausted.mockResolvedValue(0);
+    const r = await call("worker_id=hf-w1&machine=hf");
+    expect(r.status).toBe(200);
+    expect(S.claimPending).toHaveBeenCalledWith("hf-w1", expect.any(Number), "hf");
+    expect(S.claimProbsBackfill).not.toHaveBeenCalled();
+    delete process.env.NEMO_HF_DAILY_USD_CAP;
+  });
+
+  it("off when NEMOTRON_PROBS_BACKFILL=0; a mistyped value or a lane fault is 'no windows', never a failed claim", async () => {
+    S.claimPending.mockResolvedValue([]);
+    S.countExhausted.mockResolvedValue(0);
+    process.env.NEMOTRON_PROBS_BACKFILL = "0";
+    expect(await json(await call())).toMatchObject({ ok: true, windows: [] });
+    expect(S.claimProbsBackfill).not.toHaveBeenCalled();
+    process.env.NEMOTRON_PROBS_BACKFILL = "maybe";
+    const r = await call();
+    expect(r.status).toBe(200);
+    expect(S.claimProbsBackfill).not.toHaveBeenCalled();
+    delete process.env.NEMOTRON_PROBS_BACKFILL;
+    S.claimProbsBackfill.mockRejectedValue(new Error("db"));
+    const r2 = await call();
+    expect(r2.status).toBe(200);
+    expect(await json(r2)).toMatchObject({ ok: true, windows: [] });
+  });
+
+  it("a probs window whose PUT cannot be signed is given back under its probs: key and not handed out", async () => {
+    S.claimPending.mockResolvedValue([]);
+    S.claimProbsBackfill.mockResolvedValue([PW]);
+    S.signGetUrl.mockResolvedValue("https://r2.test/get");
+    S.signPutUrl.mockRejectedValue(new Error("r2 down"));
+    S.countExhausted.mockResolvedValue(0);
+    const r = await call();
+    expect(await json(r)).toMatchObject({ ok: true, windows: [] });
+    expect(S.releaseClaim.mock.calls).toEqual([["box-t4-1", "probs:bw_p1"]]);
   });
 });
 

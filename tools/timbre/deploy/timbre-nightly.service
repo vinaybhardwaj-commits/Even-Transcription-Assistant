@@ -1,0 +1,15 @@
+# /etc/systemd/system/timbre-nightly.service — Timbre nightly job (Architecture #79). Off unless the config or
+# TIMBRE_NIGHTLY_ENABLED=1 turns it on. Secrets live in /etc/timbre-nightly.env (mode 0600), never in this file.
+[Unit]
+Description=Timbre nightly patient-voice affect scoring (#79)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=timbre
+WorkingDirectory=/opt/timbre/eta
+EnvironmentFile=/etc/timbre-nightly.env
+ExecStart=/opt/timbre/eta/tools/timbre/.venv/bin/python -m tools.timbre.nightly run --config /etc/timbre-nightly.json
+TimeoutStartSec=8h
+Nice=10

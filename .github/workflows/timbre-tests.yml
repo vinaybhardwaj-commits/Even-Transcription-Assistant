@@ -1,0 +1,24 @@
+name: timbre-tests
+
+on:
+  pull_request:
+    paths:
+      - "tools/timbre/**"
+      - ".github/workflows/timbre-tests.yml"
+  push:
+    paths:
+      - "tools/timbre/**"
+      - ".github/workflows/timbre-tests.yml"
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install fast dependencies
+        run: python -m pip install -r tools/timbre/requirements-fast.txt
+      - name: Fast tests (no model downloads)
+        run: python -m pytest -c tools/timbre/pytest.ini -m "not slow" tools/timbre/tests -q

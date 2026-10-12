@@ -20,13 +20,14 @@ import { SARVAM_CONSULT_BATCH_KIND, parseBatchArgs } from "@/lib/jobs/kinds/sarv
 import { logTrackMissing, preflightClip } from "@/lib/consult-clip";
 import { palimpsestAsResult } from "@/lib/consult-index/palimpsest-view";
 import { signatureVersion } from "@/lib/consult-index/parse";
-import { findSarvamTracks } from "@/lib/room-access/readers/reb-consult";
+import { findSarvamTracks, readRebRoleFlags, type RebRoleFlags } from "@/lib/room-access/readers/reb-consult";
 import { consultResultView } from "@/lib/consult-index/result-view";
 import { getIndexRow, latestSync, listIndexDay, listResults } from "@/lib/room-access/consult-index-store";
 import { SARVAM_TRANSLATE_KIND, parseSarvamTranslateArgs } from "@/lib/jobs/kinds/sarvam-translate";
 import { labStoreConfigured } from "@/lib/sarvam-lab";
 import { SARVAM_DAILY_CAP_MINUTES, SARVAM_ENGINE, dailyCapRefusal, istDayStartIso, readJson, resultKey, sarvamMinutesToday } from "@/lib/jobs/kinds/sarvam-common";
 import { gatewayConfigured, gatewayHealth } from "@/lib/sarvam-gateway";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { argBool, argInt, argStr, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { isRealDate, notCollectedReason } from "./s1";
 
@@ -129,12 +130,13 @@ type ResultRowT = Awaited<ReturnType<typeof listResults>>[number];
  * THE ONE HEAD. Our own stored results and the palimpsest's tracks (palimpsestAsResult) both go through this function, so the key sets are identical by construction; `source` says which it was
  * ("scribe_sarvam" for a job of ours, "palimpsest" for a reused track). tests/unit/consult-index-pg.test.ts compares the two field by field.
  */
-function resultHead(hit: ResultRowT & { source?: string }, row: IndexRowT, others: string[]): Row {
+function resultHead(hit: ResultRowT & { source?: string; reb_role_flags?: RebRoleFlags }, row: IndexRowT, others: string[]): Row {
   return {
     ok: true, consult_uid: hit.consult_uid, source: hit.source ?? "scribe_sarvam", cut_version: hit.cut_version, current_cut_version: row.cut_version, stale: hit.cut_version !== row.cut_version, mode: hit.mode, english: hit.english,
     job_id: hit.job_id || null, model_stt: hit.model_stt, model_translate: hit.model_translate, model_rev: hit.model_rev, pipeline_rev: hit.pipeline_rev, language_code: hit.language_code, duration_s: hit.duration_s,
     speakers: hit.speaker_count, transcript_chars: hit.transcript_chars, english_chars: hit.english_chars, english_pass: hit.english_pass, clip: { t0_ms: hit.t0_ms, t1_ms: row.t1_ms },
     created_at: hit.created_at || null, other_cuts: others, billed: false, // reading a result bills nothing, ours or reused
+    ...(hit.reb_role_flags ? { reb_role_flags: hit.reb_role_flags } : {}),
   };
 }
 
@@ -146,7 +148,8 @@ async function palimpsestResult(uid: string, row: IndexRowT, withText: boolean):
   const r = await findSarvamTracks(row.consult_uid, row.room_id, row.room_slug, row.cut_version, signatureVersion);
   if ("unavailable" in r) return { ok: false, error: "reuse_lookup_unavailable" };
   if (r.found?.stt) {
-    const v = palimpsestAsResult(row, r.found.stt, r.found.translate);
+    const flags = await readRebRoleFlags(row.consult_uid, row.room_id, row.room_slug);
+    const v = palimpsestAsResult(row, r.found.stt, r.found.translate, flags);
     const head = resultHead(v.result, row, []);
     return withText ? { ...head, ...consultResultView(v.doc, row.t0_ms) } : head;
   }
@@ -154,21 +157,97 @@ async function palimpsestResult(uid: string, row: IndexRowT, withText: boolean):
   return { ok: true, consult_uid: uid, result: null, current_cut_version: row.cut_version, note: "no stored result; transcribe it first" };
 }
 
-/** consult_result {consult_uid, include_text?}: the stored Sarvam result of a consult (model + revision always; transcript, English and segments with ABSOLUTE UTC times only with include_text). No Sarvam call. */
-async function consultResult(args: ToolArgs): Promise<Row> {
-  const uid = argStr(args, "consult_uid", 128);
+const RESULT_BATCH_MAX = 25;
+const RESULT_DAY_MAX = 50;
+const RESULT_KEEP = ["ok", "consult_uid", "error", "source", "cut_version", "current_cut_version", "stale", "mode", "english", "model_stt", "model_translate", "model_rev", "pipeline_rev", "language_code", "duration_s", "speakers", "transcript_chars", "english_chars", "english_pass", "created_at", "result", "note", "content_note"] as const;
+const TEXT_KEEP = ["transcript", "segments", "english_segments"] as const;
+
+function presentResult(got: Row, withText: boolean, extra: Row): Row {
+  const out: Row = { ...extra };
+  for (const k of RESULT_KEEP) if (got[k] !== undefined) out[k] = got[k];
+  if (withText) for (const k of TEXT_KEEP) if (got[k] !== undefined) out[k] = got[k];
+  return out;
+}
+
+const blindIndex = (row: { ist_date: string; room_id: string; room_slug: string }): boolean =>
+  isBlindRoomDay(row.ist_date, row.room_id) || isBlindRoomDay(row.ist_date, row.room_slug);
+
+/** One stored Sarvam result. Transcript text only when withText is true. No Sarvam call. */
+async function consultResultOne(uid: string, withText: boolean): Promise<Row> {
   if (!uid || !UID_OK.test(uid)) return { ok: false, error: "consult_uid_invalid" };
   const row = await getIndexRow(uid);
   if (!row) return { ok: false, error: "consult_not_indexed" };
   const results = await listResults(uid);
   const hit = results.find((r) => r.cut_version === row.cut_version) ?? results[0];
-  if (!hit) return palimpsestResult(uid, row, argBool(args, "include_text"));
+  if (!hit) return palimpsestResult(uid, row, withText);
   const head = resultHead(hit, row, results.filter((r) => r !== hit).map((r) => r.cut_version));
-  if (!argBool(args, "include_text")) return head;
+  if (!withText) return head;
   let doc;
   try { doc = await readJson<import("@/lib/jobs/kinds/sarvam-common").ResultDoc>(hit.result_r2_key); } catch { return { ...head, content: null, content_note: "r2_read_failed" }; }
   if (!doc) return { ...head, content: null, content_note: "no_stored_text" };
   return { ...head, ...consultResultView(doc, hit.t0_ms) };
+}
+
+async function consultResultMany(uids: string[], withText: boolean, sealedOnly: boolean): Promise<Row> {
+  if (uids.length > RESULT_BATCH_MAX) return { ok: false, error: "bad_args", detail: "consult_uids max 25" };
+  const rows: Row[] = [];
+  let withheld = 0;
+  let skipped = 0;
+  for (const uid of uids) {
+    if (!uid || !UID_OK.test(uid)) { rows.push({ ok: false, consult_uid: uid, error: "consult_uid_invalid" }); continue; }
+    const index = await getIndexRow(uid);
+    if (index && blindIndex(index)) { withheld += 1; continue; }
+    if (sealedOnly && index?.sealed !== true) { skipped += 1; continue; }
+    const got = await consultResultOne(uid, withText);
+    const extra: Row = { consult_uid: uid };
+    if (index) Object.assign(extra, { sealed: index.sealed, ist_date: index.ist_date, room_slug: index.room_slug, room_id: index.room_id });
+    rows.push(presentResult(got, withText, extra));
+  }
+  return { ok: true, selector: "consult_uids", n: rows.length, withheld_blind: withheld, skipped_unsealed: skipped, include_text: withText, rows };
+}
+
+async function consultResultDay(day: string, withText: boolean, sealedOnly: boolean): Promise<Row> {
+  if (!isRealDate(day)) return { ok: false, error: "invalid_ist_date" };
+  const cap = withText ? RESULT_BATCH_MAX : RESULT_DAY_MAX;
+  const listed = await listIndexDay(day, null, 100);
+  let withheld = 0;
+  const eligible = [];
+  for (const r of listed.rows) {
+    if (blindIndex(r)) { withheld += 1; continue; }
+    if (sealedOnly && !r.sealed) continue;
+    eligible.push(r);
+  }
+  const chosen = eligible.slice(0, cap);
+  const rows: Row[] = [];
+  for (const r of chosen) {
+    const got = await consultResultOne(r.consult_uid, withText);
+    rows.push(presentResult(got, withText, { sealed: r.sealed, ist_date: r.ist_date, room_slug: r.room_slug, room_id: r.room_id }));
+  }
+  return {
+    ok: true, selector: "ist_date", ist_date: day, n: rows.length, truncated: eligible.length > cap || listed.total > listed.rows.length,
+    withheld_blind: withheld, include_text: withText, sealed_only: sealedOnly, rows,
+  };
+}
+
+/**
+ * Box and MCP read of stored Sarvam consult results. consult_uids (1..25) or ist_date.
+ * include_text defaults false. sealed_only keeps consult_index.sealed rows. No write.
+ */
+export async function consultResultsRead(q: { consult_uids?: string[]; ist_date?: string | null; include_text?: boolean; sealed_only?: boolean }): Promise<Row> {
+  if (q.consult_uids && q.consult_uids.length > 0) return consultResultMany(q.consult_uids, q.include_text === true, q.sealed_only === true);
+  if (q.ist_date) return consultResultDay(q.ist_date, q.include_text === true, q.sealed_only === true);
+  return { ok: false, error: "bad_args" };
+}
+
+/** consult_result {consult_uid | consult_uids[] | ist_date, include_text?}. Heads by default. Text only with include_text (batch and day cap 25). No Sarvam call. */
+async function consultResult(args: ToolArgs): Promise<Row> {
+  const raw = args.consult_uids;
+  const listed = Array.isArray(raw) ? raw.map((x) => (typeof x === "string" ? x.trim() : "")) : null;
+  const day = argStr(args, "ist_date", 10);
+  const one = argStr(args, "consult_uid", 128);
+  if (listed && listed.length > 0) return consultResultMany(listed, argBool(args, "include_text"), false);
+  if (day && !one) return consultResultDay(day, argBool(args, "include_text"), false);
+  return consultResultOne(one ?? "", argBool(args, "include_text"));
 }
 
 async function loadSarvamJob(args: ToolArgs): Promise<{ job: NonNullable<Awaited<ReturnType<typeof readJob>>> } | { error: Row }> {
@@ -270,7 +349,7 @@ const sarvam: McpTool = {
   description:
     "Sarvam speech AI through the Even AWS gateway (saaras:v3 transcription with speaker labels, mayura:v1 translation); Sarvam is zero-data-retention. Reads and writes the job queue and one R2 result object per job; touches no room; " +
     "never writes a clinical table. ONLY ISOLATED CONSULT AUDIO goes to Sarvam (V's standing rule): `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a cut clip, resolved by the consult index; refusals consult_not_indexed, consult_sealed, consult_voice_isolated; a result stored for the same cut returns billed:false) or {consult_uids:[<=25]} (one batch job); " +
-    "consult_clips {ist_date, room_slug?}; consult_result {consult_uid, include_text?} (model + revision; text and absolute-UTC segments with include_text); options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
+    "consult_clips {ist_date, room_slug?}; consult_result {consult_uid | consult_uids[] | ist_date, include_text?} (a batch or a day returns heads; text and absolute-UTC segments only with include_text, and a day with text is capped at 25); options mode transcribe|codemix, english default true, num_speakers 1-6. Any room / session / window argument is refused with scope_consult_only. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
     "Both queue a job and need invoke scope. status / result {job_id} (include_text returns the stored JSON: transcript, speaker-labelled entries, English); usage {ist_date | days <= 30}: gateway minutes, estimated cost, calls, Sarvam jobs and runs; " +
     "health: configured env names, lab_store_configured, credential check, STS expiry (Sarvam is not called). " +
     `A daily cap of ${SARVAM_DAILY_CAP_MINUTES} audio minutes applies, counting earlier queued jobs. Results are written to R2 mcp-sarvam/<job_id>.json; the job row carries counts only. Usage is also logged to the shared Sarvam ledger (sarvam.call.v1) and lane file. Times UTC.`,

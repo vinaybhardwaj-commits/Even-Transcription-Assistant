@@ -1,0 +1,3 @@
+window_id,room,date,lang,phase,start_s,end_s,patient_speech_s,role
+synth_consultA_p0000000,ROOM-A,2026-01-01,en,open,0.0,1.0,0.8,patient
+synth_consultA_p0001000,ROOM-A,2026-01-01,en,open,1.0,2.0,0.9,patient

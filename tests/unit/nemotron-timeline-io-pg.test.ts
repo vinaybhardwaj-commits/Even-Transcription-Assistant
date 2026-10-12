@@ -93,6 +93,31 @@ describe.runIf(HAVE)("worker-health readers", () => {
     expect(hb.map((h) => h.worker_id)).toEqual(["box-fake-1"]);
     const lat = await store.readNemotronLatency24h();
     expect(lat).toMatchObject({ windows_24h: 3, box_24h: 2, hf_24h: 1 });
-    expect(lat.p95_latency_s).toBeGreaterThan(0);
+    // bw_a / bw_b ended on 9 Oct: a backfill, not live intake, so the live p95 has nothing to say yet
+    expect(lat).toMatchObject({ live_windows_24h: 0, p95_latency_s: null });
+  });
+
+  it("p95 is LIVE lag: windows that ended in the last 24 h, an unanswered one counted at now(), old backfill and a dead (failed-only) window excluded", async () => {
+    const store = await import("@/lib/room-access/nemotron-store");
+    const nowMs = "(extract(epoch FROM now()) * 1000)::bigint";
+    pg.exec(`
+INSERT INTO room_day VALUES ('rd_live', 'room_fake2', (now() AT TIME ZONE 'Asia/Kolkata')::date);
+INSERT INTO bench_window VALUES ('bw_l1', 's2', 'rd_live', ${nowMs} - 4500000, ${nowMs} - 3600000, 'closed', true, 'k', NULL),
+                                ('bw_l2', 's2', 'rd_live', ${nowMs} - 2700000, ${nowMs} - 1800000, 'closed', true, 'k', NULL),
+                                ('bw_dead', 's2', 'rd_live', ${nowMs} - 1800000, ${nowMs} - 900000, 'closed', true, 'k', NULL),
+                                ('bw_openl', 's2', 'rd_live', ${nowMs} - 900000, ${nowMs} + 60000, 'open', true, NULL, NULL);
+INSERT INTO diarize_nemotron_window (window_id, room_day_id, model, model_rev, config, config_hash, worker_id, machine, audio_ms, turns_json,
+   speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status, received_at)
+ VALUES ('bw_l1','rd_live','m','rev_new','{}','h2','w','box',900000,'[]',0,0,0,0,'p9','empty', now() - interval '3000 seconds');
+INSERT INTO diarize_nemotron_window (window_id, room_day_id, model, model_rev, config, config_hash, worker_id, machine, audio_ms, turns_json,
+   speaker_count, turn_count, speech_ms, overlap_ms, payload_sha256, status, error_code, received_at)
+ VALUES ('bw_dead','rd_live','m','rev_new','{}','h2','w','box',0,'[]',0,0,0,0,'p10','failed','decode_failed', now());
+`);
+    const lat = await store.readNemotronLatency24h();
+    // bw_l1 answered 600 s after its end; bw_l2 still waiting, 1800 s so far. p95 of {600, 1800} = 1740.
+    expect(lat.live_windows_24h).toBe(2);
+    expect(lat.p95_latency_s).toBeGreaterThan(1700);
+    expect(lat.p95_latency_s).toBeLessThan(1800);
+    expect(lat).toMatchObject({ windows_24h: 4, box_24h: 3, hf_24h: 1 });
   });
 });

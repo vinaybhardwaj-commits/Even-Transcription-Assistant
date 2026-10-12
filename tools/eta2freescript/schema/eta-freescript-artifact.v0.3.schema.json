@@ -1,0 +1,1320 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eta.lab/schemas/eta.freescript.v0.3.json",
+  "title": "ETA -> FreeScript encounter artifact (v0.3)",
+  "description": "One artifact per ETA-captured consult. gp_extraction mirrors pulsepb.GPLlmExtraction (next-web/pulse/pulsepb/parse_prescription.proto:157-176, snapshot d9ed85d844) field-for-field, so Pulse can hand it to hospitalGPMapper.Build in place of the extraction LLM's output. note_text is the same content as an 11-heading English note for FreeScript's text path. provenance explains every item, including items deliberately kept OUT of gp_extraction (stopped, not given, discussed only). v0.2: speakers from the REB role track (attendant/staff/other), completion_required[] (what the doctor must fill before release) and clip_boundary{} (turns quarantined as a previous/next patient). v0.3: finished prescription. visit_date_ist, run_id, slots, room_facts, evidence_state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "created_at",
+    "generator",
+    "encounter",
+    "pulse_link",
+    "note_text",
+    "gp_extraction",
+    "provenance",
+    "completion_required",
+    "clip_boundary",
+    "slots",
+    "room_facts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "eta.freescript.v0.3"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "supersedes": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "artifact_id of an earlier artifact for the same encounter that this one replaces; null for the first."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "code_sha256",
+        "prompt_sha256",
+        "model",
+        "model_provider",
+        "zdr",
+        "temperature",
+        "run_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "code_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model": {
+          "type": "string",
+          "description": "Exact model string the provider returned."
+        },
+        "model_provider": {
+          "type": "string"
+        },
+        "zdr": {
+          "type": "boolean",
+          "description": "True only when the call went through a zero-data-retention route."
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 80
+        }
+      }
+    },
+    "encounter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eta_encounter_id",
+        "room",
+        "window_start",
+        "window_end",
+        "languages",
+        "transcript",
+        "visit_date_ist"
+      ],
+      "properties": {
+        "eta_encounter_id": {
+          "type": "string"
+        },
+        "room": {
+          "type": "string"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Language codes detected in the window, e.g. en, hi, kn."
+        },
+        "transcript": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "segment_count",
+            "diarised",
+            "english_source"
+          ],
+          "properties": {
+            "segment_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "diarised": {
+              "type": "boolean",
+              "description": "False when segments carry no speaker labels; speaker on items is then model-inferred."
+            },
+            "english_source": {
+              "type": "string",
+              "description": "How English text was obtained, e.g. 'native' or 'mt:gemini-3.8-flash'."
+            },
+            "speaker_source": {
+              "enum": [
+                "role_track",
+                "model_inferred"
+              ],
+              "description": "role_track: speakers from REB role.llm-roles; model_inferred: Stage A read roles from content."
+            },
+            "role_track": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "config_hash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "attender_present": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "two_consults": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "diar_partial": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "doctor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pulse_doctor_uid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "specialty": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "visit_date_ist": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      }
+    },
+    "pulse_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type_of_prescription",
+        "individual_uid",
+        "hospital_uid",
+        "consult_uid",
+        "prescription_uid",
+        "draft_exists",
+        "link_status",
+        "link_basis"
+      ],
+      "description": "Keys Pulse needs to bind the artifact to one prescription. Anything ETA does not know is null; ETA never guesses an id.",
+      "properties": {
+        "type_of_prescription": {
+          "const": "HOSPITAL_GP"
+        },
+        "individual_uid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hospital_uid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "consult_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pulse ConsultUid (calendar event id) if known."
+        },
+        "prescription_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pulse prescription doc id if known."
+        },
+        "draft_exists": {
+          "enum": [
+            "unknown",
+            "yes",
+            "no"
+          ]
+        },
+        "link_status": {
+          "enum": [
+            "confirmed",
+            "probable",
+            "none"
+          ],
+          "description": "How ETA tied room audio to this consult."
+        },
+        "link_basis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "note_text": {
+      "type": "string",
+      "description": "English, doctor-voice note under exactly the 11 FreeScript headings in order, one 'Heading:' line each. Contains only what is in gp_extraction.",
+      "pattern": "^Co-morbidities:[\\s\\S]*\\nPresenting Complaint:[\\s\\S]*\\nExamination:[\\s\\S]*\\nDiagnoses:[\\s\\S]*\\nPlan of Management:[\\s\\S]*\\nSurgery or Procedure:[\\s\\S]*\\nMedication:[\\s\\S]*\\nFurther Investigation:[\\s\\S]*\\nFollow up:[\\s\\S]*\\nRefer to:[\\s\\S]*\\nGeneral Advice:[\\s\\S]*$"
+    },
+    "gp_extraction": {
+      "$ref": "#/definitions/GPLlmExtraction"
+    },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProvenanceItem"
+      }
+    },
+    "completion_required": {
+      "type": "array",
+      "description": "What the doctor must complete in Pulse FreeScript before release. One entry per open review item.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "item_id",
+          "prompt"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "pick_drug",
+              "dose_unstated",
+              "drug_history",
+              "exam_missing",
+              "follow_up_unstated",
+              "follow_up_missing",
+              "surgery_confirm",
+              "inferred_confirm",
+              "allergy_check",
+              "boundary_review",
+              "lab_dx_conflict"
+            ]
+          },
+          "item_id": {
+            "type": "string",
+            "description": "provenance item_id this entry refers to"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "clip_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suspected",
+        "quarantined_turns",
+        "reasons"
+      ],
+      "properties": {
+        "suspected": {
+          "type": "boolean"
+        },
+        "quarantined_turns": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "slots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slot_id",
+          "form",
+          "frequency",
+          "duration",
+          "timing",
+          "class",
+          "indication",
+          "strength",
+          "decision",
+          "evidence",
+          "confidence",
+          "json_pointer"
+        ],
+        "properties": {
+          "slot_id": {
+            "type": "string"
+          },
+          "form": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "frequency": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "duration": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "timing": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "class": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "indication": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "strength": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "evidence_state"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence_state": {
+                "enum": [
+                  "heard_in_room",
+                  "inferred",
+                  "not_said_in_room"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "doctor",
+                  "patient",
+                  "attendant",
+                  "label"
+                ]
+              },
+              "as_heard": {
+                "type": "string"
+              }
+            }
+          },
+          "decision": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": "array"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 0.6
+          },
+          "json_pointer": {
+            "type": "null"
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "room_facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allergies",
+        "vitals"
+      ],
+      "properties": {
+        "allergies": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "vitals": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "str": {
+      "type": "string"
+    },
+    "strList": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 3
+    },
+    "LlmMedicine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Normalised generic or brand name with strength, no Tab/Cap/Syp/Inj prefix."
+        },
+        "frequency": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmDiagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnosis_or_impression",
+        "raw_name"
+      ],
+      "properties": {
+        "diagnosis_or_impression": {
+          "type": "string"
+        },
+        "is_differential_diagnosis": {
+          "type": "boolean"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmSurgeryRecommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scheduled_date": {
+          "type": "string",
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmFurtherInvestigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scheduled_date": {
+          "type": "string",
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
+        },
+        "urgent": {
+          "type": "boolean"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmDuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "unit": {
+          "enum": [
+            "DAYS",
+            "WEEKS",
+            "MONTHS",
+            "YEARS"
+          ],
+          "description": "evenpb.DurationUnit. Default emit is MONTHS x 12 (ETA_FREESCRIPT_EMIT_YEARS unset or 0). YEARS is emitted only when ETA_FREESCRIPT_EMIT_YEARS=1."
+        }
+      }
+    },
+    "LlmComorbidity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "duration": {
+          "$ref": "#/definitions/LlmDuration"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmFollowUp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "followup_type": {
+          "enum": [
+            "IF_REQUIRED",
+            "MANDATORY_FOLLOW_UP",
+            "FOLLOW_UP_WITH_REPORTS",
+            "FOLLOW_UP_WITH_REFERRAL_PRESCRIPTION",
+            "FOLLOW_UP_WITH_REPORT_AND_REFERRAL_PRESCRIPTION"
+          ]
+        },
+        "follow_up_instructions": {
+          "type": "string"
+        },
+        "followup_date": {
+          "type": "string",
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
+        },
+        "no_follow_up_needed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "LlmReferral": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speciality"
+      ],
+      "properties": {
+        "speciality": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "GPLlmExtraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Field names and nesting of pulsepb.GPLlmExtraction (proto3 JSON, snake_case). Only items with provenance status prescribed or continued appear here.",
+      "properties": {
+        "examination": {
+          "type": "string"
+        },
+        "general_advice": {
+          "type": "string"
+        },
+        "presenting_complaints": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "symptoms": {
+              "type": "string"
+            },
+            "diagnoses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/LlmDiagnosis"
+              }
+            }
+          }
+        },
+        "plan_of_management": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "management_plan": {
+              "type": "string"
+            },
+            "requires_surgery_or_procedure": {
+              "type": "boolean"
+            },
+            "surgery_or_procedure_recommendations": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/LlmSurgeryRecommendation"
+              }
+            }
+          }
+        },
+        "medicines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMedicine"
+          }
+        },
+        "further_investigations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmFurtherInvestigation"
+          }
+        },
+        "comorbidities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmComorbidity"
+          }
+        },
+        "follow_up": {
+          "$ref": "#/definitions/LlmFollowUp"
+        },
+        "referrals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmReferral"
+          }
+        }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_ref",
+        "t0",
+        "t1",
+        "quote_en"
+      ],
+      "properties": {
+        "segment_ref": {
+          "type": "string",
+          "description": "Opaque ETA segment id (window id + index)."
+        },
+        "t0": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "t1": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "quote_en": {
+          "type": "string",
+          "description": "Verbatim English text of the segment span that supports the item."
+        },
+        "lang": {
+          "type": "string"
+        },
+        "quote": {
+          "type": "string"
+        },
+        "quote_native": {
+          "type": "string"
+        },
+        "speaker": {
+          "enum": [
+            "doctor",
+            "patient",
+            "attendant",
+            "staff",
+            "other",
+            "unknown"
+          ]
+        },
+        "speaker_source": {
+          "enum": [
+            "role_track",
+            "diarisation",
+            "model_inferred"
+          ]
+        }
+      }
+    },
+    "ProvenanceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "kind",
+        "text",
+        "status",
+        "negated",
+        "speaker",
+        "evidence",
+        "confidence",
+        "json_pointer",
+        "flags",
+        "evidence_state"
+      ],
+      "properties": {
+        "item_id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "medicine",
+            "diagnosis",
+            "investigation",
+            "procedure",
+            "comorbidity",
+            "symptoms",
+            "examination",
+            "management_plan",
+            "advice",
+            "follow_up",
+            "referral",
+            "clip_boundary",
+            "allergy",
+            "vital"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "description": "Short English statement of the item as ETA understood it."
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "description": "For order items (medicine, investigation, procedure, referral): every name ETA holds for it (as spoken, normalised, brand/generic, acronym/full name). Used to keep stopped / not-given orders out of gp_extraction and out of the matching note_text section under any of these names."
+        },
+        "status": {
+          "enum": [
+            "prescribed",
+            "continued",
+            "stopped",
+            "not_given",
+            "discussed_only",
+            "conditional",
+            "already_done",
+            "asked_only",
+            "drug_history"
+          ],
+          "description": "prescribed = newly ordered/advised this visit; continued = existing therapy the doctor says to keep; stopped = doctor discontinues; not_given = considered or asked for but explicitly not ordered; discussed_only = mentioned (e.g. by the patient) without a doctor decision."
+        },
+        "negated": {
+          "type": "boolean",
+          "description": "True when the supporting speech carries a negation or stop cue about this item. For orders (medicine, investigation, procedure, referral) negated=true forces a status outside gp_extraction. For findings (symptoms, examination) a negated item is a pertinent negative and is written into the text as such, e.g. 'no chest pain'."
+        },
+        "speaker": {
+          "enum": [
+            "doctor",
+            "patient",
+            "attendant",
+            "staff",
+            "other",
+            "unknown"
+          ]
+        },
+        "speaker_source": {
+          "enum": [
+            "role_track",
+            "diarisation",
+            "model_inferred"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Evidence"
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "json_pointer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "RFC 6901 pointer into gp_extraction (e.g. /medicines/0) for items that are in it; null for items kept out."
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "low_confidence",
+              "no_evidence",
+              "speaker_uncertain",
+              "strength_unstated",
+              "frequency_unstated",
+              "duration_unstated",
+              "translation_uncertain",
+              "negation_cue_nearby",
+              "boundary_quarantined",
+              "doctor_dose_precedence",
+              "translation_conflict",
+              "unresolved_name",
+              "molecule_conflict",
+              "dose_binding_conflict",
+              "implausible_strength",
+              "lab_dx_conflict"
+            ]
+          }
+        },
+        "evidence_state": {
+          "enum": [
+            "heard_in_room",
+            "inferred",
+            "not_said_in_room"
+          ]
+        },
+        "decision": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "for_this_patient": {
+          "type": "boolean"
+        },
+        "medicine": {
+          "type": "object"
+        },
+        "diagnosis": {
+          "type": "object"
+        },
+        "investigation": {
+          "type": "object"
+        },
+        "procedure": {
+          "type": "object"
+        },
+        "follow_up": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "stopped",
+                  "not_given",
+                  "discussed_only",
+                  "conditional",
+                  "already_done",
+                  "asked_only",
+                  "drug_history"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "json_pointer": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "prescribed",
+                  "continued"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "json_pointer": {
+                "type": "string",
+                "pattern": "^/"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "negated": {
+                "const": true
+              },
+              "kind": {
+                "enum": [
+                  "medicine",
+                  "investigation",
+                  "procedure",
+                  "referral"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "stopped",
+                  "not_given",
+                  "discussed_only"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "confidence": {
+                "exclusiveMaximum": 0.6
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "flags": {
+                "contains": {
+                  "const": "low_confidence"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

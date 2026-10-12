@@ -1,0 +1,31 @@
+{
+ "medicines": [
+  {
+   "name": "Diclofenac gel",
+   "frequency": "BD",
+   "duration": "10 days"
+  },
+  {
+   "name": "Metformin 500 mg",
+   "frequency": "BD",
+   "duration": "continue"
+  }
+ ],
+ "diagnoses": [
+  "Osteoarthritis knee"
+ ],
+ "icd_codes": [
+  "M17.1"
+ ],
+ "investigations": [
+  "X-ray knee AP/lateral"
+ ],
+ "comorbidities": [
+  "Type 2 diabetes mellitus"
+ ],
+ "advice": "Avoid stairs",
+ "follow_up": {
+  "type": "IF_REQUIRED",
+  "text": "SOS"
+ }
+}

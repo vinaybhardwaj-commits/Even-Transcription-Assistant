@@ -1,0 +1,13 @@
+.venv/
+results/
+__pycache__/
+.pytest_cache/
+*.pyc
+smoke-cache/
+clef-cache/
+*.parquet
+*.tmp
+text-cache/
+*.cost.jsonl
+scale-out/
+cache/

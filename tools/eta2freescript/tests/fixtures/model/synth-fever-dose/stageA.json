@@ -1,0 +1,223 @@
+{
+ "schema": "even.encounter.v2",
+ "speaker_roles": [
+  {
+   "speaker": "S0",
+   "role": "doctor",
+   "confidence": 1.0
+  },
+  {
+   "speaker": "S1",
+   "role": "patient",
+   "confidence": 1.0
+  }
+ ],
+ "language_notes": "English, clear",
+ "chief_complaint": {
+  "text": "Fever",
+  "duration": "3 days",
+  "basis": "said",
+  "source_turns": [
+   1
+  ]
+ },
+ "hpi": [
+  {
+   "text": "Body pain",
+   "basis": "said",
+   "source_turns": [
+    1
+   ]
+  }
+ ],
+ "comorbidities": [],
+ "history": [
+  {
+   "type": "social",
+   "text": "Works at a vegetable market, came by bus",
+   "clinically_relevant": false,
+   "basis": "said",
+   "source_turns": [
+    3
+   ]
+  }
+ ],
+ "drug_history": [
+  {
+   "name_as_said": "Dolo 650",
+   "text": "Took Dolo 650 at home twice",
+   "current": false,
+   "reported_by": "patient",
+   "source_turns": [
+    2
+   ]
+  }
+ ],
+ "allergy_history": [],
+ "examination": [
+  {
+   "performed": "Temperature",
+   "finding": "101 F",
+   "basis": "said",
+   "source_turns": [
+    6
+   ]
+  },
+  {
+   "performed": "Throat",
+   "finding": "red",
+   "basis": "said",
+   "source_turns": [
+    6
+   ]
+  },
+  {
+   "performed": "Chest",
+   "finding": "clear",
+   "basis": "said",
+   "source_turns": [
+    6
+   ]
+  }
+ ],
+ "vitals": [
+  {
+   "name": "Temperature",
+   "value": "101",
+   "unit": "F",
+   "source_turns": [
+    6
+   ]
+  }
+ ],
+ "assessment": {
+  "summary": "Viral fever",
+  "basis": "said",
+  "source_turns": [
+   7
+  ]
+ },
+ "diagnoses": [
+  {
+   "label": "Viral fever",
+   "rank": "primary",
+   "doctor_named": true,
+   "status": "provisional",
+   "basis": "said",
+   "icd10_suggestion": "B34.9",
+   "icd10_confidence": 0.6,
+   "source_turns": [
+    7
+   ]
+  },
+  {
+   "label": "Elevated blood pressure",
+   "rank": "secondary",
+   "doctor_named": false,
+   "status": "provisional",
+   "basis": "inferred",
+   "icd10_suggestion": "R03.0",
+   "icd10_confidence": 0.4,
+   "source_turns": [
+    5
+   ]
+  },
+  {
+   "label": "Body ache",
+   "rank": "secondary",
+   "doctor_named": false,
+   "status": "provisional",
+   "basis": "said",
+   "icd10_suggestion": "R52",
+   "icd10_confidence": 0.4,
+   "source_turns": [
+    1
+   ]
+  }
+ ],
+ "plan": [],
+ "prescription": [
+  {
+   "action": "start",
+   "decision_turn": 7,
+   "generic": "paracetamol",
+   "brand_as_said": "Dolo 650",
+   "name_interpretation": null,
+   "strength": "650 mg",
+   "strength_said_by": "patient",
+   "strength_turn": 2,
+   "dosage_form": "tablet",
+   "route": "oral",
+   "frequency": "three times a day",
+   "duration": "3 days",
+   "instructions": null,
+   "basis": "said",
+   "confidence": 0.85,
+   "source_quote_turn": 7,
+   "source_turns": [
+    2,
+    7
+   ]
+  }
+ ],
+ "regimen_slots": [],
+ "investigations": [
+  {
+   "name": "CBC",
+   "order_status": "ordered",
+   "timing": "today",
+   "decision_turn": 8,
+   "basis": "said",
+   "source_turns": [
+    8
+   ]
+  }
+ ],
+ "advice": [
+  {
+   "text": "Drink plenty of water",
+   "basis": "said",
+   "source_turns": [
+    9
+   ]
+  },
+  {
+   "text": "Take rest",
+   "basis": "said",
+   "source_turns": [
+    9
+   ]
+  },
+  {
+   "text": "Drink lots of water, at least three litres",
+   "basis": "said",
+   "source_turns": [
+    10
+   ]
+  }
+ ],
+ "follow_up": {
+  "type": "FOLLOW_UP_WITH_REPORTS",
+  "interval": {
+   "value": 1,
+   "unit": "WEEKS"
+  },
+  "date": null,
+  "when": "After 1 week with CBC report",
+  "condition": null,
+  "with_reports": true,
+  "with_referral": false,
+  "basis": "said",
+  "source_turns": [
+   11
+  ]
+ },
+ "referrals": [],
+ "red_flags_safety_net": [],
+ "consult_boundary": {
+  "suspected": false,
+  "foreign_turns": [],
+  "reason": null
+ },
+ "uncertainties": []
+}

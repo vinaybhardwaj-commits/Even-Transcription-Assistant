@@ -1,0 +1,3 @@
+# Pipeline, validator and unit tests. No model SDK: tests use FakeClient / ReplayClient only.
+jsonschema==4.26.0
+pytest==9.1.1

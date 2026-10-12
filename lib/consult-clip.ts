@@ -14,7 +14,7 @@
 import { headObject } from "@/lib/r2";
 import { signatureVersion } from "@/lib/consult-index/parse";
 import { palimpsestAsResult, type PalimpsestAsResult } from "@/lib/consult-index/palimpsest-view";
-import { findSarvamTracks, type SarvamTrack } from "@/lib/room-access/readers/reb-consult";
+import { findSarvamTracks, readRebRoleFlags, type SarvamTrack } from "@/lib/room-access/readers/reb-consult";
 import { findResult, getIndexRow, type ConsultResult, type StoredIndexRow } from "@/lib/room-access/consult-index-store";
 
 export type ClipRefusalCode = "consult_not_indexed" | "consult_sealed" | "consult_voice_isolated" | "mirror_minutes_missing" | "reuse_lookup_unavailable" | "track_missing" | "audio_unreadable";
@@ -37,7 +37,10 @@ export async function palimpsestFor(row: StoredIndexRow): Promise<{ unavailable:
   const r = await findSarvamTracks(row.consult_uid, row.room_id, row.room_slug, row.cut_version, signatureVersion);
   if ("unavailable" in r) return { unavailable: true };
   // a reusable answer needs the transcript itself; a translate track alone is not "this consult has been transcribed"
-  if (r.found?.stt) return { reuse: { source: "palimpsest", stt: r.found.stt, translate: r.found.translate, view: palimpsestAsResult(row, r.found.stt, r.found.translate) } };
+  if (r.found?.stt) {
+    const flags = await readRebRoleFlags(row.consult_uid, row.room_id, row.room_slug);
+    return { reuse: { source: "palimpsest", stt: r.found.stt, translate: r.found.translate, view: palimpsestAsResult(row, r.found.stt, r.found.translate, flags) } };
+  }
   if (r.missing.includes("stt")) return { missing: true };
   return { reuse: null };
 }

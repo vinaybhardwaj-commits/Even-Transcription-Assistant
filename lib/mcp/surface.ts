@@ -53,6 +53,9 @@ import { S5_TOOLS } from "./tools/s5";
 import { S8_TOOLS } from "./tools/s8";
 import { S7_TOOLS } from "./tools/s7";
 import { S2L_TOOLS } from "./tools/s2l";
+import { TIMBRE_TOOLS } from "./tools/timbre";
+import { ENCOUNTER_TIMELINE_TOOLS } from "./tools/encounter-timeline";
+import { FREESCRIPT_TOOLS } from "./tools/freescript";
 
 /**
  * Every tool the door published before Slice E, in the order tools/list served them, plus every
@@ -71,6 +74,9 @@ export const PUBLISHED_TOOLS: readonly McpTool[] = [
   ...S8_TOOLS,
   ...S2L_TOOLS,
   ...S7_TOOLS,
+  ...TIMBRE_TOOLS,
+  ...ENCOUNTER_TIMELINE_TOOLS,
+  ...FREESCRIPT_TOOLS,
 ];
 
 const PUBLISHED_BY_NAME = new Map(PUBLISHED_TOOLS.map((t) => [t.name, t]));
