@@ -1,0 +1,7 @@
+Phone walk, in order (no notes needed):
+1. Wait for the ORB3 beacons to stop (about 2 minutes), then start the phone track.
+2. Round 1: hold the phone against ORB3 mic 1 (Device_1, the one nearer the computer). Round 2: against ORB3 mic 2. Round 3: against the Pi mic. Within 10 cm each.
+3. Rounds 4 to 20: one new spot per round, any order, inside the triangle of the three mics or close to it. Hold the phone at chest height every round. Stand still while the sweep and the speech play.
+4. Hold the phone the same way every round (speaker facing the room). Do not cover it.
+5. When the track ends, say "done": the lead touches the walk_done file, and 2 more minutes of beacons play.
+6. Keep quiet and still during both beacon blocks.
