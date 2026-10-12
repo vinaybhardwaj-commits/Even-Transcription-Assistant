@@ -57,6 +57,15 @@ def test_nothing_said_means_no_follow_up():
     assert map_follow_up(None, VISIT) == (None, [])
 
 
+def test_weekday_is_the_next_occurrence_after_the_visit():
+    out, notes = map_follow_up({"when": "come Friday", "type": "MANDATORY_FOLLOW_UP"}, VISIT)
+    assert out["followup_date"] == "2026-10-09" and notes == []
+    out, notes = map_follow_up({"when": "Monday", "type": "MANDATORY_FOLLOW_UP"}, VISIT)
+    assert out["followup_date"] == "2026-10-12" and notes == []
+    out, _ = map_follow_up({"date": "Friday"}, VISIT, heard="see you Friday")
+    assert out["followup_date"] == "2026-10-09"
+
+
 def test_mapped_follow_up_fits_vendor_schema():
     import jsonschema
     sch = dict(V.SCHEMA["definitions"]["LlmFollowUp"])

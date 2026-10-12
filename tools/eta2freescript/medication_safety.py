@@ -1,12 +1,17 @@
 """Deterministic medication safety checks used by both the mapper and FRX validator.
 
-The catalogue is deliberately explicit. Unknown names are held out for doctor review; fuzzy
-matching is unsafe for drug names. Strength ranges are broad plausibility bounds, not dosing advice.
+Names resolve against the curated molecule map and the db13 medication catalogue
+(`data/drug-lexicon.json`: brand and generic names only). Matching folds case, spacing,
+punctuation and a trailing strength. A close brand spelling can match; a garbled name cannot.
+Strength ranges are broad plausibility bounds, not dosing advice.
 """
 from __future__ import annotations
 
+import difflib
+import json
 import re
 import unicodedata
+from pathlib import Path
 
 from .combinations import CATALOGUE as COMBINATION_CATALOGUE
 
@@ -125,7 +130,7 @@ def molecules(text: str | None) -> frozenset[str] | None:
 
 
 def resolvable(text: str | None) -> bool:
-    return molecules(text) is not None
+    return molecules(text) is not None or catalogue_hit(text) is not None
 
 
 def same_molecules(a: str | None, b: str | None) -> bool:
@@ -174,11 +179,14 @@ def native_supports(name: str, values: list[str], native: str) -> bool:
     if not native.strip():
         return True
     mols = molecules(name)
+    mentioned = _mentioned_sets(native)
     if not mols:
-        return False
+        # No molecule map. A known molecule in the native span is a different drug
+        # (Oxypent over a vonoprazan/rivaroxaban line). A catalogue brand with no
+        # known molecule in the native span is not a translation conflict.
+        return not mentioned
     if not _mentions(native, mols):
         return False
-    mentioned = _mentioned_sets(native)
     only_one_product = len(mentioned) == 1
     for value in values:
         wanted = set(number_tokens(value))
@@ -205,9 +213,11 @@ def plausible_strength(name: str, strength: str | None) -> bool:
         return True
     mols = molecules(name)
     if not mols:
-        return False
+        return True
     ranges = [STRENGTH_MG[m] for m in mols if m in STRENGTH_MG]
-    return bool(ranges) and any(lo <= value <= hi for lo, hi in ranges)
+    if not ranges:
+        return False
+    return any(lo <= value <= hi for lo, hi in ranges)
 
 
 def form_unit_ok(form: str | None, strength: str | None) -> bool:
@@ -230,30 +240,244 @@ def _clauses(text: str) -> list[str]:
     ]
 
 
+def _letters(text: str | None) -> str:
+    return key(text)
+
+
+def _name_in(text: str, label: str) -> bool:
+    letters = _letters(label)
+    if len(letters) < 4:
+        return False
+    pattern = r"(?<![a-z])" + r"[\W_]*".join(map(re.escape, letters)) + r"(?![a-z])"
+    return re.search(pattern, text or "", re.I) is not None
+
+
+def _label_hit(clause: str, label: str) -> bool:
+    mols = molecules(label)
+    if mols and _mentions(clause, mols):
+        return True
+    return _name_in(clause, label)
+
+
+def _other_drug_at(clause: str, labels: list[str]) -> list[int]:
+    """Start offsets of a different drug in this clause."""
+    low = clause.lower()
+    own = {molecules(lab) for lab in labels if molecules(lab)}
+    spots = []
+    seen = set()
+    for name in list(GENERICS) + list(BRANDS):
+        mols = molecules(name)
+        if not mols or mols in own:
+            continue
+        letters = _letters(name)
+        if len(letters) < 4 or letters in seen:
+            continue
+        seen.add(letters)
+        m = re.search(r"(?<![a-z])" + r"[\W_]*".join(map(re.escape, letters)) + r"(?![a-z])", low)
+        if m:
+            spots.append(m.start())
+    for word in re.findall(r"[A-Za-z][A-Za-z-]{4,}", clause):
+        if any(_name_in(word, lab) for lab in labels):
+            continue
+        if not catalogue_hit(word):
+            continue
+        m = re.search(rf"(?<![A-Za-z]){re.escape(word)}(?![A-Za-z])", clause)
+        if m:
+            spots.append(m.start())
+    return spots
+
+
+def _number_near(clause: str, labels: list[str], wanted: list[str]) -> bool:
+    """True when each wanted number sits nearer this drug than another named drug."""
+    low = clause.lower()
+    own = []
+    for lab in labels:
+        letters = _letters(lab)
+        if len(letters) < 4:
+            continue
+        m = re.search(r"(?<![a-z])" + r"[\W_]*".join(map(re.escape, letters)), low)
+        if m:
+            own.append(m.start())
+    if not own:
+        return False
+    others = _other_drug_at(clause, labels)
+    norm = normalize_numbers(clause)
+    for tok in wanted:
+        m = re.search(rf"(?<!\d){re.escape(tok)}(?!\d)", norm)
+        if not m:
+            return False
+        pos = m.start()
+        if others and min(abs(pos - p) for p in own) > min(abs(pos - p) for p in others):
+            return False
+    return True
+
+
 def dose_bound(name: str, aliases: list[str], strength: str | None, quotes: list[str], form: str | None = None) -> bool:
+    """False only for a real cross-clause (or cross-drug) dose ambiguity.
+
+    A turn that merely names another drug, or carries another number, is not a conflict
+    when this drug's own number sits with this drug. A number that belongs to a different
+    drug in another clause is a conflict. Tablet/ml mismatches stay a conflict.
+    """
     if not strength:
         return True
     if not form_unit_ok(form, strength):
         return False
     wanted = number_tokens(strength)
-    anchors = [x for x in [name, *aliases] if molecules(x)]
-    for quote in quotes:
-        anchor_sets = {molecules(a) for a in anchors}
-        expected_molecules = frozenset().union(*(x for x in anchor_sets if x)) if anchor_sets else frozenset()
-        for clause in _clauses(quote):
-            if not any(_mentions(clause, anchor) for anchor in anchor_sets if anchor):
+    if not wanted:
+        return True
+    labels = [x for x in [name, *aliases] if x and (_letters(x) or molecules(x))]
+    if not labels:
+        return True
+    clauses = [c for quote in quotes for c in _clauses(quote)]
+
+    def piece_form(clause: str) -> str | None:
+        if form:
+            return form
+        fm = re.search(r"\b(tablets?|tabs?|capsules?|caps?|syrup|solution)\b", clause, re.I)
+        return fm.group(1) if fm else None
+
+    def bound(clause: str) -> bool:
+        if not all(tok in set(number_tokens(clause)) for tok in wanted):
+            return False
+        if not any(_label_hit(clause, lab) for lab in labels):
+            return False
+        if not form_unit_ok(piece_form(clause), strength):
+            return False
+        if _other_drug_at(clause, labels):
+            return _number_near(clause, labels, wanted)
+        return True
+
+    if any(bound(c) for c in clauses):
+        return True
+    # The number sits with this drug, but only in a form the unit cannot belong to
+    # (a tablet quoted as 10 ml). That is a conflict.
+    for clause in clauses:
+        if not all(tok in set(number_tokens(clause)) for tok in wanted):
+            continue
+        if any(_label_hit(clause, lab) for lab in labels) and not form_unit_ok(piece_form(clause), strength):
+            return False
+    # The number is carried by a different drug and never sits with this one.
+    for clause in clauses:
+        if not all(tok in set(number_tokens(clause)) for tok in wanted):
+            continue
+        if any(_label_hit(clause, lab) for lab in labels):
+            continue
+        if _other_drug_at(clause, labels):
+            return False
+    return True
+
+
+_PACK_WORDS = FORM_WORDS | {
+    "sr", "xr", "er", "dt", "pr", "md", "kit", "skin", "oral", "forte", "plus", "gold",
+    "dsr", "respules", "suspension", "lotion", "powder", "shampoo", "soap", "cream",
+}
+_LEXICON = Path(__file__).resolve().parents[2] / "data" / "drug-lexicon.json"
+
+
+def norm_tokens(text: str | None) -> tuple[str, ...]:
+    """Case, spacing, punctuation and a glued strength suffix, with pack words removed."""
+    s = (text or "").lower().replace("&", " and ")
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    out = []
+    for w in s.split():
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)(mg|mcg|g|ml|iu)", w)
+        if m:
+            out.append(m.group(1))
+            continue
+        if w in _PACK_WORDS:
+            continue
+        out.append(w)
+    return tuple(out)
+
+
+class _Catalogue:
+    def __init__(self) -> None:
+        self.exact: dict[tuple[str, ...], str] = {}
+        self.by_first: dict[str, list[tuple[tuple[str, ...], str, str]]] = {}
+        self.by_letter: dict[str, dict[str, str]] = {}
+        names: list[str] = []
+        if _LEXICON.exists():
+            try:
+                names = json.loads(_LEXICON.read_text(encoding="utf-8")).get("names") or []
+            except (OSError, json.JSONDecodeError):
+                names = []
+        for display in names:
+            if not isinstance(display, str):
                 continue
-            clause_numbers = set(number_tokens(clause))
-            if not all(tok in clause_numbers for tok in wanted):
+            toks = norm_tokens(display)
+            if not toks:
                 continue
-            named_sets = _mentioned_sets(clause)
-            heard_molecules = frozenset().union(*(x for x in named_sets if x)) if named_sets else frozenset()
-            # Every named drug in the clause must belong to this product. This admits
-            # fixed combinations while rejecting a number carried over from another item.
-            inferred_form = form
-            if not inferred_form:
-                fm = re.search(r"\b(tablets?|tabs?|capsules?|caps?|syrup|solution)\b", clause, re.I)
-                inferred_form = fm.group(1) if fm else None
-            if heard_molecules and heard_molecules <= expected_molecules and form_unit_ok(inferred_form, strength):
-                return True
-    return False
+            stem = "".join(t for t in toks if not t.isdigit())
+            self.exact.setdefault(toks, display)
+            self.by_first.setdefault(toks[0], []).append((toks, stem, display))
+            if len(stem) >= 4:
+                self.by_letter.setdefault(stem[0], {})
+                self.by_letter[stem[0]].setdefault(stem, display)
+
+
+_CATALOGUE: _Catalogue | None = None
+
+
+def _catalogue() -> _Catalogue:
+    global _CATALOGUE
+    if _CATALOGUE is None:
+        _CATALOGUE = _Catalogue()
+    return _CATALOGUE
+
+
+def _subsequence(query: tuple[str, ...], entry: tuple[str, ...]) -> bool:
+    i = 0
+    for tok in entry:
+        if i < len(query) and tok == query[i]:
+            i += 1
+    return i == len(query)
+
+
+def _extra_alpha_ok(query: tuple[str, ...], entry: tuple[str, ...]) -> bool:
+    """Telvas 40 may match Telvas H 40; a pile of extra words may not."""
+    extra = [t for t in entry if t not in query and not t.isdigit()]
+    return len(extra) <= 1 and all(len(t) <= 2 for t in extra)
+
+
+def catalogue_hit(text: str | None) -> str | None:
+    """A db13 catalogue display name this string resolves to, or None.
+
+    Exact after normalisation, then a brand-stem prefix, then one short extra token
+    (Telvas 40 / Telvas H 40), then a close brand spelling. The first two letters and a
+    similar length are required, so a garbled antibiotic does not hit.
+    """
+    toks = norm_tokens(text)
+    if sum(len(t) for t in toks if not t.isdigit()) < 4:
+        return None
+    cat = _catalogue()
+    if toks in cat.exact:
+        return cat.exact[toks]
+    pool = cat.by_first.get(toks[0], [])
+    for entry, _stem, display in pool:
+        if len(entry) >= len(toks) and entry[: len(toks)] == toks:
+            return display
+    stem_toks = tuple(t for t in toks if not t.isdigit())
+    if stem_toks and stem_toks != toks:
+        for entry, _stem, display in pool:
+            entry_stem = tuple(t for t in entry if not t.isdigit())
+            if entry_stem[: len(stem_toks)] == stem_toks:
+                return display
+    for entry, _stem, display in pool:
+        if _subsequence(toks, entry) and _extra_alpha_ok(toks, entry):
+            return display
+    qstem = "".join(stem_toks)
+    if len(qstem) < 6:
+        return None
+    best, best_r = None, 0.0
+    for stem, display in cat.by_letter.get(qstem[0], {}).items():
+        # Same first two letters and a close length. 0.86 keeps Sompras/Sompraz and
+        # rejects a garbled antibiotic (Azithroxyz vs azithromycin is about 0.73). Sompras/Sompraz is 0.857.
+        if abs(len(stem) - len(qstem)) > 2 or stem[:2] != qstem[:2]:
+            continue
+        ratio = difflib.SequenceMatcher(None, qstem, stem).ratio()
+        if ratio > best_r:
+            best, best_r = display, ratio
+    if best is not None and best_r >= 0.85:
+        return best
+    return None
