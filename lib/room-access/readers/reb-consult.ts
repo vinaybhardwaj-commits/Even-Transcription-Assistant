@@ -38,7 +38,16 @@ export type RebConsult = {
 export type RebOutcome = { found: RebConsult | null; n_integrity_skipped: number };
 export type RoleLookup = { bySegment: ReadonlyMap<string, RebSpeakerRole>; bySpeaker?: ReadonlyMap<string, RebSpeakerRole> };
 
-type IndexRow = { layer: string; engine: string; config_hash: string; r2_key: string; sha256: string };
+type IndexRow = { layer: string; engine: string; config_hash: string; r2_key: string; sha256: string; version?: string };
+
+/**
+ * The stt engines the consult reader may take text from, in preference order. A consult holds stt tracks from several engines, so "newest" means nothing;
+ * the first engine here with a usable row decides, and if that row is not wholly English the stt layer yields nothing (no fallback to a later engine).
+ * medasr is English-only run on every clip, so its text is not the transcript of record and is deliberately absent. A caa-version row is never taken.
+ */
+export const REB_STT_ENGINE_PREFERENCE: readonly string[] = ["sarvam-saaras-v3"];
+const isCaaVersion = (r: IndexRow): boolean => /caa/i.test(String(r.version ?? ""));
+const isEnglishTag = (v: unknown): boolean => typeof v === "string" && v.toLowerCase().startsWith("en");
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 
 export function isRebRole(v: unknown): v is RebSpeakerRole {
@@ -145,11 +154,14 @@ export function linesFromTrack(doc: unknown, open: number, close: number, layer:
   if (!d || typeof d !== "object" || d.status !== "ok" || !Array.isArray(d.segments)) return null;
   const segs = d.segments as Array<Record<string, unknown>>;
   let allEnglish = segs.length > 0;
+  // a track that says its clip was not English is never English text, whatever its segments claim (medasr writes lang "en" on every segment)
+  const extras = (doc as { extras?: unknown }).extras as { source_language?: unknown } | null | undefined;
+  if (layer === "stt" && extras && typeof extras === "object" && extras.source_language != null && !isEnglishTag(extras.source_language)) allEnglish = false;
   const lines: ConsultLine[] = [];
   const turns: Turn[] = [];
   for (const g of segs) {
     if (!g || typeof g !== "object") continue;
-    if (layer === "stt" && !(typeof g.lang === "string" && g.lang.toLowerCase().startsWith("en"))) allEnglish = false;
+    if (layer === "stt" && !isEnglishTag(g.lang)) allEnglish = false;
     const t0 = Number(g.t0_ms), t1 = Number(g.t1_ms);
     const text = typeof g.text === "string" ? g.text.trim() : "";
     if (!Number.isFinite(t0) || !Number.isFinite(t1) || !text) continue;
@@ -245,7 +257,7 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
   const store = labStore();
   if (!store) return none;
   const rows = (await sql`
-    SELECT layer, engine, config_hash, r2_key, sha256
+    SELECT layer, engine, version, config_hash, r2_key, sha256
       FROM reb_track_index
      WHERE window_id = ${`consult-${uid}`}::text AND status = 'ok' AND shadow = false AND layer IN ('translate', 'stt')
      ORDER BY finished_at DESC NULLS LAST, id DESC
@@ -253,7 +265,11 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
   `) as IndexRow[];
   let skipped = 0;
   for (const layer of ["translate", "stt"] as const) {
-    for (const row of rows.filter((r) => r.layer === layer)) {
+    // stt: only a named engine, never a caa version, ordered by engine preference then newest (the query order is kept within an engine)
+    const layerRows = layer === "translate"
+      ? rows.filter((r) => r.layer === layer)
+      : REB_STT_ENGINE_PREFERENCE.flatMap((eng) => rows.filter((r) => r.layer === "stt" && r.engine === eng && !isCaaVersion(r)));
+    for (const row of layerRows) {
       const m = REB_CONSULT_KEY.exec(String(row.r2_key));
       // the key must be a consult key of THIS consult in THIS room, and not a held-out pair
       if (!m || m[3] !== uid || m[2] !== span.room_id || blindRefusal(m[2]!, m[1]!)) { skipped += 1; continue; }
@@ -264,7 +280,7 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
       try { doc = JSON.parse(obj.body); } catch { skipped += 1; continue; }
       const got = linesFromTrack(doc, span.t_open_ms, span.t_close_ms, layer);
       if (!got || got.lines.length === 0) continue;
-      if (layer === "stt" && !got.allEnglish) continue; // a native or lang-less stt row is not text we can score: try the next older stt row; none wholly English falls through to window_english
+      if (layer === "stt" && !got.allEnglish) break; // the preferred engine's latest row is not wholly English: the stt layer yields nothing, the caller falls through to window_english
       const joined = await joinRoleTrack(uid, span.room_id, store, layer, doc, span.t_open_ms, span.t_close_ms, got);
       skipped += joined.skipped;
       return {
