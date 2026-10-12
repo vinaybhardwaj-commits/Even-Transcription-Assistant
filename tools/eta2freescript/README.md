@@ -1,4 +1,4 @@
-# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.2.0 · stageB-v4 · eta.freescript.v0.3)
+# eta2freescript — ETA consult transcript → FreeScript artifact (v2: stageA-v2 · mapper 2.3.0 · stageB-v4 · eta.freescript.v0.3)
 
 Turns one isolated OPD consult (an ETA cut clip with its Sarvam transcript and, when present, the REB `role.llm-roles`
 track) into a draft encounter for Pulse FreeScript: an `eta.freescript.v0.3` artifact holding `gp_extraction`
@@ -135,7 +135,7 @@ python -m tools.eta2freescript aggregate --out /tmp/e2fs
 
 On unless `ETA_FREESCRIPT` is 0. The Python pipeline still does not run on Vercel.
 
-- `scribe_freescript` `action=read` with one selector (`encounter_id` or `consult_uid`, `room`+`date`, or `doctor_uid8`+range) returns the stored artifact, `completion_required` and the validator status.
+- `scribe_freescript` `action=read` with one selector (`encounter_id` or `consult_uid`, `ist_date` alone, `room`+`date` (or `ist_date`), or `doctor_uid8`+range) returns the stored artifact, `completion_required` and the validator status. A rejected run is `state: rejected` with the FRX codes.
 - `scribe_freescript` `action=run` (needs invoke) queues a `freescript` job. The box drains it; the Vercel step only waits.
 - `POST /api/freescript/ingest` stores one result (HMAC `FREESCRIPT_INGEST_SECRET`, same shape as the Timbre ingest). A transcript-shaped field is refused.
 - `GET /api/freescript/day?ist_date=YYYY-MM-DD` is the `eta2freescript_offline` hook: stored artifacts for that IST day (same HMAC, `FREESCRIPT_INGEST_SECRET`). 404 when `ETA_FREESCRIPT` is 0. No Pulse write.

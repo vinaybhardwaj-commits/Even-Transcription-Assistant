@@ -28,7 +28,7 @@ run AS (
          NULLIF(p.j->>'room_id', ''),
          NULLIF(p.j->>'ist_date', '')::date,
          NULLIF(p.j->>'doctor_uid8', ''),
-         CASE WHEN (p.j->'validator'->>'ok')::boolean THEN 'ok' ELSE 'invalid' END,
+         CASE WHEN (p.j->'validator'->>'ok')::boolean THEN 'ok' ELSE 'rejected' END,
          (p.j->'validator'->>'ok')::boolean,
          COALESCE(p.j->'validator'->'errors', '[]'::jsonb),
          p.j->'generator'->>'code_sha256',

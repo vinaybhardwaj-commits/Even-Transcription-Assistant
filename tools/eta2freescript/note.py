@@ -1,4 +1,9 @@
-"""note_text: the deterministic renderer (fallback and reference) and sanitize_note (filler removal)."""
+"""note_text: the deterministic renderer (fallback and reference), sanitize_note, and repair_note.
+
+Stage B is kept only when a repaired note still passes validation. List sections (medicines, investigations,
+referrals, surgery, diagnoses) always come from gp_extraction. Free-text sections may keep the model line when
+it does not smuggle a kept-out name or an identity pattern.
+"""
 from __future__ import annotations
 
 import re
@@ -34,6 +39,81 @@ def drop_clauses(text: str, drop) -> str:
     parts = re.split(r"\s*(?:;|,|\band\b)\s*", text)
     kept = [p.strip(" .") for p in parts if p.strip() and not drop(p.strip())]
     return "; ".join(kept)
+
+
+_EXAMPLE_HOSTS = ("example.com", "example.org", "example.net", "example.test")
+LIST_HEADS = {"Co-morbidities", "Diagnoses", "Surgery or Procedure", "Medication", "Further Investigation", "Refer to"}
+
+
+def scrub_identity(text: str) -> str:
+    """Drop phone, Aadhaar, Dr-name and non-example email shapes. Quotes that are only an identifier become empty."""
+    if not text:
+        return text or ""
+    from .validate import AADHAAR, DR_NAME, EMAIL, PHONE
+
+    s = PHONE.sub(" ", text)
+    s = AADHAAR.sub(" ", s)
+    s = DR_NAME.sub(" ", s)
+
+    def _em(m):
+        host = m.group(1) or ""
+        if host.endswith(_EXAMPLE_HOSTS):
+            return m.group(0)
+        return " "
+
+    s = EMAIL.sub(_em, s)
+    return re.sub(r"[ \t]{2,}", " ", s).strip()
+
+
+def _identity_hit(text: str) -> bool:
+    from .validate import AADHAAR, DR_NAME, EMAIL, PHONE
+
+    if PHONE.search(text) or AADHAAR.search(text) or DR_NAME.search(text):
+        return True
+    em = EMAIL.search(text)
+    return bool(em and not (em.group(1) or "").endswith(_EXAMPLE_HOSTS))
+
+
+def _split_sections(note: str) -> dict[str, list[str]]:
+    cur = None
+    out = {h: [] for h in HEADINGS}
+    for line in (note or "").split("\n"):
+        head, sep, body = line.partition(":")
+        if sep and head in HEADINGS:
+            cur = head
+            if body.strip():
+                out[head].append(body.strip())
+            continue
+        if cur and line.strip():
+            out[cur].append(line.strip())
+    return out
+
+
+def _assemble(sections: dict[str, list[str]]) -> str:
+    lines = []
+    for h in HEADINGS:
+        body = [b for b in sections.get(h) or [] if b]
+        lines.append(f"{h}: {body[0]}".rstrip() if body else f"{h}:")
+        lines.extend(body[1:])
+    return "\n".join(lines)
+
+
+def repair_note(llm: str, gx: dict, flags: dict | None = None, banned_names: list[str] | None = None) -> str:
+    """Force the 11 headings. List sections always come from gp_extraction. Free-text lines stay when they are clean."""
+    from .validate import V
+
+    banned = [n for n in (banned_names or []) if n]
+    det = _split_sections(render_note(gx, flags, banned))
+    got = _split_sections(llm or "")
+    out: dict[str, list[str]] = {}
+    for h in HEADINGS:
+        if h in LIST_HEADS:
+            out[h] = det[h]
+            continue
+        lines = got.get(h) or []
+        bad = any(_identity_hit(line) or any(V.same_drug([n], [line]) for n in banned) for line in lines)
+        out[h] = det[h] if bad or not lines else lines
+    return _assemble(out)
 
 
 def filler_lines(note: str) -> int:

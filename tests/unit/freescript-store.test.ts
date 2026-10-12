@@ -106,10 +106,23 @@ describe("migration 0158", () => {
   });
 });
 
+describe("migration 0159", () => {
+  const up = readFileSync("db/migrations/0159_freescript_rejected.sql", "utf8");
+  it("records a rejected run and does not grant", () => {
+    expect(up).toContain("'rejected'");
+    expect(up).toContain("'ok'");
+    expect(up).toContain("'invalid'");
+    expect(up).toMatch(/VALUES \(159, '0159_freescript_rejected'\)/);
+    expect(up).not.toMatch(/\bGRANT\b/i);
+    expect(readFileSync("db/rollbacks/0159_freescript_rejected.down.sql", "utf8")).toMatch(/DELETE FROM schema_migrations WHERE version = 159/);
+  });
+});
+
 describe("ingest SQL", () => {
   it("is one statement and names no transcript column", () => {
     expect(INGEST_SQL.startsWith("WITH p AS (SELECT $1::jsonb AS j)")).toBe(true);
     expect(INGEST_SQL).toContain("WHERE NOT EXISTS (SELECT 1 FROM prior)");
+    expect(INGEST_SQL).toContain("ELSE 'rejected'");
     expect(INGEST_SQL).not.toMatch(/transcript|segments|brain_svc/);
   });
 });

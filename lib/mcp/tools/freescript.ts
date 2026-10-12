@@ -4,8 +4,8 @@
  * Read scope at the door (like scribe_sarvam). action=run needs invoke, enforced by submitJob. On unless
  * ETA_FREESCRIPT is 0. Reads the 0157 tables through the APP connection (@/lib/db). Never returns transcript segments.
  *
- * Read selectors, exactly one: encounter_id | consult_uid | room+date | doctor_uid8+date_from+date_to (<= 92 days).
- * action=run accepts encounter_id/consult_uid or room+date and queues kind `freescript`. The pipeline runs on the box.
+ * Read selectors, exactly one: encounter_id | consult_uid | ist_date | room+date | doctor_uid8+date_from+date_to (<= 92 days).
+ * ist_date alone is one IST day. With room and no date, ist_date is the date. action=run accepts a consult or room+date.
  */
 import { sql } from "@/lib/db";
 import { FlagValueError } from "@/lib/flags";
@@ -33,15 +33,16 @@ const n = (v: unknown): number | null => (v === null || v === undefined || v ===
 
 const HELP = [
   "Stored FreeScript artifacts (tables freescript_run / freescript_artifact, migration 0157). On unless ETA_FREESCRIPT is 0.",
-  "action=read (default) takes EXACTLY ONE selector: encounter_id or consult_uid; room + date (IST YYYY-MM-DD); or doctor_uid8 + date_from + date_to (at most 92 days).",
+  "action=read (default) takes EXACTLY ONE selector: encounter_id or consult_uid; ist_date; room + date (or ist_date); or doctor_uid8 + date_from + date_to (at most 92 days).",
   "Returns the artifact, completion_required and the validator status (ok plus error codes). No transcript text.",
   "action=run queues a freescript job for the box (needs invoke) and returns { job_id }. The Python pipeline runs off Vercel: transcripts go only to Bedrock Claude via phi_guard.",
-  "run accepts encounter_id/consult_uid or room+date, not a doctor range. Times UTC.",
+  "run accepts encounter_id/consult_uid or room+date, not a day or a doctor range. Times UTC.",
 ].join(" ");
 
 type Selector =
   | { kind: "encounter"; id: string }
   | { kind: "room_day"; room: string; date: string }
+  | { kind: "day"; date: string }
   | { kind: "doctor"; doctor: string; from: string; to: string };
 
 export function parseSelector(args: ToolArgs): { ok: true; sel: Selector } | { ok: false; error: string; detail: string } {
@@ -49,8 +50,16 @@ export function parseSelector(args: ToolArgs): { ok: true; sel: Selector } | { o
   const idKeys = has("encounter_id") || has("consult_uid");
   const roomKeys = has("room") || has("date");
   const doctorKeys = has("doctor_uid8") || has("date_from") || has("date_to");
-  const picked = [idKeys, roomKeys, doctorKeys].filter(Boolean).length;
-  if (picked !== 1) return { ok: false, error: "bad_args", detail: "pass exactly one selector: encounter_id|consult_uid | room+date | doctor_uid8+date_from+date_to" };
+  const ist = has("ist_date");
+  if (ist && (idKeys || doctorKeys || has("date"))) return { ok: false, error: "bad_args", detail: "ist_date cannot combine with another selector" };
+  const dayOnly = ist && !has("room");
+  const picked = [idKeys, roomKeys, doctorKeys, dayOnly].filter(Boolean).length;
+  if (picked !== 1) return { ok: false, error: "bad_args", detail: "pass exactly one selector: encounter_id|consult_uid | ist_date | room+date | doctor_uid8+date_from+date_to" };
+  if (dayOnly) {
+    const date = argStr(args, "ist_date", 10);
+    if (!realDate(date)) return { ok: false, error: "bad_args", detail: "ist_date must be IST YYYY-MM-DD" };
+    return { ok: true, sel: { kind: "day", date } };
+  }
   if (idKeys) {
     if (has("encounter_id") && has("consult_uid")) return { ok: false, error: "bad_args", detail: "pass encounter_id or consult_uid, not both" };
     const id = argStr(args, has("encounter_id") ? "encounter_id" : "consult_uid", 128);
@@ -59,7 +68,7 @@ export function parseSelector(args: ToolArgs): { ok: true; sel: Selector } | { o
   }
   if (roomKeys) {
     const room = argStr(args, "room", 96);
-    const date = argStr(args, "date", 10);
+    const date = argStr(args, "date", 10) || (ist ? argStr(args, "ist_date", 10) : null);
     if (!room || !ROOM.test(room) || !realDate(date)) return { ok: false, error: "bad_args", detail: "room and date (IST YYYY-MM-DD) are both required" };
     return { ok: true, sel: { kind: "room_day", room, date } };
   }
@@ -104,6 +113,7 @@ export function rowView(r: Row): Row {
     generator: { code_sha256: r.generator_code_sha ?? null, prompt_sha256: r.generator_prompt_sha ?? null, model: r.model_id ?? null },
     cost_usd: n(r.cost_usd),
     created_at: r.created_at ?? null,
+    state: ok ? "ok" : "rejected",
   };
 }
 
@@ -117,6 +127,16 @@ async function readRows(sel: Selector, limit: number): Promise<Row[]> {
              artifact, completion_required
         FROM freescript_latest WHERE consult_uid = ${sel.id}
        ORDER BY created_at DESC
+       LIMIT ${limit}`) as Row[];
+  }
+  if (sel.kind === "day") {
+    return (await sql`
+      SELECT run_id, consult_uid, prescription_uid, schema_version, room_slug, room_id, ist_date, doctor_uid8,
+             validator_ok, validator_errors, generator_code_sha, generator_prompt_sha, model_id, cost_usd, created_at,
+             artifact, completion_required
+        FROM freescript_latest
+       WHERE ist_date = ${sel.date}::date
+       ORDER BY consult_uid
        LIMIT ${limit}`) as Row[];
   }
   if (sel.kind === "room_day") {
@@ -189,7 +209,7 @@ export async function freescriptDayRead(istDate: string): Promise<Row> {
 async function queue(args: ToolArgs, ctx: ToolContext): Promise<Row> {
   const parsed = parseSelector(args);
   if (!parsed.ok) return parsed;
-  if (parsed.sel.kind === "doctor") return { ok: false, error: "bad_args", detail: "run accepts a consult or a room+date, not a doctor range" };
+  if (parsed.sel.kind === "doctor" || parsed.sel.kind === "day") return { ok: false, error: "bad_args", detail: "run accepts a consult or a room+date, not a day or a doctor range" };
   const raw = parsed.sel.kind === "encounter" ? { consult_uid: parsed.sel.id } : { room: parsed.sel.room, ist_date: parsed.sel.date };
   try {
     const job = await submitJob({ kind: FREESCRIPT_KIND, args: raw, actor: ctx.actor, origin: ctx.origin, scopes: ctx.scopes });
@@ -230,6 +250,7 @@ export const freescriptTool: McpTool = {
       doctor_uid8: { type: "string", description: "8-char cell, with a date range" },
       date_from: { type: "string", description: "IST YYYY-MM-DD" },
       date_to: { type: "string", description: "IST YYYY-MM-DD, <= 92 days" },
+      ist_date: { type: "string", description: "IST day alone" },
       limit: { type: "number", description: "max rows (default 20, max 50)" },
     },
     additionalProperties: false,

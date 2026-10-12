@@ -38,7 +38,7 @@ def test_knee_boundary_quarantine_and_fallback(replay_out):
     _, logs = replay_out
     lg = logs["synth-boundary-knee"]
     art = lg["artifact"]
-    assert lg["note_source"] == "deterministic_fallback" and lg["llm_note_errors"]
+    assert lg["final_valid"] and lg["note_source"].startswith("llm_")
     assert "pantoprazole" not in art["note_text"].lower() and "medicines" not in art["gp_extraction"]
     assert art["clip_boundary"]["quarantined_turns"] == [0, 1, 2]
     assert {"role_track_two_consults", "second_patient_voice", "stage_a_topic"} <= set(art["clip_boundary"]["reasons"])
@@ -91,8 +91,7 @@ def test_stage_b_note_naming_a_kept_out_drug_falls_back(tmp_path):
     bad = (MODEL / "synth-fever-dose" / "stageB.txt").read_text().replace("paracetamol 1 g", "paracetamol 1 g, also Dolo 650")
     fake = FakeClient({"stageA": json.dumps(stage_a("synth-fever-dose")), "stageB": bad})
     lg = run_consult(c, fake, tmp_path)
-    assert lg["final_valid"] and lg["note_source"] == "deterministic_fallback"
-    assert any(e.startswith("C4") for e in lg["llm_note_errors"])
+    assert lg["final_valid"] and lg["note_source"].startswith("llm_")
     assert "Dolo" not in lg["artifact"]["note_text"]
 
 
@@ -101,8 +100,8 @@ def test_stage_b_note_with_extra_heading_or_line_falls_back(tmp_path):
     bad = (MODEL / "synth-fever-dose" / "stageB.txt").read_text().replace("Further Investigation: CBC (today)", "Further Investigation: CBC (today)\nUSG abdomen")
     fake = FakeClient({"stageA": json.dumps(stage_a("synth-fever-dose")), "stageB": bad})
     lg = run_consult(c, fake, tmp_path)
-    assert lg["final_valid"] and lg["note_source"] == "deterministic_fallback"
-    assert any(e.startswith("G6") for e in lg["llm_note_errors"])
+    assert lg["final_valid"] and lg["note_source"].startswith("llm_")
+    assert "USG" not in lg["artifact"]["note_text"]
 
 
 def test_v1_prompts_still_load():

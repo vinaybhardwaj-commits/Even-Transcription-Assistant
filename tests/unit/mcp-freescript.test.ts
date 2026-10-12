@@ -114,6 +114,20 @@ describe("read selectors", () => {
     const doc = await freescriptCall({ doctor_uid8: "cellfake", date_from: "2026-10-01", date_to: "2026-10-11" }, READ);
     expect(doc).toMatchObject({ ok: true, selector: "doctor" });
   });
+  it("ist_date alone is a day read, and a failed validator is state rejected", async () => {
+    const day = await freescriptCall({ ist_date: "2026-10-05" }, READ);
+    expect(day).toMatchObject({ ok: true, selector: "day", n: 1 });
+    expect(H.calls.at(-1)).toMatch(/ist_date = \$\?::date/);
+    expect(H.calls.at(-1)).not.toMatch(/room_slug =/);
+    expect((day.rows as Row[])[0]!.state).toBe("ok");
+    H.respond = () => [stored({ validator_ok: false, validator_errors: ["FRX-A1"] })];
+    const bad = await freescriptCall({ ist_date: "2026-10-05" }, READ);
+    expect((bad.rows as Row[])[0]!.state).toBe("rejected");
+    expect((bad.rows as Row[])[0]!.validator).toEqual({ ok: false, errors: ["FRX-A1"] });
+    expect(await freescriptCall({ action: "run", ist_date: "2026-10-05" }, CTX)).toMatchObject({ ok: false, error: "bad_args" });
+    expect(await freescriptCall({ ist_date: "2026-10-05", consult_uid: "synth-fs-1" }, READ)).toMatchObject({ ok: false, error: "bad_args" });
+    expect(await freescriptCall({ room: "synth-room", ist_date: "2026-10-05" }, READ)).toMatchObject({ ok: true, selector: "room_day" });
+  });
 });
 
 describe("run queues a box job and does not call a model", () => {

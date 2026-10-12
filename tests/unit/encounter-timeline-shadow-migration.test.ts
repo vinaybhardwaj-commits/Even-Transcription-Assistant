@@ -13,7 +13,8 @@ describe("0156 encounter_timeline_shadow", () => {
     expect(nums.filter((n) => n === "0156")).toEqual(["0156"]);
     expect(nums.filter((n) => n === "0157")).toEqual(["0157"]);
     expect(nums.filter((n) => n === "0158")).toEqual(["0158"]);
-    expect(Math.max(...nums.map(Number))).toBe(158);
+    expect(nums.filter((n) => n === "0159")).toEqual(["0159"]);
+    expect(Math.max(...nums.map(Number))).toBe(159);
     expect(up).not.toMatch(/\bGRANT\b/);
     expect(up).toMatch(/INSERT INTO schema_migrations \(version, name\)\s+VALUES \(156, '0156_encounter_timeline_shadow'\)/);
     const tables = up.slice(up.indexOf("CREATE TABLE"));
