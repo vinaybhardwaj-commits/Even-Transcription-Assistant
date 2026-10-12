@@ -240,14 +240,16 @@ export async function setRollout(sql: FleetSql, actor: string, i: RolloutInput):
   return rows.length === 1 ? { ok: true, from: was } : { ok: false, reason: "db" };
 }
 
-/** Replace a device's cohort memberships. ONE statement with its audit row. */
+/** Replace a device's cohort memberships (kept ones untouched, missing ones removed, new ones added). ONE statement with its audit row. */
 export async function setDeviceCohorts(sql: FleetSql, actor: string, deviceId: string, cohorts: readonly string[]): Promise<{ ok: true } | { ok: false; reason: string }> {
   const uniq = [...new Set(cohorts)];
   if (!uniq.every((c) => (DEVICE_COHORTS as readonly string[]).includes(c))) return { ok: false, reason: "bad_cohort" };
   const dev = (await sql`SELECT machine, status FROM fleet_devices WHERE device_id = ${deviceId}`) as Array<{ machine: string; status: string }>;
   if (!dev[0]) return { ok: false, reason: "unknown_device" };
+  // Sibling data-modifying CTEs share ONE snapshot: a DELETE of every row plus an INSERT ... ON CONFLICT DO NOTHING would let the insert conflict with the very row the delete
+  // removes, and a cohort kept across the call would vanish. So delete ONLY what is not in the new list and insert the new ones (kept ones conflict harmlessly, untouched).
   const rows = await sql`
-    WITH del AS (DELETE FROM fleet_device_cohort WHERE device_id = ${deviceId} RETURNING cohort),
+    WITH del AS (DELETE FROM fleet_device_cohort WHERE device_id = ${deviceId} AND cohort <> ALL(${uniq}::text[]) RETURNING cohort),
     ins AS (
       INSERT INTO fleet_device_cohort (device_id, cohort, assigned_by)
       SELECT ${deviceId}, c, ${actor} FROM unnest(${uniq}::text[]) AS c

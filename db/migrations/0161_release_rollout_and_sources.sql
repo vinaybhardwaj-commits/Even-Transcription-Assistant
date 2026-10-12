@@ -10,6 +10,10 @@
 --     helper event could be swallowed as a "duplicate" of a daemon event that merely shared those three values. The constraint KEEPS ITS NAME, so code that names it
 --     (ON CONFLICT ON CONSTRAINT kiosk_health_events_machine_boot_seq_key) works before and after this migration, in either deploy order.
 --
+-- DEPLOY ORDER: apply this migration BEFORE the app that carries it. lib/room-install.ts writeHelperFields now names helper_update_step / _version / _result in the same UPDATE as the
+-- TS-H5 helper fields: with the app first that UPDATE fails (caught, logged, the poll is unaffected) and every 0.1.35+ app's helper telemetry stops being stored until this lands.
+-- NEVER apply the abandoned gating/rr0137-server branch's own 0160: it renames kiosk_health_events_machine_boot_seq_key, which would make the swap below skip and break code that names the constraint.
+--
 -- ADDITIVE AND IDEMPOTENT: CREATE ... IF NOT EXISTS and ADD COLUMN IF NOT EXISTS; the constraint swap is guarded (skipped when the constraint already includes `source`). No data is
 -- changed or removed. The constraint swap builds one unique index over kiosk_health_events (30 days of rows) and briefly blocks writes to it while it builds.
 -- GRANTS: none (app-owned). NO PHI: version strings, URLs of our own release blobs, machine/device ids.

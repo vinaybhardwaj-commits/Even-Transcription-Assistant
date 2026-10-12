@@ -277,15 +277,46 @@ const PUBKEYS = { fk1: publicKeysOf(SIGNER).fk1! };
       expect((await q<{ cohort: string }>`SELECT cohort FROM fleet_device_cohort`).map((r) => r.cohort)).toEqual(["audiometry"]);
     });
 
-    it("device cohorts: unknown device 404, a stage name is not a membership, replace semantics, [] clears", async () => {
+    it("device cohorts: unknown device 404, a stage name is not a membership", async () => {
       expect(await cohorts("dev_" + "9".repeat(24), ["opd1"])).toMatchObject({ status: 404 });
       expect(await cohorts(DEV, ["pct"])).toMatchObject({ status: 400, json: { error: "bad_cohort" } });
       expect(await cohorts(DEV, ["all"])).toMatchObject({ status: 400 });
-      await cohorts(DEV, ["opd1", "audiometry"]);
-      await cohorts(DEV, ["home_office"]);
-      expect((await q<{ cohort: string }>`SELECT cohort FROM fleet_device_cohort ORDER BY cohort`).map((r) => r.cohort)).toEqual(["home_office"]);
-      await cohorts(DEV, []);
       expect(await q`SELECT 1 FROM fleet_device_cohort`).toHaveLength(0);
+    });
+
+    it("REPLACE semantics keep what is kept (refute F1): re-posting the SAME list leaves it unchanged (and audited); a superset keeps the old and adds the new; a subset removes the rest; [] clears", async () => {
+      const have = async () => (await q<{ cohort: string }>`SELECT cohort FROM fleet_device_cohort WHERE device_id = ${DEV} ORDER BY cohort`).map((r) => r.cohort);
+      const stamp = async () => (await q<{ cohort: string; assigned_at: string }>`SELECT cohort, assigned_at FROM fleet_device_cohort WHERE device_id = ${DEV} ORDER BY cohort`).map((r) => `${r.cohort}@${r.assigned_at}`);
+      expect((await cohorts(DEV, ["opd1"])).status).toBe(200);
+      expect(await have()).toEqual(["opd1"]);
+      const first = await stamp();
+      expect((await cohorts(DEV, ["opd1"])).status).toBe(200); // the SAME list again
+      expect(await have()).toEqual(["opd1"]);
+      expect(await stamp()).toEqual(first); // the row was not deleted and re-created
+      expect((await cohorts(DEV, ["opd1", "audiometry"])).status).toBe(200); // a superset
+      expect(await have()).toEqual(["audiometry", "opd1"]);
+      expect((await stamp()).find((x) => x.startsWith("opd1@"))).toBe(first[0]); // the old one is the old row
+      expect((await cohorts(DEV, ["audiometry", "home_office"])).status).toBe(200); // overlap: one kept, one dropped, one added
+      expect(await have()).toEqual(["audiometry", "home_office"]);
+      expect((await cohorts(DEV, ["home_office"])).status).toBe(200); // a subset
+      expect(await have()).toEqual(["home_office"]);
+      expect((await cohorts(DEV, ["home_office", "home_office"])).status).toBe(200); // duplicates in the request
+      expect(await have()).toEqual(["home_office"]);
+      expect((await cohorts(DEV, [])).status).toBe(200); // empty clears
+      expect(await have()).toEqual([]);
+      expect((await cohorts(DEV, [])).status).toBe(200); // empty again: still fine
+      // every call was audited, and the audit says what the device actually has
+      const audit = await q<{ summary: string }>`SELECT summary FROM fleet_audit WHERE action = 'device_cohorts' ORDER BY id`;
+      expect(audit.map((a) => a.summary)).toEqual([
+        `device ${DEV}: [opd1]`, `device ${DEV}: [opd1]`, `device ${DEV}: [opd1, audiometry]`, `device ${DEV}: [audiometry, home_office]`, `device ${DEV}: [home_office]`, `device ${DEV}: [home_office]`, `device ${DEV}: []`, `device ${DEV}: []`,
+      ]);
+    });
+
+    it("another device's cohorts are never touched by a change to this one", async () => {
+      await cohorts(DEV2, ["audiometry"]);
+      await cohorts(DEV, ["opd1"]);
+      await cohorts(DEV, []);
+      expect((await q<{ device_id: string; cohort: string }>`SELECT device_id, cohort FROM fleet_device_cohort`)).toEqual([{ device_id: DEV2, cohort: "audiometry" }]);
     });
 
     it("the admin read lists stages, cohorts and buckets, with no signature or key", async () => {
