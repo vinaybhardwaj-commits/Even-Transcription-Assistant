@@ -191,6 +191,10 @@ export async function GET(req: NextRequest) {
         console_user: tri("console_user"),
         power_schedule: sp.get("power_schedule"),
         pmset_drift: sp.get("pmset_drift"),
+        // ── RR 0.1.37 (0160). Sent by app 0.1.37 and later, all optional; `cleanPollFields` bounds each. ──
+        helper_update_step: sp.get("helper_update_step"),
+        helper_update_version: sp.get("helper_update_version"),
+        helper_update_result: sp.get("helper_update_result"),
       }
     : undefined;
 

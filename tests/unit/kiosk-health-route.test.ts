@@ -85,7 +85,7 @@ describe("POST /api/kiosk-health", () => {
     expect(M.sql).toHaveBeenCalledTimes(3);
     expect(M.sql.mock.calls.map((c) => (c[1] as unknown[]).length / 9)).toEqual([100, 100, 50]);
     const [text, params] = M.sql.mock.calls[0] as [string, unknown[]];
-    expect(text).toContain("ON CONFLICT ON CONSTRAINT kiosk_health_events_machine_boot_seq_key DO NOTHING RETURNING id");
+    expect(text).toContain("ON CONFLICT DO NOTHING RETURNING id"); // no constraint named: the unique key is (machine, boot_id, seq, source) since 0160
     expect(text).toContain("$900::jsonb");
     expect(text).not.toContain("m1"); // values are bound, never interpolated
     expect(params.slice(0, 9)).toEqual(["m1", "r1", "i1", "b1", 0, "daemon", "heartbeat", expect.any(String), "{}"]);

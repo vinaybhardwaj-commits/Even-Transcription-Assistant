@@ -2,6 +2,8 @@
  * GET /api/steward/tickets?machine=<id> — a kiosk fetches its pending Room Steward repair tickets (migration 0128, lib/steward/tickets.ts).
  *
  * Auth: Authorization: Bearer ${KIOSK_HEALTH_INGEST_TOKEN} (same token and constant-time check as POST /api/kiosk-health). Unset -> 500, wrong/missing -> 401.
+ *       OR Authorization: Device <fleet device JWT> (RR 0.1.37 #49: the room app relays for its helper; lib/fleet/device-auth.ts, bound to GET and this path, jti once). A bad or
+ *       expired token, another path, or an unknown/revoked device -> 401 <reason>. A Device caller may fetch only its OWN machine's tickets (another machine -> 403 machine_mismatch).
  * machine: 1..128 chars (same rule as the kiosk-health machine field). Missing/invalid -> 400.
  * 200 { ok:true, key_id, tickets:[{ ticket, signature }] }: this machine's status 'issued', unexpired tickets, oldest first, at most 10, each marked 'fetched'
  * (fetched_at = now). Tickets past expires_at are flipped to 'expired' first (lazily, here), which also frees their (machine, action) slot.
@@ -9,6 +11,8 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
+import { authenticateDevice } from "@/lib/fleet/device-auth";
+import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { isValidMachine } from "@/lib/kiosk-health-ingest";
 import { kioskIngestToken, tokenOk } from "@/lib/kiosk-health-auth";
 import { STEWARD_TICKET_KEY_ID } from "@/lib/steward/ticket-public-key";
@@ -36,18 +40,32 @@ type Row = {
 };
 
 export async function GET(req: NextRequest) {
-  const expected = kioskIngestToken();
-  if (!expected) {
-    if (!warnedUnset) {
-      warnedUnset = true;
-      console.error("[steward-tickets] KIOSK_HEALTH_INGEST_TOKEN is not set; endpoint disabled");
+  const authz = req.headers.get("authorization") ?? "";
+  let deviceMachine: string | null = null;
+  if (authz.startsWith("Device ")) {
+    try {
+      const auth = await authenticateDevice(sql as never, { authorization: authz, method: "GET", path: req.nextUrl.pathname, nowMs: Date.now() });
+      if (!auth.ok) return reply(auth.status, { ok: false, error: auth.code });
+      deviceMachine = auth.device.machine;
+    } catch {
+      console.warn("[steward-tickets] database fault");
+      return reply(503, { ok: false, error: "db" });
     }
-    return reply(500, { ok: false, error: "not_configured" });
+  } else {
+    const expected = kioskIngestToken();
+    if (!expected) {
+      if (!warnedUnset) {
+        warnedUnset = true;
+        console.error("[steward-tickets] KIOSK_HEALTH_INGEST_TOKEN is not set; endpoint disabled");
+      }
+      return reply(500, { ok: false, error: "not_configured" });
+    }
+    if (!tokenOk(authz, expected)) return reply(401, { ok: false, error: "unauthorized" });
   }
-  if (!tokenOk(req.headers.get("authorization") ?? "", expected)) return reply(401, { ok: false, error: "unauthorized" });
 
   const machine = req.nextUrl.searchParams.get("machine");
   if (!isValidMachine(machine)) return reply(400, { ok: false, error: "bad_machine" });
+  if (deviceMachine !== null && normalizeHostname(machine).toLowerCase() !== normalizeHostname(deviceMachine).toLowerCase()) return reply(403, { ok: false, error: "machine_mismatch" });
 
   try {
     await sql`

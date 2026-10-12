@@ -40,6 +40,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { readRoomClaims } from "@/lib/room-auth";
 import { installError, installErrorFrom, latestRelease } from "@/lib/room-install";
 import { respondError } from "@/lib/respond";
+import { sql } from "@/lib/db";
+import { loadSigner } from "@/lib/fleet/signing";
+import { buildRecord, signRecord, type NoRecordReason } from "@/lib/fleet/release-record";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,6 +53,39 @@ const CHANNELS = ["stable", "test"] as const;
 type Channel = (typeof CHANNELS)[number];
 
 const isChannel = (v: string): v is Channel => (CHANNELS as readonly string[]).includes(v);
+
+/** One closed reason code per request, never a value. The route then answers with the old four fields only: the helper keeps its current version. */
+const noRecord = (reason: NoRecordReason) => {
+  console.warn(`[room-recorder-release] no signed record: ${reason}`);
+  return {};
+};
+
+/** RR 0.1.37 #45: the signed per-device record. The device is the room's active fleet device (the app sends nothing new). Never throws, never a 500. */
+async function signedRecord(roomId: string, channel: string, release: { version: string; sha256: string; size_bytes: number; blob_url: string }) {
+  const signer = loadSigner();
+  if (!signer) return noRecord("signing_key_unset");
+  let device: { device_id: string; machine: string } | undefined;
+  try {
+    const rows = (await sql`
+      SELECT d.device_id, d.machine
+        FROM fleet_devices d
+        JOIN room_install ri ON ri.install_id = d.install_id
+       WHERE d.room_id = ${roomId} AND d.status = 'active' AND ri.retired_at IS NULL
+       ORDER BY d.last_poll_at DESC NULLS LAST, d.device_id
+       LIMIT 1
+    `) as Array<{ device_id: string; machine: string }>;
+    device = rows[0];
+  } catch {
+    return noRecord("device_lookup_failed");
+  }
+  if (!device) return noRecord("no_device");
+  try {
+    const record = buildRecord({ release, channel, device, signer });
+    return { record, record_signature: signRecord(record, signer) };
+  } catch {
+    return noRecord("sign_failed");
+  }
+}
 
 export async function GET(req: NextRequest) {
   const claims = await readRoomClaims();
@@ -71,7 +107,7 @@ export async function GET(req: NextRequest) {
     if (!release) {
       return installError("NO_RELEASE", "no release published on this channel", 404);
     }
-    // FOUR FIELDS, and the omissions are the point. `blob_url` is what to fetch, `sha256` and
+    // FOUR FIELDS (plus, since RR 0.1.37, the per-device signed `record` + `record_signature` when the signing key is set and the room has an active device), and the omissions are the point. `blob_url` is what to fetch, `sha256` and
     // `size_bytes` are what it must weigh and hash, `version` is what it will become. The app
     // pins its expected SIGNER as a compile-time constant (R3-5) and never takes it from here,
     // so a wrong or compromised publish cannot point a Mac at a different certificate.
@@ -81,6 +117,7 @@ export async function GET(req: NextRequest) {
         sha256: release.sha256,
         size_bytes: release.size_bytes,
         blob_url: release.blob_url,
+        ...(await signedRecord(claims.room_id, raw, release)),
       },
       NO_STORE,
     );

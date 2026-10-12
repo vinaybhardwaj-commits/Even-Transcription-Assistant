@@ -6,6 +6,8 @@
  *       OR Authorization: Device <room session JWT> (TS-H10 #47: the room app posts the helper's spooled events with its existing device credential, verified exactly as the bench
  *       poll verifies it). A Device post may carry only source "helper", only for a Mac that belongs to the JWT's own room, and never kind steward.result; any other event is
  *       rejected by name (wrong_source · machine_not_in_room · room_mismatch · kind_not_allowed). An invalid Device token → 401.
+ *       OR Authorization: Device <fleet device JWT> (RR 0.1.37 #49: EdDSA, lib/fleet/device-auth.ts; bound to POST, this path and this exact body by `bsha`; jti once). Same confinement as the
+ *       room-JWT Device post, tighter on the Mac: only the device's OWN machine (machine_not_in_room otherwise). The two Device kinds are told apart by the token header's alg (EdDSA = fleet).
  * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, the OTHER source of the daemon/helper pair, ts within 2 s) is already stored AND not yet used by another event is not stored again (pairing is one-to-one, nearest first); it is counted in
  * `deduped` and recorded in kiosk_health_dedupe (migration 0154).
  * Idempotent on (machine, boot_id, seq): replays of a spooled batch insert nothing new and still answer 200.
@@ -24,6 +26,7 @@ import { sql } from "@/lib/db";
 import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-health-ingest";
 import { tokenOk } from "@/lib/kiosk-health-auth";
 import { verifyRoomJwt } from "@/lib/room-auth";
+import { authenticateDevice, parseDeviceAuthorization } from "@/lib/fleet/device-auth";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { loadLedgerNear, loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
 import { applyStewardResults, STEWARD_RESULT_KIND } from "@/lib/steward/results";
@@ -36,7 +39,6 @@ export const maxDuration = 15;
 const MAX_BODY_CHARS = 3_000_000;
 const CHUNK = 100;
 const REASONS_CAP = 20;
-const KIOSK_HEALTH_UNIQUE = "kiosk_health_events_machine_boot_seq_key";
 
 const reply = (status: number, body: Record<string, unknown>) =>
   NextResponse.json(body, { status, headers: { "cache-control": "no-store" } });
@@ -60,7 +62,8 @@ async function insertChunk(rows: KioskHealthRow[]): Promise<number> {
   const text =
     "INSERT INTO kiosk_health_events (machine, room_id, install_id, boot_id, seq, source, kind, ts, payload) VALUES " +
     tuples.join(", ") +
-    ` ON CONFLICT ON CONSTRAINT ${KIOSK_HEALTH_UNIQUE} DO NOTHING RETURNING id`;
+    // No conflict target: the unique key is (machine, boot_id, seq, source) since 0160 and (machine, boot_id, seq) before it; this insert is correct on either side of the migration.
+    " ON CONFLICT DO NOTHING RETURNING id";
   const out = (await (sql as unknown as (q: string, p: unknown[]) => Promise<unknown[]>)(text, params)) ?? [];
   return out.length;
 }
@@ -69,7 +72,12 @@ export async function POST(req: NextRequest) {
   const authz = req.headers.get("authorization") ?? "";
   // TS-H10: the room app's device credential (the same room session JWT its bench poll carries) in the Authorization header; the daemon's bearer path below is unchanged.
   let deviceRoom: string | null = null;
-  if (authz.startsWith("Device ")) {
+  // A fleet device token (EdDSA) is body-bound, so it is checked after the body is read; a room-session token (HS256) is checked here as before.
+  const fleetDevice = authz.startsWith("Device ") && parseDeviceAuthorization(authz)?.header.alg === "EdDSA";
+  let fleetMachine: string | null = null;
+  if (fleetDevice) {
+    // checked below, with the body
+  } else if (authz.startsWith("Device ")) {
     try {
       const claims = await verifyRoomJwt(authz.slice("Device ".length).trim());
       deviceRoom = typeof claims.room_id === "string" && claims.room_id ? claims.room_id : null;
@@ -98,6 +106,17 @@ export async function POST(req: NextRequest) {
     return reply(400, { ok: false, error: "bad_json" });
   }
   if (text.length > MAX_BODY_CHARS) return reply(413, { ok: false, error: "body_too_large" });
+  if (fleetDevice) {
+    try {
+      const auth = await authenticateDevice(sql as never, { authorization: authz, method: "POST", path: req.nextUrl.pathname, bodyText: text, nowMs: Date.now() });
+      if (!auth.ok) return reply(auth.status, { ok: false, error: "unauthorized" });
+      deviceRoom = auth.device.room_id;
+      fleetMachine = auth.device.machine;
+    } catch {
+      console.warn("[kiosk-health] device auth lookup failed");
+      return reply(503, { ok: false, error: "db" });
+    }
+  }
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -114,7 +133,8 @@ export async function POST(req: NextRequest) {
   // A Device post is confined to its own room: the helper's source, this room's Macs, no steward results.
   if (deviceRoom !== null) {
     let mine: string[] = [];
-    try {
+    if (fleetMachine !== null) mine = [normalizeHostname(fleetMachine).toLowerCase()];
+    else try {
       const installs = (await sql`SELECT hostname FROM room_install WHERE room_id = ${deviceRoom} AND retired_at IS NULL AND hostname IS NOT NULL`) as Array<{ hostname: string }>;
       mine = installs.map((i) => normalizeHostname(i.hostname).toLowerCase());
     } catch {
