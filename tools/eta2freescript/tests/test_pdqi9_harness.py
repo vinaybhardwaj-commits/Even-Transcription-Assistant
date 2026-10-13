@@ -1,0 +1,571 @@
+"""B4b scoring harness. Synthetic only: fake Bedrock client, fake Jev, obviously fake frozen prompt files."""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import pytest
+from conftest import CONSULTS, build_artifact, stage_a
+
+from tools.eta2freescript import validate
+from tools.eta2freescript.eval.pdqi9 import floors, jev_lines, judge, render, run, scoreboard, splits, stats
+from tools.eta2freescript.ingest import format_transcript, load_consult
+from tools.eta2freescript.models import FakeClient
+from tools.eta2freescript.validate import frx_n, printable_errors
+
+MARK = "ZZFAKEPROMPTZZ"
+FAKE_FILES = {
+    "pdqi9-judge-v3.system.txt": MARK + " judge system. {{REFERENCE_RULE}}",
+    "pdqi9-ref-transcript-v3.txt": MARK + " rule with transcript",
+    "pdqi9-ref-none-v3.txt": MARK + " rule without transcript",
+    "pdqi9-user-v3.txt": MARK + " user\n{{TRANSCRIPT_BLOCK}}\nNote {{NOTE_ID}}:\n{{NOTE}}",
+    "floor-items-v1.system.txt": MARK + " floor items system",
+    "floor-missing-v1.system.txt": MARK + " floor missing system",
+}
+UIDS = ["synth-fever-dose", "synth-cough-native", "synth-boundary-knee"]
+RX = {"medicines": [{"name": "Paracetamol", "strength": "1 g", "frequency": "three times a day", "duration": "three days"}],
+      "diagnoses": [{"name": "Viral fever"}, {"name": "dengue", "is_differential": True}], "comorbidities": [{"name": "HYPERTENSION", "duration": "2 years"}],
+      "symptoms": "Fever and body pain", "examination": "Temperature 101 F", "management_plan": "Rest",
+      "investigations": [{"name": "CBC", "urgent": True}], "referrals": [], "general_advice": ["Drink water"],
+      "follow_up": {"type": "visit", "instructions": "after one week"}, "surgeries": []}
+
+
+def make_frozen(root: Path, tuning=("synth-fever-dose", "synth-cough-native"), lockbox=("synth-boundary-knee",)) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+    for n, t in FAKE_FILES.items():
+        (root / n).write_text(t, encoding="utf-8")
+        (root / n).chmod(0o600)
+    (root / "split-v1.json").write_text(json.dumps({"tuning": list(tuning), "lockbox": list(lockbox)}), encoding="utf-8")
+    (root / "split-v1.json").chmod(0o600)
+    return root
+
+
+def item(n, **kw):
+    return {"n": n, "said": "yes", "leak": False, "invented": [], "dose_precedence_error": False, "turns": ["T1"], **kw}
+
+
+def responder(tag: str, prompt: str, system: str) -> str:
+    if tag.startswith("pdqi9-v3"):
+        return json.dumps(dict(zip(judge.ITEM_KEYS, [3, 4, 4, 3, 5, 4, 3, 4, 4])))
+    if tag.startswith("floor-items-v1"):
+        n = len(re.findall(r"^\d+\. \[", prompt.split("ITEMS:")[1], re.M))
+        return json.dumps({"items": [item(i) for i in range(1, n + 1)]})
+    if tag.startswith("floor-missing-v1"):
+        n = len(re.findall(r"^\d+\. \[", prompt.split("SIGNED:")[1].split("DRAFT:")[0], re.M))
+        return json.dumps({"signed": [{"n": i, "in_draft": True, "covered_by": None} for i in range(1, n + 1)]})
+    raise KeyError(tag)
+
+
+@pytest.fixture
+def frozen(tmp_path):
+    return judge.load_frozen(make_frozen(tmp_path / "frozen"))
+
+
+@pytest.fixture
+def fever():
+    c = load_consult(CONSULTS, "synth-fever-dose")
+    art = build_artifact(c, stage_a("synth-fever-dose"))
+    return c, art
+
+
+# ---- render -----------------------------------------------------------------------------------------------------
+
+def test_render_is_deterministic_and_has_the_twelve_headings_in_order():
+    a, b = render.render(copy.deepcopy(RX)), render.render(copy.deepcopy(RX))
+    assert a == b and render.RENDER_VERSION == "render-v2"
+    heads = [ln[:-1] for ln in a.split("\n") if ln.endswith(":") and not ln.startswith(" ")]
+    assert heads == list(render.HEADINGS) and len(heads) == 12
+
+
+def test_same_template_for_every_arm_and_neutral_text():
+    other = {"medicines": [{"name": "Zinc"}]}
+    h = lambda t: [ln for ln in t.split("\n") if ln.endswith(":") and not ln.startswith(" ")]
+    assert h(render.render(RX)) == h(render.render(other)) == h(render.render({}))
+    txt = render.render(other)
+    assert "Strength: not specified" in txt and "Frequency: not specified" in txt and "Duration: not specified" in txt and "Instructions: not specified" in txt
+    assert not re.search(r"\[|\]|\{\{|ETA|Pulse|doctor|signed", txt, re.I)
+
+
+def test_sentence_case_of_mostly_uppercase_strings_only():
+    txt = render.render({"comorbidities": [{"name": "HYPERTENSION AND DIABETES. ON DRUGS"}], "investigations": [{"name": "ECG"}, {"name": "Ultrasound abdomen"}]})
+    assert "Hypertension and diabetes. On drugs" in txt and "ECG" in txt and "Ultrasound abdomen" in txt
+
+
+def test_input_is_schema_validated():
+    with pytest.raises(render.PrescriptionError):
+        render.render({"medicines": [{"strength": "1 g"}]})
+    with pytest.raises(render.PrescriptionError):
+        render.render({"medicines": "paracetamol"})
+
+
+# ---- judge: blinding, shuffling, parsing, cache, frozen dir ---------------------------------------------------------
+
+def test_note_id_is_the_specified_hash():
+    import hashlib
+    assert judge.note_id("u1", "Bn") == hashlib.sha256(b"20261012u1Bn").hexdigest()[:10]
+
+
+def test_shuffling_is_reproducible_and_seed_dependent():
+    a = judge.plan_calls(["u2", "u1", "u3"], ["A", "B0", "Bn"])
+    assert a == judge.plan_calls(["u3", "u1", "u2"], ["A", "B0", "Bn"])
+    assert a != judge.plan_calls(["u2", "u1", "u3"], ["A", "B0", "Bn"], seed=1)
+    assert len(a) == 3 * 3 * 4 and len(set(a)) == len(a)
+    assert a != sorted(a)
+
+
+def test_no_arm_name_reaches_any_judge_input(frozen, tmp_path, fever):
+    c, _ = fever
+    fc = FakeClient(responder)
+    tr = format_transcript(c)
+    for arm in ("A", "B0", "Bn"):
+        for ref in judge.REFS:
+            judge.score_note(fc, frozen, uid="synth-fever-dose", arm=arm, judge="opus", ref=ref, note=render.render(RX), transcript=tr,
+                             cache_dir=tmp_path / "c", render_version=render.RENDER_VERSION)
+    assert len(fc.calls) == 6
+    for call in fc.calls:
+        blob = call["prompt"] + call["system"]
+        assert not re.search(r"\bB0\b|\bBn\b|\bA\b arm|arm [AB]", blob)
+        assert any(judge.note_id("synth-fever-dose", arm) in call["prompt"] for arm in ("A", "B0", "Bn"))
+    assert "{{" not in fc.calls[0]["prompt"] + fc.calls[0]["system"]
+    assert "rule with transcript" in "".join(x["system"] for x in fc.calls) and tr in fc.calls[0]["prompt"] + fc.calls[1]["prompt"]
+
+
+GOOD = {k: 3 for k in judge.ITEM_KEYS}
+
+
+@pytest.mark.parametrize("text,ok", [
+    (json.dumps(GOOD), True), ("```json\n" + json.dumps(GOOD) + "\n```", True),
+    (json.dumps({**GOOD, "accurate": 1, "up_to_date": 5}), True),
+    ("[1,2,3,4,5,1,2,3,4]", False), (json.dumps({"scores": GOOD}), False), (json.dumps({k: 3 for k in list(GOOD)[:8]}), False),
+    (json.dumps({**GOOD, "extra": 3}), False), (json.dumps({**{k: 3 for k in list(GOOD)[:8]}, "bogus": 3}), False),
+    (json.dumps({**GOOD, "useful": 6}), False), (json.dumps({**GOOD, "useful": 0}), False), (json.dumps({**GOOD, "useful": 3.0}), False),
+    (json.dumps({**GOOD, "useful": True}), False), (json.dumps({**GOOD, "useful": "3"}), False), ("Scores: " + json.dumps(GOOD), False), ("not json", False)])
+def test_parse_is_strict(text, ok):
+    assert (judge.parse_scores(text) is not None) is ok
+
+
+def test_one_retry_then_parse_failure_and_failures_are_cached_per_key(frozen, tmp_path):
+    fc = FakeClient(lambda *a: "garbage")
+    kw = dict(uid="u", arm="A", judge="opus", ref="none", note="n", transcript="t", cache_dir=tmp_path, render_version="render-v2")
+    r = judge.score_note(fc, frozen, **kw)
+    assert r["parse_failure"] and r["scores"] is None and len(fc.calls) == 2
+    judge.score_note(fc, frozen, **kw)
+    assert len(fc.calls) == 2  # cached
+    replies = iter(["garbage", json.dumps(GOOD)])
+    fc2 = FakeClient(lambda *a: next(replies))
+    r2 = judge.score_note(fc2, frozen, **{**kw, "uid": "v"})
+    assert r2["scores"] == [3] * 9 and r2["attempts"] == 2 and len(fc2.calls) == 2
+
+
+def test_cache_key_changes_with_note_judge_ref(frozen, tmp_path):
+    fc = FakeClient(responder)
+    kw = dict(uid="u", arm="A", judge="opus", ref="none", note="n", transcript="t", cache_dir=tmp_path, render_version="render-v2")
+    judge.score_note(fc, frozen, **kw)
+    judge.score_note(fc, frozen, **kw)
+    assert len(fc.calls) == 1
+    judge.score_note(fc, frozen, **{**kw, "note": "n2"})
+    judge.score_note(fc, frozen, **{**kw, "judge": "sonnet"})
+    judge.score_note(fc, frozen, **{**kw, "ref": "transcript"})
+    assert len(fc.calls) == 4
+
+
+def test_frozen_dir_permissions_refused_and_hashes_recorded(tmp_path):
+    import hashlib
+    root = make_frozen(tmp_path / "f")
+    fz = judge.load_frozen(root)
+    for n in judge.FROZEN_FILES:
+        assert fz.hashes[n] == hashlib.sha256((root / n).read_bytes()).hexdigest()
+    (root / "pdqi9-user-v3.txt").chmod(0o640)
+    with pytest.raises(judge.FrozenError, match="pdqi9-user"):
+        judge.load_frozen(root)
+    (root / "pdqi9-user-v3.txt").chmod(0o600)
+    root.chmod(0o750)
+    with pytest.raises(judge.FrozenError):
+        judge.load_frozen(root)
+    root.chmod(0o700)
+    (root / "split-v1.json").unlink()
+    with pytest.raises(judge.FrozenError, match="missing"):
+        judge.load_frozen(root)
+
+
+# ---- splits and lockbox -----------------------------------------------------------------------------------------
+
+def test_overlapping_splits_refused():
+    with pytest.raises(splits.SplitError):
+        splits.Splits(["a", "b"], ["b"])
+
+
+def test_lockbox_refusal_and_once_per_candidate(tmp_path, monkeypatch):
+    sp = splits.Splits(["t1", "t2"], ["l1", "l2"])
+    led = tmp_path / "ledger" / "lockbox.jsonl"
+    monkeypatch.setenv(splits.LEDGER_ENV, str(led))
+    assert splits.gate(sp, ["t1", "t2"], False, None) == "tuning"
+    with pytest.raises(splits.SplitError, match="lockbox"):
+        splits.gate(sp, ["t1", "l1"], False, None)
+    with pytest.raises(splits.SplitError):
+        splits.gate(sp, ["l1"], False, "c1")
+    with pytest.raises(splits.SplitError, match="candidate"):
+        splits.gate(sp, ["l1"], True, None)
+    with pytest.raises(splits.SplitError, match="tuning uids"):
+        splits.gate(sp, ["l1", "t1"], True, "c1")
+    with pytest.raises(splits.SplitError, match="neither"):
+        splits.gate(sp, ["zz"], False, None)
+    assert not led.exists()
+    assert splits.gate(sp, ["l1", "l2"], True, "c1") == "lockbox"
+    assert oct(led.stat().st_mode & 0o777) == "0o600"
+    with pytest.raises(splits.SplitError, match="second run"):
+        splits.gate(sp, ["l1"], True, "c1")
+    assert splits.gate(sp, ["l1"], True, "c2") == "lockbox"
+    lines = led.read_text().splitlines()
+    assert [json.loads(x)["candidate"] for x in lines] == ["c1", "c2"]
+
+
+def test_lockbox_needs_the_ledger_env_and_tuning_runs_do_not(tmp_path, monkeypatch):
+    sp = splits.Splits(["t1"], ["l1"])
+    monkeypatch.delenv(splits.LEDGER_ENV, raising=False)
+    with pytest.raises(splits.SplitError, match=splits.LEDGER_ENV):
+        splits.gate(sp, ["l1"], True, "c1")
+    assert splits.gate(sp, ["t1"], False, None) == "tuning"
+    assert not list(tmp_path.iterdir())
+
+
+# ---- floors -----------------------------------------------------------------------------------------------------
+
+def items_reply(rows):
+    return lambda tag, p, s: json.dumps({"items": rows(p)}) if tag.startswith("floor-items") else responder(tag, p, s)
+
+
+def test_judge_floor_counts_a_breaking_case_and_a_passing_case(frozen, tmp_path):
+    items = floors.numbered_items({"medicines": [{"name": "Paracetamol", "strength": "1 g"}, {"name": "Zorbex"}, {"name": "Cetrizine"}],
+                                   "diagnoses": [{"name": "Viral fever"}, {"name": "Cough"}]})
+    assert [i["kind"] for i in items] == ["medicine"] * 3 + ["diagnosis"] * 2
+    bad = [item(1, invented=["frequency", "duration"], dose_precedence_error=True), item(2, said="no", leak=True), item(3, said="unclear"),
+           item(4, said="no"), item(5, said="unclear")]
+    r = floors.judge_items(FakeClient(lambda *a: json.dumps({"items": bad})), frozen, items, "T0 hi", tmp_path / "a", "u", "Bn")
+    assert r == {"unsupported_drugs": 1, "leak_items": 1, "invented_fields": 1, "dose_precedence_errors": 1, "hallucinations": 2,
+                 "unclear_items": 2, "parse_failure": False}
+    good = [item(i) for i in range(1, 6)]
+    r = floors.judge_items(FakeClient(lambda *a: json.dumps({"items": good})), frozen, items, "T0 hi", tmp_path / "b", "u", "Bn")
+    assert {k: v for k, v in r.items() if k != "parse_failure"} == dict.fromkeys(floors._ZERO, 0)
+    fc = FakeClient(lambda *a: json.dumps({"items": good}))
+    floors.judge_items(fc, frozen, items, "T0 hi", tmp_path / "c", "u", "Bn")
+    assert "ITEMS:\n1. [medicine] Paracetamol" in fc.calls[0]["prompt"] and fc.calls[0]["prompt"].startswith("TRANSCRIPT:\nT0 hi")
+
+
+@pytest.mark.parametrize("mut", [
+    lambda x: x.update(said="partial"), lambda x: x.update(invented=["dose"]), lambda x: x.update(invented="strength"), lambda x: x.update(leak="no"),
+    lambda x: x.update(dose_precedence_error=None), lambda x: x.update(turns="T1"), lambda x: x.update(turns=[1]), lambda x: x.update(n=True),
+    lambda x: x.pop("turns"), lambda x: x.pop("leak")])
+def test_floor_items_reply_is_parsed_exactly(frozen, tmp_path, mut):
+    items = floors.numbered_items({"diagnoses": [{"name": "a"}]})
+    row = item(1)
+    mut(row)
+    fc = FakeClient(lambda *a: json.dumps({"items": [row]}))
+    r = floors.judge_items(fc, frozen, items, "t", tmp_path, "u", "Bn")
+    assert r["parse_failure"] and r["hallucinations"] is None and len(fc.calls) == 2
+    fc = FakeClient(lambda *a: json.dumps({"items": [item(1)], "extra": 1}))
+    assert floors.judge_items(fc, frozen, items, "t", tmp_path / "x", "u", "Bn")["parse_failure"]
+    fc = FakeClient(lambda *a: json.dumps({"items": [item(1), item(2)]}))
+    assert floors.judge_items(fc, frozen, items, "t", tmp_path / "y", "u", "Bn")["parse_failure"]
+    t = floors.aggregate([{**floors_row(), "hallucinations": None, "unsupported_drugs": None}])
+    assert not next(x for x in t["rows"] if x["floor"] == "unsupported drugs")["pass"]
+
+
+def floors_row(**kw):
+    base = {"uid": "u", "arm": "Bn", "unsupported_drugs": 0, "leak_items": 0, "invented_fields": 0, "dose_precedence_errors": 0, "hallucinations": 0,
+            "invented_numbers": 0, "dose_precedence_det": 0, "printable_errors": 0, "validator_failures": 0, "artifact_missing": False,
+            "unclear_items": 0, "completion": {"missing": 2, "covered": 2, "parse_failure": False}}
+    return {**base, **kw}
+
+
+def test_invented_numbers_breaking_and_passing(fever):
+    c, art = fever
+    ok = {"medicines": [{"name": "Paracetamol", "strength": "1 g", "frequency": "three times a day"}]}
+    assert floors.invented_numbers(ok, art, c)["count"] == 0
+    assert floors.invented_numbers({"medicines": [{"name": "Paracetamol", "strength": "5 g"}]}, art, c) == {"offending_runs": 1, "unmatched_medicines": 0, "count": 1}
+    assert floors.invented_numbers({"medicines": [{"name": "Zorbex", "strength": "10 mg"}]}, art, c)["unmatched_medicines"] == 1
+    assert floors.invented_numbers({"medicines": [{"name": "Paracetamol", "strength": "1 g"}]}, None, c)["unmatched_medicines"] == 1
+    assert floors.invented_numbers({"medicines": [{"name": "Dolo", "frequency": "twice a day"}]}, art, c)["count"] == 0  # brand match, no digits
+
+
+def test_dose_precedence_breaking_and_passing(fever):
+    _, art = fever
+    assert any("doctor_dose_precedence" in p["flags"] for p in art["provenance"])
+    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol", "strength": "1 g"}]}, art) == 0
+    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol", "strength": "1000 mg"}]}, art) == 1
+    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol", "strength": "650 mg"}]}, art) == 1
+    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol"}]}, art) == 1
+    assert floors.dose_precedence({"medicines": []}, art) == 1
+
+
+def test_printable_floor_counts_note_text_and_replayed_fields(fever):
+    _, art = fever
+    assert floors.printable_count(RX, art) == 0
+    assert floors.printable_count({"general_advice": ["[doctor to verify] dose"]}, art) >= 2
+    bad = {**art, "note_text": art["note_text"] + "\nPlan of Management: tbd {{x}}"}
+    assert floors.printable_count({}, bad) >= 2
+
+
+def test_validator_floor(fever):
+    _, art = fever
+    assert floors.validator_failures(None) == 1
+    assert floors.validator_failures({**art, "note_text": "[x] broken"}) == 1
+    assert floors.validator_failures({"schema_version": "nope"}) == 1
+    assert floors.validator_failures(art) == (1 if validate.check(art) else 0)
+
+
+def test_completion_recall_counts_and_review_numbering(frozen, tmp_path):
+    signed = floors.numbered_items({"diagnoses": [{"name": "a"}, {"name": "b"}, {"name": "c"}]})
+    rows = lambda *r: lambda *a: json.dumps({"signed": [{"n": n, "in_draft": d, "covered_by": c} for n, d, c in r]})
+    review = [{"kind": "pick_drug", "prompt": "p", "detail": "dd"}, {"kind": "exam_missing", "prompt": "q"}]
+    fc = FakeClient(rows((1, True, None), (2, False, 2), (3, False, None)))
+    r = floors.completion_counts(fc, frozen, signed, signed[:1], review, "t", tmp_path, "u", "Bn")
+    assert r == {"missing": 2, "covered": 1, "parse_failure": False}
+    u = fc.calls[0]["prompt"]
+    assert "SIGNED:\n1. [diagnosis] a" in u and "DRAFT:\n1. [diagnosis] a" in u and "REVIEW:\n1. [pick_drug] p | detail: dd\n2. [exam_missing] q" in u
+    for i, bad in enumerate([rows((1, True, None), (2, False, 3), (3, False, None)), rows((1, True, None), (2, False, True), (3, False, None)),
+                             rows((1, True, None), (2, False, 0), (3, False, None)), rows((1, True, None), (2, False, None)),
+                             lambda *a: json.dumps({"items": []})]):
+        out = floors.completion_counts(FakeClient(bad), frozen, signed, [], review, "t", tmp_path / f"z{i}", "u", "Bn")
+        assert out["parse_failure"] and out["missing"] is None, i
+
+
+def test_floor_table_pass_and_fail():
+    good = floors.aggregate([floors_row(), floors_row()], [floors_row(completion={"missing": 2, "covered": 1, "parse_failure": False}), floors_row()])
+    assert good["all_pass"], good
+    for key, val in (("unsupported_drugs", 1), ("leak_items", 1), ("invented_fields", 1), ("dose_precedence_errors", 1), ("invented_numbers", 1),
+                     ("dose_precedence_det", 1), ("printable_errors", 1), ("validator_failures", 1)):
+        t = floors.aggregate([floors_row(**{key: val}), floors_row()], [floors_row()])
+        assert not t["all_pass"] and [x["pass"] for x in t["rows"]].count(False) == 1 + (key == "validator_failures" and 0), key
+    assert floors.aggregate([floors_row(hallucinations=1)] * 5 + [floors_row()] * 0)["rows"][7]["pass"] is False
+    assert floors.aggregate([floors_row(hallucinations=1)] + [floors_row()] * 5)["rows"][7]["pass"] is True   # 1/6 <= 0.2
+    assert floors.aggregate([floors_row(hallucinations=2)] + [floors_row()] * 5)["rows"][7]["pass"] is False  # 2/6 > 0.2
+    worse = floors.aggregate([floors_row(completion={"missing": 4, "covered": 1, "parse_failure": False})], [floors_row()])
+    assert not next(x for x in worse["rows"] if x["floor"] == "completion recall")["pass"]
+    assert not floors.aggregate([])["all_pass"]
+
+
+# ---- stats ------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("use_scipy", [True, False])
+def test_wilcoxon_hand_computed(use_scipy):
+    # d = [1,-2,3,-4,5,6]: ranks 1..6, W+ = 15, W- = 6; subsets of {1..6} with sum <= 6 = 14, p = 2*14/64
+    x, y = [1, 0, 3, 0, 5, 6], [0, 2, 0, 4, 0, 0]
+    r = stats.wilcoxon(x, y, use_scipy=use_scipy)
+    assert r["n"] == 6 and r["statistic"] == 6 and r["p"] == pytest.approx(0.4375)
+    r = stats.wilcoxon([2, 3, 4, 5, 6, 7], [1, 1, 1, 1, 1, 1], use_scipy=use_scipy)  # all positive: p = 2/64 ... diffs 1..6
+    assert r["statistic"] == 0 and r["p"] == pytest.approx(2 / 64)
+    z = stats.wilcoxon([1, 2, 3, 3], [1, 2, 0, 0], use_scipy=use_scipy)  # zero differences dropped
+    assert z["n"] == 2
+    assert stats.wilcoxon([1, 2], [1, 2], use_scipy=use_scipy) == {"n": 0, "statistic": None, "p": None}
+
+
+def test_python_fallback_matches_scipy_with_ties():
+    pytest.importorskip("scipy")
+    d = [1, 1, 2, 2, 2, -1, 3, 4, -2, 5, 1, 2, 3, 3, -3, 4, 5, 6, 1, 2, 2, 3, 4, -5, 1, 2, 3, 1, 2, 4]
+    zeros = [0] * len(d)
+    assert stats.wilcoxon(d, zeros, use_scipy=False)["p"] == pytest.approx(stats.wilcoxon(d, zeros, use_scipy=True)["p"], rel=1e-6)
+
+
+def test_holm_rank_biserial_and_median():
+    assert stats.holm([0.01, 0.04, 0.03]) == pytest.approx([0.03, 0.06, 0.06])
+    assert stats.holm([0.5, None, 0.01]) == pytest.approx([0.5, None, 0.02])
+    assert stats.holm([0.2, 0.001, 0.2]) == pytest.approx([0.4, 0.003, 0.4])
+    x, y = [1, 0, 3, 0, 5, 6], [0, 2, 0, 4, 0, 0]
+    assert stats.rank_biserial(x, y) == pytest.approx(9 / 21)
+    assert stats.rank_biserial(y, x) == pytest.approx(-9 / 21)
+    assert stats.rank_biserial([1], [1]) is None
+    assert stats.median_diff(x, y) == pytest.approx(2.0)  # diffs sorted -4 -2 1 3 5 6 -> (1+3)/2
+
+
+# ---- printable floor uses B1's public printable_errors (B1 owns the frx_n equivalence tests) ---------------------------
+
+def test_printable_floor_calls_b1_printable_errors(monkeypatch):
+    seen = []
+    monkeypatch.setattr(validate, "printable_errors", lambda t, p: seen.append((t, p)) or [])
+    assert floors.printable_count({"general_advice": ["a"]}, {"note_text": "N", "completion_required": [{"prompt": "P"}]}) == 0
+    assert ("N", ["P"]) in seen and ("a", []) in seen
+
+
+# ---- jev --------------------------------------------------------------------------------------------------------
+
+class _FakeJev:
+    def __init__(self, structured=True):
+        self.args, self.structured = [], structured
+
+    def call(self, tool, args):
+        assert tool == "jev_ask"
+        self.args.append(args)
+        ans = {k: {"type": "noul", "noul": 0.2 if "LOW" in args["state"]["lines"][k] else 0.9} for k in args["questions"]}
+        body = {"answers": ans, "model": "jev-test-1", "usage": {}}
+        return {"structuredContent": body} if self.structured else {"content": [{"type": "text", "text": json.dumps(body)}]}
+
+
+def test_jev_not_run_without_cmd(monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    r = jev_lines.check_lines("a\nb", "t")
+    assert r["status"] == "not run" and "JEV_MCP_CMD" in r["reason"]
+    assert not hasattr(jev_lines, "deid_from_env")
+
+
+def test_jev_args_are_exactly_the_strict_shape():
+    a = jev_lines.jev_ask_args("tape", {"L1": "x", "L3": "y"})
+    assert set(a) == {"state", "questions"} and a["state"] == {"transcript": "tape", "lines": {"L1": "x", "L3": "y"}}
+    assert set(a["questions"]) == {"L1", "L3"}
+    for k, q in a["questions"].items():
+        assert set(q) == {"type", "instructions"} and q["type"] == "noul" and f"line {k}?" in q["instructions"]
+
+
+@pytest.mark.parametrize("structured", [True, False])
+def test_jev_one_call_per_consult_and_low_lines_reported(structured):
+    fj = _FakeJev(structured)
+    r = jev_lines.check_lines("Plan: ok\n\nFollow up: LOW support\nNAME Jane", "tape", client=fj)
+    assert len(fj.args) == 1 and fj.args[0]["state"]["lines"] == {"L1": "Plan: ok", "L3": "Follow up: LOW support", "L4": "NAME Jane"}
+    assert r == {"status": "ok", "lines": 3, "low": [{"line": 3, "p_yes": 0.2}], "errors": 0, "model": "jev-test-1", "calls": 1}
+    assert "Jane" not in json.dumps(r) and "LOW" not in json.dumps(r)
+
+
+def test_jev_splits_beyond_200_questions_and_counts_missing_answers():
+    fj = _FakeJev()
+    r = jev_lines.check_lines("\n".join(f"line {i}" for i in range(450)), "t", client=fj)
+    assert [len(a["questions"]) for a in fj.args] == [200, 200, 50] and r["calls"] == 3 and r["lines"] == 450 and r["errors"] == 0
+
+    class Partial(_FakeJev):
+        def call(self, tool, args):
+            out = super().call(tool, args)
+            out["structuredContent"]["answers"].pop("L2")
+            out["structuredContent"]["answers"]["L1"]["noul"] = 7  # out of range = unusable
+            return out
+    r = jev_lines.check_lines("a\nb\nc", "t", client=Partial())
+    assert r["errors"] == 2 and r["low"] == []
+
+
+FAKE_JEV_SERVER = r'''
+import json, sys
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    if "id" not in msg:
+        continue
+    if msg["method"] == "initialize":
+        res = {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "fake-jev", "version": "0"}}
+    else:
+        a = msg["params"]["arguments"]
+        assert set(a) == {"state", "questions"}
+        ans = {k: {"type": "noul", "noul": 0.2 if "LOW" in a["state"]["lines"][k] else 0.9} for k in a["questions"]}
+        res = {"content": [{"type": "text", "text": json.dumps({"answers": ans, "model": "jev-fake", "usage": {}})}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+'''
+
+
+def test_jev_over_stdio_with_fake_server(monkeypatch, tmp_path):
+    # Written at test time: tests/fixtures is compared file-for-file by test_fixtures_regenerate_identically.
+    server = tmp_path / "fake_jev_server.py"
+    server.write_text(FAKE_JEV_SERVER, encoding="utf-8")
+    monkeypatch.setenv("JEV_MCP_CMD", json.dumps([sys.executable, str(server)]))
+    r = jev_lines.check_lines("fine line\nLOW line", "tape")
+    assert r["status"] == "ok" and r["lines"] == 2 and [x["line"] for x in r["low"]] == [2] and r["model"] == "jev-fake"
+    monkeypatch.setenv("JEV_MCP_CMD", json.dumps(["/nonexistent/binary"]))
+    assert jev_lines.check_lines("a", "t")["status"] == "error"
+
+
+# ---- end to end -------------------------------------------------------------------------------------------------
+
+def _write_inputs(tmp_path: Path, uids):
+    arts = tmp_path / "arts"
+    arts.mkdir()
+    for u in uids:
+        art = build_artifact(load_consult(CONSULTS, u), stage_a(u))
+        (arts / f"{u}.json").write_text(json.dumps(art), encoding="utf-8")
+    def arm(name, rx, extra=None):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps({"uid": u, "prescription": rx, **(extra or {})}) for u in uids) + "\n", encoding="utf-8")
+        return str(path)
+
+    return arts, ",".join([arm("A", RX), arm("B0", {**RX, "examination": "Throat red"}), arm("Bn", RX, {"drops": ["x", "y"]})])
+
+
+def _argv(tmp_path, arms, arts, frozen_dir, out, extra=()):
+    return ["--round", "R1", "--arms", arms, "--artifacts", str(arts), "--consults", str(CONSULTS), "--frozen", str(frozen_dir), "--out", str(out),
+            "--scoreboard", str(tmp_path / "SCOREBOARD.md"), *extra]
+
+
+def test_end_to_end_tuning_run_writes_row_and_leaks_nothing_private(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:2])
+    fc = FakeClient(responder)
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc) == 0
+    n_calls = len(fc.calls)
+    assert sum(c["tag"].startswith("pdqi9-v3") for c in fc.calls) == 2 * 3 * 4
+    row = json.loads((tmp_path / "SCOREBOARD.R1.json").read_text())
+    assert row["n"] == 2 and row["split"] == "tuning" and row["render"] == "render-v2" and row["replay_drops"] == 4
+    assert set(row["frozen_hashes"]) == set(judge.FROZEN_FILES) and row["verdict"].startswith("PENDING")
+    assert row["jev"]["status"] == "not run" and row["totals"]["opus/none"]["Bn"]["median"] == 34
+    assert len(row["floors"]["rows"]) >= 10 and "succinct_bn_minus_a" in row and set(row["rendered_chars_mean"]) == {"A", "B0", "Bn"}
+    md = (tmp_path / "SCOREBOARD.md").read_text().splitlines()
+    assert len(md) == 3 and md[2].startswith("| R1 |")
+    for p in [tmp_path / "SCOREBOARD.md", tmp_path / "SCOREBOARD.R1.json", *(tmp_path / "out").rglob("*")]:
+        if p.is_file():
+            assert MARK not in p.read_text(errors="ignore"), p
+    # second run reuses the cache for the scored notes
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=(fc2 := FakeClient(responder))) == 0
+    assert not fc2.calls and n_calls > 0
+    assert len((tmp_path / "SCOREBOARD.md").read_text().splitlines()) == 4
+
+
+def test_end_to_end_lockbox_gate(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    led = tmp_path / "fixed-ledger.jsonl"
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, ["synth-boundary-knee"])
+    fc = FakeClient(responder)
+    with pytest.raises(splits.SplitError):
+        run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc)
+    assert not fc.calls
+    monkeypatch.delenv(splits.LEDGER_ENV, raising=False)
+    with pytest.raises(splits.SplitError, match=splits.LEDGER_ENV):
+        run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out", ["--lockbox", "--candidate", "c9"]), client=fc)
+    assert not fc.calls
+    monkeypatch.setenv(splits.LEDGER_ENV, str(led))
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out", ["--lockbox", "--candidate", "c9"]), client=fc) == 0
+    n = len(fc.calls)
+    # a fresh --out does not reset the ledger
+    with pytest.raises(splits.SplitError, match="second run"):
+        run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out2", ["--lockbox", "--candidate", "c9"]), client=fc)
+    assert len(fc.calls) == n and len(led.read_text().splitlines()) == 1
+
+
+def test_bundles_mode_refused_without_load_bundle_and_used_when_present(tmp_path, monkeypatch):
+    from tools.eta2freescript import ingest
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:1])
+    argv = ["--round", "R1", "--arms", arms, "--artifacts", str(arts), "--bundles", str(tmp_path / "bundles"), "--frozen", str(fdir),
+            "--out", str(tmp_path / "out"), "--scoreboard", str(tmp_path / "SB.md")]
+    monkeypatch.delattr(ingest, "load_bundle", raising=False)
+    fc = FakeClient(responder)
+    with pytest.raises(SystemExit, match="load_bundle"):
+        run.main(argv, client=fc)
+    assert not fc.calls
+    seen = []
+    (tmp_path / "bundles").mkdir()
+    (tmp_path / "bundles" / "synth-fever-dose.json").write_text(json.dumps({"marker": 7}), encoding="utf-8")
+    monkeypatch.setattr(ingest, "load_bundle", lambda b, english="auto", use_role_track=True: seen.append(b) or load_consult(CONSULTS, "synth-fever-dose"), raising=False)
+    assert run.main(argv, client=fc) == 0 and seen == [{"marker": 7}]
+    with pytest.raises(SystemExit, match="exactly one"):
+        run.main(argv + ["--consults", str(CONSULTS)], client=fc)
+
+
+def test_run_refuses_loose_frozen_dir_before_any_call(tmp_path):
+    fdir = make_frozen(tmp_path / "frozen")
+    (fdir / "floor-items-v1.system.txt").chmod(0o644)
+    arts, arms = _write_inputs(tmp_path, UIDS[:1])
+    fc = FakeClient(responder)
+    with pytest.raises(judge.FrozenError):
+        run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc)
+    assert not fc.calls

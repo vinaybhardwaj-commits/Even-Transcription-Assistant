@@ -1,0 +1,171 @@
+"""python -m tools.eta2freescript.eval.pdqi9.run --round R --arms A.jsonl,B0.jsonl,Bn.jsonl --artifacts DIR (--consults DATA | --bundles DIR)
+       --frozen $FREESCRIPT_FROZEN_DIR --out OUT --scoreboard PATH [--lockbox --candidate ID]
+
+Arm files: one JSON object per line, {"uid": ..., "prescription": {...}[, "drops": n | [...]]}. A B4a replay() dict fits as is.
+Artifacts: DIR/<uid>.json (eta.freescript artifact); DIR/b0/<uid>.json, if present, is used for arm B0.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import statistics
+import sys
+from pathlib import Path
+
+from ... import ingest
+from ...models import BedrockClient, ModelClient, UsageLedger
+from . import floors, jev_lines, judge, render, scoreboard, splits, stats
+
+ARMS = ("A", "B0", "Bn")
+PKG = Path(__file__).resolve().parent
+
+
+def read_arm(path: Path) -> dict[str, dict]:
+    out = {}
+    for ln in Path(path).read_text(encoding="utf-8").splitlines():
+        if not ln.strip():
+            continue
+        row = json.loads(ln)
+        uid = row.get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise SystemExit(f"{path.name}: a row has no uid")
+        rx = row.get("prescription") if isinstance(row.get("prescription"), dict) else {k: v for k, v in row.items() if k not in ("uid", "drops", "dropped")}
+        drops = row.get("drops", row.get("dropped"))
+        out[uid] = {"rx": render.validate_prescription(rx), "drops": len(drops) if isinstance(drops, (list, dict)) else int(drops or 0)}
+    return out
+
+
+def code_sha() -> str:
+    h = hashlib.sha256()
+    for p in sorted(PKG.glob("*.py")) + [PKG.parents[1] / "validate.py"]:
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
+def _load_art(d: Path, uid: str) -> dict | None:
+    p = Path(d) / f"{uid}.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+def _agg(vals: list[float]) -> dict:
+    return {"median": statistics.median(vals), "mean": statistics.fmean(vals), "n": len(vals)} if vals else {"median": None, "mean": None, "n": 0}
+
+
+def _paired(scores: dict, uids: list[str], combo: str, a: str, b: str) -> tuple[list[float], list[float]]:
+    pairs = [(scores[(u, a, combo)], scores[(u, b, combo)]) for u in uids if scores.get((u, a, combo)) and scores.get((u, b, combo))]
+    return [x["total"] for x, _ in pairs], [y["total"] for _, y in pairs]
+
+
+def compare_family(scores, uids, combos, a, b) -> dict:
+    res = {c: stats.compare(*_paired(scores, uids, c, a, b)) for c in combos}
+    adj = stats.holm([res[c]["p"] for c in combos])
+    for c, p in zip(combos, adj):
+        res[c]["p_holm"] = p
+    return res
+
+
+def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_client=None) -> int:
+    ap = argparse.ArgumentParser(prog="pdqi9.run")
+    ap.add_argument("--round", required=True)
+    ap.add_argument("--arms", required=True, help="A.jsonl,B0.jsonl,Bn.jsonl")
+    ap.add_argument("--artifacts", required=True)
+    ap.add_argument("--consults", help="folder mode: DATA/<uid>/transcript.json ...")
+    ap.add_argument("--bundles", help="bundle mode: DIR/<uid>.json, read with ingest.load_bundle")
+    ap.add_argument("--frozen", default=os.environ.get("FREESCRIPT_FROZEN_DIR"))
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--scoreboard", required=True)
+    ap.add_argument("--lockbox", action="store_true")
+    ap.add_argument("--candidate")
+    a = ap.parse_args(argv)
+    if not a.frozen:
+        raise SystemExit("--frozen or FREESCRIPT_FROZEN_DIR is required")
+    if bool(a.consults) == bool(a.bundles):
+        raise SystemExit("give exactly one of --consults and --bundles")
+    if a.bundles and not hasattr(ingest, "load_bundle"):
+        raise SystemExit("--bundles needs ingest.load_bundle, which this tree does not have yet (B2 lands it); use --consults")
+    paths = a.arms.split(",")
+    if len(paths) != 3:
+        raise SystemExit("--arms takes exactly three files: A, B0, Bn (in that order)")
+    out = Path(a.out)
+    os.umask(0o077)
+    out.mkdir(parents=True, exist_ok=True)
+
+    frozen = judge.load_frozen(a.frozen)
+    arms = {n: read_arm(Path(p)) for n, p in zip(ARMS, paths)}
+    uids = sorted(set(arms["A"]) & set(arms["B0"]) & set(arms["Bn"]))
+    dropped_uids = len(set().union(*[set(v) for v in arms.values()]) - set(uids))
+    if not uids:
+        raise SystemExit("no uid is present in all three arm files")
+    spl = splits.Splits.load(frozen.split_path)
+    split_name = splits.gate(spl, uids, a.lockbox, a.candidate)
+
+    ledger = UsageLedger(out / "usage.jsonl")
+    client = client or BedrockClient(ledger)
+    cache = out / "cache"
+
+    consult, transcript, art_bn, art_b0 = {}, {}, {}, {}
+    for u in uids:
+        art_bn[u] = _load_art(Path(a.artifacts), u)
+        art_b0[u] = _load_art(Path(a.artifacts) / "b0", u) or art_bn[u]
+        quarantined = set(((art_bn[u] or {}).get("clip_boundary") or {}).get("quarantined_turns") or [])
+        consult[u] = ingest.load_bundle(json.loads((Path(a.bundles) / f"{u}.json").read_text(encoding="utf-8"))) if a.bundles else ingest.load_consult(Path(a.consults), u)
+        transcript[u] = ingest.format_transcript(consult[u], quarantined)
+
+    texts = {(u, arm): render.render(arms[arm][u]["rx"]) for u in uids for arm in ARMS}
+    combos = [f"{j}/{r}" for j in judge.JUDGES for r in judge.REFS]
+    scores: dict = {}
+    for u, arm, j, r in judge.plan_calls(uids, list(ARMS)):
+        res = judge.score_note(client, frozen, uid=u, arm=arm, judge=j, ref=r, note=texts[(u, arm)], transcript=transcript[u],
+                               cache_dir=cache / "pdqi9", render_version=render.RENDER_VERSION)
+        scores[(u, arm, f"{j}/{r}")] = None if res["parse_failure"] else {"total": sum(res["scores"]), "items": res["scores"]}
+    parse_failures = sum(1 for v in scores.values() if v is None)
+
+    fl = {"Bn": [], "B0": []}
+    for u in uids:
+        for kind, art in (("Bn", art_bn[u]), ("B0", art_b0[u])):
+            fl[kind].append(floors.consult_floors(client, frozen, uid=u, arm_kind=kind, rx=arms[kind][u]["rx"], signed_rx=arms["A"][u]["rx"],
+                                                  art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors"))
+    table = floors.aggregate(fl["Bn"], fl["B0"])
+
+    jev_res = {u: jev_lines.check_lines((art_bn[u] or {}).get("note_text") or "", transcript[u], jev_client) for u in uids}
+    ok = [v for v in jev_res.values() if v["status"] == "ok"]
+    jev = {"status": "ok" if ok else next(iter(jev_res.values()))["status"], "consults": len(ok), "lines": sum(v["lines"] for v in ok),
+           "low": sum(len(v["low"]) for v in ok), "errors": sum(v["errors"] for v in ok)}
+    jev["models"] = sorted({v["model"] for v in ok if v.get("model")})
+    jev["summary"] = (f"{jev['low']}/{jev['lines']} lines P(yes)<0.5 ({jev['errors']} errors; model {','.join(jev['models']) or '?'})" if ok else
+                      f"jev: not run ({next(iter(jev_res.values())).get('reason', jev['status'])})")
+
+    totals, item_means, gt = {}, {}, {}
+    for c in combos:
+        totals[c] = {arm: _agg([scores[(u, arm, c)]["total"] for u in uids if scores[(u, arm, c)]]) for arm in ARMS}
+        item_means[c] = {arm: [statistics.fmean(scores[(u, arm, c)]["items"][i] for u in uids if scores[(u, arm, c)]) if any(scores[(u, arm, c)] for u in uids) else None
+                               for i in range(judge.N_ITEMS)] for arm in ARMS}
+        gt[c] = sum(1 for x, y in zip(item_means[c]["Bn"], item_means[c]["A"]) if x is not None and y is not None and x > y)
+
+    cost = round(sum(json.loads(x).get("usd", 0) for x in ledger.path.read_text().splitlines() if x.strip()), 5) if ledger.path.exists() else 0.0
+    row = {
+        "round": a.round, "code_sha": code_sha(), "prompt_sha": frozen.prompt_sha(*[n for n in judge.FROZEN_FILES if n.startswith("pdqi9")]),
+        "judge_sha": hashlib.sha256((frozen.prompt_sha("floor-items-v1.system.txt", "floor-missing-v1.system.txt")
+                                     + "".join(client.resolve(j)[0] for j in judge.JUDGES)).encode()).hexdigest(),
+        "render": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"], "split": split_name, "candidate": a.candidate,
+        "frozen_hashes": frozen.hashes, "n": len(uids), "uids_dropped_not_in_all_arms": dropped_uids, "parse_failures": parse_failures,
+        "totals": totals, "item_means": item_means, "items_bn_gt_a": gt,
+        "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A"),
+        "thorough_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
+        "floors": table, "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
+        "rendered_chars_mean": {arm: statistics.fmean(len(texts[(u, arm)]) for u in uids) for arm in ARMS},
+        "cost_usd": cost, "verdict": "PENDING (freescript-lead)",
+    }
+    (out / "floors.json").write_text(json.dumps(fl, indent=1, default=str), encoding="utf-8")
+    (out / "jev.json").write_text(json.dumps(jev_res, indent=1), encoding="utf-8")
+    (out / "scores.json").write_text(json.dumps([{"uid": u, "arm": ar, "combo": c, "note_id": judge.note_id(u, ar), **(v or {"parse_failure": True})}
+                                                 for (u, ar, c), v in sorted(scores.items())], indent=1), encoding="utf-8")
+    jp = scoreboard.write(row, Path(a.scoreboard))
+    print(f"scored {len(uids)} consults, split {split_name}, floors {'PASS' if table['all_pass'] else 'FAIL'}, row -> {jp.name}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
