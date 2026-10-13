@@ -33,7 +33,7 @@ beforeAll(() => {
       ('g1','docA',1,'enrolment_clip', decode('00','hex'), 3, '{}'), ('g2','docA',2,'room_audio', decode('00','hex'), 9, '{"windows": 4, "speech_s": 61.5, "manifest": "mf_secret"}');
     INSERT INTO voice_centroid (id, clinician_id, domain, generation, embedding, embedding_model, embedding_dim, n_samples, retired_at, retired_by, retired_reason) VALUES
       ('vc1','docA','room_primary',1,'{0.1,0.2}','ecapa-192',2,5,now(),'actor_x','superseded_by:vc2'), ('vc2','docA','room_primary',2,'{0.1,0.2}','ecapa-192',2,6,NULL,NULL,NULL);
-    INSERT INTO room_day VALUES ('rd_ok','r1',(now() AT TIME ZONE 'Asia/Kolkata')::date), ('rd_blind','room_ux92qpws','2026-09-13');
+    INSERT INTO room_day VALUES ('rd_ok','r1',(now() AT TIME ZONE 'Asia/Kolkata')::date), ('rd_blind','room_ux92qpws',(now() AT TIME ZONE 'Asia/Kolkata')::date - 10);
     INSERT INTO bench_window VALUES ('w_ok','rd_ok'), ('w_blind','rd_blind'), ('w_none', NULL);
     INSERT INTO room_turn_speaker (window_id, source_ref, role, clinician_id, match_confidence, losing_clinician_id) VALUES
       ('w_ok','t1','clinician','docA',0.80,NULL), ('w_ok','t2','clinician','docA',0.90,NULL), ('w_ok','t3','clinician','docA',0.70,NULL), ('w_ok','t4','clinician','docA',0.85,'docB'), ('w_ok','t5','clinician','docB',0.75,'docA'),
@@ -64,7 +64,9 @@ describe.runIf(HAVE)("voice console on real postgres", () => {
     expect(r.voice_centroids.map((c: any) => [c.generation, c.retired_by, c.retired_reason])).toEqual([[1, "actor_x", "superseded_by:vc2"], [2, null, null]]);
     expect(JSON.stringify(r)).not.toMatch(/mf_secret|embedding\b"?:\s*\[/);
     expect(r.daily_30d).toHaveLength(2);
-    expect(r.daily_30d.map((d: any) => [d.day, d.n_matched])).toEqual([["2026-09-13", 2], [r.daily_30d[1].day, 4]]);
+    // The formerly held-out day is a fixed offset inside the 30-day window (a literal date aged out of it on 13 Oct 2026).
+    const [{ d: older }] = await pg.sql`SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date - 10)::text AS d` as Array<{ d: string }>;
+    expect(r.daily_30d.map((d: any) => [d.day, d.n_matched])).toEqual([[older, 2], [r.daily_30d[1].day, 4]]);
     expect(r.daily_30d[1].match_confidence_p50).toBeCloseTo(0.825, 3);
   });
   it("pairs: active prints only, cosine 3 dp from the stored bytes, the 30-day contested counts, the floor", async () => {
