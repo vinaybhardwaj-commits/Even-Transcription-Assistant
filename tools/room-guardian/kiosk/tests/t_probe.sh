@@ -1,7 +1,7 @@
 #!/bin/bash
 # Probe responder (spec 2.2).
 test_probe_reply_and_topic() {
-  load_libs; mk_tcc 2; mk_pcm 16384 3; export PROBE_CAP_S=4
+  load_libs; mk_tcc 2; mk_pcm 16384 3; export PROBE_CAP_S=60 PROBE_BUDGET_MS=120000   # a content test, not a timing test: a busy host must not turn a slow check into a timeout
   handle_message "kiosk/opd9/probe" "probe opd9 abc-123"
   local r; r="$(grep 'kiosk/opd9/probe-reply' "$T/pub.log")"
   assert_has "$r" '"probe_id":"abc-123"' "id echoed"
@@ -38,7 +38,7 @@ test_probe_via_main_entry() {
 }
 
 # Spec 2.2: a probe is answered within 5 s. Checks are capped at 2.5 s and the reply publish at 1.5 s; process overhead is about 0.5 s, so the worst case stays under 5 s.
-ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+ms() { mono_ms; }
 test_probe_reply_within_5_s_when_a_check_and_the_publish_both_hang() {
   unset PROBE_CAP_S; load_libs; mk_tcc 2
   assert_eq "$PROBE_CAP_S" "2.5" "default check cap"
@@ -62,4 +62,50 @@ test_probe_check_timing_out_at_the_default_cap_yields_a_verdict() {
   assert_has "$r" '"usb":"present"' "the other rows are intact"
   assert_eq "$(printf '%s' "$r" | cut -f2 | sed 's/[^{]//g' | wc -c | tr -d ' ')" "$(printf '%s' "$r" | cut -f2 | sed 's/[^}]//g' | wc -c | tr -d ' ')" "braces balance: well-formed JSON"
   assert_eq "$(find "$STATE_DIR" -maxdepth 1 -name 'probe.*' | wc -l | tr -d ' ')" "0" "no probe temp dir left behind"
+}
+
+# ---- R3: one deadline from probe start (4.5 s), not fixed caps ----
+
+test_probe_caps_are_computed_from_the_time_left() {
+  unset PROBE_CAP_S; load_libs
+  assert_eq "$PROBE_BUDGET_MS" "4500" "budget: 0.5 s under the spec's 5 s"
+  assert_eq "$(probe_check_cap 4500)" "2.500" "full budget: the 2.5 s ceiling"
+  assert_eq "$(probe_check_cap 3000)" "2.000" "3.0 s left: leave 1.0 s for the publish"
+  assert_eq "$(probe_check_cap 2500)" "1.500" "2.5 s left"
+  assert_eq "$(probe_check_cap 1100)" "0.000" "under 0.2 s for checks: none are started"
+  assert_eq "$(probe_check_cap -400)" "0.000" "deadline already past"
+  assert_eq "$(probe_publish_cap 1500)" "1.500" "publish gets what is left"
+  assert_eq "$(probe_publish_cap 4000)" "4.000" "and more when checks finished early"
+  assert_eq "$(probe_publish_cap 100)" "0.300" "never under 0.3 s"
+  assert_eq "$(probe_publish_cap -2000)" "0.300" "even when the deadline is past"
+}
+
+# Artificial 2 s overhead at probe start + a hung check + a hung publish: still under 5 s, and the payload shows the timeout.
+test_probe_replies_under_5_s_with_2_s_overhead_a_hung_check_and_a_hung_publish() {
+  unset PROBE_CAP_S; load_libs; mk_tcc 2
+  probe_start_hook() { sleep 2; }
+  export FAKE_SP_SLEEP=30 GUARDIAN_PUBLISH_CMD='{ printf "%s\t" "$1"; cat; } >>"$T/pub.log"; sleep 30'
+  local t0 t1; t0="$(ms)"
+  handle_message "kiosk/opd9/probe" "probe opd9 ovh1"
+  t1="$(ms)"
+  [ $((t1 - t0)) -lt 5000 ] && ok || fail "probe took $((t1 - t0)) ms under 2 s injected overhead, budget 5000"
+  local r; r="$(grep 'probe-reply' "$T/pub.log")"
+  assert_has "$r" '"probe_id":"ovh1"' "the reply was handed to the transport"
+  assert_has "$r" '"default_input":"timeout"' "the hung check is a timeout"
+  assert_has "$r" '"usb":"present"' "fast checks still reported"
+}
+
+# Deadline already spent when the checks would start: nothing is started, every row is a timeout, the reply still goes out.
+test_probe_with_the_deadline_spent_marks_every_row_timeout_and_still_replies() {
+  unset PROBE_CAP_S; load_libs; mk_tcc 2
+  PROBE_BUDGET_MS=1000
+  probe_start_hook() { sleep 1.3; }
+  export FAKE_SP_SLEEP=30
+  : >"$CALLS"
+  handle_message "kiosk/opd9/probe" "probe opd9 late1"
+  local r; r="$(grep 'probe-reply' "$T/pub.log")"
+  assert_has "$r" '"probe_id":"late1"' "a reply was published"
+  assert_eq "$(printf '%s' "$r" | grep -o '"[a-z_0-9]*":"timeout"' | wc -l | tr -d ' ')" "12" "all 12 rows are timeout"
+  assert_has "$r" '"verdict":"coreaudio_unresponsive"' "verdict follows the timeout rule"
+  assert_not "$(cat "$CALLS")" "SUDO" "no check was started"
 }
