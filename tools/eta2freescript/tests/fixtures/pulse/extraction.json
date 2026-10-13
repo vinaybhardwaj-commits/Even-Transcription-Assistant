@@ -1,0 +1,113 @@
+{
+ "examination": "synthetic exam text",
+ "general_advice": "synthetic advice line one\nsynthetic advice line two",
+ "presenting_complaints": {
+  "symptoms": "synthetic complaint text",
+  "diagnoses": [
+   {
+    "diagnosis_or_impression": "Synthetic fever syndrome",
+    "is_differential_diagnosis": false,
+    "raw_name": "synthetic fever syndrome"
+   },
+   {
+    "diagnosis_or_impression": "Unlisted synthetic ailment",
+    "raw_name": "unlisted synthetic ailment"
+   }
+  ]
+ },
+ "plan_of_management": {
+  "management_plan": "synthetic plan text",
+  "requires_surgery_or_procedure": false,
+  "surgery_or_procedure_recommendations": [
+   {
+    "name": "Synthetic knee arthroscopy",
+    "raw_name": "synthetic knee arthroscopy",
+    "scheduled_date": "2026-12-01"
+   },
+   {
+    "name": "Synthetic hernia repair",
+    "raw_name": "hernia repair",
+    "scheduled_date": "2026-01-01"
+   }
+  ]
+ },
+ "medicines": [
+  {
+   "name": "Zorvex 500",
+   "raw_name": "Zorvex 500",
+   "frequency": "twice daily",
+   "duration": "5 days",
+   "instructions": "after food"
+  },
+  {
+   "name": "Quelitra",
+   "raw_name": "Quelitra",
+   "aliases": [
+    "Zorvex 500"
+   ],
+   "frequency": "once daily"
+  },
+  {
+   "name": "Blorpanol",
+   "raw_name": "Blorpanol",
+   "frequency": "at night"
+  },
+  {
+   "name": "",
+   "raw_name": "",
+   "frequency": "x"
+  }
+ ],
+ "further_investigations": [
+  {
+   "name": "Synthetic blood panel",
+   "raw_name": "synthetic blood panel",
+   "urgent": true,
+   "scheduled_date": "2026-10-20"
+  },
+  {
+   "name": "Synthetic unlisted test",
+   "raw_name": "synthetic unlisted test"
+  }
+ ],
+ "comorbidities": [
+  {
+   "name": "Synthetic hypertension",
+   "raw_name": "synthetic hypertension",
+   "duration": {
+    "value": 2,
+    "unit": "YEARS"
+   }
+  },
+  {
+   "name": "Synthetic diabetes",
+   "raw_name": "synthetic diabetes",
+   "duration": {
+    "value": 1001,
+    "unit": "DAYS"
+   }
+  },
+  {
+   "name": "Synthetic thyroid disorder",
+   "raw_name": "synthetic thyroid disorder",
+   "duration": {
+    "value": 3,
+    "unit": "UNKNOWN"
+   }
+  }
+ ],
+ "follow_up": {
+  "followup_type": "MANDATORY_FOLLOW_UP",
+  "follow_up_instructions": "review in two weeks",
+  "followup_date": "2026-10-27"
+ },
+ "referrals": [
+  {
+   "speciality": "Synthetic Orthopaedics",
+   "notes": "synthetic"
+  },
+  {
+   "speciality": "Neurology"
+  }
+ ]
+}
