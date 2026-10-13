@@ -81,14 +81,35 @@ for OLD_APP in "$DEST/$APP" "$HOME/Applications/$APP"; do
   fi
 done
 
+# Everything that can fail happens BEFORE the running recorder is touched: the new bundle is expanded and copied beside the old one ($APP.new), into a folder this
+# user can write, with room to spare. Only then is the old copy stopped and swapped (a rename). A user who cannot write /Applications gets a message and an
+# untouched room; the room is never left with no recorder by a script that stops it first and then cannot install.
+echo "Checking that this Mac can install into /Applications..."
+mkdir -p "$TMP/expanded"
+ditto -x -k "$TMP/app.zip" "$TMP/expanded"
+if [ ! -d "$DEST" ] || [ ! -w "$DEST" ]; then
+  echo "This user cannot write to $DEST (it needs an administrator account). Install stopped. The running recorder was not touched."
+  exit 1
+fi
+NEED_KB="$(du -sk "$TMP/expanded/$APP" | awk '{print $1}')"
+FREE_KB="$(df -k "$DEST" | awk 'NR==2 {print $4}')"
+if [ -n "$NEED_KB" ] && [ -n "$FREE_KB" ] && [ "$FREE_KB" -lt $((NEED_KB * 2)) ]; then
+  echo "Not enough free space in $DEST. Install stopped. The running recorder was not touched."
+  exit 1
+fi
+rm -rf "$DEST/$APP.new"
+if ! ditto "$TMP/expanded/$APP" "$DEST/$APP.new"; then
+  rm -rf "$DEST/$APP.new"
+  echo "Could not copy the new app into $DEST. Install stopped. The running recorder was not touched."
+  exit 1
+fi
+
 echo "Stopping any earlier copy..."
 launchctl bootout "gui/$(id -u)/com.evenscribe.room-recorder" 2>/dev/null || true
 
 echo "Installing into /Applications..."
-mkdir -p "$DEST"
-ditto -x -k "$TMP/app.zip" "$TMP/expanded"
 rm -rf "$DEST/$APP"
-ditto "$TMP/expanded/$APP" "$DEST/$APP"
+mv "$DEST/$APP.new" "$DEST/$APP"
 
 echo "Enrolling this Mac..."
 "$DEST/$APP/Contents/MacOS/room-recorder" enrol --token "$TOKEN" --origin "$ORIGIN"

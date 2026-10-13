@@ -26,7 +26,7 @@ export async function recordRoomToggle(r: {
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES (${r.actor.startsWith("system:") ? "system" : "admin"}::actor_type, ${r.actor}, ${action}, 'room', ${r.room_id},
+      VALUES (${r.actor.startsWith("system:") || r.actor.startsWith("mcp:") ? "system" : "admin"}::actor_type, ${r.actor}, ${action}, 'room', ${r.room_id},
               ${JSON.stringify({ actor: r.actor, room_id: r.room_id, reason: r.reason ?? null, before: r.before, after: r.after })}::jsonb)
     `;
   } catch (e) {

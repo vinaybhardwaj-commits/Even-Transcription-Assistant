@@ -400,6 +400,15 @@ describe("S6 bootstrap: /Applications, the fleet's release, no downgrade", () =>
     expect(M.compareVersions("0.1.9", "0.1.34")).toBeLessThan(0);
   });
 
+  it("M1: only STABLE-channel installs set the fleet version; a test-channel Mac at a higher version changes nothing a new bootstrap gets", async () => {
+    const stableRow = { id: "rel_24", version: "0.1.24", channel: "stable", published_at: "2026-09-01T00:00:00Z", withdrawn_at: null, size_bytes: 1 };
+    // the SQL is what filters: assert it, and that with only the stable-channel rows the answer is stable
+    responses = [[stableRow], [{ app_version: "0.1.24" }]];
+    expect(await M.bootstrapRelease()).toMatchObject({ version: "0.1.24" });
+    const q = calls.find((c) => /SELECT app_version FROM room_install/.test(c.text))!;
+    expect(q.text).toContain("COALESCE(update_channel, 'stable') = 'stable'");
+  });
+
   it("bootstrapRelease reads the fleet's version and serves the published release that matches it", async () => {
     const stableRow = { id: "rel_24", version: "0.1.24", channel: "stable", published_at: "2026-09-01T00:00:00Z", withdrawn_at: null, size_bytes: 1 };
     const testRow = { id: "rel_34", version: "0.1.34", channel: "test", published_at: "2026-10-10T00:00:00Z", withdrawn_at: null, size_bytes: 1 };
@@ -444,10 +453,90 @@ describe("S7 room enable / disable is audited and a clinic-hours disable alerts"
     await R.recordRoomToggle({ room_id: "room_x", room_slug: "opd-4", before: "enabled", after: "disabled", actor: "system:pin_lockout", reason: "30 failed PIN attempts", now_ms: Date.parse("2026-10-13T23:00:00+05:30") });
     expect(calls[0]!.values).toEqual(expect.arrayContaining(["system", "system:pin_lockout", "room.disable"]));
   });
+  it("an mcp:<actor> principal is actor_type system for a room toggle and for a retirement; actor_id keeps the name", async () => {
+    const R = await import("@/lib/room-enable");
+    responses = [[]];
+    await R.recordRoomToggle({ room_id: "room_x", room_slug: "opd-4", before: "enabled", after: "disabled", actor: "mcp:scribe-admin", now_ms: Date.parse("2026-10-13T23:00:00+05:30") });
+    expect(calls[0]!.values).toEqual(expect.arrayContaining(["system", "mcp:scribe-admin"]));
+    calls.length = 0;
+    responses = [[installRow({ last_seen_age_s: 7200 })], [], [{ slug: "s" }], [{ id: 1 }]];
+    await M.retireInstall("install_old", { actor: "mcp:scribe-admin" });
+    const audit = calls.find((c) => /INSERT INTO audit_log/.test(c.text))!;
+    expect(audit.text).toContain("VALUES ('system'");
+    expect(audit.values).toContain("mcp:scribe-admin");
+  });
   it("an unknown room is NOT_FOUND and writes nothing", async () => {
     const R = await import("@/lib/room-enable");
     responses = [[]];
     expect(await R.setRoomEnabled("nope", true, { actor: "adm_1" })).toEqual({ ok: false, code: "NOT_FOUND" });
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("M2: the script checks it can install BEFORE it stops the running recorder", () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const { join } = require("node:path") as typeof import("node:path");
+  const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+  const input = { token: "t".repeat(32), origin: "https://x.test", blobUrl: "https://x.public.blob.vercel-storage.com/a.zip", sha256: "a".repeat(64), version: "0.1.34", roomName: "OPD 4" };
+
+  /** Run the rendered Mac body under bash with fake curl / shasum / ditto / launchctl; DEST is swapped for `dest`. Returns the exit code, output and the launchctl log. */
+  function run(dest: string, mutate?: (home: string) => void) {
+    const root = mkdtempSync(join(tmpdir(), "m2-"));
+    const bin = join(root, "bin");
+    const home = join(root, "home");
+    mkdirSync(bin);
+    mkdirSync(home);
+    const log = join(root, "launchctl.log");
+    const fake = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`); chmodSync(join(bin, name), 0o755); };
+    fake("curl", 'while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then echo zip > "$2"; fi; shift; done');
+    fake("shasum", `echo "${"a".repeat(64)}  -"`);
+    fake("launchctl", `echo "$@" >> "${log}"`);
+    // ditto -x -k zip dir  -> a fake bundle with a runnable room-recorder; ditto src dst -> copy
+    fake("ditto", 'if [ "$1" = "-x" ]; then mkdir -p "$4/EvenScribe Room Recorder.app/Contents/MacOS"; printf "#!/bin/bash\\nexit 0\\n" > "$4/EvenScribe Room Recorder.app/Contents/MacOS/room-recorder"; chmod +x "$4/EvenScribe Room Recorder.app/Contents/MacOS/room-recorder"; else cp -R "$1" "$2"; fi');
+    mutate?.(home);
+    const script = M.renderBootstrapScript(input).split("\n").map((l) => (l === 'DEST="/Applications"' ? `DEST="${dest}"` : l)).join("\n");
+    const r = spawnSync("bash", ["-c", script.slice(script.indexOf('APP="EvenScribe'))], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: home } as unknown as NodeJS.ProcessEnv, encoding: "utf8" as const });
+    return { code: r.status, out: String(r.stdout) + String(r.stderr), log: existsSync(log) ? readFileSync(log, "utf8") : "" };
+  }
+
+  it("a destination that is not a directory aborts with a clear message and never calls launchctl bootout", () => {
+    const root = mkdtempSync(join(tmpdir(), "m2f-"));
+    const file = join(root, "not-a-dir");
+    writeFileSync(file, "x");
+    const r = run(file);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("cannot write");
+    expect(r.out).toContain("The running recorder was not touched");
+    expect(r.log).not.toContain("bootout");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("an unwritable directory aborts before bootout", () => {
+    const dir = mkdtempSync(join(tmpdir(), "m2u-"));
+    chmodSync(dir, 0o555);
+    const r = run(dir);
+    chmodSync(dir, 0o755);
+    expect(r.code).not.toBe(0);
+    expect(r.log).not.toContain("bootout");
+  });
+
+  it("a writable destination: the new bundle is copied BESIDE the old one first, then bootout, then the swap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "m2ok-"));
+    mkdirSync(join(dir, "EvenScribe Room Recorder.app"));
+    writeFileSync(join(dir, "EvenScribe Room Recorder.app", "old"), "old");
+    const r = run(dir);
+    expect(r.code).toBe(0);
+    expect(r.log).toContain("bootout");
+    expect(existsSync(join(dir, "EvenScribe Room Recorder.app", "Contents", "MacOS", "room-recorder"))).toBe(true);
+    expect(existsSync(join(dir, "EvenScribe Room Recorder.app", "old"))).toBe(false);
+    expect(existsSync(join(dir, "EvenScribe Room Recorder.app.new"))).toBe(false);
+  });
+
+  it("in the rendered text every abort comes before the bootout line", () => {
+    const script = M.renderBootstrapScript(input);
+    const boot = script.indexOf('launchctl bootout "gui/$(id -u)/com.evenscribe.room-recorder"', script.indexOf("APP="));
+    expect(script.indexOf("The running recorder was not touched")).toBeLessThan(boot);
+    expect(script.lastIndexOf("Install stopped.", boot)).toBeGreaterThan(0);
   });
 });
