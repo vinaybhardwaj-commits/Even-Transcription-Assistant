@@ -1,0 +1,6 @@
+# rr-0139 merge 13 Oct 2026 (gating-lead): synthetic test fixtures + a type declaration, not secrets
+86232ffd1c372f5db46203ae0973dba544829c68:apps/room-recorder/Tests/HelperCoreTests/KioskUserFileSafetyTests.swift:generic-api-key:13
+a94843299a04708ae81673babbf61a8df63ef814:apps/room-recorder/Tests/HelperCoreTests/ChromePolicyTests.swift:generic-api-key:47
+a94843299a04708ae81673babbf61a8df63ef814:apps/room-recorder/Tests/HelperCoreTests/ChromePolicyTests.swift:generic-api-key:107
+a94843299a04708ae81673babbf61a8df63ef814:apps/room-recorder/Tests/HelperCoreTests/ChromePolicyTests.swift:generic-api-key:176
+50e0a6d2632d7602b70bb58daf0de359f2baf5d4:apps/room-recorder/Sources/FleetCore/FleetJWS.swift:generic-api-key:36
