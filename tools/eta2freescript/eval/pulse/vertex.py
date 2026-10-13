@@ -23,8 +23,12 @@ log = logging.getLogger("eta.pulse_replay.vertex")
 DEFAULT_EXTRACT_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_ADJ_MODEL = "gemini-3.5-flash"
 MAX_REQUEST_CHARS = 40_000
-TRANSCRIPT_MARKERS = ("T0 [S", "NATIVE[", "english_segments", "native_segments")
-_REGION = re.compile(r"^[a-z]+-[a-z]+[0-9]+$")
+_TRANSCRIPT_SHAPES = (
+    ("a transcript turn line (T<n> [S...)", re.compile(r"t\d+\s*\[s")),
+    ("a native[ line", re.compile(r"native\s*\[")),
+    ("an english/native segments key", re.compile(r"(?:english|native)[\s_-]*segments")),
+)
+_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
 _MODEL = re.compile(r"^[A-Za-z0-9._-]+$")
 _TIMEOUT_S = 180
 
@@ -48,12 +52,30 @@ class GenResult:
 DEFAULT_LOCATION = "asia-northeast1"
 
 
+# Lowercase (post-casefold) Cyrillic/Greek look-alikes of Latin t s e n a i v g l h.
+_CONFUSABLES = str.maketrans({
+    "\u0442": "t", "\u03c4": "t",
+    "\u0455": "s",
+    "\u0435": "e", "\u03b5": "e",
+    "\u03bd": "n", "\u043f": "n",
+    "\u0430": "a", "\u03b1": "a",
+    "\u0456": "i", "\u03b9": "i",
+    "\u0475": "v", "\u03c5": "v",
+    "\u050d": "g",
+    "\u04cf": "l",
+    "\u043d": "h", "\u03b7": "h",
+})
+
+
+def _strip_cf(t: str) -> str:
+    return "".join(c for c in t if unicodedata.category(c) != "Cf")
+
+
 def _fold(t: str) -> str:
-    """NFKC, case-folded, whitespace runs collapsed: 'T0  [S' and 't0 [s' compare equal to the marker."""
-    return " ".join(unicodedata.normalize("NFKC", t).casefold().split())
-
-
-_FOLDED_MARKERS = tuple((m, _fold(m)) for m in TRANSCRIPT_MARKERS)
+    """Drop format chars (Cf), NFKC, fold dotted I, casefold, map confusables, collapse whitespace."""
+    t = unicodedata.normalize("NFKC", _strip_cf(t)).replace("\u0130", "I")
+    t = _strip_cf(t).casefold().replace("i\u0307", "i").translate(_CONFUSABLES)
+    return " ".join(t.split())
 
 
 def guard_request(*texts: str) -> None:
@@ -62,9 +84,13 @@ def guard_request(*texts: str) -> None:
         raise TranscriptGuardError(f"request is {total} chars, over the {MAX_REQUEST_CHARS} limit")
     for t in texts:
         folded = _fold(t)
-        for m, fm in _FOLDED_MARKERS:
-            if fm in folded:
-                raise TranscriptGuardError(f"request contains the transcript marker {m!r}")
+        for what, rx in _TRANSCRIPT_SHAPES:
+            if rx.search(folded):
+                raise TranscriptGuardError(f"request contains {what}")
+
+
+def _real_ruling(r: str | None) -> bool:
+    return any(c.isprintable() and not c.isspace() and unicodedata.category(c) != "Cf" for c in (r or ""))
 
 
 def check_key_file(path) -> Path:
@@ -115,9 +141,9 @@ class VertexClient:
                  location_ruling: str | None = None):
         if not project or not re.match(r"^[a-z][a-z0-9-]{4,}$", project):
             raise ReplayUnavailable("VERTEX_PROJECT missing or malformed")
-        if location == "global" or not _REGION.match(location or ""):
+        if location == "global" or not _REGION.fullmatch(location or ""):
             raise ReplayUnavailable("VERTEX_LOCATION must be a region such as asia-northeast1; global is refused")
-        if location != DEFAULT_LOCATION and not (location_ruling or "").strip():
+        if location != DEFAULT_LOCATION and not _real_ruling(location_ruling):
             raise ReplayUnavailable(f"VERTEX_LOCATION other than {DEFAULT_LOCATION} needs VERTEX_LOCATION_OVERRIDE_RULING (a fable ruling id)")
         for m in (extract_model, adj_model):
             if not _MODEL.match(m or ""):

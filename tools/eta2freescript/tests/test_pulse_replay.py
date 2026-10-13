@@ -457,3 +457,25 @@ def test_from_env_region_ruling(tmp_path):
         VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": ""}, token_provider=lambda: "t")
     c = VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": "fable-ruling-99"}, token_provider=lambda: "t")
     assert c.location == "us-central1"
+
+
+@pytest.mark.parametrize("text", ["T1 [S0|doctor] (00:05) hi", "T12[S3|patient]", "T0\u200b [S", "nati\u00adve[", "\u0422" + "0 [S",
+                                  "NAT\u0130VE[", "english segments", "english-segments"])
+def test_guard_by_shape_refuses(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("ok", f"x {text} y")
+
+
+@pytest.mark.parametrize("text", ["a t0 and some text", "nativeness", "patient native place", "Tab T3 tablet", "T3 hormone"])
+def test_guard_by_shape_passes(text):
+    guard_request("ok", text)
+
+
+def test_region_fullmatch_and_real_ruling():
+    for ruling in ("\u200b", "\u200b \u00ad"):
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "us-central1\n", lambda: "t", location_ruling="fable-ruling-99")
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "asia-northeast1\n", lambda: "t")
