@@ -90,6 +90,17 @@ if echo "postinstall running $(/bin/date '+%Y-%m-%d %H:%M:%S')" > "$INSTALL_MARK
   [ "${ETA_POSTINSTALL_TEST:-}" = "1" ] || /usr/sbin/chown root:wheel "$INSTALL_MARKER"
 fi
 
+# 0.1.38: the app never goes into a user's own Applications folder. A ~/Applications copy is what left OPD 4
+# running a stale 0.1.24 beside the real install. Refused here, before anything is touched.
+case "$INSTALL_LOCATION" in
+  "$USERS_DIR"/*/Applications|"$USERS_DIR"/*/Applications/*)
+    say_early="room-recorder postinstall: refusing to install into $INSTALL_LOCATION; the app belongs in /Applications"
+    echo "$say_early"
+    echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') $say_early" >> "$INSTALL_LOG" 2>/dev/null
+    exit 1
+    ;;
+esac
+
 APP="$INSTALL_LOCATION/$APP_NAME"
 BUNDLE_HELPER="$APP/Contents/MacOS/room-recorder-helper"
 HELPER="$HELPER_DIR/$LABEL"

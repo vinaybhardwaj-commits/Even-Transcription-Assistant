@@ -120,15 +120,25 @@ import Testing
     #expect(!roomUpdateIsAvailable(running: "garbage", offered: "9.9.9"))
   }
 
+  // 0.1.38 (R3). mutant: make roomUpdateIsDowngrade return false and the first three fail.
+  @Test func aLowerOfferIsNamedADowngradeAndAnEqualOrHigherOneIsNot() {
+    #expect(roomUpdateIsDowngrade(running: "0.1.38", offered: "0.1.24"))
+    #expect(roomUpdateIsDowngrade(running: "0.1.9", offered: "0.1.8"))
+    #expect(!roomUpdateIsDowngrade(running: "0.1.38", offered: "0.1.38"))
+    #expect(!roomUpdateIsDowngrade(running: "0.1.38", offered: "0.1.39"))
+    #expect(!roomUpdateIsDowngrade(running: nil, offered: "0.1.1"))
+    #expect(!roomUpdateIsDowngrade(running: "garbage", offered: "0.1.1"))
+  }
+
   @Test func theUpdaterReplacesTheRunningBundleAndNothingElse() {
     let home = URL(fileURLWithPath: "/Users/room")
     let applications = URL(fileURLWithPath: "/Applications/EvenScribe Room Recorder.app")
     // (/Applications present, no system helper plist: the ordinary case.)
     #expect(RoomEngine.updaterBundle(bundleURL: applications, homeDirectory: home, fileExists: { _ in false }) == applications)
-    // A copy under ~/Applications with no /Applications install yet is the pre-pkg state: it may update itself.
+    // 0.1.38: a copy under ~/Applications never updates itself, even with no /Applications install yet.
     let old = URL(fileURLWithPath: "/Users/room/Applications/EvenScribe Room Recorder.app")
-    #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { _ in false }) == old)
-    // ...but once /Applications has the app, the stale copy never updates itself.
+    #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { _ in false }) == nil)
+    // ...and the same once /Applications has the app.
     #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { $0 == "/Applications/EvenScribe Room Recorder.app" }) == nil)
     #expect(RoomEngine.updaterBundle(bundleURL: URL(fileURLWithPath: "/tmp/debug/room-recorder"), homeDirectory: home, fileExists: { _ in false }) == nil)
   }

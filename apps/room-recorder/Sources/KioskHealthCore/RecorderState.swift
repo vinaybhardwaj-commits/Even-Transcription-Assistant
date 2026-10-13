@@ -14,14 +14,17 @@ struct RecorderStatus {
     /// Room Recorder 0.1.26 MicModeGuard: status.json "mic_mode" {before, after, set, at}, bounded (see RecorderStatusParser.micMode).
     /// nil when status.json has no usable mic_mode: the event then carries no mic_mode key at all.
     var micMode: [String: String]?
+    /// Room Recorder 0.1.38: status.json "mic_state", one of authorized / denied / not_determined; anything else is dropped.
+    var micState: String?
     var otherKeys: [String] = []
 }
 
 enum RecorderStatusParser {
-    static let knownKeys: Set<String> = ["state", "session_id", "pending_piece_count", "updated_at", "mic_mode"]
+    static let knownKeys: Set<String> = ["state", "session_id", "pending_piece_count", "updated_at", "mic_mode", "mic_state"]
     /// The only keys of mic_mode that ever leave the machine, and the longest string for any of them.
     static let micModeKeys: [String] = ["before", "after", "set", "at"]
     static let micModeMaxChars = 64
+    static let micStates: Set<String> = ["authorized", "denied", "not_determined"]
     static let closedStates: Set<String> = ["idle", "ready", "stopped", "closed", "ended", "none", "inactive"]
 
     /// status.json shape seen on a live kiosk: {pending_piece_count, session_id, state, updated_at}.
@@ -35,6 +38,7 @@ enum RecorderStatusParser {
         s.pendingPieces = (obj["pending_piece_count"] as? NSNumber)?.intValue
         s.updatedAt = obj["updated_at"] as? String
         s.micMode = micMode(obj["mic_mode"])
+        s.micState = (obj["mic_state"] as? String).flatMap { micStates.contains($0) ? $0 : nil }
         s.otherKeys = obj.keys.filter { !knownKeys.contains($0) }.sorted()
         return s
     }

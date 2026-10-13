@@ -351,6 +351,24 @@ import Testing
     #expect(box.launchctlCalls.isEmpty)
   }
 
+  // 0.1.38 (R3). mutant: delete the `case` block in postinstall and the first test installs into the user folder.
+  @Test func anInstallLocationInAUserApplicationsFolderIsRefusedBeforeAnythingIsTouched() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    let userApps = box.usersDir.appendingPathComponent("room/Applications", isDirectory: true)
+    let result = try box.run(extraEnv: ["ETA_INSTALL_LOCATION": userApps.path])
+    #expect(result.status == 1)
+    #expect(result.output.contains("refusing to install into"))
+    #expect(box.launchctlCalls.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: box.plist.path))
+  }
+
+  @Test func anInstallLocationThatIsNotAnApplicationsFolderIsStillAccepted() throws {
+    let box = try Sandbox()
+    defer { box.tearDown() }
+    #expect(try box.run().status == 0)
+  }
+
   @Test func noAppMeansTheInstallFails() throws {
     let box = try Sandbox(withApp: false)
     defer { box.tearDown() }
@@ -1099,7 +1117,8 @@ final class StrictService: HelperDaemonService, @unchecked Sendable {
 
   @Test func theOtherRulesStillHold() {
     let old = URL(fileURLWithPath: "/Users/room/Applications/EvenScribe Room Recorder.app")
-    #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { _ in false }) == old)
+    // 0.1.38: a ~/Applications copy never updates itself, with or without an /Applications install.
+    #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { _ in false }) == nil)
     #expect(RoomEngine.updaterBundle(bundleURL: old, homeDirectory: home, fileExists: { $0 == "/Applications/EvenScribe Room Recorder.app" }) == nil)
     #expect(RoomEngine.updaterBundle(bundleURL: URL(fileURLWithPath: "/tmp/room-recorder"), homeDirectory: home, fileExists: { _ in false }) == nil)
   }

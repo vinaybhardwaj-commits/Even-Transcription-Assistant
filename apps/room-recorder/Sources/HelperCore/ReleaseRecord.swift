@@ -119,6 +119,11 @@ public enum UpdateRefusal: String, Error, Equatable, Sendable {
   case wrongDevice = "record_wrong_device"
   case notEligible = "not_eligible"
   case notNewer = "version_not_newer"
+  /// 0.1.38: the offered version sorts BELOW the installed one. Refused and reported under its own name, so a rollout
+  /// that points a Mac backwards is visible on the bench poll, not folded into "already current".
+  case downgrade = "version_downgrade_refused"
+  /// 0.1.38: the install path is not under /Applications (a per-user ~/Applications copy). Nothing is installed there.
+  case userApplications = "install_path_not_applications"
   case pinned = "pinned"
   case pinUnreadable = "pin_unreadable"
   case helperTooOld = "helper_too_old"

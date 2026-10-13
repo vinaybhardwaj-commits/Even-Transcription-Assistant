@@ -630,8 +630,17 @@ public actor RoomEngine {
   var selfTestGapSeconds = 0.5
   /// Hard cap on a run (eta-refuter B3).
   var selfTestMaxSeconds = 180.0
-  /// §4.5 rule 3 — this install has been superseded or retired and must never poll again.
+  /// §4.5 rule 3 — the server refused this install as retired. 0.1.38: no longer "must never poll again". The
+  /// process stays up, says `retired` in status.json, and asks again every `retiredRepollNanoseconds` until a poll
+  /// is accepted.
   private var retiredByServer = false
+  /// 0.1.38 (R1). How long a retired install waits between polls. Five minutes; a test shortens it.
+  var retiredRepollNanoseconds: UInt64 = 300_000_000_000
+  /// 0.1.38 (R2). What macOS says about the microphone. A test replaces it.
+  var micStateProvider: @Sendable () -> String = { MachineFactsReader.microphoneState() }
+  /// Test seams for the two values above (an actor's stored property cannot be set from outside).
+  func setRetiredRepoll(nanoseconds: UInt64) { retiredRepollNanoseconds = nanoseconds }
+  func setMicStateProvider(_ provider: @escaping @Sendable () -> String) { micStateProvider = provider }
 
   // ─── BUILD R3 (§13.3) ──────────────────────────────────────────────────────────────────────
   /// Injected, and nil on every path that is not the resident app. A `swift run` binary, a test
@@ -835,9 +844,8 @@ public actor RoomEngine {
   }
 
   /// The bundle an updater may replace, or nil. The bundle that is RUNNING is the bundle that gets
-  /// replaced: never another path (0.1.30). A stale copy under `~/Applications` must not update
-  /// itself once the `/Applications` install exists: the swap would put a new version where nothing
-  /// is meant to run.
+  /// replaced: never another path (0.1.30). A copy under `~/Applications` never updates itself
+  /// (0.1.38, was: only once /Applications existed): nothing is installed in a per-user folder.
   static func updaterBundle(
     bundleURL: URL, homeDirectory: URL, fileExists: (String) -> Bool
   ) -> URL? {
@@ -848,9 +856,10 @@ public actor RoomEngine {
     // copy; a helper change ships only by pkg.
     let userApplications =
       homeDirectory.appendingPathComponent("Applications", isDirectory: true).standardizedFileURL.path + "/"
-    if bundle.path.hasPrefix(userApplications), fileExists("/Applications/" + bundle.lastPathComponent) {
-      return nil
-    }
+    // 0.1.38: never any copy under `~/Applications`, whether or not an /Applications install exists.
+    // `fileExists` stays in the signature for the callers; it no longer decides.
+    _ = fileExists
+    if bundle.path.hasPrefix(userApplications) { return nil }
     return bundle
   }
 
@@ -1075,6 +1084,34 @@ public actor RoomEngine {
       )
     }
     return (configured, .configuration)
+  }
+
+  /// 0.1.38 (R1). Sleep `retiredRepollNanoseconds` (in 1 s slices, so a cancel is prompt), then adopt whatever install
+  /// config.json names NOW: an install that was un-retired keeps its id, and a config that now names the live install
+  /// switches the poll to it.
+  private func waitBeforeRetiredRepoll() async {
+    var remaining = retiredRepollNanoseconds
+    while remaining > 0 && !Task.isCancelled {
+      let slice = min(remaining, 1_000_000_000)
+      try? await Task.sleep(nanoseconds: slice)
+      remaining -= slice
+    }
+    guard !Task.isCancelled else { return }
+    if let configured = (try? persistence.loadConfiguration())?.installID, configured != installID {
+      log("retired: config.json now names install \(configured); polling as it")
+      installID = configured
+      listenerTabID = "app_\(configured)"
+      installIDSource = .configuration
+    }
+  }
+
+  /// 0.1.38 (R1). A poll was accepted. If this process was retired, it is not any more: resume as normal.
+  private func resumeAfterRetired() {
+    guard retiredByServer else { return }
+    retiredByServer = false
+    lastError = nil
+    log("poll accepted again; the install is no longer retired; resuming")
+    try? saveStatus()
   }
 
   /// 0.1.17 — the single retry a RETIRED answer earns, or nil for "stop as before".
@@ -1339,39 +1376,48 @@ public actor RoomEngine {
     var uploadRetryAfter = Date.distantPast
     var uploadBackoff: TimeInterval = 5
     while !Task.isCancelled && phase != .superseded {
-      do {
-        try await finishUnexpectedCaptureIfNeeded()
-        try publishAvailable(finalFlush: false)
-      } catch {
-        lastError = bounded(error)
-        try? saveStatus()
+      // 0.1.38 (R1). A retired install does nothing but wait and ask again: no uploads, no auto-start. The wait
+      // re-reads config.json first, so an install that was re-enrolled underneath this process is the one asked about.
+      if retiredByServer {
+        await waitBeforeRetiredRepoll()
+        if Task.isCancelled { break }
       }
-      await autoStartIfDue()
-
-      if Date() >= uploadRetryAfter {
+      var retainedArchiveReady = false
+      if !retiredByServer {
         do {
-          if try await drainPending() {
-            try await stopAfterServerEnd()
-          }
-          uploadBackoff = 5
-          uploadRetryAfter = .distantPast
+          try await finishUnexpectedCaptureIfNeeded()
+          try publishAvailable(finalFlush: false)
         } catch {
           lastError = bounded(error)
-          uploadRetryAfter = Date().addingTimeInterval(uploadBackoff)
-          uploadBackoff = min(uploadBackoff * 2, 60)
-          try? saveStatus(preferred: .offline)
+          try? saveStatus()
         }
-      }
+        await autoStartIfDue()
 
-      tryStartRetainedArchiveRecovery()
-      let retainedArchiveReady = await refreshRetainedArchiveRecovery()
-      if needsActiveReconciliation && retainedArchiveReady {
-        do {
-          let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
-          try await adopt(active)
-        } catch {
-          lastError = bounded(error)
-          try? saveStatus(preferred: .offline)
+        if Date() >= uploadRetryAfter {
+          do {
+            if try await drainPending() {
+              try await stopAfterServerEnd()
+            }
+            uploadBackoff = 5
+            uploadRetryAfter = .distantPast
+          } catch {
+            lastError = bounded(error)
+            uploadRetryAfter = Date().addingTimeInterval(uploadBackoff)
+            uploadBackoff = min(uploadBackoff * 2, 60)
+            try? saveStatus(preferred: .offline)
+          }
+        }
+
+        tryStartRetainedArchiveRecovery()
+        retainedArchiveReady = await refreshRetainedArchiveRecovery()
+        if needsActiveReconciliation && retainedArchiveReady {
+          do {
+            let active = try await remote.activeSession(tabID: listenerTabID, since: nil)
+            try await adopt(active)
+          } catch {
+            lastError = bounded(error)
+            try? saveStatus(preferred: .offline)
+          }
         }
       }
 
@@ -1439,6 +1485,7 @@ public actor RoomEngine {
         // 0.1.17. A no-op unless the one RETIRED retry is in flight, in which case this poll
         // returning is what proves config's id is live.
         retryAfterRetiredAccepted()
+        resumeAfterRetired()
         // 0.1.37 (#45). The helper's update health check: a successful bench poll, running this version.
         onBenchPollOK?()
         // ─── THE CANARY IS ACKNOWLEDGED HERE (Release B1, §14.2 step 5, B1-D3) ─────────────
@@ -1532,27 +1579,30 @@ public actor RoomEngine {
       } catch let error as BenchClientError where Self.isRetired(error) {
         // §4.5 rule 3. NOT the generic backoff below: a retired install is not a transient fault
         // and retrying it is how a superseded copy keeps taking the room back from the install
-        // that replaced it. Stop, say why, and let the process exit.
+        // that replaced it. 0.1.38: not an exit either; see the R1 block below.
         //
         // 0.1.17: ONE exception, and only once — see `retryAfterRetired`.
         if retryAfterRetired() != nil { continue }
         if retiredRetryAwaitingPoll, let refused = installID {
           log("retry as install \(refused) also refused (409 RETIRED); stopping")
         }
+        // 0.1.38 (R1). NEVER GO SILENT, and never end the loop. The process stays alive; status.json says `retired`
+        // (the helper's recorder.status collector carries it to kiosk-health), the stale error is replaced, and the
+        // top of the loop asks again every 5 minutes.
+        let firstRefusal = !retiredByServer
         retiredByServer = true
-        exitReason = .retired
-        lastError = "retired: this install was superseded by a newer enrolment"
-        FileHandle.standardError.write(
-          Data(
-            """
-            room-recorder: this install has been retired (409 RETIRED). \
-            A newer enrolment owns \(configuration.roomSlug). Stopping; this copy will not poll again. \
-            Re-enrol with a fresh install command from /admin/bench if this Mac should serve the room.
-
-            """.utf8))
-        try? await stopWithoutEnding(reason: .cancelled)
-        await stopRetainedArchiveRecovery()
-        break
+        lastError = "retired: this install was retired on the server"
+        if firstRefusal {
+          log("this install was retired on the server (409 RETIRED); staying up, asking again every \(retiredRepollNanoseconds / 1_000_000) ms")
+          try? await stopWithoutEnding(reason: .cancelled)
+          await stopRetainedArchiveRecovery()
+          // stopWithoutEnding leaves the engine `.superseded`, which ends the loop. A retired install is not finished:
+          // it waits, and when a poll is accepted again it reconciles with whatever the server holds.
+          if phase == .superseded { phase = .ready }
+          needsActiveReconciliation = true
+        }
+        try? saveStatus()
+        continue
       } catch {
         lastError = bounded(error)
         try? saveStatus(preferred: .offline)
@@ -4195,15 +4245,26 @@ public actor RoomEngine {
     case .ready, .superseded:
       state = pending > 0 ? .uploadPending : (preferred ?? .ready)
     }
+    // 0.1.38. `retired` outranks everything; `mic_denied` replaces any not-recording state, so a denied microphone
+    // is never filed as a generic `failed`. A session in progress keeps its own state (the helper reads `recording`
+    // to hold updates and restarts); `mic_state` still says denied.
+    let micState = micStateProvider()
+    var reported = state
+    if retiredByServer {
+      reported = .retired
+    } else if micState == "denied", reported != .recording, reported != .paused {
+      reported = .micDenied
+    }
     try persistence.saveStatus(
       RoomRecorderStatus(
-        state: state,
+        state: reported,
         sessionID: sessionID,
         pendingPieceCount: pending,
         lastError: lastError,
         micMode: currentMicMode(),
         lastEvent: lastEvent?.name,
         lastEventAt: lastEvent?.at,
+        micState: micState,
         helperRegistration: HelperStatusCache.shared.snapshot?.registration,
         helperRegistrationError: HelperStatusCache.shared.registrationError,
         helperMode: HelperStatusCache.shared.snapshot?.mode,

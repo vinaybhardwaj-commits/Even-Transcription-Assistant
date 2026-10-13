@@ -38,6 +38,14 @@ public final class BundleUpdater: @unchecked Sendable {
   public static let retryHold: TimeInterval = 6 * 3600
   public static let installerLabel = "com.evenscribe.room-recorder.update-installer"
   public static let defaultApp = "/Applications/EvenScribe Room Recorder.app"
+
+  /// 0.1.38. True for a path inside a user's own `Applications` folder: `/Users/<name>/Applications/...`.
+  /// `/Applications` itself, and scratch paths, are not.
+  public static func isUserApplications(_ path: String) -> Bool {
+    let components = (path as NSString).standardizingPath.split(separator: "/").map(String.init)
+    guard let index = components.firstIndex(of: "Applications"), index >= 2 else { return false }
+    return components[index - 2] == "Users"
+  }
   public static let appRequirement =
     "identifier \"\(HelperIdentity.appIdentifier)\" and certificate leaf = H\"\(HelperIdentity.pinnedLeafSHA1)\""
 
@@ -209,8 +217,14 @@ public final class BundleUpdater: @unchecked Sendable {
       return .refused(why)
     }
     guard let helper = RoomVersion(helperVersion), let needed = RoomVersion(record.minHelper), !(helper < needed) else { return refuse(.helperTooOld) }
+    // 0.1.38: nothing is ever installed into a per-user Applications folder.
+    if BundleUpdater.isUserApplications(appPath) { return refuse(.userApplications) }
     guard let installed = installedVersion() else { return refuse(.unknownInstalled) }
     guard roomUpdateNewer(offered: record.version, running: installed) else {
+      // 0.1.38: a LOWER version is a refused downgrade and says so; an equal one is simply current.
+      if let have = RoomVersion(installed), let want = RoomVersion(record.version), want < have {
+        return refuse(.downgrade)
+      }
       mutate { $0.step = "up_to_date"; $0.detail = nil }
       return .refused(.notNewer)
     }

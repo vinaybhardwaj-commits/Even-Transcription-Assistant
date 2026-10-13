@@ -530,8 +530,40 @@ final class UpdateRig: @unchecked Sendable {
     let r = try UpdateRig(); defer { r.tearDown() }
     let u = r.updater()
     #expect(r.offer(r.record(version: "0.1.36"), updater: u) == .refused(.notNewer))
-    #expect(r.offer(r.record(version: "0.1.35"), updater: u) == .refused(.notNewer))
+    #expect(r.offer(r.record(version: "0.1.35"), updater: u) == .refused(.downgrade))
     #expect(r.downloaded.isEmpty && u.current.phase == "idle")
+  }
+
+  // 0.1.38 (R3). mutant: drop the `.downgrade` branch in offer() and the refusal comes back as notNewer.
+  @Test func aLowerVersionIsRefusedAndReportedAsADowngrade() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let u = r.updater()
+    #expect(r.offer(r.record(version: "0.1.24"), updater: u) == .refused(.downgrade))
+    #expect(u.current.step == "refused")
+    #expect(u.current.detail == "version_downgrade_refused")
+    #expect(u.statusDetail()["update_detail"] == "version_downgrade_refused")
+    #expect(r.downloaded.isEmpty && u.current.phase == "idle")
+  }
+
+  // 0.1.38 (R3). mutant: drop the isUserApplications guard and a newer record is accepted for a ~/Applications app.
+  @Test func nothingIsInstalledIntoAUserApplicationsFolder() throws {
+    let r = try UpdateRig(); defer { r.tearDown() }
+    let userApp = "/Users/room/Applications/EvenScribe Room Recorder.app"
+    let inner = SystemUpdateDisk(reader: UnprivilegedUserFiles(), supportDirectory: r.support, setOwner: false, downloader: UpdateRig.Downloader(rig: r))
+    let u = BundleUpdater(
+      env: r.env, tools: r.tools, disk: UpdateRig.Disk(inner: inner, rig: r), reader: UnprivilegedUserFiles(),
+      serverKeys: ["fk1": r.server.publicKey], directory: r.support + "/update", rollbackDirectory: r.rollback,
+      statePath: r.statePath, appPath: userApp, pinPath: r.pinPath, helperVersion: r.helperVersion,
+      now: { [unowned r] in r.env.clock }, log: { _ in })
+    #expect(r.offer(r.record(version: "0.1.99"), updater: u) == .refused(.userApplications))
+    #expect(u.current.detail == "install_path_not_applications")
+    #expect(r.downloaded.isEmpty && u.current.phase == "idle")
+  }
+
+  @Test func onlyAUsersOwnApplicationsFolderCountsAsUserApplications() {
+    #expect(BundleUpdater.isUserApplications("/Users/room/Applications/EvenScribe Room Recorder.app"))
+    #expect(!BundleUpdater.isUserApplications("/Applications/EvenScribe Room Recorder.app"))
+    #expect(!BundleUpdater.isUserApplications("/var/folders/x/update-1/Applications/EvenScribe Room Recorder.app"))
   }
 
   @Test func theRollbackPinIsHonoured() throws {

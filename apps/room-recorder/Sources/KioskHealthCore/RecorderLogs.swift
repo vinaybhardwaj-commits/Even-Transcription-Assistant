@@ -220,7 +220,7 @@ final class RecorderLogCollector {
     static func statusFingerprint(_ st: RecorderStatus) -> String {
         [st.state ?? "-", st.sessionID ?? "-", (st.pendingPieces ?? 0) > 0 ? "pending" : "clear",
          st.otherKeys.joined(separator: ","), RecorderStatusParser.sessionOpen(st).rawValue, st.parseError ? "bad" : "ok",
-         Self.micModeFingerprint(st.micMode)]
+         Self.micModeFingerprint(st.micMode), st.micState ?? "-"]
             .joined(separator: "|")
     }
 
@@ -242,6 +242,7 @@ final class RecorderLogCollector {
             "session_open": RecorderStatusParser.sessionOpen(st).rawValue,
         ]
         if let mm = st.micMode { p["mic_mode"] = mm }   // absent (not null) when status.json has none
+        if let ms = st.micState { p["mic_state"] = ms }   // 0.1.38; absent when status.json has none
         if let m = io.mtime(dir + "/status.json") { p["file_mtime"] = TimeFmt.iso(m) }
         return [DraftEvent("recorder.status", p)]
     }

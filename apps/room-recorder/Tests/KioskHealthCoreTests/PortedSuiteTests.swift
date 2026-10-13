@@ -29,6 +29,7 @@ import Testing
     @Test func r11() { run("r11", runR11Tests) }
     @Test func r11b() { run("r11b", runR11bTests) }
     @Test func r12() { run("r12", runR12Tests) }
+    @Test func r138() { run("r138", runR138Tests) }
     @Test func r12b() { run("r12b", runR12bTests) }
 
     @Test func zzCleanup() { cleanupTmp() }

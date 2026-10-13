@@ -386,6 +386,12 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     /// Distinct from `offline`, which means "the server is unreachable, keep trying". This one
     /// means "there is nothing to try with" — a human has to re-paste the install command.
     case needsEnrol = "needs_enrol"
+    /// 0.1.38. The server answered 409 RETIRED: this install was retired on the server. The process stays up and
+    /// asks again every 5 minutes; it says `retired` instead of going silent with a stale `failed`.
+    case retired
+    /// 0.1.38. macOS has the microphone denied for this app (`mic_state` says `denied`), so nothing can be recorded
+    /// until a person grants it. Distinct from a generic `failed`.
+    case micDenied = "mic_denied"
   }
 
   public var state: State
@@ -398,6 +404,10 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   /// A planned event, not an error: "mic_mode_reset" when the tapewriter watchdog reset Mic Mode in place.
   public var lastEvent: String?
   public var lastEventAt: Date?
+  /// 0.1.38. The microphone permission macOS reports for this app right now: `authorized`, `denied` or
+  /// `not_determined` (the same strings the bench poll carries as `mic_state`). Nil only for a status written
+  /// by an older build.
+  public var micState: String?
   /// 0.1.30. What macOS says about the privileged helper: `enabled`, `requiresApproval`,
   /// `notRegistered` or `notFound`. Nil until the app has looked.
   public var helperRegistration: String?
@@ -432,6 +442,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     case micMode = "mic_mode"
     case lastEvent = "last_event"
     case lastEventAt = "last_event_at"
+    case micState = "mic_state"
   }
 
   public init(
@@ -443,6 +454,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     micMode: MicModeStatus? = nil,
     lastEvent: String? = nil,
     lastEventAt: Date? = nil,
+    micState: String? = nil,
     helperRegistration: String? = nil,
     helperRegistrationError: String? = nil,
     helperMode: String? = nil,
@@ -468,6 +480,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     self.micMode = micMode
     self.lastEvent = lastEvent
     self.lastEventAt = lastEventAt
+    self.micState = micState
   }
 }
 

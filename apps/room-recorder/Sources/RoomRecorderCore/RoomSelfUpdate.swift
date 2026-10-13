@@ -613,6 +613,12 @@ public func roomUpdateIsAvailable(running: String?, offered: String) -> Bool {
   return want > have
 }
 
+/// PURE — 0.1.38. The offered version sorts strictly BELOW the running one.
+public func roomUpdateIsDowngrade(running: String?, offered: String) -> Bool {
+  guard let running, let have = RoomVersion(running), let want = RoomVersion(offered) else { return false }
+  return want < have
+}
+
 // MARK: - The seams
 
 /// Fetching the release descriptor. R3-9 lives at this boundary: ANY answer other than a 200 is
@@ -830,6 +836,10 @@ public struct RoomUpdater: Sendable {
       return .upToDate
     }
     guard roomUpdateIsAvailable(running: runningVersion, offered: release.version) else {
+      // 0.1.38: a lower offer is refused out loud, not folded into "up to date".
+      if roomUpdateIsDowngrade(running: runningVersion, offered: release.version) {
+        log("update to \(release.version) refused: it is lower than the running \(runningVersion ?? "?"); downgrades are never taken")
+      }
       // A version match also means the ledger is spent: whatever went wrong before, this Mac is
       // now running what its channel offers.
       RoomUpdateAttempts.clear(root: rootURL)
