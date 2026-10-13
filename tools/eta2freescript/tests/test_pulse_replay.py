@@ -583,3 +583,39 @@ def test_every_writer_label_is_refused():
             continue
         survivors.append(label)
     assert not survivors, f"{len(survivors)} labels survived: " + ", ".join(repr(s) for s in survivors[:10])
+
+
+def _turn_line(label: str, t: int = 59) -> str:
+    c = Consult(uid="u", turns=[Turn(idx=0, t0_ms=t * 1000, t1_ms=t * 1000 + 1000, speaker=label, text="x")],
+                clip_t0_ms=0, clip_t1_ms=t * 1000 + 1000, language_code="en", english_source="s", diarised=True, room="r")
+    return format_transcript(c)
+
+
+def test_label_window_covers_worst_expansion_of_a_128_char_label():
+    """The window is read from the live pattern; a future Unicode version with a longer expansion breaks this test, not the guard."""
+    import unicodedata
+    from tools.eta2freescript.eval.pulse import vertex as V
+    from tools.eta2freescript.eval.pulse.vertex import _fold
+    turn_rx = next(rx for what, rx in V._TRANSCRIPT_SHAPES if what.startswith("a transcript turn line"))
+    window = int(re.search(r"\.\{0,(\d+)\}\?", turn_rx.pattern).group(1))
+    longest = 0
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        longest = max(longest, len(unicodedata.normalize("NFKC", ch)), len(unicodedata.normalize("NFKD", ch)),
+                      len(_fold("s" + ch + "s")) - 2)
+    assert longest >= 18  # U+FDFA on current Unicode
+    assert 128 * longest <= window, f"label window {window} < 128 x {longest}"
+
+
+@pytest.mark.parametrize("label", [
+    "ﷺ" * 128, "ﷻ" * 128, "שּׁ" * 128, "ﬃ" * 128, "ẞ" * 128, "ﷺ" * 127 + "]",
+    "שּׁ" * 64 + "]" + "שּׁ" * 63, "]" + "ﷺ" * 127, "ﷺ" * 64 + "]" + "שּׁ" * 63,
+    "ﷺ]" * 64, "x]y" + "ﷺ" * 125, "שּׁ]ﷺ" * 42,
+])
+def test_expanding_labels_are_refused(label):
+    assert len(label) <= 128
+    for t in (0, 59, 3599, 10 ** 6):
+        with pytest.raises(TranscriptGuardError):
+            guard_request(_turn_line(label, t))
