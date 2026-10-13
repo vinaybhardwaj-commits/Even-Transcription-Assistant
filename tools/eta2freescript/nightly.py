@@ -20,6 +20,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -49,7 +51,9 @@ class NightlyError(RuntimeError):
 
 BUNDLE_TIMEOUT_S = 120
 _STDERR_CAP = 500
-_SAFE_UID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_STDERR_READ = 64 * 1024
+_SAFE_UID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
 
 
 def parse_bundle_config(env: dict) -> tuple[list[str], str] | None:
@@ -66,9 +70,14 @@ def parse_bundle_config(env: dict) -> tuple[list[str], str] | None:
         raise NightlyError("FREESCRIPT_BUNDLE_CMD is not valid JSON") from None
     if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
         raise NightlyError("FREESCRIPT_BUNDLE_CMD must be a JSON array of strings")
+    if not cmd[0].strip():
+        raise NightlyError("FREESCRIPT_BUNDLE_CMD has an empty program")
     for ph in ("{uid}", "{out}"):
         if not any(ph in a for a in cmd):
             raise NightlyError(f"FREESCRIPT_BUNDLE_CMD has no {ph} placeholder")
+    for a in cmd:
+        if any(m not in ("{uid}", "{out}") for m in _PLACEHOLDER.findall(a)):
+            raise NightlyError("FREESCRIPT_BUNDLE_CMD has a placeholder other than {uid} and {out}")
     cwd = (env.get("FREESCRIPT_BUNDLE_CWD") or "").strip()
     if not cwd:
         raise NightlyError("FREESCRIPT_BUNDLE_CMD is set but FREESCRIPT_BUNDLE_CWD is not")
@@ -315,24 +324,50 @@ def jobs_to_rows(jobs: list[dict], data: Path) -> tuple[list[dict], list[str]]:
     return rows, missing
 
 
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+
+
+def _communicate_bounded(proc: subprocess.Popen, timeout: float) -> tuple[bytes, bytes]:
+    """Wait for ``proc``; keep at most _STDERR_READ bytes of stderr and drain the rest, so a noisy child cannot fill memory."""
+    import threading
+    buf = bytearray()
+
+    def drain():
+        for chunk in iter(lambda: proc.stderr.read(8192), b""):
+            if len(buf) < _STDERR_READ:
+                buf.extend(chunk[: _STDERR_READ - len(buf)])
+    t = threading.Thread(target=drain, daemon=True)
+    t.start()
+    proc.wait(timeout=timeout)
+    t.join(timeout=5)
+    return b"", bytes(buf)
+
+
 def fetch_bundle(cmd: list[str], cwd: str, uid: str, tmp: Path) -> dict:
     """Run the bundle command for one uid (no shell, 120 s) into a file under ``tmp``; return the parsed bundle.
 
     stdout is discarded (untrusted). stderr is logged as one line, 500 chars at most. Any failure raises.
     """
-    if not _SAFE_UID.match(uid):
+    if not isinstance(uid, str) or not _SAFE_UID.fullmatch(uid):
         raise NightlyError("uid is not a safe argv value")
     out = tmp / "bundle.json"
     argv = [a.replace("{uid}", uid).replace("{out}", str(out)) for a in cmd]
+    proc = subprocess.Popen(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, start_new_session=True)
     try:
-        proc = subprocess.run(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.PIPE, timeout=BUNDLE_TIMEOUT_S)
+        _, err_bytes = _communicate_bounded(proc, BUNDLE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        proc.wait()
         raise NightlyError("bundle command timed out") from None
     if proc.returncode != 0:
-        err = " ".join(proc.stderr.decode("utf-8", "replace").split())[:_STDERR_CAP]
+        err = " ".join(err_bytes.decode("utf-8", "replace").split())[:_STDERR_CAP]
         if err:
-            print(uid, "bundle-stderr", err, flush=True)
+            print(repr(uid)[:40], "bundle-stderr", err, flush=True)
         raise NightlyError(f"bundle command exited {proc.returncode}")
     try:
         doc = json.loads(out.read_text(encoding="utf-8"))
@@ -350,7 +385,7 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
 
     A pending job is an explicit request: it skips the day check. A consult that fails is counted once and never fetched again. ids and counts only; the Consults stay in memory.
     """
-    from .ingest import ROLE_SLOTS, bundle_window, load_bundle
+    from .ingest import ROLE_SLOTS, _slot_track, bundle_window, load_bundle
     fetch = fetch or (lambda uid: fetch_bundle(cfg["bundle_cmd"], cfg["bundle_cwd"], uid, tmp))
     counts = {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
     rows, consults, seen = [], {}, set()
@@ -361,7 +396,8 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
         try:
             b = fetch(uid)
             tracks = b.get("tracks") if isinstance(b.get("tracks"), dict) else {}
-            if not (tracks.get("translate") or tracks.get("stt")) or not any(tracks.get(k) for k in ROLE_SLOTS):
+            if (_slot_track(tracks.get("translate")) is None and _slot_track(tracks.get("stt")) is None) \
+                    or not any(_slot_track(tracks.get(k)) is not None for k in ROLE_SLOTS):
                 counts["missing_layers"] += 1
                 continue
             t0, _t1, room = bundle_window(b)
@@ -371,7 +407,7 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
             c = load_bundle(b)
         except Exception as e:
             counts["bundle_failed"] += 1
-            print(uid, "bundle-failed", type(e).__name__, flush=True)
+            print(repr(uid)[:40], "bundle-failed", type(e).__name__, flush=True)
             continue
         if not c.role_track:
             counts["missing_layers"] += 1
@@ -499,20 +535,65 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
         tmp = Path(td)
         (tmp / "bundles").mkdir()
         rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles")
-        if not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded:
+        nothing = not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded
+        if nothing:
             print("nothing", day)
-            return 0
-        bcfg = dict(cfg, data=str(tmp), out=cfg.get("out") or str(tmp / "out"))
-        summary = execute(rows, bcfg, dry_run=dry_run, run_one=run_one or _bundle_runner(consults, Path(bcfg["out"])),
-                          post=sender or (lambda _p: {"ok": True, "inserted": 0}))
+            summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0}
+        else:
+            # every pipeline output goes inside the temp dir; _bundle_runner copies out only the derived files
+            bcfg = dict(cfg, data=str(tmp), out=str(tmp / "out"))
+            summary = execute(rows, bcfg, dry_run=dry_run, run_one=run_one or _bundle_runner(consults, tmp / "out", cfg.get("out")),
+                              post=sender or (lambda _p: {"ok": True, "inserted": 0}))
     summary.update(counts, mode="bundle")
     summary["skipped"] = summary.get("skipped", 0) + overflow
     summary["missing"] = counts["missing_layers"] + unexpanded
-    return _finish(summary, dry_run, extra_failed=counts["bundle_failed"])
+    rc = _finish(summary, dry_run, extra_failed=counts["bundle_failed"])
+    return 0 if nothing else rc
 
 
-def _bundle_runner(consults: dict, out: Path):
-    state: dict = {}
+def _keep_derived(tmp_out: Path, keep_root: str | None, uid: str, log: dict, usage_from: int) -> int:
+    """Copy artifact.json, artifact.validation.json, one run-log line and the new usage lines to <keep_root>. Nothing else persists.
+
+    Files 0600, directories 0700. Returns the new offset into the temp usage ledger.
+    """
+    ledger = tmp_out / "usage.jsonl"
+    size = ledger.stat().st_size if ledger.exists() else usage_from
+    if not keep_root:
+        return size
+    root = Path(keep_root)
+    dest = root / uid
+    for d in (root, dest):
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+    for name in ("artifact.json", "artifact.validation.json"):
+        src = tmp_out / uid / name
+        if src.is_file():
+            shutil.copyfile(src, dest / name)
+            os.chmod(dest / name, 0o600)
+    line = {"uid": uid, "final_valid": bool(log.get("final_valid")), "n_final_errors": len(log.get("final_errors") or []),
+            "cost_usd": log.get("cost_usd"), "secs_total": log.get("secs_total")}
+    for path, data in ((root / "runs.jsonl", (json.dumps(line) + "\n").encode()),
+                       (root / "usage.jsonl", _read_from(ledger, usage_from, size))):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.chmod(path, 0o600)
+    return size
+
+
+def _read_from(path: Path, start: int, end: int) -> bytes:
+    if end <= start or not path.exists():
+        return b""
+    with path.open("rb") as f:
+        f.seek(start)
+        return f.read(end - start)
+
+
+def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
+    """run_one for bundle mode. The pipeline writes under ``out`` (inside the TemporaryDirectory); only derived outputs reach ``keep_root``."""
+    state: dict = {"offset": 0}
 
     def run_one(uid: str) -> dict:
         from .models import UsageLedger, make_client
@@ -522,7 +603,9 @@ def _bundle_runner(consults: dict, out: Path):
             out.mkdir(parents=True, exist_ok=True)
             state["client"] = make_client("bedrock", UsageLedger(out / "usage.jsonl"), None)
             assert_phi_safe(*state["client"].resolve("sonnet"))
-        return run_consult(consults[uid], state["client"], out, Options())
+        log = run_consult(consults[uid], state["client"], out, Options())
+        state["offset"] = _keep_derived(out, keep_root, uid, log, state["offset"])
+        return log
 
     return run_one
 

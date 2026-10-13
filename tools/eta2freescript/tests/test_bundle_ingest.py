@@ -205,6 +205,7 @@ def test_pending_job_skips_the_day_check_but_the_sealed_feed_does_not(tmp_path, 
     monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s")
     rc, s, ran, _, out = go(tmp_path, ["synth-otherday"], capsys)
     assert ran == [] and rc == 0 and "nothing" in out  # counted not_this_day, nothing left to run
+    assert s["not_this_day"] == 1 and s["mode"] == "bundle"
 
 
 def test_max_consults_applies_before_any_fetch(tmp_path, capsys, monkeypatch):
@@ -224,3 +225,120 @@ def test_stderr_is_logged_only_when_the_command_fails(tmp_path, capsys, monkeypa
     monkeypatch.setenv("FAKE_BUNDLE_STDERR", "1")
     rc, s, ran, _, out = go(tmp_path, ["synth-all"], capsys)
     assert ran == ["synth-all"] and "bundle-stderr" not in out and "noise" not in out
+
+
+def test_off_day_only_feed_prints_one_summary_line(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s")
+    rc, s, ran, _, out = go(tmp_path, ["synth-otherday"], capsys)
+    lines = [l for l in out.splitlines() if l.startswith("{")]
+    assert rc == 0 and len(lines) == 1 and ran == []
+    assert (s["mode"], s["not_this_day"], s["posted"], s["n"]) == ("bundle", 1, 0, 0)
+
+
+@pytest.mark.parametrize("uid", ["x\n", "x\r", " x", "-x", "x y", ""])
+def test_unsafe_uids_are_rejected_and_logged_as_repr(tmp_path, uid, capsys):
+    with pytest.raises(NightlyError):
+        nightly.fetch_bundle(json.loads(cmd_env(tmp_path)["FREESCRIPT_BUNDLE_CMD"]), str(tmp_path), uid, tmp_path)
+    assert nightly._SAFE_UID.fullmatch("x") and nightly._SAFE_UID.fullmatch("a.b_c-1")
+
+
+def test_unsafe_uid_in_the_feed_is_failed_and_not_printed_raw(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s")
+    rc, s, ran, _, out = go(tmp_path, ["x\n"], capsys)
+    assert s["bundle_failed"] == 1 and ran == [] and "'x\\n'" in out and "x\n " not in out
+
+
+def test_derived_outputs_only_persist(tmp_path, capsys, monkeypatch):
+    from types import SimpleNamespace
+    from tools.eta2freescript import models, phi_guard, pipeline
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s")
+    keep = tmp_path / "keep"
+    seen_dirs = []
+
+    class Client(SimpleNamespace):
+        def resolve(self, _a):
+            return ("m", "converse")
+
+    def fake_make_client(_kind, ledger, _x):
+        c = Client(ledger=ledger)
+        return c
+
+    def fake_run_consult(c, client, out_dir, opts=None, specialty=None):
+        od = Path(out_dir) / c.uid
+        od.mkdir(parents=True, exist_ok=True)
+        seen_dirs.append(od)
+        (od / "stageA.raw.txt").write_text("RAW")
+        (od / "encounter.json").write_text("{}")
+        (od / "note_text.llm.txt").write_text("note")
+        (od / "artifact.json").write_text('{"ok": 1}')
+        (od / "artifact.validation.json").write_text('{"final_valid": true}')
+        client.ledger.path.write_text('{"tag": "t", "usd": 0.1}\n')
+        return {"final_valid": True, "final_errors": [], "cost_usd": 0.1,
+                "artifact": {"encounter": {"eta_encounter_id": c.uid}, "pulse_link": {"consult_uid": c.uid}}}
+    monkeypatch.setattr(models, "make_client", fake_make_client)
+    monkeypatch.setattr(phi_guard, "assert_phi_safe", lambda *a: None)
+    monkeypatch.setattr(pipeline, "run_consult", fake_run_consult)
+    cfg = bcfg(tmp_path, out=str(keep))
+    rc = run(cfg, DAY, post=lambda b: {"ok": True, "inserted": 1}, sealed=["synth-all"], pending=False)
+    assert rc == 0 and seen_dirs and not seen_dirs[0].exists()
+    kept = sorted(p.relative_to(keep).as_posix() for p in keep.rglob("*") if p.is_file())
+    assert kept == ["runs.jsonl", "synth-all/artifact.json", "synth-all/artifact.validation.json", "usage.jsonl"]
+    for p in keep.rglob("*"):
+        assert (p.stat().st_mode & 0o777) == (0o700 if p.is_dir() else 0o600)
+    assert json.loads((keep / "runs.jsonl").read_text().splitlines()[0])["uid"] == "synth-all"
+    assert (keep / "usage.jsonl").read_text().count("\n") == 1
+
+
+@pytest.mark.parametrize("cmd", [
+    '["x", "{uid}", "{out}", "{bogus}"]', '["", "{uid}", "{out}"]', '["  ", "{uid}", "{out}"]', '["x", "{uid}", "{out}", "{}"]',
+])
+def test_bad_placeholders_or_empty_program_are_config_errors(cmd, tmp_path):
+    with pytest.raises(NightlyError):
+        parse_bundle_config({"FREESCRIPT_BUNDLE_CMD": cmd, "FREESCRIPT_BUNDLE_CWD": str(tmp_path)})
+
+
+def test_non_null_slot_with_null_track_is_missing_layers(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s")
+    b = bundle("synth-all")
+    for k in ROLE_SLOTS:
+        b["tracks"][k] = {"engine": "llm-roles", "path": "tracks/x.json", "track": None}
+    monkeypatch.setattr(nightly, "fetch_bundle", lambda *a, **k: b)
+    rc, s, ran, _, _ = go(tmp_path, ["synth-all"], capsys)
+    assert (s["missing_layers"], s["bundle_failed"]) == (1, 0) and ran == []
+    b = bundle("synth-all")
+    for k in ("translate", "stt"):
+        b["tracks"][k] = {"engine": "e", "path": "p", "track": None}
+    monkeypatch.setattr(nightly, "fetch_bundle", lambda *a, **k: b)
+    rc, s, ran, _, _ = go(tmp_path, ["synth-all"], capsys)
+    assert (s["missing_layers"], s["bundle_failed"]) == (1, 0)
+
+
+def test_timeout_kills_the_whole_process_group(tmp_path, monkeypatch):
+    import os, time
+    pidfile = tmp_path / "gc.pid"
+    script = tmp_path / "spawn.py"
+    script.write_text("import subprocess, sys, time\n"
+                      f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                      f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+                      "time.sleep(60)\n")
+    monkeypatch.setattr(nightly, "BUNDLE_TIMEOUT_S", 2)
+    with pytest.raises(NightlyError, match="timed out"):
+        nightly.fetch_bundle([sys.executable, str(script), "{uid}", "{out}"], str(tmp_path), "u1", tmp_path)
+    pid = int(pidfile.read_text())
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("grandchild survived")
+
+
+def test_stderr_read_is_bounded(tmp_path, capsys):
+    script = tmp_path / "noisy.py"
+    script.write_text("import sys\nsys.stderr.write('e' * 5_000_000)\nsys.exit(4)\n")
+    with pytest.raises(NightlyError):
+        nightly.fetch_bundle([sys.executable, str(script), "{uid}", "{out}"], str(tmp_path), "u1", tmp_path)
+    line = capsys.readouterr().out.strip()
+    assert len(line.split("bundle-stderr ", 1)[1]) == 500
