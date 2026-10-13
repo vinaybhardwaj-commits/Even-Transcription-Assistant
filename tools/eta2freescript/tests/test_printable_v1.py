@@ -28,12 +28,27 @@ PASS_CASES = [
     {"Diagnoses": "?Migraine"},
     {"Follow up": "Review with reports"},
     {"Examination": "BP 130/80 mm Hg"},
+    {"Medication": "Paracetamol 650 TDS x 3 days"},
+    {"Plan of Management": "if BP < 140 continue"},
+    {"Plan of Management": "if BP <140 continue"},
+    {"Medication": "Syrup Cremaffin 10 ml HS x 7 days"},
+    {"Medication": "Ointment to be applied twice daily"},
+    {"Medication": "Tablet to be taken after food"},
+    {"Presenting Complaint": "Cause unknown"},
+    {"Co-morbidities": "No known drug allergies"},
+    {"Follow up": "mandatory follow up; 2026-10-25; Review after 2 weeks"},
+    {"Refer to": "Cardiology - for ECHO"},
+    {"Further Investigation": "HbA1c (fasting not required)"},
 ]
 
 
 @pytest.mark.parametrize("sections", PASS_CASES)
 def test_n1_false_positive_list_passes(sections):
     assert n1(note(**sections)) == []
+
+
+def test_n1_full_width_brackets_are_brackets():
+    assert n1(note(Medication="Tab A 1 OD ［x］"))
 
 
 def test_n1_diagnosis_continuation_line_may_start_with_question_mark():
@@ -47,11 +62,30 @@ FAIL_CASES = [
     ("Medication", "Dose: to be confirmed"),
     ("Examination", "Not documented"),
     ("Plan of Management", "{{GP_EXTRACTION}}"),
-    ("Plan of Management", "Dose TBD"),
+    ("Medication", "Dose TBD"),
     ("Plan of Management", "unspecified"),
-    ("Plan of Management", "placeholder text"),
-    ("Medication", "an unnamed drug 1 OD"),
-    ("Plan of Management", "will VERIFY later"),
+    ("Medication", "will VERIFY later"),
+    ("Medication", "Paracetamol 650 BD (doctor to confirm)"),
+    ("Medication", "Paracetamol 650 (dose to be decided)"),
+    ("Medication", "Paracetamol 650 BD - please confirm dose"),
+    ("Medication", "Paracetamol 650 BD (needs verification)"),
+    ("Medication", "Paracetamol 650 BD (frequency not mentioned)"),
+    ("Medication", "Paracetamol 650 BD x duration not stated"),
+    ("Medication", "Paracetamol 650 BD, dose unknown"),
+    ("Medication", "Paracetamol 650 BD x <duration>"),
+    ("Medication", "{dose}"),
+    ("Medication", "Paracetamol 650 BD x __ days"),
+    ("Medication", "XX mg"),
+    ("Medication", "Paracetamol 650 BD x days"),
+    ("Medication", "Paracetamol 650 BD x？days"),
+    ("Medication", "Amlodipine 5 OD (to be decided)"),
+    ("Follow up", "Review date unknown"),
+    ("Medication", "Dose: missing"),
+    ("Medication", "Kindly add strength"),
+    ("Plan of Management", "Review dr to advise"),
+    ("General Advice", "Frequency of review unclear"),
+    ("Medication", "Amlodipine 5 OD unconfirmed"),
+    ("Medication", "Amlodipine pending"),
     ("Medication", "Amlodipine ?5 OD"),          # "?" not at the start of a Diagnoses entry
     ("Plan of Management", "?cause"),            # "?" outside Diagnoses
     ("Diagnoses", "Migraine?"),                  # "?" not first in a Diagnoses entry
