@@ -34,4 +34,9 @@ func runR138Tests() {
         let ev = statusEvents138("{\"state\":\"ready\",\"updated_at\":\"2026-10-13T03:00:00Z\",\"pending_piece_count\":0}")
         check(ev.first?.payload["mic_state"] == nil, "no mic_state key")
     }
+    test("R138 capture_open is a known key and reaches the sink as a bool") {
+        let ev = statusEvents138("{\"state\":\"retired\",\"capture_open\":true,\"updated_at\":\"2026-10-13T03:00:00Z\",\"pending_piece_count\":0}")
+        checkEq(ev.first?.payload["capture_open"] as? Bool, true)
+        checkEq(ev.first?.payload["other_keys"] as? [String], [])
+    }
 }

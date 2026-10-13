@@ -295,3 +295,25 @@ import Testing
     #expect(try JSONDecoder().decode(RoomRecorderStatus.self, from: old).helperRegistration == nil)
   }
 }
+
+// MARK: - 0.1.38: a retired app with a recording still running is a session in progress
+
+@Suite struct RetiredSessionProbeTests {
+  private func snapshot(_ json: String) -> AppStatusSnapshot? {
+    let env = FakeEnv()
+    let root = "/Users/room/Library/Application Support/EvenScribe/RoomRecorder"
+    env.files[root + "/status.json"] = Data(json.utf8)
+    return AppStatusSnapshot.read(env: env, root: root, uid: 501, gid: 20)
+  }
+
+  // mutant: ignore capture_open in AppStatusSnapshot.sessionOpen and the first expectation fails.
+  @Test func retiredWithAnOpenCaptureCountsAsASessionInProgress() {
+    #expect(snapshot(#"{"state":"retired","capture_open":true}"#)?.sessionOpen == true)
+  }
+
+  @Test func retiredWithNoCaptureIsNotASession() {
+    #expect(snapshot(#"{"state":"retired","capture_open":false}"#)?.sessionOpen == false)
+    #expect(snapshot(#"{"state":"retired"}"#)?.sessionOpen == false)
+    #expect(snapshot(#"{"state":"recording"}"#)?.sessionOpen == true)
+  }
+}

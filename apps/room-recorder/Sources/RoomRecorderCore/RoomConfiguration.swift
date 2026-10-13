@@ -408,6 +408,10 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   /// `not_determined` (the same strings the bench poll carries as `mic_state`). Nil only for a status written
   /// by an older build.
   public var micState: String?
+  /// 0.1.38. True while a capture is open (recording or paused), whatever `state` says. A retired install with a
+  /// recording still running reports `state: retired`; the helper reads this key so it never mistakes that for an
+  /// idle room and updates or restarts under it.
+  public var captureOpen: Bool?
   /// 0.1.30. What macOS says about the privileged helper: `enabled`, `requiresApproval`,
   /// `notRegistered` or `notFound`. Nil until the app has looked.
   public var helperRegistration: String?
@@ -443,6 +447,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     case lastEvent = "last_event"
     case lastEventAt = "last_event_at"
     case micState = "mic_state"
+    case captureOpen = "capture_open"
   }
 
   public init(
@@ -455,6 +460,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     lastEvent: String? = nil,
     lastEventAt: Date? = nil,
     micState: String? = nil,
+    captureOpen: Bool? = nil,
     helperRegistration: String? = nil,
     helperRegistrationError: String? = nil,
     helperMode: String? = nil,
@@ -481,6 +487,7 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     self.lastEvent = lastEvent
     self.lastEventAt = lastEventAt
     self.micState = micState
+    self.captureOpen = captureOpen
   }
 }
 

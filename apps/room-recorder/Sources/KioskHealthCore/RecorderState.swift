@@ -16,11 +16,13 @@ struct RecorderStatus {
     var micMode: [String: String]?
     /// Room Recorder 0.1.38: status.json "mic_state", one of authorized / denied / not_determined; anything else is dropped.
     var micState: String?
+    /// Room Recorder 0.1.38: status.json "capture_open", true while a capture is running whatever "state" says.
+    var captureOpen: Bool?
     var otherKeys: [String] = []
 }
 
 enum RecorderStatusParser {
-    static let knownKeys: Set<String> = ["state", "session_id", "pending_piece_count", "updated_at", "mic_mode", "mic_state"]
+    static let knownKeys: Set<String> = ["state", "session_id", "pending_piece_count", "updated_at", "mic_mode", "mic_state", "capture_open"]
     /// The only keys of mic_mode that ever leave the machine, and the longest string for any of them.
     static let micModeKeys: [String] = ["before", "after", "set", "at"]
     static let micModeMaxChars = 64
@@ -38,6 +40,7 @@ enum RecorderStatusParser {
         s.pendingPieces = (obj["pending_piece_count"] as? NSNumber)?.intValue
         s.updatedAt = obj["updated_at"] as? String
         s.micMode = micMode(obj["mic_mode"])
+        s.captureOpen = (obj["capture_open"] as? NSNumber).flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? $0.boolValue : nil }
         s.micState = (obj["mic_state"] as? String).flatMap { micStates.contains($0) ? $0 : nil }
         s.otherKeys = obj.keys.filter { !knownKeys.contains($0) }.sorted()
         return s

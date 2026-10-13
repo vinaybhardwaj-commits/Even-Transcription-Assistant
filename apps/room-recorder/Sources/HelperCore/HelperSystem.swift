@@ -308,7 +308,9 @@ public enum HelperProcessScan {
 /// What the helper reads from the app's own `status.json` (the app writes it; the helper only reads).
 public struct AppStatusSnapshot: Equatable, Sendable {
   public var state: String
-  public var sessionOpen: Bool { state == "recording" || state == "paused" }
+  /// 0.1.38. status.json `capture_open`: a capture is running even though `state` says something else (`retired`).
+  public var captureOpen = false
+  public var sessionOpen: Bool { state == "recording" || state == "paused" || captureOpen }
   public var needsEnrol: Bool { state == "needs_enrol" }
 
   public static func read(env: HelperEnvironment, root: String, uid: UInt32, gid: UInt32) -> AppStatusSnapshot? {
@@ -316,7 +318,7 @@ public struct AppStatusSnapshot: Equatable, Sendable {
       let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
       let state = object["state"] as? String
     else { return nil }
-    return AppStatusSnapshot(state: state)
+    return AppStatusSnapshot(state: state, captureOpen: (object["capture_open"] as? Bool) ?? false)
   }
 }
 

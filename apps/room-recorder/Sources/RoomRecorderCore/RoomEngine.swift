@@ -636,6 +636,8 @@ public actor RoomEngine {
   private var retiredByServer = false
   /// 0.1.38 (R1). How long a retired install waits between polls. Five minutes; a test shortens it.
   var retiredRepollNanoseconds: UInt64 = 300_000_000_000
+  /// 0.1.38 R2. When the next poll of a retired install is due.
+  private var retiredNextPollAt = Date.distantPast
   /// 0.1.38 (R2). What macOS says about the microphone. A test replaces it.
   var micStateProvider: @Sendable () -> String = { MachineFactsReader.microphoneState() }
   /// Test seams for the two values above (an actor's stored property cannot be set from outside).
@@ -1086,17 +1088,9 @@ public actor RoomEngine {
     return (configured, .configuration)
   }
 
-  /// 0.1.38 (R1). Sleep `retiredRepollNanoseconds` (in 1 s slices, so a cancel is prompt), then adopt whatever install
-  /// config.json names NOW: an install that was un-retired keeps its id, and a config that now names the live install
-  /// switches the poll to it.
-  private func waitBeforeRetiredRepoll() async {
-    var remaining = retiredRepollNanoseconds
-    while remaining > 0 && !Task.isCancelled {
-      let slice = min(remaining, 1_000_000_000)
-      try? await Task.sleep(nanoseconds: slice)
-      remaining -= slice
-    }
-    guard !Task.isCancelled else { return }
+  /// 0.1.38 (R1). Adopt whatever install config.json names NOW: an install that was un-retired keeps its id, and a
+  /// config that now names the live install switches the poll to it.
+  private func adoptConfiguredInstallWhileRetired() {
     if let configured = (try? persistence.loadConfiguration())?.installID, configured != installID {
       log("retired: config.json now names install \(configured); polling as it")
       installID = configured
@@ -1109,6 +1103,7 @@ public actor RoomEngine {
   private func resumeAfterRetired() {
     guard retiredByServer else { return }
     retiredByServer = false
+    retiredNextPollAt = .distantPast
     lastError = nil
     log("poll accepted again; the install is no longer retired; resuming")
     try? saveStatus()
@@ -1379,8 +1374,22 @@ public actor RoomEngine {
       // 0.1.38 (R1). A retired install does nothing but wait and ask again: no uploads, no auto-start. The wait
       // re-reads config.json first, so an install that was re-enrolled underneath this process is the one asked about.
       if retiredByServer {
-        await waitBeforeRetiredRepoll()
-        if Task.isCancelled { break }
+        if Date() < retiredNextPollAt {
+          // Not due. NOTHING STOPS AN OPEN RECORDING: capture keeps running and its pieces keep landing in the local
+          // spool (uploads wait for the server). Without a session these two calls do nothing.
+          do {
+            try await finishUnexpectedCaptureIfNeeded()
+            try publishAvailable(finalFlush: false)
+          } catch {
+            log("retired: local housekeeping failed: \(bounded(error, limit: 120))")
+          }
+          try? saveStatus()
+          let remaining = max(0, retiredNextPollAt.timeIntervalSinceNow)
+          try? await Task.sleep(nanoseconds: min(UInt64(remaining * 1_000_000_000) + 1_000_000, 1_000_000_000))
+          continue
+        }
+        adoptConfiguredInstallWhileRetired()
+        retiredNextPollAt = Date().addingTimeInterval(Double(retiredRepollNanoseconds) / 1_000_000_000)
       }
       var retainedArchiveReady = false
       if !retiredByServer {
@@ -1591,15 +1600,24 @@ public actor RoomEngine {
         // top of the loop asks again every 5 minutes.
         let firstRefusal = !retiredByServer
         retiredByServer = true
+        retiredNextPollAt = Date().addingTimeInterval(Double(retiredRepollNanoseconds) / 1_000_000_000)
         lastError = "retired: this install was retired on the server"
         if firstRefusal {
           log("this install was retired on the server (409 RETIRED); staying up, asking again every \(retiredRepollNanoseconds / 1_000_000) ms")
-          try? await stopWithoutEnding(reason: .cancelled)
-          await stopRetainedArchiveRecovery()
-          // stopWithoutEnding leaves the engine `.superseded`, which ends the loop. A retired install is not finished:
-          // it waits, and when a poll is accepted again it reconciles with whatever the server holds.
-          if phase == .superseded { phase = .ready }
-          needsActiveReconciliation = true
+          if sessionIsOpen {
+            // NOTHING STOPS AN OPEN RECORDING (gating-lead, 13 Oct). Capture keeps running and the retained-archive
+            // recovery stays as it is; audio goes to tape and the local spool. The 5-minute re-poll goes on, and a
+            // 200 hands the session back to the normal path.
+            log("retired while a session is open: capture keeps running")
+          } else {
+            try? await stopWithoutEnding(reason: .cancelled)
+            await stopRetainedArchiveRecovery()
+            // stopWithoutEnding leaves the engine `.superseded` (ends the loop) or `.failed` (its pending upload took
+            // the same 409). A retired install is not finished: it waits, and when a poll is accepted again it
+            // reconciles with whatever the server holds.
+            if phase == .superseded || phase == .failed { phase = .ready }
+            needsActiveReconciliation = true
+          }
         }
         try? saveStatus()
         continue
@@ -4249,6 +4267,7 @@ public actor RoomEngine {
     // is never filed as a generic `failed`. A session in progress keeps its own state (the helper reads `recording`
     // to hold updates and restarts); `mic_state` still says denied.
     let micState = micStateProvider()
+    let captureOpen = sessionIsOpen
     var reported = state
     if retiredByServer {
       reported = .retired
@@ -4265,6 +4284,7 @@ public actor RoomEngine {
         lastEvent: lastEvent?.name,
         lastEventAt: lastEvent?.at,
         micState: micState,
+        captureOpen: captureOpen,
         helperRegistration: HelperStatusCache.shared.snapshot?.registration,
         helperRegistrationError: HelperStatusCache.shared.registrationError,
         helperMode: HelperStatusCache.shared.snapshot?.mode,
