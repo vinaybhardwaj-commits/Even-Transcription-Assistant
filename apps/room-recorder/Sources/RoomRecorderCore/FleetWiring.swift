@@ -52,6 +52,197 @@ public struct KeychainFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   }
 }
 
+extension KeychainFleetKeyStore {
+  /// 0.1.39.1. The ONE keychain read the file store may make, and only when its file is absent. It cannot raise a prompt:
+  /// `kSecUseAuthenticationUIFail` for data-protection items and `SecKeychainSetUserInteractionAllowed(false)` for the
+  /// legacy partition prompt this item raises (the same pair `RoomKeychain.load` uses, B1.5 K1). It never writes,
+  /// updates or deletes the item. A mismatch returns `errSecInteractionNotAllowed` in microseconds.
+  public static func readSeedNonInteractive(
+    service: String = KeychainFleetKeyStore.service, account: String = KeychainFleetKeyStore.account
+  ) throws -> Data {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+      kSecAttrAccount as String: account, kSecReturnData as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne, kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+    ]
+    var item: CFTypeRef?
+    let status = withoutUserInteraction { SecItemCopyMatching(query as CFDictionary, &item) }
+    guard status == errSecSuccess else { throw FleetKeychainError.read(status) }
+    guard let data = item as? Data else { throw FleetKeychainError.read(errSecDecode) }
+    return data
+  }
+
+  @available(macOS, deprecated: 10.10, message: "the only switch for the legacy partition prompt (B1.5 K1)")
+  private static func withoutUserInteraction<T>(_ body: () -> T) -> T {
+    var previous: DarwinBoolean = true
+    let read = SecKeychainGetUserInteractionAllowed(&previous)
+    SecKeychainSetUserInteractionAllowed(false)
+    defer { if read == errSecSuccess { SecKeychainSetUserInteractionAllowed(previous.boolValue) } }
+    return body()
+  }
+}
+
+/// 0.1.39.1. The fleet device key, in `<room root>/fleet-key.json` (0600, owned by the room user, written atomically).
+///
+/// WHY: the keychain item was written by one build and its partition list holds that build's cdhash (the signing
+/// identity has no Team ID), so the next build's `SecItemCopyMatching` put up a prompt nobody could click and blocked
+/// for ever inside the FleetClient actor (OPD 6, 13 Oct). Same failure, same cure as `RoomSessionStore` (B1.5).
+///
+/// THE KEYCHAIN IS READ AT MOST ONCE, only when the file is absent, never interactively, on its own thread, with a hard
+/// deadline. What it answers decides the key:
+/// - the seed: written to the file, never read from the keychain again;
+/// - not found: a new key, as on a fresh install;
+/// - unreadable without a person (-25308, -25293, -25315) or no answer in time: a new key, and `rotated`, so the client
+///   drops the device id and registers a new device. The old id is never reused with a new key (KEY_CONFLICT);
+/// - anything else: an error, no key made. The client retries every 300 s.
+/// The old keychain item is never changed or deleted.
+public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
+  public static let fileName = "fleet-key.json"
+  /// The statuses that mean "the item is there and only a person could open it".
+  static let needsPerson: Set<OSStatus> = [errSecInteractionNotAllowed, errSecAuthFailed, errSecInteractionRequired]
+
+  struct Stored: Codable {
+    let seed: String
+    let algorithm: String
+    let writtenBy: String
+    let writtenAt: Date
+    enum CodingKeys: String, CodingKey {
+      case seed, algorithm
+      case writtenBy = "written_by"
+      case writtenAt = "written_at"
+    }
+  }
+
+  let root: URL
+  let keychainReader: @Sendable () throws -> Data
+  let deadline: TimeInterval
+  let log: @Sendable (String) -> Void
+  let uid: UInt32
+  private let lock = NSLock()
+
+  public init(
+    root: URL, keychainReader: @escaping @Sendable () throws -> Data = { try KeychainFleetKeyStore.readSeedNonInteractive() },
+    deadline: TimeInterval = RoomSessionStore.keychainDeadline, uid: UInt32 = getuid(),
+    log: @escaping @Sendable (String) -> Void
+  ) {
+    self.root = root
+    self.keychainReader = keychainReader
+    self.deadline = deadline
+    self.uid = uid
+    self.log = log
+  }
+
+  public var url: URL { root.appendingPathComponent(Self.fileName, isDirectory: false) }
+
+  public func loadOrCreate() throws -> FleetSigningKey { try loadWithOrigin().key }
+
+  public func loadWithOrigin() throws -> FleetKeyLoad {
+    lock.lock(); defer { lock.unlock() }
+    var wasRefused = false
+    switch readFile() {
+    case .ok(let key): return FleetKeyLoad(key: key, origin: .existing)
+    case .refused(let why):
+      // Unusable is treated as absent, and said. The key it held (if any) is unknown, so a replacement is a new identity.
+      log("ignoring fleet-key.json: \(why)")
+      wasRefused = true
+    case .absent: break
+    }
+    do {
+      let seed = try readKeychainWithDeadline()
+      guard let key = try? FleetSigningKey(seed: seed) else { throw FleetKeychainError.read(errSecDecode) }
+      try write(key)
+      log("fleet key: moved from keychain to file")
+      return FleetKeyLoad(key: key, origin: .existing)
+    } catch let error as FleetKeychainError {
+      guard case .read(let status) = error else { throw error }
+      if status == errSecItemNotFound {
+        let key = FleetSigningKey.generate()
+        try write(key)
+        return FleetKeyLoad(key: key, origin: wasRefused ? .rotated(reason: "file unusable") : .fresh)
+      }
+      if Self.needsPerson.contains(status) { return try rotate(reason: String(status)) }
+      throw error
+    } catch let error as KeyDeadline {
+      _ = error
+      return try rotate(reason: "timeout")
+    }
+  }
+
+  private func rotate(reason: String) throws -> FleetKeyLoad {
+    let key = FleetSigningKey.generate()
+    try write(key)
+    return FleetKeyLoad(key: key, origin: .rotated(reason: reason))
+  }
+
+  struct KeyDeadline: Error {}
+
+  private final class Box: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Data, Error>?
+    func set(_ r: Result<Data, Error>) { lock.lock(); result = r; lock.unlock() }
+    var value: Result<Data, Error>? { lock.lock(); defer { lock.unlock() }; return result }
+  }
+
+  /// A timed-out thread is left where it is: it is parked inside securityd and cannot be killed.
+  private func readKeychainWithDeadline() throws -> Data {
+    let box = Box()
+    let done = DispatchSemaphore(value: 0)
+    let reader = keychainReader
+    Thread.detachNewThread {
+      box.set(Result { try reader() })
+      done.signal()
+    }
+    guard done.wait(timeout: .now() + deadline) == .success, let result = box.value else { throw KeyDeadline() }
+    return try result.get()
+  }
+
+  enum FileOutcome {
+    case ok(FleetSigningKey)
+    case refused(String)
+    case absent
+  }
+
+  func readFile() -> FileOutcome {
+    let path = url.path
+    guard FileManager.default.fileExists(atPath: path) else { return .absent }
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else {
+      return .refused("its attributes could not be read")
+    }
+    guard attributes[.type] as? FileAttributeType == .typeRegular else { return .refused("it is not a regular file") }
+    guard let mode = (attributes[.posixPermissions] as? NSNumber)?.uint16Value, mode == 0o600 else {
+      let mode = (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+      return .refused("its mode is \(String(mode, radix: 8)), not 600")
+    }
+    guard let owner = (attributes[.ownerAccountID] as? NSNumber)?.uint32Value, owner == uid else {
+      return .refused("it is owned by another user")
+    }
+    guard let data = try? Data(contentsOf: url) else { return .refused("it could not be read") }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    guard let stored = try? decoder.decode(Stored.self, from: data), stored.algorithm == "ed25519",
+      let seed = Data(base64Encoded: stored.seed), let key = try? FleetSigningKey(seed: seed)
+    else { return .refused("it is not the JSON this app writes") }
+    return .ok(key)
+  }
+
+  /// Atomic: a temporary, chmod 0600 BEFORE the rename, then renamed over the file. No reader sees it at 0644.
+  func write(_ key: FleetSigningKey) throws {
+    let stored = Stored(
+      seed: key.seed.base64EncodedString(), algorithm: "ed25519", writtenBy: BuildInfo.appVersion ?? "unbundled",
+      writtenAt: Date())
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let data = try encoder.encode(stored)
+    let temporary = root.appendingPathComponent("\(Self.fileName).\(UUID().uuidString).tmp", isDirectory: false)
+    try data.write(to: temporary, options: [.atomic])
+    defer { try? FileManager.default.removeItem(at: temporary) }
+    try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: temporary.path)
+    _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary, backupItemName: nil, options: .usingNewMetadataOnly)
+    try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+  }
+}
+
 public enum FleetKeychainError: Error, Equatable, CustomNSError {
   case read(OSStatus)
   case write(OSStatus)
@@ -186,7 +377,7 @@ public enum FleetBootstrap {
       config: FleetClientConfig(
         enabled: true, installID: installID, machine: machine, hwModel: MachineFactsReader.hardwareModel(),
         helperVersion: HelperStatusCache.shared.snapshot?.helperVersion),
-      app: engine, transport: URLSessionFleetTransport(origin: configuration.origin), keys: KeychainFleetKeyStore(),
+      app: engine, transport: URLSessionFleetTransport(origin: configuration.origin), keys: FileFleetKeyStore(root: root, log: log),
       store: FileFleetStateStore(root: root), roomSession: { session }, log: log)
     log("fleet client: on")
     Task.detached { await client.run() }

@@ -112,6 +112,13 @@ final class FlakyKeys: FleetKeyStore, @unchecked Sendable {
   }
 }
 
+final class ClockBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var date = TestServer.now
+  var value: Date { lock.lock(); defer { lock.unlock() }; return date }
+  func advance(by seconds: TimeInterval) { lock.lock(); date = date.addingTimeInterval(seconds); lock.unlock() }
+}
+
 final class LogLines: @unchecked Sendable {
   private let lock = NSLock()
   private var lines: [String] = []
@@ -130,13 +137,16 @@ final class LogLines: @unchecked Sendable {
     return store
   }
 
-  private func client(keys: FleetKeyStore, store: FleetStateStore, transport: FakeTransport, log: LogLines, sleeps: TaskBox) -> FleetClient {
+  private func client(
+    keys: FleetKeyStore, store: FleetStateStore, transport: FakeTransport, log: LogLines, sleeps: TaskBox,
+    clock: @escaping @Sendable () -> Date = { TestServer.now }
+  ) -> FleetClient {
     let server = TestServer()
     return FleetClient(
       config: FleetClientConfig(enabled: true, installID: "inst_1", machine: TestServer.machine, hwModel: "Macmini9,1", helperVersion: "0.2.4-h6"),
       transport: transport, keys: keys, store: store, executor: RecordingExecutor(),
       serverKeys: ["fk1": server.publicKey], roomSession: { "room-jwt" }, gates: { FleetGateState(sessionOpen: false) },
-      clock: { TestServer.now }, sleep: { _ in sleeps.tick(limit: Int.max); await Task.yield() }, makeJTI: { UUID().uuidString.lowercased() },
+      clock: clock, sleep: { _ in sleeps.tick(limit: Int.max); await Task.yield() }, makeJTI: { UUID().uuidString.lowercased() },
       log: { log.add($0) })
   }
 
@@ -160,7 +170,8 @@ final class LogLines: @unchecked Sendable {
     let log = LogLines()
     let sleeps = TaskBox()
     let keys = FlakyKeys()
-    let fleet = client(keys: keys, store: seeded(), transport: transport, log: log, sleeps: sleeps)
+    let now = ClockBox()
+    let fleet = client(keys: keys, store: seeded(), transport: transport, log: log, sleeps: sleeps, clock: { now.value })
     let task = Task.detached { await fleet.run() }
     polls.set(task)
 
@@ -172,8 +183,10 @@ final class LogLines: @unchecked Sendable {
     let said = log.all.filter { $0.hasPrefix("fleet client: poll failed") }
     #expect(said == ["fleet client: poll failed (FleetKeychain -25308)"], "once, with the status; got \(said)")
 
-    // Unlocked: it carries on by itself, polling at least three times, and registration is not repeated.
+    // Unlocked. A key that failed to load is asked for again after 300 s (0.1.39.1), so the clock moves on.
+    // It then carries on by itself, polling at least three times, and registration is not repeated.
     keys.heal()
+    now.advance(by: FleetClient.keyRetryInterval + 1)
     while polls.cycles < 3 && Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
     task.cancel()
     await task.value
