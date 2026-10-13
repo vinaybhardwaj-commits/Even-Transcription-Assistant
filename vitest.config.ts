@@ -9,5 +9,5 @@ export default defineConfig({
       "@cloudflare/containers": fileURLToPath(new URL("./tests/stubs/cloudflare-containers.mjs", import.meta.url)),
     },
   },
-  test: { include: ["tests/unit/**/*.test.ts"], environment: "node" },
+  test: { include: ["tests/unit/**/*.test.ts"], environment: "node", globalSetup: ["tests/support/no-leaked-containers.ts"] },
 });

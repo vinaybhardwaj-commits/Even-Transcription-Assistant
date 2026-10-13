@@ -8,7 +8,7 @@
  *      switch is ON even if the plan was made while it was OFF (the race), and writes NOTHING (no history row either).
  *   4. Compare-and-set: a value changed between the read and the write is not overwritten; the command re-reads and retries.
  */
-import { describe, it, expect, vi, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import ts from "typescript";
@@ -59,6 +59,7 @@ describe.skipIf(!HAVE_DOCKER)("0136 steward_config_history and lib/steward/write
     pg.start();
     vi.spyOn(console, "warn").mockImplementation(() => {});
   }, 240_000);
+  afterAll(() => { if (HAVE_DOCKER) pg.stop(); });
 
   it("applies through splitSql twice and as raw psql; registers itself; indexes; no grant, no role", () => {
     pg.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
