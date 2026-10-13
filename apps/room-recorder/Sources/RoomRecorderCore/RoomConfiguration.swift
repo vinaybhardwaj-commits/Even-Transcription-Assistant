@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TapeCapture
+import TapeCore
 
 /// ─── THE CASE ORDER HERE IS NOT THE ERROR CODE ORDER ────────────────────────────────────────
 /// Swift bridges an enum's cases to `NSError.code` by putting every case that carries an
@@ -191,8 +192,13 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
   /// fleet card can say why an assignment is not taking. Absent means false. Nothing but a hand on
   /// this Mac sets it: no command, no enrol, no server field writes it.
   public var channelLocked: Bool
+  /// The outbound long-poll command client (TS-H3/H4). ON by default since 0.1.35, when the server's `fk1` was
+  /// compiled in: absent means on, and a hand on this Mac turns it off with `"fleet_client_enabled": false` in
+  /// config.json. Nothing the server sends can change it. Not an init parameter, on purpose.
+  public var fleetClientEnabled: Bool = true
 
   enum CodingKeys: String, CodingKey {
+    case fleetClientEnabled = "fleet_client_enabled"
     case origin
     case roomSlug = "room_slug"
     case deviceUID = "device_uid"
@@ -348,6 +354,7 @@ public struct RoomConfiguration: Codable, Equatable, Sendable {
       // a JSON boolean is refused with the file, as every other typed key here is.
       channelLocked: values.decodeIfPresent(Bool.self, forKey: .channelLocked) ?? false
     )
+    fleetClientEnabled = try values.decodeIfPresent(Bool.self, forKey: .fleetClientEnabled) ?? true
   }
 
   public func residentArchiveEligibility(archiveRootURL: URL) -> RoomResidentArchiveEligibility {
@@ -379,6 +386,15 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     /// Distinct from `offline`, which means "the server is unreachable, keep trying". This one
     /// means "there is nothing to try with" — a human has to re-paste the install command.
     case needsEnrol = "needs_enrol"
+    /// 0.1.38. The server answered 409 RETIRED: this install was retired on the server. The process stays up and
+    /// asks again every 5 minutes; it says `retired` instead of going silent with a stale `failed`.
+    case retired
+    /// 0.1.38. macOS has the microphone denied for this app (`mic_state` says `denied`), so nothing can be recorded
+    /// until a person grants it. Distinct from a generic `failed`.
+    case micDenied = "mic_denied"
+    /// 0.1.39. A session is open and the tape has not grown for 3 minutes. The capture owner was restarted; this stays
+    /// until the tape moves again.
+    case captureStalled = "capture_stalled"
   }
 
   public var state: State
@@ -386,13 +402,65 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   public var pendingPieceCount: Int
   public var lastError: String?
   public var updatedAt: Date
+  /// The latest MicModeGuard result from tapewriter; nil when none has been read.
+  public var micMode: MicModeStatus?
+  /// A planned event, not an error: "mic_mode_reset" when the tapewriter watchdog reset Mic Mode in place.
+  public var lastEvent: String?
+  public var lastEventAt: Date?
+  /// 0.1.38. The microphone permission macOS reports for this app right now: `authorized`, `denied` or
+  /// `not_determined` (the same strings the bench poll carries as `mic_state`). Nil only for a status written
+  /// by an older build.
+  public var micState: String?
+  /// 0.1.38. True while a capture is open (recording or paused), whatever `state` says. A retired install with a
+  /// recording still running reports `state: retired`; the helper reads this key so it never mistakes that for an
+  /// idle room and updates or restarts under it.
+  public var captureOpen: Bool?
+  /// 0.1.39. When the server last answered a poll with a 2xx. `updated_at` moves on failures too, so it cannot say this.
+  public var lastPollOKAt: Date?
+  /// 0.1.39. The HTTP status of the latest poll: 200 on success, the server's code on a refusal (409 RETIRED), 0 when
+  /// no HTTP answer came back (network). Nil until the first poll of this process.
+  public var lastHTTP: Int?
+  /// 0.1.39. When a piece last reached the server and was removed from the spool. Nil until one has in this process.
+  public var lastChunkUploadedAt: Date?
+  /// 0.1.30. What macOS says about the privileged helper: `enabled`, `requiresApproval`,
+  /// `notRegistered` or `notFound`. Nil until the app has looked.
+  public var helperRegistration: String?
+  /// The last reason `register()` refused, bounded; nil while it has not.
+  public var helperRegistrationError: String?
+  /// 0.1.32. `launchd`, `smappservice` or `none`; see `HelperSnapshot.mode`.
+  public var helperMode: String?
+  /// 0.1.34. Whether the helper answered a hello over XPC at the last probe, and the version it gave.
+  /// FLEET could not see either: they were on the bench row only. Nil until the app has probed.
+  public var helperXPCOK: Bool?
+  public var helperVersion: String?
+  /// 0.1.35. What the helper reports about itself (#43/#46): its state, the power-on schedule it holds, and any
+  /// pmset settings it found off baseline (comma-joined). Nil until it has answered.
+  public var helperState: String?
+  public var powerSchedule: String?
+  public var pmsetDrift: String?
 
   enum CodingKeys: String, CodingKey {
+    case helperState = "helper_state"
+    case powerSchedule = "power_schedule"
+    case pmsetDrift = "pmset_drift"
+    case helperXPCOK = "helper_xpc_ok"
+    case helperVersion = "helper_version"
+    case helperMode = "helper_mode"
     case state
     case sessionID = "session_id"
+    case helperRegistration = "helper_registration"
+    case helperRegistrationError = "helper_registration_error"
     case pendingPieceCount = "pending_piece_count"
     case lastError = "last_error"
     case updatedAt = "updated_at"
+    case micMode = "mic_mode"
+    case lastEvent = "last_event"
+    case lastEventAt = "last_event_at"
+    case micState = "mic_state"
+    case captureOpen = "capture_open"
+    case lastPollOKAt = "last_poll_ok_at"
+    case lastHTTP = "last_http"
+    case lastChunkUploadedAt = "last_chunk_uploaded_at"
   }
 
   public init(
@@ -400,13 +468,45 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     sessionID: String? = nil,
     pendingPieceCount: Int = 0,
     lastError: String? = nil,
-    updatedAt: Date = Date()
+    updatedAt: Date = Date(),
+    micMode: MicModeStatus? = nil,
+    lastEvent: String? = nil,
+    lastEventAt: Date? = nil,
+    micState: String? = nil,
+    captureOpen: Bool? = nil,
+    helperRegistration: String? = nil,
+    helperRegistrationError: String? = nil,
+    helperMode: String? = nil,
+    helperXPCOK: Bool? = nil,
+    helperVersion: String? = nil,
+    helperState: String? = nil,
+    powerSchedule: String? = nil,
+    pmsetDrift: String? = nil,
+    lastPollOKAt: Date? = nil,
+    lastHTTP: Int? = nil,
+    lastChunkUploadedAt: Date? = nil
   ) {
+    self.lastPollOKAt = lastPollOKAt
+    self.lastHTTP = lastHTTP
+    self.lastChunkUploadedAt = lastChunkUploadedAt
+    self.helperState = helperState
+    self.powerSchedule = powerSchedule
+    self.pmsetDrift = pmsetDrift
+    self.helperXPCOK = helperXPCOK
+    self.helperVersion = helperVersion
+    self.helperMode = helperMode
+    self.helperRegistration = helperRegistration
+    self.helperRegistrationError = helperRegistrationError.map { String($0.prefix(200)) }
     self.state = state
     self.sessionID = sessionID
     self.pendingPieceCount = max(0, pendingPieceCount)
     self.lastError = lastError.map { String($0.prefix(500)) }
     self.updatedAt = updatedAt
+    self.micMode = micMode
+    self.lastEvent = lastEvent
+    self.lastEventAt = lastEventAt
+    self.micState = micState
+    self.captureOpen = captureOpen
   }
 }
 

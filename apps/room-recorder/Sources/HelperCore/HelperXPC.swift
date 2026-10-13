@@ -1,0 +1,192 @@
+import Foundation
+import Security
+import ServiceManagement
+
+/// One method, Data in and Data out. The closed protocol lives in `HelperCodec`, so the XPC
+/// surface cannot grow a verb without passing through the allow-list.
+@objc public protocol HelperXPCProtocol {
+  func send(_ request: Data, reply: @escaping (Data) -> Void)
+}
+
+final class HelperXPCEndpoint: NSObject, HelperXPCProtocol {
+  let service: HelperService
+  init(service: HelperService) { self.service = service }
+  func send(_ request: Data, reply: @escaping (Data) -> Void) { reply(service.handle(request)) }
+}
+
+/// Helper side. Every connection gets the peer requirement BEFORE it is resumed; a peer that does
+/// not satisfy it has its messages dropped and the connection invalidated by the system.
+public final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate {
+  private let endpoint: HelperXPCEndpoint
+  private let requirement: String
+
+  public init(service: HelperService, requirement: String = HelperIdentity.requirementForApp) {
+    self.endpoint = HelperXPCEndpoint(service: service)
+    self.requirement = requirement
+  }
+
+  public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection)
+    -> Bool
+  {
+    connection.setCodeSigningRequirement(requirement)
+    connection.exportedInterface = NSXPCInterface(with: HelperXPCProtocol.self)
+    connection.exportedObject = endpoint
+    connection.resume()
+    return true
+  }
+}
+
+/// Static code-signing check on a file. Used by tests, and by anything that wants the same
+/// question answered without a live connection.
+public enum PeerRequirement {
+  public static func isValid(_ requirement: String) -> Bool {
+    var req: SecRequirement?
+    return SecRequirementCreateWithString(requirement as CFString, [], &req) == errSecSuccess
+  }
+
+  /// True only when the code at `url` is validly signed AND satisfies `requirement`.
+  public static func satisfies(codeAt url: URL, requirement: String) -> Bool {
+    var req: SecRequirement?
+    guard SecRequirementCreateWithString(requirement as CFString, [], &req) == errSecSuccess,
+      let req
+    else { return false }
+    var code: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else {
+      return false
+    }
+    return SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: 0), req) == errSecSuccess
+  }
+}
+
+/// App-side view of the helper, as the bench poll reports it.
+public struct HelperSnapshot: Equatable, Sendable {
+  public var registration: String
+  public var helperVersion: String?
+  public var xpcOK: Bool?
+  /// `launchd` (a system LaunchDaemon the pkg installed), `smappservice` (the bundle's own daemon plist,
+  /// registered by the app) or `none` (neither is there). Nil until the app has looked.
+  public var mode: String?
+  /// From the helper's `helperStatus` answer (0.1.35): its own state, the power schedule it holds and any
+  /// pmset settings it found off baseline. Nil when it did not answer.
+  public var helperState: String?
+  public var powerSchedule: String?
+  public var pmsetDrift: String?
+  /// 0.1.37 (#45): where the helper's whole-bundle update is. `step` is the last step's word (with its reason after a colon),
+  /// `version` the release it is working on, `result` ok / rolled_back / failed once it has finished.
+  public var updateStep: String?
+  public var updateVersion: String?
+  public var updateResult: String?
+
+  public init(
+    registration: String, helperVersion: String?, xpcOK: Bool?, mode: String? = nil, helperState: String? = nil,
+    powerSchedule: String? = nil, pmsetDrift: String? = nil, updateStep: String? = nil, updateVersion: String? = nil,
+    updateResult: String? = nil
+  ) {
+    self.updateStep = updateStep
+    self.updateVersion = updateVersion
+    self.updateResult = updateResult
+    self.registration = registration
+    self.helperVersion = helperVersion
+    self.xpcOK = xpcOK
+    self.mode = mode
+    self.helperState = helperState
+    self.powerSchedule = powerSchedule
+    self.pmsetDrift = pmsetDrift
+  }
+}
+
+/// `SMAppService` status → the four strings #39 names.
+public enum HelperRegistration {
+  public static func name(_ status: SMAppService.Status) -> String {
+    switch status {
+    case .notRegistered: return "notRegistered"
+    case .requiresApproval: return "requiresApproval"
+    case .enabled: return "enabled"
+    case .notFound: return "notFound"
+    @unknown default: return "notFound"
+    }
+  }
+
+  public static var service: SMAppService { SMAppService.daemon(plistName: HelperIdentity.daemonPlistName) }
+}
+
+/// App → helper client. The helper's identity is checked on the app's side of the connection.
+public final class HelperClient: @unchecked Sendable {
+  private let makeConnection: () -> NSXPCConnection
+  private let requirement: String
+
+  public init(
+    machService: String = HelperIdentity.machServiceName,
+    requirement: String = HelperIdentity.requirementForHelper
+  ) {
+    self.makeConnection = { NSXPCConnection(machServiceName: machService, options: .privileged) }
+    self.requirement = requirement
+  }
+
+  /// For tests: connect to an in-process listener instead of the helper's mach service.
+  init(endpoint: NSXPCListenerEndpoint, requirement: String) {
+    self.makeConnection = { NSXPCConnection(listenerEndpoint: endpoint) }
+    self.requirement = requirement
+  }
+
+  /// One hello. Nil on timeout, refusal or a peer that fails the requirement.
+  public func hello(timeout: TimeInterval = 3) -> HelperResponse? {
+    send(.hello(clientVersion: nil), timeout: timeout)
+  }
+
+  /// The helper's own account of itself: version, safe mode, app state, power schedule, pmset drift.
+  public func helperStatus(timeout: TimeInterval = 5) -> HelperResponse? {
+    send(.helperStatus, timeout: timeout)
+  }
+
+  /// Hands a server-signed envelope to the helper, which verifies it again before it does anything.
+  public func runSignedCommand(envelope: String, deviceID: String, machine: String, timeout: TimeInterval = 40) -> HelperResponse? {
+    send(.runSignedCommand(envelope: envelope, deviceID: deviceID, machine: machine), timeout: timeout)
+  }
+
+  /// The next batch of kiosk-health events (#47). `detail["count"]` is "0" when there is nothing to send.
+  public func kioskBatch(timeout: TimeInterval = 10) -> HelperResponse? {
+    send(.kioskBatch, timeout: timeout)
+  }
+
+  /// What the sink answered for a batch. `status` 0 means the post never got an HTTP answer.
+  public func kioskReport(batchID: String, status: Int, reason: String, body: String, timeout: TimeInterval = 10) -> HelperResponse? {
+    send(.kioskReport(batchID: batchID, status: status, reason: reason, body: body), timeout: timeout)
+  }
+
+  /// 0.1.37 (#45). `detail["answer"]` is `accepted`, `in_progress` or `refused:<reason>`.
+  public func updateOffer(record: String, signature: String, deviceID: String, machine: String, timeout: TimeInterval = 10) -> HelperResponse? {
+    send(.updateOffer(record: record, signature: signature, deviceID: deviceID, machine: machine), timeout: timeout)
+  }
+
+  /// The app's proof of life: a successful bench poll, running `version`.
+  public func appBeat(version: String, timeout: TimeInterval = 5) -> HelperResponse? {
+    send(.appBeat(version: version), timeout: timeout)
+  }
+
+  /// 0.1.37 (#49).
+  public func stewardTickets(json: String, deviceID: String, machine: String, timeout: TimeInterval = 40) -> HelperResponse? {
+    send(.stewardTickets(json: json, deviceID: deviceID, machine: machine), timeout: timeout)
+  }
+
+  func send(_ command: HelperCommand, timeout: TimeInterval) -> HelperResponse? {
+    let connection = makeConnection()
+    connection.remoteObjectInterface = NSXPCInterface(with: HelperXPCProtocol.self)
+    connection.setCodeSigningRequirement(requirement)
+    connection.resume()
+    defer { connection.invalidate() }
+    guard let request = try? HelperCodec.encode(command) else { return nil }
+    let done = DispatchSemaphore(value: 0)
+    let box = ResponseBox()
+    let proxy = connection.remoteObjectProxyWithErrorHandler { _ in done.signal() }
+    guard let remote = proxy as? HelperXPCProtocol else { return nil }
+    remote.send(request) { data in
+      box.value = HelperResponse.decode(data)
+      done.signal()
+    }
+    _ = done.wait(timeout: .now() + timeout)
+    return box.value
+  }
+
+  private final class ResponseBox: @unchecked Sendable { var value: HelperResponse? }
+}

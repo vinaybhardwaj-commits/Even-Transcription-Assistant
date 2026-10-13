@@ -1651,6 +1651,83 @@ import Testing
       segmentSampleStart: 0)
   }
 
+  // ─── 0.1.38 R2: NOTHING STOPS AN OPEN RECORDING ─────────────────────────────────────────────
+  // The refuter's probe. OPD 4 was retired 21 s after a start_day. mutants: put `stopWithoutEnding` back in the 409
+  // branch (stopReasons becomes [.cancelled] while retired); drop the `sessionIsOpen` guard (same); drop
+  // `capture_open` from saveStatus (the status check fails).
+
+  @Test func aRetiredAnswerNeverStopsAnOpenRecordingAndAFollowingOKResumesIt() async throws {
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try RoomPersistence(root: root).saveConfiguration(
+      configuration(enabled: true, receipt: preflightReceipt(root: root)))
+    let probe = ResidentFactoryProbe()
+    let remote = ResidentRetiredRemote(script: [.ok, .retired, .retired, .ok])
+    let engine = try await RoomEngine.load(
+      rootURL: root,
+      enrolmentReader: enrolledForTests,
+      remoteFactory: { _ in remote },
+      captureLauncher: RefusingCaptureLauncher(),
+      retainedArchiveRecovery: EncoderCapableRecovery(),
+      residentRuntimeFactory: { _, _ in probe.makeRuntime() }
+    )
+    await engine.setRetiredRepoll(nanoseconds: 300_000_000)
+    await engine.setMicStateProvider { "authorized" }
+    let task = Task { try await engine.run() }
+
+    try await waitUntil {
+      guard probe.owner.startContexts.count == 1 else { return false }
+      return await remote.pollCalls() >= 1
+    }
+    // Poll 2 is the first 409: the recording is open.
+    try await waitUntil { (try? RoomPersistence(root: root).loadStatus())?.state == .retired }
+    let retired = try #require(try? RoomPersistence(root: root).loadStatus())
+    #expect(retired.captureOpen == true, "the helper must still see an open capture")
+    #expect(retired.sessionID == "bs_resident")
+    #expect(probe.owner.stopReasons.isEmpty, "a 409 must not stop the capture")
+    let serviceBefore = probe.owner.serviceCalls
+    // It is still being serviced while retired, and the next 409 (poll 3) changes nothing.
+    try await waitUntil { (await remote.pollCalls()) >= 3 }
+    #expect(probe.owner.serviceCalls > serviceBefore)
+    #expect(probe.owner.stopReasons.isEmpty)
+    // Poll 4 is a 200: the session carries on under the normal path.
+    try await waitUntil { (try? RoomPersistence(root: root).loadStatus())?.state == .recording }
+    #expect(probe.owner.stopReasons.isEmpty)
+    #expect(probe.owner.startContexts.count == 1, "no restart of the capture")
+
+    task.cancel()
+    try await task.value
+    #expect(probe.owner.stopReasons == [.cancelled], "only the normal cancellation stops it")
+  }
+
+  @Test func aDeniedMicrophoneDuringARecordingKeepsTheStateRecording() async throws {
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try RoomPersistence(root: root).saveConfiguration(
+      configuration(enabled: true, receipt: preflightReceipt(root: root)))
+    let probe = ResidentFactoryProbe()
+    let remote = ResidentCaptureRemote()
+    let engine = try await RoomEngine.load(
+      rootURL: root,
+      enrolmentReader: enrolledForTests,
+      remoteFactory: { _ in remote },
+      captureLauncher: RefusingCaptureLauncher(),
+      retainedArchiveRecovery: EncoderCapableRecovery(),
+      residentRuntimeFactory: { _, _ in probe.makeRuntime() }
+    )
+    await engine.setMicStateProvider { "denied" }
+    let task = Task { try await engine.run() }
+    try await waitUntil {
+      guard let status = try? RoomPersistence(root: root).loadStatus() else { return false }
+      return status.state == .recording && status.micState == "denied"
+    }
+    let status = try #require(try? RoomPersistence(root: root).loadStatus())
+    #expect(status.state == .recording, "the helper reads recording to hold updates; mic_denied must not replace it")
+    #expect(status.captureOpen == true)
+    task.cancel()
+    try await task.value
+  }
+
   private func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async throws {
     for _ in 0..<500 {
       if await condition() { return }
@@ -2332,6 +2409,59 @@ private actor ResidentSupersededRemote: RoomEngineRemote {
   }
 
   func activeSessionCalls() -> Int { activeCalls }
+}
+
+/// 0.1.38. A resident remote whose polls follow a script: 200 or 409 RETIRED, then 200 for ever.
+private actor ResidentRetiredRemote: RoomEngineRemote {
+  enum Answer: Sendable { case ok, retired }
+  private var script: [Answer]
+  private var polls = 0
+
+  init(script: [Answer]) { self.script = script }
+
+  func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
+    try residentActiveSession()
+  }
+
+  func createSession(label: String?, micLabel: String?) async throws -> CreateSessionResponse {
+    throw ResidentCaptureTestError.unexpectedRemoteCall
+  }
+
+  func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws
+    -> BenchOKResponse
+  { throw ResidentCaptureTestError.unexpectedRemoteCall }
+
+  func pollCommands(
+    tabID: String, previousPollAt: String?, recordingSessionID: String?, paused: Bool,
+    primaryLevels: BenchLevelPair?, install: InstallPollFields?
+  ) async throws -> CommandPollResponse {
+    polls += 1
+    let answer = script.isEmpty ? Answer.ok : script.removeFirst()
+    if answer == .retired {
+      throw BenchClientError.http(
+        BenchHTTPError(
+          statusCode: 409,
+          body: #"{"ok":false,"error":{"code":"RETIRED","message":"install retired"}}"#,
+          retention: .notApplicable))
+    }
+    return try JSONDecoder().decode(
+      CommandPollResponse.self,
+      from: Data(#"{"ok":true,"room_id":"room_1","superseded":false,"commands":[]}"#.utf8))
+  }
+
+  func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
+    -> CommandAcknowledgement
+  { throw ResidentCaptureTestError.unexpectedRemoteCall }
+
+  func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse {
+    throw ResidentCaptureTestError.unexpectedRemoteCall
+  }
+
+  func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws
+    -> ImmutablePieceUploadResult
+  { throw ResidentCaptureTestError.unexpectedRemoteCall }
+
+  func pollCalls() -> Int { polls }
 }
 
 private func residentActiveSession() throws -> ActiveSessionResponse {

@@ -1,0 +1,6 @@
++-o IOMobileFramebufferShim  <class IOMobileFramebufferShim, id 0x10000073e, registered, matched, active, busy 0 (3 ms), retain 13>
+      "NormalModeActive" = No
++-o IOMobileFramebufferShim  <class IOMobileFramebufferShim, id 0x100000758, registered, matched, active, busy 0 (6 ms), retain 13>
+      "NormalModeActive" = No
++-o IOMobileFramebufferShim  <class IOMobileFramebufferShim, id 0x10000073d, registered, matched, active, busy 0 (2 ms), retain 13>
+      "NormalModeActive" = No

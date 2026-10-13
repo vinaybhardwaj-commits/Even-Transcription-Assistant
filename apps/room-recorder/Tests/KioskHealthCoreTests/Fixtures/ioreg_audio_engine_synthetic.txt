@@ -1,0 +1,1 @@
++-o AppleUSBAudioEngine:C-Media Electronics Inc.:USB PnP Sound Device:14213000:1,2@1  <class AppleUSBAudioEngine, id 0x100000d20, registered, matched, active, busy 0 (1 ms), retain 12>

@@ -12,23 +12,45 @@ var products: [Product] = [
   .library(name: "TapeCore", targets: ["TapeCore"]),
   .executable(name: "tapewriter", targets: ["tapewriter"]),
   .executable(name: "room-recorder", targets: ["RoomRecorderCLI"]),
+  .executable(name: "room-recorder-helper", targets: ["room-recorder-helper"]),
 ]
 
 var targets: [Target] = [
+  .target(name: "MicModeShim", path: "Sources/MicModeShim"),
   .target(
     name: "TapeCore",
     swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
   .target(
     name: "TapeCapture",
-    dependencies: ["TapeCore"],
+    dependencies: ["TapeCore", "MicModeShim"],
     path: "Sources/tapewriter",
     swiftSettings: includeDurabilityFaultProbe
       ? [.define("ETA_DURABILITY_FAULT_PROBE")]
       : []
   ),
+  .target(name: "HelperCore", dependencies: ["FleetCore", "KioskHealthCore"]),
+  // The kiosk-health collectors (0.1.36, #47). IOKit and CoreFoundation only: CoreAudio and CoreGraphics are
+  // deliberately NOT linked, because touching them makes macOS run TCC checks for a headless root daemon.
+  .target(
+    name: "KioskHealthCore",
+    linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
+  .target(name: "FleetCore"),
   .target(
     name: "RoomRecorderCore",
-    dependencies: ["TapeCore", "TapeCapture"]
+    dependencies: ["TapeCore", "TapeCapture", "HelperCore", "FleetCore"]
+  ),
+  .executableTarget(
+    name: "room-recorder-helper",
+    dependencies: ["HelperCore", "KioskHealthCore"],
+    exclude: ["Info.plist"],
+    linkerSettings: [
+      .unsafeFlags([
+        "-Xlinker", "-sectcreate",
+        "-Xlinker", "__TEXT",
+        "-Xlinker", "__info_plist",
+        "-Xlinker", "Sources/room-recorder-helper/Info.plist",
+      ])
+    ]
   ),
   .executableTarget(
     name: "tapewriter",
@@ -48,9 +70,12 @@ var targets: [Target] = [
     name: "RoomRecorderCLI",
     dependencies: ["RoomRecorderCore"]
   ),
+  .testTarget(name: "HelperCoreTests", dependencies: ["HelperCore", "FleetCore", "RoomRecorderCore", "KioskHealthCore"]),
+  .testTarget(
+    name: "KioskHealthCoreTests", dependencies: ["KioskHealthCore"], exclude: ["Fixtures"]),
   .testTarget(
     name: "TapeCoreTests",
-    dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore"],
+    dependencies: ["TapeCore", "TapeCapture", "RoomRecorderCore", "HelperCore"],
     swiftSettings: includeKeywrapProbe ? [.define("ETA_KEYWRAP_PROBE")] : []),
 ]
 

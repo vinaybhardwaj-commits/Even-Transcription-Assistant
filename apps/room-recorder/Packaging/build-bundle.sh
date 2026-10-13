@@ -38,6 +38,8 @@ readonly CERT_SHA256="903EDCE6F78C2199DFF45939D492041FED0C0A8394DDABB985278349BB
 readonly BUNDLE_ID="com.evenscribe.room-recorder"
 readonly FFMPEG_BUNDLE_ID="com.evenscribe.room-recorder.ffmpeg"
 readonly TAPEWRITER_BUNDLE_ID="com.evenscribe.room-recorder.tapewriter"
+readonly HELPER_BUNDLE_ID="com.evenscribe.room-recorder.helper"
+readonly HELPER_PLIST_NAME="com.evenscribe.room-recorder.helper.plist"
 readonly MIN_MACOS="15.0"
 readonly APP_NAME="EvenScribe Room Recorder.app"
 # ─── THE HARDENED RUNTIME REFUSES THE MICROPHONE WITHOUT AN ENTITLEMENT ──────────────────────
@@ -125,7 +127,7 @@ say "Building release binaries for macOS ${MIN_MACOS}"
 # One invocation per product. SwiftPM's `--product` is single-valued: passing it twice does not
 # build two products, it silently keeps the last one, and the build then dies at the assemble step
 # with `room-recorder was not built`. Observed 8 Sep on this script's first real run.
-for product in room-recorder tapewriter; do
+for product in room-recorder room-recorder-helper tapewriter; do
   (
     cd "$PACKAGE_DIR"
     swift build -c release \
@@ -136,18 +138,27 @@ done
 BIN_DIR="$(cd "$PACKAGE_DIR" && swift build -c release --show-bin-path)"
 [ -x "${BIN_DIR}/room-recorder" ] || die "room-recorder was not built"
 [ -x "${BIN_DIR}/tapewriter" ] || die "tapewriter was not built"
+[ -x "${BIN_DIR}/room-recorder-helper" ] || die "room-recorder-helper was not built"
 
 # ─── Assemble (§5.1) ─────────────────────────────────────────────────────────────────────────
 say "Assembling ${APP_NAME}"
 STAGE="${OUTPUT_ROOT}/stage"
 APP="${STAGE}/${APP_NAME}"
 /bin/rm -rf "$STAGE"
-/bin/mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Helpers" "${APP}/Contents/Resources/Licenses"
+/bin/mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Helpers" "${APP}/Contents/Library/LaunchDaemons" "${APP}/Contents/Resources/Licenses"
 
 /bin/cp "${BIN_DIR}/room-recorder" "${APP}/Contents/MacOS/room-recorder"
 /bin/cp "${BIN_DIR}/tapewriter" "${APP}/Contents/Helpers/tapewriter"
+# TS-H2 #39. The root helper lives in Contents/MacOS (the plist's BundleProgram is relative to the
+# bundle) and its launchd plist in Contents/Library/LaunchDaemons, where SMAppService looks.
+/bin/cp "${BIN_DIR}/room-recorder-helper" "${APP}/Contents/MacOS/room-recorder-helper"
+/bin/cp "${SCRIPT_DIR}/${HELPER_PLIST_NAME}" "${APP}/Contents/Library/LaunchDaemons/${HELPER_PLIST_NAME}"
+/bin/chmod 0644 "${APP}/Contents/Library/LaunchDaemons/${HELPER_PLIST_NAME}"
+/usr/bin/plutil -lint "${APP}/Contents/Library/LaunchDaemons/${HELPER_PLIST_NAME}" >/dev/null \
+  || die "the helper launchd plist did not lint"
 /bin/cp "$FFMPEG_SOURCE" "${APP}/Contents/Helpers/ffmpeg"
 /bin/chmod 0755 "${APP}/Contents/MacOS/room-recorder" \
+  "${APP}/Contents/MacOS/room-recorder-helper" \
   "${APP}/Contents/Helpers/tapewriter" "${APP}/Contents/Helpers/ffmpeg"
 
 # LGPL notices and the source lock ride inside the bundle (X2's condition for shipping).
@@ -159,6 +170,24 @@ if [ -f "${PACKAGE_DIR}/Encoder/LGPL-NOTICES.txt" ]; then
   /bin/cp "${PACKAGE_DIR}/Encoder/LGPL-NOTICES.txt" "${APP}/Contents/Resources/LGPL-NOTICES.txt"
 else
   die "Encoder/LGPL-NOTICES.txt is missing. X2 ships the vendored encoder ONLY with its notices bundled; without them this build must not be produced."
+fi
+
+# 0.1.25 — the acoustic self-test's stimulus pack (invented speech, hashes pinned in pack.json).
+# Optional: a build without Packaging/SelfTest/pack.json simply refuses `self_test` with
+# pack_missing. It is copied BEFORE the bundle is signed, so the signature seals it.
+# The pack is NOT committed (binary WAVs): point SELFTEST_PACK_DIR at diar-lab's folder
+# (pack.json + the WAVs beside it, NOT selftest_pack.json or ref/), or drop it in Packaging/SelfTest.
+SELFTEST_SRC="${SELFTEST_PACK_DIR:-${PACKAGE_DIR}/Packaging/SelfTest}"
+# PINNED (eta-refuter R3): pack.json's sha256 is fixed here, and pack.json pins every WAV's sha256
+# (the app re-verifies them at run time). A different pack is a script edit, on purpose.
+SELFTEST_PACK_SHA256="57d9bfbc8046b3efe1fef9f6f4b44dbac122fe27f91edfbf9771f9bdbe3c1737"
+if [ -f "${SELFTEST_SRC}/pack.json" ]; then
+  ACTUAL_PACK_SHA256="$(/usr/bin/shasum -a 256 "${SELFTEST_SRC}/pack.json" | /usr/bin/cut -d' ' -f1)"
+  [ "$ACTUAL_PACK_SHA256" = "$SELFTEST_PACK_SHA256" ] \
+    || die "self-test pack.json sha256 ${ACTUAL_PACK_SHA256} is not the pinned ${SELFTEST_PACK_SHA256}."
+  /bin/mkdir -p "${APP}/Contents/Resources/SelfTest"
+  /bin/cp "${SELFTEST_SRC}/pack.json" "${SELFTEST_SRC}/"*.wav "${APP}/Contents/Resources/SelfTest/"
+  say "Bundled the self-test pack from ${SELFTEST_SRC}"
 fi
 
 # ─── Info.plist (§5.2) ───────────────────────────────────────────────────────────────────────
@@ -192,6 +221,9 @@ say "Signing helpers"
 # entitlement. Least privilege, and it keeps the audio-input grant on the two binaries that need it.
 codesign --force --timestamp --options runtime \
   --identifier "$FFMPEG_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/ffmpeg"
+# The root helper takes no entitlements: it never touches the microphone.
+codesign --force --timestamp --options runtime \
+  --identifier "$HELPER_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/MacOS/room-recorder-helper"
 codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" \
   --identifier "$TAPEWRITER_BUNDLE_ID" --sign "$SIGNING_IDENTITY" "${APP}/Contents/Helpers/tapewriter"
 
@@ -235,9 +267,9 @@ say "Verifying"
 codesign --verify --strict --verbose=4 \
   -R "= certificate leaf = H\"$(/bin/echo "$SIGNING_IDENTITY" | /usr/bin/tr 'A-Z' 'a-z')\"" \
   "$APP" || die "the signed bundle does not satisfy the pinned requirement"
-for helper in ffmpeg tapewriter; do
-  codesign --verify --strict "${APP}/Contents/Helpers/${helper}" \
-    || die "helper ${helper} failed verification"
+for helper in Helpers/ffmpeg Helpers/tapewriter MacOS/room-recorder-helper; do
+  codesign --verify --strict "${APP}/Contents/${helper}" \
+    || die "${helper} failed verification"
 done
 codesign -dv --verbose=4 "$APP" 2>&1 | /usr/bin/grep -E "^Authority|^Identifier|^CDHash" || true
 

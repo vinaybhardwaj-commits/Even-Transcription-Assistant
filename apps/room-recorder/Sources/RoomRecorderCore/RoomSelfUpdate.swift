@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import HelperCore
 
 /// Self-update (Install and Fleet PRD §13.3, Build R3).
 ///
@@ -17,12 +18,14 @@ import Foundation
 /// that no code ever restored would have been the fifth.
 ///
 /// ─── EXIT 64 IS A FAIL-SAFE, NOT A STATUS ────────────────────────────────────────────────────
-/// The LaunchAgent carries `KeepAlive = {"SuccessfulExit": false}`: launchd restarts the app on a
-/// NON-ZERO exit and leaves it stopped on zero. `needs_enrol` and the retired 409 both exit zero
-/// on purpose. Exit 1 already means any error. 64 is a third value, distinct in `launchd.log`, and
-/// its non-zero-ness is the safety: if the swap script dies before it boots the agent out, launchd
-/// starts the OLD app again and the room keeps recording on the version it has. Nothing is lost by
-/// an update that does not happen; a room that stops recording is a clinic day.
+/// Since 0.1.29 the LaunchAgent carries `KeepAlive = true`: launchd restarts the app on ANY exit.
+/// (Before that it was `{SuccessfulExit: false}` and a clean exit left a room unattended for a day.)
+/// The swap is unchanged by this: the app exited 64 and was restarted at once under the old
+/// setting too, and the script's `bootout` is what stops that restart before any bundle moves.
+/// Exit 1 already means any error. 64 is a third value, distinct in `launchd.log`, and the restart
+/// is the safety: if the swap script dies before it boots the agent out, launchd starts the OLD app
+/// again and the room keeps recording on the version it has. Nothing is lost by an update that does
+/// not happen; a room that stops recording is a clinic day.
 ///
 /// ─── THE EXPECTED SIGNER IS COMPILED IN, NEVER SERVED (R3-5) ─────────────────────────────────
 /// `pinnedRequirement` below is a constant in this binary. The release route returns where to get
@@ -74,13 +77,13 @@ public enum RoomSelfUpdate {
   public static let launchAgentLabel = "com.evenscribe.room-recorder"
 
   /// ─── THE EXIT CODE A HANDOVER USES (R3-4). Fix 1, F7: named, not a bare literal. ──────────
-  /// 64 is distinct from 0 — which `needs_enrol` and the retired 409 use ON PURPOSE, to stay
-  /// stopped — and from 1, which already means any error. So an update restart is readable in
-  /// `launchd.log` and separable from a crash.
+  /// 64 is distinct from 0, which is a clean return of `run()` (launchd restarts it too, since
+  /// `KeepAlive` is `true`), and from 1, which already means any error. So an update restart is
+  /// readable in `launchd.log` and separable from a crash.
   ///
-  /// ITS NON-ZERO-NESS IS THE FAIL-SAFE, not its value. `KeepAlive` is `{"SuccessfulExit": false}`,
-  /// so launchd restarts the app on any non-zero exit: if the swap script dies before it boots the
-  /// agent out, the OLD app comes back and the room keeps recording on the version it has.
+  /// THE RESTART IS THE FAIL-SAFE, not the value. `KeepAlive` is `true` (0.1.29), so launchd
+  /// restarts the app on any exit: if the swap script dies before it boots the agent out, the OLD
+  /// app comes back and the room keeps recording on the version it has.
   public static let handoverExitCode: Int32 = 64
 
   // MARK: - Paths under the app root
@@ -190,19 +193,29 @@ public struct RoomReleaseDescriptor: Codable, Equatable, Sendable {
   public let sha256: String
   public let sizeBytes: Int64
   public let blobURL: String
+  /// 0.1.37 (#45). The server-signed record the ROOT HELPER acts on (`pkg_url`, `pkg_sha256`, `cohort`, ... inside it), and its
+  /// Ed25519 signature. Both absent from a server that does not speak #45; the user-level updater then works as before.
+  public let record: JSONValue?
+  public let recordSignature: String?
 
   enum CodingKeys: String, CodingKey {
     case version
     case sha256
     case sizeBytes = "size_bytes"
     case blobURL = "blob_url"
+    case record
+    case recordSignature = "record_signature"
   }
 
-  public init(version: String, sha256: String, sizeBytes: Int64, blobURL: String) {
+  public init(
+    version: String, sha256: String, sizeBytes: Int64, blobURL: String, record: JSONValue? = nil, recordSignature: String? = nil
+  ) {
     self.version = version
     self.sha256 = sha256
     self.sizeBytes = sizeBytes
     self.blobURL = blobURL
+    self.record = record
+    self.recordSignature = recordSignature
   }
 }
 
@@ -581,19 +594,29 @@ public struct RoomUpdateSchedule: Equatable, Sendable {
   }
 }
 
-/// PURE — §13.3 step 2. A DIFFERENT version is an update, in either direction.
+/// PURE — §13.3 step 2. An update is a version that sorts STRICTLY ABOVE the running one.
 ///
-/// NOT `>`, and the asymmetry is the entire rollback mechanism. `latestRelease` orders by
-/// `published_at`, not by version, so withdrawing the newest row makes the route answer with the
-/// one before it — a LOWER version — and every Mac walks backwards at its next check. Turning this
-/// into a greater-than would leave withdraw with nothing to do and a bad build in four rooms.
+/// ─── 0.1.30: NEVER DOWN, NEVER SIDEWAYS ───────────────────────────────────────────────────
+/// This used to read "a DIFFERENT version is an update, in either direction", on purpose: the
+/// release route orders by `published_at`, so withdrawing the newest row made it answer with an
+/// older version and every Mac walked back to it. On the OPD 6 proof install a 0.1.29 app logged
+/// "update to 0.1.28 deferred" — it would have downgraded itself the moment the session closed.
+/// Rolling a room back is now a deliberate act (publish a higher number, or the pkg), not something
+/// a channel can do. A version this code cannot order is not an update.
 public func roomUpdateIsAvailable(running: String?, offered: String) -> Bool {
   guard let running, !running.isEmpty else {
     // No version at all is an unbundled `swift run` binary. It has no release identity, must not
     // claim one, and must never swap a bundle it is not running from.
     return false
   }
-  return running != offered
+  guard let have = RoomVersion(running), let want = RoomVersion(offered) else { return false }
+  return want > have
+}
+
+/// PURE — 0.1.38. The offered version sorts strictly BELOW the running one.
+public func roomUpdateIsDowngrade(running: String?, offered: String) -> Bool {
+  guard let running, let have = RoomVersion(running), let want = RoomVersion(offered) else { return false }
+  return want < have
 }
 
 // MARK: - The seams
@@ -713,6 +736,9 @@ public enum RoomUpdateAttempt: Equatable, Sendable {
   /// F2. This version has failed twice on this Mac and is not being attempted again until the hold
   /// expires or a different version appears. NOTHING was downloaded.
   case heldAfterRepeatedFailure(version: String)
+  /// 0.1.37 (#45). The root helper took the release (or already has it): it downloads, verifies, installs and rolls back by
+  /// itself. This app does nothing for this version, and does not fall back to its own updater.
+  case handedToHelper(version: String, answer: String)
 }
 
 /// The steps of §13.3, with every piece of the outside world injected.
@@ -728,8 +754,13 @@ public struct RoomUpdater: Sendable {
   let fetcher: any RoomReleaseFetching
   let downloader: any RoomUpdateDownloading
   let runner: any RoomUpdateCommandRunning
+  /// 0.1.34. Where the rollback pin lives; a test points it at a temp file.
+  let pinURL: URL
   let now: @Sendable () -> Date
   let log: @Sendable (String) -> Void
+  /// 0.1.37 (#45). Hands the server-signed record to the root helper and says what it answered: `accepted`, `in_progress`,
+  /// `refused:<reason>`, or `unavailable` (no helper, an older helper, nobody answered). Nil in a test that does not care.
+  public var helperOffer: (@Sendable (RoomReleaseDescriptor) async -> String)?
 
   public init(
     rootURL: URL,
@@ -739,6 +770,7 @@ public struct RoomUpdater: Sendable {
     fetcher: any RoomReleaseFetching,
     downloader: any RoomUpdateDownloading = FoundationUpdateDownloader(),
     runner: any RoomUpdateCommandRunning = FoundationUpdateCommandRunner(),
+    pinURL: URL = RoomUpdatePin.defaultURL,
     now: @escaping @Sendable () -> Date = { Date() },
     log: @escaping @Sendable (String) -> Void = { message in
       FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
@@ -751,6 +783,7 @@ public struct RoomUpdater: Sendable {
     self.fetcher = fetcher
     self.downloader = downloader
     self.runner = runner
+    self.pinURL = pinURL
     self.now = now
     self.log = log
   }
@@ -803,9 +836,29 @@ public struct RoomUpdater: Sendable {
       return .upToDate
     }
     guard roomUpdateIsAvailable(running: runningVersion, offered: release.version) else {
+      // 0.1.38: a lower offer is refused out loud, not folded into "up to date".
+      if roomUpdateIsDowngrade(running: runningVersion, offered: release.version) {
+        log("update to \(release.version) refused: it is lower than the running \(runningVersion ?? "?"); downgrades are never taken")
+      }
       // A version match also means the ledger is spent: whatever went wrong before, this Mac is
       // now running what its channel offers.
       RoomUpdateAttempts.clear(root: rootURL)
+      return .upToDate
+    }
+    // 0.1.34. THE ROLLBACK PIN. Before the loop-breaker, the session guard and the download: a Mac that
+    // was rolled back on purpose does not so much as look at a version above its pin.
+    switch RoomUpdatePin.verdict(offered: release.version, pinText: RoomUpdatePin.read(at: pinURL)) {
+    case .noPin, .allowed:
+      break
+    case .held(let pin):
+      log(
+        "update to \(release.version) skipped: this Mac was rolled back and pinned at \(pin). "
+          + "A pkg install clears the pin.")
+      return .upToDate
+    case .unreadable:
+      log(
+        "update to \(release.version) skipped: \(pinURL.path) exists but is not a version, so every update is held "
+          + "until it is fixed or removed (as root).")
       return .upToDate
     }
     // F2. THE LOOP-BREAKER. Two failures on this exact version and the Mac stops asking for it
@@ -817,6 +870,16 @@ public struct RoomUpdater: Sendable {
         "update to \(release.version) held: it has failed \(attempts?.failures ?? 0) times on this Mac. "
           + "Publish a different version, or withdraw this one, to clear the hold.")
       return .heldAfterRepeatedFailure(version: release.version)
+    }
+    // 0.1.37 (#45). A release that carries the server's signed record is the ROOT HELPER's to install: it downloads, verifies,
+    // waits for a quiet room, installs and rolls back by itself. Only "no helper answered" falls back to the code below; a
+    // refusal (bad signature, not eligible, held ...) is the helper's verdict and is not worked around.
+    if release.record != nil, let offer = helperOffer {
+      let answer = await offer(release)
+      if answer != "unavailable" {
+        log("update to \(release.version): the root helper answered \(answer)")
+        return .handedToHelper(version: release.version, answer: answer)
+      }
     }
     // §13.3 step 3, BEFORE the download and not after it. A clinic Mac recording a consultation
     // must not spend its disk and its network on ~90 MB it has already decided not to install.

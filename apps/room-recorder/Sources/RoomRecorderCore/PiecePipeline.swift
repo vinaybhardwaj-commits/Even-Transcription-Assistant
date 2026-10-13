@@ -458,19 +458,19 @@ public struct FoundationPieceProcessRunner: RoomPieceProcessRunning {
   public init() {}
 
   public func run(_ invocation: FFmpegEncoderInvocation) throws -> RoomPieceProcessResult {
-    let process = Process()
-    let errorPipe = Pipe()
-    process.executableURL = invocation.executableURL
-    process.arguments = invocation.arguments
-    process.standardInput = FileHandle.nullDevice
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = errorPipe
-    try process.run()
-    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
+    guard
+      let result = RoomSubprocess.run(
+        executable: invocation.executableURL,
+        arguments: invocation.arguments,
+        timeout: nil,
+        captureStdout: false,
+        captureStderr: true)
+    else {
+      throw RoomPiecePipelineError.processFailed(status: -1, stderr: "ffmpeg did not start")
+    }
     return RoomPieceProcessResult(
-      terminationStatus: process.terminationStatus,
-      standardError: String(decoding: errorData.prefix(4_096), as: UTF8.self)
+      terminationStatus: result.status,
+      standardError: String(decoding: result.stderr.prefix(4_096), as: UTF8.self)
     )
   }
 }

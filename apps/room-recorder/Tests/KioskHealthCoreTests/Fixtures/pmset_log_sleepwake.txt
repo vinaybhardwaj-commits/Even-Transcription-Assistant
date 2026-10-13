@@ -1,0 +1,16 @@
+# SYNTHETIC `pmset -g log` excerpt. Format reproduced from the documented pmset log layout;
+# no real kiosk sleep/wake lines could be captured read-only (Audiometry/Mini never sleep).
+# Only the Start/Notification lines at the top were copied from a real kiosk.
+2026-09-30 18:19:10 +0530 Start               	powerd process is started                                                  	          
+2026-09-30 18:19:11 +0530 Notification        	Display is turned on                                                       	          
+2026-10-04 21:36:00 +0530 Notification        	Display is turned off                                                      	          
+2026-10-04 23:10:00 +0530 Sleep               	Entering Sleep state due to 'Maintenance Sleep':TCPKeepAlive=active Using AC (Charge:100%) 3 secs	          
+2026-10-04 23:10:02 +0530 Assertions          	PID 107(powerd) Released PreventUserIdleSystemSleep "Powerd - Prevent sleep while display is on" 00:04:59  id:0x0x1 [System: PrevIdle]	          
+2026-10-05 01:36:12 +0530 Sleep               	Entering Sleep state due to 'kAESleep':TCPKeepAlive=active Using AC (Charge:100%) 1783 secs	          
+2026-10-05 01:36:12 +0530 Kernel Client Acks  	Kernel Client Acks                                                         	          
+2026-10-05 01:36:14 +0530 DarkWake            	DarkWake from Normal Sleep [CDNVA] : due to RTC/Maintenance Using AC (Charge:100%) 2 secs	          
+2026-10-05 01:36:14 +0530 Notification        	Display is turned off                                                      	          
+2026-10-05 01:50:03 +0530 Sleep               	Entering Sleep state due to 'Software Sleep pid=412':TCPKeepAlive=active Using AC (Charge:100%) 849 secs	          
+2026-10-05 09:12:41 +0530 Wake                	Wake from Normal Sleep [CDNVA] : due to EC.LidOpen/Lid Open Using AC (Charge:100%) 30791 secs	          
+2026-10-05 09:12:42 +0530 Notification        	Display is turned on                                                       	          
+2026-10-05 09:30:00 +0530 Clamshell Sleep     	Clamshell Sleep  Using AC (Charge:100%)                                    	          

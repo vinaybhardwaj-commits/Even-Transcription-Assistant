@@ -1,0 +1,37 @@
+{
+  "SPAudioDataType" : [
+    {
+      "_items" : [
+        {
+          "_name" : "CRSM24FMDA029",
+          "_properties" : "coreaudio_default_audio_system_device",
+          "coreaudio_default_audio_system_device" : "spaudio_yes",
+          "coreaudio_device_manufacturer" : "TCL",
+          "coreaudio_device_output" : 2,
+          "coreaudio_device_srate" : 48000,
+          "coreaudio_device_transport" : "coreaudio_device_type_hdmi",
+          "coreaudio_output_source" : "spaudio_default"
+        },
+        {
+          "_name" : "C270 HD WEBCAM",
+          "coreaudio_default_audio_input_device" : "spaudio_yes",
+          "coreaudio_device_input" : 1,
+          "coreaudio_device_manufacturer" : "Unknown Manufacturer",
+          "coreaudio_device_srate" : 48000,
+          "coreaudio_device_transport" : "coreaudio_device_type_usb",
+          "coreaudio_input_source" : "spaudio_default"
+        },
+        {
+          "_name" : "Mac mini Speakers",
+          "coreaudio_default_audio_output_device" : "spaudio_yes",
+          "coreaudio_device_manufacturer" : "Apple Inc.",
+          "coreaudio_device_output" : 2,
+          "coreaudio_device_srate" : 48000,
+          "coreaudio_device_transport" : "coreaudio_device_type_builtin",
+          "coreaudio_output_source" : "Mac mini Speakers"
+        }
+      ],
+      "_name" : "coreaudio_device"
+    }
+  ]
+}

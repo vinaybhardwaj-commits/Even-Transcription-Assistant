@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 
+@testable import FleetCore
+@testable import HelperCore
 @testable import RoomRecorderCore
 @testable import TapeCapture
 @testable import TapeCore
@@ -255,6 +257,219 @@ import Testing
     try await task.value
     #expect(!events.all.contains { $0.hasPrefix("exit:") })
     #expect(await remote.ackAttempts == 3)
+  }
+
+  // -------------------------------------------------------------------------
+  // 0.1.30: the same verbs, reached from the fleet client
+  // -------------------------------------------------------------------------
+
+  @Test func theEngineWritesTheHelperProbeIntoStatusJSONOnDisk() async throws {
+    // 0.1.34: FLEET reads status.json and could not see helper_xpc_ok or helper_version.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root); HelperStatusCache.shared.set(nil) }
+    HelperStatusCache.shared.set(
+      HelperSnapshot(registration: "enabled", helperVersion: "0.2.0-h2", xpcOK: true, mode: "launchd"), error: nil)
+    let events = EventLog()
+    let remote = VerbRemote(polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
+    task.cancel()
+    try await task.value
+    let raw = try Data(contentsOf: root.appendingPathComponent("status.json"))
+    let object = try #require(try JSONSerialization.jsonObject(with: raw) as? [String: Any])
+    #expect(object["helper_xpc_ok"] as? Bool == true)
+    #expect(object["helper_version"] as? String == "0.2.0-h2")
+    #expect(object["helper_mode"] as? String == "launchd" && object["helper_registration"] as? String == "enabled")
+  }
+
+  @Test func theFleetRestartRefusesAnOpenSessionAndOtherwiseWaitsForTheResult() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let open = VerbRemote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: [], events: events)
+    let busy = try await Self.engine(root: root, remote: open, events: events)
+    let task = Task { try await busy.run() }
+    try await R4Fixture.waitUntil { await open.pollCount >= 1 }  // the open session has been adopted
+    #expect(await busy.fleetSessionOpen)
+    let refused = await busy.runFleetAppVerb(.restartRecorder, params: FleetParams([:]), commandID: "cmd_f1")
+    #expect(refused.outcome == .failed && refused.reason == "session_open")
+    #expect(refused.afterResultPosted == nil)
+    task.cancel()
+    try await task.value
+  }
+
+  @Test func aRestartAcceptedWhileIdleIsDroppedIfASessionOpensBeforeItFires() async throws {
+    // accepted -> result posted -> (a consultation starts) -> the armed restart must NOT cut it.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
+    #expect(await engine.fleetSessionOpen)
+    await engine.armFleetRestart(forced: false)
+    try await R4Fixture.waitUntil { await remote.pollCount >= 3 }
+    #expect(!events.all.contains { $0.hasPrefix("exit:") }, "the session was not interrupted")
+    await engine.armFleetRestart(forced: true)  // a forced and approved restart was authorised over an open session
+    try await task.value
+    #expect(events.all.contains("exit:\(RoomEngine.restartExitCode)"))
+  }
+
+  @Test func aRestartArmedWhileIdleDoesNotFireIfASessionOpensBeforeTheLoopWouldExit() async throws {
+    // The firing moment: armed with the room idle, then start_day arrives in the very poll the loop is handling.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [Self.command("cmd_start", "start_day", nil)], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    #expect(await !engine.fleetSessionOpen)
+    await engine.armFleetRestart(forced: false)  // accepted idle
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 3 }
+    #expect(await engine.fleetSessionOpen, "the consultation started")
+    #expect(!events.all.contains { $0.hasPrefix("exit:") }, "and the restart did NOT fire over it")
+    let status = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("status.json"))) as? [String: Any]
+    #expect(status?["last_event"] as? String == "superseded_session_open")
+    task.cancel()
+    try await task.value
+  }
+
+  @Test func aForcedAndApprovedRestartStillFiresOverASessionThatOpenedMeanwhile() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [Self.command("cmd_start", "start_day", nil)], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    await engine.armFleetRestart(forced: true)
+    let task = Task { try await engine.run() }
+    // Bounded: if the forced restart were wrongly dropped the loop would run on for ever.
+    try await R4Fixture.waitUntil { events.all.contains("exit:\(RoomEngine.restartExitCode)") || false }
+    task.cancel()
+    _ = try? await task.value
+    #expect(events.all.contains("exit:\(RoomEngine.restartExitCode)"))
+  }
+
+  @Test func theDesksOwnRestartIsNotTouchedByTheFleetRule() async throws {
+    // restart_engine from the bench already refuses an open session at accept time (existing behaviour); it must not
+    // pick up the fleet's firing-time drop.
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [Self.command("cmd_r", "restart_engine", "{}")], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    try await engine.run()
+    #expect(events.all == ["ack:cmd_r", "exit:75"])
+  }
+
+  @Test func theFleetAudioInputOverAnOpenSessionNeedsForceAtTheEngineToo() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(activeSessionJSON: R4Fixture.recordingActiveJSON, polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
+    #expect(await engine.fleetSessionOpen)
+    let plain = await engine.runFleetAppVerb(.selectAudioInput, params: FleetParams(["device_uid": .string("not-attached")]), commandID: "cmd_s1")
+    #expect(plain.outcome == .failed && plain.reason == "session_open")
+    let forced = await engine.runFleetAppVerb(
+      .selectAudioInput, params: FleetParams(["device_uid": .string("not-attached"), "force": .bool(true)]), commandID: "cmd_s2")
+    #expect(forced.reason == "device_not_present", "past the session gate, then the desk's own checks")
+    task.cancel()
+    try await task.value
+  }
+
+  @Test func theFleetRestartExitsOnlyAfterTheResultStepRuns() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let result = await engine.runFleetAppVerb(.restartRecorder, params: FleetParams([:]), commandID: "cmd_f2")
+    #expect(result.outcome == .ok)
+    let after = try #require(result.afterResultPosted)
+    #expect(!events.all.contains { $0.hasPrefix("exit:") }, "nothing restarts before the result is safe")
+    await after()
+    try await engine.run()
+    #expect(events.all.contains("exit:\(RoomEngine.restartExitCode)"))
+    #expect(await remote.acks.isEmpty, "the fleet path acknowledges nothing on the bench")
+  }
+
+  @Test func theFleetReportDiagReturnsACountAndNeverTheLog() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let result = await engine.runFleetAppVerb(
+      .reportDiag, params: FleetParams(["log_lines": .int(5)]), commandID: "cmd_f3")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["log_lines"]?.intValue != nil)
+    #expect(result.detail["session_open"] == .bool(false))
+    #expect(FleetClient.detailIsClosed(result.detail))
+    #expect(!FleetJSON.object(result.detail).canonical.contains("eta_room_session"))
+  }
+
+  @Test func theFleetListsAudioInputsAsClosedDetail() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    let result = await engine.runFleetAppVerb(.listAudioInputs, params: FleetParams([:]), commandID: "cmd_l")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["count"]?.intValue != nil && result.detail["devices"]?.arrayValue != nil)
+    #expect(result.detail["selected_uid"]?.stringValue != nil)
+    #expect(FleetClient.detailIsClosed(result.detail))
+  }
+
+  @Test func theFleetPiecesInventoryIsCountsAndTimestampsOnly() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    let result = await engine.runFleetAppVerb(.piecesInventory, params: FleetParams([:]), commandID: "cmd_i")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["pending_count"] == .int(0) && result.detail["pending_total"] == .int(0) && result.detail["bytes"] == .int(0))
+    #expect(Set(result.detail.keys).isSubset(of: ["pending_count", "pending_total", "bytes", "oldest_started_at", "newest_started_at"]))
+    #expect(FleetClient.detailIsClosed(result.detail))
+    let filtered = await engine.runFleetAppVerb(
+      .piecesInventory, params: FleetParams(["since": .string("2026-10-10T07:00:00.000Z")]), commandID: "cmd_i2")
+    #expect(filtered.outcome == .ok)
+  }
+
+  @Test func theFleetPiecesReuploadRedrivesTheExistingUploaderAndTouchesNothingElse() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let remote = VerbRemote(polls: [], events: events)
+    let engine = try await Self.engine(root: root, remote: remote, events: events)
+    let result = await engine.runFleetAppVerb(.piecesReupload, params: FleetParams([:]), commandID: "cmd_r")
+    #expect(result.outcome == .ok)
+    #expect(result.detail["pending_before"] == .int(0) && result.detail["pending_after"] == .int(0))
+  }
+
+  @Test func theHelperVerbsAreNotTheAppsToRun() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    for verb in [FleetVerb.coreaudiodReset, .reloadLaunchagent, .wake, .pmsetEnforce, .schedulePoweron, .helperStatus, .usbReseat, .collectDiag] {
+      let result = await engine.runFleetAppVerb(verb, params: FleetParams([:]), commandID: "cmd_h")
+      #expect(result.outcome == .unsupported && result.reason == "not_an_app_verb", "\(verb)")
+    }
+  }
+
+  @Test func theFleetAudioInputRefusesWhatTheDeskWouldRefuse() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let events = EventLog()
+    let engine = try await Self.engine(root: root, remote: VerbRemote(polls: [], events: events), events: events)
+    let result = await engine.runFleetAppVerb(
+      .selectAudioInput, params: FleetParams(["device_uid": .string("not-attached")]), commandID: "cmd_f4")
+    #expect(result.outcome == .failed)
+    #expect(result.reason == "device_not_present")
   }
 
   // -------------------------------------------------------------------------

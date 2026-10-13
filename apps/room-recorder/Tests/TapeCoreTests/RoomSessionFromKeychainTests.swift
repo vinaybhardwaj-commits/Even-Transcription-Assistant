@@ -179,7 +179,8 @@ import Testing
           if !name.isEmpty {
             for back in stride(from: n - 1, through: max(0, n - 20), by: -1)
             where code[back].contains("\(name) =") || code[back].contains("\(name):") {
-              if code[back].contains("startingConfiguration") { ok = true }
+              // 0.1.39: `awaitEnrolment` is `startingConfiguration` re-read until a session exists, and returns only its result.
+              if code[back].contains("startingConfiguration") || code[back].contains("awaitEnrolment") { ok = true }
               break
             }
           }

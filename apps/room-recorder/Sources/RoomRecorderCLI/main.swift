@@ -11,6 +11,7 @@ private let usage = """
     room-recorder status [--root <dir>]
     room-recorder mark [--root <dir>]
     room-recorder install-launch-agent [--root <dir>]
+    room-recorder probe-helper
   """
 
 private struct Arguments {
@@ -170,9 +171,9 @@ private enum RoomRecorderCLI {
         // and at 180 seconds the swap script puts the previous version back — on a real Mac,
         // watched from the study.
         //
-        // FIRST, AND EXIT 1. Before the enrolment read, which exits ZERO by design and would leave
-        // an unenrolled Mac stopped instead of thrashing; before `RoomEngine.load`, which opens the
-        // instance lock and the spool. The whole point is a process that starts and dies, so
+        // FIRST, AND EXIT 1. Before the enrolment read, which waits for an enrolment instead of
+        // exiting (0.1.39) and so would never reach a line placed after it; before `RoomEngine.load`,
+        // which opens the instance lock and the spool. The whole point is a process that starts and dies, so
         // nothing that could succeed may run ahead of it.
         //
         // Operator-created only. Nothing in this app ever writes it, so a room that has not been
@@ -184,12 +185,20 @@ private enum RoomRecorderCLI {
             Data("room-recorder: break-on-launch present; exiting 1\n".utf8))
           exit(1)
         }
-        // Refuses with needs_enrol and exits 0 if the keychain holds no session — before any
-        // application is created, so a Mac that was never enrolled does not sit in a run loop.
-        let configuration = try RoomEngine.startingConfiguration(rootURL: root)
+        // 0.1.30. Config paths that point outside the running bundle (an old ~/Applications copy)
+        // are rewritten to this bundle's own tools before anything reads them.
+        RoomConfigurationRebase.apply(root: root, log: { message in
+          FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+        })
+        // 0.1.39. No session in the keychain: status.json says `needs_enrol` and the session and config are read
+        // again every 5 minutes, before any application is created. The process neither exits (KeepAlive would
+        // restart it) nor parks silent; the moment an enrolment lands, this launch carries on as a normal one.
+        let configuration = try await RoomEngine.awaitEnrolment(rootURL: root)
         // Hands the main thread to AppKit and never returns. The microphone is requested from
         // inside the run loop; see ResidentApplication for why that is the only order that works.
         ResidentApplication.run {
+          // TS-H2 #39. Registers the privileged helper and starts reporting its state.
+          HelperBootstrap.start()
           do {
             let bench = BenchClient(configuration: configuration)
             let recovery: (any RoomRetainedArchiveRecovering)?
@@ -213,6 +222,22 @@ private enum RoomRecorderCLI {
               remoteFactory: { _ in bench },
               retainedArchiveRecovery: recovery
             )
+            // 0.1.37 (#45): after every bench poll the server answered, tell the root helper this version is alive.
+            let beat = HelperBeat()
+            await engine.setOnBenchPollOK { beat.ping() }
+            // 0.1.25: auto-start at clinic open is OPT-IN per Mac (an `auto-start-on` file beside
+            // config.json). Absent, this build behaves exactly as 0.1.24 does.
+            if RoomAutoStartMarker(root: root).optedIn() { await engine.enableAutoStart() }
+            // 0.1.30. The outbound command client; a no-op unless config.json turns it on.
+            FleetBootstrap.start(configuration: configuration, root: root, engine: engine, log: { message in
+              FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+            })
+            // 0.1.29. The instance lock is held, so no other app is running: any tapewriter still
+            // writing with launchd as its parent belongs to an instance that is gone. Stop it
+            // before a new capture starts next to it. Ids are logged; no file is touched.
+            OrphanTapewriterReaper.reap(log: { message in
+              FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
+            })
             try await engine.run()
             switch await engine.exitReason {
             case .handedOverToUpdate(let version):
@@ -231,7 +256,7 @@ private enum RoomRecorderCLI {
                   """.utf8))
               return RoomSelfUpdate.handoverExitCode
             case .stopped:
-              // A clean return is the retired case (§4.5 rule 3): stop, and stay stopped.
+              // Any other clean return. Exit 0; launchd starts the app again (0.1.29).
               return 0
             }
           } catch {
@@ -277,6 +302,8 @@ private enum RoomRecorderCLI {
       case "install-launch-agent":
         try arguments.rejectOptions(except: ["--root"])
         _ = try RoomPersistence(root: root).loadConfiguration()
+        // 0.1.30. Run from the new bundle, this is also where a room's config learns the new paths.
+        RoomConfigurationRebase.apply(root: root, log: { print($0) })
         let executable =
           Bundle.main.executableURL
           ?? URL(
@@ -290,49 +317,27 @@ private enum RoomRecorderCLI {
         let plistURL = launchAgents.appendingPathComponent(
           "com.evenscribe.room-recorder.plist", isDirectory: false)
         let logPath = root.appendingPathComponent("launchd.log").path
-        let plist: [String: Any] = [
-          "Label": "com.evenscribe.room-recorder",
-          "ProgramArguments": [executable.standardizedFileURL.path, "run", "--root", root.path],
-          "RunAtLoad": true,
-          // §4.5 rule 3 / R2 §2.4. NOT `KeepAlive: true`, which restarts on ANY exit: a retired
-          // install stops deliberately and cleanly, and an unconditional KeepAlive would have
-          // launchd relaunch it in a tight loop for ever, polling 409s. `SuccessfulExit: false`
-          // means "restart only when it exits non-zero", so a crash is still covered and a
-          // deliberate stop is honoured.
-          "KeepAlive": ["SuccessfulExit": false],
-          // R3-11. The plist carried no ThrottleInterval, so launchd's default of 10 seconds
-          // applied: a bundle that cannot launch would retry six times a minute for ever. Thirty
-          // seconds is what that fixes, and it is ALL it fixes.
-          //
-          // ─── IT DOES NOT PROTECT THE SWAP, AND THE FIRST CUT OF THIS COMMENT SAID IT DID ────
-          // Corrected in Fix 1. `ThrottleInterval` is a minimum interval between STARTS, and a
-          // resident app that has been running for hours spent it long ago — so exiting 64 gets an
-          // immediate respawn and the swap script is racing the new process from the moment it is
-          // spawned. What actually protects the staging directory is the handover marker
-          // (`RoomSelfUpdate.handoverMarkerURL`, F3); what stops a failed swap looping is the
-          // attempt ledger (F2). Neither of those is this number.
-          "ThrottleInterval": 30,
-          "ProcessType": "Interactive",
-          "StandardOutPath": logPath,
-          "StandardErrorPath": logPath,
-        ]
+        // 0.1.29: `KeepAlive true`; see RoomLaunchAgent for why and for the two deliberate stops.
+        let plist = RoomLaunchAgent.plist(
+          executablePath: executable.standardizedFileURL.path, rootPath: root.path, logPath: logPath)
         let data = try PropertyListSerialization.data(
           fromPropertyList: plist, format: .xml, options: 0)
         try data.write(to: plistURL, options: .atomic)
         print("Installed \(plistURL.path)")
+
+      case "probe-helper":
+        // 0.1.39. One XPC hello to the root helper, 3 s at most. Prints `ok <helper version>` and exits 0, or
+        // `fail <reason>` and exits 1. Reads nothing from disk and changes nothing; for the Guardian's probe.
+        try arguments.rejectOptions(except: [])
+        let line = HelperProbe.probe()
+        print(line.text)
+        if !line.ok { exit(1) }
 
       case "help", "--help", "-h":
         print(usage)
       default:
         throw CLIError("unknown command: \(arguments.command)\n\(usage)")
       }
-    } catch RoomEngineError.needsEnrolment {
-      // EXIT ZERO, and the zero is the whole point. The LaunchAgent carries
-      // `KeepAlive = { SuccessfulExit: false }`, so a non-zero exit here would have launchd
-      // restart the app immediately, for ever, each time failing the same way — the thrash §2.4
-      // exists to prevent. RoomEngine.load has already written `needs_enrol` and said why on
-      // stderr; there is nothing left to retry, so the process stops and stays stopped.
-      exit(0)
     } catch {
       let message = "room-recorder: \(error.localizedDescription)\n"
       FileHandle.standardError.write(Data(message.utf8))

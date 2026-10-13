@@ -1,0 +1,309 @@
+#!/bin/sh
+# pkg postinstall, run by the installer as root.
+#
+#  1. Hand the installed app bundle to the console user, and clear what an earlier swap left root-owned.
+#  2. Install the privileged helper as a classic SYSTEM LaunchDaemon (0.1.32). That needs no user
+#     approval: it is not an SMAppService item, so macOS shows no Login Items prompt.
+#
+# ─── THE ROOT DAEMON RUNS A ROOT-ONLY COPY, NOT THE BUNDLE ────────────────────────────────
+# /Applications is `root:admin 775` and room accounts are admin, so any admin process can rename the
+# bundle aside and put its own file at the same path. launchd would then run that file as root.
+# So the helper is COPIED to /Library/PrivilegedHelperTools (root:wheel 755, in a root-owned
+# directory) and the daemon plist's Program points there. The copy keeps its signature. It is
+# verified against the pinned requirement BEFORE it replaces anything, so a bad copy leaves the
+# previous helper and daemon in place.
+#
+# Upgrade = this script again: stage + verify the new copy, bootout, swap it in, rewrite the plist,
+# bootstrap. Idempotent. The self-updater never touches the copy; a helper change ships by pkg only.
+#
+# ─── THE APP BUNDLE BELONGS TO THE CONSOLE USER (0.1.33) ──────────────────────────────────
+# The root daemon runs only the verified copy above and pins its XPC client's signature, so the bundle
+# no longer needs root ownership. It used to be left root:wheel go-w, and that broke the self-updater
+# after ONE update: the next swap does `rm -rf .previous` and `mv bundle .previous` as the room user,
+# and neither works on a tree the user cannot write. So the bundle is chowned to the console user (as
+# before 0.1.29), and a `.previous` / `.failed` that an earlier swap left root-owned (the 0.1.29-0.1.32
+# state) is removed here, as root, so the next swap has a clean slate. The helper copy, its directory
+# and the daemon plist stay root:wheel, exactly as in 0.1.32.
+#
+# $2 is the install location the installer was given (/Applications).
+#
+# EXIT CODES. A missing app, or a daemon that is still not running after every try (see 2c), exits 1 and
+# the installer reports the failure; the app and the plist are already on disk by then, and the log says
+# the one command that finishes the job. A helper that is missing from the bundle, a failed copy or a
+# failed signature check changes nothing and exits 0: there is nothing to load, and the log says why.
+#
+# The ETA_* overrides exist for the dry-run test and are honoured ONLY when ETA_POSTINSTALL_TEST=1,
+# which the installer never sets.
+
+LABEL="com.evenscribe.room-recorder.helper"
+MACH_SERVICE="com.evenscribe.room-recorder.helper.xpc"
+APP_NAME="EvenScribe Room Recorder.app"
+# Mirrors HelperIdentity.requirementForHelper; a test keeps the two equal.
+REQUIREMENT='identifier "com.evenscribe.room-recorder.helper" and certificate leaf = H"187dd424fb866204111113d60c6f88a21d098edb"'
+
+if [ "${ETA_POSTINSTALL_TEST:-}" = "1" ]; then
+  INSTALL_LOCATION="${ETA_INSTALL_LOCATION:-/Applications}"
+  DAEMON_DIR="${ETA_DAEMON_DIR:-/Library/LaunchDaemons}"
+  HELPER_DIR="${ETA_HELPER_DIR:-/Library/PrivilegedHelperTools}"
+  LAUNCHCTL="${ETA_LAUNCHCTL:-/bin/launchctl}"
+  CODESIGN="${ETA_CODESIGN:-/usr/bin/codesign}"
+  CHOWN="${ETA_CHOWN:-/usr/sbin/chown}"
+  CONSOLE_USER_OVERRIDE="${ETA_CONSOLE_USER:-}"
+  USERS_DIR="${ETA_USERS_DIR:-/Users}"
+  ROOT_UID="${ETA_ROOT_UID:-0}"
+  PIN_FILE="${ETA_PIN_FILE:-/Library/Application Support/EvenScribe/update-pin}"
+  SKIP_OWNERSHIP="${ETA_SKIP_OWNERSHIP:-0}"
+  LOG_PATH="${ETA_LOG_PATH:-/var/log/room-recorder-helper.log}"
+  INSTALL_LOG="${ETA_INSTALL_LOG:-/var/log/evenscribe-room-recorder-install.log}"
+  SLEEP="${ETA_SLEEP:-/bin/sleep}"
+  SUPPORT_DIR="${ETA_SUPPORT_DIR:-/Library/Application Support/EvenScribe}"
+else
+  INSTALL_LOCATION="${2:-/Applications}"
+  DAEMON_DIR="/Library/LaunchDaemons"
+  HELPER_DIR="/Library/PrivilegedHelperTools"
+  LAUNCHCTL="/bin/launchctl"
+  CODESIGN="/usr/bin/codesign"
+  CHOWN="/usr/sbin/chown"
+  CONSOLE_USER_OVERRIDE=""
+  USERS_DIR="/Users"
+  ROOT_UID=0
+  PIN_FILE="/Library/Application Support/EvenScribe/update-pin"
+  SKIP_OWNERSHIP=0
+  LOG_PATH="/var/log/room-recorder-helper.log"
+  INSTALL_LOG="/var/log/evenscribe-room-recorder-install.log"
+  SLEEP="/bin/sleep"
+  SUPPORT_DIR="/Library/Application Support/EvenScribe"
+fi
+
+# The watchdog hold (0.1.36). The helper's watchdog relaunches a missing app; during an install the app is
+# missing on purpose. The preinstall wrote this root-owned marker; it is written again here (a fleet or manual
+# run of this script has no preinstall) and removed on EVERY exit, including a failed install and a signal. A
+# marker left by a killed installer ages out after 30 minutes on the watchdog's side.
+INSTALL_MARKER="$SUPPORT_DIR/install-in-progress"
+# shellcheck disable=SC2329  # run by the EXIT trap below
+clear_install_marker() { /bin/rm -f "$INSTALL_MARKER"; }
+trap clear_install_marker EXIT
+trap 'exit 1' HUP INT TERM
+/bin/mkdir -p "$SUPPORT_DIR"
+if echo "postinstall running $(/bin/date '+%Y-%m-%d %H:%M:%S')" > "$INSTALL_MARKER"; then
+  /bin/chmod 644 "$INSTALL_MARKER"
+  [ "${ETA_POSTINSTALL_TEST:-}" = "1" ] || /usr/sbin/chown root:wheel "$INSTALL_MARKER"
+fi
+
+# 0.1.38: the app never goes into a user's own Applications folder. A ~/Applications copy is what left OPD 4
+# running a stale 0.1.24 beside the real install. Refused here, before anything is touched.
+case "$INSTALL_LOCATION" in
+  "$USERS_DIR"/*/Applications|"$USERS_DIR"/*/Applications/*)
+    say_early="room-recorder postinstall: refusing to install into $INSTALL_LOCATION; the app belongs in /Applications"
+    echo "$say_early"
+    echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') $say_early" >> "$INSTALL_LOG" 2>/dev/null
+    exit 1
+    ;;
+esac
+
+APP="$INSTALL_LOCATION/$APP_NAME"
+BUNDLE_HELPER="$APP/Contents/MacOS/room-recorder-helper"
+HELPER="$HELPER_DIR/$LABEL"
+PLIST="$DAEMON_DIR/$LABEL.plist"
+
+# Every step goes to the installer's output AND to a log that survives it.
+say() {
+  echo "room-recorder postinstall: $*"
+  echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') room-recorder postinstall: $*" >> "$INSTALL_LOG" 2>/dev/null
+}
+own() { [ "$SKIP_OWNERSHIP" = "1" ] || "$CHOWN" root:wheel "$@"; }
+
+# The user who runs the recorder: the console user, or, at the login window or over SSH, the one user
+# who has the recorder's LaunchAgent. Prints nothing when it cannot tell.
+room_user() {
+  if [ -n "$CONSOLE_USER_OVERRIDE" ]; then
+    console="$CONSOLE_USER_OVERRIDE"
+  else
+    console="$(/usr/bin/stat -f %Su /dev/console 2>/dev/null)"
+  fi
+  case "$console" in
+    ""|root|loginwindow) ;;
+    *) echo "$console"; return ;;
+  esac
+  found=""
+  count=0
+  for agent in "$USERS_DIR"/*/Library/LaunchAgents/com.evenscribe.room-recorder.plist; do
+    [ -f "$agent" ] || continue
+    count=$((count + 1))
+    found="$(/usr/bin/stat -f %Su "$agent")"
+  done
+  [ "$count" = "1" ] && echo "$found"
+}
+
+[ -d "$APP" ] || { say "no app at $APP"; exit 1; }
+
+# 0. A pkg install is a deliberate act by someone with root, and it ends a rollback pin (0.1.34): the
+#    self-updater may go forward again. rollback.sh writes the pin AFTER its own installer run, so a
+#    rollback to a pkg that also does this still ends up pinned.
+if [ -e "$PIN_FILE" ]; then
+  /bin/rm -f "$PIN_FILE"
+  say "removed the update pin $PIN_FILE"
+fi
+
+# 1. The bundle goes to the room user; root-owned leftovers of earlier swaps go away.
+# `.previous` and `.failed` are the updater's aside copies. Removed only when something in them is
+# owned by root, which is what a 0.1.29-0.1.32 swap left; a user-owned one the updater handles itself.
+for aside in "$APP.previous" "$APP.failed"; do
+  if [ -e "$aside" ] && [ -n "$(/usr/bin/find "$aside" -user "$ROOT_UID" -print -quit 2>/dev/null)" ]; then
+    /bin/rm -rf "$aside"
+    say "removed the root-owned $aside left by an earlier update"
+  fi
+done
+ROOM_USER="$(room_user)"
+if [ -n "$ROOM_USER" ] && [ "$SKIP_OWNERSHIP" != "1" ]; then
+  ROOM_GROUP="$(/usr/bin/id -gn "$ROOM_USER" 2>/dev/null)"
+  "$CHOWN" -R "$ROOM_USER:${ROOM_GROUP:-staff}" "$APP"
+  /bin/chmod -R u+rwX,go-w "$APP"
+  say "app bundle owned by $ROOM_USER"
+elif [ -z "$ROOM_USER" ]; then
+  say "could not tell which user runs the recorder; the bundle ownership is left as the installer made it"
+  /bin/chmod -R go-w "$APP"
+else
+  /bin/chmod -R u+rwX,go-w "$APP"
+fi
+
+# 2. The system LaunchDaemon.
+if [ ! -x "$BUNDLE_HELPER" ]; then
+  say "no helper binary at $BUNDLE_HELPER; the daemon is not installed"
+  exit 0
+fi
+
+# 2a. Stage the copy in the root-only directory and verify it. Nothing live has been touched yet.
+/bin/mkdir -p "$HELPER_DIR"
+own "$HELPER_DIR"
+/bin/chmod 755 "$HELPER_DIR"
+STAGED="$HELPER.new.$$"
+/bin/rm -f "$STAGED"
+if ! /bin/cp "$BUNDLE_HELPER" "$STAGED"; then
+  say "could not copy the helper to $HELPER_DIR; the daemon is not changed"
+  /bin/rm -f "$STAGED"
+  exit 0
+fi
+own "$STAGED"
+/bin/chmod 755 "$STAGED"
+if ! "$CODESIGN" --verify --strict -R "=$REQUIREMENT" "$STAGED" > /dev/null 2>&1; then
+  say "the helper copy does not satisfy the pinned code-signing requirement; the daemon is not changed"
+  /bin/rm -f "$STAGED"
+  exit 0
+fi
+
+# 2b. The plist, in a temp file, linted.
+TMP="$PLIST.tmp.$$"
+/bin/mkdir -p "$DAEMON_DIR"
+/bin/cat > "$TMP" <<PLIST_END
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>Program</key>
+    <string>$HELPER</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HELPER</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>$MACH_SERVICE</key>
+        <true/>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>$LOG_PATH</string>
+</dict>
+</plist>
+PLIST_END
+
+if ! /usr/bin/plutil -lint "$TMP" > /dev/null 2>&1; then
+  say "the generated daemon plist did not lint; the daemon is not changed"
+  /bin/rm -f "$TMP" "$STAGED"
+  exit 0
+fi
+own "$TMP"
+/bin/chmod 644 "$TMP"
+
+# 2c. Out, WAIT, swap, in, VERIFY. `bootout` of a job that is not loaded fails; that is fine. Never `load`/`unload`.
+#
+# `bootout` is ASYNCHRONOUS: it returns before the job is gone, and a `bootstrap` issued meanwhile fails
+# ("in progress" / already loaded). On OPD 5 and OPD 6 (0.1.33) the job was not there after the install.
+# So: ask launchd by name until the job is gone (up to 10 s), bootstrap with up to 3 retries, and
+# insist on seeing `state = running` before saying the install worked.
+job_state() { "$LAUNCHCTL" print "system/$LABEL" 2>/dev/null; }
+job_running() { job_state | /usr/bin/grep -q "state = running"; }
+job_loaded() { job_state > /dev/null; }
+
+"$LAUNCHCTL" bootout "system/$LABEL" > /dev/null 2>&1
+waited=0
+while job_loaded && [ "$waited" -lt 10 ]; do
+  "$SLEEP" 1
+  waited=$((waited + 1))
+done
+if job_loaded; then
+  say "WARNING: $LABEL is still loaded $waited s after bootout; continuing anyway"
+else
+  say "bootout complete: $LABEL gone after $waited s"
+fi
+
+/bin/mv -f "$STAGED" "$HELPER"
+/bin/mv -f "$TMP" "$PLIST"
+say "new helper copy and plist are in place"
+
+bootstrap_once() {
+  if "$LAUNCHCTL" bootstrap system "$PLIST"; then
+    say "launchctl bootstrap system $PLIST: ok"
+    return 0
+  fi
+  say "launchctl bootstrap system $PLIST: failed"
+  return 1
+}
+
+# One try plus up to three retries, 2 s apart. The loop ends only when a bootstrap SUCCEEDED and the job
+# is there: a bootstrap that returns 0 but leaves no job is a failure, and so is one that fails while an
+# older definition of the job is still loaded (it would keep running the old code).
+tries=0
+boot_ok=0
+while [ "$tries" -lt 4 ]; do
+  if [ "$tries" -gt 0 ]; then
+    say "$LABEL is not (re)loaded; retry $tries of 3 in 2 s"
+    "$SLEEP" 2
+  fi
+  tries=$((tries + 1))
+  if bootstrap_once && job_loaded; then
+    boot_ok=1
+    break
+  fi
+done
+
+if job_loaded && ! job_running; then
+  # Loaded but not running: start it, WITHOUT -k (no kill of anything that is running).
+  say "$LABEL is loaded but not running; kickstart (no -k)"
+  "$LAUNCHCTL" kickstart "system/$LABEL" > /dev/null 2>&1
+  "$SLEEP" 1
+fi
+
+if job_running; then
+  if [ "$boot_ok" = "1" ]; then
+    say "VERIFIED: $LABEL is running from $HELPER (bootstrap attempts: $tries)"
+  else
+    say "WARNING: $LABEL is running, but no bootstrap succeeded in $tries attempts: it is the PREVIOUS definition and keeps the old helper code until it restarts. Run: sudo launchctl bootout system/$LABEL; sudo launchctl bootstrap system $PLIST"
+  fi
+  exit 0
+fi
+
+# The only non-zero exit of the daemon step: every try is spent and the job is still not running. The
+# installer reports the failure; the app and the plist are already in place, so the cure is one command.
+if job_loaded; then
+  say "FAILED: $LABEL is loaded but NOT running after kickstart. See /var/log/room-recorder-helper.log. Retry: sudo launchctl kickstart system/$LABEL"
+else
+  say "FAILED: $LABEL is NOT loaded after $tries bootstrap attempts. Retry: sudo launchctl bootstrap system $PLIST"
+fi
+exit 1

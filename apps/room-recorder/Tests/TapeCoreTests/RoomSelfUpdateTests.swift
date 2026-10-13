@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 @testable import RoomRecorderCore
+@testable import HelperCore
 
 /// Build R3 §13.3 — self-update, proved rather than argued.
 ///
@@ -81,16 +82,23 @@ import Testing
 
   /// A directory of stub tools that go on PATH ahead of the real ones, so no test can boot a real
   /// LaunchAgent out or need a real signing certificate.
-  static func stubTools(codesignExit: Int32, log: URL) throws -> URL {
+  static func stubTools(codesignExit: Int32, log: URL, residentVersionFile: URL? = nil) throws -> URL {
     let bin = URL(fileURLWithPath: NSTemporaryDirectory())
       .appendingPathComponent("r3-stubs-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     for (name, exit) in [("launchctl", Int32(0)), ("codesign", codesignExit)] {
       let tool = bin.appendingPathComponent(name, isDirectory: false)
+      // 0.1.29. For launchctl only: also record which version sits at the resident path at the
+      // moment of each call, in a second file, so a test can prove WHEN the agent was out. The
+      // first file's lines are unchanged.
+      let snapshot =
+        (name == "launchctl" && residentVersionFile != nil)
+        ? "echo \"$1 resident=$(cat '\(residentVersionFile!.path)' 2>/dev/null || echo none)\" >> '\(log.path).state'\n"
+        : ""
       try """
         #!/bin/bash
         echo "\(name) $*" >> '\(log.path)'
-        exit \(exit)
+        \(snapshot)exit \(exit)
         """.write(to: tool, atomically: true, encoding: .utf8)
       try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
     }
@@ -140,7 +148,9 @@ import Testing
       "one rendezvous per run; two would deadlock on the same FIFO")
     let toolLog = fixture.root.appendingPathComponent("tools.log", isDirectory: false)
     FileManager.default.createFile(atPath: toolLog.path, contents: nil)
-    let stubs = try stubTools(codesignExit: codesignExit, log: toolLog)
+    let stubs = try stubTools(
+      codesignExit: codesignExit, log: toolLog,
+      residentVersionFile: fixture.resident.appendingPathComponent("version.txt"))
     defer { try? FileManager.default.removeItem(at: stubs) }
 
     var script = RoomSwapScript.render(
@@ -374,14 +384,201 @@ import Testing
 
   // MARK: - Step 2: what counts as an update
 
-  @Test func aLowerVersionIsAnUpdate_becauseThatIsHowWithdrawRollsBack() {
-    // NOT `>`. `latestRelease` orders by published_at, so withdrawing the newest row makes the
-    // route answer with the one BEFORE it — a lower version — and every Mac walks backwards at its
-    // next check. A greater-than here would leave withdraw with nothing to do.
-    #expect(roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.7"))
+  @Test func aLowerVersionIsNeverAnUpdate_0_1_30() {
+    // REVERSED in 0.1.30 (gating-lead addendum B). It used to be "a different version is an update",
+    // so that withdrawing the newest release walked every Mac back to the one before. On the OPD 6
+    // proof install that rule had a 0.1.29 app deferring a DOWNGRADE to 0.1.28. A room now moves
+    // only upwards; a rollback is a deliberate act. See RoomUpdateOrderingTests for the full table.
+    #expect(!roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.7"))
     #expect(roomUpdateIsAvailable(running: "0.1.7", offered: "0.1.8"))
     #expect(roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.9-test"))
     #expect(!roomUpdateIsAvailable(running: "0.1.8", offered: "0.1.8"))
+  }
+
+  // 0.1.32 R2: the root daemon runs its own copy in /Library/PrivilegedHelperTools, so the swap
+  // must leave it alone and stay in the user's launchd domain.
+  @Test func aRealSwapLeavesTheRootHelperCopyByteForByteAndLaunchctlInTheUserDomain() throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let helperDir = fixture.root.deletingLastPathComponent().appendingPathComponent("PrivilegedHelperTools")
+    try FileManager.default.createDirectory(at: helperDir, withIntermediateDirectories: true)
+    let copy = helperDir.appendingPathComponent("com.evenscribe.room-recorder.helper")
+    try Data("ROOT-HELPER-COPY".utf8).write(to: copy)
+    let before = try Data(contentsOf: copy)
+    let modified = try FileManager.default.attributesOfItem(atPath: copy.path)[.modificationDate] as? Date
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.99")
+
+    let run = try Self.runSwapScript(fixture, stagedBundle: staged, version: "0.1.99")
+    #expect(run.status == 0)
+    #expect(fixture.version(of: fixture.resident) == "0.1.99", "the bundle did swap")
+    #expect(try Data(contentsOf: copy) == before)
+    #expect(try FileManager.default.attributesOfItem(atPath: copy.path)[.modificationDate] as? Date == modified)
+    let launchctl = run.toolLog.split(separator: "\n").filter { $0.hasPrefix("launchctl ") }
+    #expect(!launchctl.isEmpty && launchctl.allSatisfy { !$0.contains("system") }, "\(launchctl)")
+  }
+
+  // 0.1.33 (refuter F1): the pkg used to leave the bundle root:wheel go-w, so the SECOND swap could not
+  // remove or reuse `.previous`. The bundle now belongs to the room user.
+  @Test func twoSuccessiveSwapsSucceedOnAUserOwnedTree() throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let helperDir = fixture.root.deletingLastPathComponent().appendingPathComponent("PrivilegedHelperTools")
+    try FileManager.default.createDirectory(at: helperDir, withIntermediateDirectories: true)
+    let copy = helperDir.appendingPathComponent("com.evenscribe.room-recorder.helper")
+    try Data("ROOT-HELPER-COPY".utf8).write(to: copy)
+    var versions: [String] = []
+    for version in ["0.1.8", "0.1.9", "0.1.10"] {
+      let staged = fixture.root.appendingPathComponent("staged-\(version)/EvenScribe Room Recorder.app")
+      try fixture.writeBundle(at: staged, version: version)
+      let run = try Self.runSwapScript(fixture, stagedBundle: staged, version: version)
+      #expect(run.status == 0, "swap to \(version)")
+      #expect(Self.readResult(fixture)?.outcome == .ok, "swap to \(version)")
+      versions.append(fixture.version(of: fixture.resident) ?? "?")
+    }
+    #expect(versions == ["0.1.8", "0.1.9", "0.1.10"])
+    #expect(fixture.version(of: fixture.previous) == "0.1.9", "the rollback copy is the version just before")
+    #expect(try Data(contentsOf: copy) == Data("ROOT-HELPER-COPY".utf8), "no swap touches the root helper copy")
+  }
+
+  @Test func controlATreeTheUserCannotWriteBlocksTheSecondSwap_thatWasTheDefect() throws {
+    // Stands in for the root-owned tree the old pkg left: `a-w` on the whole bundle. If this stops
+    // failing, the test above is no longer proving anything about ownership.
+    let fixture = try Fixture.make()
+    defer {
+      _ = try? Process.run(URL(fileURLWithPath: "/bin/chmod"), arguments: ["-R", "u+w", fixture.applications.path])
+      fixture.tearDown()
+    }
+    let first = fixture.root.appendingPathComponent("staged-a/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: first, version: "0.1.8")
+    #expect(try Self.runSwapScript(fixture, stagedBundle: first, version: "0.1.8").status == 0)
+    let lock = Process()
+    lock.executableURL = URL(fileURLWithPath: "/bin/chmod")
+    lock.arguments = ["-R", "a-w", fixture.resident.path, fixture.previous.path]
+    try lock.run()
+    lock.waitUntilExit()
+    let second = fixture.root.appendingPathComponent("staged-b/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: second, version: "0.1.9")
+    let run = try Self.runSwapScript(fixture, stagedBundle: second, version: "0.1.9")
+    #expect(run.status != 0 || Self.readResult(fixture)?.outcome != .ok, "a tree the user cannot write must block the swap")
+    #expect(fixture.version(of: fixture.resident) != "0.1.9")
+  }
+
+  // MARK: - 0.1.34: the rollback pin
+
+  @Test func thePinVerdictTable() {
+    let table: [(String, String?, RoomUpdatePin.Verdict)] = [
+      ("0.1.33", nil, .noPin),
+      ("0.1.33", "0.1.31\n", .held(pin: "0.1.31")),
+      ("0.1.32", "0.1.31", .held(pin: "0.1.31")),
+      ("0.1.31", "0.1.31", .allowed(pin: "0.1.31")),  // at the pin: allowed
+      ("0.1.30", "0.1.31", .allowed(pin: "0.1.31")),
+      ("0.1.10", "0.1.9", .held(pin: "0.1.9")),  // numeric, not lexical
+      ("0.1.9", "0.1.10", .allowed(pin: "0.1.10")),
+      ("0.1.33", "", .unreadable),  // there but empty: fail closed
+      ("0.1.33", "banana", .unreadable),
+      ("0.1.33", "0.1.x\n", .unreadable),
+      ("banana", "0.1.31", .unreadable),
+    ]
+    for (offered, pin, expected) in table {
+      #expect(RoomUpdatePin.verdict(offered: offered, pinText: pin) == expected, "offered \(offered), pin \(pin ?? "none")")
+    }
+    #expect(RoomUpdatePin.defaultPath == "/Library/Application Support/EvenScribe/update-pin")
+  }
+
+  private func pinnedUpdater(
+    _ fixture: Fixture, running: String, offered: String, pin: String?, runner: RecordingRunner
+  ) throws -> RoomUpdater {
+    let pinURL = fixture.root.appendingPathComponent("update-pin-test")
+    try? FileManager.default.removeItem(at: pinURL)
+    if let pin { try pin.write(to: pinURL, atomically: true, encoding: .utf8) }
+    let bytes = Data("a plausible zip".utf8)
+    runner.dittoProducesBundleNamed = "EvenScribe Room Recorder.app"
+    runner.dittoProducesVersion = offered
+    return RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: running, channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: offered, bytes: bytes)), downloader: StubDownloader(bytes: bytes),
+      runner: runner, pinURL: pinURL, log: { _ in })
+  }
+
+  @Test func anOfferedVersionAboveThePinIsIgnoredBeforeAnythingIsDownloadedOrDeferred() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = try pinnedUpdater(fixture, running: "0.1.7", offered: "0.1.10", pin: "0.1.8\n", runner: runner)
+    #expect(await updater.check(sessionIsOpen: false) == .upToDate)
+    #expect(await updater.check(sessionIsOpen: true) == .upToDate, "not even the 'deferred while recording' answer")
+    #expect(await runner.spawned.isEmpty)
+    #expect(Self.readResult(fixture) == nil && !FileManager.default.fileExists(atPath: fixture.staging.path))
+  }
+
+  @Test func anOfferedVersionAtOrBelowThePinIsStillTaken() async throws {
+    for offered in ["0.1.8", "0.1.9"] {
+      let fixture = try Fixture.make()
+      defer { fixture.tearDown() }
+      let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+      let updater = try pinnedUpdater(fixture, running: "0.1.7", offered: offered, pin: "0.1.9", runner: runner)
+      #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: offered), "offered \(offered)")
+    }
+  }
+
+  @Test func noPinFileMeansNoPin() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let updater = try pinnedUpdater(fixture, running: "0.1.7", offered: "0.1.99", pin: nil, runner: runner)
+    #expect(await updater.check(sessionIsOpen: false) == .handedOver(version: "0.1.99"))
+  }
+
+  @Test func aPinThatIsNotAVersionHoldsEveryUpdateAndSaysWhy() async throws {
+    for garbage in ["", "banana\n", "0.1.x"] {
+      let fixture = try Fixture.make()
+      defer { fixture.tearDown() }
+      let logged = LockedStrings()
+      let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+      var updater = try pinnedUpdater(fixture, running: "0.1.7", offered: "0.1.8", pin: garbage, runner: runner)
+      updater = RoomUpdater(
+        rootURL: updater.rootURL, residentBundleURL: updater.residentBundleURL, runningVersion: "0.1.7", channel: "stable",
+        fetcher: StubFetcher(release: descriptor(version: "0.1.8", bytes: Data("z".utf8))), downloader: StubDownloader(bytes: Data("z".utf8)),
+        runner: runner, pinURL: updater.pinURL, log: { logged.add($0) })
+      #expect(await updater.check(sessionIsOpen: false) == .upToDate, "pin text '\(garbage)'")
+      #expect(await runner.spawned.isEmpty)
+      #expect(logged.all.contains { $0.contains("is not a version") }, "\(logged.all)")
+    }
+  }
+
+  @Test func theHeldLogLineNamesThePinAndTheWayOut() async throws {
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let logged = LockedStrings()
+    let runner = RecordingRunner(exitCodes: [:])
+    let pinURL = fixture.root.appendingPathComponent("pin")
+    try "0.1.31".write(to: pinURL, atomically: true, encoding: .utf8)
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.30", channel: "stable",
+      fetcher: StubFetcher(release: descriptor(version: "0.1.33", bytes: Data("z".utf8))), downloader: StubDownloader(bytes: Data("z".utf8)),
+      runner: runner, pinURL: pinURL, log: { logged.add($0) })
+    _ = await updater.check(sessionIsOpen: false)
+    #expect(logged.all.contains { $0.contains("pinned at 0.1.31") && $0.contains("pkg install clears the pin") })
+  }
+
+  @Test func aChannelOfferingALowerVersionStagesNothingAndDefersNothing() async throws {
+    // The whole updater, not just the predicate: a 0.1.29 app on a channel that offers 0.1.28 with
+    // the session CLOSED downloads nothing, spawns nothing and leaves no result file.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let bytes = Data("a plausible zip".utf8)
+    let runner = RecordingRunner(exitCodes: ["/usr/bin/ditto": 0, "/usr/bin/codesign": 0])
+    let downloader = StubDownloader(bytes: bytes)
+    let updater = RoomUpdater(
+      rootURL: fixture.root, residentBundleURL: fixture.resident, runningVersion: "0.1.29",
+      channel: "test", fetcher: StubFetcher(release: descriptor(version: "0.1.28", bytes: bytes)),
+      downloader: downloader, runner: runner, log: { _ in })
+    #expect(await updater.check(sessionIsOpen: false) == .upToDate)
+    #expect(await updater.check(sessionIsOpen: true) == .upToDate, "not even a deferral message for a downgrade")
+    #expect(await runner.spawned.isEmpty)
+    #expect(Self.readResult(fixture) == nil)
+    #expect(!FileManager.default.fileExists(atPath: fixture.staging.path))
   }
 
   @Test func anUnbundledBinaryNeverUpdatesItself() {
@@ -639,6 +836,44 @@ import Testing
     #expect(result.outcome == .ok)
     #expect(result.version == "0.1.8")
     #expect(result.reason == nil)
+  }
+
+  @Test func theAgentIsOutWhileTheBundlesMoveSoAlwaysOnKeepAliveCannotFightTheSwap() throws {
+    // 0.1.29. The LaunchAgent is `KeepAlive true`: launchd restarts the app on ANY exit. The swap
+    // is safe under that only if the agent is booted out BEFORE the first bundle move and booted
+    // back in AFTER the last one. The stub records the version at the resident path at each
+    // launchctl call: the old one at `bootout`, the new one at `bootstrap`, and nothing between.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.8")
+
+    let run = try Self.runSwapScript(fixture, stagedBundle: staged, version: "0.1.8")
+    #expect(run.status == 0)
+    let state = try String(
+      contentsOf: fixture.root.appendingPathComponent("tools.log.state"), encoding: .utf8
+    ).split(separator: "\n").map(String.init)
+    #expect(state.first == "bootout resident=0.1.7")
+    #expect(state.last == "bootstrap resident=0.1.8")
+    #expect(state.filter { $0.hasPrefix("bootout") }.count == 1)
+    #expect(state.count == 2, "no launchctl call may land while the bundles are moving: \(state)")
+  }
+
+  @Test func aRolledBackSwapBootsTheAgentBackInOnTheOldBundle() throws {
+    // The failure side of the same guarantee: a bundle that fails verification is put back, and the
+    // agent only comes back after the old one is at the resident path again.
+    let fixture = try Fixture.make()
+    defer { fixture.tearDown() }
+    let staged = fixture.root.appendingPathComponent("staged/EvenScribe Room Recorder.app")
+    try fixture.writeBundle(at: staged, version: "0.1.8")
+
+    _ = try Self.runSwapScript(fixture, stagedBundle: staged, version: "0.1.8", codesignExit: 1)
+    let state = try String(
+      contentsOf: fixture.root.appendingPathComponent("tools.log.state"), encoding: .utf8
+    ).split(separator: "\n").map(String.init)
+    #expect(state.first == "bootout resident=0.1.7")
+    #expect(state.last == "bootstrap resident=0.1.7")
+    #expect(fixture.version(of: fixture.resident) == "0.1.7")
   }
 
   @Test func theNewBundleWritesThePlistBeforeTheAgentIsBootstrapped() throws {
@@ -1954,6 +2189,13 @@ import Testing
 private struct StubFetcher: RoomReleaseFetching {
   let release: RoomReleaseDescriptor?
   func fetchRelease(channel: String) async -> RoomReleaseDescriptor? { release }
+}
+
+private final class LockedStrings: @unchecked Sendable {
+  private let lock = NSLock()
+  private var items: [String] = []
+  func add(_ s: String) { lock.lock(); items.append(s); lock.unlock() }
+  var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
 }
 
 private struct StubDownloader: RoomUpdateDownloading {

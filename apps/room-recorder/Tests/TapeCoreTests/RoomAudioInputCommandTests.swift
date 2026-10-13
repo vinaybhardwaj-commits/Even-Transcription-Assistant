@@ -208,6 +208,35 @@ import Testing
     #expect(try RoomPersistence(root: root).loadConfiguration().deviceUID == "device-b")
   }
 
+  /// 0.1.25 item 3 — the SAME uid used to ack "applied" and reopen nothing (25 Sep, OPD 4). It must
+  /// now close the running segment and open a new one of the same session, on the same device,
+  /// with the config untouched. Fails on 0.1.24: one launch, one directory.
+  @Test func aSameDeviceSwitchWhileRecordingReopensTheCapture() async throws {
+    let root = R4Fixture.temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let remote = R4Remote(
+      activeSessionJSON: R4Fixture.recordingActiveJSON,
+      polls: [Self.setAudio("cmd_same", #"{"device_uid":"device-a"}"#)])
+    let launcher = R4FakeLauncher()
+    let engine = try await Self.engine(
+      root: root, remote: remote, launcher: launcher, audio: R4AudioInputs.standard())
+
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.reached(acks: 1, polls: 2) }
+    let directories = launcher.launchedDirectories
+    task.cancel()
+    try await task.value
+
+    let ack = try #require(await remote.acknowledgements().first)
+    #expect(ack.ok)
+    #expect(ack.sessionID == "bs_r4")
+    #expect(launcher.launchedDevices == ["device-a", "device-a"])
+    #expect(launcher.mostRunningAtALaunch == 0)
+    #expect(Set(directories).count == 2)
+    #expect(await remote.createCalls() == 0)
+    #expect(try RoomPersistence(root: root).loadConfiguration().deviceUID == "device-a")
+  }
+
   /// (c) A uid that is not attached: `device_not_present`, config.json byte-for-byte untouched,
   /// and the running capture never stopped.
   @Test func anAbsentDeviceIsRefusedAndNothingMoves() async throws {

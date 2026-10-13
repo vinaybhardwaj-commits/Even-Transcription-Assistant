@@ -29,6 +29,9 @@ private func require(_ name: String, in arguments: [String]) throws -> String {
   return value
 }
 
+// stdout goes to tapewriter.log, a file: line-buffer it so guard lines land as they happen.
+setvbuf(stdout, nil, _IOLBF, 0)
+
 do {
   let arguments = Array(CommandLine.arguments.dropFirst())
   guard let command = arguments.first else { throw RecorderError(usage) }
