@@ -29,6 +29,74 @@ public protocol FleetTransport: Sendable {
 /// The device's own keychain. `loadOrCreate` makes the key once and returns the same one after.
 public protocol FleetKeyStore: Sendable {
   func loadOrCreate() throws -> FleetSigningKey
+  /// The key, and where it came from. A store that cannot read the key the device registered with MUST say `rotated`
+  /// (or `fresh`) so the client drops the old device id: a new key under the old id is a KEY_CONFLICT at the server.
+  func loadWithOrigin() throws -> FleetKeyLoad
+}
+
+extension FleetKeyStore {
+  public func loadWithOrigin() throws -> FleetKeyLoad { FleetKeyLoad(key: try loadOrCreate(), origin: .existing) }
+}
+
+/// 0.1.39.1. How the key in hand relates to the one the device registered with.
+public enum FleetKeyOrigin: Equatable, Sendable {
+  /// The same key as before (read from the file, or moved from the keychain once).
+  case existing
+  /// Made now because there was none.
+  case fresh
+  /// Made now because the old one exists and cannot be read; `reason` is the status or `timeout`.
+  case rotated(reason: String)
+}
+
+public struct FleetKeyLoad: @unchecked Sendable {
+  public let key: FleetSigningKey
+  public let origin: FleetKeyOrigin
+  /// 0.1.40 R2. Read from the store's durable record, not from this load: the device id this key REPLACED, when the
+  /// store rotated it (possibly in an earlier process, or after the client's deadline had passed). The client drops a
+  /// device id that matches, so a lost or late rotation can never sign for the old id.
+  public let replacesDeviceID: String?
+  /// The recorded reason for the rotation (a status, or `timeout`), when there was one.
+  public let rotationReason: String?
+  public init(key: FleetSigningKey, origin: FleetKeyOrigin, replacesDeviceID: String? = nil, rotationReason: String? = nil) {
+    self.key = key
+    self.origin = origin
+    self.replacesDeviceID = replacesDeviceID
+    self.rotationReason = rotationReason
+  }
+}
+
+/// 0.1.39.1. The client's own errors, with a stable domain and code for the log.
+public enum FleetClientError: Error, Equatable, CustomNSError {
+  /// The key store did not answer within the deadline (or a previous load is still stuck).
+  case keyTimeout
+  /// The key changed and the device id was dropped; the next pass registers again.
+  case reenrolling
+
+  public static var errorDomain: String { "FleetClient" }
+  public var errorCode: Int {
+    switch self {
+    case .keyTimeout: return 1
+    case .reenrolling: return 2
+    }
+  }
+}
+
+/// The load of a key runs on its own thread and resumes the caller exactly once: with the answer, or with a timeout.
+final class FleetKeyLoadGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var busy = false
+  func begin() -> Bool { lock.lock(); defer { lock.unlock() }; if busy { return false }; busy = true; return true }
+  func end() { lock.lock(); busy = false; lock.unlock() }
+}
+
+private final class ResumeOnce: @unchecked Sendable {
+  private let lock = NSLock()
+  private var continuation: CheckedContinuation<Result<FleetKeyLoad, Error>, Never>?
+  init(_ continuation: CheckedContinuation<Result<FleetKeyLoad, Error>, Never>) { self.continuation = continuation }
+  func resume(_ result: Result<FleetKeyLoad, Error>) {
+    lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+    c?.resume(returning: result)
+  }
 }
 
 public protocol FleetStateStore: Sendable {
@@ -117,6 +185,9 @@ public actor FleetClient {
   private let sleep: @Sendable (TimeInterval) async -> Void
   private let makeJTI: @Sendable () -> String
   private let log: @Sendable (String) -> Void
+  private let keyDeadline: TimeInterval
+  private let rekeyJitter: @Sendable () -> Double
+  private nonisolated let keyGate = FleetKeyLoadGate()
 
   private var state: FleetState
   private var key: FleetSigningKey?
@@ -132,8 +203,12 @@ public actor FleetClient {
       try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
     },
     makeJTI: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
-    log: @escaping @Sendable (String) -> Void
+    log: @escaping @Sendable (String) -> Void,
+    keyDeadline: TimeInterval = 10,
+    rekeyJitter: @escaping @Sendable () -> Double = { Double.random(in: -0.1...0.1) }
   ) {
+    self.rekeyJitter = rekeyJitter
+    self.keyDeadline = keyDeadline
     self.config = config
     self.transport = transport
     self.keys = keys
@@ -156,6 +231,8 @@ public actor FleetClient {
   public func run() async {
     guard config.enabled else { log("fleet client stopped: disabled"); return }
     loadState()
+    // 0.1.40 R2. The key first, so a rotation drops the old device id BEFORE any pass reads it.
+    _ = try? await signingKey()
     while !Task.isCancelled {
       if let reason = state.stoppedReason {
         log("fleet client stopped: \(reason)")
@@ -182,6 +259,7 @@ public actor FleetClient {
   /// change: where, the error's domain and code. Never the error's text, which can carry a URL, and never a token.
   private var lastFailures: [String: String] = [:]
   private func noteFailure(_ site: String, _ error: Error) {
+    if (error as? FleetClientError) == .reenrolling { return }
     let ns = error as NSError
     let line = "fleet client: \(site) failed (\(ns.domain) \(ns.code))"
     guard lastFailures[site] != line else { return }
@@ -195,6 +273,12 @@ public actor FleetClient {
       loaded = FleetState()  // a different enrolment starts clean
       loaded.installID = config.installID
     }
+    // 0.1.40 R2. 0.1.40's first build (948d3829) persisted a stop for a KEY_CONFLICT after a rotation. That is a wait now:
+    // the stop is cleared on the first start of this build.
+    if loaded.stoppedReason == "register_key_conflict" {
+      loaded.stoppedReason = nil
+      store.save(loaded)
+    }
     state = loaded
   }
 
@@ -202,11 +286,75 @@ public actor FleetClient {
 
   private func now() -> Int { Int(clock().timeIntervalSince1970) }
 
-  private func signingKey() throws -> FleetSigningKey {
+  /// How long a key that failed to load (not a timeout) is left alone before the store is asked again.
+  static let keyRetryInterval: TimeInterval = 300
+  /// How often a register refused after a key rotation is asked again.
+  public static let rekeyRetryInterval: TimeInterval = 900
+  /// The refused-register line is written at most this often.
+  static let refusedLogInterval: TimeInterval = 3600
+  private var lastRefusedLogAt: Date?
+  private var keyRetryAt: Date?
+  private var keyRetryError: Error?
+  private var rotation: (reason: String, oldDevice: String)?
+
+  /// 0.1.39.1. NOTHING HERE CAN WAIT FOR EVER. The store is asked on its own thread; this actor waits at most
+  /// `keyDeadline` for the answer. A load that never returns stays on its thread (it cannot be killed) and no second
+  /// one is started while it is stuck, so a hang costs one thread, not one per retry.
+  private func signingKey() async throws -> FleetSigningKey {
     if let key { return key }
-    let made = try keys.loadOrCreate()
-    key = made
-    return made
+    if let at = keyRetryAt, clock() < at, let error = keyRetryError { throw error }
+    guard keyGate.begin() else { throw FleetClientError.keyTimeout }
+    let keys = self.keys, gate = keyGate, deadline = keyDeadline
+    let result: Result<FleetKeyLoad, Error> = await withCheckedContinuation { continuation in
+      let once = ResumeOnce(continuation)
+      Thread.detachNewThread {
+        let answer = Result { try keys.loadWithOrigin() }
+        gate.end()
+        once.resume(answer)
+      }
+      DispatchQueue.global().asyncAfter(deadline: .now() + deadline) { once.resume(.failure(FleetClientError.keyTimeout)) }
+    }
+    switch result {
+    case .success(let load):
+      key = load.key
+      keyRetryAt = nil
+      keyRetryError = nil
+      applyRotation(of: load)
+      return load.key
+    case .failure(let error):
+      if (error as? FleetClientError) != .keyTimeout {
+        let ns = error as NSError
+        log("fleet client stopped: key read failed (\(ns.domain) \(ns.code))")
+        keyRetryAt = clock().addingTimeInterval(Self.keyRetryInterval)
+        keyRetryError = error
+      }
+      throw error
+    }
+  }
+
+  /// True once this process knows the key is not the one the device registered with. A 409 at register is then the
+  /// server waiting for an operator re-key, not a verdict on this install.
+  private var afterRotation = false
+
+  /// The key is not the one this device registered with: forget the device id so the next pass registers a new one.
+  /// Two sources, both honoured: this load's origin (a key made just now) and the store's DURABLE record of the id it
+  /// replaced (a rotation the client missed because its own deadline had passed, or an earlier process made).
+  private func applyRotation(of load: FleetKeyLoad) {
+    var reason: String?
+    switch load.origin {
+    case .existing: break
+    case .fresh: reason = state.deviceID == nil ? nil : "no key on this Mac"
+    case .rotated(let why): reason = why
+    }
+    if load.replacesDeviceID != nil || { if case .rotated = load.origin { return true }; return false }() { afterRotation = true }
+    if let replaced = load.replacesDeviceID, replaced == state.deviceID {
+      reason = reason ?? load.rotationReason ?? "recorded"
+    }
+    guard let reason, let old = state.deviceID else { return }
+    afterRotation = true
+    rotation = (reason, String(old.dropFirst(4).prefix(8)))
+    state.deviceID = nil
+    persist()
   }
 
   // MARK: Register
@@ -217,7 +365,8 @@ public actor FleetClient {
     if state.deviceID != nil { return .handled(0) }
     guard let session = roomSession() else { return .wait(30) }
     do {
-      let key = try signingKey()
+      let key = try await signingKey()
+      guard state.deviceID == nil else { return .handled(0) }
       let proof = try FleetToken.registrationProof(
         key: key, installID: config.installID, iat: now(), jti: makeJTI())
       var body =
@@ -239,10 +388,27 @@ public actor FleetClient {
         state.deviceID = id
         persist()
         backoff.success()
+        if let note = rotation {
+          log("fleet key: keychain item unreadable (\(note.reason)), registered as new device \(id.dropFirst(4).prefix(8)); old device \(note.oldDevice) needs retiring")
+          rotation = nil
+        }
         log("fleet device registered")
         return .handled(1)
       case 409:
         let code = errorCode(response)
+        if afterRotation, code == "KEY_CONFLICT" || code == "REVOKED" {
+          // 0.1.40 R2. The server holds the old key for this install until an operator re-keys it. That is a wait, not
+          // a stop: nothing is persisted, the register is asked again every 900 s, and no restart is needed.
+          // At most one line an hour while it lasts. The fingerprint is the HASH of the public key (the proof's `pk`
+          // claim, first 12 characters): what the operator approves. The key itself is never logged.
+          if lastRefusedLogAt.map({ clock().timeIntervalSince($0) >= Self.refusedLogInterval }) ?? true {
+            lastRefusedLogAt = clock()
+            let fingerprint = key.publicKeySHA256B64URL.prefix(12)
+            log("fleet client: register refused (\(code)) after key rotation; key fp \(fingerprint); waiting for operator re-key, retry every ~900 s")
+          }
+          // ±10 % so a fleet that was refused together does not ask together.
+          return .wait(Self.rekeyRetryInterval * (1 + rekeyJitter()))
+        }
         if ["REVOKED", "RETIRED", "KEY_CONFLICT"].contains(code) {
           return stop("register_\(code.lowercased())")
         }
@@ -261,12 +427,12 @@ public actor FleetClient {
   public func pollOnce() async -> FleetPollStep {
     guard config.enabled else { return .stop("disabled") }
     if state.installID == nil { loadState() }
-    guard let deviceID = state.deviceID else { return .wait(1) }
+    guard state.deviceID != nil else { return .wait(1) }
     do {
       let response = try await transport.send(
         FleetRequest(
           method: "GET", path: "/api/fleet/poll", query: ["wait": "25"],
-          headers: ["Authorization": "Device \(try token(method: "GET", path: "/api/fleet/poll", body: nil, deviceID: deviceID))"],
+          headers: ["Authorization": "Device \(try await token(method: "GET", path: "/api/fleet/poll", body: nil))"],
           body: nil, timeout: 40))
       switch response.status {
       case 200:
@@ -372,13 +538,13 @@ public actor FleetClient {
   public func postKioskHealth(_ body: Data, timeout: TimeInterval = 30) async -> FleetResponse? {
     guard config.enabled else { return nil }
     if state.installID == nil { loadState() }
-    guard state.stoppedReason == nil, let deviceID = state.deviceID else { return nil }
+    guard state.stoppedReason == nil, state.deviceID != nil else { return nil }
     do {
       return try await transport.send(
         FleetRequest(
           method: "POST", path: Self.kioskHealthPath,
           headers: [
-            "Authorization": "Device \(try token(method: "POST", path: Self.kioskHealthPath, body: body, deviceID: deviceID))",
+            "Authorization": "Device \(try await token(method: "POST", path: Self.kioskHealthPath, body: body))",
             "Content-Type": "application/json",
           ], body: body, timeout: timeout))
     } catch {
@@ -394,12 +560,12 @@ public actor FleetClient {
   public func fetchStewardTickets(machine: String, timeout: TimeInterval = 20) async -> FleetResponse? {
     guard config.enabled else { return nil }
     if state.installID == nil { loadState() }
-    guard state.stoppedReason == nil, let deviceID = state.deviceID else { return nil }
+    guard state.stoppedReason == nil, state.deviceID != nil else { return nil }
     do {
       return try await transport.send(
         FleetRequest(
           method: "GET", path: Self.stewardTicketsPath, query: ["machine": machine],
-          headers: ["Authorization": "Device \(try token(method: "GET", path: Self.stewardTicketsPath, body: nil, deviceID: deviceID))"],
+          headers: ["Authorization": "Device \(try await token(method: "GET", path: Self.stewardTicketsPath, body: nil))"],
           body: nil, timeout: timeout))
     } catch {
       noteFailure("steward_tickets", error)
@@ -415,14 +581,14 @@ public actor FleetClient {
   }
 
   private func post(_ stored: FleetStoredResult) async {
-    guard let deviceID = state.deviceID else { return }
+    guard state.deviceID != nil else { return }
     let body = Data(stored.body.utf8)
     do {
       let response = try await transport.send(
         FleetRequest(
           method: "POST", path: "/api/fleet/results",
           headers: [
-            "Authorization": "Device \(try token(method: "POST", path: "/api/fleet/results", body: body, deviceID: deviceID))",
+            "Authorization": "Device \(try await token(method: "POST", path: "/api/fleet/results", body: body))",
             "Content-Type": "application/json",
           ], body: body, timeout: 30))
       switch response.status {
@@ -450,9 +616,12 @@ public actor FleetClient {
 
   // MARK: Helpers
 
-  private func token(method: String, path: String, body: Data?, deviceID: String) throws -> String {
-    try FleetToken.device(
-      key: try signingKey(), deviceID: deviceID, method: method, path: path, body: body, iat: now(),
+  /// The key is loaded FIRST and the device id read AFTER, so a key that had to be replaced never signs for the old id.
+  private func token(method: String, path: String, body: Data?) async throws -> String {
+    let key = try await signingKey()
+    guard let deviceID = state.deviceID else { throw FleetClientError.reenrolling }
+    return try FleetToken.device(
+      key: key, deviceID: deviceID, method: method, path: path, body: body, iat: now(),
       jti: makeJTI())
   }
 
