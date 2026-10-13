@@ -644,8 +644,9 @@ public actor RoomEngine {
   }
   /// A failed start (offline, pending uploads) is tried again after a minute, not every loop.
   private var autoStartRetryAfter = Date.distantPast
-  /// 0.1.39. Failed auto-starts since the last success; a retry (>= 1) is gated on ready inputs and the hourly cap.
-  private var autoStartFailures = 0
+  /// 0.1.39. True when the last failed auto-start died on the microphone or the device. Only then is the next retry gated
+  /// on ready inputs and the hourly cap; offline, pending uploads and any other transient error keep the 60 s retry.
+  private var autoStartFailedOnInput = false
 
   // ─── 0.1.25: SELF-TEST ──────────────────────────────────────────────────────────────────────
   private var selfTestRunning = false
@@ -2945,6 +2946,14 @@ public actor RoomEngine {
   }
 
   /// PURE — errors that mean the capture itself died at start (retryable), as opposed to a refusal.
+  /// PURE (0.1.39) - did a start fail because of the microphone or the device? The capture died at start, or the
+  /// configured device was not attached. Offline, pending uploads and server errors are not.
+  static func isMicOrDeviceFailure(_ error: Error) -> Bool {
+    if isStartDeath(error) { return true }
+    if let e = error as? RoomEngineError, case .inputDeviceNotReady = e { return true }
+    return false
+  }
+
   static func isStartDeath(_ error: Error) -> Bool {
     guard let e = error as? RoomEngineError else { return false }
     switch e {
@@ -3818,10 +3827,11 @@ public actor RoomEngine {
       lastStartedWindowMs: marker.read(),
       disabled: RoomAutoStart.disabledBySlug(configuration.roomSlug) || marker.killSwitchPresent())
     guard case .start(let windowStartMs) = decision else { return }
-    // 0.1.39 (A4 G3, G4). The FIRST attempt of a window is as before. A retry after a failure waits until the
-    // microphone is authorised and the device is listed, and spends one of this hour's 3 attempts: a start that dies
-    // on a denied microphone no longer opens and ends a server session every minute.
-    if autoStartFailures > 0 {
+    // 0.1.39 (A4 G3, G4). The FIRST attempt of a window is as before. A retry after a start that died on the microphone
+    // or the device waits until the microphone is authorised and the device is listed, and spends one of this hour's 3
+    // attempts: a denied microphone no longer opens and ends a server session every minute. A retry after any other
+    // failure (offline, pending uploads) is the 0.1.38 one: every 60 s, uncapped.
+    if autoStartFailedOnInput {
       guard micStateProvider() == "authorized",
         Self.inputReadiness(devices: audioInputs.inputDevices(), uid: configuration.deviceUID) != .notReady
       else {
@@ -3837,10 +3847,10 @@ public actor RoomEngine {
     do {
       try await beginOrResume(commandID: "auto-\(windowStartMs)")
       marker.write(windowStartMs: windowStartMs)
-      autoStartFailures = 0
+      autoStartFailedOnInput = false
       log("auto-start: day started")
     } catch {
-      autoStartFailures += 1
+      autoStartFailedOnInput = Self.isMicOrDeviceFailure(error)
       lastError = bounded(error)
       autoStartRetryAfter = now.addingTimeInterval(60)
       log("auto-start failed (\(bounded(error, limit: 120))); retrying in 60 s")

@@ -14,6 +14,7 @@ import Testing
 ///  (3) interval constant changed                              -> the same test fails on the 300 s sleeps
 ///  (3) loop returns the first miss without re-reading         -> the same test fails on the call count
 ///  (4) governor cap raised / never spent                      -> `theGovernorAllowsThreeAttemptsPerRollingHour`, `aFailingStartIsRetriedThreeTimesAnHourNotEveryMinute` fail
+///  (4) every failure treated as mic/device (the R2 blocker)   -> `aServerOutageAtOpenKeepsTheUncappedMinuteRetry`, `onlyAMicOrDeviceFailureCountsAsOne` fail
 ///  (4) retry skips the readiness gate                         -> `aStartThatDiedOnADeniedMicrophoneRetriesOnlyOnceItIsBack` fails on the create count
 ///  (4) `decide` ignores the retired flag / the window         -> `aRecoveryStartNeedsEveryGate` fails
 ///  (5) watchdog never reports a stall                         -> both engine stall tests fail on the launch count
@@ -435,6 +436,7 @@ import Testing
     _ = await task.result
   }
 
+  /// Scoped to a start that dies on the microphone or the device (the launcher exits at once).
   @Test func aFailingStartIsRetriedThreeTimesAnHourNotEveryMinute() async throws {
     let root = try Self.prepareRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -460,6 +462,54 @@ import Testing
     try await R4Fixture.waitUntil { await remote.createCalls() == 5 }
     task.cancel()
     _ = await task.result
+  }
+
+  /// The refuter's probe (C2-REFUTE 11): the server is unreachable for about five minutes at clinic open with the
+  /// microphone authorised and the device listed. That is not a mic or device failure, so the 0.1.38 retry (every
+  /// minute, uncapped) must hold: the day starts within a minute of the network returning, and the hourly cap is untouched.
+  @Test func aServerOutageAtOpenKeepsTheUncappedMinuteRetry() async throws {
+    let root = try Self.prepareRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let remote = OutageRemote()
+    let launcher = Launcher([.healthy])
+    let room = Room(mic: "authorized", devices: ["device-a"])
+    let engine = try await RoomEngine.load(
+      rootURL: root, enrolmentReader: R4Fixture.enrolled, remoteFactory: { _ in remote },
+      captureLauncher: launcher, pieceRunner: R4FakeEncoder(), updaterFactory: { _, _, _ in nil },
+      log: { _ in }, audioInputs: room, inputReadyWait: .disabled)
+    await engine.setMicStateProvider { "authorized" }
+    let clock = Clock(Self.ist("2026-09-28", "08:00"))  // before the window
+    await engine.enableAutoStart(clock: { clock.now })
+    await engine.setRecoveryClock { clock.now }
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.pollCount() >= 1 }
+    await remote.setDown(true)
+    clock.advance(3_600)  // 09:00, the window opens, the server is down
+    try await R4Fixture.waitUntil { await remote.failedAttempts() >= 1 }
+    // Five more minutes of outage: every minute's retry is made (none is capped away) and none creates a session.
+    for _ in 0..<5 {
+      clock.advance(61)
+      try await Task.sleep(for: .milliseconds(1_800))
+    }
+    #expect(await remote.failedAttempts() >= 5)
+    #expect(await remote.creates() == 0)
+    // The network returns: the very next minute's retry starts the day.
+    await remote.setDown(false)
+    clock.advance(61)
+    try await R4Fixture.waitUntil { await remote.creates() == 1 }
+    try await R4Fixture.waitUntil { Self.status(root)?.state == .recording }
+    // Offline spent nothing from the hour's three attempts.
+    #expect(await engine.startRetryAttemptsLeftForTests(now: clock.now) == StartRetryGovernor.capPerHour)
+    task.cancel()
+    _ = await task.result
+  }
+
+  @Test func onlyAMicOrDeviceFailureCountsAsOne() {
+    #expect(RoomEngine.isMicOrDeviceFailure(RoomEngineError.captureExited(1)))
+    #expect(RoomEngine.isMicOrDeviceFailure(RoomEngineError.inputDeviceNotReady("gone")))
+    #expect(!RoomEngine.isMicOrDeviceFailure(RoomEngineError.pendingUploads(2)))
+    #expect(!RoomEngine.isMicOrDeviceFailure(URLError(.notConnectedToInternet)))
+    #expect(!RoomEngine.isMicOrDeviceFailure(RoomEngineError.noActiveSession))
   }
 
   // MARK: - (5) capture-progress watchdog
@@ -658,5 +708,56 @@ actor ResidentFreeRetiredRemote: RoomEngineRemote {
   }
   func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws -> ImmutablePieceUploadResult {
     throw CancellationError()
+  }
+}
+
+/// An idle server that can be taken down: while down, reading or creating a session fails like a lost network.
+actor OutageRemote: RoomEngineRemote {
+  private var down = false
+  private var polls = 0
+  private var failed = 0
+  private var created = 0
+
+  func setDown(_ value: Bool) { down = value }
+  func pollCount() -> Int { polls }
+  func failedAttempts() -> Int { failed }
+  func creates() -> Int { created }
+
+  func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
+    if down {
+      failed += 1
+      throw URLError(.notConnectedToInternet)
+    }
+    return try JSONDecoder().decode(ActiveSessionResponse.self, from: Data(R4Fixture.idleActiveJSON.utf8))
+  }
+  func createSession(label: String?, micLabel: String?) async throws -> CreateSessionResponse {
+    if down {
+      failed += 1
+      throw URLError(.notConnectedToInternet)
+    }
+    created += 1
+    return try JSONDecoder().decode(
+      CreateSessionResponse.self,
+      from: Data(
+        #"{"session":{"id":"bs_new","room_id":"room_1","label":null,"mic_label":"device-a","status":"recording"}}"#.utf8))
+  }
+  func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws -> BenchOKResponse {
+    try JSONDecoder().decode(BenchOKResponse.self, from: Data(#"{"ok":true}"#.utf8))
+  }
+  func pollCommands(
+    tabID: String, previousPollAt: String?, recordingSessionID: String?, paused: Bool,
+    primaryLevels: BenchLevelPair?, install: InstallPollFields?
+  ) async throws -> CommandPollResponse {
+    polls += 1
+    return try JSONDecoder().decode(
+      CommandPollResponse.self,
+      from: Data(#"{"ok":true,"room_id":"room_1","superseded":false,"commands":[]}"#.utf8))
+  }
+  func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws
+    -> CommandAcknowledgement
+  { throw CancellationError() }
+  func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse { throw CancellationError() }
+  func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws -> ImmutablePieceUploadResult {
+    .alreadyVerified
   }
 }
