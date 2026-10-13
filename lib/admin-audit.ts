@@ -28,6 +28,33 @@ export type AdminAuditInput = {
   strict?: boolean;
 };
 
+/**
+ * ADMIN-5 (L4): the strict insert of the ONE row a scribe_admin write leaves. Returns the new row's id (audit_log.id is the UUID primary key, migration 0001) and
+ * THROWS on failure so the caller fails closed. The result fields are merged into the same row afterwards by finishAdminAudit.
+ */
+export async function insertAdminAuditStrict(input: Omit<AdminAuditInput, "strict">): Promise<string> {
+  const rows = (await sql`
+    INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+    VALUES (${input.actor.type}, ${input.actor.id}, ${input.action}, ${input.targetType}, ${input.targetId},
+            ${JSON.stringify(input.meta)}::jsonb)
+    RETURNING id
+  `) as Array<{ id: string }>;
+  const id = rows[0]?.id;
+  if (!id) throw new Error("audit_log insert returned no id");
+  return String(id);
+}
+
+/** Best-effort: merge the result fields into the row `insertAdminAuditStrict` wrote. True when the update ran. Never put a token or a command in `patch`. */
+export async function finishAdminAudit(id: string, patch: Record<string, unknown>): Promise<boolean> {
+  try {
+    await sql`UPDATE audit_log SET metadata_json = metadata_json || ${JSON.stringify(patch)}::jsonb WHERE id = ${id}::uuid`;
+    return true;
+  } catch (e) {
+    console.warn("[admin-audit] audit_log update failed", JSON.stringify({ id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    return false;
+  }
+}
+
 export async function writeAdminAudit(input: AdminAuditInput): Promise<boolean> {
   try {
     await sql`

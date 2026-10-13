@@ -23,9 +23,11 @@ export async function recordRoomToggle(r: {
   actor: string;
   reason?: string | null;
   now_ms?: number;
+  /** ADMIN-5: skip ONLY the audit_log insert (scribe_admin writes its own single row); the alert still runs. */
+  skipAudit?: boolean;
 }): Promise<void> {
   const action = r.after === "disabled" ? "room.disable" : "room.enable";
-  try {
+  if (!r.skipAudit) try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
       VALUES (${r.actor.startsWith("system:") || r.actor.startsWith("mcp:") ? "system" : "admin"}::actor_type, ${r.actor}, ${action}, 'room', ${r.room_id},
@@ -49,7 +51,7 @@ export async function recordRoomToggle(r: {
 }
 
 /** Enable or disable one room. Enabling also clears the PIN lockout (as the route always did). */
-export async function setRoomEnabled(roomId: string, enabled: boolean, opts: { actor: string; reason?: string | null }): Promise<RoomToggleResult> {
+export async function setRoomEnabled(roomId: string, enabled: boolean, opts: { actor: string; reason?: string | null; skipAudit?: boolean }): Promise<RoomToggleResult> {
   const rows = (await sql`SELECT slug, disabled_at FROM room WHERE id = ${roomId} LIMIT 1`) as Array<{ slug: string; disabled_at: unknown }>;
   const room = rows[0];
   if (!room) return { ok: false, code: "NOT_FOUND" };
@@ -60,6 +62,6 @@ export async function setRoomEnabled(roomId: string, enabled: boolean, opts: { a
     await sql`UPDATE room SET disabled_at = NOW() WHERE id = ${roomId}`;
   }
   const after = enabled ? "enabled" : "disabled";
-  await recordRoomToggle({ room_id: roomId, room_slug: room.slug, before, after, actor: opts.actor, reason: opts.reason });
+  await recordRoomToggle({ room_id: roomId, room_slug: room.slug, before, after, actor: opts.actor, reason: opts.reason, skipAudit: opts.skipAudit });
   return { ok: true, room_id: roomId, room_slug: room.slug, before, after };
 }
