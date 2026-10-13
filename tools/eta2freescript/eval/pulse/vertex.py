@@ -26,7 +26,7 @@ MAX_REQUEST_CHARS = 40_000
 # Shapes of what ingest.format_transcript writes, matched on folded text.
 _TRANSCRIPT_SHAPES = (
     ("a transcript turn line (T<n> [S<label>] (mm:ss))",
-     re.compile(r"t\d+\s*\[\s*s[^\]]{1,32}\]\s*\(\s*\d{1,3}\s*:\s*\d{2}\s*\)")),
+     re.compile(r"t\d+\s*\[\s*s.{0,160}?\]\s*\(\s*\d{1,7}\s*:\s*\d{2}\s*\)")),
     ("a NATIVE[<lang>]: ... | ENGLISH: pair", re.compile(r"native\s*\[[^\]]{1,16}\]\s*:[^|]{0,4000}\|\s*english\s*:")),
     ("an english/native segments key",
      re.compile(r"(english|native)\s*[-_.]\s*segments|[\"']\s*(english|native)\s+segments\s*[\"']")),

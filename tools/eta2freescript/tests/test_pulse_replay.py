@@ -546,3 +546,40 @@ def test_ruling_allow_list_more(ruling):
 @pytest.mark.parametrize("ruling", ["r", "7", "#", "+", "\u093e", "\u0915"])
 def test_ruling_allow_list_unlocks(ruling):
     VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+
+
+def test_every_writer_label_is_refused():
+    """Property: any line format_transcript can emit is refused, whatever the label, role, quarantine, native or time."""
+    import random
+    import uuid
+    rng = random.Random(20261014)
+    fixed = ["", "?", "A", "speaker_0", str(uuid.UUID(int=0x1234567890abcdef1234567890abcdef)), "x]y", "Sx]y", "]", "[S]"]
+    roles = [("unknown", "none"), ("doctor", "role_track"), ("patient", "role_track")]
+    times = [0, 59, 3599, 10 ** 6]
+
+    def rand_label():
+        n = rng.randint(0, 128)
+        out = []
+        while len(out) < n:
+            c = chr(rng.randint(0, 0x10FFFF))
+            if c != "\n":
+                out.append(c)
+        return "".join(out)
+
+    labels = fixed + [rand_label() for _ in range(5000)]
+    survivors = []
+    for i, label in enumerate(labels):
+        role, src = roles[i % 3]
+        t = times[(i // 3) % 4]
+        quarantined, native = bool(i % 2), bool((i // 2) % 2)
+        c = Consult(uid="u", turns=[Turn(idx=0, t0_ms=t * 1000, t1_ms=t * 1000 + 1000, speaker=label, text="x",
+                                         native_text="a" if native else None, native_lang="hi" if native else None,
+                                         role=role, role_source=src)],
+                    clip_t0_ms=0, clip_t1_ms=t * 1000 + 1000, language_code="en", english_source="s", diarised=True, room="r")
+        line = format_transcript(c, {0} if quarantined else frozenset())
+        try:
+            guard_request(line)
+        except TranscriptGuardError:
+            continue
+        survivors.append(label)
+    assert not survivors, f"{len(survivors)} labels survived: " + ", ".join(repr(s) for s in survivors[:10])
