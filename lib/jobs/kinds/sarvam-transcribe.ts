@@ -229,7 +229,7 @@ async function prepareConsult(ctx: StepContext, a: Extract<SarvamTranscribeArgs,
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
   return nextStep(STEPS.init, {
-    clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", cut_version: pre.row.cut_version, clip_t0_ms: pre.row.t0_ms,
+    clip_key: pre.key, content_type: pre.content_type, scope: "consult_clip", ref: a.consult_uid, source_kind: "consult", use: a.caller_class === "mcp" ? "mcp" : "production", cut_version: pre.row.cut_version, clip_t0_ms: pre.row.t0_ms,
     ...(typeof pre.row.minutes === "number" && Number.isFinite(pre.row.minutes) ? { mirror_minutes: pre.row.minutes } : {}),
   });
 }

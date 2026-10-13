@@ -30,6 +30,12 @@ vi.mock("@/lib/r2", async (orig) => ({
   headObject: vi.fn(async () => ({ content_type: headType })),
 }));
 
+let consultPreflight: ((...a: unknown[]) => Promise<unknown>) | null = null;
+vi.mock("@/lib/consult-clip", async (orig) => {
+  const real = (await orig()) as { preflightClip: (...a: unknown[]) => Promise<unknown> };
+  return { ...real, preflightClip: (...a: unknown[]) => (consultPreflight ? consultPreflight(...a) : real.preflightClip(...a)) };
+});
+
 const gw = { init: vi.fn(), upload: vi.fn(), startJob: vi.fn(), status: vi.fn(), result: vi.fn(), translate: vi.fn() };
 vi.mock("@/lib/sarvam-gw", async (orig) => ({
   ...((await orig()) as object),
@@ -139,6 +145,16 @@ describe("sarvam_transcribe: prepare", () => {
   });
   it("a consult uid that the index does not hold fails consult_not_indexed (the real index is covered by consult-index-pg.test.ts)", async () => {
     expect(await run({ source: "consult", consult_uid: "cu_9", mode: "transcribe", english: true })).toEqual({ kind: "fail", error: "consult_not_indexed" });
+  });
+  it("R6-1: a consult job carries use into progress: mcp for an MCP caller, production otherwise (so the ledger line and audit row say so)", async () => {
+    consultPreflight = async () => ({ ok: true, key: "consult/cu_9.ogg", content_type: "audio/ogg", row: { cut_version: 1, t0_ms: 0, minutes: 3 } });
+    try {
+      const base = { source: "consult", consult_uid: "cu_9", mode: "transcribe", english: true };
+      expect(await run({ ...base, caller_class: "mcp" })).toMatchObject({ kind: "next", step: "init", progress: { scope: "consult_clip", ref: "cu_9", use: "mcp" } });
+      expect(await run(base)).toMatchObject({ kind: "next", step: "init", progress: { scope: "consult_clip", use: "production" } });
+    } finally {
+      consultPreflight = null;
+    }
   });
   it("today's minutes at the cap -> sarvam_daily_cap", async () => {
     answer = (text) => (/FROM audit_log/.test(text) ? [{ minutes: 240 }] : []);
