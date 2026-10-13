@@ -123,3 +123,17 @@ def test_list_consults_only_dirs_with_transcripts(tmp_path):
     (tmp_path / "_eta2freescript").mkdir()
     assert list_consults(tmp_path) == ["a"]
     assert list_consults(CONSULTS) == ["synth-boundary-knee", "synth-cough-native", "synth-fever-dose"]
+
+
+def test_label_never_contains_a_line_break_or_control():
+    import unicodedata
+    from tools.eta2freescript.ingest import _label
+    bad = ("Cc", "Zl", "Zp")
+    for v in ("0\n1", "\r\nSPEAKER_00", "a b", "a b", "a\x0bb\x0cc\x85d\x00e"):
+        out = _label(v)
+        assert not any(unicodedata.category(c) in bad for c in out), repr(v)
+    assert _label("0\n1") == "0 1"
+    assert _label("a b") == "a b"
+    assert _label("SPEAKER_00") == "SPEAKER_00"
+    assert _label(3) == "3"
+    assert _label(True) is None

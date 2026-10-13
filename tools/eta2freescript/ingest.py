@@ -133,7 +133,8 @@ def _label(v) -> str | None:
     if isinstance(v, (int, float)):
         return str(int(v))
     if isinstance(v, str):
-        return v
+        import unicodedata
+        return "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in v)
     return None
 
 

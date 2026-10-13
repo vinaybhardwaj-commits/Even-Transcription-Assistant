@@ -670,3 +670,49 @@ def test_same_line_false_positives_stay_refused(text):
     """Accepted false positives (B4a.5 verdict Note 1): same-line prose that has the turn-line shape."""
     with pytest.raises(TranscriptGuardError):
         guard_request(text)
+
+
+def test_raw_vendor_labels_are_refused_end_to_end(tmp_path):
+    """B4a.6b: raw speaker_id (with line breaks) -> load_consult -> format_transcript -> guard_request, always refused."""
+    import random
+    from tools.eta2freescript.ingest import format_transcript, load_consult
+    rng = random.Random(20261015)
+    fixed = ["0\n1", "\n", "SPEAKER_00\n", "\n0"]
+    breaks = ["\n", "\r", "\u2028", "\u0085", "\u2029", "\x0b", "\x0c", "\x00"]
+
+    def rand_label():
+        n = rng.randint(0, 128)
+        out = []
+        while len(out) < n:
+            out.append(rng.choice(breaks) if rng.random() < 0.05 else chr(rng.randint(0, 0x10FFFF)))
+        return "".join(out)
+
+    labels = fixed + [rand_label() for _ in range(2000)]
+    assert len(labels) >= 2000 and all(len(x) <= 128 for x in labels)
+    d = tmp_path / "u1"
+    d.mkdir()
+    survivors = []
+    for i, label in enumerate(labels):
+        t = [0, 59, 3599][i % 3]
+        native, role_on, quarantined = bool(i % 2), bool((i // 2) % 2), bool((i // 4) % 2)
+        seg = {"t0_ms": t * 1000, "t1_ms": t * 1000 + 1000, "speaker_id": label, "text": "x"}
+        raw = {"consult_uid": "u1", "language_code": "hi" if native else "en", "english_segments": [seg],
+               "clip": {"t0_ms": 0, "t1_ms": t * 1000 + 1000}}
+        if native:
+            raw["native_segments"] = [{"t0_ms": seg["t0_ms"], "t1_ms": seg["t1_ms"], "speaker_id": label, "text": "a", "lang": "hi"}]
+        (d / "transcript.json").write_text(json.dumps(raw))
+        role = d / "role.json"
+        if role_on:
+            role.write_text(json.dumps({"status": "ok", "layer": "role", "engine": "llm-roles", "config_hash": "c", "extras": {},
+                                        "segments": [{"t0_ms": seg["t0_ms"], "t1_ms": seg["t1_ms"], "speaker": label,
+                                                      "role": "doctor" if i % 3 else "patient"}]}))
+        elif role.exists():
+            role.unlink()
+        c = load_consult(tmp_path, "u1")
+        text = format_transcript(c, {0} if quarantined else frozenset())
+        try:
+            guard_request(text)
+        except TranscriptGuardError:
+            continue
+        survivors.append(label)
+    assert not survivors, f"{len(survivors)} survived: " + ", ".join(repr(s) for s in survivors[:10])
