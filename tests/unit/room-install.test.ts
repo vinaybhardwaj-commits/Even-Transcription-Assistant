@@ -6,8 +6,8 @@
  *   · the one-liner matches PRD §4.2 EXACTLY (acceptance item 4 turns on the byte)
  *   · the §4.4 script body is reproduced verbatim, and a room name cannot escape its quotes
  *   · a manifest is never believed — a wrong sha256 or size is SHA_MISMATCH before any row exists
- *   · the enrol exchange retires BEFORE it enrols, which is what keeps the partial unique index
- *     from rejecting a legitimate re-enrol
+ *   · the enrol exchange retires nothing (opd4-guard S1); the first-poll handover retires BEFORE it enrols,
+ *     which is what keeps the partial unique index from rejecting a legitimate re-enrol (tests/unit/opd4-guard.test.ts)
  *   · a replayed token is TOKEN_INVALID (acceptance item 6)
  *   · the tape streak resets on a false and only reaches two on two trues in a row
  *   · a poll WITHOUT install_id issues no install SQL at all (acceptance item 9's mechanism)
@@ -224,7 +224,7 @@ describe("release registration (§4.2)", () => {
 // ---------------------------------------------------------------------------
 
 describe("the enrol exchange (§4.2, §4.5, D10)", () => {
-  it("retires BEFORE it enrols, in one transaction", async () => {
+  it("claims the token and exchanges the install in one transaction, and retires NOTHING (opd4-guard S1: the handover retires, on the new install's first poll)", async () => {
     txResponses = [[[], [{ install_id: "install_new", room_id: "room_1", slug: "opd-5-ab12", name: "OPD 5", session_expires_at: new Date(Date.now() + 365 * 86_400_000).toISOString() }]]];
     responses = [[], []];
     process.env.JWT_SECRET_DOCTOR = "test-secret-for-room-jwt";
@@ -233,11 +233,10 @@ describe("the enrol exchange (§4.2, §4.5, D10)", () => {
 
     expect(txCalls).toHaveLength(1);
     const [first, second] = txCalls[0]!;
-    // Statement 1 claims the token and retires the room's other live installs.
     expect(first!.text).toMatch(/UPDATE room_bootstrap_token SET used_at = now\(\)/);
-    expect(first!.text).toMatch(/SET retired_at = now\(\)/);
-    // Statement 2 enrols. Ordered after, so the partial unique index never sees two live rows.
-    expect(second!.text).toMatch(/SET enrolled_at = now\(\)/);
+    expect(txCalls[0]!.some((c) => /SET retired_at/.test(c.text))).toBe(false);
+    // Statement 2 enrols only when no other enrolled install holds the room (else it stays pending); ordered after the claim.
+    expect(second!.text).toMatch(/enrolled_at = CASE WHEN EXISTS/);
     expect(second!.text).toMatch(/ri\.enrolled_at IS NULL/);
   });
 

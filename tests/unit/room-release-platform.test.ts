@@ -74,6 +74,7 @@ describe("latestRelease filters by platform in SQL", () => {
     responses = [
       [{ token: "ab".repeat(16), room_name: "OPD 5" }],
       [releaseRow()],
+      [], // opd4-guard S6: the fleet's app versions (none enrolled), read after the stable macos release
       [releaseRow({ id: "rel_linux", version: "0.2.0", platform: "linux", blob_url: "https://x.public.blob.vercel-storage.com/rr-linux-0.2.0.tar.gz" })],
     ];
     const script = (await M.bootstrapScriptFor("ab".repeat(16)))!;
@@ -85,7 +86,7 @@ describe("latestRelease filters by platform in SQL", () => {
 
   it("a failed Linux read never breaks a Mac paste: the Mac body is served and the Linux branch says none is available", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    responses = [[{ token: "ab".repeat(16), room_name: "OPD 5" }], [releaseRow()], new Error("column \"platform\" does not exist")];
+    responses = [[{ token: "ab".repeat(16), room_name: "OPD 5" }], [releaseRow()], [], new Error("column \"platform\" does not exist")];
     const script = (await M.bootstrapScriptFor("ab".repeat(16)))!;
     expect(script).toContain('BLOB_URL="https://x.public.blob.vercel-storage.com/rr-0.1.21.zip"');
     expect(script).toContain("No Linux release of EvenScribe Room Recorder is available right now.");

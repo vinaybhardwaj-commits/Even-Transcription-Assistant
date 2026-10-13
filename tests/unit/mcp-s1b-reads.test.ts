@@ -278,6 +278,19 @@ describe("scribe_kiosks", () => {
     expect(statements.filter((s) => /room_install|kiosk_health/.test(s.text))).toEqual([]);
   });
 
+  it("S5 (opd4-guard): a roster room with no live install is listed as state no_install (red), never omitted; one live install leaves the other seven flagged", async () => {
+    const out = await run("scribe_kiosks", { view: "devices" });
+    const rows = out.kiosks as Row[];
+    expect(rows).toHaveLength(8);
+    expect(rows[0]).toMatchObject({ room_id: ROOM.id, machine: "EvenMac-1" });
+    expect(rows[0]).not.toHaveProperty("state");
+    const missing = rows.filter((r) => r.state === "no_install");
+    expect(missing).toHaveLength(7);
+    expect(missing.map((r) => r.room_id)).toContain("room_ux92qpws");
+    expect(missing[0]).toMatchObject({ severity: "red", machine: null, input_device_name: null });
+    noWrites();
+  });
+
   it("devices: as stored", async () => {
     const out = await run("scribe_kiosks", { view: "devices" });
     expect((out.kiosks as Row[])[0]).toMatchObject({ room_id: ROOM.id, machine: "EvenMac-1", input_device_name: "USB Mic", input_devices: [{ name: "USB Mic" }], mic_state: "authorized", state_flags: { flags: ["x"] } });

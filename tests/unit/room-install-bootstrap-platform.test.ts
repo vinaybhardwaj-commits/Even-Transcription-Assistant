@@ -39,12 +39,15 @@ const MAC = {
   roomName: "OPD 5",
 };
 
-/** The Mac script exactly as it was served before the Linux port. Do not edit to make a test pass. */
+/**
+ * The Mac script as served. It was byte-identical to the pre-Linux-port script until gating/opd4-guard S6 (13 Oct 2026) changed it ON PURPOSE: DEST is /Applications, a
+ * downgrade guard runs before anything is touched, and the stale ~/Applications copy is removed. Everything else is unchanged. Do not edit to make a test pass.
+ */
 const MAC_GOLDEN = `#!/bin/bash
 set -euo pipefail
 
 APP="EvenScribe Room Recorder.app"
-DEST="$HOME/Applications"
+DEST="/Applications"
 PLIST="$HOME/Library/LaunchAgents/com.evenscribe.room-recorder.plist"
 TOKEN="0123456789abcdef0123456789abcdef"
 ORIGIN="https://www.evenscribe.app"
@@ -62,10 +65,26 @@ if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
   exit 1
 fi
 
+# Never go back a version. The release this script carries is the one the fleet runs (lib/room-install.ts bootstrapRelease), but a Mac that is already
+# ahead (a newer build installed by the fleet helper) keeps what it has: the script stops before it touches anything.
+NEW_VERSION="0.1.21"
+for OLD_APP in "$DEST/$APP" "$HOME/Applications/$APP"; do
+  if [ -f "$OLD_APP/Contents/Info.plist" ]; then
+    HAVE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$OLD_APP/Contents/Info.plist" 2>/dev/null || true)"
+    if [ -n "$HAVE" ] && [ "$HAVE" != "$NEW_VERSION" ]; then
+      NEWEST="$(printf '%s\\n%s\\n' "$HAVE" "$NEW_VERSION" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+      if [ "$NEWEST" = "$HAVE" ]; then
+        echo "This Mac already has EvenScribe Room Recorder $HAVE, which is newer than $NEW_VERSION. Install stopped. Nothing was changed."
+        exit 1
+      fi
+    fi
+  fi
+done
+
 echo "Stopping any earlier copy..."
 launchctl bootout "gui/$(id -u)/com.evenscribe.room-recorder" 2>/dev/null || true
 
-echo "Installing into ~/Applications..."
+echo "Installing into /Applications..."
 mkdir -p "$DEST"
 ditto -x -k "$TMP/app.zip" "$TMP/expanded"
 rm -rf "$DEST/$APP"
@@ -73,6 +92,8 @@ ditto "$TMP/expanded/$APP" "$DEST/$APP"
 
 echo "Enrolling this Mac..."
 "$DEST/$APP/Contents/MacOS/room-recorder" enrol --token "$TOKEN" --origin "$ORIGIN"
+
+rm -rf "$HOME/Applications/$APP"
 
 echo "Installing the LaunchAgent..."
 "$DEST/$APP/Contents/MacOS/room-recorder" install-launch-agent

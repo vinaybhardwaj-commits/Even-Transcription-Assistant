@@ -28,15 +28,19 @@ import * as React from "react";
 import {
   CHECKLIST_POLL_MS,
   FLEET_POLL_MS,
+  LIVE_INSTALL_MS,
   deriveRow,
   deriveSteps,
   fmtSeen,
   releaseForRow,
+  retireGate,
+  retireTypedMatches,
   type DiskLevel,
   type FleetPayload,
   type FleetRow,
   type InstallView,
   type ReleaseView,
+  type RetireGate,
   type RowView,
   type Step,
   type UnassignedInstall,
@@ -153,24 +157,40 @@ export function BenchInstallFleet() {
     [load],
   );
 
+  // S2 (gating/opd4-guard). Retire asks first: the dialog names the room and shows "last seen N min ago". A live install (polled within 10 min) can only be
+  // forced, by typing the room's name; the route checks the name again. Nothing is retired until Confirm.
+  const [retireAsk, setRetireAsk] = React.useState<{ install: InstallView; room_name: string } | null>(null);
+  const [retireTyped, setRetireTyped] = React.useState("");
   const onRetire = React.useCallback(
-    async (install: InstallView) => {
-      setBusy(install.install_id);
-      try {
-        const res = await fetch(`/api/admin/installs/${encodeURIComponent(install.install_id)}/retire`, {
-          method: "POST",
-        });
-        const j = await res.json();
-        if (!res.ok) throw new Error(j?.error?.message ?? "retire failed");
-        void load();
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setBusy(null);
-      }
+    (install: InstallView) => {
+      const room = (fleet?.rows ?? []).find((r) => r.install?.install_id === install.install_id);
+      setRetireTyped("");
+      setRetireAsk({ install, room_name: room?.room_name ?? install.room_id });
     },
-    [load],
+    [fleet],
   );
+  const onRetireConfirm = React.useCallback(async () => {
+    if (!retireAsk) return;
+    const { install, room_name } = retireAsk;
+    const gate = retireGate(install.last_seen_at, Date.now());
+    setBusy(install.install_id);
+    try {
+      const res = await fetch(`/api/admin/installs/${encodeURIComponent(install.install_id)}/retire`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(gate.live ? { force: true, confirm_room: room_name } : {}),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error?.message ?? "retire failed");
+      setRetireAsk(null);
+      void load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setRetireAsk(null);
+    } finally {
+      setBusy(null);
+    }
+  }, [retireAsk, load]);
 
   // B2-D5. "Move to stable" writes `assigned_channel` and nothing else. The row keeps saying
   // `channel test` until the Mac itself reports `stable` — no optimistic state, the rule this
@@ -290,6 +310,17 @@ export function BenchInstallFleet() {
         <ReleaseHeader release={release} busy={busy} onWithdraw={onWithdraw} />
       </div>
 
+      {retireAsk && (
+        <RetireDialog
+          roomName={retireAsk.room_name}
+          gate={retireGate(retireAsk.install.last_seen_at, nowMs)}
+          typed={retireTyped}
+          onTyped={setRetireTyped}
+          busy={busy === retireAsk.install.install_id}
+          onCancel={() => setRetireAsk(null)}
+          onConfirm={() => void onRetireConfirm()}
+        />
+      )}
       {error && (
         <p className="mb-3 text-caption text-danger-700" role="alert">
           {error}
@@ -804,7 +835,7 @@ function FleetRowView({
               onClick={() => onRetire(i)}
               disabled={busy === i.install_id}
               className={`${ROW_BTN} text-even-ink-600`}
-              title="Marks this install retired and frees the room. It removes no software from the Mac."
+              title="Asks first, then marks this install retired and frees the room. A live install needs the room name typed. It removes no software from the Mac."
             >
               {busy === i.install_id ? "Retiring…" : "Retire"}
             </button>
@@ -949,6 +980,59 @@ function InstallHead({ roomName, onBack }: { roomName: string; onBack: () => voi
  * line into a Terminal on a clinic Mac should be able to see what they are pasting, and a copy
  * that silently failed is otherwise indistinguishable from one that worked.
  */
+function RetireDialog({
+  roomName,
+  gate,
+  typed,
+  onTyped,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  roomName: string;
+  gate: RetireGate;
+  typed: string;
+  onTyped: (v: string) => void;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const ok = !gate.live || retireTypedMatches(typed, roomName);
+  return (
+    <div className="mb-4 rounded-lg border border-danger-300 bg-danger-50 p-4" role="alertdialog" aria-label={`Retire the install in ${roomName}`}>
+      <p className="text-body font-medium text-even-navy-800">
+        Retire the install in {roomName}? It was {gate.label}.
+      </p>
+      <p className="mt-1 text-caption text-even-ink-600">
+        The room will have no recorder until a Mac is enrolled again. This removes no software from the Mac.
+      </p>
+      {gate.live && (
+        <>
+          <p className="mt-2 text-caption text-danger-700" role="alert">
+            This install is live: it polled within the last {LIVE_INSTALL_MS / 60_000} minutes and is probably recording now. Type the room name to retire it anyway.
+          </p>
+          <input
+            type="text"
+            value={typed}
+            onChange={(e) => onTyped(e.target.value)}
+            placeholder={roomName}
+            aria-label="Type the room name to confirm"
+            className="mt-2 w-full max-w-xs rounded border border-even-ink-200 px-2 py-1 text-body"
+          />
+        </>
+      )}
+      <span className="mt-3 flex gap-2">
+        <button type="button" className={ROW_BTN} onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+        <button type="button" className={`${ROW_BTN} text-danger-700`} onClick={onConfirm} disabled={!ok || busy}>
+          {busy ? "Retiring…" : gate.live ? "Retire live install" : "Retire"}
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function CommandBox({ minted, nowMs }: { minted: Minted; nowMs: number }) {
   const [recopied, setRecopied] = React.useState(false);
   const msLeft = new Date(minted.expires_at).getTime() - nowMs;

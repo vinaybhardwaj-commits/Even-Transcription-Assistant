@@ -14,6 +14,7 @@ import { windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
 import { windowDetailRow, windowRunSummaries, windowsStartingIn } from "@/lib/room-access/tool-reads";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
+import { ROOMS } from "@/lib/rooms-live/rooms";
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
 import { argBool, argInt, argStr, type McpTool, type ToolArgs } from "../registry";
@@ -480,7 +481,11 @@ async function installs(roomId: string | null): Promise<Install[]> {
      ORDER BY r.name
      LIMIT ${KIOSK_ROOMS_MAX}
   `) as Row[];
-  return rows.map((r) => ({ room_id: String(r.room_id), room_name: String(r.room_name), hostname: (r.hostname as string | null) ?? null, row: r }));
+  const live: Install[] = rows.map((r) => ({ room_id: String(r.room_id), room_name: String(r.room_name), hostname: (r.hostname as string | null) ?? null, row: r }));
+  // gating/opd4-guard S5. A roster room with no live install is listed as state "no_install" (red), never omitted: OPD 4 vanished from this tool for a day.
+  const seen = new Set(live.map((i) => i.room_id));
+  const missing = ROOMS.filter((r) => !seen.has(r.room_id) && (roomId === null || roomId === r.room_id));
+  return [...live, ...missing.map((r): Install => ({ room_id: r.room_id, room_name: r.label, hostname: null, row: { no_install: true } }))];
 }
 
 /** SQL key list for a set of installs, and the key → room map used to put event rows back on their room */
@@ -497,7 +502,12 @@ function keyMap(list: Install[]): { keys: string[]; roomOf: Map<string, string> 
   return { keys: [...keys], roomOf };
 }
 
-const base = (i: Install): Row => ({ room_id: i.room_id, room_name: i.room_name, machine: i.hostname });
+const base = (i: Install): Row => ({
+  room_id: i.room_id,
+  room_name: i.room_name,
+  machine: i.hostname,
+  ...(i.row.no_install === true ? { state: "no_install", severity: "red", note: "roster room with no live install: nothing is recording it" } : {}),
+});
 
 async function kioskVersions(list: Install[]): Promise<Row> {
   const { keys, roomOf } = keyMap(list);

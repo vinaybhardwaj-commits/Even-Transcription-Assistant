@@ -50,6 +50,7 @@
  *
  * Browser code imports the types and wording from lib/fleet-attention-format.ts (no database); only the route imports this file.
  */
+import { ROOMS, ROOM_IDS } from "@/lib/rooms-live/rooms";
 import { sql } from "@/lib/db";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { reachability, type Reachability } from "@/lib/reachability";
@@ -1188,12 +1189,50 @@ export async function loadAttentionInputs(nowMs: number = Date.now()): Promise<{
   return { inputs: { now_ms: nowMs, rooms, kiosk_health: kioskHealth }, degraded };
 }
 
+/**
+ * gating/opd4-guard S5. A roster room with NO live install used to vanish from this panel (every rule above iterates the live installs), which is how OPD 4 went dark
+ * for a day with "Nothing needs attention". PURE: one red `no_install` item per roster room not in `liveRoomIds`. `since` is the room's last retirement when there is one
+ * (`lastRetiredAt`), else now. Not clinic-hours gated: a roster room is expected to have a recorder at every hour.
+ */
+export function noInstallItems(
+  roster: ReadonlyArray<{ room_id: string; label: string }>,
+  liveRoomIds: ReadonlySet<string>,
+  lastRetiredAt: ReadonlyMap<string, string>,
+  nowMs: number,
+): AttentionItem[] {
+  return roster
+    .filter((r) => !liveRoomIds.has(r.room_id))
+    .map((r) => ({
+      room_id: r.room_id,
+      room_name: r.label,
+      machine: null,
+      kind: "no_install" as const,
+      since: lastRetiredAt.get(r.room_id) ?? new Date(nowMs).toISOString(),
+      detail: `${r.label} has no live recorder install, so nothing is recording it.`,
+      action: `Enrol a Mac in ${r.label} from the Install and fleet card, or check why its install was retired.`,
+      severity: "red" as const,
+    }));
+}
+
 /** The route's whole job: load, compute, wrap. */
 export async function getFleetAttention(nowMs: number = Date.now()): Promise<FleetAttentionResponse> {
   const { inputs, degraded } = await loadAttentionInputs(nowMs);
+  const items = computeAttention(inputs);
+  // S5. Its own read; a failure is named, never "nothing needs attention".
+  const retired = await safe("room_install_retired", degraded, async () => (await sql`
+    SELECT room_id, max(retired_at) AS retired_at FROM room_install WHERE room_id = ANY(${ROOM_IDS}::text[]) AND retired_at IS NOT NULL GROUP BY room_id
+  `) as Array<{ room_id: string; retired_at: unknown }>, null);
+  if (retired !== null) {
+    const lastRetired = new Map<string, string>();
+    for (const r of retired) {
+      const at = toIso(r.retired_at);
+      if (at) lastRetired.set(r.room_id, at);
+    }
+    items.push(...noInstallItems(ROOMS.map((r) => ({ room_id: r.room_id, label: r.label })), new Set(inputs.rooms.map((r) => r.room_id)), lastRetired, nowMs));
+  }
   return {
     generated_at: new Date(nowMs).toISOString(),
-    items: computeAttention(inputs),
+    items,
     rooms_checked: inputs.rooms.length,
     ...(inputs.rooms.some((r) => r.reach)
       ? { reachability: inputs.rooms.filter((r) => r.reach).map((r) => ({ room_id: r.room_id, room_name: r.room_name, state: r.reach!.state, source: r.reach!.source, age_s: r.reach!.age_s })) }
