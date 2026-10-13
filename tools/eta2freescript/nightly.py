@@ -8,6 +8,9 @@
 on this box (Bedrock Claude via phi_guard) and POSTs each artifact to <app>/api/freescript/ingest. It then drains
 queued ``scribe_freescript`` jobs the same way. ``plan`` lists uids and dates only.
 
+Bundle mode (FREESCRIPT_BUNDLE_CMD set): no folders. Each sealed or pending uid is read from a palimpsest consult bundle
+that FREESCRIPT_BUNDLE_CMD writes into a temporary directory; /api/reb/roles is not called. See NIGHTLY.md.
+
 No transcript text is printed. Exit 0 disabled / nothing to do / ok, 2 partial, 1 failed.
 See NIGHTLY.md.
 """
@@ -16,7 +19,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +45,36 @@ DEFAULTS = {
 
 class NightlyError(RuntimeError):
     pass
+
+
+BUNDLE_TIMEOUT_S = 120
+_STDERR_CAP = 500
+_SAFE_UID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def parse_bundle_config(env: dict) -> tuple[list[str], str] | None:
+    """FREESCRIPT_BUNDLE_CMD (JSON argv template with {uid} and {out}) + FREESCRIPT_BUNDLE_CWD. None when bundle mode is off.
+
+    A bad template or a missing cwd is a config error: never a quiet fall back to folders.
+    """
+    raw = env.get("FREESCRIPT_BUNDLE_CMD")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        cmd = json.loads(raw)
+    except json.JSONDecodeError:
+        raise NightlyError("FREESCRIPT_BUNDLE_CMD is not valid JSON") from None
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
+        raise NightlyError("FREESCRIPT_BUNDLE_CMD must be a JSON array of strings")
+    for ph in ("{uid}", "{out}"):
+        if not any(ph in a for a in cmd):
+            raise NightlyError(f"FREESCRIPT_BUNDLE_CMD has no {ph} placeholder")
+    cwd = (env.get("FREESCRIPT_BUNDLE_CWD") or "").strip()
+    if not cwd:
+        raise NightlyError("FREESCRIPT_BUNDLE_CMD is set but FREESCRIPT_BUNDLE_CWD is not")
+    if not Path(cwd).is_dir():
+        raise NightlyError("FREESCRIPT_BUNDLE_CWD is not a directory")
+    return cmd, cwd
 
 
 def flag_enabled(env: dict, config_enabled: bool = True) -> bool:
@@ -68,6 +104,9 @@ def load_config(path: str | None, env: dict | None = None) -> dict:
     if env.get("FREESCRIPT_DATA", "").strip():
         cfg["data"] = env["FREESCRIPT_DATA"].strip()
     cfg["enabled"] = flag_enabled(env, bool(cfg.get("enabled")))
+    b = parse_bundle_config(env)
+    if b:
+        cfg["bundle_cmd"], cfg["bundle_cwd"] = b
     return cfg
 
 
@@ -276,6 +315,75 @@ def jobs_to_rows(jobs: list[dict], data: Path) -> tuple[list[dict], list[str]]:
     return rows, missing
 
 
+def fetch_bundle(cmd: list[str], cwd: str, uid: str, tmp: Path) -> dict:
+    """Run the bundle command for one uid (no shell, 120 s) into a file under ``tmp``; return the parsed bundle.
+
+    stdout is discarded (untrusted). stderr is logged as one line, 500 chars at most. Any failure raises.
+    """
+    if not _SAFE_UID.match(uid):
+        raise NightlyError("uid is not a safe argv value")
+    out = tmp / "bundle.json"
+    argv = [a.replace("{uid}", uid).replace("{out}", str(out)) for a in cmd]
+    try:
+        proc = subprocess.run(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, timeout=BUNDLE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise NightlyError("bundle command timed out") from None
+    if proc.returncode != 0:
+        err = " ".join(proc.stderr.decode("utf-8", "replace").split())[:_STDERR_CAP]
+        if err:
+            print(uid, "bundle-stderr", err, flush=True)
+        raise NightlyError(f"bundle command exited {proc.returncode}")
+    try:
+        doc = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise NightlyError("bundle file missing or not JSON") from None
+    finally:
+        out.unlink(missing_ok=True)
+    if not isinstance(doc, dict):
+        raise NightlyError("bundle is not an object")
+    return doc
+
+
+def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, tmp: Path, fetch=None) -> tuple[list[dict], dict, dict]:
+    """(rows, consults by uid, counts). Eligibility is spec section 2.5: a translate or stt layer, a role layer, a clip start on ``day``.
+
+    A pending job is an explicit request: it skips the day check. A consult that fails is counted once and never fetched again. ids and counts only; the Consults stay in memory.
+    """
+    from .ingest import ROLE_SLOTS, bundle_window, load_bundle
+    fetch = fetch or (lambda uid: fetch_bundle(cfg["bundle_cmd"], cfg["bundle_cwd"], uid, tmp))
+    counts = {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
+    rows, consults, seen = [], {}, set()
+    for uid, job_id, check_day in uids:
+        if uid in seen:
+            continue
+        seen.add(uid)
+        try:
+            b = fetch(uid)
+            tracks = b.get("tracks") if isinstance(b.get("tracks"), dict) else {}
+            if not (tracks.get("translate") or tracks.get("stt")) or not any(tracks.get(k) for k in ROLE_SLOTS):
+                counts["missing_layers"] += 1
+                continue
+            t0, _t1, room = bundle_window(b)
+            if check_day and ist_date_of_ms(t0) != day:
+                counts["not_this_day"] += 1
+                continue
+            c = load_bundle(b)
+        except Exception as e:
+            counts["bundle_failed"] += 1
+            print(uid, "bundle-failed", type(e).__name__, flush=True)
+            continue
+        if not c.role_track:
+            counts["missing_layers"] += 1
+            continue
+        row = b.get("cutter_row") if isinstance(b.get("cutter_row"), dict) else {}
+        d8 = row.get("doctor_uid")
+        rows.append({"uid": uid, "ist_date": ist_date_of_ms(t0), "room_slug": room, "job_id": job_id,
+                     "doctor_uid8": d8 if isinstance(d8, str) and len(d8) == 8 else None})
+        consults[uid] = c
+    return rows, consults, counts
+
+
 def _default_run(data: Path, out: Path, uid: str) -> dict:
     from .ingest import load_consult
     from .models import UsageLedger, make_client
@@ -345,30 +453,110 @@ def _post_factory(cfg: dict, secret: str):
     return post
 
 
+def _sealed_uids(cfg: dict, day: str, sealed, reb_token: str) -> list[str] | None:
+    if sealed is False:
+        return None
+    if callable(sealed):
+        return sealed(day)
+    if isinstance(sealed, list):
+        return sealed
+    if reb_token and cfg.get("app_url"):
+        try:
+            return fetch_sealed_uids(cfg["app_url"], reb_token, day)
+        except Exception as e:
+            print("sealed", type(e).__name__)
+            return []
+    return None
+
+
+def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed, secret: str, reb_token: str) -> int:
+    """Bundle mode: uids = the sealed feed + pending jobs; every bundle lives in one TemporaryDirectory that is gone when this returns."""
+    sealed_uids = [u for u in (_sealed_uids(cfg, day, sealed, reb_token) or []) if isinstance(u, str) and u]
+    jobs_by_uid: dict[str, str | None] = {}
+    unexpanded = 0
+    if cfg.get("app_url") and secret and pending is not False:
+        try:
+            jobs = pending(cfg["app_url"], secret) if pending else fetch_pending(cfg["app_url"], secret)
+        except Exception as e:
+            print("pending", type(e).__name__)
+            jobs = []
+        for j in jobs:
+            uid = j.get("consult_uid")
+            if isinstance(uid, str) and uid:
+                jid = j.get("job_id") if isinstance(j.get("job_id"), str) else None
+                jobs_by_uid[uid] = jid
+            else:
+                unexpanded += 1  # a room+day job needs a folder scan; bundle mode has none
+    # explicit pending requests first (they skip the day check), then the sealed feed; the cap applies before any fetch
+    uids = [(u, j, False) for u, j in jobs_by_uid.items()] + [(u, None, True) for u in sealed_uids if u not in jobs_by_uid]
+    cap = int(cfg.get("max_consults") or 40)
+    overflow, uids = len(uids) - cap if len(uids) > cap else 0, uids[:cap]
+    sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
+    if sender is None and not dry_run:
+        print("no ingest target")
+        return 1
+    with tempfile.TemporaryDirectory(prefix="freescript-bundle-") as td:
+        tmp = Path(td)
+        (tmp / "bundles").mkdir()
+        rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles")
+        if not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded:
+            print("nothing", day)
+            return 0
+        bcfg = dict(cfg, data=str(tmp), out=cfg.get("out") or str(tmp / "out"))
+        summary = execute(rows, bcfg, dry_run=dry_run, run_one=run_one or _bundle_runner(consults, Path(bcfg["out"])),
+                          post=sender or (lambda _p: {"ok": True, "inserted": 0}))
+    summary.update(counts, mode="bundle")
+    summary["skipped"] = summary.get("skipped", 0) + overflow
+    summary["missing"] = counts["missing_layers"] + unexpanded
+    return _finish(summary, dry_run, extra_failed=counts["bundle_failed"])
+
+
+def _bundle_runner(consults: dict, out: Path):
+    state: dict = {}
+
+    def run_one(uid: str) -> dict:
+        from .models import UsageLedger, make_client
+        from .phi_guard import assert_phi_safe
+        from .pipeline import Options, run_consult
+        if "client" not in state:
+            out.mkdir(parents=True, exist_ok=True)
+            state["client"] = make_client("bedrock", UsageLedger(out / "usage.jsonl"), None)
+            assert_phi_safe(*state["client"].resolve("sonnet"))
+        return run_consult(consults[uid], state["client"], out, Options())
+
+    return run_one
+
+
+def _finish(summary: dict, dry_run: bool, extra_failed: int = 0) -> int:
+    summary.setdefault("mode", "folder")
+    for k in ("bundle_failed", "missing_layers", "not_this_day"):
+        summary.setdefault(k, 0)
+    keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day")
+    print(json.dumps({k: summary[k] for k in keys}))
+    stored = summary["posted"] + summary.get("rejected", 0)
+    if summary["failed"] or extra_failed or summary["missing"]:
+        return 1 if stored == 0 and not dry_run else 2
+    if summary.get("rejected") or summary["skipped"]:
+        return 2
+    return 0
+
+
 def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None, sealed=None, roles=None) -> int:
     if not cfg.get("enabled"):
         print("disabled")
         return 0
+    secret = os.environ.get("FREESCRIPT_INGEST_SECRET", "").strip()
+    reb_token = os.environ.get("REB_INDEX_READ_TOKEN", "").strip()
+    if cfg.get("bundle_cmd"):
+        return _run_bundle(cfg, day, dry_run=dry_run, run_one=run_one, post=post, pending=pending, sealed=sealed, secret=secret, reb_token=reb_token)
     data = Path(cfg["data"]) if cfg.get("data") else None
     if data is None:
         print("no data dir")
         return 1
     rows = select_day(data, day)
-    secret = os.environ.get("FREESCRIPT_INGEST_SECRET", "").strip()
-    reb_token = os.environ.get("REB_INDEX_READ_TOKEN", "").strip()
     sealed_missing: list[str] = []
     if sealed is not False:
-        uids = None
-        if callable(sealed):
-            uids = sealed(day)
-        elif isinstance(sealed, list):
-            uids = sealed
-        elif reb_token and cfg.get("app_url"):
-            try:
-                uids = fetch_sealed_uids(cfg["app_url"], reb_token, day)
-            except Exception as e:
-                print("sealed", type(e).__name__)
-                uids = []
+        uids = _sealed_uids(cfg, day, sealed, reb_token)
         if uids is not None:
             def role_for(uid: str):
                 if callable(roles):
@@ -401,13 +589,7 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         return 1
     summary = execute(rows, cfg, dry_run=dry_run, run_one=run_one, post=sender or (lambda _p: {"ok": True, "inserted": 0}))
     summary["missing"] = len(missing) + len(sealed_missing)
-    print(json.dumps({k: summary[k] for k in ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing")}))
-    stored = summary["posted"] + summary.get("rejected", 0)
-    if summary["failed"] or missing or sealed_missing:
-        return 1 if stored == 0 and not dry_run else 2
-    if summary.get("rejected") or summary["skipped"]:
-        return 2
-    return 0
+    return _finish(summary, dry_run)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -420,13 +602,20 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--config")
         s.add_argument("--dry-run", action="store_true")
     a = p.parse_args(argv)
-    cfg = load_config(a.config)
+    try:
+        cfg = load_config(a.config)
+    except NightlyError as e:
+        print("config error:", e)
+        return 1
     if a.data:
         cfg["data"] = str(a.data)
     day = a.date or previous_ist_day()
     if a.cmd == "plan":
         if not cfg.get("data"):
             print("no data dir")
+            return 1
+        if cfg.get("bundle_cmd"):
+            print("plan lists local folders; bundle mode has none")
             return 1
         rows = select_day(Path(cfg["data"]), day)
         for r in rows:
@@ -443,8 +632,13 @@ def _drain(cfg: dict, dry_run: bool) -> int:
     if not cfg.get("enabled"):
         print("disabled")
         return 0
-    data = Path(cfg["data"]) if cfg.get("data") else None
     secret = os.environ.get("FREESCRIPT_INGEST_SECRET", "").strip()
+    if cfg.get("bundle_cmd"):
+        if not cfg.get("app_url") or not secret:
+            print("no ingest target")
+            return 1
+        return _run_bundle(cfg, previous_ist_day(), dry_run=dry_run, run_one=None, post=None, pending=None, sealed=False, secret=secret, reb_token="")
+    data = Path(cfg["data"]) if cfg.get("data") else None
     if not data or not cfg.get("app_url") or not secret:
         print("no ingest target")
         return 1

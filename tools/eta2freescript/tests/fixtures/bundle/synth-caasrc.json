@@ -1,0 +1,193 @@
+{
+ "consult_uid": "synth-caasrc",
+ "scope_path": "2026-10-05/room_aaaaaaaa/_consults/synth-caasrc",
+ "manifest": {
+  "window_id": "consult-synth-caasrc",
+  "source_kind": "consult_clip",
+  "t0_ms": 1791174600000,
+  "t1_ms": 1791174750000,
+  "tracks": []
+ },
+ "source": "caa",
+ "unparseable_tracks": 0,
+ "cutter_row": null,
+ "tracks": {
+  "stt": {
+   "path": "tracks/stt.sarvam-saaras-v3__v1__abcd1234.json",
+   "status": "ok",
+   "version": "v1",
+   "engine": "sarvam-saaras-v3",
+   "track": {
+    "schema": "reb.track.v1",
+    "layer": "stt",
+    "engine": "sarvam-saaras-v3",
+    "version": "v1",
+    "status": "ok",
+    "config_hash": "abcd1234",
+    "segments": [
+     {
+      "t0_ms": 0,
+      "t1_ms": 6000,
+      "text": "SYNTH_MARKER_NOT_A_NAME native one",
+      "lang": "hi-IN",
+      "speaker": "0"
+     },
+     {
+      "t0_ms": 6500,
+      "t1_ms": 12000,
+      "text": "SYNTH_MARKER_NOT_A_NAME native two",
+      "lang": "hi-IN",
+      "speaker": "1"
+     },
+     {
+      "t0_ms": 12000,
+      "t1_ms": 12500,
+      "text": "  ",
+      "lang": "hi-IN",
+      "speaker": "1"
+     },
+     {
+      "t0_ms": 13000,
+      "t1_ms": 150560,
+      "text": "SYNTH_MARKER_NOT_A_NAME native three",
+      "lang": "hi-IN",
+      "speaker": "0"
+     }
+    ],
+    "extras": {}
+   }
+  },
+  "translate": {
+   "path": "tracks/translate.sarvam-saaras-v3__v1__abcd1234.json",
+   "status": "ok",
+   "version": "v1",
+   "engine": "sarvam-saaras-v3",
+   "track": {
+    "schema": "reb.track.v1",
+    "layer": "translate",
+    "engine": "sarvam-saaras-v3",
+    "version": "v1",
+    "status": "ok",
+    "config_hash": "abcd1234",
+    "segments": [
+     {
+      "t0_ms": 0,
+      "t1_ms": 6000,
+      "text": "SYNTH_MARKER_NOT_A_NAME english one",
+      "speaker": "0"
+     },
+     {
+      "t0_ms": 6500,
+      "t1_ms": 12000,
+      "text": "SYNTH_MARKER_NOT_A_NAME english two",
+      "speaker": "1"
+     },
+     {
+      "t0_ms": 13000,
+      "t1_ms": 150560,
+      "text": "SYNTH_MARKER_NOT_A_NAME english three",
+      "speaker": "0"
+     }
+    ],
+    "extras": {}
+   }
+  },
+  "diar_sarvam": null,
+  "diar_nemotron": {
+   "path": "tracks/diar.nemotron__v1__abcd1234.json",
+   "status": "ok",
+   "version": "v1",
+   "engine": "nemotron",
+   "track": {
+    "schema": "reb.track.v1",
+    "layer": "diar",
+    "engine": "nemotron",
+    "version": "v1",
+    "status": "ok",
+    "config_hash": "abcd1234",
+    "segments": [
+     {
+      "t0_ms": 0,
+      "t1_ms": 5,
+      "speaker": "9"
+     }
+    ],
+    "extras": {}
+   }
+  },
+  "role_llm": null,
+  "role_judge": null,
+  "role_caa": {
+   "path": "tracks/role.caa-labels__caa__abcd1234.json",
+   "status": "ok",
+   "version": "caa",
+   "engine": "caa-labels",
+   "track": {
+    "schema": "reb.track.v1",
+    "layer": "role",
+    "engine": "caa-labels",
+    "version": "caa",
+    "status": "ok",
+    "config_hash": "abcd1234",
+    "segments": [
+     {
+      "t0_ms": 0,
+      "t1_ms": 12000,
+      "speaker": "1",
+      "role": "attendant"
+     },
+     {
+      "t0_ms": 13000,
+      "t1_ms": 150000,
+      "speaker": "0",
+      "role": "doctor"
+     }
+    ],
+    "extras": {
+     "map": {
+      "0": "doctor",
+      "1": "attendant"
+     }
+    }
+   }
+  },
+  "parts": {
+   "path": "tracks/parts.clef-jev__v1__abcd1234.json",
+   "status": "ok",
+   "version": "v1",
+   "engine": "clef-jev",
+   "track": {
+    "schema": "reb.track.v1",
+    "layer": "parts",
+    "engine": "clef-jev",
+    "version": "v1",
+    "status": "ok",
+    "config_hash": "abcd1234",
+    "segments": [
+     {
+      "t0_ms": 0,
+      "t1_ms": 5,
+      "text": "ignored"
+     }
+    ],
+    "extras": {}
+   }
+  },
+  "acoustics": {
+   "path": "tracks/acoustics.room_profile_acoustics__v1__abcd1234.json",
+   "status": "ok",
+   "version": "v1",
+   "engine": "room_profile_acoustics",
+   "track": {
+    "schema": "reb.track.v1",
+    "layer": "acoustics",
+    "engine": "room_profile_acoustics",
+    "version": "v1",
+    "status": "ok",
+    "config_hash": "abcd1234",
+    "segments": [],
+    "extras": {}
+   }
+  }
+ }
+}

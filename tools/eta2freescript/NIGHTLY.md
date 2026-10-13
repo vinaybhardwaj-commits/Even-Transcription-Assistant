@@ -20,6 +20,27 @@ The optional `eta2freescript_offline` hook reads what was stored: `GET /api/free
 
 Exit codes: 0 disabled / nothing to do / ok, 2 partial (over `max_consults`, a rejected artifact was stored, or some posted and some failed), 1 failed with nothing stored.
 
+## Bundle mode
+
+Set `FREESCRIPT_BUNDLE_CMD` and the nightly stops reading consult folders. Each uid comes from one palimpsest consult bundle (one JSON per consult, written by eta-lab `kit/reb/consult_bundle.py`). It needs no `transcript.json` or `role.json` on disk and never calls `/api/reb/roles`. Folder mode (variable unset) is unchanged and stays for test fixtures.
+
+The box is eta-lab-t4. `FREESCRIPT_BUNDLE_CWD` is the eta-lab checkout there.
+
+| variable | meaning |
+|---|---|
+| `FREESCRIPT_BUNDLE_CMD` | JSON array of strings, an argv template with `{uid}` and `{out}`, e.g. `["python3","-m","kit.reb.consult_bundle","--uid","{uid}","--out","{out}"]`. No shell |
+| `FREESCRIPT_BUNDLE_CWD` | directory the command runs in: `<eta-lab checkout>` |
+
+A bad JSON value, a missing placeholder, or a missing or non-directory cwd is a config error: the job prints `config error` and exits 1. It never falls back to folders.
+
+- The uid list is the sealed-consult feed plus pending jobs that name a `consult_uid`. A room+day job needs a folder scan, so it is counted in `missing` and not run.
+- For each uid the command runs with a 120 s timeout into a file inside a `TemporaryDirectory`. The bundle is read, the Consult is built, the pipeline runs, and the directory (bundle and, unless `out` is configured, pipeline outputs) is removed when the run ends. The command's stdout is discarded; its stderr is logged, as one line of at most 500 characters, only when the command fails.
+- Text is the translate track (English) and the stt track (native). Roles are the first of `role_llm`, `role_judge`, `role_caa` that is present. `parts`, `acoustics` and `diar_nemotron` are not read. Segment times are ms from clip start; the reader clamps ends to the clip and moves them onto the absolute axis the folder reader uses.
+- `max_consults` applies to the uid list before any bundle is fetched (pending jobs first, then the sealed feed); the rest are counted in `skipped`.
+- Eligibility: a translate or stt layer, a role layer, and a clip start on the target IST day. The day check applies to sealed-feed uids only; a pending job is an explicit request and runs on any day. A consult that fails is counted and not fetched again: `missing_layers` (also added to `missing`), `not_this_day`. A command failure, timeout, unreadable bundle or unreadable clip window is `bundle_failed` (counts as failed for the exit code).
+- The summary line gains `mode` (`bundle` or `folder`), `bundle_failed`, `missing_layers`, `not_this_day`.
+- `plan` lists local folders only and exits 1 in bundle mode. `drain` takes pending jobs only, for the previous IST day.
+
 ## Switches
 
 | switch | where | effect |
@@ -28,6 +49,7 @@ Exit codes: 0 disabled / nothing to do / ok, 2 partial (over `max_consults`, a r
 | `FREESCRIPT_INGEST_SECRET` | Vercel env and the box | HMAC for ingest, pending, and `GET /api/freescript/day`. The box holds no database credential |
 | `FREESCRIPT_APP_URL` | box | the app origin, no trailing path |
 | `FREESCRIPT_DATA` | box | the consult folder (one subdirectory per uid) |
+| `FREESCRIPT_BUNDLE_CMD` / `FREESCRIPT_BUNDLE_CWD` | box | bundle mode, see above. Unset is folder mode |
 | `REB_INDEX_READ_TOKEN` | Vercel env and the box | Bearer for `GET /api/sarvam/consult-results` and `GET /api/reb/roles`. `REB_INDEX_TOKEN` is accepted on those routes too. Unset means the nightly skips the sealed-consult feed |
 
 ## Install
