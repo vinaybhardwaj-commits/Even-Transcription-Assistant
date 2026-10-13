@@ -11,15 +11,20 @@ import re
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
             "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice"]
 FILLER = re.compile(r"^\s*(not\s+(documented|stated|recorded|examined|mentioned|done|available)|none( stated)?|nil|n/?a|-+|—)\s*\.?\s*$", re.I)
-DOSE_MARK = " [dose not stated — doctor to verify]"
+DOSE_MARK = " [dose not stated — doctor to verify]"  # no longer written (printable-v1); kept so DOSE_ONLY still reads old notes
 # A heading whose whole body is this marker (no drug named) is empty. Left in place it fails G6 and forces the
 # deterministic fallback on consults that have no medicines.
 DOSE_ONLY = re.compile(r"^\s*\[dose not stated — doctor to verify\]\s*(\[\?\])?\s*$", re.I)
 
 
+# Any "[...]" span an LLM writes is a marker, never note content. The whitespace before it goes too.
+BRACKET_SPAN = re.compile(r"\s*\[[^\]]*\]")
+
+
 def sanitize_note(note: str) -> str:
     out = []
     for line in note.split("\n"):
+        line = BRACKET_SPAN.sub("", line)
         if not line.strip():
             continue
         head, sep, body = line.partition(":")
@@ -153,11 +158,8 @@ def render_note(gx: dict, flags: dict | None = None, banned_names: list[str] | N
     def med(i, m):
         own = [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or [])
         instr = _scrub(m.get("instructions") or "", banned, own)
+        # printable-v1: only the fields present. What is missing lives in completion_required, never in the note.
         s = " ".join(x for x in [m.get("name", ""), m.get("frequency", ""), ("x " + m["duration"]) if m.get("duration") else "", instr] if x)
-        if not m.get("frequency") or not m.get("duration"):
-            s += DOSE_MARK
-        if "low_confidence" in flags.get(f"/medicines/{i}", []):
-            s += " [?]"
         return _clean(s)
 
     sec = {

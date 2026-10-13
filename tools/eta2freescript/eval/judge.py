@@ -21,10 +21,10 @@ from ..ingest import Consult, format_transcript
 from ..models import ModelClient
 from ..note import filler_lines
 from ..prompts import load_prompt, parse_json
-from ..validate import check
+from ..validate import check, schema_v03
 
-_COMPLETION_KINDS = ("regimen_slot", "pick_drug", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated",
-                       "follow_up_missing", "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review")
+# The kinds come from the v0.3 schema enum, never a hand-kept list.
+_COMPLETION_KINDS = tuple(schema_v03()["properties"]["completion_required"]["items"]["properties"]["kind"]["enum"])
 
 JUDGE = "judge-v3"
 REF_KEYS = ("medicines", "diagnoses", "icd_codes", "investigations", "comorbidities", "advice", "plan", "follow_up")

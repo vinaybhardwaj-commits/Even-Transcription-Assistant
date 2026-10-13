@@ -21,6 +21,7 @@ import copy
 import importlib.util
 import json
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +29,7 @@ import jsonschema
 
 from .followup import add_interval
 from .guard import CONTINUE_QUOTE, NUM_WORDS, NUM_WORDS_HI, numerals
+from .note import FILLER
 from .medication_safety import (
     dose_bound, is_dose_change, molecules, native_supports, plausible_strength, resolvable, same_molecules,
 )
@@ -782,6 +784,118 @@ def frx(art: dict) -> list[str]:
     return e
 
 
+# printable-v1 (spec 7.3, 8.2). Structural rules on note_text, applied after NFKC normalisation.
+_MIN_PROMPT_LEN = 8
+_UNITS = r"(?:mg|ml|mcg|g|iu|units|days|weeks|months)"
+_SLOT_X = re.compile(r"(?<!\w)x+(?=\s+" + _UNITS + r"\b)", re.I)
+_AVAIL = "stated|mentioned|specified|known|clear|decided|recorded|documented|provided|confirmed|verified|determined|filled"
+_D1 = re.compile(r"(?:\b(?:not|(?:was|is)\s+not|(?:wasn|isn)['\u2019]t)\s+(?:\w+ly\s+)?|\bun)(?:" + _AVAIL + r")\b", re.I)
+_D2 = re.compile(r"\b(?:verif|confirm|decid|determin|clarif|tbd|tbc)\w*", re.I)
+_D2_SECTIONS = {"Medication", "Follow up", "Further Investigation", "Surgery or Procedure", "Refer to"}
+_D3 = re.compile(r"\b(?:doctor\s+to|dr\.?\s+to|ask\s+doctor|ask\s+dr)\b", re.I)
+_D3_PP = re.compile(
+    r"\bto\s+be\s+(?:confirmed|decided|determined|verified|clarified|specified|filled|entered)\b", re.I)
+_D5 = re.compile(
+    r"\bunnamed\s+drug\b|\bplaceholder\b|\bdose\s+not\s+stated\b|\bheld_back\b|\bkept\s+out\b(?!\s+of\b)|\bredacted\b|\blorem\b",
+    re.I)
+_D4_FIELDS = {"dose", "dosage", "strength", "frequency", "duration", "timing", "date", "drug", "medicine", "name"}
+_D4_MISSING = {"missing", "unknown", "unclear", "absent", "blank", "?", "n/a", "na", "nil", "none"}
+_D4_NO = re.compile(r"\bno\s+(?:" + "|".join(sorted(_D4_FIELDS)) + r")\s+(?:given|stated|mentioned|specified)\b", re.I)
+
+
+def _note_entries(note: str):
+    """Yield (heading or None, body, is_diagnosis_entry, section) for each line body. Un-headed lines belong to the last heading."""
+    cur = None
+    for line in (note or "").split("\n"):
+        head, sep, body = line.partition(":")
+        if sep and head in V.HEADINGS:
+            cur = head
+            yield head, body, cur == "Diagnoses", cur
+        elif line.strip():
+            yield None, line, cur == "Diagnoses", cur
+
+
+def _d4(text: str) -> bool:
+    if _D4_NO.search(text):
+        return True
+    toks = []
+    for t in re.findall(r"\w+(?:/\w+)?|\?", text.lower()):
+        toks.extend([t] if t == "n/a" else t.split("/"))
+    for i, t in enumerate(toks):
+        if t in _D4_FIELDS and any(x in _D4_MISSING for x in toks[max(0, i - 3):i] + toks[i + 1:i + 4]):
+            return True
+    return False
+
+
+def _has_content(node) -> bool:
+    if isinstance(node, dict):
+        return any(_has_content(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_content(v) for v in node)
+    if isinstance(node, str):
+        return bool(node.strip())
+    return node is not None and node is not False and node != 0
+
+
+def printable_errors(text: str, prompts: list[str]) -> list[str]:
+    """The FRX-N1 errors for one note_text and its completion prompts (index = completion_required index)."""
+    e: list[str] = []
+    note = unicodedata.normalize("NFKC", text or "")
+    if "[" in note or "]" in note:
+        e.append("FRX-N1 note_text contains a bracket")
+    if "{" in note or "}" in note:
+        e.append("FRX-N1 note_text contains a template brace")
+    if re.search(r"<[A-Za-z]", note):
+        e.append("FRX-N1 note_text contains an angle-bracket slot")
+    if re.search(r"_{2,}", note):
+        e.append("FRX-N1 note_text contains an underscore blank")
+    if any(unicodedata.category(c) in ("Ps", "Pe") and c not in "()" for c in note):
+        e.append("FRX-N1 note_text contains a bracket")
+    if _SLOT_X.search(note):
+        e.append("FRX-N1 note_text contains an x/XX unit slot")
+    for head, body, is_dx, sec in _note_entries(note):
+        where = head or "un-headed line"
+        text = body.lstrip()
+        if is_dx and text.startswith("?"):
+            text = text[1:]
+        if "?" in text:
+            e.append(f"FRX-N1 '?' outside the Diagnoses differential prefix ({where})")
+        if FILLER.match(body):
+            e.append(f"FRX-N1 filler line body ({where})")
+        if sec in _D2_SECTIONS:
+            for m in _D1.finditer(body):
+                e.append(f"FRX-N1 d1 missing-value phrase '{m.group(0).lower()}' ({where})")
+        if sec in _D2_SECTIONS:
+            for m in _D2.finditer(body):
+                e.append(f"FRX-N1 d2 request word '{m.group(0).lower()}' ({where})")
+        for m in _D3.finditer(body):
+            e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
+        for m in (_D3_PP.finditer(body) if sec in _D2_SECTIONS else ()):
+            e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
+        for m in _D5.finditer(body):
+            e.append(f"FRX-N1 d5 internal pipeline marker '{m.group(0).lower()}' ({where})")
+        if sec in _D2_SECTIONS and _d4(body):
+            e.append(f"FRX-N1 d4 missing-field label ({where})")
+    low = note.lower()
+    for i, pr in enumerate(prompts):
+        if isinstance(pr, str) and len(pr.strip()) >= _MIN_PROMPT_LEN and pr.strip().lower() in low:
+            e.append(f"FRX-N1 completion_required[{i}] prompt text is in note_text")
+    return e
+
+
+def frx_n(art: dict) -> list[str]:
+    note = art.get("note_text") or ""
+    if not isinstance(note, str):
+        return []
+    prompts = [c.get("prompt") if isinstance(c, dict) else None for c in art.get("completion_required") or []]
+    e = printable_errors(note, prompts)
+    note = unicodedata.normalize("NFKC", note)
+    if _has_content(art.get("gp_extraction")):
+        if not any(body.strip() for _, body, _, _ in _note_entries(note)):
+            e.append("FRX-N2 gp_extraction has content but note_text has no non-empty section")
+    return e
+
+
 def _person_key(node) -> bool:
     if isinstance(node, dict):
         return any(PERSON_KEY.match(str(k)) or _person_key(v) for k, v in node.items())
@@ -874,6 +988,7 @@ def check(art: dict) -> list[str]:
             errs.append(f"v0.1 projection: {type(ex).__name__}: {ex}")
         _c_rules(art, errs, slots=True)
         errs += [x for x in frx(art) if not x.startswith("FRX-D4")]
+        errs += frx_n(art)
         return errs
     errs = _schema_errors(art, schema_v02(), "schema-v0.2")
     if errs:
