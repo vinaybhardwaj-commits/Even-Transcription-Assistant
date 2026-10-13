@@ -154,7 +154,7 @@ public actor FleetClient {
   /// Returns when the task is cancelled, the client is disabled, or the server has revoked this
   /// device. Disabled: returns at once, having touched nothing.
   public func run() async {
-    guard config.enabled else { return }
+    guard config.enabled else { log("fleet client stopped: disabled"); return }
     loadState()
     while !Task.isCancelled {
       if let reason = state.stoppedReason {
@@ -175,6 +175,18 @@ public actor FleetClient {
       case .stop(let why): log("fleet client stopped: \(why)"); return
       }
     }
+    log("fleet client stopped: cancelled")
+  }
+
+  /// 0.1.39. A request that threw (no key, no network, a bad token) used to retry in silence. It now says so once per
+  /// change: where, the error's domain and code. Never the error's text, which can carry a URL, and never a token.
+  private var lastFailures: [String: String] = [:]
+  private func noteFailure(_ site: String, _ error: Error) {
+    let ns = error as NSError
+    let line = "fleet client: \(site) failed (\(ns.domain) \(ns.code))"
+    guard lastFailures[site] != line else { return }
+    lastFailures[site] = line
+    log(line)
   }
 
   func loadState() {
@@ -239,6 +251,7 @@ public actor FleetClient {
         return .wait(backoff.failure())
       }
     } catch {
+      noteFailure("register", error)
       return .wait(backoff.failure())
     }
   }
@@ -278,6 +291,7 @@ public actor FleetClient {
         return .wait(backoff.failure())
       }
     } catch {
+      noteFailure("poll", error)
       return .wait(backoff.failure())
     }
   }
@@ -368,6 +382,7 @@ public actor FleetClient {
             "Content-Type": "application/json",
           ], body: body, timeout: timeout))
     } catch {
+      noteFailure("kiosk_health_post", error)
       return nil
     }
   }
@@ -387,6 +402,7 @@ public actor FleetClient {
           headers: ["Authorization": "Device \(try token(method: "GET", path: Self.stewardTicketsPath, body: nil, deviceID: deviceID))"],
           body: nil, timeout: timeout))
     } catch {
+      noteFailure("steward_tickets", error)
       return nil
     }
   }
@@ -420,7 +436,8 @@ public actor FleetClient {
         markPosted(stored.cmdID)
       }
     } catch {
-      // network: stays unposted and goes out again on the next pass
+      noteFailure("result_post", error)
+      // stays unposted and goes out again on the next pass
     }
   }
 

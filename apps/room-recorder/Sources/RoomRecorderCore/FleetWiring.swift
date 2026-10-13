@@ -52,9 +52,17 @@ public struct KeychainFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   }
 }
 
-public enum FleetKeychainError: Error, Equatable {
+public enum FleetKeychainError: Error, Equatable, CustomNSError {
   case read(OSStatus)
   case write(OSStatus)
+
+  public static var errorDomain: String { "FleetKeychain" }
+  /// The Security status itself, so a log line says `-25308` and not a case number.
+  public var errorCode: Int {
+    switch self {
+    case .read(let status), .write(let status): return Int(status)
+    }
+  }
 }
 
 /// `fleet-state.json` in the app root, private to the user. Holds the device id, the last 1,000
