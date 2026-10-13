@@ -1,16 +1,20 @@
 """Paired statistics: Wilcoxon signed-rank (two-sided, zero differences dropped), Holm, rank-biserial, median difference.
 
-scipy is used when importable; otherwise the exact (n <= 25, no ties) or tie-corrected normal approximation below.
+Wilcoxon uses ONE pure-Python implementation; scipy is never imported, so the result is the same with or without it.
+Zero differences are dropped first (zero_method "wilcox"). The method is chosen by an explicit rule (WILCOXON_EXACT_MAX_N):
+  n <= 50 after dropping zeros: EXACT. Null distribution of W+ over the integer ranks 1..n. With ties the statistic can be a
+    half-integer; as scipy does, it is rounded conservatively (floor for the upper tail, ceil for the lower tail), then
+    p = min(1, 2 * min(P(W >= floor(W+)), P(W <= ceil(W+)))). Matches scipy 1.18.1 method="exact".
+  n > 50: APPROX. Normal approximation with the tie correction and no continuity correction. Matches scipy 1.18.1
+    method="approx", correction=False.
+The result carries the method used ("exact" or "approx"; None when n == 0).
 """
 from __future__ import annotations
 
 import math
 import statistics
 
-try:
-    from scipy import stats as _sp
-except Exception:  # pragma: no cover - exercised by tests through use_scipy=False
-    _sp = None
+WILCOXON_EXACT_MAX_N = 50
 
 
 def paired_diffs(x: list[float], y: list[float]) -> list[float]:
@@ -33,39 +37,46 @@ def _ranks(vals: list[float]) -> tuple[list[float], list[int]]:
     return ranks, ties
 
 
-def _wilcoxon_py(d: list[float]) -> tuple[float, float]:
+def _signed_rank_counts(n: int) -> list[int]:
+    """counts[s] = number of sign assignments over ranks 1..n with W+ == s (exact integers)."""
+    counts = [0] * (n * (n + 1) // 2 + 1)
+    counts[0] = 1
+    for r in range(1, n + 1):
+        for s in range(len(counts) - 1, r - 1, -1):
+            counts[s] += counts[s - r]
+    return counts
+
+
+def _wilcoxon_exact(w_plus: float, n: int) -> float:
+    counts = _signed_rank_counts(n)
+    upper = sum(counts[math.floor(w_plus):])        # P(W >= floor(W+))
+    lower = sum(counts[: math.ceil(w_plus) + 1])    # P(W <= ceil(W+))
+    return min(1.0, 2 * min(upper, lower) / 2 ** n)
+
+
+def _wilcoxon_approx(w_plus: float, n: int, ties: list[int]) -> float:
+    var = (n * (n + 1) * (2 * n + 1) - sum(t ** 3 - t for t in ties) / 2) / 24
+    if var <= 0:
+        return 1.0
+    z = (w_plus - n * (n + 1) / 4) / math.sqrt(var)  # no continuity correction
+    return min(1.0, math.erfc(abs(z) / math.sqrt(2)))
+
+
+def wilcoxon(x: list[float], y: list[float]) -> dict:
+    """Two-sided paired test of x against y. Returns n (non-zero pairs), statistic (min(W+, W-)), p and method.
+
+    n == 0 gives statistic, p and method all None.
+    """
+    d = [v for v in paired_diffs(x, y) if v != 0]
     n = len(d)
+    if not n:
+        return {"n": 0, "statistic": None, "p": None, "method": None}
     ranks, ties = _ranks([abs(v) for v in d])
     w_plus = sum(r for r, v in zip(ranks, d) if v > 0)
-    w_minus = n * (n + 1) / 2 - w_plus
-    stat = min(w_plus, w_minus)
-    if n <= 25 and max(ties) == 1:
-        # exact: count sign assignments with W+ <= stat (ranks are 1..n)
-        counts = [0] * (n * (n + 1) // 2 + 1)
-        counts[0] = 1
-        for r in range(1, n + 1):
-            for s in range(len(counts) - 1, r - 1, -1):
-                counts[s] += counts[s - r]
-        p = 2 * sum(counts[: int(stat) + 1]) / 2 ** n
-        return stat, min(1.0, p)
-    mean = n * (n + 1) / 4
-    var = n * (n + 1) * (2 * n + 1) / 24 - sum(t ** 3 - t for t in ties) / 48
-    if var <= 0:
-        return stat, 1.0
-    z = (abs(stat - mean) - 0.5 * 0) / math.sqrt(var)  # no continuity correction, as scipy's default
-    return stat, min(1.0, math.erfc(z / math.sqrt(2)))
-
-
-def wilcoxon(x: list[float], y: list[float], use_scipy: bool = True) -> dict:
-    """Two-sided paired test of x against y. Returns n (non-zero pairs), statistic, p (None when n == 0)."""
-    d = [v for v in paired_diffs(x, y) if v != 0]
-    if not d:
-        return {"n": 0, "statistic": None, "p": None}
-    if use_scipy and _sp is not None:
-        r = _sp.wilcoxon(d, zero_method="wilcox", alternative="two-sided", method="auto")
-        return {"n": len(d), "statistic": float(r.statistic), "p": float(r.pvalue)}
-    stat, p = _wilcoxon_py(d)
-    return {"n": len(d), "statistic": stat, "p": p}
+    stat = min(w_plus, n * (n + 1) / 2 - w_plus)
+    if n <= WILCOXON_EXACT_MAX_N:
+        return {"n": n, "statistic": stat, "p": _wilcoxon_exact(w_plus, n), "method": "exact"}
+    return {"n": n, "statistic": stat, "p": _wilcoxon_approx(w_plus, n, ties), "method": "approx"}
 
 
 def holm(pvals: list[float | None]) -> list[float | None]:

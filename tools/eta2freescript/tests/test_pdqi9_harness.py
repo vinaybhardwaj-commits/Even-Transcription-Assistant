@@ -352,24 +352,48 @@ def test_floor_table_pass_and_fail():
 
 # ---- stats ------------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("use_scipy", [True, False])
-def test_wilcoxon_hand_computed(use_scipy):
-    # d = [1,-2,3,-4,5,6]: ranks 1..6, W+ = 15, W- = 6; subsets of {1..6} with sum <= 6 = 14, p = 2*14/64
-    x, y = [1, 0, 3, 0, 5, 6], [0, 2, 0, 4, 0, 0]
-    r = stats.wilcoxon(x, y, use_scipy=use_scipy)
-    assert r["n"] == 6 and r["statistic"] == 6 and r["p"] == pytest.approx(0.4375)
-    r = stats.wilcoxon([2, 3, 4, 5, 6, 7], [1, 1, 1, 1, 1, 1], use_scipy=use_scipy)  # all positive: p = 2/64 ... diffs 1..6
-    assert r["statistic"] == 0 and r["p"] == pytest.approx(2 / 64)
-    z = stats.wilcoxon([1, 2, 3, 3], [1, 2, 0, 0], use_scipy=use_scipy)  # zero differences dropped
-    assert z["n"] == 2
-    assert stats.wilcoxon([1, 2], [1, 2], use_scipy=use_scipy) == {"n": 0, "statistic": None, "p": None}
+def _wil(d):
+    return stats.wilcoxon(d, [0] * len(d))
 
 
-def test_python_fallback_matches_scipy_with_ties():
-    pytest.importorskip("scipy")
-    d = [1, 1, 2, 2, 2, -1, 3, 4, -2, 5, 1, 2, 3, 3, -3, 4, 5, 6, 1, 2, 2, 3, 4, -5, 1, 2, 3, 1, 2, 4]
-    zeros = [0] * len(d)
-    assert stats.wilcoxon(d, zeros, use_scipy=False)["p"] == pytest.approx(stats.wilcoxon(d, zeros, use_scipy=True)["p"], rel=1e-6)
+# Reference values generated ONCE with scipy 1.18.1 (throwaway venv outside the repo):
+#   wilcoxon(nonzero d, zero_method="wilcox", alternative="two-sided", method="exact")                 for n <= 50
+#   wilcoxon(nonzero d, zero_method="wilcox", alternative="two-sided", method="asymptotic", correction=False)  for n > 50
+N50 = [(i % 5 + 1) * (1 if i % 3 else -1) for i in range(50)]
+N60_TIES = [-1, 1, -2, 1, 1, -3, 1, -1, 4, 1, -3, 2, 1, 1, -2, -2, 1, 2, 1, -3, -2, 1, 4, 1, 2, 4, 1, 4, 4, -2,
+            1, 2, 1, -3, 1, 2, -2, 1, -3, 1, 4, 2, -3, 1, 1, 4, 4, 2, -1, 1, -3, 1, 4, 1, 4, 2, 3, -3, -2, -1]
+
+
+@pytest.mark.parametrize("d,n,stat,p,method", [
+    ([1, 2, 3, 4, 5, 6], 6, 0.0, 0.03125, "exact"),                       # all positive: 2/64
+    ([1] * 6, 6, 0.0, 0.03125, "exact"),                                  # every rank tied: still the exact 2/64
+    ([1, 1, 2, 2, -1, 3, -2, 3, 4, 1], 10, 8.5, 0.064453125, "exact"),    # half-integer statistic from ties
+    ([1, -2, 3, -4, 5, 6], 6, 6.0, 0.4375, "exact"),                      # mixed signs: 2 * 14 / 64
+    ([3], 1, 0.0, 1.0, "exact"),
+    (N50, 50, 423.5, 0.039015525521861605, "exact"),                 # n == 50 is still exact
+    (N50 + [1], 51, 438.5, 0.03446519180036485, "approx"),                # n == 51 switches to approx
+    (N60_TIES, 60, 660.0, 0.0572171253370782, "approx"),                  # many ties, approx with tie correction
+])
+def test_wilcoxon_matches_scipy_reference(d, n, stat, p, method):
+    r = _wil(d)
+    assert r["n"] == n and r["method"] == method
+    assert r["statistic"] == stat
+    assert r["p"] == pytest.approx(p, rel=1e-9)
+
+
+def test_wilcoxon_zero_differences_dropped_and_empty():
+    z = stats.wilcoxon([1, 2, 3, 3], [1, 2, 0, 0])
+    assert z["n"] == 2 and z["method"] == "exact"
+    assert stats.wilcoxon([1, 2], [1, 2]) == {"n": 0, "statistic": None, "p": None, "method": None}
+
+
+def test_wilcoxon_does_not_import_scipy():
+    import ast
+    import inspect
+    mods = [n.module if isinstance(n, ast.ImportFrom) else a.name
+            for n in ast.walk(ast.parse(inspect.getsource(stats))) if isinstance(n, (ast.Import, ast.ImportFrom))
+            for a in (n.names if isinstance(n, ast.Import) else [None])]
+    assert not [m for m in mods if m and m.split(".")[0] == "scipy"]
 
 
 def test_holm_rank_biserial_and_median():
