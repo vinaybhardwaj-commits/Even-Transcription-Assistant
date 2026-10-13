@@ -13,6 +13,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { containerName } from "./container-name";
+import { removeOnExit, forgetOnExit } from "./reap-containers";
 
 export const PG_IMAGE = "postgres:16";
 /** Unique per worktree: a fixed name let a suite in one worktree `rm -f` another worktree's database mid-run. */
@@ -39,6 +40,7 @@ const sh = (args: string[], input?: string): string =>
 
 export function startPg(): void {
   try { sh(["rm", "-fv", PG_NAME]); } catch { /* not running */ }
+  removeOnExit(PG_NAME);
   sh(["run", "-d", "--rm", "--name", PG_NAME, "-e", "POSTGRES_PASSWORD=x", PG_IMAGE]);
   // READINESS IS A REAL QUERY, TWICE. `pg_isready` answers YES during the image's own bootstrap,
   // moments before initdb shuts the server down and restarts it for real — so a single probe
@@ -58,6 +60,7 @@ export function startPg(): void {
 
 export function stopPg(): void {
   try { sh(["rm", "-fv", PG_NAME]); } catch { /* already gone */ }
+  forgetOnExit(PG_NAME);
 }
 
 /** Run SQL with no result shaping — DDL, COPY, whatever. Throws with psql's own message. */

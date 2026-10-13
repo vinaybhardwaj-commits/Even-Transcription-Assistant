@@ -26,6 +26,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { containerName } from "./container-name";
+import { removeOnExit, forgetOnExit } from "./reap-containers";
 
 export type Sql = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>;
 
@@ -108,6 +109,7 @@ export function pgContainer(base: string) {
 
   function start(): void {
     try { docker(["rm", "-fv", name]); } catch { /* not running */ }
+    removeOnExit(name);
     docker(["run", "-d", "--rm", "--name", name, "-e", "POSTGRES_PASSWORD=x", "postgres:16"]);
     // Two consecutive real SELECTs: pg_isready answers during initdb's restart and then loses the race.
     const deadline = Date.now() + 90_000;
@@ -120,6 +122,7 @@ export function pgContainer(base: string) {
 
   function stop(): void {
     try { docker(["rm", "-fv", name]); } catch { /* already gone */ }
+    forgetOnExit(name);
   }
 
   /** DDL and seeding. No parameters, no result. */
