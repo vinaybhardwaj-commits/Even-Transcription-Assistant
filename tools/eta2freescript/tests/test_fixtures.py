@@ -62,7 +62,8 @@ def test_fixtures_regenerate_identically(tmp_path):
     bf.HERE = tmp_path
     bf.main()
     gen = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_file())
-    have = sorted(p.relative_to(FIX) for p in FIX.rglob("*") if p.is_file() and p.parent != FIX and "__pycache__" not in p.parts)
+    hand = {"bundle", "pulse", "pdqi9"}  # hand-authored fixture dirs, not produced by build_fixtures.py
+    have = sorted(p.relative_to(FIX) for p in FIX.rglob("*") if p.is_file() and p.parent != FIX and p.relative_to(FIX).parts[0] not in hand and "__pycache__" not in p.parts)
     assert gen == have
     for rel in gen:
         assert (tmp_path / rel).read_bytes() == (FIX / rel).read_bytes(), rel
