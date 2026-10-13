@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- TEMPLATE. Not loaded by any script in this repo. V (or an ordered session) fills the REPLACE_ values, copies to ~/Library/LaunchAgents, and loads it.
+     The tailnet address and port live in guardian.env, not here. No secret appears in this file. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>REPLACE_LABEL</string>
+  <key>ProgramArguments</key>
+  <array><string>REPLACE_REPO_PATH/tools/room-guardian/mini/pipe/run-pipe.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>REPLACE_GUARDIAN_HOME/logs/pipe.out.log</string>
+  <key>StandardErrorPath</key><string>REPLACE_GUARDIAN_HOME/logs/pipe.err.log</string>
+</dict>
+</plist>
