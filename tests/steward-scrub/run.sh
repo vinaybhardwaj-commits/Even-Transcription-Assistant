@@ -21,6 +21,8 @@ for e in "$T"/data/*; do
       want="${name#hit-}"; ok=0
       for r in $rules; do case "$want" in "$r"*) ok=1;; esac; done ;;
     ok-*) ok=1; [ -z "$rules" ] || ok=0 ;;
+    xfail-*) # known limit: expected NOT to be caught today. Never fails the run; reports if it starts being caught.
+      ok=1; [ -z "$rules" ] || echo "NOTE $name is now caught: promote it to hit-*" ;;
     *) ok=0 ;;
   esac
   if [ $ok -eq 1 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $name"; fi
