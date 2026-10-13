@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { makeFakeOperator } from "../support/fake-identity";
 
 type Row = Record<string, unknown>;
@@ -19,18 +20,31 @@ const db = {
   recording: { known: true, rooms: [] as Array<{ room_id: string }> } as { known: boolean; rooms: Array<{ room_id: string }>; reason?: string },
   mintLog: [] as unknown[],
   noRelease: false,
+  auditDown: false,
+  writes: [] as string[],
 };
 
-const adminAudits = () => db.audits.filter((a) => /action, target_type/.test(a.q) && !/mcp\.tools\/call/.test(a.q)).map((a) => ({ actor_type: a.values[0], actor_id: a.values[1], action: a.values[2] as string, target_type: a.values[3], target_id: a.values[4], meta: JSON.parse(a.values[5] as string) as Row }));
+const allAdminAudits = () => db.audits.filter((a) => /action, target_type/.test(a.q) && !/mcp\.tools\/call/.test(a.q)).map((a) => ({ actor_type: a.values[0], actor_id: a.values[1], action: a.values[2] as string, target_type: a.values[3], target_id: a.values[4], meta: JSON.parse(a.values[5] as string) as Row }));
+
+/** the pre-write rows (admin.<action> and admin.<action>.refused) */
+const adminAudits = () => allAdminAudits().filter((a) => !a.action.endsWith(".result"));
+/** the post-write rows (admin.<action>.result) */
+const resultAudits = () => allAdminAudits().filter((a) => a.action.endsWith(".result"));
 
 function run(strings: TemplateStringsArray, values: unknown[]): Row[] {
   const q = strings.join("?").replace(/\s+/g, " ").trim();
-  if (/^INSERT INTO audit_log/.test(q)) { db.audits.push({ q, values }); return []; }
+  if (/^INSERT INTO audit_log/.test(q)) {
+    if (db.auditDown && !/mcp\.tools\/call/.test(q)) throw new Error("audit_log down");
+    db.audits.push({ q, values });
+    return [];
+  }
+  if (/^UPDATE room/.test(q)) db.writes.push(q.slice(0, 40));
   if (/^SELECT id, slug, name, disabled_at FROM room WHERE/.test(q)) {
     const want = values.filter((v): v is string => typeof v === "string");
     return db.rooms.filter((r) => want.some((w) => w === r.id || w === r.slug || w.toLowerCase() === String(r.name).toLowerCase()));
   }
   if (/^SELECT disabled_at FROM room WHERE id/.test(q)) return db.rooms.filter((r) => r.id === values[0]).map((r) => ({ disabled_at: r.disabled_at }));
+  if (/^UPDATE room SET failed_attempts/.test(q)) return [];
   if (/^UPDATE room SET disabled_at = NULL/.test(q)) { for (const r of db.rooms) if (r.id === values[0]) r.disabled_at = null; return []; }
   if (/^UPDATE room SET disabled_at = NOW\(\) WHERE id = \? AND disabled_at IS NULL/.test(q)) {
     const r = db.rooms.find((x) => x.id === values[0] && x.disabled_at === null);
@@ -112,6 +126,8 @@ beforeEach(() => {
   db.audits = [];
   db.mintLog = [];
   db.noRelease = false;
+  db.auditDown = false;
+  db.writes = [];
   db.recording = { known: true, rooms: [] };
   logs = [];
   for (const m of ["log", "warn", "error", "info", "debug"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { logs.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")); });
@@ -195,7 +211,8 @@ describe("room_enable / room_disable", () => {
     const b = await call({ action: "room_disable", room: "room_a", reason: "again" });
     expect(b.out).toMatchObject({ ok: true, changed: false });
     expect(adminAudits()).toHaveLength(2);
-    expect(adminAudits()[1]!.meta.changed).toBe(false);
+    expect(resultAudits()[1]!.meta.changed).toBe(false);
+    expect(resultAudits()).toHaveLength(2);
   });
 
   it("enable clears disabled_at; enabling an enabled room is a no-op that is audited", async () => {
@@ -317,7 +334,8 @@ describe("bind", () => {
     expect((await call({ action: "bind", room: "room_a", install_id: "inst_new", reason: "x" })).out.error).toBe("never_enrolled");
     expect((await call({ action: "bind", room: "room_a", install_id: "inst_zz", reason: "x" })).out.error).toBe("no_install");
     expect(db.installs[1]!.retired_at).toBeTruthy();
-    expect(adminAudits()).toEqual([]);
+    expect(db.writes).toEqual([]);
+    expect(resultAudits().every((a) => a.meta.changed === false)).toBe(true);
   });
 });
 
@@ -326,10 +344,11 @@ describe("install_mint: the command is shown once and appears nowhere else", () 
     const { out } = await call({ action: "install_mint", room: "room_a", reason: "replace dead Mac" });
     expect(out).toMatchObject({ ok: true, install_id: "inst_new", command: SECRET_COMMAND, expires_at: "2026-10-13T10:00:00.000Z", release: { version: "0.1.99" }, reason: "replace dead Mac", before: null });
     expect(db.mintLog).toEqual([{ roomId: "room_a", createdBy: "mcp:fable" }]);
-    const rows = adminAudits();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ action: "admin.install_mint", target_id: "inst_new" });
-    expect(rows[0]!.meta).toMatchObject({ reason: "replace dead Mac", before: null, after: { install_id: "inst_new", expires_at: "2026-10-13T10:00:00.000Z" }, room_id: "room_a" });
+    // pre-row first (before minting: no install id yet), then the result row with install id, expiry and release only
+    expect(allAdminAudits().map((a) => a.action)).toEqual(["admin.install_mint", "admin.install_mint.result"]);
+    expect(adminAudits()[0]!.meta).toMatchObject({ reason: "replace dead Mac", before: null, room_id: "room_a" });
+    expect(resultAudits()[0]).toMatchObject({ target_id: "inst_new" });
+    expect(resultAudits()[0]!.meta).toMatchObject({ changed: true, after: { install_id: "inst_new", expires_at: "2026-10-13T10:00:00.000Z" }, room_id: "room_a", release_version: "0.1.99" });
     const everything = JSON.stringify(db.audits) + logs.join("\n");
     expect(everything).not.toContain(SECRET_TOKEN);
     expect(everything).not.toContain("bootstrap/");
@@ -338,12 +357,13 @@ describe("install_mint: the command is shown once and appears nowhere else", () 
     expect(db.audits.some((a) => /mcp\.tools\/call/.test(a.q))).toBe(true);
   });
 
-  it("a mint that fails (no release) is an error code, no token, and still no audit row", async () => {
+  it("a mint that fails (no release) is an error code, no token, and leaves a pre-row and a changed:false result row", async () => {
     db.noRelease = true;
     const { out } = await call({ action: "install_mint", room: "room_a", reason: "x" });
     expect(out).toMatchObject({ ok: false, error: "no_release" });
     expect(JSON.stringify(out)).not.toContain(SECRET_TOKEN);
-    expect(adminAudits()).toEqual([]);
+    expect(allAdminAudits().map((a) => a.action)).toEqual(["admin.install_mint", "admin.install_mint.result"]);
+    expect(resultAudits()[0]!.meta).toMatchObject({ changed: false, error: "NO_RELEASE" });
   });
 });
 
@@ -366,7 +386,7 @@ describe("install_list and state", () => {
     expect(out.bound_install).toMatchObject({ install_id: "inst_1", hostname: "mac-1", app_version: "0.1.50", mic_state: "authorized", update_channel: "stable", session_open: false });
     expect(out.recording_now).toBe(true);
     expect((out.retired_installs as Row[])[0]).toMatchObject({ install_id: "inst_old" });
-    expect((out.admin_audit as Row[])[0]).toMatchObject({ action: "admin.install_mint", actor: "mcp:fable", reason: "seed an audit row" });
+    expect((out.admin_audit as Row[]).find((x) => x.action === "admin.install_mint")).toMatchObject({ actor: "mcp:fable", reason: "seed an audit row" });
   });
 });
 
@@ -404,5 +424,65 @@ describe("the existing routes now audit", () => {
     expect((await retireRoute(req(), ctx)).status).toBe(404);
     expect(adminAudits()).toHaveLength(1);
     delete process.env.MIGRATION_SECRET;
+  });
+});
+
+describe("ADMIN-1b A1: audit first, fail closed", () => {
+  it("with the audit insert down, every write is audit_unavailable and nothing is updated, minted or retired", async () => {
+    db.installs = [inst({ last_seen_at: ago(86_400_000) }), inst({ install_id: "inst_old", retired_at: ago(1000), last_seen_at: ago(86_400_000) })];
+    db.installs[0]!.install_id = "inst_1";
+    db.auditDown = true;
+    for (const action of ["room_enable", "room_disable", "install_mint", "install_retire", "unbind"]) {
+      const { out } = await call(writeArgs(action));
+      expect(out, action).toMatchObject({ ok: false, error: "audit_unavailable" });
+    }
+    db.installs = [inst({ install_id: "inst_old", retired_at: ago(1000), last_seen_at: ago(86_400_000) })];
+    expect((await call({ action: "bind", room: "room_a", install_id: "inst_old", reason: "x" })).out.error).toBe("audit_unavailable");
+    expect(db.writes).toEqual([]);
+    expect(db.mintLog).toEqual([]);
+    expect(db.rooms[0]!.disabled_at).toBeNull();
+    expect(db.installs[0]!.retired_at).toBeTruthy();
+  });
+
+  it("normal path: the pre-row is written before the write, the .result row after; every success path says audited:true (retire included)", async () => {
+    const d = await call({ action: "room_disable", room: "room_a", reason: "r" });
+    expect(d.out).toMatchObject({ ok: true, audited: true });
+    const rt = await call({ action: "install_retire", room: "room_a", install_id: "inst_1", reason: "r", confirm_live: true });
+    expect(rt.out).toMatchObject({ ok: true, changed: true, audited: true });
+    expect(allAdminAudits().map((a) => a.action)).toEqual(["admin.room_disable", "admin.room_disable.result", "admin.install_retire", "admin.install_retire.result"]);
+    // retireInstall wrote no duplicate pre-row
+    expect(allAdminAudits().filter((a) => a.action === "admin.install_retire")).toHaveLength(1);
+    const bd = await call({ action: "bind", room: "room_a", install_id: "inst_1", reason: "undo" });
+    expect(bd.out).toMatchObject({ ok: true, changed: true, audited: true });
+  });
+
+  it("a failed result-row insert does not fail the write", async () => {
+    // pre-row lands, then the audit goes down: not testable per row with this fake, so assert the strict/best-effort split directly
+    const { writeAdminAudit } = await import("@/lib/admin-audit");
+    db.auditDown = true;
+    await expect(writeAdminAudit({ actor: { type: "system", id: "x" }, action: "a", targetType: "room", targetId: "r", meta: {} })).resolves.toBe(false);
+    await expect(writeAdminAudit({ actor: { type: "system", id: "x" }, action: "a", targetType: "room", targetId: "r", meta: {}, strict: true })).rejects.toThrow();
+  });
+});
+
+describe("ADMIN-1b A2 / A3 / A4", () => {
+  it("A2: 'kiosk dev gone stale' does not satisfy V GO; a word-bounded 'v go' does", async () => {
+    db.recording = { known: true, rooms: [{ room_id: "room_a" }] };
+    expect((await call({ action: "room_disable", room: "room_a", reason: "kiosk dev gone stale", override_patient_gate: true })).out.error).toBe("patient_gate");
+    expect((await call({ action: "room_disable", room: "room_a", reason: "ok (v go)", override_patient_gate: true })).out.ok).toBe(true);
+  });
+
+  it("A3: the state audit read is limited to 30 days", () => {
+    const src = readFileSync("lib/mcp/tools/admin.ts", "utf8");
+    expect(src).toContain("AND created_at > now() - interval '30 days'");
+  });
+
+  it("A4: the PIN-lockout disable writes room.pin_lockout_disable (system actor, room target, room_id + failed_attempts)", async () => {
+    const { roomRecordFailedAttempt } = await import("@/lib/room-auth");
+    const out = await roomRecordFailedAttempt({ id: "room_a", failed_attempts: 29, locked_until: null, disabled_at: null } as never);
+    expect(out.kind).toBe("disabled");
+    const row = allAdminAudits().find((a) => a.action === "room.pin_lockout_disable")!;
+    expect(row).toMatchObject({ actor_type: "system", target_type: "room", target_id: "room_a" });
+    expect(row.meta).toEqual({ room_id: "room_a", failed_attempts: 30 });
   });
 });

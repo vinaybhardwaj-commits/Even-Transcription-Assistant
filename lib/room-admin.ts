@@ -20,7 +20,7 @@ const iso = (v: string | Date | null | undefined): string | null => (v ? new Dat
  * disabled_at AND the PIN lockout (failed_attempts, locked_until) exactly as the Bench route always did.
  * One audit row either way, no-ops included.
  */
-export async function setRoomEnabled(roomId: string, enabled: boolean, actor: AdminActor, reason: string): Promise<RoomEnableResult> {
+export async function setRoomEnabled(roomId: string, enabled: boolean, actor: AdminActor, reason: string, opts: { skipAudit?: boolean } = {}): Promise<RoomEnableResult> {
   const rows = (await sql`SELECT disabled_at FROM room WHERE id = ${roomId} LIMIT 1`) as Array<{ disabled_at: string | Date | null }>;
   if (rows.length === 0) return { found: false };
   const before = { disabled_at: iso(rows[0]!.disabled_at) };
@@ -43,7 +43,7 @@ export async function setRoomEnabled(roomId: string, enabled: boolean, actor: Ad
       changed = true;
     }
   }
-  const audited = await writeAdminAudit({
+  const audited = opts.skipAudit ? false : await writeAdminAudit({
     actor,
     action: enabled ? "admin.room_enable" : "admin.room_disable",
     targetType: "room",
@@ -117,7 +117,7 @@ export type BindResult =
  * The UPDATE repeats the live-install guard so a race loses to the partial unique index, not to a
  * second live binding.
  */
-export async function bindInstall(roomId: string, installId: string, actor: AdminActor, reason: string): Promise<BindResult> {
+export async function bindInstall(roomId: string, installId: string, actor: AdminActor, reason: string, opts: { skipAudit?: boolean } = {}): Promise<BindResult> {
   const inst = await findInstall(installId);
   if (!inst) return { ok: false, error: "no_install" };
   if (inst.room_id !== roomId) return { ok: false, error: "install_not_in_room" };
@@ -145,7 +145,7 @@ export async function bindInstall(roomId: string, installId: string, actor: Admi
     changed = true;
     after = { retired_at: null };
   }
-  const audited = await writeAdminAudit({
+  const audited = opts.skipAudit ? false : await writeAdminAudit({
     actor,
     action: "admin.bind",
     targetType: "room_install",

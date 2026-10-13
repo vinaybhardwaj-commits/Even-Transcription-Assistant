@@ -19,6 +19,7 @@
 import { jwtVerify, SignJWT, type JWTPayload } from "jose";
 import { cookies } from "next/headers";
 import { sql } from "@/lib/db";
+import { writeAdminAudit } from "@/lib/admin-audit";
 
 export const ROOM_COOKIE = "eta_room_session";
 const TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days, matches doctor/admin
@@ -179,6 +180,8 @@ export async function roomRecordFailedAttempt(
                disabled_at = NOW()
          WHERE id = ${room.id}
       `;
+      // ADMIN-1b (A4): a PIN-lockout disable used to leave no trace (the OPD 4 class). Best-effort row; no behaviour change.
+      await writeAdminAudit({ actor: { type: "system", id: "room-auth" }, action: "room.pin_lockout_disable", targetType: "room", targetId: room.id, meta: { room_id: room.id, failed_attempts: newCount } });
     } else if (lockedUntilSec) {
       await sql`
         UPDATE room

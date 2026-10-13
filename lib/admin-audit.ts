@@ -24,6 +24,8 @@ export type AdminAuditInput = {
   targetType: "room" | "room_install";
   targetId: string;
   meta: Record<string, unknown>;
+  /** ADMIN-1b: true = a failed insert THROWS (the MCP tool writes its audit row before the write and fails closed). Default false = best-effort. */
+  strict?: boolean;
 };
 
 export async function writeAdminAudit(input: AdminAuditInput): Promise<boolean> {
@@ -35,6 +37,7 @@ export async function writeAdminAudit(input: AdminAuditInput): Promise<boolean> 
     `;
     return true;
   } catch (e) {
+    if (input.strict) throw e;
     console.warn("[admin-audit] audit_log insert failed", JSON.stringify({ action: input.action, target_id: input.targetId, err: String((e as Error)?.message ?? e).slice(0, 160) }));
     return false;
   }

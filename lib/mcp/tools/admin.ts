@@ -57,6 +57,20 @@ const installView = (i: InstallRow) => ({
 
 const badArgs = (detail: string) => ({ ok: false, error: "bad_args", detail });
 
+/** ADMIN-1b A1: the pre-write audit row. STRICT: false when the insert failed, and the caller must then NOT write. */
+async function preAudit(actor: AdminActor, action: string, targetType: "room" | "room_install", targetId: string, meta: Record<string, unknown>): Promise<boolean> {
+  try {
+    await writeAdminAudit({ actor, action, targetType, targetId, meta, strict: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+/** The post-write row `<action>.result`, best-effort. */
+const resultAudit = (actor: AdminActor, action: string, targetType: "room" | "room_install", targetId: string, meta: Record<string, unknown>) =>
+  writeAdminAudit({ actor, action: `${action}.result`, targetType, targetId, meta });
+const AUDIT_DOWN = { ok: false, error: "audit_unavailable", hint: "the audit row could not be written, so nothing was changed" };
+
 type Resolved = { room: RoomRef } | { out: Record<string, unknown> };
 
 async function resolveAdminRoom(args: ToolArgs): Promise<Resolved> {
@@ -93,7 +107,7 @@ async function retireFlow(action: "install_retire" | "unbind", room: RoomRef, in
   };
   const gate = await recordingState(room.id, install);
   if (gate.gated) {
-    const override = argBool(args, "override_patient_gate") && /V GO/i.test(reason);
+    const override = argBool(args, "override_patient_gate") && /\bV GO\b/i.test(reason);
     if (!override) {
       return refuse("patient_gate", { why: gate.why, hint: "pass override_patient_gate=true and put 'V GO' in the reason only on V's go" });
     }
@@ -102,18 +116,22 @@ async function retireFlow(action: "install_retire" | "unbind", room: RoomRef, in
   if (seen !== null && Date.now() - seen < LIVE_WINDOW_MS && !argBool(args, "confirm_live")) {
     return refuse("install_live", { last_seen_at: iso(install.last_seen_at), hint: "seen in the last 10 minutes; pass confirm_live=true to retire it anyway" });
   }
-  const retired = await retireInstall(install.install_id, { actor, reason, action: auditAction });
   const before = { retired_at: null };
+  if (!(await preAudit(actor, auditAction, "room_install", install.install_id, { reason, before, after: { retired_at: "(now)" }, ...base }))) return AUDIT_DOWN;
+  const retired = await retireInstall(install.install_id, { actor, reason, action: auditAction, skip: true });
   if (!retired) {
+    await resultAudit(actor, auditAction, "room_install", install.install_id, { changed: false, after: before, ...base });
     // lost a race: someone retired it between the read and the write
-    const audited = await writeAdminAudit({ actor, action: auditAction, targetType: "room_install", targetId: install.install_id, meta: { reason, before, after: before, changed: false, ...base } });
-    return { ok: true, action, changed: false, reason, before, after: before, audited, room: { id: room.id, slug: room.slug } };
+    return { ok: true, action, changed: false, reason, before, after: before, audited: true, room: { id: room.id, slug: room.slug } };
   }
   const after = { retired_at: retired.retired_at };
+  const resultAudited = await resultAudit(actor, auditAction, "room_install", install.install_id, { changed: true, after, ...base });
   return {
     ok: true,
     action,
     changed: true,
+    audited: true,
+    result_audited: resultAudited,
     reason,
     before,
     after,
@@ -149,7 +167,7 @@ async function runAction(action: AdminAction, args: ToolArgs, ctx: ToolContext) 
         (await sql`
           SELECT action, actor_id, created_at, metadata_json->>'reason' AS reason
             FROM audit_log
-           WHERE action LIKE 'admin.%' AND metadata_json->>'room_id' = ${room.id}
+           WHERE action LIKE 'admin.%' AND metadata_json->>'room_id' = ${room.id} AND created_at > now() - interval '30 days'
            ORDER BY created_at DESC
            LIMIT 5
         `) as Array<{ action: string; actor_id: string | null; created_at: string | Date; reason: string | null }>),
@@ -181,24 +199,31 @@ async function runAction(action: AdminAction, args: ToolArgs, ctx: ToolContext) 
   if (action === "room_enable" || action === "room_disable") {
     if (action === "room_disable" && room.enabled) {
       const gate = await recordingState(room.id, await findBoundInstall(room.id));
-      const override = argBool(args, "override_patient_gate") && /V GO/i.test(reason);
+      const override = argBool(args, "override_patient_gate") && /\bV GO\b/i.test(reason);
       if (gate.gated && !override) {
         await writeAdminAudit({ actor, action: "admin.room_disable.refused", targetType: "room", targetId: room.id, meta: { reason, refused: "patient_gate", why: gate.why, room_id: room.id } });
         return { ok: false, error: "patient_gate", action, why: gate.why, hint: "pass override_patient_gate=true and put 'V GO' in the reason only on V's go" };
       }
     }
-    const out = await setRoomEnabled(room.id, action === "room_enable", actor, reason);
+    const enabling = action === "room_enable";
+    const cur = (await sql`SELECT disabled_at FROM room WHERE id = ${room.id} LIMIT 1`) as Array<{ disabled_at: string | Date | null }>;
+    const was = iso(cur[0]?.disabled_at);
+    if (!(await preAudit(actor, `admin.${action}`, "room", room.id, { reason, before: { disabled_at: was }, after: { disabled_at: enabling ? null : was ?? new Date().toISOString() }, room_id: room.id }))) return AUDIT_DOWN;
+    const out = await setRoomEnabled(room.id, enabling, actor, reason, { skipAudit: true });
     if (!out.found) return { ok: false, error: "unknown_room" };
-    return { ok: true, action, changed: out.changed, reason, before: out.before, after: out.after, audited: out.audited, room: { id: room.id, slug: room.slug } };
+    const resultAudited = await resultAudit(actor, `admin.${action}`, "room", room.id, { changed: out.changed, after: out.after, room_id: room.id });
+    return { ok: true, action, changed: out.changed, reason, before: out.before, after: out.after, audited: true, result_audited: resultAudited, room: { id: room.id, slug: room.slug } };
   }
 
   if (action === "install_mint") {
+    // the pre-row is written BEFORE minting, so it cannot contain the token or the command
+    if (!(await preAudit(actor, "admin.install_mint", "room", room.id, { reason, before: null, after: "(new unenrolled install)", room_id: room.id }))) return AUDIT_DOWN;
     try {
       const m = await mintBootstrapToken({ roomId: room.id, createdBy: ctx.actor });
       const before = null;
       const after = { install_id: m.install_id, expires_at: m.expires_at };
-      // the audit row carries the install id and expiry only: NEVER m.token or m.command
-      const audited = await writeAdminAudit({ actor, action: "admin.install_mint", targetType: "room_install", targetId: m.install_id, meta: { reason, before, after, room_id: room.id, install_id: m.install_id, release_version: m.release.version } });
+      // the result row carries install id, expiry and release version only: NEVER m.token or m.command
+      const audited = await resultAudit(actor, "admin.install_mint", "room_install", m.install_id, { changed: true, after, room_id: room.id, install_id: m.install_id, release_version: m.release.version });
       return {
         ok: true,
         action,
@@ -206,7 +231,8 @@ async function runAction(action: AdminAction, args: ToolArgs, ctx: ToolContext) 
         reason,
         before,
         after,
-        audited,
+        audited: true,
+        result_audited: audited,
         install_id: m.install_id,
         command: m.command,
         expires_at: m.expires_at,
@@ -215,6 +241,7 @@ async function runAction(action: AdminAction, args: ToolArgs, ctx: ToolContext) 
         note: "the command is shown once and is not stored in the audit log; paste it on the Mac in that room",
       };
     } catch (e) {
+      if (e instanceof InstallError) await resultAudit(actor, "admin.install_mint", "room", room.id, { changed: false, error: e.code, room_id: room.id });
       if (e instanceof InstallError) return { ok: false, error: e.code.toLowerCase(), detail: e.message.slice(0, 120) };
       throw e;
     }
@@ -223,8 +250,13 @@ async function runAction(action: AdminAction, args: ToolArgs, ctx: ToolContext) 
   if (action === "bind") {
     const installId = argStr(args, "install_id", 128);
     if (!installId) return badArgs("install_id is required for bind");
-    const out = await bindInstall(room.id, installId, actor, reason);
-    if (!out.ok) return { ok: false, error: out.error, action };
+    if (!(await preAudit(actor, "admin.bind", "room_install", installId, { reason, before: { retired_at: "(retired)" }, after: { retired_at: null }, room_id: room.id, install_id: installId }))) return AUDIT_DOWN;
+    const out = await bindInstall(room.id, installId, actor, reason, { skipAudit: true });
+    if (!out.ok) {
+      await resultAudit(actor, "admin.bind", "room_install", installId, { changed: false, error: out.error, room_id: room.id, install_id: installId });
+      return { ok: false, error: out.error, action };
+    }
+    const resultAudited = await resultAudit(actor, "admin.bind", "room_install", installId, { changed: out.changed, after: out.after, room_id: room.id, install_id: installId });
     return {
       ok: true,
       action,
@@ -232,7 +264,8 @@ async function runAction(action: AdminAction, args: ToolArgs, ctx: ToolContext) 
       reason,
       before: out.before,
       after: out.after,
-      audited: out.audited,
+      audited: true,
+      result_audited: resultAudited,
       room: { id: room.id, slug: room.slug },
       ...(out.changed ? { note: "restart the recorder on that Mac: it stops polling after a 409 RETIRED and will not resume on its own" } : {}),
     };

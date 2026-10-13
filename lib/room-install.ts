@@ -944,7 +944,13 @@ export async function enrolWithToken(token: string): Promise<EnrolResult> {
  * their own `action`). The row is written only when a row was actually retired; a no-op writes nothing
  * here (scribe_admin audits its own no-ops). Best-effort: see lib/admin-audit.
  */
-export type RetireAudit = { actor: AdminActor; reason: string; action?: "admin.install_retire" | "admin.unbind" };
+export type RetireAudit = {
+  actor: AdminActor;
+  reason: string;
+  action?: "admin.install_retire" | "admin.unbind";
+  /** ADMIN-1b: the caller (scribe_admin) owns the audit rows; write none here. */
+  skip?: boolean;
+};
 
 export async function retireInstall(installId: string, audit: RetireAudit): Promise<InstallView | null> {
   try {
@@ -962,7 +968,7 @@ export async function retireInstall(installId: string, audit: RetireAudit): Prom
              input_volume, input_volume_settable
     `) as InstallView[];
     const retired = rows[0] ? normaliseInstall(rows[0]) : null;
-    if (retired) {
+    if (retired && !audit.skip) {
       await writeAdminAudit({
         actor: audit.actor,
         action: audit.action ?? "admin.install_retire",
