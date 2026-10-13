@@ -796,6 +796,7 @@ _D2_SECTIONS = {"Medication", "Follow up", "Further Investigation", "Surgery or 
 _D3 = re.compile(r"\b(?:doctor\s+to|dr\.?\s+to|please|kindly)\b", re.I)
 _D3_PP = re.compile(r"\bto\s+be\s+(\w+(?:ed|en))\b", re.I)
 _D3_PATIENT = {"taken", "applied"}
+_D5 = re.compile(r"unnamed\s+drug|placeholder|dose\s+not\s+stated|held_back|kept\s+out|redacted|lorem", re.I)
 _D4_FIELDS = {"dose", "dosage", "strength", "frequency", "duration", "timing", "date", "drug", "medicine", "name"}
 _D4_MISSING = {"missing", "unknown", "unclear", "absent", "blank", "?"}
 
@@ -866,6 +867,8 @@ def frx_n(art: dict) -> list[str]:
         for m in _D3_PP.finditer(body):
             if m.group(1).lower() not in _D3_PATIENT:
                 e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
+        for m in _D5.finditer(body):
+            e.append(f"FRX-N1 d5 internal pipeline marker '{m.group(0).lower()}' ({where})")
         if _d4(body):
             e.append(f"FRX-N1 d4 missing-field label ({where})")
     low = note.lower()
