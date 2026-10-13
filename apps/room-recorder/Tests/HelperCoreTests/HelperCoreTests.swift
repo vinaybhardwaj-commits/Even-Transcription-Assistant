@@ -104,7 +104,7 @@ private func refusal(_ data: Data) -> HelperRefusal? {
     for command in [HelperCommand.hello(clientVersion: nil), .helperStatus] {
       let reply = try call(service, command)
       #expect(reply.ok)
-      #expect(reply.detail["helper_version"] == "0.2.3-h5")
+      #expect(reply.detail["helper_version"] == "0.2.4-h6")
       #expect(reply.detail["safe_mode"] == "false")
     }
     #expect(try call(HelperService(safeMode: true), .helperStatus).detail["safe_mode"] == "true")
