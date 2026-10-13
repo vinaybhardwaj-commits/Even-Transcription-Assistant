@@ -34,13 +34,23 @@ export const MCP_TOKENS_ENV = "SCRIBE_MCP_TOKENS";
  * `extra:` so audit rows say where a token came from, and the whole map is ignored when the primary is not fully readable (fail closed). Absent = nothing changes.
  */
 export const MCP_TOKENS_EXTRA_ENV = "SCRIBE_MCP_TOKENS_EXTRA";
+/**
+ * ADMIN TOKENS (ADMIN-4, 13 Oct 2026). The "admin" scope (scribe_admin writes) is granted ONLY from this third, hash-only map:
+ *   { "<sha256 hex>": { "actor": "admin:<name>", "scopes": ["read","admin"] } }
+ * An entry is valid only if its actor starts with "admin:" and its scopes are a non-empty subset of ["read","admin"]; anything else drops the entry.
+ * An entry in SCRIBE_MCP_TOKENS / SCRIBE_MCP_TOKENS_EXTRA that lists "admin" LOSES that scope; the single-token fallback never had it. Lookup order: primary, EXTRA, ADMIN.
+ * An ADMIN hash that collides with a primary or EXTRA hash is ignored (it never widens an existing token). No rooms restriction. The tool allowlist (scribe_admin plus
+ * read-scope tools) is the scope set itself: read + admin reaches nothing that needs invoke or write. Logs carry COUNTS (and an 8-char hash prefix on a collision) only.
+ */
+export const MCP_TOKENS_ADMIN_ENV = "SCRIBE_MCP_TOKENS_ADMIN";
+export const ADMIN_ACTOR_PREFIX = "admin:";
 export const MCP_TOKEN_ID = "operator-v1";
 
 export type McpScope = "read" | "invoke" | "write" | "admin";
 /** The scopes the single-token fallback holds. DELIBERATELY WITHOUT "admin" (ADMIN-1 D1): admin is granted only by an explicit entry in SCRIBE_MCP_TOKENS / SCRIBE_MCP_TOKENS_EXTRA. */
 export const ALL_SCOPES: readonly McpScope[] = ["read", "invoke", "write"];
-/** Every scope a token-map entry may list: ALL_SCOPES plus "admin". */
-export const GRANTABLE_SCOPES: readonly McpScope[] = [...ALL_SCOPES, "admin"];
+/** Every scope a PRIMARY / EXTRA map entry may list: ALL_SCOPES only. "admin" is filtered out of those maps (ADMIN-4): it comes from SCRIBE_MCP_TOKENS_ADMIN alone. */
+export const GRANTABLE_SCOPES: readonly McpScope[] = ALL_SCOPES;
 
 /**
  * PER-TOKEN ROOM ALLOWLIST (27 Sep 2026, W40 follow-up: a token that may act on ONE room only,
@@ -209,14 +219,86 @@ export function mergeTokenMaps(primary: TokenMap, extra: TokenMap, primaryOk: bo
   return out;
 }
 
+let adminMemo: { raw: string | undefined; map: TokenMap } | null = null;
+
+/**
+ * PURE apart from one log line the first time a given value is parsed — the admin map. Valid entries only; the log carries the valid and dropped COUNTS, never a hash or an actor.
+ * Missing, blank or malformed JSON gives an empty map.
+ */
+export function parseAdminTokenMap(raw: string | undefined): TokenMap {
+  if (adminMemo && adminMemo.raw === raw) return adminMemo.map;
+  const out: TokenMap = {};
+  let dropped = 0;
+  if (raw && raw.trim()) {
+    let v: unknown;
+    try {
+      v = JSON.parse(raw);
+    } catch {
+      v = null;
+      console.warn(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV} is not valid JSON; ignoring it`);
+    }
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      for (const [hash, entry] of Object.entries(v as Record<string, unknown>)) {
+        const e = entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as Record<string, unknown>) : null;
+        const actor = e && typeof e.actor === "string" ? e.actor.trim().slice(0, 64) : "";
+        const scopes = e && Array.isArray(e.scopes) ? e.scopes : [];
+        const scopesOk = scopes.length > 0 && scopes.every((x) => x === "read" || x === "admin");
+        if (!/^[0-9a-f]{64}$/i.test(hash) || !actor.startsWith(ADMIN_ACTOR_PREFIX) || actor.length <= ADMIN_ACTOR_PREFIX.length || !scopesOk) {
+          dropped += 1;
+          continue;
+        }
+        out[hash.toLowerCase()] = { actor, scopes: new Set(scopes as McpScope[]) };
+      }
+    }
+    console.log(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV}: ${Object.keys(out).length} valid admin entr${Object.keys(out).length === 1 ? "y" : "ies"}, ${dropped} dropped`);
+  }
+  adminMemo = { raw, map: out };
+  return out;
+}
+
+const loggedOnce = new Set<string>();
+const warnOnce = (msg: string) => { if (!loggedOnce.has(msg)) { loggedOnce.add(msg); console.warn(msg); } };
+
+/** PURE — every 64-hex string anywhere in the raw text of the primary and EXTRA envs (lowercased), valid JSON or not, entries valid or not. */
+export function takenHashes(...raws: Array<string | undefined>): Set<string> {
+  const out = new Set<string>();
+  for (const raw of raws) for (const m of (raw ?? "").matchAll(/[0-9a-fA-F]{64}/g)) out.add(m[0].toLowerCase());
+  return out;
+}
+
+/**
+ * The merged map with the admin map behind it. An admin entry is IGNORED when its hash appears anywhere in the RAW primary or EXTRA text (`taken`, so an unreadable
+ * primary or a dropped invalid entry still blocks it) or is in the merged map, and when its actor id equals a primary/EXTRA actor id (mcpActorId form). Logs carry an
+ * 8-char hash prefix or a count only.
+ */
+export function mergeAdminTokens(base: TokenMap, admin: TokenMap, taken: ReadonlySet<string> = new Set()): TokenMap {
+  const out: TokenMap = { ...base };
+  const baseActors = new Set(Object.values(base).map((e) => mcpActorId(e.actor)));
+  let actorClash = 0;
+  for (const [hash, entry] of Object.entries(admin)) {
+    if (hash in out || taken.has(hash)) {
+      warnOnce(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV}: entry ${hash.slice(0, 8)} collides with a primary/extra token; ignored`);
+      continue;
+    }
+    if (baseActors.has(mcpActorId(entry.actor))) { actorClash += 1; continue; }
+    out[hash] = entry;
+  }
+  if (actorClash > 0) warnOnce(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV}: ${actorClash} entr${actorClash === 1 ? "y" : "ies"} dropped: the actor equals a primary/extra actor`);
+  return out;
+}
+
 /** Returns the principal when authorized, else the failure to send. Never throws. */
 export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipal } | { ok: false; failure: McpAuthFailure } {
   const header = req.headers.get("authorization") ?? "";
   const m = /^Bearer\s+(.+)$/i.exec(header.trim());
-  const map = mergeTokenMaps(
-    parseTokenMap(process.env[MCP_TOKENS_ENV]),
-    parseTokenMap(process.env[MCP_TOKENS_EXTRA_ENV], MCP_TOKENS_EXTRA_ENV),
-    primaryFullyParsed(process.env[MCP_TOKENS_ENV]),
+  const map = mergeAdminTokens(
+    mergeTokenMaps(
+      parseTokenMap(process.env[MCP_TOKENS_ENV]),
+      parseTokenMap(process.env[MCP_TOKENS_EXTRA_ENV], MCP_TOKENS_EXTRA_ENV),
+      primaryFullyParsed(process.env[MCP_TOKENS_ENV]),
+    ),
+    parseAdminTokenMap(process.env[MCP_TOKENS_ADMIN_ENV]),
+    takenHashes(process.env[MCP_TOKENS_ENV], process.env[MCP_TOKENS_EXTRA_ENV]),
   );
   const single = process.env[MCP_TOKEN_ENV];
   const configured = Object.keys(map).length > 0 || Boolean(single);
