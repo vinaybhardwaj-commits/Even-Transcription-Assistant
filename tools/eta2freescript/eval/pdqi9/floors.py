@@ -16,7 +16,6 @@ from pathlib import Path
 from ... import validate
 from ...ingest import Consult
 from ...models import ModelClient
-from ...prompts import parse_json
 from .judge import Frozen, cache_path, _write_private
 from .render import validate_prescription
 
@@ -69,17 +68,6 @@ def _list(items: list[dict]) -> str:
     return "\n".join(f"{it['n']}. [{it['kind']}] {it['text']}" for it in items) or "(none)"
 
 
-def _text_fields(node):
-    if isinstance(node, str):
-        yield node
-    elif isinstance(node, dict):
-        for v in node.values():
-            yield from _text_fields(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from _text_fields(v)
-
-
 # ---- judged floors ----------------------------------------------------------------------------------------------
 
 SAID = ("yes", "no", "unclear")
@@ -87,8 +75,12 @@ INVENTED = {"strength", "frequency", "duration"}
 _isint = lambda v: isinstance(v, int) and not isinstance(v, bool)
 
 
+ITEM_KEYS = {"n", "said", "leak", "invented", "dose_precedence_error", "turns"}
+SIGNED_KEYS = {"n", "in_draft", "covered_by"}
+
+
 def _item_ok(x) -> bool:
-    return (isinstance(x, dict) and _isint(x.get("n")) and x.get("said") in SAID and isinstance(x.get("leak"), bool)
+    return (isinstance(x, dict) and set(x) == ITEM_KEYS and _isint(x.get("n")) and x.get("said") in SAID and isinstance(x.get("leak"), bool)
             and isinstance(x.get("invented"), list) and set(x["invented"]) <= INVENTED
             and isinstance(x.get("dose_precedence_error"), bool)
             and isinstance(x.get("turns"), list) and all(isinstance(t, str) for t in x["turns"]))
@@ -96,14 +88,28 @@ def _item_ok(x) -> bool:
 
 def _signed_ok(x, n_review: int) -> bool:
     cb = x.get("covered_by") if isinstance(x, dict) else None
-    return (isinstance(x, dict) and _isint(x.get("n")) and isinstance(x.get("in_draft"), bool) and "covered_by" in x
+    return (isinstance(x, dict) and set(x) == SIGNED_KEYS and _isint(x.get("n")) and isinstance(x.get("in_draft"), bool)
             and (cb is None or (_isint(cb) and 1 <= cb <= n_review)))
 
 
-def _parse_rows(text: str, key: str, n_expected: int, ok) -> list[dict] | None:
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
+
+
+def _exact_json(text: str):
+    """The reply must be exactly one JSON object; a single surrounding code fence is tolerated, nothing else. Else None."""
+    t = (text or "").strip()
+    m = _FENCE.fullmatch(t)
+    t = m.group(1) if m else t
     try:
-        d = parse_json(text)
+        d = json.loads(t)
     except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _parse_rows(text: str, key: str, n_expected: int, ok) -> list[dict] | None:
+    d = _exact_json(text)
+    if d is None:
         return None
     rows = d.get(key) if isinstance(d, dict) and set(d) == {key} else None
     if not isinstance(rows, list) or len(rows) != n_expected or not all(ok(x) for x in rows):
@@ -241,12 +247,46 @@ def dose_precedence(rx: dict, art: dict | None) -> int:
     return errs
 
 
+def printable_text(rx: dict) -> str:
+    """Every replayed Rx text field, rendered under the heading the printable note puts it under, so the section-gated
+    FRX-N1 checks (d1-d4) see it. Medicines: one line each (name strength frequency x duration instructions)."""
+    sec: dict[str, list[str]] = {h: [] for h in ("Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
+                                                 "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice")}
+
+    def add(head, *parts):
+        line = " ".join(p for p in (_s(x) for x in parts) if p)
+        if line:
+            sec[head].append(line)
+
+    for m in rx.get("medicines") or []:
+        add("Medication", m.get("name"), m.get("brand_name"), m.get("generic"), m.get("strength"), m.get("frequency"),
+            "x" if _s(m.get("duration")) else "", m.get("duration"), m.get("instructions"))
+    for i in rx.get("investigations") or []:
+        add("Further Investigation", i.get("name"), i.get("instruction"))
+    for x in rx.get("surgeries") or []:
+        add("Surgery or Procedure", x.get("name"), x.get("scheduled_date"), x.get("notes"))
+    for r in rx.get("referrals") or []:
+        add("Refer to", r.get("speciality"), r.get("notes"))
+    fu = rx.get("follow_up") or {}
+    add("Follow up", fu.get("type"), fu.get("date"), fu.get("instructions"))
+    for d in rx.get("diagnoses") or []:
+        add("Diagnoses", d.get("name"))
+    for c in rx.get("comorbidities") or []:
+        add("Co-morbidities", c.get("name"), c.get("duration"))
+    for a in rx.get("general_advice") or []:
+        add("General Advice", a)
+    add("Examination", rx.get("examination"))
+    add("Presenting Complaint", rx.get("symptoms"))
+    add("Plan of Management", rx.get("management_plan"))
+    return "\n".join(f"{h}:\n" + "\n".join(lines) for h, lines in sec.items() if lines)
+
+
 def printable_count(rx: dict, art: dict | None) -> int:
     n = 0
     if art is not None and isinstance(art.get("note_text"), str):
         prompts = [c.get("prompt") for c in art.get("completion_required") or [] if isinstance(c, dict)]
         n += len(validate.printable_errors(art["note_text"], prompts))
-    return n + sum(len(validate.printable_errors(t, [])) for t in _text_fields(rx))
+    return n + len(validate.printable_errors(printable_text(rx), []))
 
 
 def validator_failures(art: dict | None) -> int:
@@ -304,9 +344,14 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None) -> dict:
     table.append({"floor": "validator pass rate", "bn": None if not n else 1 - vf / n, "b0": None if not b0 else 1 - _sum(b0, "validator_failures") / len(b0),
                   "rule": "== 100 %", "pass": n > 0 and vf == 0})
     r, r0 = comp(bn), comp(b0) if b0 else None
-    pf = any(x["completion"]["parse_failure"] for x in bn)
-    table.append({"floor": "completion recall", "bn": r, "b0": r0, "rule": "Bn >= B0",
-                  "pass": (not pf) and (r is None or r0 is None or r >= r0)})
+    pf = any(x["completion"]["parse_failure"] for x in list(bn) + list(b0 or []))
+    if pf:
+        recall_pass, ok_ = "not_evaluated", False
+    else:
+        ok_ = r is None or r0 is None or r >= r0
+        recall_pass = "pass" if ok_ else "fail"
+    table.append({"floor": "completion recall", "bn": r, "b0": r0, "rule": "Bn >= B0", "recall_pass": recall_pass,
+                  "pass": ok_, "blocks_kept": not ok_})
     table.append({"floor": "unclear items (reported, not a breach)", "bn": _sum(bn, "unclear_items"), "b0": _sum(b0, "unclear_items") if b0 else None, "rule": "info", "pass": True})
     table.append({"floor": "artifacts missing", "bn": sum(1 for x in bn if x["artifact_missing"]), "b0": None, "rule": "info", "pass": True})
     return {"n": n, "rows": table, "all_pass": all(t["pass"] for t in table)}

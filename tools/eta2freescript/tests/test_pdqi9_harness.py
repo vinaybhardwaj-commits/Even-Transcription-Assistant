@@ -389,7 +389,7 @@ def test_printable_floor_calls_b1_printable_errors(monkeypatch):
     seen = []
     monkeypatch.setattr(validate, "printable_errors", lambda t, p: seen.append((t, p)) or [])
     assert floors.printable_count({"general_advice": ["a"]}, {"note_text": "N", "completion_required": [{"prompt": "P"}]}) == 0
-    assert ("N", ["P"]) in seen and ("a", []) in seen
+    assert ("N", ["P"]) in seen and ("General Advice:\na", []) in seen
 
 
 # ---- jev --------------------------------------------------------------------------------------------------------
@@ -569,3 +569,129 @@ def test_run_refuses_loose_frozen_dir_before_any_call(tmp_path):
     with pytest.raises(judge.FrozenError):
         run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc)
     assert not fc.calls
+
+
+# ---- fix round 3 (D1-D6) ----------------------------------------------------------------------------------------
+
+PROBE = {"medicines": [{"name": "Drug", "strength": "dose not stated", "frequency": "to be confirmed", "duration": "TBD"}],
+         "follow_up": {"date": "to be decided"}}
+
+
+def test_d2_printable_floor_renders_fields_under_their_headings():
+    n = floors.printable_count(PROBE, None)
+    assert n >= 4
+    assert floors.printable_count({"medicines": [{"name": "Drug", "strength": "5 mg", "frequency": "bd", "duration": "5 days"}]}, None) == 0
+    t = floors.printable_text({"medicines": [{"name": "Para", "strength": "500 mg", "frequency": "bd", "duration": "3 days", "instructions": "after food"}],
+                               "investigations": [{"name": "CBC"}], "surgeries": [{"name": "X"}], "referrals": [{"speciality": "ENT"}],
+                               "follow_up": {"date": "d"}, "diagnoses": [{"name": "Fever"}], "general_advice": ["rest"],
+                               "examination": "e", "symptoms": "s", "management_plan": "p"})
+    assert "Medication:\nPara 500 mg bd x 3 days after food" in t
+    for h in ("Further Investigation", "Surgery or Procedure", "Refer to", "Follow up", "Diagnoses", "General Advice", "Examination",
+              "Presenting Complaint", "Plan of Management"):
+        assert f"{h}:\n" in t
+
+
+def test_d3_b0_parse_failure_is_not_evaluated_and_blocks_kept():
+    bad = {"missing": None, "covered": None, "parse_failure": True}
+    t = floors.aggregate([floors_row(completion={"missing": 4, "covered": 1, "parse_failure": False})], [floors_row(completion=bad)])
+    row = next(x for x in t["rows"] if x["floor"] == "completion recall")
+    assert row["recall_pass"] == "not_evaluated" and row["pass"] is False and row["blocks_kept"] and not t["all_pass"]
+    t = floors.aggregate([floors_row(completion=bad)], [floors_row()])
+    assert next(x for x in t["rows"] if x["floor"] == "completion recall")["recall_pass"] == "not_evaluated"
+    t = floors.aggregate([floors_row()], [floors_row()])
+    assert next(x for x in t["rows"] if x["floor"] == "completion recall")["recall_pass"] == "pass"
+
+
+def test_d4_floor_parsers_are_exact(frozen, tmp_path):
+    items = floors.numbered_items({"diagnoses": [{"name": "a"}]})
+    ok = json.dumps({"items": [item(1)]})
+    for i, text in enumerate(["Sure! " + ok + " done", ok + " trailing", "```json\n" + ok, ok + "\n```", "[" + ok + "]"]):
+        assert floors.judge_items(FakeClient(lambda *a, t=text: t), frozen, items, "t", tmp_path / f"p{i}", "u", "Bn")["parse_failure"], text
+    extra = json.dumps({"items": [{**item(1), "extra": 1}]})
+    assert floors.judge_items(FakeClient(lambda *a: extra), frozen, items, "t", tmp_path / "e", "u", "Bn")["parse_failure"]
+    for i, text in enumerate([ok, "```json\n" + ok + "\n```", "```\n" + ok + "\n```"]):
+        assert not floors.judge_items(FakeClient(lambda *a, t=text: t), frozen, items, "t", tmp_path / f"g{i}", "u", "Bn")["parse_failure"]
+    signed = [{"n": 1, "kind": "diagnosis", "text": "a"}]
+    row = {"n": 1, "in_draft": True, "covered_by": None}
+    for i, text in enumerate([json.dumps({"signed": [{**row, "extra": 1}]}), "ok " + json.dumps({"signed": [row]})]):
+        assert floors.completion_counts(FakeClient(lambda *a, t=text: t), frozen, signed, [], [], "t", tmp_path / f"s{i}", "u", "Bn")["parse_failure"]
+    assert not floors.completion_counts(FakeClient(lambda *a: json.dumps({"signed": [row]})), frozen, signed, [], [], "t", tmp_path / "sg", "u", "Bn")["parse_failure"]
+
+
+def _scores(a, b, b0):
+    """scores dict for 6 consults, one combo: arms A, Bn, B0 each a list of 9-item score lists."""
+    d = {}
+    for i in range(6):
+        for arm, v in (("A", a), ("Bn", b), ("B0", b0)):
+            d[(f"u{i}", arm, "opus/none")] = {"total": sum(v[i]), "items": v[i]}
+    return d
+
+
+def test_d1_item_level_comparisons_are_not_the_total():
+    A = [[3] * 9 for _ in range(6)]
+    # Bn: succinct item (index 6) up 2, thorough (index 2) down 1, others equal
+    Bn = [[3, 3, 2, 3, 3, 3, 5, 3, 3] for _ in range(6)]
+    sc = _scores(A, Bn, A)
+    suc = run.compare_family(sc, [f"u{i}" for i in range(6)], ["opus/none"], "Bn", "A", run.SUCCINCT)["opus/none"]
+    tot = run.compare_family(sc, [f"u{i}" for i in range(6)], ["opus/none"], "Bn", "A")["opus/none"]
+    tho = run.compare_family(sc, [f"u{i}" for i in range(6)], ["opus/none"], "Bn", "B0", run.THOROUGH)["opus/none"]
+    assert suc["median_diff"] == 2 and suc["mean_diff"] == 2 and suc["p"] == pytest.approx(0.03125) and suc["rank_biserial"] == 1
+    assert tot["median_diff"] == 1 and tho["median_diff"] == -1 and tho["mean_diff"] == -1
+
+
+def test_d1_end_to_end_row_has_item_total_and_target_fields(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:2])
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=FakeClient(responder)) == 0
+    row = json.loads((tmp_path / "SCOREBOARD.R1.json").read_text())
+    for k in ("succinct_bn_minus_a", "thorough_bn_minus_b0", "total_bn_minus_a", "total_bn_minus_b0"):
+        assert set(row[k]) == {f"{j}/{r}" for j in judge.JUDGES for r in judge.REFS} and "mean_diff" in row[k]["opus/none"]
+    t = row["target_12_7"]
+    assert set(t) >= {"items_all_gt", "total_holm_lt_0_05_median_ge_2", "thorough_mean_ge_minus_0_1", "direction_holds_sonnet", "met"}
+    assert t["met"] is False   # identical scores everywhere
+    # D6: every scores.json and floors.json row carries the frozen hashes, render version and split sha
+    for r in json.loads((tmp_path / "out" / "scores.json").read_text()):
+        assert set(r["frozen_hashes"]) == set(judge.FROZEN_FILES) and r["render_version"] == "render-v2" and r["split_sha"] == r["frozen_hashes"]["split-v1.json"]
+    fl = json.loads((tmp_path / "out" / "floors.json").read_text())
+    assert fl["Bn"] and fl["B0"]
+    for r in fl["Bn"] + fl["B0"]:
+        assert set(r["frozen_hashes"]) == set(judge.FROZEN_FILES) and r["render_version"] == "render-v2" and r["split_sha"]
+
+
+def test_d1_target_check_logic():
+    combos = [f"{j}/{r}" for j in judge.JUDGES for r in judge.REFS]
+    good = {"median_diff": 2, "p_holm": 0.01, "mean_diff": 0.0}
+    gt = dict.fromkeys(combos, 9)
+    assert run.target_check(gt, dict.fromkeys(combos, good), dict.fromkeys(combos, good), combos)["met"]
+    assert not run.target_check({**gt, "opus/none": 8}, dict.fromkeys(combos, good), dict.fromkeys(combos, good), combos)["met"]
+    assert not run.target_check(gt, dict.fromkeys(combos, {**good, "median_diff": 1}), dict.fromkeys(combos, good), combos)["met"]
+    assert not run.target_check(gt, dict.fromkeys(combos, good), dict.fromkeys(combos, {**good, "mean_diff": -0.2}), combos)["met"]
+    assert not run.target_check(gt, {**dict.fromkeys(combos, good), "sonnet/none": {**good, "median_diff": -1}}, dict.fromkeys(combos, good), combos)["met"]
+
+
+class _J:
+    def __init__(self, fail): self.fail = fail
+    def call(self, tool, args):
+        if self.fail:
+            raise RuntimeError("x")
+        return {"structuredContent": {"answers": {k: {"noul": 0.9} for k in args["questions"]}, "model": "m"}}
+
+
+def _jev_main(tmp_path, monkeypatch, check):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    monkeypatch.setattr(run.jev_lines, "check_lines", check)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:2])
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=FakeClient(responder)) == 0
+    return json.loads((tmp_path / "SCOREBOARD.R1.json").read_text())["jev"]
+
+
+def test_d5_jev_status_counts_error_ok_and_not_run(tmp_path, monkeypatch):
+    err = {"status": "error", "reason": "JevError"}
+    j = _jev_main(tmp_path, monkeypatch, lambda *a, **k: err)
+    assert j["status"] == "failed" and j["consults_error"] == 2 and j["consults_ok"] == 0 and j["summary"].startswith("jev: failed (2 consults")
+    ok = {"status": "ok", "lines": 3, "low": [], "errors": 0, "model": "m", "calls": 1}
+    seq = iter([ok, err])
+    j = _jev_main(tmp_path / "b", monkeypatch, lambda *a, **k: next(seq))
+    assert j["status"] == "partial" and (j["consults_ok"], j["consults_error"], j["consults_not_run"]) == (1, 1, 0) and "error 1" in j["summary"]

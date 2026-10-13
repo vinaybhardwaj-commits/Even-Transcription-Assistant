@@ -53,17 +53,38 @@ def _agg(vals: list[float]) -> dict:
     return {"median": statistics.median(vals), "mean": statistics.fmean(vals), "n": len(vals)} if vals else {"median": None, "mean": None, "n": 0}
 
 
-def _paired(scores: dict, uids: list[str], combo: str, a: str, b: str) -> tuple[list[float], list[float]]:
+SUCCINCT = judge.ITEM_KEYS.index("succinct")
+THOROUGH = judge.ITEM_KEYS.index("thorough")
+
+
+def _paired(scores: dict, uids: list[str], combo: str, a: str, b: str, item: int | None = None) -> tuple[list[float], list[float]]:
+    """Paired values of arm a and arm b on the PDQI-9 total (item None) or on one item (0-based index into ITEM_KEYS)."""
     pairs = [(scores[(u, a, combo)], scores[(u, b, combo)]) for u in uids if scores.get((u, a, combo)) and scores.get((u, b, combo))]
-    return [x["total"] for x, _ in pairs], [y["total"] for _, y in pairs]
+    pick = (lambda x: x["total"]) if item is None else (lambda x: x["items"][item])
+    return [pick(x) for x, _ in pairs], [pick(y) for _, y in pairs]
 
 
-def compare_family(scores, uids, combos, a, b) -> dict:
-    res = {c: stats.compare(*_paired(scores, uids, c, a, b)) for c in combos}
+def compare_family(scores, uids, combos, a, b, item: int | None = None) -> dict:
+    res = {c: stats.compare(*_paired(scores, uids, c, a, b, item)) for c in combos}
     adj = stats.holm([res[c]["p"] for c in combos])
     for c, p in zip(combos, adj):
         res[c]["p_holm"] = p
     return res
+
+
+def target_check(items_gt: dict, total_bn_a: dict, thorough: dict, combos: list[str]) -> dict:
+    """Spec 12.7 as data. Each condition is judged over every combo of the named judge (all of its references).
+    items_all_gt: all 9 item means Bn > A. total_holm: Bn-A total Holm p < 0.05 and median diff >= 2 (opus combos).
+    thorough_mean: thorough-item mean diff Bn-B0 >= -0.1 (opus combos). sonnet_direction: Bn-A total median diff > 0
+    (sonnet combos)."""
+    by = lambda j: [c for c in combos if c.startswith(j + "/")]
+    op, so = by("opus"), by("sonnet")
+    all9 = all(items_gt[c] == judge.N_ITEMS for c in op)
+    tot = all((total_bn_a[c].get("p_holm") is not None and total_bn_a[c]["p_holm"] < 0.05 and (total_bn_a[c]["median_diff"] or 0) >= 2) for c in op)
+    thor = all(thorough[c]["mean_diff"] is not None and thorough[c]["mean_diff"] >= -0.1 for c in op)
+    sdir = all((total_bn_a[c]["median_diff"] or 0) > 0 for c in so)
+    return {"items_all_gt": all9, "total_holm_lt_0_05_median_ge_2": tot, "thorough_mean_ge_minus_0_1": thor, "direction_holds_sonnet": sdir,
+            "met": all9 and tot and thor and sdir, "basis": "opus combos for the first three, sonnet combos for direction"}
 
 
 def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_client=None) -> int:
@@ -122,20 +143,28 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         scores[(u, arm, f"{j}/{r}")] = None if res["parse_failure"] else {"total": sum(res["scores"]), "items": res["scores"]}
     parse_failures = sum(1 for v in scores.values() if v is None)
 
+    stamp = {"frozen_hashes": frozen.hashes, "render_version": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"]}
     fl = {"Bn": [], "B0": []}
     for u in uids:
         for kind, art in (("Bn", art_bn[u]), ("B0", art_b0[u])):
-            fl[kind].append(floors.consult_floors(client, frozen, uid=u, arm_kind=kind, rx=arms[kind][u]["rx"], signed_rx=arms["A"][u]["rx"],
+            fl[kind].append(stamp | floors.consult_floors(client, frozen, uid=u, arm_kind=kind, rx=arms[kind][u]["rx"], signed_rx=arms["A"][u]["rx"],
                                                   art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors"))
     table = floors.aggregate(fl["Bn"], fl["B0"])
 
     jev_res = {u: jev_lines.check_lines((art_bn[u] or {}).get("note_text") or "", transcript[u], jev_client) for u in uids}
     ok = [v for v in jev_res.values() if v["status"] == "ok"]
-    jev = {"status": "ok" if ok else next(iter(jev_res.values()))["status"], "consults": len(ok), "lines": sum(v["lines"] for v in ok),
-           "low": sum(len(v["low"]) for v in ok), "errors": sum(v["errors"] for v in ok)}
+    n_err = sum(1 for v in jev_res.values() if v["status"] == "error")
+    n_not = len(jev_res) - len(ok) - n_err
+    reasons = sorted({v.get("reason", "?") for v in jev_res.values() if v["status"] != "ok"})
+    jev = {"status": "ok" if len(ok) == len(jev_res) else "failed" if n_err == len(jev_res) else "not run" if n_not == len(jev_res) else "partial",
+           "consults": len(ok), "consults_ok": len(ok), "consults_error": n_err, "consults_not_run": n_not, "lines": sum(v["lines"] for v in ok),
+           "low": sum(len(v["low"]) for v in ok), "errors": sum(v["errors"] for v in ok), "reasons": reasons}
     jev["models"] = sorted({v["model"] for v in ok if v.get("model")})
-    jev["summary"] = (f"{jev['low']}/{jev['lines']} lines P(yes)<0.5 ({jev['errors']} errors; model {','.join(jev['models']) or '?'})" if ok else
-                      f"jev: not run ({next(iter(jev_res.values())).get('reason', jev['status'])})")
+    counts = f"ok {len(ok)}, error {n_err}, not_run {n_not}"
+    detail = f"{jev['low']}/{jev['lines']} lines P(yes)<0.5 ({jev['errors']} errors; model {','.join(jev['models']) or '?'})"
+    jev["summary"] = (f"jev: failed ({n_err} consults; {', '.join(reasons)})" if jev["status"] == "failed" else
+                      f"jev: not run ({', '.join(reasons)})" if jev["status"] == "not run" else
+                      f"{detail}" if jev["status"] == "ok" else f"{detail}; consults {counts} ({', '.join(reasons)})")
 
     totals, item_means, gt = {}, {}, {}
     for c in combos:
@@ -144,6 +173,8 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
                                for i in range(judge.N_ITEMS)] for arm in ARMS}
         gt[c] = sum(1 for x, y in zip(item_means[c]["Bn"], item_means[c]["A"]) if x is not None and y is not None and x > y)
 
+    total_a = compare_family(scores, uids, combos, "Bn", "A")
+    thorough = compare_family(scores, uids, combos, "Bn", "B0", THOROUGH)
     cost = round(sum(json.loads(x).get("usd", 0) for x in ledger.path.read_text().splitlines() if x.strip()), 5) if ledger.path.exists() else 0.0
     row = {
         "round": a.round, "code_sha": code_sha(), "prompt_sha": frozen.prompt_sha(*[n for n in judge.FROZEN_FILES if n.startswith("pdqi9")]),
@@ -152,15 +183,17 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "render": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"], "split": split_name, "candidate": a.candidate,
         "frozen_hashes": frozen.hashes, "n": len(uids), "uids_dropped_not_in_all_arms": dropped_uids, "parse_failures": parse_failures,
         "totals": totals, "item_means": item_means, "items_bn_gt_a": gt,
-        "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A"),
-        "thorough_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
+        "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A", SUCCINCT),
+        "thorough_bn_minus_b0": thorough,
+        "total_bn_minus_a": total_a, "total_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
+        "target_12_7": target_check(gt, total_a, thorough, combos),
         "floors": table, "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
         "rendered_chars_mean": {arm: statistics.fmean(len(texts[(u, arm)]) for u in uids) for arm in ARMS},
         "cost_usd": cost, "verdict": "PENDING (freescript-lead)",
     }
     (out / "floors.json").write_text(json.dumps(fl, indent=1, default=str), encoding="utf-8")
     (out / "jev.json").write_text(json.dumps(jev_res, indent=1), encoding="utf-8")
-    (out / "scores.json").write_text(json.dumps([{"uid": u, "arm": ar, "combo": c, "note_id": judge.note_id(u, ar), **(v or {"parse_failure": True})}
+    (out / "scores.json").write_text(json.dumps([{"uid": u, "arm": ar, "combo": c, "note_id": judge.note_id(u, ar), **stamp, **(v or {"parse_failure": True})}
                                                  for (u, ar, c), v in sorted(scores.items())], indent=1), encoding="utf-8")
     jp = scoreboard.write(row, Path(a.scoreboard))
     print(f"scored {len(uids)} consults, split {split_name}, floors {'PASS' if table['all_pass'] else 'FAIL'}, row -> {jp.name}")

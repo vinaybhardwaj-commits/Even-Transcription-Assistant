@@ -95,6 +95,11 @@ def median_diff(x: list[float], y: list[float]) -> float | None:
     return statistics.median(d) if d else None
 
 
+def mean_diff(x: list[float], y: list[float]) -> float | None:
+    d = paired_diffs(x, y)
+    return statistics.fmean(d) if d else None
+
+
 def compare(x: list[float], y: list[float]) -> dict:
     w = wilcoxon(x, y)
-    return {**w, "median_diff": median_diff(x, y), "rank_biserial": rank_biserial(x, y)}
+    return {**w, "median_diff": median_diff(x, y), "mean_diff": mean_diff(x, y), "rank_biserial": rank_biserial(x, y)}
