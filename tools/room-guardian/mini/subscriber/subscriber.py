@@ -26,7 +26,7 @@ def parse_topic(topic):
 
 class RouterSink:
     """Hands Mini-detected alerts straight to the router (C4 R2 ruling 2): same case open / ack / re-page / close path and bus post format as server
-    alerts, source=mini in the body. They never touch the server outbox. Case ids come from the store (>= LOCAL_ID_BASE)."""
+    alerts, source=mini in the body. They never touch the server outbox. Case ids come from the store's local_seq counter (LOCAL_ID_BASE + seq)."""
     def __init__(self, router, bus_factory):
         self.router, self.bus_factory = router, bus_factory
 
@@ -42,7 +42,7 @@ class RouterSink:
         return [c["room_id"] for c in self.router.store.list_open() if c["kind"] == "guardian_quiet"]
 
     def _open(self, room, kind, now):
-        row = {"id": self.router.store.next_local_id(), "kind": kind, "room_ids": [room], "room_name": room}
+        row = {"id": self.router.store.alloc_local_id(), "kind": kind, "room_ids": [room], "room_name": room}
         self._with_bus(lambda bus: self.router.on_row(bus, row))
 
     def guardian_quiet(self, room, quiet_s, now):

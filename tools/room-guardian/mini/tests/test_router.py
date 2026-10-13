@@ -197,11 +197,50 @@ class DurabilityTests(unittest.TestCase):
             self.assertEqual((len(files), files[0]), (14, "cases-20261003-020000.sqlite"))
             self.assertEqual(ar.SqliteStore(last).get_open("r1", "recorder_off")["first_id"], 100)
 
-    def test_local_ids_stay_above_server_ids(self):
-        st = ar.SqliteStore(); self.assertEqual(st.next_local_id(), 1_000_000_000_001)
-        st.insert({"first_id": 1_000_000_000_005, "room_id": "r", "kind": "k", "opened_at": 1, "last_paged_at": None, "page_count": 0, "suppressed_count": 0,
+    def test_local_ids_come_from_a_monotonic_counter_not_from_cases(self):
+        st = ar.SqliteStore()
+        self.assertEqual([st.alloc_local_id() for _ in range(3)], [1_000_000_000_001, 1_000_000_000_002, 1_000_000_000_003])
+        st.insert({"first_id": 1_000_000_000_999, "room_id": "r", "kind": "k", "opened_at": 1, "last_paged_at": None, "page_count": 0, "suppressed_count": 0,
                    "acked_by": None, "acked_at": None, "closed_at": None, "close_reason": None})
-        self.assertEqual(st.next_local_id(), 1_000_000_000_006)
+        self.assertEqual(st.alloc_local_id(), 1_000_000_000_004)          # not MAX(first_id)+1
+
+    def test_counter_survives_restart(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "c.sqlite"); st = ar.SqliteStore(p); st.alloc_local_id(); st.alloc_local_id(); st.db.close()
+            self.assertEqual(ar.SqliteStore(p).alloc_local_id(), 1_000_000_000_003)
+
+    def test_refuter_probe_duplicate_heal_then_other_room_quiet_is_not_dropped(self):
+        with tempfile.TemporaryDirectory() as t:
+            clock, bus = Clock(TUE_11), FakeBus()
+            router = ar.Router(ar.SqliteStore(), lambda: bus, clock)
+            subr = sb.Subscriber(os.path.join(t, "d"), t, ["r1", "r2"], sb.RouterSink(router, lambda: bus), clock)
+            subr.on_line("kiosk/r1/heal", '{"result":"escalated"}'); subr.on_line("kiosk/r1/heal", '{"result":"escalated"}')
+            clock.adv(121); subr.on_line("kiosk/r1/health", "{}")
+            self.assertEqual(subr.check_quiet(), ["r2"])
+            self.assertIsNotNone(router.store.get_open("r2", "guardian_quiet"))
+            subr.on_line("kiosk/r1/heal", '{"result":"escalated"}')
+            self.assertEqual(router.store.get_open("r1", "heal_escalated")["suppressed_count"], 2)
+
+    def test_100_interleaved_mini_duplicates_and_new_alerts_drop_nothing(self):
+        with tempfile.TemporaryDirectory() as t:
+            clock, bus = Clock(TUE_11), FakeBus()
+            router = ar.Router(ar.SqliteStore(), lambda: bus, clock)
+            sink = sb.RouterSink(router, lambda: bus)
+            expect_dups = {}
+            opened = 0
+            for i in range(100):
+                room = f"r{i % 7}"
+                if i % 3 == 0:                                   # new alert for a fresh room, then close it so the id space keeps moving
+                    fresh = f"x{i}"; sink.heal_escalated(fresh, 0); opened += 1
+                    self.assertIsNotNone(router.store.get_open(fresh, "heal_escalated"), i)
+                    if i % 2 == 0: sink.heal_resolved(fresh, 0)
+                else:                                            # duplicates on a long-lived room
+                    sink.heal_escalated(room, 0)
+                    first = (room not in expect_dups); expect_dups[room] = expect_dups.get(room, -1) + 1; opened += first
+            for room, n in expect_dups.items():
+                self.assertEqual(router.store.get_open(room, "heal_escalated")["suppressed_count"], n, room)
+            routed = router.store.db.execute("SELECT COUNT(*) FROM routed_ids").fetchone()[0]
+            self.assertEqual(routed, 100)                       # every one of the 100 Mini alerts got its own, once-only id
 
 
 class EndToEndQuietTests(unittest.TestCase):
@@ -309,6 +348,41 @@ class KitLateSetTests(unittest.TestCase):
         self.assertTrue(self.store.is_routed(5))
         self.clock.adv(7 * 86400 + 61); self.relay.poll_once()
         self.assertFalse(self.store.is_routed(5))
+
+
+class StoreFailureWatchTests(unittest.TestCase):
+    def test_pages_on_third_consecutive_failing_poll_rate_limited_30_min_reset_by_clean_poll(self):
+        import router_relay as rr
+        clock, posts = Clock(TUE_11), []
+        w = rr.StoreFailureWatch(clock); post = lambda *a: posts.append(a)
+        def poll(err):
+            clock.adv(60)
+            if err: w.note_error()
+            return w.end_poll(post)
+        self.assertEqual([poll(True), poll(True)], [False, False])
+        self.assertTrue(poll(True)); self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][0], "ROOM ALERT ROUTER STORE FAILING"); self.assertEqual(posts[0][2], "urgent")
+        for _ in range(29): self.assertFalse(poll(True))                  # inside 30 min: silent
+        self.assertTrue(poll(True)); self.assertEqual(len(posts), 2)
+        self.assertFalse(poll(False)); self.assertEqual([poll(True), poll(True)], [False, False])   # clean poll reset the count
+
+    def test_pages_when_errors_outlast_the_late_window_even_below_three_polls(self):
+        import router_relay as rr
+        clock, posts = Clock(TUE_11), []
+        w = rr.StoreFailureWatch(clock); w.note_error(); self.assertFalse(w.end_poll(lambda *a: posts.append(a)))
+        clock.adv(200); w.note_error(); self.assertTrue(w.end_poll(lambda *a: posts.append(a)))
+
+    def test_through_the_kit_relay_a_dead_store_pages_gating_lead_and_fleet_once(self):
+        kit_path = KitLateSetTests.KIT
+        if not os.path.exists(kit_path): self.skipTest("kit relay not on this machine")
+        h = KitLateSetTests("test_store_error_in_on_row_is_not_fatal_to_the_poll"); h.setUp()
+        class Boom(ar.SqliteStore):
+            def insert(self, case): raise RuntimeError("disk full")
+        h.build(Boom(os.path.join(h.tmp.name, "b.sqlite"))); h.add(5, "offline")
+        h.polls(4)
+        pages = [m for m in h.bus.msgs if m["subject"] == "ROOM ALERT ROUTER STORE FAILING"]
+        self.assertEqual(len(pages), 1)                                   # polls 3 and 4 fail; one page, rate limited
+        h.tmp.cleanup()
 
 
 class ThresholdAndSourceTests(unittest.TestCase):

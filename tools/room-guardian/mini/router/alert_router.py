@@ -228,6 +228,8 @@ class SqliteStore:
         self.db.execute("CREATE TABLE IF NOT EXISTS room_alert_case (first_id INTEGER PRIMARY KEY, room_id TEXT NOT NULL, kind TEXT NOT NULL, opened_at REAL NOT NULL, "
                         "last_paged_at REAL, page_count INTEGER NOT NULL DEFAULT 0, suppressed_count INTEGER NOT NULL DEFAULT 0, acked_by TEXT, acked_at REAL, closed_at REAL, close_reason TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS routed_ids (row_id INTEGER PRIMARY KEY, routed_at REAL NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS local_seq (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL)")
+        self.db.execute("INSERT OR IGNORE INTO local_seq (id, seq) VALUES (1, 0)")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS open_uq ON room_alert_case (room_id, kind) WHERE closed_at IS NULL")
 
     def get_open(self, room, kind):
@@ -256,10 +258,18 @@ class SqliteStore:
     def prune_routed(self, before):
         self.db.execute("DELETE FROM routed_ids WHERE routed_at < ?", (before,))
 
-    def next_local_id(self):
-        """An id for a Mini-detected case: above every id seen, never below LOCAL_ID_BASE."""
-        r = self.db.execute("SELECT MAX(first_id) FROM room_alert_case").fetchone()[0]
-        return max(r or 0, LOCAL_ID_BASE) + 1
+    def alloc_local_id(self):
+        """A Mini-local case id: LOCAL_ID_BASE + a monotonic counter in local_seq. Never derived from existing cases or routed ids, so a duplicate
+        (which makes a routed id but no case) cannot cause a reuse. The increment commits on its own before the id is used; a burnt id is harmless."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("UPDATE local_seq SET seq = seq + 1 WHERE id = 1")
+            seq = self.db.execute("SELECT seq FROM local_seq WHERE id = 1").fetchone()[0]
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+        return LOCAL_ID_BASE + seq
 
     def backup_to(self, dest_dir, keep=14, stamp=None):
         """Online copy via the sqlite backup API (safe with WAL). Keeps the newest `keep` files named cases-YYYYMMDD-HHMMSS.sqlite."""

@@ -16,17 +16,49 @@ def load_kit(path=KIT):
     return mod
 
 
+class StoreFailureWatch:
+    """Pages once when on_row store errors persist: 3 consecutive polls with an error, or errors lasting longer than the kit's late window.
+    Rate limit: one page per PAGE_EVERY_S. A clean poll resets it. In-memory: a restart re-counts from zero."""
+    CONSECUTIVE, WINDOW_S, PAGE_EVERY_S = 3, 180, 1800
+
+    def __init__(self, clock):
+        self.clock, self.errors, self.consec, self.first_at, self.last_page = clock, 0, 0, None, None
+
+    def note_error(self):
+        self.errors += 1
+
+    def end_poll(self, post):
+        """Call once per poll. `post(subject, body, priority, thread_id)`. Returns True if it paged."""
+        now, errs, self.errors = self.clock(), self.errors, 0
+        if not errs:
+            self.consec, self.first_at = 0, None
+            return False
+        self.consec += 1
+        self.first_at = self.first_at if self.first_at is not None else now
+        if self.consec < self.CONSECUTIVE and now - self.first_at <= self.WINDOW_S:
+            return False
+        if self.last_page is not None and now - self.last_page < self.PAGE_EVERY_S:
+            return False
+        self.last_page = now
+        post("ROOM ALERT ROUTER STORE FAILING", f"The alert router could not store {errs} row(s) this poll; errors on {self.consec} consecutive polls "
+             f"({int(now - self.first_at)} s). Rows are retried only while they stay in the relay's late window, so cases may be lost. "
+             "Check the case store (cases.sqlite) on the Mini.", "urgent", f"room-alert-router-store-{int(now)}")
+        return True
+
+
 def make_relay_class(kit):
     class RouterRelay(kit.Relay):
         def __init__(self, router, *a, **kw):
             super().__init__(*a, **kw)
             self.router = router
+            self.store_watch = StoreFailureWatch(self.clock)
 
         def _deliver(self, bus, row):
             posted = super()._deliver(bus, row)
             try:                                            # a store/router error must never stop the cursor, last-poll or tick (R3); the row is retried on its next replay
                 self.router.on_row(RouterBus(bus), row)     # on_row routes each row id once, so the kit's `late` replays are no-ops
             except Exception as e:
+                self.store_watch.note_error()
                 kit.log(f"router on_row failed for row {row.get('id')}: {e.__class__.__name__}: {kit.one_line(e, 100)}")
             return posted
 
@@ -35,7 +67,13 @@ def make_relay_class(kit):
             bus = None
             try:
                 bus = self.bus_factory()
-                self.router.tick(RouterBus(bus))
+                rb = RouterBus(bus)
+                try:
+                    self.router.tick(rb)
+                except Exception as e:                       # a store failure in tick counts toward the store-failing page
+                    self.store_watch.note_error()
+                    kit.log(f"router tick failed: {e.__class__.__name__}: {kit.one_line(e, 100)}")
+                self.store_watch.end_poll(rb.post)
             except Exception as e:                           # router trouble must not stop the plain relay; the case table keeps its state
                 kit.log(f"router tick failed: {e.__class__.__name__}: {kit.one_line(e, 100)}")
             finally:
