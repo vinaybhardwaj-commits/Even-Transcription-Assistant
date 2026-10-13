@@ -837,12 +837,10 @@ def _has_content(node) -> bool:
     return node is not None and node is not False and node != 0
 
 
-def frx_n(art: dict) -> list[str]:
+def printable_errors(text: str, prompts: list[str]) -> list[str]:
+    """The FRX-N1 errors for one note_text and its completion prompts (index = completion_required index)."""
     e: list[str] = []
-    note = art.get("note_text") or ""
-    if not isinstance(note, str):
-        return e
-    note = unicodedata.normalize("NFKC", note)
+    note = unicodedata.normalize("NFKC", text or "")
     if "[" in note or "]" in note:
         e.append("FRX-N1 note_text contains a bracket")
     if "{" in note or "}" in note:
@@ -879,10 +877,19 @@ def frx_n(art: dict) -> list[str]:
         if sec in _D2_SECTIONS and _d4(body):
             e.append(f"FRX-N1 d4 missing-field label ({where})")
     low = note.lower()
-    for i, c in enumerate(art.get("completion_required") or []):
-        pr = c.get("prompt") if isinstance(c, dict) else None
+    for i, pr in enumerate(prompts):
         if isinstance(pr, str) and len(pr.strip()) >= _MIN_PROMPT_LEN and pr.strip().lower() in low:
             e.append(f"FRX-N1 completion_required[{i}] prompt text is in note_text")
+    return e
+
+
+def frx_n(art: dict) -> list[str]:
+    note = art.get("note_text") or ""
+    if not isinstance(note, str):
+        return []
+    prompts = [c.get("prompt") if isinstance(c, dict) else None for c in art.get("completion_required") or []]
+    e = printable_errors(note, prompts)
+    note = unicodedata.normalize("NFKC", note)
     if _has_content(art.get("gp_extraction")):
         if not any(body.strip() for _, body, _, _ in _note_entries(note)):
             e.append("FRX-N2 gp_extraction has content but note_text has no non-empty section")

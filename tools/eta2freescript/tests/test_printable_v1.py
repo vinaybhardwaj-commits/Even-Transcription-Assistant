@@ -7,7 +7,7 @@ from conftest import CONSULTS, build_artifact, stage_a
 from tools.eta2freescript.boundary import Boundary
 from tools.eta2freescript.ingest import load_consult
 from tools.eta2freescript.note import BRACKET_SPAN, HEADINGS, render_note, sanitize_note
-from tools.eta2freescript.validate import check, frx_n
+from tools.eta2freescript.validate import check, frx_n, printable_errors
 
 
 def note(**sections):
@@ -232,3 +232,12 @@ def test_all_fixtures_render_without_n1_n2(uid):
     art = build_artifact(c, stage_a(uid), Boundary())
     assert [e for e in frx_n(art)] == []
     assert not [e for e in check(art) if e.startswith(("FRX-N1", "FRX-N2"))]
+
+
+def test_printable_errors_matches_frx_n_n1():
+    prompts = ["Confirm the dosage with doctor"]
+    cases = [note(**c) for c in PASS_CASES] + [note(**{h: b}) for h, b in FAIL_CASES]
+    cases.append(note(**{"Plan of Management": "Confirm the dosage with doctor"}))
+    for text in cases:
+        art = {"note_text": text, "completion_required": [{"prompt": p} for p in prompts], "gp_extraction": {}}
+        assert [e for e in frx_n(art) if e.startswith("FRX-N1")] == printable_errors(text, prompts)
