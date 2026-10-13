@@ -28,6 +28,7 @@ import jsonschema
 
 from .followup import add_interval
 from .guard import CONTINUE_QUOTE, NUM_WORDS, NUM_WORDS_HI, numerals
+from .note import FILLER
 from .medication_safety import (
     dose_bound, is_dose_change, molecules, native_supports, plausible_strength, resolvable, same_molecules,
 )
@@ -782,6 +783,66 @@ def frx(art: dict) -> list[str]:
     return e
 
 
+# printable-v1 (spec 7.3, 8.2). Structural rules on note_text; the phrase list is examples, not exhaustive.
+_INSTRUCTION_PHRASES = re.compile(
+    r"\b(?:doctor\s+to\s+verify|to\s+be\s+verified|to\s+be\s+confirmed|verify|tbd|tbc|not\s+specified|unspecified"
+    r"|unnamed\s+drug|placeholder|dose\s+not\s+stated)\b", re.I)
+_MIN_PROMPT_LEN = 8
+
+
+def _note_entries(note: str):
+    """Yield (heading or None, body, is_diagnosis_entry) for each line body. Un-headed lines belong to the last heading."""
+    cur = None
+    for line in (note or "").split("\n"):
+        head, sep, body = line.partition(":")
+        if sep and head in V.HEADINGS:
+            cur = head
+            yield head, body, cur == "Diagnoses"
+        elif line.strip():
+            yield None, line, cur == "Diagnoses"
+
+
+def _has_content(node) -> bool:
+    if isinstance(node, dict):
+        return any(_has_content(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_content(v) for v in node)
+    if isinstance(node, str):
+        return bool(node.strip())
+    return node is not None and node is not False and node != 0
+
+
+def frx_n(art: dict) -> list[str]:
+    e: list[str] = []
+    note = art.get("note_text") or ""
+    if not isinstance(note, str):
+        return e
+    if "[" in note or "]" in note:
+        e.append("FRX-N1 note_text contains a bracket")
+    if "{{" in note or "}}" in note:
+        e.append("FRX-N1 note_text contains a template brace")
+    for head, body, is_dx in _note_entries(note):
+        where = head or "un-headed line"
+        text = body.lstrip()
+        if is_dx and text.startswith("?"):
+            text = text[1:]
+        if "?" in text:
+            e.append(f"FRX-N1 '?' outside the Diagnoses differential prefix ({where})")
+        if FILLER.match(body):
+            e.append(f"FRX-N1 filler line body ({where})")
+    for m in _INSTRUCTION_PHRASES.finditer(note):
+        e.append(f"FRX-N1 instruction phrase '{m.group(0).lower()}' in note_text")
+    low = note.lower()
+    for i, c in enumerate(art.get("completion_required") or []):
+        pr = c.get("prompt") if isinstance(c, dict) else None
+        if isinstance(pr, str) and len(pr.strip()) >= _MIN_PROMPT_LEN and pr.strip().lower() in low:
+            e.append(f"FRX-N1 completion_required[{i}] prompt text is in note_text")
+    if _has_content(art.get("gp_extraction")):
+        if not any(body.strip() for _, body, _ in _note_entries(note)):
+            e.append("FRX-N2 gp_extraction has content but note_text has no non-empty section")
+    return e
+
+
 def _person_key(node) -> bool:
     if isinstance(node, dict):
         return any(PERSON_KEY.match(str(k)) or _person_key(v) for k, v in node.items())
@@ -874,6 +935,7 @@ def check(art: dict) -> list[str]:
             errs.append(f"v0.1 projection: {type(ex).__name__}: {ex}")
         _c_rules(art, errs, slots=True)
         errs += [x for x in frx(art) if not x.startswith("FRX-D4")]
+        errs += frx_n(art)
         return errs
     errs = _schema_errors(art, schema_v02(), "schema-v0.2")
     if errs:

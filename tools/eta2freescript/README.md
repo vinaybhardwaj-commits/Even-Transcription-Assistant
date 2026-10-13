@@ -290,6 +290,15 @@ rules. Rerun `run` + `eval` + `aggregate` on the box set and compare `headline.j
 `completion_review` (is each completion item needed?), `[boundary_quarantine]` verdicts, `dx_oversplit`,
 `advice_too_long` and `follow_up.type_ok`.
 
+## Printable note rule
+
+`note_text` is what a doctor would type into Pulse FreeScript, so it carries no placeholder, marker or instruction to the doctor (Stage B v5, `note_policy` printable-v1). A medicine line is `<name> <frequency> x <duration> <instructions>` with only the fields that were said. Whatever the doctor must complete lives only in `completion_required`.
+
+- The renderer and `sanitize_note` strip every `[...]` span. The differential `?` prefix on a Diagnoses entry is the only allowed `?`.
+- Validator FRX-N1 (block) rejects brackets and `{{ }}`, a `?` anywhere but the start of a Diagnoses entry, filler line bodies, doctor-instruction phrases ("verify", "TBD", "not specified" and similar), and any completion prompt text (8 characters or more) inside `note_text`.
+- Validator FRX-N2 (block) rejects an empty note when `gp_extraction` has content.
+- The eval harness reads the completion kinds from the v0.3 schema enum.
+
 ## Tests
 
 ```bash

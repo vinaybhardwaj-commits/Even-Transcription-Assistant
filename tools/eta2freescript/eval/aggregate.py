@@ -9,6 +9,8 @@ import csv
 import json
 from pathlib import Path
 
+from ..validate import schema_v03
+
 
 def _i(r, k) -> int:
     try:
@@ -21,8 +23,8 @@ def pct(a: int, b: int) -> str:
     return f"{a}/{b} ({100 * a / b:.0f}%)" if b else "n/a"
 
 
-COMPLETION_KINDS = ("regimen_slot", "pick_drug", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated",
-                     "follow_up_missing", "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review")
+# The kinds come from the v0.3 schema enum, never a hand-kept list.
+COMPLETION_KINDS = tuple(schema_v03()["properties"]["completion_required"]["items"]["properties"]["kind"]["enum"])
 
 
 def head(rs: list[dict]) -> dict:
