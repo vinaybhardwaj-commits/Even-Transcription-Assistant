@@ -2,6 +2,8 @@ import os, sys, tempfile, unittest
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "router"))
 import alert_router as ar
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'subscriber'))
+import subscriber as sb
 import relay_watcher as rw
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -164,6 +166,75 @@ class RouterTests(unittest.TestCase):
             r2 = ar.Router(self.store, lambda: self.bus, self.clock, p)
             self.clock.adv(60); r2.tick(self.bus)
             self.assertEqual(len([m for m in self.bus.msgs if m["subject"].startswith("ROOM ALERT V")]), 1)
+
+
+class DurabilityTests(unittest.TestCase):
+    def test_restart_durability_wal_file_store(self):
+        with tempfile.TemporaryDirectory() as t:
+            path = os.path.join(t, "data", "cases.sqlite"); clock, bus = Clock(TUE_11), FakeBus()
+            st = ar.SqliteStore(path)
+            self.assertEqual(st.db.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+            r = ar.Router(st, lambda: bus, clock); r.on_row(bus, row(100)); r.on_row(bus, row(101))
+            clock.adv(600); r.tick(bus)                                       # page 2
+            bus.human("gating-lead", "ACK room-alert-100", "room-alert-100"); r.tick(bus)
+            r.on_row(bus, row(300, "offline", "r2"))
+            st.db.close(); del r, st                                          # process dies
+            st2 = ar.SqliteStore(path); r2 = ar.Router(st2, lambda: bus, clock)
+            c = st2.get_open("r1", "recorder_off")
+            self.assertEqual((c["first_id"], c["page_count"], c["suppressed_count"], c["acked_by"]), (100, 2, 1, "gating-lead"))
+            n = len(bus.pages()); r2.tick(bus); self.assertEqual(len(bus.pages()), n)       # no early re-page after restart
+            clock.adv(600); r2.tick(bus)
+            self.assertEqual([m["thread"] for m in bus.pages()][n:], ["room-alert-300"])    # acked 100 stays quiet; unacked 300 pages
+            r2.on_row(bus, row(400, "recovered"))
+            self.assertIsNone(st2.get_open("r1", "recorder_off")); self.assertIsNotNone(st2.get_open("r2", "offline"))
+
+    def test_backup_keeps_14_and_is_readable(self):
+        with tempfile.TemporaryDirectory() as t:
+            st = ar.SqliteStore(os.path.join(t, "cases.sqlite")); r = ar.Router(st, lambda: FakeBus(), Clock(TUE_11)); r.on_row(FakeBus(), row(100))
+            for i in range(16):
+                last = st.backup_to(os.path.join(t, "backup"), keep=14, stamp=f"202610{i + 1:02d}-020000")
+            files = sorted(os.listdir(os.path.join(t, "backup")))
+            self.assertEqual((len(files), files[0]), (14, "cases-20261003-020000.sqlite"))
+            self.assertEqual(ar.SqliteStore(last).get_open("r1", "recorder_off")["first_id"], 100)
+
+    def test_local_ids_stay_above_server_ids(self):
+        st = ar.SqliteStore(); self.assertEqual(st.next_local_id(), 1_000_000_000_001)
+        st.insert({"first_id": 1_000_000_000_005, "room_id": "r", "kind": "k", "opened_at": 1, "last_paged_at": None, "page_count": 0, "suppressed_count": 0,
+                   "acked_by": None, "acked_at": None, "closed_at": None, "close_reason": None})
+        self.assertEqual(st.next_local_id(), 1_000_000_000_006)
+
+
+class EndToEndQuietTests(unittest.TestCase):
+    def test_quiet_to_page_to_ack_to_close(self):
+        with tempfile.TemporaryDirectory() as t:
+            clock, bus = Clock(TUE_11), FakeBus()
+            router = ar.Router(ar.SqliteStore(os.path.join(t, "cases.sqlite")), lambda: bus, clock)
+            subr = sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(router, lambda: bus), clock)
+            subr.on_line("kiosk/r1/health", "{}")
+            clock.adv(121); self.assertEqual(subr.check_quiet(), ["r1"])
+            c = router.store.get_open("r1", "guardian_quiet"); tid = f"room-alert-{c['first_id']}"
+            self.assertGreaterEqual(c["first_id"], 1_000_000_000_001)
+            pages = bus.pages(tid); self.assertEqual(len(pages), 1)
+            self.assertIn("source=mini", pages[0]["body"]); self.assertIn("guardian_quiet", pages[0]["subject"])
+            clock.adv(600); subr.check_quiet(); router.tick(bus)                       # still quiet: one case, re-paged, no second case
+            self.assertEqual(len(bus.pages(tid)), 2); self.assertEqual(len(router.store.list_open()), 1)
+            bus.human("fleet", f"ACK {tid}", tid); clock.adv(600); router.tick(bus)
+            self.assertEqual(len(bus.pages(tid)), 2); self.assertEqual(router.store.get_open("r1", "guardian_quiet")["acked_by"], "fleet")
+            clock.adv(30); subr.on_line("kiosk/r1/health", "{}")                       # stream returns: closes
+            self.assertIsNone(router.store.get_open("r1", "guardian_quiet"))
+            self.assertEqual(len([m for m in bus.thread_messages(tid) if "CLOSED" in m["subject"]]), 1)
+            clock.adv(121); self.assertEqual(subr.check_quiet(), ["r1"])               # a later quiet spell is a NEW case
+            self.assertNotEqual(router.store.get_open("r1", "guardian_quiet")["first_id"], c["first_id"])
+            self.assertEqual(len([m for m in bus.msgs if m["thread"].startswith("room-alert-") and "outbox" in m["body"]]), 0)
+
+    def test_heal_escalated_through_same_path(self):
+        with tempfile.TemporaryDirectory() as t:
+            clock, bus = Clock(TUE_11), FakeBus()
+            router = ar.Router(ar.SqliteStore(), lambda: bus, clock)
+            subr = sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(router, lambda: bus), clock)
+            subr.on_line("kiosk/r1/heal", '{"result":"escalated"}'); subr.on_line("kiosk/r1/heal", '{"result":"escalated"}')
+            c = router.store.get_open("r1", "heal_escalated"); self.assertEqual(c["suppressed_count"], 1)
+            subr.on_line("kiosk/r1/heal", '{"result":"ok"}'); self.assertIsNone(router.store.get_open("r1", "heal_escalated"))
 
 
 class WatcherTests(unittest.TestCase):

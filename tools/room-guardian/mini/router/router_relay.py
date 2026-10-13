@@ -2,7 +2,7 @@
 loads that file by path (RELAY_KIT_PATH), keeps its door/cursor/flock/SILENT logic, and adds the durable router:
   _deliver  = the kit's plain post, THEN router.on_row (cursor still advances only after every row succeeded);
   poll_once = the kit's poll, THEN router.tick (acks, re-pages, V notices, 21:00 list).
-The production case store is NOT built here (no DB writer exists for the Mini; see README flag). main() refuses to run without one.
+Production store: Mini-local SQLite at <GUARDIAN_HOME>/data/cases.sqlite (alert_router.default_store).
 """
 import importlib.util, os, sys
 
@@ -24,7 +24,7 @@ def make_relay_class(kit):
 
         def _deliver(self, bus, row):
             posted = super()._deliver(bus, row)
-            self.router.on_row(_RouterBus(bus), row)       # runs on a replay too: on_row is idempotent per row id
+            self.router.on_row(RouterBus(bus), row)       # runs on a replay too: on_row is idempotent per row id
             return posted
 
         def poll_once(self):
@@ -32,7 +32,7 @@ def make_relay_class(kit):
             bus = None
             try:
                 bus = self.bus_factory()
-                self.router.tick(_RouterBus(bus))
+                self.router.tick(RouterBus(bus))
             except Exception as e:                           # router trouble must not stop the plain relay; the case table keeps its state
                 kit.log(f"router tick failed: {e.__class__.__name__}: {kit.one_line(e, 100)}")
             finally:
@@ -43,7 +43,7 @@ def make_relay_class(kit):
     return RouterRelay
 
 
-class _RouterBus:
+class RouterBus:
     """Adapts the kit's StdioBus to the router's bus interface. Message shape from bus_thread is INFERRED: {"messages":[{"from","subject","body"}]}."""
     def __init__(self, stdio, to=("gating-lead", "fleet")):
         self.b, self.to = stdio, list(to)
@@ -56,8 +56,27 @@ class _RouterBus:
 
 
 def main():
-    sys.stderr.write("router_relay: no production case store configured (flag in README). Refusing to start.\n")
-    return 2
+    import time
+    kit = load_kit()
+    home = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
+    import alert_router
+    store = alert_router.default_store(home)                     # Mini-local SQLite, WAL (C4 R2 ruling 1)
+    router = alert_router.Router(store, lambda: RouterBus(kit.StdioBus()), time.time, os.path.join(home, "data", "router-local.json"))
+    lock = kit.take_lock()
+    if lock is None:
+        kit.log("another relay holds the lock; exiting"); return 0
+    relay = make_relay_class(kit)(router, kit.http_door, kit.StdioBus)
+    kit.log(f"router relay started pid={os.getpid()} cursor={relay.state['cursor']}")
+    last_backup = ""
+    while True:
+        try:
+            kit.log(f"poll: {relay.poll_once()}")
+            day = time.strftime("%Y-%m-%d")
+            if time.strftime("%H") == "02" and day != last_backup:      # nightly copy, 14 kept
+                store.backup_to(os.path.join(home, "backup"), keep=14); last_backup = day
+        except Exception as e:
+            kit.log(f"poll crashed: {e.__class__.__name__}: {kit.one_line(e, 120)}")
+        time.sleep(kit.POLL_INTERVAL)
 
 
 if __name__ == "__main__":

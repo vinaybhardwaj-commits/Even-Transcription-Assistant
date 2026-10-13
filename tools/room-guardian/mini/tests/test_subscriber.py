@@ -65,11 +65,20 @@ class SubscriberTests(unittest.TestCase):
         sent = []; s.publish_control(lambda t, m: sent.append((t, json.loads(m))))
         self.assertEqual(sent[0][0], "guardian/control"); self.assertFalse(sent[0][1]["kill"])
 
-    def test_spool_sink_writes_ids_and_seconds_only(self):
+
+class RecSink(Sink):
+    def __init__(self): super().__init__(); self.esc, self.res = [], []
+    def heal_escalated(self, room, now): self.esc.append(room)
+    def heal_resolved(self, room, now): self.res.append(room)
+
+class HealTests(unittest.TestCase):
+    def test_heal_result_escalated_and_resolved_routed_to_sink(self):
         with tempfile.TemporaryDirectory() as t:
-            k = sb.SpoolSink(t); k.guardian_quiet("r1", 130.4, 5); k.guardian_recovered("r1", 9)
-            lines = [json.loads(l) for l in open(os.path.join(t, "guardian-alerts.jsonl"))]
-            self.assertEqual(lines[0], {"kind": "guardian_quiet", "quiet_s": 130, "room": "r1", "ts": 5})
+            sink, clock = RecSink(), Clock(T0)
+            s = sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sink, clock)
+            s.on_line("kiosk/r1/heal", '{"result":"ok","shadow":true}'); s.on_line("kiosk/r1/heal", '{"result":"escalated"}')
+            s.on_line("kiosk/r1/heal", '{"result":"ESCALATED"}'); s.on_line("kiosk/r1/heal", "garbage")
+            self.assertEqual((sink.esc, sink.res), (["r1", "r1"], ["r1"]))
 
 if __name__ == "__main__":
     unittest.main()

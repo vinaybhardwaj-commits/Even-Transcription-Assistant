@@ -85,9 +85,19 @@ class Router:
                 self.store.update(case["first_id"], suppressed_count=case["suppressed_count"] + 1)
             return
         now = self.clock()
+        try:
+            self._insert_case(rid, room, kind, now)
+        except Exception:                      # a concurrent opener (relay vs subscriber) won the unique index: fold in as a duplicate
+            case = self.store.get_open(room, kind)
+            if not case:
+                raise
+            self.store.update(case["first_id"], suppressed_count=case["suppressed_count"] + 1)
+            return
+        self._page(bus, self.store.get_open(room, kind), row.get("room_name") or room)
+
+    def _insert_case(self, rid, room, kind, now):
         self.store.insert({"first_id": rid, "room_id": room, "kind": kind, "opened_at": now, "last_paged_at": None, "page_count": 0,
                            "suppressed_count": 0, "acked_by": None, "acked_at": None, "closed_at": None, "close_reason": None})
-        self._page(bus, self.store.get_open(room, kind), row.get("room_name") or room)
 
     def close_room(self, bus, room, reason, kind=None):
         for c in self.store.list_open():
@@ -112,7 +122,8 @@ class Router:
         already = any(marker in str(m.get("subject", "")) for m in bus.thread_messages(tid))
         if not already:
             vtag = " V" if v else ""
-            body = (f"{c['kind']} in {label}. Case room-alert-{c['first_id']}, open {self._age_min(c)} min, page {n}, duplicates folded "
+            src = " source=mini." if c["first_id"] >= LOCAL_ID_BASE else ""
+            body = (f"{c['kind']} in {label}.{src} Case room-alert-{c['first_id']}, open {self._age_min(c)} min, page {n}, duplicates folded "
                     f"{c['suppressed_count']}. Reply 'ACK room-alert-{c['first_id']}' to stop re-pages.")
             if v:
                 body = "V: patient-impacting and open past the V threshold. gating-lead tells V. " + body
@@ -191,18 +202,27 @@ class Router:
         return 1 if lines else 0
 
 
+LOCAL_ID_BASE = 10 ** 12      # cases opened on the Mini (source=mini) use ids from here; server outbox ids stay far below
+
+
 class SqliteStore:
-    """Dev/test store with the room_alert_case columns. NOT the production store: the Mini has no DB writer for the app database (flagged)."""
+    """Production case store (C4 R2 ruling 1): Mini-local SQLite, WAL. The router and the relay are its only users and both run on the Mini."""
     COLS = ("first_id", "room_id", "kind", "opened_at", "last_paged_at", "page_count", "suppressed_count", "acked_by", "acked_at", "closed_at", "close_reason")
 
     def __init__(self, path=":memory:"):
-        import sqlite3
-        self.db = sqlite3.connect(path)
+        import os, sqlite3
+        if path != ":memory:":
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self.path = path
+        self.db = sqlite3.connect(path, timeout=10, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA busy_timeout=10000")
+        if path != ":memory:":
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS room_alert_case (first_id INTEGER PRIMARY KEY, room_id TEXT NOT NULL, kind TEXT NOT NULL, opened_at REAL NOT NULL, "
                         "last_paged_at REAL, page_count INTEGER NOT NULL DEFAULT 0, suppressed_count INTEGER NOT NULL DEFAULT 0, acked_by TEXT, acked_at REAL, closed_at REAL, close_reason TEXT)")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS open_uq ON room_alert_case (room_id, kind) WHERE closed_at IS NULL")
-        self.db.commit()
 
     def get_open(self, room, kind):
         r = self.db.execute("SELECT * FROM room_alert_case WHERE room_id=? AND kind=? AND closed_at IS NULL", (room, kind)).fetchone()
@@ -213,7 +233,6 @@ class SqliteStore:
 
     def insert(self, case):
         self.db.execute(f"INSERT INTO room_alert_case ({','.join(self.COLS)}) VALUES ({','.join('?' * len(self.COLS))})", [case[c] for c in self.COLS])
-        self.db.commit()
 
     def update(self, first_id, **f):
         bad = set(f) - set(self.COLS)
@@ -221,4 +240,29 @@ class SqliteStore:
             raise ValueError(f"unknown columns {bad}")
         sets = ",".join(f"{k}=?" for k in f)
         self.db.execute(f"UPDATE room_alert_case SET {sets} WHERE first_id=?", [*f.values(), first_id])
-        self.db.commit()
+
+    def next_local_id(self):
+        """An id for a Mini-detected case: above every id seen, never below LOCAL_ID_BASE."""
+        r = self.db.execute("SELECT MAX(first_id) FROM room_alert_case").fetchone()[0]
+        return max(r or 0, LOCAL_ID_BASE) + 1
+
+    def backup_to(self, dest_dir, keep=14, stamp=None):
+        """Online copy via the sqlite backup API (safe with WAL). Keeps the newest `keep` files named cases-YYYYMMDD-HHMMSS.sqlite."""
+        import os, sqlite3
+        os.makedirs(dest_dir, exist_ok=True)
+        stamp = stamp or datetime.now(IST).strftime("%Y%m%d-%H%M%S")
+        dest = os.path.join(dest_dir, f"cases-{stamp}.sqlite")
+        out = sqlite3.connect(dest)
+        try:
+            self.db.backup(out)
+        finally:
+            out.close()
+        files = sorted(f for f in os.listdir(dest_dir) if f.startswith("cases-") and f.endswith(".sqlite"))
+        for f in files[:-keep]:
+            os.remove(os.path.join(dest_dir, f))
+        return dest
+
+
+def default_store(home):
+    import os
+    return SqliteStore(os.path.join(home, "data", "cases.sqlite"))

@@ -2,7 +2,9 @@
 """run_subscriber.py -- drives Subscriber from the pipe over ssh (one `sub` process per room+stream). Not loaded by any launchd job in this repo.
 INFERRED: pipe topics have no wildcard, so the room list comes from rooms.json; `ssh -p PORT host sub <topic>` is the read form (UNVERIFIED on a live pipe)."""
 import json, os, queue, subprocess, sys, threading, time
-from subscriber import Subscriber, SpoolSink, STREAMS
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "router"))
+import alert_router, router_relay
+from subscriber import Subscriber, RouterSink, STREAMS
 
 HOME = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
 
@@ -17,7 +19,10 @@ def main():
     cfg = json.load(open(os.path.join(HOME, "rooms.json")))
     host, port = os.environ["PIPE_HOST"], os.environ["PIPE_SSH_PORT"]
     ssh = ["ssh", "-p", port, "-i", os.path.join(HOME, "subscriber_ed25519"), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", host]
-    s = Subscriber(os.path.join(HOME, "data"), HOME, cfg["rooms"], SpoolSink(os.path.join(HOME, "data", "spool")), quiet_after_s=cfg.get("quiet_after_s", 120))
+    kit = router_relay.load_kit()
+    # No state_path: the relay's router owns the V/digest file. This router only opens and closes cases (same SQLite file, WAL).
+    router = alert_router.Router(alert_router.default_store(HOME), lambda: router_relay.RouterBus(kit.StdioBus(as_name="room-guardian-subscriber")), time.time)
+    s = Subscriber(os.path.join(HOME, "data"), HOME, cfg["rooms"], RouterSink(router, router.bus_factory), quiet_after_s=cfg.get("quiet_after_s", 120))
     q = queue.Queue()
     for r in cfg["rooms"]:
         for st in STREAMS:

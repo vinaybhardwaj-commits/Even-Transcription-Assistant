@@ -3,6 +3,7 @@
 * Streams kiosk/<room>/health, heal, probe-reply -> JSONL under <data>/<YYYY-MM-DD>/<room>.<stream>.jsonl; days older than KEEP_DAYS are pruned.
 * Quiet detection is HERE, not pipe `monitor` (R4): a room with no health line for QUIET_AFTER_S raises guardian_quiet once (edge), and a
   line after that closes it. A room is counted from process start, so a room that never speaks is quiet too.
+* A heal line with result "escalated" raises heal_escalated through the same sink (inferred shape).
 * Serves control: control_snapshot() = {"kill": bool, "modes": {room: "shadow"|"heal"}} from files; publish_control() sends it on topic
   guardian/control. Anything not exactly "heal" is "shadow". An unreadable or missing kill file is kill=true (fail safe).
 Health/heal/probe lines are stored as received. Nothing here prints line content.
@@ -23,22 +24,35 @@ def parse_topic(topic):
     return None
 
 
-class SpoolSink:
-    """guardian_quiet has NO server entry point from the Mini yet (flagged in README). Until one is named, alerts are spooled to JSONL so none is lost;
-    a later sink posts them. open/close records carry room and seconds only."""
-    def __init__(self, spool_dir):
-        self.dir = spool_dir
-        os.makedirs(spool_dir, exist_ok=True)
+class RouterSink:
+    """Hands Mini-detected alerts straight to the router (C4 R2 ruling 2): same case open / ack / re-page / close path and bus post format as server
+    alerts, source=mini in the body. They never touch the server outbox. Case ids come from the store (>= LOCAL_ID_BASE)."""
+    def __init__(self, router, bus_factory):
+        self.router, self.bus_factory = router, bus_factory
 
-    def _w(self, rec):
-        with open(os.path.join(self.dir, "guardian-alerts.jsonl"), "a") as f:
-            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    def _with_bus(self, fn):
+        bus = self.bus_factory()
+        try:
+            fn(bus)
+        finally:
+            if hasattr(bus, "close"):
+                bus.close()
+
+    def _open(self, room, kind, now):
+        row = {"id": self.router.store.next_local_id(), "kind": kind, "room_ids": [room], "room_name": room}
+        self._with_bus(lambda bus: self.router.on_row(bus, row))
 
     def guardian_quiet(self, room, quiet_s, now):
-        self._w({"ts": int(now), "kind": "guardian_quiet", "room": room, "quiet_s": int(quiet_s)})
+        self._open(room, "guardian_quiet", now)
 
     def guardian_recovered(self, room, now):
-        self._w({"ts": int(now), "kind": "guardian_recovered", "room": room})
+        self._with_bus(lambda bus: self.router.close_room(bus, room, "recovery", kind="guardian_quiet"))
+
+    def heal_escalated(self, room, now):
+        self._open(room, "heal_escalated", now)
+
+    def heal_resolved(self, room, now):
+        self._with_bus(lambda bus: self.router.close_room(bus, room, "recovery", kind="heal_escalated"))
 
 
 class Subscriber:
@@ -65,12 +79,25 @@ class Subscriber:
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, f"{room}.{stream}.jsonl"), "a") as f:
             f.write(raw.rstrip("\n") + "\n")
+        if stream == "heal":
+            self._on_heal(room, raw, now)
         if stream == "health":
             self.last_seen[room] = now
             if room in self.quiet:
                 self.quiet.discard(room)
                 self.sink.guardian_recovered(room, now)
         return True
+
+    # INFERRED heal record shape (FR-1 2.4): {"result": ...}. "escalated" opens heal_escalated; "ok"/"healed" closes it. Unverified against C1.
+    def _on_heal(self, room, raw, now):
+        try:
+            res = str(json.loads(raw).get("result", "")).lower()
+        except (ValueError, AttributeError):
+            return
+        if res == "escalated":
+            self.sink.heal_escalated(room, now)
+        elif res in ("ok", "healed"):
+            self.sink.heal_resolved(room, now)
 
     # ---- quiet detection
     def check_quiet(self):

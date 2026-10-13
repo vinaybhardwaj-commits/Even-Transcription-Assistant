@@ -9,14 +9,15 @@ Spec: FR-1 section 5 (R4), A0, A6. Code is under `mini/`. Nothing here is instal
 | Alert router | `mini/router/alert_router.py` | case open / re-page / ack / close, V rule, 21:00 unacked list |
 | Successor relay | `mini/router/router_relay.py` | subclasses the kit `Relay` by path; the kit file is not edited |
 | Relay watcher | `mini/router/relay_watcher.py` | pages if the relay's last-poll is older than 10 min |
-| Migration | `db/migrations/0166_room_alert_case.sql` | table `room_alert_case` (not `room_alert_state`, which is the watchdog's) |
+| Case store | `alert_router.SqliteStore` | Mini-local SQLite `<GUARDIAN_HOME>/data/cases.sqlite`, WAL, nightly copy to `backup/` (14 kept). No app-DB table, no migration (R2 ruling 1) |
 
-Tests: `mini/tests/run.sh` (shellcheck, then 21 unittest cases; clock injected).
+Tests: `mini/tests/run.sh` (shellcheck, then 26 unittest cases; clock injected).
 
 ## Flags (not settled by the kickoff)
-1. No production case store. The Mini has no writer for the app database. `SqliteStore` is dev/test only; `router_relay.main()` refuses to start. Needs a ruling: authenticated server endpoint, or a Scribe MCP tool.
-2. No server entry point for `guardian_quiet`. The subscriber spools to `data/spool/guardian-alerts.jsonl`. Same ruling as 1.
-3. Control topic `guardian/control` and the read form `ssh -p PORT host sub <topic>` are my choices; C1 must match. Pipe topic wildcards unverified, so the room list comes from `rooms.json`.
-4. Router V-notice state and the digest day sit in a local JSON file, not the table (the columns were fixed by the order). Losing it repeats a V notice.
-5. `recovered` closes every open case of that room. Which kinds a recovery row really covers is unverified.
+1. Mini-detected alerts (`guardian_quiet`, `heal_escalated`) go from the subscriber straight to the router, never the server outbox (R2 ruling 2). Their case ids are `>= 10^12` (`LOCAL_ID_BASE`) so they cannot collide with outbox ids; the page body says `source=mini`.
+2. Control topic `guardian/control` accepted by gating-lead. The read form `ssh -p PORT host sub <topic>` is unverified; pipe topic wildcards unverified, so the room list comes from `rooms.json`.
+3. Heal record shape is inferred: `result == "escalated"` opens `heal_escalated`, `"ok"`/`"healed"` closes it. C1 must match.
+4. Router V-notice state and the digest day sit in `data/router-local.json`. Only the relay's router writes it; the subscriber's router has none.
+5. A `recovered` outbox row closes every open case of that room; coverage unverified.
 6. Bus message shape from `bus_thread` (`from`, `subject`, `body`) is inferred.
+7. Two processes (relay, subscriber) share the SQLite file. WAL plus a 10 s busy timeout; the unique open-case index settles a race (loser counts as a duplicate).
