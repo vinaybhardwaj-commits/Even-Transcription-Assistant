@@ -2,12 +2,55 @@
 # tests/unit/fleet-jws-vector.test.ts holds three throwaway JWTs signed with a fixed-seed key (32 x 0x07) used as cross-language test vectors for the fleet
 # protocol (docs/fleet/PROTOCOL.md). Current files carry an inline gitleaks:allow; the commit below is the one historical commit that added them before the
 # annotation existed, and history cannot be rewritten on a shared branch. Nothing else is allowed.
+#
+# steward scrub gate (git-steward, 14 Oct 2026): custom rules below. Allowlist: the fixtures path and steward/scrub-allow.txt only,
+# plus the two historical commits above.
 [extend]
 useDefault = true
 
 [allowlist]
-description = "made-up test strings, first commit that added each (history cannot be rewritten)"
+description = "historical commits (history cannot be rewritten) and the scrub fixtures"
 commits = [
   "8f85e6bf9b1d757c88c84d70eb5b73ffb021e679", # fleet JWT test vectors (fixed-seed throwaway key)
   "61b686f5c43054df80e0119cffd2d684ccad155f", # fleet-h6-pg: a made-up "operator-picked" token string in a refusal test
+]
+paths = [
+  '''^tests/steward-scrub/fixtures/''',
+]
+
+[[rules]]
+id = "ts-cgnat-ip"
+description = "Tailscale CGNAT address (100.64.0.0/10)"
+regex = '''\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?:[^\d.]|\.[^\d]|$)'''
+keywords = ["100."]
+
+[[rules]]
+id = "ts-hostname"
+description = "Tailscale ts.net hostname"
+regex = '''(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.ts\.net\b'''
+keywords = ["ts.net"]
+
+[[rules]]
+id = "aws-account-id"
+description = "AWS account id in an ARN, an account-id field, or an ECR host"
+regex = '''(?i)(?:arn:aws[^:\s]*:[^:\s]*:[^:\s]*:\d{12}(?:[^\d]|$)|(?:aws_account_id|account_id|accountid|account-id)\W{0,20}\d{12}(?:[^\d]|$)|(?:^|[^\d])\d{12}\.dkr\.ecr\.)'''
+keywords = ["arn:aws", "account", "ecr"]
+
+[[rules]]
+id = "private-key-header"
+description = "PEM private key header"
+regex = '''-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'''
+keywords = ["private key"]
+
+[[rules]]
+id = "env-secret-assign"
+description = "ENV-style assignment of a secret-named variable to a literal value"
+regex = '''(?m)^[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL|DSN)[A-Z0-9_]*[ \t]*=[ \t]*\S{8,}'''
+keywords = ["secret", "token", "password", "passwd", "api_key", "private_key", "access_key", "database_url", "dsn"]
+# Reading from another variable or the process environment is not a literal.
+[[rules.allowlists]]
+description = "value is a reference, not a literal"
+regexTarget = "match"
+regexes = [
+  '''=[ \t]*["']?(?:\$\{?[A-Za-z_]|process\.env|os\.environ|os\.getenv|ENV\[|<[A-Za-z_ -]+>)''',
 ]

@@ -1,0 +1,1 @@
+image: 000000000000.dkr.ecr.us-east-1.amazonaws.com/fake

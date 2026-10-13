@@ -1,0 +1,1 @@
+# steward/scrub-allow.txt: one entry per line: <gitleaks fingerprint> # <one-line reason>. Needs merge-owner review. Empty at start.
