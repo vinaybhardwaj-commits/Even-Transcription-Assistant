@@ -43,7 +43,16 @@
    "MATCHED_ONE_OF_SEVERAL",
    "AMBIGUOUS",
    "NO_VALID_CANDIDATE"
-  ]
+  ],
+  "no_pick_reason": "NO_VALID_CANDIDATE",
+  "context": {
+   "header": "SYNTH CONTEXT:",
+   "diagnoses": "SYNTH dx: ",
+   "symptoms": "SYNTH sx: ",
+   "medicines": "SYNTH rx: ",
+   "investigations": "SYNTH inv: ",
+   "joiner": " | "
+  }
  },
  "search": {
   "top_k": 5,

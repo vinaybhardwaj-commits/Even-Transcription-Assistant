@@ -169,15 +169,29 @@ def type_rule(assets: dict, kind: str) -> str:
     return ""
 
 
-def adjudicate(item: dict, namekey: str, kind: str, cands: list[dict], assets: dict, client, usage: dict, served: dict):
+def prescription_context(norm: dict, assets: dict) -> str:
+    """Header plus one line per non-empty group (diagnoses, symptoms, medicines, investigations), then a blank line. '' if none."""
+    c = assets["adjudicate"]["context"]
+    pc = norm.get("presenting_complaints") or {}
+
+    def names(items, key):
+        return c["joiner"].join(n for n in ((i.get(key) or "").strip() for i in items or []) if n)
+    groups = [("diagnoses", names(pc.get("diagnoses"), "diagnosis_or_impression")),
+              ("symptoms", (pc.get("symptoms") or "").strip()),
+              ("medicines", names(norm.get("medicines"), "name")),
+              ("investigations", names(norm.get("further_investigations"), "name"))]
+    lines = [c[k] + v for k, v in groups if v]
+    return c["header"] + "\n" + "\n".join(lines) + "\n\n" if lines else ""
+
+
+def adjudicate(item: dict, namekey: str, kind: str, cands: list[dict], assets: dict, client, usage: dict, served: dict,
+               context: str = ""):
     """Returns (method, choice, reason, picked entity or None)."""
     adj = assets["adjudicate"]
     lead = adj["user_lead"]
     raw = (item.get("raw_name") or item.get(namekey) or "").strip()
     name = (item.get(namekey) or "").strip()
-    lines = [_fill(lead["doctor_wrote"], raw)]
-    if name and norm_name(name) != norm_name(raw):
-        lines.append(_fill(lead["interpreted_as"], name))
+    lines = [_fill(lead["doctor_wrote"], raw), _fill(lead["interpreted_as"], name)]  # interpreted_as is always sent
     if item.get("aliases"):
         lines.append(_fill(lead["also_known_as"], ", ".join(a for a in item["aliases"] if a)))
     lines.append(lead["candidates_header"])
@@ -189,7 +203,8 @@ def adjudicate(item: dict, namekey: str, kind: str, cands: list[dict], assets: d
                              "note": {"type": "string"}}}
     try:
         res = client.generate(stage="adjudicate", model=client.model_for("adjudicate", adj["model"]), system=system,
-                              user="\n".join(lines), schema=schema, temperature=adj["temperature"], max_tokens=adj["max_tokens"])
+                              user=context + "\n".join(lines), schema=schema, temperature=adj["temperature"],
+                              max_tokens=adj["max_tokens"])
     except ReplayUnavailable:
         return "LLM_ERROR", None, None, None
     _add_usage(usage, "adjudicate", res.usage)
@@ -202,16 +217,16 @@ def adjudicate(item: dict, namekey: str, kind: str, cands: list[dict], assets: d
             raise ValueError("shape")
     except (ValueError, KeyError, TypeError):
         return "LLM_ERROR", None, None, None
-    is_pick = reason.startswith("MATCHED")
-    if is_pick and 1 <= choice <= len(cands):
+    is_pick = reason != adj["no_pick_reason"]
+    if is_pick != (choice > 0) or choice < 0 or choice > len(cands):
+        return "LLM_INCOHERENT", choice, reason, None  # treated as no match
+    if is_pick:
         return "LLM_PICK", choice, reason, cands[choice - 1]
-    if is_pick or choice != 0:  # a pick reason without a valid candidate, or a candidate chosen with a no-pick reason
-        return "LLM_INCOHERENT", choice, reason, None
     return "NO_MATCH", 0, reason, None
 
 
 def resolve(kind: str, item: dict, namekey: str, cat: Catalogue, params: SearchParams, assets: dict, client,
-            usage: dict, served: dict):
+            usage: dict, served: dict, context: str = ""):
     """Returns (resolution record, picked catalogue entity or None)."""
     queries = _queries(item, namekey)
     rec = {"kind": kind, "query_terms": queries, "method": "NO_MATCH", "choice": None, "reason": None, "candidate_uid": None}
@@ -223,7 +238,7 @@ def resolve(kind: str, item: dict, namekey: str, cat: Catalogue, params: SearchP
         if exact_keys & set(exact_names(c)):
             rec.update(method="EXACT_MATCH", candidate_uid=c["uid"])
             return rec, c
-    method, choice, reason, picked = adjudicate(item, namekey, kind, cands, assets, client, usage, served)
+    method, choice, reason, picked = adjudicate(item, namekey, kind, cands, assets, client, usage, served, context)
     rec.update(method=method, choice=choice, reason=reason, candidate_uid=picked["uid"] if picked else None)
     return rec, picked
 
@@ -312,12 +327,13 @@ def replay(note_text: str, visit_date, catalogue: Catalogue, client, assets: dic
                "comorbidities": (norm.get("comorbidities") or [], "name"),
                "surgeries": (pm.get("surgery_or_procedure_recommendations") or [], "name"),
                "investigations": (norm.get("further_investigations") or [], "name")}
+    context = prescription_context(norm, assets)
     resolutions, resolved = [], {"referrals": []}
     dropped = {"investigations": 0, "referrals": 0}
     for key, (items, namekey) in sources.items():
         resolved[key] = []
         for item in items:
-            rec, ent = resolve(LISTS[key], item, namekey, catalogue, params, assets, client, usage, served)
+            rec, ent = resolve(LISTS[key], item, namekey, catalogue, params, assets, client, usage, served, context)
             resolutions.append(rec)
             resolved[key].append((item, ent))
             if ent is None and key == "investigations":

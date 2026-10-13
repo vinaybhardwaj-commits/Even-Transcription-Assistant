@@ -16,6 +16,7 @@ KINDS = ("medicine", "diagnosis", "comorbidity", "investigation", "surgery")
 EFFORTS = ("low", "medium", "high")
 LOOKUPS = ("exact", "substring")
 USER_LEAD_KEYS = ("doctor_wrote", "interpreted_as", "also_known_as", "candidates_header", "question")
+CONTEXT_KEYS = ("header", "diagnoses", "symptoms", "medicines", "investigations", "joiner")
 
 
 class AssetsError(Exception):
@@ -68,7 +69,11 @@ def validate(a: dict) -> dict:
         "user_lead": lambda v: isinstance(v, dict) and set(v) == set(USER_LEAD_KEYS) and all(_str(x) for x in v.values()),
         "type_rules": _kind_map, "entity_types": _kind_map, "rule_lookup": lambda v: v in LOOKUPS, "model": _str,
         "temperature": _is_num, "max_tokens": lambda v: _is_int(v) and v > 0,
-        "reasons": lambda v: isinstance(v, list) and v and all(_str(x) and x for x in v)})
+        "reasons": lambda v: isinstance(v, list) and v and all(_str(x) and x for x in v),
+        "no_pick_reason": lambda v: _str(v) and v,
+        "context": lambda v: isinstance(v, dict) and set(v) == set(CONTEXT_KEYS) and all(_str(x) for x in v.values())})
+    if a["adjudicate"]["no_pick_reason"] not in a["adjudicate"]["reasons"]:
+        raise AssetsError("adjudicate.no_pick_reason: not one of reasons")
     _check_keys(a["search"], "search", {
         "top_k": lambda v: _is_int(v) and v > 0, "max_candidates": lambda v: _is_int(v) and v > 0,
         "medicine_score_threshold": lambda v: _is_num(v) and 0 <= v <= 1, "popularity_weight": lambda v: _is_num(v) and v >= 0})

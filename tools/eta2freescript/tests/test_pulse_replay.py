@@ -130,7 +130,7 @@ def test_exact_match_short_circuits(assets, cat, extraction):
     res, t = run(assets, cat, extraction)
     r = by_query(res, "Zorvex 500")
     assert r["method"] == "EXACT_MATCH" and r["candidate_uid"] == "m01"
-    exact_n_calls = sum(1 for c in t.calls if c["user"].startswith("SYNTH wrote: Zorvex 500"))
+    exact_n_calls = sum(1 for c in t.calls if "SYNTH wrote: Zorvex 500" in c["user"])
     assert exact_n_calls == 0
     assert by_query(res, "Synthetic fever syndrome")["method"] == "EXACT_MATCH"
 
@@ -140,7 +140,7 @@ def test_aliases_never_exact_match(assets, cat, extraction):
     r = by_query(res, "Quelitra")
     assert r["query_terms"] == ["Quelitra", "Zorvex 500"]
     assert r["method"] == "LLM_PICK" and r["candidate_uid"] == "m01" and r["reason"] == "MATCHED"
-    call = next(c for c in t.calls if c["user"].startswith("SYNTH wrote: Quelitra"))
+    call = next(c for c in t.calls if "SYNTH wrote: Quelitra" in c["user"])
     assert "SYNTH aka: Zorvex 500" in call["user"] and "SYNTH candidates:" in call["user"]
     assert call["system"] == "SYNTHETIC ADJUDICATOR medicine / SYNTH RULE MED"
 
@@ -179,7 +179,9 @@ def test_free_text_entities_when_unmatched(assets, cat, extraction):
     ({"choice": 99, "reason": "MATCHED", "note": ""}, "LLM_INCOHERENT"),
     ({"choice": 0, "reason": "MATCHED", "note": ""}, "LLM_INCOHERENT"),
     ({"choice": 1, "reason": "NO_VALID_CANDIDATE", "note": ""}, "LLM_INCOHERENT"),
-    ({"choice": 0, "reason": "AMBIGUOUS", "note": ""}, "NO_MATCH"),
+    ({"choice": 0, "reason": "AMBIGUOUS", "note": ""}, "LLM_INCOHERENT"),
+    ({"choice": -1, "reason": "NO_VALID_CANDIDATE", "note": ""}, "LLM_INCOHERENT"),
+    ({"choice": 0, "reason": "NO_VALID_CANDIDATE", "note": ""}, "NO_MATCH"),
     ("not json", "LLM_ERROR"),
 ])
 def test_adjudicator_answers(assets, cat, extraction, answer, method):
@@ -187,6 +189,41 @@ def test_adjudicator_answers(assets, cat, extraction, answer, method):
     r = by_query(res, "Quelitra")
     assert r["method"] == method and r["candidate_uid"] is None
     assert any(m["name"] == "Quelitra" and m["other"] for m in res["prescription"]["medicines"])
+
+
+@pytest.mark.parametrize("reason", ["MATCHED", "MATCHED_ONE_OF_SEVERAL", "AMBIGUOUS"])
+def test_every_reason_but_the_no_pick_reason_is_a_pick(assets, cat, extraction, reason):
+    res, _ = run(assets, cat, extraction, adj=lambda u: {"choice": pick_line(u, "Zorvex"), "reason": reason, "note": ""})
+    r = by_query(res, "Quelitra")
+    assert r["method"] == "LLM_PICK" and r["reason"] == reason and r["candidate_uid"] == "m01"
+
+
+def test_no_pick_reason_is_configurable(assets, cat, extraction):
+    a2 = copy.deepcopy(assets)
+    a2["adjudicate"]["no_pick_reason"] = "AMBIGUOUS"
+    res, _ = run(a2, cat, extraction, adj=lambda u: {"choice": 0, "reason": "AMBIGUOUS", "note": ""})
+    assert by_query(res, "Quelitra")["method"] == "NO_MATCH"
+    a2["adjudicate"]["no_pick_reason"] = "NOT_A_REASON"
+    with pytest.raises(A.AssetsError):
+        A.validate(a2)
+
+
+def test_interpreted_as_always_sent_and_context_built(assets, cat, extraction):
+    _, t = run(assets, cat, extraction)
+    call = next(c for c in t.calls if "SYNTH wrote: Quelitra" in c["user"])
+    u = call["user"]
+    assert "SYNTH read as: Quelitra" in u  # equal to the raw name, still sent
+    assert u.startswith("SYNTH CONTEXT:\nSYNTH dx: Synthetic fever syndrome | Unlisted synthetic ailment\n"
+                        "SYNTH sx: synthetic complaint text\n"
+                        "SYNTH rx: Zorvex 500 | Quelitra | Blorpanol\n"
+                        "SYNTH inv: Synthetic blood panel | Synthetic unlisted test\n\nSYNTH wrote: Quelitra")
+
+
+def test_context_skips_empty_lines_and_vanishes_when_empty(assets):
+    ext = {"presenting_complaints": {"symptoms": "  ", "diagnoses": [{"diagnosis_or_impression": "dx one", "raw_name": "x"}]},
+           "medicines": [{"name": " ", "raw_name": "y"}]}
+    assert R.prescription_context(ext, assets) == "SYNTH CONTEXT:\nSYNTH dx: dx one\n\n"
+    assert R.prescription_context({}, assets) == ""
 
 
 def test_adjudicator_transport_failure_is_llm_error(assets, cat, extraction):
@@ -265,7 +302,8 @@ def test_assets_mode_and_strictness(tmp_path, assets):
     assert A.load_assets(p)["source"] == "synthetic test assets"
     for mutate in (lambda a: a.update(extra=1), lambda a: a["extract"].update(extra=1), lambda a: a["extract"].pop("model"),
                    lambda a: a["extract"].update(system_template="no date slot"), lambda a: a["adjudicate"]["type_rules"].pop("surgery"),
-                   lambda a: a["extract"].update(temperature="hot"), lambda a: a.update(assets_version="x")):
+                   lambda a: a["extract"].update(temperature="hot"), lambda a: a["adjudicate"].pop("context"),
+                   lambda a: a["adjudicate"]["context"].pop("joiner"), lambda a: a["adjudicate"].pop("no_pick_reason"), lambda a: a.update(assets_version="x")):
         bad = copy.deepcopy(assets)
         mutate(bad)
         with pytest.raises(A.AssetsError):
