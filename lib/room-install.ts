@@ -1081,7 +1081,7 @@ export type RetireResult =
  * names the room). The refusal is IN THE UPDATE, not in a read before it: a poll landing between a check and a write cannot slip a live install through.
  * Every retirement writes an `install.retire` audit row and queues an alert; neither can fail the retire.
  */
-export async function retireInstall(installId: string, opts: { actor: string; force?: boolean }): Promise<RetireResult> {
+export async function retireInstall(installId: string, opts: { actor: string; force?: boolean; skipAudit?: boolean }): Promise<RetireResult> {
   const force = opts.force === true;
   try {
     const rows = (await sql`
@@ -1105,7 +1105,7 @@ export async function retireInstall(installId: string, opts: { actor: string; fo
       const { last_seen_age_s: _drop, ...view } = row;
       void _drop;
       const reason: RetireReason = force && age !== null && age * 1000 < LIVE_INSTALL_MS ? "forced" : "manual";
-      await recordRetirement({ installId: row.install_id, roomId: row.room_id, reason, lastSeenAgeS: age, actor: opts.actor, actorType: "admin" });
+      await recordRetirement({ installId: row.install_id, roomId: row.room_id, reason, lastSeenAgeS: age, actor: opts.actor, actorType: "admin", skipAudit: opts.skipAudit });
       return { ok: true, install: normaliseInstall(view as InstallView), reason, last_seen_age_s: age };
     }
     // Nothing updated: unknown, already retired, or LIVE and not forced. Told apart so the caller can show "last seen N min ago".
@@ -1129,8 +1129,10 @@ async function recordRetirement(r: {
   lastSeenAgeS: number | null;
   actor: string;
   actorType: "system" | "admin";
+  /** ADMIN-5: skip ONLY the audit row; the alert still queues. */
+  skipAudit?: boolean;
 }): Promise<void> {
-  await auditInstall(
+  if (!r.skipAudit) await auditInstall(
     "install.retire",
     r.roomId,
     { install_id: r.installId, actor: r.actor, reason: r.reason, last_seen_age_s: r.lastSeenAgeS },
