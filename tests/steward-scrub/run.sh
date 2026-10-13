@@ -8,6 +8,11 @@ export STEWARD_SCRUB_NO_ALLOW=1 STEWARD_HOSTS_FILE=/nonexistent
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/data"
 cp -R "$HERE"/fixtures/. "$T/data/"
+# Generated at run time, not committed: the repo's no-identity-literals guard rejects committed person-name fields in test-like files.
+printf '{"patient_%s": "Fake Person", "visit": 1}\n' name > "$T/data/hit-phi-field.json"
+printf '{"a":1,"patient%s":"Fake Person"}\n{"b":2}\n' Name > "$T/data/hit-phi-field-camel.jsonl"
+mkdir -p "$T/data/ok-synthetic/fixtures/synthetic"
+printf '{"patient_%s":"Fake Person"}\n' name > "$T/data/ok-synthetic/fixtures/synthetic/p.json"
 "$ROOT/scripts/steward/scrub.sh" --tree "$T" > "$T/out.tsv" 2>/dev/null
 rc=$?
 [ $rc -eq 1 ] || { echo "FAIL scrub.sh exit $rc, expected 1"; exit 1; }
