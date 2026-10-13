@@ -815,14 +815,30 @@ def _note_entries(note: str):
             yield None, line, cur == "Diagnoses", cur
 
 
-def _d4(text: str) -> bool:
-    if _D4_NO.search(text):
+_D4_FIELD_ALT = "|".join(sorted(_D4_FIELDS))
+_D4_ADD = re.compile(r"\badd\s+(?:" + _D4_FIELD_ALT + r")\b", re.I)
+_D4_MED_NOT = re.compile(r"\b(?:" + _D4_FIELD_ALT + r")\s+not\s+(?:given|available)\b", re.I)
+_D4_MED_PENDING = re.compile(r"\b\w+\s+pending\s*(?:[.]?\s*$|[,;])", re.I)
+
+
+def _d4(text: str, sec: str = "") -> bool:
+    if _D4_NO.search(text) or _D4_ADD.search(text):
         return True
-    toks = []
-    for t in re.findall(r"\w+(?:/\w+)?|\?", text.lower()):
-        toks.extend([t] if t == "n/a" else t.split("/"))
-    for i, t in enumerate(toks):
-        if t in _D4_FIELDS and any(x in _D4_MISSING for x in toks[max(0, i - 3):i] + toks[i + 1:i + 4]):
+    if sec == "Medication" and (_D4_MED_NOT.search(text) or _D4_MED_PENDING.search(text)):
+        return True
+    raw = re.findall(r"\w+(?:/\w+)?|\?", text.lower())
+    ents = []  # (field word, missing word or None); "/" splits only the field side
+    for k, t in enumerate(raw):
+        if t == "n/a":
+            ents.append(("n/a", "n/a"))
+        elif "/" in t:
+            ents.extend((f, None) for f in t.split("/"))
+        elif t == "na" or (t == "nil" and raw[k + 1:k + 2] == ["by"]):
+            ents.append((t, None))
+        else:
+            ents.append((t, t))
+    for i, (f, _) in enumerate(ents):
+        if f in _D4_FIELDS and any(m in _D4_MISSING for _, m in ents[max(0, i - 3):i] + ents[i + 1:i + 4]):
             return True
     return False
 
@@ -874,7 +890,7 @@ def printable_errors(text: str, prompts: list[str]) -> list[str]:
             e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
         for m in _D5.finditer(body):
             e.append(f"FRX-N1 d5 internal pipeline marker '{m.group(0).lower()}' ({where})")
-        if sec in _D2_SECTIONS and _d4(body):
+        if sec in _D2_SECTIONS and _d4(body, sec):
             e.append(f"FRX-N1 d4 missing-field label ({where})")
     low = note.lower()
     for i, pr in enumerate(prompts):

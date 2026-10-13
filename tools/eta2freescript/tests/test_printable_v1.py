@@ -65,6 +65,10 @@ PASS_CASES = [
     {"Follow up": "To be reviewed by doctor after 1 week"},
     {"Further Investigation": "if MRI not available, CT brain"},
     {"Further Investigation": "report pending"},
+    {"Further Investigation": "Serum Na/K, date: 25 Oct"},
+    {"Further Investigation": "S. Na K, date 25 Oct"},
+    {"Surgery or Procedure": "Nil by mouth, drug timing as per anaesthetist"},
+    {"Medication": "not given to children under 2"},
 ]
 
 
@@ -140,6 +144,13 @@ FAIL_CASES = [
     ("Medication", "Tab X, dose/duration nil"),
     ("Medication", "dose/timing: none"),
     ("Follow up", "Next visit date to be confirmed at reception"),
+    ("Medication", "Paracetamol 650, dose not given"),
+    ("Medication", "Paracetamol 650, dose not available"),
+    ("Medication", "Amlodipine pending"),
+    ("Medication", "Amlodipine pending, 5 OD"),
+    ("Medication", "Kindly add strength"),
+    ("Medication", "add dose"),
+    ("Follow up", "add date"),
 ]
 
 
