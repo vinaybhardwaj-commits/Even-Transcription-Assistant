@@ -42,6 +42,7 @@ describe("R4-D1 — COMMAND_KINDS", () => {
     expect([...B.COMMAND_KINDS]).toEqual([
       "start_day", "pause_day", "resume_day", "end_day", "set_audio_input",
       "check_update_now", "report_diag", "restart_engine", "self_test",
+      "consult_started", "consult_ended",
     ]);
   });
 });

@@ -28,6 +28,10 @@ import { applyInstallPoll, INPUT_DEVICE_UID_MAX, notePollWriteFailure, type Inst
  * app owns audio — so a room listening from a browser never acks it and the caller sees a timeout.
  *
  * 0.1.25 (W34.1) adds the ninth, `self_test`, migration 0121's CHECK.
+ *
+ * Encounter Buddy L1 adds the tenth and eleventh, `consult_started` and `consult_ended` (migration 0166's
+ * CHECK). They are the native app's alone, enqueued by lib/buddy/relay.ts with args `{ opaque_id }`
+ * and nothing else. They are NOT Tier 1 verbs: no operator route or tool sends them.
  */
 export const COMMAND_KINDS = [
   "start_day",
@@ -39,6 +43,8 @@ export const COMMAND_KINDS = [
   "report_diag",
   "restart_engine",
   "self_test",
+  "consult_started",
+  "consult_ended",
 ] as const;
 export type CommandKind = (typeof COMMAND_KINDS)[number];
 
