@@ -306,7 +306,7 @@ describe("S3 clinic hours, dedupe, and the standing alerts", () => {
     const real = Date.now;
     Date.now = () => clinic;
     try {
-      responses = [[], [], [], ...Array.from({ length: 24 }, () => [{ id: 1 }])];
+      responses = [[], [], [], [], ...Array.from({ length: 24 }, () => [{ id: 1 }])];
       const out = await S.runOpsSweep(clinic);
       expect(out.degraded).toEqual([]);
       expect(out.planned).toBeGreaterThan(0);

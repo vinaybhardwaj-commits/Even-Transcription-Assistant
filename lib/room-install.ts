@@ -1138,9 +1138,11 @@ async function recordRetirement(r: {
     r.actor.startsWith("mcp:") ? "system" : r.actorType,
   );
   let slug = r.roomId;
+  let roomName: string | null = null;
   try {
-    const rooms = (await sql`SELECT slug FROM room WHERE id = ${r.roomId} LIMIT 1`) as Array<{ slug: string }>;
+    const rooms = (await sql`SELECT slug, name FROM room WHERE id = ${r.roomId} LIMIT 1`) as Array<{ slug: string; name: string | null }>;
     if (rooms[0]?.slug) slug = rooms[0].slug;
+    roomName = rooms[0]?.name ?? null;
   } catch {
     /* the id stands in for the slug */
   }
@@ -1148,6 +1150,7 @@ async function recordRetirement(r: {
     kind: "install_retired",
     room_id: r.roomId,
     room_slug: slug,
+    room_name: roomName,
     minutes: r.lastSeenAgeS === null ? null : r.lastSeenAgeS / 60,
     install_id: r.installId,
     reason: r.reason,
