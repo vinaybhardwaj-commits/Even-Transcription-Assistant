@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { sql } from "@/lib/db";
 import { validateBatch, type PresenceRow } from "@/lib/presence-ingest";
+import { relayInserted } from "@/lib/buddy/relay";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -87,6 +88,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const inserted = await insert(v.rows);
+    await relayInserted(v.rows); // Encounter Buddy L1: after the insert, never throws, 2 s cap; the response below does not depend on it
     return reply(200, { ok: true, inserted: inserted.length, rejected, count: inserted.length });
   } catch (e) {
     if (!isDataFault(e)) {
@@ -97,9 +99,12 @@ export async function POST(req: NextRequest) {
 
   // Postgres refused something in the data. Insert row by row so good rows still land.
   let inserted = 0;
+  const landed: PresenceRow[] = [];
   for (const row of v.rows) {
     try {
-      inserted += (await insert([row])).length;
+      const n = (await insert([row])).length;
+      inserted += n;
+      if (n > 0) landed.push(row);
     } catch (e) {
       if (!isDataFault(e)) {
         console.warn(`[presence] insert failed: infrastructure fault, after ${inserted} of ${v.rows.length}`);
@@ -109,5 +114,6 @@ export async function POST(req: NextRequest) {
     }
   }
   console.warn(`[presence] data fault fallback: inserted=${inserted} rejected=${rejected}`);
+  await relayInserted(landed);
   return reply(200, { ok: true, inserted, rejected, count: inserted });
 }
