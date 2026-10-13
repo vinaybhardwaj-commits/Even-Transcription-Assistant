@@ -88,3 +88,34 @@ describe("SCRIBE_MCP_TOKENS_ADMIN", () => {
     expect(all).not.toContain("a1");
   });
 });
+
+describe("ADMIN-4b: collisions are checked against the RAW primary and EXTRA text", () => {
+  it("D1: an unreadable primary (which also drops EXTRA) still blocks an admin entry with the same hash", () => {
+    process.env.SCRIBE_MCP_TOKENS = "{bad";
+    process.env[MCP_TOKENS_EXTRA_ENV] = json({ [sha("d")]: { actor: "relay", scopes: ["read"] } });
+    process.env[MCP_TOKENS_ADMIN_ENV] = json({ [sha("d")]: { actor: "admin:y", scopes: ["read", "admin"] } });
+    expect("fail" in who("d")).toBe(true); // 503 or 401: either way no admin
+  });
+
+  it("D1: a primary entry dropped as invalid still blocks an admin entry with its hash", () => {
+    process.env.SCRIBE_MCP_TOKENS = json({ [sha("d")]: { actor: "", scopes: "read" }, [sha("ok")]: { actor: "w", scopes: ["read"] } });
+    process.env[MCP_TOKENS_ADMIN_ENV] = json({ [sha("d")]: { actor: "admin:y", scopes: ["read", "admin"] } });
+    expect(who("d")).toEqual({ fail: 401 });
+    expect(who("ok")).toMatchObject({ actor: "w", scopes: ["read"] });
+  });
+
+  it("D2: an admin entry whose actor equals a primary actor is dropped (an EXTRA actor carries extra:, which no valid admin actor can)", () => {
+    process.env.SCRIBE_MCP_TOKENS = json({ [sha("p")]: { actor: "admin:fable", scopes: ["read"] } });
+    process.env[MCP_TOKENS_EXTRA_ENV] = json({ [sha("e")]: { actor: "relay", scopes: ["read"] } });
+    process.env[MCP_TOKENS_ADMIN_ENV] = json({
+      [sha("a1")]: { actor: "admin:fable", scopes: ["read", "admin"] },
+      [sha("a2")]: { actor: "extra:relay", scopes: ["read", "admin"] },
+      [sha("a3")]: { actor: "admin:other", scopes: ["read", "admin"] },
+    });
+    expect(who("a1")).toEqual({ fail: 401 });
+    expect(who("a2")).toEqual({ fail: 401 });
+    expect(who("a3")).toMatchObject({ actor: "admin:other", scopes: ["admin", "read"] });
+    expect(logs.join("\n")).toContain("1 entry dropped");
+    expect(logs.join("\n")).not.toContain("admin:fable");
+  });
+});

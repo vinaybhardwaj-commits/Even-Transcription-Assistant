@@ -256,16 +256,34 @@ export function parseAdminTokenMap(raw: string | undefined): TokenMap {
   return out;
 }
 
-/** The merged map with the admin map behind it: an admin hash that collides with a primary or EXTRA hash is ignored (logged by an 8-char prefix). */
-export function mergeAdminTokens(base: TokenMap, admin: TokenMap): TokenMap {
+const loggedOnce = new Set<string>();
+const warnOnce = (msg: string) => { if (!loggedOnce.has(msg)) { loggedOnce.add(msg); console.warn(msg); } };
+
+/** PURE — every 64-hex string anywhere in the raw text of the primary and EXTRA envs (lowercased), valid JSON or not, entries valid or not. */
+export function takenHashes(...raws: Array<string | undefined>): Set<string> {
+  const out = new Set<string>();
+  for (const raw of raws) for (const m of (raw ?? "").matchAll(/[0-9a-fA-F]{64}/g)) out.add(m[0].toLowerCase());
+  return out;
+}
+
+/**
+ * The merged map with the admin map behind it. An admin entry is IGNORED when its hash appears anywhere in the RAW primary or EXTRA text (`taken`, so an unreadable
+ * primary or a dropped invalid entry still blocks it) or is in the merged map, and when its actor id equals a primary/EXTRA actor id (mcpActorId form). Logs carry an
+ * 8-char hash prefix or a count only.
+ */
+export function mergeAdminTokens(base: TokenMap, admin: TokenMap, taken: ReadonlySet<string> = new Set()): TokenMap {
   const out: TokenMap = { ...base };
+  const baseActors = new Set(Object.values(base).map((e) => mcpActorId(e.actor)));
+  let actorClash = 0;
   for (const [hash, entry] of Object.entries(admin)) {
-    if (hash in out) {
-      console.warn(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV}: entry ${hash.slice(0, 8)} collides with a primary/extra token; ignored`);
+    if (hash in out || taken.has(hash)) {
+      warnOnce(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV}: entry ${hash.slice(0, 8)} collides with a primary/extra token; ignored`);
       continue;
     }
+    if (baseActors.has(mcpActorId(entry.actor))) { actorClash += 1; continue; }
     out[hash] = entry;
   }
+  if (actorClash > 0) warnOnce(`[mcp-auth] ${MCP_TOKENS_ADMIN_ENV}: ${actorClash} entr${actorClash === 1 ? "y" : "ies"} dropped: the actor equals a primary/extra actor`);
   return out;
 }
 
@@ -280,6 +298,7 @@ export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipa
       primaryFullyParsed(process.env[MCP_TOKENS_ENV]),
     ),
     parseAdminTokenMap(process.env[MCP_TOKENS_ADMIN_ENV]),
+    takenHashes(process.env[MCP_TOKENS_ENV], process.env[MCP_TOKENS_EXTRA_ENV]),
   );
   const single = process.env[MCP_TOKEN_ENV];
   const configured = Object.keys(map).length > 0 || Boolean(single);
