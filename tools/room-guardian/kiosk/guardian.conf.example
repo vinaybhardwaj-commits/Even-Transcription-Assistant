@@ -1,0 +1,14 @@
+# Kiosk Guardian config. Copy to $GUARDIAN_HOME/guardian.conf. The REAL file lives outside git
+# (~/oc/fleet-access/guardian/) because it names hosts and keys (G7). Nothing below is a real value.
+GUARDIAN_ROOM="<room-slug>"
+# Each command runs under `bash -c`. Publish: topic is $1, the line is on stdin.
+# Subscribe: $1 is the room; print "<topic><TAB><payload>" per message, forever.
+# Flags: reads the newest message on topic $2 (guardian/control); print "fleet=on|off" and "mode=shadow|heal" for room $1; exit non-zero when the Mini is unreachable.
+GUARDIAN_PUBLISH_CMD="<command that publishes stdin to topic \$1>"
+GUARDIAN_SUBSCRIBE_CMD="<command that streams topic<TAB>payload lines>"
+GUARDIAN_FLAG_CMD="<command that prints fleet=... and mode=... lines>"
+# The kiosk-sudo path: a command that runs its arguments as root (sudoers NOPASSWD for the root helper only).
+GUARDIAN_SUDO="sudo -n"
+GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"
+USB_MIC_PATTERN="C270"
+# PRESENCE_FILE="<file whose mtime is the Presence heartbeat>"
