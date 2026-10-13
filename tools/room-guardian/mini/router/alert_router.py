@@ -22,6 +22,7 @@ V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"}   # 
 V_FIRST_S, V_REMINDER_S = 1800, 3600
 CLINIC_START_MIN, CLINIC_END_MIN, CLINIC_DAYS = 7 * 60 + 30, 21 * 60 + 30, (1, 2, 3, 4, 5, 6)   # mirrors lib/alerts/clinic-hours.ts
 DIGEST_HOUR_IST = 21
+ROUTED_KEEP_S = 7 * 86400
 URGENT = {"offline", "degraded", "fleet_outage", "install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled",
           "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated"}
 OPEN_KINDS = URGENT          # kinds that open a case; 'recovered' and 'session_reaped' never do
@@ -72,11 +73,14 @@ class Router:
         rid, kind, rooms = row.get("id"), row.get("kind"), row.get("room_ids") or ([row["room_id"]] if row.get("room_id") else [])
         if not isinstance(rid, int) or isinstance(rid, bool) or not rooms:
             return
+        if self.store.is_routed(rid):               # the kit relay re-delivers recent rows (its `late` set): each row id is routed ONCE (R3)
+            return
         for room in rooms:
             if kind == RECOVERY_KIND:
                 self.close_room(bus, room, "recovery")
             elif kind in OPEN_KINDS:
                 self._open_or_bump(bus, room, kind, rid, row)
+        self.store.mark_routed(rid, self.clock())    # AFTER the work: a crash before this replays the row (a late duplicate), never loses it
 
     def _open_or_bump(self, bus, room, kind, rid, row):
         case = self.store.get_open(room, kind)
@@ -155,6 +159,7 @@ class Router:
                     self._say(bus, c, f"ROOM ALERT V {c['kind']}: {c['room_id']} open {int(age // 60)} min", "urgent",
                               f"V: patient-impacting, {'acked but' if c['acked_at'] else 'unacked,'} not recovered. gating-lead tells V. Case room-alert-{c['first_id']}.")
                     out["v"] += 1
+            self.store.prune_routed(now - ROUTED_KEEP_S)
             out["digest"] = self._digest(bus, now)
             self._save()
         finally:
@@ -222,6 +227,7 @@ class SqliteStore:
             self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS room_alert_case (first_id INTEGER PRIMARY KEY, room_id TEXT NOT NULL, kind TEXT NOT NULL, opened_at REAL NOT NULL, "
                         "last_paged_at REAL, page_count INTEGER NOT NULL DEFAULT 0, suppressed_count INTEGER NOT NULL DEFAULT 0, acked_by TEXT, acked_at REAL, closed_at REAL, close_reason TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS routed_ids (row_id INTEGER PRIMARY KEY, routed_at REAL NOT NULL)")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS open_uq ON room_alert_case (room_id, kind) WHERE closed_at IS NULL")
 
     def get_open(self, room, kind):
@@ -240,6 +246,15 @@ class SqliteStore:
             raise ValueError(f"unknown columns {bad}")
         sets = ",".join(f"{k}=?" for k in f)
         self.db.execute(f"UPDATE room_alert_case SET {sets} WHERE first_id=?", [*f.values(), first_id])
+
+    def is_routed(self, row_id):
+        return self.db.execute("SELECT 1 FROM routed_ids WHERE row_id=?", (row_id,)).fetchone() is not None
+
+    def mark_routed(self, row_id, now):
+        self.db.execute("INSERT OR IGNORE INTO routed_ids (row_id, routed_at) VALUES (?, ?)", (row_id, now))
+
+    def prune_routed(self, before):
+        self.db.execute("DELETE FROM routed_ids WHERE routed_at < ?", (before,))
 
     def next_local_id(self):
         """An id for a Mini-detected case: above every id seen, never below LOCAL_ID_BASE."""

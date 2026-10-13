@@ -24,7 +24,10 @@ def make_relay_class(kit):
 
         def _deliver(self, bus, row):
             posted = super()._deliver(bus, row)
-            self.router.on_row(RouterBus(bus), row)       # runs on a replay too: on_row is idempotent per row id
+            try:                                            # a store/router error must never stop the cursor, last-poll or tick (R3); the row is retried on its next replay
+                self.router.on_row(RouterBus(bus), row)     # on_row routes each row id once, so the kit's `late` replays are no-ops
+            except Exception as e:
+                kit.log(f"router on_row failed for row {row.get('id')}: {e.__class__.__name__}: {kit.one_line(e, 100)}")
             return posted
 
         def poll_once(self):

@@ -38,6 +38,9 @@ class RouterSink:
             if hasattr(bus, "close"):
                 bus.close()
 
+    def open_quiet_rooms(self):
+        return [c["room_id"] for c in self.router.store.list_open() if c["kind"] == "guardian_quiet"]
+
     def _open(self, room, kind, now):
         row = {"id": self.router.store.next_local_id(), "kind": kind, "room_ids": [room], "room_name": room}
         self._with_bus(lambda bus: self.router.on_row(bus, row))
@@ -56,12 +59,12 @@ class RouterSink:
 
 
 class Subscriber:
-    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S):
+    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=()):
         self.data, self.ctl, self.rooms, self.sink, self.clock, self.quiet_after = data_dir, control_dir, list(rooms), sink, clock, quiet_after_s
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
-        self.quiet = set()
+        self.quiet = set(quiet_seed) & set(self.rooms)   # rooms whose guardian_quiet case is still open (R3): a restart must not forget them
 
     # ---- ingest
     def on_line(self, topic, raw):

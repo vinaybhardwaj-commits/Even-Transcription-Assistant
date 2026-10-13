@@ -237,6 +237,102 @@ class EndToEndQuietTests(unittest.TestCase):
             subr.on_line("kiosk/r1/heal", '{"result":"ok"}'); self.assertIsNone(router.store.get_open("r1", "heal_escalated"))
 
 
+class KitLateSetTests(unittest.TestCase):
+    """The refuter's probes THROUGH the real kit Relay: a door with the server's semantics (new = id > cursor, late = id <= cursor created recently)."""
+    KIT = os.path.expanduser("~/dev/eta-lab/kit/room-alert-relay.py")
+
+    def setUp(self):
+        if not os.path.exists(self.KIT):
+            self.skipTest("kit relay not on this machine")
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "router"))
+        import router_relay as rr
+        self.rr, self.kit = rr, rr.load_kit(self.KIT)
+        self.clock, self.rows, self.bus = Clock(TUE_11), [], FakeBus()
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+
+    def stdio(self):
+        bus = self.bus
+        class S:
+            def thread_exists(s, tid): return any(m["thread"] == tid for m in bus.msgs if "[page" not in m["subject"] and "CLOSED" not in m["subject"])
+            def post(s, to, subject, body, priority, thread_id): bus.post(subject, body, priority, thread_id)
+            def _tool(s, name, args): return {"messages": bus.thread_messages(args["thread_id"])}
+            def close(s): pass
+        return S()
+
+    def door(self, cursor, lookback):
+        new = [r for r in self.rows if r["id"] > cursor]
+        late = [r for r in self.rows if r["id"] <= cursor and self.clock() - r["_t"] <= 600]
+        return {"ok": True, "new": new, "late": late, "heartbeat": {"state": "ok", "age_s": 5}}
+
+    def build(self, store=None):
+        self.store = store or ar.SqliteStore(os.path.join(self.tmp.name, "cases.sqlite"))
+        self.router = ar.Router(self.store, self.stdio, self.clock)
+        self.relay = self.rr.make_relay_class(self.kit)(self.router, self.door, self.stdio, state_dir=self.tmp.name, clock=self.clock)
+
+    def add(self, i, kind, room="r1"):
+        self.rows.append({"id": i, "kind": kind, "room_ids": [room], "room_name": room, "subject": "s", "body": "b", "_t": self.clock()})
+
+    def polls(self, n):
+        for _ in range(n):
+            self.clock.adv(60); self.relay.poll_once()
+
+    def test_replayed_recovery_does_not_close_a_newer_outage(self):
+        self.build(); self.add(5, "offline"); self.polls(1); self.add(6, "recovered"); self.polls(1)
+        self.assertIsNone(self.store.get_open("r1", "offline"))
+        self.add(7, "offline"); self.polls(4)                                   # 6 stays in the late set for these polls
+        c = self.store.get_open("r1", "offline")
+        self.assertIsNotNone(c); self.assertEqual(c["first_id"], 7)
+
+    def test_replayed_first_row_of_closed_case_does_not_crash_the_poll(self):
+        self.build(); self.add(5, "offline"); self.polls(1); self.add(6, "recovered"); self.polls(1)
+        before = self.relay.state["cursor"]
+        self.polls(3)                                                           # 5 and 6 replay; must not raise or stall tick/last-poll
+        lp = open(os.path.join(self.tmp.name, "relay-room-alerts.last-poll")).read()
+        self.assertIn("epoch=%d" % int(self.clock()), lp); self.assertEqual(self.relay.state["cursor"], before)
+        self.assertIsNone(self.store.get_open("r1", "offline"))
+
+    def test_duplicate_then_three_polls_counts_once(self):
+        self.build(); self.add(5, "offline"); self.polls(1); self.add(6, "offline"); self.polls(4)
+        self.assertEqual(self.store.get_open("r1", "offline")["suppressed_count"], 1)
+
+    def test_store_error_in_on_row_is_not_fatal_to_the_poll(self):
+        class Boom(ar.SqliteStore):
+            def insert(self, case): raise RuntimeError("disk full")
+        self.build(Boom(os.path.join(self.tmp.name, "b.sqlite"))); self.add(5, "offline"); self.add(6, "degraded", "r2")
+        self.polls(1)
+        self.assertEqual(self.relay.state["cursor"], 6)
+        self.assertIn("status=OK", open(os.path.join(self.tmp.name, "relay-room-alerts.last-poll")).read())
+        self.assertTrue(any(m["thread"] == "room-alert-5" for m in self.bus.msgs))       # the plain kit post still went out
+
+    def test_routed_ids_pruned_after_7_days(self):
+        self.build(); self.add(5, "offline"); self.polls(1)
+        self.assertTrue(self.store.is_routed(5))
+        self.clock.adv(7 * 86400 + 61); self.relay.poll_once()
+        self.assertFalse(self.store.is_routed(5))
+
+
+class ThresholdAndSourceTests(unittest.TestCase):
+    def test_v_threshold_pinned_from_below_at_30_min(self):
+        for delta, expect in ((1799, 0), (1800, 1)):
+            clock, bus, store = Clock(TUE_11), FakeBus(), ar.SqliteStore()
+            r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100, "recorder_off"))
+            bus.human("gating-lead", "ACK room-alert-100", "room-alert-100")
+            clock.adv(delta); r.tick(bus)
+            self.assertEqual(len([m for m in bus.msgs if m["subject"].startswith("ROOM ALERT V")]), expect, delta)
+
+    def test_clinic_hours_copy_matches_the_ts_source(self):
+        import re
+        ts = open(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "lib", "alerts", "clinic-hours.ts")).read()
+        def num(name):
+            m = re.search(r"export const %s = ([0-9 +*]+);" % name, ts); self.assertIsNotNone(m, name)
+            return eval(m.group(1), {"__builtins__": {}})
+        days = re.search(r"CLINIC_DAYS: readonly number\[\] = \[([0-9, ]+)\];", ts); self.assertIsNotNone(days)
+        self.assertEqual(num("CLINIC_START_MIN"), ar.CLINIC_START_MIN)
+        self.assertEqual(num("CLINIC_END_MIN"), ar.CLINIC_END_MIN)
+        self.assertEqual(tuple(int(x) for x in days.group(1).split(",")), ar.CLINIC_DAYS)
+        self.assertEqual(re.search(r"IST_OFFSET_MS = ([0-9_]+);", ts).group(1).replace("_", ""), str(int(ar.IST.utcoffset(None).total_seconds() * 1000)))
+
+
 class WatcherTests(unittest.TestCase):
     def test_pages_when_last_poll_older_than_10_min_edge_triggered(self):
         with tempfile.TemporaryDirectory() as t:

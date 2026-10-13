@@ -2,6 +2,7 @@ import json, os, sys, tempfile, unittest
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "subscriber"))
 import subscriber as sb
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "router"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 T0 = datetime(2026, 10, 13, 11, 0, tzinfo=IST).timestamp()
@@ -79,6 +80,28 @@ class HealTests(unittest.TestCase):
             s.on_line("kiosk/r1/heal", '{"result":"ok","shadow":true}'); s.on_line("kiosk/r1/heal", '{"result":"escalated"}')
             s.on_line("kiosk/r1/heal", '{"result":"ESCALATED"}'); s.on_line("kiosk/r1/heal", "garbage")
             self.assertEqual((sink.esc, sink.res), (["r1", "r1"], ["r1"]))
+
+class SeedTests(unittest.TestCase):
+    def test_restart_with_open_quiet_case_then_room_speaks_closes_it(self):
+        import alert_router as ar
+        class Bus:
+            def __init__(s): s.msgs = []
+            def post(s, subject, body, priority, thread_id): s.msgs.append({"subject": subject, "thread": thread_id, "body": body})
+            def thread_messages(s, tid): return [m for m in s.msgs if m["thread"] == tid]
+        with tempfile.TemporaryDirectory() as t:
+            clock, bus, path = Clock(T0), Bus(), os.path.join(t, "cases.sqlite")
+            router = ar.Router(ar.SqliteStore(path), lambda: bus, clock)
+            sub1 = sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(router, lambda: bus), clock)
+            clock.adv(121); self.assertEqual(sub1.check_quiet(), ["r1"])
+            router2 = ar.Router(ar.SqliteStore(path), lambda: bus, clock)            # subscriber process restarts
+            sink2 = sb.RouterSink(router2, lambda: bus)
+            self.assertEqual(sink2.open_quiet_rooms(), ["r1"])
+            sub2 = sb.Subscriber(os.path.join(t, "d"), t, ["r1", "r2"], sink2, clock, quiet_seed=sink2.open_quiet_rooms() + ["gone"])
+            self.assertEqual(sub2.quiet, {"r1"})                                      # unknown rooms are not seeded
+            clock.adv(30); sub2.on_line("kiosk/r1/health", "{}")
+            self.assertIsNone(router2.store.get_open("r1", "guardian_quiet"))
+            self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["subject"]]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

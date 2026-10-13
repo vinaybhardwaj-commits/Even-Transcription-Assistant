@@ -22,7 +22,8 @@ def main():
     kit = router_relay.load_kit()
     # No state_path: the relay's router owns the V/digest file. This router only opens and closes cases (same SQLite file, WAL).
     router = alert_router.Router(alert_router.default_store(HOME), lambda: router_relay.RouterBus(kit.StdioBus(as_name="room-guardian-subscriber")), time.time)
-    s = Subscriber(os.path.join(HOME, "data"), HOME, cfg["rooms"], RouterSink(router, router.bus_factory), quiet_after_s=cfg.get("quiet_after_s", 120))
+    sink = RouterSink(router, router.bus_factory)
+    s = Subscriber(os.path.join(HOME, "data"), HOME, cfg["rooms"], sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms())
     q = queue.Queue()
     for r in cfg["rooms"]:
         for st in STREAMS:
