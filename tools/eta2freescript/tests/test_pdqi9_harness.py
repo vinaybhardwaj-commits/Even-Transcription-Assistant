@@ -585,10 +585,23 @@ def test_d2_printable_floor_renders_fields_under_their_headings():
                                "investigations": [{"name": "CBC"}], "surgeries": [{"name": "X"}], "referrals": [{"speciality": "ENT"}],
                                "follow_up": {"date": "d"}, "diagnoses": [{"name": "Fever"}], "general_advice": ["rest"],
                                "examination": "e", "symptoms": "s", "management_plan": "p"})
-    assert "Medication:\nPara 500 mg bd x 3 days after food" in t
+    assert "Medication:\nPara 500 mg bd for 3 days after food" in t
     for h in ("Further Investigation", "Surgery or Procedure", "Refer to", "Follow up", "Diagnoses", "General Advice", "Examination",
               "Presenting Complaint", "Plan of Management"):
         assert f"{h}:\n" in t
+
+
+@pytest.mark.parametrize("dur", ["Days 5", "weeks", "Months - 3", "5 days", "1 month", "continue", "SOS"])
+def test_b4b1_duration_with_unit_word_is_not_a_printable_error(dur):
+    rx = {"medicines": [{"name": "Drug", "strength": "5 mg", "frequency": "bd", "duration": dur}]}
+    assert floors.printable_count(rx, None) == 0
+    assert " for " + dur in floors.printable_text(rx)
+
+
+@pytest.mark.parametrize("dur", ["[days]", "to be decided"])
+def test_b4b1_placeholder_duration_still_counts_errors_unchanged(dur):
+    # B1 reports two FRX-N1 findings for each of these on one line (two bracket hits; d2 + d3); the count is the same under "x" and "for".
+    assert floors.printable_count({"medicines": [{"name": "Drug", "strength": "5 mg", "frequency": "bd", "duration": dur}]}, None) == 2
 
 
 def test_d3_b0_parse_failure_is_not_evaluated_and_blocks_kept():

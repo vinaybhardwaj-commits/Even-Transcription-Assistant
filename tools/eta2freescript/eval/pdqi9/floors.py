@@ -249,7 +249,7 @@ def dose_precedence(rx: dict, art: dict | None) -> int:
 
 def printable_text(rx: dict) -> str:
     """Every replayed Rx text field, rendered under the heading the printable note puts it under, so the section-gated
-    FRX-N1 checks (d1-d4) see it. Medicines: one line each (name strength frequency x duration instructions)."""
+    FRX-N1 checks (d1-d4) see it. Medicines: one line each (name strength frequency for duration instructions)."""
     sec: dict[str, list[str]] = {h: [] for h in ("Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
                                                  "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice")}
 
@@ -260,7 +260,7 @@ def printable_text(rx: dict) -> str:
 
     for m in rx.get("medicines") or []:
         add("Medication", m.get("name"), m.get("brand_name"), m.get("generic"), m.get("strength"), m.get("frequency"),
-            "x" if _s(m.get("duration")) else "", m.get("duration"), m.get("instructions"))
+            "for" if _s(m.get("duration")) else "", m.get("duration"), m.get("instructions"))
     for i in rx.get("investigations") or []:
         add("Further Investigation", i.get("name"), i.get("instruction"))
     for x in rx.get("surgeries") or []:
