@@ -72,6 +72,8 @@ def parse_bundle_config(env: dict) -> tuple[list[str], str] | None:
         raise NightlyError("FREESCRIPT_BUNDLE_CMD must be a JSON array of strings")
     if not cmd[0].strip():
         raise NightlyError("FREESCRIPT_BUNDLE_CMD has an empty program")
+    if "{" in cmd[0]:
+        raise NightlyError("FREESCRIPT_BUNDLE_CMD program must be a literal, not a placeholder")
     for ph in ("{uid}", "{out}"):
         if not any(ph in a for a in cmd):
             raise NightlyError(f"FREESCRIPT_BUNDLE_CMD has no {ph} placeholder")
@@ -331,6 +333,14 @@ def _kill_group(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+def _killpg_quiet(proc: subprocess.Popen) -> None:
+    """SIGKILL the command's process group; a group that is already gone is fine."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def _communicate_bounded(proc: subprocess.Popen, timeout: float) -> tuple[bytes, bytes]:
     """Wait for ``proc``; keep at most _STDERR_READ bytes of stderr and drain the rest, so a noisy child cannot fill memory."""
     import threading
@@ -342,8 +352,11 @@ def _communicate_bounded(proc: subprocess.Popen, timeout: float) -> tuple[bytes,
                 buf.extend(chunk[: _STDERR_READ - len(buf)])
     t = threading.Thread(target=drain, daemon=True)
     t.start()
-    proc.wait(timeout=timeout)
-    t.join(timeout=5)
+    try:
+        proc.wait(timeout=timeout)
+    finally:
+        _killpg_quiet(proc)  # no grandchild outlives the command, and none keeps stderr open
+        t.join(timeout=5)
     return b"", bytes(buf)
 
 
@@ -359,11 +372,16 @@ def fetch_bundle(cmd: list[str], cwd: str, uid: str, tmp: Path) -> dict:
     proc = subprocess.Popen(argv, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, start_new_session=True)
     try:
-        _, err_bytes = _communicate_bounded(proc, BUNDLE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        proc.wait()
-        raise NightlyError("bundle command timed out") from None
+        try:
+            _, err_bytes = _communicate_bounded(proc, BUNDLE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.wait()
+            raise NightlyError("bundle command timed out") from None
+    finally:
+        _killpg_quiet(proc)
+        if proc.stderr:
+            proc.stderr.close()
     if proc.returncode != 0:
         err = " ".join(err_bytes.decode("utf-8", "replace").split())[:_STDERR_CAP]
         if err:
@@ -530,6 +548,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
     if sender is None and not dry_run:
         print("no ingest target")
+        _config_error_summary(dry_run)
         return 1
     with tempfile.TemporaryDirectory(prefix="freescript-bundle-") as td:
         tmp = Path(td)
@@ -551,7 +570,12 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     return 0 if nothing else rc
 
 
-def _keep_derived(tmp_out: Path, keep_root: str | None, uid: str, log: dict, usage_from: int) -> int:
+def _config_error_summary(dry_run: bool) -> None:
+    print(json.dumps({"dry_run": dry_run, "n": 0, "posted": 0, "rejected": 0, "failed": 0, "skipped": 0, "missing": 0,
+                      "mode": "bundle", "bundle_failed": 0, "missing_layers": 0, "not_this_day": 0, "config_error": True}))
+
+
+def _keep_derived(tmp_out: Path, keep_root: str | None, uid: str, log: dict, usage_from: int, error_type: str | None = None) -> int:
     """Copy artifact.json, artifact.validation.json, one run-log line and the new usage lines to <keep_root>. Nothing else persists.
 
     Files 0600, directories 0700. Returns the new offset into the temp usage ledger.
@@ -565,13 +589,16 @@ def _keep_derived(tmp_out: Path, keep_root: str | None, uid: str, log: dict, usa
     for d in (root, dest):
         d.mkdir(parents=True, exist_ok=True)
         os.chmod(d, 0o700)
-    for name in ("artifact.json", "artifact.validation.json"):
+    for name in (() if error_type else ("artifact.json", "artifact.validation.json")):
         src = tmp_out / uid / name
         if src.is_file():
             shutil.copyfile(src, dest / name)
             os.chmod(dest / name, 0o600)
-    line = {"uid": uid, "final_valid": bool(log.get("final_valid")), "n_final_errors": len(log.get("final_errors") or []),
-            "cost_usd": log.get("cost_usd"), "secs_total": log.get("secs_total")}
+    if error_type:  # the class name only, never the message
+        line = {"uid": uid, "final_valid": False, "error_type": error_type}
+    else:
+        line = {"uid": uid, "final_valid": bool(log.get("final_valid")), "n_final_errors": len(log.get("final_errors") or []),
+                "cost_usd": log.get("cost_usd"), "secs_total": log.get("secs_total")}
     for path, data in ((root / "runs.jsonl", (json.dumps(line) + "\n").encode()),
                        (root / "usage.jsonl", _read_from(ledger, usage_from, size))):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -603,7 +630,12 @@ def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
             out.mkdir(parents=True, exist_ok=True)
             state["client"] = make_client("bedrock", UsageLedger(out / "usage.jsonl"), None)
             assert_phi_safe(*state["client"].resolve("sonnet"))
-        log = run_consult(consults[uid], state["client"], out, Options())
+        try:
+            log = run_consult(consults[uid], state["client"], out, Options())
+        except Exception as e:
+            # a consult that raised still keeps what it spent
+            state["offset"] = _keep_derived(out, keep_root, uid, {}, state["offset"], error_type=type(e).__name__)
+            raise
         state["offset"] = _keep_derived(out, keep_root, uid, log, state["offset"])
         return log
 
@@ -719,6 +751,7 @@ def _drain(cfg: dict, dry_run: bool) -> int:
     if cfg.get("bundle_cmd"):
         if not cfg.get("app_url") or not secret:
             print("no ingest target")
+            _config_error_summary(dry_run)
             return 1
         return _run_bundle(cfg, previous_ist_day(), dry_run=dry_run, run_one=None, post=None, pending=None, sealed=False, secret=secret, reb_token="")
     data = Path(cfg["data"]) if cfg.get("data") else None

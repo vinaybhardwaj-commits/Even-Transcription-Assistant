@@ -342,3 +342,82 @@ def test_stderr_read_is_bounded(tmp_path, capsys):
         nightly.fetch_bundle([sys.executable, str(script), "{uid}", "{out}"], str(tmp_path), "u1", tmp_path)
     line = capsys.readouterr().out.strip()
     assert len(line.split("bundle-stderr ", 1)[1]) == 500
+
+
+def test_no_grandchild_survives_a_clean_exit(tmp_path):
+    import os, time
+    pidfile, late = tmp_path / "gc.pid", tmp_path / "work" / "late.txt"
+    work = tmp_path / "work"
+    work.mkdir()
+    script = tmp_path / "spawn.py"
+    script.write_text("import subprocess, sys\n"
+                      f"code = 'import time; time.sleep(1.5); open(' + repr({str(late)!r}) + ', ' + repr('w') + ').write(' + repr('x') + ')'\n"
+                      "p = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.DEVNULL)\n"
+                      f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+                      "open(sys.argv[2], 'w').write('{}')\n")
+    nightly.fetch_bundle([sys.executable, str(script), "{uid}", "{out}"], str(tmp_path), "u1", work)
+    pid = int(pidfile.read_text())
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("grandchild survived")
+    time.sleep(2)
+    assert not late.exists() and list(work.iterdir()) == []
+
+
+def _raising_consult(monkeypatch, fail_uids):
+    from types import SimpleNamespace
+    from tools.eta2freescript import models, phi_guard, pipeline
+
+    class Client(SimpleNamespace):
+        def resolve(self, _a):
+            return ("m", "converse")
+
+    def fake_run_consult(c, client, out_dir, opts=None, specialty=None):
+        with client.ledger.path.open("a") as f:
+            f.write('{"tag": "t", "usd": 0.1}\n')
+        if c.uid in fail_uids:
+            raise RuntimeError("SYNTH_SECRET_MESSAGE")
+        return {"final_valid": True, "final_errors": [], "cost_usd": 0.1,
+                "artifact": {"encounter": {"eta_encounter_id": c.uid}, "pulse_link": {"consult_uid": c.uid}}}
+    monkeypatch.setattr(models, "make_client", lambda _k, ledger, _x: Client(ledger=ledger))
+    monkeypatch.setattr(phi_guard, "assert_phi_safe", lambda *a: None)
+    monkeypatch.setattr(pipeline, "run_consult", fake_run_consult)
+
+
+@pytest.mark.parametrize("order", [["synth-all", "synth-judge"], ["synth-judge", "synth-all"]])
+def test_a_raising_consult_still_flushes_usage_and_logs_the_class(tmp_path, capsys, monkeypatch, order):
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s")
+    keep = tmp_path / "keep"
+    _raising_consult(monkeypatch, {"synth-judge"})  # fails first or last, depending on the order
+    cfg = bcfg(tmp_path, out=str(keep))
+    run(cfg, DAY, post=lambda b: {"ok": True, "inserted": 1}, sealed=order, pending=False)
+    out = capsys.readouterr().out
+    assert "SYNTH_SECRET_MESSAGE" not in out
+    assert (keep / "usage.jsonl").read_text().count("\n") == 2
+    runs = {json.loads(l)["uid"]: json.loads(l) for l in (keep / "runs.jsonl").read_text().splitlines()}
+    assert runs["synth-judge"] == {"uid": "synth-judge", "final_valid": False, "error_type": "RuntimeError"}
+    assert runs["synth-all"]["final_valid"] is True
+
+
+@pytest.mark.parametrize("which", ["run", "drain"])
+def test_no_ingest_target_in_bundle_mode_prints_one_summary(tmp_path, capsys, monkeypatch, which):
+    monkeypatch.delenv("FREESCRIPT_INGEST_SECRET", raising=False)
+    cfg = bcfg(tmp_path)
+    rc = run(cfg, DAY, sealed=["synth-all"], pending=False) if which == "run" else nightly._drain(cfg, False)
+    out = capsys.readouterr().out
+    lines = [l for l in out.splitlines() if l.startswith("{")]
+    assert rc == 1 and len(lines) == 1
+    s = json.loads(lines[0])
+    assert s["mode"] == "bundle" and s["config_error"] is True
+
+
+def test_placeholder_program_is_a_config_error(tmp_path):
+    with pytest.raises(NightlyError):
+        parse_bundle_config({"FREESCRIPT_BUNDLE_CMD": '["{uid}", "{out}"]', "FREESCRIPT_BUNDLE_CWD": str(tmp_path)})
+    with pytest.raises(NightlyError):
+        parse_bundle_config({"FREESCRIPT_BUNDLE_CMD": '["py{uid}", "x", "{out}"]', "FREESCRIPT_BUNDLE_CWD": str(tmp_path)})

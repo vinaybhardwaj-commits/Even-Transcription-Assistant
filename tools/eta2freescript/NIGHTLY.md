@@ -45,6 +45,16 @@ A bad JSON value, a missing placeholder, or a missing or non-directory cwd is a 
 - Every bundle-mode run prints exactly one JSON summary line, including when no row is eligible (the exit code for "nothing to do" stays 0).
 - The summary line gains `mode` (`bundle` or `folder`), `bundle_failed`, `missing_layers`, `not_this_day`.
 - `plan` lists local folders only and exits 1 in bundle mode. `drain` takes pending jobs only, for the previous IST day.
+- argv[0] must be a literal program; a `{` in it (a placeholder program) is a config error.
+- After every bundle command (success, failure or timeout) its whole process group is killed, so no grandchild outlives `fetch_bundle`.
+- A consult whose pipeline raises still flushes its usage lines to `<out>/usage.jsonl` and writes `{uid, final_valid: false, error_type}` (the exception class name, no message) to `runs.jsonl`. This holds for the last consult too.
+- "no ingest target" in bundle mode still prints the one JSON summary line (`mode: bundle`, `config_error: true`) before exiting 1.
+
+## First live night
+
+1. Until B2.1 is merged, the first live night runs with `--dry-run` only.
+2. Once merged, the first live run samples one CAA consult (a uid whose role layer is `role_caa`) and the lead records the window check in the lead LOG: the clip start falls on the target IST day and the segment times sit inside the clip.
+3. Only after that entry does the cron run unattended.
 
 ## Switches
 
