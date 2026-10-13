@@ -36,8 +36,9 @@ Install it with `sudo installer`, which Gatekeeper does not check. Do not double
    An old plist (`SuccessfulExit` instead of `true`) means this step was skipped; a room left on it
    stays stopped after a clean exit. The agent is only re-read at `bootout` then `bootstrap`; a
    `kickstart` does not reload the file.
-   A retired or never-enrolled app now idles instead of exiting. That is deliberate: it is how it
-   stays stopped under `KeepAlive true`.
+   0.1.39: a retired app re-polls every 5 minutes (status `retired`), and a never-enrolled app re-reads its
+   session and config every 5 minutes (status `needs_enrol`). Neither exits, so `KeepAlive true` cannot loop
+   them, and neither sits silent. `room-recorder probe-helper` prints `ok <helper version>` or `fail <reason>`.
    A Mac that was never enrolled needs the usual bootstrap paste first; this step does not enrol.
    **0.1.30 also fixes the tool paths.** `install-launch-agent` (and every app start) rewrites
    `tapewriter_path` and `ffmpeg_path` in `config.json` to the copies inside the running bundle, and

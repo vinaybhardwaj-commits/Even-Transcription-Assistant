@@ -22,7 +22,7 @@ struct RecorderStatus {
 }
 
 enum RecorderStatusParser {
-    static let knownKeys: Set<String> = ["state", "session_id", "pending_piece_count", "updated_at", "mic_mode", "mic_state", "capture_open"]
+    static let knownKeys: Set<String> = ["state", "session_id", "pending_piece_count", "updated_at", "mic_mode", "mic_state", "capture_open", "last_poll_ok_at", "last_http", "last_chunk_uploaded_at"]
     /// The only keys of mic_mode that ever leave the machine, and the longest string for any of them.
     static let micModeKeys: [String] = ["before", "after", "set", "at"]
     static let micModeMaxChars = 64

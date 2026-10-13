@@ -11,6 +11,7 @@ private let usage = """
     room-recorder status [--root <dir>]
     room-recorder mark [--root <dir>]
     room-recorder install-launch-agent [--root <dir>]
+    room-recorder probe-helper
   """
 
 private struct Arguments {
@@ -170,9 +171,9 @@ private enum RoomRecorderCLI {
         // and at 180 seconds the swap script puts the previous version back — on a real Mac,
         // watched from the study.
         //
-        // FIRST, AND EXIT 1. Before the enrolment read, which exits ZERO by design and would leave
-        // an unenrolled Mac stopped instead of thrashing; before `RoomEngine.load`, which opens the
-        // instance lock and the spool. The whole point is a process that starts and dies, so
+        // FIRST, AND EXIT 1. Before the enrolment read, which waits for an enrolment instead of
+        // exiting (0.1.39) and so would never reach a line placed after it; before `RoomEngine.load`,
+        // which opens the instance lock and the spool. The whole point is a process that starts and dies, so
         // nothing that could succeed may run ahead of it.
         //
         // Operator-created only. Nothing in this app ever writes it, so a room that has not been
@@ -189,9 +190,10 @@ private enum RoomRecorderCLI {
         RoomConfigurationRebase.apply(root: root, log: { message in
           FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))
         })
-        // Refuses with needs_enrol and exits 0 if the keychain holds no session — before any
-        // application is created, so a Mac that was never enrolled does not sit in a run loop.
-        let configuration = try RoomEngine.startingConfiguration(rootURL: root)
+        // 0.1.39. No session in the keychain: status.json says `needs_enrol` and the session and config are read
+        // again every 5 minutes, before any application is created. The process neither exits (KeepAlive would
+        // restart it) nor parks silent; the moment an enrolment lands, this launch carries on as a normal one.
+        let configuration = try await RoomEngine.awaitEnrolment(rootURL: root)
         // Hands the main thread to AppKit and never returns. The microphone is requested from
         // inside the run loop; see ResidentApplication for why that is the only order that works.
         ResidentApplication.run {
@@ -253,10 +255,6 @@ private enum RoomRecorderCLI {
 
                   """.utf8))
               return RoomSelfUpdate.handoverExitCode
-            case .retired:
-              // §4.5 rule 3: a deliberate stop. The LaunchAgent is `KeepAlive true`, so exiting
-              // would restart a retired copy for ever. Park instead; nothing polls or records.
-              await RoomLaunchAgent.parkForever()
             case .stopped:
               // Any other clean return. Exit 0; launchd starts the app again (0.1.29).
               return 0
@@ -327,17 +325,19 @@ private enum RoomRecorderCLI {
         try data.write(to: plistURL, options: .atomic)
         print("Installed \(plistURL.path)")
 
+      case "probe-helper":
+        // 0.1.39. One XPC hello to the root helper, 3 s at most. Prints `ok <helper version>` and exits 0, or
+        // `fail <reason>` and exits 1. Reads nothing from disk and changes nothing; for the Guardian's probe.
+        try arguments.rejectOptions(except: [])
+        let line = HelperProbe.probe()
+        print(line.text)
+        if !line.ok { exit(1) }
+
       case "help", "--help", "-h":
         print(usage)
       default:
         throw CLIError("unknown command: \(arguments.command)\n\(usage)")
       }
-    } catch RoomEngineError.needsEnrolment {
-      // PARK, do not exit. The LaunchAgent is `KeepAlive true` (0.1.29), so any exit here would have
-      // launchd restart the app every ThrottleInterval, each time failing the same way — the
-      // thrash §2.4 exists to prevent. RoomEngine.load has already written `needs_enrol` and said
-      // why on stderr; there is nothing left to retry. Enrolling again restarts it by hand.
-      RoomLaunchAgent.parkForeverBlocking()
     } catch {
       let message = "room-recorder: \(error.localizedDescription)\n"
       FileHandle.standardError.write(Data(message.utf8))

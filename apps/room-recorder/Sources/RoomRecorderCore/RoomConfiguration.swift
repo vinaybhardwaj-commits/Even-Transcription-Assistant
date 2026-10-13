@@ -392,6 +392,9 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     /// 0.1.38. macOS has the microphone denied for this app (`mic_state` says `denied`), so nothing can be recorded
     /// until a person grants it. Distinct from a generic `failed`.
     case micDenied = "mic_denied"
+    /// 0.1.39. A session is open and the tape has not grown for 3 minutes. The capture owner was restarted; this stays
+    /// until the tape moves again.
+    case captureStalled = "capture_stalled"
   }
 
   public var state: State
@@ -412,6 +415,13 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
   /// recording still running reports `state: retired`; the helper reads this key so it never mistakes that for an
   /// idle room and updates or restarts under it.
   public var captureOpen: Bool?
+  /// 0.1.39. When the server last answered a poll with a 2xx. `updated_at` moves on failures too, so it cannot say this.
+  public var lastPollOKAt: Date?
+  /// 0.1.39. The HTTP status of the latest poll: 200 on success, the server's code on a refusal (409 RETIRED), 0 when
+  /// no HTTP answer came back (network). Nil until the first poll of this process.
+  public var lastHTTP: Int?
+  /// 0.1.39. When a piece last reached the server and was removed from the spool. Nil until one has in this process.
+  public var lastChunkUploadedAt: Date?
   /// 0.1.30. What macOS says about the privileged helper: `enabled`, `requiresApproval`,
   /// `notRegistered` or `notFound`. Nil until the app has looked.
   public var helperRegistration: String?
@@ -448,6 +458,9 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     case lastEventAt = "last_event_at"
     case micState = "mic_state"
     case captureOpen = "capture_open"
+    case lastPollOKAt = "last_poll_ok_at"
+    case lastHTTP = "last_http"
+    case lastChunkUploadedAt = "last_chunk_uploaded_at"
   }
 
   public init(
@@ -468,8 +481,14 @@ public struct RoomRecorderStatus: Codable, Equatable, Sendable {
     helperVersion: String? = nil,
     helperState: String? = nil,
     powerSchedule: String? = nil,
-    pmsetDrift: String? = nil
+    pmsetDrift: String? = nil,
+    lastPollOKAt: Date? = nil,
+    lastHTTP: Int? = nil,
+    lastChunkUploadedAt: Date? = nil
   ) {
+    self.lastPollOKAt = lastPollOKAt
+    self.lastHTTP = lastHTTP
+    self.lastChunkUploadedAt = lastChunkUploadedAt
     self.helperState = helperState
     self.powerSchedule = powerSchedule
     self.pmsetDrift = pmsetDrift

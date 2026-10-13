@@ -273,12 +273,10 @@ enum RoomInstallIDSource: Equatable, Sendable {
 
 /// What `run()` decided the process should do when it returned (§13.3 steps 7 and 9).
 public enum RoomEngineExit: Equatable, Sendable {
-  /// The engine returned for any reason other than the two below (cancelled, finished). The CLI
+  /// The engine returned for any reason other than the handover below (cancelled, finished). The CLI
   /// exits 0 and the LaunchAgent, which is `KeepAlive true` since 0.1.29, starts it again.
+  /// A retired install never ends up here: 0.1.38 keeps the process up and asks again every 5 minutes.
   case stopped
-  /// The server refused this install as retired or superseded (§4.5 rule 3). A deliberate stop:
-  /// the CLI parks the process instead of exiting, so `KeepAlive true` cannot restart it.
-  case retired
   /// A swap script now owns the bundle and the restart. Exit 64 (R3-4).
   case handedOverToUpdate(version: String)
 }
@@ -288,6 +286,13 @@ public protocol RoomCaptureProcess: AnyObject, Sendable {
   var terminationStatus: Int32? { get }
   func interrupt()
   func waitUntilExit()
+  /// 0.1.39. SIGKILL for a capture that ignored its interrupt. Only the stall watchdog calls it. The default does nothing,
+  /// so a test double that dies on `interrupt` needs no change.
+  func forceStop()
+}
+
+extension RoomCaptureProcess {
+  public func forceStop() {}
 }
 
 public protocol RoomCaptureLaunching: Sendable {
@@ -470,6 +475,7 @@ private final class FoundationRoomCaptureProcess: RoomCaptureProcess, @unchecked
   var isRunning: Bool { process.isRunning }
   var terminationStatus: Int32? { process.isRunning ? nil : process.terminationStatus }
   func interrupt() { if process.isRunning { process.interrupt() } }
+  func forceStop() { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
   func waitUntilExit() {
     FoundationProcessWaiter.waitUntilExit(process)
     try? log.close()
@@ -597,6 +603,28 @@ public actor RoomEngine {
   /// 0.1.25 — the plain path's `tape_advancing`: the durable PCM file's size, poll to poll.
   private var tapeGrowth = TapeGrowthProbe()
 
+  // ─── 0.1.39: WHAT status.json SAYS ABOUT THE LAST POLL AND THE LAST UPLOAD ───────────────────
+  /// `updated_at` moves on failures too, so these three say what actually happened last (A2 risks 1-2).
+  private var lastPollOKAt: Date?
+  private var lastHTTP: Int?
+  private var lastChunkUploadedAt: Date?
+
+  // ─── 0.1.39: CAPTURE-PROGRESS WATCHDOG (A4 G5) ───────────────────────────────────────────────
+  /// The clock the watchdog and the recovery start read. A test sets it.
+  var recoveryClock: @Sendable () -> Date = { Date() }
+  var stallWatchdog = CaptureStallWatchdog()
+  private var stallGrowth = TapeGrowthProbe()
+  /// True from a stall until the tape grows again. status.json says `capture_stalled` meanwhile.
+  private var captureStalledNow = false
+  /// How long a restart waits for the capture to leave after its interrupt, before it is killed. A test shortens it.
+  var stalledCaptureExitWaitNanoseconds: UInt64 = 10_000_000_000
+
+  // ─── 0.1.39: RETRY A DAY THAT NEVER STARTED (A4 G3, G4) ──────────────────────────────────────
+  var startRetryGovernor = StartRetryGovernor()
+  /// The input checks (CoreAudio, TCC) run at most this often.
+  var recoveryCheckEverySeconds: TimeInterval = 15
+  private var recoveryNextCheckAt = Date.distantPast
+
   // ─── 0.1.25: AUTO-START AT CLINIC OPEN ─────────────────────────────────────────────────────
   /// The clock the schedule reads. `var` so a test can put the room inside or outside its window.
   var autoStartClock: @Sendable () -> Date = { Date() }
@@ -616,6 +644,8 @@ public actor RoomEngine {
   }
   /// A failed start (offline, pending uploads) is tried again after a minute, not every loop.
   private var autoStartRetryAfter = Date.distantPast
+  /// 0.1.39. Failed auto-starts since the last success; a retry (>= 1) is gated on ready inputs and the hourly cap.
+  private var autoStartFailures = 0
 
   // ─── 0.1.25: SELF-TEST ──────────────────────────────────────────────────────────────────────
   private var selfTestRunning = false
@@ -643,6 +673,16 @@ public actor RoomEngine {
   /// Test seams for the two values above (an actor's stored property cannot be set from outside).
   func setRetiredRepoll(nanoseconds: UInt64) { retiredRepollNanoseconds = nanoseconds }
   func setMicStateProvider(_ provider: @escaping @Sendable () -> String) { micStateProvider = provider }
+  /// 0.1.39 test seams: the watchdog/recovery clock, and how long a restart waits for an interrupted capture to leave.
+  func setRecoveryClock(_ clock: @escaping @Sendable () -> Date) { recoveryClock = clock }
+  func setStalledCaptureExitWait(nanoseconds: UInt64) { stalledCaptureExitWaitNanoseconds = nanoseconds }
+  func setRecoveryCheckEvery(seconds: TimeInterval) { recoveryCheckEverySeconds = seconds }
+  func startRetryAttemptsLeftForTests(now: Date) -> Int {
+    var copy = startRetryGovernor
+    var left = 0
+    while copy.permit(now: now) { left += 1 }
+    return left
+  }
 
   // ─── BUILD R3 (§13.3) ──────────────────────────────────────────────────────────────────────
   /// Injected, and nil on every path that is not the resident app. A `swift run` binary, a test
@@ -1371,6 +1411,9 @@ public actor RoomEngine {
     var uploadRetryAfter = Date.distantPast
     var uploadBackoff: TimeInterval = 5
     while !Task.isCancelled && phase != .superseded {
+      // 0.1.39 (A4 G5). First in every pass, retired or not: an open recording whose tape stopped growing is the one
+      // thing no state below may leave alone.
+      await watchCaptureProgress()
       // 0.1.38 (R1). A retired install does nothing but wait and ask again: no uploads, no auto-start. The wait
       // re-reads config.json first, so an install that was re-enrolled underneath this process is the one asked about.
       if retiredByServer {
@@ -1401,6 +1444,7 @@ public actor RoomEngine {
           try? saveStatus()
         }
         await autoStartIfDue()
+        await recoveryStartIfDue()
 
         if Date() >= uploadRetryAfter {
           do {
@@ -1495,6 +1539,9 @@ public actor RoomEngine {
         // returning is what proves config's id is live.
         retryAfterRetiredAccepted()
         resumeAfterRetired()
+        // 0.1.39. `pollCommands` returns only for a 2xx; the client does not hand the exact code back.
+        lastPollOKAt = Date()
+        lastHTTP = 200
         // 0.1.37 (#45). The helper's update health check: a successful bench poll, running this version.
         onBenchPollOK?()
         // ─── THE CANARY IS ACKNOWLEDGED HERE (Release B1, §14.2 step 5, B1-D3) ─────────────
@@ -1586,6 +1633,7 @@ public actor RoomEngine {
       } catch is CancellationError {
         break
       } catch let error as BenchClientError where Self.isRetired(error) {
+        lastHTTP = 409
         // §4.5 rule 3. NOT the generic backoff below: a retired install is not a transient fault
         // and retrying it is how a superseded copy keeps taking the room back from the install
         // that replaced it. 0.1.38: not an exit either; see the R1 block below.
@@ -1622,6 +1670,7 @@ public actor RoomEngine {
         try? saveStatus()
         continue
       } catch {
+        noteHTTPFailure(error)
         lastError = bounded(error)
         try? saveStatus(preferred: .offline)
         // Sleep the poll back-off in 1 s slices. A capture process that exits meanwhile is
@@ -1631,6 +1680,7 @@ public actor RoomEngine {
           let slice = min(remaining, 1_000_000_000)
           try await Task.sleep(nanoseconds: slice)
           remaining -= slice
+          await watchCaptureProgress()
           do {
             try await finishUnexpectedCaptureIfNeeded()
           } catch {
@@ -3629,6 +3679,120 @@ public actor RoomEngine {
     return reopenRunningCapture(commandID: commandID, deviceUID: uid, restoreUID: previousUID)
   }
 
+  /// 0.1.39 (A4 G3, G4). A day that never started is retried when the microphone or the device is back.
+  ///
+  /// `autoStartIfDue` only acts from `.ready`; a start that died on a missing device or a denied microphone leaves the
+  /// engine `.failed`, where nothing tried again. This does, under the same gates as auto-start (opt-in per Mac, plain
+  /// capture path, clinic window open, nothing started in it by any path, not the Dietary room, no kill switch) and
+  /// only once the microphone is authorised and the device is listed. At most 3 attempts in any rolling hour.
+  private func recoveryStartIfDue() async {
+    guard residentControlJournal == nil, residentRuntimeFactory == nil,
+      residentCaptureOwner == nil, !selfTestHoldsMic, let schedule = autoStartSchedule
+    else { return }
+    let now = recoveryClock()
+    guard now >= recoveryNextCheckAt else { return }
+    recoveryNextCheckAt = now.addingTimeInterval(recoveryCheckEverySeconds)
+    let marker = RoomAutoStartMarker(root: persistence.root)
+    let decision = RecoveryStart.decide(
+      schedule: schedule, now: autoStartClock(), phase: phase,
+      needsReconciliation: needsActiveReconciliation, captureActive: hasActiveCapture,
+      retired: retiredByServer, lastStartedWindowMs: marker.read(),
+      disabled: RoomAutoStart.disabledBySlug(configuration.roomSlug) || marker.killSwitchPresent(),
+      micState: micStateProvider(),
+      deviceReadiness: Self.inputReadiness(
+        devices: audioInputs.inputDevices(), uid: configuration.deviceUID),
+      governor: &startRetryGovernor)
+    switch decision {
+    case .notDue:
+      return
+    case .capped:
+      log("recovery start: this hour's \(StartRetryGovernor.capPerHour) attempts are spent; waiting")
+    case .start(let windowStartMs):
+      log("recovery start: microphone and device are available, clinic window open, no day started; starting")
+      do {
+        try await beginOrResume(commandID: "recover-\(windowStartMs)")
+        marker.write(windowStartMs: windowStartMs)
+        lastError = nil
+        log("recovery start: day started")
+      } catch {
+        lastError = bounded(error)
+        if !hasActiveCapture, phase != .recording, phase != .paused { phase = .failed }
+        log("recovery start failed (\(bounded(error, limit: 120)))")
+        try? saveStatus(preferred: .offline)
+      }
+    }
+  }
+
+  /// 0.1.39 (A4 G5). A recording whose tape has not grown for 3 minutes gets its capture owner restarted.
+  ///
+  /// NOT THE PROCESS, and never `launchctl kickstart -k`: the session stays open, the pieces already on tape are
+  /// published, and a new tapewriter is opened on the same session. `status.json` says `capture_stalled` until the tape
+  /// grows. A stall that comes back within the hour is a repeat: the log and `last_event` say so, which the
+  /// kiosk-health stream carries as a changed `recorder.status`. Plain capture path only; the resident archive lane
+  /// has no `tape.pcm` to watch and is off on every Mac.
+  private func watchCaptureProgress() async {
+    let now = recoveryClock()
+    guard residentCaptureOwner == nil, phase == .recording, let segment = capture, segment.process.isRunning else {
+      stallGrowth.reset()
+      _ = stallWatchdog.observe(recording: false, advanced: false, now: now)
+      if captureStalledNow && phase != .recording {
+        captureStalledNow = false
+      }
+      return
+    }
+    let advanced = stallGrowth.advanced(pcm: segment.pcmURL)
+    if advanced, captureStalledNow {
+      captureStalledNow = false
+      lastError = nil
+      log("capture progress: the tape is growing again")
+      try? saveStatus()
+    }
+    guard case .stalled(let repeated) = stallWatchdog.observe(recording: true, advanced: advanced, now: now) else {
+      return
+    }
+    captureStalledNow = true
+    lastEvent = (repeated ? "capture_stall_repeat" : "capture_stalled", now)
+    lastError = "capture stalled: the tape did not grow for \(Int(CaptureStallWatchdog.stallSeconds)) s"
+    log(
+      "capture progress: \(repeated ? "REPEAT stall" : "stall"); restarting the capture owner (session stays open)")
+    await restartStalledCapture(segment)
+    stallGrowth.reset()
+    stallWatchdog.graceAfterRestart(now: recoveryClock())
+    try? saveStatus()
+  }
+
+  private func restartStalledCapture(_ stalled: Segment) async {
+    stalled.process.interrupt()
+    var waited: UInt64 = 0
+    while stalled.process.isRunning, waited < stalledCaptureExitWaitNanoseconds {
+      try? await Task.sleep(nanoseconds: 100_000_000)
+      waited += 100_000_000
+    }
+    if stalled.process.isRunning {
+      log("capture progress: the stalled capture ignored its interrupt; killing it")
+      stalled.process.forceStop()
+    }
+    do {
+      try stopCaptureAndPublishFinal(reason: .pause(commandID: "stall-watchdog"))
+    } catch RoomEngineError.captureExited {
+      // The capture was killed or already dead: its tape is cut and published, `capture` is nil. Carry on to the start.
+    } catch {
+      lastError = bounded(error)
+      log("capture progress: could not cut the stalled capture cleanly (\(bounded(error, limit: 120)))")
+    }
+    guard capture == nil else { return }
+    do {
+      try startCapture(trigger: .reconciliation)
+    } catch {
+      lastError = bounded(error)
+      log("capture progress: restart failed (\(bounded(error, limit: 120))); reconciliation will retry")
+      if !hasActiveCapture {
+        phase = .failed
+        needsActiveReconciliation = true
+      }
+    }
+  }
+
   /// 0.1.25 — start the day by itself at clinic open. Only the plain capture path (the resident
   /// archive lane is off on every Mac and journals its own control commands), only from `.ready`,
   /// at most once per window, never when a desk started, paused or ended the day, and never when
@@ -3654,12 +3818,29 @@ public actor RoomEngine {
       lastStartedWindowMs: marker.read(),
       disabled: RoomAutoStart.disabledBySlug(configuration.roomSlug) || marker.killSwitchPresent())
     guard case .start(let windowStartMs) = decision else { return }
+    // 0.1.39 (A4 G3, G4). The FIRST attempt of a window is as before. A retry after a failure waits until the
+    // microphone is authorised and the device is listed, and spends one of this hour's 3 attempts: a start that dies
+    // on a denied microphone no longer opens and ends a server session every minute.
+    if autoStartFailures > 0 {
+      guard micStateProvider() == "authorized",
+        Self.inputReadiness(devices: audioInputs.inputDevices(), uid: configuration.deviceUID) != .notReady
+      else {
+        autoStartRetryAfter = now.addingTimeInterval(60)
+        return
+      }
+      guard startRetryGovernor.permit(now: recoveryClock()) else {
+        autoStartRetryAfter = now.addingTimeInterval(60)
+        return
+      }
+    }
     log("auto-start: clinic window open, no day started; starting")
     do {
       try await beginOrResume(commandID: "auto-\(windowStartMs)")
       marker.write(windowStartMs: windowStartMs)
+      autoStartFailures = 0
       log("auto-start: day started")
     } catch {
+      autoStartFailures += 1
       lastError = bounded(error)
       autoStartRetryAfter = now.addingTimeInterval(60)
       log("auto-start failed (\(bounded(error, limit: 120))); retrying in 60 s")
@@ -4102,6 +4283,7 @@ public actor RoomEngine {
           sessionID: benchPiece.sessionID,
           index: benchPiece.index,
           sizeBytes: benchPiece.sizeBytes))
+      lastChunkUploadedAt = Date()   // 0.1.39
       if case .registered(let response, _) = result,
         Self.shouldStopForChunkReply(
           pieceSessionID: benchPiece.sessionID, activeSessionID: sessionID,
@@ -4273,6 +4455,8 @@ public actor RoomEngine {
       reported = .retired
     } else if micState == "denied", reported != .recording, reported != .paused {
       reported = .micDenied
+    } else if captureStalledNow, reported == .recording {
+      reported = .captureStalled
     }
     try persistence.saveStatus(
       RoomRecorderStatus(
@@ -4292,7 +4476,19 @@ public actor RoomEngine {
         helperVersion: HelperStatusCache.shared.snapshot?.helperVersion,
         helperState: HelperStatusCache.shared.snapshot?.helperState,
         powerSchedule: HelperStatusCache.shared.snapshot?.powerSchedule,
-        pmsetDrift: HelperStatusCache.shared.snapshot?.pmsetDrift))
+        pmsetDrift: HelperStatusCache.shared.snapshot?.pmsetDrift,
+        lastPollOKAt: lastPollOKAt,
+        lastHTTP: lastHTTP,
+        lastChunkUploadedAt: lastChunkUploadedAt))
+  }
+
+  /// 0.1.39. What a failed poll says for `last_http`: the server's code when it answered, 0 when no HTTP answer came back.
+  private func noteHTTPFailure(_ error: Error) {
+    if let bench = error as? BenchClientError, case .http(let http) = bench {
+      lastHTTP = http.statusCode
+    } else {
+      lastHTTP = 0
+    }
   }
 
   /// The latest guard result tapewriter wrote beside the running segment's tape. Kept after the

@@ -77,9 +77,9 @@ public enum RoomSelfUpdate {
   public static let launchAgentLabel = "com.evenscribe.room-recorder"
 
   /// ─── THE EXIT CODE A HANDOVER USES (R3-4). Fix 1, F7: named, not a bare literal. ──────────
-  /// 64 is distinct from 0 — which `needs_enrol` and the retired 409 use ON PURPOSE, to stay
-  /// stopped — and from 1, which already means any error. So an update restart is readable in
-  /// `launchd.log` and separable from a crash.
+  /// 64 is distinct from 0, which is a clean return of `run()` (launchd restarts it too, since
+  /// `KeepAlive` is `true`), and from 1, which already means any error. So an update restart is
+  /// readable in `launchd.log` and separable from a crash.
   ///
   /// THE RESTART IS THE FAIL-SAFE, not the value. `KeepAlive` is `true` (0.1.29), so launchd
   /// restarts the app on any exit: if the swap script dies before it boots the agent out, the OLD

@@ -9,9 +9,11 @@ import HelperCore
 /// Until 0.1.28 the agent carried `KeepAlive = {SuccessfulExit: false}`: restart on a non-zero exit,
 /// stay stopped on zero. On 9 Oct 2026 an OPD room's app exited 0 and launchd never brought it
 /// back; the room had no listener for about 26 hours while an orphan tapewriter kept writing. A
-/// recorder that is meant to be resident has no exit it should stay stopped after — except the two
-/// deliberate ones, which now park inside the process instead of leaving it
-/// (`RoomLaunchAgent.parkForever`), so `true` cannot turn them into a restart loop.
+/// recorder that is meant to be resident has no exit it should stay stopped after. 0.1.39: the two
+/// states that used to park the process (a retired install, an install with no session) no longer
+/// park either. A retired install re-polls every 5 minutes (0.1.38); an install with no session
+/// re-reads its session and config every 5 minutes (`RoomEngine.awaitEnrolment`). Neither exits,
+/// so `true` cannot turn them into a restart loop, and neither goes silent.
 ///
 /// `ThrottleInterval` 30 stays: a bundle that cannot launch retries twice a minute, not six times.
 public enum RoomLaunchAgent {
@@ -21,18 +23,5 @@ public enum RoomLaunchAgent {
   public static func plist(executablePath: String, rootPath: String, logPath: String) -> [String: Any] {
     // One definition, shared with the root helper's watchdog, which rewrites this file when it goes missing.
     LaunchAgentPlist.dictionary(executablePath: executablePath, rootPath: rootPath, logPath: logPath)
-  }
-
-  /// A retired install, or a Mac that was never enrolled, is a deliberate stop: there is nothing
-  /// to retry and polling again is how a superseded copy takes a room back. With `KeepAlive true`
-  /// the process must not exit, or launchd would restart it for ever. It stays alive and idle: no
-  /// polling, no capture, nothing written.
-  public static func parkForever() async -> Never {
-    while true { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
-  }
-
-  /// Synchronous variant for the paths that run before any async context exists.
-  public static func parkForeverBlocking() -> Never {
-    while true { sleep(3600) }
   }
 }
