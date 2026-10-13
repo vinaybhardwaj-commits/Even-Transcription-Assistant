@@ -1,0 +1,14 @@
+#!/bin/bash
+# git pre-push hook: runs scrub.sh over each pushed range. Not installed by default; see install-hook.sh.
+ROOT="$(git rev-parse --show-toplevel)"
+ZERO=0000000000000000000000000000000000000000
+while read -r lref lsha rref rsha; do
+  [ "$lsha" = "$ZERO" ] && continue
+  if [ "$rsha" = "$ZERO" ]; then
+    git rev-parse --verify -q origin/main >/dev/null && range="origin/main..$lsha" || range="$lsha"
+  else
+    range="$rsha..$lsha"
+  fi
+  "$ROOT/scripts/steward/scrub.sh" "$range" || { echo "pre-push: scrub failed for $lref" >&2; exit 1; }
+done
+exit 0
