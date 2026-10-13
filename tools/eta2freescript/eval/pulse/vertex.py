@@ -26,7 +26,7 @@ MAX_REQUEST_CHARS = 40_000
 # Shapes of what ingest.format_transcript writes, matched on folded text.
 _TRANSCRIPT_SHAPES = (
     ("a transcript turn line (T<n> [S<label>] (mm:ss))",
-     re.compile(r"t\d+\s*\[\s*s.{0,2400}?\]\s*\(\s*\d{1,7}\s*:\s*\d{2}\s*\)")),
+     re.compile(r"t\d+\s*\[\s*s.{0,2400}?\]\s*\(\s*\d+\s*:\s*\d{2}\s*\)")),
     ("a NATIVE[<lang>]: ... | ENGLISH: pair", re.compile(r"native\s*\[[^\]]{1,16}\]\s*:[^|]{0,4000}\|\s*english\s*:")),
     ("an english/native segments key",
      re.compile(r"(english|native)\s*[-_.]\s*segments|[\"']\s*(english|native)\s+segments\s*[\"']")),
@@ -112,11 +112,14 @@ def guard_request(*texts: str) -> None:
     total = sum(len(t) for t in texts)
     if total > MAX_REQUEST_CHARS:
         raise TranscriptGuardError(f"request is {total} chars, over the {MAX_REQUEST_CHARS} limit")
+    # The writer joins turns with "\n" and a label never contains one, so each raw line is tested on its own.
+    # Only "\n" splits: U+2028, U+0085, "\r" and the like stay inside a piece and the fold collapses them.
     for t in texts:
-        folded = _fold(t)
-        for what, rx in _TRANSCRIPT_SHAPES:
-            if rx.search(folded):
-                raise TranscriptGuardError(f"request contains {what}")
+        for piece in t.split("\n"):
+            folded = _fold(piece)
+            for what, rx in _TRANSCRIPT_SHAPES:
+                if rx.search(folded):
+                    raise TranscriptGuardError(f"request contains {what}")
 
 
 def _real_ruling(r: str | None) -> bool:
