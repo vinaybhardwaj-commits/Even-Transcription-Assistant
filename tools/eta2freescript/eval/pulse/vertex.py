@@ -23,10 +23,12 @@ log = logging.getLogger("eta.pulse_replay.vertex")
 DEFAULT_EXTRACT_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_ADJ_MODEL = "gemini-3.5-flash"
 MAX_REQUEST_CHARS = 40_000
+# Shapes of what ingest.format_transcript writes, matched on folded text.
 _TRANSCRIPT_SHAPES = (
-    ("a transcript turn line (T<n> [S...)", re.compile(r"t\d+\s*\[s")),
-    ("a native[ line", re.compile(r"native\s*\[")),
-    ("an english/native segments key", re.compile(r"(?:english|native)[\s_-]*segments")),
+    ("a transcript turn line (T<n> [S<n>...])", re.compile(r"t\d+\s*\[\s*s\d+\s*(\|[^\]]{0,24})?\]")),
+    ("a NATIVE[<lang>]: part", re.compile(r"native\s*\[\s*[a-z]{2,3}(-[a-z]{2,4})?\s*\]\s*:")),
+    ("an english/native segments key",
+     re.compile(r"(english|native)\s*[-_.]\s*segments|[\"']\s*(english|native)\s+segments\s*[\"']")),
 )
 _REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
 _MODEL = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -64,17 +66,36 @@ _CONFUSABLES = str.maketrans({
     "\u050d": "g",
     "\u04cf": "l",
     "\u043d": "h", "\u03b7": "h",
+    "\u0131": "i",
+    "\ua731": "s",
 })
 
 
+# Unicode Default_Ignorable_Code_Point ranges (DerivedCoreProperties.txt, Unicode 15.1). Not in unicodedata.
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+
+
+def _invisible(c: str) -> bool:
+    """Cf, Default_Ignorable, or U+2800 (braille blank): carries no visible mark."""
+    o = ord(c)
+    return (unicodedata.category(c) == "Cf" or o == 0x2800
+            or any(lo <= o <= hi for lo, hi in _DEFAULT_IGNORABLE))
+
+
 def _strip_cf(t: str) -> str:
-    return "".join(c for c in t if unicodedata.category(c) != "Cf")
+    return "".join(c for c in t if not _invisible(c))
 
 
 def _fold(t: str) -> str:
-    """Drop format chars (Cf), NFKC, fold dotted I, casefold, map confusables, collapse whitespace."""
+    """Drop invisibles, NFKC, fold dotted I, casefold, map confusables and dashes, collapse whitespace."""
     t = unicodedata.normalize("NFKC", _strip_cf(t)).replace("\u0130", "I")
     t = _strip_cf(t).casefold().replace("i\u0307", "i").translate(_CONFUSABLES)
+    t = "".join("-" if unicodedata.category(c) == "Pd" else c for c in t)
     return " ".join(t.split())
 
 
@@ -90,7 +111,8 @@ def guard_request(*texts: str) -> None:
 
 
 def _real_ruling(r: str | None) -> bool:
-    return any(c.isprintable() and not c.isspace() and unicodedata.category(c) != "Cf" for c in (r or ""))
+    dead = {"Mn", "Me", "Cf", "Zs", "Cc", "Co", "Cs"}
+    return any(unicodedata.category(c) not in dead and not _invisible(c) for c in (r or ""))
 
 
 def check_key_file(path) -> Path:

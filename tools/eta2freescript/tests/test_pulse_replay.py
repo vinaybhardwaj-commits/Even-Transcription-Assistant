@@ -373,11 +373,11 @@ def test_key_file_mode_checked(tmp_path):
         VertexClient.from_env({k: v for k, v in env.items() if k != "VERTEX_SA_KEY_FILE"}, token_provider=lambda: "t")
 
 
-@pytest.mark.parametrize("marker", ["T0 [S", "NATIVE[", "english_segments", "native_segments"])
+@pytest.mark.parametrize("marker", ["T0 [S1]", "NATIVE[hi]:", "english_segments", "native_segments"])
 def test_transcript_marker_guard(marker, assets, cat, extraction):
     t = FakeTransport(extraction)
     with pytest.raises(TranscriptGuardError):
-        R.replay(f"fine text {marker}1] more", VISIT, cat, client(t), assets=assets)
+        R.replay(f"fine text {marker} more", VISIT, cat, client(t), assets=assets)
     assert t.calls == []  # nothing left the machine
     with pytest.raises(TranscriptGuardError):
         guard_request("ok", f"x {marker}")
@@ -427,7 +427,7 @@ def test_visit_date_is_local_ist_date():
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-13T03:00:00+00:00"}}) == date(2026, 10, 13)
 
 
-@pytest.mark.parametrize("text", ["t0 [s1]", "T0  [S1]", "T0\t\n[S1]", "native[1]", "Native[1]", "ＮＡＴＩＶＥ[1]", "ＴＯ [S1]".replace("ＴＯ", "Ｔ０"),
+@pytest.mark.parametrize("text", ["t0 [s1]", "T0  [S1]", "T0\t\n[S1]", "native[hi]:", "Native[hi] :", "ＮＡＴＩＶＥ[ｈｉ]:", "Ｔ０ [Ｓ１]",
                                   "English_Segments", "NATIVE_SEGMENTS"])
 def test_marker_guard_is_case_nfkc_and_whitespace_insensitive(text):
     with pytest.raises(TranscriptGuardError):
@@ -459,16 +459,39 @@ def test_from_env_region_ruling(tmp_path):
     assert c.location == "us-central1"
 
 
-@pytest.mark.parametrize("text", ["T1 [S0|doctor] (00:05) hi", "T12[S3|patient]", "T0\u200b [S", "nati\u00adve[", "\u0422" + "0 [S",
-                                  "NAT\u0130VE[", "english segments", "english-segments"])
+@pytest.mark.parametrize("text", ["T1 [S0|doctor] (00:05) hi", "T12[S3|patient]", "T0\u200b [S1]", "nati\u00adve[hi]:", "\u0422" + "0 [S1]",
+                                  "NAT\u0130VE[hi]:", "english-segments"])
 def test_guard_by_shape_refuses(text):
     with pytest.raises(TranscriptGuardError):
         guard_request("ok", f"x {text} y")
 
 
-@pytest.mark.parametrize("text", ["a t0 and some text", "nativeness", "patient native place", "Tab T3 tablet", "T3 hormone"])
-def test_guard_by_shape_passes(text):
+_REFUSE_B4A3 = [
+    "T0\u034f[S1]", "T0\ufe0f[S1]", "T0\u3164[S1]", "T0\u2800[S1]", "T0\U000e0100[S1]", "T0\u115f[S1]", "T0\uffa0[S1]",
+    "T0 [\ua731" + "1]", "nat\u0131ve[hi]:", "english\u2014segments", "english\u2013segments", "english\u2010segments",
+    "english.segments", "english_segments", '"english segments"', "'native segments'", "T3 [S2|doctor] (01:10) hi",
+    "NATIVE[ta]: x | ENGLISH: y", "NATIVE[pt-BR]: x", '{"native_segments": []}', '{"english_segments": []}',
+    "t3 [ s2 | role ]",
+]
+_PASS_B4A3 = [
+    "a t0 and some text", "nativeness", "patient native place", "Tab T3 tablet", "T3 hormone",
+    "T3 [Sustained release] 25 mcg", "T4 [Synthroid] 50mcg", "on T2 [SR] tab", "T2 [s/p]",
+    "MRI T1 [STIR]", "T1 [SI joint]", "lesion T12 [spine]", "Vitals at T1 [Systolic 120]",
+    "native [Bihar]", "native[1]", "English segments of the leaflet", "ST segments normal", "T2DM [since 2010]",
+    "english segments", "native[hi] later",
+]
+
+
+@pytest.mark.parametrize("text", _REFUSE_B4A3)
+def test_guard_b4a3_refuses(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("ok", f"x {text} y")
+
+
+@pytest.mark.parametrize("text", _PASS_B4A3)
+def test_guard_b4a3_passes(text):
     guard_request("ok", text)
+    guard_request(f"x {text} y")
 
 
 def test_region_fullmatch_and_real_ruling():
@@ -479,3 +502,10 @@ def test_region_fullmatch_and_real_ruling():
         VertexClient("synth-proj-001", "us-central1\n", lambda: "t", location_ruling="fable-ruling-99")
     with pytest.raises(ReplayUnavailable):
         VertexClient("synth-proj-001", "asia-northeast1\n", lambda: "t")
+
+
+@pytest.mark.parametrize("ruling", ["\u034f", "\ufe0f", "\u3164", "\u2800", "\u0300", "\ue000", "\U000e0100", "\u200b \u00ad\u2800"])
+def test_ruling_that_must_not_unlock(ruling):
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling="r1")
