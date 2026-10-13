@@ -11,7 +11,7 @@
  * room, the whole of R3-3 rests on it being able to go false, and a COALESCE would freeze a room at
  * "recording" the moment its last session ended — bringing the false tape warning straight back.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { makeFakeClinician, makeFakeOperator } from "../support/fake-identity";
 
@@ -305,6 +305,12 @@ describe("state B — the warning still works, unweakened", () => {
 });
 
 describe("state C — a failed update names itself in the App cell (R3-7)", () => {
+  // fmtClock prints the viewer's LOCAL time, by design (the card is read in the clinic). The sentences below
+  // assert 14:44 for 09:14Z, which is IST, so the run pins the zone instead of trusting the host (CI is UTC).
+  let savedTz: string | undefined;
+  beforeAll(() => { savedTz = process.env.TZ; process.env.TZ = "Asia/Kolkata"; });
+  afterAll(() => { if (savedTz === undefined) delete process.env.TZ; else process.env.TZ = savedTz; });
+
   const failed = (over: Partial<V.InstallView> = {}) =>
     derive(
       install({

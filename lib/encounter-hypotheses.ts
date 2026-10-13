@@ -443,6 +443,24 @@ export async function readLatestRun(
   return { run: rowToRun(r, await hypothesesOf(String(r.id), r.source === "timeline")), runs_for_day: num(r.runs_for_day) };
 }
 
+/**
+ * The newest run of any version or source for a room-day, header columns only (no hypotheses read).
+ * For callers that report that a run exists, not what it holds. Errors propagate: a missing table is
+ * the caller's to name.
+ */
+export async function readLatestRunHeader(
+  roomDayId: string,
+): Promise<{ id: string; created_at: unknown; n_hypotheses: unknown } | null> {
+  if (!ID_RE.test(roomDayId)) return null;
+  const rows = (await sql`
+    SELECT id, created_at, n_hypotheses FROM encounter_hypothesis_run
+     WHERE room_day_id = ${roomDayId}::text
+     ORDER BY created_at DESC LIMIT 1
+  `) as Row[];
+  const r = rows[0];
+  return r ? { id: String(r.id), created_at: r.created_at, n_hypotheses: r.n_hypotheses } : null;
+}
+
 /** PURE — is this the database saying `encounter_hypothesis_run.source` does not exist (0118 not applied)? */
 export function isMissingSourceColumn(e: unknown): boolean {
   const err = e as { code?: unknown; message?: unknown } | null;

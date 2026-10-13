@@ -4,8 +4,9 @@ from cutter import config as C
 
 spec = importlib.util.spec_from_file_location("replay", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "replay.py")); RP = importlib.util.module_from_spec(spec); spec.loader.exec_module(RP)
 H = 3600.0; T0 = 1790000000.0
+DOC_NAME = "fake-doctor"
 def W(i, o, c, reason="url_clear", doc="D", room="r1"):
-    return dict(id=i, consult_uid=f"c{i}", machine="m", room_id=room, room_slug=room, t_open=T0 + o, t_close=None if c is None else T0 + c, close_reason=reason, quality="clean", resolver_version="v", computed_at="x", doctor_uid=doc, doctor_name="n", doctor_source="warehouse_doctor_uid")
+    return dict(id=i, consult_uid=f"c{i}", machine="m", room_id=room, room_slug=room, t_open=T0 + o, t_close=None if c is None else T0 + c, close_reason=reason, quality="clean", resolver_version="v", computed_at="x", doctor_uid=doc, doctor_name=DOC_NAME, doctor_source="warehouse_doctor_uid")
 
 class Synthetic(unittest.TestCase):
     by = {"r1": [(T0 - 10 * H, T0 + 200 * H, "tape")]}

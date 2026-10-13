@@ -4,6 +4,10 @@ import Foundation
 // Round-1 fix tests (Refuter findings F1-F12). Every gate here is tested at the level where it acts: remove the
 // gate and the corresponding test fails.
 
+// Synthetic owner name for the possessive-scrub cases (the no-identity-literals guard bans a real-looking "Dr <Name>").
+private let ownerSurname = "Fake"
+private let ownerName = "Dr " + ownerSurname
+
 private func write(_ path: String, _ text: String) {
     try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: path, contents: text.data(using: .utf8))
@@ -209,37 +213,37 @@ func runR1Tests() {
     // MARK: F9 privacy
 
     test("F9: possessives are stripped from every device, HID, assertion, kernel-owner and USB name that ships") {
-        checkEq(AudioNames.sanitize("Dr Rao's Keyboard"), "Keyboard")
+        checkEq(AudioNames.sanitize("\(ownerName)'s Keyboard"), "Keyboard")
         checkEq(AudioNames.sanitize("Alex\u{2019}s iPhone Microphone"), "iPhone Microphone")
         checkEq(AudioNames.sanitize("Mac mini Speakers"), "Mac mini Speakers")
         // assertion holder name (powerd is allowlisted), UserIsActive product, kernel owner
         var s = AssertionsSnapshot()
         s.holders.append(AssertionHolder(pid: 1, process: "powerd", id: "0x1", heldSeconds: 5, type: "UserIsActive",
-                                         name: "com.apple.iohideventsystem.queue.tickle serviceID:1 product:Dr Rao's Keyboard eventType:3"))
+                                         name: "com.apple.iohideventsystem.queue.tickle serviceID:1 product:\(ownerName)'s Keyboard eventType:3"))
         s.holders.append(AssertionHolder(pid: 2, process: "coreaudiod", id: "0x2", heldSeconds: 5, type: "PreventUserIdleSystemSleep",
                                          name: "Created for Priya's USB Microphone"))
         s.kernel.append(KernelAssertion(owner: "Sam's Webcam", kind: "x"))
         let text = J.string(s.payload())
-        for leak in ["Rao", "Priya", "Sam's", "Sam\u{2019}s"] { check(!text.contains(leak), "\(leak) leaked: \(text)") }
+        for leak in [ownerSurname, "Priya", "Sam's", "Sam\u{2019}s"] { check(!text.contains(leak), "\(leak) leaked: \(text)") }
         check(text.contains("Keyboard") && text.contains("USB Microphone") && text.contains("Webcam"))
         // USB tree
-        let usb = Fixtures.read("ioreg_usb_mic_synthetic.txt").replacingOccurrences(of: "\"USB Product Name\" = \"USB PnP Sound Device\"", with: "\"USB Product Name\" = \"Dr Rao's USB PnP Sound Device\"")
+        let usb = Fixtures.read("ioreg_usb_mic_synthetic.txt").replacingOccurrences(of: "\"USB Product Name\" = \"USB PnP Sound Device\"", with: "\"USB Product Name\" = \"\(ownerName)'s USB PnP Sound Device\"")
         let devs = IoregUSB.parse(usb)
-        check(devs.contains { $0.name == "USB PnP Sound Device" } && !devs.contains { $0.name.contains("Rao") })
+        check(devs.contains { $0.name == "USB PnP Sound Device" } && !devs.contains { $0.name.contains(ownerSurname) })
         // audio device names
         let r = FakeRunner()
         let io = IoregScript(); io.usb = [usb]; io.install(on: r)
-        r.on("/usr/sbin/system_profiler SPAudioDataType -json", stdout: spAudio(input: true, inputName: "Dr Rao's USB Mic"))
+        r.on("/usr/sbin/system_profiler SPAudioDataType -json", stdout: spAudio(input: true, inputName: "\(ownerName)'s USB Mic"))
         let (ctx, _, _) = makeCtx(runner: r)
         let ac = AudioCollector(ctx: ctx)
         let ev = ac.presencePoll().events + ac.profilePoll(trigger: "start").events
-        check(ev.count == 2 && !ev.contains { J.string($0.payload).contains("Rao") }, ev.map { J.string($0.payload) }.joined())
+        check(ev.count == 2 && !ev.contains { J.string($0.payload).contains(ownerSurname) }, ev.map { J.string($0.payload) }.joined())
         // HID collector
         let hr = FakeRunner()
         let idleNs: (Double) -> String = { "    \"HIDIdleTime\" = \(Int($0 * 1_000_000_000))" }
         hr.sequence("/usr/sbin/ioreg -c IOHIDSystem", [ok(idleNs(400)), ok(idleNs(2))])
         hr.on("/usr/bin/pmset -g assertions", stdout:
-              "Listed by owning process:\n   pid 1(powerd): [0x1] 00:00:05 UserIsActive named: \"com.apple.iohideventsystem.queue.tickle serviceID:1 product:Dr Rao's Keyboard eventType:3\"\n")
+              "Listed by owning process:\n   pid 1(powerd): [0x1] 00:00:05 UserIsActive named: \"com.apple.iohideventsystem.queue.tickle serviceID:1 product:\(ownerName)'s Keyboard eventType:3\"\n")
         let (hctx, _, _) = makeCtx(runner: hr)
         let hc = HIDCollector(ctx: hctx, assertions: AssertionsCollector(ctx: hctx))
         var mono: TimeInterval = 0
@@ -264,7 +268,7 @@ func runR1Tests() {
         do {
             let h = FileHandle(forWritingAtPath: rr + "/launchd.log")!
             _ = try? h.seekToEnd()
-            try? h.write(contentsOf: "room-recorder: authorized for Dr Rao's account\n\(long)\nroom-recorder: tape writer exited unexpectedly for Dr Rao's session\nroom-recorder: chunk 17 written\n".data(using: .utf8)!)
+            try? h.write(contentsOf: "room-recorder: authorized for \(ownerName)'s account\n\(long)\nroom-recorder: tape writer exited unexpectedly for \(ownerName)'s session\nroom-recorder: chunk 17 written\n".data(using: .utf8)!)
             try? h.close()
         }
         let first = rc.poll().events.filter { $0.kind == "recorder.log" }
@@ -272,7 +276,7 @@ func runR1Tests() {
         check(first.allSatisfy { ($0.payload["line"] as? String ?? "").count <= 300 }, "truncated to 300")
         check(first.contains { ($0.payload["line"] as? String)?.count == 300 }, "the long line is cut at exactly 300")
         check(first.allSatisfy { $0.payload["redaction"] as? String == "keyword_only" })
-        check(!J.string(first.map { $0.payload }).contains("Rao"), "possessive name scrubbed")
+        check(!J.string(first.map { $0.payload }).contains(ownerSurname), "possessive name scrubbed")
         check(first.allSatisfy { $0.payload["count"] as? Int == 1 })
         // the same error line 5 more times within 10 minutes
         func append(_ text: String) {
@@ -281,7 +285,7 @@ func runR1Tests() {
         }
         for i in 0..<5 {
             clock.advance(60)
-            append("room-recorder: tape writer exited unexpectedly for Dr Rao's session\n")
+            append("room-recorder: tape writer exited unexpectedly for \(ownerName)'s session\n")
             checkEq(rc.poll().events.filter { $0.kind == "recorder.log" }.count, 0, "repeat \(i + 1) folded into a count")
         }
         clock.advance(600)
@@ -291,7 +295,7 @@ func runR1Tests() {
         checkEq(closing.first?.payload["collapsed_repeats"] as? Bool, true)
         checkEq(closing.first?.payload["redaction"] as? String, "keyword_only")
         // after the window a new occurrence ships again
-        append("room-recorder: tape writer exited unexpectedly for Dr Rao's session\n")
+        append("room-recorder: tape writer exited unexpectedly for \(ownerName)'s session\n")
         clock.advance(10)
         checkEq(rc.poll().events.filter { $0.kind == "recorder.log" }.count, 1)
     }

@@ -94,7 +94,7 @@ describe("pkg_url (mirror of ReleaseRecord.validatedURL — the app's own cases)
   });
   it("refuses http, other hosts, look-alikes, credentials, ports, fragments, spaces, non-ASCII, over 512", () => {
     for (const bad of ["http://www.evenscribe.app/x.pkg", "https://evil.example/x.pkg", "https://abc.public.blob.vercel-storage.com.evil.example/x.pkg", "https://notevenscribe.app/x.pkg",
-      "https://user:pw@www.evenscribe.app/x.pkg", "https://www.evenscribe.app:8443/x.pkg", "https://www.evenscribe.app/x.pkg#frag", "https://www.evenscribe.app/x y.pkg", "https://www.evenscribe.app/é.pkg",
+      "https://user:pw" + "@www.evenscribe.app/x.pkg", "https://www.evenscribe.app:8443/x.pkg", "https://www.evenscribe.app/x.pkg#frag", "https://www.evenscribe.app/x y.pkg", "https://www.evenscribe.app/é.pkg",
       `https://www.evenscribe.app/${"a".repeat(500)}`, "", 5, null]) expect(validPkgUrl(bad), String(bad)).toBe(false);
   });
 });

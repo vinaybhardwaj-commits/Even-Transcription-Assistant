@@ -126,7 +126,7 @@ export const REACHABILITY_DATA_MAX_AGE_MS = 2 * 3_600_000;
 /** live-start gate: the kiosk-health heartbeat must be this fresh (kh_heartbeat_s <= 180) */
 export const START_GATE_KH_MAX_MS = 180_000;
 /** live-start gate: recorder.status must have been ready with no session for this long, derived from the history (recorder_ready_for_s >= 300) */
-export const START_GATE_RECORDER_READY_MS = 300_000;
+export const START_GATE_RECORDER_READY_MS = 5 * MIN;
 /** the newest recorder.status row must be this young (kiosk-health re-emits at least every 300 s) for the ready streak to count */
 export const START_GATE_RECORDER_LATEST_MAX_MS = 420_000;
 

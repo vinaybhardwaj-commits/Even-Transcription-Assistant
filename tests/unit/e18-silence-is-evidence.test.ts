@@ -452,8 +452,14 @@ describe.runIf(HAVE_DOCKER)("E18 R31 — the operator surface, on real SQL", () 
     // No cron, no auto-drain, no migration hook: the only caller is a person at the door.
     const callers = execSync(`git grep -l "scribe_silence_readjudicate\\|reopenSilentWindows" -- lib app scripts || true`, { encoding: "utf8" })
       .split("\n").filter(Boolean).sort();
-    expect(callers, "only the silence module and the operator tool name the bulk path")
-      .toEqual(["lib/mcp/tools/stt.ts", "lib/stt/silence.ts"]);
+    // The implementation lives in lib/room-access (82924cc; lib/stt/silence.ts is now a re-export shim that names
+    // neither symbol). lib/mcp/profile.ts (f52961a) carries the tool's one-line description string and nothing else.
+    expect(callers, "only the silence module, the operator tool and its description line name the bulk path")
+      .toEqual(["lib/mcp/profile.ts", "lib/mcp/tools/stt.ts", "lib/room-access/silence.ts"]);
+    const profileHits = execSync(`git grep -n "scribe_silence_readjudicate\\|reopenSilentWindows" -- lib/mcp/profile.ts`, { encoding: "utf8" })
+      .split("\n").filter(Boolean);
+    expect(profileHits, "profile.ts names the tool once, as a description entry, never as a call").toHaveLength(1);
+    expect(profileHits[0]).toMatch(/scribe_silence_readjudicate: "/);
   });
 });
 

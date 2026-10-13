@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeFakeClinician } from "../support/fake-identity";
 
 const S = vi.hoisted(() => ({
   productionPendingExists: vi.fn(),
@@ -189,7 +190,7 @@ describe("lab/ingest", () => {
   const post = (b: unknown) => labIngest(req("/api/diarize/nemotron/lab/ingest", { body: b }));
 
   it("refuses a body that is not the closed shape (400) before any store call", async () => {
-    for (const bad of [labBody({ transcript: "x" }), labBody({ status: "nope" }), labBody({ turns: [[0, 1, "Dr Rao"]] }), "not json", labBody({ idx: -1 })]) {
+    for (const bad of [labBody({ transcript: "x" }), labBody({ status: "nope" }), labBody({ turns: [[0, 1, makeFakeClinician(1).label]] }), "not json", labBody({ idx: -1 })]) {
       const r = await post(bad);
       expect(r.status).toBe(400);
     }

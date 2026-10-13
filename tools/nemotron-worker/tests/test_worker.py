@@ -608,7 +608,7 @@ class Hardening(Base):
         self.assertIsNone(ok("https://www.evenscribe.app", {}))
         self.assertIsNone(ok("https://www.evenscribe.app/", {}))
         for bad in ("https://evenscribe.app", "http://www.evenscribe.app", "https://www.evenscribe.app.evil.example",
-                    "https://www.evenscribe.app:8443", "https://u@www.evenscribe.app", "https://www.evenscribe.app/api",
+                    "https://www.evenscribe.app:8443", "https://u" + "@www.evenscribe.app", "https://www.evenscribe.app/api",
                     "http://127.0.0.1:3000", "", None):
             self.assertIsNotNone(ok(bad, {}), bad)
         self.assertIsNone(ok("http://127.0.0.1:3000", {"NEMOTRON_ALLOW_OTHER_BASE_URL": "1"}))

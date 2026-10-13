@@ -57,13 +57,13 @@ const KEYS = publicKeysOf(SIGNER);
 
 async function enqueue(body: unknown, opts: { cookie?: string | null; raw?: string } = {}) {
   const { POST } = await import("@/app/api/admin/fleet/commands/route");
-  H.cookie = opts.cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : opts.cookie;
+  H.cookie = opts.cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : opts.cookie;
   const res = await POST(new NextRequest("https://x.test/api/admin/fleet/commands", { method: "POST", body: opts.raw ?? JSON.stringify(body), headers: { "content-type": "application/json" } }));
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
 }
 async function overview(cookie?: string | null) {
   const { GET } = await import("@/app/api/admin/fleet/route");
-  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : cookie;
+  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : cookie;
   const res = await GET(new NextRequest("https://x.test/api/admin/fleet"));
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
 }
@@ -121,7 +121,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 const jsonPost = async (route: string, body: unknown, cookie?: string | null) => {
   const { POST } = await import(route);
-  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : cookie;
+  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : cookie;
   const res = await POST(new NextRequest("https://x.test/x", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body), headers: { "content-type": "application/json" } }));
   return { status: res.status, json: (await res.json()) as Record<string, any> };
 };
@@ -234,7 +234,7 @@ const PUBKEYS = { fk1: publicKeysOf(SIGNER).fk1! };
 
   describe("the admin actions are the ONLY way a version reaches a cohort", () => {
     it("admin cookie only: no cookie, junk, a doctor's cookie -> 401 and nothing written; unknown keys 400; an unpublished version 404", async () => {
-      for (const c of [null, "not.a.jwt", await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.invalid", slug: "dr-fake" } as never)]) {
+      for (const c of [null, "not.a.jwt", await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.test", slug: "dr-fake" } as never)]) {
         expect((await rollout({}, c)).status).toBe(401);
         expect((await cohorts(DEV, ["opd1"], c)).status).toBe(401);
       }
@@ -323,7 +323,7 @@ const PUBKEYS = { fk1: publicKeysOf(SIGNER).fk1! };
       await rollout({ cohort: "pct", rollout_pct: 10 });
       await cohorts(DEV, ["opd1"]);
       const { GET } = await import("@/app/api/admin/fleet/releases/route");
-      H.cookie = await signAdminJwt({ admin_id: "adm_fake1", email: "a@example.invalid" });
+      H.cookie = await signAdminJwt({ admin_id: "adm_fake1", email: "a@example.test" });
       const j = (await (await GET()).json()) as Record<string, any>;
       expect(j.rollouts[0]).toMatchObject({ version: "0.1.37", cohort: "pct", rollout_pct: 10 });
       expect(j.devices.find((d: any) => d.device_id === DEV)).toMatchObject({ cohorts: ["opd1"], buckets: { "0.1.37": bucketOf(DEV, "0.1.37") } });

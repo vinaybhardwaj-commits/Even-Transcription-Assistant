@@ -5,13 +5,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { RoomTile } from "@/components/rooms-live/RoomTile";
 import { RoomDetail } from "@/components/rooms-live/RoomDetail";
 import type { RoomRow } from "@/lib/rooms-live/snapshot";
+import { makeFakeClinician } from "../support/fake-identity";
 
 // vitest compiles the components with the classic JSX runtime (no tsconfig jsx transform here): give them the global they expect
 (globalThis as { React?: unknown }).React = React;
 
 const NOW = Date.parse("2026-10-08T12:50:00Z");
 const base: RoomRow = {
-  room_id: "room_ux92qpws", label: "OPD 4", doctor: { display: "Dr Test", activity: "Signed in" }, doctor_known: true, state: "listening", state_since: null, detail_code: null,
+  room_id: "room_ux92qpws", label: "OPD 4", doctor: { display: makeFakeClinician(1).label, activity: "Signed in" }, doctor_known: true, state: "listening", state_since: null, detail_code: null,
   level: { rms: 0.01, zero: 0.001, at: null, stale: false }, baseline_rms: 0.009, device: { name: "C270", missing: false }, session: { open: true, since: null, chunk_age_s: 30 },
   steward: null, steward_line: null, steward_log: [], claim: null, ages_s: { listener: 1, heartbeat: 1, ext: 1 },
 };

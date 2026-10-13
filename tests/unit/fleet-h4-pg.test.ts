@@ -39,13 +39,13 @@ const KEYS = publicKeysOf(SIGNER);
 
 async function enqueue(body: unknown, opts: { cookie?: string | null; raw?: string } = {}) {
   const { POST } = await import("@/app/api/admin/fleet/commands/route");
-  H.cookie = opts.cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : opts.cookie;
+  H.cookie = opts.cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : opts.cookie;
   const res = await POST(new NextRequest("https://x.test/api/admin/fleet/commands", { method: "POST", body: opts.raw ?? JSON.stringify(body), headers: { "content-type": "application/json" } }));
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
 }
 async function overview(cookie?: string | null) {
   const { GET } = await import("@/app/api/admin/fleet/route");
-  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : cookie;
+  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : cookie;
   const res = await GET(new NextRequest("https://x.test/api/admin/fleet"));
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
 }
@@ -83,9 +83,9 @@ afterEach(() => { vi.useRealTimers(); });
       const body = { device_id: DEV, verb: "helper_status" };
       expect((await enqueue(body, { cookie: null })).status).toBe(401);
       expect((await enqueue(body, { cookie: "not.a.jwt" })).status).toBe(401);
-      expect((await enqueue(body, { cookie: await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.invalid", slug: "dr-fake" } as never) })).status).toBe(401);
+      expect((await enqueue(body, { cookie: await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.test", slug: "dr-fake" } as never) })).status).toBe(401);
       const { SignJWT } = await import("jose");
-      const old = await new SignJWT({ admin_id: "adm_fake1", email: "a@example.invalid" }).setProtectedHeader({ alg: "HS256" }).setIssuedAt(1).setAudience("admin").setExpirationTime(2).sign(new TextEncoder().encode(process.env.JWT_SECRET_ADMIN));
+      const old = await new SignJWT({ admin_id: "adm_fake1", email: "a@example.test" }).setProtectedHeader({ alg: "HS256" }).setIssuedAt(1).setAudience("admin").setExpirationTime(2).sign(new TextEncoder().encode(process.env.JWT_SECRET_ADMIN));
       expect((await enqueue(body, { cookie: old })).status).toBe(401);
       expect(await q`SELECT 1 FROM fleet_commands`).toHaveLength(0);
       expect(await q`SELECT 1 FROM fleet_audit`).toHaveLength(0);
@@ -193,8 +193,8 @@ afterEach(() => { vi.useRealTimers(); });
 
     it("M14/M13: GET /api/admin/fleet refuses a junk cookie and a doctor's cookie; an admin token with an empty admin_id cannot enqueue", async () => {
       expect((await overview("not.a.jwt")).status).toBe(401);
-      expect((await overview(await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.invalid", slug: "dr-fake" } as never))).status).toBe(401);
-      const empty = await signAdminJwt({ admin_id: "", email: "a@example.invalid" });
+      expect((await overview(await signDoctorJwt({ doctor_id: "doc_fake", email: "d@example.test", slug: "dr-fake" } as never))).status).toBe(401);
+      const empty = await signAdminJwt({ admin_id: "", email: "a@example.test" });
       expect(await enqueue({ device_id: DEV, verb: "wake" }, { cookie: empty })).toMatchObject({ status: 401 });
       expect(await q`SELECT 1 FROM fleet_commands`).toHaveLength(0);
     });
