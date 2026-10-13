@@ -30,23 +30,23 @@ case "$1" in
     py=(staged) ;;
   *)
     ( cd "$ROOT" && git rev-list "$1" >/dev/null 2>&1 ) || { echo "scrub: invalid range" >&2; exit 2; }
-    ( cd "$ROOT" && "$GL" git --log-opts="-m $1" --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>"$TMP/gl.err" ) || { echo "scrub: gitleaks error" >&2; exit 2; }
+    ( cd "$ROOT" && "$GL" git --log-opts="$1" --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>"$TMP/gl.err" ) || { echo "scrub: gitleaks error" >&2; exit 2; }
     grep -q ' ERR ' "$TMP/gl.err" && { echo "scrub: gitleaks reported an error" >&2; exit 2; }
     py=(range "$1") ;;
 esac
 # gitleaks hits: rule id, file, line, commit only.
 [ -s "$REP" ] || { echo "scrub: gitleaks wrote no report" >&2; exit 2; }
-python3 -I - "$REP" <<'PY' > "$TMP/gl.out"
+python3 -I -B - "$REP" <<'PY' > "$TMP/gl.out" || { echo "scrub: unreadable gitleaks report" >&2; exit 2; }
 import json,sys
-try: items=json.load(open(sys.argv[1])) or []
-except Exception: items=[]
+items=json.load(open(sys.argv[1])) or []
 for i in items:
     print("%s\t%s:%s\t%s" % (i.get("RuleID","?"), i.get("File","?"), i.get("StartLine",0), (i.get("Commit") or "-")[:10]))
 PY
 [ -s "$TMP/gl.out" ] && rc=1
-(cd "$ROOT" && python3 -I "$HERE/scrub_rules.py" "${py[@]}") > "$TMP/py.out"
+(cd "$ROOT" && python3 -I -B "$HERE/scrub_rules.py" "${py[@]}") > "$TMP/py.out"
 [ $? -ne 0 ] && rc=1
-cat "$TMP/gl.out" "$TMP/py.out"
-n=$(cat "$TMP/gl.out" "$TMP/py.out" | wc -l | tr -d ' ')
+cat "$TMP/gl.out" "$TMP/py.out" | sort -u > "$TMP/all.out"
+cat "$TMP/all.out"
+n=$(wc -l < "$TMP/all.out" | tr -d ' ')
 [ "$rc" -ne 0 ] && echo "scrub: $n hit(s)" >&2
 exit $rc

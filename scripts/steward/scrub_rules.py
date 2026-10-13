@@ -76,7 +76,7 @@ def env_example_nonempty(text):
         if not s or s.startswith("#") or "=" not in s:
             continue
         key = s.split("=", 1)[0].strip().replace("export ", "").upper()
-        if not re.search(r"SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL|DSN", key):
+        if not re.search(r"SECRET|TOKEN|PASS|PWD|CRED|(^|_)KEY($|_)|KEY$|(DATABASE|DB|REDIS|MONGO|AMQP)_?(URL|URI)|DSN|AUTH|SALT|SIGNING", key):
             continue  # non-secret defaults (ports, flags, model names) are allowed
         v = s.split("=", 1)[1].strip()
         v = re.split(r"\s+#", " " + v, maxsplit=1)[0].strip().strip("\"'")
@@ -97,6 +97,10 @@ def phi_applies(path):
 
 
 JSON_TYPES = {"string", "number", "integer", "boolean", "object", "array", "null"}
+SCHEMA_VOCAB = {"type", "$ref", "$id", "$schema", "$defs", "definitions", "properties", "items", "enum", "const", "description",
+                "oneof", "anyof", "allof", "not", "format", "required", "default", "title", "example", "examples",
+                "minlength", "maxlength", "minimum", "maximum", "pattern", "additionalproperties", "minitems", "maxitems",
+                "uniqueitems", "nullable", "readonly", "writeonly", "deprecated", "contentencoding", "contentmediatype"}
 SCHEMA_KEYS = {"type", "$ref", "properties", "items", "enum", "description", "oneof", "anyof", "allof", "format"}
 
 
@@ -110,7 +114,8 @@ def has_content(v):
         return any(has_content(x) for x in v)
     if isinstance(v, dict):
         t = v.get("type")
-        if isinstance(t, str) and t in JSON_TYPES or isinstance(t, list) and t and all(x in JSON_TYPES for x in t) or "$ref" in v:
+        if (isinstance(t, str) and t in JSON_TYPES or isinstance(t, list) and t and all(x in JSON_TYPES for x in t) or "$ref" in v) \
+                and set(k.lower() for k in v) <= SCHEMA_VOCAB and not any(k in v for k in ("default", "example", "const")):
             return False
         if v and set(k.lower() for k in v) <= SCHEMA_KEYS | {"required", "default", "title", "example", "examples"}:
             return False
