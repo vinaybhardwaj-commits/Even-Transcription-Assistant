@@ -4,7 +4,7 @@
  *
  *   recorder_off   clinic hours (lib/alerts/clinic-hours.ts) and the room's newest chunk, of ANY session, is >= 15 min old (the clock starts at the window start). It reads the
  *                  room's audio, never the install: OPD 4 had no install and a stale machine binding, and every rule that began at the install was silent.
- *   mic_denied     the room's live install reports mic_state 'denied'. Any hour.
+ *   mic_denied     the room's live install reports mic_state 'denied'; or, with no live install, the newest retired one did. Any hour.
  *   no_machine     clinic hours and the roster room has NO live (enrolled, un-retired) install. The steward's own rule (lib/steward/rules.ts) also reads a config machine override;
  *                  this one asks only whether a recorder is installed.
  *
@@ -22,8 +22,12 @@ export type SweepInputs = {
   last_chunk_ms: ReadonlyMap<string, number> | null;
   /** room_id -> the live install's mic_state (null when it reports none); absent room = no live install */
   live_installs: ReadonlyMap<string, { mic_state: string | null }> | null;
+  /** room_id -> the mic_state of the room's newest RETIRED install, for rooms with no live install. Absent = the source was not read (rule skipped). */
+  retired_installs?: ReadonlyMap<string, { mic_state: string | null }> | null;
   /** room_id -> slug, for the message; a room missing from it is named by its id */
   slugs?: ReadonlyMap<string, string>;
+  /** room_id -> room.name, carried in the body beside the slug */
+  names?: ReadonlyMap<string, string>;
 };
 
 /** PURE — the alerts that stand right now. A null source skips its rules (they are "degraded", not "fine"). */
@@ -32,14 +36,20 @@ export function planOpsAlerts(inp: SweepInputs): OpsAlert[] {
   const clinic = isClinicHours(inp.now_ms);
   for (const room of ROOMS) {
     const slug = inp.slugs?.get(room.room_id) ?? room.room_id;
+    const room_name = inp.names?.get(room.room_id);
     if (inp.last_chunk_ms !== null) {
       const mins = recorderOffMinutes(inp.now_ms, inp.last_chunk_ms.get(room.room_id) ?? null);
-      if (mins !== null) out.push({ kind: "recorder_off", room_id: room.room_id, room_slug: slug, minutes: mins });
+      if (mins !== null) out.push({ kind: "recorder_off", room_id: room.room_id, room_slug: slug, room_name, minutes: mins });
     }
     if (inp.live_installs !== null) {
       const inst = inp.live_installs.get(room.room_id);
-      if (!inst && clinic) out.push({ kind: "no_machine", room_id: room.room_id, room_slug: slug, minutes: null });
-      if (inst && inst.mic_state === "denied") out.push({ kind: "mic_denied", room_id: room.room_id, room_slug: slug, minutes: null });
+      if (!inst && clinic) out.push({ kind: "no_machine", room_id: room.room_id, room_slug: slug, room_name, minutes: null });
+      if (inst && inst.mic_state === "denied") out.push({ kind: "mic_denied", room_id: room.room_id, room_slug: slug, room_name, minutes: null });
+      // A4 §4: a room whose LAST install was retired while its mic was denied has no live install to read, and stays silent without this. The retired row's
+      // last report still stands until a new install replaces it; the live install, once it exists, is the one that is read.
+      if (!inst && inp.retired_installs?.get(room.room_id)?.mic_state === "denied") {
+        out.push({ kind: "mic_denied", room_id: room.room_id, room_slug: slug, room_name, minutes: null });
+      }
     }
   }
   return out;
@@ -76,15 +86,30 @@ export async function runOpsSweep(nowMs: number = Date.now()): Promise<SweepResu
     console.error("[ops-sweep] could not read room_install:", e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
   }
 
-  let slugs: Map<string, string> | undefined;
+  let retired: Map<string, { mic_state: string | null }> | null = null;
   try {
-    const rows = (await sql`SELECT id, slug FROM room WHERE id = ANY(${ids}::text[])`) as Array<{ id: string; slug: string }>;
+    const rows = (await sql`
+      SELECT DISTINCT ON (room_id) room_id, mic_state FROM room_install
+       WHERE room_id = ANY(${ids}::text[]) AND retired_at IS NOT NULL AND enrolled_at IS NOT NULL
+       ORDER BY room_id, retired_at DESC
+    `) as Array<{ room_id: string; mic_state: string | null }>;
+    retired = new Map(rows.map((r) => [r.room_id, { mic_state: r.mic_state ?? null }]));
+  } catch (e) {
+    degraded.push("room_install_retired");
+    console.error("[ops-sweep] could not read retired room_install:", e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
+  }
+
+  let slugs: Map<string, string> | undefined;
+  let names: Map<string, string> | undefined;
+  try {
+    const rows = (await sql`SELECT id, slug, name FROM room WHERE id = ANY(${ids}::text[])`) as Array<{ id: string; slug: string; name: string | null }>;
     slugs = new Map(rows.map((r) => [r.id, r.slug]));
+    names = new Map(rows.filter((r) => r.name).map((r) => [r.id, r.name as string]));
   } catch {
     /* the id names the room */
   }
 
-  const plan = planOpsAlerts({ now_ms: nowMs, last_chunk_ms: lastChunk, live_installs: installs, slugs });
+  const plan = planOpsAlerts({ now_ms: nowMs, last_chunk_ms: lastChunk, live_installs: installs, retired_installs: retired, slugs, names });
   let queued = 0;
   for (const a of plan) if (await queueOpsAlert(a)) queued++;
   return { ok: degraded.length === 0, planned: plan.length, queued, degraded };

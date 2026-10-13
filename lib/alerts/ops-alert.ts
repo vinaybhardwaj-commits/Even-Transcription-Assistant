@@ -6,14 +6,17 @@
  * that row and nothing else, so it adds no vendor and no secret. WHICH buses and WHICH recipients (gating-lead, fleet, ubus) is the relay's configuration on
  * the Mini and is not visible from here.
  *
- * CONTENT: room id, room slug, problem code, minutes. Ids and counts only; no name, no transcript, no patient text.
+ * CONTENT: room id, room slug, room name, problem code, minutes. No transcript, no patient text.
  * DEDUPE: one row per (kind, room, dedupe key) per hour, decided by the database in the same statement as the insert (NOT EXISTS), so two cron runs or two
  * app instances cannot both send. A retire's key is its install id, so two different installs retired in one hour are two messages.
  * NEVER THROWS: a retire or a poll must not fail because its alert could not be queued. A failure is logged by name and returned as false.
  */
 import { sql } from "@/lib/db";
 
-export const OPS_ALERT_KINDS = ["install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled"] as const;
+export const OPS_ALERT_KINDS = [
+  "install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled",
+  "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated",
+] as const;
 export type OpsAlertKind = (typeof OPS_ALERT_KINDS)[number];
 
 /** One problem sends one message per hour. */
@@ -23,6 +26,8 @@ export type OpsAlert = {
   kind: OpsAlertKind;
   room_id: string;
   room_slug: string;
+  /** the room's display name (room.name); the slug alone is not what a person on the bus calls the room */
+  room_name?: string | null;
   /** minutes the problem has stood, or the last-seen age for a retire; null when it has no duration */
   minutes: number | null;
   /** the install a retire is about; also its dedupe key */
@@ -34,12 +39,16 @@ export type OpsAlert = {
 const SAFE = /[^A-Za-z0-9_.:-]/g;
 const clean = (v: string): string => v.replace(SAFE, "").slice(0, 80);
 
-/** PURE — the row's text. Ids only. */
+/** A room name is facility text ("OPD 4"): letters, digits, spaces and a few marks, one line, 60 chars. */
+const cleanName = (v: string): string => v.replace(/[^A-Za-z0-9 _.:()&/-]/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+
+/** PURE — the row's text. Ids and the room's name; no patient text. */
 export function composeOpsAlert(a: OpsAlert): { subject: string; body: string; dedupe_key: string } {
   const slug = clean(a.room_slug) || clean(a.room_id);
   const mins = a.minutes === null || !Number.isFinite(a.minutes) ? null : Math.max(0, Math.round(a.minutes));
   const dedupeKey = a.kind === "install_retired" ? clean(a.install_id ?? "") || "unknown_install" : a.kind;
-  const parts = [`room=${slug}`, `room_id=${clean(a.room_id)}`, `problem=${a.kind}`];
+  const name = a.room_name ? cleanName(a.room_name) : "";
+  const parts = [`room=${slug}`, ...(name ? [`name="${name}"`] : []), `room_id=${clean(a.room_id)}`, `problem=${a.kind}`];
   if (a.install_id) parts.push(`install_id=${clean(a.install_id)}`);
   if (a.reason) parts.push(`reason=${clean(a.reason)}`);
   if (mins !== null) parts.push(a.kind === "install_retired" ? `last_seen_min_ago=${mins}` : `minutes=${mins}`);
@@ -52,7 +61,7 @@ export async function queueOpsAlert(a: OpsAlert): Promise<boolean> {
   try {
     const rows = (await sql`
       INSERT INTO room_alert_outbox (kind, room_ids, room_name, status_from, status_to, subject, body)
-      SELECT ${a.kind}::text, ARRAY[${a.room_id}::text], ${clean(a.room_slug) || null}::text, NULL, ${m.dedupe_key}::text, ${m.subject}::text, ${m.body}::text
+      SELECT ${a.kind}::text, ARRAY[${a.room_id}::text], ${(a.room_name ? cleanName(a.room_name) : "") || clean(a.room_slug) || null}::text, NULL, ${m.dedupe_key}::text, ${m.subject}::text, ${m.body}::text
        WHERE NOT EXISTS (
          SELECT 1 FROM room_alert_outbox o
           WHERE o.kind = ${a.kind}::text

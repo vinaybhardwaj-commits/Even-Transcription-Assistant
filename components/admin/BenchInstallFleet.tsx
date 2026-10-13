@@ -66,7 +66,8 @@ type Minted = {
 /** R4-D5. The audio-input route's body: exactly one of the two, per control. */
 export type AudioInputBody = { device_uid: string } | { input_volume: number };
 
-export function BenchInstallFleet() {
+/** `actor` is the signed-in admin (their email), passed by the page: the retire dialog says who the retirement is recorded against (A4 G8). */
+export function BenchInstallFleet({ actor = "" }: { actor?: string } = {}) {
   const [fleet, setFleet] = React.useState<FleetPayload | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
@@ -313,6 +314,7 @@ export function BenchInstallFleet() {
       {retireAsk && (
         <RetireDialog
           roomName={retireAsk.room_name}
+          actor={actor}
           gate={retireGate(retireAsk.install.last_seen_at, nowMs)}
           typed={retireTyped}
           onTyped={setRetireTyped}
@@ -980,8 +982,15 @@ function InstallHead({ roomName, onBack }: { roomName: string; onBack: () => voi
  * line into a Terminal on a clinic Mac should be able to see what they are pasting, and a copy
  * that silently failed is otherwise indistinguishable from one that worked.
  */
+/** PURE — the sentence that names who the retirement is recorded against. Exported for the test. */
+export function retireActorLine(actor: string): string {
+  const who = actor.trim();
+  return who ? `This retirement is recorded as done by ${who}.` : "This retirement is recorded in the audit log under your admin sign-in.";
+}
+
 function RetireDialog({
   roomName,
+  actor,
   gate,
   typed,
   onTyped,
@@ -990,6 +999,7 @@ function RetireDialog({
   onConfirm,
 }: {
   roomName: string;
+  actor: string;
   gate: RetireGate;
   typed: string;
   onTyped: (v: string) => void;
@@ -1005,6 +1015,9 @@ function RetireDialog({
       </p>
       <p className="mt-1 text-caption text-even-ink-600">
         The room will have no recorder until a Mac is enrolled again. This removes no software from the Mac.
+      </p>
+      <p className="mt-1 text-caption text-even-ink-600" data-testid="retire-actor">
+        {retireActorLine(actor)}
       </p>
       {gate.live && (
         <>

@@ -16,6 +16,8 @@ export type RoomToggleResult = { ok: true; room_id: string; room_slug: string; b
 export async function recordRoomToggle(r: {
   room_id: string;
   room_slug: string;
+  /** room.name, for the alert body */
+  room_name?: string | null;
   before: "enabled" | "disabled";
   after: "enabled" | "disabled";
   actor: string;
@@ -33,7 +35,16 @@ export async function recordRoomToggle(r: {
     console.warn("[room-enable] audit insert failed", JSON.stringify({ action, room_id: r.room_id, err: String((e as Error)?.message ?? e).slice(0, 160) }));
   }
   if (r.after === "disabled" && isClinicHours(r.now_ms ?? Date.now())) {
-    await queueOpsAlert({ kind: "room_disabled", room_id: r.room_id, room_slug: r.room_slug, minutes: null, reason: r.reason ?? null });
+    // the name is read here, only when the alert will be queued, so the toggle's own reads are unchanged
+    let roomName = r.room_name ?? null;
+    if (!roomName) {
+      try {
+        roomName = ((await sql`SELECT name FROM room WHERE id = ${r.room_id} LIMIT 1`) as Array<{ name?: string | null }>)[0]?.name ?? null;
+      } catch {
+        /* the slug names the room */
+      }
+    }
+    await queueOpsAlert({ kind: "room_disabled", room_id: r.room_id, room_slug: r.room_slug, room_name: roomName, minutes: null, reason: r.reason ?? null });
   }
 }
 

@@ -40,7 +40,7 @@ export default async function AdminBenchPage() {
           at an OPD Mac is already on this screen, and a separate route would need its own guard,
           shell and navigation to say less. It sits between the live monitor and the desk work
           because installing a Mac is a today job, not a history one. */}
-      <BenchInstallFleet />
+      <BenchInstallFleet actor={email} />
       <BenchClient />
     </AdminShell>
   );
