@@ -427,7 +427,7 @@ def test_visit_date_is_local_ist_date():
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-13T03:00:00+00:00"}}) == date(2026, 10, 13)
 
 
-@pytest.mark.parametrize("text", ["t0 [s1] (00:00)", "T0  [S1]  (0:05)", "T0\t\n[S1] (00:00)", "native[hi]: a | english: b",
+@pytest.mark.parametrize("text", ["t0 [s1] (00:00)", "T0  [S1]  (0:05)", "T0\t\r[S1] (00:00)", "native[hi]: a | english: b",
                                   "Native[hi] : a | English :", "ＮＡＴＩＶＥ[ｈｉ]: a | ＥＮＧＬＩＳＨ:", "Ｔ０ [Ｓ１] （００：００）",
                                   "English_Segments", "NATIVE_SEGMENTS"])
 def test_marker_guard_is_case_nfkc_and_whitespace_insensitive(text):
@@ -619,3 +619,54 @@ def test_expanding_labels_are_refused(label):
     for t in (0, 59, 3599, 10 ** 6):
         with pytest.raises(TranscriptGuardError):
             guard_request(_turn_line(label, t))
+
+
+# --- B4a.6: the guard checks each raw line ---------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Tab Dolo 650 T1 [SOS] for fever.\nReview in OPD [Room 5] (10:30) tomorrow.",
+    "MRI T2 [STIR] hyperintensity at L4.\nNext appointment [OPD] (11:15).",
+    "Spine T12 [S1 level] tenderness;\nphysio [daily] (10:00)",
+])
+def test_cross_line_parts_pass(text):
+    guard_request(text)
+
+
+def test_whole_multi_turn_writer_output_is_refused():
+    turns = [Turn(idx=i, t0_ms=i * 5000, t1_ms=i * 5000 + 1000, speaker=str(i % 2), text="x") for i in range(4)]
+    c = Consult(uid="u", turns=turns, clip_t0_ms=0, clip_t1_ms=30000, language_code="en", english_source="s",
+                diarised=True, room="r")
+    out = format_transcript(c)
+    assert out.count("\n") >= 3
+    with pytest.raises(TranscriptGuardError):
+        guard_request(out)
+
+
+@pytest.mark.parametrize("text", [
+    "T0 [S0] (10000000:00) x",
+    "T0 [S0] (123456789012:00) x",
+    "unrelated note line\nT0 [S0] (00:59) x",
+    "unrelated note line\r\nT3 [S1|doctor] (01:05) x\nmore",
+    "NATIVE[hi]: namaste | ENGLISH: hello",
+    "intro\nNATIVE[hi]: namaste | ENGLISH: hello",
+])
+def test_line_split_still_refuses_writer_lines(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request(text)
+
+
+@pytest.mark.parametrize("sep", [" ", "\u0085", "\r", " ", "\x0b", "\x0c"])
+def test_only_newline_splits_lines(sep):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("T0 [S0]" + sep + "(00:59) x")
+
+
+@pytest.mark.parametrize("text", [
+    "Started T1 [stat dose] inj ceftriaxone. Vitals [BP 120/80] (09:00) stable.",
+    "Pt1 [stable], seen by Dr [cardiology] (14:20).",
+    "Dose at T0 [start] then repeat [after food] (13:00).",
+])
+def test_same_line_false_positives_stay_refused(text):
+    """Accepted false positives (B4a.5 verdict Note 1): same-line prose that has the turn-line shape."""
+    with pytest.raises(TranscriptGuardError):
+        guard_request(text)
