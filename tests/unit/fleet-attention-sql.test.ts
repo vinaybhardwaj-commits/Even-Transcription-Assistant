@@ -120,7 +120,12 @@ const samples = (room: string, fromAgo: string, toAgo: string, mode: "frozen" | 
          ${mode === "frozen" ? "0.31" : "0.1 + (extract(epoch from t)::bigint % 7) * 0.01"}, true, true
     FROM generate_series(${ago(fromAgo)}, ${ago(toAgo)}, interval '${step} seconds') t;`;
 
-const attention = async () => (await import("@/lib/fleet-attention")).getFleetAttention();
+// opd4-guard S5 adds one red `no_install` item per ROSTER room (lib/rooms-live/rooms.ts) that has no live install; this fixture's rooms are not the roster, so those eight
+// items are dropped here and covered by tests/unit/opd4-guard.test.ts. Everything else is as the rules emit it.
+const attention = async () => {
+  const r = await (await import("@/lib/fleet-attention")).getFleetAttention();
+  return { ...r, items: r.items.filter((i) => i.kind !== "no_install") };
+};
 const kindsOf = (r: { items: Array<{ room_id: string; kind: string }> }) => r.items.map((i) => `${i.room_id}:${i.kind}`).sort();
 const minutesBetween = (a: string, b: number) => Math.abs(Date.parse(a) - b) / 60_000;
 

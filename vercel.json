@@ -84,6 +84,10 @@
     {
       "path": "/api/cron/consult-index-sync",
       "schedule": "40 * * * *"
+    },
+    {
+      "path": "/api/cron/ops-alerts",
+      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [

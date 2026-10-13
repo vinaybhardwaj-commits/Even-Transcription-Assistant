@@ -397,3 +397,19 @@ export async function manifestChunkRows(sessionId: string): Promise<Array<Record
      ORDER BY (source = 'backup'), idx
   `) as Array<Record<string, unknown>>;
 }
+
+/**
+ * gating/opd4-guard S3b — the newest chunk time per roster room (any session started in the last 2 days). METADATA ONLY: a room id and one timestamp, no audio, no key.
+ * Read by lib/alerts/ops-sweep.ts, which asks "has any audio reached the server lately", never "what was said". Rides bench_session (room_id, started_at), then bench_chunk (session_id).
+ */
+export async function lastChunkByRoom(roomIds: readonly string[]): Promise<Array<{ room_id: string; last_chunk_at: unknown }>> {
+  return (await sql`
+    SELECT s.room_id, max(c.created_at) AS last_chunk_at
+      FROM bench_session s
+      JOIN bench_chunk c ON c.session_id = s.id
+     WHERE s.room_id = ANY(${roomIds as string[]}::text[])
+       AND s.started_at > now() - interval '2 days'
+       AND c.created_at > now() - interval '2 days'
+     GROUP BY s.room_id
+  `) as Array<{ room_id: string; last_chunk_at: unknown }>;
+}

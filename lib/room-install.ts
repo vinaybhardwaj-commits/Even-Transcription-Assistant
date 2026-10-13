@@ -38,7 +38,9 @@ import { verifyAdminJwt } from "@/lib/auth";
 // shape: readFleet reads the currently-`recording` sessions once and attaches each to its
 // room's FleetRow, so `deriveRow` can compute NOT_DELIVERING at read time.
 import { listBenchSessions } from "@/lib/bench";
+import { queueOpsAlert } from "@/lib/alerts/ops-alert";
 import {
+  LIVE_INSTALL_MS,
   groupFleet,
   type FleetPayload,
   type FleetRoom,
@@ -83,6 +85,7 @@ export type InstallErrorCode =
   | "ENROL_RATE_LIMITED"
   | "NOT_FOUND"
   | "RETIRED"
+  | "INSTALL_LIVE"
   | "BAD_CHANNEL"
   | "BAD_ARGS"
   | "ACK_TIMEOUT"
@@ -100,6 +103,8 @@ export const INSTALL_ERROR_STATUS: Record<InstallErrorCode, number> = {
   ENROL_RATE_LIMITED: 429,
   NOT_FOUND: 404,
   RETIRED: 409,
+  // gating/opd4-guard S1. A retire of an install that polled in the last 10 min, without the force flag.
+  INSTALL_LIVE: 409,
   // B2-D5. The assign route admits `stable` and nothing else; anything else is the caller's error.
   BAD_CHANNEL: 400,
   // R4-D5. The audio-input route: a body that is not `{device_uid?, input_volume?}`, and no ack from
@@ -444,6 +449,66 @@ export async function withdrawRelease(id: string): Promise<ReleaseView | null> {
 }
 
 // ---------------------------------------------------------------------------
+// The release a NEW install is given (gating/opd4-guard S6)
+// ---------------------------------------------------------------------------
+
+/** PURE — "0.1.34" -> [0,1,34]; null when it is not three dotted integers. */
+export function parseVersion(v: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(v).trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** PURE — negative when a < b. Unparseable sorts lowest. */
+export function compareVersions(a: string, b: string): number {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  if (!pa || !pb) return pa ? 1 : pb ? -1 : 0;
+  for (let k = 0; k < 3; k++) if (pa[k] !== pb[k]) return pa[k]! - pb[k]!;
+  return 0;
+}
+
+/**
+ * PURE — which release the bootstrap script serves. The `stable` record can sit behind the fleet (13 Oct 2026: stable said 0.1.24 while every room ran 0.1.34, which
+ * went out through the helper and the `test` channel), and a re-enrolment then installed 0.1.24 over a newer app. So: the floor is the higher of the stable version and the
+ * version the fleet runs; the answer is the highest PUBLISHED release (stable or test) at or below that floor, stable winning a tie. A test build newer than the
+ * fleet is never served; and when nothing published reaches the floor the stable record stands (the script itself refuses to downgrade a Mac).
+ */
+export function chooseBootstrapRelease(
+  stable: ReleaseView | null,
+  test: ReleaseView | null,
+  fleetVersion: string | null,
+): ReleaseView | null {
+  if (!stable && !test) return null;
+  if (!stable) return test;
+  const floor = fleetVersion && compareVersions(fleetVersion, stable.version) > 0 ? fleetVersion : stable.version;
+  let best = stable;
+  if (test && compareVersions(test.version, floor) <= 0 && compareVersions(test.version, best.version) > 0) best = test;
+  return best;
+}
+
+/** The release a new macOS install is given. Stable first; the fleet's version and the test shelf are read only when the fleet is ahead of stable. */
+export async function bootstrapRelease(): Promise<ReleaseView | null> {
+  const stable = await latestRelease("stable", "macos");
+  if (!stable) return null;
+  try {
+    const rows = (await sql`
+      SELECT app_version FROM room_install
+       WHERE retired_at IS NULL AND enrolled_at IS NOT NULL AND app_version IS NOT NULL
+         AND COALESCE(update_channel, 'stable') = 'stable'
+    `) as Array<{ app_version: string | null }>;
+    // STABLE-CHANNEL MACS ONLY (refute M1): a test-channel Mac (a canary on a proof build) is not 'the fleet' and must never lift what a new install gets.
+    let fleet: string | null = null;
+    for (const r of rows) if (r.app_version && parseVersion(r.app_version) && (!fleet || compareVersions(r.app_version, fleet) > 0)) fleet = r.app_version;
+    if (!fleet || compareVersions(fleet, stable.version) <= 0) return stable;
+    return chooseBootstrapRelease(stable, await latestRelease("test", "macos"), fleet);
+  } catch (e) {
+    // The fleet read failing must not stop an install: stable is what this always served.
+    console.warn("[room-install] fleet version read failed; serving stable", { err: String((e as Error)?.message ?? e).slice(0, 160) });
+    return stable;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap token mint (§4.2)
 // ---------------------------------------------------------------------------
 
@@ -478,7 +543,7 @@ export async function mintBootstrapToken(input: {
   // the bootstrap fetch reads the release again minutes later — so a token minted against a
   // different channel could not be honoured by the script it produces. `latestRelease` keeps its
   // channel parameter for Build R3's release route, which reads it per request.
-  const release = await latestRelease("stable", "macos");
+  const release = await bootstrapRelease();
   if (!release) throw new InstallError("NO_RELEASE", "no release published yet");
 
   const token = newBootstrapToken();
@@ -741,7 +806,7 @@ function renderMacScript(input: ScriptInput): string {
 set -euo pipefail
 
 APP="EvenScribe Room Recorder.app"
-DEST="$HOME/Applications"
+DEST="/Applications"
 PLIST="$HOME/Library/LaunchAgents/com.evenscribe.room-recorder.plist"
 TOKEN="${token}"
 ORIGIN="${origin}"
@@ -759,17 +824,56 @@ if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
   exit 1
 fi
 
+# Never go back a version. The release this script carries is the one the fleet runs (lib/room-install.ts bootstrapRelease), but a Mac that is already
+# ahead (a newer build installed by the fleet helper) keeps what it has: the script stops before it touches anything.
+NEW_VERSION="${version}"
+for OLD_APP in "$DEST/$APP" "$HOME/Applications/$APP"; do
+  if [ -f "$OLD_APP/Contents/Info.plist" ]; then
+    HAVE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$OLD_APP/Contents/Info.plist" 2>/dev/null || true)"
+    if [ -n "$HAVE" ] && [ "$HAVE" != "$NEW_VERSION" ]; then
+      NEWEST="$(printf '%s\\n%s\\n' "$HAVE" "$NEW_VERSION" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+      if [ "$NEWEST" = "$HAVE" ]; then
+        echo "This Mac already has EvenScribe Room Recorder $HAVE, which is newer than $NEW_VERSION. Install stopped. Nothing was changed."
+        exit 1
+      fi
+    fi
+  fi
+done
+
+# Everything that can fail happens BEFORE the running recorder is touched: the new bundle is expanded and copied beside the old one ($APP.new), into a folder this
+# user can write, with room to spare. Only then is the old copy stopped and swapped (a rename). A user who cannot write /Applications gets a message and an
+# untouched room; the room is never left with no recorder by a script that stops it first and then cannot install.
+echo "Checking that this Mac can install into /Applications..."
+mkdir -p "$TMP/expanded"
+ditto -x -k "$TMP/app.zip" "$TMP/expanded"
+if [ ! -d "$DEST" ] || [ ! -w "$DEST" ]; then
+  echo "This user cannot write to $DEST (it needs an administrator account). Install stopped. The running recorder was not touched."
+  exit 1
+fi
+NEED_KB="$(du -sk "$TMP/expanded/$APP" | awk '{print $1}')"
+FREE_KB="$(df -k "$DEST" | awk 'NR==2 {print $4}')"
+if [ -n "$NEED_KB" ] && [ -n "$FREE_KB" ] && [ "$FREE_KB" -lt $((NEED_KB * 2)) ]; then
+  echo "Not enough free space in $DEST. Install stopped. The running recorder was not touched."
+  exit 1
+fi
+rm -rf "$DEST/$APP.new"
+if ! ditto "$TMP/expanded/$APP" "$DEST/$APP.new"; then
+  rm -rf "$DEST/$APP.new"
+  echo "Could not copy the new app into $DEST. Install stopped. The running recorder was not touched."
+  exit 1
+fi
+
 echo "Stopping any earlier copy..."
 launchctl bootout "gui/$(id -u)/com.evenscribe.room-recorder" 2>/dev/null || true
 
-echo "Installing into ~/Applications..."
-mkdir -p "$DEST"
-ditto -x -k "$TMP/app.zip" "$TMP/expanded"
+echo "Installing into /Applications..."
 rm -rf "$DEST/$APP"
-ditto "$TMP/expanded/$APP" "$DEST/$APP"
+mv "$DEST/$APP.new" "$DEST/$APP"
 
 echo "Enrolling this Mac..."
 "$DEST/$APP/Contents/MacOS/room-recorder" enrol --token "$TOKEN" --origin "$ORIGIN"
+
+rm -rf "$HOME/Applications/$APP"
 
 echo "Installing the LaunchAgent..."
 "$DEST/$APP/Contents/MacOS/room-recorder" install-launch-agent
@@ -804,7 +908,7 @@ export async function bootstrapScriptFor(token: string): Promise<string | null> 
 
     // The release is read at FETCH time, not at mint time, so a withdraw between the copy and
     // the paste is honoured: the script that runs is built from what is published now.
-    const release = await latestRelease("stable", "macos");
+    const release = await bootstrapRelease();
     if (!release) return null;
 
     // THE LINUX READ CANNOT BREAK A MAC PASTE. Every script now carries both branches, so a fault reading
@@ -843,6 +947,8 @@ export type EnrolResult = {
   room_slug: string;
   room_name: string;
   session: { token: string; expires_at: string };
+  /** true when another install still holds the room: this one is enrolled by its first successful poll, which retires the holder. */
+  pending_handover?: boolean;
 };
 
 /**
@@ -862,34 +968,40 @@ export type EnrolResult = {
  */
 export async function enrolWithToken(token: string): Promise<EnrolResult> {
   const ttl = INSTALL_SESSION_TTL_SECONDS;
-  let rows: Array<{ install_id: string; room_id: string; slug: string; name: string; session_expires_at: string | Date }>;
+  let rows: Array<{
+    install_id: string;
+    room_id: string;
+    slug: string;
+    name: string;
+    session_expires_at: string | Date;
+    pending_handover?: boolean | null;
+  }>;
 
   try {
     const results = (await sql.transaction([
-      // 1. Claim the token, and retire every OTHER live install of that room off the claim.
+      // 1. Claim the token. NOTHING IS RETIRED HERE (gating/opd4-guard S1): this statement used to retire every other live install of the room off the claim,
+      //    before the new install had made one poll. A new install that never recorded then left the room with no recorder at all.
       sql`
-        WITH claimed AS (
-          UPDATE room_bootstrap_token
-             SET used_at = now()
-           WHERE token = ${token}
-             AND used_at IS NULL
-             AND expires_at > now()
-          RETURNING room_id, install_id
-        )
-        UPDATE room_install ri
-           SET retired_at = now()
-          FROM claimed c
-         WHERE ri.room_id = c.room_id
-           AND ri.install_id <> c.install_id
-           AND ri.retired_at IS NULL
-           AND ri.enrolled_at IS NOT NULL
-        RETURNING ri.install_id
+        UPDATE room_bootstrap_token
+           SET used_at = now()
+         WHERE token = ${token}
+           AND used_at IS NULL
+           AND expires_at > now()
+        RETURNING room_id, install_id
       `,
-      // 2. Enrol the install the token names. Runs AFTER the retire, so the partial unique index
-      //    never sees two live enrolments of one room even for the width of a statement.
+      // 2. Exchange the install the token names. THE SINGLE-USE GUARANTEE is `ri.session_expires_at IS NULL`: a fresh mint row has none, this statement sets it,
+      //    so a replay of a spent token finds it set and updates nothing.
+      //    If another ENROLLED, un-retired install holds the room, this install is NOT enrolled yet (the partial unique index would refuse it, and retiring the
+      //    holder first is exactly what S1 forbids). It is left `enrolled_at NULL` with its session issued — PENDING HANDOVER. Its first successful poll
+      //    (applyInstallPoll -> handoverIfPending) retires the holder and enrols it in one transaction.
       sql`
         UPDATE room_install ri
-           SET enrolled_at = now(),
+           SET enrolled_at = CASE
+                 WHEN EXISTS (
+                   SELECT 1 FROM room_install o
+                    WHERE o.room_id = ri.room_id AND o.install_id <> ri.install_id
+                      AND o.retired_at IS NULL AND o.enrolled_at IS NOT NULL
+                 ) THEN NULL ELSE now() END,
                session_expires_at = now() + (${ttl}::int * INTERVAL '1 second')
           FROM room_bootstrap_token t
           JOIN room r ON r.id = t.room_id
@@ -897,8 +1009,10 @@ export async function enrolWithToken(token: string): Promise<EnrolResult> {
            AND t.used_at IS NOT NULL
            AND ri.install_id = t.install_id
            AND ri.enrolled_at IS NULL
+           AND ri.session_expires_at IS NULL
            AND ri.retired_at IS NULL
-        RETURNING ri.install_id, ri.room_id, r.slug, r.name, ri.session_expires_at
+        RETURNING ri.install_id, ri.room_id, r.slug, r.name, ri.session_expires_at,
+                  (ri.enrolled_at IS NULL) AS pending_handover
       `,
     ])) as unknown as [unknown, typeof rows];
     rows = results[1];
@@ -930,6 +1044,7 @@ export async function enrolWithToken(token: string): Promise<EnrolResult> {
       token: jwt,
       expires_at: expiresAt.toISOString(),
     },
+    pending_handover: row.pending_handover === true,
   };
 }
 
@@ -937,12 +1052,43 @@ export async function enrolWithToken(token: string): Promise<EnrolResult> {
 // Retire (§4.2, §4.5 rule 5)
 // ---------------------------------------------------------------------------
 
-export async function retireInstall(installId: string): Promise<InstallView | null> {
+/** The room an install is bound to (name and slug), for the retire route's confirm check. Null when the install is unknown. */
+export async function roomOfInstall(installId: string): Promise<{ room_id: string; slug: string; name: string } | null> {
+  try {
+    const rows = (await sql`
+      SELECT r.id AS room_id, r.slug, r.name
+        FROM room_install ri JOIN room r ON r.id = ri.room_id
+       WHERE ri.install_id = ${installId} LIMIT 1
+    `) as Array<{ room_id: string; slug: string; name: string }>;
+    return rows[0] ?? null;
+  } catch (e) {
+    throw classifyInstallError(e);
+  }
+}
+
+/** An install that polled within this window is LIVE: only an explicit force retires it (S1). Defined in the view module so the browser dialog shares it. */
+export { LIVE_INSTALL_MS };
+
+export type RetireReason = "manual" | "forced" | "handover";
+
+export type RetireResult =
+  | { ok: true; install: InstallView; reason: RetireReason; last_seen_age_s: number | null }
+  | { ok: false; code: "NOT_FOUND" }
+  | { ok: false; code: "LIVE"; room_id: string; last_seen_age_s: number };
+
+/**
+ * Retire one install by hand. REFUSED when it polled in the last LIVE_INSTALL_MS unless `force` is set (the route sets it only from a confirm step that
+ * names the room). The refusal is IN THE UPDATE, not in a read before it: a poll landing between a check and a write cannot slip a live install through.
+ * Every retirement writes an `install.retire` audit row and queues an alert; neither can fail the retire.
+ */
+export async function retireInstall(installId: string, opts: { actor: string; force?: boolean }): Promise<RetireResult> {
+  const force = opts.force === true;
   try {
     const rows = (await sql`
       UPDATE room_install
          SET retired_at = now()
        WHERE install_id = ${installId} AND retired_at IS NULL
+         AND (${force}::boolean OR last_seen_at IS NULL OR last_seen_at < now() - (${LIVE_INSTALL_MS / 1000}::int * INTERVAL '1 second'))
       RETURNING install_id, room_id, created_at, enrolled_at, session_expires_at, launched_by,
              hostname, hardware_model, os_version, input_device_name, app_version, build_sha,
              first_seen_at, last_seen_at, mic_state, launch_agent_loaded,
@@ -950,11 +1096,103 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
              session_open, update_channel, last_update_result, last_update_version,
              last_update_error, last_update_at, disk_free_bytes,
              assigned_channel, peak, zero_ratio, input_devices,
-             input_volume, input_volume_settable
-    `) as InstallView[];
-    return rows[0] ? normaliseInstall(rows[0]) : null;
+             input_volume, input_volume_settable,
+             EXTRACT(EPOCH FROM (now() - last_seen_at))::int AS last_seen_age_s
+    `) as Array<InstallView & { last_seen_age_s?: number | string | null }>;
+    const row = rows[0];
+    if (row) {
+      const age = row.last_seen_age_s === null || row.last_seen_age_s === undefined ? null : Number(row.last_seen_age_s);
+      const { last_seen_age_s: _drop, ...view } = row;
+      void _drop;
+      const reason: RetireReason = force && age !== null && age * 1000 < LIVE_INSTALL_MS ? "forced" : "manual";
+      await recordRetirement({ installId: row.install_id, roomId: row.room_id, reason, lastSeenAgeS: age, actor: opts.actor, actorType: "admin" });
+      return { ok: true, install: normaliseInstall(view as InstallView), reason, last_seen_age_s: age };
+    }
+    // Nothing updated: unknown, already retired, or LIVE and not forced. Told apart so the caller can show "last seen N min ago".
+    const probe = (await sql`
+      SELECT room_id, retired_at, EXTRACT(EPOCH FROM (now() - last_seen_at))::int AS last_seen_age_s
+        FROM room_install WHERE install_id = ${installId} LIMIT 1
+    `) as Array<{ room_id: string; retired_at: string | null; last_seen_age_s: number | string | null }>;
+    const p = probe[0];
+    if (!p || p.retired_at) return { ok: false, code: "NOT_FOUND" };
+    return { ok: false, code: "LIVE", room_id: p.room_id, last_seen_age_s: Number(p.last_seen_age_s ?? 0) };
   } catch (e) {
     throw classifyInstallError(e);
+  }
+}
+
+/** The audit row and the alert for one retirement. Best effort: never throws, never blocks the retire that already happened. */
+async function recordRetirement(r: {
+  installId: string;
+  roomId: string;
+  reason: RetireReason;
+  lastSeenAgeS: number | null;
+  actor: string;
+  actorType: "system" | "admin";
+}): Promise<void> {
+  await auditInstall(
+    "install.retire",
+    r.roomId,
+    { install_id: r.installId, actor: r.actor, reason: r.reason, last_seen_age_s: r.lastSeenAgeS },
+    // an MCP principal ("mcp:<name>") is not an admin-table user: actor_type 'system', actor_id keeps the name
+    r.actor.startsWith("mcp:") ? "system" : r.actorType,
+  );
+  let slug = r.roomId;
+  try {
+    const rooms = (await sql`SELECT slug FROM room WHERE id = ${r.roomId} LIMIT 1`) as Array<{ slug: string }>;
+    if (rooms[0]?.slug) slug = rooms[0].slug;
+  } catch {
+    /* the id stands in for the slug */
+  }
+  await queueOpsAlert({
+    kind: "install_retired",
+    room_id: r.roomId,
+    room_slug: slug,
+    minutes: r.lastSeenAgeS === null ? null : r.lastSeenAgeS / 60,
+    install_id: r.installId,
+    reason: r.reason,
+  });
+}
+
+/**
+ * THE HANDOVER (S1). Called after a poll was ACCEPTED for an install that was exchanged but not yet enrolled (a re-enrolment while another install held
+ * the room). In one transaction: retire the holder(s), then enrol this install, in that order so the partial unique index never sees two. This is the ONLY
+ * automatic retirement left. The holder is typically live (it is the Mac being replaced), and that is the point: the new install has just proved itself by
+ * polling. A failure is logged and the next poll tries again; the holder stays live meanwhile.
+ */
+export async function handoverIfPending(installId: string): Promise<void> {
+  try {
+    const results = (await sql.transaction([
+      sql`
+        UPDATE room_install old
+           SET retired_at = now()
+          FROM room_install nw
+         WHERE nw.install_id = ${installId}
+           AND nw.enrolled_at IS NULL AND nw.retired_at IS NULL AND nw.session_expires_at IS NOT NULL
+           AND old.room_id = nw.room_id AND old.install_id <> nw.install_id
+           AND old.retired_at IS NULL AND old.enrolled_at IS NOT NULL
+        RETURNING old.install_id, old.room_id, EXTRACT(EPOCH FROM (now() - old.last_seen_at))::int AS last_seen_age_s
+      `,
+      sql`
+        UPDATE room_install
+           SET enrolled_at = now()
+         WHERE install_id = ${installId}
+           AND enrolled_at IS NULL AND retired_at IS NULL AND session_expires_at IS NOT NULL
+        RETURNING install_id
+      `,
+    ])) as unknown as [Array<{ install_id: string; room_id: string; last_seen_age_s: number | string | null }>, unknown];
+    for (const old of results[0] ?? []) {
+      await recordRetirement({
+        installId: old.install_id,
+        roomId: old.room_id,
+        reason: "handover",
+        lastSeenAgeS: old.last_seen_age_s === null || old.last_seen_age_s === undefined ? null : Number(old.last_seen_age_s),
+        actor: `install:${installId}`,
+        actorType: "system",
+      });
+    }
+  } catch (e) {
+    console.warn("[room-install] handover failed; the holder stays live", JSON.stringify({ install_id: installId, err: String((e as Error)?.message ?? e).slice(0, 200) }));
   }
 }
 
@@ -1400,6 +1638,8 @@ type InstallPollReturn = {
   /** Tier 2 §2.2 — the PRE-update assignment, from the FROM subquery. Absent on older callers. */
   prev_assigned_channel?: string | null;
   prev_room_id?: string | null;
+  /** NULL = exchanged but not yet enrolled (pending handover). Absent on a caller that did not select it. */
+  enrolled_at?: string | Date | null;
 };
 
 /**
@@ -1635,10 +1875,12 @@ export async function applyInstallPoll(
                 room_install.state_flags, room_install.input_device_name, room_install.input_devices,
                 room_install.expected_device_name, room_install.disk_free_bytes,
                 room_install.update_channel, room_install.channel_locked,
-                prev.prev_assigned_channel, prev.prev_room_id
+                prev.prev_assigned_channel, prev.prev_room_id, room_install.enrolled_at
     `) as InstallPollReturn[];
 
     if (rows.length > 0) {
+      // S1: a pending install's first accepted poll hands the room over (retires the holder, enrols this one). Only when the column came back NULL.
+      if (rows[0]!.enrolled_at === null) await handoverIfPending(f.install_id);
       if (carriesHelperFields(f)) deferHelperWrite(() => writeHelperFields(sql as never, f.install_id, f));
       await writeInstallState(rows[0]!, { recording, tapeAdvancing: f.tape_advancing, silenceMs: f.silence_ms, now });
       // Tier 2 §2.2 — ONCE PER TRANSITION, not once per poll. The clear fires on exactly the poll
@@ -1913,16 +2155,25 @@ export async function readFleet(now: Date = new Date()): Promise<FleetPayload> {
  * NEVER FAILS THE CALLER. A missing audit row must not block a Mac from moving channel.
  */
 async function auditInstall(
-  action: "install.assign_channel" | "install.channel_reported" | "install.poll_write_failed",
+  action: "install.assign_channel" | "install.channel_reported" | "install.poll_write_failed" | "install.retire",
   roomId: string | null,
   meta: Record<string, unknown>,
+  actorType: "system" | "admin" = "system",
 ): Promise<void> {
   try {
-    await sql`
-      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('system', ${String(meta.actor ?? "install")}, ${action}, 'room_install',
-              ${String(meta.install_id ?? "")}, ${JSON.stringify({ ...meta, room_id: roomId })}::jsonb)
-    `;
+    if (actorType === "admin") {
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+        VALUES ('admin', ${String(meta.actor ?? "admin")}, ${action}, 'room_install',
+                ${String(meta.install_id ?? "")}, ${JSON.stringify({ ...meta, room_id: roomId })}::jsonb)
+      `;
+    } else {
+      await sql`
+        INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+        VALUES ('system', ${String(meta.actor ?? "install")}, ${action}, 'room_install',
+                ${String(meta.install_id ?? "")}, ${JSON.stringify({ ...meta, room_id: roomId })}::jsonb)
+      `;
+    }
   } catch (e) {
     console.warn(
       "[room-install] audit insert failed",
@@ -2044,7 +2295,8 @@ export async function boundInstallForRoom(
 /**
  * Delete unenrolled installs whose token expired more than 24 hours ago.
  *
- * ONLY UNENROLLED ROWS, and the join to the token is the guard: an enrolled install is the fleet's
+ * ONLY UNENROLLED ROWS THAT NEVER EXCHANGED THEIR TOKEN (`session_expires_at IS NULL`; opd4-guard S1: an install exchanged while another held the room waits, enrolled_at NULL, for its
+ * first poll, and a schedule must not delete it), and the join to the token is the guard: an enrolled install is the fleet's
  * record of a Mac and is never deleted by a schedule, only retired by a person or by a second
  * paste. What this removes is the litter of an operator who copied a command and did not use it.
  *
@@ -2058,6 +2310,7 @@ export async function cleanupExpiredInstalls(): Promise<{ deleted: number }> {
         FROM room_install i
         JOIN room_bootstrap_token t ON t.install_id = i.install_id
        WHERE i.enrolled_at IS NULL
+         AND i.session_expires_at IS NULL
          AND t.expires_at < now() - INTERVAL '24 hours'
        LIMIT 500
     `) as Array<{ token: string; install_id: string }>;
@@ -2067,7 +2320,7 @@ export async function cleanupExpiredInstalls(): Promise<{ deleted: number }> {
 
     await sql.transaction([
       sql`DELETE FROM room_bootstrap_token WHERE install_id = ANY(${ids}::text[])`,
-      sql`DELETE FROM room_install WHERE install_id = ANY(${ids}::text[]) AND enrolled_at IS NULL`,
+      sql`DELETE FROM room_install WHERE install_id = ANY(${ids}::text[]) AND enrolled_at IS NULL AND session_expires_at IS NULL`,
     ]);
     return { deleted: ids.length };
   } catch (e) {

@@ -1137,3 +1137,31 @@ export function deriveRow(input: {
     ...r3,
   };
 }
+
+// ---------------------------------------------------------------------------
+// gating/opd4-guard S1/S2 — the retire gate, shared by the route (server) and the Retire dialog (browser). PURE.
+// ---------------------------------------------------------------------------
+
+/** An install that polled within this window is LIVE: only an explicit, typed force retires it. */
+export const LIVE_INSTALL_MS = 10 * 60_000;
+
+export type RetireGate = {
+  /** polled within LIVE_INSTALL_MS: the dialog asks for the room's name and sends force */
+  live: boolean;
+  /** whole minutes since the last poll, null when the install never polled */
+  minutes: number | null;
+  /** "last seen 3 min ago" / "never seen" */
+  label: string;
+};
+
+export function retireGate(lastSeenAt: string | null, nowMs: number): RetireGate {
+  const t = lastSeenAt ? new Date(lastSeenAt).getTime() : NaN;
+  if (!Number.isFinite(t)) return { live: false, minutes: null, label: "never seen" };
+  const ms = Math.max(0, nowMs - t);
+  const minutes = Math.floor(ms / 60_000);
+  return { live: ms < LIVE_INSTALL_MS, minutes, label: minutes < 1 ? "last seen less than a minute ago" : `last seen ${minutes} min ago` };
+}
+
+/** The forced-retire confirm: the typed text must be the room's name (case and surrounding space ignored). */
+export const retireTypedMatches = (typed: string, roomName: string): boolean =>
+  typed.trim().length > 0 && typed.trim().toLowerCase() === roomName.trim().toLowerCase();

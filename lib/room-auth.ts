@@ -16,6 +16,7 @@
  * forked, only re-applied.
  */
 
+import { recordRoomToggle } from "@/lib/room-enable";
 import { jwtVerify, SignJWT, type JWTPayload } from "jose";
 import { cookies } from "next/headers";
 import { sql } from "@/lib/db";
@@ -179,6 +180,8 @@ export async function roomRecordFailedAttempt(
                disabled_at = NOW()
          WHERE id = ${room.id}
       `;
+      // opd4-guard S7: an automatic disable leaves a trail and pages (the reason says it was the lockout, not a person).
+      await recordRoomToggle({ room_id: room.id, room_slug: room.slug, before: "enabled", after: "disabled", actor: "system:pin_lockout", reason: "30 failed PIN attempts" });
     } else if (lockedUntilSec) {
       await sql`
         UPDATE room

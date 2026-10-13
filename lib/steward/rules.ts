@@ -40,6 +40,7 @@ import { IST_OFFSET_MS, isNeverLiveRoom, istMidnightOf, windowAt, type Config, t
 import type { RoomSense } from "./sense";
 import { paramsValid, type StewardAction } from "./tickets";
 import { startVerdict } from "./start-schedule";
+import { isClinicHours, recorderOffMinutes } from "@/lib/alerts/clinic-hours";
 
 export type DecisionAction =
   | "scribe_start"
@@ -799,7 +800,12 @@ function extensionMissing(c: Ctx): Decision[] | null {
 
 function chain(c: Ctx): Decision[] {
   const { s, win } = c;
-  if (!s.machine) return [mk(c, "no_machine", "none", {}, "room has no bound machine", null, "info")];
+  if (!s.machine) {
+    // gating/opd4-guard S4. During clinic hours a roster room with no bound machine is a FAULT (OPD 4 sat in this state, logged at info, from 12 Oct to 13 Oct).
+    // Severity error and action "alert": no room action is ever taken from here (only scribe_start is live); the page goes out through the outbox (lib/alerts).
+    if (c.s.kind === "clinic" && isClinicHours(c.A)) return [mk(c, "no_machine", "alert", {}, "room has no bound machine during clinic hours: nothing is recording it", null, "error")];
+    return [mk(c, "no_machine", "none", {}, "room has no bound machine", null, "info")];
+  }
   if (s.recording.session_open === null) {
     return [mk(c, "sense_degraded", "log_only", {}, "cannot tell whether a session is open", "missing: bench_session", "warn")];
   }
@@ -942,7 +948,24 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
     ds.push(mk(c, "device_missing", "log_only", { state: "back" }, `room ${sense.room_name}: the input device is back; the missing-device episode is closed`, null, "info", {}, {}));
   }
   ds.push(...micReturnSilent(c));
+  // opd4-guard S4. Only where the chain cannot see the room: no bound machine, or the session state unreadable. Every other failing primary (not_recording, session_died,
+  // kiosk_asleep, ...) already names the fault, and a second alert row per tick on top of it would double the decision log; the standing sweep (lib/alerts/ops-sweep.ts)
+  // pages recorder_off for ALL roster rooms regardless of what the steward decided.
+  if (p0 && (p0.rule === "no_machine" || p0.rule === "sense_degraded")) ds.push(...recorderOffDecision(c));
   return ds;
+}
+
+/**
+ * gating/opd4-guard S4/S3b. A roster room with no audio at the server for 15 min inside clinic hours, WHATEVER the install or machine binding says: it reads the room's
+ * newest chunk, never the install. Alert only, never a room action; appended only beside no_machine / sense_degraded (see decideRoom). `last_chunk_24h_at` null means "no chunk in 24 h" (sense reads the roster), so a room dark for days is
+ * counted from the window start. Params carry no minutes (the dedupe key stays stable); the number goes to inputs.
+ */
+function recorderOffDecision(c: Ctx): Decision[] {
+  if (c.s.kind !== "clinic") return []; // OT rooms keep their own 06:00-04:00 window; idle between cases is normal there
+  const last = c.s.recording.last_chunk_24h_at ?? c.s.recording.last_chunk_at;
+  const mins = recorderOffMinutes(c.A, last ? Date.parse(last) : null);
+  if (mins === null) return [];
+  return [mk(c, "recorder_off", "alert", { room_id: c.s.room_id }, `room ${c.s.room_name}: no audio reached the server for ${mins} min inside clinic hours`, null, "error", {}, { recorder_off_min: mins })];
 }
 
 /**

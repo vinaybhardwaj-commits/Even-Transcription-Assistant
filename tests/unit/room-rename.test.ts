@@ -155,7 +155,10 @@ describe("the other three actions are untouched", () => {
   });
 
   it("disable still writes disabled_at and never name", async () => {
+    // opd4-guard S7: the route reads the room first (audit needs before -> after), then writes, then audits
+    responder = (text) => (/^SELECT slug, disabled_at FROM room/.test(text) ? [{ slug: "opd-a", disabled_at: null }] : []);
     await patch({ room_id: "room_a", action: "disable" });
+    expect(calls.some((c) => /INSERT INTO audit_log/.test(c.text))).toBe(true);
     const upd = calls.find((c) => /^UPDATE room/.test(c.text))!;
     expect(upd.text).toContain("disabled_at = NOW()");
     expect(upd.text).not.toContain("SET name");

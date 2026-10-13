@@ -878,7 +878,9 @@ describe("fleet incident, caps and repeated failure", () => {
 // ---------------------------------------------------------------------------
 describe("degraded inputs and determinism", () => {
   it("no bound machine -> none; session state unreadable -> log_only naming the missing source", () => {
-    expect(first(healthy(T, { machine: null }), T)).toMatchObject({ rule: "no_machine", action: "none" });
+    // opd4-guard S4: T is Tuesday 10:00 IST, inside clinic hours: severity error and action alert (still no room action). Outside clinic hours it stays info / none.
+    expect(first(healthy(T, { machine: null }), T)).toMatchObject({ rule: "no_machine", action: "alert", severity: "error" });
+    expect(first(healthy(ist("23:00"), { machine: null }), ist("23:00"))).toMatchObject({ rule: "no_machine", action: "none", severity: "info" });
     const d = first(healthy(T, { recording: { session_open: null }, missing: ["bench_session"] }), T);
     expect(d).toMatchObject({ rule: "sense_degraded", action: "log_only" });
     expect(d.why_not).toContain("bench_session");

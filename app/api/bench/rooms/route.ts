@@ -15,6 +15,7 @@ import { randomInt } from "crypto";
 import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
+import { setRoomEnabled } from "@/lib/room-enable";
 import { benchAdminGuard, buildRoomSlug, newRoomId } from "@/lib/bench";
 
 export const runtime = "nodejs";
@@ -116,7 +117,7 @@ export async function PATCH(req: NextRequest) {
   const g = await benchAdminGuard();
   if (!g.ok) return respondError(g.code, g.msg);
 
-  let body: { room_id?: string; action?: string; name?: string };
+  let body: { room_id?: string; action?: string; name?: string; reason?: string };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -145,24 +146,13 @@ export async function PATCH(req: NextRequest) {
     return respondOk({ ok: true, pin_plaintext: pin });
   }
 
-  if (action === "disable") {
+  if (action === "disable" || action === "enable") {
+    // opd4-guard S7: audited (room.enable / room.disable) and, for a disable in clinic hours, alerted. The reason is optional free text from the caller, capped.
+    const actor = String(g.claims.admin_id ?? g.claims.email ?? "admin");
+    const reason = typeof (body as { reason?: unknown }).reason === "string" ? String((body as { reason?: string }).reason).trim().slice(0, 200) || null : null;
     try {
-      await sql`UPDATE room SET disabled_at = NOW() WHERE id = ${roomId}`;
-    } catch (e) {
-      return respondError("PIPELINE_FAILED", String(e).slice(0, 150));
-    }
-    return respondOk({ ok: true });
-  }
-
-  if (action === "enable") {
-    try {
-      await sql`
-        UPDATE room
-           SET disabled_at = NULL,
-               failed_attempts = 0,
-               locked_until = NULL
-         WHERE id = ${roomId}
-      `;
+      const out = await setRoomEnabled(roomId, action === "enable", { actor, reason });
+      if (!out.ok) return respondError("VALIDATION_FAILED", "unknown_room");
     } catch (e) {
       return respondError("PIPELINE_FAILED", String(e).slice(0, 150));
     }

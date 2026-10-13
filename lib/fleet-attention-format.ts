@@ -31,7 +31,8 @@ export type AttentionKind =
   | "presence_cannot_run"
   | "recorder_update_failing"
   | "app_missing"
-  | "helper_missing";
+  | "helper_missing"
+  | "no_install";
 
 export type AttentionItem = {
   room_id: string;
@@ -94,6 +95,7 @@ export const KIND_LABEL: Record<AttentionKind, string> = {
   recorder_update_failing: "Recorder update failing",
   app_missing: "Recorder app not running",
   helper_missing: "Helper not reporting",
+  no_install: "No recorder installed",
 };
 
 /** "for 3 h 12 m", "for 45 m", "for under a minute", "for 4 d 3 h". Never negative. */
