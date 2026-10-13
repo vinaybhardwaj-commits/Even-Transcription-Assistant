@@ -278,7 +278,7 @@ def test_floor_items_reply_is_parsed_exactly(frozen, tmp_path, mut):
 
 def floors_row(**kw):
     base = {"uid": "u", "arm": "Bn", "unsupported_drugs": 0, "leak_items": 0, "invented_fields": 0, "dose_precedence_errors": 0, "hallucinations": 0,
-            "invented_numbers": 0, "dose_precedence_det": 0, "printable_errors": 0, "validator_failures": 0, "artifact_missing": False,
+            "invented_numbers": 0, "dose_precedence_det": 0, "printable_errors": 0, "unknown_key_errors": 0, "validator_failures": 0, "artifact_missing": False,
             "unclear_items": 0, "completion": {"missing": 2, "covered": 2, "parse_failure": False}}
     return {**base, **kw}
 
@@ -662,12 +662,39 @@ def test_d1_end_to_end_row_has_item_total_and_target_fields(tmp_path, monkeypatc
 def test_d1_target_check_logic():
     combos = [f"{j}/{r}" for j in judge.JUDGES for r in judge.REFS]
     good = {"median_diff": 2, "p_holm": 0.01, "mean_diff": 0.0}
+    fam = {"bn_vs_a": good}
     gt = dict.fromkeys(combos, 9)
-    assert run.target_check(gt, dict.fromkeys(combos, good), dict.fromkeys(combos, good), combos)["met"]
-    assert not run.target_check({**gt, "opus/none": 8}, dict.fromkeys(combos, good), dict.fromkeys(combos, good), combos)["met"]
-    assert not run.target_check(gt, dict.fromkeys(combos, {**good, "median_diff": 1}), dict.fromkeys(combos, good), combos)["met"]
-    assert not run.target_check(gt, dict.fromkeys(combos, good), dict.fromkeys(combos, {**good, "mean_diff": -0.2}), combos)["met"]
-    assert not run.target_check(gt, {**dict.fromkeys(combos, good), "sonnet/none": {**good, "median_diff": -1}}, dict.fromkeys(combos, good), combos)["met"]
+    tot = dict.fromkeys(combos, good)
+    th = dict.fromkeys(combos, good)
+    assert run.target_check(gt, fam, th, tot)["met"]
+    # opus/none is not part of met
+    assert run.target_check({**gt, "opus/none": 3}, fam, {**th, "opus/none": {"mean_diff": -5}}, tot)["met"]
+    assert not run.target_check({**gt, "opus/transcript": 8}, fam, th, tot)["met"]
+    assert not run.target_check(gt, {"bn_vs_a": {**good, "median_diff": 1}}, th, tot)["met"]
+    assert not run.target_check(gt, {"bn_vs_a": {**good, "p_holm": 0.05}}, th, tot)["met"]
+    assert not run.target_check(gt, fam, {**th, "opus/transcript": {"mean_diff": -0.2}}, tot)["met"]
+    for ref in ("transcript", "none"):
+        assert not run.target_check(gt, fam, th, {**tot, f"sonnet/{ref}": {**good, "median_diff": 0}})["met"]
+
+
+def test_ruling_total_family_is_the_three_totals_under_the_primary_judge():
+    A = [[3] * 9 for _ in range(6)]
+    Bn = [[4] * 9 for _ in range(6)]
+    B0 = [[3, 3, 3, 3, 3, 3, 3, 3, 4] for _ in range(6)]
+    sc = {(f"u{i}", arm, run.PRIMARY): {"total": sum(v[i]), "items": v[i]} for i in range(6) for arm, v in (("A", A), ("Bn", Bn), ("B0", B0))}
+    fam = run.total_family(sc, [f"u{i}" for i in range(6)], run.PRIMARY)
+    assert set(fam) == {"bn_vs_a", "bn_vs_b0", "b0_vs_a"} and fam["bn_vs_a"]["median_diff"] == 9
+    assert fam["bn_vs_a"]["p_holm"] == pytest.approx(3 * 0.03125)
+
+
+def test_ruling_unknown_key_strings_are_checked_and_counted_apart():
+    clean = {"general_advice": ["rest"]}
+    assert floors.unknown_key_errors(clean) == 0
+    rx = {**clean, "extra_note": "[doctor to verify]", "medicines": [{"name": "D", "mystery": ["{{x}}"]}], "follow_up": {"zzz": "ok"}}
+    assert floors.unknown_key_errors(rx) >= 2
+    assert floors.printable_count(rx, None) == 0
+    row = floors.aggregate([floors_row(unknown_key_errors=1)])["rows"][-3]
+    assert row["floor"] == "unknown-key printable errors" and not row["pass"]
 
 
 class _J:

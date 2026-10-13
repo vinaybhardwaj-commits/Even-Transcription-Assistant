@@ -17,7 +17,7 @@ from ... import validate
 from ...ingest import Consult
 from ...models import ModelClient
 from .judge import Frozen, cache_path, _write_private
-from .render import validate_prescription
+from .render import PRESCRIPTION_SCHEMA, validate_prescription
 
 HALLUCINATION_MAX_PER_CONSULT = 0.2
 ITEM_KINDS = ("medicine", "diagnosis", "comorbidity", "investigation", "procedure", "referral", "advice", "follow_up",
@@ -281,6 +281,39 @@ def printable_text(rx: dict) -> str:
     return "\n".join(f"{h}:\n" + "\n".join(lines) for h, lines in sec.items() if lines)
 
 
+def _unknown_strings(node, schema) -> list[str]:
+    """Every string value under a key the Rx schema does not know, at any depth."""
+    out: list[str] = []
+
+    def strings(n):
+        if isinstance(n, str):
+            out.append(n)
+        elif isinstance(n, dict):
+            for v in n.values():
+                strings(v)
+        elif isinstance(n, list):
+            for v in n:
+                strings(v)
+
+    if isinstance(node, dict):
+        props = schema.get("properties", {})
+        for k, v in node.items():
+            if k in props:
+                out.extend(_unknown_strings(v, props[k]))
+            else:
+                strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            out.extend(_unknown_strings(v, schema.get("items", {})))
+    return out
+
+
+def unknown_key_errors(rx: dict) -> int:
+    """Fail-safe: printable_errors over each string under an unknown key, as a heading-less line. Counted apart from printable_errors."""
+    lines = [_s(x) for x in _unknown_strings(rx, PRESCRIPTION_SCHEMA)]
+    return len(validate.printable_errors("\n".join(x for x in lines if x), [])) if any(lines) else 0
+
+
 def printable_count(rx: dict, art: dict | None) -> int:
     n = 0
     if art is not None and isinstance(art.get("note_text"), str):
@@ -308,7 +341,7 @@ def consult_floors(client, frozen, *, uid: str, arm_kind: str, rx: dict, signed_
     inv = invented_numbers(rx, art, consult)
     rec = {"uid": uid, "arm": arm_kind, "n_items": len(items), **j, "invented_numbers": inv["count"],
            "invented_numbers_detail": {k: inv[k] for k in ("offending_runs", "unmatched_medicines")},
-           "dose_precedence_det": dose_precedence(rx, art), "printable_errors": printable_count(rx, art),
+           "dose_precedence_det": dose_precedence(rx, art), "printable_errors": printable_count(rx, art), "unknown_key_errors": unknown_key_errors(rx),
            "validator_failures": validator_failures(art), "artifact_missing": art is None}
     rec["completion"] = completion_counts(client, frozen, signed, items, (art or {}).get("completion_required") or [], transcript,
                                           cache_dir, uid, arm_kind)
@@ -352,6 +385,7 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None) -> dict:
         recall_pass = "pass" if ok_ else "fail"
     table.append({"floor": "completion recall", "bn": r, "b0": r0, "rule": "Bn >= B0", "recall_pass": recall_pass,
                   "pass": ok_, "blocks_kept": not ok_})
+    zero("unknown-key printable errors", "unknown_key_errors")
     table.append({"floor": "unclear items (reported, not a breach)", "bn": _sum(bn, "unclear_items"), "b0": _sum(b0, "unclear_items") if b0 else None, "rule": "info", "pass": True})
     table.append({"floor": "artifacts missing", "bn": sum(1 for x in bn if x["artifact_missing"]), "b0": None, "rule": "info", "pass": True})
     return {"n": n, "rows": table, "all_pass": all(t["pass"] for t in table)}

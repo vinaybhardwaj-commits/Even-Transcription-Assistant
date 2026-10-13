@@ -72,19 +72,30 @@ def compare_family(scores, uids, combos, a, b, item: int | None = None) -> dict:
     return res
 
 
-def target_check(items_gt: dict, total_bn_a: dict, thorough: dict, combos: list[str]) -> dict:
-    """Spec 12.7 as data. Each condition is judged over every combo of the named judge (all of its references).
-    items_all_gt: all 9 item means Bn > A. total_holm: Bn-A total Holm p < 0.05 and median diff >= 2 (opus combos).
-    thorough_mean: thorough-item mean diff Bn-B0 >= -0.1 (opus combos). sonnet_direction: Bn-A total median diff > 0
-    (sonnet combos)."""
-    by = lambda j: [c for c in combos if c.startswith(j + "/")]
-    op, so = by("opus"), by("sonnet")
-    all9 = all(items_gt[c] == judge.N_ITEMS for c in op)
-    tot = all((total_bn_a[c].get("p_holm") is not None and total_bn_a[c]["p_holm"] < 0.05 and (total_bn_a[c]["median_diff"] or 0) >= 2) for c in op)
-    thor = all(thorough[c]["mean_diff"] is not None and thorough[c]["mean_diff"] >= -0.1 for c in op)
-    sdir = all((total_bn_a[c]["median_diff"] or 0) > 0 for c in so)
+PRIMARY = "opus/transcript"
+
+
+def total_family(scores, uids, combo: str) -> dict:
+    """The three total comparisons under one judge/reference (Bn vs A, Bn vs B0, B0 vs A), Holm-adjusted together."""
+    res = {k: stats.compare(*_paired(scores, uids, combo, x, y)) for k, (x, y) in
+           {"bn_vs_a": ("Bn", "A"), "bn_vs_b0": ("Bn", "B0"), "b0_vs_a": ("B0", "A")}.items()}
+    for k, p in zip(res, stats.holm([r["p"] for r in res.values()])):
+        res[k]["p_holm"] = p
+    return res
+
+
+def target_check(items_gt: dict, family: dict, thorough: dict, total_a: dict) -> dict:
+    """Spec 12.7 as data (lead ruling 13 Oct). Primary = opus/transcript alone: all 9 item means Bn > A; Bn-A total Holm p < 0.05
+    (family = `family`, the three totals) with median diff >= 2; thorough-item mean diff Bn-B0 >= -0.1. Direction under Sonnet =
+    Bn-A total median diff > 0 on both Sonnet references. Opus/none is reported elsewhere and is not part of `met`."""
+    ba = family["bn_vs_a"]
+    all9 = items_gt[PRIMARY] == judge.N_ITEMS
+    tot = ba["p_holm"] is not None and ba["p_holm"] < 0.05 and (ba["median_diff"] or 0) >= 2
+    thor = thorough[PRIMARY]["mean_diff"] is not None and thorough[PRIMARY]["mean_diff"] >= -0.1
+    sonnet = [c for c in total_a if c.startswith("sonnet/")]
+    sdir = bool(sonnet) and all((total_a[c]["median_diff"] or 0) > 0 for c in sonnet)
     return {"items_all_gt": all9, "total_holm_lt_0_05_median_ge_2": tot, "thorough_mean_ge_minus_0_1": thor, "direction_holds_sonnet": sdir,
-            "met": all9 and tot and thor and sdir, "basis": "opus combos for the first three, sonnet combos for direction"}
+            "met": all9 and tot and thor and sdir, "basis": PRIMARY}
 
 
 def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_client=None) -> int:
@@ -175,6 +186,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
 
     total_a = compare_family(scores, uids, combos, "Bn", "A")
     thorough = compare_family(scores, uids, combos, "Bn", "B0", THOROUGH)
+    fam = total_family(scores, uids, PRIMARY)
     cost = round(sum(json.loads(x).get("usd", 0) for x in ledger.path.read_text().splitlines() if x.strip()), 5) if ledger.path.exists() else 0.0
     row = {
         "round": a.round, "code_sha": code_sha(), "prompt_sha": frozen.prompt_sha(*[n for n in judge.FROZEN_FILES if n.startswith("pdqi9")]),
@@ -186,7 +198,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A", SUCCINCT),
         "thorough_bn_minus_b0": thorough,
         "total_bn_minus_a": total_a, "total_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
-        "target_12_7": target_check(gt, total_a, thorough, combos),
+        "total_family_primary": fam, "target_12_7": target_check(gt, fam, thorough, total_a),
         "floors": table, "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
         "rendered_chars_mean": {arm: statistics.fmean(len(texts[(u, arm)]) for u in uids) for arm in ARMS},
         "cost_usd": cost, "verdict": "PENDING (freescript-lead)",
