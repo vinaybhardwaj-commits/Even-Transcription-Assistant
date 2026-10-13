@@ -425,3 +425,35 @@ def test_error_messages_carry_no_text(assets, cat):
 def test_visit_date_is_local_ist_date():
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-12T19:00:00Z"}}) == date(2026, 10, 13)
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-13T03:00:00+00:00"}}) == date(2026, 10, 13)
+
+
+@pytest.mark.parametrize("text", ["t0 [s1]", "T0  [S1]", "T0\t\n[S1]", "native[1]", "Native[1]", "ＮＡＴＩＶＥ[1]", "ＴＯ [S1]".replace("ＴＯ", "Ｔ０"),
+                                  "English_Segments", "NATIVE_SEGMENTS"])
+def test_marker_guard_is_case_nfkc_and_whitespace_insensitive(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("ok", f"x {text} y")
+    guard_request("a t0 and some [s] text")  # not a marker
+
+
+def test_other_region_needs_a_ruling():
+    for loc in ("us-central1", "europe-west4"):
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", loc, lambda: "t")
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", loc, lambda: "t", location_ruling="  ")
+    c = VertexClient("synth-proj-001", "europe-west4", lambda: "t", location_ruling="fable-ruling-99")
+    assert c.location == "europe-west4"
+    VertexClient("synth-proj-001", "asia-northeast1", lambda: "t")  # the default needs none
+
+
+def test_from_env_region_ruling(tmp_path):
+    key = tmp_path / "k.json"
+    key.write_text("{}")
+    key.chmod(0o600)
+    env = {"VERTEX_SA_KEY_FILE": str(key), "VERTEX_PROJECT": "synth-proj-001", "VERTEX_LOCATION": "us-central1"}
+    with pytest.raises(ReplayUnavailable):
+        VertexClient.from_env(env, token_provider=lambda: "t")
+    with pytest.raises(ReplayUnavailable):
+        VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": ""}, token_provider=lambda: "t")
+    c = VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": "fable-ruling-99"}, token_provider=lambda: "t")
+    assert c.location == "us-central1"

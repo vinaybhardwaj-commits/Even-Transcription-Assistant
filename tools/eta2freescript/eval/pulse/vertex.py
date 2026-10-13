@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -44,13 +45,25 @@ class GenResult:
     usage: dict = field(default_factory=dict)
 
 
+DEFAULT_LOCATION = "asia-northeast1"
+
+
+def _fold(t: str) -> str:
+    """NFKC, case-folded, whitespace runs collapsed: 'T0  [S' and 't0 [s' compare equal to the marker."""
+    return " ".join(unicodedata.normalize("NFKC", t).casefold().split())
+
+
+_FOLDED_MARKERS = tuple((m, _fold(m)) for m in TRANSCRIPT_MARKERS)
+
+
 def guard_request(*texts: str) -> None:
     total = sum(len(t) for t in texts)
     if total > MAX_REQUEST_CHARS:
         raise TranscriptGuardError(f"request is {total} chars, over the {MAX_REQUEST_CHARS} limit")
     for t in texts:
-        for m in TRANSCRIPT_MARKERS:
-            if m in t:
+        folded = _fold(t)
+        for m, fm in _FOLDED_MARKERS:
+            if fm in folded:
                 raise TranscriptGuardError(f"request contains the transcript marker {m!r}")
 
 
@@ -98,11 +111,14 @@ def _google_token_provider(key_file: Path):
 
 class VertexClient:
     def __init__(self, project: str, location: str, token_provider, *, transport=_http_transport,
-                 extract_model: str = DEFAULT_EXTRACT_MODEL, adj_model: str = DEFAULT_ADJ_MODEL):
+                 extract_model: str = DEFAULT_EXTRACT_MODEL, adj_model: str = DEFAULT_ADJ_MODEL,
+                 location_ruling: str | None = None):
         if not project or not re.match(r"^[a-z][a-z0-9-]{4,}$", project):
             raise ReplayUnavailable("VERTEX_PROJECT missing or malformed")
         if location == "global" or not _REGION.match(location or ""):
             raise ReplayUnavailable("VERTEX_LOCATION must be a region such as asia-northeast1; global is refused")
+        if location != DEFAULT_LOCATION and not (location_ruling or "").strip():
+            raise ReplayUnavailable(f"VERTEX_LOCATION other than {DEFAULT_LOCATION} needs VERTEX_LOCATION_OVERRIDE_RULING (a fable ruling id)")
         for m in (extract_model, adj_model):
             if not _MODEL.match(m or ""):
                 raise ReplayUnavailable("model name malformed")
@@ -120,7 +136,8 @@ class VertexClient:
         tp = token_provider or _google_token_provider(key_path)
         return cls(env.get("VERTEX_PROJECT", ""), env.get("VERTEX_LOCATION", ""), tp, transport=transport,
                    extract_model=env.get("PULSE_EXTRACT_MODEL") or DEFAULT_EXTRACT_MODEL,
-                   adj_model=env.get("PULSE_ADJ_MODEL") or DEFAULT_ADJ_MODEL)
+                   adj_model=env.get("PULSE_ADJ_MODEL") or DEFAULT_ADJ_MODEL,
+                   location_ruling=env.get("VERTEX_LOCATION_OVERRIDE_RULING"))
 
     def model_for(self, stage: str, asset_model: str | None = None) -> str:
         """Env override wins, then the assets file's model, then the built-in default."""
