@@ -787,18 +787,21 @@ def frx(art: dict) -> list[str]:
 # printable-v1 (spec 7.3, 8.2). Structural rules on note_text, applied after NFKC normalisation.
 _MIN_PROMPT_LEN = 8
 _UNITS = r"(?:mg|ml|mcg|g|iu|units|days|weeks|months)"
-_SLOT_X = re.compile(r"(?<!\w)(?:XX|xx|X|x)(?=\s+" + _UNITS + r"\b)", re.I)
+_SLOT_X = re.compile(r"(?<!\w)x+(?=\s+" + _UNITS + r"\b)", re.I)
 _AVAIL = "stated|mentioned|given|specified|known|available|clear|decided|recorded|documented|provided|confirmed|verified|determined|filled"
-_D1 = re.compile(r"(?:\bnot\s+|\bun)(?:" + _AVAIL + r")\b", re.I)
-_D1_EXEMPT = {"Co-morbidities", "Presenting Complaint", "Examination"}
+_D1 = re.compile(r"(?:\b(?:not|(?:was|is)\s+not|(?:wasn|isn)['\u2019]t)\s+(?:\w+ly\s+)?|\bun)(?:" + _AVAIL + r")\b", re.I)
 _D2 = re.compile(r"\b(?:verif|confirm|decid|determin|clarif|tbd|tbc|pending)\w*", re.I)
 _D2_SECTIONS = {"Medication", "Follow up", "Further Investigation", "Surgery or Procedure", "Refer to"}
-_D3 = re.compile(r"\b(?:doctor\s+to|dr\.?\s+to|please|kindly)\b", re.I)
-_D3_PP = re.compile(r"\bto\s+be\s+(\w+(?:ed|en))\b", re.I)
-_D3_PATIENT = {"taken", "applied"}
-_D5 = re.compile(r"unnamed\s+drug|placeholder|dose\s+not\s+stated|held_back|kept\s+out|redacted|lorem", re.I)
+_D3 = re.compile(r"\b(?:doctor\s+to|dr\.?\s+to|please|kindly|ask\s+doctor|ask\s+dr)\b", re.I)
+_D3_PP = re.compile(
+    r"\bto\s+be\s+(?:confirmed|decided|determined|verified|clarified|specified|added|filled|entered|completed"
+    r"|reviewed\s+by\s+(?:the\s+)?doctor)\b", re.I)
+_D5 = re.compile(
+    r"\bunnamed\s+drug\b|\bplaceholder\b|\bdose\s+not\s+stated\b|\bheld_back\b|\bkept\s+out\b(?!\s+of\b)|\bredacted\b|\blorem\b",
+    re.I)
 _D4_FIELDS = {"dose", "dosage", "strength", "frequency", "duration", "timing", "date", "drug", "medicine", "name"}
-_D4_MISSING = {"missing", "unknown", "unclear", "absent", "blank", "?"}
+_D4_MISSING = {"missing", "unknown", "unclear", "absent", "blank", "?", "n/a", "na", "nil", "none"}
+_D4_NO = re.compile(r"\bno\s+(?:" + "|".join(sorted(_D4_FIELDS)) + r")\s+(?:given|stated|mentioned|specified)\b", re.I)
 
 
 def _note_entries(note: str):
@@ -814,9 +817,11 @@ def _note_entries(note: str):
 
 
 def _d4(text: str) -> bool:
-    toks = re.findall(r"\w+|\?", text.lower())
+    if _D4_NO.search(text):
+        return True
+    toks = re.findall(r"\w+(?:/\w+)?|\?", text.lower())
     for i, t in enumerate(toks):
-        if t in _D4_FIELDS and any(x in _D4_MISSING for x in toks[i + 1:i + 4]):
+        if t in _D4_FIELDS and any(x in _D4_MISSING for x in toks[max(0, i - 3):i] + toks[i + 1:i + 4]):
             return True
     return False
 
@@ -845,6 +850,8 @@ def frx_n(art: dict) -> list[str]:
         e.append("FRX-N1 note_text contains an angle-bracket slot")
     if re.search(r"_{2,}", note):
         e.append("FRX-N1 note_text contains an underscore blank")
+    if any(unicodedata.category(c) in ("Ps", "Pe") and c not in "()" for c in note):
+        e.append("FRX-N1 note_text contains a bracket")
     if _SLOT_X.search(note):
         e.append("FRX-N1 note_text contains an x/XX unit slot")
     for head, body, is_dx, sec in _note_entries(note):
@@ -856,7 +863,7 @@ def frx_n(art: dict) -> list[str]:
             e.append(f"FRX-N1 '?' outside the Diagnoses differential prefix ({where})")
         if FILLER.match(body):
             e.append(f"FRX-N1 filler line body ({where})")
-        if sec not in _D1_EXEMPT:
+        if sec in _D2_SECTIONS:
             for m in _D1.finditer(body):
                 e.append(f"FRX-N1 d1 missing-value phrase '{m.group(0).lower()}' ({where})")
         if sec in _D2_SECTIONS:
@@ -865,11 +872,10 @@ def frx_n(art: dict) -> list[str]:
         for m in _D3.finditer(body):
             e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
         for m in _D3_PP.finditer(body):
-            if m.group(1).lower() not in _D3_PATIENT:
-                e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
+            e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
         for m in _D5.finditer(body):
             e.append(f"FRX-N1 d5 internal pipeline marker '{m.group(0).lower()}' ({where})")
-        if _d4(body):
+        if sec in _D2_SECTIONS and _d4(body):
             e.append(f"FRX-N1 d4 missing-field label ({where})")
     low = note.lower()
     for i, c in enumerate(art.get("completion_required") or []):

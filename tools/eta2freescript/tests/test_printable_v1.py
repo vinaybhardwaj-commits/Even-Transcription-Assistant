@@ -39,6 +39,19 @@ PASS_CASES = [
     {"Follow up": "mandatory follow up; 2026-10-25; Review after 2 weeks"},
     {"Refer to": "Cardiology - for ECHO"},
     {"Further Investigation": "HbA1c (fasting not required)"},
+    {"Diagnoses": "Fever of unknown origin"},
+    {"Diagnoses": "Abdominal pain, cause unclear"},
+    {"Plan of Management": "Diagnosis unclear, observe"},
+    {"Plan of Management": "Decide on surgery after MRI"},
+    {"General Advice": "BP to be checked weekly"},
+    {"General Advice": "Sugar to be monitored twice daily"},
+    {"General Advice": "Dressing to be changed daily"},
+    {"General Advice": "Wound to be kept out of water"},
+    {"General Advice": "Keep leg kept outstretched"},
+    {"Further Investigation": "sample to be given fasting"},
+    {"Medication": "Tab Dolorem 1 BD x 3 days"},
+    {"Presenting Complaint": "Fall at home, exact date unknown"},
+    {"Co-morbidities": "Not a known diabetic"},
 ]
 
 
@@ -72,7 +85,7 @@ FAIL_CASES = [
     ("General Advice", "REDACTED"),
     ("General Advice", "Lorem ipsum"),
     ("Medication", "Dose TBD"),
-    ("Plan of Management", "unspecified"),
+    ("Follow up", "unspecified"),
     ("Medication", "will VERIFY later"),
     ("Medication", "Paracetamol 650 BD (doctor to confirm)"),
     ("Medication", "Paracetamol 650 (dose to be decided)"),
@@ -92,13 +105,26 @@ FAIL_CASES = [
     ("Medication", "Dose: missing"),
     ("Medication", "Kindly add strength"),
     ("Plan of Management", "Review dr to advise"),
-    ("General Advice", "Frequency of review unclear"),
+    ("Follow up", "Frequency of review unclear"),
     ("Medication", "Amlodipine 5 OD unconfirmed"),
     ("Medication", "Amlodipine pending"),
     ("Medication", "Amlodipine ?5 OD"),          # "?" not at the start of a Diagnoses entry
     ("Plan of Management", "?cause"),            # "?" outside Diagnoses
     ("Diagnoses", "Migraine?"),                  # "?" not first in a Diagnoses entry
     ("Diagnoses", "??Migraine"),
+    ("Medication", "【dose】"),
+    ("Medication", "XXX mg"),
+    ("Medication", "dose N/A"),
+    ("Medication", "duration nil"),
+    ("Medication", "Missing: dose of paracetamol"),
+    ("Medication", "frequency not clearly stated"),
+    ("Medication", "duration wasn't mentioned"),
+    ("Medication", "duration wasn\u2019t mentioned"),
+    ("Medication", "dose is not given"),
+    ("Medication", "no dose given"),
+    ("Medication", "dose: ask doctor"),
+    ("Medication", "Paracetamol 650 BD, dose to be confirmed"),
+    ("Follow up", "date unknown"),
 ]
 
 
