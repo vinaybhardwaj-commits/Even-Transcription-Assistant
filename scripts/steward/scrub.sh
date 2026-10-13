@@ -23,13 +23,15 @@ case "$1" in
     [ $# -eq 2 ] || { echo "usage: scrub.sh --tree PATH" >&2; exit 2; }
     [ -e "$2" ] || { echo "scrub: no such path" >&2; exit 2; }
     TREE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; set -- --tree "$TREE"
-    "$GL" dir "$2" --no-banner --redact -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 >/dev/null 2>&1 || { echo "scrub: gitleaks error" >&2; exit 2; }
+    "$GL" dir "$2" --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 >/dev/null 2>&1 || { echo "scrub: gitleaks error" >&2; exit 2; }
     py=(tree "$2") ;;
   --staged)
-    ( cd "$ROOT" && "$GL" git --staged --no-banner --redact -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>&1 ) || { echo "scrub: gitleaks error" >&2; exit 2; }
+    ( cd "$ROOT" && "$GL" git --staged --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>&1 ) || { echo "scrub: gitleaks error" >&2; exit 2; }
     py=(staged) ;;
   *)
-    ( cd "$ROOT" && "$GL" git --log-opts="$1" --no-banner --redact -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>&1 ) || { echo "scrub: gitleaks error" >&2; exit 2; }
+    ( cd "$ROOT" && git rev-list "$1" >/dev/null 2>&1 ) || { echo "scrub: invalid range" >&2; exit 2; }
+    ( cd "$ROOT" && "$GL" git --log-opts="$1" --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>"$TMP/gl.err" ) || { echo "scrub: gitleaks error" >&2; exit 2; }
+    grep -q ' ERR ' "$TMP/gl.err" && { echo "scrub: gitleaks reported an error" >&2; exit 2; }
     py=(range "$1") ;;
 esac
 # gitleaks hits: rule id, file, line, commit only.

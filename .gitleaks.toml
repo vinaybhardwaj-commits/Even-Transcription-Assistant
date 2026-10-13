@@ -21,8 +21,8 @@ paths = [
 [[rules]]
 id = "ts-cgnat-ip"
 description = "Tailscale CGNAT address (100.64.0.0/10)"
-regex = '''\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?:[^\d.]|\.[^\d]|$)'''
-keywords = ["100."]
+regex = '''(?:\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?:[^\d.]|\.[^\d]|\.?$))|(?i:fd7a:115c:a1e0:)'''
+keywords = ["100.", "fd7a"]
 
 [[rules]]
 id = "ts-hostname"
@@ -32,20 +32,20 @@ keywords = ["ts.net"]
 
 [[rules]]
 id = "aws-account-id"
-description = "AWS account id in an ARN, an account-id field, or an ECR host"
-regex = '''(?i)(?:arn:aws[^:\s]*:[^:\s]*:[^:\s]*:\d{12}(?:[^\d]|$)|(?:aws_account_id|account_id|accountid|account-id)\W{0,20}\d{12}(?:[^\d]|$)|(?:^|[^\d])\d{12}\.dkr\.ecr\.)'''
-keywords = ["arn:aws", "account", "ecr"]
+description = "AWS account id in an ARN, an account-id field, an ECR host, or a dashed console form"
+regex = '''(?i)(?:arn:aws[^:\s]*:[^:\s]*:[^:\s]*:\d{12}(?:[^\d]|$)|(?:aws[ _-]?account[ _-]?id|account[ _-]?id|accountid|ownerid)\D{0,40}\d{12}(?:[^\d]|$)|(?:account[ _-]?id|ownerid)\D{0,40}\d{4}-\d{4}-\d{4}(?:[^\d]|$)|(?:^|[^\d])\d{12}\.dkr\.ecr\.)'''
+keywords = ["arn:aws", "account", "ecr", "ownerid"]
 
 [[rules]]
 id = "private-key-header"
 description = "PEM private key header"
-regex = '''-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----'''
+regex = '''-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY( BLOCK)?-----'''
 keywords = ["private key"]
 
 [[rules]]
 id = "env-secret-assign"
 description = "ENV-style assignment of a secret-named variable to a literal value"
-regex = '''(?m)^[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL|DSN)[A-Z0-9_]*[ \t]*=[ \t]*\S{8,}'''
+regex = '''(?m)^[ \t]*(?:export[ \t]+|ENV[ \t]+)?[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL|DSN)[A-Z0-9_]*[ \t]*=[ \t]*\S{8,}'''
 keywords = ["secret", "token", "password", "passwd", "api_key", "private_key", "access_key", "database_url", "dsn"]
 # Reading from another variable or the process environment is not a literal.
 [[rules.allowlists]]

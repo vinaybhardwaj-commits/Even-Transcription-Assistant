@@ -39,8 +39,11 @@ jobs:
           elif [ -z "${BEFORE//0/}" ]; then
             RANGE="$(git rev-list -n1 --first-parent "$AFTER^" 2>/dev/null | head -1)..${AFTER}"
             git rev-parse --verify -q "origin/main" >/dev/null && RANGE="origin/main..${AFTER}"
-          else
+          elif git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
             RANGE="${BEFORE}..${AFTER}"
+          else
+            # force-push: the old tip is gone, scan everything not on main
+            RANGE="origin/main..${AFTER}"
           fi
           echo "range: $RANGE"
           scripts/steward/scrub.sh "$RANGE"

@@ -19,19 +19,23 @@ PHI_FIELDS = {
     "transcript", "transcript_text", "note_text", "prescription", "rx_text", "audio_url", "encounter_text",
 }
 
+PHI_FIELDS |= {"mobileno", "abhanumber", "aadhaarnumber", "patientuhid", "pan", "patientid", "emailid", "phoneno"}
+PHI_FIELDS = {re.sub(r"[^a-z0-9]", "", f) for f in PHI_FIELDS}
+
 DATA_EXT = {".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".yaml", ".yml"}
 TEXT_DATA_EXT = {".txt", ".md"}
-DATA_DIRS = {"data", "fixtures", "samples", "exports"}
-AUDIO_VIDEO = {".wav", ".webm", ".mp3", ".m4a", ".flac", ".ogg", ".mp4"}
-BINARY_DENY = {".pem", ".p12", ".key", ".sqlite", ".db", ".parquet"}
-CHROME_DENY = ("default/cookies", "local state", "login data")
+DATA_DIRS = {"data", "fixtures", "samples", "exports", "testdata"}
+AUDIO_VIDEO = {".wav", ".webm", ".mp3", ".m4a", ".flac", ".ogg", ".mp4", ".opus", ".aac", ".mov"}
+CHROME_RE = re.compile(r"(^|/)((default|profile \\d+)/(cookies|login data)|local state)$")
 
 EMPTY = {"", "null", "none", "~", "false", "[]", "{}", '""', "''"}
 
 
 def norm_key(k):
+    k = k.replace("\ufeff", "")
     k = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", k)
-    return k.strip().strip("\"'").lower().replace("-", "_").replace(" ", "_")
+    k = k.strip().strip("\"'").lower()
+    return re.sub(r"[^a-z0-9]", "", k)
 
 
 def is_synthetic(path):
@@ -50,15 +54,15 @@ def path_rules(path, size):
     base = os.path.basename(low)
     ext = os.path.splitext(base)[1]
     hits = []
-    if (base.startswith(".env") or base.endswith(".env")) and base != ".env.example":
+    if (base.startswith(".env") or base.endswith(".env") or base in ("env.production", "env.local", "env.development", "env.staging", "env.prod", "env.test")) and base != ".env.example":
         hits.append("deny-env-file")
-    if ext in (".pem", ".p12", ".key"):
+    if ext in (".pem", ".p12", ".key", ".p8", ".pfx"):
         hits.append("deny-key-file")
     if ext in AUDIO_VIDEO:
         hits.append("deny-media-file")
-    if ext in (".sqlite", ".db", ".parquet"):
+    if ext in (".sqlite", ".sqlite3", ".db", ".parquet"):
         hits.append("deny-db-file")
-    if any(low.endswith(c) or ("/" + c) in low or low == c for c in CHROME_DENY):
+    if CHROME_RE.search(low):
         hits.append("deny-chrome-profile")
     if size > MAX_BYTES:
         hits.append("deny-large-file")
@@ -71,8 +75,9 @@ def env_example_nonempty(text):
         s = line.strip()
         if not s or s.startswith("#") or "=" not in s:
             continue
-        v = s.split("=", 1)[1].strip().strip("\"'")
-        if v:
+        v = s.split("=", 1)[1].strip()
+        v = re.split(r"\s+#", " " + v, maxsplit=1)[0].strip().strip("\"'")
+        if v and not v.startswith("#"):
             out.append(i)
     return out
 
@@ -88,8 +93,26 @@ def phi_applies(path):
     return False
 
 
+SCHEMA_KEYS = {"type", "$ref", "properties", "items", "enum", "description", "oneof", "anyof", "allof", "format"}
+
+
+def has_content(v):
+    """True when v holds a real value. Booleans and schema-shaped dicts do not count."""
+    if isinstance(v, bool) or v is None:
+        return False
+    if isinstance(v, (str, int, float)):
+        return nonempty_scalar(v)
+    if isinstance(v, list):
+        return any(has_content(x) for x in v)
+    if isinstance(v, dict):
+        if v and set(k.lower() for k in v) <= SCHEMA_KEYS | {"required", "default", "title", "example", "examples"}:
+            return False
+        return any(has_content(x) for x in v.values())
+    return False
+
+
 def nonempty_scalar(v):
-    if v is None or v is False:
+    if v is None or isinstance(v, bool):
         return False
     if isinstance(v, str):
         return v.strip() != ""
@@ -101,11 +124,8 @@ def nonempty_scalar(v):
 def walk_json(obj, found):
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if norm_key(str(k)) in PHI_FIELDS:
-                if nonempty_scalar(v):
-                    found.append(str(k))
-                elif isinstance(v, list) and any(nonempty_scalar(x) for x in v):
-                    found.append(str(k))
+            if norm_key(str(k)) in PHI_FIELDS and has_content(v):
+                found.append(str(k))
             walk_json(v, found)
     elif isinstance(obj, list):
         for v in obj:
@@ -146,20 +166,45 @@ def phi_hits(path, text):
                     hits.append(line_of(lines, '"' + k + '"', start) if ext == ".json" else start + 1)
             return sorted(set(hits))
     if ext in (".csv", ".tsv"):
-        delim = "\t" if ext == ".tsv" else ","
         import csv
-        rows = list(csv.reader(lines, delimiter=delim))
-        if rows:
-            cols = [i for i, h in enumerate(rows[0]) if norm_key(h) in PHI_FIELDS]
-            for ri, row in enumerate(rows[1:], 2):
-                if any(c < len(row) and row[c].strip().lower() not in EMPTY for c in cols):
-                    hits.append(ri)
-        return hits
+        for delim in (",", ";", "\t", "|"):
+            rows = list(csv.reader(lines, delimiter=delim))
+            for hi in range(min(5, len(rows))):
+                cols = [i for i, h in enumerate(rows[hi]) if norm_key(h) in PHI_FIELDS]
+                if not cols:
+                    continue
+                for ri, row in enumerate(rows[hi + 1:], hi + 2):
+                    if any(c < len(row) and row[c].strip().lower() not in EMPTY and row[c].strip().lower() not in ("true", "false") for c in cols):
+                        hits.append(ri)
+                break
+        return sorted(set(hits))
     # yaml, md, txt, and unparsable json: line patterns "field: value" / "field = value" / "field": value
+    def indent(l):
+        return len(l) - len(l.lstrip())
+
+    def nested_content(i):
+        base = indent(lines[i])
+        for j in range(i + 1, min(i + 60, len(lines))):
+            t = lines[j]
+            if not t.strip():
+                continue
+            if indent(t) <= base and not t.lstrip().startswith("- "):
+                return False
+            body = t.strip().lstrip("-").strip()
+            if ":" in body:
+                body = body.split(":", 1)[1].strip()
+            if body and body.lower() not in EMPTY and body.lower() not in ("true", "false"):
+                return True
+        return False
+
     pat = re.compile(r"""^\s*(?:[-*]\s+)?["']?([A-Za-z][A-Za-z0-9_ -]*?)["']?\s*[:=]\s*(.*)$""")
     for i, ln in enumerate(lines, 1):
+        mm = re.match(r"""^\s*(?:-\s+)?["']?([A-Za-z][A-Za-z0-9_ -]*?)["']?\s*:\s*(?:[|>][-+]?)?\s*(?:#.*)?$""", ln)
+        if mm and norm_key(mm.group(1)) in PHI_FIELDS and nested_content(i - 1):
+            hits.append(i)
+            continue
         for m in re.finditer(r"""["']?([A-Za-z][A-Za-z0-9_]*)["']?\s*:\s*("[^"]+"|'[^']+'|[^\s,{}\[\]#][^,{}\]#]*)""", ln):
-            if norm_key(m.group(1)) in PHI_FIELDS and m.group(2).strip().lower() not in EMPTY:
+            if norm_key(m.group(1)) in PHI_FIELDS and m.group(2).strip().lower() not in EMPTY and m.group(2).strip().lower() not in ("true", "false"):
                 hits.append(i)
                 break
         else:
@@ -196,9 +241,20 @@ def check(path, data, commit, hosts, report):
         return
     for r in path_rules(path, size):
         report(r, path, 0, commit)
-    if size > MAX_BYTES or b"\0" in data[:4096]:
+    if size > MAX_BYTES:
         return
-    text = data.decode("utf-8", "replace")
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = data.decode("utf-16", "replace")
+    elif b"\0" in data[:4096]:
+        head = data[:4096]
+        if head[1::2].count(0) > len(head) // 4:
+            text = data.decode("utf-16-le", "replace")
+        elif head[0::2].count(0) > len(head) // 4:
+            text = data.decode("utf-16-be", "replace")
+        else:
+            return
+    else:
+        text = data.decode("utf-8-sig", "replace")
     base = os.path.basename(low.lower())
     if base == ".env.example":
         for n in env_example_nonempty(text):
@@ -254,9 +310,13 @@ def main():
             check(path, data, "staged", hosts, report)
     elif mode == "range":
         rng = sys.argv[2]
-        commits = git("rev-list", "--reverse", rng).decode().split()
+        rl = subprocess.run(["git", "rev-list", "--reverse", rng], capture_output=True)
+        if rl.returncode != 0:
+            print("scrub: invalid range", file=sys.stderr)
+            return 2
+        commits = rl.stdout.decode().split()
         for c in commits:
-            out = git("diff-tree", "--root", "-r", "--no-commit-id", "--name-only", "--diff-filter=ACMR", "-z", c)
+            out = git("diff-tree", "--root", "-r", "--cc", "--no-commit-id", "--name-only", "--diff-filter=ACMR", "-z", c)
             for p in out.split(b"\0"):
                 if not p:
                     continue
