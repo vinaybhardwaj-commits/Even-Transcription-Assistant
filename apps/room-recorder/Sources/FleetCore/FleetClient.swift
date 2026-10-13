@@ -51,9 +51,17 @@ public enum FleetKeyOrigin: Equatable, Sendable {
 public struct FleetKeyLoad: @unchecked Sendable {
   public let key: FleetSigningKey
   public let origin: FleetKeyOrigin
-  public init(key: FleetSigningKey, origin: FleetKeyOrigin) {
+  /// 0.1.40 R2. Read from the store's durable record, not from this load: the device id this key REPLACED, when the
+  /// store rotated it (possibly in an earlier process, or after the client's deadline had passed). The client drops a
+  /// device id that matches, so a lost or late rotation can never sign for the old id.
+  public let replacesDeviceID: String?
+  /// The recorded reason for the rotation (a status, or `timeout`), when there was one.
+  public let rotationReason: String?
+  public init(key: FleetSigningKey, origin: FleetKeyOrigin, replacesDeviceID: String? = nil, rotationReason: String? = nil) {
     self.key = key
     self.origin = origin
+    self.replacesDeviceID = replacesDeviceID
+    self.rotationReason = rotationReason
   }
 }
 
@@ -178,6 +186,7 @@ public actor FleetClient {
   private let makeJTI: @Sendable () -> String
   private let log: @Sendable (String) -> Void
   private let keyDeadline: TimeInterval
+  private let rekeyJitter: @Sendable () -> Double
   private nonisolated let keyGate = FleetKeyLoadGate()
 
   private var state: FleetState
@@ -195,8 +204,10 @@ public actor FleetClient {
     },
     makeJTI: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
     log: @escaping @Sendable (String) -> Void,
-    keyDeadline: TimeInterval = 10
+    keyDeadline: TimeInterval = 10,
+    rekeyJitter: @escaping @Sendable () -> Double = { Double.random(in: -0.1...0.1) }
   ) {
+    self.rekeyJitter = rekeyJitter
     self.keyDeadline = keyDeadline
     self.config = config
     self.transport = transport
@@ -220,6 +231,8 @@ public actor FleetClient {
   public func run() async {
     guard config.enabled else { log("fleet client stopped: disabled"); return }
     loadState()
+    // 0.1.40 R2. The key first, so a rotation drops the old device id BEFORE any pass reads it.
+    _ = try? await signingKey()
     while !Task.isCancelled {
       if let reason = state.stoppedReason {
         log("fleet client stopped: \(reason)")
@@ -260,6 +273,12 @@ public actor FleetClient {
       loaded = FleetState()  // a different enrolment starts clean
       loaded.installID = config.installID
     }
+    // 0.1.40 R2. 0.1.40's first build (948d3829) persisted a stop for a KEY_CONFLICT after a rotation. That is a wait now:
+    // the stop is cleared on the first start of this build.
+    if loaded.stoppedReason == "register_key_conflict" {
+      loaded.stoppedReason = nil
+      store.save(loaded)
+    }
     state = loaded
   }
 
@@ -269,6 +288,11 @@ public actor FleetClient {
 
   /// How long a key that failed to load (not a timeout) is left alone before the store is asked again.
   static let keyRetryInterval: TimeInterval = 300
+  /// How often a register refused after a key rotation is asked again.
+  public static let rekeyRetryInterval: TimeInterval = 900
+  /// The refused-register line is written at most this often.
+  static let refusedLogInterval: TimeInterval = 3600
+  private var lastRefusedLogAt: Date?
   private var keyRetryAt: Date?
   private var keyRetryError: Error?
   private var rotation: (reason: String, oldDevice: String)?
@@ -295,11 +319,7 @@ public actor FleetClient {
       key = load.key
       keyRetryAt = nil
       keyRetryError = nil
-      switch load.origin {
-      case .existing: break
-      case .fresh: dropDevice(because: "no key on this Mac")
-      case .rotated(let reason): dropDevice(because: reason)
-      }
+      applyRotation(of: load)
       return load.key
     case .failure(let error):
       if (error as? FleetClientError) != .keyTimeout {
@@ -312,9 +332,26 @@ public actor FleetClient {
     }
   }
 
+  /// True once this process knows the key is not the one the device registered with. A 409 at register is then the
+  /// server waiting for an operator re-key, not a verdict on this install.
+  private var afterRotation = false
+
   /// The key is not the one this device registered with: forget the device id so the next pass registers a new one.
-  private func dropDevice(because reason: String) {
-    guard let old = state.deviceID else { return }
+  /// Two sources, both honoured: this load's origin (a key made just now) and the store's DURABLE record of the id it
+  /// replaced (a rotation the client missed because its own deadline had passed, or an earlier process made).
+  private func applyRotation(of load: FleetKeyLoad) {
+    var reason: String?
+    switch load.origin {
+    case .existing: break
+    case .fresh: reason = state.deviceID == nil ? nil : "no key on this Mac"
+    case .rotated(let why): reason = why
+    }
+    if load.replacesDeviceID != nil || { if case .rotated = load.origin { return true }; return false }() { afterRotation = true }
+    if let replaced = load.replacesDeviceID, replaced == state.deviceID {
+      reason = reason ?? load.rotationReason ?? "recorded"
+    }
+    guard let reason, let old = state.deviceID else { return }
+    afterRotation = true
     rotation = (reason, String(old.dropFirst(4).prefix(8)))
     state.deviceID = nil
     persist()
@@ -359,6 +396,19 @@ public actor FleetClient {
         return .handled(1)
       case 409:
         let code = errorCode(response)
+        if afterRotation, code == "KEY_CONFLICT" || code == "REVOKED" {
+          // 0.1.40 R2. The server holds the old key for this install until an operator re-keys it. That is a wait, not
+          // a stop: nothing is persisted, the register is asked again every 900 s, and no restart is needed.
+          // At most one line an hour while it lasts. The fingerprint is the HASH of the public key (the proof's `pk`
+          // claim, first 12 characters): what the operator approves. The key itself is never logged.
+          if lastRefusedLogAt.map({ clock().timeIntervalSince($0) >= Self.refusedLogInterval }) ?? true {
+            lastRefusedLogAt = clock()
+            let fingerprint = key.publicKeySHA256B64URL.prefix(12)
+            log("fleet client: register refused (\(code)) after key rotation; key fp \(fingerprint); waiting for operator re-key, retry every ~900 s")
+          }
+          // ±10 % so a fleet that was refused together does not ask together.
+          return .wait(Self.rekeyRetryInterval * (1 + rekeyJitter()))
+        }
         if ["REVOKED", "RETIRED", "KEY_CONFLICT"].contains(code) {
           return stop("register_\(code.lowercased())")
         }

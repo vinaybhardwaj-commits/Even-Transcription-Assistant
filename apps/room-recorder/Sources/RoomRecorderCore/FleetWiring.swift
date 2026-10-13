@@ -52,33 +52,61 @@ public struct KeychainFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   }
 }
 
+/// 0.1.40 R2. The process-wide "may the keychain ask a person" switch, as a seam so a test can see it used.
+public struct KeychainInteraction: @unchecked Sendable {
+  /// The current setting, or nil when it could not be read.
+  var current: () -> Bool?
+  var allow: (Bool) -> Void
+
+  @available(macOS, deprecated: 10.10, message: "the only switch for the legacy partition prompt (B1.5 K1)")
+  static func systemSwitch() -> KeychainInteraction {
+    KeychainInteraction(
+      current: {
+        var previous: DarwinBoolean = true
+        return SecKeychainGetUserInteractionAllowed(&previous) == errSecSuccess ? previous.boolValue : nil
+      },
+      allow: { _ = SecKeychainSetUserInteractionAllowed($0) })
+  }
+}
+
 extension KeychainFleetKeyStore {
-  /// 0.1.39.1. The ONE keychain read the file store may make, and only when its file is absent. It cannot raise a prompt:
-  /// `kSecUseAuthenticationUIFail` for data-protection items and `SecKeychainSetUserInteractionAllowed(false)` for the
-  /// legacy partition prompt this item raises (the same pair `RoomKeychain.load` uses, B1.5 K1). It never writes,
-  /// updates or deletes the item. A mismatch returns `errSecInteractionNotAllowed` in microseconds.
-  public static func readSeedNonInteractive(
-    service: String = KeychainFleetKeyStore.service, account: String = KeychainFleetKeyStore.account
-  ) throws -> Data {
-    let query: [String: Any] = [
+  /// 0.1.40 R2. PURE: the one query the file store may make of the keychain. `kSecUseAuthenticationUIFail` is what stops
+  /// a data-protection item from asking a person; a test pins it.
+  public static func nonInteractiveReadQuery(service: String, account: String) -> [String: Any] {
+    [
       kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
       kSecAttrAccount as String: account, kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne, kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
     ]
+  }
+
+  /// 0.1.39.1. The ONE keychain read the file store may make, and only when its file is absent. It cannot raise a prompt:
+  /// the query carries `kSecUseAuthenticationUIFail`, and the legacy partition prompt this item raises is switched off
+  /// for the call with `SecKeychainSetUserInteractionAllowed(false)` and the previous setting restored (the pair
+  /// `RoomKeychain.load` uses, B1.5 K1). It never writes, updates or deletes the item.
+  public static func readSeedNonInteractive(
+    service: String = KeychainFleetKeyStore.service, account: String = KeychainFleetKeyStore.account
+  ) throws -> Data {
+    try readSeed(service: service, account: account, interaction: KeychainInteraction.systemSwitch()) {
+      SecItemCopyMatching($0 as CFDictionary, &$1)
+    }
+  }
+
+  /// The read with its two seams: the interaction switch and the keychain call.
+  static func readSeed(
+    service: String, account: String, interaction: KeychainInteraction,
+    copy: (_ query: [String: Any], _ item: inout CFTypeRef?) -> OSStatus
+  ) throws -> Data {
+    let query = nonInteractiveReadQuery(service: service, account: account)
+    let previous = interaction.current()
+    interaction.allow(false)
     var item: CFTypeRef?
-    let status = withoutUserInteraction { SecItemCopyMatching(query as CFDictionary, &item) }
+    let status = copy(query, &item)
+    // Only restore what was actually read: if the getter failed, interaction stays off rather than guessing "true".
+    if let previous { interaction.allow(previous) }
     guard status == errSecSuccess else { throw FleetKeychainError.read(status) }
     guard let data = item as? Data else { throw FleetKeychainError.read(errSecDecode) }
     return data
-  }
-
-  @available(macOS, deprecated: 10.10, message: "the only switch for the legacy partition prompt (B1.5 K1)")
-  private static func withoutUserInteraction<T>(_ body: () -> T) -> T {
-    var previous: DarwinBoolean = true
-    let read = SecKeychainGetUserInteractionAllowed(&previous)
-    SecKeychainSetUserInteractionAllowed(false)
-    defer { if read == errSecSuccess { SecKeychainSetUserInteractionAllowed(previous.boolValue) } }
-    return body()
   }
 }
 
@@ -104,12 +132,30 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   struct Stored: Codable {
     let seed: String
     let algorithm: String
+    /// 0.1.40 R2. `existing`, `fresh` or `rotated`, written in the same atomic write as the key it describes.
+    let origin: String?
+    /// The device id this key replaced (the id in fleet-state.json when the key was made), or null.
+    let replacesDeviceID: String?
+    let rotationReason: String?
     let writtenBy: String
     let writtenAt: Date
     enum CodingKeys: String, CodingKey {
-      case seed, algorithm
+      case seed, algorithm, origin
+      case replacesDeviceID = "replaces_device_id"
+      case rotationReason = "rotation_reason"
       case writtenBy = "written_by"
       case writtenAt = "written_at"
+    }
+
+    func encode(to encoder: Encoder) throws {
+      var c = encoder.container(keyedBy: CodingKeys.self)
+      try c.encode(seed, forKey: .seed)
+      try c.encode(algorithm, forKey: .algorithm)
+      try c.encode(origin, forKey: .origin)
+      try c.encode(replacesDeviceID, forKey: .replacesDeviceID)  // null, not absent
+      try c.encode(rotationReason, forKey: .rotationReason)
+      try c.encode(writtenBy, forKey: .writtenBy)
+      try c.encode(writtenAt, forKey: .writtenAt)
     }
   }
 
@@ -118,13 +164,16 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   let deadline: TimeInterval
   let log: @Sendable (String) -> Void
   let uid: UInt32
+  /// The device id fleet-state.json holds right now. Read when a key is MADE, so the store can record what it replaced.
+  let currentDeviceID: @Sendable () -> String?
   private let lock = NSLock()
 
   public init(
     root: URL, keychainReader: @escaping @Sendable () throws -> Data = { try KeychainFleetKeyStore.readSeedNonInteractive() },
     deadline: TimeInterval = RoomSessionStore.keychainDeadline, uid: UInt32 = getuid(),
-    log: @escaping @Sendable (String) -> Void
+    currentDeviceID: @escaping @Sendable () -> String? = { nil }, log: @escaping @Sendable (String) -> Void
   ) {
+    self.currentDeviceID = currentDeviceID
     self.root = root
     self.keychainReader = keychainReader
     self.deadline = deadline
@@ -140,7 +189,9 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
     lock.lock(); defer { lock.unlock() }
     var wasRefused = false
     switch readFile() {
-    case .ok(let key): return FleetKeyLoad(key: key, origin: .existing)
+    case .ok(let key, let stored):
+      return FleetKeyLoad(
+        key: key, origin: .existing, replacesDeviceID: stored.replacesDeviceID, rotationReason: stored.rotationReason)
     case .refused(let why):
       // Unusable is treated as absent, and said. The key it held (if any) is unknown, so a replacement is a new identity.
       log("ignoring fleet-key.json: \(why)")
@@ -150,15 +201,18 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
     do {
       let seed = try readKeychainWithDeadline()
       guard let key = try? FleetSigningKey(seed: seed) else { throw FleetKeychainError.read(errSecDecode) }
-      try write(key)
+      try write(key, origin: "existing", replaces: nil, reason: nil)
       log("fleet key: moved from keychain to file")
       return FleetKeyLoad(key: key, origin: .existing)
     } catch let error as FleetKeychainError {
       guard case .read(let status) = error else { throw error }
       if status == errSecItemNotFound {
         let key = FleetSigningKey.generate()
-        try write(key)
-        return FleetKeyLoad(key: key, origin: wasRefused ? .rotated(reason: "file unusable") : .fresh)
+        let replaced = currentDeviceID()
+        let reason = wasRefused ? "file unusable" : nil
+        try write(key, origin: wasRefused ? "rotated" : "fresh", replaces: replaced, reason: reason)
+        return FleetKeyLoad(
+          key: key, origin: wasRefused ? .rotated(reason: "file unusable") : .fresh, replacesDeviceID: replaced, rotationReason: reason)
       }
       if Self.needsPerson.contains(status) { return try rotate(reason: String(status)) }
       throw error
@@ -170,8 +224,11 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
 
   private func rotate(reason: String) throws -> FleetKeyLoad {
     let key = FleetSigningKey.generate()
-    try write(key)
-    return FleetKeyLoad(key: key, origin: .rotated(reason: reason))
+    let replaced = currentDeviceID()
+    // The rotation is recorded in the SAME atomic write as the key: from the moment the file exists, any later load
+    // knows which device id this key must never sign for.
+    try write(key, origin: "rotated", replaces: replaced, reason: reason)
+    return FleetKeyLoad(key: key, origin: .rotated(reason: reason), replacesDeviceID: replaced, rotationReason: reason)
   }
 
   struct KeyDeadline: Error {}
@@ -197,7 +254,7 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   }
 
   enum FileOutcome {
-    case ok(FleetSigningKey)
+    case ok(FleetSigningKey, Stored)
     case refused(String)
     case absent
   }
@@ -222,13 +279,14 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
     guard let stored = try? decoder.decode(Stored.self, from: data), stored.algorithm == "ed25519",
       let seed = Data(base64Encoded: stored.seed), let key = try? FleetSigningKey(seed: seed)
     else { return .refused("it is not the JSON this app writes") }
-    return .ok(key)
+    return .ok(key, stored)
   }
 
   /// Atomic: a temporary, chmod 0600 BEFORE the rename, then renamed over the file. No reader sees it at 0644.
-  func write(_ key: FleetSigningKey) throws {
+  func write(_ key: FleetSigningKey, origin: String, replaces: String?, reason: String?) throws {
     let stored = Stored(
-      seed: key.seed.base64EncodedString(), algorithm: "ed25519", writtenBy: BuildInfo.appVersion ?? "unbundled",
+      seed: key.seed.base64EncodedString(), algorithm: "ed25519", origin: origin, replacesDeviceID: replaces,
+      rotationReason: reason, writtenBy: BuildInfo.appVersion ?? "unbundled",
       writtenAt: Date())
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
@@ -377,7 +435,7 @@ public enum FleetBootstrap {
       config: FleetClientConfig(
         enabled: true, installID: installID, machine: machine, hwModel: MachineFactsReader.hardwareModel(),
         helperVersion: HelperStatusCache.shared.snapshot?.helperVersion),
-      app: engine, transport: URLSessionFleetTransport(origin: configuration.origin), keys: FileFleetKeyStore(root: root, log: log),
+      app: engine, transport: URLSessionFleetTransport(origin: configuration.origin), keys: FileFleetKeyStore(root: root, currentDeviceID: { FileFleetStateStore(root: root).load().deviceID }, log: log),
       store: FileFleetStateStore(root: root), roomSession: { session }, log: log)
     log("fleet client: on")
     Task.detached { await client.run() }
