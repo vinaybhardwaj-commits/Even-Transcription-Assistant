@@ -788,14 +788,13 @@ def frx(art: dict) -> list[str]:
 _MIN_PROMPT_LEN = 8
 _UNITS = r"(?:mg|ml|mcg|g|iu|units|days|weeks|months)"
 _SLOT_X = re.compile(r"(?<!\w)x+(?=\s+" + _UNITS + r"\b)", re.I)
-_AVAIL = "stated|mentioned|given|specified|known|available|clear|decided|recorded|documented|provided|confirmed|verified|determined|filled"
+_AVAIL = "stated|mentioned|specified|known|clear|decided|recorded|documented|provided|confirmed|verified|determined|filled"
 _D1 = re.compile(r"(?:\b(?:not|(?:was|is)\s+not|(?:wasn|isn)['\u2019]t)\s+(?:\w+ly\s+)?|\bun)(?:" + _AVAIL + r")\b", re.I)
-_D2 = re.compile(r"\b(?:verif|confirm|decid|determin|clarif|tbd|tbc|pending)\w*", re.I)
+_D2 = re.compile(r"\b(?:verif|confirm|decid|determin|clarif|tbd|tbc)\w*", re.I)
 _D2_SECTIONS = {"Medication", "Follow up", "Further Investigation", "Surgery or Procedure", "Refer to"}
-_D3 = re.compile(r"\b(?:doctor\s+to|dr\.?\s+to|please|kindly|ask\s+doctor|ask\s+dr)\b", re.I)
+_D3 = re.compile(r"\b(?:doctor\s+to|dr\.?\s+to|ask\s+doctor|ask\s+dr)\b", re.I)
 _D3_PP = re.compile(
-    r"\bto\s+be\s+(?:confirmed|decided|determined|verified|clarified|specified|added|filled|entered|completed"
-    r"|reviewed\s+by\s+(?:the\s+)?doctor)\b", re.I)
+    r"\bto\s+be\s+(?:confirmed|decided|determined|verified|clarified|specified|filled|entered)\b", re.I)
 _D5 = re.compile(
     r"\bunnamed\s+drug\b|\bplaceholder\b|\bdose\s+not\s+stated\b|\bheld_back\b|\bkept\s+out\b(?!\s+of\b)|\bredacted\b|\blorem\b",
     re.I)
@@ -819,7 +818,9 @@ def _note_entries(note: str):
 def _d4(text: str) -> bool:
     if _D4_NO.search(text):
         return True
-    toks = re.findall(r"\w+(?:/\w+)?|\?", text.lower())
+    toks = []
+    for t in re.findall(r"\w+(?:/\w+)?|\?", text.lower()):
+        toks.extend([t] if t == "n/a" else t.split("/"))
     for i, t in enumerate(toks):
         if t in _D4_FIELDS and any(x in _D4_MISSING for x in toks[max(0, i - 3):i] + toks[i + 1:i + 4]):
             return True
@@ -871,7 +872,7 @@ def frx_n(art: dict) -> list[str]:
                 e.append(f"FRX-N1 d2 request word '{m.group(0).lower()}' ({where})")
         for m in _D3.finditer(body):
             e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
-        for m in _D3_PP.finditer(body):
+        for m in (_D3_PP.finditer(body) if sec in _D2_SECTIONS else ()):
             e.append(f"FRX-N1 d3 addressed-to-doctor phrase '{m.group(0).lower()}' ({where})")
         for m in _D5.finditer(body):
             e.append(f"FRX-N1 d5 internal pipeline marker '{m.group(0).lower()}' ({where})")

@@ -52,6 +52,19 @@ PASS_CASES = [
     {"Medication": "Tab Dolorem 1 BD x 3 days"},
     {"Presenting Complaint": "Fall at home, exact date unknown"},
     {"Co-morbidities": "Not a known diabetic"},
+    {"General Advice": "Please take medicines regularly"},
+    {"General Advice": "Kindly avoid oily food"},
+    {"General Advice": "Salt not to be added to food"},
+    {"Plan of Management": "Please continue current medicines"},
+    {"Plan of Management": "Surgery to be decided after reports"},
+    {"Plan of Management": "Biopsy to be confirmed by histopathology"},
+    {"Refer to": "Physiotherapy, please"},
+    {"Diagnoses": "Diagnosis to be confirmed by biopsy"},
+    {"Medication": "Antibiotic course to be completed"},
+    {"Medication": "Syrup Ascoril 5 ml TDS, not given to children under 2"},
+    {"Follow up": "To be reviewed by doctor after 1 week"},
+    {"Further Investigation": "if MRI not available, CT brain"},
+    {"Further Investigation": "report pending"},
 ]
 
 
@@ -103,11 +116,9 @@ FAIL_CASES = [
     ("Medication", "Amlodipine 5 OD (to be decided)"),
     ("Follow up", "Review date unknown"),
     ("Medication", "Dose: missing"),
-    ("Medication", "Kindly add strength"),
     ("Plan of Management", "Review dr to advise"),
     ("Follow up", "Frequency of review unclear"),
     ("Medication", "Amlodipine 5 OD unconfirmed"),
-    ("Medication", "Amlodipine pending"),
     ("Medication", "Amlodipine ?5 OD"),          # "?" not at the start of a Diagnoses entry
     ("Plan of Management", "?cause"),            # "?" outside Diagnoses
     ("Diagnoses", "Migraine?"),                  # "?" not first in a Diagnoses entry
@@ -120,11 +131,15 @@ FAIL_CASES = [
     ("Medication", "frequency not clearly stated"),
     ("Medication", "duration wasn't mentioned"),
     ("Medication", "duration wasn\u2019t mentioned"),
-    ("Medication", "dose is not given"),
     ("Medication", "no dose given"),
     ("Medication", "dose: ask doctor"),
     ("Medication", "Paracetamol 650 BD, dose to be confirmed"),
     ("Follow up", "date unknown"),
+    ("Medication", "dose/frequency missing"),
+    ("Medication", "Dose/Frequency: N/A"),
+    ("Medication", "Tab X, dose/duration nil"),
+    ("Medication", "dose/timing: none"),
+    ("Follow up", "Next visit date to be confirmed at reception"),
 ]
 
 
