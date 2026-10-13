@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { makeFakeClinician } from "../support/fake-identity";
 import {
   LAB_EXPERIMENTAL_PRESETS, LAB_PRESETS, LabArgsError, labSpecNotes, checkLabIngest, decodeNlp, encodeNlp, labEmbeddingsKey, labProbsKey, parseLabArgs, parseLabInputs, parseLabSpec,
   parsePostprocessingYaml, probsRawBytes, specHash, windowProbsKey, nemotronLabEnabled,
@@ -227,7 +228,7 @@ describe("lab ingest body: a closed shape", () => {
     ["an empty with turns", { status: "empty" }, "turns_with_empty"],
     ["a turn past the audio", { turns: [[0, 900001, "spk0"]] }, "turn_out_of_range"],
     ["unsorted turns", { turns: [[100, 200, "spk0"], [0, 50, "spk1"]] }, "turns_not_sorted"],
-    ["a name as a label", { turns: [[0, 100, "Dr Rao"]] }, "bad_speaker_label"],
+    ["a name as a label", { turns: [[0, 100, makeFakeClinician(1).label]] }, "bad_speaker_label"],
     ["a spec hash that is not a hash", { spec_hash: "x" }, "bad_spec_hash"],
     ["an ok result with no clip hash", { clip_sha256: null }, "missing_clip_sha256"],
     ["a probs key outside the lab prefix", { probs_r2_key: "bench/x/y.webm" }, "bad_probs_r2_key"],

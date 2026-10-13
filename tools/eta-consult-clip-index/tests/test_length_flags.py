@@ -2,7 +2,7 @@ import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.dont_write_bytecode = True
 import gen_index as G
-from test_gen_index import Base, row
+from test_gen_index import Base, row, DOC_A, DOC_B
 
 
 class TestLengthFlags(Base):
@@ -41,7 +41,7 @@ class TestLengthFlags(Base):
         self.assertIn("&lt;b&gt;", self.page(minutes=60, close_reason="<b>"))
 
     def test_hide_checkbox_per_doctor_page_and_header_note(self):
-        r1, r2 = row("a", doctor_uid="A", doctor_name="Dr A"), row("b", doctor_uid="B", doctor_name="Dr B")
+        r1, r2 = row("a", doctor_uid="A", doctor_name=DOC_A), row("b", doctor_uid="B", doctor_name=DOC_B)
         h = self.render([r1, r2])
         self.assertEqual(h.count('<input type="checkbox" class="hidelong">'), 2)
         self.assertEqual(h.count("hide consults over 30 min"), 2)

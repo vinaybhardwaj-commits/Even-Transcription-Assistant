@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
+import { makeFakeClinician } from "../support/fake-identity";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
 const H = vi.hoisted(() => ({ sql: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>) }));
@@ -494,7 +495,7 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
 
   it("F6: scopedOccupancy reads only the roster machines, only the last 2 h, bounded, with machine = ANY on the (machine, ts) index", async () => {
     const ext = (machine: string, event: string, minAgo: number, extra = "") =>
-      `INSERT INTO pulse_presence_events (source, machine, event, ts, payload) VALUES ('ext', '${machine}', '${event}', '${at(minAgo)}', '{"doctor_uid":"d1","display_name":"Dr T","tab_focus":"true","instance_id":"i1"${extra}}'::jsonb);`;
+      `INSERT INTO pulse_presence_events (source, machine, event, ts, payload) VALUES ('ext', '${machine}', '${event}', '${at(minAgo)}', '${JSON.stringify({ doctor_uid: "d1", display_name: makeFakeClinician(1).label, tab_focus: "true", instance_id: "i1" }).slice(0, -1)}${extra}}'::jsonb);`;
     pg.exec(`
       ${ext("clinic-a-mac", "login", 30)}
       ${ext("clinic-a-mac", "heartbeat", 1)}
@@ -518,7 +519,7 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     // volume: more focused heartbeats than the limit inside 2 h -> still answers, newest rows win
     pg.exec(`
       INSERT INTO pulse_presence_events (source, machine, event, ts, payload)
-      SELECT 'ext', 'clinic-b-mac', 'heartbeat', '${at(0)}'::timestamptz - (g * interval '1 second'), '{"doctor_uid":"d2","display_name":"Dr U","tab_focus":"true","instance_id":"i2"}'::jsonb
+      SELECT 'ext', 'clinic-b-mac', 'heartbeat', '${at(0)}'::timestamptz - (g * interval '1 second'), '${JSON.stringify({ doctor_uid: "d2", display_name: makeFakeClinician(2).label, tab_focus: "true", instance_id: "i2" })}'::jsonb
         FROM generate_series(1, ${OCCUPANCY_ROW_LIMIT + 200}) g;
     `);
     const big = await scopedOccupancy(spy, AS_OF, ["clinic-a-mac", "clinic-b-mac"]);

@@ -8,6 +8,10 @@ vi.mock("@/lib/db", () => ({ sql: (() => Promise.resolve([])) as unknown }));
 import { buildSnapshot, resetMemoForTests } from "@/lib/rooms-live/snapshot";
 import type { Db } from "@/lib/rooms-live/read";
 import { groupOf } from "@/lib/rooms-live/present";
+import { makeFakeClinician } from "../support/fake-identity";
+
+const FAKE = makeFakeClinician(1);
+const FAKE_FIRST = FAKE.full_name.split(" ")[0]!;
 
 const NOW = Date.parse("2026-10-08T06:42:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -97,19 +101,19 @@ describe("O2: who is in the room", () => {
     expect(r.doctor).toEqual({ display: "Clinician Signed", activity: "Signed in" });
   });
   it("v1.6: sign-in only, non-stale full best_dn + first-name page_name -> the full name, Signed in", async () => {
-    occ({ occupied: true, page_name: "Prashanth", best_dn: "Dr Prashanth Nagaraj", best_uid: "ABC123" });
-    expect((await run(fakeDb())).r.doctor).toEqual({ display: "Dr Prashanth Nagaraj", activity: "Signed in" });
+    occ({ occupied: true, page_name: FAKE_FIRST, best_dn: FAKE.label, best_uid: "ABC123" });
+    expect((await run(fakeDb())).r.doctor).toEqual({ display: FAKE.label, activity: "Signed in" });
   });
   it("v1.6: stale identity + page_name -> page_name (F28 unchanged)", async () => {
-    occ({ occupied: true, page_name: "Prashanth", best_dn: "Cookie Person", best_stale: true });
-    expect((await run(fakeDb())).r.doctor?.display).toBe("Prashanth");
+    occ({ occupied: true, page_name: FAKE_FIRST, best_dn: "Cookie Person", best_stale: true });
+    expect((await run(fakeDb())).r.doctor?.display).toBe(FAKE_FIRST);
   });
   it("v1.6: best_dn is an email or the uid -> page_name", async () => {
-    occ({ occupied: true, page_name: "Prashanth", best_dn: "p.nagaraj@example.org" });
-    expect((await run(fakeDb())).r.doctor?.display).toBe("Prashanth");
+    occ({ occupied: true, page_name: FAKE_FIRST, best_dn: FAKE.email });
+    expect((await run(fakeDb())).r.doctor?.display).toBe(FAKE_FIRST);
     resetMemoForTests();
-    occ({ occupied: true, page_name: "Prashanth", best_dn: "ABC123", best_uid: "ABC123" });
-    expect((await run(fakeDb())).r.doctor?.display).toBe("Prashanth");
+    occ({ occupied: true, page_name: FAKE_FIRST, best_dn: "ABC123", best_uid: "ABC123" });
+    expect((await run(fakeDb())).r.doctor?.display).toBe(FAKE_FIRST);
   });
   it("v1.5 R2: closed 91 min ago -> no Last consult", async () => {
     const { r } = await run(fakeDb({ wh: [{ consulting_doctor_name: "Clinician Edge", t_open: iso(NOW - 110 * 60_000), t_close: iso(NOW - 91 * 60_000) }] }));
