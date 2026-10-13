@@ -113,6 +113,7 @@ describe("A2 — the repair is not a kiosk command", () => {
     expect([...COMMAND_KINDS]).toEqual([
       "start_day", "pause_day", "resume_day", "end_day", "set_audio_input",
       "check_update_now", "report_diag", "restart_engine", "self_test",
+      "consult_started", "consult_ended",
     ]);
   });
 });

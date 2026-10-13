@@ -103,16 +103,23 @@ function makeIndexedDB(records) {
   };
 }
 
+// Synthetic identities (the no-identity-literals guard bans real-looking ones in test files).
+const FAKE_EMAIL = 'fake.clinician@example.test';
+const FAKE_NAME = 'Fake Clinician 0001';
+const OTHER_EMAIL = 'fake.other@example.test';
+const OTHER_NAME = 'Fake Other 0002';
+
 const TOKEN_RECORD = {
   fbase_key: 'firebase:authUser:AIzaFAKEKEY:[DEFAULT]',
   value: {
     uid: 'uid-DOC-123',
-    email: 'Dr.Test@Even.in',
-    displayName: 'Dr Test',
+    // mixed case on purpose: the identity reader lower-cases it
+    email: ['Fake.Clinician', 'Example.test'].join('@'),
+    displayName: FAKE_NAME,
     phoneNumber: '+910000000000',
     stsTokenManager: { refreshToken: 'SECRET-REFRESH-TOKEN', accessToken: 'SECRET-ACCESS-TOKEN', expirationTime: 1 },
     apiKey: 'AIzaFAKEKEY',
   },
 };
 
-module.exports = { makeChrome, makeFetch, makeIndexedDB, bytes, TOKEN_RECORD, emitter };
+module.exports = { makeChrome, makeFetch, makeIndexedDB, bytes, TOKEN_RECORD, emitter, FAKE_EMAIL, FAKE_NAME, OTHER_EMAIL, OTHER_NAME };

@@ -373,11 +373,11 @@ def test_key_file_mode_checked(tmp_path):
         VertexClient.from_env({k: v for k, v in env.items() if k != "VERTEX_SA_KEY_FILE"}, token_provider=lambda: "t")
 
 
-@pytest.mark.parametrize("marker", ["T0 [S", "NATIVE[", "english_segments", "native_segments"])
+@pytest.mark.parametrize("marker", ["T0 [S1] (00:00) x", "NATIVE[hi]: a | ENGLISH: b", "english_segments", "native_segments"])
 def test_transcript_marker_guard(marker, assets, cat, extraction):
     t = FakeTransport(extraction)
     with pytest.raises(TranscriptGuardError):
-        R.replay(f"fine text {marker}1] more", VISIT, cat, client(t), assets=assets)
+        R.replay(f"fine text {marker} more", VISIT, cat, client(t), assets=assets)
     assert t.calls == []  # nothing left the machine
     with pytest.raises(TranscriptGuardError):
         guard_request("ok", f"x {marker}")
@@ -425,3 +425,400 @@ def test_error_messages_carry_no_text(assets, cat):
 def test_visit_date_is_local_ist_date():
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-12T19:00:00Z"}}) == date(2026, 10, 13)
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-13T03:00:00+00:00"}}) == date(2026, 10, 13)
+
+
+@pytest.mark.parametrize("text", ["t0 [s1] (00:00)", "T0  [S1]  (0:05)", "T0\t\r[S1] (00:00)", "native[hi]: a | english: b",
+                                  "Native[hi] : a | English :", "ＮＡＴＩＶＥ[ｈｉ]: a | ＥＮＧＬＩＳＨ:", "Ｔ０ [Ｓ１] （００：００）",
+                                  "English_Segments", "NATIVE_SEGMENTS"])
+def test_marker_guard_is_case_nfkc_and_whitespace_insensitive(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("ok", f"x {text} y")
+    guard_request("a t0 and some [s] text")  # not a marker
+
+
+def test_other_region_needs_a_ruling():
+    for loc in ("us-central1", "europe-west4"):
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", loc, lambda: "t")
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", loc, lambda: "t", location_ruling="  ")
+    c = VertexClient("synth-proj-001", "europe-west4", lambda: "t", location_ruling="fable-ruling-99")
+    assert c.location == "europe-west4"
+    VertexClient("synth-proj-001", "asia-northeast1", lambda: "t")  # the default needs none
+
+
+def test_from_env_region_ruling(tmp_path):
+    key = tmp_path / "k.json"
+    key.write_text("{}")
+    key.chmod(0o600)
+    env = {"VERTEX_SA_KEY_FILE": str(key), "VERTEX_PROJECT": "synth-proj-001", "VERTEX_LOCATION": "us-central1"}
+    with pytest.raises(ReplayUnavailable):
+        VertexClient.from_env(env, token_provider=lambda: "t")
+    with pytest.raises(ReplayUnavailable):
+        VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": ""}, token_provider=lambda: "t")
+    c = VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": "fable-ruling-99"}, token_provider=lambda: "t")
+    assert c.location == "us-central1"
+
+
+@pytest.mark.parametrize("text", ["T1 [S0|doctor] (00:05) hi", "T12[S3|patient] (01:10)", "T0\u200b [S1] (00:00)", "nati\u00adve[hi]: a | english: b",
+                                  "\u0422" + "0 [S1] (00:00)", "NAT\u0130VE[hi]: a |ENGLISH:", "english-segments"])
+def test_guard_by_shape_refuses(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("ok", f"x {text} y")
+
+
+from tools.eta2freescript.ingest import Consult, Turn, format_transcript
+
+
+def _writer(speaker="0", role="unknown", role_source="none", text="x", native=None, quarantined=False):
+    c = Consult(uid="u", turns=[Turn(idx=0, t0_ms=0, t1_ms=1000, speaker=speaker, text=text, native_text=native,
+                                     native_lang="hi" if native else None, role=role, role_source=role_source)],
+                clip_t0_ms=0, clip_t1_ms=1000, language_code="en", english_source="s", diarised=True, room="r")
+    return format_transcript(c, {0} if quarantined else frozenset())
+
+
+_WRITER_LINES = [
+    _writer(), _writer("?"), _writer("?", quarantined=True), _writer("A"), _writer("speaker_0"), _writer("0", quarantined=True),
+    _writer("3", "patient", "role_track"), _writer("0", native="a", text="b"), _writer("?", native="a", text="b", quarantined=True),
+]
+_REFUSE_B4A3 = [
+    "T0 [S?] (00:00) x", "T0 [S?] (00:00) [QUARANTINED: possible other consult] x", "T0 [SA] (00:01) x",
+    "T0 [Sspeaker_0] (00:01) x", "T12 [S3|patient] (01:10) x", "T0 [S0] (00:00) NATIVE[hi]: a | ENGLISH: b",
+    "NATIVE[ta]: x | ENGLISH: y", "NATIVE[pt-BR]: x | ENGLISH: y",
+    "T0\u034f[S1] (00:00) x", "T0\ufe0f[S1] (00:00) x", "T0\u3164[S1] (00:00) x", "T0\u2800[S1] (00:00) x",
+    "T0\U000e0100[S1] (00:00) x", "T0\u115f[S1] (00:00) x", "T0\uffa0[S1] (00:00) x", "T0 [\ua731" + "1] (00:00) x",
+    "nat\u0131ve[hi]: a | english: b", "T3 [S2|doctor] (01:10) hi", "t3 [ s2 | role ] ( 1 : 10 ) hi",
+    "T\u03000 [S0] (00:00) x", "T\u03070 [S0] (00:00) x", "\u1e6a0 [S0] (00:00) x", "T0 [\u1e60?] (00:00) x", "T0 [S\u0307?] (00:00) x", "T0 [S\u0323A] (00:00) x", "\u1d1b0 [S0] (00:00) x", "T0 [S0] (00:00)",
+    "english\u2014segments", "english\u2013segments", "english\u2010segments", "english\u2212segments", "english\u2043segments",
+    "english.segments", "english_segments", '"english segments"', "'native segments'",
+    '{"native_segments": []}', '{"english_segments": []}',
+    *_WRITER_LINES,
+]
+_PASS_B4A3 = [
+    "a t0 and some text", "nativeness", "patient native place", "Tab T3 tablet", "T3 hormone",
+    "T3 [Sustained release] 25 mcg", "T4 [Synthroid] 50mcg", "on T2 [SR] tab", "T2 [s/p]",
+    "MRI T1 [STIR]", "T1 [SI joint]", "lesion T12 [spine]", "Vitals at T1 [Systolic 120]",
+    "native [Bihar]", "native[1]", "English segments of the leaflet", "ST segments normal", "T2DM [since 2010]",
+    "english segments", "native[hi] later",
+    "spine T2 [S1] level", "T12 [S1] radiculopathy", "L5-S1 and T1 [S2] dermatome", "Fundus T1 [S3] grade",
+    "T3 [S4|L5] sacral", "native[en]: speaks English", "Pt native [en]: ok",
+    # B4a.3 must-refuse cases that carry no timestamp or no ENGLISH pair; moved here by the B4a.4 kickoff
+    "T0 [S1]", "T0\u034f[S1]", "T0\u2800[S1]", "T0 [\ua731" + "1]", "t3 [ s2 | role ]", "nat\u0131ve[hi]:",
+    "NATIVE[pt-BR]: x", "T12 [S3|patient]", "T0 [S0] hello", "NATIVE[hi]: a",
+]
+
+
+@pytest.mark.parametrize("text", _REFUSE_B4A3)
+def test_guard_b4a3_refuses(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("ok", f"x {text} y")
+
+
+@pytest.mark.parametrize("text", _PASS_B4A3)
+def test_guard_b4a3_passes(text):
+    guard_request("ok", text)
+    guard_request(f"x {text} y")
+
+
+def test_region_fullmatch_and_real_ruling():
+    for ruling in ("\u200b", "\u200b \u00ad"):
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "us-central1\n", lambda: "t", location_ruling="fable-ruling-99")
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "asia-northeast1\n", lambda: "t")
+
+
+@pytest.mark.parametrize("ruling", ["\u034f", "\ufe0f", "\u3164", "\u2800", "\u0300", "\ue000", "\U000e0100", "\u200b \u00ad\u2800"])
+def test_ruling_that_must_not_unlock(ruling):
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling="r1")
+
+
+@pytest.mark.parametrize("ruling", ["\u2028", "\u2029", "\u0378", "\uffff", "\U0010ffff", "\u3164", "\u0020", "\u0000"])
+def test_ruling_allow_list_more(ruling):
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+
+
+@pytest.mark.parametrize("ruling", ["r", "7", "#", "+", "\u093e", "\u0915"])
+def test_ruling_allow_list_unlocks(ruling):
+    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+
+
+def test_every_writer_label_is_refused():
+    """Property: any line format_transcript can emit is refused, whatever the label, role, quarantine, native or time."""
+    import random
+    import uuid
+    rng = random.Random(20261014)
+    fixed = ["", "?", "A", "speaker_0", str(uuid.UUID(int=0x1234567890abcdef1234567890abcdef)), "x]y", "Sx]y", "]", "[S]"]
+    roles = [("unknown", "none"), ("doctor", "role_track"), ("patient", "role_track")]
+    times = [0, 59, 3599, 10 ** 6]
+
+    def rand_label():
+        n = rng.randint(0, 128)
+        out = []
+        while len(out) < n:
+            c = chr(rng.randint(0, 0x10FFFF))
+            if c != "\n":
+                out.append(c)
+        return "".join(out)
+
+    labels = fixed + [rand_label() for _ in range(5000)]
+    survivors = []
+    for i, label in enumerate(labels):
+        role, src = roles[i % 3]
+        t = times[(i // 3) % 4]
+        quarantined, native = bool(i % 2), bool((i // 2) % 2)
+        c = Consult(uid="u", turns=[Turn(idx=0, t0_ms=t * 1000, t1_ms=t * 1000 + 1000, speaker=label, text="x",
+                                         native_text="a" if native else None, native_lang="hi" if native else None,
+                                         role=role, role_source=src)],
+                    clip_t0_ms=0, clip_t1_ms=t * 1000 + 1000, language_code="en", english_source="s", diarised=True, room="r")
+        line = format_transcript(c, {0} if quarantined else frozenset())
+        try:
+            guard_request(line)
+        except TranscriptGuardError:
+            continue
+        survivors.append(label)
+    assert not survivors, f"{len(survivors)} labels survived: " + ", ".join(repr(s) for s in survivors[:10])
+
+
+def _turn_line(label: str, t: int = 59) -> str:
+    c = Consult(uid="u", turns=[Turn(idx=0, t0_ms=t * 1000, t1_ms=t * 1000 + 1000, speaker=label, text="x")],
+                clip_t0_ms=0, clip_t1_ms=t * 1000 + 1000, language_code="en", english_source="s", diarised=True, room="r")
+    return format_transcript(c)
+
+
+def test_max_label_chars_fits_the_guard_window():
+    """B4a.7: if MAX_LABEL_CHARS or the fold expansion or the window moves, this test breaks, not the guard."""
+    import unicodedata
+    from tools.eta2freescript.eval.pulse import vertex as V
+    from tools.eta2freescript.eval.pulse.vertex import _fold
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS
+    turn_rx = next(rx for what, rx in V._TRANSCRIPT_SHAPES if what.startswith("a transcript turn line"))
+    window = int(re.search(r"\.\{0,(\d+)\}\?", turn_rx.pattern).group(1))
+    longest = 0
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        longest = max(longest, len(unicodedata.normalize("NFKC", ch)), len(unicodedata.normalize("NFKD", ch)),
+                      len(_fold("s" + ch + "s")) - 2)
+    assert MAX_LABEL_CHARS * longest + 64 <= window, f"{MAX_LABEL_CHARS} x {longest} + 64 > window {window}"
+
+
+def test_label_window_covers_worst_expansion_of_a_128_char_label():
+    """The window is read from the live pattern; a future Unicode version with a longer expansion breaks this test, not the guard."""
+    import unicodedata
+    from tools.eta2freescript.eval.pulse import vertex as V
+    from tools.eta2freescript.eval.pulse.vertex import _fold
+    turn_rx = next(rx for what, rx in V._TRANSCRIPT_SHAPES if what.startswith("a transcript turn line"))
+    window = int(re.search(r"\.\{0,(\d+)\}\?", turn_rx.pattern).group(1))
+    longest = 0
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        longest = max(longest, len(unicodedata.normalize("NFKC", ch)), len(unicodedata.normalize("NFKD", ch)),
+                      len(_fold("s" + ch + "s")) - 2)
+    assert longest >= 18  # U+FDFA on current Unicode
+    assert 128 * longest <= window, f"label window {window} < 128 x {longest}"
+
+
+@pytest.mark.parametrize("label", [
+    "ﷺ" * 128, "ﷻ" * 128, "שּׁ" * 128, "ﬃ" * 128, "ẞ" * 128, "ﷺ" * 127 + "]",
+    "שּׁ" * 64 + "]" + "שּׁ" * 63, "]" + "ﷺ" * 127, "ﷺ" * 64 + "]" + "שּׁ" * 63,
+    "ﷺ]" * 64, "x]y" + "ﷺ" * 125, "שּׁ]ﷺ" * 42,
+])
+def test_expanding_labels_are_refused(label):
+    assert len(label) <= 128
+    for t in (0, 59, 3599, 10 ** 6):
+        with pytest.raises(TranscriptGuardError):
+            guard_request(_turn_line(label, t))
+
+
+# --- B4a.6: the guard checks each raw line ---------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Tab Dolo 650 T1 [SOS] for fever.\nReview in OPD [Room 5] (10:30) tomorrow.",
+    "MRI T2 [STIR] hyperintensity at L4.\nNext appointment [OPD] (11:15).",
+    "Spine T12 [S1 level] tenderness;\nphysio [daily] (10:00)",
+])
+def test_cross_line_parts_pass(text):
+    guard_request(text)
+
+
+def test_whole_multi_turn_writer_output_is_refused():
+    turns = [Turn(idx=i, t0_ms=i * 5000, t1_ms=i * 5000 + 1000, speaker=str(i % 2), text="x") for i in range(4)]
+    c = Consult(uid="u", turns=turns, clip_t0_ms=0, clip_t1_ms=30000, language_code="en", english_source="s",
+                diarised=True, room="r")
+    out = format_transcript(c)
+    assert out.count("\n") >= 3
+    with pytest.raises(TranscriptGuardError):
+        guard_request(out)
+
+
+@pytest.mark.parametrize("text", [
+    "T0 [S0] (10000000:00) x",
+    "T0 [S0] (123456789012:00) x",
+    "unrelated note line\nT0 [S0] (00:59) x",
+    "unrelated note line\r\nT3 [S1|doctor] (01:05) x\nmore",
+    "NATIVE[hi]: namaste | ENGLISH: hello",
+    "intro\nNATIVE[hi]: namaste | ENGLISH: hello",
+])
+def test_line_split_still_refuses_writer_lines(text):
+    with pytest.raises(TranscriptGuardError):
+        guard_request(text)
+
+
+@pytest.mark.parametrize("sep", [" ", "\u0085", "\r", " ", "\x0b", "\x0c"])
+def test_only_newline_splits_lines(sep):
+    with pytest.raises(TranscriptGuardError):
+        guard_request("T0 [S0]" + sep + "(00:59) x")
+
+
+@pytest.mark.parametrize("text", [
+    "Started T1 [stat dose] inj ceftriaxone. Vitals [BP 120/80] (09:00) stable.",
+    "Pt1 [stable], seen by Dr [cardiology] (14:20).",
+    "Dose at T0 [start] then repeat [after food] (13:00).",
+])
+def test_same_line_false_positives_stay_refused(text):
+    """Accepted false positives (B4a.5 verdict Note 1): same-line prose that has the turn-line shape."""
+    with pytest.raises(TranscriptGuardError):
+        guard_request(text)
+
+
+def test_raw_vendor_labels_are_refused_end_to_end(tmp_path):
+    """B4a.6b: raw speaker_id (with line breaks) -> load_consult -> format_transcript -> guard_request, always refused."""
+    import random
+    from tools.eta2freescript.ingest import format_transcript, load_consult
+    rng = random.Random(20261015)
+    fixed = ["0\n1", "\n", "SPEAKER_00\n", "\n0"]
+    breaks = ["\n", "\r", "\u2028", "\u0085", "\u2029", "\x0b", "\x0c", "\x00"]
+
+    def rand_label():
+        n = rng.randint(0, 128)
+        out = []
+        while len(out) < n:
+            out.append(rng.choice(breaks) if rng.random() < 0.05 else chr(rng.randint(0, 0x10FFFF)))
+        return "".join(out)
+
+    labels = fixed + [rand_label() for _ in range(2000)]
+    assert len(labels) >= 2000 and all(len(x) <= 128 for x in labels)
+    d = tmp_path / "u1"
+    d.mkdir()
+    survivors = []
+    for i, label in enumerate(labels):
+        t = [0, 59, 3599][i % 3]
+        native, role_on, quarantined = bool(i % 2), bool((i // 2) % 2), bool((i // 4) % 2)
+        seg = {"t0_ms": t * 1000, "t1_ms": t * 1000 + 1000, "speaker_id": label, "text": "x"}
+        raw = {"consult_uid": "u1", "language_code": "hi" if native else "en", "english_segments": [seg],
+               "clip": {"t0_ms": 0, "t1_ms": t * 1000 + 1000}}
+        if native:
+            raw["native_segments"] = [{"t0_ms": seg["t0_ms"], "t1_ms": seg["t1_ms"], "speaker_id": label, "text": "a", "lang": "hi"}]
+        (d / "transcript.json").write_text(json.dumps(raw))
+        role = d / "role.json"
+        if role_on:
+            role.write_text(json.dumps({"status": "ok", "layer": "role", "engine": "llm-roles", "config_hash": "c", "extras": {},
+                                        "segments": [{"t0_ms": seg["t0_ms"], "t1_ms": seg["t1_ms"], "speaker": label,
+                                                      "role": "doctor" if i % 3 else "patient"}]}))
+        elif role.exists():
+            role.unlink()
+        c = load_consult(tmp_path, "u1")
+        text = format_transcript(c, {0} if quarantined else frozenset())
+        try:
+            guard_request(text)
+        except TranscriptGuardError:
+            continue
+        survivors.append(label)
+    assert not survivors, f"{len(survivors)} survived: " + ", ".join(repr(s) for s in survivors[:10])
+
+
+def test_long_raw_vendor_labels_are_refused_end_to_end(tmp_path):
+    """B4a.7: over-long raw speaker_id -> load_consult -> format_transcript -> guard_request, always refused."""
+    import random
+    from tools.eta2freescript.ingest import format_transcript, load_consult
+    rng = random.Random(20261016)
+    labels = ["a" * 2401, "a" * 10000, "\ufdfa" * 134, "\ufdfa" * 5000, "]" * 3000]
+    for _ in range(500):
+        n = rng.randint(129, 10000)
+        labels.append("".join(chr(rng.choice([rng.randint(0, 0xD7FF), rng.randint(0xE000, 0x10FFFF)])) for _ in range(n)))
+    d = tmp_path / "u1"
+    d.mkdir()
+    survivors = []
+    for i, label in enumerate(labels):
+        t = [0, 59, 3599][i % 3]
+        seg = {"t0_ms": t * 1000, "t1_ms": t * 1000 + 1000, "speaker_id": label, "text": "x"}
+        raw = {"consult_uid": "u1", "language_code": "en", "english_segments": [seg],
+               "clip": {"t0_ms": 0, "t1_ms": t * 1000 + 1000}}
+        (d / "transcript.json").write_text(json.dumps(raw))
+        text = format_transcript(load_consult(tmp_path, "u1"))
+        try:
+            guard_request(text)
+        except TranscriptGuardError:
+            continue
+        survivors.append(len(label))
+    assert not survivors, f"{len(survivors)} survived, lengths {survivors[:10]}"
+
+
+def test_huge_integer_speaker_ids_are_refused_end_to_end(tmp_path):
+    """B4a.7b: a JSON integer speaker_id of 2,401 / 3,000 / 4,300 digits, role none or doctor, quarantine on or off."""
+    from tools.eta2freescript.ingest import format_transcript, load_consult
+    d = tmp_path / "u1"
+    d.mkdir()
+    survivors = []
+    for digits in (2401, 3000, 4300):
+        for role_on in (False, True):
+            for quarantined in (False, True):
+                raw_json = ('{"consult_uid": "u1", "language_code": "en", "english_segments": [{"t0_ms": 0, "t1_ms": 1000, '
+                            '"speaker_id": ' + "9" * digits + ', "text": "x"}], "clip": {"t0_ms": 0, "t1_ms": 1000}}')
+                (d / "transcript.json").write_text(raw_json)
+                role = d / "role.json"
+                if role_on:
+                    role.write_text('{"status": "ok", "layer": "role", "engine": "llm-roles", "config_hash": "c", "extras": {}, '
+                                    '"segments": [{"t0_ms": 0, "t1_ms": 1000, "speaker": ' + "9" * digits + ', "role": "doctor"}]}')
+                elif role.exists():
+                    role.unlink()
+                text = format_transcript(load_consult(tmp_path, "u1"), {0} if quarantined else frozenset())
+                try:
+                    guard_request(text)
+                except TranscriptGuardError:
+                    continue
+                survivors.append((digits, role_on, quarantined))
+    assert not survivors, survivors
+
+
+def test_label_property_mixed_types():
+    import random
+    import unicodedata
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS, _label
+    rng = random.Random(20261017)
+    bad = ("Cc", "Zl", "Zp")
+    seen_str = 0
+    for _ in range(300):
+        k = rng.randrange(8)
+        if k == 0:
+            v = "".join(chr(rng.choice([rng.randint(0, 0xD7FF), rng.randint(0xE000, 0x10FFFF)])) for _ in range(rng.randint(0, 5000)))
+        elif k == 1:
+            v = rng.randint(-(10 ** rng.randint(1, 4300)) + 1, 10 ** rng.randint(1, 4300) - 1)
+        elif k == 2:
+            v = rng.choice([-1, 1]) * rng.random() * 1e308
+        elif k == 3:
+            v = rng.random() < 0.5
+        elif k == 4:
+            v = None
+        elif k == 5:
+            v = [rng.randint(0, 9)]
+        elif k == 6:
+            v = {"a": rng.randint(0, 9)}
+        else:
+            v = "\n\r \x00" * rng.randint(1, 200)
+        out = _label(v)
+        if out is None:
+            continue
+        seen_str += 1
+        assert isinstance(out, str) and len(out) <= MAX_LABEL_CHARS, type(v)
+        assert not any(unicodedata.category(c) in bad for c in out)
+    assert seen_str > 100

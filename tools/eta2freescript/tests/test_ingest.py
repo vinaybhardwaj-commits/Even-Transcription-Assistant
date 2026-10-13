@@ -35,6 +35,20 @@ def test_map_then_unknown_fallback():
     assert [t.role for t in ts] == ["staff", "other", "unknown"]
 
 
+def test_label_is_capped_and_ordinary_labels_unchanged():
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS, _label
+    assert MAX_LABEL_CHARS == 128
+    assert len(_label("a" * 300)) == 128
+    assert _label("SPEAKER_00") == "SPEAKER_00"
+
+
+def test_map_keys_are_normalised_like_labels():
+    from tools.eta2freescript.ingest import _label
+    ts = turns((0, 1000, _label("0\n1")))
+    join_roles(ts, doc([], {"map": {"0\n1": "doctor"}}))
+    assert ts[0].role == "doctor"
+
+
 def test_numeric_speaker_labels_and_bad_roles():
     ts = turns((0, 1000, "0"))
     join_roles(ts, doc([{"t0_ms": 0, "t1_ms": 1000, "speaker": 0, "role": "nurse"}]))
@@ -123,3 +137,26 @@ def test_list_consults_only_dirs_with_transcripts(tmp_path):
     (tmp_path / "_eta2freescript").mkdir()
     assert list_consults(tmp_path) == ["a"]
     assert list_consults(CONSULTS) == ["synth-boundary-knee", "synth-cough-native", "synth-fever-dose"]
+
+
+def test_label_never_contains_a_line_break_or_control():
+    import unicodedata
+    from tools.eta2freescript.ingest import _label
+    bad = ("Cc", "Zl", "Zp")
+    for v in ("0\n1", "\r\nSPEAKER_00", "a b", "a b", "a\x0bb\x0cc\x85d\x00e"):
+        out = _label(v)
+        assert not any(unicodedata.category(c) in bad for c in out), repr(v)
+    assert _label("0\n1") == "0 1"
+    assert _label("a b") == "a b"
+    assert _label("SPEAKER_00") == "SPEAKER_00"
+    assert _label(3) == "3"
+    assert _label(True) is None
+
+
+def test_label_caps_every_type():
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS, _label
+    assert MAX_LABEL_CHARS == 128
+    for v in (10**2400, -(10**3000), int("9" * 4300), 1e300):
+        out = _label(v)
+        assert isinstance(out, str) and len(out) <= 128, type(v)
+    assert _label(7) == "7"

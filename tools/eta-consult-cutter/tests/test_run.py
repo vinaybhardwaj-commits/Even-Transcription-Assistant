@@ -4,10 +4,12 @@ import numpy as np
 from conftest import T0, FakeHO, make_fixture, fake_worker, unit
 from cutter import config as C, run as R, store as SO, state as ST, spanrule as S, tape as T
 
+DOC_NAME = "fake-doctor"
+
 PRINT = unit(np.random.default_rng(11).normal(size=192)); D = "D1"
 def W(i, o, c, reason="url_clear", doc=D, room="r1", slug="opd-1", q="clean"):
     return dict(id=i, consult_uid=f"cons{i}", machine="m", room_id=room, room_slug=slug, t_open=T0 + o, t_close=None if c is None else T0 + c, close_reason=reason, quality=q, resolver_version="v1",
-                computed_at="2026-10-07T10:00:00+00:00", doctor_uid=doc, doctor_name="Dr X", doctor_source="warehouse_doctor_uid")
+                computed_at="2026-10-07T10:00:00+00:00", doctor_uid=doc, doctor_name=DOC_NAME, doctor_source="warehouse_doctor_uid")
 
 class Base(unittest.TestCase):
     @classmethod

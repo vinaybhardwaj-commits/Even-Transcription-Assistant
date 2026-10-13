@@ -135,14 +135,20 @@ def _native_span(g: dict, native: list[dict], default_lang: str) -> tuple[str | 
     return (text or None), (langs[0] if text and langs else None)
 
 
+MAX_LABEL_CHARS = 128
+
+
 def _label(v) -> str | None:
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
-        return str(int(v))
-    if isinstance(v, str):
-        return v
-    return None
+        out = str(int(v))
+    elif isinstance(v, str):
+        import unicodedata
+        out = "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in v)
+    else:
+        return None
+    return out[:MAX_LABEL_CHARS]
 
 
 def parse_role_flags(doc: dict) -> RoleFlags:
@@ -177,7 +183,7 @@ def join_roles(turns: list[Turn], doc: dict) -> None:
         exact.setdefault((t0, t1, sp), role)
         by_speaker_segs.setdefault(sp, []).append((t0, t1, role))
     extras = doc.get("extras") if isinstance(doc.get("extras"), dict) else {}
-    smap = {str(k): (v if v in REB_ROLES else "unknown") for k, v in (extras.get("map") or {}).items()} if isinstance(extras.get("map"), dict) else {}
+    smap = {_label(str(k)): (v if v in REB_ROLES else "unknown") for k, v in (extras.get("map") or {}).items()} if isinstance(extras.get("map"), dict) else {}
     for t in turns:
         role = exact.get((t.t0_ms, t.t1_ms, t.speaker))
         if role is None:

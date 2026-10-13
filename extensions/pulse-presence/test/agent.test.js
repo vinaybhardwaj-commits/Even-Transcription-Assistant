@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { createAgent } = require('../src/agent.js');
 const T = require('../src/lib/transport.js');
 const E = require('../src/lib/events.js');
-const { makeChrome, makeFetch, bytes } = require('./fakes.js');
+const { makeChrome, makeFetch, bytes, FAKE_EMAIL, FAKE_NAME, OTHER_EMAIL, OTHER_NAME } = require('./fakes.js');
 
 const CFG = { machine_id: 'MAC-7', room: 'OPD-3', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-XYZ' };
 const PULSE_TAB = { focused: true, tabs: [{ active: true, url: 'https://pulse.even.in/prescription?prescription_uid=RX1' }] };
@@ -15,7 +15,7 @@ function setup({ statuses = [], managed = CFG, local = {}, t0 = Date.parse('2026
   const clock = { t: t0 };
   const agent = createAgent(chrome, { fetch, now: () => clock.t });
   const msg = (over = {}) => ({
-    type: 'pulse_state', status: 'present', identity: { email: 'dr@even.in', display_name: 'Dr X' },
+    type: 'pulse_state', status: 'present', identity: { email: FAKE_EMAIL, display_name: FAKE_NAME },
     impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...over,
   });
   const send = async (m) => { chrome.runtime.onMessage.fire(m, FROM); await agent.settled(); };
@@ -38,19 +38,19 @@ test('login, then logout when the record disappears', async () => {
   await send(msg({ status: 'absent', identity: null }));
   const evs = events();
   assert.deepEqual(names(evs), ['login', 'logout']);
-  assert.equal(evs[0].email, 'dr@even.in');
-  assert.equal(evs[0].display_name, 'Dr X');
-  assert.equal(evs[1].email, 'dr@even.in'); // logout names who left
+  assert.equal(evs[0].email, FAKE_EMAIL);
+  assert.equal(evs[0].display_name, FAKE_NAME);
+  assert.equal(evs[1].email, FAKE_EMAIL); // logout names who left
 });
 
 test('a changed email closes the previous doctor and opens the next', async () => {
   const { send, msg, events } = setup();
   await send(msg());
-  await send(msg({ identity: { email: 'other@even.in', display_name: 'Other' } }));
+  await send(msg({ identity: { email: OTHER_EMAIL, display_name: OTHER_NAME } }));
   const evs = events();
   assert.deepEqual(names(evs), ['login', 'logout', 'login']);
-  assert.equal(evs[1].email, 'dr@even.in');
-  assert.equal(evs[2].email, 'other@even.in');
+  assert.equal(evs[1].email, FAKE_EMAIL);
+  assert.equal(evs[2].email, OTHER_EMAIL);
 });
 
 test('impersonation: doctor null, impersonating true, no login/logout churn', async () => {
@@ -308,7 +308,7 @@ test('R10: body_unavailable alone during impersonation; logout of a known doctor
   await b.send(b.msg({ status: 'invalid', identity: null }));
   await b.send(b.msg({ status: 'absent', identity: null }));
   const lo = b.events().find((e) => e.event === 'logout');
-  assert.equal(lo.email, 'dr@even.in');
+  assert.equal(lo.email, FAKE_EMAIL);
   assert.equal(lo.reason, null);
 });
 

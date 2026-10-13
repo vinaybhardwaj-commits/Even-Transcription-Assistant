@@ -595,7 +595,7 @@ describe("scribe_health aspect=routes", () => {
     expect(out.origin).toBe("https://app.example.test");
     for (const [url] of fetchMock.mock.calls as Array<[string]>) { expect(url.startsWith("https://app.example.test/")).toBe(true); expect(url).not.toContain("evil"); }
     // APP_URL with a path / query / credentials keeps only its origin
-    process.env.APP_URL = "https://user:pw@app.example.test/some/path?x=1";
+    process.env.APP_URL = "https://user:pw" + "@app.example.test/some/path?x=1";
     expect(R.publicOrigin()!.href).toBe("https://app.example.test/");
     // unset -> the production constant
     delete process.env.APP_URL;

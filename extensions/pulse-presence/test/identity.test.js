@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { extractIdentity, readFirebaseIdentity } = require('../src/lib/identity.js');
 const { createContent } = require('../src/content.js');
-const { makeIndexedDB, TOKEN_RECORD, makeChrome } = require('./fakes.js');
+const { makeIndexedDB, TOKEN_RECORD, makeChrome, FAKE_EMAIL, FAKE_NAME } = require('./fakes.js');
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -10,7 +10,7 @@ test('extractIdentity keeps only uid, email, displayName and never a token', () 
   const r = extractIdentity(TOKEN_RECORD);
   assert.equal(r.status, 'present');
   assert.deepEqual(Object.keys(r.identity).sort(), ['displayName', 'email', 'uid']);
-  assert.equal(r.identity.email, 'dr.test@even.in');
+  assert.equal(r.identity.email, FAKE_EMAIL);
   const s = JSON.stringify(r);
   for (const bad of ['SECRET-REFRESH-TOKEN', 'SECRET-ACCESS-TOKEN', 'stsTokenManager', 'phoneNumber', 'AIzaFAKEKEY']) {
     assert.ok(!s.includes(bad), bad + ' leaked');
@@ -69,7 +69,7 @@ test('content script message carries email and display_name only; tokens and uid
   assert.equal(sent.length, 1);
   const s = JSON.stringify(sent[0]);
   for (const bad of ['SECRET', 'stsTokenManager', 'uid-DOC-123', 'IND1', 'phoneNumber', 'individual_uid', 'https://']) assert.ok(!s.includes(bad), bad);
-  assert.deepEqual(sent[0].identity, { email: 'dr.test@even.in', display_name: 'Dr Test' });
+  assert.deepEqual(sent[0].identity, { email: FAKE_EMAIL, display_name: FAKE_NAME });
   assert.deepEqual(sent[0].route, { type: 'prescription', prescription_ref: 'RX9' });
 });
 

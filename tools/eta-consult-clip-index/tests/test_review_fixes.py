@@ -3,7 +3,7 @@ import contextlib, datetime as dt, http.client, io, json, os, socket, sys, tempf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.dont_write_bytecode = True
 import gen_index as G, serve as S, build_patients as B
-from test_gen_index import Base, row
+from test_gen_index import Base, row, PATIENT
 
 DATA = bytes(range(256)) * 40
 
@@ -113,14 +113,14 @@ class TestGenFixes(Base):
         self.assertEqual(open(old).read(), "OLD")
 
     # late Rx chip
-    def _late(self, rx_ts, name="Jane Roe"):
+    def _late(self, rx_ts, name=PATIENT):
         r = row("u1"); self.make_files(r)  # span_end 10:03:36.726 IST
         return self.render([r], {"u1": {"patient_name": name, "prescription_ts": rx_ts}})
 
     def test_late_rx_chip_shown_over_30_min_and_name_kept(self):
         html = self._late("2026-10-07 10:48:36+05:30")  # +45 min
         self.assertIn("late Rx: patient name from a prescription saved 45 min after the consult", html)
-        self.assertIn("Jane Roe", html)
+        self.assertIn(PATIENT, html)
 
     def test_no_late_rx_chip_within_30_min(self):
         self.assertNotIn("late Rx", self._late("2026-10-07 10:33:36+05:30"))  # +30 min exactly
@@ -128,7 +128,7 @@ class TestGenFixes(Base):
 
     def test_no_late_rx_chip_without_timestamp_or_for_unknown_patient(self):
         r = row("u1"); self.make_files(r)
-        self.assertNotIn("late Rx", self.render([r], {"u1": {"patient_name": "Jane Roe"}}))
+        self.assertNotIn("late Rx", self.render([r], {"u1": {"patient_name": PATIENT}}))
         self.assertNotIn("late Rx", self._late("2026-10-07 12:00:00+05:30", name=None))
 
     # title start time
@@ -143,8 +143,8 @@ class TestGenFixes(Base):
 
     def test_rendered_title_uses_window_start(self):
         r = row("u1"); self.make_files(r)
-        html = self.render([r], {"u1": {"patient_name": "Jane Roe", "window_t_open_ist": "2026-10-07 09:43:22"}})
-        self.assertIn("Dr A · 09:43 · Jane Roe · 09:42–10:03 (21 min)", html)
+        html = self.render([r], {"u1": {"patient_name": PATIENT, "window_t_open_ist": "2026-10-07 09:43:22"}})
+        self.assertIn("Dr A · 09:43 · Fake Patient · 09:42–10:03 (21 min)", html)
 
 
 class TestBuildPatientsOpen(unittest.TestCase):
@@ -156,7 +156,7 @@ class TestBuildPatientsOpen(unittest.TestCase):
     def test_merge_stores_window_open_for_matched_and_unmatched(self):
         w = {"u1": [{"warehouse_prescription_uid": "P1", "prescription_ref": "P1", "t_open": "2026-10-07 06:18:44+00:00"}],
              "u2": [{"warehouse_prescription_uid": None, "prescription_ref": "P2", "t_open": "2026-10-07 07:00:00+00:00"}]}
-        res = B.merge(["u1", "u2"], w, {"P1": {"name": "Jane Roe", "ts": "2026-10-07 11:48:45+05:30"}})
+        res = B.merge(["u1", "u2"], w, {"P1": {"name": PATIENT, "ts": "2026-10-07 11:48:45+05:30"}})
         self.assertEqual(res["u1"]["window_t_open_ist"], "2026-10-07 11:48:44")
         self.assertEqual(res["u2"]["window_t_open_ist"], "2026-10-07 12:30:00")
         self.assertIsNone(res["u2"]["patient_name"])

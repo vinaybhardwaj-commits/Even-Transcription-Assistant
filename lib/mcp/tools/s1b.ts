@@ -14,6 +14,7 @@ import { windowBlindAny, windowsBlindAny } from "@/lib/room-access/check";
 import { windowDetailRow, windowRunSummaries, windowsStartingIn } from "@/lib/room-access/tool-reads";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { sql } from "@/lib/db";
+import { readLatestRunHeader } from "@/lib/encounter-hypotheses";
 import { ROOMS } from "@/lib/rooms-live/rooms";
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
@@ -789,12 +790,8 @@ async function oneWindow(windowId: string): Promise<Row> {
   const runs = await windowRunSummaries(windowId);
   let hypo: Row;
   try {
-    const h = (await sql`
-      SELECT id, created_at, n_hypotheses FROM encounter_hypothesis_run
-       WHERE room_day_id = ${(win.room_day_id as string | null) ?? ""}::text
-       ORDER BY created_at DESC LIMIT 1
-    `) as Row[];
-    hypo = h[0] ? { latest_run_id: String(h[0].id), run_at: iso(h[0].created_at), n_hypotheses: num(h[0].n_hypotheses) } : { latest_run_id: null };
+    const h = await readLatestRunHeader((win.room_day_id as string | null) ?? "");
+    hypo = h ? { latest_run_id: h.id, run_at: iso(h.created_at), n_hypotheses: num(h.n_hypotheses) } : { latest_run_id: null };
   } catch (e) {
     const why = notCollectedReason(e);
     if (!why) throw e;

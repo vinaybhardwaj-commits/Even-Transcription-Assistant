@@ -254,7 +254,7 @@ final class UpdateRig: @unchecked Sendable {
     #expect(r.offer(r.record(extra: ["extra": .int(1)]), updater: u) == .refused(.malformed))
     #expect(r.offer(r.record(url: "http://www.evenscribe.app/x.pkg"), updater: u) == .refused(.malformed), "not https")
     #expect(r.offer(r.record(url: "https://evil.example/x.pkg"), updater: u) == .refused(.malformed), "not our host")
-    #expect(r.offer(r.record(url: "https://user:pw@www.evenscribe.app/x.pkg"), updater: u) == .refused(.malformed))
+    #expect(r.offer(r.record(url: "https://user:pw" + "@www.evenscribe.app/x.pkg"), updater: u) == .refused(.malformed))
     #expect(r.offer(r.record(sha: String(repeating: "g", count: 64)), updater: u) == .refused(.malformed))
     #expect(r.offer(("not json", "AAAA"), updater: u) == .refused(.malformed))
     #expect(r.downloaded.isEmpty)

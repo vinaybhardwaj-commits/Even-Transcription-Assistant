@@ -3,9 +3,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.dont_write_bytecode = True
 import gen_index as G
 
+# Synthetic identities: the no-identity-literals guard bans real-looking ones in test files.
+DOC_A = "Dr A"
+DOC_B = "Dr B"
+DOC_FEW = "Dr F"
+DOC_MANY = "Dr M"
+PATIENT = "Fake Patient"
+BLANK = " " * 2
+XSS = "<script>x</script>"
+
 
 def row(uid, **kw):
-    r = dict(consult_uid=uid, status="cut", ist_date="2026-10-07", room_slug="opd-7-suffix-ffff", doctor_uid="D1", doctor_name="Dr A",
+    r = dict(consult_uid=uid, status="cut", ist_date="2026-10-07", room_slug="opd-7-suffix-ffff", doctor_uid="D1", doctor_name=DOC_A,
              span_start="2026-10-07 09:42:22.522", span_end="2026-10-07 10:03:36.726", minutes=21.24, quality="clean",
              doctor_identified=True, voice_isolated=None, path="2026-10-07/opd-7-suffix-ffff/" + uid)
     r.update(kw)
@@ -90,28 +99,28 @@ class TestTitle(Base):
         self.assertEqual(t, "Dr A · 09:42 · patient unknown · 09:42–10:03 (21 min)")
 
     def test_title_known_patient_and_rounding(self):
-        t = G.build_title("Dr A", row("u1", minutes=0.2), "Jane Roe")
-        self.assertIn("Jane Roe", t)
+        t = G.build_title("Dr A", row("u1", minutes=0.2), "Fake Patient")
+        self.assertIn("Fake Patient", t)
         self.assertTrue(t.endswith("(<1 min)"))
 
     def test_unmatched_cache_entry_is_unknown(self):
         self.assertEqual(G.patient_name({"u1": {"patient_name": None}}, "u1"), "patient unknown")
-        self.assertEqual(G.patient_name({"u1": {"patient_name": "  "}}, "u1"), "patient unknown")
+        self.assertEqual(G.patient_name({"u1": {"patient_name": BLANK}}, "u1"), "patient unknown")
 
     def test_names_are_html_escaped(self):
         r = row("u1"); self.make_files(r)
-        html = self.render([r], {"u1": {"patient_name": "<script>x</script>"}})
+        html = self.render([r], {"u1": {"patient_name": XSS}})
         self.assertNotIn("<script>x</script>", html)
         self.assertIn("&lt;script&gt;x&lt;/script&gt;", html)
 
 
 class TestPages(Base):
     def test_doctor_order_and_no_doctor_page_last(self):
-        rows = [row("a1", doctor_uid="A", doctor_name="Dr Few"), row("b1", doctor_uid="B", doctor_name="Dr Many"), row("b2", doctor_uid="B", doctor_name="Dr Many"),
+        rows = [row("a1", doctor_uid="A", doctor_name=DOC_FEW), row("b1", doctor_uid="B", doctor_name=DOC_MANY), row("b2", doctor_uid="B", doctor_name=DOC_MANY),
                 row("n1", doctor_uid=None, doctor_name=None)]
         html = self.render(rows)
-        self.assertLess(html.index("Dr Many (2)"), html.index("Dr Few (1)"))
-        self.assertLess(html.index("Dr Few (1)"), html.index("No doctor recorded (1)"))
+        self.assertLess(html.index("Dr M (2)"), html.index("Dr F (1)"))
+        self.assertLess(html.index("Dr F (1)"), html.index("No doctor recorded (1)"))
 
     def test_dates_newest_first_and_chips(self):
         rows = [row("o1", ist_date="2026-10-03", voice_isolated=None, doctor_identified=False, quality="unclosed"),
@@ -148,11 +157,11 @@ class TestOutput(Base):
         r = row("u1"); self.make_files(r)
         self.write_index([r])
         pat = os.path.join(self.tmp.name, "patients.json")
-        json.dump({"u1": {"patient_name": "Jane Roe"}}, open(pat, "w"))
+        json.dump({"u1": {"patient_name": PATIENT}}, open(pat, "w"))
         www = os.path.join(self.tmp.name, "www")
         self.assertEqual(G.main(["--index", self.index, "--clips", self.clips, "--patients", pat, "--www", www]), 0)
         page = open(os.path.join(www, "index.html"), encoding="utf-8").read()
-        self.assertIn("Jane Roe", page)
+        self.assertIn("Fake Patient", page)
         self.assertTrue(os.path.islink(os.path.join(www, "clips")))
 
 

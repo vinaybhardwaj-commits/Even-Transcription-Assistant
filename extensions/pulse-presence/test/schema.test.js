@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const E = require('../src/lib/events.js');
 const { createAgent } = require('../src/agent.js');
-const { makeChrome, makeFetch, bytes } = require('./fakes.js');
+const { makeChrome, makeFetch, bytes, FAKE_EMAIL, FAKE_NAME } = require('./fakes.js');
 
 const R6 = ['machine_id', 'room', 'email', 'display_name', 'event', 'encounter_id', 'prescription_ref', 'ts', 'tab_focus', 'impersonating', 'ext_version', 'reason'];
 const CFG = { machine_id: 'M', room: 'R', ingest_url: 'https://ingest.example/e', token: 'T' };
@@ -38,7 +38,7 @@ test('every outbound event over a full session matches R6 exactly', async () => 
   const fetch = makeFetch();
   const agent = createAgent(chrome, { fetch });
   const from = { id: 'ext-id', url: 'https://pulse.even.in/' };
-  const m = (o) => ({ type: 'pulse_state', status: 'present', identity: { email: 'a@b.c', display_name: 'A' }, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...o });
+  const m = (o) => ({ type: 'pulse_state', status: 'present', identity: { email: FAKE_EMAIL, display_name: FAKE_NAME }, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...o });
   const go = async (x) => { chrome.runtime.onMessage.fire(x, from); await agent.settled(); };
   await go(m());
   await go(m({ route: { type: 'prescription', prescription_ref: 'RX1' } }));

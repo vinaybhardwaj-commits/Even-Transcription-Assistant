@@ -49,13 +49,13 @@ const KEYS = publicKeysOf(SIGNER);
 
 async function enqueue(body: unknown, opts: { cookie?: string | null; raw?: string } = {}) {
   const { POST } = await import("@/app/api/admin/fleet/commands/route");
-  H.cookie = opts.cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : opts.cookie;
+  H.cookie = opts.cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : opts.cookie;
   const res = await POST(new NextRequest("https://x.test/api/admin/fleet/commands", { method: "POST", body: opts.raw ?? JSON.stringify(body), headers: { "content-type": "application/json" } }));
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
 }
 async function overview(cookie?: string | null) {
   const { GET } = await import("@/app/api/admin/fleet/route");
-  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.invalid" }) : cookie;
+  H.cookie = cookie === undefined ? await signAdminJwt({ admin_id: "adm_fake1", email: "admin@example.test" }) : cookie;
   const res = await GET(new NextRequest("https://x.test/api/admin/fleet"));
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
 }

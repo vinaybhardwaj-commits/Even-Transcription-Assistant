@@ -261,7 +261,7 @@ describe("attributeFromWarehouse", () => {
   it("RETRY CAP: the write bumps warehouse_attempts only for an unresolved lookup, and the 12th unresolved one is reported as gave_up", async () => {
     const { db, issued } = fakeDb([cand(), cand({ consult_key: "C2@m", consult_uid: "C2", prescription_ref: null })], {
       updateReturns: (payload) => payload.map((p) => ({
-        consult_key: p.consult_key, machine: "m", room_slug: "opd-6", consult_uid: p.consult_key === "C1@m" ? "C1" : "C2", doctor_uid: "EDOC1", display_name: "x",
+        consult_key: p.consult_key, machine: "m", room_slug: "opd-6", consult_uid: p.consult_key === "C1@m" ? "C1" : "C2", doctor_uid: "EDOC1", display_name: makeFakeClinician(1).full_name,
         warehouse_doctor_uid: p.warehouse_doctor_uid, warehouse_doctor_name: null, doctor_mismatch: p.doctor_mismatch,
         warehouse_attempts: p.consult_key === "C1@m" ? 0 : 12, // C1 resolved; C2 just used its 12th unresolved check
       })),
