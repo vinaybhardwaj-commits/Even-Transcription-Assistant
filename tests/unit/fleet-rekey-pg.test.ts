@@ -315,6 +315,57 @@ const active = async () => (await devices()).filter((x) => x.status === "active"
     });
   });
 
+  describe("B3.10: the approval is consumed only by the statement that rotated and inserted", () => {
+    it("two DIFFERENT approved keys register concurrently: exactly one 201, one active + one rotated row, the loser's approval stays UNUSED, no phantom device, one audit row each", async () => {
+      const k2 = newKey();
+      const k3 = newKey();
+      await approve(k2);
+      await approve(k3);
+      const [a, b] = await Promise.all([register(k2), register(k3)]);
+      expect([a.status, b.status].sort()).toEqual([201, 409]);
+      const [win, lose, loseKey] = a.status === 201 ? [a, b, k3] : [b, a, k2];
+      expect(lose.json.error).toBe("KEY_CONFLICT");
+      const d = await devices();
+      expect(d.map((x) => x.status).sort()).toEqual(["active", "rotated"]);
+      expect(d.find((x) => x.status === "active")!.device_id).toBe(win.json.device_id);
+      const ap = await approvals();
+      const loser = ap.find((x) => x.pk_fingerprint === fpOf(loseKey))!;
+      expect(loser).toMatchObject({ used_at: null, outcome: null, old_device_id: null, new_device_id: null });
+      const used = ap.filter((x) => x.used_at !== null);
+      expect(used).toHaveLength(1);
+      expect(used[0]).toMatchObject({ outcome: "rekeyed", old_device_id: DEV, new_device_id: win.json.device_id });
+      for (const x of ap.filter((y) => y.new_device_id)) expect(d.map((y) => y.device_id)).toContain(x.new_device_id); // no phantom device
+      expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM fleet_audit WHERE action = 'fleet_device_rekeyed'`)[0]!.n).toBe(1);
+      expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'install.rekeyed' AND target_id = ${INSTALL}`)[0]!.n).toBe(1);
+    });
+
+    it("an admin revoke landing between the lookup and the re-key leaves the approval unused", async () => {
+      const k2 = newKey();
+      await approve(k2);
+      const real = H.sql;
+      let fired = 0;
+      H.sql = (async (s: TemplateStringsArray, ...v: unknown[]) => {
+        if (fired === 0 && s.join("?").includes("'fleet_device_rekeyed'")) {
+          fired += 1;
+          pg.exec(`UPDATE fleet_devices SET status = 'revoked', revoked_at = now() WHERE device_id = '${DEV}'`); // lands after register read the active row, before the re-key statement
+        }
+        return real(s, ...v);
+      }) as never;
+      let r;
+      try {
+        r = await register(k2);
+      } finally {
+        H.sql = real;
+      }
+      expect(fired).toBe(1);
+      expect(r.status).toBe(409);
+      expect(r.json.error).toBe("REVOKED");
+      expect((await approvals())[0]).toMatchObject({ used_at: null, outcome: null, new_device_id: null });
+      expect((await devices()).map((x) => x.status)).toEqual(["revoked"]);
+      expect((await q`SELECT 1 FROM fleet_audit WHERE action = 'fleet_device_rekeyed'`)).toHaveLength(0);
+    });
+  });
+
   describe("POST /api/admin/installs/{id}/undo-rekey", () => {
     it("restores the old row to active, retires the new row, marks the approval undone, audits it; the old key polls again and the new one is refused", async () => {
       const k2 = newKey();

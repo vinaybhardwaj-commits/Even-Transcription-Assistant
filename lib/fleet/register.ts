@@ -117,41 +117,44 @@ export async function registerDevice(sql: FleetSql, input: { roomId: string; bod
     }
     return bad("KEY_CONFLICT", 409);
   };
-  // The operator-approved re-key: ONE statement, so it is one transaction. clr (consume the approval that matches this install AND this fingerprint, unexpired, unused)
-  // gates old (rotate the active row) gates ins (the new row) gates the audit row; any step that matches nothing, e.g. no approval, a second concurrent re-key or a retire
-  // in between, stops the chain and nothing changes.
+  // The operator-approved re-key: ONE statement, so it is one transaction (the injected sql is a tag function with no interactive transaction, and a single statement
+  // is atomic by construction). Data-modifying CTEs all run to completion whether or not anything reads them, so the ORDER is made by data dependency, and the approval
+  // is consumed LAST: pick (read-only; locks the matching open approval FOR UPDATE, so two requests on one approval serialise and the second no longer sees it open)
+  // gates old (rotate the active row; a concurrent re-key, a revoke or a retire leaves it with zero rows) gates ins (the new row) gates clr (consume the approval,
+  // WHERE EXISTS over ins) and the audit rows. A request that loses leaves its approval UNUSED: nothing is consumed unless the rotation and the insert happened here.
   const rekey = async (old: DeviceRow): Promise<RegisterResult> => {
     const newId = `dev_${randomBytes(12).toString("hex")}`;
     const done = await sql`
-      WITH clr AS (
-        UPDATE fleet_rekey_approval SET used_at = now(), outcome = 'rekeyed', old_device_id = ${old.device_id}, new_device_id = ${newId}
-         WHERE approval_id = (
-                 SELECT approval_id FROM fleet_rekey_approval
-                  WHERE install_id = ${b.install_id} AND pk_fingerprint = ${fp} AND used_at IS NULL AND expires_at > now()
-                  ORDER BY created_at DESC, approval_id LIMIT 1)
-           AND used_at IS NULL AND expires_at > now()
+      WITH pick AS (
+        SELECT approval_id, approved_by FROM fleet_rekey_approval
+         WHERE install_id = ${b.install_id} AND pk_fingerprint = ${fp} AND used_at IS NULL AND expires_at > now()
            AND EXISTS (SELECT 1 FROM room_install WHERE install_id = ${b.install_id} AND retired_at IS NULL)
-     RETURNING approval_id, approved_by
+         ORDER BY created_at DESC, approval_id LIMIT 1
+           FOR UPDATE
       ), old AS (
-        UPDATE fleet_devices SET status = 'rotated', rotated_at = now(), approval_id = (SELECT approval_id FROM clr)
-         WHERE device_id = ${old.device_id} AND install_id = ${b.install_id} AND status = 'active' AND EXISTS (SELECT 1 FROM clr)
+        UPDATE fleet_devices SET status = 'rotated', rotated_at = now(), approval_id = (SELECT approval_id FROM pick)
+         WHERE device_id = ${old.device_id} AND install_id = ${b.install_id} AND status = 'active' AND EXISTS (SELECT 1 FROM pick)
      RETURNING device_id
       ), ins AS (
         INSERT INTO fleet_devices (device_id, install_id, room_id, machine, hw_model, serial_hash, helper_version, key_alg, public_key)
         SELECT ${newId}, ${b.install_id}, ${roomId}, ${b.machine}, ${b.hw_model}, ${b.serial_hash}, ${b.helper_version}, 'ed25519', ${b.public_key} FROM old
      RETURNING device_id
+      ), clr AS (
+        UPDATE fleet_rekey_approval SET used_at = now(), outcome = 'rekeyed', old_device_id = ${old.device_id}, new_device_id = ${newId}
+         WHERE approval_id = (SELECT approval_id FROM pick) AND used_at IS NULL AND expires_at > now() AND EXISTS (SELECT 1 FROM ins)
+     RETURNING approval_id, approved_by
       ), aud AS (
         INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
         SELECT 'system'::actor_type, ${`room:${roomId}`}::text, 'install.rekeyed', 'room_install', ${b.install_id}::text,
                jsonb_build_object('who', ${`room:${roomId}`}::text, 'approved_by', clr.approved_by, 'install_id', ${b.install_id}::text, 'pk_fingerprint', ${fp}::text,
                                   'approval_id', clr.approval_id, 'old_device_id', ${old.device_id}::text, 'new_device_id', ${newId}::text, 'outcome', 'rekeyed')
-          FROM ins, clr
+          FROM clr
      RETURNING 1
       )
       INSERT INTO fleet_audit (actor, action, machine, summary)
       SELECT ${`room:${roomId}`}, 'fleet_device_rekeyed', ${b.machine}::text,
              ${`install ${b.install_id}: device ${old.device_id} rotated, device ${newId} registered, fingerprint ${fp}, outcome rekeyed (helper ${b.helper_version ?? "unknown"}); approval `}::text || clr.approval_id || ' approved by ' || clr.approved_by
-        FROM ins, clr
+        FROM clr
    RETURNING id
     `;
     if (done.length === 0) {

@@ -4,6 +4,7 @@
  * Body: { "approval_id": "rka_...", "reason": "<1..200 chars>" }. In one transaction the rotated device row goes back to 'active', the device the re-key created goes to
  * 'retired' (retired_at), and the approval records outcome 'undone'. Nothing is deleted. Audited (audit_log + fleet_audit). Refused: an unknown approval for this install
  * (404), a retired install (409 RETIRED), an approval that did not end 'rekeyed' or whose devices are no longer in the re-keyed state (409 NOT_UNDOABLE).
+ * UNDO LOCKS OUT a Mac that already holds the new key: the 0.1.40 client waits at 900 s, and a fresh approval of the same fingerprint recovers it.
  * Auth is the retire route's guard, unchanged: the admin cookie or the migration secret (installAdminGuard).
  */
 import { NextRequest, NextResponse } from "next/server";
