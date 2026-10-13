@@ -31,5 +31,6 @@ Add one line to `steward/scrub-allow.txt`: `<gitleaks fingerprint> # <one-line r
 - YAML flow values that span several lines (`uhid: [` ... `]`) and a nested `patient:` then `name:` are not caught (fixture `xfail-phi-field-yamlmultiline.yaml`).
 - Unparsable JSON with a flow list under a PHI key, and schema-shaped values carrying data under `example`, `default`, `title`, `description` or `enum`, are not caught.
 - The tree-scan control above is a manual step, not a CI step: a tree scan of main today has hits that predate the gate, so it is compared against the files a push changes.
+- `.env.example` keys ending in `_ID` are exempt from the non-empty check. A real secret stored under an `_ID` key there is caught only by the gitleaks default rules (AWS key ids and other known key shapes).
 - Hits from the python rules (path, PHI, host) have no per-line allowlist; move synthetic data under `fixtures/synthetic/`.
 Gitleaks decodes nested encodings (depth 5). The PHI rule reads field names, so a value stored under an unlisted key is not caught. Add the key to `PHI_FIELDS`.
