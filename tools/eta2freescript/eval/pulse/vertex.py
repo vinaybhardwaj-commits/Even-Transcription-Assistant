@@ -25,8 +25,9 @@ DEFAULT_ADJ_MODEL = "gemini-3.5-flash"
 MAX_REQUEST_CHARS = 40_000
 # Shapes of what ingest.format_transcript writes, matched on folded text.
 _TRANSCRIPT_SHAPES = (
-    ("a transcript turn line (T<n> [S<n>...])", re.compile(r"t\d+\s*\[\s*s\d+\s*(\|[^\]]{0,24})?\]")),
-    ("a NATIVE[<lang>]: part", re.compile(r"native\s*\[\s*[a-z]{2,3}(-[a-z]{2,4})?\s*\]\s*:")),
+    ("a transcript turn line (T<n> [S<label>] (mm:ss))",
+     re.compile(r"t\d+\s*\[\s*s[^\]]{1,32}\]\s*\(\s*\d{1,3}\s*:\s*\d{2}\s*\)")),
+    ("a NATIVE[<lang>]: ... | ENGLISH: pair", re.compile(r"native\s*\[[^\]]{1,16}\]\s*:[^|]{0,4000}\|\s*english\s*:")),
     ("an english/native segments key",
      re.compile(r"(english|native)\s*[-_.]\s*segments|[\"']\s*(english|native)\s+segments\s*[\"']")),
 )
@@ -68,6 +69,7 @@ _CONFUSABLES = str.maketrans({
     "\u043d": "h", "\u03b7": "h",
     "\u0131": "i",
     "\ua731": "s",
+    "\u1d1b": "t",
 })
 
 
@@ -91,11 +93,18 @@ def _strip_cf(t: str) -> str:
     return "".join(c for c in t if not _invisible(c))
 
 
+def _strip_marks(t: str) -> str:
+    return "".join(c for c in t if unicodedata.category(c) not in ("Mn", "Me"))
+
+
 def _fold(t: str) -> str:
     """Drop invisibles, NFKC, fold dotted I, casefold, map confusables and dashes, collapse whitespace."""
-    t = unicodedata.normalize("NFKC", _strip_cf(t)).replace("\u0130", "I")
+    # The guard only inspects the text, so combining marks (Mn, Me) can go. Decompose first (NFKD), or a
+    # precomposed letter such as U+1E6A (T with dot) would survive as a letter that is not a "t".
+    t = unicodedata.normalize("NFKC", _strip_marks(unicodedata.normalize("NFKD", _strip_cf(t))))
+    t = _strip_marks(t).replace("\u0130", "I")
     t = _strip_cf(t).casefold().replace("i\u0307", "i").translate(_CONFUSABLES)
-    t = "".join("-" if unicodedata.category(c) == "Pd" else c for c in t)
+    t = "".join("-" if unicodedata.category(c) == "Pd" or c in "\u2212\u2043" else c for c in t)
     return " ".join(t.split())
 
 
@@ -111,8 +120,11 @@ def guard_request(*texts: str) -> None:
 
 
 def _real_ruling(r: str | None) -> bool:
-    dead = {"Mn", "Me", "Cf", "Zs", "Cc", "Co", "Cs"}
-    return any(unicodedata.category(c) not in dead and not _invisible(c) for c in (r or ""))
+    """Allow-list: a letter, number, punctuation or symbol (or Mc) that is visible."""
+    def ok(c: str) -> bool:
+        k = unicodedata.category(c)
+        return (k[0] in "LNPS" or k == "Mc") and not _invisible(c) and c != "\u3164"
+    return any(ok(c) for c in (r or ""))
 
 
 def check_key_file(path) -> Path:

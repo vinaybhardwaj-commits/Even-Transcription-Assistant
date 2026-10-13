@@ -373,7 +373,7 @@ def test_key_file_mode_checked(tmp_path):
         VertexClient.from_env({k: v for k, v in env.items() if k != "VERTEX_SA_KEY_FILE"}, token_provider=lambda: "t")
 
 
-@pytest.mark.parametrize("marker", ["T0 [S1]", "NATIVE[hi]:", "english_segments", "native_segments"])
+@pytest.mark.parametrize("marker", ["T0 [S1] (00:00) x", "NATIVE[hi]: a | ENGLISH: b", "english_segments", "native_segments"])
 def test_transcript_marker_guard(marker, assets, cat, extraction):
     t = FakeTransport(extraction)
     with pytest.raises(TranscriptGuardError):
@@ -427,7 +427,8 @@ def test_visit_date_is_local_ist_date():
     assert R.visit_date_of({"encounter": {"window_start": "2026-10-13T03:00:00+00:00"}}) == date(2026, 10, 13)
 
 
-@pytest.mark.parametrize("text", ["t0 [s1]", "T0  [S1]", "T0\t\n[S1]", "native[hi]:", "Native[hi] :", "ＮＡＴＩＶＥ[ｈｉ]:", "Ｔ０ [Ｓ１]",
+@pytest.mark.parametrize("text", ["t0 [s1] (00:00)", "T0  [S1]  (0:05)", "T0\t\n[S1] (00:00)", "native[hi]: a | english: b",
+                                  "Native[hi] : a | English :", "ＮＡＴＩＶＥ[ｈｉ]: a | ＥＮＧＬＩＳＨ:", "Ｔ０ [Ｓ１] （００：００）",
                                   "English_Segments", "NATIVE_SEGMENTS"])
 def test_marker_guard_is_case_nfkc_and_whitespace_insensitive(text):
     with pytest.raises(TranscriptGuardError):
@@ -459,19 +460,39 @@ def test_from_env_region_ruling(tmp_path):
     assert c.location == "us-central1"
 
 
-@pytest.mark.parametrize("text", ["T1 [S0|doctor] (00:05) hi", "T12[S3|patient]", "T0\u200b [S1]", "nati\u00adve[hi]:", "\u0422" + "0 [S1]",
-                                  "NAT\u0130VE[hi]:", "english-segments"])
+@pytest.mark.parametrize("text", ["T1 [S0|doctor] (00:05) hi", "T12[S3|patient] (01:10)", "T0\u200b [S1] (00:00)", "nati\u00adve[hi]: a | english: b",
+                                  "\u0422" + "0 [S1] (00:00)", "NAT\u0130VE[hi]: a |ENGLISH:", "english-segments"])
 def test_guard_by_shape_refuses(text):
     with pytest.raises(TranscriptGuardError):
         guard_request("ok", f"x {text} y")
 
 
+from tools.eta2freescript.ingest import Consult, Turn, format_transcript
+
+
+def _writer(speaker="0", role="unknown", role_source="none", text="x", native=None, quarantined=False):
+    c = Consult(uid="u", turns=[Turn(idx=0, t0_ms=0, t1_ms=1000, speaker=speaker, text=text, native_text=native,
+                                     native_lang="hi" if native else None, role=role, role_source=role_source)],
+                clip_t0_ms=0, clip_t1_ms=1000, language_code="en", english_source="s", diarised=True, room="r")
+    return format_transcript(c, {0} if quarantined else frozenset())
+
+
+_WRITER_LINES = [
+    _writer(), _writer("?"), _writer("?", quarantined=True), _writer("A"), _writer("speaker_0"), _writer("0", quarantined=True),
+    _writer("3", "patient", "role_track"), _writer("0", native="a", text="b"), _writer("?", native="a", text="b", quarantined=True),
+]
 _REFUSE_B4A3 = [
-    "T0\u034f[S1]", "T0\ufe0f[S1]", "T0\u3164[S1]", "T0\u2800[S1]", "T0\U000e0100[S1]", "T0\u115f[S1]", "T0\uffa0[S1]",
-    "T0 [\ua731" + "1]", "nat\u0131ve[hi]:", "english\u2014segments", "english\u2013segments", "english\u2010segments",
-    "english.segments", "english_segments", '"english segments"', "'native segments'", "T3 [S2|doctor] (01:10) hi",
-    "NATIVE[ta]: x | ENGLISH: y", "NATIVE[pt-BR]: x", '{"native_segments": []}', '{"english_segments": []}',
-    "t3 [ s2 | role ]",
+    "T0 [S?] (00:00) x", "T0 [S?] (00:00) [QUARANTINED: possible other consult] x", "T0 [SA] (00:01) x",
+    "T0 [Sspeaker_0] (00:01) x", "T12 [S3|patient] (01:10) x", "T0 [S0] (00:00) NATIVE[hi]: a | ENGLISH: b",
+    "NATIVE[ta]: x | ENGLISH: y", "NATIVE[pt-BR]: x | ENGLISH: y",
+    "T0\u034f[S1] (00:00) x", "T0\ufe0f[S1] (00:00) x", "T0\u3164[S1] (00:00) x", "T0\u2800[S1] (00:00) x",
+    "T0\U000e0100[S1] (00:00) x", "T0\u115f[S1] (00:00) x", "T0\uffa0[S1] (00:00) x", "T0 [\ua731" + "1] (00:00) x",
+    "nat\u0131ve[hi]: a | english: b", "T3 [S2|doctor] (01:10) hi", "t3 [ s2 | role ] ( 1 : 10 ) hi",
+    "T\u03000 [S0] (00:00) x", "T\u03070 [S0] (00:00) x", "\u1e6a0 [S0] (00:00) x", "T0 [\u1e60?] (00:00) x", "T0 [S\u0307?] (00:00) x", "T0 [S\u0323A] (00:00) x", "\u1d1b0 [S0] (00:00) x", "T0 [S0] (00:00)",
+    "english\u2014segments", "english\u2013segments", "english\u2010segments", "english\u2212segments", "english\u2043segments",
+    "english.segments", "english_segments", '"english segments"', "'native segments'",
+    '{"native_segments": []}', '{"english_segments": []}',
+    *_WRITER_LINES,
 ]
 _PASS_B4A3 = [
     "a t0 and some text", "nativeness", "patient native place", "Tab T3 tablet", "T3 hormone",
@@ -479,6 +500,11 @@ _PASS_B4A3 = [
     "MRI T1 [STIR]", "T1 [SI joint]", "lesion T12 [spine]", "Vitals at T1 [Systolic 120]",
     "native [Bihar]", "native[1]", "English segments of the leaflet", "ST segments normal", "T2DM [since 2010]",
     "english segments", "native[hi] later",
+    "spine T2 [S1] level", "T12 [S1] radiculopathy", "L5-S1 and T1 [S2] dermatome", "Fundus T1 [S3] grade",
+    "T3 [S4|L5] sacral", "native[en]: speaks English", "Pt native [en]: ok",
+    # B4a.3 must-refuse cases that carry no timestamp or no ENGLISH pair; moved here by the B4a.4 kickoff
+    "T0 [S1]", "T0\u034f[S1]", "T0\u2800[S1]", "T0 [\ua731" + "1]", "t3 [ s2 | role ]", "nat\u0131ve[hi]:",
+    "NATIVE[pt-BR]: x", "T12 [S3|patient]", "T0 [S0] hello", "NATIVE[hi]: a",
 ]
 
 
@@ -509,3 +535,14 @@ def test_ruling_that_must_not_unlock(ruling):
     with pytest.raises(ReplayUnavailable):
         VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
     VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling="r1")
+
+
+@pytest.mark.parametrize("ruling", ["\u2028", "\u2029", "\u0378", "\uffff", "\U0010ffff", "\u3164", "\u0020", "\u0000"])
+def test_ruling_allow_list_more(ruling):
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+
+
+@pytest.mark.parametrize("ruling", ["r", "7", "#", "+", "\u093e", "\u0915"])
+def test_ruling_allow_list_unlocks(ruling):
+    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
