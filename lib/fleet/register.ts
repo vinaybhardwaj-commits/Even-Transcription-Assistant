@@ -7,8 +7,11 @@
  * proof is refused, so a leaked room JWT alone cannot bind an attacker's key to a Mac that does not hold it... except by an attacker who also makes the proof, which is
  * why one active key per install_id is the rule (a different key is 409 KEY_CONFLICT, never an overwrite).
  *
- * Rules: one device per install_id. Same key again = idempotent 200. A different key = 409 KEY_CONFLICT (rotation/re-enrol, TS-H3 later slice). A revoked device = 409 REVOKED. A
- * retired install = 409 RETIRED. Room mismatch = 403. machine must equal the install's hostname (normalised) when the install has one.
+ * Rules: one ACTIVE device per install_id (partial unique index, migration 0167). Same key again = idempotent 200. A different key = 409 KEY_CONFLICT, EXCEPT inside an
+ * operator approval (POST /api/admin/installs/{id}/allow-rekey, lib/fleet/rekey.ts: room_install.rekey_allowed_until in the future): then, with the same room JWT and
+ * proof of possession as always, ONE statement marks the old row 'rotated' (kept, never deleted), inserts a new device with a new server-minted device_id, clears the
+ * approval and audits `fleet_device_rekeyed`; 201 with the new device id. The approval is one-shot. A revoked or rotated-away device with no active successor = 409
+ * REVOKED, never re-keyable. A retired install = 409 RETIRED. Room mismatch = 403. machine must equal the install's hostname (normalised) when the install has one.
  */
 import { randomBytes } from "node:crypto";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
@@ -79,8 +82,8 @@ export async function registerDevice(sql: FleetSql, input: { roomId: string; bod
 
   // 2. the install: must exist, belong to the caller's room, be live, and be this machine
   const inst = (await sql`
-    SELECT install_id, room_id, hostname, retired_at FROM room_install WHERE install_id = ${b.install_id}
-  `) as Array<{ install_id: string; room_id: string; hostname: string | null; retired_at: unknown }>;
+    SELECT install_id, room_id, hostname, retired_at, COALESCE(rekey_allowed_until > now(), false) AS rekey_open, rekey_allowed_by FROM room_install WHERE install_id = ${b.install_id}
+  `) as Array<{ install_id: string; room_id: string; hostname: string | null; retired_at: unknown; rekey_open: boolean; rekey_allowed_by: string | null }>;
   const i = inst[0];
   if (!i) return bad("unknown_install", 404);
   if (i.room_id !== roomId) return bad("room_mismatch", 403);
@@ -90,31 +93,62 @@ export async function registerDevice(sql: FleetSql, input: { roomId: string; bod
   // 3. a registration proof is accepted once
   if (!(await claimJti(sql, `install:${b.install_id}`, jws.payload.jti as string))) return bad("replay", 401);
 
-  // 4. one device per install
+  // 4. one ACTIVE device per install. The row judged is the active one; with none, the newest row (revoked, or rotated away and since revoked).
   const existing = async () =>
     ((await sql`
       SELECT device_id, public_key, status, room_id, to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS registered_at
-        FROM fleet_devices WHERE install_id = ${b.install_id}
+        FROM fleet_devices WHERE install_id = ${b.install_id} ORDER BY (status = 'active') DESC, registered_at DESC, device_id LIMIT 1
     `) as DeviceRow[])[0];
-  const answerExisting = async (d: DeviceRow): Promise<RegisterResult> => {
+  const answerExisting = async (d: DeviceRow, mayRekey: boolean): Promise<RegisterResult> => {
     if (d.status !== "active") return bad("REVOKED", 409);
-    if (d.public_key !== b.public_key) return bad("KEY_CONFLICT", 409);
+    if (d.public_key !== b.public_key) return mayRekey && i.rekey_open ? rekey(d) : bad("KEY_CONFLICT", 409);
     await sql`UPDATE fleet_devices SET machine = ${b.machine}, hw_model = ${b.hw_model}, serial_hash = ${b.serial_hash}, helper_version = ${b.helper_version} WHERE device_id = ${d.device_id}`;
     return { ok: true, status: 200, body: FIELDS(d) };
   };
+  // The operator-approved re-key: ONE statement, so it is one transaction. clr (consume the approval) gates old (rotate the active row) gates ins (the new row) gates the
+  // audit row; any step that matches nothing, e.g. a second concurrent re-key or a retire in between, stops the chain and nothing changes.
+  const rekey = async (old: DeviceRow): Promise<RegisterResult> => {
+    const newId = `dev_${randomBytes(12).toString("hex")}`;
+    const done = await sql`
+      WITH clr AS (
+        UPDATE room_install SET rekey_allowed_until = NULL, rekey_allowed_by = NULL
+         WHERE install_id = ${b.install_id} AND retired_at IS NULL AND rekey_allowed_until > now()
+     RETURNING install_id
+      ), old AS (
+        UPDATE fleet_devices SET status = 'rotated', rotated_at = now()
+         WHERE device_id = ${old.device_id} AND install_id = ${b.install_id} AND status = 'active' AND EXISTS (SELECT 1 FROM clr)
+     RETURNING device_id
+      ), ins AS (
+        INSERT INTO fleet_devices (device_id, install_id, room_id, machine, hw_model, serial_hash, helper_version, key_alg, public_key)
+        SELECT ${newId}, ${b.install_id}, ${roomId}, ${b.machine}, ${b.hw_model}, ${b.serial_hash}, ${b.helper_version}, 'ed25519', ${b.public_key} FROM old
+     RETURNING device_id
+      )
+      INSERT INTO fleet_audit (actor, action, machine, summary)
+      SELECT ${`room:${roomId}`}, 'fleet_device_rekeyed', ${b.machine}::text,
+             ${`install ${b.install_id}: device ${old.device_id} rotated, device ${newId} registered (approved by ${i.rekey_allowed_by ?? "unknown"}; helper ${b.helper_version ?? "unknown"})`}::text
+        FROM ins
+   RETURNING id
+    `;
+    if (done.length === 0) {
+      const now = await existing(); // lost the race, or the approval went: judge the install as it now stands, with no second re-key
+      return now ? answerExisting(now, false) : bad("db", 503);
+    }
+    const made = (await existing())!;
+    return { ok: true, status: 201, body: FIELDS(made) };
+  };
   const found = await existing();
-  if (found) return answerExisting(found);
+  if (found) return answerExisting(found, true);
 
   const deviceId = `dev_${randomBytes(12).toString("hex")}`;
   const ins = await sql`
     INSERT INTO fleet_devices (device_id, install_id, room_id, machine, hw_model, serial_hash, helper_version, key_alg, public_key)
     VALUES (${deviceId}, ${b.install_id}, ${roomId}, ${b.machine}, ${b.hw_model}, ${b.serial_hash}, ${b.helper_version}, 'ed25519', ${b.public_key})
-    ON CONFLICT (install_id) DO NOTHING
+    ON CONFLICT (install_id) WHERE status = 'active' DO NOTHING
     RETURNING device_id
   `;
   if (ins.length === 0) {
     const raced = await existing(); // two registrations for one install raced: the first wins, the second is judged against it
-    return raced ? answerExisting(raced) : bad("db", 503);
+    return raced ? answerExisting(raced, false) : bad("db", 503);
   }
   await sql`INSERT INTO fleet_audit (actor, action, machine, summary) VALUES (${`room:${roomId}`}, 'register', ${b.machine}, ${`device ${deviceId} registered (helper ${b.helper_version ?? "unknown"})`})`;
   const made = (await existing())!;
