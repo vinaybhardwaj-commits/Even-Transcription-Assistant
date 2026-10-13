@@ -11,6 +11,7 @@ let commands: Array<{ roomId: string; kind: string; args: string | null; source:
 let installs: Array<{ room_id: string; hostname: string; app_version: string | null }> = [];
 let throwOn: RegExp | null = null;
 let hang = false;
+let releaseHang: (() => void) | null = null;
 const writes: string[] = [];
 
 vi.mock("@/lib/db", () => ({
@@ -21,31 +22,31 @@ vi.mock("@/lib/db", () => ({
       const rows = JSON.parse(v[0] as string) as unknown[];
       return rows.map((_, i) => ({ id: i + 1 }));
     }
-    if (hang && /FROM room_install/.test(q)) return new Promise(() => {});
+    if (hang && /FROM room_install/.test(q)) {
+      const gate = v[0] as string[];
+      return new Promise((res) => { releaseHang = () => res(installs.filter((i) => gate.includes(i.room_id))); });
+    }
     if (/FROM room_install/.test(q)) {
       const gate = v[0] as string[];
       return installs.filter((i) => gate.includes(i.room_id));
     }
-    if (/INSERT INTO buddy_consult_ref/.test(q)) {
-      writes.push("ref_insert");
-      const [opaque, uid, room] = v as string[];
+    if (/WITH made AS/.test(q)) {
+      // one statement: the ref row and its command, atomically
+      writes.push("ref_and_command");
+      const [opaque, uid, room, , , cmd] = v as string[];
       if (refs.some((r) => r.consult_uid === uid)) return [];
       refs.push({ opaque_id: opaque!, consult_uid: uid!, room_id: room!, closed_at: null });
-      return [{ opaque_id: opaque }];
+      commands.push({ roomId: room!, kind: "consult_started", args: JSON.stringify({ opaque_id: opaque }), source: "buddy" });
+      return [{ id: cmd }];
     }
-    if (/UPDATE buddy_consult_ref/.test(q)) {
-      writes.push("ref_update");
-      const [ts, uid] = v as string[];
+    if (/WITH closed AS/.test(q)) {
+      writes.push("ref_and_command");
+      const [ts, uid, cmd] = v as string[];
       const r = refs.find((x) => x.consult_uid === uid && x.closed_at === null);
       if (!r) return [];
       r.closed_at = ts!;
-      return [{ opaque_id: r.opaque_id }];
-    }
-    if (/INSERT INTO bench_command/.test(q)) {
-      writes.push("command");
-      const [, roomId, kind, args, source] = v as string[];
-      commands.push({ roomId: roomId!, kind: kind!, args: args ?? null, source: source! });
-      return [];
+      commands.push({ roomId: r.room_id, kind: "consult_ended", args: JSON.stringify({ opaque_id: r.opaque_id }), source: "buddy" });
+      return [{ id: cmd }];
     }
     return [];
   },
@@ -57,19 +58,21 @@ import { COMMAND_KINDS } from "@/lib/bench-commands";
 
 const TOKEN = "test-presence-token";
 const UID = "consult-fixture-1";
+const nowIso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 const ext = (over: Record<string, unknown> = {}) => ({
-  machine_id: "MAC-FIX-1", room: "ROOM-FIX", email: "fixture.one@example.test", display_name: "Fixture Label", event: "heartbeat",
-  encounter_id: null, prescription_ref: null, ts: "2026-09-30T14:05:00.000+05:30", tab_focus: true,
+  machine_id: "MAC-FIX-1", room: "ROOM-FIX", email: "fixture.one@example.test", display_name: null, event: "heartbeat",
+  encounter_id: null, prescription_ref: null, ts: nowIso(), tab_focus: true,
   impersonating: false, ext_version: "0.1.0", reason: null, ...over,
 });
 const open = (uid: string | null = UID) => ext({ event: "encounter_open", encounter_id: uid });
 const close = (uid: string | null = UID) => ext({ event: "encounter_close", encounter_id: uid });
+const rowOf = (over: Record<string, unknown> = {}) => ({ source: "ext" as const, machine: "MAC-FIX-1", room: null, event: "encounter_open", ts: nowIso(), email: null, payload: { encounter_id: UID }, ...over });
 const post = (body: unknown) =>
   POST(new NextRequest("http://localhost/api/presence", { method: "POST", headers: { authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) }));
 const raw = async (res: Response) => ({ status: res.status, body: await res.text() });
 
 beforeEach(() => {
-  refs = []; commands = []; writes.length = 0; throwOn = null; hang = false;
+  refs = []; commands = []; writes.length = 0; throwOn = null; hang = false; releaseHang = null;
   installs = [{ room_id: "room_fix_1", hostname: "MAC-FIX-1", app_version: "0.1.30" }];
   process.env.PRESENCE_INGEST_TOKEN = TOKEN;
   process.env.BUDDY_RELAY_ROOMS = "room_fix_1";
@@ -179,13 +182,50 @@ describe("Encounter Buddy L1 relay", () => {
     expect(logged).not.toContain(UID);
   });
 
-  it("a hung relay is cut at the timeout and the ingest still answers 200", async () => {
+  it("a hung relay is cut at the timeout, and when the read finally returns it writes nothing", async () => {
     vi.useFakeTimers();
     hang = true;
-    const p = relayInserted([{ source: "ext", machine: "MAC-FIX-1", room: null, event: "encounter_open", ts: "2026-09-30T08:35:00Z", email: null, payload: { encounter_id: UID } }]);
+    const p = relayInserted([rowOf()]);
     await vi.advanceTimersByTimeAsync(RELAY_TIMEOUT_MS + 1);
     await expect(p).resolves.toBeUndefined();
-    vi.useRealTimers();
-    hang = false;
+    releaseHang!();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(writes).toEqual([]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+  });
+
+  it("the ref row and its command land in one statement", async () => {
+    await post([open()]);
+    expect(writes).toEqual(["ref_and_command"]);
+  });
+
+  it("consult_ended goes to the room stored on the ref, not the closing machine's room", async () => {
+    installs.push({ room_id: "room_fix_2", hostname: "MAC-FIX-2", app_version: "0.1.30" });
+    process.env.BUDDY_RELAY_ROOMS = "room_fix_1,room_fix_2";
+    await post([open()]);
+    await post([ext({ machine_id: "MAC-FIX-2", event: "encounter_close", encounter_id: UID })]);
+    expect(commands.map((c) => [c.roomId, c.kind])).toEqual([["room_fix_1", "consult_started"], ["room_fix_1", "consult_ended"]]);
+  });
+
+  it("freshness: an event older than 120 s or more than 30 s ahead is ignored; inside the window it is relayed", async () => {
+    await post([ext({ event: "encounter_open", encounter_id: "old-1", ts: nowIso(-121_000) })]);
+    await post([ext({ event: "encounter_open", encounter_id: "future-1", ts: nowIso(31_000) })]);
+    expect(writes).toEqual([]);
+    await post([ext({ event: "encounter_open", encounter_id: "ok-1", ts: nowIso(-100_000) })]);
+    await post([ext({ event: "encounter_open", encounter_id: "ok-2", ts: nowIso(20_000) })]);
+    expect(commands).toHaveLength(2);
+  });
+
+  it("only source ext is relayed", async () => {
+    await relayInserted([rowOf({ source: "poller" }), rowOf({ source: "guard" })]);
+    expect(writes).toEqual([]);
+  });
+
+  it("a blank or whitespace-only encounter_id is not a consult; a padded one is trimmed", async () => {
+    await post([open("   "), open("")]);
+    expect(writes).toEqual([]);
+    await post([open("  " + UID + "  ")]);
+    expect(refs.map((r) => r.consult_uid)).toEqual([UID]);
   });
 });
