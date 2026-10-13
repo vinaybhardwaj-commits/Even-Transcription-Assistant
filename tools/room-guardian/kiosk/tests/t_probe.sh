@@ -37,15 +37,29 @@ test_probe_via_main_entry() {
   assert_has "$(cat "$T/pub.log")" '"probe_id":"z9"' "guardian.sh handle"
 }
 
-# Spec 2.2: a probe is answered within 5 s. Checks are capped at 3 s and the reply publish at 1 s; process overhead is about 0.5 s, so the worst case stays under 5 s.
+# Spec 2.2: a probe is answered within 5 s. Checks are capped at 2.5 s and the reply publish at 1.5 s; process overhead is about 0.5 s, so the worst case stays under 5 s.
 ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
 test_probe_reply_within_5_s_when_a_check_and_the_publish_both_hang() {
   unset PROBE_CAP_S; load_libs; mk_tcc 2
-  assert_eq "$PROBE_CAP_S" "3" "default check cap"
+  assert_eq "$PROBE_CAP_S" "2.5" "default check cap"
   export FAKE_SP_SLEEP=30 GUARDIAN_PUBLISH_CMD='sleep 30'
   local t0 t1; t0="$(ms)"
   handle_message "kiosk/opd9/probe" "probe opd9 slow1"
   t1="$(ms)"
   [ $((t1 - t0)) -lt 5000 ] && ok || fail "probe took $((t1 - t0)) ms, budget 5000"
-  [ $((t1 - t0)) -ge 3000 ] && ok || fail "the 3 s cap did not wait ($((t1 - t0)) ms)"
+  [ $((t1 - t0)) -ge 2500 ] && ok || fail "the 2.5 s cap did not wait ($((t1 - t0)) ms)"
+}
+
+# A check that hits the 2.5 s default cap is a verdict in a well-formed reply, not an error and not silence.
+test_probe_check_timing_out_at_the_default_cap_yields_a_verdict() {
+  unset PROBE_CAP_S; load_libs; mk_tcc 2
+  export FAKE_SP_SLEEP=30
+  handle_message "kiosk/opd9/probe" "probe opd9 cap1"
+  local r; r="$(grep 'probe-reply' "$T/pub.log")"
+  assert_has "$r" '"probe_id":"cap1"' "a reply was published"
+  assert_has "$r" '"default_input":"timeout"' "the slow check is recorded as timeout"
+  assert_has "$r" '"verdict":"coreaudio_unresponsive"' "and the verdict names it"
+  assert_has "$r" '"usb":"present"' "the other rows are intact"
+  assert_eq "$(printf '%s' "$r" | cut -f2 | sed 's/[^{]//g' | wc -c | tr -d ' ')" "$(printf '%s' "$r" | cut -f2 | sed 's/[^}]//g' | wc -c | tr -d ' ')" "braces balance: well-formed JSON"
+  assert_eq "$(find "$STATE_DIR" -maxdepth 1 -name 'probe.*' | wc -l | tr -d ' ')" "0" "no probe temp dir left behind"
 }

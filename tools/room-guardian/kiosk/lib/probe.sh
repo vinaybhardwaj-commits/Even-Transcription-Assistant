@@ -1,9 +1,9 @@
 #!/bin/bash
 # shellcheck disable=SC2034,SC2154
 # Kiosk Guardian: probe responder (spec 2.2, A2). `probe <room> <id>` -> one reply on
-# kiosk/<room>/probe-reply. Every A2 row runs in parallel with its own 3 s cap; the reply publish is capped at 1 s, so check + publish <= 5 s; a timeout is a verdict.
+# kiosk/<room>/probe-reply. Every A2 row runs in parallel with its own 2.5 s cap; the reply publish is capped at 1.5 s, so check + publish <= 5 s; a timeout is a verdict.
 
-PROBE_CAP_S="${PROBE_CAP_S:-3}"
+PROBE_CAP_S="${PROBE_CAP_S:-2.5}"
 
 # Each check writes "name=value" to $dir/<name>. The wrapper records "timeout" when the cap fires.
 probe_check() { # dir name function
@@ -59,7 +59,7 @@ probe_run() { # id
   elif [ "$(cat "$dir/usb" 2>/dev/null)" = "absent" ]; then verdict="usb_device_missing"
   elif [ "$(cat "$dir/usb" 2>/dev/null)/$(cat "$dir/audio_engine" 2>/dev/null)" = "present/absent" ]; then verdict="coreaudio_no_device"
   fi
-  PUBLISH_CAP_S=1 publish "kiosk/$GUARDIAN_ROOM/probe-reply" "$(printf '{"room_id":%s,"probe_id":%s,"ts":%s,"verdict":%s,"checks":{%s}}' "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$id")" "$ts" "$(jstr "$verdict")" "$body")"
+  PUBLISH_CAP_S=1.5 publish "kiosk/$GUARDIAN_ROOM/probe-reply" "$(printf '{"room_id":%s,"probe_id":%s,"ts":%s,"verdict":%s,"checks":{%s}}' "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$id")" "$ts" "$(jstr "$verdict")" "$body")"
   rm -f "$dir"/* 2>/dev/null
   rmdir "$dir" 2>/dev/null
 }
