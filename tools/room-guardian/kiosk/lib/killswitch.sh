@@ -45,3 +45,15 @@ current_mode() {
   m="$(sed -n 's/^mode=//p' "$FLAG_CACHE" 2>/dev/null | head -n1)"
   [ "$m" = "heal" ] && echo heal || echo shadow
 }
+
+# Fetch at most once per FLAG_FETCH_S. The cache max age (FLAG_MAX_AGE_S) is longer, so one missed fetch is not yet OFF.
+flag_poll() {
+  local f="$STATE_DIR/flag_last" last now
+  now="$(now_epoch)"; last="$(cat "$f" 2>/dev/null)"
+  case "$last" in ''|*[!0-9]*) last="" ;; esac
+  if [ -z "$last" ] || [ "$((now - last))" -ge "$FLAG_FETCH_S" ]; then
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s\n' "$now" >"$f"
+    flag_fetch
+  fi
+}

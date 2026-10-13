@@ -44,14 +44,14 @@ subscriber_loop() {
 }
 
 run() {
-  local last_flag=0 t0 t1 sub
+  local t0 t1 sub
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
   subscriber_loop & sub=$!
   trap 'kill $sub 2>/dev/null; exit 0' TERM INT
   while :; do
     t0="$(now_epoch)"
-    if [ "$((t0 - last_flag))" -ge 60 ]; then flag_fetch; last_flag="$t0"; fi
+    flag_poll
     tick
     t1="$(now_epoch)"
     [ "$((t1 - t0))" -lt 10 ] && sleep $((10 - (t1 - t0)))

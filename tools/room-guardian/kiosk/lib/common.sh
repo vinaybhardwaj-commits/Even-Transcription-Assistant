@@ -30,6 +30,10 @@ GUARDIAN_VERSION="c1-0.1.0"
 : "${CONFIRM_TIMEOUT_S:=30}"
 : "${HEAL_MAX_PER_HOUR:=3}"
 : "${IDLE_MIN_S:=600}"
+: "${SPEECH_GATE_DBFS:=-50}"   # INFERRED: tape RMS at or above this is speech
+: "${SPEECH_QUIET_S:=600}"
+: "${FLAG_FETCH_S:=60}"
+: "${PUBLISH_CAP_S:=4}"
 
 STATE_DIR="$GUARDIAN_HOME/state"
 AUDIT_LOG="$GUARDIAN_HOME/audit.log"
@@ -124,7 +128,7 @@ publish() {
   mkdir -p "$STATE_DIR" 2>/dev/null
   tmp="$STATE_DIR/pub.$$.out"
   printf '%s\n' "$line" >"$tmp.in"
-  RC_STDIN="$tmp.in" run_capped 4 "$tmp" bash -c "$GUARDIAN_PUBLISH_CMD" _ "$topic"
+  RC_STDIN="$tmp.in" run_capped "$PUBLISH_CAP_S" "$tmp" bash -c "$GUARDIAN_PUBLISH_CMD" _ "$topic"
   local rc=$?
   rm -f "$tmp" "$tmp.in"
   [ "$rc" -eq 0 ] || audit "publish_failed topic=$topic rc=$rc"

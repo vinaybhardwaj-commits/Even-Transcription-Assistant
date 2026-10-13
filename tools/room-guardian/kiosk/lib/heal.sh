@@ -2,12 +2,13 @@
 # shellcheck disable=SC2034,SC2154
 # Kiosk Guardian: self-heal ladder (spec 2.4 a-g) with the G-rules in code.
 #  G1 no launchctl kickstart anywhere in this file; restart is bootout + bootstrap only.
-#  G2 Chrome restart only when idle >= IDLE_MIN_S, or in the night window.
+#  G2 Chrome restart by day only when HID idle >= IDLE_MIN_S AND no speech on the tape in SPEECH_QUIET_S AND no unproven-quiet open capture; else only in the night window.
 #  G3 nothing here stops or pauses recording; restarts need a confirmed idle capture.
 #  G4 no deletes, no Chrome cookie or Preferences reads.
 #  G5 root only through root_do (the kiosk-sudo path) and only the whitelisted helper verbs.
 #  G6 3 heal actions per room per hour, then escalate once and stop.
-#  G8 kill switch is checked in act_begin and again in act_step before each mutating command.
+#  G8 kill switch is checked before an action begins (act_begin) and before each step that can still be skipped safely.
+#     Never inside bootout..bootstrap or pkill..open: once the first half ran, the second half always runs.
 #  G9 events carry ids, counts, levels and verdict names only.
 
 HEAL_CHANGED=0
@@ -86,24 +87,17 @@ capture_idle() {
   [ "$(json_get "$STATUS_JSON" capture_open)" = "false" ]
 }
 
-confirm_log() { # offset pattern
-  local off="$1" pat="$2" waited=0
-  while [ "$waited" -le "$CONFIRM_TIMEOUT_S" ]; do
-    if tail -c "+$((off + 1))" "$LAUNCHD_LOG" 2>/dev/null | grep -q -- "$pat"; then return 0; fi
-    gsleep 1; waited=$((waited + 1))
-  done
-  return 1
-}
-
 # bootout then bootstrap. Never kickstart (G1). Caller has checked capture_idle; checked again here.
 recorder_restart() {
   local uid; uid="$(id -u)"
   capture_idle || { audit "recorder_restart refused: capture not idle"; return 2; }
   RESTART_OFFSET="$(wc -c <"$LAUNCHD_LOG" 2>/dev/null | tr -d ' ')"; : "${RESTART_OFFSET:=0}"
   act_step || return 1
+  # point of no return: bootout is followed by bootstrap whatever the kill switch says (an unloaded agent is not reloaded by KeepAlive)
   launchctl bootout "gui/$uid/$RR_LABEL" 2>/dev/null
   gsleep "${GUARDIAN_SETTLE_S:-1}"
-  act_step || return 1
+  launchctl bootstrap "gui/$uid" "$RR_PLIST" 2>/dev/null && return 0
+  gsleep "${GUARDIAN_SETTLE_S:-1}"
   launchctl bootstrap "gui/$uid" "$RR_PLIST" 2>/dev/null
 }
 
@@ -127,17 +121,31 @@ heal_tcc() {
   act_step || return 1
   killall -u "$user" tccd 2>/dev/null
   recorder_restart || { heal_event heal tcc mic_not_authorized "$before" "" "restart_failed" false "$(target_for mic_row_missing)" page; return 1; }
-  if confirm_log "$RESTART_OFFSET" "microphone authorized"; then
+  if tcc_confirmed "$user"; then
     local lines
     lines="$(root_do log-grab 2 2>/dev/null | tee -a "$AUDIT_LOG" | wc -l | tr -d ' ')"
-    heal_event heal tcc mic_not_authorized "$before" "log:microphone authorized" "ok" false
+    heal_event heal tcc mic_not_authorized "$before" "$CONFIRM_HOW" "ok" false
     heal_event alert tcc mic_flip_regranted "$before" "audit_lines=${lines:-0}" "regranted" false "$(target_for mic_flip_regranted)" page
     : >"$STATE_DIR/tcc_row"   # drop the 60 s cache so the next pass re-reads the row
     HEAL_CHANGED=1
     return 0
   fi
-  if [ "$res" = "ok" ] && act_step; then root_do tcc-restore "$user" "$stamp" >/dev/null 2>&1; fi
-  heal_event heal tcc mic_not_authorized "$before" "log:no microphone authorized in ${CONFIRM_TIMEOUT_S}s" "unconfirmed_restored" false "$(target_for mic_row_missing)" page
+  # No revert here. The helper already restored the backup when changes() was not 1; a working grant is never put back to denied.
+  heal_event heal tcc mic_not_authorized "$before" "not confirmed in ${CONFIRM_TIMEOUT_S}s: $CONFIRM_HOW" "unconfirmed_escalated" false "$(target_for mic_row_missing)" page
+  return 1
+}
+
+# After the restart: the log line or status.json mic_state=authorized (polled), then a last read of the row. Sets CONFIRM_HOW.
+tcc_confirmed() { # user
+  local waited=0 row
+  while [ "$waited" -le "$CONFIRM_TIMEOUT_S" ]; do
+    if tail -c "+$((RESTART_OFFSET + 1))" "$LAUNCHD_LOG" 2>/dev/null | grep -q -- "microphone authorized"; then CONFIRM_HOW="log:microphone authorized"; return 0; fi
+    if [ "$(json_get "$STATUS_JSON" mic_state)" = "authorized" ]; then CONFIRM_HOW="status:mic_state=authorized"; return 0; fi
+    gsleep 1; waited=$((waited + 1))
+  done
+  row="$(root_do tcc-row "$1" 2>/dev/null)"; row="${row%%|*}"
+  if [ "$row" = "2" ]; then CONFIRM_HOW="row:auth_value=2"; return 0; fi
+  CONFIRM_HOW="mic_state=$(json_get "$STATUS_JSON" mic_state) row=${row:-null}"
   return 1
 }
 
@@ -172,11 +180,14 @@ heal_recorder() { # verdict
   return 0
 }
 
-# f. Chrome: G2
+# f. Chrome: G2. By day BOTH: HID idle >= IDLE_MIN_S AND nobody present (no speech on the tape in SPEECH_QUIET_S,
+# and no open capture we cannot show is quiet). Kiosks are unattended, so HID idle alone proves nothing. Else only in the night window.
 chrome_restart_allowed() {
   local idle; idle="$(hid_idle_s)"
-  if [ -n "$idle" ] && [ "$idle" -ge "$IDLE_MIN_S" ] 2>/dev/null; then return 0; fi
-  in_night_window
+  in_night_window && return 0
+  [ -n "$idle" ] && [ "$idle" -ge "$IDLE_MIN_S" ] 2>/dev/null || return 1
+  speech_recent && return 1
+  return 0
 }
 
 heal_chrome() {
@@ -188,9 +199,9 @@ heal_chrome() {
   fi
   act_begin presence presence_stale "$before" || return 1
   act_step || return 1
+  # point of no return: once Chrome is killed it is always reopened
   pkill -x "Google Chrome" 2>/dev/null
   gsleep "${GUARDIAN_SETTLE_S:-1}"
-  act_step || return 1
   open -a "Google Chrome" 2>/dev/null
   heal_event heal presence presence_stale "$before" "chrome_restarted" ok false
   HEAL_CHANGED=1

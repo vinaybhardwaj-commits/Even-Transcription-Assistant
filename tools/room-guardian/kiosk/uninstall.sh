@@ -18,7 +18,10 @@ do_it() { if [ "$DRY" -eq 1 ]; then echo "DRY-RUN: $*"; else "$@"; fi; }
 
 if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then do_it launchctl bootout "gui/$(id -u)/$LABEL"; fi
 [ -e "$LA_DIR/$LABEL.plist" ] && do_it rm -f "$LA_DIR/$LABEL.plist"
+# our TCC.db backups sit beside TCC.db, outside the install dir: remove them through the root helper (before the helper goes)
+# shellcheck disable=SC2086
+if [ -e "$GUARDIAN_ROOT_HELPER" ]; then do_it $SUDO "$GUARDIAN_ROOT_HELPER" tcc-prune "$(id -un)" 0 >/dev/null; fi
 [ -e "$GUARDIAN_HOME" ] && do_it rm -r "$GUARDIAN_HOME"
 # shellcheck disable=SC2086
-if [ -e "$GUARDIAN_ROOT_HELPER" ]; then do_it $SUDO rm -f "$GUARDIAN_ROOT_HELPER"; fi
+if [ -e "$GUARDIAN_ROOT_HELPER" ]; then do_it $SUDO rm -f "$GUARDIAN_ROOT_HELPER"; do_it $SUDO rmdir "$(dirname "$GUARDIAN_ROOT_HELPER")" 2>/dev/null; fi
 echo "uninstalled (the audit log went with the install directory)"

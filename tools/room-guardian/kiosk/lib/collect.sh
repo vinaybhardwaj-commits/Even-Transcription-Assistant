@@ -66,6 +66,25 @@ tcc_row_cached() {
   printf '%s\n%s\n' "$now" "$S_tcc_row" >"$f"
 }
 
+# G2 presence evidence. Kiosks are unattended, so HID idle says nothing; speech on the tape does.
+rms_is_speech() { # dBFS -> 0 when at or above the speech gate
+  [ -n "$1" ] && awk -v r="$1" -v g="$SPEECH_GATE_DBFS" 'BEGIN { exit !(r + 0 >= g + 0) }'
+}
+note_speech() { # remember when the tape last held speech
+  rms_is_speech "$S_rms" || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  printf '%s\n' "$(now_epoch)" >"$STATE_DIR/speech_seen"
+}
+# 0 when speech was seen in the last SPEECH_QUIET_S, or a capture is open and we cannot show it is quiet.
+speech_recent() {
+  local last
+  rms_is_speech "$S_rms" && return 0
+  last="$(cat "$STATE_DIR/speech_seen" 2>/dev/null)"
+  case "$last" in ''|*[!0-9]*) ;; *) [ "$(( $(now_epoch) - last ))" -lt "$SPEECH_QUIET_S" ] && return 0 ;; esac
+  [ "$S_capture_open" = "true" ] && [ -z "$S_rms" ] && return 0
+  return 1
+}
+
 collect_all() {
   local now ts e
   now="$(now_epoch)"
@@ -82,6 +101,7 @@ collect_all() {
   ts="$(ts_to_epoch "$(json_get "$STATUS_JSON" updated_at)")"
   S_status_age=""; [ -n "$ts" ] && S_status_age=$((now - ts))
   S_rms="$(rms_dbfs_2s)"
+  note_speech
 
   S_usb=false; S_engine=false
   if ioreg -r -c IOUSBHostDevice -l -d 2 -w0 2>/dev/null | grep -q -- "$USB_MIC_PATTERN"; then S_usb=true; fi

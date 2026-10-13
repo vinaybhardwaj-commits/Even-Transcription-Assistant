@@ -9,7 +9,7 @@ test_shadow_default_would_do_changes_nothing() {
   load_libs; mk_tcc 0; write_status mic_state=denied capture_open=false; go_shadow; collect_all
   heal_tcc
   assert_eq "$(tcc_val)" "0" "row untouched in shadow"
-  assert_not "$(cat "$CALLS")" "tcc-heal\|coreaudiod-kill\|pmset-baseline\|tcc-restore" "no mutating root verb in shadow"
+  assert_not "$(cat "$CALLS")" "tcc-heal\|coreaudiod-kill\|pmset-baseline\|tcc-prune" "no mutating root verb in shadow"
   assert_not "$(cat "$CALLS")" "launchctl boot" "no restart in shadow"
   assert_has "$(events)" '"result":"WOULD-DO"' "WOULD-DO published"
   assert_has "$(events)" '"shadow":true' "shadow flag"
@@ -70,16 +70,10 @@ test_a_capture_open_logs_only() {
   heal_tcc
   assert_eq "$(tcc_val)" "0" "row untouched while capture open"
   assert_not "$(cat "$CALLS")" "launchctl boot" "G3 no restart"
-  assert_not "$(cat "$CALLS")" "tcc-heal\|tcc-restore" "no mutating root verb"
+  assert_not "$(cat "$CALLS")" "tcc-heal\|tcc-prune" "no mutating root verb"
   assert_has "$(events)" "capture_open_no_restart" "log only"
 }
 
-test_a_unconfirmed_restores_backup() {
-  prep_denied; rm -f "$T/boot_ok"
-  heal_tcc; assert_rc $? 1 "unconfirmed fails"
-  assert_eq "$(tcc_val)" "0" "backup restored"
-  assert_has "$(events)" "unconfirmed_restored" "reported"
-}
 
 test_a_restart_is_refused_with_tapewriter_running() {
   prep_denied; echo 5151 >"$T/tapewriters"
@@ -135,18 +129,6 @@ test_e_retired_escalates_only() {
   assert_not "$(cat "$CALLS")" "launchctl boot" "no restart"
 }
 
-test_f_g2_chrome_restart_rule() {
-  load_libs; mk_tcc 2; echo 100000000000 >"$T/hid"; export PRESENCE_FILE="$T/pres"; : >"$PRESENCE_FILE"
-  touch -t 202610140000 "$PRESENCE_FILE"; go_heal; collect_all
-  heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "idle 100 s by day: no restart"
-  echo 700000000000 >"$T/hid"; heal_chrome
-  assert_has "$(cat "$CALLS")" 'pkill -x Google Chrome' "idle 700 s: restart"
-  : >"$CALLS"; echo 100000000000 >"$T/hid"; : >"$STATE_DIR/actions"
-  GUARDIAN_FAKE_NOW="$(ist_epoch 21:34)"; heal_chrome
-  assert_not "$(cat "$CALLS")" "pkill" "21:34 busy: no restart"
-  GUARDIAN_FAKE_NOW="$(ist_epoch 21:36)"; go_heal; heal_chrome
-  assert_has "$(cat "$CALLS")" "pkill" "after 21:35 IST: restart even if not idle"
-}
 
 test_g_drift_repairs() {
   load_libs; mk_tcc 2; printf 'sleep 10\nautorestart 0\n' >"$T/pmset"; rm -f "$RR_PLIST"; write_status capture_open=false; go_heal; collect_all
@@ -209,4 +191,137 @@ test_stacked_fix_reruns_from_the_top() {
   assert_eq "$HEAL_PASSES" "2" "after a fix the tree is re-run from the top"
   assert_eq "$(tcc_val)" "2" "permission fixed"
   assert_has "$(events)" 'usb_device_missing' "device layer still escalated"
+}
+
+# ---- R2 (refute of 60c50b2) ----
+
+# The refuter's probe: the heal worked, the recorder just logged no "microphone authorized" line. The grant must stay.
+test_a_no_log_line_but_authorized_keeps_the_grant() {
+  prep_denied; rm -f "$T/boot_ok"; touch "$T/boot_fixes_mic"
+  heal_tcc; assert_rc $? 0 "heal succeeds on mic_state=authorized"
+  assert_eq "$(tcc_val)" "2" "the row is not reverted to denied"
+  assert_not "$(cat "$CALLS")" "tcc-restore" "no restore verb is ever called"
+  assert_has "$(events)" '"result":"ok"' "reported ok"
+  assert_has "$(events)" 'status:mic_state=authorized' "by the status file"
+}
+
+test_a_row_reads_2_after_restart_is_success() {
+  prep_denied; rm -f "$T/boot_ok"
+  heal_tcc; assert_rc $? 0 "no log line, status still denied, row reads 2: success"
+  assert_eq "$(tcc_val)" "2" "grant kept"
+  assert_has "$(events)" 'row:auth_value=2' "confirmed by the row"
+}
+
+test_a_unconfirmed_escalates_and_never_reverts() {
+  prep_denied; rm -f "$T/boot_ok"
+  root_do() { "$GUARDIAN_ROOT_HELPER" "$@" | { if [ "$1" = tcc-row ]; then echo "0|4|1"; else cat; fi; }; }
+  heal_tcc; assert_rc $? 1 "neither status nor row says authorized"
+  assert_eq "$(tcc_val)" "2" "a 2 is never put back to 0"
+  assert_has "$(events)" 'unconfirmed_escalated' "escalated"
+  assert_has "$(events)" '"severity":"page"' "a person is told"
+  assert_not "$(cat "$CALLS")" "tcc-restore" "no revert"
+}
+
+test_a_old_backups_pruned_keep_newest_one() {
+  prep_denied; heal_tcc
+  sqlite3 "$T/TCC.db" "UPDATE access SET auth_value=0 WHERE client='com.evenscribe.room-recorder'"
+  : >"$STATE_DIR/tcc_row"; rm -f "$STATE_DIR/actions"; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); go_heal; write_status mic_state=denied capture_open=false state=mic_denied; collect_all
+  heal_tcc
+  assert_eq "$(ls "$T"/TCC.db.bak-guardian-* | wc -l | tr -d ' ')" "1" "one backup kept while installed"
+  assert_has "$(ls "$T"/TCC.db.bak-guardian-*)" "$GUARDIAN_FAKE_NOW" "the newest one"
+}
+
+# G2, the refuter's probe: 11:00 IST, capture open, speech-level tape (-20 dBFS), HID idle 1 h, Presence stale -> no Chrome restart.
+test_f_g2_speech_on_the_tape_blocks_chrome_restart() {
+  load_libs; mk_tcc 2; mk_pcm 3277 3; write_status capture_open=true; echo 3600000000000 >"$T/hid"
+  export PRESENCE_FILE="$T/pres"; : >"$PRESENCE_FILE"; touch -t 202610140000 "$PRESENCE_FILE"; go_heal; collect_all
+  heal_cycle
+  assert_not "$(cat "$CALLS")" "pkill" "speech on the tape: no Chrome restart"
+  assert_not "$(cat "$CALLS")" "open -a" "and no reopen"
+  assert_eq "$(cat "$STATE_DIR/speech_seen")" "$GUARDIAN_FAKE_NOW" "speech time remembered"
+}
+
+test_f_g2_by_day_needs_idle_and_quiet() {
+  load_libs; mk_tcc 2; write_status capture_open=false; export PRESENCE_FILE="$T/pres"; : >"$PRESENCE_FILE"; touch -t 202610140000 "$PRESENCE_FILE"
+  go_heal; collect_all
+  echo 100000000000 >"$T/hid"; heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "idle 100 s by day: no restart"
+  echo 700000000000 >"$T/hid"; echo $((GUARDIAN_FAKE_NOW - 300)) >"$STATE_DIR/speech_seen"
+  heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "idle 700 s but speech 5 min ago: no restart"
+  echo $((GUARDIAN_FAKE_NOW - 700)) >"$STATE_DIR/speech_seen"
+  heal_chrome; assert_has "$(cat "$CALLS")" 'pkill -x Google Chrome' "idle 700 s and quiet 11 min: restart"
+  assert_has "$(cat "$CALLS")" 'open -a Google Chrome' "and reopened"
+}
+
+test_f_g2_open_capture_without_a_tape_reading_is_not_proof_of_quiet() {
+  load_libs; mk_tcc 2; write_status capture_open=true; echo 3600000000000 >"$T/hid"; go_heal; collect_all
+  chrome_restart_allowed; assert_rc $? 1 "capture open, rms unknown: blocked by day"
+  write_status capture_open=false; collect_all
+  chrome_restart_allowed; assert_rc $? 0 "no capture, idle 1 h, no speech: allowed"
+}
+
+test_f_g2_night_window_boundaries() {
+  load_libs; mk_tcc 2; write_status capture_open=true; echo 100000000000 >"$T/hid"
+  export PRESENCE_FILE="$T/pres"; : >"$PRESENCE_FILE"; touch -t 202610140000 "$PRESENCE_FILE"
+  GUARDIAN_FAKE_NOW="$(ist_epoch 21:34)"; go_heal; collect_all
+  heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "21:34 busy: no restart (fresh switch, so this is G2 and not a stale cache)"
+  GUARDIAN_FAKE_NOW="$(ist_epoch 21:36)"; go_heal; : >"$STATE_DIR/actions"; collect_all
+  heal_chrome; assert_has "$(cat "$CALLS")" "pkill" "after 21:35 IST: restart even if not idle"
+  : >"$CALLS"; GUARDIAN_FAKE_NOW="$(ist_epoch 05:59)"; go_heal; : >"$STATE_DIR/actions"; collect_all
+  heal_chrome; assert_has "$(cat "$CALLS")" "pkill" "05:59 still night"
+  : >"$CALLS"; GUARDIAN_FAKE_NOW="$(ist_epoch 06:01)"; go_heal; : >"$STATE_DIR/actions"; collect_all
+  heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "06:01 is day again"
+}
+
+# G8: the kill switch is checked before an action starts and never between its two halves.
+test_g8_bootout_is_always_followed_by_bootstrap() {
+  load_libs; mk_tcc 2; write_status capture_open=false; : >"$T/rec_pid"; go_heal; collect_all
+  gsleep() { touch "$FLAG_DIR/heal-off"; }   # the switch goes off during the settle
+  heal_recorder recorder_not_running
+  assert_eq "$(grep -c 'launchctl bootout' "$CALLS")" "1" "bootout ran"
+  assert_eq "$(grep -c 'launchctl bootstrap' "$CALLS")" "1" "and so did bootstrap"
+}
+
+test_g8_pkill_chrome_is_always_followed_by_open() {
+  load_libs; mk_tcc 2; write_status capture_open=false; GUARDIAN_FAKE_NOW="$(ist_epoch 21:36)"; go_heal; collect_all
+  gsleep() { touch "$FLAG_DIR/heal-off"; }
+  heal_chrome
+  assert_has "$(cat "$CALLS")" "pkill" "Chrome killed"
+  assert_has "$(cat "$CALLS")" "open -a Google Chrome" "and reopened"
+}
+
+test_g8_a_failed_bootstrap_is_retried_once() {
+  load_libs; mk_tcc 2; write_status capture_open=false; : >"$T/rec_pid"; go_heal; collect_all
+  printf '#!/bin/bash\necho "launchctl $*" >>"$CALLS"\n[ "$1" = bootstrap ] && [ "$(grep -c "launchctl bootstrap" "$CALLS")" = 1 ] && exit 5\nexit 0\n' >"$T/bin/launchctl"
+  recorder_restart; assert_rc $? 0 "second bootstrap works"
+  assert_eq "$(grep -c 'launchctl bootstrap' "$CALLS")" "2" "retried once"
+}
+
+test_g8_switch_off_before_start_means_no_bootout() {
+  load_libs; mk_tcc 2; write_status capture_open=false; : >"$T/rec_pid"; go_heal; collect_all
+  touch "$FLAG_DIR/heal-off"; recorder_restart
+  assert_not "$(cat "$CALLS")" "launchctl boot" "nothing started, nothing half done"
+}
+
+# G6 window is an hour, not a minute.
+test_g6_window_is_an_hour() {
+  load_libs; mk_tcc 2; write_status capture_open=false; : >"$T/rec_pid"; go_heal; collect_all
+  local i
+  for i in 1 2 3; do heal_recorder recorder_not_running; done
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 120)); go_heal; collect_all
+  heal_recorder recorder_not_running
+  assert_eq "$(grep -c 'launchctl bootout' "$CALLS")" "3" "two minutes later the cap still holds"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 3000)); go_heal; collect_all
+  heal_recorder recorder_not_running
+  assert_eq "$(grep -c 'launchctl bootout' "$CALLS")" "3" "52 minutes later it still holds"
+}
+
+# The Mini is asked for the flags every 60 s, not more and not less often.
+test_flag_poll_interval_is_60_s() {
+  load_libs; export GUARDIAN_FLAG_CMD='echo x >>"$T/fcount"; printf "fleet=on\nmode=heal\n"'
+  flag_poll; assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "1" "first poll fetches"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 30)); flag_poll
+  assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "1" "30 s later: no fetch"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 31)); flag_poll
+  assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "2" "61 s later: fetch"
+  assert_eq "$FLAG_FETCH_S" "60" "the interval"
 }
