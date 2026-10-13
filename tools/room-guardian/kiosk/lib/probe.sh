@@ -4,12 +4,13 @@
 # kiosk/<room>/probe-reply. Every A2 row runs in parallel; a timeout is a verdict.
 # One DEADLINE from probe start (PROBE_BUDGET_MS, 4.5 s: 0.5 s under the spec's 5 s), so a busy host cannot push the reply late:
 #   check cap   = min(PROBE_CAP_S, remaining - PROBE_PUBLISH_RESERVE_MS)   (no check is started when under 0.2 s is left: all rows are marked timeout)
-#   publish cap = remaining at publish time minus how late the check timers fired, at least PROBE_PUBLISH_MIN_MS
+#   publish cap = remaining at publish time minus how late the check timers fired and PROBE_TIMER_SLACK_MS (the publish timer itself fires late too), at least PROBE_PUBLISH_MIN_MS
 
 PROBE_CAP_S="${PROBE_CAP_S:-2.5}"
 PROBE_BUDGET_MS="${PROBE_BUDGET_MS:-4500}"
 PROBE_PUBLISH_RESERVE_MS="${PROBE_PUBLISH_RESERVE_MS:-1000}"
 PROBE_PUBLISH_MIN_MS="${PROBE_PUBLISH_MIN_MS:-300}"
+PROBE_TIMER_SLACK_MS="${PROBE_TIMER_SLACK_MS:-250}"   # run_capped fires its kill about 0.2-0.3 s after the cap on a busy host (measured)
 PROBE_NAMES="rms_dbfs_2s tcc usb audio_engine default_input coreaudiod recorder helper upload presence disk power"
 
 # Pure bash, no external process (every fork costs real time on a loaded host).
@@ -28,6 +29,7 @@ probe_start_hook() { :; }
 # Each check writes "name=value" to $dir/<name>. The wrapper records "timeout" when the cap fires.
 probe_check() { # dir name function
   local dir="$1" name="$2" fn="$3" rc
+  set +m   # nested jobs (run_capped's) stay in this check's process group, so one group kill reaches them all
   run_capped "$PROBE_CHECK_CAP" "$dir/$name.raw" "$fn"
   rc=$?
   if [ "$rc" -eq 124 ]; then printf 'timeout' >"$dir/$name"; else tr -d '\n' <"$dir/$name.raw" >"$dir/$name"; fi
@@ -50,6 +52,42 @@ pc_presence()   { if pgrep -x "Google Chrome" >/dev/null 2>&1; then echo chrome_
 pc_disk()       { echo "root=$(disk_free_pct /) home=$(disk_free_pct "$HOME")"; }
 pc_power()      { echo "sleep=$(pmset -g | awk '$1=="sleep"{print $2; exit}') boot_age_s=$(boot_age_s)"; }
 
+# The check phase is bounded by its own deadline (t0 + budget - publish reserve), whatever the check subshells do.
+# Each check is a job in its own process group (set -m). Polled, never a bare `wait`: a check whose timer fires late
+# or whose kill is slow cannot hold the reply. At the deadline every group still alive gets SIGKILL (hung children too),
+# its row is "timeout", and it is reaped. Groups of checks that finished are swept too, so no timer sleep outlives the probe.
+probe_run_checks() { # dir t0
+  local dir="$1" t0="$2" check_deadline p k alive n=0
+  local pids=() names=()
+  check_deadline=$((t0 + PROBE_BUDGET_MS - PROBE_PUBLISH_RESERVE_MS))
+  set -m
+  exec 3>&2 2>/dev/null   # job-control notices ("Done", "Killed") stay out of the log
+  probe_launch rms_dbfs_2s pc_rms; probe_launch tcc pc_tcc; probe_launch usb pc_usb; probe_launch audio_engine pc_engine
+  probe_launch default_input pc_default_in; probe_launch coreaudiod pc_coreaudiod; probe_launch recorder pc_recorder
+  probe_launch helper pc_helper; probe_launch upload pc_upload; probe_launch presence pc_presence
+  probe_launch disk pc_disk; probe_launch power pc_power
+  while :; do
+    alive=0
+    for p in "${pids[@]}"; do if kill -0 "$p" 2>/dev/null; then alive=1; break; fi; done
+    [ "$alive" -eq 1 ] || break
+    [ "$(mono_ms)" -lt "$check_deadline" ] || break
+    sleep 0.1
+  done
+  for k in "${!pids[@]}"; do
+    p="${pids[$k]}"
+    if kill -0 "$p" 2>/dev/null; then
+      kill -9 -- "-$p" 2>/dev/null; kill -9 "$p" 2>/dev/null
+      wait "$p" 2>/dev/null          # already killed: returns at once
+      printf 'timeout' >"$dir/${names[$k]}"
+    else
+      kill -9 -- "-$p" 2>/dev/null   # sweep: leftovers of a finished check (a timer's sleep)
+    fi
+  done
+  exec 2>&3 3>&-
+  set +m
+}
+probe_launch() { probe_check "$dir" "$1" "$2" & names[${#names[@]}]="$1"; pids[${#pids[@]}]=$!; }
+
 probe_run() { # id
   local id="$1" dir ts name v verdict first=1 body="" t0 deadline payload pubcap planned_end late=0 now_ms
   t0="$(mono_ms)"; deadline=$((t0 + PROBE_BUDGET_MS))
@@ -63,19 +101,7 @@ probe_run() { # id
     # the deadline is spent: reply with what is ready, every row a timeout
     for name in $PROBE_NAMES; do printf 'timeout' >"$dir/$name"; done
   else
-    probe_check "$dir" rms_dbfs_2s pc_rms &
-    probe_check "$dir" tcc pc_tcc &
-    probe_check "$dir" usb pc_usb &
-    probe_check "$dir" audio_engine pc_engine &
-    probe_check "$dir" default_input pc_default_in &
-    probe_check "$dir" coreaudiod pc_coreaudiod &
-    probe_check "$dir" recorder pc_recorder &
-    probe_check "$dir" helper pc_helper &
-    probe_check "$dir" upload pc_upload &
-    probe_check "$dir" presence pc_presence &
-    probe_check "$dir" disk pc_disk &
-    probe_check "$dir" power pc_power &
-    wait
+    probe_run_checks "$dir" "$t0"
   fi
   # assembly uses builtins only (read, parameter expansion, printf -v): no fork per row, so a loaded host does not eat the deadline
   local v_di="" v_ca="" v_usb="" v_eng="" room_j id_j verdict_j
@@ -97,7 +123,7 @@ probe_run() { # id
   payload="{\"room_id\":$room_j,\"probe_id\":$id_j,\"ts\":$ts,\"verdict\":$verdict_j,\"checks\":{$body}}"
   # timer slack: a check timer that fired late (busy host) means the publish timer will too, so that lateness comes off the publish cap
   now_ms="$(mono_ms)"; late=$((now_ms - planned_end)); [ "$late" -gt 0 ] || late=0
-  probe_publish_cap_v $((deadline - now_ms - late)); pubcap="$PSECS"
+  probe_publish_cap_v $((deadline - now_ms - late - PROBE_TIMER_SLACK_MS)); pubcap="$PSECS"
   PUBLISH_CAP_S="$pubcap" publish "kiosk/$GUARDIAN_ROOM/probe-reply" "$payload"
   rm -f "$dir"/* 2>/dev/null
   rmdir "$dir" 2>/dev/null

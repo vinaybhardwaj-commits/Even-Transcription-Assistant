@@ -109,3 +109,38 @@ test_probe_with_the_deadline_spent_marks_every_row_timeout_and_still_replies() {
   assert_has "$r" '"verdict":"coreaudio_unresponsive"' "verdict follows the timeout rule"
   assert_not "$(cat "$CALLS")" "SUDO" "no check was started"
 }
+
+# ---- R4: the deadline is enforced on the check phase itself ----
+
+# The per-check timer is defeated (probe_check has no cap at all) and one check ignores TERM and hangs. Only the
+# bounded check phase can save the reply. Plus a hung publish and 2 s of injected overhead.
+test_probe_deadline_holds_when_a_term_ignoring_check_and_every_timer_fail() {
+  unset PROBE_CAP_S; load_libs; mk_tcc 2
+  probe_check() { local dir="$1" name="$2" fn="$3"; "$fn" >"$dir/$name.raw" 2>/dev/null; tr -d '\n' <"$dir/$name.raw" >"$dir/$name"; }
+  pc_default_in() { bash -c "trap '' TERM; exec sleep 31.4159"; }
+  probe_start_hook() { sleep 2; }
+  export GUARDIAN_PUBLISH_CMD='{ printf "%s\t" "$1"; cat; } >>"$T/pub.log"; sleep 30'
+  local t0 t1; t0="$(ms)"
+  handle_message "kiosk/opd9/probe" "probe opd9 hang1"
+  t1="$(ms)"
+  [ $((t1 - t0)) -lt 5000 ] && ok || fail "probe took $((t1 - t0)) ms, budget 5000"
+  local r; r="$(grep 'probe-reply' "$T/pub.log")"
+  assert_has "$r" '"default_input":"timeout"' "the stuck row is a timeout"
+  assert_has "$r" '"usb":"present"' "finished rows are kept"
+  assert_has "$r" '"probe_id":"hang1"' "reply went out"
+  assert_eq "$(/usr/bin/pgrep -f 'sleep 31.4159' | wc -l | tr -d ' ')" "0" "the TERM-ignoring child is dead, not orphaned"
+}
+
+# Normal path (real run_capped): a TERM-ignoring check is a timeout and nothing of it is left running after the reply.
+test_probe_leaves_no_descendant_behind() {
+  unset PROBE_CAP_S; load_libs; mk_tcc 2
+  pc_default_in() { bash -c "trap '' TERM; exec sleep 31.2718"; }
+  pc_disk() { bash -c "trap '' TERM; exec sleep 31.1618"; }
+  handle_message "kiosk/opd9/probe" "probe opd9 clean1"
+  local r; r="$(grep 'probe-reply' "$T/pub.log")"
+  assert_has "$r" '"default_input":"timeout"' "TERM-ignoring check: timeout"
+  assert_has "$r" '"disk":"timeout"' "a second one too"
+  assert_eq "$(/usr/bin/pgrep -f 'sleep 31\.[0-9]*' | wc -l | tr -d ' ')" "0" "no check child outlives the reply"
+  assert_eq "$(/usr/bin/pgrep -f "$STATE_DIR/probe\." | wc -l | tr -d ' ')" "0" "and no timer process either"
+  assert_eq "$(find "$STATE_DIR" -maxdepth 1 -name 'probe.*' | wc -l | tr -d ' ')" "0" "no temp dir"
+}
