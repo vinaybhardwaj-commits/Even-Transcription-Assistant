@@ -1,0 +1,30 @@
+{"kind": "medicine", "uid": "m01", "name": "Zorvex 500", "brand_name": "Zorvex", "generic": "zorvexamide", "strength": "500", "usage": 40}
+{"kind": "medicine", "uid": "m02", "name": "Zorvex 250", "brand_name": "Zorvex", "generic": "zorvexamide", "strength": "250"}
+{"kind": "medicine", "uid": "m03", "name": "Quelitra Forte 10", "brand_name": "Quelitra Forte", "generic": "quelitramine", "strength": "10"}
+{"kind": "medicine", "uid": "m04", "name": "Plimzol 20", "brand_name": "Plimzol", "generic": "plimzolate", "strength": "20"}
+{"kind": "medicine", "uid": "m05", "name": "Tarnox 5", "brand_name": "Tarnox", "generic": "tarnoxin", "strength": "5", "usage": 3}
+{"kind": "medicine", "uid": "m06", "name": "Brindal 100", "brand_name": "Brindal", "generic": "brindalone", "strength": "100"}
+{"kind": "medicine", "uid": "m07", "name": "Kelvaxin 40", "brand_name": "Kelvaxin", "generic": "kelvaxide", "strength": "40"}
+{"kind": "medicine", "uid": "m08", "name": "Odrimet 50", "brand_name": "Odrimet", "generic": "odrimetol", "strength": "50"}
+{"kind": "medicine", "uid": "m09", "name": "Vantrel 75", "brand_name": "Vantrel", "generic": "vantrelide", "strength": "75"}
+{"kind": "medicine", "uid": "m10", "name": "Hesporin 625", "brand_name": "Hesporin", "generic": "hesporil", "strength": "625", "aliases": ["hespo"]}
+{"kind": "medicine", "uid": "m11", "name": "Ulmaray 15", "brand_name": "Ulmaray", "generic": "ulmarayne", "strength": "15", "disabled": true}
+{"kind": "medicine", "uid": "m12", "name": "Syntrix 2", "brand_name": "Syntrix", "generic": "syntrixol", "strength": "2"}
+{"kind": "diagnosis", "uid": "d01", "name": "Synthetic fever syndrome", "icd": "Z01.1"}
+{"kind": "diagnosis", "uid": "d02", "name": "Synthetic knee strain", "icd": "Z02.2"}
+{"kind": "diagnosis", "uid": "d03", "name": "Synthetic cough variant", "icd": "Z03.3"}
+{"kind": "diagnosis", "uid": "d04", "name": "Synthetic gastric upset"}
+{"kind": "diagnosis", "uid": "d05", "name": "Synthetic migraine form", "icd": "Z05.5"}
+{"kind": "comorbidity", "uid": "c01", "name": "Synthetic hypertension"}
+{"kind": "comorbidity", "uid": "c02", "name": "Synthetic diabetes"}
+{"kind": "comorbidity", "uid": "c03", "name": "Synthetic thyroid disorder"}
+{"kind": "surgery", "uid": "s01", "name": "Synthetic knee arthroscopy"}
+{"kind": "surgery", "uid": "s02", "name": "Synthetic hernia repair"}
+{"kind": "surgery", "uid": "s03", "name": "Synthetic cataract procedure"}
+{"kind": "investigation", "uid": "i01", "name": "Synthetic blood panel", "included_tests": ["Synthetic Hb", "Synthetic WBC", "Synthetic platelets"]}
+{"kind": "investigation", "uid": "i02", "name": "Synthetic knee scan"}
+{"kind": "investigation", "uid": "i03", "name": "Synthetic liver panel", "included_tests": ["Synthetic ALT", "Synthetic AST"]}
+{"kind": "investigation", "uid": "i04", "name": "Synthetic chest film"}
+{"kind": "specialist", "uid": "p01", "name": "Synthetic Cardiology"}
+{"kind": "specialist", "uid": "p02", "name": "Synthetic Orthopaedics"}
+{"kind": "specialist", "uid": "p03", "name": "Synthetic Orthopaedics and Sports"}

@@ -1,0 +1,12 @@
+Co-morbidities: synthetic hypertension for 2 years
+Presenting Complaint: synthetic complaint text
+Examination: synthetic exam text
+Diagnoses: synthetic fever syndrome
+Plan of Management: synthetic plan text
+Surgery or Procedure: synthetic knee arthroscopy
+Medication: Zorvex 500 twice daily
+Further Investigation: synthetic blood panel
+Follow up: review in two weeks
+Refer to: synthetic neurology
+General Advice: synthetic advice line one
+synthetic advice line two

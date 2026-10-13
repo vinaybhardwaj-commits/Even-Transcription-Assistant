@@ -1,0 +1,2 @@
+# Live replay only. The tests do not need this file: google-auth is imported lazily.
+google-auth>=2.30,<3
