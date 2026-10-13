@@ -29,5 +29,7 @@ Add one line to `steward/scrub-allow.txt`: `<gitleaks fingerprint> # <one-line r
 ## Known limits
 - A secret first added inside a merge commit (not present in either parent) is not seen by the gitleaks history pass. Compensating control: before every steward push or mirror, also run `scripts/steward/scrub.sh --tree <checkout of the target HEAD>` and block on any hit. A merge-introduced secret that is still in the tree is caught there; history-only ones are accepted because the public mirror is tree-based.
 - YAML flow values that span several lines (`uhid: [` ... `]`) and a nested `patient:` then `name:` are not caught (fixture `xfail-phi-field-yamlmultiline.yaml`).
+- Unparsable JSON with a flow list under a PHI key, and schema-shaped values carrying data under `example`, `default`, `title`, `description` or `enum`, are not caught.
+- The tree-scan control above is a manual step, not a CI step: a tree scan of main today has hits that predate the gate, so it is compared against the files a push changes.
 - Hits from the python rules (path, PHI, host) have no per-line allowlist; move synthetic data under `fixtures/synthetic/`.
 Gitleaks decodes nested encodings (depth 5). The PHI rule reads field names, so a value stored under an unlisted key is not caught. Add the key to `PHI_FIELDS`.

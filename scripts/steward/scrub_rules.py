@@ -76,6 +76,8 @@ def env_example_nonempty(text):
         if not s or s.startswith("#") or "=" not in s:
             continue
         key = s.split("=", 1)[0].strip().replace("export ", "").upper()
+        if re.search(r"_ID$", key):
+            continue  # key ids, client ids and similar identifiers are not secrets
         if not re.search(r"SECRET|TOKEN|PASS|PWD|CRED|(^|_)KEY($|_)|KEY$|(DATABASE|DB|REDIS|MONGO|AMQP)_?(URL|URI)|DSN|AUTH|SALT|SIGNING", key):
             continue  # non-secret defaults (ports, flags, model names) are allowed
         v = s.split("=", 1)[1].strip()
