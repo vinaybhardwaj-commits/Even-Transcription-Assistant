@@ -35,6 +35,20 @@ def test_map_then_unknown_fallback():
     assert [t.role for t in ts] == ["staff", "other", "unknown"]
 
 
+def test_label_is_capped_and_ordinary_labels_unchanged():
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS, _label
+    assert MAX_LABEL_CHARS == 128
+    assert len(_label("a" * 300)) == 128
+    assert _label("SPEAKER_00") == "SPEAKER_00"
+
+
+def test_map_keys_are_normalised_like_labels():
+    from tools.eta2freescript.ingest import _label
+    ts = turns((0, 1000, _label("0\n1")))
+    join_roles(ts, doc([], {"map": {"0\n1": "doctor"}}))
+    assert ts[0].role == "doctor"
+
+
 def test_numeric_speaker_labels_and_bad_roles():
     ts = turns((0, 1000, "0"))
     join_roles(ts, doc([{"t0_ms": 0, "t1_ms": 1000, "speaker": 0, "role": "nurse"}]))

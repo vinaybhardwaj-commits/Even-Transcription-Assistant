@@ -591,6 +591,24 @@ def _turn_line(label: str, t: int = 59) -> str:
     return format_transcript(c)
 
 
+def test_max_label_chars_fits_the_guard_window():
+    """B4a.7: if MAX_LABEL_CHARS or the fold expansion or the window moves, this test breaks, not the guard."""
+    import unicodedata
+    from tools.eta2freescript.eval.pulse import vertex as V
+    from tools.eta2freescript.eval.pulse.vertex import _fold
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS
+    turn_rx = next(rx for what, rx in V._TRANSCRIPT_SHAPES if what.startswith("a transcript turn line"))
+    window = int(re.search(r"\.\{0,(\d+)\}\?", turn_rx.pattern).group(1))
+    longest = 0
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        longest = max(longest, len(unicodedata.normalize("NFKC", ch)), len(unicodedata.normalize("NFKD", ch)),
+                      len(_fold("s" + ch + "s")) - 2)
+    assert MAX_LABEL_CHARS * longest + 64 <= window, f"{MAX_LABEL_CHARS} x {longest} + 64 > window {window}"
+
+
 def test_label_window_covers_worst_expansion_of_a_128_char_label():
     """The window is read from the live pattern; a future Unicode version with a longer expansion breaks this test, not the guard."""
     import unicodedata
@@ -716,3 +734,30 @@ def test_raw_vendor_labels_are_refused_end_to_end(tmp_path):
             continue
         survivors.append(label)
     assert not survivors, f"{len(survivors)} survived: " + ", ".join(repr(s) for s in survivors[:10])
+
+
+def test_long_raw_vendor_labels_are_refused_end_to_end(tmp_path):
+    """B4a.7: over-long raw speaker_id -> load_consult -> format_transcript -> guard_request, always refused."""
+    import random
+    from tools.eta2freescript.ingest import format_transcript, load_consult
+    rng = random.Random(20261016)
+    labels = ["a" * 2401, "a" * 10000, "\ufdfa" * 134, "\ufdfa" * 5000, "]" * 3000]
+    for _ in range(500):
+        n = rng.randint(129, 10000)
+        labels.append("".join(chr(rng.choice([rng.randint(0, 0xD7FF), rng.randint(0xE000, 0x10FFFF)])) for _ in range(n)))
+    d = tmp_path / "u1"
+    d.mkdir()
+    survivors = []
+    for i, label in enumerate(labels):
+        t = [0, 59, 3599][i % 3]
+        seg = {"t0_ms": t * 1000, "t1_ms": t * 1000 + 1000, "speaker_id": label, "text": "x"}
+        raw = {"consult_uid": "u1", "language_code": "en", "english_segments": [seg],
+               "clip": {"t0_ms": 0, "t1_ms": t * 1000 + 1000}}
+        (d / "transcript.json").write_text(json.dumps(raw))
+        text = format_transcript(load_consult(tmp_path, "u1"))
+        try:
+            guard_request(text)
+        except TranscriptGuardError:
+            continue
+        survivors.append(len(label))
+    assert not survivors, f"{len(survivors)} survived, lengths {survivors[:10]}"
