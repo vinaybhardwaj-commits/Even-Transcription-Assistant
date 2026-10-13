@@ -36,8 +36,11 @@ export const MCP_TOKENS_ENV = "SCRIBE_MCP_TOKENS";
 export const MCP_TOKENS_EXTRA_ENV = "SCRIBE_MCP_TOKENS_EXTRA";
 export const MCP_TOKEN_ID = "operator-v1";
 
-export type McpScope = "read" | "invoke" | "write";
+export type McpScope = "read" | "invoke" | "write" | "admin";
+/** The scopes the single-token fallback holds. DELIBERATELY WITHOUT "admin" (ADMIN-1 D1): admin is granted only by an explicit entry in SCRIBE_MCP_TOKENS / SCRIBE_MCP_TOKENS_EXTRA. */
 export const ALL_SCOPES: readonly McpScope[] = ["read", "invoke", "write"];
+/** Every scope a token-map entry may list: ALL_SCOPES plus "admin". */
+export const GRANTABLE_SCOPES: readonly McpScope[] = [...ALL_SCOPES, "admin"];
 
 /**
  * PER-TOKEN ROOM ALLOWLIST (27 Sep 2026, W40 follow-up: a token that may act on ONE room only,
@@ -98,7 +101,7 @@ function parseEntry(
   // access, and a token that can do nothing is a loud, safe failure.
   const listed = Array.isArray(o.scopes) ? o.scopes : [];
   const scopes = new Set<McpScope>(
-    listed.filter((x): x is McpScope => typeof x === "string" && (ALL_SCOPES as readonly string[]).includes(x)),
+    listed.filter((x): x is McpScope => typeof x === "string" && (GRANTABLE_SCOPES as readonly string[]).includes(x)),
   );
   // `rooms` / `tools` ABSENT (key not present at all) = unrestricted, `undefined` here. PRESENT
   // (even `null`, even the wrong type) = restricted, to whatever valid values survive filtering —
