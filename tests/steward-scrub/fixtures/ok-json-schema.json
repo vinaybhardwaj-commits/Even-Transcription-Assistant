@@ -1,0 +1,1 @@
+{"properties": {"transcript": {"type": "string", "minLength": 1}, "uhid": {"$ref": "#/defs/id"}}}

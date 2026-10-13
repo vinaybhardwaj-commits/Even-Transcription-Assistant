@@ -11,6 +11,9 @@ This repo is public. Nothing below may ever be committed. The gate blocks it in 
 
 Output is rule id, `path:line` and commit. The matched value is never printed.
 
+An inline `gitleaks:allow` comment does NOT silence these rules: the gate ignores it. Use `steward/scrub-allow.txt`.
+`.env.example` may carry non-empty defaults for non-secret keys; a secret-named key (SECRET, TOKEN, PASSWORD, API_KEY, DATABASE_URL ...) must be empty there.
+
 ## Run it locally
     scripts/steward/scrub.sh origin/main..HEAD     # a commit range
     scripts/steward/scrub.sh --staged              # what is staged

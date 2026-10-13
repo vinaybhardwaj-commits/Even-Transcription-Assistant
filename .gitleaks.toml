@@ -3,7 +3,8 @@
 # protocol (docs/fleet/PROTOCOL.md). Current files carry an inline gitleaks:allow; the commit below is the one historical commit that added them before the
 # annotation existed, and history cannot be rewritten on a shared branch. Nothing else is allowed.
 #
-# steward scrub gate (git-steward, 14 Oct 2026): custom rules below. Allowlist: the fixtures path and steward/scrub-allow.txt only,
+# steward scrub gate (git-steward, 14 Oct 2026). scrub.sh runs gitleaks with --ignore-gitleaks-allow: inline allow comments do not apply.
+# custom rules below. Allowlist: the fixtures path and steward/scrub-allow.txt only,
 # plus the two historical commits above.
 [extend]
 useDefault = true

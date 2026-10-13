@@ -30,11 +30,12 @@ case "$1" in
     py=(staged) ;;
   *)
     ( cd "$ROOT" && git rev-list "$1" >/dev/null 2>&1 ) || { echo "scrub: invalid range" >&2; exit 2; }
-    ( cd "$ROOT" && "$GL" git --log-opts="$1" --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>"$TMP/gl.err" ) || { echo "scrub: gitleaks error" >&2; exit 2; }
+    ( cd "$ROOT" && "$GL" git --log-opts="-m $1" --no-banner --redact --ignore-gitleaks-allow -c "$CFG" -i "$IGN" -f json -r "$REP" --exit-code 0 . >/dev/null 2>"$TMP/gl.err" ) || { echo "scrub: gitleaks error" >&2; exit 2; }
     grep -q ' ERR ' "$TMP/gl.err" && { echo "scrub: gitleaks reported an error" >&2; exit 2; }
     py=(range "$1") ;;
 esac
 # gitleaks hits: rule id, file, line, commit only.
+[ -s "$REP" ] || { echo "scrub: gitleaks wrote no report" >&2; exit 2; }
 python3 -I - "$REP" <<'PY' > "$TMP/gl.out"
 import json,sys
 try: items=json.load(open(sys.argv[1])) or []

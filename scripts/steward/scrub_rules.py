@@ -26,7 +26,7 @@ DATA_EXT = {".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".yaml", ".yml"}
 TEXT_DATA_EXT = {".txt", ".md"}
 DATA_DIRS = {"data", "fixtures", "samples", "exports", "testdata"}
 AUDIO_VIDEO = {".wav", ".webm", ".mp3", ".m4a", ".flac", ".ogg", ".mp4", ".opus", ".aac", ".mov"}
-CHROME_RE = re.compile(r"(^|/)((default|profile \\d+)/(cookies|login data)|local state)$")
+CHROME_RE = re.compile(r"(^|/)((default|profile [0-9]+)/(cookies|login data)|local state)$")
 
 EMPTY = {"", "null", "none", "~", "false", "[]", "{}", '""', "''"}
 
@@ -75,6 +75,9 @@ def env_example_nonempty(text):
         s = line.strip()
         if not s or s.startswith("#") or "=" not in s:
             continue
+        key = s.split("=", 1)[0].strip().replace("export ", "").upper()
+        if not re.search(r"SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL|DSN", key):
+            continue  # non-secret defaults (ports, flags, model names) are allowed
         v = s.split("=", 1)[1].strip()
         v = re.split(r"\s+#", " " + v, maxsplit=1)[0].strip().strip("\"'")
         if v and not v.startswith("#"):
@@ -93,6 +96,7 @@ def phi_applies(path):
     return False
 
 
+JSON_TYPES = {"string", "number", "integer", "boolean", "object", "array", "null"}
 SCHEMA_KEYS = {"type", "$ref", "properties", "items", "enum", "description", "oneof", "anyof", "allof", "format"}
 
 
@@ -105,6 +109,9 @@ def has_content(v):
     if isinstance(v, list):
         return any(has_content(x) for x in v)
     if isinstance(v, dict):
+        t = v.get("type")
+        if isinstance(t, str) and t in JSON_TYPES or isinstance(t, list) and t and all(x in JSON_TYPES for x in t) or "$ref" in v:
+            return False
         if v and set(k.lower() for k in v) <= SCHEMA_KEYS | {"required", "default", "title", "example", "examples"}:
             return False
         return any(has_content(x) for x in v.values())
@@ -203,6 +210,13 @@ def phi_hits(path, text):
         if mm and norm_key(mm.group(1)) in PHI_FIELDS and nested_content(i - 1):
             hits.append(i)
             continue
+        fm = re.match(r"""^\s*(?:-\s+)?["']?([A-Za-z][A-Za-z0-9_ -]*?)["']?\s*:\s*([\[{].*)$""", ln)
+        if fm and norm_key(fm.group(1)) in PHI_FIELDS:
+            inner = re.sub(r"[\[\]{},\s\"']", "", fm.group(2))
+            if inner and not re.search(r"\btype\s*:\s*(string|number|integer|boolean|object|array|null)", fm.group(2)) \
+                    and inner.lower() not in ("true", "false", "null", "none", "~"):
+                hits.append(i)
+                continue
         for m in re.finditer(r"""["']?([A-Za-z][A-Za-z0-9_]*)["']?\s*:\s*("[^"]+"|'[^']+'|[^\s,{}\[\]#][^,{}\]#]*)""", ln):
             if norm_key(m.group(1)) in PHI_FIELDS and m.group(2).strip().lower() not in EMPTY and m.group(2).strip().lower() not in ("true", "false"):
                 hits.append(i)
