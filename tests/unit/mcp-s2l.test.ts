@@ -67,20 +67,20 @@ beforeEach(() => {
 });
 
 describe("registration", () => {
-  it("the tools are listed (59 in all; scribe_encounter_timeline then scribe_freescript), write / read scope, and scribe_health gained aspect=routes", async () => {
+  it("the tools are listed (60 in all; scribe_encounter_timeline, scribe_freescript, then scribe_admin), write / read scope, and scribe_health gained aspect=routes", async () => {
     expect(S.CALLABLE_TOOLS.get("scribe_steward_command")!.scope).toBe("write");
     expect(S.CALLABLE_TOOLS.get("scribe_lanes")!.scope).toBe("read");
     const req = new NextRequest("https://x/api/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
     const body = (await (await handleMcpRpc(req, { token_id: "t", scopes: new Set(["read"]) } as never)).json()) as { result: { tools: Array<{ name: string; description: string; annotations: Row; inputSchema: Row }> } };
     const t = body.result.tools;
-    expect(t.length).toBe(59);
+    expect(t.length).toBe(60);
     const sc = t.find((x) => x.name === "scribe_steward_command")!;
     expect(sc.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
     expect(sc.description.length).toBeLessThanOrEqual(200);
     expect(t.find((x) => x.name === "scribe_lanes")!.annotations.readOnlyHint).toBe(true);
     const aspect = ((t.find((x) => x.name === "scribe_health")!.inputSchema as { properties: Row }).properties.aspect as { enum: string[] }).enum;
     expect(aspect).toContain("routes");
-    expect(JSON.stringify(body.result).length).toBeLessThanOrEqual(44_500); // measured 44,434: timeline + freescript
+    expect(JSON.stringify(body.result).length).toBeLessThanOrEqual(45_353); // measured 45,350: main 44,497 + scribe_admin 853
   });
 
   it("the write needs write scope at the door; a room-restricted token is refused", async () => {
