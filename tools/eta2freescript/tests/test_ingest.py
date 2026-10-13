@@ -151,3 +151,12 @@ def test_label_never_contains_a_line_break_or_control():
     assert _label("SPEAKER_00") == "SPEAKER_00"
     assert _label(3) == "3"
     assert _label(True) is None
+
+
+def test_label_caps_every_type():
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS, _label
+    assert MAX_LABEL_CHARS == 128
+    for v in (10**2400, -(10**3000), int("9" * 4300), 1e300):
+        out = _label(v)
+        assert isinstance(out, str) and len(out) <= 128, type(v)
+    assert _label(7) == "7"

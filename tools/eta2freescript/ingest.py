@@ -134,11 +134,13 @@ def _label(v) -> str | None:
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
-        return str(int(v))
-    if isinstance(v, str):
+        out = str(int(v))
+    elif isinstance(v, str):
         import unicodedata
-        return "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in v)[:MAX_LABEL_CHARS]
-    return None
+        out = "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in v)
+    else:
+        return None
+    return out[:MAX_LABEL_CHARS]
 
 
 def parse_role_flags(doc: dict) -> RoleFlags:

@@ -761,3 +761,64 @@ def test_long_raw_vendor_labels_are_refused_end_to_end(tmp_path):
             continue
         survivors.append(len(label))
     assert not survivors, f"{len(survivors)} survived, lengths {survivors[:10]}"
+
+
+def test_huge_integer_speaker_ids_are_refused_end_to_end(tmp_path):
+    """B4a.7b: a JSON integer speaker_id of 2,401 / 3,000 / 4,300 digits, role none or doctor, quarantine on or off."""
+    from tools.eta2freescript.ingest import format_transcript, load_consult
+    d = tmp_path / "u1"
+    d.mkdir()
+    survivors = []
+    for digits in (2401, 3000, 4300):
+        for role_on in (False, True):
+            for quarantined in (False, True):
+                raw_json = ('{"consult_uid": "u1", "language_code": "en", "english_segments": [{"t0_ms": 0, "t1_ms": 1000, '
+                            '"speaker_id": ' + "9" * digits + ', "text": "x"}], "clip": {"t0_ms": 0, "t1_ms": 1000}}')
+                (d / "transcript.json").write_text(raw_json)
+                role = d / "role.json"
+                if role_on:
+                    role.write_text('{"status": "ok", "layer": "role", "engine": "llm-roles", "config_hash": "c", "extras": {}, '
+                                    '"segments": [{"t0_ms": 0, "t1_ms": 1000, "speaker": ' + "9" * digits + ', "role": "doctor"}]}')
+                elif role.exists():
+                    role.unlink()
+                text = format_transcript(load_consult(tmp_path, "u1"), {0} if quarantined else frozenset())
+                try:
+                    guard_request(text)
+                except TranscriptGuardError:
+                    continue
+                survivors.append((digits, role_on, quarantined))
+    assert not survivors, survivors
+
+
+def test_label_property_mixed_types():
+    import random
+    import unicodedata
+    from tools.eta2freescript.ingest import MAX_LABEL_CHARS, _label
+    rng = random.Random(20261017)
+    bad = ("Cc", "Zl", "Zp")
+    seen_str = 0
+    for _ in range(300):
+        k = rng.randrange(8)
+        if k == 0:
+            v = "".join(chr(rng.choice([rng.randint(0, 0xD7FF), rng.randint(0xE000, 0x10FFFF)])) for _ in range(rng.randint(0, 5000)))
+        elif k == 1:
+            v = rng.randint(-(10 ** rng.randint(1, 4300)) + 1, 10 ** rng.randint(1, 4300) - 1)
+        elif k == 2:
+            v = rng.choice([-1, 1]) * rng.random() * 1e308
+        elif k == 3:
+            v = rng.random() < 0.5
+        elif k == 4:
+            v = None
+        elif k == 5:
+            v = [rng.randint(0, 9)]
+        elif k == 6:
+            v = {"a": rng.randint(0, 9)}
+        else:
+            v = "\n\r \x00" * rng.randint(1, 200)
+        out = _label(v)
+        if out is None:
+            continue
+        seen_str += 1
+        assert isinstance(out, str) and len(out) <= MAX_LABEL_CHARS, type(v)
+        assert not any(unicodedata.category(c) in bad for c in out)
+    assert seen_str > 100
