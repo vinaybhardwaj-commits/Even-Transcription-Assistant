@@ -23,6 +23,17 @@ export const dynamic = "force-dynamic";
 
 const NO_STORE = { headers: { "cache-control": "no-store" } };
 
+/** An optional `{reason}` in the body (<= 500 chars); absent or unreadable falls back to a fixed label. */
+async function optionalReason(req: NextRequest): Promise<string> {
+  try {
+    const b = (await req.json()) as { reason?: unknown };
+    if (typeof b?.reason === "string" && b.reason.trim()) return b.reason.trim().slice(0, 500);
+  } catch {
+    /* no body: the fixed label below */
+  }
+  return "admin retire route";
+}
+
 export async function POST(req: NextRequest, ctx: { params: Promise<{ installId: string }> }) {
   const guard = await installAdminGuard(req);
   if (!guard.ok) {
@@ -34,7 +45,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ installId:
 
   const { installId } = await ctx.params;
   try {
-    const install = await retireInstall(installId);
+    // ADMIN-1: audited. The actor is the admin session (cookie) or "migration_secret" (curl), never the secret itself.
+    const install = await retireInstall(installId, {
+      actor: { type: "admin", id: guard.adminId },
+      reason: await optionalReason(req),
+    });
     if (!install) return installError("NOT_FOUND", "no such install, or it is already retired");
     return NextResponse.json({ install }, NO_STORE);
   } catch (e) {

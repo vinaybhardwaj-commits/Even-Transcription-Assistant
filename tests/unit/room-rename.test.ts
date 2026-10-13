@@ -61,6 +61,14 @@ beforeEach(() => {
       r.name = name;
       return [{ id: r.id, slug: r.slug, name: r.name }];
     }
+    // ADMIN-1: disable / enable now go through lib/room-admin, which reads the row first and audits after
+    if (/^SELECT disabled_at FROM room WHERE id/.test(text)) return rooms.filter((r) => r.id === values[0]).map((r) => ({ disabled_at: r.disabled_at }));
+    if (/^UPDATE room SET disabled_at = NOW\(\)/.test(text)) {
+      const r = rooms.find((x) => x.id === values[0] && x.disabled_at === null);
+      if (!r) return [];
+      r.disabled_at = "2026-10-13T00:00:00Z";
+      return [{ disabled_at: r.disabled_at }];
+    }
     return [];
   };
 });

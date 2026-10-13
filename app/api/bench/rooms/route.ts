@@ -16,6 +16,7 @@ import { sql } from "@/lib/db";
 import { respondOk, respondError } from "@/lib/respond";
 import { SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
 import { benchAdminGuard, buildRoomSlug, newRoomId } from "@/lib/bench";
+import { setRoomEnabled } from "@/lib/room-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -116,7 +117,7 @@ export async function PATCH(req: NextRequest) {
   const g = await benchAdminGuard();
   if (!g.ok) return respondError(g.code, g.msg);
 
-  let body: { room_id?: string; action?: string; name?: string };
+  let body: { room_id?: string; action?: string; name?: string; reason?: string };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -145,24 +146,14 @@ export async function PATCH(req: NextRequest) {
     return respondOk({ ok: true, pin_plaintext: pin });
   }
 
-  if (action === "disable") {
+  if (action === "disable" || action === "enable") {
+    // ADMIN-1: one shared function (lib/room-admin) writes the room and the audit row; the same
+    // function backs scribe_admin room_enable / room_disable. The actor is the admin session.
+    const reasonRaw = typeof body.reason === "string" ? body.reason.trim() : "";
+    const reason = (reasonRaw || "bench admin page").slice(0, 500);
     try {
-      await sql`UPDATE room SET disabled_at = NOW() WHERE id = ${roomId}`;
-    } catch (e) {
-      return respondError("PIPELINE_FAILED", String(e).slice(0, 150));
-    }
-    return respondOk({ ok: true });
-  }
-
-  if (action === "enable") {
-    try {
-      await sql`
-        UPDATE room
-           SET disabled_at = NULL,
-               failed_attempts = 0,
-               locked_until = NULL
-         WHERE id = ${roomId}
-      `;
+      const r = await setRoomEnabled(roomId, action === "enable", { type: "admin", id: String(g.claims.admin_id ?? g.claims.email ?? "admin") }, reason);
+      if (!r.found) return respondError("VALIDATION_FAILED", "unknown_room");
     } catch (e) {
       return respondError("PIPELINE_FAILED", String(e).slice(0, 150));
     }

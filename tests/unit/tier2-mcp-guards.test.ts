@@ -96,7 +96,7 @@ describe("token map resolution", () => {
   it("a malformed scopes list grants NOTHING — it must never widen access", () => {
     process.env.SCRIBE_MCP_TOKENS = JSON.stringify({
       [sha("t1")]: { actor: "a", scopes: "read" },
-      [sha("t2")]: { actor: "b", scopes: ["read", "admin", 7] },
+      [sha("t2")]: { actor: "b", scopes: ["read", "superuser", 7] },
       [sha("t3")]: { actor: "c" },
     });
     expect([...(A.checkMcpBearer(req("t1")) as { principal: { scopes: Set<string> } }).principal.scopes]).toEqual([]);

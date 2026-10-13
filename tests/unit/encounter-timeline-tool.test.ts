@@ -42,8 +42,9 @@ const keysDeep = (o: unknown, out = new Set<string>()): Set<string> => {
 describe("registration", () => {
   it("is appended once, read scope, listed for every profile", () => {
     expect(PUBLISHED_TOOLS.filter((t) => t.name === "scribe_encounter_timeline")).toHaveLength(1);
-    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 2]!.name).toBe("scribe_encounter_timeline");
-    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 1]!.name).toBe("scribe_freescript");
+    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 3]!.name).toBe("scribe_encounter_timeline");
+    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 2]!.name).toBe("scribe_freescript");
+    expect(PUBLISHED_TOOLS[PUBLISHED_TOOLS.length - 1]!.name).toBe("scribe_admin");
     expect(CALLABLE_TOOLS.get("scribe_encounter_timeline")!.scope).toBe("read");
     expect(LAB_TOOLS.some((t) => t.name === "scribe_encounter_timeline")).toBe(true);
     for (const p of ["operator", "lab"] as const) expect(toolsForProfile(p).map((t) => t.name)).toContain("scribe_encounter_timeline");

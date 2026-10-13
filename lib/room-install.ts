@@ -30,6 +30,7 @@ import { NextResponse, after } from "next/server";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { customAlphabet } from "nanoid";
 import { sql } from "@/lib/db";
+import { writeAdminAudit, type AdminActor } from "@/lib/admin-audit";
 import { signRoomJwt } from "@/lib/room-auth";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
@@ -937,7 +938,15 @@ export async function enrolWithToken(token: string): Promise<EnrolResult> {
 // Retire (§4.2, §4.5 rule 5)
 // ---------------------------------------------------------------------------
 
-export async function retireInstall(installId: string): Promise<InstallView | null> {
+/**
+ * ADMIN-1 (13 Oct 2026, RCA fix 3): retiring an install is audited. `audit.actor` is the admin-session
+ * user (the /admin retire route) or the MCP principal (scribe_admin install_retire / unbind, which pass
+ * their own `action`). The row is written only when a row was actually retired; a no-op writes nothing
+ * here (scribe_admin audits its own no-ops). Best-effort: see lib/admin-audit.
+ */
+export type RetireAudit = { actor: AdminActor; reason: string; action?: "admin.install_retire" | "admin.unbind" };
+
+export async function retireInstall(installId: string, audit: RetireAudit): Promise<InstallView | null> {
   try {
     const rows = (await sql`
       UPDATE room_install
@@ -952,7 +961,23 @@ export async function retireInstall(installId: string): Promise<InstallView | nu
              assigned_channel, peak, zero_ratio, input_devices,
              input_volume, input_volume_settable
     `) as InstallView[];
-    return rows[0] ? normaliseInstall(rows[0]) : null;
+    const retired = rows[0] ? normaliseInstall(rows[0]) : null;
+    if (retired) {
+      await writeAdminAudit({
+        actor: audit.actor,
+        action: audit.action ?? "admin.install_retire",
+        targetType: "room_install",
+        targetId: retired.install_id,
+        meta: {
+          reason: audit.reason,
+          before: { retired_at: null },
+          after: { retired_at: retired.retired_at },
+          room_id: retired.room_id,
+          install_id: retired.install_id,
+        },
+      });
+    }
+    return retired;
   } catch (e) {
     throw classifyInstallError(e);
   }
