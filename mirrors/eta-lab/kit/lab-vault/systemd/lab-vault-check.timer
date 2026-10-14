@@ -1,9 +1,0 @@
-[Unit]
-Description=Daily three-copy check at 07:30 IST (the Mini syncs hourly)
-
-[Timer]
-OnCalendar=*-*-* 07:30:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target

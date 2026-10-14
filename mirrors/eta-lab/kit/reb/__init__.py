@@ -5,7 +5,7 @@ from .schema import (
 )
 from .validate import validate_track, validate_manifest, ValidationError
 from .writer import write_track, TrackExistsError, PathComponentError, MirrorPendingError, config_hash, track_filename
-from .reb import load_window, encounters, consult, consults, windows_for, real_room_windows, Window, Track
+from .reb import load_window, encounters, real_room_windows, Window, Track
 from . import r2_mirror
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "validate_track", "validate_manifest", "ValidationError",
     "write_track", "TrackExistsError", "PathComponentError", "MirrorPendingError",
     "config_hash", "track_filename",
-    "load_window", "encounters", "consult", "consults", "windows_for", "real_room_windows", "Window", "Track", "r2_mirror",
+    "load_window", "encounters", "real_room_windows", "Window", "Track", "r2_mirror",
 ]

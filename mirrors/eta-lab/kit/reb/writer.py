@@ -94,13 +94,7 @@ def track_filename(layer, engine, version, cfg_hash):
     return f"{layer}.{engine}__{version}__{cfg_hash}.json"
 
 
-CONSULT_PREFIX = "consult-"
-
-
 def _window_dir(root, ist_date, room_id, window_id):
-    """A consult-scope id "consult-<uid>" (ORDERS-6S3) lives at <date>/<room>/_consults/<uid>/ (never mistaken for a window dir)."""
-    if window_id.startswith(CONSULT_PREFIX) and len(window_id) > len(CONSULT_PREFIX):
-        return os.path.join(root, ist_date, room_id, "_consults", window_id[len(CONSULT_PREFIX):])
     return os.path.join(root, ist_date, room_id, window_id)
 
 
@@ -225,34 +219,6 @@ def _write_manifest_entry(root, ist_date, room_id, window_id, manifest_stub, ent
             except Exception as e:
                 return e
         return None
-    finally:
-        _unlock(lock_fd)
-
-
-def write_manifest(root, ist_date, room_id, window_id, manifest_stub):
-    """Create a window's manifest.json with NO track (13A B4: windows made from a raw tape dir are registered before any lane has a track to write). Create-only: an existing manifest is
-    never touched (returns False). The stub is validated like any manifest; `tracks` starts empty; there is no index.jsonl line (index lines are per track). R2 mirror, when on, as for a track.
-    Returns True when the manifest was written."""
-    for name, value in (("ist_date", ist_date), ("room_id", room_id), ("window_id", window_id)):
-        _check_component(name, value)
-    _check_manifest_stub_required(manifest_stub, window_id)
-    window_dir = _window_dir(root, ist_date, room_id, window_id)
-    manifest_path = os.path.join(window_dir, "manifest.json")
-    os.makedirs(window_dir, exist_ok=True)
-    lock_fd = _lock(os.path.join(window_dir, "manifest.lock"))
-    try:
-        if os.path.exists(manifest_path):
-            return False
-        manifest = dict(manifest_stub)
-        manifest["tracks"] = []
-        validate_manifest(manifest)
-        _replace_file_atomic(manifest_path, (json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True) + "\n").encode("utf-8"))
-        if r2_mirror.enabled():
-            try:
-                r2_mirror.mirror_window_files(root, ist_date, room_id, window_id, [manifest_path])
-            except Exception:  # noqa: BLE001 - the manifest is durably committed; a mirror failure is not a write failure (as for a track)
-                pass
-        return True
     finally:
         _unlock(lock_fd)
 

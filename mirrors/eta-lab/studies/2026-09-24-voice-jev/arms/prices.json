@@ -1,5 +1,0 @@
-{"_note": "USD per million tokens. UNVERIFIED (ruling 165 I): taken from public pages, not from an invoice or the vendor's own contract. Recheck before quoting cost.",
- "jev": {"input_per_m": 0.042, "output_per_m": 0.0, "status": "UNVERIFIED",
-   "source": "https://www.mindstudio.ai/blog/jev-pricing-cost-per-token (third-party; also kucoin.com/news/flash/typesafe-ai-model-jev-launches-on-b-ai-api-with-0-042-1m-token-input-cost). typesafe.ai/pricing and openrouter.ai/typesafe/jev-1.13 returned 404 on 24 Sep 2026, so no vendor page confirmed it."},
- "gemini": {"input_per_m": 0.75, "output_per_m": 3.75, "status": "UNVERIFIED", "model": "gemini-3.8-flash",
-   "source": "https://ai.google.dev/gemini-api/docs/pricing (Gemini API Standard tier, valid through 31 Dec 2026; from 1 Jan 2027 it is 1.50 in / 7.50 out). The Vertex page https://cloud.google.com/vertex-ai/generative-ai/pricing was truncated when fetched, so Vertex's own rate is not confirmed. No separate audio-input rate was listed for Standard, so audio tokens are priced at the text rate here; that may understate audio cost."}}
