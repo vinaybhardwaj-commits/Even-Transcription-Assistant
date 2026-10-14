@@ -207,7 +207,7 @@ describe('patient concern', () => {
     expect(c).toHaveLength(1)
     expect(c[0]!.evidence.map((e) => e.segment_id)).toEqual(['seg-0002', 'seg-0003', 'seg-0004', 'seg-0005'])
     expect(c[0]!.fact_refs).toHaveLength(4)
-    expect(c[0]!.claim).toBe('The doctor did not address this patient concern in the consult.')
+    expect(c[0]!.claim).toBe('A response to this patient concern was not heard in the consult recording.')
     const g = empty()
     g.patient_response.push(resp(input, '6', { concern_stated: true }))
     const r = only(run(input, g), 'concern_unaddressed')

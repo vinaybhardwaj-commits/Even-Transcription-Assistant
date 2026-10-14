@@ -7,16 +7,19 @@ import { FakeJudgePort } from '../../../../src/platform/agent/judge-port.js'
 import { FakeSecondJudge, type SecondJudge } from '../../../../src/platform/judge/second.js'
 import { parseConsultLines, type LoadedConsult } from '../../../../src/agents/surgical-consult/offline/input.js'
 import { makeSecondJudge, missingGeminiEnv, secondFactory } from '../../../../src/agents/surgical-consult/offline/second.js'
+import { RULE_SPECS } from '../../../../src/agents/surgical-consult/rules/index.js'
 import { GEMINI_PINNED } from '../../../../src/llm/allowlist.js'
 import type { GeminiSender } from '../../../../src/llm/gemini.js'
 import { GeminiSecondJudge } from '../../../../src/platform/judge/gemini-second.js'
 import { testDb, testEnv } from '../../../helpers.js'
+import { recordModelCall } from '../../../../src/llm/ledger.js'
 import {
   computeCaps,
   MeteredJudge,
   type Meter,
   dryRunSummary,
   main,
+  extractionFor,
   missingLiveEnv,
   parseArgs,
   prepareOutDir,
@@ -25,7 +28,7 @@ import {
   writeEntry,
   type BatchWiring,
 } from '../../../../src/agents/surgical-consult/offline/run-batch.js'
-import { buildReport, loadEntries } from '../../../../src/agents/surgical-consult/offline/report.js'
+import { buildReport, busSafeSummary, loadEntries, renderMarkdown } from '../../../../src/agents/surgical-consult/offline/report.js'
 import { loadEnv } from '../../../../src/config.js'
 import { scriptedExtractor } from '../helpers.js'
 import { fixtureJsonl, FIXTURE_NAMES, loadFixture } from './helpers.js'
@@ -338,6 +341,113 @@ describe('live env', () => {
     expect(await main(['--in', file, '--out', path.join(dir, 'o')], {})).toBe(2)
     expect(String(write.mock.calls[0]![0])).toContain('BEDROCK_REGION')
     expect(readdirSync(dir)).toEqual(['in.jsonl'])
+  })
+})
+
+describe('S6-Rd: judge_pairs in runs.jsonl', () => {
+  it('records both judges per candidate with numbers, booleans and ids only', async () => {
+    // Jev says yes (0.95), the second judge no (0.1): every judged candidate is a disagree.
+    const result = await runBatch(all(), wiring(new FakeSecondJudge(() => 0.1)), opts)
+    const pairs = result.entries.flatMap((e) => e.record.judge_pairs ?? [])
+    expect(pairs.length).toBeGreaterThan(0)
+    expect(pairs.every((p) => p.primary_p === 0.95 && p.second_p === 0.1 && p.primary_yes === true && p.second_yes === false && p.outcome === 'disagree')).toBe(true)
+    expect(new Set(pairs.map((p) => p.polarity))).toEqual(new Set(['presence', 'absence']))
+    for (const p of pairs) {
+      expect(p.polarity === 'absence').toBe(p.question_set === 'consult-absence-claim')
+      expect(Object.keys(p).sort()).toEqual(['outcome', 'polarity', 'primary_p', 'primary_yes', 'question_set', 'rule_id', 'second_p', 'second_yes'])
+      expect(p.rule_id).toMatch(/^[a-z][a-z0-9_.]*$/)
+    }
+    // No text anywhere: the serialized pairs hold none of the fixtures' words.
+    const text = JSON.stringify(pairs)
+    expect(text).not.toMatch(/recommend|hernia|knee|risk[s]? are|enc-|doc-/i)
+    // Cross-check against the platform's own counts: one judge_disagree per judged candidate.
+    expect(pairs.length).toBe(result.entries.reduce((s, e) => s + e.record.counts.judge_disagree, 0))
+  })
+
+  it('both yes is agree, both no is dropped, no second judge is unavailable (primary kept)', async () => {
+    const yes = await runBatch(all(), wiring(new FakeSecondJudge(() => 0.95)), opts)
+    expect(new Set(yes.entries.flatMap((e) => e.record.judge_pairs ?? []).map((p) => p.outcome))).toEqual(new Set(['agree']))
+    const no = await runBatch(all(), wiring(new FakeSecondJudge(() => 0.1), 0.1), opts)
+    expect(new Set(no.entries.flatMap((e) => e.record.judge_pairs ?? []).map((p) => p.outcome))).toEqual(new Set(['dropped']))
+    const none = await runBatch(all(), wiring(null), opts)
+    const held = none.entries.flatMap((e) => e.record.judge_pairs ?? [])
+    expect(held.length).toBeGreaterThan(0)
+    expect(held.every((p) => p.outcome === 'unavailable' && p.second_p === null && p.primary_p === 0.95)).toBe(true)
+  })
+
+  it('a rule on the safety bar uses 0.9, others 0.75', async () => {
+    const mid = await runBatch(all(), wiring(new FakeSecondJudge(() => 0.8), 0.8), opts)
+    const pairs = mid.entries.flatMap((e) => e.record.judge_pairs ?? [])
+    const safety = new Set(RULE_SPECS.filter((s) => s.safety_class === true).map((s) => s.id))
+    for (const p of pairs) expect(p.primary_yes, p.rule_id).toBe(!safety.has(p.rule_id))
+  })
+})
+
+describe('S6-Rc: the extraction ledger rows reach runs.jsonl and the report', () => {
+  it('extractionFor: a served row and a null row on the same trace give served_verified=false and served=null', async () => {
+    const sql = await testDb()
+    const row = (served: string | null, purpose: string, extra: Record<string, string | null> = {}) =>
+      recordModelCall(sql, { traceId: 's6-0001', provider: 'bedrock', tier: 'sonnet', intendedModelId: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0', servedModelId: served, inputTokens: 1, outputTokens: 1, latencyMs: 1, costUsd: 0, status: 'ok', stopReason: null, errorType: null, purpose, ...extra })
+    await row('claude-sonnet-4-5-served', 'audit.consult:extract')
+    await row(null, 'audit.consult:extract_escalation')
+    // Rows that must not count: another trace, and a Gemini row on the same trace.
+    await recordModelCall(sql, { traceId: 's6-0002', provider: 'bedrock', tier: 'sonnet', intendedModelId: 'x', servedModelId: null, inputTokens: 1, outputTokens: 1, latencyMs: 1, costUsd: 0, status: 'ok', stopReason: null, errorType: null, purpose: 'audit.consult:extract' })
+    await recordModelCall(sql, { traceId: 's6-0001', provider: 'vertex', tier: 'second_judge', intendedModelId: 'gemini-2.5-pro', servedModelId: null, inputTokens: 1, outputTokens: 1, latencyMs: 1, costUsd: 0, status: 'ok', stopReason: null, errorType: null, purpose: 'second_judge' })
+    expect(await extractionFor(sql, 's6-0001')).toEqual({ intended: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0', served: null, served_verified: false, calls: 2, errors_by_type: {} })
+    // All served: verified, served ids listed.
+    await sql.query(`update model_calls set served_model_id = 'claude-sonnet-4-5-served' where trace_id = 's6-0001' and provider = 'bedrock'`)
+    expect(await extractionFor(sql, 's6-0001')).toMatchObject({ served: 'claude-sonnet-4-5-served', served_verified: true, calls: 2 })
+  })
+
+  const DATED = 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0'
+  // A fake client whose ledger rows carry a dated intended id and no served id, like the global profile on Bedrock.
+  const nullServed = (sql: Parameters<BatchWiring['models']>[0]): FakeModelClient => {
+    const inner = new FakeModelClient(sql, (request) => scriptedExtractor(request))
+    const complete = inner.complete.bind(inner)
+    inner.complete = async (request) => {
+      const out = await complete(request)
+      await sql.query(`update model_calls set intended_model_id = $2, served_model_id = null where trace_id = $1`, [request.traceId, DATED])
+      return out
+    }
+    return inner
+  }
+
+  it('records intended, served_verified=false, calls and errors per consult; the report and the bus block say so', async () => {
+    const w: BatchWiring = { ...wiring(new FakeSecondJudge(() => 0.95)), models: nullServed }
+    const result = await runBatch(all(), w, opts)
+    const ran = result.entries.filter((e) => e.record.counts.llm_calls > 0)
+    expect(ran.length).toBeGreaterThan(0)
+    for (const e of ran) {
+      expect(e.record.extraction).toEqual({ intended: DATED, served: null, served_verified: false, calls: e.record.counts.llm_calls, errors_by_type: {} })
+    }
+    for (const e of result.entries.filter((x) => x.record.counts.llm_calls === 0)) expect(e.record.extraction).toMatchObject({ calls: 0, intended: null, served_verified: false })
+    const report = buildReport(result.entries, { lines_read: 9, rejects: {}, skipped_for_cap: 0, stopped_by_cap: null, caps: result.meter.caps, metered: { llm: result.meter.llm, jev: 0, second: 0 }, mode: 'fake' })
+    expect(report.models.extraction).toEqual([{ intended: DATED, served: null, served_verified: false, consults: ran.length, calls: result.meter.llm, errors_by_type: {} }])
+    const block = busSafeSummary(report, result.entries)
+    expect(block).toContain('extraction_model=claude-sonnet-4-5 served_verified=no')
+    expect(/\d{8,}/.test(block)).toBe(false)
+    expect(renderMarkdown(report, result.entries)).toContain('unverified: profile not resolved')
+  })
+
+  it('writes the extraction object (ids and codes only) into runs.jsonl', async () => {
+    const dir = tmp()
+    const file = path.join(dir, 'in.jsonl')
+    writeFileSync(file, fixtureJsonl())
+    const w: BatchWiring = { ...wiring(null), models: nullServed }
+    const out = path.join(dir, 'o')
+    prepareOutDir(out)
+    await runBatch(all(), w, { ...opts, limit: 3 }, (entry) => writeEntry(out, entry))
+    const rows = readFileSync(path.join(out, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { extraction: Record<string, unknown> })
+    expect(rows.length).toBe(3)
+    for (const row of rows) expect(Object.keys(row.extraction).sort()).toEqual(['calls', 'errors_by_type', 'intended', 'served', 'served_verified'])
+  })
+
+  it('a refused or failed call is counted by error type', async () => {
+    const w: BatchWiring = { ...wiring(null), models: (sql) => new FakeModelClient(sql, () => ({ kind: 'truncated', text: 'x' })) }
+    const result = await runBatch(all(), w, { ...opts, limit: 1 })
+    const x = result.entries[0]!.record.extraction!
+    expect(x.calls).toBeGreaterThan(0)
+    expect(x.errors_by_type).toEqual({ truncated: x.calls })
   })
 })
 

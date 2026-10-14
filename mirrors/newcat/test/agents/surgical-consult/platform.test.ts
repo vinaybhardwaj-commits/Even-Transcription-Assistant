@@ -161,7 +161,7 @@ describe('G8: absence findings use their own question and whole-segment context'
     const audit = await r.run(hernia())
     const f = audit.findings.filter((x) => x.rule_id === 'concern.unaddressed')
     expect(f).toHaveLength(1)
-    expect(f[0]!.summary).toBe('The doctor did not address this patient concern in the consult.')
+    expect(f[0]!.summary).toBe('A response to this patient concern was not heard in the consult recording.')
     const window = new Set(consultContext(hernia()).segments.map((s) => s.id))
     for (const calls of [r.judge.calls.filter((c) => (c.state as { rule: string }).rule === 'concern.unaddressed'), second.calls.filter((c) => (c.state as { rule: string }).rule === 'concern.unaddressed')]) {
       expect(calls).toHaveLength(1)
