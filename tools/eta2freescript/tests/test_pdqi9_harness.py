@@ -152,18 +152,18 @@ GOOD = {k: 3 for k in judge.ITEM_KEYS}
     ("[1,2,3,4,5,1,2,3,4]", False), (json.dumps({"scores": GOOD}), False), (json.dumps({k: 3 for k in list(GOOD)[:8]}), False),
     (json.dumps({**GOOD, "extra": 3}), False), (json.dumps({**{k: 3 for k in list(GOOD)[:8]}, "bogus": 3}), False),
     (json.dumps({**GOOD, "useful": 6}), False), (json.dumps({**GOOD, "useful": 0}), False), (json.dumps({**GOOD, "useful": 3.0}), False),
-    (json.dumps({**GOOD, "useful": True}), False), (json.dumps({**GOOD, "useful": "3"}), False), ("Scores: " + json.dumps(GOOD), False), ("not json", False)])
-def test_parse_is_strict(text, ok):
+    (json.dumps({**GOOD, "useful": True}), False), (json.dumps({**GOOD, "useful": "3"}), False), ("Scores: " + json.dumps(GOOD), True), ("not json", False)])
+def test_parse_checks_stay_strict_after_extraction(text, ok):
     assert (judge.parse_scores(text) is not None) is ok
 
 
-def test_one_retry_then_parse_failure_and_failures_are_cached_per_key(frozen, tmp_path):
+def test_one_retry_then_parse_failure_and_failures_are_not_cached(frozen, tmp_path):
     fc = FakeClient(lambda *a: "garbage")
     kw = dict(uid="u", arm="A", judge="opus", ref="none", note="n", transcript="t", cache_dir=tmp_path, render_version="render-v2")
     r = judge.score_note(fc, frozen, **kw)
     assert r["parse_failure"] and r["scores"] is None and len(fc.calls) == 2
     judge.score_note(fc, frozen, **kw)
-    assert len(fc.calls) == 2  # cached
+    assert len(fc.calls) == 4  # a failure is not cached (14 Oct ruling): the rerun retries, once more
     replies = iter(["garbage", json.dumps(GOOD)])
     fc2 = FakeClient(lambda *a: next(replies))
     r2 = judge.score_note(fc2, frozen, **{**kw, "uid": "v"})
@@ -706,15 +706,16 @@ def test_d3_b0_parse_failure_is_not_evaluated_and_blocks_kept():
 def test_d4_floor_parsers_are_exact(frozen, tmp_path):
     items = floors.numbered_items({"diagnoses": [{"name": "a"}]})
     ok = json.dumps({"items": [item(1)]})
-    for i, text in enumerate(["Sure! " + ok + " done", ok + " trailing", "```json\n" + ok, ok + "\n```", "[" + ok + "]"]):
+    for i, text in enumerate(["[" + ok + "]", ok + " " + ok, "no object here"]):
         assert floors.judge_items(FakeClient(lambda *a, t=text: t), frozen, items, "t", tmp_path / f"p{i}", "u", "Bn")["parse_failure"], text
     extra = json.dumps({"items": [{**item(1), "extra": 1}]})
     assert floors.judge_items(FakeClient(lambda *a: extra), frozen, items, "t", tmp_path / "e", "u", "Bn")["parse_failure"]
-    for i, text in enumerate([ok, "```json\n" + ok + "\n```", "```\n" + ok + "\n```"]):
+    for i, text in enumerate([ok, "```json\n" + ok + "\n```", "```\n" + ok + "\n```", "Sure! " + ok + " done", ok + " trailing", "```json\n" + ok, ok + "\n```"]):
         assert not floors.judge_items(FakeClient(lambda *a, t=text: t), frozen, items, "t", tmp_path / f"g{i}", "u", "Bn")["parse_failure"]
     signed = [{"n": 1, "kind": "diagnosis", "text": "a"}]
     row = {"n": 1, "in_draft": True, "covered_by": None}
-    for i, text in enumerate([json.dumps({"signed": [{**row, "extra": 1}]}), "ok " + json.dumps({"signed": [row]})]):
+    ok_two = json.dumps({"signed": [row]}) + " " + json.dumps({"signed": [row]})
+    for i, text in enumerate([json.dumps({"signed": [{**row, "extra": 1}]}), ok_two]):
         assert floors.completion_counts(FakeClient(lambda *a, t=text: t), frozen, signed, [], [], "t", tmp_path / f"s{i}", "u", "Bn")["parse_failure"]
     assert not floors.completion_counts(FakeClient(lambda *a: json.dumps({"signed": [row]})), frozen, signed, [], [], "t", tmp_path / "sg", "u", "Bn")["parse_failure"]
 

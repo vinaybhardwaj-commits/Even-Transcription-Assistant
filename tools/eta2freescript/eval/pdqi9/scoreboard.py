@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 COLUMNS = ("round", "code", "prompts", "judges", "models", "render", "split sha", "split", "n", "A", "B0", "Bn", "Bn items > A", "Bn-A", "Bn-B0",
-           "floors", "jev", "replay drops", "rendered chars", "cost USD", "verdict")
+           "floors", "jev", "replay drops", "tolerated_cells", "parse_fail_cells", "floor_rows_unparsed", "rendered chars", "cost USD", "verdict")
 
 
 def _f(v, nd=2):
@@ -31,6 +31,7 @@ def md_row(r: dict) -> str:
              "<br>".join(f"{c}: d={_f(v['median_diff'])} p_holm={_f(v.get('p_holm'), 3)} rb={_f(v['rank_biserial'])}" for c, v in r["succinct_bn_minus_a"].items()),
              "<br>".join(f"{c}: d={_f(v['median_diff'])} p_holm={_f(v.get('p_holm'), 3)} rb={_f(v['rank_biserial'])}" for c, v in r["thorough_bn_minus_b0"].items()),
              floors, r["jev"].get("summary", r["jev"].get("status", "-")), r["replay_drops"],
+             _f(r.get("tolerated_cells")), _f(r.get("parse_fail_cells", r.get("parse_failures"))), _f(r.get("floor_rows_unparsed")),
              " / ".join(f"{a} {_f(v, 0)}" for a, v in r["rendered_chars_mean"].items()), _f(r["cost_usd"], 4), r["verdict"]]
     return "| " + " | ".join(str(c).replace("|", "/").replace("\n", " ") for c in cells) + " |"
 

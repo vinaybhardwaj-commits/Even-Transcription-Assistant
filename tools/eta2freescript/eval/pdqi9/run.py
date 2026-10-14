@@ -212,18 +212,24 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     texts = {(u, arm): render.render(arms[arm][u]["rx"]) for u in uids for arm in ARMS}
     combos = [f"{j}/{r}" for j in judge.JUDGES for r in judge.REFS]
     scores: dict = {}
+    shape_log = out / "judge-shapes.jsonl"
     for u, arm, j, r in judge.plan_calls(uids, list(ARMS)):
         res = judge.score_note(client, frozen, uid=u, arm=arm, judge=j, ref=r, note=texts[(u, arm)], transcript=transcript[u],
-                               cache_dir=cache / "pdqi9", render_version=render.RENDER_VERSION)
-        scores[(u, arm, f"{j}/{r}")] = None if res["parse_failure"] else {"total": sum(res["scores"]), "items": res["scores"]}
+                               cache_dir=cache / "pdqi9", render_version=render.RENDER_VERSION, shape_log=shape_log)
+        scores[(u, arm, f"{j}/{r}")] = None if res["parse_failure"] else {"total": sum(res["scores"]), "items": res["scores"],
+                                                                         **({"tolerated": True} if res.get("tolerated") else {})}
     parse_failures = sum(1 for v in scores.values() if v is None)
+    tolerated_cells = sum(1 for v in scores.values() if v and v.get("tolerated"))
 
     stamp = {"frozen_hashes": frozen.hashes, "render_version": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"]}
     fl = {"Bn": [], "B0": []}
     for u in uids:
         for kind, art in (("Bn", art_bn[u]), ("B0", art_b0[u])):
             fl[kind].append(stamp | floors.consult_floors(client, frozen, uid=u, arm_kind=kind, rx=arms[kind][u]["rx"], signed_rx=arms["A"][u]["rx"],
-                                                  art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors"))
+                                                  art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors", shape_log=shape_log))
+    floor_judged = [c for rows in fl.values() for x in rows for c in (x, x["completion"])]
+    floor_rows_unparsed = sum(1 for c in floor_judged if c.get("parse_failure"))
+    floor_rows_tolerated = sum(1 for c in floor_judged if c.get("tolerated"))
     table = floors.aggregate(fl["Bn"], fl["B0"])
 
     jev_res = {u: jev_lines.check_lines((art_bn[u] or {}).get("note_text") or "", transcript[u], jev_client) for u in uids}
@@ -258,6 +264,8 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
                                      + "".join(client.resolve(j)[0] for j in judge.JUDGES)).encode()).hexdigest(),
         "render": render.RENDER_VERSION, "resolved_model_ids": resolved, "split_sha": frozen.hashes["split-v1.json"], "split": split_name, "candidate": a.candidate,
         "frozen_hashes": frozen.hashes, "n": len(uids), "uids_dropped_not_in_all_arms": dropped_uids, "parse_failures": parse_failures,
+        "tolerated_cells": tolerated_cells, "parse_fail_cells": parse_failures, "floor_rows_unparsed": floor_rows_unparsed,
+        "floor_rows_tolerated": floor_rows_tolerated,
         "totals": totals, "item_means": item_means, "items_bn_gt_a": gt,
         "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A", SUCCINCT),
         "thorough_bn_minus_b0": thorough,
