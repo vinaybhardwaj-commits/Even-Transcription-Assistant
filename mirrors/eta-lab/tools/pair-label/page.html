@@ -150,7 +150,7 @@ let items=[],sig="",cur=0,mine={t:{}},all=[];
 let saveTimer=null,saving=Promise.resolve(),dirty=false;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const ANS=[["A_better","A is better","A reads better"],["B_better","B is better","B reads better"],["same","About the same","Equally good or bad"],["neither_readable","Neither is readable","Both garbled, empty or wrong language"],["unsure","Unsure","Cannot tell"]];
+const ANS=[["a_better","A is better","A reads better"],["b_better","B is better","B reads better"],["same","About the same","Equally good or bad"],["neither_readable","Neither is readable","Both garbled, empty or wrong language"],["unsure","Unsure","Cannot tell"]];
 const ALAB=Object.fromEntries(ANS.map(x=>[x[0],x[1]]));
 const LANG={en:"English",hi:"Hindi",kn:"Kannada",ta:"Tamil",ml:"Malayalam",te:"Telugu",bn:"Bengali",gu:"Gujarati",mr:"Marathi",pa:"Punjabi",und:"Undetermined"};
 const A=id=>mine.t[id]||(mine.t[id]={});
