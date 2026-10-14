@@ -157,7 +157,6 @@ _ZERO = ("unsupported_drugs", "leak_items", "invented_fields", "dose_precedence_
 def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> dict:
     """Source tallies for the three judged floors that name a replayed medicine or field."""
     by_n = {it["n"]: it for it in items}
-    note = (art or {}).get("note_text") or ""
     unsupported, invented, dose = [], [], []
     for x in res:
         it = by_n[x["n"]]
@@ -169,8 +168,8 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> 
             invented.append(_worst(_field_source(m, f, art, prov) for f in x["invented"]))
         if x["dose_precedence_error"]:
             if m is None:
-                dose.append("eta" if _in_text(it["text"], note) else "pulse_extraction")
-            elif _in_text(_s(m.get("strength")), _eta_text(m, art, prov)) and _s(m.get("strength")):
+                dose.append("eta" if _in_text(it["text"], _eta_output(art)) else "pulse_extraction")
+            elif _s(m.get("strength")) and _in_text(_s(m.get("strength")), _eta_text(art, prov)):
                 dose.append("eta")
             else:
                 dose.append("pulse_catalogue" if _is_catalogue(m) else "eta")
@@ -305,9 +304,47 @@ def _note_lines_for(m: dict, art: dict | None) -> str:
     return "\n".join(ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip() and _names_match(names, {_norm_name(ln)}))
 
 
-def _eta_text(m: dict, art: dict | None, prov: dict | None) -> str:
-    """What ETA carries for this drug: its note line(s) and its provenance item's text."""
-    return _note_lines_for(m, art) + "\n" + ((prov or {}).get("text") or "")
+_PROV_SKIP = frozenset({"evidence", "decision", "quote", "quote_en", "segment_ref", "item_id", "json_pointer", "flags"})
+
+
+def _prov_values(node, out: list[str]) -> None:
+    """Every string a provenance item carries as ETA's own statement: `text`, `names` and the structured `medicine` parts
+    (strength.text, frequency and duration texts...). Transcript quotes and ids are not ETA's output."""
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if k not in _PROV_SKIP:
+                _prov_values(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _prov_values(v, out)
+
+
+def _prov_text(p: dict | None) -> str:
+    out: list[str] = []
+    if isinstance(p, dict):
+        for k in ("text", "names", "medicine"):
+            _prov_values(p.get(k), out)
+    return "\n".join(out)
+
+
+def _eta_output(art: dict | None) -> str:
+    """ETA's whole output for the consult: note_text, every provenance item's text/names and structured values."""
+    a = art or {}
+    note = a.get("note_text") if isinstance(a.get("note_text"), str) else ""
+    return "\n".join([note] + [_prov_text(p) for p in a.get("provenance") or [] if isinstance(p, dict)])
+
+
+def _eta_text(art: dict | None, prov: dict | None) -> str:
+    """Lead rule: a value is ETA's when it appears anywhere in ETA's output (drug-line matching may only move a hit toward eta)."""
+    return _eta_output(art) + "\n" + _prov_text(prov)
+
+
+def _text_in(value: str, text: str) -> bool:
+    """Normalised, case-folded substring (no digit-run shortcut)."""
+    v = re.sub(r"\s+", " ", (value or "").lower()).strip()
+    return bool(v) and v in re.sub(r"\s+", " ", (text or "").lower())
 
 
 def _in_text(value: str, text: str) -> bool:
@@ -322,11 +359,11 @@ def _in_text(value: str, text: str) -> bool:
 
 def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None) -> str:
     """Source of one digit run found in field of replayed medicine m."""
-    if run in _DIGITS.findall(_eta_text(m, art, prov)):
+    if run in _DIGITS.findall(_eta_text(art, prov)):
         return "eta"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
-    return "eta" if run in _DIGITS.findall((art or {}).get("note_text") or "") else "pulse_extraction"
+    return "pulse_extraction"
 
 
 def _field_source(m: dict, field: str, art: dict | None, prov: dict | None) -> str:
@@ -334,16 +371,18 @@ def _field_source(m: dict, field: str, art: dict | None, prov: dict | None) -> s
     value = _s(m.get(field))
     if not value:
         return "check"
-    if _in_text(value, _eta_text(m, art, prov)):
+    if _in_text(value, _eta_text(art, prov)):
         return "eta"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
-    return "eta" if _in_text(value, (art or {}).get("note_text") or "") else "pulse_extraction"
+    return "pulse_extraction"
 
 
 def _name_source(m: dict, art: dict | None) -> str:
     """Source of an unsupported replayed drug (the name is the offending value)."""
-    if _note_lines_for(m, art):
+    if _note_lines_for(m, art) or _prov_for(m, art) is not None:
+        return "eta"
+    if any(_text_in(v, _eta_output(art)) for v in (m.get(k) or "" for k in ("name", "brand_name", "generic")) if len(_norm_name(v)) >= 3):
         return "eta"
     return "pulse_catalogue" if _is_catalogue(m) else "pulse_extraction"
 
@@ -404,7 +443,7 @@ def dose_precedence_sources(rx: dict, art: dict | None) -> list[str]:
         if m is None:
             out.append("eta")
         elif _strength(m.get("strength") or "") != want:
-            out.append("eta" if _in_text(_s(m.get("strength")), _eta_text(m, art, p)) else
+            out.append("eta" if _in_text(_s(m.get("strength")), _eta_text(art, p)) else
                        "pulse_catalogue" if _is_catalogue(m) else "eta")
     return out
 
@@ -457,32 +496,76 @@ def printable_text(rx: dict) -> str:
     return "\n".join(f"{h}:\n" + "\n".join(lines) for h, lines in heads.items())
 
 
+def _note_chunks(note: str) -> list[str]:
+    """note_text split into one chunk per rendered line, each carrying its heading so the section-gated checks see it."""
+    out, cur = [], None
+    for line in (note or "").split("\n"):
+        head, sep, _ = line.partition(":")
+        if sep and head in validate.V.HEADINGS:
+            cur = head
+            out.append(line)
+        elif line.strip():
+            out.append(f"{cur}:\n{line}" if cur else line)
+    return out
+
+
+def _printable_source(e: str, h: str, line: str, med: dict | None, eta_out: str) -> str:
+    """Source of one finding in a replayed field. Lead rule: eta when the matched text (or, for a finding with no matched text, the
+    whole field text) occurs anywhere in ETA's output."""
+    for q in re.findall(r"'([^']*)'", e):
+        if len(q) >= 3 and re.search(r"[A-Za-z]", q) and _text_in(q, eta_out):
+            return "eta"
+    if len(line) >= 3 and re.search(r"[A-Za-z]", line) and _text_in(line, eta_out):
+        return "eta"
+    if med is not None and _is_catalogue(med):
+        bare = {**med, "frequency": "", "duration": "", "instructions": ""}
+        bare_line = " ".join(x for x in (_s(bare.get(k)) for k in ("name", "brand_name", "generic", "strength")) if x)
+        if e in validate.printable_errors(f"{h}:\n{bare_line}", []):
+            return "pulse_catalogue"
+    return "pulse_extraction"
+
+
 def printable_attribution(rx: dict, art: dict | None) -> dict:
-    """{"raw", "dedup", "check", "sources": {...}}. raw is printable_count. Identical findings per text are counted once (validate
-    reports the same bracket twice); the removed repeats are `check`. note_text findings are eta; a replayed-field finding is
-    pulse_catalogue when it survives blanking the extraction fields of an entity-resolved medicine line, else pulse_extraction."""
+    """{"raw", "dedup", "check", "sources": {...}}. raw is printable_count. Only a finding identical in rule AND matched text AND from
+    the same rendered line is a repeat (validate reports one bracket twice); the removed repeats are `check`. Distinct lines with the
+    same finding are distinct findings. When the per-line findings do not add up to the whole-text findings (the field identity is
+    not available), nothing is de-duplicated."""
+    eta_out = _eta_output(art)
     sources: list[str] = []
-    raw = 0
+    raw = check = 0
+
+    def take(whole: list[str], units: list[tuple[list[str], tuple | None]], fallback_src):
+        """units: (findings of one rendered line, line identity). Appends sources; returns the check count."""
+        nonlocal raw
+        raw += len(whole)
+        n_units = sum(len(f) for f, _ in units)
+        if n_units > len(whole):  # whole-text checks coalesced: no field identity, no de-duplication
+            sources.extend(fallback_src(e) for e in whole)
+            return 0
+        rep = 0
+        for found, ident in units:
+            uniq = list(dict.fromkeys(found))
+            rep += len(found) - len(uniq)
+            sources.extend(fallback_src(e) if ident is None else _printable_source(e, *ident, eta_out) for e in uniq)
+        sources.extend("eta" for _ in range(len(whole) - n_units))  # findings with no line of their own: in doubt, ETA's
+        return rep
+
     if art is not None and isinstance(art.get("note_text"), str):
         prompts = [c.get("prompt") for c in art.get("completion_required") or [] if isinstance(c, dict)]
-        errs = validate.printable_errors(art["note_text"], prompts)
-        raw += len(errs)
-        sources += ["eta"] * len(set(errs))
-    errs = validate.printable_errors(printable_text(rx), [])
-    raw += len(errs)
+        units = [(validate.printable_errors(c, []), None) for c in _note_chunks(art["note_text"])]
+        check += take(validate.printable_errors(art["note_text"], prompts), units, lambda e: "eta")
     lines = _printable_lines(rx)
-    for e in dict.fromkeys(errs):
-        src = "pulse_extraction"
-        for h, line, med in lines:
-            if e in validate.printable_errors(f"{h}:\n{line}", []):
-                if med is not None and _is_catalogue(med):
-                    bare = {**med, "frequency": "", "duration": "", "instructions": ""}
-                    bare_line = " ".join(x for x in (_s(bare.get(k)) for k in ("name", "brand_name", "generic", "strength")) if x)
-                    if e in validate.printable_errors(f"{h}:\n{bare_line}", []):
-                        src = "pulse_catalogue"
-                break
-        sources.append(src)
-    return {"raw": raw, "dedup": len(sources), "check": raw - len(sources), "sources": {**_tally(sources), "check": raw - len(sources)}}
+    whole = validate.printable_errors(printable_text(rx), [])
+    units = [(validate.printable_errors(f"{h}:\n{line}", []), (h, line, med)) for h, line, med in lines]
+
+    def locate(e):
+        for (found, ident) in units:
+            if e in found:
+                return _printable_source(e, *ident, eta_out)
+        return "eta"
+
+    check += take(whole, units, locate)
+    return {"raw": raw, "dedup": len(sources), "check": check, "sources": {**_tally(sources), "check": check}}
 
 
 def _unknown_strings(node, schema) -> list[str]:
