@@ -3,7 +3,7 @@
 Out: ~/vj/link/overnight/jev_in.json = [{gid, doctor_uid, doctor_name, consults:[{rd, token_uid, called_ms, completed_ms, turn_idx}]}]"""
 import csv, json, os, sys
 from datetime import datetime
-H = os.path.expanduser(os.environ.get("LINK_H", "~/vj/link")); ms = lambda ts: int(datetime.fromisoformat(ts).timestamp() * 1000)
+H = os.path.expanduser("~/vj/link"); ms = lambda ts: int(datetime.fromisoformat(ts).timestamp() * 1000)
 targets = json.load(open(f"{H}/overnight/jev_targets.json")); out = []
 for t in targets:
     cons, name = [], None

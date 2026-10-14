@@ -41,7 +41,7 @@ MAX_T, MAX_C, MAX_CH = 12, 8, 300
 
 
 def deid(texts, doctor):
-    inp, outp = f"{PD}/_deid_in.{os.getpid()}.json", f"{PD}/_deid_out.{os.getpid()}.json"   # unique per process: two runs must never share a de-id file
+    inp, outp = f"{PD}/_deid_in.json", f"{PD}/_deid_out.json"
     json.dump({"turns": [{"id": str(i), "text": t, "doctor": doctor} for i, t in enumerate(texts)]}, open(inp, "w")); os.chmod(inp, 0o600)
     if os.path.exists(outp): os.remove(outp)
     r = subprocess.run([os.path.expanduser("~/eta-data/deid/venv/bin/python"), f"{LAB}/studies/2026-09-24-surgery-review-v2/deid.py", inp, outp], capture_output=True, text=True)
@@ -121,7 +121,7 @@ for L in jin:
         own_lines = [l for l in items_for(mine, windows).splitlines() if l.startswith("- consult")]; ctl_lines = [l for l in ctrl_lines.splitlines() if l.startswith("- consult")]
         emp = lambda ls: sum(1 for l in ls if "(no drug or test recorded)" in l)
         ow = {w for l in own_lines for w in re.findall(r"[a-z]{5,}", l.lower())}; cw = {w for l in ctl_lines for w in re.findall(r"[a-z]{5,}", l.lower())}
-        jf = f"{OUTD}/{L['gid']}.json"; j = json.load(open(jf)) if os.path.exists(jf) else {}
+        jf = f"{PD}/jev/{L['card_id']}.json"; j = json.load(open(jf)) if os.path.exists(jf) else {}
         print(json.dumps({"card": L["gid"], "turns": len(texts), "turn_chars": sum(len(x) for x in texts), "consults": len(cons), "deid_tags": tags, "turns_changed_by_deid": chg,
                           "own_item_lines_empty": f"{emp(own_lines)}/{len(own_lines)}", "ctrl_item_lines_empty": f"{emp(ctl_lines)}/{len(ctl_lines)}", "own_item_words": len(ow), "ctrl_item_words": len(cw), "item_word_overlap_own_ctrl": len(ow & cw),
                           "state_chars_lq": len(st_lq), "state_chars_ctrl": len(st_ctrl), "lq": j.get("lq_noul"), "ctrl": j.get("control_noul"), "void": j.get("lq_void"), "q1": j.get("q1_choice")}))
@@ -132,5 +132,5 @@ for L in jin:
     res = {"gid": L["gid"], "n_consults": len(cons), "n_turns": len(texts), "q1_choice": q1["choice"], "q1_confidence": q1.get("confidence"), "q1_p_doctor": q1p,
            "lq_noul": lq, "control_noul": ct, "lq_void": ct >= 0.5, "jev_term": bool(doc_conf is not None and doc_conf >= 0.70 and lq >= 0.5 and ct < 0.5),
            "backend": a.backend, "lq_sha12": LQ_SHA12, "freeze_sha12": C.FREEZE_SHA12, "state_chars": len(st_lq)}
-    json.dump(res, open(f"{OUTD}/{L['gid']}.json", "w"), indent=1)
+    json.dump(res, open(f"{PD}/jev/{L['card_id']}.json", "w"), indent=1)
     print(L["gid"], {k: res[k] for k in ("q1_choice", "q1_confidence", "lq_noul", "control_noul", "lq_void", "jev_term")})

@@ -29,5 +29,3 @@ PRE-REGISTERED (written before any 25 Sep data existed; 24 Sep 19:50 IST):
  windows, 5.7 %, max hour 7.7 %): same measure, an earlier cut than the 17 of 302 above. The 07:50 time is the ORDER, not a measurement: the split
  uses Vercel's `ready` timestamp from deploy_at.txt, and if the deploy slips past 08:05 there is no AFTER period and the report says so.
 
-- 08:05 IST 25 Sep | BEFORE (24 Sep 04:40 -> deploy 25 Sep 07:51): 321 windows, 18 loop (5.6%), 15 with an unprotected loop | TRANSITION (07:51-08:01, in neither pool): 0 windows | AFTER (from 08:01): 0 windows, 0 loop (n/a, Wilson95 [0.0-100.0%]), 0 unprotected, 0 protected-only | expected at baseline 0.0, P(<= observed | no effect) = 1.000
-- 09:05 IST 25 Sep | BEFORE (24 Sep 04:40 -> deploy 25 Sep 07:51): 321 windows, 18 loop (5.6%), 15 with an unprotected loop | TRANSITION (07:51-08:01, in neither pool): 0 windows | AFTER (from 08:01): 0 windows, 0 loop (n/a, Wilson95 [0.0-100.0%]), 0 unprotected, 0 protected-only | expected at baseline 0.0, P(<= observed | no effect) = 1.000

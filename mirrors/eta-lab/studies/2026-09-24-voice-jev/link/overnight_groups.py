@@ -13,12 +13,12 @@ import json, os, sys, random, collections, glob
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tiering as T
-H = os.path.expanduser(os.environ.get("LINK_H", "~/vj/link")); SUF = sys.argv[1] if len(sys.argv) > 1 else ""; SEED = 24092026
-rds = sorted(p.split("link-")[1][:-5] for p in glob.glob(f"{H}/link-rd_*.json") if "-pl" not in p and "-pd" not in p)
+H = os.path.expanduser("~/vj/link"); SUF = sys.argv[1] if len(sys.argv) > 1 else ""; SEED = 24092026
+rds = sorted(p.split("link-")[1][:-5] for p in glob.glob(f"{H}/link-rd_*.json") if "-pl" not in p)
 L = T.load(rds, H, SUF); V = T.voices(L); G = T.groups(V)
 edge = {}
 for p in glob.glob(f"{H}/edge-2026-09-??{SUF}.json"):
-    if SUF == "" and ("-pl" in p or "-pd" in p): continue
+    if SUF == "" and "-pl" in p: continue
     edge[os.path.basename(p)[5:15]] = json.load(open(p))
 seen, glinks = set(), []
 for v in V:
@@ -39,7 +39,7 @@ for v in V:
     glinks.append({"gid": f"g{len(glinks):03d}", "doctor_uid": D, "members": [list(m) for m in grp], "members_naming_D": [list(m) for m in mem], "rep": list(rep), "n_room_days": len(days),
                    "xday": len(days) >= 2, "excl": excl, "staff_candidate": not excl, "doctors_named": sorted(docs), "n5": n_core >= 5, "core_turns_in_consults": n_core, "rx_hits": rx, "rx": rx >= 1,
                    "stable_tolerances_max": st, "stable": st >= 2, "lq": None,
-                   "excess_rep": pairs[rep]["excess"], "dominance_rank_rep": pairs[rep].get("dominance_rank"), "core_share_rep": pairs[rep].get("core_share_in_consults"), "dominant_rep": pairs[rep].get("dominance_rank") == 1, "rx_hits_rep": pairs[rep]["rx_hit_by_voice"], "present_rep": [pairs[rep]["present"], pairs[rep]["consults_room_active"]]})
+                   "excess_rep": pairs[rep]["excess"], "present_rep": [pairs[rep]["present"], pairs[rep]["consults_room_active"]]})
 def tier(g):
     ok_rl = g["rx"] or bool(g["lq"])
     return "HIGH" if (g["xday"] and g["excl"] and g["n5"] and ok_rl and g["stable"]) else "MED" if (g["xday"] and g["excl"] and g["n5"]) else "LOW"

@@ -41,7 +41,7 @@ MAX_T, MAX_C, MAX_CH = 12, 8, 300
 
 
 def deid(texts, doctor):
-    inp, outp = f"{PD}/_deid_in.{os.getpid()}.json", f"{PD}/_deid_out.{os.getpid()}.json"   # unique per process: two runs must never share a de-id file
+    inp, outp = f"{PD}/_deid_in.json", f"{PD}/_deid_out.json"
     json.dump({"turns": [{"id": str(i), "text": t, "doctor": doctor} for i, t in enumerate(texts)]}, open(inp, "w")); os.chmod(inp, 0o600)
     if os.path.exists(outp): os.remove(outp)
     r = subprocess.run([os.path.expanduser("~/eta-data/deid/venv/bin/python"), f"{LAB}/studies/2026-09-24-surgery-review-v2/deid.py", inp, outp], capture_output=True, text=True)

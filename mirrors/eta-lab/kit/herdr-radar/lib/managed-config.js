@@ -438,16 +438,6 @@ function sidebarBlock(variant) {
         cell('$title_idle_stale', state.idleStale),
         cell('$title_unknown', state.unknown),
       ].join(', ')}]`,
-      // eta-lab fork (ruling 237): herdr's default agent rows are
-      // [state_icon, machine, workspace, tab] and [agent]. The managed block
-      // replaces them, so the machine label, workspace, tab and the agent's
-      // name are named again here as built-in tokens (bare names; `$name`
-      // means custom metadata). A token with no value drops out with its
-      // separator, and a row with no value at all disappears: `machine` shows
-      // only on a multi-machine client, `agent` only where one is detected.
-      // The state mark is not repeated: the state-coloured logo and title say it.
-      `[${[cell('machine', state.subtle), cell('workspace', state.subtle), cell('tab', state.subtle)].join(', ')}]`,
-      `[${[cell('agent', state.subtle)].join(', ')}]`,
       '["$gap"]',
     ].join(', ');
 
