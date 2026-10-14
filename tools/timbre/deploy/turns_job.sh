@@ -16,7 +16,7 @@ log "pip install"
 TORCH_BEFORE=$(python -c "import torch;print(torch.__version__)")
 pip install -q --no-cache-dir -r tools/timbre/requirements-turns.txt
 [ "$(python -c 'import torch;print(torch.__version__)')" = "$TORCH_BEFORE" ] || { echo "torch changed by pip install: abort" >&2; exit 3; }
-pip check || log "pip check reported conflicts (see above)"
+pip check || { echo "pip check failed: abort" >&2; exit 4; }
 python - <<'PY'
 import torch, torchaudio
 print("torchaudio", torchaudio.__version__)

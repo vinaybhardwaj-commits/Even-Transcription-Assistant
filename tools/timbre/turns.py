@@ -54,7 +54,8 @@ MODEL_NAMES = {
     "e2v": "emotion2vec_plus_large.v1",
 }
 ROLES = ("doctor", "patient", "other")
-ROLE_SOURCES = ("llm-roles", "text-judge", "caa-labels", "silver-labels")
+SILVER_SOURCE = "silver-labels"
+ROLE_LAYERS = ("role.llm-roles", "role.text-judge", "role.caa-labels")
 
 # --------------------------------------------------------------------------- offsets / turns
 
@@ -193,12 +194,15 @@ def role_segments_to_clip(role_track_segments, manifest_t0_ms):
 def assign_roles(raw_segs, role_segs):
     """Role per Nemotron speaker by most overlap with one set of role segments.
 
-    raw_segs: [(a, b, speaker)], role_segs: [(a, b, role)]. Returns {speaker: role or None}
-    (None = this layer has no overlap with the speaker).
+    raw_segs: [(a, b, speaker)], role_segs: [(a, b, role)]. Returns
+    {speaker: (role, role_overlap_frac) or None}; None = this layer has no overlap with the
+    speaker. role_overlap_frac = seconds of the speaker's speech inside the winning role's
+    segments / the speaker's total speech seconds.
     """
     out = {}
     for sp in {s for _, _, s in raw_segs}:
         mine = _union([(a, b) for a, b, s in raw_segs if s == sp])
+        total = sum(y - x for x, y in mine)
         tot = {}
         for r in {r for _, _, r in role_segs}:
             theirs = _union([(a, b) for a, b, rr in role_segs if rr == r])
@@ -208,27 +212,34 @@ def assign_roles(raw_segs, role_segs):
                     ov += max(0.0, min(x[1], y[1]) - max(x[0], y[0]))
             if ov > 0:
                 tot[r] = ov
-        out[sp] = max(tot, key=tot.get) if tot else None
+        if tot:
+            best = max(tot, key=tot.get)
+            out[sp] = (best, round(min(1.0, tot[best] / total), 4) if total > 0 else 0.0)
+        else:
+            out[sp] = None
     return out
 
 
 def assign_roles_layered(raw_segs, layers):
     """Per speaker: the first layer, in order, that overlaps the speaker decides.
 
-    Read contract v0.2 section 5 (eta-lab docs/ETA-PALIMPSEST-ARTEFACT-READ-CONTRACT-13-OCT-2026.md,
-    rule 5): role = llm-roles by most overlap, else text-judge, else caa-labels, else unknown. The
-    fallback is per turn there, so here it is per speaker. ``layers`` = [(source, role_segs)] in
-    priority order; the labelled silver map goes last. Returns {speaker: (role, source)} with
-    ("unknown", None) when no layer overlaps.
+    Role comes only from segment time overlap, never from the extras.map speaker maps (palimpsest
+    ruling 14 Oct 10:15Z). Order follows read contract v0.2 section 5 rule 5 (eta-lab docs/
+    ETA-PALIMPSEST-ARTEFACT-READ-CONTRACT-13-OCT-2026.md): llm-roles, then text-judge, then
+    caa-labels, else unknown; per speaker here. ``layers`` = [(layer_name, role_segs)] in priority
+    order. role_source is "overlap:<layer_name>" (e.g. overlap:role.llm-roles); the labelled silver
+    layer (name "silver-labels") keeps its own name. Returns {speaker: (role, role_source,
+    role_overlap_frac)}; ("unknown", None, None) when no layer overlaps.
     """
-    out = {sp: ("unknown", None) for sp in {s for _, _, s in raw_segs}}
-    for source, role_segs in layers:
+    out = {sp: ("unknown", None, None) for sp in {s for _, _, s in raw_segs}}
+    for name, role_segs in layers:
         if not role_segs:
             continue
         got = assign_roles(raw_segs, role_segs)
-        for sp, role in got.items():
-            if role is not None and out[sp][0] == "unknown":
-                out[sp] = (role, source)
+        src = name if name == SILVER_SOURCE else f"overlap:{name}"
+        for sp, res in got.items():
+            if res is not None and out[sp][0] == "unknown":
+                out[sp] = (res[0], src, res[1])
     return out
 
 
@@ -353,6 +364,7 @@ def feature_rows(consult_uid, person, turn_rows, features, model_info, run_id, g
                 "speaker": person["speaker"],
                 "role": person["role"],
                 "role_source": person["role_source"],
+                "role_overlap_frac": person.get("role_overlap_frac"),
                 "feature": feat,
                 "value": agg["value"],
                 "stat": "median",
@@ -421,23 +433,24 @@ def plan_clip(clip, reb_root, label=None):
     turns = build_turns(nem.get("segments"), t0, dur)
 
     layers = []
-    for prefix, src in (("role.llm-roles", "llm-roles"), ("role.text-judge", "text-judge"), ("role.caa-labels", "caa-labels")):
+    for prefix in ROLE_LAYERS:
         d, _ = _canonical(scope, prefix)
         if d:
-            layers.append((src, role_segments_to_clip(d.get("segments"), t0)))
-    if not any(rs for _, rs in layers) and label and label.get("speaker_roles"):
-        # silver labels only when no role-layer track gave any role segment
+            # every status-ok track counts as present, even with no segments or no mappable role
+            layers.append((prefix, role_segments_to_clip(d.get("segments"), t0)))
+    if not layers and label and label.get("speaker_roles"):
+        # silver labels only when NO status-ok role-layer track exists
         sar = clip["tracks"].get("diar_sarvam")
         if sar:
             sd = json.loads((Path(reb_root) / sar["key"]).read_text())
             smap = {k: norm_role(v) for k, v in label["speaker_roles"].items() if norm_role(v)}
             silver = [(a, b, smap[sp]) for a, b, sp in segments_to_clip(sd.get("segments"), t0, dur) if smap.get(sp)]
-            layers.append(("silver-labels", silver))
+            layers.append((SILVER_SOURCE, silver))
     got = assign_roles_layered(raw, layers)
     persons = {}
     for sp in sorted({t["speaker"] for t in turns}):
-        role, source = got.get(sp, ("unknown", None))
-        persons[sp] = {"role": role, "role_source": source if role != "unknown" else None}
+        role, source, frac = got.get(sp, ("unknown", None, None))
+        persons[sp] = {"role": role, "role_source": source, "role_overlap_frac": frac}
     return {
         "bench_id": clip["bench_id"],
         "consult_uid": clip["consult_uid"],
@@ -477,12 +490,30 @@ def cmd_plan(args):
 # --------------------------------------------------------------------------- score (GPU, HF)
 
 
+def hf_cache_dir():
+    """The hub cache directory, resolved the same way for pinning and for reading revisions."""
+    return Path(os.environ.get("HF_HUB_CACHE") or Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub")
+
+
+def check_revisions(models):
+    """Abort unless every model has a pin and the revision in the cache equals it.
+    (None == None must not pass.)"""
+    for name, m in models.items():
+        pinned, loaded = m.get("pinned_rev"), m.get("model_rev")
+        if not pinned:
+            raise SystemExit(f"{name}: no pinned revision for {m.get('model_id')}")
+        if loaded != pinned:
+            raise SystemExit(f"{name}: loaded revision {loaded} differs from the pin {pinned}")
+
+
 def pin_models(pins=None):
     """Download the pinned commits and point refs/main at them, so the extractors (which
     resolve ``main`` from the local cache) load exactly these revisions."""
+    # Make the hub cache explicit so snapshot_download, refs/main and cached_hub_revision agree.
+    os.environ.setdefault("HF_HUB_CACHE", str(hf_cache_dir()))
     from huggingface_hub import snapshot_download
 
-    cache = Path(os.environ.get("HF_HUB_CACHE") or Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub")
+    cache = hf_cache_dir()
     for repo, sha in (pins or MODEL_PINS).items():
         allow = ["*.json", "*.txt"] if repo == "microsoft/wavlm-large" else None
         snapshot_download(repo, revision=sha, allow_patterns=allow)
@@ -565,9 +596,7 @@ def cmd_score(args):
             "git_sha": git_sha,
             "overlap_exclude_frac": OVERLAP_EXCLUDE_FRAC,
         }
-        for s_, m_ in meta["models"].items():
-            if m_["model_rev"] != m_["pinned_rev"]:
-                raise SystemExit(f"{s_}: loaded revision {m_['model_rev']} differs from the pin {m_['pinned_rev']}")
+        check_revisions(meta["models"])
         fh.write(json.dumps(meta) + "\n")
         for rec in plan:
             if only and rec["bench_id"] not in only:
@@ -586,6 +615,8 @@ def cmd_score(args):
                     "turn": t["turn"],
                     "speaker": t["speaker"],
                     "role": rec["persons"].get(t["speaker"], {}).get("role", "unknown"),
+                    "role_source": rec["persons"].get(t["speaker"], {}).get("role_source"),
+                    "role_overlap_frac": rec["persons"].get(t["speaker"], {}).get("role_overlap_frac"),
                     "t0_s": t["t0_s"],
                     "t1_s": t["t1_s"],
                     "dur_s": t["dur_s"],
