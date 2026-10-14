@@ -1,0 +1,4 @@
+{"frame": "mic1 origin, x along the mic1-mic2 line, y toward the Pi, z up, metres. 2D problem: all heights set to 1.0 (heights unknown, V 9 Oct). spk_left is an ASSUMED anchor (speakers sit on the computer near mic1, position unknown): the beacon clock offset cannot be split from it.",
+ "points": {"mic1": [0, 0, 1.0], "mic2": [2.44, 0, 1.0], "pi": [1.22, 3.45, 1.0], "spk_left": [-0.2, 0.2, 1.0], "spk_right": [0.1, 0.2, 1.0]},
+ "spk_left_sigma_m": 0.2,
+ "temp_c": 24}

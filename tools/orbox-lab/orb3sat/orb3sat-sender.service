@@ -1,0 +1,13 @@
+[Unit]
+Description=ORB3Sat sender (rsync closed pieces to ORB3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sat
+ExecStart=/usr/bin/python3 /opt/orb3sat/sender.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
