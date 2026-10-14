@@ -49,17 +49,15 @@ def stamp():
     return {"freeze_sha12": FREEZE_SHA12, "addendum_sha12": ADDENDUM_SHA12, "addendum166_sha12": ADDENDUM166_SHA12}
 
 
-def select_turns(arm1_rows, mode, turn_ids=None, confident_ids=None, extra_ids=None):
+def select_turns(arm1_rows, mode, turn_ids=None, confident_ids=None):
     """Which turns an arm runs on. doubtful = every DOUBTFUL turn; doubtful+page = those plus the confident sample, which is the 40 confident items of the
     "Who is speaking" page (ruling 169 X1: they have human truth), given as confident_ids; all = everything.
-    extra_ids = turns that are NOT in the arm 1 file but must still be run (ruling 290 E3X pseudo-turns: no production row, so they never enter arm1_in);
-    they are added as given. turn_ids (a list) restricts the result further (used by the refuter's stability re-query)."""
+    turn_ids (a list) restricts the result further (used by the refuter's stability re-query)."""
     have = {r["turn_id"] for r in arm1_rows}
     ids = {r["turn_id"] for r in arm1_rows if is_doubtful(r)} if mode != "all" else set(have)
     if mode == "doubtful+page":
         if confident_ids is None: raise SystemExit("--select doubtful+page needs --confident-ids (the page's 40 confident items)")
         ids |= set(confident_ids) & have
-    if extra_ids: ids |= set(extra_ids) - have          # ids that ARE in arm 1 follow the normal selection, not this back door
     return ids & set(turn_ids) if turn_ids is not None else ids
 
 

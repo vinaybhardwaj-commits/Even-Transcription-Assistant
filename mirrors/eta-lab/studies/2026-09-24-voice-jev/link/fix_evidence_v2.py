@@ -6,7 +6,7 @@
  E4  one line on every card: what production's own voice matcher says about THIS voice (share of its turns labelled 'clinician' in that room-day, and whether production names a clinician for the room-day).
 Reads the tier key only to map card -> (room-day, voice); does not write it.  Usage: fix_evidence_v2.py   (box)"""
 import json, os, re, subprocess
-BOX = os.path.expanduser("~/eta-data/voice-linkage"); NAME = os.environ.get("BATCH", "batch1"); B = f"{BOX}/{NAME}"; K = json.load(open(f"{BOX}/{NAME}-key/key.json")); D = f"{BOX}/{os.environ.get('TREE', 'dtree')}"
+BOX = os.path.expanduser("~/eta-data/voice-linkage"); B = f"{BOX}/batch1"; K = json.load(open(f"{BOX}/batch1-key/key.json")); D = f"{BOX}/dtree"
 HELPER = os.path.expanduser("~/dev/eta-lab/kit/neon-select.mjs"); REPO = os.path.expanduser("~/dev/Even-Transcription-Assistant")
 def neon(sql):
     r = subprocess.run(["node", HELPER, sql], cwd=REPO, capture_output=True, text=True, timeout=300)
@@ -27,9 +27,6 @@ for k in K:
     clin = sum(1 for x in labelled if x["role"] == "clinician")
     docs = {x["clinician_id"] for x in rm.values() if x["role"] == "clinician" and x["clinician_id"]}
     ev = [e for e in card["evidence"] if not e.startswith("Jev")]                                   # E1
-    rxf = f"{D}/rx-{L['date']}.json"
-    if os.path.exists(rxf) and os.path.getsize(rxf) <= 5:   # no production transcript on this day: the Rx step could not run
-        ev = [("Prescriptions: not checked, because there is no transcript for this day." if e.startswith("Prescriptions") else e) for e in ev]
     for i, e in enumerate(ev):                                                                        # E2
         m = re.match(r"Voice timing: this voice is heard in (\d+)% of the busy minutes when the doctor is in a queue consult, and in (\d+)% of the busy minutes when they are not", e)
         if m and abs(int(m.group(1)) - int(m.group(2))) < 15:

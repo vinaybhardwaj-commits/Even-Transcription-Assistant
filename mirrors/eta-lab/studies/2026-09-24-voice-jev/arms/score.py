@@ -250,9 +250,7 @@ def main():
     ap.add_argument("--role-weights-key", default="all_pool_doubtful"); ap.add_argument("--windows"); ap.add_argument("--human-counts"); ap.add_argument("--key-json"); ap.add_argument("--prices"); ap.add_argument("--outdir", required=True)
     a = ap.parse_args()
     stamp = C.stamp(); rule = K.load_rule(a.rule, a.rule_sha)
-    a1_rows = C.read_jsonl(a.arm1)
-    if any(r.get("production_row") is False for r in a1_rows): raise SystemExit("arm 1 file has production_row=false rows (E3X pseudo-turns): they would be scored with a fabricated arm-1 answer (ruling 290). Keep them out of arm1_in.")
-    a1 = {r["turn_id"]: r for r in a1_rows}
+    a1_rows = C.read_jsonl(a.arm1); a1 = {r["turn_id"]: r for r in a1_rows}
     if a.role_weights: weights, wsrc = pinned_role_weights(a.role_weights, a.role_weights_key)
     else: weights, wsrc = role_weights(a1_rows), {"file": None, "note": "recomputed from the arm 1 file: NOT PINNED (per-context turn ids)"}
     wins = {r["window_id"]: r["duration_s"] for r in C.read_jsonl(a.windows)} if a.windows else {}

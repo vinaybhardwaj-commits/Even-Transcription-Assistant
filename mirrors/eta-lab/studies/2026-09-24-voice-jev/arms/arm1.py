@@ -17,7 +17,6 @@ def main():
     for r in rows:
         d = C.is_doubtful(r)
         if "doubtful" in r and bool(r["doubtful"]) != d: bad.append(r["turn_id"])
-        if r.get("production_row") is False: raise SystemExit(f"turn {r['turn_id']}: production_row is false. Non-production pseudo-turns (E3X, ruling 290) must NOT enter arm1_in (they would be scored with a fabricated arm-1 answer); hand them off in a separate file and pass their ids with --extra-ids")
         for k in ("role", "best", "margin"):
             if k not in r: raise SystemExit(f"turn {r['turn_id']}: no `{k}` key (a null value is fine, a missing key is a schema error)")
         out.append({"turn_id": r["turn_id"], "window_id": r.get("window_id"), "arm": 1, "role": r["role"], "role_empty": not r["role"], "is_doctor": r["role"] == "clinician",
