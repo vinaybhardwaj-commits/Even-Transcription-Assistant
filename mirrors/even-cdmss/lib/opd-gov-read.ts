@@ -1,13 +1,9 @@
 /**
  * lib/opd-gov-read.ts — audit-side reads for the governance signal feed (Neon).
  *
- * A governance thread stores the (doctor, signal_type, window, note_class) key; the finding
- * INSTANCES are resolved at read time from the store for THAT class (so the thread never
- * duplicates finding text, and an OPD note is never attached to a discharge or OT thread):
- *   opd                → opd_note_audits
- *   discharge_summary  → ipd_discharge_audits, attributed by the treating-doctor hop
- *   ot                 → ot_note_audits, attributed only when map_status is mapped
- * Audit METRICS stay on the OPD canonical read. Re-stamps finding identity on read → legacy rows covered.
+ * A governance thread stores the (doctor, signal_type, window) key; the actual finding INSTANCES
+ * and the doctor's audit METRICS live in opd_note_audits and are resolved at read time here (so the
+ * thread never duplicates finding text). Re-stamps finding identity on read → legacy rows covered.
  */
 
 import { sql } from './db';
@@ -16,11 +12,6 @@ import { canonicalDistinctOnSql } from './audit-canonical';
 import { parseJson } from './opd-audit-ui';
 import type { Source } from './citations-core';
 import type { SignalRepresentative } from './opd-gov-signal-core';
-import { fetchIpdDoctorHop } from './ipd-doctor-hop';
-import { landDischargeAudits, type DischargeAuditSource } from './triage/ds-lander';
-import { landOtAudits } from './triage/ot-lander';
-import { OT_ENGINE_VERSION } from './triage/ot-audit-core';
-import { emptyPatient, evidenceExcerpt, patientContext, type PatientContext } from './doctor-facing';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -28,38 +19,14 @@ const APP = process.env.APP_SOURCE || 'standalone';
  *  before ranking, which is what makes the int[] cast in CANONICAL_RANK_SQL safe. */
 const ENG_FAMILY_SQL = `ANY(ARRAY[${OPD_ENGINE_VERSIONS_CURRENT.map((v) => `'${v}'`).join(', ')}])`;
 
-export interface Instance extends SignalRepresentative {
-  /** Present only on an `enrich` read (doctor-facing). Governance reads never carry these. */
-  evidence_excerpt?: string | null;
-  patient?: PatientContext;
-}
+export interface Instance extends SignalRepresentative {}
 
-export interface ResolveOpts {
-  /**
-   * Doctor-facing read: add the audit's evidence points, the patient context CDMSS already stores,
-   * and (discharge) resolved citations. Off by default, so every governance route keeps its shape.
-   */
-  enrich?: boolean;
-}
-
-export interface Resolved {
-  count: number;
-  representative: Instance | null;
-  instances: Instance[];
-}
-
-/** At most this many audits get their `report.sources` read for citation titles in one call. */
-const ENRICH_AUDIT_CAP = 25;
-
-function citationsFromSources(ids: readonly number[], sources: readonly Source[]): { n: number; title: string; url: string }[] {
+function citationsFor(f: OpdFinding, sources: Source[]): { n: number; title: string; url: string }[] {
+  const ids = Array.isArray(f.citation_ids) ? f.citation_ids : [];
   return ids.map((i) => {
     const s = sources.find((x) => x?.n === i);
     return { n: i, title: s ? (s.chapter ? `${s.book} — ${s.chapter}` : s.book) : `Source ${i}`, url: s?.url || '' };
   });
-}
-
-function citationsFor(f: OpdFinding, sources: Source[]): { n: number; title: string; url: string }[] {
-  return citationsFromSources(Array.isArray(f.citation_ids) ? f.citation_ids : [], sources);
 }
 
 /**
@@ -68,8 +35,7 @@ function citationsFor(f: OpdFinding, sources: Source[]): { n: number; title: str
  */
 export async function resolveInstances(
   doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
+): Promise<{ count: number; representative: SignalRepresentative | null; instances: Instance[] }> {
   const params: unknown[] = [APP, OPD_ENGINE_VERSION, doctorUid];
   let where = `app_source=$1 AND engine_version=$2 AND doctor_uid=$3 AND excluded_reason IS NULL`;   // Fix C
   if (windowFrom) { params.push(windowFrom); where += ` AND (note_date AT TIME ZONE 'Asia/Kolkata')::date >= $${params.length}`; }
@@ -91,265 +57,10 @@ export async function resolveInstances(
       instances.push({
         audit_id, finding_ref: f.finding_ref as string, subject: f.subject, verdict: f.verdict,
         rationale: f.rationale, note_date, citations: citationsFor(f, sources),
-        // OPD rows hold no patient fields at all (migration 0007), so the context stays all-null.
-        ...(opts.enrich ? { evidence_excerpt: evidenceExcerpt(f.evidence), patient: emptyPatient() } : {}),
       });
     }
   }
   return { count: instances.length, representative: instances[0] ?? null, instances };
-}
-
-function emptyInstances(): Resolved {
-  return { count: 0, representative: null, instances: [] };
-}
-
-interface LandedInstance {
-  audit_id: string;
-  doctor_uid: string;
-  note_date: string;
-  subject: string;
-  verdict: string;
-  rationale: string;
-  signal_type: string;
-  finding_ref: string;
-  citation_ids?: number[];
-  evidence?: string[];
-  informational?: boolean;
-}
-
-/** Per-audit context for an enriched read. Its presence is what switches enrichment on. */
-export interface InstanceAux {
-  patients?: ReadonlyMap<string, Partial<Record<keyof PatientContext, unknown>>>;
-  sources?: ReadonlyMap<string, readonly Source[]>;
-}
-
-/**
- * Keep findings that belong to this doctor, signal, and window. Newest note first; within a note,
- * lander order. A missing window bound is open on that side. Both bounds absent matches every
- * dated finding — callers that must not scan an unbounded corpus return before this.
- */
-export function selectSignalInstances(
-  findings: readonly LandedInstance[],
-  doctorUid: string,
-  signalType: string,
-  windowFrom: string | null,
-  windowTo: string | null,
-  aux?: InstanceAux,
-): Resolved {
-  const uid = doctorUid.trim();
-  const from = windowFrom ? windowFrom.slice(0, 10) : '';
-  const to = windowTo ? windowTo.slice(0, 10) : '';
-  const ranked = (findings ?? []).filter((f) => {
-    if (!f || f.informational) return false;
-    if (f.doctor_uid !== uid || f.signal_type !== signalType) return false;
-    const day = String(f.note_date || '').slice(0, 10);
-    if (!day) return false;
-    if (from && day < from) return false;
-    if (to && day > to) return false;
-    return true;
-  }).slice().sort((a, b) => String(b.note_date).slice(0, 10).localeCompare(String(a.note_date).slice(0, 10)));
-  const instances: Instance[] = ranked.map((f) => {
-    const ids = Array.isArray(f.citation_ids) ? f.citation_ids : [];
-    const resolved = aux?.sources?.get(f.audit_id);
-    return {
-      audit_id: f.audit_id,
-      finding_ref: f.finding_ref,
-      subject: f.subject,
-      verdict: f.verdict,
-      rationale: f.rationale,
-      note_date: String(f.note_date).slice(0, 10),
-      citations: resolved ? citationsFromSources(ids, resolved as Source[]) : ids.map((n) => ({ n, title: `Source ${n}`, url: '' })),
-      ...(aux ? {
-        evidence_excerpt: evidenceExcerpt(f.evidence),
-        patient: patientContext(aux.patients?.get(f.audit_id)),
-      } : {}),
-    };
-  });
-  return { count: instances.length, representative: instances[0] ?? null, instances };
-}
-
-function classWindowOpen(windowFrom: string | null, windowTo: string | null): boolean {
-  return !!(windowFrom || windowTo);
-}
-
-/**
- * Discharge instances for one doctor × signal_type × window.
- * `ipd_discharge_audits` has no doctor_uid. Attribution is the read-time treating-doctor hop
- * (fail closed): an unresolved, ambiguous, or unavailable stay is not counted.
- * Does not read opd_note_audits.
- */
-export async function resolveDischargeInstances(
-  doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
-  if (!doctorUid.trim() || !signalType.trim() || !classWindowOpen(windowFrom, windowTo)) return emptyInstances();
-  const params: unknown[] = [APP];
-  let where = `app_source = $1 AND engine_version LIKE 'ipd-discharge-audit/%' AND engine_version NOT LIKE '%-mini'
-    AND discharged_at IS NOT NULL`;
-  if (windowFrom) {
-    params.push(windowFrom.slice(0, 10));
-    where += ` AND (discharged_at AT TIME ZONE 'Asia/Kolkata')::date >= $${params.length}::date`;
-  }
-  if (windowTo) {
-    params.push(windowTo.slice(0, 10));
-    where += ` AND (discharged_at AT TIME ZONE 'Asia/Kolkata')::date <= $${params.length}::date`;
-  }
-  const rows = await run(
-    `SELECT id, ip_uid, speciality, note_date, findings
-     FROM (${canonicalDistinctOnSql({
-       table: 'ipd_discharge_audits',
-       identity: 'document_id',
-       cols: `id::text AS id, ip_uid, speciality,
-              to_char((discharged_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS note_date,
-              findings`,
-       where,
-     })}) canonical
-     LIMIT 8000`,
-    params,
-  ).catch(() => []);
-  const sources: DischargeAuditSource[] = (rows as Record<string, unknown>[]).map((r) => ({
-    id: String(r.id),
-    ip_uid: r.ip_uid == null ? null : String(r.ip_uid),
-    speciality: r.speciality == null ? null : String(r.speciality),
-    note_date: String(r.note_date || ''),
-    findings: r.findings,
-  }));
-  if (!sources.length) return emptyInstances();
-  let hop: Awaited<ReturnType<typeof fetchIpdDoctorHop>>;
-  try {
-    hop = await fetchIpdDoctorHop(sources.map((s) => s.ip_uid || ''));
-  } catch {
-    hop = {
-      byIpUid: {},
-      coverage: { asked: sources.length, known: 0, resolved: 0, ambiguousPractitioner: 0, ambiguousStay: 0, unmatched: 0, noTreatingId: 0, unavailable: true },
-      ambiguousIds: [],
-    };
-  }
-  const landed = landDischargeAudits(sources, hop);
-  const plain = selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo);
-  if (!opts.enrich || !plain.count) return plain;
-
-  // Enriched read. The IP number is the stay id already on the row. Citation titles live in the
-  // stored report; read only that one key, and only for the audits this thread actually shows.
-  const patients = new Map<string, Partial<Record<keyof PatientContext, unknown>>>(
-    sources.map((s) => [s.id, { ip_number: s.ip_uid }]),
-  );
-  const ids = [...new Set(plain.instances.map((i) => i.audit_id))].slice(0, ENRICH_AUDIT_CAP);
-  const srcRows = await run(
-    `SELECT id::text AS id, report->'sources' AS sources FROM ipd_discharge_audits WHERE id = ANY($1::uuid[])`,
-    [ids],
-  ).catch(() => []);
-  const sourcesById = new Map<string, Source[]>();
-  for (const r of srcRows as Record<string, unknown>[]) {
-    const list = parseJson<Source[]>(r.sources, []);
-    if (Array.isArray(list) && list.length) sourcesById.set(String(r.id), list);
-  }
-  return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo, { patients, sources: sourcesById });
-}
-
-/**
- * OT instances for one doctor × signal_type × window.
- * Only mapped surgeon-map rows (`ot_note_audits.map_status = 'mapped'` with a doctor_uid).
- * Does not read opd_note_audits and does not use the treating-doctor hop.
- */
-export async function resolveOtInstances(
-  doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
-  if (!doctorUid.trim() || !signalType.trim() || !classWindowOpen(windowFrom, windowTo)) return emptyInstances();
-  const params: unknown[] = [APP, OT_ENGINE_VERSION, doctorUid];
-  let where = `app_source = $1 AND engine_version = $2 AND doctor_uid = $3 AND map_status = 'mapped'`;
-  if (windowFrom) {
-    params.push(windowFrom.slice(0, 10));
-    where += ` AND note_day >= $${params.length}::date`;
-  }
-  if (windowTo) {
-    params.push(windowTo.slice(0, 10));
-    where += ` AND note_day <= $${params.length}::date`;
-  }
-  const uhidCol = opts.enrich ? ', uhid' : '';
-  const rows = await run(
-    `SELECT id, doctor_uid, map_status, note_day${uhidCol}, findings
-     FROM (${canonicalDistinctOnSql({
-       table: 'ot_note_audits',
-       identity: 'uid',
-       cols: `id::text AS id, doctor_uid, map_status, to_char(note_day,'YYYY-MM-DD') AS note_day${uhidCol}, findings`,
-       where,
-     })}) canonical
-     LIMIT 8000`,
-    params,
-  ).catch(() => []);
-  const list = rows as Record<string, unknown>[];
-  const landed = landOtAudits(list.map((r) => ({
-    id: String(r.id),
-    doctor_uid: r.doctor_uid == null ? null : String(r.doctor_uid),
-    map_status: r.map_status == null ? 'unmapped' : String(r.map_status),
-    note_day: String(r.note_day || ''),
-    findings: r.findings,
-  })));
-  if (!opts.enrich) return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo);
-  // OT notes carry no citation store, so citations stay empty; the UHID is the one patient field held.
-  const patients = new Map<string, Partial<Record<keyof PatientContext, unknown>>>(
-    list.map((r) => [String(r.id), { uhid: r.uhid }]),
-  );
-  return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo, { patients });
-}
-
-/**
- * Non-OPD fan-in. OPD stays on `resolveInstances` so a discharge or OT thread cannot receive
- * OPD finding text. An unknown class stays at zero rather than falling through to OPD.
- */
-export async function resolveInstancesForNoteClass(
-  noteClass: string | null | undefined,
-  doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
-  if (noteClass === 'discharge_summary') return resolveDischargeInstances(doctorUid, signalType, windowFrom, windowTo, opts);
-  if (noteClass === 'ot') return resolveOtInstances(doctorUid, signalType, windowFrom, windowTo, opts);
-  return emptyInstances();
-}
-
-/**
- * The one resolver every thread-reading route uses. A thread resolves against ITS OWN note class:
- * opd → opd_note_audits, discharge_summary → ipd_discharge_audits, ot → ot_note_audits.
- * (Calling resolveInstances directly for a non-OPD thread returns OPD text or nothing.)
- */
-export async function resolveInstancesForSignal(
-  signal: { note_class?: string | null; doctor_uid: string; signal_type: string; window_from: string | null; window_to: string | null },
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
-  const cls = signal.note_class || 'opd';
-  return cls === 'opd'
-    ? resolveInstances(signal.doctor_uid, signal.signal_type, signal.window_from, signal.window_to, opts)
-    : resolveInstancesForNoteClass(cls, signal.doctor_uid, signal.signal_type, signal.window_from, signal.window_to, opts);
-}
-
-/**
- * The same resolver without any call out of Neon, for doctor-interactive POSTs (doctor-response,
- * signal-reaction). A discharge thread resolves through the Metabase treating-doctor hop, which can
- * outlast the portal's timeout after the write is already committed; those POSTs only need the
- * thread row, so a discharge thread resolves to nothing here. OPD and OT read Neon only.
- */
-export async function resolveInstancesLocal(
-  signal: { note_class?: string | null; doctor_uid: string; signal_type: string; window_from: string | null; window_to: string | null },
-): Promise<Resolved> {
-  if (signal.note_class === 'discharge_summary') return emptyInstances();
-  return resolveInstancesForSignal(signal);
-}
-
-/** Run `fn` over `items` with at most `limit` in flight; results keep input order. */
-export async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
-  return out;
 }
 
 export interface AuditMetrics {

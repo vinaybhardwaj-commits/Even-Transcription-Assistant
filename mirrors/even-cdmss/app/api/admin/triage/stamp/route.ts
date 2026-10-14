@@ -40,14 +40,11 @@ import {
   clinicalStampRequiresIdentity,
   parseQueueItemRef,
   resolveStampRequestId,
-  sameQueueItem,
-  triageClassMintAllowed,
   triageWriteEnabled,
   validateTriageStamp,
   type NormalizedTriageStamp,
   type TriageStampInput,
 } from '@/lib/triage/stamp-schema';
-import { isUnmappedQueueDoctor, UNMAPPED_DOCTOR_REASON } from '@/lib/triage/note-class';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -169,7 +166,6 @@ function stampResponse(row: StampRecord, payload: StampPayload, replayed: boolea
     replayed,
     stamp_id: row.id,
     queue_item_ref: row.queue_item_ref,
-    note_class: parseQueueItemRef(row.queue_item_ref)?.note_class ?? 'opd',
     verb: row.verb,
     outcome: row.outcome,
     client_request_id: row.client_request_id,
@@ -325,24 +321,10 @@ export async function POST(req: NextRequest) {
   const queue = await readActionQueue(
     parseActionQueueQuery(stampQueueInput(req, body as Record<string, unknown>)),
   ).catch(() => null);
-  const item = queue && flattenActionQueueItems(queue.doctors, queue.unmapped)
-    .find((candidate) => sameQueueItem(candidate.queue_item_ref, stamp.queue_item_ref));
+  const item = queue && flattenActionQueueItems(queue.doctors)
+    .find((candidate) => candidate.queue_item_ref === stamp.queue_item_ref);
   if (!queue || !item) {
     return NextResponse.json({ ok: false, error: 'queue item is not present in the current Action queue' }, { status: 404 });
-  }
-
-  if (isUnmappedQueueDoctor(identity.doctor_uid)) {
-    if (stamp.verb !== 'hold' || stamp.reason !== UNMAPPED_DOCTOR_REASON) {
-      return NextResponse.json({
-        ok: false,
-        error: 'unmapped_doctor: unresolved doctor cannot be routed or labelled; stamp hold with reason unmapped_doctor',
-      }, { status: 400 });
-    }
-  } else if ((stamp.verb === 'valid' || stamp.verb === 'bug' || stamp.verb === 'route') && !triageClassMintAllowed(identity.note_class)) {
-    return NextResponse.json({
-      ok: false,
-      error: `TRIAGE_BOT_WRITE_CLASSES does not allow note_class=${identity.note_class} (default allow-list is opd; route mint stays blocked until that class is listed)`,
-    }, { status: 403 });
   }
 
   const requestMetadata = {
@@ -393,7 +375,6 @@ export async function POST(req: NextRequest) {
       const applied = await insertQueueDisposition({
         doctor_uid: identity.doctor_uid,
         signal_type: identity.signal_type,
-        note_class: identity.note_class,
         window_from: queue.window.from,
         window_to: queue.window.to,
         disposition: stamp.verb,

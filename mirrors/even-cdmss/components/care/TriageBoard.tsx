@@ -51,7 +51,6 @@ interface TypeDecisionState {
   disposition?: string | null; decided_at: string;
 }
 interface TypeGroup {
-  note_class?: 'opd' | 'discharge_summary' | 'ot';
   signal_type: string; label: string; count: number; notes: number;
   severity_weight: number; importance_hint: Importance; concentrated: boolean; noisiest: boolean;
   representative: Representative; triage: TypeDecisionState | null;
@@ -203,13 +202,12 @@ export default function TriageBoard() {
   const doctor = useMemo(() => data?.doctors.find((d) => d.doctor_uid === selected) ?? null, [data, selected]);
 
   const setDraft = (key: string, patch: Draft) => setDrafts((d) => ({ ...d, [key]: { ...d[key], ...patch } }));
-  const cardKey = (doctorUid: string, t: TypeGroup) => `${t.note_class || 'opd'}|${doctorUid}|${t.signal_type}`;
 
   async function apply(dg: DoctorGroup, t: TypeGroup) {
-    const key = cardKey(dg.doctor_uid, t);
+    const key = `${dg.doctor_uid}|${t.signal_type}`;
     const draft = drafts[key] || {};
     const body: Record<string, unknown> = {
-      scope: 'type', note_class: t.note_class || 'opd', doctor_uid: dg.doctor_uid, signal_type: t.signal_type,
+      scope: 'type', doctor_uid: dg.doctor_uid, signal_type: t.signal_type,
       window_from: data?.window.from, window_to: data?.window.to,
       validity: draft.validity,
     };
@@ -357,7 +355,7 @@ export default function TriageBoard() {
           {/* Signal-type cards for the selected doctor */}
           <section className="space-y-3">
             {doctor?.types.map((t) => {
-              const key = cardKey(doctor.doctor_uid, t);
+              const key = `${doctor.doctor_uid}|${t.signal_type}`;
               const draft = drafts[key] || {};
               const rep = t.representative;
               if (draft.done) {
@@ -391,12 +389,6 @@ export default function TriageBoard() {
                 <div key={key} className="rounded-xl border border-slate-200 bg-white p-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[14px] font-semibold text-slate-900">{t.label}</span>
-                    {t.note_class === 'discharge_summary' && (
-                      <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-800">discharge summary</span>
-                    )}
-                    {t.note_class === 'ot' && (
-                      <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-800">ot</span>
-                    )}
                     <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">×{t.count}</span>
                     {(t.quieted_count ?? 0) > 0 && (
                       <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-700">+{t.quieted_count} quieted · rule {ruleShort(t.quieted_rule)}</span>

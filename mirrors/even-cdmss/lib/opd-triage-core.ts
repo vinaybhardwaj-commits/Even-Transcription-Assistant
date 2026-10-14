@@ -12,8 +12,6 @@
  * Ranking is advisory pre-sorting so the loudest + most serious pile sits on top; never a verdict.
  */
 
-import { noteClassOf, type NoteClass } from './triage/note-class';
-
 // ── Controlled decision vocab (spec §3.1) ─────────────────────────────────────
 export const VALIDITY = ['valid_signal', 'audit_bug'] as const;
 export const BUG_TYPES = ['process_bug', 'structural_bug'] as const;
@@ -106,8 +104,6 @@ export interface TriageFinding {
   // Quieting (demote) passthrough — set when the engine quieted this finding (informational:true +
   // quieted_by:<rule_id>). Display/badging only; never affects ranking or the scored queue.
   quieted_by?: string | null;
-  /** Action-queue class. Absent on OPD history — readers treat that as `opd`. */
-  note_class?: NoteClass;
 }
 
 export interface TriageDecisionRow {
@@ -125,8 +121,6 @@ export interface TriageDecisionRow {
   cm_user?: string | null;
   /** hold | drop_informational on a non-clinical queue outcome; absent/null on a clinical label. */
   disposition?: string | null;
-  /** Absent on rows written before note_class — readers treat that as `opd`. */
-  note_class?: NoteClass;
   created_at: string;              // ISO; newest wins
 }
 
@@ -149,7 +143,6 @@ export interface TriageRepresentative {
   complexity_band?: string | null; complexity_inputs?: Record<string, unknown> | null; lvc_category?: string | null;
 }
 export interface TypeGroup {
-  note_class: NoteClass;
   signal_type: string;
   label: string;
   count: number;                   // instances (findings) of this type for this doctor in the window
@@ -205,12 +198,12 @@ function labelFor(signalType: string, subject: string): string {
 const day = (d: string): string => (d || '').slice(0, 10);
 const impRank = (i: Importance): number => (i === 'high' ? 3 : i === 'med' ? 2 : 1);
 
-/** Newest type-level decision per (note_class, doctor_uid, signal_type). Instance overrides resolve at drill. */
+/** Newest type-level decision per (doctor_uid, signal_type). Instance overrides resolve at drill. */
 function latestTypeDecisions(decisions: TriageDecisionRow[]): Map<string, TriageDecisionRow> {
   const out = new Map<string, TriageDecisionRow>();
   for (const d of decisions) {
     if (d.scope !== 'type') continue;
-    const key = `${noteClassOf(d.note_class)} ${d.doctor_uid} ${d.signal_type}`;
+    const key = `${d.doctor_uid} ${d.signal_type}`;
     const prev = out.get(key);
     if (!prev || d.created_at > prev.created_at) out.set(key, d);
   }
@@ -249,11 +242,7 @@ export function buildQueue(
 
   // Window-wide instance count per signal_type → concentration (this doctor's share).
   const typeTotals = new Map<string, number>();
-  for (const f of findings) {
-    if (f.informational) continue;
-    const totKey = `${noteClassOf(f.note_class)} ${f.signal_type}`;
-    typeTotals.set(totKey, (typeTotals.get(totKey) || 0) + 1);
-  }
+  for (const f of findings) if (!f.informational) typeTotals.set(f.signal_type, (typeTotals.get(f.signal_type) || 0) + 1);
 
   // doctor_uid → signal_type → findings
   const byDoc = new Map<string, Map<string, TriageFinding[]>>();
@@ -264,15 +253,13 @@ export function buildQueue(
     if (f.informational) {
       if (opts.includeQuieted && f.quieted_by && f.doctor_uid) {
         const q = byDocQuieted.get(f.doctor_uid) || byDocQuieted.set(f.doctor_uid, new Map()).get(f.doctor_uid)!;
-        const qKey = `${noteClassOf(f.note_class)} ${f.signal_type}`;
-        (q.get(qKey) || q.set(qKey, []).get(qKey)!).push(f);
+        (q.get(f.signal_type) || q.set(f.signal_type, []).get(f.signal_type)!).push(f);
       }
       continue;
     }
     if (!f.doctor_uid) continue;
     const byType = byDoc.get(f.doctor_uid) || byDoc.set(f.doctor_uid, new Map()).get(f.doctor_uid)!;
-    const typeKey = `${noteClassOf(f.note_class)} ${f.signal_type}`;
-    (byType.get(typeKey) || byType.set(typeKey, []).get(typeKey)!).push(f);
+    (byType.get(f.signal_type) || byType.set(f.signal_type, []).get(f.signal_type)!).push(f);
   }
 
   const doctors: DoctorGroup[] = [];
@@ -281,19 +268,15 @@ export function buildQueue(
     let instances = 0;
     let types: TypeGroup[] = [];
 
-    for (const [, fs] of byType.entries()) {
-      const signal_type = fs[0].signal_type;
-      const note_class = noteClassOf(fs[0].note_class);
+    for (const [signal_type, fs] of byType.entries()) {
       const weight = severityOf(signal_type);
       const notes = new Set(fs.map((f) => f.audit_id));
       for (const f of fs) noteSet.add(f.audit_id);
       instances += fs.length;
-      const totKey = `${note_class} ${signal_type}`;
-      const share = (typeTotals.get(totKey) || fs.length) > 0 ? fs.length / (typeTotals.get(totKey) || fs.length) : 0;
+      const share = (typeTotals.get(signal_type) || fs.length) > 0 ? fs.length / (typeTotals.get(signal_type) || fs.length) : 0;
       const rep = fs[0];
-      const decision = decisionByKey.get(`${note_class} ${doctor_uid} ${signal_type}`) || null;
+      const decision = decisionByKey.get(`${doctor_uid} ${signal_type}`) || null;
       types.push({
-        note_class,
         signal_type,
         label: labelFor(signal_type, rep.subject),
         count: fs.length,
@@ -318,14 +301,12 @@ export function buildQueue(
     // quieted become passive quieted_only cards (no decision pipeline — they score nothing).
     const quietedTypes = byDocQuieted.get(doctor_uid);
     if (opts.includeQuieted && quietedTypes) {
-      for (const [, qfs] of quietedTypes.entries()) {
-        const signal_type = qfs[0].signal_type;
-        const note_class = noteClassOf(qfs[0].note_class);
-        const existing = types.find((t) => t.signal_type === signal_type && t.note_class === note_class);
+      for (const [signal_type, qfs] of quietedTypes.entries()) {
+        const existing = types.find((t) => t.signal_type === signal_type);
         if (existing) { existing.quieted_count = qfs.length; existing.quieted_rule = qfs[0].quieted_by ?? null; continue; }
         const rep = qfs[0];
         types.push({
-          note_class, signal_type, label: labelFor(signal_type, rep.subject), count: qfs.length,
+          signal_type, label: labelFor(signal_type, rep.subject), count: qfs.length,
           notes: new Set(qfs.map((f) => f.audit_id)).size,
           severity_weight: 1, importance_hint: 'low', concentrated: false, noisiest: false,
           routable: false,
@@ -391,11 +372,9 @@ export interface DecisionInput {
   response_required?: string | null;
   reason?: string | null;
   cm_user?: string | null;
-  note_class?: string | null;
 }
 export interface NormalizedDecision {
   scope: 'type' | 'instance';
-  note_class: NoteClass;
   doctor_uid: string;
   signal_type: string;
   audit_id: string | null;
@@ -426,10 +405,6 @@ export function validateDecision(input: DecisionInput): { ok: true; value: Norma
   if (!scope) return { ok: false, error: 'scope must be "type" or "instance"' };
   const doctor_uid = dstr(input.doctor_uid, 64);
   if (!doctor_uid) return { ok: false, error: 'doctor_uid required' };
-  if (input.note_class != null && input.note_class !== '' && noteClassOf(input.note_class) !== input.note_class) {
-    return { ok: false, error: 'note_class must be opd|discharge_summary|ot' };
-  }
-  const note_class = noteClassOf(input.note_class);
   const signal_type = dstr(input.signal_type, 80);
   if (!signal_type) return { ok: false, error: 'signal_type required' };
   if (!inSet(VALIDITY, input.validity)) return { ok: false, error: 'validity must be valid_signal or audit_bug' };
@@ -464,7 +439,7 @@ export function validateDecision(input: DecisionInput): { ok: true; value: Norma
   return {
     ok: true,
     value: {
-      scope, note_class, doctor_uid, signal_type, audit_id, finding_ref,
+      scope, doctor_uid, signal_type, audit_id, finding_ref,
       window_from: dstr(input.window_from, 10), window_to: dstr(input.window_to, 10),
       validity: input.validity, bug_type, importance, routed, response_required,
       reason: dstr(input.reason, 1000), cm_user: dstr(input.cm_user, 64),
