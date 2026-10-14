@@ -88,7 +88,7 @@ def plan_calls(uids: list[str], arms: list[str], judges=JUDGES, refs=REFS, seed:
     return calls
 
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
+_OLD_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 
 def _json_spans(t: str) -> list[tuple[int, int]]:
@@ -134,8 +134,7 @@ def extract_object(text: str) -> tuple[dict | None, dict]:
     A reply that is valid JSON but not an object (a list, a string) is a failure. Returns (object|None, shape) where shape holds
     counts only: leading_chars, trailing_chars, fenced, n_spans, tolerated."""
     raw = (text or "").strip()
-    m = _FENCE.fullmatch(raw)
-    t = m.group(1) if m else raw
+    t = _OLD_FENCE.sub("", raw)  # the old parser's independent leading/trailing strip: what it accepted strictly is never "tolerated"
     info = {"leading_chars": 0, "trailing_chars": 0, "fenced": "```" in raw, "n_spans": 0, "tolerated": False}
     try:
         d = json.loads(t)
@@ -163,13 +162,19 @@ def extract_object(text: str) -> tuple[dict | None, dict]:
     return d, info
 
 
-def parse_scores_ex(text: str) -> tuple[tuple[list[int], list[str]] | None, dict, list[str]]:
-    """(result|None, shape, key_diff). Strict checks on the extracted object: exactly the 9 PDQI-9 integer keys, each 1-5."""
+def key_shape(got, expected) -> dict:
+    """Counts and expected names only; no model-chosen string. missing_keys: expected names absent; extra_keys: how many unexpected."""
+    got = set(got)
+    return {"missing_keys": sorted(k for k in expected if k not in got), "extra_keys": len(got - set(expected))}
+
+
+def parse_scores_ex(text: str) -> tuple[tuple[list[int], list[str]] | None, dict, dict]:
+    """(result|None, shape, key_shape). Strict checks on the extracted object: exactly the 9 PDQI-9 integer keys, each 1-5."""
     d, info = extract_object(text)
     if d is None:
-        return None, info, []
-    diff = sorted(set(d) ^ set(ITEM_KEYS))
-    if diff or any(isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 5 for v in d.values()):
+        return None, info, key_shape((), ())
+    diff = key_shape(d, ITEM_KEYS)
+    if diff["missing_keys"] or diff["extra_keys"] or any(isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 5 for v in d.values()):
         return None, info, diff
     return ([d[k] for k in ITEM_KEYS], list(ITEM_KEYS)), info, diff
 
@@ -203,14 +208,15 @@ def last_usage(client: ModelClient, tag: str) -> tuple[int | None, str | None]:
 
 
 def log_shape(shape_log: Path | None, client: ModelClient, tag: str, *, prompt: str, judge: str, ref: str | None, arm: str, uid: str,
-              info: dict, parse_ok: bool, key_diff: list[str]) -> None:
+              info: dict, parse_ok: bool, keys: dict) -> None:
     """One line per reply to judge-shapes.jsonl. Shapes and counts only: no reply text, no prompt text."""
     if not shape_log:
         return
     out, stop = last_usage(client, tag)
     rec = {"prompt": prompt, "judge": judge, "ref": ref, "arm": arm, "uid_hash": uid_hash(uid), "out_tokens": out, "stop_reason": stop,
            "leading_chars": info["leading_chars"], "trailing_chars": info["trailing_chars"], "fenced": info["fenced"],
-           "n_spans": info["n_spans"], "tolerated": info["tolerated"], "parse_ok": parse_ok, "key_diff": key_diff}
+           "n_spans": info["n_spans"], "tolerated": info["tolerated"], "parse_ok": parse_ok,
+           "missing_keys": keys["missing_keys"], "extra_keys": keys["extra_keys"]}
     p = Path(shape_log)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
@@ -244,14 +250,16 @@ def score_note(client: ModelClient, frozen: Frozen, *, uid: str, arm: str, judge
            hashlib.sha256(transcript.encode()).hexdigest() if ref == "transcript" else "")
     cp = cache_path(cache_dir, *key)
     if cp.exists():
-        return {**json.loads(cp.read_text(encoding="utf-8")), "cached": True}
+        c = json.loads(cp.read_text(encoding="utf-8"))
+        if not c.get("parse_failure"):  # an old-format failure record is a miss: re-call, overwrite only on success
+            return {**c, "cached": True}
     system, user = build_prompt(frozen, ref, nid, note, transcript)
     rec = {"note_id": nid, "scores": None, "item_names": None, "parse_failure": True, "tolerated": False, "attempts": 0}
     for attempt in (1, 2):
         rec["attempts"] = attempt
         tag = f"pdqi9-v3:{judge}-{ref}:{uid}"
         parsed, info, diff = parse_scores_ex(client.chat(judge, user, system, max_tokens=1500, temperature=0.0, tag=tag))
-        log_shape(shape_log, client, tag, prompt="pdqi9-v3", judge=judge, ref=ref, arm=arm, uid=uid, info=info, parse_ok=parsed is not None, key_diff=diff)
+        log_shape(shape_log, client, tag, prompt="pdqi9-v3", judge=judge, ref=ref, arm=arm, uid=uid, info=info, parse_ok=parsed is not None, keys=diff)
         if parsed:
             rec.update(scores=parsed[0], item_names=parsed[1], parse_failure=False, tolerated=info["tolerated"])
             break

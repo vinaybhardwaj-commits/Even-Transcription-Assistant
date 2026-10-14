@@ -16,7 +16,7 @@ from pathlib import Path
 from ... import validate
 from ...ingest import Consult
 from ...models import ModelClient
-from .judge import Frozen, cache_path, _write_private, extract_object, log_shape
+from .judge import Frozen, cache_path, _write_private, extract_object, key_shape, log_shape
 from .render import PRESCRIPTION_SCHEMA, validate_prescription
 
 HALLUCINATION_MAX_PER_CONSULT = 0.2
@@ -97,18 +97,22 @@ def _exact_json(text: str):
     return extract_object(text)
 
 
-def _parse_rows(text: str, key: str, n_expected: int, ok) -> tuple[list[dict] | None, dict, list[str]]:
-    """(rows|None, shape, key_diff). The strict checks are unchanged: exactly {key}, n_expected rows, each row passes `ok`, n = 1..n_expected."""
+def _parse_rows(text: str, key: str, n_expected: int, ok) -> tuple[list[dict] | None, dict, dict]:
+    """(rows|None, shape, key_shape). The strict checks are unchanged: exactly {key}, n_expected rows, each row passes `ok`, n = 1..n_expected."""
     d, info = _exact_json(text)
     if d is None:
-        return None, info, []
-    diff = set(d) ^ {key}
+        return None, info, key_shape((), ())
+    top = key_shape(d, (key,))
     rows = d.get(key)
+    miss, extra = list(top["missing_keys"]), top["extra_keys"]
     if isinstance(rows, list):
+        want = ITEM_KEYS if key == "items" else SIGNED_KEYS
         for x in rows:
             if isinstance(x, dict):
-                diff |= set(x) ^ (ITEM_KEYS if key == "items" else SIGNED_KEYS)
-    diff = sorted(str(k) for k in diff)
+                ks = key_shape(x, want)
+                miss += [k for k in ks["missing_keys"] if k not in miss]
+                extra += ks["extra_keys"]
+    diff = {"missing_keys": miss, "extra_keys": extra}
     if set(d) != {key} or not isinstance(rows, list) or len(rows) != n_expected or not all(ok(x) for x in rows):
         return None, info, diff
     if sorted(x["n"] for x in rows) != list(range(1, n_expected + 1)):
@@ -122,12 +126,13 @@ def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse
     cp = cache_path(cache_dir, name, uid, frozen.prompt_sha(name), hashlib.sha256(user.encode()).hexdigest(), cache_extra)
     if cp.exists():
         c = json.loads(cp.read_text(encoding="utf-8"))
-        return c["items"], bool(c.get("tolerated"))
+        if c.get("items") is not None and not c.get("parse_failure"):  # an old-format failure record is a miss
+            return c["items"], bool(c.get("tolerated"))
     items, tolerated = None, False
     for _ in (1, 2):
         full_tag = f"{tag}:{uid}"
         items, info, diff = parse(client.chat("opus", user, frozen.text[name], max_tokens=8000, temperature=0.0, tag=full_tag))
-        log_shape(shape_log, client, full_tag, prompt=tag, judge="opus", ref=None, arm=arm, uid=uid, info=info, parse_ok=items is not None, key_diff=diff)
+        log_shape(shape_log, client, full_tag, prompt=tag, judge="opus", ref=None, arm=arm, uid=uid, info=info, parse_ok=items is not None, keys=diff)
         if items is not None:
             tolerated = info["tolerated"]
             break

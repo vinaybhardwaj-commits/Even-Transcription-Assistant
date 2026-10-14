@@ -38,9 +38,9 @@ def test_two_objects_fail():
     assert r is None and info["n_spans"] == 2
 
 
-def test_extra_key_fails_and_is_named():
+def test_extra_key_fails_and_is_counted():
     r, _, diff = judge.parse_scores_ex("Result: " + json.dumps({**GOOD, "bonus": 3}))
-    assert r is None and diff == ["bonus"]
+    assert r is None and diff == {"missing_keys": [], "extra_keys": 1}
 
 
 @pytest.mark.parametrize("v", [0, 6, 3.0, True, "3"])
@@ -106,10 +106,10 @@ def test_shape_lines_contain_no_reply_text(frozen, tmp_path):
     lines = [json.loads(x) for x in text.splitlines()]
     assert len(lines) == 4  # 1 ok + 2 attempts on the extra-key reply + 1 floor
     keys = {"prompt", "judge", "ref", "arm", "uid_hash", "out_tokens", "stop_reason", "leading_chars", "trailing_chars", "fenced", "n_spans",
-            "tolerated", "parse_ok", "key_diff"}
+            "tolerated", "parse_ok", "missing_keys", "extra_keys"}
     assert all(set(x) == keys and len(x["uid_hash"]) == 12 for x in lines)
     assert lines[0]["out_tokens"] == 77 and lines[0]["stop_reason"] == "end_turn" and lines[0]["tolerated"] and lines[0]["parse_ok"]
-    assert lines[1]["key_diff"] == ["extra_x"] and not lines[1]["parse_ok"]
+    assert lines[1]["missing_keys"] == [] and lines[1]["extra_keys"] == 1 and not lines[1]["parse_ok"]
     assert lines[3]["prompt"] == "floor-items-v1" and lines[3]["arm"] == "Bn" and lines[3]["parse_ok"]
 
 
@@ -140,3 +140,47 @@ def test_scoreboard_row_has_the_new_counts(tmp_path, monkeypatch):
     assert len(md[0].split("|")) == len(md[2].split("|"))
     assert (tmp_path / "out" / "judge-shapes.jsonl").exists()
     assert "Here you go" not in (tmp_path / "out" / "judge-shapes.jsonl").read_text()
+
+
+def test_old_format_failure_record_is_a_miss_and_overwritten_only_on_success(frozen, tmp_path):
+    fc = FakeClient(lambda *a: G)
+    k = kw(tmp_path)
+    judge.score_note(fc, frozen, **k)
+    cp = next((tmp_path / "c").glob("*.json"))
+    cp.write_text(json.dumps({"note_id": "x", "scores": None, "item_names": None, "parse_failure": True, "attempts": 2}))
+    bad = FakeClient(lambda *a: "garbage")
+    assert judge.score_note(bad, frozen, **k)["parse_failure"] and len(bad.calls) == 2
+    assert json.loads(cp.read_text())["parse_failure"] is True  # not overwritten by a failure
+    r = judge.score_note(fc, frozen, **k)
+    assert not r["cached"] and r["scores"] == [3] * 9 and json.loads(cp.read_text())["parse_failure"] is False
+    # floors: same
+    items = floors.numbered_items({"diagnoses": [{"name": "a"}]})
+    fc2 = FakeClient(lambda *a: json.dumps({"items": [item(1)]}))
+    floors.judge_items(fc2, frozen, items, "t", tmp_path / "f", "u", "Bn")
+    fp = next((tmp_path / "f").glob("*.json"))
+    fp.write_text(json.dumps({"items": None, "parse_failure": True}))
+    n = len(fc2.calls)
+    assert not floors.judge_items(fc2, frozen, items, "t", tmp_path / "f", "u", "Bn")["parse_failure"] and len(fc2.calls) == n + 1
+
+
+def test_no_model_chosen_string_reaches_the_shape_log(frozen, tmp_path):
+    log = tmp_path / "o" / "judge-shapes.jsonl"
+    evil = {**GOOD, f"{MARK}KEY": f"{MARK}VAL"}
+    evil.pop("useful")
+    judge.score_note(FakeClient(lambda *a: f"{MARK}PROSE " + json.dumps(evil)), frozen, **kw(tmp_path, shape_log=log))
+    row = item(1)
+    row[f"{MARK}ROWKEY"] = f"{MARK}ROWVAL"
+    row.pop("leak")
+    items = floors.numbered_items({"diagnoses": [{"name": "a"}]})
+    floors.judge_items(FakeClient(lambda *a: f"{MARK}PROSE " + json.dumps({"items": [row], f"{MARK}TOP": 1})), frozen, items, "t", tmp_path / "f", "u", "Bn", log)
+    text = log.read_text()
+    assert MARK not in text
+    lines = [json.loads(x) for x in text.splitlines()]
+    assert lines[0]["missing_keys"] == ["useful"] and lines[0]["extra_keys"] == 1
+    assert lines[-1]["missing_keys"] == ["leak"] and lines[-1]["extra_keys"] == 2 and not lines[-1]["parse_ok"]
+
+
+@pytest.mark.parametrize("text", ["```json\n" + G, G + "\n```", "```\n" + G, "```json" + G])
+def test_old_accepted_fence_shapes_are_strict_not_tolerated(text):
+    r, info, _ = judge.parse_scores_ex(text)
+    assert r is not None and not info["tolerated"] and r[0] == [3] * 9
