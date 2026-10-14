@@ -10,7 +10,12 @@ import json, os, urllib.request
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 PROMPT_VERSION = "u9-v2.2"
-from jevconfig import MODEL  # W41 F4b: moved, not changed (still "jev-1.13.0"); u9.MODEL still resolves for callers
+# W41 F2: every jev_decision row in production (5672/5672, 23-24 Sep) and the Arm D J4 bench
+# (67/67 real rows, jev_window_signal, 22 Sep) came back model="jev-1.13.0" -- pin to what the
+# wording (v2.1-v2.3) and the 18-real-label thresholds were actually tuned against, not the
+# floating alias. response.model is still read back below and threaded through by callers, so a
+# vendor-side change shows up in the data instead of being silently absorbed by the pin.
+MODEL = "jev-1.13.0"
 
 QUESTIONS_V21 = {
     "recommended": {"type": "choice", "instructions":

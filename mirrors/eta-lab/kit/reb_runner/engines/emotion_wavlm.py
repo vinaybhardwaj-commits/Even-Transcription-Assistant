@@ -6,8 +6,8 @@ already validated (arm 1's finding stands: negative-emotion labels are NOT to be
 from this model — see HANDOVER.md and RULINGS-2026-09-27.md #4506).
 
 Runs on HF L4 GPU via hf-fleet (RULINGS 13:22: "diar/nemotron/emotion move to HF once up"; box T4 is
-STT-only). Scoring itself lives in hf_emotion_job.py (standalone script, loads the model in-process). This
-module only defines the track shape. It never touches a REB root or calls write_track() —
+STT-only). This module loads the model in-process (unlike the box service, which is called over HTTP)
+because an HF Job has no box replica to call. It never touches a REB root or calls write_track() —
 per kit/reb_runner/DESIGN.md #2 ("the box is the SOLE process that calls write_track()"), a remote
 (HF) worker only computes and hands back a track body; box-side code (hf_emotion_collect.py) is what
 commits it.
@@ -31,18 +31,15 @@ from reb.writer import config_hash
 MODEL = "Aniemore/wavlm-emotion-v1-crosslingual"
 VERSION = "v1"
 BACKEND = "hf-l4x1"
-SUBFOLDER = "int8"  # the box :8086 Mini service loads this subfolder (app.py load_wavlm: int8 -> fp8 -> root)
-REVISION = "a08f2a01c0ebf3611f5720ee46438226aa913ae7"  # hub sha, 29 Sep 2026
 LABELS = ("anger", "disgust", "enthusiasm", "fear", "happiness", "neutral", "sadness")
 MIN_SPEECH_S = 1.5
-DIAR_OVERSHOOT_MS = 1000
 
 
 def expected_config():
     """The config dict (and its config_hash) a run of this engine WOULD use — computable with no
     model load, same purpose as whisper.expected_config: lets a caller check "does this track already
     exist?" before paying for a GPU run."""
-    return {"backend": BACKEND, "min_speech_s": MIN_SPEECH_S, "subfolder": SUBFOLDER, "revision": REVISION}
+    return {"backend": BACKEND, "min_speech_s": MIN_SPEECH_S}
 
 
 def turns_from_diar_segments(diar_segments, window_t0_ms, window_t1_ms):
@@ -58,20 +55,30 @@ def turns_from_diar_segments(diar_segments, window_t0_ms, window_t1_ms):
     fallback previously returned the window's ABSOLUTE bounds directly, which both misaligned the
     written segment against every other layer's segments AND (worse) got handed straight to slice_fn
     as a wav-file offset in seconds — for a real epoch t0 (~1.79e12 ms), that's ~56 years into a 300s
-    clip (eta-refuter #5410 B1). Diar segments are window-relative (verified by eta-refuter #5659 on
-    19 real pyannote-local-twin tracks)."""
+    clip (eta-refuter #5410 B1). Diar segments are assumed already window-relative (no diar writer
+    exists yet to verify against; re-check this assumption once one lands)."""
     if diar_segments:
-        dur = window_t1_ms - window_t0_ms
-        turns = []
-        for s in diar_segments:
-            t0, t1 = s["t0_ms"], s["t1_ms"]
-            if dur < t1 <= dur + DIAR_OVERSHOOT_MS:
-                t1 = dur  # diarizer rounding at the window edge
-            if not (0 <= t0 <= t1 <= dur):
-                raise ValueError(f"diar segment {t0}-{t1} outside window-relative [0, {dur}]")
-            turns.append((t0, t1, s.get("speaker")))
-        return turns
+        return [(s["t0_ms"], s["t1_ms"], s.get("speaker")) for s in diar_segments]
     return [(0, window_t1_ms - window_t0_ms, None)]
+
+
+def load_model():
+    """Loads the wavlm crosslingual pipeline once per process. Real transformers import is deferred
+    to here so unit tests (and any code that only wants turns_from_diar_segments/build_track's shape)
+    never need it installed."""
+    from transformers import pipeline
+
+    return pipeline("audio-classification", model=MODEL)
+
+
+def score_clip(model, wav_path):
+    """Runs the loaded wavlm pipeline over one wav file. Returns {"label": ..., "scores": {label:
+    prob}}. `model` is whatever load_model() returned — kept as a plain argument (not a module-level
+    global) so callers/tests can pass a fake without monkeypatching load_model's transformers import."""
+    out = model(wav_path)  # transformers AudioClassificationPipeline shape: [{"label","score"}, ...]
+    scores = {r["label"]: r["score"] for r in out}
+    label = max(scores, key=scores.get)
+    return {"label": label, "scores": scores}
 
 
 def build_track(window_id, wav_path, window_t0_ms, window_t1_ms, diar_segments=None,
@@ -84,15 +91,13 @@ def build_track(window_id, wav_path, window_t0_ms, window_t1_ms, diar_segments=N
 
     slice_fn(wav_path, t0_ms, t1_ms) -> clip_path cuts one turn's audio out of the window wav (t0_ms/
     t1_ms window-relative, i.e. valid offsets into wav_path itself); defaults to
-    reb_runner.engines.audio_utils.slice_wav. score_fn(model, clip_path) -> {"label", "scores"} or None
-    (None = no audio for that turn); the real scores come from hf_emotion_job.py via
-    hf_emotion_collect.track_from_scores.
+    reb_runner.engines.audio_utils.slice_wav. score_fn(model, clip_path) -> {"label", "scores"}
+    defaults to score_clip; both are injectable so tests never need ffmpeg or a real model.
     """
     from .audio_utils import slice_wav
 
     slice_fn = slice_fn or (lambda path, t0_ms, t1_ms: slice_wav(path, t0_ms / 1000.0, (t1_ms - t0_ms) / 1000.0))
-    if score_fn is None:
-        raise ValueError("score_fn is required: scoring runs in hf_emotion_job.py, not in this module")
+    score_fn = score_fn or score_clip
 
     turns = turns_from_diar_segments(diar_segments, window_t0_ms, window_t1_ms)
     config = expected_config()
@@ -107,13 +112,7 @@ def build_track(window_id, wav_path, window_t0_ms, window_t1_ms, diar_segments=N
             continue
         clip_path = slice_fn(wav_path, t0_ms, t1_ms)
         try:
-            value = score_fn(model, clip_path)
-            if value is None:  # scorer had no audio for this turn (tape gap): keep the turn, say why
-                seg["extras"] = {"skipped_no_audio": True}
-            elif "skipped" in value:  # every piece failed the silence gate: no label, say why
-                seg["extras"] = {"skipped_silence": True}
-            else:
-                seg["value"] = value
+            seg["value"] = score_fn(model, clip_path)
         finally:
             if clip_path != wav_path:
                 try:
@@ -128,6 +127,6 @@ def build_track(window_id, wav_path, window_t0_ms, window_t1_ms, diar_segments=N
         "schema": "reb.track.v1", "window_id": window_id, "layer": "emotion", "engine": "wavlm",
         "model": MODEL, "version": VERSION, "config": config, "config_hash": config_h,
         "machine": machine, "status": "ok" if scored else "empty",
-        "reason": None if scored else "no turn scored (below min_speech_s, silent, or no audio)",
+        "reason": None if scored else "every turn below min_speech_s",
         "segments": segments,
     }
