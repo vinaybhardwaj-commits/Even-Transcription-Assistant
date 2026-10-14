@@ -27,9 +27,6 @@ h2{margin:6px 0 2px;font-size:22px}.sub{color:var(--mut);margin:0 0 10px}
 .spt{min-height:0;margin-right:6px}
 .nosp .spchip,.nosp .spdiv{display:none}.nosp .cline.spbreak{margin-top:0;border-top:0;padding-top:3px}
 :root{--sp0:#9ec5f0;--sp1:#f0b98f;--sp2:#a9d9a3;--sp3:#e3a6d6;--sp4:#e6d77c;--sp5:#8fd6d0}
-.rxcard{margin:10px 0;border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:8px;padding:6px 10px;background:var(--card)}.rxcard summary{cursor:pointer;font-weight:600}
-.rxi{padding:4px 0;border-top:1px solid var(--line)}.rxi .rt{font-weight:600}.rxi .rm{color:var(--mut);font-size:13px;margin-left:22px}
-.rxb{display:inline-block;border-radius:99px;padding:0 8px;font-size:12px;font-weight:600;margin-right:6px;color:#111;background:#ccc}.rxb.cap{background:#a9d9a3}.rxb.mis{background:#e6d77c}.rxb.lit{background:#e3a6d6}.rxb.abs{background:#f0b98f}.rxb.gap{background:#c9c9c9}
 .cline.unc{color:var(--mut);font-style:italic}.cline.hit{background:var(--hi)}mark{background:var(--hi);color:inherit;padding:0 1px}
 .cnote{padding:6px 10px;margin:8px 0;border-left:3px solid var(--line);color:var(--mut);font-size:14px}.cnote.warn{border-color:var(--warn)}
 .uncgroup{margin:2px 0}.uncgroup button{font-size:12px;min-height:0;padding:0 8px;border-style:dashed;color:var(--mut);background:transparent;border-radius:99px}
@@ -38,10 +35,6 @@ h2{margin:6px 0 2px;font-size:22px}.sub{color:var(--mut);margin:0 0 10px}
 .noaudio{color:var(--mut);font-size:14px;margin:8px 0}
 details.tech{margin-top:26px;border-top:1px solid var(--line);padding-top:10px}details.tech summary{cursor:pointer;font-weight:600;color:var(--mut)}
 .tech pre{white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:60vh;overflow:auto}
-.rebrow{margin-top:10px}.rebhead{font-size:13px}.rebhead b{font-weight:600}
-.rebbar{width:100%;height:20px;display:block;margin-top:2px}.rebbar rect{cursor:pointer}
-.rebempty{font-size:13px;margin:2px 0 0}.rebdetail{margin-top:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:12px;white-space:pre-wrap;word-break:break-word}
-.reb-failed .rebhead b,.reb-failed .rebhead{color:var(--warn)}.rebsup{color:var(--warn);font-size:12px;margin-top:2px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0}.mut{color:var(--mut);font-size:13px}.warn{color:var(--warn)}
 .bar{position:fixed;bottom:0;left:0;right:0;background:var(--bg);border-top:1px solid var(--line);padding:8px 16px;display:flex;gap:10px;align-items:center}.bar audio{flex:1;min-width:0;height:40px}
 `;
@@ -50,8 +43,6 @@ const JS = String.raw`
 "use strict";
 const $=(s,r=document)=>r.querySelector(s);
 const el=(t,a={},...k)=>{const e=document.createElement(t);for(const [x,v] of Object.entries(a)){if(v==null)continue;if(x==="class")e.className=v;else if(x.startsWith("on"))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v)}for(const c of k.flat(Infinity)){if(c==null||c===false)continue;e.append(c instanceof Node?c:document.createTextNode(String(c)))}return e};
-// W49 P3: SVG needs its own namespace (className is an SVGAnimatedString there, not a plain string - setAttribute always, never e.className=).
-const elNS=(t,a={},...k)=>{const e=document.createElementNS("http://www.w3.org/2000/svg",t);for(const [x,v] of Object.entries(a)){if(v==null)continue;if(x.startsWith("on"))e.addEventListener(x.slice(2),v);else e.setAttribute(x,v)}for(const c of k.flat(Infinity)){if(c==null||c===false)continue;e.append(c instanceof Node?c:document.createTextNode(String(c)))}return e};
 const main=$("main");
 // replaceChildren does not flatten arrays (it would stringify them); every page goes through this
 const show=(...k)=>main.replaceChildren(...k.flat(Infinity).filter(x=>x!=null&&x!==false));
@@ -61,7 +52,7 @@ const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","De
 const fmtDate=d=>{const t=new Date(d+"T00:00:00Z");return isNaN(t)?d:DOW[t.getUTCDay()]+" "+t.getUTCDate()+" "+MON[t.getUTCMonth()]+" "+t.getUTCFullYear()};
 const mmss=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
 const wkey=r=>r.key.replace(/^runs\//,"").replace(/\.json$/,"");
-const STATUS={held_out:"held out for a validation study",text:"",refused:"transcript discarded as unreliable",no_text:"no speech detected",no_signal:"no sound recorded (microphone silent)",untested:"not transcribed: silence unconfirmed",failed:"transcription failed"};
+const STATUS={text:"",refused:"transcript discarded as unreliable",no_text:"no speech detected",no_signal:"no sound recorded (microphone silent)",untested:"not transcribed: silence unconfirmed",failed:"transcription failed"};
 const SCORE={text:5,refused:4,no_text:3,no_signal:2,untested:2,failed:1};
 
 async function loadRows(){
@@ -83,7 +74,7 @@ function statusChip(x){return x.status==="text"?null:el("span",{class:"chip warn
 function winRow(x){
   const t=(x.t0?x.t0+"–"+(x.t1||"?"):"clip");
   return el("a",{class:"win",href:"#/win/"+wkey(x)},
-    el("div",{},el("span",{class:"t"},t),el("span",{class:"m"}," · "+(x.status==="held_out"?"held out":(x.lang||"language ?"))+(x.status==="text"&&x.n_words!=null?" · "+x.n_words+" words":"")),statusChip(x),x.complete===false?el("span",{class:"chip"},"partial provenance"):null),
+    el("div",{},el("span",{class:"t"},t),el("span",{class:"m"}," · "+(x.lang||"language ?")+(x.status==="text"?" · "+x.n_words+" words":"")),statusChip(x),x.complete===false?el("span",{class:"chip"},"partial provenance"):null),
     x.first_words?el("div",{class:"fw"},x.first_words+(x.n_words>12?" …":"")):null)}
 async function days(){
   setNav("days");show(el("p",{class:"mut"},"Loading…"));
@@ -103,15 +94,15 @@ async function days(){
   const box=el("div",{},dates.length?null:el("p",{class:"mut"},rows.length?"No days with speech match these filters.":"No index has been published yet."));
   for(const d of dates){
     const dr=f.filter(r=>r.ist_date===d),dt=dr.filter(r=>r.status==="text"),dk=(counts.by_date||{})[d]||0,open=state.open[d];
-    const words=dt.reduce((n,r)=>n+(r.n_words||0),0),anyBl=dr.some(r=>r.blind);
-    box.append(el("div",{class:"date"},el("a",{href:"#/days",onclick:e=>{e.preventDefault();state.open[d]=!open;days()}},(open?"▾ ":"▸ ")+fmtDate(d)),el("span",{class:"m"}," · "+words.toLocaleString()+" words"+(anyBl?" (blinded rooms not counted)":""))),
+    const words=dt.reduce((n,r)=>n+(r.n_words||0),0);
+    box.append(el("div",{class:"date"},el("a",{href:"#/days",onclick:e=>{e.preventDefault();state.open[d]=!open;days()}},(open?"▾ ":"▸ ")+fmtDate(d)),el("span",{class:"m"}," · "+words.toLocaleString()+" words")),
       el("div",{class:"dcov"},dr.length+" indexed · "+dt.length+" with text · "+dk+" run files in the vault"+(dk>dr.length?" · "+(dk-dr.length)+" not indexed yet":"")));
     if(!open)continue;
     const list=state.onlyText?dt:dr;
     const byRoom=new Map();for(const r of list){(byRoom.get(r.room_id)||byRoom.set(r.room_id,{name:r.room_name,ws:[]}).get(r.room_id)).ws.push(r)}
     for(const [rid,g] of [...byRoom].sort((a,b)=>a[1].name<b[1].name?-1:1)){
-      const tw=g.ws.filter(r=>r.status==="text"),rw=tw.reduce((n,r)=>n+(r.n_words||0),0),bl=g.ws.some(r=>r.blind),lg=[...new Set(tw.map(r=>r.lang).filter(Boolean))].join(", "),rk=d+"|"+rid,ro=state.open[rk];
-      box.append(el("div",{class:"roomrow"},el("span",{class:"room"},g.name),el("span",{class:"m"},(bl?"held out · "+g.ws.length:rw.toLocaleString()+" words · "+tw.length)+" windows"+(lg?" · "+lg:"")),
+      const tw=g.ws.filter(r=>r.status==="text"),rw=tw.reduce((n,r)=>n+(r.n_words||0),0),lg=[...new Set(tw.map(r=>r.lang).filter(Boolean))].join(", "),rk=d+"|"+rid,ro=state.open[rk];
+      box.append(el("div",{class:"roomrow"},el("span",{class:"room"},g.name),el("span",{class:"m"},rw.toLocaleString()+" words · "+tw.length+" windows"+(lg?" · "+lg:"")),
         el("a",{class:"read",href:"#/consult/"+rid+"/"+d},"Read the consult →"),
         el("a",{href:"#/days",class:"m",onclick:e=>{e.preventDefault();state.open[rk]=!ro;days()}},ro?"hide windows":"windows")));
       if(ro){g.ws.sort((a,b)=>(a.start||a.key)<(b.start||b.key)?-1:1);box.append(...g.ws.map(winRow))}
@@ -126,41 +117,6 @@ async function days(){
 
 /* ---------------------------------------------------------------- Window */
 let audio,chunks=[],segs=[],winStart=0,curChunk=-1,stopAt=null,base="",playingAll=false;
-let rebT0=null,rebT1=null,rebCursors=[];   // W49 P3: reset per win(); populated by rebPanel() when reb.loaded, read by onTime()
-const REB_LAYER_COLOR={acoustics:"#9ec5f0",stt:"#2f7a4f",translate:"#e3a6d6",diar:"#f0b98f",speaker:"#a9d9a3",emotion:"#e6d77c",terms:"#8a63b8",fused:"#9a958b"};
-// W49 P3: one tape-clock SVG bar per track, aligned to the SAME [t0,t1] every row shares so bars line up visually.
-// Segment bars carry a native <title> (hover); onSeg (click) is wired by the caller so it can update a shared detail box.
-function rebBar(track,t0,t1,onSeg){
-  // eta-refuter-2 #5268: x/w clamp to the window's own bounds - a real whisper track's last segment can pad slightly past
-  // the window's actual end on a short clip (#5020, e.g. 59,980ms on a ~30.8s clip); clamped here rather than overflowing the bar.
-  const span=Math.max(1,t1-t0),x=t=>Math.max(0,Math.min(100,(100*(t-t0))/span)),w=(a,b)=>Math.max(0.3,(100*(b-a))/span);
-  const color=REB_LAYER_COLOR[track.layer]||"#9a958b";
-  const rects=track.segments.map(s=>elNS("rect",{x:x(s.t0_ms).toFixed(3),y:"0",width:w(s.t0_ms,s.t1_ms).toFixed(3),height:"20",rx:"1.5",fill:color,onclick:()=>onSeg(track,s)},
-    elNS("title",{},mmss((s.t0_ms-t0)/1000)+"–"+mmss((s.t1_ms-t0)/1000)+" "+(s.text||"(no text)")) ));
-  const cursor=elNS("rect",{x:"0",y:"0",width:"0.3",height:"20",fill:"#1B1C1E"});
-  rebCursors.push(cursor);
-  return elNS("svg",{class:"rebbar",viewBox:"0 0 100 20",preserveAspectRatio:"none",role:"img","aria-label":track.layer+"."+track.engine},...rects,cursor);
-}
-function rebDetailText(track,seg,t0){
-  return track.layer+"."+track.engine+" ("+track.version+", "+track.config_hash+") · "+track.machine+" · "+track.status+(track.lang?" · "+track.lang:"")+
-    "\n"+mmss((seg.t0_ms-t0)/1000)+"–"+mmss((seg.t1_ms-t0)/1000)+"\n"+(seg.text||"(no text)");
-}
-// W49 P3 (Fable 28 Sep, named order): the Room Evidence Bundle - one stacked row per track file (not deduped: a superseded
-// or failed entry is still a row, per Fable's word), tape-clock bars with hover/click text, per-track language, audio-cursor
-// sync (rebCursors, moved by onTime()). insp.reb comes from /api/inspect, already whitelisted server-side (worker/reb.js).
-function rebPanel(reb){
-  rebT0=null;rebT1=null;rebCursors=[];
-  if(!reb||!reb.loaded)return el("p",{class:"mut"},"REB engine tracks: not available yet for this window.");
-  rebT0=reb.t0_ms;rebT1=reb.t1_ms;
-  const detail=el("pre",{class:"rebdetail"},"Click a segment bar for its detail.");
-  const onSeg=(track,seg)=>{detail.textContent=rebDetailText(track,seg,reb.t0_ms)};
-  const rows=reb.tracks.map(track=>el("div",{class:"rebrow reb-"+track.status},
-    el("div",{class:"rebhead"},el("b",{},track.layer+"."+track.engine),
-      el("span",{class:"mut"}," "+track.version+" #"+track.config_hash+" · "+track.machine+" · "+track.status+(track.lang?" · "+track.lang:"")+(track.reason?" ("+track.reason+")":""))),
-    track.superseded_by?el("div",{class:"rebsup"},"Superseded by a later "+track.superseded_by.status+" run"+(track.superseded_by.reason?" ("+track.superseded_by.reason+")":"")):null,
-    track.segments.length?rebBar(track,reb.t0_ms,reb.t1_ms,onSeg):el("p",{class:"mut rebempty"},"No segments.")));
-  return el("div",{},rows,detail);
-}
 const absMs=t=>winStart+t*1000;
 function chunkFor(ms){return chunks.findIndex(c=>ms>=c.s&&ms<c.e)}
 function playAt(rel,end,all){const ms=absMs(rel);let i=chunkFor(ms);if(i<0){i=chunks.findIndex(c=>c.s>ms);if(i<0){note("No audio at this time.");return}}
@@ -169,7 +125,6 @@ function playAt(rel,end,all){const ms=absMs(rel);let i=chunkFor(ms);if(i<0){i=ch
 function note(t){const n=$("#note");if(n)n.textContent=t}
 function onTime(){if(!audio||curChunk<0)return;const ms=chunks[curChunk].s+audio.currentTime*1000;const rel=(ms-winStart)/1000;
  document.querySelectorAll(".seg").forEach((n,i)=>n.classList.toggle("now",!!segs[i]&&rel>=segs[i].start_s&&rel<segs[i].end_s));
- if(rebT0!=null&&rebCursors.length){const frac=Math.max(0,Math.min(1,(ms-rebT0)/Math.max(1,rebT1-rebT0)));rebCursors.forEach(c=>c.setAttribute("x",(frac*100).toFixed(3)))}
  if(stopAt!=null&&ms>=stopAt){audio.pause();stopAt=null}}
 function onEnded(){if(!audio||!playingAll||curChunk<0)return;const nx=curChunk+1;if(nx<chunks.length)playAt((chunks[nx].s-winStart)/1000,null,true)}
 
@@ -197,7 +152,7 @@ function whyEmpty(d,row,all,addNoSignal,untested){
   return row?"No transcript: this record has no segments, so no speech was detected in this window.":"Not yet indexed. This window is newer than the hourly index, so it has not been checked for silence: it has no transcript, but that does not mean there was no sound. It will be classified after the next hourly refresh."}
 async function win(key){
   setNav("days");show(el("p",{class:"mut"},"Loading…"));
-  let d;try{d=await (await j("/api/window/"+key)).json()}catch(e){show(el("p",{class:"warn"},/ 403$/.test(String(e.message))?"Blinded: held out for a validation study":"Window not found."));return}
+  let d;try{d=await (await j("/api/window/"+key)).json()}catch(e){show(el("p",{class:"warn"},"Window not found."));return}
   await loadRows();const vkey="runs/"+key+".json";const row=(state.byKey&&state.byKey.get(vkey))||null;
   const p=d.provenance||{},parts=key.split("/"),payload=isObj(d.payload)?d.payload:{};
   segs=segmentsOf(d).filter(isObj);winStart=Date.parse(d.start);base="/audio/"+key;
@@ -249,16 +204,6 @@ async function win(key){
   const tech=Object.assign({},d);for(const k of ["segments","transcript_native","transcript_native_collapsed","transcript_english","transcript_en","language_timeline"])delete tech[k];
   if(tech.payload){tech.payload=Object.assign({},tech.payload);for(const k of ["segments","transcript_native","transcript_english","language_timeline"])delete tech.payload[k]}
   audio=el("audio",{controls:"",preload:"none"});audio.addEventListener("timeupdate",onTime);audio.addEventListener("ended",onEnded);
-  // W49 P2: rx / speaker-share / acoustics for this window only, from the timeline inspector's own endpoint; absent = the panel says so, never an error
-  let insp=null;try{insp=await (await j("/api/inspect/"+parts[1]+"/"+parts[2]+"/"+parts[0]+"/"+parts[parts.length-1])).json()}catch(e){}
-  const inspPanels=insp?[
-    el("details",{class:"tech"},el("summary",{},"Prescription"),
-      insp.rx.length?insp.rx.map(c=>el("div",{class:"mut"},c.items.map(x=>el("div",{},el("b",{},x.cls+": "),x.term+(x.matched?" (heard: "+x.matched+")":""))))):el("p",{class:"mut"},"No linked prescription for this window.")),
-    el("details",{class:"tech"},el("summary",{},"Sound and speakers"),
-      insp.speakers.length?el("div",{},insp.speakers.map(s=>el("div",{},"Speaker "+s.l+": "+s.pct+"%"))):el("p",{class:"mut"},"No labelled speaker turns."),
-      insp.acoustics?el("p",{class:"mut"},"Speech missed (sampled, lower bound): "+insp.acoustics.missed_speech_pct+"%"+(insp.acoustics.missed_in_window?", "+insp.acoustics.missed_in_window+" gap(s) in this window":"")):el("p",{class:"mut"},"Acoustics: not processed yet.")),
-    el("details",{class:"tech"},el("summary",{},"Technical detail"),rebPanel(insp.reb))
-  ]:null;
   show(el("p",{},el("a",{href:"#/days"},"← all days")),
    el("h2",{},room),
    el("p",{class:"sub"},(row?fmtDate(row.ist_date):parts[2])+(t0?" · "+t0+"–"+(t1||"?")+" IST":" · time not recorded")+" · language "+lang+(engines.length?" · engine "+engines.join(", "):"")+((!untested&&((row&&row.no_signal)||addNoSignal))?" · no sound recorded (microphone silent)":"")+(untested?(untested==="transcribed_unconfirmed"?" · transcribed, empty":" · not transcribed"):"")),
@@ -268,8 +213,7 @@ async function win(key){
    hasAudio?(canPlay?null:el("p",{class:"noaudio"},"Audio is stored, but its timing is not available for this window.")):el("p",{class:"noaudio"},"No audio stored for this window."),
    el("details",{class:"tech"},el("summary",{},"Technical details"),
      el("p",{class:"mut"},"Vault key: "+vkey+(p.run_id?" · run "+p.run_id:"")+(p.producer?" · "+p.producer:"")+((p.provenance_complete===false||provOv)?" · partial provenance"+((provOv||p.incomplete_reason)?": "+(provOv||p.incomplete_reason):""):"")+(unvLeaves.length?" · unverified: "+unvLeaves.join("; "):"")),
-     el("button",{onclick:dl},"download full JSON"),el("pre",{},JSON.stringify(tech,null,1))),
-   inspPanels);
+     el("button",{onclick:dl},"download full JSON"),el("pre",{},JSON.stringify(tech,null,1))));
   if(hasAudio&&canPlay)document.body.append(el("div",{class:"bar",id:"bar"},el("button",{onclick:()=>playAt(0,null,true)},"▶ window"),audio,el("span",{id:"note",class:"mut"})))}
 
 /* ---------------------------------------------------------------- Consult (ruling 337a) */
@@ -301,14 +245,12 @@ async function consult(room,date,at){
   const short=r=>String(r||"another run").replace(/^hist-(bulk|miner)-/,"");
   c.windows.forEach((w,wi)=>{
     const ws=bySeg.get(wi)||[];
-    if(w.partial){items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+(w.n_words==null?"words withheld":w.n_words+" words")+"); it overlaps windows shown elsewhere, so only its minutes not shown there are listed. Open it",warn:false,k:w.k});}
+    if(w.partial){items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+w.n_words+" words); it overlaps windows shown elsewhere, so only its minutes not shown there are listed. Open it",warn:false,k:w.k});}
     else if(!ws.length){items.push({t:w.s,note:w.t0+"–"+w.t1+" · "+(WINNOTE[w.status]||"no text."),warn:w.status!=="no_text",k:w.k});return}
     else if(!ws.some(x=>!x.refused&&x.text.trim())){items.push({t:w.s,note:w.t0+"–"+w.t1+" · "+WINNOTE.refused,warn:true,k:w.k});return}
     for(const x of ws){if(!x.refused&&!x.text.trim())continue;items.push({t:x.t,s:x,u:isUnclear(x)})}
   });
-  const RXN={CAPTURED:["captured","cap"],MISHEARD:["misheard","mis"],"LOST-IN-TRANSLATION":["lost in translation","lit"],ABSENT:["absent","abs"],"ABSENT-SPEECH-GAP":["absent (audio gap)","gap"]};
-  for(const r of (c.rx||[]))items.push({t:r.s,rx:r});
-  for(const w of (c.hidden||[]))items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+(w.status==="text"?(w.n_words==null?"words withheld":w.n_words+" words"):(WINNOTE[w.status]||"no text").replace(/\.$/,""))+"); hidden here because it overlaps a window shown. Open it",warn:false,k:w.k});
+  for(const w of (c.hidden||[]))items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+(w.status==="text"?w.n_words+" words":(WINNOTE[w.status]||"no text").replace(/\.$/,""))+"); hidden here because it overlaps a window shown. Open it",warn:false,k:w.k});
   items.sort((a,b)=>a.t-b.t); // stable: notes and lines of the same instant keep their order
   const q=(st.q||"").toLowerCase();
   const matches=[];const out=[];let i=0,gid=0;
@@ -336,10 +278,6 @@ async function consult(room,date,at){
     if(hit)matches.push(line);return line};
   while(i<items.length){
     const it=items[i];
-    if(it.rx){const r=it.rx,n={};for(const x of r.items)n[x.cls]=(n[x.cls]||0)+1;
-      out.push(el("details",{class:"rxcard"},el("summary",{},"Prescription check · "+hms(r.s).slice(0,5)+"–"+hms(r.e).slice(0,5)+" · "+r.items.length+" items: "+Object.keys(RXN).filter(k=>n[k]).map(k=>n[k]+" "+RXN[k][0]).join(", ")),
-        el("div",{class:"mut"},"What the prescription says vs what the transcript has (CAP-1 scoring; the consult window is the time link, so the card sits at its start)."),
-        ...r.items.map(x=>el("div",{class:"rxi"},el("span",{class:"rxb "+RXN[x.cls][1]},RXN[x.cls][0]),el("span",{class:"rt"},x.term),el("span",{class:"mut"}," ("+x.type+")"),x.tm?el("span",{class:"why"}," English missing"):null,x.matched?el("div",{class:"rm"},"heard: "+x.matched):null))));i++;continue}
     if(it.note){out.push(el("div",{class:"cnote"+(it.warn?" warn":"")},el("a",{href:"#/win/"+it.k},it.note)));i++;continue}
     if(!it.u){out.push(renderSeg(it.s,false));i++;continue}
     const grp=[];while(i<items.length&&items[i].s&&items[i].u){grp.push(items[i].s);i++}
@@ -352,7 +290,6 @@ async function consult(room,date,at){
   const nUn=items.filter(x=>x.s&&x.u).length,firstT=segs.length?hms(segs[0].t):null,lastT=segs.length?hms(segs[segs.length-1].t):null;
   const langs=[...new Set(segs.filter(x=>!x.refused&&x.text.trim()).map(x=>x.lang).filter(Boolean))].join(", ");
   show(el("p",{},el("a",{href:"#/days"},"← all days")),
-   c.blind&&el("p",{class:"warn"},"Blinded: held out for a validation study. Timing and speaker turns only; no transcript is shown for this room-day."),
    el("h2",{},c.room_name),
    el("p",{class:"sub"},fmtDate(date)+(firstT?" · "+firstT.slice(0,5)+"–"+lastT.slice(0,5)+" IST":"")+" · "+c.counts.windows+" windows"+(c.counts.hidden_windows?" (+"+c.counts.hidden_windows+" overlapping, hidden)":"")+" · "+c.counts.words.toLocaleString()+" words"+(langs?" · "+langs:"")),
    c.counts.non_english?el("div",{class:"cstat"},"English is available for "+c.counts.with_english+" of "+c.counts.non_english+" non-English lines"+(c.counts.with_english<c.counts.non_english?" (the rest are still being translated).":".")):null,
@@ -388,9 +325,9 @@ async function search(){setNav("days");const q=state.q.trim().toLowerCase();if(!
 function router(){document.getElementById("bar")?.remove();if(audio){audio.pause();audio=null}const h=location.hash.replace(/^#\//,"").split("/");
  const go={days:()=>days(),runs:()=>runs(),consult:()=>consult(h[1],h[2],h[3]),win:()=>win(h.slice(1).join("/"))}[h[0]||"days"]||days;go().catch(e=>show(el("p",{class:"warn"},"Something went wrong.")))}
 addEventListener("hashchange",router);router();
-fetch("/api/me").then(r=>r.json()).then(m=>{if(m&&m.rater){const n=document.querySelector("nav");for(const [t,u] of [["Rating hub","/rate"],["Label lines","/rate/label200"],["Rate excerpts","/rate/rate20"],["Compare A/B","/rate/ba106"]])n.append(el("a",{href:u},t))}}).catch(()=>{}); // the two raters (r349) get links to the rating pages
+fetch("/api/me").then(r=>r.json()).then(m=>{if(m&&m.rater){const n=document.querySelector("nav");for(const [t,u] of [["Label lines","/rate/label200"],["Rate excerpts","/rate/rate20"],["Compare A/B","/rate/ba106"]])n.append(el("a",{href:u},t))}}).catch(()=>{}); // the two raters (r349) get links to the rating pages
 `;
 
 export function shell(nonce) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>ETA Lab Transcripts</title><style nonce="${nonce}">${CSS}</style></head><body><header><h1>ETA Lab Transcripts</h1><nav><a href="#/days" data-p="days">Days</a><a href="#/runs" data-p="runs">Runs</a><a href="/clarity">Clarity</a><a href="/timeline">Timeline</a></nav></header><main></main><script nonce="${nonce}">${JS}</script></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>ETA Lab Transcripts</title><style nonce="${nonce}">${CSS}</style></head><body><header><h1>ETA Lab Transcripts</h1><nav><a href="#/days" data-p="days">Days</a><a href="#/runs" data-p="runs">Runs</a></nav></header><main></main><script nonce="${nonce}">${JS}</script></body></html>`;
 }
