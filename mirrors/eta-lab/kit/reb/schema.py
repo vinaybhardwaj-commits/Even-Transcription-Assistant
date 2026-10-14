@@ -27,7 +27,7 @@ REQUIRED_AUDIO_FIELDS = ("r2_key", "sha256", "sample_rate", "duration_ms")
 # test suite (S1's clinical1: no tape origin at all), or a short real-room sub-clip pulled out of a
 # larger hist-bulk window for dev/eval purposes (label200's DEV30). Absent = "room_tape", same as
 # every window written before this field existed.
-SOURCE_KIND_VALUES = ("room_tape", "suite_synthetic", "dev_clip", "consult_clip", "room_tape_orphan", "consult_clip_external")   # consult_clip: a CONSULT-cutter clip scope (ORDERS-6S3), never a day-record window; room_tape_orphan: a real-room recording with no session (13A B4), windowed from a raw tape dir, its own unit (not a day-record window); consult_clip_external: a consult whose audio lives on another machine and whose text was produced there (14A: the CAA Sept results), no audio on the box
+SOURCE_KIND_VALUES = ("room_tape", "suite_synthetic", "dev_clip", "consult_clip")   # consult_clip: a CONSULT-cutter clip scope (ORDERS-6S3), never a day-record window
 DEFAULT_SOURCE_KIND = "room_tape"
 
 # How trustworthy a window's t0_ms/t1_ms are as real tape-clock UTC: "tape_utc" (the normal case, or

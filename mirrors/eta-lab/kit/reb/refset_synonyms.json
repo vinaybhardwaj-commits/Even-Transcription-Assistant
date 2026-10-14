@@ -1,0 +1,623 @@
+{
+ "_note": "Synonym groups for matcher A (8A). Fixed BEFORE scoring; the sha256 of this file is recorded in the results. v1 = the v0 general clinical equivalences plus groups built from the terms of the 8-9 Oct record export (10 Oct, before the first scored run); common names only, no patient data. Do not change after the first scored run.",
+ "groups": [
+  [
+   "paracetamol",
+   "acetaminophen",
+   "dolo",
+   "crocin",
+   "calpol"
+  ],
+  [
+   "metformin",
+   "glycomet",
+   "glucophage"
+  ],
+  [
+   "amlodipine",
+   "amlong",
+   "amlokind"
+  ],
+  [
+   "atorvastatin",
+   "atorva",
+   "lipitor"
+  ],
+  [
+   "rosuvastatin",
+   "rosuvas",
+   "crestor"
+  ],
+  [
+   "telmisartan",
+   "telma"
+  ],
+  [
+   "losartan",
+   "losar",
+   "cozaar"
+  ],
+  [
+   "pantoprazole",
+   "pantocid",
+   "pan"
+  ],
+  [
+   "omeprazole",
+   "omez"
+  ],
+  [
+   "azithromycin",
+   "azithral",
+   "azee"
+  ],
+  [
+   "amoxicillin",
+   "novamox",
+   "mox"
+  ],
+  [
+   "cefixime",
+   "taxim o"
+  ],
+  [
+   "ibuprofen",
+   "brufen"
+  ],
+  [
+   "diclofenac",
+   "voveran"
+  ],
+  [
+   "aspirin",
+   "ecosprin",
+   "disprin"
+  ],
+  [
+   "clopidogrel",
+   "plavix",
+   "clopilet"
+  ],
+  [
+   "levothyroxine",
+   "thyronorm",
+   "eltroxin",
+   "thyroxine"
+  ],
+  [
+   "ondansetron",
+   "emeset",
+   "zofran"
+  ],
+  [
+   "cetirizine",
+   "zyrtec",
+   "cetzine"
+  ],
+  [
+   "montelukast",
+   "montair"
+  ],
+  [
+   "salbutamol",
+   "asthalin",
+   "ventolin"
+  ],
+  [
+   "hypertension",
+   "high blood pressure",
+   "htn"
+  ],
+  [
+   "diabetes mellitus",
+   "diabetes",
+   "sugar",
+   "dm"
+  ],
+  [
+   "hypothyroidism",
+   "thyroid"
+  ],
+  [
+   "coronary artery disease",
+   "cad",
+   "heart disease"
+  ],
+  [
+   "urinary tract infection",
+   "uti"
+  ],
+  [
+   "ecg",
+   "electrocardiogram",
+   "ekg"
+  ],
+  [
+   "echocardiogram",
+   "echo",
+   "2d echo"
+  ],
+  [
+   "xray",
+   "x ray",
+   "radiograph"
+  ],
+  [
+   "ct scan",
+   "computed tomography",
+   "ct"
+  ],
+  [
+   "mri",
+   "magnetic resonance imaging"
+  ],
+  [
+   "cbc",
+   "complete blood count",
+   "blood count"
+  ],
+  [
+   "lipid profile",
+   "cholesterol",
+   "lipids"
+  ],
+  [
+   "hba1c",
+   "glycosylated hemoglobin",
+   "hb a1c",
+   "a1c"
+  ],
+  [
+   "thyroid profile",
+   "tsh",
+   "thyroid function"
+  ],
+  [
+   "kft",
+   "kidney function",
+   "renal function"
+  ],
+  [
+   "lft",
+   "liver function"
+  ],
+  [
+   "ultrasound",
+   "usg",
+   "sonography"
+  ],
+  [
+   "acute febrile illness",
+   "afi",
+   "fever",
+   "viral fever"
+  ],
+  [
+   "low back pain",
+   "back pain",
+   "backache",
+   "lbp"
+  ],
+  [
+   "knee pain",
+   "pain in the knee"
+  ],
+  [
+   "hip pain",
+   "pain in the hip"
+  ],
+  [
+   "shoulder pain",
+   "pain in the shoulder"
+  ],
+  [
+   "osteoarthritis",
+   "arthrosis",
+   "oa",
+   "arthritis"
+  ],
+  [
+   "viral urti",
+   "upper respiratory tract infection",
+   "urti",
+   "viral infection",
+   "cold and cough"
+  ],
+  [
+   "acute gastroenteritis",
+   "gastroenteritis",
+   "loose motions",
+   "diarrhoea",
+   "diarrhea"
+  ],
+  [
+   "missed periods",
+   "missed period",
+   "delayed periods",
+   "amenorrhea",
+   "amenorrhoea"
+  ],
+  [
+   "abnormal uterine bleeding",
+   "aub",
+   "dub",
+   "dysfunctional uterine bleeding",
+   "heavy bleeding"
+  ],
+  [
+   "peripheral neuropathy",
+   "neuropathy"
+  ],
+  [
+   "adhesive capsulitis of shoulder",
+   "frozen shoulder",
+   "adhesive capsulitis"
+  ],
+  [
+   "flat foot",
+   "pes planus",
+   "flat feet"
+  ],
+  [
+   "acl tear",
+   "acl injury",
+   "anterior cruciate ligament tear"
+  ],
+  [
+   "tfcc injury",
+   "tfcc",
+   "triangular fibrocartilage complex"
+  ],
+  [
+   "chronic suppurative otitis media",
+   "csom",
+   "ear discharge",
+   "tubotympanic"
+  ],
+  [
+   "cyst of bartholin gland",
+   "bartholin cyst",
+   "bartholin gland cyst"
+  ],
+  [
+   "foreign body in ear",
+   "ear foreign body"
+  ],
+  [
+   "urinary tract infection",
+   "uti"
+  ],
+  [
+   "25 oh vitamin d",
+   "vitamin d",
+   "vit d",
+   "vitamin d3 level"
+  ],
+  [
+   "anti mullerian harmone",
+   "anti mullerian hormone",
+   "amh"
+  ],
+  [
+   "fasting blood glucose",
+   "fasting sugar",
+   "fbs",
+   "fasting blood sugar"
+  ],
+  [
+   "random blood glucose",
+   "rbs",
+   "random sugar",
+   "random blood sugar"
+  ],
+  [
+   "hbsag",
+   "hepatitis b",
+   "hbs ag"
+  ],
+  [
+   "hcv",
+   "hepatitis c"
+  ],
+  [
+   "hiv rapid",
+   "hiv",
+   "hiv test"
+  ],
+  [
+   "hpv dna pcr",
+   "hpv test",
+   "hpv dna"
+  ],
+  [
+   "iron profile",
+   "iron studies",
+   "ferritin",
+   "iron panel"
+  ],
+  [
+   "mammography both breast",
+   "mammography",
+   "mammogram"
+  ],
+  [
+   "pap smear",
+   "pap test",
+   "cervical screening",
+   "pap smear conventional method",
+   "pap smear liquid based cytology"
+  ],
+  [
+   "semen analysis",
+   "semen test",
+   "sfa",
+   "semen examination"
+  ],
+  [
+   "thyroid stimulating hormone tsh",
+   "tsh",
+   "thyroid stimulating hormone"
+  ],
+  [
+   "urine pregnancy test",
+   "upt",
+   "pregnancy test"
+  ],
+  [
+   "urine routine cue",
+   "urine routine",
+   "urine examination",
+   "cue",
+   "urine re"
+  ],
+  [
+   "uric acid serum",
+   "uric acid"
+  ],
+  [
+   "calcium serum",
+   "calcium level",
+   "serum calcium"
+  ],
+  [
+   "culture and sensitivity urine",
+   "urine culture",
+   "urine culture and sensitivity"
+  ],
+  [
+   "culture and sensitivity vaginal swab",
+   "vaginal swab culture",
+   "high vaginal swab"
+  ],
+  [
+   "obstetric ultrasound with doppler growth scan",
+   "growth scan",
+   "obstetric ultrasound",
+   "doppler"
+  ],
+  [
+   "usg afi and doppler",
+   "afi scan",
+   "amniotic fluid index"
+  ],
+  [
+   "usg pelvis tvs",
+   "ultrasound pelvis",
+   "usg tvs trans vaginal",
+   "pelvic ultrasound",
+   "tvs",
+   "transvaginal scan",
+   "usg pelvis"
+  ],
+  [
+   "x ray knee left ap and lat",
+   "x ray knee",
+   "knee x ray",
+   "xray knee"
+  ],
+  [
+   "mri knee left knee",
+   "mri knee",
+   "knee mri"
+  ],
+  [
+   "mri ls spine with saggittal screening of whole spine",
+   "mri ls spine",
+   "mri lumbar spine",
+   "mri spine"
+  ],
+  [
+   "fsh lh prolactin",
+   "prolactin",
+   "fsh",
+   "lh"
+  ],
+  [
+   "pooled prolactin",
+   "prolactin"
+  ],
+  [
+   "free testosterone serum",
+   "free testosterone",
+   "testosterone"
+  ],
+  [
+   "even complete blood profile",
+   "complete blood profile",
+   "cbc"
+  ],
+  [
+   "even vitamin panel",
+   "vitamin panel",
+   "vitamin profile"
+  ],
+  [
+   "paracetamol",
+   "dolo",
+   "crocin",
+   "calpol",
+   "paracetamol o"
+  ],
+  [
+   "cetirizine",
+   "cetzine"
+  ],
+  [
+   "pantoprazole",
+   "pan",
+   "pantocid"
+  ],
+  [
+   "amoxycillin clavulanic acid",
+   "amoxicillin clavulanic acid",
+   "augmentin duo",
+   "augmentin",
+   "co amoxiclav"
+  ],
+  [
+   "ibuprofen paracetamol",
+   "combiflam"
+  ],
+  [
+   "calcium carbonate vitamin d3 methylcobalamin",
+   "shelcal xt",
+   "shelcal"
+  ],
+  [
+   "folic acid",
+   "folvite"
+  ],
+  [
+   "ascorbic acid vit c",
+   "limcee",
+   "vitamin c",
+   "ascorbic acid"
+  ],
+  [
+   "vitamin b complex",
+   "becosules",
+   "neurobion forte",
+   "neurobion",
+   "vitamins"
+  ],
+  [
+   "bacillus clausii",
+   "enterogermina"
+  ],
+  [
+   "human papillomavirus vaccine",
+   "gardasil",
+   "gardasil 9",
+   "hpv vaccine"
+  ],
+  [
+   "tranexamic acid",
+   "pause",
+   "tranexa"
+  ],
+  [
+   "mupirocin",
+   "t bact",
+   "tbact",
+   "bactroban"
+  ],
+  [
+   "levetiracetam",
+   "levipil",
+   "levera"
+  ],
+  [
+   "cilnidipine",
+   "cilacar"
+  ],
+  [
+   "lactulose",
+   "lactifiber",
+   "duphalac"
+  ],
+  [
+   "lignocaine",
+   "lox",
+   "xylocaine",
+   "lidocaine"
+  ],
+  [
+   "domperidone pantoprazole",
+   "pan d"
+  ],
+  [
+   "ferrous ascorbate folic acid",
+   "orofer xt",
+   "orofer"
+  ],
+  [
+   "cholecalciferol vit d3",
+   "d rise",
+   "cholecalciferol",
+   "vitamin d3"
+  ],
+  [
+   "methylcobalamin alpha lipoic acid vitamins",
+   "meganeuron",
+   "meganeuron od plus"
+  ],
+  [
+   "flavoxate",
+   "urispas"
+  ],
+  [
+   "fosfomycin",
+   "novefos"
+  ],
+  [
+   "medroxyprogesterone acetate",
+   "deviry",
+   "medroxyprogesterone"
+  ],
+  [
+   "aceclofenac paracetamol",
+   "hifenac p",
+   "zerodol p",
+   "aceclofenac paracetamol serratiopeptidase",
+   "zerodol sp"
+  ],
+  [
+   "diclofenac sodium serratiopeptidase",
+   "emanzen d"
+  ],
+  [
+   "dicyclomine mefenamic acid",
+   "mef spas",
+   "meftal spas"
+  ],
+  [
+   "ciprofloxacin dexamethasone",
+   "ciplox d",
+   "ciprofloxacin dexamethasone drops"
+  ],
+  [
+   "clotrimazole",
+   "clotrimazole powder",
+   "abzorb"
+  ],
+  [
+   "cyanocobalamin",
+   "optineuron",
+   "vitamin b12"
+  ],
+  [
+   "benfothiamine",
+   "nervijen p",
+   "nervijen"
+  ],
+  [
+   "sod alginate sod bicarb cal carb",
+   "gaviscon",
+   "sodium alginate"
+  ],
+  [
+   "ethinyl estradiol desogestrel",
+   "femilon"
+  ]
+ ]
+}

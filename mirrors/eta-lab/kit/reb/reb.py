@@ -5,7 +5,6 @@ Read-only: this module never creates or edits anything under the REB root (see w
 import glob
 import json
 import os
-import re
 from datetime import datetime, timezone
 
 from .schema import DEFAULT_CLOCK, DEFAULT_SOURCE_KIND
@@ -196,9 +195,6 @@ class Window:
         return out
 
 
-_PLAIN_WINDOW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")   # every window id in the store (c-.., o-.., l3-c003-r1, L041) is of this form; none starts with a dot or contains a path part
-
-
 def _find_manifest_path(root, window_id, ist_date=None, room_id=None):
     if ist_date and room_id:
         p = os.path.join(root, ist_date, room_id, window_id, "manifest.json")
@@ -221,11 +217,6 @@ def _find_manifest_path(root, window_id, ist_date=None, room_id=None):
                     p = os.path.join(date_dir, rec["room_id"], window_id, "manifest.json")
                     if os.path.exists(p):
                         return p
-    # 13A: a window registered with writer.write_manifest (the orphan tape windows) has a manifest but no track, so no index.jsonl line yet: look for its dir directly
-    # (the id must be a plain window-id token, so no glob metacharacter or path part can widen the match; the id is also glob-escaped; newest date first)
-    if window_id and _PLAIN_WINDOW_ID.match(window_id):
-        for p in sorted(glob.glob(os.path.join(root, "20*", "*", glob.escape(window_id), "manifest.json")), reverse=True):
-            return p
     return None
 
 

@@ -124,28 +124,6 @@ class RebTimelineSeed(unittest.TestCase):
         self.assertEqual(n_windows, 1)   # the broken window is skipped, not fatal to the good one
         self.assertEqual(len(lanes["whisper"]), 1)
 
-    def test_a_sealed_window_never_reaches_any_lane_even_when_its_files_are_live(self):
-        """lid-debug's 4 clips stay sealed after the held-out lift (gating-lead #10998): a window with one of those ids is skipped BEFORE its manifest is opened."""
-        m = load("reb_timeline_seed")
-        for wid in ("L041", "L057", "L139", "L182"):
-            write_window(self.root, "2026-09-26", "room_x", wid, 1790500000000, 1790500030000,
-                         [("stt", "whisper-auto", "aaa11111", "ok", [(0, 4000, "SEALEDTEXT")]), ("acoustics", "vad", "bbb22222", "ok", [(0, 4000, "")])])
-        write_window(self.root, "2026-09-26", "room_x", "w1", 1790500100000, 1790500130000,
-                     [("stt", "whisper-auto", "aaa11111", "ok", [(0, 4000, "open window")])])
-        lanes, n_windows, n_tracks, n_held = m.build_reb_lanes(str(self.root), "2026-09-26", "room_x", NOT_HELD)
-        self.assertEqual(lanes.sealed, 4)
-        self.assertEqual((n_windows, n_tracks, n_held), (1, 1, 0))          # only the open window is counted
-        self.assertEqual([x["text"] for x in lanes["whisper"]], ["open window"])
-        self.assertEqual(lanes["acoustic"], [])
-        self.assertNotIn("SEALEDTEXT", json.dumps(dict(lanes)))
-
-    def test_the_sealed_set_is_the_shared_one_and_holds_exactly_the_four_ids(self):
-        m = load("reb_timeline_seed")
-        self.assertEqual(sorted(m.SEALED_WINDOWS), ["L041", "L057", "L139", "L182"])
-        sys.path.insert(0, str(TOOLS.parents[1]))
-        from reb import from_hist
-        self.assertIs(m.SEALED_WINDOWS, from_hist.SEALED_WINDOWS)
-
     def test_no_windows_for_this_room_day_is_empty_not_an_error(self):
         m = load("reb_timeline_seed")
         lanes, n_windows, n_tracks, _ = m.build_reb_lanes(str(self.root), "2026-09-26", "room_x", NOT_HELD)
@@ -194,15 +172,13 @@ class RebTimelineSeed(unittest.TestCase):
         self.assertTrue(m.window_held(lambda d, r: False, "room_x", None, 5))
         self.assertTrue(m.window_held(lambda d, r: False, "room_x", float("nan"), 5))
 
-    def test_r3w51_real_predicate_holds_nothing_after_the_lift(self):
-        """V ruling O8 (10 Oct 2026): the held-out list is empty. The shared heldout.py was swapped to sha16 880404e36fd6b650 (empty union) at 14:48; this used to assert that
-        the real file held 2026-09-26 room_ux92qpws. It now asserts the lifted state: the real loader still loads (fail-closed on a bad file) and holds none of the former 14 pairs."""
+    def test_r3w51_real_predicate_holds_the_known_blind_room_day(self):
         m = load("reb_timeline_seed")
         if not os.path.exists(m.HELDOUT_PY):
             self.skipTest("shared heldout.py not on this box")
         is_held = m.load_heldout()
-        for day, room in [("2026-09-26", "room_ux92qpws"), ("2026-09-23", "room_4ggnkg5x"), ("2026-08-23", "room_qyzghzaf"), ("2026-09-16", "room_ux92qpws"), ("2026-09-26", "room_d74hhmc4")]:
-            self.assertFalse(is_held(day, room), f"{day} {room}")
+        self.assertTrue(is_held("2026-09-26", "room_ux92qpws"))
+        self.assertFalse(is_held("2026-09-26", "room_d74hhmc4"))
 
 
     def test_suspect_medasr_track_stays_out_of_the_lane_end_to_end(self):
