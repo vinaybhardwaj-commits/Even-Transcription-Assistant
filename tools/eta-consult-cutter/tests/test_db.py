@@ -2,7 +2,7 @@
 import os, unittest
 from cutter import config as C
 
-@unittest.skipUnless(os.path.exists(C.DB_URL_FILE), "no DB credential on this machine")
+@unittest.skipUnless(os.environ.get("CUTTER_LIVE_TESTS") == "1" and os.path.exists(C.DB_URL_FILE), "no DB credential on this machine")
 class ReadOnly(unittest.TestCase):
     def test_live_connection_is_read_only(self):
         import psycopg

@@ -50,14 +50,17 @@ def cut(pieces, out, workdir):
 LAST_PULL_ERROR = None
 
 def pull_missing(room_id, t0, t1, runner=None):
-    """pull the room's chunks overlapping [t0 - 300 s, t1 + 300 s] from R2 (the mirror's way). runner(args) -> (rc, text) injectable. -> True if the pull ran."""
+    """pull the room's chunks overlapping [t0 - 300 s, t1 + 300 s] from R2 (the mirror's way). runner(args) -> (rc, text) injectable. -> True if the pull ran and succeeded.
+    m3-17 addendum 4: a pull that did NOT succeed (rc != 0, lock busy, an exception) sets LAST_PULL_ERROR, so the skip row carries pull_error and is never read as 'no tape'."""
+    global LAST_PULL_ERROR
     f = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     args = [C.PULL_PY, C.PULL_ROOM, "--room", room_id, "--from", f(t0 - 300), "--to", f(t1 + 300)]
     try:
-        if runner: rc, _ = runner(args); return rc == 0
-        r = subprocess.run(args, capture_output=True, text=True, timeout=900); return r.returncode == 0
+        rc = runner(args)[0] if runner else subprocess.run(args, capture_output=True, text=True, timeout=900).returncode
+        if rc != 0: LAST_PULL_ERROR = f"pull rc={rc}"
+        return rc == 0
     except Exception as e:                                                    # R9: a timeout or OS error in one pull never aborts the run
-        global LAST_PULL_ERROR; LAST_PULL_ERROR = f"{type(e).__name__}: {str(e)[:120]}"; return False
+        LAST_PULL_ERROR = f"{type(e).__name__}: {str(e)[:120]}"; return False
 
 def loudness(path):
     """integrated loudness of a file by loudnorm's first pass: a float (LUFS), the string '-inf' for digital silence (every 400 ms block is under the -70 LUFS gate), or None if it could not be measured."""

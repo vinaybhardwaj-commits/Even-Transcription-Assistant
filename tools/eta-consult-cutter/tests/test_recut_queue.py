@@ -71,3 +71,32 @@ def test_F3_a_timeout_is_a_deferral_and_a_clip_deferred_three_times_is_parked_fo
 
 def test_F4_only_one_driver_instance():
     d = tempfile.mkdtemp(); a = RQ.single_instance(f"{d}/l"); assert a is not None and RQ.single_instance(f"{d}/l") is None; a.close(); b = RQ.single_instance(f"{d}/l"); assert b is not None; b.close()
+
+
+def test_would_cut_only_skips_do_not_block_the_queue():
+    import datetime as dt
+    T = lambda: dt.datetime(2026, 10, 8, 14, 10, tzinfo=RQ.IST).timestamp(); ix = idx([("u", "2026-10-08", "10", 10)])
+    skips = [dict(consult_uid="a", would_skip="no_tape_coverage_0.00 (re-checked hourly for 24 h)"), dict(consult_uid="b", would_skip="deferred_long (window 806 min > 45)")]
+    calls = []
+    def runner(args, to): calls.append(args); return (0, dict(eligible=2, _windows=skips)) if "--dry-run" in args else (0, dict(cut=1, errors=0))
+    assert RQ.step("u", ix, runner, T) == "done" and calls[-1][:3] == ["--once", "--only", "u"]
+
+def test_one_window_that_would_be_cut_makes_the_queue_wait():
+    import datetime as dt
+    T = lambda: dt.datetime(2026, 10, 8, 14, 10, tzinfo=RQ.IST).timestamp(); ix = idx([("u", "2026-10-08", "10", 10)])
+    ws = [dict(consult_uid="a", would_skip="no_tape_coverage_0.00"), dict(consult_uid="b", mode="new")]
+    r = lambda args, to: (0, dict(eligible=2, _windows=ws)) if "--dry-run" in args else (_ for _ in ()).throw(AssertionError("must not cut"))
+    assert RQ.step("u", ix, r, T).startswith("wait")
+    unseen = lambda args, to: (0, dict(eligible=2, _windows=[])) if "--dry-run" in args else (_ for _ in ()).throw(AssertionError("must not cut"))
+    assert RQ.step("u", ix, unseen, T).startswith("wait")                                                                # eligible but the lines are missing: cannot verify, wait
+
+def test_missing_summary_or_locked_still_waits_and_run_cutter_parses_the_window_lines():
+    import datetime as dt, subprocess
+    from unittest import mock
+    T = lambda: dt.datetime(2026, 10, 8, 14, 10, tzinfo=RQ.IST).timestamp(); ix = idx([("u", "2026-10-08", "10", 10)])
+    assert RQ.step("u", ix, lambda a, t: (1, None), T).startswith("wait")
+    assert RQ.step("u", ix, lambda a, t: (0, dict(locked=True)), T).startswith("wait")
+    out = '{"consult_uid": "a", "would_skip": "x"}\nnot json\n{"consult_uid": "b"}\n{"eligible": 2, "cut": 0}\n'
+    with mock.patch.object(RQ.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, out, "")):
+        rc, s = RQ.run_cutter(["--once", "--dry-run"], 5)
+    assert s["eligible"] == 2 and [d["consult_uid"] for d in s["_windows"]] == ["a", "b"] and RQ.hourly_has_work(lambda a, t: (rc, s)) is True

@@ -1,0 +1,10 @@
+[Unit]
+Description=Index mirror, :55 past every hour from 08:55 to 22:55 (box local time = IST), 20 min after the :35 cut starts
+
+[Timer]
+OnCalendar=*-*-* 08..22:55:00
+Persistent=false
+Unit=index-mirror.service
+
+[Install]
+WantedBy=timers.target
