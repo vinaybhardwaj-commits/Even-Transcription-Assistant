@@ -13,8 +13,6 @@
 export type SignalStatus = 'routed' | 'responded' | 'escalated' | 'ruled' | 'closed';
 export type ResponseType = 'acknowledgment' | 'explanation';
 export type ResponseVerdict = 'agree' | 'disagree';
-export const DOCTOR_RESPONSE_VERBS = ['agree', 'disagree', 'needs_clarification'] as const;
-export type DoctorResponseVerb = (typeof DOCTOR_RESPONSE_VERBS)[number];
 export const SIGNAL_ACTIONS = ['acknowledged_by_governance', 'privilege_action', 'dismissed', 'closed'] as const;
 export type SignalAction = (typeof SIGNAL_ACTIONS)[number];
 
@@ -56,18 +54,6 @@ export function isOverdue(s: { status: string; response_required: string; sla_du
 export function statusAfterResponse(type: ResponseType, verdict: ResponseVerdict | null): SignalStatus {
   return type === 'explanation' && verdict === 'disagree' ? 'escalated' : 'responded';
 }
-/** Portal verbs are deliberately smaller than the transport's legacy type/verdict pair. Both
- * disagree and needs_clarification return the thread to CM/governance, regardless of whether the
- * original signal asked for an acknowledgment or an explanation. */
-export function statusAfterDoctorVerb(
-  verb: DoctorResponseVerb,
-  type: ResponseType,
-  verdict: ResponseVerdict | null,
-): SignalStatus {
-  return verb === 'disagree' || verb === 'needs_clarification'
-    ? 'escalated'
-    : statusAfterResponse(type, verdict);
-}
 /** After a governance ruling: dismissed/closed shut the thread; otherwise it is ruled. */
 export function statusAfterAction(action: SignalAction): SignalStatus {
   return action === 'dismissed' || action === 'closed' ? 'closed' : 'ruled';
@@ -76,16 +62,10 @@ export function statusAfterAction(action: SignalAction): SignalStatus {
 // ── Validation: POST /doctor-response (contract §5.1) ─────────────────────────
 export interface DoctorResponseInput {
   reference?: string; signal_id?: string; doctor_uid?: string;
-  verb?: string; comment?: string; client_request_id?: string;
-  /** Legacy portal fields; accepted temporarily and normalized to the doctor verb contract. */
-  type?: string; verdict?: string;
+  type?: string; verdict?: string; comment?: string;
 }
 export interface NormalizedDoctorResponse {
-  verb: DoctorResponseVerb;
-  type: ResponseType;
-  verdict: ResponseVerdict | null;
-  comment: string | null;
-  client_request_id: string;
+  type: ResponseType; verdict: ResponseVerdict | null; comment: string | null;
 }
 const dstr = (v: unknown, cap = 4000): string | null => (v == null || v === '' ? null : String(v).slice(0, cap));
 
@@ -104,30 +84,6 @@ export function validateDoctorResponse(
   if (req === 'none' || req === 'recommend_privilege_review') {
     return { ok: false, error: `this signal requires no doctor response (${req})`, code: 409 };
   }
-  const client_request_id = dstr(input.client_request_id, 200);
-  if (!client_request_id) {
-    return { ok: false, error: 'client_request_id or Idempotency-Key header required', code: 400 };
-  }
-  if (input.verb != null) {
-    if (!(DOCTOR_RESPONSE_VERBS as readonly string[]).includes(input.verb)) {
-      return { ok: false, error: 'verb must be agree|disagree|needs_clarification', code: 400 };
-    }
-    const verb = input.verb as DoctorResponseVerb;
-    const comment = dstr(input.comment);
-    if ((verb === 'disagree' || verb === 'needs_clarification') && !comment) {
-      return { ok: false, error: `${verb} requires a comment`, code: 400 };
-    }
-    return {
-      ok: true,
-      value: {
-        verb,
-        type: req === 'acknowledgment' ? 'acknowledgment' : 'explanation',
-        verdict: verb === 'needs_clarification' ? null : verb,
-        comment,
-        client_request_id,
-      },
-    };
-  }
   if (input.type !== req) {
     return { ok: false, error: `type must equal the signal's response_required (${req})`, code: 400 };
   }
@@ -136,16 +92,10 @@ export function validateDoctorResponse(
     if (!comment) return { ok: false, error: 'explanation requires a comment', code: 400 };
     const verdict = input.verdict === 'agree' ? 'agree' : input.verdict === 'disagree' ? 'disagree' : null;
     if (!verdict) return { ok: false, error: 'explanation requires verdict agree|disagree', code: 400 };
-    return { ok: true, value: { verb: verdict, type: 'explanation', verdict, comment, client_request_id } };
+    return { ok: true, value: { type: 'explanation', verdict, comment } };
   }
   // acknowledgment
-  return {
-    ok: true,
-    value: {
-      verb: 'agree', type: 'acknowledgment', verdict: null,
-      comment: dstr(input.comment), client_request_id,
-    },
-  };
+  return { ok: true, value: { type: 'acknowledgment', verdict: null, comment: dstr(input.comment) } };
 }
 
 /** The comment as the idempotency comparison sees it: trimmed, internal whitespace runs collapsed
@@ -166,26 +116,14 @@ function normalizeComment(v: unknown): string {
  */
 export function classifyDoctorResponse(
   stored: unknown | null,
-  incoming: { verb?: string; type: string; verdict: string | null; comment: string | null },
+  incoming: { type: string; verdict: string | null; comment: string | null },
 ): 'first' | 'replay' | 'conflict' {
   if (stored == null) return 'first';
   if (typeof stored !== 'object') return 'conflict';
-  const s = stored as { verb?: string | null; type?: string | null; verdict?: string | null; comment?: unknown };
-  if (s.verb == null && incoming.verb == null) {
-    const sameLegacy =
-      s.type === incoming.type &&
-      (s.verdict ?? null) === (incoming.verdict ?? null) &&
-      normalizeComment(s.comment) === normalizeComment(incoming.comment);
-    return sameLegacy ? 'replay' : 'conflict';
-  }
-  const storedVerb = s.verb ?? (s.verdict === 'agree' || s.verdict === 'disagree'
-    ? s.verdict
-    : s.type === 'acknowledgment' ? 'agree' : null);
-  const incomingVerb = incoming.verb ?? (incoming.verdict === 'agree' || incoming.verdict === 'disagree'
-    ? incoming.verdict
-    : incoming.type === 'acknowledgment' ? 'agree' : null);
+  const s = stored as { type?: string | null; verdict?: string | null; comment?: unknown };
   const same =
-    storedVerb === incomingVerb &&
+    s.type === incoming.type &&
+    (s.verdict ?? null) === (incoming.verdict ?? null) &&
     normalizeComment(s.comment) === normalizeComment(incoming.comment);
   return same ? 'replay' : 'conflict';
 }
@@ -212,81 +150,9 @@ export function validateSignalAction(input: SignalActionInput): { ok: true; valu
   };
 }
 
-/**
- * Which governance actions a thread in `status` may take.
- *   routed | responded | escalated → any of the four actions
- *   ruled                          → closing it (closed | dismissed) or a privilege_action: a
- *                                    privilege review after an acknowledgement is a legal escalation
- *   closed                         → nothing; closed is terminal
- * A repeat of any earlier action + gov_intervention_ref pair is handled before this (see
- * isSignalActionReplay and the event-log check in the route).
- */
-export function signalActionTransition(
-  status: string,
-  action: SignalAction,
-): { ok: true } | { ok: false; error: string } {
-  if (status === 'closed') {
-    return { ok: false, error: `signal is closed; ${action} is not allowed` };
-  }
-  if (status === 'ruled' && action !== 'closed' && action !== 'dismissed' && action !== 'privilege_action') {
-    return { ok: false, error: `signal is already ruled; only privilege_action, closed or dismissed may follow (got ${action})` };
-  }
-  return { ok: true };
-}
-
-/**
- * Idempotency for POST /signal-action, first half: the same action carrying the same
- * gov_intervention_ref as the ruling currently on the thread is a replay (200, nothing written).
- * `ruling` holds only the LATEST action, so the route also asks the event log for an earlier pair
- * (hasSignalActionEvent). Without a reference there is nothing to key on, so the transition guard
- * decides instead.
- */
-export function isSignalActionReplay(ruling: unknown, incoming: { action: string; gov_intervention_ref: string | null }): boolean {
-  if (!incoming.gov_intervention_ref) return false;
-  if (!ruling || typeof ruling !== 'object') return false;
-  const r = ruling as { action?: unknown; gov_intervention_ref?: unknown };
-  return r.action === incoming.action && r.gov_intervention_ref === incoming.gov_intervention_ref;
-}
-
-// ── Doctor visibility ────────────────────────────────────────────────────────
-/**
- * Is this thread one a doctor may see? Routed to the doctor, and neither withdrawn nor dismissed:
- *   withdrawn — the care manager un-routed it (withdrawSignal): status closed, no ruling.
- *   dismissed — governance ruled it not applicable: status closed, ruling.action = dismissed.
- * Everything else stays visible, including a thread governance acknowledged (ruled), escalated or
- * closed after the doctor answered it (the doctor's own response stays on the card). A thread the CM
- * re-routes leaves `closed`, so a stale ruling does not hide it.
- *
- * ONE predicate for every doctor-facing read: doctor-audits, the document-audits export and the
- * routed-only findings PDF. DOCTOR_VISIBLE_SQL is the same rule as a WHERE fragment (columns
- * `status`, `ruling`); a test holds the two in step.
- */
-export function isDoctorVisibleThread(t: { status: string; ruling?: unknown }): boolean {
-  if (t.status !== 'closed') return true;
-  if (t.ruling == null || typeof t.ruling !== 'object') return false;
-  return (t.ruling as { action?: unknown }).action !== 'dismissed';
-}
-export const DOCTOR_VISIBLE_SQL =
-  `NOT (status = 'closed' AND (ruling IS NULL OR ruling->>'action' = 'dismissed'))`;
-
-/**
- * Where a doctor's `disagree` may be recorded as calibration feedback. Only OPD threads have a
- * calibration store keyed on their audit id (opd_audit_feedback.audit_id is an opd_note_audits id).
- * A discharge or OT thread's audit id is a different table's uuid, so writing it there would put a
- * foreign id into the OPD corpus. Those classes skip, with a reason the caller logs.
- */
-export function calibrationTarget(noteClass: string | null | undefined):
-  { ok: true; table: 'opd_audit_feedback' } | { ok: false; reason: string } {
-  const cls = noteClass || 'opd';
-  if (cls === 'opd') return { ok: true, table: 'opd_audit_feedback' };
-  return { ok: false, reason: `no calibration store for note_class=${cls}; opd_audit_feedback only accepts opd_note_audits ids` };
-}
-
 // ── Outbound signal object (contract §6) ──────────────────────────────────────
 export interface SignalRow {
   reference: string; signal_id: string; doctor_uid: string; signal_type: string;
-  /** Absent on threads minted before the column — readers treat that as `opd`. */
-  note_class?: 'opd' | 'discharge_summary' | 'ot' | null;
   importance: string; response_required: string; status: string;
   instances?: number | null;
   window_from: string | null; window_to: string | null;
@@ -320,7 +186,6 @@ export function signalObject(row: SignalRow, representative: SignalRepresentativ
     signal_id: row.signal_id,
     doctor_uid: row.doctor_uid,
     signal_type: row.signal_type,
-    note_class: row.note_class === 'discharge_summary' || row.note_class === 'ot' ? row.note_class : 'opd',
     label: signalLabel(row.signal_type),
     importance: row.importance,
     response_required: row.response_required,

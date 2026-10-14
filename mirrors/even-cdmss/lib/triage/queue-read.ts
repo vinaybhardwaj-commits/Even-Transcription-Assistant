@@ -3,11 +3,6 @@
  *
  * Same read the /care/triage UI uses (GET /api/opd-triage/queue). Informational findings are
  * dropped by buildQueue — this module does not invent a second queue or a second filter.
- *
- * Discharge summaries from ipd_discharge_audits join with note_class=discharge_summary
- * (treating-doctor hop). OT notes from ot_note_audits join with note_class=ot (curated
- * surgeon map). Unjoined rows are queued as unmapped cards, never under an invented uid.
- * Chart surgery bookings are never read here as note grain.
  */
 
 import { sql } from '@/lib/db';
@@ -19,15 +14,7 @@ import { buildQueue, type DoctorGroup, type TriageFinding } from '@/lib/opd-tria
 import { loadTriageDecisions } from '@/lib/opd-triage-store';
 import { stripRetiredEvenCitations } from '@/lib/even-ground-core';
 import type { Source } from '@/lib/citations-core';
-import { fetchIpdDoctorHop } from '@/lib/ipd-doctor-hop';
 import { actionQueueItemRef } from '@/lib/triage/shadow-schema';
-import { noteClassOf, unmappedQueueDoctor, type NoteClass } from '@/lib/triage/note-class';
-import {
-  landDischargeAudits, visibleUnmappedCards,
-  type DischargeAuditSource, type UnmappedDischargeCard,
-} from '@/lib/triage/ds-lander';
-import { landOtAudits, visibleUnmappedOtCards, type UnmappedOtCard } from '@/lib/triage/ot-lander';
-import { loadOtAuditsForQueue } from '@/lib/triage/ot-audit-store';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -43,8 +30,6 @@ export interface ActionQueueQuery {
   includeQuieted: boolean;
 }
 
-export type OtLoadDiagnostic = { ok: true } | { ok: false; error: string };
-
 export interface ActionQueueResult {
   ok: true;
   window: { from: string; to: string; days: number };
@@ -52,19 +37,12 @@ export interface ActionQueueResult {
   engine: string;
   doctors_total: number;
   doctors: DoctorGroup[];
-  /** Unresolved DS treating-doctor or OT surgeon-map cards. Not grouped under a physician. */
-  unmapped: Array<UnmappedDischargeCard | UnmappedOtCard>;
   advisory: string;
-  /** Non-PHI: OT Neon load status so Triage Bot can see failures without Vercel log diving. */
-  ot_load: OtLoadDiagnostic;
 }
 
 export interface ActionQueueItem {
   queue_item_ref: string;
-  note_class: NoteClass;
-  /** Null on an unmapped DS/OT card. Never a synthesized physician id. */
-  doctor_uid: string | null;
-  attribution: 'mapped' | 'unmapped';
+  doctor_uid: string;
   doctor_name: string | null;
   speciality: string | null;
   signal_type: string;
@@ -104,20 +82,14 @@ function addDays(day: string, delta: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Flatten the CM Action queue (doctor → class → signal_type, plus unmapped DS/OT cards). */
-export function flattenActionQueueItems(
-  doctors: DoctorGroup[],
-  unmapped: Array<UnmappedDischargeCard | UnmappedOtCard> = [],
-): ActionQueueItem[] {
+/** Flatten the CM Action queue (doctor → signal_type cards) into bot-addressable items. */
+export function flattenActionQueueItems(doctors: DoctorGroup[]): ActionQueueItem[] {
   const items: ActionQueueItem[] = [];
   for (const d of doctors) {
     for (const t of d.types) {
-      const note_class = noteClassOf(t.note_class);
       items.push({
-        queue_item_ref: actionQueueItemRef(d.doctor_uid, t.signal_type, note_class),
-        note_class,
+        queue_item_ref: actionQueueItemRef(d.doctor_uid, t.signal_type),
         doctor_uid: d.doctor_uid,
-        attribution: 'mapped',
         doctor_name: d.name ?? null,
         speciality: d.speciality ?? null,
         signal_type: t.signal_type,
@@ -130,70 +102,7 @@ export function flattenActionQueueItems(
       });
     }
   }
-  for (const card of unmapped) {
-    items.push({
-      queue_item_ref: card.queue_item_ref,
-      note_class: noteClassOf(card.note_class),
-      doctor_uid: null,
-      attribution: 'unmapped',
-      doctor_name: null,
-      speciality: card.speciality,
-      signal_type: card.signal_type,
-      label: card.label,
-      count: card.count,
-      notes: card.notes,
-      importance_hint: card.importance_hint,
-      representative: card.representative,
-      triage: null,
-    });
-  }
   return items;
-}
-
-async function loadDischargeQueue(from: string, to: string): Promise<{ findings: TriageFinding[]; unmapped: UnmappedDischargeCard[] }> {
-  const where = `app_source = $1 AND engine_version LIKE 'ipd-discharge-audit/%' AND engine_version NOT LIKE '%-mini'
-    AND discharged_at IS NOT NULL AND (discharged_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2 AND $3`;
-  const rows = await run(
-    `SELECT id, ip_uid, speciality, note_date, findings
-     FROM (${canonicalDistinctOnSql({
-       table: 'ipd_discharge_audits',
-       identity: 'document_id',
-       cols: `id::text AS id, ip_uid, speciality,
-              to_char((discharged_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS note_date,
-              findings`,
-       where,
-     })}) canonical
-     LIMIT 8000`,
-    [APP, from, to],
-  );
-  const sources: DischargeAuditSource[] = (rows as Record<string, unknown>[]).map((r) => ({
-    id: String(r.id),
-    ip_uid: r.ip_uid == null ? null : String(r.ip_uid),
-    speciality: r.speciality == null ? null : String(r.speciality),
-    note_date: String(r.note_date || ''),
-    findings: r.findings,
-  }));
-  if (!sources.length) return { findings: [], unmapped: [] };
-  let hop: Awaited<ReturnType<typeof fetchIpdDoctorHop>>;
-  try {
-    hop = await fetchIpdDoctorHop(sources.map((s) => s.ip_uid || ''));
-  } catch {
-    hop = { byIpUid: {}, coverage: { asked: sources.length, known: 0, resolved: 0, ambiguousPractitioner: 0, ambiguousStay: 0, unmatched: 0, noTreatingId: 0, unavailable: true }, ambiguousIds: [] };
-  }
-  return landDischargeAudits(sources, hop);
-}
-
-async function loadOtQueue(from: string, to: string): Promise<{ findings: TriageFinding[]; unmapped: UnmappedOtCard[] }> {
-  const rows = await loadOtAuditsForQueue(from, to);
-  if (!rows.length) return { findings: [], unmapped: [] };
-  return landOtAudits(rows.map((r) => ({
-    id: r.id,
-    doctor_uid: r.doctor_uid,
-    map_status: r.map_status,
-    surgeon_raw: r.surgeon_raw,
-    note_day: r.note_day,
-    findings: r.findings,
-  })));
 }
 
 /**
@@ -255,7 +164,6 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
         subject: f.subject, rationale: f.rationale, verdict: f.verdict, domain: f.domain,
         signal_type: f.signal_type as string, finding_ref: f.finding_ref as string,
         informational: f.informational, citation_ids: f.citation_ids,
-        note_class: 'opd',
         complexity_band: band, complexity_inputs: inputs,
         lvc_category: (f as { lvc_category?: string }).lvc_category ?? null,
         quieted_by: (f as { quieted_by?: string | null }).quieted_by ?? null,
@@ -263,43 +171,7 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
     }
   }
 
-  let dischargeFindings: TriageFinding[] = [];
-  let dischargeUnmapped: UnmappedDischargeCard[] = [];
-  try {
-    const landed = await loadDischargeQueue(from, to);
-    dischargeFindings = doctorFilter
-      ? landed.findings.filter((f) => f.doctor_uid === doctorFilter)
-      : landed.findings;
-    dischargeUnmapped = doctorFilter ? [] : landed.unmapped;
-  } catch {
-    dischargeFindings = [];
-    dischargeUnmapped = [];
-  }
-  findings.push(...dischargeFindings);
-
-  let otFindings: TriageFinding[] = [];
-  let otUnmapped: UnmappedOtCard[] = [];
-  let ot_load: OtLoadDiagnostic = { ok: true };
-  try {
-    const landed = await loadOtQueue(from, to);
-    otFindings = doctorFilter
-      ? landed.findings.filter((f) => f.doctor_uid === doctorFilter)
-      : landed.findings;
-    otUnmapped = doctorFilter ? [] : landed.unmapped;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[queue-read] OT Action-queue load failed:', message);
-    otFindings = [];
-    otUnmapped = [];
-    ot_load = { ok: false, error: message };
-  }
-  findings.push(...otFindings);
-
-  const doctorUids = [...new Set([
-    ...findings.map((f) => f.doctor_uid),
-    ...dischargeUnmapped.map((card) => unmappedQueueDoctor(card.audit_id)),
-    ...otUnmapped.map((card) => unmappedQueueDoctor(card.audit_id)),
-  ])];
+  const doctorUids = [...new Set(findings.map((f) => f.doctor_uid))];
   const [decisions, names, dirRows] = await Promise.all([
     loadTriageDecisions(doctorUids).catch(() => []),
     fetchDoctorNames(doctorUids).catch(() => ({} as Record<string, string>)),
@@ -309,10 +181,6 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
   for (const r of dirRows as Record<string, unknown>[]) specialities[String(r.doctor_uid)] = String(r.speciality);
 
   const { doctors } = buildQueue(findings, decisions, { names, specialities, status, includeQuieted });
-  const unmapped = [
-    ...visibleUnmappedCards(dischargeUnmapped, decisions, status),
-    ...visibleUnmappedOtCards(otUnmapped, decisions, status),
-  ];
 
   return {
     ok: true,
@@ -321,8 +189,6 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
     engine: OPD_ENGINE_VERSION,
     doctors_total: doctorUids.length,
     doctors,
-    unmapped,
     advisory: 'Advisory documentation & prescribing signals from an automated screen — validate before routing. Not a clinician performance score.',
-    ot_load,
   };
 }
