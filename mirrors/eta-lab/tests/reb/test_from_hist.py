@@ -150,24 +150,6 @@ def test_guard_fails_closed(tmp_path):
         fh.load_heldout(str(bad))
 
 
-def test_only_the_swapped_heldout_file_loads_and_the_old_one_fails_closed(tmp_path):
-    import hashlib
-    assert fh.HELDOUT_PY_SHA16S == ("880404e36fd6b650",)
-    old = tmp_path / "old.py"
-    old.write_text("def load_union(): return {'2026-09-26 OPD4'}, 'x'\ndef is_held_out(u, d, r): return f'{d} OPD4' in u\n")
-    assert hashlib.sha256(old.read_bytes()).hexdigest()[:16] != "880404e36fd6b650"
-    with pytest.raises(SystemExit):   # any file that is not the pinned one, the pre-swap f672c1ef included, fails closed
-        fh.load_heldout(str(old))
-
-
-def test_pinned_heldout_loads_and_holds_nothing(tmp_path, monkeypatch):
-    import hashlib
-    new = tmp_path / "new.py"
-    new.write_text("def load_union(): return set(), 'y'\ndef is_held_out(u, d, r): return f'{d} OPD4' in u\n")
-    monkeypatch.setattr(fh, "HELDOUT_PY_SHA16S", (hashlib.sha256(new.read_bytes()).hexdigest()[:16],))
-    assert fh.load_heldout(str(new))("2026-09-26", "room_ux92qpws") is False
-
-
 def test_misnamed_id_resolved_by_manifest_start(env):
     new_id, old_id = "c-2026-10-05_room_abcd1234_2315", "c-2026-10-06_room_abcd1234_2315"
     d = os.path.join(env.root, "2026-10-05", ROOM, new_id)
@@ -399,23 +381,3 @@ def test_write_track_config_hash_override_is_additive():
     import inspect
     assert inspect.signature(writer.write_track).parameters["config_hash"].default is None
     assert writer.config_hash({"a": 1}) == writer._default_config_hash({"a": 1})
-
-
-def test_sealed_window_ids_are_never_converted(env):
-    put(env, hist(wid="L041"))
-    c = go(env)
-    assert c["sealed"] == 1 and c["written"] == 0 and tracks(env) == []
-    assert fh.SEALED_WINDOWS == {"L041", "L057", "L139", "L182"}
-
-
-def test_a_start_match_into_a_sealed_window_is_refused_before_its_manifest_is_opened(env):
-    d = os.path.join(env.root, "2026-10-06", ROOM, "L041")
-    os.makedirs(d)
-    mp = os.path.join(d, "manifest.json")
-    json.dump({"window_id": "L041", "room_id": ROOM, "room_slug": ROOM, "ist_date": "2026-10-06", "t0_ms": T0_MS, "t1_ms": T0_MS + 900000,
-               "audio": {"r2_key": "k", "sha256": "s", "sample_rate": 1, "duration_ms": 1}, "tracks": []}, open(mp, "w"))
-    before = open(mp, "rb").read()
-    put(env, hist())                                                          # an ordinary id with the same room and the same start as the sealed window
-    c = go(env)
-    assert c["sealed"] == 1 and c["written"] == 0 and c["start_resolved"] == 0 and c["new_manifest"] == 0
-    assert tracks(env) == [] and open(mp, "rb").read() == before and sorted(os.listdir(os.path.join(env.root, "2026-10-06", ROOM))) == ["L041"]

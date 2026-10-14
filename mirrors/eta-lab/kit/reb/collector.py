@@ -3,8 +3,7 @@ is verified, the object is in R2 and the row is in the index (REB-SPEC v2.3 prin
 
 Source of truth: ~/eta-data/reb/<date>/index.jsonl (every writer appends there). For each complete line:
   resolve the track file; missing file or sha256 != line  -> `stale`, skipped;
-  sealed window ids (from_hist.SEALED_WINDOWS: the 4 lid-debug clips) -> `sealed`, skipped, the file is not read;
-  heldout guard (heldout.py 880404e3) on the path date and the window's t0/t1 -> `blind`, skipped, nothing of the window leaves the box;
+  heldout guard (heldout.py f672c1ef) on the path date and the window's t0/t1 -> `blind`, skipped, nothing of the window leaves the box;
   r2_key = reb/<path>; HEAD; absent -> PUT with the sha256 in object metadata; present, same sha -> skip;
   present with a different (or no) sha256 -> `r2_conflict`, alarm line, NEVER overwritten, and its row is NOT indexed.
   manifest.json is pushed too (overwrite allowed, it is append-only on the box).
@@ -42,7 +41,7 @@ DEFAULT_WORKERS = 8
 MAX_WORKERS = 16
 DEFAULT_MACHINE = "eta-lab-t4"
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-COUNTERS = ("lines", "bad_lines", "sealed", "live", "stale_missing", "stale_sha", "no_manifest", "blind", "r2_present", "r2_conflict",
+COUNTERS = ("lines", "bad_lines", "live", "stale_missing", "stale_sha", "no_manifest", "blind", "r2_present", "r2_conflict",
             "would_put", "put", "manifest_put", "would_index", "indexed", "index_existing", "index_conflicts", "errors")
 
 
@@ -323,10 +322,6 @@ class Collector:
                 raise ValueError("path")
         except (ValueError, KeyError, TypeError, AttributeError):
             c["bad_lines"] += 1
-            return ("skip", end, None)
-        from .from_hist import SEALED_WINDOWS
-        if line["window_id"] in SEALED_WINDOWS or rel.split("/")[2:3] and rel.split("/")[2] in SEALED_WINDOWS:   # sealed clips never leave the box; the file is not even read
-            c["sealed"] += 1
             return ("skip", end, None)
         tpath = os.path.join(self.root, rel)
         try:

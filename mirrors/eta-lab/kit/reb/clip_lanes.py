@@ -176,32 +176,6 @@ class GpuGate:
                 os.close(fd)
 
 
-class LaneHalt(GuardUnavailable):
-    """Raised by a YieldingGate to end the run cleanly (the production worker stalled or stayed behind, or a stop-flag file appeared). It passes through process_clip's per-clip error handling
-    (GuardUnavailable is re-raised there) and run() turns it into stopped=<reason> in the counters."""
-
-    def __init__(self, reason):
-        super().__init__(reason)
-        self.reason = reason
-
-
-class YieldingGate:
-    """14A: a GpuGate that first asks the production-worker yield rule (window_lanes.Yield, gating-lead #11324) whether it may start; `halts` are the exception types that mean
-    "stop the run" (ProductionBehind, WorkerStalled, StopRequested). Used only when --worker-status is given; the hourly run does not use it."""
-
-    def __init__(self, gate, yielder, halts):
-        self.gate, self.yielder, self.halts = gate, yielder, tuple(halts)
-
-    @contextlib.contextmanager
-    def hold(self):
-        try:
-            self.yielder.wait_clear()
-        except self.halts as e:
-            raise LaneHalt({"ProductionBehind": "production_behind", "WorkerStalled": "worker_stalled", "StopRequested": "stop_file"}.get(type(e).__name__, type(e).__name__))
-        with self.gate.hold():
-            yield
-
-
 # ---------------------------------------------------------------- real runners (models load on first use, never in a dry run)
 class RealRunner:
     """run(lane, row, clip, config, workdir) -> (status, reason, segments, extras). Loads the lane's model on first call."""
@@ -236,54 +210,12 @@ class RealRunner:
                                                                                     "nemo_version": model.nemo_version, "nemo_sha256": model.nemo_sha256}
         if self.lane == "medasr":
             out = model.transcribe(x16, eng.MEDASR_CONFIG["chunk_s"])
-            segs = tape_segments(clip, [(a, b, {"text": t, "lang": "en"}) for a, b, t in out])   # 16A: MedASR is an English model: every segment says so (readers treated a missing lang as not-English)
+            segs = tape_segments(clip, [(a, b, {"text": t}) for a, b, t in out])
             return ("ok" if segs else "empty"), (None if segs else "no text"), segs, {"runtime": model.runtime}
         raise KeyError(self.lane)
 
 
 # ---------------------------------------------------------------- one clip
-RUN_TS = time.strftime("%Y%m%dT%H%M%S")
-FAILED_KEEP = 5   # backfill-lead #11473 / architect #11496: only failed jobs keep their scratch, and at most this many
-
-
-def scratch_dir(work_root=WORK_ROOT, lane=""):
-    """The ONE scratch dir of this run and lane (the clip lanes run one clip at a time): runner.run decodes into it and the next clip overwrites the same file names, so a run holds one clip's
-    decode (about the clip's size) instead of a retired directory per clip. The decode is re-creatable from the clip; nothing in it is a result."""
-    return os.path.join(work_root, f"scratch-{RUN_TS}-{os.getpid()}-{lane}")
-
-
-def keep_failed(wd, name, work_root=WORK_ROOT):
-    """A clip whose lane raised keeps its scratch for diagnosis: the whole scratch dir is MOVED to <work_root>/failed/<name>-<time>, at most FAILED_KEEP dirs in total (beyond that nothing is kept;
-    the next clip overwrites the scratch). Nothing is deleted."""
-    dest = os.path.join(work_root, "failed")
-    if os.path.isdir(wd) and (not os.path.isdir(dest) or len(os.listdir(dest)) < FAILED_KEEP):
-        os.makedirs(dest, exist_ok=True)
-        base = os.path.join(dest, name + time.strftime("-%Y%m%dT%H%M%S"))
-        target, n = base, 0
-        while os.path.exists(target):
-            n += 1
-            target = f"{base}-{n}"
-        os.rename(wd, target)
-        return True
-    return False
-
-
-def retire_scratch(work_root=WORK_ROOT):
-    """End of a run: MOVE this process's scratch dirs (one per lane) to <work_root>/_to_delete/ under a unique name; never deleted."""
-    import glob
-    n = 0
-    for wd in sorted(d for d in glob.glob(os.path.join(work_root, f"scratch-{RUN_TS}-{os.getpid()}-*")) if os.path.isdir(d)):
-        dest = os.path.join(work_root, "_to_delete")
-        os.makedirs(dest, exist_ok=True)
-        target, k = os.path.join(dest, os.path.basename(wd)), 0
-        while os.path.exists(target):
-            k += 1
-            target = os.path.join(dest, f"{os.path.basename(wd)}-{k}")
-        os.rename(wd, target)
-        n += 1
-    return n
-
-
 def retire(wd, work_root=WORK_ROOT):
     if wd and os.path.isdir(wd):
         dest = os.path.join(work_root, "_to_delete")
@@ -340,7 +272,7 @@ def process_clip(lane, row, root, is_held, write, cnt, runner, gate, joblog, cli
             cnt["would_write"] += 1
             cnt["audio_s"] += dur
             return
-        wd = scratch_dir(work_root, lane)
+        wd = os.path.join(work_root, f"{row['consult_uid']}-{lane}")
         t = time.time()
         try:
             if LANES[lane]["gpu"]:
@@ -348,11 +280,9 @@ def process_clip(lane, row, root, is_held, write, cnt, runner, gate, joblog, cli
                     status, reason, segs, extras = runner.run(row, clip, config, wd, lang)
             else:
                 status, reason, segs, extras = runner.run(row, clip, config, wd, lang)
-        except BaseException:
-            keep_failed(wd, f"{row['consult_uid']}-{lane}", work_root)   # a failed clip keeps its decode (capped); a successful one leaves nothing but the reused scratch
-            raise
-        track = build_track(lane, row, clip, config, status, reason, segs, {**extras, **({"sarvam_language_code": sarvam_language(root, row)} if lane == "koyal" else {}),
-                                                                                           **({"source_language": sarvam_language(root, row)} if lane in ("koyal", "medasr") else {})})   # 16A: the clip's Sarvam language code behind this run, null if unknown
+        finally:
+            retire(wd, work_root)
+        track = build_track(lane, row, clip, config, status, reason, segs, {**extras, **({"sarvam_language_code": sarvam_language(root, row)} if lane == "koyal" else {})})
         try:
             writer.write_track(root, row["ist_date"], row["room_id"], track["window_id"], track, manifest_stub=sl.manifest_stub(row, clip, root), config_hash=track["config_hash"])
             cnt["written"] += 1
@@ -416,27 +346,16 @@ def run(args, lane, root=None, is_held=None, runner=None, gate=None, index_path=
     if getattr(args, "until", None):
         rows = [r for r in rows if r["ist_date"] <= args.until]
     limit = getattr(args, "limit", 0)
-    stop_file, stopped = getattr(args, "stop_file", None), None
     done = 0
     for r in rows:
         if limit and done >= limit:
             cnt["limit_reached"] += 1
             continue
-        if stop_file and os.path.exists(stop_file):   # checked between clips: the clip just finished is written, the next is not started
-            stopped = "stop_file"
-            break
         before = cnt["written"] + cnt["would_write"]
-        try:
-            process_clip(lane, r, root, is_held, args.write, cnt, runner, gate, joblog, clips_root, recut_pending, work_root)
-        except LaneHalt as h:
-            stopped = h.reason
-            break
+        process_clip(lane, r, root, is_held, args.write, cnt, runner, gate, joblog, clips_root, recut_pending, work_root)
         done += (cnt["written"] + cnt["would_write"]) - before
-    retire_scratch(work_root)
     out = dict(cnt)
     out["audio_h"] = round(out.pop("audio_s") / 3600, 3)
-    if stopped:
-        out["stopped"] = stopped
     return out
 
 
@@ -452,20 +371,11 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="at most N clips actually processed (skipped and refused clips do not count)")
     ap.add_argument("--root", help="REB root to write under (default ~/eta-data/reb); use a temp root for a smoke run")
-    ap.add_argument("--worker-status", default=None, help="14A: yield to the production Nemotron worker before every GPU inference: worker (its own `nemotron-worker.sh status`) | file:<json> | cmd:<command>; "
-                                                         "off by default (the hourly run does not pass it)")
-    ap.add_argument("--excuse-rate-cap-sleep", action="store_true", help="with --worker-status: a rate_capped worker asleep for its own sleep_s + 3 min is not stalled")
-    ap.add_argument("--stop-file", help="when this file exists the run finishes the clip it is on and stops (stopped=stop_file); nothing is killed")
     a = ap.parse_args(argv)
     if a.write and a.dry_run:
         ap.error("--write and --dry-run are exclusive")
     a.min_minutes, a.identified = 0, False
-    gate = None
-    if a.worker_status and a.worker_status != "none":
-        from . import window_lanes as wl   # lazy: window_lanes imports this module
-        y = wl.Yield(wl.status_from_spec(a.worker_status), excuse_rate_cap_sleep=a.excuse_rate_cap_sleep, stop_check=(lambda: os.path.exists(a.stop_file)) if a.stop_file else None)
-        gate = YieldingGate(GpuGate(), y, (wl.ProductionBehind, wl.WorkerStalled, wl.StopRequested))
-    print(json.dumps({"lane": a.lane, "write": a.write, "counts": run(a, a.lane, root=a.root, gate=gate)}, sort_keys=True))
+    print(json.dumps({"lane": a.lane, "write": a.write, "counts": run(a, a.lane, root=a.root)}, sort_keys=True))
     return 0
 
 
