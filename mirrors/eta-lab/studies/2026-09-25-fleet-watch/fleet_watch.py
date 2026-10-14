@@ -137,8 +137,19 @@ def decide(snap, cfg, now, prev_devices=None):
         if mic is not None and mic != "authorized" and mic not in cfg["mic_ok"].get(name, []):
             add("MIC_NOT_AUTHORIZED", "mic_state=%s" % mic)
         nd = r.get("not_delivering_minutes")
-        if nd is not None and nd >= 10:
-            add("NOT_DELIVERING", "not delivering %s min" % nd)
+        der = None      # r412.6 (scribe #2728): derive NOT_DELIVERING at read time; never wait for the 30-min reaper.
+        if pa is not None and pa > cfg["piece_age_s"] and lv:
+            cut2 = (now.timestamp() - cfg["stall_window_s"]) * 1000
+            fresh = [s for s in lv if isinstance(s, dict) and s.get("t_ms", 0) >= cut2]
+            if fresh:
+                newest = max(fresh, key=lambda s: s.get("t_ms", 0))
+                if newest.get("session_open") and newest.get("tape_advancing"):
+                    der = int(pa)
+        if (nd is not None and nd >= 10) or der is not None:
+            d = "not delivering %s min (reaper field)" % nd if nd is not None else ""
+            if der is not None:
+                d = (d + "; " if d else "") + "device session_open + tape_advancing, last chunk %d s ago (r412.6 read-time)" % der
+            add("NOT_DELIVERING", d)
         dl = (fl.get(rid) or {}).get("disk_level")
         if dl == "red":
             add("DISK_RED", "disk level red", "PROBLEM")
@@ -409,6 +420,7 @@ def main(argv=None):
                 if r["room"]["name"] == room:
                     if code == "NOT_RECORDING": r["recording"] = False; r["room_state"]["state"] = "ready"
                     if code == "PIECES_STALLED": r["last_piece_at"] = "2000-01-01T00:00:00Z"
+                    if code == "NOT_DELIVERING": r["recording"] = True; r["room_state"]["state"] = "recording"; r["last_piece_at"] = "2000-01-01T00:00:00Z"; r["not_delivering_minutes"] = None
         sp = a.state or os.path.join(RT, "state.replay.json"); now = parse_iso(a.at or snap["ts"])   # --at overrides the clock (e.g. +12 min for the RESOLVED line)
         if a.at:
             snap = shift_snapshot(snap, now - parse_iso(snap["ts"]))

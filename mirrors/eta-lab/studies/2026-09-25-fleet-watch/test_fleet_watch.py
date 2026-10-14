@@ -25,8 +25,9 @@ def fleet_row(rid="room_a", flags=None, mic="authorized", dev="C270 HD WEBCAM", 
     return {"room": {"id": rid}, "install": {"state_flags": flags or [], "mic_state": mic, "input_device_name": dev}, "disk_level": disk}
 
 
-def samples(now, n=40, adv=True, zr=0.0):
-    return [{"t_ms": int((now.timestamp() - 15 * (n - i)) * 1000), "peak": 0.05, "avg": 0.03, "zero_ratio": zr, "session_open": True, "tape_advancing": adv, "samples": 6} for i in range(n)]
+def samples(now, n=40, adv=True, zr=0.0, sess=True, shift_s=0):
+    base = (now - dt.timedelta(seconds=shift_s)).timestamp()
+    return [{"t_ms": int((base - 15 * (n - i)) * 1000), "peak": 0.05, "avg": 0.03, "zero_ratio": zr, "session_open": sess, "tape_advancing": adv, "samples": 6} for i in range(n)]
 
 
 def snap(rooms, fleet=None, levels=None, now=MON_NOON, health=None, tape=None):
@@ -81,7 +82,8 @@ def a_closed_page_with_a_listening_listener_is_still_an_offline_kiosk():
 
 @test
 def pieces_stalled_boundary_and_flag():
-    assert codes(issues_for(snap([room(piece_age=700)]))[0]["OPD 1"]) == ["PIECES_STALLED"]
+    # r412.6: fresh session_open + tape_advancing polls make any >10 min stall ALSO a derived NOT_DELIVERING; closed-session polls isolate the PIECES_STALLED boundary here
+    assert codes(issues_for(snap([room(piece_age=700)], levels={"room_a": samples(MON_NOON, sess=False)}))[0]["OPD 1"]) == ["PIECES_STALLED"]
     assert codes(issues_for(snap([room(piece_age=500)]))[0]["OPD 1"]) == []
     assert codes(issues_for(snap([room(piece_age=10, stalled=True)]))[0]["OPD 1"]) == ["PIECES_STALLED"]
 
@@ -114,6 +116,46 @@ def device_and_mic_and_delivery_and_disk_rules():
     assert codes(issues_for(snap([room(nd=15)]))[0]["OPD 1"]) == ["NOT_DELIVERING"] and codes(issues_for(snap([room(nd=3)]))[0]["OPD 1"]) == []
     assert codes(issues_for(snap([r], fleet=[fleet_row(disk="red")]), MON_NIGHT)[0]["OPD 1"]) == ["DISK_RED"], "red disk is a problem at any hour"
     assert codes(issues_for(snap([r], fleet=[fleet_row(disk="amber")]))[0]["OPD 1"]) == [] and codes(issues_for(snap([r], fleet=[fleet_row(disk="amber")]))[0]["OPD 1"], "INFO") == ["DISK_AMBER"]
+
+
+@test
+def r412_device_open_and_advancing_with_no_chunk_over_10min_is_NOT_DELIVERING_without_the_reaper_field():
+    # the Cardiology/OPD 4 signature (scribe #2728): recorder polls stay session_open + tape_advancing, no chunk arrives, scribe's reaper field is None
+    iss = issues_for(snap([room(piece_age=700)]))[0]["OPD 1"]
+    assert codes(iss) == ["NOT_DELIVERING", "PIECES_STALLED"]
+    assert "r412.6 read-time" in [i for i in iss if i["code"] == "NOT_DELIVERING"][0]["detail"]
+
+
+@test
+def r412_derived_alarm_needs_both_device_signals_and_recent_samples():
+    assert "NOT_DELIVERING" not in codes(issues_for(snap([room(piece_age=700)], levels={"room_a": samples(MON_NOON, adv=False)}))[0]["OPD 1"]), "tape not advancing = a capture fault, not delivery"
+    assert "NOT_DELIVERING" not in codes(issues_for(snap([room(piece_age=700)], levels={"room_a": samples(MON_NOON, sess=False)}))[0]["OPD 1"]), "device session closed = NOT_RECORDING territory, not NOT_DELIVERING"
+    assert "NOT_DELIVERING" not in codes(issues_for(snap([room(piece_age=700)], levels={"room_a": samples(MON_NOON, shift_s=700)}))[0]["OPD 1"]), "stale polls prove nothing; no derived alarm (PIECES_STALLED still fires)"
+    assert codes(issues_for(snap([room(piece_age=700)], levels={"room_a": samples(MON_NOON, shift_s=700)}))[0]["OPD 1"]) == ["PIECES_STALLED"]
+    assert "NOT_DELIVERING" not in codes(issues_for(snap([room()]))[0]["OPD 1"]), "control: fresh open+advancing polls but a chunk 120 s ago is no alarm"
+
+
+@test
+def r412_derived_alarm_survives_the_reaper_ending_the_session():
+    # the ORB3 signature: server session ended, but the device still reports open + advancing and no chunk for hours
+    iss = issues_for(snap([room(recording=False, state="finished", piece_age=8000)]))[0]["OPD 1"]
+    assert codes(iss) == ["NOT_DELIVERING", "NOT_RECORDING"] and "PIECES_STALLED" not in codes(iss), "after the reaper closes the session only the derived rule keeps alerting"
+
+
+@test
+def the_NEWEST_poll_decides_the_derived_alarm_not_the_oldest():
+    # refuter-2 #2792 M3: a mutant where the oldest sample in the window decides must die. Oldest open+advancing, newest NOT -> no derived alarm.
+    mixed = samples(MON_NOON); mixed[0]["session_open"] = True; mixed[0]["tape_advancing"] = True
+    for s in mixed[1:]: s["session_open"] = False; s["tape_advancing"] = False
+    assert "NOT_DELIVERING" not in codes(issues_for(snap([room(piece_age=700)], levels={"room_a": mixed}))[0]["OPD 1"]), "the device CLOSED its session at the newest poll: no delivery alarm whatever the oldest says"
+    mixed2 = samples(MON_NOON, sess=False, adv=False); mixed2[-1]["session_open"] = True; mixed2[-1]["tape_advancing"] = True
+    assert "NOT_DELIVERING" in codes(issues_for(snap([room(piece_age=700)], levels={"room_a": mixed2}))[0]["OPD 1"]), "and the reverse: newest open+advancing after an older closed poll IS the stall signature"
+
+@test
+def r412_reaper_field_and_derived_merge_into_one_issue():
+    iss = issues_for(snap([room(piece_age=700, nd=12)]))[0]["OPD 1"]
+    nd = [i for i in iss if i["code"] == "NOT_DELIVERING"]
+    assert len(nd) == 1 and "reaper field" in nd[0]["detail"] and "r412.6 read-time" in nd[0]["detail"]
 
 @test
 def a_known_condition_is_info_with_its_reason_and_ignored_rooms_are_skipped():
