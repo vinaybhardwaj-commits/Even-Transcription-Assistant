@@ -98,6 +98,8 @@ export async function POST(req: Request) {
   if (!(COMMAND_KINDS as readonly string[]).includes(kind) && kind !== CLOSE_ORPHAN_KIND) {
     return fail(400, "unknown_kind", { allowed: [...COMMAND_KINDS, CLOSE_ORPHAN_KIND] });
   }
+  // F8: consult_started / consult_ended are the Encounter Buddy relay's alone (lib/buddy/relay.ts). The operator route cannot enqueue them.
+  if (kind === "consult_started" || kind === "consult_ended") return fail(400, "relay_only_kind");
   const overridePause = body.override_pause === true;
 
   // ---- K5 A2: close_orphan — a REPAIR, and the one kind that is never queued ---------------

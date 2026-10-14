@@ -11,6 +11,8 @@ let commands: Array<{ roomId: string; kind: string; args: string | null; source:
 let installs: Array<{ room_id: string; hostname: string; app_version: string | null }> = [];
 let throwOn: RegExp | null = null;
 let hang = false;
+let fetchImpl: (url: string, init: RequestInit) => Promise<Response> = async () => new Response(JSON.stringify({ window: true }), { status: 200 });
+const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
 let releaseHang: (() => void) | null = null;
 const writes: string[] = [];
 
@@ -29,6 +31,9 @@ vi.mock("@/lib/db", () => ({
     if (/FROM room_install/.test(q)) {
       const gate = v[0] as string[];
       return installs.filter((i) => gate.includes(i.room_id));
+    }
+    if (/FROM buddy_consult_ref/.test(q) && /SELECT 1/.test(q)) {
+      return refs.some((r) => r.consult_uid === (v[0] as string)) ? [{ one: 1 }] : [];
     }
     if (/WITH made AS/.test(q)) {
       // one statement: the ref row and its command, atomically
@@ -53,7 +58,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { POST } from "../../app/api/presence/route";
-import { relayInserted, RELAY_TIMEOUT_MS } from "@/lib/buddy/relay";
+import { relayInserted, RELAY_TIMEOUT_MS, DECIDE_PATH } from "@/lib/buddy/relay";
 import { COMMAND_KINDS } from "@/lib/bench-commands";
 
 const TOKEN = "test-presence-token";
@@ -76,12 +81,21 @@ beforeEach(() => {
   installs = [{ room_id: "room_fix_1", hostname: "MAC-FIX-1", app_version: "0.1.30" }];
   process.env.PRESENCE_INGEST_TOKEN = TOKEN;
   process.env.BUDDY_RELAY_ROOMS = "room_fix_1";
+  process.env.NEWCAT_BASE_URL = "https://newcat.example.test";
+  process.env.NEWCAT_RELAY_KEY = "test-relay-key-value";
+  fetchCalls.length = 0;
+  fetchImpl = async () => new Response(JSON.stringify({ window: true }), { status: 200 });
+  vi.stubGlobal("fetch", (url: string, init: RequestInit) => { fetchCalls.push({ url, init }); return fetchImpl(url, init); });
   vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "info").mockImplementation(() => {});
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   delete process.env.BUDDY_RELAY_ROOMS;
+  delete process.env.NEWCAT_BASE_URL;
+  delete process.env.NEWCAT_RELAY_KEY;
 });
 
 describe("Encounter Buddy L1 relay", () => {
@@ -227,5 +241,140 @@ describe("Encounter Buddy L1 relay", () => {
     expect(writes).toEqual([]);
     await post([open("  " + UID + "  ")]);
     expect(refs.map((r) => r.consult_uid)).toEqual([UID]);
+  });
+
+  // ---- DECIDE (A1-C6, A2-C1, A2-C5, A2-C6) ----
+  const logs = () => [console.warn, console.info].flatMap((f) => (f as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]))).join("\n");
+
+  it("decide true: one ref row and one command; the request body is exactly the contract", async () => {
+    await post([ext({ event: "encounter_open", encounter_id: UID, doctor_uid: "doc-fixture-1" })]);
+    expect(refs).toHaveLength(1);
+    expect(commands).toHaveLength(1);
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]!.url).toBe(`https://newcat.example.test${DECIDE_PATH}`);
+    const h = fetchCalls[0]!.init.headers as Record<string, string>;
+    expect(h.authorization).toBe("Bearer test-relay-key-value");
+    const body = JSON.parse(fetchCalls[0]!.init.body as string);
+    expect(Object.keys(body).sort()).toEqual(["consult_uid", "doctor_uid", "opaque_id", "room_id"]);
+    expect(body).toMatchObject({ consult_uid: UID, room_id: "room_fix_1", doctor_uid: "doc-fixture-1", opaque_id: refs[0]!.opaque_id });
+  });
+
+  it("decide false: nothing is written", async () => {
+    fetchImpl = async () => new Response(JSON.stringify({ window: false }), { status: 200 });
+    await post([open()]);
+    expect(writes).toEqual([]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(logs()).toContain("decide_false=1");
+  });
+
+  it("a 500, garbage, a non-boolean window, a network error: nothing written, ingest reply unchanged", async () => {
+    const baseline = await raw(await post([open("baseline-1")]));
+    refs = []; commands = []; writes.length = 0;
+    const faults: Array<() => Promise<Response>> = [
+      async () => new Response("{}", { status: 500 }),
+      async () => new Response("not json at all", { status: 200 }),
+      async () => new Response(JSON.stringify({ window: "yes" }), { status: 200 }),
+      async () => new Response(JSON.stringify({}), { status: 200 }),
+      async () => { throw new Error("network down secret-value"); },
+    ];
+    for (const f of faults) {
+      fetchImpl = f;
+      const r = await raw(await post([open("baseline-1")]));
+      expect(r).toEqual(baseline);
+    }
+    expect(writes).toEqual([]);
+    expect(commands).toHaveLength(0);
+    expect(logs()).toContain("decide_fault=1");
+    expect(logs()).not.toContain("secret-value");
+  });
+
+  it("NEWCAT_BASE_URL or NEWCAT_RELAY_KEY unset: fail closed, no call, nothing written", async () => {
+    delete process.env.NEWCAT_RELAY_KEY;
+    await post([open()]);
+    process.env.NEWCAT_RELAY_KEY = "k";
+    delete process.env.NEWCAT_BASE_URL;
+    await post([open()]);
+    expect(fetchCalls).toHaveLength(0);
+    expect(writes).toEqual([]);
+  });
+
+  it("a null or blank doctor_uid is passed as null", async () => {
+    await post([open()]);
+    await post([ext({ event: "encounter_open", encounter_id: "u-blank", doctor_uid: "   " })]);
+    await post([ext({ event: "encounter_open", encounter_id: "u-num", doctor_uid: 7 })]);
+    expect(fetchCalls.map((c) => JSON.parse(c.init.body as string).doctor_uid)).toEqual([null, null, null]);
+  });
+
+  it("decide hanging: the ingest POST returns within the 2 s bound, identical to the no-relay reply, and nothing is written", async () => {
+    delete process.env.BUDDY_RELAY_ROOMS;
+    const baseline = await raw(await post([open("hang-1")]));
+    process.env.BUDDY_RELAY_ROOMS = "room_fix_1";
+    fetchImpl = () => new Promise<Response>(() => {});
+    const t0 = Date.now();
+    const r = await raw(await post([open("hang-1")]));
+    const took = Date.now() - t0;
+    expect(took).toBeLessThan(RELAY_TIMEOUT_MS + 500);
+    expect(r).toEqual(baseline);
+    expect(writes).toEqual([]);
+  });
+
+  it("decide resolving after the budget writes nothing", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    fetchImpl = () => new Promise<Response>((res) => { release = () => res(new Response(JSON.stringify({ window: true }), { status: 200 })); });
+    const p = relayInserted([rowOf()]);
+    await vi.advanceTimersByTimeAsync(RELAY_TIMEOUT_MS + 1);
+    await expect(p).resolves.toBeUndefined();
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(writes).toEqual([]);
+  });
+
+  it("a repeat open for a known consult does not ask newcat again", async () => {
+    await post([open()]);
+    await post([open()]);
+    expect(fetchCalls).toHaveLength(1);
+    expect(commands).toHaveLength(1);
+  });
+
+  it("close never calls newcat; a close after a false decision writes nothing", async () => {
+    fetchImpl = async () => new Response(JSON.stringify({ window: false }), { status: 200 });
+    await post([open()]);
+    const callsAfterOpen = fetchCalls.length;
+    await post([close()]);
+    expect(fetchCalls).toHaveLength(callsAfterOpen);
+    expect(commands).toHaveLength(0);
+  });
+
+  it("no uid, opaque_id or room appears in any log line", async () => {
+    await post([ext({ event: "encounter_open", encounter_id: UID, doctor_uid: "doc-fixture-1" })]);
+    fetchImpl = async () => new Response("{}", { status: 500 });
+    await post([ext({ event: "encounter_open", encounter_id: "u-2", doctor_uid: "doc-fixture-1" })]);
+    const all = logs();
+    expect(all).toContain("[buddy-relay]");
+    for (const bad of [UID, "u-2", "doc-fixture-1", refs[0]!.opaque_id, "room_fix_1", "test-relay-key-value", "newcat.example.test"]) expect(all).not.toContain(bad);
+  });
+});
+
+describe("F8: the operator route refuses the relay-only kinds", () => {
+  it("consult_started and consult_ended answer 400 and enqueue nothing", async () => {
+    vi.resetModules();
+    const inserted: string[] = [];
+    vi.doMock("@/lib/bench", () => ({ benchAdminGuard: async () => ({ ok: true, claims: { admin_id: "admin-fixture" } }) }));
+    vi.doMock("@/lib/bench-commands", async (orig) => ({
+      ...((await orig()) as object),
+      insertCommand: async (a: { kind: string }) => { inserted.push(a.kind); return "cmd-fixture"; },
+    }));
+    const { POST: adminPost } = await import("../../app/api/admin/bench/command/route");
+    for (const kind of ["consult_started", "consult_ended"]) {
+      const res = await adminPost(new Request("http://localhost/api/admin/bench/command", { method: "POST", body: JSON.stringify({ room_id: "room_fix_1", kind }) }));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, error: "relay_only_kind" });
+    }
+    expect(inserted).toEqual([]);
+    expect(commands).toHaveLength(0);
+    vi.doUnmock("@/lib/bench");
+    vi.doUnmock("@/lib/bench-commands");
   });
 });
