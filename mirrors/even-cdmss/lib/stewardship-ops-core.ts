@@ -41,8 +41,8 @@ export interface EmailMapRow { email: string; nUids: number; uid: string | null 
 export interface EmailMap {
   /** lower-cased e-mail → the single `doctors.uid` that claims it. */
   unique: Map<string, string>;
-  /** e-mails claimed by more than one uid. MEASURED: three pairs — Mahendra Jain, Srikanth K N,
-   *  Vinit Oswal. They are known offenders, not a hypothetical. */
+  /** e-mails claimed by more than one uid. MEASURED: three pairs — Person A, Person B,
+   *  Person C. They are known offenders, not a hypothetical. */
   duplicate: Set<string>;
 }
 

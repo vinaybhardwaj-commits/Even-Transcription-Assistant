@@ -100,7 +100,7 @@ export interface AftercarePlan {
  * them can carry an operative block as printed, so a discharge summary that prints the whole OT
  * note in its body reached the readmission agent as a one-line `procedure` string — and the agent,
  * finding no structured OT row in db13 either, told a care manager the operative text did not
- * exist. That is the defect Dr. Zaki reported on 26 Aug (UHID-26415) and it is a defect of
+ * exist. That is the defect Dr. Example reported on 26 Aug (UHID000003) and it is a defect of
  * OMISSION, not of judgement.
  *
  * DE-IDENTIFIED LIKE EVERYTHING ELSE. `verbatim` means "the document's own clinical wording",
