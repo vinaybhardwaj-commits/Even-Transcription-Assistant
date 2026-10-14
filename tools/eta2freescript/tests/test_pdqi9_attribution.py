@@ -459,3 +459,43 @@ def test_r2_5_empty_judge_invented_field_is_eta_and_provenance_leaves_are_read(f
     for leaf in ("A90", "next Tuesday", "CBC", "left knee", "650 mg"):
         assert leaf in t
     assert "quote" not in floors._prov_text({"text": "x", "evidence": [{"quote": "secret"}]})
+
+
+# ---- fix round 3 (14 Oct 2026): verdict R3 inputs (a), (b), D2, LOW 3, (4a), (4b) ----------------------------------------
+
+def test_r3_1_printable_class_follows_the_findings_own_line():
+    clean = _syn("Medication: Dolo 500 mg")
+    dolo = {**CAT, "strength": "500 mg", "instructions": "after food?"}
+    # (a) catalogue line and a symptoms field, same rule
+    art = _syn("Presenting Complaint: body pain")
+    pa = floors.printable_attribution({"medicines": [dolo], "symptoms": "body pain?"}, art)
+    assert pa["sources"]["pulse_catalogue"] == 1 and pa["sources"]["pulse_extraction"] == 1 and pa["sources"]["eta"] == 0
+    # (b) catalogue and non-catalogue medicine lines, same rule
+    zorbex = {"name": "Zorbex", "other": True, "instructions": "at night?"}
+    pa = floors.printable_attribution({"medicines": [{**CAT, "strength": "500 mg", "instructions": "SOS?"}, zorbex]}, clean)
+    assert pa["sources"]["pulse_catalogue"] == 1 and pa["sources"]["pulse_extraction"] == 1
+    assert sum(pa["sources"].values()) == pa["raw"]
+
+
+def test_r3_2_empty_vals_and_empty_catalogue_field_are_eta(fever):
+    art = _syn("Follow up: No follow-up needed")
+    its = floors.numbered_items({"follow_up": {"no_follow_up_needed": True}})
+    out = floors._judge_attribution([item(1, dose_precedence_error=True)], its, art)
+    assert out["dose_precedence_errors"] == floors._tally(["eta"])
+    rx = {"medicines": [{**CAT, "name": "Dolo", "strength": ""}]}
+    out = floors._judge_attribution([item(1, dose_precedence_error=True)], floors.numbered_items(rx), _syn("Medication: Dolo"))
+    assert out["dose_precedence_errors"] == floors._tally(["eta"])
+
+
+def test_r3_3_matched_text_in_etas_note_makes_a_replayed_finding_eta():
+    # (4a) the section is not gated in ETA's note, the replay's copy is
+    art = _syn("Presenting Complaint: fever, dose to be confirmed")
+    rx = {"medicines": [{**CAT, "strength": "500 mg", "instructions": "dose to be confirmed"}]}
+    pa = floors.printable_attribution(rx, art)
+    assert pa["sources"]["eta"] == pa["raw"] >= 2 and pa["sources"]["pulse_catalogue"] == 0
+    # (4b) the '?' is exempt on a Diagnoses line; the same text in the plan has none to match, so the field's line is compared
+    art = _syn("Diagnoses: ?Dengue")
+    pa = floors.printable_attribution({"management_plan": "?Dengue"}, art)
+    assert pa["sources"]["eta"] == 1 and pa["sources"]["pulse_extraction"] == 0
+    # text ETA never wrote stays Pulse's
+    assert floors.printable_attribution({"management_plan": "?Malaria"}, art)["sources"]["pulse_extraction"] == 1

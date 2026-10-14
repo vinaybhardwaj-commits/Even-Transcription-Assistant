@@ -174,8 +174,9 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> 
             invented.append(_worst(_field_source(m, f, art, prov) for f in x["invented"]))
         if x["dose_precedence_error"]:
             if m is None:
-                dose.append("eta" if any(_in_text(v, _eta_output(art)) for v in it.get("vals") or []) else "pulse_extraction")
-            elif _s(m.get("strength")) and _in_text(_s(m.get("strength")), _eta_text(art, prov)):
+                vals = it.get("vals") or []
+                dose.append("pulse_extraction" if vals and not any(_in_text(v, _eta_output(art)) for v in vals) else "eta")
+            elif not _s(m.get("strength")) or _in_text(_s(m.get("strength")), _eta_text(art, prov)):
                 dose.append("eta")
             else:
                 dose.append("pulse_catalogue" if _is_catalogue(m) else "eta")
@@ -461,7 +462,7 @@ def dose_precedence_sources(rx: dict, art: dict | None) -> list[str]:
         if m is None:
             out.append("eta")
         elif _strength(m.get("strength") or "") != want:
-            out.append("eta" if _in_text(_s(m.get("strength")), _eta_text(art, p)) else
+            out.append("eta" if not _s(m.get("strength")) or _in_text(_s(m.get("strength")), _eta_text(art, p)) else
                        "pulse_catalogue" if _is_catalogue(m) else "eta")
     return out
 
@@ -569,23 +570,29 @@ def printable_attribution(rx: dict, art: dict | None) -> dict:
     lines = _printable_lines(rx)
     text = printable_text(rx)
     whole = validate.printable_errors(text, [])
-    cat_rules: set[str] = set()
+    # each finding's own location: the rendered line that yields it (each whole-text finding is claimed by one line)
+    left = list(whole)
+    where: list[tuple[str, str, str]] = []  # (finding, rendered line, class by location)
     for h, line, med in lines:
-        if med is not None and _is_catalogue(med):
-            cat_rules |= {_rule(e) for e in validate.printable_errors(f"{h}:\n{line}", [])}
-    srcs = [e for e in whole]
+        for e in validate.printable_errors(f"{h}:\n{line}", []):
+            if e in left:
+                left.remove(e)
+                where.append((e, line, "pulse_catalogue" if med is not None and _is_catalogue(med) else "pulse_extraction"))
+    where.extend((e, "", "pulse_extraction") for e in left)  # coalesced across lines: no single location
+    eta_out = _eta_output(art)
     n = _bracket_check(text, [f"{h}:\n{line}" for h, line, _ in lines])
     n = max(min(n, sum(1 for e in whole if _rule(e) == _BRACKET_RULE) - 1), 0) if whole else 0
     raw += len(whole)
     check += n
     drop = n
-    for e in srcs:
+    for e, line, cls in where:
         r = _rule(e)
-        src = "eta" if r in eta_rules else "pulse_catalogue" if r in cat_rules else "pulse_extraction"
         if r == _BRACKET_RULE and drop:
             drop -= 1
             continue
-        sources.append(src)
+        q = re.search(r"'([^']*)'", e)
+        eta = r in eta_rules or any(len(c.strip()) >= 3 and re.search(r"[^\W\d_]", c) and _text_in(c, eta_out) for c in (q.group(1) if q else "", line))
+        sources.append("eta" if eta else cls)
     return {"raw": raw, "dedup": len(sources), "check": check, "sources": {**_tally(sources), "check": check}}
 
 
