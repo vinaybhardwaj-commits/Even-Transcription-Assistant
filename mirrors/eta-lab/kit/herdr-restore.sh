@@ -12,8 +12,8 @@ T=(
   # MOVED to eta-lab-t4 (PANES-TO-E2E.md stage 2, 23 Sep 2026 ~19:20): lives on the box now, not the Mini.
   # Restore the pane there with: herdr --machine eta-lab-t4 agent start fleet --kind claude --pane wB:p1 --timeout 120000 -- --resume 51df0efe-55e7-4a7a-afae-f4a920a646e6 -n fleet --model sonnet --permission-mode auto
   #"fleet|fleet|$E|51df0efe-55e7-4a7a-afae-f4a920a646e6"
-  # fleet-watch (ruling 399, 25 Sep 2026): lives on eta-lab-t4 as its OWN herdr WORKSPACE "fleet-watch" (not a Claude session, nothing to --resume).
-  # Restore it there with: bash $HOME/fleet-watch/herdr-start.sh   (idempotent: does nothing if the workspace exists; its pane runs pane-run.sh, which tails the logs if the loop already holds the lock, else starts the loop; ~/fleet-watch/MODE = dry|live)
+  # fleet-watch (ruling 399, 25 Sep 2026): lives on eta-lab-t4 as a plain herdr TAB ("fleet-watch · OpenCode · box"), not a Claude session, so nothing to --resume.
+  # Restore it there with: bash $HOME/fleet-watch/herdr-start.sh   (idempotent: it does nothing if the tab already exists; the wrapper inside reads ~/fleet-watch/MODE, dry|live)
   # MOVED to eta-lab-t4 (PANES-TO-E2E.md stage 2, 23 Sep 2026 ~18:00): lives on the box now, not the Mini.
   # Restore the pane there with: herdr --machine eta-lab-t4 agent start lx --kind claude --pane w9:p1 --timeout 120000 -- --resume 59f6f674-d26e-4e34-b26b-4f8b0afaf2a3 -n lx --model opus --permission-mode auto
   #"lx|lx|$E-linux-bootstrap|59f6f674-d26e-4e34-b26b-4f8b0afaf2a3"

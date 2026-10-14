@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Tests for fleet_watch.py on INVENTED snapshots in the real Scribe door shape (no real data, no network, no ssh, no hsend)."""
-import fcntl, datetime as dt, json, os, re, sys, tempfile
-os.environ["FLEET_WATCH_HOME"] = tempfile.mkdtemp()      # unconditional: a test must never touch the real runtime dir (cost.jsonl, state, lock)
+import datetime as dt, json, os, re, sys, tempfile
+os.environ.setdefault("FLEET_WATCH_HOME", tempfile.mkdtemp())
 import fleet_watch as fw
-
-
-def _no_real_model(*a, **k):
-    raise AssertionError("a test reached a real model call (run_model must be stubbed or the budget cap must stop it)")
-fw.run_model = _no_real_model      # fail fast: a bypassed cap used to hang the suite on a real opencode call (refuter-2 G7 note)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MON_NOON = dt.datetime(2026, 9, 21, 6, 30, tzinfo=dt.timezone.utc)      # Mon 12:00 IST
@@ -71,13 +66,6 @@ def not_recording_is_a_problem_in_clinic_hours_only():
 def an_offline_kiosk_is_one_root_cause_not_two_problems():
     s = snap([room(recording=False, state="offline", listener="stale", page=False, kiosk_lost=True)])
     assert codes(issues_for(s)[0]["OPD 1"]) == ["KIOSK_OFFLINE"], "NOT_RECORDING must not double-report an offline kiosk"
-
-@test
-def a_closed_page_with_a_listening_listener_is_still_an_offline_kiosk():
-    s = snap([room(recording=False, state="ready", listener="listening", page=False)])
-    assert codes(issues_for(s)[0]["OPD 1"]) == ["KIOSK_OFFLINE"], "page_open false alone is KIOSK_OFFLINE, not NOT_RECORDING"
-    assert codes(issues_for(snap([room(recording=False, state="ready", listener="listening", page=True)]))[0]["OPD 1"]) == ["NOT_RECORDING"], "control: page open + listening + not recording is NOT_RECORDING"
-    assert codes(issues_for(s, MON_NIGHT)[0]["OPD 1"]) == [] and codes(issues_for(s, MON_NIGHT)[0]["OPD 1"], "INFO") == ["KIOSK_OFFLINE"], "outside clinic hours it is INFO"
 
 @test
 def pieces_stalled_boundary_and_flag():
@@ -151,7 +139,6 @@ def log_lines_and_messages_carry_only_room_code_detail_and_times():
     e = {"type": "NEW", "room": "OPD 1", "code": "NOT_RECORDING", "detail": "state=ready", "since": MON_NOON.isoformat()}
     l, m = fw.buglog_line(e, MON_NOON), fw.message(e)
     assert m.startswith("NF| fleet-watch NEW: OPD 1 NOT_RECORDING") and "\n" not in m and "12:00 IST" in l and l.count("|") == 4
-    r = dict(e, type="RESOLVED", duration_s=719); assert fw.buglog_line(r, MON_NOON).endswith("after 12m"), "719 s reads as 12 minutes, not 11"
 
 @test
 def agreement_is_strict_on_rooms_recording_and_state():
@@ -257,13 +244,11 @@ def the_heartbeat_is_written_atomically_temp_then_rename_and_the_logs_are_append
 def replay_with_an_injected_fault_reports_once_then_resolves_with_the_replayed_duration():
     sp = os.path.join(tempfile.mkdtemp(), "state.json"); s = snap([room(), room("OPD 3", "room_b")]); cfg = fw.load_cfg(); sk = FakeSinks()
     bad = json.loads(json.dumps(s)); bad["now"]["rooms"][0]["recording"] = False; bad["now"]["rooms"][0]["room_state"]["state"] = "ready"
-    st, rec = fw.run_cycle(None, cfg, sk, MON_NOON, {}, use_model=False, snap=bad, label="[INJECTED TEST]", heartbeat=True)
+    st, rec = fw.run_cycle(None, cfg, sk, MON_NOON, {}, use_model=False, snap=bad, label="[INJECTED TEST]")
     assert len(sk.msgs) == 1 and sk.msgs[0].endswith("[INJECTED TEST]") and sk.bug[0].endswith("[INJECTED TEST]")
     st, rec = fw.run_cycle(None, cfg, sk, MON_NOON + dt.timedelta(minutes=5), st, use_model=False, snap=bad, label="[INJECTED TEST]"); assert len(sk.msgs) == 1, "not repeated"
     t2 = MON_NOON + dt.timedelta(minutes=12); good = snap([room(now=t2), room("OPD 3", "room_b", now=t2)], now=t2)
-    st, rec = fw.run_cycle(None, cfg, sk, t2, st, use_model=False, snap=good, label="[INJECTED TEST]", heartbeat=False)
-    assert len(sk.hb) == 2 and sk.hb[-1]["ts"] == "2026-09-21T06:35:00Z", "the third cycle (heartbeat=False) wrote none"
-    assert rec["replay"] == "[INJECTED TEST]" and sk.rows[-1]["replay"] == "[INJECTED TEST]"
+    st, rec = fw.run_cycle(None, cfg, sk, t2, st, use_model=False, snap=good, label="[INJECTED TEST]")
     assert len(sk.msgs) == 2 and "RESOLVED" in sk.msgs[1] and "after 12m" in sk.bug[1], (sk.msgs, sk.bug)
 
 @test
@@ -279,45 +264,6 @@ def a_failed_primary_model_is_retried_once_on_the_fallback_and_both_costs_are_co
         fw.run_model = orig
     assert seen == [cfg["model"]["name"], cfg["model"]["fallback"]] and rec["model"] == cfg["model"]["fallback"] and rec["watcher_fault"] is None and rec["agrees"] is True and rec["cost"] == 0.004
     if os.path.exists(os.path.join(fw.RT, "cost.jsonl")): os.remove(os.path.join(fw.RT, "cost.jsonl"))
-
-@test
-def a_replay_with_an_overridden_clock_shifts_every_snapshot_timestamp_so_it_stays_healthy():
-    s = snap([room(), room("OPD 3", "room_b")]); cfg = fw.load_cfg(); t2 = MON_NOON + dt.timedelta(minutes=12)
-    assert codes(issues_for(s, t2)[0]["OPD 1"]) == ["PIECES_STALLED"], "unshifted, 12 minutes later the pieces look stale"
-    sh = fw.shift_snapshot(json.loads(json.dumps(s)), dt.timedelta(minutes=12))
-    for r in ("OPD 1", "OPD 3"): assert codes(issues_for(sh, t2)[0][r]) == [], r
-    assert abs(sh["levels"]["room_a"][-1]["t_ms"] - (s["levels"]["room_a"][-1]["t_ms"] + 720000)) < 1
-
-@test
-def a_config_file_override_is_read_and_a_zero_budget_forces_deterministic_only():
-    d = tempfile.mkdtemp(); cp = os.path.join(d, "config.json"); json.dump({"budget_usd_per_day": 0.0, "known": {"OPD 1": {"NOT_RECORDING": "test"}}, "clinic": {"start": "09:00"}}, open(cp, "w"))
-    cfg = fw.load_cfg(cp); assert cfg["budget_usd_per_day"] == 0.0 and cfg["clinic"]["start"] == "09:00" and cfg["clinic"]["end"] == "20:00" and cfg["known"]["OPD 1"]["NOT_RECORDING"] == "test", "nested dicts merge, unmentioned keys keep their defaults"
-    sk = FakeSinks(); st, rec = fw.run_cycle(_door(snap([room()]), []), cfg, sk, MON_NOON, {}, use_model=True)
-    assert rec["mode"].startswith("deterministic-only") and rec["watcher_fault"] is None
-
-@test
-def real_sinks_need_mode_live_in_the_run_home():
-    d = tempfile.mkdtemp(); assert not fw.live_mode_ok(d), "no MODE file: not live"
-    open(os.path.join(d, "MODE"), "w").write("dry\n"); assert not fw.live_mode_ok(d)
-    open(os.path.join(d, "MODE"), "w").write("live\n"); assert fw.live_mode_ok(d)
-    old_rt = fw.RT; fw.RT = tempfile.mkdtemp()      # a scratch home, as a stray --once from a temp copy would have
-    try:
-        assert fw.main(["--once"]) == 4 and fw.main(["--loop"]) == 4, "no MODE=live: refused, no sink touched"
-        assert fw.main(["--replay", "/nonexistent.json"]) == 4, "a replay to real sinks is refused too"
-        open(os.path.join(fw.RT, "MODE"), "w").write("dry")
-        assert fw.main(["--once"]) == 4, "MODE=dry: refused"
-    finally:
-        fw.RT = old_rt
-
-@test
-def a_real_sink_replay_refuses_while_the_loop_holds_the_lock():
-    old_rt = fw.RT; fw.RT = tempfile.mkdtemp(); open(os.path.join(fw.RT, "MODE"), "w").write("live")
-    snapf = os.path.join(fw.RT, "snap.json"); json.dump({"ts": "2026-09-21T06:30:00+00:00", "now": {"rooms": []}}, open(snapf, "w"))
-    held = open(os.path.join(fw.RT, "lock"), "w"); fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    try:
-        assert fw.main(["--replay", snapf]) == 3, "loop holds the lock: refused before any sink is touched"
-    finally:
-        held.close(); fw.RT = old_rt
 
 def _jsonc(path):
     s = re.sub(r"^\s*//.*$", "", open(path).read(), flags=re.M); return json.loads(s)

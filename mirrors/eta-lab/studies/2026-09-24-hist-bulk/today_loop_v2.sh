@@ -1,13 +1,12 @@
 #!/bin/bash
 # today_loop_v2.sh GROUP — keep one runner group draining tier C (r370/371). v2 (refuter-2 #2264 items 3+5): stops on HALT.<router> (failure-rate halt) or a non-zero runner exit,
 # re-plans when windows_tierC.json is older than 15 min (any group, under a flock), and logs a failed plan instead of silently keeping a stale one.
-# GROUP: box | vl1 | c13 | c14 | c3. Stops when ~/eta-data/hist/STOP, ~/eta-data/hist-mining/STOP or ~/eta-data/hist/LOOP_STOP[.GROUP] exists.
+# GROUP: box | vl1 | c13 | c14. Stops when ~/eta-data/hist/STOP, ~/eta-data/hist-mining/STOP or ~/eta-data/hist/LOOP_STOP[.GROUP] exists.
 G=$1; D=~/dev/eta-lab/studies/2026-09-24-hist-bulk; HD=~/eta-data/hist; PY=~/.venv-r2/bin/python
 case $G in
   box) R=":box"; X="";;
   vl1) R=":vl1"; X="";;
   c13|c14) R=$(for k in 0 1 2 3 4; do printf ":${G}s$k,"; done | sed 's/,$//'); X="--stack-file $HD/stack_versions.json";;
-  c3) R=":c3s0,:c3s1"; X="--stack-file $HD/stack_versions.c3.json --ci-lock /tmp/eta-ci-c3-ci.lock";;   # eta-ci-c3 helper (J-hist-c3): the CI gate has priority (herdr-kit #3350 contract: flock on /tmp/eta-ci-c3-ci.lock, checked non-blocking before each window)
   *) echo "bad group"; exit 2;;
 esac
 FIRST=${R%%,*}

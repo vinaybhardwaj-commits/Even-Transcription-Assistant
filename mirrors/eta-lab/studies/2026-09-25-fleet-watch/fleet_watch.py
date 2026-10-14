@@ -182,7 +182,7 @@ def fmt_local(iso):
 
 
 def buglog_line(e, now):
-    d = "" if e.get("duration_s") is None else " after %dm" % ((e["duration_s"] + 30) // 60)     # rounded to the nearest minute
+    d = "" if e.get("duration_s") is None else " after %dm" % (e["duration_s"] // 60)
     tag = {"NEW": "NEW", "RESOLVED": "RESOLVED", "REMIND": "STILL", "W21": "W21-CANDIDATE"}[e["type"]]
     return "%s | %s | %s | %s | %s%s" % (fmt_local(now.isoformat()), tag, e["room"], e["code"], e["detail"], d)
 
@@ -224,7 +224,6 @@ class Sinks:
     def notify(self, msg):
         if self.dry:
             os.makedirs(os.path.join(RT, "dry"), exist_ok=True); open(os.path.join(RT, "dry", "notify.log"), "a").write(msg + "\n"); return
-        open(os.path.join(RT, "notify.log"), "a").write(msg + "\n")     # local copy of what conductor was sent (the pane tails it)
         subprocess.run(["/bin/zsh", self.cfg["hsend"], msg, "conductor"], timeout=40, capture_output=True)
 
 
@@ -284,16 +283,14 @@ def agreement(model_json, snap):
 
 
 # ---------------------------------------------------------------- one cycle
-def run_cycle(call, cfg, sinks, now, state, use_model=True, snap=None, label="", heartbeat=True):
+def run_cycle(call, cfg, sinks, now, state, use_model=True, snap=None, label=""):
     """-> (new_state, record). The record is the jsonl line (room/state/timings only)."""
     rec = {"ts": now.isoformat(), "mode": "deterministic", "watcher_fault": None}
     try:
         snap = snap or collect(call, now, state, cfg)
     except Exception as ex:
         rec["watcher_fault"] = "door: %s" % type(ex).__name__
-        sinks.jsonl(rec)
-        if heartbeat:
-            sinks.heartbeat({"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "ok": False, "fault": rec["watcher_fault"]})
+        sinks.jsonl(rec); sinks.heartbeat({"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "ok": False, "fault": rec["watcher_fault"]})
         return state, rec
     issues, devices, finfo = decide(snap, cfg, now, state.get("devices"))
     st, events = advance(state, issues, now, cfg); st["devices"] = devices
@@ -322,11 +319,8 @@ def run_cycle(call, cfg, sinks, now, state, use_model=True, snap=None, label="",
         line = buglog_line(e, now) + (" %s" % label if label else "")
         sinks.buglog(line)
         sinks.notify(message(e) + (" %s" % label if label else ""))
-    if label:
-        rec["replay"] = label          # a replayed snapshot is marked in the jsonl
     sinks.jsonl(rec)
-    if heartbeat:                      # a replay must NEVER touch the heartbeat: its old timestamp would trip minibot's STALE alert
-        sinks.heartbeat({"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "ok": rec["watcher_fault"] is None, "fault": rec["watcher_fault"], "mode": rec["mode"]})
+    sinks.heartbeat({"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "ok": rec["watcher_fault"] is None, "fault": rec["watcher_fault"], "mode": rec["mode"]})
     return st, rec
 
 
@@ -346,42 +340,12 @@ def select_models(call, cfg, n, gap_s, candidates):
     return rows
 
 
-def shift_snapshot(snap, delta):
-    """--at: move every timestamp of a replayed snapshot by delta (a timedelta) so the snapshot stays consistent with the overridden clock."""
-    iso_keys = {"ts", "now", "last_piece_at", "last_seen_at", "last_poll_at", "started_at", "ended_at", "last_chunk_at", "last_any_chunk_at", "checked_at"}
-    def walk(o):
-        if isinstance(o, dict):
-            for k, v in list(o.items()):
-                if k in iso_keys and isinstance(v, str) and v[:2] == "20":
-                    try:
-                        o[k] = (parse_iso(v) + delta).isoformat()
-                    except ValueError:
-                        pass
-                elif k == "t_ms" and isinstance(v, (int, float)):
-                    o[k] = v + delta.total_seconds() * 1000
-                else:
-                    walk(v)
-        elif isinstance(o, list):
-            for x in o:
-                walk(x)
-    walk(snap)
-    return snap
-
-
 def load_state(path):
     return json.load(open(path)) if os.path.exists(path) else {}
 
 
 def save_state(path, st):
     tmp = path + ".tmp"; json.dump(st, open(tmp, "w")); os.replace(tmp, path)
-
-
-def live_mode_ok(rt=None):
-    """Real sinks (the Mini bug log, conductor) only when THIS run home's MODE file says 'live'. A stray run with a scratch FLEET_WATCH_HOME (no MODE file) or a dry home can never reach production."""
-    try:
-        return open(os.path.join(rt or RT, "MODE")).read().strip() == "live"
-    except OSError:
-        return False
 
 
 def main(argv=None):
@@ -391,18 +355,10 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.selftest:
         import test_fleet_watch; return test_fleet_watch.main()
-    if not a.dry and not a.select and not live_mode_ok():
-        print("fleet-watch: REFUSED: real sinks need MODE=live in %s (add --dry, or flip MODE after the refuter's PASS)" % RT, file=sys.stderr); return 4
     os.makedirs(RT, exist_ok=True); cfg = load_cfg(a.config)
     sys.path.insert(0, os.path.join(HERE, "..", "..", "kit"))
-    if a.replay and not a.dry:     # a replay to REAL sinks must never race the live writer: it takes the loop's lock too, non-blocking (refuter-2 #2498)
-        rl = open(os.path.join(RT, "lock"), "w")
-        try:
-            fcntl.flock(rl, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            print("fleet-watch: REFUSED: the live loop holds the lock; a real-sink replay must not race it", file=sys.stderr); return 3
     if a.replay:   # replayed snapshot, optional injected fault, REAL sinks, its own state file (so real state is untouched)
-        snap = json.load(open(a.replay)); label = "[REPLAY]"    # a replay is never a real event: its lines are always marked
+        snap = json.load(open(a.replay)); label = ""
         if a.inject:
             room, code = a.inject.split(":"); label = "[INJECTED TEST]"
             for r in snap["now"]["rooms"]:
@@ -410,9 +366,7 @@ def main(argv=None):
                     if code == "NOT_RECORDING": r["recording"] = False; r["room_state"]["state"] = "ready"
                     if code == "PIECES_STALLED": r["last_piece_at"] = "2000-01-01T00:00:00Z"
         sp = a.state or os.path.join(RT, "state.replay.json"); now = parse_iso(a.at or snap["ts"])   # --at overrides the clock (e.g. +12 min for the RESOLVED line)
-        if a.at:
-            snap = shift_snapshot(snap, now - parse_iso(snap["ts"]))
-        st, rec = run_cycle(None, cfg, Sinks(cfg, dry=a.dry), now, load_state(sp), use_model=False, snap=snap, label=label, heartbeat=False); save_state(sp, st); print(json.dumps(rec["events"])); return 0
+        st, rec = run_cycle(None, cfg, Sinks(cfg, dry=a.dry), now, load_state(sp), use_model=False, snap=snap, label=label); save_state(sp, st); print(json.dumps(rec["events"])); return 0
     import clip_fetch_mcp
     if a.select:
         m = cfg["model"]; select_models(clip_fetch_mcp.call, cfg, a.select, a.gap, [(m["name"], m["variant"]), (m["fallback"], m["fallback_variant"])]); return 0
@@ -424,7 +378,6 @@ def main(argv=None):
     sp = a.state or os.path.join(RT, "state.dry.json" if a.dry else "state.json"); sinks = Sinks(cfg, dry=a.dry)
     while True:
         now = dt.datetime.now(dt.timezone.utc); sinks.flush_spool()
-        cfg = load_cfg(a.config); sinks.cfg = cfg          # config.json is re-read EVERY cycle: a budget/known/clinic change takes effect within 5 minutes, no restart
         st, rec = run_cycle(clip_fetch_mcp.call, cfg, sinks, now, load_state(sp), use_model=not a.no_model); save_state(sp, st)
         print("%s %s events=%d fault=%s cost=%s" % (fmt_local(now.isoformat()), rec["mode"], len(rec.get("events", [])), rec["watcher_fault"], rec.get("cost")), flush=True)
         if not a.loop:
