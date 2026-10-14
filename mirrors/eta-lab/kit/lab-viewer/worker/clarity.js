@@ -2,7 +2,6 @@
 // plus an empty FIXED ROUTER column that fills from router-fix's offline eval. Data: clarity/clips.json, clarity/fixed.json and clarity/audio/Lnnn.webm in
 // eta-lab-ratings (loaded by tools/clarity_seed.py; READ-ONLY here). Server-rendered and escape-first, ZERO client script; filters are plain links (the CSP has form-action 'none').
 // The rows hold PHI (transcripts, clip audio): shown to Access-restricted physicians only (same gate as every route).
-import { BLIND_CLIPS } from "./blind.js";
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const rstr = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const TAG = /^[a-z]{2,8}$/;
@@ -78,14 +77,13 @@ export function scorecardOf(doc) {
   if (doc?.s3 && typeof doc.s3 === "object") {
     const j = doc.s3.judge && typeof doc.s3.judge === "object" ? doc.s3.judge : null;
     const kept = fnum(doc.s3.kept_error_pct, 0, 100);
-    const diagNote = rstr(doc.s3.kept_error_pct_diagnostic_note, 300) || null;   // W44/Fable 12:50: one neutral text line, no colour, no verdict
     const per = {};
     for (const [k, v] of Object.entries(j?.accuracy?.per_lang && typeof j.accuracy.per_lang === "object" ? j.accuracy.per_lang : {}).slice(0, 20)) if (LANGS.has(k) && fnum(v, 0, 100) !== null) per[k] = fnum(v, 0, 100);
     const rowLangs = [...new Set(rowsOf(doc.s3).map((r) => r.lang).filter((l) => LANGS.has(l) && l !== "all"))];
     const overall = fnum(j?.accuracy?.overall, 0, 100);
     // W33 gate, DERIVED from the numbers (a `usable:true` flag is never trusted on its own; an evaluator's stricter `usable:false`, e.g. a minimum n per label, is honoured): >= 95% overall AND >= 90% in every language the rows cover, each of which must have a proven accuracy
     const proven = overall !== null && overall >= 95 && rowLangs.every((l) => per[l] !== undefined && per[l] >= 90) && Object.values(per).every((v) => v >= 90);
-    out.s3 = { ...head(doc.s3), kept, diagNote, judge: j ? { model: rstr(j.model, 60), validated_on: rstr(j.validated_on, 60), overall, per_lang: per, usable: proven && j.usable === true, flagged: j.usable === true && !proven } : null,
+    out.s3 = { ...head(doc.s3), kept, judge: j ? { model: rstr(j.model, 60), validated_on: rstr(j.validated_on, 60), overall, per_lang: per, usable: proven && j.usable === true, flagged: j.usable === true && !proven } : null,
       rows: rowsOf(doc.s3).filter((r) => LANGS.has(r.lang)).map((r) => ({ lang: r.lang, sig: r.sig === true, n: fnum(r.n, 0, 1e6), kept: fnum(r.kept_error_pct, 0, 100), old: pair(r.old, ["wrong_pct"], [[0, 100]]), new: pair(r.new, ["wrong_pct"], [[0, 100]]) })) };
   }
   return out;
@@ -132,8 +130,7 @@ export function scorecardHtml(sc) {
       : hasRows ? ` · <b class="warn">kept-set error: NOT MEASURED — numbers not interpretable</b>` : "";
     // S3 is indicative only: colour never applies here, whatever a row's sig says (that would read as a verdict)
     const tr = (r) => `<tr class="${small(r)}"><td>${esc(r.lang)}</td><td>${nCell(r)}</td>${cmp(r.old, r.new, "wrong_pct", "%", false)}<td class="mut">${r.kept === null ? (hasRows ? "NOT MEASURED" : "—") : r.kept + "%"}</td></tr>`;
-    const diagHtml = sc.s3.diagNote ? `<p class="mut">${esc(sc.s3.diagNote)}</p>` : "";
-    parts.push(`<div class="sc"><h2>S3 language truth (real windows, listening judge) — INDICATIVE, NOT A GATE</h2>${meta(sc.s3)}<p class="warn">Indicative only: this score does not decide a win or a loss (Fable ruling 27 Sep). ${jl}${keptTxt}</p>${diagHtml}` +
+    parts.push(`<div class="sc"><h2>S3 language truth (real windows, listening judge) — INDICATIVE, NOT A GATE</h2>${meta(sc.s3)}<p class="warn">Indicative only: this score does not decide a win or a loss (Fable ruling 27 Sep). ${jl}${keptTxt}</p>` +
       `<table><thead><tr><th>language heard</th><th>windows</th><th>sent down the wrong path</th><th>kept-set error (synthetic suite)</th></tr></thead><tbody>${sc.s3.rows.map(tr).join("") || `<tr><td colspan="4" class="none">no rows</td></tr>`}</tbody></table></div>`);
   }
   return `<section class="scorecard"><h1>Scorecard: old router vs new router, same audio</h1><p class="mut">Three automatic scores, pre-registered. A change wins only if S2 improves and S1 does not get worse. S3 (language truth) is INDICATIVE ONLY, not a gate (Fable ruling, 27 Sep: v3 misses real mixed speech and would mislabel ~10% of kept windows in noise); every S3 number is shown with its kept-set error rate. Numbers are shown neutral; green / red appears only where the evaluator marked a row as significant under its pre-registered rule. The per-clip table below is for spot-checks.</p>${parts.join("")}</section>`;
@@ -142,9 +139,7 @@ export function scorecardHtml(sc) {
 export async function clarityModel(env) {
   const get = async (key) => { try { const o = env.RATINGS && (await env.RATINGS.get(key)); return o ? JSON.parse(await o.text()) : null; } catch { return null; } };
   const clips = await get("clarity/clips.json"), fixed = await get("clarity/fixed.json"), sc = await get("clarity/scorecard.json");
-  const fx = fixedOf(fixed);   // R3/W51: a blind-day clip leaves the page entirely (text, router output and audio)
-  fx.rows = Object.fromEntries(Object.entries(fx.rows).filter(([id]) => !BLIND_CLIPS.has(id)));
-  return { rows: clipsOf(clips).filter((r) => !BLIND_CLIPS.has(r.id)), fixed: fx, loaded: !!clips, sc: scorecardOf(sc) };
+  return { rows: clipsOf(clips), fixed: fixedOf(fixed), loaded: !!clips, sc: scorecardOf(sc) };
 }
 
 export function parseFilters(search) {
