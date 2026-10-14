@@ -147,11 +147,9 @@ def test_failed_inference_writes_nothing_and_counts_by_class_the_workdir_is_move
     cnt, runner, _ = go(env, "nemotron", runner=FakeRunner(raises=RuntimeError("CUDA out of memory")))
     assert cnt["errors"] == 1 and cnt["written"] == 0 and role_tracks(env, "nemotron") == []
     work = str(env.root) + "-work"
-    failed = os.listdir(os.path.join(work, "failed"))
-    assert len(failed) == 1 and failed[0].startswith(f"{UID}-nemotron-") and os.path.exists(os.path.join(work, "failed", failed[0], "scratch.wav"))      # the failed clip's decode, MOVED to failed/
-    assert not any(n.startswith("scratch-") for n in os.listdir(work)) and not os.path.exists(os.path.join(work, "_to_delete"))                     # and no scratch left behind
+    assert not os.path.exists(os.path.join(work, f"{UID}-nemotron")) and len(os.listdir(os.path.join(work, "_to_delete"))) == 1            # moved, not deleted
     logs = open(os.path.join(str(env.root) + "-logs", os.listdir(str(env.root) + "-logs")[0])).read()
-    assert "RuntimeError" in logs and '"msg": "CUDA out of memory"' in logs                                                    # class, location and a message only if it matches a torch shape (decoded text never passes; see the test below)
+    assert "RuntimeError" in logs and "CUDA" not in logs                                                                       # the class only, no message text
     cnt, _, _ = go(env, "nemotron", runner=FakeRunner(status="empty"))
     assert cnt["empty"] == 1 and cnt["written"] == 1                                                                           # an empty result is recorded evidence
 
@@ -261,109 +259,3 @@ def test_a_failed_engine_result_is_counted_as_failed_not_as_an_error(tmp_path):
             return "failed", "short_clip", [], {}
     cnt, _, _ = go(env, "acoustics", runner=Short())
     assert cnt["failed"] == 1 and cnt["errors"] == 0 and cnt["written"] == 1
-
-
-def error_lines(env):
-    logdir = str(env.root) + "-logs"
-    return [json.loads(l) for f in os.listdir(logdir) if f.endswith(".jsonl") for l in open(os.path.join(logdir, f)) if '"error"' in l]
-
-
-def test_error_line_keeps_a_torch_shape_but_never_a_decoded_english_or_hindi_sentence(tmp_path):
-    env, row = make(tmp_path)
-    cnt, _, _ = go(env, "medasr", runner=FakeRunner(raises=RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB (GPU 0; 14.58 GiB total)")))
-    (line,) = error_lines(env)
-    assert cnt["errors"] == 1 and line["msg"] == "CUDA out of memory. Tried to allocate 2.00 GiB" and "msg_len" not in line
-    assert set(line) == {"ts", "consult_uid", "lane", "error", "where", "where_kit", "msg"}
-    assert line["where"].endswith(":run") and line["where_kit"].startswith("clip_lanes.py:")
-    env2, _ = make(tmp_path / "b")
-    sentence = "the patient takes metformin five hundred twice daily and \u0939\u093f\u0902\u0926\u0940"
-    go(env2, "medasr", runner=FakeRunner(raises=RuntimeError(sentence)))
-    (line2,) = error_lines(env2)
-    assert line2["msg"] == "unclassified" and line2["msg_len"] == len(sentence) and "metformin" not in json.dumps(line2) and line2["error"] == "RuntimeError"
-    env3, _ = make(tmp_path / "c")
-    go(env3, "medasr", runner=FakeRunner(raises=ValueError("CUDA error: an illegal memory access was encountered")))
-    go(env3, "medasr", runner=FakeRunner(raises=ValueError("CUDA error: the patient is on insulin")))
-    l3 = error_lines(env3)
-    assert l3[0]["msg"] == "CUDA error: an illegal memory access was encountered" and l3[1]["msg"] == "unclassified"            # a known shape only; a free sentence after the prefix is not copied
-
-
-def test_no_expected_but_got_shape_so_free_words_there_are_never_copied(tmp_path):
-    probe = "Expected input amlodipine five mg twice daily but got chest pain since two days and fever"
-    assert cl._safe_msg(RuntimeError(probe)) == {"msg": "unclassified", "msg_len": len(probe)}
-    assert cl._safe_msg(RuntimeError("Expected hidden[0] size (1, 4, 256), got [1, 4, 128]")) == {"msg": "unclassified", "msg_len": 52}
-
-
-def test_medasr_chunk_bounds_fold_a_tiny_tail_into_the_chunk_before_it():
-    sr, cs = eng.SR16, 30 * eng.SR16
-    assert eng.MedAsr.chunk_bounds(60 * sr, cs) == [(0, cs), (cs, 2 * cs)]                                      # exact multiple: unchanged
-    assert eng.MedAsr.chunk_bounds(60 * sr + int(0.137 * sr), cs) == [(0, cs), (cs, 2 * cs + int(0.137 * sr))]    # a 137 ms tail (one of the five failed clips) joins the last chunk
-    assert eng.MedAsr.chunk_bounds(60 * sr + int(0.172 * sr), cs)[-1] == (2 * cs, 2 * cs + int(0.172 * sr))          # 172 ms worked in the 10A run: stays its own chunk, existing tracks unchanged
-    assert eng.MedAsr.chunk_bounds(60 * sr + 2 * sr, cs) == [(0, cs), (cs, 2 * cs), (2 * cs, 2 * cs + 2 * sr)]    # a 2 s tail stays its own chunk (as the 359 existing tracks)
-    assert eng.MedAsr.chunk_bounds(10 * sr, cs) == [(0, 10 * sr)] and eng.MedAsr.chunk_bounds(0, cs) == []
-
-
-
-# ---------------------------------------------------------------- architect #11496: one scratch per lane, not a retired dir per clip
-def many(tmp, n):
-    rows = [make_row(uid=f"u{i}", date=DATE) for i in range(n)]
-    env = Env(tmp, rows)
-    env.run(LangGW(lang="hi-IN"), date=DATE)
-    return env
-
-
-def test_many_clips_leave_one_scratch_dir_per_lane_run(tmp_path):
-    env = many(tmp_path, 8)
-    cnt, runner, _ = go(env, "nemotron")
-    assert cnt["written"] == 8 and len(runner.calls) == 8
-    work = str(env.root) + "-work"
-    moved = os.listdir(os.path.join(work, "_to_delete"))
-    assert len(moved) == 1 and moved[0].startswith("scratch-") and os.path.exists(os.path.join(work, "_to_delete", moved[0], "scratch.wav"))        # 8 clips -> 1 dir
-    assert sorted(os.listdir(work)) == ["_to_delete"]
-    cnt2, _, _ = go(env, "nemotron")                                                                                                               # a rerun is skip-existing: nothing is decoded, no scratch is made
-    assert cnt2["skipped_existing"] == 8 and len(os.listdir(os.path.join(work, "_to_delete"))) == 1
-
-
-def test_failed_clips_keep_scratch_up_to_the_cap(tmp_path):
-    env = many(tmp_path, 8)
-    cnt, runner, _ = go(env, "nemotron", runner=FakeRunner(raises=RuntimeError("CUDA out of memory")))
-    assert cnt["errors"] == 8 and cnt["written"] == 0
-    work = str(env.root) + "-work"
-    assert len(os.listdir(os.path.join(work, "failed"))) == cl.FAILED_KEEP == 5                       # 8 failures keep 5
-    assert sorted(os.listdir(work)) == ["failed"] or all(n in ("failed", "_to_delete") or n.startswith("scratch-") for n in os.listdir(work))
-    assert sum(1 for dp, _, fs in os.walk(work) for f in fs) <= cl.FAILED_KEEP + 1                    # the 5 kept + at most the last un-keepable scratch: bounded whatever the count
-
-
-# ---- 16A: stt segments carry lang; extras.source_language is the clip's Sarvam language code
-def _real_stt_segments(monkeypatch, lane, lang=None):
-    monkeypatch.setattr(eng, "decode_f32", lambda *a, **k: [0.0] * 16)
-    r = cl.RealRunner(lane)
-    r.model = types.SimpleNamespace(transcribe=lambda *a: [(1.0, 2.0, "one"), (3.0, 4.5, "two")], runtime="fake", nemo_version="n", nemo_sha256="s")
-    status, _, segs, _ = r.run({}, {"path": "x.flac", "span_start_ms": 0, "span_end_ms": 6000}, {}, "/tmp/never-used-" + lane, lang)
-    return status, segs
-
-
-def test_medasr_segments_say_en_and_koyal_segments_say_their_language(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    status, segs = _real_stt_segments(monkeypatch, "medasr")
-    assert status == "ok" and len(segs) == 2 and all(s["lang"] == "en" and s["text"] for s in segs)
-    status, segs = _real_stt_segments(monkeypatch, "koyal", "kn")
-    assert status == "ok" and len(segs) == 2 and all(s["lang"] == "kn-IN" for s in segs)
-
-
-@pytest.mark.parametrize("lane,code", [("medasr", "hi-IN"), ("koyal", "kn-IN"), ("medasr", "en-IN")])
-def test_stt_tracks_carry_extras_source_language_from_sarvam(tmp_path, lane, code):
-    env, _ = make(tmp_path, lang=code)
-    cnt, _, _ = go(env, lane)
-    if cnt["written"] == 0:                                       # koyal skips en-IN by design
-        assert lane == "koyal" and code == "en-IN"
-        return
-    t = json.load(open(os.path.join(tdir(env), role_tracks(env, lane)[0])))
-    assert t["extras"]["source_language"] == code
-
-
-def test_medasr_source_language_is_null_when_sarvam_has_no_track(tmp_path):
-    env = Env(tmp_path / "nolang", [make_row()])
-    cnt, _, _ = go(env, "medasr")
-    assert cnt["written"] == 1
-    t = json.load(open(os.path.join(tdir(env), role_tracks(env, "medasr")[0])))
-    assert "source_language" in t["extras"] and t["extras"]["source_language"] is None

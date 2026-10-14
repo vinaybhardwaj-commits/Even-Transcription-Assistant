@@ -26,7 +26,6 @@ KOYAL_REV = "959231d2816f60f9ea680246092270fb059e0785"
 KOYAL_LANGS = {"hi": "hi-IN", "kn": "kn-IN", "ml": "ml-IN", "te": "te-IN"}   # the only languages the model has prompts for
 KOYAL_CHUNK_S, KOYAL_BATCH = 30.0, 32
 MEDASR_REPO, MEDASR_REV = "google/medasr", "ae1e4845b4b07479735d93e1e591e566435b7104"
-MEDASR_MIN_TAIL_S = 0.16   # a final piece shorter than this is folded into the previous chunk (MedAsr.chunk_bounds). Measured on the 10A clips: tails of 12-137 ms failed, tails of 172 ms and more worked, so every existing track is reproduced unchanged
 MEDASR_CONFIG = {"audio_format": "mono_int16", "chunk_overlap_s": 0, "chunk_s": 30, "decoding": "greedy", "lm": "none", "model": MEDASR_REPO, "revision": MEDASR_REV,
                  "sample_rate": 16000}   # = pinned_configs.MEDASR (hash e2b69f8a, the hf-l4-medasr-1 lineage)
 ACOUSTICS_CONFIG = {"sr": 48000, "mute_min_ms": 200, "clip_thresh": 0.999, "quiet_frame_s": 1}   # = acoustics_layer.CONFIG
@@ -150,8 +149,8 @@ class MedAsr:
         import torch
         cs, out = int(chunk_s * SR16), []
         dtype = next(self.model.parameters()).dtype
-        for c0, c1 in self.chunk_bounds(len(x16), cs):
-            chunk = x16[c0:c1]
+        for c0 in range(0, len(x16), cs):
+            chunk = x16[c0:c0 + cs]
             if chunk.size == 0:
                 continue
             inputs = self.processor(chunk, sampling_rate=SR16, return_tensors="pt")
@@ -160,17 +159,8 @@ class MedAsr:
                 ids = torch.argmax(self.model(**inputs).logits, dim=-1)
             text = self.processor.batch_decode(ids)[0].strip()
             if text:
-                out.append((c0 / SR16, c1 / SR16, text))
+                out.append((c0 / SR16, min(len(x16), c0 + cs) / SR16, text))
         return out
-
-    @staticmethod
-    def chunk_bounds(n, cs, min_tail=MEDASR_MIN_TAIL_S * SR16):
-        """[(c0, c1)] of cs-sample chunks over n samples. A final piece shorter than min_tail samples is folded into the chunk before it, because the model's front end and
-        convolutions fail on a few milliseconds of audio (five 10A clips had tails of 12 to 137 ms). A single chunk is kept as is (clips are at least 3 minutes)."""
-        b = [(c0, min(n, c0 + cs)) for c0 in range(0, n, cs)]
-        if len(b) > 1 and b[-1][1] - b[-1][0] < min_tail:
-            b[-2:] = [(b[-2][0], b[-1][1])]
-        return b
 
 
 # ---------------------------------------------------------------- acoustics (CPU DSP + silero VAD)
