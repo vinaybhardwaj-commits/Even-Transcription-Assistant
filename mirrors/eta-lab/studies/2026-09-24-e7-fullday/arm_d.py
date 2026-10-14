@@ -11,7 +11,6 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "2026-09-24-encounter-first"))
 import segmenter as S
 
-
 date, out, truth_path = sys.argv[1:4]
 conf = [r for r in json.load(open(f"{out}/confirmed.json"))["room_days"] if r["confirmed"]]
 levels, labels = json.load(open(f"{out}/levels.json")), json.load(open(f"{out}/labels.json"))
@@ -27,10 +26,6 @@ for r in conf:
     rds[rd] = {"room": r["room"], "date": date, "energy_gap": not lv,
                "encounters": [{"id": f"armd-{i}", "start_ms": s, "end_ms": e} for i, (s, e) in enumerate(segs)]}
     print(f"ARMD {rd} level_samples={len(lv)} label_rows={len(lb)} queue={len(q)} clips={len(segs)}")
-json.dump({"source": "arm-d",
-           # transcript_version: named by e7-rescore.sh --transcript (W28.2); null when unset — an
-           # score card must never infer a version a run did not declare
-           "transcript_version": os.environ.get("E7_TRANSCRIPT_VERSION"),
-           "segmenter": "studies/2026-09-24-encounter-first/segmenter.py", "room_days": rds},
+json.dump({"source": "arm-d", "segmenter": "studies/2026-09-24-encounter-first/segmenter.py", "room_days": rds},
           open(f"{out}/hyp-arm-d.json", "w"))
 print(f"ARMD_DONE room_days={len(rds)} clips={sum(len(v['encounters']) for v in rds.values())}")

@@ -7,13 +7,9 @@ order (shuffled manifests: any prefix is a random sample). Both sides must be no
 Outputs: sheet.tsv (n, claimed_language, start_s, end_s, text_A, text_B, label), key.json, counts.json (ids/counts only)."""
 import argparse, collections, json, os, random
 R1 = os.path.expanduser("~/eta-data/readable-rerun/r1/"); H = os.path.expanduser("~/eta-data/hist/")
-ap = argparse.ArgumentParser(); ap.add_argument("--n", type=int, default=96)
-ap.add_argument("--unflagged-only", action="store_true", help="addendum 5 batch 2: draw only non-empty re-runs that are NOT stock strings (>=3x in the full set) and NOT text on near-silence")
-ap.add_argument("--exclude-key", help="key.json of an earlier sheet: its segment ids are not drawn again")
-ap.add_argument("--alloc", help="cell=count,... overrides the default shares, e.g. kn=30,hi=30,bn=12,ta=12,ml=8,other=8"); ap.add_argument("--seed", type=int, default=20260940); ap.add_argument("--out", required=True)
+ap = argparse.ArgumentParser(); ap.add_argument("--n", type=int, default=96); ap.add_argument("--seed", type=int, default=20260940); ap.add_argument("--out", required=True)
 a = ap.parse_args()
 hall = json.load(open(R1 + "results/hall.json")) if os.path.exists(R1 + "results/hall.json") else {}
-excl = {v["id"] for v in json.load(open(a.exclude_key)).values()} if a.exclude_key else None
 man = {}
 for k in range(4):
     for l in open(R1 + f"s{k}/manifest.jsonl"):
@@ -32,16 +28,12 @@ for k in range(4):
         old = json.load(open(H + m["record"]))["segments"][m["idx"]]["text"]
         if not old.strip(): continue
         cell = m["force_lang"] if m["force_lang"] in ("kn", "hi", "bn", "ta", "ml") else "other"
-        h = hall.get(r["id"], {})
-        if a.unflagged_only and ((h.get("recur") or 0) >= 3 or h.get("near_silence_text")): continue
-        if excl and r["id"] in excl: continue
         pool[cell].append((r["id"], old, r["text"], m))
         wins[cell].add(m["record"]); rooms[cell].add(m["record"].split("/")[2] if m["record"].startswith("runs/") else m["record"].split("/")[1])
 alloc = {"kn": 0.25, "hi": 0.25, "bn": 0.125, "ta": 0.125, "ml": 0.125, "other": 0.125}
-fixed = {c: int(n) for c, n in (kv.split("=") for kv in a.alloc.split(","))} if a.alloc else None
 rnd = random.Random(a.seed); rows = []
-for cell in alloc:
-    rnd.shuffle(pool[cell]); rows += [(cell, x) for x in pool[cell][:(fixed[cell] if fixed else round(a.n * alloc[cell]))]]
+for cell, share in alloc.items():
+    rnd.shuffle(pool[cell]); rows += [(cell, x) for x in pool[cell][:round(a.n * share)]]
 # ATTENTION/BIAS CHECK (eta-refuter #2111 3b): ~10 % extra rows whose two sides are the SAME old text; a rater who prefers A or B there shows position bias.
 idn = [(c, x) for c, xs in pool.items() for x in xs if x[0] not in {y[1][0] for y in rows}]
 rnd.shuffle(idn); nid = max(1, round(a.n * 0.10)); rows += [("identical:" + c, x) for c, x in idn[:nid]]
