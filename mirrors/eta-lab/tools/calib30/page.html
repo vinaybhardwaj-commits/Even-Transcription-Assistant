@@ -11,7 +11,7 @@ button[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
 .opt{display:inline-flex;align-items:center;gap:6px;margin:2px 12px 2px 0;cursor:pointer;min-height:36px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}.mut{color:var(--mut);font-size:.85rem}
 audio{width:100%;margin-top:8px}#status{color:var(--warn);font-size:.9rem}#done{color:var(--acc);font-size:.9rem}
-.note{color:var(--mut);font-size:.85rem;margin-top:8px}.mt{margin-top:10px}
+.note{color:var(--mut);font-size:.85rem;margin-top:8px}
 </style></head><body><main>
 <h1>Calibration 30 — hear it, read it, judge it</h1>
 <p class="sub">30 items: 20 single transcript lines and 10 A/B pairs. <b>Play the audio</b> for each item (the ▶ button hears exactly that line, ~1 s of padding each side). Toggle English only if you want a literal gloss; the first judgement is your read of the text. "Can't judge this language" skips the item for you without counting it. Your answers save as you go; only you see them.</p>
@@ -19,7 +19,7 @@ audio{width:100%;margin-top:8px}#status{color:var(--warn);font-size:.9rem}#done{
 <div id="panel"></div>
 <p class="note">Keys 1–6 choose the open answer; N / → next, P / ← back.</p>
 </main><script>
-const $=(id)=>document.getElementById(id);const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const $=(s)=>document.querySelector(s);const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const L=["readable","romanised_readable","garbled","wrong_language","unsure","cant_judge"],B=["A_better","B_better","same","neither_readable","unsure","cant_judge"];
 const LL=["Clear and readable","Readable but romanised","Garbled","Wrong language","Not sure","Can't judge this language (skip)"],BL=["A is better","B is better","Same","Neither readable","Not sure","Can't judge this language (skip)"];
 let items=[],mine={},db=null,meId="",claudeOk=false,loaded=false,cur=0,dirty=false,saving=Promise.resolve(),saveTimer=0;
@@ -32,8 +32,8 @@ function panel(){const it=items[cur];
  const a=mine[it.id]||{},glossed=it.kind==="B"?(it.gloss_A||it.gloss_B):!!it.gloss;
  $("panel").innerHTML=`<div class="card"><div class="row"><b>${esc(it.id)}</b><span class="mut">${it.kind==="B"?"A/B pair":"line"} · ${esc(it.lang)}${it.dur_s?" · "+it.dur_s+" s":""}</span><button id="play">▶ Play this line</button><button id="replay" hidden>↻ Again</button></div>
  <audio id="au" controls preload="none"></audio>
- ${it.kind==="B"?`<div class="two mt"><div><h3>A</h3><div class="tx">${esc(it.text_A)}</div></div><div><h3>B</h3><div class="tx">${esc(it.text_B)}</div></div></div>${glossed?`<div class="row"><button id="tgl" aria-pressed="false">English</button></div><div id="gl" hidden><div class="two"><div class="tx">${esc(it.gloss_A||"")}</div><div class="tx">${esc(it.gloss_B||"")}</div></div></div>`:""}`
- :`<div class="tx mt">${esc(it.text)}</div>${glossed?`<div class="row"><button id="tgl" aria-pressed="false">English</button></div><p class="tx" id="gl" hidden>${esc(it.gloss||"")}</p>`:""}`}
+ ${it.kind==="B"?`<div class="two" style="margin-top:10px"><div><h3>A</h3><div class="tx">${esc(it.text_A)}</div></div><div><h3>B</h3><div class="tx">${esc(it.text_B)}</div></div></div>${glossed?`<div class="row"><button id="tgl" aria-pressed="false">English</button></div><div id="gl" hidden><div class="two"><div class="tx">${esc(it.gloss_A||"")}</div><div class="tx">${esc(it.gloss_B||"")}</div></div></div>`:""}`
+ :`<div class="tx" style="margin-top:10px">${esc(it.text)}</div>${glossed?`<div class="row"><button id="tgl" aria-pressed="false">English</button></div><p class="tx" id="gl" hidden>${esc(it.gloss||"")}</p>`:""}`}
  <div class="q">Your judgement:</div>
  ${qs(it).map((v,i)=>`<label class="opt"><input type="radio" name="j" value="${esc(vals(it)[i])}"${a.a===vals(it)[i]?" checked":""}><span>${esc(v)}</span></label>`).join("")}
 </div>`;
