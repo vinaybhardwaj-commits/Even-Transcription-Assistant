@@ -117,6 +117,12 @@ Migration numbers: 0005 consult-audit, 0006 agent runs, 0007 platform outbox, ne
 - **No identifiers** in specs, fixtures, logs, `agent_runs` or bus posts.
 - **`audit.note` stays byte-identical.** Every existing test stays green and unedited.
 
-## Artefacts
+## Encounters (N2)
 
-`src/platform/artefact/` holds `ArtefactRef` (`store`, `path`, `layer`, `engine`, `version`, `cfg8`, `sha256`, `schema`; a new cfg8 is a new artefact), `readConsultBundle` (wraps `kit.reb.consult_bundle`, returns refs only) and `resolveTrack` (reads the track at read time and checks its sha256). Persist refs only, never artefact bodies or quote text (D1); bodies are resolved when a body is needed. Reads happen only in the worker on eta-lab-t4: both functions throw when `VERCEL=1`. Env: `NEWCAT_ETA_LAB_DIR`, `NEWCAT_REB_ROOT`.
+`src/platform/encounter/**`, migration `0011_encounters.sql`. An encounter is one room-audio consult.
+
+- **Identity.** `encounterIdFor(consult_uid)` (`identity.ts`) is the ETA cutter consult_uid itself when it passes `isOpaqueId` (F7.5: no run of 8+ digits, UUIDs exempt), otherwise the surrogate `enc-` + first 16 hex of sha256(consult_uid). Deterministic. Only the opaque encounter id may appear in governance bodies, logs and bus posts.
+- **Append-only links.** `encounter_links` has one row per observation; triggers refuse UPDATE, DELETE and TRUNCATE (and UPDATE, DELETE and TRUNCATE on `encounters`); the migration revokes all privileges from public. Rollback note: `migrations/0011_encounters.rollback.md` (only while both tables are empty). `addLink` only inserts; `currentLinks` returns the newest row per `key_kind`. No hard deletes: a wrong link is superseded by a newer row (`refused` or another value).
+- **Identifiers stay in `encounter_links`.** `encounters` holds only `encounter_id`, `source`, `created_at`. The ETA consult_uid is an `eta_consult_uid` link (verified, `exact_uid`) written when the encounter is created; lookup is `encounterIdFor(consult_uid)` or that link. presc_uid, pulse_consult_uid, individual_uid, kx_encounter_id and the consult_uid never enter prompts, logs, the bus or any audience body. These modules log nothing.
+- **Probable is not verified.** The resolver (`resolver.ts`, design D3) appends `verified` only from an exact Metabase lookup (exact consult_uid match; exactly one `individual_uid` row for a verified presc_uid). A room/doctor window match, or anything derived from a probable link, stays `probable`. Downstream code must test `link_status === 'verified'` (`isVerified`), never the mere existence of a link.
+- **Not yet.** No HTTP route, no wiring into the worker or agents, no EncounterState (N3). `resolveEncounterLinks(sql, mb, consultUid, hints)` takes the consult_uid only and derives the encounter id; a refused presc_uid yields no individual lookup; a verified presc_uid is never superseded by a window guess. It takes an injected `MetabaseClient`; the db13 wiring comes with the first caller.

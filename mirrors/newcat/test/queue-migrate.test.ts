@@ -22,7 +22,7 @@ describe('migrations and work leases', () => {
     const sql = await testDb()
     const second = await migrate(sql)
     expect(second).toEqual([])
-    expect(await appliedMigrations(sql)).toEqual(['0001_init.sql', '0002_ops.sql', '0003_evidence.sql', '0004_extract_trace.sql', '0005_consult.sql', '0006_agent_runs.sql', '0007_outbox.sql', '0008_governance_audience.sql', '0009_cloudflare_provider.sql', '0010_vertex_provider.sql'])
+    expect(await appliedMigrations(sql)).toEqual(['0001_init.sql', '0002_ops.sql', '0003_evidence.sql', '0004_extract_trace.sql', '0005_consult.sql', '0006_agent_runs.sql', '0007_outbox.sql', '0008_governance_audience.sql', '0009_cloudflare_provider.sql', '0010_vertex_provider.sql', '0011_encounters.sql'])
   })
 
   it('keeps DDL out of runtime source', () => {

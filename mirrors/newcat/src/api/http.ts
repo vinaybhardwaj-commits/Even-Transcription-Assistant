@@ -20,7 +20,7 @@ import type { Audience } from '../facts/schema.js'
 import { CAPABILITY_VERSION } from '../version.js'
 import { authenticateConsumer, authenticateCron, audienceAllowed } from '../auth/consumers.js'
 import { signWebhook } from '../auth/crypto.js'
-import { EmitRefusal, hasLongDigitRun, keyOk, pendingBody, PendingBody, serialize, STRUCTURED_ID } from '../audience/serialize.js'
+import { EmitRefusal, pendingBody, PendingBody, serialize } from '../audience/serialize.js'
 import { AGENTS } from '../agents/index.js'
 import type { AnyAgentDefinition } from '../platform/agent/types.js'
 import type { CdmssQuery } from '../platform/cdmss/client.js'
@@ -507,122 +507,31 @@ async function getJob(sql: Sql, principal: string, jobId: string, traceId: strin
   return json(job.http_status ?? 200, asJson(job.result))
 }
 
-const GOVERNANCE_HIDDEN_JUDGE_KEY = 'served_model_ids'
+const JUDGE_KEYS = ['primary_p', 'second_p', 'agree', 'served_model_ids'] as const
+const GOVERNANCE_JUDGE_KEYS = JUDGE_KEYS.filter((key) => key !== 'served_model_ids')
+const REF_KEYS = ['source_id', 'segment_id', 'start', 'end'] as const
 
+const MAX_SCALAR_LENGTH = 200
 const VERSION_FIXED_KEYS = ['engine', 'rules', 'extractor', 'agent', 'models', 'question_set_id', 'question_set_sha', 'question_sets'] as const
 const VERSION_KEY_TOKEN = /^[a-z][a-z0-9_]{0,39}$/
 const VERSION_VALUE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._@:/+-]{0,79}$/
-/** Shape of any key the run body returns (F7.5 wall: also `keyOk`). */
-const KEY_TOKEN = /^[a-z][a-z0-9_.]{0,63}$/
-const RUN_ACTIONS: ReadonlySet<string> = new Set(['valid', 'route', 'hold', 'drop_informational', 'suppressed_invalid', 'abstain'])
 
-/** Counts every key or value the run body drops at the wall; reported as `dropped_fields`. */
-interface Wall {
-  dropped: number
-}
-
-/** A key passes when it is token-shaped and clears the F7.5 identifier and digit-run test. */
-function wallKey(wall: Wall, key: string, shape: RegExp = KEY_TOKEN): boolean {
-  if (shape.test(key) && keyOk(key)) return true
-  wall.dropped += 1
-  return false
-}
-
-/** Lowercase hex of exactly 16, 32 or 64 characters with a letter (finding_id, run_id, shas): exempt from the digit-run test. */
-const HEX_ID = /^(?=[^a-f]*[a-f])(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f]{64})$/
-/** `versions.question_sets` values: `<set id>@<sha256 hex>` as written by persistRun. */
-const QUESTION_SET_VALUE = /^[a-z0-9][a-z0-9._/-]{0,63}@[0-9a-f]{64}$/
-/** A yyyymmdd release date inside a served model id (e.g. `...-20250929-v1:0`); stripped before the digit-run test on model ids only. */
-const MODEL_ID_DATE = /(?<=[-.])20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?=[-.:]|$)/g
-
-/** Platform-generated hashes (run_id 32, finding_id 16, question_set_sha 64): exactly this many lowercase hex, letters or not. Only the fields that carry them use it (`hash`). */
-const PLATFORM_HASH = /^(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f]{64})$/
-
-/** A string value passes when it is a plain token with no identifier-shaped digit run (F7.5 value rule). Counted when it fails. */
-function wallString(wall: Wall, value: string, modelId = false, hash = false): boolean {
-  if (VERSION_VALUE_TOKEN.test(value) && ((hash && PLATFORM_HASH.test(value)) || STRUCTURED_ID.test(value) || HEX_ID.test(value) || !hasLongDigitRun(modelId ? value.replace(MODEL_ID_DATE, '') : value))) return true
-  wall.dropped += 1
-  return false
-}
-
-/** A `question_sets` value: `<set id>@<64 hex>`, the id part free of identifier digit runs. */
-function wallQuestionSet(wall: Wall, value: string): boolean {
-  if (QUESTION_SET_VALUE.test(value) && !hasLongDigitRun(value.slice(0, value.indexOf('@')))) return true
-  wall.dropped += 1
-  return false
-}
-
-/** Finite numbers, booleans, token strings and arrays of token strings; anything else is dropped and counted. */
-function safeValue(wall: Wall, value: unknown, modelId = false, hash = false): unknown {
-  if (typeof value === 'number') {
-    if (Number.isFinite(value)) return value
-  } else if (typeof value === 'boolean') {
-    return value
-  } else if (typeof value === 'string') {
-    return wallString(wall, value, modelId, hash) ? value : undefined
-  } else if (Array.isArray(value)) {
-    return value.filter((item) => (typeof item === 'string' ? wallString(wall, item, modelId) : ((wall.dropped += 1), false)))
-  }
-  wall.dropped += 1
+/** Numbers, booleans, bounded strings and arrays of bounded strings; anything else is dropped. */
+function safeValue(value: unknown): unknown {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') return value.length <= MAX_SCALAR_LENGTH ? value : undefined
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length <= MAX_SCALAR_LENGTH)) return value
   return undefined
 }
 
-/** A number in 0..1 or null (judge probabilities). */
-const isProbability = (value: unknown): value is number | null => value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1)
-const isPosition = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
-
-/** Judge fields by type: primary_p/second_p in 0..1 or null, agree boolean or null, served_model_ids token strings (not for governance). Anything else is dropped and counted. */
-function projectJudge(wall: Wall, value: unknown, governance: boolean): Record<string, unknown> {
+function pick(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  const source = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {}
   const out: Record<string, unknown> = {}
-  if (value === null || value === undefined) return out
-  if (!isRecord(value)) {
-    wall.dropped += 1
-    return out
-  }
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === 'primary_p' || key === 'second_p') {
-      if (isProbability(entry)) out[key] = entry
-      else wall.dropped += 1
-    } else if (key === 'agree') {
-      if (entry === null || typeof entry === 'boolean') out[key] = entry
-      else wall.dropped += 1
-    } else if (key === GOVERNANCE_HIDDEN_JUDGE_KEY) {
-      if (governance) continue
-      if (Array.isArray(entry)) out[key] = entry.filter((item) => (typeof item === 'string' ? wallString(wall, item, true) : ((wall.dropped += 1), false)))
-      else wall.dropped += 1
-    } else {
-      wall.dropped += 1
-    }
-  }
-  return out
-}
-
-/** Evidence refs: positions only. source_id/segment_id token strings, start/end finite non-negative numbers; anything else is dropped and counted. */
-function projectRefs(wall: Wall, value: unknown): Array<Record<string, unknown>> {
-  if (value === null || value === undefined) return []
-  if (!Array.isArray(value)) {
-    wall.dropped += 1
-    return []
-  }
-  const out: Array<Record<string, unknown>> = []
-  for (const ref of value) {
-    if (!isRecord(ref)) {
-      wall.dropped += 1
-      continue
-    }
-    const item: Record<string, unknown> = {}
-    for (const [key, entry] of Object.entries(ref)) {
-      if (key === 'source_id' || key === 'segment_id') {
-        if (typeof entry === 'string' && wallString(wall, entry)) item[key] = entry
-        else if (typeof entry !== 'string') wall.dropped += 1
-      } else if (key === 'start' || key === 'end') {
-        if (isPosition(entry)) item[key] = entry
-        else wall.dropped += 1
-      } else {
-        wall.dropped += 1
-      }
-    }
-    out.push(item)
+  for (const key of keys) {
+    if (!(key in source)) continue
+    const safe = safeValue(source[key])
+    if (safe !== undefined) out[key] = safe
   }
   return out
 }
@@ -631,65 +540,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** A top-level string field of the run body: kept when it is a token, else null and counted. */
-function tokenOrNull(wall: Wall, value: unknown, hash = false): string | null {
-  return typeof value === 'string' && wallString(wall, value, false, hash) ? value : null
-}
-
-/** The closed-list reason: a key-shaped token that clears the wall, else null (counted unless the column was null). */
-function reasonOrNull(wall: Wall, value: unknown): string | null {
-  if (value === null || value === undefined) return null
-  if (typeof value === 'string' && wallKey(wall, value)) return value
-  if (typeof value !== 'string') wall.dropped += 1
-  return null
-}
-
-/** Fixed version keys, plus agent-declared keys that are plain identifiers with token values. Governance never gets a key naming a model. */
-function projectVersions(wall: Wall, value: unknown, governance: boolean): Record<string, unknown> {
+/** Fixed version keys, plus agent-declared keys that are plain identifiers with bounded string values. Governance never gets a key naming a model. */
+function projectVersions(value: unknown, governance: boolean): Record<string, unknown> {
   const source = isRecord(value) ? value : {}
-  if (!isRecord(value) && value !== null && value !== undefined) wall.dropped += 1
   const out: Record<string, unknown> = {}
   for (const [key, entry] of Object.entries(source)) {
     if (governance && key.toLowerCase().includes('model')) continue
-    const fixed = (VERSION_FIXED_KEYS as readonly string[]).includes(key)
-    if (!wallKey(wall, key, VERSION_KEY_TOKEN)) continue
-    if (fixed && key === 'question_sets') {
-      if (!isRecord(entry)) {
-        wall.dropped += 1
+    if ((VERSION_FIXED_KEYS as readonly string[]).includes(key)) {
+      if (key === 'question_sets') {
+        if (!isRecord(entry)) continue
+        out[key] = Object.fromEntries(
+          Object.entries(entry).filter(([rule, id]) => typeof id === 'string' && id.length <= MAX_SCALAR_LENGTH && VERSION_KEY_TOKEN.test(rule.toLowerCase().replace(/[^a-z0-9_]/g, '_'))),
+        )
         continue
       }
-      const inner: Record<string, unknown> = {}
-      for (const [rule, id] of Object.entries(entry)) {
-        if (governance && rule.toLowerCase().includes('model')) continue
-        if (!wallKey(wall, rule)) continue
-        if (typeof id === 'string' && wallQuestionSet(wall, id)) inner[rule] = id
-        else if (typeof id !== 'string') wall.dropped += 1
-      }
-      out[key] = inner
-    } else if (fixed) {
-      const safe = safeValue(wall, entry, key === 'models', key === 'question_set_sha')
+      const safe = safeValue(entry)
       if (safe !== undefined) out[key] = safe
-    } else if (typeof entry === 'string' && wallString(wall, entry)) {
+    } else if (VERSION_KEY_TOKEN.test(key) && typeof entry === 'string' && VERSION_VALUE_TOKEN.test(entry)) {
       out[key] = entry
-    } else if (typeof entry !== 'string') {
-      wall.dropped += 1
     }
   }
   return out
 }
 
-/** Counts: token keys at every depth, non-negative integers only, objects of the same; everything else is dropped and counted. */
-function projectCounts(wall: Wall, value: unknown): Record<string, unknown> {
+/** Counts: non-negative integers only, and objects of the same (one level or more); everything else is dropped. */
+function projectCounts(value: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {}
-  if (!isRecord(value)) {
-    if (value !== null && value !== undefined) wall.dropped += 1
-    return out
-  }
+  if (!isRecord(value)) return out
   for (const [key, entry] of Object.entries(value)) {
-    if (!wallKey(wall, key)) continue
-    if (typeof entry === 'number' && Number.isInteger(entry) && entry >= 0) out[key] = entry
-    else if (isRecord(entry)) out[key] = projectCounts(wall, entry)
-    else wall.dropped += 1
+    if (typeof entry === 'number') {
+      if (Number.isInteger(entry) && entry >= 0) out[key] = entry
+    } else if (isRecord(entry)) {
+      out[key] = projectCounts(entry)
+    }
   }
   return out
 }
@@ -746,56 +629,43 @@ async function getAgentRun(
   )
   // Spec 12: no model ids in governance output, and V1: abstentions appear only as counts by reason, never as findings.
   const governance = consumer.audience === 'governance'
-  const wall: Wall = { dropped: 0 }
-  const actionOf = (action: string): string => (RUN_ACTIONS.has(action) ? action : 'other')
   const shown = governance ? findings.rows.filter((row) => row.action === 'valid') : findings.rows
   const abstentions: Record<string, number> = {}
   if (governance) {
     for (const row of findings.rows) {
       if (row.action === 'valid') continue
-      const name = actionOf(row.action)
-      abstentions[name] = (abstentions[name] ?? 0) + 1
+      abstentions[row.action] = (abstentions[row.action] ?? 0) + 1
     }
   }
-  const runBody = {
-    run_id: tokenOrNull(wall, run.run_id, true),
-    agent_id: tokenOrNull(wall, run.agent_id),
-    agent_version: tokenOrNull(wall, run.agent_version),
-    status: tokenOrNull(wall, run.status),
-    reason: reasonOrNull(wall, run.reason),
-    versions: projectVersions(wall, asJson(run.versions), governance),
-    counts: projectCounts(wall, asJson(run.counts)),
-    created_at: asIso(run.created_at),
-  }
-  const findingBodies = shown.map((row) => {
-    const refs = asJson(row.evidence_refs)
-    const body: Record<string, unknown> = {}
-    for (const [key, value] of [
-      ['finding_id', row.finding_id],
-      ['rule_id', row.rule_id],
-      ['rule_version', row.rule_version],
-      ['severity', row.severity],
-    ] as const) {
-      if (typeof value === 'string' && wallString(wall, value, false, key === 'finding_id')) body[key] = value
-      else wall.dropped += 1
-    }
-    return {
-      ...body,
-      safety_class: row.safety_class,
-      action: actionOf(row.action),
-      judge: projectJudge(wall, asJson(row.judge), governance),
-      evidence_refs: projectRefs(wall, refs),
-    }
-  })
   return json(200, {
     trace_id: traceId,
     capability,
     capability_version: CAPABILITY_VERSION,
     status: 'ok',
-    run: runBody,
-    findings: findingBodies,
+    run: {
+      run_id: run.run_id,
+      agent_id: run.agent_id,
+      agent_version: run.agent_version,
+      status: run.status,
+      reason: typeof run.reason === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(run.reason) ? run.reason : null,
+      versions: projectVersions(asJson(run.versions), governance),
+      counts: projectCounts(asJson(run.counts)),
+      created_at: asIso(run.created_at),
+    },
+    findings: shown.map((row) => {
+      const refs = asJson(row.evidence_refs)
+      return {
+        finding_id: row.finding_id,
+        rule_id: row.rule_id,
+        rule_version: row.rule_version,
+        severity: row.severity,
+        safety_class: row.safety_class,
+        action: row.action,
+        judge: pick(asJson(row.judge), governance ? GOVERNANCE_JUDGE_KEYS : JUDGE_KEYS),
+        evidence_refs: Array.isArray(refs) ? refs.map((ref) => pick(ref, REF_KEYS)) : [],
+      }
+    }),
     ...(governance ? { abstentions } : {}),
-    dropped_fields: wall.dropped,
   })
 }
 

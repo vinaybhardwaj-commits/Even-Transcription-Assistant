@@ -6,7 +6,7 @@ export const FINDING_TYPES = [
   'consent_incomplete',
   'pressure_signal',
   'said_vs_written',
-  'concern_unaddressed',
+  'patient_concern_unaddressed',
 ] as const
 export type FindingType = (typeof FINDING_TYPES)[number]
 

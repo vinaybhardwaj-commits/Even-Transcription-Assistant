@@ -261,3 +261,37 @@ export function opdIcdSql(individualUids: string[]): string | null {
         ORDER BY p.uploaded_at ASC
         LIMIT 1000`
 }
+
+// ── N2 encounter-link recipes (INFERRED until gating-lead validates live against db13) ──────────
+
+/** Strict ISO-8601 UTC instant (Z, optional millis) for window bounds. Never free text. */
+export const isInstant = (s: string) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)
+
+/**
+ * N2 (a): Pulse prescriptions whose consult_uid equals the ETA consult_uid exactly. New recipe, same guards
+ * as metabase.ts:131 (isUid), no free SQL. LIMIT 3 so more than one match is detectable.
+ */
+export const prescriptionsForConsultSql = (consultUid: string): string => {
+  if (!isUid(consultUid)) throw new Error('bad consult uid')
+  return `SELECT uid AS presc_uid, consult_uid AS pulse_consult_uid FROM "individuals-prescriptions" WHERE consult_uid = '${consultUid}' AND is_draft = false LIMIT 3`
+}
+
+/**
+ * N2 (a), fallback: prescriptions by one doctor inside a time window (room_doctor_window). Same table and
+ * columns as opdNoteByUidSql (metabase.ts:203-208). Only ever yields PROBABLE links. LIMIT 3.
+ */
+export const prescriptionsInWindowSql = (doctorUid: string, fromIso: string, toIso: string): string => {
+  if (!isUid(doctorUid)) throw new Error('bad doctor uid')
+  if (!isInstant(fromIso) || !isInstant(toIso)) throw new Error('bad window')
+  return `SELECT uid AS presc_uid, consult_uid AS pulse_consult_uid FROM "individuals-prescriptions" WHERE doctor_uid = '${doctorUid}' AND is_draft = false AND timestamp >= '${fromIso}' AND timestamp < '${toIso}' ORDER BY timestamp ASC LIMIT 3`
+}
+
+/**
+ * N2 (b): presc_uid -> individual_uid. Port of individualForPrescSql (cdmss-ref/lib/member-state/member-state.ts:44-54,
+ * file member-state-44-56.ts): same table, columns and isUid guard; LIMIT 2 instead of LIMIT 1 so a second row is
+ * visible and the resolver can refuse to verify an ambiguous answer.
+ */
+export const individualForPrescLookupSql = (prescUid: string): string => {
+  if (!isUid(prescUid)) throw new Error('bad presc uid')
+  return `SELECT _parent_id AS individual_uid FROM "individuals-prescriptions" WHERE uid = '${prescUid}' LIMIT 2`
+}

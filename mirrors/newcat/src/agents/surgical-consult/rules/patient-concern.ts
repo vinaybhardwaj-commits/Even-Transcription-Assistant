@@ -22,11 +22,11 @@ export function patientConcernRules(facts: GatedFacts): RuleOutcome[] {
     const keep = new Set(segments.slice(0, DOCTOR_TURNS_TO_CHECK))
     const replies = later.filter((d) => keep.has(d.segment_id))
     out.push({
-      finding_type: 'concern_unaddressed',
+      finding_type: 'patient_concern_unaddressed',
       procedure_group: procedureGroup(recommendationFor(facts, f.rec_ref)?.procedure_text),
       rule_id: 'concern.unaddressed',
       rule_version: RULES_VERSION,
-      claim: 'The doctor did not address this patient concern in the consult.',
+      claim: 'No later doctor statement in the extracted facts addresses this patient concern.',
       ...basis(f, ...replies),
       needs_judge: true,
       doctor_visible: false,

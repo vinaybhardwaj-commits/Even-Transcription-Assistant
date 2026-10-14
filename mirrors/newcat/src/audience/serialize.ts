@@ -327,13 +327,13 @@ export function isIdentifierKey(key: string): boolean {
     || IDENTIFIER_SUBSTRINGS.some((part) => scanned.includes(part)) || tokens.some((token) => IDENTIFIER_TOKENS.has(token))
 }
 /** Id shapes exempt from the digit-run test (values only, never keys): canonical UUID, 32 lowercase hex, 26-char Crockford ULID. Each needs a letter and a ULID starts with [0-7]. */
-export const STRUCTURED_ID = /^(?:(?=[^a-fA-F]*[a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|(?=[^a-f]*[a-f])[0-9a-f]{32}|(?=\d*[A-Z])[0-7][0-9A-HJKMNP-TV-Z]{25})$/
+const STRUCTURED_ID = /^(?:(?=[^a-fA-F]*[a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|(?=[^a-f]*[a-f])[0-9a-f]{32}|(?=\d*[A-Z])[0-7][0-9A-HJKMNP-TV-Z]{25})$/
 /** Opaque id: `^[A-Za-z0-9._:-]{1,128}$` with no run of 8 or more digits, separators stripped before counting. */
 export function isOpaqueId(value: unknown): boolean {
   return typeof value === 'string' && OPAQUE_ID.test(value) && (STRUCTURED_ID.test(value) || !hasLongDigitRun(value))
 }
 /** A key that may appear in a governance body at any depth: not identifier-like and no long digit run. */
-export const keyOk = (key: string): boolean => !isIdentifierKey(key) && !hasLongDigitRun(key)
+const keyOk = (key: string): boolean => !isIdentifierKey(key) && !hasLongDigitRun(key)
 /** Inner keys of `versions.question_sets` are rule ids. */
 const RULE_ID_KEY = /^[a-z][a-z0-9_.]{0,63}$/
 /** Cap on a governance meta string value. */

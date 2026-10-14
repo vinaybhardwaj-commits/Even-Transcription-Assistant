@@ -9,15 +9,15 @@ import { ConsultAuditInput } from './input.js'
 import { prepass } from './prepass.js'
 import { CONSULT_SOURCE_ID, consultContext, segmentId, type ConsultContext } from './segments.js'
 import { CONSENT_RULE_IDS, CONSULT_META_KEYS, COUNT_REASONS, MAX_CANDIDATES, RULE_SPECS } from './rules/index.js'
-import { persistConsult, sweepConsultInputs, trimInput } from './store.js'
+import { persistConsult } from './store.js'
 import { TOOL_DESCRIPTION, TOOL_INPUT_SCHEMA, TOOL_NAME, buildPrompt } from './extract/prompt.js'
 import { RULES_VERSION } from './versions.js'
 
 /**
  * audit.consult: the surgical consult audit on the F7 template (spec sections 2 to 4, 12, 13).
  * Segment ids are opaque (`seg-NNNN`, by position in the pre-pass output), never derived from record text.
- * Judges: Jev primary and a Gemini second judge (the platform's default wiring builds Gemini when NEWCAT_GEMINI=live and the
- * Vertex env is complete; otherwise `second` is null and every finding is held, judge_unavailable).
+ * Judges: Jev primary (default wiring) and a Gemini second judge. No Gemini client exists yet, so `second` is null in the
+ * wiring and every finding is held (judge_unavailable) until S3: correct, not a bug.
  */
 
 export const CONSULT_AGENT_ID = 'audit.consult'
@@ -31,7 +31,7 @@ export const CONSULT_QUESTION_SET = {
   question: CONSULT_QUESTION,
 } as const
 
-// Absence findings (consent.*, concern.unaddressed, G8): the judge reads whole consult segments given as context, not the recommendation quote.
+// Absence findings (consent.*, G8): the judge reads whole consult segments given as context, not the recommendation quote.
 export const ABSENCE_QUESTION = 'Reading only the consult segments given as context, is the claim true? Answer yes or no.'
 export const ABSENCE_QUESTION_SET = {
   id: 'consult-absence-claim',
@@ -93,7 +93,7 @@ export const surgicalConsult: AgentDefinition<ConsultAuditInput, ExtractedFact, 
   countReasons: COUNT_REASONS,
   judge: {
     questionSet: CONSULT_QUESTION_SET,
-    questionSets: Object.fromEntries([...CONSENT_RULE_IDS, 'concern.unaddressed'].map((id) => [id, ABSENCE_QUESTION_SET])),
+    questionSets: Object.fromEntries(CONSENT_RULE_IDS.map((id) => [id, ABSENCE_QUESTION_SET])),
     second: 'gemini',
     thresholds: { safety: 0.9, nonSafety: 0.75 },
   },
@@ -107,8 +107,6 @@ export const surgicalConsult: AgentDefinition<ConsultAuditInput, ExtractedFact, 
   budget: { llmCalls: 2, jevCalls: JEV_CALLS, clefCalls: 0 },
   versions: { extractor: CONSULT_EXTRACTOR_VERSION, rules: RULES_VERSION },
   persist: persistConsult,
-  storedInput: trimInput,
-  retention: ({ sql, now }) => sweepConsultInputs(sql, now).then((swept) => ({ swept })),
   serializers: { governance: governanceBody },
 }
 

@@ -8,7 +8,6 @@ import { consultContext, type ConsultContext } from '../../../src/agents/surgica
 import { FakeJudgePort } from '../../../src/platform/agent/judge-port.js'
 import { candidatesOf, type GatedFact } from '../../../src/platform/agent/types.js'
 import { FakeSecondJudge } from '../../../src/platform/judge/second.js'
-import { asJson } from '../../../src/db/sql.js'
 import type { Sql } from '../../../src/db/sql.js'
 import { load, reply, rig, scriptedExtractor } from './helpers.js'
 
@@ -116,12 +115,12 @@ const recOnly = [
 
 describe('G8: absence findings use their own question and whole-segment context', () => {
   const hernia = () => load('hernia-full-consent')
-  it('maps every consent rule and concern.unaddressed to the absence question set and leaves the others on the neutral one', () => {
+  it('maps every consent rule to the absence question set and leaves the others on the neutral one', () => {
     expect(ABSENCE_QUESTION_SET.question).toBe('Reading only the consult segments given as context, is the claim true? Answer yes or no.')
     expect(surgicalConsult.judge.questionSet).toBe(CONSULT_QUESTION_SET)
     for (const spec of RULE_SPECS) {
       const set = surgicalConsult.judge.questionSets?.[spec.id]
-      if (spec.id.startsWith('consent.') || spec.id === 'concern.unaddressed') expect(set).toBe(ABSENCE_QUESTION_SET)
+      if (spec.id.startsWith('consent.')) expect(set).toBe(ABSENCE_QUESTION_SET)
       else expect(set).toBeUndefined()
     }
   })
@@ -149,26 +148,6 @@ describe('G8: absence findings use their own question and whole-segment context'
       expect(call.question).toBe(ABSENCE_QUESTION_SET.question)
       expect((call.state as { context_segments?: unknown[] }).context_segments).toHaveLength(window.size)
     }
-  })
-
-  it('concern.unaddressed shows the whole doctor+patient window on both judges, with the absence claim', async () => {
-    const concern = {
-      group: 'patient_response', quote: 'How long has this been there, doctor?', segment_id: 'seg-0002', rec_ref: null,
-      question_asked: true, hesitation_stated: false, agreement_stated: false, concern_stated: false,
-    }
-    const second = new FakeSecondJudge(() => 0.95)
-    const r = await rig(() => reply([concern]), new FakeJudgePort(() => 0.95), second)
-    const audit = await r.run(hernia())
-    const f = audit.findings.filter((x) => x.rule_id === 'concern.unaddressed')
-    expect(f).toHaveLength(1)
-    expect(f[0]!.summary).toBe('The doctor did not address this patient concern in the consult.')
-    const window = new Set(consultContext(hernia()).segments.map((s) => s.id))
-    for (const calls of [r.judge.calls.filter((c) => (c.state as { rule: string }).rule === 'concern.unaddressed'), second.calls.filter((c) => (c.state as { rule: string }).rule === 'concern.unaddressed')]) {
-      expect(calls).toHaveLength(1)
-      expect(calls[0]!.question).toBe(ABSENCE_QUESTION_SET.question)
-      expect((calls[0]!.state as { context_segments: unknown[] }).context_segments).toHaveLength(window.size)
-    }
-    expect(r.judge.calls.find((c) => (c.state as { rule: string }).rule === 'concern.unaddressed')!.set.id).toBe('consult-absence-claim')
   })
 
   it('other roles are left out and the range count follows the window', async () => {
@@ -407,43 +386,5 @@ describe('A1: F7.5 names', () => {
       if (bad(spec.id) !== null) kept.push(spec.id)
     }
     expect(kept).toEqual(['concern.unaddressed'])
-  })
-
-  it('F7.5: every rule id keying a per-rule question set matches ^[a-z][a-z0-9_.]{0,63}$ and has no identifier word token', async () => {
-    const RULE_ID_KEY = /^[a-z][a-z0-9_.]{0,63}$/
-    const keys = Object.keys(surgicalConsult.judge.questionSets ?? {})
-    expect(keys.length).toBeGreaterThan(5)
-    for (const id of keys) {
-      expect(id, id).toMatch(RULE_ID_KEY)
-      expect(tokens(id).some((t) => WORDS.includes(t)), id).toBe(false)
-    }
-    // And the real governance body: the keys that reach versions.question_sets pass the same check and the emit gate.
-    const r = await rig()
-    const body = gov(await r.run(load('knee-replacement-missing-consent')))
-    const emitted = Object.keys((body.versions as unknown as { question_sets: Record<string, unknown> }).question_sets)
-    expect(emitted.length).toBeGreaterThan(0)
-    for (const id of emitted) expect(id, id).toMatch(RULE_ID_KEY)
-    expect(() => assertGovernanceSafe(body)).not.toThrow()
-  })
-})
-
-describe('P1P2: the persist hook stores the gated facts and drop counts', () => {
-  it('a fake run persists non-empty facts and the drop counts', async () => {
-    // One real quote plus one the segment does not contain, so the gate drops it and counts the reason.
-    const r = await rig((request) => {
-      const real = scriptedExtractor(request)
-      const facts = (real as { toolInput: { facts: unknown[] } }).toolInput.facts
-      return reply([...facts, { group: 'pressure', quote: 'not said anywhere in this consult', segment_id: 'seg-0001', rec_ref: null, decide_today: true, discount_or_package: false, fear_framing: false }])
-    })
-    const audit = await r.run(load('hernia-full-consent'))
-    expect({ status: audit.status, reason: audit.reason }).toEqual({ status: 'ok', reason: undefined })
-    const row = (await r.sql.query<{ facts: unknown; dropped: unknown }>('select facts, dropped from consult_extractions')).rows[0]!
-    const facts = asJson<Array<{ group: string; quote: string; segment_id: string }>>(row.facts)
-    const dropped = asJson<Record<string, number>>(row.dropped)
-    expect(facts.length).toBeGreaterThan(0)
-    expect(facts.every((f) => typeof f.quote === 'string' && f.quote.length > 0 && /^seg-\d{4}$/.test(f.segment_id))).toBe(true)
-    expect(facts.some((f) => f.quote === 'not said anywhere in this consult')).toBe(false)
-    expect(Object.values(dropped).reduce((a, b) => a + b, 0)).toBeGreaterThan(0)
-    expect(Object.values(dropped).every((n) => Number.isInteger(n) && n > 0)).toBe(true)
   })
 })

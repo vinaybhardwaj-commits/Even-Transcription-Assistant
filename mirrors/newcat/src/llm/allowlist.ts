@@ -47,16 +47,6 @@ export function acceptsTemperature(modelId: string): boolean {
   return !CLAUDE_5.test(modelId.trim())
 }
 
-const CLAUDE_5_5 = /(?:^|[./])anthropic\.claude-(?:sonnet|opus|haiku|fable)-5-5(?:[-.:]|$)/
-
-/**
- * Bedrock rejects a forced toolChoice (type "tool" or "any") for Claude 5.5 Sonnet and Opus; Haiku 5.5 accepts it,
- * but the whole 5.5 family defaults to `auto` (newcat-orch ruling). False for 5.5 ids under any geo prefix or ARN.
- */
-export function supportsForcedToolChoice(modelId: string): boolean {
-  return !CLAUDE_5_5.test(modelId.trim())
-}
-
 /** Names of the env vars whose id is set but not allowed. Ids are never echoed. */
 export function disallowedModelEnv(
   ids: Record<ModelTier, string | undefined>,

@@ -88,8 +88,6 @@ const metaOf = (o: CandidateFinding): Candidate['meta'] => ({ procedure_group: o
 // Absence findings (consent.*): the judge reads every doctor and patient segment of the consult window (G8, W1), so consent
 // stated before the recommendation is visible too. One range per run of such segments, so no other role's text is shown;
 // every range lies inside the window's segments, on both judges.
-// consent.* and concern.unaddressed are absence claims: the judge reads the whole consult window.
-export const isAbsenceRule = (ruleId: string): boolean => ruleId.startsWith('consent.') || ruleId === 'concern.unaddressed'
 export const ABSENCE_ROLES: ReadonlySet<string> = new Set(['doctor', 'patient'])
 export function absenceRanges(ctx: ConsultContext): ContextRange[] {
   const ranges: ContextRange[] = []
@@ -125,7 +123,7 @@ const COUNTERS: ReadonlySet<string> = new Set(['svw.group_differs', 'consent.ris
 
 function evaluateRule(ruleId: string, flat: Array<GatedFact>, cap: number, ctx: ConsultContext | undefined): RuleOutput {
   const facts = groupFacts(flat)
-  const absence = isAbsenceRule(ruleId)
+  const absence = ruleId.startsWith('consent.')
   if (absence && ctx === undefined) throw new Error('missing_rule_context')
   const counts: Record<string, number> = Object.create(null) as Record<string, number>
   const seen = new Set<string>()
