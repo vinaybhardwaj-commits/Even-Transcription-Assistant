@@ -7,7 +7,7 @@ pinned seed (same windows, same segments); only `en` is added to lines that have
 Each line is matched to its segment in the window's run record by exact text (index i = position in the record's full segment list, refused
 segments included, as the annotation grammar counts them). Translations are read from <vault>/annotations/translation/*/*/*.json (items {k,i,en,q,src_sha256};
 k = record key without runs/ and .json). A line with no translation is left without `en` (the page says "No English for this line yet.").
-A translation is kept and written as-is whatever its q (ok / garbled source / untranslatable / mt_failed): the rater judges what a reader would see; the non-ok q values are recorded in the key, not on the page.
+A translation whose q flag is set is kept and written as-is (the reader sees the machine text; q is recorded in the key, not on the page).
 --report prints coverage only (Indic lines with English / total) and writes nothing. Output is 0700/0600, box only."""
 import argparse, glob, hashlib, json, os, stat, sys
 
@@ -67,14 +67,14 @@ for d in docs:
             if t:
                 new["en"] = t[0]
                 have += 1
-                if t[1] and t[1] != "ok":  # q is "ok" or a flag (garbled source, untranslatable, mt_failed)
+                if t[1]:
                     qn += 1
                 qs.append({"i": i, "q": t[1]})
         lines.append(new)
     out_docs.append({"id": d["id"], "lines": lines})
     nk = dict(k)
     nk["has_en"] = any(l.get("en") for l in lines)
-    nk["translation_q"] = [x for x in qs if x["q"] and x["q"] != "ok"]
+    nk["translation_q"] = [x for x in qs if x["q"]]
     out_key[d["id"]] = nk
 print(f"{len(docs)} excerpts; Indic lines {tot}; with English {have}; with a machine-translation quality flag {qn}; excerpts with any English {sum(k['has_en'] for k in out_key.values())}")
 if a.report or not a.out:

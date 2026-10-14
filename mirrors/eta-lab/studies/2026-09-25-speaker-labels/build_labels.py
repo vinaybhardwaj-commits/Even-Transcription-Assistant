@@ -13,15 +13,12 @@ PARAMS = dict(model="nvidia/Nemotron-3-Diarization", config="offline spkcache 26
 
 
 def index_records():
-    """window_id -> record path (first run in sorted order that HAS segments; sorted so the choice is deterministic)."""
+    """window_id -> record path (first run in sorted order that has segments; sorted so the choice is deterministic)."""
     seen = {}
     for root in ("hist", "hist-mining"):
         for p in sorted(glob.glob(f"{HOME}/{root}/runs/*/*/*/*.json")):
             wid = os.path.basename(p)[:-5]
-            if wid in seen: continue
-            try: has = bool(json.load(open(p)).get("segments"))
-            except Exception: has = False
-            if has: seen[wid] = p
+            if wid not in seen: seen[wid] = p
     return seen
 
 

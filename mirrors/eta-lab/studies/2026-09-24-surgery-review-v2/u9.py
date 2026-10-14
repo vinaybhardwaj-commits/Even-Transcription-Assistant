@@ -10,7 +10,6 @@ import json, os, urllib.request
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 PROMPT_VERSION = "u9-v2.2"
-from jevconfig import MODEL  # W41 F4b: moved, not changed (still "jev-1.13.0"); u9.MODEL still resolves for callers
 
 QUESTIONS_V21 = {
     "recommended": {"type": "choice", "instructions":
@@ -43,7 +42,7 @@ QUESTIONS_V21 = {
 
 def ask(state, questions=None, timeout=60):
     key = open(os.path.expanduser("~/.config/even-jev/key")).read().strip()
-    body = json.dumps({"model": MODEL, "state": state, "questions": questions or QUESTIONS}).encode()
+    body = json.dumps({"model": "jev-latest", "state": state, "questions": questions or QUESTIONS}).encode()
     import time
     for attempt in range(1, 6):  # lib/jev/client.ts retries 429/529 with backoff and never 401/422; same rule here
         req = urllib.request.Request(ENDPOINT, data=body, method="POST", headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
