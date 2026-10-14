@@ -1,0 +1,10 @@
+[Unit]
+Description=vp-auto-05 daily at 07:30 IST (before clinic, never at night)
+
+[Timer]
+OnCalendar=*-*-* 07:30:00 Asia/Kolkata
+Persistent=false
+Unit=vp-auto-daily.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=vp-auto-05: daily AUTO-route voiceprint job (rev9 gates, add-only, versioned live prints, mints only on G-sex PASS)
+
+[Service]
+Type=oneshot
+# the pinned deploy worktree of the eta-lab repo (moved only by studies/2026-10-08-vp-auto-05/deploy.sh from a clean commit), never a working tree; the job imports its sibling study folders, so it needs the whole checkout
+WorkingDirectory=%h/oc/consult/vp-auto-deploy/studies/2026-10-08-vp-auto-05
+# nemo venv (librosa for the F0 gate). CPU-only gating: no gpu.lock here (re-cuts of older clips are done by the cutter, tools/recut_queue.py)
+ExecStart=%h/eta-data/nemotron/venv-nemo-main/bin/python3 %h/oc/consult/vp-auto-deploy/studies/2026-10-08-vp-auto-05/vp_auto_live.py
+TimeoutStartSec=2h
