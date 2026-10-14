@@ -916,6 +916,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     dates: dict[str, str] = {}  # uid -> the consult's own IST date (bundle read); sealed uids fall back to the run day
     day_of = {u: day for u, _j, chk in uids if chk}
     ledger_failed = False
+    clock_src: dict = {}  # uid -> Consult, once its bundle is read (for the clock counts)
 
     def emit(uid: str, state: str, aid: str | None = None, reposted: bool = False) -> None:
         line = {"consult_uid": uid, "ist_date": dates.get(uid) or day_of.get(uid), "state": state, "artifact_id": aid,
@@ -924,6 +925,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
             line["job_id"] = job_of[uid]
         if reposted:
             line["reposted"] = True  # not a Bedrock attempt: count_attempts ignores it
+        line.update({k: v for k, v in _clock_of(clock_src.get(uid)).items() if v})  # only when non-zero
         if not cfg.get("out") or dry_run:
             return
         try:
@@ -997,6 +999,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
             (tmp / "bundles").mkdir()
             outcomes: dict[str, str] = {}
             rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles", outcomes=outcomes, dates=dates)
+            clock_src.update(consults)
             for u, st in outcomes.items():
                 emit(u, st)
             nothing = not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded
@@ -1015,6 +1018,8 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
         summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
     if summary.get("ledger_write_failed"):
         ledger_failed = True
+    for k in (n for n, _ in CLOCK_FIELDS):
+        summary[k] = sum(_clock_of(c)[k] for c in clock_src.values())
     summary.update(counts, **flags, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows),
                    attempts_exhausted=len(exhausted))
     summary["skipped"] = summary.get("skipped", 0) + overflow
@@ -1090,6 +1095,17 @@ def _usd_between(ledger: Path, start: int) -> float | None:
         return None
 
 
+CLOCK_FIELDS = (("clock_absolute", "segments_absolute"), ("clock_relative", "segments_relative"),
+                ("clock_dropped_outside", "dropped_outside_clip"), ("clock_malformed_dropped", "malformed_dropped"))
+
+
+def _clock_of(consult) -> dict:
+    """The four segment-clock counts of one Consult as ledger/summary names; zero where the Consult carries none. Counts only."""
+    cc = getattr(consult, "clock_counts", None)
+    cc = cc if isinstance(cc, dict) else {}
+    return {name: int(cc.get(src) or 0) for name, src in CLOCK_FIELDS}
+
+
 def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
     """run_one for bundle mode. The pipeline writes under ``out`` (inside the TemporaryDirectory); only derived outputs reach ``keep_root``."""
     state: dict = {"offset": 0}
@@ -1124,6 +1140,7 @@ def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | Non
     keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day",
             "skipped_existing", "attempts_exhausted", "cost_usd")
     line = {k: summary[k] for k in keys}
+    line.update({k: summary[k] for k, _ in CLOCK_FIELDS if k in summary})
     if summary.get("cost_unknown"):
         line["cost_unknown"] = summary["cost_unknown"]
     line.update({k: True for k in ("day_read_partial", "day_read_failed", "ledger_write_failed") if summary.get(k)})

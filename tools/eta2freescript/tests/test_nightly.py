@@ -1262,3 +1262,35 @@ def test_the_parent_directory_is_fsynced_when_the_ledger_is_first_created_only(t
     synced.clear()
     nightly.append_states(str(root), [{"consult_uid": "b", "state": "started", "code_sha256": "S"}])
     assert synced == [False]
+
+
+# ---- segment-clock counts (B2.2 fix round 1, D1 option c)
+
+def _clock_rows(counts_by_uid):
+    from types import SimpleNamespace
+
+    def rows(uids, day, cfg, tmp, fetch=None, outcomes=None, dates=None):
+        if dates is not None:
+            dates.update({u: day for u, _, _ in uids})
+        return ([{"uid": u, "ist_date": day, "room_slug": "r", "job_id": j, "doctor_uid8": None} for u, j, _ in uids],
+                {u: SimpleNamespace(clock_counts=counts_by_uid.get(u, {})) for u, _, _ in uids},
+                {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0})
+    return rows
+
+
+def test_the_summary_carries_the_four_clock_sums_and_the_ledger_only_when_non_zero(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    monkeypatch.setattr(nightly, "bundle_rows", _clock_rows({
+        "a": {"segments_absolute": 9, "segments_relative": 0, "dropped_outside_clip": 2, "malformed_dropped": 1},
+        "b": {"segments_absolute": 4, "segments_relative": 3, "dropped_outside_clip": 0, "malformed_dropped": 0}}))
+    out = {}
+    run(_bcfg(tmp_path), "2026-10-05", run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, pending=False,
+        sealed=["a", "b", "c"], skip_existing=True, day_read=lambda *_: [], out=out)
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (line["clock_absolute"], line["clock_relative"], line["clock_dropped_outside"], line["clock_malformed_dropped"]) == (13, 3, 2, 1)
+    lines = [json.loads(l) for l in (tmp_path / "keep" / "consult-state.jsonl").read_text().splitlines()]
+    a = [l for l in lines if l["consult_uid"] == "a"]
+    assert a and all((l["clock_absolute"], l["clock_dropped_outside"], l["clock_malformed_dropped"]) == (9, 2, 1) for l in a)
+    assert all("clock_relative" not in l for l in a)  # zero value omitted
+    c = [l for l in lines if l["consult_uid"] == "c"]
+    assert c and all(not any(k.startswith("clock_") for k in l) for l in c)  # all zero: no clock fields at all

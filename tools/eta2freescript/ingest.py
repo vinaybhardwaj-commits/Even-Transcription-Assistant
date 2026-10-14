@@ -293,7 +293,7 @@ def bundle_window(bundle: dict) -> tuple[int, int, str | None]:
 
 
 EPOCH_MS_MIN = 10**12  # a t0_ms at or above this is epoch ms (2001-09 onwards); a clip-relative ms never gets near it
-CLOCK_COUNT_KEYS = ("segments_absolute", "segments_relative", "dropped_outside_clip", "clock_mismatch")
+CLOCK_COUNT_KEYS = ("segments_absolute", "segments_relative", "dropped_outside_clip", "malformed_dropped")
 
 
 def _manifest_window(bundle: dict) -> tuple[int, int] | None:
@@ -310,8 +310,9 @@ def _shift(segs: list, t0: int, dur: int, stats: dict | None = None, window: tup
     """Move track segments to the absolute UTC ms the folder reader's transcripts use, so boundary.py / format_transcript see one axis.
 
     Consult-scope tracks carry EPOCH ms on the manifest clock (palimpsest read contract v0.2); legacy fixtures carry ms from clip start.
-    The clock is decided once per track, by its first usable segment (t0_ms >= EPOCH_MS_MIN is epoch). Clocks are never mixed in a track:
-    a segment on the other clock is read on the track's clock and counted in clock_mismatch.
+    A track is EPOCH if ANY usable segment has t0_ms >= EPOCH_MS_MIN (a clip-relative ms can never reach it), else RELATIVE (legacy).
+    Inside an epoch track a segment with t0_ms or t1_ms below EPOCH_MS_MIN is malformed: dropped and counted in malformed_dropped, never
+    read as relative. Clocks are never mixed in a track.
     Epoch track: clamp to `window` (the manifest t0_ms/t1_ms = the consult.flac audio span; default [t0, t0 + dur]), NOT the cutter span, which
     can start up to 60 s after the audio (pre-roll). A segment wholly outside the window is dropped and counted.
     Relative track: clamp the end to the clip (Sarvam can overrun by up to 0.56 s), then add clip_t0.
@@ -320,20 +321,20 @@ def _shift(segs: list, t0: int, dur: int, stats: dict | None = None, window: tup
     for k in CLOCK_COUNT_KEYS:
         st.setdefault(k, 0)
     w0, w1 = window if window else (t0, t0 + dur)
-    out, absolute = [], None
+    out, usable = [], []
     for g in segs or []:
         if not isinstance(g, dict):
             continue
         try:
-            a, b = int(g["t0_ms"]), int(g["t1_ms"])
+            usable.append((g, int(g["t0_ms"]), int(g["t1_ms"])))
         except (KeyError, TypeError, ValueError):
             continue
-        is_epoch = a >= EPOCH_MS_MIN
-        if absolute is None:
-            absolute = is_epoch
-        elif is_epoch != absolute:
-            st["clock_mismatch"] += 1
+    absolute = any(a >= EPOCH_MS_MIN for _g, a, _b in usable)
+    for g, a, b in usable:
         if absolute:
+            if a < EPOCH_MS_MIN or b < EPOCH_MS_MIN:
+                st["malformed_dropped"] += 1
+                continue
             if b < w0 or a > w1:
                 st["dropped_outside_clip"] += 1
                 continue
