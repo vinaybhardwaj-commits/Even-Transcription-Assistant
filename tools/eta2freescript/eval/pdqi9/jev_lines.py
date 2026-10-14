@@ -16,6 +16,8 @@ import select
 import subprocess
 import time
 
+from ... import validate
+
 MAX_QUESTIONS = 200
 INSTRUCTIONS = ("Does the transcript support note line {id}? true = the transcript supports every clinical claim in the line; "
                 "false = it does not.")
@@ -94,6 +96,21 @@ def _argv_from_env() -> list[str] | None:
     return argv
 
 
+def empty_headings(text: str) -> set[int]:
+    """1-based line numbers of bare section headings with no body: `Heading:` with nothing after it and no body line before the next
+    heading (or the end). The validator's own heading list decides what a heading is."""
+    rows = [(i, ln) for i, ln in enumerate((text or "").split("\n"), 1) if ln.strip()]
+    heads = validate.V.HEADINGS
+    out = set()
+    for k, (i, ln) in enumerate(rows):
+        h, sep, body = ln.partition(":")
+        if sep and h in heads and not body.strip():
+            nxt = rows[k + 1][1] if k + 1 < len(rows) else None
+            if nxt is None or (nxt.partition(":")[1] and nxt.partition(":")[0] in heads):
+                out.add(i)
+    return out
+
+
 def jev_ask_args(transcript: str, lines: dict[str, str]) -> dict:
     """The one place the jev_ask argument shape lives. Strict: no other keys ("model" is optional and left to the server default)."""
     return {"state": {"transcript": transcript, "lines": lines},
@@ -101,7 +118,8 @@ def jev_ask_args(transcript: str, lines: dict[str, str]) -> dict:
 
 
 def check_lines(note_text: str, transcript: str, client=None) -> dict:
-    """{"status": "ok", "lines": n, "low": [{"line": i, "p_yes": p}], "errors": k, "model": m, "calls": c} or a not-run/error status.
+    """{"status": "ok", "lines": n, "low": [{"line": i, "p_yes": p}], "errors": k, "model": m, "calls": c, "jev_skipped_empty_headings": h} or a not-run/error status.
+    Bare section headings with no body are not sent and not counted in `lines`.
 
     Line numbers are 1-based positions in note_text (blank lines count). `client` is a test seam (an object with .call)."""
     if client is None and not os.environ.get("JEV_MCP_CMD"):
@@ -109,7 +127,8 @@ def check_lines(note_text: str, transcript: str, client=None) -> dict:
     own = client is None
     try:
         client = client or StdioMcp(_argv_from_env())
-        lines = [(i, ln) for i, ln in enumerate((note_text or "").split("\n"), 1) if ln.strip()]
+        bare = empty_headings(note_text or "")
+        lines = [(i, ln) for i, ln in enumerate((note_text or "").split("\n"), 1) if ln.strip() and i not in bare]
         low, errors, model, calls = [], 0, None, 0
         for k in range(0, len(lines), MAX_QUESTIONS):
             chunk = lines[k:k + MAX_QUESTIONS]
@@ -127,7 +146,8 @@ def check_lines(note_text: str, transcript: str, client=None) -> dict:
                     errors += 1
                 elif p < THRESHOLD:
                     low.append({"line": i, "p_yes": round(p, 3)})
-        return {"status": "ok", "lines": len(lines), "low": low, "errors": errors, "model": model, "calls": calls}
+        return {"status": "ok", "lines": len(lines), "low": low, "errors": errors, "model": model, "calls": calls,
+                "jev_skipped_empty_headings": len(bare)}
     except Exception as ex:
         return {"status": "error", "reason": type(ex).__name__}
     finally:

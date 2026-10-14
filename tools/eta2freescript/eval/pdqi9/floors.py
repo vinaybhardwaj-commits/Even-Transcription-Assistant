@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import unicodedata
 from pathlib import Path
 
 from ... import validate
@@ -35,32 +37,37 @@ def numbered_items(rx: dict) -> list[dict]:
     validate_prescription(rx)
     out: list[dict] = []
 
-    def add(kind, text, **extra):
+    def add(kind, text, vals=(), **extra):
+        """`vals` are the raw rx field values behind a non-medicine item (matching uses these, never the labelled text)."""
         if text:
-            out.append({"n": len(out) + 1, "kind": kind, "text": text, **extra})
+            out.append({"n": len(out) + 1, "kind": kind, "text": text, "vals": [v for v in (_s(x) for x in vals) if v], **extra})
 
     for m in rx.get("medicines") or []:
         parts = [f"{lab}: {_s(m.get(k))}" for lab, k in (("brand", "brand_name"), ("generic", "generic"), ("strength", "strength"),
                  ("frequency", "frequency"), ("duration", "duration"), ("instructions", "instructions")) if _s(m.get(k))]
         add("medicine", "; ".join([_s(m.get("name"))] + parts) if _s(m.get("name")) else "", med=m)
     for d in rx.get("diagnoses") or []:
-        add("diagnosis", ("differential: " if d.get("is_differential") else "") + _s(d.get("name")))
+        add("diagnosis", ("differential: " if d.get("is_differential") else "") + _s(d.get("name")), [d.get("name")])
     for c in rx.get("comorbidities") or []:
-        add("comorbidity", _s(c.get("name")) + (f" ({_s(c.get('duration'))})" if _s(c.get("duration")) else ""))
+        add("comorbidity", _s(c.get("name")) + (f" ({_s(c.get('duration'))})" if _s(c.get("duration")) else ""),
+            [c.get("name"), c.get("duration")])
     for i in rx.get("investigations") or []:
-        add("investigation", _s(i.get("name")) + (" (urgent)" if i.get("urgent") else "") + (f": {_s(i.get('instruction'))}" if _s(i.get("instruction")) else ""))
+        add("investigation", _s(i.get("name")) + (" (urgent)" if i.get("urgent") else "") + (f": {_s(i.get('instruction'))}" if _s(i.get("instruction")) else ""),
+            [i.get("name"), i.get("instruction")])
     for s in rx.get("surgeries") or []:
         add("procedure", _s(s.get("name")) + (f" on {_s(s.get('scheduled_date'))}" if _s(s.get("scheduled_date")) else "")
-            + (f": {_s(s.get('notes'))}" if _s(s.get("notes")) else ""))
+            + (f": {_s(s.get('notes'))}" if _s(s.get("notes")) else ""), [s.get("name"), s.get("scheduled_date"), s.get("notes")])
     for r in rx.get("referrals") or []:
-        add("referral", _s(r.get("speciality")) + (f": {_s(r.get('notes'))}" if _s(r.get("notes")) else ""))
+        add("referral", _s(r.get("speciality")) + (f": {_s(r.get('notes'))}" if _s(r.get("notes")) else ""),
+            [r.get("speciality"), r.get("notes")])
     for a in rx.get("general_advice") or []:
-        add("advice", _s(a))
+        add("advice", _s(a), [a])
     fu = rx.get("follow_up") or {}
     add("follow_up", "; ".join(([] if not fu.get("no_follow_up_needed") else ["no follow-up needed"])
-                                + [f"{k}: {_s(fu.get(k))}" for k in ("type", "date", "instructions") if _s(fu.get(k))]))
+                                + [f"{k}: {_s(fu.get(k))}" for k in ("type", "date", "instructions") if _s(fu.get(k))]),
+        [fu.get(k) for k in ("type", "date", "instructions")])
     for k, kind in (("symptoms", "symptoms"), ("examination", "examination"), ("management_plan", "plan")):
-        add(kind, _s(rx.get(k)))
+        add(kind, _s(rx.get(k)), [rx.get(k)])
     return out
 
 
@@ -153,16 +160,45 @@ def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse
 _ZERO = ("unsupported_drugs", "leak_items", "invented_fields", "dose_precedence_errors", "hallucinations", "unclear_items")
 
 
-def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: Path, uid: str, arm_kind: str, shape_log: Path | None = None) -> dict:
+def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> dict:
+    """Source tallies for the three judged floors that name a replayed medicine or field."""
+    by_n = {it["n"]: it for it in items}
+    unsupported, invented, dose = [], [], []
+    for x in res:
+        it = by_n[x["n"]]
+        m = it.get("med")
+        prov = _prov_for(m, art) if m is not None else None
+        if it["kind"] == "medicine" and x["said"] == "no":
+            unsupported.append(_name_source(m, art))
+        if it["kind"] == "medicine" and x["invented"]:
+            invented.append(_worst(_field_source(m, f, art, prov) for f in x["invented"]))
+        if x["dose_precedence_error"]:
+            if m is None:
+                vals = it.get("vals") or []
+                dose.append("pulse_extraction" if vals and not any(_in_text(v, _eta_output(art)) for v in vals) else "eta")
+            elif not _s(m.get("strength")) or _in_text(_s(m.get("strength")), _eta_text(art, prov)):
+                dose.append("eta")
+            else:
+                dose.append("pulse_catalogue" if _is_catalogue(m) else "eta")
+    return {"unsupported_drugs": _tally(unsupported), "invented_fields": _tally(invented), "dose_precedence_errors": _tally(dose)}
+
+
+def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: Path, uid: str, arm_kind: str, shape_log: Path | None = None,
+                art: dict | None = None, attr_out: dict | None = None) -> dict:
+    """`attr_out`, when given, receives the per-source tallies of the judged floors (the returned counts are unchanged)."""
     """Counts from floor-items-v1 over the numbered replayed items. All None when the judge could not be parsed twice.
     `transcript` is format_transcript output (T<n> ids, roles, QUARANTINED marks)."""
     if not items:
+        if attr_out is not None:
+            attr_out.update({k: _zero_attr() for k in ("unsupported_drugs", "invented_fields", "dose_precedence_errors")})
         return {**dict.fromkeys(_ZERO, 0), "parse_failure": False}
     user = f"TRANSCRIPT:\n{transcript}\n\nITEMS:\n{_list(items)}\n"
     res, tolerated = _judge_json(client, frozen, "floor-items-v1.system.txt", user, lambda t: _parse_rows(t, "items", len(items), _item_ok),
                                  cache_dir, uid, arm_kind, "floor-items-v1", arm_kind, shape_log)
     if res is None:
         return {**dict.fromkeys(_ZERO), "parse_failure": True}
+    if attr_out is not None:
+        attr_out.update(_judge_attribution(res, items, art))
     kind = {it["n"]: it["kind"] for it in items}
     med = [x for x in res if kind[x["n"]] == "medicine"]
     return {"unsupported_drugs": sum(1 for x in med if x["said"] == "no"),
@@ -228,22 +264,185 @@ def _cited_turns(p: dict) -> list[int]:
     return out
 
 
-def invented_numbers(rx: dict, art: dict | None, consult: Consult) -> dict:
-    """Digit runs in a replayed medicine's strength/frequency/duration must occur in the turns the artifact cites for it."""
+
+# ---- attribution (FLOOR-ATTRIBUTION kickoff, 14 Oct 2026) -------------------------------------------------------
+# Every floor hit gets a source, decided deterministically. Priority when one hit has several parts: eta > pulse_catalogue >
+# pulse_extraction > check. A medicine row with a uid and other=False carries the resolved catalogue entity's name, brand, generic
+# and strength (replay.build copies them); frequency, duration and instructions come from the Pulse LLM extraction.
+
+SOURCES = ("eta", "pulse_catalogue", "pulse_extraction", "check")
+FLOOR_BASES = ("all", "eta")
+DEFAULT_FLOOR_BASIS = "eta"
+ATTRIBUTED = {"unsupported drugs": "unsupported_drugs", "invented fields": "invented_fields",
+              "dose precedence errors (judge)": "dose_precedence_errors", "invented numbers (deterministic)": "invented_numbers",
+              "dose precedence errors (deterministic)": "dose_precedence_det", "printable errors": "printable_errors"}
+
+
+def floor_basis(basis: str | None = None) -> str:
+    """FREESCRIPT_FLOOR_BASIS in {all, eta}; unset or empty is eta (fable ruling). A typo is an error, never mapped to a default."""
+    b = basis if basis is not None else os.environ.get("FREESCRIPT_FLOOR_BASIS", "")
+    if b == "":
+        b = DEFAULT_FLOOR_BASIS
+    if b not in FLOOR_BASES:
+        raise ValueError("FREESCRIPT_FLOOR_BASIS must be one of: " + ", ".join(FLOOR_BASES))
+    return b
+
+
+def _zero_attr() -> dict:
+    return dict.fromkeys(SOURCES, 0)
+
+
+def _tally(sources) -> dict:
+    t = _zero_attr()
+    for x in sources:
+        t[x] += 1
+    return t
+
+
+def _worst(sources) -> str:
+    sources = list(sources)
+    return next((x for x in SOURCES if x in sources), "check")
+
+
+def _is_catalogue(m: dict) -> bool:
+    return bool(m.get("uid")) and m.get("other") is False
+
+
+def _note_lines_for(m: dict, art: dict | None) -> str:
+    """The lines of ETA's note_text that name this drug."""
+    names = _rx_names(m)
+    return "\n".join(ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip() and _names_match(names, {_norm_name(ln)}))
+
+
+_PROV_SKIP = frozenset({"evidence", "decision", "quote", "quote_en", "segment_ref", "item_id", "json_pointer", "flags"})
+
+
+def _prov_values(node, out: list[str]) -> None:
+    """Every string a provenance item carries as ETA's own statement: `text`, `names` and the structured `medicine` parts
+    (strength.text, frequency and duration texts...). Transcript quotes and ids are not ETA's output."""
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if k not in _PROV_SKIP:
+                _prov_values(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _prov_values(v, out)
+
+
+def _prov_text(p: dict | None) -> str:
+    out: list[str] = []
+    if isinstance(p, dict):
+        for k in ("text", "names", "diagnosis", "follow_up", "investigation", "procedure", "medicine"):
+            _prov_values(p.get(k), out)
+    return "\n".join(out)
+
+
+_NUMWORDS = {w: str(i) for i, w in enumerate("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                                              "sixteen seventeen eighteen nineteen twenty".split(), 1)}
+_NUMWORDS.update({"once": "1", "twice": "2", "thrice": "3"})
+_NUMWORD_RE = re.compile(r"\b(" + "|".join(_NUMWORDS) + r")\b")
+
+
+def _numnorm(s: str) -> str:
+    """Number words one..twenty and once/twice/thrice become digits, "a day" becomes "daily" (lower-cased)."""
+    return _NUMWORD_RE.sub(lambda m: _NUMWORDS[m.group(1)], re.sub(r"\ba day\b", "daily", (s or "").lower()))
+
+
+def _eta_output(art: dict | None) -> str:
+    """ETA's whole output for the consult: note_text, every provenance item's text/names and structured values (number words normalised)."""
+    a = art or {}
+    note = a.get("note_text") if isinstance(a.get("note_text"), str) else ""
+    return _numnorm("\n".join([note] + [_prov_text(p) for p in a.get("provenance") or [] if isinstance(p, dict)]))
+
+
+def _eta_text(art: dict | None, prov: dict | None) -> str:
+    """Lead rule: a value is ETA's when it appears anywhere in ETA's output (drug-line matching may only move a hit toward eta)."""
+    return _eta_output(art) + "\n" + _numnorm(_prov_text(prov))
+
+
+def _text_in(value: str, text: str) -> bool:
+    """Normalised, case-folded substring (no digit-run shortcut)."""
+    v = re.sub(r"\s+", " ", _numnorm(value)).strip()
+    return bool(v) and v in re.sub(r"\s+", " ", _numnorm(text))
+
+
+def _in_text(value: str, text: str) -> bool:
+    """Digits: every digit run of value occurs among the digit runs of text. No digits: normalised substring."""
+    value, text = _numnorm(value), _numnorm(text)
+    runs = _DIGITS.findall(value)
+    if runs:
+        have = set(_DIGITS.findall(text))
+        return all(r in have for r in runs)
+    v = re.sub(r"\s+", " ", value).strip()
+    return bool(v) and v in re.sub(r"\s+", " ", text)
+
+
+def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None) -> str:
+    """Source of one digit run found in field of replayed medicine m."""
+    if run in _DIGITS.findall(_eta_text(art, prov)):  # _eta_text is number-word normalised
+        return "eta"
+    if field == "strength":
+        return "pulse_catalogue" if _is_catalogue(m) else "eta"
+    return "pulse_extraction"
+
+
+def _field_source(m: dict, field: str, art: dict | None, prov: dict | None) -> str:
+    """Source of a whole replayed medicine field (judge floors, which flag a field, not a digit run)."""
+    value = _s(m.get(field))
+    if not value:  # a field the judge invented that the rx leaves empty: in doubt, ETA's
+        return "eta"
+    if _in_text(value, _eta_text(art, prov)):
+        return "eta"
+    if field == "strength":
+        return "pulse_catalogue" if _is_catalogue(m) else "eta"
+    return "pulse_extraction"
+
+
+def _name_source(m: dict, art: dict | None) -> str:
+    """Source of an unsupported replayed drug (the name is the offending value)."""
+    if _note_lines_for(m, art) or _prov_for(m, art) is not None:
+        return "eta"
+    if any(_text_in(v, _eta_output(art)) for v in (m.get(k) or "" for k in ("name", "brand_name", "generic")) if len(_norm_name(v)) >= 3):
+        return "eta"
+    return "pulse_catalogue" if _is_catalogue(m) else "pulse_extraction"
+
+
+def _prov_for(m: dict, art: dict | None) -> dict | None:
+    return next((p for p in _prov_medicines(art) if _names_match(_rx_names(m), _prov_names(p))), None)
+
+
+def _invented_core(rx: dict, art: dict | None, consult: Consult) -> dict:
+    """Digit runs in a replayed medicine's strength/frequency/duration must occur in the turns the artifact cites for it.
+    An unmatched medicine with no digits is not a hit (info: unmatched_no_digits)."""
     prov = _prov_medicines(art)
-    offending = unmatched = 0
+    offending = unmatched = no_digits = 0
+    sources: list[str] = []
     for m in rx.get("medicines") or []:
-        runs = [r for k in ("strength", "frequency", "duration") for r in _DIGITS.findall(m.get(k) or "")]
+        runs = [(k, r) for k in ("strength", "frequency", "duration") for r in _DIGITS.findall(m.get(k) or "")]
         match = next((p for p in prov if _names_match(_rx_names(m), _prov_names(p))), None)
         if match is None:
+            if not runs:
+                no_digits += 1
+                continue
             unmatched += 1
+            sources.append(_worst(_run_source(m, k, r, art, None) for k, r in runs))
             continue
         heard = set()
         for t in _cited_turns(match):
             if 0 <= t < len(consult.turns):
                 heard |= set(_DIGITS.findall(f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"))
-        offending += sum(1 for r in runs if r not in heard)
-    return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched}
+        bad = [(k, r) for k, r in runs if r not in heard]
+        offending += len(bad)
+        sources += [_run_source(m, k, r, art, match) for k, r in bad]
+    return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched,
+            "unmatched_no_digits": no_digits, "sources": sources}
+
+
+def invented_numbers(rx: dict, art: dict | None, consult: Consult) -> dict:
+    c = _invented_core(rx, art, consult)
+    return {k: c[k] for k in ("offending_runs", "unmatched_medicines", "count")}
 
 
 def _strength(s: str) -> tuple[float, str] | None:
@@ -251,9 +450,10 @@ def _strength(s: str) -> tuple[float, str] | None:
     return (float(m.group(1)), m.group(2).lower()) if m else None
 
 
-def dose_precedence(rx: dict, art: dict | None) -> int:
-    """Replayed strength must equal the artifact's for every doctor_dose_precedence item (a missing medicine counts as an error)."""
-    errs = 0
+def dose_precedence_sources(rx: dict, art: dict | None) -> list[str]:
+    """One source per error. A medicine missing from the replay, or a non-catalogue strength, is eta; a catalogue strength not on
+    ETA's line for the drug is pulse_catalogue."""
+    out: list[str] = []
     for p in _prov_medicines(art):
         if "doctor_dose_precedence" not in (p.get("flags") or []):
             continue
@@ -262,25 +462,33 @@ def dose_precedence(rx: dict, art: dict | None) -> int:
         if want is None:
             continue
         m = next((m for m in rx.get("medicines") or [] if _names_match(_rx_names(m), _prov_names(p))), None)
-        if m is None or _strength(m.get("strength") or "") != want:
-            errs += 1
-    return errs
+        if m is None:
+            out.append("eta")
+        elif _strength(m.get("strength") or "") != want:
+            out.append("eta" if not _s(m.get("strength")) or _in_text(_s(m.get("strength")), _eta_text(art, p)) else
+                       "pulse_catalogue" if _is_catalogue(m) else "eta")
+    return out
 
 
-def printable_text(rx: dict) -> str:
-    """Every replayed Rx text field, rendered under the heading the printable note puts it under, so the section-gated
-    FRX-N1 checks (d1-d4) see it. Medicines: one line each (name strength frequency for duration instructions)."""
-    sec: dict[str, list[str]] = {h: [] for h in ("Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
-                                                 "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice")}
+def dose_precedence(rx: dict, art: dict | None) -> int:
+    """Replayed strength must equal the artifact's for every doctor_dose_precedence item (a missing medicine counts as an error)."""
+    return len(dose_precedence_sources(rx, art))
 
-    def add(head, *parts):
+
+def _printable_lines(rx: dict) -> list[tuple[str, str, dict | None]]:
+    """(heading, line, replayed medicine or None) for every Rx text field, in printable section order."""
+    sec: dict[str, list[tuple[str, dict | None]]] = {h: [] for h in ("Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses",
+                                                                      "Plan of Management", "Surgery or Procedure", "Medication",
+                                                                      "Further Investigation", "Follow up", "Refer to", "General Advice")}
+
+    def add(head, *parts, med=None):
         line = " ".join(p for p in (_s(x) for x in parts) if p)
         if line:
-            sec[head].append(line)
+            sec[head].append((line, med))
 
     for m in rx.get("medicines") or []:
         add("Medication", m.get("name"), m.get("brand_name"), m.get("generic"), m.get("strength"), m.get("frequency"),
-            "for" if _s(m.get("duration")) else "", m.get("duration"), m.get("instructions"))
+            "for" if _s(m.get("duration")) else "", m.get("duration"), m.get("instructions"), med=m)
     for i in rx.get("investigations") or []:
         add("Further Investigation", i.get("name"), i.get("instruction"))
     for x in rx.get("surgeries") or []:
@@ -298,7 +506,109 @@ def printable_text(rx: dict) -> str:
     add("Examination", rx.get("examination"))
     add("Presenting Complaint", rx.get("symptoms"))
     add("Plan of Management", rx.get("management_plan"))
-    return "\n".join(f"{h}:\n" + "\n".join(lines) for h, lines in sec.items() if lines)
+    return [(h, line, med) for h, rows in sec.items() for line, med in rows]
+
+
+def printable_text(rx: dict) -> str:
+    """Every replayed Rx text field, rendered under the heading the printable note puts it under, so the section-gated
+    FRX-N1 checks (d1-d4) see it. Medicines: one line each (name strength frequency for duration instructions)."""
+    heads: dict[str, list[str]] = {}
+    for h, line, _ in _printable_lines(rx):
+        heads.setdefault(h, []).append(line)
+    return "\n".join(f"{h}:\n" + "\n".join(lines) for h, lines in heads.items())
+
+
+def _note_chunks(note: str) -> list[str]:
+    """note_text split into one chunk per rendered line, each carrying its heading so the section-gated checks see it."""
+    out, cur = [], None
+    for line in (note or "").split("\n"):
+        head, sep, _ = line.partition(":")
+        if sep and head in validate.V.HEADINGS:
+            cur = head
+            out.append(line)
+        elif line.strip():
+            out.append(f"{cur}:\n{line}" if cur else line)
+    return out
+
+
+def _rule(e: str) -> str:
+    """The rule of one printable finding: the finding without its quoted match and its (heading) suffix. No text matching."""
+    return re.sub(r"\s*\([^()]*\)\s*$", "", re.sub(r"'[^']*'", "''", e)).strip()
+
+
+def _bracket_hits(text: str) -> tuple[int, int]:
+    """(hits of the `[` rule, hits of the Ps/Pe rule) of printable_errors on text: validate.py:860-869 emits the same finding twice for one bracket."""
+    note = unicodedata.normalize("NFKC", text or "")
+    return (int("[" in note or "]" in note),
+            int(any(unicodedata.category(c) in ("Ps", "Pe") and c not in "()" for c in note)))
+
+
+def _bracket_check(whole_text: str, line_texts: list[str]) -> int:
+    """Validator double-emissions of one bracket: per rendered line min(`[` hits, Ps/Pe hits), capped by the whole text's own count."""
+    per_line = sum(min(*_bracket_hits(t)) for t in line_texts)
+    return min(per_line, min(*_bracket_hits(whole_text)))
+
+
+_BRACKET_RULE = _rule("FRX-N1 note_text contains a bracket")
+
+
+def printable_attribution(rx: dict, art: dict | None) -> dict:
+    """{"raw", "dedup", "check", "sources": {...}}. raw is printable_count. Findings in ETA's own note_text are eta. A replayed finding is
+    eta when ETA's note_text yields a finding of the SAME rule (no text matching); otherwise pulse_catalogue when it lies on an
+    entity-resolved medicine line, else pulse_extraction. The only thing removed is the validator's double emission of one bracket (the
+    `[` rule plus the Ps/Pe rule), counted as `check`; nothing else is de-duplicated."""
+    sources: list[str] = []
+    raw = check = 0
+    eta_rules: set[str] = set()
+    if art is not None and isinstance(art.get("note_text"), str):
+        note = art["note_text"]
+        prompts = [c.get("prompt") for c in art.get("completion_required") or [] if isinstance(c, dict)]
+        whole = validate.printable_errors(note, prompts)
+        eta_rules = {_rule(e) for e in whole}
+        n = min(_bracket_check(note, _note_chunks(note)), sum(1 for e in whole if _rule(e) == _BRACKET_RULE) - 1) if whole else 0
+        n = max(n, 0)
+        raw += len(whole)
+        check += n
+        sources.extend(["eta"] * (len(whole) - n))
+    lines = _printable_lines(rx)
+    text = printable_text(rx)
+    whole = validate.printable_errors(text, [])
+    # each finding's locations: ALL rendered lines that yield it (the result must not depend on line order)
+    per_line = [(line, med, validate.printable_errors(f"{h}:\n{line}", [])) for h, line, med in lines]
+    eta_out = _eta_output(art)
+    n = _bracket_check(text, [f"{h}:\n{line}" for h, line, _ in lines])
+    n = max(min(n, sum(1 for e in whole if _rule(e) == _BRACKET_RULE) - 1), 0) if whole else 0
+    raw += len(whole)
+    check += n
+    rank = {"eta": 0, "pulse_catalogue": 1, "pulse_extraction": 2}
+    classed: list[tuple[str, str]] = []  # (rule, class)
+
+    def klass(e: str, yl: list[tuple[str, dict | None]]) -> str:
+        q = re.search(r"'([^']*)'", e)
+        cands = ([q.group(1)] if q else []) + [line for line, _ in yl]
+        if _rule(e) in eta_rules or any(len(c.strip()) >= 3 and re.search(r"[^\W\d_]", c) and _text_in(c, eta_out) for c in cands):
+            return "eta"
+        if yl and all(med is not None and _is_catalogue(med) for _, med in yl):
+            return "pulse_catalogue"
+        return "pulse_extraction"  # a non-medicine line, or coalesced across lines with no single location
+
+    for e in dict.fromkeys(whole):
+        k = whole.count(e)
+        yl = [(line, med) for line, med, errs in per_line for _ in range(errs.count(e))]
+        if len(yl) == k:  # each occurrence is its own line's: classed by that line alone
+            classed.extend((_rule(e), klass(e, [y])) for y in yl)
+        elif len(yl) > k:  # one finding for the whole text that several lines yield: all of them decide
+            classed.extend((_rule(e), klass(e, yl)) for _ in range(k))
+        else:  # some occurrences have no single line
+            classed.extend((_rule(e), klass(e, [y])) for y in yl)
+            classed.extend((_rule(e), klass(e, [])) for _ in range(k - len(yl)))
+    drop = n  # the double emission is dropped from the bracket-rule findings in a fixed (class) order, never line order
+    for r, cls in sorted(classed, key=lambda t: (t[0] != _BRACKET_RULE, rank[t[1]])):
+        if r == _BRACKET_RULE and drop:
+            drop -= 1
+            continue
+        sources.append(cls)
+    return {"raw": raw, "dedup": len(sources), "check": check, "sources": {**_tally(sources), "check": check}}
 
 
 def _unknown_strings(node, schema) -> list[str]:
@@ -357,11 +667,17 @@ def validator_failures(art: dict | None) -> int:
 def consult_floors(client, frozen, *, uid: str, arm_kind: str, rx: dict, signed_rx: dict, art: dict | None, consult: Consult,
                    transcript: str, cache_dir: Path, shape_log: Path | None = None) -> dict:
     items, signed = numbered_items(rx), numbered_items(signed_rx)
-    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log)
-    inv = invented_numbers(rx, art, consult)
+    judged_attr: dict = {}
+    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log, art, judged_attr)
+    inv = _invented_core(rx, art, consult)
+    dps = dose_precedence_sources(rx, art)
+    pa = printable_attribution(rx, art)
+    attribution = {**judged_attr, "invented_numbers": _tally(inv["sources"]), "dose_precedence_det": _tally(dps), "printable_errors": pa["sources"]}
     rec = {"uid": uid, "arm": arm_kind, "n_items": len(items), **j, "invented_numbers": inv["count"],
            "invented_numbers_detail": {k: inv[k] for k in ("offending_runs", "unmatched_medicines")},
-           "dose_precedence_det": dose_precedence(rx, art), "printable_errors": printable_count(rx, art), "unknown_key_errors": unknown_key_errors(rx),
+           "unmatched_no_digits": inv["unmatched_no_digits"], "attribution": attribution,
+           "printable_detail": {k: pa[k] for k in ("raw", "dedup", "check")},
+           "dose_precedence_det": len(dps), "printable_errors": printable_count(rx, art), "unknown_key_errors": unknown_key_errors(rx),
            "validator_failures": validator_failures(art), "artifact_missing": art is None}
     rec["completion"] = completion_counts(client, frozen, signed, items, (art or {}).get("completion_required") or [], transcript,
                                           cache_dir, uid, arm_kind, shape_log)
@@ -373,8 +689,33 @@ def _sum(rows: list[dict], key: str):
     return None if any(v is None for v in vals) else sum(vals)
 
 
-def aggregate(bn: list[dict], b0: list[dict] | None = None) -> dict:
-    """Floor table for arm Bn (pass/fail against spec 12.3) with B0 baselines where given."""
+def _attr_sum(rows: list[dict], key: str) -> dict | None:
+    """Per-source totals of floor `key`. A row without attribution is all eta (nothing shown to be someone else's); None when the floor total is None."""
+    out = _zero_attr()
+    for r in rows:
+        if r.get(key) is None:
+            return None
+        a = (r.get("attribution") or {}).get(key)
+        for k in SOURCES:
+            out[k] += r[key] if a is None and k == "eta" else (a or {}).get(k, 0)
+    return out
+
+
+def header(rows: list[dict], basis: str) -> dict:
+    """The round header: the basis, and the eta, pulse_catalogue, pulse_extraction and check counts summed over the attributed
+    floors, whichever basis is chosen."""
+    att = [t for t in rows if t.get("eta") is not None and t["floor"] in ATTRIBUTED]
+    h = {"floor_basis": basis}
+    h.update({k: sum(t[k] or 0 for t in att) for k in SOURCES})
+    h["total"] = sum(t["bn"] or 0 for t in att)
+    return h
+
+
+def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = None) -> dict:
+    """Floor table for arm Bn (pass/fail against spec 12.3) with B0 baselines where given. `bn` is the total of every hit; the
+    attributed floors also carry eta, pulse_catalogue, pulse_extraction and check. basis `eta` (default) passes on the eta column
+    only, `all` on the total; it changes the pass column and the stamp, never a count."""
+    basis = floor_basis(basis)
     n = len(bn)
     comp = lambda rows: (None if any(r["completion"]["missing"] is None for r in rows) else
                          (None if sum(r["completion"]["missing"] for r in rows) == 0 else
@@ -383,7 +724,16 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None) -> dict:
 
     def zero(name, key):
         v = _sum(bn, key)
-        table.append({"floor": name, "bn": v, "b0": _sum(b0, key) if b0 else None, "rule": "== 0", "pass": v == 0})
+        row = {"floor": name, "bn": v, "b0": _sum(b0, key) if b0 else None, "rule": "== 0"}
+        if key in ATTRIBUTED.values():
+            at = _attr_sum(bn, key)
+            row.update(at or {k: None for k in SOURCES})
+            basis_v = v if basis == "all" else (at or {}).get("eta")
+            row["basis_value"] = basis_v
+            row["pass"] = basis_v == 0
+        else:
+            row["pass"] = v == 0
+        table.append(row)
 
     for name, key in (("unsupported drugs", "unsupported_drugs"), ("leak items", "leak_items"), ("invented fields", "invented_fields"),
                       ("dose precedence errors (judge)", "dose_precedence_errors"), ("invented numbers (deterministic)", "invented_numbers"),
@@ -405,7 +755,9 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None) -> dict:
         recall_pass = "pass" if ok_ else "fail"
     table.append({"floor": "completion recall", "bn": r, "b0": r0, "rule": "Bn >= B0", "recall_pass": recall_pass,
                   "pass": ok_, "blocks_kept": not ok_})
+    table.append({"floor": "unmatched medicines with no digits (info, not a hit)", "bn": _sum(bn, "unmatched_no_digits") if all("unmatched_no_digits" in x for x in bn) else None,
+                  "b0": None, "rule": "info", "pass": True})
     zero("unknown-key printable errors", "unknown_key_errors")
     table.append({"floor": "unclear items (reported, not a breach)", "bn": _sum(bn, "unclear_items"), "b0": _sum(b0, "unclear_items") if b0 else None, "rule": "info", "pass": True})
     table.append({"floor": "artifacts missing", "bn": sum(1 for x in bn if x["artifact_missing"]), "b0": None, "rule": "info", "pass": True})
-    return {"n": n, "rows": table, "all_pass": all(t["pass"] for t in table)}
+    return {"n": n, "basis": basis, "header": header(table, basis), "rows": table, "all_pass": all(t["pass"] for t in table)}

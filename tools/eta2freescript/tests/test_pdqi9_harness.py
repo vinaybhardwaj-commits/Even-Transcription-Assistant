@@ -458,7 +458,7 @@ def test_jev_one_call_per_consult_and_low_lines_reported(structured):
     fj = _FakeJev(structured)
     r = jev_lines.check_lines("Plan: ok\n\nFollow up: LOW support\nNAME Jane", "tape", client=fj)
     assert len(fj.args) == 1 and fj.args[0]["state"]["lines"] == {"L1": "Plan: ok", "L3": "Follow up: LOW support", "L4": "NAME Jane"}
-    assert r == {"status": "ok", "lines": 3, "low": [{"line": 3, "p_yes": 0.2}], "errors": 0, "model": "jev-test-1", "calls": 1}
+    assert r == {"status": "ok", "lines": 3, "low": [{"line": 3, "p_yes": 0.2}], "errors": 0, "model": "jev-test-1", "calls": 1, "jev_skipped_empty_headings": 0}
     assert "Jane" not in json.dumps(r) and "LOW" not in json.dumps(r)
 
 
