@@ -570,29 +570,41 @@ def printable_attribution(rx: dict, art: dict | None) -> dict:
     lines = _printable_lines(rx)
     text = printable_text(rx)
     whole = validate.printable_errors(text, [])
-    # each finding's own location: the rendered line that yields it (each whole-text finding is claimed by one line)
-    left = list(whole)
-    where: list[tuple[str, str, str]] = []  # (finding, rendered line, class by location)
-    for h, line, med in lines:
-        for e in validate.printable_errors(f"{h}:\n{line}", []):
-            if e in left:
-                left.remove(e)
-                where.append((e, line, "pulse_catalogue" if med is not None and _is_catalogue(med) else "pulse_extraction"))
-    where.extend((e, "", "pulse_extraction") for e in left)  # coalesced across lines: no single location
+    # each finding's locations: ALL rendered lines that yield it (the result must not depend on line order)
+    per_line = [(line, med, validate.printable_errors(f"{h}:\n{line}", [])) for h, line, med in lines]
     eta_out = _eta_output(art)
     n = _bracket_check(text, [f"{h}:\n{line}" for h, line, _ in lines])
     n = max(min(n, sum(1 for e in whole if _rule(e) == _BRACKET_RULE) - 1), 0) if whole else 0
     raw += len(whole)
     check += n
-    drop = n
-    for e, line, cls in where:
-        r = _rule(e)
+    rank = {"eta": 0, "pulse_catalogue": 1, "pulse_extraction": 2}
+    classed: list[tuple[str, str]] = []  # (rule, class)
+
+    def klass(e: str, yl: list[tuple[str, dict | None]]) -> str:
+        q = re.search(r"'([^']*)'", e)
+        cands = ([q.group(1)] if q else []) + [line for line, _ in yl]
+        if _rule(e) in eta_rules or any(len(c.strip()) >= 3 and re.search(r"[^\W\d_]", c) and _text_in(c, eta_out) for c in cands):
+            return "eta"
+        if yl and all(med is not None and _is_catalogue(med) for _, med in yl):
+            return "pulse_catalogue"
+        return "pulse_extraction"  # a non-medicine line, or coalesced across lines with no single location
+
+    for e in dict.fromkeys(whole):
+        k = whole.count(e)
+        yl = [(line, med) for line, med, errs in per_line for _ in range(errs.count(e))]
+        if len(yl) == k:  # each occurrence is its own line's: classed by that line alone
+            classed.extend((_rule(e), klass(e, [y])) for y in yl)
+        elif len(yl) > k:  # one finding for the whole text that several lines yield: all of them decide
+            classed.extend((_rule(e), klass(e, yl)) for _ in range(k))
+        else:  # some occurrences have no single line
+            classed.extend((_rule(e), klass(e, [y])) for y in yl)
+            classed.extend((_rule(e), klass(e, [])) for _ in range(k - len(yl)))
+    drop = n  # the double emission is dropped from the bracket-rule findings in a fixed (class) order, never line order
+    for r, cls in sorted(classed, key=lambda t: (t[0] != _BRACKET_RULE, rank[t[1]])):
         if r == _BRACKET_RULE and drop:
             drop -= 1
             continue
-        q = re.search(r"'([^']*)'", e)
-        eta = r in eta_rules or any(len(c.strip()) >= 3 and re.search(r"[^\W\d_]", c) and _text_in(c, eta_out) for c in (q.group(1) if q else "", line))
-        sources.append("eta" if eta else cls)
+        sources.append(cls)
     return {"raw": raw, "dedup": len(sources), "check": check, "sources": {**_tally(sources), "check": check}}
 
 

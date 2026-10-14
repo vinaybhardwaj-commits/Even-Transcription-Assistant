@@ -499,3 +499,47 @@ def test_r3_3_matched_text_in_etas_note_makes_a_replayed_finding_eta():
     assert pa["sources"]["eta"] == 1 and pa["sources"]["pulse_extraction"] == 0
     # text ETA never wrote stays Pulse's
     assert floors.printable_attribution({"management_plan": "?Malaria"}, art)["sources"]["pulse_extraction"] == 1
+
+
+# ---- fix round 4 (14 Oct 2026): a whole-text finding's class does not depend on line order -------------------------------
+
+def _prov_advice(text):
+    return {"kind": "advice", "json_pointer": "/general_advice/0", "text": text, "evidence": [], "flags": []}
+
+
+def test_r4_1_whole_text_finding_is_eta_if_any_yielding_line_is_etas():
+    clean = _syn("Medication: Dolo 500 mg")
+    # (a) Pulse-only line first, ETA's advice line second
+    art = {**clean, "provenance": [_prov_advice("bring reports __")]}
+    rx_a = {"management_plan": "review in ___", "general_advice": ["bring reports __"]}
+    pa = floors.printable_attribution(rx_a, art)
+    assert pa["sources"]["eta"] >= 1 and pa["sources"]["pulse_extraction"] == 0
+    # (a-reversed) ETA's line is the one earlier in section order
+    art = {**clean, "provenance": [_prov_advice("review in ___")]}
+    pa = floors.printable_attribution(rx_a, art)
+    assert pa["sources"]["eta"] >= 1 and pa["sources"]["pulse_extraction"] == 0
+    # (b) a Pulse-only symptoms line before ETA's non-catalogue medicine line
+    art = _syn("Medication: Calpol", [{"text": "Calpol [P]", "names": ["Calpol"]}])
+    rx_b = {"symptoms": "headache [x]", "medicines": [{"name": "Calpol [P]", "other": True}]}
+    pa = floors.printable_attribution(rx_b, art)
+    assert pa["sources"]["eta"] == 1 and pa["sources"]["pulse_extraction"] == 0 and pa["sources"]["check"] == 1
+
+
+def test_r4_2_permuting_line_order_never_changes_the_class_counts():
+    import itertools
+    clean = _syn("Medication: Dolo 500 mg")
+    dolo = {**CAT, "strength": "500 mg", "instructions": "after food [x]"}
+    zorbex = {"name": "Zorbex", "other": True, "instructions": "at night [y]"}
+    adv = ["bring reports __", "see ___", "walk daily [z]"]
+    for art in (clean, {**clean, "provenance": [_prov_advice("see ___")]}):
+        got = {json.dumps(floors.printable_attribution({"management_plan": "review in ___", "symptoms": "headache [x]",
+                                                        "general_advice": list(p)}, art)["sources"], sort_keys=True)
+               for p in itertools.permutations(adv)}
+        assert len(got) == 1
+    got = {json.dumps(floors.printable_attribution({"medicines": list(m), "symptoms": "headache [x]"}, clean)["sources"], sort_keys=True)
+           for m in itertools.permutations([dolo, zorbex])}
+    assert len(got) == 1
+    # a finding yielded only by catalogue lines stays pulse_catalogue, in either order
+    for m in itertools.permutations([dolo, {**dolo, "strength": "250 mg"}]):
+        pa = floors.printable_attribution({"medicines": list(m)}, clean)
+        assert pa["sources"]["pulse_extraction"] == 0 and pa["sources"]["pulse_catalogue"] >= 1
