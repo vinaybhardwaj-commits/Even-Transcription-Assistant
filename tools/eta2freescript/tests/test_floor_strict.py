@@ -3,6 +3,9 @@ Property 4 (legacy equivalence) is checked against a private copy of the pre-cha
 from __future__ import annotations
 
 import random
+import subprocess
+import types
+from pathlib import Path
 
 import pytest
 from test_floor_scope import _consult
@@ -55,7 +58,7 @@ SURFACE = {
     None: [],
     "mg": ["mg", "MG", "mgs", "mg.", "m.g.", "Mg"],
     "ml": ["ml", "ml.", "mL"],
-    "day": ["days", "day", "Days"],
+    "day": ["days", "Days"],  # not "day": "5/day" is "5 daily" since FIX4
     "week": ["weeks", "week"],
     "tablet": ["tablet", "Tablets"],
     "%": ["%"],
@@ -337,11 +340,14 @@ def test_fix3_fixed_cases(scope):
     assert _wn(note="Medication:\nParacetamol x 7 days", scope=scope, med=cat200) == ("pulse_catalogue", True)  # days is not a strength
     assert _wn(note="Medication:\nParacetamol x 7 days", scope=scope, med=cat_plain) == ("check", True)
     assert _wn(note="Medication:\nParacetamol twice a day", scope=scope, med=cat_plain) == ("check", True)  # frequency
-    assert _wn(note="Medication:\nParacetamol 2 tablets", scope=scope, med=cat_plain) == ("check", True)  # form word
+    # FIX4 (b): a number directly after the medicine's name is a strength unless a time or frequency word follows; a form word does not cancel
+    assert _wn(note="Medication:\nParacetamol 2 tablets", scope=scope, med=cat_plain) == ("eta", False)
+    assert _wn(note="Medication:\nParacetamol 2 days", scope=scope, med=cat_plain) == ("check", True)
     assert _wn(note="Medication:\nParacetamol 5%", scope=scope) == ("eta", False)  # % is a strength unit
-    assert _wn(note="Medication:\nParacetamol 5 puffs", scope=scope, med=cat200) == ("pulse_catalogue", True)
+    assert _wn(note="Medication:\nParacetamol 5 puffs", scope=scope, med=cat200) == ("eta", False)  # FIX4 (b), as above
+    assert _wn(note="Medication:\nParacetamol x 5 puffs", scope=scope, med=cat200) == ("pulse_catalogue", True)  # not directly after the name
     assert _wn(note="Medication:\nParacetamol 5 zorgs", scope=scope) == ("eta", False)  # an unknown unit counts as a strength
-    assert _wn(note="Medication:\nParacetamol 5\nmg", scope=scope) == ("check", True)  # a unit does not cross a line
+    assert _wn(note="Medication:\nParacetamol 5\nmg", scope=scope) == ("eta", False)  # FIX4 (e): a number wrapped onto the next line
     assert _wn(note="Medication:\nParacetamol\nMetformin 500 mg", scope=scope) == ("check", True)  # another drug's line is not ETA's strength
     # a hit that also names a non-empty field: the old rule's eta stays eta where another field is eta
     m = {"name": "Paracetamol", "frequency": "5 mg"}
@@ -363,3 +369,393 @@ def test_flag_is_counted_alongside_the_source_and_rolls_up():
     assert out["invented_fields"]["check"] == 1 and out["invented_fields"]["eta_wrote_nothing"] == 1 and out["invented_fields"]["eta"] == 0
     assert floors._tally(["eta", "check"]) ["eta_wrote_nothing"] == 0
     assert "eta_wrote_nothing" not in floors.SOURCES and floors._worst(["check", "pulse_catalogue"]) == "pulse_catalogue"
+
+
+# ---- FIX4 (15 Oct 2026): in doubt, ETA's -------------------------------------------------------------------------------
+PREV = "387abea4"  # FIX3: the second oracle. FIX4 may only move a hit toward eta compared with it.
+
+
+def _oracle_prev():
+    src = subprocess.run(["git", "show", f"{PREV}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
+                         capture_output=True, text=True, check=True).stdout
+    mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_prev")
+    mod.__package__ = "tools.eta2freescript.eval.pdqi9"
+    exec(compile(src, f"floors@{PREV}", "exec"), mod.__dict__)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def prev():
+    return _oracle_prev()
+
+
+def _para(t):
+    return f"Medication:\nParacetamol {t}"
+
+
+def _eta_both_paths(value, eta_text, scope, field="duration"):
+    """Sources of a replayed `value` against ETA's `eta_text` on the digit-run path and on the judged whole-field path."""
+    m = {"name": "Paracetamol", field: value}
+    art = _syn(_para(eta_text), [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+    prov = floors._prov_for(m, art)
+    runs = [floors._run_source(m, field, r, art, prov, scope) for r in floors._DIGITS.findall(value)]
+    return runs, floors._field_source(m, field, art, prov, scope)
+
+
+# the verdict's finding B probes: same unit, so eta (each pair both ways)
+SAME_UNIT = [
+    ("2 times a day", "twice a day"), ("2 times daily", "twice a day"), ("twice daily", "2 times a day"), ("twice a day", "twice daily"),
+    ("2 times a day", "2 times daily"), ("2 times per day", "twice a day"), ("2 times/day", "twice daily"), ("2 time a day", "twice a day"),
+    ("3 times a day", "thrice daily"), ("1 times daily", "once a day"), ("1 time a day", "once daily"), ("1 times a day", "once a day"),
+    ("5 mg", "5/10 mg"), ("5 mg", "5 or 10 mg"), ("5 mg", "5, 10 mg"), ("5 mg", "5 and 10 mg"), ("5 mg", "5\u201410 mg"),
+    ("5 mg", "5 ~ 10 mg"), ("5 mg", "5\u201310 mg"), ("5 mg", "5 - 10 mg"), ("5 mg", "5 to 10 mg"), ("10 mg", "5/10 mg"),
+    ("5 mg", "5 / 10 mg"), ("5 mg", "5 , 10 mg"), ("5 mg", "5 OR 10 mg"),
+    ("5 \u00b5g", "5 \u03bcg"), ("5 \u03bcg", "5 \u00b5g"), ("5 \u338e", "5 mg"), ("5 mg", "5 \u338e"), ("5 m\u200bg", "5 mg"),
+    ("5 mg", "5 m\u200bg"), ("5 mg", "5 \u200bmg"), ("5 mg", "5 [mg]"), ("5 [mg]", "5 mg"), ("5 mg", '5 "mg"'), ('5 "mg"', "5 mg"),
+    ("5 mg", "5: mg"), ("5: mg", "5 mg"), ("5 mg", "5 (mg)"), ("5 mg", "5 \u201cmg\u201d"), ("5 mg", "5 'mg'"), ("5 mg", "5 {mg}"),
+    ("5 %", "5 percent"), ("5 percent", "5%"), ("5 percent", "5 %"), ("5 %", "5 per cent"), ("5%", "5 percent"),
+    ("2\uff05", "2 percent"), ("5 \uff4d\uff47", "5 mg"),
+]
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+@pytest.mark.parametrize("value,eta_text", SAME_UNIT)
+def test_fix4_finding_b_same_unit_is_eta(scope, value, eta_text):
+    runs, whole = _eta_both_paths(value, eta_text, scope)
+    assert set(runs) <= {"eta"}, (value, eta_text, runs)
+    assert whole == "eta", (value, eta_text, whole)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_different_units_stay_coincidence(scope):
+    for value, eta_text in [("5 days", "5 mg"), ("5 mg", "5 ml"), ("5 mg", "5 percent"), ("5 %", "5 mg"), ("2 times a day", "2 mg"),
+                            ("5 mg", "5/10 ml"), ("5 mg", "5 or 10 days"), ("5 \u00b5g", "5 mg"), ("5 [mg]", "5 ml")]:
+        runs, whole = _eta_both_paths(value, eta_text, scope)
+        assert runs == ["eta_coincidence"] and whole == "eta_coincidence", (value, eta_text, runs, whole)
+
+
+def _wrote(name, note, prov_items, scope="global", med=None, field="strength"):
+    m = {"name": name, **(med or {})}
+    art = _syn(note, prov_items)
+    return floors._field_hit(m, [field], art, floors._prov_for(m, art), scope)
+
+
+def _dolo(note, scope="global", prov=None, med=None):
+    return _wrote("Dolo", note, prov if prov is not None else [{"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"]}], scope, med)
+
+
+# the verdict's finding A and A2 probes: ETA wrote a strength, so the empty judged field stays eta
+WROTE = [
+    # (a) a number and a unit outside the time / form / frequency set
+    "Medication:\nDolo 650 mg", "Medication:\nDolo 5 ml", "Medication:\nDolo 5% cream", "Medication:\nDolo 500 mcg", "Medication:\nDolo 1 g",
+    "Medication:\nDolo 5 [mg]", 'Medication:\nDolo 5 "mg"', "Medication:\nDolo 5: mg", "Medication:\nDolo 5 \u338e", "Medication:\nDolo 5 percent",
+    # (b) a number after, or glued to, the name; a form word does not cancel it
+    "Medication:\nDolo 650", "Medication:\nDolo650", "Medication:\nDolo-650 tab", "Medication:\nDolo 650 tab", "Medication:\nDolo 650 Tablet",
+    "Medication:\nDolo 650 BD", "Medication:\nDolo 650 1-0-1", "Medication:\nDolo-650", "Medication:\nTab Dolo 650", "Medication:\nTab. Dolo650 BD",
+    "Medication:\nDOLO 650", "Medication:\nDolo (650)", "Medication:\nDolo: 650", "Medication:\nDolo\u2013650", "Medication:\nDolo 2 tablets",
+    "Medication:\nDolo 650.5", "Medication:\nDolo 1,000",
+    # (c) number words of any size
+    "Medication:\nDolo forty mg", "Medication:\nDolo forty", "Medication:\nDolo two hundred fifty mg", "Medication:\nDolo two hundred and fifty",
+    "Medication:\nDolo six hundred fifty tab", "Medication:\nDolo twenty-five mg", "Medication:\nDolo five hundred mg", "Medication:\nDolo ten mg",
+    "Medication:\nDolo nine hundred ninety nine mg", "Medication:\nDolo Forty Mg", "Medication:\nDolo one thousand mg",
+    # (e) a number wrapped onto the next line
+    "Medication:\nDolo 650\nmg", "Medication:\nDolo 650\n mg", "Medication:\nDolo forty\nmg", "Medication:\nDolo 650\n\nmg",
+    # (f) continuation lines
+    "Medication:\nTab Dolo\n650 mg 1-0-1", "Medication:\nTab Dolo\n650 mg", "Medication:\nTab Dolo\n1-0-1\n650 mg", "Medication:\nTab Dolo\n650 mg\n1-0-1",
+    "Medication:\nTab Dolo\n1-0-1\n1-0-1\n500 mg", "Medication:\nTab Dolo\n(650 mg)", "Medication:\nTab Dolo\nforty mg", "Medication:\nTab Dolo\n650\nmg",
+]
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+@pytest.mark.parametrize("note", WROTE)
+def test_fix4_finding_a_eta_wrote_a_strength(scope, note):
+    assert _dolo(note, scope) == ("eta", False), note
+    m = {"name": "Dolo"}
+    art = _syn(note, [{"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"]}])
+    assert floors._eta_wrote_strength(m, art, floors._prov_for(m, art)) is True
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_provenance_value_and_unit_without_text(scope):
+    for strength in ({"value": "650", "unit": "mg"}, {"value": 650, "unit": "mg"}, {"value": 650.0, "unit": "mg"}, {"value": 0.5, "unit": "g"},
+                     {"value": "forty", "unit": "mg"}, {"value": "650", "unit": "tablet"}):
+        p = {"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"], "medicine": {"strength": strength}}
+        m = {"name": "Dolo"}
+        art = _syn("Medication:\nDolo", [p])
+        if strength["unit"] == "tablet":  # a form unit is still no strength...
+            assert floors._eta_wrote_strength(m, art, floors._prov_for(m, art)) is False, strength
+            continue
+        assert _dolo("Medication:\nDolo", scope, [p]) == ("eta", False), strength
+    # the pair is joined by a space, never a newline: the unit is read next to the value even though the value is a bare number
+    pieces: list[str] = []
+    floors._prov_strength_pieces({"medicine": {"strength": {"value": 650, "unit": "mg"}}}, pieces)
+    assert "650 mg" in pieces and not any("\n" in x for x in pieces)
+    # a transcript quote is still not ETA's output
+    p = {"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"], "evidence": [{"quote": "650 mg"}]}
+    assert _dolo("Medication:\nDolo", scope, [p]) == ("check", True)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_still_wrote_nothing(scope):
+    """The cases FIX4 must NOT move: no number, a time or frequency word after the name's number, another medicine's number."""
+    cases = [
+        "Medication:\nDolo", "Medication:\nDolo twice a day", "Medication:\nDolo 2 days", "Medication:\nDolo 2 times a day", "Medication:\nDolo 3 weeks",
+        "Medication:\nDolo-2 months", "Medication:\nDolo 1 year", "Medication:\nDolo 4 hours", "Medication:\nDolo 30 minutes", "Medication:\nDolo 2 daily",
+        "Medication:\nDolo x 7 days", "Medication:\nDolo\nMetformin 500 mg", "Medication:\nDolo twice", "Medication:\nDolo after food",
+        "Medication:\nDolo\nafter food", "Medication:\nDolo\nMetformin\n650 mg",
+    ]
+    for note in cases:
+        assert _dolo(note, scope, med=CAT) == ("check", True), note
+    # a continuation line that names another ETA medicine is that medicine's strength
+    other = [{"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"]},
+             {"kind": "medicine", "name": "Metformin", "text": "Metformin", "names": ["Metformin"]}]
+    assert _dolo("Medication:\nTab Dolo\n650 mg Metformin", scope, other, med=CAT) == ("check", True)
+    assert _dolo("Medication:\nTab Dolo\n650 mg Metformin", scope, other, med=CAT) != ("eta", False)
+    # a line that is not a continuation: it has to follow directly
+    assert _dolo("Medication:\nTab Dolo\nafter food\n650 mg", scope, med=CAT) == ("check", True)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_catalogue_name_shows_a_strength(scope):
+    def cat(**kw):
+        return {**CAT, "brand_name": "", "generic": "", **kw}
+    for nm in ("Dolo 650 Tablet", "Paracetamol 650", "Dolo650", "Dolo-650 tab", "Paracetamol forty", "Paracetamol two hundred fifty", "Paracetamol 650\nmg",
+               "Pan 40 BD", "Paracetamol 650 mg"):
+        assert floors._catalogue_name_has_strength(cat(name=nm)), nm
+        m = cat(name=nm)
+        art = _syn("Medication:\nParacetamol", [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+        assert floors._field_hit(m, ["strength"], art, floors._prov_for(m, art), scope) == ("pulse_catalogue", True), nm
+    for nm in ("Dolo", "Paracetamol tablets", "Dolo 3 days", "Paracetamol twice a day"):
+        assert not floors._catalogue_name_has_strength(cat(name=nm)), nm
+    assert not floors._catalogue_name_has_strength({"name": "Dolo 650", "uid": "u", "other": True})  # not a catalogue row
+
+
+def test_fix4_number_word_normaliser_is_local():
+    assert floors._wrote_norm("Forty mg") == "9 mg"
+    assert floors._wrote_norm("two hundred and fifty mg") == "9 mg"
+    assert floors._wrote_norm("twenty-five mg") == "9 mg"
+    assert floors._wrote_norm("twice a day").split() == ["twice", "daily"]  # a frequency word, not a number
+    assert floors._numnorm("forty mg") == "forty mg"  # the shared normaliser (FIX3) is untouched
+    assert "forty" not in floors._NUMWORDS
+
+
+# ---- generators and properties ---------------------------------------------------------------------------------------
+# A rendering is (text, v3 unit, v4 unit): the unit each reading (FIX3's, FIX4's) takes from it. Two texts are the same unit when their
+# FIX3 units are equal or their FIX4 units are equal (the check is the OR of the two readings, so a hit only moves toward eta).
+# ETA's side can also be read at a line wrap, where a number has no unit (None) under both readings.
+def render4(run, rng):
+    n = int(run)
+    t = rng.choice(["mg", "mg", "ml", "%", "days", "daily", "times", None])
+    if t == "mg":
+        u, v3u = rng.choice([("mg", "mg"), ("MG", "mg"), ("mgs", "mg"), ("m.g.", "mg"), ("\u338e", None), ("m\u200bg", "m"), ("\uff4d\uff47", "\uff4d\uff47")])
+        fmt, wrapped = rng.choice([("{n} {u}", 0), ("{n}{u}", 0), ("{n}\u00a0{u}", 0), ("{n}\n{u}", 1), ("{n} [{u}]", 2), ('{n} "{u}"', 2), ("{n}: {u}", 2),
+                                   ("{n} ({u})", 0), ("{n} \u201c{u}\u201d", 2)])
+        # an unsplit mg keeps v3's reading; a unit behind [ " : or a curly quote is invisible to FIX3 (None)
+        return fmt.format(n=run, u=u), (None if wrapped == 2 else v3u), "mg"
+    if t == "ml":
+        fmt, v3u = rng.choice([("{n} ml", "ml"), ("{n} mL", "ml"), ("{n} [ml]", None), ("{n}: ml", None)])
+        return fmt.format(n=run), v3u, "ml"
+    if t == "%":
+        fmt, v3u = rng.choice([("{n}%", "%"), ("{n} %", "%"), ("{n} percent", "percent"), ("{n} per cent", "per"), ("{n} Percent", "percent"),
+                               ("{n}\uff05", None), ("{n} [%]", None)])
+        return fmt.format(n=run), v3u, "%"
+    if t == "days":
+        fmt, v3u = rng.choice([("{n} days", "day"), ("{n} Days", "day"), ("{n}-days", "day"), ("{n} [days]", None)])
+        return fmt.format(n=run), v3u, "day" if v3u else "day"
+    if t == "daily":
+        if n in (1, 2, 3) and rng.random() < 0.5:
+            w = {1: "once", 2: "twice", 3: "thrice"}[n]
+            return rng.choice([(f"{w} a day", "daily"), (f"{w} daily", "daily"), (f"{w} per day", "per")]) + ("time",)
+        fmt, v3u = rng.choice([("{n} a day", "daily"), ("{n} daily", "daily"), ("{n} per day", "per"), ("{n}/day", "day"), ("{n}\u00a0a\u00a0day", "daily")])
+        return fmt.format(n=run), v3u, "daily"
+    if t == "times":
+        if n in (1, 2, 3) and rng.random() < 0.3:
+            w = {1: "once", 2: "twice", 3: "thrice"}[n]
+            return rng.choice([(f"{w} a day", "daily"), (f"{w} daily", "daily")]) + ("time",)
+        return rng.choice(["{n} times a day", "{n} times daily", "{n} times per day", "{n} times/day", "{n} time a day", "{n} times"]).format(n=run), "time", "time"
+    return run, None, None
+
+
+def gen_case4(rng):
+    run = str(rng.randint(1, 30))
+    ft, f3, f4 = render4(run, rng)
+    et, e3, e4 = render4(run, rng)
+    if rng.random() < 0.3:
+        et, e3, e4 = ft, f3, f4
+    return run, ft, (f3, f4), et, (e3, e4)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_same_unit_is_eta_generated(scope):
+    """Same unit under either reading: eta, on the digit-run path and on the whole-field path. Different: eta_coincidence."""
+    rng = random.Random(15102615)
+    n_eta = n_coin = 0
+    for _ in range(4000):
+        run, ft, (f3, f4), et, (e3, e4) = gen_case4(rng)
+        wrap = "\n" in et
+        same = f3 == e3 or f4 == e4 or (wrap and (f3 is None or f4 is None))
+        m = {"name": "Paracetamol", "duration": ft}
+        art = _syn(_para(et + " ;"), [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+        prov = floors._prov_for(m, art)
+        got = floors._run_source(m, "duration", run, art, prov, scope)
+        assert got == ("eta" if same else "eta_coincidence"), (ft, et, (f3, f4), (e3, e4), got)
+        n_eta += same
+        n_coin += not same
+    assert n_eta > 1000 and n_coin > 500
+
+
+def gen_range4(rng):
+    """The field gives `run UNIT`; ETA gives `run SEP hi UNIT`: every member takes the unit after the last number."""
+    run, hi = str(rng.randint(1, 30)), str(rng.randint(31, 99))
+    u = rng.choice(["mg", "ml", "days", "%", "mcg"])
+    fu = u if rng.random() < 0.6 else rng.choice(["mg", "ml", "days", "%", "mcg"])
+    sep = rng.choice(["-", "\u2013", "\u2014", "~", "/", ",", " to ", " or ", " and ", " - ", " / ", ", ", "\u00a0to\u00a0", " OR ", " And "])
+    glue = "" if u == "%" else " "
+    return run, f"{run}{glue}{fu}", f"{run}{sep}{hi}{glue}{u}", fu == u
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_range_and_list_separators_generated(scope):
+    rng = random.Random(15102617)
+    for _ in range(3000):
+        run, ft, et, same = gen_range4(rng)
+        m = {"name": "Paracetamol", "duration": ft}
+        art = _syn(_para(et + " ;"), [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+        got = floors._run_source(m, "duration", run, art, floors._prov_for(m, art), scope)
+        assert got == ("eta" if same else "eta_coincidence"), (ft, et, got)
+
+
+def gen_wrote(rng):
+    """(note, expected) over the A forms: expected True when ETA wrote a strength by rule (a)-(f); False for the controls."""
+    brand = rng.choice(["Dolo", "Pan", "Telma", "Augmentin"])
+    sep = rng.choice(["", " ", "-", " ", ": ", "\u00a0"])
+    n = rng.choice(["650", "40", "5", "500", "forty", "two hundred fifty", "six hundred and fifty", "twenty five", "seventy-five", "one thousand"])
+    tail = rng.choice(["", " mg", " tab", " BD", " 1-0-1", " Tablet", " ml", " mcg", " %"])
+    kind = rng.choice(["name", "name", "unit", "wrap", "cont", "cont_wrap", "ctl_time", "ctl_none", "ctl_other"])
+    pre = rng.choice(["", "Tab ", "Tab. ", "Cap "])
+    if kind == "name":
+        if sep == "" and not n.replace(" ", "").isdigit():
+            sep = " "
+        return f"Medication:\n{pre}{brand}{sep}{n}{tail}", True
+    if kind == "unit":
+        return f"Medication:\n{pre}{brand} {n} {rng.choice(['mg', 'ml', 'mcg', 'g', 'IU', '%', 'percent'])}", True
+    if kind == "wrap":
+        return f"Medication:\n{pre}{brand} {n}\n{rng.choice(['mg', 'ml', 'mcg'])}", True
+    if kind == "cont":
+        mid = rng.choice(["", "1-0-1\n", "OD\n1-0-1\n"][:2])
+        return f"Medication:\n{pre}{brand}\n{mid}{n} mg{rng.choice(['', ' 1-0-1', ' after food'])}", True
+    if kind == "cont_wrap":
+        return f"Medication:\n{pre}{brand}\n{n}\nmg", True
+    if kind == "ctl_time":
+        return f"Medication:\n{pre}{brand}{sep or ' '}{rng.choice(['2', '3', 'two', 'ten'])} {rng.choice(['days', 'weeks', 'months', 'years', 'hours', 'minutes', 'times', 'daily', 'times a day'])}", False
+    if kind == "ctl_none":
+        return f"Medication:\n{pre}{brand} {rng.choice(['twice a day', 'after food', 'BD', 'once daily', 'at night', 'SOS'])}", False
+    return f"Medication:\n{pre}{brand}\nMetformin {n} mg", False
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_wrote_strength_generated(scope):
+    rng = random.Random(15102620)
+    t = f = 0
+    for _ in range(4000):
+        note, expect = gen_wrote(rng)
+        brand = next(b for b in ("Augmentin", "Dolo", "Pan", "Telma") if b in note)
+        prov = [{"kind": "medicine", "name": brand, "text": brand, "names": [brand]}]
+        got = _wrote(brand, note, prov, scope)
+        assert got == (("eta", False) if expect else ("check", True)), (note, got)
+        t += expect
+        f += not expect
+    assert t > 1500 and f > 800
+
+
+def gen_any(rng):
+    """A mix of every form, with the FIX3 forms, for the properties against the two oracles."""
+    kind = rng.random()
+    if kind < 0.4:
+        run, ft, _, et, _ = gen_case4(rng)
+        return {"name": "Paracetamol", rng.choice(["strength", "frequency", "duration"]): ft, **(CAT if rng.random() < 0.4 else {})}, _para(et + " ;"), None
+    if kind < 0.8:
+        note, _ = gen_wrote(rng)
+        brand = next(b for b in ("Augmentin", "Dolo", "Pan", "Telma") if b in note)
+        field = rng.choice(["strength", "frequency", "duration"])
+        m = {"name": brand, **(CAT if rng.random() < 0.5 else {}), "name_": brand}
+        m["name"] = brand
+        if rng.random() < 0.25:
+            m[field] = rng.choice(["", "5 mg", "2 times a day", "twice a day", "650", "5 percent", "after food"])
+        return m, note, brand
+    m, field, run, art, in_eta, _ = gen_case(rng)
+    return m, art["note_text"], "Paracetamol"
+
+
+def _rank(src, moved):
+    """eta 0, eta_coincidence 1, a hit the old rule counted as eta but FIX3 flagged wrote_nothing 2, anything else 3."""
+    if src == "eta":
+        return 0
+    if src == "eta_coincidence":
+        return 1
+    return 2 if moved else 3
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_moves_no_hit_away_from_eta(scope, prev):
+    """Property: over the generators, no FIX4 change moves any hit away from eta compared with 387abea4, on the digit-run path
+    and on the judged-field path, with and without the wrote_nothing flag. Improvements are counted, so the property is not vacuous."""
+    rng = random.Random(15102630)
+    better = worse = same = 0
+    for _ in range(6000):
+        m, note, brand = gen_any(rng)
+        brand = brand or "Paracetamol"
+        art = _syn(note, [{"kind": "medicine", "name": brand, "text": brand, "names": [brand]}])
+        field = next((k for k in ("strength", "frequency", "duration") if _s(m.get(k)) or k == "strength"), "strength")
+        for k in ("strength", "frequency", "duration"):
+            if _s(m.get(k)):
+                field = k
+        pn, po = floors._prov_for(m, art), prev._prov_for(m, art)
+        new, old = floors._field_hit1(m, field, art, pn, scope), prev._field_hit1(m, field, art, po, scope)
+        assert _rank(*new) <= _rank(*old), (m, note, new, old)
+        better += _rank(*new) < _rank(*old)
+        worse += _rank(*new) > _rank(*old)
+        same += _rank(*new) == _rank(*old)
+        for r in floors._DIGITS.findall(_s(m.get(field))):
+            ns, os_ = floors._run_source(m, field, r, art, pn, scope), prev._run_source(m, field, r, art, po, scope)
+            assert _rank(ns, False) <= _rank(os_, False), (m, note, r, ns, os_)
+        assert (not prev._eta_wrote_strength(m, art, po)) or floors._eta_wrote_strength(m, art, pn)
+        if floors._is_catalogue(m):
+            assert (not prev._catalogue_name_has_strength(m)) or floors._catalogue_name_has_strength(m)
+    assert worse == 0 and better > 300 and same > 300
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix4_legacy_equivalence_on_the_fix4_generators(scope):
+    """The origin/main oracle (3e10381c, private copy above) still holds over the FIX4 forms: old eta <=> new eta, eta_coincidence or flagged."""
+    rng = random.Random(15102640)
+    for _ in range(5000):
+        m, note, brand = gen_any(rng)
+        brand = brand or "Paracetamol"
+        art = _syn(note, [{"kind": "medicine", "name": brand, "text": brand, "names": [brand]}])
+        prov = floors._prov_for(m, art)
+        for field in ("strength", "frequency", "duration"):
+            new, moved = floors._field_hit1(m, field, art, prov, scope)
+            old = old_field_source(m, field, art, prov, scope)
+            assert (old == "eta") == (new in ("eta", "eta_coincidence") or moved), (m, note, field, old, new, moved)
+            for r in floors._DIGITS.findall(_s(m.get(field))):
+                nr, orr = floors._run_source(m, field, r, art, prov, scope), old_run_source(m, field, r, art, prov, scope)
+                assert (orr == "eta") == (nr in ("eta", "eta_coincidence")), (m, note, field, r, orr, nr)
+                if orr != "eta":
+                    assert nr == orr
+
+
+def test_fix4_the_new_probes_fail_on_387abea4(prev):
+    """The probes are not vacuous: against FIX3's own code, finding A's forms read as wrote-nothing and finding B's as coincidence."""
+    wrong_a = 0
+    for note in WROTE:
+        m = {"name": "Dolo"}
+        art = _syn(note, [{"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"]}])
+        wrong_a += not prev._eta_wrote_strength(m, art, prev._prov_for(m, art))
+    assert wrong_a >= 20
+    wrong_b = 0
+    for value, eta_text in SAME_UNIT:
+        m = {"name": "Paracetamol", "duration": value}
+        art = _syn(_para(eta_text), [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+        wrong_b += any(prev._run_source(m, "duration", r, art, prev._prov_for(m, art), "global") == "eta_coincidence" for r in floors._DIGITS.findall(value))
+    assert wrong_b >= 20

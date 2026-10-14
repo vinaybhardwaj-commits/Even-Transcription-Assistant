@@ -619,16 +619,18 @@ def _numnorm(s: str) -> str:
     return _NUMWORD_RE.sub(lambda m: _NUMWORDS[m.group(1)], re.sub(r"\ba day\b", "daily", (s or "").lower()))
 
 
-def _eta_output(art: dict | None) -> str:
-    """ETA's whole output for the consult: note_text, every provenance item's text/names and structured values (number words normalised)."""
+def _eta_output(art: dict | None, norm: bool = True) -> str:
+    """ETA's whole output for the consult: note_text, every provenance item's text/names and structured values (number words normalised
+    unless norm is False: FIX4's unit comparison reads the words itself)."""
     a = art or {}
     note = a.get("note_text") if isinstance(a.get("note_text"), str) else ""
-    return _numnorm("\n".join([note] + [_prov_text(p) for p in a.get("provenance") or [] if isinstance(p, dict)]))
+    text = "\n".join([note] + [_prov_text(p) for p in a.get("provenance") or [] if isinstance(p, dict)])
+    return _numnorm(text) if norm else text
 
 
-def _eta_text(art: dict | None, prov: dict | None) -> str:
+def _eta_text(art: dict | None, prov: dict | None, norm: bool = True) -> str:
     """Lead rule: a value is ETA's when it appears anywhere in ETA's output (drug-line matching may only move a hit toward eta)."""
-    return _eta_output(art) + "\n" + _numnorm(_prov_text(prov))
+    return _eta_output(art, norm) + "\n" + (_numnorm(_prov_text(prov)) if norm else _prov_text(prov))
 
 
 def _text_in(value: str, text: str) -> bool:
@@ -661,7 +663,7 @@ def _is_other_medicine(p, m: dict) -> bool:
     return isinstance(p, dict) and p.get("kind") == "medicine" and bool(_prov_names(p)) and not _names_match(_rx_names(m), _prov_names(p))
 
 
-def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None:
+def _medicine_output(m: dict, art: dict | None, prov: dict | None, norm: bool = True) -> str | None:
     """global's ETA text with ONLY the other medicines' parts removed (scope `medicine`): the note lines that name another ETA medicine and
     not this one, and other medicines' provenance items. It adds nothing global does not read (no gp_extraction text). Non-medicine
     lines, follow-up and other provenance stay, so a run found there is ETA's. None when no ETA line pairs with this medicine or 2+ lines could (then the global rule applies)."""
@@ -679,16 +681,16 @@ def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None
     parts = [ln if _names_match(names, {_norm_name(ln)}) or not any(_line_names(ln, o) for o in other_names) else _CUT for ln in lines]
     parts += [_CUT if _is_other_medicine(p, m) else _prov_text(p) for p in (art or {}).get("provenance") or [] if isinstance(p, dict)]
     parts += [_prov_text(prov)]  # a transcript quote is not ETA's output
-    return _numnorm("\n".join(parts))
+    return _numnorm("\n".join(parts)) if norm else "\n".join(parts)
 
 
-def _eta_run_text(m: dict, art: dict | None, prov: dict | None, scope: str) -> str:
+def _eta_run_text(m: dict, art: dict | None, prov: dict | None, scope: str, norm: bool = True) -> str:
     """The ETA text a run is searched in: the medicine-scoped text when it applies, else the global text."""
     if scope == "medicine":
-        own = _medicine_output(m, art, prov)
+        own = _medicine_output(m, art, prov, norm)
         if own is not None:
             return own
-    return _eta_text(art, prov)  # _eta_text is number-word normalised
+    return _eta_text(art, prov, norm)  # number-word normalised unless norm is False
 
 
 def _eta_has_run(m: dict, run: str, art: dict | None, prov: dict | None, scope: str) -> bool:
@@ -719,9 +721,9 @@ def _same_norm(s: str) -> str:
     return flat(_numnorm(re.sub(r"\ba\s+day\b", "a day", flat(s or ""), flags=re.I)))
 
 
-def _unit_after(text: str, mt, reading: int) -> str | None:
+def _unit_after(text: str, mt, reading: int, table: tuple = _READINGS) -> str | None:
     """The normalised unit token after the number at match `mt` under one reading (None: no unit token)."""
-    unit_re, range_re = _READINGS[reading]
+    unit_re, range_re = table[reading]
     end = mt.end()
     while True:
         while (t := _DECIMAL_TAIL.match(text, end)):
@@ -734,28 +736,66 @@ def _unit_after(text: str, mt, reading: int) -> str | None:
     return _unit_norm(u.group(1)) if u else None
 
 
-def _run_units(text: str, run: str, readings: tuple = (0, 1)) -> list[str | None]:
+def _run_units(text: str, run: str, readings: tuple = (0, 1), table: tuple = _READINGS) -> list[str | None]:
     """The normalised unit tokens after each occurrence of the digit run in text, under the given readings (None: no unit token). The unit
     is the first token after the number, skipping whitespace and - ( ) _ / . between them; "%" is a unit. A number's end is after any
     decimal or thousands tail (0.5, 1,000); in a range (A-B, A - B, A to B) every number takes the unit after the last number.
     Expects _same_norm'd text."""
-    return [_unit_after(text, mt, rd) for mt in _DIGITS.finditer(text) if mt.group() == run for rd in readings]
+    return [_unit_after(text, mt, rd, table) for mt in _DIGITS.finditer(text) if mt.group() == run for rd in readings]
 
 
-def _strict_run(run: str, own_text: str, eta_text: str) -> bool:
+# ---- FIX4 (15 Oct 2026): unit sameness, second reading ---------------------------------------------------------------
+# _strict_run is the OR of the FIX3 reading (above, unchanged) and this one, so a hit can only move toward eta. The second reading
+# differs in: NFKC and zero-width characters out; once/twice/thrice -> "1/2/3 times"; "a day", "per day", "/day", "daily" -> daily;
+# "percent" -> "%"; more range and list separators (- en dash, em dash, ~, /, comma, to, or, and); brackets, quotes and ":" skipped
+# between the number and its unit.
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"))
+_TIMES_WORD = {"once": "1 times", "twice": "2 times", "thrice": "3 times"}
+
+
+def _nfkc(s: str) -> str:
+    return unicodedata.normalize("NFKC", s or "").translate(_ZERO_WIDTH)
+
+
+def _flat_ws(t: str) -> str:
+    return re.sub(r"\s+", lambda m: "\n" if "\n" in m.group() else " ", t)
+
+
+def _same_norm4(s: str) -> str:
+    t = _flat_ws(_nfkc(s).lower())
+    t = re.sub(r"\b(once|twice|thrice)\b", lambda m: _TIMES_WORD[m.group(1)], t)
+    t = re.sub(r"\b(?:a|per|each)\s+day\b|/\s*day\b|\bdaily\b", " daily ", t)
+    t = re.sub(r"\bper\s?cent\b|\bpercent\b", " % ", t)
+    return _flat_ws(t)
+
+
+_READINGS4 = tuple(
+    (re.compile(rf"[{ws}\-()_/.\[\]{{}}\"'\u201c\u201d\u2018\u2019:]*((?:[^\W\d_]\.)+[^\W\d_]*|[^\W\d_]+\.?|%)"),
+     re.compile(rf"[{ws}]*(?:[-\u2013\u2014~/,]|\b(?:to|or|and)\b)[{ws}]*(" + _NUM_RE + ")"))
+    for ws in (r"\s", " "))
+
+
+def _strict_run(run: str, own_text: str, eta_text: str, own_raw: str | None = None, eta_raw: str | None = None) -> bool:
     """3+ digits, or the unit after the run in own_text equals the unit after it at some occurrence in eta_text. A unit that is missing on
-    one side only never matches; missing on both sides is the identical text, so in doubt it is the same unit."""
+    one side only never matches; missing on both sides is the identical text, so in doubt it is the same unit. own_text and eta_text are
+    _same_norm'd; own_raw and eta_raw (default: the same texts) feed the FIX4 reading, which can only add matches."""
     if len(run) >= 3:
         return True
     have = set(_run_units(eta_text, run))
-    return any(u in have for u in _run_units(own_text, run, (0,)))  # the replayed field is one piece: only ETA's text has boundaries
+    if any(u in have for u in _run_units(own_text, run, (0,))):  # the replayed field is one piece: only ETA's text has boundaries
+        return True
+    o, e = _same_norm4(own_text if own_raw is None else own_raw), _same_norm4(eta_text if eta_raw is None else eta_raw)
+    have4 = set(_run_units(e, run, table=_READINGS4))
+    return any(u in have4 for u in _run_units(o, run, (0,), _READINGS4))
 
 
 def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
     """Source of one digit run found in field of replayed medicine m."""
     sc = floor_scope(scope)
     if _eta_has_run(m, run, art, prov, sc):
-        return "eta" if _strict_run(run, _same_norm(_s(m.get(field)).replace(_CUT, "")), _same_norm(_eta_run_text(m, art, prov, sc))) else "eta_coincidence"
+        own_raw = _s(m.get(field)).replace(_CUT, "")
+        return "eta" if _strict_run(run, _same_norm(own_raw), _same_norm(_eta_run_text(m, art, prov, sc)), own_raw,
+                                    _eta_run_text(m, art, prov, sc, False)) else "eta_coincidence"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
     return "pulse_extraction"
@@ -773,14 +813,133 @@ def _has_strength(text: str) -> bool:
     return any((u := _unit_after(text, mt, 1)) and u not in NON_STRENGTH_UNITS for mt in _DIGITS.finditer(text))
 
 
+# ---- FIX4: what counts as "ETA wrote a strength" -----------------------------------------------------------------
+# In doubt, ETA's: every rule below can only turn "wrote nothing" into "wrote a strength". The FIX3 test stays and is OR'd in.
+_NUMBER_WORDS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen "
+                 "nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand lakh").split()
+_NW = "|".join(_NUMBER_WORDS)
+# A run of number words of any size ("forty", "two hundred and fifty", "twenty-five"). This local normaliser replaces the run with a
+# digit; once/twice/thrice are frequency words, not numbers, and stay words.
+_NW_RUN = re.compile(rf"\b(?:{_NW})(?:(?:[\s\-]+(?:and[\s\-]+)?)(?:{_NW}))*\b")
+_TIMEFREQ = frozenset({"day", "week", "month", "year", "hour", "minute", "daily", "time"})
+
+
+def _wrote_norm(s: str) -> str:
+    t = _flat_ws(_nfkc(s).lower())
+    t = re.sub(r"\b(?:a|per|each)\s+day\b|/\s*day\b", " daily ", t)
+    t = re.sub(r"\bper\s?cent\b|\bpercent\b", " % ", t)
+    return _flat_ws(_NW_RUN.sub("9", t))
+
+
+def _number_not_time(text: str, pat: re.Pattern) -> bool:
+    """A match of pat (group 1: the number) whose next token on the same line is not a time or frequency word. A form word does not cancel."""
+    for mt in pat.finditer(text):
+        tok = re.match(r"[ \t\-]*([^\W\d_]+)", text[mt.end():])
+        if not (tok and _unit_norm(tok.group(1)) in _TIMEFREQ):
+            return True
+    return False
+
+
+_ANY_NUMBER = re.compile(rf"({_NUM_RE})")
+
+
+def _brand_number(text: str, names: set[str]) -> bool:
+    """A number directly after, or glued to, one of the medicine's names ("Dolo 650", "Dolo650", "Dolo-650 tab", "Pan 40 BD")."""
+    alts = [r"\s+".join(map(re.escape, n.split())) for n in sorted(names) if len(n) >= 3]
+    if not alts:
+        return False
+    pat = re.compile(r"(?<![a-z0-9])(?:" + "|".join(alts) + r")(?![a-z])[ \t\-\u2013\u2014:(\[]*(" + _NUM_RE + ")")
+    return _number_not_time(text, pat)
+
+
+def _strength_in(text: str, names: set[str] | None = None) -> bool:
+    """text is _wrote_norm'd pieces joined by _CUT (a unit never crosses it). (a) a number then a unit token outside NON_STRENGTH_UNITS,
+    a wrapped line included (reading A) and brackets or quotes around the unit skipped; (b) a brand-number."""
+    if any((u := _unit_after(text, mt, 0, _READINGS4)) and u not in NON_STRENGTH_UNITS for mt in _DIGITS.finditer(text)):
+        return True
+    return _brand_number(text, names) if names else False
+
+
+def _prov_strength_pieces(node, out: list[str]) -> None:
+    """Every string ETA's provenance item carries (each its own piece), and for a {value, unit} pair with no text, "value unit" joined
+    by a SPACE (value a str or a number)."""
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        v, u = node.get("value"), node.get("unit")
+        if isinstance(u, str) and isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            out.append(f"{v:g} {u}" if isinstance(v, float) else f"{v} {u}")
+        for k, x in node.items():
+            if k not in _PROV_SKIP:
+                _prov_strength_pieces(x, out)
+    elif isinstance(node, list):
+        for x in node:
+            _prov_strength_pieces(x, out)
+
+
+_STARTS_NUMBER = re.compile(rf"[\s(\[]*(?:\d|(?:{_NW})\b)", re.I)
+_ENDS_NUMBER = re.compile(rf"(?:\d|\b(?:{_NW}))[\s.]*$", re.I)
+_STARTS_WORD = re.compile(r"[\s(\[]*[^\W\d_]")
+
+
+def _strength_groups(m: dict, art: dict | None) -> tuple[list[str], list[str]]:
+    """(groups, naming lines). A group is a note line that names the medicine plus the lines that directly follow it and (f) start with
+    a number or dose pattern, or (e) start a word right after a line ending in a number (a wrapped "650" / "mg"), while naming no other
+    medicine. Following lines are taken while they qualify."""
+    names = _rx_names(m)
+    note = (art or {}).get("note_text")
+    lines = [ln for ln in (note if isinstance(note, str) else "").split("\n") if ln.strip()]
+    others = [_prov_names(p) for p in (art or {}).get("provenance") or [] if _is_other_medicine(p, m)]
+    gp = ((art or {}).get("gp_extraction") or {}).get("medicines")
+    others += [_rx_names(g) for g in (gp if isinstance(gp, list) else []) if isinstance(g, dict) and not _names_match(names, _rx_names(g))]
+    names_me = lambda ln: _names_match(names, {_norm_name(ln)})
+    groups: list[str] = []
+    naming: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not names_me(lines[i]):
+            i += 1
+            continue
+        naming.append(lines[i])
+        g, j = [lines[i]], i + 1
+        while (j < len(lines) and not names_me(lines[j]) and not any(_line_names(lines[j], o) for o in others)
+               and (_STARTS_NUMBER.match(lines[j]) or (_ENDS_NUMBER.search(_nfkc(g[-1]).lower()) and _STARTS_WORD.match(lines[j])))):
+            g.append(lines[j])
+            j += 1
+        groups.append("\n".join(g))
+        i = j
+    return groups, naming
+
+
 def _eta_wrote_strength(m: dict, art: dict | None, prov: dict | None) -> bool:
-    """Did ETA write a strength for this medicine: in the note line(s) that name it or in its provenance item (both scopes alike)."""
+    """Did ETA write a strength for this medicine: in the note line(s) that name it (and their continuation lines) or in its provenance
+    item (both scopes alike). True under the FIX3 test or any FIX4 rule (a)-(f)."""
     p = prov if prov is not None else _prov_for(m, art)
-    return _has_strength(_same_norm("\n".join([_note_lines_for(m, art), _prov_text(p)])))
+    if _has_strength(_same_norm("\n".join([_note_lines_for(m, art), _prov_text(p)]))):
+        return True
+    groups, naming = _strength_groups(m, art)
+    pieces: list[str] = []
+    _prov_strength_pieces({k: p.get(k) for k in ("text", "names", "diagnosis", "follow_up", "investigation", "procedure", "medicine")} if isinstance(p, dict) else None, pieces)
+    names = set(_rx_names(m))
+    if isinstance(p, dict):
+        names |= {_norm_name(x) for x in p.get("names") or [] if isinstance(x, str)} - {""}
+    names |= {w for ln in naming for w in re.findall(r"[a-z]{3,}", _nfkc(ln).lower()) if _names_match(names, {w})}
+    return _strength_in(_CUT.join(_wrote_norm(x) for x in groups + pieces), names)
 
 
 def _catalogue_name_has_strength(m: dict) -> bool:
-    return _is_catalogue(m) and any(_has_strength(_same_norm(_s(m.get(k)))) for k in ("name", "brand_name", "generic"))
+    """The catalogue row's name, brand or generic shows a strength: FIX3's unit test, or any number that is not followed by a time or
+    frequency word ("Dolo 650 Tablet", "Paracetamol 650"), a wrapped line and number words included."""
+    if not _is_catalogue(m):
+        return False
+    for k in ("name", "brand_name", "generic"):
+        v = _s(m.get(k))
+        if _has_strength(_same_norm(v)):
+            return True
+        t = _wrote_norm(v)
+        if _strength_in(t) or _number_not_time(t, _ANY_NUMBER):
+            return True
+    return False
 
 
 def _field_hit(m: dict, fields, art: dict | None, prov: dict | None, scope: str | None = None) -> tuple[str, bool]:
@@ -805,12 +964,15 @@ def _field_hit1(m: dict, field: str, art: dict | None, prov: dict | None, scope:
         if _eta_wrote_strength(m, art, prov):
             return "eta", False
         return ("pulse_catalogue" if _catalogue_name_has_strength(m) else "check"), True
-    own = _medicine_output(m, art, prov) if floor_scope(scope) == "medicine" else None
+    medicine = floor_scope(scope) == "medicine"
+    own = _medicine_output(m, art, prov) if medicine else None
     text = own if own is not None else _eta_text(art, prov)
     if _in_text(value, text):
+        raw = (_medicine_output(m, art, prov, False) if medicine else None)
+        raw = raw if raw is not None else _eta_text(art, prov, False)
         own_n, eta_n = _same_norm(value), _same_norm(text)
         runs = _DIGITS.findall(own_n)
-        if runs and not any(_strict_run(r, own_n, eta_n) for r in runs):
+        if runs and not any(_strict_run(r, own_n, eta_n, value, raw) for r in runs):
             return "eta_coincidence", False
         return "eta", False
     if field == "strength":
