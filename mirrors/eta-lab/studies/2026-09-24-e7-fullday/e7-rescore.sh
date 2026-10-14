@@ -32,21 +32,15 @@
 #   ~/.claude/secrets/metabase_api_key   Metabase API key with read on database 13
 # Code: the E-6.1 worktree (E61_WT, default ~/dev/eta-wt-e61), pinned: E61_SHA (default 81cec3a) must be HEAD.
 set -euo pipefail
-DATE="${1:?usage: e7-rescore.sh YYYY-MM-DD [--transcript <name>] [--check | --from <stage> [--to <stage>]]}"; shift
-MODE=run; FROM=rooms; TO=score; TRANSCRIPT=""
+DATE="${1:?usage: e7-rescore.sh YYYY-MM-DD [--check | --from <stage> [--to <stage>]]}"; shift
+MODE=run; FROM=rooms; TO=score
 while [ $# -gt 0 ]; do case "$1" in
-  --transcript) TRANSCRIPT="${2:?--transcript needs a name}"; shift 2 ;;
   --check) MODE=--check; shift ;;
   --from) FROM="${2:?--from needs a stage}"; shift 2 ;;
   --to) TO="${2:?--to needs a stage}"; shift 2 ;;
   *) echo "STAGE_FAIL unknown arg $1"; exit 2 ;;
 esac; done
 for x in "$FROM" "$TO"; do case "$x" in rooms|pqm|truth|replay|score) ;; *) echo "STAGE_FAIL unknown stage $x"; exit 2 ;; esac; done
-# W28.2: the transcript version travels by env only (never argv after this export) so stage_db.ts
-# records it in every hyp-*.json. Refuter-2 N1: exported ONLY when named — when absent the var is
-# unset, so stage_db.ts's `?? null` and arm_d.py's os.environ.get really record null, and the
-# scorer's --allow-undeclared path stays honest.
-if [ -n "$TRANSCRIPT" ]; then export E7_TRANSCRIPT_VERSION="$TRANSCRIPT"; else unset E7_TRANSCRIPT_VERSION; fi
 PQM_CSV="$HOME/eta-data/pqm-consults-$DATE.csv"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 E61_WT="${E61_WT:-$HOME/dev/eta-wt-e61}"; E61_SHA="${E61_SHA:-81cec3a}"
