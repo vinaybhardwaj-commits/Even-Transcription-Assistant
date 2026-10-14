@@ -6,7 +6,7 @@
 
 The objects hold PHI (Rx item text, matched transcript spans): they go ONLY to eta-lab-ratings, which the viewer reads behind Cloudflare Access.
 Never print rows. Needs CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID for `load` (never printed). ist_date = the IST date of the consult span start."""
-import argparse, hashlib, json, os, subprocess, sys
+import argparse, hashlib, json, subprocess, sys
 from pathlib import Path
 
 BUCKET = "eta-lab-ratings"
@@ -31,15 +31,12 @@ def build(scored_path, links_path, out):
         c = by.setdefault((r["room"], date), {}).setdefault(r["consult_id"], {"consult_id": r["consult_id"], "t0": sp[0], "t1": sp[1], "basis": r.get("basis", ""), "items": []})
         c["items"].append({"item_id": r["item_id"], "type": r["item_type"], "term": r["term"], "cls": r["class"], "score": r["score"],
                            "matched": r["matched"] or None, "translation_missing": bool(r.get("translation_missing"))})
-    os.umask(0o077)   # PHI: nothing written here is group/world readable
     out = Path(out)
-    out.mkdir(parents=True, exist_ok=True); out.chmod(0o700)
     src = hashlib.sha256(raw).hexdigest()
     n = 0
     for (room, date), cs in by.items():
         p = out / "prescribe" / room / f"{date}.json"
         p.parent.mkdir(parents=True, exist_ok=True)
-        for d in (out / "prescribe", p.parent): d.chmod(0o700)
         p.write_text(json.dumps({"schema": 1, "room_id": room, "date": date, "source_sha256": src, "consults": sorted(cs.values(), key=lambda c: c["t0"])}, ensure_ascii=False))
         p.chmod(0o600)
         n += 1
