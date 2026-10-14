@@ -435,6 +435,9 @@ export async function readClipChunk(key: string, offset: number, length: number)
     return { ok: false, error: "read_failed" };
   }
   if (got === null) return { ok: false, error: "clip_not_found" };
+  // F1: never trust the server to have honoured the Range. More bytes than asked for is a failure, never a chunk.
+  if (!("outOfRange" in got) && got.bytes.length > length) return { ok: false, error: "read_failed" };
+  const headerAbsent = !("outOfRange" in got) && got.totalBytes === null;
   let total: number | null = "outOfRange" in got ? null : got.totalBytes;
   if (total === null) {
     const h = await headObject(key); // the Content-Range header was absent, or the start was past the end
@@ -442,5 +445,7 @@ export async function readClipChunk(key: string, offset: number, length: number)
   }
   if (total === null) return { ok: false, error: "read_failed" };
   if ("outOfRange" in got || offset >= total) return { ok: false, error: "bad_range", total_bytes: total };
+  // Without Content-Range the bytes must be exactly the requested slice (a Range-ignoring 200 sends the whole object, which would be labelled with an offset it does not start at).
+  if (headerAbsent && got.bytes.length !== Math.min(length, total - offset)) return { ok: false, error: "read_failed" };
   return { ok: true, bytes: got.bytes, total_bytes: total };
 }

@@ -34,7 +34,7 @@ const HELP = [
   "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, signature_sha256}. The URL is never audited or logged.",
   "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, signature_sha256}; bad_range past the end.",
-  "Held-out room-days are refused blind_room_day on get and clip_audio_url and left out of search.",
+  "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
 ].join(" ");
 
 const badArgs = (detail: string) => ({ ok: false, error: "bad_args", detail });

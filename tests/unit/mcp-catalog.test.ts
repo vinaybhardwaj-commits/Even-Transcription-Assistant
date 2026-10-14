@@ -16,6 +16,7 @@ const H = vi.hoisted(() => ({
   identityQueries: [] as Array<{ uids: string[]; withRx: boolean }>,
   clip: null as Uint8Array | null,
   clipRangeHeader: true,
+  clipIgnoreRange: false,
   clipReadThrows: false,
   rangeCalls: [] as Array<{ key: string; start: number; end: number }>,
   headCalls: [] as string[],
@@ -70,6 +71,7 @@ vi.mock("@/lib/r2", () => ({
     if (H.clipReadThrows) throw new Error("r2 down");
     if (!H.clip) return null;
     if (start >= H.clip.length) return { outOfRange: true };
+    if (H.clipIgnoreRange) return { bytes: H.clip.slice(), totalBytes: null }; // a server that ignores Range: the whole object, no Content-Range
     return { bytes: H.clip.slice(start, Math.min(end + 1, H.clip.length)), totalBytes: H.clipRangeHeader ? H.clip.length : null };
   }),
   headObject: vi.fn(async (key: string) => {
@@ -176,6 +178,7 @@ beforeEach(() => {
   H.matchQueries = [];
   H.clip = null;
   H.clipRangeHeader = true;
+  H.clipIgnoreRange = false;
   H.clipReadThrows = false;
   H.rangeCalls = [];
   H.headCalls = [];
@@ -1364,6 +1367,22 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
       expect(await run({ action: "clip_audio_chunk", consult_uid: "NOSUCHUID1" })).toEqual({ ok: false, error: "not_found" });
       expect(await run({ action: "clip_audio_chunk", consult_uid: "x" })).toMatchObject({ error: "bad_args" });
       expect(H.rangeCalls).toEqual([]);
+    });
+    it("F1: a Range-ignoring 200 (the whole body, no Content-Range) is read_failed with no base64; a short body without the header is read_failed; an over-long body with the header is read_failed", async () => {
+      H.clip = bytes(3000);
+      H.clipIgnoreRange = true;
+      const o = await chunk({ offset: 1000, length: 1000 });
+      expect(o).toEqual({ ok: false, error: "read_failed" });
+      expect(JSON.stringify(o)).not.toContain("base64");
+      // the default length on a clip longer than the cap: the whole body would exceed length
+      H.clip = bytes(1_048_576 + 50);
+      expect(await chunk()).toEqual({ ok: false, error: "read_failed" });
+      // the same clip honouring Range is fine (the slice exactly matches min(length, total - offset))
+      H.clipIgnoreRange = false;
+      H.clipRangeHeader = false;
+      H.clip = bytes(3000);
+      expect(await chunk({ offset: 2500, length: 1000 })).toMatchObject({ ok: true, length: 500, done: true });
+      expect(await chunk({ offset: 0, length: 1000 })).toMatchObject({ ok: true, length: 1000, done: false });
     });
     it("a missing object and a failing read are codes, not throws", async () => {
       H.clip = null;
