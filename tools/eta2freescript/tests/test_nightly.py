@@ -429,7 +429,7 @@ def test_backfill_is_newest_first_and_continues_on_exit_2(tmp_path, monkeypatch,
     assert seen == ["2026-10-05", "2026-10-04", "2026-10-03"]
     total = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert total == {"total": True, "days": 3, "eligible": 9, "written": 3, "skipped_existing": 3, "rejected": 3, "failed": 0,
-                     "missing_layers": 0, "bundle_failed": 0, "cost_usd": 0.75}
+                     "missing_layers": 0, "bundle_failed": 0, "attempts_exhausted": 0, "cost_unknown": 0, "cost_usd": 0.75}
 
 
 def test_backfill_stops_on_a_fatal_exit_1_but_not_on_a_plain_one(tmp_path, monkeypatch):
@@ -733,3 +733,172 @@ def test_the_ledger_ist_date_is_the_consults_own_day_not_the_run_day(tmp_path, b
                sealed=["new"], skip_existing=True, day_read=lambda *_: []) == 0
     by = {l["consult_uid"]: l for l in _lines(cfg)}
     assert by["old"]["ist_date"] == "2026-09-30" and by["new"]["ist_date"] == "2026-10-05"
+
+
+# ---- fix round 3: one attempt cap per (uid, code_sha256), counted from the box ledger ----
+
+def _keeping(cfg, run_one):
+    """The real runner keeps artifact.json for a valid run; a rejected run (pipeline writes none) keeps nothing."""
+    def keeping(uid):
+        log = run_one(uid)
+        if log.get("final_valid"):
+            d = Path(cfg["out"]) / uid
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "artifact.json").write_text(json.dumps(log["artifact"]))
+            (d / "artifact.validation.json").write_text(json.dumps({"final_valid": True, "final_errors": [], "cost_usd": 0.5}))
+        return log
+    return keeping
+
+
+def _hours(cfg, hours, **kw):
+    return [hourly(cfg, now=_ist(2026, 10, 14, h, 5), **kw) for h in hours]
+
+
+def _states(cfg, uid):
+    return [l["state"] for l in _lines(cfg) if l["consult_uid"] == uid]
+
+
+def test_a_pending_job_with_ingest_down_costs_one_bedrock_call_then_reposts_then_is_served(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    state = {"up": False, "jobs": [{"consult_uid": "p", "job_id": "job-7"}]}
+    posted = []
+
+    def post(body):
+        posted.append((body["consult_uid"], body.get("job_id")))
+        if not state["up"]:
+            raise ConnectionError("down")
+        return {"ok": True, "inserted": 1, "run_id": 41}
+
+    kw = dict(run_one=_keeping(cfg, run_one), post=post, sealed=[], pending=lambda *_: state["jobs"], day_read=lambda *_: ([], True))
+    assert _hours(cfg, (10, 11, 12), **kw) == [1, 1, 1]
+    assert ran == ["p"]  # one Bedrock call; the next two hours re-post the kept artifact
+    assert posted == [("p", "job-7")] * 3  # the job id rides every re-post
+    assert _states(cfg, "p") == ["post_failed"] * 3
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {"p": 1}  # a re-post is not an attempt
+    state["up"] = True
+    assert _hours(cfg, (13,), **kw) == [0]
+    assert ran == ["p"] and _states(cfg, "p")[-1] == "written" and _lines(cfg)[-1]["job_id"] == "job-7" and posted[-1] == ("p", "job-7")
+
+
+def test_a_repost_takes_the_job_id_from_the_ledger_when_the_job_is_no_longer_listed(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    d = Path(cfg["out"]) / "p"
+    d.mkdir(parents=True)
+    (d / "artifact.json").write_text(json.dumps(run_one("p")["artifact"]))
+    ran.clear()
+    root = Path(cfg["out"])
+    (root / "consult-state.jsonl").write_text(json.dumps({"consult_uid": "p", "ist_date": "2026-10-14", "state": "post_failed", "artifact_id": None,
+                                                         "run_ts": "t", "code_sha256": "sha-A", "job_id": "job-3"}) + "\n")
+    got = []
+    assert _hours(cfg, (10,), run_one=run_one, post=lambda b: got.append(b.get("job_id")) or {"ok": True, "inserted": 1, "run_id": 5},
+                  sealed=["p"], pending=lambda *_: [], day_read=lambda *_: ([], True)) == [0]
+    assert ran == [] and got == ["job-3"]
+
+
+def test_rejected_with_ingest_down_costs_two_bedrock_calls_then_attempts_exhausted(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+
+    def rejected(uid):  # pipeline.py writes no artifact.json for a rejected result: nothing to re-post
+        log = run_one(uid)
+        log["final_valid"], log["final_errors"] = False, ["x"]
+        return log
+
+    def post(body):
+        raise ConnectionError("down")
+
+    kw = dict(run_one=rejected, post=post, sealed=["r"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    capsys.readouterr()
+    assert _hours(cfg, (10, 11, 12, 13), **kw)[:2] == [1, 1]
+    assert ran == ["r", "r"]  # the cap: two Bedrock runs at this code sha
+    assert _states(cfg, "r") == ["post_failed", "post_failed", "attempts_exhausted", "attempts_exhausted"]
+    last = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert last["attempts_exhausted"] == 1 and last["failed"] == 0
+
+
+def test_a_raising_consult_over_three_hours_is_two_calls_then_exhausted_and_still_costs(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    kw = dict(run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, sealed=["boom"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    capsys.readouterr()
+    _hours(cfg, (10, 11, 12), **kw)
+    assert ran == ["boom", "boom"]
+    assert _states(cfg, "boom") == ["failed:RuntimeError", "failed:RuntimeError", "attempts_exhausted"]
+    outs = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
+    assert [o["failed"] for o in outs] == [1, 1, 0] and [o["attempts_exhausted"] for o in outs] == [0, 0, 1]
+
+
+def test_a_new_code_sha_resets_the_attempt_count(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    sha = {"v": "sha-A"}
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: sha["v"])
+    kw = dict(run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, sealed=["boom"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    _hours(cfg, (10, 11, 12), **kw)
+    assert ran == ["boom", "boom"]
+    sha["v"] = "sha-B"
+    _hours(cfg, (13, 14, 15), **kw)
+    assert ran == ["boom"] * 4 and _states(cfg, "boom")[-1] == "attempts_exhausted"
+
+
+def test_seed_lines_skip_and_never_count_as_attempts(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _ledger(cfg, [("s", "written", "1", "seed"), ("s", "written", "1", "seed"), ("s", "written", "1", "seed")])
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {}
+    assert _call(cfg, "2026-10-05", run_one, ["s", "n"], lambda *_: ([], True)) == 0
+    assert ran == ["n"] and _states(cfg, "s")[-1] == "skipped_existing"
+
+
+def test_the_cap_applies_to_a_pending_job_that_bypasses_skip_existing(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _ledger(cfg, [("w", "failed:RuntimeError", None, "sha-A"), ("w", "written", "9", "sha-A")])
+    capsys.readouterr()
+    assert run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, sealed=[],
+               pending=lambda *_: [{"consult_uid": "w", "job_id": "job-1"}], skip_existing=True, day_read=lambda *_: []) == 0
+    assert ran == []  # skip-existing would have been bypassed; the cap is not
+    assert _lines(cfg)[-1]["state"] == "attempts_exhausted" and _lines(cfg)[-1]["job_id"] == "job-1" and _lines(cfg)[-1]["ist_date"] == "2026-10-05"
+    assert json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])["attempts_exhausted"] == 1
+
+
+def test_an_exhausted_uid_does_not_use_a_max_consults_slot(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path, max_consults=1)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _ledger(cfg, [("x", "rejected", "1", "sha-A"), ("x", "post_failed", None, "sha-A")])
+    assert _call(cfg, "2026-10-05", run_one, ["x", "y"], lambda *_: ([], True)) == 0
+    assert ran == ["y"]
+
+
+def test_a_raise_reports_what_it_spent_and_an_unreadable_cost_is_counted(tmp_path):
+    class Spent(RuntimeError):
+        cost_usd = 0.25
+
+    def run_one(uid):
+        raise Spent("x") if uid == "a" else RuntimeError("y")
+
+    s = nightly.execute([{"uid": "a"}, {"uid": "b"}], {"data": str(tmp_path), "out": str(tmp_path / "o"), "max_consults": 5}, dry_run=False,
+                        run_one=run_one, post=lambda b: {"ok": True})
+    assert s["failed"] == 2 and s["cost_usd"] == 0.25 and s["cost_unknown"] == 1
+
+
+def test_the_bundle_runner_reads_a_raising_consults_cost_from_its_usage_lines(tmp_path):
+    led = tmp_path / "usage.jsonl"
+    led.write_text(json.dumps({"usd": 9.0}) + "\n")
+    start = led.stat().st_size
+    with open(led, "a") as f:
+        f.write(json.dumps({"usd": 0.125}) + "\n" + json.dumps({"usd": 0.5}) + "\n")
+    assert nightly._usd_between(led, start) == 0.625
+    assert nightly._usd_between(led, led.stat().st_size) == 0.0
+    with open(led, "a") as f:
+        f.write("not json\n")
+    assert nightly._usd_between(led, start) is None

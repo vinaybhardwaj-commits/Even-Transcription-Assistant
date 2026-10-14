@@ -62,7 +62,8 @@ A bad JSON value, a missing placeholder, or a missing or non-directory cwd is a 
 - The ledger line is appended per consult, as soon as its state is known (after its post, or on its failure or skip), so a crash or kill keeps every line already earned. A line may also carry `job_id` (a pending job's consult). `ist_date` is the consult's own IST day (from its bundle clip start); sealed consults not read yet fall back to the run day.
 - Seeding: before go-live the lead seeds the ledger from the store's existing artifacts with lines `{"consult_uid", "state": "written", "code_sha256": "seed", ...}`. A `written` line skips whatever its code sha; extra or missing fields are ignored by the reader, as are non-object and malformed lines.
 - `post_failed`: the artifact was produced but the POST failed or was refused. The line keeps `code_sha256`. The next run at the SAME code sha re-POSTs the kept `<out>/<uid>/artifact.json` (with its validation file and cost) and makes no Bedrock call; with no kept artifact, or at a new code sha, it runs the consult again. The re-post spends nothing.
-- An explicit pending `scribe_freescript` job is a deliberate rerun request: it bypasses skip-existing and the ledger and runs again. Its ledger line carries the `job_id`.
+- An explicit pending `scribe_freescript` job is a deliberate rerun request: it bypasses skip-existing and runs again, but NOT the attempt cap below. Its ledger line carries the `job_id`. A pending job whose post failed is re-posted from the kept artifact like any other uid, under its `job_id` (from the pending list, else from the ledger line).
+- Attempt cap: `MAX_ATTEMPTS_PER_SHA` (2). A Bedrock attempt is any ledger line for the uid at this `code_sha256` whose state is `written`, `rejected`, `post_failed` or `failed:<Class>`; seed lines (another code sha) and re-post lines (marked `"reposted": true`) are not. Before any Bedrock run for a uid the box counts its attempts; at 2 or more it makes no call, appends a line with state `attempts_exhausted` and counts it in the summary key `attempts_exhausted` (also in the backfill total). It applies to sealed uids, pending jobs, hourly and backfill alike, and exhausted uids do not use a `max_consults` slot. Re-post comes first and costs no attempt. A rejected result writes no `artifact.json`, so it is bounded at 2 runs per code sha; a `failed:<Class>` is retried until the cap. A new code sha resets the count. A consult that raises still adds what it spent (from its usage lines) to `cost_usd`; if that cannot be read the summary carries `cost_unknown: n`. `attempts_exhausted` does not change the exit code: look for the key in the log. An unreadable ledger is fatal (exit 1).
 - If a ledger line cannot be written, the summary line carries `ledger_write_failed: true` and the exit is 1 (fatal: `backfill` stops, and the run stops after that consult).
 - In folder mode `hourly` and `backfill` print `config error: hourly/backfill need bundle mode` and exit 1.
 
@@ -110,7 +111,9 @@ sudo -u freescript env $(grep -v '^#' /etc/freescript-nightly.env | xargs) \
   python -m tools.eta2freescript.nightly plan --data "$FREESCRIPT_DATA"
 ```
 
-Cron on the box, after that day's Sarvam transcripts and role tracks are on disk. The script selects the previous IST day, so 01:15 IST is enough. With `TZ=Asia/Kolkata` and the repo venv on `PATH`:
+**When hourly is installed, REMOVE the old `run` nightly cron line below. Hourly replaces it; running both double-handles the previous day.** (Both take the same lock, so the second would only find it held or re-walk the day.)
+
+Cron on the box (the old nightly line; remove it once hourly is installed), after that day's Sarvam transcripts and role tracks are on disk. The script selects the previous IST day, so 01:15 IST is enough. With `TZ=Asia/Kolkata` and the repo venv on `PATH`:
 
 ```
 15 1 * * * cd /opt/Even-Transcription-Assistant && set -a && . /etc/freescript-nightly.env && set +a && python -m tools.eta2freescript.nightly run >> /var/log/freescript-nightly.log 2>&1

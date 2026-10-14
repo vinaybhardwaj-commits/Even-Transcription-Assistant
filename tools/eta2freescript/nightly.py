@@ -534,8 +534,8 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
     """
     cap = int(cfg.get("max_consults") or 40)
     chosen, overflow = rows[:cap], rows[cap:]
-    note = on_result or (lambda uid, state, artifact_id=None: None)
-    posted, rejected, failed, skipped, spent = 0, 0, 0, len(overflow), 0.0
+    note = on_result or (lambda uid, state, artifact_id=None, **kw: None)
+    posted, rejected, failed, skipped, spent, cost_unknown = 0, 0, 0, len(overflow), 0.0, 0
     if dry_run:
         for r in chosen:
             print(r["uid"], r.get("ist_date"), "dry-run")
@@ -549,12 +549,21 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
                 log = (run_one or (lambda uid: _default_run(data, out, uid)))(r["uid"])
             except Exception as e:
                 failed += 1
+                c = getattr(e, "cost_usd", None)  # what the consult spent before it raised, from its usage lines
+                if isinstance(c, (int, float)) and not isinstance(c, bool):
+                    spent += c
+                else:
+                    cost_unknown += 1
                 note(r["uid"], "failed:" + type(e).__name__)
                 print(r["uid"], "ERROR", type(e).__name__, flush=True)
                 continue
             art = log.get("artifact") if isinstance(log, dict) else None
+            rp = {"reposted": True} if isinstance(log, dict) and log.get("reposted") else {}
             if not isinstance(art, dict):
                 failed += 1
+                c = log.get("cost_usd") if isinstance(log, dict) else None
+                if isinstance(c, (int, float)) and not isinstance(c, bool):
+                    spent += c
                 note(r["uid"], "failed:NoArtifact")
                 print(r["uid"], "not-valid", flush=True)
                 continue
@@ -571,7 +580,7 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
                 res = post(body)
             except Exception as e:
                 failed += 1
-                note(r["uid"], "post_failed")  # the artifact exists; the next run at this code sha re-posts it
+                note(r["uid"], "post_failed", **rp)  # the artifact exists; the next run at this code sha re-posts it
                 print(r["uid"], "POST", type(e).__name__, flush=True)
                 continue
             ok = isinstance(res, dict) and res.get("ok")
@@ -586,7 +595,7 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
                 rejected += 1
                 print(r["uid"], "rejected", flush=True)
             else:
-                note(r["uid"], "post_failed")
+                note(r["uid"], "post_failed", **rp)
                 failed += 1
                 print(r["uid"], "post-rejected", "inserted=" + str((res or {}).get("inserted")), flush=True)
     except LedgerWriteError:
@@ -595,6 +604,8 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
                "cost_usd": round(spent, 6)}
     if ledger_failed:
         summary["ledger_write_failed"] = True
+    if cost_unknown:
+        summary["cost_unknown"] = cost_unknown
     return summary
 
 
@@ -667,6 +678,36 @@ def _abort_summary(dry_run: bool, day: str, out: dict | None) -> None:
 
 STATE_FILE = "consult-state.jsonl"
 LOCK_FILE = ".nightly.lock"
+MAX_ATTEMPTS_PER_SHA = 2  # Bedrock runs per (uid, code_sha256); a re-post of a kept artifact is not one
+_ATTEMPT_STATES = ("written", "rejected", "post_failed")
+
+
+def count_attempts(out_root: str, code_sha: str) -> dict[str, int] | None:
+    """uid -> Bedrock attempts at ``code_sha``, counted from every ledger line (not only the last).
+
+    An attempt is a line whose state is written, rejected, post_failed or failed:<Class>. A line marked ``reposted`` is a re-post
+    of a kept artifact and is not one. Seed lines (another code sha) never count. A missing file is {}; an unreadable one is None.
+    """
+    n: dict[str, int] = {}
+    try:
+        with open(Path(out_root) / STATE_FILE, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or not isinstance(row.get("consult_uid"), str) or row.get("code_sha256") != code_sha:
+                    continue
+                st = row.get("state")
+                if row.get("reposted") or not isinstance(st, str):
+                    continue
+                if st in _ATTEMPT_STATES or st.startswith("failed:"):
+                    n[row["consult_uid"]] = n.get(row["consult_uid"], 0) + 1
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError):
+        return None
+    return n
 
 
 def append_states(out_root: str, lines: list[dict]) -> None:
@@ -801,11 +842,13 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     day_of = {u: day for u, _j, chk in uids if chk}
     ledger_failed = False
 
-    def emit(uid: str, state: str, aid: str | None = None) -> None:
+    def emit(uid: str, state: str, aid: str | None = None, reposted: bool = False) -> None:
         line = {"consult_uid": uid, "ist_date": dates.get(uid) or day_of.get(uid), "state": state, "artifact_id": aid,
                 "run_ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "code_sha256": code_sha}
         if job_of.get(uid):
             line["job_id"] = job_of[uid]
+        if reposted:
+            line["reposted"] = True  # not a Bedrock attempt: count_attempts ignores it
         if not cfg.get("out") or dry_run:
             return
         try:
@@ -823,8 +866,31 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
         have, flags = got
         ledger = read_ledger(cfg["out"]) or {}
         repost = {u for u, row in ledger.items() if row.get("state") == "post_failed" and row.get("code_sha256") == code_sha}
-    # an explicit pending scribe_freescript job is a deliberate rerun request: it bypasses skip-existing
+        for u in repost:  # a pending job that failed to post is re-posted too, under the job id of this run or of the ledger line
+            if not job_of.get(u) and isinstance(ledger[u].get("job_id"), str):
+                job_of[u] = ledger[u]["job_id"]
+        uids = [(u, job_of.get(u) if u in repost else j, chk) for u, j, chk in uids]
+    # re-post comes first: a post_failed with a kept artifact.json goes out again with no Bedrock call
+    kept_logs: dict[str, dict] = {}
+    if not dry_run and cfg.get("out"):
+        for u in repost:
+            lg = _repost_log(cfg["out"], u)
+            if lg:
+                kept_logs[u] = lg
+    # an explicit pending scribe_freescript job is a deliberate rerun request: it bypasses skip-existing, but not the attempt cap
     kept = [t for t in uids if not t[2] or t[0] not in have]
+    exhausted: list[str] = []
+    prior = read_ledger(cfg["out"]) or {} if cfg.get("out") else {}
+    if cfg.get("out"):
+        attempts = count_attempts(cfg["out"], code_sha)
+        if attempts is None:
+            _abort_summary(dry_run, day, out)
+            return 1
+        exhausted = [t[0] for t in kept if t[0] not in kept_logs and attempts.get(t[0], 0) >= MAX_ATTEMPTS_PER_SHA]
+        kept = [t for t in kept if t[0] not in exhausted]
+        for u in exhausted:
+            if isinstance(prior.get(u, {}).get("ist_date"), str):
+                dates.setdefault(u, prior[u]["ist_date"])
     cap = int(cfg.get("max_consults") or 40)
     overflow, kept_capped = len(kept) - cap if len(kept) > cap else 0, kept[:cap]
     skipped = [t for t in uids if t[2] and t[0] in have]
@@ -844,6 +910,8 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     try:
         for t in skipped:
             emit(t[0], *have[t[0]])
+        for u in exhausted:
+            emit(u, "attempts_exhausted")
         with tempfile.TemporaryDirectory(prefix="freescript-bundle-") as td:
             tmp = Path(td)
             (tmp / "bundles").mkdir()
@@ -859,14 +927,6 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
                 # every pipeline output goes inside the temp dir; _bundle_runner copies out only derived files
                 bcfg = dict(cfg, data=str(tmp), out=str(tmp / "out"))
                 base = run_one or _bundle_runner(consults, tmp / "out", cfg.get("out"))
-                kept_logs = {}
-                if not dry_run:
-                    for r in rows:
-                        u = r["uid"]
-                        if u in repost and not job_of.get(u):
-                            lg = _repost_log(cfg["out"], u)
-                            if lg:
-                                kept_logs[u] = lg
                 summary = execute(rows, bcfg, dry_run=dry_run, run_one=lambda u: kept_logs[u] if u in kept_logs else base(u),
                                   post=sender or (lambda _p: {"ok": True, "inserted": 0}),
                                   on_result=emit)
@@ -875,7 +935,8 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
         summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
     if summary.get("ledger_write_failed"):
         ledger_failed = True
-    summary.update(counts, **flags, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows))
+    summary.update(counts, **flags, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows),
+                   attempts_exhausted=len(exhausted))
     summary["skipped"] = summary.get("skipped", 0) + overflow
     summary["missing"] = counts["missing_layers"] + unexpanded
     if ledger_failed:
@@ -936,6 +997,19 @@ def _read_from(path: Path, start: int, end: int) -> bytes:
         return f.read(end - start)
 
 
+def _usd_between(ledger: Path, start: int) -> float | None:
+    """USD in the usage lines appended after ``start`` bytes. 0.0 when nothing was written; None when a line cannot be read."""
+    try:
+        size = ledger.stat().st_size if ledger.exists() else start
+        total = 0.0
+        for line in _read_from(ledger, start, size).decode("utf-8").splitlines():
+            if line.strip():
+                total += float(json.loads(line)["usd"])
+        return total
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
     """run_one for bundle mode. The pipeline writes under ``out`` (inside the TemporaryDirectory); only derived outputs reach ``keep_root``."""
     state: dict = {"offset": 0}
@@ -951,7 +1025,8 @@ def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
         try:
             log = run_consult(consults[uid], state["client"], out, Options())
         except Exception as e:
-            # a consult that raised still keeps what it spent
+            # a consult that raised still keeps what it spent, and reports it to execute() so the summary's cost_usd includes it
+            e.cost_usd = _usd_between(out / "usage.jsonl", state["offset"])
             state["offset"] = _keep_derived(out, keep_root, uid, {}, state["offset"], error_type=type(e).__name__)
             raise
         state["offset"] = _keep_derived(out, keep_root, uid, log, state["offset"])
@@ -962,13 +1037,15 @@ def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
 
 def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | None = None) -> int:
     summary.setdefault("mode", "folder")
-    for k in ("bundle_failed", "missing_layers", "not_this_day", "skipped_existing"):
+    for k in ("bundle_failed", "missing_layers", "not_this_day", "skipped_existing", "attempts_exhausted"):
         summary.setdefault(k, 0)
     summary.setdefault("cost_usd", 0.0)
     summary.setdefault("eligible", summary.get("n", 0) + summary.get("skipped", 0))
     keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day",
-            "skipped_existing", "cost_usd")
+            "skipped_existing", "attempts_exhausted", "cost_usd")
     line = {k: summary[k] for k in keys}
+    if summary.get("cost_unknown"):
+        line["cost_unknown"] = summary["cost_unknown"]
     line.update({k: True for k in ("day_read_partial", "day_read_failed", "ledger_write_failed") if summary.get(k)})
     if summary.get("date"):
         line = {"date": summary["date"], **line}
@@ -1123,7 +1200,8 @@ def load_index(path: str, date_from: str, date_to: str) -> tuple[dict[str, list[
             by_day.setdefault(day, []).append(uid)
     return by_day, bad
 
-_TOTAL_KEYS = ("eligible", "written", "skipped_existing", "rejected", "failed", "missing_layers", "bundle_failed")
+_TOTAL_KEYS = ("eligible", "written", "skipped_existing", "rejected", "failed", "missing_layers", "bundle_failed", "attempts_exhausted",
+               "cost_unknown")
 _TOTAL_SOURCE = {"written": "posted"}  # the per-day summary still says posted; the total line says written
 
 
