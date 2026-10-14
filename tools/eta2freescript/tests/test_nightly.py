@@ -1294,3 +1294,58 @@ def test_the_summary_carries_the_four_clock_sums_and_the_ledger_only_when_non_ze
     assert all("clock_relative" not in l for l in a)  # zero value omitted
     c = [l for l in lines if l["consult_uid"] == "c"]
     assert c and all(not any(k.startswith("clock_") for k in l) for l in c)  # all zero: no clock fields at all
+
+
+# ---- an `invalidated` ledger line forces a re-run (operator lever) ----
+
+def _invalidate(cfg, uid, sha="old-sha"):
+    nightly.append_states(cfg["out"], [{"consult_uid": uid, "ist_date": "2026-10-05", "state": "invalidated",
+                                        "reason": "b2_epoch_collapse", "code_sha256": sha}])
+
+
+def _last_summary(capsys):
+    return json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+
+
+def test_invalidated_uid_listed_by_the_day_read_runs_then_is_skipped_once_written(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    nightly.append_states(cfg["out"], [{"consult_uid": "x", "state": "written", "code_sha256": "old-sha", "artifact_id": "9"}])
+    _invalidate(cfg, "x")
+    stored = [{"consult_uid": "x", "state": "ok", "run_id": 9}, {"consult_uid": "y", "state": "ok", "run_id": 10}]
+    capsys.readouterr()
+    assert _call(cfg, "2026-10-05", run_one, ["x", "y"], lambda *_: stored) == 0
+    assert ran == ["x"]  # y stays skipped by the day read
+    out = _last_summary(capsys)
+    assert out["invalidated_rerun"] == 1 and out["skipped_existing"] == 1
+    assert _states(cfg, "x")[-1] == "written"
+    assert _call(cfg, "2026-10-05", run_one, ["x", "y"], lambda *_: stored) == 0
+    assert ran == ["x"]  # written after the invalidation: skipped again
+    assert _last_summary(capsys)["invalidated_rerun"] == 0
+
+
+def test_invalidated_at_the_attempt_cap_is_attempts_exhausted_and_not_run(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    nightly.append_states(cfg["out"], [{"consult_uid": "x", "state": s, "code_sha256": "sha-A"} for s in ("started", "written", "started", "written")])
+    _invalidate(cfg, "x", "sha-A")
+    capsys.readouterr()
+    assert _call(cfg, "2026-10-05", run_one, ["x"], lambda *_: [{"consult_uid": "x", "state": "ok"}]) == 0
+    assert ran == []
+    out = _last_summary(capsys)
+    assert out["attempts_exhausted"] == 1 and out["invalidated_rerun"] == 0
+    assert _states(cfg, "x")[-1] == "attempts_exhausted"
+
+
+def test_other_ledger_states_still_skip_with_the_day_read_listing_them(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    nightly.append_states(cfg["out"], [{"consult_uid": "w", "state": "written", "code_sha256": "sha-A"},
+                                       {"consult_uid": "s", "state": "skipped_existing", "code_sha256": "sha-A"}])
+    stored = [{"consult_uid": u, "state": "ok"} for u in ("w", "s", "d")]
+    assert _call(cfg, "2026-10-05", run_one, ["w", "s", "d"], lambda *_: stored) == 0
+    assert ran == []
+    assert _last_summary(capsys)["invalidated_rerun"] == 0

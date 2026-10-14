@@ -643,7 +643,10 @@ def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str) -> tupl
 
     The box's ledger comes first: a last line of ``written`` or ``skipped_existing`` skips, and so does ``rejected`` with this
     run's code sha (a rejected uid is retried only when the code changed). The day read adds every uid it lists with a state other
-    than ``rejected``. A truncated or blind-withholding read is partial, a failed read is ledger-only. None only when the ledger is
+    than ``rejected``, except a uid whose LAST ledger line is ``invalidated`` (the operator's re-run lever): that uid is not skipped,
+    and ``info["_invalidated"]`` holds those uids so the caller can count ``invalidated_rerun``. Any later ledger line (started,
+    written, ...) ends the invalidation, so a re-run and written uid is skipped again. An ``invalidated`` line is not an attempt:
+    the per-(uid, code sha) cap still applies. A truncated or blind-withholding read is partial, a failed read is ledger-only. None only when the ledger is
     unreadable AND the day read fails: the caller aborts.
     """
     ledger = read_ledger(cfg["out"])
@@ -655,7 +658,9 @@ def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str) -> tupl
             skips[uid] = ("skipped_existing", aid)
         elif st == "rejected" and row.get("code_sha256") == code_sha:
             skips[uid] = ("rejected", aid)  # still rejected at this code: the line keeps saying so, so a code change retries it
-    info = {"day_read_partial": False, "day_read_failed": False}
+    info: dict = {"day_read_partial": False, "day_read_failed": False}
+    invalidated = {u for u, row in (ledger or {}).items() if row.get("state") == "invalidated"}
+    info["_invalidated"] = invalidated
     try:
         if not cfg.get("app_url") or not secret:
             raise NightlyError("no app url or secret for the day read")
@@ -663,7 +668,8 @@ def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str) -> tupl
         rows, partial = got if isinstance(got, tuple) else (got, False)
         info["day_read_partial"] = bool(partial)
         for uid, aid in existing_uids(rows).items():
-            skips[uid] = ("skipped_existing", aid)
+            if uid not in invalidated:
+                skips[uid] = ("skipped_existing", aid)
     except Exception as e:
         print("day-read", type(e).__name__, flush=True)
         info["day_read_failed"] = True
@@ -934,12 +940,14 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
             raise LedgerWriteError("ledger write failed") from None
 
     have: dict[str, tuple[str, str | None]] = {}
+    invalidated: set = set()
     if skip_existing:
         got = _skip_map(cfg, day, secret, day_read, code_sha)
         if got is None:
             _abort_summary(dry_run, day, out)
             return 1
         have, flags = got
+        invalidated = flags.pop("_invalidated", set())
     # re-post comes first, on every path and before the cap: a uid with a post_failed at this code sha and no later written or
     # rejected, whose artifact.json is kept, goes out again with no Bedrock call
     kept_logs: dict[str, dict] = {}
@@ -978,6 +986,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     skipped = [t for t in uids if t[2] and t[0] in have]
     skipped_existing = len(skipped)
     uids = kept_capped
+    invalidated_rerun = sum(1 for t in uids if t[0] in invalidated)
     sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
     if sender is None and not dry_run:
         print("no ingest target")
@@ -1021,7 +1030,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     for k in (n for n, _ in CLOCK_FIELDS):
         summary[k] = sum(_clock_of(c)[k] for c in clock_src.values())
     summary.update(counts, **flags, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows),
-                   attempts_exhausted=len(exhausted))
+                   attempts_exhausted=len(exhausted), invalidated_rerun=invalidated_rerun)
     summary["skipped"] = summary.get("skipped", 0) + overflow
     summary["missing"] = counts["missing_layers"] + unexpanded
     if ledger_failed:
@@ -1133,12 +1142,13 @@ def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
 
 def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | None = None) -> int:
     summary.setdefault("mode", "folder")
-    for k in ("bundle_failed", "missing_layers", "not_this_day", "skipped_existing", "attempts_exhausted"):
+    for k in ("bundle_failed", "missing_layers", "not_this_day", "skipped_existing", "attempts_exhausted",
+              "invalidated_rerun"):
         summary.setdefault(k, 0)
     summary.setdefault("cost_usd", 0.0)
     summary.setdefault("eligible", summary.get("n", 0) + summary.get("skipped", 0))
     keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day",
-            "skipped_existing", "attempts_exhausted", "cost_usd")
+            "skipped_existing", "attempts_exhausted", "invalidated_rerun", "cost_usd")
     line = {k: summary[k] for k in keys}
     line.update({k: summary[k] for k, _ in CLOCK_FIELDS if k in summary})
     if summary.get("cost_unknown"):
@@ -1220,8 +1230,10 @@ def _run_day(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=N
                 out.update(fatal=True)
             return 1
         have, flags = got
+        invalidated = flags.pop("_invalidated", set())
         kept = [r for r in rows if r["uid"] not in have]
         skipped_existing, rows = len(rows) - len(kept), kept
+        flags["invalidated_rerun"] = sum(1 for r in rows if r["uid"] in invalidated)
     if not rows and not missing and not sealed_missing:
         print("nothing", day)
         return 0
