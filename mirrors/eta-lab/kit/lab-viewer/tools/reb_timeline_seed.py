@@ -25,7 +25,6 @@ HERE = Path(__file__).resolve()
 KIT_ROOT = HERE.parents[2]   # kit/lab-viewer/tools/reb_timeline_seed.py -> parents[0]=tools [1]=lab-viewer [2]=kit
 sys.path.insert(0, str(KIT_ROOT))
 from reb.reb import load_window, WindowNotFoundError   # the REAL library (eta-refuter-2 #5266: read reb.py from THIS repo, never a snapshot)
-from reb.from_hist import SEALED_WINDOWS   # lid-debug's 4 sealed clips (gating-lead #10998): never seeded into a lane, whatever the held-out list says. An import failure stops the tool (fail closed).
 
 BUCKET = "eta-lab-ratings"
 CWD = HERE.parents[1]   # kit/lab-viewer, matching timeline_seed.py's own wrangler cwd
@@ -34,16 +33,9 @@ CWD = HERE.parents[1]   # kit/lab-viewer, matching timeline_seed.py's own wrangl
 # (still fully visible per-window in the P3 inspector - this file is additive, never a substitute for that).
 LANES = [
     ("whisper", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("whisper")),
-    ("medmodel", lambda e: e.get("layer") == "stt" and e.get("engine") == "medasr"),   # T-MEDMODEL-2: stt layer only; terms.medasr (W50 evidence, other windows + decode) stays in the MedASR row below
-    ("indic", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("indic-")),
+    ("indic", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("indic-ctc")),
     ("sravaani", lambda e: e.get("layer") == "stt" and e.get("engine") == "sravaani"),
-    ("medasr", lambda e: e.get("layer") in ("terms", "medical")),   # 6V: REB-SPEC v2.3 renames the layer `medical`; `terms` tracks stay in this row
-    # 6V (V rulings S1-S6): the Sarvam lanes and the production router twin get their own rows, listed BEFORE the generic translate/diar rows so first-match wins
-    ("router", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("router-twin")),
-    ("sarvam", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("sarvam-saaras")),
-    ("sarvam_translate", lambda e: e.get("layer") == "translate" and str(e.get("engine", "")).startswith("sarvam-saaras")),
-    ("sarvam_diar", lambda e: e.get("layer") == "diar" and str(e.get("engine", "")).startswith("sarvam-saaras")),
-    ("encounter", lambda e: e.get("layer") == "encounter"),
+    ("medasr", lambda e: e.get("layer") == "terms"),
     ("translate", lambda e: e.get("layer") == "translate"),   # layer name per REB-SPEC-v1 (translate: Gemini text->English per Indic STT track); no such track exists on disk yet
     ("diar", lambda e: e.get("layer") == "diar"),
     ("acoustic", lambda e: e.get("layer") == "acoustics"),
@@ -51,31 +43,11 @@ LANES = [
 ]
 
 
-KOYAL_LANGS = ("hi", "kn", "ml", "te")   # KOYAL-LANE-SPEC f1f57dc3: four prompt-language tracks per window, same engine name, told apart only by config.lang
-
-
-def lane_of(entry, body=None):
-    if entry.get("layer") == "stt" and entry.get("engine") == "koyal":
-        cfg = (body or {}).get("config")
-        lang = str(cfg.get("lang", "") if isinstance(cfg, dict) else "").split("-")[0].lower()
-        return f"koyal_{lang}" if lang in KOYAL_LANGS else None   # an unknown prompt language is not shown rather than guessed
+def lane_of(entry):
     for name, pred in LANES:
         if pred(entry):
             return name
     return None
-
-
-# stt.medasr tracks by config_hash that must not reach the viewer. e2b69f8a = hf-l4-medasr-1 (chunk_s 30): eta-refuter-3 #8625 verdict, EOS-only on 356/432,
-# a chunking fault. Track versions are never mixed in one lane; a new v2 hash is added to the allow rule here only after r3 PASSes its launcher.
-MEDMODEL_SUSPECT_HASHES = frozenset({"e2b69f8a"})
-SUSPECT_REASON = "SUSPECT e2b69f8a (30 s chunking)"
-
-
-def suspect_medmodel(entry, body=None):
-    if not (entry.get("layer") == "stt" and entry.get("engine") == "medasr"):
-        return False
-    h = entry.get("config_hash") or (body or {}).get("config_hash")
-    return h in MEDMODEL_SUSPECT_HASHES
 
 
 def clip_local_offset(source_kind, t0, t1, all_raw_segments):
@@ -136,37 +108,15 @@ def window_ids_for(reb_root, date, room):
         yield Path(p).parent.name
 
 
-class Lanes(dict):
-    """lane -> segments; .capped = {lane: {"n_total", "until_ms"}} for every lane cut at LANE_CAP (so the viewer can say so)"""
-    capped = None
-    eos = None   # {lane: {"eos": chunks dropped because their text was only the "</s>" token, "kept": segments left}}; dropped BEFORE counting/capping, stored REB tracks are untouched
-    excluded = None   # {lane: {"n_tracks", "reason"}} for tracks deliberately left out (SUSPECT); the viewer must say so instead of "no segments"
-    full = None   # {lane: every segment, sorted} for capped lanes: written as timeline-lanes/ objects so the Worker can page by time window
-    sealed = 0   # windows skipped because their id is in SEALED_WINDOWS (never opened, no text, no track)
-
-
-LANE_CAP = 2000
-
-
 def build_reb_lanes(reb_root, date, room, is_held=None):
     """{"whisper": [...], ...} - each entry {t0_ms, t1_ms, text, engine}, absolute ms, across every window in
     this room-day, sorted, capped. A malformed window is skipped, never fatal to the rest of the day."""
-    lanes = Lanes({name: [] for name, _ in LANES})
-    lanes.capped = {}
-    lanes.full = {}
-    lanes.excluded = {}
-    lanes.eos = {}
-    eos_n = {}
-    lanes.update({f"koyal_{l}": [] for l in KOYAL_LANGS})
+    lanes = {name: [] for name, _ in LANES}
     n_windows = n_tracks = n_held = 0
     is_held = is_held or load_heldout()
     if is_held(date, room):   # the whole room-day is blind: nothing is read at all
         return lanes, 0, 0, sum(1 for _ in window_ids_for(reb_root, date, room))
-    lanes.sealed = 0
     for wid in window_ids_for(reb_root, date, room):
-        if wid in SEALED_WINDOWS:   # before the manifest is opened: a sealed window contributes nothing to any lane
-            lanes.sealed += 1
-            continue
         try:
             w = load_window(wid, ist_date=date, room_id=room, root=reb_root)
         except (WindowNotFoundError, OSError, json.JSONDecodeError, KeyError):
@@ -184,12 +134,8 @@ def build_reb_lanes(reb_root, date, room, is_held=None):
         for t in tracks:
             if t.entry.get("status") != "ok":
                 continue   # a day overlay is about what was SAID; per-engine failure bookkeeping stays in the per-window P3 inspector
-            lane = lane_of(t.entry, t.body)
+            lane = lane_of(t.entry)
             if lane is None:
-                continue
-            if suspect_medmodel(t.entry, t.body):
-                ex = lanes.excluded.setdefault(lane, {"n_tracks": 0, "reason": SUSPECT_REASON})
-                ex["n_tracks"] += 1
                 continue
             n_tracks += 1
             for seg in t.segments[:500]:
@@ -203,31 +149,11 @@ def build_reb_lanes(reb_root, date, room, is_held=None):
                     if placed is None:
                         continue
                     a, b = placed
-                if text and not text.replace("</s>", "").strip():
-                    eos_n[lane] = eos_n.get(lane, 0) + 1
-                    continue
                 lanes[lane].append({"t0_ms": a, "t1_ms": b, "text": text[:1000], "engine": str(t.entry.get("engine"))[:60]})
-    for name, n in eos_n.items():
-        lanes.eos[name] = {"eos": n, "kept": len(lanes[name])}
     for name in lanes:
         lanes[name].sort(key=lambda s: s["t0_ms"])
-        if len(lanes[name]) > LANE_CAP:
-            lanes.capped[name] = {"n_total": len(lanes[name]), "until_ms": lanes[name][LANE_CAP - 1]["t1_ms"], "full": True}
-            lanes.full[name] = list(lanes[name])
-        lanes[name] = lanes[name][:LANE_CAP]
+        lanes[name] = lanes[name][:2000]
     return lanes, n_windows, n_tracks, n_held
-
-
-def write_lane_objects(out, room, date, lanes):
-    """timeline-lanes/<room>/<date>/<lane>.json under out, one per capped lane (the uncapped, sorted segments); private 0600/0700."""
-    d = Path(out) / "timeline-lanes" / room / date
-    if lanes.full:
-        d.mkdir(parents=True, exist_ok=True)
-        for parent in (d, d.parent, d.parent.parent):
-            private_dir_file(parent)
-    for name, segs in lanes.full.items():
-        p = d / f"{name}.json"
-        p.write_text(json.dumps(segs, ensure_ascii=False)); private_dir_file(p)
 
 
 def private_dir_file(p):
@@ -239,39 +165,35 @@ def cmd_build(a):
     lanes, n_windows, n_tracks, n_held = build_reb_lanes(a.reb_root, a.date, a.room)
     out = Path(a.out) / "timeline" / a.room; out.mkdir(parents=True, exist_ok=True); private_dir_file(out)
     p = out / f"{a.date}.reb.json"
-    p.write_text(json.dumps({"reb": lanes, "reb_cap": lanes.capped, "reb_excluded": lanes.excluded, "reb_eos": lanes.eos}, ensure_ascii=False)); private_dir_file(p)
-    write_lane_objects(a.out, a.room, a.date, lanes)
-    print(f"built reb lanes for {a.room}/{a.date}: {n_windows} windows, {n_tracks} current tracks, {n_held} held out (R3/W51), {lanes.sealed} sealed -> {p}")
+    p.write_text(json.dumps({"reb": lanes}, ensure_ascii=False)); private_dir_file(p)
+    print(f"built reb lanes for {a.room}/{a.date}: {n_windows} windows, {n_tracks} current tracks, {n_held} held out (R3/W51) -> {p}")
 
 
 def fetch_live(room, date):
-    """Read-only R2 get of the live doc: (parsed doc, sha256 of the exact bytes) or (None, None) if it doesn't exist yet (a fresh room-day, not an error)."""
+    """Read-only R2 get of the live doc; None if it doesn't exist yet (a fresh room-day, not an error)."""
     r = subprocess.run(["npx", "wrangler", "r2", "object", "get", f"{BUCKET}/timeline/{room}/{date}.json", "--pipe", "--remote"],
-                        capture_output=True, cwd=CWD)
+                        capture_output=True, text=True, cwd=CWD)
     if r.returncode != 0:
-        if b"does not exist" in (r.stderr or b""):
-            return None, None
-        sys.exit(f"cannot read the live doc for {room}/{date} (not a clean not-found - refusing to guess): {(r.stderr or b'')[:300]!r}")
+        if "does not exist" in (r.stderr or ""):
+            return None
+        sys.exit(f"cannot read the live doc for {room}/{date} (not a clean not-found - refusing to guess): {(r.stderr or '')[:300]}")
     try:
-        return json.loads(r.stdout), hashlib.sha256(r.stdout).hexdigest()
+        return json.loads(r.stdout)
     except json.JSONDecodeError:
         sys.exit(f"live doc for {room}/{date} is not valid JSON - refusing to build on top of it")
 
 
 def cmd_merge(a):
     os.umask(0o077)
-    live_fetched, live_sha = fetch_live(a.room, a.date)
+    live_fetched = fetch_live(a.room, a.date)
     live = live_fetched if live_fetched is not None else {"schema": 1, "room_id": a.room, "date": a.date}
     lanes, n_windows, n_tracks, n_held = build_reb_lanes(a.reb_root, a.date, a.room)
-    merged = {**live, "reb": lanes, "reb_cap": lanes.capped, "reb_excluded": lanes.excluded, "reb_eos": lanes.eos}
+    merged = {**live, "reb": lanes}
     merged["source_sha256"] = hashlib.sha256(json.dumps({k: v for k, v in merged.items() if k != "source_sha256"}, sort_keys=True).encode()).hexdigest()
     out = Path(a.out) / "timeline" / a.room; out.mkdir(parents=True, exist_ok=True); private_dir_file(out)
     p = out / f"{a.date}.json"
     p.write_text(json.dumps(merged, ensure_ascii=False)); private_dir_file(p)
-    side = out / f"{a.date}.livesha"   # timeline_seed.py load --replace refuses if the live object is no longer this one (lost-update guard)
-    side.write_text(live_sha or "absent"); private_dir_file(side)
-    write_lane_objects(a.out, a.room, a.date, lanes)
-    print(f"merged reb lanes ({n_windows} windows, {n_tracks} current tracks, {n_held} held out R3/W51, {lanes.sealed} sealed) into {a.room}/{a.date} "
+    print(f"merged reb lanes ({n_windows} windows, {n_tracks} current tracks, {n_held} held out R3/W51) into {a.room}/{a.date} "
           f"({'had' if live_fetched is not None else 'no'} pre-existing live doc) -> {p}; "
           f"load with: timeline_seed.py load --dir {a.out} --replace")
 

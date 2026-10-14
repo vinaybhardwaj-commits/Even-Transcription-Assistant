@@ -60,4 +60,3 @@ Refs: #986, r220.
 - 29 Sep 2026 (rev 25): 25 Sep tone 418/418 done; duplicate-record bug (225 records, 218 windows) fixed, sidecar written; STT for 25/24 Sep deferred on GPU.
 - 29 Sep ~19:27 IST (rev 26): cut-only driver plus HF STT; 25 Sep 393/393 and 24 Sep 238/238 done; runner guard broken by 9bb75cf5, fixed fd460731 (978d9969e2589af8), no blind window transcribed (#6982-#7037).
 - 29 Sep ~23:10 IST (rev 27): T-BACKFILL-5 un-cancelled for 27 Sep only, HF; HF spend about USD 66.84 of 300 (#7602); Koyal lane launched #7592.
-- 30 Sep 2026 ~06:30 IST (rev 28): 29 Sep re-cut 418/418; 10 Sep cut 339/339; T-BACKFILL-5 closed (27/19/18 Sep ctc-out collected, 0 blind, #7863/#7865); 134 misnamed night-window ids found (#7893), hist-bulk owns the re-id. Refs: #7861-#7865, #7893, #7917.
