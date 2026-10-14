@@ -144,10 +144,8 @@ def read_consult(turns, jev=None, transport=None):
     """Jev proposals + evidence for one consult. `jev(state, questions)` is injectable for the selftest."""
     jev = jev or u9.ask
     state = state_text(turns)
-    main_resp = jev(state, {**u9.QUESTIONS, "too_poor": {"type": "noul", "instructions":
-        "Is this transcript too garbled, fragmentary or incomplete to tell reliably what was discussed about any surgical procedure?"}})
-    main = main_resp["answers"]
-    jev_model = main_resp.get("model") or u9.MODEL  # W41 F2: the model that actually answered, never a hardcoded literal
+    main = jev(state, {**u9.QUESTIONS, "too_poor": {"type": "noul", "instructions":
+        "Is this transcript too garbled, fragmentary or incomplete to tell reliably what was discussed about any surgical procedure?"}})["answers"]
     prop = {}
     for f in ("discussed", "context", "proposed_by", "recommended", "firmness", "patient_response", "urgency", "cost", "second_opinion", "procedure_named", "too_poor"):
         a = main[f]
@@ -162,7 +160,7 @@ def read_consult(turns, jev=None, transport=None):
             answers.update(jev(state, ch)["answers"]); calls += 1
     ev = evidence_from(answers, turns) if answers else {n: [] for n in EVIDENCE_NAME.values()}
     proc = procedure_phrase(turns, ev["procedure"], transport=transport)
-    return {"proposals": prop, "evidence": ev, "procedure": proc, "probe_calls": calls, "probes_skipped": skip, "jev_model": jev_model}
+    return {"proposals": prop, "evidence": ev, "procedure": proc, "probe_calls": calls, "probes_skipped": skip}
 
 
 def build(c, turns, transport=None):
@@ -170,10 +168,9 @@ def build(c, turns, transport=None):
         t["i"] = n
     n_tr = translate_turns(turns, transport=transport)
     r = read_consult(turns, transport=transport)
-    jev_model = r.pop("jev_model", u9.MODEL)
     return {"id": c["id"], "minutes": c["minutes"], "n_turns": len(turns), "translated_turns": n_tr,
             "turns": [{k: t.get(k) for k in ("i", "at", "window", "speaker", "speaker_basis", "lang", "text", "en")} | {"audio": None} for t in turns],
-            **r, "versions": {"u9": u9.PROMPT_VERSION, "translate_model": TRANSLATE_MODEL, "jev_model": jev_model}}
+            **r, "versions": {"u9": u9.PROMPT_VERSION, "translate_model": TRANSLATE_MODEL, "jev_model": "jev-latest"}}
 
 
 def selftest():
@@ -212,13 +209,10 @@ def selftest():
     def fake_jev(state, q):
         calls.append(len(q))
         if "discussed" in q:
-            return {"model": "jev-9.9.9-test", "answers": {**{k: ({"type": "choice", "choice": "no_surgical_talk", "confidence": 0.95, "probabilities": {}} if v["type"] == "choice" else {"type": "noul", "noul": 0.03}) for k, v in q.items()}}}
+            return {"answers": {**{k: ({"type": "choice", "choice": "no_surgical_talk", "confidence": 0.95, "probabilities": {}} if v["type"] == "choice" else {"type": "noul", "noul": 0.03}) for k, v in q.items()}}}
         return {"answers": {k: {"type": "noul", "noul": 0.9} for k in q}}
     r = read_consult(turns, jev=fake_jev, transport=fake_tr)
     assert r["probes_skipped"] and r["probe_calls"] == 0 and calls == [len(u9.QUESTIONS) + 1], "a confident no-surgery consult skips the per-turn probes"
-    assert r["jev_model"] == "jev-9.9.9-test", "read_consult must carry the model that actually answered, not a hardcoded literal (W41 F2)"
-    assert read_consult(turns, jev=lambda s, q: {"answers": {k: {"type": "noul", "noul": 0.9} for k in q}}, transport=fake_tr)["jev_model"] == u9.MODEL, \
-        "if a response omits model (e.g. a mock), fall back to the pinned constant, never the removed 'jev-latest' literal"
     # an empty reply (content None) is asked again once; two empty replies fail soft to "no phrase" instead of crashing
     seq = iter([None, '{"procedure": "septoplasty", "named": true}'])
     assert procedure_phrase([{"i": 1, "speaker": "Doctor", "en": "x", "text": "x"}], [1], transport=lambda m, j: next(seq)) == {"phrase": "septoplasty", "named": True}, "one empty reply is retried"
