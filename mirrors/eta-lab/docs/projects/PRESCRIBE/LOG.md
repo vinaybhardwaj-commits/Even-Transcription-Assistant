@@ -64,4 +64,3 @@ Refs: r429, r430, r430b.
 
 ## Standing leak rule
 A prescription or note never feeds the transcript of the same encounter or day. CAP-2 (vocabularies to steer STT/translation) is the second half, not yet started.
-- 29 Sep ~19:27 IST (rev 26): CAP-3 OWN/SWAP no help; PRIOR arm launched (pid 55701, bundle c979b5d, #7093).

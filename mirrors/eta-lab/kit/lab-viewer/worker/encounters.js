@@ -2,7 +2,6 @@
 // fed by lx's output file (ENCOUNTERS-SHAPES.md). Server-rendered, escape-first, zero client script, same Access gate as every route.
 // PHI note: STT window times/status and speaker letters come from the vault (already shown on the Consult page). The detected/pqm/cap
 // lanes carry ONLY times, ids and counts (no drug/diagnosis/doctor/patient text) - the shape doc says so and this module never widens that.
-import { isBlind } from "./blind.js";
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const rstr = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const ROOM_RE = /^[A-Za-z0-9_-]{1,64}$/, DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -55,7 +54,7 @@ export function encounterModel(consult, doc) {
   const windows = (consult.windows || []).map((w) => ({ k: w.k, t0: w.t0, t1: w.t1, s: w.s, e: w.e, status: w.status, n_words: w.n_words, run_id: w.run_id }));
   const turns = turnsOf(consult.segments || []);
   const det = detectedOf(doc);
-  return { room_id: consult.room_id, room_name: consult.room_name, date: consult.date, blind: isBlind(consult.room_id, consult.date), windows, hidden: consult.hidden || [], turns, cov: coverageOf(windows, consult.hidden), det };
+  return { room_id: consult.room_id, room_name: consult.room_name, date: consult.date, windows, hidden: consult.hidden || [], turns, cov: coverageOf(windows, consult.hidden), det };
 }
 
 const CSS = `
@@ -100,7 +99,7 @@ export function encountersPage(m) {
   if (!m) return `<p class="mut">This room-day has no data.</p>`;
   const dayStart = Date.parse(`${m.date}T00:00:00+05:30`), dayEnd = dayStart + 24 * 3600 * 1000;
   const cov = m.cov;
-  const winRows = m.windows.slice().sort((a, b) => a.s - b.s).map((w) => `<div class="row"><span class="t">${esc(w.t0)}–${esc(w.t1)}</span><a href="/#/win/${esc(w.k)}">${esc(w.status)}</a>${!m.blind && w.n_words ? ` · ${w.n_words} words` : ""}</div>`).join("") || `<p class="mut">No windows.</p>`;
+  const winRows = m.windows.slice().sort((a, b) => a.s - b.s).map((w) => `<div class="row"><span class="t">${esc(w.t0)}–${esc(w.t1)}</span><a href="/#/win/${esc(w.k)}">${esc(w.status)}</a>${w.n_words ? ` · ${w.n_words} words` : ""}</div>`).join("") || `<p class="mut">No windows.</p>`;
   // t.w indexes m.windows (NOT the time-sorted copy above): encounterModel maps consult.windows 1:1, in the same order consult() used when it stamped each segment's `w`
   const turnRows = m.turns.slice(0, 300).map((t) => `<div class="row"><span class="t">${fmtHMS(t.s)}–${fmtHMS(t.e)}</span>Speaker ${esc(t.key)} · ${t.n} line${t.n === 1 ? "" : "s"}${m.windows[t.w] ? `<a href="/#/win/${esc(m.windows[t.w].k)}">↳ window</a>` : ""}</div>`).join("") || `<p class="mut">No labelled speaker turns.</p>`;
   const d = m.det;
@@ -113,7 +112,7 @@ export function encountersPage(m) {
 <p class="mut">room ${esc(m.room_name)} (${esc(m.room_id)}) · ${esc(m.date)}${d.source ? ` · detector source <code>${esc(d.source)}</code>` : ""}</p>
 <div class="lane"><h2>Tape coverage &amp; speech activity</h2>
   <div class="stretches">${laneStretches(m.windows, dayStart, dayEnd)}</div>
-  <p class="mut">${cov.kept} STT windows kept (${cov.hidden} overlapping hidden), ${m.blind ? "word counts withheld" : `${cov.with_speech} with words`}, ${durMin(cov.covered_ms)} min covered of a day. ${m.blind ? "status withheld" : (Object.entries(cov.by_status).map(([k, v]) => `${v} ${esc(k)}`).join(", ") || "no windows")}.</p></div>
+  <p class="mut">${cov.kept} STT windows kept (${cov.hidden} overlapping hidden), ${cov.with_speech} with words, ${durMin(cov.covered_ms)} min covered of a day. ${Object.entries(cov.by_status).map(([k, v]) => `${v} ${esc(k)}`).join(", ") || "no windows"}.</p></div>
 <div class="lane"><h2>STT windows</h2>${winRows}</div>
 <div class="lane"><h2>Detected encounters (acoustic / E-6 / Jev loop)</h2>${detHtml}</div>
 <div class="lane"><h2>PQM truth consults</h2>${pqmHtml}</div>
