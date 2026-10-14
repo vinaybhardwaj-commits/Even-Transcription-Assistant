@@ -2,16 +2,6 @@
 
 Build and event log, newest first. Owner panes: fleet (builder), eta-refuter (checker).
 
-28 Sep ~15:2x -- F4-prod PASSed and pinned
-Session: jev-fix, eta-refuter.
-Advisory finding fixed (an env-var test wasn't actually exercising the code it claimed to guard); re-verified with a mutation test proving the fix is real. df61b3f PASS, pinned.
-Refs: #5423, #5425, #5446, #5449.
-
-## 28 Sep ~14:0x-15:1x -- jev-fix F2 merged main, F3 ready, F4-prod rebased on prod
-Session: jev-fix, eta-refuter.
-F2 (jev-fix/f2-model-pin) PASS (mutation-killed), cherry-picked clean to eta-lab main 30ae7561. F3 (legacy askJev routing) PASS x2, ready to merge, held for next train. F4-prod (shared thresholds file, production side) rebased onto production 4d7d8e0 after one real import-conflict resolution; eta-refuter verified every moved value identical.
-Refs: #5401-5415.
-
 ## 27-28 Sep -- W36 Jev audit done; ZDR ruling withdraws de-id fixes
 Session: jev-audit, jev-fix, eta-refuter.
 W36 audit: 43 Jev call sites, 17 PASS/23 GAP/2 UNVERIFIED/1 REFUTED; 2 real HIGH findings (surgery study bypassed its own de-id gate before calling Jev; prod logged raw error text that could echo PHI). W41 fixes: F2 (pin ETA_JEV_MODEL) + F3 (route legacy calls through logging) + F4 (one constants module) shipped. V ruled (27 Sep 12:55) Jev and OpenRouter/Gemini are ZDR for Even -- no de-identification is required before sending to them. This WITHDREW F1 and F5 (the de-id fixes) after F1 was already built.
