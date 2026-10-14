@@ -27,7 +27,7 @@ jobs:
         run: |
           npm i -D vitest@^2 --no-audit --no-fund
           # forks with a capped count: the threads pool hit "[vitest-worker]: Timeout calling onTaskUpdate" on loaded runners (PR 56, 59)
-          npx vitest run --pool=forks --poolOptions.forks.maxForks=2
+          npx vitest run --pool=forks --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=2
 
       - name: Silent-failure gate (no empty catch/.catch in critical paths; fails on any finding NOT in .github/check-silent-baseline.txt)
         run: |
