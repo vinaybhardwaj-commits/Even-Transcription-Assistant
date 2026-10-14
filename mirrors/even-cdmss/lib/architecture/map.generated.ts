@@ -139,14 +139,6 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "case-ask",
-    "plane": "unregistered"
-  },
-  {
-    "id": "case-ask-core",
-    "plane": "unregistered"
-  },
-  {
     "id": "ccb-apikey",
     "plane": "unregistered"
   },
@@ -259,10 +251,6 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "cognition",
-    "plane": "spine"
-  },
-  {
     "id": "concordance",
     "plane": "unregistered"
   },
@@ -340,10 +328,6 @@ export const MAP_MODULES: MapModule[] = [
   },
   {
     "id": "doctor-directory-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "doctor-facing",
     "plane": "unregistered"
   },
   {
@@ -427,6 +411,10 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
+    "id": "guardrails-r3-core",
+    "plane": "unregistered"
+  },
+  {
     "id": "guidelines-ingest-core",
     "plane": "unregistered"
   },
@@ -449,14 +437,6 @@ export const MAP_MODULES: MapModule[] = [
   {
     "id": "ipd-audit",
     "plane": "audit-engine"
-  },
-  {
-    "id": "ipd-doctor-hop",
-    "plane": "unregistered"
-  },
-  {
-    "id": "ipd-episode",
-    "plane": "unregistered"
   },
   {
     "id": "jats-chunk",
@@ -487,10 +467,6 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "lab-execution-context",
-    "plane": "unregistered"
-  },
-  {
     "id": "lab-override",
     "plane": "unregistered"
   },
@@ -504,10 +480,6 @@ export const MAP_MODULES: MapModule[] = [
   },
   {
     "id": "lab-source-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "lab-v2",
     "plane": "unregistered"
   },
   {
@@ -547,23 +519,11 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "lvc-merge-compare",
-    "plane": "unregistered"
-  },
-  {
     "id": "lvc-proposal-core",
     "plane": "unregistered"
   },
   {
     "id": "lvc-ratified-wording",
-    "plane": "unregistered"
-  },
-  {
-    "id": "lvc-ratify-surface-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "lvc-rule-merge",
     "plane": "unregistered"
   },
   {
@@ -596,10 +556,6 @@ export const MAP_MODULES: MapModule[] = [
   },
   {
     "id": "mcp-tools",
-    "plane": "unregistered"
-  },
-  {
-    "id": "mcp-v2",
     "plane": "unregistered"
   },
   {
@@ -695,10 +651,6 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "opd-audit-worker-core",
-    "plane": "unregistered"
-  },
-  {
     "id": "opd-case-anchor-core",
     "plane": "unregistered"
   },
@@ -744,10 +696,6 @@ export const MAP_MODULES: MapModule[] = [
   },
   {
     "id": "opd-ingest-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "opd-lab-write-guard",
     "plane": "unregistered"
   },
   {
@@ -807,59 +755,7 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "physician-standing-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "physician-standing-store",
-    "plane": "unregistered"
-  },
-  {
     "id": "plos",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-assemble-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-extract-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-harvest-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-instruments-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-narrative-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-pac-map-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-suggest-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-surface-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-tier-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "preop-versions-core",
     "plane": "unregistered"
   },
   {
@@ -904,10 +800,6 @@ export const MAP_MODULES: MapModule[] = [
   },
   {
     "id": "readmission-ask-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "readmission-check-core",
     "plane": "unregistered"
   },
   {
@@ -965,10 +857,6 @@ export const MAP_MODULES: MapModule[] = [
   {
     "id": "retrieve",
     "plane": "unregistered"
-  },
-  {
-    "id": "review",
-    "plane": "spine"
   },
   {
     "id": "review-navigator-core",
@@ -1031,39 +919,11 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "stay-library",
-    "plane": "unregistered"
-  },
-  {
-    "id": "stewardship-board",
-    "plane": "unregistered"
-  },
-  {
-    "id": "stewardship-canonical",
-    "plane": "unregistered"
-  },
-  {
-    "id": "stewardship-danger-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "stewardship-ops",
-    "plane": "unregistered"
-  },
-  {
-    "id": "stewardship-ops-core",
-    "plane": "unregistered"
-  },
-  {
     "id": "stream",
     "plane": "unregistered"
   },
   {
     "id": "trace",
-    "plane": "unregistered"
-  },
-  {
-    "id": "triage",
     "plane": "unregistered"
   },
   {
@@ -1073,10 +933,6 @@ export const MAP_MODULES: MapModule[] = [
   {
     "id": "vitals-coverage-core",
     "plane": "unregistered"
-  },
-  {
-    "id": "world-model",
-    "plane": "spine"
   }
 ];
 
@@ -1128,11 +984,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/admin",
-    "to": "case-ask",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
     "to": "ccb-dossier-core",
     "kind": "value"
   },
@@ -1145,11 +996,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "app/admin",
     "to": "citations-core",
     "kind": "type"
-  },
-  {
-    "from": "app/admin",
-    "to": "cognition",
-    "kind": "value"
   },
   {
     "from": "app/admin",
@@ -1208,16 +1054,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/admin",
-    "to": "ipd-doctor-hop",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "ipd-episode",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
     "to": "learning",
     "kind": "value"
   },
@@ -1240,21 +1076,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "app/admin",
     "to": "llm-cost-core",
     "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "lvc-merge-compare",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "lvc-rule-merge",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "member-state",
-    "kind": "type"
   },
   {
     "from": "app/admin",
@@ -1388,16 +1209,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/admin",
-    "to": "physician-standing-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "physician-standing-store",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
     "to": "prognosis-outcomes-core",
     "kind": "value"
   },
@@ -1448,47 +1259,12 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/admin",
-    "to": "stay-library",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "stewardship-board",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "stewardship-danger-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "stewardship-ops",
-    "kind": "type"
-  },
-  {
-    "from": "app/admin",
-    "to": "stewardship-ops",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "stewardship-ops-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
     "to": "value-score-core",
     "kind": "value"
   },
   {
     "from": "app/admin",
     "to": "vitals-coverage-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/admin",
-    "to": "world-model",
     "kind": "value"
   },
   {
@@ -1509,6 +1285,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "appropriateness-runs",
+    "kind": "value"
+  },
+  {
+    "from": "app/api",
+    "to": "audit-canonical",
     "kind": "value"
   },
   {
@@ -1564,16 +1345,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "care-tracks-store",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "case-ask",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "case-ask-core",
     "kind": "value"
   },
   {
@@ -1668,11 +1439,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "cognition",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "concordance",
     "kind": "value"
   },
@@ -1743,11 +1509,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "doctor-facing",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "doctor-metrics-refresh",
     "kind": "value"
   },
@@ -1813,6 +1574,11 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
+    "to": "guardrails-r3-core",
+    "kind": "value"
+  },
+  {
+    "from": "app/api",
     "to": "harvest",
     "kind": "value"
   },
@@ -1834,21 +1600,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "ipd-audit",
-    "kind": "type"
-  },
-  {
-    "from": "app/api",
-    "to": "ipd-audit",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "ipd-episode",
-    "kind": "type"
-  },
-  {
-    "from": "app/api",
-    "to": "ipd-episode",
     "kind": "value"
   },
   {
@@ -1874,11 +1625,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "lab-provider-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "lab-v2",
     "kind": "value"
   },
   {
@@ -1923,32 +1669,12 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "lvc-merge-compare",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "lvc-proposal-core",
     "kind": "value"
   },
   {
     "from": "app/api",
     "to": "lvc-ratified-wording",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "lvc-ratify-surface-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "lvc-rule-merge",
-    "kind": "type"
-  },
-  {
-    "from": "app/api",
-    "to": "lvc-rule-merge",
     "kind": "value"
   },
   {
@@ -1979,11 +1705,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "mcp-tools",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "mcp-v2",
     "kind": "value"
   },
   {
@@ -2043,11 +1764,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "opd-audit-worker-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "opd-complexity-core",
     "kind": "value"
   },
@@ -2090,11 +1806,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "app/api",
     "to": "opd-longitudinal",
     "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "opd-lvc-classify-core",
-    "kind": "type"
   },
   {
     "from": "app/api",
@@ -2173,32 +1884,7 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "physician-standing-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "physician-standing-store",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "plos",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "preop",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "preop-suggest-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "preop-versions-core",
     "kind": "value"
   },
   {
@@ -2243,13 +1929,13 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "readmission-check-core",
+    "to": "readmission-detect-core",
     "kind": "value"
   },
   {
     "from": "app/api",
-    "to": "readmission-detect-core",
-    "kind": "value"
+    "to": "readmission-narrative-core",
+    "kind": "type"
   },
   {
     "from": "app/api",
@@ -2313,11 +1999,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "review",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "review-queue-core",
     "kind": "value"
   },
@@ -2358,32 +2039,12 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "app/api",
-    "to": "stay-library",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "stewardship-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
     "to": "stream",
     "kind": "value"
   },
   {
     "from": "app/api",
     "to": "trace",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "triage",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "world-model",
     "kind": "value"
   },
   {
@@ -2499,16 +2160,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/care",
     "to": "opd-note-audit-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/care",
-    "to": "preop",
-    "kind": "value"
-  },
-  {
-    "from": "app/care",
-    "to": "preop-versions-core",
     "kind": "value"
   },
   {
@@ -2689,66 +2340,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "care-tracks-store",
     "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "backfill-runs",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "case-ask-core",
-    "kind": "type"
-  },
-  {
-    "from": "case-ask",
-    "to": "case-ask-core",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "doc-audit-core",
-    "kind": "type"
-  },
-  {
-    "from": "case-ask",
-    "to": "ipd-audit",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "llm",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "llm-cost",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "llm-cost-core",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "physician-standing-core",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "stewardship-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "case-ask",
-    "to": "trace",
     "kind": "value"
   },
   {
@@ -3047,36 +2638,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "cognition",
-    "to": "audit-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "cognition",
-    "to": "ccb-dossier-core",
-    "kind": "value"
-  },
-  {
-    "from": "cognition",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "cognition",
-    "to": "member-state",
-    "kind": "value"
-  },
-  {
-    "from": "cognition",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "cognition",
-    "to": "world-model",
-    "kind": "value"
-  },
-  {
     "from": "concordance",
     "to": "concordance-core",
     "kind": "value"
@@ -3139,16 +2700,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "curator",
     "to": "trace",
-    "kind": "value"
-  },
-  {
-    "from": "db",
-    "to": "lab-execution-context",
-    "kind": "value"
-  },
-  {
-    "from": "db",
-    "to": "opd-lab-write-guard",
     "kind": "value"
   },
   {
@@ -3327,11 +2878,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "type"
   },
   {
-    "from": "doctor-facing",
-    "to": "opd-gov-signal-core",
-    "kind": "type"
-  },
-  {
     "from": "doctor-metrics-refresh",
     "to": "db",
     "kind": "value"
@@ -3352,11 +2898,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "doctor-metrics-refresh",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
     "from": "doctor-metrics-store",
     "to": "db",
     "kind": "value"
@@ -3365,11 +2906,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "doctor-metrics-store",
     "to": "doctor-directory-core",
     "kind": "type"
-  },
-  {
-    "from": "doctor-metrics-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
   },
   {
     "from": "dose-aggregation-core",
@@ -3553,11 +3089,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "gemini-multimodal",
-    "to": "lab-execution-context",
-    "kind": "value"
-  },
-  {
-    "from": "gemini-multimodal",
     "to": "llm",
     "kind": "value"
   },
@@ -3663,11 +3194,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "ipd-audit",
-    "to": "clinical-state",
-    "kind": "type"
-  },
-  {
-    "from": "ipd-audit",
     "to": "db",
     "kind": "value"
   },
@@ -3728,73 +3254,8 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "ipd-audit",
-    "to": "stay-library",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-audit",
     "to": "value-score-core",
     "kind": "type"
-  },
-  {
-    "from": "ipd-doctor-hop",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "bedrock-core",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "ipd-audit",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "lab-provider-core",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "lvc-value-core",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "opd-lvc-classify-core",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "readmission",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "retrieve",
-    "kind": "value"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "stay-library",
-    "kind": "type"
-  },
-  {
-    "from": "ipd-episode",
-    "to": "trace",
-    "kind": "value"
   },
   {
     "from": "lab",
@@ -3894,161 +3355,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "lab-override",
     "to": "llm",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "audit-suppression-store",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "bedrock",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "discharge-extract-store",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "doc-audit-core",
-    "kind": "type"
-  },
-  {
-    "from": "lab-v2",
-    "to": "formulary",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "ipd-audit",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "ipd-episode",
-    "kind": "type"
-  },
-  {
-    "from": "lab-v2",
-    "to": "ipd-episode",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "lab",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "lab-execution-context",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "llm",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "lvc-proposal-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "lvc-ratified-wording",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "mcp-tools",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "mcp-v2",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-audit-store",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-complexity-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-ingest-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-note-audit",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-note-audit-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "preop",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "preop-tier-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "readmission",
-    "kind": "type"
-  },
-  {
-    "from": "lab-v2",
-    "to": "readmission",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "readmission-prompts",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "retrieve",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "sql-guard-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "trace",
     "kind": "value"
   },
   {
@@ -4195,36 +3501,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "lvc-judge-aa-core",
     "to": "lvc-core",
     "kind": "type"
-  },
-  {
-    "from": "lvc-merge-compare",
-    "to": "lvc-rule-merge",
-    "kind": "type"
-  },
-  {
-    "from": "lvc-merge-compare",
-    "to": "opd-lvc-classify-core",
-    "kind": "value"
-  },
-  {
-    "from": "lvc-ratify-surface-core",
-    "to": "lvc-rule-merge",
-    "kind": "value"
-  },
-  {
-    "from": "lvc-rule-merge",
-    "to": "lvc-proposal-core",
-    "kind": "value"
-  },
-  {
-    "from": "lvc-rule-merge",
-    "to": "lvc-ratified-wording",
-    "kind": "value"
-  },
-  {
-    "from": "lvc-rule-merge",
-    "to": "opd-lvc-classify-core",
-    "kind": "value"
   },
   {
     "from": "lvc-value",
@@ -4427,21 +3703,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "mcp-v2",
-    "to": "lab-execution-context",
-    "kind": "value"
-  },
-  {
-    "from": "mcp-v2",
-    "to": "lab-v2",
-    "kind": "type"
-  },
-  {
-    "from": "mcp-v2",
-    "to": "lab-v2",
-    "kind": "value"
-  },
-  {
     "from": "member-state",
     "to": "as-of-core",
     "kind": "value"
@@ -4482,16 +3743,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "member-state",
-    "to": "readmission",
-    "kind": "value"
-  },
-  {
-    "from": "member-state",
-    "to": "stay-library",
-    "kind": "value"
-  },
-  {
     "from": "member-state-adapters",
     "to": "clinical-state",
     "kind": "type"
@@ -4509,11 +3760,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "member-state-adapters",
     "to": "member-state",
-    "kind": "value"
-  },
-  {
-    "from": "metabase",
-    "to": "lab-execution-context",
     "kind": "value"
   },
   {
@@ -4663,11 +3909,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "opd-audit-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "opd-audit-store",
     "to": "opd-longitudinal",
     "kind": "value"
   },
@@ -4723,16 +3964,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "opd-gov-read",
-    "to": "doctor-facing",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-read",
-    "to": "ipd-doctor-hop",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-read",
     "to": "opd-audit-ui",
     "kind": "value"
   },
@@ -4747,11 +3978,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "opd-gov-read",
-    "to": "triage",
-    "kind": "value"
-  },
-  {
     "from": "opd-gov-signal-store",
     "to": "db",
     "kind": "value"
@@ -4759,16 +3985,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "opd-gov-signal-store",
     "to": "opd-gov-signal-core",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-signal-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-signal-store",
-    "to": "triage",
     "kind": "value"
   },
   {
@@ -4810,11 +4026,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "opd-longitudinal",
     "to": "opd-ingest-core",
     "kind": "type"
-  },
-  {
-    "from": "opd-longitudinal",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
   },
   {
     "from": "opd-longitudinal",
@@ -5002,11 +4213,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "type"
   },
   {
-    "from": "opd-triage-core",
-    "to": "triage",
-    "kind": "value"
-  },
-  {
     "from": "opd-triage-store",
     "to": "db",
     "kind": "value"
@@ -5018,17 +4224,7 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "opd-triage-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "opd-triage-store",
     "to": "opd-triage-core",
-    "kind": "value"
-  },
-  {
-    "from": "opd-triage-store",
-    "to": "triage",
     "kind": "value"
   },
   {
@@ -5142,186 +4338,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "physician-standing-store",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "physician-standing-store",
-    "to": "physician-standing-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "admin-cookie",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "backfill-runs",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "care-cookie",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "llm",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-assemble-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop",
-    "to": "preop-assemble-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-extract-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-harvest-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-instruments-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop",
-    "to": "preop-narrative-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-pac-map-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop",
-    "to": "preop-pac-map-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-suggest-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-surface-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop",
-    "to": "preop-tier-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop",
-    "to": "preop-tier-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "preop-versions-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop",
-    "to": "trace",
-    "kind": "value"
-  },
-  {
-    "from": "preop-assemble-core",
-    "to": "preop-instruments-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-assemble-core",
-    "to": "preop-tier-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-extract-core",
-    "to": "preop-assemble-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-harvest-core",
-    "to": "preop-assemble-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop-narrative-core",
-    "to": "preop-assemble-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop-narrative-core",
-    "to": "preop-instruments-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop-pac-map-core",
-    "to": "preop-assemble-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop-suggest-core",
-    "to": "preop-assemble-core",
-    "kind": "type"
-  },
-  {
-    "from": "preop-suggest-core",
-    "to": "preop-extract-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-suggest-core",
-    "to": "preop-harvest-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-surface-core",
-    "to": "preop-instruments-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-surface-core",
-    "to": "preop-tier-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-tier-core",
-    "to": "preop-instruments-core",
-    "kind": "value"
-  },
-  {
-    "from": "preop-versions-core",
-    "to": "preop-assemble-core",
-    "kind": "type"
-  },
-  {
     "from": "prognosis-outcomes-store",
     "to": "db",
     "kind": "value"
@@ -5388,16 +4404,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "readmission",
-    "to": "bedrock",
-    "kind": "value"
-  },
-  {
-    "from": "readmission",
-    "to": "care-call-store",
-    "kind": "value"
-  },
-  {
-    "from": "readmission",
     "to": "db",
     "kind": "value"
   },
@@ -5419,11 +4425,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "readmission",
     "to": "gcp-auth",
-    "kind": "value"
-  },
-  {
-    "from": "readmission",
-    "to": "ipd-audit",
     "kind": "value"
   },
   {
@@ -5453,22 +4454,12 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "readmission",
-    "to": "member-state",
-    "kind": "value"
-  },
-  {
-    "from": "readmission",
     "to": "metabase",
     "kind": "value"
   },
   {
     "from": "readmission",
     "to": "mini-backfill",
-    "kind": "value"
-  },
-  {
-    "from": "readmission",
-    "to": "opd-ingest-core",
     "kind": "value"
   },
   {
@@ -5500,11 +4491,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "readmission",
     "to": "readmission-prompts",
     "kind": "value"
-  },
-  {
-    "from": "readmission",
-    "to": "readmission-rates-core",
-    "kind": "type"
   },
   {
     "from": "readmission",
@@ -5553,22 +4539,12 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "readmission",
-    "to": "stay-library",
-    "kind": "value"
-  },
-  {
-    "from": "readmission",
     "to": "trace",
     "kind": "value"
   },
   {
     "from": "readmission-ask-core",
     "to": "readmission-narrative-core",
-    "kind": "value"
-  },
-  {
-    "from": "readmission-filter-core",
-    "to": "readmission-rates-core",
     "kind": "value"
   },
   {
@@ -5589,11 +4565,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "readmission-narrative-core",
     "to": "readmission-reconcile-core",
-    "kind": "value"
-  },
-  {
-    "from": "readmission-prompts",
-    "to": "readmission-ask-core",
     "kind": "value"
   },
   {
@@ -5642,11 +4613,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "record-audit-link-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
     "from": "rerank",
     "to": "llm",
     "kind": "value"
@@ -5678,11 +4644,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "retrieve",
-    "to": "lab-execution-context",
-    "kind": "value"
-  },
-  {
-    "from": "retrieve",
     "to": "llm",
     "kind": "value"
   },
@@ -5699,16 +4660,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "retrieve",
     "to": "source-quality",
-    "kind": "value"
-  },
-  {
-    "from": "review",
-    "to": "cognition",
-    "kind": "value"
-  },
-  {
-    "from": "review",
-    "to": "db",
     "kind": "value"
   },
   {
@@ -5782,111 +4733,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "stay-library",
-    "to": "clinical-state",
-    "kind": "value"
-  },
-  {
-    "from": "stay-library",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "stay-library",
-    "to": "discharge-extract-store",
-    "kind": "value"
-  },
-  {
-    "from": "stay-library",
-    "to": "doc-audit-core",
-    "kind": "type"
-  },
-  {
-    "from": "stay-library",
-    "to": "ipd-audit",
-    "kind": "value"
-  },
-  {
-    "from": "stay-library",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "stay-library",
-    "to": "readmission",
-    "kind": "value"
-  },
-  {
-    "from": "stay-library",
-    "to": "readmission-template-core",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-board",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-board",
-    "to": "ipd-doctor-hop",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-board",
-    "to": "severity-tier-core",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-board",
-    "to": "stewardship-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-board",
-    "to": "stewardship-danger-core",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-canonical",
-    "to": "audit-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-canonical",
-    "to": "ipd-audit",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-canonical",
-    "to": "opd-note-audit-core",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-danger-core",
-    "to": "severity-tier-core",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-ops",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-ops",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-ops",
-    "to": "stewardship-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "stewardship-ops",
-    "to": "stewardship-ops-core",
-    "kind": "value"
-  },
-  {
     "from": "trace",
     "to": "bedrock",
     "kind": "value"
@@ -5904,11 +4750,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "trace",
     "to": "lab-batch-core",
-    "kind": "value"
-  },
-  {
-    "from": "trace",
-    "to": "lab-execution-context",
     "kind": "value"
   },
   {
@@ -5937,104 +4778,9 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "triage",
-    "to": "audit-canonical",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "citations-core",
-    "kind": "type"
-  },
-  {
-    "from": "triage",
-    "to": "db",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "doctor-facing",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "even-ground-core",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "ipd-doctor-hop",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "metabase",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-audit-pdf",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-audit-ui",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-gov-signal-core",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-note-audit-core",
-    "kind": "type"
-  },
-  {
-    "from": "triage",
-    "to": "opd-note-audit-core",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-triage-core",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-triage-store",
-    "kind": "value"
-  },
-  {
     "from": "value-score-core",
     "to": "doc-audit-core",
     "kind": "type"
-  },
-  {
-    "from": "world-model",
-    "to": "ccb-dossier-core",
-    "kind": "value"
-  },
-  {
-    "from": "world-model",
-    "to": "ccb-resolve",
-    "kind": "value"
-  },
-  {
-    "from": "world-model",
-    "to": "member-state",
-    "kind": "type"
-  },
-  {
-    "from": "world-model",
-    "to": "member-state",
-    "kind": "value"
-  },
-  {
-    "from": "world-model",
-    "to": "metabase",
-    "kind": "value"
   }
 ];
 
@@ -6064,18 +4810,6 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "derived": false
   },
   {
-    "constName": "BURDEN_POLICY_VERSION",
-    "value": "burden-policy/0.1",
-    "file": "lib/cognition/schema.ts",
-    "derived": false
-  },
-  {
-    "constName": "CASE_ASK_VERSION",
-    "value": "case-ask/1",
-    "file": "lib/case-ask-core.ts",
-    "derived": false
-  },
-  {
     "constName": "CCB_ENGINE_VERSION",
     "value": "care-brief/0.1",
     "file": "lib/ccb-brief-core.ts",
@@ -6088,21 +4822,9 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "derived": true
   },
   {
-    "constName": "CLINICAL_REVIEW_VERSION",
-    "value": "clinical_review/1",
-    "file": "lib/readmission-ask-core.ts",
-    "derived": false
-  },
-  {
     "constName": "CLINICAL_STATE_VERSION",
     "value": "clinical-state/1.2",
     "file": "lib/clinical-state/schema.ts",
-    "derived": false
-  },
-  {
-    "constName": "COGNITION_SCHEMA_VERSION",
-    "value": "cognition/0.1",
-    "file": "lib/cognition/schema.ts",
     "derived": false
   },
   {
@@ -6113,7 +4835,7 @@ export const VERSION_REGISTRY: VersionRow[] = [
   },
   {
     "constName": "DOC_EXTRACT_VERSION",
-    "value": "doc-extract/2",
+    "value": "doc-extract/1",
     "file": "lib/discharge-extract-store.ts",
     "derived": false
   },
@@ -6184,33 +4906,9 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "derived": false
   },
   {
-    "constName": "IPD_DISCHARGE_ENGINE_VERSION_FOR_JOIN",
-    "value": "ipd-discharge-audit/0.2",
-    "file": "lib/ipd-episode/store.ts",
-    "derived": false
-  },
-  {
     "constName": "IPD_ENGINE_VERSION",
     "value": "ipd-discharge-audit/0.2",
     "file": "lib/ipd-audit/store.ts",
-    "derived": false
-  },
-  {
-    "constName": "IPD_ENGINE_VERSION",
-    "value": "ipd-episode-audit/0.2",
-    "file": "lib/lab-v2/sources/ipd.ts",
-    "derived": false
-  },
-  {
-    "constName": "IPD_EPISODE_ENGINE_VERSION",
-    "value": "ipd-episode-audit/0.2",
-    "file": "lib/ipd-episode/store.ts",
-    "derived": false
-  },
-  {
-    "constName": "IPD_EPISODE_ENGINE_VERSION_PRIOR",
-    "value": "ipd-episode-audit/0.1",
-    "file": "lib/ipd-episode/store.ts",
     "derived": false
   },
   {
@@ -6218,18 +4916,6 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "value": "`${IPD_ENGINE_VERSION}-mini`",
     "file": "lib/ipd-audit/store.ts",
     "derived": true
-  },
-  {
-    "constName": "IPD_STAY_ENGINE_VERSION",
-    "value": "ipd-stay-audit/0.1",
-    "file": "lib/ipd-audit/stay-material.ts",
-    "derived": false
-  },
-  {
-    "constName": "JOIN_SCHEMA_VERSION",
-    "value": "cognition-join/0.1",
-    "file": "lib/cognition/schema.ts",
-    "derived": false
   },
   {
     "constName": "JUDGEMENT_RULE_VERSION",
@@ -6253,18 +4939,6 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "constName": "MCP_PROTOCOL_VERSION",
     "value": "2024-11-05",
     "file": "lib/mcp-server.ts",
-    "derived": false
-  },
-  {
-    "constName": "MCP_V2_PROTOCOL_VERSION",
-    "value": "LATEST_PROTOCOL_VERSION",
-    "file": "lib/mcp-v2/server.ts",
-    "derived": true
-  },
-  {
-    "constName": "MCP_V2_SDK_VERSION",
-    "value": "@modelcontextprotocol/server@2.0.0",
-    "file": "lib/mcp-v2/server.ts",
     "derived": false
   },
   {
@@ -6299,7 +4973,7 @@ export const VERSION_REGISTRY: VersionRow[] = [
   },
   {
     "constName": "MEMBER_STATE_VERSION",
-    "value": "member-state/1.2",
+    "value": "member-state/1.1",
     "file": "lib/member-state/schema.ts",
     "derived": false
   },
@@ -6346,105 +5020,9 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "derived": false
   },
   {
-    "constName": "OT_ENGINE_VERSION",
-    "value": "ot-note-audit/0.1",
-    "file": "lib/triage/ot-audit-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "OT_ENGINE_VERSIONS_CURRENT",
-    "value": "[OT_ENGINE_VERSION]",
-    "file": "lib/triage/ot-audit-core.ts",
-    "derived": true
-  },
-  {
-    "constName": "PAIRED_PROMPT_VERSION",
-    "value": "paired-opd-prompt/1",
-    "file": "lib/lab-v2/paired-audit-core.ts",
-    "derived": false
-  },
-  {
     "constName": "PATIENT_SUMMARY_API_VERSION",
     "value": "patient-summary/1.0",
     "file": "lib/patient-summary-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PHYSICIAN_STANDING_VERSION",
-    "value": "physician_standing/1",
-    "file": "lib/physician-standing-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_ASSEMBLE_RULE_VERSION",
-    "value": "preop-assemble/1",
-    "file": "lib/preop-assemble-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_ENGINE_VERSION",
-    "value": "preop-risk/0.1",
-    "file": "lib/preop/store.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_EXTRACT_RULE_VERSION",
-    "value": "preop-extract/1",
-    "file": "lib/preop-extract-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_HARVEST_RULE_VERSION",
-    "value": "preop-harvest/1",
-    "file": "lib/preop-harvest-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_INSTRUMENTS_VERSION",
-    "value": "preop-instruments/1",
-    "file": "lib/preop-instruments-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_NARRATIVE_VERSION",
-    "value": "preop-narrative/1",
-    "file": "lib/preop-narrative-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_PAC_MAP_VERSION",
-    "value": "preop-pac-map/1",
-    "file": "lib/preop-pac-map-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_SUGGEST_RULE_VERSION",
-    "value": "preop-suggest/1",
-    "file": "lib/preop-suggest-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_SURFACE_RULE_VERSION",
-    "value": "preop-surface/1",
-    "file": "lib/preop-surface-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_TIER_RULE_VERSION",
-    "value": "preop-tier/0",
-    "file": "lib/preop-tier-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PREOP_VERSIONS_RULE_VERSION",
-    "value": "preop-versions/1",
-    "file": "lib/preop-versions-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "PRICING_VERSION",
-    "value": "lab-v2-pricing/1.0.0",
-    "file": "lib/lab-v2/pricing.ts",
     "derived": false
   },
   {
@@ -6479,14 +5057,8 @@ export const VERSION_REGISTRY: VersionRow[] = [
   },
   {
     "constName": "RATES_VERSION",
-    "value": "rates/2",
+    "value": "rates/1",
     "file": "lib/readmission-rates-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "REACTION_SCHEMA_VERSION",
-    "value": "reaction/0.1",
-    "file": "lib/cognition/schema.ts",
     "derived": false
   },
   {
@@ -6505,12 +5077,6 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "constName": "RELATED_LVC_VERSION",
     "value": "related-lvc/1",
     "file": "lib/readmission-narrative-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "REVIEW_SCHEMA_VERSION",
-    "value": "review/0.1",
-    "file": "lib/cognition/schema.ts",
     "derived": false
   },
   {
@@ -6538,12 +5104,6 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "derived": false
   },
   {
-    "constName": "STAY_LIBRARY_VERSION",
-    "value": "stay-library/1",
-    "file": "lib/stay-library/core.ts",
-    "derived": false
-  },
-  {
     "constName": "TRIAL_PROMPT_VERSION",
     "value": "ml-label-trial/1.0",
     "file": "lib/ml-label-trial/core.ts",
@@ -6554,24 +5114,16 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "value": "readmit-versions/1",
     "file": "lib/readmission-versions-core.ts",
     "derived": false
-  },
-  {
-    "constName": "WORLD_MODEL_WALK_VERSION",
-    "value": "world-model-walk-o/0.1",
-    "file": "lib/world-model/walk-o.ts",
-    "derived": false
   }
 ];
 
 export const COVERAGE = {
-  "registered": 24,
-  "unregistered": 46,
-  "total": 70,
+  "registered": 21,
+  "unregistered": 26,
+  "total": 47,
   "unregisteredIds": [
     "calculators",
     "care-call-core",
-    "case-ask",
-    "case-ask-core",
     "ccb-brief-core",
     "ccb-dossier-cache-core",
     "cdsco-banned-fdc",
@@ -6580,40 +5132,22 @@ export const COVERAGE = {
     "doc-audit-core",
     "dose-limits",
     "formulary-match-core",
-    "ipd-episode",
-    "lab-v2",
     "mcp-server",
-    "mcp-v2",
     "ml-label-trial",
     "opd-audit",
     "opd-feedback-rollup-core",
     "opd-note-audit",
     "opd-note-audit-core",
     "patient-summary-core",
-    "physician-standing-core",
-    "preop",
-    "preop-assemble-core",
-    "preop-extract-core",
-    "preop-harvest-core",
-    "preop-instruments-core",
-    "preop-narrative-core",
-    "preop-pac-map-core",
-    "preop-suggest-core",
-    "preop-surface-core",
-    "preop-tier-core",
-    "preop-versions-core",
     "prognosis-core",
     "proms",
     "readmission",
-    "readmission-ask-core",
     "readmission-narrative-core",
     "readmission-rates-core",
     "readmission-reconcile-core",
     "readmission-versions-core",
     "reasoning",
-    "right-care-ground-eval-core",
-    "stay-library",
-    "triage"
+    "right-care-ground-eval-core"
   ]
 } as const;
 

@@ -23,24 +23,12 @@
  *     completed 30-day follow-up; before that the module shows counts only. Computed, never hardcoded.
  *   · Staged-return marker (R7-6) + immediate-return predicate (R7-5): deterministic, no model verdict
  *     touched, no engine bump.
- *
- * R9 (CDMSS-READMISSIONS-R9-DUAL-CONTRACT PRD, GO 27 Aug 2026) — the SECOND published contract.
- * The same detection spine now feeds two aggregators (D1):
- *   · INCIDENCE (the LEAD, D2/D3/D4/D5): unique PEOPLE, clock hours from the stored
- *     `index_discharge_at` / `readmit_admit_at` (never floor-days — T1), <24h collapsed as the same
- *     event, index department not in INCIDENCE_EXCLUDED_DEPARTMENTS. Denominator = distinct people
- *     among Even completed IP discharges in the same window, read by its own query. People are not
- *     stays: when the distinct-person count cannot be read the card says so and shows NOTHING (T5).
- *   · ELIGIBLE EPISODES (the SECONDARY): today's `rates/1` math, BYTE-STABLE. Everything below the
- *     incidence block is unchanged arithmetic; only the card strip's presentation moved.
- * RATES_VERSION is 'rates/2' because the card strip's semantics changed (the reviewable peer card is
- * gone, the lead is a different measure) — not because any Eligible number moved.
  */
 import { EXCLUDED_DEPARTMENTS } from './readmission-detect-core';
 
 // ── constants ────────────────────────────────────────────────────────────────────────────
 
-export const RATES_VERSION = 'rates/2';
+export const RATES_VERSION = 'rates/1';
 /** Left truncation (report caveat 4): surveillance starts 22 Sep 2025 IST. */
 export const SURVEILLANCE_START = '2025-09-22';
 export const FOLLOW_UP_30 = 30;
@@ -58,20 +46,6 @@ export const FACILITY_EHRC = 'Even';
 export const FACILITY_EHBR = 'Even-EHBR';
 export const FACILITIES: readonly string[] = [FACILITY_EHRC, FACILITY_EHBR];
 
-/** READMIT-EHRC-RELABEL-BUILDER-BRIEF-16-SEP-2026: since 19 Aug 2026 the KareXpert ADT feed labels
- *  EHRC encounters `Even-EHRC` instead of `Even` (db13 kx_discharged_completed_patients.facility_name).
- *  The canonical key stays `Even` — everything that reads a raw facility_name off db13 must canonicalise
- *  through here before comparing, grouping, or displaying it. */
-export const FACILITY_EHRC_ALIASES: readonly string[] = ['Even', 'Even-EHRC'];
-
-/** Maps a raw db13 facility_name to its canonical key: any FACILITY_EHRC_ALIASES member, trimmed, becomes
- *  FACILITY_EHRC; every other non-empty value is returned verbatim; empty or null returns null. */
-export function canonicalFacility(name: string | null | undefined): string | null {
-  const trimmed = (name ?? '').trim();
-  if (!trimmed) return null;
-  return (FACILITY_EHRC_ALIASES as readonly string[]).includes(trimmed) ? FACILITY_EHRC : trimmed;
-}
-
 export type DenominatorKey = 'eligible' | 'true_ipd' | 'all_in_window';
 export const DENOMINATORS: readonly DenominatorKey[] = ['eligible', 'true_ipd', 'all_in_window'];
 export const DENOMINATOR_LABEL: Readonly<Record<DenominatorKey, string>> = {
@@ -86,89 +60,14 @@ export const DENOMINATOR_WARNING: Readonly<Record<DenominatorKey, string | null>
 };
 export const DEFAULT_DENOMINATOR: DenominatorKey = 'eligible';
 
+/** R7-3 — the fifth card's sub-line. */
+export const PROPOSED_AVOIDABLE_SUBLINE = "agent's proposal · adjudication pending · advisory";
 /** The footnote (report caveat 1): an Even-return rate, not a true readmission rate. */
 export const THIS_HOSPITAL_ONLY_FOOTNOTE = 'These are returns to THIS hospital only — returns to other hospitals are invisible except by patient report, so the true all-hospital rate is higher by an unknown margin. Definitions: CDMSS-EHRC-READMISSION-RATE-REPORT-19-AUG-2026 (codified in readmission-rates-core).';
 export const RATES_UNAVAILABLE_COPY = 'rates unavailable right now';
 export const EHBR_GATE_COPY = 'counts only — rates are shown once the first full month of discharges has completed its 30-day follow-up';
 /** R7-7 — condition-pass-only audits are labelled, never "no judgement". */
 export const CONDITION_PASS_ONLY_LABEL = 'condition-pass only';
-
-// ── R9 — the incidence contract (D2 … D6, L1, O4, T1, T3, T4, T5) ─────────────────────────
-
-/**
- * R9 / D5 (O4) — the departments dropped from the INCIDENCE numerator, matched on the INDEX stay's
- * `treating_sub_department_name`, exact strings: the four oncology strings plus all Obstetrics and
- * Gynecology (maternity is not splittable into delivery vs other gynae on this spine — D6).
- *
- * ⚠️ THIS DELIBERATELY AMENDS THE R7 INVARIANT "EXCLUDED_DEPARTMENTS is reused, never redeclared".
- * Two lists now exist and they are not the same list, on purpose:
- *   · the DETECTOR's six-string `EXCLUDED_DEPARTMENTS` (readmission-detect-core) still drives
- *     detection hold-out and the board's held-out list filter, and it still contains 'Nephrology';
- *   · this five-string list drives the INCIDENCE numerator only, and Nephrology is NOT in it —
- *     Mohsin named oncology and maternity, never CKD (D5, refuse list).
- * Neither list may be derived from the other; a change to one is not a change to the other.
- */
-export const INCIDENCE_EXCLUDED_DEPARTMENTS: readonly string[] = [
-  'Oncology',
-  'Medical Oncology',
-  'Radiation Oncology',
-  'Surgical Oncology & Oncoplastic Breast Surgery',
-  'Obstetrics and Gynecology',
-];
-
-/** D5 — exact string match on the trimmed index department. Null / unknown department → NOT excluded. */
-export function isIncidenceExcludedDepartment(department: string | null | undefined): boolean {
-  return department != null && INCIDENCE_EXCLUDED_DEPARTMENTS.includes(department.trim());
-}
-
-/** D4 — the incidence clock window, in HOURS: <24h is the same event; >30 days is out of window. */
-export const INCIDENCE_MIN_HOURS = 24;
-export const INCIDENCE_MAX_HOURS = FOLLOW_UP_30 * 24;
-
-/**
- * T1 — CLOCK hours between two stored instants, NEVER floor-days. Either side missing or
- * unparseable → null, and a null is NOT countable: the pair simply cannot be judged for incidence
- * and is reported as such (never silently re-judged with `gap_days`).
- */
-export function clockHoursBetween(fromIso: string | null | undefined, toIso: string | null | undefined): number | null {
-  const parse = (v: string | null | undefined): number | null => {
-    if (v == null || v === '') return null;
-    const t = Date.parse(/^\d{4}-\d{2}-\d{2} /.test(String(v)) ? String(v).replace(' ', 'T') : String(v));
-    return Number.isFinite(t) ? t : null;
-  };
-  const a = parse(fromIso), b = parse(toIso);
-  if (a == null || b == null) return null;
-  return (b - a) / 3_600_000;
-}
-
-/** D4 — the pair's clock gap is inside the incidence window: ≥ 24 h and ≤ 30 days. */
-export function isIncidenceClockGap(hours: number | null | undefined): boolean {
-  return typeof hours === 'number' && Number.isFinite(hours) && hours >= INCIDENCE_MIN_HOURS && hours <= INCIDENCE_MAX_HOURS;
-}
-
-// ── R9 card copy (§12.2; L1 for the Immediate card) ───────────────────────────────────────
-
-export const INCIDENCE_LEAD_LABEL = '30-day incidence · unique patients';
-export const INCIDENCE_LEAD_NOTE = 'clock ≥24h and ≤30d · onco and ObGyn excluded';
-/** D6 — the two exclusions that cannot be tagged on this spine. Required on the incidence card. */
-export const INCIDENCE_FOOTNOTE = 'Neonate and ophthal/cataract cannot be tagged on completed IP discharges. This is CAT incidence on the CAT spine, not the insurer calendar.';
-/** T5 — people are NEVER approximated as stays: the card says it cannot count people. */
-export const INCIDENCE_UNAVAILABLE_COPY = 'incidence unavailable — the unique-patient count could not be read; people are not stays, so nothing is shown';
-export const EPISODES_SECONDARY_LABEL = '30-day episodes · warranty / clinical';
-export const EPISODES_SECONDARY_NOTE = '0–30 including next-morning · stays, not people';
-export const EPISODES_90_LABEL = '90-day episodes';
-/** L1 — the Immediate card's label and copy. The union test itself is UNCHANGED (see isImmediateReturn). */
-export const IMMEDIATE_CARD_LABEL = 'Immediate / next-morning returns';
-export const IMMEDIATE_CARD_COPY = 'count, not a rate · includes next-morning returns · <24h same-event returns are out of incidence';
-/** §12.2 — the advisory card's sub-line under the dual contract. */
-export const PROPOSED_AVOIDABLE_ADVISORY = 'agent proposal, not the human overlay';
-
-// ── READMIT-RECENT-VIEW (17 Sep 2026) — the sixth tile, the incomplete tail's counts ───────
-
-export const RECENT_TILE_TITLE = 'Last 30 days · provisional';
-export const RECENT_TILE_CAPTION = 'follow-up still running — counts can only rise; not a rate for comparison';
-/** The trend-bar legend line for an incomplete month — a provisional bar, not a censored ghost. */
-export const INCOMPLETE_MONTH_LEGEND = '30-day follow-up not complete — provisional, can only rise';
 
 // ── small pure helpers ───────────────────────────────────────────────────────────────────
 
@@ -197,8 +96,7 @@ export function monthsBetween(fromMonth: string, toMonth: string): string[] {
 /** Facility of a finding: the R6 name when the route carries it, else the encounter-prefix fallback
  *  (measured: 'IP-' = Even / EHRC; 'IPNO-' and 'ADM' = Even-EHBR). Unknown prefix → null. */
 export function facilityOfEncounter(encounterId: string | null | undefined, facilityName?: string | null): string | null {
-  const canon = canonicalFacility(facilityName);
-  if (canon && (FACILITIES as readonly string[]).includes(canon)) return canon;
+  if (facilityName && (FACILITIES as readonly string[]).includes(facilityName)) return facilityName;
   const id = (encounterId ?? '').trim().toUpperCase();
   if (id.startsWith('IPNO') || id.startsWith('ADM')) return FACILITY_EHBR;
   if (id.startsWith('IP-')) return FACILITY_EHRC;
@@ -210,15 +108,7 @@ export function isHeldOutDepartment(department: string | null | undefined): bool
   return department != null && (EXCLUDED_DEPARTMENTS as readonly string[]).includes(department.trim());
 }
 
-/**
- * R7-5 — immediate return: a pair with gap ≤ 1 day (same / next-day). Null gap → false.
- *
- * L1 / acceptance #9 keep the UNION test "clock < 24 h OR gap_days ≤ 1", and this single predicate
- * already IS that union, exactly: gap_days is floor((admit − discharge) / 24 h), so a clock gap under
- * 24 h floors to 0 and is therefore always inside `gap_days ≤ 1`. {clock < 24h} ⊂ {gap_days ≤ 1}, so
- * the union equals {gap_days ≤ 1}. The card's LABEL and COPY change under R9; this arithmetic does
- * not, and the Immediate count is byte-stable.
- */
+/** R7-5 — immediate return: a pair with gap ≤ 1 day (same / next-day). Null gap → false. */
 export function isImmediateReturn(gapDays: number | null | undefined): boolean {
   return typeof gapDays === 'number' && Number.isFinite(gapDays) && gapDays <= 1;
 }
@@ -262,55 +152,9 @@ export interface DischargeBucket {
   n: number;
 }
 
-/**
- * R9 — one detected Even→Even pair as the INCIDENCE aggregator needs it (D3/D4/D5).
- *
- * `person` is the stored `uhid`. It is the ONLY identifier this core ever receives, it is used for
- * exactly one thing — counting a repeater once (D3) — and it is NEVER emitted: `Incidence` carries
- * counts only. This is the same posture as `index_encounter_id`, which the R7 core already reads
- * server-side solely to resolve a facility and never puts in the payload.
- */
-export interface IncidencePair {
-  person: string | null;
-  index_encounter_id: string;
-  /** IST calendar day of the index discharge. */
-  index_day: string | null;
-  index_department: string | null;
-  /** The stored instants — the ONLY source of the incidence clock (T1). */
-  index_discharge_at: string | null;
-  readmit_admit_at: string | null;
-  facility?: string | null;
-}
-
 // ── outputs ───────────────────────────────────────────────────────────────────────────────
 
 export interface Measure { numerator: number; denominator: number; rate: number | null; ci: { lo: number; hi: number } | null }
-
-/**
- * R9 — the incidence contract's result. AGGREGATES ONLY.
- *
- * `available` is the T5 fail-closed switch: false means the distinct-PEOPLE denominator could not be
- * read, and the card must show INCIDENCE_UNAVAILABLE_COPY. It must never fall back to the stays
- * denominator — a people rate printed off a stays denominator is a number neither board publishes.
- * The three drop counters exist so the recipe can be audited from the payload without any identifier.
- */
-export interface Incidence {
-  available: boolean;
-  /** Distinct people with a qualifying return. 0 is a real answer; unavailable is not 0. */
-  numerator: number;
-  /** Distinct people discharged in the window, or null when the read failed (T5). */
-  denominator: number | null;
-  rate: number | null;
-  ci: { lo: number; hi: number } | null;
-  windowStart: string;
-  windowEnd: string;
-  /** Pairs in the window dropped because the index department is in INCIDENCE_EXCLUDED_DEPARTMENTS. */
-  excludedByDepartment: number;
-  /** Pairs in the window whose clock gap is outside [24 h, 30 d] — the <24h same-event collapse (D4). */
-  outOfClockWindow: number;
-  /** Pairs in the window that cannot be judged at all: a missing timestamp or a missing person key (T1). */
-  notCountable: number;
-}
 export interface DenominatorSet {
   key: DenominatorKey;
   label: string;
@@ -327,26 +171,6 @@ export interface MonthCohort {
   discharges: number; discharges_reviewable: number; discharges_held_out: number;
   returns30: number; returns30_reviewable: number; returns30_held_out: number;
   rate30: number | null; rate30_reviewable: number | null; rate30_held_out: number | null;
-  /** READMIT-RECENT-VIEW (17 Sep 2026): pct(returns so far, discharges) for an INCOMPLETE month —
-   *  null once the month completes (rate30 takes over). The two never carry a number in the same month. */
-  provisionalRate30: number | null; provisionalRate30_reviewable: number | null; provisionalRate30_held_out: number | null;
-}
-
-/**
- * READMIT-RECENT-VIEW (17 Sep 2026): the incomplete tail — index discharges whose IST day falls in
- * (ceiling − 30, ceiling], counts only, never a rate for comparison (follow-up is still running so a
- * return can only be ADDED between reads, never removed). `discharges` sums every canonicalised bucket
- * in the window (no true-IPD disposition filter — same posture as the `eligible` denominator);
- * `returnsSoFar` is every pair whose index day is in the window and whose gap is ≤ 30, split reviewable
- * vs held-out by the same `isHeldOutDepartment` rule the rest of this module uses; `provisionalRate` is
- * `pct(returnsSoFar, discharges)`, shown on the tile only where `ratesAllowed` (R7-4 gate unchanged).
- */
-export interface RecentBlock {
-  windowStart: string; windowEnd: string;
-  discharges: number;
-  returnsSoFar: number; returnsSoFar_reviewable: number; returnsSoFar_held_out: number;
-  audited: number; proposedAvoidable: number; needsAdjudication: number;
-  provisionalRate: number | null;
 }
 export interface JudgementStats {
   audited: number; justified: number; needs_adjudication: number; avoidable: number;
@@ -367,12 +191,6 @@ export interface FacilityRates {
   months: MonthCohort[];
   judgements: JudgementStats;
   gapDistribution: { d0_1: number; d2_7: number; d8_30: number; d31_90: number };
-  /** R9 — the incidence LEAD. Non-null only where an incidence read was supplied for this facility
-   *  (today: Even / EHRC only — EHBR stays its own tab and its own gate). */
-  incidence: Incidence | null;
-  /** READMIT-RECENT-VIEW (17 Sep 2026): the incomplete tail — always computed, always shown (counts
-   *  are never gated; only `provisionalRate` on the tile is). */
-  recent: RecentBlock;
 }
 export interface RatesResult {
   version: typeof RATES_VERSION;
@@ -386,82 +204,15 @@ export interface RatesResult {
 const measure = (k: number, n: number): Measure => ({ numerator: k, denominator: n, rate: pct(k, n), ci: wilsonCi(k, n) });
 const inWindow = (day: string | null, start: string, endInclusive: string): boolean => !!day && day >= start && day <= endInclusive;
 
-/**
- * R9 — the INCIDENCE aggregator (D2 … D5, T1, T5). PURE, and deliberately its own function so the
- * recipe can be read in one place:
- *
- *   denominator  distinct PEOPLE discharged from this facility with complete 30-day follow-up
- *                (index day in [start, ceiling − 30]); supplied by the caller because a distinct
- *                count cannot be recovered from the day × department × disposition buckets, and
- *                NULL when that read failed — which fails the whole card closed (T5).
- *   numerator    distinct PEOPLE among this facility's even_even pairs whose index day is in the
- *                same window, whose index department is not in INCIDENCE_EXCLUDED_DEPARTMENTS, and
- *                whose CLOCK gap is in [24 h, 30 d]. A person with two qualifying returns counts once.
- *
- * A pair with a missing timestamp, an unparseable timestamp, or no person key is NOT countable and is
- * reported in `notCountable` — never re-judged with `gap_days` (T1), never quietly dropped.
- */
-export function computeIncidence(input: {
-  pairs: readonly IncidencePair[];
-  denominator: number | null | undefined;
-  ceilingDay: string;
-  start?: string;
-  facility?: string;
-}): Incidence {
-  const start = input.start ?? SURVEILLANCE_START;
-  const end30 = addDays(input.ceilingDay, -FOLLOW_UP_30);
-  const fac = input.facility ?? FACILITY_EHRC;
-  const people = new Set<string>();
-  let excludedByDepartment = 0, outOfClockWindow = 0, notCountable = 0;
-  for (const p of input.pairs) {
-    if ((canonicalFacility(p.facility) ?? facilityOfEncounter(p.index_encounter_id)) !== fac) continue;
-    if (!inWindow(p.index_day, start, end30)) continue;
-    if (isIncidenceExcludedDepartment(p.index_department)) { excludedByDepartment++; continue; }
-    const hours = clockHoursBetween(p.index_discharge_at, p.readmit_admit_at);
-    if (hours == null) { notCountable++; continue; }
-    if (!isIncidenceClockGap(hours)) { outOfClockWindow++; continue; }
-    const person = typeof p.person === 'string' ? p.person.trim() : '';
-    if (!person) { notCountable++; continue; }
-    people.add(person);
-  }
-  const denom = typeof input.denominator === 'number' && Number.isFinite(input.denominator) && input.denominator >= 0 ? Math.floor(input.denominator) : null;
-  const numerator = people.size;
-  const available = denom != null && denom > 0;
-  return {
-    available,
-    numerator,
-    denominator: denom,
-    rate: available ? pct(numerator, denom) : null,
-    ci: available ? wilsonCi(Math.min(numerator, denom), denom) : null,
-    windowStart: start,
-    windowEnd: end30,
-    excludedByDepartment,
-    outOfClockWindow,
-    notCountable,
-  };
-}
-
-/**
- * `incidencePairs` / `incidenceDenominator` are OPTIONAL and additive: omit them and every facility
- * gets `incidence: null` and every Eligible / 90-day / immediate / proposed-avoidable number below is
- * bit-for-bit what `rates/1` produced for the same input.
- */
-export function computeRates(input: {
-  pairs: readonly RatePair[];
-  discharges: readonly DischargeBucket[];
-  ceilingDay: string;
-  start?: string;
-  incidencePairs?: readonly IncidencePair[] | null;
-  incidenceDenominator?: number | null;
-}): RatesResult {
+export function computeRates(input: { pairs: readonly RatePair[]; discharges: readonly DischargeBucket[]; ceilingDay: string; start?: string }): RatesResult {
   const start = input.start ?? SURVEILLANCE_START;
   const ceiling = input.ceilingDay;
   const end30 = addDays(ceiling, -FOLLOW_UP_30);
   const end90 = addDays(ceiling, -FOLLOW_UP_90);
   const facilities: FacilityRates[] = [];
   for (const fac of FACILITIES) {
-    const pairs = input.pairs.filter((p) => (canonicalFacility(p.facility) ?? facilityOfEncounter(p.index_encounter_id)) === fac);
-    const disch = input.discharges.filter((d) => canonicalFacility(d.facility) === fac && d.day != null);
+    const pairs = input.pairs.filter((p) => (p.facility ?? facilityOfEncounter(p.index_encounter_id)) === fac);
+    const disch = input.discharges.filter((d) => d.facility === fac && d.day != null);
     const heldOutD = (d: DischargeBucket) => isHeldOutDepartment(d.department);
     const heldOutP = (p: RatePair) => isHeldOutDepartment(p.index_department);
     const excludedDisp = (d: DischargeBucket) => d.disposition != null && TRUE_IPD_EXCLUDED_DISPOSITIONS.includes(d.disposition.trim());
@@ -505,30 +256,8 @@ export function computeRates(input: {
         month, complete, discharges: dAll, discharges_reviewable: dAll - dH, discharges_held_out: dH,
         returns30: rAll, returns30_reviewable: rAll - rH, returns30_held_out: rH,
         rate30: complete ? pct(rAll, dAll) : null, rate30_reviewable: complete ? pct(rAll - rH, dAll - dH) : null, rate30_held_out: complete ? pct(rH, dH) : null,
-        // READMIT-RECENT-VIEW (17 Sep 2026): the mirror image of rate30 — a number ONLY while the
-        // month is still incomplete, using the same numerator/denominator the ghost bar already carries.
-        provisionalRate30: complete ? null : pct(rAll, dAll),
-        provisionalRate30_reviewable: complete ? null : pct(rAll - rH, dAll - dH),
-        provisionalRate30_held_out: complete ? null : pct(rH, dH),
       };
     });
-
-    // READMIT-RECENT-VIEW (17 Sep 2026) — the recent-30-days window: (ceiling − 30, ceiling]. Counts
-    // only, split reviewable / held-out; `end30` (ceiling − 30) is already computed above and EXCLUDED.
-    const recentInWindow = (day: string | null) => !!day && day > end30 && day <= ceiling;
-    const recentDischarges = sum(disch, (d) => recentInWindow(d.day));
-    const recentPairPred = (p: RatePair) => recentInWindow(p.index_day) && (p.gap_days ?? Infinity) <= 30;
-    const recentReturns = count(pairs, recentPairPred);
-    const recentReturnsHeld = count(pairs, (p) => recentPairPred(p) && heldOutP(p));
-    const recent: RecentBlock = {
-      windowStart: addDays(end30, 1), windowEnd: ceiling,
-      discharges: recentDischarges,
-      returnsSoFar: recentReturns, returnsSoFar_reviewable: recentReturns - recentReturnsHeld, returnsSoFar_held_out: recentReturnsHeld,
-      audited: count(pairs, (p) => recentPairPred(p) && p.audit_status === 'audited'),
-      proposedAvoidable: count(pairs, (p) => recentPairPred(p) && p.avoidable === 'avoidable'),
-      needsAdjudication: count(pairs, (p) => recentPairPred(p) && p.avoidable === 'needs_adjudication'),
-      provisionalRate: pct(recentReturns, recentDischarges),
-    };
 
     // R7-4 gate: the first FULL calendar month of discharges must have completed 30-day follow-up.
     const firstFullMonth = firstDay ? (firstDay.slice(8) === '01' ? monthOf(firstDay) : nextMonth(monthOf(firstDay))) : null;
@@ -554,15 +283,10 @@ export function computeRates(input: {
       d8_30: count(pairs, (p) => p.gap_days != null && p.gap_days > 7 && p.gap_days <= 30),
       d31_90: count(pairs, (p) => p.gap_days != null && p.gap_days > 30 && p.gap_days <= 90),
     };
-    // R9 — the incidence lead. Only the facility the incidence denominator was read FOR (Even) can
-    // have one: a people-denominator read for one hospital is not a denominator for another.
-    const incidence = input.incidencePairs && fac === FACILITY_EHRC
-      ? computeIncidence({ pairs: input.incidencePairs, denominator: input.incidenceDenominator, ceilingDay: ceiling, start, facility: fac })
-      : null;
     facilities.push({
       facility: fac, pairs: pairs.length, ratesAllowed,
       gate: { firstDischargeDay: firstDay, firstFullMonth, opensOn, reason: ratesAllowed ? null : EHBR_GATE_COPY },
-      denominators, months, judgements, gapDistribution, incidence, recent,
+      denominators, months, judgements, gapDistribution,
     });
   }
   return { version: RATES_VERSION, ceilingDay: ceiling, surveillanceStart: start, facilities };
@@ -629,148 +353,42 @@ export const fmtPct = (v: number | null): string => (v == null ? '—' : `${v.to
 export const fmtCi = (ci: { lo: number; hi: number } | null): string => (ci == null ? '' : `${ci.lo.toFixed(2)}–${ci.hi.toFixed(2)}%`);
 export const fmtCount = (n: number): string => n.toLocaleString('en-IN');
 
-export interface RateCard {
-  key: string;
-  title: string;
-  big: string;
-  sub: string;
-  ci: string;
-  /** The static method line under the sub (the recipe, not the numbers). */
-  note: string | null;
-  advisory: string | null;
-  tone: 'lead' | 'plain' | 'count' | 'advisory' | 'unavailable';
-}
+export interface RateCard { key: string; title: string; big: string; sub: string; ci: string; advisory: string | null; tone: 'plain' | 'red' | 'advisory' }
 
-/**
- * R9 §12.2 — the Even-tab card strip. The reviewable card is GONE from the strip (D8 / §3.3): the
- * hold-out is a list filter, not a peer rate, because CAT's 45 and revenue's 45 are two different 45s.
- *
- *   [LEAD]      30-day incidence · unique patients      people, clock ≥24h and ≤30d, onco + ObGyn out
- *   [SECONDARY] 30-day episodes · warranty / clinical   today's Eligible stay rate, 0–30 inclusive
- *   [PLAIN]     90-day episodes                         demoted, kept (§3.2 "may remain, demoted")
- *   [COUNT]     Immediate / next-morning returns        L1 label + copy; a COUNT, never a rate
- *   [ADVISORY]  Proposed avoidable                      agent proposal, not the human overlay (D14)
- *
- * The lead card renders ONLY from `f.incidence`. No incidence read, or a read that could not produce a
- * distinct-people denominator, gives the unavailable card (T5) — never the stays number wearing a
- * people label. Rates stay NUMBERS only when the facility has earned them (R7-4); otherwise counts.
- */
+/** The five cards for one facility × denominator. Rates are NUMBERS only when the facility has earned
+ *  them (R7-4); otherwise every card shows counts and the big figure is "n / d" with "counts only". */
 export function rateCards(f: FacilityRates, key: DenominatorKey): RateCard[] {
   const d = f.denominators[key];
   const ok = f.ratesAllowed;
   const big = (m: Measure) => (ok ? fmtPct(m.rate) : `${fmtCount(m.numerator)} / ${fmtCount(m.denominator)}`);
   const sub = (m: Measure, what: string) => (ok ? `${fmtCount(m.numerator)} of ${fmtCount(m.denominator)} ${what}` : `counts only · ${what}`);
   const ci = (m: Measure) => (ok ? fmtCi(m.ci) : '');
-  const inc = f.incidence;
-  const lead: RateCard = inc && inc.available && inc.denominator != null
-    ? {
-        key: 'incidence', title: INCIDENCE_LEAD_LABEL,
-        big: ok ? fmtPct(inc.rate) : `${fmtCount(inc.numerator)} / ${fmtCount(inc.denominator)}`,
-        sub: ok ? `${fmtCount(inc.numerator)} of ${fmtCount(inc.denominator)} people` : `counts only · ${fmtCount(inc.numerator)} of ${fmtCount(inc.denominator)} people`,
-        ci: ok ? fmtCi(inc.ci) : '', note: INCIDENCE_LEAD_NOTE, advisory: null, tone: 'lead',
-      }
-    : { key: 'incidence', title: INCIDENCE_LEAD_LABEL, big: '—', sub: INCIDENCE_UNAVAILABLE_COPY, ci: '', note: null, advisory: null, tone: 'unavailable' };
-  // READMIT-RECENT-VIEW (17 Sep 2026) — the sixth tile: the incomplete tail. Counts (A) are ALWAYS
-  // shown (R7-4 is unchanged, but this tile is never gated); only the provisional RATE line (B) is
-  // shown where `ok` (ratesAllowed) — appended to the caption rather than replacing it (item 6).
-  const rec = f.recent;
-  const recentCard: RateCard = {
-    key: 'recent', title: RECENT_TILE_TITLE, big: fmtCount(rec.returnsSoFar),
-    sub: `${fmtCount(rec.returnsSoFar)} of ${fmtCount(rec.discharges)} discharged ${rec.windowStart}–${rec.windowEnd}`,
-    ci: '', note: `audited ${fmtCount(rec.audited)} · proposed avoidable ${fmtCount(rec.proposedAvoidable)} · needs adjudication ${fmtCount(rec.needsAdjudication)}`,
-    advisory: ok ? `${RECENT_TILE_CAPTION} · provisional rate ${fmtPct(rec.provisionalRate)}` : RECENT_TILE_CAPTION,
-    tone: 'advisory',
-  };
   return [
-    lead,
-    { key: 'episodes30', title: EPISODES_SECONDARY_LABEL, big: big(d.all30), sub: sub(d.all30, 'discharges'), ci: ci(d.all30), note: EPISODES_SECONDARY_NOTE, advisory: null, tone: 'plain' },
-    { key: 'all90', title: EPISODES_90_LABEL, big: big(d.all90), sub: sub(d.all90, 'discharges with 90-day follow-up'), ci: ci(d.all90), note: 'stays, not people', advisory: null, tone: 'plain' },
-    { key: 'immediate', title: IMMEDIATE_CARD_LABEL, big: fmtCount(d.immediate.numerator), sub: `of ${fmtCount(d.immediate.denominator)} discharges`, ci: '', note: IMMEDIATE_CARD_COPY, advisory: null, tone: 'count' },
-    { key: 'proposedAvoidable', title: 'Proposed avoidable', big: fmtCount(d.proposedAvoidable.numerator), sub: ok ? `${fmtPct(d.proposedAvoidable.rate)} of ${fmtCount(d.proposedAvoidable.denominator)} eligible discharges` : `of ${fmtCount(d.proposedAvoidable.denominator)} eligible discharges`, ci: '', note: null, advisory: PROPOSED_AVOIDABLE_ADVISORY, tone: 'advisory' },
-    recentCard,
+    { key: 'all30', title: '30-day return rate', big: big(d.all30), sub: sub(d.all30, 'discharges'), ci: ci(d.all30), advisory: null, tone: 'plain' },
+    { key: 'reviewable30', title: '30-day · reviewable', big: big(d.reviewable30), sub: `${sub(d.reviewable30, 'discharges')} · held-out ${fmtCount(d.heldOut30.numerator)}/${fmtCount(d.heldOut30.denominator)}${ok && d.heldOut30.rate != null ? ` (${fmtPct(d.heldOut30.rate)})` : ''}`, ci: ci(d.reviewable30), advisory: null, tone: 'plain' },
+    { key: 'all90', title: '90-day return rate', big: big(d.all90), sub: sub(d.all90, 'discharges with 90-day follow-up'), ci: ci(d.all90), advisory: null, tone: 'plain' },
+    { key: 'immediate', title: 'Immediate returns (≤ 1 day)', big: ok ? fmtCount(d.immediate.numerator) : `${fmtCount(d.immediate.numerator)} / ${fmtCount(d.immediate.denominator)}`, sub: ok ? `${fmtPct(d.immediate.rate)} of ${fmtCount(d.immediate.denominator)} · possible transfers or deferred surgery` : 'counts only · possible transfers or deferred surgery', ci: ci(d.immediate), advisory: null, tone: 'plain' },
+    { key: 'proposedAvoidable', title: 'Proposed avoidable', big: ok ? fmtCount(d.proposedAvoidable.numerator) : `${fmtCount(d.proposedAvoidable.numerator)} / ${fmtCount(d.proposedAvoidable.denominator)}`, sub: ok ? `${fmtPct(d.proposedAvoidable.rate)} of ${fmtCount(d.proposedAvoidable.denominator)} eligible discharges` : 'counts only', ci: '', advisory: PROPOSED_AVOIDABLE_SUBLINE, tone: 'advisory' },
   ];
 }
 
-export interface TrendBar {
-  month: string; label: string; complete: boolean; reviewablePct: number | null; heldOutPct: number | null;
-  /** READMIT-RECENT-VIEW (17 Sep 2026): the incomplete-month bar height — `provisionalRate30`, shown
-   *  only where `ratesAllowed` (item 6); null for a complete month or a closed gate (still a ghost). */
-  provisionalPct: number | null;
-  /** The visible `n / N so far` label under an incomplete month's bar; null for a complete month. */
-  soFarLabel: string | null;
-  discharges: number; returns30: number; returns30_reviewable: number; returns30_held_out: number; title: string;
-}
+export interface TrendBar { month: string; label: string; complete: boolean; reviewablePct: number | null; heldOutPct: number | null; discharges: number; returns30: number; returns30_reviewable: number; returns30_held_out: number; title: string }
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const monthLabel = (month: string): string => { const [y, m] = month.split('-').map(Number); return `${MONTH_ABBR[(m || 1) - 1]} ${String(y).slice(2)}`; };
 
 /** The split trend bars: reviewable vs held-out share of each complete month's discharges (as % of
- *  ALL that month's discharges, so the two stack to the month's all-cause rate); incomplete months
- *  render at the PROVISIONAL height (READMIT-RECENT-VIEW, 17 Sep 2026) — dashed, lighter, counts can
- *  only rise — never a rate for comparison. `ratesAllowed` false → every bar a ghost, no provisional
- *  height either (item 6: a provisional RATE is gated same as any other rate; the `n / N so far`
- *  label is a COUNT and always renders). */
+ *  ALL that month's discharges, so the two stack to the month's all-cause rate); incomplete months are
+ *  ghosts (dashed, no rate) — censored, never a rate. `ratesAllowed` false → every bar a ghost. */
 export function trendBars(f: FacilityRates): TrendBar[] {
   return f.months.map((m) => {
     const live = f.ratesAllowed && m.complete && m.discharges > 0;
     const rPct = live ? Math.round((m.returns30_reviewable / m.discharges) * 10_000) / 100 : null;
     const hPct = live ? Math.round((m.returns30_held_out / m.discharges) * 10_000) / 100 : null;
-    const provisionalPct = !m.complete && f.ratesAllowed ? m.provisionalRate30 : null;
     const title = live
       ? `${monthLabel(m.month)}: ${m.returns30} of ${m.discharges} (${fmtPct(m.rate30)}) — reviewable ${m.returns30_reviewable} (${fmtPct(rPct)}), held-out ${m.returns30_held_out} (${fmtPct(hPct)})`
       : `${monthLabel(m.month)}: ${m.returns30} of ${m.discharges} so far — 30-day follow-up not complete, no rate`;
-    const soFarLabel = m.complete ? null : `${fmtCount(m.returns30)}/${fmtCount(m.discharges)}`;   // V 17 Sep layout: compact, fits the column; legend explains n/N
-    return {
-      month: m.month, label: monthLabel(m.month), complete: m.complete, reviewablePct: rPct, heldOutPct: hPct, provisionalPct, soFarLabel,
-      discharges: m.discharges, returns30: m.returns30, returns30_reviewable: m.returns30_reviewable, returns30_held_out: m.returns30_held_out, title,
-    };
+    return { month: m.month, label: monthLabel(m.month), complete: m.complete, reviewablePct: rPct, heldOutPct: hPct, discharges: m.discharges, returns30: m.returns30, returns30_reviewable: m.returns30_reviewable, returns30_held_out: m.returns30_held_out, title };
   });
-}
-
-// ── READMIT-LAYOUT-FIX (17 Sep 2026) — provisional-strip formatting + the chart's shared y-scale ────
-
-/** `D Mon` (e.g. `19 Aug`) — no leading zero, no year. The day is already an IST calendar day. */
-export function shortDate(day: string): string {
-  const [y, m, d] = day.split('-').map(Number);
-  return `${d} ${MONTH_ABBR[(m || 1) - 1]}`;
-}
-
-/** `D Mon – D Mon`, year appended to BOTH ends only when the two days fall in different years —
- *  same-year ranges (the common case) stay bare so the strip's one line never wraps. */
-export function shortDateRange(startDay: string, endDay: string): string {
-  const startYear = startDay.slice(0, 4), endYear = endDay.slice(0, 4);
-  return startYear === endYear
-    ? `${shortDate(startDay)} – ${shortDate(endDay)}`
-    : `${shortDate(startDay)} ${startYear} – ${shortDate(endDay)} ${endYear}`;
-}
-
-/** 1-decimal percent — the provisional strip's own rounding (every other rate on this module is 2dp). */
-export const fmtPct1 = (v: number | null): string => (v == null ? '—' : `${v.toFixed(1)}%`);
-
-/** The provisional strip's line 1 (READMIT-LAYOUT-FIX, 17 Sep 2026). Counts always show; the rate
- *  appends only where `ratesAllowed` — the EHBR gate rule is unchanged (R7-4), just relocated off the
- *  tile grid. */
-export function recentStripLine(rec: RecentBlock, ratesAllowed: boolean): string {
-  const parts = [
-    `${fmtCount(rec.returnsSoFar)} returns of ${fmtCount(rec.discharges)} discharges (${shortDateRange(rec.windowStart, rec.windowEnd)})`,
-    `audited ${fmtCount(rec.audited)}`,
-    `proposed avoidable ${fmtCount(rec.proposedAvoidable)}`,
-    `needs adjudication ${fmtCount(rec.needsAdjudication)}`,
-  ];
-  if (ratesAllowed) parts.push(`provisional rate ${fmtPct1(rec.provisionalRate)}`);
-  return parts.join(' · ');
-}
-
-/** The trend chart's one shared y-scale max: the tallest bar across every complete month's stacked
- *  total AND every provisional height, with a small floor so a flat trend still plots legibly. Pulled
- *  out of the component so the "nothing overflows" invariant is unit-testable. */
-export function maxTrendPct(bars: readonly TrendBar[], floor = 2): number {
-  return Math.max(floor, ...bars.map((b) => Math.max((b.reviewablePct ?? 0) + (b.heldOutPct ?? 0), b.provisionalPct ?? 0)));
-}
-
-/** Both label rows for a trend column, row 2 always a STRING (never null) so every month's label
- *  block has the same fixed height whether or not it carries a `n/N so far` count. */
-export function trendLabelRows(bars: readonly TrendBar[]): Array<{ month: string; row1: string; row2: string }> {
-  return bars.map((b) => ({ month: b.month, row1: b.label, row2: b.soFarLabel ?? '' }));
 }
 
 /** The facility the module shows: the R6 filter's hospital when it names one the rates know, else the
@@ -780,50 +398,13 @@ export function moduleFacility(rates: RatesResult, r6Facility: string | null | u
   return byName(r6Facility) ?? byName(tab) ?? rates.facilities.find((f) => f.gate.firstDischargeDay != null) ?? rates.facilities[0] ?? null;
 }
 
-/** IST `YYYY-MM-DD HH:MM IST` wall-clock stamp, or null when unparseable. Shared by `computedAtLabel`
- *  and the freshness line (READMIT-RECENT-VIEW, 17 Sep 2026) so the two clocks read identically. */
-export function istTimestamp(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return null;
-  const d = new Date(t + 5.5 * 3_600_000);
-  return `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)} IST`;
-}
-
 /** "computed at" stamp — IST wall clock, as the rest of the surface prints times. */
 export function computedAtLabel(iso: string | null | undefined): string {
-  const ts = istTimestamp(iso);
-  return ts ? `computed ${ts}` : '';
-}
-
-// ── READMIT-RECENT-VIEW (17 Sep 2026) — the freshness line, under the page subtitle ────────
-
-/** `lastCheckAt` is set only by the check route (POST /api/care/readmissions/check); null otherwise —
- *  it is per-instance, best-effort, same posture as every other module-level guard in this codebase. */
-export interface FreshnessInfo {
-  feedCurrentTo: string | null;
-  newestReturnAt: string | null;
-  lastAuditAt: string | null;
-  lastCheckAt: string | null;
-  /** Agent health (narrative leg + pipeline). Absent when the health read faulted. */
-  health?: { status: 'green' | 'red'; reasons: string[]; lastNarrativeAt: string | null };
-}
-export const FRESHNESS_NULL = '—';
-export const FRESHNESS_CADENCE = 'checks every 30 min';
-/** Brief item 10: appended after `checked just now: N new` when N > 0 — new pairs audit at the next cron tick. */
-export const FRESHNESS_AUDIT_PENDING = '— audits run within 30 min';
-
-/** PURE: the one-line freshness stamp. Every null renders as FRESHNESS_NULL; `checkedJustNow` is the
- *  live count from a just-completed /check press (the route's own `lastCheckAt` is not read here —
- *  the caller already has the fresher, in-session number). */
-export function freshnessLine(info: FreshnessInfo, checkedJustNow?: number | null): string {
-  const feed = istTimestamp(info.feedCurrentTo) ?? FRESHNESS_NULL;
-  const ret = istDay(info.newestReturnAt) ?? FRESHNESS_NULL;
-  const audit = istTimestamp(info.lastAuditAt) ?? FRESHNESS_NULL;
-  const base = `Data feed current to ${feed} · newest return ${ret} · last audit ${audit} · ${FRESHNESS_CADENCE}`;
-  if (typeof checkedJustNow !== 'number') return base;
-  const checked = `${base} · checked just now: ${checkedJustNow} new`;
-  return checkedJustNow > 0 ? `${checked} ${FRESHNESS_AUDIT_PENDING}` : checked;
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t + 5.5 * 3_600_000);
+  return `computed ${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)} IST`;
 }
 
 /** The card / case-page marker lines (R7-5 / R7-6) — exact copy; nothing else changes on the card. */

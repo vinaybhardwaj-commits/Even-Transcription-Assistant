@@ -3,11 +3,10 @@ export const runtime = 'nodejs';
 
 import Link from 'next/link';
 import { redirect, notFound } from 'next/navigation';
-import { ArrowRight, ClipboardCheck, ListChecks, Layers, Repeat, Stethoscope } from 'lucide-react';
+import { ArrowRight, ClipboardCheck, ListChecks, Layers, Repeat } from 'lucide-react';
 import { isCareUnlocked } from '@/lib/care-cookie';
 import { sql } from '@/lib/db';
 import { reviewCountForChooser } from '@/lib/readmission/store';
-import { boardCounts as preopBoardCounts } from '@/lib/preop/store';
 import { OPD_ENGINE_VERSIONS_CURRENT } from '@/lib/opd-note-audit-core';
 import { getSettings } from '@/lib/mini-backfill';
 import { parseGoal, computeReviewStats, FALLBACK_ROSTER, type LabelRow } from '@/lib/review-stats-core';
@@ -50,13 +49,6 @@ export default async function ManagedCareHome() {
   // and the page can never disagree. Best-effort: soft-fails to 0 like its peers.
   const readmissionsEnabled = process.env.READMISSIONS_SURFACE_ENABLED === '1';
   const readmissionCount = readmissionsEnabled ? await reviewCountForChooser().catch(() => 0) : 0;
-
-  // Pre-op Risk (CDMSS-PREOP-RISK-AGENT-PRD v1.1-LOCKED §6; Build Plan B4) — 6th card,
-  // behind PREOP_SURFACE_ENABLED (ships OFF). Badge = the needs-review count from the SAME
-  // predicate the board's own tile uses (lib/preop/store.ts boardCounts), so the badge and
-  // the page can never disagree — the readmissions rule, kept. Soft-fails to 0.
-  const preopEnabled = process.env.PREOP_SURFACE_ENABLED === '1';
-  const preopCount = preopEnabled ? await preopBoardCounts().then((c) => c.needsReview).catch(() => 0) : 0;
 
   // Review Mode team-progress strip (§2.4) — best-effort; omitted entirely on any error. Reuses the
   // gamification core over the same counted-label rows the stats route reads (identical basis).
@@ -114,13 +106,6 @@ export default async function ManagedCareHome() {
       title: 'Readmissions',
       desc: 'Find the unplanned readmissions that did not need to happen — a premature discharge, an admission that missed the threshold. Patient-centric.',
       count: readmissionCount, countLabel: 'to review', tint: 'rose',
-    }] : []),
-    ...(preopEnabled ? [{
-      href: '/care/preop',
-      icon: Stethoscope,
-      title: 'Pre-op Risk',
-      desc: 'Instrument-based surgical risk, recomputed as booking → labs → PAC land. Validated instruments, deterministic arithmetic, visible provenance.',
-      count: preopCount, countLabel: 'need review', tint: 'violet',
     }] : []),
   ];
 

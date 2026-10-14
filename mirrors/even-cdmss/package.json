@@ -5,8 +5,7 @@
   "description": "CAT (Clinical Analysis Tool) — standalone clinical decision support, MKSAP/StatPearls-grounded. Shares Neon corpus + Ollama with the staff portal; developed and deployed independently. Repo: Even-CDMSS.",
   "scripts": {
     "dev": "next dev",
-    "build": "npm run lab:versions && next build",
-    "lab:versions": "node scripts/lab-versions-gen.mjs",
+    "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
@@ -22,8 +21,6 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1105.0",
     "@aws-sdk/client-sts": "^3.1105.0",
-    "@modelcontextprotocol/node": "2.0.0",
-    "@modelcontextprotocol/server": "2.0.0",
     "@neondatabase/serverless": "^0.10.4",
     "dompurify": "^3.2.3",
     "lucide-react": "^0.383.0",
@@ -31,19 +28,15 @@
     "next": "15.5.18",
     "openai": "^4.77.0",
     "pdf-lib": "^1.17.1",
-    "pg": "8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.1",
     "remark-gfm": "^4.0.0",
-    "zod": "3.25.76"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.8",
-    "@modelcontextprotocol/client": "2.0.0",
     "@types/dompurify": "^3.0.5",
     "@types/node": "^20",
-    "@types/pg": "8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10",
