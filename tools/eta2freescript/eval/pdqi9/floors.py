@@ -16,7 +16,7 @@ from pathlib import Path
 from ... import validate
 from ...ingest import Consult
 from ...models import ModelClient
-from .judge import Frozen, cache_path, _write_private
+from .judge import Frozen, cache_path, _write_private, extract_object, log_shape
 from .render import PRESCRIPTION_SCHEMA, validate_prescription
 
 HALLUCINATION_MAX_PER_CONSULT = 0.2
@@ -92,57 +92,61 @@ def _signed_ok(x, n_review: int) -> bool:
             and (cb is None or (_isint(cb) and 1 <= cb <= n_review)))
 
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
-
-
 def _exact_json(text: str):
-    """The reply must be exactly one JSON object; a single surrounding code fence is tolerated, nothing else. Else None."""
-    t = (text or "").strip()
-    m = _FENCE.fullmatch(t)
-    t = m.group(1) if m else t
-    try:
-        d = json.loads(t)
-    except ValueError:
-        return None
-    return d if isinstance(d, dict) else None
+    """Tolerant extraction (lead ruling 14 Oct 2026): see judge.extract_object. Returns (object|None, shape)."""
+    return extract_object(text)
 
 
-def _parse_rows(text: str, key: str, n_expected: int, ok) -> list[dict] | None:
-    d = _exact_json(text)
+def _parse_rows(text: str, key: str, n_expected: int, ok) -> tuple[list[dict] | None, dict, list[str]]:
+    """(rows|None, shape, key_diff). The strict checks are unchanged: exactly {key}, n_expected rows, each row passes `ok`, n = 1..n_expected."""
+    d, info = _exact_json(text)
     if d is None:
-        return None
-    rows = d.get(key) if isinstance(d, dict) and set(d) == {key} else None
-    if not isinstance(rows, list) or len(rows) != n_expected or not all(ok(x) for x in rows):
-        return None
-    return rows if sorted(x["n"] for x in rows) == list(range(1, n_expected + 1)) else None
+        return None, info, []
+    diff = set(d) ^ {key}
+    rows = d.get(key)
+    if isinstance(rows, list):
+        for x in rows:
+            if isinstance(x, dict):
+                diff |= set(x) ^ (ITEM_KEYS if key == "items" else SIGNED_KEYS)
+    diff = sorted(str(k) for k in diff)
+    if set(d) != {key} or not isinstance(rows, list) or len(rows) != n_expected or not all(ok(x) for x in rows):
+        return None, info, diff
+    if sorted(x["n"] for x in rows) != list(range(1, n_expected + 1)):
+        return None, info, diff
+    return rows, info, diff
 
 
 def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse, cache_dir: Path, uid: str, cache_extra: str,
-                tag: str) -> list[dict] | None:
+                tag: str, arm: str = "", shape_log: Path | None = None) -> tuple[list[dict] | None, bool]:
+    """(rows|None, tolerated). One retry per call. Only a parsed result is cached, so a rerun retries every failure."""
     cp = cache_path(cache_dir, name, uid, frozen.prompt_sha(name), hashlib.sha256(user.encode()).hexdigest(), cache_extra)
     if cp.exists():
-        return json.loads(cp.read_text(encoding="utf-8"))["items"]
-    items = None
+        c = json.loads(cp.read_text(encoding="utf-8"))
+        return c["items"], bool(c.get("tolerated"))
+    items, tolerated = None, False
     for _ in (1, 2):
-        items = parse(client.chat("opus", user, frozen.text[name], max_tokens=8000, temperature=0.0, tag=f"{tag}:{uid}"))
+        full_tag = f"{tag}:{uid}"
+        items, info, diff = parse(client.chat("opus", user, frozen.text[name], max_tokens=8000, temperature=0.0, tag=full_tag))
+        log_shape(shape_log, client, full_tag, prompt=tag, judge="opus", ref=None, arm=arm, uid=uid, info=info, parse_ok=items is not None, key_diff=diff)
         if items is not None:
+            tolerated = info["tolerated"]
             break
     if items is not None:
-        _write_private(cp, {"items": items})
-    return items
+        _write_private(cp, {"items": items, "tolerated": tolerated})
+    return items, tolerated
 
 
 _ZERO = ("unsupported_drugs", "leak_items", "invented_fields", "dose_precedence_errors", "hallucinations", "unclear_items")
 
 
-def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: Path, uid: str, arm_kind: str) -> dict:
+def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: Path, uid: str, arm_kind: str, shape_log: Path | None = None) -> dict:
     """Counts from floor-items-v1 over the numbered replayed items. All None when the judge could not be parsed twice.
     `transcript` is format_transcript output (T<n> ids, roles, QUARANTINED marks)."""
     if not items:
         return {**dict.fromkeys(_ZERO, 0), "parse_failure": False}
     user = f"TRANSCRIPT:\n{transcript}\n\nITEMS:\n{_list(items)}\n"
-    res = _judge_json(client, frozen, "floor-items-v1.system.txt", user, lambda t: _parse_rows(t, "items", len(items), _item_ok),
-                      cache_dir, uid, arm_kind, "floor-items-v1")
+    res, tolerated = _judge_json(client, frozen, "floor-items-v1.system.txt", user, lambda t: _parse_rows(t, "items", len(items), _item_ok),
+                                 cache_dir, uid, arm_kind, "floor-items-v1", arm_kind, shape_log)
     if res is None:
         return {**dict.fromkeys(_ZERO), "parse_failure": True}
     kind = {it["n"]: it["kind"] for it in items}
@@ -152,22 +156,24 @@ def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: P
             "invented_fields": sum(1 for x in med if x["invented"]),
             "dose_precedence_errors": sum(1 for x in res if x["dose_precedence_error"]),
             "hallucinations": sum(1 for x in res if x["said"] == "no"),
-            "unclear_items": sum(1 for x in res if x["said"] == "unclear"), "parse_failure": False}
+            "unclear_items": sum(1 for x in res if x["said"] == "unclear"), "parse_failure": False, **({"tolerated": True} if tolerated else {})}
 
 
 def completion_counts(client, frozen, signed: list[dict], draft: list[dict], review: list[dict], transcript: str,
-                      cache_dir: Path, uid: str, arm_kind: str) -> dict:
+                      cache_dir: Path, uid: str, arm_kind: str, shape_log: Path | None = None) -> dict:
     """Of the signed items missing from the draft, how many a REVIEW prompt covers (covered_by is the 1-based REVIEW number)."""
     if not signed:
         return {"missing": 0, "covered": 0, "parse_failure": False}
     rv = "\n".join(f"{i}. [{_s(r.get('kind'))}] {_s(r.get('prompt'))} | detail: {_s(r.get('detail'))}" for i, r in enumerate(review, 1)) or "(none)"
     user = f"TRANSCRIPT:\n{transcript}\n\nSIGNED:\n{_list(signed)}\n\nDRAFT:\n{_list(draft)}\n\nREVIEW:\n{rv}\n"
-    res = _judge_json(client, frozen, "floor-missing-v1.system.txt", user,
-                      lambda t: _parse_rows(t, "signed", len(signed), lambda x: _signed_ok(x, len(review))), cache_dir, uid, arm_kind, "floor-missing-v1")
+    res, tolerated = _judge_json(client, frozen, "floor-missing-v1.system.txt", user,
+                                 lambda t: _parse_rows(t, "signed", len(signed), lambda x: _signed_ok(x, len(review))), cache_dir, uid, arm_kind,
+                                 "floor-missing-v1", arm_kind, shape_log)
     if res is None:
         return {"missing": None, "covered": None, "parse_failure": True}
     missing = [x for x in res if not x["in_draft"]]
-    return {"missing": len(missing), "covered": sum(1 for x in missing if x["covered_by"] is not None), "parse_failure": False}
+    return {"missing": len(missing), "covered": sum(1 for x in missing if x["covered_by"] is not None), "parse_failure": False,
+            **({"tolerated": True} if tolerated else {})}
 
 
 # ---- deterministic floors ---------------------------------------------------------------------------------------
@@ -335,16 +341,16 @@ def validator_failures(art: dict | None) -> int:
 # ---- per consult and aggregate ----------------------------------------------------------------------------------
 
 def consult_floors(client, frozen, *, uid: str, arm_kind: str, rx: dict, signed_rx: dict, art: dict | None, consult: Consult,
-                   transcript: str, cache_dir: Path) -> dict:
+                   transcript: str, cache_dir: Path, shape_log: Path | None = None) -> dict:
     items, signed = numbered_items(rx), numbered_items(signed_rx)
-    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind)
+    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log)
     inv = invented_numbers(rx, art, consult)
     rec = {"uid": uid, "arm": arm_kind, "n_items": len(items), **j, "invented_numbers": inv["count"],
            "invented_numbers_detail": {k: inv[k] for k in ("offending_runs", "unmatched_medicines")},
            "dose_precedence_det": dose_precedence(rx, art), "printable_errors": printable_count(rx, art), "unknown_key_errors": unknown_key_errors(rx),
            "validator_failures": validator_failures(art), "artifact_missing": art is None}
     rec["completion"] = completion_counts(client, frozen, signed, items, (art or {}).get("completion_required") or [], transcript,
-                                          cache_dir, uid, arm_kind)
+                                          cache_dir, uid, arm_kind, shape_log)
     return rec
 
 

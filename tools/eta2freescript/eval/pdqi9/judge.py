@@ -88,18 +88,133 @@ def plan_calls(uids: list[str], arms: list[str], judges=JUDGES, refs=REFS, seed:
     return calls
 
 
-def parse_scores(text: str) -> tuple[list[int], list[str]] | None:
-    """Strict: one JSON object with exactly the 9 PDQI-9 integer keys, each 1-5. Returns (scores in ITEM_KEYS order, keys) or None."""
-    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
+
+
+def _json_spans(t: str) -> list[tuple[int, int]]:
+    """Balanced top-level {...} spans of t as (start, end_exclusive). Quotes and escapes count only inside a span; a brace that never
+    balances is skipped, not allowed to swallow a later object."""
+    spans, i, n = [], 0, len(t)
+    while i < n:
+        if t[i] != "{":
+            i += 1
+            continue
+        depth, j, in_str, esc = 0, i, False, False
+        end = None
+        while j < n:
+            c = t[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+            j += 1
+        if end is None:
+            i += 1
+        else:
+            spans.append((i, end))
+            i = end
+    return spans
+
+
+def extract_object(text: str) -> tuple[dict | None, dict]:
+    """Tolerant extraction (lead ruling 14 Oct 2026). Strip one optional code fence; if what is left is itself a JSON object, use it.
+    Else scan for balanced top-level {...} spans: exactly one that parses as a JSON object is used (tolerated); zero or 2+ is a failure.
+    A reply that is valid JSON but not an object (a list, a string) is a failure. Returns (object|None, shape) where shape holds
+    counts only: leading_chars, trailing_chars, fenced, n_spans, tolerated."""
+    raw = (text or "").strip()
+    m = _FENCE.fullmatch(raw)
+    t = m.group(1) if m else raw
+    info = {"leading_chars": 0, "trailing_chars": 0, "fenced": "```" in raw, "n_spans": 0, "tolerated": False}
     try:
         d = json.loads(t)
     except ValueError:
-        return None
-    if not isinstance(d, dict) or set(d) != set(ITEM_KEYS):
-        return None
-    if any(isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 5 for v in d.values()):
-        return None
-    return [d[k] for k in ITEM_KEYS], list(ITEM_KEYS)
+        d = None
+    else:
+        spans = _json_spans(t)
+        info["n_spans"] = len(spans)
+        if isinstance(d, dict):
+            return d, info
+        return None, info
+    spans = _json_spans(raw)
+    info["n_spans"] = len(spans)
+    if len(spans) != 1:
+        return None, info
+    s0, e0 = spans[0]
+    info["leading_chars"], info["trailing_chars"] = s0, len(raw) - e0
+    try:
+        d = json.loads(raw[s0:e0])
+    except ValueError:
+        return None, info
+    if not isinstance(d, dict):
+        return None, info
+    info["tolerated"] = True
+    return d, info
+
+
+def parse_scores_ex(text: str) -> tuple[tuple[list[int], list[str]] | None, dict, list[str]]:
+    """(result|None, shape, key_diff). Strict checks on the extracted object: exactly the 9 PDQI-9 integer keys, each 1-5."""
+    d, info = extract_object(text)
+    if d is None:
+        return None, info, []
+    diff = sorted(set(d) ^ set(ITEM_KEYS))
+    if diff or any(isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 5 for v in d.values()):
+        return None, info, diff
+    return ([d[k] for k in ITEM_KEYS], list(ITEM_KEYS)), info, diff
+
+
+def parse_scores(text: str) -> tuple[list[int], list[str]] | None:
+    """One JSON object with exactly the 9 PDQI-9 integer keys, each 1-5 (tolerant of prose around a single object). Returns (scores in
+    ITEM_KEYS order, keys) or None."""
+    return parse_scores_ex(text)[0]
+
+
+def uid_hash(uid: str) -> str:
+    return hashlib.sha256(uid.encode()).hexdigest()[:12]
+
+
+def last_usage(client: ModelClient, tag: str) -> tuple[int | None, str | None]:
+    """(output tokens, stop reason) of the call just made, from the client's usage ledger, if it keeps one. Counts only."""
+    path = getattr(getattr(client, "ledger", None), "path", None)
+    try:
+        if path and Path(path).exists():
+            for ln in reversed(Path(path).read_text(encoding="utf-8").splitlines()):
+                if not ln.strip():
+                    continue
+                rec = json.loads(ln)
+                if rec.get("tag") == tag:
+                    return rec.get("out"), rec.get("stop")
+                if "tag" in rec:
+                    break
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None, None
+
+
+def log_shape(shape_log: Path | None, client: ModelClient, tag: str, *, prompt: str, judge: str, ref: str | None, arm: str, uid: str,
+              info: dict, parse_ok: bool, key_diff: list[str]) -> None:
+    """One line per reply to judge-shapes.jsonl. Shapes and counts only: no reply text, no prompt text."""
+    if not shape_log:
+        return
+    out, stop = last_usage(client, tag)
+    rec = {"prompt": prompt, "judge": judge, "ref": ref, "arm": arm, "uid_hash": uid_hash(uid), "out_tokens": out, "stop_reason": stop,
+           "leading_chars": info["leading_chars"], "trailing_chars": info["trailing_chars"], "fenced": info["fenced"],
+           "n_spans": info["n_spans"], "tolerated": info["tolerated"], "parse_ok": parse_ok, "key_diff": key_diff}
+    p = Path(shape_log)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
 
 
 def cache_path(cache_dir: Path, *key) -> Path:
@@ -121,8 +236,9 @@ def build_prompt(frozen: Frozen, ref: str, nid: str, note: str, transcript: str)
 
 
 def score_note(client: ModelClient, frozen: Frozen, *, uid: str, arm: str, judge: str, ref: str, note: str, transcript: str,
-               cache_dir: Path, render_version: str) -> dict:
-    """One blinded call (plus one retry on a parse failure). Returns {scores|None, parse_failure, cached, note_id}."""
+               cache_dir: Path, render_version: str, shape_log: Path | None = None) -> dict:
+    """One blinded call (plus one retry on a parse failure). Returns {scores|None, parse_failure, tolerated, cached, note_id}.
+    Only a parsed result is cached, so a rerun retries every failure."""
     nid = note_id(uid, arm)
     key = (uid, arm, judge, ref, frozen.pdqi9_sha(ref), hashlib.sha256(note.encode()).hexdigest(), render_version,
            hashlib.sha256(transcript.encode()).hexdigest() if ref == "transcript" else "")
@@ -130,12 +246,15 @@ def score_note(client: ModelClient, frozen: Frozen, *, uid: str, arm: str, judge
     if cp.exists():
         return {**json.loads(cp.read_text(encoding="utf-8")), "cached": True}
     system, user = build_prompt(frozen, ref, nid, note, transcript)
-    rec = {"note_id": nid, "scores": None, "item_names": None, "parse_failure": True, "attempts": 0}
+    rec = {"note_id": nid, "scores": None, "item_names": None, "parse_failure": True, "tolerated": False, "attempts": 0}
     for attempt in (1, 2):
         rec["attempts"] = attempt
-        parsed = parse_scores(client.chat(judge, user, system, max_tokens=1500, temperature=0.0, tag=f"pdqi9-v3:{judge}-{ref}:{uid}"))
+        tag = f"pdqi9-v3:{judge}-{ref}:{uid}"
+        parsed, info, diff = parse_scores_ex(client.chat(judge, user, system, max_tokens=1500, temperature=0.0, tag=tag))
+        log_shape(shape_log, client, tag, prompt="pdqi9-v3", judge=judge, ref=ref, arm=arm, uid=uid, info=info, parse_ok=parsed is not None, key_diff=diff)
         if parsed:
-            rec.update(scores=parsed[0], item_names=parsed[1], parse_failure=False)
+            rec.update(scores=parsed[0], item_names=parsed[1], parse_failure=False, tolerated=info["tolerated"])
             break
-    _write_private(cp, rec)
+    if not rec["parse_failure"]:
+        _write_private(cp, rec)
     return {**rec, "cached": False}
