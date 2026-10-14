@@ -241,15 +241,11 @@ def decide(speakers, talk, a, b_doctor, scores):
 
 
 # ---------------------------------------------------------------- the track
-def track_config(stt_sha, tr_sha, jev_name):
-    return {"stt_sha256": stt_sha, "translate_sha256": tr_sha, "rule": RULE, "jev": jev_name}
-
-
 def build_track(row, stt_rel, stt_sha, stt, tr_sha, mp, turns, jev_name, reason, jev_reported=None):
     """jev_name = the CONFIGURED judge model name (e.g. "jev-latest"), the only judge identity in the cfg8: it is known before any call, so the track hash does not
     depend on processing order. The model id the server reports goes in extras.judge.reported only."""
     uid = row["consult_uid"]
-    config = track_config(stt_sha, tr_sha, jev_name)
+    config = {"stt_sha256": stt_sha, "translate_sha256": tr_sha, "rule": RULE, "jev": jev_name}
     cfg = writer.config_hash(config)
     role_of = {sp: v["role"] for sp, v in mp.items()}
     segs = [{"t0_ms": t0, "t1_ms": t1, "speaker": sp, "role": role_of.get(sp, "unknown")} for sp, _, _, t0, t1 in turns]
@@ -257,7 +253,7 @@ def build_track(row, stt_rel, stt_sha, stt, tr_sha, mp, turns, jev_name, reason,
          "config": config, "config_hash": cfg, "machine": "box-role-text-judge", "status": "ok" if segs else "empty", "reason": None if segs else "stt track has no turns",
          "segments": segs,
          "extras": {"rule": RULE["rule"], "rule_params": RULE, "map": mp, "abstain_reason": reason, "judge": {"jev": jev_name, "reported": jev_reported},
-                    "derived_from": {"stt_path": stt_rel, "stt_sha256": stt_sha, "translate_sha256": tr_sha, "text_source": "caa" if (stt or {}).get("version") == "caa" else "palimpsest"}, "consult_uid": uid, "clip_signature": row["signature"]}}
+                    "derived_from": {"stt_path": stt_rel, "stt_sha256": stt_sha, "translate_sha256": tr_sha}, "consult_uid": uid, "clip_signature": row["signature"]}}
     validate_track(t)
     return t
 
@@ -309,10 +305,6 @@ def process(row, root, is_held, write, cnt, jev=None, clips_root=sl.CLIPS, budge
         tr_found = live_track(root, row, "translate")
         tr = tr_found[2] if tr_found and (tr_found[2].get("config") or {}).get("clip_signature") == row["signature"] else None
         tr_sha = sha256_file(tr_found[1]) if tr else None
-        stt_sha = sha256_file(stt_abs)
-        if os.path.exists(role_path(root, row, {"config_hash": writer.config_hash(track_config(stt_sha, tr_sha, getattr(jev, "model", None)))})):
-            cnt["skipped_existing"] += 1   # the cfg8 is known from the two text hashes, the rule and the configured judge name: no judging, no Jev call for a clip already done
-            return
         turns = speaker_turns(stt, tr)
         talk = talk_seconds(turns)
         speakers = sorted(talk)
@@ -341,7 +333,7 @@ def process(row, root, is_held, write, cnt, jev=None, clips_root=sl.CLIPS, budge
                  "no_qualifying_speaker": "abstain_no_speaker"}[reason]] += 1
         else:
             cnt["doctor_assigned"] += 1
-        track = build_track(row, stt_rel, stt_sha, stt, tr_sha, mp, turns, getattr(jev, "model", None), reason, getattr(jev, "model_id", None))
+        track = build_track(row, stt_rel, sha256_file(stt_abs), stt, tr_sha, mp, turns, getattr(jev, "model", None), reason, getattr(jev, "model_id", None))
         if os.path.exists(role_path(root, row, track)):
             cnt["skipped_existing"] += 1
         elif write:
@@ -370,8 +362,6 @@ def run(args, root=None, is_held=None, jev=None, index_path=sl.CLIP_INDEX, clips
     if jev is not None and hasattr(jev, "warm_up"):
         jev.warm_up()   # one synthetic call so the reported model id is known for extras.judge.reported (it is NOT part of the cfg8)
     rows = sl.select(args, index_path)
-    if getattr(args, "until", None):
-        rows = [r for r in rows if r["ist_date"] <= args.until]
     limit, seed = getattr(args, "limit", 0), getattr(args, "seed", None)
     if seed is not None:   # a seeded random order, so a --limit sample is not just the oldest clips
         random.Random(seed).shuffle(rows)
@@ -387,18 +377,17 @@ def main(argv=None):
     g.add_argument("--consult")
     g.add_argument("--date")
     g.add_argument("--since")
-    ap.add_argument("--write", action="store_true", help="write role tracks (needs --jev real; 6S9 step 2, architect GO #10816)")
+    ap.add_argument("--write", action="store_true", help="write role tracks: refused until the architect's GO for step 2")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--jev", choices=("none", "real"), default="none", help="real = call Jev (V rulings O6/O7); a dry run needs --limit, a write does not")
+    ap.add_argument("--jev", choices=("none", "real"), default="none", help="real = call Jev (V rulings O6/O7); needs --limit")
     ap.add_argument("--limit", type=int, default=0, help="at most N clips go to Jev")
     ap.add_argument("--seed", type=int, default=None, help="seeded random clip order (use with --limit)")
-    ap.add_argument("--until", default=None, help="last ist_date included (inclusive); the 6S9 step 2 scope is 2026-10-02..2026-10-09")
     ap.add_argument("--root")
     a = ap.parse_args(argv)
-    if a.write and a.jev != "real":
-        ap.error("--write needs --jev real: a role track is written only with a real judge's answer (never from the heuristic alone)")
-    if a.jev == "real" and not a.limit and not a.write:
-        ap.error("--jev real without --write is the capped dry run: it needs --limit N")
+    if a.write:
+        ap.error("--write is not enabled: step 2 (write + measurement) needs the architect's GO after the refuter's PASS of the real-Jev dry run")
+    if a.jev == "real" and not a.limit:
+        ap.error("--jev real needs --limit N (the dry run is capped)")
     a.min_minutes, a.identified = 0, False
     client, logf = None, None
     if a.jev == "real":

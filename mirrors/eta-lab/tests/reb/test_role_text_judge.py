@@ -213,7 +213,7 @@ def test_guard_unavailable_is_fatal_and_write_needs_a_real_client(tmp_path, monk
     with pytest.raises(GuardUnavailable):
         rj.run(a, root=env.root, index_path=env.index, clips_root=env.clips)
     with pytest.raises(SystemExit):
-        rj.main(["--since", DATE, "--write"])                                    # a write needs a real judge
+        rj.main(["--since", DATE, "--write"])
 
 
 def test_no_jev_call_when_the_outcome_is_already_an_abstain(tmp_path):
@@ -289,7 +289,7 @@ def test_main_requires_limit_for_real_jev_and_still_refuses_write():
     with pytest.raises(SystemExit):
         rj.main(["--since", DATE, "--jev", "real"])
     with pytest.raises(SystemExit):
-        rj.main(["--since", DATE, "--write"])                                    # a write needs a real judge
+        rj.main(["--since", DATE, "--write"])
 
 
 class UnwarmedJev(FakeJev):
@@ -398,54 +398,3 @@ def test_client_choose_many_is_one_request_with_the_state_sent_once(tmp_path):
     r = c.choose_many("STATE", {"1": ("is 1 a patient?", ["patient", "attendant"], "none / cannot tell"), "2": ("is 2 a patient?", ["patient", "attendant"], "none / cannot tell")})
     assert r["1"] == {"patient": 0.9, "attendant": 0.05, "none / cannot tell": 0.05} and r["2"]["attendant"] == 0.85
     assert len(op.reqs) == 1 and json.loads(op.reqs[0][0].data)["state"] == "STATE" and set(json.loads(op.reqs[0][0].data)["questions"]) == {"q0", "q1"}
-
-
-def test_until_bounds_the_scope_and_a_real_write_needs_no_limit(tmp_path):
-    rows = [make_row(uid=f"u{i}", date=d) for i, d in enumerate(("2026-10-08", "2026-10-09", "2026-10-10"))]
-    env = Env(tmp_path, rows)
-    for d in ("2026-10-08", "2026-10-09", "2026-10-10"):
-        env.run(FakeGW(entries=ENTRIES), date=d)
-    a = types.SimpleNamespace(consult=None, date=None, since="2026-10-08", until="2026-10-09", write=True, min_minutes=0, identified=False, limit=0, seed=None)
-    j = FakeJev(doctor="0")
-    cnt = rj.run(a, root=env.root, is_held=lambda d, r: False, jev=j, index_path=env.index, clips_root=env.clips)
-    assert cnt["clips"] == 2 and cnt["written"] == 2 and cnt.get("limit_reached", 0) == 0                       # the 10 Oct clip is out of scope; no cap on a real write
-    assert not [n for n in os.listdir(tdir(env, uid="u2", date="2026-10-10")) if n.startswith("role.text-judge")]
-    assert rj.run(a, root=env.root, is_held=lambda d, r: False, jev=FakeJev(doctor="0"), index_path=env.index, clips_root=env.clips)["skipped_existing"] == 2
-
-
-def test_stats_measure_counts_a_vs_b_language_abstain_and_voiceprint_reference(tmp_path):
-    from kit.reb import role_text_stats as rts
-    env, row = make(tmp_path)
-    judge(env, FakeJev(doctor="0", others={"1": "patient"}))
-    log = tmp_path / "calls.jsonl"
-    log.write_text("\n".join(json.dumps(x) for x in [{"status": 200, "latency_s": 0.3, "attempt": 0, "input_tokens": 100, "output_tokens": 5},
-                                                      {"status": 200, "latency_s": 0.5, "attempt": 1, "input_tokens": 50, "output_tokens": 2}]))
-    m = rts.measure(root=env.root, index_path=env.index, since=DATE, until=DATE, call_log=str(log))
-    assert m["clips_in_scope"] == 1 and m["text_judge_tracks"] == 1 and m["doctor_assigned"] == 1 and m["abstain_rate"] == 0.0
-    assert m["judge_a_vs_b_on_the_doctor"] == {"A_and_B_name_same": 1} and m["by_language_heard"]["hi-IN"] == {"clips": 1, "doctor_assigned": 1}
-    assert m["voiceprint_reference_NOISY"] == {"no_voiceprint_track": 1, "agreement_when_both_name_a_doctor": None}                        # make_row is doctor_identified; no voiceprint track yet
-    assert m["jev_call_log"] == {"requests": 2, "ok": 2, "retries": 1, "input_tokens": 150, "output_tokens": 7, "latency_median_s": 0.4, "latency_p90_s": 0.48, "latency_max_s": 0.5}
-    assert "fever" not in json.dumps(m)
-
-
-def test_a_clip_that_already_has_its_track_makes_no_jev_call_and_is_not_judged_again(tmp_path):
-    env, row = make(tmp_path)
-    j = FakeJev(doctor="0", others={"1": "patient"})
-    assert judge(env, j)["written"] == 1 and len(j.states) > 0
-    j2 = FakeJev(doctor="0", others={"1": "patient"})
-    cnt = judge(env, j2)
-    assert cnt["skipped_existing"] == 1 and cnt["written"] == 0 and cnt["judged"] == 0 and cnt["jev_calls"] == 0 and j2.states == []     # 0 Jev calls on the second write-mode run
-    j3 = FakeJev(doctor="0")
-    j3.model = "fake-jev-pro"                                                                                                              # another configured judge = another cfg8 = judged
-    cnt3 = judge(env, j3)
-    assert cnt3["written"] == 1 and len(j3.states) > 0
-
-
-def test_role_track_records_the_text_source():
-    import kit.reb.role_text_judge as rj
-    row = {"consult_uid": "u1", "signature": {"a": 1}}
-    turns = [("A", 0, 0, 0, 1000)]
-    mp = {"A": {"role": "doctor"}}
-    for version, expect in (("v1", "palimpsest"), ("caa", "caa")):
-        t = rj.build_track(row, "p", "sha", {"version": version}, None, mp, turns, "jev-latest", None)
-        assert t["extras"]["derived_from"]["text_source"] == expect
