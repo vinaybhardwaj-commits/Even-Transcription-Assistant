@@ -59,12 +59,28 @@
       "pane_id": "wD:p2",
       "machine": "air",
       "note": "24 Sep 06:1x IST: the pane held a bare `claude --resume` on the Air whose only session file (9086d37f, 3 KB, cwd ~/eta-air, contents: one /model command) has no context. No real air-lab session exists on the Air. Closed it (SIGTERM, pid 25348) per Fable's rule; pane wD:p2 is now a plain zsh in ~/eta-air. No new session created."
+    }
+  },
+  "ctl-test": {
+    "ctltest": {
+      "pane_id": "w1:p1",
+      "cwd": "/private/tmp",
+      "session_id": "d13e4635-d46d-4e99-aea1-b814fe4beae4",
+      "model": "haiku",
+      "task": "reply-with-ok-test"
     },
-    "radar-kit": {
-      "pane_id": "wX:p1",
-      "cwd": "/Users/vinaybhardwaj/dev/eta-lab",
-      "session_id": "a83477f0-ef02-4f60-aace-50b586d7fe51",
-      "model": "sonnet",
+    "bt-a": {
+      "pane_id": "w2:p1",
+      "cwd": "/private/tmp/eta-bus-test-a",
+      "session_id": "5ebb148e-251c-4f65-91df-b068a7fe12f2",
+      "model": "haiku",
+      "task": "e2e-tagged-by-fable"
+    },
+    "bt-b": {
+      "pane_id": "w3:p1",
+      "cwd": "/private/tmp/eta-bus-test-b",
+      "session_id": "14701b50-d340-43e4-bf42-4c56f7353077",
+      "model": "haiku",
       "task": ""
     }
   },
@@ -114,8 +130,8 @@
       "label": "lab-mover · lab migration · box",
       "purpose": "lab migration",
       "machine": "box",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 2041, restarted 24 Sep 17:00 IST",
-      "note": "Native since 24 Sep 17:00 IST (Fable 13:30 native-move order, after its 'parity posted' and its own idle-for-restart message #523); resumed session 0a4388cc on --model sonnet --dangerously-skip-permissions. Its 2 MCP ssh sessions now use the lab sshd (box port 2224, ruling 129), which took 2 slots off the capped system sshd. Registered cleanly (no nameless-agent race)."
+      "binary": "OLD (deleted npm binary) -- pending native move (Fable 13:30)",
+      "note": "SKIPPED 24 Sep 06:1x IST, status=working at both attempts; still on the removed npm binary (process started before the 24-Sep uninstall) -- restart with its registry command once idle; the relaunch resolves via the /usr/bin/claude -> ~/.local/bin/claude bridge symlink 13:30 native-move status: NOT moved yet, blocked by 3 background shells (two stt_parity waits on hist-gpu-1/2, one smoke.log wait); move it when they finish / 'parity posted'."
     },
     "scribe": {
       "pane_id": "w7:p1",
@@ -138,8 +154,8 @@
       "label": "split-speaker · speaker split study · box",
       "purpose": "speaker split study",
       "machine": "box",
-      "note": "Native since 24 Sep 13:37 IST (Fable 13:30 native-move order); resumed session 2f5b94c5 on --model sonnet --permission-mode auto. Its filler_watch.py (ruling 98 revert-trigger watch) runs detached (pid 9978, no claude ancestor) until 20:00 IST, so it survives restarts. Naming: pane w8:p1 had no herdr name before 24 Sep; now split-speaker. | 24 Sep 19:17 IST (Fable ruling 152): restarted (done, no background command; its filler watch had already ended by design at 19:05, EXIT 0) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 21581, same session 2f5b94c5.",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 28134, restarted 24 Sep 19:17 IST onto the lab sshd (ruling 152)"
+      "note": "Native since 24 Sep 13:37 IST (Fable 13:30 native-move order); resumed session 2f5b94c5 on --model sonnet --permission-mode auto. Its filler_watch.py (ruling 98 revert-trigger watch) runs detached (pid 9978, no claude ancestor) until 20:00 IST, so it survives restarts. Naming: pane w8:p1 had no herdr name before 24 Sep; now split-speaker.",
+      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 21581, restarted 24 Sep 13:37 IST"
     },
     "lx": {
       "pane_id": "w9:p1",
@@ -163,8 +179,7 @@
       "label": "fleet · surgery-30 + fleet data · box",
       "purpose": "surgery-30 + fleet data",
       "machine": "box",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 49063, restarted 24 Sep 18:16 IST onto the lab sshd (ruling 152)",
-      "note": " | 24 Sep 18:16 IST (Fable ruling 152): restarted (done, no background command, no draft) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 63575, same session."
+      "binary": "native ~/.local/share/claude/versions/2.1.281 (verified 24 Sep 06:1x IST)"
     },
     "eta-refuter-2": {
       "pane_id": "wD:p1",
@@ -176,8 +191,7 @@
       "purpose": "code checker 2 (Opus)",
       "machine": "box",
       "task": "second Refuter, parallel with eta-refuter, never reviews a branch its own session built",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 6784, restarted 24 Sep 18:16 IST onto the lab sshd (ruling 152)",
-      "note": " | 24 Sep 18:16 IST (Fable ruling 152): restarted (done, no background command, no draft) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 54986, same session."
+      "binary": "native ~/.local/share/claude/versions/2.1.281 (verified 24 Sep 06:1x IST)"
     },
     "surg-deid": {
       "pane_id": "wG:p1",
@@ -266,8 +280,8 @@
       "label": "linker · encounter→Rx→OT→discharge chain · box",
       "purpose": "Surgical chain linker (orders/SURGICAL-CHAIN-LINKER.md): consult -> Rx -> OT booking -> OT note -> discharge. Refuter: eta-refuter-2.",
       "machine": "eta-lab-t4",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 62336, restarted 24 Sep 18:36 IST onto the lab sshd (ruling 152)",
-      "note": "Created 24 Sep 14:4x IST on Fable's order. agent start timed out at 150 s although the session ran; the agent was nameless, fixed with herdr agent rename wP:p1 linker (same race as tunnel-ops). Reads Metabase via the box key in ~/.claude/secrets (never printed). No patient identifiers in git; examples only under box ~/eta-data/surgical-chain/. | 24 Sep 18:36 IST (Fable ruling 152): restarted (done, no background command, no draft) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 15703, same session c8227c47.",
+      "binary": "native 2.1.281, pid 15703",
+      "note": "Created 24 Sep 14:4x IST on Fable's order. agent start timed out at 150 s although the session ran; the agent was nameless, fixed with herdr agent rename wP:p1 linker (same race as tunnel-ops). Reads Metabase via the box key in ~/.claude/secrets (never printed). No patient identifiers in git; examples only under box ~/eta-data/surgical-chain/.",
       "task": "P0 read-only Metabase schema scout, due 17:00 IST"
     },
     "mb-rx": {
@@ -308,50 +322,6 @@
       "binary": "native 2.1.281, pid 28590",
       "note": "Created 24 Sep 14:5x IST on Fable's order. agent start hit the nameless-agent race for mb-rx and mb-ot (fixed with herdr agent rename); session id read from the pane's scratchpad path; it asked which scout-table row it was, and I answered option 3 (mb-ipd) with send-keys. Metabase key is in ~/.claude/secrets (never printed); no patient identifiers in git.",
       "task": "read-only scout row, due 16:30 IST"
-    },
-    "vj-data": {
-      "pane_id": "wT:p1",
-      "cwd": "/home/eta/dev/eta-lab",
-      "session_id": "",
-      "model": "sonnet",
-      "task": ""
-    },
-    "vj-arms": {
-      "pane_id": "wV:p1",
-      "cwd": "/home/eta/dev/eta-lab",
-      "session_id": "",
-      "model": "sonnet",
-      "task": ""
-    },
-    "vj-refuter": {
-      "pane_id": "wW:p1",
-      "cwd": "/home/eta/dev/eta-lab",
-      "session_id": "",
-      "model": "opus",
-      "task": ""
-    }
-  },
-  "ctl-test": {
-    "ctltest": {
-      "pane_id": "w1:p1",
-      "cwd": "/private/tmp",
-      "session_id": "d13e4635-d46d-4e99-aea1-b814fe4beae4",
-      "model": "haiku",
-      "task": "reply-with-ok-test"
-    },
-    "bt-a": {
-      "pane_id": "w2:p1",
-      "cwd": "/private/tmp/eta-bus-test-a",
-      "session_id": "5ebb148e-251c-4f65-91df-b068a7fe12f2",
-      "model": "haiku",
-      "task": "e2e-tagged-by-fable"
-    },
-    "bt-b": {
-      "pane_id": "w3:p1",
-      "cwd": "/private/tmp/eta-bus-test-b",
-      "session_id": "14701b50-d340-43e4-bf42-4c56f7353077",
-      "model": "haiku",
-      "task": ""
     }
   }
 }
