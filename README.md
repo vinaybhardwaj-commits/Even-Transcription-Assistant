@@ -76,7 +76,6 @@ This repo is the single place to read what the team is building. Other repos sta
 | `mirrors/eta-lab/` | Lab and study code, kits, orders and reports | `eta-lab` (private) | lab leads, merges by gating-lead | by the git steward when the source `main` moves; branches as `mirror/eta-lab/<branch>` |
 | `mirrors/newcat/` | Clinical decision-support platform code and docs | `newcat` (private git) | newcat-orch | same; branches as `mirror/newcat/<branch>` |
 | `mirrors/even-cdmss/` | Clinical decision-support app (CDMSS) | `Even-CDMSS` (public) | newcat-orch and gating-lead | same; branches as `mirror/even-cdmss/<branch>` |
-| `mirrors/even-elo/` | Governance / ELO app | `even-elo` (public) | gov-orch | same; branches as `mirror/even-elo/<branch>` |
 
 Each mirror folder has `MIRROR.md` (source repo, source commit, file and byte counts) and `WITHHELD.md` (files left out, by path and rule only). Nothing is edited inside a mirror: a file that fails the scrub is left out whole. Mirrors are not part of the app build, typecheck, tests or deploy.
 
