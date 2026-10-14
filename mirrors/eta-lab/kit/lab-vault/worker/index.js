@@ -1,7 +1,7 @@
 // eta-lab-ingest: the write-once door into the eta-lab-results vault (ruling 184).
 // One route: PUT /v1/obj/<key>. There is no delete, no list, no overwrite and no multipart.
 // An R2 binding is bucket-wide read/write, so every guarantee here is enforced in this file.
-import { parseKey, provenanceProblems, annotationProblems, annotationSources, tapeProblems, TAPE_MAX_BYTES } from "./validate.js";
+import { parseKey, provenanceProblems, annotationProblems, annotationSources } from "./validate.js";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const PREFIX = "/v1/obj/";
@@ -68,17 +68,7 @@ async function handle(request, env) {
     if (bytes === null) return json(413, { error: `body exceeds ${MAX_BYTES} bytes` });
     if (bytes.byteLength === 0) return json(400, { error: "empty body" });
 
-    if (parsed.kind === "tape") {  // r373: audio, never parsed as JSON; the client states the sha256 and the Worker must reproduce it from the bytes
-      if (bytes.byteLength > TAPE_MAX_BYTES) return json(413, { error: `tape chunks are at most ${TAPE_MAX_BYTES} bytes` });
-      const ct = ctype.split(";")[0].trim();
-      if (!["audio/webm", "audio/ogg", "audio/opus"].includes(ct)) return json(415, { error: "content-type must be audio/webm, audio/ogg or audio/opus" });
-      const problems = tapeProblems(bytes, parsed);
-      if (problems.length) return json(422, { error: "tape rejected", problems });
-      const claimed = (request.headers.get("x-content-sha256") || "").toLowerCase();
-      if (!/^[0-9a-f]{64}$/.test(claimed)) return json(400, { error: "x-content-sha256 (64 hex, the sha256 of the body) is required for tapes" });
-      if (claimed !== (await sha256hex(bytes))) return json(422, { error: "x-content-sha256 does not match the body" });
-    }
-    if (parsed.kind !== "index" && parsed.kind !== "tape") {
+    if (parsed.kind !== "index") {
       let text;
       try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return json(422, { error: "body is not utf-8", problems: ["body is not utf-8"] }); }
       const problems = parsed.kind === "annotation" ? annotationProblems(text, parsed) : provenanceProblems(text, parsed.runId, parsed.kind);
@@ -109,7 +99,7 @@ async function handle(request, env) {
       stored = await env.RESULTS.put(key, bytes, {
         onlyIf: { etagDoesNotMatch: "*" }, // atomic: fails if the key exists, no get-then-put race
         sha256,
-        httpMetadata: { contentType: parsed.kind === "tape" ? ctype.split(";")[0].trim() : parsed.kind === "index" && key.endsWith(".parquet") ? "application/octet-stream" : "application/json" },
+        httpMetadata: { contentType: parsed.kind === "index" && key.endsWith(".parquet") ? "application/octet-stream" : "application/json" },
         customMetadata: { sha256, ingested_at: new Date().toISOString() },
       });
     } catch (e) { putErr = e; }

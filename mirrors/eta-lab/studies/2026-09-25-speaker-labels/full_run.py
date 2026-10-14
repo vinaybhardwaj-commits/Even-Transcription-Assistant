@@ -9,7 +9,7 @@ ap = argparse.ArgumentParser(); ap.add_argument("--results", required=True); ap.
 ap.add_argument("--exclude", nargs="*", default=[], help="jsonl files whose window_ids are already done")
 ap.add_argument("--local", action="store_true", help="run the consumer on THIS box (T4, flock /home/eta/gpu.lock) instead of shipping to eta-lab-l4")
 ap.add_argument("--since", help="only windows starting on/after YYYY-MM-DD"); ap.add_argument("--before", help="only windows starting before YYYY-MM-DD")
-ap.add_argument("--oldest-first", action="store_true"); ap.add_argument("--cut-workers", type=int, default=4)
+ap.add_argument("--oldest-first", action="store_true")
 a = ap.parse_args()
 done = set()
 for f in [a.results] + a.exclude:
@@ -32,18 +32,10 @@ VENV = "/home/eta/vad/venv/bin/python"; CODE = "eta-lab-night/337e"
 if not a.local:
     subprocess.run(["ssh", L4, f"mkdir -p ~/{RIN} ~/{CODE} && chmod 700 ~/{RIN}"], check=True)
     subprocess.run(["rsync", "-aq", os.path.join(HERE, "l4_consume.py"), f"{L4}:{CODE}/"], check=True)
-def refresh(k):
-    """drop windows another run (T4/L4 split) finished since this one started"""
-    cur = set()
-    for f in [a.results] + a.exclude:
-        if os.path.exists(f):
-            for l in open(f): cur.add(json.loads(l)["window_id"])
-    batches[k] = [x for x in batches[k] if x[1] not in cur]
 def prepare(k):
-    refresh(k)
     d = f"{HOME}/speaker-labels/opus/b{k:03d}"; os.makedirs(d, mode=0o700, exist_ok=True)
     lst = f"{HOME}/speaker-labels/opus/b{k:03d}.json"; json.dump({"windows": [dict(window_id=w, path=p) for _, w, p in batches[k]]}, open(lst, "w"))
-    r = subprocess.run(["nice", "-n", "10", VENV, os.path.join(HERE, "cut_batch.py"), lst, d, "--workers", str(a.cut_workers)], capture_output=True, text=True)
+    r = subprocess.run(["nice", "-n", "10", VENV, os.path.join(HERE, "cut_batch.py"), lst, d, "--workers", "4"], capture_output=True, text=True)
     print(f"batch {k}: cut: {r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[-200:]}", flush=True); return d
 nxt = {}; t_all = time.time()
 def bg(k): nxt[k] = prepare(k)
