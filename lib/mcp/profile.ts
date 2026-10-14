@@ -92,6 +92,7 @@ function briefs(): Record<string, string> {
     scribe_freescript: "Job queue read/write. Reads stored FreeScript artifacts. action=read|run; run queues a box job and needs invoke. On unless ETA_FREESCRIPT=0. No transcript text. Times UTC. ist_date.",
     scribe_sarvam: "Job queue read/write; Sarvam (ZDR): consult audio/text; MCP also room windows, never blind days. Times UTC. consult_result: consult_uids or ist_date. submits need invoke.",
     scribe_admin: "Reads (state, install_list) and WRITES (admin scope): room/kiosk repair, audited, needs reason. action=state|room_enable|room_disable|install_mint|install_list|install_retire|bind|unbind. Times UTC.",
+    scribe_catalog: "Read-only; touches no room. Times UTC. Encounter Explorer catalog since 2026-09-09: action=search|get|clip_audio_url. Text only with include_text. May quote identity.",
     scribe_reb_index: "Read-only; touches no room. Times UTC. REB track index rows (layer, engine, R2 key) for a window_id or IST date; shadow only on request.",
     scribe_steward: "Read-only; touches no room. Times UTC. Steward view=config|decisions|tickets|tick|why|history|ticket_log|ticket_summary|live; why needs room + at (+-15 min). No ticket signatures.",
     scribe_kiosks: "Read-only; reads live kiosks' stored reports, sends no command. Times UTC. view=health|versions|devices|power|last_seen|helper|commands; room optional.",
