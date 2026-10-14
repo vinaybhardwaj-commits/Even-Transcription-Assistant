@@ -69,15 +69,7 @@ export function placeRoomTapeSegment(t0, t1, s0, s1) {
 
 // window_id/room_id/ist_date are the SAME ones the /timeline inspector route already validated (WID_RE / validRoomDate) -
 // this function never sees anything it didn't already check the shape of.
-// opts.rich (6V consult drawer): segments additionally carry speaker / lang / conf and a whitelisted `x` of the fields the drawer shows,
-// and each track carries cfg_lang (a koyal track's prompt language) and job_id. Off by default, so every existing caller is unchanged.
-const XKEYS = ["consult_uid", "display_name", "doctor_uid", "quality", "attribution", "prescription_ref", "warehouse_prescription_uid", "job_id"];
-const richSeg = (s) => {
-  const x = {};
-  for (const k of XKEYS) if (typeof s?.extras?.[k] === "string") x[k] = s.extras[k].slice(0, 80);
-  return { speaker: str(s?.speaker, 24), lang: str(s?.lang, 12), conf: Number.isFinite(+s?.conf) ? Math.round(+s.conf * 1000) / 1000 : null, x };
-};
-export async function rebModel(env, date, room, windowId, opts = {}) {
+export async function rebModel(env, date, room, windowId) {
   if (!env.RESULTS) return { loaded: false };
   let manifest;
   try {
@@ -112,33 +104,28 @@ export async function rebModel(env, date, room, windowId, opts = {}) {
 
   // fetch every chosen track's body once, up front, so the clip-local check below sees every segment in the window
   const bodies = new Map();   // entry -> raw segments[]
-  bodies.cfg = new Map();      // entry -> { lang, job_id } (rich mode only reads it)
   for (const { entry: e } of picks) {
     let body = null;
     try { const o = await env.RESULTS.get(`reb/${e.path}`); if (o) body = JSON.parse(await o.text()); } catch { body = null; }
     bodies.set(e, Array.isArray(body?.segments) ? body.segments : []);
-    bodies.cfg.set(e, { lang: body?.config?.lang, job_id: body?.extras?.job_id ?? body?.config?.job_id });
   }
   const allRawSegments = [...bodies.values()].flat();
   const offset = clipLocalOffset(sourceKind, t0, t1, allRawSegments);
 
   const tracks = picks.map(({ entry: e, supersededBy: sb }) => {
     const rawSegs = bodies.get(e) || [];
-    const rich = opts.rich === true;
     const segments = rawSegs.slice(0, 500).map((s) => {
       const s0 = Number(s?.t0_ms), s1 = Number(s?.t1_ms);
       if (!Number.isFinite(s0) || !Number.isFinite(s1) || s1 < s0) return null;
       let a = s0 + offset, b = s1 + offset;
-      if (opts.absoluteOk === true && s0 >= t0 - 1000) { a = s0; b = s1; }   // a consult-scope track written straight on the tape clock (epoch ms) is not shifted again
-      else if (sourceKind === "room_tape") { const p = placeRoomTapeSegment(t0, t1, s0, s1); if (!p) return null; [a, b] = p; }
-      return rich ? { t0_ms: a, t1_ms: b, text: str(s?.text, 1000) || "", ...richSeg(s) } : { t0_ms: a, t1_ms: b, text: str(s?.text, 1000) || "" };
+      if (sourceKind === "room_tape") { const p = placeRoomTapeSegment(t0, t1, s0, s1); if (!p) return null; [a, b] = p; }
+      return { t0_ms: a, t1_ms: b, text: str(s?.text, 1000) || "" };
     }).filter(Boolean);
     return {
       layer: e.layer, engine: e.engine, model: str(e.model, 120), version: str(e.version, 40) || "",
       config_hash: str(e.config_hash, 16) || "", machine: str(e.machine, 80) || "", status: e.status,
       reason: str(e.reason, 240), started_at: str(e.started_at, 40), finished_at: str(e.finished_at, 40),
       lang: deriveLang(e, rawSegs), segments,
-      ...(rich ? { cfg_lang: str(bodies.cfg?.get(e)?.lang, 8), job_id: str(bodies.cfg?.get(e)?.job_id, 80) } : {}),
       superseded_by: sb ? { status: sb.status, reason: str(sb.reason, 240), machine: str(sb.machine, 80), finished_at: str(sb.finished_at, 40) } : null,
     };
   });

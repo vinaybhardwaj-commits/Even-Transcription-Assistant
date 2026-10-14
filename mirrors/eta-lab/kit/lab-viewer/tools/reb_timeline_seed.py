@@ -25,7 +25,6 @@ HERE = Path(__file__).resolve()
 KIT_ROOT = HERE.parents[2]   # kit/lab-viewer/tools/reb_timeline_seed.py -> parents[0]=tools [1]=lab-viewer [2]=kit
 sys.path.insert(0, str(KIT_ROOT))
 from reb.reb import load_window, WindowNotFoundError   # the REAL library (eta-refuter-2 #5266: read reb.py from THIS repo, never a snapshot)
-from reb.from_hist import SEALED_WINDOWS   # lid-debug's 4 sealed clips (gating-lead #10998): never seeded into a lane, whatever the held-out list says. An import failure stops the tool (fail closed).
 
 BUCKET = "eta-lab-ratings"
 CWD = HERE.parents[1]   # kit/lab-viewer, matching timeline_seed.py's own wrangler cwd
@@ -37,13 +36,7 @@ LANES = [
     ("medmodel", lambda e: e.get("layer") == "stt" and e.get("engine") == "medasr"),   # T-MEDMODEL-2: stt layer only; terms.medasr (W50 evidence, other windows + decode) stays in the MedASR row below
     ("indic", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("indic-")),
     ("sravaani", lambda e: e.get("layer") == "stt" and e.get("engine") == "sravaani"),
-    ("medasr", lambda e: e.get("layer") in ("terms", "medical")),   # 6V: REB-SPEC v2.3 renames the layer `medical`; `terms` tracks stay in this row
-    # 6V (V rulings S1-S6): the Sarvam lanes and the production router twin get their own rows, listed BEFORE the generic translate/diar rows so first-match wins
-    ("router", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("router-twin")),
-    ("sarvam", lambda e: e.get("layer") == "stt" and str(e.get("engine", "")).startswith("sarvam-saaras")),
-    ("sarvam_translate", lambda e: e.get("layer") == "translate" and str(e.get("engine", "")).startswith("sarvam-saaras")),
-    ("sarvam_diar", lambda e: e.get("layer") == "diar" and str(e.get("engine", "")).startswith("sarvam-saaras")),
-    ("encounter", lambda e: e.get("layer") == "encounter"),
+    ("medasr", lambda e: e.get("layer") == "terms"),
     ("translate", lambda e: e.get("layer") == "translate"),   # layer name per REB-SPEC-v1 (translate: Gemini text->English per Indic STT track); no such track exists on disk yet
     ("diar", lambda e: e.get("layer") == "diar"),
     ("acoustic", lambda e: e.get("layer") == "acoustics"),
@@ -142,7 +135,6 @@ class Lanes(dict):
     eos = None   # {lane: {"eos": chunks dropped because their text was only the "</s>" token, "kept": segments left}}; dropped BEFORE counting/capping, stored REB tracks are untouched
     excluded = None   # {lane: {"n_tracks", "reason"}} for tracks deliberately left out (SUSPECT); the viewer must say so instead of "no segments"
     full = None   # {lane: every segment, sorted} for capped lanes: written as timeline-lanes/ objects so the Worker can page by time window
-    sealed = 0   # windows skipped because their id is in SEALED_WINDOWS (never opened, no text, no track)
 
 
 LANE_CAP = 2000
@@ -162,11 +154,7 @@ def build_reb_lanes(reb_root, date, room, is_held=None):
     is_held = is_held or load_heldout()
     if is_held(date, room):   # the whole room-day is blind: nothing is read at all
         return lanes, 0, 0, sum(1 for _ in window_ids_for(reb_root, date, room))
-    lanes.sealed = 0
     for wid in window_ids_for(reb_root, date, room):
-        if wid in SEALED_WINDOWS:   # before the manifest is opened: a sealed window contributes nothing to any lane
-            lanes.sealed += 1
-            continue
         try:
             w = load_window(wid, ist_date=date, room_id=room, root=reb_root)
         except (WindowNotFoundError, OSError, json.JSONDecodeError, KeyError):
@@ -241,7 +229,7 @@ def cmd_build(a):
     p = out / f"{a.date}.reb.json"
     p.write_text(json.dumps({"reb": lanes, "reb_cap": lanes.capped, "reb_excluded": lanes.excluded, "reb_eos": lanes.eos}, ensure_ascii=False)); private_dir_file(p)
     write_lane_objects(a.out, a.room, a.date, lanes)
-    print(f"built reb lanes for {a.room}/{a.date}: {n_windows} windows, {n_tracks} current tracks, {n_held} held out (R3/W51), {lanes.sealed} sealed -> {p}")
+    print(f"built reb lanes for {a.room}/{a.date}: {n_windows} windows, {n_tracks} current tracks, {n_held} held out (R3/W51) -> {p}")
 
 
 def fetch_live(room, date):
@@ -271,7 +259,7 @@ def cmd_merge(a):
     side = out / f"{a.date}.livesha"   # timeline_seed.py load --replace refuses if the live object is no longer this one (lost-update guard)
     side.write_text(live_sha or "absent"); private_dir_file(side)
     write_lane_objects(a.out, a.room, a.date, lanes)
-    print(f"merged reb lanes ({n_windows} windows, {n_tracks} current tracks, {n_held} held out R3/W51, {lanes.sealed} sealed) into {a.room}/{a.date} "
+    print(f"merged reb lanes ({n_windows} windows, {n_tracks} current tracks, {n_held} held out R3/W51) into {a.room}/{a.date} "
           f"({'had' if live_fetched is not None else 'no'} pre-existing live doc) -> {p}; "
           f"load with: timeline_seed.py load --dir {a.out} --replace")
 
