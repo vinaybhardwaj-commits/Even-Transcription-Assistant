@@ -50,6 +50,28 @@ A bad JSON value, a missing placeholder, or a missing or non-directory cwd is a 
 - A consult whose pipeline raises still flushes its usage lines to `<out>/usage.jsonl` and writes `{uid, final_valid: false, error_type}` (the exception class name, no message) to `runs.jsonl`. This holds for the last consult too.
 - "no ingest target" in bundle mode still prints the one JSON summary line (`mode: bundle`, `config_error: true`) before exiting 1.
 
+## Hourly, skip-existing and backfill (bundle mode only)
+
+- `run --skip-existing` reads `GET /api/freescript/day?ist_date=<day>` (same HMAC as the pending read) before any uid runs and drops every uid that already has a stored artifact whose state is not `rejected`. If the day read fails (or is truncated at the 50-row cap) the run aborts with exit 1 and a summary line with `day_read_failed: true`; it never runs blind. The summary line gains `skipped_existing` (and `cost_usd`, `date`). The cap applies after the skip.
+- `run --max-consults N` overrides `max_consults`. `run --date today` is the current IST day; the sealed feed lists only sealed consults, so one sealed after a run is picked up by the next.
+- `hourly` runs `run --skip-existing` for today (IST) and, while the IST hour is < 2, for yesterday as well, in one process. One summary line per day; exit code is the worse of the two. Pending jobs are drained on the first day only.
+- `backfill --from YYYY-MM-DD --to YYYY-MM-DD [--max-consults N] [--uids-from-index PATH]` runs `run --skip-existing` for each day, newest first, one summary line per day plus a total line (`days, eligible, written(posted), skipped_existing, rejected, failed, missing_layers, bundle_failed, cost_usd`). It stops at the first day that exits 1 for a config or day-read failure; exit 2 continues. More than 120 days is refused. Pending jobs are not drained by backfill.
+- `--uids-from-index PATH` (days before the sealed feed existed): PATH is the cutter clip index, JSONL (on the box `~/eta-data/consult/clips/index.jsonl`). The last row per `consult_uid` wins; rows with `ist_date` in range and `minutes` >= 2 are grouped by day and replace the sealed feed. Only `consult_uid`, `ist_date` and `minutes` are read. Malformed lines are counted (`malformed`) and skipped. Bundle eligibility and skip-existing still apply.
+- Stage ledger (bundle mode, `out` set, not `--dry-run`): every consult that `run`, `hourly` or `backfill` considers appends one line to `<out>/consult-state.jsonl` (0600): `{"consult_uid", "ist_date", "state", "artifact_id", "run_ts"}`. `state` is `written`, `rejected`, `skipped_existing`, `not_eligible:<reason>` (`missing_layers`, `not_this_day`), `bundle_failed` or `failed:<ErrorClass>` (the class name only; `PostRejected` and `NoArtifact` for a refused post or a missing artifact). `artifact_id` is the stored run id from the ingest reply (or the day read for `skipped_existing`), else null. Ids and states only. Consults cut by `max_consults` before any fetch are not considered and get no line.
+- In folder mode `hourly` and `backfill` print `config error: hourly/backfill need bundle mode` and exit 1.
+
+Hourly cron (IST box clock; `TZ=Asia/Kolkata`), replacing the single nightly line once the first live night is signed off:
+
+```
+5 * * * * cd /opt/Even-Transcription-Assistant && set -a && . /etc/freescript-nightly.env && set +a && python -m tools.eta2freescript.nightly hourly >> /var/log/freescript-nightly.log 2>&1
+```
+
+Backfill (run by hand):
+
+```
+python -m tools.eta2freescript.nightly backfill --from 2026-09-01 --to 2026-09-30 --max-consults 40 --uids-from-index ~/eta-data/consult/clips/index.jsonl
+```
+
 ## First live night
 
 1. Until B2.1 is merged, the first live night runs with `--dry-run` only.

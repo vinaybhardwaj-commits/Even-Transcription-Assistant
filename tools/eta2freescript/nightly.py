@@ -3,6 +3,9 @@
     python -m tools.eta2freescript.nightly plan [--date YYYY-MM-DD] [--data DIR]
     python -m tools.eta2freescript.nightly run  [--date YYYY-MM-DD] [--data DIR] [--dry-run]
     python -m tools.eta2freescript.nightly drain [--data DIR]
+    python -m tools.eta2freescript.nightly run [--date today] [--skip-existing] [--max-consults N]
+    python -m tools.eta2freescript.nightly hourly
+    python -m tools.eta2freescript.nightly backfill --from YYYY-MM-DD --to YYYY-MM-DD [--max-consults N]
 
 ``run`` selects the day's consult folders that have a Sarvam transcript.json and an ok role.json, runs the pipeline
 on this box (Bedrock Claude via phi_guard) and POSTs each artifact to <app>/api/freescript/ingest. It then drains
@@ -124,6 +127,11 @@ def load_config(path: str | None, env: dict | None = None) -> dict:
 def previous_ist_day(now: datetime | None = None) -> str:
     now = now or datetime.now(timezone.utc)
     return (now.astimezone(IST).date() - timedelta(days=1)).isoformat()
+
+
+def current_ist_day(now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(IST).date().isoformat()
 
 
 def ist_date_of_ms(t0_ms: int) -> str:
@@ -275,6 +283,36 @@ def fetch_role_doc(app_url: str, token: str, uid: str, timeout_s: int = 30) -> d
     return role_doc_from_feed(rows[0])
 
 
+def fetch_day(app_url: str, secret: str, day: str, timeout_s: int = 30) -> list[dict]:
+    """GET /api/freescript/day?ist_date= (same HMAC as the pending read). Stored rows for the day; any failure raises.
+
+    A truncated read is a failure: uids past the cap would look absent and be run twice.
+    """
+    path = f"/api/freescript/day?ist_date={day}"
+    ts = int(datetime.now(timezone.utc).timestamp())
+    req = urllib.request.Request(app_url.rstrip("/") + path, method="GET")
+    req.add_header("x-freescript-ts", str(ts))
+    req.add_header("x-freescript-signature", sign_get(path, secret, ts))
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        body = json.loads(resp.read().decode())
+    rows = body.get("rows") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or body.get("ok") is not True or not isinstance(rows, list):
+        raise NightlyError("day read returned no rows list")
+    if body.get("truncated"):
+        raise NightlyError("day read was truncated")
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def existing_uids(rows: list[dict]) -> dict[str, str | None]:
+    """Uid -> stored run id, for uids with a stored artifact whose state is not ``rejected``."""
+    out: dict[str, str | None] = {}
+    for r in rows:
+        if isinstance(r.get("consult_uid"), str) and r.get("state") != "rejected":
+            rid = r.get("run_id")
+            out[r["consult_uid"]] = str(rid) if isinstance(rid, (int, str)) and not isinstance(rid, bool) else None
+    return out
+
+
 def fetch_pending(app_url: str, secret: str, timeout_s: int = 30) -> list[dict]:
     path = "/api/freescript/pending"
     ts = int(datetime.now(timezone.utc).timestamp())
@@ -398,7 +436,7 @@ def fetch_bundle(cmd: list[str], cwd: str, uid: str, tmp: Path) -> dict:
     return doc
 
 
-def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, tmp: Path, fetch=None) -> tuple[list[dict], dict, dict]:
+def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, tmp: Path, fetch=None, outcomes: dict | None = None) -> tuple[list[dict], dict, dict]:
     """(rows, consults by uid, counts). Eligibility is spec section 2.5: a translate or stt layer, a role layer, a clip start on ``day``.
 
     A pending job is an explicit request: it skips the day check. A consult that fails is counted once and never fetched again. ids and counts only; the Consults stay in memory.
@@ -406,6 +444,7 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
     from .ingest import ROLE_SLOTS, _slot_track, bundle_window, load_bundle
     fetch = fetch or (lambda uid: fetch_bundle(cfg["bundle_cmd"], cfg["bundle_cwd"], uid, tmp))
     counts = {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
+    outcomes = outcomes if outcomes is not None else {}  # uid -> ledger state for every uid that is not eligible
     rows, consults, seen = [], {}, set()
     for uid, job_id, check_day in uids:
         if uid in seen:
@@ -417,18 +456,22 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
             if (_slot_track(tracks.get("translate")) is None and _slot_track(tracks.get("stt")) is None) \
                     or not any(_slot_track(tracks.get(k)) is not None for k in ROLE_SLOTS):
                 counts["missing_layers"] += 1
+                outcomes[uid] = "not_eligible:missing_layers"
                 continue
             t0, _t1, room = bundle_window(b)
             if check_day and ist_date_of_ms(t0) != day:
                 counts["not_this_day"] += 1
+                outcomes[uid] = "not_eligible:not_this_day"
                 continue
             c = load_bundle(b)
         except Exception as e:
             counts["bundle_failed"] += 1
+            outcomes[uid] = "bundle_failed"
             print(repr(uid)[:40], "bundle-failed", type(e).__name__, flush=True)
             continue
         if not c.role_track:
             counts["missing_layers"] += 1
+            outcomes[uid] = "not_eligible:missing_layers"
             continue
         row = b.get("cutter_row") if isinstance(b.get("cutter_row"), dict) else {}
         d8 = row.get("doctor_uid")
@@ -449,15 +492,16 @@ def _default_run(data: Path, out: Path, uid: str) -> dict:
     return run_consult(c, client, out, Options())
 
 
-def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post) -> dict:
+def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_result=None) -> dict:
     """Run and post. ``run_one(uid) -> pipeline log``. ``post(payload) -> response``. Prints counts only."""
     cap = int(cfg.get("max_consults") or 40)
     chosen, overflow = rows[:cap], rows[cap:]
-    posted, rejected, failed, skipped = 0, 0, 0, len(overflow)
+    note = on_result or (lambda uid, state, artifact_id=None: None)
+    posted, rejected, failed, skipped, spent = 0, 0, 0, len(overflow), 0.0
     if dry_run:
         for r in chosen:
             print(r["uid"], r.get("ist_date"), "dry-run")
-        return {"dry_run": True, "n": len(chosen), "skipped": skipped, "posted": 0, "rejected": 0, "failed": 0}
+        return {"dry_run": True, "n": len(chosen), "skipped": skipped, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
     data, out = Path(cfg["data"]), Path(cfg.get("out") or str(Path(cfg["data"]) / "_eta2freescript"))
     out.mkdir(parents=True, exist_ok=True)
     for r in chosen:
@@ -465,15 +509,19 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post) -> dic
             log = (run_one or (lambda uid: _default_run(data, out, uid)))(r["uid"])
         except Exception as e:
             failed += 1
+            note(r["uid"], "failed:" + type(e).__name__)
             print(r["uid"], "ERROR", type(e).__name__, flush=True)
             continue
         art = log.get("artifact") if isinstance(log, dict) else None
         if not isinstance(art, dict):
             failed += 1
+            note(r["uid"], "failed:NoArtifact")
             print(r["uid"], "not-valid", flush=True)
             continue
         valid = bool(log.get("final_valid"))
         cost = log.get("cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            spent += cost
         body = payload_from_artifact(
             art, errors=log.get("final_errors") or [],
             cost_usd=cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
@@ -483,19 +531,26 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post) -> dic
             res = post(body)
         except Exception as e:
             failed += 1
+            note(r["uid"], "failed:" + type(e).__name__)
             print(r["uid"], "POST", type(e).__name__, flush=True)
             continue
         ok = isinstance(res, dict) and res.get("ok")
+        rid = res.get("run_id") if isinstance(res, dict) else None
+        rid = str(rid) if isinstance(rid, (int, str)) and not isinstance(rid, bool) else None
         if ok and valid:
+            note(r["uid"], "written", rid)
             posted += 1
             print(r["uid"], "posted", "inserted=" + str(res.get("inserted")), flush=True)
         elif ok:
+            note(r["uid"], "rejected", rid)
             rejected += 1
             print(r["uid"], "rejected", flush=True)
         else:
+            note(r["uid"], "failed:PostRejected")
             failed += 1
             print(r["uid"], "post-rejected", "inserted=" + str((res or {}).get("inserted")), flush=True)
-    return {"dry_run": False, "n": len(chosen), "skipped": skipped, "posted": posted, "rejected": rejected, "failed": failed}
+    return {"dry_run": False, "n": len(chosen), "skipped": skipped, "posted": posted, "rejected": rejected, "failed": failed,
+            "cost_usd": round(spent, 6)}
 
 
 def _post_factory(cfg: dict, secret: str):
@@ -523,7 +578,47 @@ def _sealed_uids(cfg: dict, day: str, sealed, reb_token: str) -> list[str] | Non
     return None
 
 
-def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed, secret: str, reb_token: str) -> int:
+def _day_filter(cfg: dict, day: str, secret: str, day_read) -> dict[str, str | None] | None:
+    """Uids already stored for ``day``, or None when the day read failed (the caller aborts; never run blind)."""
+    try:
+        if not cfg.get("app_url") or not secret:
+            raise NightlyError("no app url or secret for the day read")
+        rows = day_read(cfg["app_url"], secret, day) if day_read else fetch_day(cfg["app_url"], secret, day)
+        return existing_uids(rows)
+    except Exception as e:
+        print("day-read", type(e).__name__, flush=True)
+        return None
+
+
+STATE_FILE = "consult-state.jsonl"
+
+
+def append_states(out_root: str, lines: list[dict]) -> None:
+    """Append the stage-ledger lines to <out_root>/consult-state.jsonl (0600, directory 0700). Ids, states and times only."""
+    if not lines:
+        return
+    root = Path(out_root)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    path = root / STATE_FILE
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, "".join(json.dumps(x) + "\n" for x in lines).encode())
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def _abort_summary(dry_run: bool, day: str, out: dict | None) -> None:
+    print(json.dumps({"date": day, "dry_run": dry_run, "n": 0, "posted": 0, "rejected": 0, "failed": 0, "skipped": 0, "missing": 0,
+                      "skipped_existing": 0, "mode": "bundle", "bundle_failed": 0, "missing_layers": 0, "not_this_day": 0,
+                      "day_read_failed": True}))
+    if out is not None:
+        out.update(fatal=True)
+
+
+def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed, secret: str, reb_token: str,
+                skip_existing: bool = False, day_read=None, out: dict | None = None) -> int:
     """Bundle mode: uids = the sealed feed + pending jobs; every bundle lives in one TemporaryDirectory that is gone when this returns."""
     sealed_uids = [u for u in (_sealed_uids(cfg, day, sealed, reb_token) or []) if isinstance(u, str) and u]
     jobs_by_uid: dict[str, str | None] = {}
@@ -543,30 +638,52 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
                 unexpanded += 1  # a room+day job needs a folder scan; bundle mode has none
     # explicit pending requests first (they skip the day check), then the sealed feed; the cap applies before any fetch
     uids = [(u, j, False) for u, j in jobs_by_uid.items()] + [(u, None, True) for u in sealed_uids if u not in jobs_by_uid]
+    skipped_existing = 0
+    states: dict[str, tuple[str, str | None]] = {}  # uid -> (state, artifact_id) for the ledger
+    if skip_existing:
+        have = _day_filter(cfg, day, secret, day_read)
+        if have is None:
+            _abort_summary(dry_run, day, out)
+            return 1
+        kept = [t for t in uids if t[0] not in have]
+        for t in uids:
+            if t[0] in have:
+                states[t[0]] = ("skipped_existing", have[t[0]])
+        skipped_existing, uids = len(uids) - len(kept), kept
     cap = int(cfg.get("max_consults") or 40)
     overflow, uids = len(uids) - cap if len(uids) > cap else 0, uids[:cap]
     sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
     if sender is None and not dry_run:
         print("no ingest target")
         _config_error_summary(dry_run)
+        if out is not None:
+            out.update(fatal=True)
         return 1
     with tempfile.TemporaryDirectory(prefix="freescript-bundle-") as td:
         tmp = Path(td)
         (tmp / "bundles").mkdir()
-        rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles")
+        outcomes: dict[str, str] = {}
+        rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles", outcomes=outcomes)
+        for u, st in outcomes.items():
+            states[u] = (st, None)
         nothing = not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded
         if nothing:
             print("nothing", day)
-            summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0}
+            summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
         else:
             # every pipeline output goes inside the temp dir; _bundle_runner copies out only the derived files
             bcfg = dict(cfg, data=str(tmp), out=str(tmp / "out"))
             summary = execute(rows, bcfg, dry_run=dry_run, run_one=run_one or _bundle_runner(consults, tmp / "out", cfg.get("out")),
-                              post=sender or (lambda _p: {"ok": True, "inserted": 0}))
-    summary.update(counts, mode="bundle")
+                              post=sender or (lambda _p: {"ok": True, "inserted": 0}),
+                              on_result=lambda u, st, aid=None: states.__setitem__(u, (st, aid)))
+    if cfg.get("out") and not dry_run:
+        run_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        append_states(cfg["out"], [{"consult_uid": u, "ist_date": day, "state": st, "artifact_id": aid, "run_ts": run_ts}
+                                   for u, (st, aid) in states.items()])
+    summary.update(counts, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows))
     summary["skipped"] = summary.get("skipped", 0) + overflow
     summary["missing"] = counts["missing_layers"] + unexpanded
-    rc = _finish(summary, dry_run, extra_failed=counts["bundle_failed"])
+    rc = _finish(summary, dry_run, extra_failed=counts["bundle_failed"], out=out)
     return 0 if nothing else rc
 
 
@@ -642,12 +759,20 @@ def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
     return run_one
 
 
-def _finish(summary: dict, dry_run: bool, extra_failed: int = 0) -> int:
+def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | None = None) -> int:
     summary.setdefault("mode", "folder")
-    for k in ("bundle_failed", "missing_layers", "not_this_day"):
+    for k in ("bundle_failed", "missing_layers", "not_this_day", "skipped_existing"):
         summary.setdefault(k, 0)
-    keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day")
-    print(json.dumps({k: summary[k] for k in keys}))
+    summary.setdefault("cost_usd", 0.0)
+    summary.setdefault("eligible", summary.get("n", 0) + summary.get("skipped", 0))
+    keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day",
+            "skipped_existing", "cost_usd")
+    line = {k: summary[k] for k in keys}
+    if summary.get("date"):
+        line = {"date": summary["date"], **line}
+    print(json.dumps(line))
+    if out is not None:
+        out.update(summary)
     stored = summary["posted"] + summary.get("rejected", 0)
     if summary["failed"] or extra_failed or summary["missing"]:
         return 1 if stored == 0 and not dry_run else 2
@@ -656,17 +781,21 @@ def _finish(summary: dict, dry_run: bool, extra_failed: int = 0) -> int:
     return 0
 
 
-def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None, sealed=None, roles=None) -> int:
+def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None, sealed=None, roles=None,
+        skip_existing: bool = False, day_read=None, out: dict | None = None) -> int:
     if not cfg.get("enabled"):
         print("disabled")
         return 0
     secret = os.environ.get("FREESCRIPT_INGEST_SECRET", "").strip()
     reb_token = os.environ.get("REB_INDEX_READ_TOKEN", "").strip()
     if cfg.get("bundle_cmd"):
-        return _run_bundle(cfg, day, dry_run=dry_run, run_one=run_one, post=post, pending=pending, sealed=sealed, secret=secret, reb_token=reb_token)
+        return _run_bundle(cfg, day, dry_run=dry_run, run_one=run_one, post=post, pending=pending, sealed=sealed, secret=secret,
+                           reb_token=reb_token, skip_existing=skip_existing, day_read=day_read, out=out)
     data = Path(cfg["data"]) if cfg.get("data") else None
     if data is None:
         print("no data dir")
+        if out is not None:
+            out.update(fatal=True)
         return 1
     rows = select_day(data, day)
     sealed_missing: list[str] = []
@@ -695,19 +824,130 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         for r in extra:
             if r["uid"] not in have:
                 rows.append(r)
+    skipped_existing = 0
+    if skip_existing:
+        have = _day_filter(cfg, day, secret, day_read)
+        if have is None:
+            print(json.dumps({"date": day, "mode": "folder", "day_read_failed": True}))
+            if out is not None:
+                out.update(fatal=True)
+            return 1
+        kept = [r for r in rows if r["uid"] not in have]
+        skipped_existing, rows = len(rows) - len(kept), kept
     if not rows and not missing and not sealed_missing:
         print("nothing", day)
         return 0
     sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
     if sender is None and not dry_run:
         print("no ingest target")
+        if out is not None:
+            out.update(fatal=True)
         return 1
     summary = execute(rows, cfg, dry_run=dry_run, run_one=run_one, post=sender or (lambda _p: {"ok": True, "inserted": 0}))
     summary["missing"] = len(missing) + len(sealed_missing)
-    return _finish(summary, dry_run)
+    summary["skipped_existing"] = skipped_existing
+    return _finish(summary, dry_run, out=out)
 
 
-def main(argv: list[str] | None = None) -> int:
+_EXIT_RANK = {0: 0, 2: 1, 1: 2}
+
+
+def _worse(a: int, b: int) -> int:
+    return a if _EXIT_RANK.get(a, 2) >= _EXIT_RANK.get(b, 2) else b
+
+
+def hourly(cfg: dict, *, now: datetime | None = None, dry_run: bool = False, **kw) -> int:
+    """run --skip-existing for today (IST), and for yesterday too while the IST hour is < 2. Pending jobs are drained once (the first day)."""
+    now = now or datetime.now(timezone.utc)
+    days = [current_ist_day(now)]
+    if now.astimezone(IST).hour < 2:
+        days.append(previous_ist_day(now))
+    rc = 0
+    for i, day in enumerate(days):
+        sub = dict(kw)
+        if i:
+            sub["pending"] = False
+        rc = _worse(rc, run(cfg, day, dry_run=dry_run, skip_existing=True, **sub))
+    return rc
+
+
+MAX_BACKFILL_DAYS = 120
+MIN_INDEX_MINUTES = 2
+
+
+def load_index(path: str, date_from: str, date_to: str) -> tuple[dict[str, list[str]], int]:
+    """Cutter clip index (JSONL) -> ({ist_date: [uid]}, malformed line count).
+
+    The last row per consult_uid wins. Kept: ist_date in [from, to] and minutes >= 2. Only consult_uid, ist_date and minutes are read.
+    """
+    last: dict[str, tuple[str, float]] = {}
+    bad = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                uid, day, mins = row["consult_uid"], row["ist_date"], row["minutes"]
+                if not isinstance(uid, str) or not uid or isinstance(mins, bool) or not isinstance(mins, (int, float)):
+                    raise ValueError
+                datetime.fromisoformat(day)
+                if len(day) != 10:
+                    raise ValueError
+            except (ValueError, KeyError, TypeError):
+                bad += 1
+                continue
+            last[uid] = (day, float(mins))
+    by_day: dict[str, list[str]] = {}
+    for uid, (day, mins) in last.items():
+        if date_from <= day <= date_to and mins >= MIN_INDEX_MINUTES:
+            by_day.setdefault(day, []).append(uid)
+    return by_day, bad
+_TOTAL_KEYS = ("eligible", "posted", "skipped_existing", "rejected", "failed", "missing_layers", "bundle_failed")
+
+
+def backfill(cfg: dict, date_from: str, date_to: str, *, dry_run: bool = False, uids_from_index: str | None = None, **kw) -> int:
+    """run --skip-existing for each day from ``date_to`` back to ``date_from``. Stops on a config or day-read failure; partial continues."""
+    try:
+        d0, d1 = datetime.fromisoformat(date_from).date(), datetime.fromisoformat(date_to).date()
+    except ValueError:
+        print("config error: backfill dates must be YYYY-MM-DD")
+        return 1
+    if d1 < d0:
+        print("config error: --to is before --from")
+        return 1
+    if (d1 - d0).days + 1 > MAX_BACKFILL_DAYS:
+        print(f"config error: backfill range is over {MAX_BACKFILL_DAYS} days")
+        return 1
+    kw.setdefault("pending", False)  # historical days: pending jobs are not drained here
+    by_day, bad = {}, 0
+    if uids_from_index:
+        try:
+            by_day, bad = load_index(uids_from_index, date_from, date_to)
+        except OSError:
+            print("config error: --uids-from-index file is not readable")
+            return 1
+        print(json.dumps({"index": True, "malformed": bad, "uids": sum(len(v) for v in by_day.values())}))
+    total = {k: 0 for k in _TOTAL_KEYS}
+    total["cost_usd"] = 0.0
+    days, rc, d = 0, 0, d1
+    while d >= d0:
+        out: dict = {}
+        day_kw = dict(kw, sealed=sorted(by_day.get(d.isoformat(), []))) if uids_from_index else kw
+        code = run(cfg, d.isoformat(), dry_run=dry_run, skip_existing=True, out=out, **day_kw)
+        days += 1
+        rc = _worse(rc, code)
+        for k in _TOTAL_KEYS:
+            total[k] += int(out.get(k) or 0)
+        total["cost_usd"] += float(out.get("cost_usd") or 0.0)
+        if code == 1 and out.get("fatal"):
+            break
+        d -= timedelta(days=1)
+    print(json.dumps({"total": True, "days": days, **total, "cost_usd": round(total["cost_usd"], 6)}))
+    return rc
+
+
+def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m tools.eta2freescript.nightly")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in ("plan", "run", "drain"):
@@ -716,6 +956,17 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--data", type=Path)
         s.add_argument("--config")
         s.add_argument("--dry-run", action="store_true")
+    for name in ("hourly", "backfill"):
+        s = sub.add_parser(name)
+        s.add_argument("--data", type=Path)
+        s.add_argument("--config")
+        s.add_argument("--dry-run", action="store_true")
+    sub.choices["run"].add_argument("--skip-existing", action="store_true")
+    for name in ("run", "backfill"):
+        sub.choices[name].add_argument("--max-consults", type=int)
+    sub.choices["backfill"].add_argument("--uids-from-index", dest="index_path")
+    sub.choices["backfill"].add_argument("--from", dest="date_from", required=True)
+    sub.choices["backfill"].add_argument("--to", dest="date_to", required=True)
     a = p.parse_args(argv)
     try:
         cfg = load_config(a.config)
@@ -724,7 +975,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if a.data:
         cfg["data"] = str(a.data)
-    day = a.date or previous_ist_day()
+    if getattr(a, "max_consults", None) is not None:
+        if a.max_consults < 1:
+            print("config error: --max-consults must be at least 1")
+            return 1
+        cfg["max_consults"] = a.max_consults
+    if a.cmd in ("hourly", "backfill"):
+        if not cfg.get("bundle_cmd"):
+            print("config error: hourly/backfill need bundle mode")
+            return 1
+        if a.cmd == "hourly":
+            return hourly(cfg, now=now, dry_run=a.dry_run)
+        return backfill(cfg, a.date_from, a.date_to, dry_run=a.dry_run, uids_from_index=a.index_path)
+    day = current_ist_day(now) if a.date == "today" else (a.date or previous_ist_day())
     if a.cmd == "plan":
         if not cfg.get("data"):
             print("no data dir")
@@ -739,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "drain":
         return _drain(cfg, a.dry_run)
-    return run(cfg, day, dry_run=a.dry_run)
+    return run(cfg, day, dry_run=a.dry_run, skip_existing=getattr(a, "skip_existing", False))
 
 
 def _drain(cfg: dict, dry_run: bool) -> int:
