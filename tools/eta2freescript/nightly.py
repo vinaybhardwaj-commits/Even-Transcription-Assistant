@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -729,21 +730,38 @@ def count_attempts(out_root: str, code_sha: str) -> dict[str, int] | None:
     return n
 
 
-def repost_pending(out_root: str, code_sha: str) -> dict[str, str | None]:
-    """uid -> job id (or None) for uids with a post_failed line at ``code_sha`` and no later written or rejected line at it.
+def _parse_ts(v) -> float | None:
+    """Epoch seconds from an ISO run_ts, or None when it is missing or unparseable."""
+    if not isinstance(v, str):
+        return None
+    try:
+        return datetime.fromisoformat(v).timestamp()
+    except ValueError:
+        return None
 
-    Lines in between (bundle_failed, attempts_exhausted, started, ...) do not matter. Unreadable ledger: {}.
+
+def repost_pending(out_root: str, code_sha: str) -> dict[str, tuple[str | None, float | None]]:
+    """uid -> (job id or None, since) for uids owed a re-post at ``code_sha``.
+
+    Owed: a post_failed line with no later written or rejected line, or an open ``started`` (a crash inside the POST) with no
+    terminal line after it. Lines in between (bundle_failed, attempts_exhausted, ...) do not matter. ``since`` is the run_ts of the
+    attempt's last ``started`` line (None if unknown): a kept artifact.json older than it belongs to an earlier attempt and must not
+    be posted. Unreadable ledger: {}.
     """
-    pend: dict[str, str | None] = {}
+    pend: dict[str, tuple[str | None, float | None]] = {}
+    last_start: dict[str, float | None] = {}
     try:
         for row in _scan_ledger(out_root):
             if row.get("code_sha256") != code_sha:
                 continue
             uid, st = row["consult_uid"], row.get("state")
-            if st == "post_failed":
-                jid = row.get("job_id")
-                pend[uid] = jid if isinstance(jid, str) else pend.get(uid)
-            elif st in ("written", "rejected"):
+            jid = row.get("job_id") if isinstance(row.get("job_id"), str) else None
+            if st == "started":
+                last_start[uid] = _parse_ts(row.get("run_ts"))
+                pend[uid] = (jid or pend.get(uid, (None, None))[0], last_start[uid])
+            elif st == "post_failed":
+                pend[uid] = (jid or pend.get(uid, (None, None))[0], last_start.get(uid))
+            elif st in ("written", "rejected") or (isinstance(st, str) and st.startswith("failed:")):
                 pend.pop(uid, None)
     except (OSError, UnicodeDecodeError):
         return {}
@@ -758,17 +776,29 @@ def append_states(out_root: str, lines: list[dict]) -> None:
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
     path = root / STATE_FILE
+    created = not path.exists()
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         size = os.fstat(fd).st_size
         lead = b""
         if size and os.pread(fd, 1, size - 1) != b"\n":
             lead = b"\n"  # a file that does not end in a newline would merge the next line into its last
-        os.write(fd, lead + "".join(json.dumps(x) + "\n" for x in lines).encode())
+        buf = memoryview(lead + "".join(json.dumps(x) + "\n" for x in lines).encode())
+        while buf:  # write(2) may store less than asked on a nearly full disk; a 0 return can never finish
+            n = os.write(fd, buf)
+            if n <= 0:
+                raise OSError(errno.ENOSPC, "short write to the ledger")
+            buf = buf[n:]
         os.fsync(fd)
     finally:
         os.close(fd)
     os.chmod(path, 0o600)
+    if created:  # the file's directory entry must survive a power loss too
+        dfd = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
 
 _HELD_LOCKS: set[str] = set()
@@ -912,9 +942,15 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     # rejected, whose artifact.json is kept, goes out again with no Bedrock call
     kept_logs: dict[str, dict] = {}
     if not dry_run and cfg.get("out"):
-        for u, jid in repost_pending(cfg["out"], code_sha).items():
+        for u, (jid, since) in repost_pending(cfg["out"], code_sha).items():
             if u not in job_of:
                 continue
+            if since is not None:  # an artifact older than the attempt's started line is a stale earlier one: fall through to the cap
+                try:
+                    if (Path(cfg["out"]) / u / "artifact.json").stat().st_mtime < since:
+                        continue
+                except OSError:
+                    continue
             lg = _repost_log(cfg["out"], u)
             if lg:
                 kept_logs[u] = lg

@@ -1,10 +1,12 @@
 """Nightly selection, the off switch, and the ingest payload. Synthetic folders only. No model call."""
+import shutil
+import time
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1113,3 +1115,150 @@ def test_append_states_adds_a_newline_first_when_the_file_does_not_end_in_one(tm
     rows = [json.loads(l) for l in (root / "consult-state.jsonl").read_text().splitlines()]
     assert [r["consult_uid"] for r in rows] == ["seed", "a", "b"]
     assert nightly.read_ledger(str(root)).keys() == {"seed", "a", "b"}
+
+
+# ---- fix round 5: re-post an open started; short writes; parent-directory fsync ----
+
+_CHILD_POST = _CHILD.split("def run_one(uid):")[0] + """
+def run_one(uid):
+    with open(calls, "a") as f:
+        f.write(uid + "\\n")
+    log = {"final_valid": True, "final_errors": [], "cost_usd": 0.5, "artifact": {
+        "schema_version": "eta.freescript.v0.2", "encounter": {"eta_encounter_id": uid}, "pulse_link": {"consult_uid": uid},
+        "generator": {"code_sha256": "a" * 64, "prompt_sha256": "b" * 64}, "completion_required": [], "note_text": "Medication:"}}
+    d = Path(out) / uid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "artifact.json").write_text(json.dumps(log["artifact"]))
+    (d / "artifact.validation.json").write_text(json.dumps({"final_valid": True, "final_errors": [], "cost_usd": 0.5}))
+    return log
+def post(body):
+    if mode == "kill":
+        os.kill(os.getpid(), signal.SIGKILL)
+    with open(posts, "a") as f:
+        f.write(body["consult_uid"] + "\\n")
+    return {"ok": True, "inserted": 1, "run_id": 3}
+cfg = {"enabled": True, "app_url": "https://app.test", "max_consults": 40, "bundle_cmd": ["x"], "bundle_cwd": out, "out": out}
+now = datetime(2026, 10, 14, hour, 5, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+sys.exit(nightly.hourly(cfg, now=now, run_one=run_one, post=post, sealed=["k"], pending=lambda *_: [{"consult_uid": "k", "job_id": "job-9"}] if jobs else [],
+                        day_read=lambda *_: ([], True)))
+"""
+_CHILD_POST = _CHILD_POST.replace("out, calls, hour = sys.argv[1], sys.argv[2], int(sys.argv[3])",
+                                  "out, calls, hour, mode, posts, jobs = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6] == '1'")
+
+
+def _child_post(tmp_path, hour, mode, jobs=False):
+    root = Path(__file__).resolve().parents[3]
+    r = subprocess.run([sys.executable, "-c", _CHILD_POST, str(tmp_path / "keep"), str(tmp_path / "calls.txt"), str(hour), mode,
+                        str(tmp_path / "posts.txt"), "1" if jobs else "0"], cwd=root, capture_output=True, timeout=120)
+    return r.returncode
+
+
+def _read_names(p):
+    return p.read_text().split() if p.exists() else []
+
+
+def test_r11_sigkill_inside_the_post_then_the_next_hour_reposts_with_one_bedrock_call_in_total(tmp_path):
+    assert _child_post(tmp_path, 10, "kill") == -9  # artifact kept, POST cut off: only `started` is in the ledger
+    assert _child_post(tmp_path, 11, "ok") == 0
+    assert _read_names(tmp_path / "calls.txt") == ["k"]
+    assert _read_names(tmp_path / "posts.txt") == ["k"]
+    rows = _lines({"out": str(tmp_path / "keep")}, started=True)
+    assert [r["state"] for r in rows] == ["started", "written"] and rows[-1]["reposted"] is True
+    assert nightly.count_attempts(str(tmp_path / "keep"), "sha-A") == {"k": 1}
+
+
+def test_r11b_two_kills_inside_the_post_still_deliver_and_are_not_exhausted(tmp_path):
+    assert _child_post(tmp_path, 10, "kill", jobs=True) == -9
+    assert _child_post(tmp_path, 11, "kill", jobs=True) == -9  # the re-post is killed too: still no terminal line
+    assert _read_names(tmp_path / "calls.txt") == ["k"]  # the second hour re-posted, it did not re-bill
+    assert _child_post(tmp_path, 12, "ok", jobs=True) == 0
+    assert _read_names(tmp_path / "calls.txt") == ["k"] and _read_names(tmp_path / "posts.txt") == ["k"]
+    states = [r["state"] for r in _lines({"out": str(tmp_path / "keep")}, started=True)]
+    assert "attempts_exhausted" not in states and states[-1] == "written"
+
+
+def test_a_stale_artifact_older_than_its_started_line_is_not_reposted(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _post_failed_artifact(cfg, run_one)
+    old = time.time() - 3600
+    os.utime(Path(cfg["out"]) / "a" / "artifact.json", (old, old))
+    ran.clear()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = [{"consult_uid": "a", "state": "started", "run_ts": now, "code_sha256": "sha-A"}]
+    with open(Path(cfg["out"]) / "consult-state.jsonl", "w") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in rows))
+    posts = []
+    kw = dict(run_one=run_one, post=lambda b: posts.append(b["consult_uid"]) or {"ok": True, "inserted": 1, "run_id": 1},
+              sealed=["a"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    assert _hours(cfg, (10,), **kw) == [0]
+    assert ran == ["a"]  # not re-posted: it fell through to the cap, which allowed the second attempt
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {"a": 2}
+    # the same for a post_failed that follows a newer started line
+    os.utime(Path(cfg["out"]) / "a" / "artifact.json", (old, old))
+    with open(Path(cfg["out"]) / "consult-state.jsonl", "w") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in (rows[0], dict(rows[0], state="post_failed"))))
+    ran.clear()
+    posts.clear()
+    assert _hours(cfg, (11,), **kw) == [0] and ran == ["a"]
+
+
+def test_a_fresh_artifact_after_its_started_line_is_reposted_by_post_failed_and_by_open_started(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    for state in ("post_failed", "started"):
+        shutil.rmtree(cfg["out"], ignore_errors=True)
+        ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds")
+        _post_failed_artifact(cfg, run_one)
+        rows = [{"consult_uid": "a", "state": "started", "run_ts": ts, "code_sha256": "sha-A"}]
+        if state == "post_failed":
+            rows.append(dict(rows[0], state="post_failed"))
+        with open(Path(cfg["out"]) / "consult-state.jsonl", "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in rows))
+        ran.clear()
+        assert _hours(cfg, (10,), run_one=run_one, post=lambda b: {"ok": True, "inserted": 1, "run_id": 1}, sealed=["a"],
+                      pending=lambda *_: [], day_read=lambda *_: ([], True)) == [0]
+        assert ran == [] and _states(cfg, "a")[-1] == "written"
+
+
+def test_r12_writes_cut_to_sixty_bytes_are_looped_to_completion_and_the_cap_holds(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    real = os.write
+    monkeypatch.setattr(nightly.os, "write", lambda fd, b: real(fd, bytes(b)[:60]))
+    kw = dict(run_one=run_one, post=lambda b: {"ok": False}, sealed=["a"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    _hours(cfg, (10, 11, 12, 13), **kw)
+    # the loop finishes every write, so each line is whole and counted: 2 Bedrock calls, then exhausted
+    assert ran == ["a", "a"]
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {"a": 2}
+    assert _states(cfg, "a")[-2:] == ["attempts_exhausted"] * 2
+
+
+def test_r12b_a_write_that_returns_zero_raises_and_no_bedrock_call_is_made(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    monkeypatch.setattr(nightly.os, "write", lambda fd, b: 0)
+    with pytest.raises(OSError):
+        nightly.append_states(cfg["out"], [{"consult_uid": "x", "state": "started", "code_sha256": "S"}])
+    capsys.readouterr()
+    kw = dict(run_one=run_one, post=lambda b: {"ok": False}, sealed=["a"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    assert _hours(cfg, (10, 11), **kw) == [1, 1]
+    assert ran == []
+    outs = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
+    assert all(o["ledger_write_failed"] is True for o in outs)
+
+
+def test_the_parent_directory_is_fsynced_when_the_ledger_is_first_created_only(tmp_path, monkeypatch):
+    root = tmp_path / "keep"
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(nightly.os, "fsync", lambda fd: synced.append(os.path.isdir(f"/proc/self/fd/{fd}")) or real(fd))
+    nightly.append_states(str(root), [{"consult_uid": "a", "state": "started", "code_sha256": "S"}])
+    assert synced == [False, True]  # the file, then its directory
+    synced.clear()
+    nightly.append_states(str(root), [{"consult_uid": "b", "state": "started", "code_sha256": "S"}])
+    assert synced == [False]
