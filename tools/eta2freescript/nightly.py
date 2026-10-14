@@ -526,11 +526,12 @@ def _default_run(data: Path, out: Path, uid: str) -> dict:
     return run_consult(c, client, out, Options())
 
 
-def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_result=None) -> dict:
+def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_result=None, on_start=None) -> dict:
     """Run and post. ``run_one(uid) -> pipeline log``. ``post(payload) -> response``. Prints counts only.
 
     ``on_result`` is called as soon as each consult's state is known. If it raises LedgerWriteError the loop stops and the
-    summary carries ``ledger_write_failed``.
+    summary carries ``ledger_write_failed``. ``on_start(uid)`` is called immediately before each run_one, outside its try: if it
+    raises LedgerWriteError no Bedrock call is made and the loop stops.
     """
     cap = int(cfg.get("max_consults") or 40)
     chosen, overflow = rows[:cap], rows[cap:]
@@ -545,6 +546,8 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
     ledger_failed = False
     try:
         for r in chosen:
+            if on_start:
+                on_start(r["uid"])
             try:
                 log = (run_one or (lambda uid: _default_run(data, out, uid)))(r["uid"])
             except Exception as e:
@@ -587,11 +590,11 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
             rid = res.get("run_id") if isinstance(res, dict) else None
             rid = str(rid) if isinstance(rid, (int, str)) and not isinstance(rid, bool) else None
             if ok and valid:
-                note(r["uid"], "written", rid)
+                note(r["uid"], "written", rid, **rp)
                 posted += 1
                 print(r["uid"], "posted", "inserted=" + str(res.get("inserted")), flush=True)
             elif ok:
-                note(r["uid"], "rejected", rid)
+                note(r["uid"], "rejected", rid, **rp)
                 rejected += 1
                 print(r["uid"], "rejected", flush=True)
             else:
@@ -682,13 +685,8 @@ MAX_ATTEMPTS_PER_SHA = 2  # Bedrock runs per (uid, code_sha256); a re-post of a 
 _ATTEMPT_STATES = ("written", "rejected", "post_failed")
 
 
-def count_attempts(out_root: str, code_sha: str) -> dict[str, int] | None:
-    """uid -> Bedrock attempts at ``code_sha``, counted from every ledger line (not only the last).
-
-    An attempt is a line whose state is written, rejected, post_failed or failed:<Class>. A line marked ``reposted`` is a re-post
-    of a kept artifact and is not one. Seed lines (another code sha) never count. A missing file is {}; an unreadable one is None.
-    """
-    n: dict[str, int] = {}
+def _scan_ledger(out_root: str):
+    """Yield every ledger row as a dict; a missing file yields nothing; an unreadable one raises OSError/UnicodeDecodeError."""
     try:
         with open(Path(out_root) / STATE_FILE, encoding="utf-8") as f:
             for line in f:
@@ -696,18 +694,60 @@ def count_attempts(out_root: str, code_sha: str) -> dict[str, int] | None:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if not isinstance(row, dict) or not isinstance(row.get("consult_uid"), str) or row.get("code_sha256") != code_sha:
-                    continue
-                st = row.get("state")
-                if row.get("reposted") or not isinstance(st, str):
-                    continue
-                if st in _ATTEMPT_STATES or st.startswith("failed:"):
-                    n[row["consult_uid"]] = n.get(row["consult_uid"], 0) + 1
+                if isinstance(row, dict) and isinstance(row.get("consult_uid"), str):
+                    yield row
     except FileNotFoundError:
-        return {}
+        return
+
+
+def count_attempts(out_root: str, code_sha: str) -> dict[str, int] | None:
+    """uid -> Bedrock attempts at ``code_sha``, counted from every ledger line (not only the last).
+
+    One attempt per ``started`` line, written before the spend. A legacy terminal line (written, rejected, post_failed or
+    failed:<Class>, not marked ``reposted``) counts only when no started line is still open for that uid before it; a terminal line
+    that follows a started line closes it and adds nothing. So a started line with no terminal line (a crash) is one attempt, a
+    started/terminal pair is one, and a pre-fix terminal line alone is one. A re-post line and seed lines (another sha) never count.
+    A missing file is {}; an unreadable one is None.
+    """
+    n: dict[str, int] = {}
+    open_: set[str] = set()
+    try:
+        for row in _scan_ledger(out_root):
+            uid, st = row["consult_uid"], row.get("state")
+            if row.get("code_sha256") != code_sha or not isinstance(st, str) or row.get("reposted"):
+                continue
+            if st == "started":
+                n[uid] = n.get(uid, 0) + 1
+                open_.add(uid)
+            elif st in _ATTEMPT_STATES or st.startswith("failed:"):
+                if uid in open_:
+                    open_.discard(uid)
+                else:
+                    n[uid] = n.get(uid, 0) + 1
     except (OSError, UnicodeDecodeError):
         return None
     return n
+
+
+def repost_pending(out_root: str, code_sha: str) -> dict[str, str | None]:
+    """uid -> job id (or None) for uids with a post_failed line at ``code_sha`` and no later written or rejected line at it.
+
+    Lines in between (bundle_failed, attempts_exhausted, started, ...) do not matter. Unreadable ledger: {}.
+    """
+    pend: dict[str, str | None] = {}
+    try:
+        for row in _scan_ledger(out_root):
+            if row.get("code_sha256") != code_sha:
+                continue
+            uid, st = row["consult_uid"], row.get("state")
+            if st == "post_failed":
+                jid = row.get("job_id")
+                pend[uid] = jid if isinstance(jid, str) else pend.get(uid)
+            elif st in ("written", "rejected"):
+                pend.pop(uid, None)
+    except (OSError, UnicodeDecodeError):
+        return {}
+    return pend
 
 
 def append_states(out_root: str, lines: list[dict]) -> None:
@@ -718,9 +758,14 @@ def append_states(out_root: str, lines: list[dict]) -> None:
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
     path = root / STATE_FILE
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        os.write(fd, "".join(json.dumps(x) + "\n" for x in lines).encode())
+        size = os.fstat(fd).st_size
+        lead = b""
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            lead = b"\n"  # a file that does not end in a newline would merge the next line into its last
+        os.write(fd, lead + "".join(json.dumps(x) + "\n" for x in lines).encode())
+        os.fsync(fd)
     finally:
         os.close(fd)
     os.chmod(path, 0o600)
@@ -857,26 +902,25 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
             raise LedgerWriteError("ledger write failed") from None
 
     have: dict[str, tuple[str, str | None]] = {}
-    repost: set[str] = set()
     if skip_existing:
         got = _skip_map(cfg, day, secret, day_read, code_sha)
         if got is None:
             _abort_summary(dry_run, day, out)
             return 1
         have, flags = got
-        ledger = read_ledger(cfg["out"]) or {}
-        repost = {u for u, row in ledger.items() if row.get("state") == "post_failed" and row.get("code_sha256") == code_sha}
-        for u in repost:  # a pending job that failed to post is re-posted too, under the job id of this run or of the ledger line
-            if not job_of.get(u) and isinstance(ledger[u].get("job_id"), str):
-                job_of[u] = ledger[u]["job_id"]
-        uids = [(u, job_of.get(u) if u in repost else j, chk) for u, j, chk in uids]
-    # re-post comes first: a post_failed with a kept artifact.json goes out again with no Bedrock call
+    # re-post comes first, on every path and before the cap: a uid with a post_failed at this code sha and no later written or
+    # rejected, whose artifact.json is kept, goes out again with no Bedrock call
     kept_logs: dict[str, dict] = {}
     if not dry_run and cfg.get("out"):
-        for u in repost:
+        for u, jid in repost_pending(cfg["out"], code_sha).items():
+            if u not in job_of:
+                continue
             lg = _repost_log(cfg["out"], u)
             if lg:
                 kept_logs[u] = lg
+                if not job_of.get(u) and jid:  # a pending job no longer listed is served under the ledger's job id
+                    job_of[u] = jid
+        uids = [(u, job_of.get(u) if u in kept_logs else j, chk) for u, j, chk in uids]
     # an explicit pending scribe_freescript job is a deliberate rerun request: it bypasses skip-existing, but not the attempt cap
     kept = [t for t in uids if not t[2] or t[0] not in have]
     exhausted: list[str] = []
@@ -929,7 +973,7 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
                 base = run_one or _bundle_runner(consults, tmp / "out", cfg.get("out"))
                 summary = execute(rows, bcfg, dry_run=dry_run, run_one=lambda u: kept_logs[u] if u in kept_logs else base(u),
                                   post=sender or (lambda _p: {"ok": True, "inserted": 0}),
-                                  on_result=emit)
+                                  on_result=emit, on_start=lambda u: None if u in kept_logs else emit(u, "started"))
     except LedgerWriteError:
         ledger_failed = True
         summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}

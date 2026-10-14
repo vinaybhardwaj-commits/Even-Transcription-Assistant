@@ -1,6 +1,8 @@
 """Nightly selection, the off switch, and the ingest payload. Synthetic folders only. No model call."""
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -554,7 +556,8 @@ def test_ledger_not_written_without_out_or_on_dry_run(tmp_path, bundle_env):
 
 # ---- fix round 2: lock, per-consult ledger, seed lines, post_failed repost, ledger failure, pending bypass, own date ----
 
-def _lines(cfg):
+def _lines(cfg, started=False):
+    """Ledger rows; the ``started`` lines written before each spend are left out unless asked for."""
     p = Path(cfg["out"]) / "consult-state.jsonl"
     rows = []
     for l in (p.read_text().splitlines() if p.exists() else []):
@@ -562,7 +565,7 @@ def _lines(cfg):
             r = json.loads(l)
         except ValueError:
             continue
-        if isinstance(r, dict) and isinstance(r.get("consult_uid"), str):
+        if isinstance(r, dict) and isinstance(r.get("consult_uid"), str) and (started or r.get("state") != "started"):
             rows.append(r)
     return rows
 
@@ -697,7 +700,7 @@ def test_a_ledger_write_failure_prints_the_flag_and_exits_1_fatal(tmp_path, bund
                skip_existing=True, day_read=lambda *_: [], out=out) == 1
     line = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
     assert line["ledger_write_failed"] is True and out["fatal"] is True
-    assert ran == ["a", "b"]  # it stops after the consult whose line could not be written
+    assert ran == ["a"]  # b's started line could not be written, so no Bedrock call for b, and the run stops
     # backfill stops on it
     seen = []
     monkeypatch.setattr(nightly, "append_states", failing)
@@ -902,3 +905,211 @@ def test_the_bundle_runner_reads_a_raising_consults_cost_from_its_usage_lines(tm
     with open(led, "a") as f:
         f.write("not json\n")
     assert nightly._usd_between(led, start) is None
+
+
+# ---- fix round 4: count the attempt before the spend; re-post rules; newline guard ----
+
+_CHILD = """
+import json, os, signal, sys
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from tools.eta2freescript import nightly
+out, calls, hour = sys.argv[1], sys.argv[2], int(sys.argv[3])
+os.environ["FREESCRIPT_INGEST_SECRET"] = "s"
+os.environ["REB_INDEX_READ_TOKEN"] = ""
+def fake_rows(uids, day, cfg, tmp, fetch=None, outcomes=None, dates=None):
+    return [{"uid": u, "ist_date": day, "room_slug": "r", "job_id": j, "doctor_uid8": None} for u, j, _ in uids], {u: 1 for u, _, _ in uids}, \
+        {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
+nightly.bundle_rows = fake_rows
+nightly.current_code_sha = lambda: "sha-A"
+def run_one(uid):
+    with open(calls, "a") as f:
+        f.write(uid + "\\n")
+    os.kill(os.getpid(), signal.SIGKILL)
+cfg = {"enabled": True, "app_url": "https://app.test", "max_consults": 40, "bundle_cmd": ["x"], "bundle_cwd": out, "out": out}
+now = datetime(2026, 10, 14, hour, 5, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+sys.exit(nightly.hourly(cfg, now=now, run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, sealed=["k"], pending=lambda *_: [],
+                        day_read=lambda *_: ([], True)))
+"""
+
+
+def test_a_real_child_killed_inside_run_one_over_four_hourly_runs_makes_at_most_two_calls(tmp_path):
+    out, calls = tmp_path / "keep", tmp_path / "calls.txt"
+    root = Path(__file__).resolve().parents[3]
+    codes = []
+    for h in (10, 11, 12, 13):
+        r = subprocess.run([sys.executable, "-c", _CHILD, str(out), str(calls), str(h)], cwd=root, capture_output=True, timeout=120)
+        codes.append(r.returncode)
+    assert codes[:2] == [-9, -9]  # SIGKILL inside run_one, twice
+    assert calls.read_text().split() == ["k", "k"]  # the cap held even though no terminal line was ever written
+    states = [l["state"] for l in _lines({"out": str(out)}, started=True)]
+    assert states[:2] == ["started", "started"] and states[2:] == ["attempts_exhausted", "attempts_exhausted"]
+    assert nightly.count_attempts(str(out), "sha-A") == {"k": 2}
+
+
+def test_a_ledger_that_cannot_be_written_makes_no_bedrock_call_in_any_hour(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+
+    def enospc(root, lines):
+        raise OSError(28, "no space")
+
+    monkeypatch.setattr(nightly, "append_states", enospc)
+    kw = dict(run_one=run_one, post=lambda b: {"ok": False}, sealed=["a"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    capsys.readouterr()
+    assert _hours(cfg, (10, 11, 12), **kw) == [1, 1, 1]
+    assert ran == []  # the started line is the gate: if it cannot be written there is no spend
+    outs = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
+    assert all(o["ledger_write_failed"] is True for o in outs)
+
+
+def test_the_started_line_is_written_before_run_one_with_the_run_fields(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    seen = []
+
+    def spying(uid):
+        seen.append([l for l in _lines(cfg, started=True) if l["consult_uid"] == uid])
+        return run_one(uid)
+
+    _hours(cfg, (10,), run_one=spying, post=lambda b: {"ok": True, "inserted": 1, "run_id": 3}, sealed=["a"],
+           pending=lambda *_: [{"consult_uid": "p", "job_id": "job-1"}], day_read=lambda *_: ([], True))
+    assert [len(x) for x in seen] == [1, 1] and all(x[0]["state"] == "started" and x[0]["code_sha256"] == "sha-A" for x in seen)
+    assert {"consult_uid", "ist_date", "run_ts", "code_sha256"} <= set(seen[0][0])
+    assert [l["job_id"] for l in _lines(cfg, started=True) if l["consult_uid"] == "p" and l["state"] == "started"] == ["job-1"]
+    # a finished consult is started + terminal: one attempt, not two
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {"a": 1, "p": 1}
+
+
+def test_count_attempts_counts_one_per_started_line_and_legacy_terminal_lines_alone(tmp_path):
+    out = str(tmp_path)
+
+    def put(*rows):
+        with open(tmp_path / "consult-state.jsonl", "a") as f:
+            for uid, st, *rest in rows:
+                f.write(json.dumps({"consult_uid": uid, "state": st, "code_sha256": "S", **(rest[0] if rest else {})}) + "\n")
+
+    put(("pair", "started"), ("pair", "written"),            # started + terminal = 1
+        ("crash", "started"), ("crash", "started"),          # two started, no terminal = 2
+        ("legacy", "post_failed"), ("legacy", "rejected"),   # no started: each counts = 2
+        ("mixed", "failed:X"), ("mixed", "started"), ("mixed", "rejected"),  # legacy 1 + pair 1 = 2
+        ("re", "started"), ("re", "post_failed"), ("re", "written", {"reposted": True}),  # a re-post adds nothing = 1
+        ("other", "started", {"code_sha256": "T"}), ("seed", "written", {"code_sha256": "seed"}))
+    assert nightly.count_attempts(out, "S") == {"pair": 1, "crash": 2, "legacy": 2, "mixed": 2, "re": 1}
+
+
+def _post_failed_artifact(cfg, run_one, uid="a"):
+    """Ledger post_failed at sha-A plus a kept artifact, as one failed hour would leave them."""
+    d = Path(cfg["out"]) / uid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "artifact.json").write_text(json.dumps(run_one(uid)["artifact"]))
+    (d / "artifact.validation.json").write_text(json.dumps({"final_valid": True, "final_errors": [], "cost_usd": 0.5}))
+
+
+def test_r4_post_failed_then_bundle_failed_then_the_next_hour_reposts_with_no_bedrock_call(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    state = {"up": False}
+    posts = []
+
+    def post(body):
+        posts.append(body["consult_uid"])
+        if not state["up"]:
+            raise ConnectionError("down")
+        return {"ok": True, "inserted": 1, "run_id": 9}
+
+    kw = dict(run_one=_keeping(cfg, run_one), post=post, sealed=["a"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    assert _hours(cfg, (10,), **kw) == [1]
+    assert ran == ["a"]
+    _ledger(cfg, [("a", "bundle_failed", None, "sha-A")])  # an hour in between that could not bundle
+    state["up"] = True
+    assert _hours(cfg, (12,), **kw) == [0]
+    assert ran == ["a"] and posts == ["a", "a"]
+    assert _states(cfg, "a")[-1] == "written" and _lines(cfg)[-1].get("reposted") is True
+
+
+def test_r10_an_exhausted_uid_with_a_kept_artifact_is_still_delivered_and_the_job_served(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _post_failed_artifact(cfg, run_one, "p")
+    ran.clear()
+    _ledger(cfg, [("p", "post_failed", None, "sha-A"), ("p", "post_failed", None, "sha-A"), ("p", "attempts_exhausted", None, "sha-A")])
+    got = []
+    kw = dict(run_one=run_one, post=lambda b: got.append((b["consult_uid"], b.get("job_id"))) or {"ok": True, "inserted": 1, "run_id": 5},
+              sealed=[], pending=lambda *_: [{"consult_uid": "p", "job_id": "job-1"}], day_read=lambda *_: ([], True))
+    assert _hours(cfg, (10, 11), **kw) == [0, 0]
+    assert ran == [] and got == [("p", "job-1")]  # delivered once; the written line ends the re-post
+    # (the fake still lists the job in hour 11, so the cap, not a second POST, answers it)
+    assert _states(cfg, "p")[-3:] == ["attempts_exhausted", "written", "attempts_exhausted"] and _lines(cfg)[-2]["reposted"] is True
+
+
+def test_r5_drain_with_a_pending_job_and_ingest_down_makes_one_call_then_reposts(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    posts = []
+
+    def post(body):
+        posts.append(body.get("job_id"))
+        raise ConnectionError("down")
+
+    keeping = _keeping(cfg, run_one)
+    pend = lambda *_: [{"consult_uid": "p", "job_id": "job-2"}]
+    for _ in range(3):
+        nightly._run_bundle(cfg, "2026-10-14", dry_run=False, run_one=keeping, post=post, pending=pend, sealed=False, secret="s", reb_token="")
+    assert ran == ["p"] and posts == ["job-2"] * 3  # drain / plain run: no skip_existing, still one Bedrock call
+    assert _states(cfg, "p") == ["post_failed"] * 3
+    got = []
+    nightly._run_bundle(cfg, "2026-10-14", dry_run=False, run_one=keeping, post=lambda b: got.append(b.get("job_id")) or {"ok": True, "inserted": 1, "run_id": 4},
+                        pending=pend, sealed=False, secret="s", reb_token="")
+    assert ran == ["p"] and got == ["job-2"] and _states(cfg, "p")[-1] == "written"
+
+
+def test_r6_a_successful_repost_is_marked_and_is_not_an_attempt(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    state = {"up": False}
+
+    def post(body):
+        if not state["up"]:
+            raise ConnectionError("down")
+        return {"ok": True, "inserted": 1, "run_id": 6}
+
+    kw = dict(run_one=_keeping(cfg, run_one), post=post, sealed=["a"], pending=lambda *_: [], day_read=lambda *_: ([], True))
+    _hours(cfg, (10,), **kw)
+    state["up"] = True
+    _hours(cfg, (11,), **kw)
+    assert ran == ["a"]
+    last = _lines(cfg)[-1]
+    assert last["state"] == "written" and last["reposted"] is True
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {"a": 1}
+
+
+def test_a_rejected_repost_is_marked_reposted_too(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _post_failed_artifact(cfg, run_one)
+    (Path(cfg["out"]) / "a" / "artifact.validation.json").write_text(json.dumps({"final_valid": False, "final_errors": ["x"], "cost_usd": 0.5}))
+    _ledger(cfg, [("a", "started", None, "sha-A"), ("a", "post_failed", None, "sha-A")])
+    ran.clear()
+    _hours(cfg, (10,), run_one=run_one, post=lambda b: {"ok": True, "inserted": 1, "run_id": 8}, sealed=["a"], pending=lambda *_: [],
+           day_read=lambda *_: ([], True))
+    assert ran == [] and _lines(cfg)[-1]["state"] == "rejected" and _lines(cfg)[-1]["reposted"] is True
+    assert nightly.count_attempts(cfg["out"], "sha-A") == {"a": 1}
+
+
+def test_append_states_adds_a_newline_first_when_the_file_does_not_end_in_one(tmp_path):
+    root = tmp_path / "keep"
+    root.mkdir()
+    (root / "consult-state.jsonl").write_text(json.dumps({"consult_uid": "seed", "state": "written", "code_sha256": "seed"}))  # no trailing newline
+    nightly.append_states(str(root), [{"consult_uid": "a", "state": "started", "code_sha256": "S"}])
+    nightly.append_states(str(root), [{"consult_uid": "b", "state": "started", "code_sha256": "S"}])
+    rows = [json.loads(l) for l in (root / "consult-state.jsonl").read_text().splitlines()]
+    assert [r["consult_uid"] for r in rows] == ["seed", "a", "b"]
+    assert nightly.read_ledger(str(root)).keys() == {"seed", "a", "b"}
