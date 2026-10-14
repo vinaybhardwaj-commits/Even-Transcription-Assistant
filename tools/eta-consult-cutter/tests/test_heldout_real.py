@@ -6,7 +6,7 @@ from cutter import config as C
 class RealHeldout(unittest.TestCase):
     def test_union_pins_and_every_cutter_room_is_mapped(self):
         s = importlib.util.spec_from_file_location("heldout", C.HELDOUT); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); union, sha = m.load_union()
-        self.assertEqual(sha[:8], "f07171dc"); self.assertGreaterEqual(len(m.LABEL), 7)
+        self.assertEqual(sha[:8], "f07171dc"); self.assertEqual(len(union), 0); self.assertGreaterEqual(len(m.LABEL), 7)
         by_label = {v: k for k, v in m.LABEL.items()}
         for entry in union:                                   # "<day> <label>"
             day, label = entry.split(" ", 1)

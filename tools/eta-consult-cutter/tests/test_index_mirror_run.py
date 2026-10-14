@@ -1,5 +1,6 @@
 """index-mirror hourly hook: the run wrapper (tools/index_mirror_run.sh) and the unit files. Nothing is installed, enabled or started; the wrapper runs in --dry-run against fixtures, never --live."""
-import configparser, fcntl, json, os, re, shutil, stat, subprocess, sys, tempfile, unittest
+from unittest import mock
+import importlib, configparser, fcntl, json, os, re, shutil, stat, subprocess, sys, tempfile, unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests")); sys.path.insert(0, os.path.join(ROOT, "tools"))
 import test_index_mirror as T
@@ -56,7 +57,10 @@ class Wrapper(unittest.TestCase):
     def test_the_wrapper_uses_the_deploy_worktree_the_cutter_venv_and_prints_no_secret_path(self):
         src = open(WRAP).read(); self.assertIn("$HOME/oc/consult/cutter-deploy", src); self.assertIn("$HOME/oc/consult/cutter-venv/bin/python", src); self.assertNotIn("secrets", src); self.assertNotIn("r2_lab_results", src)
     def test_the_tool_default_key_file_is_the_lab_results_write_key(self):
-        import index_mirror as M; self.assertTrue(M.CRED_FILE.endswith("/.config/consult-cutter/r2_lab_results_write"))
+        import index_mirror as M
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CONSULT_MIRROR_CRED_FILE", None); self.assertTrue(importlib.reload(M).CRED_FILE.endswith("/.config/consult-cutter/r2_lab_results_write"))
+        importlib.reload(M)
 
 class Units(unittest.TestCase):
     def test_service_is_a_oneshot_in_the_deploy_worktree_with_no_link_to_the_cutter(self):

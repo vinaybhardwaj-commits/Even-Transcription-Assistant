@@ -155,7 +155,7 @@ def build(index=INDEX, blind_file=BLIND_FILE, now=None, commit=None, heldout_py=
     if not commit: raise ConfigError("code_commit unknown (git rev-parse failed)")
     pairs, c = select(latest, blind); leak_check(pairs, names)
     c.update(index_lines=n, bad_lines=bad, blind_pairs=len(blind), slug_name_rows=slug_name_hits(pairs, names))
-    skip_slug = os.environ.get("INDEX_MIRROR_SKIP_SLUG_GUARD") == "1"   # Vinay 12 Oct 2026: durable override of the room_slug/doctor_name word-overlap refusal only; leak_check above still runs
+    skip_slug = os.environ.get("INDEX_MIRROR_SKIP_SLUG_GUARD") == "1"   # 12 Oct 2026: durable override of the room_slug/doctor_name word-overlap refusal only; leak_check above still runs
     c["slug_guard_skipped"] = int(skip_slug)
     if not skip_slug and c["slug_name_rows"] != accept_slug_names: raise SlugNameError(c["slug_name_rows"], c)
     body = "".join(json.dumps(p, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n" for _, p in pairs).encode("utf-8")

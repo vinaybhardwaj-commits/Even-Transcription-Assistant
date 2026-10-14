@@ -7,7 +7,7 @@ Current behaviour in short:
 - Run budget: one hourly run is bounded (budget 1500 s); the remaining windows go to the next run.
 - Partial tape: a window below the coverage floor that still holds `MIN_PARTIAL_TAPE_S` seconds of tape is cut and flagged `partial_tape`; a silent clip is still skipped.
 - Index mirror: `tools/index_mirror.py` + `index-mirror.{service,timer}` publish an allow-listed, leak-checked copy of the index (installed by hand, never by this repo).
-- Tests that need production files (real `heldout.py`, real index/blind config) skip unless those files exist on the machine. Set `CUTTER_LIVE_TESTS=1` to force them where the files are present.
+- Tests that need production files (real `heldout.py`, real index/blind config) skip unless those files exist on the machine. They run only when `CUTTER_LIVE_TESTS=1` is set AND the live files exist on the machine.
 
 Cuts every closed consult window into `~/eta-data/consult/clips/<IST date>/<room_slug>/<consult_uid>/` (0700): `consult.flac` (whole span, mono 16 kHz, -18 LUFS), `doctor.flac` + `others.flac` (only when the doctor has a confirmed print; overlap stays in consult only), `timeline.json`, and one row in `clips/index.jsonl` (append-only, latest row per consult wins). No transcription, no external API. Patient audio stays under `~/eta-data` and private R2.
 

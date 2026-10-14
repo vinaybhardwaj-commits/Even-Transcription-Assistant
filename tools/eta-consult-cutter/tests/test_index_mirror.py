@@ -1,5 +1,5 @@
 """index-mirror/01: the R2 index mirror (tools/index_mirror.py). No network, no credential read: a fake client stands in for R2."""
-import contextlib, hashlib, io, json, os, stat, sys, tempfile, unittest
+import contextlib, hashlib, importlib, io, json, os, re, stat, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
@@ -148,7 +148,7 @@ class Config(Base):
         d = json.load(open(M.BLIND_FILE)); self.assertEqual(len(d["pairs"]), 14); self.assertEqual(d["union_sha16"], "f07171dcb708d080")
         with contextlib.redirect_stderr(io.StringIO()): self.assertEqual(M.load_blind(), set())       # 10 Oct: the live heldout.py union is empty (marker f07171dc kept): nothing withheld, whatever the config file lists
     def test_no_blind_pair_is_hard_coded_in_the_tool(self):
-        src = open(M.__file__).read(); self.assertNotIn("room_zzzzzzzz", src); self.assertNotIn("2026-09-28", src)
+        src = open(M.__file__).read(); self.assertIsNone(re.search(r"room_[a-z0-9]{8}\b", src)); self.assertNotIn("2026-09-28", src)
 
 class DryRun(Base):
     def run_main(self, args):
@@ -206,7 +206,11 @@ class Live(Base):
         cf = f"{self.d}/cred"; open(cf, "w").write("A\nB\nhttps://x\neta-audio\n"); rc, _ = self.go([row("a")], None, ["--cred", cf]); self.assertEqual(rc, 2)
         open(cf, "w").write("A\nB\n"); rc, _ = self.go([row("a")], None, ["--cred", cf]); self.assertEqual(rc, 2)
     def test_credential_constants_point_at_the_lab_results_write_key_and_bucket(self):
-        self.assertTrue(M.CRED_FILE.endswith("/.config/consult-cutter/r2_lab_results_write")); self.assertEqual(M.BUCKET, "eta-lab-results"); self.assertEqual((M.KEY_LATEST, M.KEY_MANIFEST), ("consult/index/latest.jsonl", "consult/index/manifest.json"))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CONSULT_MIRROR_CRED_FILE", None)
+            self.assertTrue(importlib.reload(M).CRED_FILE.endswith("/.config/consult-cutter/r2_lab_results_write"))
+        importlib.reload(M)
+        self.assertEqual(M.BUCKET, "eta-lab-results"); self.assertEqual((M.KEY_LATEST, M.KEY_MANIFEST), ("consult/index/latest.jsonl", "consult/index/manifest.json"))
 
 class NestedLeak(Base):
     """refuter must-fix 1: allowed values (signature, bytes, flags, ...) are copied whole, so the guard must look inside them, fail closed."""
