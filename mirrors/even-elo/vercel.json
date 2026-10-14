@@ -1,7 +1,0 @@
-{
-  "crons": [
-    { "path": "/api/cron/gov-snapshot", "schedule": "30 0 * * *" },
-    { "path": "/api/cron/document-audit-ingest", "schedule": "0 1 * * *" },
-    { "path": "/api/cron/ot-capture-ocr", "schedule": "*/5 * * * *" }
-  ]
-}
