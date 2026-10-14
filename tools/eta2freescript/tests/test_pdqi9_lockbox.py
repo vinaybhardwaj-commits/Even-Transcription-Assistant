@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from test_pdqi9_harness import RX, _argv, make_frozen, responder
+from test_pdqi9_harness import CONSULTS, RX, make_frozen, responder
+from test_pdqi9_harness import _argv as _harness_argv
 
 from tools.eta2freescript.eval.pdqi9 import eligibility, run, splits
 from tools.eta2freescript.models import FakeClient
@@ -25,12 +28,48 @@ def rule(tmp_path, **kw):
     return p
 
 
-def setup(tmp_path, dates):
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+GOOD_DAYS = {"2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"}
+
+
+def ms(day, hour=11):
+    y, m, d = map(int, day.split("-"))
+    return int(datetime(y, m, d, hour, tzinfo=IST).timestamp() * 1000)
+
+
+def _argv(tmp_path, arms, arts, fdir, out, extra=()):
+    """The harness argv, with the consults folder this test built (clip dates matching the artifacts) when there is one."""
+    a = _harness_argv(tmp_path, arms, arts, fdir, out, extra)
+    c = tmp_path / "consults"
+    if c.exists():
+        a[a.index("--consults") + 1] = str(c)
+    return a
+
+
+def make_consults(tmp_path, clips):
+    """Copy the synthetic consult fixtures; set each uid's clip.t0_ms (None removes it). Only uids in clips are copied."""
+    for u, t0 in clips.items():
+        if not (CONSULTS / u).is_dir():
+            continue
+        shutil.copytree(CONSULTS / u, tmp_path / "consults" / u)
+        f = tmp_path / "consults" / u / "transcript.json"
+        j = json.loads(f.read_text(encoding="utf-8"))
+        if t0 is None:
+            j["clip"].pop("t0_ms", None)
+        else:
+            j["clip"]["t0_ms"] = t0
+        f.write_text(json.dumps(j), encoding="utf-8")
+
+
+def setup(tmp_path, dates, clips=None):
     arts = tmp_path / "arts"
     arts.mkdir()
     for u, d in dates.items():
         enc = {"visit_date_ist": d} if d else {}
         (arts / f"{u}.json").write_text(json.dumps({"encounter": enc}), encoding="utf-8")
+    make_consults(tmp_path, clips if clips is not None else {u: ms(d) for u, d in dates.items() if d in GOOD_DAYS})
     arm = tmp_path / "arm.jsonl"
     arm.write_text("\n".join(json.dumps({"uid": u, "prescription": RX}) for u in dates) + "\n", encoding="utf-8")
     return arts, ",".join([str(arm)] * 3), make_frozen(tmp_path / "frozen")
@@ -215,6 +254,114 @@ def test_lockbox_candidate_run_skips_the_date_guard_but_needs_a_valid_rule(tmp_p
     fc2 = FakeClient(responder)
     assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out2", ["--lockbox", "--candidate", "c2"]), client=fc2) != 0
     assert not fc2.calls and len((tmp_path / "led.jsonl").read_text().splitlines()) == 1
+
+
+# ---- clip date of the consult input -----------------------------------------------------------------------------
+
+def _consult_run(tmp_path, monkeypatch, capsys, art_day, clip):
+    monkeypatch.setenv(splits.RULE_ENV, str(rule(tmp_path)))
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    arts, arms, fdir = setup(tmp_path, {U1: art_day}, clips={U1: clip})
+    fc = FakeClient(responder)
+    rc = run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc)
+    return rc, fc, capsys.readouterr().out
+
+
+def test_consult_clip_in_range_aborts_though_artifacts_say_earlier(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _consult_run(tmp_path, monkeypatch, capsys, "2026-10-12", ms("2026-10-15"))
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=1 n_nodate=1" in out and U1 not in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_consult_clip_date_converted_to_ist(tmp_path, monkeypatch, capsys):
+    # 13 Oct 20:00 UTC is 14 Oct 01:30 IST, which is in range; artifacts agreeing on 13 Oct are still wrong
+    t = int(datetime(2026, 10, 13, 20, tzinfo=timezone.utc).timestamp() * 1000)
+    rc, fc, out = _consult_run(tmp_path, monkeypatch, capsys, "2026-10-13", t)
+    assert rc != 0 and "n_date=1" in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_consult_clip_differing_from_artifacts_aborts(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _consult_run(tmp_path, monkeypatch, capsys, "2026-10-12", ms("2026-10-11"))
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=0 n_nodate=1" in out
+    assert_nothing_written(tmp_path, fc)
+
+
+@pytest.mark.parametrize("clip", [None, "x", 1.5, True, 10**30, -10**30, [1]])
+def test_consult_clip_missing_or_invalid_aborts(tmp_path, monkeypatch, capsys, clip):
+    rc, fc, out = _consult_run(tmp_path, monkeypatch, capsys, "2026-10-12", clip)
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=0 n_nodate=1" in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_consult_transcript_missing_or_unreadable_aborts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(splits.RULE_ENV, str(rule(tmp_path)))
+    arts, _, _ = setup(tmp_path, {U1: "2026-10-12"})
+    t = tmp_path / "consults" / U1 / "transcript.json"
+    t.write_text("{", encoding="utf-8")
+    assert run.lockbox_guard([U1], arts, False, str(tmp_path / "consults")) == 1
+    t.unlink()
+    assert run.lockbox_guard([U1], arts, False, str(tmp_path / "consults")) == 1
+    assert capsys.readouterr().out.count("n_nodate=1") == 2
+
+
+def test_consult_clip_matching_artifact_date_passes(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _consult_run(tmp_path, monkeypatch, capsys, "2026-10-12", ms("2026-10-12"))
+    assert rc == 0 and fc.calls and "lockbox_guard" not in out
+
+
+def _bundle_run(tmp_path, monkeypatch, capsys, art_day, bundle):
+    from tools.eta2freescript import ingest
+    monkeypatch.setenv(splits.RULE_ENV, str(rule(tmp_path)))
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    arts, arms, fdir = setup(tmp_path, {U1: art_day})
+    b = tmp_path / "bundles"
+    b.mkdir()
+    if bundle is not None:
+        (b / f"{U1}.json").write_text(json.dumps(bundle), encoding="utf-8")
+    monkeypatch.setattr(ingest, "load_bundle", lambda x, english="auto", use_role_track=True: ingest.load_consult(CONSULTS, U1), raising=False)
+    argv = _harness_argv(tmp_path, arms, arts, fdir, tmp_path / "out")
+    i = argv.index("--consults")
+    argv[i:i + 2] = ["--bundles", str(b)]
+    fc = FakeClient(responder)
+    rc = run.main(argv, client=fc)
+    return rc, fc, capsys.readouterr().out
+
+
+def manifest(day):
+    return {"manifest": {"t0_ms": ms(day), "t1_ms": ms(day) + 60000}}
+
+
+def test_bundle_clip_in_range_aborts_though_artifacts_say_earlier(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _bundle_run(tmp_path, monkeypatch, capsys, "2026-10-12", manifest("2026-10-15"))
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=1 n_nodate=1" in out and U1 not in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_bundle_cutter_span_in_range_aborts(tmp_path, monkeypatch, capsys):
+    b = {"source": "cutter", "cutter_row": {"span_start": "2026-10-15 11:00:00", "span_end": "2026-10-15 11:05:00"}}
+    rc, fc, out = _bundle_run(tmp_path, monkeypatch, capsys, "2026-10-12", b)
+    assert rc != 0 and "n_date=1" in out
+    assert_nothing_written(tmp_path, fc)
+
+
+@pytest.mark.parametrize("bundle", [None, {}, {"manifest": {}}, {"manifest": {"t0_ms": "x", "t1_ms": 1}}, {"manifest": {"t0_ms": ms("2026-10-12")}},
+                                    {"source": "cutter"}, {"source": "cutter", "cutter_row": {"span_start": "bad", "span_end": "bad"}}])
+def test_bundle_clip_missing_or_invalid_aborts(tmp_path, monkeypatch, capsys, bundle):
+    rc, fc, out = _bundle_run(tmp_path, monkeypatch, capsys, "2026-10-12", bundle)
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=0 n_nodate=1" in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_bundle_clip_differing_from_artifacts_aborts(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _bundle_run(tmp_path, monkeypatch, capsys, "2026-10-12", manifest("2026-10-11"))
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=0 n_nodate=1" in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_bundle_clip_matching_artifact_date_passes(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _bundle_run(tmp_path, monkeypatch, capsys, "2026-10-12", manifest("2026-10-12"))
+    assert rc == 0 and fc.calls and "lockbox_guard" not in out
 
 
 # ---- eligibility ------------------------------------------------------------------------------------------------
