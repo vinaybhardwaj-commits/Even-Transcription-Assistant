@@ -89,28 +89,8 @@ def no_signal_corrections():
     return out
 
 
-def provenance_overrides():
-    """(run_id, window_id) -> reason, from write-once addenda carrying addendum.provenance_complete_override = {provenance_complete: false, reason, window_ids}
-    (refuter-2 #2264/#2308: records the runner stamped complete=true although the harness's own incompleteness note was lost). The records are
-    immutable, so the correction lives only in the addendum; only a FALSE override is honoured (an addendum can lower completeness, never raise it)."""
-    out = {}
-    for root in ROOTS:
-        for p in sorted((root / "manifests").glob("*.addendum.json")) if (root / "manifests").exists() else []:
-            try:
-                d = json.loads(p.read_text()); run = d["provenance"]["run_id"]; o = d["addendum"]["provenance_complete_override"]
-                if o.get("provenance_complete") is not False or not isinstance(o.get("window_ids"), list):
-                    continue
-                reason = o.get("reason") if isinstance(o.get("reason"), str) and o.get("reason").strip() else "provenance overridden by an addendum"
-                for w in o["window_ids"]:
-                    if isinstance(w, str):
-                        out[(run, w)] = reason[:300]
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                continue
-    return out
-
-
 def rows(surgery):
-    marks = no_signal_marks(); corr = no_signal_corrections(); ovr = provenance_overrides()
+    marks = no_signal_marks(); corr = no_signal_corrections()
     for root in ROOTS:
         for p in sorted((root / "runs").glob("*/*/*/*.json")) if (root / "runs").exists() else []:
             if p.name.startswith(".") or ".attempt" in p.name:
@@ -134,7 +114,7 @@ def rows(surgery):
                 "n_turns": len(segs), "n_words": sum(len((s.get("text") or "").split()) for s in segs),
                 "has_english": any(s.get("text_en") for s in segs) or bool(d.get("transcript_en")),
                 "has_surgery_candidate": None if surgery is None else wid in surgery,
-                "ok": d.get("ok"), "provenance_complete": (False if (prov.get("run_id"), wid) in ovr else prov.get("provenance_complete")), "incomplete_reason": ovr.get((prov.get("run_id"), wid)) or (prov.get("incomplete_reason") if isinstance(prov.get("incomplete_reason"), str) else None),
+                "ok": d.get("ok"), "provenance_complete": prov.get("provenance_complete"), "incomplete_reason": prov.get("incomplete_reason") if isinstance(prov.get("incomplete_reason"), str) else None,
                 "no_signal": True if ((wid in marks.get(prov.get("run_id"), (None, set()))[1] or d.get("state") == "no_signal") and wid not in corr) else None,
                 "no_signal_rule": (marks[prov["run_id"]][0] if wid in marks.get(prov.get("run_id"), (None, set()))[1] else RULE_ALIASES.get(str(d.get("rule")).split(" ")[0].rstrip(":;,."), str(d.get("rule")) if isinstance(d.get("rule"), str) else "exact_zero_by_size_v1")) if ((wid in marks.get(prov.get("run_id"), (None, set()))[1] or d.get("state") == "no_signal") and wid not in corr) else None,
                 "provenance_hash": hashlib.sha256(json.dumps(prov, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
@@ -221,7 +201,7 @@ def to_ist(iso):
         return None
 
 
-def view_row(key, d, prov, marks, by_room, by_session, corr=None, ovr=None):
+def view_row(key, d, prov, marks, by_room, by_session, corr=None):
     payload = d.get("payload") if isinstance(d.get("payload"), dict) else {}
     segs = d.get("segments") if isinstance(d.get("segments"), list) else (payload.get("segments") if isinstance(payload.get("segments"), list) else [])
     segs = [x for x in segs if isinstance(x, dict)]
@@ -261,7 +241,7 @@ def view_row(key, d, prov, marks, by_room, by_session, corr=None, ovr=None):
         "engine": max(set(engines), key=engines.count) if engines else None,
         "n_words": len(words), "n_lines": len(good), "n_refused": sum(1 for x in segs if x.get("refused")),
         "first_words": " ".join(words[:12]), "status": status, "no_signal": True if flagged else None, "untested_kind": untested,
-        "has_audio": bool(audio_key), "complete": False if (ovr or {}).get((prov.get("run_id"), wid)) else prov.get("provenance_complete"),
+        "has_audio": bool(audio_key), "complete": prov.get("provenance_complete"),
     }
 
 
@@ -270,7 +250,7 @@ def build_view(out_dir, stamp):
     target = out_dir / f"view-{stamp}.jsonl"
     if target.exists():
         return None, target
-    marks, (by_room, by_session), rows_out, corr, ovr = no_signal_marks(), room_maps(), [], no_signal_corrections(), provenance_overrides()
+    marks, (by_room, by_session), rows_out, corr = no_signal_marks(), room_maps(), [], no_signal_corrections()
     for root in ROOTS:
         for p in sorted((root / "runs").glob("*/*/*/*.json")) if (root / "runs").exists() else []:
             if p.name.startswith(".") or ".attempt" in p.name:
@@ -280,7 +260,7 @@ def build_view(out_dir, stamp):
                 if not isinstance(d, dict) or not isinstance(prov, dict): continue
             except Exception:
                 continue
-            rows_out.append(view_row(p.relative_to(root).as_posix(), d, prov, marks, by_room, by_session, corr, ovr))
+            rows_out.append(view_row(p.relative_to(root).as_posix(), d, prov, marks, by_room, by_session, corr))
     rows_out.sort(key=lambda r: r["key"])
     body = "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in rows_out).encode()
     out_dir.mkdir(parents=True, exist_ok=True)
