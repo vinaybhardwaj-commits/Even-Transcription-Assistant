@@ -822,3 +822,33 @@ def test_label_property_mixed_types():
         assert isinstance(out, str) and len(out) <= MAX_LABEL_CHARS, type(v)
         assert not any(unicodedata.category(c) in bad for c in out)
     assert seen_str > 100
+
+
+def test_global_needs_a_ruling_and_uses_the_global_host():
+    for ruling in (None, "", "  ", "​"):
+        with pytest.raises(ReplayUnavailable):
+            VertexClient("synth-proj-001", "global", lambda: "t", location_ruling=ruling)
+    seen = []
+    c = VertexClient("synth-proj-001", "global", lambda: "t", transport=lambda u, h, b: seen.append(u) or {},
+                     location_ruling="fable-ruling-99")
+    c.generate(stage="extract", model="m-1", system="s", user="u", schema={}, temperature=0, max_tokens=1)
+    assert seen[0].startswith("https://aiplatform.googleapis.com/v1/projects/synth-proj-001/locations/global/")
+    assert "-aiplatform" not in seen[0]
+
+
+def test_asia_northeast1_host_unchanged_after_global_change():
+    seen = []
+    c = VertexClient("synth-proj-001", "asia-northeast1", lambda: "t", transport=lambda u, h, b: seen.append(u) or {})
+    c.generate(stage="extract", model="m-1", system="s", user="u", schema={}, temperature=0, max_tokens=1)
+    assert seen[0].startswith("https://asia-northeast1-aiplatform.googleapis.com/v1/projects/synth-proj-001/locations/asia-northeast1/")
+
+
+def test_global_guard_hit_aborts_before_the_call():
+    seen = []
+    c = VertexClient("synth-proj-001", "global", lambda: "t", transport=lambda u, h, b: seen.append(u) or {},
+                     location_ruling="fable-ruling-99")
+    with pytest.raises(TranscriptGuardError):
+        c.generate(stage="extract", model="m-1", system="s", user="x T0 [S1] (00:00) y", schema={}, temperature=0, max_tokens=1)
+    with pytest.raises(TranscriptGuardError):
+        c.generate(stage="extract", model="m-1", system="s", user="a" * 40_001, schema={}, temperature=0, max_tokens=1)
+    assert seen == []
