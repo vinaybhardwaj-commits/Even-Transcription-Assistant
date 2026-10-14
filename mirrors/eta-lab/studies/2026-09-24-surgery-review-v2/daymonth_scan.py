@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""daymonth_scan.py — day + month-name shape ("12th March", "March 12", "the twelfth of March") in the de-identified text of every surgery-path set; prints KEYS and COUNTS only (item#turn), never text.
+"""daymonth_scan.py — day + month-name shape ("6th July", "July 6", "the sixth of July") in the de-identified text of every surgery-path set; prints KEYS and COUNTS only (item#turn), never text.
 Why: the frozen deid.py has no rule for a day-month date without a year (eta-refuter-2 #1651: c028|l3-c028-r2|2 reached Jev). SENT = a turn of an item that has a Jev output, in the encounter (no phase), or any turn of a pool/deid item scored by scan_pool;
-the regenerated <set>/deid files were NOT sent (only <set>/deid_r1 were). A hit is a SHAPE, not a birthday: a human decides which are dates of birth. Run from ~/eta-data/surgery-review-v3 (cwd). Not covered: numeric dd/mm without a year, month-only ("born in October").
+the regenerated <set>/deid files were NOT sent (only <set>/deid_r1 were). A hit is a SHAPE, not a birthday: a human decides which are dates of birth. Run from ~/eta-data/surgery-review-v3 (cwd). Not covered: numeric dd/mm without a year, month-only ("born in July").
 """
 import json,os,re,glob,sys
 MON_FULL=r"(?:january|february|march|april|june|july|august|september|october|november|december)"  # 'may' handled capitalised only (the verb)
@@ -13,7 +13,7 @@ P1=re.compile(rf"(?i:\b{DAY}(?:\s+of(?:\s+the)?)?\s+{MON_FULL}\b)|\b{DAYN}(?:\s+
 P2=re.compile(rf"(?i:\b{MON_FULL}\b\.?\s+(?:the\s+)?{DAY}\b)|\b{MON_ABB}\b\.?\s+(?:the\s+)?{DAYN}\b")
 def shape(t): return bool(P1.search(t) or P2.search(t))
 def selftest():
-    for s,e in (("Daily birthday. 12th March.",1),("born on 12 March",1),("March 12 is fine",1),("the twelfth of March",1),("12th of March",1),("he may 5 times",0),("take 2 tablets in the morning",0),("Mar 9",1),("in march we will operate",0),("I was born in October",0),("1 May",1),("May 12th",1),("you may take 3 tablets",0),("the second of may we start",0)):
+    for s,e in (("Daily birthday. 6th July.",1),("born on 6 July",1),("July 6 is fine",1),("the sixth of July",1),("6th of July",1),("he may 5 times",0),("take 2 tablets in the morning",0),("Mar 6",1),("in march we will operate",0),("I was born in July",0),("1 May",1),("May 12th",1),("you may take 3 tablets",0),("the second of may we start",0)):
         assert shape(s)==bool(e),(s,shape(s))
     print("shape self-test OK on 14 invented strings (incl. the verb 'may')")
 if __name__=="__main__":

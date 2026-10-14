@@ -301,7 +301,6 @@ def main():
     ap.add_argument("--count-loss-weight", type=float, default=0.0, help="variant C/C': weight of the speaker-count loss (0 = off). Choose on VAL only.")
     ap.add_argument("--count-loss-kind", choices=["soft", "sharp"], default="soft", help="soft = sum of channel peaks (C); sharp = sum sigmoid((peak-0.5)/tau) (C')")
     ap.add_argument("--count-loss-tau", type=float, default=0.1)
-    ap.add_argument("--precision", choices=["bf16-mixed", "16-mixed"], default="bf16-mixed", help="T4 (Turing) has no native bf16: use 16-mixed there. Default keeps every earlier run's behaviour.")
     ap.add_argument("--freeze-encoder", action="store_true", help="variant A (ruling 94): encoder frozen, head-only (sortformer_modules); proven by an encoder weights hash before/after and an optimizer param-group check")
     a = ap.parse_args()
 
@@ -332,7 +331,7 @@ def main():
               "base_model_nemo_sha256": sha256_file(nemo_path), "dataset_id": manifest["dataset_id"], "train_n": n_train, "val_n": n_val,
               "val_holdout_room_day": holdout, "skipped_windows": skipped, "excluded_test_room_days": manifest.get("excluded_test_room_days"),
               "val_room_days": manifest.get("val_room_days"), "train_room_days": manifest.get("train_room_days"), "manifest_counts": manifest.get("counts"), "max_steps": a.max_steps, "lr": a.lr, "warmup_steps": a.warmup_steps,
-              "batch_size": a.batch_size, "session_len_sec": a.session_len_sec, "seed": a.seed, "precision": a.precision,
+              "batch_size": a.batch_size, "session_len_sec": a.session_len_sec, "seed": a.seed, "precision": "bf16-mixed",
               "nemo_speech_commit": os.environ.get("NEMO_SPEECH_COMMIT", "cf724ac337d1ebc7d0dda1e23fb80916f52927a5"),
               "git_sha": git_sha(), "env_versions": versions, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     print("# config:", json.dumps(config), file=sys.stderr)
@@ -381,7 +380,7 @@ def main():
             class KeepEncoderEval(pl.Callback):     # frozen encoder = no dropout / stochastic depth either; Lightning and CountEval flip train mode
                 def on_train_batch_start(self, tr, m, batch, batch_idx): m.encoder.eval()
             cbs.append(KeepEncoderEval())
-        trainer = pl.Trainer(max_time=a.max_time, devices=1, accelerator=a.device, precision=a.precision, max_steps=a.max_steps, max_epochs=10000,
+        trainer = pl.Trainer(max_time=a.max_time, devices=1, accelerator=a.device, precision="bf16-mixed", max_steps=a.max_steps, max_epochs=10000,
                              deterministic="warn", logger=False, enable_checkpointing=False, callbacks=cbs or None,
                              enable_progress_bar=False, log_every_n_steps=10, gradient_clip_val=1.0, check_val_every_n_epoch=4 if n_val else 1,
                              num_sanity_val_steps=0, limit_val_batches=1.0 if n_val else 0)

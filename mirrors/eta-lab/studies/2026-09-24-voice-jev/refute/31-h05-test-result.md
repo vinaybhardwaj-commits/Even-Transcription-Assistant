@@ -35,8 +35,3 @@ Test as frozen in refute/28 (amendment) and BATCH2-RULE v2 ea40f81c §4, before 
   1. Window. vj-link used hist-miner's encounter bounds, 15:27:12-15:38:09 (102 turns). The frozen text (rule v2 §4) names called/completed, 15:30:12-15:35:09, which I used (44 turns). c35 dominates in both windows: 181.1 s vs next 77.0 s, and 72.7 s vs next 6.0 s. This is a deviation from the frozen wording, recorded, with no effect.
   2. Seconds counting. vj-link counts by each turn's own dense-cluster label, including non-top clusters 37/34. I count by nearest top centroid at cos >= 0.5, where the 37 voice falls into "none". The reference cosines are centroid-level and identical in both runs.
 - vj-link's second voice (c37, 77 s in the wider window) is presumably the patient or a companion. That is consistent with my 33.3 s unmatched.
-
-## Note after rulings 335/336 (OPD 4 records from a C270 webcam; no TM20)
-- All H05 audio is from OPD 4: the 16 Sep encounter, the 19 Sep reference c40 and the card clips from 22/24/10 Sep. So the H05 matches are same-source (C270 to C270). No microphone change sits inside the H05 family.
-- The OPD 4 exact-zero span (11 Sep 19:04 to 14 Sep 13:05, cause now UNKNOWN per r336) covers none of these days, so no H05 clip or reference falls in it.
-- Aside, for the anchors: r335 says OPD 3, Cardiology and OPD 7 list a TM20 but record from the C270. Room-mic prints enrolled on the TM20 (e.g. the Ankit OPD 7 TONOR print) are then matched cross-mic on later days. That fits Ankit's weak 0.60-0.69 and changes no verdict.

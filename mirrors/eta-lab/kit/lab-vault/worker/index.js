@@ -1,7 +1,7 @@
 // eta-lab-ingest: the write-once door into the eta-lab-results vault (ruling 184).
 // One route: PUT /v1/obj/<key>. There is no delete, no list, no overwrite and no multipart.
 // An R2 binding is bucket-wide read/write, so every guarantee here is enforced in this file.
-import { parseKey, provenanceProblems, annotationProblems, annotationSources, tapeProblems, TAPE_MAX_BYTES } from "./validate.js";
+import { parseKey, provenanceProblems } from "./validate.js";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const PREFIX = "/v1/obj/";
@@ -68,33 +68,11 @@ async function handle(request, env) {
     if (bytes === null) return json(413, { error: `body exceeds ${MAX_BYTES} bytes` });
     if (bytes.byteLength === 0) return json(400, { error: "empty body" });
 
-    if (parsed.kind === "tape") {  // r373: audio, never parsed as JSON; the client states the sha256 and the Worker must reproduce it from the bytes
-      if (bytes.byteLength > TAPE_MAX_BYTES) return json(413, { error: `tape chunks are at most ${TAPE_MAX_BYTES} bytes` });
-      const ct = ctype.split(";")[0].trim();
-      if (!["audio/webm", "audio/ogg", "audio/opus"].includes(ct)) return json(415, { error: "content-type must be audio/webm, audio/ogg or audio/opus" });
-      const problems = tapeProblems(bytes, parsed);
-      if (problems.length) return json(422, { error: "tape rejected", problems });
-      const claimed = (request.headers.get("x-content-sha256") || "").toLowerCase();
-      if (!/^[0-9a-f]{64}$/.test(claimed)) return json(400, { error: "x-content-sha256 (64 hex, the sha256 of the body) is required for tapes" });
-      if (claimed !== (await sha256hex(bytes))) return json(422, { error: "x-content-sha256 does not match the body" });
-    }
-    if (parsed.kind !== "index" && parsed.kind !== "tape") {
+    if (parsed.kind !== "index") {
       let text;
       try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return json(422, { error: "body is not utf-8", problems: ["body is not utf-8"] }); }
-      const problems = parsed.kind === "annotation" ? annotationProblems(text, parsed) : provenanceProblems(text, parsed.runId, parsed.kind);
+      const problems = provenanceProblems(text, parsed.runId, parsed.kind);
       if (problems.length) return json(422, { error: "provenance rejected", problems });
-      if (parsed.kind === "annotation") {  // ruling 341: bound to the source records: every named run record must exist and have exactly that sha256
-        const wrong = [];
-        for (const [k, want] of Object.entries(annotationSources(text))) {
-          const h = await env.RESULTS.head(`runs/${k}.json`);
-          if (!h) { wrong.push(`no run record runs/${k}.json in the vault`); continue; }
-          let have = h.checksums?.sha256 ? hex(h.checksums.sha256) : h.customMetadata?.sha256;
-          if (!have) { const o = await env.RESULTS.get(`runs/${k}.json`); have = o ? await sha256hex(await o.arrayBuffer()) : null; }
-          if (have !== want) wrong.push(`sha256 of runs/${k}.json is not the one in sources`);
-          if (wrong.length >= 5) break;
-        }
-        if (wrong.length) return json(422, { error: "annotation rejected", problems: wrong });
-      }
       if (parsed.kind === "addendum") {  // a permanent note may only be pinned on a run that already has records in the vault
         const has = async (prefix) => (await env.RESULTS.list({ prefix, limit: 1 })).objects.length > 0;
         if (!(await has(`runs/${parsed.runId}/`)) && !(await has(`manifests/${parsed.runId}.`))) return json(422, { error: "addendum rejected", problems: ["run_id has no records in the vault yet"] });
@@ -109,7 +87,7 @@ async function handle(request, env) {
       stored = await env.RESULTS.put(key, bytes, {
         onlyIf: { etagDoesNotMatch: "*" }, // atomic: fails if the key exists, no get-then-put race
         sha256,
-        httpMetadata: { contentType: parsed.kind === "tape" ? ctype.split(";")[0].trim() : parsed.kind === "index" && key.endsWith(".parquet") ? "application/octet-stream" : "application/json" },
+        httpMetadata: { contentType: parsed.kind === "index" && key.endsWith(".parquet") ? "application/octet-stream" : "application/json" },
         customMetadata: { sha256, ingested_at: new Date().toISOString() },
       });
     } catch (e) { putErr = e; }

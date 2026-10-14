@@ -9,7 +9,7 @@ No patient text, no roster names and no item-level class are in this file. Ids o
 |---|---|
 | successor `deid.py` git blob | `b8b793507a566fc116fd3058e95a7c5dbbc115a0` (ruling 332, option B; the earlier candidate blob `0e55dc0f…` is superseded and was never used on real text) |
 | successor `deid.py` sha256 | `bc375f78d4f0e1bef4965fee4570e50f506003e1605a1ebbd338f8ac44678f02` (recomputed independently by refuter-2, #1796, and by fleet, #1798) |
-| landed as | `707a113` on origin/main (one commit, 25 Sep 08:30 IST; its three files are byte-identical to `d1e957b` on `surg-deid/dob-partial-b`, which is `2c54ce7` + `0e9d530` on `surg-deid/dob-partial` plus the string replacement; nothing else in the push; confirmed by refuter-2, #1978) |
+| landed as | `LANDED_SHA_LIST` on origin/main (filled at landing: the commit shas, and the branches they were taken from; nothing else in the push) |
 | `test_deid_dob_partial.py` blob | `48d2793468572ad253e99e010fcd84b4eb51312e` |
 | `deid_eval.py` blob | `72deb477d9a19f6fe59a6a8a0489bbb11fd57655` |
 | predecessor (frozen a53717d lineage) | `deid.py` blob `5527f92082bc4403dad20949b69e82774a8b28b2`, sha256 `f092bf43…caa492`: the cap-rule redactor used for every link-3 and every regenerated surgery de-id so far |

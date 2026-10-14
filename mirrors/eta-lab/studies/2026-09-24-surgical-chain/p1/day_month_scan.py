@@ -40,7 +40,7 @@ def scan_dir(d):
 def selftest():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
-        docs = {"roomA": [(0, "Family birthday. 22nd November. Hello."), (1, "come back on 5th August"), (2, "no date here"), (3, "born in the month of May 3")], "roomA_rx": [(0, "review on 4th June")], "roomB": [(0, "12th March is my dob")]}
+        docs = {"roomA": [(0, "Daily birthday. 6th July. Hello."), (1, "come back on 5th August"), (2, "no date here"), (3, "born in the month of May 3")], "roomA_rx": [(0, "review on 4th June")], "roomB": [(0, "12th March is my dob")]}
         for name, ts in docs.items():
             with open(os.path.join(d, name + ".json"), "w") as f: json.dump({"id": name, "turns": [{"i": i, "en": t} for i, t in ts]}, f)
         r = scan_dir(d)
