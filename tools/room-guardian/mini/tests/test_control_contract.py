@@ -39,7 +39,7 @@ class ControlContract(unittest.TestCase):
                 self.assertTrue(re.fullmatch(KIOSK_RE, msg), (n, kill, msg[:80]))
                 self.assertEqual(json.loads(msg)["kill"], kill)
                 self.assertEqual(len(json.loads(msg)["modes"]), n)
-                self.assertLessEqual(len(msg.encode()), 4096)
+                self.assertLessEqual(len(msg.encode()), 4000)
                 self.assertTrue(all(0x20 <= b <= 0x7E for b in msg.encode()))
                 self.assertNotIn("\n", msg)
                 self.assertEqual(msg, json.dumps(json.loads(msg), sort_keys=True))            # default separators ', ' and ': '
@@ -93,15 +93,46 @@ class ControlContract(unittest.TestCase):
             with self.assertRaises(ValueError, msg=str(bad)[:60]):
                 sb.canonical_control(bad)
 
-    def test_over_4096_bytes_is_refused_even_though_the_regex_allows_64_long_slugs(self):
+    def test_over_4000_bytes_is_refused_even_though_the_regex_allows_64_long_slugs(self):
         rooms = [f"{i:02d}" + "x" * 62 for i in range(64)]                                    # 64 rooms, 64-char slugs
         self.assertEqual(len(set(rooms)), 64)
         payload = {"kill": True, "modes": {r: "shadow" for r in rooms}, "ts": 1791960000}
-        self.assertGreater(len(json.dumps(payload, sort_keys=True).encode()), 4096)
+        self.assertGreater(len(json.dumps(payload, sort_keys=True).encode()), 4000)
         self.assertTrue(re.fullmatch(KIOSK_RE, json.dumps(payload, sort_keys=True)))           # the regex alone would pass it
         with self.assertRaises(ValueError):
             sb.canonical_control(payload)
-        self.assertIn("4096", sb.validate_rooms(rooms))
+        self.assertIn("4000", sb.validate_rooms(rooms))
+
+    @staticmethod
+    def payload_of_len(target):
+        """A contract-valid payload (<= 64 rooms, slugs [a-z0-9]{1,64}) whose json.dumps is exactly `target` bytes."""
+        for k in range(1, 65):
+            for last in range(1, 65):
+                rooms = [f"{i:02d}" + "x" * 62 for i in range(k - 1)] + [f"{k - 1:02d}" + "y" * (last - 2 if last > 2 else 0)][:1]
+                rooms[-1] = (f"{k - 1:02d}" + "y" * 62)[:max(last, 2)]
+                if len(set(rooms)) != len(rooms):
+                    continue
+                p = {"kill": True, "modes": {r: "shadow" for r in rooms}, "ts": 1791960000}
+                if len(json.dumps(p, sort_keys=True).encode()) == target:
+                    return p
+        raise AssertionError(f"no payload of {target} bytes")
+
+    def test_cap_boundary_3999_and_4000_pass_4001_is_refused(self):
+        for n, ok in ((3999, True), (4000, True), (4001, False)):
+            p = self.payload_of_len(n)
+            self.assertEqual(len(json.dumps(p, sort_keys=True).encode()), n)
+            self.assertTrue(re.fullmatch(KIOSK_RE, json.dumps(p, sort_keys=True)), n)         # the regex alone accepts all three
+            if ok:
+                self.assertEqual(len(sb.canonical_control(p).encode()), n)
+            else:
+                with self.assertRaises(ValueError):
+                    sb.canonical_control(p)
+        self.assertEqual(sb.CONTROL_MAX_BYTES, 4000)
+
+    def test_largest_publishable_payload_fits_the_kiosk_4096_line_cap_with_margin(self):
+        p = self.payload_of_len(4000)
+        control_last = len(("9" * 15) + "\n") + len(sb.canonical_control(p)) + 1               # receive-epoch line + payload + payload newline
+        self.assertLessEqual(control_last, 4096)
 
     def test_validate_rooms_refuses_slugs_and_counts_the_kiosk_would_reject(self):
         self.assertIsNone(sb.validate_rooms([]))

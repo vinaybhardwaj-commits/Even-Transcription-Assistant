@@ -19,15 +19,16 @@ CONTROL_TOPIC = "guardian/control"
 # Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
 CONTROL_RE = re.compile(r'^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
 SLUG_RE = re.compile(r"[a-z0-9_-]{1,64}")
-CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4096, 64
+# The contract limit is 4096 (kiosk R8: payload line <= 4096, file <= 4096+17); the Mini caps itself at 4000 as extra margin.
+CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4000, 64
 
 
 def canonical_control(payload):
     """The one serialisation the Mini may publish: json.dumps(payload, sort_keys=True) with the default separators. Raises ValueError (and so
-    nothing is published; kiosks go stale and kill) if the result is not exactly the frozen form, or is over 4096 bytes, or has a byte outside 0x20-0x7E."""
+    nothing is published; kiosks go stale and kill) if the result is not exactly the frozen form, or is over 4000 bytes, or has a byte outside 0x20-0x7E."""
     msg = json.dumps(payload, sort_keys=True)
     if len(msg.encode("ascii", "replace")) > CONTROL_MAX_BYTES:
-        raise ValueError("control payload over 4096 bytes")
+        raise ValueError("control payload over 4000 bytes")
     if any(not (0x20 <= ord(ch) <= 0x7E) for ch in msg):
         raise ValueError("control payload has a byte outside 0x20-0x7E")
     if not CONTROL_RE.fullmatch(msg):
@@ -37,7 +38,7 @@ def canonical_control(payload):
 
 def validate_rooms(rooms):
     """Startup check for rooms.json: every slug ^[a-z0-9_-]{1,64}$, at most 64 distinct rooms, and the worst-case payload (every mode shadow, 15-digit ts)
-    still within the contract. Returns an error string, or None."""
+    still within the contract (<= 4000 bytes). Returns an error string, or None."""
     if not isinstance(rooms, list):                  # a bare string would iterate as one room per character
         return f"rooms must be a JSON list, got {type(rooms).__name__}"
     bad = [r for r in rooms if not isinstance(r, str) or not SLUG_RE.fullmatch(r)]
