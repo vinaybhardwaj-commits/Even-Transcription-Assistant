@@ -49,28 +49,69 @@ def unit_norm(u):  # test-side restatement of the rule
     return u[:-1] if u.endswith("s") else u
 
 
-UNITS = [None, "mg", "mg.", "MG", "mgs", "m.g.", "Tablets", "tablet", "tab.", "days", "day", "milligram", "ml", "ml.", "weeks"]
+NB = "\u00a0"
+# canonical unit -> surface spellings that must all read as that unit
+SURFACE = {
+    None: [],
+    "mg": ["mg", "MG", "mgs", "mg.", "m.g.", "Mg"],
+    "ml": ["ml", "ml.", "mL"],
+    "day": ["days", "day", "Days"],
+    "week": ["weeks", "week"],
+    "tablet": ["tablet", "Tablets"],
+    "%": ["%"],
+    "daily": ["daily"],
+}
+CANON = list(SURFACE)
+WORD = {i: w for i, w in enumerate("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+                                   "seventeen eighteen nineteen twenty".split(), 1)}
 
 
-def render(n, unit, sep):
-    return n if unit is None else f"{n}{sep}{unit}"
+def render(run, canon, rng):
+    """One surface rendering of `run` followed by the unit `canon` (None: nothing). The run is always a standalone digit run in the
+    result (as itself, as a number word, or as one end of a range)."""
+    num = run
+    if run.isdigit() and not run.startswith("0") and int(run) in WORD and rng.random() < 0.2:
+        num = WORD[int(run)]
+    if canon is None:
+        return rng.choice([num, f"({num})", f"{num}-{rng.randint(1, 99)}", f"{num} to {rng.randint(1, 99)}"])
+    u = rng.choice(SURFACE[canon])
+    sep = rng.choice(["", " ", " ", NB, "\t", "\n", "  ", f" {NB}"])
+    if num != run and not sep:
+        sep = " "  # a number word needs a boundary before the unit
+    if canon == "%":
+        return rng.choice([f"{num}%", f"{num} %", f"{num}% cream", f"{num}{NB}%", f"{rng.randint(1, 9)}-{num}%"])
+    if canon == "daily":
+        day = rng.choice([" ", NB, "\n"])
+        opts = [f"{num} a{day}day", f"{num} daily", f"{num}{sep}daily"]
+        if run == "1":
+            opts.append("once a day")
+        if run == "2":
+            opts.append("twice a day")
+        return rng.choice(opts)
+    lo, hi = rng.randint(1, 99), rng.randint(1, 99)
+    return rng.choice([
+        f"{num}{sep}{u}", f"({num}){sep}{u}", f"({num}) {u}", f"{num}-{u}", f"{num} _{u}", f"{num}/{u}", f"{num} - {u}",
+        f"{lo}-{num}{sep}{u}", f"{lo} \u2013 {num} {u}", f"{lo} to {num} {u}", f"{num}-{hi}{sep}{u}", f"{num} \u2013 {hi}{sep}{u}",
+        f"{num} to {hi} {u}", f"{num} to{NB}{hi} {u}",
+    ])
 
 
 def gen_case(rng):
     run = "".join(rng.choice("123456789") if i == 0 else rng.choice("0123456789") for i in range(rng.randint(1, 6)))
-    fu, eu = rng.choice(UNITS), rng.choice(UNITS)
+    fu = rng.choice(CANON)
+    eu = fu if rng.random() < 0.5 else rng.choice(CANON)
     in_eta = rng.random() < 0.75
     distract = [f"{rng.randint(1, 9)}{rng.choice('0123456789')}{rng.choice('0123456789')}{rng.choice('0123456789')}7 mg" for _ in range(rng.randint(0, 2))]
-    parts = distract + ([render(run, eu, rng.choice(["", " "]))] if in_eta else [])
+    parts = distract + ([render(run, eu, rng)] if in_eta else [])
     rng.shuffle(parts)
     # a separator keeps a bare number from taking the next part's word as its unit
-    note = "Medication:\nParacetamol " + " ; ".join(parts)
+    note = "Medication:\nParacetamol " + " ; ".join(parts) + " ;"
     field = rng.choice(["strength", "frequency", "duration"])
-    m = {"name": "Paracetamol", field: render(run, fu, rng.choice(["", " "]))}
+    m = {"name": "Paracetamol", field: render(run, fu, rng)}
     if rng.random() < 0.5:
         m.update(CAT if rng.random() < 0.8 else {"uid": "u", "other": True, "name": "Paracetamol"})
     art = _syn(note, [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
-    expect_strict = len(run) >= 3 or (unit_norm(fu) is not None and unit_norm(fu) == unit_norm(eu))
+    expect_strict = len(run) >= 3 or fu == eu  # same canonical unit; none on both sides is the identical text
     return m, field, run, art, in_eta, expect_strict
 
 
@@ -104,7 +145,7 @@ def test_field_source_legacy_equivalence(scope):
         assert (old == "eta") == (new in ("eta", "eta_coincidence")), (m, art["note_text"], old, new)
         if old != "eta":
             assert new == old
-        if not _s(m.get(field)) or not _DIGITS.findall(_s(m[field])):
+        if not _s(m.get(field)) or not _DIGITS.findall(floors._numnorm(_s(m[field]))):
             assert new == old
         seen.add(new)
     assert {"eta", "eta_coincidence"} <= seen
@@ -180,3 +221,66 @@ def test_header_and_basis():
     assert r_eta["eta"] == 0 and r_eta["eta_coincidence"] == 3 and r_eta["bn"] == 3
     assert r_eta["pass"] is True and r_all["pass"] is False
     assert eta["header"]["eta_coincidence"] == 3 and eta["header"]["eta"] == 0
+
+
+# ---- FIX2: one normaliser, the unit token ------------------------------------------------------------------------
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_identity_same_rendering_both_sides_is_eta(scope):
+    """(i) The same rendered string as field and as ETA text is eta, for every canonical unit including none."""
+    rng = random.Random(2)
+    for _ in range(3000):
+        run = str(rng.randint(1, 99))
+        x = render(run, rng.choice(CANON), rng)
+        m = {"name": "Paracetamol", "duration": x}
+        art = _syn("Medication:\nParacetamol " + x + " ;", [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+        prov = floors._prov_for(m, art)
+        for r in floors._DIGITS.findall(floors._numnorm(x)):
+            assert floors._run_source(m, "duration", r, art, prov, scope) == "eta", (x, r)
+        assert floors._field_source(m, "duration", art, prov, scope) == "eta", x
+
+
+def test_identity_strict_run_any_string():
+    rng = random.Random(3)
+    alphabet = list("0123456789 \t\n" + NB + "-–()_/.,%;:abcdmgl") + ["once", "a day", "to", "twice"]
+    for _ in range(5000):
+        x = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 14)))
+        n = floors._same_norm(x)
+        for r in floors._DIGITS.findall(n):
+            assert floors._strict_run(r, n, n), x
+
+
+def test_same_unit_under_any_rendering_and_different_unit_is_coincidence():
+    """(ii) and (iii) on the _strict_run level, over every pair of surface renderings."""
+    rng = random.Random(4)
+    for _ in range(4000):
+        run = str(rng.randint(1, 99))
+        fu, eu = rng.choice(CANON), rng.choice(CANON)
+        f, e = floors._same_norm(render(run, fu, rng) + " ;"), floors._same_norm(render(run, eu, rng) + " ;")
+        assert floors._strict_run(run, f, e) == (fu == eu), (f, e, fu, eu)
+
+
+def test_normaliser_is_symmetric():
+    for x in ["2 a day", "once  a day", "5 mg", "TWICE\ta day", "five\nmg"]:
+        assert floors._same_norm(x) == floors._same_norm(floors._same_norm(x))
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix2_verdict_cases(scope):
+    para = lambda t: f"Medication:\nParacetamol {t}"
+    assert _src(frequency="2 a day", note=para("2 a day"), scope=scope) == ["eta"]
+    assert _src(frequency="1 a day", note=para("once a day"), scope=scope) == ["eta"]
+    assert _src(strength="5 mg", note=para("5 mg"), scope=scope) == ["eta"]  # NBSP in ETA's text
+    assert _src(strength="5 mg", note=para("5 mg"), scope=scope) == ["eta"]  # NBSP in the field
+    assert _src(duration="5 mg", note=para("5-10 mg"), scope=scope) == ["eta"]  # a range takes the unit after the last number
+    assert _src(duration="5-10 mg", note=para("5 mg"), scope=scope) == ["eta", "pulse_extraction"]  # 5 is ETA's, 10 is not
+    assert _src(duration="5-10 mg", note=para("5 to 10 mg"), scope=scope) == ["eta", "eta"]
+    assert _src(duration="5 days", note=para("5-10 mg"), scope=scope) == ["eta_coincidence"]
+    assert _src(strength="2% cream", note=para("2% cream"), scope=scope) == ["eta"]
+    assert _src(duration="5%", note=para("5% ;"), scope=scope) == ["eta"]
+    assert _src(duration="5%", note=para("5 mg"), scope=scope) == ["eta_coincidence"]
+    assert _src(strength="(5) mg", note=para("5 mg"), scope=scope) == ["eta"]
+    assert _src(strength="5-mg", note=para("5 mg"), scope=scope) == ["eta"]
+    assert _src(strength="5 _mg", note=para("5 mg"), scope=scope) == ["eta"]
+    assert _src(strength="5 mg", note=para("(5) mg"), scope=scope) == ["eta"]
+    assert _src(duration="5 mg", note=para("5 ml"), scope=scope) == ["eta_coincidence"]
+    assert _src(duration="5", note=para("5 mg"), scope=scope) == ["eta_coincidence"]  # a missing unit on one side only

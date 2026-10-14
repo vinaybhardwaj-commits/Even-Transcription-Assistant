@@ -686,7 +686,9 @@ def _eta_has_run(m: dict, run: str, art: dict | None, prov: dict | None, scope: 
     return run in _DIGITS.findall(_eta_run_text(m, art, prov, scope))
 
 
-_UNIT_RE = re.compile(r"[ \t]*((?:[^\W\d_]\.)+[^\W\d_]*|[^\W\d_]+\.?)")
+_NUM_RE = r"\d+(?:[.,]\d+)*"
+_UNIT_RE = re.compile(r"[\s\-()_/.]*((?:[^\W\d_]\.)+[^\W\d_]*|[^\W\d_]+\.?|%)")
+_RANGE_RE = re.compile(r"\s*(?:[-\u2013]|\bto\b)\s*(" + _NUM_RE + ")")
 _DECIMAL_TAIL = re.compile(r"[.,]\d+")
 
 
@@ -695,34 +697,47 @@ def _unit_norm(tok: str) -> str:
     return t[:-1] if t.endswith("s") else t
 
 
+def _same_norm(s: str) -> str:
+    """The one normaliser both sides of the strict check go through: whitespace (NBSP, tab, newline) collapsed, number words, "a day"
+    -> "daily", lower-case. Collapsing first as well lets "a<NBSP>day" normalise; it only ever moves a match toward eta."""
+    return re.sub(r"\s+", " ", _numnorm(re.sub(r"\s+", " ", s or "")))
+
+
 def _run_units(text: str, run: str) -> list[str | None]:
-    """The normalised unit token after each occurrence of the digit run in text (None: no unit token). The number ends after any
-    decimal or thousands tail (0.5, 1,000), so the unit is the first letters-only token after the whole number."""
+    """The normalised unit token after each occurrence of the digit run in text (None: no unit token). The unit is the first token after
+    the number, skipping whitespace and - ( ) _ / . between them; "%" is a unit. A number's end is after any decimal or thousands tail
+    (0.5, 1,000); in a range (A-B, A - B, A to B) every number takes the unit after the last number. Expects _same_norm'd text."""
     out: list[str | None] = []
     for mt in _DIGITS.finditer(text):
         if mt.group() != run:
             continue
         end = mt.end()
-        while (t := _DECIMAL_TAIL.match(text, end)):
-            end = t.end()
+        while True:
+            while (t := _DECIMAL_TAIL.match(text, end)):
+                end = t.end()
+            r = _RANGE_RE.match(text, end)
+            if not r:
+                break
+            end = r.end()
         u = _UNIT_RE.match(text, end)
         out.append(_unit_norm(u.group(1)) if u else None)
     return out
 
 
 def _strict_run(run: str, own_text: str, eta_text: str) -> bool:
-    """3+ digits, or the unit after the run in own_text equals the unit after it at some occurrence in eta_text (no unit never matches)."""
+    """3+ digits, or the unit after the run in own_text equals the unit after it at some occurrence in eta_text. A unit that is missing on
+    one side only never matches; missing on both sides is the identical text, so in doubt it is the same unit."""
     if len(run) >= 3:
         return True
-    have = {u for u in _run_units(eta_text, run) if u}
-    return any(u in have for u in _run_units(own_text, run) if u)
+    have = set(_run_units(eta_text, run))
+    return any(u in have for u in _run_units(own_text, run))
 
 
 def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
     """Source of one digit run found in field of replayed medicine m."""
     sc = floor_scope(scope)
     if _eta_has_run(m, run, art, prov, sc):
-        return "eta" if _strict_run(run, _s(m.get(field)).replace(_CUT, ""), _eta_run_text(m, art, prov, sc)) else "eta_coincidence"
+        return "eta" if _strict_run(run, _same_norm(_s(m.get(field)).replace(_CUT, "")), _same_norm(_eta_run_text(m, art, prov, sc))) else "eta_coincidence"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
     return "pulse_extraction"
@@ -736,8 +751,9 @@ def _field_source(m: dict, field: str, art: dict | None, prov: dict | None, scop
     own = _medicine_output(m, art, prov) if floor_scope(scope) == "medicine" else None
     text = own if own is not None else _eta_text(art, prov)
     if _in_text(value, text):
-        runs = _DIGITS.findall(_numnorm(value))
-        if runs and not any(_strict_run(r, _numnorm(value), text) for r in runs):
+        own_n, eta_n = _same_norm(value), _same_norm(text)
+        runs = _DIGITS.findall(own_n)
+        if runs and not any(_strict_run(r, own_n, eta_n) for r in runs):
             return "eta_coincidence"
         return "eta"
     if field == "strength":
