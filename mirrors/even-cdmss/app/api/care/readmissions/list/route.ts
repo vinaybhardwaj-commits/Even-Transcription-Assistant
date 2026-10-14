@@ -37,10 +37,8 @@ import { fetchExtractedCases } from '@/lib/discharge-extract-store';
 import { fetchStayBillTotals } from '@/lib/readmission/db13';
 import { asJson, indexDocumentIdOf, readmitDocumentIdOf, returnContextOf, toFinding, toIndexCaseSummary, type Identity } from '@/lib/readmission/surface-row';
 import { caseLine, computeTiles, groupByLane, returnBillFor, toFindingClass, type FindingBlob } from '@/lib/readmission-surface-core';
-import { canonicalFacility } from '@/lib/readmission-rates-core';
 import { stripCaseArtefacts } from '@/lib/readmission-narrative-core';
 import { readClinicalReviewDecisions } from '@/lib/readmission/ask-store';
-import { readFreshness } from '@/lib/readmission/freshness';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -99,9 +97,7 @@ async function namesFromAdt(ids: string[]): Promise<Map<string, Identity>> {
         // R6 (Readmissions R6 PRD v1.0, R6-1): the hospital rides THIS join — facility_name is on
         // every kx_discharged_completed_patients row (measured: two facilities, zero nulls) and was
         // already fetched by the SELECT * above. No new query; null when the join finds nothing.
-        // READMIT-EHRC-RELABEL-BUILDER-BRIEF-16-SEP-2026: canonicalised so a raw `Even-EHRC` (the
-        // 19-Aug relabel) never becomes a separate facility on the surface.
-        facility: canonicalFacility(s(r.facility_name)),
+        facility: s(r.facility_name),
       });
     }
     return out;
@@ -196,17 +192,13 @@ export async function GET() {
   // the surface SELECT — before the migration runs those columns do not exist, and widening that read
   // would turn a missing column into an empty BOARD. An empty map = no overlays visible, which renders
   // as today's board exactly.
-  // READMIT-RECENT-VIEW (17 Sep 2026, item C): the freshness line's own fail-safe read, alongside the
-  // other db13 / Neon reads above — a fault here costs the freshness line's numbers (they render `—`),
-  // never the board.
-  const [adt, summaries, denominator, extracts, bills, reviews, freshness] = await Promise.all([
+  const [adt, summaries, denominator, extracts, bills, reviews] = await Promise.all([
     namesFromAdt(ids),
     identityFromSummaries(ids),
     ipDischargeDenominator(),
     fetchExtractedCases(indexDocIds),
     fetchStayBillTotals(readmitIds),
     readClinicalReviewDecisions(),
-    readFreshness(),
   ]);
 
   const rows = read.rows.map((r) => {
@@ -260,7 +252,5 @@ export async function GET() {
     /** R3 sibling: the batched bill fetch answered (ok). False → every cell reads unknown and
      *  the board shows the quiet bills-unavailable notice. */
     billsResolved: bills.ok,
-    /** READMIT-RECENT-VIEW (17 Sep 2026): the freshness line under the page subtitle. */
-    freshness,
   });
 }

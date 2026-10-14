@@ -126,13 +126,7 @@ test('trap 3: the VERTEX path is untouched — it still sends the google form an
   // Vertex branches forward `...rest` (google included) and add only the model + headroom.
   // (V-a2: the geminiModel param is typed optional now the ladder owns the branch, hence `as string`.)
   assert.ok(LLM.includes('const gParams = { ...rest, model: vertexModelName(geminiModel as string), max_tokens: baseMax + 8192 };'));
-  // lab-v2 decision 21: the Vertex normalisation moved out of tracedChat's branch and into
-  // buildVertexParams IN THIS SAME FILE, so the lab transport (governedLabChat) and the traced
-  // path cannot drift — a live lab run had already sent Gemini 2.5 Pro the un-raised Ollama
-  // max_tokens and got billed for empty content. The property this pin guards is unchanged;
-  // it is now asserted in two halves, which is strictly stronger than the single literal was.
-  assert.ok(TRACE.includes('buildVertexParams(params, opts!.gemini as string)'), 'the traced path still prefixes from opts.gemini');
-  assert.ok(TRACE.includes('model: vertexModelName(model),') && TRACE.includes('max_tokens: baseMax + 8192,'), 'and buildVertexParams still does the prefix + the thinking headroom');
+  assert.ok(TRACE.includes('model: vertexModelName(opts!.gemini as string),'));
   assert.ok(!TRACE.includes('thinkingBudgetOf'), 'no translation on the Vertex path');
   assert.ok(LLM.includes('const { google: _g, ...body } = rest;'), 'the strip happens only in the OpenRouter builder');
 });

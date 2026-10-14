@@ -58,20 +58,6 @@ export const FACILITY_EHRC = 'Even';
 export const FACILITY_EHBR = 'Even-EHBR';
 export const FACILITIES: readonly string[] = [FACILITY_EHRC, FACILITY_EHBR];
 
-/** READMIT-EHRC-RELABEL-BUILDER-BRIEF-16-SEP-2026: since 19 Aug 2026 the KareXpert ADT feed labels
- *  EHRC encounters `Even-EHRC` instead of `Even` (db13 kx_discharged_completed_patients.facility_name).
- *  The canonical key stays `Even` — everything that reads a raw facility_name off db13 must canonicalise
- *  through here before comparing, grouping, or displaying it. */
-export const FACILITY_EHRC_ALIASES: readonly string[] = ['Even', 'Even-EHRC'];
-
-/** Maps a raw db13 facility_name to its canonical key: any FACILITY_EHRC_ALIASES member, trimmed, becomes
- *  FACILITY_EHRC; every other non-empty value is returned verbatim; empty or null returns null. */
-export function canonicalFacility(name: string | null | undefined): string | null {
-  const trimmed = (name ?? '').trim();
-  if (!trimmed) return null;
-  return (FACILITY_EHRC_ALIASES as readonly string[]).includes(trimmed) ? FACILITY_EHRC : trimmed;
-}
-
 export type DenominatorKey = 'eligible' | 'true_ipd' | 'all_in_window';
 export const DENOMINATORS: readonly DenominatorKey[] = ['eligible', 'true_ipd', 'all_in_window'];
 export const DENOMINATOR_LABEL: Readonly<Record<DenominatorKey, string>> = {
@@ -163,13 +149,6 @@ export const IMMEDIATE_CARD_COPY = 'count, not a rate · includes next-morning r
 /** §12.2 — the advisory card's sub-line under the dual contract. */
 export const PROPOSED_AVOIDABLE_ADVISORY = 'agent proposal, not the human overlay';
 
-// ── READMIT-RECENT-VIEW (17 Sep 2026) — the sixth tile, the incomplete tail's counts ───────
-
-export const RECENT_TILE_TITLE = 'Last 30 days · provisional';
-export const RECENT_TILE_CAPTION = 'follow-up still running — counts can only rise; not a rate for comparison';
-/** The trend-bar legend line for an incomplete month — a provisional bar, not a censored ghost. */
-export const INCOMPLETE_MONTH_LEGEND = '30-day follow-up not complete — provisional, can only rise';
-
 // ── small pure helpers ───────────────────────────────────────────────────────────────────
 
 /** YYYY-MM-DD of an instant in IST (UTC+05:30, no DST). */
@@ -197,8 +176,7 @@ export function monthsBetween(fromMonth: string, toMonth: string): string[] {
 /** Facility of a finding: the R6 name when the route carries it, else the encounter-prefix fallback
  *  (measured: 'IP-' = Even / EHRC; 'IPNO-' and 'ADM' = Even-EHBR). Unknown prefix → null. */
 export function facilityOfEncounter(encounterId: string | null | undefined, facilityName?: string | null): string | null {
-  const canon = canonicalFacility(facilityName);
-  if (canon && (FACILITIES as readonly string[]).includes(canon)) return canon;
+  if (facilityName && (FACILITIES as readonly string[]).includes(facilityName)) return facilityName;
   const id = (encounterId ?? '').trim().toUpperCase();
   if (id.startsWith('IPNO') || id.startsWith('ADM')) return FACILITY_EHBR;
   if (id.startsWith('IP-')) return FACILITY_EHRC;
@@ -327,26 +305,6 @@ export interface MonthCohort {
   discharges: number; discharges_reviewable: number; discharges_held_out: number;
   returns30: number; returns30_reviewable: number; returns30_held_out: number;
   rate30: number | null; rate30_reviewable: number | null; rate30_held_out: number | null;
-  /** READMIT-RECENT-VIEW (17 Sep 2026): pct(returns so far, discharges) for an INCOMPLETE month —
-   *  null once the month completes (rate30 takes over). The two never carry a number in the same month. */
-  provisionalRate30: number | null; provisionalRate30_reviewable: number | null; provisionalRate30_held_out: number | null;
-}
-
-/**
- * READMIT-RECENT-VIEW (17 Sep 2026): the incomplete tail — index discharges whose IST day falls in
- * (ceiling − 30, ceiling], counts only, never a rate for comparison (follow-up is still running so a
- * return can only be ADDED between reads, never removed). `discharges` sums every canonicalised bucket
- * in the window (no true-IPD disposition filter — same posture as the `eligible` denominator);
- * `returnsSoFar` is every pair whose index day is in the window and whose gap is ≤ 30, split reviewable
- * vs held-out by the same `isHeldOutDepartment` rule the rest of this module uses; `provisionalRate` is
- * `pct(returnsSoFar, discharges)`, shown on the tile only where `ratesAllowed` (R7-4 gate unchanged).
- */
-export interface RecentBlock {
-  windowStart: string; windowEnd: string;
-  discharges: number;
-  returnsSoFar: number; returnsSoFar_reviewable: number; returnsSoFar_held_out: number;
-  audited: number; proposedAvoidable: number; needsAdjudication: number;
-  provisionalRate: number | null;
 }
 export interface JudgementStats {
   audited: number; justified: number; needs_adjudication: number; avoidable: number;
@@ -370,9 +328,6 @@ export interface FacilityRates {
   /** R9 — the incidence LEAD. Non-null only where an incidence read was supplied for this facility
    *  (today: Even / EHRC only — EHBR stays its own tab and its own gate). */
   incidence: Incidence | null;
-  /** READMIT-RECENT-VIEW (17 Sep 2026): the incomplete tail — always computed, always shown (counts
-   *  are never gated; only `provisionalRate` on the tile is). */
-  recent: RecentBlock;
 }
 export interface RatesResult {
   version: typeof RATES_VERSION;
@@ -414,7 +369,7 @@ export function computeIncidence(input: {
   const people = new Set<string>();
   let excludedByDepartment = 0, outOfClockWindow = 0, notCountable = 0;
   for (const p of input.pairs) {
-    if ((canonicalFacility(p.facility) ?? facilityOfEncounter(p.index_encounter_id)) !== fac) continue;
+    if ((p.facility ?? facilityOfEncounter(p.index_encounter_id)) !== fac) continue;
     if (!inWindow(p.index_day, start, end30)) continue;
     if (isIncidenceExcludedDepartment(p.index_department)) { excludedByDepartment++; continue; }
     const hours = clockHoursBetween(p.index_discharge_at, p.readmit_admit_at);
@@ -460,8 +415,8 @@ export function computeRates(input: {
   const end90 = addDays(ceiling, -FOLLOW_UP_90);
   const facilities: FacilityRates[] = [];
   for (const fac of FACILITIES) {
-    const pairs = input.pairs.filter((p) => (canonicalFacility(p.facility) ?? facilityOfEncounter(p.index_encounter_id)) === fac);
-    const disch = input.discharges.filter((d) => canonicalFacility(d.facility) === fac && d.day != null);
+    const pairs = input.pairs.filter((p) => (p.facility ?? facilityOfEncounter(p.index_encounter_id)) === fac);
+    const disch = input.discharges.filter((d) => d.facility === fac && d.day != null);
     const heldOutD = (d: DischargeBucket) => isHeldOutDepartment(d.department);
     const heldOutP = (p: RatePair) => isHeldOutDepartment(p.index_department);
     const excludedDisp = (d: DischargeBucket) => d.disposition != null && TRUE_IPD_EXCLUDED_DISPOSITIONS.includes(d.disposition.trim());
@@ -505,30 +460,8 @@ export function computeRates(input: {
         month, complete, discharges: dAll, discharges_reviewable: dAll - dH, discharges_held_out: dH,
         returns30: rAll, returns30_reviewable: rAll - rH, returns30_held_out: rH,
         rate30: complete ? pct(rAll, dAll) : null, rate30_reviewable: complete ? pct(rAll - rH, dAll - dH) : null, rate30_held_out: complete ? pct(rH, dH) : null,
-        // READMIT-RECENT-VIEW (17 Sep 2026): the mirror image of rate30 — a number ONLY while the
-        // month is still incomplete, using the same numerator/denominator the ghost bar already carries.
-        provisionalRate30: complete ? null : pct(rAll, dAll),
-        provisionalRate30_reviewable: complete ? null : pct(rAll - rH, dAll - dH),
-        provisionalRate30_held_out: complete ? null : pct(rH, dH),
       };
     });
-
-    // READMIT-RECENT-VIEW (17 Sep 2026) — the recent-30-days window: (ceiling − 30, ceiling]. Counts
-    // only, split reviewable / held-out; `end30` (ceiling − 30) is already computed above and EXCLUDED.
-    const recentInWindow = (day: string | null) => !!day && day > end30 && day <= ceiling;
-    const recentDischarges = sum(disch, (d) => recentInWindow(d.day));
-    const recentPairPred = (p: RatePair) => recentInWindow(p.index_day) && (p.gap_days ?? Infinity) <= 30;
-    const recentReturns = count(pairs, recentPairPred);
-    const recentReturnsHeld = count(pairs, (p) => recentPairPred(p) && heldOutP(p));
-    const recent: RecentBlock = {
-      windowStart: addDays(end30, 1), windowEnd: ceiling,
-      discharges: recentDischarges,
-      returnsSoFar: recentReturns, returnsSoFar_reviewable: recentReturns - recentReturnsHeld, returnsSoFar_held_out: recentReturnsHeld,
-      audited: count(pairs, (p) => recentPairPred(p) && p.audit_status === 'audited'),
-      proposedAvoidable: count(pairs, (p) => recentPairPred(p) && p.avoidable === 'avoidable'),
-      needsAdjudication: count(pairs, (p) => recentPairPred(p) && p.avoidable === 'needs_adjudication'),
-      provisionalRate: pct(recentReturns, recentDischarges),
-    };
 
     // R7-4 gate: the first FULL calendar month of discharges must have completed 30-day follow-up.
     const firstFullMonth = firstDay ? (firstDay.slice(8) === '01' ? monthOf(firstDay) : nextMonth(monthOf(firstDay))) : null;
@@ -562,7 +495,7 @@ export function computeRates(input: {
     facilities.push({
       facility: fac, pairs: pairs.length, ratesAllowed,
       gate: { firstDischargeDay: firstDay, firstFullMonth, opensOn, reason: ratesAllowed ? null : EHBR_GATE_COPY },
-      denominators, months, judgements, gapDistribution, incidence, recent,
+      denominators, months, judgements, gapDistribution, incidence,
     });
   }
   return { version: RATES_VERSION, ceilingDay: ceiling, surveillanceStart: start, facilities };
@@ -670,107 +603,32 @@ export function rateCards(f: FacilityRates, key: DenominatorKey): RateCard[] {
         ci: ok ? fmtCi(inc.ci) : '', note: INCIDENCE_LEAD_NOTE, advisory: null, tone: 'lead',
       }
     : { key: 'incidence', title: INCIDENCE_LEAD_LABEL, big: '—', sub: INCIDENCE_UNAVAILABLE_COPY, ci: '', note: null, advisory: null, tone: 'unavailable' };
-  // READMIT-RECENT-VIEW (17 Sep 2026) — the sixth tile: the incomplete tail. Counts (A) are ALWAYS
-  // shown (R7-4 is unchanged, but this tile is never gated); only the provisional RATE line (B) is
-  // shown where `ok` (ratesAllowed) — appended to the caption rather than replacing it (item 6).
-  const rec = f.recent;
-  const recentCard: RateCard = {
-    key: 'recent', title: RECENT_TILE_TITLE, big: fmtCount(rec.returnsSoFar),
-    sub: `${fmtCount(rec.returnsSoFar)} of ${fmtCount(rec.discharges)} discharged ${rec.windowStart}–${rec.windowEnd}`,
-    ci: '', note: `audited ${fmtCount(rec.audited)} · proposed avoidable ${fmtCount(rec.proposedAvoidable)} · needs adjudication ${fmtCount(rec.needsAdjudication)}`,
-    advisory: ok ? `${RECENT_TILE_CAPTION} · provisional rate ${fmtPct(rec.provisionalRate)}` : RECENT_TILE_CAPTION,
-    tone: 'advisory',
-  };
   return [
     lead,
     { key: 'episodes30', title: EPISODES_SECONDARY_LABEL, big: big(d.all30), sub: sub(d.all30, 'discharges'), ci: ci(d.all30), note: EPISODES_SECONDARY_NOTE, advisory: null, tone: 'plain' },
     { key: 'all90', title: EPISODES_90_LABEL, big: big(d.all90), sub: sub(d.all90, 'discharges with 90-day follow-up'), ci: ci(d.all90), note: 'stays, not people', advisory: null, tone: 'plain' },
     { key: 'immediate', title: IMMEDIATE_CARD_LABEL, big: fmtCount(d.immediate.numerator), sub: `of ${fmtCount(d.immediate.denominator)} discharges`, ci: '', note: IMMEDIATE_CARD_COPY, advisory: null, tone: 'count' },
     { key: 'proposedAvoidable', title: 'Proposed avoidable', big: fmtCount(d.proposedAvoidable.numerator), sub: ok ? `${fmtPct(d.proposedAvoidable.rate)} of ${fmtCount(d.proposedAvoidable.denominator)} eligible discharges` : `of ${fmtCount(d.proposedAvoidable.denominator)} eligible discharges`, ci: '', note: null, advisory: PROPOSED_AVOIDABLE_ADVISORY, tone: 'advisory' },
-    recentCard,
   ];
 }
 
-export interface TrendBar {
-  month: string; label: string; complete: boolean; reviewablePct: number | null; heldOutPct: number | null;
-  /** READMIT-RECENT-VIEW (17 Sep 2026): the incomplete-month bar height — `provisionalRate30`, shown
-   *  only where `ratesAllowed` (item 6); null for a complete month or a closed gate (still a ghost). */
-  provisionalPct: number | null;
-  /** The visible `n / N so far` label under an incomplete month's bar; null for a complete month. */
-  soFarLabel: string | null;
-  discharges: number; returns30: number; returns30_reviewable: number; returns30_held_out: number; title: string;
-}
+export interface TrendBar { month: string; label: string; complete: boolean; reviewablePct: number | null; heldOutPct: number | null; discharges: number; returns30: number; returns30_reviewable: number; returns30_held_out: number; title: string }
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const monthLabel = (month: string): string => { const [y, m] = month.split('-').map(Number); return `${MONTH_ABBR[(m || 1) - 1]} ${String(y).slice(2)}`; };
 
 /** The split trend bars: reviewable vs held-out share of each complete month's discharges (as % of
- *  ALL that month's discharges, so the two stack to the month's all-cause rate); incomplete months
- *  render at the PROVISIONAL height (READMIT-RECENT-VIEW, 17 Sep 2026) — dashed, lighter, counts can
- *  only rise — never a rate for comparison. `ratesAllowed` false → every bar a ghost, no provisional
- *  height either (item 6: a provisional RATE is gated same as any other rate; the `n / N so far`
- *  label is a COUNT and always renders). */
+ *  ALL that month's discharges, so the two stack to the month's all-cause rate); incomplete months are
+ *  ghosts (dashed, no rate) — censored, never a rate. `ratesAllowed` false → every bar a ghost. */
 export function trendBars(f: FacilityRates): TrendBar[] {
   return f.months.map((m) => {
     const live = f.ratesAllowed && m.complete && m.discharges > 0;
     const rPct = live ? Math.round((m.returns30_reviewable / m.discharges) * 10_000) / 100 : null;
     const hPct = live ? Math.round((m.returns30_held_out / m.discharges) * 10_000) / 100 : null;
-    const provisionalPct = !m.complete && f.ratesAllowed ? m.provisionalRate30 : null;
     const title = live
       ? `${monthLabel(m.month)}: ${m.returns30} of ${m.discharges} (${fmtPct(m.rate30)}) — reviewable ${m.returns30_reviewable} (${fmtPct(rPct)}), held-out ${m.returns30_held_out} (${fmtPct(hPct)})`
       : `${monthLabel(m.month)}: ${m.returns30} of ${m.discharges} so far — 30-day follow-up not complete, no rate`;
-    const soFarLabel = m.complete ? null : `${fmtCount(m.returns30)}/${fmtCount(m.discharges)}`;   // V 17 Sep layout: compact, fits the column; legend explains n/N
-    return {
-      month: m.month, label: monthLabel(m.month), complete: m.complete, reviewablePct: rPct, heldOutPct: hPct, provisionalPct, soFarLabel,
-      discharges: m.discharges, returns30: m.returns30, returns30_reviewable: m.returns30_reviewable, returns30_held_out: m.returns30_held_out, title,
-    };
+    return { month: m.month, label: monthLabel(m.month), complete: m.complete, reviewablePct: rPct, heldOutPct: hPct, discharges: m.discharges, returns30: m.returns30, returns30_reviewable: m.returns30_reviewable, returns30_held_out: m.returns30_held_out, title };
   });
-}
-
-// ── READMIT-LAYOUT-FIX (17 Sep 2026) — provisional-strip formatting + the chart's shared y-scale ────
-
-/** `D Mon` (e.g. `19 Aug`) — no leading zero, no year. The day is already an IST calendar day. */
-export function shortDate(day: string): string {
-  const [y, m, d] = day.split('-').map(Number);
-  return `${d} ${MONTH_ABBR[(m || 1) - 1]}`;
-}
-
-/** `D Mon – D Mon`, year appended to BOTH ends only when the two days fall in different years —
- *  same-year ranges (the common case) stay bare so the strip's one line never wraps. */
-export function shortDateRange(startDay: string, endDay: string): string {
-  const startYear = startDay.slice(0, 4), endYear = endDay.slice(0, 4);
-  return startYear === endYear
-    ? `${shortDate(startDay)} – ${shortDate(endDay)}`
-    : `${shortDate(startDay)} ${startYear} – ${shortDate(endDay)} ${endYear}`;
-}
-
-/** 1-decimal percent — the provisional strip's own rounding (every other rate on this module is 2dp). */
-export const fmtPct1 = (v: number | null): string => (v == null ? '—' : `${v.toFixed(1)}%`);
-
-/** The provisional strip's line 1 (READMIT-LAYOUT-FIX, 17 Sep 2026). Counts always show; the rate
- *  appends only where `ratesAllowed` — the EHBR gate rule is unchanged (R7-4), just relocated off the
- *  tile grid. */
-export function recentStripLine(rec: RecentBlock, ratesAllowed: boolean): string {
-  const parts = [
-    `${fmtCount(rec.returnsSoFar)} returns of ${fmtCount(rec.discharges)} discharges (${shortDateRange(rec.windowStart, rec.windowEnd)})`,
-    `audited ${fmtCount(rec.audited)}`,
-    `proposed avoidable ${fmtCount(rec.proposedAvoidable)}`,
-    `needs adjudication ${fmtCount(rec.needsAdjudication)}`,
-  ];
-  if (ratesAllowed) parts.push(`provisional rate ${fmtPct1(rec.provisionalRate)}`);
-  return parts.join(' · ');
-}
-
-/** The trend chart's one shared y-scale max: the tallest bar across every complete month's stacked
- *  total AND every provisional height, with a small floor so a flat trend still plots legibly. Pulled
- *  out of the component so the "nothing overflows" invariant is unit-testable. */
-export function maxTrendPct(bars: readonly TrendBar[], floor = 2): number {
-  return Math.max(floor, ...bars.map((b) => Math.max((b.reviewablePct ?? 0) + (b.heldOutPct ?? 0), b.provisionalPct ?? 0)));
-}
-
-/** Both label rows for a trend column, row 2 always a STRING (never null) so every month's label
- *  block has the same fixed height whether or not it carries a `n/N so far` count. */
-export function trendLabelRows(bars: readonly TrendBar[]): Array<{ month: string; row1: string; row2: string }> {
-  return bars.map((b) => ({ month: b.month, row1: b.label, row2: b.soFarLabel ?? '' }));
 }
 
 /** The facility the module shows: the R6 filter's hospital when it names one the rates know, else the
@@ -780,50 +638,13 @@ export function moduleFacility(rates: RatesResult, r6Facility: string | null | u
   return byName(r6Facility) ?? byName(tab) ?? rates.facilities.find((f) => f.gate.firstDischargeDay != null) ?? rates.facilities[0] ?? null;
 }
 
-/** IST `YYYY-MM-DD HH:MM IST` wall-clock stamp, or null when unparseable. Shared by `computedAtLabel`
- *  and the freshness line (READMIT-RECENT-VIEW, 17 Sep 2026) so the two clocks read identically. */
-export function istTimestamp(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return null;
-  const d = new Date(t + 5.5 * 3_600_000);
-  return `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)} IST`;
-}
-
 /** "computed at" stamp — IST wall clock, as the rest of the surface prints times. */
 export function computedAtLabel(iso: string | null | undefined): string {
-  const ts = istTimestamp(iso);
-  return ts ? `computed ${ts}` : '';
-}
-
-// ── READMIT-RECENT-VIEW (17 Sep 2026) — the freshness line, under the page subtitle ────────
-
-/** `lastCheckAt` is set only by the check route (POST /api/care/readmissions/check); null otherwise —
- *  it is per-instance, best-effort, same posture as every other module-level guard in this codebase. */
-export interface FreshnessInfo {
-  feedCurrentTo: string | null;
-  newestReturnAt: string | null;
-  lastAuditAt: string | null;
-  lastCheckAt: string | null;
-  /** Agent health (narrative leg + pipeline). Absent when the health read faulted. */
-  health?: { status: 'green' | 'red'; reasons: string[]; lastNarrativeAt: string | null };
-}
-export const FRESHNESS_NULL = '—';
-export const FRESHNESS_CADENCE = 'checks every 30 min';
-/** Brief item 10: appended after `checked just now: N new` when N > 0 — new pairs audit at the next cron tick. */
-export const FRESHNESS_AUDIT_PENDING = '— audits run within 30 min';
-
-/** PURE: the one-line freshness stamp. Every null renders as FRESHNESS_NULL; `checkedJustNow` is the
- *  live count from a just-completed /check press (the route's own `lastCheckAt` is not read here —
- *  the caller already has the fresher, in-session number). */
-export function freshnessLine(info: FreshnessInfo, checkedJustNow?: number | null): string {
-  const feed = istTimestamp(info.feedCurrentTo) ?? FRESHNESS_NULL;
-  const ret = istDay(info.newestReturnAt) ?? FRESHNESS_NULL;
-  const audit = istTimestamp(info.lastAuditAt) ?? FRESHNESS_NULL;
-  const base = `Data feed current to ${feed} · newest return ${ret} · last audit ${audit} · ${FRESHNESS_CADENCE}`;
-  if (typeof checkedJustNow !== 'number') return base;
-  const checked = `${base} · checked just now: ${checkedJustNow} new`;
-  return checkedJustNow > 0 ? `${checked} ${FRESHNESS_AUDIT_PENDING}` : checked;
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t + 5.5 * 3_600_000);
+  return `computed ${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)} IST`;
 }
 
 /** The card / case-page marker lines (R7-5 / R7-6) — exact copy; nothing else changes on the card. */

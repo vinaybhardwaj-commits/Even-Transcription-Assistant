@@ -15,7 +15,6 @@ import {
   upsertOperationalMetrics, upsertRoster, operationalActiveUids,
   type OperationalMetric,
 } from './doctor-metrics-store';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -44,10 +43,9 @@ async function refreshOperational(): Promise<number> {
 /** Rebuild the canonical roster from db13 doctors, tagged with audit/operational activity. */
 async function refreshRoster(): Promise<{ built: number; upserted: number }> {
   const [docRows, auditRows, opUids] = await Promise.all([
-    // Disabled doctors stay in: findings can still carry their uid. The row says disabled: true.
     metabaseQuery(`SELECT uid, name_with_prefix AS name, email, mobile,
-        karexpert_metadata__practitioner_id AS kx_id, coalesce(disabled, false) AS disabled
-      FROM doctors WHERE uid IS NOT NULL`),
+        karexpert_metadata__practitioner_id AS kx_id
+      FROM doctors WHERE uid IS NOT NULL AND coalesce(disabled, false) = false`),
     run(`SELECT DISTINCT doctor_uid FROM opd_note_audits WHERE app_source=$1 AND doctor_uid IS NOT NULL`, [APP]).catch(() => []),
     operationalActiveUids().catch(() => [] as string[]),
   ]);
@@ -60,7 +58,6 @@ async function refreshRoster(): Promise<{ built: number; upserted: number }> {
       doctor_uid: uid, name: String(r.name || ''), email: s(r.email), mobile: s(r.mobile),
       specialty: null, channel: null,
       audit_active: auditSet.has(uid), operational_active: opSet.has(uid),
-      disabled: r.disabled === true || r.disabled === 't' || r.disabled === 'true',
     };
   });
   const roster = buildRoster(inputs);
@@ -72,7 +69,6 @@ export interface RefreshResult { ok: true; operational_upserted: number; roster_
 
 /** Full daily refresh: operational first (so the roster can tag operational_active), then roster. */
 export async function refreshDoctorMetrics(): Promise<RefreshResult> {
-  assertOpdProductionWrite('doctor_metrics.refresh');
   const operational_upserted = await refreshOperational();
   const { built, upserted } = await refreshRoster();
   return { ok: true, operational_upserted, roster_built: built, roster_upserted: upserted };
