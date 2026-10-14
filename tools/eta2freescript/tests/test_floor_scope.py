@@ -83,7 +83,7 @@ def test_every_integer_counts_only_before_a_quantity_word(n):
     w = _words(n)
     for tail in ("", " reports", " o'clock", " percent", " minutes", " is fine"):
         assert floors.spoken_values(w + tail) == set(), (w, tail)
-    for tail in (" mg", " days", " mg twice a day"):
+    for tail in (" mg", " days", " mg every day"):
         assert floors.spoken_values(w + tail) == {Decimal(n)}, (w, tail)
     for tail in ("", " minutes", " percent"):
         assert _inv(strength=f"{n} mg")(w + tail)["count"] == 1, (w, tail)
@@ -403,7 +403,7 @@ def test_r4_a_spoken_value_excuses_only_a_field_of_its_own_kind():
     assert _inv(duration="40 days")("forty mg")["count"] == 1
     assert _inv(duration="2 weeks")("two weeks")["count"] == 0 and _inv(duration="2 weeks")("two tablets")["count"] == 1
     assert _inv(frequency="3 times")("three times")["count"] == 0 and _inv(frequency="3 times")("three days")["count"] == 1
-    assert _inv(frequency="2 daily")("two a day")["count"] == 0 and _inv(frequency="1 twice")("one twice")["count"] == 0
+    assert _inv(frequency="2 daily")("two a day")["count"] == 0 and _inv(frequency="1 twice")("one twice")["count"] == 1  # r6: "1 twice" carries no frequency unit
     assert _inv(strength="3 mg")("three a day")["count"] == 1
     assert floors.spoken_values("forty years old", "strength") == set()
     assert floors.spoken_values("forty years old", "duration") == {Decimal(40)}
@@ -450,7 +450,7 @@ def test_r5_a_spoken_value_excuses_only_a_replayed_value_of_the_same_unit():
     assert _inv(strength="100 IU")("one hundred international units")["count"] == 0
     assert _inv(duration="2 weeks")("two days")["count"] == 1 and _inv(duration="2 weeks")("two weeks")["count"] == 0
     # frequency words excuse a frequency only
-    assert _inv(frequency="2")("two doses")["count"] == 0
+    assert _inv(frequency="2")("two doses")["count"] == 1
     # a replayed number with no unit is excused by no word
     assert _inv(strength="500")("five hundred mg")["count"] == 1
     assert _inv(duration="40")("forty days")["count"] == 1
@@ -468,3 +468,29 @@ def test_r5_nul_inside_a_replayed_value_does_not_split_a_run():
                                  _consult("five hundred"))["count"] == 1
     assert floors._invented_core({"medicines": [{"name": "Paracetamol", "strength": "5\x0000"}]}, _syn("Medication: Paracetamol", [_prov("Paracetamol")]),
                                  _consult("500"))["count"] == 0
+
+
+def test_r6_a_frequency_is_excused_only_by_an_equal_frequency_unit():
+    assert _inv(frequency="every 6 hours")("I vomited six times")["count"] == 1
+    assert _inv(frequency="6 hourly")("six times")["count"] == 1
+    assert _inv(frequency="2")("two doses")["count"] == 1
+    assert _inv(frequency="1-0-1")("one dose")["count"] == 3  # three runs, none excused
+    assert _inv(frequency="2 times a day")("twice a day")["count"] == 0
+    assert _inv(frequency="2 times a day")("two times a day")["count"] == 0
+    assert _inv(frequency="2 times daily")("two a day")["count"] == 0
+    assert _inv(frequency="2 times a day")("two a week")["count"] == 1
+    assert _inv(frequency="2 times a day")("two times a week")["count"] == 1
+    assert _inv(frequency="every 6 hours")("every six hours")["count"] == 0
+    assert _inv(frequency="6 hourly")("every six hours")["count"] == 0
+    assert _inv(frequency="2 times")("two doses")["count"] == 0
+    assert _inv(frequency="2 times a day")("two doses")["count"] == 1
+    assert _inv(frequency="3 times a week")("three times a week")["count"] == 0
+    assert _inv(frequency="3 times a month")("three a month")["count"] == 0
+    assert _inv(frequency="3 times a year")("three times a month")["count"] == 1
+
+
+def test_r6_units_are_tracked_per_occurrence_not_per_number():
+    assert _inv(strength="5 mg/5 ml")("five ml")["count"] == 1
+    assert _inv(strength="5 mg/5 ml")("five mg")["count"] == 1
+    assert _inv(strength="5 mg/5 ml")("five mg and five ml")["count"] == 0
+    assert floors.replayed_units("5 mg/5 ml", "strength") == [("5", "mg"), ("5", "ml")]

@@ -368,13 +368,43 @@ _UNIT_WORDS = {
     "mg": "mg", "milligram": "mg", "g": "g", "gm": "g", "gms": "g", "gram": "g", "mcg": "mcg", "ug": "mcg", "microgram": "mcg",
     "ml": "ml", "millilitre": "ml", "milliliter": "ml", "l": "l", "litre": "l", "liter": "l", "iu": "iu", "unit": "iu", "kg": "kg",
     "day": "day", "week": "week", "month": "month", "year": "year",
-    "time": "freq", "dose": "freq", "daily": "freq", "twice": "freq", "thrice": "freq",
 }
 _FORM_WORDS = frozenset("tablet tab capsule cap spoon teaspoon tablespoon drop puff sachet patch lozenge ampoule vial injection".split())
 # a dosage form, "dose" and a body unit (kg) never excuse a strength: they name no strength unit
 _STRENGTH_UNITS = frozenset("mg g mcg ml l iu".split())
 _TIME_UNIT_SET = frozenset("day week month year".split())
-_KIND_UNITS = {"strength": _STRENGTH_UNITS, "duration": _TIME_UNIT_SET, "frequency": frozenset({"freq"})}
+_PERIODS = ("day", "week", "month", "year")
+# a frequency unit carries its period: freq:day, freq:week, freq:month, freq:year, freq:hour (every N hours, N hourly), freq:count (N times, N doses)
+_KIND_UNITS = {"strength": _STRENGTH_UNITS, "duration": _TIME_UNIT_SET}
+
+
+def _suits(field: str, u: str) -> bool:
+    return u.startswith("freq:") if field == "frequency" else u in _KIND_UNITS[field]
+
+
+def _period_after(toks: list[str], k: int) -> str | None:
+    """The period spoken at toks[k:]: "a day", "per week", "daily"; None when there is none."""
+    if toks[k:k + 1] == ["daily"]:
+        return "day"
+    if toks[k:k + 1] in (["a"], ["per"]) and toks[k + 1:k + 2] and toks[k + 1] in _PERIODS:
+        return toks[k + 1]
+    return None
+
+
+def _spoken_freq_unit(toks: list[str], i: int, j: int) -> str | None:
+    """The frequency unit of a number at toks[i:j], or None when it is not a frequency: "N times/doses [a day|daily]", "N daily",
+    "N a day/week/month/year", "N hourly", "every N hours"."""
+    w = toks[j] if j < len(toks) else ""
+    if w in ("time", "times", "dose", "doses"):
+        p = _period_after(toks, j + 1)
+        return f"freq:{p}" if p else "freq:count"
+    if w == "daily":
+        return "freq:day"
+    if w == "hourly" or (w in ("hour", "hours") and i > 0 and toks[i - 1] == "every"):
+        return "freq:hour"
+    if w == "a" and toks[j + 1:j + 2] and toks[j + 1] in _PERIODS:
+        return f"freq:{toks[j + 1]}"
+    return None
 
 
 def _unit_of(tok: str) -> str | None:
@@ -387,27 +417,41 @@ def _unit_of(tok: str) -> str | None:
     return None
 
 
-def _unit_at(toks: list[str], n: int, after_a: bool = False) -> str | None:
-    """The unit of the quantity word at toks[n] ("international units" -> "iu"); "N a day" is a frequency."""
+def _unit_at(toks: list[str], n: int) -> str | None:
+    """The unit of the quantity word at toks[n] ("international units" -> "iu")."""
     if n >= len(toks):
         return None
     if toks[n] == "international" and n + 1 < len(toks) and _unit_of(toks[n + 1]) == "iu":
         return "iu"
-    u = _unit_of(toks[n])
-    return "freq" if after_a and u in _TIME_UNIT_SET else u
+    return _unit_of(toks[n])
 
 
 _REPLAYED_UNIT = re.compile(r"(\d+(?:\.\d+)?)[ \t]*(?:international[ \t]+)?([a-z\u00b5\u03bc]+)")
 
 
-def replayed_units(value: str) -> dict[Decimal, set[str]]:
-    """The unit each number of a replayed value carries ("500 mg" -> {500: {mg}}); a number with no unit word is absent."""
-    out: dict[Decimal, set[str]] = {}
-    for m in _REPLAYED_UNIT.finditer((value or "").lower().replace(_CUT, "")):
-        w = re.sub(r"^[\u00b5\u03bc]", "mc", m.group(2))  # µg = mcg
-        u = _unit_of(w) or ("iu" if "international" in m.group(0) and w.rstrip("s") == "unit" else None)
-        if u:
-            out.setdefault(Decimal(m.group(1)), set()).add(u)
+_AFTER_NUMBER = re.compile(r"[ \t]*(?:international[ \t]+)?([a-z\u00b5\u03bc]+)")
+_REPLAYED_FREQ = re.compile(r"[ \t]*(?:(hourly|daily)\b|(?:times?|doses?)\b(?:[ \t]*(?:(?:a|per|each)[ \t]+(day|week|month|year)s?\b|(daily)\b))?"
+                            r"|(?:a|per)[ \t]+(day|week|month|year)s?\b)")
+
+
+def replayed_units(value: str, field: str) -> list[tuple[str, str | None]]:
+    """(number text, unit) for each number OCCURRENCE of a replayed value, in order; the unit is None when it carries none. Strength and duration:
+    "500 mg" -> mg. Frequency: the unit carries its period ("2 times a day" -> freq:day, "every 6 hours" -> freq:hour, "2 times" -> freq:count);
+    "2" and "1-0-1" carry none."""
+    text = (value or "").lower().replace(_CUT, "")
+    out: list[tuple[str, str | None]] = []
+    for m in _NUMBER.finditer(text):
+        u = None
+        if field == "frequency":
+            if re.search(r"every[ \t]+$", text[:m.start()]) and re.match(r"[ \t]*hours?\b", text[m.end():]):
+                u = "freq:hour"
+            elif (f := _REPLAYED_FREQ.match(text, m.end())):
+                u = ("freq:hour" if f.group(1) == "hourly" else "freq:day" if f.group(1) == "daily" or f.group(3)
+                     else f"freq:{f.group(2) or f.group(4)}" if f.group(2) or f.group(4) else "freq:count")
+        elif (w := _AFTER_NUMBER.match(text, m.end())):
+            word = re.sub(r"^[\u00b5\u03bc]", "mc", w.group(1))  # µg = mcg
+            u = _unit_of(word) or ("iu" if "international" in w.group(0) and word.rstrip("s") == "unit" else None)
+        out.append((m.group(0), u))
     return out
 
 
@@ -417,25 +461,31 @@ def spoken_units(text: str) -> set[tuple[Decimal, str]]:
     token, after an optional "a", "an" or "of", is a quantity word, with only spaces or tabs (and that one a/an/of) between them: any other
     character is a break. The unit is the canonical unit of that word ("form" for a dosage form). A bare "point" counts only after a number."""
     toks, spans = _scan_numbers(text)
-    cands: list[tuple[Decimal, int]] = []  # (value, index after its last token)
+    cands: list[tuple[Decimal, int, int]] = []  # (value, index of its first token, index after its last token)
     k = 0
     while k < len(spans):
         v, i, j, kind = spans[k]
         nxt = spans[k + 1] if k + 1 < len(spans) else None
         if (kind == "num" and j - i == 1 and toks[i] in _UNITS and 1 <= _UNITS[toks[i]] <= 9 and nxt and nxt[1] == j and nxt[3] == "num"
                 and toks[j] in _TENS and v == _UNITS[toks[i]]):  # colloquial hundreds: "two fifty", "two twenty five" = 250, 225
-            cands.append((v * 100 + nxt[0], nxt[2]))
+            cands.append((v * 100 + nxt[0], i, nxt[2]))
             k += 2
             continue
         if kind not in ("lead_point", "digit"):
-            cands.append((v, j))
+            cands.append((v, i, j))
         k += 1
     out: set[tuple[Decimal, str]] = set()
-    for v, j in cands:  # the ONE quantity-context check
-        skip = bool(toks[j:j + 1]) and toks[j] in ("a", "an", "of")
-        u = _unit_at(toks, j + 1 if skip else j, skip and toks[j] == "a")
+    for v, i, j in cands:  # the ONE quantity-context check
+        u = _spoken_freq_unit(toks, i, j)
+        if u is None:
+            skip = bool(toks[j:j + 1]) and toks[j] in ("a", "an", "of")
+            u = _unit_at(toks, j + 1 if skip else j)
         if u:
             out.add((v, u))
+    for t, w in enumerate(toks):  # twice / thrice are frequencies of 2 and 3
+        if w in ("twice", "thrice"):
+            p = _period_after(toks, t + 1)
+            out.add((Decimal(2 if w == "twice" else 3), f"freq:{p}" if p else "freq:count"))
     # "1/2" in digits counts as 0.5 only before a quantity word
     for m in _SLASH_HALF.finditer((text or "").lower()):
         u = _unit_of(m.group(1))
@@ -446,18 +496,14 @@ def spoken_units(text: str) -> set[tuple[Decimal, str]]:
 
 def spoken_values(text: str, field: str | None = None) -> set[Decimal]:
     """The values spoken_units() finds. With `field` ("strength", "duration", "frequency") only those whose unit suits that kind (a
-    strength unit, a time unit, "freq"); a dosage form suits no kind. Without it, every value."""
-    ok = _KIND_UNITS.get(field) if field else None
-    return {v for v, u in spoken_units(text) if ok is None or u in ok}
+    strength unit, a time unit, "freq:<period>"); a dosage form suits no kind. Without it, every value."""
+    return {v for v, u in spoken_units(text) if not field or _suits(field, u)}
 
 
-def excused(spoken: set[tuple[Decimal, str]], field: str, value: str, tok: str) -> bool:
-    """Does a spoken quantity excuse the number `tok` of the replayed `value`? Only if its unit EQUALS the replayed number's unit
-    (frequency: the "freq" unit). A replayed number with no unit is excused by nothing."""
-    d = Decimal(tok)
-    if field == "frequency":
-        return (d, "freq") in spoken
-    return any((d, u) in spoken for u in replayed_units(value).get(d, ()) if u in _KIND_UNITS[field])
+def excused(spoken: set[tuple[Decimal, str]], field: str, unit: str | None, tok: str) -> bool:
+    """Does a spoken quantity excuse the number `tok` that carries `unit` in a replayed value (see replayed_units)? Only if the spoken
+    unit EQUALS it, for every field alike. A number with no unit is excused by nothing."""
+    return unit is not None and _suits(field, unit) and (Decimal(tok), unit) in spoken
 
 
 _SLASH_HALF = re.compile(r"(?<![\d/.])1[ \t]*/[ \t]*2(?![\d/])[ \t]+(?:(?:a|an|of)[ \t]+)?([a-z]+)")
@@ -693,8 +739,8 @@ def _invented_core(rx: dict, art: dict | None, consult: Consult, scope: str | No
                 heard |= set(_DIGITS.findall(said))
                 spoken |= spoken_units(said)
         # a number spoken in words is heard only as a whole value: an rx number equals a spoken value or it is not heard that way
-        bad = [(k, r) for k in val for tok in _NUMBER.findall(val[k])
-               if not excused(spoken, k, val[k], tok) for r in _DIGITS.findall(tok) if r not in heard]
+        bad = [(k, r) for k in val for tok, u in replayed_units(val[k], k)
+               if not excused(spoken, k, u, tok) for r in _DIGITS.findall(tok) if r not in heard]
         offending += len(bad)
         sources += [_run_source(m, k, r, art, match, scope) for k, r in bad]
     return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched,
