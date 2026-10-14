@@ -433,8 +433,6 @@ test_scanner_error_anywhere_is_killed() {
   ctl_engaged 1 '{"kill": false, "modes": {}, "note": "unterminated}'; assert_rc $? 0 "unterminated string"
   ctl_engaged 1 '{"kill": false, "modes": {}, "list": [1, 2}'; assert_rc $? 0 "unbalanced ["
   ctl_engaged 1 '{"kill": false, "modes": {}, "list": [1, 2]]}'; assert_rc $? 0 "extra ]"
-  ctl_engaged 1 '{"kill": false, "modes": {}, "kill": true}'; assert_rc $? 0 "escaped key after kill"
-  ctl_engaged 1 '{"kill": false, "modes": {}, "kill": false}'; assert_rc $? 0 "escaped key spelling kill"
   assert_eq "$(current_mode)" "shadow" "shadow after every scanner error"
 }
 
@@ -476,4 +474,97 @@ test_payload_cap_4096_bytes_before_awk() {
   ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 1 "3 KB payload is still read"
   pad="$(head -c 4200 /dev/zero | tr '\0' x)"
   ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 0 "4.2 KB payload is over the cap"
+}
+
+# ---- R5 ----
+# 0 when file $1 holds at least one backslash byte (the editing tool strips backslashes from source, so payloads are built with printf)
+has_bs() { [ "$(LC_ALL=C awk 'index($0, sprintf("%c", 92)) { n++ } END { print n + 0 }' "$1")" -ge 1 ]; }
+
+test_escaped_key_payloads_hold_real_backslashes_and_are_killed() {
+  use_ctl
+  local bs p
+  bs="$(printf '\134')"
+  p='{"kill": false, "modes": {}, "'"${bs}"'u006bill": true}'
+  ctl_engaged 1 "$p"; assert_rc $? 0 "escaped key after kill"
+  has_bs "$STATE_DIR/control.last" && ok || fail "control.last holds no backslash byte (escaped key after kill)"; od -c "$STATE_DIR/control.last" >>"$T/od_escaped.txt"
+  assert_eq "$(current_mode)" "shadow" "shadow"
+  p='{"kill": false, "modes": {}, "k'"${bs}"'u0069ll": true}'
+  ctl_engaged 1 "$p"; assert_rc $? 0 "escaped key spelling kill"
+  has_bs "$STATE_DIR/control.last" && ok || fail "control.last holds no backslash byte (escaped kill spelling)"; od -c "$STATE_DIR/control.last" >>"$T/od_escaped.txt"
+  p='{"kill": false, "modes": {"opd9": "heal"}, "x'"${bs}"'"y": 1}'
+  ctl_engaged 1 "$p"; assert_rc $? 0 "escaped quote in a key"
+  has_bs "$STATE_DIR/control.last" && ok || fail "control.last holds no backslash byte (escaped quote)"; od -c "$STATE_DIR/control.last" >>"$T/od_escaped.txt"
+
+}
+
+# MAIN_PID empty: the loop does not run (fail closed) and says so in the audit log
+test_loop_with_empty_main_pid_does_not_run() {
+  load_libs
+  set_subs 4611 4612
+  ( eval "$(guardian_funcs)"; MAIN_PID=""; control_loop ) </dev/null >/dev/null 2>&1
+  assert_rc $? 0 "loop returned at once"
+  assert_eq "$(alive_of ctl)" "0" "the subscriber command never started"
+  assert_has "$(cat "$AUDIT_LOG" 2>/dev/null)" "MAIN_PID empty" "audit line"
+}
+
+# run(): if sh cannot report main's pid (first call prints nothing), MAIN_PID falls back to $$ and the loops still run
+test_run_falls_back_to_dollar_dollar_when_main_pid_is_empty() {
+  load_libs
+  set_subs 4621 4622
+  printf '#!/bin/bash\nn=$(cat "%s/shcount" 2>/dev/null || echo 0); echo $((n + 1)) >"%s/shcount"\n[ "$n" = 0 ] && exit 0\nexec /bin/sh "$@"\n' "$T" "$T" >"$T/bin/sh"
+  chmod +x "$T/bin/sh"
+  start_guardian
+  wait_alive ctl 1; wait_alive sub 1
+  sleep 4
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "11" "loops still running with the \$\$ fallback"
+  assert_eq "$(cat "$T/shcount")" "3" "fake sh was used for main (empty) and for the two loops"
+  kill -TERM "$GP"; wait "$GP" 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "loops stop after TERM"
+}
+
+# fake ps: for the parent read (-o ppid=) it prints nothing according to $T/psmode, otherwise it runs the real ps
+mk_fake_ps() {
+  cat >"$T/psfake" <<'F'
+#!/bin/bash
+case "$*" in
+  *ppid=*)
+    n=$(cat "$T/pscount" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$T/pscount"
+    case "$(cat "$T/psmode")" in
+      dead) exit 0 ;;
+      flaky) [ $((n % 3)) -ne 0 ] && exit 0 ;;
+    esac ;;
+esac
+exec /bin/ps "$@"
+F
+  chmod +x "$T/psfake"
+}
+
+test_two_empty_ps_reads_in_a_row_do_not_end_the_loop() {
+  load_libs
+  set_subs 4631 4632
+  mk_fake_ps; echo flaky >"$T/psmode"
+  export GUARDIAN_PS="$T/psfake"
+  start_loops control_loop
+  local i=0
+  while [ "$i" -lt 60 ] && [ "$(cat "$T/pscount" 2>/dev/null || echo 0)" -lt 8 ]; do sleep 0.25; i=$((i + 1)); done
+  assert_eq "$([ "$(cat "$T/pscount")" -ge 8 ] && echo enough)" "enough" "the loop made 8+ parent reads"
+  assert_eq "$(alive_of ctl)" "1" "loop survived runs of 2 empty reads that were followed by a good read"
+  assert_not "$(cat "$AUDIT_LOG" 2>/dev/null)" "empty ps reads" "no exit audit line"
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+}
+
+test_three_empty_ps_reads_in_a_row_end_the_loop_with_an_audit_line() {
+  load_libs
+  set_subs 4641 4642
+  mk_fake_ps; echo dead >"$T/psmode"
+  export GUARDIAN_PS="$T/psfake"
+  start_loops control_loop
+  wait_alive ctl 1 20
+  wait_alive ctl 0 40
+  assert_eq "$(alive_of ctl)" "0" "loop and its subscriber gone after 3 empty reads"
+  assert_has "$(cat "$AUDIT_LOG" 2>/dev/null)" "3 empty ps reads in a row" "audit line written on exit"
+  assert_eq "$([ "$(cat "$T/pscount")" -ge 3 ] && echo yes)" "yes" "at least 3 reads were made"
+  assert_eq "$([ "$(cat "$T/pscount")" -le 5 ] && echo yes)" "yes" "it did not read forever"
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
 }

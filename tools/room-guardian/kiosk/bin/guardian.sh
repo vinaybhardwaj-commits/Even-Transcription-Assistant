@@ -33,22 +33,33 @@ tick() {
 # Loop self-supervision. The Guardian never signals a pid it remembers: under launchd a process-group kill of the job (or a SIGKILL of main)
 # takes main down without running a trap, and the loops sit in groups of their own. So each loop checks, once per second, that main is still
 # its parent. When main is gone the loop signals ONLY its own process group (signal target 0 = the caller's group, which it leads) and exits.
-# MAIN_PID is set by run(). Empty (tests that call a loop on its own) = no check.
+# MAIN_PID is set by run(); a loop started with it empty does not run.
 MAIN_PID=""
 LOOP_ME=""
+LOOP_MISS=0
 
 # Run first inside a loop subshell. Job control off, so the loop's pipeline stays in the loop's group; LOOP_ME = this subshell's pid.
+# Fails closed: no MAIN_PID means no supervisor to watch for, so the loop does not run.
 loop_init() {
   set +m
+  if [ -z "$MAIN_PID" ]; then audit "loop exits: MAIN_PID empty"; exit 0; fi
   LOOP_ME="$(exec sh -c 'echo $PPID')"
+  LOOP_MISS=0
 }
 
 # 0 while main is alive and is still this loop's parent (a reused main pid does not pass: the parent link is checked, not just kill -0).
+# An empty ps read (a failed fork) is not "main gone": it counts as a miss and the loop leaves only after 3 misses in a row.
 loop_parent_ok() {
   local info
-  [ -n "$MAIN_PID" ] || return 0
+  [ -n "$MAIN_PID" ] || return 1
   kill -0 "$MAIN_PID" 2>/dev/null || return 1
-  info="$(/bin/ps -o ppid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  info="$("${GUARDIAN_PS:-/bin/ps}" -o ppid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  if [ -z "$info" ]; then
+    LOOP_MISS=$((LOOP_MISS + 1))
+    if [ "$LOOP_MISS" -ge 3 ]; then audit "loop exits: 3 empty ps reads in a row"; return 1; fi
+    return 0
+  fi
+  LOOP_MISS=0
   [ "$info" = "$MAIN_PID" ]
 }
 
@@ -130,6 +141,7 @@ run() {
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
   MAIN_PID="$(exec sh -c 'echo $PPID')"
+  [ -n "$MAIN_PID" ] || MAIN_PID=$$
   trap 'exit 0' TERM INT HUP
   # Job control gives each loop a process group of its own, which the loop signals itself (see loop_orphaned) when main is gone.
   # Main sends no signal to any pid: after TERM, an exit or a SIGKILL the loops notice within about 2 s and stop on their own.
