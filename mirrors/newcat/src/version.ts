@@ -1,0 +1,7 @@
+export const ENGINE_VERSION = 'newcat/0.1.0'
+export const EXTRACTOR_VERSION = 'extract/0.1.0'
+export const RULE_PACK_VERSION = 'rules/0.1.0'
+export const API_VERSION = 'v1'
+export const CAPABILITY_VERSION = '1.0.0'
+export const ABSTENTION_POLICY_ID = 'abstention-policy/0.2.0'
+export const QUESTION_SET_ID = 'audit-decisions/0.3.0'

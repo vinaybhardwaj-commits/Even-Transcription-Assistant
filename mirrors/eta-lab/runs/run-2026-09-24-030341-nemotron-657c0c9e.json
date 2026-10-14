@@ -1,0 +1,81 @@
+{
+ "run_id": "run-2026-09-24-030341-nemotron-657c0c9e",
+ "trainer": "train_nemotron.py",
+ "base_model": "nvidia/Nemotron-3-Diarization",
+ "base_model_snapshot": "a435e9867d79e789e90053f9b6d6834053af564a",
+ "base_model_nemo_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+ "dataset_id": "diar-train-merged-2026-09-24-657c0c9e",
+ "train_n": 161,
+ "val_n": 5,
+ "val_holdout_room_day": "rd_yhh6kexm",
+ "skipped_windows": [
+  [
+   "bw_xd6gt5sp_1790131500000_primary",
+   "9 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790157600000_primary",
+   "17 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790156700000_primary",
+   "11 speakers"
+  ],
+  [
+   "bw_7tedad86_1790136900000_primary",
+   "9 speakers"
+  ]
+ ],
+ "max_steps": 44,
+ "lr": 1e-05,
+ "warmup_steps": 2,
+ "batch_size": 8,
+ "session_len_sec": 105,
+ "seed": 42,
+ "precision": "bf16-mixed",
+ "nemo_speech_commit": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+ "git_sha": "adc1c1ca030b99b78e71e7dfbfdcd63c0114d728",
+ "env_versions": {
+  "torch": "2.14.0",
+  "lightning": "2.4.0",
+  "nemo-toolkit": "3.1.0+cf724ac33",
+  "numpy": "2.5.3"
+ },
+ "started_at": "2026-09-24T03:03:41Z",
+ "status": "OK",
+ "reason": "real run on the verified nightly dataset; quality judged only by held-out evaluation (V5 + bench20 vs pyannote.ai)",
+ "metrics": {
+  "loss": 0.11778684705495834,
+  "ats_loss": 0.045922618359327316,
+  "pil_loss": 0.02884313091635704,
+  "activity_loss": 0.16836215555667877,
+  "phantom_loss": 0.00492763752117753,
+  "learning_rate": 2.6111647457582876e-06,
+  "train_f1_acc": 0.8426307439804077,
+  "train_precision": 0.8090522885322571,
+  "train_recall": 0.8791182637214661,
+  "train_f1_acc_ats": 0.7593944668769836,
+  "train_spk_count_mae": 0.25,
+  "train_spk_count_acc": 0.75,
+  "val_loss": 0.25271621346473694,
+  "val_ats_loss": 0.2738109529018402,
+  "val_pil_loss": 0.10762162506580353,
+  "val_activity_loss": 0.2052256166934967,
+  "val_phantom_loss": 0.009344530291855335,
+  "val_f1_acc": 0.8521972894668579,
+  "val_precision": 0.8818253874778748,
+  "val_recall": 0.8254186511039734,
+  "val_f1_acc_ats": 0.6788780689239502,
+  "val_spk_count_mae": 1.0,
+  "val_spk_count_acc": 0.20000000298023224
+ },
+ "best_val_metric": "val_f1_acc",
+ "best_val_score": 0.8521972894668579,
+ "last_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/nemotron-proof1/run-2026-09-24-030341-nemotron-657c0c9e.nemo",
+ "last_nemo_sha256": "1f2b9e7143efeb29c6e865db1b500fa9b3234e9716a220ecc4144c86780712a8",
+ "last_weights_sha256": "f476b9d2d9182c55de31a271156654602b0e48ea8ae6d30f6dab46dfedca051c",
+ "best_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/nemotron-proof1/run-2026-09-24-030341-nemotron-657c0c9e-best.nemo",
+ "best_nemo_sha256": "a62d09f33a14ac908c36eb679e2bbd0cefe71934e2534251ca125aacd6481a03",
+ "best_weights_sha256": "1e5fff012114c22e5a1358c0884a44538df7628dbc95feb737e5a7ac64323f7c",
+ "checkpoint_r2_key": null
+}

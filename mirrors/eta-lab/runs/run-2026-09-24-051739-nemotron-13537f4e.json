@@ -1,0 +1,216 @@
+{
+ "run_id": "run-2026-09-24-051739-nemotron-13537f4e",
+ "trainer": "train_nemotron.py",
+ "base_model": "nvidia/Nemotron-3-Diarization",
+ "base_model_snapshot": "a435e9867d79e789e90053f9b6d6834053af564a",
+ "base_model_nemo_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+ "dataset_id": "diar-train-clean-2026-09-24-13537f4e",
+ "train_n": 116,
+ "val_n": 34,
+ "val_holdout_room_day": null,
+ "skipped_windows": [
+  [
+   "bw_xd6gt5sp_1790131500000_primary",
+   "9 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790157600000_primary",
+   "17 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790156700000_primary",
+   "11 speakers"
+  ],
+  [
+   "bw_7tedad86_1790136900000_primary",
+   "9 speakers"
+  ]
+ ],
+ "excluded_test_room_days": [
+  "rd_3629fkar",
+  "rd_5b5kmjeq",
+  "rd_7g2ytyta",
+  "rd_93tcdc4c",
+  "rd_au3vmzsm",
+  "rd_djmbtzph",
+  "rd_f4hzv5sj",
+  "rd_jqj96amk",
+  "rd_kp4c7pp6",
+  "rd_m4rft4fy",
+  "rd_sp5dezef",
+  "rd_tcqaam5c",
+  "rd_u579utrq",
+  "rd_vc28prfr",
+  "rd_yhh6kexm"
+ ],
+ "val_room_days": [
+  "rd_4fsw6f6y",
+  "rd_xrn7wjsf",
+  "rd_yck5kdc2"
+ ],
+ "train_room_days": [
+  "rd_7usy23ex",
+  "rd_9q4u73rr",
+  "rd_aeeu5u4j",
+  "rd_errdkjhe",
+  "rd_ntajfras",
+  "rd_pw5gaugg",
+  "rd_qjw6srbs",
+  "rd_tp4hcf8s",
+  "rd_u6kdhc3b"
+ ],
+ "manifest_counts": {
+  "source": 173,
+  "excluded": 19,
+  "train": 120,
+  "val": 34
+ },
+ "max_steps": 600,
+ "lr": 1e-05,
+ "warmup_steps": 20,
+ "batch_size": 8,
+ "session_len_sec": 105,
+ "seed": 42,
+ "precision": "bf16-mixed",
+ "nemo_speech_commit": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+ "git_sha": "b8a992fe38f3055e57a88e56cceb4edc78f65ef8",
+ "env_versions": {
+  "torch": "2.14.0",
+  "lightning": "2.4.0",
+  "nemo-toolkit": "3.1.0+cf724ac33",
+  "numpy": "2.5.3"
+ },
+ "started_at": "2026-09-24T05:17:40Z",
+ "status": "OK",
+ "reason": "real run on the verified nightly dataset; quality judged only by held-out evaluation (V5 + bench20 vs pyannote.ai)",
+ "metrics": {
+  "loss": 0.13831408321857452,
+  "ats_loss": 0.06771359592676163,
+  "pil_loss": 0.03971328213810921,
+  "activity_loss": 0.17939633131027222,
+  "phantom_loss": 0.01902567222714424,
+  "learning_rate": 3.240370460844133e-06,
+  "train_f1_acc": 0.8311617970466614,
+  "train_precision": 0.8647372126579285,
+  "train_recall": 0.8000971078872681,
+  "train_f1_acc_ats": 0.6921783089637756,
+  "train_spk_count_mae": 0.375,
+  "train_spk_count_acc": 0.625,
+  "val_loss": 0.07230199128389359,
+  "val_ats_loss": 0.04800531640648842,
+  "val_pil_loss": 0.018543699756264687,
+  "val_activity_loss": 0.0901300460100174,
+  "val_phantom_loss": 0.013278540223836899,
+  "val_f1_acc": 0.7759156227111816,
+  "val_precision": 0.8662054538726807,
+  "val_recall": 0.7722193598747253,
+  "val_f1_acc_ats": 0.6490949392318726,
+  "val_spk_count_mae": 0.5588235259056091,
+  "val_spk_count_acc": 0.6176470518112183
+ },
+ "best_val_metric": "val_count_mae_vs_teacher",
+ "best_val_score": 0.7647058823529411,
+ "best_step": 0,
+ "stop_reason": "no val-count improvement for 4 checks (best 0.765 at step 0)",
+ "count_curve": [
+  {
+   "step": 0,
+   "val_count_mae_vs_teacher": 0.7647,
+   "val_count_bias": 0.3529,
+   "v5_count_mae_vs_V": 0.4,
+   "v5_counts": [
+    5,
+    7,
+    4,
+    3,
+    4
+   ]
+  },
+  {
+   "step": 50,
+   "val_count_mae_vs_teacher": 0.7647,
+   "val_count_bias": -0.5882,
+   "v5_count_mae_vs_V": 1.4,
+   "v5_counts": [
+    5,
+    5,
+    2,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 100,
+   "val_count_mae_vs_teacher": 0.7647,
+   "val_count_bias": -0.6471,
+   "v5_count_mae_vs_V": 1.4,
+   "v5_counts": [
+    5,
+    5,
+    2,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 150,
+   "val_count_mae_vs_teacher": 0.8235,
+   "val_count_bias": -0.7059,
+   "v5_count_mae_vs_V": 1.2,
+   "v5_counts": [
+    4,
+    5,
+    2,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 200,
+   "val_count_mae_vs_teacher": 0.8235,
+   "val_count_bias": -0.7059,
+   "v5_count_mae_vs_V": 1.2,
+   "v5_counts": [
+    4,
+    5,
+    2,
+    3,
+    3
+   ]
+  }
+ ],
+ "count_selection_note": "best checkpoint = lowest val-window count error vs teacher; V5 counts are logged per checkpoint but NOT used to select or stop",
+ "last_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-clean-2026-09-24-13537f4e-nemotron/run-2026-09-24-051739-nemotron-13537f4e.nemo",
+ "last_nemo_sha256": "6848889fd6d95eb1a3b139b0207280234bf1392eac032f04f13391859a3f2ec5",
+ "last_weights_sha256": "7ca31428eb1935183e0ba2c84e27cf154e8c95f486c7d5f9408152010e9e9fb3",
+ "best_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-clean-2026-09-24-13537f4e-nemotron/run-2026-09-24-051739-nemotron-13537f4e-best.nemo",
+ "best_nemo_sha256": "df544903f9ddced2b7dd56a6e5b1271c5ba8440656ba6dc37bdbe656ce5d50b8",
+ "best_weights_sha256": "957b5315847c77fbec9e3684c5721e82bf5a9f85af6b16f4bb5fb804ec2e0001",
+ "checkpoint_r2_key": null,
+ "checkpoint_copies": [
+  {
+   "which": "last_nemo",
+   "gcp-l4": {
+    "path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-clean-2026-09-24-13537f4e-nemotron/run-2026-09-24-051739-nemotron-13537f4e.nemo",
+    "sha256": "6848889fd6d95eb1a3b139b0207280234bf1392eac032f04f13391859a3f2ec5"
+   },
+   "box(eta-lab-t4)": {
+    "path": "/home/eta/eta-train/runs/run-2026-09-24-051739-nemotron-13537f4e/run-2026-09-24-051739-nemotron-13537f4e.nemo",
+    "sha256": "6848889fd6d95eb1a3b139b0207280234bf1392eac032f04f13391859a3f2ec5"
+   },
+   "identical": true
+  },
+  {
+   "which": "best_nemo",
+   "gcp-l4": {
+    "path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-clean-2026-09-24-13537f4e-nemotron/run-2026-09-24-051739-nemotron-13537f4e-best.nemo",
+    "sha256": "df544903f9ddced2b7dd56a6e5b1271c5ba8440656ba6dc37bdbe656ce5d50b8"
+   },
+   "box(eta-lab-t4)": {
+    "path": "/home/eta/eta-train/runs/run-2026-09-24-051739-nemotron-13537f4e/run-2026-09-24-051739-nemotron-13537f4e-best.nemo",
+    "sha256": "df544903f9ddced2b7dd56a6e5b1271c5ba8440656ba6dc37bdbe656ce5d50b8"
+   },
+   "identical": true
+  }
+ ]
+}

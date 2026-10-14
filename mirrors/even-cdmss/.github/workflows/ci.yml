@@ -1,0 +1,70 @@
+# CI — the repo's FIRST general enforcement gate (Architecture Governance Slice 1, Part D).
+# Distinct from the report-only ddx-benchmark.yml: every step here is a HARD gate.
+#
+#   1. architecture:check — the four import-boundary rules + the manifest-coverage rule
+#      (scripts/architecture-check.mjs; declarative config, reads source as text).
+#   2. architecture map staleness (System Map Stage 1, Part 4) — regenerate
+#      lib/architecture/map.generated.ts and hard-fail on any diff: the committed map must
+#      always match what the code actually is (generated-not-authored, made enforceable).
+#   3. typecheck — full-repo `tsc --noEmit`. Vercel's `next build` typechecks only the app
+#      graph, so this is the first thing anywhere that gates the WHOLE repo (tests included);
+#      Slice 1 Part 0 greened the 5 baseline errors to make this a straight hard gate.
+#   4. test — the full lib suite (incl. the 5 clinical-semantics tests + the map-gen tests).
+#
+# Pure static + unit verification: no secrets, no network calls beyond npm ci, no admin token.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history. Several tests pin byte-identity with `git show` / `git diff`
+      # against ancestor commits (f4a67ee, 6f5cfa81, 9c440fcc). The action default
+      # is depth 1, which omits those objects and fails the suite before any assertion.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          # 22 (not the ddx-benchmark idiom's 20): `node --test` only glob-expands its
+          # "lib/**/__tests__/*.test.ts" pattern from Node 21+, and 22 LTS matches the
+          # local dev environment (v22.20). Deviation from the PRD's "node-version 20" —
+          # flagged in the Slice 1 build report.
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: architecture boundaries
+        run: npm run architecture:check
+      - name: architecture map is current
+        run: npm run architecture:map && git diff --exit-code lib/architecture/map.generated.ts
+      # Reasoning Observability Stage 0 — the prompt registry is generated-not-authored:
+      # regenerate and hard-fail on any diff, exactly like the architecture map gate above.
+      - name: reasoning registry is current
+        run: npm run reasoning:registry && git diff --exit-code data/reasoning-registry/prompts.generated.json
+      # Reasoning Observability Stage 4 — governed-layer HARD GATE (exit 1): no model call
+      # may bypass tracedChat/governedChat, and the concordance fold must hold. Every direct
+      # site was migrated in Stage 4; a new one fails CI here.
+      - name: reasoning governance
+        run: npm run reasoning:governance
+      # The OPD engine changelog is surfaced IN-PRODUCT on /admin/opd-audit/how-it-works, so a
+      # shipped engine version with no entry is a scoring change a clinician can see in their
+      # numbers and cannot look up. 0.81.15/16/17 all shipped undocumented before this gate.
+      - name: opd changelog covers every shipped engine version
+        run: npm run changelog:coverage
+      # next-env.d.ts is gitignored (repo policy); `next dev/build` regenerates it locally.
+      # Without it, tsc lacks Next's type-reference chain (styled-jsx's `jsx` prop, route types)
+      # and reports errors that don't exist in any real environment — regenerate it here.
+      - name: regenerate next type refs
+        run: |
+          printf '/// <reference types="next" />\n/// <reference types="next/image-types/global" />\n' > next-env.d.ts
+      - name: typecheck (full repo)
+        run: npm run typecheck
+      - name: tests
+        run: npm test

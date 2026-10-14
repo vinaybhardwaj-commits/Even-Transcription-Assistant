@@ -1,0 +1,33 @@
+{
+ "id": "q1Bs8d",
+ "kind": "link",
+ "room": "OPD 5",
+ "date": "2026-09-23",
+ "doctor": "Dr Mock A",
+ "evidence": [
+  "PQM: 5 of 8 consults line up, within 90 s."
+ ],
+ "clips": [
+  {
+   "src": "audio/q1Bs8d_0.mp3",
+   "duration_s": 5.0
+  },
+  {
+   "src": "audio/q1Bs8d_1.mp3",
+   "duration_s": 5.0
+  },
+  {
+   "src": "audio/q1Bs8d_2.mp3",
+   "duration_s": 5.0
+  }
+ ],
+ "contrast": {
+  "src": "audio/q1Bs8d_3.mp3",
+  "duration_s": 5.0
+ },
+ "tier": "LOW",
+ "pqm_score": 0.9,
+ "cluster_id": "clu-2",
+ "true_doctor": "Dr Mock A",
+ "confidence": 0.86
+}

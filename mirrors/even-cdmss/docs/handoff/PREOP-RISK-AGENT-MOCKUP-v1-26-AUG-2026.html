@@ -1,0 +1,505 @@
+<title>Pre-op Risk Agent Mockup</title>
+<style>
+  /* ── Even-CDMSS design tokens (from app/globals.css) — single-theme light, deliberately:
+     this is a binding spec of a light-themed product; every ground is painted explicitly. ── */
+  :root{
+    --bg:#f2f4f8; --card:#fcfcfc; --ink:#1a1a2e; --ink-2:#4a5568; --muted:#7a8599;
+    --line:#e2e6ec; --brand:#0055ff; --brand-faint:#e6eeff; --navy:#002054;
+    --llm:#d6338f; --llm-bg:#fdeef7; --llm-line:#f5c1de;
+    --crit-ink:#7f1d1d; --crit-bg:#fef2f2; --crit-line:#fecaca; --crit-solid:#991b1b;
+    --red-ink:#b91c1c; --red-bg:#fff5f5; --red-line:#fecaca;
+    --amb-ink:#92400e; --amb-bg:#fffbeb; --amb-line:#fde68a;
+    --grn-ink:#065f46; --grn-bg:#ecfdf5; --grn-line:#a7f3d0;
+  }
+  html,body{background:var(--bg);color:var(--ink);margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1100px;margin:0 auto;padding:28px 20px 80px;}
+  h1,h2,h3{margin:0;text-wrap:balance;}
+  .num{font-variant-numeric:tabular-nums;}
+
+  /* spec-document chrome */
+  .spechead{background:var(--navy);color:#fff;border-radius:14px;padding:22px 26px;margin-bottom:26px;}
+  .spechead .eyebrow{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#9db4e0;}
+  .spechead h1{font-size:22px;font-weight:700;margin-top:4px;}
+  .spechead .meta{margin-top:10px;font-size:12px;color:#c7d4ee;display:flex;flex-wrap:wrap;gap:6px 18px;}
+  .spechead .meta b{color:#fff;font-weight:600;}
+  .binding{display:inline-block;margin-top:12px;background:#fff;color:var(--navy);border-radius:6px;
+    padding:4px 10px;font-size:11px;font-weight:700;letter-spacing:.04em;}
+
+  .secttl{margin:34px 0 6px;font-size:15px;font-weight:700;}
+  .secsub{color:var(--ink-2);font-size:12.5px;margin:0 0 14px;max-width:70ch;}
+
+  /* fake browser frame */
+  .frame{border:1px solid var(--line);border-radius:12px;background:var(--card);overflow:hidden;
+    box-shadow:0 1px 2px rgba(26,26,46,.05),0 6px 18px rgba(26,26,46,.05);}
+  .framebar{display:flex;align-items:center;gap:8px;background:#e9edf3;border-bottom:1px solid var(--line);padding:8px 12px;}
+  .dot{width:9px;height:9px;border-radius:50%;background:#c5ccd8;}
+  .urlpill{flex:1;max-width:420px;margin-left:6px;background:#fff;border:1px solid var(--line);border-radius:6px;
+    padding:3px 10px;font-size:11px;color:var(--ink-2);}
+  .framebody{padding:0;background:var(--bg);}
+
+  /* in-app shell strip */
+  .appbar{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card);
+    border-bottom:1px solid var(--line);padding:10px 18px;}
+  .crumbs{font-size:12.5px;color:var(--ink-2);}
+  .crumbs b{color:var(--ink);font-weight:600;}
+  .appbar .right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .sys{font-size:10.5px;color:var(--muted);border:1px solid var(--line);background:#fff;border-radius:999px;padding:2px 9px;}
+
+  .pagepad{padding:16px 18px 22px;}
+
+  /* stat tiles — numbers wear ink, never status color */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;}
+  .tile .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);}
+  .tile .v{font-size:20px;font-weight:700;margin-top:2px;}
+  .tile .s{font-size:10.5px;color:var(--muted);margin-top:1px;font-style:italic;}
+
+  /* tier pills — label + glyph always, never color alone */
+  .pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:2px 9px;
+    font-size:10.5px;font-weight:700;letter-spacing:.05em;border:1px solid;}
+  .pill.crit{background:var(--crit-solid);border-color:var(--crit-solid);color:#fff;}
+  .pill.red{background:var(--red-bg);border-color:var(--red-line);color:var(--red-ink);}
+  .pill.amb{background:var(--amb-bg);border-color:var(--amb-line);color:var(--amb-ink);}
+  .pill.grn{background:var(--grn-bg);border-color:var(--grn-line);color:var(--grn-ink);}
+
+  /* bands */
+  .band{margin-top:16px;}
+  .bandhead{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;}
+  .bandhead .t{font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;}
+  .bandhead .c{font-size:11px;color:var(--muted);}
+  .bandrule{flex:1;height:1px;background:var(--line);}
+  .review-band{border:1px solid var(--amb-line);background:#fffdf4;border-radius:12px;padding:12px;margin-top:14px;}
+  .review-band .bandhead .t{color:var(--amb-ink);}
+
+  /* case cards */
+  .card{position:relative;background:var(--card);border:1px solid var(--line);border-left-width:4px;
+    border-radius:10px;padding:12px 14px;margin-top:10px;}
+  .card.crit{border-left-color:var(--crit-solid);}
+  .card.red{border-left-color:#dc2626;}
+  .card.amb{border-left-color:#d97706;}
+  .card.grn{border-left-color:#059669;}
+  .cardtop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap;}
+  .who{font-size:14px;font-weight:600;}
+  .who .idline{font-size:11px;color:var(--muted);font-weight:400;margin-left:6px;}
+  .proc{font-size:12.5px;color:var(--ink-2);margin-top:2px;}
+  .when{text-align:right;font-size:11.5px;color:var(--ink-2);white-space:nowrap;}
+  .when b{color:var(--ink);}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;}
+  .ichip{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 9px;font-size:11.5px;}
+  .ichip b{font-weight:700;}
+  .ichip .cls{color:var(--muted);font-size:10.5px;margin-left:4px;}
+  .ichip.range{border-style:dashed;border-color:#cbd2dd;background:#fbfcfe;}
+  .ichip.range b{color:var(--ink-2);}
+  .why{margin-top:8px;font-size:12px;color:var(--ink-2);}
+  .why b{color:var(--ink);font-weight:600;}
+  .missing{margin-top:4px;font-size:12px;font-weight:500;color:var(--amb-ink);}
+  .sitline{margin-top:4px;font-size:12px;font-weight:600;color:var(--red-ink);}
+  .cardfoot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:9px;flex-wrap:wrap;}
+  .metachips{display:flex;gap:6px;flex-wrap:wrap;}
+  .mchip{font-size:10.5px;border-radius:999px;padding:2px 8px;border:1px solid var(--line);background:#fff;color:var(--ink-2);}
+  .mchip.ok{border-color:var(--grn-line);background:var(--grn-bg);color:var(--grn-ink);}
+  .mchip.warn{border-color:var(--amb-line);background:var(--amb-bg);color:var(--amb-ink);}
+  .btn{font-size:11px;font-weight:600;border:1px solid var(--line);background:#fff;border-radius:7px;
+    padding:4px 10px;color:var(--ink-2);}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:#fff;}
+
+  /* dense green rows */
+  .dense{display:flex;justify-content:space-between;gap:10px;align-items:center;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;padding:7px 12px;margin-top:6px;font-size:12px;color:var(--ink-2);flex-wrap:wrap;}
+  .dense b{color:var(--ink);font-weight:600;}
+  .dense .nums{display:flex;gap:12px;color:var(--ink-2);}
+
+  /* annotation markers + notes */
+  .mark{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;
+    background:var(--navy);color:#fff;font-size:10px;font-weight:700;vertical-align:2px;margin-left:5px;flex:none;}
+  .notes{margin:12px 2px 0;padding:0;list-style:none;columns:2;column-gap:26px;}
+  .notes li{break-inside:avoid;display:flex;gap:8px;font-size:12px;color:var(--ink-2);margin-bottom:8px;max-width:60ch;}
+  .notes b{color:var(--ink);}
+  @media (max-width:760px){.notes{columns:1}}
+
+  /* chooser tiles */
+  .chooser{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;}
+  .ctile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;position:relative;}
+  .ctile .t{font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px;}
+  .ctile p{margin:6px 0 0;font-size:11.5px;color:var(--muted);}
+  .ctile.new{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-faint);}
+  .badge{position:absolute;top:12px;right:12px;background:var(--red-bg);border:1px solid var(--red-line);
+    color:var(--red-ink);font-size:10.5px;font-weight:700;border-radius:999px;padding:1px 8px;}
+  .newtag{font-size:9.5px;font-weight:700;letter-spacing:.06em;background:var(--brand);color:#fff;border-radius:5px;padding:2px 6px;}
+
+  /* case page */
+  .casehead{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;}
+  .pacverdict{display:flex;gap:10px;align-items:flex-start;background:var(--navy);color:#fff;border-radius:10px;
+    padding:10px 14px;margin-top:12px;}
+  .pacverdict .lab{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9db4e0;}
+  .pacverdict .v{font-size:13.5px;font-weight:700;margin-top:2px;}
+  .pacverdict .note{font-size:10.5px;color:#c7d4ee;font-style:italic;margin-top:3px;}
+
+  /* timeline */
+  .timeline{display:flex;gap:0;margin-top:14px;overflow-x:auto;padding-bottom:4px;}
+  .tstep{flex:1;min-width:200px;position:relative;padding:0 10px 0 0;}
+  .tstep .rail{display:flex;align-items:center;gap:0;}
+  .tstep .tdot{width:12px;height:12px;border-radius:50%;background:#fff;border:3px solid #b9c2d0;flex:none;}
+  .tstep.cur .tdot{border-color:var(--brand);background:var(--brand);}
+  .tstep .tline{flex:1;height:2px;background:var(--line);}
+  .tstep:last-child .tline{background:transparent;}
+  .tcard{margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-right:10px;}
+  .tstep.cur .tcard{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-faint);}
+  .tcard .tv{font-size:10.5px;font-weight:700;color:var(--ink);}
+  .tcard .td{font-size:10.5px;color:var(--muted);}
+  .tcard .tr{font-size:11.5px;margin-top:5px;color:var(--ink-2);}
+  .tcard .cap{display:inline-block;margin-top:6px;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 6px;}
+
+  /* factor tables */
+  .ftable{width:100%;border-collapse:collapse;margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+  .ftable th{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);text-align:left;
+    padding:7px 10px;border-bottom:1px solid var(--line);background:#f7f9fc;font-weight:600;}
+  .ftable td{padding:7px 10px;border-bottom:1px solid #eef1f6;font-size:12px;color:var(--ink-2);vertical-align:top;}
+  .ftable tr:last-child td{border-bottom:none;}
+  .ftable .fname{color:var(--ink);font-weight:500;}
+  .st{font-size:10.5px;font-weight:700;border-radius:6px;padding:1px 7px;border:1px solid;}
+  .st.yes{color:var(--red-ink);background:var(--red-bg);border-color:var(--red-line);}
+  .st.no{color:var(--grn-ink);background:var(--grn-bg);border-color:var(--grn-line);}
+  .st.unk{color:var(--amb-ink);background:var(--amb-bg);border-color:var(--amb-line);}
+  .src{font-size:10px;font-weight:600;letter-spacing:.04em;border-radius:5px;padding:1px 6px;border:1px solid var(--line);background:#fff;color:var(--ink-2);white-space:nowrap;}
+  .src.pac{background:var(--navy);border-color:var(--navy);color:#fff;}
+  .src.lab{background:var(--brand-faint);border-color:#c3d6ff;color:#0044cc;}
+  .src.llm{background:var(--llm-bg);border-color:var(--llm-line);color:var(--llm);}
+  .pts{font-weight:700;color:var(--ink);text-align:right;}
+  .subtotal td{background:#f7f9fc;font-weight:600;color:var(--ink);}
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media (max-width:860px){.twocol{grid-template-columns:1fr}}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;}
+  .panel h4{margin:0 0 6px;font-size:12px;font-weight:700;}
+  .lens-note{font-size:11px;font-style:italic;color:var(--muted);margin-top:8px;max-width:70ch;}
+  .darkrail{border:1.5px dashed #cbd2dd;background:#fbfcfe;border-radius:12px;padding:12px 14px;color:var(--muted);}
+  .darkrail h4{margin:0 0 4px;font-size:12px;font-weight:700;color:var(--ink-2);}
+  .flagchip{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;background:#eef1f6;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--ink-2);}
+  .tighten li{margin-bottom:5px;}
+  .tighten{margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--ink-2);}
+
+  /* spec notes tables */
+  .spectable{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:12px;}
+  .spectable th{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);text-align:left;padding:8px 11px;background:#f7f9fc;border-bottom:1px solid var(--line);}
+  .spectable td{padding:8px 11px;border-bottom:1px solid #eef1f6;color:var(--ink-2);vertical-align:top;}
+  .spectable tr:last-child td{border-bottom:none;}
+  .spectable td:first-child{color:var(--ink);font-weight:600;white-space:nowrap;}
+  .scroller{overflow-x:auto;}
+  .foot{margin-top:36px;border-top:1px solid var(--line);padding-top:14px;font-size:11.5px;color:var(--muted);max-width:80ch;}
+</style>
+
+<div class="wrap">
+
+  <div class="spechead">
+    <div class="eyebrow">Even-CDMSS · Managed Care · UI/UX specification</div>
+    <h1>Pre-op Risk Agent Mockup</h1>
+    <div class="meta">
+      <span>Version <b>v1</b></span><span>26 Aug 2026</span>
+      <span>PRD <b>CDMSS-PREOP-RISK-AGENT-PRD-v1.1-LOCKED</b></span>
+      <span>Sibling pattern <b>Readmissions agent</b></span>
+      <span>All patient data on this page is <b>synthetic</b></span>
+    </div>
+    <div class="binding">PENDING V APPROVAL — becomes the binding UI spec on approval; deviations need V</div>
+  </div>
+
+  <!-- ───────────────────────── chooser ───────────────────────── -->
+  <h2 class="secttl">0 · The chooser gains a third tile</h2>
+  <p class="secsub">Existing <code>/care</code> cards are untouched (two shown, abbreviated). The new tile follows the readmissions
+     pattern exactly: badge = needs-review count from the same predicate the board uses, so they can never disagree;
+     whole surface gated by <span class="flagchip">PREOP_SURFACE_ENABLED</span>, ships OFF.</p>
+  <div class="chooser">
+    <div class="ctile"><div class="t">OPD Audit Triage</div><p>Doctor-by-doctor signal triage (unchanged)</p></div>
+    <div class="ctile"><div class="t">Readmissions</div><p>What the readmission agent found (unchanged)</p></div>
+    <div class="ctile new"><span class="badge">2 need review</span>
+      <div class="t">Pre-op Risk <span class="newtag">NEW</span></div>
+      <p>Instrument-based surgical risk, recomputed as booking → labs → PAC land</p></div>
+  </div>
+
+  <!-- ───────────────────────── screen 1 ───────────────────────── -->
+  <h2 class="secttl">1 · The board — <code>/care/preop</code></h2>
+  <p class="secsub">Triage-first (SREWS vocabulary per D1): needs-review band pinned on top, then tier bands, GREEN and
+     reviewed cases collapse to dense rows. Risk view only in Slice 1 — Schedule/Calendar are S2.</p>
+
+  <div class="frame">
+    <div class="framebar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="urlpill">cat.evenos.app/care/preop</span></div>
+    <div class="framebody">
+      <div class="appbar">
+        <div class="crumbs">CAT · Managed Care › <b>Pre-op Risk</b></div>
+        <div class="right">
+          <span class="sys num">engine preop-risk/0.1</span>
+          <span class="sys num">last sweep 14:00 IST · idempotent<span class="mark">1</span></span>
+          <span class="sys">extraction OFF · narrative OFF<span class="mark">2</span></span>
+        </div>
+      </div>
+      <div class="pagepad">
+
+        <div class="tiles">
+          <div class="tile"><div class="k">Upcoming cases</div><div class="v num">14</div><div class="s">surgery date today or later</div></div>
+          <div class="tile"><div class="k">Need review</div><div class="v num">2</div><div class="s">unreviewed RED/CRITICAL, surgery ≤ 7d</div></div>
+          <div class="tile"><div class="k">No PAC on file</div><div class="v num">5</div><div class="s">of 14 upcoming</div></div>
+          <div class="tile"><div class="k">Booking-only</div><div class="v num">3</div><div class="s">no OPD, labs or PAC yet<span class="mark">3</span></div></div>
+        </div>
+
+        <div class="review-band">
+          <div class="bandhead"><span class="t">Needs review now</span><span class="c num">2 cases · unreviewed RED/CRITICAL within 7 days of surgery</span><span class="bandrule"></span></div>
+
+          <div class="card crit">
+            <div class="cardtop">
+              <div><div class="who">Manjunath R <span class="idline">UHID-401223 · 68 M</span></div>
+                <div class="proc">Open right hemicolectomy · EHRC</div></div>
+              <div class="when"><b>Sat 29 Aug</b> · in 3 days<br><span class="pill crit">▲ CRITICAL</span></div>
+            </div>
+            <div class="chips">
+              <span class="ichip">RCRI <b class="num">3</b><span class="cls num">Class IV · 11%</span></span>
+              <span class="ichip">mFI-5 <b class="num">3<span style="color:var(--muted)">–4</span>/5</b><span class="cls">frail</span></span>
+              <span class="ichip">Charlson <b class="num">6</b></span>
+            </div>
+            <div class="why">Why: <b>high-risk surgery + ischaemic heart disease + insulin-treated diabetes</b> (RCRI, 3 of 6 factors)<span class="mark">4</span></div>
+            <div class="missing">Missing: creatinine · functional status — both confirmable at PAC<span class="mark">5</span></div>
+            <div class="sitline">No PAC on file and surgery is in 3 days<span class="mark">6</span></div>
+            <div class="cardfoot">
+              <div class="metachips"><span class="mchip warn">PAC — none</span><span class="mchip num">snapshot v2 · 26 Aug 14:00</span></div>
+              <button class="btn primary">Mark reviewed<span class="mark">7</span></button>
+            </div>
+          </div>
+
+          <div class="card red">
+            <div class="cardtop">
+              <div><div class="who">Shobha K <span class="idline">UHID-398871 · 61 F</span></div>
+                <div class="proc">Total knee replacement (left) · EHRC</div></div>
+              <div class="when"><b>Tue 1 Sep</b> · in 6 days<br><span class="pill red">● RED</span></div>
+            </div>
+            <div class="chips">
+              <span class="ichip">RCRI <b class="num">2</b><span class="cls num">Class III · 6.6%</span></span>
+              <span class="ichip">mFI-5 <b class="num">2/5</b></span>
+              <span class="ichip">Charlson <b class="num">4</b></span>
+            </div>
+            <div class="why">Why: <b>ischaemic heart disease (MI 2019) + insulin-treated diabetes</b> (RCRI)</div>
+            <div class="cardfoot">
+              <div class="metachips"><span class="mchip ok">PAC ✓ final · 24 Aug</span><span class="mchip num">snapshot v3 · 24 Aug 18:02</span></div>
+              <button class="btn primary">Mark reviewed</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="band">
+          <div class="bandhead"><span class="t" style="color:var(--amb-ink)">Amber</span><span class="c num">2 cases</span><span class="bandrule"></span></div>
+
+          <div class="card amb">
+            <div class="cardtop">
+              <div><div class="who">Farhan S <span class="idline">UHID-402911 · 54 M</span></div>
+                <div class="proc">Laparoscopic cholecystectomy · EHRC</div></div>
+              <div class="when"><b>Thu 3 Sep</b> · in 8 days<br><span class="pill amb">◆ AMBER</span></div>
+            </div>
+            <div class="chips">
+              <span class="ichip range">RCRI <b class="num">1–2</b><span class="cls num">Class II–III · 0.9–6.6%</span><span class="mark">8</span></span>
+              <span class="ichip">mFI-5 <b class="num">1/5</b></span>
+              <span class="ichip">Charlson <b class="num">2</b></span>
+            </div>
+            <div class="why">Why: <b>coronary angioplasty 2021</b> (RCRI) — upper bound unconfirmed</div>
+            <div class="missing">Missing: creatinine — a single lab collapses the range</div>
+            <div class="cardfoot">
+              <div class="metachips"><span class="mchip ok">PAC ✓ final · 22 Aug</span><span class="mchip num">snapshot v2 · 25 Aug 09:15</span></div>
+              <button class="btn">Mark reviewed</button>
+            </div>
+          </div>
+
+          <div class="card amb">
+            <div class="cardtop">
+              <div><div class="who">Lakshmamma H <span class="idline">UHID-403544 · 71 F</span></div>
+                <div class="proc">Cataract surgery (right) · EHBR</div></div>
+              <div class="when"><b>Fri 4 Sep</b> · in 9 days<br><span class="pill amb">◆ AMBER</span></div>
+            </div>
+            <div class="chips">
+              <span class="ichip range">RCRI <b class="num">0–1</b><span class="cls num">Class I–II · 0.4–0.9%</span></span>
+              <span class="ichip range">mFI-5 <b class="num">1–2/5</b></span>
+              <span class="ichip">Charlson <b class="num">3</b></span>
+            </div>
+            <div class="why">Why: <b>age 71 · booking form is the only source on file</b> — no OPD, labs or PAC yet<span class="mark">3</span></div>
+            <div class="missing">Missing: creatinine · functional status · PAC</div>
+            <div class="cardfoot">
+              <div class="metachips"><span class="mchip warn">PAC — none</span><span class="mchip num">snapshot v1 · 20 Aug 11:00</span></div>
+              <button class="btn">Mark reviewed</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="band">
+          <div class="bandhead"><span class="t" style="color:var(--grn-ink)">Green</span><span class="c num">10 cases · dense rows, expand on click</span><span class="bandrule"></span></div>
+          <div class="dense"><span><b>Arjun P</b> · 29 M · Inguinal hernia repair · <b>7 Sep</b></span>
+            <span class="nums num">RCRI 0 (0.4%) · mFI 0 · CCI 0</span><span class="mchip ok">PAC ✓</span></div>
+          <div class="dense"><span><b>Divya N</b> · 34 F · Lap appendectomy (interval) · <b>9 Sep</b></span>
+            <span class="nums num">RCRI 0 (0.4%) · mFI 0 · CCI 0</span><span class="mchip warn">PAC — none</span></div>
+          <div class="dense"><span><b>Ravi T</b> · 41 M · ACL reconstruction · <b>11 Sep</b></span>
+            <span class="nums num">RCRI 0 (0.4%) · mFI 0 · CCI 1</span><span class="mchip ok">PAC ✓ · reviewed ✓<span class="mark">7</span></span></div>
+          <div class="dense" style="justify-content:center;color:var(--muted)">+ 7 more</div>
+        </div>
+
+        <p style="margin:16px 2px 0;font-size:11px;color:var(--muted);font-style:italic;">
+          Scores are deterministic instrument arithmetic (RCRI · mFI-5 · Charlson) over stored inputs — no model
+          contributes a point of score. Ranges mean inputs are missing, not that the engine is unsure of its arithmetic.</p>
+      </div>
+    </div>
+  </div>
+
+  <ol class="notes">
+    <li><span class="mark" style="margin:0">1</span><span><b>Worker heartbeat.</b> Day-window cron sweep (readmit posture: sweep-is-the-retry, idempotent on <code>(dedup_key, engine_version)</code>). Stamp shows last completed sweep.</span></li>
+    <li><span class="mark" style="margin:0">2</span><span><b>Flag state is always visible.</b> <code>PREOP_EXTRACT_ENABLED</code> / <code>PREOP_NARRATIVE_ENABLED</code> ship OFF; the board must render correctly in this state (PRD §7).</span></li>
+    <li><span class="mark" style="margin:0">3</span><span><b>Degradation is a first-class state (PRD §8).</b> Booking-only patients render ranges + missing lists — thin data <i>is</i> the finding, never hidden.</span></li>
+    <li><span class="mark" style="margin:0">4</span><span><b>Why-line</b> = top-points factor of the dominant instrument, derived deterministically (SREWS <code>derive.ts</code> pattern).</span></li>
+    <li><span class="mark" style="margin:0">5</span><span><b>Missing-input line</b> names what would tighten the score and where it comes from — the module's own nudge toward its data gaps.</span></li>
+    <li><span class="mark" style="margin:0">6</span><span><b>Situation line</b> (red) reserved for operational danger: RED/CRITICAL with no finalized PAC inside 72 h.</span></li>
+    <li><span class="mark" style="margin:0">7</span><span><b>Mark reviewed</b> is Slice 1's only workflow verb (per-case, per-snapshot-version; a new snapshot version re-opens review). Feeds the needs-review predicate + chooser badge.</span></li>
+    <li><span class="mark" style="margin:0">8</span><span><b>Range chips</b> are dashed. Tier scores the range's confirmed lower bound, flooring at AMBER when the upper bound crosses a severity boundary (tier rule v0, §3 below) — and the fix it demands is data, which the card itself names.</span></li>
+  </ol>
+
+  <!-- ───────────────────────── screen 2 ───────────────────────── -->
+  <h2 class="secttl">2 · The case page — <code>/care/preop/case/[key]</code></h2>
+  <p class="secsub">Everything the board asserts, proven: factor tables with per-input provenance, the snapshot timeline
+     (the ripening demo), and the anaesthetist's own verdict displayed alongside — never replaced.</p>
+
+  <div class="frame">
+    <div class="framebar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="urlpill">cat.evenos.app/care/preop/case/SC-2026-0871</span></div>
+    <div class="framebody"><div class="pagepad">
+
+      <div class="casehead">
+        <div class="cardtop">
+          <div><div class="who" style="font-size:16px">Shobha K <span class="idline">UHID-398871 · 61 F · SC-2026-0871</span></div>
+            <div class="proc">Total knee replacement (left) · EHRC · Dr Prakash Rao (Ortho) · admitting</div></div>
+          <div class="when"><b>Tue 1 Sep 2026</b> · in 6 days<br><span class="pill red">● RED</span>&nbsp;<span class="mchip num">snapshot v3 · 24 Aug 18:02</span></div>
+        </div>
+        <div class="pacverdict"><div>
+          <div class="lab">Anaesthetist's PAC verdict — KareXpert, 24 Aug, final<span class="mark">1</span></div>
+          <div class="v">"PATIENT CAN BE TAKEN FOR SURGERY"</div>
+          <div class="note">Displayed verbatim, never replaced or overridden — this module is decision support beside the PAC, not above it. ASA grade: not recorded in this PAC (capture ask open, PRD §9.3).</div>
+        </div></div>
+      </div>
+
+      <h3 style="font-size:12px;margin:18px 2px 0;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)">Snapshot history — how this score ripened<span class="mark">2</span></h3>
+      <div class="timeline">
+        <div class="tstep"><div class="rail"><span class="tdot"></span><span class="tline"></span></div>
+          <div class="tcard"><div class="tv num">v1 <span class="td">· 12 Aug · booking form only</span></div>
+            <div class="tr num">RCRI <b>2–3</b> (6.6–11%) · mFI <b>2–3</b> · CCI <b>4</b></div>
+            <div class="tr" style="color:var(--amb-ink)">missing: creatinine, functional status</div>
+            <span class="cap">capture: overwrite</span></div></div>
+        <div class="tstep"><div class="rail"><span class="tdot"></span><span class="tline"></span></div>
+          <div class="tcard"><div class="tv num">v2 <span class="td">· 19 Aug · lab result landed</span></div>
+            <div class="tr num">RCRI <b>2</b> (6.6%) · mFI <b>2–3</b> · CCI <b>4</b></div>
+            <div class="tr">creatinine 1.4 → renal factor resolved absent</div>
+            <span class="cap">capture: overwrite</span></div></div>
+        <div class="tstep cur"><div class="rail"><span class="tdot"></span><span class="tline"></span></div>
+          <div class="tcard"><div class="tv num">v3 <span class="td">· 24 Aug · PAC finalized</span></div>
+            <div class="tr num">RCRI <b>2</b> (6.6%) · mFI <b>2/5</b> · CCI <b>4</b></div>
+            <div class="tr">functional status: independent → mFI resolved</div>
+            <span class="cap">current · live row</span></div></div>
+      </div>
+
+      <div class="twocol" style="margin-top:16px">
+        <div class="panel">
+          <h4>RCRI — Revised Cardiac Risk Index · <span class="num">2 of 6 · Class III · 6.6% MACE</span></h4>
+          <div class="scroller"><table class="ftable">
+            <tr><th>Factor</th><th>Status</th><th>Source<span class="mark">3</span></th><th style="text-align:right">Pts</th></tr>
+            <tr><td class="fname">High-risk surgery</td><td><span class="st no">ABSENT</span> <span style="font-size:10.5px;color:var(--muted)">TKR — not intraperitoneal / intrathoracic / suprainguinal-vascular</span></td><td><span class="src">BOOKING</span></td><td class="pts num">0</td></tr>
+            <tr><td class="fname">Ischaemic heart disease</td><td><span class="st yes">PRESENT</span> <span style="font-size:10.5px;color:var(--muted)">MI 2019</span></td><td><span class="src llm">EXTRACTED · 0.96<span class="mark">4</span></span> <span class="src pac">PAC</span></td><td class="pts num">1</td></tr>
+            <tr><td class="fname">Congestive heart failure</td><td><span class="st no">ABSENT</span></td><td><span class="src">BOOKING</span></td><td class="pts num">0</td></tr>
+            <tr><td class="fname">Cerebrovascular disease</td><td><span class="st no">ABSENT</span></td><td><span class="src">BOOKING</span></td><td class="pts num">0</td></tr>
+            <tr><td class="fname">Insulin-treated diabetes</td><td><span class="st yes">PRESENT</span></td><td><span class="src">BOOKING</span> <span class="src llm">EXTRACTED · 0.93</span></td><td class="pts num">1</td></tr>
+            <tr><td class="fname">Creatinine &gt; 2.0 mg/dL</td><td><span class="st no">ABSENT</span> <span style="font-size:10.5px;color:var(--muted)" class="num">1.4 mg/dL · 19 Aug</span></td><td><span class="src lab">LAB · Eka</span></td><td class="pts num">0</td></tr>
+            <tr class="subtotal"><td>RCRI</td><td colspan="2" style="font-weight:500;color:var(--ink-2)">Class III (Lee): 6.6% major cardiac complication</td><td class="pts num">2</td></tr>
+          </table></div>
+        </div>
+
+        <div class="panel">
+          <h4>mFI-5 — Modified Frailty Index · <span class="num">2 of 5</span></h4>
+          <div class="scroller"><table class="ftable">
+            <tr><th>Item</th><th>Status</th><th>Source</th><th style="text-align:right">Pts</th></tr>
+            <tr><td class="fname">Functional status (dependent)</td><td><span class="st no">INDEPENDENT</span> <span style="font-size:10.5px;color:var(--muted)">was UNKNOWN until v3</span></td><td><span class="src pac">PAC</span></td><td class="pts num">0</td></tr>
+            <tr><td class="fname">Diabetes mellitus</td><td><span class="st yes">PRESENT</span></td><td><span class="src">BOOKING</span></td><td class="pts num">1</td></tr>
+            <tr><td class="fname">COPD / pneumonia</td><td><span class="st no">ABSENT</span></td><td><span class="src">BOOKING</span> <span class="src pac">PAC</span></td><td class="pts num">0</td></tr>
+            <tr><td class="fname">Congestive heart failure</td><td><span class="st no">ABSENT</span></td><td><span class="src">BOOKING</span></td><td class="pts num">0</td></tr>
+            <tr><td class="fname">Hypertension (on medication)</td><td><span class="st yes">PRESENT</span> <span style="font-size:10.5px;color:var(--muted)">Telmisartan 40</span></td><td><span class="src llm">EXTRACTED · 0.91</span></td><td class="pts num">1</td></tr>
+            <tr class="subtotal"><td>mFI-5</td><td colspan="2" style="font-weight:500;color:var(--ink-2)">2/5 — intermediate frailty</td><td class="pts num">2</td></tr>
+          </table></div>
+          <h4 style="margin-top:14px">Charlson Comorbidity Index · <span class="num">4</span></h4>
+          <div class="scroller"><table class="ftable">
+            <tr><td class="fname">Myocardial infarction</td><td><span class="st yes">PRESENT</span></td><td><span class="src llm">EXTRACTED · 0.96</span></td><td class="pts num">1</td></tr>
+            <tr><td class="fname">Diabetes, uncomplicated</td><td><span class="st yes">PRESENT</span></td><td><span class="src">BOOKING</span></td><td class="pts num">1</td></tr>
+            <tr><td class="fname">Age band 60–69</td><td><span class="st yes">61</span></td><td><span class="src">BOOKING</span></td><td class="pts num">2</td></tr>
+            <tr class="subtotal"><td>CCI</td><td colspan="2" style="font-weight:500;color:var(--ink-2)">4 — moderate burden</td><td class="pts num">4</td></tr>
+          </table></div>
+          <p class="lens-note">mFI-5 and Charlson share comorbidity inputs — read them as two <b>correlated lenses</b> (frailty vs burden), not independent confirmation (PRD §3).<span class="mark">5</span></p>
+        </div>
+      </div>
+
+      <div class="twocol" style="margin-top:14px">
+        <div class="panel">
+          <h4>What would tighten this score</h4>
+          <ul class="tighten">
+            <li>Nothing outstanding for RCRI — all six factors resolved at v3.</li>
+            <li><b>ASA grade</b> and <b>METs</b> were not recorded in the PAC — capture-quality ask to anaesthesia is open (PRD §9.3); they'd feed the S2 instrument set, not these three.</li>
+            <li>Echo report (if done) would corroborate the CHF-absent judgement.</li>
+          </ul>
+        </div>
+        <div class="darkrail">
+          <h4>Narrative — rail dark<span class="mark">6</span></h4>
+          <p style="margin:0;font-size:12px">Ships behind <span class="flagchip">PREOP_NARRATIVE_ENABLED=0</span>. When flipped, prose is written <i>from the factor tables above</i> — the model summarises a computed result, it never scores. Model label derived from the call, never typed.</p>
+        </div>
+      </div>
+
+      <p style="margin:14px 2px 0;font-size:11px;color:var(--muted);font-style:italic;">
+        Every input above carries provenance. <span class="src" style="vertical-align:1px">BOOKING</span> booking form ·
+        <span class="src lab" style="vertical-align:1px">LAB · Eka</span> structured lab ·
+        <span class="src pac" style="vertical-align:1px">PAC</span> KareXpert PAC (mapped keys) ·
+        <span class="src llm" style="vertical-align:1px">EXTRACTED · 0.9x</span> model-proposed input with confidence — pink marks the model
+        boundary; below the confidence floor an input is treated as UNKNOWN and the instrument widens to a range (PRD §7).</p>
+    </div></div>
+  </div>
+
+  <ol class="notes">
+    <li><span class="mark" style="margin:0">1</span><span><b>PAC verdict banner.</b> The anaesthetist's conclusion is quoted verbatim in the module's most prominent slot. Absent PAC → banner shows "No PAC on file" in amber, same position.</span></li>
+    <li><span class="mark" style="margin:0">2</span><span><b>Snapshot timeline</b> renders the versions rail (readmit R8.1 pattern): append-only, capture-reason on every step, live row marked. Clicking a version shows that snapshot's full factor tables (read-only).</span></li>
+    <li><span class="mark" style="margin:0">3</span><span><b>Multiple sources may back one input</b>; the highest-precedence one scores it (precedence: LAB/PAC-mapped &gt; BOOKING &gt; EXTRACTED), the rest corroborate. Conflicts render both chips + an amber conflict tag.</span></li>
+    <li><span class="mark" style="margin:0">4</span><span><b>Pink = the model boundary (D4).</b> EXTRACTED chips show source text on hover and the confidence score always. Only visible when <code>PREOP_EXTRACT_ENABLED=1</code>; flag off ⇒ these inputs are UNKNOWN and scores widen — same machinery, honest either way.</span></li>
+    <li><span class="mark" style="margin:0">5</span><span><b>Correlated-lenses note</b> is a fixed part of the layout, not a tooltip — the panel must not imply three independent signals.</span></li>
+    <li><span class="mark" style="margin:0">6</span><span><b>Dark rails are visible as dark.</b> The narrative panel renders its OFF state explicitly rather than disappearing — flag state is never ambiguous on a clinical screen.</span></li>
+  </ol>
+
+  <!-- ───────────────────────── spec notes ───────────────────────── -->
+  <h2 class="secttl">3 · Tier rule v0 — deterministic, builder implements exactly this</h2>
+  <p class="secsub">Composite tier = <b>max severity across the three instruments</b>, with two escalations. A range scores as its
+     <b>lower (confirmed) bound</b>; if the upper bound would land a higher severity, the tier floors at AMBER and carries the
+     <i>unconfirmed</i> tag — missing data alone never mints RED (the SREWS flood lesson: creatinine is missing for ~83% at
+     booking), but a boundary-crossing range can never render GREEN either. Calibration review after 4 weeks of live data —
+     thresholds move only by PRD amendment.</p>
+  <div class="scroller"><table class="spectable">
+    <tr><th>Instrument</th><th>GREEN</th><th>AMBER</th><th>RED</th></tr>
+    <tr><td>RCRI (Lee class)</td><td>Class I (0 factors)</td><td>Class II (1)</td><td>Class III–IV (≥2)</td></tr>
+    <tr><td>mFI-5</td><td class="num">0–1</td><td class="num">2</td><td class="num">≥3</td></tr>
+    <tr><td>Charlson</td><td class="num">≤2</td><td class="num">3–4</td><td class="num">≥5</td></tr>
+    <tr><td>CRITICAL</td><td colspan="3">RED on ≥2 instruments, OR any RED with no finalized PAC ≤72 h before surgery</td></tr>
+    <tr><td>Needs review</td><td colspan="3">unreviewed RED/CRITICAL with surgery within 7 days (same predicate feeds the chooser badge)</td></tr>
+  </table></div>
+
+  <h2 class="secttl">4 · Flags, empty states, out of scope</h2>
+  <div class="scroller"><table class="spectable">
+    <tr><th>Item</th><th>Spec</th></tr>
+    <tr><td><span class="flagchip">PREOP_SURFACE_ENABLED</span></td><td>Gates chooser tile + page + read routes independently (readmissions pattern). Ships OFF; V flips after deploy verification.</td></tr>
+    <tr><td><span class="flagchip">PREOP_EXTRACT_ENABLED</span></td><td>Extraction rail (ClinicalState B2). OFF ⇒ extractable inputs are UNKNOWN, instruments widen to ranges. Ships OFF.</td></tr>
+    <tr><td><span class="flagchip">PREOP_NARRATIVE_ENABLED</span></td><td>Narrative rail. OFF ⇒ dashed dark panel renders its state (never disappears). Ships OFF.</td></tr>
+    <tr><td>Empty board</td><td>"No upcoming surgical cases in view" + last-sweep stamp; tiles render zeros — never a blank page.</td></tr>
+    <tr><td>Auth</td><td>Care-manager cookie gate, same as /care peers; worker auth = x-vercel-cron / CRON_SECRET / admin.</td></tr>
+    <tr><td>Out of scope — Slice 1</td><td>Schedule + Calendar views · ask-the-agent route · acknowledgement workflow beyond Mark reviewed · any API for Pulse · tier calibration changes.</td></tr>
+  </table></div>
+
+  <div class="foot">
+    <b>Approval.</b> On V's approval this mockup becomes the binding UI spec for the Slice-1 build
+    (house rule: the mockup is the spec — deviations need V). All names, UHIDs and clinical values on this page are
+    synthetic. Scores shown were hand-computed from the published instruments (Lee RCRI class risks 0.4 / 0.9 / 6.6 / 11%;
+    mFI-5; age-adjusted Charlson) and are the arithmetic the pure cores must reproduce exactly.
+  </div>
+</div>

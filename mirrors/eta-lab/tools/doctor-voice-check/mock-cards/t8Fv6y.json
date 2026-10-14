@@ -1,0 +1,18 @@
+{
+ "id": "t8Fv6y",
+ "kind": "pair",
+ "a": {
+  "src": "audio/t8Fv6y_0.mp3",
+  "duration_s": 4.0
+ },
+ "b": {
+  "src": "audio/t8Fv6y_1.mp3",
+  "duration_s": 4.0
+ },
+ "tier": "MED",
+ "pqm_score": 0.9,
+ "cluster_id": "clu-4",
+ "true_doctor": "Dr Mock A",
+ "confidence": 0.86,
+ "batch": 1
+}

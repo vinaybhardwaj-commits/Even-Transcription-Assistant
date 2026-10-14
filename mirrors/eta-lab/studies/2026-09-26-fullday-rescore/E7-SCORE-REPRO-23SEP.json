@@ -1,0 +1,133 @@
+{
+ "transcript_version": "route-v2 23sep home",
+ "truth": "/home/eta/dev/eta-lab-lx/studies/2026-09-23-e7-pqm-truth/e7-truth-23sep.csv",
+ "hyp": [
+  "/home/eta/dev/eta-lab-lx/studies/2026-09-23-e7-pqm-truth/hyp-fused.json"
+ ],
+ "date_filter": null,
+ "match_rule": "overlap >= 50% of the shorter interval (e7_score.py, unchanged)",
+ "arms": {
+  "hyp-fused.json": {
+   "found": 3,
+   "n_truth": 14,
+   "n_hyp": 7,
+   "matched_hyp": 3,
+   "splits": 0,
+   "merges": 0,
+   "start_err": {
+    "med_s": 175.2,
+    "p90_s": 369.6,
+    "med_min": 2.9,
+    "p90_min": 6.2
+   },
+   "end_err": {
+    "med_s": 327.6,
+    "p90_s": 356.8,
+    "med_min": 5.5,
+    "p90_min": 5.9
+   },
+   "undeclared": true,
+   "transcript_version_in_file": null,
+   "unkeyed_truth": 0,
+   "versions": {
+    "transcript_version": null,
+    "smoother_version": "encounter-clock-smooth-v1",
+    "shadow_version": "encounter-clock-shadow-v2",
+    "fusion_version": "encounter-fusion-v1",
+    "code": "production d519d7b (contains E-6 4129768)"
+   },
+   "per_room_day": {
+    "rd_tp4hcf8s": {
+     "room": "Cardiology OPD",
+     "date": "2026-09-23",
+     "n_truth": 3,
+     "n_hyp": 3,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_pw5gaugg": {
+     "room": "OPD 3",
+     "date": "2026-09-23",
+     "n_truth": 8,
+     "n_hyp": 2,
+     "matched_truth": 2,
+     "matched_hyp": 2,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_yck5kdc2": {
+     "room": "OPD 5",
+     "date": "2026-09-23",
+     "n_truth": 3,
+     "n_hyp": 2,
+     "matched_truth": 1,
+     "matched_hyp": 1,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_tcqaam5c": {
+     "room": "Cardiology OPD",
+     "date": "2026-09-21",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_djmbtzph": {
+     "room": "Cardiology OPD",
+     "date": "2026-09-22",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_kp4c7pp6": {
+     "room": "OPD 5",
+     "date": "2026-09-21",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_93tcdc4c": {
+     "room": "OPD 3",
+     "date": "2026-09-21",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_4fsw6f6y": {
+     "room": "OPD 3",
+     "date": "2026-09-22",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_7usy23ex": {
+     "room": "OPD 6",
+     "date": "2026-09-22",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    }
+   }
+  }
+ }
+}

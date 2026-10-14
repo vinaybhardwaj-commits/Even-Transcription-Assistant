@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""
+Parity for the exported lexicon: eta_number_words.py must equal the router's own NUMBER_WORDS, and the
+generator must be the only way it is written.
+
+RUN:  ETA_JOBS_DIR=$(mktemp -d) ./.venv/bin/python -m unittest test_lexicon_export -v
+
+The shim is MiniBot's file and is never edited here. Its list is REPORTED, not asserted: a test that
+failed because another owner's file is behind would be a red suite nobody here can fix, and the number
+that matters to them (which words they are missing) is printed instead.
+"""
+import importlib.util
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("ETA_JOBS_DIR", tempfile.mkdtemp())
+import router_server as rs  # noqa: E402
+import eta_number_words as export  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SHIM = os.path.expanduser("~/.local/bin/whisper-shim.py")
+
+
+class Parity(unittest.TestCase):
+    def test_export_equals_the_router(self):
+        self.assertEqual(export.NUMBER_WORDS, rs.NUMBER_WORDS)
+
+    def test_export_is_what_the_generator_writes(self):
+        # Regenerate into a temp copy of this directory's module and compare text: a hand-edit to the
+        # export, or a lexicon change without a regenerate, both show up here.
+        with open(os.path.join(HERE, "eta_number_words.py"), encoding="utf-8") as fh:
+            committed = fh.read()
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run([sys.executable, os.path.join(HERE, "tools_export_lexicon.py")],
+                           cwd=HERE, check=True, capture_output=True,
+                           env={**os.environ, "ETA_JOBS_DIR": td})
+        with open(os.path.join(HERE, "eta_number_words.py"), encoding="utf-8") as fh:
+            regenerated = fh.read()
+        self.assertEqual(committed, regenerated, "eta_number_words.py is not what the generator writes")
+
+    def test_every_exported_word_is_a_number_to_the_router(self):
+        for w in export.NUMBER_WORDS:
+            self.assertTrue(rs.is_number_token(w), w)
+
+    def test_the_export_covers_0_to_100_in_both_scripts(self):
+        for lang, table in rs.number_lexicon().items():
+            for n, (rom, nat) in table.items():
+                for w in rom | nat:
+                    self.assertIn(w.lower(), export.NUMBER_WORDS, f"{lang} {n} {w}")
+
+
+class ShimReport(unittest.TestCase):
+    """Reports the live shim's coverage against the export. Never edits or asserts on MiniBot's file."""
+
+    def test_report_shim_coverage(self):
+        if not os.path.exists(SHIM):
+            self.skipTest("whisper-shim not on this machine")
+        spec = importlib.util.spec_from_file_location("whisper_shim_readonly", SHIM)
+        shim = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(spec and shim)  # module level only defines; the server needs __main__
+        shim_words = None
+        for name in ("NUMBER_WORDS", "_NUMBER_WORDS", "NUMBERS"):
+            if isinstance(getattr(shim, name, None), (set, frozenset)):
+                shim_words = {str(w).lower() for w in getattr(shim, name)}
+                break
+        if shim_words is None:
+            print("\n[shim] exposes no number-word set at module level — parity cannot be read from here")
+            self.skipTest("shim exposes no number-word set")
+        missing = set(export.NUMBER_WORDS) - shim_words
+        extra = shim_words - set(export.NUMBER_WORDS)
+        print(f"\n[shim] words: {len(shim_words)} | export: {len(export.NUMBER_WORDS)} | "
+              f"missing from shim: {len(missing)} | in shim only: {len(extra)}")
+        if missing:
+            print(f"[shim] examples missing (romanised): {sorted(w for w in missing if w.isascii())[:8]}")
+        if extra:
+            print(f"[shim] in shim only: {sorted(extra)[:8]}")
+        # Deliberately no assertion on another owner's file: the numbers above are the handoff, and a
+        # red suite here could only be fixed by MiniBot, not by anyone reading this one.
+
+
+if __name__ == "__main__":
+    unittest.main()

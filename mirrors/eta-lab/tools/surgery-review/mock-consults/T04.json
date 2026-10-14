@@ -1,0 +1,116 @@
+{
+ "id": "T04",
+ "date": "2026-09-22",
+ "room": "Room 5 (mock)",
+ "doctor": "Dr. C. Example",
+ "quality": "ok",
+ "why": {
+  "source": "jev",
+  "jev_scan": {
+   "recall_p": 0.7,
+   "status": "proposed_now"
+  }
+ },
+ "turns": [
+  {
+   "i": 0,
+   "start_s": 3,
+   "end_s": 9,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "We would repair the small hole in the ear drum through a cut behind the ear, under anaesthesia. It takes about an hour.",
+   "en": "We would repair the small hole in the ear drum through a cut behind the ear, under anaesthesia. It takes about an hour."
+  },
+  {
+   "i": 1,
+   "start_s": 10,
+   "end_s": 18,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "Yes doctor, they said the vessels were fine and gave tablets.",
+   "en": "Yes doctor, they said the vessels were fine and gave tablets."
+  },
+  {
+   "i": 2,
+   "start_s": 19,
+   "end_s": 30,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "Right. The report shows mild narrowing only. No procedure is needed now, keep the tablets going.",
+   "en": "Right. The report shows mild narrowing only. No procedure is needed now, keep the tablets going."
+  },
+  {
+   "i": 3,
+   "start_s": 31,
+   "end_s": 36,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "Should we get a second opinion?",
+   "en": "Should we get a second opinion?"
+  },
+  {
+   "i": 4,
+   "start_s": 37,
+   "end_s": 44,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "You can if you want, but I do not think it is needed.",
+   "en": "You can if you want, but I do not think it is needed."
+  }
+ ],
+ "jev": {
+  "named": {
+   "answer": null,
+   "category": null,
+   "conf": 0.6,
+   "evidence": [
+    0
+   ]
+  },
+  "described": {
+   "answer": "yes",
+   "conf": 0.85,
+   "evidence": [
+    0
+   ]
+  },
+  "status": {
+   "answer": "proposed_now",
+   "conf": 0.8,
+   "evidence": [
+    0
+   ]
+  },
+  "raised_by": {
+   "answer": "this_doctor",
+   "conf": 0.9,
+   "evidence": [
+    0
+   ]
+  },
+  "firmness": {
+   "answer": "advised",
+   "conf": 0.7,
+   "evidence": [
+    0
+   ]
+  },
+  "patient_response": {
+   "answer": "will_think",
+   "conf": 0.7,
+   "evidence": [
+    1
+   ]
+  },
+  "cost": {
+   "answer": "no",
+   "conf": 0.9,
+   "evidence": []
+  },
+  "second_opinion": {
+   "answer": "no",
+   "conf": 0.9,
+   "evidence": []
+  }
+ }
+}

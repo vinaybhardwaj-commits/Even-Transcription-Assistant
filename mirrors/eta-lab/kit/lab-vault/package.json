@@ -1,0 +1,7 @@
+{
+  "name": "eta-lab-ingest",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.js" },
+  "devDependencies": { "wrangler": "^4" }
+}

@@ -1,0 +1,811 @@
+/**
+ * lib/readmission/store.ts — persist + read readmission findings (Neon
+ * `readmission_findings`, created by /api/admin/migrate-readmissions).
+ * Mirrors lib/ipd-audit/store.ts: pure DB layer, no LLM calls, no db13 reads,
+ * everything parameterised, idempotent UPSERT on (dedup_key, engine_version).
+ *
+ * Two write phases share the row:
+ *   · saveDetection — Stage-1 upsert. Refreshes detection facts (tags/lane/CM
+ *     note) but NEVER clobbers audit output: the ON CONFLICT update lists only
+ *     detection columns.
+ *   · saveAuditResult — Stage-2 update by key. audit_status moves detected →
+ *     audited / not_auditable; a transient failure leaves 'detected' so the sweep
+ *     IS the retry (the IPD posture).
+ *
+ * PHI: the row carries uhid/encounter ids as LINK-BACK keys for the Phase-2
+ * surface (kickoff requirement) — never a patient name, never a raw document;
+ * `finding` is the de-identified reconciliation output only.
+ *
+ * Fail-safe: every reader returns []/0 and every writer returns 'skipped' on DB
+ * error (e.g. the migration has not run yet) — the worker reports, never 500s.
+ */
+
+import { sql } from '../db';
+import { normaliseNarrativeCode } from './health';
+import type { ReadmitPair, OonDetection } from '../readmission-detect-core';
+import { pairDedupKey, oonDedupKey } from '../readmission-detect-core';
+import type { ReadmissionFinding, LabTier } from '../readmission-reconcile-core';
+import { deriveJudgements, JUDGEMENT_RULE_VERSION } from '../readmission-reconcile-core';
+import { needsOverwriteSnapshot } from '../readmission-versions-core';
+
+/** Flags (ship OFF): the Vertex surface is GEMINI_READMIT_AUDIT; the engine version
+ *  bumps ONLY on behaviour change (house rule).
+ *  0.1 → 0.2 (R2, 17 Aug 2026, V ruled R2-1): the catalog gained source 4 (KX OT / PAC /
+ *  progress templates), so the backlog re-audits WITH templates. Traced mechanics: the
+ *  next sweep INSERTs a parallel row set at 0.2 as 'detected', the surface and the badge
+ *  read 0.2 only (board blank, badge 0 until the cron refills at ≤ 60/day), 0.1 rows are
+ *  orphaned in place, PDF extraction is not re-paid (DOC_EXTRACT_VERSION unchanged). */
+export const READMIT_ENGINE_VERSION = 'readmission/0.2';
+
+export type AuditStatus = 'detected' | 'audited' | 'not_auditable' | 'excluded';
+
+export interface DetectionRow {
+  dedupKey: string;
+  findingClass: 'even_even' | 'out_of_network';
+  indexEncounterId: string;
+  readmitEncounterId: string | null;
+  formUid: string | null;
+  uhid: string | null;
+  memberUid: string | null;
+  lane: string;
+  tags: Record<string, boolean> | null;
+  gapDays: number | null;
+  indexDepartment: string | null;
+  readmitDepartment: string | null;
+  indexDoctor: string | null;
+  readmitDoctor: string | null;
+  indexDischargeAt: string | null;
+  readmitAdmitAt: string | null;
+  payerIndex: string | null;
+  payerReadmit: string | null;
+  cmNote: string | null;
+  /** POST_IPD form flags (out-of-network classification inputs, §5a). Null = unknown
+   *  — recon catch 2: is_planned appears only when true. */
+  formIsPlanned: boolean | null;
+  formSameCondition: boolean | null;
+}
+
+export function pairToDetectionRow(p: ReadmitPair): DetectionRow {
+  return {
+    dedupKey: pairDedupKey(p.index.encounterId, p.readmit.encounterId),
+    findingClass: 'even_even',
+    indexEncounterId: p.index.encounterId,
+    readmitEncounterId: p.readmit.encounterId,
+    formUid: p.formUid ?? null,
+    uhid: p.index.uhid,
+    memberUid: null,
+    lane: p.lane,
+    tags: { ...p.tags },
+    gapDays: p.gapDays,
+    indexDepartment: p.index.department,
+    readmitDepartment: p.readmit.department,
+    indexDoctor: p.index.doctor,
+    readmitDoctor: p.readmit.doctor,
+    indexDischargeAt: p.index.dischargeAt,
+    readmitAdmitAt: p.readmit.admitAt,
+    payerIndex: p.index.payer,
+    payerReadmit: p.readmit.payer,
+    cmNote: p.cmNote ?? null,
+    formIsPlanned: null,
+    formSameCondition: null,
+  };
+}
+
+export function oonToDetectionRow(o: OonDetection): DetectionRow {
+  return {
+    dedupKey: oonDedupKey(o.index.encounterId, o.formUid),
+    findingClass: 'out_of_network',
+    indexEncounterId: o.index.encounterId,
+    readmitEncounterId: null,
+    formUid: o.formUid,
+    uhid: o.index.uhid,
+    memberUid: o.memberUid,
+    lane: 'out_of_network',
+    tags: null,
+    gapDays: null,
+    indexDepartment: o.index.department,
+    readmitDepartment: null,
+    indexDoctor: o.index.doctor,
+    readmitDoctor: null,
+    indexDischargeAt: o.index.dischargeAt,
+    readmitAdmitAt: o.reportedReadmitDate,
+    payerIndex: o.index.payer,
+    payerReadmit: null,
+    cmNote: o.cmNote,
+    formIsPlanned: o.isPlanned,
+    formSameCondition: o.sameCondition,
+  };
+}
+
+/** Stage-1 upsert. Detection columns only in the conflict update — audit output survives. */
+export async function saveDetection(row: DetectionRow, engineVersion: string = READMIT_ENGINE_VERSION): Promise<'inserted' | 'updated' | 'skipped'> {
+  if (!row.dedupKey || !row.indexEncounterId) return 'skipped';
+  try {
+    const rows = (await sql(
+      `INSERT INTO readmission_findings
+        (dedup_key, engine_version, finding_class, index_encounter_id, readmit_encounter_id, form_uid,
+         uhid, member_uid, lane, tags, gap_days,
+         index_department, readmit_department, index_doctor, readmit_doctor,
+         index_discharge_at, readmit_admit_at, payer_index, payer_readmit, cm_note,
+         form_is_planned, form_same_condition, audit_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+         CASE WHEN $9 = 'excluded' THEN 'excluded' ELSE 'detected' END)
+       ON CONFLICT (dedup_key, engine_version) DO UPDATE SET
+         finding_class = EXCLUDED.finding_class, lane = EXCLUDED.lane, tags = EXCLUDED.tags,
+         gap_days = EXCLUDED.gap_days,
+         index_department = EXCLUDED.index_department, readmit_department = EXCLUDED.readmit_department,
+         index_doctor = EXCLUDED.index_doctor, readmit_doctor = EXCLUDED.readmit_doctor,
+         index_discharge_at = EXCLUDED.index_discharge_at, readmit_admit_at = EXCLUDED.readmit_admit_at,
+         payer_index = EXCLUDED.payer_index, payer_readmit = EXCLUDED.payer_readmit,
+         cm_note = COALESCE(EXCLUDED.cm_note, readmission_findings.cm_note),
+         form_uid = COALESCE(EXCLUDED.form_uid, readmission_findings.form_uid),
+         form_is_planned = COALESCE(EXCLUDED.form_is_planned, readmission_findings.form_is_planned),
+         form_same_condition = COALESCE(EXCLUDED.form_same_condition, readmission_findings.form_same_condition),
+         -- READMIT-EXCLUSION-NARROW: re-queue a previously muted row when the recomputed lane is
+         -- auditable; never touch an audited/not_auditable row; a row re-excluded stays excluded.
+         audit_status = CASE
+           WHEN readmission_findings.audit_status IN ('audited', 'not_auditable') THEN readmission_findings.audit_status
+           WHEN EXCLUDED.lane = 'excluded' THEN 'excluded'
+           WHEN readmission_findings.audit_status = 'excluded' THEN 'detected'
+           ELSE readmission_findings.audit_status
+         END
+       RETURNING (xmax = 0) AS inserted`,
+      [
+        row.dedupKey, engineVersion, row.findingClass, row.indexEncounterId, row.readmitEncounterId,
+        row.formUid, row.uhid, row.memberUid, row.lane, JSON.stringify(row.tags ?? null), row.gapDays,
+        row.indexDepartment, row.readmitDepartment, row.indexDoctor, row.readmitDoctor,
+        row.indexDischargeAt, row.readmitAdmitAt, row.payerIndex, row.payerReadmit, row.cmNote,
+        row.formIsPlanned, row.formSameCondition,
+      ],
+    )) as Array<{ inserted: boolean }>;
+    return rows.length ? (rows[0].inserted ? 'inserted' : 'updated') : 'skipped';
+  } catch {
+    return 'skipped';   // migration not run / DB fault — the worker reports it, never 500s
+  }
+}
+
+export interface AuditResultWrite {
+  dedupKey: string;
+  status: Extract<AuditStatus, 'audited' | 'not_auditable'>;
+  finding?: ReadmissionFinding | null;
+  notAuditableReason?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  traceId?: string | null;
+  promoted?: boolean;
+  /** Phase 1.5: the tier for a NOT-AUDITABLE write, where there is no finding to read
+   *  it off. An audited row takes it from the finding. */
+  labTier?: LabTier | null;
+}
+
+/** Stage-2 write. On transient failure call recordAuditError instead — status stays
+ *  'detected' and the next sweep retries (the sweep IS the retry). */
+export async function saveAuditResult(w: AuditResultWrite, engineVersion: string = READMIT_ENGINE_VERSION): Promise<boolean> {
+  if (!w.dedupKey) return false;
+  const f = w.finding ?? null;
+  const judgements = f != null ? deriveJudgements(f) : null;
+  try {
+    // R8.1 (FINDING-VERSIONS PRD, "Change to the write path", O2): read what stands at
+    // (dedup_key, engine_version) BEFORE overwriting. An audited reading about to be
+    // replaced is snapshotted to the versions table; no row, or a row never
+    // audited, has nothing worth keeping and takes the plain UPDATE below unchanged.
+    // needsOverwriteSnapshot (pure core) also skips the snapshot when the stored reading
+    // IS the incoming one (same trace_id), keeping this function idempotent: a second
+    // identical save re-runs the UPDATE and writes no second snapshot of the same reading.
+    const current = (await sql(
+      `SELECT audit_status, trace_id FROM readmission_findings
+        WHERE dedup_key = $1 AND engine_version = $2`,
+      [w.dedupKey, engineVersion],
+    )) as Array<{ audit_status: string | null; trace_id: string | null }>;
+    const snapshotFirst = needsOverwriteSnapshot(current[0] ?? null, w.traceId ?? null);
+    const updateSql = `UPDATE readmission_findings SET
+         audit_status = $3, audited_at = NOW(),
+         finding = $4::jsonb, not_auditable_reason = $5,
+         planned = $6, same_condition = $7, avoidable = $8,
+         lab_timing_profile = $9, n_omissions = $10, needs_human_review = $11,
+         promoted_to_full = $12, model = $13, provider = $14, trace_id = $15,
+         lab_tier = $16, lab_source_provenance = $17::jsonb, omission_evidence = $18::jsonb,
+         preventable_injury = $19, negligence = $20, judgement_rule_version = $21,
+         last_error = NULL
+       WHERE dedup_key = $1 AND engine_version = $2
+       RETURNING id`;
+    // ONE statement = ONE transaction (Neon's HTTP driver has no interactive BEGIN/COMMIT):
+    // the snapshot INSERT and the UPDATE travel together, so a fault in either aborts both —
+    // a crash can never leave a snapshot with no overwrite behind it, and a failed snapshot
+    // BLOCKS the UPDATE (O2; the catch below returns false and the sweep is the retry, the
+    // same posture every transient save fault already has). The CTE re-reads the row inside
+    // the statement's own MVCC snapshot, so row_snapshot is exactly the row being replaced;
+    // its WHERE re-checks audited + trace-distinct so a race with another save degrades to
+    // "no snapshot inserted", never a wrong one.
+    const rows = (await sql(
+      snapshotFirst
+        ? `WITH cur AS (
+             SELECT * FROM readmission_findings
+              WHERE dedup_key = $1 AND engine_version = $2
+           ), snap AS (
+             INSERT INTO readmission_finding_versions
+               (capture_reason, dedup_key, engine_version, avoidable, planned, same_condition,
+                preventable_injury, audit_status, model, provider, audited_at, template_coverage,
+                row_snapshot, trace_id)
+             SELECT 'overwrite', c.dedup_key, c.engine_version, c.avoidable, c.planned, c.same_condition,
+                    c.preventable_injury, c.audit_status, c.model, c.provider, c.audited_at,
+                    c.finding->'templateCoverage', to_jsonb(c), c.trace_id
+               FROM cur c
+              WHERE c.audit_status = 'audited'
+                AND (c.trace_id IS NULL OR $15::text IS NULL OR c.trace_id <> $15::text)
+             RETURNING id
+           )
+           ${updateSql}`
+        : updateSql,
+      [
+        w.dedupKey, engineVersion, w.status,
+        f != null ? JSON.stringify(f) : null, w.notAuditableReason ?? null,
+        f?.planned?.verdict ?? null, f?.sameCondition?.verdict ?? null, f?.avoidable?.verdict ?? null,
+        f?.labProfile ?? null, f?.omissions?.length ?? 0, f?.provenance?.needsHumanReview ?? null,
+        w.promoted === true, w.model ?? null, w.provider ?? null, w.traceId ?? null,
+        // Phase 1.5: the coverage tier, what it was built from, and the omission
+        // evidence rows — surfaced as their own columns so a reviewer can filter on
+        // "tier 1 only" without opening every `finding` blob.
+        f?.labTier ?? w.labTier ?? null,
+        f?.labSourceProvenance != null ? JSON.stringify(f.labSourceProvenance) : null,
+        f?.omissions?.length ? JSON.stringify(f.omissions) : null,
+        // R1 (READMISSIONS-R1 PRD v1.1 §5): the two stored advisory judgements, derived
+        // deterministically from the finding, stamped with the rule version that produced
+        // them. A not_auditable write has no finding and therefore no judgement — NULLs,
+        // never an invented value.
+        judgements?.preventableInjury ?? null, judgements?.negligence ?? null,
+        judgements ? JUDGEMENT_RULE_VERSION : null,
+      ],
+    )) as Array<{ id: string }>;
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Best-effort transient-failure note. Never throws; row stays 'detected' for the sweep. */
+export async function recordAuditError(dedupKey: string, error: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<void> {
+  try {
+    await sql(
+      `UPDATE readmission_findings SET last_error = $3, attempts = COALESCE(attempts, 0) + 1
+       WHERE dedup_key = $1 AND engine_version = $2`,
+      [dedupKey, engineVersion, String(error).slice(0, 2000)],
+    );
+  } catch { /* observability must never break the audit path */ }
+}
+
+/** Best-effort: stamp the last narrative-leg failure on the finding blob. Additive key, no
+ *  version snapshot (same rule as caseNarrative). Never throws. */
+export async function recordNarrativeError(dedupKey: string, code: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<void> {
+  try {
+    await sql(
+      `UPDATE readmission_findings SET finding = jsonb_set(COALESCE(finding,'{}'::jsonb), '{narrativeError}', jsonb_build_object('at', to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'), 'code', $2::text)) WHERE dedup_key = $1 AND engine_version = $3`,
+      [dedupKey, normaliseNarrativeCode(code), engineVersion],
+    );
+  } catch { /* observability must never break the audit path */ }
+}
+
+/** Best-effort: drop the narrativeError key after a narrative lands. Never throws. */
+export async function clearNarrativeError(dedupKey: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<void> {
+  try {
+    await sql(
+      `UPDATE readmission_findings SET finding = finding - 'narrativeError' WHERE dedup_key = $1 AND engine_version = $2 AND finding ? 'narrativeError'`,
+      [dedupKey, engineVersion],
+    );
+  } catch { /* observability must never break the audit path */ }
+}
+
+export interface ReadmissionHealthCounts {
+  readOk: boolean;
+  lastAuditAt: string | null;
+  lastNarrativeAt: string | null;
+  narrativePending: number | null;
+  oldestNarrativePendingAt: string | null;
+  detectedPending: number | null;
+  oldestDetectedAt: string | null;
+  narrativeErrors: number | null;
+  lastNarrativeErrorAt: string | null;
+  auditErrors: number | null;
+}
+
+const HEALTH_NULL: ReadmissionHealthCounts = {
+  readOk: false, lastAuditAt: null, lastNarrativeAt: null, narrativePending: null, oldestNarrativePendingAt: null,
+  detectedPending: null, oldestDetectedAt: null, narrativeErrors: null, lastNarrativeErrorAt: null, auditErrors: null,
+};
+
+/** The ONE health read. Timestamps and counts only. Fail-safe: all-null with readOk:false. */
+export const READMISSION_HEALTH_SQL = `SELECT
+       to_char(MAX(audited_at) FILTER (WHERE audit_status = 'audited') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_audit_at,
+       to_char(MAX(CASE WHEN finding->'caseNarrative'->>'generatedAt' ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN (finding->'caseNarrative'->>'generatedAt')::timestamptz END) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_narrative_at,
+       count(*) FILTER (WHERE audit_status = 'audited' AND (finding IS NULL OR finding->'caseNarrative' IS NULL))::int AS narrative_pending,
+       to_char(MIN(audited_at) FILTER (WHERE audit_status = 'audited' AND (finding IS NULL OR finding->'caseNarrative' IS NULL)) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS oldest_narrative_pending_at,
+       count(*) FILTER (WHERE audit_status = 'detected')::int AS detected_pending,
+       to_char(MIN(created_at) FILTER (WHERE audit_status = 'detected') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS oldest_detected_at,
+       count(*) FILTER (WHERE finding ? 'narrativeError')::int AS narrative_errors,
+       to_char(MAX(CASE WHEN finding->'narrativeError'->>'at' ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN (finding->'narrativeError'->>'at')::timestamptz END) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_narrative_error_at,
+       count(*) FILTER (WHERE last_error IS NOT NULL)::int AS audit_errors
+  FROM readmission_findings
+ WHERE engine_version = $1`;
+
+export async function readmissionHealthCounts(engineVersion: string = READMIT_ENGINE_VERSION): Promise<ReadmissionHealthCounts> {
+  try {
+    const rows = (await sql(READMISSION_HEALTH_SQL, [engineVersion])) as Record<string, unknown>[];
+    const r = rows[0];
+    if (!r) return { ...HEALTH_NULL };
+    const ts = (v: unknown): string | null => (v == null || v === '' ? null : String(v));
+    const n = (v: unknown): number => Number(v ?? 0);
+    return {
+      readOk: true,
+      lastAuditAt: ts(r.last_audit_at), lastNarrativeAt: ts(r.last_narrative_at),
+      narrativePending: n(r.narrative_pending), oldestNarrativePendingAt: ts(r.oldest_narrative_pending_at),
+      detectedPending: n(r.detected_pending), oldestDetectedAt: ts(r.oldest_detected_at),
+      narrativeErrors: n(r.narrative_errors), lastNarrativeErrorAt: ts(r.last_narrative_error_at),
+      auditErrors: n(r.audit_errors),
+    };
+  } catch {
+    return { ...HEALTH_NULL };
+  }
+}
+
+export interface PendingRow extends Record<string, unknown> {
+  dedup_key: string;
+  finding_class: string;
+  index_encounter_id: string;
+  readmit_encounter_id: string | null;
+  form_uid: string | null;
+  uhid: string | null;
+  lane: string;
+  gap_days: number | null;
+  index_department: string | null;
+  readmit_department: string | null;
+  index_doctor: string | null;
+  readmit_doctor: string | null;
+  index_discharge_at: string | null;
+  readmit_admit_at: string | null;
+  cm_note: string | null;
+  form_is_planned: boolean | null;
+  form_same_condition: boolean | null;
+}
+
+/** Auditable lanes by default: A (er_routed, tight_bounce), B (structural_30d),
+ *  D (other — condition pass, decision 9) and out-of-network (decision 13).
+ *  Lane C ('excluded') is sample-only and reachable via an explicit ?lane=excluded. */
+export const AUDITABLE_LANES = ['er_routed', 'tight_bounce', 'structural_30d', 'other', 'out_of_network'] as const;
+
+export async function pendingFindings(opts: {
+  limit: number;
+  lane?: string | null;
+  readmitDay?: string | null;   // IST day of the readmit admission (?day=)
+  engineVersion?: string;
+}): Promise<PendingRow[]> {
+  const engine = opts.engineVersion ?? READMIT_ENGINE_VERSION;
+  const limit = Math.max(1, Math.min(50, Math.floor(opts.limit)));
+  const params: unknown[] = [engine];
+  let where = `engine_version = $1 AND audit_status = 'detected'`;
+  if (opts.lane) {
+    params.push(opts.lane);
+    where += ` AND lane = $${params.length}`;
+  } else {
+    where += ` AND lane IN (${AUDITABLE_LANES.map((l) => `'${l}'`).join(', ')})`;
+  }
+  if (opts.readmitDay && /^\d{4}-\d{2}-\d{2}$/.test(opts.readmitDay)) {
+    params.push(opts.readmitDay);
+    where += ` AND (readmit_admit_at AT TIME ZONE 'Asia/Kolkata')::date = $${params.length}::date`;
+  }
+  try {
+    return (await sql(
+      `SELECT dedup_key, finding_class, index_encounter_id, readmit_encounter_id, form_uid, uhid, lane,
+              gap_days, index_department, readmit_department, index_doctor, readmit_doctor,
+              to_char(index_discharge_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS index_discharge_at,
+              to_char(readmit_admit_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS readmit_admit_at,
+              cm_note, form_is_planned, form_same_condition
+         FROM readmission_findings
+        WHERE ${where}
+        ORDER BY readmit_admit_at ASC NULLS LAST
+        LIMIT ${limit}`,
+      params,
+    )) as PendingRow[];
+  } catch {
+    return [];
+  }
+}
+
+// ── Phase 2 (/care/readmissions) — the READ side ────────────────────────────────
+// Additive: nothing below writes. The surface renders findings the agent already
+// stored, so this is the only new thing the read path needed.
+
+/** One audited finding as the surface reads it (PRD Phase-2 §2). `finding` and
+ *  `omission_evidence` come back as jsonb — the Neon driver usually parses them,
+ *  but a TEXT-typed round trip is tolerated by the route's asJson(). */
+export interface SurfaceRow extends Record<string, unknown> {
+  dedup_key: string;
+  finding_class: string;
+  lane: string;
+  audit_status: string;
+  index_encounter_id: string;
+  readmit_encounter_id: string | null;
+  uhid: string | null;
+  tags: unknown;
+  gap_days: number | null;
+  index_department: string | null;
+  readmit_department: string | null;
+  index_doctor: string | null;
+  readmit_doctor: string | null;
+  index_discharge_at: string | null;
+  readmit_admit_at: string | null;
+  payer_index: string | null;
+  payer_readmit: string | null;
+  cm_note: string | null;
+  planned: string | null;
+  same_condition: string | null;
+  avoidable: string | null;
+  lab_tier: string | null;
+  lab_timing_profile: string | null;
+  n_omissions: number | null;
+  needs_human_review: boolean | null;
+  promoted_to_full: boolean | null;
+  not_auditable_reason: string | null;
+  finding: unknown;
+  omission_evidence: unknown;
+  /** R1 stored advisory judgements (PRD v1.1 §5) — NULL until the row is audited under
+   *  R1 or the versioned backfill has reached it. */
+  preventable_injury: string | null;
+  negligence: string | null;
+  judgement_rule_version: string | null;
+}
+
+export interface SurfaceRead {
+  rows: SurfaceRow[];
+  /** Still 'detected' — the "N pending audit" note. Not renderable as a finding. */
+  pendingCount: number;
+  /** The chooser badge: audited AND avoidable IN ('avoidable','needs_adjudication'). */
+  reviewCount: number;
+}
+
+/** Hard cap on what one page load reads. The detector's window is 90 days; 500 is
+ *  well above the measured pair count and keeps a runaway table off the page. */
+const SURFACE_LIMIT = 500;
+
+/**
+ * Read the audited findings the /care/readmissions surface renders, plus the two
+ * counts the page and the chooser badge need. READ-ONLY.
+ *
+ * `not_auditable` and `excluded` rows are included ONLY when explicitly asked for, so
+ * that any OTHER caller still gets the audited findings and nothing else. The care
+ * surface asks for both (Phase 2.1, decision 1): the held-out sample is expected by
+ * design and reads as context, not as a queue — the board collapses it.
+ *
+ * Fail-safe (house posture): any DB error — including the migration not having run —
+ * degrades to an empty board with zero counts, never a 500. An empty surface says
+ * "nothing to review", which is the truthful reading of "we cannot see anything".
+ */
+export async function listFindingsForSurface(opts?: {
+  engineVersion?: string;
+  lane?: string | null;
+  includeNotAuditable?: boolean;
+  /** Add the held-out sample (audit_status 'excluded' — oncology / dialysis /
+   *  obstetric returns). Off by default; the care surface turns it on. */
+  includeExcluded?: boolean;
+  limit?: number;
+}): Promise<SurfaceRead> {
+  const engine = opts?.engineVersion ?? READMIT_ENGINE_VERSION;
+  const limit = Math.max(1, Math.min(SURFACE_LIMIT, Math.floor(opts?.limit ?? SURFACE_LIMIT)));
+  // The status allowlist is assembled from literals in THIS function — no caller value
+  // reaches the SQL text. 'detected' is never a member: a row the sweep has not reached
+  // has nothing to render, and the pending count reports it instead.
+  const statuses: AuditStatus[] = ['audited'];
+  if (opts?.includeNotAuditable) statuses.push('not_auditable');
+  if (opts?.includeExcluded) statuses.push('excluded');
+  const params: unknown[] = [engine];
+  let where = `engine_version = $1 AND audit_status IN (${statuses.map((st) => `'${st}'`).join(',')})`;
+  if (opts?.lane) {
+    params.push(opts.lane);
+    where += ` AND lane = $${params.length}`;
+  }
+  try {
+    const [rows, counts] = await Promise.all([
+      sql(
+        `SELECT dedup_key, finding_class, lane, audit_status, index_encounter_id, readmit_encounter_id,
+                uhid, tags, gap_days, index_department, readmit_department, index_doctor, readmit_doctor,
+                to_char(index_discharge_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS index_discharge_at,
+                to_char(readmit_admit_at,   'YYYY-MM-DD"T"HH24:MI:SSOF') AS readmit_admit_at,
+                payer_index, payer_readmit, cm_note,
+                planned, same_condition, avoidable, lab_tier, lab_timing_profile,
+                n_omissions, needs_human_review, promoted_to_full, not_auditable_reason,
+                finding, omission_evidence,
+                preventable_injury, negligence, judgement_rule_version
+           FROM readmission_findings
+          WHERE ${where}
+          ORDER BY readmit_admit_at DESC NULLS LAST
+          LIMIT ${limit}`,
+        params,
+      ),
+      sql(
+        `SELECT
+           count(*) FILTER (WHERE audit_status = 'detected')::int AS pending,
+           count(*) FILTER (WHERE audit_status = 'audited'
+                              AND avoidable IN ('avoidable','needs_adjudication'))::int AS review
+         FROM readmission_findings WHERE engine_version = $1`,
+        [engine],
+      ),
+    ]);
+    const c = (counts as Array<{ pending: number; review: number }>)[0];
+    return {
+      rows: rows as SurfaceRow[],
+      pendingCount: Number(c?.pending ?? 0),
+      reviewCount: Number(c?.review ?? 0),
+    };
+  } catch {
+    return { rows: [], pendingCount: 0, reviewCount: 0 };
+  }
+}
+
+/**
+ * R1 (PRD v1.1 §6, decision 14): ONE finding for the case route, read exactly as the list
+ * reads it, PINNED to the engine version — never "pick latest". READ-ONLY. Null on no
+ * row and on any DB fault alike (the route turns both into a 404 / thinner brief, never
+ * a 500). Same column list as listFindingsForSurface so the brief and the card can never
+ * see different fields on the same row.
+ */
+export async function fetchFindingForSurface(dedupKey: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<SurfaceRow | null> {
+  if (!dedupKey) return null;
+  try {
+    const rows = (await sql(
+      `SELECT dedup_key, finding_class, lane, audit_status, index_encounter_id, readmit_encounter_id,
+              uhid, tags, gap_days, index_department, readmit_department, index_doctor, readmit_doctor,
+              to_char(index_discharge_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS index_discharge_at,
+              to_char(readmit_admit_at,   'YYYY-MM-DD"T"HH24:MI:SSOF') AS readmit_admit_at,
+              payer_index, payer_readmit, cm_note,
+              planned, same_condition, avoidable, lab_tier, lab_timing_profile,
+              n_omissions, needs_human_review, promoted_to_full, not_auditable_reason,
+              finding, omission_evidence,
+              preventable_injury, negligence, judgement_rule_version
+         FROM readmission_findings
+        WHERE dedup_key = $1 AND engine_version = $2
+        LIMIT 1`,
+      [dedupKey, engineVersion],
+    )) as SurfaceRow[];
+    return rows[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The chooser badge alone (app/care/page.tsx). Same predicate as listFindingsForSurface's
+ * `review` count — deliberately one SQL expression duplicated in one other place and
+ * nowhere else, because the badge must not be able to disagree with the page. Soft-fails
+ * to 0 like every other count on that page.
+ */
+export async function reviewCountForChooser(engineVersion: string = READMIT_ENGINE_VERSION): Promise<number> {
+  try {
+    const rows = (await sql(
+      `SELECT count(*)::int AS n FROM readmission_findings
+        WHERE engine_version = $1 AND audit_status = 'audited'
+          AND avoidable IN ('avoidable','needs_adjudication')`,
+      [engineVersion],
+    )) as Array<{ n: number }>;
+    return Number(rows[0]?.n ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+/** Status/lane rollup for the worker's response (V's lane-count validation, §12.5). */
+export async function findingCounts(engineVersion: string = READMIT_ENGINE_VERSION): Promise<{
+  byLane: Record<string, number>; byStatus: Record<string, number>; total: number;
+}> {
+  try {
+    const rows = (await sql(
+      `SELECT lane, audit_status, count(*)::int AS n
+         FROM readmission_findings WHERE engine_version = $1 GROUP BY lane, audit_status`,
+      [engineVersion],
+    )) as Array<{ lane: string; audit_status: string; n: number }>;
+    const byLane: Record<string, number> = {};
+    const byStatus: Record<string, number> = {};
+    let total = 0;
+    for (const r of rows) {
+      byLane[r.lane] = (byLane[r.lane] ?? 0) + Number(r.n);
+      byStatus[r.audit_status] = (byStatus[r.audit_status] ?? 0) + Number(r.n);
+      total += Number(r.n);
+    }
+    return { byLane, byStatus, total };
+  } catch {
+    return { byLane: {}, byStatus: {}, total: 0 };
+  }
+}
+
+// ── R4 (CDMSS-READMISSIONS-R4-PRD v1.0 §2) — the case artefacts, blob-only ─────────────────
+//
+// The narrative, the evidence ledger and the related-LVC selection are ADDITIVE artefacts on
+// the `finding` jsonb — no column, no DDL, no engine bump: the audit's judgements are unchanged
+// (the R1 judgement-column reasoning). Written once at audit time (run.ts) or by the backfill
+// tick on the Bedrock rails; the page renders them as stored (R4-2). The judgement columns
+// (planned / same_condition / avoidable / preventable_injury / negligence …) are NOT in this
+// SET list and cannot move here.
+
+/** Merge the R4 artefacts into the finding blob of ONE audited row at the given engine version.
+ *  `finding || $3` overwrites only the keys present in $3. Returns false when no such row. */
+export async function saveCaseArtefacts(dedupKey: string, artefacts: Record<string, unknown>, engineVersion: string = READMIT_ENGINE_VERSION): Promise<boolean> {
+  if (!dedupKey || !artefacts || !Object.keys(artefacts).length) return false;
+  try {
+    const rows = (await sql(
+      `UPDATE readmission_findings
+          SET finding = COALESCE(finding, '{}'::jsonb) || $3::jsonb
+        WHERE dedup_key = $1 AND engine_version = $2 AND audit_status = 'audited'
+        RETURNING id`,
+      [dedupKey, engineVersion, JSON.stringify(artefacts)],
+    )) as Array<{ id: unknown }>;
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** An audited row as the narrative leg needs it: the PendingRow facts + the stored finding. */
+export interface NarrativeRow extends PendingRow {
+  finding: unknown;
+  audited_at: string | null;
+}
+
+const NARRATIVE_ROW_COLS = `dedup_key, finding_class, index_encounter_id, readmit_encounter_id, form_uid, uhid, lane,
+              gap_days, index_department, readmit_department, index_doctor, readmit_doctor,
+              to_char(index_discharge_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS index_discharge_at,
+              to_char(readmit_admit_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS readmit_admit_at,
+              cm_note, form_is_planned, form_same_condition, finding,
+              to_char(audited_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS audited_at`;
+
+/** The predicate for "needs a narrative": audited at this engine, no caseNarrative on the blob. */
+const NEEDS_NARRATIVE = `engine_version = $1 AND audit_status = 'audited' AND (finding IS NULL OR finding->'caseNarrative' IS NULL)`;
+
+/**
+ * Backfill (R4-8): audited findings WITHOUT a stored narrative whose audited_at (UTC calendar day)
+ * is `day` — the run cursor's unit on the rails. Oldest first, capped. Fail-safe: [] on fault.
+ */
+export async function auditedRowsNeedingNarrative(opts: { day: string; limit: number; engineVersion?: string }): Promise<NarrativeRow[]> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.day)) return [];
+  const engine = opts.engineVersion ?? READMIT_ENGINE_VERSION;
+  const limit = Math.max(1, Math.min(8, Math.floor(opts.limit)));
+  try {
+    return (await sql(
+      `SELECT ${NARRATIVE_ROW_COLS}
+         FROM readmission_findings
+        WHERE ${NEEDS_NARRATIVE} AND (audited_at AT TIME ZONE 'UTC')::date = $2::date
+        ORDER BY audited_at ASC
+        LIMIT ${limit}`,
+      [engine, opts.day],
+    )) as NarrativeRow[];
+  } catch {
+    return [];
+  }
+}
+
+/** How many audited findings on `day` (UTC) still lack a narrative — the tick's dayComplete test.
+ *  Null on fault (the tick then treats the day as NOT complete rather than marching past it). */
+export async function narrativePendingCountForDay(day: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<number | null> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  try {
+    const rows = (await sql(
+      `SELECT count(*)::int AS n FROM readmission_findings
+        WHERE ${NEEDS_NARRATIVE} AND (audited_at AT TIME ZONE 'UTC')::date = $2::date`,
+      [engineVersion, day],
+    )) as Array<{ n: number }>;
+    return Number(rows[0]?.n ?? 0);
+  } catch {
+    return null;
+  }
+}
+
+/** The whole backlog: audited findings lacking a narrative, and the audited_at UTC day span they
+ *  cover — what an operator needs to size a run (day_from / day_to). Fail-safe: zeros / nulls. */
+export async function narrativeBacklog(engineVersion: string = READMIT_ENGINE_VERSION): Promise<{ pending: number; withNarrative: number; invalid: number; dayFrom: string | null; dayTo: string | null }> {
+  try {
+    const rows = (await sql(
+      `SELECT
+         count(*) FILTER (WHERE finding IS NULL OR finding->'caseNarrative' IS NULL)::int AS pending,
+         count(*) FILTER (WHERE finding->'caseNarrative' IS NOT NULL)::int AS with_narrative,
+         count(*) FILTER (WHERE (finding->'caseNarrative'->>'valid') = 'false')::int AS invalid,
+         to_char(min(audited_at) FILTER (WHERE finding IS NULL OR finding->'caseNarrative' IS NULL) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day_from,
+         to_char(max(audited_at) FILTER (WHERE finding IS NULL OR finding->'caseNarrative' IS NULL) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day_to
+       FROM readmission_findings
+       WHERE engine_version = $1 AND audit_status = 'audited'`,
+      [engineVersion],
+    )) as Array<Record<string, unknown>>;
+    const r = rows[0] ?? {};
+    return {
+      pending: Number(r.pending ?? 0), withNarrative: Number(r.with_narrative ?? 0), invalid: Number(r.invalid ?? 0),
+      dayFrom: r.day_from == null ? null : String(r.day_from), dayTo: r.day_to == null ? null : String(r.day_to),
+    };
+  } catch {
+    return { pending: 0, withNarrative: 0, invalid: 0, dayFrom: null, dayTo: null };
+  }
+}
+
+/** One audited row by key (any narrative state) — the manual single-finding path. */
+export async function auditedRowForNarrative(dedupKey: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<NarrativeRow | null> {
+  if (!dedupKey) return null;
+  try {
+    const rows = (await sql(
+      `SELECT ${NARRATIVE_ROW_COLS} FROM readmission_findings
+        WHERE dedup_key = $1 AND engine_version = $2 AND audit_status = 'audited' LIMIT 1`,
+      [dedupKey, engineVersion],
+    )) as NarrativeRow[];
+    return rows[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ── R10-A (CDMSS-READMISSIONS-R10-RECORD-REACH PRD §3.3, R10-D2) — the re-extraction cohort ──
+//
+// EVERY finding at the engine, whatever its audit status, with the two encounter ids and its
+// finding blob. Deliberately NOT filtered to `audited`: R10-D2 says re-extract all stored cases —
+// "93 audited + pending" — and a pending pair whose document prints operative text is exactly the
+// pair that must not be audited from a blind extraction in the first place.
+//
+// Ordered by dedup_key so the backfill's `offset` cursor is stable across requests, which is the
+// only thing that makes "call it again until next_offset === total" an honest instruction.
+//
+// ⚠️ INFERRED SQL. Fail-safe: [] on any fault — the backfill then reports zero rows to consider
+// rather than claiming the cohort is finished.
+export interface ReextractRow extends Record<string, unknown> {
+  dedup_key: string;
+  finding_class: string;
+  audit_status: string | null;
+  index_encounter_id: string;
+  readmit_encounter_id: string | null;
+  finding: unknown;
+}
+
+export async function rowsForReextract(opts: { engineVersion?: string; limit?: number; offset?: number } = {}): Promise<ReextractRow[]> {
+  const engine = opts.engineVersion ?? READMIT_ENGINE_VERSION;
+  const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 500)));
+  const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+  try {
+    return (await sql(
+      `SELECT dedup_key, finding_class, audit_status, index_encounter_id, readmit_encounter_id, finding
+         FROM readmission_findings
+        WHERE engine_version = $1
+        ORDER BY dedup_key ASC
+        LIMIT ${limit} OFFSET ${offset}`,
+      [engine],
+    )) as ReextractRow[];
+  } catch {
+    return [];
+  }
+}
+
+/** How many findings the re-extraction cohort holds at this engine. Null on fault — the backfill
+ *  reports "total unknown" rather than a zero that would read as "nothing to do". */
+export async function reextractCohortSize(engineVersion: string = READMIT_ENGINE_VERSION): Promise<number | null> {
+  try {
+    const rows = (await sql(
+      `SELECT count(*)::int AS n FROM readmission_findings WHERE engine_version = $1`,
+      [engineVersion],
+    )) as Array<{ n: number }>;
+    return Number(rows[0]?.n ?? 0);
+  } catch {
+    return null;
+  }
+}
+
+// ── R4.1 (CDMSS-READMISSIONS-R4.1-PRD v1.0 R41-4) — the refresh detector's read ─────────────
+//
+// Every AUDITED finding at the engine (optionally on one audited_at UTC day), WITH its finding blob
+// (the stored templateCoverage + the refresh bookkeeping ride inside it). The pure detector decides
+// which are refresh-pending; nothing here writes. Fail-safe: [] on fault.
+export async function auditedRowsForRefresh(opts: { day?: string | null; limit?: number; engineVersion?: string } = {}): Promise<NarrativeRow[]> {
+  const engine = opts.engineVersion ?? READMIT_ENGINE_VERSION;
+  const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 500)));
+  const params: unknown[] = [engine];
+  let where = `engine_version = $1 AND audit_status = 'audited'`;
+  if (opts.day && /^\d{4}-\d{2}-\d{2}$/.test(opts.day)) { params.push(opts.day); where += ` AND (audited_at AT TIME ZONE 'UTC')::date = $${params.length}::date`; }
+  try {
+    return (await sql(
+      `SELECT ${NARRATIVE_ROW_COLS} FROM readmission_findings WHERE ${where} ORDER BY audited_at ASC LIMIT ${limit}`,
+      params,
+    )) as NarrativeRow[];
+  } catch {
+    return [];
+  }
+}

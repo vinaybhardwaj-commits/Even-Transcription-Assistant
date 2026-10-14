@@ -1,0 +1,56 @@
+{
+  "encounter_id": "synthetic-knee-replacement-missing-consent",
+  "room": "room-a",
+  "specialty": "orthopaedics",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 7,
+      "text_en": "Your knee x-ray shows severe wear. You need a knee replacement on the right.",
+      "text_native": "घुटना घिस गया है",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "patient",
+      "t0": 9,
+      "t1": 13,
+      "text_en": "I have had pain for three years and tried tablets and physio.",
+      "text_native": "तीन साल से दर्द",
+      "lang": "hi"
+    },
+    {
+      "id": "3",
+      "role": "doctor",
+      "t0": 15,
+      "t1": 20,
+      "text_en": "Then replacement is the right step. Recovery takes about three months.",
+      "text_native": "तीन महीने",
+      "lang": "hi"
+    },
+    {
+      "id": "4",
+      "role": "patient",
+      "t0": 22,
+      "t1": 25,
+      "text_en": "Fine, go ahead.",
+      "text_native": "ठीक है",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": true,
+    "procedure_text": "right knee replacement"
+  },
+  "clips": []
+}

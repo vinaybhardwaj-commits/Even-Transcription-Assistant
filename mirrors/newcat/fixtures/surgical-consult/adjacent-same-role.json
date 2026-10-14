@@ -1,0 +1,74 @@
+{
+  "encounter_id": "synthetic-adjacent-same-role",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 3,
+      "text_en": "Your scan shows a hernia.",
+      "text_native": "स्कैन में हर्निया",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "doctor",
+      "t0": 3.5,
+      "t1": 6,
+      "text_en": "  I recommend repair.  ",
+      "text_native": "ऑपरेशन करें",
+      "lang": "hi"
+    },
+    {
+      "id": "3",
+      "role": "doctor",
+      "t0": 6.5,
+      "t1": 6.8,
+      "text_en": "   ",
+      "text_native": null,
+      "lang": "hi"
+    },
+    {
+      "id": "4",
+      "role": "patient",
+      "t0": 9,
+      "t1": 11,
+      "text_en": "Is it urgent?",
+      "text_native": "जल्दी है क्या",
+      "lang": "hi"
+    },
+    {
+      "id": "5",
+      "role": "patient",
+      "t0": 11.5,
+      "t1": 13,
+      "text_en": "I am worried.",
+      "text_native": "चिंता है",
+      "lang": "hi"
+    },
+    {
+      "id": "6",
+      "role": "doctor",
+      "t0": 15,
+      "t1": 19,
+      "text_en": "Not urgent, but plan it.",
+      "text_native": "जल्दी नहीं",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": true,
+    "procedure_text": "hernia repair"
+  },
+  "clips": []
+}

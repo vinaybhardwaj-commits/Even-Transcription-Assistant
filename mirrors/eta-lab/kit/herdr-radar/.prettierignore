@@ -1,0 +1,25 @@
+# Build output and artwork: nothing here is source, and reformatting it would
+# only churn bytes.
+dist/
+assets/
+node_modules/
+
+# Markdown here is hand-set prose. The three READMEs break their lines where
+# the sense breaks and the tables are aligned by hand; Prettier leaves prose
+# alone by default but still rewrites list markers, emphasis and table
+# alignment, which buys noise rather than consistency. What needs guarding is
+# the code, not the writing.
+*.md
+
+# Not in the repo - generated locally by herdr-radar-extras and laid out against
+# how it renders. Listed so a local copy does not trip the check.
+tools/banner.html
+tools/sidebar.html
+
+# Team hook config, local to a checkout and excluded from the repo via
+# .git/info/exclude. CI never sees these; without the entries a local
+# `prettier --check .` is permanently red, which is how a real failure
+# stops being noticed.
+lefthook.yml
+lefthook-local.yml
+.hooks-profile.json

@@ -1,0 +1,54 @@
+{
+  "name": "newcat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NewCat: headless clinical audit engine with an evidence index (synthetic data only).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/dev-server.ts",
+    "start": "tsx src/dev-server.ts",
+    "start:worker": "tsx src/worker.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "keys": "tsx scripts/keys.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "example": "tsx scripts/e2e-example.ts",
+    "eval": "tsx src/eval/cli.ts",
+    "eval:jev": "tsx src/eval/jev-calibration-cli.ts",
+    "jev:debug": "tsx src/eval/jev-debug-cli.ts",
+    "probe:bedrock": "tsx scripts/probe-bedrock.ts",
+    "migrate": "tsx src/db/migrate-cli.ts",
+    "openapi": "tsx scripts/generate-openapi.ts",
+    "corpus:import": "tsx scripts/corpus-import.ts",
+    "corpus:epmc": "tsx scripts/epmc.ts",
+    "corpus:batch-prepare": "tsx scripts/corpus-batch-prepare.ts",
+    "corpus:batch-load": "tsx scripts/corpus-batch-load.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock": "^3.1149.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.901.0",
+    "@aws-sdk/client-iam": "^3.1149.0",
+    "@aws-sdk/client-s3": "^3.1149.0",
+    "@aws-sdk/client-sts": "^3.1149.0",
+    "@electric-sql/pglite": "^0.3.11",
+    "@neondatabase/serverless": "^1.2.0",
+    "@vercel/oidc-aws-credentials-provider": "^3.3.11",
+    "google-auth-library": "^11.2.0",
+    "ws": "^8.22.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.24.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.0",
+    "@types/ws": "^8.18.2",
+    "eslint": "^9.37.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  }
+}

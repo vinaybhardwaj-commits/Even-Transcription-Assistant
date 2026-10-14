@@ -1,0 +1,6 @@
+# Remote agent host: publish pane tokens only. The Mini's config.toml draws the rows.
+headless = true
+# Must match the variant the Mini uses. `text` needs no font. `auto` would read "no font" on a server.
+variant = "text"
+poll_ms = 150
+frame_floor_ms = 120

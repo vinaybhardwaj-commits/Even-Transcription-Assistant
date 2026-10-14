@@ -1,0 +1,56 @@
+{
+  "encounter_id": "synthetic-decide-today-package",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 6,
+      "text_en": "You need hernia surgery. Let us do it this week.",
+      "text_native": "इसी हफ्ते करते हैं",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "doctor",
+      "t0": 9,
+      "t1": 15,
+      "text_en": "If you decide today I can give a package discount, otherwise the rate goes up.",
+      "text_native": "आज तय करें तो छूट",
+      "lang": "hi"
+    },
+    {
+      "id": "3",
+      "role": "patient",
+      "t0": 17,
+      "t1": 21,
+      "text_en": "I want to think and talk to my family first.",
+      "text_native": "परिवार से पूछना है",
+      "lang": "hi"
+    },
+    {
+      "id": "4",
+      "role": "doctor",
+      "t0": 23,
+      "t1": 28,
+      "text_en": "Waiting is dangerous, it can burst and become an emergency.",
+      "text_native": "इंतज़ार खतरनाक है",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": true,
+    "procedure_text": "hernia repair"
+  },
+  "clips": []
+}

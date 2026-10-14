@@ -1,0 +1,83 @@
+{
+ "transcript_version": "route-v2 24sep",
+ "truth": "/home/eta/dev/eta-lab-lx/studies/2026-09-24-e7-fullday/out-2026-09-24/e7-truth-2026-09-24.csv",
+ "hyp": [
+  "/home/eta/dev/eta-lab-lx/studies/2026-09-24-e7-fullday/out-2026-09-24/hyp-arm-d.json"
+ ],
+ "date_filter": null,
+ "match_rule": "overlap >= 50% of the shorter interval (e7_score.py, unchanged)",
+ "arms": {
+  "hyp-arm-d.json": {
+   "found": 18,
+   "n_truth": 23,
+   "n_hyp": 44,
+   "matched_hyp": 19,
+   "splits": 2,
+   "merges": 2,
+   "start_err": {
+    "med_s": 157.5,
+    "p90_s": 528.0,
+    "med_min": 2.6,
+    "p90_min": 8.8
+   },
+   "end_err": {
+    "med_s": 143.5,
+    "p90_s": 796.0,
+    "med_min": 2.4,
+    "p90_min": 13.3
+   },
+   "undeclared": true,
+   "transcript_version_in_file": null,
+   "unkeyed_truth": 0,
+   "versions": {
+    "transcript_version": null,
+    "smoother_version": null,
+    "shadow_version": null,
+    "fusion_version": null,
+    "code": null
+   },
+   "per_room_day": {
+    "rd_abcwg2qf": {
+     "room": "OPD 1",
+     "date": "2026-09-24",
+     "n_truth": 0,
+     "n_hyp": 0,
+     "matched_truth": 0,
+     "matched_hyp": 0,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_6cn2jp2d": {
+     "room": "OPD 3",
+     "date": "2026-09-24",
+     "n_truth": 8,
+     "n_hyp": 14,
+     "matched_truth": 4,
+     "matched_hyp": 4,
+     "splits": 0,
+     "merges": 0
+    },
+    "rd_ed8endsg": {
+     "room": "OPD 5",
+     "date": "2026-09-24",
+     "n_truth": 6,
+     "n_hyp": 11,
+     "matched_truth": 5,
+     "matched_hyp": 6,
+     "splits": 1,
+     "merges": 1
+    },
+    "rd_ueankkjc": {
+     "room": "OPD 6",
+     "date": "2026-09-24",
+     "n_truth": 9,
+     "n_hyp": 19,
+     "matched_truth": 9,
+     "matched_hyp": 9,
+     "splits": 1,
+     "merges": 1
+    }
+   }
+  }
+ }
+}

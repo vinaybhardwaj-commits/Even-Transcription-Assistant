@@ -1,0 +1,9 @@
+#!/bin/zsh
+TMUX=/opt/homebrew/bin/tmux
+[ -x "$TMUX" ] || TMUX=/usr/local/bin/tmux
+T=split-speaker:1.1
+$TMUX send-keys -t $T C-u; sleep 1
+$TMUX send-keys -t $T "V has finished all 51 v5 clips. Score it. Counts only, no transcript text. LEAD WITH THE DIAGNOSTIC ARM because it is the whole experiment: the 3 unmarked turn-span clips for Shankar, Soujanya and Prashanth - what did V answer on each, and what did he answer on the SEGMENT-BUILT clips for those same three doctors. Those three yielded 0 seconds in v4, so if segment-built clips for them are now identifiable while the turn-span ones are not, the fix is proven on one ear in one sitting. State that comparison explicitly before anything else. Then: the 10 controls - confirmed, rejected, cant tell, with the exact interval, and compare against v4's 1 of 4 decided. Then per doctor for the genuine segment-built clips: confirmed, rejected, cant tell, and usable seconds of CONFIRMED audio. Then the headline number - total confirmed seconds per doctor against the 120 second benchmark, and how that compares with v4's 110 seconds across three doctors. Then the cant-tell rate overall against v4's 48 percent; if it has fallen sharply that is the instrument coming unsaturated and it matters as much as the confirmations. Then your reading in under 200 words: do we now have enough confirmed room-domain audio to build a centroid for anyone, which doctors, and what would you NOT build yet. Be as willing to report failure as you were last time - if segment-built clips are no better, say so plainly and I will take the fix back to the drawing board rather than shipping it. Do not enrol anyone, do not touch a centroid, do not create clinician records. Leave all five servers up."; sleep 2
+$TMUX send-keys -t $T Enter; sleep 2
+$TMUX send-keys -t $T Enter; sleep 1
+echo sent

@@ -1,0 +1,66 @@
+{
+ "banerjee": {
+  "sr": 16000,
+  "dur": 100.0,
+  "whole": {
+   "banerjee": 1.0,
+   "salanki": 0.062,
+   "ankit_tonor": 0.165,
+   "ankit_pwa": 0.149
+  },
+  "chunkmean3s": {
+   "banerjee": 0.959,
+   "salanki": 0.01,
+   "ankit_tonor": 0.139,
+   "ankit_pwa": 0.115
+  }
+ },
+ "salanki": {
+  "sr": 16000,
+  "dur": 100.0,
+  "whole": {
+   "banerjee": 0.062,
+   "salanki": 1.0,
+   "ankit_tonor": 0.302,
+   "ankit_pwa": 0.121
+  },
+  "chunkmean3s": {
+   "banerjee": 0.033,
+   "salanki": 0.969,
+   "ankit_tonor": 0.27,
+   "ankit_pwa": 0.083
+  }
+ },
+ "ankit_tonor": {
+  "sr": 16000,
+  "dur": 128.2,
+  "whole": {
+   "banerjee": 0.165,
+   "salanki": 0.302,
+   "ankit_tonor": 1.0,
+   "ankit_pwa": 0.651
+  },
+  "chunkmean3s": {
+   "banerjee": 0.137,
+   "salanki": 0.248,
+   "ankit_tonor": 0.953,
+   "ankit_pwa": 0.582
+  }
+ },
+ "ankit_pwa": {
+  "sr": 16000,
+  "dur": 171.5,
+  "whole": {
+   "banerjee": 0.149,
+   "salanki": 0.121,
+   "ankit_tonor": 0.651,
+   "ankit_pwa": 1.0
+  },
+  "chunkmean3s": {
+   "banerjee": 0.162,
+   "salanki": 0.075,
+   "ankit_tonor": 0.648,
+   "ankit_pwa": 0.957
+  }
+ }
+}

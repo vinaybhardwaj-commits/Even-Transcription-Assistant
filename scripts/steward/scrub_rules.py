@@ -60,7 +60,7 @@ def path_rules(path, size):
         hits.append("deny-key-file")
     if ext in AUDIO_VIDEO:
         hits.append("deny-media-file")
-    if ext in (".sqlite", ".sqlite3", ".db", ".parquet"):
+    if ext in (".sqlite", ".sqlite3", ".db", ".parquet") or base.endswith(("-wal", "-shm", "-journal", ".db-wal", ".db-shm")):
         hits.append("deny-db-file")
     if CHROME_RE.search(low):
         hits.append("deny-chrome-profile")
@@ -239,19 +239,70 @@ def phi_hits(path, text):
 def load_hosts():
     p = os.environ.get("STEWARD_HOSTS_FILE") or os.path.expanduser("~/oc/git-steward/scrub/HOSTS.local")
     try:
-        names = [l.strip().lower() for l in open(p) if l.strip() and not l.startswith("#")]
+        raw = [l.strip() for l in open(p) if l.strip() and not l.startswith("#")]
     except OSError:
         return []
-    return [n for n in names if len(n) >= 3]
+    names = []
+    for n in raw:
+        if n.lower().startswith("re:"):
+            names.append("re:" + n[3:])  # regex lines keep their case (\D \S \W \B are case-sensitive)
+        else:
+            names.append(n.lower())
+    out = []
+    for n in names:
+        if n.startswith("re:"):
+            try:
+                re.compile(n[3:])
+            except re.error as e:
+                print("scrub: invalid regex in HOSTS file (line starting 're:'): %s" % e, file=sys.stderr)
+                sys.exit(1)
+            out.append(n)
+        elif len(n) >= 3:
+            out.append(n)
+    return out
 
 
 def host_hits(text, hosts):
     if not hosts:
         return []
+    plain = [h for h in hosts if not h.startswith("re:")]
+    rx = [re.compile(h[3:], re.I) for h in hosts if h.startswith("re:")]
     out = []
-    for i, ln in enumerate(text.lower().splitlines(), 1):
-        if any(h in ln for h in hosts):
+    for i, ln in enumerate(text.splitlines(), 1):
+        low = ln.lower()
+        if any(h in low for h in plain) or any(r.search(ln) for r in rx):
             out.append(i)
+    return out
+
+
+IPV4 = re.compile(r"(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\d]|\.\d)")
+
+
+def is_public_ipv4(a, b, c, d):
+    if any(x > 255 for x in (a, b, c, d)):
+        return False
+    if a in (0, 10, 127) or a >= 224:
+        return False
+    if a == 100 and 64 <= b <= 127:
+        return False  # tailnet CGNAT: the ts-cgnat-ip gitleaks rule owns it
+    if a == 172 and 16 <= b <= 31:
+        return False
+    if a == 192 and b == 168:
+        return False
+    if a == 169 and b == 254:
+        return False
+    if (a, b, c) in ((192, 0, 2), (198, 51, 100), (203, 0, 113)):
+        return False  # documentation ranges
+    return True
+
+
+def public_ipv4_hits(text):
+    out = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        for m in IPV4.finditer(ln):
+            if is_public_ipv4(*[int(x) for x in m.groups()]):
+                out.append(i)
+                break
     return out
 
 
@@ -285,6 +336,9 @@ def check(path, data, commit, hosts, report):
             report("phi-field", path, n, commit)
     for n in host_hits(text, hosts):
         report("host-deny", path, n, commit)
+    if "/mirrors/" in "/" + low or os.environ.get("STEWARD_PUBLIC_IPV4") == "1":
+        for n in public_ipv4_hits(text):
+            report("public-ipv4", path, n, commit)
 
 
 def git(*a):
@@ -317,6 +371,10 @@ def main():
                 rel = os.path.relpath(full, base) if not os.path.isfile(root) else os.path.basename(full)
                 if os.path.isdir(root) and os.environ.get("STEWARD_TREE_PREFIX"):
                     rel = os.environ["STEWARD_TREE_PREFIX"].rstrip("/") + "/" + rel
+                elif os.path.isdir(root):
+                    parts = os.path.abspath(root).split(os.sep)
+                    if "mirrors" in parts:
+                        rel = "/".join(parts[parts.index("mirrors"):] + [rel])
                 try:
                     data = open(full, "rb").read()
                 except OSError:

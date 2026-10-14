@@ -1,0 +1,14 @@
+{
+ "id": "r2Hb6w",
+ "audio": "audio/r2Hb6w.mp3",
+ "duration_s": 10.0,
+ "turn_start_s": 3.0,
+ "turn_end_s": 8.5,
+ "text": "We will see you after two weeks.",
+ "machine_label": "doctor",
+ "doubtful": true,
+ "room": "Room 4 (mock)",
+ "doctor": "Dr. Mock",
+ "speaker_basis": "voiceprint",
+ "margin": 0.4
+}

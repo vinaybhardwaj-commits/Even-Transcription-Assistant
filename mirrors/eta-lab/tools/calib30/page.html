@@ -1,0 +1,87 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Calibration 30 (r414)</title><style>
+:root{--bg:#fbfaf7;--ink:#1c1a17;--mut:#6b675f;--line:#e2ddd2;--acc:#0a5c36;--warn:#9c1c1c}:root[data-theme="dark"]{--bg:#171513;--ink:#e9e4da;--mut:#9a958b;--line:#3a362f;--acc:#5fbf8f;--warn:#e08585}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif}main{max-width:760px;margin:0 auto;padding:18px 16px 90px}
+h1{font-size:1.25rem}.sub{color:var(--mut);font-size:.9rem}
+.card{border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:12px;background:var(--bg)}
+.tx{font-size:1.15rem;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:10px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.two h3{margin:0 0 4px;font-size:.95rem;color:var(--mut)}
+button,a.plain{background:none;border:1px solid var(--line);border-radius:8px;color:var(--ink);padding:7px 11px;cursor:pointer;font:inherit;min-height:38px;text-decoration:none}
+button[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
+.q{margin:14px 0 2px}.q fieldset{border:1px solid var(--line);border-radius:8px;margin:6px 0 0;padding:8px 10px}legend{font-size:.9rem;font-weight:600;padding:0 4px}
+.opt{display:inline-flex;align-items:center;gap:6px;margin:2px 12px 2px 0;cursor:pointer;min-height:36px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}.mut{color:var(--mut);font-size:.85rem}
+audio{width:100%;margin-top:8px}#status{color:var(--warn);font-size:.9rem}#done{color:var(--acc);font-size:.9rem}
+.note{color:var(--mut);font-size:.85rem;margin-top:8px}.mt{margin-top:10px}
+</style></head><body><main>
+<h1>Calibration 30 — hear it, read it, judge it</h1>
+<p class="sub">30 items: 20 single transcript lines and 10 A/B pairs. <b>Play the audio</b> for each item (the ▶ button hears exactly that line, ~1 s of padding each side). Toggle English only if you want a literal gloss; the first judgement is your read of the text. "Can't judge this language" skips the item for you without counting it. Your answers save as you go; only you see them.</p>
+<div class="row"><button id="prev">← Prev</button><button id="next">Next →</button><button id="nextopen">Next unrated</button><label class="mut">Go to <select id="jump"></select></label><span id="prog" class="mut"></span><span id="status"></span><span id="done"></span></div>
+<div id="panel"></div>
+<p class="note">Keys 1–6 choose the open answer; N / → next, P / ← back.</p>
+</main><script>
+const $=(id)=>document.getElementById(id);const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const L=["readable","romanised_readable","garbled","wrong_language","unsure","cant_judge"],B=["A_better","B_better","same","neither_readable","unsure","cant_judge"];
+const LL=["Clear and readable","Readable but romanised","Garbled","Wrong language","Not sure","Can't judge this language (skip)"],BL=["A is better","B is better","Same","Neither readable","Not sure","Can't judge this language (skip)"];
+let items=[],mine={},db=null,meId="",claudeOk=false,loaded=false,cur=0,dirty=false,saving=Promise.resolve(),saveTimer=0;
+let players=new Map(),clipCache=new Map(),winCache=new Map(),chunkIdx=null;
+function rated(it){const a=mine[it.id];return !!a&&(a.a==="cant_judge"||([...(it.kind==="B"?B:L)].some(v=>v===a.a)));}
+function qs(it){return (it.kind==="B"?BL:LL);}
+function vals(it){return (it.kind==="B"?B:L);}
+function panel(){const it=items[cur];
+ if(!it){$("panel").innerHTML=`<p class="empty">${!claudeOk?"This page needs the rating access - open it signed in.":loaded?"Nothing loaded yet.":"Loading…"}</p>`;return}
+ const a=mine[it.id]||{},glossed=it.kind==="B"?(it.gloss_A||it.gloss_B):!!it.gloss;
+ $("panel").innerHTML=`<div class="card"><div class="row"><b>${esc(it.id)}</b><span class="mut">${it.kind==="B"?"A/B pair":"line"} · ${esc(it.lang)}${it.dur_s?" · "+it.dur_s+" s":""}</span><button id="play">▶ Play this line</button><button id="replay" hidden>↻ Again</button></div>
+ <audio id="au" controls preload="none"></audio>
+ ${it.kind==="B"?`<div class="two mt"><div><h3>A</h3><div class="tx">${esc(it.text_A)}</div></div><div><h3>B</h3><div class="tx">${esc(it.text_B)}</div></div></div>${glossed?`<div class="row"><button id="tgl" aria-pressed="false">English</button></div><div id="gl" hidden><div class="two"><div class="tx">${esc(it.gloss_A||"")}</div><div class="tx">${esc(it.gloss_B||"")}</div></div></div>`:""}`
+ :`<div class="tx mt">${esc(it.text)}</div>${glossed?`<div class="row"><button id="tgl" aria-pressed="false">English</button></div><p class="tx" id="gl" hidden>${esc(it.gloss||"")}</p>`:""}`}
+ <div class="q">Your judgement:</div>
+ ${qs(it).map((v,i)=>`<label class="opt"><input type="radio" name="j" value="${esc(vals(it)[i])}"${a.a===vals(it)[i]?" checked":""}><span>${esc(v)}</span></label>`).join("")}
+</div>`;
+ $("prog").textContent=`${cur+1}/${items.length}`;
+ const jump=$("jump");jump.innerHTML=items.map((x,i)=>`<option value="${i}"${i===cur?" selected":""}>${i+1}${rated(x)?" · done":""}</option>`).join("");
+ $("prev").disabled=cur<=0;$("replay").hidden=!players.has(it.id);
+ bind(it);progress();}
+function bind(it){
+ $("play").onclick=()=>play(it).catch(()=>{$("status").textContent="Audio is not available for this item.";});$("next").onclick=()=>go(cur+1);$("prev").onclick=()=>go(cur-1);
+ $("nextopen").onclick=()=>{const n=items.length;for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!rated(items[i]))return go(i)}$("done").textContent="Every item is judged."};
+ $("jump").onchange=(e)=>go(+e.target.value);
+ document.querySelectorAll("input[name=j]").forEach(r=>r.onchange=()=>choose(it,r.value));
+ const tgl=$("tgl");if(tgl)tgl.onclick=()=>{const on=tgl.getAttribute("aria-pressed")!=="true";tgl.setAttribute("aria-pressed",on);const gl=$("gl");if(gl)gl.hidden=!on;if(on){A2(it.id).g=true;queueSave()}};}
+const A2=(id)=>mine[id]||(mine[id]={});
+function choose(it,v){const a=A2(it.id);a.a=v;a.mode=players.has(it.id)?"audio":"text";a.ts=new Date().toISOString();queueSave();progress();}
+function progress(){$("done").textContent="";}
+function queueSave(){dirty=true;$("status").textContent="Saving…";clearTimeout(saveTimer);saveTimer=setTimeout(flush,700)}
+function flush(){if(!db||!meId||!dirty||!loaded)return;dirty=false;const t={};for(const id of Object.keys(mine)){const s=mine[id];if(!s||!s.a)continue;const keep={};for(const k of["a","mode","g","ts"])if(s[k]!==undefined)keep[k]=s[k];t[id]=keep}
+ if(!Object.keys(t).length){$("status").textContent="";return}
+ saving=saving.then(()=>db.doc("ratings/"+meId).set({t})).then(()=>{$("status").textContent="Saved"}).catch((e)=>{$("status").textContent=e&&e.code==="invalid_argument"?"You have view-only access - ask the page owner.":"Couldn't save just now; change an answer to retry.";dirty=true});}
+async function chunkPlan(k){const d=winCache.get(k)||(winCache.set(k,await (await fetch("/api/window/"+k)).json()),winCache.get(k));
+ const w=d,pd=w.provenance||{};let sc;if(Array.isArray(pd.source_chunks)&&pd.source_chunks.length)sc=pd.source_chunks;
+ else{const keys=(w.cut&&w.cut.chunk_keys&&w.cut.chunk_keys.length)?w.cut.chunk_keys:(pd.source_audio_keys||[]);
+  if(keys.length>1||(keys.length===1&&!isNaN(Date.parse(w.start)))){if(chunkIdx===null){try{chunkIdx=new Map((await (await fetch("/api/chunks-index")).text()).split("\n").filter(Boolean).map((l)=>{const r=JSON.parse(l);return[r.r2_key,r]}))}catch(e){chunkIdx=new Map()}}}else chunkIdx=chunkIdx||new Map();
+  sc=keys.map((kk)=>(chunkIdx&&chunkIdx.get(kk))||{r2_key:kk})}
+ if(sc.length===1&&isNaN(Date.parse(sc[0].started_at))){return{winStart:0,chunks:sc.map((c,i)=>({n:i,s:0,e:1e13}))}}
+ const winStart=Date.parse(w.start);return{winStart,chunks:sc.map((c,i)=>({n:i,s:Date.parse(c.started_at),e:c.ended_at?Date.parse(c.ended_at):Date.parse(c.started_at)+(c.duration_ms||0)}))}}
+async function play(it){const au=$("au");let c=clipCache.get(it.id);if(!c){c=await fetchClip(it);clipCache.set(it.id,c)}
+ const plan=await chunkPlan(c.k);const rel0=Math.max(0,c.t0-1),rel1=c.t1+1;
+ const ms0=plan.winStart+rel0*1000,stopMs=plan.winStart+rel1*1000;
+ let i=plan.chunks.findIndex((x)=>ms0>=x.s&&ms0<x.e);if(i<0){i=plan.chunks.findIndex((x)=>x.s>ms0);if(i<0){$("status").textContent="No audio at this time.";return}}
+ players.set(it.id,1);
+ au.src=`/audio/${c.k}/${plan.chunks[i].n}`;
+ const off=Math.max(0,(Math.max(ms0,plan.chunks[i].s)-plan.chunks[i].s)/1000);
+ au.addEventListener("loadedmetadata",()=>{au.currentTime=off;au.play().catch(()=>{})},{once:true});au.load();
+ au.ontimeupdate=()=>{const abs=plan.chunks[i].s+au.currentTime*1000;if(abs>=stopMs||i===plan.chunks.length-1&&au.ended){au.pause();au.ontimeupdate=null}};
+ $("replay").hidden=false;preload(it);}
+function preload(it){const i=items.indexOf(it);if(i+1>=items.length)return;const nx=items[i+1];
+ fetchClip(nx).then(async(c)=>{clipCache.set(nx.id,c);const p=await chunkPlan(c.k);const a=new Audio();a.preload="auto";a.src=`/audio/${c.k}/${chunkFor(p,Math.max(0,c.t0-1))}`;a.load();}).catch(()=>{});}
+function p_t0(c){return c.t0}function chunkFor(p,rel){const ms=p.winStart+rel*1000;let i=p.chunks.findIndex((c)=>ms>=c.s&&ms<c.e);if(i<0)i=0;return i}
+async function fetchClip(it){const r=await fetch(`/api/rate/calib30/clip?id=${encodeURIComponent(it.id)}`);if(!r.ok)throw new Error("clip "+r.status);return await r.json()}
+function go(i){cur=Math.max(0,Math.min(i,items.length-1));panel();window.scrollTo(0,0)}
+function keys(e){if(/^[1-6]$/.test(e.key)){const rs=document.querySelectorAll("input[name=j]");const r=rs[+e.key-1];if(r){r.checked=true;choose(items[cur],r.value);e.preventDefault()}}
+ else if(e.key==="n"||e.key==="ArrowRight"){go(cur+1);e.preventDefault()}else if(e.key==="p"||e.key==="ArrowLeft"){go(cur-1);e.preventDefault()}}
+(async()=>{if(!window.claude||!window.claude.use)return;claudeOk=true;panel();document.addEventListener("keydown",keys);
+ const[dbU,us]=await Promise.all([claude.use("db"),claude.use("user")]);db=dbU;
+ const u=await us.me();meId=u.name||"me";
+ db.collection("rows").onSnapshot((snap)=>{items=snap.docs.map((d)=>d.data());loaded=true;panel();},()=>{});
+ try{const d=await db.doc("ratings/"+meId).get();if(d.exists){const t=d.data().t||{};for(const k of Object.keys(t))mine[k]=Object.assign({},t[k],mine[k]||{})}}catch(e){}
+ panel();})();
+</script></body></html>

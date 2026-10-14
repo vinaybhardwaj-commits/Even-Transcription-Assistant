@@ -1,0 +1,282 @@
+=== fuse.ts: guard + handler ordering (lines 195-250) ===
+  name: "scribe_fuse_run",
+  description:
+    "WRITES — run one fuse arm over one SCRATCH room-day and write its visits. arm ∈ rules | hybrid | flash | jev. `rules` is a pure function over the cue list (no model, provider 'none'); `hybrid` runs rules then asks Gemini only about the cases rules could not settle; `flash` asks Gemini to produce the visits. `jev` (Arm D) is also pure and provider 'none': it reads jev_window_signal for the bench sessions the room-day's tape actually is — walked back from a scratch day to its real room the same way scribe_fuse_report does, since a scratch room has no tape of its own — and FAILS CLOSED by name 'no_jev_signals' when there is nothing to read, with `detail` telling apart no bench sessions for the day at all from sessions that simply have never been run through the J2 job. Arms hybrid and flash also FAIL CLOSED: if the provider that answers is not gemini:… they write nothing at all and return error 'provider_not_gemini' with the provider they actually got — a fuse served by a local model cannot be scored as Flash. Refuses any room-day whose scratch flag is not true (not_a_scratch_day) before reading anything, for every arm including jev: no arm ever writes a live clinic day. dry_run defaults TRUE and FAILS DRY — only an explicit false (or the string 'false') writes; anything else returns the visits it would write without writing them. Re-running the same arm on the same day writes nothing that exists — the visits are keyed (arm, opened_by). Returns { arm, provider, written, already_existed, failed, visits[] }.",
+  scope: "write",
+  inputSchema: {
+    type: "object",
+    properties: {
+      room_day_id: { type: "string", description: "rd_scratch_… — must be a scratch day" },
+      arm: { type: "string", enum: [...ARMS], description: "rules | hybrid | flash | jev" },
+      dry_run: { type: "boolean", default: true, description: "default TRUE and fails dry — only an explicit false writes; anything unrecognised returns the visits without writing them" },
+    },
+    required: ["room_day_id", "arm"],
+    additionalProperties: false,
+  },
+  handler: async (args: ToolArgs) =>
+    failSafe({ visits: [] as unknown[], written: 0, already_existed: 0, failed: 0 }, async () => {
+      const roomDayId = argStr(args, "room_day_id", 128);
+      if (!roomDayId) return { ok: false, error: "room_day_id_required", visits: [], written: 0, already_existed: 0, failed: 0 };
+      const armRaw = argStr(args, "arm", 32);
+      if (!armRaw || !(ARMS as readonly string[]).includes(armRaw)) {
+        return { ok: false, error: "unknown_arm", allowed: ARMS, visits: [], written: 0, already_existed: 0, failed: 0 };
+      }
+      const arm = armRaw as Arm;
+      // `dry_run` defaults TRUE, and it FAILS DRY (K2, correction 5): only an explicit false
+      // turns writing on. This used to read `args.dry_run === undefined ? true : argBool(...)`,
+      // which made every value argBool does not recognise — a typo, a string, a null from a
+      // client that serialises absent fields — mean WRITE. That is the wrong way round for the
+      // one flag standing between a fuse run and visit rows. Same shape as
+      // scribe_transcribe_range, deliberately: two write tools, one rule.
+      const dryRun = !(args.dry_run === false || args.dry_run === "false" || args.dry_run === 0);
+
+      // ---- the guard, before a single cue is read -----------------------------
+      const dayRes = await query<RoomDayByIdRow>(SQL_ROOM_DAY_BY_ID, [roomDayId]);
+      const day = dayRes.rows[0];
+      if (!day) return { ok: false, error: "room_day_not_found", room_day_id: roomDayId, visits: [], written: 0, already_existed: 0, failed: 0 };
+      if (day.scratch !== true) {
+        return { ok: false, error: "not_a_scratch_day", room_day_id: roomDayId, room_id: day.room_id, ist_date: day.ist_date, visits: [], written: 0, already_existed: 0, failed: 0 };
+      }
+
+      const cues = await readCuesForFuse(roomDayId);
+      const res = await runArm(arm, cues, day);
+      if (!res.ok) {
+        // X4 — nothing was written, and the provider that answered is named.
+        return { ok: false, error: res.error, provider: res.provider, arm, room_day_id: roomDayId, ...(res.detail ? { detail: res.detail } : {}), visits: [], written: 0, already_existed: 0, failed: 0 };
+      }
+
+      const { visits, unbound } = res.output;
+      const shown = visits.map((v) => ({
+        state: v.state,
+        confidence: v.confidence,
+        individual_uid: v.individual_uid,
+        opened_by: v.opened_by,
+        opened_by_kind: v.opened_by_kind,
+        pstart_at: v.pstart_at,
+        reasons: v.reasons,
+        ambiguity: ambiguityOf(v.reasons),
+
+=== fuse.ts: RoomDayByIdRow + readDay ===
+23:import { newVisitId, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_VISIT_INSERT, type RoomDayByIdRow } from "@/lib/brain/state";
+24-import { ambiguityOf, runRulesArm } from "@/lib/brain/fuse/rules";
+25-import { runFlashArm, runHybridArm, type ArmResult } from "@/lib/brain/fuse/gemini-arms";
+26-import { runJevArm, type JevWindowSignal } from "@/lib/brain/fuse/jev-arm";
+27-import type { TapeSession } from "@/lib/brain/fuse/rules";
+28-import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
+29-import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
+30-import { listBenchSessions } from "@/lib/bench";
+31-import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
+32-import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+33-
+34-type CueRow = { id: string; type: string; at: Date | string; created_at: Date | string; payload: unknown; source: string | null; source_ref: string | null };
+35-
+36-const iso = (d: Date | string): string => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
+37-
+--
+163:async function resolveTapeSessionsForJev(day: RoomDayByIdRow): Promise<TapeSession[]> {
+164-  const isScratch = day.room_id.startsWith(SCRATCH_ROOM_PREFIX);
+165-  const realRoomId = isScratch ? realRoomIdFor(day.room_id) : day.room_id;
+166-  if (!realRoomId) return [];
+167-  const rows = await listBenchSessions({ room_id: realRoomId, ist_date: day.ist_date });
+168-  return rows.map((row) => ({ id: row.id, started_at: iso(row.started_at), ended_at: row.ended_at ? iso(row.ended_at) : null }));
+169-}
+170-
+171:async function runArm(arm: Arm, cues: FuseCue[], day: RoomDayByIdRow): Promise<ArmResult> {
+172-  // B3 — scribe_fuse_run is scratch-only and runs over a day that is DONE (0046's scratch days
+173-  // are replays of finished sessions), so the rollover pass applies. Stated here rather than
+174-  // inferred inside rules.ts, which must not decide this for itself.
+175-  if (arm === "rules") return { ok: true, provider: "none", output: runRulesArm(cues, { day_complete: true }) };
+176-  if (arm === "hybrid") return runHybridArm(cues);
+177-  if (arm === "jev") {
+178-    // X4-style guard (gemini-arms.ts:70-77): no signals means nothing is written, named. The two
+179-    // ways to get there are different facts and `detail` says which: no tape at all for the day,
+180-    // versus tape that has simply never been run through J2 yet.
+181-    const sessions = await resolveTapeSessionsForJev(day);
+182-    if (sessions.length === 0) {
+183-      return { ok: false, error: "no_jev_signals", provider: "none", detail: "no_bench_sessions_for_day" };
+184-    }
+185-    const signals = await readJevSignals(sessions.map((s) => s.id));
+--
+
+=== fuse.ts: readJevSignals row mapper (lines 108-150) ===
+}
+
+type JevSignalRow = {
+  window_id: string; room_day_id: string; session_id: string; start_ms: string | number; end_ms: string | number;
+  phase: string; phase_probs: unknown; phase_confidence: number;
+  p_start: number; p_end: number; p_clinician: number; p_clinical: number;
+};
+
+/**
+ * Slice J2 — jev_window_signal for a set of bench sessions, in start_ms order. No transcript text.
+ *
+ * KEYED ON session_id, NOT room_day_id. J2 (lib/jobs/kinds/jev-window.ts) writes signals against
+ * the LIVE room-day, because that is where the diarized windows and the text are — but the only
+ * room-day this tool is ever allowed to run over is a SCRATCH one (the guard above refuses every
+ * other kind before a single row is read). A scratch day's own id therefore never appears in
+ * jev_window_signal by construction, and a lookup keyed on it finds nothing FOR EVERY INPUT. The
+ * tape a scratch day replays is identified by its SESSIONS, not by any room_day_id — the same fact
+ * scribe_fuse_report already leans on — so session_id is the one honest key. See
+ * resolveTapeSessionsForJev, which is what supplies the ids passed in here.
+ */
+async function readJevSignals(sessionIds: string[]): Promise<JevWindowSignal[]> {
+  if (sessionIds.length === 0) return [];
+  const r = await query<JevSignalRow>(
+    `SELECT window_id, room_day_id, session_id, start_ms, end_ms, phase, phase_probs, phase_confidence,
+            p_start, p_end, p_clinician, p_clinical
+       FROM jev_window_signal WHERE session_id = ANY($1) ORDER BY start_ms`,
+    [sessionIds],
+  );
+  return r.rows.map((row) => ({
+    window_id: row.window_id,
+    room_day_id: row.room_day_id,
+    session_id: row.session_id,
+    start_ms: Number(row.start_ms),
+    end_ms: Number(row.end_ms),
+    phase: row.phase as JevWindowSignal["phase"],
+    phase_probs: (row.phase_probs ?? {}) as Record<string, number>,
+    phase_confidence: row.phase_confidence,
+    p_start: row.p_start,
+    p_end: row.p_end,
+    p_clinician: row.p_clinician,
+    p_clinical: row.p_clinical,
+  }));
+}
+
+=== iso() helper ===
+36:const iso = (d: Date | string): string => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
+37-
+38-/** The day's cues in evidence order, normalised to what the arms take. */
+39-export async function readCuesForFuse(roomDayId: string): Promise<FuseCue[]> {
+40-  const r = await query<CueRow>(SQL_CUES_FOR_ROOM_DAY, [roomDayId]);
+41-  return r.rows.map((c) => ({
+42-    id: c.id,
+
+=== runArm callers anywhere ===
+/Users/vinaybhardwaj/dev/_fable/r3-read.sh:19: no matches found: --include=*.ts
+
+=== listBenchSessions definition ===
+/Users/vinaybhardwaj/dev/_fable/r3-read.sh:22: no matches found: lib/bench/*.ts
+
+=== scratch.ts: realRoomIdFor / SCRATCH_ROOM_PREFIX / scratchRoomIdFor ===
+35:export const SCRATCH_ROOM_PREFIX = "room_scratch_";
+36-export const SCRATCH_ROOM_DAY_PREFIX = "rd_scratch_";
+37-export const SCRATCH_SLUG_PREFIX = "scratch-";
+38-export const SCRATCH_NAME_PREFIX = "SCRATCH · ";
+39-
+40-/**
+41- * The scratch room's PIN hash. `room.pin_hash` is NOT NULL, so the column has to hold
+42- * something; this is deliberately NOT a bcrypt hash, so bcrypt.compare in the room login
+43- * route can never return true for any PIN (it returns false, or throws and the route
+44- * refuses). A scratch room is not a place anyone logs in to.
+45- */
+--
+51:export const scratchRoomIdFor = (roomId: string): string => `${SCRATCH_ROOM_PREFIX}${suffixOf(roomId)}`;
+52-
+53-/**
+54: * The INVERSE of scratchRoomIdFor: `room_scratch_abcd1234` → `room_abcd1234`. Null when the id
+55- * is not a scratch room id at all, so a caller cannot accidentally "recover" a real room from
+56- * one that never had a scratch twin.
+57- *
+58- * Slice 5 needs this because a scratch room has NO TAPE — bench_session rows belong to the real
+59- * room — so the report has to walk back from the scratch day to the room that actually
+60- * recorded. It lives here, next to the forward function and built from the same two constants,
+61- * so the pair cannot drift; the alternative was string surgery on a hardcoded prefix at the
+62- * call site, which is exactly what the slice 5 PRD forbids.
+63- */
+64:export const realRoomIdFor = (scratchRoomId: string): string | null =>
+65:  scratchRoomId.startsWith(SCRATCH_ROOM_PREFIX) ? `${ROOM_PREFIX}${scratchRoomId.slice(SCRATCH_ROOM_PREFIX.length)}` : null;
+66-
+67-/** `opd-7-k4hz` → `scratch-opd-7-k4hz`. `room.slug` is UNIQUE, so this must be derived too. */
+68-export const scratchSlugFor = (slug: string): string => `${SCRATCH_SLUG_PREFIX}${slug}`;
+69-
+70-/** `OPD 7` → `SCRATCH · OPD 7`. Reads as scratch at a glance in any list of rooms. */
+71-export const scratchNameFor = (name: string): string => `${SCRATCH_NAME_PREFIX}${name}`;
+72-
+73-/** `room_scratch_abcd1234` + `2026-08-19` → `rd_scratch_abcd1234_20260819`. */
+74-export const scratchRoomDayIdFor = (scratchRoomId: string, istDate: string): string => {
+75:  const bare = scratchRoomId.startsWith(SCRATCH_ROOM_PREFIX) ? scratchRoomId.slice(SCRATCH_ROOM_PREFIX.length) : suffixOf(scratchRoomId);
+76-  return `${SCRATCH_ROOM_DAY_PREFIX}${bare}_${istDate.replace(/-/g, "")}`;
+77-};
+78-
+79-// ---------------------------------------------------------------------------
+80-// SQL (inferred — listed verbatim in the report)
+81-//
+82-// The two `room` statements go through lib/db's tagged template (that handle takes no
+83-// text+params form), so the constants below are not passed anywhere — they are the exact
+84-// statements the templates issue, named so the report and the tests can quote them.
+85-// The two `room_day` statements ARE the text passed to the brain pool.
+--
+135:  const id = scratchRoomIdFor(room.id);
+136-  const slug = scratchSlugFor(room.slug);
+137-  const name = scratchNameFor(room.name);
+138-  try {
+139-    const found = (await sql`SELECT id, slug, name, disabled_at FROM room WHERE id = ${id} LIMIT 1`) as RoomRow[];
+140-    if (found[0]) return { ok: true, room: { id: found[0].id, slug: found[0].slug, name: found[0].name, created: false } };
+141-
+142-    await sql`
+143-      INSERT INTO room (id, slug, name, pin_hash)
+144-      VALUES (${id}, ${slug}, ${name}, ${SCRATCH_PIN_HASH})
+145-      ON CONFLICT (id) DO NOTHING
+
+=== fuse-report.ts 105-145 (the idiom being mirrored) ===
+sed: lib/brain/fuse/fuse-report.ts: No such file or directory
+
+=== scratch day creation: ist_date ===
+lib/brain/scratch.ts:4: * A scratch room_day cannot share (room_id, ist_date) with a live one: 0042 declares that
+lib/brain/scratch.ts:98:  "SELECT id, room_id, ist_date::text AS ist_date, scratch FROM room_day WHERE room_id = $1 AND ist_date = $2::date";
+lib/brain/scratch.ts:108:  "INSERT INTO room_day (id, room_id, ist_date, scratch) VALUES ($1, $2, $3::date, true) " +
+lib/brain/scratch.ts:109:  "ON CONFLICT (room_id, ist_date) DO UPDATE SET room_id = EXCLUDED.room_id " +
+lib/brain/scratch.ts:110:  "RETURNING id, room_id, ist_date::text AS ist_date, scratch";
+lib/brain/scratch.ts:117:export type ScratchRoomDay = { id: string; room_id: string; ist_date: string; scratch: boolean; created: boolean };
+lib/brain/scratch.ts:158:type ScratchDayRow = { id: string; room_id: string; ist_date: string; scratch: boolean };
+
+=== jev_window_signal schema: start_ms/end_ms/session_id types ===
+db/migrations/0106_jev_window_signal.sql:2:-- Migration 0106 — jev_window_signal: Arm D's (`jev`) per-window Jev answers (Slice J2).
+db/migrations/0106_jev_window_signal.sql-3---
+db/migrations/0106_jev_window_signal.sql-4--- WHY (ETA-JEV-ARM-D-SPEC v1.1 §5.1). Arm D reads jev_window_text (J0, migration 0105) in
+db/migrations/0106_jev_window_signal.sql-5--- batches and asks Jev four questions per target window (phase, start, end, clinician) plus a
+db/migrations/0106_jev_window_signal.sql-6--- fifth (clinical). This table persists one row per TARGET window per Jev call ("batch_id");
+db/migrations/0106_jev_window_signal.sql-7--- context windows carried for surrounding evidence are never persisted from that batch. Read by
+db/migrations/0106_jev_window_signal.sql-8--- lib/brain/fuse/jev-arm.ts (pure) to produce DraftVisits, and by scribe_jev_signals (read-only).
+db/migrations/0106_jev_window_signal.sql-9---
+db/migrations/0106_jev_window_signal.sql-10--- ADDITIVE AND IDEMPOTENT. One new table, name-guarded index, no existing table touched, no
+db/migrations/0106_jev_window_signal.sql-11--- CHECK on an existing column changed. Rolls forward from the current head. App-owned: no GRANTs.
+db/migrations/0106_jev_window_signal.sql-12--- =====================================================================
+db/migrations/0106_jev_window_signal.sql-13-
+db/migrations/0106_jev_window_signal.sql:14:CREATE TABLE IF NOT EXISTS jev_window_signal (
+db/migrations/0106_jev_window_signal.sql-15-  window_id        text PRIMARY KEY REFERENCES bench_window(id),
+db/migrations/0106_jev_window_signal.sql-16-  room_day_id       text NOT NULL,
+db/migrations/0106_jev_window_signal.sql-17-  session_id        text NOT NULL,
+db/migrations/0106_jev_window_signal.sql-18-  start_ms          bigint NOT NULL,
+db/migrations/0106_jev_window_signal.sql-19-  end_ms            bigint NOT NULL,
+db/migrations/0106_jev_window_signal.sql-20-  phase             text NOT NULL CHECK (phase IN ('non_clinical','arrival','history','examination','plan','closing')),
+db/migrations/0106_jev_window_signal.sql-21-  phase_probs       jsonb NOT NULL,
+db/migrations/0106_jev_window_signal.sql-22-  phase_confidence  real NOT NULL,
+db/migrations/0106_jev_window_signal.sql-23-  p_start           real NOT NULL,
+db/migrations/0106_jev_window_signal.sql-24-  p_end             real NOT NULL,
+db/migrations/0106_jev_window_signal.sql-25-  p_clinician       real NOT NULL,
+db/migrations/0106_jev_window_signal.sql-26-  p_clinical        real NOT NULL,
+db/migrations/0106_jev_window_signal.sql-27-  model             text NOT NULL,
+db/migrations/0106_jev_window_signal.sql-28-  prompt_version    text NOT NULL,
+db/migrations/0106_jev_window_signal.sql-29-  input_tokens      int NOT NULL,
+db/migrations/0106_jev_window_signal.sql-30-  batch_id          text NOT NULL,
+db/migrations/0106_jev_window_signal.sql-31-  created_at        timestamptz NOT NULL DEFAULT now()
+db/migrations/0106_jev_window_signal.sql-32-);
+db/migrations/0106_jev_window_signal.sql-33-
+db/migrations/0106_jev_window_signal.sql:34:CREATE INDEX IF NOT EXISTS idx_jev_window_signal_room_day
+db/migrations/0106_jev_window_signal.sql:35:  ON jev_window_signal (room_day_id, start_ms);
+db/migrations/0106_jev_window_signal.sql-36-
+db/migrations/0106_jev_window_signal.sql:37:COMMENT ON TABLE jev_window_signal IS
+db/migrations/0106_jev_window_signal.sql-38-  'Slice J2 (ETA-JEV-ARM-D §5.1): one row per bench window Arm D asked Jev about, persisted by lib/jobs/kinds/jev-window.ts and consumed by lib/brain/fuse/jev-arm.ts. Bench-only; no production wiring.';
+db/migrations/0106_jev_window_signal.sql:39:COMMENT ON COLUMN jev_window_signal.batch_id IS
+db/migrations/0106_jev_window_signal.sql-40-  'Identifies the single Jev call this row came from (cost/latency accounting; never crosses room-days).';
+db/migrations/0106_jev_window_signal.sql:41:COMMENT ON COLUMN jev_window_signal.prompt_version IS
+db/migrations/0106_jev_window_signal.sql-42-  'jev-arm-d-v1, or skipped:no_english for a window with no jev_window_text.english (all p_* = 0).';
+db/migrations/0106_jev_window_signal.sql-43-
+db/migrations/0106_jev_window_signal.sql-44-INSERT INTO schema_migrations (version, name)
+db/migrations/0106_jev_window_signal.sql:45:VALUES (106, '0106_jev_window_signal')
+db/migrations/0106_jev_window_signal.sql-46-ON CONFLICT DO NOTHING;
+
+=== JOB_KIND_NAMES / job kinds registry ===
+/Users/vinaybhardwaj/dev/_fable/r3-read.sh:37: no matches found: --include=*.ts

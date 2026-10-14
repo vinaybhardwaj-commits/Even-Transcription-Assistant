@@ -1,0 +1,155 @@
+=== file ===
+-rw-r--r--@ 1 vinaybhardwaj  staff  40781 Sep 19 13:49 /Users/vinaybhardwaj/eta-router/router_server.py
+=== job_verdict ===
+718:def job_verdict(window_results: list[dict]) -> tuple[str, dict]:
+719-    """PURE. One job's status + segmentation, aggregated from its sub-windows.
+720-
+721-    WHY THIS EXISTS. /route answers per call with `status` and `segmentation`; run_job splits the
+722-    clip into window_s sub-windows, called /route's body once per sub-window, and then BUILT ITS
+723-    OWN reply out of a fixed key set that had neither field. The room drain uses run_job and only
+724-    run_job, so every starved room window still stored as a clean empty success no matter what the
+725-    synchronous path reported. Refuted 19 Sep; this is the fix.
+726-
+727-    THE RULE IS THE SINGLE-WINDOW RULE, LIFTED, AND IT DOES NOT OVER-CLAIM. `silent_skipped` means
+728-    NO ENGINE RAN ANYWHERE (a): not one sub-window handed a span to an engine. A job that ran an
+729-    engine on even one sub-window is `ok`, EVEN IF it produced no text (b) — the old test keyed on
+730-    n_segments (engine OUTPUT), so a job that was heard but wordless was stored as never-heard, which
+731-    is the very over-claim this fixes. The discriminator is n_engine_segments, aggregated below.
+732-
+733-    PARTIAL STARVATION IS STILL VISIBLE without lying about the whole: windows_total and
+734-    windows_skipped are always carried, so a job that starved on 4 of 5 sub-windows is readable as
+735-    such even though its status is `ok`. `outcome` names (a)/(b)/(c) for the job as a whole.
+736-    """
+737-    methods: dict[str, int] = {}
+738-    windows_skipped = 0
+739-    n_segments = 0            # engine OUTPUT segments, summed across sub-windows
+740-    n_engine_segments = 0     # spans an engine was actually RUN on, summed across sub-windows
+741-    n_skipped_silent = 0
+742-    for r in window_results:
+743-        seg = r.get("segmentation") or {}
+744-        m = seg.get("method")
+745-        if isinstance(m, str) and m:
+746-            methods[m] = methods.get(m, 0) + 1
+747-        if r.get("status") == "silent_skipped":
+748-            windows_skipped += 1
+749-        n_segments += len(r.get("segments") or [])
+750-        try:
+751-            n_engine_segments += int(seg.get("n_engine_segments") or 0)
+752-        except (TypeError, ValueError):
+753-            pass
+754-        try:
+755-            n_skipped_silent += int(seg.get("n_skipped_silent") or 0)
+756-        except (TypeError, ValueError):
+757-            pass
+758-    if len(methods) == 1:
+759-        method = next(iter(methods))
+760-    elif methods:
+761-        method = "mixed"
+762-    else:
+763-        method = None
+764-    status = "silent_skipped" if not engine_ran(n_engine_segments) else "ok"
+765-    return status, {
+766-        "method": method,
+767-        "methods": methods,
+768-        "windows_total": len(window_results),
+769-        "windows_skipped": windows_skipped,
+770-        "n_segments": n_segments,
+771-        "n_engine_segments": n_engine_segments,
+772-        "outcome": window_outcome(n_engine_segments, n_segments),
+773-        "n_skipped_silent": n_skipped_silent,
+774-        "max_window_s": SEG_SEC,
+775-        "silence_gate": {
+776-            "rms_threshold": SEG_SILENCE_RMS,
+777-            "max_abs_threshold": SEG_SILENCE_MAX_ABS,
+778-            "min_seg_s": SEG_MIN_S,
+--
+828:            job["status"], job["segmentation"] = job_verdict(win_results)
+829-            job["progress"] = {"done": i + 1, "total": total}
+830-            job["segments"] = acc_seg
+831-            job["language_timeline"] = acc_tl
+832-            job["transcript_native"] = "\n".join(acc_native).strip()
+833-            job["transcript_english"] = ("\n".join(acc_eng).strip() if do_translate else None)
+834-            job["dominant_language"] = (max(by_lang, key=by_lang.get) if by_lang else None)
+835-            job["sec"] = round(time.time() - t0, 2)
+836-            _write_job(jid, job)
+837-        job["state"] = "done"
+838-        job["sec"] = round(time.time() - t0, 2)
+839-        _write_job(jid, job)
+840-    except Exception as e:
+841-        sys.stderr.write(f"[eta-router] job {jid} failed: {e!r}\n")
+842-        job["state"] = "failed"; job["ok"] = False; job["error"] = repr(e)[:300]
+843-        job["sec"] = round(time.time() - t0, 2)
+844-        _write_job(jid, job)
+845-    finally:
+846-        shutil.rmtree(jobdir, ignore_errors=True)
+847-
+848-
+849-# --------------------------------------------------------------------------- #
+850-# Routes
+851-# --------------------------------------------------------------------------- #
+852-@app.get("/healthz")
+853-def healthz():
+854-    return {
+855-        "ok": True,
+856-        "version": "3.1-sravaani",
+857-        "use_sravaani": USE_SRAVAANI,
+858-        "engine_versions": ENGINE_VERSIONS,
+859-        "urls": {
+860-            "whisper": WHISPER_URL,
+861-            "indic": INDIC_URL,
+862-            "sravaani": SRAVAANI_URL,
+863-        },
+864-    }
+865-
+866-
+867-def _route_blocking(raw_bytes: bytes, cand_list: list[str], translate: bool, t0: float):
+868-    """Blocking body of /route. Called via asyncio.to_thread under _ROUTE_SEM."""
+869-    workdir = tempfile.mkdtemp(prefix="eta-route-")
+870-    try:
+871-        raw_path = os.path.join(workdir, "input")
+872-        with open(raw_path, "wb") as fh:
+873-            fh.write(raw_bytes)
+874-        norm_wav = os.path.join(workdir, "norm.wav")
+875-        try:
+876-            normalize_to_wav(raw_path, norm_wav)
+877-        except subprocess.CalledProcessError as e:
+878-            return JSONResponse(status_code=400,
+879-                                content={"ok": False, "error": "ffmpeg failed to decode audio",
+880-                                         "detail": e.stderr.decode("utf-8", "ignore")[-500:]})
+881-        res = transcribe_norm_wav(norm_wav, cand_list, bool(translate))
+882-        res.update({"ok": True, "engine_versions": ENGINE_VERSIONS, "sec": round(time.time() - t0, 2)})
+883-        return res
+884-    finally:
+885-        shutil.rmtree(workdir, ignore_errors=True)
+=== outcome mentions ===
+298:        # This used to return [] and the caller replied `silent_skipped` with an empty transcript.
+529:# What `silent_skipped` may and may not mean (refuted 19 Sep).
+540:# The discriminator is `n_engine_segments` — how many spans an engine was actually run on — NOT the
+542:# `silent_skipped`; calling that a skip manufactures a starvation finding, which is the exact bug the
+549:def engine_ran(n_engine_segments) -> bool:
+552:        return int(n_engine_segments) > 0
+557:def window_outcome(n_engine_segments, n_output_segments) -> str:
+559:    if not engine_ran(n_engine_segments):
+587:                    "n_engine_segments": 0,   # (a) VAD found no speech: no engine ran.
+588:                    "outcome": NO_ENGINE,
+597:                "status": "silent_skipped",
+612:                    f"[eta-router] silent_skipped span {s:.2f}-{e:.2f} "
+651:        # silent_skipped iff NO ENGINE RAN (a). An engine that ran and returned nothing (b) or little
+654:        status = "silent_skipped" if not engine_ran(len(seg_jobs)) else "ok"
+660:                                 "n_engine_segments": len(seg_jobs),
+661:                                 "outcome": window_outcome(len(seg_jobs), len(segments)),
+727:    THE RULE IS THE SINGLE-WINDOW RULE, LIFTED, AND IT DOES NOT OVER-CLAIM. `silent_skipped` means
+731:    is the very over-claim this fixes. The discriminator is n_engine_segments, aggregated below.
+733:    PARTIAL STARVATION IS STILL VISIBLE without lying about the whole: windows_total and
+734:    windows_skipped are always carried, so a job that starved on 4 of 5 sub-windows is readable as
+735:    such even though its status is `ok`. `outcome` names (a)/(b)/(c) for the job as a whole.
+738:    windows_skipped = 0
+740:    n_engine_segments = 0     # spans an engine was actually RUN on, summed across sub-windows
+747:        if r.get("status") == "silent_skipped":
+748:            windows_skipped += 1
+751:            n_engine_segments += int(seg.get("n_engine_segments") or 0)
+764:    status = "silent_skipped" if not engine_ran(n_engine_segments) else "ok"
+768:        "windows_total": len(window_results),
+769:        "windows_skipped": windows_skipped,
+771:        "n_engine_segments": n_engine_segments,
+772:        "outcome": window_outcome(n_engine_segments, n_segments),

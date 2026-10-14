@@ -1,0 +1,1 @@
+https://fake-bucket.example.r2.cloudflarestorage.com/path/file?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=900

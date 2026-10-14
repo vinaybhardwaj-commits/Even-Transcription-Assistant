@@ -78,7 +78,7 @@ describe("CHECK — no identity literal in any test file in the tree", () => {
 
   it("no test-like file anywhere in the tree hard-codes a person", () => {
     const offenders: string[] = [];
-    for (const f of repoFiles()) {
+    for (const f of repoFiles(process.cwd(), { includeMirrors: true })) {
       if (!TESTLIKE.test(f) || EXEMPT.has(f)) continue;
       const text = textOf(f);
       if (text === null) continue;

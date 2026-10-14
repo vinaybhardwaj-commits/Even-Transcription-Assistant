@@ -26,7 +26,7 @@ const git = (cwd: string, args: string[]) =>
 /** Files in the index whose staged copy differs from the working copy (or is missing from it). Per call of repoFiles. */
 const diverged = new Map<string, Set<string>>();
 
-export function repoFiles(cwd: string = process.cwd()): string[] {
+export function repoFiles(cwd: string = process.cwd(), opts: { includeMirrors?: boolean } = {}): string[] {
   const list = (args: string[]) => git(cwd, ["ls-files", "-z", ...args]).split("\0").filter(Boolean);
   const staged = list([]);
   const untracked = list(["--others", "--exclude-standard"]).filter((f) => !f.startsWith("docs/handoff/"));
@@ -34,7 +34,9 @@ export function repoFiles(cwd: string = process.cwd()): string[] {
   const onDisk = (f: string) => existsSync(join(cwd, f)) && statSync(join(cwd, f)).isFile();
   const stagedSet = new Set(staged);
   // A staged file deleted from the working tree is still what the commit would carry: keep it.
-  return [...new Set([...staged, ...untracked])].filter((f) => onDisk(f) || stagedSet.has(f));
+  // mirrors/ holds read-only copies of other repos (mirrors/*/MIRROR.md). Structure guards skip it by default; the identity, clinician-id and E11 guards pass includeMirrors: true because mirrors/ is public.
+  const keep = (f: string) => opts.includeMirrors === true || !f.startsWith("mirrors/");
+  return [...new Set([...staged, ...untracked])].filter((f) => keep(f) && (onDisk(f) || stagedSet.has(f)));
 }
 
 /** Text of a file — its working copy and, where it differs, its staged copy — or null for binary content (a NUL in the first 8 KB). */

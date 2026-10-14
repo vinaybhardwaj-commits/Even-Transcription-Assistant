@@ -1,0 +1,84 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pitch review (W46/W49)</title><style>
+:root{--bg:#fbfaf7;--ink:#1c1a17;--mut:#6b675f;--line:#e2ddd2;--acc:#0a5c36;--warn:#9c1c1c}:root[data-theme="dark"]{--bg:#171513;--ink:#e9e4da;--mut:#9a958b;--line:#3a362f;--acc:#5fbf8f;--warn:#e08585}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif}main{max-width:820px;margin:0 auto;padding:18px 16px 90px}
+h1{font-size:1.2rem}.sub{color:var(--mut);font-size:.9rem}
+.card{border:1px solid var(--line);border-radius:10px;padding:14px;margin-top:12px;background:var(--bg)}
+.tx{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:340px;overflow-y:auto}
+.turn{padding:3px 0;border-top:1px solid var(--line)}.turn:first-child{border-top:0}.turn .lg{color:var(--mut);font-size:.8rem;margin-right:6px}.turn .om{color:var(--mut);font-style:italic}
+button,a.plain{background:none;border:1px solid var(--line);border-radius:8px;color:var(--ink);padding:7px 11px;cursor:pointer;font:inherit;min-height:38px;text-decoration:none}
+button[aria-pressed=true]{border-color:var(--acc);color:var(--acc);font-weight:600}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}.mut{color:var(--mut);font-size:.85rem}.wide{width:100%}
+.act{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.act button{flex:1 1 200px}
+.field{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:8px}
+.field .fh{display:flex;justify-content:space-between;gap:8px;font-size:.9rem;margin-bottom:6px}.field .fh b{font-weight:600}.field .fh .mut{white-space:nowrap}
+.choices{display:flex;gap:6px;flex-wrap:wrap}.choices button{padding:5px 10px;min-height:32px}
+.warnbox{color:var(--warn);font-size:.85rem;margin-top:6px}
+textarea{width:100%;min-height:52px;border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;background:var(--bg);color:var(--ink)}
+#status{color:var(--warn);font-size:.9rem}#done{color:var(--acc);font-size:.9rem}.note{color:var(--mut);font-size:.85rem;margin-top:8px}
+</style></head><body><main>
+<h1>Pitch review — keyword hit, Jev said no pitch (25/26 Sep)</h1>
+<p class="sub">Each case had a surgery/procedure keyword in the transcript, but Jev's judgment was "no pitch". Read the transcript and decide whether that is right. No per-segment speaker label in this batch — the transcript is not diarized here, unlike the Consult view. Your answers save as you go; only you see them. A line marked <i>(redacted — non-Latin script, could not be safely de-identified)</i> was deliberately dropped by the de-id tool, not missing/broken data; judge the rest of the transcript around it.</p>
+<div class="row"><button id="prev">← Prev</button><button id="next">Next →</button><button id="nextopen">Next unrated</button><label class="mut">Go to <select id="jump"></select></label><span id="prog" class="mut"></span><span id="status"></span><span id="done"></span></div>
+<div id="panel"></div>
+<p class="note">This set exists to catch a specific failure mode (recall on Jev, not a re-run of the original labelling task). "Unsure" is for a transcript too poor to judge, not a coin flip.</p>
+</main><script>
+const $=(id)=>document.getElementById(id);const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const OMITTED="[NONLATIN_SCRIPT_OMITTED]";   // surg-link's deid.py fail-closed rule (#4788): a whole line dropped, not missing/broken data
+const FIELD_LABEL={pitched_surgery:"Surgical operation pitched",pitched_intervention:"Non-surgical procedure pitched",procedure_family:"Procedure family",doctor_recommended:"Raised by the clinician",patient_agreed:"Patient agreed",patient_deferred:"Patient asked to think it over"};
+const FIELD_CHOICES={pitched_surgery:["yes","no"],pitched_intervention:["yes","no"],procedure_family:["surgery_general","surgery_ortho","cath_angio","endoscopy","injection","biopsy","physio_procedural","other","none"],doctor_recommended:["yes","no"],patient_agreed:["yes","no"],patient_deferred:["yes","no"]};
+const FIELD_ORDER=["procedure_family","pitched_surgery","pitched_intervention","doctor_recommended","patient_agreed","patient_deferred"];
+let items=[],mine={},db=null,meId="",claudeOk=false,loaded=false,cur=0,dirty=false,saving=Promise.resolve(),saveTimer=0;
+function rated(it){const a=mine[it.id];return !!a&&!!a.action}
+function A2(id){return mine[id]||(mine[id]={})}
+function jevVal(it,k){const v=it.jev&&it.jev[k];return v&&v.value?v.value:"?"}
+function jevP(it,k){const v=it.jev&&it.jev[k];return v&&v.p_yes!=null?" (p="+v.p_yes+")":""}
+function fieldVal(it,a,k){if(!a.fields)return jevVal(it,k);const f=a.fields[k];return (f===undefined||f==="agree")?jevVal(it,k):f}
+function panel(){const it=items[cur];
+ if(!it){$("panel").innerHTML=`<p class="empty">${!claudeOk?"This page needs the rating access - open it signed in.":loaded?"Nothing loaded yet.":"Loading…"}</p>`;return}
+ const a=A2(it.id),action=a.action||"";
+ const turns=(it.turns||[]).map((t)=>`<div class="turn"><span class="lg">(${esc(t.lang)})</span>${t.text===OMITTED?'<span class="om">(redacted — non-Latin script, could not be safely de-identified)</span>':esc(t.text)||"(no text)"}</div>`).join("")||`<p class="mut">No transcript.</p>`;
+ const fields=action==="missed_pitch"?FIELD_ORDER.map((k)=>{
+   const cur=fieldVal(it,a,k),choices=FIELD_CHOICES[k];
+   return `<div class="field"><div class="fh"><b>${esc(FIELD_LABEL[k])}</b><span class="mut">Jev proposed: ${esc(jevVal(it,k))}${jevP(it,k)}</span></div>
+    <div class="choices">${choices.map((c)=>`<button data-field="${esc(k)}" data-val="${esc(c)}" aria-pressed="${cur===c}">${esc(c)}${c===jevVal(it,k)?" (Jev)":""}</button>`).join("")}</div></div>`;
+ }).join("") : "";
+ $("panel").innerHTML=`<div class="card">
+  <div class="row"><b>${esc(it.id)}</b><span class="mut">${esc(it.day)}${it.link_status?" · "+esc(it.link_status):""}</span></div>
+  <p class="mut">${esc(it.reason)}</p>
+  <div class="tx">${turns}</div>
+  <div class="act">
+   <button id="a_none" aria-pressed="${action==="confirm_none"}">Jev is right — no pitch</button>
+   <button id="a_missed" aria-pressed="${action==="missed_pitch"}">Jev missed a pitch</button>
+   <button id="a_unsure" aria-pressed="${action==="unsure"}">Unsure / transcript too poor</button>
+  </div>
+  ${action==="missed_pitch"?fields:""}
+  ${action==="missed_pitch"?"<p class=\"mut\">Click a field's own value to leave it as Jev proposed; click a different one to correct it.</p>":""}
+  <div class="row"><label class="mut wide">Note (optional)<textarea id="note">${esc(a.note||"")}</textarea></label></div>
+ </div>`;
+ $("prog").textContent=`${cur+1}/${items.length}`;
+ const jump=$("jump");jump.innerHTML=items.map((x,i)=>`<option value="${i}"${i===cur?" selected":""}>${i+1}${rated(x)?" · done":""}</option>`).join("");
+ $("prev").disabled=cur<=0;
+ bind(it);}
+function bind(it){
+ $("next").onclick=()=>go(cur+1);$("prev").onclick=()=>go(cur-1);
+ $("nextopen").onclick=()=>{const n=items.length;for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!rated(items[i]))return go(i)}$("done").textContent="Every case is judged."};
+ $("jump").onchange=(e)=>go(+e.target.value);
+ $("a_none").onclick=()=>setAction(it,"confirm_none");$("a_missed").onclick=()=>setAction(it,"missed_pitch");$("a_unsure").onclick=()=>setAction(it,"unsure");
+ $("note").onchange=(e)=>{A2(it.id).note=e.target.value;queueSave()};
+ document.querySelectorAll("button[data-field]").forEach((b)=>b.onclick=()=>chooseField(it,b.dataset.field,b.dataset.val));}
+function setAction(it,action){const a=A2(it.id);a.action=action;if(action!=="missed_pitch")delete a.fields;else if(!a.fields){a.fields={};for(const k of FIELD_ORDER)a.fields[k]="agree"}
+ a.ts=new Date().toISOString();queueSave();panel();}
+function chooseField(it,k,v){const a=A2(it.id);if(!a.fields){a.fields={};for(const kk of FIELD_ORDER)a.fields[kk]="agree"}
+ a.fields[k]=(v===jevVal(it,k))?"agree":v;a.ts=new Date().toISOString();queueSave();panel();}
+function queueSave(){dirty=true;$("status").textContent="Saving…";clearTimeout(saveTimer);saveTimer=setTimeout(flush,700)}
+function flush(){if(!db||!meId||!dirty||!loaded)return;dirty=false;const t={};for(const id of Object.keys(mine)){const s=mine[id];if(!s||!s.action)continue;const keep={action:s.action};if(s.action==="missed_pitch"&&s.fields)keep.fields=s.fields;if(s.note)keep.note=s.note;if(s.ts)keep.ts=s.ts;t[id]=keep}
+ if(!Object.keys(t).length){$("status").textContent="";return}
+ saving=saving.then(()=>db.doc("ratings/"+meId).set({t})).then(()=>{$("status").textContent="Saved"}).catch((e)=>{$("status").textContent=e&&e.code==="invalid_argument"?"You have view-only access - ask the page owner.":"Couldn't save just now; change an answer to retry.";dirty=true});}
+function go(i){cur=Math.max(0,Math.min(i,items.length-1));panel();window.scrollTo(0,0)}
+(async()=>{if(!window.claude||!window.claude.use)return;claudeOk=true;panel();
+ const[dbU,us]=await Promise.all([claude.use("db"),claude.use("user")]);db=dbU;
+ const u=await us.me();meId=u.name||"me";
+ db.collection("rows").onSnapshot((snap)=>{items=snap.docs.map((d)=>d.data());loaded=true;panel();},()=>{});
+ try{const d=await db.doc("ratings/"+meId).get();if(d.exists){const t=d.data().t||{};for(const k of Object.keys(t))mine[k]=Object.assign({},t[k],mine[k]||{})}}catch(e){}
+ panel();})();
+</script></body></html>

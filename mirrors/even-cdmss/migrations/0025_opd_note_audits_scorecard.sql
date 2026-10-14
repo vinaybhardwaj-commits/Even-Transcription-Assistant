@@ -1,0 +1,26 @@
+-- 0025_opd_note_audits_scorecard.sql — NQI coverage metric, PHASE 1 (PRD 27 Jul 2026).
+-- Applied BY HAND in the Neon SQL editor. Idempotent. STRICTLY ADDITIVE: one nullable column.
+-- No index, no NOT NULL, no default (PRD §3/§4). One table, per house style.
+--
+-- WHY. The scorecard's per-domain WEIGHTS are computed at scoring time and thrown away. When the
+-- PDQI-9 leg returns nothing, the note_quality domain is emitted with score 0 and WEIGHT 0, which
+-- removes it from a coverage-normalised mean — and because note_quality is the lowest-scoring domain,
+-- dropping it RAISES the index. Measured 27 Jul over 25,103 rows: notes the engine could NOT assess
+-- average 95.21 NQI with 52% scoring exactly 100, against 78.36 and 0.6% for assessed notes. A
+-- failure to assess is currently scored as excellence, and nothing stored could contradict it.
+--
+-- domains[].weight is the load-bearing field: a `note_quality` entry with weight 0 and
+-- basis "PDQI-9 not assessed" sitting beside a high note_quality_index in the SAME row is the
+-- contradiction this column exists to make visible.
+--
+-- NO BACKFILL, deliberately (PRD §4). Reconstructing a scorecard for existing rows would stamp
+-- TODAY's weights onto rows scored by engines 0.1 … 0.81.13, whose weights may have differed — a
+-- stored value asserting something unverified, which is the exact defect class this workstream
+-- exists to eliminate. Existing rows keep scorecard IS NULL, which honestly means "not recorded".
+-- `scorecard IS NULL` must NEVER be read as "fully assessed".
+--
+-- Phase 1 changes no existing value, type or behaviour, and creates no unscoreable notes. The
+-- 'unscored' band (D2), the four NULL-coerced-to-0 read sites, and making note_quality_index
+-- nullable are Phases 2 and 3.
+
+ALTER TABLE opd_note_audits ADD COLUMN IF NOT EXISTS scorecard jsonb;

@@ -1,0 +1,294 @@
+{
+ "run_id": "run-2026-09-24-053809-nemotron-13537f4e",
+ "trainer": "train_nemotron.py",
+ "base_model": "nvidia/Nemotron-3-Diarization",
+ "base_model_snapshot": "a435e9867d79e789e90053f9b6d6834053af564a",
+ "base_model_nemo_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+ "dataset_id": "diar-train-clean-2026-09-24-13537f4e",
+ "train_n": 116,
+ "val_n": 34,
+ "val_holdout_room_day": null,
+ "skipped_windows": [
+  [
+   "bw_xd6gt5sp_1790131500000_primary",
+   "9 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790157600000_primary",
+   "17 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790156700000_primary",
+   "11 speakers"
+  ],
+  [
+   "bw_7tedad86_1790136900000_primary",
+   "9 speakers"
+  ]
+ ],
+ "excluded_test_room_days": [
+  "rd_3629fkar",
+  "rd_5b5kmjeq",
+  "rd_7g2ytyta",
+  "rd_93tcdc4c",
+  "rd_au3vmzsm",
+  "rd_djmbtzph",
+  "rd_f4hzv5sj",
+  "rd_jqj96amk",
+  "rd_kp4c7pp6",
+  "rd_m4rft4fy",
+  "rd_sp5dezef",
+  "rd_tcqaam5c",
+  "rd_u579utrq",
+  "rd_vc28prfr",
+  "rd_yhh6kexm"
+ ],
+ "val_room_days": [
+  "rd_4fsw6f6y",
+  "rd_xrn7wjsf",
+  "rd_yck5kdc2"
+ ],
+ "train_room_days": [
+  "rd_7usy23ex",
+  "rd_9q4u73rr",
+  "rd_aeeu5u4j",
+  "rd_errdkjhe",
+  "rd_ntajfras",
+  "rd_pw5gaugg",
+  "rd_qjw6srbs",
+  "rd_tp4hcf8s",
+  "rd_u6kdhc3b"
+ ],
+ "manifest_counts": {
+  "source": 173,
+  "excluded": 19,
+  "train": 120,
+  "val": 34
+ },
+ "max_steps": 300,
+ "lr": 2e-06,
+ "warmup_steps": 20,
+ "batch_size": 8,
+ "session_len_sec": 105,
+ "seed": 42,
+ "precision": "bf16-mixed",
+ "nemo_speech_commit": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+ "git_sha": "probe",
+ "env_versions": {
+  "torch": "2.14.0",
+  "lightning": "2.4.0",
+  "nemo-toolkit": "3.1.0+cf724ac33",
+  "numpy": "2.5.3"
+ },
+ "started_at": "2026-09-24T05:38:10Z",
+ "status": "OK",
+ "reason": "real run on the verified nightly dataset; quality judged only by held-out evaluation (V5 + bench20 vs pyannote.ai)",
+ "metrics": {
+  "loss": 0.05019998177886009,
+  "ats_loss": 0.014039644040167332,
+  "pil_loss": 0.014039644040167332,
+  "activity_loss": 0.07009024173021317,
+  "phantom_loss": 0.011152170598506927,
+  "learning_rate": 5.291502702675643e-07,
+  "train_f1_acc": 0.938291072845459,
+  "train_precision": 0.955344021320343,
+  "train_recall": 0.9218371510505676,
+  "train_f1_acc_ats": 0.938291072845459,
+  "train_spk_count_mae": 0.0,
+  "train_spk_count_acc": 1.0,
+  "val_loss": 0.0720863863825798,
+  "val_ats_loss": 0.05542429909110069,
+  "val_pil_loss": 0.016920380294322968,
+  "val_activity_loss": 0.0840381532907486,
+  "val_phantom_loss": 0.03520946949720383,
+  "val_f1_acc": 0.8171199560165405,
+  "val_precision": 0.8527323603630066,
+  "val_recall": 0.8131958246231079,
+  "val_f1_acc_ats": 0.6726965308189392,
+  "val_spk_count_mae": 0.5,
+  "val_spk_count_acc": 0.5882353186607361
+ },
+ "best_val_metric": "val_count_mae_vs_teacher",
+ "best_val_score": 0.5588235294117647,
+ "best_step": 25,
+ "stop_reason": "max_steps",
+ "count_curve": [
+  {
+   "step": 0,
+   "val_count_mae_vs_teacher": 0.7647,
+   "val_count_bias": 0.3529,
+   "v5_count_mae_vs_V": 0.4,
+   "v5_counts": [
+    5,
+    7,
+    4,
+    3,
+    4
+   ]
+  },
+  {
+   "step": 25,
+   "val_count_mae_vs_teacher": 0.5588,
+   "val_count_bias": 0.2059,
+   "v5_count_mae_vs_V": 0.4,
+   "v5_counts": [
+    5,
+    7,
+    4,
+    3,
+    4
+   ]
+  },
+  {
+   "step": 50,
+   "val_count_mae_vs_teacher": 0.5882,
+   "val_count_bias": -0.3529,
+   "v5_count_mae_vs_V": 1.2,
+   "v5_counts": [
+    5,
+    6,
+    2,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 75,
+   "val_count_mae_vs_teacher": 0.7059,
+   "val_count_bias": -0.4706,
+   "v5_count_mae_vs_V": 1.2,
+   "v5_counts": [
+    5,
+    6,
+    2,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 100,
+   "val_count_mae_vs_teacher": 0.7059,
+   "val_count_bias": -0.5294,
+   "v5_count_mae_vs_V": 1.0,
+   "v5_counts": [
+    4,
+    6,
+    2,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 125,
+   "val_count_mae_vs_teacher": 0.6765,
+   "val_count_bias": -0.5,
+   "v5_count_mae_vs_V": 0.8,
+   "v5_counts": [
+    4,
+    6,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 150,
+   "val_count_mae_vs_teacher": 0.6765,
+   "val_count_bias": -0.5,
+   "v5_count_mae_vs_V": 0.8,
+   "v5_counts": [
+    4,
+    6,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 175,
+   "val_count_mae_vs_teacher": 0.6471,
+   "val_count_bias": -0.5294,
+   "v5_count_mae_vs_V": 1.0,
+   "v5_counts": [
+    5,
+    6,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 200,
+   "val_count_mae_vs_teacher": 0.7059,
+   "val_count_bias": -0.5882,
+   "v5_count_mae_vs_V": 1.0,
+   "v5_counts": [
+    4,
+    5,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 225,
+   "val_count_mae_vs_teacher": 0.7353,
+   "val_count_bias": -0.6176,
+   "v5_count_mae_vs_V": 1.0,
+   "v5_counts": [
+    4,
+    5,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 250,
+   "val_count_mae_vs_teacher": 0.7941,
+   "val_count_bias": -0.6765,
+   "v5_count_mae_vs_V": 1.0,
+   "v5_counts": [
+    4,
+    5,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 275,
+   "val_count_mae_vs_teacher": 0.8235,
+   "val_count_bias": -0.7059,
+   "v5_count_mae_vs_V": 1.2,
+   "v5_counts": [
+    3,
+    5,
+    3,
+    3,
+    3
+   ]
+  },
+  {
+   "step": 300,
+   "val_count_mae_vs_teacher": 0.7941,
+   "val_count_bias": -0.6765,
+   "v5_count_mae_vs_V": 1.0,
+   "v5_counts": [
+    3,
+    6,
+    3,
+    3,
+    3
+   ]
+  }
+ ],
+ "count_selection_note": "best checkpoint = lowest val-window count error vs teacher; V5 counts are logged per checkpoint but NOT used to select or stop",
+ "last_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/nemotron-probe-p1/run-2026-09-24-053809-nemotron-13537f4e.nemo",
+ "last_nemo_sha256": "d6633f0a2a49b4ab4f439f3ab74b4c310093b2fed3efc67a2c7808087a504a0d",
+ "last_weights_sha256": "e06edfdb800a17e583d2c7c2c5917abab1f72f09b67207449ea575803811f315",
+ "best_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/nemotron-probe-p1/run-2026-09-24-053809-nemotron-13537f4e-best.nemo",
+ "best_nemo_sha256": "3298de8d37660c9ec0e62f7d276b617c9ff113a17b64b1d8ee16a701d856387e",
+ "best_weights_sha256": "3667eb9a7f4bc2bb6584c155c8100647c3350ac18756519271384c8689736843",
+ "checkpoint_r2_key": null
+}

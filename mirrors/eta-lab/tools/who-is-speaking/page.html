@@ -1,0 +1,392 @@
+<title>Who Is Speaking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+Devanagari:wght@400;500&family=Noto+Sans+Kannada:wght@400;500&family=Noto+Sans+Telugu:wght@400;500&family=Noto+Sans+Tamil:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f3f5f3;--card:#ffffff;--ink:#1b2320;--mut:#5f6b66;--line:#d6dcd8;--soft:#e9eeeb;
+  --acc:#1f5e7a;--acc-ink:#ffffff;--mark:#f2c14e;--ok:#2f7a4d;--warn:#a2641a;--bad:#a33a3a;
+  --sans:"IBM Plex Sans","Noto Sans Devanagari","Noto Sans Kannada","Noto Sans Telugu","Noto Sans Tamil",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--mark:#c79a2e;--ok:#6cc08c;--warn:#e0a458;--bad:#e07c7c;}}
+:root[data-theme="dark"]{
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--mark:#c79a2e;--ok:#6cc08c;--warn:#e0a458;--bad:#e07c7c;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans);padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:720px;margin:0 auto}
+header.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:14px 10px;border-bottom:1px solid var(--line)}
+.bar-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px}
+h1{font-size:1.15rem;font-weight:600;margin:0;text-wrap:balance}
+h2,h3{text-wrap:balance}
+.meta{color:var(--mut);font-size:.88rem}
+.prog{font-family:var(--mono);font-size:.85rem;font-variant-numeric:tabular-nums}
+.pbar{height:6px;border-radius:3px;background:var(--soft);overflow:hidden;margin-top:8px}
+.pbar i{display:block;height:100%;background:var(--ok);width:0}
+.tabs{display:flex;gap:6px;margin-top:10px}
+.tab{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;padding:4px 12px;font:500 .85rem var(--sans);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.intro{color:var(--mut);font-size:.9rem;max-width:62ch;margin:14px 0 0}
+.howto{max-width:62ch;margin:6px 0 0;font-size:.9rem}
+.howto summary{padding-block:6px;min-height:32px}
+.howto p{color:var(--mut);margin:4px 0 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-top:14px;display:grid;gap:14px}
+.wh{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.wh h2{font-size:1.1rem;margin:0}
+.tok{font:400 .8rem var(--mono);color:var(--mut)}
+.btn{border:1px solid var(--acc);background:var(--acc);color:var(--acc-ink);border-radius:8px;padding:8px 16px;font:500 .9rem var(--sans);cursor:pointer}
+.btn.ghost{background:transparent;color:var(--acc)}
+.btn[disabled]{opacity:.4;cursor:default}
+.link{background:none;border:0;padding:0;color:var(--acc);font:inherit;font-size:.85rem;cursor:pointer;text-decoration:underline}
+/* player */
+.pl{display:grid;gap:4px}
+.pl-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.pl-b{min-width:44px;min-height:44px;border:1px solid var(--line);background:var(--soft);color:var(--ink);border-radius:8px;font:500 .9rem var(--sans);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 12px;font-variant-numeric:tabular-nums}
+.pl-play{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);min-width:52px}
+.pl-b svg{width:20px;height:20px;fill:currentColor}
+.pl-time{margin-left:auto;font:400 .82rem var(--mono);font-variant-numeric:tabular-nums;color:var(--mut);white-space:nowrap}
+.sc{position:relative;height:34px}
+.sc .base{position:absolute;left:0;right:0;top:13px;height:8px;border-radius:4px;background:var(--soft)}
+.sc .band{position:absolute;top:8px;height:18px;border-radius:4px;background:color-mix(in srgb,var(--mark) 60%,transparent);border:1px solid var(--mark)}
+.sc input{position:absolute;inset:0;width:100%;height:34px;margin:0;background:transparent;-webkit-appearance:none;appearance:none}
+.sc input::-webkit-slider-runnable-track{background:transparent;height:34px}
+.sc input::-moz-range-track{background:transparent;height:34px}
+.sc input::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;margin-top:7px;border-radius:50%;background:var(--acc);border:2px solid var(--card)}
+.sc input::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--acc);border:2px solid var(--card)}
+.pl-key{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.78rem;color:var(--mut);align-items:center}
+.pl-key .sw{display:inline-block;width:14px;height:10px;border-radius:3px;background:color-mix(in srgb,var(--mark) 60%,transparent);border:1px solid var(--mark);vertical-align:middle;margin-right:5px}
+.now{font-weight:600;color:var(--mut)}
+.now.on{color:var(--warn)}
+.pl-msg{font-size:.8rem;color:var(--warn);min-height:1.1em}
+.quote{margin:0;padding:10px 12px;border-left:4px solid var(--mark);background:var(--soft);border-radius:0 8px 8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.qlab{font-size:.78rem;color:var(--mut);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em}
+/* answers */
+fieldset{border:0;padding:0;margin:0}
+legend{font-weight:600;font-size:.95rem;margin-bottom:8px;padding:0}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.opt{position:relative;display:block}
+.opt input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer;width:100%;height:100%}
+.opt span{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:48px;padding:6px 14px;border:1px solid var(--line);border-radius:8px;font-size:1rem;font-weight:500;background:var(--card)}
+.opt kbd{font:400 .72rem var(--mono);color:var(--mut);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+.opt input:checked+span{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+.opt input:checked+span kbd{color:var(--acc-ink);border-color:currentColor}
+.opt input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
+.foot label.l{display:block;font-size:.85rem;font-weight:600;margin-bottom:4px}
+textarea{width:100%;min-height:56px;resize:vertical;border:1px solid var(--line);border-radius:6px;padding:7px 9px;background:var(--bg);color:var(--ink);font:inherit}
+.nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px;flex-wrap:wrap}
+.nav2{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-top:12px;font-size:.85rem;color:var(--mut)}
+.nav2 select{min-height:36px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);font:inherit;padding:0 8px}
+.nav2 label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-height:36px}
+.status{font-size:.82rem;color:var(--mut);min-height:1.2em;margin-top:8px}
+.table-wrap{overflow-x:auto;margin-top:12px}
+table{border-collapse:collapse;width:100%;font-size:.86rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
+.pill{display:inline-block;border-radius:999px;padding:1px 8px;font-size:.78rem;font-weight:500}
+.pill.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.pill.warn{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.pill.bad{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.pill.none{background:var(--soft);color:var(--mut)}
+details summary{cursor:pointer;color:var(--acc)}
+.empty{color:var(--mut);padding:24px 0}
+@media (max-width:560px){
+  header.bar{position:static}
+  .btn,.btn.sm{min-height:44px}
+  .tab{min-height:40px}
+  .nav .btn{flex:1 1 0}
+  .opts{grid-template-columns:1fr 1fr}
+  .opt kbd{display:none}
+  .link{min-height:32px}
+}
+@media (hover:none){.opt kbd{display:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="bar" id="hdr">
+    <div class="bar-row">
+      <h1>Who Is Speaking</h1>
+      <span class="prog" id="prog">0 / 0 answered</span>
+      <span class="meta" id="who"></span>
+    </div>
+    <div class="pbar" aria-hidden="true"><i id="pfill"></i></div>
+    <div class="tabs" role="tablist" id="tabs" hidden>
+      <button class="tab" role="tab" id="tab-rate" aria-selected="true">My answers</button>
+      <button class="tab" role="tab" id="tab-res" aria-selected="false">Results</button>
+    </div>
+  </header>
+
+  <section id="view-rate">
+    <p class="intro">Each item is one turn from a clinic conversation, with a few seconds of audio either side. The turn you are judging is marked on the audio bar.</p>
+    <details class="howto"><summary>How to rate</summary>
+      <p>Listen, then say who is speaking in the marked turn. Play it as often as you like: "Marked turn" plays only that part. Your answers save as you go and only you see them here. On a computer, keys 1 to 5 choose an answer, N or the right arrow moves on, P or the left arrow goes back, T plays the marked turn, and the space bar plays or pauses.</p></details>
+    <div id="panel"><p class="empty">Loading the turns…</p></div>
+    <div class="nav">
+      <button class="btn ghost" id="prev">Previous</button>
+      <button class="btn" id="next">Next</button>
+    </div>
+    <div class="nav2">
+      <button class="link" id="nextopen">Next unanswered</button>
+      <label for="jump">Go to <select id="jump" aria-label="Go to turn"></select></label>
+      <label for="auto"><input type="checkbox" id="auto"> Move on after I answer</label>
+    </div>
+    <div class="status" id="status" aria-live="polite"></div>
+    <div class="status" id="done" aria-live="polite"></div>
+  </section>
+
+  <section id="view-res" hidden>
+    <p class="intro">How the raters compare, using the scoring rule: a turn counts only where at least one rater answered something other than "cannot tell"; if the raters who did answer disagree, the turn is excluded. Only you (the page owner) see this tab.</p>
+    <div class="card" id="res"><p class="empty">No answers yet.</p></div>
+  </section>
+</div>
+
+<script>
+/* Who is speaking. Items are read from the db collection "turns" through a whitelist (id, audio, duration_s,
+   turn_start_s, turn_end_s, text): no machine label, doctor, room or "doubtful" flag can reach the screen, whatever the
+   doc holds. Answers are saved to labels/<rater id> = {rater, schema, t:{<turnId>:{a, note?, ts}}}. */
+let db=null,user=null,meId=null,owner=false,claudeOk=false,loaded=false;
+let items=[],sig="",cur=0,mine={t:{}},all=[];
+let saveTimer=null,saving=Promise.resolve(),dirty=false;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fnv=s=>{let h=2166136261;for(const ch of String(s)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}return h>>>0};
+const tf=s=>{s=Math.max(0,+s||0);return Math.floor(s/60)+":"+(s%60).toFixed(1).padStart(4,"0")};
+const ANS=[["doctor","Doctor"],["patient","Patient"],["companion","Companion or relative"],["staff","Staff"],["cannot_tell","Cannot tell"]];
+const ALAB=Object.fromEntries(ANS);
+const A=id=>mine.t[id]||(mine.t[id]={});
+const answered=a=>!!a&&!!ALAB[a.a];
+const curI=()=>items[cur];
+let follow=false;
+try{follow=localStorage.getItem("wis-auto")==="1"}catch(e){}
+function progress(){
+  const n=items.filter(it=>answered(mine.t[it.id])).length;
+  $("prog").textContent=n+" / "+items.length+" answered";
+  $("pfill").style.width=(items.length?100*n/items.length:0)+"%";
+  const j=$("jump");
+  if(j){const want=items.map((it,i)=>`<option value="${i}"${i===cur?" selected":""}>${i+1}${answered(mine.t[it.id])?" · answered":""}</option>`).join("");
+    if(j.dataset.k!==want){j.innerHTML=want;j.dataset.k=want}else j.value=String(cur)}
+}
+
+/* ---- audio: small clips fetched into Blob URLs ahead of time (no byte-range support needed; play starts inside the tap) ---- */
+const ICON={
+  play:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>',
+  pause:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4.5v16H6zM13.5 4H18v16h-4.5z"/></svg>'};
+const RATES=[1,0.75,1.25,1.5];
+const blobs=new Map(),pending=new Map();
+const P={audio:null,id:null,rate:1,playing:false,pos:0,stopAt:null};
+async function audioBlob(b){
+  if(/^(audio|video)\//.test(b.type))return b;
+  const h=new Uint8Array(await b.slice(0,12).arrayBuffer()),s=String.fromCharCode(...h);
+  const type=s.slice(4,8)==="ftyp"?"audio/mp4":s.slice(0,4)==="OggS"?"audio/ogg":s.slice(0,4)==="RIFF"?"audio/wav":"audio/mpeg";
+  return new Blob([b],{type});
+}
+function prefetch(it){
+  if(!it||!it.audio||blobs.has(it.id)||pending.has(it.id)||typeof fetch!=="function")return;
+  const p=fetch(it.audio).then(r=>{if(!r.ok)throw new Error(r.status);return r.blob()})
+    .then(audioBlob).then(bb=>{blobs.set(it.id,URL.createObjectURL(bb));pending.delete(it.id)}).catch(()=>{pending.delete(it.id)});
+  pending.set(it.id,p);
+}
+function trim(){
+  const keep=new Set([items[cur-1],items[cur],items[cur+1],items[cur+2]].filter(Boolean).map(x=>x.id));
+  for(const [id,u] of blobs)if(!keep.has(id)){URL.revokeObjectURL(u);blobs.delete(id)}
+}
+function resetPlayer(){
+  const a=P.audio;if(a){a.onplay=a.onpause=a.onended=a.ontimeupdate=a.onloadedmetadata=a.onerror=null;try{a.pause()}catch(e){}}
+  P.audio=null;P.id=null;P.playing=false;P.pos=0;P.stopAt=null;
+}
+const durOf=()=>{const it=curI();return P.audio&&Number.isFinite(P.audio.duration)?P.audio.duration:(it&&it.duration_s)||0};
+const getPos=()=>P.audio&&P.audio.readyState>=1?P.audio.currentTime:P.pos;
+function plUi(){
+  const it=curI();if(!it||!$("pl-play"))return;
+  const d=durOf(),p=Math.min(getPos(),d||getPos());
+  $("pl-play").innerHTML=P.playing?ICON.pause:ICON.play;
+  $("pl-play").setAttribute("aria-label",P.playing?"Pause":"Play all");
+  $("pl-time").textContent=tf(p)+" / "+tf(d);
+  const sk=$("pl-seek");sk.max=String(Math.max(1,d));sk.value=String(p);
+  const band=$("band");if(d>0){band.style.left=(100*it.ts/d)+"%";band.style.width=(100*(it.te-it.ts)/d)+"%"}
+  $("pl-rate").textContent=P.rate+"×";$("pl-rate").setAttribute("aria-label","Playback speed "+P.rate+"×. Tap to change.");
+  const on=P.playing&&p>=it.ts-0.05&&p<=it.te+0.05;
+  $("now").textContent=on?"Marked turn":(P.playing?"Context":"");$("now").classList.toggle("on",on);
+}
+function ensureAudio(){
+  const it=curI();if(!it||!it.audio)return null;
+  if(P.audio&&P.id===it.id)return P.audio;
+  const start=P.pos;resetPlayer();P.pos=start;
+  const a=new Audio();P.audio=a;P.id=it.id;
+  a.onplay=()=>{P.playing=true;plUi()};a.onpause=()=>{P.playing=false;plUi()};a.onended=()=>{P.playing=false;P.stopAt=null;plUi()};
+  a.ontimeupdate=()=>{P.pos=a.currentTime;if(P.stopAt!=null&&a.currentTime>=P.stopAt){P.stopAt=null;a.pause()}plUi()};
+  a.onloadedmetadata=()=>{try{if(P.pos>0&&a.currentTime<0.05)a.currentTime=P.pos}catch(e){}plUi()};
+  a.onerror=()=>{P.playing=false;$("pl-msg").textContent="The clip could not be loaded.";plUi()};
+  a.playbackRate=P.rate;a.src=blobs.get(it.id)||it.audio;
+  return a;
+}
+function setPos(x){
+  x=Math.max(0,Math.min(x,durOf()||x));P.pos=x;
+  if(P.audio&&P.audio.readyState>=1)P.audio.currentTime=x;
+  plUi();
+}
+function play(from,stopAt){
+  const a=ensureAudio();if(!a)return;$("pl-msg").textContent="";
+  P.stopAt=stopAt==null?null:stopAt;
+  if(from!=null){P.pos=from;if(a.readyState>=1)a.currentTime=from}
+  const p=a.play();if(p&&p.catch)p.catch(()=>{$("pl-msg").textContent="Tap play to start.";P.playing=false;plUi()});
+}
+function playTurnOnly(){const it=curI();if(it)play(it.ts,it.te)}
+
+/* ---- the turn on screen ---- */
+function turnHtml(it){
+  const a=mine.t[it.id]||{};
+  const opts=ANS.map(([v,l],i)=>`<label class="opt"><input type="radio" name="a" id="a-${v}" value="${v}"${a.a===v?" checked":""}><span>${esc(l)}<kbd>${i+1}</kbd></span></label>`).join("");
+  return `<div class="card">
+    <div class="wh"><h2>Turn ${cur+1} of ${items.length}</h2><span class="tok">marked ${tf(it.ts)} to ${tf(it.te)}</span></div>
+    <div class="pl" role="group" aria-label="Clip audio">
+      <div class="pl-row">
+        <button class="pl-b pl-play" id="pl-play" aria-label="Play all">${ICON.play}</button>
+        <button class="pl-b" id="pl-turn" aria-label="Play only the marked turn">Marked turn</button>
+        <button class="pl-b" id="pl-rate" aria-label="Playback speed 1×. Tap to change.">1×</button>
+        <span class="pl-time" id="pl-time">0.0 / 0.0</span>
+      </div>
+      <div class="sc"><div class="base"></div><div class="band" id="band"></div>
+        <input type="range" id="pl-seek" min="0" max="${Math.max(1,it.duration_s||0)}" step="0.1" value="0" aria-label="Position in the clip"></div>
+      <div class="pl-key"><span><span class="sw"></span>Marked turn</span><span class="now" id="now"></span></div>
+      <div class="pl-msg" id="pl-msg" aria-live="polite"></div>
+    </div>
+    ${it.text?`<div><div class="qlab">Transcript of the marked turn</div><blockquote class="quote">${esc(it.text)}</blockquote></div>`:""}
+    <fieldset><legend>Who is speaking in the marked turn?</legend><div class="opts">${opts}</div></fieldset>
+    <div class="foot"><label class="l" for="note">Note (optional)</label><textarea id="note">${esc(a.note||"")}</textarea></div>
+  </div>`;
+}
+function render(){
+  resetPlayer();progress();
+  const it=curI();
+  if(!it){
+    $("panel").innerHTML=`<p class="empty">${!claudeOk?"Open this page while signed in to claude.ai to rate turns.":loaded?"No turns have been added yet.":"Loading the turns…"}</p>`;
+    $("prev").disabled=true;$("next").disabled=true;$("nextopen").disabled=true;return;
+  }
+  $("panel").innerHTML=turnHtml(it);plUi();
+  prefetch(it);prefetch(items[cur+1]);prefetch(items[cur+2]);trim();
+  $("prev").disabled=cur<=0;$("next").disabled=false;$("next").textContent=cur>=items.length-1?"Done":"Next";
+  $("nextopen").disabled=false;$("auto").checked=follow;progress();
+}
+function go(i){$("status").textContent="";$("done").textContent="";cur=Math.max(0,Math.min(i,items.length-1));render();window.scrollTo({top:0,behavior:"instant"})}
+function goOpen(){
+  const n=items.length;for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!answered(mine.t[items[i].id])){go(i);return}}
+  $("done").textContent="Every turn is answered.";
+}
+function finish(){
+  flush();
+  const open=items.map((it,i)=>({it,i})).filter(x=>!answered(mine.t[x.it.id]));
+  $("done").innerHTML=open.length
+    ?"Not finished yet. Your answers save as you go, so there is nothing to submit. Still open: "+open.slice(0,30).map(x=>`<button class="link" data-go="${x.i}">${x.i+1}</button>`).join(", ")+(open.length>30?" and "+(open.length-30)+" more":"")+"."
+    :"All turns are answered. Your answers are saved automatically; there is nothing to submit. Thank you.";
+}
+
+/* ---- saving ---- */
+function queueSave(){dirty=true;$("status").textContent="Saving…";clearTimeout(saveTimer);saveTimer=setTimeout(flush,700)}
+function flush(){
+  if(!db||!meId||!dirty||!loaded)return;dirty=false;
+  const body=JSON.parse(JSON.stringify({rater:meId,schema:1,t:mine.t,updated:new Date().toISOString()}));
+  saving=saving.then(()=>db.doc("labels/"+meId).set(body)).then(()=>{$("status").textContent="Saved"}).catch(e=>{
+    $("status").textContent=e&&e.code==="invalid_argument"?"You have view-only access, so your answers can't be saved. Ask the page owner for access.":"Couldn't save just now. Your answers are still on screen; change any answer to retry.";dirty=true;
+  });
+}
+function choose(v){
+  const it=curI();if(!it||!ALAB[v])return;
+  const a=A(it.id);a.a=v;a.ts=new Date().toISOString();
+  const r=$("a-"+v);if(r)r.checked=true;
+  progress();queueSave();
+  if(follow)setTimeout(()=>{if(curI()&&curI().id===it.id){cur<items.length-1?go(cur+1):finish()}},350);
+}
+
+document.addEventListener("click",e=>{
+  const t=e.target,g=t.closest("[data-go]");if(g){go(+g.dataset.go);return}
+  if(t.closest("#pl-play")){if(P.playing)P.audio.pause();else play(null,null);return}
+  if(t.closest("#pl-turn")){playTurnOnly();return}
+  if(t.closest("#pl-rate")){P.rate=RATES[(RATES.indexOf(P.rate)+1)%RATES.length];if(P.audio)P.audio.playbackRate=P.rate;plUi()}
+});
+$("prev").onclick=()=>{if(cur>0)go(cur-1)};
+$("next").onclick=()=>{if(cur<items.length-1)go(cur+1);else finish()};
+$("nextopen").onclick=goOpen;
+document.addEventListener("change",e=>{
+  const t=e.target;
+  if(t.id==="jump"){go(+t.value);return}
+  if(t.id==="auto"){follow=t.checked;try{localStorage.setItem("wis-auto",follow?"1":"0")}catch(err){}return}
+  if(t.type==="radio"&&t.name==="a")choose(t.value);
+});
+document.addEventListener("input",e=>{
+  const t=e.target,it=curI();if(!it)return;
+  if(t.id==="pl-seek"){setPos(+t.value);return}
+  if(t.id==="note"){A(it.id).note=t.value;queueSave()}
+});
+document.addEventListener("keydown",e=>{ // desktop shortcuts; ignored while typing in a text box, a menu or a slider
+  const el=e.target,tag=el.tagName,type=el.type||"";
+  if(tag==="TEXTAREA"||tag==="SELECT"||(tag==="INPUT"&&(type==="text"||type==="range"))||e.metaKey||e.ctrlKey||e.altKey)return;
+  const k=e.key;
+  if(/^[1-5]$/.test(k)){choose(ANS[+k-1][0]);e.preventDefault()}
+  else if(k==="n"||(k==="ArrowRight"&&!(tag==="INPUT"&&type==="radio"))){if(cur<items.length-1)go(cur+1);e.preventDefault()}
+  else if(k==="p"||(k==="ArrowLeft"&&!(tag==="INPUT"&&type==="radio"))){if(cur>0)go(cur-1);e.preventDefault()}
+  else if(k===" "&&tag!=="BUTTON"&&tag!=="INPUT"){if(P.playing)P.audio.pause();else play(null,null);e.preventDefault()}
+  else if(k==="t"){playTurnOnly();e.preventDefault()}
+});
+
+
+/* ---- owner: results ---- */
+async function renderRes(){
+  const ids=all.map(r=>r.rater);let names={};
+  try{names=user&&user.profiles?await user.profiles(ids):{}}catch(e){}
+  const nm=id=>(names[id]&&names[id].name)||"Rater";
+  if(!all.length){$("res").innerHTML=`<p class="empty">No answers yet.</p>`;return}
+  let scored=0,agreed=0,disagreed=0,allCant=0,unanswered=0,twoPlus=0;
+  const dist={};
+  const rows=items.map((it,i)=>{
+    const ans=all.map(r=>((r.t||{})[it.id]||{}).a).filter(v=>ALAB[v]);
+    if(!ans.length){unanswered++;return""}
+    if(ans.length>=2)twoPlus++;
+    const real=ans.filter(v=>v!=="cannot_tell");
+    let verdict;
+    if(!real.length){allCant++;verdict=`<span class="pill none">all cannot tell</span>`}
+    else if(new Set(real).size>1){disagreed++;verdict=`<span class="pill bad">disagree: excluded</span>`}
+    else{scored++;if(ans.length>=2)agreed++;dist[real[0]]=(dist[real[0]]||0)+1;verdict=`<span class="pill ok">${esc(ALAB[real[0]])}</span>`}
+    return `<tr><td class="tok">${i+1} · ${esc(it.id)}</td>${all.map(r=>{const a=(r.t||{})[it.id];return `<td>${a&&ALAB[a.a]?esc(ALAB[a.a]):"—"}${a&&a.note?` <span class="meta">(note)</span>`:""}</td>`}).join("")}<td>${verdict}</td></tr>`;
+  }).join("");
+  $("res").innerHTML=`<h3 style="margin:0">Raters: ${all.length}</h3><p class="meta">${all.map(r=>esc(nm(r.rater))).join(", ")}</p>
+    <p class="meta">Turns with at least one answer: ${items.length-unanswered} of ${items.length}. Answered by two or more raters: ${twoPlus}. <b>Scored</b> (someone gave a real answer and the real answers agree): ${scored}. <b>Excluded for disagreement</b>: ${disagreed}. All "cannot tell": ${allCant}.
+    ${Object.keys(dist).length?"Scored turns by answer: "+Object.entries(dist).map(([k,v])=>esc(ALAB[k])+" "+v).join(", ")+".":""}</p>
+    <details><summary>Every answered turn</summary><div class="table-wrap"><table><thead><tr><th>Turn</th>${all.map(r=>`<th>${esc(nm(r.rater))}</th>`).join("")}<th>Verdict</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+}
+function tab(which){
+  $("tab-rate").setAttribute("aria-selected",which==="rate");$("tab-res").setAttribute("aria-selected",which==="res");
+  $("view-rate").hidden=which!=="rate";$("view-res").hidden=which!=="res";
+  if(which==="res")renderRes();
+}
+$("tab-rate").onclick=()=>tab("rate");$("tab-res").onclick=()=>tab("res");
+render();
+(async()=>{
+  if(!window.claude||!window.claude.use)return;
+  claudeOk=true;render();
+  [db,user]=await Promise.all([claude.use("db"),claude.use("user")]);
+  if(user){try{const me=await user.me();meId=me.id;owner=me.isOwner;$("who").textContent=me.name?("Rating as "+me.name):"";}catch(e){}}
+  if(!db){render();return}
+  if(!meId)$("status").textContent="Sign in to claude.ai to save your answers.";
+  db.collection("turns").onSnapshot(s=>{
+    const num=v=>Number.isFinite(+v)?+v:0;
+    // whitelist: nothing but these fields is ever kept
+    const next=s.docs.filter(d=>d.exists!==false).map(d=>{const x=d.data()||{};
+      return{id:String(x.id??d.id??""),audio:typeof x.audio==="string"?x.audio:"",duration_s:num(x.duration_s),ts:num(x.turn_start_s),te:num(x.turn_end_s),text:typeof x.text==="string"?x.text:""}})
+      .filter(x=>x.id).sort((a,b)=>fnv(a.id)-fnv(b.id)||a.id.localeCompare(b.id)); // a fixed scrambled order: an id that encodes a group leaks nothing
+    const ns=JSON.stringify(next);if(ns===sig)return;
+    const keep=items[cur]&&items[cur].id;sig=ns;items=next;
+    const i=keep?items.findIndex(x=>x.id===keep):-1;cur=i>=0?i:0;render();
+  },()=>{});
+  if(meId){try{const d=await db.doc("labels/"+meId).get();if(d.exists){const b=d.data()||{},t=b.t||{};
+    Object.keys(t).forEach(k=>{mine.t[k]=Object.assign({},t[k],mine.t[k]||{})});render()}}catch(e){}}
+  loaded=true;render();if(dirty)flush();
+  if(owner){$("tabs").hidden=false;
+    db.collection("labels").onSnapshot(s=>{all=s.docs.filter(d=>d.exists!==false).map(d=>d.data());if(!$("view-res").hidden)renderRes()},()=>{});
+  }
+})();
+window.addEventListener("pagehide",flush);
+</script>

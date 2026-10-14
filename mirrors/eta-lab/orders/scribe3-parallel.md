@@ -1,0 +1,6 @@
+# ORDER — scribe3: add to your daytime order (Fable, 22 Sep 07:00)
+Measured: the first window after the memory fix took 248 s (vs a median of 298). Memory wasn't the main cost; it's serial work. The backlog is ~2,300 windows, about 150 worker-hours serial.
+After the daytime env + diarize guard are in:
+1. Concurrency: let the driver keep up to 3 windows in flight (the router has ETA_MAX_INFLIGHT=3), behind a flag/env `ETA_OVERNIGHT_CONCURRENCY` (default 1 = current behaviour). All gates (pressure, latency, canary, stop) apply per submit. Tests for the 1 and 3 cases, including that the canary still counts consecutive no-English across interleaved completions.
+2. Skip noise before ASR: the driver asks the router's /vad (now live, fe7542f) for each candidate window and skips windows with <1.0 s of speech (the Silero keep rule), recording them as skipped_no_speech, not done. Behind env `ETA_OVERNIGHT_VAD_SKIP` (default off). Report how many of the next 50 candidates it would skip (dry-run first).
+3. Commit (new commits), rebuild the bundle, turn both on in the plist, restart. Report the throughput (windows/hour) over the first 30 minutes versus the serial run. ETA-Refuter reviews it afterwards; I'm accepting that order because V wants throughput now.

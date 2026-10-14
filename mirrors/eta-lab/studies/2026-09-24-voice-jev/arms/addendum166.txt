@@ -1,0 +1,15 @@
+## A. Embedding model (replaces 165 C "wespeaker")
+- Margin = cosine in **ECAPA space** (speechbrain/spkrec-ecapa-voxceleb), the same model as the stored centroids.
+- **Doctor with a stored room-mic centroid for that room:** use it; with the multi-centroid rule, take the max over that doctor's centroids.
+- **Doctor without one:** use the 165 profile, built with ECAPA.
+- Runner-up = best other cluster in the window. A missing margin is still DOUBTFUL.
+
+## B. Truth, in priority order (replaces 165 B)
+1. V's existing labels: the split-speaker pilot answers, the V-verified listening clips and the Salanki verified turns. They are mapped to turns by time overlap ≥ 50%.
+2. Speaker counts: V's and Sandhya's counts on the speaker-count page, plus V's V5 counts.
+3. The new "Who is speaking" page: ONLY as a top-up, if (1) gives fewer than 60 labelled doubtful turns. Its size is then set by Fable to the shortfall plus 20%, not a fixed 150.
+
+The blinding rules of 165 are unchanged. vj-data may inventory WHICH turns carry V labels (ids, counts). The label VALUES go only to `~/vj/truth/` for the scorer.
+
+## C. Test-set priority
+Windows from rooms with a stored room-mic centroid come first: OPD 3, OPD 5, OPD 7. Then OPD 4, OPD 6 and Room 4.1, where V's listening clips exist.

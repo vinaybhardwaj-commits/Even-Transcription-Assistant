@@ -1,0 +1,84 @@
+[
+ {
+  "gid": "g008",
+  "anchor_doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "matching_room_days": 6,
+  "members": 8,
+  "members_non_enrolment": 6,
+  "enrolment_sessions_excluded": [
+   "bs_erxhnc58",
+   "bs_p8y8kc9w"
+  ],
+  "cos_min": 0.86,
+  "cos_max": 0.92,
+  "doctors_named_by_timing": 5,
+  "tier_201": "LOW"
+ },
+ {
+  "gid": "g013",
+  "anchor_doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "matching_room_days": 6,
+  "members": 9,
+  "members_non_enrolment": 9,
+  "enrolment_sessions_excluded": [
+   "bs_rjf49y3d"
+  ],
+  "cos_min": 0.6,
+  "cos_max": 0.69,
+  "doctors_named_by_timing": 4,
+  "tier_201": "LOW"
+ },
+ {
+  "gid": "g017",
+  "anchor_doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "matching_room_days": 5,
+  "members": 5,
+  "members_non_enrolment": 5,
+  "enrolment_sessions_excluded": [],
+  "cos_min": 0.72,
+  "cos_max": 0.82,
+  "doctors_named_by_timing": 4,
+  "tier_201": "LOW"
+ },
+ {
+  "gid": "g034",
+  "anchor_doctor_uid": "0q9pSZHR24ysquO6V4Xg",
+  "matching_room_days": 8,
+  "members": 8,
+  "members_non_enrolment": 8,
+  "enrolment_sessions_excluded": [],
+  "cos_min": 0.76,
+  "cos_max": 0.79,
+  "doctors_named_by_timing": 5,
+  "tier_201": "LOW"
+ },
+ {
+  "gid": "g071",
+  "anchor_doctor_uid": "MFTZnXMshE91P7fHnqgX",
+  "matching_room_days": 4,
+  "members": 6,
+  "members_non_enrolment": 4,
+  "enrolment_sessions_excluded": [
+   "bs_m4dkgcku",
+   "bs_zkww73aq"
+  ],
+  "cos_min": 0.89,
+  "cos_max": 0.93,
+  "doctors_named_by_timing": 4,
+  "tier_201": "LOW"
+ },
+ {
+  "gid": "g077",
+  "anchor_doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "matching_room_days": 2,
+  "members": 2,
+  "members_non_enrolment": 2,
+  "enrolment_sessions_excluded": [
+   "bs_rjf49y3d"
+  ],
+  "cos_min": 0.66,
+  "cos_max": 0.67,
+  "doctors_named_by_timing": 1,
+  "tier_201": "MED"
+ }
+]

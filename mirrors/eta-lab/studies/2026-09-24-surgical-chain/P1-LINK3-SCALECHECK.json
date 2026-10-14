@@ -1,0 +1,66 @@
+{
+ "A": [
+  {
+   "pair": "fever/fever",
+   "p": 0.99
+  },
+  {
+   "pair": "knee/knee",
+   "p": 0.98
+  },
+  {
+   "pair": "urine/urine",
+   "p": 0.98
+  },
+  {
+   "pair": "bp/bp",
+   "p": 0.98
+  }
+ ],
+ "B": [
+  {
+   "pair": "fever/urine",
+   "p": 0.02
+  },
+  {
+   "pair": "knee/bp",
+   "p": 0.02
+  },
+  {
+   "pair": "urine/migraine",
+   "p": 0.02
+  },
+  {
+   "pair": "bp/fever",
+   "p": 0.03
+  }
+ ],
+ "C": [
+  {
+   "pair": "cough_cold: own cough_cold vs decoy cough_wheeze",
+   "own": 0.98,
+   "decoy": 0.03
+  },
+  {
+   "pair": "migraine: own migraine vs decoy tension",
+   "own": 0.98,
+   "decoy": 0.02
+  },
+  {
+   "pair": "gastritis: own gastritis vs decoy reflux",
+   "own": 0.99,
+   "decoy": 0.19
+  },
+  {
+   "pair": "back: own back vs decoy sciatica",
+   "own": 0.98,
+   "decoy": 0.03
+  }
+ ],
+ "criteria": {
+  "A_matches_ge_0_70": "4/4",
+  "B_mismatches_le_0_30": "4/4",
+  "C_own_ge_0_50_and_margin_ge_0_15": "4/4",
+  "PASS": true
+ }
+}

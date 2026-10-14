@@ -1,0 +1,8 @@
+#!/bin/zsh
+TMUX=/opt/homebrew/bin/tmux
+[ -x "$TMUX" ] || TMUX=/usr/local/bin/tmux
+$TMUX send-keys -t ETA-Refuter:1.1 C-u; sleep 1
+$TMUX send-keys -t ETA-Refuter:1.1 "URGENT ADDITION to the circularity question you raised about the roster - I found something that may make it concrete and it needs checking BEFORE the enrolment refutation. I queried the room table in our own Neon database. The room v3 measured, room_4ggnkg5x, has the slug opd-5-dr-salanki-wxmp. The room is literally NAMED AFTER THE DOCTOR whose voice the matcher claimed to identify in it. QUESTION: does any path exist by which a room slug or room name reaches the speaker-matching decision, the centroid selection, the candidate clinician list, or anything that narrows which voiceprints a turn is compared against. If the matcher only ever compares an embedding against a set of centroids and the room plays no part in choosing that set, this is harmless coincidence and v3 stands. If the room narrows the candidate set in ANY way - by name, by slug, by a room-to-clinician mapping, by a per-room allowlist - then v3 is partly circular and the 33 of 40 is worth less than I told V. Check room_87frpus9 too, slug opd-3-kjpf, which is NOT named after Dr Animesh - if v2's room gives no such hint and v3's does, that asymmetry is itself informative. Two more facts from the same query you should have: room_day has a doctor_id column and it is NULL in all 106 non-scratch room-days, so nothing has ever populated it; and room_clinician_attestation has 0 rows, so migration 0109 shipped an empty table. Do this first, then the enrolment diff. CAP 200 words."; sleep 2
+$TMUX send-keys -t ETA-Refuter:1.1 Enter; sleep 2
+$TMUX send-keys -t ETA-Refuter:1.1 Enter; sleep 1
+echo sent

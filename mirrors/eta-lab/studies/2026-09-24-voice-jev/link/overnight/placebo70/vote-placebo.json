@@ -1,0 +1,176 @@
+{
+ "real": {
+  "passing": 1,
+  "passing_anchored_correct": 1,
+  "passing_anchored_wrong": 0,
+  "passing_non_anchored": 0,
+  "anchored_plurality_correct": 5,
+  "anchored_total": 6,
+  "anchored_pass_strict": 1
+ },
+ "placebo": {
+  "-pl4": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pl-4": {
+   "passing": 1,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 1,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 1
+  },
+  "-pl5": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pl-5": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pl6": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 1,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pl-6": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pl7": {
+   "passing": 1,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 1,
+   "anchored_plurality_correct": 1,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pl-7": {
+   "passing": 2,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 1,
+   "passing_non_anchored": 1,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 1
+  },
+  "-pd1": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 0,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pd2": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 2,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pd3": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 1,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pd4": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 2,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pd5": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 2,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  },
+  "-pd6": {
+   "passing": 0,
+   "passing_anchored_correct": 0,
+   "passing_anchored_wrong": 0,
+   "passing_non_anchored": 0,
+   "anchored_plurality_correct": 3,
+   "anchored_total": 6,
+   "anchored_pass_strict": 0
+  }
+ },
+ "summary": {
+  "passing": {
+   "real": 1,
+   "placebo_min": 0,
+   "placebo_median": 0.0,
+   "placebo_max": 2,
+   "empirical_p_ge_real": 0.267
+  },
+  "passing_non_anchored": {
+   "real": 0,
+   "placebo_min": 0,
+   "placebo_median": 0.0,
+   "placebo_max": 1,
+   "empirical_p_ge_real": 1.0
+  },
+  "passing_anchored_correct": {
+   "real": 1,
+   "placebo_min": 0,
+   "placebo_median": 0.0,
+   "placebo_max": 0,
+   "empirical_p_ge_real": 0.067
+  },
+  "passing_anchored_wrong": {
+   "real": 0,
+   "placebo_min": 0,
+   "placebo_median": 0.0,
+   "placebo_max": 1,
+   "empirical_p_ge_real": 1.0
+  },
+  "anchored_plurality_correct": {
+   "real": 5,
+   "placebo_min": 0,
+   "placebo_median": 0.5,
+   "placebo_max": 3,
+   "empirical_p_ge_real": 0.067
+  }
+ }
+}

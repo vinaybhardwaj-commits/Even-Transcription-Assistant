@@ -1,0 +1,279 @@
+[
+ {
+  "room_day_id": "rd_djmbtzph",
+  "shape_check_not_accuracy": true,
+  "gate_version": "encounter-clock-gate-v1",
+  "smoother_version": "encounter-clock-smooth-v1",
+  "day_ist": [
+   "08:18",
+   "19:39"
+  ],
+  "chunks_decoded": 137,
+  "chunks_failed": 0,
+  "tape_on": {
+   "stretches": 1,
+   "minutes": 681.7,
+   "gaps_over_5s": 0
+  },
+  "chunk_audio_peak_dbfs_p10_p50_p90": [
+   -23.6,
+   -0.8,
+   2.6
+  ],
+  "transcript_windows": {
+   "placed": 18,
+   "unplaceable": 9
+  },
+  "bridge_unjudged_max_ms": 180000,
+  "tape_off_stretches": 0,
+  "probes": 679,
+  "verdicts": {
+   "speech": 234,
+   "non_speech": 28,
+   "unjudged": 417
+  },
+  "unjudged_fraction": 0.614,
+  "reasons": {
+   "no_transcript_evidence": 413,
+   "speech": 234,
+   "no_text": 27,
+   "dead_mic": 4,
+   "quiet_room": 1
+  },
+  "by_merge_gap": {
+   "2_min": {
+    "closed_by": {
+     "non_speech": 4,
+     "unjudged_gap": 2
+    },
+    "encounters": 6,
+    "total_min": 233.0,
+    "median_min": 29.0,
+    "max_min": 90.0,
+    "share_of_tape_on": 0.342,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   },
+   "3_min": {
+    "closed_by": {
+     "non_speech": 4,
+     "unjudged_gap": 2
+    },
+    "encounters": 6,
+    "total_min": 233.0,
+    "median_min": 29.0,
+    "max_min": 90.0,
+    "share_of_tape_on": 0.342,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   },
+   "5_min": {
+    "closed_by": {
+     "non_speech": 2,
+     "unjudged_gap": 2
+    },
+    "encounters": 4,
+    "total_min": 242.0,
+    "median_min": 72.0,
+    "max_min": 90.0,
+    "share_of_tape_on": 0.355,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   }
+  },
+  "wall_s": 48.1
+ },
+ {
+  "room_day_id": "rd_au3vmzsm",
+  "shape_check_not_accuracy": true,
+  "gate_version": "encounter-clock-gate-v1",
+  "smoother_version": "encounter-clock-smooth-v1",
+  "day_ist": [
+   "09:21",
+   "19:39"
+  ],
+  "chunks_decoded": 124,
+  "chunks_failed": 0,
+  "tape_on": {
+   "stretches": 1,
+   "minutes": 618.4,
+   "gaps_over_5s": 0
+  },
+  "chunk_audio_peak_dbfs_p10_p50_p90": [
+   -34.7,
+   -24.3,
+   -4.4
+  ],
+  "transcript_windows": {
+   "placed": 9,
+   "unplaceable": 7
+  },
+  "bridge_unjudged_max_ms": 180000,
+  "tape_off_stretches": 0,
+  "probes": 616,
+  "verdicts": {
+   "speech": 67,
+   "non_speech": 205,
+   "unjudged": 344
+  },
+  "unjudged_fraction": 0.558,
+  "reasons": {
+   "no_transcript_evidence": 344,
+   "quiet_room": 192,
+   "speech": 67,
+   "no_text": 13
+  },
+  "by_merge_gap": {
+   "2_min": {
+    "closed_by": {
+     "non_speech": 5,
+     "unjudged_gap": 2
+    },
+    "encounters": 7,
+    "total_min": 67.0,
+    "median_min": 8.0,
+    "max_min": 29.0,
+    "share_of_tape_on": 0.108,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   },
+   "3_min": {
+    "closed_by": {
+     "non_speech": 5,
+     "unjudged_gap": 2
+    },
+    "encounters": 7,
+    "total_min": 67.0,
+    "median_min": 8.0,
+    "max_min": 29.0,
+    "share_of_tape_on": 0.108,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   },
+   "5_min": {
+    "closed_by": {
+     "non_speech": 3,
+     "unjudged_gap": 2
+    },
+    "encounters": 5,
+    "total_min": 75.0,
+    "median_min": 10.0,
+    "max_min": 42.0,
+    "share_of_tape_on": 0.121,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   }
+  },
+  "wall_s": 45.5
+ },
+ {
+  "room_day_id": "rd_7g2ytyta",
+  "shape_check_not_accuracy": true,
+  "gate_version": "encounter-clock-gate-v1",
+  "smoother_version": "encounter-clock-smooth-v1",
+  "day_ist": [
+   "06:30",
+   "18:55"
+  ],
+  "chunks_decoded": 140,
+  "chunks_failed": 0,
+  "tape_on": {
+   "stretches": 3,
+   "minutes": 698.3,
+   "gaps_over_5s": 2
+  },
+  "chunk_audio_peak_dbfs_p10_p50_p90": [
+   -11.5,
+   0.8,
+   5.5
+  ],
+  "transcript_windows": {
+   "placed": 15,
+   "unplaceable": 5
+  },
+  "bridge_unjudged_max_ms": 180000,
+  "tape_off_stretches": 2,
+  "probes": 742,
+  "verdicts": {
+   "speech": 161,
+   "non_speech": 52,
+   "unjudged": 529
+  },
+  "unjudged_fraction": 0.713,
+  "reasons": {
+   "no_transcript_evidence": 480,
+   "speech": 161,
+   "no_text": 52,
+   "no_energy_evidence": 49
+  },
+  "by_merge_gap": {
+   "2_min": {
+    "closed_by": {
+     "non_speech": 6,
+     "unjudged_gap": 3
+    },
+    "encounters": 9,
+    "total_min": 165.0,
+    "median_min": 11.0,
+    "max_min": 51.0,
+    "share_of_tape_on": 0.236,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   },
+   "3_min": {
+    "closed_by": {
+     "non_speech": 5,
+     "unjudged_gap": 3
+    },
+    "encounters": 8,
+    "total_min": 168.0,
+    "median_min": 10.5,
+    "max_min": 71.0,
+    "share_of_tape_on": 0.241,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   },
+   "5_min": {
+    "closed_by": {
+     "unjudged_gap": 3,
+     "non_speech": 4
+    },
+    "encounters": 7,
+    "total_min": 172.0,
+    "median_min": 15.0,
+    "max_min": 71.0,
+    "share_of_tape_on": 0.246,
+    "inside_tape_on_share": 1.0,
+    "encounters_bridging_a_tape_gap": 0,
+    "minutes_over_near_silent_chunks": 0.0,
+    "closed_by_end_of_input": 0,
+    "unjudged_min_inside": 0.0
+   }
+  },
+  "wall_s": 45.0
+ }
+]

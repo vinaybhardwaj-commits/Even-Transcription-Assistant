@@ -1,0 +1,10 @@
+[Unit]
+Description=Push new STT/mining artefacts to the eta-lab-results vault (ruling 184)
+
+[Service]
+Type=oneshot
+# stage any old-layout window files not yet backfilled (deterministic, idempotent), then push everything pending
+ExecStartPre=-/usr/bin/python3 %h/.local/share/lab-vault/backfill.py
+ExecStart=/usr/bin/python3 %h/.local/share/lab-vault/vault-push.py --scan
+# exit 1 (pending/rejected) and 3 (conflict) are reported in the ledger/ALERTS.log, not systemd failures
+SuccessExitStatus=0 1 3

@@ -1,0 +1,306 @@
+{
+ "stamps": {
+  "freeze": "b961291ae64c",
+  "addendum165": "9c335c59c5be",
+  "addendum166": "87b8cdac4330",
+  "ruling": "185"
+ },
+ "note": "E-3 Cardiology human-labelled turns (ruling 185): IDENTITIES ONLY for vj-data (no labels, no clip ids). Deduped: 70 labelled clips -> 59 unique turns. Map to production turns by time overlap >= 50% (166 B). Labels are in /srv/vj-truth (vjscore) only.",
+ "turns": [
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979646591,
+   "end_ms": 1789979648633
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979701333,
+   "end_ms": 1789979709333
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979723515,
+   "end_ms": 1789979731515
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979753029,
+   "end_ms": 1789979761029
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979825432,
+   "end_ms": 1789979827474
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979842560,
+   "end_ms": 1789979848230
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789979850441,
+   "end_ms": 1789979854289
+  },
+  {
+   "window_id": "bw_gf2zntnq_1789979400000_primary",
+   "start_ms": 1789980196767,
+   "end_ms": 1789980203669
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191012957,
+   "end_ms": 1789191014509
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191061928,
+   "end_ms": 1789191068172
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191125395,
+   "end_ms": 1789191127032
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191238778,
+   "end_ms": 1789191246034
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191326697,
+   "end_ms": 1789191329937
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191335573,
+   "end_ms": 1789191338340
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191382435,
+   "end_ms": 1789191387902
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191401200,
+   "end_ms": 1789191407174
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191604679,
+   "end_ms": 1789191609741
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191615175,
+   "end_ms": 1789191618027
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191692834,
+   "end_ms": 1789191694673
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191782288,
+   "end_ms": 1789191790135
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789191000000_primary",
+   "start_ms": 1789191802335,
+   "end_ms": 1789191808005
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789201826507,
+   "end_ms": 1789201831165
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789201982449,
+   "end_ms": 1789201984407
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202280782,
+   "end_ms": 1789202285575
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202299581,
+   "end_ms": 1789202304694
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202360719,
+   "end_ms": 1789202362812
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202442428,
+   "end_ms": 1789202445330
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202461024,
+   "end_ms": 1789202466745
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202527849,
+   "end_ms": 1789202529604
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202575285,
+   "end_ms": 1789202578289
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202592734,
+   "end_ms": 1789202595045
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202657297,
+   "end_ms": 1789202660183
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202660824,
+   "end_ms": 1789202662579
+  },
+  {
+   "window_id": "bw_gkzmch9p_1789201800000_primary",
+   "start_ms": 1789202684567,
+   "end_ms": 1789202687554
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053259582,
+   "end_ms": 1790053266366
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053486939,
+   "end_ms": 1790053488660
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053526174,
+   "end_ms": 1790053529819
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053674977,
+   "end_ms": 1790053677205
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053694620,
+   "end_ms": 1790053698737
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053705926,
+   "end_ms": 1790053707597
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053709065,
+   "end_ms": 1790053711832
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790053748789,
+   "end_ms": 1790053751117
+  },
+  {
+   "window_id": "bw_maaacrdh_1790053200000_primary",
+   "start_ms": 1790054010030,
+   "end_ms": 1790054011870
+  },
+  {
+   "window_id": "bw_maaacrdh_1790065800000_primary",
+   "start_ms": 1790065989587,
+   "end_ms": 1790065992034
+  },
+  {
+   "window_id": "bw_maaacrdh_1790065800000_primary",
+   "start_ms": 1790066124739,
+   "end_ms": 1790066126258
+  },
+  {
+   "window_id": "bw_maaacrdh_1790065800000_primary",
+   "start_ms": 1790066445972,
+   "end_ms": 1790066448942
+  },
+  {
+   "window_id": "bw_maaacrdh_1790065800000_primary",
+   "start_ms": 1790066464551,
+   "end_ms": 1790066466492
+  },
+  {
+   "window_id": "bw_maaacrdh_1790065800000_primary",
+   "start_ms": 1790066541990,
+   "end_ms": 1790066544437
+  },
+  {
+   "window_id": "bw_maaacrdh_1790065800000_primary",
+   "start_ms": 1790066686930,
+   "end_ms": 1790066689697
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452160950,
+   "end_ms": 1789452164663
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452170772,
+   "end_ms": 1789452175919
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452175362,
+   "end_ms": 1789452178821
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452190135,
+   "end_ms": 1789452198135
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452260091,
+   "end_ms": 1789452263247
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452294026,
+   "end_ms": 1789452302026
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452309484,
+   "end_ms": 1789452315357
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452318706,
+   "end_ms": 1789452326706
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452383532,
+   "end_ms": 1789452386738
+  },
+  {
+   "window_id": "bw_qjmagw6k_1789452000000_primary",
+   "start_ms": 1789452450812,
+   "end_ms": 1789452455757
+  }
+ ]
+}

@@ -1,0 +1,5 @@
+# RULING — scribe: /vad endpoint + D15 (Fable, 2026-09-21)
+1. /vad: authorised. Add a `/vad` route to the transcription router that runs the existing Silero on posted audio and returns speech spans only (no transcription). Build it on your branch and test it on a SECOND router instance on a spare port. Do NOT restart the production router. Production restart happens only after ETA-Refuter passes the whole gate diff (router + gate + roomEnergyFloor fix). The flag stays default OFF, and `vad_unavailable` stays fail-safe.
+2. D15: the join refusal returns covering pieces by design, so assembling windows locally from those pieces is intended use, not circumvention. It keeps load off the live Mini. Keep doing it. Record the D15 behaviour you rely on (file:line) in your report so the Refuter can check it.
+3. Ledger: see RULING-ledger-markers.md. Your five lines can stay where they are.
+4. When the gate diff is complete, with tests and held-out closed-hours proof plus the clinic-hours cost, report "READY FOR REFUTER" with the branch and commit. I dispatch the Refuter; you don't.

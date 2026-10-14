@@ -1,0 +1,55 @@
+# vj-arms harness: what it reads and writes (vj-arms, 24 Sep 2026)
+
+Run everything on voice-lab-1 in `~/vj/arms` with `.venv/bin/python` (uv venv; ffmpeg via imageio-ffmpeg). Offline check: `python3 tests.py` (24 tests). Whole pipeline on the synthetic fixture: `BACKEND=mock|live ./run_fixture.sh`.
+
+## Inputs the arms need (blinded: no truth in any of them; the runners refuse truth-looking paths and keys)
+- `arm1_in.jsonl` (production's stored output, one line per turn): turn_id, window_id, label (doctor|patient|companion|staff|...), margin, speaker_basis, nemotron_n, pyannote_n, doctor_name. If a `doubtful` field is present it must equal the frozen rule or arm1.py refuses.
+- `cards.jsonl`: turn_id, window_id, doctor_name, card_text (arm 3), raw_text (arm 2). A trailing Q1-Q3 block in the text is stripped; the questions travel separately, verbatim from the freeze.
+- `clips.jsonl` (arm 4): turn_id, window_id, audio_path, turn_start_s, turn_end_s, window_start_s, window_end_s (times within audio_path). For the speaker-count 30 use the rater-facing opaque ids and `public/cw*.mp3` (no turn fields, L2 only): the runners never need key.json.
+## Scorer-only inputs (only score.py and the refuter read these)
+- `truth_turns.jsonl`: turn_id, label (or is_doctor). `human-counts.json`: {window_id: {rater: n} | [n..] | n}. `key.json` (optional, gives arm 1 counts for the speaker-count 30). `windows.jsonl`: window_id, duration_s. `prices.json`: USD per M tokens (all null until Fable supplies).
+## Commands
+arm1.py --in arm1_in.jsonl --out out/arm1.jsonl | arm_jev.py --arm 3|2 --in cards.jsonl --out out/armN.jsonl --arm1 out/arm1.jsonl [--select doubtful+sample] | arm4_gemini.py --in clips.jsonl --out out/arm4.jsonl --arm1 out/arm1.jsonl [--model gemini-3.8-flash] | score.py --arm1 out/arm1.jsonl --truth ~/vj/truth/turn_labels.jsonl --arm3 out/arm3.jsonl ... --rule COMBINE_RULE.md --rule-sha <sha posted before data> [--requery3 FILE] --outdir DIR
+Runs are resumable (rerun skips finished turns). Raw outputs are one JSON line per call; the scorer is deterministic from them.
+
+## Changes from ruling 165 (freeze b961291ae64c + addendum 9c335c59c5be, both stamped on every raw row and in results.json)
+- `arm1_in.jsonl` needs `role` (production speaker role; null or "" allowed, but the key must exist). "clinician" = doctor, anything else or empty = not doctor. arm1.py reports how many not-doctor turns had an empty role.
+- vj-data: the runners need cards (`card_text`, `raw_text`) and clips for every DOUBTFUL turn AND for the confident turns. The confident sample is chosen by `common.select_turns` (seed 24092026, 40 turns from the sorted confident turn ids), so please give cards for all confident turns in the test set (or at least the 150-item page's 40 confident turns plus enough others; the sample is drawn from arm1 rows, and a sampled turn without a card is simply not run and shows up as n < 40).
+- Window ids on the speaker-count 30 must be the cw... ids (they are the keys of human-counts.json).
+- Truth (only score.py reads it): `~/vj/truth/turn_labels.jsonl` as {turn_id, labels:{rater: label}} or {turn_id, rater, label}. Binary, "cannot tell" ignored, disagreement excluded and reported.
+- `--select doubtful+sample` is the default for arm_jev.py / arm4_gemini.py (needs `--arm1`). `--turn-ids FILE` restricts further (the refuter's 20% re-query: write to a different `--out`, then `score.py --requery3 FILE`). `--select all` still exists for a whole-file run.
+- The scorer implements pass bar F1-F5 and stability G. Speaker counts are scored only at >= 20 excerpts with a human count.
+- prices.json filled and marked UNVERIFIED with source URLs (Jev via third-party pages; Gemini API standard tier, not Vertex).
+
+## Changes from ruling 166 (addendum 87b8cdac4330; third hash on every row and in results.json)
+- Truth priority: V's existing labels first (`source: "v_existing"`), the "Who is speaking" page only as a top-up (`source: "who_is_speaking"`). One `~/vj/truth/turn_labels.jsonl`, rows {turn_id, source, labels:{rater: label}}. A turn in several sources uses its highest-priority source. results.json reports usable truth turns per source.
+- The label-to-turn mapping (time overlap >= 50%) is done upstream of the scorer (vj-data inventories, Fable exports values to ~/vj/truth); the scorer only reads finished turn ids.
+- Margins are now ECAPA-space (vj-data). My side only consumes the `margin`, `speaker_basis`, `nemotron_n`, `pyannote_n` fields of arm1_in.jsonl, so nothing changes in the runners.
+- Combine rule is now v3 (`COMBINE_RULE.md`, sha in HASHES.txt). v1 and v2 were never used on real data.
+
+## Changes from rulings 167-170 (orders/RULINGS-FABLE-1835.md, no new addendum hash)
+- 169: the confident sample is the 40 confident items of the "Who is speaking" page, not a random draw. vj-data: give me `page_confident.txt` (one turn_id per line) plus cards/clips for them. Runners: `--select doubtful+page --confident-ids page_confident.txt` (default select is now doubtful+page; the seeded random sample is gone). F4 needs >= 30 confident human-labelled turns run directly; fewer = INSUFFICIENT (status CONTINUE_ONLY when the rest of the bar holds: not adoptable for production).
+- 168: only vj-refuter runs the scorer, `sudo -u vjscore`. Builders' home dirs are not readable by vjscore, so `make_scorer_bundle.sh /srv/vj-score` copies the scorer (python3 stdlib only) to a readable place and prints each file's sha256. Arm outputs the scorer reads must be readable by vjscore, and its --outdir writable by it; the refuter arranges that. I never invoke vjscore.
+- 167, 170: vj-data's side (runner-up, dedupe of page items against V's usable labels). No change to the harness beyond the truth `source` priority already in place.
+- Combine rule is now v4 (sha in HASHES.txt); v1-v3 were never used on real data.
+
+## Changes from rulings 182, 185-188 (orders/RULINGS-FABLE-1835.md; no new addendum hash; combine rule is now v5)
+- 186: CONFIDENT = margin >= 0.10 AND best >= 0.50 (best = cosine to the room-day doctor's VERIFIED centroid). arm1_in.jsonl must now carry `best` as well as `margin` (null allowed, but the key is required; arm1.py refuses a missing key). A missing best or margin is DOUBTFUL. The scorer still cross-checks any `doubtful` flag from vj-data against this rule.
+- 185: new truth source tag `e3_recovered` (the 70 recovered E-3 Cardiology turns, {turn_id, source, is_doctor}). Truth priority is v_existing, then e3_recovered, then who_is_speaking, taking the highest-priority source that has a usable answer. The E-3 values go to /srv/vj-truth only; vj-data gives me ids and times, never labels.
+- 188: the confident sample is now every CONFIDENT turn with usable human truth from any source (pilot, E-3, page), not only the page's 40. vj-data: one file `confident_labelled_ids.txt` (ids only) for `--confident-ids`, plus cards/clips for them. F4 still needs >= 30 of them run directly.
+- 182, 187: vj-data / vj-link / refuter business; no harness change. If no centroid passes the controls, every margin is missing and every turn is DOUBTFUL: the harness handles that as is.
+
+## Changes from rulings 214, 215 (combine rule is now v6)
+- 214: the +22 not-doctor turns from voice-verified single-doctor rooms are tagged `vpilot_voice_verified` in the truth file (vj-refuter applies them). Every result is reported with and without that source: results.json top level = with all sources, `without_vpilot_voice_verified` = without; SUMMARY.md and SUMMARY_without_vpilot.md. Source priority: v_existing, e3_recovered, vpilot_voice_verified, who_is_speaking.
+- 215: F2 uses population-weighted doubtful accuracy (weights = production role shares among ALL doubtful turns in the arm 1 file, role null/"" = "empty") and needs >= 5 pp with the unweighted difference > 0; F3 (exact McNemar) stays on the paired, unweighted sample. Both are in results.json (gain_pp_weighted next to gain_pp, plus the weights and any role with no labelled turn). The arm 1 file must therefore include EVERY doubtful turn of the test sets, labelled or not, and its `role` values are the weights' strata.
+
+## Real run status and changes from vj-refuter #1067 (combine rule is now v7)
+- F2 weights are PINNED: score.py takes `--role-weights ../data/role_shares_doubtful.json` (key `all_pool_doubtful`, distinct production turns: clinician 0.1017 / empty 0.8983) and stamps the file, its sha and the shares in results.json (`f2_role_weights_source`) and the summary line. Without the flag the weights are recomputed from arm1_in and flagged NOT PINNED (arm1_in has per-context turn ids, clinician 0.0989).
+- Real-data inputs live in `~/vj/arms/inputs/` (copy of vj-data's ~/eta-data/vj/handoff, PHI, mode 700); raw outputs in `~/vj/arms/out/real/{arm1,arm2,arm3,arm4}.jsonl`. Runs resume per turn and re-run a turn whose card or clip changed (input_sha12), so a regenerated hand-off only re-runs what changed.
+- `run_requery.sh IDS_FILE OUTDIR` (for vj-refuter ONLY, ruling 248; needs VJ_REFUTER=1, ruling 165 G): re-asks arms 2, 3, 4 at temperature 0 on the turn ids you choose (your random 20% of the scored doubtful turns; I do not know the truth), into fresh files; then `score.py ... --requery2/3/4 OUTDIR/armN.jsonl`. `BACKEND=mock` for an offline check.
+- Raw output files are append-only. A regenerated hand-off re-runs changed turns and leaves rows for turn ids that no longer exist (vj-data's re-render changed some ids); the scorer keeps the LAST row per turn_id and only looks at truth turns, so orphans are harmless. Coverage check on the 21:42 hand-off (1,723 cards): arms 2 and 3 have a current (input_sha12 matches), error-free final row for 1,723/1,723.
+- Stale rows (vj-refuter #1114): scoring should pass `--cards inputs/cards.jsonl`. The scorer then keeps only the LAST row per turn (or per L2 window) for turns/windows on the current cards; everything else is `stale_rows_excluded` and does not count toward cost, time, missing or accuracy. `split_stale.py --cards inputs/cards.jsonl out/real/armN.jsonl ...` moves stale rows to `armN.jsonl.stale.jsonl` (append-only, nothing deleted); run it only while that arm is not writing. Without `--cards` the arm 1 file's ids define "current" and results.json says so (`current_run_defined_by`).
+
+## Ruling 290 (E3X pseudo-turns; refuter #1541)
+- E3X turns have no production row, so they must NOT enter arm1_in.jsonl (they would be scored with a fabricated arm-1 "not doctor"). Hand them off separately (e.g. e3x_in.jsonl: turn_id, window_id, s, e) with cards/clips in the normal cards.jsonl / clips.jsonl, and give me their ids in a text file.
+- Runners: `--extra-ids e3x_ids.txt` runs arms 2/3/4 on turns that have NO arm 1 row (ids that are in arm 1 follow the normal selection). `arm1.py` and `score.py` both refuse any arm-1 row with `production_row: false`, so the mistake cannot pass silently. No scorer or rule change (combine rule v7 unchanged). vj-refuter scores E3X as its own descriptive stratum.

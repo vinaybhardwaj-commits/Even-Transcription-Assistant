@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.eta-lab.lab-sshd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/sbin/sshd</string>
+    <string>-D</string>
+    <string>-e</string>
+    <string>-f</string>
+    <string>/Users/vinaybhardwaj/.ssh/lab-sshd/sshd_config</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/lab-sshd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/lab-sshd.log</string>
+</dict>
+</plist>

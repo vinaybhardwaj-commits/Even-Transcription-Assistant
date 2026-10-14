@@ -1,0 +1,114 @@
+{
+ "run_id": "run-2026-09-24-060903-nemotron-13537f4e",
+ "trainer": "train_nemotron.py",
+ "base_model": "nvidia/Nemotron-3-Diarization",
+ "base_model_snapshot": "f667ed73aee57d40cc39428eb768b4fd87a0a29e",
+ "base_model_nemo_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+ "dataset_id": "diar-train-clean-2026-09-24-13537f4e",
+ "train_n": 116,
+ "val_n": 34,
+ "val_holdout_room_day": null,
+ "skipped_windows": [
+  [
+   "bw_xd6gt5sp_1790131500000_primary",
+   "9 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790157600000_primary",
+   "17 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790156700000_primary",
+   "11 speakers"
+  ],
+  [
+   "bw_7tedad86_1790136900000_primary",
+   "9 speakers"
+  ]
+ ],
+ "excluded_test_room_days": [
+  "rd_3629fkar",
+  "rd_5b5kmjeq",
+  "rd_7g2ytyta",
+  "rd_93tcdc4c",
+  "rd_au3vmzsm",
+  "rd_djmbtzph",
+  "rd_f4hzv5sj",
+  "rd_jqj96amk",
+  "rd_kp4c7pp6",
+  "rd_m4rft4fy",
+  "rd_sp5dezef",
+  "rd_tcqaam5c",
+  "rd_u579utrq",
+  "rd_vc28prfr",
+  "rd_yhh6kexm"
+ ],
+ "val_room_days": [
+  "rd_4fsw6f6y",
+  "rd_xrn7wjsf",
+  "rd_yck5kdc2"
+ ],
+ "train_room_days": [
+  "rd_7usy23ex",
+  "rd_9q4u73rr",
+  "rd_aeeu5u4j",
+  "rd_errdkjhe",
+  "rd_ntajfras",
+  "rd_pw5gaugg",
+  "rd_qjw6srbs",
+  "rd_tp4hcf8s",
+  "rd_u6kdhc3b"
+ ],
+ "manifest_counts": {
+  "source": 173,
+  "excluded": 19,
+  "train": 120,
+  "val": 34
+ },
+ "max_steps": 300,
+ "lr": 2e-06,
+ "warmup_steps": 20,
+ "batch_size": 4,
+ "session_len_sec": 300,
+ "seed": 42,
+ "precision": "bf16-mixed",
+ "nemo_speech_commit": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+ "git_sha": "probe",
+ "env_versions": {
+  "torch": "2.14.0",
+  "lightning": "2.4.0",
+  "nemo-toolkit": "3.1.0+cf724ac33",
+  "numpy": "2.5.3"
+ },
+ "started_at": "2026-09-24T06:09:03Z",
+ "status": "FAILED",
+ "reason": "OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 22.03 GiB of which 18.00 MiB is free. Process 94460 has 2.04 GiB memory in use. Including non-PyTorch memory, this process has 19.96 GiB memory in use. Of the allocated memory 19.69 GiB is allocated by PyTorch, and 14.96 MiB is reserved by PyTorch but unallocated.",
+ "metrics": {},
+ "best_val_metric": "val_count_mae_vs_teacher",
+ "best_val_score": null,
+ "best_step": 0,
+ "stop_reason": "max_steps",
+ "count_curve": [
+  {
+   "step": 0,
+   "val_count_mae_vs_teacher": 0.7647,
+   "val_count_bias": 0.3529,
+   "v5_count_mae_vs_V": 0.4,
+   "v5_counts": [
+    5,
+    7,
+    4,
+    3,
+    4
+   ]
+  }
+ ],
+ "count_selection_note": "best checkpoint = lowest val-window count error vs teacher; V5 counts are logged per checkpoint but NOT used to select or stop",
+ "last_nemo_path": null,
+ "last_nemo_sha256": null,
+ "last_weights_sha256": null,
+ "best_nemo_path": null,
+ "best_nemo_sha256": null,
+ "best_weights_sha256": null,
+ "checkpoint_r2_key": null
+}

@@ -1,0 +1,42 @@
+--- /tmp/capbase/cap_link.py	2026-09-27 07:52:14.292170298 +0530
++++ cap_link.py	2026-09-27 07:52:40.452560435 +0530
+@@ -12,11 +12,14 @@
+ """
+ import csv, collections, datetime as dt, difflib, glob, json, math, os, re, sys
+ HOME = os.path.expanduser("~/eta-data/")
+-OUT = HOME + "cap/2026-09-25/"
+-RAW = HOME + "cap/raw/"
++DAY = os.environ.get("CAP_DAY", "2026-09-25"); TAG = os.environ.get("CAP_TAG", "")     # W33.4b: the day is a parameter; 25 Sep with no tag is exactly CAP-1 (paths unchanged)
++if DAY == "2026-09-25" and not TAG:
++    OUT, RAW, ROWS = HOME + "cap/2026-09-25/", HOME + "cap/raw/", HOME + "encounter-truth/rows.csv"
++else:
++    OUT, RAW, ROWS = HOME + f"cap/{DAY}{TAG}/", HOME + f"cap/raw-{DAY}{TAG}/", HOME + f"cap/{DAY}{TAG}/rows.csv"
+ METRIC = "frac"            # "frac" = matched idf / total idf of the level's terms; "sum" = matched idf (absolute)
+ USE_HUB_TEXT = False        # tried on 26 Sep (complaint + history + examination text of the same Rx): NO gain; kept OFF, see CAP-1-DESIGN.md D3
+-DAY = "2026-09-25"; IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
++IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+ MIN_SPEECH_S = 20.0          # a room is a candidate for a consult only if it has at least this much speech inside the consult span
+ PAD_S = 30.0                 # consult span = called_at - PAD .. completed_at + PAD
+ SHIFTS_MIN = (-150, -90, 90, 150)
+@@ -48,7 +51,11 @@
+ 
+ def load_windows():
+     """One record per (room, window): the first ok record by file time (hist-bulk tier C, 25 Sep)."""
+-    files = sorted(glob.glob(HOME + "hist/runs/hist-bulk-20260925T*/*/2026-09-25/c-2026-09-25_*.json"), key=os.path.getmtime)
++    if DAY == "2026-09-25":
++        runs = ["hist-bulk-20260925T*"]                                                   # CAP-1: the runs started on the day
++    else:
++        d = dt.date.fromisoformat(DAY); runs = [f"hist-bulk-{x.strftime('%Y%m%d')}T*" for x in (d, d + dt.timedelta(days=1))]     # W33.4b: the day's runs and the next day's (evening windows)
++    files = sorted((f for r in runs for f in glob.glob(HOME + f"hist/runs/{r}/*/{DAY}/c-{DAY}_*.json")), key=os.path.getmtime)
+     got = {}
+     for f in files:
+         try:
+@@ -113,7 +120,7 @@
+ 
+ def merged_consults():
+     """One row per consult TOKEN: span = earliest called_at .. latest completed_at; the Rx uids are the union (eta-refuter-2 #3491.2)."""
+-    rows = [r for r in csv.DictReader(open(HOME + "encounter-truth/rows.csv")) if r["day"] == DAY and r["completed_at"]]
++    rows = [r for r in csv.DictReader(open(ROWS)) if r["day"] == DAY and r["completed_at"]]
+     by = collections.OrderedDict()
+     for r in rows:
+         m = by.setdefault(r["token_uid"], dict(token_uid=r["token_uid"], called=[], completed=[], rx=set(), steps=0))

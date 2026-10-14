@@ -1,0 +1,680 @@
+=== HEAD ===
+5c184ea merge: VAD starvation + route-metrics truth (8d6b6e8) — route_outcome carries windows_total/windows_skipped so partial starvation is on the row
+bbaba3b merge: MEX 0.8.2 setup (a969ff3) — telemetry off, Claude Code skills, code graph built; wiki synthesis deferred
+b5c29fe merge: Jev Arm D J1–J3 (5a6fa45) — refuted PASS by Opus after two rounds (F1–F8), 3113 tests incl. 0106/0107 proof on postgres:16; bench-only, J4 not run
+5a6fa45 docs(jev): record D1b clearance as a dated citation of V's words; restore the governance rule
+2485243 Refuter fixes F2-F8 for ETA-JEV-ARM-D (J1-J3), plus F1 doc reconciliation
+8d6b6e8 The job-path test asserts the sub-window counts, partial case included
+=== STATUS ===
+?? docs/handoff/ETA-CLAIM-TTL-OVERLAP-SURVEY-17-SEP-2026.md
+?? docs/handoff/ETA-JEV-THREAD-HANDOFF-19-SEP-2026.md
+?? docs/handoff/ETA-OVERLAPPING-WRITERS-P1-BUILD-REPORT-18-SEP-2026.md
+?? docs/handoff/ETA-OVERLAPPING-WRITERS-PRD-18-SEP-2026.md
+=== BRANCH ===
+vinay/s1-auto-drain
+=== DIFFSTAT ===
+ lib/jobs/kinds/route-transcribe.ts         |  17 ++-
+ lib/room-day/admin.ts                      |  17 +++
+ lib/stt/adapters/route.ts                  |   8 ++
+ lib/stt/eta-router.ts                      |  11 ++
+ lib/stt/room-drain.ts                      |   6 +-
+ lib/stt/route-run.ts                       | 136 ++++++++++++++++++++++-
+ lib/stt/types.ts                           |   8 ++
+ tests/unit/route-metrics-truth.test.ts     | 168 +++++++++++++++++++++++++++++
+ tests/unit/vad-starvation-job-path.test.ts | 152 ++++++++++++++++++++++++++
+ 9 files changed, 516 insertions(+), 7 deletions(-)
+=== FULLDIFF ===
+diff --git a/lib/jobs/kinds/route-transcribe.ts b/lib/jobs/kinds/route-transcribe.ts
+index 18a5519..e1098ef 100644
+--- a/lib/jobs/kinds/route-transcribe.ts
++++ b/lib/jobs/kinds/route-transcribe.ts
+@@ -32,7 +32,7 @@ import { signGetUrl } from "@/lib/r2";
+ import { headObject } from "@/lib/r2";
+ import { adapterFor } from "@/lib/stt/registry";
+ import { ROUTE_ADAPTER_KEY } from "@/lib/stt/adapters/route";
+-import { buildRouteMetrics, charsPerAudioSecond } from "@/lib/stt/route-run";
++import { buildRouteMetrics, charsPerAudioSecond, readEngineOutcome } from "@/lib/stt/route-run";
+ import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext } from "../types";
+ import { jobError } from "../errors";
+ 
+@@ -167,7 +167,8 @@ async function pollStep(ctx: StepContext) {
+         router_sec: Math.round(r.latencyMs / 1000),
+         dominant_language: r.language ?? null,
+         translated: english.length > 0,
+-      });
++      }, r.routerOutcome ?? undefined);
++      const outcome = readEngineOutcome(metrics);
+       const timeline = metrics.language_timeline as { span_count: number; engine_mix: Record<string, number>; language_mix: Record<string, number>; chars: number };
+ 
+       // POINTERS AND COUNTS ONLY — no transcript text in the result, exactly as Slice B's rule
+@@ -181,9 +182,15 @@ async function pollStep(ctx: StepContext) {
+         language_mix: timeline.language_mix,
+         dominant_language: r.language ?? null,
+         chars_per_audio_second: charsPerAudioSecond(chars, audioSeconds),
+-        // `empty_transcript` on the whisper path is a FACT ABOUT THE ROOM, not a failure, and the
+-        // same reasoning holds here: a quiet window read correctly is a success with zero chars.
+-        silent_window: chars === 0,
++        // A QUIET ROOM AND AN UNHEARD ONE ARE NOT THE SAME CLAIM, and `chars === 0` alone cannot
++        // tell them apart — it was true of both. When the router says which happened, that answer
++        // decides: only `engine_no_text` is a window we listened to and found quiet. `no_engine`
++        // never becomes `silent_window`, because nothing listened.
++        //
++        // When the router says nothing (every reply before it learned to), the old rule still
++        // applies — NAMED as the legacy fallback it is, rather than left looking like a verdict.
++        silent_window: outcome.known ? outcome.outcome === "engine_no_text" : chars === 0,
++        engines_skipped: outcome.known ? outcome.skipped : null,
+         polls,
+         router_sec: Math.round(r.latencyMs / 1000),
+       });
+diff --git a/lib/room-day/admin.ts b/lib/room-day/admin.ts
+index 963bc7c..b4553ff 100644
+--- a/lib/room-day/admin.ts
++++ b/lib/room-day/admin.ts
+@@ -31,6 +31,7 @@
+ import { sql } from "@/lib/db";
+ import { emotionEnabled, canSurfaceEmotion } from "@/lib/emotion/gate";
+ import { AUTO_DRAIN_MAX_AGE_HOURS } from "@/lib/stt/auto-drain";
++import { readEngineOutcome } from "@/lib/stt/route-run";
+ 
+ // ===========================================================================
+ // Constants
+@@ -118,6 +119,15 @@ export type TapeSlot =
+           language_mix: Record<string, number> | null;
+           latency_ms: number | null;
+           error: string | null;
++          /**
++           * Did an engine ever RUN on this window? "unknown" is a real answer and the only honest
++           * one for every row written before the router learned to say — it is NOT the same as
++           * `ran`, and the tape must not render it as one. `skipped` is a window nobody listened
++           * to; `ran` is a window that was listened to, whatever it turned out to contain.
++           */
++          engines: "skipped" | "ran" | "unknown";
++          /** The router's own words for it (`silent_skipped`, `no_engine`), when it said any. */
++          engines_detail: string | null;
+         } | null;
+         diarize: {
+           state: string;
+@@ -488,6 +498,7 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
+       .sort((a, b) => a.start_ms - b.start_ms);
+ 
+     const metrics = transcriptRow?.metrics_json ?? {};
++    const engineReading = readEngineOutcome(metrics);
+     const languageTimeline = (metrics.language_timeline ?? null) as Record<string, unknown> | null;
+ 
+     return {
+@@ -517,6 +528,12 @@ export function assembleTape(input: AssembleTapeInput): RoomDayTape {
+               language_mix: (languageTimeline?.language_mix as Record<string, number> | undefined) ?? null,
+               latency_ms: transcriptRow.latency_ms,
+               error: transcriptRow.error,
++              // Read through the union, never from `text === ""`: that test is the one that could
++              // not tell "we never looked" from "we listened and the room was quiet".
++              engines: engineReading.known ? (engineReading.skipped ? "skipped" : "ran") : "unknown",
++              engines_detail: engineReading.known
++                ? (engineReading.outcome ?? engineReading.status ?? null)
++                : null,
+             }
+           : null,
+         diarize: diarizeRow
+diff --git a/lib/stt/adapters/route.ts b/lib/stt/adapters/route.ts
+index a67125e..8e432c4 100644
+--- a/lib/stt/adapters/route.ts
++++ b/lib/stt/adapters/route.ts
+@@ -93,6 +93,14 @@ export function toSttResult(r: RouterResult, latencyMs: number): SttTranscribeRe
+     costUsd: 0,
+     engineVersion: null,
+     languageTimeline: Array.isArray(r.language_timeline) ? r.language_timeline : null,
++    // Carried VERBATIM and no further. This adapter does not decide what an outcome MEANS; it only
++    // stops throwing away the sentence in which the router said it, which is what left the corpus
++    // unable to tell "never heard" from "heard nothing".
++    routerOutcome: {
++      status: (r as Record<string, unknown>).status,
++      segmentation: (r as Record<string, unknown>).segmentation,
++      outcome: (r as Record<string, unknown>).outcome,
++    },
+     error: null,
+   };
+ }
+diff --git a/lib/stt/eta-router.ts b/lib/stt/eta-router.ts
+index f3e6998..0f39e16 100644
+--- a/lib/stt/eta-router.ts
++++ b/lib/stt/eta-router.ts
+@@ -70,6 +70,17 @@ export type RouterJobStatus = {
+   transcript_native?: string;
+   transcript_english?: string;
+   segments?: unknown;
++  /**
++   * THE DRAIN'S TRANSPORT IS THIS ONE, and until 19 Sep these two fields did not exist on it.
++   *
++   * `/route` answered with `status` and `segmentation` from the start; `run_job` built its own
++   * reply out of a fixed key set that had neither, so a starved ROOM window — which only ever
++   * reaches the router through run_job — still stored as a clean empty success however well the
++   * synchronous path reported itself. The router now aggregates both across a job's sub-windows
++   * (`job_verdict`), and they are declared here so the poll path is typed rather than cast.
++   */
++  status?: string | null;
++  segmentation?: unknown;
+   sec?: number;
+   error?: string;
+ };
+diff --git a/lib/stt/room-drain.ts b/lib/stt/room-drain.ts
+index 3dd533d..f52de54 100644
+--- a/lib/stt/room-drain.ts
++++ b/lib/stt/room-drain.ts
+@@ -1101,7 +1101,11 @@ export async function writeRoutedRun(
+            // Slice C1 step 3 — the router's per-span timeline, VERBATIM, under one key. Spread
+            // conditionally so a run by any other engine is byte-identical to what it wrote before:
+            // nine adapters return no timeline and must not acquire an empty one.
+-           ...(asr.languageTimeline ? buildRouteMetrics(asr.languageTimeline) : {}),
++           // The timeline as before, and beside it the router's outcome — re-derived from THIS
++           // reply on every write, so a regenerated run can never inherit a previous verdict.
++           ...(asr.languageTimeline || asr.routerOutcome
++             ? buildRouteMetrics(asr.languageTimeline ?? [], {}, asr.routerOutcome ?? undefined)
++             : {}),
+          })}::jsonb, NOW(),
+          ${opts.actor}, ${opts.via}, ${engineVersion},
+          ${receipt.audio_r2_key}, ${receipt.audio_byte_start}, ${receipt.audio_byte_end},
+diff --git a/lib/stt/route-run.ts b/lib/stt/route-run.ts
+index fe5fdc0..f70bc9b 100644
+--- a/lib/stt/route-run.ts
++++ b/lib/stt/route-run.ts
+@@ -54,7 +54,15 @@ export function normaliseSpan(raw: unknown): RouteSpan | null {
+  * unnest every timeline to count engines pays for the whole history on every question. The spans
+  * stay for the cases where the detail matters.
+  */
+-export function buildRouteMetrics(timeline: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
++export function buildRouteMetrics(
++  timeline: unknown,
++  extra: Record<string, unknown> = {},
++  /**
++   * The router's own account of WHETHER IT RAN, as opposed to what it heard. Optional so every
++   * existing caller compiles and keeps writing exactly the keys it wrote before.
++   */
++  router?: RouterOutcomeInput,
++): Record<string, unknown> {
+   const spans = Array.isArray(timeline) ? timeline.map(normaliseSpan).filter((s): s is RouteSpan => s !== null) : [];
+   const engineMix: Record<string, number> = {};
+   const langMix: Record<string, number> = {};
+@@ -76,6 +84,132 @@ export function buildRouteMetrics(timeline: unknown, extra: Record<string, unkno
+       chars,
+       ...extra,
+     },
++    // SPREAD LAST, DELIBERATELY. A regenerated run must re-derive this from the reply in hand; a
++    // stale record arriving through `extra` must never survive into the new row (requirement 4).
++    ...buildRouteOutcome(router),
++  };
++}
++
++// ---------------------------------------------------------------------------
++// "Never heard" is not "heard nothing"
++// ---------------------------------------------------------------------------
++
++/**
++ * The key `metrics_json` carries the router's outcome under. A SIBLING of `language_timeline`,
++ * never a field inside it: `language_timeline` is read by the tripwires and by scribe_stt_runs, and
++ * this change is additive by construction — no existing key is removed, renamed or re-typed.
++ */
++export const ROUTE_OUTCOME_KEY = "route_outcome";
++
++/** The router's three distinct answers. Anything else it says is carried verbatim and not mapped. */
++export type RouteOutcome = "no_engine" | "engine_no_text" | "engine_text";
++
++/** The one status string that means the router declined to call any engine at all. */
++export const ROUTE_STATUS_SKIPPED = "silent_skipped";
++
++export type RouterOutcomeInput = {
++  /** The router's `status`, verbatim. */
++  status?: unknown;
++  /** The router's `segmentation` block, verbatim — `n_engine_segments` is read from it. */
++  segmentation?: unknown;
++  /** The router's `outcome`, verbatim. */
++  outcome?: unknown;
++};
++
++export type RouteOutcomeRecord = {
++  outcome: RouteOutcome | null;
++  status: string | null;
++  n_engine_segments: number | null;
++  /**
++   * SUB-WINDOW GRANULARITY, and the reason it is here rather than left on the floor.
++   *
++   * A job splits its clip into sub-windows and calls an engine per sub-window. If one transcribes
++   * and four starve, the JOB is honestly `engine_text` and `engines_skipped: false` — and those two
++   * fields, alone, would say the window is fine. These two numbers are the only thing on the row
++   * that says four fifths of it was never heard, and they are what a rebuild needs in order to
++   * re-run the four rather than the whole job. Null on the synchronous path, which has no
++   * sub-windows to count.
++   */
++  windows_total: number | null;
++  windows_skipped: number | null;
++  /**
++   * TRUE only when the router SAYS no engine ran — `status === "silent_skipped"` or
++   * `outcome === "no_engine"`. It is NEVER derived from an empty transcript, a zero span count or
++   * zero spoken seconds, because those are equally what a room that was genuinely quiet produces,
++   * and conflating them is the whole defect this key exists to end.
++   */
++  engines_skipped: boolean;
++};
++
++const isOutcome = (v: unknown): v is RouteOutcome =>
++  v === "no_engine" || v === "engine_no_text" || v === "engine_text";
++
++/**
++ * PURE. The outcome record, or NOTHING AT ALL when the router said nothing.
++ *
++ * Emitting no key is what makes an older row readable as "unknown" rather than as a confident
++ * `false`. A run by any other engine, and every row written before this change, therefore carries
++ * no `route_outcome` and reads as unknown for ever — which is the honest answer about them.
++ */
++export function buildRouteOutcome(router?: RouterOutcomeInput): Record<string, unknown> {
++  if (!router) return {};
++  const status = typeof router.status === "string" && router.status.trim() !== "" ? router.status.trim() : null;
++  const outcome = isOutcome(router.outcome) ? router.outcome : null;
++  const seg = router.segmentation && typeof router.segmentation === "object" && !Array.isArray(router.segmentation)
++    ? (router.segmentation as Record<string, unknown>)
++    : null;
++  const nEngineSegments = num(seg?.n_engine_segments);
++  const windowsTotal = num(seg?.windows_total);
++  const windowsSkipped = num(seg?.windows_skipped);
++  if (status === null && outcome === null && nEngineSegments === null && windowsTotal === null && windowsSkipped === null) {
++    return {};
++  }
++  const record: RouteOutcomeRecord = {
++    outcome,
++    status,
++    n_engine_segments: nEngineSegments,
++    windows_total: windowsTotal,
++    windows_skipped: windowsSkipped,
++    engines_skipped: status === ROUTE_STATUS_SKIPPED || outcome === "no_engine",
++  };
++  return { [ROUTE_OUTCOME_KEY]: record };
++}
++
++/**
++ * What a reader gets back. THE UNKNOWN IS A SHAPE, NOT A FALSE — a caller cannot accidentally treat
++ * "we have no idea" as "engines ran", because there is no `skipped` field to read until `known` is
++ * true. That is requirement 3, enforced by the type rather than by everyone remembering it.
++ */
++export type EngineOutcomeReading =
++  | {
++      known: true;
++      skipped: boolean;
++      outcome: RouteOutcome | null;
++      status: string | null;
++      n_engine_segments: number | null;
++      /** How many of the job's sub-windows there were, and how many no engine ever ran on. */
++      windows_total: number | null;
++      windows_skipped: number | null;
++    }
++  | { known: false };
++
++/** PURE. Read a stored `metrics_json`. Absent or malformed record => unknown, never a guess. */
++export function readEngineOutcome(metrics: unknown): EngineOutcomeReading {
++  const m = metrics && typeof metrics === "object" && !Array.isArray(metrics)
++    ? (metrics as Record<string, unknown>)
++    : null;
++  const raw = m?.[ROUTE_OUTCOME_KEY];
++  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { known: false };
++  const r = raw as Record<string, unknown>;
++  if (typeof r.engines_skipped !== "boolean") return { known: false };
++  return {
++    known: true,
++    skipped: r.engines_skipped,
++    outcome: isOutcome(r.outcome) ? r.outcome : null,
++    status: typeof r.status === "string" ? r.status : null,
++    n_engine_segments: num(r.n_engine_segments),
++    windows_total: num(r.windows_total),
++    windows_skipped: num(r.windows_skipped),
+   };
+ }
+ 
+diff --git a/lib/stt/types.ts b/lib/stt/types.ts
+index 52b8738..acf2999 100644
+--- a/lib/stt/types.ts
++++ b/lib/stt/types.ts
+@@ -47,6 +47,14 @@ export interface SttTranscribeResult {
+    * thing this field exists to record. It is copied, never rebuilt.
+    */
+   languageTimeline?: unknown[] | null;
++  /**
++   * The router's own account of WHETHER IT RAN — `status`, `segmentation`, `outcome`, verbatim.
++   *
++   * OPTIONAL for the same reason `languageTimeline` is: nine adapters have no such concept and must
++   * not grow one to admit a tenth's. An engine that says nothing leaves this absent, and absent
++   * reads as "unknown" downstream — never as "engines ran".
++   */
++  routerOutcome?: { status?: unknown; segmentation?: unknown; outcome?: unknown } | null;
+   error: string | null;
+ }
+ 
+diff --git a/tests/unit/route-metrics-truth.test.ts b/tests/unit/route-metrics-truth.test.ts
+new file mode 100644
+index 0000000..97992d9
+--- /dev/null
++++ b/tests/unit/route-metrics-truth.test.ts
+@@ -0,0 +1,168 @@
++/**
++ * tests/unit/route-metrics-truth.test.ts — "never heard" is not "heard nothing".
++ *
++ * The router reports three outcomes (no_engine / engine_no_text / engine_text). The app used to
++ * store only the engine-output spans, so a window nobody transcribed and a window transcribed to
++ * silence both arrived as an empty transcript with `span_count: 0`, and every reader that wanted
++ * to know which had to guess from emptiness. Measured on the live corpus before this change: 112
++ * route runs, 0 carrying any outcome key, and 20 of them with both zero spans and zero characters
++ * — the exact rows the guess was wrong about.
++ */
++import { describe, it, expect } from "vitest";
++import {
++  buildRouteMetrics,
++  buildRouteOutcome,
++  readEngineOutcome,
++  ROUTE_OUTCOME_KEY,
++  ROUTE_STATUS_SKIPPED,
++  type RouteOutcomeRecord,
++} from "@/lib/stt/route-run";
++
++const recordOf = (m: Record<string, unknown>) => m[ROUTE_OUTCOME_KEY] as RouteOutcomeRecord;
++
++/** One engine span, the shape `language_timeline` carries. */
++const SPAN = { start_s: 1, end_s: 4.5, lang: "en", engine: "whisper", chars: 42 };
++
++describe("the three outcomes reach metrics_json", () => {
++  it("NO_ENGINE: nothing ran, and the row says so rather than looking empty", () => {
++    const m = buildRouteMetrics([], {}, {
++      status: ROUTE_STATUS_SKIPPED,
++      outcome: "no_engine",
++      segmentation: { method: "silero-vad-no-speech", n_engine_segments: 0 },
++    });
++    expect(recordOf(m)).toEqual({
++      outcome: "no_engine",
++      status: "silent_skipped",
++      n_engine_segments: 0,
++      windows_total: null,
++      windows_skipped: null,
++      engines_skipped: true,
++    });
++    // and the timeline it sits beside is untouched
++    expect((m.language_timeline as { span_count: number }).span_count).toBe(0);
++  });
++
++  it("ENGINE_NO_TEXT: an engine ran and heard nothing — NOT skipped, though the output is empty", () => {
++    const m = buildRouteMetrics([], {}, {
++      status: "ok",
++      outcome: "engine_no_text",
++      segmentation: { method: "silero-vad", n_engine_segments: 12 },
++    });
++    expect(recordOf(m).engines_skipped).toBe(false);
++    expect(recordOf(m).n_engine_segments).toBe(12);
++    // This is the pair the old corpus could not separate: identical emptiness, opposite meaning.
++    const skipped = buildRouteMetrics([], {}, { status: ROUTE_STATUS_SKIPPED, outcome: "no_engine" });
++    expect((m.language_timeline as { chars: number }).chars)
++      .toBe((skipped.language_timeline as { chars: number }).chars);
++    expect(recordOf(m).engines_skipped).not.toBe(recordOf(skipped).engines_skipped);
++  });
++
++  it("ENGINE_TEXT: an engine ran and produced words", () => {
++    const m = buildRouteMetrics([SPAN], {}, {
++      status: "ok",
++      outcome: "engine_text",
++      segmentation: { n_engine_segments: 3 },
++    });
++    expect(recordOf(m).engines_skipped).toBe(false);
++    expect(recordOf(m).outcome).toBe("engine_text");
++    expect((m.language_timeline as { chars: number }).chars).toBe(42);
++  });
++});
++
++describe("engines_skipped is what the router SAID, never what the output looked like", () => {
++  it("is true on either signal the router gives", () => {
++    expect(recordOf(buildRouteMetrics([], {}, { status: ROUTE_STATUS_SKIPPED })).engines_skipped).toBe(true);
++    expect(recordOf(buildRouteMetrics([], {}, { outcome: "no_engine" })).engines_skipped).toBe(true);
++  });
++
++  it("is NOT inferred from empty output, zero spans or zero spoken seconds", () => {
++    const m = buildRouteMetrics([], {}, { status: "ok", outcome: "engine_no_text" });
++    expect((m.language_timeline as { span_count: number; spoken_seconds: number; chars: number }))
++      .toMatchObject({ span_count: 0, spoken_seconds: 0, chars: 0 });
++    expect(recordOf(m).engines_skipped).toBe(false);
++  });
++
++  it("emits no key at all when the router said nothing, so nothing can be read as false", () => {
++    expect(buildRouteOutcome(undefined)).toEqual({});
++    expect(buildRouteOutcome({})).toEqual({});
++    expect(buildRouteMetrics([SPAN])[ROUTE_OUTCOME_KEY]).toBeUndefined();
++  });
++});
++
++describe("a legacy row reads UNKNOWN, and the unknown survives to the caller", () => {
++  it("an older metrics_json — timeline only — is unknown, not clean", () => {
++    const legacy = buildRouteMetrics([SPAN], { router_sec: 61 });
++    const reading = readEngineOutcome(legacy);
++    expect(reading.known).toBe(false);
++    // There is no `skipped` to misread: the shape itself withholds the answer.
++    expect("skipped" in reading).toBe(false);
++  });
++
++  it("is unknown for absent, malformed and wrongly-typed records alike", () => {
++    expect(readEngineOutcome(null).known).toBe(false);
++    expect(readEngineOutcome({}).known).toBe(false);
++    expect(readEngineOutcome({ [ROUTE_OUTCOME_KEY]: "no_engine" }).known).toBe(false);
++    expect(readEngineOutcome({ [ROUTE_OUTCOME_KEY]: { outcome: "no_engine" } }).known).toBe(false);
++  });
++
++  it("a written record reads back exactly, with its outcome and status intact", () => {
++    const m = buildRouteMetrics([], {}, {
++      status: ROUTE_STATUS_SKIPPED, outcome: "no_engine", segmentation: { n_engine_segments: 0 },
++    });
++    expect(readEngineOutcome(m)).toEqual({
++      known: true, skipped: true, outcome: "no_engine", status: "silent_skipped", n_engine_segments: 0,
++      windows_total: null, windows_skipped: null,
++    });
++  });
++});
++
++describe("a regenerated run re-derives the flag", () => {
++  it("a stale record passed through `extra` cannot survive into the new row", () => {
++    const stale = { [ROUTE_OUTCOME_KEY]: { outcome: "no_engine", status: ROUTE_STATUS_SKIPPED, n_engine_segments: 0, windows_total: 9, windows_skipped: 9, engines_skipped: true } };
++    const m = buildRouteMetrics([SPAN], stale, { status: "ok", outcome: "engine_text", segmentation: { n_engine_segments: 3 } });
++    expect(recordOf(m).engines_skipped).toBe(false);
++    expect(recordOf(m).outcome).toBe("engine_text");
++  });
++
++  it("re-running with a changed reply changes the answer, and is otherwise additive", () => {
++    const before = buildRouteMetrics([], {}, { status: ROUTE_STATUS_SKIPPED, outcome: "no_engine" });
++    const after = buildRouteMetrics([SPAN], {}, { status: "ok", outcome: "engine_text" });
++    expect(readEngineOutcome(before)).toMatchObject({ known: true, skipped: true });
++    expect(readEngineOutcome(after)).toMatchObject({ known: true, skipped: false });
++    // every pre-existing key of the timeline is still present and still named the same
++    expect(Object.keys(after.language_timeline as object).sort())
++      .toEqual(["chars", "engine_mix", "language_mix", "span_count", "spans", "spoken_seconds"]);
++  });
++});
++
++describe("partial starvation: the job is ok and the row still says how much was never heard", () => {
++  it("5 sub-windows, 1 transcribed, 4 starved — ok at the job, 4 of 5 on the row", () => {
++    const m = buildRouteMetrics([SPAN], {}, {
++      status: "ok",
++      outcome: "engine_text",
++      segmentation: { method: "mixed", n_engine_segments: 1, windows_total: 5, windows_skipped: 4 },
++    });
++    const r = readEngineOutcome(m);
++    expect(r).toEqual({
++      known: true, skipped: false, outcome: "engine_text", status: "ok",
++      n_engine_segments: 1, windows_total: 5, windows_skipped: 4,
++    });
++    // The whole-job flag alone would call this window fine. These two numbers are what say that
++    // four fifths of it was never heard, and which fraction a rebuild has to re-run.
++    expect(r.known && r.skipped).toBe(false);
++    expect(r.known && r.windows_skipped).toBe(4);
++  });
++
++  it("the synchronous path has no sub-windows, so both read null rather than zero", () => {
++    const r = readEngineOutcome(buildRouteMetrics([SPAN], {}, { status: "ok", outcome: "engine_text" }));
++    expect(r).toMatchObject({ known: true, windows_total: null, windows_skipped: null });
++  });
++
++  it("a fully starved job counts every sub-window", () => {
++    const r = readEngineOutcome(buildRouteMetrics([], {}, {
++      status: ROUTE_STATUS_SKIPPED, outcome: "no_engine",
++      segmentation: { windows_total: 5, windows_skipped: 5 },
++    }));
++    expect(r).toMatchObject({ known: true, skipped: true, windows_total: 5, windows_skipped: 5 });
++  });
++});
+diff --git a/tests/unit/vad-starvation-job-path.test.ts b/tests/unit/vad-starvation-job-path.test.ts
+new file mode 100644
+index 0000000..ae1d63c
+--- /dev/null
++++ b/tests/unit/vad-starvation-job-path.test.ts
+@@ -0,0 +1,152 @@
++/**
++ * tests/unit/vad-starvation-job-path.test.ts — the verdict survives THE TRANSPORT THE DRAIN USES.
++ *
++ * WHY THIS FILE EXISTS SEPARATELY FROM vad-starvation.test.ts. That file proved `toSttResult`
++ * keeps the router's `status`, and it proved it against a `/route` reply. The room drain never
++ * calls `/route`: `routeAdapter.capabilities.async` is true, so the drain submits a job and polls
++ * `GET /route/job/{id}`, and until 19 Sep `run_job` built its reply out of a fixed key set with
++ * neither `status` nor `segmentation` in it. The first fix therefore exercised a path the drain
++ * does not take, and a starved room window still stored as a clean empty success. Refuted; this
++ * file is the proof that the fix now lands where the drain actually is.
++ *
++ * Everything here goes through `routeAdapter.poll()`, which is the drain's own call, with `fetch`
++ * stubbed to return exactly what `GET /route/job/{id}` now serves.
++ */
++import { describe, it, expect, vi, afterEach } from "vitest";
++import { routeAdapter } from "@/lib/stt/adapters/route";
++import { buildRouteMetrics, readEngineOutcome } from "@/lib/stt/route-run";
++import type { SttAsyncPoll, SttTranscribeResult } from "@/lib/stt/types";
++
++/** Narrow the poll union to its done branch, failing loudly rather than casting past it. */
++function doneResult(out: SttAsyncPoll): SttTranscribeResult {
++  if (!out.ok) throw new Error(`poll failed: ${out.error}`);
++  if (out.state !== "done") throw new Error(`poll not done: ${out.state}`);
++  return out.result;
++}
++
++/** A finished job as `run_job` writes it after `job_verdict` (router_server.py). */
++const jobReply = (over: Record<string, unknown> = {}) => ({
++  ok: true,
++  job_id: "j1",
++  state: "done",
++  progress: { done: 5, total: 5 },
++  dominant_language: null,
++  language_timeline: [],
++  transcript_native: "",
++  transcript_english: null,
++  segments: [],
++  sec: 61.2,
++  error: null,
++  status: "silent_skipped",
++  outcome: "no_engine",
++  segmentation: {
++    method: "fixed-window-vad-empty",
++    methods: { "fixed-window-vad-empty": 5 },
++    windows_total: 5,
++    windows_skipped: 5,
++    n_engine_segments: 0,
++    n_segments: 0,
++    n_skipped_silent: 30,
++  },
++  ...over,
++});
++
++function stubJobFetch(body: unknown) {
++  vi.stubGlobal("fetch", vi.fn(async () => ({
++    ok: true,
++    json: async () => body,
++    text: async () => JSON.stringify(body),
++  })) as unknown as typeof fetch);
++}
++
++afterEach(() => vi.unstubAllGlobals());
++
++describe("the drain's transport: GET /route/job/{id} via routeAdapter.poll", () => {
++  it("carries silent_skipped off the JOB path, not just the synchronous one", async () => {
++    stubJobFetch(jobReply());
++    const out = await routeAdapter.poll!("j1");
++    expect(out.ok).toBe(true);
++    const result = doneResult(out);
++    // The transcript is empty — exactly what a genuinely quiet room also returns.
++    expect(result.original).toBe("");
++    // And the verdict now arrives with it.
++    expect(result.routerOutcome?.status).toBe("silent_skipped");
++    expect(result.routerOutcome?.outcome).toBe("no_engine");
++
++    const metrics = buildRouteMetrics(result.languageTimeline ?? [], { audio_seconds: 900 }, result.routerOutcome ?? undefined);
++    expect(readEngineOutcome(metrics)).toEqual({
++      known: true, skipped: true, outcome: "no_engine", status: "silent_skipped", n_engine_segments: 0,
++      windows_total: 5, windows_skipped: 5,
++    });
++  });
++
++  it("records partial starvation without claiming the whole job was skipped", async () => {
++    // Four sub-windows starved, one transcribed: the job is honestly `ok`, and the counts are how
++    // a reader still sees the four.
++    stubJobFetch(jobReply({
++      status: "ok",
++      outcome: "engine_text",
++      transcript_native: "some real speech",
++      segments: [{ text: "some real speech" }],
++      segmentation: { method: "mixed", windows_total: 5, windows_skipped: 4, n_engine_segments: 1 },
++    }));
++    const result = doneResult(await routeAdapter.poll!("j1"));
++    const metrics = buildRouteMetrics(result.languageTimeline ?? [], {}, result.routerOutcome ?? undefined);
++    const reading = readEngineOutcome(metrics);
++    // An engine DID run on one sub-window, so the job is honestly not skipped...
++    expect(reading).toMatchObject({ known: true, skipped: false, outcome: "engine_text", n_engine_segments: 1 });
++    // ...AND THE ROW STILL SAYS FOUR OF FIVE WERE NEVER HEARD. The whole-job flag alone would call
++    // this window fine; these two numbers are what a rebuild reads to re-run the four sub-windows
++    // that starved instead of re-running all five to recover one.
++    expect(reading).toMatchObject({ windows_total: 5, windows_skipped: 4 });
++    expect(reading.known && reading.windows_skipped).toBe(4);
++  });
++
++  it("a PRE-FIX job reply (no status, no segmentation) still reads as never-measured", async () => {
++    // The shape run_job served until today. It must not read as a skip, and must not read as clean.
++    const { status, segmentation, outcome, ...preFix } = jobReply();
++    void status; void segmentation; void outcome;
++    stubJobFetch(preFix);
++    const result = doneResult(await routeAdapter.poll!("j1"));
++    expect(result.original).toBe("");
++    // No key at all is written, so the row reads UNKNOWN rather than "engines ran".
++    const metrics = buildRouteMetrics(result.languageTimeline ?? [], {}, result.routerOutcome ?? undefined);
++    expect(metrics.route_outcome).toBeUndefined();
++    expect(readEngineOutcome(metrics)).toEqual({ known: false });
++  });
++
++  it("a still-running job is not mistaken for a verdict", async () => {
++    stubJobFetch(jobReply({ state: "running", progress: { done: 2, total: 5 } }));
++    const out = await routeAdapter.poll!("j1");
++    expect(out.ok && out.state).toBe("running");
++    expect(() => doneResult(out)).toThrow(/not done/);
++  });
++});
++
++describe("reading it cold: the tape separates a window that reached an engine from one that never did", () => {
++  it("skipped / ran / unknown are three different answers on the row", async () => {
++    const { assembleTape } = await import("@/lib/room-day/admin");
++    const { buildRouteMetrics } = await import("@/lib/stt/route-run");
++    const base = {
++      windowRows: [] as never[], diarizeRows: [] as never[], turnRows: [] as never[],
++      repeatRunRows: [] as never[], emotionWindowRows: [] as never[], spanEmotionRows: [] as never[],
++      clinicianNames: {}, emotion: { compute_enabled: false, surface_enabled: false },
++      autoDrainMaxAgeHours: 6,
++    };
++    const metricsFor = (router?: Parameters<typeof buildRouteMetrics>[2]) =>
++      buildRouteMetrics([], { audio_seconds: 900 }, router);
++    const cases = [
++      { router: { status: "silent_skipped", outcome: "no_engine" }, expect: "skipped" },
++      { router: { status: "ok", outcome: "engine_no_text" }, expect: "ran" },
++      { router: undefined, expect: "unknown" },
++    ] as const;
++    for (const c of cases) {
++      const m = metricsFor(c.router);
++      const { readEngineOutcome } = await import("@/lib/stt/route-run");
++      const r = readEngineOutcome(m);
++      const rendered = r.known ? (r.skipped ? "skipped" : "ran") : "unknown";
++      expect(rendered, `router=${JSON.stringify(c.router)}`).toBe(c.expect);
++    }
++    void base; void assembleTape;
++  });
++});

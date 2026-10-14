@@ -1,0 +1,10 @@
+{
+  "id": "basic",
+  "note": "Synthetic. No patient data.",
+  "input": {
+    "segments": [
+      { "id": "s1", "role": "clinician", "text": "The sample widget is blue and sealed." },
+      { "id": "s2", "role": "patient", "text": "I think the widget is red." }
+    ]
+  }
+}

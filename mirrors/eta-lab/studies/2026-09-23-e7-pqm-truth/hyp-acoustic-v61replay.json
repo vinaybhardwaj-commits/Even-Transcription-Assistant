@@ -1,0 +1,102 @@
+{
+ "source": "acoustic",
+ "smoother_version": "encounter-clock-smooth-v1",
+ "shadow_version": "encounter-clock-shadow-v2",
+ "note": "Acoustic runs written by the E-6.1 replay (b05ac71, 23 Sep 12:21-12:24 UTC) - the same evidence load and the same Jev sample as hyp-fused-v61.json, so acoustic/fused/fused+E-6.1 compare on one set of Jev answers. Ids and times only.",
+ "room_days": {
+  "rd_tp4hcf8s": {
+   "room": "Cardiology OPD",
+   "date": "2026-09-23",
+   "run_id": "ehr_6x2xda34zv6g",
+   "energy_gap": false,
+   "encounters": [
+    {
+     "id": "a0",
+     "start_ms": 1790137298450,
+     "end_ms": 1790137718450
+    },
+    {
+     "id": "a1",
+     "start_ms": 1790138798450,
+     "end_ms": 1790139518450
+    },
+    {
+     "id": "a2",
+     "start_ms": 1790141498450,
+     "end_ms": 1790142158450
+    },
+    {
+     "id": "a3",
+     "start_ms": 1790144198450,
+     "end_ms": 1790144858450
+    },
+    {
+     "id": "a4",
+     "start_ms": 1790145998450,
+     "end_ms": 1790146718450
+    }
+   ]
+  },
+  "rd_pw5gaugg": {
+   "room": "OPD 3",
+   "date": "2026-09-23",
+   "run_id": "ehr_jp9zb5u7jafu",
+   "energy_gap": false,
+   "encounters": [
+    {
+     "id": "a0",
+     "start_ms": 1790130733173,
+     "end_ms": 1790131393173
+    },
+    {
+     "id": "a1",
+     "start_ms": 1790134273173,
+     "end_ms": 1790134573173
+    },
+    {
+     "id": "a2",
+     "start_ms": 1790134813173,
+     "end_ms": 1790134993173
+    },
+    {
+     "id": "a3",
+     "start_ms": 1790141473173,
+     "end_ms": 1790142133173
+    }
+   ]
+  },
+  "rd_yck5kdc2": {
+   "room": "OPD 5",
+   "date": "2026-09-23",
+   "run_id": "ehr_pkdkkfnkknrd",
+   "energy_gap": false,
+   "encounters": [
+    {
+     "id": "a0",
+     "start_ms": 1790133366366,
+     "end_ms": 1790134086366
+    },
+    {
+     "id": "a1",
+     "start_ms": 1790135166366,
+     "end_ms": 1790135406366
+    },
+    {
+     "id": "a2",
+     "start_ms": 1790137086366,
+     "end_ms": 1790137386366
+    },
+    {
+     "id": "a3",
+     "start_ms": 1790141466366,
+     "end_ms": 1790142186366
+    },
+    {
+     "id": "a4",
+     "start_ms": 1790144466366,
+     "end_ms": 1790144886366
+    }
+   ]
+  }
+ }
+}

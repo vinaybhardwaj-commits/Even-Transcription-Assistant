@@ -1,0 +1,33 @@
+{
+ "stack": {
+  "whisper": {
+   "model": "ggml-large-v3-turbo.bin sha256 1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69 (whisper.cpp e0fd1f67, CUDA build on L4; production Metal)",
+   "flags": {
+    "vad": "off",
+    "temperature_inc": "0.2 (whisper.cpp default, not set)",
+    "no_speech_thold": "0.7",
+    "suppress_nst": "true",
+    "max_context": "0 (set by the shim on every request)"
+   }
+  },
+  "indic_conformer": {
+   "model_id": "ai4bharat/indic-conformer-600m-multilingual@e9b71b369c048e2c6b634d4c131061c34e441179 (rnnt, CPU, ONNX thread cap INDIC_DECODING=rnnt ORT_INTRA_THREADS=9)",
+   "git_head": "643e4e1 (production eta-indic); running file indic_server.py sha256 333c687c277f7629f218f83281601a2c1e663996d85c1c15174fb509c9688e42"
+  },
+  "sravaani": {
+   "version": "ARTPARK-IISc/SraVaani-1.0@f5dd5358325a5208775b91dad98918e079ea2b27 (CPU torch 2.14.0+cpu); running file sravaani_server.py sha256 907b7d8180557b560a951d0d2e26e510204197759505ac1e4809eca41bc1c90b"
+  },
+  "router": {
+   "commit": "5e841f0 (eta-router); running file router_server.py sha256 400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+   "config_sha256": "3d944d983148c15263d03e1505a451ed547c50450471e83913bf03ebd19ccfe2"
+  }
+ },
+ "guards": {
+  "shim_anti_loop": "whisper-shim twin file sha256 c24fd097996e8dddb6fae405dd1dbca3d9990784c4cfaf60c1413ebc4a0f314c (production shim sha256 aa9a7e4971779e4d5d7f7e3b8c913edc1d8497021a17f2e15d5391ab5012e02b, differs only in the bind address); number lexicon sha256 f0adbe7a153105943185a770337d4a12bc7e38ced1b6431f1897b1cb748bf2ec",
+  "english_hallucination_guard": "inside router_server.py sha256 400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+  "transcript_guard": "lib/transcript-guard.ts sha256 222bfe2145b1e96d1e2e508c87ed6b4dc1c24866ee557047cba454004ec6f28f at production commit a30186c (source; not executed by the HIST route path, which runs only assembled-collapse.ts at the pinned sha)",
+  "loop_guard_number_rule": "not deployed: loop-guard 7258a90 is not in production or in this stack (next2 train); collapse_phrase_loops with the number lexicon runs inside the router and shim"
+ },
+ "stack_id": "0b12949986df",
+ "source": "studies/2026-09-24-stt-parity/stack_provenance.json (lab-mover, live collection on 4 nodes, all consistent: True)"
+}

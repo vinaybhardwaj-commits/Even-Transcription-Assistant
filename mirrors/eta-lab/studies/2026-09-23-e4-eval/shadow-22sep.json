@@ -1,0 +1,76 @@
+{
+ "room_id": "room_jwyrr4dc",
+ "ist_date": "2026-09-22",
+ "room_day_id": "rd_7g2ytyta",
+ "ok": true,
+ "run_id": "ehr_b99v954sx2dr",
+ "supersedes": null,
+ "summary": {
+  "room_day_id": "rd_7g2ytyta",
+  "shadow_version": "encounter-clock-shadow-v1",
+  "gate_version": "encounter-clock-gate-v1",
+  "smoother_version": "encounter-clock-smooth-v1",
+  "probes": {
+   "total": 742,
+   "speech": 0,
+   "non_speech": 0,
+   "unjudged": 742
+  },
+  "unjudged_share": 1,
+  "reasons": {
+   "no_energy_evidence": 742
+  },
+  "preselect": {
+   "extract": 742
+  },
+  "windows": {
+   "with_text": 20,
+   "placed": 15,
+   "unplaceable": 5
+  },
+  "encounters": 0,
+  "median_minutes": null,
+  "longest_minutes": null,
+  "closed_by": {},
+  "day_complete": true,
+  "triggers": [
+   {
+    "trigger": "encounter_over_2h",
+    "value": null,
+    "limit": 120,
+    "tripped": false,
+    "provisional": false
+   },
+   {
+    "trigger": "unjudged_over_90pct",
+    "value": 1,
+    "limit": 0.9,
+    "tripped": true,
+    "provisional": false
+   },
+   {
+    "trigger": "median_over_60min",
+    "value": null,
+    "limit": 60,
+    "tripped": false,
+    "provisional": false
+   },
+   {
+    "trigger": "encounters_over_15",
+    "value": 0,
+    "limit": 15,
+    "tripped": false,
+    "provisional": false
+   },
+   {
+    "trigger": "no_encounters_on_a_day_with_transcripts",
+    "value": 0,
+    "limit": 0,
+    "tripped": true,
+    "provisional": false
+   }
+  ],
+  "triggers_tripped": true,
+  "triggers_tripped_firm": true
+ }
+}
