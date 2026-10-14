@@ -68,15 +68,19 @@ run() {
   local t0 t1 sub ctl
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
+  # Job control gives each loop its own process group, so TERM reaches the pipeline children (bash -c, ssh) too.
+  set -m
   subscriber_loop & sub=$!
   control_loop & ctl=$!
-  trap 'kill $sub $ctl 2>/dev/null; exit 0' TERM INT
+  set +m
+  trap 'kill -TERM -- -$sub -$ctl 2>/dev/null; kill $sub $ctl 2>/dev/null; exit 0' TERM INT
   while :; do
     t0="$(now_epoch)"
     flag_poll
     tick
     t1="$(now_epoch)"
-    [ "$((t1 - t0))" -lt 10 ] && sleep $((10 - (t1 - t0)))
+    # sleep in the background and wait, so TERM/INT is handled at once
+    if [ "$((t1 - t0))" -lt 10 ]; then sleep $((10 - (t1 - t0))) & wait $!; fi
   done
 }
 

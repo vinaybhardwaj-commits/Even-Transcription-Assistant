@@ -75,6 +75,11 @@ act_step() {
     heal_event abort "$ACT_LAYER" "$ACT_REASON" "$ACT_BEFORE" "" "aborted_killswitch" false
     return 1
   fi
+  # act_begin gates on heal mode too; act_step repeats it so a direct caller in SHADOW cannot act.
+  if [ "$(current_mode)" != "heal" ]; then
+    audit "act_step refused: mode is not heal layer=${ACT_LAYER:-none}"
+    return 1
+  fi
   return 0
 }
 

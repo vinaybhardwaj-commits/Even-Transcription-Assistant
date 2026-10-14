@@ -134,3 +134,120 @@ test_control_loop_writes_control_last() {
   flag_fetch; killswitch_engaged; assert_rc $? 1 "loop output drives the switch"
   assert_eq "$(current_mode)" "heal" "mode from the loop output"
 }
+
+# ---- R2 ----
+# ctl_engaged <age> <payload>: 0 when the switch is engaged for that control.last
+ctl_engaged() { rm -f "$STATE_DIR/control_latch"; put_ctl "$1" "$2"; flag_fetch; killswitch_engaged; }
+
+test_top_level_kill_only_fail_closed() {
+  use_ctl
+  ctl_engaged 1 '{"kill": false, "meta": {"kill": true}, "modes": {}}'; assert_rc $? 0 "nested meta kill"
+  ctl_engaged 1 '{"kill": false, "meta": {"kill": false}, "modes": {}}'; assert_rc $? 0 "nested meta kill=false is still a second kill key"
+  ctl_engaged 1 '{"kill": false, "kill": false, "modes": {}}'; assert_rc $? 0 "duplicate kill"
+  ctl_engaged 1 '{"kill": true, "kill": false, "modes": {}}'; assert_rc $? 0 "duplicate kill, true first"
+  ctl_engaged 1 '{"note": "\"kill\": false", "modes": {}}'; assert_rc $? 0 "kill only inside a string"
+  ctl_engaged 1 '{"kill": false, "note": "kill", "modes": {}}'; assert_rc $? 0 "kill word as a value next to the real key"
+  ctl_engaged 1 '{"kill": falsey, "modes": {}}'; assert_rc $? 0 "falsey"
+  ctl_engaged 1 '{"kill": falsetrue, "modes": {}}'; assert_rc $? 0 "falsetrue"
+  ctl_engaged 1 '"kill": false, "modes": {}}'; assert_rc $? 0 "missing opening brace"
+  ctl_engaged 1 '{"kill": false, "modes": {}'; assert_rc $? 0 "missing closing brace"
+  ctl_engaged 1 '{"modes": {"kill": false}}'; assert_rc $? 0 "kill only inside modes"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "modes": {}}'; assert_rc $? 0 "duplicate modes"
+  ctl_engaged 1 '{"modes": {"opd9": "heal"}, "kill": false}'; assert_rc $? 1 "order does not matter"
+  ctl_engaged 1 '{"kill":false,"modes":{"opd9":"heal"}}'; assert_rc $? 1 "compact spacing"
+}
+
+test_heal_to_shadow_takes_effect_without_a_fetch() {
+  use_ctl
+  put_ctl 1 "$HEAL"; flag_fetch
+  assert_eq "$(current_mode)" "heal" "heal"
+  put_ctl 1 "$OFF"   # no flag_fetch
+  assert_eq "$(current_mode)" "shadow" "shadow at once, cache still says heal"
+  put_ctl 1 "$HEAL"; assert_eq "$(current_mode)" "heal" "and back"
+  put_ctl 1 '{"kill": true, "modes": {"opd9": "heal"}}'
+  assert_eq "$(current_mode)" "shadow" "kill at once"
+}
+
+test_stale_latches_through_a_clock_step_back() {
+  use_ctl
+  put_ctl 0 "$HEAL"; flag_fetch
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 120)); flag_fetch; killswitch_engaged; assert_rc $? 0 "stale"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW - 100)); flag_fetch   # clock steps back: the old message looks 20 s old
+  killswitch_engaged; assert_rc $? 0 "still engaged after the clock steps back"
+  assert_eq "$(current_mode)" "shadow" "shadow"
+  put_ctl 0 "$HEAL"; flag_fetch; killswitch_engaged; assert_rc $? 1 "a new message (new receive epoch) clears it"
+}
+
+test_receive_epoch_in_the_future_is_killed() {
+  use_ctl
+  printf '%s\n%s\n' "$((GUARDIAN_FAKE_NOW + 3))" "$HEAL" >"$STATE_DIR/control.last"; flag_fetch
+  killswitch_engaged; assert_rc $? 0 "3 s ahead"
+  printf '%s\n%s\n' "$((GUARDIAN_FAKE_NOW + 2))" "$HEAL" >"$STATE_DIR/control.last"; flag_fetch
+  killswitch_engaged; assert_rc $? 1 "2 s ahead is tolerated"
+}
+
+# ---- ts (publish epoch from the Mini) ----
+ts_payload() { printf '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}' "$1"; }
+
+test_ts_absent_falls_back_to_receive_age() {
+  use_ctl
+  ctl_engaged 1 "$HEAL"; assert_rc $? 1 "no ts, fresh"
+  ctl_engaged 91 "$HEAL"; assert_rc $? 0 "no ts, receive age 91"
+}
+
+test_ts_fresh_clear_old_engaged_replay_engaged() {
+  use_ctl
+  ctl_engaged 1 "$(ts_payload "$GUARDIAN_FAKE_NOW")"; assert_rc $? 1 "ts now"
+  assert_eq "$(current_mode)" "heal" "heal with ts"
+  ctl_engaged 1 "$(ts_payload $((GUARDIAN_FAKE_NOW - 90)))"; assert_rc $? 1 "ts 90 s old"
+  ctl_engaged 1 "$(ts_payload $((GUARDIAN_FAKE_NOW - 91)))"; assert_rc $? 0 "replay: fresh receive, ts 91 s old"
+  assert_eq "$(current_mode)" "shadow" "replay: shadow"
+  ctl_engaged 1 "$(ts_payload 1000)"; assert_rc $? 0 "replay of a very old message"
+  ctl_engaged 95 "$(ts_payload "$GUARDIAN_FAKE_NOW")"; assert_rc $? 0 "ts fresh but receive age 95: receive age wins"
+}
+
+test_ts_future_skew() {
+  use_ctl
+  ctl_engaged 1 "$(ts_payload $((GUARDIAN_FAKE_NOW + 30)))"; assert_rc $? 1 "30 s ahead tolerated"
+  ctl_engaged 1 "$(ts_payload $((GUARDIAN_FAKE_NOW + 31)))"; assert_rc $? 0 "31 s ahead killed"
+}
+
+test_ts_malformed_or_duplicated_is_killed() {
+  use_ctl
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": "123"}'; assert_rc $? 0 "ts as string"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 12.5}'; assert_rc $? 0 "ts float"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": -5}'; assert_rc $? 0 "ts negative"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": null}'; assert_rc $? 0 "ts null"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": }'; assert_rc $? 0 "ts empty"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"ts\": $GUARDIAN_FAKE_NOW, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 0 "duplicate ts"
+  ctl_engaged 1 "{\"kill\": false, \"meta\": {\"ts\": $GUARDIAN_FAKE_NOW}, \"modes\": {}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 0 "nested ts"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"ts\": ${GUARDIAN_FAKE_NOW}x}"; assert_rc $? 0 "ts with trailing junk"
+}
+
+test_rooms_named_ts_and_kill_inside_modes_are_not_read() {
+  use_ctl
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"ts\": \"heal\", \"kill\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "keys inside modes ignored, real ones used"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"ts\": \"heal\", \"kill\": \"heal\"}, \"ts\": $((GUARDIAN_FAKE_NOW - 200))}"; assert_rc $? 0 "real old ts still stale"
+  ctl_engaged 1 '{"kill": true, "modes": {"ts": "heal", "kill": "heal"}, "ts": 1}'; assert_rc $? 0 "real kill=true wins"
+  export GUARDIAN_ROOM=ts
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"ts\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "room named ts"
+  assert_eq "$(current_mode)" "heal" "room named ts gets its mode"
+}
+
+# ---- trap ----
+test_term_kills_the_subscriber_pipelines() {
+  load_libs
+  local gp i=0 left
+  export GUARDIAN_CONTROL_SUB_CMD='sleep 4243 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4244 | cat'
+  bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 &
+  gp=$!
+  while [ "$i" -lt 30 ] && [ "$(/bin/ps -axo command | grep -c '^sleep 424[34]$')" -lt 2 ]; do sleep 0.2; i=$((i + 1)); done
+  assert_eq "$(/bin/ps -axo command | grep -c '^sleep 424[34]$')" "2" "both fake subscribers are running"
+  kill -TERM "$gp"; i=0
+  while [ "$i" -lt 50 ] && kill -0 "$gp" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+  sleep 0.5
+  left="$(/bin/ps -axo command | grep -c '^sleep 424[34]$')"
+  /usr/bin/pkill -f 'sleep 424[34]' 2>/dev/null
+  assert_eq "$left" "0" "no orphan subscriber process after TERM"
+  kill -0 "$gp" 2>/dev/null && { kill -9 "$gp"; fail "guardian did not exit on TERM"; } || ok
+}

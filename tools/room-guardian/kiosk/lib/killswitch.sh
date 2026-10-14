@@ -11,10 +11,13 @@ FLAG_CACHE="$STATE_DIR/flags.cache"
 CONTROL_LAST="$STATE_DIR/control.last"
 
 # Parse $CONTROL_LAST (line 1 = receive epoch, line 2 = payload). Sets CTRL_FLEET (on|unreachable),
-# CTRL_MODE (shadow|heal), CTRL_WHY (ok|missing|unparseable|stale|kill) and CTRL_AGE (seconds or empty).
-# Pure bash/sed. Anything but a fresh "kill": false means killed (fleet=unreachable).
+# CTRL_MODE (shadow|heal), CTRL_WHY (ok|missing|unparseable|stale|kill|skew) and CTRL_AGE (receive age, or empty).
+# Pure bash/sed. Fail closed: anything but a fresh payload with exactly one top-level "kill": false means killed.
+# Top-level only: the modes object is stripped first, then "kill" and "ts" must each occur at most once ("kill" exactly once).
+# Optional top-level integer "ts" (publish epoch): stale when now - ts > CONTROL_STALE_S; more than 30 s ahead = killed.
+# Stale latches on the receive epoch: it stays stale until a message arrives with a DIFFERENT receive epoch, even if the clock steps back.
 control_parse() {
-  local recv payload now room modes kill
+  local opens closes recv payload now room modes top kill ts nk nm nts latch
   CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
   [ -r "$CONTROL_LAST" ] || return 1
   recv="$(sed -n '1p' "$CONTROL_LAST" 2>/dev/null)"
@@ -22,14 +25,32 @@ control_parse() {
   now="$(now_epoch)"
   case "$recv" in ''|*[!0-9]*) CTRL_WHY=unparseable; return 1 ;; esac
   CTRL_AGE=$((now - recv))
-  if [ "$CTRL_AGE" -lt -5 ]; then CTRL_WHY=unparseable; return 1; fi
+  if [ "$CTRL_AGE" -lt -2 ]; then CTRL_WHY=unparseable; return 1; fi
+  latch="$(cat "$STATE_DIR/control_latch" 2>/dev/null)"
+  if [ "$latch" = "$recv" ]; then CTRL_WHY=stale; return 1; fi
+  if [ "$CTRL_AGE" -gt "$CONTROL_STALE_S" ]; then
+    mkdir -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
+    CTRL_WHY=stale; return 1
+  fi
   case "$payload" in '{'*'}') ;; *) CTRL_WHY=unparseable; return 1 ;; esac
-  # drop the modes object so a room named "kill" cannot be read as the kill field
-  kill="$(printf '%s' "$payload" | sed -E 's/"modes"[[:space:]]*:[[:space:]]*\{[^}]*\}//' | sed -nE 's/.*"kill"[[:space:]]*:[[:space:]]*(true|false).*/\1/p')"
-  if [ "$CTRL_AGE" -gt "$CONTROL_STALE_S" ]; then CTRL_WHY=stale; return 1; fi
-  if [ "$kill" != "false" ]; then
-    if [ "$kill" = "true" ]; then CTRL_WHY="kill"; else CTRL_WHY=unparseable; fi
-    return 1
+  opens="$(printf "%s" "$payload" | tr -cd "{" | wc -c | tr -d " ")"; closes="$(printf "%s" "$payload" | tr -cd "}" | wc -c | tr -d " ")"
+  if [ "$opens" != "$closes" ]; then CTRL_WHY=unparseable; return 1; fi
+  top="$(printf '%s' "$payload" | sed -E 's/"modes"[[:space:]]*:[[:space:]]*\{[^}]*\}//')"
+  nm="$(printf '%s' "$payload" | grep -o '"modes"' | wc -l | tr -d ' ')"
+  nk="$(printf '%s' "$top" | grep -o '"kill"' | wc -l | tr -d ' ')"
+  nts="$(printf '%s' "$top" | grep -o '"ts"' | wc -l | tr -d ' ')"
+  if [ "$nk" != "1" ] || [ "$nm" -gt 1 ] || [ "$nts" -gt 1 ]; then CTRL_WHY=unparseable; return 1; fi
+  kill="$(printf '%s' "$top" | sed -nE 's/.*"kill"[[:space:]]*:[[:space:]]*(true|false)[[:space:]]*[,}].*/\1/p')"
+  if [ "$kill" = "true" ]; then CTRL_WHY="kill"; return 1; fi
+  if [ "$kill" != "false" ]; then CTRL_WHY=unparseable; return 1; fi
+  if [ "$nts" = "1" ]; then
+    ts="$(printf '%s' "$top" | sed -nE 's/.*"ts"[[:space:]]*:[[:space:]]*([0-9]{1,15})[[:space:]]*[,}].*/\1/p')"
+    if [ -z "$ts" ]; then CTRL_WHY=unparseable; return 1; fi
+    if [ "$((ts - now))" -gt 30 ]; then CTRL_WHY=skew; return 1; fi
+    if [ "$((now - ts))" -gt "$CONTROL_STALE_S" ]; then
+      mkdir -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
+      CTRL_WHY=stale; return 1
+    fi
   fi
   CTRL_FLEET=on; CTRL_WHY=ok
   # shellcheck disable=SC2016
@@ -90,6 +111,8 @@ killswitch_engaged() {
 current_mode() {
   local m
   if killswitch_engaged; then echo shadow; return; fi
+  # With the control subscription the live parsed mode is used, so heal -> shadow needs no fetch.
+  if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then control_parse || { echo shadow; return; }; echo "$CTRL_MODE"; return; fi
   m="$(sed -n 's/^mode=//p' "$FLAG_CACHE" 2>/dev/null | head -n1)"
   [ "$m" = "heal" ] && echo heal || echo shadow
 }
