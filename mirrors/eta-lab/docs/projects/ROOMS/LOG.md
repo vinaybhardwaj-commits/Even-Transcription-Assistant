@@ -2,21 +2,6 @@
 
 Build and event log, newest first. Owner panes: fleet (fleet-watch), scribe, radar-kit.
 
-## 27-28 Sep -- signature_mismatch CLOSED; Room Timeline live; now-view bug fixed
-Session: sig-debug, sig-research, scribe, lab-viewer.
-Every signature_mismatch failure traced to app build 0.1.8 (pre-0.1.18 anchor-trust fix); OPD1/OPD4 '27 Sep' mismatches were stale 17-Sep launchd text. W37 CLOSED. Room Timeline (/timeline) shipped, see LABVIEW. A real now-view bug fixed: cross-midnight sessions dropped from the recording view (same-IST-date filter mismatch), branch vinay/scribe-rooms-now-bug PASS. OPD1 ENCODER_STALLED and OPD3 mute diagnosed+confirmed healthy via the standard playbook.
-Refs: #4334-4378, #5293-5298.
-
-## 27 Sep ~07:4x-08:0x IST — room readiness; OPD 4 still flagged; report_diag blocked
-Session: fleet, minibot.
-07:45 and 07:58 reads: 7 rooms + Home Office ready and listening; ORB3 recording since 06:00; Cardiology and Dietary offline (Dietary off by V, expected). OPD 4 flags DEVICE_MISSING both times despite reporting the C270 by name. fleet's single read-only report_diag to OPD 4 (W34.3) was refused by its own pane classifier as a remote write; nothing sent. Auto-start ruled GO by V, built into RECORDER 0.1.25 (closes D-1).
-Refs: #4146, #4180, #4221.
-
-## 26 Sep ~20:1x-21:4x IST — Dietary closed; PARITY gate not met
-Session: minibot, fleet.
-Dietary was switched off by V, not a fault; last heartbeat 17:25 IST, session closed normally (#3895). PARITY-389 gate not met at 21:40: 7 rooms recording (ORB3 to 02:00); six hashes match; fleet polls to 22:15 (#3924).
-Refs: #3895, #3924.
-
 ## 26 Sep ~19:4x-20:1x IST — 7-day schedule; Dietary
 Session: fleet, scribe, minibot.
 fleet-watch config now clinic 08:30-20:30 Mon-Sun (#3868); code default still Mon-Sat. OPD 4 has no mic listed (physical, #3862). W27.8: minibot diagnoses Dietary (silent since 24 Sep 17:39).

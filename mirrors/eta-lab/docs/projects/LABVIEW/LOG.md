@@ -2,21 +2,6 @@
 
 Build and event log, newest first. Owner panes: lab-viewer (builder), eta-refuter-2 (checker).
 
-28 Sep ~19:3x -- 7-lane REB engine timeline built ahead of the data
-Session: lab-viewer.
-Fable's overnight priority (outranks the FUSER/G3 page, which waits on RUN2 scoring anyway): render every REB engine layer as an overlaid lane on /timeline/<room>/<date> spanning the whole day. Built tools/reb_timeline_seed.py using kit.reb's real load_window()/.tracks(latest_ok=True) rather than re-implementing selection (avoiding the exact mistake eta-refuter-2 caught at #5266 on the per-window inspector). Built ahead of real data (only DEV30/clinical1 exist on the box at build time); lights up automatically as BACKFILL's historical catch-up lands.
-Refs: commit f05c2afe.
-
-## 27-28 Sep -- Room Timeline (/timeline) shipped P1+P2+P3; pitch25 live
-Session: lab-viewer, eta-refuter-2, eta-refuter-3.
-V approved (14:00) the Room Timeline mockup. P1 LIVE 78921667 (tape coverage, PQM truth, CAP links, fleet alerts, date picker). P2 LIVE cc416d93 (audio playback in the existing Access-gated proxy, synced transcript, Prescription/Sound tabs, append-only view log). P3 LIVE 82936ec9 (REB per-engine layers, compare-engines, provenance-underlined stitched line) after 2 real bugs fixed (wrong track-selection key, segment-clock handling). pitch25 shipped, 15/15 rows. Several 'X of Y' labels caught overclaiming completeness and fixed lab-wide.
-Refs: #4634, #4686-4742, #5263-5269.
-
-## 26 Sep ~21:0x IST — rating hub /rate LIVE
-Session: lab-viewer, eta-refuter-2, Fable (deploys).
-Branch 5efcbbc5 PASS (#3910), cherry-picked to main 974b347a (#3911), raters only, counts and times only. Speaker-count, Doctor Voice Check and surgery v4 are not viewer sets so the hub does not list them (#3909). CAP-1 items beside consults: cap posted the scored_items location (#3925); it sits on c3, not the box.
-Refs: #3909, #3910, #3911, #3925.
-
 ## 26 Sep ~18:0x-19:5x IST — /roadmap and speaker chips LIVE
 Session: lab-viewer, eta-refuter-2, Fable (deploys).
 /roadmap branch e4000863 PASS (#3834/#3844), merged 79fd7af9, deployed as version 0ea4917a; Access redirect verified (#3860). Speaker chips 7e3efd13 FAIL (#3865, two blocking), fixed 5213ea3e PASS (#3872), main 207821ba, deployed by Fable as e07cff51. W27.4 next: CAP-1 items beside consults, rating hub.
@@ -54,5 +39,3 @@ Refs: r184, r195.
 
 ## Open
 Speaker A/B/C chips in consult view; `/roadmap` page rendering docs/ROADMAP.md; calib30 chunkPlan fix (queued, own check).
-- 29 Sep ~19:27 IST (rev 26): viewer blanks status/lang/n_words on blind days; 6f74d573 ready to deploy (deployed: UNVERIFIED).
-- 29 Sep ~23:10 IST (rev 27): Staff button deployed, main e0ef0665, Worker version 11200299, 22:24.
