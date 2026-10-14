@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatAuditRef, parseAuditRef, isAuditRef, computeSlaDueAt, mintStatus, isOverdue,
-  statusAfterResponse, statusAfterDoctorVerb, statusAfterAction, validateDoctorResponse, validateSignalAction,
+  statusAfterResponse, statusAfterAction, validateDoctorResponse, validateSignalAction,
   signalObject, signalLabel, type SignalRow,
 } from '../opd-gov-signal-core.ts';
 
@@ -39,38 +39,29 @@ test('status machine: response + action transitions', () => {
   assert.equal(statusAfterResponse('acknowledgment', null), 'responded');
   assert.equal(statusAfterResponse('explanation', 'agree'), 'responded');
   assert.equal(statusAfterResponse('explanation', 'disagree'), 'escalated');
-  assert.equal(statusAfterDoctorVerb('agree', 'acknowledgment', null), 'responded');
-  assert.equal(statusAfterDoctorVerb('disagree', 'acknowledgment', 'disagree'), 'escalated');
-  assert.equal(statusAfterDoctorVerb('needs_clarification', 'explanation', null), 'escalated');
   assert.equal(statusAfterAction('acknowledged_by_governance'), 'ruled');
   assert.equal(statusAfterAction('privilege_action'), 'ruled');
   assert.equal(statusAfterAction('dismissed'), 'closed');
   assert.equal(statusAfterAction('closed'), 'closed');
 });
 
-test('validateDoctorResponse: doctor verbs, request identity, legacy compatibility, and guards', () => {
+test('validateDoctorResponse: type must match; explanation needs comment+verdict; guards', () => {
   const sig = { doctor_uid: 'HalPy', response_required: 'acknowledgment', status: 'routed' };
-  assert.equal(validateDoctorResponse({ verb: 'agree' }, sig).ok, false); // no request identity
-  assert.ok(validateDoctorResponse({ verb: 'agree', client_request_id: 'req-1', doctor_uid: 'HalPy' }, sig).ok);
-  assert.equal(validateDoctorResponse({ verb: 'route', client_request_id: 'req-2' }, sig).ok, false);
+  assert.equal(validateDoctorResponse({ type: 'explanation' }, sig).ok, false);           // wrong type
+  assert.ok(validateDoctorResponse({ type: 'acknowledgment', doctor_uid: 'HalPy' }, sig).ok);
   // wrong doctor → 403
-  const wrongDoc = validateDoctorResponse({ verb: 'agree', client_request_id: 'req-3', doctor_uid: 'OTHER' }, sig);
+  const wrongDoc = validateDoctorResponse({ type: 'acknowledgment', doctor_uid: 'OTHER' }, sig);
   assert.equal(wrongDoc.ok, false); if (!wrongDoc.ok) assert.equal(wrongDoc.code, 403);
-  // disagree and clarification require a reason
+  // explanation signal
   const esig = { doctor_uid: 'HalPy', response_required: 'explanation', status: 'routed' };
-  assert.equal(validateDoctorResponse({ verb: 'disagree', client_request_id: 'req-4', comment: '' }, esig).ok, false);
-  const good = validateDoctorResponse({
-    verb: 'needs_clarification', client_request_id: 'req-5', comment: 'Which encounter?',
-  }, esig);
-  assert.ok(good.ok); if (good.ok) assert.equal(good.value.verb, 'needs_clarification');
-  // legacy type/verdict remains accepted during portal migration, but still needs a request key
-  assert.ok(validateDoctorResponse({
-    type: 'explanation', comment: 'reviewed externally', verdict: 'disagree', client_request_id: 'legacy-1',
-  }, esig).ok);
+  assert.equal(validateDoctorResponse({ type: 'explanation', comment: '' }, esig).ok, false);         // no comment
+  assert.equal(validateDoctorResponse({ type: 'explanation', comment: 'x' }, esig).ok, false);        // no verdict
+  const good = validateDoctorResponse({ type: 'explanation', comment: 'reviewed externally', verdict: 'disagree' }, esig);
+  assert.ok(good.ok); if (good.ok) assert.equal(good.value.verdict, 'disagree');
   // no-response signals reject
-  assert.equal(validateDoctorResponse({ verb: 'agree', client_request_id: 'req-6' }, { doctor_uid: 'X', response_required: 'none', status: 'routed' }).ok, false);
+  assert.equal(validateDoctorResponse({ type: 'acknowledgment' }, { doctor_uid: 'X', response_required: 'none', status: 'routed' }).ok, false);
   // closed → 409
-  const closed = validateDoctorResponse({ verb: 'agree', client_request_id: 'req-7' }, { doctor_uid: 'X', response_required: 'acknowledgment', status: 'closed' });
+  const closed = validateDoctorResponse({ type: 'acknowledgment' }, { doctor_uid: 'X', response_required: 'acknowledgment', status: 'closed' });
   assert.equal(closed.ok, false); if (!closed.ok) assert.equal(closed.code, 409);
 });
 

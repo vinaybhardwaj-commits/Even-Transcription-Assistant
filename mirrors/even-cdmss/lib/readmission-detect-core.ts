@@ -32,15 +32,7 @@
 export const READMIT_WINDOW_DAYS = 90;
 const DAY_MS = 86_400_000;
 
-/** Decision 8 — Mohsin's clinical exclusion set, EXACT live KX department strings.
- *
- *  READMIT-EXCLUSION-NARROW (18 Sep 2026, V's ruling): gynaecological surgery is audited like
- *  any other surgery — only OBSTETRIC care stays excluded. 'Obstetrics and Gynecology' stays IN
- *  this array on purpose: lib/readmission-rates-core.ts's `isHeldOutDepartment` reuses this exact
- *  array to split the rates module's reviewable/held-out bars, and that split must not move
- *  (rates guard, tested). The detector's own exclusion test (`isExcludedDept` below) special-cases
- *  'Obstetrics and Gynecology' to `isObstetricStay` instead of bare membership, so THIS is where
- *  the narrowing actually happens — not by shrinking the array. */
+/** Decision 8 — Mohsin's clinical exclusion set, EXACT live KX department strings. */
 export const EXCLUDED_DEPARTMENTS: readonly string[] = [
   'Oncology',
   'Medical Oncology',
@@ -49,41 +41,6 @@ export const EXCLUDED_DEPARTMENTS: readonly string[] = [
   'Nephrology',
   'Obstetrics and Gynecology',
 ];
-
-/** Obstetric care admission types (exact, case-insensitive, trimmed) — decision READMIT-EXCLUSION-NARROW. */
-export const OBSTETRIC_ADMISSION_TYPES: readonly string[] = ['Maternity'];
-
-/** Obstetric ward name hints (lower-cased substring match against KxEncounter.ward). Ruling 1
- *  (18 Sep 2026) replaced the bare `labour`/`labor` substrings — which false-positive on
- *  "Laboratory Annex" / "Collaboration Suite" — with the specific phrases actually used on a
- *  ward board. */
-export const OBSTETRIC_WARD_HINTS: readonly string[] = [
-  'birthday suite', 'birthing', 'labour room', 'labor room', 'labour ward', 'labor ward',
-];
-
-/** Ruling 1: `ldr` is matched as a WHOLE WORD/TOKEN, never a bare substring — "LDR-2" and "LDR 2"
- *  match (the ward string tokenises on non-alphanumeric separators), but "Laboratory Annex",
- *  "Collaboration Suite" and "Elder Care" never do, however they are punctuated. */
-export const OBSTETRIC_WARD_WORD_HINTS: readonly string[] = ['ldr'];
-
-/** True when an encounter is an OBSTETRIC stay: department is Obstetrics and Gynecology AND
- *  (its admission type is Maternity OR its ward matches an obstetric hint). Gynaecological
- *  surgery in the same department (Elective / Procedure / Day Care / Emergency, no obstetric
- *  ward) is NOT obstetric and is therefore no longer excluded. */
-export function isObstetricStay(encounter: {
-  department?: string | null;
-  admissionType?: string | null;
-  ward?: string | null;
-}): boolean {
-  if (norm(encounter.department) !== norm('Obstetrics and Gynecology')) return false;
-  const type = norm(encounter.admissionType);
-  if (OBSTETRIC_ADMISSION_TYPES.some((t) => norm(t) === type)) return true;
-  const ward = norm(encounter.ward);
-  if (ward === '') return false;
-  if (OBSTETRIC_WARD_HINTS.some((h) => ward.includes(h))) return true;
-  const wardTokens = ward.split(/[^a-z0-9]+/).filter(Boolean);
-  return OBSTETRIC_WARD_WORD_HINTS.some((h) => wardTokens.includes(h));
-}
 
 export interface KxEncounter {
   encounterId: string;
@@ -96,8 +53,6 @@ export interface KxEncounter {
   department: string | null;
   doctor: string | null;
   payer: string | null;
-  /** READMIT-EXCLUSION-NARROW: the obstetric ward-hint input for isObstetricStay. */
-  ward?: string | null;
   /** Identity facts for the name+dob duplicate-MRN reconcile ONLY (§8c.1).
    *  Never stored on a finding row, never sent to the model. */
   patientName?: string | null;
@@ -189,8 +144,6 @@ export const ADT_COLUMN_CANDIDATES = {
   admissionType: ['admission_type'],
   department: ['treating_sub_department_name', 'treating_department_name', 'department', 'speciality', 'department_name'],
   doctor: ['current_treating_doctor', 'admitting_doctor', 'treating_doctor', 'treating_doctor_team', 'treating_doctor_name', 'admitting_doctor_team'],
-  /** READMIT-EXCLUSION-NARROW: db13's column is `ward`; `current_ward` is the fallback. */
-  ward: ['ward', 'current_ward'],
   payer: ['payer', 'payer_name', 'payer_type', 'payor'],
   patientName: ['patient_name', 'name'],
   dob: ['dob', 'date_of_birth', 'birth_date'],
@@ -205,10 +158,6 @@ export interface MappedAdtCols {
   encounter_id: string | null;
   dob: string | null;
   name: string | null;
-  /** Ruling 1 (18 Sep 2026): the obstetric ward-hint input, reported like every other ADT field
-   *  so a silent mapping miss (e.g. neither `ward` nor `current_ward` present) is visible, never
-   *  a quiet false-negative on isObstetricStay. */
-  ward: string | null;
 }
 
 /** Which candidate actually resolved, in priority order, across the sampled rows —
@@ -228,7 +177,6 @@ export function resolveMappedCols(rows: Record<string, unknown>[]): MappedAdtCol
     encounter_id: find(ADT_COLUMN_CANDIDATES.encounterId),
     dob: find(ADT_COLUMN_CANDIDATES.dob),
     name: find(ADT_COLUMN_CANDIDATES.patientName),
-    ward: find(ADT_COLUMN_CANDIDATES.ward),
   };
 }
 
@@ -300,15 +248,8 @@ export function pairEncounters(encounters: KxEncounter[]): Array<{ index: KxEnco
   return out;
 }
 
-/** READMIT-EXCLUSION-NARROW: 'Obstetrics and Gynecology' is special-cased to `isObstetricStay` —
- *  membership in EXCLUDED_DEPARTMENTS alone no longer excludes it. The other five strings
- *  (oncology + Nephrology) are unchanged, plain membership. */
-const isExcludedDept = (e: { department?: string | null; admissionType?: string | null; ward?: string | null } | null | undefined): boolean => {
-  if (!e || !e.department) return false;
-  const dept = e.department.trim();
-  if (norm(dept) === norm('Obstetrics and Gynecology')) return isObstetricStay(e);
-  return EXCLUDED_DEPARTMENTS.includes(dept);
-};
+const isExcludedDept = (d: string | null | undefined): boolean =>
+  d != null && EXCLUDED_DEPARTMENTS.includes(d.trim());
 
 /** Tag one pair. `erEncounters` = the person's er_admission encounters (for er_route). */
 export function computeTags(
@@ -331,26 +272,14 @@ export function computeTags(
     within_30d: adm <= disch + 30 * DAY_MS,
     structural_bounce: sameDept || sameDoctor,
     er_route: norm(pair.readmit.admissionType) === 'emergency' || erWithin48h,
-    excluded_category: isExcludedDept(pair.index) || isExcludedDept(pair.readmit),
+    excluded_category: isExcludedDept(pair.index.department) || isExcludedDept(pair.readmit.department),
   };
 }
 
-/** READMIT-EXCLUSION-NARROW (18 Sep 2026, V's ruling; tightened by Ruling 1, 18 Sep 2026): any
- *  muted return within this many CALENDAR-DAY gaps is audited anyway, whatever its department.
- *  Ruling 1: this compares against `gapDays` (the same floor-day gap the surface and the rates
- *  use), NOT tags.tight_7d — tight_7d is a 168-HOUR clock comparison and disagrees with gapDays
- *  right at the boundary (e.g. a discharge at 09:00 and a readmit at day+7 12:00 is gapDays 7 but
- *  171 clock-hours, so tight_7d is false while the override must still fire). */
-export const TIGHT_BOUNCE_OVERRIDE_DAYS = 7;
-
 /** Lane precedence, first match wins (PRD §4): excluded → er_routed → tight_bounce →
- *  structural_30d → other. READMIT-EXCLUSION-NARROW (Ruling 1): a muted (excluded_category) pair
- *  whose `gapDays <= TIGHT_BOUNCE_OVERRIDE_DAYS` is no longer muted — tight_bounce beats excluded,
- *  regardless of structural_bounce. tags.excluded_category is left true on that row so the surface
- *  can still show what category it came from. `gapDays` is the pair's own field (pairEncounters'
- *  floor-day gap), passed in explicitly — laneFor never re-derives it from a clock tag. */
-export function laneFor(tags: PairTags, gapDays: number): Lane {
-  if (tags.excluded_category) return gapDays <= TIGHT_BOUNCE_OVERRIDE_DAYS ? 'tight_bounce' : 'excluded';
+ *  structural_30d → other. */
+export function laneFor(tags: PairTags): Lane {
+  if (tags.excluded_category) return 'excluded';
   if (tags.er_route) return 'er_routed';
   if (tags.tight_7d && tags.structural_bounce) return 'tight_bounce';
   if (tags.within_30d && tags.structural_bounce) return 'structural_30d';
@@ -394,7 +323,7 @@ export function detectReadmissions(encounters: KxEncounter[], forms: FormReadmis
   const rawPairs = pairEncounters(encounters);
   const pairs: ReadmitPair[] = rawPairs.map((p) => {
     const tags = computeTags(p, ersByPerson.get(personKey(p.index.uhid)) ?? []);
-    return { ...p, tags, lane: laneFor(tags, p.gapDays) };
+    return { ...p, tags, lane: laneFor(tags) };
   });
 
   const ipByUhid = new Map<string, KxEncounter[]>();

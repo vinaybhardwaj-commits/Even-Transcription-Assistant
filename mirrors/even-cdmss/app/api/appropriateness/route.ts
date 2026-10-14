@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { matchLowValueCare, type MatchInput } from '@/lib/lvc';
+import { telemetryContextFor } from '@/lib/retrieval-telemetry-core';
 import { analyzeValue } from '@/lib/lvc-value';
 import type { Region } from '@/lib/lvc-core';
 import { makeNdjsonStream, ndjsonHeaders, type Stage } from '@/lib/stream';
@@ -59,6 +60,13 @@ export async function POST(req: NextRequest) {
     regionFilter: regionFilter && regionFilter.length ? regionFilter : undefined,
     preferRegion,
     forceOllama: body.providerOverride === 'ollama',   // lab probe: whole pipeline on the free mini
+    // ⚠️ `unknown_route`, AND IT IS NOT A GAP (D7, §7/A3). This surface has no member in the
+    // retrieval-route taxonomy, and §7's canary rule excludes exactly this case by name — an
+    // `lvc_recall` row reached from the appropriateness surface. Assigning it the nearest-looking
+    // route would make the one honest exclusion unreadable, which is why §4.4's rule against
+    // guessing applies to route names too. This is the ONLY change to this file: telemetry-context
+    // wiring on the one `matchLowValueCare` call, exactly as the file contract permits.
+    telemetry: { ctx: telemetryContextFor('unknown_route', req.headers), route: 'unknown_route' },
   };
 
   const { stream, emit, close } = makeNdjsonStream();

@@ -327,8 +327,16 @@ test('the Ollama fallback is still PRESENT and still CALLED in both files', () =
   // this test ever fails as a SIDE EFFECT, something removed the fallback without meaning to.
   assert.ok(TRACE.includes("result = await runOllamaFallback(lastTier, servedModel, lastErr, () => llm.chat.completions.create(params, reqOpts));"),
     'trace.ts: the ladder terminal still calls the Ollama fallback');
-  assert.ok(LLM.includes('return llm.chat.completions.create(params, reqOpts);'),
-    'llm.ts: the fallback returns are intact');
+  // ⚠️ SHAPE CHANGED, GUARD DID NOT (rerank telemetry §4.4, 11 Aug 2026). llm.ts's fallback returns
+  // are now wrapped in `attachTransportAttribution(...)` — a non-enumerable evidence property on the
+  // completion, so the TRACELESS rerank path can name the provider that actually served it. The
+  // question this test asks is "is the fallback still present and still called", and the answer is
+  // still yes: same `params`, same `reqOpts`, still awaited, still returned. Asserted on the call
+  // rather than the whole line so the wrapper cannot hide a change to the call itself.
+  assert.ok(LLM.includes('await llm.chat.completions.create(params, reqOpts)'),
+    'llm.ts: the fallback returns are intact — same params, same reqOpts');
+  assert.equal((LLM.match(/llm\.chat\.completions\.create\(params, reqOpts\)/g) || []).length, 2,
+    'llm.ts: still exactly two fallback call sites — the no-cloud default path and the ladder terminal');
   // …and the flag is the ONLY thing that bypasses it (throw before the fallback, never silently).
   assert.ok(TRACE.includes('if (opts?.noLocalFallback) throw lastErr;'), 'trace.ts: flag ⇒ throw');
   assert.ok(LLM.includes('if (noLocalFallback) throw lastErr;'), 'llm.ts: flag ⇒ throw');

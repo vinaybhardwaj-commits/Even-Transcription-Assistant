@@ -22,13 +22,11 @@ import { CitationChips, SourcesPanel } from '@/components/right-care/kit';
 import type { Source } from '@/lib/citations-core';
 import { stripRetiredEvenCitations } from '@/lib/even-ground-core';
 import { citationResolves, groundingKind, GROUNDING_PRESENTATION } from '@/lib/provenance-tier-core';
-import { findingOrigin, ORIGIN_PRESENTATION, LAYER_COPY } from '@/lib/opd-audit-layers-core';
 import FeedbackPanel, { type FeedbackEntry } from './feedback-panel';
 import { FindingTriage, ReviewerBar } from './finding-triage';
 import { MissedFindingCapture, type MissedEntry } from './missed-finding';
 import { EscalateButton } from './escalate-button';
 import { TriageProgress } from './triage-progress';
-import OpdCaseAskPanel from './case-ask-panel';
 import {
   bandColor, scoreColor, parseJson, doctorLabel, fmtIstTime, PDQI9_LABEL, PDQI9_HELP,
 } from '@/lib/opd-audit-ui';
@@ -395,23 +393,6 @@ function PdqiRadar({ pdqi }: { pdqi: Pdqi[] }) {
   );
 }
 
-// ── the three layers (facts-then-rules PR 1) ────────────────────────────────────
-// Facts → Findings → Model, in the page's EXISTING order: the header labels the section it sits
-// in, it does not move or regroup anything. Numbering is by identity, not position — layer 3
-// stays "3" on a note with no findings. Longitudinal, Suggestions, Sources and Your verdict are
-// deliberately outside the layers (they are workflow, and longitudinal carries its own label).
-function LayerHeader({ n, title, line }: { n: number; title: string; line: string }) {
-  return (
-    <div className="mb-1.5">
-      <div className="flex items-baseline gap-2">
-        <span className="inline-flex h-[17px] min-w-[17px] items-center justify-center rounded-full bg-slate-800 px-1 text-[10px] font-semibold text-white">{n}</span>
-        <span className="text-[12.5px] font-semibold text-slate-800">{title}</span>
-      </div>
-      <p className="mt-0.5 text-[11.5px] leading-snug text-slate-500">{line}</p>
-    </div>
-  );
-}
-
 // ── the single finding card ─────────────────────────────────────────────────────
 function FindingCard({ f, num, sources, auditId, triage, ruleMap }: { f: Finding; num: number; sources: Source[]; auditId: string; triage: Record<string, string>; ruleMap: Record<string, LvcRuleInfo> }) {
   const isLvc = f.verdict === 'low-value' || f.signal_type === 'low_value_care';
@@ -426,10 +407,6 @@ function FindingCard({ f, num, sources, auditId, triage, ruleMap }: { f: Finding
     label: gp.label,
     cls: gp.elevated ? 'border-teal-200 bg-teal-50 text-teal-800' : 'border-slate-200 bg-slate-50 text-slate-500',
   };
-  // Layer 2 · origin (facts-then-rules PR 1; architecture §3.3 finding_origin, §3.7 legacy).
-  // From the STORED source field ONLY. Never from rule_ref: the matcher stamps rule_ref onto
-  // model-authored prose after the finding exists, so it proves nothing fired.
-  const origin = ORIGIN_PRESENTATION[findingOrigin(f.source)];
   const tone = chipTone(f);
   const cardCls = tone === 'red' ? 'border-red-200 bg-red-50/50' : tone === 'amber' ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-white';
   return (
@@ -441,7 +418,6 @@ function FindingCard({ f, num, sources, auditId, triage, ruleMap }: { f: Finding
           <div className="text-[12.5px] font-medium text-slate-800">{f.subject}
             <span className="ml-2 align-middle text-[10px] font-normal" style={{ color: VERDICT_COLOR[f.verdict] || '#78715f' }}>{f.verdict}</span>
             <span className={`ml-2 inline-block rounded border px-1.5 py-0.5 align-middle text-[10px] font-medium ${ground.cls}`}>{ground.label}</span>
-            <span className={`ml-2 inline-block rounded border px-1.5 py-0.5 align-middle text-[10px] font-medium ${origin.cls}`} title={origin.title}>{origin.label}</span>
             {/* Quieting badge — admin views stay UNFILTERED; the badge discloses zero score effect */}
             {f.quieted_by && (
               <span className="ml-2 inline-block rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 align-middle text-[10px] font-medium text-violet-700"
@@ -789,20 +765,12 @@ export default async function OpdCaseAudit({ params }: { params: Promise<{ id: s
 
           {longitudinal && <LongitudinalPanel block={longitudinal} view={longitudinalView} />}
 
-          <div id="note" className="mt-4 scroll-mt-4">
-            {/* Layer 1 · Facts — the pane reconstructs db13 as it is NOW, at render time. It is not
-                an audit-time snapshot (that is PR 3), and it must not imply these facts drove the
-                audit. Architecture §3.4. */}
-            <LayerHeader n={LAYER_COPY.facts.n} title={LAYER_COPY.facts.title} line={LAYER_COPY.facts.line} />
+          <div id="note" className="mt-3 scroll-mt-4">
             <NotePanel note={note} pdfUrl={prescriptionUrl} grouped={grouped} findings={displayFindings} />
           </div>
 
           {findings.length > 0 && (
-            <div id="findings" className="mt-5 scroll-mt-4">
-              {/* Layer 2 · Findings — the layer is OUTER, the severity tiers stay INNER and
-                  unchanged (V's IA ruling, 20 Aug). Each card carries its origin, read from the
-                  stored source field. Architecture §3.3, §3.7. */}
-              <LayerHeader n={LAYER_COPY.findings.n} title={LAYER_COPY.findings.title} line={LAYER_COPY.findings.line} />
+            <div id="findings" className="mt-4 scroll-mt-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-400">Findings · grouped by severity tier · numbered where they sit in the note</div>
                 <EscalateButton pkg={escalationPackage} uid={uid} />
@@ -874,13 +842,8 @@ export default async function OpdCaseAudit({ params }: { params: Promise<{ id: s
           )}
 
           {pdqiAssessed && (
-            <div id="pdqi" className="mt-5 scroll-mt-4">
-              {/* Layer 3 · Model ratings — PDQI-9 is model-derived and ~25% of the index. Proposals
-                  join this layer in PR 2; they do not exist yet. Architecture §3.1. */}
-              <LayerHeader n={LAYER_COPY.model.n} title={LAYER_COPY.model.title} line={LAYER_COPY.model.line} />
-              <div className="rounded-xl border border-slate-200 bg-white p-3.5">
-                <PdqiRadar pdqi={pdqi} />
-              </div>
+            <div id="pdqi" className="mt-4 scroll-mt-4 rounded-xl border border-slate-200 bg-white p-3.5">
+              <PdqiRadar pdqi={pdqi} />
             </div>
           )}
 
@@ -905,13 +868,6 @@ export default async function OpdCaseAudit({ params }: { params: Promise<{ id: s
           )}
 
           <div id="verdict" className="mt-4 scroll-mt-4"><FeedbackPanel auditId={id} uid={uid || null} initial={feedback as unknown as FeedbackEntry[]} /></div>
-
-          {/* Ask the agent — the shared persisted case conversation (CASE-AGENTS-SPINE PRD P1).
-              Additive: it sits BELOW the adjudication panel because the pills stay the primary
-              adjudication loop (D2), and it changes nothing above it — no NQI, no band, no
-              feedback row, no MemberState (§3.3). Before migration 0046 has run the box is simply
-              empty and its turns do not persist; nothing else on this page notices. */}
-          <div id="ask" className="mt-4 scroll-mt-4"><OpdCaseAskPanel auditId={id} /></div>
 
           <p className="mt-5 text-[11px] text-slate-400">Advisory note-level quality proxy — documentation, PDQI-9, appropriateness and prescribing safety as demonstrated in the note. uid <code className="rounded bg-slate-100 px-1">{uid}</code> links back to the source encounter in db13. Not an outcomes measure; not a clinician scorecard.</p>
         </div>

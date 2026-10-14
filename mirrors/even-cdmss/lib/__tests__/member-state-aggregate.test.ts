@@ -102,10 +102,7 @@ test('inv7 / stratum13: buildMemberState does not mutate input; corrected eviden
 
 test('inv9: version + as-of metadata is mandatory and stamped', () => {
   const s = buildMemberState(member([enc('e1', '2026-03-01'), enc('e2', '2026-05-01')]), COMPUTED);
-  // 1.1 → 1.2 (CASE-AGENTS-SPINE O1, 27 Aug 2026): the snapshot gained a `procedures` slot and the
-  // evidence kind union gained 'ipd'. zMemberStateSnapshot is .strict(), so that is a version bump.
-  assert.equal(s.version, 'member-state/1.2');
-  assert.deepEqual(s.procedures, [], 'a snapshot with no ipd evidence carries an empty procedures slot');
+  assert.equal(s.version, 'member-state/1.1');
   assert.equal(s.normalizationVersion, 'member-norm/0.1');
   assert.equal(s.reconciliationVersion, 'member-reconcile/0.3');
   assert.equal(s.computedAt, COMPUTED);

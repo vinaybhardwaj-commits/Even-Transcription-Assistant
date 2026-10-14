@@ -18,8 +18,22 @@ import { PART_C_RELATIONS, majorityOf, partCVerdict } from '../lib/metamorphic-c
 import { auditOpdNote } from '../lib/opd-note-audit.ts';
 import { ensureLabTables, saveLabAnalysis } from '../lib/lab.ts';
 import { MINI_MODEL } from '../lib/llm.ts';
+import { telemetryContextFor } from '../lib/retrieval-telemetry-core.ts';
+import { startInvocation } from '../lib/retrieval-invocation-store.ts';
+import { settleOwned } from '../lib/retrieval-settlement.ts';
 
 const RUNS_PER_ARM = 3;
+
+// ⚠️ ONE INVOCATION PER PROCESS (D11), made once at module scope rather than per run: every audit
+// this script performs belongs to the same execution, and minting a context per note would report
+// one local script run as dozens of separate invocations.
+const TELEMETRY_CTX = telemetryContextFor('script', null);
+let telemetryOpened = false;
+async function openTelemetryOnce() {
+  if (telemetryOpened) return;
+  telemetryOpened = true;
+  await startInvocation(TELEMETRY_CTX);
+}
 const log = (...a) => console.error(...a);
 
 await ensureLabTables();
@@ -41,18 +55,30 @@ for (const rel of ACTIVE) {
   // L-3 needs BOTH matchers on the transformed arm: praise still present? safety fired?
   const praiseSeen = { base: [], transformed: [] };
 
+  await openTelemetryOnce();
   for (const [arm, row] of Object.entries(arms)) {
     for (let run = 1; run <= RUNS_PER_ARM; run++) {
       const started = Date.now();
       let fired = false; let praise = false; let findings = [];
       let error = null;
+      // ⚠️ THIS SCRIPT AUDITS AND SAVES NOTHING (D9), so every run settles `no_persistence_intended`
+      // — and `trace: false` means `trace_id` is null from declaration through to the terminal write,
+      // which is the second of the two callers D10 names for that.
+      let handle = null;
+      let published = false;
       try {
-        const audit = await auditOpdNote(row, { pipeline: 'mini', engineTag: 'lab', trace: false });
+        const audit = await auditOpdNote(row, {
+          pipeline: 'mini', engineTag: 'lab', trace: false,
+          telemetry: { ctx: TELEMETRY_CTX, route: 'script', persistenceIntent: 'never_persists' },
+          onLifecycleHandleUpdated: (h) => { handle = h; published = true; },
+        });
+        await settleOwned(handle, 'no_persistence_intended');
         findings = audit.findings;
         fired = rel.fires(findings);
         praise = findings.some((f) => f.signal_type === 'appropriateness_high_value'
           || (f.domain === 'appropriateness' && f.verdict === 'high-value'));
       } catch (e) {
+        await settleOwned(handle, published ? 'audit_generation_failed' : 'retrieval_not_run');
         error = String(e?.message ?? e).slice(0, 300);
         log(`  ! ${rel.id} ${arm} run ${run} FAILED: ${error}`);
       }
