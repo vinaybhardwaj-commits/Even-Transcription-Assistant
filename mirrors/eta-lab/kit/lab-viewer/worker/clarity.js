@@ -2,7 +2,6 @@
 // plus an empty FIXED ROUTER column that fills from router-fix's offline eval. Data: clarity/clips.json, clarity/fixed.json and clarity/audio/Lnnn.webm in
 // eta-lab-ratings (loaded by tools/clarity_seed.py; READ-ONLY here). Server-rendered and escape-first, ZERO client script; filters are plain links (the CSP has form-action 'none').
 // The rows hold PHI (transcripts, clip audio): shown to Access-restricted physicians only (same gate as every route).
-import { BLIND_CLIPS } from "./blind.js";
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const rstr = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const TAG = /^[a-z]{2,8}$/;
@@ -54,97 +53,10 @@ export function fixedOf(doc) {
   return { run_id: rstr(doc?.run_id, 60), rows: out };
 }
 
-// ---- SCORECARD (W33.5): S1 synthetic truth, S2 clinical truth, S3 language truth; old router vs new router. Numbers only, whitelisted and typed here.
-// Shapes: /home/eta/oc/lab-viewer/SCORECARD-SHAPES.md. The viewer shows old, new and the difference; it never invents a verdict (an evaluator's own `verdict` is shown as theirs).
-const LANGS = new Set(["en", "hi", "kn", "ta", "te", "ml", "hi-en", "kn-en", "mr", "bn", "gu", "pa", "or", "und", "mixed", "none", "all"]);
-const CONDS = new Set(["clean", "fan10", "babble5", "all"]);
-const fnum = (v, lo, hi) => (v !== null && v !== "" && Number.isFinite(+v) && +v >= lo && +v <= hi ? Math.round(+v * 10000) / 10000 : null);
-const pair = (o, keys, ranges) => { const out = {}; for (const [i, k] of keys.entries()) out[k] = fnum(o?.[k], ...ranges[i]); return out; };
-const vOf = (v) => (v && ["win", "no-win", "worse", "pending"].includes(v.status) ? { status: v.status, note: rstr(v.note, 120) } : null);
-const head = (d) => ({ run_id: rstr(d?.run_id, 60), prereg: rstr(d?.prereg_sha256, 64).replace(/[^0-9a-f]/gi, ""), old: rstr(d?.old, 60), new: rstr(d?.new, 60), verdict: vOf(d?.verdict) });
-const rowsOf = (d) => (Array.isArray(d?.rows) ? d.rows.slice(0, 200) : []).filter((r) => r && typeof r === "object");
-export function scorecardOf(doc) {
-  const out = { s1: null, s2: null, s3: null };
-  if (doc?.s1 && typeof doc.s1 === "object") {
-    const K = ["wer", "cer", "hit"], R = [[0, 100], [0, 100], [0, 100]];
-    out.s1 = { ...head(doc.s1), suite: rstr(doc.s1.suite_id, 60), rows: rowsOf(doc.s1).filter((r) => LANGS.has(r.lang) && CONDS.has(r.cond)).map((r) => ({ lang: r.lang, cond: r.cond, sig: r.sig === true, n: fnum(r.n, 0, 1e6), old: pair(r.old, K, R), new: pair(r.new, K, R) })) };
-  }
-  if (doc?.s2 && typeof doc.s2 === "object") {
-    const K = ["captured_pct", "lo", "hi"], R = [[0, 100], [0, 100], [0, 100]];
-    out.s2 = { ...head(doc.s2), scorer: rstr(doc.s2.scorer, 20), sample: { consults: fnum(doc.s2.sample?.consults ?? doc.s2.n_consults, 0, 1e5), items: fnum(doc.s2.sample?.items, 0, 1e6) },
-      envelope: /^[0-9.]{1,6}\s?[-–]\s?[0-9.]{1,6}$/.test(doc.s2.link_envelope?.confirmed_false_pct ?? "") ? doc.s2.link_envelope.confirmed_false_pct.replace("–", "-") : null, nflip: fnum(doc.s2.noise?.Nflip, 0, 1e6),
-      rows: rowsOf(doc.s2).filter((r) => r.scope === "overall" || r.scope === "drugs" || LANGS.has(r.scope)).map((r) => ({ scope: r.scope, sig: r.sig === true, n: fnum(r.n, 0, 1e6), old: pair(r.old, K, R), new: pair(r.new, K, R) })) };
-  }
-  if (doc?.s3 && typeof doc.s3 === "object") {
-    const j = doc.s3.judge && typeof doc.s3.judge === "object" ? doc.s3.judge : null;
-    const kept = fnum(doc.s3.kept_error_pct, 0, 100);
-    const diagNote = rstr(doc.s3.kept_error_pct_diagnostic_note, 300) || null;   // W44/Fable 12:50: one neutral text line, no colour, no verdict
-    const per = {};
-    for (const [k, v] of Object.entries(j?.accuracy?.per_lang && typeof j.accuracy.per_lang === "object" ? j.accuracy.per_lang : {}).slice(0, 20)) if (LANGS.has(k) && fnum(v, 0, 100) !== null) per[k] = fnum(v, 0, 100);
-    const rowLangs = [...new Set(rowsOf(doc.s3).map((r) => r.lang).filter((l) => LANGS.has(l) && l !== "all"))];
-    const overall = fnum(j?.accuracy?.overall, 0, 100);
-    // W33 gate, DERIVED from the numbers (a `usable:true` flag is never trusted on its own; an evaluator's stricter `usable:false`, e.g. a minimum n per label, is honoured): >= 95% overall AND >= 90% in every language the rows cover, each of which must have a proven accuracy
-    const proven = overall !== null && overall >= 95 && rowLangs.every((l) => per[l] !== undefined && per[l] >= 90) && Object.values(per).every((v) => v >= 90);
-    out.s3 = { ...head(doc.s3), kept, diagNote, judge: j ? { model: rstr(j.model, 60), validated_on: rstr(j.validated_on, 60), overall, per_lang: per, usable: proven && j.usable === true, flagged: j.usable === true && !proven } : null,
-      rows: rowsOf(doc.s3).filter((r) => LANGS.has(r.lang)).map((r) => ({ lang: r.lang, sig: r.sig === true, n: fnum(r.n, 0, 1e6), kept: fnum(r.kept_error_pct, 0, 100), old: pair(r.old, ["wrong_pct"], [[0, 100]]), new: pair(r.new, ["wrong_pct"], [[0, 100]]) })) };
-  }
-  return out;
-}
-// a row with fewer than 10 units is shown greyed and marked: too small to read as a result
-const SMALL_N = 10, small = (r) => (r.n !== null && r.n < SMALL_N ? "smalln" : ""), nCell = (r) => (r.n === null ? "—" : r.n < SMALL_N ? `${r.n} <span class="mut">(small n)</span>` : String(r.n));
-const rng = (x) => (x.lo === null || x.hi === null ? "—" : `${x.lo}–${x.hi}%`);
-const HIGHER_BETTER = new Set(["hit", "captured_pct"]);
-// "old -> new (+delta)": green when better, red when worse; lower is better for wer/cer/wrong_pct
-function cmp(o, n, key, unit = "", sig = false) {
-  const a = o?.[key] ?? null, b = n?.[key] ?? null;
-  const f = (v) => (v === null ? "—" : String(Math.round(v * 1000) / 1000) + unit);
-  if (a === null || b === null) return `<td>${f(a)} → ${f(b)}</td>`;
-  const d = Math.round((b - a) * 1000) / 1000, better = HIGHER_BETTER.has(key) ? d > 0 : d < 0;
-  return `<td class="${!sig || d === 0 ? "" : better ? "good" : "bad"}">${f(a)} → ${f(b)} <span class="mut">(${d > 0 ? "+" : ""}${d}${unit})</span></td>`;
-}
-const verdictHtml = (v) => (v ? `<span class="vd ${esc(v.status)}">${esc(v.status)}</span>${v.note ? ` <span class="mut">${esc(v.note)}</span>` : ""}` : `<span class="mut">no verdict supplied</span>`);
-const meta = (s, extra = "") => `<p class="mut">run ${esc(s.run_id || "?")} · old <code>${esc(s.old || "?")}</code> → new <code>${esc(s.new || "?")}</code> · pre-registered <code>${esc(s.prereg ? s.prereg.slice(0, 12) : "not stated")}</code>${extra} · ${verdictHtml(s.verdict)}</p>`;
-const pending = (t, why) => `<div class="sc"><h2>${esc(t)}</h2><p class="none">${esc(why)}</p></div>`;
-export function scorecardHtml(sc) {
-  if (!sc) return "";
-  const parts = [];
-  if (!sc.s1) parts.push(pending("S1 synthetic truth (exact)", "pending: the router-fix eval on the SELFTEST suite has not been loaded."));
-  else {
-    const per = sc.s1.rows.filter((r) => r.cond === "all"), other = sc.s1.rows.filter((r) => r.cond !== "all");
-    const tr = (r, lab) => `<tr class="${small(r)}"><td>${esc(lab)}</td><td>${nCell(r)}</td>${cmp(r.old, r.new, "wer", "", r.sig)}${cmp(r.old, r.new, "cer", "", r.sig)}${cmp(r.old, r.new, "hit", "%", r.sig)}</tr>`;
-    const T = (rows, lab) => `<table><thead><tr><th>${lab}</th><th>n</th><th>WER</th><th>CER</th><th>item hit</th></tr></thead><tbody>${rows}</tbody></table>`;
-    parts.push(`<div class="sc"><h2>S1 synthetic truth (exact)</h2>${meta(sc.s1, sc.s1.suite ? ` · suite <code>${esc(sc.s1.suite)}</code>` : "")}${T(per.map((r) => tr(r, r.lang)).join("") || `<tr><td colspan="5" class="none">no per-language rows</td></tr>`, "language")}` +
-      (other.length ? `<details><summary>per noise condition (${other.length} rows)</summary>${T(other.map((r) => tr(r, `${r.lang} · ${r.cond}`)).join(""), "language · condition")}</details>` : "") + `</div>`);
-  }
-  if (!sc.s2) parts.push(pending("S2 clinical truth (real consults, CAP scorer)", "pending: cap's router arm has not been loaded."));
-  else {
-    const tr = (r) => `<tr class="${small(r)}"><td>${esc(r.scope)}</td><td>${nCell(r)}</td>${cmp(r.old, r.new, "captured_pct", "%", r.sig)}<td class="mut">${rng(r.old)} → ${rng(r.new)}</td></tr>`;
-    parts.push(`<div class="sc"><h2>S2 clinical truth (real consults, CAP scorer)</h2>${meta(sc.s2, ` · scorer <code>${esc(sc.s2.scorer || "?")}</code> · ${sc.s2.sample.consults ?? "?"} consults, ${sc.s2.sample.items ?? "?"} items${sc.s2.envelope ? ` · link envelope: confirmed-false ${esc(sc.s2.envelope)}%` : ""}${sc.s2.nflip !== null ? ` · noise: ${sc.s2.nflip} flips` : ""}`)}<p class="mut">Ranges are exact 95% on items; items cluster in consults, so read them as optimistic.</p>` +
-      `<table><thead><tr><th>scope</th><th>items</th><th>captured</th><th>held-out range: old → new</th></tr></thead><tbody>${sc.s2.rows.map(tr).join("") || `<tr><td colspan="4" class="none">no rows</td></tr>`}</tbody></table></div>`);
-  }
-  if (!sc.s3) parts.push(pending("S3 language truth (real windows, listening judge)", "pending: the language-judge run has not been loaded."));
-  else {
-    const j = sc.s3.judge;
-    const jl = j ? `judge ${esc(j.model || "?")}, validated on ${esc(j.validated_on || "?")}: ${j.overall === null ? "?" : j.overall + "%"} overall${Object.keys(j.per_lang).length ? " (" + Object.entries(j.per_lang).map(([k, v]) => `${esc(k)} ${v}%`).join(", ") + ")" : ""}` : "no judge validation supplied";
-    const hasRows = sc.s3.rows.length > 0;
-    // refuter-2 #4343: this is a SYNTHETIC estimate from a validation suite, not a measurement on the real windows in the rows below - the wording must say so, every time
-    const keptTxt = sc.s3.kept !== null ? ` · kept-set error on the synthetic validation suite: <b>${sc.s3.kept}%</b> (not measured on these windows)`
-      : hasRows ? ` · <b class="warn">kept-set error: NOT MEASURED — numbers not interpretable</b>` : "";
-    // S3 is indicative only: colour never applies here, whatever a row's sig says (that would read as a verdict)
-    const tr = (r) => `<tr class="${small(r)}"><td>${esc(r.lang)}</td><td>${nCell(r)}</td>${cmp(r.old, r.new, "wrong_pct", "%", false)}<td class="mut">${r.kept === null ? (hasRows ? "NOT MEASURED" : "—") : r.kept + "%"}</td></tr>`;
-    const diagHtml = sc.s3.diagNote ? `<p class="mut">${esc(sc.s3.diagNote)}</p>` : "";
-    parts.push(`<div class="sc"><h2>S3 language truth (real windows, listening judge) — INDICATIVE, NOT A GATE</h2>${meta(sc.s3)}<p class="warn">Indicative only: this score does not decide a win or a loss (Fable ruling 27 Sep). ${jl}${keptTxt}</p>${diagHtml}` +
-      `<table><thead><tr><th>language heard</th><th>windows</th><th>sent down the wrong path</th><th>kept-set error (synthetic suite)</th></tr></thead><tbody>${sc.s3.rows.map(tr).join("") || `<tr><td colspan="4" class="none">no rows</td></tr>`}</tbody></table></div>`);
-  }
-  return `<section class="scorecard"><h1>Scorecard: old router vs new router, same audio</h1><p class="mut">Three automatic scores, pre-registered. A change wins only if S2 improves and S1 does not get worse. S3 (language truth) is INDICATIVE ONLY, not a gate (Fable ruling, 27 Sep: v3 misses real mixed speech and would mislabel ~10% of kept windows in noise); every S3 number is shown with its kept-set error rate. Numbers are shown neutral; green / red appears only where the evaluator marked a row as significant under its pre-registered rule. The per-clip table below is for spot-checks.</p>${parts.join("")}</section>`;
-}
-
 export async function clarityModel(env) {
   const get = async (key) => { try { const o = env.RATINGS && (await env.RATINGS.get(key)); return o ? JSON.parse(await o.text()) : null; } catch { return null; } };
-  const clips = await get("clarity/clips.json"), fixed = await get("clarity/fixed.json"), sc = await get("clarity/scorecard.json");
-  const fx = fixedOf(fixed);   // R3/W51: a blind-day clip leaves the page entirely (text, router output and audio)
-  fx.rows = Object.fromEntries(Object.entries(fx.rows).filter(([id]) => !BLIND_CLIPS.has(id)));
-  return { rows: clipsOf(clips).filter((r) => !BLIND_CLIPS.has(r.id)), fixed: fx, loaded: !!clips, sc: scorecardOf(sc) };
+  const clips = await get("clarity/clips.json"), fixed = await get("clarity/fixed.json");
+  return { rows: clipsOf(clips), fixed: fixedOf(fixed), loaded: !!clips };
 }
 
 export function parseFilters(search) {
@@ -167,10 +79,6 @@ audio{width:100%;max-width:420px;height:36px;margin:6px 0}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px}.col{border:1px solid var(--line);border-radius:8px;padding:6px 8px;min-width:0}
 .col h3{margin:0 0 3px;font-size:12px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.03em}.col p{margin:0;white-space:pre-wrap}.col .none{color:var(--mut);font-style:italic}
 .warn{color:var(--warn)}.chg{background:var(--hi)}
-.scorecard h1{font-size:19px;margin:10px 0 2px}.sc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:10px 0;overflow-x:auto}.sc.grey{opacity:.6}.sc h2{font-size:16px;margin:0 0 2px}.sc p{margin:2px 0}
-.sc tr.smalln td{opacity:.55}.sc table{border-collapse:collapse;width:100%;font-size:13px;margin:6px 0}.sc th,.sc td{border:1px solid var(--line);padding:3px 6px;text-align:left}.sc th{background:var(--bg)}.sc code{font-size:12px}
-.good{color:#1a7f37;font-weight:600}.bad{color:var(--warn);font-weight:600}.vd{border-radius:99px;padding:0 8px;font-weight:600;background:var(--line)}.vd.win{background:#a9d9a3;color:#111}.vd.worse{background:#f0b98f;color:#111}
-@media (prefers-color-scheme:dark){.good{color:#7fd58f}}
 `;
 
 const fmtP = (v) => (v === null ? "n/a" : v.toFixed(2));
@@ -211,5 +119,5 @@ export function clarityPage(model, f, search = "") {
   const body = !model.loaded ? `<p class="mut">The CLARITY data is not loaded yet (clarity/clips.json is missing).</p>` : `${flt}<p class="mut">Showing ${rows.length} of ${model.rows.length} clips. Fixed router: ${nFixed ? `${nFixed} clips from ${esc(model.fixed.run_id || "router-fix")}` : "empty until router-fix's offline eval is loaded"}. Script check compares SraVaani's output with the script the router tag implies.</p>${cards || `<p class="mut">No clip matches these filters.</p>`}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
 <title>ETA lab — CLARITY</title><style nonce="__NONCE__">${CSS}</style></head>
-<body><header><h1>ETA lab — CLARITY: label200 clips, engines side by side</h1><nav><a href="/">Viewer</a><a href="/clarity">Reset filters</a></nav></header><main>${scorecardHtml(model.sc)}${body}</main></body></html>`;
+<body><header><h1>ETA lab — CLARITY: label200 clips, engines side by side</h1><nav><a href="/">Viewer</a><a href="/clarity">Reset filters</a></nav></header><main>${body}</main></body></html>`;
 }

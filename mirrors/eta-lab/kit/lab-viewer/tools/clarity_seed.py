@@ -4,8 +4,6 @@
   clarity_seed.py build      --out ~/eta-data/clarity-build                 # verifies every input sha, encodes the 200 clips to opus/webm, writes clarity/clips.json
   clarity_seed.py load       --dir ~/eta-data/clarity-build                 # puts clarity/clips.json + clarity/audio/Lnnn.webm; refuses to replace an existing object
   clarity_seed.py load-fixed --file <router-fix clarity_fixed.json>         # clarity/fixed.json (the FIXED ROUTER column); replaces the old one, keeping it under clarity/fixed-history/
-  clarity_seed.py build-scorecard --s1 <router-fix file> --s2 <cap file> --s3 <linker file> --out <dir>   # W33.5: validates the shapes in lab-viewer/SCORECARD-SHAPES.md, writes <dir>/clarity/scorecard.json (any of the three may be omitted = "pending")
-  clarity_seed.py load-scorecard --file <dir>/clarity/scorecard.json        # clarity/scorecard.json; replaces the old one, keeping it under clarity/scorecard-history/
 
 Inputs (box): ~/eta-data/readability/label200-audio/ (split's wavs + MANIFEST.tsv, sha256 d3bd5a8e...), ~/eta-data/readability/r1/label-page-seed/seed_docs.json (router tag = row `lang`),
 ~/eta-data/eta-ci-c3-out/ (stt-bench Phase B: whisper.jsonl [forced English], sravaani.jsonl, indic-ctc.jsonl, whisper-lid.jsonl; PHASEB-MANIFEST.json pins their sha256).
@@ -115,97 +113,6 @@ def load(d, resume=False):
     print(f"put {n} objects, skipped {skipped} already present")
 
 
-def put_replacing(key, f, history):
-    """put key from file; an existing object is first copied to <history>/<epoch>.json (never lost)"""
-    if exists(key):
-        old = wr("get", f"{BUCKET}/{key}", "--pipe").stdout
-        with tempfile.NamedTemporaryFile(suffix=".json") as t:
-            t.write(old); t.flush()
-            put(f"{history}/{int(time.time())}.json", t.name, "application/json")
-    put(key, f, "application/json")
-
-
-LANGS = {"en", "hi", "kn", "ta", "te", "ml", "hi-en", "kn-en", "mr", "bn", "gu", "pa", "or", "und", "mixed", "none", "all"}
-CONDS = {"clean", "fan10", "babble5", "all"}
-
-
-def _num(v, lo, hi, where):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
-        sys.exit(f"scorecard: {where}: number outside {lo}..{hi}")
-
-
-def _check_side(d, keys, where):
-    if not isinstance(d, dict):
-        sys.exit(f"scorecard: {where}: old/new must be objects")
-    for k in keys:
-        if d.get(k) is not None:
-            _num(d[k], 0, 100, f"{where}.{k}")
-
-
-def check_score(name, d):
-    if not isinstance(d, dict) or d.get("schema") != 1 or not isinstance(d.get("rows"), list) or len(d["rows"]) > 200:
-        sys.exit(f"scorecard {name}: needs schema 1 and at most 200 rows")
-    # a judge-only S3 (the judge is not proven yet, so there are no router rows) is a real, loadable state: the panel shows "judge not proven"
-    if not d["rows"] and not (name == "s3" and isinstance(d.get("judge"), dict) and d["judge"].get("usable") is False):
-        sys.exit(f"scorecard {name}: needs 1..200 rows (only an S3 whose judge is marked usable:false may have none)")
-    if not re.fullmatch(r"[0-9a-f]{12,64}", str(d.get("prereg_sha256", ""))):
-        sys.exit(f"scorecard {name}: prereg_sha256 (the pre-registration sha, hex) is required: results must be pre-registered before the run")
-    for i, r in enumerate(d["rows"]):
-        w = f"{name}.rows[{i}]"
-        if name == "s1":
-            if r.get("lang") not in LANGS or r.get("cond") not in CONDS: sys.exit(f"scorecard: {w}: bad lang/cond")
-            keys = ("wer", "cer", "hit")
-        elif name == "s2":
-            if not (r.get("scope") in ("overall", "drugs") or r.get("scope") in LANGS): sys.exit(f"scorecard: {w}: bad scope")
-            keys = ("captured_pct", "lo", "hi")
-        else:
-            if r.get("lang") not in LANGS: sys.exit(f"scorecard: {w}: bad lang")
-            keys = ("wrong_pct",)
-        _check_side(r.get("old"), keys, w + ".old"); _check_side(r.get("new"), keys, w + ".new")
-        if r.get("n") is not None: _num(r["n"], 0, 1e6, w + ".n")
-    if name == "s3":
-        j = d.get("judge")
-        if not isinstance(j, dict) or not isinstance(j.get("accuracy"), dict):
-            sys.exit("scorecard s3: judge {model, validated_on, accuracy:{overall, per_lang}, usable} is required (the judge must be proven on the SELFTEST audio first)")
-        per = j["accuracy"].get("per_lang") or {}
-        _num(j["accuracy"].get("overall"), 0, 100, "s3.judge.accuracy.overall")
-        for k, v in per.items():
-            _num(v, 0, 100, f"s3.judge.accuracy.per_lang.{k}")
-        langs = {r["lang"] for r in d["rows"] if r["lang"] != "all"}
-        derived = j["accuracy"]["overall"] >= 95 and all(k in per and per[k] >= 90 for k in langs) and all(v >= 90 for v in per.values())
-        if j.get("usable") is True and not derived:   # W33 gate: a `true` flag may not contradict its own numbers (a stricter `false`, e.g. min n per label, is the evaluator's call and is honoured)
-            sys.exit(f"scorecard s3: judge.usable=true but the accuracy numbers do not pass the gate (needs >=95 overall and >=90 in every language in the rows)")
-        if d["rows"] and d.get("kept_error_pct") is None:   # 27 Sep ruling: S3 is indicative, but every number shown must sit beside its kept-set error rate (refuter-2 #4339 F1)
-            sys.exit("scorecard s3: kept_error_pct (top-level) is required once rows exist, so every S3 number is shown with its kept-set error rate")
-        if d.get("kept_error_pct") is not None:
-            _num(d["kept_error_pct"], 0, 100, "s3.kept_error_pct")
-
-
-def build_scorecard(s1, s2, s3, out):
-    os.umask(0o077)
-    doc = {"schema": 1, "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "source_sha256": {}}
-    for name, f in (("s1", s1), ("s2", s2), ("s3", s3)):
-        if f:
-            d = json.loads(Path(f).read_text())
-            check_score(name, d)
-            doc[name] = d
-            doc["source_sha256"][name] = sha(f)
-    if not any(k in doc for k in ("s1", "s2", "s3")):
-        sys.exit("give at least one of --s1 --s2 --s3")
-    base = Path(out); base.mkdir(parents=True, exist_ok=True); base.chmod(0o700)
-    d = base / "clarity"; d.mkdir(exist_ok=True); d.chmod(0o700)
-    (d / "scorecard.json").write_text(json.dumps(doc, ensure_ascii=False)); private_file(d / "scorecard.json")
-    print("scorecard.json built with " + ", ".join(k for k in ("s1", "s2", "s3") if k in doc))
-
-
-def load_scorecard(f):
-    d = json.loads(Path(f).read_text())
-    for name in ("s1", "s2", "s3"):
-        if name in d: check_score(name, d[name])
-    put_replacing("clarity/scorecard.json", f, "clarity/scorecard-history")
-    print("put clarity/scorecard.json")
-
-
 def load_fixed(f):
     d = json.loads(Path(f).read_text())
     rows = d.get("rows")
@@ -214,7 +121,12 @@ def load_fixed(f):
     for k, v in rows.items():
         if not ID.match(k) or not isinstance(v, dict) or not re.match(r"^[a-z]{2,8}$", str(v.get("tag", ""))):
             sys.exit(f"fixed file: bad row {k!r}")
-    put_replacing("clarity/fixed.json", f, "clarity/fixed-history")
+    if exists("clarity/fixed.json"):
+        old = wr("get", f"{BUCKET}/clarity/fixed.json", "--pipe").stdout
+        with tempfile.NamedTemporaryFile(suffix=".json") as t:
+            t.write(old); t.flush()
+            put(f"clarity/fixed-history/{int(time.time())}.json", t.name, "application/json")
+    put("clarity/fixed.json", f, "application/json")
     print(f"put clarity/fixed.json ({len(rows)} rows)")
 
 
@@ -224,7 +136,5 @@ if __name__ == "__main__":
     sub.add_parser("build").add_argument("--out", required=True)
     l = sub.add_parser("load"); l.add_argument("--dir", required=True); l.add_argument("--resume", action="store_true")
     sub.add_parser("load-fixed").add_argument("--file", required=True)
-    bs = sub.add_parser("build-scorecard"); [bs.add_argument(x) for x in ("--s1", "--s2", "--s3")]; bs.add_argument("--out", required=True)
-    sub.add_parser("load-scorecard").add_argument("--file", required=True)
     a = ap.parse_args()
-    {"build": lambda: build(a.out), "load": lambda: load(a.dir, a.resume), "load-fixed": lambda: load_fixed(a.file), "build-scorecard": lambda: build_scorecard(a.s1, a.s2, a.s3, a.out), "load-scorecard": lambda: load_scorecard(a.file)}[a.cmd]()
+    {"build": lambda: build(a.out), "load": lambda: load(a.dir, a.resume), "load-fixed": lambda: load_fixed(a.file)}[a.cmd]()
