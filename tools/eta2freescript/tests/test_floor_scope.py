@@ -366,3 +366,69 @@ def test_random_differential_medicine_is_never_eta_when_global_is_not():
                             and floors._field_source(m, field, art, None, "global") != "eta"), (art["note_text"], m, field)
         n += 1
     assert n >= 2000
+
+
+# ---- fix round 4: adjacency, kind match, NUL, non-string note_text -------------------------------------------------
+
+_SEPS = [c for c in map(chr, range(33, 127)) if not c.isalnum()] + ["…", "\r", "\n", "\x00"]
+
+
+@pytest.mark.parametrize("sep", _SEPS)
+def test_r4_any_separator_but_spaces_and_tabs_breaks_a_number_from_its_quantity_word(sep):
+    for pre, post in (("", ""), (" ", ""), ("", " "), (" ", " ")):
+        said = f"bed five{pre}{sep}{post}tablets are not helping"
+        assert _inv(strength="5 mg")(said)["count"] == 1, (sep, pre, post)
+        assert floors.spoken_values(said) == set(), (sep, pre, post)
+
+
+@pytest.mark.parametrize("sep", _SEPS)
+def test_r4_the_half_path_breaks_on_the_same_separators(sep):
+    for pre, post in (("", ""), (" ", ""), ("", " "), (" ", " ")):
+        assert floors.spoken_values(f"page 1/2{pre}{sep}{post}tablets not helping") == set(), (sep, pre, post)
+
+
+def test_r4_spaces_tabs_and_one_article_still_join():
+    for said in ("five tablets", "five\ttablets", "five \t  tablets", "five a tablet", "five of tablets", "twenty-five mg", "1/2\ttablet"):
+        assert floors.spoken_values(said), said
+    assert floors.spoken_values("five a an tablet") == set()
+    assert _inv(strength="5 mg")("take five.tablets")["count"] == 1
+    assert _inv(strength="0.5 mg")("page 1/2\ntablets not helping")["count"] == 2  # runs 0 and 5
+    assert _inv(strength="25 mg")("twenty-five milligram")["count"] == 0
+
+
+def test_r4_a_spoken_value_excuses_only_a_field_of_its_own_kind():
+    assert _inv(strength="40 mg")("forty years old")["count"] == 1
+    assert _inv(strength="40 mg")("forty mg")["count"] == 0
+    assert _inv(duration="40 days")("for forty days")["count"] == 0
+    assert _inv(duration="40 days")("forty mg")["count"] == 1
+    assert _inv(duration="2 weeks")("two weeks")["count"] == 0 and _inv(duration="2 weeks")("two tablets")["count"] == 1
+    assert _inv(frequency="3 times")("three times")["count"] == 0 and _inv(frequency="3 times")("three days")["count"] == 1
+    assert _inv(frequency="2 daily")("two a day")["count"] == 0 and _inv(frequency="1 twice")("one twice")["count"] == 0
+    assert _inv(strength="3 mg")("three a day")["count"] == 1
+    assert floors.spoken_values("forty years old", "strength") == set()
+    assert floors.spoken_values("forty years old", "duration") == {Decimal(40)}
+    assert floors.spoken_values("forty years old") == {Decimal(40)}
+
+
+def test_r4_nul_in_a_replayed_field_gives_the_same_class_in_both_modes():
+    art = _syn("Medication:\nParacetamol once daily\nAmoxicillin 500 mg\nafter food", [_prov("Paracetamol"), _prov("Amoxicillin")])
+    its_rows = {"n": 1, "said": "yes", "leak": False, "invented": ["frequency"], "dose_precedence_error": False, "turns": []}
+    for val in ("\x00", "daily \x00 after", "daily\x00 after food", "\x00\x00"):
+        rx = {"medicines": [{**CAT, "frequency": val}]}
+        its = floors.numbered_items(rx)
+        res = [floors._judge_attribution([its_rows], its, art, mode)["invented_fields"] for mode in ("global", "medicine")]
+        assert res[0] == res[1], (val, res)
+        fs = [floors._field_source(rx["medicines"][0], "frequency", art, None, mode) for mode in ("global", "medicine")]
+        assert fs[0] == fs[1], (val, fs)
+
+
+def test_r4_non_string_note_text_is_handled_in_medicine_mode_as_in_global():
+    c = _consult("hello")
+    for bad in (["Paracetamol 500 mg"], 5, None, {"a": 1}):
+        art = _syn("x", [_prov("Paracetamol")])
+        art["note_text"] = bad
+        rx = {"medicines": [{**CAT, "strength": "500 mg", "frequency": "twice"}]}
+        res = [floors._invented_core(rx, art, c, mode) for mode in ("global", "medicine")]
+        assert res[0]["sources"] == res[1]["sources"], (bad, res)
+        fs = [floors._field_source(rx["medicines"][0], "frequency", art, None, mode) for mode in ("global", "medicine")]
+        assert fs[0] == fs[1], bad

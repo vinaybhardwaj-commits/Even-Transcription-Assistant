@@ -274,7 +274,8 @@ def _cited_turns(p: dict) -> list[int]:
 _UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
                                      "sixteen seventeen eighteen nineteen".split())}
 _TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
-_SPOKEN_TOKEN = re.compile(r"[a-z]+|\d+|\.(?=\s|$)|[?!;\n]")  # a sentence break is a token, so no number-quantity link spans one
+_SPOKEN_TOKEN = re.compile(r"[a-z]+|\d+|[^a-z\d \t]")  # only spaces and tabs separate tokens silently; any other character is a break token
+_TENS_UNIT = re.compile(r"\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)-(one|two|three|four|five|six|seven|eight|nine)\b")
 
 
 def _digit_word_run(toks: list[str], j: int) -> tuple[str, int]:
@@ -323,7 +324,7 @@ def _integer_at(toks: list[str], j: int):
 def _scan_numbers(text: str):
     """(tokens, spans): every number the text speaks, as (value, start, end, kind) over token indexes; kind is "num", "digit" (a bare
     digit token), "half" or "lead_point" ("point five" with no number before it)."""
-    toks = _SPOKEN_TOKEN.findall((text or "").lower())
+    toks = _SPOKEN_TOKEN.findall(_TENS_UNIT.sub(r"\1 \2", (text or "").lower()))
     out: list[tuple[Decimal, int, int, str]] = []
     i, n = 0, len(toks)
     while i < n:
@@ -362,20 +363,45 @@ def parse_number_words(text: str) -> list[Decimal]:
 
 # Safety floor: a number word is "heard" only when it is plainly a quantity: the next token (past one a/an/of) is a quantity word in the same sentence.
 # Clock-time units (hour, minute) are deliberately absent: "fifteen minutes in the waiting room" is not a 15 mg strength.
-_QUANTITY = frozenset(
+_TIME_UNITS = frozenset("day week month year".split())
+_DOSAGE_UNITS = frozenset(
     "mg g gm gms gram milligram mcg microgram kg ml millilitre milliliter l litre liter iu unit tablet tab capsule cap spoon teaspoon "
-    "tablespoon drop puff sachet sachets patch lozenge ampoule vial injection time day week month year dose".split())
+    "tablespoon drop puff sachet sachets patch lozenge ampoule vial injection dose".split())
+_FREQ_WORDS = frozenset("time dose daily twice thrice".split())
+_QUANTITY = _TIME_UNITS | _DOSAGE_UNITS | _FREQ_WORDS
 
 
-def _is_quantity_word(tok: str) -> bool:
-    return tok in _QUANTITY or (tok.endswith("s") and tok[:-1] in _QUANTITY) or (tok.endswith("es") and tok[:-2] in _QUANTITY)
+def _quantity_base(tok: str) -> str | None:
+    for b in (tok, tok[:-1] if tok.endswith("s") else None, tok[:-2] if tok.endswith("es") else None):
+        if b and b in _QUANTITY:
+            return b
+    return None
 
 
-def spoken_values(text: str) -> set[Decimal]:
+def _quantity_kinds(tok: str, after_a: bool = False) -> frozenset:
+    """The replayed field kinds a quantity word can excuse: strength <- mass, volume, unit, dosage form; duration <- day/week/month/year;
+    frequency <- "times", a dosing word, or "N a day"."""
+    b = _quantity_base(tok)
+    if b is None:
+        return frozenset()
+    k = set()
+    if b in _DOSAGE_UNITS:
+        k.add("strength")
+    if b in _TIME_UNITS:
+        k.add("duration")
+        if after_a:
+            k.add("frequency")
+    if b in _FREQ_WORDS:
+        k.add("frequency")
+    return frozenset(k)
+
+
+def spoken_values(text: str, field: str | None = None) -> set[Decimal]:
     """The numbers the text plainly speaks as a quantity, whole (0.5 stays 0.5, never the runs 0 and 5), whatever their words: single
     words, compounds, decimals, "N and a half". ONE check at the exit: a value counts only if the next token, after an optional "a",
-    "an" or "of", is a quantity word. So every value returned is immediately followed by a quantity word in the source text. A bare
-    "point" counts only after a number. Bare digit tokens are the digit-run path's business, not this one's."""
+    "an" or "of", is a quantity word. So every value returned is immediately followed by a quantity word in the source text, with only spaces or tabs (and that one a/an/of)
+    between them: any other character is a break. With `field` ("strength", "duration", "frequency") only values whose quantity word suits
+    that kind come back. A bare "point" counts only after a number. Bare digit tokens are the digit-run path's business, not this one's."""
     toks, spans = _scan_numbers(text)
     cands: list[tuple[Decimal, int]] = []  # (value, index after its last token)
     k = 0
@@ -392,17 +418,21 @@ def spoken_values(text: str) -> set[Decimal]:
         k += 1
     out: set[Decimal] = set()
     for v, j in cands:  # the ONE quantity-context check
-        n = j + 1 if toks[j:j + 1] and toks[j] in ("a", "an", "of") else j
-        if n < len(toks) and _is_quantity_word(toks[n]):
-            out.add(v)
+        skip = bool(toks[j:j + 1]) and toks[j] in ("a", "an", "of")
+        n = j + 1 if skip else j
+        if n < len(toks):
+            ks = _quantity_kinds(toks[n], skip and toks[j] == "a")
+            if ks and (field is None or field in ks):
+                out.add(v)
     # "1/2" in digits counts as 0.5 only before a quantity word
     for m in _SLASH_HALF.finditer((text or "").lower()):
-        if _is_quantity_word(m.group(1)):
+        ks = _quantity_kinds(m.group(1))
+        if ks and (field is None or field in ks):
             out.add(Decimal("0.5"))
     return out
 
 
-_SLASH_HALF = re.compile(r"(?<![\d/.])1\s*/\s*2(?![\d/])\s+(?:(?:a|an|of)\s+)?([a-z]+)")
+_SLASH_HALF = re.compile(r"(?<![\d/.])1[ \t]*/[ \t]*2(?![\d/])[ \t]+(?:(?:a|an|of)[ \t]+)?([a-z]+)")
 
 
 FLOOR_SCOPES = ("global", "medicine")
@@ -524,7 +554,7 @@ def _text_in(value: str, text: str) -> bool:
 
 def _in_text(value: str, text: str) -> bool:
     """Digits: every digit run of value occurs among the digit runs of text. No digits: normalised substring."""
-    value, text = _numnorm(value), _numnorm(text)
+    value, text = _numnorm(value).replace(_CUT, ""), _numnorm(text)
     runs = _DIGITS.findall(value)
     if runs:
         have = set(_DIGITS.findall(text))
@@ -551,7 +581,8 @@ def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None
     not this one, and other medicines' provenance items. It adds nothing global does not read (no gp_extraction text). Non-medicine
     lines, follow-up and other provenance stay, so a run found there is ETA's. None when no ETA line pairs with this medicine or 2+ lines could (then the global rule applies)."""
     names = _rx_names(m)
-    lines = [ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip()]
+    note = (art or {}).get("note_text")
+    lines = [ln for ln in (note if isinstance(note, str) else "").split("\n") if ln.strip()]
     if sum(1 for ln in lines if _names_match(names, {_norm_name(ln)})) != 1:
         return None
     others = [p for p in (art or {}).get("provenance") or [] if _is_other_medicine(p, m)]
@@ -585,7 +616,7 @@ def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | No
 
 def _field_source(m: dict, field: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
     """Source of a whole replayed medicine field (judge floors, which flag a field, not a digit run)."""
-    value = _s(m.get(field))
+    value = _s(m.get(field)).replace(_CUT, "")
     if not value:  # a field the judge invented that the rx leaves empty: in doubt, ETA's
         return "eta"
     own = _medicine_output(m, art, prov) if floor_scope(scope) == "medicine" else None
@@ -626,15 +657,16 @@ def _invented_core(rx: dict, art: dict | None, consult: Consult, scope: str | No
             unmatched += 1
             sources.append(_worst(_run_source(m, k, r, art, None, scope) for k, r in runs))
             continue
-        heard, spoken = set(), set()
+        heard, spoken = set(), {k: set() for k in ("strength", "frequency", "duration")}
         for t in _cited_turns(match):
             if 0 <= t < len(consult.turns):
                 said = f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"
                 heard |= set(_DIGITS.findall(said))
-                spoken |= spoken_values(said)
+                for k in spoken:
+                    spoken[k] |= spoken_values(said, k)
         # a number spoken in words is heard only as a whole value: an rx number equals a spoken value or it is not heard that way
         bad = [(k, r) for k in ("strength", "frequency", "duration") for tok in _NUMBER.findall(m.get(k) or "")
-               if Decimal(tok) not in spoken for r in _DIGITS.findall(tok) if r not in heard]
+               if Decimal(tok) not in spoken[k] for r in _DIGITS.findall(tok) if r not in heard]
         offending += len(bad)
         sources += [_run_source(m, k, r, art, match, scope) for k, r in bad]
     return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched,
