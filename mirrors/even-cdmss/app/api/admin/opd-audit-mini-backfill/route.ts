@@ -40,8 +40,7 @@ export const maxDuration = 300;
  * a Bedrock run does not touch.
  *
  * Auth: Vercel cron header / Bearer|?secret=CRON_SECRET / admin session — unchanged.
- *   GET  ?auto=1        → work the active run (the cron tick); with NO active OPD run, the tick
- *                          works the readmission-narrative worker's run instead (R4-8, 18 Aug)
+ *   GET  ?auto=1        → work the active run (the cron tick)
  *   GET  (no args)      → status
  *   POST {action:…}     → start_run | pause | resume | stop | status   (§C3)
  */
@@ -57,6 +56,13 @@ import { probeReachable } from '@/lib/lab-override';
 import { MINI_MODEL, modelsAgree, geminiModelFor, geminiUtilityModel } from '@/lib/llm';
 import { PRICING } from '@/lib/llm-cost';
 import { costUsd } from '@/lib/llm-cost-core';
+import { telemetryContextFor, type TelemetryRequestContext } from '@/lib/retrieval-telemetry-core';
+import {
+  declareNoteRuns, readRetrievalTelemetry, TelemetryDeclarationError,
+  type LifecycleHandle, type ManifestDefectsByRole,
+} from '@/lib/retrieval-telemetry-store';
+import { startInvocation } from '@/lib/retrieval-invocation-store';
+import { settleOwned, outcomeForOwnedSave } from '@/lib/retrieval-settlement';
 import {
   planRunCreate, planTick, canStartRun, advanceAfterTick, planStatusChange, RUN_MODEL_PREFIXES,
   type BackfillRun,
@@ -65,8 +71,6 @@ import {
   activeRun, currentRun, createRun, recentRuns, setRunCursor, setRunStatus, addRunProgress,
   usageForTrace, servedCallForAudit,
 } from '@/lib/backfill-runs';
-import { narrativeTick } from '@/lib/readmission/narrative-backfill';
-import { refreshTick } from '@/lib/readmission/refresh';
 
 const WORKER = 'opd' as const;
 
@@ -127,7 +131,7 @@ function resolveRunModel(model: string): RunModel {
  * `cloudAuditedUidsForDay`, both fed to the fetch as a skip list, and `ON CONFLICT DO NOTHING`
  * inside saveOpdAudit as the last line of defence. This is what makes a prod-line label safe.
  */
-async function processRunBatch(run: BackfillRun, day: string, resolved: Extract<RunModel, { ok: true }>) {
+async function processRunBatch(run: BackfillRun, day: string, resolved: Extract<RunModel, { ok: true }>, ctx: TelemetryRequestContext) {
   const { provider, modelId } = resolved;
   const total = await countOpdNotesForDay(day);
   const already = await auditedUidsForDayInLine(day);
@@ -135,19 +139,39 @@ async function processRunBatch(run: BackfillRun, day: string, resolved: Extract<
   const skip = [...new Set([...already, ...cloudDone])];
   const rows = total > skip.length ? await fetchOpdNotesForDay(day, skip, run.n_per_tick) : [];
 
+  // The worker's declaration shape, over this tick's note set, before any provider work (D10).
+  // Fail-closed here too: the caller turns a TelemetryDeclarationError into a 503 and the tick
+  // grades nothing, which is the same trade the worker makes and for the same reason.
+  const runIds = await declareNoteRuns(ctx, rows as Array<Record<string, unknown>>, OPD_ENGINE_VERSION);
+
   const results: Record<string, unknown>[] = [];
   let processed = 0, failed = 0, tokensIn = 0, tokensOut = 0, cost = 0;
   let lastError: string | null = null;
 
-  for (const row of rows) {
+  for (const [idx, row] of rows.entries()) {
     const started = Date.now();
+    let handle: LifecycleHandle = {
+      invocationId: ctx.invocationId,
+      runs: [{ role: 'primary', runId: runIds[idx], expectedRevision: 0 }],
+      persistenceIntent: 'will_persist',
+    };
+    let published = false;
+    /** The last map the callback delivered (v10 requirement 4), for the paths that return no audit. */
+    let publishedDefects: ManifestDefectsByRole | undefined;
     try {
       // No `pipeline: 'mini'`, no `engineTag`: the row carries the PLAIN prod engine version.
       // ⚠️ ONE THREADING RULE, TWO PROVIDERS. A bedrock run hands the leg its modelId (the S2 path,
       // unchanged); a VERTEX run passes nothing, because the production audit path IS the Gemini
       // arm — that is the whole point of §C2, and inventing a second way to reach Gemini here would
       // make the arm something other than "what production does".
-      const audit = await auditOpdNote(row, provider === 'bedrock' ? { bedrockModel: modelId } : {});
+      const audit = await auditOpdNote(row, {
+        ...(provider === 'bedrock' ? { bedrockModel: modelId } : {}),
+        telemetry: { ctx, route: 'opd_audit_mini_backfill', persistenceIntent: 'will_persist' },
+        predeclaredTelemetry: { primary: { runId: runIds[idx], expectedRevision: 0 } },
+        // ⚠️ `if (d)` IS LOAD-BEARING. The DECLARATION publication passes no map, and letting it
+        // overwrite a real one with undefined would throw away the verdict this exists to keep.
+        onLifecycleHandleUpdated: (h, d) => { handle = h; published = true; if (d) publishedDefects = d; },
+      });
       // ⚠️ THE MODEL STAMP IS WHAT SERVED, READ BACK OFF THIS NOTE'S OWN TRACE. The autopilot
       // stamped MINI_MODEL, which was true for it and would be a lie for this runner; S2 stamped
       // the resolved bedrock id, which was true because that branch has no ladder. Neither is safe
@@ -160,15 +184,35 @@ async function processRunBatch(run: BackfillRun, day: string, resolved: Extract<
       if (served.model && !modelsAgree(served.model, modelId)) {
         throw new Error(`DEC-2: run ${run.id} asked ${provider}:${modelId} but ${served.provider ?? '?'}:${served.model} answered — no row written`);
       }
+      // ⚠️ THE ROLE MAP, NOT A FLAT LIST (pass 0b). Settlement applies each run's own role's
+      // verdict; passing one merged array is what made a normative defect dirty the primary row.
+      // ⚠️ NO `?? {}` (v10 requirement 5). An empty map is NOT "no map": under requirement 6 a
+      // PROVIDED map carrying no key for a role settles that linkable role partial, so `?? {}` would
+      // have made every uninstrumented save partial and left requirement 7 unreachable. The attached
+      // map first, then whatever the callback delivered, then undefined — which is a real answer.
+      const defectsByRole = readRetrievalTelemetry(audit)?.manifestDefectsByRole ?? publishedDefects;
+      let linked = false;
       const status = await saveOpdAudit(audit, {
         model: served.model ?? modelId, provider: served.provider ?? provider, latencyMs: Date.now() - started,
+      }, {
+        onPersisted: async ({ status: st, auditId }) => {
+          linked = true;
+          await settleOwned(handle, outcomeForOwnedSave(st), auditId, defectsByRole);
+        },
       });
+      if (!linked) await settleOwned(handle, outcomeForOwnedSave(status), null, defectsByRole);
       const usage = await usageForTrace(audit.traceId);
       const usd = costUsd(served.model ?? modelId, usage.tokensIn, usage.tokensOut, false, PRICING);
       tokensIn += usage.tokensIn; tokensOut += usage.tokensOut; cost += usd;
       if (status === 'inserted') processed++;
       results.push({ uid: audit.keys.uid, index: audit.scorecard.headline, band: audit.scorecard.band, status, ms: Date.now() - started, model: served.model ?? modelId, provider: served.provider ?? provider, tokens_in: usage.tokensIn, tokens_out: usage.tokensOut, usd: Number(usd.toFixed(4)), traceId: audit.traceId ?? null });
     } catch (e) {
+      // ⚠️ THE DEC-2 REFUSAL IS `persistence_refused`, NOT a generation failure (D9). It is thrown
+      // from inside this try, so it arrives here alongside real audit failures and has to be told
+      // apart by what it is: a decision not to persist a completed audit.
+      await settleOwned(handle,
+        /^DEC-2:/.test(String((e as Error).message)) ? 'persistence_refused'
+          : published ? 'audit_generation_failed' : 'retrieval_not_run');
       // A NOTE that fails is data, not an outage: count it, record why, keep going. A whole run
       // must not be lost to one unparseable note.
       failed++;
@@ -188,24 +232,13 @@ async function processRunBatch(run: BackfillRun, day: string, resolved: Extract<
 }
 
 /** The cron tick (?auto=1): work the ACTIVE run for this worker. */
-async function autoTick(): Promise<Record<string, unknown>> {
+async function autoTick(headers?: Headers): Promise<Record<string, unknown>> {
   const run = await activeRun(WORKER);
   const plan = planTick(run);
 
   if (plan.action === 'idle') {
     await logTick({ status: 'paused', note: plan.reason });
-    // R4-8 (18 Aug 2026): with NO active OPD run this cron tick is otherwise wasted, so it works the
-    // readmission-NARRATIVE worker's active run instead (lib/readmission/narrative-backfill.ts) —
-    // same rails, its own run row, its own lock, never while an OPD run is active (serial by
-    // design). vercel.json is untouched: this is how the narrative run gets its cron ticks.
-    const readmission = await narrativeTick().catch((e) => ({ worker: 'readmission' as const, error: String((e as Error).message).slice(0, 300) }));
-    // R4.1 (R41-7): and if the narrative worker had nothing to do either, the template-REFRESH
-    // worker's active run gets the tick (lib/readmission/refresh.ts) — serial by construction:
-    // OPD run > narrative run > refresh run, one worker per cron fire, one case per refresh tick.
-    const refresh = 'idle' in readmission && readmission.idle
-      ? await refreshTick().catch((e) => ({ worker: 'readmission_refresh' as const, error: String((e as Error).message).slice(0, 300) }))
-      : { worker: 'readmission_refresh' as const, skipped: 'narrative worker ticked this fire' };
-    return { auto: true, idle: true, note: plan.reason, readmission, refresh };
+    return { auto: true, idle: true, note: plan.reason };
   }
   if (plan.action === 'skip') {
     await logTick({ status: plan.status === 'done' ? 'finished' : 'paused', note: plan.reason, run_id: run!.id });
@@ -243,7 +276,10 @@ async function autoTick(): Promise<Record<string, unknown>> {
 
   await setSetting(MB_KEYS.lock, new Date().toISOString());
   try {
-    const batch = await processRunBatch(active, plan.day, resolved);
+    // One invocation per tick, established at this boundary and threaded down (D11).
+    const ctx = telemetryContextFor('opd_audit_mini_backfill', headers ?? null);
+    await startInvocation(ctx);
+    const batch = await processRunBatch(active, plan.day, resolved, ctx);
     await addRunProgress(active.id, {
       processed: batch.processed, failed: batch.failed,
       tokensIn: batch.tokensIn, tokensOut: batch.tokensOut, costUsd: batch.cost,
@@ -271,7 +307,11 @@ async function autoTick(): Promise<Record<string, unknown>> {
   } catch (e) {
     // A TICK that fails is infrastructure — every note in this run would fail the same way. Error
     // the run: loud, visible, resumable, and it stops burning the range against a broken provider.
-    const msg = String((e as Error).message).slice(0, 500);
+    // A TelemetryDeclarationError arrives here too: it is a refusal to start, so the tick grades
+    // nothing and the run is errored and resumable, exactly as for an unreachable provider.
+    const msg = e instanceof TelemetryDeclarationError
+      ? `503 ${e.message}`
+      : String((e as Error).message).slice(0, 500);
     await setRunStatus(active.id, 'error', msg, { onlyIfActive: true });
     await logTick({ status: 'error', note: msg.slice(0, 200), run_id: active.id });
     return { auto: true, run_id: active.id, status: 'error', error: msg };
@@ -295,7 +335,7 @@ async function statusPayload(): Promise<Record<string, unknown>> {
 export async function GET(req: NextRequest) {
   if (!(await authed(req))) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   if (req.nextUrl.searchParams.get('auto') === '1') {
-    try { return NextResponse.json({ ok: true, ...(await autoTick()) }); }
+    try { return NextResponse.json({ ok: true, ...(await autoTick(req.headers)) }); }
     catch (e) {
       await logTick({ status: 'error', note: String((e as Error).message).slice(0, 200) });
       return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 500 });

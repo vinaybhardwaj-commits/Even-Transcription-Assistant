@@ -225,7 +225,21 @@ test("chatWithFallback's OpenRouter branch passes the caller's timeout through",
   assert.ok(/\btimeoutMs,/.test(branch), 'the branch that previously dropped it now forwards it');
   // the Vertex/Ollama branches keep using reqOpts, untouched
   assert.ok(src.includes('const reqOpts = timeoutMs ? { timeout: timeoutMs } : undefined;'), 'reqOpts unchanged');
-  assert.ok(src.includes('return llm.chat.completions.create(params, reqOpts);'), 'the Ollama path is unchanged');
+  // ⚠️ SHAPE CHANGED, GUARD DID NOT (rerank telemetry §4.4, 11 Aug 2026). The Ollama return is now
+  // wrapped in `attachTransportAttribution(...)` so the traceless rerank path can report its served
+  // provider. This test is about the CEILING, not the wrapper: what it must still prove is that the
+  // Ollama path carries `reqOpts` — the per-request timeout — exactly as before. That is asserted
+  // directly below, on the call itself, which is a tighter check than the old whole-line match.
+  assert.ok(src.includes('await llm.chat.completions.create(params, reqOpts)'),
+    'the Ollama path still carries the per-request ceiling (reqOpts), unchanged');
+  // The negative is checked against CODE ONLY. `chatWithFallback`'s own doc comment says it is
+  // "byte-identical to `llm.chat.completions.create(params)`" when no gemini model is given, and a
+  // raw-source match would read that prose as a ceiling-dropping call site.
+  const llmCode = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal((llmCode.match(/llm\.chat\.completions\.create\(params, reqOpts\)/g) || []).length, 2,
+    'both fallback call sites carry reqOpts');
+  assert.equal(/llm\.chat\.completions\.create\(params\s*\)/.test(llmCode), false,
+    'and no fallback call ever drops reqOpts');
 });
 
 test("tracedChat's OpenRouter branch — THE PRODUCTION PATH — passes both through", () => {

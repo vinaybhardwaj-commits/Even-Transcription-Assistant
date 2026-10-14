@@ -34,20 +34,12 @@ import {
 import {
   fetchAdtEncounters, fetchFormReadmissions, fetchSummaryRecord,
   fetchDischargeDocForEncounter, resolveIndividualUid, fetchStructuredLabs,
-  fetchOtNotes, fetchPacNotes, fetchProgressNotes,
 } from './db13';
-import type { StructuredLabRow, TemplateFetchResult } from './db13';
-import { flattenTemplateRow, pacWindow, readmitFallbackFrom } from '../readmission-template-core';
-import type { FlattenedTemplate, TemplateFetchOutcomes } from '../readmission-template-core';
+import type { StructuredLabRow } from './db13';
 import { assembleThreeSource } from './assemble';
 import type { CaseSource, ThreeSourceInputs } from './assemble';
-import { composeCaseArtefacts } from './narrative';
-import { probeReachable } from '../lab-override';
-import { bedrockLive } from '../bedrock';
-import { classifyBedrockError, classifyNarrativeFailure } from './health';
-import type { NarrativeErrorCode } from './health';
 import {
-  saveDetection, saveAuditResult, recordAuditError, recordNarrativeError, clearNarrativeError, pairToDetectionRow, oonToDetectionRow,
+  saveDetection, saveAuditResult, recordAuditError, pairToDetectionRow, oonToDetectionRow,
   READMIT_ENGINE_VERSION,
 } from './store';
 import type { PendingRow } from './store';
@@ -73,7 +65,7 @@ export interface DetectSweepResult {
   encounters: number;
   forms: number;
   /** The FULL resolved ADT column mapping (admission/discharge/department/doctor/
-   *  encounter_id/dob/name/ward) — surfaced so the orchestrator validates every field
+   *  encounter_id/dob/name) — surfaced so the orchestrator validates every field
    *  live; a single-field miss (the excluded:0 defect) can't hide behind counts. */
   mappedCols: MappedAdtCols;
   pairsStored: number;
@@ -112,9 +104,6 @@ export interface ReadmitAuditResult {
   avoidable?: string | null;
   latencyMs?: number;
   traceId?: string | null;
-  /** R4: what the inline narrative leg did — 'skipped' when opted out (READMIT_NARRATIVE_INLINE=0)
-   *  or Bedrock is unreachable in this deployment. */
-  narrative?: 'stored' | 'invalid' | 'skipped' | 'failed';
 }
 
 /** T-5 posture: record what actually SERVED, from this audit's own trace — never a
@@ -167,7 +156,7 @@ async function vertexPass(
  * second edit to the protected module, and decision 7.1 permits exactly one (the
  * persistence write). Eight lines of duplication is the cheaper price. Flagged.
  */
-export async function fetchPdfBytes(url: string): Promise<Buffer> {
+async function fetchPdfBytes(url: string): Promise<Buffer> {
   let res = await fetch(url).catch(() => null);
   if (!res?.ok) {
     const token = await getVertexAccessToken();
@@ -177,7 +166,7 @@ export async function fetchPdfBytes(url: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
-export interface LoadedCase {
+interface LoadedCase {
   extracted: ExtractedCase | null;
   source: CaseSource;
   documentId: string | null;
@@ -190,14 +179,8 @@ export interface LoadedCase {
  *
  * Never throws: every failure path returns a null case, which the tier resolver turns
  * into TIER 3 (not auditable) rather than a guess.
- *
- * R10-A: EXPORTED (was module-private) so the re-extraction backfill
- * (lib/readmission/reextract.ts) re-uses this exact path rather than restating it. That reuse is
- * what makes the backfill idempotent by version for free: DOC_EXTRACT_VERSION bumped, so the
- * store-first read misses once, extracts, writes back — and every later call hits the store and
- * pays nothing. There is no second definition of "read this stay's discharge document".
  */
-export async function loadExtractedCase(encounterId: string | null): Promise<LoadedCase> {
+async function loadExtractedCase(encounterId: string | null): Promise<LoadedCase> {
   const miss: LoadedCase = { extracted: null, source: null, documentId: null };
   if (!encounterId) return miss;
   try {
@@ -253,68 +236,14 @@ export function indexLabWindow(args: {
   return { window: { from: toDay(startMs - 14 * DAY), to: toDay(disch + 2 * DAY) }, startInferred: inferred };
 }
 
-export interface AssembledPair {
+interface AssembledPair {
   inputs: ThreeSourceInputs;
   indexAdmitAt: string | null;
   indexDischargeAt: string | null;
-  /** R4: the identity tokens the scrub matched on — handed to the narrative leg so its own
-   *  deidText pass (LVC rationale) uses the SAME names / UHIDs. Never persisted. */
-  identity: { names: Array<string | null | undefined>; uhids: Array<string | null | undefined> };
 }
 
-/**
- * R2 source 4 (READMISSIONS-R2 PRD v1.0 §3.5): the OT / PAC / progress fetches for one
- * finding — index stay always; readmit stay for Even→Even pairs; PAC index-only (its
- * window is the index pre-admit period). ALL hops run in one Promise.all: the worker's
- * ~170 s margin does not survive serial db13 round-trips. Runs ONLY after the tier-3
- * short-circuit in assembleForRow — a not-auditable row never looks, so its coverage is
- * unwritten and its chips read `unknown` (constraint 21, stated not "fixed").
- *
- * Outcome per SOURCE spans both stays: any faulting fetch for that source → 'fetch_failed'
- * (chip `unknown`, never `absent`), rows from the fetches that did succeed still return.
- * Rows come back flattened but NOT de-identified — assemble.ts is the choke point.
- */
-async function fetchTemplatesForRow(args: {
-  indexEncounterId: string; readmitEncounterId: string | null; oon: boolean;
-  uhid: string | null; summaryUhid: string | null; summaryIpdNo: string | null;
-  /** The READMIT stay's discharge-summary row (uhid + its own ipd_no), when one exists. */
-  readmitSummary: { uhid: string | null; ipdNo: string | null } | null;
-  indexAdmitAt: string | null; indexDischargeAt: string | null;
-}): Promise<{ templates: FlattenedTemplate[]; templateFetch: TemplateFetchOutcomes }> {
-  const uhid = args.uhid ?? args.summaryUhid;
-  // The discharged-history fallback hop exists only when a discharge row exists (its uhid + ipd_no).
-  const indexFallback = args.summaryIpdNo ? { uhid: args.summaryUhid ?? uhid, ipdNo: args.summaryIpdNo } : null;
-  // Addendum A1: the readmit fallback comes from the READMIT stay's own discharge row; with no
-  // such row there is no discharged-history ipd_no distinct from the primary hop, so it is skipped.
-  const readmitFallback = readmitFallbackFrom(args.readmitSummary, uhid);
-  const doReadmit = !args.oon && !!args.readmitEncounterId;
-  const none: TemplateFetchResult = { outcome: 'ok', rows: [] };
-
-  const [otIdx, prIdx, pacIdx, otRd, prRd] = await Promise.all([
-    fetchOtNotes(args.indexEncounterId, indexFallback),
-    fetchProgressNotes(args.indexEncounterId, indexFallback),
-    fetchPacNotes(args.indexEncounterId, uhid, pacWindow(args.indexAdmitAt, args.indexDischargeAt)),
-    doReadmit ? fetchOtNotes(args.readmitEncounterId!, readmitFallback) : Promise.resolve(none),
-    doReadmit ? fetchProgressNotes(args.readmitEncounterId!, readmitFallback) : Promise.resolve(none),
-  ]);
-  const templates: FlattenedTemplate[] = [
-    ...otIdx.rows.map((r) => flattenTemplateRow(r, 'ot_note', 'index')),
-    ...otRd.rows.map((r) => flattenTemplateRow(r, 'ot_note', 'readmit')),
-    ...pacIdx.rows.map((r) => flattenTemplateRow(r, 'pac_note', 'index')),
-    ...prIdx.rows.map((r) => flattenTemplateRow(r, 'progress_note', 'index')),
-    ...prRd.rows.map((r) => flattenTemplateRow(r, 'progress_note', 'readmit')),
-  ];
-  const failed = (...rs: TemplateFetchResult[]): 'ok' | 'fetch_failed' => (rs.some((r) => r.outcome === 'fetch_failed') ? 'fetch_failed' : 'ok');
-  return {
-    templates,
-    templateFetch: { ot_note: failed(otIdx, otRd), pac_note: failed(pacIdx), progress_note: failed(prIdx, prRd) },
-  };
-}
-
-/** Fetch + de-identify one finding's inputs. A `notAuditable` reason = tier 3, stop.
- *  Exported for R4's backfill tick (lib/readmission/narrative-backfill.ts), which RE-ASSEMBLES
- *  the evidence for an already-audited finding (db13 reads, no recon legs) to build its ledger. */
-export async function assembleForRow(row: PendingRow): Promise<AssembledPair | { notAuditable: string; labTier?: LabTier }> {
+/** Fetch + de-identify one finding's inputs. A `notAuditable` reason = tier 3, stop. */
+async function assembleForRow(row: PendingRow): Promise<AssembledPair | { notAuditable: string; labTier?: LabTier }> {
   const oon = row.finding_class === 'out_of_network';
 
   // Source 1 + source 2, in parallel: both discharge PDFs as de-identified cases.
@@ -333,13 +262,7 @@ export async function assembleForRow(row: PendingRow): Promise<AssembledPair | {
   // The KX summary record is still read — for the admission TIMESTAMP that sizes the lab
   // window and for the identity tokens the de-identification scrub matches on. Its
   // clinical text is no longer the substrate (PRD §1.1 BA-4: it holds metadata only).
-  // R2 Addendum A1: the readmit stay's summary row is read too (in parallel — no serial
-  // db13 round-trip added to the worker box) ONLY for its uhid + ipd_no, which build the
-  // readmit-side discharged-history template fallback. Its text is never used.
-  const [idxSummary, rdSummary] = await Promise.all([
-    fetchSummaryRecord(row.index_encounter_id),
-    !oon && row.readmit_encounter_id ? fetchSummaryRecord(row.readmit_encounter_id) : Promise.resolve(null),
-  ]);
+  const idxSummary = await fetchSummaryRecord(row.index_encounter_id);
   const identity = {
     names: [idxSummary?.patientName],
     uhids: [row.uhid, idxSummary?.uhid],
@@ -352,23 +275,12 @@ export async function assembleForRow(row: PendingRow): Promise<AssembledPair | {
     losDays: indexLoaded.extracted.adminFacts?.lengthOfStayDays ?? null,
   });
 
-  // Source 3 (structured labs inside the index window) and source 4 (R2: OT / PAC /
-  // progress templates) are fetched TOGETHER — the template fetches sit after the tier-3
-  // gate above and beside the lab reads, never serial to them (worker box arithmetic).
-  const labsRead = (async (): Promise<StructuredLabRow[]> => {
-    if (!window) return [];
+  // Source 3: structured labs for this patient inside the index window.
+  let structuredLabs: StructuredLabRow[] = [];
+  if (window) {
     const individualUid = await resolveIndividualUid([row.uhid, idxSummary?.uhid]);
-    return individualUid ? fetchStructuredLabs(individualUid, window.from, window.to) : [];
-  })();
-  const [structuredLabs, tpl] = await Promise.all([
-    labsRead,
-    fetchTemplatesForRow({
-      indexEncounterId: row.index_encounter_id, readmitEncounterId: row.readmit_encounter_id, oon,
-      uhid: row.uhid, summaryUhid: idxSummary?.uhid ?? null, summaryIpdNo: idxSummary?.encounterId ?? null,
-      readmitSummary: rdSummary ? { uhid: rdSummary.uhid, ipdNo: rdSummary.ipdNo } : null,
-      indexAdmitAt, indexDischargeAt,
-    }),
-  ]);
+    if (individualUid) structuredLabs = await fetchStructuredLabs(individualUid, window.from, window.to);
+  }
 
   const sameDoctor = !!row.index_doctor && !!row.readmit_doctor
     && row.index_doctor.trim().toLowerCase() === row.readmit_doctor.trim().toLowerCase();
@@ -394,112 +306,9 @@ export async function assembleForRow(row: PendingRow): Promise<AssembledPair | {
     caseSources: { index: indexLoaded.source, readmit: readmitLoaded.source },
     documentIds: { index: indexLoaded.documentId, readmit: readmitLoaded.documentId },
     extractionVersion: DOC_EXTRACT_VERSION,
-    templates: tpl.templates,
-    templateFetch: tpl.templateFetch,
   });
   if (inputs.notAuditableReason) return { notAuditable: inputs.notAuditableReason, labTier: inputs.labTier };
-  return { inputs, indexAdmitAt, indexDischargeAt, identity };
-}
-
-// ── R4: the narrative leg at audit time (CDMSS-READMISSIONS-R4-PRD v1.0 R4-3 / R4-11) ────────
-//
-// MEASURED 18 Aug 2026 (live, four Opus 4.6 calls on real audited findings at this SHA): 22–25 s
-// wall per narrative (2.9–4.2k tokens in / ~1.1k out), citations 100% valid — well inside the
-// ≤ 80 s budget R4-3 gives the leg. So the leg runs INLINE by default, per R4-11's ordering
-// (measured fit → inline; the follow-up-tick answer was the fallback for a call that did not
-// fit). Opt out with READMIT_NARRATIVE_INLINE=0. Two guards make the default safe:
-//   · it runs AFTER saveAuditResult, so a narrative fault or a box overrun can never cost the
-//     finding — the row is already 'audited'; the backfill sweep re-offers it for a narrative;
-//   · it runs only when Bedrock is reachable in this deployment (probeReachable), so unsetting a
-//     BEDROCK_* var degrades to "no narrative yet", never to a failed audit.
-// The worker box arithmetic for this mode is in app/api/readmission/worker/route.ts (worst case
-// ≈ 790,000 of 800,000 ms — a thin margin BY THE 200 s-per-leg WORST CASE; measured actuals are
-// ~35 s for leg + join). Budget: NARRATIVE_BUDGET_MS (80 s × 1 try) on NARRATIVE_MODEL only.
-export async function narrativeInlineEnabled(): Promise<boolean> {
-  if (process.env.READMIT_NARRATIVE_INLINE === '0') return false;
-  if (!probeReachable('bedrock')) return false;
-  return (await bedrockLive()).ok;
-}
-
-// ── R4.1: the recon sequence, transport-agnostic (CDMSS-READMISSIONS-R4.1-PRD v1.0 R41-4) ─────
-//
-// The leg SEQUENCE (which prompt, in which order, with which reconcile call) is one function; the
-// TRANSPORT that answers a leg is injected as `pass`. The Vertex worker injects vertexPass exactly
-// as before — its tracedChat options are byte-identical (a source-read test pins the literal) —
-// and the R4.1 refresh run injects an Opus-4.6-on-Bedrock pass for its cases only. The four
-// prompt builders are byte-identical (fingerprint-pinned): what changes per path is WHO answers,
-// never WHAT is asked or how the answer is reconciled and judged.
-
-/** One leg: label + prompt in, PassClaims (or null = unparseable / unavailable) out. */
-export type PassFn = (label: string, prompt: { system: string; user: string }) => Promise<PassClaims | null>;
-
-export interface ReconSequenceArgs {
-  row: PendingRow;
-  inputs: ThreeSourceInputs;
-  indexDischargeAt: string | null;
-  pass: PassFn;
-}
-
-/** The recon legs for one finding, verbatim the R2 sequence: OON → one pass; lane D → condition
- *  pass, promoted to the full pair on 'same' (decision 14); full pair → recon A then recon B (§5
- *  two-pass money verdict). Throws on an unparseable leg (the caller decides retry semantics). */
-export async function runReconSequence(a: ReconSequenceArgs): Promise<{ finding: ReadmissionFinding; promoted: boolean }> {
-  const { row, inputs, pass } = a;
-  const oon = row.finding_class === 'out_of_network';
-  const laneD = row.lane === 'other';
-  const gapDays = Number(row.gap_days ?? 0);
-  let finding: ReadmissionFinding | null = null;
-  let promoted = false;
-  if (oon) {
-    // Decision 13: index side only, no avoidable verdict on the other hospital.
-    const passA = await pass('readmit_oon',
-      buildOonPrompt(inputs.catalog, { reportedReadmitDate: row.readmit_admit_at, labProfile: inputs.labProfile }));
-    if (!passA) throw new Error('OON pass unparseable or model unavailable');
-    finding = reconcileFinding({
-      findingClass: 'out_of_network', catalog: inputs.catalog, labProfile: inputs.labProfile,
-      labTier: inputs.labTier, labSourceProvenance: inputs.labSourceProvenance, templateCoverage: inputs.templateCoverage ?? null,
-      indexDischargeAt: a.indexDischargeAt, passA, passB: null,
-      formFlags: { isPlanned: row.form_is_planned, sameCondition: row.form_same_condition },
-    });
-  } else {
-    let doFull = !laneD;
-    if (laneD) {
-      // Decision 9: lane D gets the condition pass only…
-      const cond = await pass('readmit_condition',
-        buildConditionPassPrompt(inputs.catalog, { gapDays }));
-      if (!cond) throw new Error('condition pass unparseable or model unavailable');
-      const condFinding = reconcileFinding({
-        findingClass: 'even_even', catalog: inputs.catalog, labProfile: inputs.labProfile,
-        labTier: inputs.labTier, labSourceProvenance: inputs.labSourceProvenance, templateCoverage: inputs.templateCoverage ?? null,
-        indexDischargeAt: a.indexDischargeAt, passA: cond, passB: null, conditionOnly: true,
-      });
-      // …decision 14: SAME condition auto-promotes to the full reconciliation.
-      if (condFinding.promoteToFull) { doFull = true; promoted = true; }
-      else finding = condFinding;
-    }
-    if (doFull) {
-      const facts = {
-        gapDays, lane: row.lane,
-        indexDepartment: row.index_department, readmitDepartment: row.readmit_department,
-        sameDoctor: !!row.index_doctor && !!row.readmit_doctor
-          && row.index_doctor.trim().toLowerCase() === row.readmit_doctor.trim().toLowerCase(),
-        labProfile: inputs.labProfile,
-      };
-      const passA = await pass('readmit_recon_a', buildFullReconPrompt(inputs.catalog, facts));
-      if (!passA) throw new Error('recon pass A unparseable or model unavailable');
-      // The money verdict is produced TWICE, with different prompts (§5 two-pass rule).
-      const passB = await pass('readmit_recon_b',
-        buildSecondAvoidablePrompt(inputs.catalog, { gapDays, labProfile: inputs.labProfile }));
-      if (!passB) throw new Error('recon pass B unparseable or model unavailable');
-      finding = reconcileFinding({
-        findingClass: 'even_even', catalog: inputs.catalog, labProfile: inputs.labProfile,
-        labTier: inputs.labTier, labSourceProvenance: inputs.labSourceProvenance, templateCoverage: inputs.templateCoverage ?? null,
-        indexDischargeAt: a.indexDischargeAt, passA, passB,
-      });
-    }
-  }
-  if (!finding) throw new Error('no finding assembled');
-  return { finding, promoted };
+  return { inputs, indexAdmitAt, indexDischargeAt };
 }
 
 /**
@@ -519,6 +328,9 @@ export async function runReadmissionAudit(row: PendingRow): Promise<ReadmitAudit
       return { dedupKey: row.dedup_key, status: 'not_auditable', reason: assembled.notAuditable, latencyMs: Date.now() - t0 };
     }
     const { inputs } = assembled;
+    const oon = row.finding_class === 'out_of_network';
+    const laneD = row.lane === 'other';
+    const gapDays = Number(row.gap_days ?? 0);
 
     const traceId = await startTrace('readmit_audit', {
       dedupKey: row.dedup_key, lane: row.lane, findingClass: row.finding_class, engine: READMIT_ENGINE_VERSION,
@@ -527,14 +339,54 @@ export async function runReadmissionAudit(row: PendingRow): Promise<ReadmitAudit
     let finding: ReadmissionFinding | null = null;
     let promoted = false;
     try {
-      // The recon sequence (R4.1: one function, transport injected). The Vertex worker's transport
-      // is vertexPass, byte-identical to R2 — see the source-read pin in readmission-r41 tests.
-      const seq = await runReconSequence({
-        row, inputs, indexDischargeAt: assembled.indexDischargeAt,
-        pass: (label, prompt) => vertexPass(traceId, label, model, prompt),
-      });
-      finding = seq.finding;
-      promoted = seq.promoted;
+      if (oon) {
+        // Decision 13: index side only, no avoidable verdict on the other hospital.
+        const passA = await vertexPass(traceId, 'readmit_oon', model,
+          buildOonPrompt(inputs.catalog, { reportedReadmitDate: row.readmit_admit_at, labProfile: inputs.labProfile }));
+        if (!passA) throw new Error('OON pass unparseable or model unavailable');
+        finding = reconcileFinding({
+          findingClass: 'out_of_network', catalog: inputs.catalog, labProfile: inputs.labProfile,
+          labTier: inputs.labTier, labSourceProvenance: inputs.labSourceProvenance,
+          indexDischargeAt: assembled.indexDischargeAt, passA, passB: null,
+          formFlags: { isPlanned: row.form_is_planned, sameCondition: row.form_same_condition },
+        });
+      } else {
+        let doFull = !laneD;
+        if (laneD) {
+          // Decision 9: lane D gets the condition pass only…
+          const cond = await vertexPass(traceId, 'readmit_condition', model,
+            buildConditionPassPrompt(inputs.catalog, { gapDays }));
+          if (!cond) throw new Error('condition pass unparseable or model unavailable');
+          const condFinding = reconcileFinding({
+            findingClass: 'even_even', catalog: inputs.catalog, labProfile: inputs.labProfile,
+            labTier: inputs.labTier, labSourceProvenance: inputs.labSourceProvenance,
+            indexDischargeAt: assembled.indexDischargeAt, passA: cond, passB: null, conditionOnly: true,
+          });
+          // …decision 14: SAME condition auto-promotes to the full reconciliation.
+          if (condFinding.promoteToFull) { doFull = true; promoted = true; }
+          else finding = condFinding;
+        }
+        if (doFull) {
+          const facts = {
+            gapDays, lane: row.lane,
+            indexDepartment: row.index_department, readmitDepartment: row.readmit_department,
+            sameDoctor: !!row.index_doctor && !!row.readmit_doctor
+              && row.index_doctor.trim().toLowerCase() === row.readmit_doctor.trim().toLowerCase(),
+            labProfile: inputs.labProfile,
+          };
+          const passA = await vertexPass(traceId, 'readmit_recon_a', model, buildFullReconPrompt(inputs.catalog, facts));
+          if (!passA) throw new Error('recon pass A unparseable or model unavailable');
+          // The money verdict is produced TWICE, with different prompts (§5 two-pass rule).
+          const passB = await vertexPass(traceId, 'readmit_recon_b', model,
+            buildSecondAvoidablePrompt(inputs.catalog, { gapDays, labProfile: inputs.labProfile }));
+          if (!passB) throw new Error('recon pass B unparseable or model unavailable');
+          finding = reconcileFinding({
+            findingClass: 'even_even', catalog: inputs.catalog, labProfile: inputs.labProfile,
+            labTier: inputs.labTier, labSourceProvenance: inputs.labSourceProvenance,
+            indexDischargeAt: assembled.indexDischargeAt, passA, passB,
+          });
+        }
+      }
 
       if (!finding) throw new Error('no finding assembled');
       const served = await servedReadmitCall(traceId);
@@ -542,37 +394,14 @@ export async function runReadmissionAudit(row: PendingRow): Promise<ReadmitAudit
         dedupKey: row.dedup_key, status: 'audited', finding,
         model: served.model, provider: served.provider, traceId, promoted,
       });
+      await finishTrace(traceId, ok ? 'success' : 'partial');
       if (!ok) {
-        await finishTrace(traceId, 'partial');
         await recordAuditError(row.dedup_key, 'audit produced a finding but the store write failed');
         return { dedupKey: row.dedup_key, status: 'failed', reason: 'store write failed', traceId, latencyMs: Date.now() - t0 };
       }
-      // R4 — the fourth leg (see narrativeInlineEnabled above). Runs AFTER the audit row is
-      // stored, so a narrative fault can never cost the finding; its ledger is the very catalog
-      // the recon legs read (source 'audit').
-      let narrative: 'stored' | 'invalid' | 'skipped' | 'failed' = 'skipped';
-      if (await narrativeInlineEnabled()) {
-        let narrativeCode: NarrativeErrorCode = 'narrative_failed';
-        try {
-          const n = await composeCaseArtefacts({
-            row, finding, catalog: inputs.catalog, identity: assembled.identity,
-            ledgerSource: 'audit', narrativeSource: 'audit', traceId,
-          });
-          narrative = n.ok ? (n.valid ? 'stored' : 'invalid') : 'failed';
-          if (!n.ok) narrativeCode = classifyNarrativeFailure((n as { reason?: string }).reason);
-        } catch (e) { narrative = 'failed'; narrativeCode = classifyNarrativeFailure(String((e as Error)?.message ?? e)); }
-        // Observability only (best-effort, never changes the audit outcome).
-        if (narrative === 'failed') await recordNarrativeError(row.dedup_key, narrativeCode);
-        else await clearNarrativeError(row.dedup_key);
-      } else if (process.env.READMIT_NARRATIVE_INLINE !== '0' && probeReachable('bedrock')) {
-        // Skipped because bedrockLive is not ok (the kill switch and missing env are deliberate, not faults).
-        const live = await bedrockLive();
-        await recordNarrativeError(row.dedup_key, classifyBedrockError(live) ?? 'error');
-      }
-      await finishTrace(traceId, 'success');
       return {
         dedupKey: row.dedup_key, status: 'audited', promoted,
-        avoidable: finding.avoidable?.verdict ?? null, traceId, latencyMs: Date.now() - t0, narrative,
+        avoidable: finding.avoidable?.verdict ?? null, traceId, latencyMs: Date.now() - t0,
       };
     } catch (e) {
       // Transient (model/parse) failure: row stays 'detected' → the sweep IS the retry.

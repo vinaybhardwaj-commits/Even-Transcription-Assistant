@@ -25,6 +25,9 @@ import { resolveProvider } from './lab-provider-core';
 import { checkAttribution } from './lab-attribution-core';
 import { servedCallForAudit, usageForTrace } from './backfill-runs';
 import { costUsd } from './llm-cost-core';
+import { type TelemetryRequestContext } from './retrieval-telemetry-core';
+import { type LifecycleHandle } from './retrieval-telemetry-store';
+import { settleOwned } from './retrieval-settlement';
 import { PRICING } from './llm-cost';
 import { getSettings, setSetting, windowOpen, lockHeld, readState as readMiniState } from './mini-backfill';
 import { LB_KEYS, LB_LOCK_TTL_MS, EVAL_TICK_DEADLINE_MS, type LabBatchState, parseBatchState, remainingUids, batchGate, drainPlan, boundedPool, labLockHeld, ttlBreach, ttlBreachMessage } from './lab-batch-core';
@@ -59,6 +62,11 @@ export interface LabEvalConfig {
   /** S2b C1 — grade this batch on a BEDROCK model (the full modelId). Absent ⇒ every line of this
    *  file behaves exactly as before. Mutually exclusive with `evalModel` (rejected at the door). */
   bedrockModel?: string;
+  /** ⚠️ CARRIED ON THE CONFIG RATHER THAN AS A FOURTH PARAMETER, so `runMiniOpdToLab(uid,
+   *  experiment, evalCfg)` stays the call `lib/__tests__/eval-hardening.test.ts` reads to prove the
+   *  tombstone budget check happens BEFORE the attempt. A new parameter would have broken a pin
+   *  that has nothing to do with telemetry, to say something the config can say instead. */
+  telemetry?: TelemetryRequestContext;
 }
 
 // ── S2b C1: the batch gains a model (BAKEOFF-DESIGN §6 gap 1) ────────────────────────────────────
@@ -194,6 +202,7 @@ export function tombstoneDue(state: AttemptsState, uid: string): boolean {
  *  saveLabAnalysis); auditOpdNote is pure compute and never writes opd_note_audits. `evalCfg` (Phase 2)
  *  forces the R-11 normative leg on and/or routes generation to an OpenRouter model — absent ⇒ mini. */
 export async function runMiniOpdToLab(uid: string, experiment: string, evalCfg: LabEvalConfig = {}): Promise<{ id: string; band: string; index: number; findings: number; engine: string; usd?: number }> {
+  const telemetry = evalCfg.telemetry;
   const row = await fetchOpdNoteByUid(uid);
   if (!row) throw new Error(`no db13 OPD note for uid ${uid}`);
   const started = Date.now();
@@ -207,7 +216,18 @@ export async function runMiniOpdToLab(uid: string, experiment: string, evalCfg: 
   // If the audit fails, the catch in auditOpdNote rethrows (eval only), drainOne records the error,
   // and no row is written at all — which is the point of the build.
   let lastEnvelope: LlmEnvelope | null = null;
+  // ⚠️ THIS PATH WRITES `lab_analyses` AND NOTHING ELSE (D9). It never touches opd_note_audits, so
+  // its retrieval rows settle `no_persistence_intended` — a statement that persistence was never
+  // intended, which is a different fact from a save that failed. The intent is declared up front for
+  // the same reason D12 gives: no property of the `primary` role could have told anyone.
+  let handle: LifecycleHandle | null = null;
+  let published = false;
+  try {
   const audit = await auditOpdNote(row, {
+    ...(telemetry ? {
+      telemetry: { ctx: telemetry, route: 'lab_batch' as const, persistenceIntent: 'never_persists' as const },
+      onLifecycleHandleUpdated: (h: LifecycleHandle) => { handle = h; published = true; },
+    } : {}),
     pipeline: 'mini', engineTag: 'lab',
     // ⚠️ THE BEDROCK ARM IS TRACED, AND IT HAS TO BE. `trace: false` is right for the mini — a free
     // local call with nothing to attribute and nothing to price — but a paid arm that records no
@@ -278,16 +298,30 @@ export async function runMiniOpdToLab(uid: string, experiment: string, evalCfg: 
     ...(attribution ? { provider: attribution.provider } : {}),
     latencyMs: Date.now() - started,
   });
+  await settleOwned(handle, 'no_persistence_intended');
   return {
     id, band: audit.scorecard.band, index: audit.scorecard.headline,
     findings: audit.findings.length, engine: audit.engineVersion,
     ...(usage ? { usd: usage.usd } : {}),
   };
+  } catch (e) {
+    // The DEC-2 refusal branch throws from inside this try and is ALSO `no_persistence_intended`:
+    // this path never intended to write an audit row, so refusing to write a LAB row does not change
+    // what the retrieval's persistence intent was. Every other throw is the audit's own.
+    await settleOwned(handle,
+      /verified|attribution|answered/i.test(String((e as Error).message)) ? 'no_persistence_intended'
+        : published ? 'audit_generation_failed' : 'retrieval_not_run');
+    throw e;
+  }
 }
 
 /** One tick: drain up to n un-done cohort uids into lab_analyses. Idempotent + resumable.
  *  ignoreWindow=true is the manual-nudge path (lab_batch_tick) — the cron respects the window. */
-export async function batchTick(opts: { ignoreWindow?: boolean } = {}): Promise<Record<string, unknown>> {
+/** ⚠️ `batchTick` ACCEPTS THE TYPED CONTEXT AND NEVER CREATES ITS OWN (D11). It is reached from two
+ *  different boundaries — the admin route's cron and the MCP `lab_batch_tick` tool — and a context
+ *  minted here would report both of them as the same kind of invocation, which is exactly the
+ *  overlap question §8 exists to answer. */
+export async function batchTick(opts: { ignoreWindow?: boolean; telemetry?: TelemetryRequestContext } = {}): Promise<Record<string, unknown>> {
   // D3 — wall clock for the tick. PURE OBSERVATION: read only where the summary is built, never
   // branched on. The old summary could not distinguish "tick completed" from "tick never ran", which
   // is precisely how the killed-invocation defect stayed invisible for a full paid run.
@@ -362,7 +396,7 @@ export async function batchTick(opts: { ignoreWindow?: boolean } = {}): Promise<
     // branch gets `undefined` and is byte-identical, because the mini path is serial on a single GPU
     // and never retries inside the tick, so it has neither the failure mode nor the fan-out.
     const deadlineAt = plan.evalMode ? tickStart + EVAL_TICK_DEADLINE_MS : undefined;
-    const evalCfg = { evalNormativeLeg: st.evalNormativeLeg, evalModel: st.evalModel ?? undefined, evalNormativeChannel: st.evalNormativeChannel, rerankBackend: st.evalRerankBackend ?? undefined, ...(deadlineAt != null ? { deadlineAt } : {}), ...(bedrockModel ? { bedrockModel } : {}) };
+    const evalCfg = { evalNormativeLeg: st.evalNormativeLeg, evalModel: st.evalModel ?? undefined, evalNormativeChannel: st.evalNormativeChannel, rerankBackend: st.evalRerankBackend ?? undefined, ...(deadlineAt != null ? { deadlineAt } : {}), ...(bedrockModel ? { bedrockModel } : {}), ...(opts.telemetry ? { telemetry: opts.telemetry } : {}) };
     // Eval-hardening D3/D4 — the per-uid failure budget. PAID BRANCHES ONLY: the free mini branch
     // neither reads nor writes it. Absent key ⇒ empty state, never an error (a batch is draining
     // mid-deploy as this ships). The read failing entirely degrades to "no budget enforcement" —

@@ -3,10 +3,6 @@
  * The canonical doctor list EPI matches its physicians against (to populate physicians.cdmss_doctor_uid
  * by name). Served from the pre-cleaned/pre-deduped doctor_roster snapshot. No PHI; mobile_last4 only,
  * for disambiguation. GOV_API_KEY (or admin).
- *
- * Duplicate-mobile doctors are collapsed to one canonical uid; the others are listed in alias_uids so
- * a finding keyed on any of them resolves. Disabled doctors are included with disabled: true (the
- * consumer decides what to do with them).
  */
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -34,9 +30,6 @@ export async function GET(req: NextRequest) {
       has_email: r.has_email,
       audit_active: r.audit_active,
       operational_active: r.operational_active,
-      // Round 1: other uids collapsed into this person (same mobile), and the db13 disabled flag.
-      alias_uids: r.alias_uids,
-      disabled: r.disabled,
     })),
   });
 }
