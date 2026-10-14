@@ -122,10 +122,9 @@ control_store() {
   { printf '%s\n' "$(now_epoch)"; printf '%s\n' "$1"; } >"$tmp" && mv -f "$tmp" "$STATE_DIR/control.last"
 }
 
-# Unbuffered NUL -> 0x01 filter (tr and cat buffer on a pipe, which would hold a message back until EOF). /usr/bin/perl ships with macOS.
-# Missing perl = empty stream = the loop only reconnects = no control messages = stale = shadow.
+# NUL -> 0x01 filter. tr -u (BSD tr: unbuffered) matters: a plain tr holds a message back on a pipe until EOF.
 nul_to_soh() {
-  /usr/bin/perl -e 'while (sysread(STDIN, $b, 65536)) { $b =~ tr/\0/\1/; syswrite(STDOUT, $b); }'
+  LC_ALL=C tr -u '\000' '\001'
 }
 
 # Kiosk's own subscription to guardian/control. Same backoff pattern as subscriber_loop.

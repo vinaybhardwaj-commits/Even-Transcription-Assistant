@@ -873,3 +873,19 @@ test_backslashes_survive_control_loop() {
   kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
   has_bs "$STATE_DIR/control.last" && ok || fail "the backslash did not survive read -r"
 }
+
+# a message from a stream that stays open must reach control.last before EOF (a buffering filter would hold it back)
+test_message_from_a_still_open_stream_reaches_control_last_before_eof() {
+  load_libs
+  export GUARDIAN_CONTROL_SUB_CMD='printf "{\"kill\": false, \"modes\": {}, \"ts\": %s}\n" "$GUARDIAN_FAKE_NOW"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  start_loops control_loop
+  local i=0
+  while [ "$i" -lt 20 ] && ! grep -q '"kill": false' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  assert_eq "$(alive_of ctl)" "1" "the stream is still open (its sleep is running)"
+  assert_has "$(sed -n '2p' "$STATE_DIR/control.last" 2>/dev/null)" '"kill": false' "line stored within 2 s while the stream is open"
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+}
+
+test_kiosk_code_has_no_perl_python_osascript_or_jq() {
+  assert_eq "$(grep -rnE '\b(perl|python3?|osascript|jq)\b' "$KDIR/bin" "$KDIR/lib" | grep -vcE '^[^:]*:[0-9]+:[[:space:]]*#')" "0" "no perl, python, osascript or jq outside comments"
+}
