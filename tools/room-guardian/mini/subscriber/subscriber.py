@@ -138,7 +138,13 @@ class Subscriber:
             modes[r] = m
         return {"kill": kill, "modes": modes}
 
-    def publish_control(self, publish):
+    def control_payload(self):
+        """control_snapshot() plus ts = publish epoch seconds (int), so a consumer can reject replayed or stale control by payload time. Additive."""
         snap = self.control_snapshot()
+        snap["ts"] = int(self.clock())
+        return snap
+
+    def publish_control(self, publish):
+        snap = self.control_payload()
         publish(CONTROL_TOPIC, json.dumps(snap, sort_keys=True))
         return snap
