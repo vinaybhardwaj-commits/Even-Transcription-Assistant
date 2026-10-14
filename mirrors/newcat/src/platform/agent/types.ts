@@ -152,17 +152,6 @@ export interface AgentBudget {
 
 export type CompletenessResult = { ok: true } | { ok: false; reason: string }
 
-/** A fact that survived the quote gate, as given to the persist hook. `fields` is the agent's own validated fields. */
-export interface PersistFact {
-  group: string
-  fields: Record<string, unknown>
-  segment_id: string
-  role: string
-  t0: number | null
-  t1: number | null
-  quote: string
-}
-
 /** What the agent's post-run persist hook receives. */
 export interface PersistContext<I> {
   sql: Sql
@@ -172,10 +161,6 @@ export interface PersistContext<I> {
   input: I
   /** A deep copy: changing it changes neither the returned audit nor `agent_findings`. */
   audit: InternalAudit
-  /** Deep copy of the gated facts of the accepted extraction (empty when the run ended before the gate or on `extraction_unverified`). Contains quotes. */
-  facts: PersistFact[]
-  /** Deep copy of the gate's drop counts by reason (`counts.drops`, includes `context_out_of_range`). Counts only. */
-  drops: Record<string, number>
 }
 
 export interface AgentDefinition<I, F, C = unknown> {
@@ -218,16 +203,6 @@ export interface AgentDefinition<I, F, C = unknown> {
   persist?(ctx: PersistContext<I>): Promise<void>
   /** Deadline for `persist` in ms (default 10000, capped at 60000). On timeout the run counts `persist_failed` and continues. */
   persistTimeoutMs?: number
-  /**
-   * Optional daily retention pass for the agent's own tables. The worker calls it at most once per UTC day (and once at start). Returns a count only.
-   * A throw is caught by the worker and logged as a code; it never stops the worker. A hook that outlives the worker's deadline (default 30 s) is counted as a timeout. `swept` is coerced to a non-negative integer. Keep it idempotent.
-   */
-  retention?(ctx: { sql: Sql; now: Date }): Promise<{ swept: number }>
-  /**
-   * Optional projection of the parsed input that may stay at rest in `jobs.request`. For an async job the worker replaces
-   * `jobs.request` with this value at completion (same UPDATE as the result); until then the full input stays, so a crash retry sees it. The run itself uses the full input. Absent: `jobs.request` is unchanged (until the 90-day sweep).
-   */
-  storedInput?(input: I): unknown
   /** Required when `audiences` lists governance (validateDefinition). Agent-owned code. */
   serializers?: { governance?: GovernanceSerializer }
 }

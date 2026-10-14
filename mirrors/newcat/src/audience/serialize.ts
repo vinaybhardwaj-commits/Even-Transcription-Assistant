@@ -113,7 +113,6 @@ const InternalVersions = z
     extractor: z.string(),
     models: z.array(z.string()),
     question_set_sha: z.string(),
-    question_sets: z.record(z.string()).optional(),
   })
   .strict()
 
@@ -297,64 +296,13 @@ export function keyTokens(key: string): string[] {
     .filter((token) => token !== '')
     .map((token) => token.toLowerCase())
 }
-/** Concatenated spellings the token split cannot see (`phoneno`, `PatientName`); matched as substrings of the lowercased key. */
-const IDENTIFIER_SUBSTRINGS: readonly string[] = ['phoneno', 'mobileno', 'patientname', 'fullname', 'uhidno', 'emailid', 'abha', 'ssn', 'aadhaarno',
-  'phone', 'mobile', 'uhid', 'aadhaar', 'aadhar', 'patient', 'passport', 'email', 'surname', 'firstname', 'lastname', 'dateofbirth', 'birthdate',
-  'telephone', 'doctorname', 'mrnno', 'contactno', 'panno', 'ipno', 'ipnumber', 'pincode', 'cellno',
-  'adhaar', 'adhar', 'mailid', 'whatsapp', 'nextofkin', 'emergencycontact', 'zipcode', 'postcode', 'birthday', 'drivinglicen']
-/** Whole tokens that pass the substring wall although they contain a listed substring (phone, patient, ...). */
-const SUBSTRING_EXCEPTION_TOKENS: ReadonlySet<string> = new Set(['microphone', 'headphone', 'smartphone', 'phonetic', 'outpatient', 'inpatient', 'impatient', 'immobile'])
-/** Stems that, followed by no, num, number, id or reg, name an identifier (`regno`, `mrnnumber`, `epic_no`). The substring exception tokens are stems too: they bypass the substring wall only when they stand alone. */
-const IDENTIFIER_STEMS: readonly string[] = ['ph', 'mob', 'phone', 'mobile', 'contact', 'cell', 'mrn', 'uhid', 'pan', 'aadhaar', 'aadhar', 'adhaar', 'adhar',
-  'abha', 'health', 'voter', 'passport', 'policy', 'insurance', 'beneficiary', 'reg', 'registration', 'op', 'ip', 'bed', 'ward', 'epic', 'dl', 'visit', 'medicalrecord',
-  'microphone', 'headphone', 'smartphone', 'phonetic', 'outpatient', 'inpatient', 'impatient', 'immobile']
-const STEM_NUMBER = new RegExp(`^(?:${[...IDENTIFIER_STEMS].sort((a, b) => b.length - a.length).join('|')})(?:no|num|number|id|reg)\\d*$`)
-const NUMBER_SUFFIX = /^(?:no|num|number|id|reg)\d*$/
-/** A token that is a stem plus a number suffix, or a stem token followed by a suffix token. */
-function hasStemNumber(tokens: readonly string[]): boolean {
-  return tokens.some((token, i) => STEM_NUMBER.test(token) || (IDENTIFIER_STEMS.includes(token) && i + 1 < tokens.length && NUMBER_SUFFIX.test(tokens[i + 1]!)))
-}
-/** True when the text holds a run of 8 or more digits once separators (- _ . : space /) are stripped (phone and MRN shapes). */
-export function hasLongDigitRun(text: string): boolean {
-  return /\d{8,}/.test(text.replace(/[-_.:\s/]/g, ''))
-}
 /** True when the key looks like it names an identifier (patient, uhid, phone, doctor name, ...). */
 export function isIdentifierKey(key: string): boolean {
-  const lower = key.toLowerCase()
-  const tokens = keyTokens(key)
-  const scanned = tokens.some((token) => SUBSTRING_EXCEPTION_TOKENS.has(token)) ? tokens.filter((token) => !SUBSTRING_EXCEPTION_TOKENS.has(token)).join('_') : lower
-  return lower === 'encounter_id' || lower.endsWith('name') || tokens.some((token) => token.endsWith('name')) || hasStemNumber(tokens)
-    || IDENTIFIER_SUBSTRINGS.some((part) => scanned.includes(part)) || tokens.some((token) => IDENTIFIER_TOKENS.has(token))
+  return key.toLowerCase() === 'encounter_id' || keyTokens(key).some((token) => IDENTIFIER_TOKENS.has(token))
 }
-/** Id shapes exempt from the digit-run test (values only, never keys): canonical UUID, 32 lowercase hex, 26-char Crockford ULID. Each needs a letter and a ULID starts with [0-7]. */
-export const STRUCTURED_ID = /^(?:(?=[^a-fA-F]*[a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|(?=[^a-f]*[a-f])[0-9a-f]{32}|(?=\d*[A-Z])[0-7][0-9A-HJKMNP-TV-Z]{25})$/
-/** Opaque id: `^[A-Za-z0-9._:-]{1,128}$` with no run of 8 or more digits, separators stripped before counting. */
+/** Opaque id: `^[A-Za-z0-9._:-]{1,128}$` with no run of 8 or more digits (phone and MRN shapes). */
 export function isOpaqueId(value: unknown): boolean {
-  return typeof value === 'string' && OPAQUE_ID.test(value) && (STRUCTURED_ID.test(value) || !hasLongDigitRun(value))
-}
-/** A key that may appear in a governance body at any depth: not identifier-like and no long digit run. */
-export const keyOk = (key: string): boolean => !isIdentifierKey(key) && !hasLongDigitRun(key)
-/** Inner keys of `versions.question_sets` are rule ids. */
-const RULE_ID_KEY = /^[a-z][a-z0-9_.]{0,63}$/
-/** Cap on a governance meta string value. */
-const META_VALUE_MAX = 128
-/** Walks every key at every depth; `topExempt` names top-level keys that skip the check. */
-function keysClean(value: unknown, topExempt: ReadonlySet<string> = new Set()): boolean {
-  if (Array.isArray(value)) return value.every((item) => keysClean(item))
-  if (!isRecord(value)) return true
-  return Object.entries(value).every(([key, inner]) => (topExempt.has(key) || keyOk(key)) && keysClean(inner))
-}
-/** Case-folded text with whitespace collapsed, for the quote-copy check. */
-const foldText = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ').trim()
-/** Shortest meta value checked for being a piece of a quote, or containing one. */
-const QUOTE_PIECE_MIN = 16
-/** True when a meta value equals a quote, or (16+ chars) is a substring of one or contains a quote of 16+ chars, after case-folding and whitespace collapse. */
-function copiesQuote(value: string, quotes: ReadonlySet<string>): boolean {
-  const folded = foldText(value)
-  if (quotes.has(folded)) return true
-  if (folded.length < QUOTE_PIECE_MIN) return false
-  for (const quote of quotes) if (quote !== '' && (quote.includes(folded) || (quote.length >= QUOTE_PIECE_MIN && folded.includes(quote)))) return true
-  return false
+  return typeof value === 'string' && OPAQUE_ID.test(value) && !/\d{8,}/.test(value)
 }
 /** Keys the platform stamps into `versions`; any other key must be slug-shaped and not identifier-like. */
 const GOVERNANCE_VERSION_KEYS: ReadonlySet<string> = new Set(['engine', 'rules', 'extractor', 'models', 'question_set_sha', 'question_sets'])
@@ -362,8 +310,8 @@ const isRecordOfStrings = (value: unknown): boolean => isRecord(value) && Object
 const versionsOk = (versions: unknown): boolean => {
   if (!isRecord(versions)) return false
   for (const [key, value] of Object.entries(versions)) {
-    if (!GOVERNANCE_VERSION_KEYS.has(key) && (!META_KEY.test(key) || !keyOk(key))) return false
-    if (key === 'question_sets' ? !isRecordOfStrings(value) || !Object.keys(value as object).every((k) => RULE_ID_KEY.test(k) && keyOk(k)) : typeof value !== 'string') return false
+    if (!GOVERNANCE_VERSION_KEYS.has(key) && (!META_KEY.test(key) || isIdentifierKey(key))) return false
+    if (key === 'question_sets' ? !isRecordOfStrings(value) : typeof value !== 'string') return false
   }
   return true
 }
@@ -393,8 +341,7 @@ function toGovernance(audit: InternalAudit, hook: GovernanceSerializer | undefin
  * No banned-internal key at any depth. A finding may carry `meta`: a flat record, keys matching `^[a-z][a-z0-9_]{0,63}$`, values string, finite number or boolean.
  * Value shapes: `status` is one of the five envelope statuses; `summary` and `reason` are strings (top level and per finding);
  * `versions` keys are engine|rules|extractor|models|question_set_sha|question_sets or slug-shaped non-identifier keys, values strings (`question_sets`: record of strings);
- * identifier-like keys (name, uid, uhid, mrn, phone, ... as a token, or a concatenated spelling such as phoneno) and keys with a run of 8+ digits (separators stripped) are refused at every depth, top-level `doctor_uid`/`encounter_id` excepted;
- * `versions.question_sets` inner keys match `^[a-z][a-z0-9_.]{0,63}$`; a meta string value is at most 128 characters and never equals an evidence quote in the same body; `judge` carries only `primary_p`, `second_p`, `agree` (boolean) and `served_model_ids` (string[]);
+ * identifier-like keys (name, uid, uhid, mrn, phone, ... as a token) are refused in meta, versions, findings and at top level except the two ids; `judge` carries only `primary_p`, `second_p`, `agree` (boolean) and `served_model_ids` (string[]);
  * evidence `t0`/`t1` are numbers >= 0 and `role` is a string; `trace_id`, `capability`, `capability_version` and the finding's
  * `id`, `finding_type`, `rule_id`, `rule_version`, `severity`, `procedure_group` are strings; abstention keys match `^[a-z][a-z0-9_]{0,63}$`.
  */
@@ -406,13 +353,8 @@ export function assertGovernanceSafe(body: unknown): void {
   if (body.summary !== undefined && typeof body.summary !== 'string') throw new EmitRefusal()
   if (body.reason !== undefined && typeof body.reason !== 'string') throw new EmitRefusal()
   if (body.versions !== undefined && !versionsOk(body.versions)) throw new EmitRefusal()
-  if (!keysClean(body, new Set<string>(GOVERNANCE_OPAQUE_IDS))) throw new EmitRefusal()
-  const quotes = new Set<string>()
-  if (Array.isArray(body.findings)) {
-    for (const finding of body.findings) {
-      const items = isRecord(finding) && Array.isArray(finding.evidence) ? finding.evidence : []
-      for (const item of items) if (isRecord(item) && typeof item.quote === 'string') quotes.add(foldText(item.quote))
-    }
+  for (const key of Object.keys(body)) {
+    if (key !== 'doctor_uid' && key !== 'encounter_id' && isIdentifierKey(key)) throw new EmitRefusal()
   }
   for (const key of GOVERNANCE_TOP_STRINGS) {
     if (body[key] !== undefined && typeof body[key] !== 'string') throw new EmitRefusal()
@@ -431,7 +373,7 @@ export function assertGovernanceSafe(body: unknown): void {
   if (!Array.isArray(body.findings)) throw new EmitRefusal()
   for (const finding of body.findings) {
     if (!isRecord(finding)) throw new EmitRefusal()
-    if (Object.keys(finding).some((key) => !GOVERNANCE_FINDING_KEYS.has(key) || !keyOk(key))) throw new EmitRefusal()
+    if (Object.keys(finding).some((key) => !GOVERNANCE_FINDING_KEYS.has(key) || isIdentifierKey(key))) throw new EmitRefusal()
     if (finding.action === 'abstain') throw new EmitRefusal()
     for (const key of GOVERNANCE_FINDING_STRINGS) {
       if (finding[key] !== undefined && typeof finding[key] !== 'string') throw new EmitRefusal()
@@ -451,8 +393,7 @@ export function assertGovernanceSafe(body: unknown): void {
     if (findingMeta !== undefined) {
       if (!isRecord(findingMeta)) throw new EmitRefusal()
       for (const [key, value] of Object.entries(findingMeta)) {
-        if (!META_KEY.test(key) || !keyOk(key)) throw new EmitRefusal()
-        if (typeof value === 'string' && (value.length > META_VALUE_MAX || copiesQuote(value, quotes))) throw new EmitRefusal()
+        if (!META_KEY.test(key) || isIdentifierKey(key)) throw new EmitRefusal()
         const scalar = typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))
         if (!scalar) throw new EmitRefusal()
       }

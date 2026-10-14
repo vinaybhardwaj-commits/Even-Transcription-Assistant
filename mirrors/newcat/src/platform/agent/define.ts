@@ -1,12 +1,10 @@
 import { ZodObject } from 'zod'
 import { jevReadiness } from '../../config.js'
-import { geminiConfig, vertexSender } from '../../llm/gemini.js'
-import { geminiSecondJudge } from '../judge/gemini-second.js'
 import { jevJudge } from '../jev/judge.js'
 import type { Capability, CapabilityContext } from '../../api/registry.js'
 import type { SecondJudge } from '../judge/second.js'
 import { unavailableJudge, type JudgePort } from './judge-port.js'
-import { hasLongDigitRun, isIdentifierKey } from '../../audience/serialize.js'
+import { isIdentifierKey } from '../../audience/serialize.js'
 import { runAgent } from './run.js'
 import type { AgentDefinition, AnyAgentDefinition } from './types.js'
 
@@ -25,16 +23,7 @@ export const defaultWiring: AgentWiring = {
     jevReadiness(ctx.env) === 'unavailable'
       ? unavailableJudge
       : jevJudge({ transport: ctx.jev, traceId: ctx.traceId, purpose: 'agent_judge' }),
-  second: (ctx) => {
-    if (ctx.env.NEWCAT_GEMINI !== 'live') return null
-    const config = geminiConfig(ctx.env)
-    if (!config) return null
-    try {
-      return geminiSecondJudge({ sql: ctx.sql, config, sender: vertexSender(config.keyJson), traceId: ctx.traceId })
-    } catch {
-      return null
-    }
-  },
+  second: () => null,
 }
 
 const META_KEY = /^[a-z][a-z0-9_]{0,63}$/
@@ -54,19 +43,17 @@ export function validateDefinition(def: AnyAgentDefinition): void {
   if (def.input instanceof ZodObject && def.input._def.unknownKeys !== 'strict') fail('input schema must be strict')
   for (const reason of [...def.abstention.reasons, ...def.abstention.emptyReasons]) {
     if (!REASON.test(reason)) fail('reasons must be snake_case identifiers')
-    if (isIdentifierKey(reason) || hasLongDigitRun(reason)) fail('reasons cannot use an identifier-like name or an 8+ digit run')
   }
   const countReasons = def.countReasons ?? []
   for (const reason of countReasons) {
     if (!REASON.test(reason)) fail('countReasons must be snake_case identifiers')
-    if (isIdentifierKey(reason) || hasLongDigitRun(reason)) fail('countReasons cannot use an identifier-like name or an 8+ digit run')
     if (PROTOTYPE_NAMES.has(reason.toLowerCase())) fail('countReasons cannot use an Object.prototype name')
   }
   if (new Set(countReasons).size !== countReasons.length) fail('countReasons must be unique')
   const metaKeys = def.metaKeys ?? []
   for (const key of metaKeys) {
     if (!META_KEY.test(key)) fail('metaKeys must be snake_case slugs')
-    if (isIdentifierKey(key) || hasLongDigitRun(key)) fail('metaKeys cannot use an identifier-like name or an 8+ digit run')
+    if (isIdentifierKey(key)) fail('metaKeys cannot use an identifier-like name')
     if (PROTOTYPE_NAMES.has(key)) fail('metaKeys cannot use an Object.prototype name')
   }
   if (new Set(metaKeys).size !== metaKeys.length) fail('metaKeys must be unique')

@@ -10,7 +10,7 @@ const TYPE_BY_PREFIX: Array<[string, string]> = [
   ['consent.', 'consent_incomplete'],
   ['pressure.', 'pressure_signal'],
   ['svw.', 'said_vs_written'],
-  ['concern.', 'concern_unaddressed'],
+  ['concern.', 'patient_concern_unaddressed'],
   ['indication.', 'indication_gap'],
 ]
 export const findingTypeOf = (ruleId: string): string => TYPE_BY_PREFIX.find(([p]) => ruleId.startsWith(p))?.[1] ?? 'unknown'

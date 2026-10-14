@@ -1,12 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { surgicalConsult } from '../../../src/agents/surgical-consult/definition.js'
-import type { ExtractedFact } from '../../../src/agents/surgical-consult/facts.js'
 import { ConsultAuditInput } from '../../../src/agents/surgical-consult/input.js'
 import { FakeModelClient, type FakeReply } from '../../../src/llm/fake.js'
 import type { ModelRequest } from '../../../src/llm/types.js'
 import { FakeJudgePort } from '../../../src/platform/agent/judge-port.js'
-import type { AgentDefinition } from '../../../src/platform/agent/types.js'
-import type { ConsultContext } from '../../../src/agents/surgical-consult/segments.js'
 import { runAgent, type AgentDeps } from '../../../src/platform/agent/run.js'
 import { FakeSecondJudge, type SecondJudge } from '../../../src/platform/judge/second.js'
 import { testDb } from '../../helpers.js'
@@ -86,7 +83,6 @@ export async function rig(
   respond: (request: ModelRequest) => FakeReply = scriptedExtractor,
   judge = new FakeJudgePort(() => 0.95),
   second: SecondJudge | null = new FakeSecondJudge(() => 0.95),
-  agent: AgentDefinition<ConsultAuditInput, ExtractedFact, ConsultContext> = surgicalConsult,
 ): Promise<Rig> {
   const sql = await testDb()
   const requests: ModelRequest[] = []
@@ -100,7 +96,7 @@ export async function rig(
     sql,
     run: (input, overrides = {}) =>
       runAgent(
-        agent,
+        surgicalConsult,
         { sql, models, traceId: `trace-${Math.random().toString(16).slice(2)}`, purpose: 'test', audience: 'internal', judge, second, ...overrides },
         input,
       ),

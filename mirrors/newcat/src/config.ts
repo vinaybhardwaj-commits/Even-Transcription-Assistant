@@ -1,6 +1,5 @@
 import { z } from 'zod'
-import { disallowedModelEnv, isAllowedGeminiModel } from './llm/allowlist.js'
-import { geminiConfig } from './llm/gemini.js'
+import { disallowedModelEnv } from './llm/allowlist.js'
 import { parseServiceAccountKey } from './llm/gcp-federation.js'
 
 const optionalText = z
@@ -67,14 +66,6 @@ const EnvSchema = z.object({
     .enum(['live', 'fake', 'http'])
     .default('live')
     .transform((value) => (value === 'http' ? 'live' : value)),
-  /** Gemini second judge via Vertex. `fake` is refused in production; defaultWiring wires only `live`. */
-  NEWCAT_GEMINI: z.enum(['live', 'fake', 'off']).default('off'),
-  VERTEX_PROJECT: optionalText,
-  VERTEX_LOCATION: optionalText,
-  /** Service-account JSON, raw or base64. Never log it. Distinct from GCP_SA_KEY_JSON (Bedrock federation). */
-  VERTEX_SA_KEY_JSON: optionalText,
-  GEMINI_MODEL: optionalText,
-  GEMINI_BUDGET_MAX: z.coerce.number().int().positive().default(1000),
   WORKER_POLL_MS: z.coerce.number().int().positive().default(2000),
 })
 
@@ -148,17 +139,6 @@ export function assertBootSecrets(env: Env, runtime: { vercel?: boolean } = { ve
   if (env.NEWCAT_JEV !== 'live') missing.push('NEWCAT_JEV=live')
   if (env.NEWCAT_EMBED !== 'bedrock') missing.push('NEWCAT_EMBED=bedrock')
   if (env.EMBEDDING_DIMENSIONS !== 1024) missing.push('EMBEDDING_DIMENSIONS=1024')
-  if (env.NEWCAT_GEMINI === 'fake') missing.push('NEWCAT_GEMINI (fake refused)')
-  if (env.GEMINI_MODEL && !isAllowedGeminiModel(env.GEMINI_MODEL)) missing.push('GEMINI_MODEL (not in allowlist)')
-  if (env.NEWCAT_GEMINI === 'live') {
-    const before = missing.length
-    if (!env.GEMINI_MODEL) missing.push('GEMINI_MODEL')
-    if (!env.VERTEX_PROJECT) missing.push('VERTEX_PROJECT')
-    if (!env.VERTEX_LOCATION) missing.push('VERTEX_LOCATION')
-    if (!env.VERTEX_SA_KEY_JSON || !readableServiceAccount(env.VERTEX_SA_KEY_JSON)) missing.push('VERTEX_SA_KEY_JSON')
-    if (env.VERTEX_LOCATION && env.VERTEX_LOCATION !== 'asia-northeast1') missing.push('VERTEX_LOCATION (must be asia-northeast1)')
-    if (missing.length === before && geminiConfig(env) === null) missing.push('VERTEX_PROJECT/VERTEX_LOCATION/GEMINI_MODEL (live config unusable)')
-  }
   const auth = resolveBedrockAuth(env, { vercelOidcToken: runtime.vercel ? process.env.VERCEL_OIDC_TOKEN : undefined })
   if (auth === 'gcp-federation') {
     if (!env.GCP_SA_KEY_JSON || !readableServiceAccount(env.GCP_SA_KEY_JSON)) missing.push('GCP_SA_KEY_JSON')

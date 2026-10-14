@@ -1,12 +1,11 @@
 import { z } from 'zod'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { exampleEcho } from '../../../src/agents/example-echo/index.js'
 import { audienceAllowed } from '../../../src/auth/consumers.js'
 import { assertGovernanceSafe, EmitRefusal, serialize } from '../../../src/audience/serialize.js'
 import { AUDIENCES, type Audience } from '../../../src/facts/schema.js'
 import type { InternalAudit } from '../../../src/pipeline/types.js'
-import { createApp } from '../../../src/api/http.js'
-import type { Capability } from '../../../src/api/registry.js'
+import { CAPABILITIES, type Capability } from '../../../src/api/registry.js'
 import { toCapability, validateDefinition } from '../../../src/platform/agent/define.js'
 import { postJson, testApp, testEnv, DEMO_KEYS } from '../../helpers.js'
 import { GOOD_FACT, harness, reply } from '../agent/harness.js'
@@ -277,7 +276,8 @@ describe('governance over HTTP', () => {
 })
 
 describe('governance over HTTP, success path', () => {
-  // Seam: AppDeps.capabilities overrides the registry list for the app under test; CAPABILITIES is never mutated.
+  // Seam: src/api/http.ts looks capabilities up in the exported CAPABILITIES array (getCapability), and AppDeps has no capability
+  // injection. The test pushes a test-only governance-capable capability and removes it afterwards. registry.ts is not edited.
   const GOV_KEYS = [
     ...DEMO_KEYS,
     { name: 'pulse-governance', token: 'pulse-governance-token-01', scopes: ['test.gov'], audience: 'governance' as const },
@@ -317,6 +317,12 @@ describe('governance over HTTP, success path', () => {
     }),
     serializers: { governance: () => body },
   }
+  beforeAll(() => {
+    CAPABILITIES.push(testCapability)
+  })
+  afterAll(() => {
+    CAPABILITIES.splice(CAPABILITIES.indexOf(testCapability), 1)
+  })
 
   const envelope = (mode: 'sync' | 'async') => ({
     capability: 'test.gov',
@@ -329,10 +335,7 @@ describe('governance over HTTP, success path', () => {
     input: {},
   })
   const TOKEN = 'pulse-governance-token-01'
-  const newApp = async () => {
-    const built = await testApp({ env: testEnv({ API_KEYS_JSON: JSON.stringify(GOV_KEYS) }) })
-    return { ...built, app: createApp({ ...built.deps, capabilities: [testCapability] }) }
-  }
+  const newApp = () => testApp({ env: testEnv({ API_KEYS_JSON: JSON.stringify(GOV_KEYS) }) })
   const getJob = (app: Awaited<ReturnType<typeof newApp>>['app'], id: string) =>
     app.handle(new Request(`http://newcat.test/v1/jobs/${id}`, { headers: { authorization: `Bearer ${TOKEN}` } }))
 

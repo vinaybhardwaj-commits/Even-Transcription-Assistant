@@ -47,16 +47,6 @@ export function acceptsTemperature(modelId: string): boolean {
   return !CLAUDE_5.test(modelId.trim())
 }
 
-const CLAUDE_5_5 = /(?:^|[./])anthropic\.claude-(?:sonnet|opus|haiku|fable)-5-5(?:[-.:]|$)/
-
-/**
- * Bedrock rejects a forced toolChoice (type "tool" or "any") for Claude 5.5 Sonnet and Opus; Haiku 5.5 accepts it,
- * but the whole 5.5 family defaults to `auto` (newcat-orch ruling). False for 5.5 ids under any geo prefix or ARN.
- */
-export function supportsForcedToolChoice(modelId: string): boolean {
-  return !CLAUDE_5_5.test(modelId.trim())
-}
-
 /** Names of the env vars whose id is set but not allowed. Ids are never echoed. */
 export function disallowedModelEnv(
   ids: Record<ModelTier, string | undefined>,
@@ -73,15 +63,4 @@ export function disallowedModelEnv(
     if (id && !isAllowedModelId(tier, id, pinned)) out.push(`${names[tier]} (not in allowlist)`)
   }
   return out
-}
-
-/**
- * Exact pinned ids for GEMINI_MODEL (Vertex publisher model ids, no `google/` prefix).
- * INFERRED: 'gemini-2.5-pro' is CDMSS's code default (lib/llm.ts GEMINI_MODEL); replace with the value
- * gating-lead reads from CDMSS production when it is reported.
- */
-export const GEMINI_PINNED: readonly string[] = ['gemini-2.5-pro']
-
-export function isAllowedGeminiModel(id: string, pinned: readonly string[] = GEMINI_PINNED): boolean {
-  return pinned.includes(id.trim())
 }

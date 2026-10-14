@@ -65,8 +65,6 @@ export interface VersionStamp {
   extractor: string
   models: string[]
   question_set_sha: string
-  /** Agent run path only: rule id -> `set id@sha` when per-rule question sets are used; absent for default-set-only runs. */
-  question_sets?: Record<string, string> | undefined
 }
 
 export interface InternalAudit {

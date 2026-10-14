@@ -14,18 +14,13 @@ export const segmentId = (index: number): string => `seg-${String(index + 1).pad
 export interface ConsultContext {
   // The written side of said-vs-written: what the prescription records.
   rx: { requires_surgery: boolean | null; procedure_text: string | null } | null
-  // The pre-pass completeness verdict (the same logic as the definition's completeness hook). Rules pass it on, so absence
-  // is never evidence on an incomplete window even if the hook is bypassed.
-  complete: boolean
-  // The consult window's segments in source order: lets an absence rule name the whole window's doctor and patient segments.
+  // The consult window's segments in source order: lets an absence rule name the range from a segment to the window end.
   segments: Array<{ id: string; role: string }>
 }
 
 export function consultContext(input: ConsultAuditInput): ConsultContext {
-  const pass = prepass(input)
   return {
     rx: input.rx === null ? null : { requires_surgery: input.rx.requires_surgery, procedure_text: input.rx.procedure_text },
-    complete: pass.complete,
-    segments: pass.turns.map((turn, i) => ({ id: segmentId(i), role: turn.role })),
+    segments: prepass(input).turns.map((turn, i) => ({ id: segmentId(i), role: turn.role })),
   }
 }

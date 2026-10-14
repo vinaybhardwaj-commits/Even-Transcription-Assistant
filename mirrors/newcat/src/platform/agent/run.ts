@@ -18,7 +18,6 @@ import {
   type AgentDefinition,
   type ContextRange,
   type GatedFact,
-  type PersistFact,
   type QuestionSetRef,
   type RawFact,
   type RuleSpec,
@@ -45,8 +44,6 @@ export interface AgentCounts {
   drops: Record<string, number>
   extract_attempts: number
   served_unverified: number
-  /** Present only when a declared second judge answered with an empty servedModelIds; counted per answer. */
-  served_unverified_second?: number
   rules_fired: number
   rules_disabled: number
   candidates: number
@@ -136,9 +133,6 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
   const allowedEmpty = new Set<string>([...def.abstention.emptyReasons, ...PLATFORM_EMPTY_REASONS])
 
   const opaqueIds = buildOpaqueIds(def, input, counts)
-  const questionSets = questionSetStamp(def)
-  // The facts that survived the quote gate of the accepted extraction; stays empty when the run ended before or without one.
-  let persistFacts: PersistFact[] = []
 
   const stamp = () => ({
     engine: ENGINE_VERSION,
@@ -146,7 +140,6 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
     extractor: def.versions.extractor ?? `${def.id}/${def.version}`,
     models: [...models],
     question_set_sha: def.judge.questionSet.sha,
-    ...(questionSets ? { question_sets: questionSets } : {}),
   })
 
   const finish = async (partial: Partial<InternalAudit> & { status: InternalAudit['status'] }): Promise<InternalAudit> => {
@@ -164,7 +157,7 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
     counts.llm_calls = budget.snapshot().llm
     counts.jev_calls = budget.snapshot().jev
     const runId = await persistRun(deps.sql, def, deps, inputSha, audit, counts, trail)
-    await runPersistHook(def, deps, runId, input, audit, counts, persistFacts)
+    await runPersistHook(def, deps, runId, input, audit, counts)
     return audit
   }
 
@@ -230,7 +223,6 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
 
     // 6. rules
     const facts = gate.kept
-    persistFacts = facts.map(toPersistFact)
     const agentCounts: Record<string, number> = Object.create(null) as Record<string, number>
     let agentEmptyReason: string | undefined
     const ruleContext = buildRuleContext(def, input)
@@ -297,7 +289,7 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
       )
       const servedIds = new Set<string>()
       const set = def.judge.questionSets?.[rule.id] ?? def.judge.questionSet
-      const verdict = await judgeOne(deps, def.judge.second, budget, state, threshold, servedIds, set, counts)
+      const verdict = await judgeOne(deps, def.judge.second, budget, state, threshold, servedIds, set)
       for (const served of servedIds) models.add(served)
       if (verdict.kind === 'drop') {
         counts.judge_dropped += 1
@@ -387,7 +379,6 @@ async function runPersistHook<I, F>(
   input: I,
   audit: InternalAudit,
   counts: AgentCounts,
-  facts: PersistFact[],
 ): Promise<void> {
   if (!def.persist || !PERSIST_STATUSES.has(audit.status)) return
   const wanted = def.persistTimeoutMs
@@ -395,7 +386,7 @@ async function runPersistHook<I, F>(
   let timer: NodeJS.Timeout | undefined
   try {
     // Promise.resolve: a hook that returns a plain value (not a promise) is awaited normally.
-    const hook = Promise.resolve(def.persist({ sql: deps.sql, runId, traceId: deps.traceId, input: structuredClone(input), audit: structuredClone(audit), facts: structuredClone(facts), drops: structuredClone(counts.drops) }))
+    const hook = Promise.resolve(def.persist({ sql: deps.sql, runId, traceId: deps.traceId, input: structuredClone(input), audit: structuredClone(audit) }))
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error('persist_timeout')), limit)
     })
@@ -413,21 +404,6 @@ async function runPersistHook<I, F>(
   } finally {
     if (timer) clearTimeout(timer)
   }
-}
-
-/** `rule id -> id@sha` for the per-rule sets; undefined (key absent) for a default-set-only agent. One value for audit.versions and agent_runs.versions. */
-function questionSetStamp<I, F>(def: AgentDefinition<I, F>): Record<string, string> | undefined {
-  const sets = def.judge.questionSets
-  if (!sets || Object.keys(sets).length === 0) return undefined
-  return Object.fromEntries(Object.entries(sets).map(([rule, set]) => [rule, `${set.id}@${set.sha}`]))
-}
-
-const PLATFORM_FACT_KEYS = new Set(['id', 'group', 'quote', 'source_id', 'segment_id', 'role', 't0', 't1', 'start', 'end'])
-
-/** A gated fact as the persist hook sees it: platform-stamped location plus the agent's own fields. */
-function toPersistFact<F>(fact: GatedFact<F>): PersistFact {
-  const fields = Object.fromEntries(Object.entries(fact).filter(([key]) => !PLATFORM_FACT_KEYS.has(key)))
-  return { group: fact.group, fields, segment_id: fact.segment_id, role: fact.role, t0: fact.t0, t1: fact.t1, quote: fact.quote }
 }
 
 function bumpIdentityInvalid(counts: AgentCounts, field: 'doctor_uid' | 'encounter_id' | 'threw'): void {
@@ -504,7 +480,6 @@ async function judgeOne(
   threshold: number,
   models: Set<string>,
   set: QuestionSetRef,
-  counts: AgentCounts,
 ): Promise<Verdict> {
   const result = (kind: 'valid' | 'drop' | 'disagree' | 'unavailable', primary: number | null, second: number | null, p: number): Verdict => ({
     kind,
@@ -512,12 +487,11 @@ async function judgeOne(
     second,
     p,
   })
-  const ask = async (call: () => Promise<{ p_yes: number; servedModelIds: string[] }>, isSecond = false): Promise<number | null> => {
+  const ask = async (call: () => Promise<{ p_yes: number; servedModelIds: string[] }>): Promise<number | null> => {
     if (!budget.take('jev')) throw new Stop({ status: 'failed', error: ERR.budget })
     try {
       const answer = await call()
       for (const id of answer.servedModelIds) models.add(id)
-      if (isSecond && answer.servedModelIds.length === 0) counts.served_unverified_second = (counts.served_unverified_second ?? 0) + 1
       return answer.p_yes
     } catch (error) {
       if (error instanceof JudgeUnavailable && error.kind === 'budget_exhausted') throw new Stop({ status: 'failed', error: ERR.budget })
@@ -531,7 +505,7 @@ async function judgeOne(
 
   const second = deps.second
   if (!second) return result('unavailable', primary, null, 0)
-  const other = await ask(() => second.askValidity(state, set.question, set), true)
+  const other = await ask(() => second.askValidity(state, set.question, set))
   if (other === null) return result('unavailable', primary, null, 0)
   const yes = [primary >= threshold, other >= threshold]
   if (yes[0] && yes[1]) return result('valid', primary, other, Math.min(primary, other))
@@ -556,7 +530,7 @@ async function persistRun<I, F>(
     models: audit.versions.models,
     question_set_id: def.judge.questionSet.id,
     question_set_sha: audit.versions.question_set_sha,
-    ...(audit.versions.question_sets ? { question_sets: audit.versions.question_sets } : {}),
+    ...(def.judge.questionSets ? { question_sets: Object.fromEntries(Object.entries(def.judge.questionSets).map(([rule, set]) => [rule, `${set.id}@${set.sha}`])) } : {}),
   }
   const key = deps.idempotencyKey ?? deps.traceId
   const runId = sha256(`${def.id}|${key}`).slice(0, 32)

@@ -85,17 +85,17 @@ const META_KEYS = ['procedure_group'] as const
 export const CONSULT_META_KEYS: readonly string[] = META_KEYS
 const metaOf = (o: CandidateFinding): Candidate['meta'] => ({ procedure_group: o.procedure_group })
 
-// Absence findings (consent.*): the judge reads every doctor and patient segment of the consult window (G8, W1), so consent
-// stated before the recommendation is visible too. One range per run of such segments, so no other role's text is shown;
-// every range lies inside the window's segments, on both judges.
-// consent.* and concern.unaddressed are absence claims: the judge reads the whole consult window.
-export const isAbsenceRule = (ruleId: string): boolean => ruleId.startsWith('consent.') || ruleId === 'concern.unaddressed'
+// Absence findings (consent.*): the judge reads the doctor and patient segments from the linked recommendation to the end
+// of the consult window (G8). One range per run of such segments, so no other role's text is shown; every range lies
+// inside the window's segments, on both judges.
 export const ABSENCE_ROLES: ReadonlySet<string> = new Set(['doctor', 'patient'])
-export function absenceRanges(ctx: ConsultContext): ContextRange[] {
+export function absenceRanges(ctx: ConsultContext, fromSegment: string): ContextRange[] | null {
+  const start = ctx.segments.findIndex((s) => s.id === fromSegment)
+  if (start < 0) return null
   const ranges: ContextRange[] = []
   let open: string | null = null
   let last = ''
-  for (const s of ctx.segments) {
+  for (const s of ctx.segments.slice(start)) {
     if (ABSENCE_ROLES.has(s.role)) {
       open ??= s.id
       last = s.id
@@ -111,28 +111,26 @@ export function absenceRanges(ctx: ConsultContext): ContextRange[] {
 type Spec = RuleSpec<ExtractedFact, ConsultContext>
 const capOf = new Map<string, number>()
 
-// `complete` comes from the context: an incomplete window that reaches the rules abstains instead of emitting absence findings.
 const outcomesFor = (ruleId: string, facts: GatedFacts, ctx: ConsultContext | undefined): RuleOutcome[] => {
-  const complete = ctx?.complete ?? false
-  if (ruleId.startsWith('consent.')) return consentRules(facts, complete)
+  if (ruleId.startsWith('consent.')) return consentRules(facts, true)
   if (ruleId.startsWith('pressure.')) return pressureRules(facts)
   if (ruleId.startsWith('concern.')) return patientConcernRules(facts)
-  return saidVsWrittenRules(facts, ctx?.rx ?? null, complete)
+  return saidVsWrittenRules(facts, ctx?.rx ?? null, true)
 }
 
-// One spec per family also carries the family's count-only outcomes (svw: no_rx, not spoken; consent: window_incomplete), so they are counted once.
-const COUNTERS: ReadonlySet<string> = new Set(['svw.group_differs', 'consent.risks'])
+// The first svw spec also carries the family's count-only outcomes (no_rx, not spoken), so they are counted once.
+const SVW_COUNTER = 'svw.group_differs'
 
 function evaluateRule(ruleId: string, flat: Array<GatedFact>, cap: number, ctx: ConsultContext | undefined): RuleOutput {
   const facts = groupFacts(flat)
-  const absence = isAbsenceRule(ruleId)
+  const absence = ruleId.startsWith('consent.')
   if (absence && ctx === undefined) throw new Error('missing_rule_context')
   const counts: Record<string, number> = Object.create(null) as Record<string, number>
   const seen = new Set<string>()
   const all: Candidate[] = []
   for (const o of outcomesFor(ruleId, facts, ctx)) {
     if (!isFinding(o)) {
-      if (COUNTERS.has(ruleId)) countOutcome(counts, o)
+      if (ruleId === SVW_COUNTER) countOutcome(counts, o)
       continue
     }
     if (o.rule_id !== ruleId) continue
@@ -141,9 +139,9 @@ function evaluateRule(ruleId: string, flat: Array<GatedFact>, cap: number, ctx: 
     seen.add(key)
     const candidate: Candidate = { factRefs: o.fact_refs, summary: o.claim, key: `${o.procedure_group}|${o.fact_refs.join(',')}`, meta: metaOf(o) }
     if (absence) {
-      // A recommendation whose segment is not in the window cannot be judged in context: skip it.
-      if (!ctx!.segments.some((seg) => seg.id === o.evidence[0]?.segment_id)) continue
-      candidate.contextRanges = absenceRanges(ctx!)
+      const ranges = absenceRanges(ctx!, o.evidence[0]?.segment_id ?? '')
+      if (ranges === null) continue
+      candidate.contextRanges = ranges
     }
     all.push(candidate)
   }

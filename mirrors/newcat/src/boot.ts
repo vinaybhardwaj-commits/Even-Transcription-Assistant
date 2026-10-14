@@ -46,7 +46,6 @@ export async function bootApp(options: BootOptions): Promise<Booted> {
     models: buildModelClient(sql, env),
     jev: buildJev(sql, env),
     embedder: buildEmbedder(sql, env),
-    cdmss: cdmss?.query,
   }
   const app = createApp(deps, { background: options.role !== 'api' })
   warnIfJevUnavailable(env, options.role)

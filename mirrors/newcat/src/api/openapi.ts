@@ -34,22 +34,6 @@ export function buildOpenApi(): Record<string, unknown> {
       },
       '/v1/jobs/{id}': { get: { summary: 'Read an async job', security: [{ bearer: [] }] } },
       '/v1/events': { get: { summary: 'Read webhook and job events', security: [{ bearer: [] }] } },
-      '/v1/agents/{agentId}/runs/{runId}': {
-        get: {
-          summary:
-            'Read one agent run: metadata and finding positions only, no input or quote text. Needs the agent id as a key scope. Doctor audience refused. Governance responses omit served model ids.',
-          security: [{ bearer: [] }],
-          parameters: [
-            { name: 'agentId', in: 'path', required: true, schema: { type: 'string' } },
-            { name: 'runId', in: 'path', required: true, schema: { type: 'string' } },
-          ],
-          responses: {
-            '200': { description: 'Run metadata and findings' },
-            '403': { description: 'Missing scope or audience not permitted' },
-            '404': { description: 'Unknown agent or run' },
-          },
-        },
-      },
       '/v1/capabilities': { get: { summary: 'List capabilities', security: [{ bearer: [] }] } },
       '/v1/internal/work/tick': { post: { summary: 'Lease and run one work item', security: [{ cron: [] }] } },
       '/v1/internal/corpus/import-sample': {

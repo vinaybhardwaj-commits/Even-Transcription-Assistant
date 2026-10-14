@@ -18,8 +18,9 @@ const CLAIM: Record<(typeof CONSENT_ELEMENTS)[number], string> = {
 // allowed only when completeness passed: the F7 completeness hook abstains an incomplete window before any model call,
 // so these rules never see one.
 //
-// The judge reads whole-segment context for these claims (rules/index.ts absenceRanges and the absence question set), so
-// consent stated anywhere in the doctor and patient segments of the window is visible to it, not only the recommendation quote.
+// TODO(G8): these are absence findings. The judge sees only the recommendation quote, so it cannot tell whether risks
+// were stated elsewhere. They need their own judge question and whole-segment evidence, which is platform work (G8).
+// The judge wiring is deliberately unchanged here.
 //
 // `complete` is the pre-pass verdict. When false, absence is not evidence: the rule abstains (window_incomplete) instead.
 export function consentRules(facts: GatedFacts, complete: boolean): RuleOutcome[] {
