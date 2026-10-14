@@ -27,3 +27,14 @@ export function safeJoin(root: string, rel: string, join: (...p: string[]) => st
   const base = resolve(root)
   return full.startsWith(base.endsWith(sep) ? base : base + sep) ? full : null
 }
+
+/** N1 F1: the file's real path (symlinks resolved) must sit under the real root. Throws when either cannot be resolved. */
+export async function assertUnderRealRoot(
+  root: string,
+  full: string,
+  realpath: (p: string) => Promise<string>,
+  sep: string,
+): Promise<void> {
+  const [r, f] = await Promise.all([realpath(root), realpath(full)])
+  if (!f.startsWith(r.endsWith(sep) ? r : r + sep)) throw new ArtefactError('path_outside_root')
+}

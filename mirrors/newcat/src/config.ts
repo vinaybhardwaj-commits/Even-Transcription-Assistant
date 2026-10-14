@@ -11,6 +11,9 @@ const optionalText = z
     return trimmed ? trimmed : undefined
   })
 
+/** A blank `NAME=` line (docker --env-file passes it through as '') counts as unset, so the default applies. */
+const blankIsUnset = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v)
+
 const EnvSchema = z.object({
   NEWCAT_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(43123),
@@ -75,7 +78,16 @@ const EnvSchema = z.object({
   VERTEX_SA_KEY_JSON: optionalText,
   GEMINI_MODEL: optionalText,
   GEMINI_BUDGET_MAX: z.coerce.number().int().positive().default(1000),
-  WORKER_POLL_MS: z.coerce.number().int().positive().default(2000),
+  WORKER_POLL_MS: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(2000)),
+  /** Where the worker runs the REB bundle reader: `local` (this host's python) or `t4` (the failover host over ssh). */
+  NEWCAT_REB_SOURCE: z.preprocess(blankIsUnset, z.enum(['local', 't4']).default('local')),
+  /** ssh config alias of the failover host (t4 source only). Letters, digits, dot, underscore, hyphen; checked again before spawn. */
+  NEWCAT_REB_SSH_HOST: z.preprocess(blankIsUnset, z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional()),
+  /** t4 source only: eta-lab checkout and REB root as paths ON the remote host. */
+  NEWCAT_REB_SSH_LAB_DIR: optionalText,
+  NEWCAT_REB_SSH_ROOT: optionalText,
+  /** Seconds between `worker.heartbeat` log lines. */
+  NEWCAT_HEARTBEAT_S: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(300)),
 })
 
 export type Env = z.infer<typeof EnvSchema>

@@ -19,6 +19,9 @@ const ALLOWED = new Set([
   'agent_id',
   'swept',
   'downgrade',
+  'reb_source',
+  'slots',
+  'tick_age_s',
 ])
 
 /** Note identifiers are hashed before they are written. Bodies, refs, and secrets are dropped. */

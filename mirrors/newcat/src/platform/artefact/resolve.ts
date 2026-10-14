@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import { ArtefactChanged, ArtefactError, assertWorkerContext, safeJoin } from './errors.js'
+import { ArtefactChanged, ArtefactError, assertUnderRealRoot, assertWorkerContext, safeJoin } from './errors.js'
 import { refKey, type ArtefactRef } from './ref.js'
+import { readRemoteTrack, rebSourceOf, remoteConfig, spawnSsh, type SshRunner } from './transport.js'
 
 export interface ResolveDeps {
   env?: Record<string, string | undefined>
   readFile?: (path: string) => Promise<Buffer>
+  realpath?: (path: string) => Promise<string>
+  /** t4 source only. */
+  sshRunner?: SshRunner
+  timeoutMs?: number
 }
 
 const CACHE_MAX = 32
@@ -23,18 +28,31 @@ export function clearTrackCache(): void {
 export async function resolveTrack(ref: ArtefactRef, deps: ResolveDeps = {}): Promise<unknown> {
   assertWorkerContext(deps.env)
   if (ref.store !== 'reb') throw new ArtefactError('store_unsupported')
-  const root = (deps.env ?? process.env).NEWCAT_REB_ROOT
-  if (!root) throw new ArtefactError('reb_root_unset')
-  const full = safeJoin(root, ref.path, join, resolve, sep)
-  if (full === null) throw new ArtefactError('path_outside_root')
+  const env = deps.env ?? process.env
+  const source = rebSourceOf(env)
+  if (source === null) throw new ArtefactError('transport_failed')
   const key = refKey(ref)
+  let full: string | null = null
+  let root = ''
+  if (source === 'local') {
+    root = env.NEWCAT_REB_ROOT ?? ''
+    if (!root) throw new ArtefactError('reb_root_unset')
+    full = safeJoin(root, ref.path, join, resolve, sep)
+    if (full === null) throw new ArtefactError('path_outside_root')
+  }
   const hit = cache.get(key)
   if (hit && hit.sha256 === ref.sha256) return structuredClone(hit.body)
   let bytes: Buffer
-  try {
-    bytes = await (deps.readFile ?? readFile)(full)
-  } catch {
-    throw new ArtefactError('track_unreadable')
+  if (source === 't4') {
+    // Body held in memory only; the path is rebuilt from the validated ref and checked again on the remote with realpath -e.
+    bytes = await readRemoteTrack(remoteConfig(env), ref.path, deps.sshRunner ?? spawnSsh, deps.timeoutMs ?? 30_000)
+  } else {
+    try {
+      await assertUnderRealRoot(root, full as string, deps.realpath ?? realpath, sep)
+      bytes = await (deps.readFile ?? readFile)(full as string)
+    } catch (e) {
+      throw e instanceof ArtefactError && e.code === 'path_outside_root' ? e : new ArtefactError('track_unreadable')
+    }
   }
   if (createHash('sha256').update(bytes).digest('hex') !== ref.sha256) throw new ArtefactChanged()
   let body: unknown
