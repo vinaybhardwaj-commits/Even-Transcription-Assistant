@@ -358,8 +358,15 @@ export async function readTranscriptLayer(row: Row, includeText: boolean, manife
     if (!f) return null;
     if (f.kind === "track") {
       const c = toClipClock(f.track, t0, durationMs);
+      if (clockMismatch(c)) {
+        // W1: stt on the wrong clock fails the whole layer; a translate or role track on the wrong clock is not used, says so, and is not counted
+        if (name === "stt") mismatch = true;
+        else {
+          degraded.push(`${name}:clock_mismatch`);
+          return null;
+        }
+      }
       nClamped += c.n_clamped;
-      if (name === "stt" && clockMismatch(c)) mismatch = true;
       return c.track;
     }
     if (f.kind === "error") degraded.push(`${name}:${f.code}`);

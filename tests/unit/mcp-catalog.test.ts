@@ -848,6 +848,40 @@ describe("CATALOG-2 C5: reb-consult readers accept _ uids and still refuse the r
   });
 });
 
+describe("CATALOG-4 W1/W2: a mis-clocked translate or role track is dropped loudly, not silently", () => {
+  beforeEach(() => {
+    setCatalog([crow(UID)]);
+    seedLayers();
+  });
+  const tr = async () => ((await run({ action: "get", consult_uid: UID, include_text: true })).layers as Record<string, Row>).transcript!;
+  const rel = (segments: Row[]) => segments.map((g) => ({ ...g, t0_ms: (g.t0_ms as number) - T0, t1_ms: (g.t1_ms as number) - T0 }));
+  it("stt good + translate on the relative clock: transcript ok, text_en null (stt is hi), degraded has translate:clock_mismatch, n_clamped counts only the tracks used", async () => {
+    setTrack(tk("translate.sarvam-saaras-v3"), translate({ segments: rel(translate().segments as Row[]) }));
+    const t = await tr();
+    expect(t.status).toBe("ok");
+    const d = t.data as Row;
+    expect(d.degraded).toEqual(["translate:clock_mismatch"]);
+    expect((d.segments as Row[]).map((x) => x.text_en)).toEqual([null, "ENGLISH1", null]); // only the en-IN stt segment keeps an English text
+    expect(d.n_clamped).toBe(2); // stt overrun + role overrun; the dropped translate adds nothing
+  });
+  it("stt good + role on the relative clock: ok, roles unknown (as with an absent role track), degraded has role:clock_mismatch", async () => {
+    setTrack(tk("role.llm-roles"), roles({ segments: rel(roles().segments as Row[]) }));
+    const d = (await tr()).data as Row;
+    expect(d.degraded).toEqual(["role:clock_mismatch"]);
+    expect((d.segments as Row[]).every((x) => x.role === "unknown")).toBe(true);
+  });
+  it("a good translate track has no degraded entry; both bad gives both entries", async () => {
+    expect(((await tr()).data as Row).degraded).toBeUndefined();
+    setTrack(tk("translate.sarvam-saaras-v3"), translate({ segments: rel(translate().segments as Row[]) }));
+    setTrack(tk("role.llm-roles"), roles({ segments: rel(roles().segments as Row[]) }));
+    expect(((await tr()).data as Row).degraded).toEqual(["translate:clock_mismatch", "role:clock_mismatch"]);
+  });
+  it("stt mis-clocked still fails the whole layer with clock_mismatch", async () => {
+    setTrack(tk("stt.sarvam-saaras-v3"), stt({ segments: rel(stt().segments as Row[]) }));
+    expect(await tr()).toMatchObject({ status: "error", error: "clock_mismatch", data: null });
+  });
+});
+
 // --- the door ---------------------------------------------------------------------------------------------------------------------------------
 describe("the door", () => {
   const { handleMcpRpc } = { handleMcpRpc: (...a: Parameters<typeof import("@/lib/mcp/handler").handleMcpRpc>) => import("@/lib/mcp/handler").then((m) => m.handleMcpRpc(...a)) };
