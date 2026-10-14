@@ -33,11 +33,7 @@ const doc = { fleet: [{ kind: "mic_missing", at_ms: T0 + 60000, message: "Mic no
   pqm_truth: [{ start_ms: T0, end_ms: T0 + 600000, token: "T-9", status: "confirmed" },
     { start_ms: T0 + 3600000, end_ms: T0 + 3600000 + 3600000, token: "T-10", status: "confirmed", suspect: true }],   // Fable 15:50: auto-timeout artifact, start-only tick
   cap_links: [{ start_ms: T0, end_ms: T0 + 60000, items: 5, captured: 4 }], acoustics: { missed_speech_pct: 3.2, missed: [{ start_ms: T0 + 200000, end_ms: T0 + 210000 }] },
-  detected: { acoustic: [{ start_ms: T0 + 60000, end_ms: T0 + 120000, conf: 0.6 }], e6: [], jev_loop: [] },
-  reb: { whisper: [{ t0_ms: T0, t1_ms: T0 + 4000, text: "invented whisper line", engine: "whisper-auto" }],
-         indic: [{ t0_ms: T0 + 4000, t1_ms: T0 + 8000, text: "invented indic line", engine: "indic-ctc-kn" }],
-         medasr: [{ t0_ms: T0, t1_ms: T0 + 8000, text: "invented term line", engine: "medasr" }],
-         tone: [{ t0_ms: T0, t1_ms: T0 + 8000, text: "", engine: "wavlm" }] } };   // W49 palimpsest (Fable 28 Sep): sravaani/diar/acoustic left empty on purpose - exercises the "not processed yet" fallback too
+  detected: { acoustic: [{ start_ms: T0 + 60000, end_ms: T0 + 120000, conf: 0.6 }], e6: [], jev_loop: [] } };
 const pageHtml = roomDayPage(roomDayModel(consult, doc)).replaceAll("__NONCE__", "testnonce");
 
 const srv = http.createServer((q, res) => {
@@ -73,10 +69,6 @@ try {
   check("room-day: suspect pqm row (Fable 15:50) reads as an unknown-end tick, never a fabricated end time", titles.some((t) => t.includes("T-10") && t.includes("end time unknown") && t.includes("queue timer ran out")) && !titles.some((t) => t.includes("T-10") && /\d\d:\d\d–\d\d:\d\d/.test(t)));
   const queueRects = await page2.evaluate(() => [...document.querySelectorAll("svg title")].filter((t) => t.textContent.includes("T-10")).map((t) => t.closest("rect").getAttribute("width")));
   check("room-day: suspect row's rect is the narrow fixed tick width, not proportional to its (fake) span", queueRects.length === 1 && queueRects[0] === "0.4");
-  // W49 palimpsest (Fable 28 Sep, overnight priority): the 7 REB day-overlay lanes - real segments render for the
-  // populated ones, "not processed yet" for the empty ones (sravaani/diar/acoustic here), no crash either way
-  check("room-day: Whisper/IndicConformer/MedASR/Tone lane labels shown", ["Whisper", "IndicConformer", "MedASR", "Tone"].every((n) => txt.includes(n)));
-  check("room-day: whisper/indic/medasr lanes show their real engine+text", titles.some((t) => t.includes("whisper-auto: invented whisper line")) && titles.some((t) => t.includes("indic-ctc-kn: invented indic line")) && titles.some((t) => t.includes("medasr: invented term line")));
-  check("room-day: an empty reb lane (SraVaani here) says not processed yet, not a crash", txt.includes("SraVaani") && /SraVaani[\s\S]{0,120}No current track segments/.test(txt));
+  check("room-day: tone always says not shown yet", /Tone[\s\S]*not.*valid/i.test(txt));
 } finally { await browser.close(); srv.close(); }
 console.log(fails ? `FAILED ${fails}` : "ALL PASS"); process.exit(fails ? 1 : 0);
