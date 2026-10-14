@@ -13,11 +13,12 @@ Writes ~/eta-data/surgery-review-v2/consult-<id>.json (0600). Prints counts only
 import json, os, re, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 import u9
-from jevconfig import CHUNK, EVIDENCE_MIN_P, EVIDENCE_MAX  # W41 F4: moved, not changed (still 180 / 0.5 / 6)
 
 OUT = os.path.expanduser("~/eta-data/surgery-review-v2")
 TRANSLATE_MODEL = "google/gemini-3.8-flash"
 OR_URL = "https://openrouter.ai/api/v1/chat/completions"
+CHUNK = 180
+EVIDENCE_MIN_P, EVIDENCE_MAX = 0.5, 6
 TRANSLATE_SYSTEM = ("You translate a clinic conversation transcript into English, faithfully.\n- Leave English words and English sentences exactly as they are.\n"
     "- Keep drug names, doses, numbers and units exact.\n- Never summarise, and never add or drop any content.\n"
     "- If the input is already English, return it unchanged.\n- Output only the translation: no preamble, no notes, no quotation marks.")
@@ -144,10 +145,8 @@ def read_consult(turns, jev=None, transport=None):
     """Jev proposals + evidence for one consult. `jev(state, questions)` is injectable for the selftest."""
     jev = jev or u9.ask
     state = state_text(turns)
-    main_resp = jev(state, {**u9.QUESTIONS, "too_poor": {"type": "noul", "instructions":
-        "Is this transcript too garbled, fragmentary or incomplete to tell reliably what was discussed about any surgical procedure?"}})
-    main = main_resp["answers"]
-    jev_model = main_resp.get("model") or u9.MODEL  # W41 F2: the model that actually answered, never a hardcoded literal
+    main = jev(state, {**u9.QUESTIONS, "too_poor": {"type": "noul", "instructions":
+        "Is this transcript too garbled, fragmentary or incomplete to tell reliably what was discussed about any surgical procedure?"}})["answers"]
     prop = {}
     for f in ("discussed", "context", "proposed_by", "recommended", "firmness", "patient_response", "urgency", "cost", "second_opinion", "procedure_named", "too_poor"):
         a = main[f]
@@ -162,7 +161,7 @@ def read_consult(turns, jev=None, transport=None):
             answers.update(jev(state, ch)["answers"]); calls += 1
     ev = evidence_from(answers, turns) if answers else {n: [] for n in EVIDENCE_NAME.values()}
     proc = procedure_phrase(turns, ev["procedure"], transport=transport)
-    return {"proposals": prop, "evidence": ev, "procedure": proc, "probe_calls": calls, "probes_skipped": skip, "jev_model": jev_model}
+    return {"proposals": prop, "evidence": ev, "procedure": proc, "probe_calls": calls, "probes_skipped": skip}
 
 
 def build(c, turns, transport=None):
@@ -170,10 +169,9 @@ def build(c, turns, transport=None):
         t["i"] = n
     n_tr = translate_turns(turns, transport=transport)
     r = read_consult(turns, transport=transport)
-    jev_model = r.pop("jev_model", u9.MODEL)
     return {"id": c["id"], "minutes": c["minutes"], "n_turns": len(turns), "translated_turns": n_tr,
             "turns": [{k: t.get(k) for k in ("i", "at", "window", "speaker", "speaker_basis", "lang", "text", "en")} | {"audio": None} for t in turns],
-            **r, "versions": {"u9": u9.PROMPT_VERSION, "translate_model": TRANSLATE_MODEL, "jev_model": jev_model}}
+            **r, "versions": {"u9": u9.PROMPT_VERSION, "translate_model": TRANSLATE_MODEL, "jev_model": "jev-latest"}}
 
 
 def selftest():
@@ -212,13 +210,10 @@ def selftest():
     def fake_jev(state, q):
         calls.append(len(q))
         if "discussed" in q:
-            return {"model": "jev-9.9.9-test", "answers": {**{k: ({"type": "choice", "choice": "no_surgical_talk", "confidence": 0.95, "probabilities": {}} if v["type"] == "choice" else {"type": "noul", "noul": 0.03}) for k, v in q.items()}}}
+            return {"answers": {**{k: ({"type": "choice", "choice": "no_surgical_talk", "confidence": 0.95, "probabilities": {}} if v["type"] == "choice" else {"type": "noul", "noul": 0.03}) for k, v in q.items()}}}
         return {"answers": {k: {"type": "noul", "noul": 0.9} for k in q}}
     r = read_consult(turns, jev=fake_jev, transport=fake_tr)
     assert r["probes_skipped"] and r["probe_calls"] == 0 and calls == [len(u9.QUESTIONS) + 1], "a confident no-surgery consult skips the per-turn probes"
-    assert r["jev_model"] == "jev-9.9.9-test", "read_consult must carry the model that actually answered, not a hardcoded literal (W41 F2)"
-    assert read_consult(turns, jev=lambda s, q: {"answers": {k: {"type": "noul", "noul": 0.9} for k in q}}, transport=fake_tr)["jev_model"] == u9.MODEL, \
-        "if a response omits model (e.g. a mock), fall back to the pinned constant, never the removed 'jev-latest' literal"
     # an empty reply (content None) is asked again once; two empty replies fail soft to "no phrase" instead of crashing
     seq = iter([None, '{"procedure": "septoplasty", "named": true}'])
     assert procedure_phrase([{"i": 1, "speaker": "Doctor", "en": "x", "text": "x"}], [1], transport=lambda m, j: next(seq)) == {"phrase": "septoplasty", "named": True}, "one empty reply is retried"
@@ -254,24 +249,57 @@ def selftest():
     finally:
         urllib.request.urlopen, globals()["_sleep"] = orig_open, orig_sleep
     print("selftest OK: translation only for non-English turns, empty translation refused, probes 5/turn chunked at 180, evidence capped, skip path")
+    test_quarantine()
+
+
+def test_quarantine():
+    """W41 F1 (jev-audit #23): the raw v2 CLI must refuse before touching Jev or OpenRouter, even with real-shaped un-scrubbed text on disk."""
+    import tempfile
+    calls = []
+
+    def spy_ask(*a, **k):
+        calls.append("jev"); raise AssertionError("Jev must never be called by the quarantined entrypoint")
+
+    def spy_urlopen(*a, **k):
+        calls.append("http"); raise AssertionError("OpenRouter must never be called by the quarantined entrypoint")
+
+    orig_ask, orig_urlopen, orig_out, orig_argv = u9.ask, urllib.request.urlopen, globals()["OUT"], sys.argv
+    u9.ask, urllib.request.urlopen = spy_ask, spy_urlopen
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(f"{d}/work")
+            json.dump({"pilot": [{"id": "X01", "minutes": 5}]}, open(f"{d}/selection.json", "w"))
+            json.dump([{"i": 1, "text": "call me on 98450 12345, I am Sunita Verma", "lang": "english",
+                        "speaker": "Speaker A", "speaker_basis": "x", "window": "w1", "at": "t"}], open(f"{d}/work/X01.turns.json", "w"))
+            globals()["OUT"] = d
+            sys.argv = ["build_consult.py"]
+            try:
+                main()
+                raise AssertionError("the raw v2 entrypoint must refuse to run")
+            except SystemExit as e:
+                assert "QUARANTINED" in str(e), e
+        assert not calls, f"no external client may be reached, even with un-scrubbed text present: {calls}"
+    finally:
+        u9.ask, urllib.request.urlopen, sys.argv = orig_ask, orig_urlopen, orig_argv
+        globals()["OUT"] = orig_out
+    print("test_quarantine OK: raw entrypoint refuses before any external call, un-scrubbed text never leaves the box")
+
+
+QUARANTINE_MSG = (
+    "QUARANTINED (W41 F1, jev-audit finding #23, 27 Sep 2026): this v2 entrypoint read RAW turns straight from "
+    "work/*.turns.json (no de-identification) and sent them to both OpenRouter (translate_turns/procedure_phrase) "
+    "and Jev (u9.ask) before any de-id gate ran -- a live PHI-exposure path, contrary to V's standing ruling 42/43. "
+    "It is superseded by the gated v3/v4/v5 pipeline: build_v3.py / build_v4.py route de-identified turns through "
+    "finalize.py's residual_identifiers() check before ever calling bc.read_consult/bc.build. This module's "
+    "functions (read_consult, build, translate_turns, procedure_phrase) remain safe to import as a library -- the "
+    "caller is responsible for de-identifying turns first. Only this raw standalone CLI path is quarantined."
+)
 
 
 def main():
     if "--selftest" in sys.argv:
         return selftest()
-    sel = json.load(open(f"{OUT}/selection.json"))["pilot"]
-    only = [a for a in sys.argv[1:] if not a.startswith("--")]
-    for c in sel:
-        if only and c["id"] not in only:
-            continue
-        turns = json.load(open(f"{OUT}/work/{c['id']}.turns.json"))
-        res = build(c, turns)
-        p = f"{OUT}/consult-{c['id']}.json"
-        json.dump(res, open(p, "w"), ensure_ascii=False, indent=1); os.chmod(p, 0o600)
-        pr = res["proposals"]
-        print(c["id"], "turns", res["n_turns"], "| translated", res["translated_turns"], "| probe calls", res["probe_calls"], "| skipped probes", res["probes_skipped"],
-              "| context", pr["context"]["value"], round(pr["context"]["confidence"] or 0, 2), "| too_poor p", round(pr["too_poor"]["p_yes"], 2),
-              "| evidence", {k: len(v) for k, v in res["evidence"].items()}, "| procedure named", res["procedure"]["named"])
+    raise SystemExit(QUARANTINE_MSG)
 
 
 if __name__ == "__main__":

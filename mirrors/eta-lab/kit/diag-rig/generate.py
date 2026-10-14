@@ -130,14 +130,6 @@ class Builder:
             _, base, j = name.split("_", 2)
             n, turns, items = clinical.build_mixed3(base, int(j) - 1)
             return turns, items
-        if name.startswith("cf4_"):
-            _, lang, k = name.split("_", 2)
-            n, turns, items = clinical.build_confirm4(lang, int(k) - 1)
-            return turns, items
-        if name.startswith("mx4_"):
-            _, base, j = name.split("_", 2)
-            n, turns, items = clinical.build_mixed4(base, int(j) - 1)
-            return turns, items
         return [(s, l, phrases.phrase(l, i)) for s, l, i in phrases.DIALOGUES[name]], None
 
     def _assemble(self, turns):
@@ -152,9 +144,9 @@ class Builder:
     @staticmethod
     def language_truth(name, turns):
         """the language label a language judge must give: 'mixed' for sentence-level switching (mix_*), else the single language code."""
-        if name.startswith(("mix_", "mx3_", "mx4_")):
+        if name.startswith(("mix_", "mx3_")):
             return "mixed"
-        return tts.lang_base(turns[0][1]) if name.startswith(("conf_", "clin_", "cf3_", "cf4_")) and "-" not in turns[0][1] else turns[0][1]
+        return tts.lang_base(turns[0][1]) if name.startswith(("conf_", "clin_", "cf3_")) and "-" not in turns[0][1] else turns[0][1]
 
     def dialogue(self, name):
         turns, items = self.resolve(name)
@@ -164,8 +156,6 @@ class Builder:
             extra.update(language_truth=self.language_truth(name, turns), confirm_sha=clinical.CONFIRM_SHA)
         elif name.startswith(("cf3_", "mx3_")):
             extra.update(language_truth=self.language_truth(name, turns), confirm3_sha=clinical.CONFIRM3_SHA)
-        elif name.startswith(("cf4_", "mx4_")):
-            extra.update(language_truth=self.language_truth(name, turns), confirm4_sha=clinical.CONFIRM4_SHA)
         return self._write(name, x, "dialogue", ev, tts=metas, n_speakers=len({e["speaker"] for e in ev}), **extra)
 
     def noisy(self, dlg, bed, snr):
@@ -195,8 +185,6 @@ class Builder:
             extra.update(language_truth=self.language_truth(dlg, turns), confirm_sha=clinical.CONFIRM_SHA)
         elif dlg.startswith(("cf3_", "mx3_")):
             extra.update(language_truth=self.language_truth(dlg, turns), confirm3_sha=clinical.CONFIRM3_SHA)
-        elif dlg.startswith(("cf4_", "mx4_")):
-            extra.update(language_truth=self.language_truth(dlg, turns), confirm4_sha=clinical.CONFIRM4_SHA)
         if bed == "obabble0":
             extra.update(diagnostic=True, crowd_kind="other-language, draw 1, diagnostic 0 dB cell (not part of the gate)")
         return self._write(sid, y, "noisy_dialogue", ev, tts=metas, n_speakers=len({e["speaker"] for e in ev}), bed="babble" if bed == "obabble0" else ("obabble" if bed in ("obabble1", "obabble2") else bed), snr_db=snr, base=dlg, **extra)
@@ -317,7 +305,6 @@ def git_sha():
         return None
 
 
-CONFIRM4_NAMES = (["cf4_%s_%d" % (l, k) for l in ("en", "hi", "kn", "ta", "te", "ml") for k in range(1, 9)] + ["mx4_%s_%d" % (b, j + 1) for j, b in enumerate(clinical.MIX_BASES)])
 CONFIRM3_NAMES = (["cf3_%s_%d" % (l, k) for l in ("en", "hi", "kn", "ta", "te", "ml") for k in range(1, 9)] + ["mx3_%s_%d" % (b, j + 1) for j, b in enumerate(clinical.MIX_BASES)])
 CONFIRM_NAMES = (["conf_%s_%d" % (l, k) for l in ("en", "hi", "kn", "ta", "te", "ml") for k in range(1, 9)] + ["mix_%s_%d" % (b, j + 1) for j, b in enumerate(clinical.MIX_BASES)])
 
@@ -334,8 +321,6 @@ SUITES = {
     "confirm3": dict(clinical=True, dialogues=CONFIRM3_NAMES, noisy=[(n, b, s) for n in CONFIRM3_NAMES for b, s in (("fan", 10), ("sbabble", 5), ("obabble1", 5), ("obabble2", 5))]),
     # the DIAGNOSTIC 0 dB cell (linker #4241, #4265) in its OWN suite/dir so it can never enter the gate: 56 stimuli <dlg>__babble_snr0, no clean dialogues.
     "confirm3diag": dict(clinical=True, dialogues=[], noisy=[(n, "obabble0", 0) for n in CONFIRM3_NAMES]),
-    # confirm4 (linker #4368, v4 judge, fresh suite): same shape as confirm3 = 280 gate stimuli (0 dB diagnostic omitted, not asked for)
-    "confirm4": dict(clinical=True, dialogues=CONFIRM4_NAMES, noisy=[(n, b, s) for n in CONFIRM4_NAMES for b, s in (("fan", 10), ("sbabble", 5), ("obabble1", 5), ("obabble2", 5))]),
     "smoke": dict(dialogues=["dlg_en_2", "dlg_hi_2"], noisy=[("dlg_en_2", "fan", 10)]),
 }
 
@@ -354,7 +339,7 @@ def build_suite(name, outdir, mode, cache_dir, voices=None):
         b.dialogue(d)
     for d, bed, snr in SUITES[name]["noisy"]:
         b.noisy(d, bed, snr)
-    man = dict(suite=name, tts_mode=mode, phraseset_sha=phrases.PHRASESET_SHA, clinical_sha=clinical.CLINICAL_SHA if SUITES[name].get("clinical") else None, confirm_sha=clinical.CONFIRM_SHA if name == "confirm" else None, confirm3_sha=clinical.CONFIRM3_SHA if name in ("confirm3", "confirm3diag") else None, confirm4_sha=clinical.CONFIRM4_SHA if name == "confirm4" else None, rig_git=git_sha(), chars_used=b.router.chars_used(), items=b.items)
+    man = dict(suite=name, tts_mode=mode, phraseset_sha=phrases.PHRASESET_SHA, clinical_sha=clinical.CLINICAL_SHA if SUITES[name].get("clinical") else None, confirm_sha=clinical.CONFIRM_SHA if name == "confirm" else None, confirm3_sha=clinical.CONFIRM3_SHA if name in ("confirm3", "confirm3diag") else None, rig_git=git_sha(), chars_used=b.router.chars_used(), items=b.items)
     with open(os.path.join(outdir, "suite.json"), "w") as f:
         json.dump(man, f, indent=1)
     os.chmod(os.path.join(outdir, "suite.json"), 0o600)
