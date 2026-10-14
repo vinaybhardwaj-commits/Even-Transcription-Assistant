@@ -67,6 +67,13 @@ in_night_window() { hhmm_in_window "$(ist_hhmm)" "$NIGHT_START" "$NIGHT_END"; }
 # ---- JSON out (hand built; escape \ " and control characters) ----
 jesc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t\r' '   '; }
 jstr() { if [ -z "$1" ]; then printf 'null'; else printf '"%s"' "$(jesc "$1")"; fi; }
+# Same output as jstr, no subshell and no external process: jstr_v <value> sets JSTR_V. For hot paths under load.
+jstr_v() {
+  local s="$1" nl=$'\n' tb=$'\t' cr=$'\r'
+  if [ -z "$s" ]; then JSTR_V=null; return; fi
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$nl/ }"; s="${s//$tb/ }"; s="${s//$cr/ }"
+  JSTR_V="\"$s\""
+}
 jnum() { case "$1" in ''|*[!0-9.-]*) printf 'null' ;; *) printf '%s' "$1" ;; esac; }
 jbool() { case "$1" in true|false) printf '%s' "$1" ;; *) printf 'null' ;; esac; }
 
@@ -151,4 +158,10 @@ once_per() {
   if [ -n "$last" ] && [ "$((now - last))" -lt "$secs" ]; then return 1; fi
   printf '%s\n' "$now" >"$f"
   return 0
+}
+
+# Monotonic-enough milliseconds for deadlines. date +%N where the OS has it (macOS 26), else whole seconds.
+mono_ms() {
+  local n; n="$(date +%s%N 2>/dev/null)"
+  case "$n" in ''|*[!0-9]*) echo "$(( $(date +%s) * 1000 ))" ;; *) echo "$((n / 1000000))" ;; esac
 }
