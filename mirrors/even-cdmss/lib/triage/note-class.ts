@@ -1,10 +1,9 @@
 /**
  * lib/triage/note-class.ts — Action-queue note class (pure).
  *
- * One board. OPD, discharge summary, and OT share the same queue, stamp, and
- * Findings pipe. The class is part of the card identity so those pipes do not
- * collide. OT lander writes ot_note_audits → queue union; route mint stays off
- * until TRIAGE_BOT_WRITE_CLASSES lists `ot`.
+ * One board. OPD, discharge summary, and (later) OT share the same queue, stamp,
+ * and Findings pipe. The class is part of the card identity so those pipes do not
+ * collide. `ot` is a type-complete value only — this slice does not land OT notes.
  */
 
 export const NOTE_CLASSES = ['opd', 'discharge_summary', 'ot'] as const;

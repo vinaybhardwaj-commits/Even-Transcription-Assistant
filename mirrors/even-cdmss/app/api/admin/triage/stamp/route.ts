@@ -335,7 +335,7 @@ export async function POST(req: NextRequest) {
     if (stamp.verb !== 'hold' || stamp.reason !== UNMAPPED_DOCTOR_REASON) {
       return NextResponse.json({
         ok: false,
-        error: 'unmapped_doctor: unresolved doctor cannot be routed or labelled; stamp hold with reason unmapped_doctor',
+        error: 'unmapped_doctor: unresolved treating doctor cannot be routed or labelled; stamp hold with reason unmapped_doctor',
       }, { status: 400 });
     }
   } else if ((stamp.verb === 'valid' || stamp.verb === 'bug' || stamp.verb === 'route') && !triageClassMintAllowed(identity.note_class)) {

@@ -17,7 +17,6 @@ import { sql } from '../db';
 import { metabaseQuery } from '../metabase';
 import { READMIT_ENGINE_VERSION } from './store';
 import { getLastCheckAt } from './check-state';
-import { readReadmissionHealth } from './health';
 import type { FreshnessInfo } from '../readmission-rates-core';
 
 /** db13 — VERBATIM (no bind params; both facility aliases pass through because nothing filters on
@@ -31,22 +30,6 @@ export const FINDINGS_FRESHNESS_SQL = `SELECT to_char(MAX(readmit_admit_at) AT T
        to_char(MAX(audited_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_audit_at
   FROM readmission_findings
  WHERE engine_version = $1 AND finding_class = 'even_even'`;
-
-/** Longest the board waits for the health read before leaving `health` absent. */
-export const FRESHNESS_HEALTH_TIMEOUT_MS = 4000;
-
-/** Resolves to the value, or null on fault or timeout. Clears its timer. */
-export async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      p.catch(() => null),
-      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
 
 const s = (v: unknown): string | null => (v == null || v === '' ? null : String(v));
 
@@ -69,11 +52,6 @@ async function readFindingsFreshness(engineVersion: string): Promise<{ newestRet
 }
 
 export async function readFreshness(engineVersion: string = READMIT_ENGINE_VERSION): Promise<FreshnessInfo> {
-  const [feedCurrentTo, findings, health] = await Promise.all([
-    readFeedCurrentTo(), readFindingsFreshness(engineVersion),
-    withTimeout(readReadmissionHealth(engineVersion), FRESHNESS_HEALTH_TIMEOUT_MS),
-  ]);
-  const info: FreshnessInfo = { feedCurrentTo, newestReturnAt: findings.newestReturnAt, lastAuditAt: findings.lastAuditAt, lastCheckAt: getLastCheckAt() };
-  if (health) info.health = { status: health.status, reasons: health.reasons, lastNarrativeAt: health.counts.lastNarrativeAt };
-  return info;
+  const [feedCurrentTo, findings] = await Promise.all([readFeedCurrentTo(), readFindingsFreshness(engineVersion)]);
+  return { feedCurrentTo, newestReturnAt: findings.newestReturnAt, lastAuditAt: findings.lastAuditAt, lastCheckAt: getLastCheckAt() };
 }

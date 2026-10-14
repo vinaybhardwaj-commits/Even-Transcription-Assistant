@@ -2,7 +2,6 @@ import { neon, neonConfig } from '@neondatabase/serverless';
 // LAB-MCP-V2 §7 (decision 6): fail-closed. Production SQL is unreachable from inside a
 // lab execution context — see the trap below.
 import { labExecution, LabError } from './lab-execution-context';
-import { opdLabWriteFenceActive, OpdLabWriteForbidden, tripOpdLabWriteFence } from './opd-lab-write-guard';
 
 neonConfig.fetchConnectionCache = true;
 
@@ -46,37 +45,6 @@ function injectAppSource(query: string, params: unknown[]): { query: string; par
   return { query: newQuery, params: [...params, APP_SOURCE] };
 }
 
-/** Test spy. Production leaves this null. `executed` is false when the write fence refuses the statement. */
-let sqlSpy: ((statement: string, executed: boolean) => void) | null = null;
-export function setSqlSpy(spy: ((statement: string, executed: boolean) => void) | null): void {
-  sqlSpy = spy;
-}
-
-function statementText(args: unknown[]): string | null {
-  const head = args[0];
-  if (typeof head === 'string') return head;
-  if (Array.isArray(head)) return (head as string[]).join(' ');
-  return null;
-}
-
-/**
- * SELECT and WITH ... SELECT only. Anything else, including a CTE that writes,
- * a multi-statement script, or a call shape we cannot read, is a write.
- */
-export function isProductionReadSql(sqlText: string): boolean {
-  let s = sqlText.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
-  s = s.replace(/'(?:''|[^'])*'/g, "''").replace(/"(?:\\"|[^"])*"/g, '""');
-  s = s.trim().replace(/;+\s*$/g, '');
-  if (!s || s.includes(';')) return false;
-  const lower = s.toLowerCase();
-  if (!lower.startsWith('select') && !lower.startsWith('with')) return false;
-  const body = lower
-    .replace(/\bfor\s+update\b/g, ' ')
-    .replace(/\bfor\s+share\b/g, ' ')
-    .replace(/\bfor\s+no\s+key\s+update\b/g, ' ');
-  return !/\b(insert|update|delete|merge|into|create|alter|drop|truncate|grant|revoke|copy|call|do|vacuum|refresh|reindex|lock|set|begin|commit|rollback)\b/.test(body);
-}
-
 /**
  * Drop-in replacement for the neon() client. Supports both call styles used in
  * the codebase: tagged-template `sql\`...\`` and parameterized `sql(text, params)`.
@@ -84,16 +52,6 @@ export function isProductionReadSql(sqlText: string): boolean {
  */
 export const sql: ReturnType<typeof neon> = new Proxy((() => {}) as unknown as ReturnType<typeof neon>, {
   apply(_target, _thisArg, args: unknown[]) {
-    const text = statementText(args);
-    // Paired-audit fence: named writers throw first, and any other statement that is
-    // not a read throws here. Checked before the lab-IO fence so a swallowed write
-    // still sets the tripped bit.
-    if (opdLabWriteFenceActive() && (text == null || !isProductionReadSql(text))) {
-      sqlSpy?.(text ?? '', false);
-      const err = new OpdLabWriteForbidden('sql');
-      tripOpdLabWriteFence(err);
-      throw err;
-    }
     // §7 — THE fence. A research run executes production engine code, and that code
     // reaches for `sql` in a dozen places (the LVC rules, the doctor directory, every
     // store write). None of it may run: a research key must not be able to read an
@@ -101,7 +59,6 @@ export const sql: ReturnType<typeof neon> = new Proxy((() => {}) as unknown as R
     // to do so by accident. Throwing here is fail-closed by construction — a new call
     // site added years from now is guarded the day it is written, with no diff.
     if (labExecution()) throw new LabError('LAB_IO_FORBIDDEN', 'production sql inside lab execution');
-    sqlSpy?.(text ?? '', true);
     const c = client() as unknown as (...a: unknown[]) => unknown;
     // Parameterized form: (queryString, paramsArray)
     if (typeof args[0] === 'string' && Array.isArray(args[1])) {

@@ -21,7 +21,6 @@
  */
 
 import { sql } from '../db';
-import { normaliseNarrativeCode } from './health';
 import type { ReadmitPair, OonDetection } from '../readmission-detect-core';
 import { pairDedupKey, oonDedupKey } from '../readmission-detect-core';
 import type { ReadmissionFinding, LabTier } from '../readmission-reconcile-core';
@@ -272,79 +271,6 @@ export async function recordAuditError(dedupKey: string, error: string, engineVe
       [dedupKey, engineVersion, String(error).slice(0, 2000)],
     );
   } catch { /* observability must never break the audit path */ }
-}
-
-/** Best-effort: stamp the last narrative-leg failure on the finding blob. Additive key, no
- *  version snapshot (same rule as caseNarrative). Never throws. */
-export async function recordNarrativeError(dedupKey: string, code: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<void> {
-  try {
-    await sql(
-      `UPDATE readmission_findings SET finding = jsonb_set(COALESCE(finding,'{}'::jsonb), '{narrativeError}', jsonb_build_object('at', to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'), 'code', $2::text)) WHERE dedup_key = $1 AND engine_version = $3`,
-      [dedupKey, normaliseNarrativeCode(code), engineVersion],
-    );
-  } catch { /* observability must never break the audit path */ }
-}
-
-/** Best-effort: drop the narrativeError key after a narrative lands. Never throws. */
-export async function clearNarrativeError(dedupKey: string, engineVersion: string = READMIT_ENGINE_VERSION): Promise<void> {
-  try {
-    await sql(
-      `UPDATE readmission_findings SET finding = finding - 'narrativeError' WHERE dedup_key = $1 AND engine_version = $2 AND finding ? 'narrativeError'`,
-      [dedupKey, engineVersion],
-    );
-  } catch { /* observability must never break the audit path */ }
-}
-
-export interface ReadmissionHealthCounts {
-  readOk: boolean;
-  lastAuditAt: string | null;
-  lastNarrativeAt: string | null;
-  narrativePending: number | null;
-  oldestNarrativePendingAt: string | null;
-  detectedPending: number | null;
-  oldestDetectedAt: string | null;
-  narrativeErrors: number | null;
-  lastNarrativeErrorAt: string | null;
-  auditErrors: number | null;
-}
-
-const HEALTH_NULL: ReadmissionHealthCounts = {
-  readOk: false, lastAuditAt: null, lastNarrativeAt: null, narrativePending: null, oldestNarrativePendingAt: null,
-  detectedPending: null, oldestDetectedAt: null, narrativeErrors: null, lastNarrativeErrorAt: null, auditErrors: null,
-};
-
-/** The ONE health read. Timestamps and counts only. Fail-safe: all-null with readOk:false. */
-export const READMISSION_HEALTH_SQL = `SELECT
-       to_char(MAX(audited_at) FILTER (WHERE audit_status = 'audited') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_audit_at,
-       to_char(MAX(CASE WHEN finding->'caseNarrative'->>'generatedAt' ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN (finding->'caseNarrative'->>'generatedAt')::timestamptz END) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_narrative_at,
-       count(*) FILTER (WHERE audit_status = 'audited' AND (finding IS NULL OR finding->'caseNarrative' IS NULL))::int AS narrative_pending,
-       to_char(MIN(audited_at) FILTER (WHERE audit_status = 'audited' AND (finding IS NULL OR finding->'caseNarrative' IS NULL)) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS oldest_narrative_pending_at,
-       count(*) FILTER (WHERE audit_status = 'detected')::int AS detected_pending,
-       to_char(MIN(created_at) FILTER (WHERE audit_status = 'detected') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS oldest_detected_at,
-       count(*) FILTER (WHERE finding ? 'narrativeError')::int AS narrative_errors,
-       to_char(MAX(CASE WHEN finding->'narrativeError'->>'at' ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN (finding->'narrativeError'->>'at')::timestamptz END) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_narrative_error_at,
-       count(*) FILTER (WHERE last_error IS NOT NULL)::int AS audit_errors
-  FROM readmission_findings
- WHERE engine_version = $1`;
-
-export async function readmissionHealthCounts(engineVersion: string = READMIT_ENGINE_VERSION): Promise<ReadmissionHealthCounts> {
-  try {
-    const rows = (await sql(READMISSION_HEALTH_SQL, [engineVersion])) as Record<string, unknown>[];
-    const r = rows[0];
-    if (!r) return { ...HEALTH_NULL };
-    const ts = (v: unknown): string | null => (v == null || v === '' ? null : String(v));
-    const n = (v: unknown): number => Number(v ?? 0);
-    return {
-      readOk: true,
-      lastAuditAt: ts(r.last_audit_at), lastNarrativeAt: ts(r.last_narrative_at),
-      narrativePending: n(r.narrative_pending), oldestNarrativePendingAt: ts(r.oldest_narrative_pending_at),
-      detectedPending: n(r.detected_pending), oldestDetectedAt: ts(r.oldest_detected_at),
-      narrativeErrors: n(r.narrative_errors), lastNarrativeErrorAt: ts(r.last_narrative_error_at),
-      auditErrors: n(r.audit_errors),
-    };
-  } catch {
-    return { ...HEALTH_NULL };
-  }
 }
 
 export interface PendingRow extends Record<string, unknown> {

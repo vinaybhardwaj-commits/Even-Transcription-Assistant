@@ -38,8 +38,8 @@ export function triageWriteEnabled(env: Record<string, string | undefined> = pro
  * An explicit list is taken as written (`opd,discharge_summary`). Tokens that
  * are not a note class are ignored; if none remain, the list falls back to opd
  * so a typo cannot open discharge mint and cannot lock OPD out by accident.
- * This does not read or set the flag. Discharge and OT mint stay off until the
- * allow-list names `discharge_summary` / `ot`.
+ * This does not read or set the flag. Discharge mint stays off until the
+ * allow-list names `discharge_summary`.
  */
 export function triageWriteClasses(env: Record<string, string | undefined> = process.env): NoteClass[] {
   const raw = env.TRIAGE_BOT_WRITE_CLASSES;

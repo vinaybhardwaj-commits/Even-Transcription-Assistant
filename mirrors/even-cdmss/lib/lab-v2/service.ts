@@ -67,10 +67,6 @@ import { QUEUE_SCHEMAS, reviewQueue } from './tools/queue';
 // round since A2 has done.
 import { CASE_SCHEMAS, caseAsk, caseTimeline } from './tools/case';
 import { MINIMIZE_SCHEMAS, failureMinimize } from './tools/minimize';
-import {
-  PAIRED_AUDIT_SCHEMAS, pairedAuditResultsIdentifyingTool, pairedAuditResultsTool,
-  pairedAuditStatusTool, pairedAuditSubmitTool,
-} from './tools/paired-audit';
 import { FREEZE_ARM_HASH, freezeItemKey } from './adapters/dataset-freeze';
 import { freezeCohort } from './sources/cohort';
 import { freezeOpdCase, validateFrozenCase } from './sources/opd';
@@ -142,7 +138,6 @@ const SCHEMAS: Record<string, SchemaPair> = {
   ...(QUEUE_SCHEMAS as unknown as Record<string, SchemaPair>),
   ...(CASE_SCHEMAS as unknown as Record<string, SchemaPair>),
   ...(MINIMIZE_SCHEMAS as unknown as Record<string, SchemaPair>),
-  ...(PAIRED_AUDIT_SCHEMAS as unknown as Record<string, SchemaPair>),
   // §17.6 item 6 — report_export goes FULL. Its schema is widened here rather than in
   // tools/observation.ts because §17.6's file contract leaves that file untouched, and this
   // table is where both rounds' schemas already meet. A later spread wins, so this entry
@@ -1121,30 +1116,6 @@ const D3_HANDLERS: Record<string, Handler> = {
   },
 };
 
-const PAIRED_HANDLERS: Record<string, Handler> = {
-  async paired_audit_submit(deps, args) {
-    return pairedAuditSubmitTool(
-      { db: deps.db, principal: deps.principal },
-      args as Parameters<typeof pairedAuditSubmitTool>[1],
-    );
-  },
-  async paired_audit_status(deps, args) {
-    return pairedAuditStatusTool({ db: deps.db }, args as { run_id: string });
-  },
-  async paired_audit_results(deps, args) {
-    return pairedAuditResultsTool(
-      { db: deps.db },
-      args as { run_id: string; limit: number; offset: number },
-    );
-  },
-  async paired_audit_results_identifying(deps, args) {
-    return pairedAuditResultsIdentifyingTool(
-      { db: deps.db },
-      args as { run_id: string; limit: number; offset: number },
-    );
-  },
-};
-
 const ALL_HANDLERS: Record<string, Handler> = {
   ...HANDLERS,
   ...(OBSERVATION_HANDLERS as unknown as Record<string, Handler>),
@@ -1155,5 +1126,4 @@ const ALL_HANDLERS: Record<string, Handler> = {
   ...C2_HANDLERS,
   ...C3_HANDLERS,
   ...D3_HANDLERS,
-  ...PAIRED_HANDLERS,
 };

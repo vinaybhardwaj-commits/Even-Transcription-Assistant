@@ -4,10 +4,9 @@
  * Same read the /care/triage UI uses (GET /api/opd-triage/queue). Informational findings are
  * dropped by buildQueue — this module does not invent a second queue or a second filter.
  *
- * Discharge summaries from ipd_discharge_audits join with note_class=discharge_summary
- * (treating-doctor hop). OT notes from ot_note_audits join with note_class=ot (curated
- * surgeon map). Unjoined rows are queued as unmapped cards, never under an invented uid.
- * Chart surgery bookings are never read here as note grain.
+ * Discharge summaries from ipd_discharge_audits join the same population with
+ * note_class=discharge_summary. Doctor identity is the treating-doctor hop only.
+ * Unjoined stays are queued as unmapped cards, never under an invented uid.
  */
 
 import { sql } from '@/lib/db';
@@ -26,8 +25,6 @@ import {
   landDischargeAudits, visibleUnmappedCards,
   type DischargeAuditSource, type UnmappedDischargeCard,
 } from '@/lib/triage/ds-lander';
-import { landOtAudits, visibleUnmappedOtCards, type UnmappedOtCard } from '@/lib/triage/ot-lander';
-import { loadOtAuditsForQueue } from '@/lib/triage/ot-audit-store';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -43,8 +40,6 @@ export interface ActionQueueQuery {
   includeQuieted: boolean;
 }
 
-export type OtLoadDiagnostic = { ok: true } | { ok: false; error: string };
-
 export interface ActionQueueResult {
   ok: true;
   window: { from: string; to: string; days: number };
@@ -52,17 +47,15 @@ export interface ActionQueueResult {
   engine: string;
   doctors_total: number;
   doctors: DoctorGroup[];
-  /** Unresolved DS treating-doctor or OT surgeon-map cards. Not grouped under a physician. */
-  unmapped: Array<UnmappedDischargeCard | UnmappedOtCard>;
+  /** Discharge stays the treating-doctor hop did not resolve. Not grouped under a physician. */
+  unmapped: UnmappedDischargeCard[];
   advisory: string;
-  /** Non-PHI: OT Neon load status so Triage Bot can see failures without Vercel log diving. */
-  ot_load: OtLoadDiagnostic;
 }
 
 export interface ActionQueueItem {
   queue_item_ref: string;
   note_class: NoteClass;
-  /** Null on an unmapped DS/OT card. Never a synthesized physician id. */
+  /** Null on an unmapped discharge card. Never a synthesized physician id. */
   doctor_uid: string | null;
   attribution: 'mapped' | 'unmapped';
   doctor_name: string | null;
@@ -104,10 +97,10 @@ function addDays(day: string, delta: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Flatten the CM Action queue (doctor → class → signal_type, plus unmapped DS/OT cards). */
+/** Flatten the CM Action queue (doctor → class → signal_type, plus unmapped discharge cards). */
 export function flattenActionQueueItems(
   doctors: DoctorGroup[],
-  unmapped: Array<UnmappedDischargeCard | UnmappedOtCard> = [],
+  unmapped: UnmappedDischargeCard[] = [],
 ): ActionQueueItem[] {
   const items: ActionQueueItem[] = [];
   for (const d of doctors) {
@@ -133,7 +126,7 @@ export function flattenActionQueueItems(
   for (const card of unmapped) {
     items.push({
       queue_item_ref: card.queue_item_ref,
-      note_class: noteClassOf(card.note_class),
+      note_class: 'discharge_summary',
       doctor_uid: null,
       attribution: 'unmapped',
       doctor_name: null,
@@ -181,19 +174,6 @@ async function loadDischargeQueue(from: string, to: string): Promise<{ findings:
     hop = { byIpUid: {}, coverage: { asked: sources.length, known: 0, resolved: 0, ambiguousPractitioner: 0, ambiguousStay: 0, unmatched: 0, noTreatingId: 0, unavailable: true }, ambiguousIds: [] };
   }
   return landDischargeAudits(sources, hop);
-}
-
-async function loadOtQueue(from: string, to: string): Promise<{ findings: TriageFinding[]; unmapped: UnmappedOtCard[] }> {
-  const rows = await loadOtAuditsForQueue(from, to);
-  if (!rows.length) return { findings: [], unmapped: [] };
-  return landOtAudits(rows.map((r) => ({
-    id: r.id,
-    doctor_uid: r.doctor_uid,
-    map_status: r.map_status,
-    surgeon_raw: r.surgeon_raw,
-    note_day: r.note_day,
-    findings: r.findings,
-  })));
 }
 
 /**
@@ -277,28 +257,9 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
   }
   findings.push(...dischargeFindings);
 
-  let otFindings: TriageFinding[] = [];
-  let otUnmapped: UnmappedOtCard[] = [];
-  let ot_load: OtLoadDiagnostic = { ok: true };
-  try {
-    const landed = await loadOtQueue(from, to);
-    otFindings = doctorFilter
-      ? landed.findings.filter((f) => f.doctor_uid === doctorFilter)
-      : landed.findings;
-    otUnmapped = doctorFilter ? [] : landed.unmapped;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[queue-read] OT Action-queue load failed:', message);
-    otFindings = [];
-    otUnmapped = [];
-    ot_load = { ok: false, error: message };
-  }
-  findings.push(...otFindings);
-
   const doctorUids = [...new Set([
     ...findings.map((f) => f.doctor_uid),
     ...dischargeUnmapped.map((card) => unmappedQueueDoctor(card.audit_id)),
-    ...otUnmapped.map((card) => unmappedQueueDoctor(card.audit_id)),
   ])];
   const [decisions, names, dirRows] = await Promise.all([
     loadTriageDecisions(doctorUids).catch(() => []),
@@ -309,10 +270,7 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
   for (const r of dirRows as Record<string, unknown>[]) specialities[String(r.doctor_uid)] = String(r.speciality);
 
   const { doctors } = buildQueue(findings, decisions, { names, specialities, status, includeQuieted });
-  const unmapped = [
-    ...visibleUnmappedCards(dischargeUnmapped, decisions, status),
-    ...visibleUnmappedOtCards(otUnmapped, decisions, status),
-  ];
+  const unmapped = visibleUnmappedCards(dischargeUnmapped, decisions, status);
 
   return {
     ok: true,
@@ -323,6 +281,5 @@ export async function readActionQueue(query: ActionQueueQuery): Promise<ActionQu
     doctors,
     unmapped,
     advisory: 'Advisory documentation & prescribing signals from an automated screen — validate before routing. Not a clinician performance score.',
-    ot_load,
   };
 }
