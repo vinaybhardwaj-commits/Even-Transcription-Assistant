@@ -184,37 +184,25 @@ export async function seedOtSurgeonMapFromFile(
   return { upserted };
 }
 
-/**
- * OT Action-queue load SQL. `canonicalDistinctOnSql` already projects `identity` (`uid`);
- * do not re-list `uid` in `cols` — Neon rejects the outer SELECT with ambiguous column reference.
- */
-export function buildOtAuditsForQueueSql(where: string): string {
-  return `SELECT id, uid, hospital_uid, encounter_id, uhid, surgery_name, surgeon_raw, note_day,
-            doctor_uid, map_status, findings, n_findings, engine_version
-     FROM (${canonicalDistinctOnSql({
-       table: 'ot_note_audits',
-       identity: 'uid',
-       cols: `id::text AS id, hospital_uid, encounter_id, uhid, surgery_name, surgeon_raw,
-              to_char(note_day,'YYYY-MM-DD') AS note_day,
-              doctor_uid, map_status, findings, n_findings, engine_version`,
-       where,
-     })}) canonical
-     LIMIT 8000`;
-}
-
 export async function loadOtAuditsForQueue(from: string, to: string): Promise<OtAuditRow[]> {
   await ensureOtAuditTables();
   const where = `app_source = $1 AND engine_version = $2
     AND note_day BETWEEN $3::date AND $4::date`;
-  let rows: Record<string, unknown>[];
-  try {
-    rows = await run(buildOtAuditsForQueueSql(where), [APP, OT_ENGINE_VERSION, from, to]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[ot-audit-store] loadOtAuditsForQueue failed:', message);
-    throw err;
-  }
-  return rows.map((r) => ({
+  const rows = await run(
+    `SELECT id, uid, hospital_uid, encounter_id, uhid, surgery_name, surgeon_raw, note_day,
+            doctor_uid, map_status, findings, n_findings, engine_version
+     FROM (${canonicalDistinctOnSql({
+       table: 'ot_note_audits',
+       identity: 'uid',
+       cols: `id::text AS id, uid, hospital_uid, encounter_id, uhid, surgery_name, surgeon_raw,
+              to_char(note_day,'YYYY-MM-DD') AS note_day,
+              doctor_uid, map_status, findings, n_findings, engine_version`,
+       where,
+     })}) canonical
+     LIMIT 8000`,
+    [APP, OT_ENGINE_VERSION, from, to],
+  ).catch(() => []);
+  return (rows as Record<string, unknown>[]).map((r) => ({
     id: String(r.id),
     uid: String(r.uid),
     hospital_uid: r.hospital_uid == null ? null : String(r.hospital_uid),

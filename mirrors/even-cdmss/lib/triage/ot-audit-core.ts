@@ -64,11 +64,11 @@ export function auditOtNote(input: OtAuditInput): OpdFinding[] {
   }
   if (!raw.length) {
     raw.push(finding({
-      subject: 'OT documentation review: operative note present for triage',
+      subject: 'OT documentation review: operative note present for triage screen',
       verdict: 'context-dependent',
       confidence: 0.5,
       domain: 'appropriateness',
-      rationale: 'v0 lander check — note body, surgery name, and surgeon string are present. Clinical OT rubric deferred.',
+      rationale: 'v0 lander screen — note body, surgery name, and surgeon string are present. Clinical OT rubric deferred.',
     }));
   }
   return stampFindingIdentity(raw);
