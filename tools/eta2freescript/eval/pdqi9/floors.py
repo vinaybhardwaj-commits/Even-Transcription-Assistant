@@ -92,9 +92,18 @@ def _signed_ok(x, n_review: int) -> bool:
             and (cb is None or (_isint(cb) and 1 <= cb <= n_review)))
 
 
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
+
+
+def _floors_pre_strip(raw: str) -> str:
+    """The old floors parser: only a full surrounding fence was removed."""
+    m = _FENCE.fullmatch(raw)
+    return m.group(1) if m else raw
+
+
 def _exact_json(text: str):
     """Tolerant extraction (lead ruling 14 Oct 2026): see judge.extract_object. Returns (object|None, shape)."""
-    return extract_object(text)
+    return extract_object(text, _floors_pre_strip)
 
 
 def _parse_rows(text: str, key: str, n_expected: int, ok) -> tuple[list[dict] | None, dict, dict]:

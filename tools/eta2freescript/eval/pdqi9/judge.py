@@ -128,13 +128,25 @@ def _json_spans(t: str) -> list[tuple[int, int]]:
     return spans
 
 
-def extract_object(text: str) -> tuple[dict | None, dict]:
+def judge_pre_strip(raw: str) -> str:
+    """The judge's old strict pre-strip: independent leading and trailing fence removal."""
+    return _OLD_FENCE.sub("", raw)
+
+
+def _in_array(raw: str, s0: int, e0: int) -> bool:
+    """True when the span sits inside a JSON array: nearest non-space char before is `[` or `,`, or after is `]` or `,`."""
+    before, after = raw[:s0].rstrip()[-1:], raw[e0:].lstrip()[:1]
+    return before in ("[", ",") or after in ("]", ",")
+
+
+def extract_object(text: str, pre_strip=judge_pre_strip) -> tuple[dict | None, dict]:
     """Tolerant extraction (lead ruling 14 Oct 2026). Strip one optional code fence; if what is left is itself a JSON object, use it.
     Else scan for balanced top-level {...} spans: exactly one that parses as a JSON object is used (tolerated); zero or 2+ is a failure.
     A reply that is valid JSON but not an object (a list, a string) is a failure. Returns (object|None, shape) where shape holds
-    counts only: leading_chars, trailing_chars, fenced, n_spans, tolerated."""
+    counts only: leading_chars, trailing_chars, fenced, n_spans, tolerated. `pre_strip` is the caller's OLD strict pre-strip: a reply it
+    accepted is tolerated=False, anything else that parses is tolerated=True. A span inside a JSON array is a failure."""
     raw = (text or "").strip()
-    t = _OLD_FENCE.sub("", raw)  # the old parser's independent leading/trailing strip: what it accepted strictly is never "tolerated"
+    t = pre_strip(raw)  # the caller's old strict parser: what it accepted is never "tolerated"
     info = {"leading_chars": 0, "trailing_chars": 0, "fenced": "```" in raw, "n_spans": 0, "tolerated": False}
     try:
         d = json.loads(t)
@@ -151,6 +163,8 @@ def extract_object(text: str) -> tuple[dict | None, dict]:
     if len(spans) != 1:
         return None, info
     s0, e0 = spans[0]
+    if _in_array(raw, s0, e0):
+        return None, info
     info["leading_chars"], info["trailing_chars"] = s0, len(raw) - e0
     try:
         d = json.loads(raw[s0:e0])

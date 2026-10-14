@@ -184,3 +184,99 @@ def test_no_model_chosen_string_reaches_the_shape_log(frozen, tmp_path):
 def test_old_accepted_fence_shapes_are_strict_not_tolerated(text):
     r, info, _ = judge.parse_scores_ex(text)
     assert r is not None and not info["tolerated"] and r[0] == [3] * 9
+
+
+# ---- fix round 2: D3 (caller's own old pre-strip) and L2 (a span inside an array fails) ----
+def FI():
+    return json.dumps({"items": [item(1)]})
+
+
+def _floor_rows(text):
+    return floors._parse_rows(text, "items", 1, floors._item_ok)
+
+
+@pytest.mark.parametrize("text", ["```json\n" + FI(), FI() + "\n```"])
+def test_floors_open_or_trailing_only_fence_is_tolerated(text):
+    rows, info, _ = _floor_rows(text)
+    assert rows is not None and info["tolerated"]
+
+
+def test_floors_full_fence_is_strict():
+    rows, info, _ = _floor_rows("```json\n" + FI() + "\n```")
+    assert rows is not None and not info["tolerated"]
+
+
+@pytest.mark.parametrize("text", [f"Here: [{G}]", f"```json\n[{G}]\n```\nok", f"[{G}]"])
+def test_object_inside_an_array_fails(text):
+    r, info, _ = judge.parse_scores_ex(text)
+    assert r is None
+
+
+def test_array_wrapped_floor_object_fails():
+    assert _floor_rows(f"Here: [{FI()}]")[0] is None
+
+
+def test_prose_wrapped_object_still_tolerated():
+    r, info, _ = judge.parse_scores_ex(f"Here are my scores: {G} Thanks.")
+    assert r is not None and info["tolerated"]
+
+
+# Old parsers, verbatim from base e862457b.
+def _old_judge(text):
+    import re
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
+    try:
+        d = json.loads(t)
+    except ValueError:
+        return None
+    if not isinstance(d, dict) or set(d) != set(judge.ITEM_KEYS):
+        return None
+    if any(isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 5 for v in d.values()):
+        return None
+    return [d[k] for k in judge.ITEM_KEYS]
+
+
+def _old_floor_rows(text):
+    import re
+    fence = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
+    t = (text or "").strip()
+    m = fence.fullmatch(t)
+    t = m.group(1) if m else t
+    try:
+        d = json.loads(t)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    return d if set(d) == {"items"} and floors._item_ok(d["items"][0] if d["items"] else None) and len(d["items"]) == 1 else None
+
+
+def _wrappers(p):
+    return [p, "```json\n" + p + "\n```", "```json\n" + p, p + "\n```", "```\n" + p, "```json" + p, "Here: " + p, p + " done",
+            "Sure! " + p + " Hope that helps", "```json\n" + p + "\n```\nok", f"[{p}]", f"Here: [{p}]", "{sic} " + p]
+
+
+def test_property_old_accepted_identical_and_untolerated_new_accepted_tolerated():
+    bad = json.dumps({**GOOD, "useful": 9})
+    j_payloads = [G, bad, G[:-1], json.dumps({**GOOD, "x": 1}), G + G]
+    f_payloads = [FI(), json.dumps({"items": [item(1, said="maybe")]}), FI()[:-1], FI() + FI(), json.dumps({"items": [item(1)], "x": 1})]
+    n_old = n_new = 0
+    for payload in j_payloads:
+        for w in _wrappers(payload):
+            old, (new, info, _) = _old_judge(w), judge.parse_scores_ex(w)
+            if old is not None:
+                n_old += 1
+                assert new is not None and new[0] == old and not info["tolerated"], w
+            elif new is not None:
+                n_new += 1
+                assert info["tolerated"], w
+    for payload in f_payloads:
+        for w in _wrappers(payload):
+            old, (new, info, _) = _old_floor_rows(w), _floor_rows(w)
+            if old is not None:
+                n_old += 1
+                assert new == old["items"] and not info["tolerated"], w
+            elif new is not None:
+                n_new += 1
+                assert info["tolerated"], w
+    assert n_old > 5 and n_new > 5
