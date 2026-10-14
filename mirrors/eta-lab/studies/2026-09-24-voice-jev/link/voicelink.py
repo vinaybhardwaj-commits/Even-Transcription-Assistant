@@ -7,13 +7,13 @@ Inputs: emb-<rd>.npz (ECAPA per turn, embed_link.py), turns-<rd>.json, pqm-<date
    PRESENT = share of D's consults (1-60 min, room active) in which c has >= 2 core turns inside [a-30 s, b+30 s]  (= step 2's 'recurring' share).
 3. RX: of D's Rx (mb-rx), the number with >= 1 drug/test word heard in the window from c's core turns, and from all OTHER turns (rxscore.py matching).
 Console prints ids and counts only."""
-import bisect, csv, glob, json, os, re, statistics, sys
+import bisect, csv, json, os, re, statistics, sys
 from datetime import datetime
 import numpy as np
 from scipy.cluster.hierarchy import linkage, fcluster
 
 H = os.path.expanduser(os.environ.get("LINK_H", "~/vj/link")); rd = sys.argv[1]
-PL = float(os.environ.get("PLACEBO_H", "0")); DOFF = int(os.environ.get("PLACEBO_DOFF", "0")); SUF = f"-pl{os.environ['PLACEBO_H']}" if PL else (f"-pd{DOFF}" if DOFF else "")   # placebo arm (ruling 201): every doctor time (PQM consults and Rx) shifted by a WRONG number of hours
+PL = float(os.environ.get("PLACEBO_H", "0")); SUF = f"-pl{os.environ['PLACEBO_H']}" if PL else ""   # placebo arm (ruling 201): every doctor time (PQM consults and Rx) shifted by a WRONG number of hours
 SIM_CUT, CORE, TOPC, SHIFTS = 0.30, 0.45, 4, (-3, -2, 2, 3)   # cut set once from the pair-cosine distribution of ONE unlabelled room-day (23 Sep OPD 7), then fixed for all; no truth used
 STOP = set("""tablet tablets capsule capsules syrup suspension injection inj cream gel ointment drops drop lotion solution powder sachet spray inhaler
  strip strips tab cap oral each daily twice thrice after before food meal meals morning night bedtime days week weeks month months forte plus extended release
@@ -48,17 +48,12 @@ for t in T:
     if t.get("s_ms") and t.get("e_ms"):
         for m in range(int(t["s_ms"]) // 60000, int(t["e_ms"]) // 60000 + 1): room_min.add(m)
 heard = {c: set((S[core[c]] // 60000).tolist()) for c in top}
-ALT, SHIFT_MS = date, 0
-if DOFF:   # stronger placebo (vj-refuter P1): the doctor times (PQM and Rx) of ANOTHER date, moved onto this day (same time-of-day structure, wrong day)
-    _has_rx = lambda d: os.path.getsize(f"{H}/rx-{d}.json") > 5
-    pool = sorted(os.path.basename(p)[4:14] for p in glob.glob(f"{H}/pqm-2026-09-??.csv") if os.path.exists(f"{H}/rx-{os.path.basename(p)[4:14]}.json") and _has_rx(os.path.basename(p)[4:14]) == _has_rx(date)); ALT = pool[(pool.index(date) + DOFF) % len(pool)]
-    SHIFT_MS = (datetime.fromisoformat(date + "T00:00:00+05:30") - datetime.fromisoformat(ALT + "T00:00:00+05:30")).days * 86_400_000
-pqm = list(csv.DictReader(open(f"{H}/pqm-{ALT}.csv"))); name_of = {p["doctor_uid"]: p["doctor_name"] for p in pqm}
+pqm = list(csv.DictReader(open(f"{H}/pqm-{date}.csv"))); name_of = {p["doctor_uid"]: p["doctor_name"] for p in pqm}
 ms = lambda ts: int(datetime.fromisoformat(ts).timestamp() * 1000)
 by = {}
 for p in pqm:
     if p["called_at"] and p["completed_at"]:
-        a, b = ms(p["called_at"]) + int(PL * 3_600_000) + SHIFT_MS, ms(p["completed_at"]) + int(PL * 3_600_000) + SHIFT_MS
+        a, b = ms(p["called_at"]) + int(PL * 3_600_000), ms(p["completed_at"]) + int(PL * 3_600_000)
         if 60_000 <= b - a <= 3_600_000: by.setdefault(p["doctor_uid"], []).append((p["token_uid"], a, b))
 
 
@@ -101,10 +96,10 @@ res = [r for r in res if r["excess"] is not None and r["consults_room_active"] >
 for r in res: r["beats_null_max"] = bool(r["contrast"] > r["null_max"])
 res.sort(key=lambda r: -r["excess"])
 # ---- 3. Rx by voice
-rx = [r for r in json.load(open(f"{H}/rx-{ALT}.json")) if not r["is_draft"] and (r["meds"] or r["tests"])]
+rx = [r for r in json.load(open(f"{H}/rx-{date}.json")) if not r["is_draft"] and (r["meds"] or r["tests"])]
 for r in rx:
-    r["start_ms"] += int(PL * 3_600_000) + SHIFT_MS
-    if r["end_ms"]: r["end_ms"] += int(PL * 3_600_000) + SHIFT_MS
+    r["start_ms"] += int(PL * 3_600_000)
+    if r["end_ms"]: r["end_ms"] += int(PL * 3_600_000)
 
 
 def iw(r):

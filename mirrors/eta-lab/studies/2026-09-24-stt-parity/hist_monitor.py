@@ -5,7 +5,7 @@ for each GPU node: whisper twin/shim/VPC-shim health, GPU util, whisper latency 
 Stop rule from the ruling: error rate > 2% (failed / (done+failed)) -> prints STOP and exits 2. Usage: hist_monitor.py [--window 60] [--every 300]"""
 import argparse, json, os, subprocess, sys, time
 
-CPU = ["hist-cpu-1", "hist-cpu-2", "hist-cpu-3", "hist-cpu-4", "hist-cpu-5", "hist-cpu-6", "hist-cpu-7", "hist-cpu-8", "hist-cpu-9", "hist-cpu-10", "hist-cpu-11", "hist-cpu-12"]; GPU = ["hist-gpu-1", "hist-gpu-2", "hist-gpu-3", "hist-gpu-4"]
+CPU = ["hist-cpu-1", "hist-cpu-2", "hist-cpu-3", "hist-cpu-4", "hist-cpu-5", "hist-cpu-6"]; GPU = ["hist-gpu-1", "hist-gpu-2"]
 REMOTE_CPU = r'''
 import json,os,glob,time,subprocess
 W=%d*60; now=time.time(); out={"routers":{}}

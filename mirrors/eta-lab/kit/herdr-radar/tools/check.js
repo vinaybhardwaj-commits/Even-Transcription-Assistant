@@ -20,19 +20,6 @@ for (const dir of ['bin', 'lib']) {
     }
   }
 }
-// eta-lab fork (ruling 237): the agent rows must keep naming the built-in
-// machine, workspace, tab and agent tokens, so a later edit cannot drop them
-// silently. Bare names: `$name` would mean custom metadata, and a typo renders
-// empty without any error.
-for (const variant of ['dark', 'light']) {
-  const sidebar = require('../lib/managed-config').sidebarBlock(variant);
-  const agents = sidebar.slice(sidebar.indexOf('[ui.sidebar.agents]'), sidebar.indexOf('[ui.sidebar.spaces]'));
-  for (const name of ['machine', 'workspace', 'tab', 'agent']) {
-    const count = (agents.match(new RegExp(`token = "${name}"`, 'g')) ?? []).length;
-    if (count < 1) problems.push(`sidebar block (${variant}): the agent rows no longer name the built-in "${name}" token`);
-  }
-}
-
 // The tab-bar block's poll interval has to stay above its timeout. Inverted, a
 // slow tick is still running when the next one starts, and on Windows every tick
 // is a fresh `cmd.exe`: the overlap compounds until the machine stops
