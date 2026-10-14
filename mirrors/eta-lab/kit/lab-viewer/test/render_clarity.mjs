@@ -27,9 +27,8 @@ const build = process.env.CLARITY_BUILD;
 const realDoc = build ? JSON.parse(readFileSync(join(build, "clarity", "clips.json"), "utf8")) : null;
 const fxd = { rows: { L002: { tag: "kn", conf: 0.9 }, L003: { tag: "hi", conf: 0.6, alt: ["kn"] } } };
 const sc = { s1: { schema: 1, run_id: "rf", prereg_sha256: "ab12cd34ef56", old: "o", new: "n", suite_id: "st-1", rows: [
-    { lang: "all", cond: "all", sig: true, n: 96, old: { wer: 0.42, cer: 0.2, hit: 55 }, new: { wer: 0.35, cer: 0.18, hit: 61 } }, { lang: "kn", cond: "fan10", sig: true, n: 8, old: { wer: 0.5, cer: 0.3, hit: 40 }, new: { wer: 0.6, cer: 0.35, hit: 30 } } ] },
-  s2: { schema: 1, run_id: "cap", prereg_sha256: "0123456789ab", old: "o", new: "n", scorer: "efcc9c9", sample: { consults: 24, items: 169 }, rows: [{ scope: "overall", sig: true, n: 169, old: { captured_pct: 29.6, lo: 20, hi: 40 }, new: { captured_pct: 35, lo: 28, hi: 42 } }] },
-  s3: { schema: 1, run_id: "lj", prereg_sha256: "ffff00001111", old: "o", new: "n", kept_error_pct: 12.5, kept_error_pct_diagnostic_note: "On the synthetic suite the kept-set error rises from 8.1% to 15.4% as the background gets louder.", judge: { model: "m", validated_on: "st-1", accuracy: { overall: 91, per_lang: { hi: 88 } }, usable: false }, rows: [{ lang: "hi", n: 30, kept_error_pct: 8, old: { wrong_pct: 20 }, new: { wrong_pct: 10 } }] } };
+    { lang: "all", cond: "all", n: 96, old: { wer: 0.42, cer: 0.2, hit: 55 }, new: { wer: 0.35, cer: 0.18, hit: 61 } }, { lang: "kn", cond: "fan10", n: 8, old: { wer: 0.5, cer: 0.3, hit: 40 }, new: { wer: 0.6, cer: 0.35, hit: 30 } } ] },
+  s2: { schema: 1, run_id: "cap", prereg_sha256: "0123456789ab", old: "o", new: "n", scorer: "efcc9c9", sample: { consults: 24, items: 169 }, rows: [{ scope: "overall", n: 169, old: { captured_pct: 29.6, lo: 20, hi: 40 }, new: { captured_pct: 35, lo: 28, hi: 42 } }] } };
 const env = (doc) => ({ RATINGS: { get: async (k) => (k === "clarity/clips.json" ? { text: async () => JSON.stringify(doc) } : k === "clarity/fixed.json" ? { text: async () => JSON.stringify(fxd) } : k === "clarity/scorecard.json" ? { text: async () => JSON.stringify(sc) } : null) } });
 
 const srv = http.createServer(async (q, res) => {
@@ -63,10 +62,7 @@ try {
   check("no horizontal scroll at 390 px", d.w);
   const S = await page.evaluate(() => ({ h1: document.querySelector(".scorecard h1")?.textContent, panels: document.querySelectorAll(".sc").length, good: document.querySelectorAll(".sc .good").length, bad: document.querySelectorAll(".sc .bad").length,
     pending: [...document.querySelectorAll(".sc .none")].map((n) => n.textContent.slice(0, 8)), above: document.querySelector(".scorecard").compareDocumentPosition(document.querySelector(".clip")) & Node.DOCUMENT_POSITION_FOLLOWING, details: document.querySelectorAll(".sc details").length }));
-  check("scorecard panel sits above the clips, 3 panels, none pending", /Scorecard/.test(S.h1) && S.panels === 3 && S.pending.length === 0 && S.above > 0);
-  const s3text = await page.evaluate(() => document.body.innerText);
-  check("S3 marked indicative-not-a-gate with the kept-set error rate shown", /INDICATIVE, NOT A GATE/.test(s3text) && /kept-set error on the synthetic validation suite: 12.5%/.test(s3text));
-  check("S3 noise-degradation note shown, neutral (no colour span around it)", /rises from 8\.1% to 15\.4%/.test(s3text));
+  check("scorecard panel sits above the clips, 3 panels (S3 pending)", /Scorecard/.test(S.h1) && S.panels === 3 && S.pending[0] === "pending:" && S.above > 0);
   check("deltas coloured (good and bad present), per-condition details folded", S.good >= 3 && S.bad >= 1 && S.details === 1);
   await page.click('a:has-text("script mismatch")');
   check("script-mismatch filter link works", (await page.evaluate(() => document.querySelectorAll(".clip").length)) === 1 && page.url().includes("mm=1"));

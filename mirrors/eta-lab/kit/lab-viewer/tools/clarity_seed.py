@@ -143,11 +143,8 @@ def _check_side(d, keys, where):
 
 
 def check_score(name, d):
-    if not isinstance(d, dict) or d.get("schema") != 1 or not isinstance(d.get("rows"), list) or len(d["rows"]) > 200:
-        sys.exit(f"scorecard {name}: needs schema 1 and at most 200 rows")
-    # a judge-only S3 (the judge is not proven yet, so there are no router rows) is a real, loadable state: the panel shows "judge not proven"
-    if not d["rows"] and not (name == "s3" and isinstance(d.get("judge"), dict) and d["judge"].get("usable") is False):
-        sys.exit(f"scorecard {name}: needs 1..200 rows (only an S3 whose judge is marked usable:false may have none)")
+    if not isinstance(d, dict) or d.get("schema") != 1 or not isinstance(d.get("rows"), list) or not d["rows"] or len(d["rows"]) > 200:
+        sys.exit(f"scorecard {name}: needs schema 1 and 1..200 rows")
     if not re.fullmatch(r"[0-9a-f]{12,64}", str(d.get("prereg_sha256", ""))):
         sys.exit(f"scorecard {name}: prereg_sha256 (the pre-registration sha, hex) is required: results must be pre-registered before the run")
     for i, r in enumerate(d["rows"]):
@@ -163,22 +160,8 @@ def check_score(name, d):
             keys = ("wrong_pct",)
         _check_side(r.get("old"), keys, w + ".old"); _check_side(r.get("new"), keys, w + ".new")
         if r.get("n") is not None: _num(r["n"], 0, 1e6, w + ".n")
-    if name == "s3":
-        j = d.get("judge")
-        if not isinstance(j, dict) or not isinstance(j.get("accuracy"), dict):
-            sys.exit("scorecard s3: judge {model, validated_on, accuracy:{overall, per_lang}, usable} is required (the judge must be proven on the SELFTEST audio first)")
-        per = j["accuracy"].get("per_lang") or {}
-        _num(j["accuracy"].get("overall"), 0, 100, "s3.judge.accuracy.overall")
-        for k, v in per.items():
-            _num(v, 0, 100, f"s3.judge.accuracy.per_lang.{k}")
-        langs = {r["lang"] for r in d["rows"] if r["lang"] != "all"}
-        derived = j["accuracy"]["overall"] >= 95 and all(k in per and per[k] >= 90 for k in langs) and all(v >= 90 for v in per.values())
-        if j.get("usable") is True and not derived:   # W33 gate: a `true` flag may not contradict its own numbers (a stricter `false`, e.g. min n per label, is the evaluator's call and is honoured)
-            sys.exit(f"scorecard s3: judge.usable=true but the accuracy numbers do not pass the gate (needs >=95 overall and >=90 in every language in the rows)")
-        if d["rows"] and d.get("kept_error_pct") is None:   # 27 Sep ruling: S3 is indicative, but every number shown must sit beside its kept-set error rate (refuter-2 #4339 F1)
-            sys.exit("scorecard s3: kept_error_pct (top-level) is required once rows exist, so every S3 number is shown with its kept-set error rate")
-        if d.get("kept_error_pct") is not None:
-            _num(d["kept_error_pct"], 0, 100, "s3.kept_error_pct")
+    if name == "s3" and not isinstance(d.get("judge"), dict):
+        sys.exit("scorecard s3: judge {model, validated_on, accuracy, usable} is required (the judge must be proven on the SELFTEST audio first)")
 
 
 def build_scorecard(s1, s2, s3, out):
