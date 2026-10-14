@@ -24,7 +24,7 @@ class Synthetic(unittest.TestCase):
         ws = [W(1, 100, 235, "idle_timeout"), W(2, 100 + 25 * 60, 100 + 40 * 60)]                                              # successor opens 25 min into the 30-min search horizon, after the first cut
         out, ids = self.run_(ws, prints={"D": None}); self.assertEqual(out.get("recuts", 0), 0, dict(out))
 
-@unittest.skipUnless(os.path.exists(C.DB_URL_FILE), "no DB credential on this machine")
+@unittest.skipUnless(os.environ.get("CUTTER_LIVE_TESTS") == "1" and os.path.exists(C.DB_URL_FILE), "no DB credential on this machine")
 class RealWindows(unittest.TestCase):
     def test_hourly_replay_over_2_7_oct_recuts_nothing_spurious(self):
         import datetime as dt

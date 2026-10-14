@@ -46,3 +46,8 @@ import pytest
 def _night_gate_on_by_default(monkeypatch):
     """the suite was written for the 22:30-06:00 gate; production has it off since 08 Oct (config.GPU_WINDOW_ENABLED = False). Tests of the disabled mode switch it off explicitly."""
     monkeypatch.setattr(C, "GPU_WINDOW_ENABLED", True)
+
+@pytest.fixture(autouse=True)
+def _private_gpu_lock(monkeypatch, tmp_path):
+    """the suite must not wait on (or hold) the box's real ~/gpu.lock, which a live cutter / CLARITY job may hold while the tests run: every test gets its own lock file."""
+    monkeypatch.setattr(C, "GPU_LOCK", str(tmp_path / "gpu.lock"))
