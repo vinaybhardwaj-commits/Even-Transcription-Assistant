@@ -331,39 +331,3 @@ def test_failed_clips_keep_scratch_up_to_the_cap(tmp_path):
     assert len(os.listdir(os.path.join(work, "failed"))) == cl.FAILED_KEEP == 5                       # 8 failures keep 5
     assert sorted(os.listdir(work)) == ["failed"] or all(n in ("failed", "_to_delete") or n.startswith("scratch-") for n in os.listdir(work))
     assert sum(1 for dp, _, fs in os.walk(work) for f in fs) <= cl.FAILED_KEEP + 1                    # the 5 kept + at most the last un-keepable scratch: bounded whatever the count
-
-
-# ---- 16A: stt segments carry lang; extras.source_language is the clip's Sarvam language code
-def _real_stt_segments(monkeypatch, lane, lang=None):
-    monkeypatch.setattr(eng, "decode_f32", lambda *a, **k: [0.0] * 16)
-    r = cl.RealRunner(lane)
-    r.model = types.SimpleNamespace(transcribe=lambda *a: [(1.0, 2.0, "one"), (3.0, 4.5, "two")], runtime="fake", nemo_version="n", nemo_sha256="s")
-    status, _, segs, _ = r.run({}, {"path": "x.flac", "span_start_ms": 0, "span_end_ms": 6000}, {}, "/tmp/never-used-" + lane, lang)
-    return status, segs
-
-
-def test_medasr_segments_say_en_and_koyal_segments_say_their_language(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    status, segs = _real_stt_segments(monkeypatch, "medasr")
-    assert status == "ok" and len(segs) == 2 and all(s["lang"] == "en" and s["text"] for s in segs)
-    status, segs = _real_stt_segments(monkeypatch, "koyal", "kn")
-    assert status == "ok" and len(segs) == 2 and all(s["lang"] == "kn-IN" for s in segs)
-
-
-@pytest.mark.parametrize("lane,code", [("medasr", "hi-IN"), ("koyal", "kn-IN"), ("medasr", "en-IN")])
-def test_stt_tracks_carry_extras_source_language_from_sarvam(tmp_path, lane, code):
-    env, _ = make(tmp_path, lang=code)
-    cnt, _, _ = go(env, lane)
-    if cnt["written"] == 0:                                       # koyal skips en-IN by design
-        assert lane == "koyal" and code == "en-IN"
-        return
-    t = json.load(open(os.path.join(tdir(env), role_tracks(env, lane)[0])))
-    assert t["extras"]["source_language"] == code
-
-
-def test_medasr_source_language_is_null_when_sarvam_has_no_track(tmp_path):
-    env = Env(tmp_path / "nolang", [make_row()])
-    cnt, _, _ = go(env, "medasr")
-    assert cnt["written"] == 1
-    t = json.load(open(os.path.join(tdir(env), role_tracks(env, "medasr")[0])))
-    assert "source_language" in t["extras"] and t["extras"]["source_language"] is None

@@ -236,7 +236,7 @@ class RealRunner:
                                                                                     "nemo_version": model.nemo_version, "nemo_sha256": model.nemo_sha256}
         if self.lane == "medasr":
             out = model.transcribe(x16, eng.MEDASR_CONFIG["chunk_s"])
-            segs = tape_segments(clip, [(a, b, {"text": t, "lang": "en"}) for a, b, t in out])   # 16A: MedASR is an English model: every segment says so (readers treated a missing lang as not-English)
+            segs = tape_segments(clip, [(a, b, {"text": t}) for a, b, t in out])
             return ("ok" if segs else "empty"), (None if segs else "no text"), segs, {"runtime": model.runtime}
         raise KeyError(self.lane)
 
@@ -351,8 +351,7 @@ def process_clip(lane, row, root, is_held, write, cnt, runner, gate, joblog, cli
         except BaseException:
             keep_failed(wd, f"{row['consult_uid']}-{lane}", work_root)   # a failed clip keeps its decode (capped); a successful one leaves nothing but the reused scratch
             raise
-        track = build_track(lane, row, clip, config, status, reason, segs, {**extras, **({"sarvam_language_code": sarvam_language(root, row)} if lane == "koyal" else {}),
-                                                                                           **({"source_language": sarvam_language(root, row)} if lane in ("koyal", "medasr") else {})})   # 16A: the clip's Sarvam language code behind this run, null if unknown
+        track = build_track(lane, row, clip, config, status, reason, segs, {**extras, **({"sarvam_language_code": sarvam_language(root, row)} if lane == "koyal" else {})})
         try:
             writer.write_track(root, row["ist_date"], row["room_id"], track["window_id"], track, manifest_stub=sl.manifest_stub(row, clip, root), config_hash=track["config_hash"])
             cnt["written"] += 1
