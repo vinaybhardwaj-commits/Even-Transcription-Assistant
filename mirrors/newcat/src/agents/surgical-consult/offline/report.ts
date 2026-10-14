@@ -17,6 +17,29 @@ export interface HeldDetail {
   evidence: Array<{ segment_id: string; role: string; t0: number; t1: number; quote: string }>
 }
 
+export interface ExtractionRecord {
+  /** Intended model id(s), comma-joined when a run escalated to a different one; null when no extraction call ran. */
+  intended: string | null
+  /** Served model id(s) from the response; null when any call had none (the global profile is not resolved by readServedModel). */
+  served: string | null
+  served_verified: boolean
+  calls: number
+  errors_by_type: Record<string, number>
+}
+
+export const emptyExtraction = (): ExtractionRecord => ({ intended: null, served: null, served_verified: false, calls: 0, errors_by_type: {} })
+
+/**
+ * A model id safe for the bus: provider prefix, date and version suffix removed (`eu.anthropic.claude-sonnet-4-5-20250929-v1:0`
+ * -> `claude-sonnet-4-5`), an ARN reduced to its last path part, and any digit run of 8 or more masked.
+ */
+export function shortModelId(id: string): string {
+  let out = id.slice(id.lastIndexOf('/') + 1)
+  out = out.replace(/^(?:[a-z0-9-]+\.)*anthropic\./i, '')
+  out = out.replace(/-\d{8}(?:-v\d+(?::\d+)?)?$/, '')
+  return out.replace(/\d{8,}/g, '#')
+}
+
 export interface RunRecord {
   n: number
   encounter_id: string
@@ -46,6 +69,8 @@ export interface RunRecord {
     persist_failed?: number
   }
   versions: Record<string, string>
+  /** The extraction model calls from the run's model_calls ledger rows: ids and codes only. Absent in older runs.jsonl files. */
+  extraction?: ExtractionRecord
   /** Every finding both judges answered: probabilities and the rule id only. */
   pairs: Array<{ rule_id: string; jev_p: number; gemini_p: number }>
   error: 'run_threw' | 'governance_refused' | 'serialize_threw' | null
@@ -132,6 +157,15 @@ function summaryOf(entry: Entry): AgentRunSummary {
   }
 }
 
+export interface ExtractionRow {
+  intended: string
+  served: string | null
+  served_verified: boolean
+  consults: number
+  calls: number
+  errors_by_type: Record<string, number>
+}
+
 export interface Report {
   meta: ReportMeta
   consults: { read_lines: number; rejected: Record<string, number>; run: number; skipped_for_cap: number; by_source: Record<string, number>; by_match_confidence: Record<string, number>; by_window_complete: Record<string, number> }
@@ -147,12 +181,27 @@ export interface Report {
   judge_agreement: { n_both: number; n_agree: number; agreement: number | null; kappa: number | null; threshold: number; label: string }
   drops: { duplicate_span_different_fields: number; by_reason: Record<string, number> }
   extraction: { facts_total: number; facts_dropped: number; drop_rate: number }
-  models: { served_by_consults: Record<string, number>; llm_calls: number; judge_asks: number; metered: ReportMeta['metered']; caps: ReportMeta['caps'] }
+  models: { extraction: ExtractionRow[]; served_by_consults: Record<string, number>; llm_calls: number; judge_asks: number; metered: ReportMeta['metered']; caps: ReportMeta['caps'] }
   empty_reasons: Record<string, number>
   examples: {
     kept: Record<string, Array<{ encounter_id: string; doctor_uid: string | null; procedure_group: string; rule_id: string; judge: { primary_p: number; second_p: number | null }; evidence: Array<{ segment_id: string; role: string; t0: number; t1: number; quote: string }> }>>
     held: Record<string, Array<{ encounter_id: string; procedure_group: string; rule_id: string; primary_p: number | null; evidence: HeldDetail['evidence'] }>>
   }
+}
+
+function extractionRows(runs: RunRecord[]): ExtractionRow[] {
+  const rows = new Map<string, ExtractionRow>()
+  for (const r of runs) {
+    const x = r.extraction ?? emptyExtraction()
+    if (x.calls === 0 || x.intended === null) continue
+    const key = `${x.intended}|${x.served ?? ''}|${x.served_verified}`
+    const row = rows.get(key) ?? { intended: x.intended, served: x.served, served_verified: x.served_verified, consults: 0, calls: 0, errors_by_type: {} }
+    row.consults += 1
+    row.calls += x.calls
+    sumInto(row.errors_by_type, x.errors_by_type)
+    rows.set(key, row)
+  }
+  return [...rows.values()].map((row) => ({ ...row, errors_by_type: sorted(row.errors_by_type) })).sort((a, b) => cmp(a.intended, b.intended) || cmp(a.served ?? '', b.served ?? ''))
 }
 
 export function buildReport(entries: Entry[], meta: ReportMeta): Report {
@@ -278,7 +327,7 @@ export function buildReport(entries: Entry[], meta: ReportMeta): Report {
     judge_agreement,
     drops: { duplicate_span_different_fields: dropsBy.duplicate_span_different_fields ?? 0, by_reason: sorted(dropsBy) },
     extraction: { facts_total: factsTotal, facts_dropped: factsDropped, drop_rate: rate(factsDropped, factsTotal) },
-    models: { served_by_consults: sorted(served), llm_calls: llm, judge_asks: jev, metered: meta.metered, caps: meta.caps },
+    models: { extraction: extractionRows(runs), served_by_consults: sorted(served), llm_calls: llm, judge_asks: jev, metered: meta.metered, caps: meta.caps },
     empty_reasons: sorted(empties),
     examples: { kept, held: heldEx },
   }
@@ -288,7 +337,15 @@ export function buildReport(entries: Entry[], meta: ReportMeta): Report {
 
 const pairs = (o: Record<string, number>): string => (Object.keys(o).length === 0 ? 'none' : Object.entries(o).map(([k, v]) => `${k}=${v}`).join(' '))
 
-/** Counts only. Model ids are left out (they can carry date digits); ids and quotes never appear. */
+/** `extraction_model=<short intended id(s)> served_verified=yes|no`. Dated ids are shortened; `yes` needs every extraction call's served id present. */
+function extractionLine(r: Report): string {
+  const rows = r.models.extraction
+  const ids = [...new Set(rows.flatMap((x) => x.intended.split(',')).map(shortModelId))].sort()
+  const verified = rows.length > 0 && rows.every((x) => x.served_verified)
+  return `extraction_model=${ids.length === 0 ? 'none' : ids.join(',')} served_verified=${verified ? 'yes' : 'no'}`
+}
+
+/** Counts and short model ids only; consult ids, doctor ids and quotes never appear. */
 export function busSafeText(r: Report): string {
   const s = r.status_mix
   return [
@@ -300,6 +357,7 @@ export function busSafeText(r: Report): string {
     `empty_reasons: ${pairs(r.empty_reasons)}`,
     `judge_kappa=${r.judge_agreement.label} n_both=${r.judge_agreement.n_both}`,
     `drops_duplicate_span_different_fields=${r.drops.duplicate_span_different_fields}; extraction_drop_rate=${fmt(r.extraction.drop_rate)}`,
+    extractionLine(r),
     `llm_calls=${r.models.llm_calls}; jev_asks=${r.models.metered.jev}; second_judge_asks=${r.models.metered.second}; judge_asks_platform_sum=${r.models.judge_asks}; stopped_by_cap=${r.meta.stopped_by_cap ?? 'no'}`,
   ].join('\n')
 }
@@ -336,7 +394,7 @@ export function renderMarkdown(r: Report, entries: Entry[]): string {
   out.push('## Judge agreement (Jev vs second judge)', '', `Kappa: ${r.judge_agreement.label}. Pairs: ${r.judge_agreement.n_both}, agree: ${r.judge_agreement.n_agree}, threshold ${r.judge_agreement.threshold}.`, r.judge_agreement.agreement === null ? `Agreement: ${NO_SECOND}` : `Agreement: ${fmt(r.judge_agreement.agreement)}`, '')
   out.push('## Extraction', '', `Facts total ${r.extraction.facts_total}, dropped ${r.extraction.facts_dropped}, drop rate ${fmt(r.extraction.drop_rate)}.`, '', `drops.duplicate_span_different_fields: ${r.drops.duplicate_span_different_fields}`, '', table(['drop reason', 'n'], Object.entries(r.drops.by_reason)))
   out.push('## Empty reasons', '', table(['reason', 'consults'], Object.entries(r.empty_reasons)))
-  out.push('## Models and calls', '', table(['served model id', 'consults'], Object.entries(r.models.served_by_consults)), `Extraction calls: ${r.models.llm_calls}. Judge asks, primary + second (platform sum): ${r.models.judge_asks}. Metered: extraction ${r.models.metered.llm}, Jev (primary) asks ${r.models.metered.jev}, second-judge asks ${r.models.metered.second}. Caps: llm ${r.models.caps.llm}, jev ${r.models.caps.jev}.`, '')
+  out.push('## Models and calls', '', '### Extraction model', '', table(['intended model id', 'served model id', 'consults', 'calls', 'errors by type'], r.models.extraction.map((x) => [x.intended, x.served ?? 'unverified: profile not resolved', x.consults, x.calls, pairs(x.errors_by_type)])), '### Judge served model ids', '', table(['served model id', 'consults'], Object.entries(r.models.served_by_consults)), `Extraction calls: ${r.models.llm_calls}. Judge asks, primary + second (platform sum): ${r.models.judge_asks}. Metered: extraction ${r.models.metered.llm}, Jev (primary) asks ${r.models.metered.jev}, second-judge asks ${r.models.metered.second}. Caps: llm ${r.models.caps.llm}, jev ${r.models.caps.jev}.`, '')
   out.push('## Example findings for review (up to 3 per type)', '')
   const ev = (e: { segment_id: string; t0: number; t1: number; quote: string }): string => `  - ${e.segment_id} [${e.t0}-${e.t1}s]: "${e.quote}"`
   for (const [type, list] of Object.entries(r.examples.kept)) {

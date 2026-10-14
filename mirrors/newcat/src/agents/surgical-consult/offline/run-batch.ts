@@ -15,13 +15,13 @@ import { runAgent } from '../../../platform/agent/run.js'
 import { jevJudge } from '../../../platform/jev/judge.js'
 import type { SecondJudge } from '../../../platform/judge/second.js'
 import { buildJev, buildModelClient } from '../../../runtime.js'
-import { surgicalConsult } from '../definition.js'
+import { CONSULT_AGENT_ID, surgicalConsult } from '../definition.js'
 import { findingTypeOf } from '../governance/f7.js'
 import { prepass } from '../prepass.js'
 import { MAX_CANDIDATES } from '../rules/index.js'
 import { loadConsults, type LoadedConsult, type LoadResult } from './input.js'
 import { geminiConfigOf, missingGeminiEnv, secondFactory, type SecondFactory } from './second.js'
-import { buildReport, busSafeSummary, renderMarkdown, type Entry, type HeldDetail, type RunRecord } from './report.js'
+import { buildReport, busSafeSummary, emptyExtraction, renderMarkdown, type Entry, type ExtractionRecord, type HeldDetail, type RunRecord } from './report.js'
 
 /**
  * S6 offline runner: the platform's agent run path over a JSONL of consults, on an in-process pglite (never a DB URL),
@@ -149,7 +149,7 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
   const traceId = traceIdFor(n)
   const input = consult.input
   const metered = new MeteredJudge(wiring.judge(traceId, sql), wiring.second(traceId, sql), meter)
-  const base: Omit<RunRecord, 'status' | 'reason' | 'findings_kept' | 'held' | 'abstentions' | 'counts' | 'versions' | 'pairs' | 'error'> = {
+  const base: Omit<RunRecord, 'status' | 'reason' | 'findings_kept' | 'held' | 'abstentions' | 'counts' | 'versions' | 'extraction' | 'pairs' | 'error'> = {
     n,
     encounter_id: input.encounter_id,
     doctor_uid: input.doctor_uid,
@@ -160,7 +160,7 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
   }
   const failed = (error: RunRecord['error']): Done => ({
     entry: {
-      record: { ...base, status: 'failed', reason: error, findings_kept: 0, held: [], abstentions: {}, counts: emptyCounts(), versions: {}, pairs: [], error },
+      record: { ...base, status: 'failed', reason: error, findings_kept: 0, held: [], abstentions: {}, counts: emptyCounts(), versions: {}, extraction: emptyExtraction(), pairs: [], error },
       body: null,
       held: [],
     },
@@ -210,10 +210,30 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
     abstentions: (body.abstentions ?? {}) as Record<string, number>,
     counts,
     versions: stringVersions(body.versions),
+    extraction: await extractionFor(sql, traceId),
     pairs: metered.pairs(),
     error: null,
   }
   return { entry: { record, body: body as unknown as Entry['body'], held } }
+}
+
+/**
+ * The run's extraction calls from the model_calls ledger (by trace id and the agent's extract purposes, so Gemini rows are out):
+ * ids and codes only. served_verified is false when any call has no served id (the global inference profile does not resolve one).
+ */
+export async function extractionFor(sql: Sql, traceId: string): Promise<ExtractionRecord> {
+  const rows = await sql.query<{ intended_model_id: string; served_model_id: string | null; status: string; error_type: string | null }>(
+    `select intended_model_id, served_model_id, status, error_type from model_calls
+     where trace_id = $1 and purpose like $2 and provider <> 'vertex' order by created_at, id`,
+    [traceId, `${CONSULT_AGENT_ID}:extract%`],
+  )
+  if (rows.rows.length === 0) return emptyExtraction()
+  const intended = [...new Set(rows.rows.map((r) => r.intended_model_id))]
+  const served = [...new Set(rows.rows.flatMap((r) => (r.served_model_id === null ? [] : [r.served_model_id])))]
+  const errors: Record<string, number> = {}
+  for (const r of rows.rows) if (r.status !== 'ok') errors[r.error_type ?? r.status] = (errors[r.error_type ?? r.status] ?? 0) + 1
+  const verified = rows.rows.every((r) => r.served_model_id !== null)
+  return { intended: intended.join(','), served: verified ? served.join(',') : null, served_verified: verified, calls: rows.rows.length, errors_by_type: errors }
 }
 
 function emptyCounts(): RunRecord['counts'] {

@@ -116,7 +116,3 @@ Migration numbers: 0005 consult-audit, 0006 agent runs, 0007 platform outbox, ne
 - **Synthetic fixtures only** in the repo.
 - **No identifiers** in specs, fixtures, logs, `agent_runs` or bus posts.
 - **`audit.note` stays byte-identical.** Every existing test stays green and unedited.
-
-## Artefacts
-
-`src/platform/artefact/` holds `ArtefactRef` (`store`, `path`, `layer`, `engine`, `version`, `cfg8`, `sha256`, `schema`; a new cfg8 is a new artefact), `readConsultBundle` (wraps `kit.reb.consult_bundle`, returns refs only) and `resolveTrack` (reads the track at read time and checks its sha256). Persist refs only, never artefact bodies or quote text (D1); bodies are resolved when a body is needed. Reads happen only in the worker on eta-lab-t4: both functions throw when `VERCEL=1`. Env: `NEWCAT_ETA_LAB_DIR`, `NEWCAT_REB_ROOT`.
