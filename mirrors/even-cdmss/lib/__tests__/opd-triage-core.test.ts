@@ -66,25 +66,6 @@ test('buildQueue ranks types by severity×frequency; noisiest marked; doctors by
   assert.equal(doctors[0].types[1].noisiest, false);
 });
 
-test('buildQueue: hold and drop_informational clear untriaged without a clinical label', () => {
-  const findings: TriageFinding[] = [f({ audit_id: 'n1', finding_ref: 'r1' })];
-  for (const disposition of ['hold', 'drop_informational'] as const) {
-    const decisions: TriageDecisionRow[] = [{
-      scope: 'type', doctor_uid: 'docA', signal_type: 'drug_interaction',
-      validity: 'non_clinical', bug_type: null, importance: null, routed: false,
-      disposition, created_at: '2026-09-22T06:00:00Z',
-    }];
-    const untri = buildQueue(findings, decisions, { status: 'untriaged' });
-    assert.equal(untri.doctors.length, 0);
-    const all = buildQueue(findings, decisions, { status: 'all' });
-    const card = all.doctors[0].types[0];
-    assert.equal(card.triage?.disposition, disposition);
-    assert.equal(card.triage?.validity, 'non_clinical');
-    assert.equal(card.triage?.bug_type, null);
-    assert.equal(card.triage?.routed, false);
-  }
-});
-
 test('buildQueue overlays the latest type decision; status filter hides triaged', () => {
   const findings: TriageFinding[] = [
     f({ audit_id: 'n1', finding_ref: 'r1' }),

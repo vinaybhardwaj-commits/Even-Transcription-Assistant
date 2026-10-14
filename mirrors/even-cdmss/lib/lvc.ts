@@ -13,12 +13,21 @@
  * See CDMSS-CHOOSING-WISELY-LOW-VALUE-CARE-PRD-v1.1.md §6.
  */
 
+import { randomUUID } from 'node:crypto';
 import { sql } from './db';
 import { retrieve } from './retrieve';
 import { geminiUtilityModel, geminiModelFor, TEXT_MODEL, AUDIT_LLM_SEED, modelsAgree } from './llm';
 import { logEvent, finishTrace, governedChat, withTrace, readTransportAttribution } from './trace';
 import type { CdmssTransportAttribution } from './trace';
 import * as core from './lvc-core';
+// The `lvc_recall` telemetry seam (D7). Type-only where possible: this file is on the four-file
+// arm-C prohibition list for its JUDGE changes, and the single purpose permitted here is the seam.
+import { createTelemetryCapture, buildRetrievalPayload, errorClassOf } from './retrieval-capture';
+import { declareRetrievals, writeRetrievalTerminal, type LifecycleHandle } from './retrieval-telemetry-store';
+import { settleRetrievalTelemetry } from './retrieval-settlement';
+import { startInvocation } from './retrieval-invocation-store';
+import { routeClassOf } from './retrieval-telemetry-core';
+import type { TelemetryRequestContext, RetrievalRoute } from './retrieval-telemetry-core';
 import { labPackageContext } from './scoring-policy/lab-packages';
 import type { Candidate, JudgedRec, LvcFlag, LvcRecommendation, Region, Surface } from './lvc-core';
 
@@ -39,6 +48,20 @@ export interface MatchInput {
   trace?: boolean; // default true
   /** Lab probe: force the FREE local mini (no Gemini) for ₹0 pipeline testing. Default false. */
   forceOllama?: boolean;
+  /**
+   * THE `lvc_recall` TELEMETRY SEAM (D7). Present ⇒ `defaultRecall` creates a capture; absent ⇒ it
+   * creates none and executes no telemetry statement.
+   *
+   * ⚠️ WHY A SEAM AND NOT AUTOMATIC INSTRUMENTATION. `defaultRecall` is the shared default for
+   * every surface that reaches it, so instrumenting it unconditionally would also instrument the
+   * right-care probe SCRIPTS — local runs that are not production work and would pollute a canary
+   * window. And opt-in with no seam would leave the appropriateness route uninstrumented, because
+   * `MatchInput` had no way to say which route it came from.
+   *
+   * The A/A route's PINNED-recall passes deliberately leave this unset: a pinned recall performs
+   * no semantic retrieval, so it must not declare one.
+   */
+  telemetry?: { ctx: TelemetryRequestContext; route: RetrievalRoute };
 }
 
 export interface MatchResult {
@@ -175,12 +198,82 @@ async function defaultExtract(scenario: string, traceId?: string, forceOllama = 
 }
 
 async function defaultRecall(input: MatchInput, candidates: Candidate[]): Promise<LvcRecommendation[]> {
+  // ── THE lvc_recall SEAM (D7) ─────────────────────────────────────────────────────────────────
+  // A capture exists ONLY when the caller declared telemetry. Absent ⇒ every statement below that
+  // touches it is skipped, and the right-care probe scripts write nothing at all.
+  const tele = input.telemetry;
+  const capture = tele ? createTelemetryCapture('lvc_recall') : undefined;
+  const startedAt = new Date().toISOString();
+  const runId = tele ? randomUUID() : '';
+  let handle: LifecycleHandle | null = null;
+  if (tele && capture) {
+    // Idempotent (ON CONFLICT DO NOTHING) and fail-open: the appropriateness route is authorized
+    // for context wiring ONLY, so opening the invocation belongs here.
+    await startInvocation(tele.ctx);
+    try {
+      handle = await declareRetrievals(tele.ctx, [{
+        role: 'lvc_recall', runId, uid: null, engineVersion: null,
+      }], 'never_persists');
+    } catch (e) {
+      // FAIL-OPEN on this role, unlike the worker's fail-closed batch. A low-value-care recall is
+      // not an audit: refusing to run it because telemetry could not be declared would degrade a
+      // clinician-facing surface to protect a measurement, which constraint 1 forbids.
+      console.warn('[lvc] telemetry declaration failed, continuing uninstrumented', (e as Error).message);
+      handle = null;
+    }
+  }
+
+  /** Terminal write + settlement for this role. Never throws — the recall's result is the product. */
+  const finishRecall = async () => {
+    if (!tele || !capture || !handle) return;
+    try {
+      const payload = buildRetrievalPayload(capture, {
+        hmacKey: process.env.CDMSS_TELEMETRY_HMAC_KEY ?? null,
+        // Role-sensitive (A2): the scorer-context HMAC lives on the `primary` row only. Null here
+        // is correct and is not a defect.
+        scorerContext: null,
+      });
+      const next = await writeRetrievalTerminal(handle, 'lvc_recall', {
+        payload,
+        operational: {
+          route: tele.route, route_class: routeClassOf(tele.route), retrieval_role: 'lvc_recall',
+          invocation_id: tele.ctx.invocationId, trace_id: null,
+          deployment_sha: tele.ctx.deploymentSha, started_at: startedAt,
+          completed_at: new Date().toISOString(), routing_flags: tele.ctx.routingFlags,
+          active_backfill_run_id: null, active_backfill_target: null, active_backfill_state: null,
+          active_lab_experiment_id: tele.ctx.labExperimentId ?? null,
+        },
+        traceId: null,
+        completedAt: new Date().toISOString(),
+      });
+      // This caller never writes an audit, so its terminal state says exactly that.
+      await settleRetrievalTelemetry(next, {
+        outcome: 'no_persistence_intended', auditId: null, settledAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.warn('[lvc] telemetry terminal write failed', (e as Error).message);
+    }
+  };
+
   // The lvc_recommendations table is small (≤ ~900 rows), so load active recs and
   // keyword-match in memory — robust, no fragile SQL array matching.
   const rf = input.regionFilter && input.regionFilter.length ? input.regionFilter : null;
-  const rows = rf
-    ? await sql2(`SELECT ${REC_COLS} FROM lvc_recommendations WHERE status = 'active' AND region = ANY($1)`, [rf])
-    : await sql2(`SELECT ${REC_COLS} FROM lvc_recommendations WHERE status = 'active'`, []);
+  // ⚠️ THESE TWO READS SIT OUTSIDE THE SEMANTIC LEG'S OWN try, AND ALWAYS DID. A throw from either
+  // leaves the row at `started` and reaches the caller. The outcome is recorded BEFORE the error
+  // leaves the function; the throw itself is unchanged.
+  let rows: Awaited<ReturnType<typeof sql2>>;
+  try {
+    rows = rf
+      ? await sql2(`SELECT ${REC_COLS} FROM lvc_recommendations WHERE status = 'active' AND region = ANY($1)`, [rf])
+      : await sql2(`SELECT ${REC_COLS} FROM lvc_recommendations WHERE status = 'active'`, []);
+  } catch (e) {
+    if (capture) {
+      capture.retrievalOutcome = 'retrieval_failure';
+      capture.retrievalErrorClass = errorClassOf(e);
+      await finishRecall();
+    }
+    throw e;
+  }
   const recs = rows.map(rowToRec);
   const kw = core.keywordRecall(input.scenario, candidates, recs);
 
@@ -188,12 +281,19 @@ async function defaultRecall(input: MatchInput, candidates: Candidate[]): Promis
   let sem: LvcRecommendation[] = [];
   try {
     const q = [input.scenario, ...candidates.map((c) => c.name)].join('. ');
-    const r = await retrieve(q, { source: 'choosing-wisely', topK: 12, useSourceWeights: true, hybrid: true });
+    const r = await retrieve(q, { source: 'choosing-wisely', topK: 12, useSourceWeights: true, hybrid: true }, capture);
     const itemNos = new Set(r.hits.map((h) => h.item_number).filter((x): x is string => !!x));
     sem = recs.filter((x) => itemNos.has(x.id));
   } catch (e) {
     console.warn('[lvc] semantic recall failed', (e as Error).message);
+    // A swallowed retrieval exception and a retrieval that found nothing produce the SAME empty
+    // result here. Only one of them is a defect, and this is what tells them apart.
+    if (capture) {
+      capture.retrievalOutcome = 'retrieval_failure';
+      capture.retrievalErrorClass = errorClassOf(e);
+    }
   }
+  await finishRecall();
   return core.dedupeById(kw, sem);
 }
 

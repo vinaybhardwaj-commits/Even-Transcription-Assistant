@@ -21,6 +21,8 @@ import { retrieve, RRF_K, type RetrieveOptions, type RetrieveResult } from './re
 import { rerank } from './rerank';
 import { expandQuery, RETRIEVAL_LLM_SEED } from './expand';
 import { computeSourceQualityWeight } from './source-quality';
+import { createTelemetryCapture, evidenceFromCompletion, evidenceFromError, errorClassOf, type TelemetryCapture, type TransportEvidence } from './retrieval-capture';
+import type { VariantStatus, VariantOutcome } from './retrieval-telemetry-core';
 import type { ChunkHit } from './db';
 
 const VARIANT_MODEL = 'llama3.1:8b';
@@ -41,7 +43,34 @@ Each variant should:
 - Stay under 20 words
 - NOT be a question form — make them noun-phrase queries (e.g. "pathophysiology of heart failure with reduced ejection fraction" not "what is the pathophysiology of HFrEF?")`;
 
-export async function generateQueryVariants(question: string): Promise<string[]> {
+/** What variant generation actually did, alongside what it produced (D6). */
+export type VariantGenerationResult = {
+  status: VariantStatus;
+  variants: string[];
+  evidence: TransportEvidence | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+};
+
+/**
+ * Variant generation, with its own outcome reported rather than collapsed into an empty array.
+ *
+ * ⚠️ SIX DISTINGUISHABLE OUTCOMES, FIVE CODE PATHS BEFORE THIS BUILD. A usable set, a valid empty
+ * array, an array with no usable strings, and valid JSON that is not an array were each already
+ * reachable separately — but a `JSON.parse` throw and a `governedChat` throw landed in the SAME
+ * catch. They are different facts: a parse failure means a completion ARRIVED, cost tokens, and
+ * kept its provider and model, which §4.6 prices and §4.4 says must be preserved. A failed-open
+ * means no completion was produced at all. The inner `try` below is what separates them, and it is
+ * the only reason this function exists as a sibling of the wrapper rather than as its body.
+ *
+ * BEHAVIOUR IS UNCHANGED. The same call, the same parameters, the same swallow, the same console
+ * line. Only the return SHAPE is richer, and the wrapper below narrows it back.
+ */
+export async function generateQueryVariantsWithTelemetry(question: string): Promise<VariantGenerationResult> {
+  const none = { evidence: null, promptTokens: null, completionTokens: null };
+  let evidence: TransportEvidence | null = null;
+  let promptTokens: number | null = null;
+  let completionTokens: number | null = null;
   try {
     // Governed envelope (Stage 4). No promptRef: SYSTEM_VARIANTS is deliberately outside the
     // Stage-0 registry (query-variant scaffold, not a standing clinical prompt).
@@ -55,6 +84,10 @@ export async function generateQueryVariants(question: string): Promise<string[]>
       max_tokens: 300,
       ...({ options: { num_ctx: 8192, seed: RETRIEVAL_LLM_SEED }, keep_alive: '15m' } as Record<string, unknown>),
     }, { gemini: geminiUtilityModel() });
+    evidence = evidenceFromCompletion(r);
+    const usage = (r as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+    promptTokens = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : null;
+    completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : null;
     let txt = r.choices?.[0]?.message?.content?.trim() || '';
     // Strip markdown fences if the model added them
     if (txt.startsWith('```')) txt = txt.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -62,13 +95,43 @@ export async function generateQueryVariants(question: string): Promise<string[]>
     const a = txt.indexOf('[');
     const b = txt.lastIndexOf(']');
     if (a >= 0 && b > a) txt = txt.slice(a, b + 1);
-    const arr = JSON.parse(txt);
-    if (!Array.isArray(arr)) return [];
-    return arr.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, VARIANT_COUNT);
+    let arr: unknown;
+    try {
+      arr = JSON.parse(txt);
+    } catch (pe) {
+      // A COMPLETION ARRIVED AND DID NOT PARSE. Provider, model, attempts and usage are all
+      // PRESERVED (§4.4) — this stage is priced, and it is never `not_served`.
+      console.warn('[multi-query] variant generation failed', (pe as Error).message);
+      return { status: 'parse_failure', variants: [], evidence, promptTokens, completionTokens };
+    }
+    if (!Array.isArray(arr)) {
+      return { status: 'not_an_array', variants: [], evidence, promptTokens, completionTokens };
+    }
+    const usable = arr.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, VARIANT_COUNT);
+    const status: VariantStatus = arr.length === 0 ? 'parsed_empty' : usable.length === 0 ? 'all_invalid' : 'generated';
+    return { status, variants: usable, evidence, promptTokens, completionTokens };
   } catch (e) {
+    // The call itself never produced a completion. `not_served` only if the transport PROVED it.
     console.warn('[multi-query] variant generation failed', (e as Error).message);
-    return [];
+    return { status: 'failed_open', variants: [], ...none, evidence: evidenceFromError(e) };
   }
+}
+
+/**
+ * ⚠️ SIGNATURE AND BEHAVIOUR UNCHANGED. A thin wrapper, not a copy of the body — one call site, one
+ * prompt, one set of parameters. Every existing injection of this function still works.
+ *
+ * ⚠️ THE EARLY EXIT BELOW MUST KEEP ITS LITERAL FORM, AND THIS COMMENT DELIBERATELY DOES NOT QUOTE
+ * IT. lib/__tests__/retrieval-llm-determinism.test.ts greps this file for that statement as its
+ * "fail-open preserved" assertion; a comment repeating the same characters would satisfy the grep
+ * on its own, and the pin would keep passing over a file that no longer contained the statement.
+ * A wrapper that handed back the variants unconditionally would fail that test, and rightly so:
+ * every non-`generated` status really does fail open to an empty array here.
+ */
+export async function generateQueryVariants(question: string): Promise<string[]> {
+  const result = await generateQueryVariantsWithTelemetry(question);
+  if (result.status !== 'generated') return [];
+  return result.variants;
 }
 
 // Exported hit type adds ONLY the two genuinely-new fields, both optional. rerank_score /
@@ -117,6 +180,8 @@ export type MultiQueryDeps = {
   retrieveFn?: typeof retrieve;
   rerankFn?: typeof rerank;
   variantsFn?: (question: string) => Promise<string[]>;
+  /** The telemetry-aware seam. Preferred when supplied; see the precedence note below. */
+  variantsWithTelemetryFn?: (question: string) => Promise<VariantGenerationResult>;
   expandFn?: typeof expandQuery;
 };
 
@@ -124,11 +189,34 @@ export async function retrieveMultiQuery(
   question: string,
   opts: RetrieveOptions = {},
   deps: MultiQueryDeps = {},
+  capture?: TelemetryCapture,
 ): Promise<MultiRetrieveResult> {
   const retrieveFn = deps.retrieveFn ?? retrieve;
   const rerankFn = deps.rerankFn ?? rerank;
-  const variantsFn = deps.variantsFn ?? generateQueryVariants;
   const expandFn = deps.expandFn ?? expandQuery;
+
+  /**
+   * ⚠️ DEPENDENCY PRECEDENCE NEVER DEPENDS ON THE CAPTURE (D6). This resolution is identical with
+   * and without one. If it were not, a telemetry-ON ranking-invariance test would reach the real
+   * provider while the telemetry-OFF side ran a fake, and §6.1 would be comparing two different
+   * experiments while reporting them as one.
+   *
+   * A legacy `deps.variantsFn` is therefore never bypassed — it is USED, and its inability to
+   * report is recorded honestly rather than papered over.
+   */
+  const generateVariants: (q: string) => Promise<VariantGenerationResult> =
+    deps.variantsWithTelemetryFn
+      ? deps.variantsWithTelemetryFn
+      : deps.variantsFn
+        // A bare string array CANNOT distinguish `parsed_empty` from `failed_open` (A11). Inferring
+        // either would put a fabricated fact in a provenance record, so the seam reports
+        // `not_collected`: it means the collaborator cannot say, and it is never a defect.
+        ? async (q: string) => ({
+          status: 'not_collected' as VariantStatus,
+          variants: await deps.variantsFn!(q),
+          evidence: null, promptTokens: null, completionTokens: null,
+        })
+        : generateQueryVariantsWithTelemetry;
 
   const topK = opts.topK ?? 8;
   // Fusion-level stage flags (mirror retrieve.ts). The per-variant calls force these OFF.
@@ -138,16 +226,43 @@ export async function retrieveMultiQuery(
   // R-8: restore query expansion. Read `skipExpand` EXPLICITLY (D3) — NOT hardcoded — so a caller can
   // turn expansion off. Expand ONCE, on the ORIGINAL question; mirrors retrieve.ts:53-64's single-query
   // handling. expandQuery fails open (returns the original question on any error, never throws).
-  const expandedQuery = opts.skipExpand ? question : await expandFn(question);
+  // D4: `expandFn` is `typeof expandQuery`, whose second parameter is `traceId` — hence the
+  // explicit placeholder before the capture.
+  const expandedQuery = opts.skipExpand ? question : await expandFn(question, undefined, capture);
 
   // Per-variant pool — keep it moderate; we fuse and trim at the end.
   const perVariantK = Math.max(topK, 6);
   // Variants are generated from the ORIGINAL question, never the expanded paragraph (which is prose,
   // not a question — reformulating it would drift).
-  const variants = await variantsFn(question);
+  const generation = await generateVariants(question);
+  const variants = generation.variants;
+  if (capture) {
+    capture.variantGeneration = {
+      status: generation.status,
+      evidence: generation.evidence,
+      promptTokens: generation.promptTokens,
+      completionTokens: generation.completionTokens,
+      generatedCount: variants.length,
+    };
+  }
   // index 0 = the ORIGINAL arm, retrieving on the EXPANDED text; 1..N = variants on raw variant text.
   const allQueries = [expandedQuery, ...variants];
 
+  const variantOutcomes: Array<{ index: number; outcome: VariantOutcome; candidateCount: number }> = [];
+  /**
+   * ⚠️ ONE CAPTURE PER ARM, AND THE PARENT IS NOT HANDED DOWN. `index_version` is written in exactly
+   * one place in the tree — `lib/retrieve.ts`, before its first fallible statement — and the arms
+   * were being called with two arguments, so a `lab_multi_query` row's `index_version` was whatever
+   * `createTelemetryCapture` initialised it to, which is null. D17 does not permit null there, and
+   * nothing rejects it at run time: `validateManifest` has no production caller and the column is
+   * nullable with no CHECK, so the row would have been written and stored looking complete.
+   *
+   * The parent capture is NOT passed into the arms, because `retrieve()` also writes the candidate
+   * id lists, the passage texts and the retrieval outcome — fusion-level facts that this function
+   * computes for itself below. Six arms writing them in turn would leave the parent holding one
+   * arbitrary arm's view of a pool it never had.
+   */
+  const armCaptures = capture ? allQueries.map(() => createTelemetryCapture(capture.role)) : undefined;
   const results = await Promise.all(
     // Every arm hands retrieve() its FINAL text — the original arm's is already expanded, the variants
     // are deliberately raw — so the per-call skipExpand is true for all of them (no double-expansion).
@@ -155,14 +270,51 @@ export async function retrieveMultiQuery(
     // withDiagnostics: true makes each variant's retrieve() stamp per-hit bm25_rank (its own BM25-leg
     // rank) — provenance ONLY, it changes nothing retrieved or ranked. Fusion reads it below so a
     // chunk that arrived via a LATER variant's BM25 leg keeps its attribution.
-    allQueries.map((q) =>
-      retrieveFn(q, { ...opts, topK: perVariantK, skipExpand: true, useReranker: false, useSourceWeights: false, withDiagnostics: true })
+    allQueries.map((q, vi) =>
+      retrieveFn(q, { ...opts, topK: perVariantK, skipExpand: true, useReranker: false, useSourceWeights: false, withDiagnostics: true }, armCaptures?.[vi])
+        .then((r) => {
+          // One of the four sites that swallow a retrieval exception into an empty hit list. The
+          // three outcomes are DISCRIMINATED here (§4.3): a variant that found nothing and a
+          // variant that threw both produce `hits: []`, and only one of them is a defect.
+          variantOutcomes[vi] = { index: vi, outcome: r.hits.length > 0 ? 'success' : 'zero_hits', candidateCount: r.hits.length };
+          return r;
+        })
         .catch((e) => {
           console.warn('[multi-query] variant retrieve failed', q.slice(0, 60), (e as Error).message);
+          variantOutcomes[vi] = { index: vi, outcome: 'retrieval_failure', candidateCount: 0 };
+          if (capture) {
+            capture.retrievalErrorClass = capture.retrievalErrorClass ?? errorClassOf(e);
+          }
           return { hits: [], expandedQuery: q } as RetrieveResult;
         }),
     ),
   );
+  if (capture) {
+    // index 0 is the ORIGINAL expanded arm, so this array is always one longer than the generated
+    // variant count — which is what the manifest's arity check asserts.
+    capture.variants = allQueries.map((_, vi) => variantOutcomes[vi]
+      ?? { index: vi, outcome: 'zero_hits' as VariantOutcome, candidateCount: 0 });
+  }
+  if (capture && armCaptures) {
+    // `children` was declared in D5 and written by nothing. It is written here, and read by nothing
+    // that serializes: the arms' captures are raw material, and raw material never leaves the
+    // process (test 3). They are kept because the two fields lifted below are theirs.
+    capture.children = armCaptures;
+    // ⚠️ THE FIRST ARM THAT GOT AS FAR AS CHOOSING A COLUMN, NOT THE FIRST ARM. `index_version` is
+    // stamped BEFORE `retrieve()`'s first fallible statement, so an arm that threw still has one —
+    // which is what makes this the honest value even when every arm failed. It is null only if no
+    // arm reached that line at all, which for an injected `retrieveFn` that ignores its capture is
+    // a real absence and is recorded as one.
+    capture.indexVersion = capture.indexVersion
+      ?? armCaptures.find((c) => c.indexVersion !== null)?.indexVersion
+      ?? null;
+    // The arms all run the same configuration by construction — the per-call overrides above are
+    // fixed — so any arm's config is the fusion's config.
+    if (Object.keys(capture.retrievalConfig).length === 0) {
+      const cfg = armCaptures.find((c) => Object.keys(c.retrievalConfig).length > 0);
+      if (cfg) capture.retrievalConfig = { ...cfg.retrievalConfig };
+    }
+  }
 
   // ---- RRF across variants ----
   // Each variant's retrieve() returns hits in its own ranked order, so rank = index+1 within it.
@@ -195,9 +347,19 @@ export async function retrieveMultiQuery(
   const poolSize = useReranker ? Math.min(30, topK * 3) : topK;
   fused = fused.slice(0, poolSize);
 
+  // The fused pool IS this role's candidate set: multi-query has no single hydrate step, so the
+  // fused and hydrated counts are the same number by construction. Recorded as two values anyway,
+  // because a reader must not have to know which role they are looking at to read the field.
+  if (capture) {
+    capture.fusedCandidateIds = fused.map((h) => Number(h.id));
+    capture.hydratedCandidateIds = fused.map((h) => Number(h.id));
+    capture.passageTexts = fused.map((h) => h.text ?? '');
+  }
+
   // ---- Single cross-encoder rerank over the fused pool, against the ORIGINAL question ----
   if (useReranker && fused.length > 1) {
-    const reranked = await rerankFn(question, fused.map((h) => ({ id: h.id, text: h.text, __orig: h })), opts.rerankBackend);
+    // D4: `deps` is the fourth parameter of rerank(), so the capture needs its placeholder.
+    const reranked = await rerankFn(question, fused.map((h) => ({ id: h.id, text: h.text, __orig: h })), opts.rerankBackend, undefined, capture);
     fused = reranked.map((r) => {
       const orig = (r as unknown as { __orig: FusionHit }).__orig;
       return { ...orig, rerank_score: r.rerank_score, rerank_backend: r.rerank_backend };
@@ -218,8 +380,20 @@ export async function retrieveMultiQuery(
     fused = weighted.map((x) => x.hit);
   }
 
+  const hits = fused.slice(0, topK);
+  if (capture) {
+    capture.orderedFinalCandidateIds = hits.map((h) => Number(h.id));
+    // A multi-query run whose every arm threw is a FAILURE, not an empty result. One arm throwing
+    // and the rest returning nothing is `zero_hits`: the retrieval worked and found nothing.
+    const everyArmFailed = capture.variants!.length > 0
+      && capture.variants!.every((v) => v.outcome === 'retrieval_failure');
+    capture.retrievalOutcome = everyArmFailed ? 'retrieval_failure'
+      : hits.length > 0 ? 'success' : 'zero_hits';
+    if (capture.retrievalOutcome !== 'retrieval_failure') capture.retrievalErrorClass = null;
+  }
+
   return {
-    hits: fused.slice(0, topK),
+    hits,
     variants: allQueries,
     perVariantCounts: results.map((r) => r.hits.length),
     expandedQuery,

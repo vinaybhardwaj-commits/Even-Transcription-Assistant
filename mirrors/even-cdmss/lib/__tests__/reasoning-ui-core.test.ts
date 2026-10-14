@@ -32,7 +32,7 @@ const FORBIDDEN = /(patient|phi\b|uhid|mrn|dob|diagnos|complaint|medication|symp
 
 test('registryTabRows maps generated + manifest correctly', () => {
   const rows = registryTabRows();
-  assert.equal(rows.length, 38, 'one row per registry prompt');   // +1 K1 (inquiry), +1 PR0 (verify-core/VERIFY_SYSTEM), +1 Concept Coder, +1 LVP L2 (lvp-operator-core/LVP_OPERATOR_SYSTEM), +2 Pre-op B5/B6 (extract + narrative rails, both flag-dark), +1 Stewardship S4 (physician-standing-core/STANDING_PROMPT_CLAUSE), +4 IPD Episode Audit 0.1 (prompts/IPD_EPISODE_{CHECKPOINT,DIFF,FIDELITY,COMMENTARY}_SYSTEM — the second IPD engine's four passes, all registered in PROMPT_MANIFESTS, all flag-dark)
+  assert.equal(rows.length, 30, 'one row per registry prompt');   // +1 K1 (inquiry), +1 PR0 (verify-core/VERIFY_SYSTEM), +1 Concept Coder
   const judge = rows.find((r) => r.id === 'lvc-core/JUDGE_SYSTEM')!;
   assert.ok(judge, 'known prompt present');
   assert.equal(judge.maturity, 'draft', 'manifest maturity merged');

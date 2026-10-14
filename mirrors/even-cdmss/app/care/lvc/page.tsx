@@ -1,13 +1,19 @@
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-import { redirect } from 'next/navigation';
+import { redirect, notFound } from 'next/navigation';
+import { isCareUnlocked } from '@/lib/care-cookie';
+import LvcBoard from '@/components/care/LvcBoard';
 
 /**
- * Destined 20 Aug 2026 (LVP-L1 kickoff §4.7, D1–D6/O1): the Even Adjudicated LVC room was folded
- * into the one Low-value patterns shelf. The route stays reachable and forwards there. LvcBoard
- * itself is untouched (kickoff untouched list).
+ * Even Adjudicated LVC (CDMSS-EVEN-LVC-ADJUDICATION §7) — the assertion library + governance room.
+ * Same care-manager gate as its /care peers, plus the LVC_ADJUDICATION_ENABLED feature flag (ships
+ * OFF). The client component owns the roster identity pick, the generate trigger, and the ratify /
+ * edit-and-ratify / reject / retire actions.
  */
-export default function LvcPage() {
-  redirect('/care/patterns');
+export default async function LvcPage() {
+  if (process.env.CCB_ENABLED !== '1') notFound();
+  if (process.env.LVC_ADJUDICATION_ENABLED !== '1') notFound();
+  if (!(await isCareUnlocked())) redirect('/care/login');
+  return <LvcBoard />;
 }

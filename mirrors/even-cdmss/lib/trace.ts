@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { sql } from './db';
+import { attachTransportAttribution } from './transport-attribution-core';
+import type { CdmssTransportAttribution } from './transport-attribution-core';
 import { llm, geminiConfigured, getGeminiChatClient, vertexModelName, chatWithFallback, openrouterConfigured, openrouterChatClient, vertexRegion, openrouterGeminiSlug, openrouterSlugForGemini, buildOpenrouterParams, cloudLadder, tierCeilingMs, ladderSkipError } from './llm';
 import { remainingBudgetMs } from './lab-batch-core';
 import { vertexSaEmail } from './gcp-auth';
@@ -11,11 +13,6 @@ import { openrouterCreateWithRetry, createWithRetry } from './openrouter-retry';
 import { promptFingerprint } from './reasoning/registry-core';
 import { billableOutputTokens } from './llm-cost-core';
 import { bedrockGenerate, bedrockFailurePayload, singleChunkStream } from './bedrock';
-// LAB-MCP-V2 §7 (decision 6). Inside a lab execution context every trace WRITE below
-// returns without touching the database, and the two model entries delegate to the
-// lab's own chat edge. Outside a context `labExecution()` is undefined and every one of
-// these functions is byte-for-byte what it was before this import existed.
-import { labExecution } from './lab-execution-context';
 
 const sqlFn = sql as unknown as (q: string, p: unknown[]) => Promise<unknown>;
 
@@ -70,9 +67,6 @@ export const ENVELOPE_UPDATE_SQL =
    WHERE trace_id = $11 AND seq = $12`;
 
 export async function startTrace(feature: string, input: unknown, userId: number = 1, meta?: unknown): Promise<string> {
-  // §7 — a lab run has no production trace. Return a well-formed id so every downstream
-  // `logEvent(traceId, ...)` stays type-correct and equally inert.
-  if (labExecution()) return 'lab-v2-untraced';
   const traceId = randomUUID();
   try {
     await sqlFn(
@@ -93,7 +87,6 @@ export async function logEvent(
   latencyMs?: number,
   envelope?: TraceEnvelope
 ): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     // app_source is set explicitly here: the lib/db stamper cannot safely inject
     // into this INSERT because the seq subquery in VALUES contains parentheses.
@@ -147,7 +140,6 @@ export async function finishTrace(
   status: 'success' | 'error' | 'partial',
   errorMessage?: string
 ): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     await sqlFn(
       `UPDATE traces SET finished_at = NOW(), status = $1, error_message = $2,
@@ -236,68 +228,44 @@ export async function runOllamaFallback<T>(
 // does not receive it (attribution is best-effort; it must never cost a call).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The property name carrying dispatch evidence on a returned completion. Namespaced so it can
- *  never collide with an OpenAI/Bedrock/OpenRouter SDK field. */
-export const TRANSPORT_ATTRIBUTION_FIELD = 'cdmss_transport_attribution';
+// ── Dispatch evidence (GUARD-FIX PRD v3.0 D-8, 10 Aug 2026) ─────────────────────────────────────
+// MOVED, NOT CHANGED (rerank telemetry §4.4, 11 Aug 2026). These four names were declared here
+// when only the TRACED transport needed them. The traceless transport (chatWithFallback, in
+// lib/llm.ts) now needs the same primitive, and lib/trace.ts imports lib/llm.ts — so the
+// definitions moved DOWN to lib/transport-attribution-core.ts, which both can depend on.
+//
+// EVERY NAME IS RE-EXPORTED AT ITS ORIGINAL PATH. lib/lvc.ts and
+// lib/__tests__/lvc-judge-attribution.test.ts both import these from './trace' / '../trace', and
+// neither file may be touched by this build (the test is one of the four held uncommitted on
+// main). Behaviour is byte-identical: this is a re-export, not a re-implementation.
+export {
+  TRANSPORT_ATTRIBUTION_FIELD,
+  attachTransportAttribution,
+  readTransportAttribution,
+  classifyAttemptOutcome,
+} from './transport-attribution-core';
+export type {
+  CdmssTransportAttribution,
+  TransportAttempt,
+  TransportAttemptOutcome,
+} from './transport-attribution-core';
 
-export type CdmssTransportAttribution = {
-  /** Which branch of tracedChat dispatched the request. 'vertex' is the direct Vertex Gemini
-   *  branch — the trace's own provider label for it is 'gemini'; this field uses the PRD's name. */
-  dispatched_provider: 'vertex' | 'openrouter' | 'ollama' | 'bedrock';
-  /** The model slug the transport supplied to that provider (publisher prefix as sent). */
-  dispatched_model: string | null;
-  /** True when a cloud provider produced this result; false for the local model. */
-  cloud_response_received: boolean;
-};
-
-/** Attach dispatch evidence to a completion and return the SAME object. Non-enumerable, so no
- *  existing consumer of the completion can observe it. Never throws. */
-export function attachTransportAttribution<T>(result: T, attribution: CdmssTransportAttribution): T {
-  if (!result || (typeof result !== 'object' && typeof result !== 'function')) return result;
-  try {
-    Object.defineProperty(result, TRANSPORT_ATTRIBUTION_FIELD, {
-      value: attribution, enumerable: false, configurable: true, writable: true,
-    });
-  } catch { /* frozen/sealed provider object — evidence is best-effort, never a thrown call */ }
-  return result;
-}
-
-/** Read dispatch evidence back off a completion. `undefined` means the transport left none —
- *  which is a real state (an untraced call, a stream wrapper), not a failure. */
-export function readTransportAttribution(result: unknown): CdmssTransportAttribution | undefined {
-  if (!result || (typeof result !== 'object' && typeof result !== 'function')) return undefined;
-  const v = (result as Record<string, unknown>)[TRANSPORT_ATTRIBUTION_FIELD];
-  return v && typeof v === 'object' ? (v as CdmssTransportAttribution) : undefined;
-}
-
-/**
- * buildVertexParams — the Vertex request-body normalisation, in ONE place (decision 21).
- *
- * Vertex needs two things done to the engine's params, and BOTH are easy to forget:
- *
- *  1. STRIP the Ollama-only fields. Vertex rejects unknown fields, and `options` (num_ctx) and
- *     `keep_alive` mean nothing to it.
- *  2. RAISE max_tokens by 8192. Gemini 2.5 Pro is a THINKING model: max_tokens becomes
- *     maxOutputTokens, and reasoning tokens are spent from it FIRST. The caps tuned for Ollama
- *     (700–2200) are consumed by thinking and the JSON answer never gets written.
- *
- * ⚠️ THIS FUNCTION EXISTS BECAUSE FORGETTING (2) IS SILENT AND EXPENSIVE. Live lab run 1716bbe2
- * sent the engine's raw params to Vertex: max_tokens 2200 against a 4096-token thinking budget.
- * The model thought, ran out, and returned empty content — a 200 response, correctly attributed
- * and duly billed at 13,904 microusd, that the engine could only report as `llmLegFailed`. Every
- * status downstream said success because every one of them was true. The lab and production must
- * build this body through the same function or the drift comes back.
- */
-export function buildVertexParams(params: unknown, model: string): Record<string, unknown> {
-  const { options: _o, keep_alive: _k, ...rest } = params as Record<string, unknown>;
-  void _o; void _k;
-  const baseMax = Number((rest as { max_tokens?: number }).max_tokens) || 1024;
-  return {
-    ...rest,
-    model: vertexModelName(model),
-    max_tokens: baseMax + 8192,
-  };
-}
+// ── Failure attribution (rerank telemetry on-path D14, 11 Aug 2026) ─────────────────────────────
+// NEW re-exports, and the only change this build makes to this file. `tracedChat` below is NOT
+// touched: it attaches no attempt list, and D14 scopes failure attribution to the TRACELESS arm
+// because the retrieval path never reaches the traced one (rerank_judge and expandQuery both
+// dispatch with an undefined trace id). That `tracedChat` attaches no attempts is a real defect
+// and is reported as one rather than fixed here — widening it is a transport change on an arm
+// this workstream has no measurement for.
+export {
+  TRANSPORT_FAILURE_ATTRIBUTION_FIELD,
+  TRANSPORT_TERMINAL_PHASES,
+  attachTransportFailureAttribution,
+  readTransportFailureAttribution,
+  classifyLocalAttempt,
+  localAttemptSuccess,
+} from './transport-attribution-core';
+export type { CdmssTransportFailureAttribution } from './transport-attribution-core';
 
 export async function tracedChat(
   traceId: string,
@@ -327,11 +295,6 @@ export async function tracedChat(
   opts?: { gemini?: string; openrouter?: string; bedrock?: string; promptRef?: string; timeoutMs?: number; maxTries?: number; noLocalFallback?: boolean },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
-  // §7 — inside a lab context there is no trace to write to and no fallback ladder to
-  // run: the lab supplies its own single-target transport, budgeted and attributed by
-  // lib/lab-v2/gateway.ts. `label` is the stage name the gateway meters against.
-  const _labTraced = labExecution();
-  if (_labTraced) return _labTraced.chat(label, params);
   const t0 = Date.now();
   const reqOpts = opts?.timeoutMs ? { timeout: opts.timeoutMs } : undefined;
 
@@ -549,17 +512,24 @@ export async function tracedChat(
         } else {
           beginProviderCall('gemini');
           try {
-            // Strip Ollama-only params, publisher-prefix the model, and add the thinking
-            // headroom — all of it in buildVertexParams, which the lab transport calls too
-            // (decision 21). The request body here is byte-identical to what this block built
-            // inline before the extraction; lib/lab-v2/__tests__/params-fidelity.test.ts holds
-            // the two paths equal.
-            const gParams: Record<string, unknown> = buildVertexParams(params, opts!.gemini as string);
+            // Strip Ollama-only params (Vertex rejects unknown fields) + publisher-prefix the model.
+            const { options: _o, keep_alive: _k, ...rest } = params as Record<string, unknown>;
+            void _o; void _k;
+            // Gemini 2.5 Pro is a THINKING model: max_tokens (→ maxOutputTokens) is spent
+            // on internal reasoning tokens FIRST, so the tight caps tuned for Ollama
+            // (700–1500) leave no budget for the JSON answer and it truncates mid-string.
+            // Give the content budget PLUS a generous thinking allowance.
+            const baseMax = Number((rest as { max_tokens?: number }).max_tokens) || 1024;
+            const gParams: Record<string, unknown> = {
+              ...rest,
+              model: vertexModelName(opts!.gemini as string),
+              max_tokens: baseMax + 8192,
+            };
             // Streaming calls otherwise carry NO token usage, so their spend is invisible to the LLM
             // cost tracker (this is why every /ask + /ddx pass was uncounted). Ask Vertex to emit a
             // final usage chunk. Off switch: LLM_STREAM_USAGE=0. Self-healing: if the endpoint rejects
             // the field we retry WITHOUT it (keep Gemini) rather than cascading to the Ollama fallback.
-            const wantUsage = Boolean((gParams as { stream?: boolean }).stream) && process.env.LLM_STREAM_USAGE !== '0';
+            const wantUsage = Boolean((rest as { stream?: boolean }).stream) && process.env.LLM_STREAM_USAGE !== '0';
             if (wantUsage) gParams.stream_options = { include_usage: true };
             // Study arm only — absent on the shipped uncapped default.
             if (thinkingBudget) gParams.google = { thinking_config: { thinking_budget: thinkingBudget } };
@@ -771,7 +741,6 @@ export async function logStreamComplete(
 
 /** Write the first 160 chars of the question into traces.question_preview. */
 export async function setTraceQuestionPreview(traceId: string, question: string): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     const preview = (question || '').slice(0, 160);
     await sqlFn(`UPDATE traces SET question_preview = $1 WHERE trace_id = $2`, [preview, traceId]);
@@ -780,7 +749,6 @@ export async function setTraceQuestionPreview(traceId: string, question: string)
 
 /** Write the critique severity (none/minor/moderate/major) into traces.severity. */
 export async function setTraceSeverity(traceId: string, severity: string): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     await sqlFn(`UPDATE traces SET severity = $1 WHERE trace_id = $2`, [severity, traceId]);
   } catch {}
@@ -788,7 +756,6 @@ export async function setTraceSeverity(traceId: string, severity: string): Promi
 
 /** Write {draft, critique, revise, ...} → traces.model_summary JSONB. */
 export async function setTraceModelSummary(traceId: string, models: Record<string, string>): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     await sqlFn(`UPDATE traces SET model_summary = $1::jsonb WHERE trace_id = $2`, [JSON.stringify(models), traceId]);
   } catch {}
@@ -797,7 +764,6 @@ export async function setTraceModelSummary(traceId: string, models: Record<strin
 /** Write the assembled final answer text into traces.final_answer_text.
  *  The search_tsv GENERATED column will recompute automatically. */
 export async function setTraceFinalAnswer(traceId: string, finalAnswer: string): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     await sqlFn(`UPDATE traces SET final_answer_text = $1 WHERE trace_id = $2`, [finalAnswer, traceId]);
   } catch {}
@@ -806,7 +772,6 @@ export async function setTraceFinalAnswer(traceId: string, finalAnswer: string):
 /** Roll registry prompt ids into traces.prompt_ids (deduped append — an id already in the
  *  array is skipped). Stage 1 denormalized writer; degrades to no-op before migration 0012. */
 export async function setTracePromptIds(traceId: string, promptIds: string[]): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     for (const id of promptIds) {
       await sqlFn(
@@ -865,12 +830,6 @@ export async function governedChat(
   opts?: { gemini?: string; openrouter?: string; bedrock?: string; promptRef?: string; timeoutMs?: number; maxTries?: number; noLocalFallback?: boolean },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
-  // §7 — the lab edge outranks both arms below. It must be checked BEFORE the traceId
-  // branch: a lab run that happened to carry a traceId would otherwise fall into
-  // tracedChat's production ladder, which is the silent-downgrade defect F11 exists to
-  // stop, in the one direction that also spends production money.
-  const _labGoverned = labExecution();
-  if (_labGoverned) return _labGoverned.chat(label, params);
   // ⚠️ THE TRACED ARM IS THE ONE PRODUCTION USES. Both audit legs arrive here with a traceId, so
   // a budget that only reaches the traceless arm below changes nothing in production while every
   // naive test passes — which is exactly how the 110 s ceiling survived 3039c42. Both arms carry
@@ -885,73 +844,6 @@ export async function governedChat(
   return chatWithFallback(params, opts?.gemini, opts?.openrouter, opts?.timeoutMs, opts?.maxTries, opts?.noLocalFallback);
 }
 
-/**
- * governedLabChat — the Lab v2 transport (LAB-MCP-V2-PRD-v1.0 §7, §6.1).
- *
- * ONE TARGET, ONE ATTEMPT, NO LADDER. An arm names exactly one (provider, model) per
- * stage and v2 has no fallback: a stage that cannot reach its named model FAILS that
- * stage. That is not a convenience choice — a lab result silently served by a different
- * model than the arm declared is a measurement that reads as clean and is not, which is
- * precisely what §6.2's attribution machinery exists to catch. Falling back would
- * manufacture the very rows attribution is there to reject.
- *
- * `maxRetries: 0` / `maxTries: 1` on every branch for the same reason, plus a second:
- * the gateway has already RESERVED budget for exactly one call before this runs. A
- * transport-level retry would spend a second call's money against one reservation.
- *
- * It lives in lib/trace.ts because scripts/reasoning-governance-check.mjs hard-fails any
- * direct model call outside the governed layer, and because attribution must be attached
- * by the one existing mechanism (`attachTransportAttribution`) rather than a second
- * implementation that could drift from it.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function governedLabChat(
-  provider: 'bedrock' | 'openrouter' | 'ollama' | 'vertex',
-  model: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  params: any,
-  timeoutMs?: number,
-  signal?: AbortSignal,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-): Promise<any> {
-  const reqOpts: Record<string, unknown> = { maxRetries: 0 };
-  if (timeoutMs) reqOpts.timeout = timeoutMs;
-  if (signal) reqOpts.signal = signal;
-
-  if (provider === 'bedrock') {
-    const completion = await bedrockGenerate(params, { model, timeoutMs, maxTries: 1, label: 'lab-v2' });
-    return attachTransportAttribution(completion, {
-      dispatched_provider: 'bedrock', dispatched_model: model, cloud_response_received: true,
-    });
-  }
-  if (provider === 'openrouter') {
-    // The Ollama-only fields are stripped BEFORE buildOpenrouterParams, exactly as the traced
-    // path does it. buildOpenrouterParams adds the thinking headroom but does not remove these
-    // two, so calling it on raw params leaked `options` and `keep_alive` onto the wire —
-    // measured by the fidelity test, not assumed.
-    const { options: _o, keep_alive: _k, ...rest } = params as Record<string, unknown>;
-    void _o; void _k;
-    const client = openrouterChatClient();
-    const result = await client.chat.completions.create(
-      buildOpenrouterParams(model, rest) as never, reqOpts);
-    return attachTransportAttribution(result, {
-      dispatched_provider: 'openrouter', dispatched_model: model, cloud_response_received: true,
-    });
-  }
-  if (provider === 'vertex') {
-    const client = await getGeminiChatClient();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await client.chat.completions.create(buildVertexParams(params, model) as any, reqOpts);
-    return attachTransportAttribution(result, {
-      dispatched_provider: 'vertex', dispatched_model: model, cloud_response_received: true,
-    });
-  }
-  const result = await llm.chat.completions.create({ ...params, model }, reqOpts);
-  return attachTransportAttribution(result, {
-    dispatched_provider: 'ollama', dispatched_model: model, cloud_response_received: false,
-  });
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Guaranteed finalize (Stage 1) — closes the `running`-trace leak.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -963,7 +855,6 @@ export async function finishTraceIfRunning(
   status: 'success' | 'error' | 'partial',
   errorMessage?: string
 ): Promise<void> {
-  if (labExecution()) return;   // §7
   try {
     await sqlFn(
       `UPDATE traces SET finished_at = NOW(), status = $1, error_message = $2,

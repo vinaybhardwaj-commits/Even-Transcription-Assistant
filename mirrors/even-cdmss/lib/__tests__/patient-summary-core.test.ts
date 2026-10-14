@@ -225,9 +225,7 @@ test('§1.1 the CCB card and its live PHI count query are gone; OPD Audit Triage
   assert.ok(!CARE_PAGE.includes('CCB_ENGINE_VERSION'), 'and its now-unused import with it');
   assert.ok(!CARE_PAGE.includes('briefsCount'));
   assert.ok(CARE_PAGE.includes("href: '/care/triage'"), 'OPD Audit Triage still on the page');
-  // 20 Aug 2026 (LVP-L1 kickoff §4.1): the Concept coder card was destined into the Low-value
-  // patterns shelf, so "the rest of /care" is now Review Mode + the LVP card, not Concept coder.
-  assert.ok(CARE_PAGE.includes("title: 'Review Mode'") && CARE_PAGE.includes("title: 'Low-value patterns'"), 'and the rest of /care');
+  assert.ok(CARE_PAGE.includes("title: 'Review Mode'") && CARE_PAGE.includes("title: 'Concept coder'"), 'and the rest of /care');
 });
 
 test('§1.1 /care/briefs stays REACHABLE — no gate was added (V overruled 404-ing it)', () => {

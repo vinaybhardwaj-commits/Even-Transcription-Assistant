@@ -25,12 +25,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      # Full history. Several tests pin byte-identity with `git show` / `git diff`
-      # against ancestor commits (f4a67ee, 6f5cfa81, 9c440fcc). The action default
-      # is depth 1, which omits those objects and fails the suite before any assertion.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           # 22 (not the ddx-benchmark idiom's 20): `node --test` only glob-expands its

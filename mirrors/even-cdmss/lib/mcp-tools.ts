@@ -22,6 +22,16 @@ import {
   type ExistingStatement, type GapRow,
 } from './lvc-proposal-core';
 import { retrieve, clampLabRetrieveTopK, BM25_DEFAULT_DFMAX } from './retrieve';
+import { randomUUID } from 'node:crypto';
+import {
+  telemetryContextFor, routeClassOf, validateManifest,
+  type TelemetryRequestContext, type RetrievalRole, type OperationalTelemetry,
+} from './retrieval-telemetry-core';
+import { createTelemetryCapture, buildRetrievalPayload, errorClassOf as telemetryErrorClassOf } from './retrieval-capture';
+import { declareRetrievals, writeRetrievalTerminal, type LifecycleHandle, type ManifestDefectsByRole } from './retrieval-telemetry-store';
+import { startInvocation } from './retrieval-invocation-store';
+import { settleOwned, outcomeForOwnedSave } from './retrieval-settlement';
+import { readRetrievalTelemetry } from './retrieval-telemetry-store';
 import { retrieveMultiQuery } from './multi-query';
 import { RerankBackendError } from './rerank';
 
@@ -224,6 +234,17 @@ export const LAB_TOOLS = [
     },
   },
   {
+    name: 'lab_query',
+    description: 'Inspect the experimental lab + POLL async clinical probes (lab_ddx/lab_ask/lab_appropriateness/lab_pathway/lab_case_audit): fetch one run by id (its output.status is pending → done → error; done rows carry the full result), list runs in one experiment (experiment=…), list experiments (no args), or storage stats (stats=true). args: experiment? | id? | stats? WRITE-CLASS: read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        experiment: { type: 'string' }, id: { type: 'string' },
+        stats: { type: 'boolean' }, limit: { type: 'number' },
+      },
+    },
+  },
+  {
     name: 'audit_query',
     description:
       'Run a READ-ONLY SQL query (SELECT/WITH only) against the CDMSS audit database (Neon) — for mining bug prevalence + building golden sets. Readable tables are DE-IDENTIFIED (no PHI): opd_note_audits (per-note audit: uid, doctor_uid, note_date, note_quality_index, band, score_documentation/note_quality/appropriateness/prescribing_safety/patient_centred, pdqi9 jsonb [{attr,value}], completeness_pct, n_missing_mandatory, n_findings, n_low_value, n_interaction_alerts, findings jsonb [{subject,verdict,domain,source,informational,signal_type,finding_ref,citation_ids,rule_ref,lvc_category}] (lvc_category on low-value findings ∈ antibiotic|imaging|supplement_polypharmacy|therapeutic_duplication|systemic_steroid|gi_ppi_prokinetic|antihistamine_allergy|nsaid_analgesic|cough_cold_fdc|cough_expectorant|unindicated_investigation|other — the 8 overuse sub-tags added in engine 0.81.8), suggestions jsonb, missing_fields jsonb, engine_version), plus opd_audit_triage, opd_gov_signal(_event), doctor_directory, doctor_roster, audit_suppression, doctor_operational_metrics, lvc_recommendations (reference), lab_analyses (your lab_ddx/lab_ask/mini_analyze runs — output jsonb), and the DE-IDENTIFIED pipeline views v_trace_summary (feature/status/severity/timings/model_summary — NO clinical text) + v_appropriateness_summary (mode/doc_type/counts). PHI-bearing raw tables (traces, trace_events, appropriateness_runs, ccb_briefs, care_track_assignments, opd_audit_feedback) are BLOCKED — use the views, and the feedback_* tools for opd_audit_feedback. Enforced: SELECT/WITH only, single statement, no writes/DDL/system-functions, blocked-relation guard, LIMIT ≤ 500 (auto-added), audit-logged. Source-NOTE fields (medications count, followUpType, patient age, specialty) live in db13 — take the uids this returns and join via the Metabase MCP. WRITE-CLASS: read-only.',
@@ -295,7 +316,7 @@ export const LAB_TOOLS = [
   },
   {
     name: 'lvc_propose',
-    description: "F14 — propose a low-value-care statement into the STAGING table (lvc_recommendation_proposals). lvc_recommendations is NEVER written by this tool. REFUSES an uncited proposal (needs citation_url OR citation_doi OR citation_pmid, AND source_release_year, AND license_status), and REFUSES a near-duplicate of any existing statement or pending proposal unless supersedes_id is supplied — the existing 60 house statements are ~15 concepts in machine-generated variants (11 diagnosis-mismatch, 5 vitamin D, 5 antibiotic-for-viral), and without this check the tool regenerates exactly that. SUPPLY KEYWORDS: a rule matches a finding through its keywords and nothing else, so a proposal with none is promoted into a rule that is active and never fires. WRITE-CLASS: lab-write (staging only).",
+    description: "F14 — propose a low-value-care statement into the STAGING table (lvc_recommendation_proposals). lvc_recommendations is NEVER written by this tool. REFUSES an uncited proposal (needs citation_url OR citation_doi OR citation_pmid, AND source_release_year, AND license_status), and REFUSES a near-duplicate of any existing statement or pending proposal unless supersedes_id is supplied — the existing 60 house statements are ~15 concepts in machine-generated variants (11 diagnosis-mismatch, 5 vitamin D, 5 antibiotic-for-viral), and without this check the tool regenerates exactly that. WRITE-CLASS: lab-write (staging only).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -306,19 +327,6 @@ export const LAB_TOOLS = [
         citation_url: { type: 'string' }, citation_doi: { type: 'string' }, citation_pmid: { type: 'string' },
         source_release_year: { type: 'number' },
         license_status: { type: 'string', enum: ['open', 'permission-granted', 'proprietary-cited', 'unknown-blocked'] },
-        // DECISION 94. Declared here as well as parsed, because a field the parser accepts and the
-        // schema hides is a field no client will ever send.
-        keywords: {
-          type: 'array', items: { type: 'string' }, maxItems: 12,
-          description: 'Alternative trigger phrases, at most 12. A rule matches when ANY keyword matches as whole words in the finding\u2019s subject plus rationale; the longest matched phrase wins, and a tie yields no attribution. WITHOUT THESE THE PROMOTED RULE CAN NEVER FIRE.',
-        },
-        category: {
-          type: 'string',
-          enum: ['antibiotic', 'imaging', 'supplement_polypharmacy', 'therapeutic_duplication', 'systemic_steroid',
-            'gi_ppi_prokinetic', 'antihistamine_allergy', 'nsaid_analgesic', 'cough_cold_fdc', 'cough_expectorant',
-            'unindicated_investigation', 'other'],
-          description: 'The lvc_category stamped on a finding this rule matches. Omit to let the engine classify the finding from its text, which is what every rule does today.',
-        },
       },
       required: ['statement'],
     },
@@ -402,34 +410,23 @@ export const LAB_TOOLS = [
   },
 ] as const;
 
-/**
- * lab-v2 decision 143 (§17.11) + decision 149 — NAMES THIS SERVER ONCE SERVED AND NO LONGER DOES.
- *
- * A retirement has two halves that pull opposite ways: the name must be GONE from `LAB_TOOLS`, so
- * nobody discovers it, AND a client that already knows the name must get an ANSWER rather than
- * "unknown tool". This list is the second half. `dispatchMcp` consults it alongside `LAB_TOOLS` at
- * the name gate so a retired call reaches `callLabTool`; `tools/list` never reads it, which is what
- * keeps a retired tool undiscoverable.
- *
- * ⚠️ NOT the single source of the deprecation: `V1_DEPRECATIONS` in `lib/lab-v2/contracts.ts` is a
- * second copy, and decision 149 accepted that rather than making a pure schema module import this
- * one. The two are pinned equal by `c2-rules.test.ts` — if you change one, that test fails.
- */
-export const RETIRED_TOOLS = [
-  { name: 'lab_query', replaced_by: ['audit_search', 'corpus_search'], since: 'e5f53c55' },
-] as const;
-
 // ── dispatch ─────────────────────────────────────────────────────────────────────
-export async function callLabTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+/**
+ * ⚠️ THE CONTEXT COMES IN, IT IS NOT MADE HERE (D11). `dispatchMcp(body)` used to take only the
+ * body, so the two MCP routes had no way to say which invocation a tool call belonged to. It is
+ * optional because every non-retrieving tool ignores it, and because the MCP surface has callers
+ * (tests, the lab) that legitimately have no request.
+ */
+export async function callLabTool(name: string, args: Record<string, unknown>, ctx?: TelemetryRequestContext): Promise<ToolResult> {
   try {
     switch (name) {
-      case 'mini_analyze': return await miniAnalyze(args);
+      case 'mini_analyze': return await miniAnalyze(args, ctx);
       case 'lab_ddx': return await labDdx(args);
       case 'lab_ask': return await labAsk(args);
       case 'lab_appropriateness': return await labAppropriateness(args);
       case 'lab_pathway': return await labPathway(args);
       case 'lab_case_audit': return await labCaseAudit(args);
-      case 'backfill_control': return await backfillControl(args);
+      case 'backfill_control': return await backfillControl(args, ctx);
       case 'corpus_add': return await corpusAdd(args);
       case 'corpus_manage': return await corpusManage(args);
       case 'corpus_add_batch': return await corpusAddBatch(args);
@@ -437,15 +434,8 @@ export async function callLabTool(name: string, args: Record<string, unknown>): 
       case 'lvc_propose': return await lvcPropose(args);
       case 'lvc_ratify': return await lvcRatify(args);
       case 'lvc_gaps': return await lvcGaps(args);
-      case 'lab_retrieve': return await labRetrieve(args);
-      // lab-v2 decision 143 (§17.11): RETIRED. Removed from LAB_TOOLS above; this arm stays so a
-      // stale client gets a message naming its replacements instead of "unknown tool". Nothing in
-      // lab_analyses is deleted — audit_query still reads every row lab_query ever listed.
-      case 'lab_query': return ok({
-        error: 'RETIRED',
-        replaced_by: [...RETIRED_TOOLS[0].replaced_by],
-        since: RETIRED_TOOLS[0].since,
-      });
+      case 'lab_retrieve': return await labRetrieve(args, ctx);
+      case 'lab_query': return await labQuery(args);
       case 'audit_query': return await auditQuery(args);
       case 'lab_batch_start': return await labBatchStart(args);
       case 'lab_batch_status': return await labBatchStatus();
@@ -461,7 +451,7 @@ export async function callLabTool(name: string, args: Record<string, unknown>): 
   }
 }
 
-async function miniAnalyze(a: Record<string, unknown>): Promise<ToolResult> {
+async function miniAnalyze(a: Record<string, unknown>, ctx?: TelemetryRequestContext): Promise<ToolResult> {
   await ensureLabTables();
   const experiment = labLabel(a.experiment);
   const uid = S(a.metabase_uid).trim();
@@ -488,9 +478,22 @@ async function miniAnalyze(a: Record<string, unknown>): Promise<ToolResult> {
   if (uid) {
     const row = await fetchOpdNoteByUid(uid);
     if (!row) return err(`no db13 OPD note for uid ${uid}`);
-    const audit = await auditOpdNote(row, { pipeline: 'mini', engineTag: 'lab', trace: false, ...(evalModel ? { evalModel } : {}) });
+    // ⚠️ THIS TOOL WRITES `lab_analyses` AND NOTHING ELSE (D9), so `no_persistence_intended` is the
+    // honest settlement — and `trace: false` is why `trace_id` stays null on these rows from
+    // declaration all the way through the terminal write.
+    let handle: LifecycleHandle | null = null;
+    let published = false;
+    const audit = await auditOpdNote(row, {
+      pipeline: 'mini', engineTag: 'lab', trace: false, ...(evalModel ? { evalModel } : {}),
+      ...(ctx ? {
+        telemetry: { ctx, route: 'mcp_tools' as const, persistenceIntent: 'never_persists' as const },
+        onLifecycleHandleUpdated: (h: LifecycleHandle) => { handle = h; published = true; },
+      } : {}),
+    });
+    void published;
     const output = { index: audit.scorecard.headline, band: audit.scorecard.band, scorecard: audit.scorecard, completeness: audit.completeness, findings: audit.findings, suggestions: audit.suggestions };
     const id = await saveLabAnalysis({ experiment, kind: 'opd_note', engine: audit.engineVersion, inputRef: uid, inputPreview: `uid ${uid}`, output, model: M.model, provider: M.provider, latencyMs: Date.now() - started });
+    await settleOwned(handle, 'no_persistence_intended');
     return ok({ stored_id: id, experiment, kind: 'opd_note', engine: audit.engineVersion, index: audit.scorecard.headline, band: audit.scorecard.band, findings: audit.findings.length });
   }
 
@@ -853,7 +856,7 @@ async function labCaseAudit(a: Record<string, unknown>): Promise<ToolResult> {
   });
 }
 
-async function backfillControl(a: Record<string, unknown>): Promise<ToolResult> {
+async function backfillControl(a: Record<string, unknown>, ctx?: TelemetryRequestContext): Promise<ToolResult> {
   const action = S(a.action);
   if (action === 'status') return ok(await readState());
   if (action === 'start') { await setSetting(MB_KEYS.enabled, '1'); return ok({ enabled: true, note: 'autopilot on — runs within its compute window on the next 5-min tick' }); }
@@ -873,8 +876,41 @@ async function backfillControl(a: Record<string, unknown>): Promise<ToolResult> 
     const results: Record<string, unknown>[] = [];
     for (const row of rows) {
       const t0 = Date.now();
-      try { const au = await auditOpdNote(row, { pipeline: 'mini', engineTag: tag }); const st = await saveOpdAudit(au, { model: MINI_MODEL, latencyMs: Date.now() - t0 }); results.push({ uid: au.keys.uid, index: au.scorecard.headline, band: au.scorecard.band, status: st, ms: Date.now() - t0 }); }
-      catch (e) { results.push({ error: String((e as Error).message) }); }
+      // As the worker (D9): this branch DOES write opd_note_audits, so it settles by the save result.
+      let handle: LifecycleHandle | null = null;
+      let published = false;
+      /** The last map the callback delivered (v10 requirement 4), for the paths that return no audit. */
+      let publishedDefects: ManifestDefectsByRole | undefined;
+      try {
+        const au = await auditOpdNote(row, {
+          pipeline: 'mini', engineTag: tag,
+          ...(ctx ? {
+            telemetry: { ctx, route: 'mcp_tools' as const, persistenceIntent: 'will_persist' as const },
+            // ⚠️ `if (d)` IS LOAD-BEARING. The DECLARATION publication passes no map, and letting it
+            // overwrite a real one with undefined would throw away the verdict this exists to keep.
+            onLifecycleHandleUpdated: (h: LifecycleHandle, d?: ManifestDefectsByRole) => { handle = h; published = true; if (d) publishedDefects = d; },
+          } : {}),
+        });
+        let linked = false;
+        // ⚠️ A PERSISTENCE OWNER, SO IT CARRIES THE ROLE MAP (pass 0b). This path passed NO defects
+        // at all, which meant every row it settled was `persisted_clean` whatever its manifest said.
+        // It is `lab_direct`/`lab_multi_query`-shaped and single-role today, so the map is usually
+        // one key — but reading it is what stops a real defect being silently dropped here.
+        // ⚠️ NO `?? {}` (v10 requirement 5). An empty map is NOT "no map": under requirement 6 a
+        // PROVIDED map carrying no key for a role settles that linkable role partial, so `?? {}` would
+        // have made every uninstrumented save partial and left requirement 7 unreachable. The attached
+        // map first, then whatever the callback delivered, then undefined — which is a real answer.
+        const defectsByRole = readRetrievalTelemetry(au)?.manifestDefectsByRole ?? publishedDefects;
+        const st = await saveOpdAudit(au, { model: MINI_MODEL, latencyMs: Date.now() - t0 }, {
+          onPersisted: async ({ status, auditId }) => { linked = true; await settleOwned(handle, outcomeForOwnedSave(status), auditId, defectsByRole); },
+        });
+        if (!linked) await settleOwned(handle, outcomeForOwnedSave(st), null, defectsByRole);
+        results.push({ uid: au.keys.uid, index: au.scorecard.headline, band: au.scorecard.band, status: st, ms: Date.now() - t0 });
+      }
+      catch (e) {
+        await settleOwned(handle, published ? 'audit_generation_failed' : 'retrieval_not_run');
+        results.push({ error: String((e as Error).message) });
+      }
     }
     return ok({ day, engine: engineStr, total, already: already.length, processed: results.length, results });
   }
@@ -1071,7 +1107,7 @@ async function corpusManage(a: Record<string, unknown>): Promise<ToolResult> {
 /** Measurement seam: run production retrieve() (or the multi-query fusion Ask/DDx use) and return
  *  served hits + per-stage scores + full text. Read-only; no model generation. Defaults
  *  useReranker/useSourceWeights TRUE (the production config); diagnostics always populated (R-5). */
-async function labRetrieve(a: Record<string, unknown>): Promise<ToolResult> {
+async function labRetrieve(a: Record<string, unknown>, ctx?: TelemetryRequestContext): Promise<ToolResult> {
   const query = S(a.query).trim();
   if (!query) return err('query is required');
   const topK = clampLabRetrieveTopK(a.topK);
@@ -1100,9 +1136,46 @@ async function labRetrieve(a: Record<string, unknown>): Promise<ToolResult> {
     : [];
   const normativeSources = normList.length ? normList : undefined;
 
+  // ── STEP 9's SIXTH PLACEHOLDER, AND STEP 11's TWO CATCH ARMS ─────────────────────────────────
+  // The role is decided by the BRANCH, not by the tool: D6 gives the direct branch `lab_direct` and
+  // the fusion branch `lab_multi_query`, and they are different retrievals with different manifests.
+  const role: RetrievalRole = multiQuery ? 'lab_multi_query' : 'lab_direct';
+  const capture = ctx ? createTelemetryCapture(role) : undefined;
+  const startedAt = new Date().toISOString();
+  const runId = randomUUID();
+  let handle: LifecycleHandle | null = null;
+  if (ctx) {
+    await startInvocation(ctx);
+    try {
+      handle = await declareRetrievals(ctx, [{ role, runId, uid: null, engineVersion: null }], 'never_persists');
+    } catch (e) {
+      // Fail-open: this is a measurement seam, not the worker. Its declaration failure already
+      // wrote `work_declaration` evidence inside declareRetrievals.
+      console.warn('[mcp-tools] lab_retrieve declaration failed, continuing uninstrumented', (e as Error).message);
+    }
+  }
+
+  /** Write the terminal manifest, then settle. `lab_retrieve` writes NO audit row of any kind, so
+   *  its persistence outcome is `no_persistence_intended` on every path including the failing ones —
+   *  which is a statement about intent, not about what happened. */
+  const finish = async (): Promise<void> => {
+    if (!ctx || !handle || !capture) return;
+    const operational: OperationalTelemetry = {
+      route: ctx.route as OperationalTelemetry['route'], route_class: routeClassOf(ctx.route), retrieval_role: role,
+      invocation_id: ctx.invocationId, trace_id: null, deployment_sha: ctx.deploymentSha,
+      started_at: startedAt, completed_at: new Date().toISOString(), routing_flags: ctx.routingFlags,
+      active_backfill_run_id: null, active_backfill_target: null, active_backfill_state: null,
+      active_lab_experiment_id: ctx.labExperimentId ?? null,
+    };
+    const payload = buildRetrievalPayload(capture, { hmacKey: process.env.CDMSS_TELEMETRY_HMAC_KEY ?? null, scorerContext: null });
+    void validateManifest({ ...payload, operational });
+    handle = await writeRetrievalTerminal(handle, role, { payload, operational, traceId: null, completedAt: operational.completed_at ?? new Date().toISOString() });
+    await settleOwned(handle, 'no_persistence_intended');
+  };
+
   try {
     if (multiQuery) {
-      const res = await retrieveMultiQuery(query, { topK, includeQuarantined, useReranker, useSourceWeights, hybrid, skipExpand, bm25Mode, rerankBackend, restrictSources, useNormativeLeg, normativeSources });
+      const res = await retrieveMultiQuery(query, { topK, includeQuarantined, useReranker, useSourceWeights, hybrid, skipExpand, bm25Mode, rerankBackend, restrictSources, useNormativeLeg, normativeSources }, {}, capture);
       const full = res.hits.map((h, i) => {
         // rerank_score/backend/source_quality_weight/bm25 provenance are present at runtime but off the
         // exported MultiQueryHit type (see multi-query.ts) — read them via a narrow cast.
@@ -1119,6 +1192,7 @@ async function labRetrieve(a: Record<string, unknown>): Promise<ToolResult> {
         };
       });
       const hits = scoresOnly ? full.map(pickScoreFields) : full;
+      await finish();
       return ok({
         query, mode: 'multi_query', expandedQuery: res.expandedQuery, includeQuarantined: includeQuarantined ?? null,
         restrictSources: restrictSources ?? null,
@@ -1130,7 +1204,7 @@ async function labRetrieve(a: Record<string, unknown>): Promise<ToolResult> {
       });
     }
 
-    const res = await retrieve(query, { topK, includeQuarantined, useReranker, useSourceWeights, hybrid, skipExpand, withDiagnostics: true, bm25Mode, rerankBackend, restrictSources, useNormativeLeg, normativeSources });
+    const res = await retrieve(query, { topK, includeQuarantined, useReranker, useSourceWeights, hybrid, skipExpand, withDiagnostics: true, bm25Mode, rerankBackend, restrictSources, useNormativeLeg, normativeSources }, capture);
     const full = res.hits.map((h, i) => ({
       final_rank: h.final_rank ?? i + 1,
       id: h.id, source: h.source, book: h.book, chapter: h.chapter, section: h.section, item_number: h.item_number,
@@ -1140,6 +1214,7 @@ async function labRetrieve(a: Record<string, unknown>): Promise<ToolResult> {
       text: h.text,
     }));
     const hits = scoresOnly ? full.map(pickScoreFields) : full;
+    await finish();
     return ok({
       query, mode: 'single_query', expandedQuery: res.expandedQuery, includeQuarantined: includeQuarantined ?? null,
       restrictSources: restrictSources ?? null,
@@ -1147,6 +1222,15 @@ async function labRetrieve(a: Record<string, unknown>): Promise<ToolResult> {
       meta: res.meta, hits,
     });
   } catch (e) {
+    // ⚠️ BOTH ARMS RECORD `retrieval_failure`, AND NEITHER CHANGES WHAT IT RETURNS. The named
+    // RerankBackendError still becomes the same error RESULT and every other error still THROWS —
+    // §4.3's whole point is that a retrieval that found nothing and a retrieval that failed are two
+    // facts, and until now this seam produced the same empty answer for both.
+    if (capture) {
+      capture.retrievalOutcome = 'retrieval_failure';
+      capture.retrievalErrorClass = capture.retrievalErrorClass ?? telemetryErrorClassOf(e);
+    }
+    await finish();
     // D3: a requested cohere ruler that is unreachable/missing/unhealthy fails LOUD — surfaced named
     // (RerankBackendUnreachable/Missing/Unhealthy, all RerankBackendError), never a silent fallback.
     if (e instanceof RerankBackendError) return err(`${e.name}: ${e.message}`);
@@ -1255,35 +1339,22 @@ async function lvcPropose(a: Record<string, unknown>): Promise<ToolResult> {
   }
   const v = parsed.value;
   try {
-    // DECISION 94 — `category` and `keywords` join the column list. The table has had both since
-    // ensureLvcProposalTables was written (`category text, ... keywords jsonb`); nothing named them,
-    // so every proposal staged a rule that could never fire. ⚠️ `keywords` here is JSONB and the
-    // corresponding column on `lvc_recommendations` is `text[]` — measured live, 06 Sep 2026 — so
-    // the promotion below converts rather than passing the value straight through.
     const rows = await run(
       `INSERT INTO lvc_recommendation_proposals
          (statement, rationale, evidence_note, citation_url, citation_doi, citation_pmid,
-          source_release_year, license_status, provenance, status, proposed_by, supersedes_id,
-          category, keywords)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'proposed',$10,$11,$12,$13::jsonb)
+          source_release_year, license_status, provenance, status, proposed_by, supersedes_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'proposed',$10,$11)
        RETURNING id::text AS id, status, proposed_at`,
       [v.statement, v.rationale, v.evidence_note, v.citation.citation_url, v.citation.citation_doi,
        v.citation.citation_pmid, v.citation.source_release_year, v.citation.license_status,
-       v.citation.provenance, v.proposed_by, v.supersedes_id,
-       v.category, JSON.stringify(v.keywords)]);
+       v.citation.provenance, v.proposed_by, v.supersedes_id]);
     const row = rows[0] ?? {};
     return ok({ proposal_id: row.id ?? null, status: 'proposed', statement: v.statement, supersedes_id: v.supersedes_id,
-      keywords: v.keywords, category: v.category,
-      // ⚠️ DECISION 94. Said on every proposal, because the failure it names is silent: the rule
-      // would be promoted, be active, and match nothing, and nothing would report that.
-      matching: v.keywords.length
-        ? `${v.keywords.length} keyword phrase(s) recorded; the promoted rule will match a finding whose subject or rationale contains any of them as whole words.`
-        : 'NO KEYWORDS — a rule matches through its keywords alone, so if this proposal is promoted as it stands the rule will be active and will never match anything. Re-propose with keywords.',
       note: 'STAGED only — lvc_recommendations is untouched. lvc_ratify (confirm:true + a named ratifier) is the only promotion path.' });
   } catch (e) { return err(`propose failed: ${String((e as Error).message).slice(0, 200)}`); }
 }
 
-export async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult> {
+async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult> {
   await ensureLvcProposalTables().catch(() => {});
   const parsed = parseRatifyArgs(a);
   if (!parsed.ok) return err(parsed.error);
@@ -1291,12 +1362,9 @@ export async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult>
 
   let prop: Record<string, unknown> | undefined;
   try {
-    // DECISION 94 — `category` and `keywords` are read so the promotion can copy them. A promotion
-    // that did not read them could not write them, which is half of why the old path lost them.
     const rows = await run(
       `SELECT id::text AS id, statement, rationale, evidence_note, citation_url, citation_doi, citation_pmid,
-              source_release_year, license_status, provenance, status, proposed_by, supersedes_id,
-              category, keywords
+              source_release_year, license_status, provenance, status, proposed_by, supersedes_id
        FROM lvc_recommendation_proposals WHERE id = $1::uuid`, [v.proposal_id]);
     prop = rows[0];
   } catch (e) { return err(`cannot read proposal: ${String((e as Error).message).slice(0, 160)}`); }
@@ -1333,39 +1401,19 @@ export async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult>
     // The COMPLETE NOT NULL set on lvc_recommendations is exactly four columns — id, region,
     // society, statement — and all four are now supplied. `status` is deliberately NOT supplied
     // (defaults to 'active'); every other column is nullable or defaulted, measured.
-    // DECISION 94 — `category` and `keywords` are COPIED FROM THE PROPOSAL, never re-derived. The
-    // proposal is what a reviewer read and approved; deriving a category here from the statement
-    // text would promote something nobody reviewed.
-    //
-    // ⚠️ THE TWO COLUMNS ARE DIFFERENT TYPES AND THAT IS NOT A MISTAKE. Measured live 06 Sep 2026:
-    // `lvc_recommendation_proposals.keywords` is `jsonb`; `lvc_recommendations.keywords` is
-    // `text[]` (`udt_name` `_text`, `DEFAULT '{}'::text[]`, migration 0005) — and `text[]` is the
-    // type `getLvcRules` and the GIN index are built on. So the jsonb array is normalised in JS and
-    // bound as `$11::text[]`. `category` is `text` on both, nullable, no default.
-    const promotedKeywords: string[] = Array.isArray(prop!.keywords)
-      ? (prop!.keywords as unknown[]).map((k) => String(k)).filter((k) => k.trim().length > 0)
-      : [];
     const ins = await run(
       `INSERT INTO lvc_recommendations
          (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid,
-          source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at,
-          category, keywords)
-       VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12::text[])
+          source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at)
+       VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
        RETURNING id`,
       [prop!.statement, prop!.rationale, prop!.citation_url, prop!.citation_doi, prop!.citation_pmid,
-       prop!.source_release_year, prop!.license_status, prop!.provenance, prop!.proposed_by, v.ratified_by,
-       prop!.category ?? null, promotedKeywords]);
+       prop!.source_release_year, prop!.license_status, prop!.provenance, prop!.proposed_by, v.ratified_by]);
     const promotedId = ins[0]?.id == null ? null : String(ins[0].id);
     await run(`UPDATE lvc_recommendation_proposals SET status = 'ratified', promoted_id = $2 WHERE id = $1::uuid`, [v.proposal_id, promotedId]).catch(() => {});
     await run(`INSERT INTO lvc_ratifications (proposal_id, decision, ratified_by, rationale, promoted_id) VALUES ($1::uuid,'ratified',$2,$3,$4)`,
       [v.proposal_id, v.ratified_by, v.rationale, promotedId]).catch(() => {});
-    return ok({ proposal_id: v.proposal_id, status: 'ratified', promoted_id: promotedId, ratified_by: v.ratified_by,
-      // DECISION 94 — what actually landed, so an inert promotion is visible at the moment it happens
-      // rather than the first time somebody wonders why the rule never fires.
-      keywords: promotedKeywords, category: prop!.category ?? null,
-      matching: promotedKeywords.length
-        ? `active with ${promotedKeywords.length} keyword phrase(s)`
-        : 'ACTIVE BUT INERT — this rule has no keywords, and a rule matches through its keywords alone, so it will never stamp a finding.' });
+    return ok({ proposal_id: v.proposal_id, status: 'ratified', promoted_id: promotedId, ratified_by: v.ratified_by });
   } catch (e) { return err(`ratify failed: ${String((e as Error).message).slice(0, 200)}`); }
 }
 

@@ -12,7 +12,6 @@ import { assembleEvidence } from './assemble-core';    // FROZEN — value impor
 import { buildMemberState } from './aggregate-core';    // FROZEN — value import
 import { careCallEncountersForMember } from '../care-call-store';   // Amendment B — the write-back loop
 import { promEncountersForMember } from '../proms/store';           // PROMs 0.2a-2 — scores → spine fold
-import { ipdEncountersForMember, ipdFoldEnabled } from './ipd-fold'; // P4 — the stay fold, flag-gated
 import { applyAsOfCut } from '../as-of-core';                        // Stage 3 — the D2 knowability cut (pure)
 import type { MemberStateSnapshot } from './schema';
 
@@ -77,17 +76,7 @@ export async function getMemberSnapshot(individualUid: string, computedAt: strin
   const proms = process.env.PROMS_ENABLED === '1'
     ? await promEncountersForMember(individualUid).catch(() => [] as typeof base.encounters)
     : [];
-  // CASE-AGENTS-SPINE P4 (§6.4) — fold the member's inpatient STAYS in as `ipd` encounters, ONLY
-  // when MEMBERSTATE_IPD_FOLD === '1'. The CARE_CALL_ENABLED pattern EXACTLY, and for the same
-  // reason: append after the frozen assemble, then let the frozen buildMemberState project. The
-  // auditor never patches a snapshot array, assemble-core is not touched, and nothing here can run
-  // when the flag is unset. Soft-fails to [] — a library outage costs the stay, never the snapshot.
-  //
-  // FLAG OFF ⇒ this line evaluates to [] without a single read, and the fold is invisible.
-  const ipd = ipdFoldEnabled()
-    ? await ipdEncountersForMember(individualUid).then((r) => r.encounters).catch(() => [] as typeof base.encounters)
-    : [];
-  const evidence = { ...base, encounters: [...base.encounters, ...careCall, ...proms, ...ipd] };
+  const evidence = { ...base, encounters: [...base.encounters, ...careCall, ...proms] };
   if (!evidence.encounters.length) return null;
   return buildMemberState(evidence, computedAt);
 }
@@ -121,13 +110,7 @@ export async function getMemberSnapshotAsOf(
   const proms = process.env.PROMS_ENABLED === '1'
     ? await promEncountersForMember(individualUid).catch(() => [] as typeof base.encounters)
     : [];
-  // P4 — the same flag, the same soft-fail, on the as-of path too. Folding on one path and not the
-  // other would make the OPD audit's longitudinal view and the member view disagree about the same
-  // member, which is a worse defect than either behaviour alone.
-  const ipd = ipdFoldEnabled()
-    ? await ipdEncountersForMember(individualUid).then((r) => r.encounters).catch(() => [] as typeof base.encounters)
-    : [];
-  const folded = [...base.encounters, ...careCall, ...proms, ...ipd];
+  const folded = [...base.encounters, ...careCall, ...proms];
   const encounters = applyAsOfCut(folded, asOfDate, auditedEncounterRef);   // D2 cut (strict prior-day + self-exclusion)
   if (!encounters.length) return null;                                       // no prior history after the cut
   return buildMemberState({ ...base, encounters }, computedAt);

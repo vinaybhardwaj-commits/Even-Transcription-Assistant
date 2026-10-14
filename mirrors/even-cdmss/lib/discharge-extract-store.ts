@@ -32,20 +32,8 @@ import type { ExtractedCase } from './doc-audit-core';
  * extract prompt changes in a way that makes an old row unusable — the upsert key is
  * (document_id, extraction_version), so a bump re-extracts rather than overwriting,
  * and both readers move together.
- *
- * doc-extract/1 → doc-extract/2 (R10-A, 28 Aug 2026; PRD R10-D2). `verbatim_sections` was added
- * to the extract contract, so a doc-extract/1 row is not merely thinner — it CANNOT answer the
- * question R10 asks of it ("does this document print an operative block?"). Reading one as if it
- * could would reproduce the exact defect R10 fixes: silence read as absence.
- *
- * ⚠️ THE BUMP COSTS BOTH READERS, ON PURPOSE. The store is shared with the IPD discharge audit
- * (lib/ipd-audit/run.ts), so its next read of any document also finds no row at doc-extract/2 and
- * re-extracts. That is the price of one shared extraction and it is the same price the store's own
- * doc comment names; the readmission backfill (POST /api/admin/readmission-reextract) pays it up
- * front for the ~190 documents the readmission cohort actually needs, and every other document is
- * re-read lazily, once, by whichever reader gets there first.
  */
-export const DOC_EXTRACT_VERSION = 'doc-extract/2';
+export const DOC_EXTRACT_VERSION = 'doc-extract/1';
 
 export interface StoredExtractedCase {
   documentId: string;
@@ -138,101 +126,6 @@ export async function fetchExtractedCase(documentId: string, extractionVersion: 
     return rowToStoredCase(rows[0]);
   } catch {
     return null;   // absent and unreachable are the same answer to the caller: extract it
-  }
-}
-
-/**
- * H4 (CDMSS-STAY-LIBRARY-HARDENING-PRD-v1.0-29-AUG-2026) — a read that can tell ABSENT from
- * UNREACHABLE, across a caller-supplied list of acceptable extraction versions.
- *
- * WHY THIS EXISTS, MEASURED ON PRODUCTION 29 AUG. `fetchExtractedCase` deliberately collapses
- * "no row" and "the database faulted" into `null`, and for its original caller that is right: the
- * readmission agent's answer to both is "extract it myself". The stay library's answer to both is
- * NOT the same. It cannot extract anything — it has no model — so it writes a `not_auditable` row,
- * and that row OVERWRITES the discharge document's existing row in place, because a discharge
- * absence is keyed on the document id rather than on an `absent:` sentinel. A fault therefore
- * degraded a healthy stored discharge to "no stored extract exists", silently, and with
- * MEMBERSTATE_IPD_FOLD on that took the member's discharge-sourced medications off the spine.
- *
- * THE SECOND HALF IS THE VERSION LIST, and it is the actual defect that fired. R10-A (`9b3862a`,
- * 28 Aug) bumped `DOC_EXTRACT_VERSION` to `doc-extract/2` because R10 needs `verbatim_sections`.
- * The stay library does not: it reads diagnosis, procedure, medications, `rawNotes` and
- * `courseSummary`, every one of which a `doc-extract/1` row carries in full. But the library asked
- * for the DEFAULT version, so on 29 Aug every stay whose discharge had only a `/1` row — 560 of the
- * 843 rows in this store — read as "no document". A version bump made for one reader must not
- * blind another reader that never needed the new field.
- *
- * PURELY ADDITIVE: nothing above this line changed, and `fetchExtractedCase`'s contract is exactly
- * what it was. A test asserts that.
- */
-export type ExtractReadOutcome =
-  | { outcome: 'found'; stored: StoredExtractedCase; version: string }
-  | { outcome: 'absent' }
-  | { outcome: 'fetch_failed'; error: string };
-
-export async function readExtractedCaseAcrossVersions(
-  documentId: string,
-  versions: readonly string[],
-): Promise<ExtractReadOutcome> {
-  if (!documentId) return { outcome: 'absent' };
-  const wanted = [...new Set(versions.filter((v) => typeof v === 'string' && v))];
-  if (!wanted.length) return { outcome: 'absent' };
-  let rows: Array<Record<string, unknown>>;
-  try {
-    rows = (await sql(
-      `SELECT document_id, extraction_version, ip_uid, member_id, extracted_json,
-              to_char(extracted_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS extracted_at, trace_id
-         FROM discharge_extracted_cases
-        WHERE document_id = $1 AND extraction_version = ANY($2::text[])`,
-      [documentId, wanted],
-    )) as Array<Record<string, unknown>>;
-  } catch (e) {
-    // A FAULT IS NOT AN ABSENCE. The caller must be able to refuse to act on it.
-    return { outcome: 'fetch_failed', error: String((e as Error).message).slice(0, 300) };
-  }
-  // Caller precedence: the FIRST version it named that actually came back. The list is ordered
-  // best-first, so a document holding both versions yields the newer one.
-  for (const v of wanted) {
-    const row = rows.find((r) => String(r.extraction_version ?? '') === v);
-    const stored = rowToStoredCase(row);
-    if (stored) return { outcome: 'found', stored, version: v };
-  }
-  // Rows may exist and still be unusable (an unparseable payload). `rowToStoredCase` already
-  // returned null for those, and "we have nothing we can read" is the honest answer either way.
-  return { outcome: 'absent' };
-}
-
-/**
- * R1 batch variant (CDMSS-READMISSIONS-R1-PRD v1.1 §6): the extracted cases for MANY
- * document ids in ONE query, keyed by document id. Empty map on any DB fault, on an empty
- * input, and for every id with no row at this version — the caller (the /care/readmissions
- * list route) renders a thinner card, never a 500 and never invented data.
- *
- * ⚠️ INFERRED SQL:
- *   SELECT document_id, extraction_version, ip_uid, member_id, extracted_json,
- *          to_char(extracted_at, ...) AS extracted_at, trace_id
- *     FROM discharge_extracted_cases
- *    WHERE document_id = ANY($1::text[]) AND extraction_version = $2
- */
-export async function fetchExtractedCases(documentIds: string[], extractionVersion: string = DOC_EXTRACT_VERSION): Promise<Map<string, StoredExtractedCase>> {
-  const out = new Map<string, StoredExtractedCase>();
-  const ids = [...new Set((documentIds ?? []).filter((d): d is string => typeof d === 'string' && d.length > 0))];
-  if (!ids.length) return out;
-  try {
-    const rows = (await sql(
-      `SELECT document_id, extraction_version, ip_uid, member_id, extracted_json,
-              to_char(extracted_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS extracted_at, trace_id
-         FROM discharge_extracted_cases
-        WHERE document_id = ANY($1::text[]) AND extraction_version = $2`,
-      [ids, extractionVersion],
-    )) as Array<Record<string, unknown>>;
-    for (const r of rows) {
-      const c = rowToStoredCase(r);
-      if (c && !out.has(c.documentId)) out.set(c.documentId, c);
-    }
-    return out;
-  } catch {
-    return new Map();   // unreachable store = no extract for anyone; the card degrades, the page does not
   }
 }
 
