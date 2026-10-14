@@ -11,6 +11,8 @@ export const maxDuration = 300;
  * Auth: Vercel cron header / CRON_SECRET for the tick; ADMIN_TOKEN / admin session for POST+status.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { telemetryContextFor } from '@/lib/retrieval-telemetry-core';
+import { startInvocation } from '@/lib/retrieval-invocation-store';
 import { sql } from '@/lib/db';
 import { requireAdmin } from '@/lib/admin-gate';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
@@ -36,7 +38,12 @@ async function authed(req: NextRequest): Promise<boolean> {
 export async function GET(req: NextRequest) {
   if (!(await authed(req))) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   if (req.nextUrl.searchParams.get('auto') === '1') {
-    try { return NextResponse.json({ ok: true, ...(await batchTick()) }); }
+    try {
+      // The boundary makes the context; batchTick only carries it (D11).
+      const ctx = telemetryContextFor('lab_batch', req.headers);
+      await startInvocation(ctx);
+      return NextResponse.json({ ok: true, ...(await batchTick({ telemetry: ctx })) });
+    }
     catch (e) { return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 500 }); }
   }
   const st = await readBatchState();

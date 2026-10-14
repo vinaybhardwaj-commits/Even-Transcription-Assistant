@@ -10,6 +10,7 @@ export const maxDuration = 300;
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { MCP_SERVER_INFO, labKeyConfigured, labKeyMatches, dispatchMcp, type JsonRpc } from '@/lib/mcp-server';
+import { telemetryContextFor } from '@/lib/retrieval-telemetry-core';
 import { LAB_TOOLS } from '@/lib/mcp-tools';
 
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ key: string }> }) {
@@ -25,7 +26,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ key: strin
   if (!labKeyMatches(key)) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   let body: JsonRpc;
   try { body = (await req.json()) as JsonRpc; } catch { return NextResponse.json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }); }
-  const reply = await dispatchMcp(body);
+  // One invocation per MCP request, made HERE — the boundary — and carried down (D11).
+  const reply = await dispatchMcp(body, telemetryContextFor('mcp_tools', req.headers));
   if (reply.body === null) return new NextResponse(null, { status: reply.status });
   return NextResponse.json(reply.body, { status: reply.status });
 }

@@ -15,11 +15,6 @@
  *     (facts included) before anything reaches the catalog or a chip counts as present.
  *   · Any notion of "no OT row = uneventful". A missing template is UNKNOWN / ABSENT,
  *     never a negative intra-op finding (T-5).
- *
- * R10-A (28 Aug 2026) adds ONE thing and keeps T-5 intact: when db13 has no usable OT row but the
- * discharge DOCUMENT prints an operative block, coverage reads `absent_document_text` — still an
- * absence of a structured OT row, now an honest one, because the text is in the ledger as `DOT…`
- * and the refusal line says where it came from. A missing template is still never a negative finding.
  */
 
 // ── the row as db13.ts hands it over (only the columns the SELECT names) ─────────
@@ -209,12 +204,7 @@ export function dedupTemplateRows(rows: KxTemplateRow[]): KxTemplateRow[] {
 
 // ── coverage — the honesty object (R2 PRD §3.4; constraints 13-16, 21) ───────────
 
-/** R2's four states plus R10-A's fifth (PRD §3.2, R10-D10):
- *   absent_document_text — the look COMPLETED and db13 has no usable OT row for this case, but the
- *   discharge document itself prints operative text, which is now in the ledger as `DOT…`. It is a
- *   kind of absence (there is still no structured OT row) and it is NEVER `present`: promoting a
- *   printed block to a structured theatre record is exactly the claim T-5 forbids. */
-export type TemplateCoverageStatus = 'present' | 'empty' | 'absent' | 'absent_document_text' | 'fetch_failed';
+export type TemplateCoverageStatus = 'present' | 'empty' | 'absent' | 'fetch_failed';
 export interface TemplateCoverageEntry { status: TemplateCoverageStatus; count: number }
 export interface TemplateCoverage { ot: TemplateCoverageEntry; pac: TemplateCoverageEntry; progress: TemplateCoverageEntry }
 
@@ -233,83 +223,18 @@ export const COVERAGE_KEY: Readonly<Record<TemplateSource, keyof TemplateCoverag
  * Never-looked (tier-3 / pre-R2) is not a state here: the caller leaves the object off
  * the finding and the chip reads `unknown`.
  */
-export function coverageFor(
-  outcome: TemplateFetchOutcome,
-  rows: Array<Pick<FlattenedTemplate, 'narrative' | 'facts'>>,
-  /** R10-A: true when the discharge document prints operative text for this case. Consulted ONLY on
-   *  the `absent` branch — a real db13 row always outranks a printed block, and a fetch that faulted
-   *  is still `fetch_failed` (a fault is never an absence, R2 constraint 13, unchanged). */
-  documentOperativeText = false,
-): TemplateCoverageEntry {
+export function coverageFor(outcome: TemplateFetchOutcome, rows: Array<Pick<FlattenedTemplate, 'narrative' | 'facts'>>): TemplateCoverageEntry {
   if (outcome === 'fetch_failed') return { status: 'fetch_failed', count: 0 };
-  if (!rows.length) return { status: documentOperativeText ? 'absent_document_text' : 'absent', count: 0 };
+  if (!rows.length) return { status: 'absent', count: 0 };
   return { status: rows.some(hasUsableText) ? 'present' : 'empty', count: rows.length };
 }
 
-/** The whole object from per-source outcomes + the (de-identified) flattened rows.
- *  R10-A: `documentOperativeText` reaches the OT entry ONLY — PAC and progress have no document
- *  fallback and inventing one would put words in a pre-anaesthesia record nobody wrote. */
-export function reduceTemplateCoverage(
-  outcomes: TemplateFetchOutcomes,
-  rows: Array<Pick<FlattenedTemplate, 'source' | 'narrative' | 'facts'>>,
-  opts: { documentOperativeText?: boolean } = {},
-): TemplateCoverage {
+/** The whole object from per-source outcomes + the (de-identified) flattened rows. */
+export function reduceTemplateCoverage(outcomes: TemplateFetchOutcomes, rows: Array<Pick<FlattenedTemplate, 'source' | 'narrative' | 'facts'>>): TemplateCoverage {
   const by = (src: TemplateSource) => rows.filter((r) => r.source === src);
   return {
-    ot: coverageFor(outcomes.ot_note, by('ot_note'), opts.documentOperativeText === true),
+    ot: coverageFor(outcomes.ot_note, by('ot_note')),
     pac: coverageFor(outcomes.pac_note, by('pac_note')),
     progress: coverageFor(outcomes.progress_note, by('progress_note')),
   };
-}
-
-// ── R10-A — operative text printed inside a discharge document (PRD §3.1/§3.2) ────────────────
-//
-// The extractor now copies clinically substantive printed blocks verbatim (`verbatim_sections` on
-// ExtractedCase). THIS is where the repo decides which of those blocks are OPERATIVE — the same
-// module that already owns what an OT note is, so there is one vocabulary and not two.
-//
-// The test is deliberately conservative on the HEADING and permissive on nothing else. A heading is
-// what a hospital prints above a block; guessing "this paragraph reads surgical" out of free text is
-// how a course-in-hospital note becomes a fabricated operative record. When a heading is generic the
-// block's own first line is allowed to carry an unmistakable operative marker, and nothing weaker.
-
-/** The DOT evidence-id prefix. Must not collide with S R L LX M IX RX T F OT PAC P. */
-export const DOC_OPERATIVE_ID_PREFIX = 'DOT';
-/** How many DOT items one case may contribute (the extractor caps sections at 6 per document). */
-export const DOC_OPERATIVE_ITEM_CAP = 8;
-
-/** Headings that ARE an operative block, wherever they are printed. */
-const OPERATIVE_HEADING_RE = /\b(operat(?:ive|ion)\s*(?:note|notes|record|details|findings)?|ot\s*note|o\.?t\.?\s*notes?|surgery\s*(?:note|notes|details|record)|surgical\s*(?:note|notes|procedure|findings)|procedure\s*(?:note|notes|details|performed)|intra[-\s]?op(?:erative)?(?:\s*(?:findings|details|note|notes))?|anaesthesia\s*(?:note|notes|record)|anesthesia\s*(?:note|notes|record)|per[-\s]?op(?:erative)?\s*(?:findings|note|notes))\b/i;
-
-/** Markers strong enough to make a GENERICALLY headed block operative on its own text. */
-const OPERATIVE_TEXT_RE = /\b(incision|anaesthes|anesthes|intra[-\s]?op|per[-\s]?op|operative findings|surgeon|assistant surgeon|closure in layers|haemostasis|hemostasis|port(?:s)? placed|trocar|specimen sent for histopath)\b/i;
-
-/** A heading that says nothing about what the block is — the only case the text is consulted. */
-const GENERIC_HEADING_RE = /^(section|notes?|details|remarks|clinical\s*notes?|summary|course\s*in\s*hospital|hospital\s*course|treatment\s*given)$/i;
-
-/**
- * Is ONE printed section an operative block? PURE, and deliberately structural in its input so the
- * extractor's type never has to be imported here (this module stays free of doc-audit-core).
- */
-export function isOperativeSection(section: { heading?: string | null; text?: string | null }): boolean {
-  const heading = (section?.heading ?? '').trim();
-  const text = (section?.text ?? '').trim();
-  if (!text) return false;                               // a heading alone evidences nothing
-  if (OPERATIVE_HEADING_RE.test(heading)) return true;
-  if (heading && !GENERIC_HEADING_RE.test(heading)) return false;
-  return OPERATIVE_TEXT_RE.test(text.slice(0, 600));
-}
-
-/** The operative sections of one document, capped. `[]` when the document printed none — the same
- *  answer a pre-R10 extraction gives, so a caller never has to distinguish the two. */
-export function operativeVerbatimSections(
-  sections: ReadonlyArray<{ heading?: string | null; text?: string | null }> | null | undefined,
-): Array<{ heading: string; text: string }> {
-  const out: Array<{ heading: string; text: string }> = [];
-  for (const s of sections ?? []) {
-    if (out.length >= DOC_OPERATIVE_ITEM_CAP) break;
-    if (!isOperativeSection(s)) continue;
-    out.push({ heading: (s.heading ?? '').trim() || 'operative section', text: (s.text ?? '').trim() });
-  }
-  return out;
 }

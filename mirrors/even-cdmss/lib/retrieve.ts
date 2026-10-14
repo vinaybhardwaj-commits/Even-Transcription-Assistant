@@ -1,10 +1,8 @@
 import { sql } from './db';
-// LAB-MCP-V2 §7 (decision 6). Retrieval DELEGATES rather than throwing: corpus reads are
-// the one production read a Slice A run legitimately makes, and the lab supplies the edge.
-import { labExecution } from './lab-execution-context';
-import { embedQuery, embedQueryV2, vectorLiteral, TOP_K, USE_EMBEDDING_V2 } from './llm';
+import { embedQuery, embedQueryV2, vectorLiteral, TOP_K, USE_EMBEDDING_V2, EMBED_MODEL, EMBED_MODEL_V2 } from './llm';
 import { expandQuery } from './expand';
 import { rerank } from './rerank';
+import type { TelemetryCapture } from './retrieval-capture';
 import { computeSourceQualityWeight } from './source-quality';
 // F16 (decision 14): lab-ingested sources may not outrank the best curated source until a batch has
 // passed an activation A/B. Pure clamp, shared with the Lab MCP so one rule governs both.
@@ -381,15 +379,7 @@ async function buildDiscriminatingBm25(bm25Query: string, dfMax: number): Promis
   }
 }
 
-export async function retrieve(query: string, opts: RetrieveOptions = {}): Promise<RetrieveResult> {
-  // §7 — the one delegating guard. `sql` and `metabaseQuery` throw inside a lab context
-  // because a research run has no business touching them; retrieval is different, because
-  // reproducing an audit REQUIRES the corpus. The edge is captured outside the context and
-  // runs the production body under AsyncLocalStorage.exit(), so the read reaches
-  // DATABASE_URL by the normal path and is logged as a `retrieval_read` event on the item.
-  // This read is also exactly why every Slice A dataset is `mutable_source` (§4.2).
-  const _lab = labExecution();
-  if (_lab) return _lab.retrieve(query, opts) as Promise<RetrieveResult>;
+export async function retrieve(query: string, opts: RetrieveOptions = {}, capture?: TelemetryCapture): Promise<RetrieveResult> {
   const topK = opts.topK ?? TOP_K;
   const minSim = opts.minSimilarity ?? 0.3;
   const hybrid = opts.hybrid !== false;
@@ -398,11 +388,24 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
   const useSourceWeights = opts.useSourceWeights === true;
   const embCol = useV2 ? 'embedding_v2' : 'embedding';
 
+  // ⚠️ STAMPED HERE, BEFORE THE FIRST FALLIBLE STATEMENT (D2). The embedding column and the model
+  // it implies are together the whole of `index_version` — they determine which candidates exist at
+  // all — and they are both known the instant the column is chosen. Stamping later would leave a
+  // row that failed on the very next line unable to say which index it was reading, which is
+  // exactly the row where the question matters most.
+  //
+  // The `queryEmbedding` short-circuit below skips the EMBED CALL, not the column choice, so the
+  // value is correct on that path too: the vector still has to match the column it is compared to.
+  if (capture) capture.indexVersion = `${embCol}|${useV2 ? EMBED_MODEL_V2 : EMBED_MODEL}`;
+
   // R-6 guard: fires ONLY if the hardcoded-false USE_EMBEDDING_V2 flag is ever flipped without the
   // column present — a loud named error instead of a silently-empty vector leg. No-op in production.
   if (useV2) assertEmbeddingV2Available(true, await embeddingV2ColumnExists());
 
-  const expanded = opts.skipExpand ? query : await expandQuery(query);
+  // D4: the capture is the trailing THIRD parameter, so `traceId` needs an explicit placeholder.
+  // Threading a trace id here instead would move the call from chatWithFallback to tracedChat,
+  // which is a transport change (constraint 2), not instrumentation.
+  const expanded = opts.skipExpand ? query : await expandQuery(query, undefined, capture);
   // A precomputed (cached) nomic embedding short-circuits the embed call (grounding worker); default =
   // embed the (expanded) query text exactly as before. Guarded to the non-v2 path (nomic dim).
   const vec = (opts.queryEmbedding && !useV2)
@@ -415,6 +418,22 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
   const POOL = useReranker
     ? Math.max(30, topK * 4)   // smaller pool because rerank is the bottleneck
     : Math.max(40, topK * 5);
+
+  // The retrieval configuration this execution ran under (§4.3). Scalars only — a config that
+  // could hold a filter STRING would be a place for clinical text to enter the manifest, so the
+  // source/book/chunk-type filters are recorded as booleans saying WHETHER one was applied.
+  if (capture) {
+    capture.retrievalConfig = {
+      topK, minSimilarity: minSim, hybrid, useReranker, useSourceWeights,
+      useEmbeddingV2: useV2, pool: POOL, skipExpand: opts.skipExpand === true,
+      precomputedEmbedding: Boolean(opts.queryEmbedding && !useV2),
+      filtered: Boolean(opts.restrictSources || opts.bookFilter || opts.chunkType || opts.source),
+      // A BOOLEAN, not the value: `includeQuarantined` carries a lab BATCH NAME, and a name is a
+      // string a person chose. Recording whether the relaxation applied answers the analysis
+      // question without putting free text in the manifest.
+      includeQuarantined: Boolean(opts.includeQuarantined),
+    };
+  }
 
   // ---- filter clauses ----
   // QUARANTINE GUARD (lab MCP): lab-added corpus material is inert as source `labq:%` until
@@ -512,6 +531,12 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
     .map(([id]) => id);
 
   if (fusedIds.length === 0) {
+    // EDGE CASE 1 of 4 (D17): the EMPTY FUSION. This returns before the rerank block exists, so
+    // there is no backend, no batch and nothing to reconcile — fused 0, hydrated 0, expected 0,
+    // recorded 0. The createTelemetryCapture defaults already say exactly this, so only the
+    // outcome moves. `zero_hits` is a SUCCESSFUL retrieval that found nothing, which §4.3 requires
+    // be distinguishable from a failed one.
+    if (capture) capture.retrievalOutcome = 'zero_hits';
     return { hits: [], expandedQuery: expanded, meta: {
       vector_pool: vecRows.length, bm25_pool: bm25Rows.length, fused: 0,
       bm25_query: bm25Query, pool_size: 0, reranked: false, source_weighted: false,
@@ -539,13 +564,29 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
     .filter((x): x is HydratedRow => !!x)
     .map((r) => ({ ...r }));
 
+  // ⚠️ TWO CANDIDATE COUNTS, CAPTURED HERE AND NOT ONE (§4.3). `fusedIds` is the pool after the
+  // cap; `hits` is what the hydrate re-read actually returned, and it can be SHORTER. The
+  // difference is a dropped row, and it is invisible if only one number is recorded. This is also
+  // the second zero-candidate shape: a non-empty fusion whose hydrate yields nothing reaches the
+  // rerank guard below and falls through it.
+  //
+  // Captured BEFORE reranking, because rerank reorders and the trim to topK shortens — the
+  // pre-rerank order is the thing §4.3 asks for.
+  if (capture) {
+    capture.fusedCandidateIds = [...fusedIds];
+    capture.hydratedCandidateIds = hits.map((h) => h.id);
+    // RAW passage bytes. They exist only inside the capture and become keyed HMACs in
+    // buildRetrievalPayload; nothing else may read this field.
+    capture.passageTexts = hits.map((h) => h.text ?? '');
+  }
+
   // ---- Cross-encoder rerank ----
   if (useReranker && hits.length > 1) {
     const reranked = await rerank(query, hits.map((h) => ({
       id: h.id,
       text: h.text,
       __orig: h,
-    })), opts.rerankBackend);
+    })), opts.rerankBackend, undefined, capture);
     hits = reranked.map((r) => {
       const orig = (r as unknown as { __orig: ChunkHitWithMeta }).__orig;
       return {
@@ -600,6 +641,13 @@ export async function retrieve(query: string, opts: RetrieveOptions = {}): Promi
       rrf_score: score.get(h.id) ?? 0,
       final_rank: i + 1,
     }));
+  }
+
+  // The final ordering, after reranking, weighting and the trim to topK — the order that actually
+  // reaches the scorer. `zero_hits` here is the hydrate-emptied shape: fused > 0, hydrated 0.
+  if (capture) {
+    capture.orderedFinalCandidateIds = hits.map((h) => h.id);
+    capture.retrievalOutcome = hits.length > 0 ? 'success' : 'zero_hits';
   }
 
   return {

@@ -129,58 +129,13 @@ export function credentialsUsable(
 // Leg 3 — the Converse mapping, both directions
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-// ── Converse TOOL USE (R10-B, 28 Aug 2026) ───────────────────────────────────────────────────
-//
-// WHY THIS LIVES IN THE PURE CORE. R10-B lets the readmission Ask agent pull the patient's OTHER
-// records into a conversation through one capped tool (`fetch_record`). Converse expresses that as
-// a `toolConfig` going out and `toolUse` blocks coming back, neither of which this transport could
-// express before: `toConverseInput` mapped text and nothing else, and `fromConverseOutput` read
-// text parts and nothing else. Both directions are total functions over plain data, so both belong
-// here, where they can be tested without an AWS credential.
-//
-// ⚠️ EVERY EXISTING CALLER IS BYTE-IDENTICAL. `toolConfig` and `contentBlocks` are OPTIONAL and
-// absent-by-default: a params object without them maps exactly as it did before this section
-// existed, which is the property the transport's whole fleet of call sites depends on.
-
-/** One tool as Converse declares it. `inputSchema.json` is a JSON Schema object. */
-export interface ConverseToolSpec {
-  toolSpec: { name: string; description?: string; inputSchema: { json: Record<string, unknown> } };
-}
-export interface ConverseToolConfig { tools: ConverseToolSpec[] }
-
-/** The model asking for a tool. `input` is whatever the schema allowed. */
-export interface ConverseToolUse { toolUseId: string; name: string; input: unknown }
-/** Our answer to one `toolUse`. `content` is a Converse content list; text is all R10-B sends. */
-export interface ConverseToolResult { toolUseId: string; content: Array<{ text: string }>; status?: 'success' | 'error' }
-
-/** A Converse content block, in the three shapes this repo produces or reads. */
-export type ConverseContentBlock =
-  | { text: string }
-  | { toolUse: ConverseToolUse }
-  | { toolResult: ConverseToolResult };
-
-/** The tool calls a `toolUse` response carries, in the OpenAI shape every consumer here reads —
- *  crucially `classifyProviderResponse`, which allows empty content ONLY when tool_calls is a
- *  non-empty array. Without this mapping a legitimate tool turn would be judged a defect and
- *  retried until the budget ran out. */
-export interface ChatToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
-
-export interface ChatMessage {
-  role?: string;
-  content?: unknown;
-  /** R10-B: raw Converse blocks for this turn, used VERBATIM in place of `content`. The tool loop
-   *  echoes the assistant's own `toolUse` back and answers it with a `toolResult`, and neither is
-   *  expressible as text. Absent on every non-tool call site. */
-  contentBlocks?: ConverseContentBlock[];
-}
+export interface ChatMessage { role?: string; content?: unknown }
 export interface ChatParams {
   model?: string;
   messages?: ChatMessage[];
   temperature?: number;
   max_tokens?: number;
   stream?: boolean;
-  /** R10-B: the tools this call may use. Absent ⇒ no toolConfig on the wire, exactly as before. */
-  toolConfig?: ConverseToolConfig;
   [k: string]: unknown;
 }
 
@@ -213,10 +168,8 @@ export const BEDROCK_MIN_MAX_TOKENS = 4096;
 export interface ConverseInput {
   modelId: string;
   system?: Array<{ text: string }>;
-  messages: Array<{ role: 'user' | 'assistant'; content: ConverseContentBlock[] }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: Array<{ text: string }> }>;
   inferenceConfig?: { maxTokens?: number; temperature?: number };
-  /** R10-B — present only when the caller declared tools. */
-  toolConfig?: ConverseToolConfig;
 }
 
 /** Flatten a message `content` to text. Strings pass through; OpenAI part arrays are joined. */
@@ -255,24 +208,16 @@ export function toConverseInput(params: ChatParams, modelId: string): ConverseIn
   const system: Array<{ text: string }> = [];
   const messages: ConverseInput['messages'] = [];
   for (const m of params.messages ?? []) {
+    const text = messageText(m?.content);
     const role = String(m?.role ?? 'user').toLowerCase();
-    // R10-B: raw blocks win over text when the caller supplied them. A system turn can never carry
-    // them (Converse's system list is text-only), so the branch below is reached by user/assistant
-    // turns only and a stray contentBlocks on a system turn is simply ignored, not smuggled through.
-    const blocks: ConverseContentBlock[] | null =
-      Array.isArray(m?.contentBlocks) && m.contentBlocks.length ? m.contentBlocks : null;
-    const text = blocks ? '' : messageText(m?.content);
     if (role === 'system' || role === 'developer') {
       if (text) system.push({ text });
       continue;
     }
     const mapped: 'user' | 'assistant' = role === 'assistant' ? 'assistant' : 'user';
-    const content: ConverseContentBlock[] = blocks ?? [{ text }];
     const last = messages[messages.length - 1];
-    // Consecutive same-role turns are still MERGED (Converse rejects them) — now by concatenating
-    // block lists rather than pushing one text block, so a tool turn merges losslessly too.
-    if (last && last.role === mapped) last.content.push(...content);
-    else messages.push({ role: mapped, content });
+    if (last && last.role === mapped) last.content.push({ text });
+    else messages.push({ role: mapped, content: [{ text }] });
   }
 
   const inferenceConfig: { maxTokens?: number; temperature?: number } = {};
@@ -288,10 +233,6 @@ export function toConverseInput(params: ChatParams, modelId: string): ConverseIn
     ...(system.length ? { system } : {}),
     messages,
     ...(Object.keys(inferenceConfig).length ? { inferenceConfig } : {}),
-    // R10-B: only when the caller declared tools AND declared at least one — an empty `tools` array
-    // is a Converse validation error, and shipping one would turn "this deployment has no records
-    // to offer" into a hard 400 instead of a plain answer.
-    ...(params.toolConfig?.tools?.length ? { toolConfig: params.toolConfig } : {}),
   };
 }
 
@@ -323,7 +264,7 @@ export function mapStopReason(stopReason: unknown): string {
 }
 
 export interface ConverseOutput {
-  output?: { message?: { role?: string; content?: Array<{ text?: string; toolUse?: ConverseToolUse }> } };
+  output?: { message?: { role?: string; content?: Array<{ text?: string }> } };
   stopReason?: string;
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 }
@@ -333,13 +274,8 @@ export interface ChatCompletionLike {
   id: string;
   model: string;
   provider: 'bedrock';
-  choices: Array<{ index: number; message: { role: 'assistant'; content: string; tool_calls?: ChatToolCall[] }; finish_reason: string }>;
+  choices: Array<{ index: number; message: { role: 'assistant'; content: string }; finish_reason: string }>;
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-  /** R10-B: the assistant turn's RAW Converse blocks, when it asked for a tool. The tool loop has to
-   *  echo this turn back verbatim (Converse requires the `toolUse` it is answering to be present in
-   *  the history), and a lossy text round-trip would drop the toolUseId the answer is keyed on.
-   *  Absent on every non-tool response, so nothing existing sees it. */
-  converseContent?: ConverseContentBlock[];
 }
 
 /**
@@ -360,45 +296,17 @@ export function fromConverseOutput(res: ConverseOutput, modelId: string): ChatCo
   const inTok = Number(res?.usage?.inputTokens) || 0;
   const outTok = Number(res?.usage?.outputTokens) || 0;
   const total = Number(res?.usage?.totalTokens);
-  // R10-B — the tool blocks, mapped to the OpenAI shape `classifyProviderResponse` reads. Without
-  // this, a turn that asks for a tool has EMPTY content and would be classified `empty_content`,
-  // i.e. a legitimate tool call would be judged a provider defect and retried to exhaustion.
-  const toolUses = parts
-    .map((p) => p?.toolUse)
-    .filter((t): t is ConverseToolUse => !!t && typeof t.toolUseId === 'string' && typeof t.name === 'string');
-  const toolCalls: ChatToolCall[] = toolUses.map((t) => ({
-    id: t.toolUseId,
-    type: 'function',
-    function: { name: t.name, arguments: safeJson(t.input) },
-  }));
   return {
     id: `bedrock-${modelId}`,
     model: modelId,
     provider: 'bedrock',
-    choices: [{
-      index: 0,
-      message: { role: 'assistant', content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) },
-      finish_reason: mapStopReason(res?.stopReason),
-    }],
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: mapStopReason(res?.stopReason) }],
     usage: {
       prompt_tokens: inTok,
       completion_tokens: outTok,
       total_tokens: Number.isFinite(total) && total > 0 ? total : inTok + outTok,
     },
-    // Carried ONLY when there is a tool turn to echo — otherwise the shape is exactly what it was.
-    ...(toolCalls.length ? { converseContent: parts.filter((p) => !!p) as ConverseContentBlock[] } : {}),
   };
-}
-
-/** `JSON.stringify` that cannot throw (a cyclic or exotic tool input becomes `{}`, never a crash
- *  in the middle of mapping an otherwise good response). */
-function safeJson(v: unknown): string {
-  try { return JSON.stringify(v ?? {}) ?? '{}'; } catch { return '{}'; }
-}
-
-/** The tool calls on a completion, or `[]`. One reader so no call site re-derives the path. */
-export function toolCallsOf(c: ChatCompletionLike | null | undefined): ChatToolCall[] {
-  return c?.choices?.[0]?.message?.tool_calls ?? [];
 }
 
 /**

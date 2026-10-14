@@ -111,7 +111,11 @@ test('the guard is structural in the engine: latestHits is set ONLY on the gener
   assert.equal((src.match(/latestHits = hits;/g) || []).length, 1, 'assigned exactly once');
   // …and that one assignment is AFTER the retrieval, i.e. on the generation path only.
   const assignIdx = src.indexOf('latestHits = hits;');
-  const retrieveIdx = src.indexOf('const hits = await defaultRetrieve(');
+  // RE-PINNED (pass 4 forward correction, Rep 43 A1). The statement is now a ternary whose FALSE
+  // arm is the unchanged five-argument production call; the assignment no longer begins with
+  // `const hits = await`. This anchors the PRODUCTION FALSE ARM, which is the thing this test is
+  // about — the retrieval that runs when no fault plan exists — and is still unique in the file.
+  const retrieveIdx = src.indexOf(': await defaultRetrieve(query, mini, opts.evalNormativeLeg, opts.rerankBackend, primaryCapture);');
   const reuseIdx = src.indexOf('if (opts.reuse)');
   assert.ok(assignIdx > retrieveIdx, 'set after retrieval');
   assert.ok(reuseIdx < retrieveIdx, 'the reuse path returns before retrieval ever runs');

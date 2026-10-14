@@ -9,29 +9,11 @@
  * filter. Filters compose ON TOP of the held-out checkbox, which is unchanged. The review / pending
  * badges are whole-population and untouched (R5-3): only the "showing X of Y" counter moves.
  *
- * URL persistence (R5-4): `q, verdict, flags, lane, dept, fac (R6), gap, from, to, minbill, held, review
- * (R9)` — absent = off; unknown or malformed values are ignored SILENTLY, so a bad shared link
- * degrades to the unfiltered list, never an error.
- *
- * R9 (CDMSS-READMISSIONS-R9-DUAL-CONTRACT PRD, D8 / D14) adds ONE group, `review`: the care manager's
- * own stored verdict. It is deliberately a SEPARATE group from `verdict`, which reads the agent's
- * `avoidable` — filtering on "what the agent proposed" and "what a human decided" are two different
- * questions and merging the two selects would make it impossible to ask either honestly.
- *
- * D8 / §3.3 also relocate the HOLD-OUT: it left the rate strip and lives here instead, as the
- * `held` checkbox the board has always had (oncology · Nephrology · ObGyn, the DETECTOR's six-string
- * list — not the five-string incidence list). Of §12.2's six named list filters, four already
- * existed: onco / ObGyn / nephrology through `dept`, ER through `lane` ('er_routed'). The two added
- * here are `review` and `lt24h`.
- *
- * `lt24h` is the CLOCK, not `gap_days` (T1/D4): it reads the two stored instants on the card, exactly
- * as the incidence aggregator does, so the filter and the lead number agree about what "under 24
- * hours" means. It is NOT the Immediate card's set — that card is the wider union {gap_days ≤ 1},
- * which reaches ~48 clock hours (L1). A card missing either instant cannot be judged and does not
- * pass, the same posture the incidence numerator takes.
+ * URL persistence (R5-4): `q, verdict, flags, lane, dept, fac (R6), gap, from, to, minbill, held` — absent =
+ * off; unknown or malformed values are ignored SILENTLY, so a bad shared link degrades to the
+ * unfiltered list, never an error.
  */
 import { LANE_ORDER, laneMeta, type SurfaceFinding } from './readmission-surface-core';
-import { canonicalFacility } from './readmission-rates-core';
 
 // ── the filter state ──────────────────────────────────────────────────────────────────────
 
@@ -42,20 +24,6 @@ export const VERDICT_LABEL: Readonly<Record<VerdictFilter, string>> = { avoidabl
 /** R5-7 — quick presets only, no free min–max. */
 export const GAP_PRESETS = [3, 7, 15, 30] as const;
 export type GapPreset = (typeof GAP_PRESETS)[number];
-
-/** R9 (D14) — the care manager's stored verdict. 'any_review' keeps every reviewed case whatever the
- *  verdict; 'none' keeps the cases nobody has stated anything about. The three verdicts themselves are
- *  the closed set from readmission-ask-core; they are re-listed as filter values (not imported) so the
- *  filter core stays free of the ask core, exactly as ReturnContext is re-declared in the surface core. */
-export const REVIEW_FILTERS = ['justified', 'not_justified', 'insufficient', 'any_review', 'none'] as const;
-export type ReviewFilter = (typeof REVIEW_FILTERS)[number];
-export const REVIEW_FILTER_LABEL: Readonly<Record<ReviewFilter, string>> = {
-  justified: 'Reviewer: justified',
-  not_justified: 'Reviewer: not justified',
-  insufficient: 'Reviewer: not enough to say',
-  any_review: 'Reviewed by a care manager',
-  none: 'Not yet reviewed by a person',
-};
 
 export interface FilterState {
   /** Free text; split on whitespace, every token must match (case-insensitive substring). */
@@ -77,18 +45,13 @@ export interface FilterState {
   minBill: number | null;
   /** The existing held-out checkbox, mirrored for the URL only — the board applies it itself. */
   held: boolean;
-  /** R9 (D14) — the human overlay's verdict. Independent of `verdict`, which is the agent's. */
-  review: ReviewFilter | null;
-  /** R9 (§12.2) — returns whose CLOCK gap is under 24 hours: the same-event class the incidence
-   *  numerator collapses out (D4). Not `gap_days ≤ 1` — see the note at the top of this file. */
-  lt24h: boolean;
 }
 
-export const EMPTY_FILTERS: FilterState = { q: '', verdict: null, flags: false, lane: null, dept: null, fac: null, gap: null, from: null, to: null, minBill: null, held: false, review: null, lt24h: false };
+export const EMPTY_FILTERS: FilterState = { q: '', verdict: null, flags: false, lane: null, dept: null, fac: null, gap: null, from: null, to: null, minBill: null, held: false };
 
 /** True when any filter (not the held-out checkbox) is active. */
 export function hasActiveFilters(f: FilterState): boolean {
-  return f.q.trim() !== '' || f.verdict != null || f.flags || f.lane != null || f.dept != null || f.fac != null || f.gap != null || f.from != null || f.to != null || f.minBill != null || f.review != null || f.lt24h;
+  return f.q.trim() !== '' || f.verdict != null || f.flags || f.lane != null || f.dept != null || f.fac != null || f.gap != null || f.from != null || f.to != null || f.minBill != null;
 }
 
 // ── URL params (R5-4) — encode / decode with silent rejection of junk ─────────────────────
@@ -123,10 +86,7 @@ export function decodeFilters(params: URLSearchParams | Record<string, string | 
   const mbNum = /^\d+(\.\d+)?$/.test(mbRaw) ? Number(mbRaw) : NaN;
   const minBill = Number.isFinite(mbNum) && mbNum > 0 ? mbNum : null;
   const held = get('held') === '1';
-  const reviewRaw = (get('review') ?? '').trim();
-  const review = (REVIEW_FILTERS as readonly string[]).includes(reviewRaw) ? (reviewRaw as ReviewFilter) : null;
-  const lt24h = get('lt24h') === '1';
-  return { q, verdict, flags, lane, dept, fac, gap, from, to, minBill, held, review, lt24h };
+  return { q, verdict, flags, lane, dept, fac, gap, from, to, minBill, held };
 }
 
 /** Write the filter state as a query string (no leading `?`); off filters are omitted. */
@@ -143,14 +103,12 @@ export function encodeFilters(f: FilterState): string {
   if (f.to) p.set('to', f.to);
   if (f.minBill != null && f.minBill > 0) p.set('minbill', String(f.minBill));
   if (f.held) p.set('held', '1');
-  if (f.review) p.set('review', f.review);
-  if (f.lt24h) p.set('lt24h', '1');
   return p.toString();
 }
 
 // ── the searched text per case ────────────────────────────────────────────────────────────
 
-type Row = Pick<SurfaceFinding, 'patientName' | 'uhid' | 'indexDoctor' | 'readmitDoctor' | 'indexDepartment' | 'readmitDepartment' | 'indexCase' | 'caseLine' | 'avoidable' | 'preventableInjury' | 'negligence' | 'lane' | 'readmitAdmitAt' | 'gapDays' | 'returnBill' | 'auditStatus' | 'facility' | 'clinicalReviewDecision' | 'indexDischargeAt' | 'readmitAdmitAt'>;
+type Row = Pick<SurfaceFinding, 'patientName' | 'uhid' | 'indexDoctor' | 'readmitDoctor' | 'indexDepartment' | 'readmitDepartment' | 'indexCase' | 'caseLine' | 'avoidable' | 'preventableInjury' | 'negligence' | 'lane' | 'readmitAdmitAt' | 'gapDays' | 'returnBill' | 'auditStatus' | 'facility'>;
 
 /** The normative haystack: name · UHID · both doctors · both departments · extracted diagnosis /
  *  indication / procedure · the case line. Nulls contribute nothing. Lower-cased. */
@@ -198,15 +156,11 @@ export function matchesDepartment(row: Row, dept: string | null): boolean {
 }
 
 /** R6 — the hospital filter narrows only what it can judge (R6-3, the R5-6 precedent): a case whose
- *  facility is unknown (null) ALWAYS passes; otherwise exact match on the verbatim db13 name.
- *  Both sides canonicalised (19-Aug EHRC relabel — see canonicalFacility) so `Even` matches a row
- *  whose raw facility is `Even-EHRC`. */
+ *  facility is unknown (null) ALWAYS passes; otherwise exact match on the verbatim db13 name. */
 export function matchesFacility(row: Row, fac: string | null): boolean {
-  const wanted = canonicalFacility(fac);
-  if (!wanted) return true;
-  const have = canonicalFacility(row.facility);
-  if (have == null) return true;
-  return have === wanted;
+  if (!fac) return true;
+  if (row.facility == null || row.facility === '') return true;
+  return row.facility === fac;
 }
 
 /** R5-7 — `gapDays <= n`; a null gap passes only "Any". */
@@ -242,42 +196,11 @@ export function matchesMinBill(row: Row, minBill: number | null): boolean {
   return b.netRs >= minBill;
 }
 
-/**
- * R9 (D14) — the human overlay. `null` / absent means nobody has stated anything, which is a real
- * answer and the thing 'none' selects; it is NOT the same as the agent having no verdict.
- */
-export function matchesReview(row: Row, review: ReviewFilter | null): boolean {
-  if (!review) return true;
-  const v = typeof row.clinicalReviewDecision === 'string' && row.clinicalReviewDecision !== '' ? row.clinicalReviewDecision : null;
-  if (review === 'none') return v == null;
-  if (review === 'any_review') return v != null;
-  return v === review;
-}
-
-/**
- * R9 (§12.2) — the <24h same-event class, on the CLOCK. Reads the two stored instants, never
- * `gap_days`, so this filter and the incidence lead agree on what 24 hours is. Either instant missing
- * or unparseable → the card cannot be judged and does NOT pass (the incidence numerator's own posture:
- * an unjudgeable pair is never counted in).
- */
-export function matchesLt24h(row: Row, lt24h: boolean): boolean {
-  if (!lt24h) return true;
-  const parse = (v: string | null | undefined): number | null => {
-    if (v == null || v === '') return null;
-    const t = Date.parse(/^\d{4}-\d{2}-\d{2} /.test(v) ? v.replace(' ', 'T') : v);
-    return Number.isFinite(t) ? t : null;
-  };
-  const a = parse(row.indexDischargeAt), b = parse(row.readmitAdmitAt);
-  if (a == null || b == null) return false;
-  return (b - a) / 3_600_000 < 24;
-}
-
 /** ONE entry point: AND across every group. Order preserved (the caller sorts). */
 export function applyFilters<T extends Row>(rows: readonly T[], f: FilterState): T[] {
   return rows.filter((r) =>
     matchesQuery(r, f.q) && matchesVerdict(r, f.verdict) && matchesFlags(r, f.flags) && matchesLane(r, f.lane)
-    && matchesDepartment(r, f.dept) && matchesFacility(r, f.fac) && matchesGap(r, f.gap) && matchesDates(r, f.from, f.to) && matchesMinBill(r, f.minBill)
-    && matchesReview(r, f.review) && matchesLt24h(r, f.lt24h));
+    && matchesDepartment(r, f.dept) && matchesFacility(r, f.fac) && matchesGap(r, f.gap) && matchesDates(r, f.from, f.to) && matchesMinBill(r, f.minBill));
 }
 
 // ── toolbar helpers (pure) ───────────────────────────────────────────────────────────────
@@ -296,11 +219,10 @@ export function departmentOptions(rows: ReadonlyArray<Pick<SurfaceFinding, 'inde
 }
 
 /** R6 — the hospital options: sorted distinct non-null facilities from the loaded list. Never
- *  hardcoded, so a third hospital appears by itself; zero when the name join failed. Canonicalised
- *  (19-Aug EHRC relabel) so `Even-EHRC` never shows as a separate option from `Even`. */
+ *  hardcoded, so a third hospital appears by itself; zero when the name join failed. */
 export function facilityOptions(rows: ReadonlyArray<Pick<SurfaceFinding, 'facility'>>): string[] {
   const seen = new Set<string>();
-  for (const r of rows) { const v = canonicalFacility(r.facility); if (v) seen.add(v); }
+  for (const r of rows) { const v = typeof r.facility === 'string' ? r.facility.trim() : ''; if (v) seen.add(v); }
   return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
@@ -336,8 +258,6 @@ export function activeFilterChips(f: FilterState): Array<{ key: keyof FilterStat
   if (f.gap != null) out.push({ key: 'gap', label: `gap ≤ ${f.gap} days` });
   if (f.from || f.to) out.push({ key: 'from', label: `returned ${f.from ? `from ${f.from}` : ''}${f.from && f.to ? ' ' : ''}${f.to ? `to ${f.to}` : ''}` });
   if (f.minBill != null && f.minBill > 0) out.push({ key: 'minBill', label: `bill ≥ ₹${f.minBill.toLocaleString('en-IN')}` });
-  if (f.review) out.push({ key: 'review', label: REVIEW_FILTER_LABEL[f.review] });
-  if (f.lt24h) out.push({ key: 'lt24h', label: 'Returned within 24 hours' });
   return out;
 }
 

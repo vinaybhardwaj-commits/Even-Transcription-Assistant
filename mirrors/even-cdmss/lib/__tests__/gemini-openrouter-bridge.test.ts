@@ -126,13 +126,7 @@ test('trap 3: the VERTEX path is untouched — it still sends the google form an
   // Vertex branches forward `...rest` (google included) and add only the model + headroom.
   // (V-a2: the geminiModel param is typed optional now the ladder owns the branch, hence `as string`.)
   assert.ok(LLM.includes('const gParams = { ...rest, model: vertexModelName(geminiModel as string), max_tokens: baseMax + 8192 };'));
-  // lab-v2 decision 21: the Vertex normalisation moved out of tracedChat's branch and into
-  // buildVertexParams IN THIS SAME FILE, so the lab transport (governedLabChat) and the traced
-  // path cannot drift — a live lab run had already sent Gemini 2.5 Pro the un-raised Ollama
-  // max_tokens and got billed for empty content. The property this pin guards is unchanged;
-  // it is now asserted in two halves, which is strictly stronger than the single literal was.
-  assert.ok(TRACE.includes('buildVertexParams(params, opts!.gemini as string)'), 'the traced path still prefixes from opts.gemini');
-  assert.ok(TRACE.includes('model: vertexModelName(model),') && TRACE.includes('max_tokens: baseMax + 8192,'), 'and buildVertexParams still does the prefix + the thinking headroom');
+  assert.ok(TRACE.includes('model: vertexModelName(opts!.gemini as string),'));
   assert.ok(!TRACE.includes('thinkingBudgetOf'), 'no translation on the Vertex path');
   assert.ok(LLM.includes('const { google: _g, ...body } = rest;'), 'the strip happens only in the OpenRouter builder');
 });
@@ -175,7 +169,20 @@ test('the Ollama last-leg fallback is untouched in both transports', () => {
   // llm.ts count is 2 (the no-cloud default path + the terminal return) and trace.ts has one
   // runOllamaFallback call. `noLocalFallback: true` (the two audit call sites) throws before
   // reaching it; every other caller still lands here exactly as before.
-  assert.equal((LLM.match(/return llm\.chat\.completions\.create\(params, reqOpts\);/g) || []).length, 2, 'chatWithFallback: the default path + the ladder terminal');
+  //
+  // ⚠️ SHAPE CHANGED, GUARD DID NOT (rerank telemetry §4.4, 11 Aug 2026). Both llm.ts fallback
+  // returns now wrap the SAME call in `attachTransportAttribution(...)`, which puts a
+  // non-enumerable evidence property on the returned completion so the traceless rerank path can
+  // report which provider actually served it. The assertion below therefore matches the new
+  // expression rather than the bare `return llm.chat…`. What it defends is unchanged and is now
+  // asserted MORE tightly than before: still exactly two sites, still `params`, still `reqOpts`,
+  // still awaited and returned. If a future change removes a fallback, this still fails.
+  assert.equal((LLM.match(/return attachTransportAttribution\(await llm\.chat\.completions\.create\(params, reqOpts\), \{/g) || []).length, 2,
+    'chatWithFallback: the default path + the ladder terminal, both still calling llm.chat with (params, reqOpts)');
+  assert.equal(/return llm\.chat\.completions\.create\(params, reqOpts\);/.test(LLM), false,
+    'the bare form is gone — if it comes back, one fallback lost its attribution');
+  // and the evidence names the LOCAL model, so a substituted call can never be read as the cloud one
+  assert.equal((LLM.match(/dispatched_provider: 'ollama'/g) || []).length, 2, 'both fallback returns record ollama');
   assert.ok(TRACE.includes("runOllamaFallback(lastTier, servedModel, lastErr, () => llm.chat.completions.create(params, reqOpts))"));
 });
 

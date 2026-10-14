@@ -294,100 +294,6 @@ export function stringLiterals(src: string): string[] {
   return out;
 }
 
-/**
- * ⚠️ ADDED AFTER f800b45 — NOT part of the frozen baseline above, which stays byte-identical.
- *
- * The LVC RULEBOOK REPAIR PRD v1.1 Phase 1 (25 Aug 2026) adds an authorised writer to the registry:
- * the ratification surface at /admin/lvc-ratify, whose accept updates a surviving rule and retires
- * the variants it absorbs. That is a deliberate, reviewed change to the rulebook — the opposite of
- * the silent drift proof 3 exists to catch — so it is recorded HERE, in its own block, rather than
- * by editing the f800b45 fixture. The baseline's file and statement counts below are therefore
- * still asserted against the baseline alone and are unchanged.
- */
-const REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE: Record<string, string[]> = {
-  "lib/lvc-rule-merge.ts": [
-    "ALTER TABLE lvc_recommendations ADD COLUMN IF NOT EXISTS merged_into TEXT",
-    "CREATE INDEX IF NOT EXISTS lvc_merged_into_idx ON lvc_recommendations (merged_into)",
-    "SELECT 1 AS ok FROM information_schema.columns WHERE table_name = 'lvc_recommendations' AND column_name = 'merged_into'",
-    "SELECT id, statement, precondition, keywords, category, citation_url, status, merged_into, ratified_by, ratified_at FROM lvc_recommendations WHERE id = ANY($1)",
-    "UPDATE lvc_recommendations SET statement = $2, precondition = $3, keywords = $4::text[], category = $5, citation_url = $6, ratified_by = $7, ratified_at = now(), updated_at = now() WHERE id = $1 AND (statement IS DISTINCT FROM $2 OR precondition IS DISTINCT FROM $3 OR keywords IS DISTINCT FROM $4::text[] OR category IS DISTINCT FROM $5 OR citation_url IS DISTINCT FROM $6 OR ratified_by IS DISTINCT FROM $7) RETURNING id",
-    "UPDATE lvc_recommendations SET status = $2, merged_into = $3, ratified_by = $4, ratified_at = now(), updated_at = now() WHERE id = $1 AND (status IS DISTINCT FROM $2 OR merged_into IS DISTINCT FROM $3 OR ratified_by IS DISTINCT FROM $4) RETURNING id",
-  ],
-  "lib/lvc-ratify-surface-core.ts": [
-    "SELECT 1 AS ok FROM information_schema.columns WHERE table_name = 'lvc_recommendations' AND column_name = 'merged_into'",
-  ],
-  "app/api/admin/lvc-merge-compare/route.ts": [
-    "SELECT id, keywords, category FROM lvc_recommendations WHERE status = 'active'",
-  ],
-};
-
-/**
- * LAB-MCP-V2 §17.7 round C2, decisions 82/89/90 — the second authorised addition, same pattern as
- * the merge surface above.
- *
- * ⚠️ ALL THREE ARE SELECTs, AND THAT IS THE WHOLE POINT OF LISTING THEM. The Lab MCP v2 rules
- * release target writes `lvc_recommendations` through v1's own code and only v1's: `lvcRatify`
- * (decision 89) forward and `RETIREMENT_UPDATE_SQL` (decision 90) back, both reached by import, so
- * neither appears here — v2 contributes no write statement of its own in either direction.
- * `lib/lab-v2/__tests__/c2-rules.test.ts` asserts that these three are read-only and greps the whole
- * v2 release tree for a fourth.
- */
-const REGISTRY_SQL_ADDED_BY_LAB_V2_C2: Record<string, string[]> = {
-  "lib/lab-v2/releases/rules-target.ts": [
-    "SELECT id FROM lvc_recommendations WHERE status = 'active' ORDER BY id LIMIT 500",
-    "SELECT id, statement, society, category, keywords, status FROM lvc_recommendations WHERE status = 'active' ORDER BY id LIMIT 500",
-    "SELECT id, statement, society, category, keywords, status, ratified_by, ratified_at FROM lvc_recommendations WHERE id = ${recIdLit(id, 'recommendation_id')} LIMIT 1",
-  ],
-};
-
-/**
- * LAB-MCP-V2 §17.7 round C2.1, decision 94 — the first authorised CHANGE to a frozen statement, as
- * opposed to an addition. It is expressed as an explicit before → after pair rather than by
- * overwriting the file's entry, so proof 3 keeps naming the exact statement that moved and the
- * baseline constant above stays untouched and stays pinned by its own two tests.
- *
- * ⚠️ WHY IT MOVED. A rule matches through its keywords and nothing else, and `lvcRatify`'s promotion
- * INSERT named neither `keywords` nor `category`, so every rule promoted through F14 landed active
- * and inert. Decision 94 adds the two columns, copied from the proposal the reviewer approved and
- * never re-derived. The write is still v1's, still one statement, still guarded by the promote-only
- * check above it — so the Lab MCP v2 decision 79 grep, which forbids v2 from having any `lvc_`
- * write of its own, is unaffected and stays green.
- *
- * ⚠️ ONLY ONE OF DECISION 94's TWO CHANGED STATEMENTS IS VISIBLE HERE. The other is `lvcPropose`'s
- * INSERT into `lvc_recommendation_proposals`, which this scan does not see: it filters on the
- * substring `lvc_recommendations`, and `lvc_recommendation_proposals` does not contain it. The
- * staging table has never been in this registry, by construction — proof 3 freezes the LIVE RULEBOOK.
- */
-const REGISTRY_SQL_CHANGED_BY_DECISION_94: Record<string, [string, string][]> = {
-  'lib/mcp-tools.ts': [[
-    "INSERT INTO lvc_recommendations (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid, source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at) VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now()) RETURNING id",
-    "INSERT INTO lvc_recommendations (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid, source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at, category, keywords) VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12::text[]) RETURNING id",
-  ]],
-};
-
-/** Apply decision 94's substitutions. A `before` that is no longer present is an error, not a no-op:
- *  a silently-skipped substitution would let the statement drift twice and be caught once. */
-function applyAuthorisedChanges(base: Record<string, string[]>): Record<string, string[]> {
-  const out: Record<string, string[]> = { ...base };
-  for (const [file, pairs] of Object.entries(REGISTRY_SQL_CHANGED_BY_DECISION_94)) {
-    const list = [...(out[file] ?? [])];
-    for (const [before, after] of pairs) {
-      const i = list.indexOf(before);
-      assert.notEqual(i, -1, `decision 94 names a statement that is not in the frozen baseline for ${file}`);
-      list[i] = after;
-    }
-    out[file] = list.sort();
-  }
-  return out;
-}
-
-/** What proof 3 compares against: the frozen baseline, every authorised addition, every authorised change. */
-const REGISTRY_SQL_EXPECTED: Record<string, string[]> = {
-  ...applyAuthorisedChanges(REGISTRY_SQL_AT_F800B45),
-  ...REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE,
-  ...REGISTRY_SQL_ADDED_BY_LAB_V2_C2,
-};
-
 function scanRegistrySql(): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   for (const f of SOURCE_FILES) {
@@ -405,7 +311,7 @@ function scanRegistrySql(): Record<string, string[]> {
 }
 
 test('proof 3: every lvc_recommendations SQL string in the repo is unchanged from f800b45', () => {
-  assert.deepEqual(scanRegistrySql(), REGISTRY_SQL_EXPECTED);
+  assert.deepEqual(scanRegistrySql(), REGISTRY_SQL_AT_F800B45);
 });
 
 test('proof 3: the frozen fixture covers the §5 readers and writers, all sixteen sites', () => {
@@ -421,26 +327,6 @@ test('proof 3: the frozen fixture covers the §5 readers and writers, all sixtee
   ]) {
     assert.ok(f in REGISTRY_SQL_AT_F800B45, `§5 names ${f} — it must be in the fixture`);
   }
-});
-
-test('proof 3: the post-f800b45 additions are exactly the LVC merge surface, and nothing else', () => {
-  const added = Object.entries(REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE);
-  assert.equal(added.length, 3, 'three files added registry SQL since f800b45');
-  assert.equal(added.flatMap(([, v]) => v).length, 8, 'eight added statements');
-  // Every addition belongs to the LVC rulebook-repair build. A statement appearing here from any
-  // other module is drift wearing this block as cover, so the file names are pinned too.
-  assert.deepEqual(added.map(([f]) => f).sort(), [
-    'app/api/admin/lvc-merge-compare/route.ts',
-    'lib/lvc-ratify-surface-core.ts',
-    'lib/lvc-rule-merge.ts',
-  ]);
-  // The only writes are the two guarded UPDATEs of the merge, and the DDL is additive.
-  const writes = added.flatMap(([, v]) => v).filter((s) => /^(INSERT|UPDATE|DELETE|DROP)\b/i.test(s));
-  assert.equal(writes.length, 2, 'a survivor update and a retirement update — no INSERT, no DELETE');
-  for (const w of writes) assert.match(w, /IS DISTINCT FROM/, 'every registry write stays guarded');
-  const ddl = added.flatMap(([, v]) => v).filter((s) => /^(ALTER|CREATE|DROP)\b/i.test(s));
-  assert.equal(ddl.length, 2, 'ADD COLUMN IF NOT EXISTS and CREATE INDEX IF NOT EXISTS');
-  for (const d of ddl) assert.match(d, /IF NOT EXISTS/, 'DDL is additive and idempotent');
 });
 
 test('proof 3: the rule book NEVER writes lvc_recommendations — its one statement only SELECTs', () => {
