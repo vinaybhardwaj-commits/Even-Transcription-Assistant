@@ -26,7 +26,8 @@ jobs:
       - name: Unit tests (vitest installed ephemerally — not a committed dep; same pattern as e2e's playwright)
         run: |
           npm i -D vitest@^2 --no-audit --no-fund
-          npx vitest run
+          # forks with a capped count: the threads pool hit "[vitest-worker]: Timeout calling onTaskUpdate" on loaded runners (PR 56, 59)
+          npx vitest run --pool=forks --poolOptions.forks.maxForks=2
 
       - name: Silent-failure gate (no empty catch/.catch in critical paths; fails on any finding NOT in .github/check-silent-baseline.txt)
         run: |
