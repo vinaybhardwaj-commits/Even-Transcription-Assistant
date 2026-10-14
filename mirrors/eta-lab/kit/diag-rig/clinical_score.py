@@ -137,18 +137,13 @@ def _forms(v, langs, table):
     return [w for l in langs for w in table.get(v, {}).get(l, ())]
 
 
-_LEAD_DIGITS = re.compile(r"^(\d+)")
-
-
 def _number_near(v, toks, lo, hi, langs=_L):
     raw = set(_forms(v, langs, NUMWORDS))
     cks = _forms(v, langs, _NUM_CK)
     for i in range(lo, min(hi, len(toks))):
         if _is_cue(toks[i]):
             continue                                                  # the 'days' cue word itself is never a number ('days' ~ 'das' = ten in Hindi)
-        m = _LEAD_DIGITS.match(toks[i][0])
-        if toks[i][0] == str(v) or (m and m.group(1) == str(v)) or toks[i][0] in raw:
-            # exact digits, digits fused with a unit by the ASR's tokenisation (router-fix S1 #4383: '500mg', '40m', '10mg' as ONE token), or an exact spoken form
+        if toks[i][0] == str(v) or toks[i][0] in raw:                 # exact digits or an exact spoken form (short forms like 'ek' need this)
             return True
         for sw in cks:
             if len(sw) >= 3 and _ratio(toks[i][2], sw) >= 0.85:
