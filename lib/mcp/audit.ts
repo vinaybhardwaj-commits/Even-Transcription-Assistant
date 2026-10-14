@@ -41,6 +41,10 @@ export function safeArgs(args: unknown): Record<string, unknown> {
   // Record that a free-text query was present without storing it.
   const a = args as Record<string, unknown>;
   if (typeof a.q === "string") out.q_len = a.q.length;
+  // CATALOG-6: the ids themselves never enter the row; only that a filter by them was used.
+  if (typeof a.individual_uid === "string" && a.individual_uid !== "") out.by_individual_uid = true;
+  if (typeof a.prescription_uid === "string" && a.prescription_uid !== "") out.by_prescription_uid = true;
+  if (out.by_individual_uid === true || out.by_prescription_uid === true) out.identity_filter = true;
   return out;
 }
 

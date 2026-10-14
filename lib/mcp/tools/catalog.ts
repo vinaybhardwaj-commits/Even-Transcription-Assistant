@@ -12,8 +12,9 @@ import { listJevDecisions } from "@/lib/room-access/tool-reads";
 import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { fetchManifest, clipKeyOf, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
-import { hasAnyIdentity, IDENTITY_CHUNK, IDENTITY_ID, identityFor, identityView, pulseUrl, type IdentityRow } from "@/lib/room-access/readers/catalog-identity";
-import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { consultsByIdentity, hasAnyIdentity, IDENTITY_CHUNK, IDENTITY_ID, identityFor, identityView, pulseUrl, type IdentityRow } from "@/lib/room-access/readers/catalog-identity";
+import { ADMIN_ACTOR_PREFIX } from "../auth";
+import { argBool, argInt, argStr, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, resolveRoom } from "./brain";
 
 export const CATALOG_ACTIONS = ["search", "get", "clip_audio_url"] as const;
@@ -21,13 +22,14 @@ export const CATALOG_LIMIT_DEFAULT = 50;
 export const CATALOG_LIMIT_MAX = 200;
 export const CATALOG_MAX_SPAN_DAYS = 92;
 export const CATALOG_DEFAULT_DAYS = 30;
+export const CATALOG_HAS_RX_MAX_DAYS = 31;
 const UID = /^[A-Za-z0-9_-]{6,64}$/;
 const DOCTOR = /^[A-Za-z0-9_.:@-]{1,64}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
 
 const HELP = [
-  "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true returns patient and doctor names, ids and the Pulse link (rx.prescription only with both flags).",
+  "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true and the prescription_uid / individual_uid filters need the admin scope; they return names, ids and the Pulse link (rx.prescription only with include_text too).",
   "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row.",
   "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, signature_sha256}. The URL is never audited or logged.",
@@ -95,6 +97,7 @@ async function search(args: ToolArgs): Promise<Row> {
     if (from < CATALOG_MIN_DATE) from = CATALOG_MIN_DATE;
   }
   if (from! > to!) return badArgs("from is after to");
+  if (hasPresc !== null && (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS > CATALOG_HAS_RX_MAX_DAYS - 1) return badArgs("has_prescription spans at most 31 days");
   if ((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS > CATALOG_MAX_SPAN_DAYS - 1) return badArgs(`from..to is at most ${CATALOG_MAX_SPAN_DAYS} days`);
   const limit = argInt(args, "limit", CATALOG_LIMIT_DEFAULT, 1, CATALOG_LIMIT_MAX);
   let offset = 0;
@@ -133,10 +136,10 @@ async function search(args: ToolArgs): Promise<Row> {
     matched.push(r);
   }
   matched.sort((a, b) => tOpen(b) - tOpen(a) || String(a.consult_uid).localeCompare(String(b.consult_uid)));
-  // V3: any identity filter joins encounter_catalog over EVERY candidate (chunks of 500), then filters; otherwise only the returned page is joined.
-  const filtering = hasPresc !== null || prescUid !== null || indivUid !== null;
+  // C5: the id filters run in SQL (bounded by the window) and are intersected with the R2 candidates; has_prescription (window <= 31 days) still joins the candidates in chunks of 500;
+  // the identity of the returned page is joined last. A plain search joins only the page.
   let candidates = matched;
-  let joined = new Map<string, IdentityRow>();
+  const joined = new Map<string, IdentityRow>();
   let identityRows: number | null = null;
   let identityErr = false;
   const join = async (rows: Row[]): Promise<boolean> => {
@@ -147,27 +150,27 @@ async function search(args: ToolArgs): Promise<Row> {
     }
     return true;
   };
-  if (filtering) {
-    if (!(await join(matched))) return { ok: false, error: "identity_unavailable" };
-    identityRows = joined.size;
-    // an empty table must never read as "no prescription": with no joined row at all the answer is no rows, and identity_rows says why
-    candidates = matched.filter((r) => {
-      const j = joined.get(String(r.consult_uid));
-      if (!j) return false;
-      if (hasPresc !== null && j.has_prescription !== hasPresc) return false;
-      if (prescUid !== null && j.prescription_uid !== prescUid) return false;
-      if (indivUid !== null && j.individual_uid !== indivUid) return false;
-      return true;
-    });
+  if (prescUid !== null || indivUid !== null) {
+    const m = await consultsByIdentity({ individualUid: indivUid, prescriptionUid: prescUid, from: from!, to: to! });
+    if (m.status === "too_many_matches") return { ok: false, error: "too_many_matches" };
+    if (m.status === "error") return { ok: false, error: "identity_unavailable" };
+    candidates = candidates.filter((r) => m.uids.has(String(r.consult_uid)));
+  }
+  if (hasPresc !== null) {
+    // an empty table must never read as "no prescription": a consult with no joined row never matches has_prescription=false either
+    if (!(await join(candidates))) return { ok: false, error: "identity_unavailable" };
+    candidates = candidates.filter((r) => joined.get(String(r.consult_uid))?.has_prescription === hasPresc);
   }
   const page = candidates.slice(offset, offset + limit);
   const end = offset + page.length;
-  if (!filtering) {
-    const ok = await join(page);
-    if (ok) identityRows = joined.size;
-    else identityErr = true;
-    if (!ok && includeIdentity) return { ok: false, error: "identity_unavailable" };
+  const need = page.filter((r) => !joined.has(String(r.consult_uid)));
+  const filtering = hasPresc !== null || prescUid !== null || indivUid !== null;
+  if (need.length > 0 || filtering) {
+    const ok = await join(need);
+    if (!ok && (filtering || includeIdentity)) return { ok: false, error: "identity_unavailable" };
+    if (!ok) identityErr = true;
   }
+  if (!identityErr) identityRows = joined.size;
   const view = (r: Row): Row => {
     const j = joined.get(String(r.consult_uid));
     return { ...searchView(r), has_prescription: j ? j.has_prescription : null, ...(includeIdentity ? { identity: j ? identityView(j) : null } : {}) };
@@ -337,9 +340,14 @@ export const catalogTool: McpTool = {
     required: ["action"],
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) => {
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
     const action = argStr(args, "action", 32);
     if (!action || !(CATALOG_ACTIONS as readonly string[]).includes(action)) return { ok: false, error: "unknown_action", allowed: [...CATALOG_ACTIONS] };
+    // C2: names, ids and the Pulse link need the admin scope AND an "admin:" actor (as scribe_admin's writes do), checked before anything is read. has_prescription stays read scope.
+    const present = (k: string) => args[k] !== undefined && args[k] !== null && args[k] !== "" && args[k] !== false;
+    if ((action === "get" || action === "search") && (argBool(args, "include_identity") || present("prescription_uid") || present("individual_uid"))) {
+      if (!ctx.scopes.has("admin") || !ctx.actor.replace(/^mcp:/, "").startsWith(ADMIN_ACTOR_PREFIX)) throw new ToolScopeError("admin", { action });
+    }
     return failSafe({ ok: false, error: "catalog_unavailable" }, async () => (action === "search" ? search(args) : action === "get" ? get(args) : clipAudioUrl(args)));
   },
 };
