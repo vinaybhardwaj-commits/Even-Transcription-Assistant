@@ -145,3 +145,69 @@ test('the bootstrap statement writes version rows only, and reads the registry r
   assert.match(BOOTSTRAP_SNAPSHOT_SQL, /'bootstrap_snapshot', 'informational'/);
   assert.match(BOOTSTRAP_SNAPSHOT_SQL, /WHERE NOT EXISTS/, 'a second run is a no-op, not a key clash');
 });
+
+// ══ R3-A2 — the hardened shape (§1) ═════════════════════════════════════════════════════════════
+//
+// ⚠️ ASSERTED ON THE .sql AND ON THE CONSTANTS SEPARATELY, then on their agreement. The parity test
+// at the top of this file already proves the two are the same statements; these pins prove the
+// hardening is actually IN them, so a parity test passing over two identically-unhardened copies
+// cannot read as success.
+
+test('R3A2: the event table carries a caller-supplied UNIQUE event_ref uuid', () => {
+  for (const [name, sql] of [['reference .sql', MIGRATION], ['inlined DDL', ACTIVATION_EVENTS_TABLE_DDL]] as const) {
+    assert.match(sql, /event_ref\s+uuid NOT NULL UNIQUE/, `${name}: event_ref must be a unique uuid`);
+  }
+  // The idempotency key is the CALLER's, so it can never be defaulted here — a key the writer
+  // invents is a new key on every retry, which is the opposite of idempotence.
+  assert.doesNotMatch(ACTIVATION_EVENTS_TABLE_DDL, /event_ref[^,]*DEFAULT/);
+});
+
+test('R3A2: the event table has a COMPOSITE foreign key to the version it names', () => {
+  assert.match(ACTIVATION_EVENTS_TABLE_DDL,
+    /FOREIGN KEY \(rule_ref, version\) REFERENCES lvc_rule_versions \(rule_ref, version\)/);
+  assert.match(MIGRATION,
+    /FOREIGN KEY \(rule_ref, version\) REFERENCES lvc_rule_versions \(rule_ref, version\)/);
+  // It must be composite, not two separate references: a rule_ref-only key would admit an event
+  // naming a version of that rule that does not exist.
+  assert.doesNotMatch(ACTIVATION_EVENTS_TABLE_DDL, /REFERENCES lvc_rule_versions \(rule_ref\)/);
+});
+
+test('R3A2: versions are POSITIVE on both tables', () => {
+  assert.match(VERSIONS_TABLE_DDL, /CHECK \(version > 0\)/);
+  assert.match(ACTIVATION_EVENTS_TABLE_DDL, /CHECK \(version > 0\)/);
+  // Not `>= 0`: versions start at 1, and a version 0 would sort ahead of every real one in the
+  // (rule_ref, version DESC) index.
+  assert.doesNotMatch(MIGRATION, /CHECK \(version >= 0\)/);
+});
+
+test('R3A2: the evidence constraints are on ALL THREE governance tables, not only the new one', () => {
+  // §1's last bullet. The tuple can arrive by any of the three write paths, so the guarantee has to
+  // be on each table — putting it only on the newest one would leave the older two unprotected
+  // while looking hardened.
+  const tables: Array<[string, string]> = [
+    ['lvc_rule_versions', VERSIONS_TABLE_DDL],
+    ['lvc_rule_activation_events', ACTIVATION_EVENTS_TABLE_DDL],
+    ['rule_pattern_map', PATTERN_MAP_TABLE_DDL],
+  ];
+  for (const [name, ddl] of tables) {
+    assert.match(ddl, new RegExp(`CONSTRAINT ${name}_ratifier_named`), `${name}: named ratifier`);
+    assert.match(ddl, /btrim\(ratified_by\) <> ''/, `${name}: no empty ratifier`);
+    assert.match(ddl, /NOT IN \('admin'/, `${name}: 'admin' is a role, not a person`);
+    assert.match(ddl, /btrim\(rationale\) <> ''/, `${name}: nonblank rationale`);
+    assert.match(ddl, /btrim\(sample_seed\) <> ''/, `${name}: nonblank seed`);
+    assert.match(ddl, /sample_size >= 0 AND reviewed_n >= 0/, `${name}: nonnegative counts`);
+    assert.match(ddl, /CHECK \(reviewed_n <= sample_size\)/, `${name}: reviewed_n <= sample_size`);
+    assert.match(ddl, /n_not_belonging >= 0 AND n_not_belonging <= reviewed_n/,
+      `${name}: n_not_belonging <= reviewed_n`);
+    // …and the whole thing appears in the reference copy too.
+    assert.ok(MIGRATION.includes(`CONSTRAINT ${name}_reviewed_le_sample`), `${name}: in the .sql`);
+  }
+});
+
+test('R3A2: n_not_belonging stays NULLABLE — "where meaningful" survives the hardening', () => {
+  // §3.4: null is honest, 0 is a claim. The new bound must not have quietly made it mandatory.
+  for (const ddl of [VERSIONS_TABLE_DDL, ACTIVATION_EVENTS_TABLE_DDL, PATTERN_MAP_TABLE_DDL]) {
+    assert.doesNotMatch(ddl, /n_not_belonging\s+int\s+NOT NULL/);
+    assert.match(ddl, /n_not_belonging IS NULL\s*\n?\s*OR/, 'the bound must admit NULL');
+  }
+});

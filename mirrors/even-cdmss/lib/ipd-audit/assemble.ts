@@ -13,21 +13,6 @@ import type { AuditReport, ExtractedCase } from '../doc-audit-core';
 import type { ValueDomain } from '../value-score-core';
 import type { IpdAuditRow } from './store';
 import { IPD_ENGINE_VERSION } from './store';
-import type { StayCoverageBlock } from './stay-material';
-
-/**
- * CASE-AGENTS-SPINE P3 (§5) — the stored report, plus what the STAY auditor knows that a
- * discharge-only audit cannot: which document classes it was able to read.
- *
- * Widened HERE rather than on `AuditReport` in lib/doc-audit-core.ts, deliberately. doc-audit-core
- * is a scored core named by architecture rule 5 and is outside this slice's file contract; more to
- * the point, stay coverage is not a property of a document audit in general — it is a property of
- * THIS engine's material. The `report` column is jsonb, so the extra key rides along and every
- * existing reader (the case page, the export, the triage renderer) is unaffected.
- */
-export interface StayAuditReport extends AuditReport {
-  stayCoverage?: StayCoverageBlock;
-}
 
 /** The db13 admission envelope — link-back keys + non-identifying header facts ONLY. */
 export interface IpdAuditMeta {
@@ -42,13 +27,6 @@ export interface IpdAuditMeta {
   engineVersion?: string;
   model?: string | null;
   traceId?: string | null;
-  /**
-   * P3 — which document classes the stay auditor could read. Present only on
-   * `ipd-stay-audit/0.1` rows; absent on every `ipd-discharge-audit/0.2` row, which is what keeps
-   * this addition invisible to the parked engine. §5: "a stay with a missing document class shows
-   * not_auditable for that class in the AUDIT OUTPUT" — this is that output.
-   */
-  stayCoverage?: StayCoverageBlock | null;
 }
 
 function domainScore(report: AuditReport, key: ValueDomain): number | null {
@@ -84,9 +62,7 @@ export function buildIpdAuditRow(meta: IpdAuditMeta, extracted: ExtractedCase, r
     nContextDependent: findings.filter((f) => f.verdict === 'context-dependent').length,
     findings,
     suggestions: report.suggestions ?? [],
-    // Additive by construction: with no stayCoverage the object is spread unchanged, so a 0.2 row's
-    // stored report is byte-identical to what it was before P3 existed.
-    report: meta.stayCoverage ? ({ ...report, stayCoverage: meta.stayCoverage } as StayAuditReport) : report,
+    report,
     engineVersion: meta.engineVersion || IPD_ENGINE_VERSION,
     model: meta.model ?? null,
     traceId: meta.traceId ?? null,

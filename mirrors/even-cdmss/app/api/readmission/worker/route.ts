@@ -2,9 +2,7 @@
 // Mirrors /api/ipd-audit/worker: same auth guard, same box, same sweep-is-the-retry posture.
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// The cron interval must clear this box: READMIT-RECENT-VIEW (17 Sep 2026) widened the worker's
-// window from 06:30-10:30 IST only to every 30 min around the clock, and 30 min = 1,800 s still
-// clears it comfortably (was */15 = 900 s > 800 s, same posture, same box).
+// Same box as the IPD worker, and the cron interval must clear it: */15 = 900 s > 800 s.
 // Any future change to maxDuration must move the cron interval with it, in the same commit.
 export const maxDuration = 800;
 

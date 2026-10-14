@@ -55,10 +55,7 @@ test('board wiring (source-read): AbortController aborted at LOAD_TIMEOUT_MS, sl
   assert.match(b, /\{loadError\.heading\}/); assert.match(b, /\{loadError\.detail\}/); assert.match(b, /\{RETRY_LABEL\}/);
   assert.match(b, /onClick=\{\(\) => void load\(\)\}[^\n]*\{RETRY_LABEL\}/);
   assert.ok(!/setInterval/.test(b), 'nothing polls');
-  // V ruling 17 Sep 2026 (READMIT-RECENT-VIEW brief): Refresh now calls void refresh() (which itself
-  // awaits load()), so only 3 direct `void load()` call sites remain — mount effect, first-load Retry,
-  // refresh Retry (R6.1); Refresh's own press is covered by the refresh() wiring test below instead.
-  assert.equal((b.match(/void load\(\)/g) ?? []).length, 3, 'exactly: mount effect, first-load Retry, refresh Retry (R6.1) — no automatic retry');
+  assert.equal((b.match(/void load\(\)/g) ?? []).length, 4, 'exactly: mount effect, Refresh, first-load Retry, refresh Retry (R6.1) — no automatic retry');
   // R5 untouched (R6.1: the board applies the EFFECTIVE filters — unknown fac dropped)
   assert.match(b, /applyFilters\(eligible, applied\)/); assert.match(b, /showingLine\(visible\.length, eligible\.length\)/);
   assert.match(b, /router\.replace\(/);
@@ -75,12 +72,10 @@ test('R6.1 (R61-1): a failed refresh keeps the cards — inline "Refresh did not
   assert.match(b, /setRefreshFailed\(true\)/); assert.match(b, /setRefreshFailed\(false\)/);
   // the loaded view is never discarded on a failed refresh: setData is called only on success
   assert.equal((b.match(/setData\(/g) ?? []).length, 1);
-  // V ruling 17 Sep 2026 (READMIT-RECENT-VIEW brief): the Refresh button now presses refresh() (POST
-  // /check, then the same load()), not load() directly — see the check-route wiring test.
-  assert.match(b, /<button onClick=\{\(\) => void refresh\(\)\} disabled=\{loading \|\| checking\}[\s\S]{0,300}\/>Refresh\s*\n?\s*<\/button>/);
+  assert.match(b, /<button onClick=\{\(\) => void load\(\)\} disabled=\{loading\}[\s\S]{0,300}\/>Refresh\s*\n?\s*<\/button>/);
   // first-load state intact
   assert.match(b, /\{!loading && !data && loadError && \(/);
-  assert.equal((b.match(/void load\(\)/g) ?? []).length, 3, 'mount, first-load Retry, refresh Retry — still no automatic retry');
+  assert.equal((b.match(/void load\(\)/g) ?? []).length, 4, 'mount, Refresh, first-load Retry, refresh Retry — still no automatic retry');
   assert.ok(!/setInterval/.test(b));
 });
 

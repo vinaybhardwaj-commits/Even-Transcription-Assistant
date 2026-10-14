@@ -43,11 +43,8 @@ import { assembleThreeSource } from './assemble';
 import type { CaseSource, ThreeSourceInputs } from './assemble';
 import { composeCaseArtefacts } from './narrative';
 import { probeReachable } from '../lab-override';
-import { bedrockLive } from '../bedrock';
-import { classifyBedrockError, classifyNarrativeFailure } from './health';
-import type { NarrativeErrorCode } from './health';
 import {
-  saveDetection, saveAuditResult, recordAuditError, recordNarrativeError, clearNarrativeError, pairToDetectionRow, oonToDetectionRow,
+  saveDetection, saveAuditResult, recordAuditError, pairToDetectionRow, oonToDetectionRow,
   READMIT_ENGINE_VERSION,
 } from './store';
 import type { PendingRow } from './store';
@@ -73,7 +70,7 @@ export interface DetectSweepResult {
   encounters: number;
   forms: number;
   /** The FULL resolved ADT column mapping (admission/discharge/department/doctor/
-   *  encounter_id/dob/name/ward) — surfaced so the orchestrator validates every field
+   *  encounter_id/dob/name) — surfaced so the orchestrator validates every field
    *  live; a single-field miss (the excluded:0 defect) can't hide behind counts. */
   mappedCols: MappedAdtCols;
   pairsStored: number;
@@ -167,7 +164,7 @@ async function vertexPass(
  * second edit to the protected module, and decision 7.1 permits exactly one (the
  * persistence write). Eight lines of duplication is the cheaper price. Flagged.
  */
-export async function fetchPdfBytes(url: string): Promise<Buffer> {
+async function fetchPdfBytes(url: string): Promise<Buffer> {
   let res = await fetch(url).catch(() => null);
   if (!res?.ok) {
     const token = await getVertexAccessToken();
@@ -177,7 +174,7 @@ export async function fetchPdfBytes(url: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
-export interface LoadedCase {
+interface LoadedCase {
   extracted: ExtractedCase | null;
   source: CaseSource;
   documentId: string | null;
@@ -190,14 +187,8 @@ export interface LoadedCase {
  *
  * Never throws: every failure path returns a null case, which the tier resolver turns
  * into TIER 3 (not auditable) rather than a guess.
- *
- * R10-A: EXPORTED (was module-private) so the re-extraction backfill
- * (lib/readmission/reextract.ts) re-uses this exact path rather than restating it. That reuse is
- * what makes the backfill idempotent by version for free: DOC_EXTRACT_VERSION bumped, so the
- * store-first read misses once, extracts, writes back — and every later call hits the store and
- * pays nothing. There is no second definition of "read this stay's discharge document".
  */
-export async function loadExtractedCase(encounterId: string | null): Promise<LoadedCase> {
+async function loadExtractedCase(encounterId: string | null): Promise<LoadedCase> {
   const miss: LoadedCase = { extracted: null, source: null, documentId: null };
   if (!encounterId) return miss;
   try {
@@ -415,10 +406,9 @@ export async function assembleForRow(row: PendingRow): Promise<AssembledPair | {
 // The worker box arithmetic for this mode is in app/api/readmission/worker/route.ts (worst case
 // ≈ 790,000 of 800,000 ms — a thin margin BY THE 200 s-per-leg WORST CASE; measured actuals are
 // ~35 s for leg + join). Budget: NARRATIVE_BUDGET_MS (80 s × 1 try) on NARRATIVE_MODEL only.
-export async function narrativeInlineEnabled(): Promise<boolean> {
+export function narrativeInlineEnabled(): boolean {
   if (process.env.READMIT_NARRATIVE_INLINE === '0') return false;
-  if (!probeReachable('bedrock')) return false;
-  return (await bedrockLive()).ok;
+  return probeReachable('bedrock');
 }
 
 // ── R4.1: the recon sequence, transport-agnostic (CDMSS-READMISSIONS-R4.1-PRD v1.0 R41-4) ─────
@@ -551,23 +541,14 @@ export async function runReadmissionAudit(row: PendingRow): Promise<ReadmitAudit
       // stored, so a narrative fault can never cost the finding; its ledger is the very catalog
       // the recon legs read (source 'audit').
       let narrative: 'stored' | 'invalid' | 'skipped' | 'failed' = 'skipped';
-      if (await narrativeInlineEnabled()) {
-        let narrativeCode: NarrativeErrorCode = 'narrative_failed';
+      if (narrativeInlineEnabled()) {
         try {
           const n = await composeCaseArtefacts({
             row, finding, catalog: inputs.catalog, identity: assembled.identity,
             ledgerSource: 'audit', narrativeSource: 'audit', traceId,
           });
           narrative = n.ok ? (n.valid ? 'stored' : 'invalid') : 'failed';
-          if (!n.ok) narrativeCode = classifyNarrativeFailure((n as { reason?: string }).reason);
-        } catch (e) { narrative = 'failed'; narrativeCode = classifyNarrativeFailure(String((e as Error)?.message ?? e)); }
-        // Observability only (best-effort, never changes the audit outcome).
-        if (narrative === 'failed') await recordNarrativeError(row.dedup_key, narrativeCode);
-        else await clearNarrativeError(row.dedup_key);
-      } else if (process.env.READMIT_NARRATIVE_INLINE !== '0' && probeReachable('bedrock')) {
-        // Skipped because bedrockLive is not ok (the kill switch and missing env are deliberate, not faults).
-        const live = await bedrockLive();
-        await recordNarrativeError(row.dedup_key, classifyBedrockError(live) ?? 'error');
+        } catch { narrative = 'failed'; }
       }
       await finishTrace(traceId, 'success');
       return {

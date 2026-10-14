@@ -1,8 +1,7 @@
 /**
  * GET /api/governance/audit-signal/{reference}
  * One thread's full detail (contract §4.3): the signal object + all finding instances + the ordered
- * append-only event log (the auditable trail). Governance-only: it carries the ruling and events.
- * Instances resolve against the thread's own note class (OPD, discharge summary or OT).
+ * append-only event log (the auditable trail).
  */
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -12,7 +11,7 @@ import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { govKeyValid } from '@/lib/gov-auth';
 import { getByReference, listEvents, toSignalRow } from '@/lib/opd-gov-signal-store';
 import { signalObject, isAuditRef } from '@/lib/opd-gov-signal-core';
-import { resolveInstancesForSignal } from '@/lib/opd-gov-read';
+import { resolveInstances } from '@/lib/opd-gov-read';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ reference: string }> }) {
   if (!govKeyValid(req) && !(await isAdminUnlocked())) return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
@@ -26,7 +25,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ refe
 
   const now = new Date().toISOString();
   const [{ count, representative, instances }, events] = await Promise.all([
-    resolveInstancesForSignal(signal),
+    resolveInstances(signal.doctor_uid, signal.signal_type, signal.window_from, signal.window_to),
     listEvents(signal.signal_id),
   ]);
 

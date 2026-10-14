@@ -22,13 +22,12 @@ export const maxDuration = 800;
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { auditOpdNote } from '@/lib/opd-note-audit';
-import { countOpdNotesForDay, fetchOpdNotesForDay, fetchOpdNoteByUid, istToday } from '@/lib/metabase';
-import { saveOpdAudit, auditedUidsForDayAnyVersion, earliestAuditedDay, deleteOpdAuditsForUid } from '@/lib/opd-audit-store';
+import { countOpdNotesForDay, fetchOpdNotesForDay, fetchOpdNoteByUid, istYesterday } from '@/lib/metabase';
+import { saveOpdAudit, auditedUidsForDayAnyVersion, auditedCountForDayAnyVersion, earliestAuditedDay, deleteOpdAuditsForUid } from '@/lib/opd-audit-store';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { startTrace, finishTrace } from '@/lib/trace';
 import { getSettings, setSetting } from '@/lib/mini-backfill';
 import { OPD_ENGINE_VERSION } from '@/lib/opd-note-audit-core';
-import { opdCandidateProbeDone, opdSweepDays } from '@/lib/opd-audit-worker-core';
 import { MINI_MODEL } from '@/lib/llm';
 import { providerSwitchEnabled, resolveWorkerProvider, canServe, type LabProvider } from '@/lib/lab-provider-core';
 
@@ -77,6 +76,10 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (it: T) => Promise<
     while (i < items.length) { const idx = i++; out[idx] = await fn(items[idx]); }
   }));
   return out;
+}
+
+function addDays(day: string, delta: number): string {
+  const d = new Date(day + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + delta); return d.toISOString().slice(0, 10);
 }
 
 /** T-5 — the model column records what actually SERVED, not a hardcoded literal. The old
@@ -141,15 +144,8 @@ async function processDay(day: string, max: number, conc: number, exclude: strin
   // §1 exception: auditedUidsForDayAnyVersion does NOT filter excluded_reason (see the store) — excluded
   // uids stay in the "already audited" set so they're never re-admitted.
   const already = await auditedUidsForDayAnyVersion(day);
-  // Never infer completion from Neon count >= the upstream count. db13 can acquire more notes after
-  // those counts matched (especially for today's still-settling day), so the upstream exclusion
-  // query is the completion probe. A later uid therefore reopens the day on the next sweep.
+  if (already.length >= total) return { day, total, audited: already.length, processed: 0, remaining: 0, done: true, results: [] as unknown[] };
   const rows = await fetchOpdNotesForDay(day, already, max, exclude);
-  if (rows.length === 0) {
-    const observedTotal = Math.max(total, already.length);
-    const remaining = Math.max(0, observedTotal - already.length);
-    return { day, total: observedTotal, audited: already.length, processed: 0, remaining, done: opdCandidateProbeDone(0, max, 0, remaining), results: [] as unknown[] };
-  }
   const results = await mapLimit(rows, conc, async (row) => {
     const started = Date.now();
     try {
@@ -169,11 +165,8 @@ async function processDay(day: string, max: number, conc: number, exclude: strin
   // task 2) — completed work, counted the same as a fresh insert.
   const inserted = results.filter((r) => 'status' in r && ['inserted', 'updated'].includes((r as { status?: string }).status ?? '')).length;
   const audited = already.length + inserted;
-  const observedTotal = Math.max(total, already.length + rows.length);
-  const remaining = Math.max(0, observedTotal - audited);
-  // A full page may have another page behind it even when the count snapshot said otherwise.
-  const done = opdCandidateProbeDone(rows.length, max, inserted, remaining);
-  return { day, total: observedTotal, audited, processed: results.length, remaining, done, results };
+  const remaining = Math.max(0, total - audited);
+  return { day, total, audited, processed: results.length, remaining, done: remaining === 0, results };
 }
 
 /**
@@ -181,7 +174,7 @@ async function processDay(day: string, max: number, conc: number, exclude: strin
  *
  * Two modes:
  *  • ?day=YYYY-MM-DD  → audit just that day (manual backfill / spot-fill).
- *  • default (cron)   → SWEEP a lookback window ending today IST, working the OLDEST
+ *  • default (cron)   → SWEEP a lookback window ending yesterday IST, working the OLDEST
  *    un-audited day first. So a missed night (weekend, deploy gap) is caught up automatically
  *    on the next run, oldest-first, until the whole window is complete. The window is floored
  *    at the earliest-ever audited day, so it never reaches back before the system launched,
@@ -274,11 +267,12 @@ export async function GET(req: NextRequest) {
     // Sweep mode: oldest incomplete day in the lookback window. Floor = the forward cutoff if set
     // (Gemini forward-only), else the earliest-audited day (legacy gap-fill).
     const lookback = Math.max(1, Math.min(14, Number(p.get('lookback') || process.env.OPD_AUDIT_LOOKBACK || 4)));
-    const today = istToday();
-    const baseFloor = (await earliestAuditedDay()) || today;
+    const yesterday = istYesterday();
+    const baseFloor = (await earliestAuditedDay()) || yesterday;
     const floor = cutoff && cutoff > baseFloor ? cutoff : baseFloor;
-    const days = opdSweepDays(today, lookback, floor);
-    const window = { from: days[0] ?? today, to: today };
+    const days: string[] = [];
+    for (let i = lookback - 1; i >= 0; i--) { const d = addDays(yesterday, -i); if (d >= floor) days.push(d); }
+    const window = { from: days[0] ?? yesterday, to: yesterday };
 
     // ── SWEEP-1 (D3/D4, 7 Aug 2026): a zero-progress day must not black out the days behind it ──
     // The loop used to return after the FIRST incomplete day, whatever came of it. On the night of
@@ -289,8 +283,10 @@ export async function GET(req: NextRequest) {
     // every day that does progress, so this only ever relaxes a day that is already stuck.
     const stalled: Array<{ day: string; total: number; audited: number; remaining: number }> = [];
     for (const d of days) {
-      // processDay always asks db13 for a uid not present in Neon. Count equality is only a
-      // snapshot, never a completion marker; newly arrived uids reopen old lookback days.
+      const total = await countOpdNotesForDay(d, exclude);
+      if (total === 0) continue;
+      const auditedCount = await auditedCountForDayAnyVersion(d);
+      if (auditedCount >= total) continue;
       const r = await processDay(d, max, conc, exclude, intended);
       // A recount inside processDay caught the day up (a concurrent tick finished it): complete,
       // not stalled — nothing is wrong and nothing needs a trace.

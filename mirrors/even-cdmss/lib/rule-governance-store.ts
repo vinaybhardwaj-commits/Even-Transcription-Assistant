@@ -33,8 +33,9 @@ import { randomUUID } from 'node:crypto';
 import { sql } from './db';
 import {
   asEvidence, DEFINITION_HASH_FIELDS, EVALUATOR_DISPOSITION, isRuleGovernanceEnabled,
-  type ActivationEvent, type GovernanceEvidence, type PatternEvidenceSnapshot,
-  type ValidityWindow,
+  validateActivationRequest,
+  type ActivationEvent, type ActivationOutcome, type ActivationRefusal, type ActivationRequest,
+  type GovernanceEvidence, type PatternEvidenceSnapshot, type ValidityWindow,
 } from './rule-governance-core';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -93,7 +94,19 @@ export const VERSIONS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS lvc_rule_versions 
   sample_seed           text NOT NULL,
   n_not_belonging       int,
   created_at            timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (rule_ref, version)
+  PRIMARY KEY (rule_ref, version),
+  CONSTRAINT lvc_rule_versions_version_positive CHECK (version > 0),
+  CONSTRAINT lvc_rule_versions_ref_nonblank     CHECK (btrim(rule_ref) <> ''),
+  CONSTRAINT lvc_rule_versions_statement_nonblank CHECK (btrim(statement) <> ''),
+  CONSTRAINT lvc_rule_versions_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT lvc_rule_versions_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT lvc_rule_versions_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT lvc_rule_versions_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT lvc_rule_versions_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT lvc_rule_versions_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 )`;
 
 export const VERSIONS_INDEX_DDL =
@@ -103,6 +116,7 @@ export const VERSIONS_INDEX_DDL =
  *  module. Bootstrap and proposal creation write NO row here (S4). */
 export const ACTIVATION_EVENTS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS lvc_rule_activation_events (
   id              bigserial PRIMARY KEY,
+  event_ref       uuid NOT NULL UNIQUE,
   rule_ref        text NOT NULL,
   version         int  NOT NULL,
   event           text NOT NULL CHECK (event IN ('activate','retire')),
@@ -113,7 +127,19 @@ export const ACTIVATION_EVENTS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS lvc_rule_
   reviewed_n      int  NOT NULL,
   sample_seed     text NOT NULL,
   n_not_belonging int,
-  created_at      timestamptz NOT NULL DEFAULT now()
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT lvc_rule_activation_events_version_positive CHECK (version > 0),
+  CONSTRAINT lvc_rule_activation_events_version_fk
+    FOREIGN KEY (rule_ref, version) REFERENCES lvc_rule_versions (rule_ref, version),
+  CONSTRAINT lvc_rule_activation_events_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT lvc_rule_activation_events_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT lvc_rule_activation_events_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT lvc_rule_activation_events_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT lvc_rule_activation_events_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT lvc_rule_activation_events_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 )`;
 
 export const ACTIVATION_EVENTS_INDEX_DDL =
@@ -134,7 +160,18 @@ export const PATTERN_MAP_TABLE_DDL = `CREATE TABLE IF NOT EXISTS rule_pattern_ma
   reviewed_n        int  NOT NULL,
   sample_seed       text NOT NULL,
   n_not_belonging   int,
-  created_at        timestamptz NOT NULL DEFAULT now()
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT rule_pattern_map_pattern_nonblank CHECK (btrim(lvp_pattern_id) <> ''),
+  CONSTRAINT rule_pattern_map_ref_nonblank     CHECK (btrim(rule_ref) <> ''),
+  CONSTRAINT rule_pattern_map_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT rule_pattern_map_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT rule_pattern_map_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT rule_pattern_map_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT rule_pattern_map_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT rule_pattern_map_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 )`;
 
 export const PATTERN_MAP_INDEX_DDL =
@@ -417,4 +454,187 @@ export async function loadValidityWindows(ruleRefs: string[]): Promise<ValidityW
     valid_from: String(r.valid_from),
     valid_to: r.valid_to == null ? null : String(r.valid_to),
   }));
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// R3-A2 — THE ACTIVATION-EVENT WRITER. Dormant.
+//
+// ⚠️ THE RESIDUAL CONSTRAINT, AT THE CALL SITE RATHER THAN ONLY IN A REPORT (Rep 46 point 8):
+//
+//   THE ONE-STATEMENT EVENT-ONLY WRITER CANNOT GUARANTEE SERIALIZATION BETWEEN CONCURRENT
+//   TRANSITIONS USING DIFFERENT IDEMPOTENCY UUIDS. Two activations racing under different
+//   `event_ref`s are not ordered by this design. IT MUST RETAIN ZERO PRODUCTION CALLERS UNTIL
+//   R3-B PROVIDES THE ATOMIC LIVE WORKFLOW.
+//
+// Why it is here at all: the shape of the write, the preconditions and the refusals are settled
+// now, under review, rather than being invented later inside the live workflow. What is NOT
+// settled is ordering between racing writers, and that is R3-B's problem to solve — not something
+// to paper over with an advisory lock this module has no transaction to hold.
+//
+// The race, concretely: two callers each activate a different version of the same rule, with
+// different `event_ref`s, at the same instant. Both statements independently observe the same
+// "currently active" version, both pass their preconditions, and both append. The stream then
+// contains two activates in an order the database chose, and `v_lvc_rule_validity` will derive a
+// window from it — a window nobody intended. The unique `event_ref` prevents a DUPLICATE; it
+// cannot order two DISTINCT intentions.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ONE data-modifying CTE. One statement is one transaction on Neon's HTTP driver, so every
+ * precondition below is evaluated INSIDE the same statement that inserts — never read first and
+ * checked in TypeScript, which would be a read and a write with a gap between them.
+ *
+ * ⚠️ `effective_at` IS NOT IN THE INSERT COLUMN LIST. The column's `DEFAULT now()` stamps it. No
+ * parameter carries an instant and none is accepted (see `validateActivationRequest`), because the
+ * validity window is DERIVED from event order: a caller-supplied timestamp would not merely
+ * mislabel a row, it would silently rewrite which version was live and when.
+ *
+ * ⚠️ THE ONLY TABLE THIS STATEMENT WRITES IS `lvc_rule_activation_events`. `lvc_recommendations`,
+ * `lvc_rule_versions`, `lvc_recommendation_proposals` and `rule_pattern_map` appear ONLY inside
+ * read-only subqueries. Events only (§3).
+ */
+export const RECORD_ACTIVATION_EVENT_SQL = `WITH req AS (
+  SELECT $1::uuid AS event_ref, $2::text AS rule_ref, $3::int AS version, $4::text AS event,
+         $5::text AS ratified_by, $6::text AS rationale, $7::int AS sample_size,
+         $8::int AS reviewed_n, $9::text AS sample_seed, $10::int AS n_not_belonging
+), prior AS (
+  -- The idempotency key, already used or not. same_payload is what separates a REPLAY from a
+  -- caller who reused a key for a different intention.
+  SELECT e.id, e.rule_ref, e.version, e.event,
+         (e.rule_ref = r.rule_ref AND e.version = r.version AND e.event = r.event) AS same_payload
+    FROM lvc_rule_activation_events e, req r
+   WHERE e.event_ref = r.event_ref
+), ver AS (
+  SELECT v.* FROM lvc_rule_versions v, req r
+   WHERE v.rule_ref = r.rule_ref AND v.version = r.version
+), led AS (
+  -- The append-only ratification ledger entry for the proposal on this version, if any. The
+  -- promoted_id column is the rule identity the ratification promoted TO.
+  SELECT lr.promoted_id
+    FROM lvc_ratifications lr, ver v
+   WHERE lr.proposal_id = v.proposal_id AND lr.decision = 'ratified'
+   ORDER BY lr.created_at DESC, lr.id DESC
+   LIMIT 1
+), cur AS (
+  -- The version currently active for this rule, DERIVED from the stream by the same view the rest
+  -- of the module reads. An open window (valid_to IS NULL) is the live one.
+  SELECT w.version
+    FROM v_lvc_rule_validity w, req r
+   WHERE w.rule_ref = r.rule_ref AND w.valid_to IS NULL
+   ORDER BY w.valid_from DESC
+   LIMIT 1
+), decision AS (
+  SELECT r.*,
+         (SELECT count(*) FROM prior) > 0                       AS replayed,
+         coalesce((SELECT same_payload FROM prior), false)       AS same_payload,
+         (SELECT id::text FROM prior)                            AS prior_id,
+         CASE
+           -- ── an exact replay, and a conflicting reuse ──────────────────────────────────────
+           WHEN (SELECT count(*) FROM prior) > 0
+                AND NOT coalesce((SELECT same_payload FROM prior), false)
+             THEN 'idempotency_conflict'
+           WHEN (SELECT count(*) FROM prior) > 0 THEN NULL      -- already applied; not a refusal
+           WHEN (SELECT count(*) FROM ver) = 0 THEN 'unknown_version'
+           -- ── RETIREMENT: that exact version must be currently active ───────────────────────
+           WHEN r.event = 'retire' THEN
+             CASE WHEN (SELECT version FROM cur) IS DISTINCT FROM r.version
+                  THEN 'version_not_active' ELSE NULL END
+           -- ── ACTIVATION: all six preconditions, in order ───────────────────────────────────
+           -- 1. a COMPLETE EXECUTABLE DEFINITION. A shelf-origin promotion has no matcher
+           --    keywords, so it stops here — intended, and there is no bypass.
+           WHEN NOT (
+             btrim(coalesce((SELECT statement FROM ver), '')) <> ''
+             AND (SELECT keywords FROM ver) IS NOT NULL
+             AND jsonb_typeof((SELECT keywords FROM ver)) = 'array'
+             AND jsonb_array_length((SELECT keywords FROM ver)) > 0
+             AND btrim(coalesce((SELECT action_type FROM ver), '')) <> ''
+             AND btrim(coalesce((SELECT category FROM ver), '')) <> ''
+           ) THEN 'incomplete_definition'
+           -- 2. a MATCHING HASH — recomputed here from the columns on the row itself, never trusted.
+           WHEN (SELECT definition_hash FROM ver) IS DISTINCT FROM (
+             SELECT ${definitionHashSql([
+               'v.statement', 'v.precondition', 'v.action_type', 'v.keywords', 'v.category',
+             ])} FROM ver v
+           ) THEN 'definition_hash_mismatch'
+           -- 3. INFORMATIONAL DISPOSITION (S4).
+           WHEN (SELECT evaluator_disposition FROM ver) IS DISTINCT FROM '${EVALUATOR_DISPOSITION}'
+             THEN 'not_informational'
+           -- 4. PROPOSAL RATIFICATION. A bootstrap snapshot has no proposal at all, so it stops
+           --    here — bootstrap is not ratification (§3.8), and that is a separate word.
+           WHEN (SELECT origin FROM ver) = 'bootstrap_snapshot'
+             THEN 'bootstrap_origin_not_ratification'
+           WHEN (SELECT proposal_id FROM ver) IS NULL
+                OR NOT EXISTS (SELECT 1 FROM lvc_recommendation_proposals p, ver v
+                                WHERE p.id = v.proposal_id AND p.status = 'ratified')
+             THEN 'not_ratified_proposal'
+           -- 5. a MATCHING RATIFICATION-LEDGER ENTRY.
+           WHEN (SELECT count(*) FROM led) = 0 THEN 'no_ratification_ledger_entry'
+           -- 6. promoted_id === rule_ref.
+           WHEN (SELECT promoted_id FROM led) IS DISTINCT FROM r.rule_ref
+             THEN 'promoted_id_mismatch'
+           ELSE NULL
+         END AS refusal
+    FROM req r
+), ins AS (
+  INSERT INTO lvc_rule_activation_events
+    (event_ref, rule_ref, version, event,
+     ratified_by, rationale, sample_size, reviewed_n, sample_seed, n_not_belonging)
+  SELECT d.event_ref, d.rule_ref, d.version, d.event,
+         d.ratified_by, d.rationale, d.sample_size, d.reviewed_n, d.sample_seed, d.n_not_belonging
+    FROM decision d
+   WHERE d.refusal IS NULL AND NOT d.replayed
+  RETURNING id
+)
+SELECT CASE WHEN d.refusal IS NOT NULL THEN 'refused'
+            WHEN d.replayed THEN 'already_applied'
+            ELSE 'inserted' END                                  AS status,
+       d.refusal                                                 AS refusal,
+       d.event_ref::text                                         AS event_ref,
+       coalesce((SELECT id::text FROM ins), d.prior_id)           AS id
+  FROM decision d`;
+
+/**
+ * Append ONE activation or retirement event. Dormant — see the module block above.
+ *
+ * ⚠️ ZERO PRODUCTION CALLERS, AND THAT IS A REQUIREMENT UNTIL R3-B (Rep 46 point 8), not an
+ * accident of it being new. `lib/__tests__/rule-governance-dormancy.test.ts` proves it.
+ *
+ * ⚠️ THE FLAG IS CHECKED FIRST, BEFORE VALIDATION AND BEFORE ANY SQL IS BUILT. Flag off ⇒ this
+ * throws and NOTHING is executed — proven behaviourally by an injected runner that counts calls,
+ * not by reading the source.
+ *
+ * ⚠️ IT NEVER CALLS `ensureRuleGovernanceTables()`. That is how a dormant module accidentally
+ * creates tables in production: one convenience call on a path somebody later made live.
+ */
+export async function recordActivationEvent(
+  input: ActivationRequest,
+  runner: typeof run = run,
+): Promise<ActivationOutcome> {
+  assertEnabled();                                  // FIRST. Before anything else.
+  const problems = validateActivationRequest(input);
+  if (problems.length) throw new Error(`invalid activation request: ${problems.join('; ')}`);
+  const ev = asEvidence(input.evidence);
+  const rows = await runner(RECORD_ACTIVATION_EVENT_SQL, [
+    input.event_ref,          // $1
+    input.rule_ref,           // $2
+    input.version,            // $3
+    input.event,              // $4
+    ev.ratified_by,           // $5
+    ev.rationale,             // $6
+    ev.sample_size,           // $7
+    ev.reviewed_n,            // $8
+    ev.sample_seed,           // $9
+    ev.n_not_belonging,       // $10
+  ]);
+  const r = (rows[0] ?? {}) as Record<string, unknown>;
+  const status = String(r.status ?? 'refused');
+  const eventRef = String(r.event_ref ?? input.event_ref);
+  if (status === 'refused') {
+    return { status: 'refused', event_ref: eventRef, reason: String(r.refusal) as ActivationRefusal };
+  }
+  return {
+    status: status === 'already_applied' ? 'already_applied' : 'inserted',
+    event_ref: eventRef,
+    id: String(r.id ?? ''),
+  };
 }

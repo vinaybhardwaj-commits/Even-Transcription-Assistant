@@ -208,11 +208,7 @@ test('ONE RULE across every surface — governance and stewardship included (add
   // The real defect was three surfaces holding three different rules over one table: the doctor
   // pages deduped one way, governance PINNED a version, stewardship took the newest by TIME. This
   // is the test that stops a fourth appearing.
-  // ⚠️ RE-POINTED by the stewardship MS ship (S2, 29 Aug 2026). The board's SQL moved off the page
-  // into lib/stewardship-canonical.ts — one fragment now serves the board, the department roll-up,
-  // the danger queue and the room's Ask box, so those four cannot become a fifth rule. The
-  // INVARIANT is unchanged and is asserted against its new home; the page holds no SQL to check.
-  for (const f of ['lib/opd-gov-read.ts', 'lib/stewardship-canonical.ts', 'lib/opd-audit-doctor.ts']) {
+  for (const f of ['lib/opd-gov-read.ts', 'app/admin/stewardship/page.tsx', 'lib/opd-audit-doctor.ts']) {
     const src = readFileSync(f, 'utf8');
     assert.ok(src.includes('canonicalDistinctOnSql'), `${f} must dedup through the shared fragment`);
     assert.ok(!/DISTINCT ON \(\s*uid\s*\)/.test(src), `${f} must not hand-write a note-identity dedup`);
@@ -230,12 +226,9 @@ test('ONE RULE across every surface — governance and stewardship included (add
   assert.ok(metrics.includes('count(DISTINCT engine_version)'), 'and it must actually be computed');
 
   // Stewardship: newest-by-time is not THE RULE, and it had no engine filter at all.
-  const stew = readFileSync('lib/stewardship-canonical.ts', 'utf8');
+  const stew = readFileSync('app/admin/stewardship/page.tsx', 'utf8');
   assert.ok(!/ORDER BY uid, audited_at DESC/.test(stew), 'newest-by-time ranking must be gone');
   assert.ok(stew.includes('ENG_FAMILY_SQL'), 'and it must now filter the engine family');
-  // and the page it came from holds no competing copy
-  const page = readFileSync('app/admin/stewardship/page.tsx', 'utf8');
-  assert.ok(!/opd_note_audits/.test(page), 'the board page must read through the shared fragment, not its own SQL');
 });
 
 test('a non-numeric tail that is NOT -mini cannot reach the cast — shape, not suffix (learning.ts)', () => {
