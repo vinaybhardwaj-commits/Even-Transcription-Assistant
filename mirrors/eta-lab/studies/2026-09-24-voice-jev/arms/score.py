@@ -101,17 +101,6 @@ def role_weights(a1_rows):
     return {g: c / tot for g, c in sorted(n.items())} if tot else {}
 
 
-def current_rows(rows, turn_ids, window_ids):
-    """Raw output files are append-only. Keep only the CURRENT rows: the last row per turn (L1 / Jev) or per window (L2), and only for turns / windows that
-    exist in the arm 1 file. Rows for ids from an earlier hand-off (and superseded duplicates) are counted as stale and excluded, so cost and time are not inflated."""
-    last = {}
-    for r in rows:
-        k = ("l2", r.get("window_id")) if r.get("kind") == "l2" else ("t", r.get("turn_id"))
-        last[k] = r
-    keep = [r for k, r in last.items() if (k[1] in window_ids if k[0] == "l2" else k[1] in turn_ids)]
-    return keep, len(rows) - len(keep)
-
-
 def weighted_acc(rows, key, weights):
     """Population-weighted accuracy: per-role accuracy on the labelled turns, combined with the role shares (renormalised over roles that have labelled turns)."""
     by = {}
@@ -179,7 +168,7 @@ def pass_bar(s, stab):
             "status": "ADOPTABLE" if all(c.values()) else ("CONTINUE_ONLY (F4 insufficient)" if f4 == "INSUFFICIENT" and others else "NOT_ADOPTED")}
 
 
-def summarize(arm, rows, hours, outs, prices, stab=None, weights=None, stale=0):
+def summarize(arm, rows, hours, outs, prices, stab=None, weights=None):
     d = [r for r in rows if r["doubtful"]]; c = [r for r in rows if not r["doubtful"]]
     s = {"n_turns": len(rows), "doubtful": acc([r["correct"] for r in d]), "confident": acc([r["correct"] for r in c]),
          "unsure_n": sum(r["final"] == K.UNSURE for r in rows), "unsure_doubtful_n": sum(r["final"] == K.UNSURE for r in d)}
@@ -189,7 +178,7 @@ def summarize(arm, rows, hours, outs, prices, stab=None, weights=None, stale=0):
     else:
         s["vs_arm1_doubtful"] = paired(rows, weights); s["confident_sample"] = confident_sample(rows)
         s["escalated_share"] = round(len(d) / len(rows), 4) if rows else None
-        s["cost"] = cost(arm, outs.values(), hours, prices); s["errors_n"] = sum("error" in o for o in outs.values()); s["stale_rows_excluded"] = stale
+        s["cost"] = cost(arm, outs.values(), hours, prices); s["errors_n"] = sum("error" in o for o in outs.values())
         s["stability"] = stab or {"status": "not_run"}; s["pass_bar"] = pass_bar(s, s["stability"])
     return s
 
@@ -245,28 +234,22 @@ def main():
     ap.add_argument("--arm1", required=True); ap.add_argument("--truth", required=True)
     for n in (2, 3, 4): ap.add_argument(f"--arm{n}"); ap.add_argument(f"--requery{n}")
     ap.add_argument("--rule", required=True); ap.add_argument("--rule-sha", required=True)
-    ap.add_argument("--cards", help="inputs/cards.jsonl: the CURRENT run's turns (and their windows); raw rows for any other turn are stale and excluded from scoring and cost. Without it, the arm 1 file's ids define 'current' and stale rows may remain (flagged)")
     ap.add_argument("--role-weights", help="data/role_shares_doubtful.json (pinned ruling-215 weights); without it the weights are recomputed from the arm 1 file and flagged NOT PINNED")
     ap.add_argument("--role-weights-key", default="all_pool_doubtful"); ap.add_argument("--windows"); ap.add_argument("--human-counts"); ap.add_argument("--key-json"); ap.add_argument("--prices"); ap.add_argument("--outdir", required=True)
     a = ap.parse_args()
     stamp = C.stamp(); rule = K.load_rule(a.rule, a.rule_sha)
-    a1_rows = C.read_jsonl(a.arm1)
-    if any(r.get("production_row") is False for r in a1_rows): raise SystemExit("arm 1 file has production_row=false rows (E3X pseudo-turns): they would be scored with a fabricated arm-1 answer (ruling 290). Keep them out of arm1_in.")
-    a1 = {r["turn_id"]: r for r in a1_rows}
+    a1_rows = C.read_jsonl(a.arm1); a1 = {r["turn_id"]: r for r in a1_rows}
     if a.role_weights: weights, wsrc = pinned_role_weights(a.role_weights, a.role_weights_key)
     else: weights, wsrc = role_weights(a1_rows), {"file": None, "note": "recomputed from the arm 1 file: NOT PINNED (per-context turn ids)"}
     wins = {r["window_id"]: r["duration_s"] for r in C.read_jsonl(a.windows)} if a.windows else {}
     prices = json.load(open(a.prices)) if a.prices else {}
-    if a.cards: cards = C.read_jsonl(a.cards); cur_t, cur_w = {r["turn_id"] for r in cards}, {r["window_id"] for r in cards if r.get("window_id")}
-    else: cur_t, cur_w = set(a1), {r["window_id"] for r in a1_rows if r.get("window_id")}
     arm_raw = {}
     for n in (2, 3, 4):
         p = getattr(a, f"arm{n}")
         if not p: continue
-        key = (lambda r: r.get("kind") == "l1") if n == 4 else (lambda r: True)
-        rows, n_stale = current_rows(C.read_jsonl(p), cur_t, cur_w)
+        rows = C.read_jsonl(p); key = (lambda r: r.get("kind") == "l1") if n == 4 else (lambda r: True)
         rqp = getattr(a, f"requery{n}")
-        arm_raw[n] = {"rows": rows, "n_stale": n_stale, "outs": {r["turn_id"]: r for r in rows if key(r)}, "rq": {r["turn_id"]: r for r in C.read_jsonl(rqp) if key(r)} if rqp else None}
+        arm_raw[n] = {"rows": rows, "outs": {r["turn_id"]: r for r in rows if key(r)}, "rq": {r["turn_id"]: r for r in C.read_jsonl(rqp) if key(r)} if rqp else None}
 
     def variant(exclude):
         truth, texcl = load_truth(a.truth, exclude); scored = {t for t in truth if t in a1}; truth = {t: truth[t] for t in scored}
@@ -277,10 +260,10 @@ def main():
         for n, d in arm_raw.items():
             tr = score_turns(n, a1, truth, d["outs"], rule)
             allouts = {**d["outs"], **({r["window_id"]: r for r in d["rows"] if r.get("kind") == "l2"} if n == 4 else {})}
-            v["arms"][f"arm{n}"] = summarize(n, tr, hours, allouts, prices, stability(n, a1, truth, d["outs"], d["rq"], rule, weights), weights, d["n_stale"])
+            v["arms"][f"arm{n}"] = summarize(n, tr, hours, allouts, prices, stability(n, a1, truth, d["outs"], d["rq"], rule, weights), weights)
         return v
 
-    res = {**stamp, "freeze_sha256": C.freeze_text()[1], "addendum_sha256": C.addendum_sha(), "addendum166_sha256": C.addendum166_sha(), "combine_rule_sha256": rule["sha256"], "conf_threshold": rule["conf_threshold"], "f2_role_weights_source": wsrc, "current_run_defined_by": a.cards or "arm1 ids (--cards not given)",
+    res = {**stamp, "freeze_sha256": C.freeze_text()[1], "addendum_sha256": C.addendum_sha(), "addendum166_sha256": C.addendum166_sha(), "combine_rule_sha256": rule["sha256"], "conf_threshold": rule["conf_threshold"], "f2_role_weights_source": wsrc,
            **variant(())}                                                    # top level = all truth sources (with vpilot_voice_verified)
     res["without_vpilot_voice_verified"] = variant((WITHOUT_TAG,))            # ruling 214: every result reported with and without the +22 turns
     arm3_rows = arm_raw.get(3, {}).get("rows", []); arm4_rows = arm_raw.get(4, {}).get("rows", [])

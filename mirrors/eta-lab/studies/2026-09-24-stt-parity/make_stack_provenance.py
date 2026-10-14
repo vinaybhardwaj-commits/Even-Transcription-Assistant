@@ -3,7 +3,7 @@
 Collected LIVE from the four HIST nodes over ssh (file sha256s, unit environments, model revisions), so it says what is actually running.
 Output: stack_provenance.json (stack_id = first 12 hex of sha256 of the canonical version block) + a per-node consistency check. Numbers/hashes only."""
 import json, hashlib, subprocess, sys, time
-CPU = ["hist-cpu-1", "hist-cpu-2", "hist-cpu-3", "hist-cpu-4", "hist-cpu-5", "hist-cpu-6", "hist-cpu-7", "hist-cpu-8", "hist-cpu-9", "hist-cpu-10", "hist-cpu-11", "hist-cpu-12"]; GPU = ["hist-gpu-1", "hist-gpu-2", "hist-gpu-3", "hist-gpu-4"]
+CPU = ["hist-cpu-1", "hist-cpu-2", "hist-cpu-3", "hist-cpu-4", "hist-cpu-5", "hist-cpu-6"]; GPU = ["hist-gpu-1", "hist-gpu-2"]
 def ssh(h, cmd):
     return subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", h, cmd], capture_output=True, text=True, timeout=120).stdout.strip()
 def sha(h, path): return (ssh(h, f"sha256sum {path} 2>/dev/null | cut -d' ' -f1") or None)
