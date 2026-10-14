@@ -1,0 +1,10 @@
+[Unit]
+Description=Consult cutter, :35 past every hour
+
+[Timer]
+OnCalendar=*:35:00
+Persistent=false
+Unit=cutter-hourly.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+{
+  "spool": "~/eta-data/consult/ALERTS.jsonl",
+  "state": "~/.local/state/consult-alert-relay/state.json",
+  "dead_letter": "~/.local/state/consult-alert-relay/dead-letter.jsonl",
+  "identity": "consult-alerts",
+  "recipients": ["consult-lead", "fable"],
+  "ssh_command": ["ssh", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", "consult-alerts-bus"]
+}

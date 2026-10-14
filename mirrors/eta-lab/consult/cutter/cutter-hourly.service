@@ -1,0 +1,11 @@
+[Unit]
+Description=Consult cutter: cut every eligible closed consult window (span rule, diarize, doctor/others split, store, private R2 mirror)
+
+[Service]
+Type=oneshot
+# runs the pinned deploy worktree (moved only by deploy.sh from a clean commit), never the live working tree
+WorkingDirectory=%h/oc/consult/cutter-deploy
+# venv outside both trees: psycopg + boto3 (--system-site-packages); the GPU worker uses the eta-diarize venv under flock /home/eta/gpu.lock and never starts 22:30-06:00
+ExecStart=%h/oc/consult/cutter-venv/bin/python -m cutter.run --once
+# the DB credential is read from ~/.config/eta-audio/db.url (read-only use); nothing is passed on the command line
+TimeoutStartSec=3h
