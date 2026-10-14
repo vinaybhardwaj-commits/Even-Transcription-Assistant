@@ -3,15 +3,61 @@
 # Kiosk Guardian: kill switch and mode (spec 2.4 last paragraph, 2.5, G8).
 # Control comes from pipe topic guardian/control (C4 ruling); the transport command is injectable and gets the room as $1 and the topic as $2.
 # Per-kiosk flag: file $FLAG_DIR/heal-off. Fleet-wide flag and per-room mode: fetched from the Mini
-# each minute through GUARDIAN_FLAG_CMD, which prints lines "fleet=on|off" and "mode=shadow|heal".
+# every FLAG_FETCH_S through GUARDIAN_FLAG_CMD (old path), or derived from control.last (GUARDIAN_CONTROL_SUB_CMD, no message for CONTROL_STALE_S = killed), which prints lines "fleet=on|off" and "mode=shadow|heal".
 # No command, a failed command, a timeout, a stale cache, or anything but fleet=on means heal OFF.
 
 FLAG_CACHE="$STATE_DIR/flags.cache"
+
+CONTROL_LAST="$STATE_DIR/control.last"
+
+# Parse $CONTROL_LAST (line 1 = receive epoch, line 2 = payload). Sets CTRL_FLEET (on|unreachable),
+# CTRL_MODE (shadow|heal), CTRL_WHY (ok|missing|unparseable|stale|kill) and CTRL_AGE (seconds or empty).
+# Pure bash/sed. Anything but a fresh "kill": false means killed (fleet=unreachable).
+control_parse() {
+  local recv payload now room modes kill
+  CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
+  [ -r "$CONTROL_LAST" ] || return 1
+  recv="$(sed -n '1p' "$CONTROL_LAST" 2>/dev/null)"
+  payload="$(sed -n '2p' "$CONTROL_LAST" 2>/dev/null)"
+  now="$(now_epoch)"
+  case "$recv" in ''|*[!0-9]*) CTRL_WHY=unparseable; return 1 ;; esac
+  CTRL_AGE=$((now - recv))
+  if [ "$CTRL_AGE" -lt -5 ]; then CTRL_WHY=unparseable; return 1; fi
+  case "$payload" in '{'*'}') ;; *) CTRL_WHY=unparseable; return 1 ;; esac
+  # drop the modes object so a room named "kill" cannot be read as the kill field
+  kill="$(printf '%s' "$payload" | sed -E 's/"modes"[[:space:]]*:[[:space:]]*\{[^}]*\}//' | sed -nE 's/.*"kill"[[:space:]]*:[[:space:]]*(true|false).*/\1/p')"
+  if [ "$CTRL_AGE" -gt "$CONTROL_STALE_S" ]; then CTRL_WHY=stale; return 1; fi
+  if [ "$kill" != "false" ]; then
+    if [ "$kill" = "true" ]; then CTRL_WHY="kill"; else CTRL_WHY=unparseable; fi
+    return 1
+  fi
+  CTRL_FLEET=on; CTRL_WHY=ok
+  # shellcheck disable=SC2016
+  room="$(printf '%s' "$GUARDIAN_ROOM" | sed 's/[][\.*^$(){}?+|/]/\\&/g')"
+  modes="$(printf '%s' "$payload" | sed -nE 's/.*"modes"[[:space:]]*:[[:space:]]*(\{[^}]*\}).*/\1/p')"
+  if printf '%s' "$modes" | grep -qE '"'"$room"'"[[:space:]]*:[[:space:]]*"heal"'; then CTRL_MODE=heal; fi
+  return 0
+}
+
+# One audit line per state change (on <-> killed, or a new reason for being killed).
+control_audit_change() {
+  local f="$STATE_DIR/control_state" prev cur="$CTRL_FLEET:$CTRL_WHY"
+  prev="$(cat "$f" 2>/dev/null)"
+  [ "$prev" = "$cur" ] && return 0
+  printf '%s\n' "$cur" >"$f"
+  audit "control state ${prev:-none} -> $cur age=${CTRL_AGE:-none}"
+}
 
 flag_fetch() {
   local out="$STATE_DIR/flags.fetch" now rc
   mkdir -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
   now="$(now_epoch)"
+  if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then
+    control_parse; rc=$?
+    control_audit_change
+    printf '%s\nfleet=%s\nmode=%s\n' "$now" "$CTRL_FLEET" "$CTRL_MODE" >"$FLAG_CACHE.tmp" && mv "$FLAG_CACHE.tmp" "$FLAG_CACHE"
+    return "$rc"
+  fi
   if [ -z "$GUARDIAN_FLAG_CMD" ]; then
     printf '%s\nfleet=unreachable\n' "$now" >"$FLAG_CACHE"; return 1
   fi
@@ -24,7 +70,7 @@ flag_fetch() {
   return 0
 }
 
-# 0 (true) when healing is blocked. Cheap: reads two files, so it is called before every action.
+# 0 (true) when healing is blocked. Cheap: reads local files, so it is called before every action.
 killswitch_engaged() {
   local fetched now fleet
   [ -e "$FLAG_DIR/heal-off" ] && return 0
@@ -35,6 +81,8 @@ killswitch_engaged() {
   [ "$((now - fetched))" -le "$FLAG_MAX_AGE_S" ] || return 0
   fleet="$(sed -n 's/^fleet=//p' "$FLAG_CACHE" | head -n1)"
   [ "$fleet" = "on" ] || return 0
+  # With the control subscription the live file is re-read here, so staleness engages without waiting for the next fetch.
+  if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then control_parse || return 0; fi
   return 1
 }
 

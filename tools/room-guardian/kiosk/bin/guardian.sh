@@ -43,12 +43,34 @@ subscriber_loop() {
   done
 }
 
+# Store one control line atomically (tmp + mv): line 1 = receive epoch, line 2 = payload.
+control_store() {
+  local tmp="$STATE_DIR/control.last.tmp.$$"
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  { printf '%s\n' "$(now_epoch)"; printf '%s\n' "$1"; } >"$tmp" && mv -f "$tmp" "$STATE_DIR/control.last"
+}
+
+# Kiosk's own subscription to guardian/control. Same backoff pattern as subscriber_loop.
+control_loop() {
+  local line backoff=2
+  [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
+  while :; do
+    bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" 2>/dev/null | while IFS= read -r line; do
+      [ -n "$line" ] && control_store "$line"
+    done
+    audit "control subscriber exited; retry in ${backoff}s"
+    sleep "$backoff"
+    [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
+  done
+}
+
 run() {
-  local t0 t1 sub
+  local t0 t1 sub ctl
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
   subscriber_loop & sub=$!
-  trap 'kill $sub 2>/dev/null; exit 0' TERM INT
+  control_loop & ctl=$!
+  trap 'kill $sub $ctl 2>/dev/null; exit 0' TERM INT
   while :; do
     t0="$(now_epoch)"
     flag_poll

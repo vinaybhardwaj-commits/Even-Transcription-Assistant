@@ -315,13 +315,13 @@ test_g6_window_is_an_hour() {
   assert_eq "$(grep -c 'launchctl bootout' "$CALLS")" "3" "52 minutes later it still holds"
 }
 
-# The Mini is asked for the flags every 60 s, not more and not less often.
-test_flag_poll_interval_is_60_s() {
+# The flags are fetched every 10 s, not more and not less often.
+test_flag_poll_interval_is_10_s() {
   load_libs; export GUARDIAN_FLAG_CMD='echo x >>"$T/fcount"; printf "fleet=on\nmode=heal\n"'
   flag_poll; assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "1" "first poll fetches"
-  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 30)); flag_poll
-  assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "1" "30 s later: no fetch"
-  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 31)); flag_poll
-  assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "2" "61 s later: fetch"
-  assert_eq "$FLAG_FETCH_S" "60" "the interval"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 5)); flag_poll
+  assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "1" "5 s later: no fetch"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 6)); flag_poll
+  assert_eq "$(wc -l <"$T/fcount" | tr -d ' ')" "2" "11 s later: fetch"
+  assert_eq "$FLAG_FETCH_S" "10" "the interval"
 }

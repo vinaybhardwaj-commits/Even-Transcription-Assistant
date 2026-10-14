@@ -7,6 +7,8 @@ GUARDIAN_ROOM="<room-slug>"
 GUARDIAN_PUBLISH_CMD="<command that publishes stdin to topic \$1>"
 GUARDIAN_SUBSCRIBE_CMD="<command that streams topic<TAB>payload lines>"
 GUARDIAN_FLAG_CMD="<command that prints fleet=... and mode=... lines>"
+# Control subscription (preferred; when set, GUARDIAN_FLAG_CMD is unused). $1 = room, $2 = topic; print one raw payload line per message, forever. No message for 90 s = killed.
+GUARDIAN_CONTROL_SUB_CMD="<command that streams one control payload line per message>"
 # The kiosk-sudo path: a command that runs its arguments as root (sudoers NOPASSWD for the root helper only).
 GUARDIAN_SUDO="sudo -n"
 GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"
