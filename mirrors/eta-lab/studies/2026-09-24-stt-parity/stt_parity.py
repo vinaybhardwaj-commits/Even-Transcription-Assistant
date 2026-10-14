@@ -140,17 +140,8 @@ def main():
             if j.get("state") != "done":
                 row["error"] = (j.get("error") or j.get("state") or "?")[:140]; out["windows"].append(row); continue
             os.makedirs(f"{WORK}/raw", exist_ok=True)
-            # never overwrite a scored run's raw output (eta-refuter-2 #418.3): key by attempt, O_EXCL
-            att = 1
-            while True:
-                rp = f"{WORK}/raw/{fn}.a{att}.run{k+1}.json"
-                try:
-                    fd = os.open(rp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600); break
-                except FileExistsError:
-                    att += 1
-            with open(fd, "w") as fh:
+            with open(os.open(f"{WORK}/raw/{fn}.run{k+1}.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
                 json.dump(j, fh)
-            row_raw = os.path.basename(rp)
             twin_txt = j.get("transcript_native") or ""
             st_txt = r["txt"] or ""
             n1, n2 = norm(st_txt), norm(twin_txt)

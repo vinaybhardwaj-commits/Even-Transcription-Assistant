@@ -2,14 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { inFeedWindow, istMinutes, parseCsv, pickNext, breakerTripped, errorClass } from "./feeder-3.mjs";
 
-// IST = UTC+5:30.  20:45 IST = 15:15 UTC; 07:00 IST = 01:30 UTC.
+// IST = UTC+5:30.  20:45 IST = 15:15 UTC; 07:30 IST = 02:00 UTC.
 const at = (h, m) => new Date(Date.UTC(2026, 8, 24, h, m));
-test("feed window is 20:45-07:00 IST, half-open, wrapping midnight", () => {
+test("feed window is 20:45-07:30 IST, half-open, wrapping midnight", () => {
   assert.equal(inFeedWindow(at(15, 14)), false);  // 20:44
   assert.equal(inFeedWindow(at(15, 15)), true);   // 20:45
   assert.equal(inFeedWindow(at(20, 0)), true);    // 01:30 next day
-  assert.equal(inFeedWindow(at(1, 29)), true);    // 06:59
-  assert.equal(inFeedWindow(at(1, 30)), false);   // 07:00 -> stop
+  assert.equal(inFeedWindow(at(1, 59)), true);    // 07:29
+  assert.equal(inFeedWindow(at(2, 0)), false);    // 07:30 -> stop
   assert.equal(inFeedWindow(at(9, 0)), false);    // 14:30 clinic
 });
 test("istMinutes wraps", () => { assert.equal(istMinutes(at(18, 30)), 0); assert.equal(istMinutes(at(0, 0)), 330); });
