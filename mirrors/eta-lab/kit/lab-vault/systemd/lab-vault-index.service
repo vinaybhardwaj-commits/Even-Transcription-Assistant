@@ -1,9 +1,0 @@
-[Unit]
-Description=Nightly analysis index snapshot (windows-<date>.jsonl/.parquet), then push
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/share/lab-vault/venv/bin/python %h/.local/share/lab-vault/build-index.py
-# the push timer carries the new files; run it now too so the snapshot does not wait 15 minutes
-ExecStartPost=-/usr/bin/python3 %h/.local/share/lab-vault/vault-push.py --scan
-SuccessExitStatus=0 1
