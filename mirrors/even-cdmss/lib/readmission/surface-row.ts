@@ -12,7 +12,7 @@ import type { FindingBlob, IndexCaseSummary, ReturnBill, ReturnContext, SurfaceF
 import { toFindingClass } from '../readmission-surface-core';
 import type { ExtractedCase } from '../doc-audit-core';
 import type { CaseArtefacts } from '../readmission-narrative-core';
-import { canonicalFacility, returnContext } from '../readmission-rates-core';
+import { returnContext } from '../readmission-rates-core';
 
 /** Display-only identity from KX (decision 5 / decision 13). Never sent to a model. */
 export interface Identity {
@@ -97,7 +97,7 @@ export function toFinding(
     patientName: id?.name ?? null,
     uhid: s(r.uhid) ?? id?.uhid ?? null,
     ageGender: id?.ageGender ?? null,
-    facility: canonicalFacility(id?.facility) ?? null,   // R6 — rides the name join; never stored; canonicalised (19-Aug EHRC relabel)
+    facility: id?.facility ?? null,   // R6 — rides the name join; never stored
 
     gapDays: r.gap_days == null ? null : Number(r.gap_days),
     indexDepartment: s(r.index_department),

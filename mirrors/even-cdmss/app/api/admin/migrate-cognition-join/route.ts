@@ -2,17 +2,21 @@
  * POST /api/admin/migrate-cognition-join — create WM3's join storage.
  * Auth: an unlocked admin session (`isAdminUnlocked`), else 401.
  *
- * A reference copy of this DDL sits in migrations/0055_cognition_join.sql. Additive + idempotent:
- * safe to run repeatedly, and a no-op once both tables and all three indexes exist.
+ * Reference copies of this DDL sit in migrations/0055_cognition_join.sql (the two tables) and
+ * migrations/0056_cognition_join_fix3.sql (WM3 fix 3: era_status, its index, and the stability
+ * table). Additive + idempotent: safe to run repeatedly, and a no-op once everything exists.
  *
- * ⚠️ CREATE ONLY. ALTERs nothing, DROPs nothing. Does not touch cognition_shadow_events,
- * cognition_reactions, cognition_review_sessions, cognition_belief_updates, opd_note_audits or
- * anything the frozen spine reads. NO ENGINE BUMP.
+ * ⚠️ ADDITIVE ONLY. The one ALTER adds a NOT NULL column WITH A DEFAULT, so it neither rewrites a
+ * value nor invalidates a row; nothing is DROPped and no column is retyped. Does not touch
+ * cognition_shadow_events, cognition_reactions, cognition_review_sessions,
+ * cognition_belief_updates, opd_note_audits or anything the frozen spine reads. NO ENGINE BUMP.
  *
- * ⚠️ BOTH TABLES CARRY PHI and are not readable by the Lab research scope.
+ * ⚠️ ALL THREE TABLES CARRY PHI (cognition_join_stability holds the triple ids of a sample) and
+ * none is readable by the Lab research scope.
  *
- * The DDL is the kickoff's "DDL (exact)" block, transcribed verbatim. Order matters:
- * cognition_triples carries two foreign keys onto cognition_snapshots.
+ * The DDL is each kickoff's "DDL (exact)" / "Schema, exact" block, transcribed verbatim. Order
+ * matters: cognition_triples carries two foreign keys onto cognition_snapshots, and the 0056 ALTER
+ * needs cognition_triples to exist.
  */
 import { NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
@@ -80,6 +84,37 @@ export async function POST() {
     await sql`CREATE INDEX IF NOT EXISTS cognition_triples_status_idx
       ON cognition_triples (y_status, updated_at)`;
     applied.push('cognition_triples_status_idx');
+
+    // ── 0056 · WM3 fix 3 (era_status, the raw trigger, the stability table) ───────────────────
+    //
+    // ⚠️ ADDITIVE ONLY, and the additive idiom is what makes it safe on a table that already holds
+    // rows: the column is NOT NULL with a DEFAULT, so every existing triple becomes `current`
+    // without a backfill — which is exactly what they are, having been opened from eligible shadow
+    // events. No existing row's meaning changes, so JOIN_SCHEMA_VERSION stays 'cognition-join/0.1'.
+    await sql`ALTER TABLE cognition_triples ADD COLUMN IF NOT EXISTS era_status TEXT NOT NULL DEFAULT 'current'`;
+    applied.push('cognition_triples.era_status');
+
+    await sql`CREATE INDEX IF NOT EXISTS cognition_triples_era_idx
+      ON cognition_triples (era_status, trigger_kind)`;
+    applied.push('cognition_triples_era_idx');
+
+    // The stability log. APPEND-ONLY: each row is one measurement of whether O_before still
+    // reconstructs to what was stored, and measurements accumulate rather than overwrite. No FK on
+    // triple_ids — it is a jsonb list of what was sampled, and a sample must stay readable even if
+    // a triple it names is later removed.
+    await sql`CREATE TABLE IF NOT EXISTS cognition_join_stability (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sample_n INTEGER NOT NULL,
+      matched_n INTEGER NOT NULL,
+      failed_n INTEGER NOT NULL,
+      triple_ids JSONB NOT NULL,
+      mismatched_ids JSONB NOT NULL,
+      walk_version TEXT NOT NULL,
+      member_state_version TEXT NOT NULL,
+      schema_version TEXT NOT NULL
+    )`;
+    applied.push('cognition_join_stability');
 
     return NextResponse.json({ ok: true, applied });
   } catch (e) {

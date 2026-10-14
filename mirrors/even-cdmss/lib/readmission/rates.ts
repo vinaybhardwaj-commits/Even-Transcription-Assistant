@@ -31,7 +31,7 @@
 import { sql } from '../db';
 import { metabaseQuery } from '../metabase';
 import { READMIT_ENGINE_VERSION } from './store';
-import { addDays, canonicalFacility, computeRates, FACILITY_EHRC_ALIASES, FOLLOW_UP_30, istDay, SURVEILLANCE_START, type DischargeBucket, type IncidencePair, type RatePair, type RatesResult } from '../readmission-rates-core';
+import { addDays, computeRates, FOLLOW_UP_30, istDay, SURVEILLANCE_START, type DischargeBucket, type IncidencePair, type RatePair, type RatesResult } from '../readmission-rates-core';
 
 export const RATES_CACHE_MS = 15 * 60_000;
 
@@ -85,18 +85,13 @@ const DAY_LITERAL = /^\d{4}-\d{2}-\d{2}$/;
  * IST; that asymmetry is DOCUMENTED, not fixed, this ship — it must stay byte-stable.)
  * The Even filter is safe HERE (and only here) because this query serves the Even headline alone.
  * `endDay` is `ceiling − 30`, computed by the caller and shape-checked before interpolation.
- *
- * READMIT-EHRC-RELABEL-BUILDER-BRIEF-16-SEP-2026: `facility_name` is matched against every
- * FACILITY_EHRC_ALIASES member (the 19-Aug relabel to `Even-EHRC`), not just `'Even'`. The list is a
- * constant, quoted inline here — never interpolated from user input.
  */
 export function incidenceDenominatorSql(endDay: string): string {
   if (!DAY_LITERAL.test(endDay)) throw new Error(`incidence window end must be YYYY-MM-DD — got '${String(endDay)}'`);
-  const facilityList = FACILITY_EHRC_ALIASES.map((f) => `'${f}'`).join(',');
   return `SELECT count(DISTINCT uhid)::int AS n
   FROM kx_discharged_completed_patients
  WHERE encounter_type = 'ip_admission'
-   AND facility_name IN (${facilityList})
+   AND facility_name = 'Even'
    AND to_char(discharge_date AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') BETWEEN '${SURVEILLANCE_START}' AND '${endDay}'`;
 }
 
@@ -154,7 +149,7 @@ export async function readNumerators(engineVersion = READMIT_ENGINE_VERSION): Pr
 export async function readDenominators(): Promise<DischargeBucket[] | null> {
   try {
     const rows = await metabaseQuery(DENOMINATOR_SQL);
-    return rows.map((r) => ({ facility: canonicalFacility(s(r.facility_name)), day: s(r.day), department: s(r.department), disposition: s(r.disposition), n: n(r.n) ?? 0 }));
+    return rows.map((r) => ({ facility: s(r.facility_name), day: s(r.day), department: s(r.department), disposition: s(r.disposition), n: n(r.n) ?? 0 }));
   } catch {
     return null;
   }

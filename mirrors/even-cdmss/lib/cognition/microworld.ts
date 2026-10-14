@@ -23,6 +23,32 @@ export type Microworld = 'headache' | 'none';
 export const MATCH_RULE = 'headache-strict/1' as const;
 
 /**
+ * WM3 fix 3 (N8) — the RAW-NOTE rule, and a DIFFERENT rule from `headache-strict/1` even though the
+ * four spellings are the same.
+ *
+ * `headache-strict/1` runs in TypeScript over an audit row's findings and suggestions — the text the
+ * audit engine produced. `headache-raw/1` runs in POSTGRES on db13, over seven columns of the raw
+ * prescription row — the text the doctor wrote. The same four spellings applied to different text
+ * are not the same rule, and a triple must be able to say which one opened it, so the two rule
+ * strings are separate and the raw one is stored on every raw-trigger row.
+ *
+ * ⚠️ THE POOL THIS NAMES WAS MEASURED. The seven-column shape is the rule measured in
+ * CDMSS-WM-HEADACHE-POOL-ALL-HISTORY-8-SEP-2026 §2.4 (~13,000 notes since January 2024). The rule
+ * string names what was measured, so adding or dropping a column here silently invalidates that
+ * count — it would need a new rule string, not an edit to this one.
+ */
+export const RAW_MATCH_RULE = 'headache-raw/1' as const;
+
+/**
+ * The same four spellings as `HEADACHE_RE`, as a POSIX alternation for Postgres `~*`.
+ *
+ * Deliberately a plain string and not derived from the RegExp: the two engines are different
+ * (JavaScript vs POSIX), and generating one from the other would hide a divergence rather than let
+ * a test assert on both. lib/__tests__/cognition-join.test.ts pins this literal.
+ */
+export const HEADACHE_RAW_PATTERN = '(headache|cephalgia|cephalalgia|migraine)' as const;
+
+/**
  * The four spellings, case-insensitive. `migraine` is included because it is the headache term
  * clinicians actually write; `cephalgia`/`cephalalgia` because both spellings appear in Indian
  * discharge and OPD documentation.

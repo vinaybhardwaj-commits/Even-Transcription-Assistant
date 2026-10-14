@@ -12,13 +12,36 @@
 /**
  * What happened in the world that gives the agent an occasion to think.
  *
- * ⚠️ ONLY `opd_note_audited` IS REACHABLE IN v0. `ipd_stay_extracted` is declared because it is the
- * second trigger the programme intends, but the kickoff specifies no table, no identity column and
- * no text field to read for it — so this ship emits ZERO rows of that kind rather than guessing a
- * read. The Shadow page's per-kind breakdown will therefore show one kind. Flagged in the report.
+ * ⚠️ TWO OF THE THREE ARE REACHABLE. `opd_note_audited` is the shadow agent's trigger: an audit row
+ * the agent judged. `opd_note_matched` (WM3 fix 3, N8) is the join's SECOND trigger and reads a
+ * different world — a RAW OPD note on db13 that the `headache-raw/1` rule matched, whether or not
+ * the audit engine ever saw it. The two are kept apart deliberately: a triple opened from an audit
+ * row was judged by a policy, and a triple opened from a raw note was not, and collapsing them
+ * would let the never-audited backlog be read as shadow-agent output.
+ *
+ * ⚠️ `ipd_stay_extracted` REMAINS UNREACHABLE. It is declared because it is the trigger the
+ * programme intends next, but no kickoff has yet specified a table, an identity column or a text
+ * field to read for it — so this repo emits ZERO rows of that kind rather than guessing a read.
  * (This mirrors CognitionObjective below, where three of four members are likewise unreachable.)
  */
-export type DecisionEventKind = 'opd_note_audited' | 'ipd_stay_extracted';
+export type DecisionEventKind = 'opd_note_audited' | 'opd_note_matched' | 'ipd_stay_extracted';
+
+/**
+ * WHICH BACKLOG A TRIPLE CAME OUT OF, and therefore what its presence is evidence of.
+ *
+ *   · `current`    opened from an ELIGIBLE shadow event — the engine version that produced the
+ *                  audit was the current era at the time the shadow judged it. Every triple written
+ *                  before WM3 fix 3 is one of these, which is why it is the column default.
+ *   · `stale`      opened from a shadow event the burden policy refused with `stale_era`: the note
+ *                  WAS audited, by an engine version that is no longer current. The refusal was
+ *                  about whether the agent should speak, never about whether the note happened.
+ *   · `unaudited`  opened by the raw-note trigger from a db13 note that has no audit row at all.
+ *
+ * The three are never collapsed. A rate computed over `current` alone is a rate over the audited,
+ * current-era slice, and a rate computed over all three is a rate over the headache pool — two
+ * different denominators, and a reader who cannot tell them apart will believe the wrong one.
+ */
+export type EraStatus = 'current' | 'stale' | 'unaudited';
 
 /**
  * What the agent would be trying to accomplish by asking.

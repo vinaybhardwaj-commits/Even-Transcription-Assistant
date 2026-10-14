@@ -23,6 +23,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   EXTRACT_SYSTEM, VERBATIM_SECTION_MAX, VERBATIM_SECTION_MAX_CHARS, parseExtraction,
   parseVerbatimSections,
@@ -408,17 +409,15 @@ test('R10-D12 — the advisory says all four things: it answers from the case, i
   assert.match(page, /\{ASK_ADVISORY\}/, 'the surface renders the constant, never a copy of it');
 });
 
-test('R10-D11 — the pins: engine version unchanged, detect-core untouched, no dependency change, and the model pin / F11 still hold', () => {
+test('R10-D11 — the pins: engine version unchanged, the rates files untouched, detect-core untouched, no dependency change, and the model pin / F11 still hold', () => {
   assert.equal(READMIT_ENGINE_VERSION, 'readmission/0.2');
+  const changed = execFileSync('git', ['diff', '--name-only', '335e7a6', '--'], { encoding: 'utf8' }).split('\n').filter(Boolean);
   // Acceptance #6 is BYTE-IDENTITY of the rates outputs, and the only way to promise that without a
   // live DB is to prove the files that compute them were not touched at all.
   // The no-dependency-change acceptance was proven at merge time and is not an open-ended invariant (lab-v2 decision 9).
-  // READMIT-EHRC-RELABEL-BUILDER-BRIEF-16-SEP-2026 (Orchestrator ruling 1, 16 Sep 2026): lib/readmission-rates-core.ts
-  // and lib/readmission/rates.ts were unfrozen for the EHRC relabel (Even-EHRC canonicalisation) — every other frozen
-  // file stays frozen.
-  // READMIT-EXCLUSION-NARROW (18 Sep 2026) unfreezes lib/readmission-detect-core.ts too: that kickoff
-  // narrows EXCLUDED_DEPARTMENTS' ObGyn exclusion to obstetric stays only and adds the tight_bounce
-  // override — a real, intended change, not drift. Nothing left in this list stays frozen from R10.
+  for (const f of ['lib/readmission-rates-core.ts', 'lib/readmission/rates.ts', 'lib/readmission-detect-core.ts']) {
+    assert.ok(!changed.includes(f), `${f} must not change in R10`);
+  }
   // The Ask path still targets the one Opus id with no ladder behind it (T7 / F11 carried over).
   // Count CALL SITES, not mentions: `}, {` is the tracedChat options argument and appears nowhere in
   // the prose, which legitimately quotes the options object it is describing.

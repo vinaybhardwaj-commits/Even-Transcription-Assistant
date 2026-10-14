@@ -33,6 +33,10 @@ type SP = { individual_uid?: string };
 /** The sentence that must never be edited into something softer. */
 const O_BEFORE_CHIP = 'O_before is the state before the day of the note. Same-day results are not in it.';
 
+/** The second sentence of the same kind: a count over these rows is a count over three different
+ *  populations unless the reader separates them, and the era card is where they separate. */
+const ERA_CHIP = 'current = opened from an eligible shadow event · stale = opened from one the burden policy refused as stale_era · unaudited = opened from a raw db13 note the audit engine never saw. Do not sum them into one rate without saying which denominator you mean.';
+
 function Chip({ children, tone = 'slate', title }: { children: React.ReactNode; tone?: 'slate' | 'amber' | 'brand' | 'red'; title?: string }) {
   const cls = tone === 'amber' ? 'border-amber-200 bg-amber-50 text-amber-800'
     : tone === 'brand' ? 'border-brand/30 bg-brand/5 text-brand'
@@ -172,6 +176,36 @@ function hours(v: number | null): string {
   return v == null ? '—' : `${v.toFixed(1)} h`;
 }
 
+/**
+ * O_before stability (N5). The memo's threshold is 95%; the number is shown and NOT coloured —
+ * a threshold rendered as a traffic light invites the reader to stop at the colour, and this is a
+ * measurement somebody has to look at.
+ *
+ * A null rate is "not measured" (every sampled row failed to read), never 0%.
+ */
+function StabilityCard({ s }: { s: JoinCounts['stability'] | undefined }) {
+  const rate = s?.match_rate == null ? null : `${(s.match_rate * 100).toFixed(1)}%`;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <div className="text-[10.5px] font-medium uppercase tracking-wide text-slate-400">O_before stability</div>
+      {s === undefined ? <div className="mt-2 text-[12px] text-red-700">Could not read — this is not zero.</div>
+        : s === null ? <div className="mt-2 text-[12px] italic text-slate-300">not yet run</div>
+          : (
+            <>
+              <div className="mt-0.5 font-serif text-[24px] font-semibold text-slate-900">
+                {s.matched_n}/{s.sample_n}
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-400">
+                {rate == null ? 'match rate not measured — every sampled read failed' : `${rate} of those we could re-read`}
+                {s.failed_n > 0 ? ` · ${s.failed_n} could not be re-read` : ''}
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-400">run at {day(s.run_at)} · threshold 95%</div>
+            </>
+          )}
+    </div>
+  );
+}
+
 export default async function JoinPage({ searchParams }: { searchParams: Promise<SP> }) {
   if (!(await isAdminUnlocked())) {
     return (
@@ -205,8 +239,9 @@ export default async function JoinPage({ searchParams }: { searchParams: Promise
         <div>
           <h1 className="font-serif text-[26px] font-semibold leading-tight text-slate-900 sm:text-[30px]">World Model · Join</h1>
           <p className="mt-1.5 max-w-2xl text-sm text-slate-500">
-            For each eligible headache note: what the record held before it, the first result that became visible after
-            it, and what the record held once that result had landed. Read-only, internal. Nothing here is doctor-facing.
+            For each headache note this build can see — audited and current-era, audited under a superseded engine, or
+            never audited at all: what the record held before it, the first result that became visible after it, and what
+            the record held once that result had landed. Read-only, internal. Nothing here is doctor-facing.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -220,6 +255,7 @@ export default async function JoinPage({ searchParams }: { searchParams: Promise
         <Chip tone="amber">{HONESTY_CHIP}</Chip>
         <Chip tone="amber">{O_BEFORE_CHIP}</Chip>
         <Chip tone="slate">Y horizon: {Y_HORIZON_DAYS} days</Chip>
+        <Chip tone="amber" title={ERA_CHIP}>three populations, three denominators</Chip>
         <Chip tone="slate">{JOIN_SCHEMA_VERSION}</Chip>
       </div>
 
@@ -228,6 +264,12 @@ export default async function JoinPage({ searchParams }: { searchParams: Promise
         <Counts title="Triples by provenance" hint="reconstructed = opened looking backwards" rows={counts?.triplesByProvenance ?? null} />
         <Counts title="Triples by resolve status" rows={counts?.triplesByResolveStatus ?? null} />
         <Counts title="Snapshots by cut status" hint="a failed capture is counted, never folded into a zero" rows={counts?.snapshotsByCutStatus ?? null} />
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Counts title="Triples by era status" hint="current = audited, current era · stale = audited under a superseded engine · unaudited = never audited" rows={counts?.triplesByEraStatus ?? null} />
+        <Counts title="Triples by trigger kind" hint="opd_note_audited = the shadow agent judged it · opd_note_matched = the raw rule matched it" rows={counts?.triplesByTriggerKind ?? null} />
+        <StabilityCard s={counts === null ? undefined : counts.stability} />
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

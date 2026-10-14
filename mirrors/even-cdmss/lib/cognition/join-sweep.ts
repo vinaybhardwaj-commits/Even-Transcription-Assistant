@@ -1,9 +1,18 @@
 /**
- * lib/cognition/join-sweep.ts — WM3: the join's three phases (cognition-join/0.1).
+ * lib/cognition/join-sweep.ts — WM3: the join's four phases (cognition-join/0.1).
  *
- * For every eligible headache event the shadow agent judged, persist what the record held BEFORE
- * the note (`O_before`), the first result that became VISIBLE after it (`Y`), and what the record
- * held once that result had landed (`O_after`). Attach a doctor's reaction when one exists.
+ * For every headache note this build can see, persist what the record held BEFORE the note
+ * (`O_before`), the first result that became VISIBLE after it (`Y`), and what the record held once
+ * that result had landed (`O_after`). Attach a doctor's reaction when one exists.
+ *
+ * ── THREE POPULATIONS, THREE LABELS ────────────────────────────────────────────────────────────
+ *
+ * WM3 fix 3 widened what "can see" means, and every triple now says which widening opened it:
+ * `current` (an eligible shadow event), `stale` (a shadow event refused as `stale_era`) and
+ * `unaudited` (a raw db13 note under `headache-raw/1`, phase 0, which the audit engine may never
+ * have seen). They are counted apart on the readout and never summed into one rate by this module,
+ * because the three have different denominators and a reader who cannot tell them apart will
+ * believe the wrong one.
  *
  * ── THE FROZEN SPINE IS CALLED, NEVER CHANGED ──────────────────────────────────────────────────
  *
@@ -17,10 +26,11 @@
  *
  * ── EVERY PHASE IS IDEMPOTENT AND BOUNDED ──────────────────────────────────────────────────────
  *
- * Phase 1 opens triples for events that have none (ON CONFLICT DO NOTHING on the event key), phase
- * 2 resolves Y for pending ones, phase 3 captures O_after for those that have a Y. Re-running any
- * of them over the same backlog writes nothing new. Each has its own cap so a run is a bounded
- * amount of db13, and the phases never run concurrently with each other.
+ * Phase 0 opens triples for raw notes that have none, phase 1 does the same for shadow events (both
+ * ON CONFLICT DO NOTHING on the event key), phase 2 resolves Y for pending ones, phase 3 captures
+ * O_after for those that have a Y. Re-running any of them over the same backlog writes nothing new.
+ * Each has its own cap so a run is a bounded amount of db13, and the phases never run concurrently
+ * with each other.
  *
  * ── AN OUTAGE DEFERS, IT DOES NOT DECIDE ───────────────────────────────────────────────────────
  *
@@ -38,15 +48,25 @@ import { getMemberSnapshotAsOf, individualForPrescSql } from '../member-state/me
 import { MEMBER_STATE_VERSION } from '../member-state/schema';
 import { WORLD_MODEL_WALK_VERSION, ipdFoldLabelFor, readWalkFlags, type WalkFlags } from '../world-model/walk-o';
 import { BURDEN_POLICY_VERSION, JOIN_SCHEMA_VERSION } from './schema';
+import { RAW_MATCH_RULE } from './microworld';
 import {
   chooseY, istDay, oAfterAsOf, provenanceFor, snapshotHash, visibleAtFor, yStatusFor,
   type CutStatus, type LabRow, type Provenance,
 } from './join-core';
 import {
-  attachReaction, firstRunAt, insertTriple, joinCounts, listFailedAfter, listOpenAfter,
-  listOpenCandidates, listPendingY, reactionForEvent, repairFailedSnapshot, updateOAfter, updateY,
-  upsertSnapshot, type TripleRow,
+  attachReaction, firstRunAt, insertStabilityRun, insertTriple, joinCounts, listFailedAfter,
+  listOpenAfter, listOpenCandidates, listPendingY, listRawNoteCandidatesSql, listStabilitySample,
+  matchRate, rawNoteCursor, reactionForEvent, repairFailedSnapshot, tripleExistsForNote,
+  updateOAfter, updateY, upsertSnapshot, RAW_NOTE_FLOOR, type TripleRow,
 } from './join-store';
+
+/**
+ * The floor on the raw-note read. DEFINED in lib/cognition/join-store.ts beside the query that
+ * inlines it — one definition, no import cycle — and re-exported here because it is a phase-0
+ * constant and belongs on this module's surface.
+ */
+export { RAW_NOTE_FLOOR };
+export { RAW_MATCH_RULE };
 
 /** The one trigger kind this build reads. `ipd_stay_extracted` writes zero rows here. */
 export const JOIN_TRIGGER_KIND = 'opd_note_audited';
@@ -73,6 +93,24 @@ export const PHASE1_CAP = 50;
 export const PHASE2_CAP = 60;
 export const PHASE3_CAP = 30;
 export const BACKFILL_CAP = 50;
+
+/**
+ * WM3 fix 3 (N8) — the SECOND trigger kind. A triple opened from a RAW db13 note that
+ * `headache-raw/1` matched, whether or not the audit engine ever saw it.
+ *
+ * The pool behind it is large (~13,000 notes since January 2024, measured
+ * CDMSS-WM-HEADACHE-POOL-ALL-HISTORY-8-SEP-2026 §2.4) and every one of them costs a full spine
+ * reconstruction, so the cron cap is deliberately the smallest of the four: phase 0 must not be
+ * able to eat an invocation that the three phases behind it need to finish their own queues. The
+ * manual cap is higher because a person watching a backfill can wait, and can stop.
+ */
+export const RAW_TRIGGER_KIND = 'opd_note_matched';
+export const RAW_PHASE_CAP = 40;
+export const RAW_MANUAL_CAP = 100;
+
+/** How many triples the stability check re-reconstructs. Small on purpose: each one is a full db13
+ *  read pair, and the run is manual and admin-only. */
+export const STABILITY_SAMPLE_N = 30;
 
 /**
  * The wall-clock budget for one run: 240 s inside the route's 300 s `maxDuration`, leaving 60 s of
@@ -135,6 +173,8 @@ export interface JoinDeps {
   reconstruct?: (individualUid: string, asOfDate: string, computedAt: string) => Promise<unknown | null>;
   /** The Y read. */
   labRows?: (individualUid: string, fromDayIst: string) => Promise<LabRow[]>;
+  /** The raw-note read (phase 0). Rows exactly as `listRawNoteCandidatesSql` returns them. */
+  rawNotes?: (beforeTs: string | null, limit: number) => Promise<Record<string, unknown>[]>;
   flags?: WalkFlags;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
@@ -161,6 +201,10 @@ async function resolveIndividualReal(prescUid: string): Promise<string | null> {
 async function labRowsReal(individualUid: string, fromDayIst: string): Promise<LabRow[]> {
   const rows = await metabaseQuery(yQuerySql(individualUid, fromDayIst));
   return (rows as Record<string, unknown>[]).map(toLabRow).filter((r): r is LabRow => r !== null);
+}
+
+async function rawNotesReal(beforeTs: string | null, limit: number): Promise<Record<string, unknown>[]> {
+  return metabaseQuery(listRawNoteCandidatesSql(beforeTs, limit));
 }
 
 interface Capture { cutStatus: CutStatus; json: unknown | null; hash: string | null }
@@ -202,6 +246,16 @@ async function maybeAttachReaction(triple: TripleRow): Promise<boolean> {
   return true;
 }
 
+/**
+ * Phase 0's counts. `error` is NOT in the kickoff's listed shape and is added deliberately: §8
+ * requires that a db13 failure END PHASE 0 and let phases 1 to 3 run, and a phase that failed
+ * silently would be indistinguishable from a phase that found nothing. `scanned: 0, error: null` is
+ * "we looked, and there was nothing left"; `scanned: 0, error: '…'` is "we could not look".
+ */
+export interface Phase0Result {
+  scanned: number; opened: number; skipped_existing: number; skipped_bad_row: number;
+  unresolved: number; budgetStopped: boolean; error: string | null;
+}
 export interface Phase1Result { scanned: number; opened: number; unresolved: number; deferred: number; budgetStopped: boolean }
 export interface Phase2Result { scanned: number; present: number; missing: number; stillPending: number; deferred: number; reactions: number; budgetStopped: boolean }
 export interface Phase3Result { scanned: number; closed: number; failed: number; repaired: number; reactions: number; budgetStopped: boolean }
@@ -213,6 +267,111 @@ function outOfBudget(deps: JoinDeps): boolean {
 }
 
 /**
+ * Phase 0 — open a triple for every RAW headache note that has none. (WM3 fix 3, N8.)
+ *
+ * ── WHAT THIS PHASE IS FOR ─────────────────────────────────────────────────────────────────────
+ *
+ * Phase 1 can only see notes the audit engine audited AND the shadow agent judged. About 13,000
+ * headache notes since January 2024 were never audited at all, so no shadow row exists for them and
+ * phase 1 is structurally blind to them. This phase reads db13 directly under `headache-raw/1` and
+ * opens the ones that no triple covers yet.
+ *
+ * ── NEWEST FIRST, AND WHY THE CURSOR IS A MINIMUM ──────────────────────────────────────────────
+ *
+ * The cursor is the OLDEST raw triple's `event_at`, and each run asks db13 for notes strictly older
+ * than it, newest first. So run 1 takes the newest 40, run 2 the 40 before those, and the walk
+ * marches backwards through the pool without a hardcoded cutoff. That ordering is deliberate: the
+ * lab mirror is reliable after June 2026 and thinner before it, so the notes whose Y can actually be
+ * found are reached first, and the run that eventually reaches 2024 is a run whose limits are
+ * already understood rather than a surprise.
+ *
+ * The cursor is read to the SECOND (`…T00:00:00Z`), so a run re-reads at most the sub-second
+ * remainder of its own boundary — and `tripleExistsForNote` skips those without opening anything.
+ *
+ * ── ONE TRIPLE PER NOTE ────────────────────────────────────────────────────────────────────────
+ *
+ * The existence check is on `event_ref` ALONE, across every trigger kind, so a note the shadow
+ * agent already opened is skipped here rather than opened a second time under a weaker trigger. The
+ * audit-trigger triple wins, always: it is the one whose event was judged by a policy.
+ *
+ * ── NEVER THROWS ───────────────────────────────────────────────────────────────────────────────
+ *
+ * A db13 outage ends this phase with `error` set and leaves phases 1 to 3 to run (§8). Nothing here
+ * can take down a cron tick, and nothing here is retried inside one run.
+ */
+export async function runJoinPhase0(limit: number, deps: JoinDeps = {}): Promise<Phase0Result> {
+  const rawNotes = deps.rawNotes ?? rawNotesReal;
+  const sleep = deps.sleep ?? sleepReal;
+  const nowFn = deps.now ?? (() => new Date());
+  const ipdFold = ipdFoldLabelFor(deps.flags ?? readWalkFlags());
+  const computedAt = nowFn().toISOString();
+  const out: Phase0Result = {
+    scanned: 0, opened: 0, skipped_existing: 0, skipped_bad_row: 0, unresolved: 0,
+    budgetStopped: false, error: null,
+  };
+
+  try {
+    const cursor = await rawNoteCursor(RAW_TRIGGER_KIND);
+    // The builder accepts whole seconds only; truncating rather than rounding keeps the bound at or
+    // before the cursor, so no note can be stepped over.
+    const beforeTs = cursor == null ? null : `${cursor.slice(0, 19)}Z`;
+    const rows = await rawNotes(beforeTs, limit);
+    out.scanned = rows.length;
+
+    for (const r of rows) {
+      if (out.opened >= limit) break;
+      if (outOfBudget(deps)) { out.budgetStopped = true; break; }
+
+      const uid = String(r.uid ?? '');
+      const eventAtRaw = String(r.event_at ?? '');
+      const eventAt = new Date(eventAtRaw);
+      if (!isUid(uid) || !eventAtRaw || Number.isNaN(eventAt.getTime())) { out.skipped_bad_row++; continue; }
+
+      if (await tripleExistsForNote(uid)) { out.skipped_existing++; continue; }
+
+      // The row already carries `_parent_id`, so the identity needs no second db13 round trip. A
+      // value that is not a well-formed uid is read as an ABSENCE, exactly as `resolveIndividual`
+      // reads its own answer — never fed to the spine, which would return null and be recorded as
+      // "there was nothing here" when the truth is "this was not an identity".
+      const raw = String(r.individual_uid ?? '');
+      const individualUid = isUid(raw) ? raw : null;
+      const eventAtIso = eventAt.toISOString();
+
+      if (!individualUid) {
+        const inserted = await insertTriple({
+          trigger_kind: RAW_TRIGGER_KIND, event_ref: uid, event_at: eventAtIso,
+          individual_uid: null, microworld: JOIN_MICROWORLD, provenance: 'reconstructed',
+          resolve_status: 'unresolved', o_before_id: null, y_status: 'missing_within_horizon',
+          y_horizon_days: Y_HORIZON_DAYS, policy_version: BURDEN_POLICY_VERSION,
+          era_status: 'unaudited',
+        });
+        if (inserted) { out.opened++; out.unresolved++; }
+        await sleep(PACING_MS);
+        continue;
+      }
+
+      const asOf = istDay(eventAt);
+      const cap = await capture(individualUid, asOf, computedAt, deps);
+      const snapshotId = await persistCapture(individualUid, asOf, 'reconstructed', cap, ipdFold);
+      const inserted = await insertTriple({
+        trigger_kind: RAW_TRIGGER_KIND, event_ref: uid, event_at: eventAtIso,
+        individual_uid: individualUid, microworld: JOIN_MICROWORLD,
+        // Every raw triple is RECONSTRUCTED by construction: the note was matched by a query run
+        // long after it happened, never captured as it arrived.
+        provenance: 'reconstructed', resolve_status: 'resolved', o_before_id: snapshotId,
+        y_status: 'pending', y_horizon_days: Y_HORIZON_DAYS,
+        policy_version: BURDEN_POLICY_VERSION, era_status: 'unaudited',
+      });
+      if (inserted) out.opened++;
+      await sleep(PACING_MS);
+    }
+  } catch (e) {
+    out.error = String((e as Error).message).slice(0, 300);
+  }
+  return out;
+}
+
+/**
  * Phase 1 — open a triple for every eligible event that has none.
  *
  * `provenance` is decided ONCE per run from the join's first run time, so a run cannot start
@@ -220,7 +379,9 @@ function outOfBudget(deps: JoinDeps): boolean {
  * there is no first run time, so the first runs are all `reconstructed` — which is what a backfill
  * is.
  */
-export async function runJoinPhase1(limit: number, deps: JoinDeps = {}): Promise<Phase1Result> {
+export async function runJoinPhase1(
+  limit: number, deps: JoinDeps = {}, era: 'current' | 'stale' = 'current',
+): Promise<Phase1Result> {
   const resolve = deps.resolveIndividual ?? resolveIndividualReal;
   const sleep = deps.sleep ?? sleepReal;
   const nowFn = deps.now ?? (() => new Date());
@@ -228,7 +389,7 @@ export async function runJoinPhase1(limit: number, deps: JoinDeps = {}): Promise
   const computedAt = nowFn().toISOString();
 
   const first = await firstRunAt();
-  const candidates = await listOpenCandidates(BURDEN_POLICY_VERSION, JOIN_TRIGGER_KIND, limit);
+  const candidates = await listOpenCandidates(BURDEN_POLICY_VERSION, JOIN_TRIGGER_KIND, limit, era);
   const out: Phase1Result = { scanned: candidates.length, opened: 0, unresolved: 0, deferred: 0, budgetStopped: false };
 
   for (const c of candidates) {
@@ -249,7 +410,7 @@ export async function runJoinPhase1(limit: number, deps: JoinDeps = {}): Promise
         trigger_kind: c.trigger_kind, event_ref: c.event_ref, event_at: c.event_at,
         individual_uid: null, microworld: JOIN_MICROWORLD, provenance, resolve_status: 'unresolved',
         o_before_id: null, y_status: 'missing_within_horizon', y_horizon_days: Y_HORIZON_DAYS,
-        policy_version: BURDEN_POLICY_VERSION,
+        policy_version: BURDEN_POLICY_VERSION, era_status: era,
       });
       if (inserted) { out.opened++; out.unresolved++; }
       await sleep(PACING_MS);
@@ -263,7 +424,7 @@ export async function runJoinPhase1(limit: number, deps: JoinDeps = {}): Promise
       trigger_kind: c.trigger_kind, event_ref: c.event_ref, event_at: c.event_at,
       individual_uid: individualUid, microworld: JOIN_MICROWORLD, provenance,
       resolve_status: 'resolved', o_before_id: snapshotId, y_status: 'pending',
-      y_horizon_days: Y_HORIZON_DAYS, policy_version: BURDEN_POLICY_VERSION,
+      y_horizon_days: Y_HORIZON_DAYS, policy_version: BURDEN_POLICY_VERSION, era_status: era,
     });
     if (inserted) out.opened++;
     await sleep(PACING_MS);
@@ -361,10 +522,14 @@ export async function runJoinPhase3(limit: number, deps: JoinDeps = {}, retryFai
 export interface JoinSweepResult {
   ok: boolean;
   error: string | null;
-  mode: 'sweep' | 'backfill' | 'retry_failed';
+  mode: 'sweep' | 'backfill' | 'retry_failed' | 'raw_notes' | 'stability';
   schemaVersion: string;
   policyVersion: string;
+  phase0: Phase0Result | null;
   phase1: Phase1Result | null;
+  /** The stale-era pass of phase 1. Null unless `include_stale_era` was asked for — and null is
+   *  "we did not look at the stale backlog", never "the stale backlog is empty". */
+  phase1_stale: Phase1Result | null;
   phase2: Phase2Result | null;
   phase3: Phase3Result | null;
   /**
@@ -374,19 +539,37 @@ export interface JoinSweepResult {
    * consumer that only wants the boolean reads it as truthy; a consumer that wants to know which
    * queue is the bottleneck reads the name. See the report's Fix 2 for the alternative considered.
    */
-  budget_stopped: false | 'phase1' | 'phase2' | 'phase3';
+  budget_stopped: false | 'phase0' | 'phase1' | 'phase1_stale' | 'phase2' | 'phase3';
 }
 
 const EMPTY: Omit<JoinSweepResult, 'mode'> = {
   ok: true, error: null, schemaVersion: JOIN_SCHEMA_VERSION, policyVersion: BURDEN_POLICY_VERSION,
-  phase1: null, phase2: null, phase3: null, budget_stopped: false,
+  phase0: null, phase1: null, phase1_stale: null, phase2: null, phase3: null, budget_stopped: false,
 };
+
+/** What one stability run measured. Its own shape: it has no phases and opens no triples. */
+export interface JoinStabilityResult {
+  ok: boolean;
+  error: string | null;
+  mode: 'stability';
+  schemaVersion: string;
+  sample_n: number;
+  matched_n: number;
+  failed_n: number;
+  /** matched / (sampled − failed). NULL when the denominator is 0 — not measured, not 0%. */
+  match_rate: number | null;
+  mismatched_ids: string[];
+}
 
 /**
  * One bounded run. NEVER THROWS: a failed read is reported as `{ ok:false, error }` so a cron tick
- * reports rather than alerts, exactly as the shadow sweep does. The three phases run in order and
- * never concurrently — phase 2 reads rows phase 1 may have just written, and interleaving them
- * would make a run's counts unreadable.
+ * reports rather than alerts, exactly as the shadow sweep does. The FOUR phases run in order and
+ * never concurrently — phase 2 reads rows phases 0 and 1 may have just written, and interleaving
+ * them would make a run's counts unreadable.
+ *
+ * The cron opens `current` events and raw notes. It NEVER opens the stale-era backlog: that is a
+ * finite, bounded set drained by hand through `runJoinBackfill({ include_stale_era: true })`, so a
+ * decision to re-open notes the burden policy refused stays a decision somebody made.
  */
 export async function runJoinSweep(deps: JoinDeps = {}): Promise<JoinSweepResult> {
   const result: JoinSweepResult = { ...EMPTY, mode: 'sweep' };
@@ -395,6 +578,11 @@ export async function runJoinSweep(deps: JoinDeps = {}): Promise<JoinSweepResult
   // each getting a fresh one.
   const budgeted: JoinDeps = { ...deps, deadlineAt: deps.deadlineAt ?? nowFn().getTime() + SWEEP_BUDGET_MS };
   try {
+    // Phase 0 first, and its own db13 failure is NOT this run's failure: it sets its own `error`
+    // and the three phases behind it still get their share of the budget.
+    result.phase0 = await runJoinPhase0(RAW_PHASE_CAP, budgeted);
+    if (result.phase0.budgetStopped) { result.budget_stopped = 'phase0'; return result; }
+
     result.phase1 = await runJoinPhase1(PHASE1_CAP, budgeted);
     if (result.phase1.budgetStopped) { result.budget_stopped = 'phase1'; return result; }
 
@@ -409,17 +597,109 @@ export async function runJoinSweep(deps: JoinDeps = {}): Promise<JoinSweepResult
   }
 }
 
-/** Phase 1 only, with the backfill cap. The first runs of the join are backfills. */
-export async function runJoinBackfill(limit = BACKFILL_CAP, deps: JoinDeps = {}): Promise<JoinSweepResult> {
+/**
+ * Phase 1 only, with the backfill cap. The first runs of the join are backfills.
+ *
+ * `include_stale_era` runs phase 1 a SECOND time over the events the burden policy refused with
+ * `stale_era` — audited headache notes whose engine version was no longer current (about 605 of
+ * them on 9 Sep 2026). Each pass gets the full limit, and the two are reported separately, because
+ * a `stale` triple and a `current` one are evidence about different populations even though every
+ * phase after this one treats them identically.
+ *
+ * Off by default, and off on the cron: opening the stale backlog is a decision, not a schedule.
+ */
+export async function runJoinBackfill(
+  limit = BACKFILL_CAP, deps: JoinDeps = {}, opts: { include_stale_era?: boolean } = {},
+): Promise<JoinSweepResult> {
   const result: JoinSweepResult = { ...EMPTY, mode: 'backfill' };
   try {
     const nowFn = deps.now ?? (() => new Date());
     const budgeted: JoinDeps = { ...deps, deadlineAt: deps.deadlineAt ?? nowFn().getTime() + SWEEP_BUDGET_MS };
-    result.phase1 = await runJoinPhase1(Math.max(1, Math.min(BACKFILL_CAP, limit)), budgeted);
-    if (result.phase1.budgetStopped) result.budget_stopped = 'phase1';
+    const capped = Math.max(1, Math.min(BACKFILL_CAP, limit));
+    result.phase1 = await runJoinPhase1(capped, budgeted, 'current');
+    if (result.phase1.budgetStopped) { result.budget_stopped = 'phase1'; return result; }
+    if (opts.include_stale_era) {
+      result.phase1_stale = await runJoinPhase1(capped, budgeted, 'stale');
+      if (result.phase1_stale.budgetStopped) result.budget_stopped = 'phase1_stale';
+    }
     return result;
   } catch (e) {
     return { ...result, ok: false, error: String((e as Error).message).slice(0, 300) };
+  }
+}
+
+/** Phase 0 only, on demand, with the higher manual cap. */
+export async function runJoinRawNotes(limit = RAW_PHASE_CAP, deps: JoinDeps = {}): Promise<JoinSweepResult> {
+  const result: JoinSweepResult = { ...EMPTY, mode: 'raw_notes' };
+  try {
+    const nowFn = deps.now ?? (() => new Date());
+    const budgeted: JoinDeps = { ...deps, deadlineAt: deps.deadlineAt ?? nowFn().getTime() + SWEEP_BUDGET_MS };
+    result.phase0 = await runJoinPhase0(Math.max(1, Math.min(RAW_MANUAL_CAP, limit)), budgeted);
+    if (result.phase0.budgetStopped) result.budget_stopped = 'phase0';
+    return result;
+  } catch (e) {
+    return { ...result, ok: false, error: String((e as Error).message).slice(0, 300) };
+  }
+}
+
+/**
+ * N5 — does `O_before` still reconstruct to what we stored? (Manual, admin-only, never on the cron.)
+ *
+ * ── WHAT IT MEASURES, AND WHAT IT CANNOT ───────────────────────────────────────────────────────
+ *
+ * Every O_before in the table was produced by calling the frozen reconstruct at a past as-of. That
+ * function reads db13 LIVE, so its answer for an old day can move — a corrected row, a late-arriving
+ * document, a flag change. If it moves, the snapshots already written stop being reproducible, and
+ * anything computed from them silently becomes a claim about a database that no longer exists. This
+ * run re-takes the same reading and counts how many still hash the same.
+ *
+ * ⚠️ THE ORIGINAL `computedAt` IS REPLAYED, not today's clock. The frozen reconstruct stamps the
+ * `computedAt` it is handed onto the snapshot it returns, and the hash covers the whole object, so
+ * re-running with a fresh clock would differ in EVERY row and the check would report 0% while
+ * measuring only the passage of time. The original value is read back out of the stored snapshot.
+ *
+ * ⚠️ WRITES NOTHING TO `cognition_snapshots`. It calls `capture`, never `persistCapture`. A drifted
+ * reading is evidence to look at, not a correction to apply — overwriting the stored snapshot would
+ * destroy the very thing that made the drift visible.
+ *
+ * A throw counts as `failed` and comes OUT of the denominator. A run we could not take is not
+ * evidence that the reconstruct moved.
+ */
+export async function runJoinStability(deps: JoinDeps = {}): Promise<JoinStabilityResult> {
+  const base: JoinStabilityResult = {
+    ok: true, error: null, mode: 'stability', schemaVersion: JOIN_SCHEMA_VERSION,
+    sample_n: 0, matched_n: 0, failed_n: 0, match_rate: null, mismatched_ids: [],
+  };
+  try {
+    const sleep = deps.sleep ?? sleepReal;
+    const nowFn = deps.now ?? (() => new Date());
+    const sample = await listStabilitySample(STABILITY_SAMPLE_N);
+    const tripleIds: string[] = [];
+    const mismatched: string[] = [];
+    let matched = 0;
+    let failed = 0;
+
+    for (const row of sample) {
+      tripleIds.push(row.triple_id);
+      const cap = await capture(row.individual_uid, row.as_of, row.computed_at ?? nowFn().toISOString(), deps);
+      if (cap.cutStatus === 'context_fetch_failed') failed++;
+      else if (cap.hash != null && cap.hash === row.snapshot_hash) matched++;
+      else mismatched.push(row.triple_id);
+      await sleep(PACING_MS);
+    }
+
+    await insertStabilityRun({
+      sample_n: sample.length, matched_n: matched, failed_n: failed,
+      triple_ids: tripleIds, mismatched_ids: mismatched,
+      walk_version: WORLD_MODEL_WALK_VERSION, member_state_version: MEMBER_STATE_VERSION,
+    });
+
+    return {
+      ...base, sample_n: sample.length, matched_n: matched, failed_n: failed,
+      match_rate: matchRate(sample.length, matched, failed), mismatched_ids: mismatched,
+    };
+  } catch (e) {
+    return { ...base, ok: false, error: String((e as Error).message).slice(0, 300) };
   }
 }
 

@@ -325,10 +325,6 @@ export const UNREGISTERED: string[] = [
                             // discharge / OT / PAC / progress document, with not_auditable rows recording
                             // an ABSENCE as a fact. Reads db13 through the readmission fetchers; writes
                             // clinical_states and nothing else
-  'triage',                 // CAT Managed Care Audit Triage shadow door (queue-read + shadow proposals).
-                            // Listed here rather than given a ModuleManifest because the ship file
-                            // contract does not authorise editing this file beyond what the coverage
-                            // rule forces: a new lib/ directory is a subsystem by construction.
   'readmission',            // readmission analysis agent Phase 1 (readmission/0.1 — detect + reconcile + Vertex worker)
   'readmission-reconcile-core', // pure Stage-2 reconciliation + R1 advisory judgements (readmit-judgement/1) —
                             // surfaced as its own versioned subsystem the day JUDGEMENT_RULE_VERSION was exported
