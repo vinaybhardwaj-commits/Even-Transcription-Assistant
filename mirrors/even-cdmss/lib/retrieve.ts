@@ -1,7 +1,4 @@
 import { sql } from './db';
-// LAB-MCP-V2 §7 (decision 6). Retrieval DELEGATES rather than throwing: corpus reads are
-// the one production read a Slice A run legitimately makes, and the lab supplies the edge.
-import { labExecution } from './lab-execution-context';
 import { embedQuery, embedQueryV2, vectorLiteral, TOP_K, USE_EMBEDDING_V2 } from './llm';
 import { expandQuery } from './expand';
 import { rerank } from './rerank';
@@ -382,14 +379,6 @@ async function buildDiscriminatingBm25(bm25Query: string, dfMax: number): Promis
 }
 
 export async function retrieve(query: string, opts: RetrieveOptions = {}): Promise<RetrieveResult> {
-  // §7 — the one delegating guard. `sql` and `metabaseQuery` throw inside a lab context
-  // because a research run has no business touching them; retrieval is different, because
-  // reproducing an audit REQUIRES the corpus. The edge is captured outside the context and
-  // runs the production body under AsyncLocalStorage.exit(), so the read reaches
-  // DATABASE_URL by the normal path and is logged as a `retrieval_read` event on the item.
-  // This read is also exactly why every Slice A dataset is `mutable_source` (§4.2).
-  const _lab = labExecution();
-  if (_lab) return _lab.retrieve(query, opts) as Promise<RetrieveResult>;
   const topK = opts.topK ?? TOP_K;
   const minSim = opts.minSimilarity ?? 0.3;
   const hybrid = opts.hybrid !== false;

@@ -47,30 +47,6 @@ export const PROMPT_MANIFESTS: PromptManifest[] = [
   // AUDIT_REVISE's support discipline (embedded in the prompt, like the others). Measurement-only
   // (corpus-eval/1.0), Pro-tier. rubricId left blank — no separate rubric doc to link.
   { id: 'verify-core/VERIFY_SYSTEM', maturity: 'draft' },
-  // LVP L2 (21 Aug 2026) — the low-value-patterns shelf operator, Opus on Bedrock. REGISTERED
-  // rather than left unregistered because its discipline IS the prompt: the whole voice section
-  // (no assertion of wrongness, no blame, no instruction) is the rubric, embedded in the text the
-  // way the other seven embed theirs. rubricId left blank — there is no separate rubric doc.
-  // ⚠️ ITS OUTPUT IS FILTERED AFTER THE FACT TOO, and that is deliberate belt-and-braces: the
-  // prompt names the ten forbidden strings, and lvp-operator-core screens for them again
-  // server-side before any write. A prompt is an instruction, not a guarantee.
-  { id: 'lvp-operator-core/LVP_OPERATOR_SYSTEM', maturity: 'draft' },
-  // IPD Episode Audit 0.1 (2 Sep 2026) — the four standing prompts of the second IPD engine, all
-  // in lib/ipd-episode/prompts.ts. REGISTERED rather than left on the gap list because the
-  // BLINDING is the rubric: what each prompt is forbidden to see is what makes its output mean
-  // anything. The checkpoint prompt is written to a cut-off it cannot see past; the diff prompt is
-  // told outright that the admission's ending is absent and not to infer one; the fidelity prompt
-  // is fenced to a single domain; the commentary prompt is forbidden every number. rubricId is
-  // left blank on all four — the discipline is embedded in the prompt text, and there is no
-  // separate rubric document to link.
-  // ⚠️ AND EVERY ONE OF THOSE RULES IS RE-APPLIED IN CODE after the model returns
-  // (lib/ipd-episode/judge-core.ts: the Tier C rewrite, the uncited cap, the A2 domain drop, the
-  // enum validation, the commentary score/finding-id rejection). A prompt is an instruction, not
-  // a guarantee — the same belt-and-braces posture LVP_OPERATOR_SYSTEM carries above.
-  { id: 'prompts/IPD_EPISODE_CHECKPOINT_SYSTEM', maturity: 'draft' },
-  { id: 'prompts/IPD_EPISODE_COMMENTARY_SYSTEM', maturity: 'draft' },
-  { id: 'prompts/IPD_EPISODE_DIFF_SYSTEM', maturity: 'draft' },
-  { id: 'prompts/IPD_EPISODE_FIDELITY_SYSTEM', maturity: 'draft' },
 ];
 
 /**
@@ -133,26 +109,8 @@ export const UNREGISTERED_PROMPTS: string[] = [
   'pathway-core/ENRICH_CRITIQUE_SYSTEM',
   'pathway-core/ENRICH_REVISE_SYSTEM',
   'pathway-core/SKELETON_SYSTEM',
-  // Pre-op Risk B5 + B6 (27 Aug 2026), both shipped behind flags that are OFF. Neither is
-  // rubric-scored, and for opposite reasons: the extraction prompt makes no clinical
-  // judgement to score — it copies verbatim spans and names which of a fixed list of
-  // history items each one asserts, and CODE (span verification, the target whitelist, the
-  // confidence floor) decides what survives. The narrative prompt is scored by a rule
-  // rather than a rubric: every sentence must cite a row of the computed factor table, and
-  // an uncited one invalidates the whole paragraph. Both stay unregistered until the B7
-  // validation pack yields a gold — V's clinical read of the extraction sample is exactly
-  // the signal a manifest entry would need.
-  'preop-extract-core/EXTRACT_SYSTEM',
-  'preop-narrative-core/PREOP_NARRATIVE_SYSTEM',
   'prognosis-core/PX_CRITIQUE_SYSTEM',
   'prognosis-core/PX_REVISE_SYSTEM',
   'prognosis-core/PX_SYSTEM',
-  // Stewardship S4 (CDMSS-STEWARDSHIP-MS-AGENT kickoff v2, 29 Aug 2026). Not rubric-scored, and the
-  // reason is structural rather than "not yet": this clause asks the model to REPORT what a named
-  // reviewer asserted in his own turn, never to judge anything. Everything it produces is then
-  // discarded unless code can find the quote inside the reviewer's own words (§12.3), so the thing a
-  // rubric would score — a clinical judgement — is not made here at all. It stays unregistered
-  // permanently unless the gate's refusal rates ever become a signal worth grading.
-  'physician-standing-core/STANDING_PROMPT_CLAUSE',
   'right-care-ground-eval-core/PAIR_JUDGE_SYSTEM',
 ];

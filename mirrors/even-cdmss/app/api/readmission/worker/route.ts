@@ -2,9 +2,7 @@
 // Mirrors /api/ipd-audit/worker: same auth guard, same box, same sweep-is-the-retry posture.
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-// The cron interval must clear this box: READMIT-RECENT-VIEW (17 Sep 2026) widened the worker's
-// window from 06:30-10:30 IST only to every 30 min around the clock, and 30 min = 1,800 s still
-// clears it comfortably (was */15 = 900 s > 800 s, same posture, same box).
+// Same box as the IPD worker, and the cron interval must clear it: */15 = 900 s > 800 s.
 // Any future change to maxDuration must move the cron interval with it, in the same commit.
 export const maxDuration = 800;
 
@@ -63,63 +61,23 @@ export async function GET(req: NextRequest) {
   const p = req.nextUrl.searchParams;
 
   // ── THE BATCH MUST FIT THE BOX (derived from PROVIDER_BUDGETS, the IPD discipline) ──
-  // WORST CASE PER FINDING (vertex audit_ipd budget = 200,000 ms × 1 try per leg).
-  // REDONE 17 Aug 2026 for R2 (READMISSIONS-R2 PRD v1.0 §3.6, T-11): db13 reads grew by
-  // the source-4 template fetches. No fourth Vertex leg was added — templates are extra
-  // catalog items on the existing legs, so the leg term is unchanged.
+  // WORST CASE PER FINDING (vertex audit_ipd budget = 200,000 ms × 1 try per leg):
   //
   //   lane D promoted (decision 14):  condition pass + recon A + recon B = 3 legs
   //   3 × 200,000                                   = 600,000 ms
-  //   db13 reads (2 summaries + 2 lab sets)         ≈  30,000 ms   (unchanged)
-  //   db13 template fetches (R2): OT + progress on   ≈  60,000 ms   worst case — five
-  //     both stays + PAC two-hop, ALL in one              fetches in parallel with each
-  //     Promise.all beside the lab reads                   other AND with the lab reads; the
-  //                                                        slowest source may run 2 serial
-  //                                                        hops (primary → fallback), so the
-  //                                                        term is sized at 2 hops × ~30 s
-  //   per finding                                     ~690,000 ms
+  //   db13 reads (2 summaries + 2 lab sets)         ≈  30,000 ms
+  //   per finding                                     ~630,000 ms
   //   box                                              800,000 ms
-  //   waves ceil(max 3 / conc 3) = 1 → wall ≈ one worst-case finding ≈ 690,000 ms
-  //   margin                                          ~110,000 ms   guard PASS
+  //   waves ceil(max 3 / conc 3) = 1 → wall ≈ one worst-case finding ≈ 630,000 ms
+  //   margin                                          ~170,000 ms   guard PASS
   //
-  // REDONE 18 Aug 2026 for R4 (READMISSIONS-R4 PRD v1.0 R4-3 / R4-11): the at-audit path gained
-  // a FOURTH leg — the case narrative, Opus 4.6 on Bedrock, its own budget — plus the three-hop
-  // prior-LVC join, both AFTER saveAuditResult (a fault or overrun there costs the narrative,
-  // never the finding). Inline by default because the leg MEASURED 22–25 s live (four calls,
-  // 18 Aug); opt out with READMIT_NARRATIVE_INLINE=0 → narratives then come only from the
-  // backfill tick on the Bedrock rails (lib/readmission/narrative-backfill.ts).
-  //   3 × 200,000 recon                              = 600,000 ms
-  //   db13 reads + template fetches (as above)       ≈  90,000 ms
-  //   narrative leg (NARRATIVE_BUDGET_MS, 1 try)     ≈  80,000 ms   worst case; measured 22–25 s
-  //   three-hop LVC join (db13 ×2 + app DB ×2)       ≈  20,000 ms   measured 2.4–10 s
-  //   per finding                                     ~790,000 ms
-  //   box                                              800,000 ms
-  //   waves = 1 ENFORCED (max is clamped to conc, Addendum A3) → wall ≈ one worst-case finding
-  //                                                    ≈ 790,000 ms; a second wave (~1,580,000 ms)
-  //                                                    cannot fit and can no longer be requested
-  //   margin                                          ~10,000 ms    guard PASS — thin BY THE
-  //                                                                  200 s-per-leg worst case
-  //                                                                  (measured actuals ~35 s for
-  //                                                                  leg + join); safe because the
-  //                                                                  finding is stored before the
-  //                                                                  leg starts
-  // Dropping `max` cannot buy margin here (waves = 1 already; the wall IS one finding), so the
-  // R4-3 lever is the opt-out flag, not `max`. If the recon legs ever measure near their 200 s
-  // ceilings live, set READMIT_NARRATIVE_INLINE=0 in the same breath.
-  //
-  // A second wave would be ~1,380,000 ms and CANNOT fit — max stays ≤ conc by default
-  // (waves = 1 holds while max ≤ conc). Plain lane A/B findings are 2 legs ≈ 490 s; OON
-  // is 1 leg ≈ 290 s. The arithmetic sizes against the worst case, not the average. If the
-  // template term measures larger than 60 s live, drop `max`, not the templates (templates
-  // PRD §4.5). No cron change (R2-1).
-  // ⚠️ These numbers are coupled: max, conc, maxDuration, the leg count per lane,
-  // PROVIDER_BUDGETS.vertex.audit_ipd, AND the db13 read set. Changing any one means
-  // redoing this arithmetic in the same commit.
+  // A second wave would be ~1,260,000 ms and CANNOT fit — max stays ≤ conc by default.
+  // (Plain lane A/B findings are 2 legs ≈ 430 s; OON is 1 leg ≈ 230 s. The arithmetic
+  // sizes against the worst case, not the average.)
+  // ⚠️ These numbers are coupled: max, conc, maxDuration, the leg count per lane, and
+  // PROVIDER_BUDGETS.vertex.audit_ipd. Changing any one means redoing this arithmetic.
+  const max = Math.max(1, Math.min(10, Number(p.get('max') || 3)));
   const conc = Math.max(1, Math.min(5, Number(p.get('conc') || 3)));
-  // Addendum A3 (R4, 18 Aug 2026): max ≤ conc so waves = 1 by construction — the arithmetic above
-  // holds ONE worst-case finding (~790,000 of 800,000 ms); a second wave cannot fit, so ?max=10
-  // must be unfireable rather than a foot-gun.
-  const max = Math.min(Math.max(1, Math.min(10, Number(p.get('max') || 3))), conc);
   const dayParam = p.get('day');
   const day = dayParam && /^\d{4}-\d{2}-\d{2}$/.test(dayParam) ? dayParam : null;
   const laneParam = p.get('lane');

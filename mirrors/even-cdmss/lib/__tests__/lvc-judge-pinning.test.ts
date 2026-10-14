@@ -16,7 +16,10 @@
 import './gemini-env-fixture';   // ⚠️ MUST BE FIRST — see the fixture's header (module-load env capture)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultJudge, LVC_JUDGE_REFUSED_EVENT } from '../lvc';
+import {
+  defaultJudge, lvcJudgeOutputTokens, LVC_JUDGE_MAX_OUTPUT_TOKENS,
+  LVC_JUDGE_REFUSED_EVENT,
+} from '../lvc';
 import { AUDIT_LLM_SEED, GEMINI_MODEL, GEMINI_FLASH_MODEL } from '../llm';
 import { assembleFlags, type LvcRecommendation } from '../lvc-core';
 import { resolveAaExperiment, AA_EXPERIMENT_DEFAULT, AA_EXPERIMENT_RE } from '../lvc-judge-aa-core';
@@ -69,6 +72,29 @@ test('D-1: the autoflag surface is pinned identically — one judge, one configu
   assert.equal(bodies[0].temperature, 0);
   assert.equal(bodies[0].seed, AUDIT_LLM_SEED);
   assert.equal(bodies[0].top_p, 1);
+});
+
+test('the judge output allowance scales deterministically for large recommendation batches', async () => {
+  assert.equal(lvcJudgeOutputTokens(0), 900);
+  assert.equal(lvcJudgeOutputTokens(3), 900, 'small batches preserve the shipped allowance');
+  assert.equal(lvcJudgeOutputTokens(38), 6080, 'the measured truncating batch gets visible JSON room');
+  assert.equal(lvcJudgeOutputTokens(10_000), LVC_JUDGE_MAX_OUTPUT_TOKENS, 'the allowance stays bounded');
+
+  const many = Array.from({ length: 38 }, (_, i) => rec(`large-${i + 1}`));
+  const bodies: Record<string, unknown>[] = [];
+  await defaultJudge(CTX, many, 'surface', undefined, false, {
+    call: async (p) => {
+      bodies.push(p);
+      return {
+        model: INTENDED,
+        choices: [{ message: { content: JSON.stringify(many.map((r) => ({
+          id: r.id, verdict: 'applies', confidence: 0.95, why: 'test', consider_instead: null,
+        }))) } }],
+      };
+    },
+  });
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].max_tokens, 6080);
 });
 
 // ── D-2: THE GEMINI-ONLY GUARD ────────────────────────────────────────────────────────────────

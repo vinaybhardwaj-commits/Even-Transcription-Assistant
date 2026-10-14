@@ -215,6 +215,22 @@ export type JudgeCall = (params: any) => Promise<any>;
 export type JudgeEventRecorder = (kind: string, payload: unknown) => void | Promise<void>;
 export interface JudgeDeps { call?: JudgeCall; recordEvent?: JudgeEventRecorder }
 
+// Gemini 2.5 spends max_tokens on hidden reasoning before the JSON response. The transport adds
+// 8192 thinking headroom, while this value reserves the visible answer. A fixed 900-token answer
+// allowance truncated every observed 38-recommendation harness call on 10 Aug 2026. Keep the
+// existing 900 floor for small batches, scale large batches deterministically, and cap the request.
+export const LVC_JUDGE_MIN_OUTPUT_TOKENS = 900;
+export const LVC_JUDGE_OUTPUT_TOKENS_PER_REC = 160;
+export const LVC_JUDGE_MAX_OUTPUT_TOKENS = 8192;
+
+export function lvcJudgeOutputTokens(nRecs: number): number {
+  const count = Number.isFinite(nRecs) ? Math.max(0, Math.floor(nRecs)) : 0;
+  return Math.min(
+    LVC_JUDGE_MAX_OUTPUT_TOKENS,
+    Math.max(LVC_JUDGE_MIN_OUTPUT_TOKENS, count * LVC_JUDGE_OUTPUT_TOKENS_PER_REC),
+  );
+}
+
 // ══ ATTRIBUTION — LVC JUDGE GUARD FIX PRD v3.0 §3.2 (D-6, D-8, D-9, D-15), 10 Aug 2026 ═════════
 
 export type JudgeAttributionState = 'verified' | 'wrong_model' | 'unknown';
@@ -486,7 +502,7 @@ export async function defaultJudge(
     temperature: 0,
     seed: AUDIT_LLM_SEED,
     top_p: 1,
-    max_tokens: 900,
+    max_tokens: lvcJudgeOutputTokens(recs.length),
     ...({ options: { num_ctx: 8192 }, keep_alive: '15m' } as Record<string, unknown>),
   };
   // D-7: `noLocalFallback: true` — HERE AND NOWHERE ELSE IN THIS FILE. Candidate extraction keeps
@@ -504,46 +520,52 @@ export async function defaultJudge(
   let served = '';
   let lastReason = 'unknown';
   for (let attempt = 1; attempt <= 2; attempt++) {
-    let entry: JudgeAttemptRecord;
-    let verdicts: JudgedRec[] | null = null;
+    let r: any;
     try {
-      const r = await call(params);
-      const transport: CdmssTransportAttribution | null = readTransportAttribution(r) ?? null;
-      const bodyModel = String(r?.model ?? '');
-      const attribution = resolveJudgeAttribution({
-        intendedModel: geminiModel, transportModel: transport?.dispatched_model ?? null, bodyModel,
-      });
-      entry = buildJudgeAttemptPayload({
-        attempt, status: 'ok', intendedModel: geminiModel, transport, bodyModel, attribution,
-      });
-      // The evidence a refusal will report, if it comes to that: the transport's word first.
-      served = transport?.dispatched_model || bodyModel;
-      lastReason = attribution.reason;
-      if (attribution.state === 'wrong_model') {
-        console.warn(`[lvc] judge attempt ${attempt}/2 ${attribution.reason}: transport '${transport?.dispatched_model ?? 'none'}', body '${bodyModel || 'none'}' vs intended '${geminiModel}'`);
-      } else {
-        // verified OR unknown — both serve the verdict. Unknown is logged, not retried.
-        if (attribution.state === 'unknown') {
-          console.warn(`[lvc] judge attempt ${attempt}/2 attribution UNKNOWN (no model reported by transport or body) — verdict accepted per D-6, not retried`);
-        }
-        verdicts = core.parseJudgeResponse(r.choices?.[0]?.message?.content || '', recs);
-      }
+      r = await call(params);
     } catch (e) {
       lastReason = 'call_failed';
-      entry = buildJudgeAttemptPayload({
+      const entry = buildJudgeAttemptPayload({
         attempt, status: 'error', intendedModel: geminiModel, transport: null, bodyModel: null,
         attribution: null, error: e,
       });
       console.warn(`[lvc] judge attempt ${attempt}/2 failed`, (e as Error).message);
+      attempts.push(entry);
+      await record(LVC_JUDGE_ATTEMPT_EVENT, entry);
+      continue;
     }
-    attempts.push(entry);
-    await record(LVC_JUDGE_ATTEMPT_EVENT, entry);
-    if (verdicts) {
+
+    // Response inspection and parsing deliberately sit outside the provider-call catch. A local
+    // processing defect must surface as such; it must not be mislabeled, retried and stored as a
+    // transport failure after the provider has already returned successfully.
+    const transport: CdmssTransportAttribution | null = readTransportAttribution(r) ?? null;
+    const bodyModel = String(r?.model ?? '');
+    const attribution = resolveJudgeAttribution({
+      intendedModel: geminiModel, transportModel: transport?.dispatched_model ?? null, bodyModel,
+    });
+    const entry = buildJudgeAttemptPayload({
+      attempt, status: 'ok', intendedModel: geminiModel, transport, bodyModel, attribution,
+    });
+    // The evidence a refusal will report, if it comes to that: the transport's word first.
+    served = transport?.dispatched_model || bodyModel;
+    lastReason = attribution.reason;
+    if (attribution.state === 'wrong_model') {
+      console.warn(`[lvc] judge attempt ${attempt}/2 ${attribution.reason}: transport '${transport?.dispatched_model ?? 'none'}', body '${bodyModel || 'none'}' vs intended '${geminiModel}'`);
+    } else {
+      // verified OR unknown — both serve the verdict. Unknown is logged, not retried.
+      if (attribution.state === 'unknown') {
+        console.warn(`[lvc] judge attempt ${attempt}/2 attribution UNKNOWN (no model reported by transport or body) — verdict accepted per D-6, not retried`);
+      }
+      const verdicts = core.parseJudgeResponse(r.choices?.[0]?.message?.content || '', recs);
+      attempts.push(entry);
+      await record(LVC_JUDGE_ATTEMPT_EVENT, entry);
       await record(LVC_JUDGE_INVOCATION_EVENT, buildJudgeInvocationPayload({
         intendedModel: geminiModel, attempts, outcome: 'verdict', surface, recIds,
       }));
       return verdicts;
     }
+    attempts.push(entry);
+    await record(LVC_JUDGE_ATTEMPT_EVENT, entry);
   }
   return refuse(served, lastReason, attempts);
 }

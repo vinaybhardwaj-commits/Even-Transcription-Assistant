@@ -86,10 +86,7 @@ async function getQuietingConfig(): Promise<QuietingConfig> {
 // against that specialty's standards, not GP defaults. Small table → cache the whole map (60s TTL).
 const _dirRun = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 let _specCache: { at: number; map: Record<string, string> } | null = null;
-/** LAB-MCP-V2 §8.1: exported so lib/lab-v2/sources/opd.ts can FREEZE the same value this
- *  audit would have read, by calling the same reader. Duplicating the query in the lab
- *  would fork one fact into two places and fork the rule-governance SQL manifest with it. */
-export async function doctorSpecialtyFor(doctorUid: string | null): Promise<string | null> {
+async function doctorSpecialtyFor(doctorUid: string | null): Promise<string | null> {
   if (!doctorUid) return null;
   const now = Date.now();
   if (!_specCache || now - _specCache.at >= 60_000) {
@@ -115,8 +112,7 @@ function parseKeywords(v: unknown): string[] {
   }
   return [];
 }
-/** LAB-MCP-V2 §8.1: exported for the same reason as doctorSpecialtyFor above. */
-export async function getLvcRules(): Promise<LvcRuleLite[]> {
+async function getLvcRules(): Promise<LvcRuleLite[]> {
   const now = Date.now();
   if (_lvcRulesCache && now - _lvcRulesCache.at < 300_000) return _lvcRulesCache.rules;
   try {
@@ -1054,23 +1050,6 @@ function opdAuditBudget(provider: 'openrouter' | 'bedrock' = 'openrouter'): { pe
   return b;
 }
 
-/**
- * LAB-MCP-V2 decision 22 — the OPD audit's PER-ATTEMPT transport ceiling, for the lab.
- *
- * The same number `defaultGenerate` passes as `timeoutMs` (its `budget.perAttemptMs`), read from
- * the same PROVIDER_BUDGETS row rather than restated, so the two can never drift. It exists
- * because the lab's gateway had NO ceiling: a stage call inherited the OpenAI client default and
- * a slow note could sit far past the point where the tick's own 500 s budget had given up.
- *
- * ⚠️ NOT A NEW NUMBER, and it must not become one. `opdAuditBudget()` and its call site inside
- * defaultGenerate are unchanged — three existing guards (route-budget-guard, llm-call-bounds,
- * provider-switch-unit-d) assert that call site's exact source text, and the box arithmetic
- * (perAttemptMs x maxTries x legs <= maxDuration) is computed from it.
- */
-export function opdAuditPerAttemptMs(): number {
-  return opdAuditBudget().perAttemptMs;
-}
-
 async function defaultGenerate(traceId: string | undefined, system: string, user: string, mini = false, evalModel?: string, onEnvelope?: (e: LlmEnvelope) => void, deadlineAt?: number, bedrockModel?: string): Promise<string> {
   // EVAL-ONLY (lab): route to OpenRouter when an eval model is named. evalModel unset ⇒ the Gemini/mini
   // path below is byte-identical to today (no production audit ever passes evalModel).
@@ -1167,39 +1146,8 @@ export interface AuditReuse {
   suggestions: OpdSuggestion[];
   sources: Source[];
 }
-/**
- * LAB-MCP-V2 §8.1 — the FIVE live reads a Lab v2 run supplies from its FROZEN dataset
- * instead of performing (decision 10). Each of these normally reaches production IO that
- * §7 seals off inside a lab execution context:
- *   · `lvcRules`      ← getLvcRules(),              production Neon `lvc_recommendations`
- *   · `specialty`     ← doctorSpecialtyFor(),       production Neon `doctor_directory`
- *   · `complexity`    ← fetchPatientHistoryBundle(), db13 via Metabase
- *   · `suppressions`  ← getActiveSuppressions(),    production Neon `audit_suppression`
- *   · `quietingConfig`← getQuietingConfig(),        production Neon `audit_suppression` + `quieting_policy_log`
- *
- * The last two were added by decision 10 after round A1 measured what actually happens
- * without them: both have load-bearing fail-safes (empty list, gen 0) that are correct for
- * a production audit — quieting must never block a note — and WRONG for a research run,
- * which silently scored un-suppressed at gen 0 while production did neither. A lab result
- * is only evidence about production if it saw the same inputs production sees.
- *
- * Supplying them is also what makes a research run reproducible: the same dataset yields
- * the same five inputs on every replay, rather than whatever the live tables say that day.
- * ABSENT ⇒ every existing line runs unchanged and production is byte-identical.
- */
-export interface OpdLabDependencies {
-  lvcRules: LvcRuleLite[];
-  specialty: string | null;
-  complexity: OpdNoteAudit['complexity'];
-  suppressions: Suppression[];
-  quietingConfig: QuietingConfig;
-}
-
 export interface AuditOpdOpts {
   trace?: boolean;
-  /** LAB V2 ONLY (§8.1): frozen substitutes for the three live reads above. Never set by
-   *  any production caller — the OPD adapter in lib/lab-v2/adapters/opd.ts is the only one. */
-  labDependencies?: OpdLabDependencies;
   /** EVAL-ONLY (PDQI-9 fail-loud Phase 1). Fires on every OpenRouter attempt with the response
    *  envelope. Only reached when `evalModel` is set; production never passes it. Never throws. */
   onEnvelope?: (e: LlmEnvelope) => void;
@@ -1308,14 +1256,10 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
   // Tier-1 self-heal: apply human-approved active suppressions to the final (identity-stamped)
   // findings — drop, or downgrade to informational (out of the triage queue + score). No-op when
   // none are active. Applied AFTER stampFindingIdentity so it matches on signal_type + subject.
-  // LAB-MCP-V2 §8.1 / decision 10: frozen when the lab supplies them; otherwise today's
-  // cached read. An explicit opts.suppressions still outranks both, exactly as before.
-  const supps = opts.suppressions ?? (opts.labDependencies ? opts.labDependencies.suppressions : await getActiveSuppressions());
-  // LAB-MCP-V2 §8.1: frozen when the lab supplies them; otherwise today's cached read.
-  const lvcRules = opts.labDependencies ? opts.labDependencies.lvcRules : await getLvcRules();   // 0.81.4 matcher input (cached, 2s-timeout fail-safe → [])
+  const supps = opts.suppressions ?? await getActiveSuppressions();
+  const lvcRules = await getLvcRules();   // 0.81.4 matcher input (cached, 2s-timeout fail-safe → [])
   // Quieting config (demote rules + policy gen) — fail-safe to { rules: [], gen: 0 } (never blocks).
-  // LAB-MCP-V2 §8.1 / decision 10: same shape as the suppressions line above.
-  const quietCfg = opts.quieting ?? (opts.labDependencies ? opts.labDependencies.quietingConfig : await getQuietingConfig());
+  const quietCfg = opts.quieting ?? await getQuietingConfig();
   const noMeds = oc.medications.length === 0;
   // Phase 3b — the retrieval hits with their FULL text, set on the generation path only. Empty on
   // the reuse path (which carries stored 600-char previews), which is the explicit guard that keeps
@@ -1369,10 +1313,6 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
   // Right Care complexity — computed once per audit from db13 history (0.81.3). Fully guarded: a bad
   // individual_uid, a db13 error, or a 3s timeout yields a null band and NEVER blocks/fails the audit.
   const complexityFor = async (): Promise<OpdNoteAudit['complexity']> => {
-    // LAB-MCP-V2 §8.1: the lab froze this at dataset_create, outside any lab context.
-    // Reaching db13 from inside one would throw LAB_IO_FORBIDDEN (§7) and, worse, would
-    // make the run depend on a source that moves under it between replays.
-    if (opts.labDependencies) return opts.labDependencies.complexity;
     // The note uid resolves the patient (individual_uid) inside the fetcher — "individuals-prescriptions"
     // has no individual_uid (live-validated 8 Jul). keys.noteDate is the as-of hint (index timestamp).
     const noteUid = keys.uid ? String(keys.uid) : '';
@@ -1431,8 +1371,7 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
     const { sources, citedContext } = assembleAuditContext(hits, normHits);
     if (traceId) await logEvent(traceId, 'opd_audit_sources', null, { count: sources.length });
 
-    // LAB-MCP-V2 §8.1: frozen when the lab supplies it; otherwise today's directory read.
-    const specialty = opts.labDependencies ? opts.labDependencies.specialty : await doctorSpecialtyFor(keys.doctorUid);
+    const specialty = await doctorSpecialtyFor(keys.doctorUid);
     // Eval-hardening D5/O2 — keep the last envelope HERE too, so the parse guards below can attach
     // it to their throws. Wrapped ONLY when evalModel is set; absent ⇒ opts.onEnvelope passes
     // through untouched and production is byte-identical.

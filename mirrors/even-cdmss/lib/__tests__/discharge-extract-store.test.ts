@@ -72,10 +72,7 @@ test('a jsonb column handed back as TEXT is tolerated; unusable payloads are ref
 });
 
 test('the extraction version is a shared constant both readers move on together', () => {
-  // R10-A (28 Aug 2026): doc-extract/1 → doc-extract/2 for `verbatim_sections`. This pin is
-  // deliberately a LITERAL and not a reference — it is the line that makes a version bump a
-  // decision someone had to type, rather than a side effect of editing the extractor.
-  assert.equal(DOC_EXTRACT_VERSION, 'doc-extract/2');
+  assert.equal(DOC_EXTRACT_VERSION, 'doc-extract/1');
   // The default must be the constant, not a literal restated at a call site.
   assert.equal(rowToStoredCase({ document_id: 'd', extracted_json: {} })?.extractionVersion, DOC_EXTRACT_VERSION);
 });

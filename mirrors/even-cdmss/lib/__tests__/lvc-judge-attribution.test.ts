@@ -216,6 +216,22 @@ test('7b: a first-attempt throw followed by a verified answer is served — the 
   assert.ok(judged.every((j) => j.verdict === 'applies'));
 });
 
+test('response-processing defects are not retried or mislabeled as provider call failures', async () => {
+  let calls = 0;
+  const completion = attachTransportAttribution({
+    model: INTENDED,
+    get choices(): never { throw new Error('synthetic response-processing defect'); },
+  }, { dispatched_provider: 'vertex', dispatched_model: INTENDED, cloud_response_received: true });
+
+  await assert.rejects(
+    () => defaultJudge(CTX, RECS, 'surface', undefined, false, {
+      call: async () => { calls++; return completion; },
+    }),
+    /synthetic response-processing defect/,
+  );
+  assert.equal(calls, 1, 'a local processing defect must not buy another provider call');
+});
+
 // ── §3.6 TEST 8 — MECHANICAL PROOF, NOT A CLAIM ───────────────────────────────────────────────
 /**
  * §3.6 is explicit that a source comment or a build-report sentence is not acceptable evidence

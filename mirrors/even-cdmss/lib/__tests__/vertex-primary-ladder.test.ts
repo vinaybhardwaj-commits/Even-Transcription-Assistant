@@ -339,30 +339,11 @@ test('the writer is best-effort and truncates at 2000 — a ledger failure never
 });
 
 test('runIpdAudit writes the ledger at every no-row outcome, and the write precedes each return', () => {
-  // SCOPED TO THE DISCHARGE RUNNER. This counted ledger writes across the whole FILE, which was the
-  // same thing while run.ts held one runner. CASE-AGENTS-SPINE P3 (27 Aug 2026) added a second,
-  // runIpdStayAudit, with its own four — so a file-wide count now reads 8 and says nothing about
-  // either. Slicing to the function under test keeps this assertion about what it was always about,
-  // and the stay runner gets its own identical assertion below.
-  const whole = code(IPD_RUN);
-  const c = whole.slice(whole.indexOf('export async function runIpdAudit'), whole.indexOf('export async function runIpdStayAudit'));
-  assert.ok(c.length > 0, 'runIpdAudit must still be the first runner in the file');
+  const c = code(IPD_RUN);
   assert.equal((c.match(/recordIpdAuditFailure\(\{/g) ?? []).length, 4,
     'doc_read skip + analyze skip + DEC-2 + the existing catch');
   assert.ok(c.indexOf('recordIpdAuditFailure') < c.indexOf("skip: 'unreadable'"), 'the extract skip is recorded');
   assert.ok(c.includes("stage: 'run'"), 'the catch records with its own stage');
-});
-
-test('runIpdStayAudit carries the SAME ledger discipline — a stay that writes no row is still visible', () => {
-  // The stay auditor is a second writer into ipd_discharge_audits, so a stay run that fails must be
-  // as visible as a discharge run that fails. Same four outcomes, same stages, same never-throws.
-  const whole = code(IPD_RUN);
-  const c = whole.slice(whole.indexOf('export async function runIpdStayAudit'));
-  assert.ok(c.length > 0, 'runIpdStayAudit must exist');
-  assert.equal((c.match(/recordIpdAuditFailure\(\{/g) ?? []).length, 4,
-    'doc_read skip + analyze skip + DEC-2 + the catch');
-  assert.ok(c.includes("stage: 'run'"), 'the catch records with its own stage');
-  assert.ok(c.includes("stage: 'doc_read'") && c.includes("stage: 'analyze'"));
 });
 
 test('the ledger did NOT touch the machinery the kickoff fences off', () => {

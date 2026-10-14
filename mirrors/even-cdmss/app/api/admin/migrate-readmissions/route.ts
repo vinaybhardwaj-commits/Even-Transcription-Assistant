@@ -3,8 +3,6 @@ import { requireAdmin } from '@/lib/admin-gate';
 import type { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
-import { deriveJudgements, JUDGEMENT_RULE_VERSION, type JudgementInput } from '@/lib/readmission-reconcile-core';
-import { READMIT_ENGINE_VERSION } from '@/lib/readmission/store';
 
 export const runtime = 'nodejs';
 
@@ -17,67 +15,6 @@ export const runtime = 'nodejs';
 // UPSERT on (dedup_key, engine_version). PHI posture (§8b): the row carries
 // uhid/encounter ids as LINK-BACK keys only — never a patient name, never a raw
 // document; `finding` is the de-identified reconciliation output.
-//
-// R1 (CDMSS-READMISSIONS-R1-PRD v1.1 §5, 17 Aug 2026): three additive columns —
-// preventable_injury, negligence, judgement_rule_version — plus a VERSIONED, idempotent
-// backfill that re-derives both judgements from the `finding` jsonb in JS for every
-// audited row that is missing them or was stamped under an older rule version. Batched
-// ≤ 200 per request; re-run until `remaining` is 0. A future rule change bumps
-// JUDGEMENT_RULE_VERSION and the same step re-derives — nothing goes silently stale.
-// ⚠️ INFERRED SQL/DDL throughout: this sandbox has no live Neon.
-
-const BACKFILL_BATCH = 200;
-
-/** jsonb tolerance — Neon usually parses, a TEXT round trip does not. */
-function asBlob(v: unknown): JudgementInput | null {
-  if (v == null) return null;
-  if (typeof v === 'object') return v as JudgementInput;
-  if (typeof v === 'string') { try { return JSON.parse(v) as JudgementInput; } catch { return null; } }
-  return null;
-}
-
-/**
- * One backfill batch. Rows are selected by the STALENESS predicate, ENGINE-SCOPED to the
- * current READMIT_ENGINE_VERSION (R2-5): rows orphaned by an engine bump are never
- * rescanned — the surface and the badge cannot see them, so re-deriving them is wasted
- * work. A row whose blob cannot be read still gets 'unknown'/'unknown' — that is the
- * rule's own answer for "nothing to read", and stamping the version keeps the batch from
- * revisiting it forever.
- */
-async function backfillJudgements(): Promise<{ scanned: number; updated: number; remaining: number; ruleVersion: string; engineVersion: string }> {
-  const rows = (await sql(
-    `SELECT id, finding FROM readmission_findings
-      WHERE audit_status = 'audited'
-        AND engine_version = $2
-        AND (preventable_injury IS NULL OR negligence IS NULL
-             OR judgement_rule_version IS DISTINCT FROM $1)
-      ORDER BY audited_at ASC NULLS LAST
-      LIMIT ${BACKFILL_BATCH}`,
-    [JUDGEMENT_RULE_VERSION, READMIT_ENGINE_VERSION],
-  )) as Array<{ id: string; finding: unknown }>;
-  let updated = 0;
-  for (const r of rows) {
-    const j = deriveJudgements(asBlob(r.finding));
-    const out = (await sql(
-      `UPDATE readmission_findings
-          SET preventable_injury = $2, negligence = $3, judgement_rule_version = $4
-        WHERE id = $1
-        RETURNING id`,
-      [r.id, j.preventableInjury, j.negligence, JUDGEMENT_RULE_VERSION],
-    )) as Array<{ id: string }>;
-    if (out.length) updated++;
-  }
-  const rem = (await sql(
-    `SELECT count(*)::int AS n FROM readmission_findings
-      WHERE audit_status = 'audited'
-        AND engine_version = $2
-        AND (preventable_injury IS NULL OR negligence IS NULL
-             OR judgement_rule_version IS DISTINCT FROM $1)`,
-    [JUDGEMENT_RULE_VERSION, READMIT_ENGINE_VERSION],
-  )) as Array<{ n: number }>;
-  return { scanned: rows.length, updated, remaining: Number(rem[0]?.n ?? 0), ruleVersion: JUDGEMENT_RULE_VERSION, engineVersion: READMIT_ENGINE_VERSION };
-}
-
 export async function POST(req: NextRequest) {
   const denied = requireAdmin(req);
   if (denied && !(await isAdminUnlocked().catch(() => false))) return denied;
@@ -136,12 +73,6 @@ export async function POST(req: NextRequest) {
     await sql`ALTER TABLE readmission_findings ADD COLUMN IF NOT EXISTS lab_source_provenance JSONB`;
     await sql`ALTER TABLE readmission_findings ADD COLUMN IF NOT EXISTS omission_evidence JSONB`;
     steps.phase15_columns = 'ok';
-    // R1 (PRD v1.1 §5) — additive + idempotent, nullable. Existing rows carry NULL until
-    // the backfill below (or a fresh audit) writes them.
-    await sql`ALTER TABLE readmission_findings ADD COLUMN IF NOT EXISTS preventable_injury TEXT`;
-    await sql`ALTER TABLE readmission_findings ADD COLUMN IF NOT EXISTS negligence TEXT`;
-    await sql`ALTER TABLE readmission_findings ADD COLUMN IF NOT EXISTS judgement_rule_version TEXT`;
-    steps.r1_judgement_columns = 'ok';
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS readmission_findings_key_engine_uq ON readmission_findings (dedup_key, engine_version)`;
     steps.unique_key_engine = 'ok';
     await sql`CREATE INDEX IF NOT EXISTS readmission_findings_lane_idx ON readmission_findings (lane)`;
@@ -152,10 +83,7 @@ export async function POST(req: NextRequest) {
     steps.indexes = 'ok';
     const counts = (await sql`SELECT count(*)::int AS n FROM readmission_findings`) as Array<{ n: number }>;
     steps.rows = String(counts[0]?.n ?? 0);
-    // R1 versioned backfill — one batch per request, idempotent, re-run until remaining = 0.
-    const backfill = await backfillJudgements();
-    steps.r1_judgement_backfill = `scanned ${backfill.scanned}, updated ${backfill.updated}, remaining ${backfill.remaining} @ ${backfill.ruleVersion} (engine ${backfill.engineVersion})`;
-    return NextResponse.json({ ok: true, steps, backfill });
+    return NextResponse.json({ ok: true, steps });
   } catch (e) {
     return NextResponse.json({ ok: false, steps, error: String((e as Error).message) }, { status: 500 });
   }
