@@ -7,7 +7,6 @@
 // so the labels stay blind to each other. Keys are built only from a whitelisted set name + the hash, so no request can name another key.
 import { PAGES } from "./rate_pages.js";
 import { hubPage } from "./hub.js";
-import { isBlindKey, BLIND_MSG } from "./blind.js";
 
 const LABELS = ["readable", "romanised_readable", "garbled", "wrong_language", "unsure"];
 const TAGS_L = ["diff_lang_speakers", "code_mixed", "crosstalk", "non_clinical", "partly_readable", "med_terms_wrong", "audio_poor", "words_missing"];   // 421c(A): optional descriptive tags on label200, stable keys, never scored, never gate a save
@@ -156,7 +155,6 @@ export async function rateRoute(request, env, url, who, pageShell) {
     if (!c || typeof c.k !== "string" || !Number.isInteger(c.i) || c.i < 0 || c.i > 5000) return json(404, { error: "no clip for this id" });
     const parts = c.k.split("/");
     if (parts.length !== 4 || parts.some((p) => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(p))) return json(500, { error: "clip map invalid" });   // ONE alphabet with make_calib30 (no dots anywhere: window ids never carry them; ".." is unreachable by construction); /api/window re-validates via windowKey->parseKey
-    if (isBlindKey(c.k)) return json(403, { error: BLIND_MSG });   // R3/W51 room-day: no clip, no audio
     const t0 = Number(c.t0), t1 = Number(c.t1);
     if (!Number.isFinite(t0) || !Number.isFinite(t1) || t0 < 0 || t1 <= t0 || t1 > 4 * 3600) return json(500, { error: "clip map times invalid" });
     let gloss = null;

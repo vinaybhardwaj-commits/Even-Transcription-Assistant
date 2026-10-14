@@ -57,7 +57,7 @@ so the same shape extends cleanly to the other engines/machines.
 | stt | IndicConformer (5 heads) + SraVaani | **HF L4 GPU Job, together** | hf-fleet real validation: 18.7x RTF, $0.0427/tape-hour (bus #4731) — moved SraVaani off c3 onto the SAME HF job as IndicConformer, since that's now the proven cheap combined path; not built yet |
 | diar | pyannote.ai (hosted API) | none (API-bound, not machine-bound) | Fable's ruling (bus #4535 addendum); not built yet, needs `run_real.sh` for the real per-window calls (real patient audio to a paid external vendor) |
 | diar | local pyannote twin + Nemotron (optional shadow) | HF GPU, never box | Fable's ruling; not built yet |
-| emotion | wavlm crosslingual, per speaker turn (whole-window fallback if no diar track) | HF L4 GPU Job | Fable's T-REB order (28 Sep); built — `engines/emotion_wavlm.py` + `hf_emotion_manifest.py`/`hf_emotion_job.py`/`hf_emotion_collect.py`, following point 2's box-writes/HF-computes split; not yet run against real audio; audio = private HF buckets vrbeven/reb-backfill-2Xsep-audio (.webm, not uploaded yet, human-gated), job decodes with PyAV |
+| emotion | wavlm crosslingual, per speaker turn (whole-window fallback if no diar track) | HF L4 GPU Job | Fable's T-REB order (28 Sep); built — `engines/emotion_wavlm.py` + `hf_emotion_manifest.py`/`hf_emotion_job.py`/`hf_emotion_collect.py`, following point 2's box-writes/HF-computes split; not yet run against real audio, awaiting hf-fleet coordination on the audio staging path |
 | acoustics | production vad_segments, reference VAD, frame stats | cheap, any CPU | sized (Silero ~53x on box CPU); not built yet |
 | terms | medasr / parakeet-med / whisper-arca-lora | **unsized, unplaced** | Fable FYI 14:38 (W50): layer went live scope; no RTF numbers exist yet for any of these 3 engines — needs its own sizing pass before it can be placed here |
 | translate | Gemini 3.8 Flash (text->EN, audio->EN) | OpenRouter, ZDR | not sized, not built; needs `run_real.sh` when exercised |
@@ -93,8 +93,7 @@ development (not part of the committed suite). PASSED by both eta-refuter-2 and 
 hf_emotion_collect.py}` + `tests/test_emotion_engine.py`/`test_hf_emotion_manifest.py` (tone, 28 Sep,
 Fable's T-REB order) — emotion layer, wavlm crosslingual per speaker turn. Same box/HF split as
 whisper (point 2): `hf_emotion_manifest.py` (box-side, reads the local REB root only) picks the
-windows + turns; `hf_emotion_job.py` (HF-side, no REB root access) scores turns and hands back
-raw per-turn scores (standalone uv script, PyAV decode, turns over 30 s scored in 30 s pieces with
-length-weighted mean probabilities); `hf_emotion_collect.py` (box-side) builds the track body via
-`emotion_wavlm.build_track` and is the only one of the three that calls `write_track()`. tests offline (model + audio slicing faked); not yet run
+windows + turns; `hf_emotion_job.py` (HF-side, no REB root access) computes and hands back track
+bodies against audio hf-fleet/reb stage there; `hf_emotion_collect.py` (box-side) is the only one of
+the three that calls `write_track()`. 11/11 tests offline (model + audio slicing faked); not yet run
 against real audio — the manifest/job pair is queued for review before a real HF run.

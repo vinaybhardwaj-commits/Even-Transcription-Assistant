@@ -42,7 +42,7 @@ async function loadItems(env, run) {
   return rows ? { rows, sha: hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))) } : null;
 }
 
-export function rangeOf(header, size) {
+function rangeOf(header, size) {
   if (!header) return null;
   const m = /^bytes=(\d*)-(\d*)$/.exec(header);
   if (!m || (m[1] === "" && m[2] === "")) return "invalid";
