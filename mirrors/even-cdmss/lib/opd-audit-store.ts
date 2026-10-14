@@ -8,7 +8,6 @@
  */
 
 import { sql } from './db';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 import type { OpdNoteAudit } from './opd-note-audit';
 import { HYSTERESIS_G, type OpdDomain } from './opd-note-score-core';
 import { OPD_ENGINE_VERSION, OPD_ENGINE_VERSIONS_CURRENT } from './opd-note-audit-core';
@@ -165,7 +164,6 @@ export async function saveOpdAudit(
   meta: SaveOpdAuditMeta = {},
   opts: SaveOpdAuditOptions = {},
 ): Promise<'inserted' | 'exists' | 'skipped' | 'updated'> {
-  assertOpdProductionWrite('opd_note_audits.saveOpdAudit');
   const k = audit.keys;
   if (!k.uid) return 'skipped';
   const force = opts.force === true;
@@ -290,7 +288,6 @@ export async function saveOpdAudit(
 /** UPDATE an existing audit row in place (deterministic backfill — same engine version). Rewrites
  *  the completeness/findings/score columns from a recomputed audit; leaves model/trace/sources as-is. */
 export async function updateOpdAudit(audit: OpdNoteAudit): Promise<'updated' | 'skipped'> {
-  assertOpdProductionWrite('opd_note_audits.updateOpdAudit');
   const k = audit.keys;
   if (!k.uid) return 'skipped';
   const sc = audit.scorecard;

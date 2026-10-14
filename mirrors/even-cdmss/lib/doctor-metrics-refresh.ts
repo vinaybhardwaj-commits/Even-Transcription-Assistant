@@ -15,7 +15,6 @@ import {
   upsertOperationalMetrics, upsertRoster, operationalActiveUids,
   type OperationalMetric,
 } from './doctor-metrics-store';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -72,7 +71,6 @@ export interface RefreshResult { ok: true; operational_upserted: number; roster_
 
 /** Full daily refresh: operational first (so the roster can tag operational_active), then roster. */
 export async function refreshDoctorMetrics(): Promise<RefreshResult> {
-  assertOpdProductionWrite('doctor_metrics.refresh');
   const operational_upserted = await refreshOperational();
   const { built, upserted } = await refreshRoster();
   return { ok: true, operational_upserted, roster_built: built, roster_upserted: upserted };

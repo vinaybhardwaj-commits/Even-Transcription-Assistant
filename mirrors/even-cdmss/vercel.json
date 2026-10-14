@@ -12,6 +12,7 @@
     { "path": "/api/opd-audit/worker", "schedule": "*/4 18-23,0-2 * * *" },
     { "path": "/api/opd-audit/worker", "schedule": "30 8 * * *" },
     { "path": "/api/ipd-audit/worker", "schedule": "*/15 1-5 * * *" },
+    { "path": "/api/ot-audit/worker?lookback=3&max=50", "schedule": "15 3 * * *" },
     { "path": "/api/readmission/worker", "schedule": "*/30 * * * *" },
     { "path": "/api/preop/worker", "schedule": "30 0-16 * * *" },
     { "path": "/api/learning/mine", "schedule": "0 1 * * *" },
@@ -29,6 +30,6 @@
     { "path": "/api/ipd-episode/worker?auto=1", "schedule": "30-59/10 16 * * *" },
     { "path": "/api/ipd-episode/worker?auto=1", "schedule": "*/10 17-23 * * *" },
     { "path": "/api/ipd-episode/worker?auto=1", "schedule": "0-30/10 0 * * *" },
-    { "path": "/api/admin/lab-v2/tick?auto=1", "schedule": "*/2 * * * *" }
+    { "path": "/api/admin/lab-v2/tick?auto=1", "schedule": "*/5 * * * *" }
   ]
 }

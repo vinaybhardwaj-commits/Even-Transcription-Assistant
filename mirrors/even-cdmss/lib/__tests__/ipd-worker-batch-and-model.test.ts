@@ -65,7 +65,8 @@ test('restoring the cron did not disturb any other schedule', () => {
   // 22 → 23 on 8 Sep 2026: WM3's join sweep, one hour after the shadow sweep so the eligible events
   // it opens over are already written. Additive; every schedule below is untouched.
   // 23 → 24 on 22 Sep 2026: one OPD midday catch-up pass for upstream 504/incomplete-day retries.
-  assert.equal(VERCEL.crons.length, 24, '14 + IPD worker + readmission + pre-op + shadow sweep + 3 episode-window entries + lab-v2 tick + WM3 join + OPD midday retry');
+  // 24 → 25 on 12 Oct 2026: the OT note lander, once a day at 03:15 UTC (08:45 IST).
+  assert.equal(VERCEL.crons.length, 25, '14 + IPD worker + readmission + pre-op + shadow sweep + 3 episode-window entries + lab-v2 tick + WM3 join + OPD midday retry + OT lander');
   // ⚠️ The OPD entry lost its `?conc=4` on 3 Aug (Unit D, Task 11) so the route's re-sized defaults
   // (max=8, conc=8 — one wave) apply. Production had been sending conc=4 against a default max of
   // 15, i.e. FOUR waves, and the guard has to be computed against what the cron actually sends.

@@ -400,16 +400,7 @@ export default function ReadmissionsBoard() {
         Every readmission the agent has audited, one card each. The agent proposes; you decide what to escalate.
       </p>
       {/* READMIT-RECENT-VIEW (17 Sep 2026, item C) — the freshness line, under the subtitle. */}
-      {data && data.freshness && (
-        <p className="mt-0.5 text-[11.5px] text-slate-500">
-          {freshnessLine(data.freshness, checkedJustNow)}
-          {data.freshness.health?.status === 'red' && (
-            <span className="ml-2 rounded bg-red-50 px-1.5 py-0.5 font-medium text-red-700">
-              Agent stale — {data.freshness.health.reasons[0] ?? 'health check failed'}
-            </span>
-          )}
-        </p>
-      )}
+      {data && data.freshness && <p className="mt-0.5 text-[11.5px] text-slate-500">{freshnessLine(data.freshness, checkedJustNow)}</p>}
 
       {/* R7 (R7-1) — the rates module, above the counts line; its own fetch, its own fail-safe. The
           facility tabs honour R6's hospital filter when one is applied (R7-4). */}

@@ -11,12 +11,10 @@
 
 import { sql } from './db';
 import type { RosterRow } from './doctor-directory-core';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 
 export async function ensureDoctorMetricsTables(): Promise<void> {
-  assertOpdProductionWrite('doctor_metrics.ensureDoctorMetricsTables');
   await run(`CREATE TABLE IF NOT EXISTS doctor_operational_metrics (
     doctor_uid                text PRIMARY KEY,
     week                      date,
@@ -55,7 +53,6 @@ export interface OperationalMetric {
 
 /** Replace the operational snapshot with a freshly-pulled set (one row per doctor_uid). */
 export async function upsertOperationalMetrics(rows: OperationalMetric[]): Promise<number> {
-  assertOpdProductionWrite('doctor_metrics.upsertOperationalMetrics');
   let n = 0;
   for (const r of rows) {
     if (!r.doctor_uid) continue;
@@ -125,7 +122,6 @@ export async function operationalActiveUids(): Promise<string[]> {
 
 /** Replace the canonical roster with a freshly-built set. */
 export async function upsertRoster(rows: RosterRow[]): Promise<number> {
-  assertOpdProductionWrite('doctor_metrics.upsertRoster');
   // The refresh may run before the schema step has added alias_uids / disabled; add them first.
   await ensureDoctorMetricsTables();
   let n = 0;
