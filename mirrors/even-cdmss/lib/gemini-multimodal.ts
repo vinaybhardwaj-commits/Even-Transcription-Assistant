@@ -18,7 +18,6 @@ import { logEvent, buildEnvelope } from './trace';
 import { billableOutputTokens } from './llm-cost-core';
 import { buildDocRequestBody, DOC_READ_TIMEOUT_MS } from './doc-transport-core';
 import { providerErrorPayload, providerCallsInFlight, beginProviderCall, endProviderCall } from './provider-error-core';
-import { labExecution, LabError } from './lab-execution-context';
 
 const GCP_LOCATION = process.env.GCP_LOCATION || 'asia-south1';
 const GCP_PROJECT = process.env.GCP_PROJECT || '';
@@ -137,23 +136,6 @@ export async function generateFromDocument(
   mimeType: string,
   opts: MultimodalOpts = {},
 ): Promise<string | null> {
-  /**
-   * LAB-MCP-V2 §7, DECISION 102 — the same guard `sql` (`lib/db.ts:61`) and `metabaseQuery`
-   * (`lib/metabase.ts:115`) carry, and the reason it was missing is worth writing down.
-   *
-   * ⚠️ THIS IS THE ONLY MODEL CALL IN THE THREE SLICE D ENGINES THAT DOES NOT GO THROUGH
-   * `lib/trace.ts`. Every other one is fenced by the gateway. A lab run that reached
-   * `extractCase` would therefore have made a real, unmetered, UNBUDGETED Vertex multimodal
-   * call on a real patient's discharge PDF, from inside a research context — the one thing §7
-   * exists to make impossible. Measured by the Slice D survey on `c0f59fd0`.
-   *
-   * ⚠️ AND THROWING IS THE RIGHT ANSWER RATHER THAN RETURNING NULL, even though every caller
-   * treats null as "unreadable". A null would be indistinguishable from a PDF that genuinely
-   * could not be read, so a lab run would silently produce a case with no extract and score it.
-   * A D adapter that needs the extract freezes the stored `ExtractedCase` from
-   * `discharge_extracted_cases` and never comes here at all.
-   */
-  if (labExecution()) throw new LabError('LAB_IO_FORBIDDEN', 'document read inside lab execution');
   const model = opts.model || GEMINI_MODEL;
   // Normalise a couple of common mime variants Gemini expects.
   const mime = mimeType === 'image/jpg' ? 'image/jpeg' : mimeType;

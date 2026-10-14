@@ -223,8 +223,7 @@ test('§12.2 card strip: LEAD incidence · SECONDARY episodes · demoted 90-day 
   const stays: RatePair[] = [{ index_encounter_id: 'IP-1', index_day: '2026-01-10', gap_days: 3, index_department: 'Orthopedics', lane: 'tight_bounce', audit_status: 'audited', avoidable: 'avoidable', planned: 'unplanned' }];
   const r = computeRates({ pairs: stays, discharges, ceilingDay: CEILING, incidencePairs: [ip({ index_encounter_id: 'IP-1', person: 'U1' })], incidenceDenominator: 1_124 });
   const cards = rateCards(r.facilities[0], 'eligible');
-  // V ruling 17 Sep 2026 (READMIT-RECENT-VIEW brief): a sixth tile, 'recent', lands after the five.
-  assert.deepEqual(cards.map((c) => c.key), ['incidence', 'episodes30', 'all90', 'immediate', 'proposedAvoidable', 'recent']);
+  assert.deepEqual(cards.map((c) => c.key), ['incidence', 'episodes30', 'all90', 'immediate', 'proposedAvoidable']);
   const lead = cards[0];
   assert.equal(lead.tone, 'lead');
   assert.equal(lead.title, '30-day incidence · unique patients');
@@ -290,8 +289,7 @@ test('incidenceDenominatorSql: distinct PEOPLE, Even only, ip_admission, IST app
   assert.match(sql, /SELECT count\(DISTINCT uhid\)::int AS n/);
   assert.match(sql, /FROM kx_discharged_completed_patients/);
   assert.match(sql, /encounter_type = 'ip_admission'/);
-  // READMIT-EHRC-RELABEL-BUILDER-BRIEF-16-SEP-2026: Even-EHRC (the 19-Aug relabel) is an EHRC alias too.
-  assert.match(sql, /facility_name IN \('Even','Even-EHRC'\)/);
+  assert.match(sql, /facility_name = 'Even'/);
   // T4 — one IST expression, compared against both ends. No DB-time floor, no IST-only ceiling.
   assert.match(sql, /to_char\(discharge_date AT TIME ZONE 'Asia\/Kolkata', 'YYYY-MM-DD'\) BETWEEN '2025-09-22' AND '2026-07-20'/);
   assert.ok(!/discharge_date >= '/.test(sql), 'T4: no raw DB-time floor alongside the IST ceiling');
@@ -543,11 +541,9 @@ test('T7 — the model pin: the ask path still targets NARRATIVE_MODEL_ID via Be
   };
   const bedrockThen = execFileSync('git', ['show', 'f4a67ee:lib/bedrock-core.ts'], { encoding: 'utf8' });
   assert.equal(allowlist(code('lib/bedrock-core.ts')), allowlist(bedrockThen), 'the Bedrock allowlist must not change');
-  // The no-dependency-change acceptance was proven at merge time and is not an open-ended invariant (lab-v2 decision 9).
-  // READMIT-EXCLUSION-NARROW (18 Sep 2026) retires the "detect-core untouched since f4a67ee" leg of
-  // this proxy: that kickoff explicitly narrows EXCLUDED_DEPARTMENTS' ObGyn exclusion to obstetric
-  // stays only and adds the tight_bounce override in lib/readmission-detect-core.ts — a real,
-  // intended change to that file, not drift. The Bedrock-allowlist assertion above is unaffected.
+  const changed = execFileSync('git', ['diff', '--name-only', 'f4a67ee', '--'], { encoding: 'utf8' }).split('\n').filter(Boolean);
+  assert.ok(!changed.includes('package.json'), 'no dependency change');
+  assert.ok(!changed.some((f) => f.startsWith('lib/readmission-detect-core')), 'detect-core pairing untouched');
 });
 
 test('the branch is grep-clean of the refused transports (gpt-5.6 / terra / mantle) in every file it touched', () => {

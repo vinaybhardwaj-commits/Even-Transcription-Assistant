@@ -56,16 +56,7 @@ test('restoring the cron did not disturb any other schedule', () => {
   // vercel.json line). 16 → 17 on 26 Aug 2026: the pre-op risk worker's cron landed the
   // same way (Build Plan B2 requires it in the same commit as the route's maxDuration —
   // the covenant). The schedule assertions below are what this test is really about.
-  // 17 → 18 on 31 Aug 2026: WM1's shadow-agent sweep, scheduled after V verified its burden
-  // numbers live (1 ask per 12.8 eligible, against a ceiling of 1 per 10). Manual first, cron second.
-  // 18 → 21 on 5 Sep 2026: the IPD EPISODE worker's nightly window, three entries because 22:00 IST
-  // is 16:30 UTC and a half-hour offset cannot be written as whole hours (decision 53). Additive.
-  // 21 → 22 on 5 Sep 2026: the Lab MCP v2 tick (lab-v2 decision 25). Dark on arrival; the
-  // composition string below is extended with it so the count and its explanation stay in step.
-  // 22 → 23 on 8 Sep 2026: WM3's join sweep, one hour after the shadow sweep so the eligible events
-  // it opens over are already written. Additive; every schedule below is untouched.
-  // 23 → 24 on 22 Sep 2026: one OPD midday catch-up pass for upstream 504/incomplete-day retries.
-  assert.equal(VERCEL.crons.length, 24, '14 + IPD worker + readmission + pre-op + shadow sweep + 3 episode-window entries + lab-v2 tick + WM3 join + OPD midday retry');
+  assert.equal(VERCEL.crons.length, 17, '14 + the restored IPD worker + the readmission worker + the pre-op worker');
   // ⚠️ The OPD entry lost its `?conc=4` on 3 Aug (Unit D, Task 11) so the route's re-sized defaults
   // (max=8, conc=8 — one wave) apply. Production had been sending conc=4 against a default max of
   // 15, i.e. FOUR waves, and the guard has to be computed against what the cron actually sends.

@@ -55,22 +55,6 @@ export const PROMPT_MANIFESTS: PromptManifest[] = [
   // prompt names the ten forbidden strings, and lvp-operator-core screens for them again
   // server-side before any write. A prompt is an instruction, not a guarantee.
   { id: 'lvp-operator-core/LVP_OPERATOR_SYSTEM', maturity: 'draft' },
-  // IPD Episode Audit 0.1 (2 Sep 2026) — the four standing prompts of the second IPD engine, all
-  // in lib/ipd-episode/prompts.ts. REGISTERED rather than left on the gap list because the
-  // BLINDING is the rubric: what each prompt is forbidden to see is what makes its output mean
-  // anything. The checkpoint prompt is written to a cut-off it cannot see past; the diff prompt is
-  // told outright that the admission's ending is absent and not to infer one; the fidelity prompt
-  // is fenced to a single domain; the commentary prompt is forbidden every number. rubricId is
-  // left blank on all four — the discipline is embedded in the prompt text, and there is no
-  // separate rubric document to link.
-  // ⚠️ AND EVERY ONE OF THOSE RULES IS RE-APPLIED IN CODE after the model returns
-  // (lib/ipd-episode/judge-core.ts: the Tier C rewrite, the uncited cap, the A2 domain drop, the
-  // enum validation, the commentary score/finding-id rejection). A prompt is an instruction, not
-  // a guarantee — the same belt-and-braces posture LVP_OPERATOR_SYSTEM carries above.
-  { id: 'prompts/IPD_EPISODE_CHECKPOINT_SYSTEM', maturity: 'draft' },
-  { id: 'prompts/IPD_EPISODE_COMMENTARY_SYSTEM', maturity: 'draft' },
-  { id: 'prompts/IPD_EPISODE_DIFF_SYSTEM', maturity: 'draft' },
-  { id: 'prompts/IPD_EPISODE_FIDELITY_SYSTEM', maturity: 'draft' },
 ];
 
 /**

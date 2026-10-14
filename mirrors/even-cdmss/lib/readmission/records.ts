@@ -35,8 +35,6 @@ import { fetchDischargeDocForEncounter, fetchPriorPrescriptionDocs, fetchStructu
 import { staysForUhid } from '../stay-library/member-read';
 import { readStayLibrary } from '../stay-library/store';
 import { fetchMemberOpdRows } from '../ipd-audit/member-opd-fetch';
-import { fetchOpdNoteByUid } from '../metabase';
-import { opdCaseText, rowToOpdCase } from '../opd-ingest-core';
 import { getMemberSnapshot } from '../member-state/member-state';
 import { careCallEncountersForMember } from '../care-call-store';
 import {
@@ -227,7 +225,6 @@ export async function buildRecordReach(a: {
       try {
         const raw = await renderArtefact(entry, {
           identity, individualUid, memoOpdRows, memoLabs, memoSnapshot, memoCareCalls,
-          fetchOpdNote: fetchOpdNoteByUid,
         });
         if (!raw || !raw.trim()) {
           // An artefact the index listed but whose text could not be read. Reported as an UNKNOWN in
@@ -252,9 +249,6 @@ interface RenderDeps {
   identity: RecordIdentity;
   individualUid: string | null;
   memoOpdRows: () => Promise<{ linked: boolean; prescriptionRows: Record<string, unknown>[]; labRows: Record<string, unknown>[] }>;
-  /** The single-note read, injected so the renderer is testable without db13 (R11-D4). One uid,
-   *  one row or null, throws on failure — `fetchOpdNoteByUid`'s own contract. */
-  fetchOpdNote: (uid: string) => Promise<Record<string, unknown> | null>;
   memoLabs: () => Promise<Array<{ name: string | null; valueText: string | null; value: number | null; unit: string | null; at: string | null }>>;
   memoSnapshot: () => Promise<unknown>;
   /** `EncounterEvidence[]`, read structurally — this file must not depend on the spine's schema
@@ -302,54 +296,9 @@ async function renderStay(encounterRef: string): Promise<string> {
   return out.join('\n');
 }
 
-/**
- * A prior clinic note, HYDRATED (R11-D3). The thin render below reads the IPD med-rec whitelist,
- * which carries no plan column at all: the plan of management lives in `dpipe_pom` and in the GP
- * nested field, and both arrive only through the single-note read. So this fetches that row and
- * hands it to the ONE existing parser and the ONE existing renderer — `rowToOpdCase` +
- * `opdCaseText`, the same pair the OPD audit uses. No second plan parser is written here; the case
- * IS the parse (R11-D6). Nothing named `plan` is ever read (`dpipe.plan` is a pipeline mode, not
- * clinical text).
- *
- * FAIL-SAFE, like every read in this file (R11-D2). A Metabase error, a bad uid or a missing row
- * degrades to the thin render and writes one `[readmission-opd]` warn — the reach never throws, and
- * it never reports "no plan documented" where the read merely failed.
- */
-export async function renderOpdNote(uid: string, d: RenderDeps): Promise<string> {
-  let row: Record<string, unknown> | null;
-  try {
-    row = await d.fetchOpdNote(uid);
-  } catch (e) {
-    console.warn('[readmission-opd] hydrate failed', uid, e instanceof Error ? e.message : String(e));
-    return renderOpdNoteThin(uid, d);
-  }
-  if (!row) {
-    console.warn('[readmission-opd] no row for uid', uid);
-    return renderOpdNoteThin(uid, d);
-  }
-  const { case: c } = rowToOpdCase(row);   // `keys` holds the identifiers; it is discarded, unread.
-  // FAIL LOUD, NEVER SECOND-GUESS (R11-D6). Row carries plan text, case carries none ⇒ the parser is
-  // where to look, not this file. One warn, then the rendered text exactly as it stands.
-  if (c.advice.length === 0 && (hasText(row.dpipe_pom) || hasText(row['general_practitioner_prescription__plan_of_management']))) {
-    console.warn('[readmission-opd] plan text present in row but absent from case', uid);
-  }
-  return opdCaseText(c);
-}
-
-/** Is there any text at all under this field? A presence probe for the warn above, NOT a parser: it
- *  names no field, extracts nothing, and treats blank strings inside a present array as no text. */
-const hasText = (v: unknown): boolean => {
-  if (typeof v === 'string') return v.replace(/<[^>]+>/g, '').trim() !== '';
-  if (Array.isArray(v)) return v.some(hasText);
-  if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).some(hasText);
-  return false;
-};
-
-/** The pre-R11 render, now the FALLBACK only: the prescription row's clinical columns as the med-rec
- *  whitelist has them. Never the identity columns — `fetchMemberOpdRows` does not select them (its
- *  own SELECT is the guarantee). Its text is unchanged, deliberately: a degraded read must look the
- *  same as it did before, so a fallback is never mistaken for a hydrate. */
-export async function renderOpdNoteThin(uid: string, d: RenderDeps): Promise<string> {
+/** A prior clinic note: the prescription row's clinical columns. Never the identity columns —
+ *  `fetchMemberOpdRows` does not select them (its own SELECT is the guarantee). */
+async function renderOpdNote(uid: string, d: RenderDeps): Promise<string> {
   const rows = await d.memoOpdRows();
   const row = rows.prescriptionRows.find((r) => String(r.uid ?? '') === uid);
   if (!row) return '';

@@ -141,16 +141,8 @@ test('count invariant: counts match the committed artifact contents (34 prompts 
   // physician-standing.test.ts and case-ask-core.test.ts). It is a genuinely new reasoning surface
   // and it is counted as one — but note what it asks for: the model REPORTS what a named reviewer
   // asserted in his own words, and code discards anything it cannot find inside that turn.
-  // IPD EPISODE AUDIT 0.1 (2 Sep 2026) adds the four standing prompts of the second IPD engine —
-  // lib/ipd-episode/prompts.ts, all four registered in the manifest (34→38 prompts). Four new
-  // builders come with them, one per pass: buildCheckpointUser in checkpoint-core and
-  // buildDiffUser / buildFidelityUser / buildCommentaryUser in judge-core (41→45). Features go
-  // 23→24: ipd-episode/prompts.ts is not in the generator's FEATURE_OF map, so it labels itself.
-  // Rubrics are unchanged at 7 — the discipline in all four prompts is the BLINDING (what each
-  // pass may not see), which is embedded in the text and re-enforced in code, not a linkable
-  // rubric document.
-  assert.equal(gen.counts.prompts, 38);
+  assert.equal(gen.counts.prompts, 34);
   assert.equal(gen.counts.rubrics, 7);
-  assert.equal(gen.counts.user_message_builders, 45);
-  assert.equal(gen.counts.features, 24);
+  assert.equal(gen.counts.user_message_builders, 41);
+  assert.equal(gen.counts.features, 23);
 });

@@ -444,38 +444,7 @@ export interface PreopSweepOptions {
   /** test seams — production never passes them */
   suggestCall?: SuggestCall;
   narrativeCall?: NarrativeCall;
-  /**
-   * LAB-MCP-V2 §17.8 decision 104 — the SIX db13 fetches, injectable as one object.
-   *
-   * ⚠️ THE LAST HARD-WIRED THING IN THIS SWEEP. Every other input a caller needs is already a
-   * seam (`rails`, `onlyEpisodes`, `extractionCache`, `suggestCall`, `narrativeCall`); the source
-   * reads were direct imports, and they go through `metabaseQuery`, which THROWS inside a lab
-   * execution context (`lib/metabase.ts:115`). So a research run could not call this function at
-   * all — not because the sweep does anything wrong, but because it reads db13 live.
-   *
-   * Injecting the six lets a Lab v2 adapter run the real sweep over a FROZEN source set. Production
-   * passes nothing and gets the six imports, byte-for-byte the calls it made before.
-   */
-  sources?: Partial<PreopSources>;
 }
-
-/**
- * The six deterministic sources one sweep reads, in the shape `run.ts` calls them.
- * Named as a type so an injected set is checked rather than duck-typed.
- */
-export interface PreopSources {
-  fetchUpcomingEpisodes: typeof fetchUpcomingEpisodes;
-  fetchCreatinine: typeof fetchCreatinine;
-  fetchOpdIcd: typeof fetchOpdIcd;
-  fetchPacReports: typeof fetchPacReports;
-  fetchHospitalNames: typeof fetchHospitalNames;
-  fetchOpdComorbidities: typeof fetchOpdComorbidities;
-}
-
-/** Production's set: the six imports, unchanged. */
-export const DEFAULT_PREOP_SOURCES: PreopSources = {
-  fetchUpcomingEpisodes, fetchCreatinine, fetchOpdIcd, fetchPacReports, fetchHospitalNames, fetchOpdComorbidities,
-};
 
 /**
  * One tick. Idempotent on (episode_key, PREOP_ENGINE_VERSION): a second tick over
@@ -496,10 +465,7 @@ export async function runPreopSweep(opts: PreopSweepOptions = {}): Promise<Preop
   /** A leg is only STARTED if its own ceiling still fits in what is left of the box. */
   const roomFor = (legMs: number) => spent() + legMs <= llmBudgetMs;
 
-  // §17.8 decision 104 — the six sources, production's own set unless a caller injects one.
-  const src: PreopSources = opts.sources ? { ...DEFAULT_PREOP_SOURCES, ...opts.sources } : DEFAULT_PREOP_SOURCES;
-
-  const episodeFetch = await src.fetchUpcomingEpisodes(opts.horizonDays ?? PREOP_HORIZON_DAYS);
+  const episodeFetch = await fetchUpcomingEpisodes(opts.horizonDays ?? PREOP_HORIZON_DAYS);
   if (episodeFetch.error) errors.push(episodeFetch.error);
   const only = opts.onlyEpisodes?.length ? new Set(opts.onlyEpisodes) : null;
   const episodes = only ? episodeFetch.rows.filter((e) => only.has(e.docId)) : episodeFetch.rows;
@@ -507,25 +473,14 @@ export async function runPreopSweep(opts: PreopSweepOptions = {}): Promise<Preop
   const uhids = episodes.map((e) => e.uhid).filter((u): u is string => !!u);
 
   const [creat, icd, pacs, hospitals] = await Promise.all([
-    src.fetchCreatinine(individualUids),
-    src.fetchOpdIcd(individualUids),
-    src.fetchPacReports(uhids),
-    src.fetchHospitalNames(),
+    fetchCreatinine(individualUids),
+    fetchOpdIcd(individualUids),
+    fetchPacReports(uhids),
+    fetchHospitalNames(),
   ]);
   // B8a · the sixth deterministic source. Unlike the rails it is NOT flag-gated: it is
   // structured data that feeds the score, so it runs on every tick like the ICD codes do.
-  /**
-   * ⚠️ THE LITERAL CALL IS KEPT ON THE DEFAULT PATH, AND THAT SHAPE IS FORCED.
-   * `lib/__tests__/preop-rails-wiring.test.ts:176` greps this file for `await
-   * fetchOpdComorbidities(` and then asserts there is no rail guard in the 120 characters before
-   * it — the pin that keeps the sixth source ungated. Routing it through `src` unconditionally
-   * removed the literal and failed that test. The contract for this round leaves existing tests
-   * untouched, so the default path calls the import exactly as it always did and only an INJECTED
-   * source takes the seam. Both branches are the same call; only the binding differs.
-   */
-  const opdComorb = opts.sources?.fetchOpdComorbidities
-    ? await src.fetchOpdComorbidities(individualUids)
-    : await fetchOpdComorbidities(individualUids);
+  const opdComorb = await fetchOpdComorbidities(individualUids);
   const hospitalName = new Map(hospitals.rows.map((h) => [h.uid, h.name]));
   // A source that FAULTED and a source that is genuinely empty produce the same rows and
   // must never produce the same report. Both the error line and the degraded flag ride

@@ -321,71 +321,10 @@ const REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE: Record<string, string[]> = {
   ],
 };
 
-/**
- * LAB-MCP-V2 §17.7 round C2, decisions 82/89/90 — the second authorised addition, same pattern as
- * the merge surface above.
- *
- * ⚠️ ALL THREE ARE SELECTs, AND THAT IS THE WHOLE POINT OF LISTING THEM. The Lab MCP v2 rules
- * release target writes `lvc_recommendations` through v1's own code and only v1's: `lvcRatify`
- * (decision 89) forward and `RETIREMENT_UPDATE_SQL` (decision 90) back, both reached by import, so
- * neither appears here — v2 contributes no write statement of its own in either direction.
- * `lib/lab-v2/__tests__/c2-rules.test.ts` asserts that these three are read-only and greps the whole
- * v2 release tree for a fourth.
- */
-const REGISTRY_SQL_ADDED_BY_LAB_V2_C2: Record<string, string[]> = {
-  "lib/lab-v2/releases/rules-target.ts": [
-    "SELECT id FROM lvc_recommendations WHERE status = 'active' ORDER BY id LIMIT 500",
-    "SELECT id, statement, society, category, keywords, status FROM lvc_recommendations WHERE status = 'active' ORDER BY id LIMIT 500",
-    "SELECT id, statement, society, category, keywords, status, ratified_by, ratified_at FROM lvc_recommendations WHERE id = ${recIdLit(id, 'recommendation_id')} LIMIT 1",
-  ],
-};
-
-/**
- * LAB-MCP-V2 §17.7 round C2.1, decision 94 — the first authorised CHANGE to a frozen statement, as
- * opposed to an addition. It is expressed as an explicit before → after pair rather than by
- * overwriting the file's entry, so proof 3 keeps naming the exact statement that moved and the
- * baseline constant above stays untouched and stays pinned by its own two tests.
- *
- * ⚠️ WHY IT MOVED. A rule matches through its keywords and nothing else, and `lvcRatify`'s promotion
- * INSERT named neither `keywords` nor `category`, so every rule promoted through F14 landed active
- * and inert. Decision 94 adds the two columns, copied from the proposal the reviewer approved and
- * never re-derived. The write is still v1's, still one statement, still guarded by the promote-only
- * check above it — so the Lab MCP v2 decision 79 grep, which forbids v2 from having any `lvc_`
- * write of its own, is unaffected and stays green.
- *
- * ⚠️ ONLY ONE OF DECISION 94's TWO CHANGED STATEMENTS IS VISIBLE HERE. The other is `lvcPropose`'s
- * INSERT into `lvc_recommendation_proposals`, which this scan does not see: it filters on the
- * substring `lvc_recommendations`, and `lvc_recommendation_proposals` does not contain it. The
- * staging table has never been in this registry, by construction — proof 3 freezes the LIVE RULEBOOK.
- */
-const REGISTRY_SQL_CHANGED_BY_DECISION_94: Record<string, [string, string][]> = {
-  'lib/mcp-tools.ts': [[
-    "INSERT INTO lvc_recommendations (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid, source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at) VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now()) RETURNING id",
-    "INSERT INTO lvc_recommendations (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid, source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at, category, keywords) VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12::text[]) RETURNING id",
-  ]],
-};
-
-/** Apply decision 94's substitutions. A `before` that is no longer present is an error, not a no-op:
- *  a silently-skipped substitution would let the statement drift twice and be caught once. */
-function applyAuthorisedChanges(base: Record<string, string[]>): Record<string, string[]> {
-  const out: Record<string, string[]> = { ...base };
-  for (const [file, pairs] of Object.entries(REGISTRY_SQL_CHANGED_BY_DECISION_94)) {
-    const list = [...(out[file] ?? [])];
-    for (const [before, after] of pairs) {
-      const i = list.indexOf(before);
-      assert.notEqual(i, -1, `decision 94 names a statement that is not in the frozen baseline for ${file}`);
-      list[i] = after;
-    }
-    out[file] = list.sort();
-  }
-  return out;
-}
-
-/** What proof 3 compares against: the frozen baseline, every authorised addition, every authorised change. */
+/** What proof 3 compares against: the frozen baseline plus every authorised addition since. */
 const REGISTRY_SQL_EXPECTED: Record<string, string[]> = {
-  ...applyAuthorisedChanges(REGISTRY_SQL_AT_F800B45),
+  ...REGISTRY_SQL_AT_F800B45,
   ...REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE,
-  ...REGISTRY_SQL_ADDED_BY_LAB_V2_C2,
 };
 
 function scanRegistrySql(): Record<string, string[]> {

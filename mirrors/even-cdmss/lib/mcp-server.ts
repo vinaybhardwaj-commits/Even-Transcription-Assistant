@@ -5,7 +5,7 @@
  * embeddable in the connector URL. Auth is a timing-safe compare either way.
  */
 import { timingSafeEqual } from 'crypto';
-import { LAB_TOOLS, RETIRED_TOOLS, callLabTool } from './mcp-tools';
+import { LAB_TOOLS, callLabTool } from './mcp-tools';
 
 export const MCP_SERVER_INFO = { name: 'cdmss-lab', version: '1.0.0' };
 export const MCP_PROTOCOL_VERSION = '2024-11-05';
@@ -39,7 +39,7 @@ export async function dispatchMcp(body: JsonRpc): Promise<McpReply> {
         protocolVersion: MCP_PROTOCOL_VERSION,
         serverInfo: MCP_SERVER_INFO,
         capabilities: { tools: {} },
-        instructions: 'CDMSS Lab — free mini-pipeline experimentation. mini_analyze (audit a Metabase note or pasted text → lab store), backfill_control, corpus_add + corpus_manage (quarantined until activated). Nothing here uses Gemini or changes CDMSS analysis.',
+        instructions: 'CDMSS Lab — free mini-pipeline experimentation. mini_analyze (audit a Metabase note or pasted text → lab store), backfill_control, corpus_add + corpus_manage (quarantined until activated), lab_query. Nothing here uses Gemini or changes CDMSS analysis.',
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':
@@ -51,15 +51,7 @@ export async function dispatchMcp(body: JsonRpc): Promise<McpReply> {
     case 'tools/call': {
       const toolName = String(params.name || '');
       const args = (params.arguments && typeof params.arguments === 'object') ? params.arguments as Record<string, unknown> : {};
-      // lab-v2 decision 149: a RETIRED name is one this server once served, so it passes the gate
-      // and `callLabTool`'s arm answers it with the RETIRED object as a normal result. Retired names
-      // are deliberately NOT added to `tools/list` above — retirement removes a tool from discovery,
-      // not from history. A name in neither list is still refused exactly as before.
-      // ⚠️ `String(t.name)` on both sides: both lists are `as const`, so comparing a literal union
-      // against a name outside it is a compile error rather than a comparison.
-      const known = LAB_TOOLS.some((t) => String(t.name) === toolName)
-        || RETIRED_TOOLS.some((t) => String(t.name) === toolName);
-      if (!known) return rpcErr(id, -32602, `unknown tool: ${toolName}`);
+      if (!LAB_TOOLS.some((t) => t.name === toolName)) return rpcErr(id, -32602, `unknown tool: ${toolName}`);
       return result(id, await callLabTool(toolName, args));
     }
     default:
