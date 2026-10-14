@@ -4,7 +4,7 @@
   voicecheck_seed.py load --run <run_id> --dir <dir> --sha <items.json sha256, full or >=12 hex prefix, as posted on the bus> [--dry-run]
 
 <dir> holds items.json and audio/<clip_id>.m4a. items.json must be exactly {"cards":[{"card_id","proposed","clips":[clip_id,...]}], "doctors":[names]}
-(doctors optional). OPTIONAL known-voice extras: "references" {doctor name: [1..8 clip ids]} (labelled-by-design reference clips; they need audio files too, ids unique across cards and references) and "doctor_meta" {doctor name: {display_name?, status? confirmed|draft, code?}}. ANY other field at any level (is_decoy, kind, session, cluster, source, ...) aborts, so a card-kind cue can never be staged. Ids match
+(doctors optional). ANY other field at any level (is_decoy, kind, session, cluster, source, ...) aborts, so a card-kind cue can never be staged. Ids match
 [A-Za-z0-9][A-Za-z0-9_-]{0,63} (no "."), are unique, 1..60 cards, EXACTLY 5 clips per card (A4 4.8: card length must not leak type); every clip has a file and every file belongs to a card. ffprobe is REQUIRED (no ffprobe = abort); an m4a with tags beyond the container brand/encoder aborts (metadata must be stripped at cut time). Uploads clips first, items.json LAST, and
 refuses to replace an existing voicecheck/<run>/items.json (items are immutable per run; a new batch needs a new run id). The answer key is never read or
 uploaded. Needs CLOUDFLARE_API_TOKEN in the environment (never printed). --dry-run does every check and writes nothing."""
@@ -21,40 +21,14 @@ def nm(x, n):
     return isinstance(x, str) and x.strip() != "" and len(x) <= n
 
 
-REF_MAX = 8
-META_KEYS = {"display_name", "status", "code"}
-
-
-def validate_extras(data, cids_clips):
-    """Validate the optional references/doctor_meta; returns the reference clip ids. Unknown keys at any level abort. Pure: no files."""
-    refs, meta = data.get("references", {}), data.get("doctor_meta", {})
-    if not isinstance(refs, dict) or len(refs) > 60:
-        sys.exit("references: object of <=60 doctor names")
-    out = []
-    for n, ids in refs.items():
-        if not nm(n, 60) or n == "__proto__" or not isinstance(ids, list) or not 1 <= len(ids) <= REF_MAX or not all(isinstance(x, str) and ID.match(x) for x in ids):
-            sys.exit(f"references[{n!r}]: 1..{REF_MAX} plain opaque clip ids")
-        out += ids
-    if len(set(out)) != len(out) or set(out) & set(cids_clips):
-        sys.exit("clip ids must be unique across cards and references")
-    if not isinstance(meta, dict) or len(meta) > 400:
-        sys.exit("doctor_meta: object of <=400 doctor names")
-    for n, v in meta.items():
-        if not nm(n, 60) or n == "__proto__" or not isinstance(v, dict) or not set(v) <= META_KEYS:
-            sys.exit(f"doctor_meta[{n!r}]: fields must be within {sorted(META_KEYS)}")
-        if any(k in v and not nm(v[k], 60) for k in ("display_name", "code")) or ("status" in v and v["status"] not in ("confirmed", "draft")):
-            sys.exit(f"doctor_meta[{n!r}]: display_name/code <=60 chars, status confirmed|draft")
-    return out
-
-
 def check(d, sha):
     raw = (d / "items.json").read_bytes()
     got = hashlib.sha256(raw).hexdigest()
     if len(sha) < 12 or not got.startswith(sha.lower()):
         sys.exit(f"items.json sha256 {got[:12]}... does not match the posted sha {sha}")
     data = json.loads(raw)
-    if not isinstance(data, dict) or not set(data) <= {"cards", "doctors", "references", "doctor_meta"} or "cards" not in data:
-        sys.exit("items.json: top level must be {cards, doctors?, references?, doctor_meta?}")
+    if not isinstance(data, dict) or not set(data) <= {"cards", "doctors"} or "cards" not in data:
+        sys.exit("items.json: top level must be exactly {cards, doctors?}")
     cards = data["cards"]
     if not isinstance(cards, list) or not 1 <= len(cards) <= 60:
         sys.exit("items.json: 1..60 cards")
@@ -72,7 +46,6 @@ def check(d, sha):
     docs = data.get("doctors", [])
     if not isinstance(docs, list) or len(docs) > 400 or not all(nm(x, 60) for x in docs):
         sys.exit("doctors: list of <=400 names <=60 chars")
-    clips += validate_extras(data, clips)
     have = {p.name[:-4] for p in (d / "audio").glob("*.m4a")} if (d / "audio").is_dir() else set()
     if have != set(clips):
         sys.exit(f"clips and items disagree: missing files {sorted(set(clips) - have)[:3]}, files without a card {sorted(have - set(clips))[:3]}")
