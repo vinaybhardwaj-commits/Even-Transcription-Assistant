@@ -4,7 +4,9 @@
  * $1 is the rows jsonb array. FIELD-LEVEL: a row updates only the columns whose key it carries (jsonb_exists), so the prescription join
  * (C3, which sends {consult_uid, prescription}) never blanks what the box wrote, and the box never blanks the prescription. A key that is
  * present with null sets the column to NULL. A consult_uid that is new is inserted with the columns the row carries (the rest NULL).
- * Returns one row { updated, inserted }. No transcript text column exists; the identity columns (names, individual / prescription uid) are written only when the row carries them (the C3 join).
+ * STALE-WRITE GUARD (fable gate C3): when the incoming row carries generated_at and the stored generated_at is NEWER, the update is skipped (a replayed or reordered old batch cannot overwrite a newer row); a row
+ * without generated_at (C3's partial rows) is never guarded. The guard is in the UPDATE's own WHERE, so Postgres re-checks it against the committed row when a concurrent writer held the lock.
+ * Returns one row { updated, inserted, stale } (stale = rows skipped by the guard, counted from the statement's snapshot; a skip decided only on the re-check is accounted by the one rerun). No transcript text column exists; the identity columns (names, individual / prescription uid) are written only when the row carries them (the C3 join).
  */
 type Col = { name: string; expr: string };
 
@@ -45,14 +47,20 @@ upd AS (
     updated_at = now()
   FROM p
   WHERE e.consult_uid = p.j->>'consult_uid'
+    AND NOT (NULLIF(p.j->>'generated_at', '') IS NOT NULL AND e.generated_at IS NOT NULL AND e.generated_at > (p.j->>'generated_at')::timestamptz)
   RETURNING e.consult_uid
+),
+stale AS (
+  SELECT e.consult_uid FROM p JOIN encounter_catalog e ON e.consult_uid = p.j->>'consult_uid'
+   WHERE NULLIF(p.j->>'generated_at', '') IS NOT NULL AND e.generated_at IS NOT NULL AND e.generated_at > (p.j->>'generated_at')::timestamptz
 ),
 ins AS (
   INSERT INTO encounter_catalog (consult_uid, ${COLUMNS.map((c) => c.name).join(", ")})
   SELECT p.j->>'consult_uid', ${COLUMNS.map((c) => c.expr).join(", ")}
     FROM p
    WHERE NOT EXISTS (SELECT 1 FROM upd WHERE upd.consult_uid = p.j->>'consult_uid')
+     AND NOT EXISTS (SELECT 1 FROM stale WHERE stale.consult_uid = p.j->>'consult_uid')
   ON CONFLICT (consult_uid) DO NOTHING
   RETURNING consult_uid
 )
-SELECT (SELECT count(*) FROM upd)::integer AS updated, (SELECT count(*) FROM ins)::integer AS inserted`;
+SELECT (SELECT count(*) FROM upd)::integer AS updated, (SELECT count(*) FROM ins)::integer AS inserted, (SELECT count(*) FROM stale)::integer AS stale`;

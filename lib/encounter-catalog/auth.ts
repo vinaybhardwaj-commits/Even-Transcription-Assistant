@@ -5,7 +5,8 @@
  * credential. Headers: x-catalog-ts (unix seconds) and x-catalog-signature = hex HMAC-SHA256(secret, `${ts}.${rawBody}`).
  * A timestamp more than 10 minutes off is refused. An unset or blank secret FAILS CLOSED with 503. Never echoes a header.
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { NextRequest, NextResponse } from "next/server";
 
 export const CATALOG_INGEST_SECRET_ENV = "ENCOUNTER_CATALOG_INGEST_SECRET";
 export const CATALOG_TS_HEADER = "x-catalog-ts";
@@ -34,4 +35,21 @@ export function checkCatalogHmac(
   const want = Buffer.from(signCatalog(rawBody, secret, ts), "hex");
   const got = Buffer.from(sig, "hex");
   return want.length === got.length && timingSafeEqual(want, got) ? null : { status: 401, error: "unauthorized" };
+}
+
+/**
+ * Bearer-ONLY admin check for the search route (fable gate C1, 14 Oct). lib/admin-gate requireAdmin also accepts `?token=`, which would put ADMIN_TOKEN, next to a PHI-bearing URL, in the
+ * request logs. Here a request that carries a `token` query parameter at all is refused, whatever its Authorization header says; an unset or blank ADMIN_TOKEN refuses; the bearer is compared
+ * (hashed, constant time) with ADMIN_TOKEN. The refusal is the same 401 in every case, so a caller cannot tell "not configured" from "wrong".
+ */
+const sha256 = (s: string): Buffer => createHash("sha256").update(s).digest();
+
+export function requireAdminBearer(req: NextRequest, env: Record<string, string | undefined> = process.env): NextResponse | null {
+  const refuse = () => NextResponse.json({ error: "admin bearer token required" }, { status: 401, headers: { "cache-control": "no-store" } });
+  if (req.nextUrl.searchParams.has("token")) return refuse();
+  const expected = (env.ADMIN_TOKEN ?? "").trim();
+  if (expected === "") return refuse();
+  const header = req.headers.get("authorization") || "";
+  const presented = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
+  return presented !== "" && timingSafeEqual(sha256(presented), sha256(expected)) ? null : refuse();
 }
