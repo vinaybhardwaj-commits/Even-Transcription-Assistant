@@ -6,3 +6,5 @@ a94843299a04708ae81673babbf61a8df63ef814:apps/room-recorder/Tests/HelperCoreTest
 50e0a6d2632d7602b70bb58daf0de359f2baf5d4:apps/room-recorder/Sources/FleetCore/FleetJWS.swift:generic-api-key:36
 # fake placeholder presigned URL in a unit test (scribe_catalog-1), gating-lead 14 Oct
 5a1d05cad25b9454b018c0e5c069d02170d32981:tests/unit/mcp-catalog.test.ts:presigned-url:41
+# fake placeholder presigned URL in a unit test (scribe_catalog-3), gating-lead 14 Oct
+bbf77546ba1d39eeff6b39a5ca58d1d3115c1513:tests/unit/mcp-catalog.test.ts:presigned-url:816

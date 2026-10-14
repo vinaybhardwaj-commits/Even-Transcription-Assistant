@@ -881,7 +881,41 @@ describe("the door", () => {
     for (const needle of ["SECRETSIG", "signed.example", "X-Amz", "consult-clips/"]) expect(everything, needle).not.toContain(needle);
     // the audit row carries the tool name and allow-listed args only
     expect(JSON.stringify(auditRows())).toContain("scribe_catalog");
-    expect(JSON.stringify(auditRows())).not.toContain(UID);
+    // CATALOG-3: the consult uid IS audited now (an id, allow-listed), the URL never is
+  });
+  /** the metadata_json.args of the door's audit row for the last scribe_catalog call */
+  const lastAudit = (): Row => {
+    const rows = auditRows().filter((c) => c.values.includes("scribe_catalog"));
+    const json = rows[rows.length - 1]!.values.find((v) => typeof v === "string" && v.startsWith("{")) as string;
+    return JSON.parse(json) as Row;
+  };
+  it("CATALOG-3 Z2: the audit row of a get holds action and consult_uid (and include_text), not the transcript", async () => {
+    setCatalog([crow(UID)]);
+    seedLayers();
+    await rpc({ action: "get", consult_uid: UID, include_text: true });
+    expect(lastAudit().args).toEqual({ action: "get", consult_uid: UID, include_text: true });
+  });
+  it("CATALOG-3 Z2: the audit row of clip_audio_url holds action and consult_uid and no URL, signature or X-Amz text anywhere", async () => {
+    setCatalog([crow(UID)]);
+    await rpc({ action: "clip_audio_url", consult_uid: UID });
+    const row = lastAudit();
+    expect(row.args).toEqual({ action: "clip_audio_url", consult_uid: UID });
+    const text = JSON.stringify(auditRows());
+    for (const needle of ["https://", "SECRETSIG", "signature", "signature_sha256", "X-Amz", "signed.example", "s".repeat(64)]) expect(text, needle).not.toContain(needle);
+  });
+  it("CATALOG-3 Z2: the audit row of a search holds action (and the allow-listed room/limit), not the other filters", async () => {
+    setCatalog([crow(UID)]);
+    await rpc({ action: "search", limit: 5, room: "opd-a", doctor_uid: "docA", cursor: "abc", from: "2026-10-01" });
+    expect(lastAudit().args).toEqual({ action: "search", limit: 5, room: "opd-a" });
+  });
+  it("CATALOG-3 Z2: an unknown key (url, signature, text) is still dropped; so is a non-string/number/boolean action or consult_uid; strings are cut at 128", async () => {
+    setCatalog([crow(UID)]);
+    await rpc({ action: "get", consult_uid: UID, url: "https://x/y?X-Amz-Signature=abc", signature: "sig", text: "patient said", signature_sha256: "h" });
+    const a = lastAudit().args as Row;
+    for (const k of ["url", "signature", "text", "signature_sha256"]) expect(a, k).not.toHaveProperty(k);
+    const { safeArgs } = await import("@/lib/mcp/audit");
+    expect(safeArgs({ action: { x: 1 }, consult_uid: ["a"] })).toEqual({});
+    expect((safeArgs({ consult_uid: "u".repeat(300) }).consult_uid as string).length).toBe(128);
   });
   it("include_text transcript text never reaches an audit row or a log", async () => {
     setCatalog([crow(UID)]);
