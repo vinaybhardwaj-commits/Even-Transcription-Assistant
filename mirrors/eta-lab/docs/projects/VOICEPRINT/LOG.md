@@ -64,7 +64,3 @@ Refs: r168, r182, r186, r206.
 
 ## Open
 Final scoring venue (item 137); Phase L doctor-centroid minting waits on V rating Batches 1b + 2.
-
-- 29 Sep 2026 (rev 25): auto-minting PASS for Manoj 0.844, Salanki 0.9266, Animesh 0.8316 (each reproduced by two checkers); Ankit and Poornima running; 65 doctors indexed, 569 consults with room audio; W51 v3.1 re-review pending.
-- 29 Sep ~19:27 IST (rev 26): 47 proposal jobs on HF L4 due ~21:30-22:00; old DVC retired (#7010); A4 v10 7d8bd212; ROLE v4 waits on V.
-- 29 Sep ~23:10 IST (rev 27): ROLE v4 rulings #7406: D = 29 Sep, INSUFFICIENT if fewer than 30 VERIFIED sessions; T-ROLE-5 (lx A4 Staff amendment) open.

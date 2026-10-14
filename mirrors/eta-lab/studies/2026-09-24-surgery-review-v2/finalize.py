@@ -13,7 +13,6 @@ import json, os, re, sys
 import deid as deid_mod
 import build_consult as bc
 import u9
-from jevconfig import POOR_P  # W41 F4: moved, not changed (still 0.75)
 
 OUT = os.path.expanduser("~/eta-data/surgery-review-v2")
 KIND = {"recommendation_now": "recommendation_now", "history": "history", "referral": "referral", "staff_talk": "staff_talk", "no_surgical_talk": "none"}
@@ -55,6 +54,7 @@ def _conf(p):
 
 
 NOT_APPLICABLE = {"proposer": "unclear", "firmness": "not_applicable", "patient_response": "not_stated", "cost": "no", "second_opinion": "no", "procedure": "not named"}
+POOR_P = 0.75  # Jev's too-poor probability at or above this is "poor" (mostly unusable); the raw p is kept in meta
 
 
 def jev_block(r):

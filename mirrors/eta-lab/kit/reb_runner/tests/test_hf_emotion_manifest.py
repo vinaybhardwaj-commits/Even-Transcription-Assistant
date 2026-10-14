@@ -29,8 +29,8 @@ def stub(window_id, room_id, t0_ms=0, t1_ms=5000, source_kind=None):
 
 
 def diar_track(window_id, segments):
-    cfg = {"backend": "local-gpu"}
-    return {"schema": "reb.track.v1", "window_id": window_id, "layer": "diar", "engine": "pyannote-local-twin",
+    cfg = {"backend": "hosted-api"}
+    return {"schema": "reb.track.v1", "window_id": window_id, "layer": "diar", "engine": "pyannote",
             "model": "pyannote.ai", "version": "v1", "config": cfg, "config_hash": config_hash(cfg),
             "machine": "api", "status": "ok", "reason": None, "segments": segments}
 
@@ -72,41 +72,16 @@ write_track(ROOT, DATE, "suite-clinical1", "w_suite",
             diar_track("w_suite", [{"t0_ms": 0, "t1_ms": 3000, "speaker": "clinician"}]),
             manifest_stub=stub("w_suite", "suite-clinical1", t0_ms=0, t1_ms=3000, source_kind="suite_synthetic"))
 
-# w_two: prod diar alongside local-twin -> only local-twin counts (Fable's 29 Sep ruling), any order
-def diar_engine(window_id, engine, segments):
-    t = diar_track(window_id, segments)
-    t["engine"] = engine
-    return t
-
-write_track(ROOT, DATE, "room_11111111", "w_two",
-            diar_engine("w_two", "pyannote-local-twin", [{"t0_ms": 0, "t1_ms": 1000, "speaker": "0"}]),
-            manifest_stub=stub("w_two", "room_11111111"))
-write_track(ROOT, DATE, "room_11111111", "w_two",
-            diar_engine("w_two", "pyannote-ai-prod", [{"t0_ms": 0, "t1_ms": 5000, "speaker": "1"}]),
-            manifest_stub=stub("w_two", "room_11111111"))
-
-write_track(ROOT, DATE, "room_11111111", "w_prodonly",
-            diar_engine("w_prodonly", "pyannote-ai-prod", [{"t0_ms": 0, "t1_ms": 2000, "speaker": "1"}]),
-            manifest_stub=stub("w_prodonly", "room_11111111"))
-write_track(ROOT, DATE, "room_11111111", "w_bad",
-            diar_track("w_bad", [{"t0_ms": EPOCH_T0, "t1_ms": EPOCH_T0 + 2000, "speaker": "0"}]),
-            manifest_stub=stub("w_bad", "room_11111111"))
-
 try:
-    skipped = []
-    m.build_manifest(ROOT, DATE, skipped)
-    assert skipped == ["w_bad"], skipped  # one bad window is skipped and named, the rest still build
     out = {w["window_id"]: w for w in m.build_manifest(ROOT, DATE)}
 
-    assert set(out) == {"w_diar", "w_nodiar", "w_two", "w_prodonly"}, out.keys()
+    assert set(out) == {"w_diar", "w_nodiar"}, out.keys()
     print("1/3 OK: w_done (already scored) and w_suite (synthetic) excluded from the manifest")
 
     assert out["w_diar"]["turns"] == [[0, 2000, "clinician"], [2000, 5000, None]]
     print("2/3 OK: w_diar's turns come from its diar track")
 
     assert out["w_nodiar"]["turns"] == [[0, 5000, None]]  # window-relative, not [EPOCH_T0, EPOCH_T0+5000]
-    assert out["w_two"]["turns"] == [[0, 1000, "0"]], out["w_two"]["turns"]
-    assert out["w_prodonly"]["turns"] == [[0, 5000, None]], out["w_prodonly"]["turns"]  # prod-only -> whole window
     print("3/3 OK: w_nodiar (no diar track, real epoch t0) falls back to one window-relative turn")
 finally:
     shutil.rmtree(ROOT, ignore_errors=True)

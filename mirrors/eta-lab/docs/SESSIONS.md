@@ -2,11 +2,7 @@
 
 Written by the `roadmap` pane. Machine names are real hostnames or herdr ids; PHI/account/hostname redaction rules still apply elsewhere — here I name only internal machine labels already used in the board and handovers.
 
-Last revision: **29 Sep 2026, ~23:10 IST** (rev 8, addendum only; the table below is still the rev 6 query of 28 Sep and is UNVERIFIED for today).
-
-**Roster addendum, 29 Sep ~23:10 IST (rev 8, UNVERIFIED against a live query):** eta-refuter-2 and eta-refuter-3 are the active checkers (#7480, #7600); hf-fleet runs the Koyal pump (#7592); terms owns T-TERMS-40; Herdr on the Mini is 0.9.1 (spare 0.9.2 handoff failed, #7598). The table body below is still the 28 Sep query and is UNVERIFIED.
-
-**Roster change of record, 29 Sep 18:30 IST (Fable handover, bus #6855-6857):** Mini-Fable stood down at 18:26; Cowork Fable on V's MacBook Air resumed as `fable` at 18:30. Added since rev 6: warden (dispatcher, sweeps ~10 min), hist-bulk, split, router-fix, lid-debug, sig-research, sig-debug, surg-link, scribe, terms, notesafe, tone, acoustics, freescript, stt-bench, yoga-free, vp-asus, hf-fleet, lab-viewer, lx, jev-audit, jev-fix, reb, diar-lab, linker, cap, three refuters (eta-refuter Mini, eta-refuter-2 box, eta-refuter-3 REB/terms/mint; vj-refuter for VOICEPRINT/CAP). `chronicle` (asus-ubuntu) is not a registered bus name; Fable relays. Whether each agent is idle or busy right now: UNVERIFIED (Fable's 19:40 audit names acoustics, freescript, jev-fix, fleet, lab-mover, stt-bench, terms, notesafe and surg-jev as idle, #7097).
+Last revision: **28 Sep 2026, ~13:20 IST** (rev 6). Rebuilt directly from `herdr agent list` (Mini) and `herdr --machine eta-lab-t4 agent list` (box), per Fable's order for rev 15 — this is a live query, not a snapshot file, so it is authoritative for who is running right now. c3 and Yoga were not queried this pass (not in the order's ask); their rows are carried forward from rev 5 and marked UNVERIFIED.
 
 ## A. Agents today (Mini + box, live query)
 

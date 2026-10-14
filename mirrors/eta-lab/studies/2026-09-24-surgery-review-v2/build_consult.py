@@ -13,11 +13,12 @@ Writes ~/eta-data/surgery-review-v2/consult-<id>.json (0600). Prints counts only
 import json, os, re, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 import u9
-from jevconfig import CHUNK, EVIDENCE_MIN_P, EVIDENCE_MAX  # W41 F4: moved, not changed (still 180 / 0.5 / 6)
 
 OUT = os.path.expanduser("~/eta-data/surgery-review-v2")
 TRANSLATE_MODEL = "google/gemini-3.8-flash"
 OR_URL = "https://openrouter.ai/api/v1/chat/completions"
+CHUNK = 180
+EVIDENCE_MIN_P, EVIDENCE_MAX = 0.5, 6
 TRANSLATE_SYSTEM = ("You translate a clinic conversation transcript into English, faithfully.\n- Leave English words and English sentences exactly as they are.\n"
     "- Keep drug names, doses, numbers and units exact.\n- Never summarise, and never add or drop any content.\n"
     "- If the input is already English, return it unchanged.\n- Output only the translation: no preamble, no notes, no quotation marks.")

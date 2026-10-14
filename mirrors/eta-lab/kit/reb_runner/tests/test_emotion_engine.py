@@ -26,17 +26,6 @@ turns_fallback = e.turns_from_diar_segments(None, EPOCH_T0, EPOCH_T0 + 300_000)
 assert turns_fallback == [(0, 300_000, None)], turns_fallback  # window-relative: starts at 0, not EPOCH_T0
 turns_empty = e.turns_from_diar_segments([], EPOCH_T0, EPOCH_T0 + 5900)
 assert turns_empty == [(0, 5900, None)], turns_empty
-try:
-    e.turns_from_diar_segments([{"t0_ms": EPOCH_T0, "t1_ms": EPOCH_T0 + 2000, "speaker": None}], EPOCH_T0, EPOCH_T0 + 5000)
-    raise SystemExit("epoch-like diar segment was not rejected")
-except ValueError:
-    pass
-assert e.turns_from_diar_segments([{"t0_ms": 0, "t1_ms": 5001}], 0, 5000) == [(0, 5000, None)]  # <=1s overshoot clamped
-try:
-    e.turns_from_diar_segments([{"t0_ms": 0, "t1_ms": 6500}], 0, 5000)
-    raise SystemExit("overshoot beyond 1s was not rejected")
-except ValueError:
-    pass
 print("1/5 turns_from_diar_segments OK: diar turns used when present, whole-window fallback is "
       "window-relative (0-based) even for a real epoch window start")
 
