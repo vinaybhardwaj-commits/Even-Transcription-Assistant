@@ -109,10 +109,14 @@ def lockbox_guard(uids: list[str], artifacts: Path, is_lockbox: bool) -> int:
         return 0
     dates = {}
     for u in uids:
+        got = []
         try:
-            dates[u] = ((_load_art(artifacts, u) or {}).get("encounter") or {}).get("visit_date_ist")
-        except (OSError, ValueError, AttributeError):
-            dates[u] = None
+            for d in (artifacts, artifacts / "b0"):
+                if d is artifacts or (d / f"{u}.json").exists():
+                    got.append(((_load_art(d, u) or {}).get("encounter") or {}).get("visit_date_ist"))
+        except (OSError, ValueError, AttributeError, RecursionError):
+            got.append(None)
+        dates[u] = got
     n_hash, n_date, n_nodate = splits.tuning_guard(rule, dates)
     if n_hash or n_date or n_nodate:
         print(f"lockbox_guard: abort n_hash={n_hash} n_date={n_date} n_nodate={n_nodate}")

@@ -92,6 +92,15 @@ def _parse_date(v) -> dt.date:
     return dt.date.fromisoformat(v)
 
 
+def _no_dupes(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key")
+        d[k] = v
+    return d
+
+
 class LockboxRule:
     """Lockbox membership by rule: a set of uid hashes plus an IST date range. The real file lives outside the repo."""
 
@@ -106,13 +115,13 @@ class LockboxRule:
         if not path:
             raise LockboxRuleError("rule_unset")
         try:
-            d = json.loads(Path(path).read_text(encoding="utf-8"))
+            d = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_no_dupes)
         except (OSError, UnicodeDecodeError):
             raise LockboxRuleError("rule_unreadable") from None
-        except ValueError:
+        except (ValueError, RecursionError):
             raise LockboxRuleError("rule_invalid") from None
         try:
-            if not isinstance(d, dict) or set(d) != cls.KEYS or d["version"] != 1 or isinstance(d["version"], bool):
+            if not isinstance(d, dict) or set(d) != cls.KEYS or type(d["version"]) is not int or d["version"] != 1:
                 raise ValueError
             h = d["uid_sha256"]
             if not isinstance(h, list) or not all(isinstance(x, str) and _HEX64.fullmatch(x) for x in h):
@@ -131,17 +140,25 @@ class LockboxRule:
         return self.date_from <= ist_date <= self.date_to
 
 
-def tuning_guard(rule: LockboxRule, dates: dict[str, str | None]) -> tuple[int, int, int]:
-    """(n_hash, n_date, n_nodate) over uid -> IST date string (None when unknown). Any non-zero count means abort. Never returns or raises uids."""
+def tuning_guard(rule: LockboxRule, dates: dict[str, str | None | list]) -> tuple[int, int, int]:
+    """(n_hash, n_date, n_nodate) over uid -> IST date string(s) (None when unknown; a list holds one entry per artifact the run loads for the uid).
+    Any non-zero count means abort. A date in range counts n_date; an invalid date, or valid dates that differ, count n_nodate.
+    A uid that cannot be hashed counts n_hash. Never returns or raises uids."""
     n_hash = n_date = n_nodate = 0
-    for uid, raw in dates.items():
+    for uid, raws in dates.items():
+        if not isinstance(raws, list):
+            raws = [raws]
         try:
-            d = _parse_date(raw)
-        except ValueError:
-            d = None
-        n_hash += rule.hit_hash(uid)
-        if d is None:
+            n_hash += rule.hit_hash(uid)
+        except UnicodeEncodeError:
+            n_hash += 1
+        parsed = []
+        for raw in raws:
+            try:
+                parsed.append(_parse_date(raw))
+            except (ValueError, RecursionError):
+                parsed.append(None)
+        if not parsed or None in parsed or len(set(parsed)) > 1:
             n_nodate += 1
-        else:
-            n_date += rule.hit_date(d)
+        n_date += any(d is not None and rule.hit_date(d) for d in parsed)
     return n_hash, n_date, n_nodate

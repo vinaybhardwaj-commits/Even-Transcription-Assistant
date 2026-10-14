@@ -93,6 +93,77 @@ def test_abort_on_uid_with_no_artifact(tmp_path, monkeypatch, capsys):
     assert_nothing_written(tmp_path, fc)
 
 
+def _b0(tmp_path, uid, enc):
+    d = tmp_path / "arts" / "b0"
+    d.mkdir(exist_ok=True)
+    (d / f"{uid}.json").write_text(json.dumps({"encounter": enc}), encoding="utf-8")
+
+
+def _run_with_b0(tmp_path, monkeypatch, capsys, b0_enc):
+    monkeypatch.setenv(splits.RULE_ENV, str(rule(tmp_path)))
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    arts, arms, fdir = setup(tmp_path, {U1: "2026-10-12", U2: "2026-10-12"})
+    if b0_enc is not None:
+        _b0(tmp_path, U2, b0_enc)
+    fc = FakeClient(responder)
+    rc = run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc)
+    return rc, fc, capsys.readouterr().out
+
+
+def test_abort_when_bn_clean_but_b0_in_range(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _run_with_b0(tmp_path, monkeypatch, capsys, {"visit_date_ist": "2026-10-15"})
+    assert rc != 0 and "n_hash=0 n_date=1" in out and U2 not in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_abort_when_artifact_dates_differ(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _run_with_b0(tmp_path, monkeypatch, capsys, {"visit_date_ist": "2026-10-13"})
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=0 n_nodate=1" in out and U2 not in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_abort_when_present_b0_has_no_date(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _run_with_b0(tmp_path, monkeypatch, capsys, {})
+    assert rc != 0 and "lockbox_guard: abort n_hash=0 n_date=0 n_nodate=1" in out and U2 not in out
+    assert_nothing_written(tmp_path, fc)
+
+
+def test_b0_absent_and_matching_b0_pass(tmp_path, monkeypatch, capsys):
+    rc, fc, out = _run_with_b0(tmp_path, monkeypatch, capsys, None)
+    assert rc == 0 and fc.calls and "lockbox_guard" not in out
+    t = tmp_path / "again"
+    t.mkdir()
+    rc, fc, out = _run_with_b0(t, monkeypatch, capsys, {"visit_date_ist": "2026-10-12"})
+    assert rc == 0 and fc.calls
+
+
+def test_guard_turns_recursion_and_unencodable_uid_into_clean_abort(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(splits.RULE_ENV, str(rule(tmp_path)))
+    arts = tmp_path / "arts"
+    arts.mkdir()
+    (arts / "deep.json").write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+    bad = "synth-\ud800"
+    assert run.lockbox_guard(["deep", bad], arts, False) == 1
+    out = capsys.readouterr().out
+    assert out.strip() == "lockbox_guard: abort n_hash=1 n_date=0 n_nodate=2"
+
+
+def test_rule_with_duplicate_keys_or_non_int_version_is_invalid(tmp_path):
+    base = '"uid_sha256": [], "date_from": "2026-10-14", "date_to": "2026-10-16"'
+    for name, text in {
+        "dupe": '{"version": 1, "version": 1, ' + base + "}",
+        "dupe_other": '{"version": 1, ' + base + ', "date_to": "2026-10-16"}',
+        "float": '{"version": 1.0, ' + base + "}",
+        "bool": '{"version": true, ' + base + "}",
+        "deep": "[" * 100000,
+    }.items():
+        p = tmp_path / f"{name}.json"
+        p.write_text(text, encoding="utf-8")
+        with pytest.raises(splits.LockboxRuleError) as e:
+            splits.LockboxRule.load(p)
+        assert e.value.code == "rule_invalid", name
+
+
 def _bad_rules(tmp_path):
     ok = {"version": 1, "uid_sha256": [], "date_from": "2026-10-14", "date_to": "2026-10-16"}
     cases = {
