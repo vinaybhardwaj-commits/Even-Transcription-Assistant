@@ -81,15 +81,3 @@ Pin per pane: `claude --model opus|sonnet|haiku`, or settings.json `"model"`; su
 Calibration first (eta-refuter-2's builder task + scout question set), then the cheapest model that passes becomes the start model for that job. Update this file and the project copy together; note the date and the evidence. Re-probe Zen monthly or when a model errors.
 
 Sources: opencode.ai/docs/zen; opencode.ai/docs/providers; huggingface.co/docs/inference-providers (integrations/opencode, pricing, security); code.claude.com/docs/en/model-config; support.claude.com (Max plan, Claude Code with Pro/Max, usage credits); vendor model cards (Z.ai GLM-5.x, Alibaba Qwen3.8, MiniMax M3, Moonshot Kimi K2.7, DeepSeek V4, OpenAI GPT-5.4 mini/nano); morphllm.com/swe-bench-pro. Full research notes: Fable scratch files research-open-models.md, research-hf-opencode.md, research-claude-max.md (25 Sep).
-
-## GO route (Fable 438, 26 Sep)
-
-V: use up the OpenCode Go subscription first; Zen credit only after (console balance was $236.92 at ~12:50 IST, 26 Sep). Go models are addressed `opencode-go/<id>` and use the SAME key file as Zen.
-
-Mapping (same model, Go route): opencode/X -> opencode-go/X for X in {glm-5.3, glm-5.3-flash, qwen3.8-flash, deepseek-v4-pro, deepseek-v4.1-flash, minimax-m3, kimi-k3, kimi-k2.7-code}. NOT in Go: gemini-* (panes on gemini stay on Zen).
-
-Limits: 5-hour window (20% of monthly), weekly (50%), monthly. V has Extra Usage ON (continues on paid balance) — nobody touches that toggle (OFF would fall back to FREE models = PHI risk).
-
-NEVER for PHI on Go: grok-*, gpt-* (30-day retention), muse-spark-* (trains on prompts), space-bunny-free, omen-alpha, hy*/longcat/mimo* (not reviewed). DeepSeek ZDR on Go valid only THROUGH 30 SEP 2026; checkers fallback after: kimi-k3.
-
-Switcher: kit/go-switch.sh (idle-gated per-pane relaunch, same session id; run only after eta-refuter PASS).
