@@ -38,3 +38,6 @@ export function recorderOffMinutes(nowMs: number, lastChunkMs: number | null): n
   const mins = Math.floor((nowMs - since) / 60_000);
   return mins >= RECORDER_OFF_MINUTES ? mins : null;
 }
+
+/** FR1-A: with a consult window open, a room whose audio (or, if later, whose window start) is this old is `recorder_off` with consult_open, at any hour. */
+export const CONSULT_RECORDER_OFF_MINUTES = 5;
