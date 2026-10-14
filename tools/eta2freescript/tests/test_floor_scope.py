@@ -494,3 +494,37 @@ def test_r6_units_are_tracked_per_occurrence_not_per_number():
     assert _inv(strength="5 mg/5 ml")("five mg")["count"] == 1
     assert _inv(strength="5 mg/5 ml")("five mg and five ml")["count"] == 0
     assert floors.replayed_units("5 mg/5 ml", "strength") == [("5", "mg"), ("5", "ml")]
+
+
+_R7_TRAILERS = ["weekly", "monthly", "yearly", "/day", "/week", "in a day", "at night", "a fortnight", "per 24 hours", "each morning", "before food",
+                "every day", "per fortnight", "nightly"]
+
+
+@pytest.mark.parametrize("value,said", [("2 times weekly", "I vomited two times"), ("2 times/day", "I vomited two times"),
+                                        ("2 times in a day", "I vomited two times"), ("2 doses weekly", "two doses"),
+                                        ("2 times monthly", "twice"), ("1 time at night", "I came one time"),
+                                        ("3 times a fortnight", "three times"), ("2 times per 24 hours", "I vomited two times")])
+def test_r7_a_frequency_with_an_unlisted_trailer_gives_no_unit(value, said):
+    assert _inv(frequency=value)(said)["count"] == len(floors._NUMBER.findall(value.lower()))
+
+
+def test_r7_per_24_hours_keeps_both_runs():
+    assert floors.replayed_units("2 times per 24 hours", "frequency") == [("2", None), ("24", None)]
+
+
+def test_r7_a_bare_count_is_still_excused_when_nothing_follows_or_punctuation_does():
+    for v in ("2 times", "2 times.", "2 times, as needed", "2 doses;", "2 times )"):
+        assert floors.replayed_units(v, "frequency")[0] == ("2", "freq:count"), v
+        assert _inv(frequency=v)("two times")["count"] == 0, v
+    assert floors.replayed_units("2 times a day", "frequency") == [("2", "freq:day")]
+    assert floors.replayed_units("2 times daily", "frequency") == [("2", "freq:day")]
+
+
+def test_r7_generated_trailers_never_excuse():
+    import random
+    rnd = random.Random(7)
+    words = ["soon", "xyz", "later", "bedtime", "okay", "monday", "once", "tomorrow"]
+    trailers = list(_R7_TRAILERS) + [rnd.choice(words) + (" " + rnd.choice(words) if rnd.random() < .5 else "") for _ in range(60)]
+    for t in trailers:
+        for said in ("two times", "I had two times", "two doses"):
+            assert _inv(frequency=f"2 times {t}")(said)["count"] >= 1, (t, said)

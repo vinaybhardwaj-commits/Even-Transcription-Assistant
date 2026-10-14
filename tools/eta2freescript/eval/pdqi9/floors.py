@@ -430,14 +430,14 @@ _REPLAYED_UNIT = re.compile(r"(\d+(?:\.\d+)?)[ \t]*(?:international[ \t]+)?([a-z
 
 
 _AFTER_NUMBER = re.compile(r"[ \t]*(?:international[ \t]+)?([a-z\u00b5\u03bc]+)")
-_REPLAYED_FREQ = re.compile(r"[ \t]*(?:(hourly|daily)\b|(?:times?|doses?)\b(?:[ \t]*(?:(?:a|per|each)[ \t]+(day|week|month|year)s?\b|(daily)\b))?"
+_REPLAYED_FREQ = re.compile(r"[ \t]*(?:(hourly|daily)\b|(?:times?|doses?)\b(?:[ \t]*(?:(?:a|per|each)[ \t]+(day|week|month|year)s?\b|(daily)\b)|(?P<bare>(?=[ \t]*(?:\Z|[,.;:)\]]))))"
                             r"|(?:a|per)[ \t]+(day|week|month|year)s?\b)")
 
 
 def replayed_units(value: str, field: str) -> list[tuple[str, str | None]]:
     """(number text, unit) for each number OCCURRENCE of a replayed value, in order; the unit is None when it carries none. Strength and duration:
     "500 mg" -> mg. Frequency: the unit carries its period ("2 times a day" -> freq:day, "every 6 hours" -> freq:hour, "2 times" -> freq:count);
-    "2" and "1-0-1" carry none."""
+    "2" and "1-0-1" carry none, and neither does "2 times" followed by any word the parser does not list as a period ("weekly", "/day", "at night")."""
     text = (value or "").lower().replace(_CUT, "")
     out: list[tuple[str, str | None]] = []
     for m in _NUMBER.finditer(text):
@@ -447,7 +447,7 @@ def replayed_units(value: str, field: str) -> list[tuple[str, str | None]]:
                 u = "freq:hour"
             elif (f := _REPLAYED_FREQ.match(text, m.end())):
                 u = ("freq:hour" if f.group(1) == "hourly" else "freq:day" if f.group(1) == "daily" or f.group(3)
-                     else f"freq:{f.group(2) or f.group(4)}" if f.group(2) or f.group(4) else "freq:count")
+                     else f"freq:{f.group(2) or f.group(4)}" if f.group(2) or f.group(4) else "freq:count" if f.group("bare") is not None else None)
         elif (w := _AFTER_NUMBER.match(text, m.end())):
             word = re.sub(r"^[\u00b5\u03bc]", "mc", w.group(1))  # µg = mcg
             u = _unit_of(word) or ("iu" if "international" in w.group(0) and word.rstrip("s") == "unit" else None)
