@@ -13,6 +13,7 @@ import json
 import os
 import re
 import unicodedata
+from decimal import Decimal
 from pathlib import Path
 
 from ... import validate
@@ -160,7 +161,7 @@ def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse
 _ZERO = ("unsupported_drugs", "leak_items", "invented_fields", "dose_precedence_errors", "hallucinations", "unclear_items")
 
 
-def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> dict:
+def _judge_attribution(res: list[dict], items: list[dict], art: dict | None, scope: str | None = None) -> dict:
     """Source tallies for the three judged floors that name a replayed medicine or field."""
     by_n = {it["n"]: it for it in items}
     unsupported, invented, dose = [], [], []
@@ -171,7 +172,7 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> 
         if it["kind"] == "medicine" and x["said"] == "no":
             unsupported.append(_name_source(m, art))
         if it["kind"] == "medicine" and x["invented"]:
-            invented.append(_worst(_field_source(m, f, art, prov) for f in x["invented"]))
+            invented.append(_worst(_field_source(m, f, art, prov, scope) for f in x["invented"]))
         if x["dose_precedence_error"]:
             if m is None:
                 vals = it.get("vals") or []
@@ -184,7 +185,7 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> 
 
 
 def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: Path, uid: str, arm_kind: str, shape_log: Path | None = None,
-                art: dict | None = None, attr_out: dict | None = None) -> dict:
+                art: dict | None = None, attr_out: dict | None = None, scope: str | None = None) -> dict:
     """`attr_out`, when given, receives the per-source tallies of the judged floors (the returned counts are unchanged)."""
     """Counts from floor-items-v1 over the numbered replayed items. All None when the judge could not be parsed twice.
     `transcript` is format_transcript output (T<n> ids, roles, QUARANTINED marks)."""
@@ -198,7 +199,7 @@ def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: P
     if res is None:
         return {**dict.fromkeys(_ZERO), "parse_failure": True}
     if attr_out is not None:
-        attr_out.update(_judge_attribution(res, items, art))
+        attr_out.update(_judge_attribution(res, items, art, scope))
     kind = {it["n"]: it["kind"] for it in items}
     med = [x for x in res if kind[x["n"]] == "medicine"]
     return {"unsupported_drugs": sum(1 for x in med if x["said"] == "no"),
@@ -263,6 +264,108 @@ def _cited_turns(p: dict) -> list[int]:
             out.append(int(ref.rsplit(":", 1)[1]))
     return out
 
+
+
+# ---- spoken numbers (FLOOR-SCOPE kickoff, 14 Oct 2026) -------------------------------------------------------------
+
+_UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                                     "sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
+_SPOKEN_TOKEN = re.compile(r"[a-z]+|\d+")
+
+
+def _digit_word_run(toks: list[str], j: int) -> tuple[str, int]:
+    """The digits spoken one by one from toks[j] ("five", "two five"), and the index after them."""
+    dec = ""
+    while j < len(toks) and toks[j] in _UNITS and _UNITS[toks[j]] < 10:
+        dec += str(_UNITS[toks[j]])
+        j += 1
+    return dec, j
+
+
+def _integer_at(toks: list[str], j: int):
+    """(value, next index) of the integer starting at toks[j], or None. "and" joins only after hundred/thousand."""
+    n = len(toks)
+    total, cur, last, k = 0, 0, None, j
+    while k < n:
+        t = toks[k]
+        kind = ("digit" if t.isdigit() else "unit" if t in _UNITS else "tens" if t in _TENS else
+                t if t in ("hundred", "thousand") else None)
+        if kind is None and t == "and" and last in ("hundred", "thousand") and k + 1 < n and (
+                toks[k + 1].isdigit() or toks[k + 1] in _UNITS or toks[k + 1] in _TENS):
+            k += 1
+            continue
+        if kind is None:
+            break
+        if kind in ("digit", "unit", "tens"):
+            if not (last is None or last in ("hundred", "thousand") or (last == "tens" and kind == "unit" and 0 < _UNITS[t] < 10)):
+                break
+            cur += int(t) if kind == "digit" else _UNITS[t] if kind == "unit" else _TENS[t]
+        elif kind == "hundred":
+            if last is None:
+                cur = 100
+            elif last in ("digit", "unit", "tens") and 0 < cur < 100:
+                cur *= 100
+            else:
+                break
+        else:  # thousand
+            if total or last == "thousand":
+                break
+            total, cur = (cur or 1) * 1000, 0
+        last = kind
+        k += 1
+    return (total + cur, k) if last is not None else None
+
+
+def parse_number_words(text: str) -> list[Decimal]:
+    """Every number the text speaks as English words, or as digits with a magnitude word, in order: "five hundred", "two thousand and
+    fifty", "one and a half", "two point five", "half", "5 hundred". Bare digit tokens come back too (they are already digit runs).
+    Consecutive units ("one two three") are separate numbers."""
+    toks = _SPOKEN_TOKEN.findall((text or "").lower())
+    out: list[Decimal] = []
+    i, n = 0, len(toks)
+    while i < n:
+        got = _integer_at(toks, i)
+        if got is not None:
+            val, i = got
+            v = Decimal(val)
+            if toks[i:i + 3] == ["and", "a", "half"]:
+                v, i = v + Decimal("0.5"), i + 3
+            elif toks[i:i + 2] == ["and", "half"]:
+                v, i = v + Decimal("0.5"), i + 2
+            elif toks[i:i + 1] == ["point"]:
+                dec, j = _digit_word_run(toks, i + 1)
+                if dec:
+                    v, i = Decimal(f"{val}.{dec}"), j
+            out.append(v)
+        elif toks[i] == "point" and _digit_word_run(toks, i + 1)[0]:
+            dec, i = _digit_word_run(toks, i + 1)
+            out.append(Decimal(f"0.{dec}"))
+        elif toks[i] == "half":
+            out.append(Decimal("0.5"))
+            i += 1
+        else:
+            i += 1
+    return out
+
+
+def spoken_runs(text: str) -> set[str]:
+    """Digit runs of every number the text speaks as words (see parse_number_words)."""
+    return {r for v in parse_number_words(text) for r in _DIGITS.findall(format(v, "f"))}
+
+
+FLOOR_SCOPES = ("global", "medicine")
+DEFAULT_FLOOR_SCOPE = "global"
+
+
+def floor_scope(scope: str | None = None) -> str:
+    """FREESCRIPT_FLOOR_SCOPE in {global, medicine}; unset or empty is global (lead, 14 Oct, until fable rules). Anything else raises."""
+    s = scope if scope is not None else os.environ.get("FREESCRIPT_FLOOR_SCOPE", "")
+    if s == "":
+        s = DEFAULT_FLOOR_SCOPE
+    if s not in FLOOR_SCOPES:
+        raise ValueError("FREESCRIPT_FLOOR_SCOPE must be one of: " + ", ".join(FLOOR_SCOPES))
+    return s
 
 
 # ---- attribution (FLOOR-ATTRIBUTION kickoff, 14 Oct 2026) -------------------------------------------------------
@@ -379,21 +482,51 @@ def _in_text(value: str, text: str) -> bool:
     return bool(v) and v in re.sub(r"\s+", " ", text)
 
 
-def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None) -> str:
+def _gp_entries(m: dict, art: dict | None) -> list[dict]:
+    meds = ((art or {}).get("gp_extraction") or {}).get("medicines")
+    return [g for g in meds if isinstance(g, dict) and _names_match(_rx_names(m), _rx_names(g))] if isinstance(meds, list) else []
+
+
+def _quote_text(p: dict | None) -> str:
+    return "\n".join(str((e or {}).get(k) or "") for e in (p or {}).get("evidence") or [] for k in ("quote", "quote_en"))
+
+
+def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None:
+    """ETA's output for this one medicine (scope `medicine`): the note line that names it, its gp_extraction entry and its provenance
+    text and quote, number words normalised. None when no ETA line pairs with it or 2+ lines could (then the global rule applies)."""
+    lines = [ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip() and _names_match(_rx_names(m), {_norm_name(ln)})]
+    if len(lines) != 1:
+        return None
+    gp: list[str] = []
+    for g in _gp_entries(m, art):
+        _prov_values(g, gp)
+    return _numnorm("\n".join(lines + gp + [_prov_text(prov), _quote_text(prov)]))
+
+
+def _eta_has_run(m: dict, run: str, art: dict | None, prov: dict | None, scope: str) -> bool:
+    if scope == "medicine":
+        own = _medicine_output(m, art, prov)
+        if own is not None:
+            return run in _DIGITS.findall(own)
+    return run in _DIGITS.findall(_eta_text(art, prov))  # _eta_text is number-word normalised
+
+
+def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
     """Source of one digit run found in field of replayed medicine m."""
-    if run in _DIGITS.findall(_eta_text(art, prov)):  # _eta_text is number-word normalised
+    if _eta_has_run(m, run, art, prov, floor_scope(scope)):
         return "eta"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
     return "pulse_extraction"
 
 
-def _field_source(m: dict, field: str, art: dict | None, prov: dict | None) -> str:
+def _field_source(m: dict, field: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
     """Source of a whole replayed medicine field (judge floors, which flag a field, not a digit run)."""
     value = _s(m.get(field))
     if not value:  # a field the judge invented that the rx leaves empty: in doubt, ETA's
         return "eta"
-    if _in_text(value, _eta_text(art, prov)):
+    own = _medicine_output(m, art, prov) if floor_scope(scope) == "medicine" else None
+    if _in_text(value, own if own is not None else _eta_text(art, prov)):
         return "eta"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
@@ -413,9 +546,10 @@ def _prov_for(m: dict, art: dict | None) -> dict | None:
     return next((p for p in _prov_medicines(art) if _names_match(_rx_names(m), _prov_names(p))), None)
 
 
-def _invented_core(rx: dict, art: dict | None, consult: Consult) -> dict:
+def _invented_core(rx: dict, art: dict | None, consult: Consult, scope: str | None = None) -> dict:
     """Digit runs in a replayed medicine's strength/frequency/duration must occur in the turns the artifact cites for it.
     An unmatched medicine with no digits is not a hit (info: unmatched_no_digits)."""
+    scope = floor_scope(scope)
     prov = _prov_medicines(art)
     offending = unmatched = no_digits = 0
     sources: list[str] = []
@@ -427,15 +561,16 @@ def _invented_core(rx: dict, art: dict | None, consult: Consult) -> dict:
                 no_digits += 1
                 continue
             unmatched += 1
-            sources.append(_worst(_run_source(m, k, r, art, None) for k, r in runs))
+            sources.append(_worst(_run_source(m, k, r, art, None, scope) for k, r in runs))
             continue
         heard = set()
         for t in _cited_turns(match):
             if 0 <= t < len(consult.turns):
-                heard |= set(_DIGITS.findall(f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"))
+                said = f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"
+                heard |= set(_DIGITS.findall(said)) | spoken_runs(said)
         bad = [(k, r) for k, r in runs if r not in heard]
         offending += len(bad)
-        sources += [_run_source(m, k, r, art, match) for k, r in bad]
+        sources += [_run_source(m, k, r, art, match, scope) for k, r in bad]
     return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched,
             "unmatched_no_digits": no_digits, "sources": sources}
 
@@ -665,11 +800,12 @@ def validator_failures(art: dict | None) -> int:
 # ---- per consult and aggregate ----------------------------------------------------------------------------------
 
 def consult_floors(client, frozen, *, uid: str, arm_kind: str, rx: dict, signed_rx: dict, art: dict | None, consult: Consult,
-                   transcript: str, cache_dir: Path, shape_log: Path | None = None) -> dict:
+                   transcript: str, cache_dir: Path, shape_log: Path | None = None, scope: str | None = None) -> dict:
+    scope = floor_scope(scope)
     items, signed = numbered_items(rx), numbered_items(signed_rx)
     judged_attr: dict = {}
-    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log, art, judged_attr)
-    inv = _invented_core(rx, art, consult)
+    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log, art, judged_attr, scope)
+    inv = _invented_core(rx, art, consult, scope)
     dps = dose_precedence_sources(rx, art)
     pa = printable_attribution(rx, art)
     attribution = {**judged_attr, "invented_numbers": _tally(inv["sources"]), "dose_precedence_det": _tally(dps), "printable_errors": pa["sources"]}
@@ -701,21 +837,22 @@ def _attr_sum(rows: list[dict], key: str) -> dict | None:
     return out
 
 
-def header(rows: list[dict], basis: str) -> dict:
+def header(rows: list[dict], basis: str, scope: str = DEFAULT_FLOOR_SCOPE) -> dict:
     """The round header: the basis, and the eta, pulse_catalogue, pulse_extraction and check counts summed over the attributed
     floors, whichever basis is chosen."""
     att = [t for t in rows if t.get("eta") is not None and t["floor"] in ATTRIBUTED]
-    h = {"floor_basis": basis}
+    h = {"floor_basis": basis, "floor_scope": scope}
     h.update({k: sum(t[k] or 0 for t in att) for k in SOURCES})
     h["total"] = sum(t["bn"] or 0 for t in att)
     return h
 
 
-def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = None) -> dict:
+def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = None, scope: str | None = None) -> dict:
     """Floor table for arm Bn (pass/fail against spec 12.3) with B0 baselines where given. `bn` is the total of every hit; the
     attributed floors also carry eta, pulse_catalogue, pulse_extraction and check. basis `eta` (default) passes on the eta column
     only, `all` on the total; it changes the pass column and the stamp, never a count."""
     basis = floor_basis(basis)
+    scope = floor_scope(scope)
     n = len(bn)
     comp = lambda rows: (None if any(r["completion"]["missing"] is None for r in rows) else
                          (None if sum(r["completion"]["missing"] for r in rows) == 0 else
@@ -760,4 +897,4 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = 
     zero("unknown-key printable errors", "unknown_key_errors")
     table.append({"floor": "unclear items (reported, not a breach)", "bn": _sum(bn, "unclear_items"), "b0": _sum(b0, "unclear_items") if b0 else None, "rule": "info", "pass": True})
     table.append({"floor": "artifacts missing", "bn": sum(1 for x in bn if x["artifact_missing"]), "b0": None, "rule": "info", "pass": True})
-    return {"n": n, "basis": basis, "header": header(table, basis), "rows": table, "all_pass": all(t["pass"] for t in table)}
+    return {"n": n, "basis": basis, "scope": scope, "header": header(table, basis, scope), "rows": table, "all_pass": all(t["pass"] for t in table)}
