@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { enterOpdLabWriteFence, OpdLabWriteForbidden } from '../opd-lab-write-guard';
 import { exitLabExecution } from '../lab-execution-context';
-import { deleteOpdAuditsForUid, saveOpdAudit, updateOpdAudit } from '../opd-audit-store';
+import { alignOpdAuditNoteDate, deleteOpdAuditsForUid, saveOpdAudit, updateOpdAudit } from '../opd-audit-store';
 import { persistLongitudinal, replayLongitudinal, runLongitudinalPass } from '../opd-longitudinal';
 import { ensureOpdTriageTable, insertDecision, insertQueueDisposition } from '../opd-triage-store';
 import { ensureSuppressionTable } from '../audit-suppression-store';
@@ -32,6 +32,7 @@ test('override/lab mode throws before any production audit writer runs', async (
   await enterOpdLabWriteFence(async () => {
     await forbidden(() => saveOpdAudit(undefined as never));
     await forbidden(() => updateOpdAudit(undefined as never));
+    await forbidden(() => alignOpdAuditNoteDate('noteUid1', '2026-10-07T12:00:00+05:30'));
     await forbidden(() => persistLongitudinal('uid', 'engine', undefined as never));
     await forbidden(() => runLongitudinalPass(undefined as never));
     await forbidden(() => replayLongitudinal(undefined as never));

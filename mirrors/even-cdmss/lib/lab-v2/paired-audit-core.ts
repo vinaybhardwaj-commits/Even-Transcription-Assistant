@@ -27,24 +27,6 @@ export const PAIRED_MAX_ATTEMPTS = 2;
 /** Production scorer when Vertex is configured (`lib/llm.ts` GEMINI_MODEL). */
 export const PAIRED_DEFAULT_MODEL = 'vertex:gemini-2.5-pro';
 
-/**
- * How many paired items one tick may have in flight. Overlapping crons share this
- * ceiling: the claim counts rows already `running` and will not start another past it.
- * `PAIRED_AUDIT_CONCURRENCY` overrides the default. Values outside 1–6 clamp into range;
- * a blank or non-numeric value keeps the default.
- */
-export const PAIRED_AUDIT_CONCURRENCY_DEFAULT = 4;
-export const PAIRED_AUDIT_CONCURRENCY_MAX = 6;
-
-export function pairedAuditConcurrency(
-  raw: string | undefined = process.env.PAIRED_AUDIT_CONCURRENCY,
-): number {
-  if (raw == null || raw.trim() === '') return PAIRED_AUDIT_CONCURRENCY_DEFAULT;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return PAIRED_AUDIT_CONCURRENCY_DEFAULT;
-  return Math.min(PAIRED_AUDIT_CONCURRENCY_MAX, Math.max(1, Math.floor(n)));
-}
-
 export type InputPath = 'signed' | 'structured' | 'text';
 
 /** Medication fields the caller sends. `name` is the usual one; medsFrom's own names are accepted too. */

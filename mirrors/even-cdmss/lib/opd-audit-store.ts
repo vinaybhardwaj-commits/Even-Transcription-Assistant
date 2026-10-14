@@ -521,6 +521,53 @@ export async function auditedUidsForDayAnyVersion(day: string): Promise<string[]
   return rows.map((r) => r.uid).filter(Boolean);
 }
 
+/**
+ * uids in `uids` that already hold a row at the worker's write-target engine version,
+ * on any stored day. The day-scoped reader above cannot see a note whose source
+ * timestamp moved after it was audited; saveOpdAudit would then return 'exists' and
+ * the paid call would be thrown away.
+ *
+ * Same hold as the spend guard's write-target clause: `llm_leg_failed` does not hold,
+ * because that retry can still land. Fail-closed — this does not catch.
+ */
+export async function currentEngineHeldUids(uids: string[]): Promise<string[]> {
+  const list = [...new Set(uids.map((u) => String(u || '').trim()).filter(Boolean))];
+  if (!list.length) return [];
+  const rows = (await sql(
+    `SELECT uid FROM opd_note_audits
+      WHERE uid = ANY($1::text[])
+        AND engine_version = $2
+        AND excluded_reason IS DISTINCT FROM 'llm_leg_failed'`,
+    [list, OPD_ENGINE_VERSION],
+  )) as Array<{ uid: string }>;
+  return rows.map((r) => r.uid).filter(Boolean);
+}
+
+/**
+ * Point an existing current-engine row at the source timestamp when its IST day moved.
+ * Scores, audited_at, and the exclusion mark are left alone — this is not a re-audit.
+ * A failed row is not moved; the worker still sends that note to the model.
+ */
+export async function alignOpdAuditNoteDate(
+  uid: string,
+  noteTimestamp: string,
+): Promise<'aligned' | 'unchanged' | 'skipped'> {
+  assertOpdProductionWrite('opd_note_audits.alignNoteDate');
+  if (!uid || !noteTimestamp) return 'skipped';
+  const rows = (await sql(
+    `UPDATE opd_note_audits
+        SET note_date = $2::timestamptz
+      WHERE uid = $1
+        AND engine_version = $3
+        AND excluded_reason IS DISTINCT FROM 'llm_leg_failed'
+        AND (note_date AT TIME ZONE 'Asia/Kolkata')::date
+            IS DISTINCT FROM ($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
+      RETURNING uid`,
+    [uid, noteTimestamp, OPD_ENGINE_VERSION],
+  )) as Array<{ uid: string }>;
+  return rows.length ? 'aligned' : 'unchanged';
+}
+
 /** Re-audit support (Fix B / decision 2) — delete ALL rows for a note uid so the fresh 0.81.7 audit
  *  is the single current row (chosen mechanism: DELETE-then-INSERT — see the build report's flag).
  *  Feedback rows live in a separate append-only table and are untouched. */
