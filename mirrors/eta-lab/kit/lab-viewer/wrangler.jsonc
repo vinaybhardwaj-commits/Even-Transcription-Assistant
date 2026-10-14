@@ -20,9 +20,5 @@
     { "binding": "AUDIO", "bucket_name": "eta-audio" },
     { "binding": "RATINGS", "bucket_name": "eta-lab-ratings" }
   ]
-  // 6V (consult clips): two more Worker SECRETS, set by hand with `wrangler secret put <NAME>` (never in this file, never in git):
-  //   CLIP_HMAC_KEY         at least 32 random characters; signs the 15-minute /clip links. Unset or too short = downloads are off, nothing else changes.
-  //   REB_INDEX_READ_TOKEN  the read-only bearer for GET /api/reb/index (the Neon index of the REB store). Unset = the drawer lists windows from R2 instead.
-  // optional plain var REB_INDEX_BASE_URL (default https://www.evenscribe.app; the apex 307-redirects, so use www).
   // secrets: ACCESS_AUD (app AUD tag), ACCESS_TEAM_DOMAIN (gentle-union-75e6.cloudflareaccess.com), ALLOWED_EMAILS (comma list)
 }
