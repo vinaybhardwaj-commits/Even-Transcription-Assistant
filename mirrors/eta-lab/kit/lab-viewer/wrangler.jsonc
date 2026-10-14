@@ -10,19 +10,10 @@
   // Attached only after tunnel-ops confirmed the Access app (ruling 208, 24 Sep 20:00 IST).
   "routes": [{ "pattern": "lab.llmvinayminihome.uk", "custom_domain": true }],
   "observability": { "enabled": true },
-  // /voicecheck download+share ON per Fable ruling #6309 (V); every download is audited in voicecheck-rec.
-  // keep_vars: a deploy must not drop dashboard-set plain vars (e.g. RATERS) that are not listed here.
-  "keep_vars": true,
-  // VOID_RUNS: comma list of run ids the page/items/mine/audio routes refuse (404); export stays for raters, nothing is deleted.
-  "vars": { "VOICECHECK_DOWNLOAD": "1", "VOID_RUNS": "vc1" },
   "r2_buckets": [
     { "binding": "RESULTS", "bucket_name": "eta-lab-results" },
     { "binding": "AUDIO", "bucket_name": "eta-audio" },
     { "binding": "RATINGS", "bucket_name": "eta-lab-ratings" }
   ]
-  // 6V (consult clips): two more Worker SECRETS, set by hand with `wrangler secret put <NAME>` (never in this file, never in git):
-  //   CLIP_HMAC_KEY         at least 32 random characters; signs the 15-minute /clip links. Unset or too short = downloads are off, nothing else changes.
-  //   REB_INDEX_READ_TOKEN  the read-only bearer for GET /api/reb/index (the Neon index of the REB store). Unset = the drawer lists windows from R2 instead.
-  // optional plain var REB_INDEX_BASE_URL (default https://www.evenscribe.app; the apex 307-redirects, so use www).
   // secrets: ACCESS_AUD (app AUD tag), ACCESS_TEAM_DOMAIN (gentle-union-75e6.cloudflareaccess.com), ALLOWED_EMAILS (comma list)
 }
