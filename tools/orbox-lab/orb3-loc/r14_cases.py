@@ -1,8 +1,8 @@
 """R14 cases A-F (refuter's simulated two-block recordings, read only) through walk_sync + locate --calib, scored against the refuter's truth.json.
-usage: r14_cases.py CASE [CASE...]     outputs in ./r14/<case>/ (symlinks to the wavs; nothing is written into /home/lab/r14)"""
+usage: r14_cases.py CASE [CASE...]     outputs in ./r14/<case>/ (symlinks to the wavs; nothing is written into $ORB3_LAB_ROOT/r14)"""
 import json, os, subprocess, sys
 import numpy as np
-SRC, PY = "/home/lab/r14", sys.executable
+SRC, PY = os.path.join(os.environ.get("ORB3_LAB_ROOT", "."), "r14"), sys.executable
 MICS = np.array([[0, 0], [2.44, 0], [1.22, 3.45]])
 
 

@@ -1,7 +1,8 @@
 #!/bin/bash
+: "${ORB3_LAB_ROOT:?set ORB3_LAB_ROOT to the lab directory on ORB3}"
 # usage: beacon_rec.sh D   (seconds of track, default 360). Run as the lab user from anywhere.
 D=${1:-360}
-cd /home/lab/o9-run6 || exit 1
+cd $ORB3_LAB_ROOT/o9-run6 || exit 1
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 S=$(date +%Y%m%d-%H%M%S); R=$(( D + 10 ))
 mkdir -p "$S"; : > "$S/start_times.log"

@@ -1,9 +1,10 @@
 #!/bin/bash
+: "${ORB3_LAB_ROOT:?set ORB3_LAB_ROOT to the lab directory on ORB3}"
 # O17 ruling 5. Run as the lab user on ORB3. NOT run by the builder (it plays sound).
 # usage: walk_rec.sh [MAX_WALK_S]   one recording: 120 s of beacons, the phone walk (beacons silent), 120 s of beacons.
 # The walk ends when the file ~/loc/walk_done appears (touch it) or after MAX_WALK_S (default 900).
 MAX=${1:-900}
-cd /home/lab/loc || exit 1
+cd $ORB3_LAB_ROOT/loc || exit 1
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 [ -f walk_block.wav ] || /var/lib/orb3-lab/venv/bin/python walk_track.py walk_block.wav
 S=walk-$(date +%Y%m%d-%H%M%S); mkdir -p "$S"; rm -f walk_done

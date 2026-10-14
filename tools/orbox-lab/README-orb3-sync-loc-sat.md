@@ -6,3 +6,5 @@
 - orb2-cutter/o15/cutter_v2.py: case cutter v2.2 (recorder session spans, weak-activity fallback onset, t0_flag).
 
 Account names are placeholders: `sat` is the Pi user, `lab` the ORB3 user. No audio, tape, case ids or addresses are included.
+
+Paths and ssh targets come from env: ORB3_LAB_ROOT (lab dir on ORB3), ORB3_SSH_TARGET (user@host or ssh alias for ORB3; Python default "orb3"). Keys default to ~/.ssh/orb3sat_status and ~/.ssh/orb3sat_push.

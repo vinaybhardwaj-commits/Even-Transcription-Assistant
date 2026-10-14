@@ -120,7 +120,7 @@ def poll_stats(a, ms):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--status-cmd", default="ssh -i /home/sat/.ssh/orb3sat_status -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=3 -o ControlMaster=auto -o ControlPath=/tmp/orb3sat-%C -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 lab@orbox3")
+    ap.add_argument("--status-cmd", default="ssh -i ~/.ssh/orb3sat_status -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=3 -o ControlMaster=auto -o ControlPath=/tmp/orb3sat-%C -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 " + os.environ.get("ORB3_SSH_TARGET", "orb3"))
     ap.add_argument("--out", default="/var/lib/orb3sat/rec")
     ap.add_argument("--events", default="/var/lib/orb3sat/events.jsonl")
     ap.add_argument("--arecord", default="arecord -D hw:CARD=Device,DEV=0 -f S16_LE -r 48000 -c 1 -t wav")
