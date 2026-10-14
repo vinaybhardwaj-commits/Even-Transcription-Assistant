@@ -37,7 +37,7 @@ const bucket = (lookup) => ({
 // ---- fake Access: local RSA key + JWKS
 const kp = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
 const jwk = { ...(await crypto.subtle.exportKey("jwk", kp.publicKey)), kid: "k1" };
-const TEAM = "team.test", AUD = "aud-smoke", EMAIL = "v@even.in";
+const TEAM = "team.test", AUD = "aud-smoke", EMAIL = "staff-redacted@even.in";
 const b64u = (b) => Buffer.from(b).toString("base64url");
 async function token() {
   const h = b64u(JSON.stringify({ alg: "RS256", kid: "k1" })), now = Math.floor(Date.now() / 1000);

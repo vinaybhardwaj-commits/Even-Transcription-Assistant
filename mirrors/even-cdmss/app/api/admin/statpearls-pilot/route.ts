@@ -61,7 +61,7 @@ function packChunks(passages: string[], target = 600, overlap = 80, minChars = 2
 
 async function fetchArticle(nbk: string) {
   const r = await fetch(`https://www.ncbi.nlm.nih.gov/books/${nbk}/`, {
-    headers: { 'User-Agent': 'Even-CDMSS/0.2 (+vinay.bhardwaj@even.in)' },
+    headers: { 'User-Agent': 'Even-CDMSS/0.2 (staff-redacted@even.in)' },
     signal: AbortSignal.timeout(20000),
   });
   if (!r.ok) throw new Error(`fetch ${nbk}: HTTP ${r.status}`);

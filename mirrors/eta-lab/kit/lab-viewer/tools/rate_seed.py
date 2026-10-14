@@ -4,7 +4,7 @@
   rate_seed.py load   --set label200 --file ~/eta-data/readability/r1/label-page-seed/seed_docs.json     # once; refuses to replace an existing seed
   rate_seed.py load   --set ba106    --file ~/eta-data/pair-label/ba106/seed_docs.json     # identical A/B rows are allowed (10 controls)
   rate_seed.py load   --set rate20   --file ~/eta-data/readability-rate/seed1/seed_docs.json
-  rate_seed.py export --set label200 --out ~/eta-data/readability/r1/labels --rater vinay=vinay.bhardwaj@even.in --rater sandhya=sandhya.cherukuri@even.in
+  rate_seed.py export --set label200 --out ~/eta-data/readability/r1/labels --rater vinay=staff-redacted@even.in --rater sandhya=staff-redacted@even.in
 
 Needs CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID in the environment (never printed) and `npx wrangler`. The seed goes to rate-seed/<set>.json in
 eta-lab-ratings (a separate bucket from the vault; the viewer serves it only to the two raters, whitelisted fields only). Export writes, per rater,
