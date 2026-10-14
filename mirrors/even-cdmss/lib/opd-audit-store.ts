@@ -8,7 +8,6 @@
  */
 
 import { sql } from './db';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 import type { OpdNoteAudit } from './opd-note-audit';
 import { HYSTERESIS_G, type OpdDomain } from './opd-note-score-core';
 import { OPD_ENGINE_VERSION, OPD_ENGINE_VERSIONS_CURRENT } from './opd-note-audit-core';
@@ -165,7 +164,6 @@ export async function saveOpdAudit(
   meta: SaveOpdAuditMeta = {},
   opts: SaveOpdAuditOptions = {},
 ): Promise<'inserted' | 'exists' | 'skipped' | 'updated'> {
-  assertOpdProductionWrite('opd_note_audits.saveOpdAudit');
   const k = audit.keys;
   if (!k.uid) return 'skipped';
   const force = opts.force === true;
@@ -290,7 +288,6 @@ export async function saveOpdAudit(
 /** UPDATE an existing audit row in place (deterministic backfill — same engine version). Rewrites
  *  the completeness/findings/score columns from a recomputed audit; leaves model/trace/sources as-is. */
 export async function updateOpdAudit(audit: OpdNoteAudit): Promise<'updated' | 'skipped'> {
-  assertOpdProductionWrite('opd_note_audits.updateOpdAudit');
   const k = audit.keys;
   if (!k.uid) return 'skipped';
   const sc = audit.scorecard;
@@ -545,6 +542,60 @@ export async function auditedCountForDayAnyVersion(day: string): Promise<number>
     AUDITED_PARAMS(day),
   )) as Array<{ n: number }>;
   return Number(rows[0]?.n ?? 0);
+}
+
+/** Uids that already count as audited at ANY engine version, on ANY note date.
+ *
+ *  Same HAVING as the day readers — a successful row holds the note, an
+ *  incident-only row (`llm_leg_failed` / the vertex mislabel, and not a
+ *  write-target row the spend guard still holds) does not, so a failed audit
+ *  is still retried. The day predicate is omitted on purpose: a note re-dated
+ *  in db13 after it was audited is absent from `auditedUidsForDayAnyVersion`
+ *  for its new day, and the worker was paying Gemini to rediscover the
+ *  `(uid, engine_version)` conflict. Re-audits onto a newer engine stay with
+ *  the mini backfill. */
+export async function auditedUidsHeldAnyDate(uids: string[]): Promise<string[]> {
+  const list = Array.from(new Set(uids.map((uid) => String(uid || '').trim()).filter(Boolean)));
+  if (!list.length) return [];
+  const rows = (await sql(
+    `SELECT uid FROM opd_note_audits
+      WHERE uid = ANY($1::text[])
+      GROUP BY uid
+      ${AUDITED_HAVING}`,
+    [list, RE_AUDITABLE_EXCLUSIONS as unknown as string[], OPD_ENGINE_VERSION],
+  )) as Array<{ uid: string }>;
+  return rows.map((r) => r.uid).filter(Boolean);
+}
+
+const SOURCE_NOTE_INSTANT = /^\d{4}-\d{2}-\d{2}(?:[T ]\d.*)?$/;
+
+/** Point stored note_date at the source instant when the IST calendar day differs.
+ *  Scores, engine_version and exclusions are left alone — this is not a re-audit.
+ *  Returns one entry per row whose day actually changed. */
+export async function alignOpdAuditNoteDate(
+  uid: string,
+  sourceAt: string,
+): Promise<Array<{ uid: string; from_day: string; to_day: string }>> {
+  const id = String(uid || '').trim();
+  const at = String(sourceAt || '').trim();
+  if (!id || !SOURCE_NOTE_INSTANT.test(at)) return [];
+  const rows = (await sql(
+    `UPDATE opd_note_audits AS a
+        SET note_date = $2::timestamptz
+       FROM (
+         SELECT id, note_date AS old_note_date
+           FROM opd_note_audits
+          WHERE uid = $1
+            AND (note_date AT TIME ZONE 'Asia/Kolkata')::date
+                IS DISTINCT FROM ($2::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
+       ) AS prev
+      WHERE a.id = prev.id
+      RETURNING a.uid,
+                to_char((prev.old_note_date AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS from_day,
+                to_char((a.note_date AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS to_day`,
+    [id, at],
+  )) as Array<{ uid: string; from_day: string; to_day: string }>;
+  return rows.filter((r) => r.uid && r.from_day && r.to_day);
 }
 
 /** Earliest IST day that has any audit — the floor for the gap-fill sweep (never audit

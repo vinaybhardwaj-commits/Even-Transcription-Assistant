@@ -139,9 +139,10 @@ test('D6 — the trap survives in its NARROWED form: only an incident makes a no
   assert.ok(!/AUDITED_PARAMS[\s\S]{0,200}OPD_ENGINE_VERSIONS_CURRENT/.test(STORE),
     'the read family must not become the guard key');
 
-  // Both day readers share ONE predicate: the worker gates on the count and fetches on the uid
-  // list, so a divergence would loop a day forever.
-  assert.equal((STORE.match(/\$\{AUDITED_HAVING\}/g) || []).length, 2, 'both readers use the shared HAVING');
+  // The day readers and the date-agnostic hold share ONE predicate: the worker gates on
+  // the count and fetches on the uid list, so a divergence would loop a day forever.
+  // The third use is auditedUidsHeldAnyDate — same HAVING, no note-date filter.
+  assert.equal((STORE.match(/\$\{AUDITED_HAVING\}/g) || []).length, 3, 'both day readers and the date-agnostic hold use the shared HAVING');
 });
 
 test('addendum F v2 task 2 — a failed row never blocks a retry, a successful row is never overwritten', () => {

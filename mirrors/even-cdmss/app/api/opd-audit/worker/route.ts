@@ -23,12 +23,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { auditOpdNote } from '@/lib/opd-note-audit';
 import { countOpdNotesForDay, fetchOpdNotesForDay, fetchOpdNoteByUid, istToday } from '@/lib/metabase';
-import { saveOpdAudit, auditedUidsForDayAnyVersion, earliestAuditedDay, deleteOpdAuditsForUid } from '@/lib/opd-audit-store';
+import { saveOpdAudit, auditedUidsForDayAnyVersion, auditedUidsHeldAnyDate, alignOpdAuditNoteDate, earliestAuditedDay, deleteOpdAuditsForUid } from '@/lib/opd-audit-store';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { startTrace, finishTrace } from '@/lib/trace';
 import { getSettings, setSetting } from '@/lib/mini-backfill';
 import { OPD_ENGINE_VERSION } from '@/lib/opd-note-audit-core';
-import { opdCandidateProbeDone, opdSweepDays } from '@/lib/opd-audit-worker-core';
+import { opdCandidateProbeDone, opdSweepDays, opdSweepDayCap, opdCandidatesToAudit, opdSourceNoteInstant, opdSweepStallDetail, runOpdSweep } from '@/lib/opd-audit-worker-core';
 import { MINI_MODEL } from '@/lib/llm';
 import { providerSwitchEnabled, resolveWorkerProvider, canServe, type LabProvider } from '@/lib/lab-provider-core';
 
@@ -145,12 +145,21 @@ async function processDay(day: string, max: number, conc: number, exclude: strin
   // those counts matched (especially for today's still-settling day), so the upstream exclusion
   // query is the completion probe. A later uid therefore reopens the day on the next sweep.
   const rows = await fetchOpdNotesForDay(day, already, max, exclude);
-  if (rows.length === 0) {
+  // A note re-dated in db13 after it was audited is missing from the day-scoped set above
+  // (that set filters on the STORED note_date). It is still a row in opd_note_audits at
+  // whatever engine version it was audited under. Drop it before the model call — a re-audit
+  // onto a newer version belongs to the mini backfill, and saveOpdAudit would only return
+  // 'exists' on the (uid, engine_version) conflict.
+  const held = await auditedUidsHeldAnyDate(rows.map((row) => String(row.uid ?? '')));
+  const split = opdCandidatesToAudit(rows, held);
+  if (split.alreadyAudited.length) await reconcileRedatedNotes(day, split.alreadyAudited);
+  const fresh = split.audit;
+  if (fresh.length === 0) {
     const observedTotal = Math.max(total, already.length);
     const remaining = Math.max(0, observedTotal - already.length);
-    return { day, total: observedTotal, audited: already.length, processed: 0, remaining, done: opdCandidateProbeDone(0, max, 0, remaining), results: [] as unknown[] };
+    return { day, total: observedTotal, audited: already.length, processed: 0, inserted: 0, fetched: rows.length, remaining, done: opdCandidateProbeDone(0, max, 0, remaining), results: [] as unknown[] };
   }
-  const results = await mapLimit(rows, conc, async (row) => {
+  const results = await mapLimit(fresh, conc, async (row) => {
     const started = Date.now();
     try {
       const audit = await auditOpdNote(row);
@@ -172,8 +181,32 @@ async function processDay(day: string, max: number, conc: number, exclude: strin
   const observedTotal = Math.max(total, already.length + rows.length);
   const remaining = Math.max(0, observedTotal - audited);
   // A full page may have another page behind it even when the count snapshot said otherwise.
+  // The probe still sees the upstream page size: dropping an already-audited uid from the
+  // model batch must not make a full page look short.
   const done = opdCandidateProbeDone(rows.length, max, inserted, remaining);
-  return { day, total: observedTotal, audited, processed: results.length, remaining, done, results };
+  return { day, total: observedTotal, audited, processed: results.length, inserted, fetched: rows.length, remaining, done, results };
+}
+
+/** When db13's day and the stored note_date disagree, move the stored day.
+ *  No re-audit. A failure here is logged and swallowed: the note was already
+ *  dropped from the model batch, and the next tick can try the alignment again. */
+async function reconcileRedatedNotes(day: string, rows: Array<{ uid?: unknown; timestamp?: unknown }>): Promise<void> {
+  for (const row of rows) {
+    const uid = String(row.uid ?? '').trim();
+    if (!uid) continue;
+    const sourceAt = opdSourceNoteInstant(row.timestamp, day);
+    if (!sourceAt) continue;
+    try {
+      const moved = await alignOpdAuditNoteDate(uid, sourceAt);
+      if (!moved.length) continue;
+      const mark = { uid, from_day: moved[0].from_day, to_day: moved[0].to_day, rows: moved.length };
+      const traceId = await startTrace('opd_note_redate', mark);
+      await finishTrace(traceId, 'success', `stored note_date aligned to source day ${mark.to_day} (${mark.rows} row(s))`);
+    } catch (e) {
+      const traceId = await startTrace('opd_note_redate', { uid, sweep_day: day });
+      await finishTrace(traceId, 'error', `stored note_date was not aligned: ${String((e as Error).message).slice(0, 180)}`);
+    }
+  }
 }
 
 /**
@@ -287,30 +320,37 @@ export async function GET(req: NextRequest) {
     // rows, and 6 August's 374 eligible notes never reached at all. A day that makes NO progress is
     // now recorded and SKIPPED for this tick; the sweep moves on. Oldest-first still holds for
     // every day that does progress, so this only ever relaxes a day that is already stuck.
-    const stalled: Array<{ day: string; total: number; audited: number; remaining: number }> = [];
-    for (const d of days) {
-      // processDay always asks db13 for a uid not present in Neon. Count equality is only a
-      // snapshot, never a completion marker; newly arrived uids reopen old lookback days.
-      const r = await processDay(d, max, conc, exclude, intended);
-      // A recount inside processDay caught the day up (a concurrent tick finished it): complete,
-      // not stalled — nothing is wrong and nothing needs a trace.
-      if (r.done) continue;
-      if (r.processed === 0) {
-        // The count and the fetch disagree: the day says work remains, the fetch offers none.
-        // Numbers come from processDay's own read rather than the loop's, because those are the
-        // freshest and they are internally consistent (audited + remaining = total).
-        const mark = { day: d, total: r.total, audited: r.audited, remaining: r.remaining };
+    //
+    // ── REDATE STALL (Oct 2026): processed > 0 is not progress ──
+    // SWEEP-1 only continued when processed === 0. A note audited on one day and later re-dated
+    // in db13 is missing from the day-scoped audited set, so every tick re-fetched it, paid for
+    // a model call, and saveOpdAudit returned 'exists' on (uid, engine_version). That day had
+    // processed 1 and inserted 0, so the loop returned and the days behind it never ran. That
+    // shape is a stall too: trace it, record it, and keep walking. The walk is capped at the
+    // lookback (never more than OPD_SWEEP_MAX_DAYS) so one tick cannot run the whole history.
+    // A day that actually inserts still ends the tick — the box fits one batch.
+    const cap = opdSweepDayCap(lookback);
+    const sweep = await runOpdSweep(
+      days,
+      cap,
+      (d) => processDay(d, max, conc, exclude, intended),
+      async (r) => {
         // ONE trace per stalled day per tick. Finished as 'error' deliberately: a silent 200 is
-        // exactly what hid this for a night, so the stall has to leave a mark that reads as wrong.
-        // Tracing never throws (lib/trace swallows its own errors), so this cannot break the sweep.
+        // exactly what hid a stuck day for a night, so the stall has to leave a mark that reads
+        // as wrong. Tracing never throws (lib/trace swallows its own errors).
+        const mark = { day: r.day, total: r.total, audited: r.audited, remaining: r.remaining, processed: r.processed, inserted: r.inserted };
         const traceId = await startTrace('opd_sweep_stall', mark);
-        await finishTrace(traceId, 'error', `sweep made no progress on ${d}: count says ${r.total}, ${r.audited} audited, the fetch returned no rows`);
-        stalled.push(mark);
-        continue;
-      }
-      return NextResponse.json({ ok: true, mode: 'sweep', window, ...r, stalled_days: stalled });
+        await finishTrace(traceId, 'error', opdSweepStallDetail(r));
+      },
+    );
+    const stalled = sweep.stalled.map((r) => ({
+      day: r.day, total: r.total, audited: r.audited, remaining: r.remaining, processed: r.processed, inserted: r.inserted,
+    }));
+    if (sweep.yielded) {
+      return NextResponse.json({ ok: true, mode: 'sweep', window, ...sweep.yielded, stalled_days: stalled });
     }
-    return NextResponse.json({ ok: true, mode: 'sweep', window, caughtUp: stalled.length === 0, done: stalled.length === 0, processed: 0, stalled_days: stalled });
+    const caughtUp = sweep.exhausted && stalled.length === 0;
+    return NextResponse.json({ ok: true, mode: 'sweep', window, caughtUp, done: caughtUp, processed: 0, inserted: 0, stalled_days: stalled });
   } catch (e) {
     return NextResponse.json({ ok: false, error: String((e as Error).message) }, { status: 500 });
   }
