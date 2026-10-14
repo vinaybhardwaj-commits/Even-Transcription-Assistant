@@ -78,34 +78,3 @@ def test_quarantined_alongside_a_live_rerun_of_same_engine(win):
     w = load_window(WID, ist_date=DATE, room_id=ROOM, root=root)
     live = [t for t in w.tracks() if t.engine == "alpha"]
     assert len(live) == 1 and live[0].path == p2 and live[0].status == "ok"
-
-
-# --- encounters(): latest finished_at among non-quarantined encounter tracks (ORDERS-4b) ---
-def etrack(cfg, status="ok"):
-    t = track("pulse-presence", status=status, cfg={"c": cfg})
-    t["layer"] = "encounter"
-    return t
-
-
-def test_encounters_latest_finished_at_ignores_quarantined(tmp_path):
-    from kit.reb import encounters
-    root = str(tmp_path)
-    p1 = write_track(root, DATE, ROOM, WID, etrack("1"), manifest_stub=STUB, finished_at="2026-10-08T10:00:00+05:30")
-    p2 = write_track(root, DATE, ROOM, WID, etrack("2"), manifest_stub=STUB, finished_at="2026-10-08T12:00:00+05:30")
-    p3 = write_track(root, DATE, ROOM, WID, etrack("3"), manifest_stub=STUB, finished_at="2026-10-08T14:00:00+05:30")
-    got = encounters(WID, ist_date=DATE, room_id=ROOM, root=root)
-    assert os.path.basename(got.path if hasattr(got, "path") else got.entry["path"]) == os.path.basename(p3)
-    quarantine(p3)
-    got = encounters(WID, ist_date=DATE, room_id=ROOM, root=root)
-    assert got.entry["config_hash"] == os.path.basename(p2).split("__")[-1][:-5]
-    quarantine(p2, "_quarantine-b")
-    quarantine(p1, "_quarantine-c")
-    assert encounters(WID, ist_date=DATE, room_id=ROOM, root=root) is None
-
-
-def test_encounters_leaves_other_layers_alone(win):
-    from kit.reb import encounters
-    root, _ = win
-    assert encounters(WID, ist_date=DATE, room_id=ROOM, root=root) is None
-    w = load_window(WID, ist_date=DATE, room_id=ROOM, root=root)
-    assert sorted(t.engine for t in w.tracks()) == ["alpha", "beta"]

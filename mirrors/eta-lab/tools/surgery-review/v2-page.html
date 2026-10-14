@@ -224,11 +224,11 @@ const Q=[
    h:"Answer this even if the doctor never says the procedure's name."},
   {f:"described_as",q:"Which procedure is it, in your judgement?",t:1,v3:1,fl:"Which procedure do you think it is?",
    h:"The doctor described it without saying its name. Type what you think it is."},
-  {f:"category",q:"What type of procedure is it?",o:["operation","intervention","minor","imaging_ct"],v3:1,
-   L:{operation:"Operation",intervention:"Intervention",minor:"Minor OPD procedure",imaging_ct:"Imaging: CT"},
-   h:"Operation: theatre or anaesthesia. Intervention: angiography or angioplasty, endoscopy, biopsy, injection, anything booked into a procedure room. Minor: a small procedure done in the OPD. Imaging: a CT scan, plain or with contrast."},
-  {f:"status",q:"What is its status for this patient?",o:["proposed_now","already_done","referred","mentioned_only","conditional"],v3:1,
-   L:{proposed_now:"Proposed now, for this patient",already_done:"Already done (history)",referred:"Referred elsewhere",mentioned_only:"Mentioned only",conditional:"Conditional: advised or done only if something happens or does not improve"}},
+  {f:"category",q:"What type of procedure is it?",o:["operation","intervention","minor"],v3:1,
+   L:{operation:"Operation",intervention:"Intervention",minor:"Minor OPD procedure"},
+   h:"Operation: theatre or anaesthesia. Intervention: angiography or angioplasty, endoscopy, biopsy, injection, anything booked into a procedure room. Minor: a small procedure done in the OPD."},
+  {f:"status",q:"What is its status for this patient?",o:["proposed_now","already_done","referred","mentioned_only"],v3:1,
+   L:{proposed_now:"Proposed now, for this patient",already_done:"Already done (history)",referred:"Referred elsewhere",mentioned_only:"Mentioned only"}},
   {f:"raised_by",q:"Who raised it?",o:["this_doctor","another_doctor","patient_or_family","unclear"],v3:1,
    L:{this_doctor:"This doctor",another_doctor:"Another doctor",patient_or_family:"The patient or family",unclear:"Unclear"}},
   {f:"firmness",q:"How firmly was it put?",o:["suggested","advised","strongly_advised","scheduled","not_applicable"],
@@ -786,7 +786,7 @@ async function renderAgree(){
   const st=Q.map(q=>({q,n:0,ag:0,cA:[],cC:[],fix:[]}));
   const band={hi:{n:0,ag:0},lo:{n:0,ag:0}};
   const per={};consults.forEach(c=>per[c.id]={raters:0,poor:0,n:0,ag:0,notes:[],fin:{}});
-  const def={n:0,real:0,now:0,cond:0,descOnly:0,cat:{operation:0,intervention:0,minor:0,imaging_ct:0}}; // V's definition, over v3 consults
+  const def={n:0,real:0,now:0,descOnly:0,cat:{operation:0,intervention:0,minor:0}}; // V's definition, over v3 consults
   all.forEach(r=>{
     Object.entries(r.c||{}).forEach(([cid,m])=>{
       const c=byId[cid],p=per[cid];if(!c||!m)return;
@@ -808,7 +808,7 @@ async function renderAgree(){
         def.n++;
         if(!isNamed(eff(c,"named",A))&&eff(c,"described",A)==="yes")def.descOnly++;
         if(isNamed(eff(c,"named",A))&&eff(c,"described",A)==="yes"){
-          def.real++;if(eff(c,"status",A)==="proposed_now")def.now++;else if(eff(c,"status",A)==="conditional")def.cond++;
+          def.real++;if(eff(c,"status",A)==="proposed_now")def.now++;
           const ct=eff(c,"category",A);if(ct in def.cat)def.cat[ct]++;
         }
       }
@@ -834,7 +834,7 @@ async function renderAgree(){
     const notes=p.notes.length?`<details><summary>notes</summary><div>${p.notes.map(([r,t])=>`<div><span class="who">${esc(nm(r))}:</span> ${esc(t)}</div>`).join("")}</div></details>`:"";
     return `<tr><td class="tok">${esc(c.id)}</td><td>${p.raters}</td><td>${p.poor||"—"}</td><td><span class="pill ${cls(p.n,p.ag)}">${pc(p.n,p.ag)}</span>${notes}</td><td>${p.iN?`<span class="pill ${cls(p.iN,p.iS)}">${pc(p.iN,p.iS)}</span>`:"—"}</td></tr>`}).join("");
   const jwBlock=Object.keys(jwTally).length?`<p class="meta" style="margin:12px 0 0"><b>Answers by Jev wording</b>: ${Object.entries(jwTally).map(([k,v])=>esc(k)+" "+v).join(" · ")}. Ratings given before the wording was recorded show as none recorded.</p>`:"";
-  const defBlock=def.n?`<p class="meta" style="margin:12px 0 0"><b>By V's definition</b> (a procedure is named and described), on consults reviewers finished: ${pc(def.n,def.real)} are real surgical conversations (named and described); ${def.descOnly} more described a procedure without naming it. Of the real ones, ${def.now} proposed now and ${def.cond} conditional; ${def.cat.operation} operations, ${def.cat.intervention} interventions, ${def.cat.minor} minor OPD procedures, ${def.cat.imaging_ct} CT imaging.</p>`:"";
+  const defBlock=def.n?`<p class="meta" style="margin:12px 0 0"><b>By V's definition</b> (a procedure is named and described), on consults reviewers finished: ${pc(def.n,def.real)} are real surgical conversations (named and described); ${def.descOnly} more described a procedure without naming it. Of the real ones, ${def.now} proposed now; ${def.cat.operation} operations, ${def.cat.intervention} interventions, ${def.cat.minor} minor OPD procedures.</p>`:"";
   $("agree").innerHTML=`<h3 style="margin:0">Reviewers: ${all.length}</h3><p class="meta">${all.map(r=>esc(nm(r.rater))).join(", ")}</p>${defBlock}${jwBlock}
   <div class="table-wrap"><table><thead><tr><th>Question</th><th>Answers</th><th>Jev agreed</th><th>Mean conf. agreed / corrected</th></tr></thead><tbody>${qrows}
     <tr><td><b>All questions</b></td><td>${tn}</td><td><span class="pill ${cls(tn,ta)}">${pc(tn,ta)}</span></td><td></td></tr>

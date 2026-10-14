@@ -39,52 +39,6 @@ def rttm_speakers(path):
     return len({l.split()[7] for l in open(path) if l.startswith("SPEAKER")})
 
 
-def count_terms(preds, targets, tlens):
-    """Per-item peak probabilities (masked) and the teacher count of the chunk: peaks [B,8], tgt [B]."""
-    import torch
-    fr = torch.arange(preds.shape[1], device=preds.device)[None, :] < tlens[:, None]
-    peaks = (preds.float() * fr[:, :, None]).max(dim=1).values
-    tgt = ((targets > 0.5) & fr[:, :, None]).any(dim=1).sum(-1).float()
-    return peaks, tgt
-
-
-def soft_count_loss(preds, targets, tlens, kind="soft", tau=0.1):
-    """Variant C / C': L1 between a differentiable predicted speaker count and the teacher's count of the training chunk, per item, averaged.
-    kind='soft'  : count = sum over the 8 output channels of the channel's PEAK probability (variant C).
-    kind='sharp' : count = sum_k sigmoid((peak_k - 0.5) / tau), which tracks the thresholded readout (peak > 0.5) so sub-threshold 'leak' peaks over empty channels
-                   do not stand in for a missing speaker (variant C', refuter #609); note its gradient vanishes for peaks far below 0.5.
-    Gradient path: loss -> |count - tgt| -> peaks -> p at each channel's argmax frame -> logits -> encoder/head. Permutation-free (no channel matching)."""
-    import torch
-    peaks, tgt = count_terms(preds, targets, tlens)
-    cnt = peaks.sum(-1) if kind == "soft" else torch.sigmoid((peaks - 0.5) / tau).sum(-1)
-    return (cnt - tgt).abs().mean()
-
-
-def install_count_loss(model, weight, kind="soft", tau=0.1, log_every=25):
-    """Add weight * soft_count_loss to NeMo's own training loss by capturing the forward pass (no second forward). Off unless weight > 0.
-    Also logs, on the TRAIN chunks (refuter #609, the soft-vs-hard loophole): mean soft count, mean HARD count (peak > 0.5), teacher count, and the sub-threshold
-    mass (sum of peaks in (0.1, 0.5)); if the soft count reaches the teacher's while the hard count does not, the loss is being gamed."""
-    cap, acc, curve = {}, {"n": 0, "soft": 0.0, "hard": 0.0, "tgt": 0.0, "sub": 0.0, "term": 0.0}, []
-    fwd, step = model.forward, model.training_step
-    def fwd_wrap(*a, **k):
-        out = fwd(*a, **k); cap["out"] = out; return out
-    def step_wrap(batch, batch_idx):
-        res = step(batch, batch_idx)
-        out = cap.pop("out"); preds = out[0] if isinstance(out, (tuple, list)) else out
-        preds, targets, tlens = model._align_predictions_and_targets(preds, batch[2], batch[3])
-        extra = weight * soft_count_loss(preds, targets, tlens, kind, tau)
-        with __import__("torch").no_grad():
-            peaks, tgt = count_terms(preds, targets, tlens)
-            acc["n"] += 1; acc["term"] += float(extra); acc["soft"] += float(peaks.sum(-1).mean()); acc["hard"] += float((peaks > 0.5).sum(-1).float().mean())
-            acc["tgt"] += float(tgt.mean()); acc["sub"] += float(((peaks > 0.1) & (peaks <= 0.5)).float().mul(peaks).sum(-1).mean())
-        if acc["n"] % log_every == 0:
-            curve.append({"batches": acc["n"], **{k: round(acc[k] / log_every, 4) for k in ("term", "soft", "hard", "tgt", "sub")}})
-            for k in ("term", "soft", "hard", "tgt", "sub"): acc[k] = 0.0
-        return {"loss": res["loss"] + extra}
-    model.forward, model.training_step = fwd_wrap, step_wrap
-    return {"curve": curve, "acc": acc}
-
-
 B_INFO = {}
 
 
@@ -179,69 +133,22 @@ def _parse_seg(seg):
     return str(seg[2])
 
 
-def _parse_full(seg):
-    if isinstance(seg, str):
-        p = seg.split(); return float(p[0]), float(p[1]), p[2]
-    return float(seg[0]), float(seg[1]), str(seg[2])
-
-
-def rttm_segments(path):
-    return [(b, e, spk) for b, e, spk in _read_rttm(path)]
-
-
-def mean_der(hyp_segs_list, rttm_paths):
-    """Mean per-window DER vs the teacher RTTM (pyannote.metrics, collar 0.25, overlap scored: the same DER every table in this study uses)."""
-    from pyannote.core import Annotation, Segment
-    from pyannote.metrics.diarization import DiarizationErrorRate
-    def ann(segs):
-        a = Annotation()
-        for i, (b, e, spk) in enumerate(segs):
-            if e > b: a[Segment(b, e), i] = spk
-        return a
-    ders = []
-    for hyp, rt in zip(hyp_segs_list, rttm_paths):
-        ders.append(DiarizationErrorRate(collar=0.25, skip_overlap=False)(ann(rttm_segments(rt)), ann(hyp)))
-    return sum(ders) / len(ders)
-
-
-class MinorWeightedBCE(__import__("torch").nn.Module):
-    """Variant D loss: BCE whose POSITIVE frames of a minor speaker are up-weighted. Weight of speaker channel k of an item = clip((S_max / S_k)^gamma, 1, cap),
-    S_k = active frames of k in the labels handed to the loss (so the weight follows the speaker through NeMo's permutation search), S_max = the item's largest S_k;
-    negatives weight 1; mean over valid frames x channels. Brief speakers are kept as labelled; nothing is dropped or relabelled."""
-    def __init__(self, gamma=0.5, cap=4.0):
-        super().__init__(); self.gamma, self.cap = gamma, cap
-
-    def forward(self, logits=None, probs=None, labels=None, target_lens=None):
-        import torch, torch.nn.functional as F
-        x = logits if logits is not None else probs
-        fr = torch.arange(x.shape[1], device=x.device)[None, :] < target_lens[:, None]                  # [B, T]
-        lab = labels.float() * fr[:, :, None]
-        S = lab.sum(dim=1)                                                                               # [B, C] active frames per speaker
-        w_spk = ((S.max(dim=1, keepdim=True).values / S.clamp(min=1.0)) ** self.gamma).clamp(1.0, self.cap)   # [B, C]
-        w = 1.0 + (w_spk[:, None, :] - 1.0) * lab                                                        # positives only
-        el = F.binary_cross_entropy_with_logits(x.float(), lab, reduction="none") if logits is not None else F.binary_cross_entropy(x.float().clamp(1e-7, 1 - 1e-7), lab, reduction="none")
-        m = fr[:, :, None].float()
-        return (el * w * m).sum() / (m.sum() * x.shape[-1]).clamp(min=1.0)
-
-
-def make_count_callback(pl, val_items, v5_items, every, target, patience, val_rttms=None, select_metric="count"):
+def make_count_callback(pl, val_items, v5_items, every, target, patience):
     """Speaker-COUNT scoring at every checkpoint (ruling 45). Selection/stopping uses the VAL windows' count error vs the teacher's
     count (held-out room-days, not the test set); V's 5 human counts are scored at every checkpoint for the record but never used to select
     or stop (selecting on them would make the permanent test set a tuning set)."""
     class CountEval(pl.Callback):
         def __init__(self):
             self.hist, self.best_val, self.best_step, self.best_sd, self.bad, self.last, self.stop_reason = [], None, None, None, 0, -1, None
-            self.eval_seconds = 0.0
 
-        def _run(self, m, paths):
-            """Offline 30.4 s decode of each wav; returns a list of [(start_s, end_s, speaker)] per window."""
+        def _counts(self, m, paths):
             sm = m.sortformer_modules
             old = (sm.spkcache_len, sm.fifo_len, sm.chunk_len, sm.chunk_right_context, sm.spkcache_update_period)
             was = m.training; m.eval()
             try:
                 sm.spkcache_len, sm.fifo_len, sm.chunk_len, sm.chunk_right_context, sm.spkcache_update_period = 264, 40, 340, 40, 300
                 m._check_streaming_parameters()
-                out = [[_parse_full(x) for x in segs] for segs in m.diarize(audio=list(paths), batch_size=1, verbose=False)]
+                out = [len({_parse_seg(x) for x in segs}) for segs in m.diarize(audio=list(paths), batch_size=1, verbose=False)]
             finally:
                 sm.spkcache_len, sm.fifo_len, sm.chunk_len, sm.chunk_right_context, sm.spkcache_update_period = old
                 m._check_streaming_parameters(); m.train(was)
@@ -250,25 +157,20 @@ def make_count_callback(pl, val_items, v5_items, every, target, patience, val_rt
         def _score(self, trainer, m):
             step = int(trainer.global_step)
             if step == self.last: return
-            self.last = step; _t0 = time.time()
-            vsegs = self._run(m, [p for p, _ in val_items]); vc = [len({x[2] for x in sg}) for sg in vsegs]
-            v5 = [len({x[2] for x in sg}) for sg in self._run(m, [p for p, _ in v5_items])] if v5_items else []
+            self.last = step
+            vc = self._counts(m, [p for p, _ in val_items]); v5 = self._counts(m, [p for p, _ in v5_items]) if v5_items else []
             val_mae = sum(abs(c - t) for c, (_, t) in zip(vc, val_items)) / len(val_items)
-            val_der = mean_der(vsegs, val_rttms) if val_rttms else None
             rec = {"step": step, "val_count_mae_vs_teacher": round(val_mae, 4), "val_count_bias": round(sum(c - t for c, (_, t) in zip(vc, val_items)) / len(val_items), 4),
-                   "val_der_vs_teacher": round(val_der, 4) if val_der is not None else None,
                    "v5_count_mae_vs_V": round(sum(abs(c - t) for c, (_, t) in zip(v5, v5_items)) / len(v5_items), 4) if v5_items else None, "v5_counts": v5}
             self.hist.append(rec); print("# count-eval", json.dumps(rec), file=sys.stderr, flush=True)
-            sel = val_der if select_metric == "der" else val_mae            # ruling 210 / PREREG-D: selection metric is DER in the D run, count otherwise
-            if self.best_val is None or sel < self.best_val - 1e-9:
-                self.best_val, self.best_step, self.bad = sel, step, 0
+            if self.best_val is None or val_mae < self.best_val - 1e-9:
+                self.best_val, self.best_step, self.bad = val_mae, step, 0
                 self.best_sd = {k: v.detach().cpu().clone() for k, v in m.state_dict().items()}
             else:
                 self.bad += 1
-            if select_metric == "count" and val_mae <= target: self.stop_reason = f"val count MAE {val_mae:.3f} <= target {target} at step {step}"
-            elif self.bad >= patience: self.stop_reason = f"no val-{select_metric} improvement for {patience} checks (best {self.best_val:.3f} at step {self.best_step})"
+            if val_mae <= target: self.stop_reason = f"val count MAE {val_mae:.3f} <= target {target} at step {step}"
+            elif self.bad >= patience: self.stop_reason = f"no val-count improvement for {patience} checks (best {self.best_val:.3f} at step {self.best_step})"
             if self.stop_reason: trainer.should_stop = True
-            self.eval_seconds += time.time() - _t0
 
         def on_train_start(self, trainer, m): self._score(trainer, m)          # step 0 = the untuned base model
 
@@ -294,14 +196,6 @@ def main():
     ap.add_argument("--crop-over8", action="store_true", help="variant B: crop windows with > 8 teacher speakers (train only) into <= 8-speaker crops at silences instead of skipping them")
     ap.add_argument("--balance-hist", default=None, help="variant B: JSON with hist_1_to_6plus of a POPULATION (all teacher-labelled production windows); oversample train toward it")
     ap.add_argument("--subsegment-nspk-bias", type=float, default=None, help="NeMo train_ds.subsegment_nspk_bias (sampling multiplier per active speaker; released config 1.5): larger favours chunks with more speakers (variant B2; see delivered_counts_probe.py)")
-    ap.add_argument("--max-time", default=None, help="Lightning graceful wall-clock cap DD:HH:MM:SS (e.g. 00:03:00:00 = 3 h): training stops after the current step and the best checkpoint / run record are still written")
-    ap.add_argument("--select-metric", choices=["count", "der"], default="count", help="checkpoint selection/stopping metric on VAL: count error vs teacher (default) or DER vs teacher (variant D, PREREG-D)")
-    ap.add_argument("--minor-weighted-bce", action="store_true", help="variant D: replace NeMo's BCE with MinorWeightedBCE (positive frames of minor speakers up-weighted)")
-    ap.add_argument("--minor-weight-gamma", type=float, default=0.5); ap.add_argument("--minor-weight-cap", type=float, default=4.0)
-    ap.add_argument("--count-loss-weight", type=float, default=0.0, help="variant C/C': weight of the speaker-count loss (0 = off). Choose on VAL only.")
-    ap.add_argument("--count-loss-kind", choices=["soft", "sharp"], default="soft", help="soft = sum of channel peaks (C); sharp = sum sigmoid((peak-0.5)/tau) (C')")
-    ap.add_argument("--count-loss-tau", type=float, default=0.1)
-    ap.add_argument("--precision", choices=["bf16-mixed", "16-mixed"], default="bf16-mixed", help="T4 (Turing) has no native bf16: use 16-mixed there. Default keeps every earlier run's behaviour.")
     ap.add_argument("--freeze-encoder", action="store_true", help="variant A (ruling 94): encoder frozen, head-only (sortformer_modules); proven by an encoder weights hash before/after and an optimizer param-group check")
     a = ap.parse_args()
 
@@ -332,17 +226,15 @@ def main():
               "base_model_nemo_sha256": sha256_file(nemo_path), "dataset_id": manifest["dataset_id"], "train_n": n_train, "val_n": n_val,
               "val_holdout_room_day": holdout, "skipped_windows": skipped, "excluded_test_room_days": manifest.get("excluded_test_room_days"),
               "val_room_days": manifest.get("val_room_days"), "train_room_days": manifest.get("train_room_days"), "manifest_counts": manifest.get("counts"), "max_steps": a.max_steps, "lr": a.lr, "warmup_steps": a.warmup_steps,
-              "batch_size": a.batch_size, "session_len_sec": a.session_len_sec, "seed": a.seed, "precision": a.precision,
+              "batch_size": a.batch_size, "session_len_sec": a.session_len_sec, "seed": a.seed, "precision": "bf16-mixed",
               "nemo_speech_commit": os.environ.get("NEMO_SPEECH_COMMIT", "cf724ac337d1ebc7d0dda1e23fb80916f52927a5"),
               "git_sha": git_sha(), "env_versions": versions, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     print("# config:", json.dumps(config), file=sys.stderr)
 
     error, best_path, best_score, last_nemo, best_nemo, metrics, freeze_proof = None, None, None, None, None, {}, None
-    delivered = {"n_items": 0, "hist": {}, "sum": 0}; fit_stats = None; count_loss_stats = None
+    delivered = {"n_items": 0, "hist": {}, "sum": 0}
     try:
         model = SortformerEncLabelModel.restore_from(nemo_path, map_location="cpu")
-        count_loss_stats = install_count_loss(model, a.count_loss_weight, a.count_loss_kind, a.count_loss_tau) if a.count_loss_weight > 0 else None
-        if a.minor_weighted_bce: model.loss = MinorWeightedBCE(a.minor_weight_gamma, a.minor_weight_cap)
         freeze = None
         if a.freeze_encoder:
             enc_names = {n for n, _ in model.named_parameters() if n.startswith("encoder.")}
@@ -362,12 +254,12 @@ def main():
         ckpt_cb = None    # selection is by speaker-count error (CountEval), not loss/F1
         count_cb = None
         if a.val_audio_16k_dir:
-            val_items, val_rttms = [], []
+            val_items = []
             for l in open(paths["val"]):
                 r = json.loads(l); wid = os.path.basename(r["audio_filepath"])[:-4]
-                val_items.append((os.path.join(a.val_audio_16k_dir, wid + ".wav"), r["num_speakers"])); val_rttms.append(r["rttm_filepath"])
+                val_items.append((os.path.join(a.val_audio_16k_dir, wid + ".wav"), r["num_speakers"]))
             v5_items = [(os.path.join(a.v5_audio_dir, w + ".wav"), c) for w, c in V5_COUNTS.items()] if a.v5_audio_dir else []
-            count_cb = make_count_callback(pl, val_items, v5_items, a.count_every, a.count_target, a.count_patience, val_rttms, a.select_metric)
+            count_cb = make_count_callback(pl, val_items, v5_items, a.count_every, a.count_target, a.count_patience)
         class DeliveredCounts(pl.Callback):      # refuter C1: what the dataloader ACTUALLY hands the model (random <=105 s chunks, inactive speakers dropped)
             def on_train_batch_start(self, tr, m, batch, batch_idx):
                 if delivered["n_items"] >= 240: return
@@ -381,18 +273,14 @@ def main():
             class KeepEncoderEval(pl.Callback):     # frozen encoder = no dropout / stochastic depth either; Lightning and CountEval flip train mode
                 def on_train_batch_start(self, tr, m, batch, batch_idx): m.encoder.eval()
             cbs.append(KeepEncoderEval())
-        trainer = pl.Trainer(max_time=a.max_time, devices=1, accelerator=a.device, precision=a.precision, max_steps=a.max_steps, max_epochs=10000,
+        trainer = pl.Trainer(devices=1, accelerator=a.device, precision="bf16-mixed", max_steps=a.max_steps, max_epochs=10000,
                              deterministic="warn", logger=False, enable_checkpointing=False, callbacks=cbs or None,
                              enable_progress_bar=False, log_every_n_steps=10, gradient_clip_val=1.0, check_val_every_n_epoch=4 if n_val else 1,
                              num_sanity_val_steps=0, limit_val_batches=1.0 if n_val else 0)
         model.set_trainer(trainer); model.setup_training_data(tr)
         if n_val: model.setup_validation_data(va)
         seed_everything(a.seed, workers=True)
-        _t_fit = time.time(); torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
         trainer.fit(model)
-        fit_stats = {"fit_wall_seconds": round(time.time() - _t_fit, 1), "count_eval_seconds": round(count_cb.eval_seconds, 1) if count_cb else None,
-                     "steps_run": int(trainer.global_step), "peak_gpu_mem_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2) if torch.cuda.is_available() else None}
-        fit_stats["train_seconds_per_step_excl_count_eval"] = round((fit_stats["fit_wall_seconds"] - (fit_stats["count_eval_seconds"] or 0)) / max(1, fit_stats["steps_run"]), 3)
         freeze_proof = None
         if freeze is not None:
             opt_ids = {id(p) for g in trainer.optimizers[0].param_groups for p in g["params"]}
@@ -415,12 +303,10 @@ def main():
         import traceback; error = f"{type(e).__name__}: {e}"; traceback.print_exc(file=sys.stderr)
 
     rec = {**config, "status": "OK" if error is None else "FAILED", "reason": error or "real run on the verified nightly dataset; quality judged only by held-out evaluation (V5 + bench20 vs pyannote.ai)",
-           "metrics": metrics, "best_val_metric": ("val_der_vs_teacher" if a.select_metric == "der" else "val_count_mae_vs_teacher"), "select_metric": a.select_metric,
-           "minor_weighted_bce": ({"gamma": a.minor_weight_gamma, "cap": a.minor_weight_cap} if a.minor_weighted_bce else None), "best_val_score": best_score,
-           "best_step": count_cb.best_step if count_cb else None, "stop_reason": (count_cb.stop_reason or ("max_time (graceful cap)" if (a.max_time and fit_stats and fit_stats["steps_run"] < a.max_steps) else "max_steps")) if count_cb else None,
-           "count_curve": count_cb.hist if count_cb else None, "variant": "+".join(x for x, on in (("A_head_only", a.freeze_encoder), ("B_crops", a.crop_over8), ("B_balanced", bool(a.balance_hist)), ("B2_nspk_bias", a.subsegment_nspk_bias is not None), ("C_count_loss_" + a.count_loss_kind, a.count_loss_weight > 0), ("D_minor_weighted_bce", a.minor_weighted_bce), ("D_select_der", a.select_metric == "der")) if on) or "full", "count_loss_weight": a.count_loss_weight, "count_loss_kind": a.count_loss_kind, "count_loss_tau": a.count_loss_tau,
-           "count_loss_train_curve": (count_loss_stats["curve"] if count_loss_stats else None), "subsegment_nspk_bias": a.subsegment_nspk_bias, "fit_stats": fit_stats, "session_len_sec_used": a.session_len_sec, "freeze_proof": freeze_proof, "variant_B_info": B_INFO or None,
-           "delivered_speaker_hist_first240": {"n_items": delivered["n_items"], "mean": round(delivered["sum"] / max(1, delivered["n_items"]), 3), "hist_1_to_6plus": dict(sorted(delivered["hist"].items()))}, "count_selection_note": ("best checkpoint = lowest val-window DER vs teacher (PREREG-D); val count error and V5 counts are logged per checkpoint but NOT used to select or stop" if a.select_metric == "der" else "best checkpoint = lowest val-window count error vs teacher; V5 counts and val DER are logged per checkpoint but NOT used to select or stop"), "max_time": a.max_time,
+           "metrics": metrics, "best_val_metric": "val_count_mae_vs_teacher", "best_val_score": best_score,
+           "best_step": count_cb.best_step if count_cb else None, "stop_reason": (count_cb.stop_reason or "max_steps") if count_cb else None,
+           "count_curve": count_cb.hist if count_cb else None, "variant": "+".join(x for x, on in (("A_head_only", a.freeze_encoder), ("B_crops", a.crop_over8), ("B_balanced", bool(a.balance_hist)), ("B2_nspk_bias", a.subsegment_nspk_bias is not None)) if on) or "full", "subsegment_nspk_bias": a.subsegment_nspk_bias, "session_len_sec_used": a.session_len_sec, "freeze_proof": freeze_proof, "variant_B_info": B_INFO or None,
+           "delivered_speaker_hist_first240": {"n_items": delivered["n_items"], "mean": round(delivered["sum"] / max(1, delivered["n_items"]), 3), "hist_1_to_6plus": dict(sorted(delivered["hist"].items()))}, "count_selection_note": "best checkpoint = lowest val-window count error vs teacher; V5 counts are logged per checkpoint but NOT used to select or stop",
            "last_nemo_path": last_nemo, "last_nemo_sha256": sha256_file(last_nemo) if last_nemo else None, "last_weights_sha256": last_sha if last_nemo else None,
            "best_nemo_path": best_nemo, "best_nemo_sha256": sha256_file(best_nemo) if best_nemo else None, "best_weights_sha256": best_sha if best_nemo else None,
            "checkpoint_r2_key": None}

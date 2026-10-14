@@ -5,7 +5,6 @@ Read-only: this module never creates or edits anything under the REB root (see w
 import glob
 import json
 import os
-import re
 from datetime import datetime, timezone
 
 from .schema import DEFAULT_CLOCK, DEFAULT_SOURCE_KIND
@@ -155,21 +154,6 @@ class Window:
             out.append(tr)
         return out
 
-    def encounters(self):
-        """The window's current encounter-layer track: among encounter tracks that are not quarantined, the one with the latest
-        finished_at (ties: the later manifest entry), whatever its status; None if there is none. Unlike tracks(), this does NOT
-        keep one track per config_hash: an encounter source change makes a new cfg8, and the newest read supersedes the older one.
-        Other layers are unchanged. A quarantined-only window returns None; an entry missing everywhere still raises."""
-        live = []
-        for i, e in enumerate(self._matching_entries("encounter", None)):
-            if not os.path.exists(os.path.join(self.root, e["path"])):
-                self._resolve_entry(e)   # quarantined => skipped; missing everywhere => raises
-                continue
-            live.append((_parse_finished_at(e.get("finished_at")), i, e))
-        if not live:
-            return None
-        return self._resolve_entry(max(live, key=lambda x: (x[0], x[1]))[2])
-
     def segments_between(self, t0_ms, t1_ms, layer=None, engine=None, latest_ok=True):
         """Segments (from any matching status=="ok" track) whose span overlaps [t0_ms, t1_ms). Each
         segment dict comes back annotated with '_track' provenance {layer, engine, version,
@@ -196,9 +180,6 @@ class Window:
         return out
 
 
-_PLAIN_WINDOW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")   # every window id in the store (c-.., o-.., l3-c003-r1, L041) is of this form; none starts with a dot or contains a path part
-
-
 def _find_manifest_path(root, window_id, ist_date=None, room_id=None):
     if ist_date and room_id:
         p = os.path.join(root, ist_date, room_id, window_id, "manifest.json")
@@ -221,11 +202,6 @@ def _find_manifest_path(root, window_id, ist_date=None, room_id=None):
                     p = os.path.join(date_dir, rec["room_id"], window_id, "manifest.json")
                     if os.path.exists(p):
                         return p
-    # 13A: a window registered with writer.write_manifest (the orphan tape windows) has a manifest but no track, so no index.jsonl line yet: look for its dir directly
-    # (the id must be a plain window-id token, so no glob metacharacter or path part can widen the match; the id is also glob-escaped; newest date first)
-    if window_id and _PLAIN_WINDOW_ID.match(window_id):
-        for p in sorted(glob.glob(os.path.join(root, "20*", "*", glob.escape(window_id), "manifest.json")), reverse=True):
-            return p
     return None
 
 
@@ -239,42 +215,6 @@ def load_window(window_id, ist_date=None, room_id=None, root=None):
     with open(manifest_path) as f:
         manifest = json.load(f)
     return Window(root, manifest, manifest_path)
-
-
-def _consult_manifest_paths(root, ist_date=None, room_id=None, consult_uid=None):
-    d, r, u = ist_date or "*", room_id or "*", consult_uid or "*"
-    return sorted(glob.glob(os.path.join(root, d, r, "_consults", u, "manifest.json")))
-
-
-def consults(ist_date, room_id=None, root=None):
-    """Consult-scope (CONSULT-cutter clip) manifests of a day as Windows (ORDERS-6S3): reb/<date>/<room>/_consults/<uid>/. Each
-    Window's .tracks() / .encounters() work as for a window; its manifest carries the cutter provenance and `window_ids`."""
-    root = root or DEFAULT_ROOT
-    out = []
-    for p in _consult_manifest_paths(root, ist_date, room_id):
-        with open(p) as f:
-            out.append(Window(root, json.load(f), p))
-    return out
-
-
-def consult(consult_uid, ist_date=None, room_id=None, root=None):
-    """One consult-scope Window by consult_uid (its latest tracks via .tracks()). Raises WindowNotFoundError if absent."""
-    root = root or DEFAULT_ROOT
-    ps = _consult_manifest_paths(root, ist_date, room_id, consult_uid)
-    if not ps:
-        raise WindowNotFoundError(f"no consult manifest for consult_uid={consult_uid!r} under {root}")
-    with open(ps[0]) as f:
-        return Window(root, json.load(f), ps[0])
-
-
-def windows_for(consult_uid, ist_date=None, room_id=None, root=None):
-    """window_ids of the REB windows the consult's span overlaps (recorded in the consult manifest when it was first written)."""
-    return list(consult(consult_uid, ist_date, room_id, root).manifest.get("window_ids") or [])
-
-
-def encounters(window_id, ist_date=None, room_id=None, root=None):
-    """load_window(window_id).encounters(): the latest-finished_at non-quarantined encounter Track, or None."""
-    return load_window(window_id, ist_date=ist_date, room_id=room_id, root=root).encounters()
 
 
 def real_room_windows(windows):

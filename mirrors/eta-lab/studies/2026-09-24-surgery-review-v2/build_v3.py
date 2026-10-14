@@ -10,7 +10,7 @@ Turn i is 0-based over the whole span (context included); evidence indices are t
 import json, os, sys
 from datetime import datetime, timezone
 import fetch_turns as ft, stage_raw as sr
-import finalize, build_consult as bc, v3, deid_gate
+import finalize, build_consult as bc, v3
 
 V3 = os.path.expanduser("~/eta-data/surgery-review-v3"); F = f"{V3}/{os.environ.get('V3_FINAL', 'final')}"
 SEL = os.environ.get("V3_SEL", "selected.json"); BOUNDS = os.environ.get("V3_BOUNDS", "bounds.json")  # a candidate set (rescan / set B) runs through the same stages
@@ -66,15 +66,14 @@ def stage_fetch():
               "| span_min", round((doc["span"]["end_ms"] - doc["span"]["start_ms"]) / 60000, 1))
 
 
-BEFORE_S, AFTER_S = 120.0, 120.0  # ruling 74 said 5 min before / 2 min after; V's V3-03 feedback + lx (ruling 143): a 12.7-min grey lead-in held two other cases, so both sides are 2 min; the rest sits behind "show earlier talk"
+BEFORE_S, AFTER_S = 300.0, 120.0  # ruling 74: grey only the last 5 min before and 2 min after the encounter; the rest sits behind the page's "show earlier talk" toggle
 
 
 def earlier(t, enc_s, enc_e):
-    """True for an OUTSIDE turn that ENDS more than BEFORE_S (2 min) before the encounter, or STARTS AFTER_S (2 min) or more after it (turn times are seconds since the span start)."""
+    """True for an OUTSIDE turn that starts more than 5 min before the encounter or more than 2 min after it (turn times are seconds since the span start)."""
     if "phase" not in t:
         return False
-    # a turn that STRADDLES the line stays visible (lx: V3-07 #16 had 144 s inside the clip yet was folded): before = folded only when the turn ENDS before the line; after = when it STARTS after it
-    return t["end_s"] < enc_s - BEFORE_S if t["phase"] == "before" else t["start_s"] >= enc_e + AFTER_S
+    return t["start_s"] < enc_s - BEFORE_S if t["phase"] == "before" else t["start_s"] >= enc_e + AFTER_S
 
 
 def apply_rules(blk, status):
@@ -125,20 +124,17 @@ def selftest():
                                 {"firmness": ("not_applicable", 0.9), "patient_response": ("agreed", 0.9)}, {"phrase": "x", "named": True}, {"procedure": [1]}))
     assert "firmness" not in na and na["patient_response"]["answer"] == "agreed", "a firmness of not_applicable is dropped, never shown"
     b4 = {"phase": "before", "start_s": 0.0}; a4 = {"phase": "after", "start_s": 0.0}
-    E = lambda ph, st_, en_: {"phase": ph, "start_s": st_, "end_s": en_}  # enc = 500..900 -> before-line 380, after-line 1020
-    assert earlier(E("before", 300.0, 379.0), 500.0, 900.0) and not earlier(E("before", 300.0, 380.0), 500.0, 900.0), "before: folded only if the turn ENDS before 380 s"
-    assert not earlier(E("before", 350.0, 400.0), 500.0, 900.0), "a before-turn that straddles the line (starts 350, ends 400) stays visible (lx: V3-07 #16)"
-    assert not earlier(E("before", 379.9, 380.0), 500.0, 900.0) and earlier(E("before", 100.0, 379.9), 500.0, 900.0), "2-minute edge on the END"
-    assert earlier(E("after", 1020.0, 1030.0), 500.0, 900.0) and not earlier(E("after", 1019.9, 1030.0), 500.0, 900.0), "after: folded when the turn STARTS 120 s or more past the encounter end"
-    assert not earlier({"start_s": 0.0, "end_s": 1.0}, 500.0, 900.0), "an in-encounter turn is never earlier"
+    assert earlier({"phase": "before", "start_s": 99.0}, 500.0, 900.0) and not earlier({"phase": "before", "start_s": 200.0}, 500.0, 900.0), "before: earlier only beyond the last 5 min (200 s)"
+    assert not earlier({"phase": "before", "start_s": 200.0 + 1e-9}, 500.0, 900.0) and earlier({"phase": "before", "start_s": 199.9}, 500.0, 900.0), "5-minute edge"
+    assert earlier({"phase": "after", "start_s": 1020.0}, 500.0, 900.0) and not earlier({"phase": "after", "start_s": 1019.9}, 500.0, 900.0), "after: earlier beyond 2 min (120 s) past the encounter end"
+    assert not earlier({"start_s": 0.0}, 500.0, 900.0), "an in-encounter turn is never earlier"
     print("build_v3 selftest OK: page shape (named/described/status/raised_by), history->already_done + proposer unclear derived, patient->patient_or_family, absent keys, null named")
 
 
 def validate(ids):
     """Contract check of final/consults/Q##.json against surg-page's shape (#179/#184/#185) and the privacy rules. Prints ids and counts only."""
     S = json.load(open(f"{V3}/{SEL}")); bad = 0
-    ok_status = {"proposed_now", "already_done", "referred", "mentioned_only", "conditional"};  # conditional: ruling 172 / surg-page 3ee4f5e (v5 page values)
-    ok_raised = {"this_doctor", "another_doctor", "patient_or_family", "unclear"}
+    ok_status = {"proposed_now", "already_done", "referred", "mentioned_only"}; ok_raised = {"this_doctor", "another_doctor", "patient_or_family", "unclear"}
     for q in ids:
         raw = open(f"{F}/consults/{q}.json").read(); d = json.loads(raw); errs = []
         for k in ("id", "date", "room", "doctor", "turns", "jev", "why", "audio_full"):
@@ -188,7 +184,6 @@ def validate(ids):
 
 def jev_one(q, ask=None, transport=None):
     v3.check_frozen()  # only the frozen wording scores
-    deid_gate.require(f"{F}/deid", q)  # ruling 274: the v7.15b cap rule must have run on this de-identified file
     doc = json.load(open(f"{F}/deid/{q}.json"))
     inn = [t for t in doc["turns"] if "phase" not in t]  # the encounter only: the greyed context is never scored
     bad = finalize.residual_identifiers(inn)
@@ -244,7 +239,7 @@ def stage_page(ids):
                 if earlier(t, enc_s, enc_e):
                     d["earlier"] = True  # behind the "show earlier talk" toggle (ruling 74)
             turns.append(d)
-        doc = {"id": q, "date": m["day"], "room": sr.room_name(m["room_day_id"]), "doctor": doctor, "turns": turns, "jev": (jv["jev"] if jv["meta"].get("shape") == "page" else to_page_shape(jv["jev"])), "why": why,
+        doc = {"id": q, "date": m["day"], "room": sr.room_name(m["room_day_id"]), "doctor": doctor, "turns": turns, "jev": to_page_shape(jv["jev"]), "why": why,
                "encounter": {"start_s": round(enc_s, 2), "end_s": round(enc_e, 2)}, "audio_full": {"src": f"audio/{q}/full.mp3", "t0_s": 0.0, "duration_s": round(dur, 1)}, "meta": jv["meta"]}
         p = f"{F}/consults/{q}.json"; json.dump(doc, open(p, "w"), ensure_ascii=False, indent=1); os.chmod(p, 0o600)
         print(q, "turns", len(turns), "| why", why["source"], "| audio_full", doc["audio_full"]["duration_s"], "s")
