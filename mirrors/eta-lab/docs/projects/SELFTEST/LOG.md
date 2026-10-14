@@ -2,16 +2,6 @@
 
 Build and event log, newest first. Owner panes: diar-lab (lead/spec), lab-mover (plumbing), fleet (device checks), radar-kit (mic self-test).
 
-## 27-28 Sep -- confirm4 built; nightly green; clinical2 deferred on TTS budget
-Session: diar-lab, lid-debug, eta-refuter-2.
-confirm4 (280 stimuli) built+merged; S3 judge v4 on confirm4: 268/280=95.7% overall but mixed-language cells only 72.5% (below the 90% bar) -- S3 stays indicative. A real scorer bug (fused numerals like '500mg' not recognised as a dose hit) found+fixed. Nightly runs green (13/13, canary 1/1). A bigger clinical2 suite (lid-debug spec, 108 stimuli) hit a TTS character-budget wall (needs ~9,810 chars against 4,530 headroom); 2 real allocation bugs found+fixed; Fable deferred it (zero further TTS spend) -- parked.
-Refs: #4380-4463, #4505-4648.
-
-## 27 Sep ~08:0x-10:3x IST — room self-test scorer PASS; clinical S1 + confirm suites for CLARITY
-Session: diar-lab, eta-refuter-2.
-Room scorer went through 3 FAIL/fix rounds (RT60 reliability, sweep-path gain, a 0.5s manifest-offset bug masking a 46->21 dB SNR drop) to PASS at adc6681df3c1, now reading the app's real 16 kHz raw tape.pcm. W33.1 clinical suite clinical1 (192 stimuli) merged main 5d87140b PASS bbcb0bba. Two S3-judge confirmation suites (confirm2, confirm3+confirm3diag) built for CLARITY's language judge, both PASS after id/spec correction rounds.
-Refs: #4192, #4211, #4269, #4275, #4279.
-
 ## 26 Sep ~21:2x IST — diag-rig on main; first ElevenLabs voices
 Session: diar-lab, eta-refuter-2.
 Merged: main 8ae0e169 (byte-identical to PASSed b542d96c, #3918); ElevenLabs change 0b250a83 PASS, main 5ba0ca1e. voices1: 8 stimuli, 1,068 of 60,000 characters, all audio hashes match (#3921). Google credential probe blocked by the pane classifier (#3898).
