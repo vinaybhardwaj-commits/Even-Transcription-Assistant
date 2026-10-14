@@ -1,0 +1,889 @@
+<title>Surgery Advice Labels</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+Devanagari:wght@400;500&family=Noto+Sans+Kannada:wght@400;500&family=Noto+Sans+Telugu:wght@400;500&family=Noto+Sans+Tamil:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f3f5f3;--card:#ffffff;--ink:#1b2320;--mut:#5f6b66;--line:#d6dcd8;--soft:#e9eeeb;
+  --acc:#1f5e7a;--acc-ink:#ffffff;--hit:#fbe6a2;--ok:#2f7a4d;--ok-ink:#ffffff;--warn:#a2641a;--warn-ink:#ffffff;--bad:#a33a3a;
+  --sp-doctor:#1f5e7a;--sp-patient:#8f5a0e;--sp-other:#5f6b66;--sp-a:#7a4a8a;--sp-b:#58701f;--sp-c:#44598f;--sp-d:#9a3f5c;--sp-e:#2e7466;
+  --sans:"IBM Plex Sans","Noto Sans Devanagari","Noto Sans Kannada","Noto Sans Telugu","Noto Sans Tamil",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--hit:#5b4a14;--ok:#6cc08c;--ok-ink:#0d1f15;--warn:#e0a458;--warn-ink:#241705;--bad:#e07c7c;
+  --sp-doctor:#80c3df;--sp-patient:#e0a458;--sp-other:#a3afa9;--sp-a:#c9a0dc;--sp-b:#b3cc7a;--sp-c:#93a9e0;--sp-d:#e59ab4;--sp-e:#7fcdbb;}}
+:root[data-theme="dark"]{
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--hit:#5b4a14;--ok:#6cc08c;--ok-ink:#0d1f15;--warn:#e0a458;--warn-ink:#241705;--bad:#e07c7c;
+  --sp-doctor:#80c3df;--sp-patient:#e0a458;--sp-other:#a3afa9;--sp-a:#c9a0dc;--sp-b:#b3cc7a;--sp-c:#93a9e0;--sp-d:#e59ab4;--sp-e:#7fcdbb;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans);padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:900px;margin:0 auto}
+header.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:14px 10px;border-bottom:1px solid var(--line)}
+.bar-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px}
+h1{font-size:1.15rem;font-weight:600;margin:0;text-wrap:balance}
+h2,h3{text-wrap:balance}
+.meta{color:var(--mut);font-size:.88rem}
+.prog{font-family:var(--mono);font-size:.85rem;font-variant-numeric:tabular-nums}
+.tabs{display:flex;gap:6px;margin-top:10px}
+.tab{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;padding:4px 12px;font:500 .85rem var(--sans);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+nav.chips{display:flex;gap:6px;overflow-x:auto;padding-block:10px 4px;scrollbar-width:thin}
+.chip{flex:0 0 auto;font:500 .8rem var(--mono);border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer;font-variant-numeric:tabular-nums}
+.chip.done{border-color:var(--ok);color:var(--ok)}
+.chip.part{border-style:dashed;border-color:var(--warn);color:var(--warn)}
+.chip[aria-current="true"]{outline:2px solid var(--acc);outline-offset:1px}
+button:focus-visible,input:focus-visible,textarea:focus-visible,.chip:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.intro{color:var(--mut);font-size:.9rem;max-width:68ch;margin:14px 0 0}
+.howto{max-width:68ch;margin:6px 0 0;font-size:.9rem}
+.howto summary{padding-block:6px;min-height:32px}
+.howto p{color:var(--mut);margin:4px 0 0}
+.panel{margin-top:14px;display:grid;gap:14px}
+.chead h2{font-size:1.1rem;margin:0;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+.tok{font:400 .8rem var(--mono);color:var(--mut)}
+.note{font-size:.88rem;color:var(--warn);margin:4px 0 0}
+
+/* Jev card */
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.jev-head{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between}
+.jev-head h3{font-size:1rem;margin:0}
+.jev-head p{margin:2px 0 0}
+.btn{border:1px solid var(--acc);background:var(--acc);color:var(--acc-ink);border-radius:8px;padding:8px 16px;font:500 .9rem var(--sans);cursor:pointer}
+.btn.ghost{background:transparent;color:var(--acc)}
+.btn.sm{padding:5px 12px;font-size:.85rem}
+.btn[disabled]{opacity:.4;cursor:default}
+.btn[aria-pressed="true"]{background:var(--warn);border-color:var(--warn);color:var(--warn-ink)}
+.qs{margin-top:8px}
+.qs.voided .q{opacity:.5}
+.q{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 14px;padding-block:12px;border-top:1px solid var(--line)}
+.q:first-child{border-top:0}
+.q-label{font-size:.8rem;color:var(--mut);font-weight:500;letter-spacing:.02em}
+.q-ans{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-top:1px}
+.ans{font-weight:600;overflow-wrap:anywhere}
+.conf{display:inline-flex;align-items:center;gap:6px;font:400 .76rem var(--mono);color:var(--mut);font-variant-numeric:tabular-nums}
+.conf.low{color:var(--warn)}
+.meter{display:inline-block;width:38px;height:5px;border-radius:3px;background:var(--soft);overflow:hidden}
+.meter i{display:block;height:100%;background:currentColor}
+.ev{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;margin-top:6px;font-size:.78rem;color:var(--mut)}
+.ev-chip{font:500 .76rem var(--mono);border:1px solid var(--line);background:var(--soft);color:var(--ink);border-radius:5px;padding:1px 7px;cursor:pointer}
+.ev-chip.on{background:var(--hit);border-color:var(--warn)}
+.ev-chip[disabled]{opacity:.45;cursor:default;text-decoration:line-through}
+.q-act{display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;justify-content:flex-end}
+.q-act .btn.ghost[aria-pressed="true"]{background:var(--warn)}
+.q[data-state="agree"] .q-act [data-act="agree"]{background:var(--ok);border-color:var(--ok);color:var(--ok-ink)}
+.st{grid-column:1 / -1;font-size:.8rem;min-height:0;color:var(--mut)}
+.st:empty{display:none}
+.q[data-state="agree"] .st{color:var(--ok)}
+.q[data-state="correct"] .st{color:var(--warn)}
+.fix{grid-column:1 / -1;border:0;padding:10px 12px;margin:0;background:var(--soft);border-radius:8px}
+.fix legend,.fixl{font-size:.85rem;font-weight:600;padding:0}
+.fixrow{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.fixrow input{flex:1 1 220px;width:auto}
+.opts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.opt{position:relative}
+.opt input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.opt span{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:.88rem;background:var(--card)}
+.opt input:checked+span{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+.opt input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
+input[type=text],textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:7px 9px;background:var(--bg);color:var(--ink);font:inherit}
+textarea{min-height:60px;resize:vertical}
+.foot{margin-top:6px;border-top:1px solid var(--line);padding-top:12px}
+.foot label{display:block;font-size:.85rem;font-weight:600;margin-bottom:4px}
+
+/* transcript */
+.ts-head{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;justify-content:space-between}
+.ts-head h3{font-size:1rem;margin:0}
+.ts-tools{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:.85rem;color:var(--mut)}
+.ts-tools label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+.link{background:none;border:0;padding:0;color:var(--acc);font:inherit;font-size:.85rem;cursor:pointer;text-decoration:underline}
+.turns{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.turn{--spc:var(--sp-other);width:fit-content;max-width:min(92%,640px);min-width:0;padding:7px 12px 8px;border:1px solid color-mix(in srgb,var(--spc) 38%,var(--line));border-radius:10px;background:color-mix(in srgb,var(--spc) 9%,var(--card));border-top-left-radius:3px}
+.turn.sp-doctor{--spc:var(--sp-doctor);margin-left:auto;border-top-left-radius:10px;border-top-right-radius:3px}
+.turn.sp-patient{--spc:var(--sp-patient)}
+.turn.sp-a{--spc:var(--sp-a)}
+.turn.sp-b{--spc:var(--sp-b)}
+.turn.sp-c{--spc:var(--sp-c)}
+.turn.sp-d{--spc:var(--sp-d)}
+.turn.sp-e{--spc:var(--sp-e)}
+.wbreak{display:flex;align-items:center;gap:10px;margin-block:6px 2px;font-size:.76rem;color:var(--mut)}
+.wbreak::before,.wbreak::after{content:"";flex:1;border-top:1px dashed var(--line)}
+.unsure{font-style:italic}
+.q-hint{font-size:.78rem;color:var(--mut);margin-top:2px;max-width:60ch}
+.oshow{margin-block:2px;text-align:left}
+.oblock{display:flex;flex-direction:column;gap:8px}
+.oblock[hidden]{display:none}
+.turn.outside{opacity:.55;border-style:dashed;background:transparent}
+.turn.outside.hit{opacity:1}
+.outtag{font-weight:500;text-transform:uppercase;letter-spacing:.05em;font-size:.68rem}
+.why h3{font-size:1rem;margin:0 0 6px}
+.why p{margin:0}
+.player{position:sticky;top:calc(var(--stick,0px) + env(safe-area-inset-top,0px));z-index:4;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:grid;gap:2px}
+.pl-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.pl-b{min-width:44px;min-height:44px;border:1px solid var(--line);background:var(--soft);color:var(--ink);border-radius:8px;font:500 .9rem var(--sans);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 10px;font-variant-numeric:tabular-nums}
+.pl-play{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);min-width:52px}
+.pl-b svg{width:20px;height:20px;fill:currentColor}
+.pl-time{margin-left:auto;font:400 .82rem var(--mono);font-variant-numeric:tabular-nums;color:var(--mut);white-space:nowrap}
+#pl-seek{width:100%;height:32px;margin:0;accent-color:var(--acc)}
+.pl-row2{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 10px;font-size:.8rem;color:var(--mut)}
+.pl-row2 label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-height:28px}
+.pl-msg{color:var(--warn)}
+.turn.now{box-shadow:inset 4px 0 0 var(--acc)}
+.seek{position:relative;background:none;border:0;padding:0;font:inherit;font-size:.76rem;font-family:var(--mono);color:var(--acc);text-decoration:underline dotted;cursor:pointer}
+.seek::after{content:"";position:absolute;inset:-12px -6px}
+.play{margin-left:auto;font-size:.78rem}
+.play[aria-pressed="true"]{color:var(--warn)}
+.play[disabled]{color:var(--mut);text-decoration:none;cursor:default}
+.turn.hit{background:color-mix(in srgb,var(--hit) 60%,var(--card));outline:2px solid var(--warn);outline-offset:1px}
+.tmeta{display:flex;flex-wrap:wrap;gap:0 10px;align-items:baseline;font-size:.76rem;color:var(--mut)}
+.spk{font-weight:600;color:var(--spc);font-size:.8rem;letter-spacing:.02em}
+.tnum,.tim{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.en{margin:2px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.orig-btn{margin-top:3px;font-size:.78rem}
+.orig{margin:4px 0 0;padding-top:5px;border-top:1px dashed var(--line);color:var(--mut);white-space:pre-wrap;overflow-wrap:anywhere}
+
+.nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px;flex-wrap:wrap}
+.status{font-size:.82rem;color:var(--mut);min-height:1.2em;margin-top:8px}
+.table-wrap{overflow-x:auto;margin-top:12px}
+table{border-collapse:collapse;width:100%;font-size:.86rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
+.pill{display:inline-block;border-radius:999px;padding:1px 8px;font-size:.78rem;font-weight:500}
+.pill.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.pill.warn{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.pill.bad{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.pill.none{background:var(--soft);color:var(--mut)}
+details summary{cursor:pointer;color:var(--acc)}
+details>div{margin-top:6px}
+.who{font-weight:500}
+.empty{color:var(--mut);padding:24px 0}
+@media (max-width:560px){
+  header.bar{position:static} /* keep the screen for the sticky audio player */
+  .q{grid-template-columns:minmax(0,1fr)}
+  .q-act{justify-content:flex-start}
+  .q-act .btn{flex:1 1 0}
+  .btn,.btn.sm{min-height:44px}
+  .opt span{min-height:44px;display:inline-flex;align-items:center}
+  .chip{min-height:40px;padding-inline:12px}
+  .ev-chip{min-height:32px;padding-inline:10px}
+  .tab{min-height:40px}
+  .play,.orig-btn,.link{min-height:32px}
+  .turn{max-width:96%}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+  <header class="bar" id="hdr">
+    <div class="bar-row">
+      <h1>Surgery Advice Labels</h1>
+      <span class="prog" id="prog">0 / 0 reviewed</span>
+      <span class="meta" id="who"></span>
+    </div>
+    <div class="tabs" role="tablist" id="tabs" hidden>
+      <button class="tab" role="tab" id="tab-label" aria-selected="true">My review</button>
+      <button class="tab" role="tab" id="tab-agree" aria-selected="false">Agreement</button>
+    </div>
+    <nav class="chips" id="chips" aria-label="Consults"></nav>
+  </header>
+
+  <section id="view-label">
+    <p class="intro">Each card is one whole EHRC OPD consult. A surgical conversation is one where the doctor names a specific procedure and describes what it involves or how it will affect the patient; a keyword alone does not count. Naming a procedure and describing it are two separate questions: a doctor can describe one without saying its name.</p>
+    <details class="howto"><summary>How to review</summary>
+      <p>Jev has read the consult and proposes answers. Nothing is pre-selected: read the transcript, then press <b>Agree</b> or <b>Correct</b> on each answer. Questions that don't apply are hidden, and they appear if your answers make them relevant. Evidence chips jump to the turns Jev used. When a consult has full audio, use the player at the top: tap any time stamp in the transcript to hear from there. Greyed turns are outside the consult and are not scored. If the transcript is too garbled to judge, say so. Your answers save as you go and only you see them here. Please don't copy patient text out of this page.</p></details>
+    <div class="panel" id="panel"><p class="empty">Loading the consults…</p></div>
+    <div class="nav">
+      <button class="btn ghost" id="prev">Previous</button>
+      <button class="btn" id="next">Next</button>
+    </div>
+    <div class="status" id="status" aria-live="polite"></div>
+    <div class="status" id="done" aria-live="polite"></div>
+  </section>
+
+  <section id="view-agree" hidden>
+    <p class="intro">Jev's accuracy per question: the share of reviewed answers that reviewers agreed with. Consults a reviewer marked too poor to judge are left out for that reviewer. Only you (the page owner) see this tab.</p>
+    <div class="card" id="agree" style="margin-top:14px"><p class="empty">No reviews yet.</p></div>
+  </section>
+</div>
+
+<script>
+// Every question either schema knows, in display order. A consult is "v3" when Jev's block has
+// named / described / status (fleet's v3 shape); other consults use the v2 keys and show every row Jev answered.
+// In v3 the page decides which questions apply from the reviewer's own answers, so a question can be
+// shown with no Jev answer (the reviewer then answers it directly).
+const Q=[
+  {f:"discussed",q:"Is a procedure discussed at all?",o:["yes","no"],old:1},
+  {f:"kind",q:"What kind of talk is it?",o:["recommendation_now","history","referral","staff_talk","none"],old:1,
+   L:{recommendation_now:"Recommended now",history:"Past history",referral:"Referral to someone else",staff_talk:"Staff talk",none:"None of these"}},
+  {f:"procedure",q:"Which procedure?",t:1,old:1},
+  {f:"proposer",q:"Who proposed it?",o:["this_doctor","another_doctor","patient","unclear"],old:1,
+   L:{this_doctor:"This doctor",another_doctor:"Another doctor",patient:"The patient or family",unclear:"Unclear"}},
+  {f:"named",q:"Does the doctor say the name of a specific procedure? Which one?",t:1,v3:1,
+   h:"A keyword alone does not count, and describing a procedure without saying its name is not naming it. Type the procedure, or say that none was named."},
+  {f:"described",q:"Does the doctor describe a specific procedure: what it involves, or how it will affect the patient?",o:["yes","no"],v3:1,
+   h:"Answer this even if the doctor never says the procedure's name."},
+  {f:"described_as",q:"Which procedure is it, in your judgement?",t:1,v3:1,fl:"Which procedure do you think it is?",
+   h:"The doctor described it without saying its name. Type what you think it is."},
+  {f:"category",q:"What type of procedure is it?",o:["operation","intervention","minor","imaging_ct"],v3:1,
+   L:{operation:"Operation",intervention:"Intervention",minor:"Minor OPD procedure",imaging_ct:"Imaging: CT"},
+   h:"Operation: theatre or anaesthesia. Intervention: angiography or angioplasty, endoscopy, biopsy, injection, anything booked into a procedure room. Minor: a small procedure done in the OPD. Imaging: a CT scan, plain or with contrast."},
+  {f:"status",q:"What is its status for this patient?",o:["proposed_now","already_done","referred","mentioned_only","conditional"],v3:1,
+   L:{proposed_now:"Proposed now, for this patient",already_done:"Already done (history)",referred:"Referred elsewhere",mentioned_only:"Mentioned only",conditional:"Conditional: advised or done only if something happens or does not improve"}},
+  {f:"raised_by",q:"Who raised it?",o:["this_doctor","another_doctor","patient_or_family","unclear"],v3:1,
+   L:{this_doctor:"This doctor",another_doctor:"Another doctor",patient_or_family:"The patient or family",unclear:"Unclear"}},
+  {f:"firmness",q:"How firmly was it put?",o:["suggested","advised","strongly_advised","scheduled","not_applicable"],
+   o3:["suggested","advised","strongly_advised","scheduled"],L:{not_applicable:"Not applicable"}},
+  {f:"patient_response",q:"What was the patient's response?",o:["agreed","will_think","declined","not_stated"],
+   L:{will_think:"Will think about it",not_stated:"Not stated"}},
+  {f:"cost",q:"Was cost discussed?",o:["yes","no"]},
+  {f:"second_opinion",q:"Was a second opinion offered or asked for?",o:["yes","no"]}
+];
+const SPK={doctor:["Doctor","doctor"],patient_or_attender:["Patient or attender","patient"],other:["Other","other"],A:["Speaker A","a"],B:["Speaker B","b"],C:["Speaker C","c"],D:["Speaker D","d"],E:["Speaker E","e"]};
+const CUT=0.9; // fleet: Jev answers below this are right about half the time, so they are flagged for a closer look
+const LANG={en:"English",hi:"Hindi",kn:"Kannada",te:"Telugu",ta:"Tamil",mixed:"Mixed"};
+let db=null,user=null,meId=null,owner=false,claudeOk=false;
+let consults=[],sigs={},mine={c:{}},cur=null,all=[];
+let saveTimer=null,saving=Promise.resolve(),dirty=false,loaded=false;
+let hl={q:null,turns:[]},allOrig=false;const origOpen=new Set();
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
+const lab=(q,v)=>(q.L&&q.L[v])||cap(String(v).replace(/_/g," "));
+const noMotion=()=>window.matchMedia&&matchMedia("(prefers-reduced-motion:reduce)").matches;
+
+const getA=(id,f)=>((mine.c[id]||{}).a||{})[f];
+// The Jev wording that produced the proposals a rater saw, e.g. "u9-v4.0:b2ebc86f5a74"; undefined when the doc records none.
+const jwOf=c=>{const w=c&&c.jev_wording;return w&&w.sha256?(w.version?w.version+":":"")+String(w.sha256).slice(0,12):undefined};
+const answered=v=>!!v&&(v.v==="agree"||((v.v==="correct"||v.v==="add")&&!!v.val));
+const isV3=c=>!!(c.jev&&(c.jev.named||c.jev.described||c.jev.status));
+const qText=q=>q.q;
+const qOpts=(q,c)=>(isV3(c)&&q.o3)||q.o;
+const isNamed=v=>{const t=String(v??"").trim().toLowerCase();return !!t&&!["not named","not_named","none","no","n/a","null"].includes(t)};
+// Jev's answer for a question as {answer,conf,evidence}, or undefined when Jev gave none.
+// In v3, "named" carries both the procedure and its category.
+function jv(c,f){
+  const J=c.jev||{},n=J.named;
+  if(f==="named")return n?{answer:n.answer==null||n.answer===""?"not named":n.answer,conf:n.conf,evidence:n.evidence}:undefined;
+  if(f==="category")return n&&n.category?{answer:n.category,conf:n.conf,evidence:n.evidence}:undefined;
+  return J[f]||undefined;
+}
+// The answer that decides what is shown next: the reviewer's answer if they gave one, otherwise Jev's proposal.
+const eff=(c,f,a)=>{const x=(a||{})[f];if(x&&(x.v==="correct"||x.v==="add")&&x.val)return x.val;const j=jv(c,f);return j?j.answer:undefined};
+// Questions that apply, in order. In v3 a question that does not apply is hidden, never answered "not applicable".
+function required(c,a=(mine.c[c.id]||{}).a){
+  if(!isV3(c))return Q.filter(q=>!q.v3&&jv(c,q.f));
+  const named=isNamed(eff(c,"named",a)),described=eff(c,"described",a)==="yes",st=eff(c,"status",a);
+  return Q.filter(q=>{
+    if(q.old)return false;
+    if(q.f==="named"||q.f==="described")return true;      // asked separately: a procedure can be described without being named
+    if(q.f==="described_as")return described&&!named;      // the reviewer says which procedure it was
+    if(q.f==="category")return named||described;
+    if(!(named||described))return false;                    // a procedure is in play once it is named or described
+    if(q.f==="firmness"||q.f==="patient_response")return st==="proposed_now";
+    return true;                                            // status, raised_by, cost, second_opinion (also for a look-alike that is named but barely described)
+  });
+}
+const nAnsWith=(c,A)=>required(c,A).filter(q=>answered((A||{})[q.f])).length;
+const nAns=c=>nAnsWith(c,(mine.c[c.id]||{}).a);
+const status=c=>{
+  if((mine.c[c.id]||{}).poor)return"done";
+  const r=required(c).length,n=nAns(c);return r&&n===r?"done":n?"part":"todo";
+};
+function progress(){
+  const n=consults.filter(c=>status(c)==="done").length;
+  $("prog").textContent=n+" / "+consults.length+" reviewed";
+}
+function chips(){
+  $("chips").innerHTML=consults.map(c=>{const s=status(c);
+    return `<button class="chip${s==="done"?" done":s==="part"?" part":""}" data-go="${esc(c.id)}" aria-current="${c.id===cur}" title="${s==="done"?"Reviewed":s==="part"?"Started":"Not started"}">${esc(c.id)}</button>`}).join("");
+}
+const mmss=s=>{s=Math.max(0,Math.round(+s||0));return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")};
+const fmtDate=d=>{const m=/^(\d{4})-(\d\d)-(\d\d)$/.exec(d||"");if(!m)return d||"";
+  return +m[3]+" "+["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m[2]-1]+" "+m[1]};
+const hasTurn=(c,i)=>(c.turns||[]).some(t=>t.i===i);
+
+function stText(a){
+  if(!a)return"";
+  if(a.v==="agree")return"Agreed with Jev";
+  if(a.v==="add")return a.val?"Your answer":"";
+  if(a.v==="correct")return a.val?"Corrected":"Corrected: choose the right answer below";
+  return"";
+}
+function fixHtml(c,q,a){
+  const j=jv(c,q.f),manual=!j;
+  if(!manual&&(!a||a.v!=="correct"))return"";
+  const name=c.id+"-"+q.f;
+  if(q.t)return `<div class="fix"><label class="fixl" for="${name}-txt">${q.fl||(manual?"Your answer: which procedure was named?":"Which procedure was named?")}</label>
+    <div class="fixrow"><input type="text" id="${name}-txt" data-k="${esc(c.id)}" data-f="${q.f}" value="${esc(a&&a.val||"")}" placeholder="Type the procedure">
+    ${q.f!=="named"||(j&&String(j.answer).toLowerCase()==="not named")?"":`<button class="btn sm ghost" data-none="${q.f}">No procedure named</button>`}</div></div>`;
+  const opts=qOpts(q,c).filter(v=>!j||v!==String(j.answer));
+  return `<fieldset class="fix"><legend>Your answer</legend><div class="opts">`+opts.map(v=>
+    `<label class="opt"><input type="radio" id="${name}-${v}" name="${name}" value="${v}" data-k="${esc(c.id)}" data-f="${q.f}"${a&&a.val===v?" checked":""}><span>${esc(lab(q,v))}</span></label>`).join("")+`</div></fieldset>`;
+}
+function rowHtml(c,q){
+  const j=jv(c,q.f),a=getA(c.id,q.f);
+  if(!j){ // Jev gave no answer, but this question applies given the reviewer's answers: the reviewer answers it directly
+    return `<div class="q" id="q-${q.f}" data-state="${a&&a.val?"add":"none"}">
+      <div>
+        <div class="q-label">${esc(q.q)}</div>
+        ${q.h?`<div class="q-hint">${esc(q.h)}</div>`:""}
+        <div class="q-ans"><span class="meta">Jev gave no answer to this one.</span></div>
+      </div>
+      <div class="q-act">${a?`<button class="btn sm ghost" data-act="clear" data-q="${q.f}">Clear</button>`:""}</div>
+      <div class="st" id="st-${q.f}">${esc(stText(a))}</div>
+      ${fixHtml(c,q,a)}
+    </div>`;
+  }
+  const conf=typeof j.conf==="number"?Math.max(0,Math.min(1,j.conf)):null;
+  const shown=q.t?(isNamed(j.answer)?cap(String(j.answer)):"No specific procedure named"):lab(q,j.answer);
+  const hint=q.h;
+  const evs=Array.isArray(j.evidence)?j.evidence:[];
+  const ev=evs.length?evs.map(t=>hasTurn(c,t)
+      ?`<button class="ev-chip${hl.q===q.f?" on":""}" data-q="${q.f}" data-t="${t}" aria-label="Show turn ${t+1}">turn ${t+1}</button>`
+      :`<button class="ev-chip" disabled title="This turn is not in the transcript">turn ${t+1}</button>`).join("")
+    :`<span>no evidence quoted</span>`;
+  const state=a?(a.v==="agree"?"agree":"correct"):"none";
+  return `<div class="q" id="q-${q.f}" data-state="${state}">
+    <div>
+      <div class="q-label">${esc(q.q)}</div>
+      ${hint?`<div class="q-hint">${esc(hint)}</div>`:""}
+      <div class="q-ans"><span class="ans">${esc(shown)}</span>
+        ${conf===null?"":`<span class="conf${conf<CUT?" low":""}" title="${conf<CUT?"Jev is less reliable below 0.90 confidence. Check this one closely.":"Jev's confidence in this answer"}"><span class="meter"><i style="width:${Math.round(conf*100)}%"></i></span>${conf.toFixed(2)}${conf<CUT?" · check":""}</span>`}
+      </div>
+      <div class="ev"><span>Evidence</span>${ev}</div>
+    </div>
+    <div class="q-act">
+      <button class="btn sm" data-act="agree" data-q="${q.f}" aria-pressed="${state==="agree"}">Agree</button>
+      <button class="btn sm ghost" data-act="correct" data-q="${q.f}" aria-pressed="${state==="correct"}">Correct</button>
+    </div>
+    <div class="st" id="st-${q.f}">${esc(stText(a))}</div>
+    ${fixHtml(c,q,a)}
+  </div>`;
+}
+/* Audio hosting. iOS Safari (and Slack's in-app browser) can only play a file if the host answers byte-range
+   requests (206). One tiny probe finds out; if the host cannot, the MP3 is fetched whole and played from a Blob URL. */
+let rangeOK=null,rangeProbe=null,fullBlob=null;
+const blobs=new Map(),loading=new Map();
+function probeRange(src){
+  if(rangeProbe||typeof fetch!=="function")return rangeProbe||Promise.resolve(null);
+  // 206 = ranges work; 200 = the host ignored the Range header. Anything else (a missing file) proves nothing, so try again later.
+  rangeProbe=fetch(src,{headers:{Range:"bytes=0-0"}}).then(r=>{
+    try{r.body&&r.body.cancel()}catch(e){}
+    if(r.status===206)rangeOK=true;else if(r.status===200)rangeOK=false;else rangeProbe=null;
+    return rangeOK}).catch(()=>{rangeProbe=null;return null});
+  return rangeProbe;
+}
+// Label a fetched audio file by its header when the host sent no usable content-type (Safari can refuse a mislabelled blob).
+async function audioBlob(b){
+  if(/^(audio|video)\//.test(b.type))return b;
+  const h=new Uint8Array(await b.slice(0,12).arrayBuffer()),s=String.fromCharCode(...h);
+  const type=s.slice(4,8)==="ftyp"?"audio/mp4":s.slice(0,4)==="OggS"?"audio/ogg":s.slice(0,4)==="RIFF"?"audio/wav":(h[0]===0x1A&&h[1]===0x45)?"audio/webm":"audio/mpeg";
+  return new Blob([b],{type});
+}
+function loadBlob(src,isFull){
+  const key=(isFull?"F:":"C:")+src;
+  if(loading.has(key))return loading.get(key);
+  const p=fetch(src).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status);return r.blob()}).then(audioBlob).then(bb=>{
+    const u=URL.createObjectURL(bb);
+    if(isFull){if(fullBlob)URL.revokeObjectURL(fullBlob.url);fullBlob={src,url:u}}else blobs.set(src,u);
+    loading.delete(key);return u}).catch(e=>{loading.delete(key);throw e});
+  loading.set(key,p);return p;
+}
+// Fetch the small evidence clips of the open consult ahead of time when the host has no Range support.
+function prefetchClips(c){
+  if(rangeOK!==false||!c)return;
+  (c.turns||[]).forEach(t=>audioOf(t).forEach(src=>{if(!blobs.has(src))loadBlob(src,false).catch(()=>{})}));
+}
+const fullUrl=f=>rangeOK===false&&fullBlob&&fullBlob.src===f.src?fullBlob.url:f.src;
+// t.audio is a list of clip URLs (two pieces for a split turn), played back to back.
+const audioOf=t=>(Array.isArray(t.audio)?t.audio:t.audio?[t.audio]:[]).filter(s=>typeof s==="string"&&s);
+let player=null,playing=null;
+function stopAudio(){
+  if(player){player.onended=player.onerror=null;player.pause();player=null}
+  if(playing){playing.btn.textContent="Play audio";playing.btn.setAttribute("aria-pressed","false");playing=null}
+}
+function playTurn(btn,t){
+  if(playing&&playing.btn===btn){stopAudio();return}
+  pauseFull();stopAudio();
+  const srcs=audioOf(t);let k=0;playing={btn};
+  btn.textContent="Stop";btn.setAttribute("aria-pressed","true");
+  const fail=()=>{stopAudio();btn.textContent="Audio unavailable";btn.disabled=true};
+  const next=()=>{
+    if(k>=srcs.length){stopAudio();return}
+    const src=srcs[k++];
+    const go=u=>{if(!playing||playing.btn!==btn)return;const a=new Audio(u);player=a;a.onended=next;a.onerror=fail;
+      const p=a.play();if(p&&p.catch)p.catch(fail)};
+    if(rangeOK===false&&!blobs.has(src))loadBlob(src,false).then(go,fail);else go(rangeOK===false?blobs.get(src):src);
+  };
+  next();
+}
+// Language attribute for the original text, so Indic scripts get the right font: the tag if it names one, else the script.
+function origLang(t){
+  if(["hi","kn","te","ta"].includes(t.lang))return t.lang;
+  const o=String(t.orig||"");
+  return /[\u0900-\u097F]/.test(o)?"hi":/[\u0C80-\u0CFF]/.test(o)?"kn":/[\u0C00-\u0C7F]/.test(o)?"te":/[\u0B80-\u0BFF]/.test(o)?"ta":"";
+}
+function setFold(btn,open){
+  const blk=$(btn.dataset.oblock);if(!blk)return;
+  blk.hidden=!open;btn.setAttribute("aria-expanded",open);btn.textContent=(open?"Hide ":"Show ")+btn.dataset.lab;
+}
+function turnHtml(c,t,ph){
+  const [name,cls]=SPK[t.speaker]||[String(t.speaker||"Unknown"),"other"];
+  const en=t.en??"",orig=t.orig??"";
+  const hasOrig=!!orig&&orig!==en; // raw original next to the English, whatever the language tag says
+  const key=c.id+":"+t.i,open=hasOrig&&(allOrig||origOpen.has(key));
+  const lg=LANG[t.lang]||t.lang||"";
+  const out=ph&&ph!=="during"?ph:"";
+  return `<article class="turn sp-${cls}${out?" outside":""}" id="t-${t.i}" data-i="${t.i}">
+    <div class="tmeta"><span class="spk">${esc(name)}</span>${out?`<span class="outtag">${out==="before"?"Before consult":out==="after"?"After consult":"Outside the consult"} · not scored</span>`:""}<span class="tnum">#${t.i+1}</span>${turnAt(c,t)!==null?`<button class="seek tim" data-seek="${turnAt(c,t)}" aria-label="Play from ${mmss(t.start_s)}">${mmss(t.start_s)}</button>`:`<span class="tim">${mmss(t.start_s)}</span>`}${lg&&t.lang!=="en"?`<span>${esc(lg)}</span>`:""}${t.speaker_basis==="diarization_only"||t.speaker_basis==="none"?`<span class="unsure" title="No voiceprint match for this turn">speaker uncertain</span>`:""}${audioOf(t).length?`<button class="link play" data-play="${esc(key)}" data-i="${t.i}" aria-pressed="false">Play audio</button>`:""}</div>
+    <p class="en">${esc(en)}</p>
+    ${hasOrig?`<button class="link orig-btn" data-orig="${esc(key)}" aria-expanded="${open}">${open?"Hide original":"Show original"}</button>
+    <p class="orig"${origLang(t)?` lang="${origLang(t)}"`:""}${open?"":" hidden"}>${esc(orig)}</p>`:""}
+  </article>`;
+}
+function turnsHtml(c,turns){
+  // Speaker letters restart in each audio window, so mark every window break.
+  const wins=[];turns.forEach(t=>{if(t.window!==undefined&&t.window!==null&&!wins.includes(t.window))wins.push(t.window)});
+  // Turns outside the encounter (turn.outside, or phase before/after) are greyed and not scored.
+  const isOut=t=>t.outside===true||t.phase==="before"||t.phase==="after";
+  const inn=turns.map((t,k)=>isOut(t)?-1:k).filter(k=>k>=0),first=inn[0],last=inn[inn.length-1];
+  const phaseOf=(t,k)=>!isOut(t)?"during":(t.phase==="before"||t.phase==="after")?t.phase:k<first?"before":k>last?"after":"outside";
+  let prev,pp;
+  const parts=turns.map((t,k)=>{
+    let brk=wins.length>1&&t.window!==prev?`<div class="wbreak">Audio window ${wins.indexOf(t.window)+1} of ${wins.length} · speaker letters start over</div>`:"";
+    const p=phaseOf(t,k);
+    if(pp!==undefined&&p!==pp){if(p==="during"&&pp==="before")brk+=`<div class="wbreak">Consult starts</div>`;else if(p==="after")brk+=`<div class="wbreak">Consult ends</div>`}
+    prev=t.window;pp=p;return brk+turnHtml(c,t,p);
+  });
+  // Only the last 5 min before and the first 2 min after the consult stay in view (greyed); earlier or later talk is folded.
+  // The data decides when it says so (turn.earlier); otherwise the boundary comes from c.encounter or the in-consult turns.
+  const n=turns.length,BEFORE=300,AFTER=120;
+  const flagged=turns.some(t=>t.earlier!==undefined);
+  const enc=c.encounter&&Number.isFinite(+c.encounter.start_s)&&Number.isFinite(+c.encounter.end_s)?c.encounter:null;
+  const s0=enc?+enc.start_s:first!==undefined?+turns[first].start_s:NaN,e1=enc?+enc.end_s:first!==undefined?+turns[last].end_s:NaN;
+  const early=(t,k)=>flagged?t.earlier===true:
+    (Number.isFinite(s0)&&first!==undefined&&k<first&&(+t.end_s||0)<s0-BEFORE)||(Number.isFinite(e1)&&first!==undefined&&k>last&&(+t.start_s||0)>e1+AFTER);
+  let lo=0,hi=n;
+  while(lo<n&&early(turns[lo],lo))lo++;
+  while(hi>lo&&early(turns[hi-1],hi-1))hi--;
+  const fold=(a,b,what)=>{const span=mmss((+turns[b-1].end_s||0)-(+turns[a].start_s||0)),lab=`${what} (${b-a} turn${b-a===1?"":"s"}, ${span})`;
+    return `<button class="link oshow" data-oblock="ob-${a}" data-lab="${lab}" aria-expanded="false">Show ${lab}</button><div class="oblock" id="ob-${a}" hidden>${parts.slice(a,b).join("")}</div>`};
+  return (lo>0?fold(0,lo,"earlier talk"):"")+parts.slice(lo,hi).join("")+(hi<n?fold(hi,n,"later talk"):"");
+}
+
+/* Whole-consult audio: one lazy-loaded player per consult. consult.audio_full = {src, t0_s, duration_s}:
+   a turn starts at (turn.start_s - t0_s) seconds into the clip. */
+const RATES=[1,1.25,1.5,2];
+const full={audio:null,cid:null,pos:0,rate:1,now:-1,playing:false};
+let follow=true,scrubbing=false;
+const fullOf=c=>{const a=c&&c.audio_full;if(!a)return null;const o=typeof a==="string"?{src:a}:a;
+  return o&&o.src?{src:String(o.src),t0:+o.t0_s||0,dur:+o.duration_s||0}:null};
+// seconds into the clip where turn t starts, or null when the turn is not inside the clip
+const turnAt=(c,t)=>{const f=fullOf(c);if(!f||!Number.isFinite(+t.start_s))return null;const x=+t.start_s-f.t0;
+  return x>=-0.001&&(!f.dur||x<=f.dur+0.5)?Math.max(0,x):null};
+function durOf(c){
+  const f=fullOf(c);if(!f)return 0;
+  if(full.audio&&full.cid===c.id&&Number.isFinite(full.audio.duration))return full.audio.duration;
+  if(f.dur)return f.dur;
+  return Math.max(0,...(c.turns||[]).map(t=>(+t.end_s||0)-f.t0));
+}
+const ICON={
+  play:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>',
+  pause:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4.5v16H6zM13.5 4H18v16h-4.5z"/></svg>'};
+function playerHtml(c){
+  const f=fullOf(c);if(!f)return"";
+  return `<div class="player" id="player" role="group" aria-label="Consult audio">
+    <div class="pl-row">
+      <button class="pl-b pl-play" id="pl-play" aria-label="Play consult audio">${ICON.play}</button>
+      <button class="pl-b" id="pl-back" aria-label="Back 10 seconds">−10</button>
+      <button class="pl-b" id="pl-fwd" aria-label="Forward 10 seconds">+10</button>
+      <button class="pl-b" id="pl-rate" aria-label="Playback speed 1×. Tap to change.">1×</button>
+      <span class="pl-time" id="pl-time">0:00 / 0:00</span>
+    </div>
+    <input type="range" id="pl-seek" min="0" max="${Math.max(1,Math.round(durOf(c)))}" step="1" value="0" aria-label="Position in the consult audio">
+    <div class="pl-row2"><label for="pl-follow"><input type="checkbox" id="pl-follow"${follow?" checked":""}> Follow audio in the transcript</label><span class="pl-msg" id="pl-msg" aria-live="polite"></span></div>
+  </div>`;
+}
+function resetFull(){
+  const a=full.audio;
+  if(a){a.onplay=a.onpause=a.onended=a.ontimeupdate=a.onloadedmetadata=a.onerror=null;try{a.pause();a.removeAttribute("src");a.load()}catch(e){}}
+  full.audio=null;full.cid=null;full.pos=0;full.now=-1;full.playing=false;full.loading=null;
+}
+const getPos=()=>full.audio&&full.audio.readyState>=1?full.audio.currentTime:full.pos;
+// Show the current position, the play state and the playing turn.
+function plUi(){
+  const c=curC(),f=fullOf(c);if(!f||!$("pl-play"))return;
+  const d=durOf(c),p=Math.min(getPos(),d||getPos());
+  $("player").dataset.mode=rangeOK===true?"direct":rangeOK===false?"blob":"unknown"; // how audio is fetched (see probeRange)
+  $("pl-play").innerHTML=full.playing?ICON.pause:ICON.play;
+  $("pl-play").setAttribute("aria-label",full.playing?"Pause consult audio":"Play consult audio");
+  $("pl-time").textContent=mmss(f.t0+p)+" / "+mmss(f.t0+d);
+  const sk=$("pl-seek");sk.max=Math.max(1,Math.round(d));if(!scrubbing)sk.value=Math.round(p);
+  $("pl-rate").textContent=full.rate+"×";$("pl-rate").setAttribute("aria-label","Playback speed "+full.rate+"×. Tap to change.");
+  markNow(c,p);
+}
+// Highlight the turn that is playing; follow it only if the previous one was on screen (so reading the questions is not interrupted).
+function markNow(c,p){
+  let k=-1;const ts=c.turns||[];
+  // nothing is "playing" until the audio has started or a position was chosen
+  if(full.audio||full.pos>0)ts.forEach((t,i)=>{const x=turnAt(c,t);if(x!==null&&x<=p+0.05)k=i});
+  const id=k>=0?ts[k].i:-1;if(id===full.now)return;
+  const prev=full.now>=0?$("t-"+full.now):null,el=id>=0?$("t-"+id):null;
+  const seen=prev&&(r=>r.bottom>0&&r.top<(window.innerHeight||0))(prev.getBoundingClientRect());
+  if(prev){prev.classList.remove("now");prev.removeAttribute("aria-current")}
+  full.now=id;
+  if(el){el.classList.add("now");el.setAttribute("aria-current","true");
+    if(follow&&full.playing&&seen)el.scrollIntoView({block:"center",behavior:noMotion()?"auto":"smooth"})}
+}
+function ensureAudio(c){
+  const f=fullOf(c);if(!f)return null;
+  if(full.audio&&full.cid===c.id)return full.audio;
+  const keep=full.pos; // a position chosen before the first Play tap
+  resetFull();full.pos=keep;stopAudio();
+  const a=new Audio();
+  full.audio=a;full.cid=c.id;
+  a.onplay=()=>{full.playing=true;plUi()};a.onpause=()=>{full.playing=false;plUi()};a.onended=()=>{full.playing=false;plUi()};
+  a.ontimeupdate=()=>{full.pos=a.currentTime;plUi()};
+  a.onloadedmetadata=()=>{try{if(full.pos>0&&a.currentTime<1)a.currentTime=full.pos}catch(e){}plUi()};
+  a.onerror=()=>{full.playing=false;const m=$("pl-msg");if(m)m.textContent="The audio could not be loaded.";plUi()};
+  a.playbackRate=full.rate;a.src=fullUrl(f);
+  return a;
+}
+// Move to x seconds into the clip. Before the first Play tap only the position is remembered, so nothing loads.
+function setPos(c,x){
+  x=Math.max(0,Math.min(x,durOf(c)||x));full.pos=x;
+  if(full.audio&&full.cid===c.id&&full.audio.readyState>=1)full.audio.currentTime=x;
+  plUi();
+}
+function playFull(c,x){
+  stopAudio(); // an evidence clip and the full audio never play together
+  if(x!=null)full.pos=Math.max(0,x);
+  const f=fullOf(c);if(!f)return;
+  const m=$("pl-msg");if(m)m.textContent="";
+  if(rangeOK===false&&!(fullBlob&&fullBlob.src===f.src)){ // no byte ranges on this host: fetch the whole MP3 first
+    if(full.loading===c.id)return;
+    full.loading=c.id;if(m)m.textContent="Loading the audio…";
+    loadBlob(f.src,true).then(()=>{full.loading=null;const cc=curC();if(cc&&cc.id===c.id){const m2=$("pl-msg");if(m2)m2.textContent="";startFull(c,true)}},
+      ()=>{full.loading=null;const m2=$("pl-msg");if(m2)m2.textContent="The audio could not be loaded."});
+    return;
+  }
+  startFull(c,x!=null);
+}
+function startFull(c,seek){
+  const a=ensureAudio(c);if(!a)return;
+  if(seek&&a.readyState>=1)a.currentTime=full.pos;
+  const p=a.play();
+  if(p&&p.catch)p.catch(()=>{const m=$("pl-msg");if(m)m.textContent="The audio is ready. Tap play.";full.playing=false;plUi()});
+}
+const pauseFull=()=>{if(full.audio&&full.playing)full.audio.pause()};
+function syncStick(){ // the audio bar sticks below the page header when that is sticky (wide screens)
+  const h=$("hdr");if(!h)return;
+  document.documentElement.style.setProperty("--stick",getComputedStyle(h).position==="sticky"?h.offsetHeight+"px":"0px");
+}
+const qsHtml=c=>{const rows=required(c);return rows.length?rows.map(q=>rowHtml(c,q)).join(""):`<p class="empty">Jev has no answers for this consult.</p>`};
+// Why the consult was selected stays hidden until the reviewer has finished it.
+function whyLines(w){
+  if(typeof w==="string")return[w];
+  const out=[];
+  if(w.text)out.push(w.text);
+  if(w.booked_procedure||w.source==="booking"){
+    const src={surgery_case:"a surgery case",ot_note:"an OT note"}[w.booked_source]||"a booking";
+    const d=Number.isFinite(w.days_after_consult)?", "+(w.days_after_consult===0?"the same day":w.days_after_consult+(w.days_after_consult===1?" day":" days")+" after this consult"):"";
+    out.push("Found through "+src+(w.booked_procedure?" for "+w.booked_procedure:"")+d+".");
+  }
+  const j=w.jev_scan;
+  if(j&&(j.recall_p!=null||j.status))out.push("Recall score"+(j.recall_p!=null?" "+Number(j.recall_p).toFixed(2):"")+(j.status?", status: "+String(j.status).replace(/_/g," "):"")+".");
+  return out;
+}
+function revealHtml(c){
+  const w=c.why;if(!w||status(c)!=="done")return"";
+  const src=typeof w==="object"&&w.source?`<span class="pill none">${esc(cap(String(w.source)==="jev"?"Jev scan":String(w.source)))}</span> `:"";
+  return `<section class="card why" aria-label="Why this consult was selected"><h3>Why this consult was selected</h3><p>${src}${whyLines(w).map(esc).join(" ")}</p></section>`;
+}
+function updateReveal(c){const r=$("reveal");if(r)r.innerHTML=revealHtml(c)}
+// Rebuild the question list when the reviewer's answers change which questions apply; keep focus and caret.
+function refreshQs(c){
+  const el=$("qs");if(!el)return false;
+  const want=required(c).map(q=>q.f).join();
+  if(el.dataset.keys===want)return false;
+  const ae=document.activeElement,fid=ae&&ae.id,ss=ae&&ae.selectionStart,se=ae&&ae.selectionEnd;
+  el.innerHTML=qsHtml(c);el.dataset.keys=want;
+  const n=fid&&$(fid);if(n){n.focus();try{if(ss!=null)n.setSelectionRange(ss,se)}catch(e){}}
+  return true;
+}
+function afterChange(c,q,focusSel){
+  if(!refreshQs(c))replaceRow(c,q,focusSel);
+  else if(focusSel){const b=document.querySelector("#q-"+q.f+" "+focusSel);if(b)b.focus()}
+  updateReveal(c);touch(c);
+}
+function renderConsult(c){
+  const turns=Array.isArray(c.turns)?c.turns:[];
+  const m=mine.c[c.id]||{};
+  const last=turns.reduce((x,t)=>Math.max(x,+t.end_s||0),0);
+  const rows=required(c);
+  const bits=[fmtDate(c.date),c.room,c.doctor||"Doctor not identified"].filter(Boolean).map(esc).join(" · ");
+  return `<div class="chead"><h2>${esc(c.id)} <span class="tok">${bits}</span></h2>
+    <div class="meta">${turns.length} turns${last?" · "+mmss(last)+" long":""}</div></div>
+  ${playerHtml(c)}
+  <section class="card" aria-label="Jev's answers">
+    <div class="jev-head"><div><h3>Jev's answers</h3><p class="meta">Proposals only. Agree, or correct what is wrong.</p></div>
+      <button class="btn sm ghost" id="poor" aria-pressed="${!!m.poor}">Transcript too poor to judge</button></div>
+    <div class="qs${m.poor?" voided":""}" id="qs" data-keys="${rows.map(q=>q.f).join()}">${qsHtml(c)}</div>
+    <div class="foot"><label for="${esc(c.id)}-notes">Anything else about this consult?</label>
+      <textarea id="${esc(c.id)}-notes" data-k="${esc(c.id)}" data-f="notes">${esc(m.notes||"")}</textarea></div>
+  </section>
+  <div id="reveal">${revealHtml(c)}</div>
+  <section aria-label="Transcript">
+    <div class="ts-head"><h3>Transcript</h3><div class="ts-tools">
+      <button class="link" id="hl-clear" hidden>Clear highlight</button>
+      <label for="all-orig"><input type="checkbox" id="all-orig"${allOrig?" checked":""}> Show all originals</label></div></div>
+    <div class="turns">${turns.length?turnsHtml(c,turns):`<p class="empty">This consult has no transcript.</p>`}</div>
+  </section>`;
+}
+function render(){
+  stopAudio();resetFull();chips();progress();
+  const c=consults.find(x=>x.id===cur);
+  if(!c){
+    $("panel").innerHTML=`<p class="empty">${!claudeOk?"Open this page while signed in to claude.ai to review consults.":db?(loaded?"No consults have been added yet.":"Loading the consults…"):"Loading the consults…"}</p>`;
+    $("prev").disabled=true;$("next").disabled=true;return;
+  }
+  hl={q:null,turns:[]};
+  $("panel").innerHTML=renderConsult(c);plUi();syncStick();
+  const probeSrc=(fullOf(c)||{}).src||((c.turns||[]).map(audioOf).find(a=>a.length)||[])[0];
+  if(probeSrc&&rangeOK===null)probeRange(probeSrc).then(()=>{plUi();if(rangeOK===false)prefetchClips(curC())});
+  else prefetchClips(c);
+  const i=consults.indexOf(c);
+  $("prev").disabled=i<=0;$("next").disabled=false;$("next").textContent=i>=consults.length-1?"Done":"Next";
+}
+function go(id){stopAudio();cur=id;$("status").textContent="";$("done").textContent="";render();window.scrollTo({top:0,behavior:"instant"})}
+
+function applyHl(){
+  document.querySelectorAll(".turn.hit").forEach(e=>e.classList.remove("hit"));
+  hl.turns.forEach(i=>{const e=$("t-"+i);if(e)e.classList.add("hit")});
+  document.querySelectorAll(".ev-chip").forEach(e=>e.classList.toggle("on",!!hl.q&&e.dataset.q===hl.q));
+  const b=$("hl-clear");if(b)b.hidden=!hl.q;
+}
+
+function queueSave(){
+  dirty=true;$("status").textContent="Saving…";
+  clearTimeout(saveTimer);saveTimer=setTimeout(flush,700);
+}
+function flush(){
+  if(!db||!meId||!dirty||!loaded)return;dirty=false;
+  const body=JSON.parse(JSON.stringify({rater:meId,schema:3,c:mine.c,updated:new Date().toISOString()}));
+  saving=saving.then(()=>db.doc("ratings/"+meId).set(body)).then(()=>{$("status").textContent="Saved"}).catch(e=>{
+    $("status").textContent=e&&e.code==="invalid_argument"?"You have view-only access, so your answers can't be saved. Ask the page owner for access.":"Couldn't save just now. Your answers are still on screen; change any answer to retry.";dirty=true;
+  });
+}
+const cs=id=>{const m=mine.c[id]||(mine.c[id]={});return m.a||(m.a={}),m};
+function touch(c){chips();progress();queueSave()}
+function setRowState(c,f){
+  const a=getA(c.id,f),r=$("q-"+f);if(!r)return;
+  r.dataset.state=a?(a.v==="agree"?"agree":a.v==="add"?(a.val?"add":"none"):"correct"):"none";
+  $("st-"+f).textContent=stText(a);
+}
+function replaceRow(c,q,focusSel){
+  const r=$("q-"+q.f);if(!r)return;
+  r.outerHTML=rowHtml(c,q);
+  if(focusSel){const b=document.querySelector("#q-"+q.f+" "+focusSel);if(b)b.focus()}
+}
+const curC=()=>consults.find(x=>x.id===cur);
+
+document.addEventListener("click",e=>{
+  const t=e.target,g=t.closest("[data-go]");if(g){go(g.dataset.go);return}
+  const c=curC();if(!c)return;
+  const act=t.closest("[data-act]");
+  if(act){
+    const q=Q.find(x=>x.f===act.dataset.q),j=jv(c,q.f),a=getA(c.id,q.f),m=cs(c.id);
+    if(act.dataset.act==="clear")delete m.a[q.f];
+    else if(act.dataset.act==="agree")a&&a.v==="agree"?delete m.a[q.f]:m.a[q.f]={v:"agree",was:String(j.answer),jw:jwOf(c)};
+    else if(a&&a.v==="correct")delete m.a[q.f];
+    else{ // with only one other option, Correct means that option
+      const rest=q.t?[]:qOpts(q,c).filter(v=>v!==String(j.answer));
+      m.a[q.f]={v:"correct",val:rest.length===1?rest[0]:"",was:String(j.answer),jw:jwOf(c)};
+    }
+    afterChange(c,q,`[data-act="${act.dataset.act}"]`);return;
+  }
+  const chip=t.closest(".ev-chip");
+  if(chip&&!chip.disabled){
+    const f=chip.dataset.q,ti=+chip.dataset.t,ev=(jv(c,f)||{}).evidence||[];
+    hl={q:f,turns:ev.filter(i=>hasTurn(c,i))};applyHl();
+    const el=$("t-"+ti);
+    if(el){const fb=el.closest(".oblock");if(fb&&fb.hidden){const bt=document.querySelector(`[data-oblock="${fb.id}"]`);if(bt)setFold(bt,true)}
+      el.scrollIntoView({block:"center",behavior:noMotion()?"auto":"smooth"})}
+    const tt=(c.turns||[]).find(x=>x.i===ti),xa=tt?turnAt(c,tt):null;if(xa!==null)setPos(c,xa);
+    return;
+  }
+  const ob2=t.closest("[data-oblock]");
+  if(ob2){setFold(ob2,ob2.getAttribute("aria-expanded")!=="true");return}
+  const sk=t.closest("[data-seek]");
+  if(sk){playFull(c,+sk.dataset.seek);return}
+  if(t.closest("#pl-play")){if(full.playing)pauseFull();else playFull(c,full.audio?null:full.pos);return}
+  if(t.closest("#pl-back")){setPos(c,getPos()-10);return}
+  if(t.closest("#pl-fwd")){setPos(c,getPos()+10);return}
+  if(t.closest("#pl-rate")){full.rate=RATES[(RATES.indexOf(full.rate)+1)%RATES.length];if(full.audio)full.audio.playbackRate=full.rate;plUi();return}
+  const pl=t.closest("[data-play]");
+  if(pl){const turn=(c.turns||[]).find(x=>String(x.i)===pl.dataset.i);if(turn)playTurn(pl,turn);return}
+  const ob=t.closest("[data-orig]");
+  if(ob){
+    const k=ob.dataset.orig,p=ob.nextElementSibling,open=p.hidden;
+    p.hidden=!open;open?origOpen.add(k):origOpen.delete(k);
+    ob.setAttribute("aria-expanded",open);ob.textContent=open?"Hide original":"Show original";return;
+  }
+  const none=t.closest("[data-none]");
+  if(none){
+    const q=Q.find(x=>x.f===none.dataset.none),a=getA(c.id,q.f);
+    if(!jv(c,q.f)){cs(c.id).a[q.f]={v:"add",val:"not named",jw:jwOf(c)};afterChange(c,q,"[data-none]");return}
+    if(a&&a.v==="correct"){a.val="not named";afterChange(c,q,"[data-none]");const i=$(c.id+"-"+q.f+"-txt");if(i)i.value="not named"}return;
+  }
+  if(t.closest("#poor")){
+    const m=cs(c.id);m.poor=!m.poor;
+    $("poor").setAttribute("aria-pressed",m.poor);$("qs").classList.toggle("voided",m.poor);updateReveal(c);touch(c);return;
+  }
+  if(t.closest("#hl-clear")){hl={q:null,turns:[]};applyHl()}
+});
+$("prev").onclick=()=>{const i=consults.findIndex(c=>c.id===cur);if(i>0)go(consults[i-1].id)};
+$("next").onclick=()=>{
+  const i=consults.findIndex(c=>c.id===cur);
+  if(i<consults.length-1)go(consults[i+1].id);
+  else{flush();
+    const open=consults.filter(c=>status(c)!=="done").map(c=>({c,qs:required(c).filter(q=>!answered(getA(c.id,q.f)))}));
+    $("done").innerHTML=open.length
+      ?"Not finished yet. Your answers save as you go, so there is nothing to submit. Still open:<br>"+open.map(x=>
+          `<button class="link" data-go="${esc(x.c.id)}">${esc(x.c.id)}</button>: ${x.qs.length?x.qs.map(q=>esc(q.q)+(getA(x.c.id,q.f)?" (you chose Correct: pick the right answer)":"")).join("; "):"mark it too poor to judge, or answer once Jev has answers"}`).join("<br>")
+      :"All consults are reviewed. Your answers are saved automatically; there is nothing to submit. Thank you.";}
+};
+document.addEventListener("change",e=>{
+  const t=e.target,c=curC();
+  if(t.id==="pl-follow"){follow=t.checked;return}
+  if(t.id==="all-orig"){
+    allOrig=t.checked;
+    document.querySelectorAll("[data-orig]").forEach(b=>{const p=b.nextElementSibling,open=allOrig||origOpen.has(b.dataset.orig);
+      p.hidden=!open;b.setAttribute("aria-expanded",open);b.textContent=open?"Hide original":"Show original"});return;
+  }
+  if(!c||!t.dataset||!t.dataset.k||t.type!=="radio")return;
+  let a=getA(c.id,t.dataset.f);
+  if(!jv(c,t.dataset.f))a=cs(c.id).a[t.dataset.f]=Object.assign(a||{},{v:"add"});
+  if(a&&(a.v==="correct"||a.v==="add")){a.val=t.value;a.jw=jwOf(c);if(!refreshQs(c))setRowState(c,t.dataset.f);updateReveal(c);touch(c)}
+});
+document.addEventListener("input",e=>{
+  if(e.target.id==="pl-seek"){const c0=curC();if(c0)setPos(c0,+e.target.value);return}
+  const t=e.target,c=curC();if(!c||!t.dataset||!t.dataset.k||t.type==="radio")return;
+  if(t.dataset.f==="notes"){cs(c.id).notes=t.value;queueSave();return}
+  let a=getA(c.id,t.dataset.f);
+  if(!jv(c,t.dataset.f))a=cs(c.id).a[t.dataset.f]=Object.assign(a||{},{v:"add"});
+  if(a&&(a.v==="correct"||a.v==="add")){a.val=t.value.trim()?t.value:"";a.jw=jwOf(c);if(!refreshQs(c))setRowState(c,t.dataset.f);updateReveal(c);touch(c)}
+});
+
+/* Owner-only agreement tab */
+const norm=v=>String(v??"").trim().toLowerCase();
+async function renderAgree(){
+  const ids=all.map(r=>r.rater);
+  let names={};try{names=user&&user.profiles?await user.profiles(ids):{}}catch(e){}
+  const nm=id=>(names[id]&&names[id].name)||"Reviewer";
+  if(!all.length){$("agree").innerHTML=`<p class="empty">No reviews yet. Share this page with colleagues who can edit or interact.</p>`;return}
+  const byId={};consults.forEach(c=>byId[c.id]=c);
+  const st=Q.map(q=>({q,n:0,ag:0,cA:[],cC:[],fix:[]}));
+  const band={hi:{n:0,ag:0},lo:{n:0,ag:0}};
+  const per={};consults.forEach(c=>per[c.id]={raters:0,poor:0,n:0,ag:0,notes:[],fin:{}});
+  const def={n:0,real:0,now:0,cond:0,descOnly:0,cat:{operation:0,intervention:0,minor:0,imaging_ct:0}}; // V's definition, over v3 consults
+  all.forEach(r=>{
+    Object.entries(r.c||{}).forEach(([cid,m])=>{
+      const c=byId[cid],p=per[cid];if(!c||!m)return;
+      p.raters++;
+      if(m.notes)p.notes.push([r.rater,m.notes]);
+      if(m.poor){p.poor++;return}
+      const A=m.a||{},fin=p.fin[r.rater]={};
+      required(c,A).forEach(q=>{ // only the questions that applied under this reviewer's own answers
+        const a=A[q.f],j=jv(c,q.f);if(!answered(a))return;
+        fin[q.f]=a.v==="agree"?j.answer:a.val;
+        if(!j||a.v==="add")return; // Jev gave no answer here, so it says nothing about Jev's accuracy
+        const k=Q.indexOf(q),s=st[k],conf=j.conf;
+        s.n++;p.n++;
+        if(typeof conf==="number"){const b=band[conf>=CUT?"hi":"lo"];b.n++;if(a.v==="agree")b.ag++}
+        if(a.v==="agree"){s.ag++;p.ag++;if(typeof conf==="number")s.cA.push(conf)}
+        else{if(typeof conf==="number")s.cC.push(conf);s.fix.push({cid,r:r.rater,was:a.was??j.answer,val:a.val})}
+      });
+      if(isV3(c)&&nAnsWith(c,A)===required(c,A).length){ // reviewer finished this consult
+        def.n++;
+        if(!isNamed(eff(c,"named",A))&&eff(c,"described",A)==="yes")def.descOnly++;
+        if(isNamed(eff(c,"named",A))&&eff(c,"described",A)==="yes"){
+          def.real++;if(eff(c,"status",A)==="proposed_now")def.now++;else if(eff(c,"status",A)==="conditional")def.cond++;
+          const ct=eff(c,"category",A);if(ct in def.cat)def.cat[ct]++;
+        }
+      }
+    });
+  });
+  // Do reviewers agree with each other? Compare final answers on questions both answered.
+  const jwTally={};
+  all.forEach(r=>Object.values(r.c||{}).forEach(m=>Object.values((m&&m.a)||{}).forEach(x=>{if(answered(x)){const k=x.jw||"none recorded";jwTally[k]=(jwTally[k]||0)+1}})));
+  const inter={n:0,same:0};
+  consults.forEach(c=>{const p=per[c.id],rs=Object.values(p.fin);p.iN=0;p.iS=0;
+    for(let i=0;i<rs.length;i++)for(let j=i+1;j<rs.length;j++)Object.keys(rs[i]).forEach(f=>{
+      if(!(f in rs[j]))return;p.iN++;if(norm(rs[i][f])===norm(rs[j][f]))p.iS++});
+    inter.n+=p.iN;inter.same+=p.iS});
+  const avg=a=>a.length?(a.reduce((x,y)=>x+y,0)/a.length).toFixed(2):"—";
+  const cls=(n,ag)=>!n?"none":ag/n>=.85?"ok":ag/n>=.65?"warn":"bad";
+  const pc=(n,ag)=>n?Math.round(100*ag/n)+"% ("+ag+" of "+n+")":"none yet";
+  const tn=st.reduce((x,s)=>x+s.n,0),ta=st.reduce((x,s)=>x+s.ag,0);
+  const shownSt=st.filter(s=>s.n);
+  const qrows=shownSt.map(s=>`<tr><td>${esc(s.q.q)}</td><td>${s.n}</td><td><span class="pill ${cls(s.n,s.ag)}">${pc(s.n,s.ag)}</span></td><td>${avg(s.cA)} / ${avg(s.cC)}</td></tr>`).join("");
+  const fixes=st.filter(s=>s.fix.length).map(s=>`<details><summary>${esc(s.q.q)} (${s.fix.length} corrected)</summary><div>${s.fix.map(x=>
+    `<div><span class="tok">${esc(x.cid)}</span> <span class="who">${esc(nm(x.r))}</span>: Jev said <b>${esc(s.q.t?x.was:lab(s.q,x.was))}</b>, reviewer said <b>${esc(s.q.t?x.val:lab(s.q,x.val))}</b></div>`).join("")}</div></details>`).join("");
+  const crow=consults.map(c=>{const p=per[c.id];
+    const notes=p.notes.length?`<details><summary>notes</summary><div>${p.notes.map(([r,t])=>`<div><span class="who">${esc(nm(r))}:</span> ${esc(t)}</div>`).join("")}</div></details>`:"";
+    return `<tr><td class="tok">${esc(c.id)}</td><td>${p.raters}</td><td>${p.poor||"—"}</td><td><span class="pill ${cls(p.n,p.ag)}">${pc(p.n,p.ag)}</span>${notes}</td><td>${p.iN?`<span class="pill ${cls(p.iN,p.iS)}">${pc(p.iN,p.iS)}</span>`:"—"}</td></tr>`}).join("");
+  const jwBlock=Object.keys(jwTally).length?`<p class="meta" style="margin:12px 0 0"><b>Answers by Jev wording</b>: ${Object.entries(jwTally).map(([k,v])=>esc(k)+" "+v).join(" · ")}. Ratings given before the wording was recorded show as none recorded.</p>`:"";
+  const defBlock=def.n?`<p class="meta" style="margin:12px 0 0"><b>By V's definition</b> (a procedure is named and described), on consults reviewers finished: ${pc(def.n,def.real)} are real surgical conversations (named and described); ${def.descOnly} more described a procedure without naming it. Of the real ones, ${def.now} proposed now and ${def.cond} conditional; ${def.cat.operation} operations, ${def.cat.intervention} interventions, ${def.cat.minor} minor OPD procedures, ${def.cat.imaging_ct} CT imaging.</p>`:"";
+  $("agree").innerHTML=`<h3 style="margin:0">Reviewers: ${all.length}</h3><p class="meta">${all.map(r=>esc(nm(r.rater))).join(", ")}</p>${defBlock}${jwBlock}
+  <div class="table-wrap"><table><thead><tr><th>Question</th><th>Answers</th><th>Jev agreed</th><th>Mean conf. agreed / corrected</th></tr></thead><tbody>${qrows}
+    <tr><td><b>All questions</b></td><td>${tn}</td><td><span class="pill ${cls(tn,ta)}">${pc(tn,ta)}</span></td><td></td></tr>
+    <tr><td>Jev confidence ${CUT.toFixed(2)} or higher</td><td>${band.hi.n}</td><td><span class="pill ${cls(band.hi.n,band.hi.ag)}">${pc(band.hi.n,band.hi.ag)}</span></td><td></td></tr>
+    <tr><td>Jev confidence below ${CUT.toFixed(2)}</td><td>${band.lo.n}</td><td><span class="pill ${cls(band.lo.n,band.lo.ag)}">${pc(band.lo.n,band.lo.ag)}</span></td><td></td></tr></tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>Consult</th><th>Reviewers</th><th>Too poor</th><th>Jev agreed</th><th>Reviewers agree with each other</th></tr></thead><tbody>${crow}</tbody></table></div>
+  <p class="meta">Reviewer agreement compares final answers on questions two reviewers both answered; procedure names are compared as typed.${inter.n?" Overall: "+pc(inter.n,inter.same)+".":""}</p>
+  <div style="margin-top:12px">${fixes||`<p class="meta">No corrections yet.</p>`}</div>`;
+}
+function tab(which){
+  $("tab-label").setAttribute("aria-selected",which==="label");$("tab-agree").setAttribute("aria-selected",which==="agree");
+  $("view-label").hidden=which!=="label";$("view-agree").hidden=which!=="agree";$("chips").hidden=which!=="label";
+  if(which==="agree")renderAgree();
+}
+$("tab-label").onclick=()=>tab("label");$("tab-agree").onclick=()=>tab("agree");
+
+function mergeMine(server){
+  const out={c:{}};
+  const ids=new Set([...Object.keys(server||{}),...Object.keys(mine.c)]);
+  ids.forEach(id=>{const s=(server||{})[id]||{},l=mine.c[id]||{};
+    out.c[id]={...s,...l,a:{...(s.a||{}),...(l.a||{})}}});
+  mine=out;
+}
+render();
+(async()=>{
+  if(!window.claude||!window.claude.use)return;
+  claudeOk=true;render();
+  [db,user]=await Promise.all([claude.use("db"),claude.use("user")]);
+  if(user){try{const me=await user.me();meId=me.id;owner=me.isOwner;$("who").textContent=me.name?("Reviewing as "+me.name):"";}catch(e){}}
+  if(!db){render();return}
+  if(!meId)$("status").textContent="Sign in to claude.ai to save your answers.";
+  db.collection("consults").onSnapshot(s=>{
+    const next=s.docs.filter(d=>d.exists!==false).map(d=>{const x=d.data()||{};delete x.bucket;return x}).filter(x=>x.id)
+      .sort((a,b)=>String(a.id).localeCompare(String(b.id),undefined,{numeric:true}));
+    const ns={};next.forEach(x=>ns[x.id]=JSON.stringify(x));
+    const listChanged=Object.keys(ns).join()!==Object.keys(sigs).join(),curChanged=!!cur&&sigs[cur]!==ns[cur];
+    consults=next;sigs=ns;
+    if(!consults.some(c=>c.id===cur)){cur=consults[0]?consults[0].id:null;render()}
+    else if(listChanged||curChanged)render();else{chips();progress()}
+  },()=>{});
+  if(meId){try{const d=await db.doc("ratings/"+meId).get();if(d.exists){mergeMine((d.data()||{}).c);render()}}catch(e){}}
+  loaded=true;if(dirty)flush();
+  if(owner){$("tabs").hidden=false;
+    db.collection("ratings").onSnapshot(s=>{all=s.docs.filter(d=>d.exists!==false).map(d=>d.data());if(!$("view-agree").hidden)renderAgree()},()=>{});
+  }
+})();
+window.addEventListener("pagehide",flush);
+window.addEventListener("resize",syncStick);
+document.addEventListener("pointerdown",e=>{if(e.target.id==="pl-seek")scrubbing=true});
+["pointerup","pointercancel"].forEach(n=>document.addEventListener(n,()=>{scrubbing=false}));
+if(window.ResizeObserver&&$("hdr"))new ResizeObserver(syncStick).observe($("hdr"));
+</script>

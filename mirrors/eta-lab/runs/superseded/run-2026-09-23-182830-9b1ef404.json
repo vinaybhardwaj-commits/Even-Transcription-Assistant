@@ -1,0 +1,32 @@
+{
+ "run_id": "run-2026-09-23-182830-9b1ef404",
+ "base_model": "pyannote/segmentation-3.0",
+ "dataset_id": "diar-train-2026-09-23-9b1ef404",
+ "train_n": 15,
+ "val_n": 1,
+ "max_epochs": 1,
+ "seed": 42,
+ "num_workers": 0,
+ "val_holdout_room_day": "rd_yck5kdc2",
+ "device": "cuda",
+ "git_sha": "f3c5b43ed1c92ce6c7fc1ac7dbfe45eb61d681db",
+ "env_lock_hash": "23f623b1cec29e9c",
+ "env_versions": {
+  "torch": "2.2.2+cu121",
+  "torchaudio": "2.2.2+cu121",
+  "numpy": "1.26.4",
+  "huggingface-hub": "0.23.4",
+  "pyannote.audio": "3.3.2",
+  "pytorch-lightning": "2.6.6"
+ },
+ "started_at": "2026-09-23T18:28:30Z",
+ "status": "SMOKE_OK",
+ "reason": "smoke run on a hand-fetched sample (not the nightly volume) \u2014 proves wiring, results not meaningful as a model quality signal",
+ "final_loss": 0.09781736880540848,
+ "final_val_loss": 0.22422203421592712,
+ "val_der": 0.29504284262657166,
+ "checkpoint_path": "/home/vinay_bhardwaj/eta-train/runs/real-smoke/run-2026-09-23-182830-9b1ef404.ckpt",
+ "checkpoint_sha256": "aba3e2bc7138dff53fb4afbcd6142930ad2399b060d6546c4bd48ce1a49256d5",
+ "checkpoint_r2_key": null,
+ "metrics": null
+}

@@ -1,0 +1,56 @@
+{
+  "encounter_id": "synthetic-gap-over-120s",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 6,
+      "text_en": "I recommend a hernia repair on the right.",
+      "text_native": "हर्निया का ऑपरेशन",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "patient",
+      "t0": 8,
+      "t1": 10,
+      "text_en": "What are the risks?",
+      "text_native": "जोखिम क्या हैं",
+      "lang": "hi"
+    },
+    {
+      "id": "3",
+      "role": "doctor",
+      "t0": 200,
+      "t1": 208,
+      "text_en": "The main risks are infection and recurrence.",
+      "text_native": "संक्रमण और दोबारा होना",
+      "lang": "hi"
+    },
+    {
+      "id": "4",
+      "role": "patient",
+      "t0": 210,
+      "t1": 212,
+      "text_en": "Okay.",
+      "text_native": "ठीक है",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": true,
+    "procedure_text": "hernia repair"
+  },
+  "clips": []
+}

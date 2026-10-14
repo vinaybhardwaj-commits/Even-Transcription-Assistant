@@ -1,0 +1,276 @@
+{
+ "note": "proxy: teacher speakers as identities; voice_centroid empty so no doctor attribution possible",
+ "min_speech_sec": 5.0,
+ "arms": {
+  "nemotron3": {
+   "agree_time": 14901.119999999999,
+   "total_time": 16313.67,
+   "agree_spk": 67,
+   "n_spk": 90,
+   "per_window": {
+    "bw_6yfr8qb8_1789997400000_primary": {
+     "agree_spk": 3,
+     "n_spk": 5
+    },
+    "bw_8scgjz67_1789799400000_primary": {
+     "agree_spk": 4,
+     "n_spk": 5
+    },
+    "bw_8scgjz67_1789802100000_primary": {
+     "agree_spk": 4,
+     "n_spk": 4
+    },
+    "bw_9j4z2ze3_1789989300000_primary": {
+     "agree_spk": 1,
+     "n_spk": 4
+    },
+    "bw_d4t5tvg9_1789986600000_primary": {
+     "agree_spk": 6,
+     "n_spk": 8
+    },
+    "bw_d5aype5r_1790052300000_primary": {
+     "agree_spk": 1,
+     "n_spk": 3
+    },
+    "bw_gf2zntnq_1789994700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 3
+    },
+    "bw_gf2zntnq_1789999200000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_j45jmzam_1789992900000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_jk5s2tfs_1790045100000_primary": {
+     "agree_spk": 3,
+     "n_spk": 4
+    },
+    "bw_kmbn52gk_1790061300000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_m6nq7upz_1790057700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 4
+    },
+    "bw_maaacrdh_1790058600000_primary": {
+     "agree_spk": 4,
+     "n_spk": 5
+    },
+    "bw_pjk6n3qy_1789979400000_primary": {
+     "agree_spk": 2,
+     "n_spk": 5
+    },
+    "bw_pwwnz89z_1789994700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 2
+    },
+    "bw_wwq9p6eb_1789803000000_primary": {
+     "agree_spk": 7,
+     "n_spk": 8
+    },
+    "bw_yce79u6r_1789998300000_primary": {
+     "agree_spk": 3,
+     "n_spk": 5
+    },
+    "bw_yce79u6r_1789999200000_primary": {
+     "agree_spk": 5,
+     "n_spk": 5
+    },
+    "bw_zyjykmwa_1790055900000_primary": {
+     "agree_spk": 5,
+     "n_spk": 5
+    },
+    "bw_zyjykmwa_1790057700000_primary": {
+     "agree_spk": 4,
+     "n_spk": 6
+    }
+   },
+   "time_weighted_agreement": 0.9134131069219862,
+   "speaker_agreement": 0.7444444444444445
+  },
+  "local_stock_3.1": {
+   "agree_time": 14647.262,
+   "total_time": 17199.361999999997,
+   "agree_spk": 61,
+   "n_spk": 116,
+   "per_window": {
+    "bw_6yfr8qb8_1789997400000_primary": {
+     "agree_spk": 5,
+     "n_spk": 6
+    },
+    "bw_8scgjz67_1789799400000_primary": {
+     "agree_spk": 6,
+     "n_spk": 11
+    },
+    "bw_8scgjz67_1789802100000_primary": {
+     "agree_spk": 3,
+     "n_spk": 5
+    },
+    "bw_9j4z2ze3_1789989300000_primary": {
+     "agree_spk": 1,
+     "n_spk": 3
+    },
+    "bw_d4t5tvg9_1789986600000_primary": {
+     "agree_spk": 1,
+     "n_spk": 10
+    },
+    "bw_d5aype5r_1790052300000_primary": {
+     "agree_spk": 1,
+     "n_spk": 7
+    },
+    "bw_gf2zntnq_1789994700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 3
+    },
+    "bw_gf2zntnq_1789999200000_primary": {
+     "agree_spk": 2,
+     "n_spk": 2
+    },
+    "bw_j45jmzam_1789992900000_primary": {
+     "agree_spk": 2,
+     "n_spk": 2
+    },
+    "bw_jk5s2tfs_1790045100000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_kmbn52gk_1790061300000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_m6nq7upz_1790057700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 4
+    },
+    "bw_maaacrdh_1790058600000_primary": {
+     "agree_spk": 4,
+     "n_spk": 4
+    },
+    "bw_pjk6n3qy_1789979400000_primary": {
+     "agree_spk": 3,
+     "n_spk": 9
+    },
+    "bw_pwwnz89z_1789994700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 6
+    },
+    "bw_wwq9p6eb_1789803000000_primary": {
+     "agree_spk": 8,
+     "n_spk": 9
+    },
+    "bw_yce79u6r_1789998300000_primary": {
+     "agree_spk": 3,
+     "n_spk": 7
+    },
+    "bw_yce79u6r_1789999200000_primary": {
+     "agree_spk": 4,
+     "n_spk": 9
+    },
+    "bw_zyjykmwa_1790055900000_primary": {
+     "agree_spk": 3,
+     "n_spk": 7
+    },
+    "bw_zyjykmwa_1790057700000_primary": {
+     "agree_spk": 3,
+     "n_spk": 6
+    }
+   },
+   "time_weighted_agreement": 0.8516165890339422,
+   "speaker_agreement": 0.5258620689655172
+  },
+  "local_finetuned": {
+   "agree_time": 13223.002999999997,
+   "total_time": 14658.681,
+   "agree_spk": 61,
+   "n_spk": 104,
+   "per_window": {
+    "bw_6yfr8qb8_1789997400000_primary": {
+     "agree_spk": 4,
+     "n_spk": 6
+    },
+    "bw_8scgjz67_1789799400000_primary": {
+     "agree_spk": 6,
+     "n_spk": 12
+    },
+    "bw_8scgjz67_1789802100000_primary": {
+     "agree_spk": 4,
+     "n_spk": 5
+    },
+    "bw_9j4z2ze3_1789989300000_primary": {
+     "agree_spk": 1,
+     "n_spk": 3
+    },
+    "bw_d4t5tvg9_1789986600000_primary": {
+     "agree_spk": 6,
+     "n_spk": 9
+    },
+    "bw_d5aype5r_1790052300000_primary": {
+     "agree_spk": 1,
+     "n_spk": 3
+    },
+    "bw_gf2zntnq_1789994700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 2
+    },
+    "bw_gf2zntnq_1789999200000_primary": {
+     "agree_spk": 2,
+     "n_spk": 2
+    },
+    "bw_j45jmzam_1789992900000_primary": {
+     "agree_spk": 3,
+     "n_spk": 4
+    },
+    "bw_jk5s2tfs_1790045100000_primary": {
+     "agree_spk": 2,
+     "n_spk": 5
+    },
+    "bw_kmbn52gk_1790061300000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_m6nq7upz_1790057700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 4
+    },
+    "bw_maaacrdh_1790058600000_primary": {
+     "agree_spk": 3,
+     "n_spk": 3
+    },
+    "bw_pjk6n3qy_1789979400000_primary": {
+     "agree_spk": 2,
+     "n_spk": 7
+    },
+    "bw_pwwnz89z_1789994700000_primary": {
+     "agree_spk": 2,
+     "n_spk": 6
+    },
+    "bw_wwq9p6eb_1789803000000_primary": {
+     "agree_spk": 3,
+     "n_spk": 4
+    },
+    "bw_yce79u6r_1789998300000_primary": {
+     "agree_spk": 3,
+     "n_spk": 6
+    },
+    "bw_yce79u6r_1789999200000_primary": {
+     "agree_spk": 5,
+     "n_spk": 8
+    },
+    "bw_zyjykmwa_1790055900000_primary": {
+     "agree_spk": 4,
+     "n_spk": 6
+    },
+    "bw_zyjykmwa_1790057700000_primary": {
+     "agree_spk": 3,
+     "n_spk": 6
+    }
+   },
+   "time_weighted_agreement": 0.9020595372803322,
+   "speaker_agreement": 0.5865384615384616
+  }
+ }
+}

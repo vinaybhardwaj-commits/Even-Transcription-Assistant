@@ -1,0 +1,836 @@
+[
+ {
+  "card_id": "3c921d",
+  "gid": "g011",
+  "tier": "LOW",
+  "doctor_uid": "FP1cesrCLD0AK4L5edEQ",
+  "members": [
+   [
+    "rd_4n84vfgg",
+    "3"
+   ],
+   [
+    "rd_64shj9w3",
+    "22"
+   ],
+   [
+    "rd_6nwgyrpx",
+    "51"
+   ]
+  ],
+  "rep": [
+   "rd_4n84vfgg",
+   "3"
+  ],
+  "n_room_days": 3,
+  "core_turns_in_consults": 93,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 3
+ },
+ {
+  "card_id": "336934",
+  "gid": "g066",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_aqx7kxnc",
+    "26"
+   ]
+  ],
+  "rep": [
+   "rd_aqx7kxnc",
+   "26"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 68,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 13
+ },
+ {
+  "card_id": "0b87ac",
+  "gid": "g132",
+  "tier": "LOW",
+  "doctor_uid": "zktYYYPFZCH4E4PPXMtJ",
+  "members": [
+   [
+    "rd_xa2e3ufc",
+    "89"
+   ]
+  ],
+  "rep": [
+   "rd_xa2e3ufc",
+   "89"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 56,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 9
+ },
+ {
+  "card_id": "bb7028",
+  "gid": "g074",
+  "tier": "LOW",
+  "doctor_uid": "iCPiVDFia1dnnjwx8XbM",
+  "members": [
+   [
+    "rd_dydzd7n4",
+    "54"
+   ]
+  ],
+  "rep": [
+   "rd_dydzd7n4",
+   "54"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 105,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 32
+ },
+ {
+  "card_id": "26debb",
+  "gid": "g023",
+  "tier": "LOW",
+  "doctor_uid": "iCPiVDFia1dnnjwx8XbM",
+  "members": [
+   [
+    "rd_69xb8as2",
+    "39"
+   ]
+  ],
+  "rep": [
+   "rd_69xb8as2",
+   "39"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 70,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 19
+ },
+ {
+  "card_id": "d65fe7",
+  "gid": "g053",
+  "tier": "LOW",
+  "doctor_uid": "byIfJcLydITKwRYtpcj5",
+  "members": [
+   [
+    "rd_9vup24er",
+    "102"
+   ],
+   [
+    "rd_yhh6kexm",
+    "175"
+   ]
+  ],
+  "rep": [
+   "rd_9vup24er",
+   "102"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 19,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 3
+ },
+ {
+  "card_id": "30a04e",
+  "gid": "g028",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_6nwgyrpx",
+    "32"
+   ],
+   [
+    "rd_9ze2fwuh",
+    "1"
+   ]
+  ],
+  "rep": [
+   "rd_6nwgyrpx",
+   "32"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 38,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 5
+ },
+ {
+  "card_id": "0f5795",
+  "gid": "g126",
+  "tier": "LOW",
+  "doctor_uid": "C3LMRavG4ahVWvLuTx2U",
+  "members": [
+   [
+    "rd_v7kw7x4d",
+    "168"
+   ]
+  ],
+  "rep": [
+   "rd_v7kw7x4d",
+   "168"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 26,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 3
+ },
+ {
+  "card_id": "1c4bcb",
+  "gid": "g027",
+  "tier": "LOW",
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "members": [
+   [
+    "rd_6nwgyrpx",
+    "40"
+   ],
+   [
+    "rd_ykw2rxjj",
+    "35"
+   ]
+  ],
+  "rep": [
+   "rd_6nwgyrpx",
+   "40"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 188,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 23
+ },
+ {
+  "card_id": "34c8e2",
+  "gid": "g069",
+  "tier": "LOW",
+  "doctor_uid": "mjAB4AZVnP8r2oXvIgP6",
+  "members": [
+   [
+    "rd_cujhuhvj",
+    "80"
+   ],
+   [
+    "rd_u579utrq",
+    "100"
+   ]
+  ],
+  "rep": [
+   "rd_cujhuhvj",
+   "80"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 686,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 116
+ },
+ {
+  "card_id": "6b9b8b",
+  "gid": "g081",
+  "tier": "LOW",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_errdkjhe",
+    "23"
+   ],
+   [
+    "rd_kp4c7pp6",
+    "92"
+   ]
+  ],
+  "rep": [
+   "rd_errdkjhe",
+   "23"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 89,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 7
+ },
+ {
+  "card_id": "db7ae4",
+  "gid": "g133",
+  "tier": "LOW",
+  "doctor_uid": "osXJkk6P3ME712mF2b2B",
+  "members": [
+   [
+    "rd_xa2e3ufc",
+    "52"
+   ]
+  ],
+  "rep": [
+   "rd_xa2e3ufc",
+   "52"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 47,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 4
+ },
+ {
+  "card_id": "534e83",
+  "gid": "g055",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_9vup24er",
+    "27"
+   ]
+  ],
+  "rep": [
+   "rd_9vup24er",
+   "27"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 49,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 6
+ },
+ {
+  "card_id": "eb3c85",
+  "gid": "g139",
+  "tier": "LOW",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "members": [
+   [
+    "rd_znuqh35d",
+    "40"
+   ]
+  ],
+  "rep": [
+   "rd_znuqh35d",
+   "40"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 101,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 57
+ },
+ {
+  "card_id": "aced1c",
+  "gid": "g058",
+  "tier": "LOW",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_9ze2fwuh",
+    "7"
+   ]
+  ],
+  "rep": [
+   "rd_9ze2fwuh",
+   "7"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 127,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 25
+ },
+ {
+  "card_id": "6a9692",
+  "gid": "g134",
+  "tier": "LOW",
+  "doctor_uid": "aQS6ztqEHV1D29s5LJwK",
+  "members": [
+   [
+    "rd_y8nnfgfw",
+    "48"
+   ]
+  ],
+  "rep": [
+   "rd_y8nnfgfw",
+   "48"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 35,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 13
+ },
+ {
+  "card_id": "43ad26",
+  "gid": "g002",
+  "tier": "LOW",
+  "doctor_uid": "9o62ETyXw5040Kn3t8bM",
+  "members": [
+   [
+    "rd_29pjw2fr",
+    "89"
+   ]
+  ],
+  "rep": [
+   "rd_29pjw2fr",
+   "89"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 68,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 11
+ },
+ {
+  "card_id": "9a60dc",
+  "gid": "g118",
+  "tier": "LOW",
+  "doctor_uid": "R3IEiNFjBgwTiXheMX2n",
+  "members": [
+   [
+    "rd_st7wkdg5",
+    "18"
+   ]
+  ],
+  "rep": [
+   "rd_st7wkdg5",
+   "18"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 41,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 14
+ },
+ {
+  "card_id": "39c0bc",
+  "gid": "g105",
+  "tier": "LOW",
+  "doctor_uid": "R3IEiNFjBgwTiXheMX2n",
+  "members": [
+   [
+    "rd_nqugggww",
+    "38"
+   ]
+  ],
+  "rep": [
+   "rd_nqugggww",
+   "38"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 39,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 5
+ },
+ {
+  "card_id": "24f106",
+  "gid": "g059",
+  "tier": "LOW",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "members": [
+   [
+    "rd_abcwg2qf",
+    "176"
+   ]
+  ],
+  "rep": [
+   "rd_abcwg2qf",
+   "176"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 48,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 5
+ },
+ {
+  "card_id": "755201",
+  "gid": "g047",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_9q4u73rr",
+    "28"
+   ]
+  ],
+  "rep": [
+   "rd_9q4u73rr",
+   "28"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 58,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 7
+ },
+ {
+  "card_id": "414930",
+  "gid": "g041",
+  "tier": "LOW",
+  "doctor_uid": "aQS6ztqEHV1D29s5LJwK",
+  "members": [
+   [
+    "rd_7wqp76af",
+    "31"
+   ],
+   [
+    "rd_cujhuhvj",
+    "98"
+   ]
+  ],
+  "rep": [
+   "rd_7wqp76af",
+   "31"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 144,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 27
+ },
+ {
+  "card_id": "32d8af",
+  "gid": "g106",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_nqugggww",
+    "21"
+   ]
+  ],
+  "rep": [
+   "rd_nqugggww",
+   "21"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 43,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 8
+ },
+ {
+  "card_id": "d0dbcd",
+  "gid": "g022",
+  "tier": "LOW",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_64shj9w3",
+    "57"
+   ]
+  ],
+  "rep": [
+   "rd_64shj9w3",
+   "57"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 17,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 4
+ },
+ {
+  "card_id": "6c2be2",
+  "gid": "g035",
+  "tier": "LOW",
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "members": [
+   [
+    "rd_7jbmdbj4",
+    "58"
+   ]
+  ],
+  "rep": [
+   "rd_7jbmdbj4",
+   "58"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 40,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 14
+ },
+ {
+  "card_id": "22e7eb",
+  "gid": "g025",
+  "tier": "LOW",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_6cn2jp2d",
+    "99"
+   ]
+  ],
+  "rep": [
+   "rd_6cn2jp2d",
+   "99"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 29,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 6
+ },
+ {
+  "card_id": "7d873f",
+  "gid": "g092",
+  "tier": "LOW",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_jrdffvyf",
+    "242"
+   ]
+  ],
+  "rep": [
+   "rd_jrdffvyf",
+   "242"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 48,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 5
+ },
+ {
+  "card_id": "08beac",
+  "gid": "g054",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_9vup24er",
+    "25"
+   ]
+  ],
+  "rep": [
+   "rd_9vup24er",
+   "25"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 53,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 13
+ },
+ {
+  "card_id": "d1a583",
+  "gid": "g019",
+  "tier": "LOW",
+  "doctor_uid": "JKJxJjTimXHh4odOgva5",
+  "members": [
+   [
+    "rd_5bxxby8g",
+    "64"
+   ],
+   [
+    "rd_djmbtzph",
+    "93"
+   ],
+   [
+    "rd_e74p5z8k",
+    "131"
+   ],
+   [
+    "rd_tcqaam5c",
+    "24"
+   ],
+   [
+    "rd_zk6nxy33",
+    "17"
+   ]
+  ],
+  "rep": [
+   "rd_e74p5z8k",
+   "131"
+  ],
+  "n_room_days": 5,
+  "core_turns_in_consults": 549,
+  "rx_hits": 3,
+  "clip_consults": 3,
+  "clip_days": 3,
+  "n_eligible": 89
+ },
+ {
+  "card_id": "83a61f",
+  "gid": "g045",
+  "tier": "LOW",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_93tcdc4c",
+    "28"
+   ],
+   [
+    "rd_errdkjhe",
+    "26"
+   ],
+   [
+    "rd_sp5dezef",
+    "21"
+   ],
+   [
+    "rd_v97cg4pu",
+    "140"
+   ]
+  ],
+  "rep": [
+   "rd_sp5dezef",
+   "21"
+  ],
+  "n_room_days": 4,
+  "core_turns_in_consults": 287,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 18
+ },
+ {
+  "card_id": "62ef89",
+  "gid": "g048",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_9q4u73rr",
+    "30"
+   ],
+   [
+    "rd_tcqaam5c",
+    "15"
+   ]
+  ],
+  "rep": [
+   "rd_9q4u73rr",
+   "30"
+  ],
+  "n_room_days": 2,
+  "core_turns_in_consults": 37,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 22
+ },
+ {
+  "card_id": "68ab62",
+  "gid": "g042",
+  "tier": "LOW",
+  "doctor_uid": "QJPPFgQomMv8DScTODC0",
+  "members": [
+   [
+    "rd_8kshcb64",
+    "64"
+   ]
+  ],
+  "rep": [
+   "rd_8kshcb64",
+   "64"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 169,
+  "rx_hits": 2,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 12
+ },
+ {
+  "card_id": "22618f",
+  "gid": "g110",
+  "tier": "LOW",
+  "doctor_uid": "A9BPj7Hcv7bERyuM0Bo6",
+  "members": [
+   [
+    "rd_pgmekeh6",
+    "56"
+   ]
+  ],
+  "rep": [
+   "rd_pgmekeh6",
+   "56"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 94,
+  "rx_hits": 0,
+  "clip_consults": 3,
+  "clip_days": 1,
+  "n_eligible": 30
+ },
+ {
+  "card_id": "b31c65",
+  "gid": "g024",
+  "tier": "LOW",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_69xb8as2",
+    "54"
+   ]
+  ],
+  "rep": [
+   "rd_69xb8as2",
+   "54"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 60,
+  "rx_hits": 0,
+  "clip_consults": 2,
+  "clip_days": 1,
+  "n_eligible": 7
+ },
+ {
+  "card_id": "19fd46",
+  "gid": "g015",
+  "tier": "LOW",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_5b5kmjeq",
+    "39"
+   ]
+  ],
+  "rep": [
+   "rd_5b5kmjeq",
+   "39"
+  ],
+  "n_room_days": 1,
+  "core_turns_in_consults": 42,
+  "rx_hits": 0,
+  "clip_consults": 1,
+  "clip_days": 1,
+  "n_eligible": 14
+ }
+]

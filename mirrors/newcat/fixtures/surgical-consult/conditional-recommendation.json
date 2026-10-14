@@ -1,0 +1,38 @@
+{
+  "encounter_id": "synthetic-conditional-recommendation",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 7,
+      "text_en": "Try the exercises and tablets first. If the pain persists after six weeks we can consider surgery on the left knee.",
+      "text_native": "छह हफ्ते बाद सर्जरी",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "patient",
+      "t0": 9,
+      "t1": 12,
+      "text_en": "Okay, I will try that.",
+      "text_native": "ठीक है",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": false,
+    "procedure_text": null
+  },
+  "clips": []
+}

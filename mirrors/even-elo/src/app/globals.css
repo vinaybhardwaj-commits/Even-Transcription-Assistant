@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Even-ELO global styles
+ * Locked from EVEN-ELO-MOCKUPS.html
+ */
+
+:root {
+  --bg: #fafaf9;        /* stone-50 */
+  --surface: #ffffff;
+  --border: #e7e5e4;    /* stone-200 */
+  --border-strong: #d6d3d1; /* stone-300 */
+  --fg: #1c1917;        /* stone-900 */
+  --muted: #78716c;     /* stone-500 */
+  --subtle: #a8a29e;    /* stone-400 */
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer utilities {
+  /* Tabular numerals for all score / number columns. */
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    letter-spacing: -0.01em;
+  }
+
+  /* Score display — large tabular display digits. */
+  .score-display {
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ---- UI v2 shell (EPI Redesign PRD v1.4-LOCKED, R1) ----
+   ShellV2 renders a fixed 240px sidebar; page content is a sibling of the shell,
+   so the offset is applied at the body level while the v2 shell is mounted. */
+@media (min-width: 1024px) {
+  body.ui-v2 {
+    padding-left: 240px;
+  }
+}

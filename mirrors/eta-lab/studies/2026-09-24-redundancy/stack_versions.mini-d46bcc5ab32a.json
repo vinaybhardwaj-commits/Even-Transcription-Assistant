@@ -1,0 +1,33 @@
+{
+ "stack_id": "d46bcc5ab32a",
+ "source": "minibot read-only collection from the RUNNING Mini launchd units (whisper, shim, indic, router); stack_id = first 12 hex of sha256(json.dumps(stack, sort_keys=True)); router config_sha256 = sha256 of the sorted KEY=VALUE lines of ETA_DEFAULT_CANDIDATES,ETA_INDICTRANS2_URL,ETA_MAX_INFLIGHT,ETA_SRAVAANI_URL,ETA_TRANSLATE_ENGINE,ETA_TRANSLATE_FALLBACK joined by newline (not identical to the twin's systemd-derived hash)",
+ "stack": {
+  "whisper": {
+   "model": "ggml-large-v3-turbo.bin sha256 1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69 (whisper.cpp e0fd1f67, Metal build on Apple M4 Pro; whisper-server binary sha256 70ca514a9669713bdeb9a227f64737a52066c723c1562c7ff4aaaae9c8640f7b; running args: -m /Users/vinaybhardwaj/whisper.cpp/models/ggml-large-v3-turbo.bin --no-speech-thold 0.7 --suppress-nst --port 8080)",
+   "flags": {
+    "vad": "off",
+    "temperature_inc": "0.2 (whisper.cpp default, not set; --no-fallback is a no-op in this build)",
+    "no_speech_thold": "0.7",
+    "suppress_nst": "true",
+    "max_context": "0 (set by the shim on every request unless the caller sends max_context)"
+   }
+  },
+  "indic_conformer": {
+   "model_id": "ai4bharat/indic-conformer-600m-multilingual@e9b71b369c048e2c6b634d4c131061c34e441179 (INDIC_DECODING=rnnt, CPU, onnxruntime 1.26.0; loaded from /Users/vinaybhardwaj/models/indicconformer-e9b71b3/hub/models--ai4bharat--indic-conformer-600m-multilingual; HF_HOME=/Users/vinaybhardwaj/models/indicconformer-e9b71b3 HF_HUB_OFFLINE=1)",
+   "git_head": "643e4e1 (eta-indic); running file indic_server.py sha256 333c687c277f7629f218f83281601a2c1e663996d85c1c15174fb509c9688e42"
+  },
+  "sravaani": {
+   "version": "NOT ON THE MINI: the Mini's router calls SraVaani on the Yoga (ETA_SRAVAANI_URL); version and file hash are owned by lab-mover (ARTPARK-IISc/SraVaani-1.0@f5dd5358325a5208775b91dad98918e079ea2b27 per their collection); minibot did not read the Yoga"
+  },
+  "router": {
+   "commit": "5e841f0 (eta-router); running file router_server.py sha256 400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+   "config_sha256": "d398682f0262c1ca63fa230ab6f56bb4abc69cde283ee50e7fa55db03c30faaa"
+  }
+ },
+ "guards": {
+  "shim_anti_loop": "production whisper-shim.py sha256 aa9a7e4971779e4d5d7f7e3b8c913edc1d8497021a17f2e15d5391ab5012e02b (git 50fcc4e); number lexicon eta_number_words.json sha256 f0adbe7a153105943185a770337d4a12bc7e38ced1b6431f1897b1cb748bf2ec (772 words); segment dedupe with the number guard live",
+  "english_hallucination_guard": "inside router_server.py sha256 400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+  "transcript_guard": "NOT ON THE MINI: lib/transcript-guard.ts runs in the Vercel app, not in this stack; minibot did not read it",
+  "loop_guard_number_rule": "not deployed: loop-guard 7258a90 is not in production (next2 train, ruling 154); the number-lexicon collapse runs inside the shim and the router"
+ }
+}

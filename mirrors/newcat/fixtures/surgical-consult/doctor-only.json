@@ -1,0 +1,38 @@
+{
+  "encounter_id": "synthetic-doctor-only",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 6,
+      "text_en": "You need a hernia repair.",
+      "text_native": "हर्निया का ऑपरेशन",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "doctor",
+      "t0": 20,
+      "t1": 28,
+      "text_en": "The risks are infection and bleeding.",
+      "text_native": "संक्रमण और खून",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": true,
+    "procedure_text": "hernia repair"
+  },
+  "clips": []
+}

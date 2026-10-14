@@ -1,0 +1,17 @@
+{
+ "id": "r5Dn3x",
+ "kind": "pair",
+ "a": {
+  "src": "audio/r5Dn3x_0.mp3",
+  "duration_s": 4.0
+ },
+ "b": {
+  "src": "audio/r5Dn3x_1.mp3",
+  "duration_s": 4.0
+ },
+ "tier": "HIGH",
+ "pqm_score": 0.9,
+ "cluster_id": "clu-3",
+ "true_doctor": "Dr Mock A",
+ "confidence": 0.86
+}

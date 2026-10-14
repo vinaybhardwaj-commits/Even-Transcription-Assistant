@@ -1,0 +1,302 @@
+<title>Transcript Readability</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+Bengali:wght@400;500&family=Noto+Sans+Devanagari:wght@400;500&family=Noto+Sans+Gujarati:wght@400;500&family=Noto+Sans+Kannada:wght@400;500&family=Noto+Sans+Malayalam:wght@400;500&family=Noto+Sans+Tamil:wght@400;500&family=Noto+Sans+Telugu:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f3f5f3;--card:#ffffff;--ink:#1b2320;--mut:#5f6b66;--line:#d6dcd8;--soft:#e9eeeb;
+  --acc:#1f5e7a;--acc-ink:#ffffff;--ok:#2f7a4d;--warn:#a2641a;--bad:#a33a3a;--en:#2c4a5a;
+  --sans:"IBM Plex Sans","Noto Sans Devanagari","Noto Sans Kannada","Noto Sans Telugu","Noto Sans Tamil","Noto Sans Malayalam","Noto Sans Bengali","Noto Sans Gujarati",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--ok:#6cc08c;--warn:#e0a458;--bad:#e07c7c;--en:#a9cfe0;}}
+:root[data-theme="dark"]{
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--ok:#6cc08c;--warn:#e0a458;--bad:#e07c7c;--en:#a9cfe0;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans);padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:760px;margin:0 auto}
+header.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:14px 10px;border-bottom:1px solid var(--line)}
+.bar-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px}
+h1{font-size:1.15rem;font-weight:600;margin:0;text-wrap:balance}
+h2,h3{text-wrap:balance}
+.meta{color:var(--mut);font-size:.88rem}
+.prog{font-family:var(--mono);font-size:.85rem;font-variant-numeric:tabular-nums}
+.pbar{height:6px;border-radius:3px;background:var(--soft);overflow:hidden;margin-top:8px}
+.pbar i{display:block;height:100%;background:var(--ok);width:0}
+.tabs{display:flex;gap:6px;margin-top:10px}
+.tab{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;padding:4px 12px;font:500 .85rem var(--sans);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.intro{color:var(--mut);font-size:.9rem;max-width:64ch;margin:14px 0 0}
+.howto{max-width:64ch;margin:6px 0 0;font-size:.9rem}
+.howto summary{padding-block:6px;min-height:32px;cursor:pointer;color:var(--acc)}
+.howto p{color:var(--mut);margin:4px 0 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-top:14px;display:grid;gap:16px}
+.wh{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.wh h2{font-size:1.1rem;margin:0}
+.tok{font:400 .8rem var(--mono);color:var(--mut)}
+.btn{border:1px solid var(--acc);background:var(--acc);color:var(--acc-ink);border-radius:8px;padding:8px 16px;font:500 .9rem var(--sans);cursor:pointer}
+.btn.ghost{background:transparent;color:var(--acc)}
+.btn[disabled]{opacity:.4;cursor:default}
+.link{background:none;border:0;padding:0;color:var(--acc);font:inherit;font-size:.85rem;cursor:pointer;text-decoration:underline}
+/* the excerpt: one line per segment, as the consult view shows it */
+.tx{margin:0;padding:6px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);max-height:min(46vh,420px);overflow:auto}
+.ln{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;padding:6px 12px;border-bottom:1px solid var(--soft)}
+.ln:last-child{border-bottom:0}
+.ln .ts{font:400 .78rem var(--mono);color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:3px}
+.ln .tt{overflow-wrap:anywhere;white-space:pre-wrap}
+.ln .lg{font:500 .72rem var(--mono);color:var(--mut);border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-right:6px;vertical-align:1px}
+.ln .en{grid-column:2;color:var(--en);font-style:italic;overflow-wrap:anywhere;white-space:pre-wrap}
+.ln .en b{font:500 .68rem var(--mono);font-style:normal;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);margin-right:6px}
+.ln .noen{grid-column:2;color:var(--mut);font-size:.82rem}
+.exmeta{color:var(--mut);font-size:.82rem}
+/* answers */
+fieldset{border:0;padding:0;margin:0}
+legend{font-weight:600;font-size:.95rem;margin-bottom:2px;padding:0}
+.hint{color:var(--mut);font-size:.84rem;margin:0 0 8px}
+.opts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.opt{position:relative;display:block}
+.opt input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer;width:100%;height:100%}
+.opt span{display:flex;align-items:center;justify-content:center;text-align:center;min-height:48px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:.95rem;font-weight:500;background:var(--card)}
+.opt input:checked+span{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+.opt input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
+.foot label.l{display:block;font-size:.85rem;font-weight:600;margin-bottom:4px}
+textarea{width:100%;min-height:56px;resize:vertical;border:1px solid var(--line);border-radius:6px;padding:7px 9px;background:var(--bg);color:var(--ink);font:inherit}
+.nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px;flex-wrap:wrap}
+.nav2{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-top:12px;font-size:.85rem;color:var(--mut)}
+.nav2 select{min-height:36px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);font:inherit;padding:0 8px}
+.nav2 label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-height:36px}
+.status{font-size:.82rem;color:var(--mut);min-height:1.2em;margin-top:8px}
+.table-wrap{overflow-x:auto;margin-top:12px}
+table{border-collapse:collapse;width:100%;font-size:.86rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
+.bar2{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--soft);min-width:120px}
+.bar2 i{display:block;height:100%}
+.bar2 .g{background:var(--ok)}.bar2 .m{background:var(--warn)}.bar2 .r{background:var(--bad)}
+details summary{cursor:pointer;color:var(--acc)}
+.empty{color:var(--mut);padding:24px 0}
+@media (max-width:560px){
+  header.bar{position:static}
+  .btn{min-height:44px}
+  .tab{min-height:40px}
+  .nav .btn{flex:1 1 0}
+  .link{min-height:32px}
+  .opt span{font-size:.9rem;padding:6px 6px}
+  .tx{max-height:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="bar" id="hdr">
+    <div class="bar-row">
+      <h1>Transcript Readability</h1>
+      <span class="prog" id="prog">0 / 0 rated</span>
+      <span class="meta" id="who"></span>
+    </div>
+    <div class="pbar" aria-hidden="true"><i id="pfill"></i></div>
+    <div class="tabs" role="tablist" id="tabs" hidden>
+      <button class="tab" role="tab" id="tab-rate" aria-selected="true">My ratings</button>
+      <button class="tab" role="tab" id="tab-res" aria-selected="false">Results</button>
+    </div>
+  </header>
+
+  <section id="view-rate">
+    <p class="intro">Each item is a short stretch of a clinic conversation, exactly as the transcript reader shows it: one line per spoken segment with its time, language and, where there is one, the English underneath. Read it, then answer four quick questions about the text itself. You are judging the transcript, not the doctor.</p>
+    <details class="howto"><summary>How to rate</summary>
+      <p><b>Readable</b>: could you follow what was said? <b>Useful</b>: would this text help you understand the consult if you had not been there? <b>Wrong language</b>: are lines shown in a language or script that is not what was spoken? <b>Garbled</b>: words that make no sense, endless repeats, or invented-sounding text. Choose the closest answer; add a note if something specific stands out. Your ratings save as you go and only you see them here. On a computer, keys 1 to 3 answer the first open question, N or the right arrow moves on and P or the left arrow goes back.</p></details>
+    <div id="panel"><p class="empty">Loading the excerpts…</p></div>
+    <div class="nav">
+      <button class="btn ghost" id="prev">Previous</button>
+      <button class="btn" id="next">Next</button>
+    </div>
+    <div class="nav2">
+      <button class="link" id="nextopen">Next unrated</button>
+      <label for="jump">Go to <select id="jump" aria-label="Go to excerpt"></select></label>
+    </div>
+    <div class="status" id="status" aria-live="polite"></div>
+    <div class="status" id="done" aria-live="polite"></div>
+  </section>
+
+  <section id="view-res" hidden>
+    <p class="intro">How the raters scored the transcripts. Every excerpt counts once per rater; nothing is dropped for disagreement here, because the score is the share of ratings, not a label. Only you (the page owner) see this tab.</p>
+    <div class="card" id="res"><p class="empty">No ratings yet.</p></div>
+  </section>
+</div>
+
+<script>
+/* Transcript readability (ruling 337f). Excerpts are read from the db collection "excerpts" through a whitelist
+   (id, lines[{t, lang, text, en}]); nothing else in a doc can reach the screen. Ratings are saved to
+   ratings/<rater id> = {rater, schema, t:{<excerptId>:{readable, useful, wrong_lang, garbled, en_ok?, note?, ts}}}. */
+let db=null,user=null,meId=null,owner=false,claudeOk=false,loaded=false;
+let items=[],sig="",cur=0,mine={t:{}},all=[];
+let saveTimer=null,saving=Promise.resolve(),dirty=false;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fnv=s=>{let h=2166136261;for(const ch of String(s)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}return h>>>0};
+/* question key -> [legend, hint, [[value,label,tone]...]] ; tone g/m/r drives only the results bars (1 good .. 3 bad) */
+const Q=[
+ ["readable","Readable?","Could you follow what was said?",[["yes","Yes","g"],["partly","Partly","m"],["no","No","r"]]],
+ ["useful","Useful?","Would this text help you understand the consult if you had not been there?",[["yes","Yes","g"],["little","A little","m"],["no","No","r"]]],
+ ["wrong_lang","Wrong language?","Are any lines in a language or script that is not what was spoken?",[["no","No","g"],["some","Some lines","m"],["most","Most lines","r"]]],
+ ["garbled","Garbled?","Words that make no sense, endless repeats, made-up sounding text.",[["none","None","g"],["some","Some","m"],["much","Much of it","r"]]]];
+const QEN=["en_ok","English right?","Is the English underneath the lines a fair rendering of the line above it?",[["yes","Yes","g"],["partly","Partly","m"],["no","No","r"]]];
+const hasEn=it=>it.lines.some(l=>l.en);
+const qsFor=it=>hasEn(it)?Q.concat([QEN]):Q;
+const A=id=>mine.t[id]||(mine.t[id]={});
+const rated=(it,a)=>!!a&&qsFor(it).every(q=>q[3].some(o=>o[0]===a[q[0]]));
+const curI=()=>items[cur];
+const INDIC=new Set(["kn","hi","ta","ml","bn","gu","te","mr","pa","or","as","ur"]);
+const dominant=it=>{const n={};it.lines.forEach(l=>{n[l.lang]=(n[l.lang]||0)+l.text.length});const e=Object.entries(n).sort((a,b)=>b[1]-a[1])[0];return e?e[0]:"und"};
+const kind=it=>INDIC.has(dominant(it))?"Indic":"English/other"; // by the language holding most of the text; an English excerpt with one Kannada line is English
+function progress(){
+  const n=items.filter(it=>rated(it,mine.t[it.id])).length;
+  $("prog").textContent=n+" / "+items.length+" rated";
+  $("pfill").style.width=(items.length?100*n/items.length:0)+"%";
+  const j=$("jump");
+  if(j){const want=items.map((it,i)=>`<option value="${i}"${i===cur?" selected":""}>${i+1}${rated(it,mine.t[it.id])?" · rated":""}</option>`).join("");
+    if(j.dataset.k!==want){j.innerHTML=want;j.dataset.k=want}else j.value=String(cur)}
+}
+function linesHtml(it){
+  return it.lines.map(l=>`<div class="ln"><span class="ts">[${esc(l.t)}]</span><span class="tt"><span class="lg">${esc(l.lang)}</span>${esc(l.text)}</span>${
+    INDIC.has(l.lang)?(l.en?`<span class="en"><b>English</b>${esc(l.en)}</span>`:`<span class="noen">No English for this line yet.</span>`):""}</div>`).join("");
+}
+function qHtml(it,a){
+  return qsFor(it).map(([k,lg,hint,opts])=>`<fieldset><legend>${esc(lg)}</legend><p class="hint">${esc(hint)}</p><div class="opts">${
+    opts.map(([v,l],i)=>`<label class="opt"><input type="radio" name="${k}" id="${k}-${v}" value="${v}"${a[k]===v?" checked":""}><span>${esc(l)}</span></label>`).join("")}</div></fieldset>`).join("");
+}
+function excerptHtml(it){
+  const a=mine.t[it.id]||{};
+  return `<div class="card">
+    <div class="wh"><h2>Excerpt ${cur+1} of ${items.length}</h2><span class="tok">${it.lines.length} lines</span></div>
+    <div class="tx" id="tx" tabindex="0" role="region" aria-label="Transcript excerpt">${linesHtml(it)}</div>
+    ${qHtml(it,a)}
+    <div class="foot"><label class="l" for="note">Note (optional)</label><textarea id="note" placeholder="Anything specific: a line that is wrong, a language mix-up…">${esc(a.note||"")}</textarea></div>
+  </div>`;
+}
+function render(){
+  progress();
+  const it=curI();
+  if(!it){
+    $("panel").innerHTML=`<p class="empty">${!claudeOk?"Open this page while signed in to claude.ai to rate excerpts.":loaded?"No excerpts have been added yet.":"Loading the excerpts…"}</p>`;
+    $("prev").disabled=true;$("next").disabled=true;$("nextopen").disabled=true;return;
+  }
+  $("panel").innerHTML=excerptHtml(it);
+  $("prev").disabled=cur<=0;$("next").disabled=false;$("next").textContent=cur>=items.length-1?"Done":"Next";
+  $("nextopen").disabled=false;progress();
+}
+function go(i){$("status").textContent="";$("done").textContent="";cur=Math.max(0,Math.min(i,items.length-1));render();window.scrollTo({top:0,behavior:"instant"})}
+function goOpen(){
+  const n=items.length;for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!rated(items[i],mine.t[items[i].id])){go(i);return}}
+  $("done").textContent="Every excerpt is rated.";
+}
+function finish(){
+  flush();
+  const open=items.map((it,i)=>({it,i})).filter(x=>!rated(x.it,mine.t[x.it.id]));
+  $("done").innerHTML=open.length
+    ?"Not finished yet. Your ratings save as you go, so there is nothing to submit. Still open: "+open.slice(0,30).map(x=>`<button class="link" data-go="${x.i}">${x.i+1}</button>`).join(", ")+(open.length>30?" and "+(open.length-30)+" more":"")+"."
+    :"All excerpts are rated. Your ratings are saved automatically; there is nothing to submit. Thank you.";
+}
+/* ---- saving ---- */
+function queueSave(){dirty=true;$("status").textContent="Saving…";clearTimeout(saveTimer);saveTimer=setTimeout(flush,700)}
+function flush(){
+  if(!db||!meId||!dirty||!loaded)return;dirty=false;
+  const body=JSON.parse(JSON.stringify({rater:meId,schema:1,t:mine.t,updated:new Date().toISOString()}));
+  saving=saving.then(()=>db.doc("ratings/"+meId).set(body)).then(()=>{$("status").textContent="Saved"}).catch(e=>{
+    $("status").textContent=e&&e.code==="invalid_argument"?"You have view-only access, so your ratings can't be saved. Ask the page owner for access.":"Couldn't save just now. Your answers are still on screen; change any answer to retry.";dirty=true;
+  });
+}
+function choose(k,v){
+  const it=curI();if(!it)return;const q=qsFor(it).find(x=>x[0]===k);if(!q||!q[3].some(o=>o[0]===v))return;
+  const a=A(it.id);a.ts=new Date().toISOString();a[k]=v;
+  const r=$(k+"-"+v);if(r)r.checked=true;
+  progress();queueSave();
+}
+document.addEventListener("click",e=>{const g=e.target.closest("[data-go]");if(g)go(+g.dataset.go)});
+$("prev").onclick=()=>{if(cur>0)go(cur-1)};
+$("next").onclick=()=>{if(cur<items.length-1)go(cur+1);else finish()};
+$("nextopen").onclick=goOpen;
+document.addEventListener("change",e=>{
+  const t=e.target;
+  if(t.id==="jump"){go(+t.value);return}
+  if(t.type==="radio")choose(t.name,t.value);
+});
+document.addEventListener("input",e=>{const t=e.target,it=curI();if(it&&t.id==="note"){A(it.id).note=t.value;queueSave()}});
+document.addEventListener("keydown",e=>{ // desktop shortcuts; ignored while typing in a text box, a menu or a slider
+  const el=e.target,tag=el.tagName,type=el.type||"";
+  if(tag==="TEXTAREA"||tag==="SELECT"||(tag==="INPUT"&&(type==="text"||type==="range"))||e.metaKey||e.ctrlKey||e.altKey)return;
+  const k=e.key,it=curI();
+  if(/^[1-3]$/.test(k)&&it){const a=mine.t[it.id]||{},q=qsFor(it).find(x=>!x[3].some(o=>o[0]===a[x[0]]));if(q){choose(q[0],q[3][+k-1][0]);e.preventDefault()}}
+  else if(k==="n"||(k==="ArrowRight"&&!(tag==="INPUT"&&type==="radio"))){if(cur<items.length-1)go(cur+1);e.preventDefault()}
+  else if(k==="p"||(k==="ArrowLeft"&&!(tag==="INPUT"&&type==="radio"))){if(cur>0)go(cur-1);e.preventDefault()}
+});
+
+/* ---- owner: results ---- */
+const pct=(n,d)=>d?Math.round(100*n/d)+"%":"–";
+function tally(rows,q){
+  const c={};q[3].forEach(o=>c[o[0]]=0);let n=0;
+  rows.forEach(r=>{if(c[r[q[0]]]!==undefined){c[r[q[0]]]++;n++}});
+  return{c,n};
+}
+function barHtml(q,t){
+  return `<div class="bar2" role="img" aria-label="${esc(q[1])} ${q[3].map(o=>o[1]+" "+pct(t.c[o[0]],t.n)).join(", ")}">${
+    q[3].map(o=>t.n&&t.c[o[0]]?`<i class="${o[2]}" style="width:${100*t.c[o[0]]/t.n}%"></i>`:"").join("")}</div>`;
+}
+async function renderRes(){
+  const ids=all.map(r=>r.rater);let names={};
+  try{names=user&&user.profiles?await user.profiles(ids):{}}catch(e){}
+  const nm=id=>(names[id]&&names[id].name)||"Rater";
+  if(!all.length){$("res").innerHTML=`<p class="empty">No ratings yet.</p>`;return}
+  const rows=[];
+  all.forEach(r=>items.forEach(it=>{const a=(r.t||{})[it.id];if(a&&rated(it,a))rows.push(Object.assign({},a,{_id:it.id,_kind:kind(it)}))}));
+  const head=`<h3 style="margin:0">Raters: ${all.length}</h3><p class="meta">${all.map(r=>esc(nm(r.rater))).join(", ")}. Complete ratings: ${rows.length} (excerpts: ${items.length}).</p>`;
+  const blk=(label,rs)=>{
+    if(!rs.length)return"";
+    return `<h3 style="margin:14px 0 4px">${esc(label)} <span class="meta">(${rs.length} ratings)</span></h3><div class="table-wrap"><table><thead><tr><th>Question</th><th>Counts</th><th>Share</th></tr></thead><tbody>${
+      Q.concat([QEN]).map(q=>{const t=tally(rs,q);if(!t.n)return"";
+        return `<tr><td>${esc(q[1])}</td><td>${q[3].map(o=>esc(o[1])+" "+t.c[o[0]]).join(" · ")}</td><td>${barHtml(q,t)}<span class="meta">${pct(t.c[q[3][0][0]],t.n)} best answer</span></td></tr>`}).join("")}</tbody></table></div>`;
+  };
+  const per=items.map((it,i)=>{
+    const rs=all.map(r=>({r,a:(r.t||{})[it.id]})).filter(x=>x.a&&rated(it,x.a));
+    if(!rs.length)return"";
+    return `<tr><td class="tok">${i+1} · ${esc(it.id)}</td><td>${esc(dominant(it))}</td>${rs.length?`<td>${rs.map(x=>esc(nm(x.r.rater))+": "+qsFor(it).map(q=>x.a[q[0]]).join("/")+(x.a.note?" (note)":"")).join("<br>")}</td>`:""}</tr>`}).join("");
+  $("res").innerHTML=head+blk("All excerpts",rows)+blk("Mostly Indic-language excerpts",rows.filter(r=>r._kind==="Indic"))+blk("Mostly English / other excerpts",rows.filter(r=>r._kind!=="Indic"))
+    +(per?`<details style="margin-top:14px"><summary>Every rated excerpt</summary><div class="table-wrap"><table><thead><tr><th>Excerpt</th><th>Main language</th><th>Ratings (readable/useful/wrong language/garbled)</th></tr></thead><tbody>${per}</tbody></table></div></details>`:"");
+}
+function tab(which){
+  $("tab-rate").setAttribute("aria-selected",which==="rate");$("tab-res").setAttribute("aria-selected",which==="res");
+  $("view-rate").hidden=which!=="rate";$("view-res").hidden=which!=="res";
+  if(which==="res")renderRes();
+}
+$("tab-rate").onclick=()=>tab("rate");$("tab-res").onclick=()=>tab("res");
+render();
+(async()=>{
+  if(!window.claude||!window.claude.use)return;
+  claudeOk=true;render();
+  [db,user]=await Promise.all([claude.use("db"),claude.use("user")]);
+  if(user){try{const me=await user.me();meId=me.id;owner=me.isOwner;$("who").textContent=me.name?("Rating as "+me.name):"";}catch(e){}}
+  if(!db){render();return}
+  if(!meId)$("status").textContent="Sign in to claude.ai to save your ratings.";
+  db.collection("excerpts").onSnapshot(s=>{
+    const S=v=>typeof v==="string"?v:"";
+    // whitelist: nothing but these fields is ever kept
+    const next=s.docs.filter(d=>d.exists!==false).map(d=>{const x=d.data()||{};
+      const lines=(Array.isArray(x.lines)?x.lines:[]).map(l=>({t:S(l&&l.t),lang:S(l&&l.lang)||"und",text:S(l&&l.text),en:S(l&&l.en)})).filter(l=>l.text);
+      return{id:String(x.id??d.id??""),lines}})
+      .filter(x=>x.id&&x.lines.length).sort((a,b)=>fnv(a.id)-fnv(b.id)||a.id.localeCompare(b.id)); // a fixed scrambled order
+    const ns=JSON.stringify(next);if(ns===sig)return;
+    const keep=items[cur]&&items[cur].id;sig=ns;items=next;
+    const i=keep?items.findIndex(x=>x.id===keep):-1;cur=i>=0?i:0;render();
+  },()=>{});
+  if(meId){try{const d=await db.doc("ratings/"+meId).get();if(d.exists){const b=d.data()||{},t=b.t||{};
+    Object.keys(t).forEach(k=>{mine.t[k]=Object.assign({},t[k],mine.t[k]||{})});render()}}catch(e){}}
+  loaded=true;render();if(dirty)flush();
+  if(owner){$("tabs").hidden=false;
+    db.collection("ratings").onSnapshot(s=>{all=s.docs.filter(d=>d.exists!==false).map(d=>d.data());if(!$("view-res").hidden)renderRes()},()=>{});
+  }
+})();
+window.addEventListener("pagehide",flush);
+</script>

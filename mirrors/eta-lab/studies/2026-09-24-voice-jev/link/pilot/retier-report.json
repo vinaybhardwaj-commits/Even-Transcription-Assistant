@@ -1,0 +1,38 @@
+{
+ "real": {
+  "LOW": 8,
+  "MED": 2
+ },
+ "placebo": {
+  "4": {
+   "tiers": {
+    "LOW": 8,
+    "MED": 2
+   },
+   "n_links": 10,
+   "xday": 7,
+   "xday_and_excl": 2,
+   "staff_candidates": 5,
+   "stable_readingA": 0
+  },
+  "-4": {
+   "tiers": {
+    "LOW": 10
+   },
+   "n_links": 10,
+   "xday": 7,
+   "xday_and_excl": 0,
+   "staff_candidates": 7,
+   "stable_readingA": 0
+  }
+ },
+ "real_criteria_counts": {
+  "xday": 6,
+  "excl": 6,
+  "staff_candidate": 4,
+  "n5": 10,
+  "rxlq": 5,
+  "stable_readingA": 0,
+  "lq_yes": 1
+ }
+}

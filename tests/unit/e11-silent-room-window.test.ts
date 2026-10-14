@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { repoFiles } from "../support/repo-files";
 
 type Row = Record<string, unknown>;
 
@@ -590,8 +591,8 @@ const SITES: Array<{ file: string; counts: Record<string, number>; role: SiteCla
 describe("E11(d) — every call site that can reach Whisper is classified, by count", () => {
   it("THE SWEEP: the live (file, signal) counts are exactly the classified ones", () => {
     const actual: Record<string, number> = {};
-    const files = execSync("git ls-files -co --exclude-standard", { encoding: "utf8" })
-      .split("\n").filter((f) => SWEEP_SOURCE.test(f) && !SWEEP_EXCLUDE.some((x) => f.startsWith(x)));
+    const files = repoFiles(process.cwd(), { includeMirrors: true })
+      .filter((f) => SWEEP_SOURCE.test(f) && !SWEEP_EXCLUDE.some((x) => f.startsWith(x)));
     for (const f of files) {
       let src: string;
       try { src = codeOnly(readFileSync(f, "utf8")); } catch { continue; }

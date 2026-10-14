@@ -1,0 +1,14 @@
+# P1-PREREG v7.16, addendum 3 (linker, 25 Sep 2026; the git commit time is the timestamp): the batch-3 de-identification runs with the roster whitelist OFF, so ruling 42's kept-doctor rule does not collide with v7.15b R2; recorded BEFORE anything is regenerated or bound
+
+Nothing earlier is edited. **Class key sealed, no class join; nothing of batch 3 has been drawn, read or scored.** Origin: surg-deid #1582.
+
+## D1. What was found
+The batch-3 de-identification (`deid.py --cap-rule`, frozen blob `5527f920…`, run 02:56:44 to 02:57:29 into a temp file, **not bound**) reports `roster_doctors_kept = 1`: the eligible record `c012|l3-c012-r2|29` keeps a roster doctor's name readable. Two frozen rules meet there for the first time. **Ruling 42's roster whitelist** deliberately leaves a roster doctor's name readable ("doctors' names stay"). **v7.15b R2**, which both readers and the sheet header apply, counts **any readable name of a person, whatever the role**. In r2 and b2 every doctor's name came out tagged (`roster_doctors_kept` 0; eta-refuter-2 called it over-redaction, safe for the gate), so the rules never met. Binding this file would make the kept name a miss under R2 and force a foreseeable FAIL and a second regeneration and full re-read (v7.15a N2 step 4).
+
+## D2. What is done (option A of surg-deid #1582: no rule changes; the execution follows R2)
+- The batch-3 de-identification is **regenerated with the roster whitelist OFF** (an empty roster), through the library call of the **same frozen `deid.py` blob** (no new flag, no code change), on the **same** `mt-b3/translated.json` (sha256 `cf910f2a…`), with the cap rule. This is what r2 and b2 effectively were (no kept doctor), and it is what R2 says.
+- The first output (`deid.b3.tmp.json`, prefix `d42712ea…`) is **kept, marked "not bound, roster whitelist on", and never deleted**, as the record. The regenerated file is bound as `mt-b3/deid.json` **only after** eta-refuter-2's PASS on this addendum, with its hash and counts posted **before anyone reads** (structure checks as at r2 and b2; the expected difference from the first file is the one record).
+- Rejected: **(B)** a clarification that a roster doctor's name is not a miss under R2 for b3 (it would change the reading of a frozen definition after seeing a case, and differ from r2 and b2); **(C)** bind as is and take the foreseeable failure.
+
+## D3. Scope and effect on the record
+Only the batch-3 invocation. It does **not** change ruling 42 for any other pipeline (the surgery path keeps its own rule), R2, the cap rule (`a53717d`), the full read, the screen or scoring. A doctor's name being tagged removes some "who is speaking" signal from Jev's input for that turn; the effect is one turn of the 107 eligible ones and is reported with the batch-3 results. **Disclosure:** the choice is made after a de-identification run showed the collision, before any read; nothing of the batch-3 text has been read by any reader.

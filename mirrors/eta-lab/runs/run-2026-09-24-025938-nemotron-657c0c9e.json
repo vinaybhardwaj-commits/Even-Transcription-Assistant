@@ -1,0 +1,70 @@
+{
+ "run_id": "run-2026-09-24-025938-nemotron-657c0c9e",
+ "trainer": "train_nemotron.py",
+ "base_model": "nvidia/Nemotron-3-Diarization",
+ "base_model_snapshot": "a435e9867d79e789e90053f9b6d6834053af564a",
+ "base_model_nemo_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+ "dataset_id": "diar-train-merged-2026-09-24-657c0c9e",
+ "train_n": 161,
+ "val_n": 5,
+ "val_holdout_room_day": "rd_yhh6kexm",
+ "skipped_windows": [
+  [
+   "bw_xd6gt5sp_1790131500000_primary",
+   "9 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790157600000_primary",
+   "17 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790156700000_primary",
+   "11 speakers"
+  ],
+  [
+   "bw_7tedad86_1790136900000_primary",
+   "9 speakers"
+  ]
+ ],
+ "max_steps": 10,
+ "lr": 1e-05,
+ "warmup_steps": 2,
+ "batch_size": 4,
+ "session_len_sec": 105,
+ "seed": 42,
+ "precision": "bf16-mixed",
+ "nemo_speech_commit": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+ "git_sha": "adc1c1ca030b99b78e71e7dfbfdcd63c0114d728",
+ "env_versions": {
+  "torch": "2.14.0",
+  "lightning": "2.4.0",
+  "nemo-toolkit": "3.1.0+cf724ac33",
+  "numpy": "2.5.3"
+ },
+ "started_at": "2026-09-24T02:59:38Z",
+ "status": "OK",
+ "reason": "real run on the verified nightly dataset; quality judged only by held-out evaluation (V5 + bench20 vs pyannote.ai)",
+ "metrics": {
+  "loss": 0.3424416482448578,
+  "ats_loss": 0.22352568805217743,
+  "pil_loss": 0.09915205091238022,
+  "activity_loss": 0.41733518242836,
+  "phantom_loss": 0.03528599068522453,
+  "learning_rate": 5.477225386130158e-06,
+  "train_f1_acc": 0.6213911175727844,
+  "train_precision": 0.5484633445739746,
+  "train_recall": 0.7166883945465088,
+  "train_f1_acc_ats": 0.2756378650665283,
+  "train_spk_count_mae": 1.0,
+  "train_spk_count_acc": 0.5
+ },
+ "best_val_metric": "val_f1_acc",
+ "best_val_score": null,
+ "last_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/nemotron-smoke1/run-2026-09-24-025938-nemotron-657c0c9e.nemo",
+ "last_nemo_sha256": "c56f3d9dbe8d140b524eb2f63c9bda26c053dba0c10c71f5c50446a619e63592",
+ "last_weights_sha256": "5a51a1876c6d07fed31a16c49040fb4076428ab52e83867349055cf79971c0d0",
+ "best_nemo_path": null,
+ "best_nemo_sha256": null,
+ "best_weights_sha256": null,
+ "checkpoint_r2_key": null
+}

@@ -1,0 +1,33 @@
+{
+  "source": "acoustic",
+  "smoother_version": "encounter-clock-smooth-v1",
+  "shadow_version": "encounter-clock-shadow-v1",
+  "note": "3 of 9 room-days had a pre-existing stored run (all 23 Sep); the other 6 (21/22 Sep) had runs_for_day:0 and were triggered now via scribe_encounter_shadow_run (read-derived: level log + already-stored transcripts, no STT/audio fetch, no clinician-facing write). All 6 newly-triggered runs returned encounters:0, unjudged_share:1, reason no_energy_evidence -- the bench_level_sample energy signal shows no evidence at all for 21-22 Sep on every room checked, despite transcripts existing (9-27 windows with_text per day). This is a platform-wide energy-log gap for 21-22 Sep, not a per-room issue -- flagged prominently in e7-score-acoustic.md, not silently absorbed into a 0 recall number.",
+  "room_days": {
+    "rd_tcqaam5c": {"room": "Cardiology OPD", "date": "2026-09-21", "run_id": "ehr_9fmpaq78frvz", "encounters": [], "pre_existing": false, "energy_gap": true},
+    "rd_djmbtzph": {"room": "Cardiology OPD", "date": "2026-09-22", "run_id": "ehr_xnu7b2kdhtnb", "encounters": [], "pre_existing": false, "energy_gap": true},
+    "rd_tp4hcf8s": {"room": "Cardiology OPD", "date": "2026-09-23", "run_id": "ehr_pwattz7x8bcp", "pre_existing": true, "energy_gap": false, "encounters": [
+      {"id": "eh_7wfxb9n849qv", "start_ms": 1790137298450, "end_ms": 1790137718450},
+      {"id": "eh_r97dzgshw379", "start_ms": 1790138798450, "end_ms": 1790139518450},
+      {"id": "eh_vf2zdr6cnc3z", "start_ms": 1790141498450, "end_ms": 1790142158450},
+      {"id": "eh_v2wwzxtfep6k", "start_ms": 1790144198450, "end_ms": 1790144858450}
+    ]},
+    "rd_kp4c7pp6": {"room": "OPD 5", "date": "2026-09-21", "run_id": "ehr_hje8t4u5wf67", "encounters": [], "pre_existing": false, "energy_gap": true},
+    "rd_yck5kdc2": {"room": "OPD 5", "date": "2026-09-23", "run_id": "ehr_8v77apvnyk7j", "pre_existing": true, "energy_gap": false, "encounters": [
+      {"id": "eh_7ska95nsngce", "start_ms": 1790133366366, "end_ms": 1790134086366},
+      {"id": "eh_6br8tw4tddwu", "start_ms": 1790135166366, "end_ms": 1790135406366},
+      {"id": "eh_cxj2g4mvp55b", "start_ms": 1790137086366, "end_ms": 1790137386366},
+      {"id": "eh_cxgrvcx32k2d", "start_ms": 1790141466366, "end_ms": 1790142186366},
+      {"id": "eh_n4965yw79srt", "start_ms": 1790144466366, "end_ms": 1790144886366}
+    ]},
+    "rd_93tcdc4c": {"room": "OPD 3", "date": "2026-09-21", "run_id": "ehr_r3phvshwfeyr", "encounters": [], "pre_existing": false, "energy_gap": true},
+    "rd_4fsw6f6y": {"room": "OPD 3", "date": "2026-09-22", "run_id": "ehr_r7kturhfcdc2", "encounters": [], "pre_existing": false, "energy_gap": true},
+    "rd_pw5gaugg": {"room": "OPD 3", "date": "2026-09-23", "run_id": "ehr_9erukcsv2g2g", "pre_existing": true, "energy_gap": false, "encounters": [
+      {"id": "eh_au4txufj4qrm", "start_ms": 1790130733173, "end_ms": 1790131393173},
+      {"id": "eh_aqf83hrywpb7", "start_ms": 1790134273173, "end_ms": 1790134573173},
+      {"id": "eh_8vkve2e3gwck", "start_ms": 1790134813173, "end_ms": 1790134993173},
+      {"id": "eh_xs452jrtug4g", "start_ms": 1790141473173, "end_ms": 1790142133173}
+    ]},
+    "rd_7usy23ex": {"room": "OPD 6", "date": "2026-09-22", "run_id": "ehr_n7tppur5mv6d", "encounters": [], "pre_existing": false, "energy_gap": true}
+  }
+}

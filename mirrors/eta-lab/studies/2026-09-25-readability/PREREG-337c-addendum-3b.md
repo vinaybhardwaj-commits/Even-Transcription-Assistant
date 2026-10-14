@@ -1,0 +1,7 @@
+# Ruling 337c: PRE-REGISTRATION ADDENDUM 3b (split-speaker, 25 Sep 2026; committed before any label exists)
+Origin: eta-refuter #2044 (addendum 3 fix 1 was half done). Nothing but the scorer's interval changes.
+1. **Which interval is quoted first:** the PROPAGATED CLOPPER-PEARSON bounds for both overall precision and recall (conservative, not a joint 95 %). They are what the report leads with.
+2. **The plain bootstrap is dropped.** eta-refuter showed it collapses to [1.00, 1.00] at zero misses (a stratum with 0 events in n rows resamples 0 events every time), which is exactly the case it was added for. It is replaced by a **stratified Jeffreys-posterior interval**: each cell x flagged stratum's rate is drawn from Beta(bad + 0.5, n - bad + 0.5), the draws pushed through the frozen estimator (2,000 draws, seed 20260937), 95 % percentile interval. It has real width at 0 or n events. It is the secondary interval.
+3. **Tests that can fail:** with zero misses the propagated recall lower bound is < 0.70 and the posterior lower bound is < 0.95; the posterior lower bound is lower with one miss than with none; three mutants (posterior collapsed to the plain rate, Jeffreys 0.5 removed, typo count taken after combining) are each killed.
+4. **Typos are counted per rater BEFORE the two files are combined** (`unknown_labels_by_rater`), because a typo in one file would otherwise appear as a disagreement.
+5. **Times:** addendum 3's header says ~09:35 IST, but it was committed at 09:01:53 IST (b1c769a); the commit time is the evidence and the header was wrong.

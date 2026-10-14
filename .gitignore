@@ -83,3 +83,7 @@ extensions/pulse-presence/src/eta_config.js
 # python bytecode (scripts/*)
 __pycache__/
 *.pyc
+
+# mirrors: keep the steward provenance files visible even if a mirrored tree carries its own ignore rules
+!mirrors/*/MIRROR.md
+!mirrors/*/WITHHELD.md

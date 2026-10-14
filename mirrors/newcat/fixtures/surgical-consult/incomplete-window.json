@@ -1,0 +1,47 @@
+{
+  "encounter_id": "synthetic-incomplete-window",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": false
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 6,
+      "text_en": "Your scan shows a hernia on the right side. I recommend repairing it soon.",
+      "text_native": "दाईं ओर हर्निया है",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "patient",
+      "t0": 8,
+      "t1": 11,
+      "text_en": "How long has this been there, doctor?",
+      "text_native": "कितने दिन से है",
+      "lang": "hi"
+    },
+    {
+      "id": "3",
+      "role": "doctor",
+      "t0": 13,
+      "t1": 22,
+      "text_en": "The risks are infection, bleeding and the hernia coming back. The alternative is to wait and watch with a belt.",
+      "text_native": "जोखिम संक्रमण और खून बहना",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": true,
+    "procedure_text": "hernia repair"
+  },
+  "clips": []
+}

@@ -1,0 +1,1 @@
+https://storage.example.invalid/b/o?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=FAKEFAKE

@@ -1,0 +1,24 @@
+merge: scribe_fuse_run arm=jev is reachable (38a7dac)
+
+readJevSignals keyed on room_day_id while J2 writes its signals against the LIVE
+room-day, and the tool refuses any day whose scratch flag is not true. So on the
+only kind of day the arm may run, the signal table was empty by construction and
+arm=jev returned no_jev_signals for every possible input. Arm D was unreachable
+through the tool, for every input.
+
+Signals now resolve through the scratch -> real-room walk-back that fuse-report.ts
+already uses (realRoomIdFor + listBenchSessions), keyed on session_id, which is
+what actually binds a signal to the tape the scratch day replays. The scratch
+guard is byte-for-byte untouched: no arm writes a live clinic day.
+
+Refuter PASS with mutation proof: reverting the key reddens REACHABILITY and
+re-run idempotency; emptying the walk-back reddens three; inverting the two
+detail values reddens two; exempting jev from the guard reddens one.
+3149 passed / 1 skipped / 0 failed across 140 files.
+
+Also withdraws a false finding: scribe_job_submit's kind enum was never stale --
+it derives from JOB_KIND_NAMES off the kinds registry, which already includes
+jev_english, jev_window and jev_role.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PdUpQZUtoniiquFdLfiVtP

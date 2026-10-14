@@ -1,0 +1,144 @@
+[
+ {
+  "card_id": "1cd1bf",
+  "gid": "g071",
+  "tier": "ANCHORED",
+  "kind_note": "known-voice check",
+  "doctor_uid": "MFTZnXMshE91P7fHnqgX",
+  "anchor_cos_by_day": [
+   0.895,
+   0.929,
+   0.919,
+   0.91
+  ],
+  "members_used": [
+   [
+    "rd_ed8endsg",
+    "85"
+   ],
+   [
+    "rd_kftneku5",
+    "154"
+   ],
+   [
+    "rd_np5wt5tw",
+    "74"
+   ],
+   [
+    "rd_yck5kdc2",
+    "89"
+   ]
+  ],
+  "enrolment_sessions_excluded": [
+   "bs_m4dkgcku",
+   "bs_zkww73aq"
+  ],
+  "n_room_days_group": 6,
+  "rep": [
+   "rd_ed8endsg",
+   "85"
+  ],
+  "clip_days": 3
+ },
+ {
+  "card_id": "64329a",
+  "gid": "g008",
+  "tier": "ANCHORED",
+  "kind_note": "known-voice check",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "anchor_cos_by_day": [
+   0.862,
+   0.867,
+   0.856,
+   0.864,
+   0.916,
+   0.877
+  ],
+  "members_used": [
+   [
+    "rd_4fsw6f6y",
+    "51"
+   ],
+   [
+    "rd_6cn2jp2d",
+    "77"
+   ],
+   [
+    "rd_93tcdc4c",
+    "64"
+   ],
+   [
+    "rd_jqj96amk",
+    "42"
+   ],
+   [
+    "rd_nqugggww",
+    "39"
+   ],
+   [
+    "rd_pw5gaugg",
+    "86"
+   ]
+  ],
+  "enrolment_sessions_excluded": [
+   "bs_erxhnc58",
+   "bs_p8y8kc9w"
+  ],
+  "n_room_days_group": 8,
+  "rep": [
+   "rd_4fsw6f6y",
+   "51"
+  ],
+  "clip_days": 3
+ },
+ {
+  "card_id": "f05604",
+  "gid": "g013",
+  "tier": "ANCHORED",
+  "kind_note": "known-voice check",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "anchor_cos_by_day": [
+   0.661,
+   0.693,
+   0.603,
+   0.6,
+   0.617,
+   0.611
+  ],
+  "members_used": [
+   [
+    "rd_4n84vfgg",
+    "169"
+   ],
+   [
+    "rd_abcwg2qf",
+    "236"
+   ],
+   [
+    "rd_au3vmzsm",
+    "24"
+   ],
+   [
+    "rd_ehc3hyyw",
+    "38"
+   ],
+   [
+    "rd_m4rft4fy",
+    "99"
+   ],
+   [
+    "rd_ntajfras",
+    "114"
+   ]
+  ],
+  "enrolment_sessions_excluded": [
+   "bs_rjf49y3d"
+  ],
+  "n_room_days_group": 9,
+  "rep": [
+   "rd_au3vmzsm",
+   "24"
+  ],
+  "clip_days": 3
+ }
+]

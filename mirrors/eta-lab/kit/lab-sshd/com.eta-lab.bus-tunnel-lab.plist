@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.eta-lab.bus-tunnel-lab</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-o</string>
+    <string>ExitOnForwardFailure=yes</string>
+    <string>-o</string>
+    <string>ServerAliveInterval=15</string>
+    <string>-o</string>
+    <string>ServerAliveCountMax=3</string>
+    <string>-o</string>
+    <string>StrictHostKeyChecking=yes</string>
+    <string>-o</string>
+    <string>BatchMode=yes</string>
+    <string>-R</string>
+    <string>127.0.0.1:2224:127.0.0.1:2223</string>
+    <string>BOXHOST</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/bus-tunnel-lab.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/bus-tunnel-lab.log</string>
+</dict>
+</plist>

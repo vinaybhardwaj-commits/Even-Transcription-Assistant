@@ -1,0 +1,38 @@
+{
+  "encounter_id": "synthetic-no-surgery-recommended",
+  "room": "room-a",
+  "specialty": "general_surgery",
+  "doctor_uid": "doc-synth-1",
+  "presc_uid": "rx-synth-1",
+  "presc_match": "exact",
+  "window": {
+    "start": "2026-10-01T10:00:00+05:30",
+    "end": "2026-10-01T10:08:00+05:30",
+    "complete": true
+  },
+  "turns": [
+    {
+      "id": "1",
+      "role": "doctor",
+      "t0": 0,
+      "t1": 6,
+      "text_en": "Your report is normal. You do not need any surgery.",
+      "text_native": "सर्जरी की ज़रूरत नहीं",
+      "lang": "hi"
+    },
+    {
+      "id": "2",
+      "role": "patient",
+      "t0": 8,
+      "t1": 10,
+      "text_en": "Thank you, doctor.",
+      "text_native": "धन्यवाद",
+      "lang": "hi"
+    }
+  ],
+  "rx": {
+    "requires_surgery": false,
+    "procedure_text": null
+  },
+  "clips": []
+}

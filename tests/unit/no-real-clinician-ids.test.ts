@@ -62,7 +62,7 @@ describe("GUARD — no clinician id outside the synthetic allowlist, anywhere in
 
   it("no file in the tree carries an id-shaped token that is not on the allowlist", () => {
     const offenders: string[] = [];
-    for (const f of repoFiles()) {
+    for (const f of repoFiles(process.cwd(), { includeMirrors: true })) {
       const text = textOf(f);
       if (text === null) continue;
       // Name the file and the count, never the id — the report of a leak must not repeat it.

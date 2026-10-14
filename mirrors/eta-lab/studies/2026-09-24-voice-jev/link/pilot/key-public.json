@@ -1,0 +1,1229 @@
+[
+ {
+  "card_id": "9e9964",
+  "room_day": "rd_yhh6kexm",
+  "rank_in_room": 1,
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": false,
+   "rx_ge1": false,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": null,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.81,
+   "lq_noul": 0.33,
+   "control_noul": 0.18,
+   "lq_void": false,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.502,
+   "contrast": 0.289,
+   "p_in": 0.422,
+   "p_out": 0.133,
+   "null_mean": -0.213,
+   "null_max": -0.006,
+   "present": 7,
+   "consults_room_active": 12,
+   "consults": 13,
+   "rx": 8,
+   "rx_hit_by_voice": 0,
+   "rx_hit_by_others": 0,
+   "rx_words_by_voice": 0,
+   "rx_words_total": 29,
+   "core_share_in_consults": 0.404,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 13,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 2,
+     "null_mean": 2.25,
+     "excess": -0.25,
+     "z": -0.069,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 3,
+     "null_mean": 2.5,
+     "excess": 0.5,
+     "z": 0.139,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 3,
+     "null_mean": 3.25,
+     "excess": -0.25,
+     "z": -0.069,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 3,
+   "null_mean": 2.5,
+   "excess": 0.5,
+   "z": 0.139,
+   "rank": 12,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 0,
+   "same_max": null,
+   "other_doctor_max": 0.397
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 37,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": false,
+   "n_room_days_same_voice": 1,
+   "excl": true,
+   "staff_candidate": false,
+   "n5": true,
+   "core_turns_in_consults": 74,
+   "rx_hit_by_voice": 0,
+   "lq_yes": false,
+   "rxlq": false,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "mGXTEDg9o9WNR9gpZ4sY"
+   ],
+   "group_size": 1
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "a9b0ce",
+  "room_day": "rd_yhh6kexm",
+  "rank_in_room": 2,
+  "doctor_uid": "JKJxJjTimXHh4odOgva5",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": true,
+   "rx_ge1": true,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": 0.419,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 1.0,
+   "lq_noul": 0.56,
+   "control_noul": 0.56,
+   "lq_void": true,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.408,
+   "contrast": 0.385,
+   "p_in": 0.557,
+   "p_out": 0.172,
+   "null_mean": -0.023,
+   "null_max": 0.02,
+   "present": 5,
+   "consults_room_active": 5,
+   "consults": 8,
+   "rx": 3,
+   "rx_hit_by_voice": 1,
+   "rx_hit_by_others": 2,
+   "rx_words_by_voice": 1,
+   "rx_words_total": 25,
+   "core_share_in_consults": 0.447,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 8,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 0,
+     "null_mean": 0.25,
+     "excess": -0.25,
+     "z": -0.088,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 3,
+     "null_mean": 0.25,
+     "excess": 2.75,
+     "z": 0.972,
+     "top3": true,
+     "pass": true,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 4,
+     "null_mean": 0.5,
+     "excess": 3.5,
+     "z": 1.237,
+     "top3": true,
+     "pass": true,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 3,
+   "null_mean": 0.25,
+   "excess": 2.75,
+   "z": 0.972,
+   "rank": 1,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 1,
+   "same_max": 0.419,
+   "other_doctor_max": 0.412
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 20,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": false,
+   "n_room_days_same_voice": 1,
+   "excl": true,
+   "staff_candidate": false,
+   "n5": true,
+   "core_turns_in_consults": 54,
+   "rx_hit_by_voice": 1,
+   "lq_yes": false,
+   "rxlq": true,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "JKJxJjTimXHh4odOgva5"
+   ],
+   "group_size": 1
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "36d160",
+  "room_day": "rd_f4hzv5sj",
+  "rank_in_room": 1,
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": false,
+   "rx_ge1": false,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": null,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.96,
+   "lq_noul": 0.56,
+   "control_noul": 0.52,
+   "lq_void": true,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.4,
+   "contrast": 0.304,
+   "p_in": 0.468,
+   "p_out": 0.164,
+   "null_mean": -0.096,
+   "null_max": -0.023,
+   "present": 5,
+   "consults_room_active": 9,
+   "consults": 9,
+   "rx": 7,
+   "rx_hit_by_voice": 0,
+   "rx_hit_by_others": 0,
+   "rx_words_by_voice": 0,
+   "rx_words_total": 40,
+   "core_share_in_consults": 0.326,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 9,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 1,
+     "null_mean": 0.25,
+     "excess": 0.75,
+     "z": 0.25,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 1,
+     "null_mean": 0.25,
+     "excess": 0.75,
+     "z": 0.25,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 2,
+     "null_mean": 1.25,
+     "excess": 0.75,
+     "z": 0.25,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 1,
+   "null_mean": 0.25,
+   "excess": 0.75,
+   "z": 0.25,
+   "rank": 10,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 0,
+   "same_max": null,
+   "other_doctor_max": 0.25
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 20,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": false,
+   "n_room_days_same_voice": 1,
+   "excl": true,
+   "staff_candidate": false,
+   "n5": true,
+   "core_turns_in_consults": 73,
+   "rx_hit_by_voice": 0,
+   "lq_yes": false,
+   "rxlq": false,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "Tbvyk1V5ijpcD194ZOWi"
+   ],
+   "group_size": 1
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "65fb97",
+  "room_day": "rd_f4hzv5sj",
+  "rank_in_room": 2,
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": false,
+   "rx_ge1": true,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": 0.897,
+   "stored_voiceprint_cos": 0.612
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.99,
+   "lq_noul": 0.66,
+   "control_noul": 0.56,
+   "lq_void": true,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.371,
+   "contrast": 0.358,
+   "p_in": 0.358,
+   "p_out": 0.0,
+   "null_mean": -0.013,
+   "null_max": 0.074,
+   "present": 6,
+   "consults_room_active": 11,
+   "consults": 21,
+   "rx": 15,
+   "rx_hit_by_voice": 2,
+   "rx_hit_by_others": 4,
+   "rx_words_by_voice": 6,
+   "rx_words_total": 87,
+   "core_share_in_consults": 0.241,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 21,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 2,
+     "null_mean": 0.75,
+     "excess": 1.25,
+     "z": 0.273,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 3,
+     "null_mean": 2.25,
+     "excess": 0.75,
+     "z": 0.164,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 4,
+     "null_mean": 2.75,
+     "excess": 1.25,
+     "z": 0.273,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 3,
+   "null_mean": 2.25,
+   "excess": 0.75,
+   "z": 0.164,
+   "rank": 14,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 1,
+   "same_max": 0.897,
+   "other_doctor_max": 0.397
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 16,
+  "tier_201": "MED",
+  "criteria_201": {
+   "xday": true,
+   "n_room_days_same_voice": 2,
+   "excl": true,
+   "staff_candidate": false,
+   "n5": true,
+   "core_turns_in_consults": 40,
+   "rx_hit_by_voice": 2,
+   "lq_yes": false,
+   "rxlq": true,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "F092iDIAfwXKtLCqP8HS"
+   ],
+   "group_size": 2
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "387f6b",
+  "room_day": "rd_djmbtzph",
+  "rank_in_room": 1,
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": true,
+   "rx_ge1": false,
+   "jev": true,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": true,
+   "same_doctor_other_day_cos": null,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.84,
+   "lq_noul": 0.56,
+   "control_noul": 0.46,
+   "lq_void": false,
+   "jev_term": true
+  },
+  "metrics": {
+   "excess": 0.526,
+   "contrast": 0.481,
+   "p_in": 0.697,
+   "p_out": 0.216,
+   "null_mean": -0.046,
+   "null_max": 0.04,
+   "present": 8,
+   "consults_room_active": 9,
+   "consults": 12,
+   "rx": 12,
+   "rx_hit_by_voice": 0,
+   "rx_hit_by_others": 0,
+   "rx_words_by_voice": 0,
+   "rx_words_total": 101,
+   "core_share_in_consults": 0.593,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 12,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 1,
+     "null_mean": 0.5,
+     "excess": 0.5,
+     "z": 0.144,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 1,
+     "null_mean": 0.5,
+     "excess": 0.5,
+     "z": 0.144,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 3,
+     "null_mean": 0.5,
+     "excess": 2.5,
+     "z": 0.722,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 1,
+   "null_mean": 0.5,
+   "excess": 0.5,
+   "z": 0.144,
+   "rank": 15,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 0,
+   "same_max": null,
+   "other_doctor_max": 0.978
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 30,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": true,
+   "n_room_days_same_voice": 2,
+   "excl": false,
+   "staff_candidate": true,
+   "n5": true,
+   "core_turns_in_consults": 65,
+   "rx_hit_by_voice": 0,
+   "lq_yes": true,
+   "rxlq": true,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "bKr81BFLZSuiMa7MvhaA",
+    "oJfsVSPqXXXC1SVR8AjB"
+   ],
+   "group_size": 2
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "5b4488",
+  "room_day": "rd_djmbtzph",
+  "rank_in_room": 2,
+  "doctor_uid": "JKJxJjTimXHh4odOgva5",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": true,
+   "rx_ge1": false,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": 0.419,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.9,
+   "lq_noul": 0.67,
+   "control_noul": 0.52,
+   "lq_void": true,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.453,
+   "contrast": 0.453,
+   "p_in": 0.533,
+   "p_out": 0.08,
+   "null_mean": 0.0,
+   "null_max": 0.0,
+   "present": 5,
+   "consults_room_active": 5,
+   "consults": 8,
+   "rx": 3,
+   "rx_hit_by_voice": 0,
+   "rx_hit_by_others": 2,
+   "rx_words_by_voice": 0,
+   "rx_words_total": 25,
+   "core_share_in_consults": 0.398,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 8,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 2,
+     "null_mean": 0,
+     "excess": 2,
+     "z": 0.707,
+     "top3": true,
+     "pass": true,
+     "pass_exclusive": true
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 5,
+     "null_mean": 0,
+     "excess": 5,
+     "z": 1.768,
+     "top3": true,
+     "pass": true,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 6,
+     "null_mean": 0.25,
+     "excess": 5.75,
+     "z": 2.033,
+     "top3": true,
+     "pass": true,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 5,
+   "null_mean": 0,
+   "excess": 5,
+   "z": 1.768,
+   "rank": 1,
+   "stable_tolerances": 1,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 1,
+   "same_max": 0.419,
+   "other_doctor_max": 0.38
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 16,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": false,
+   "n_room_days_same_voice": 1,
+   "excl": true,
+   "staff_candidate": false,
+   "n5": true,
+   "core_turns_in_consults": 44,
+   "rx_hit_by_voice": 0,
+   "lq_yes": false,
+   "rxlq": false,
+   "stable_tolerances": 1,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "JKJxJjTimXHh4odOgva5"
+   ],
+   "group_size": 1
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "e9bc54",
+  "room_day": "rd_tp4hcf8s",
+  "rank_in_room": 1,
+  "doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": true,
+   "rx_ge1": true,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": true,
+   "same_doctor_other_day_cos": null,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.89,
+   "lq_noul": 0.52,
+   "control_noul": 0.6,
+   "lq_void": true,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.604,
+   "contrast": 0.575,
+   "p_in": 0.692,
+   "p_out": 0.118,
+   "null_mean": -0.029,
+   "null_max": 0.061,
+   "present": 3,
+   "consults_room_active": 3,
+   "consults": 3,
+   "rx": 1,
+   "rx_hit_by_voice": 1,
+   "rx_hit_by_others": 1,
+   "rx_words_by_voice": 1,
+   "rx_words_total": 5,
+   "core_share_in_consults": 0.471,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 3,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 0,
+     "null_mean": 0.25,
+     "excess": -0.25,
+     "z": -0.144,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 0,
+     "null_mean": 0.25,
+     "excess": -0.25,
+     "z": -0.144,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 1,
+     "null_mean": 0.75,
+     "excess": 0.25,
+     "z": 0.144,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 0,
+   "null_mean": 0.25,
+   "excess": -0.25,
+   "z": -0.144,
+   "rank": 14,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 0,
+   "same_max": null,
+   "other_doctor_max": 0.978
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 14,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": true,
+   "n_room_days_same_voice": 2,
+   "excl": false,
+   "staff_candidate": true,
+   "n5": true,
+   "core_turns_in_consults": 72,
+   "rx_hit_by_voice": 1,
+   "lq_yes": false,
+   "rxlq": true,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "bKr81BFLZSuiMa7MvhaA",
+    "oJfsVSPqXXXC1SVR8AjB"
+   ],
+   "group_size": 2
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "5ed3d4",
+  "room_day": "rd_tp4hcf8s",
+  "rank_in_room": 2,
+  "doctor_uid": "iCPiVDFia1dnnjwx8XbM",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": false,
+   "rx_ge1": false,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": null,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.63,
+   "lq_noul": 0.04,
+   "control_noul": 0.05,
+   "lq_void": false,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.254,
+   "contrast": 0.15,
+   "p_in": 0.394,
+   "p_out": 0.244,
+   "null_mean": -0.104,
+   "null_max": -0.038,
+   "present": 2,
+   "consults_room_active": 3,
+   "consults": 4,
+   "rx": 0,
+   "rx_hit_by_voice": 0,
+   "rx_hit_by_others": 0,
+   "rx_words_by_voice": 0,
+   "rx_words_total": 0,
+   "core_share_in_consults": 0.222,
+   "dominance_rank": 2
+  },
+  "edge": {
+   "consults": 4,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 0,
+     "null_mean": 0.25,
+     "excess": -0.25,
+     "z": -0.125,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 0,
+     "null_mean": 0.75,
+     "excess": -0.75,
+     "z": -0.375,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 1,
+     "null_mean": 0.75,
+     "excess": 0.25,
+     "z": 0.125,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 0,
+   "null_mean": 0.75,
+   "excess": -0.75,
+   "z": -0.375,
+   "rank": 19,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 0,
+   "same_max": null,
+   "other_doctor_max": 0.093
+  },
+  "n_clip_consults": 1,
+  "n_eligible": 4,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": true,
+   "n_room_days_same_voice": 5,
+   "excl": false,
+   "staff_candidate": true,
+   "n5": true,
+   "core_turns_in_consults": 14,
+   "rx_hit_by_voice": 0,
+   "lq_yes": false,
+   "rxlq": false,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "FxzVVvnPjgPOD6JeamKd",
+    "JKJxJjTimXHh4odOgva5",
+    "byIfJcLydITKwRYtpcj5",
+    "hae9i7yx7aGD21JiuLO3",
+    "iCPiVDFia1dnnjwx8XbM"
+   ],
+   "group_size": 5
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "216c5d",
+  "room_day": "rd_u6kdhc3b",
+  "rank_in_room": 1,
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": false,
+   "rx_ge1": true,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": 0.897,
+   "stored_voiceprint_cos": 0.639
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.97,
+   "lq_noul": 0.72,
+   "control_noul": 0.51,
+   "lq_void": true,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.384,
+   "contrast": 0.255,
+   "p_in": 0.293,
+   "p_out": 0.038,
+   "null_mean": -0.129,
+   "null_max": 0.0,
+   "present": 7,
+   "consults_room_active": 12,
+   "consults": 16,
+   "rx": 12,
+   "rx_hit_by_voice": 1,
+   "rx_hit_by_others": 5,
+   "rx_words_by_voice": 1,
+   "rx_words_total": 50,
+   "core_share_in_consults": 0.185,
+   "dominance_rank": 2
+  },
+  "edge": {
+   "consults": 16,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 1,
+     "null_mean": 0.5,
+     "excess": 0.5,
+     "z": 0.125,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 1,
+     "null_mean": 0.75,
+     "excess": 0.25,
+     "z": 0.062,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 2,
+     "null_mean": 1.25,
+     "excess": 0.75,
+     "z": 0.188,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 1,
+   "null_mean": 0.75,
+   "excess": 0.25,
+   "z": 0.062,
+   "rank": 5,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 1,
+   "same_max": 0.897,
+   "other_doctor_max": 0.382
+  },
+  "n_clip_consults": 3,
+  "n_eligible": 9,
+  "tier_201": "MED",
+  "criteria_201": {
+   "xday": true,
+   "n_room_days_same_voice": 2,
+   "excl": true,
+   "staff_candidate": false,
+   "n5": true,
+   "core_turns_in_consults": 33,
+   "rx_hit_by_voice": 1,
+   "lq_yes": false,
+   "rxlq": true,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "F092iDIAfwXKtLCqP8HS"
+   ],
+   "group_size": 2
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ },
+ {
+  "card_id": "a6d278",
+  "room_day": "rd_u6kdhc3b",
+  "rank_in_room": 2,
+  "doctor_uid": "Y2acuffYHRVpZfNhmhlh",
+  "criteria_met": {
+   "timing_edge_ruling194": false,
+   "recurring": false,
+   "rx_ge1": false,
+   "jev": false,
+   "cross_day": false
+  },
+  "xday_note": {
+   "conflict_with_other_doctor": false,
+   "same_doctor_other_day_cos": null,
+   "stored_voiceprint_cos": null
+  },
+  "jev": {
+   "q1_choice": "doctor",
+   "q1_confidence": 0.57,
+   "lq_noul": 0.17,
+   "control_noul": 0.09,
+   "lq_void": false,
+   "jev_term": false
+  },
+  "metrics": {
+   "excess": 0.283,
+   "contrast": 0.236,
+   "p_in": 0.606,
+   "p_out": 0.37,
+   "null_mean": -0.048,
+   "null_max": -0.002,
+   "present": 3,
+   "consults_room_active": 6,
+   "consults": 9,
+   "rx": 0,
+   "rx_hit_by_voice": 0,
+   "rx_hit_by_others": 0,
+   "rx_words_by_voice": 0,
+   "rx_words_total": 0,
+   "core_share_in_consults": 0.516,
+   "dominance_rank": 1
+  },
+  "edge": {
+   "consults": 9,
+   "tol": [
+    {
+     "tol_s": [
+      180,
+      300
+     ],
+     "aligned": 0,
+     "null_mean": 0,
+     "excess": 0,
+     "z": 0.0,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      240,
+      360
+     ],
+     "aligned": 0,
+     "null_mean": 0.5,
+     "excess": -0.5,
+     "z": -0.167,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    },
+    {
+     "tol_s": [
+      300,
+      480
+     ],
+     "aligned": 1,
+     "null_mean": 0.75,
+     "excess": 0.25,
+     "z": 0.083,
+     "top3": false,
+     "pass": false,
+     "pass_exclusive": false
+    }
+   ],
+   "aligned": 0,
+   "null_mean": 0.5,
+   "excess": -0.5,
+   "z": -0.167,
+   "rank": 18,
+   "stable_tolerances": 0,
+   "crit1": false,
+   "crit1_lx739": false
+  },
+  "xday_summary": {
+   "same_doctor_links": 0,
+   "same_max": null,
+   "other_doctor_max": 0.412
+  },
+  "n_clip_consults": 2,
+  "n_eligible": 4,
+  "tier_201": "LOW",
+  "criteria_201": {
+   "xday": true,
+   "n_room_days_same_voice": 2,
+   "excl": false,
+   "staff_candidate": true,
+   "n5": true,
+   "core_turns_in_consults": 33,
+   "rx_hit_by_voice": 0,
+   "lq_yes": false,
+   "rxlq": false,
+   "stable_tolerances": 0,
+   "stable_readingA": false,
+   "doctors_named_by_group": [
+    "Rs06m6tmEu7HvATiQXw6",
+    "Y2acuffYHRVpZfNhmhlh"
+   ],
+   "group_size": 2
+  },
+  "tier_legacy_194_pre_ruling_201": "LOW"
+ }
+]

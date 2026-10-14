@@ -1,0 +1,12 @@
+-- S1 (hysteresis banding, PRD 28 Jul 2026, D6) — the displayed-band ANCHOR.
+--
+-- opd_note_audits carries UNIQUE (uid, engine_version), so a same-version re-score OVERWRITES the
+-- row via ON CONFLICT DO UPDATE / updateOpdAudit — the prior displayed band is destroyed by the
+-- write. Hysteresis is therefore impossible without this column: there is nothing to anchor
+-- against otherwise.
+--
+-- `band` keeps its current meaning (the raw band of the stored index) and is untouched;
+-- `displayed_band` is what surfaces render, moved only on a decisive crossing (≥ g beyond the
+-- threshold). NULL = no anchor yet (historical rows; display falls back to the raw band).
+-- One statement, additive, idempotent. Run by hand in the Neon SQL editor (verification plan §8.1).
+ALTER TABLE opd_note_audits ADD COLUMN IF NOT EXISTS displayed_band text;

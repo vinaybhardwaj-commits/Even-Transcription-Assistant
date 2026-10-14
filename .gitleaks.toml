@@ -55,3 +55,9 @@ regexTarget = "match"
 regexes = [
   '''=[ \t]*["']?(?:\$\{?[A-Za-z_]|process\.env|os\.environ|os\.getenv|ENV\[|<[A-Za-z_ -]+>)''',
 ]
+
+[[rules]]
+id = "presigned-url"
+description = "Presigned object-store URL (signature, credential or R2 host with a query)"
+regex = '''(?i)(?:x-amz-signature=|x-amz-credential=|x-goog-signature=|x-goog-credential=|[?&]sig=[a-z0-9%+/=]{16,}|[a-z0-9.-]+\.r2\.cloudflarestorage\.com/[^\s"']*\?)'''
+keywords = ["x-amz-", "x-goog-", "sig=", "r2.cloudflarestorage.com"]

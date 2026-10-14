@@ -1,0 +1,86 @@
+{
+  "id": "gold-safety-synthetic-v1",
+  "synthetic": true,
+  "description": "Synthetic OPD notes for the phase-0 safety gate. Not clinical records.",
+  "frozen_sha256": "c4cb82e00d2dcb51ced277576476b5b566c140014198de5d5f4ed90668775765",
+  "baseline": {
+    "safety_recall": 0.96,
+    "safety_precision": 0.9
+  },
+  "cases": [
+    {
+      "id": "syn-ddi-allergy",
+      "source": "synthetic",
+      "source_uid": "syn-ddi-allergy",
+      "source_timestamp": "2026-10-11T20:00:00.000Z",
+      "body": "AGE: 54\nSEX: female\nPREGNANT: no\nRENAL: no\nHEPATIC: no\nALLERGY: penicillin\nCOMORBIDITY: hypertension\nDIAGNOSIS: atrial fibrillation\nMEDICATION: warfarin | 5 | mg | od | oral | 90 days\nMEDICATION: ibuprofen | 400 | mg | tds | oral | 5 days\nMEDICATION: amoxicillin | 500 | mg | tds | oral | 5 days\nVITAL: sbp | 138 | mmHg\nINVESTIGATION: INR | 2.4\nPLAN: review in clinic\nREDFLAG: none",
+      "expected_safety_rule_ids": [
+        "allergy.beta_lactam",
+        "ddi.warfarin_nsaid"
+      ],
+      "expected_critical_rule_ids": [
+        "allergy.beta_lactam",
+        "ddi.warfarin_nsaid"
+      ]
+    },
+    {
+      "id": "syn-renal-metformin",
+      "source": "synthetic",
+      "source_uid": "syn-renal-metformin",
+      "source_timestamp": "2026-10-11T18:00:00.000Z",
+      "body": "AGE: 67\nSEX: male\nPREGNANT: no\nRENAL: yes\nHEPATIC: no\nALLERGY: none\nCOMORBIDITY: none\nDIAGNOSIS: type 2 diabetes\nMEDICATION: metformin | 500 | mg | bd | oral | 30 days\nVITAL: none\nINVESTIGATION: none\nPLAN: continue metformin\nREDFLAG: none",
+      "expected_safety_rule_ids": [
+        "dose.renal.metformin"
+      ],
+      "expected_critical_rule_ids": []
+    },
+    {
+      "id": "syn-pregnancy-fdc-redflag",
+      "source": "synthetic",
+      "source_uid": "syn-pregnancy-fdc-redflag",
+      "source_timestamp": "2026-10-12T04:30:00.000Z",
+      "body": "AGE: 29\nSEX: female\nPREGNANT: yes\nRENAL: no\nHEPATIC: no\nALLERGY: none\nCOMORBIDITY: none\nDIAGNOSIS: hypertension\nMEDICATION: enalapril | 5 | mg | od | oral | 30 days\nMEDICATION: nimesulide | 100 | mg | bd | oral | 3 days\nMEDICATION: paracetamol | 500 | mg | tds | oral | 3 days\nVITAL: sbp | 128 | mmHg\nINVESTIGATION: none\nPLAN: review in 2 weeks\nREDFLAG: sudden chest pain",
+      "expected_safety_rule_ids": [
+        "fdc.banned.nimesulide_paracetamol",
+        "pregnancy.ace_inhibitor",
+        "redflag.no_urgent_plan"
+      ],
+      "expected_critical_rule_ids": [
+        "fdc.banned.nimesulide_paracetamol",
+        "pregnancy.ace_inhibitor",
+        "redflag.no_urgent_plan"
+      ]
+    },
+    {
+      "id": "syn-clean-fever",
+      "source": "synthetic",
+      "source_uid": "syn-clean-fever",
+      "source_timestamp": "2026-10-12T06:00:00.000Z",
+      "body": "AGE: 24\nSEX: male\nPREGNANT: no\nRENAL: no\nHEPATIC: no\nALLERGY: none\nCOMORBIDITY: none\nDIAGNOSIS: viral fever\nMEDICATION: paracetamol | 500 | mg | tds | oral | 3 days\nVITAL: temp_c | 38.2 | c\nINVESTIGATION: none\nPLAN: fluids and rest\nREDFLAG: none",
+      "expected_safety_rule_ids": [],
+      "expected_critical_rule_ids": []
+    },
+    {
+      "id": "syn-quality-insulin",
+      "source": "synthetic",
+      "source_uid": "syn-quality-insulin",
+      "source_timestamp": "2026-10-12T07:15:00.000Z",
+      "body": "AGE: 58\nSEX: female\nPREGNANT: no\nRENAL: no\nHEPATIC: no\nALLERGY: none\nCOMORBIDITY: none\nDIAGNOSIS: viral fever\nMEDICATION: insulin | | | od | sc |\nMEDICATION: paracetamol | 500 | mg | tds | oral | 3 days\nVITAL: none\nINVESTIGATION: none\nPLAN: fluids and rest\nREDFLAG: none",
+      "expected_safety_rule_ids": [],
+      "expected_critical_rule_ids": []
+    },
+    {
+      "id": "syn-ddi-order-swap",
+      "source": "synthetic",
+      "source_uid": "syn-ddi-order-swap",
+      "source_timestamp": "2026-10-12T08:00:00.000Z",
+      "body": "AGE: 54\nSEX: male\nPREGNANT: no\nRENAL: no\nHEPATIC: no\nALLERGY: none\nCOMORBIDITY: none\nDIAGNOSIS: atrial fibrillation\nMEDICATION: ibuprofen | 400 | mg | tds | oral | 5 days\nMEDICATION: warfarin | 5 | mg | od | oral | 90 days\nVITAL: none\nINVESTIGATION: none\nPLAN: review in clinic\nREDFLAG: none",
+      "expected_safety_rule_ids": [
+        "ddi.warfarin_nsaid"
+      ],
+      "expected_critical_rule_ids": [
+        "ddi.warfarin_nsaid"
+      ]
+    }
+  ]
+}

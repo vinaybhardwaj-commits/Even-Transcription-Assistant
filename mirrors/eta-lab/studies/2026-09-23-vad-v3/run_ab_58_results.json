@@ -1,0 +1,894 @@
+{
+  "arm_a": {
+    "rows": [
+      {
+        "wid": "bw_25prz6ry_1790162100000_primary",
+        "pyannote_s": 405.5400000000003,
+        "cut_s": 6.531999999999925,
+        "cut_pct": 1.6106919169502194,
+        "sent_s": 791.1679999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_25prz6ry_1790163000000_primary",
+        "pyannote_s": 386.85999999999996,
+        "cut_s": 4.129999999999953,
+        "cut_pct": 1.0675696634441278,
+        "sent_s": 776.1,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_25prz6ry_1790163900000_primary",
+        "pyannote_s": 192.63999999999982,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 847.9,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_25prz6ry_1790164800000_primary",
+        "pyannote_s": 180.55999999999977,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 837.0000000000001,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_25prz6ry_1790165700000_primary",
+        "pyannote_s": 355.53999999999934,
+        "cut_s": 14.625000000000057,
+        "cut_pct": 4.113461213928133,
+        "sent_s": 586.9000000000001,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_25prz6ry_1790169300000_primary",
+        "pyannote_s": 20.339999999999918,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 758.9000000000001,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_25prz6ry_1790170200000_primary",
+        "pyannote_s": 81.86000000000024,
+        "cut_s": 3.560000000000059,
+        "cut_pct": 4.348888345956571,
+        "sent_s": 700.0999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_33g2chqe_1790145900000_primary",
+        "pyannote_s": 261.41999999999956,
+        "cut_s": 0.0049999999999954525,
+        "cut_pct": 0.0019126310152228064,
+        "sent_s": 827.3,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_4h7fkrss_1790163900000_primary",
+        "pyannote_s": 238.6400000000001,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 753.5999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_4h7fkrss_1790164800000_primary",
+        "pyannote_s": 133.52,
+        "cut_s": 0.12000000000000455,
+        "cut_pct": 0.08987417615338866,
+        "sent_s": 736.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_59s3jdqw_1790161200000_primary",
+        "pyannote_s": 550.7200000000005,
+        "cut_s": 0.10200000000008913,
+        "cut_pct": 0.01852120859966753,
+        "sent_s": 850.2679999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_59s3jdqw_1790162100000_primary",
+        "pyannote_s": 735.3399999999993,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 884.268,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_59s3jdqw_1790163000000_primary",
+        "pyannote_s": 475.7399999999997,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 792.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6nm7h269_1790156700000_primary",
+        "pyannote_s": 9.139999999999858,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 686.2,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6nm7h269_1790162100000_primary",
+        "pyannote_s": 34.87999999999954,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 576.1679999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6nm7h269_1790166600000_primary",
+        "pyannote_s": 183.13999999999987,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 510.4,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6nm7h269_1790167500000_primary",
+        "pyannote_s": 588.3800000000001,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 816.5,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6nm7h269_1790168400000_primary",
+        "pyannote_s": 529.8999999999999,
+        "cut_s": 0.07699999999999818,
+        "cut_pct": 0.014531043593130441,
+        "sent_s": 797.3679999999997,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6nm7h269_1790169300000_primary",
+        "pyannote_s": 90.39999999999995,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 262.99999999999994,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_6yfr8qb8_1789969500000_primary",
+        "pyannote_s": 480.7000000000004,
+        "cut_s": 0.045000000000015916,
+        "cut_pct": 0.009361348034120216,
+        "sent_s": 709.568,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790160300000_primary",
+        "pyannote_s": 325.4799999999999,
+        "cut_s": 2.4399999999999977,
+        "cut_pct": 0.7496620376059968,
+        "sent_s": 808.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790161200000_primary",
+        "pyannote_s": 233.97999999999985,
+        "cut_s": 0.33499999999997954,
+        "cut_pct": 0.14317463031027428,
+        "sent_s": 852.4000000000001,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790162100000_primary",
+        "pyannote_s": 315.6199999999999,
+        "cut_s": 1.1550000000000296,
+        "cut_pct": 0.3659463912299696,
+        "sent_s": 840.1,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790163000000_primary",
+        "pyannote_s": 196.06000000000023,
+        "cut_s": 1.3199999999999648,
+        "cut_pct": 0.6732632867489357,
+        "sent_s": 866.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790163900000_primary",
+        "pyannote_s": 264.19999999999914,
+        "cut_s": 5.315000000000044,
+        "cut_pct": 2.0117335352006287,
+        "sent_s": 800.4,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790164800000_primary",
+        "pyannote_s": 324.28000000000094,
+        "cut_s": 1.134999999999991,
+        "cut_pct": 0.3500061675095558,
+        "sent_s": 865.5,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7tedad86_1790165700000_primary",
+        "pyannote_s": 140.9400000000005,
+        "cut_s": 0.125,
+        "cut_pct": 0.08869022278983933,
+        "sent_s": 867.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_7zyu7tfk_1789968600000_primary",
+        "pyannote_s": 614.9199999999997,
+        "cut_s": 0.2599999999999909,
+        "cut_pct": 0.04228192285175161,
+        "sent_s": 858.1000000000001,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_8scgjz67_1789810200000_primary",
+        "pyannote_s": 380.4800000000008,
+        "cut_s": 1.0149999999999864,
+        "cut_pct": 0.2667682926829227,
+        "sent_s": 845.1999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_8scgjz67_1789812000000_primary",
+        "pyannote_s": 495.47999999999996,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 855.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_9j4z2ze3_1789958700000_primary",
+        "pyannote_s": 29.279999999999973,
+        "cut_s": 0.005000000000023874,
+        "cut_pct": 0.01707650273232199,
+        "sent_s": 836.5,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_9j4z2ze3_1789987500000_primary",
+        "pyannote_s": 99.32,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 827.468,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_9j4z2ze3_1789990200000_primary",
+        "pyannote_s": 10.519999999999996,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 829.0999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_a5sq2mjz_1789737300000_primary",
+        "pyannote_s": 4.559999999999945,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 755.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_amdxyq32_1790171100000_primary",
+        "pyannote_s": 861.2400000000004,
+        "cut_s": 0.07699999999999818,
+        "cut_pct": 0.008940597278342639,
+        "sent_s": 885.168,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_bt646cgk_1789737300000_primary",
+        "pyannote_s": 116.02000000000014,
+        "cut_s": 1.0,
+        "cut_pct": 0.8619203585588681,
+        "sent_s": 852.5,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_bxcb9drz_1789737300000_primary",
+        "pyannote_s": 511.18,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 822.2999999999998,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_eznumztb_1790150400000_primary",
+        "pyannote_s": 565.8199999999999,
+        "cut_s": 2.240000000000009,
+        "cut_pct": 0.39588561733413613,
+        "sent_s": 860.368,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_eznumztb_1790151300000_primary",
+        "pyannote_s": 42.180000000000035,
+        "cut_s": 0.3649999999999949,
+        "cut_pct": 0.8653390232337472,
+        "sent_s": 846.3,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_eznumztb_1790154000000_primary",
+        "pyannote_s": 0.3800000000000523,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 618.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_gf2zntnq_1789995600000_primary",
+        "pyannote_s": 34.08000000000017,
+        "cut_s": 0.535000000000025,
+        "cut_pct": 1.5698356807512395,
+        "sent_s": 507.6,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_gf2zntnq_1789996500000_primary",
+        "pyannote_s": 48.719999999999914,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 418.4999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_j45jmzam_1789969500000_primary",
+        "pyannote_s": 174.8800000000001,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 754.568,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_nrqthr5b_1790163000000_primary",
+        "pyannote_s": 54.45999999999981,
+        "cut_s": 0.4049999999999727,
+        "cut_pct": 0.743665075284565,
+        "sent_s": 778.5999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_nrqthr5b_1790163900000_primary",
+        "pyannote_s": 127.63999999999953,
+        "cut_s": 9.104999999999905,
+        "cut_pct": 7.133343779379456,
+        "sent_s": 852.5,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_nrqthr5b_1790165700000_primary",
+        "pyannote_s": 125.63999999999916,
+        "cut_s": 8.894999999999868,
+        "cut_pct": 7.079751671442159,
+        "sent_s": 834.3999999999999,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_pjk6n3qy_1789984800000_primary",
+        "pyannote_s": 8.660000000000025,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 765.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790153100000_primary",
+        "pyannote_s": 118.40000000000008,
+        "cut_s": 2.64499999999999,
+        "cut_pct": 2.233952702702693,
+        "sent_s": 750.6,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790154900000_primary",
+        "pyannote_s": 28.239999999999952,
+        "cut_s": 0.30499999999995,
+        "cut_pct": 1.0800283286117227,
+        "sent_s": 580.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790155800000_primary",
+        "pyannote_s": 321.70000000000016,
+        "cut_s": 3.725000000000069,
+        "cut_pct": 1.157911097295638,
+        "sent_s": 772.9000000000001,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790160300000_primary",
+        "pyannote_s": 39.940000000000055,
+        "cut_s": 11.715000000000032,
+        "cut_pct": 29.331497245868842,
+        "sent_s": 783.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790161200000_primary",
+        "pyannote_s": 109.04000000000006,
+        "cut_s": 17.781999999999982,
+        "cut_pct": 16.307776962582512,
+        "sent_s": 667.168,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790162100000_primary",
+        "pyannote_s": 162.32,
+        "cut_s": 7.210000000000008,
+        "cut_pct": 4.441843272548058,
+        "sent_s": 701.7,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_u6tgv52b_1790163000000_primary",
+        "pyannote_s": 54.88000000000011,
+        "cut_s": 1.615000000000009,
+        "cut_pct": 2.9427842565597775,
+        "sent_s": 619.3,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789795800000_primary",
+        "pyannote_s": 563.9000000000001,
+        "cut_s": 0.40500000000000114,
+        "cut_pct": 0.07182124490157848,
+        "sent_s": 831.8,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789797600000_primary",
+        "pyannote_s": 639.5000000000006,
+        "cut_s": 0.07699999999999818,
+        "cut_pct": 0.012040656763095875,
+        "sent_s": 860.768,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789798500000_primary",
+        "pyannote_s": 627.7799999999995,
+        "cut_s": 0.014999999999986358,
+        "cut_pct": 0.0023893720730170393,
+        "sent_s": 866.768,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789805700000_primary",
+        "pyannote_s": 1.1800000000000068,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 680.0,
+        "level_log_source": "rms_proxy_no_real_coverage"
+      }
+    ],
+    "summary": {
+      "overall_cut_pct": 0.7507193285903876,
+      "worst_window": "bw_u6tgv52b_1790160300000_primary",
+      "worst_cut_pct": 29.331497245868842,
+      "avg_sent_s": 760.6255862068965,
+      "all_le_2pct": false
+    }
+  },
+  "arm_b": {
+    "rows": [
+      {
+        "wid": "bw_25prz6ry_1790162100000_primary",
+        "pyannote_s": 405.5400000000003,
+        "cut_s": 3.42500000000004,
+        "cut_pct": 0.8445529417566792,
+        "sent_s": 874.3000000000003
+      },
+      {
+        "wid": "bw_25prz6ry_1790163000000_primary",
+        "pyannote_s": 386.85999999999996,
+        "cut_s": 0.8750000000000426,
+        "cut_pct": 0.22618001344156613,
+        "sent_s": 881.1000000000001
+      },
+      {
+        "wid": "bw_25prz6ry_1790163900000_primary",
+        "pyannote_s": 192.63999999999982,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 875.2999999999998
+      },
+      {
+        "wid": "bw_25prz6ry_1790164800000_primary",
+        "pyannote_s": 180.55999999999977,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 871.5000000000003
+      },
+      {
+        "wid": "bw_25prz6ry_1790165700000_primary",
+        "pyannote_s": 355.53999999999934,
+        "cut_s": 1.4099999999999682,
+        "cut_pct": 0.3965798503684454,
+        "sent_s": 882.1000000000003
+      },
+      {
+        "wid": "bw_25prz6ry_1790169300000_primary",
+        "pyannote_s": 20.339999999999918,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 888.7000000000002
+      },
+      {
+        "wid": "bw_25prz6ry_1790170200000_primary",
+        "pyannote_s": 81.86000000000024,
+        "cut_s": 0.7300000000001319,
+        "cut_pct": 0.8917664304912408,
+        "sent_s": 893.8000000000001
+      },
+      {
+        "wid": "bw_33g2chqe_1790145900000_primary",
+        "pyannote_s": 261.41999999999956,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 882.6000000000001
+      },
+      {
+        "wid": "bw_4h7fkrss_1790163900000_primary",
+        "pyannote_s": 238.6400000000001,
+        "cut_s": 0.014999999999986358,
+        "cut_pct": 0.006285618504855159,
+        "sent_s": 895.1000000000001
+      },
+      {
+        "wid": "bw_4h7fkrss_1790164800000_primary",
+        "pyannote_s": 133.52,
+        "cut_s": 0.0700000000000216,
+        "cut_pct": 0.05242660275615758,
+        "sent_s": 897.0000000000001
+      },
+      {
+        "wid": "bw_59s3jdqw_1790161200000_primary",
+        "pyannote_s": 550.7200000000005,
+        "cut_s": 0.1199999999999477,
+        "cut_pct": 0.021789657176050914,
+        "sent_s": 892.2
+      },
+      {
+        "wid": "bw_59s3jdqw_1790162100000_primary",
+        "pyannote_s": 735.3399999999993,
+        "cut_s": 0.17500000000001137,
+        "cut_pct": 0.023798514972667273,
+        "sent_s": 893.4000000000002
+      },
+      {
+        "wid": "bw_59s3jdqw_1790163000000_primary",
+        "pyannote_s": 475.7399999999997,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 894.2000000000003
+      },
+      {
+        "wid": "bw_6nm7h269_1790156700000_primary",
+        "pyannote_s": 9.139999999999858,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 641.8000000000002
+      },
+      {
+        "wid": "bw_6nm7h269_1790162100000_primary",
+        "pyannote_s": 34.87999999999954,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 541.0999999999997
+      },
+      {
+        "wid": "bw_6nm7h269_1790166600000_primary",
+        "pyannote_s": 183.13999999999987,
+        "cut_s": 1.1100000000006958,
+        "cut_pct": 0.6060936988100342,
+        "sent_s": 459.7
+      },
+      {
+        "wid": "bw_6nm7h269_1790167500000_primary",
+        "pyannote_s": 588.3800000000001,
+        "cut_s": 1.4200000000004138,
+        "cut_pct": 0.24134063020503985,
+        "sent_s": 772.5999999999999
+      },
+      {
+        "wid": "bw_6nm7h269_1790168400000_primary",
+        "pyannote_s": 529.8999999999999,
+        "cut_s": 1.6650000000001857,
+        "cut_pct": 0.31421022834500584,
+        "sent_s": 748.9000000000003
+      },
+      {
+        "wid": "bw_6nm7h269_1790169300000_primary",
+        "pyannote_s": 90.39999999999995,
+        "cut_s": 1.010000000000062,
+        "cut_pct": 1.1172566371682107,
+        "sent_s": 266.9
+      },
+      {
+        "wid": "bw_6yfr8qb8_1789969500000_primary",
+        "pyannote_s": 480.7000000000004,
+        "cut_s": 0.22500000000022524,
+        "cut_pct": 0.046806740170631383,
+        "sent_s": 887.2000000000002
+      },
+      {
+        "wid": "bw_7tedad86_1790160300000_primary",
+        "pyannote_s": 325.4799999999999,
+        "cut_s": 0.10000000000002274,
+        "cut_pct": 0.030723854000252786,
+        "sent_s": 899.4000000000001
+      },
+      {
+        "wid": "bw_7tedad86_1790161200000_primary",
+        "pyannote_s": 233.97999999999985,
+        "cut_s": 0.6999999999998749,
+        "cut_pct": 0.2991708693050156,
+        "sent_s": 891.9000000000003
+      },
+      {
+        "wid": "bw_7tedad86_1790162100000_primary",
+        "pyannote_s": 315.6199999999999,
+        "cut_s": 0.5950000000000273,
+        "cut_pct": 0.18851783790635177,
+        "sent_s": 891.3999999999999
+      },
+      {
+        "wid": "bw_7tedad86_1790163000000_primary",
+        "pyannote_s": 196.06000000000023,
+        "cut_s": 0.41499999999988013,
+        "cut_pct": 0.21166989697025382,
+        "sent_s": 891.2000000000002
+      },
+      {
+        "wid": "bw_7tedad86_1790163900000_primary",
+        "pyannote_s": 264.19999999999914,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.9000000000001
+      },
+      {
+        "wid": "bw_7tedad86_1790164800000_primary",
+        "pyannote_s": 324.28000000000094,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 896.1000000000001
+      },
+      {
+        "wid": "bw_7tedad86_1790165700000_primary",
+        "pyannote_s": 140.9400000000005,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 882.2
+      },
+      {
+        "wid": "bw_7zyu7tfk_1789968600000_primary",
+        "pyannote_s": 614.9199999999997,
+        "cut_s": 0.2199999999997999,
+        "cut_pct": 0.035777011643758544,
+        "sent_s": 895.3000000000002
+      },
+      {
+        "wid": "bw_8scgjz67_1789810200000_primary",
+        "pyannote_s": 380.4800000000008,
+        "cut_s": 0.014999999999986358,
+        "cut_pct": 0.0039423885618130585,
+        "sent_s": 897.9000000000002
+      },
+      {
+        "wid": "bw_8scgjz67_1789812000000_primary",
+        "pyannote_s": 495.47999999999996,
+        "cut_s": 0.700000000000017,
+        "cut_pct": 0.1412771453943685,
+        "sent_s": 897.0000000000001
+      },
+      {
+        "wid": "bw_9j4z2ze3_1789958700000_primary",
+        "pyannote_s": 29.279999999999973,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 892.1000000000003
+      },
+      {
+        "wid": "bw_9j4z2ze3_1789987500000_primary",
+        "pyannote_s": 99.32,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 894.3
+      },
+      {
+        "wid": "bw_9j4z2ze3_1789990200000_primary",
+        "pyannote_s": 10.519999999999996,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 895.4000000000003
+      },
+      {
+        "wid": "bw_a5sq2mjz_1789737300000_primary",
+        "pyannote_s": 4.559999999999945,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 898.6000000000001
+      },
+      {
+        "wid": "bw_amdxyq32_1790171100000_primary",
+        "pyannote_s": 861.2400000000004,
+        "cut_s": 0.14499999999986812,
+        "cut_pct": 0.016836189679980965,
+        "sent_s": 885.9999999999999
+      },
+      {
+        "wid": "bw_bt646cgk_1789737300000_primary",
+        "pyannote_s": 116.02000000000014,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.5000000000001
+      },
+      {
+        "wid": "bw_bxcb9drz_1789737300000_primary",
+        "pyannote_s": 511.18,
+        "cut_s": 0.38000000000010914,
+        "cut_pct": 0.07433780664347375,
+        "sent_s": 894.2000000000003
+      },
+      {
+        "wid": "bw_eznumztb_1790150400000_primary",
+        "pyannote_s": 565.8199999999999,
+        "cut_s": 0.035000000000081855,
+        "cut_pct": 0.006185712770860319,
+        "sent_s": 895.7000000000002
+      },
+      {
+        "wid": "bw_eznumztb_1790151300000_primary",
+        "pyannote_s": 42.180000000000035,
+        "cut_s": 0.0350000000000108,
+        "cut_pct": 0.08297771455668745,
+        "sent_s": 885.4000000000001
+      },
+      {
+        "wid": "bw_eznumztb_1790154000000_primary",
+        "pyannote_s": 0.3800000000000523,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.6000000000001
+      },
+      {
+        "wid": "bw_gf2zntnq_1789995600000_primary",
+        "pyannote_s": 34.08000000000017,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 896.9000000000001
+      },
+      {
+        "wid": "bw_gf2zntnq_1789996500000_primary",
+        "pyannote_s": 48.719999999999914,
+        "cut_s": 0.10000000000002274,
+        "cut_pct": 0.2052545155993902,
+        "sent_s": 896.4
+      },
+      {
+        "wid": "bw_j45jmzam_1789969500000_primary",
+        "pyannote_s": 174.8800000000001,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 897.0
+      },
+      {
+        "wid": "bw_nrqthr5b_1790163000000_primary",
+        "pyannote_s": 54.45999999999981,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 898.3
+      },
+      {
+        "wid": "bw_nrqthr5b_1790163900000_primary",
+        "pyannote_s": 127.63999999999953,
+        "cut_s": 1.5100000000002183,
+        "cut_pct": 1.1830147289252773,
+        "sent_s": 890.9
+      },
+      {
+        "wid": "bw_nrqthr5b_1790165700000_primary",
+        "pyannote_s": 125.63999999999916,
+        "cut_s": 0.10000000000002274,
+        "cut_pct": 0.07959248646929593,
+        "sent_s": 892.4000000000001
+      },
+      {
+        "wid": "bw_pjk6n3qy_1789984800000_primary",
+        "pyannote_s": 8.660000000000025,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 898.5000000000001
+      },
+      {
+        "wid": "bw_u6tgv52b_1790153100000_primary",
+        "pyannote_s": 118.40000000000008,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.0000000000001
+      },
+      {
+        "wid": "bw_u6tgv52b_1790154900000_primary",
+        "pyannote_s": 28.239999999999952,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.8000000000001
+      },
+      {
+        "wid": "bw_u6tgv52b_1790155800000_primary",
+        "pyannote_s": 321.70000000000016,
+        "cut_s": 0.06499999999994088,
+        "cut_pct": 0.02020516008701923,
+        "sent_s": 898.6000000000001
+      },
+      {
+        "wid": "bw_u6tgv52b_1790160300000_primary",
+        "pyannote_s": 39.940000000000055,
+        "cut_s": 0.10000000000002274,
+        "cut_pct": 0.2503755633450741,
+        "sent_s": 897.0999999999999
+      },
+      {
+        "wid": "bw_u6tgv52b_1790161200000_primary",
+        "pyannote_s": 109.04000000000006,
+        "cut_s": 0.14499999999986812,
+        "cut_pct": 0.1329787234041343,
+        "sent_s": 899.4000000000002
+      },
+      {
+        "wid": "bw_u6tgv52b_1790162100000_primary",
+        "pyannote_s": 162.32,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.3000000000002
+      },
+      {
+        "wid": "bw_u6tgv52b_1790163000000_primary",
+        "pyannote_s": 54.88000000000011,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.9000000000001
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789795800000_primary",
+        "pyannote_s": 563.9000000000001,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 895.7000000000002
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789797600000_primary",
+        "pyannote_s": 639.5000000000006,
+        "cut_s": 0.14499999999986812,
+        "cut_pct": 0.022673964034381235,
+        "sent_s": 895.9000000000002
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789798500000_primary",
+        "pyannote_s": 627.7799999999995,
+        "cut_s": 0.035000000000081855,
+        "cut_pct": 0.005575201503724534,
+        "sent_s": 897.7000000000003
+      },
+      {
+        "wid": "bw_wwq9p6eb_1789805700000_primary",
+        "pyannote_s": 1.1800000000000068,
+        "cut_s": 0.0,
+        "cut_pct": 0.0,
+        "sent_s": 899.8000000000001
+      }
+    ],
+    "summary": {
+      "overall_cut_pct": 0.12095326675805446,
+      "worst_window": "bw_nrqthr5b_1790163900000_primary",
+      "worst_cut_pct": 1.1830147289252773,
+      "avg_sent_s": 859.9172413793107,
+      "all_le_2pct": true
+    }
+  }
+}

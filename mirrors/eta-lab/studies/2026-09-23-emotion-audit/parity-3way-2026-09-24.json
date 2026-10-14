@@ -1,0 +1,386 @@
+{
+ "clip00.wav": {
+  "box": {
+   "unscorable": true,
+   "skip_reason": "insufficient_speech",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "gcp": {
+   "unscorable": true,
+   "skip_reason": "insufficient_speech",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "mini": {
+   "unscorable": true,
+   "skip_reason": "insufficient_speech",
+   "labels": {},
+   "inference_s": 0.0
+  }
+ },
+ "clip01.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.008697587996721268,
+    "disgust": 0.0038520500529557467,
+    "enthusiasm": 0.04062461480498314,
+    "fear": 0.0041193170472979546,
+    "happiness": 0.058806780725717545,
+    "neutral": 0.8655214309692383,
+    "sadness": 0.01837817393243313
+   },
+   "inference_s": 0.576
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.00869892630726099,
+    "disgust": 0.003852348541840911,
+    "enthusiasm": 0.040624938905239105,
+    "fear": 0.004119243938475847,
+    "happiness": 0.05880448967218399,
+    "neutral": 0.8655233979225159,
+    "sadness": 0.018376639112830162
+   },
+   "inference_s": 0.052
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.00869752187281847,
+    "disgust": 0.0038519822992384434,
+    "enthusiasm": 0.04062405601143837,
+    "fear": 0.0041192821227014065,
+    "happiness": 0.05880594253540039,
+    "neutral": 0.8655231595039368,
+    "sadness": 0.01837805286049843
+   },
+   "inference_s": 2.052
+  }
+ },
+ "clip02.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.010476582683622837,
+    "disgust": 0.01366337575018406,
+    "enthusiasm": 0.03801296651363373,
+    "fear": 0.014222689904272556,
+    "happiness": 0.04478292912244797,
+    "neutral": 0.7451574206352234,
+    "sadness": 0.13368405401706696
+   },
+   "inference_s": 0.584
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.010477172210812569,
+    "disgust": 0.013664553873240948,
+    "enthusiasm": 0.0380156934261322,
+    "fear": 0.014222039841115475,
+    "happiness": 0.044773317873477936,
+    "neutral": 0.7451261878013611,
+    "sadness": 0.13372106850147247
+   },
+   "inference_s": 0.05
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.010476584546267986,
+    "disgust": 0.013663191348314285,
+    "enthusiasm": 0.038012921810150146,
+    "fear": 0.014222510159015656,
+    "happiness": 0.044782605022192,
+    "neutral": 0.7451611161231995,
+    "sadness": 0.13368107378482819
+   },
+   "inference_s": 1.678
+  }
+ },
+ "clip03.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.014180853962898254,
+    "disgust": 0.003070250153541565,
+    "enthusiasm": 0.010440179146826267,
+    "fear": 0.005596577189862728,
+    "happiness": 0.00880366936326027,
+    "neutral": 0.8969852924346924,
+    "sadness": 0.06092317774891853
+   },
+   "inference_s": 0.606
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.014181566424667835,
+    "disgust": 0.0030700271017849445,
+    "enthusiasm": 0.010441352613270283,
+    "fear": 0.005596615839749575,
+    "happiness": 0.008804196491837502,
+    "neutral": 0.896977424621582,
+    "sadness": 0.06092888116836548
+   },
+   "inference_s": 0.049
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.014180640690028667,
+    "disgust": 0.003070212434977293,
+    "enthusiasm": 0.010440145619213581,
+    "fear": 0.005596561823040247,
+    "happiness": 0.008803699165582657,
+    "neutral": 0.8969862461090088,
+    "sadness": 0.06092241778969765
+   },
+   "inference_s": 1.598
+  }
+ },
+ "clip04.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.017854366451501846,
+    "disgust": 0.003289639251306653,
+    "enthusiasm": 0.009244002401828766,
+    "fear": 0.004161250777542591,
+    "happiness": 0.009439718909561634,
+    "neutral": 0.930196225643158,
+    "sadness": 0.02581479400396347
+   },
+   "inference_s": 0.563
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.01784859411418438,
+    "disgust": 0.0032890026923269033,
+    "enthusiasm": 0.009245583787560463,
+    "fear": 0.004160264972597361,
+    "happiness": 0.009440569207072258,
+    "neutral": 0.9302085638046265,
+    "sadness": 0.025807494297623634
+   },
+   "inference_s": 0.05
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.017854537814855576,
+    "disgust": 0.0032896166667342186,
+    "enthusiasm": 0.009243929758667946,
+    "fear": 0.0041611334308981895,
+    "happiness": 0.009439658373594284,
+    "neutral": 0.9301968216896057,
+    "sadness": 0.025814292952418327
+   },
+   "inference_s": 1.637
+  }
+ },
+ "clip05.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.07882119715213776,
+    "disgust": 0.05074331536889076,
+    "enthusiasm": 0.18415123224258423,
+    "fear": 0.016958298161625862,
+    "happiness": 0.3011917173862457,
+    "neutral": 0.3474646508693695,
+    "sadness": 0.02066962979733944
+   },
+   "inference_s": 0.585
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.07882876694202423,
+    "disgust": 0.05073040351271629,
+    "enthusiasm": 0.18414250016212463,
+    "fear": 0.0169504527002573,
+    "happiness": 0.3011261224746704,
+    "neutral": 0.34755566716194153,
+    "sadness": 0.020666101947426796
+   },
+   "inference_s": 0.056
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.07882090657949448,
+    "disgust": 0.05074379965662956,
+    "enthusiasm": 0.18415182828903198,
+    "fear": 0.016958564519882202,
+    "happiness": 0.3011948764324188,
+    "neutral": 0.34746047854423523,
+    "sadness": 0.020669620484113693
+   },
+   "inference_s": 1.487
+  }
+ },
+ "clip06.wav": {
+  "box": {
+   "unscorable": true,
+   "skip_reason": "near_silent",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "gcp": {
+   "unscorable": true,
+   "skip_reason": "near_silent",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "mini": {
+   "unscorable": true,
+   "skip_reason": "near_silent",
+   "labels": {},
+   "inference_s": 0.0
+  }
+ },
+ "clip07.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.02520516887307167,
+    "disgust": 0.007979326881468296,
+    "enthusiasm": 0.01741543598473072,
+    "fear": 0.002687886357307434,
+    "happiness": 0.024729203432798386,
+    "neutral": 0.9035148024559021,
+    "sadness": 0.018468288704752922
+   },
+   "inference_s": 0.593
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.025192990899086,
+    "disgust": 0.007978344336152077,
+    "enthusiasm": 0.01741463877260685,
+    "fear": 0.002687047701328993,
+    "happiness": 0.02473282441496849,
+    "neutral": 0.903527557849884,
+    "sadness": 0.018466729670763016
+   },
+   "inference_s": 0.054
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.02520488016307354,
+    "disgust": 0.007979166693985462,
+    "enthusiasm": 0.017415238544344902,
+    "fear": 0.0026876835618168116,
+    "happiness": 0.024728432297706604,
+    "neutral": 0.9035171866416931,
+    "sadness": 0.0184672512114048
+   },
+   "inference_s": 1.605
+  }
+ },
+ "clip08.wav": {
+  "box": {
+   "unscorable": true,
+   "skip_reason": "insufficient_speech",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "gcp": {
+   "unscorable": true,
+   "skip_reason": "insufficient_speech",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "mini": {
+   "unscorable": true,
+   "skip_reason": "insufficient_speech",
+   "labels": {},
+   "inference_s": 0.0
+  }
+ },
+ "clip09.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.07386578619480133,
+    "disgust": 0.01619841903448105,
+    "enthusiasm": 0.012977629899978638,
+    "fear": 0.008665010333061218,
+    "happiness": 0.011939567513763905,
+    "neutral": 0.8514558672904968,
+    "sadness": 0.024897724390029907
+   },
+   "inference_s": 0.517
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.0738622322678566,
+    "disgust": 0.01620052382349968,
+    "enthusiasm": 0.01297754980623722,
+    "fear": 0.008664584718644619,
+    "happiness": 0.011942608281970024,
+    "neutral": 0.85146564245224,
+    "sadness": 0.024886876344680786
+   },
+   "inference_s": 0.047
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.07386641204357147,
+    "disgust": 0.01619916968047619,
+    "enthusiasm": 0.012978076003491879,
+    "fear": 0.008665461093187332,
+    "happiness": 0.011940068565309048,
+    "neutral": 0.8514518141746521,
+    "sadness": 0.02489902451634407
+   },
+   "inference_s": 1.689
+  }
+ },
+ "clip10.wav": {
+  "box": {
+   "unscorable": true,
+   "skip_reason": "near_silent",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "gcp": {
+   "unscorable": true,
+   "skip_reason": "near_silent",
+   "labels": {},
+   "inference_s": 0.0
+  },
+  "mini": {
+   "unscorable": true,
+   "skip_reason": "near_silent",
+   "labels": {},
+   "inference_s": 0.0
+  }
+ },
+ "clip11.wav": {
+  "box": {
+   "labels": {
+    "anger": 0.038831692188978195,
+    "disgust": 0.04829411953687668,
+    "enthusiasm": 0.06438292562961578,
+    "fear": 0.15486562252044678,
+    "happiness": 0.22934779524803162,
+    "neutral": 0.1952153593301773,
+    "sadness": 0.26906245946884155
+   },
+   "inference_s": 0.571
+  },
+  "gcp": {
+   "labels": {
+    "anger": 0.03883747383952141,
+    "disgust": 0.048318956047296524,
+    "enthusiasm": 0.06436477601528168,
+    "fear": 0.15490178763866425,
+    "happiness": 0.2293965071439743,
+    "neutral": 0.19520901143550873,
+    "sadness": 0.2689715027809143
+   },
+   "inference_s": 0.047
+  },
+  "mini": {
+   "labels": {
+    "anger": 0.03883226960897446,
+    "disgust": 0.04829424247145653,
+    "enthusiasm": 0.06438277661800385,
+    "fear": 0.15486665070056915,
+    "happiness": 0.22934654355049133,
+    "neutral": 0.19521501660346985,
+    "sadness": 0.2690625488758087
+   },
+   "inference_s": 1.646
+  }
+ }
+}

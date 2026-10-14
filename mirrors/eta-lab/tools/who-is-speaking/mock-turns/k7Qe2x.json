@@ -1,0 +1,14 @@
+{
+ "id": "k7Qe2x",
+ "audio": "audio/k7Qe2x.mp3",
+ "duration_s": 10.0,
+ "turn_start_s": 3.0,
+ "turn_end_s": 5.5,
+ "text": "Take this tablet twice a day after food.",
+ "machine_label": "doctor",
+ "doubtful": false,
+ "room": "Room 1 (mock)",
+ "doctor": "Dr. Mock",
+ "speaker_basis": "voiceprint",
+ "margin": 0.1
+}

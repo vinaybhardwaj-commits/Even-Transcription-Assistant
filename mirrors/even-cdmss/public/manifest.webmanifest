@@ -1,0 +1,25 @@
+{
+  "name": "CAT \u2014 Clinical Analysis Tool",
+  "short_name": "CAT",
+  "description": "Clinical Analysis Tool \u2014 MKSAP/StatPearls-grounded clinical decision support",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f2f4f8",
+  "theme_color": "#0055ff",
+  "scope": "/",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ]
+}

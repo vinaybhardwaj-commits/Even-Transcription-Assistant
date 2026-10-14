@@ -1,0 +1,856 @@
+{
+ "g000": {
+  "same_day_pairs": 32,
+  "max_simultaneous_core_s": 1130.7,
+  "flagged_pairs": 23,
+  "anchored": false,
+  "n_room_days": 20
+ },
+ "g001": {
+  "same_day_pairs": 1,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 4
+ },
+ "g002": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g003": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g004": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 5
+ },
+ "g005": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g006": {
+  "same_day_pairs": 55,
+  "max_simultaneous_core_s": 1655.3,
+  "flagged_pairs": 38,
+  "anchored": false,
+  "n_room_days": 27
+ },
+ "g007": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g008": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": true,
+  "n_room_days": 8
+ },
+ "g009": {
+  "same_day_pairs": 1,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g010": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g011": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 3
+ },
+ "g012": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g013": {
+  "same_day_pairs": 4,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": true,
+  "n_room_days": 9
+ },
+ "g014": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 7
+ },
+ "g015": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g016": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g017": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": true,
+  "n_room_days": 5
+ },
+ "g018": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g019": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 4
+ },
+ "g020": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 4
+ },
+ "g021": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g022": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g023": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g024": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g025": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g026": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g027": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g028": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g029": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g030": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g031": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g032": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 3
+ },
+ "g033": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g034": {
+  "same_day_pairs": 1,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": true,
+  "n_room_days": 8
+ },
+ "g035": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g036": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 6
+ },
+ "g037": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g038": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 5
+ },
+ "g039": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g040": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g041": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g042": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g043": {
+  "same_day_pairs": 1,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 4
+ },
+ "g044": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g045": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g046": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g047": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g048": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g049": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g050": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g051": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g052": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g053": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g054": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g055": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g056": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g057": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g058": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 4
+ },
+ "g059": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 5
+ },
+ "g060": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g061": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g062": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g063": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g064": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g065": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g066": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 3
+ },
+ "g067": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g068": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g069": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g070": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g071": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": true,
+  "n_room_days": 6
+ },
+ "g072": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g073": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g074": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g075": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g076": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g077": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": true,
+  "n_room_days": 2
+ },
+ "g078": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g079": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g080": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g081": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g082": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g083": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g084": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 2
+ },
+ "g085": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g086": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g087": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g088": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g089": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g090": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g091": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g092": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g093": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g094": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g095": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g096": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g097": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g098": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g099": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g100": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g101": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g102": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g103": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g104": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g105": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g106": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g107": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g108": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g109": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g110": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g111": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g112": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g113": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g114": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g115": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 3
+ },
+ "g116": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g117": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g118": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g119": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g120": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ },
+ "g121": {
+  "same_day_pairs": 0,
+  "max_simultaneous_core_s": 0.0,
+  "flagged_pairs": 0,
+  "anchored": false,
+  "n_room_days": 1
+ }
+}

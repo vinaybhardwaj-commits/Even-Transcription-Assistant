@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly refresh of the viewer's Days index
+
+[Timer]
+OnCalendar=*-*-* *:12:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

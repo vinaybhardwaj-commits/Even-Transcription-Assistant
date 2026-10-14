@@ -1,0 +1,4 @@
+[even-jev-mcp] tool=jev_ask input_bytes=1852 questions=4 latency_ms=354 status=200
+[even-jev-mcp] tool=jev_ask input_bytes=1861 questions=4 latency_ms=363 status=200
+[even-jev-mcp] tool=jev_ask input_bytes=1759 questions=4 latency_ms=454 status=200
+[even-jev-mcp] tool=jev_ask input_bytes=1995 questions=4 latency_ms=1292 status=200

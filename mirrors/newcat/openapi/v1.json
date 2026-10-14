@@ -1,0 +1,979 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "NewCat",
+    "version": "v1",
+    "description": "Headless clinical audit API. /v1 is the current major version. Breaking changes ship as /v2 and the previous major is deprecated for 90 days."
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Liveness",
+        "responses": {
+          "200": {
+            "description": "Process is up. Reports jev readiness and no clinical data."
+          }
+        }
+      }
+    },
+    "/v1/invoke": {
+      "post": {
+        "summary": "Invoke a registered capability",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Terminal envelope"
+          },
+          "202": {
+            "description": "Async accept"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "summary": "Read an async job",
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "summary": "Read webhook and job events",
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/agents/{agentId}/runs/{runId}": {
+      "get": {
+        "summary": "Read one agent run: metadata and finding positions only, no input or quote text. Needs the agent id as a key scope. Doctor audience refused. Governance responses omit served model ids.",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agentId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run metadata and findings"
+          },
+          "403": {
+            "description": "Missing scope or audience not permitted"
+          },
+          "404": {
+            "description": "Unknown agent or run"
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "summary": "List capabilities",
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/internal/work/tick": {
+      "post": {
+        "summary": "Lease and run one work item",
+        "security": [
+          {
+            "cron": []
+          }
+        ]
+      }
+    },
+    "/v1/internal/corpus/import-sample": {
+      "post": {
+        "summary": "Admin import of at most 150 JSONL corpus lines. Signs rows as cat-corpus-import and returns counts and embed cost.",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Import counts"
+          },
+          "422": {
+            "description": "Invalid or oversized sample"
+          }
+        }
+      }
+    },
+    "/v1/internal/bedrock/check": {
+      "post": {
+        "summary": "Admin check of the Bedrock auth mode, ID-token mint, AssumeRole, caller ARN, and a one-token Converse call",
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/internal/aws/probe": {
+      "get": {
+        "summary": "Admin read-only probe of S3 ListBuckets, Bedrock ListModelInvocationJobs in ap-south-1, and IAM SimulatePrincipalPolicy for s3:CreateBucket, iam:PassRole, and bedrock:CreateModelInvocationJob",
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "cron": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "RequestEnvelope": {
+        "type": "object",
+        "properties": {
+          "capability": {
+            "type": "string",
+            "minLength": 1
+          },
+          "caller": {
+            "type": "object",
+            "properties": {
+              "principal": {
+                "type": "string",
+                "minLength": 1
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "principal",
+              "purpose"
+            ],
+            "additionalProperties": false
+          },
+          "patient_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "encounter_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "audience": {
+            "type": "string",
+            "enum": [
+              "internal",
+              "operator",
+              "doctor",
+              "governance"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 200
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ]
+          },
+          "callback_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "input": {}
+        },
+        "required": [
+          "capability",
+          "caller",
+          "audience",
+          "idempotency_key",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "audit_note_input": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_uid": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200000
+          },
+          "structured_fields": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "source",
+          "source_uid",
+          "source_timestamp",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "audit_note_output": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "empty",
+              "abstained",
+              "unavailable",
+              "failed"
+            ]
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "summary"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "finding_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "finding_id"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": true
+      },
+      "evidence_retrieve_input": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "additionalProperties": false
+      },
+      "evidence_retrieve_output": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "empty",
+              "unavailable",
+              "failed"
+            ]
+          },
+          "evidence_status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "empty",
+              "unavailable"
+            ]
+          },
+          "evidence_rerank": {
+            "type": "string",
+            "enum": [
+              "off",
+              "ok",
+              "unavailable"
+            ]
+          },
+          "evidence_hits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "chunk_id": {
+                  "type": "string"
+                },
+                "source_id": {
+                  "type": "string"
+                },
+                "source_name": {
+                  "type": "string"
+                },
+                "section_path": {
+                  "type": "string"
+                },
+                "licence_class": {
+                  "type": "string",
+                  "enum": [
+                    "open",
+                    "licensed_internal",
+                    "india_regulatory",
+                    "commercial_db"
+                  ]
+                },
+                "quote": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "chunk_id",
+                "source_id",
+                "source_name",
+                "section_path",
+                "licence_class",
+                "quote",
+                "url"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "reason": {
+            "type": "string"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": true
+      },
+      "ask_input": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1
+          },
+          "context_note_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "additionalProperties": false
+      },
+      "ask_output": {
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "citations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "quote": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source_id",
+                "quote"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "answer",
+          "citations"
+        ],
+        "additionalProperties": false
+      },
+      "med_reconcile_input": {
+        "type": "object",
+        "properties": {
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "drugs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "source",
+                "drugs"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "lists"
+        ],
+        "additionalProperties": false
+      },
+      "med_reconcile_output": {
+        "type": "object",
+        "properties": {
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "drug": {
+                  "type": "string"
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "drug",
+                "sources"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "conflicts"
+        ],
+        "additionalProperties": false
+      },
+      "ddx_input": {
+        "type": "object",
+        "properties": {
+          "presentation": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "presentation"
+        ],
+        "additionalProperties": false
+      },
+      "ddx_output": {
+        "type": "object",
+        "properties": {
+          "differentials": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "rank": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "name",
+                "rank"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "differentials"
+        ],
+        "additionalProperties": false
+      },
+      "appropriateness_input": {
+        "type": "object",
+        "properties": {
+          "note_version_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "note_version_id"
+        ],
+        "additionalProperties": false
+      },
+      "appropriateness_output": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "rule_id": {
+                  "type": "string"
+                },
+                "appropriate": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "rule_id",
+                "appropriate"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "triage_decide_input": {
+        "type": "object",
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "note_version_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "finding_id",
+          "note_version_id"
+        ],
+        "additionalProperties": false
+      },
+      "triage_decide_output": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "route",
+              "hold",
+              "drop_informational"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "audit_consult_input": {
+        "type": "object",
+        "properties": {
+          "encounter_id": {
+            "type": "string"
+          },
+          "room": {
+            "type": "string"
+          },
+          "specialty": {
+            "type": "string",
+            "nullable": true
+          },
+          "doctor_uid": {
+            "type": "string",
+            "nullable": true
+          },
+          "presc_uid": {
+            "type": "string",
+            "nullable": true
+          },
+          "presc_match": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "window",
+              "none"
+            ]
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "$ref": "#/properties/window/properties/start"
+              },
+              "complete": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "start",
+              "end",
+              "complete"
+            ],
+            "additionalProperties": false
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,64}$"
+                },
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "doctor",
+                    "patient",
+                    "attendant",
+                    "unknown"
+                  ]
+                },
+                "t0": {
+                  "type": "number"
+                },
+                "t1": {
+                  "type": "number"
+                },
+                "text_en": {
+                  "type": "string"
+                },
+                "text_native": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "lang": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "role",
+                "t0",
+                "t1",
+                "text_en",
+                "text_native",
+                "lang"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 2000
+          },
+          "rx": {
+            "type": "object",
+            "properties": {
+              "requires_surgery": {
+                "type": "boolean",
+                "nullable": true
+              },
+              "procedure_text": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "requires_surgery",
+              "procedure_text"
+            ],
+            "additionalProperties": false,
+            "nullable": true
+          },
+          "clips": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "turn_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "url": {
+                  "type": "string"
+                },
+                "expires_at": {
+                  "$ref": "#/properties/window/properties/start"
+                }
+              },
+              "required": [
+                "turn_ids",
+                "url",
+                "expires_at"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "encounter_id",
+          "room",
+          "specialty",
+          "doctor_uid",
+          "presc_uid",
+          "presc_match",
+          "window",
+          "turns",
+          "rx",
+          "clips"
+        ],
+        "additionalProperties": false
+      },
+      "audit_consult_output": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      }
+    }
+  },
+  "x-capabilities": [
+    {
+      "id": "audit.note",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "audit.note"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "doctor"
+      ]
+    },
+    {
+      "id": "evidence.retrieve",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "evidence.retrieve"
+      ],
+      "audiences": [
+        "internal"
+      ]
+    },
+    {
+      "id": "ask",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "ask"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "doctor"
+      ]
+    },
+    {
+      "id": "med_reconcile",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "med_reconcile"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "doctor"
+      ]
+    },
+    {
+      "id": "ddx",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "ddx"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "doctor"
+      ]
+    },
+    {
+      "id": "appropriateness",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "appropriateness"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "doctor"
+      ]
+    },
+    {
+      "id": "triage.decide",
+      "version": "1.0.0",
+      "modes": [
+        "sync",
+        "async"
+      ],
+      "required_scopes": [
+        "triage.decide"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "doctor"
+      ]
+    },
+    {
+      "id": "audit.consult",
+      "version": "0.1.0",
+      "modes": [
+        "async"
+      ],
+      "required_scopes": [
+        "audit.consult"
+      ],
+      "audiences": [
+        "internal",
+        "operator",
+        "governance"
+      ]
+    }
+  ]
+}

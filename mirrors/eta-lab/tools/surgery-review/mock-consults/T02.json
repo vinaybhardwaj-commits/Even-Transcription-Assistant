@@ -1,0 +1,100 @@
+{
+ "id": "T02",
+ "date": "2026-09-23",
+ "room": "Room 2 (mock)",
+ "doctor": "Dr. B. Example",
+ "quality": "ok",
+ "why": {
+  "source": "jev",
+  "booked_procedure": null,
+  "booked_source": null,
+  "days_after_consult": null,
+  "jev_scan": {
+   "recall_p": 0.41,
+   "status": "mentioned_only"
+  }
+ },
+ "turns": [
+  {
+   "i": 0,
+   "start_s": 0,
+   "end_s": 5,
+   "speaker": "B",
+   "lang": "en",
+   "orig": "Did they send the surgical trays back from the wash?",
+   "en": "Did they send the surgical trays back from the wash?",
+   "outside": true
+  },
+  {
+   "i": 1,
+   "start_s": 6,
+   "end_s": 9,
+   "speaker": "C",
+   "lang": "en",
+   "orig": "Not yet. Tomorrow morning.",
+   "en": "Not yet. Tomorrow morning.",
+   "outside": true
+  },
+  {
+   "i": 2,
+   "start_s": 20,
+   "end_s": 24,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "Come in, sit down. How is the cough now?",
+   "en": "Come in, sit down. How is the cough now?"
+  },
+  {
+   "i": 3,
+   "start_s": 25,
+   "end_s": 32,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "Better, doctor, but still a little at night.",
+   "en": "Better, doctor, but still a little at night."
+  },
+  {
+   "i": 4,
+   "start_s": 33,
+   "end_s": 45,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "Continue the syrup for a week. If it is not gone, we will do a chest X-ray. Nothing else is needed.",
+   "en": "Continue the syrup for a week. If it is not gone, we will do a chest X-ray. Nothing else is needed."
+  },
+  {
+   "i": 5,
+   "start_s": 46,
+   "end_s": 50,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "Thank you, doctor.",
+   "en": "Thank you, doctor."
+  },
+  {
+   "i": 6,
+   "start_s": 55,
+   "end_s": 60,
+   "speaker": "C",
+   "lang": "en",
+   "orig": "Send in the next one please.",
+   "en": "Send in the next one please.",
+   "outside": true
+  }
+ ],
+ "jev": {
+  "named": {
+   "answer": null,
+   "category": null,
+   "conf": 0.88,
+   "evidence": [
+    4
+   ]
+  },
+  "described": {
+   "answer": "no",
+   "conf": 0.8,
+   "evidence": []
+  }
+ }
+}

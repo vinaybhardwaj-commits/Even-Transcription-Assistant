@@ -1,0 +1,59 @@
+# DDx Reasoning V2 — Phase 0a benchmark (REPORT-ONLY).
+#
+# STATUS: documented stub. The CI provider (GitHub Actions vs a Vercel check) is
+# unconfirmed by V; this file is inert until two repository secrets exist:
+#   DDX_BENCH_BASE_URL — deployment to run /api/ddx against (preview or dedicated eval)
+#   DDX_ADMIN_TOKEN    — Bearer token for the admin gate
+# Without them the bench step is skipped and the job still passes.
+#
+# SOFT GATE (§5 of the kickoff): the seed bank is ~15 cases, so one flipped case is a
+# ~7% swing and LLM nondeterminism would make a hard gate flaky. This job therefore
+# ALWAYS exits 0 — it reports metrics and uploads the results JSON as an artifact.
+# FUTURE HARD GATE (activate only once the bank reaches n ≈ 40–80): set the repo
+# variable DDX_BENCH_HARD_GATE=1 and DDX_BASELINE_CANNOT_MISS=<frozen baseline, e.g.
+# 0.80>, then remove the `|| echo` fallback below — the runner exits 2 when
+# cannotMissRecall drops below the frozen baseline.
+
+name: ddx-benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # The scorer's own unit tests are the only hard requirement of this job.
+      - name: Scorer unit tests
+        run: node --test --import tsx "lib/__tests__/ddx-eval-core.test.ts"
+
+      - name: Run benchmark against live /api/ddx (report-only)
+        if: ${{ vars.DDX_BENCH_ENABLED == '1' }}
+        env:
+          BASE_URL: ${{ secrets.DDX_BENCH_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.DDX_ADMIN_TOKEN }}
+          DDX_BENCH_HARD_GATE: ${{ vars.DDX_BENCH_HARD_GATE }}
+          DDX_BASELINE_CANNOT_MISS: ${{ vars.DDX_BASELINE_CANNOT_MISS }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::notice::DDX_BENCH_BASE_URL secret not set — skipping the live benchmark."
+            exit 0
+          fi
+          npm run ddx:bench || echo "::warning::ddx:bench failed or regressed — report-only while the bank is small (DDX_BENCH_HARD_GATE unset)."
+
+      - name: Upload results JSON
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddx-p0-results
+          path: ddx-p0-results-*.json
+          if-no-files-found: ignore

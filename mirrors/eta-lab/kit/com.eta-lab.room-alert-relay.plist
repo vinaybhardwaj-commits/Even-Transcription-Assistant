@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- TEMPLATE, NOT INSTALLED. Do not load until kit/ROOM-ALERT-RELAY.md's prerequisites are all true. -->
+  <key>Label</key>
+  <string>com.eta-lab.room-alert-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/vinaybhardwaj/dev/eta-lab/kit/room-alert-relay.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RELAY_MCP_URL</key>
+    <string>REPLACE_WITH_APP_MCP_URL</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- F10: a crash loop must stay bounded; the relay also throttles its start-time SILENT re-post to once per 30 min -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/room-alert-relay.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/room-alert-relay.log</string>
+</dict>
+</plist>

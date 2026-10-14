@@ -1,0 +1,38 @@
+{
+ "seed": 20260925,
+ "logic_sha256": "466f56b380236f746c66e49813605d039f3c6e194a69d5604f868e973efdb770",
+ "rooms": [
+  "room_2qe955hy",
+  "room_4ggnkg5x",
+  "room_7egw2my6",
+  "room_87frpus9",
+  "room_bh6jtq4t",
+  "room_jwyrr4dc",
+  "room_pnyc9u49",
+  "room_qyzghzaf",
+  "room_ux92qpws",
+  "room_yh3etjpf",
+  "room_ymch4bxu"
+ ],
+ "pool_n1": 33,
+ "pool_n2": 19,
+ "n1": [
+  "2026-09-19_room_7egw2my6_2000",
+  "2026-09-20_room_7egw2my6_2030",
+  "2026-09-20_room_7egw2my6_2045",
+  "2026-09-20_room_7egw2my6_2115",
+  "2026-09-20_room_7egw2my6_2200",
+  "2026-09-20_room_7egw2my6_2230",
+  "2026-09-20_room_7egw2my6_2300",
+  "2026-09-20_room_7egw2my6_2315"
+ ],
+ "n2": [
+  "2026-09-22_room_qyzghzaf_0745",
+  "2026-09-22_room_ux92qpws_0200",
+  "2026-09-22_room_yh3etjpf_0115",
+  "2026-09-22_room_yh3etjpf_0300",
+  "2026-09-23_room_ux92qpws_1100",
+  "2026-09-23_room_ux92qpws_1330"
+ ],
+ "declared": "post-hoc: written after the first ~10 progress lines of the main run were visible (primary fractions 0.004-0.033), before results.json was opened"
+}

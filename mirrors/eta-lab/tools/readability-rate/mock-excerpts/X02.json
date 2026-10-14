@@ -1,0 +1,5 @@
+{"id":"X02","room":"Mock Room","window_id":"mock-w2","lines":[
+{"t":"11:15:03","lang":"kn","text":"ನಮಸ್ಕಾರ ಡಾಕ್ಟರ್, ಇದು ಕಾಲ್ಪನಿಕ ಪರೀಕ್ಷಾ ಸಂಭಾಷಣೆ.","en":"Hello doctor, this is an invented test conversation."},
+{"t":"11:15:10","lang":"en","text":"Okay, sit down, tell me the problem."},
+{"t":"11:15:16","lang":"kn","text":"ಮೊಣಕಾಲು ನೋವು ಎರಡು ತಿಂಗಳಿಂದ ಇದೆ.","en":"The knee pain has been there for two months."},
+{"t":"11:15:24","lang":"hi","text":"ठीक है, दवाई ले रहे हैं क्या? यह भी एक काल्पनिक पंक्ति है।","en":"Okay, are you taking medicines? This too is an invented line."}]}

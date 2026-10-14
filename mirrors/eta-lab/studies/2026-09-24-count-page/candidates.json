@@ -1,0 +1,317 @@
+{
+ "rule": "pyannote.ai teacher count strata 1,2,3,4,5,6+ (5 each) from labelled windows on room-days NOT in the clean train/val split; V5 and windows seen by the tainted run 1 excluded; round-robin over room-days; seed 42",
+ "pool_size": 107,
+ "pool_by_count": {
+  "1": 19,
+  "2": 31,
+  "3": 20,
+  "4": 19,
+  "5": 12,
+  "6": 6
+ },
+ "short_strata": {},
+ "n": 30,
+ "note": "the 'teacher count' is pyannote.ai's raw distinct-speaker count; humans judge how many different PEOPLE speak. Includes any bench windows that fall in the pool (flagged).",
+ "windows": [
+  {
+   "window_id": "bw_wwq9p6eb_1789805700000_primary",
+   "room_day_id": "rd_jqj96amk",
+   "room_id": "room_87frpus9",
+   "ist_date": "2026-09-18T18:30:00.000Z",
+   "teacher_count": 1,
+   "stratum": 1,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6nm7h269_1790162100000_primary",
+   "room_day_id": "rd_9ze2fwuh",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-22T18:30:00.000Z",
+   "teacher_count": 1,
+   "stratum": 1,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_pjk6n3qy_1789984800000_primary",
+   "room_day_id": "rd_5b5kmjeq",
+   "room_id": "room_yh3etjpf",
+   "ist_date": "2026-09-20T18:30:00.000Z",
+   "teacher_count": 1,
+   "stratum": 1,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_a5sq2mjz_1789737300000_primary",
+   "room_day_id": "rd_mhg9kqnn",
+   "room_id": "room_bh6jtq4t",
+   "ist_date": "2026-09-17T18:30:00.000Z",
+   "teacher_count": 1,
+   "stratum": 1,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_m6nq7upz_1790073900000_primary",
+   "room_day_id": "rd_au3vmzsm",
+   "room_id": "room_qyzghzaf",
+   "ist_date": "2026-09-21T18:30:00.000Z",
+   "teacher_count": 1,
+   "stratum": 1,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_kbryfqs4_1790230500000_primary",
+   "room_day_id": "rd_4n84vfgg",
+   "room_id": "room_qyzghzaf",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 2,
+   "stratum": 2,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_9j4z2ze3_1789987500000_primary",
+   "room_day_id": "rd_3629fkar",
+   "room_id": "room_jwyrr4dc",
+   "ist_date": "2026-09-20T18:30:00.000Z",
+   "teacher_count": 2,
+   "stratum": 2,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_ayd5y9w5_1790231400000_primary",
+   "room_day_id": "rd_ueankkjc",
+   "room_id": "room_pnyc9u49",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 2,
+   "stratum": 2,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_wwq9p6eb_1789795800000_primary",
+   "room_day_id": "rd_jqj96amk",
+   "room_id": "room_87frpus9",
+   "ist_date": "2026-09-18T18:30:00.000Z",
+   "teacher_count": 2,
+   "stratum": 2,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6nm7h269_1790169300000_primary",
+   "room_day_id": "rd_9ze2fwuh",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-22T18:30:00.000Z",
+   "teacher_count": 2,
+   "stratum": 2,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6vz3rvcg_1790226000000_primary",
+   "room_day_id": "rd_abcwg2qf",
+   "room_id": "room_yh3etjpf",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 3,
+   "stratum": 3,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6nm7h269_1790166600000_primary",
+   "room_day_id": "rd_9ze2fwuh",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-22T18:30:00.000Z",
+   "teacher_count": 3,
+   "stratum": 3,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_uy5qbcse_1790228700000_primary",
+   "room_day_id": "rd_2982n3k5",
+   "room_id": "room_ymch4bxu",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 3,
+   "stratum": 3,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_zyjykmwa_1790076600000_primary",
+   "room_day_id": "rd_yhh6kexm",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-21T18:30:00.000Z",
+   "teacher_count": 3,
+   "stratum": 3,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_7s275tba_1790227800000_primary",
+   "room_day_id": "rd_xa2e3ufc",
+   "room_id": "room_jwyrr4dc",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 3,
+   "stratum": 3,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_kmbn52gk_1790073000000_primary",
+   "room_day_id": "rd_m4rft4fy",
+   "room_id": "room_yh3etjpf",
+   "ist_date": "2026-09-21T18:30:00.000Z",
+   "teacher_count": 4,
+   "stratum": 4,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_ayd5y9w5_1790226000000_primary",
+   "room_day_id": "rd_ueankkjc",
+   "room_id": "room_pnyc9u49",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 4,
+   "stratum": 4,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6nm7h269_1790168400000_primary",
+   "room_day_id": "rd_9ze2fwuh",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-22T18:30:00.000Z",
+   "teacher_count": 4,
+   "stratum": 4,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_m6nq7upz_1790077500000_primary",
+   "room_day_id": "rd_au3vmzsm",
+   "room_id": "room_qyzghzaf",
+   "ist_date": "2026-09-21T18:30:00.000Z",
+   "teacher_count": 4,
+   "stratum": 4,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_ub8xv995_1790226900000_primary",
+   "room_day_id": "rd_6cn2jp2d",
+   "room_id": "room_87frpus9",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 4,
+   "stratum": 4,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_8scgjz67_1789810200000_primary",
+   "room_day_id": "rd_f4hzv5sj",
+   "room_id": "room_yh3etjpf",
+   "ist_date": "2026-09-18T18:30:00.000Z",
+   "teacher_count": 5,
+   "stratum": 5,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6vz3rvcg_1790227800000_primary",
+   "room_day_id": "rd_abcwg2qf",
+   "room_id": "room_yh3etjpf",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 5,
+   "stratum": 5,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_ayd5y9w5_1790227800000_primary",
+   "room_day_id": "rd_ueankkjc",
+   "room_id": "room_pnyc9u49",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 5,
+   "stratum": 5,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_7zyu7tfk_1789968600000_primary",
+   "room_day_id": "rd_ehc3hyyw",
+   "room_id": "room_qyzghzaf",
+   "ist_date": "2026-09-20T18:30:00.000Z",
+   "teacher_count": 5,
+   "stratum": 5,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_kbryfqs4_1790226000000_primary",
+   "room_day_id": "rd_4n84vfgg",
+   "room_id": "room_qyzghzaf",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 5,
+   "stratum": 5,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_ub8xv995_1790222400000_primary",
+   "room_day_id": "rd_6cn2jp2d",
+   "room_id": "room_87frpus9",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 14,
+   "stratum": 6,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_j45jmzam_1789969500000_primary",
+   "room_day_id": "rd_93tcdc4c",
+   "room_id": "room_87frpus9",
+   "ist_date": "2026-09-20T18:30:00.000Z",
+   "teacher_count": 6,
+   "stratum": 6,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_6nm7h269_1790167500000_primary",
+   "room_day_id": "rd_9ze2fwuh",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-22T18:30:00.000Z",
+   "teacher_count": 6,
+   "stratum": 6,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_kbryfqs4_1790227800000_primary",
+   "room_day_id": "rd_4n84vfgg",
+   "room_id": "room_qyzghzaf",
+   "ist_date": "2026-09-23T18:30:00.000Z",
+   "teacher_count": 7,
+   "stratum": 6,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  },
+  {
+   "window_id": "bw_bxcb9drz_1789737300000_primary",
+   "room_day_id": "rd_8kshcb64",
+   "room_id": "room_ux92qpws",
+   "ist_date": "2026-09-17T18:30:00.000Z",
+   "teacher_count": 6,
+   "stratum": 6,
+   "is_bench20_window": false,
+   "seen_by_tainted_run1": false
+  }
+ ]
+}

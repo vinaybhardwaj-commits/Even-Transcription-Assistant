@@ -1,0 +1,34 @@
+{
+ "id": "m7Wt2c",
+ "kind": "link",
+ "room": "OPD 3",
+ "date": "2026-09-22",
+ "doctor": "Dr Mock B",
+ "evidence": [
+  "PQM: 7 of 9 consults line up, within 55 s.",
+  "This voice is in 8 of 9 consults."
+ ],
+ "clips": [
+  {
+   "src": "audio/m7Wt2c_0.mp3",
+   "duration_s": 5.0
+  },
+  {
+   "src": "audio/m7Wt2c_1.mp3",
+   "duration_s": 5.0
+  },
+  {
+   "src": "audio/m7Wt2c_2.mp3",
+   "duration_s": 5.0
+  }
+ ],
+ "contrast": {
+  "src": "audio/m7Wt2c_3.mp3",
+  "duration_s": 5.0
+ },
+ "tier": "MED",
+ "pqm_score": 0.9,
+ "cluster_id": "clu-1",
+ "true_doctor": "Dr Mock A",
+ "confidence": 0.86
+}

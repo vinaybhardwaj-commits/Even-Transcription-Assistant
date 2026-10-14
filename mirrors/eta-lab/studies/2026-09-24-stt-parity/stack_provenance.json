@@ -1,0 +1,157 @@
+{
+ "stack_id": "0b12949986df",
+ "collected_at": "2026-09-24T18:35:33+05:30",
+ "stack": {
+  "whisper": {
+   "model": "ggml-large-v3-turbo.bin",
+   "model_sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+   "whisper_cpp_commit": "e0fd1f67",
+   "server_flags": "-m ggml-large-v3-turbo.bin --no-speech-thold 0.7 --suppress-nst --port 8080",
+   "vad": "off (production flags since 24 Sep 04:39 IST)",
+   "temperature_inc": "whisper.cpp default 0.2 (not set)",
+   "max_context": 0,
+   "backend": "CUDA build on NVIDIA L4 (production: Metal on Mac mini)"
+  },
+  "shim": {
+   "file_sha256": "c24fd097996e8dddb6fae405dd1dbca3d9990784c4cfaf60c1413ebc4a0f314c",
+   "production_shim_sha256": "aa9a7e4971779e4d5d7f7e3b8c913edc1d8497021a17f2e15d5391ab5012e02b (differs only in the bind address)",
+   "number_lexicon_sha256": "f0adbe7a153105943185a770337d4a12bc7e38ced1b6431f1897b1cb748bf2ec"
+  },
+  "indicconformer": {
+   "model_id": "ai4bharat/indic-conformer-600m-multilingual",
+   "revision": "e9b71b369c048e2c6b634d4c131061c34e441179",
+   "decoding": "rnnt",
+   "server_sha256": "333c687c277f7629f218f83281601a2c1e663996d85c1c15174fb509c9688e42",
+   "packages": "2.12.0+cpu 1.26.0 5.12.0",
+   "thread_cap": "INDIC_DECODING=rnnt ORT_INTRA_THREADS=9",
+   "thread_cap_file_sha256": "b2194f3ac2b96578c78e62ba148c89654494100125ece19ce3d0d1ab8513921b",
+   "device": "CPU"
+  },
+  "sravaani": {
+   "model_id": "ARTPARK-IISc/SraVaani-1.0",
+   "revision": "f5dd5358325a5208775b91dad98918e079ea2b27",
+   "server_sha256": "907b7d8180557b560a951d0d2e26e510204197759505ac1e4809eca41bc1c90b",
+   "packages": "2.14.0+cpu 4.57.6",
+   "device": "CPU"
+  },
+  "router": {
+   "git_commit": "5e841f0 (eta-router), file sha256 = router_server.py",
+   "file_sha256": "400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+   "config": [
+    "ETA_DEFAULT_CANDIDATES=en,kn,hi,ta,te,ml,mr,bn",
+    "ETA_MAX_INFLIGHT=3"
+   ],
+   "config_hash": "b002c617791f",
+   "silero_vad": "6.2.1",
+   "request_shape": "translate=false, candidates en,kn,hi,ta,te,ml,mr,bn, window_s=180"
+  },
+  "guards": {
+   "shim_anti_loop_and_lexicon": "whisper-shim (sha above)",
+   "english_hallucination_guard": "router_server.py (sha above)",
+   "collapse_phrase_loops": "router_server.py (sha above)",
+   "app_side_at_production_commit_a30186c": {
+    "transcript-guard.ts": "222bfe2145b1e96d1e2e508c87ed6b4dc1c24866ee557047cba454004ec6f28f",
+    "transcript-quality.ts": "cf2c03b9621a9ed72c909d8a43b413a83a29de819a621cdc78b708cb51f87912",
+    "assembled-collapse.ts": "0ae9ea53fffa221a402bce7ffda048beae26230e71965bfd0435ab5ab1122c2a",
+    "hallucination-collapse.ts": "835c9c3e1b0e4a1bc459becf953e92790b2675072a5143c57df93e5d2a6eb5a7"
+   },
+   "loop_guard_number_rule": "NOT in this stack (loop-guard 7258a90 is not deployed to production yet)"
+  },
+  "diarizer": {
+   "engine": "pyannote speaker-diarization-3.1 (@84fd25912480287da0247647c3d2b4853cb3ee5d), segmentation-3.0 (@e66f3d3b9eb0873085418a7b813d3b369bf160bb), pyannote.audio 3.3.2",
+   "server_sha256": "dc8b074e5d7688a389fdd1667eed029a15f98e0af5b1bb9bfbe26e6d2e226c7a",
+   "device": "CUDA L4"
+  }
+ },
+ "node_consistency": {
+  "cpu.router_server.py": true,
+  "cpu.indic_server.py": true,
+  "cpu.sravaani_server.py": true,
+  "cpu.ort_thread_cap_sitecustomize.py": true,
+  "cpu.indic_units_env": true,
+  "cpu.pins": true,
+  "cpu.router_config": true,
+  "gpu.whisper_shim.py": true,
+  "gpu.eta_number_words.json": true,
+  "gpu.whisper_server_binary": true,
+  "gpu.whisper_model": true,
+  "gpu.diarize_server.py": true,
+  "gpu.whisper_flags": true,
+  "gpu.whisper_commit": true
+ },
+ "all_consistent": true,
+ "notes": [
+  "Production reference: whisper Metal on the Mini, IndicConformer on the Mini (643e4e1), SraVaani on the Yoga; parity report studies/2026-09-24-stt-parity/STT-PARITY-REPORT.md (set 2 FAIL on B5 count; HIST approved for MINING ONLY, ruling 146)",
+  "diarizer is on the hist-gpu nodes and is not part of route transcription; include only if the unit used it"
+ ],
+ "per_node": {
+  "cpu": {
+   "hist-cpu-1": {
+    "router_server.py": "400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+    "indic_server.py": "333c687c277f7629f218f83281601a2c1e663996d85c1c15174fb509c9688e42",
+    "sravaani_server.py": "907b7d8180557b560a951d0d2e26e510204197759505ac1e4809eca41bc1c90b",
+    "ort_thread_cap_sitecustomize.py": "b2194f3ac2b96578c78e62ba148c89654494100125ece19ce3d0d1ab8513921b",
+    "router_config_hash_by_stack": {
+     "0": "b002c617791f",
+     "1": "b002c617791f",
+     "2": "b002c617791f",
+     "3": "b002c617791f",
+     "4": "b002c617791f"
+    },
+    "router_config": [
+     "ETA_DEFAULT_CANDIDATES=en,kn,hi,ta,te,ml,mr,bn",
+     "ETA_MAX_INFLIGHT=3"
+    ],
+    "indic_units_env": "INDIC_DECODING=rnnt ORT_INTRA_THREADS=9",
+    "pins": {
+     "indic_torch": "2.12.0+cpu 1.26.0 5.12.0",
+     "sravaani_torch": "2.14.0+cpu 4.57.6",
+     "router_silero": "6.2.1"
+    }
+   },
+   "hist-cpu-2": {
+    "router_server.py": "400710eeb45cf0955f3293674e3a974b4ac60ee7614dc53546cbbf9e9061dc63",
+    "indic_server.py": "333c687c277f7629f218f83281601a2c1e663996d85c1c15174fb509c9688e42",
+    "sravaani_server.py": "907b7d8180557b560a951d0d2e26e510204197759505ac1e4809eca41bc1c90b",
+    "ort_thread_cap_sitecustomize.py": "b2194f3ac2b96578c78e62ba148c89654494100125ece19ce3d0d1ab8513921b",
+    "router_config_hash_by_stack": {
+     "0": "b002c617791f",
+     "1": "b002c617791f",
+     "2": "b002c617791f",
+     "3": "b002c617791f",
+     "4": "b002c617791f"
+    },
+    "router_config": [
+     "ETA_DEFAULT_CANDIDATES=en,kn,hi,ta,te,ml,mr,bn",
+     "ETA_MAX_INFLIGHT=3"
+    ],
+    "indic_units_env": "INDIC_DECODING=rnnt ORT_INTRA_THREADS=9",
+    "pins": {
+     "indic_torch": "2.12.0+cpu 1.26.0 5.12.0",
+     "sravaani_torch": "2.14.0+cpu 4.57.6",
+     "router_silero": "6.2.1"
+    }
+   }
+  },
+  "gpu": {
+   "hist-gpu-1": {
+    "whisper_shim.py": "c24fd097996e8dddb6fae405dd1dbca3d9990784c4cfaf60c1413ebc4a0f314c",
+    "eta_number_words.json": "f0adbe7a153105943185a770337d4a12bc7e38ced1b6431f1897b1cb748bf2ec",
+    "whisper_server_binary": null,
+    "whisper_model": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    "diarize_server.py": "dc8b074e5d7688a389fdd1667eed029a15f98e0af5b1bb9bfbe26e6d2e226c7a",
+    "whisper_flags": "-m ggml-large-v3-turbo.bin --no-speech-thold 0.7 --suppress-nst --port 8080",
+    "whisper_commit": "e0fd1f67"
+   },
+   "hist-gpu-2": {
+    "whisper_shim.py": "c24fd097996e8dddb6fae405dd1dbca3d9990784c4cfaf60c1413ebc4a0f314c",
+    "eta_number_words.json": "f0adbe7a153105943185a770337d4a12bc7e38ced1b6431f1897b1cb748bf2ec",
+    "whisper_server_binary": null,
+    "whisper_model": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    "diarize_server.py": "dc8b074e5d7688a389fdd1667eed029a15f98e0af5b1bb9bfbe26e6d2e226c7a",
+    "whisper_flags": "-m ggml-large-v3-turbo.bin --no-speech-thold 0.7 --suppress-nst --port 8080",
+    "whisper_commit": "e0fd1f67"
+   }
+  }
+ }
+}

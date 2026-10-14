@@ -1,0 +1,3480 @@
+[
+ {
+  "gid": "g000",
+  "doctor_uid": "R3IEiNFjBgwTiXheMX2n",
+  "members": [
+   [
+    "rd_364sjn85",
+    "31"
+   ],
+   [
+    "rd_qjw6srbs",
+    "20"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_364sjn85",
+    "31"
+   ]
+  ],
+  "rep": [
+   "rd_364sjn85",
+   "31"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "R3IEiNFjBgwTiXheMX2n"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 291,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.667,
+  "present_rep": [
+   4,
+   6
+  ],
+  "tier_pre_jev": "MED"
+ },
+ {
+  "gid": "g001",
+  "doctor_uid": "R3IEiNFjBgwTiXheMX2n",
+  "members": [
+   [
+    "rd_364sjn85",
+    "15"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_364sjn85",
+    "15"
+   ]
+  ],
+  "rep": [
+   "rd_364sjn85",
+   "15"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "R3IEiNFjBgwTiXheMX2n"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 114,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.315,
+  "present_rep": [
+   3,
+   6
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g002",
+  "doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "members": [
+   [
+    "rd_364sjn85",
+    "43"
+   ],
+   [
+    "rd_4fsw6f6y",
+    "7"
+   ],
+   [
+    "rd_4n84vfgg",
+    "65"
+   ],
+   [
+    "rd_6cn2jp2d",
+    "15"
+   ],
+   [
+    "rd_7g2ytyta",
+    "22"
+   ],
+   [
+    "rd_7usy23ex",
+    "18"
+   ],
+   [
+    "rd_8kshcb64",
+    "87"
+   ],
+   [
+    "rd_93tcdc4c",
+    "41"
+   ],
+   [
+    "rd_9q4u73rr",
+    "30"
+   ],
+   [
+    "rd_abcwg2qf",
+    "56"
+   ],
+   [
+    "rd_aeeu5u4j",
+    "23"
+   ],
+   [
+    "rd_akp6hnb7",
+    "63"
+   ],
+   [
+    "rd_au3vmzsm",
+    "126"
+   ],
+   [
+    "rd_cujhuhvj",
+    "20"
+   ],
+   [
+    "rd_djmbtzph",
+    "12"
+   ],
+   [
+    "rd_ed8endsg",
+    "138"
+   ],
+   [
+    "rd_ehc3hyyw",
+    "17"
+   ],
+   [
+    "rd_f4hzv5sj",
+    "63"
+   ],
+   [
+    "rd_hhc4hskv",
+    "130"
+   ],
+   [
+    "rd_jqj96amk",
+    "169"
+   ],
+   [
+    "rd_kp4c7pp6",
+    "19"
+   ],
+   [
+    "rd_np5wt5tw",
+    "30"
+   ],
+   [
+    "rd_qjw6srbs",
+    "29"
+   ],
+   [
+    "rd_sp5dezef",
+    "47"
+   ],
+   [
+    "rd_tcqaam5c",
+    "15"
+   ],
+   [
+    "rd_tp4hcf8s",
+    "158"
+   ],
+   [
+    "rd_u6kdhc3b",
+    "10"
+   ],
+   [
+    "rd_ueankkjc",
+    "125"
+   ],
+   [
+    "rd_vc28prfr",
+    "59"
+   ],
+   [
+    "rd_xa2e3ufc",
+    "152"
+   ],
+   [
+    "rd_xrn7wjsf",
+    "2"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_6cn2jp2d",
+    "15"
+   ],
+   [
+    "rd_7usy23ex",
+    "18"
+   ],
+   [
+    "rd_au3vmzsm",
+    "126"
+   ],
+   [
+    "rd_f4hzv5sj",
+    "63"
+   ]
+  ],
+  "rep": [
+   "rd_f4hzv5sj",
+   "63"
+  ],
+  "n_room_days": 31,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "8ih9F6QLntcLDCZhXDeq",
+   "9o62ETyXw5040Kn3t8bM",
+   "A9BPj7Hcv7bERyuM0Bo6",
+   "FxzVVvnPjgPOD6JeamKd",
+   "JKJxJjTimXHh4odOgva5",
+   "MFTZnXMshE91P7fHnqgX",
+   "QJPPFgQomMv8DScTODC0",
+   "Y2acuffYHRVpZfNhmhlh",
+   "aQS6ztqEHV1D29s5LJwK",
+   "bKr81BFLZSuiMa7MvhaA",
+   "byIfJcLydITKwRYtpcj5",
+   "iCPiVDFia1dnnjwx8XbM",
+   "jo5CndlNx5jwrD3Pmohb",
+   "mGXTEDg9o9WNR9gpZ4sY",
+   "mjAB4AZVnP8r2oXvIgP6",
+   "uAwhqWfPvn1i45TPhhPW"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 183,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.273,
+  "present_rep": [
+   9,
+   9
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g003",
+  "doctor_uid": "R3IEiNFjBgwTiXheMX2n",
+  "members": [
+   [
+    "rd_364sjn85",
+    "33"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_364sjn85",
+    "33"
+   ]
+  ],
+  "rep": [
+   "rd_364sjn85",
+   "33"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "R3IEiNFjBgwTiXheMX2n"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 51,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.21,
+  "present_rep": [
+   0,
+   6
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g004",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_4fsw6f6y",
+    "51"
+   ],
+   [
+    "rd_6cn2jp2d",
+    "77"
+   ],
+   [
+    "rd_93tcdc4c",
+    "64"
+   ],
+   [
+    "rd_jqj96amk",
+    "42"
+   ],
+   [
+    "rd_pw5gaugg",
+    "86"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_4fsw6f6y",
+    "51"
+   ],
+   [
+    "rd_6cn2jp2d",
+    "77"
+   ],
+   [
+    "rd_pw5gaugg",
+    "86"
+   ]
+  ],
+  "rep": [
+   "rd_4fsw6f6y",
+   "51"
+  ],
+  "n_room_days": 5,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "C3LMRavG4ahVWvLuTx2U",
+   "FxzVVvnPjgPOD6JeamKd",
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 1095,
+  "rx_hits": 6,
+  "rx": true,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 1.03,
+  "present_rep": [
+   10,
+   10
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g005",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_4fsw6f6y",
+    "49"
+   ],
+   [
+    "rd_7usy23ex",
+    "23"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_4fsw6f6y",
+    "49"
+   ]
+  ],
+  "rep": [
+   "rd_4fsw6f6y",
+   "49"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY",
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 76,
+  "rx_hits": 1,
+  "rx": true,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.339,
+  "present_rep": [
+   4,
+   10
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g006",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_4fsw6f6y",
+    "57"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_4fsw6f6y",
+    "57"
+   ]
+  ],
+  "rep": [
+   "rd_4fsw6f6y",
+   "57"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 46,
+  "rx_hits": 1,
+  "rx": true,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.159,
+  "present_rep": [
+   2,
+   10
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g007",
+  "doctor_uid": "FP1cesrCLD0AK4L5edEQ",
+  "members": [
+   [
+    "rd_4n84vfgg",
+    "3"
+   ],
+   [
+    "rd_6nwgyrpx",
+    "51"
+   ],
+   [
+    "rd_pw5gaugg",
+    "47"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_4n84vfgg",
+    "3"
+   ]
+  ],
+  "rep": [
+   "rd_4n84vfgg",
+   "3"
+  ],
+  "n_room_days": 3,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "FP1cesrCLD0AK4L5edEQ",
+   "mGXTEDg9o9WNR9gpZ4sY",
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 93,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.293,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g008",
+  "doctor_uid": "FP1cesrCLD0AK4L5edEQ",
+  "members": [
+   [
+    "rd_4n84vfgg",
+    "144"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_4n84vfgg",
+    "144"
+   ]
+  ],
+  "rep": [
+   "rd_4n84vfgg",
+   "144"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FP1cesrCLD0AK4L5edEQ"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 137,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.56,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g009",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "members": [
+   [
+    "rd_4n84vfgg",
+    "169"
+   ],
+   [
+    "rd_5b5kmjeq",
+    "14"
+   ],
+   [
+    "rd_abcwg2qf",
+    "236"
+   ],
+   [
+    "rd_au3vmzsm",
+    "24"
+   ],
+   [
+    "rd_ehc3hyyw",
+    "38"
+   ],
+   [
+    "rd_f4hzv5sj",
+    "208"
+   ],
+   [
+    "rd_m4rft4fy",
+    "99"
+   ],
+   [
+    "rd_ntajfras",
+    "114"
+   ],
+   [
+    "rd_u6kdhc3b",
+    "57"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_abcwg2qf",
+    "236"
+   ],
+   [
+    "rd_au3vmzsm",
+    "24"
+   ],
+   [
+    "rd_f4hzv5sj",
+    "208"
+   ],
+   [
+    "rd_ntajfras",
+    "114"
+   ],
+   [
+    "rd_u6kdhc3b",
+    "57"
+   ]
+  ],
+  "rep": [
+   "rd_au3vmzsm",
+   "24"
+  ],
+  "n_room_days": 9,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS",
+   "FxzVVvnPjgPOD6JeamKd",
+   "oJfsVSPqXXXC1SVR8AjB",
+   "uAwhqWfPvn1i45TPhhPW"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 1306,
+  "rx_hits": 12,
+  "rx": true,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.987,
+  "present_rep": [
+   12,
+   13
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g010",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_5b5kmjeq",
+    "43"
+   ],
+   [
+    "rd_abcwg2qf",
+    "144"
+   ],
+   [
+    "rd_f4hzv5sj",
+    "130"
+   ],
+   [
+    "rd_m4rft4fy",
+    "50"
+   ],
+   [
+    "rd_ntajfras",
+    "68"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_abcwg2qf",
+    "144"
+   ],
+   [
+    "rd_m4rft4fy",
+    "50"
+   ]
+  ],
+  "rep": [
+   "rd_m4rft4fy",
+   "50"
+  ],
+  "n_room_days": 5,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS",
+   "FxzVVvnPjgPOD6JeamKd",
+   "MFTZnXMshE91P7fHnqgX",
+   "Tbvyk1V5ijpcD194ZOWi"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 1045,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.369,
+  "present_rep": [
+   8,
+   8
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g011",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_5b5kmjeq",
+    "39"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_5b5kmjeq",
+    "39"
+   ]
+  ],
+  "rep": [
+   "rd_5b5kmjeq",
+   "39"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 42,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.412,
+  "present_rep": [
+   1,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g012",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "members": [
+   [
+    "rd_5b5kmjeq",
+    "80"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_5b5kmjeq",
+    "80"
+   ]
+  ],
+  "rep": [
+   "rd_5b5kmjeq",
+   "80"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 81,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.33,
+  "present_rep": [
+   1,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g013",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_6cn2jp2d",
+    "99"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_6cn2jp2d",
+    "99"
+   ]
+  ],
+  "rep": [
+   "rd_6cn2jp2d",
+   "99"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 29,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.154,
+  "present_rep": [
+   1,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g014",
+  "doctor_uid": "MFTZnXMshE91P7fHnqgX",
+  "members": [
+   [
+    "rd_6cn2jp2d",
+    "45"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_6cn2jp2d",
+    "45"
+   ]
+  ],
+  "rep": [
+   "rd_6cn2jp2d",
+   "45"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "MFTZnXMshE91P7fHnqgX"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 20,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.062,
+  "present_rep": [
+   1,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g015",
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "members": [
+   [
+    "rd_6nwgyrpx",
+    "40"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_6nwgyrpx",
+    "40"
+   ]
+  ],
+  "rep": [
+   "rd_6nwgyrpx",
+   "40"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Tbvyk1V5ijpcD194ZOWi"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 188,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.636,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g016",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_6nwgyrpx",
+    "32"
+   ],
+   [
+    "rd_9ze2fwuh",
+    "1"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_6nwgyrpx",
+    "32"
+   ]
+  ],
+  "rep": [
+   "rd_6nwgyrpx",
+   "32"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd",
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 38,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.254,
+  "present_rep": [
+   5,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g017",
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "members": [
+   [
+    "rd_6nwgyrpx",
+    "42"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_6nwgyrpx",
+    "42"
+   ]
+  ],
+  "rep": [
+   "rd_6nwgyrpx",
+   "42"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Tbvyk1V5ijpcD194ZOWi"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 62,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.375,
+  "present_rep": [
+   0,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g018",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_7g2ytyta",
+    "15"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_7g2ytyta",
+    "15"
+   ]
+  ],
+  "rep": [
+   "rd_7g2ytyta",
+   "15"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 74,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.434,
+  "present_rep": [
+   4,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g019",
+  "doctor_uid": "MFTZnXMshE91P7fHnqgX",
+  "members": [
+   [
+    "rd_7g2ytyta",
+    "45"
+   ],
+   [
+    "rd_xa2e3ufc",
+    "42"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_7g2ytyta",
+    "45"
+   ]
+  ],
+  "rep": [
+   "rd_7g2ytyta",
+   "45"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "MFTZnXMshE91P7fHnqgX",
+   "zktYYYPFZCH4E4PPXMtJ"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 14,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.184,
+  "present_rep": [
+   1,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g020",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_7g2ytyta",
+    "10"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_7g2ytyta",
+    "10"
+   ]
+  ],
+  "rep": [
+   "rd_7g2ytyta",
+   "10"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 25,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.364,
+  "present_rep": [
+   3,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g021",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_7usy23ex",
+    "33"
+   ],
+   [
+    "rd_errdkjhe",
+    "49"
+   ],
+   [
+    "rd_kp4c7pp6",
+    "102"
+   ],
+   [
+    "rd_ueankkjc",
+    "84"
+   ],
+   [
+    "rd_yck5kdc2",
+    "123"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_errdkjhe",
+    "49"
+   ],
+   [
+    "rd_yck5kdc2",
+    "123"
+   ]
+  ],
+  "rep": [
+   "rd_errdkjhe",
+   "49"
+  ],
+  "n_room_days": 5,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "0q9pSZHR24ysquO6V4Xg",
+   "FxzVVvnPjgPOD6JeamKd",
+   "R3IEiNFjBgwTiXheMX2n",
+   "uAwhqWfPvn1i45TPhhPW"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 665,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.584,
+  "present_rep": [
+   11,
+   14
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g022",
+  "doctor_uid": "0q9pSZHR24ysquO6V4Xg",
+  "members": [
+   [
+    "rd_7usy23ex",
+    "11"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_7usy23ex",
+    "11"
+   ]
+  ],
+  "rep": [
+   "rd_7usy23ex",
+   "11"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "0q9pSZHR24ysquO6V4Xg"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 29,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.364,
+  "present_rep": [
+   1,
+   6
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g023",
+  "doctor_uid": "QJPPFgQomMv8DScTODC0",
+  "members": [
+   [
+    "rd_8kshcb64",
+    "64"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_8kshcb64",
+    "64"
+   ]
+  ],
+  "rep": [
+   "rd_8kshcb64",
+   "64"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "QJPPFgQomMv8DScTODC0"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 169,
+  "rx_hits": 2,
+  "rx": true,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.617,
+  "present_rep": [
+   4,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g024",
+  "doctor_uid": "QJPPFgQomMv8DScTODC0",
+  "members": [
+   [
+    "rd_8kshcb64",
+    "73"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_8kshcb64",
+    "73"
+   ]
+  ],
+  "rep": [
+   "rd_8kshcb64",
+   "73"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "QJPPFgQomMv8DScTODC0"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 24,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.053,
+  "present_rep": [
+   1,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g025",
+  "doctor_uid": "QJPPFgQomMv8DScTODC0",
+  "members": [
+   [
+    "rd_8kshcb64",
+    "82"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_8kshcb64",
+    "82"
+   ]
+  ],
+  "rep": [
+   "rd_8kshcb64",
+   "82"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "QJPPFgQomMv8DScTODC0"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 35,
+  "rx_hits": 1,
+  "rx": true,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.212,
+  "present_rep": [
+   1,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g026",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_93tcdc4c",
+    "28"
+   ],
+   [
+    "rd_errdkjhe",
+    "26"
+   ],
+   [
+    "rd_sp5dezef",
+    "21"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_93tcdc4c",
+    "28"
+   ],
+   [
+    "rd_sp5dezef",
+    "21"
+   ]
+  ],
+  "rep": [
+   "rd_sp5dezef",
+   "21"
+  ],
+  "n_room_days": 3,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS",
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 287,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.742,
+  "present_rep": [
+   3,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g027",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_93tcdc4c",
+    "3"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_93tcdc4c",
+    "3"
+   ]
+  ],
+  "rep": [
+   "rd_93tcdc4c",
+   "3"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 55,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.299,
+  "present_rep": [
+   2,
+   7
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g028",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_9q4u73rr",
+    "28"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_9q4u73rr",
+    "28"
+   ]
+  ],
+  "rep": [
+   "rd_9q4u73rr",
+   "28"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 58,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.259,
+  "present_rep": [
+   1,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g029",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_9q4u73rr",
+    "26"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_9q4u73rr",
+    "26"
+   ]
+  ],
+  "rep": [
+   "rd_9q4u73rr",
+   "26"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 37,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.334,
+  "present_rep": [
+   0,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g030",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_9ze2fwuh",
+    "7"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_9ze2fwuh",
+    "7"
+   ]
+  ],
+  "rep": [
+   "rd_9ze2fwuh",
+   "7"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 127,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.584,
+  "present_rep": [
+   3,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g031",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "members": [
+   [
+    "rd_abcwg2qf",
+    "176"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_abcwg2qf",
+    "176"
+   ]
+  ],
+  "rep": [
+   "rd_abcwg2qf",
+   "176"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 48,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.191,
+  "present_rep": [
+   3,
+   13
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g032",
+  "doctor_uid": "mjAB4AZVnP8r2oXvIgP6",
+  "members": [
+   [
+    "rd_aeeu5u4j",
+    "12"
+   ],
+   [
+    "rd_kp4c7pp6",
+    "75"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_kp4c7pp6",
+    "75"
+   ]
+  ],
+  "rep": [
+   "rd_kp4c7pp6",
+   "75"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mjAB4AZVnP8r2oXvIgP6"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 359,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.114,
+  "present_rep": [
+   4,
+   4
+  ],
+  "tier_pre_jev": "MED"
+ },
+ {
+  "gid": "g033",
+  "doctor_uid": "zktYYYPFZCH4E4PPXMtJ",
+  "members": [
+   [
+    "rd_aeeu5u4j",
+    "10"
+   ],
+   [
+    "rd_ed8endsg",
+    "50"
+   ],
+   [
+    "rd_yck5kdc2",
+    "62"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ed8endsg",
+    "50"
+   ]
+  ],
+  "rep": [
+   "rd_ed8endsg",
+   "50"
+  ],
+  "n_room_days": 3,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "Tbvyk1V5ijpcD194ZOWi",
+   "zktYYYPFZCH4E4PPXMtJ"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 144,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.224,
+  "present_rep": [
+   1,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g034",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_akp6hnb7",
+    "27"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_akp6hnb7",
+    "27"
+   ]
+  ],
+  "rep": [
+   "rd_akp6hnb7",
+   "27"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 0,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.075,
+  "present_rep": [
+   0,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g035",
+  "doctor_uid": "Y2acuffYHRVpZfNhmhlh",
+  "members": [
+   [
+    "rd_akp6hnb7",
+    "57"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_akp6hnb7",
+    "57"
+   ]
+  ],
+  "rep": [
+   "rd_akp6hnb7",
+   "57"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Y2acuffYHRVpZfNhmhlh"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 101,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.373,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g036",
+  "doctor_uid": "Y2acuffYHRVpZfNhmhlh",
+  "members": [
+   [
+    "rd_akp6hnb7",
+    "48"
+   ],
+   [
+    "rd_hhc4hskv",
+    "73"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_akp6hnb7",
+    "48"
+   ]
+  ],
+  "rep": [
+   "rd_akp6hnb7",
+   "48"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "Y2acuffYHRVpZfNhmhlh",
+   "osXJkk6P3ME712mF2b2B"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 47,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.183,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g037",
+  "doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "members": [
+   [
+    "rd_au3vmzsm",
+    "109"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_au3vmzsm",
+    "109"
+   ]
+  ],
+  "rep": [
+   "rd_au3vmzsm",
+   "109"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "bKr81BFLZSuiMa7MvhaA"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 190,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.74,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g038",
+  "doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "members": [
+   [
+    "rd_au3vmzsm",
+    "40"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_au3vmzsm",
+    "40"
+   ]
+  ],
+  "rep": [
+   "rd_au3vmzsm",
+   "40"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "bKr81BFLZSuiMa7MvhaA"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 56,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.54,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g039",
+  "doctor_uid": "mjAB4AZVnP8r2oXvIgP6",
+  "members": [
+   [
+    "rd_cujhuhvj",
+    "80"
+   ],
+   [
+    "rd_ehc3hyyw",
+    "63"
+   ],
+   [
+    "rd_u579utrq",
+    "100"
+   ],
+   [
+    "rd_u6kdhc3b",
+    "200"
+   ],
+   [
+    "rd_yhh6kexm",
+    "175"
+   ],
+   [
+    "rd_yhh6kexm",
+    "183"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_cujhuhvj",
+    "80"
+   ]
+  ],
+  "rep": [
+   "rd_cujhuhvj",
+   "80"
+  ],
+  "n_room_days": 5,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "Rs06m6tmEu7HvATiQXw6",
+   "Tbvyk1V5ijpcD194ZOWi",
+   "byIfJcLydITKwRYtpcj5",
+   "mjAB4AZVnP8r2oXvIgP6",
+   "uAwhqWfPvn1i45TPhhPW",
+   "z04sk8cEsTuXxVWY4iHL"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 686,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.695,
+  "present_rep": [
+   4,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g040",
+  "doctor_uid": "MFTZnXMshE91P7fHnqgX",
+  "members": [
+   [
+    "rd_cujhuhvj",
+    "98"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_cujhuhvj",
+    "98"
+   ]
+  ],
+  "rep": [
+   "rd_cujhuhvj",
+   "98"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "MFTZnXMshE91P7fHnqgX"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 339,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.633,
+  "present_rep": [
+   3,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g041",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_cujhuhvj",
+    "134"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_cujhuhvj",
+    "134"
+   ]
+  ],
+  "rep": [
+   "rd_cujhuhvj",
+   "134"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 117,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.328,
+  "present_rep": [
+   6,
+   12
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g042",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_djmbtzph",
+    "216"
+   ],
+   [
+    "rd_tcqaam5c",
+    "41"
+   ],
+   [
+    "rd_tp4hcf8s",
+    "105"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_djmbtzph",
+    "216"
+   ]
+  ],
+  "rep": [
+   "rd_djmbtzph",
+   "216"
+  ],
+  "n_room_days": 3,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "JKJxJjTimXHh4odOgva5",
+   "bKr81BFLZSuiMa7MvhaA",
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 418,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.533,
+  "present_rep": [
+   8,
+   9
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g043",
+  "doctor_uid": "JKJxJjTimXHh4odOgva5",
+  "members": [
+   [
+    "rd_djmbtzph",
+    "93"
+   ],
+   [
+    "rd_tcqaam5c",
+    "24"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_djmbtzph",
+    "93"
+   ],
+   [
+    "rd_tcqaam5c",
+    "24"
+   ]
+  ],
+  "rep": [
+   "rd_djmbtzph",
+   "93"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "JKJxJjTimXHh4odOgva5"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 261,
+  "rx_hits": 3,
+  "rx": true,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.72,
+  "present_rep": [
+   5,
+   5
+  ],
+  "tier_pre_jev": "HIGH"
+ },
+ {
+  "gid": "g044",
+  "doctor_uid": "iCPiVDFia1dnnjwx8XbM",
+  "members": [
+   [
+    "rd_djmbtzph",
+    "33"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_djmbtzph",
+    "33"
+   ]
+  ],
+  "rep": [
+   "rd_djmbtzph",
+   "33"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "iCPiVDFia1dnnjwx8XbM"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 78,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.524,
+  "present_rep": [
+   1,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g045",
+  "doctor_uid": "FP1cesrCLD0AK4L5edEQ",
+  "members": [
+   [
+    "rd_ed8endsg",
+    "85"
+   ],
+   [
+    "rd_np5wt5tw",
+    "74"
+   ],
+   [
+    "rd_yck5kdc2",
+    "89"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ed8endsg",
+    "85"
+   ]
+  ],
+  "rep": [
+   "rd_ed8endsg",
+   "85"
+  ],
+  "n_room_days": 3,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "FP1cesrCLD0AK4L5edEQ",
+   "FxzVVvnPjgPOD6JeamKd",
+   "MFTZnXMshE91P7fHnqgX"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 261,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.745,
+  "present_rep": [
+   2,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g046",
+  "doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "members": [
+   [
+    "rd_ed8endsg",
+    "35"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ed8endsg",
+    "35"
+   ]
+  ],
+  "rep": [
+   "rd_ed8endsg",
+   "35"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "bKr81BFLZSuiMa7MvhaA"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 94,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.222,
+  "present_rep": [
+   2,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g047",
+  "doctor_uid": "jo5CndlNx5jwrD3Pmohb",
+  "members": [
+   [
+    "rd_ehc3hyyw",
+    "4"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ehc3hyyw",
+    "4"
+   ]
+  ],
+  "rep": [
+   "rd_ehc3hyyw",
+   "4"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "jo5CndlNx5jwrD3Pmohb"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 0,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": -0.067,
+  "present_rep": [
+   0,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g048",
+  "doctor_uid": "byIfJcLydITKwRYtpcj5",
+  "members": [
+   [
+    "rd_errdkjhe",
+    "98"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_errdkjhe",
+    "98"
+   ]
+  ],
+  "rep": [
+   "rd_errdkjhe",
+   "98"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "byIfJcLydITKwRYtpcj5"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 0,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.046,
+  "present_rep": [
+   0,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g049",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_errdkjhe",
+    "23"
+   ],
+   [
+    "rd_kp4c7pp6",
+    "92"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_errdkjhe",
+    "23"
+   ]
+  ],
+  "rep": [
+   "rd_errdkjhe",
+   "23"
+  ],
+  "n_room_days": 2,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "mjAB4AZVnP8r2oXvIgP6",
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 89,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.288,
+  "present_rep": [
+   5,
+   12
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g050",
+  "doctor_uid": "bKr81BFLZSuiMa7MvhaA",
+  "members": [
+   [
+    "rd_f4hzv5sj",
+    "74"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_f4hzv5sj",
+    "74"
+   ]
+  ],
+  "rep": [
+   "rd_f4hzv5sj",
+   "74"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "bKr81BFLZSuiMa7MvhaA"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 77,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.344,
+  "present_rep": [
+   8,
+   9
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g051",
+  "doctor_uid": "b8uerqB7pAmnTI9cr3c4",
+  "members": [
+   [
+    "rd_hhc4hskv",
+    "22"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_hhc4hskv",
+    "22"
+   ]
+  ],
+  "rep": [
+   "rd_hhc4hskv",
+   "22"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "b8uerqB7pAmnTI9cr3c4"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 71,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": -0.01,
+  "present_rep": [
+   2,
+   9
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g052",
+  "doctor_uid": "osXJkk6P3ME712mF2b2B",
+  "members": [
+   [
+    "rd_hhc4hskv",
+    "58"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_hhc4hskv",
+    "58"
+   ]
+  ],
+  "rep": [
+   "rd_hhc4hskv",
+   "58"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "osXJkk6P3ME712mF2b2B"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 25,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.212,
+  "present_rep": [
+   5,
+   8
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g053",
+  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
+  "members": [
+   [
+    "rd_jqj96amk",
+    "48"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_jqj96amk",
+    "48"
+   ]
+  ],
+  "rep": [
+   "rd_jqj96amk",
+   "48"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 182,
+  "rx_hits": 1,
+  "rx": true,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.702,
+  "present_rep": [
+   2,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g054",
+  "doctor_uid": "R3IEiNFjBgwTiXheMX2n",
+  "members": [
+   [
+    "rd_jqj96amk",
+    "49"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_jqj96amk",
+    "49"
+   ]
+  ],
+  "rep": [
+   "rd_jqj96amk",
+   "49"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "R3IEiNFjBgwTiXheMX2n"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 47,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.2,
+  "present_rep": [
+   1,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g055",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_m4rft4fy",
+    "52"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_m4rft4fy",
+    "52"
+   ]
+  ],
+  "rep": [
+   "rd_m4rft4fy",
+   "52"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 125,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.431,
+  "present_rep": [
+   5,
+   8
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g056",
+  "doctor_uid": "0q9pSZHR24ysquO6V4Xg",
+  "members": [
+   [
+    "rd_m4rft4fy",
+    "20"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_m4rft4fy",
+    "20"
+   ]
+  ],
+  "rep": [
+   "rd_m4rft4fy",
+   "20"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "0q9pSZHR24ysquO6V4Xg"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 89,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.26,
+  "present_rep": [
+   1,
+   6
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g057",
+  "doctor_uid": "FxzVVvnPjgPOD6JeamKd",
+  "members": [
+   [
+    "rd_np5wt5tw",
+    "81"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_np5wt5tw",
+    "81"
+   ]
+  ],
+  "rep": [
+   "rd_np5wt5tw",
+   "81"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "FxzVVvnPjgPOD6JeamKd"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 63,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.416,
+  "present_rep": [
+   2,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g058",
+  "doctor_uid": "9o62ETyXw5040Kn3t8bM",
+  "members": [
+   [
+    "rd_np5wt5tw",
+    "70"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_np5wt5tw",
+    "70"
+   ]
+  ],
+  "rep": [
+   "rd_np5wt5tw",
+   "70"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "9o62ETyXw5040Kn3t8bM"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 36,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 1,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.513,
+  "present_rep": [
+   3,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g059",
+  "doctor_uid": "MFTZnXMshE91P7fHnqgX",
+  "members": [
+   [
+    "rd_ntajfras",
+    "56"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ntajfras",
+    "56"
+   ]
+  ],
+  "rep": [
+   "rd_ntajfras",
+   "56"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "MFTZnXMshE91P7fHnqgX"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 1,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.235,
+  "present_rep": [
+   0,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g060",
+  "doctor_uid": "byIfJcLydITKwRYtpcj5",
+  "members": [
+   [
+    "rd_ntajfras",
+    "75"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ntajfras",
+    "75"
+   ]
+  ],
+  "rep": [
+   "rd_ntajfras",
+   "75"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "byIfJcLydITKwRYtpcj5"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 22,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.26,
+  "present_rep": [
+   1,
+   6
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g061",
+  "doctor_uid": "byIfJcLydITKwRYtpcj5",
+  "members": [
+   [
+    "rd_pw5gaugg",
+    "20"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_pw5gaugg",
+    "20"
+   ]
+  ],
+  "rep": [
+   "rd_pw5gaugg",
+   "20"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "byIfJcLydITKwRYtpcj5"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 0,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.066,
+  "present_rep": [
+   0,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g062",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_pw5gaugg",
+    "22"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_pw5gaugg",
+    "22"
+   ]
+  ],
+  "rep": [
+   "rd_pw5gaugg",
+   "22"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 35,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.107,
+  "present_rep": [
+   2,
+   8
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g063",
+  "doctor_uid": "mjAB4AZVnP8r2oXvIgP6",
+  "members": [
+   [
+    "rd_sp5dezef",
+    "102"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_sp5dezef",
+    "102"
+   ]
+  ],
+  "rep": [
+   "rd_sp5dezef",
+   "102"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mjAB4AZVnP8r2oXvIgP6"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 484,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.416,
+  "present_rep": [
+   4,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g064",
+  "doctor_uid": "uNYS9ajeKlLngWOshbMf",
+  "members": [
+   [
+    "rd_sp5dezef",
+    "80"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_sp5dezef",
+    "80"
+   ]
+  ],
+  "rep": [
+   "rd_sp5dezef",
+   "80"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "uNYS9ajeKlLngWOshbMf"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 3,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.073,
+  "present_rep": [
+   1,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g065",
+  "doctor_uid": "JKJxJjTimXHh4odOgva5",
+  "members": [
+   [
+    "rd_tcqaam5c",
+    "29"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_tcqaam5c",
+    "29"
+   ]
+  ],
+  "rep": [
+   "rd_tcqaam5c",
+   "29"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "JKJxJjTimXHh4odOgva5"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 35,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 2,
+  "stable": true,
+  "lq": null,
+  "excess_rep": 0.032,
+  "present_rep": [
+   1,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g066",
+  "doctor_uid": "Y2acuffYHRVpZfNhmhlh",
+  "members": [
+   [
+    "rd_tp4hcf8s",
+    "57"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_tp4hcf8s",
+    "57"
+   ]
+  ],
+  "rep": [
+   "rd_tp4hcf8s",
+   "57"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Y2acuffYHRVpZfNhmhlh"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 66,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.174,
+  "present_rep": [
+   5,
+   9
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g067",
+  "doctor_uid": "Y2acuffYHRVpZfNhmhlh",
+  "members": [
+   [
+    "rd_tp4hcf8s",
+    "150"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_tp4hcf8s",
+    "150"
+   ]
+  ],
+  "rep": [
+   "rd_tp4hcf8s",
+   "150"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Y2acuffYHRVpZfNhmhlh"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 35,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.202,
+  "present_rep": [
+   4,
+   9
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g068",
+  "doctor_uid": "z04sk8cEsTuXxVWY4iHL",
+  "members": [
+   [
+    "rd_u579utrq",
+    "24"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_u579utrq",
+    "24"
+   ]
+  ],
+  "rep": [
+   "rd_u579utrq",
+   "24"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "z04sk8cEsTuXxVWY4iHL"
+  ],
+  "n5": false,
+  "core_turns_in_consults": 0,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.0,
+  "present_rep": [
+   0,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g069",
+  "doctor_uid": "z04sk8cEsTuXxVWY4iHL",
+  "members": [
+   [
+    "rd_u579utrq",
+    "84"
+   ],
+   [
+    "rd_ueankkjc",
+    "28"
+   ],
+   [
+    "rd_yhh6kexm",
+    "225"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_u579utrq",
+    "84"
+   ]
+  ],
+  "rep": [
+   "rd_u579utrq",
+   "84"
+  ],
+  "n_room_days": 3,
+  "xday": true,
+  "excl": false,
+  "staff_candidate": true,
+  "doctors_named": [
+   "F092iDIAfwXKtLCqP8HS",
+   "JKJxJjTimXHh4odOgva5",
+   "z04sk8cEsTuXxVWY4iHL"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 108,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.271,
+  "present_rep": [
+   4,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g070",
+  "doctor_uid": "z04sk8cEsTuXxVWY4iHL",
+  "members": [
+   [
+    "rd_u579utrq",
+    "118"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_u579utrq",
+    "118"
+   ]
+  ],
+  "rep": [
+   "rd_u579utrq",
+   "118"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "z04sk8cEsTuXxVWY4iHL"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 13,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.02,
+  "present_rep": [
+   0,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g071",
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "members": [
+   [
+    "rd_u6kdhc3b",
+    "154"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_u6kdhc3b",
+    "154"
+   ]
+  ],
+  "rep": [
+   "rd_u6kdhc3b",
+   "154"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Tbvyk1V5ijpcD194ZOWi"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 69,
+  "rx_hits": 1,
+  "rx": true,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.43,
+  "present_rep": [
+   2,
+   6
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g072",
+  "doctor_uid": "oJfsVSPqXXXC1SVR8AjB",
+  "members": [
+   [
+    "rd_ueankkjc",
+    "1"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_ueankkjc",
+    "1"
+   ]
+  ],
+  "rep": [
+   "rd_ueankkjc",
+   "1"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "oJfsVSPqXXXC1SVR8AjB"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 111,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.193,
+  "present_rep": [
+   4,
+   22
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g073",
+  "doctor_uid": "zktYYYPFZCH4E4PPXMtJ",
+  "members": [
+   [
+    "rd_xa2e3ufc",
+    "89"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_xa2e3ufc",
+    "89"
+   ]
+  ],
+  "rep": [
+   "rd_xa2e3ufc",
+   "89"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "zktYYYPFZCH4E4PPXMtJ"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 56,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.131,
+  "present_rep": [
+   2,
+   5
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g074",
+  "doctor_uid": "osXJkk6P3ME712mF2b2B",
+  "members": [
+   [
+    "rd_xa2e3ufc",
+    "52"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_xa2e3ufc",
+    "52"
+   ]
+  ],
+  "rep": [
+   "rd_xa2e3ufc",
+   "52"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "osXJkk6P3ME712mF2b2B"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 47,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.255,
+  "present_rep": [
+   3,
+   3
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g075",
+  "doctor_uid": "Tbvyk1V5ijpcD194ZOWi",
+  "members": [
+   [
+    "rd_yck5kdc2",
+    "23"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_yck5kdc2",
+    "23"
+   ]
+  ],
+  "rep": [
+   "rd_yck5kdc2",
+   "23"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "Tbvyk1V5ijpcD194ZOWi"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 80,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.255,
+  "present_rep": [
+   4,
+   4
+  ],
+  "tier_pre_jev": "LOW"
+ },
+ {
+  "gid": "g076",
+  "doctor_uid": "mGXTEDg9o9WNR9gpZ4sY",
+  "members": [
+   [
+    "rd_yhh6kexm",
+    "272"
+   ]
+  ],
+  "members_naming_D": [
+   [
+    "rd_yhh6kexm",
+    "272"
+   ]
+  ],
+  "rep": [
+   "rd_yhh6kexm",
+   "272"
+  ],
+  "n_room_days": 1,
+  "xday": false,
+  "excl": true,
+  "staff_candidate": false,
+  "doctors_named": [
+   "mGXTEDg9o9WNR9gpZ4sY"
+  ],
+  "n5": true,
+  "core_turns_in_consults": 509,
+  "rx_hits": 0,
+  "rx": false,
+  "stable_tolerances_max": 0,
+  "stable": false,
+  "lq": null,
+  "excess_rep": 0.683,
+  "present_rep": [
+   9,
+   12
+  ],
+  "tier_pre_jev": "LOW"
+ }
+]

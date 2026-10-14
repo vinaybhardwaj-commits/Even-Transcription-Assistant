@@ -1,0 +1,199 @@
+=== runArm callers ===
+lib/mcp/tools/fuse.ts:171:async function runArm(arm: Arm, cues: FuseCue[], day: RoomDayByIdRow): Promise<ArmResult> {
+lib/mcp/tools/fuse.ts:235:      const res = await runArm(arm, cues, day);
+
+=== listBenchSessions ===
+lib/bench.ts:203:export async function listBenchSessions(f: BenchSessionListFilters = {}): Promise<BenchSessionRollupRow[]> {
+lib/bench.ts-204-  const roomId = f.room_id ?? null;
+lib/bench.ts-205-  const roomSlug = f.room_slug ?? null;
+lib/bench.ts-206-  const istDate = f.ist_date ?? null;
+lib/bench.ts-207-  const status = f.status ?? null;
+lib/bench.ts-208-  const limit = Math.min(Math.max(Math.trunc(f.limit ?? SESSIONS_DEFAULT_LIMIT) || SESSIONS_DEFAULT_LIMIT, 1), SESSIONS_DEFAULT_LIMIT);
+lib/bench.ts-209-  return (await sql`
+lib/bench.ts-210-    SELECT s.id, s.room_id, s.label, s.mic_label, s.started_at, s.ended_at, s.status, s.notes,
+lib/bench.ts-211-           r.name AS room_name, r.slug AS room_slug,
+lib/bench.ts-212-           COUNT(c.id) FILTER (WHERE c.source = 'primary')::int AS chunk_count,
+lib/bench.ts-213-           COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.upload_state = 'verified')::int AS verified_count,
+lib/bench.ts-214-           COALESCE(SUM(c.size_bytes), 0)::bigint AS total_bytes,
+lib/bench.ts-215-           COALESCE(SUM(c.gap_before_ms) FILTER (WHERE c.source = 'primary'), 0)::bigint AS gap_ms,
+lib/bench.ts-216-           COUNT(c.id) FILTER (WHERE c.source = 'primary' AND c.gap_before_ms >= 2000)::int AS gap_count,
+lib/bench.ts-217-           MAX(c.created_at) FILTER (WHERE c.source = 'primary') AS last_chunk_at,
+lib/bench.ts-218-           MAX(c.created_at) AS last_any_chunk_at,
+lib/bench.ts-219-           COUNT(c.id) FILTER (WHERE c.source = 'backup')::int AS backup_chunk_count,
+lib/bench.ts-220-           COUNT(c.id) FILTER (WHERE c.source = 'backup' AND c.upload_state = 'verified')::int AS backup_verified_count,
+lib/bench.ts-221-           COALESCE(ev.primary_lost_count, 0)::int AS primary_lost_count,
+lib/bench.ts-222-           COALESCE(ev.primary_restored_count, 0)::int AS primary_restored_count
+lib/bench.ts-223-      FROM bench_session s
+lib/bench.ts-224-      JOIN room r ON r.id = s.room_id
+lib/bench.ts-225-      LEFT JOIN bench_chunk c ON c.session_id = s.id
+lib/bench.ts-226-      LEFT JOIN LATERAL (
+lib/bench.ts-227-        SELECT COUNT(*) FILTER (WHERE e.kind = 'mic_primary_lost') AS primary_lost_count,
+lib/bench.ts-228-               COUNT(*) FILTER (WHERE e.kind = 'mic_primary_restored') AS primary_restored_count
+lib/bench.ts-229-          FROM bench_event e
+lib/bench.ts-230-         WHERE e.session_id = s.id
+lib/bench.ts-231-      ) ev ON true
+lib/bench.ts-232-     WHERE (${roomId}::text IS NULL OR s.room_id = ${roomId}::text)
+lib/bench.ts-233-       AND (${roomSlug}::text IS NULL OR r.slug = ${roomSlug}::text)
+lib/bench.ts-234-       AND (${istDate}::text IS NULL OR (s.started_at AT TIME ZONE 'Asia/Kolkata')::date = ${istDate}::date)
+lib/bench.ts-235-       AND (${status}::text IS NULL OR s.status = ${status}::text)
+lib/bench.ts-236-     GROUP BY s.id, s.room_id, s.label, s.mic_label, s.started_at, s.ended_at, s.status, s.notes,
+lib/bench.ts-237-              r.name, r.slug, ev.primary_lost_count, ev.primary_restored_count
+lib/bench.ts-238-     ORDER BY s.started_at DESC
+lib/bench.ts-239-     LIMIT ${limit}::int
+lib/bench.ts-240-  `) as BenchSessionRollupRow[];
+lib/bench.ts-241-}
+lib/bench.ts-242-
+lib/bench.ts-243-export type BenchConsultMarkRow = {
+lib/bench.ts-244-  id: string;
+lib/bench.ts-245-  at: string | Date;
+lib/bench.ts-246-  brain_status: string;
+lib/bench.ts-247-};
+lib/bench.ts-248-
+
+=== fuse-report location + the walk-back idiom ===
+lib/mcp/tools/fuse.ts
+lib/mcp/tools/fuse-report.ts
+lib/brain/scratch.ts
+--- occurrences:
+lib/mcp/tools/fuse.ts-27-import type { TapeSession } from "@/lib/brain/fuse/rules";
+lib/mcp/tools/fuse.ts-28-import { ARMS, VISIT_STATES, type Arm, type ClinicianSource, type DraftVisit, type FuseCue } from "@/lib/brain/fuse/types";
+lib/mcp/tools/fuse.ts-29-import { auditVisitClinicianChange, isClosed, readVisit, updateVisitClinician } from "@/lib/brain/fuse/visit-update";
+lib/mcp/tools/fuse.ts-30-import { listBenchSessions } from "@/lib/bench";
+lib/mcp/tools/fuse.ts:31:import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
+lib/mcp/tools/fuse.ts-32-import { argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+lib/mcp/tools/fuse.ts-33-
+lib/mcp/tools/fuse.ts-34-type CueRow = { id: string; type: string; at: Date | string; created_at: Date | string; payload: unknown; source: string | null; source_ref: string | null };
+lib/mcp/tools/fuse.ts-35-
+lib/mcp/tools/fuse.ts-36-const iso = (d: Date | string): string => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
+lib/mcp/tools/fuse.ts-37-
+lib/mcp/tools/fuse.ts-38-/** The day's cues in evidence order, normalised to what the arms take. */
+lib/mcp/tools/fuse.ts-39-export async function readCuesForFuse(roomDayId: string): Promise<FuseCue[]> {
+--
+lib/mcp/tools/fuse.ts-152-/**
+lib/mcp/tools/fuse.ts-153- * Arm D's tape sessions, walked back from the room-day exactly the way scribe_fuse_report does
+lib/mcp/tools/fuse.ts-154- * (fuse-report.ts's own comment: "a scratch room has NO TAPE — bench_session rows belong to the
+lib/mcp/tools/fuse.ts-155- * real room — so the report has to walk back from the scratch day to the room that actually
+lib/mcp/tools/fuse.ts:156: * recorded"). realRoomIdFor is the exported inverse of scratchRoomIdFor, so the two cannot drift
+lib/mcp/tools/fuse.ts-157- * apart; a live day resolves to itself, so the walk-back is correct (a no-op) on the one kind of
+lib/mcp/tools/fuse.ts-158- * day that can never reach this arm anyway.
+lib/mcp/tools/fuse.ts-159- *
+lib/mcp/tools/fuse.ts-160- * Also doubles as readSessionsForJev used to: listBenchSessions already returns everything
+lib/mcp/tools/fuse.ts-161- * TapeSession needs (id, started_at, ended_at), so there is no second bench_session query.
+lib/mcp/tools/fuse.ts-162- */
+lib/mcp/tools/fuse.ts-163-async function resolveTapeSessionsForJev(day: RoomDayByIdRow): Promise<TapeSession[]> {
+lib/mcp/tools/fuse.ts-164-  const isScratch = day.room_id.startsWith(SCRATCH_ROOM_PREFIX);
+lib/mcp/tools/fuse.ts:165:  const realRoomId = isScratch ? realRoomIdFor(day.room_id) : day.room_id;
+lib/mcp/tools/fuse.ts-166-  if (!realRoomId) return [];
+lib/mcp/tools/fuse.ts-167-  const rows = await listBenchSessions({ room_id: realRoomId, ist_date: day.ist_date });
+lib/mcp/tools/fuse.ts-168-  return rows.map((row) => ({ id: row.id, started_at: iso(row.started_at), ended_at: row.ended_at ? iso(row.ended_at) : null }));
+lib/mcp/tools/fuse.ts-169-}
+lib/mcp/tools/fuse.ts-170-
+lib/mcp/tools/fuse.ts-171-async function runArm(arm: Arm, cues: FuseCue[], day: RoomDayByIdRow): Promise<ArmResult> {
+lib/mcp/tools/fuse.ts-172-  // B3 — scribe_fuse_run is scratch-only and runs over a day that is DONE (0046's scratch days
+lib/mcp/tools/fuse.ts-173-  // are replays of finished sessions), so the rollover pass applies. Stated here rather than
+--
+lib/mcp/tools/fuse-report.ts-15- *     the consult at all. Cardiology has two.
+lib/mcp/tools/fuse-report.ts-16- *
+lib/mcp/tools/fuse-report.ts-17- * A SCRATCH ROOM HAS NO TAPE. bench_session rows belong to the REAL room, which is why
+lib/mcp/tools/fuse-report.ts-18- * scribe_day_report aimed at a scratch room comes back empty and why this tool exists. The real
+lib/mcp/tools/fuse-report.ts:19: * room is recovered with realRoomIdFor() from lib/brain/scratch.ts — the exported inverse of the
+lib/mcp/tools/fuse-report.ts-20- * function that derived the scratch id in the first place, not string surgery here.
+lib/mcp/tools/fuse-report.ts-21- *
+lib/mcp/tools/fuse-report.ts-22- * WRITES NOTHING (S3). Every statement in this file is a SELECT. No cue, no visit, no trace.
+lib/mcp/tools/fuse-report.ts-23- * Identity is off by default (S5): individual_uid appears only with include_identity:true.
+lib/mcp/tools/fuse-report.ts-24- * Every constant that shaped the answer is reported in `parameters` rather than buried (S4).
+lib/mcp/tools/fuse-report.ts-25- */
+lib/mcp/tools/fuse-report.ts-26-
+lib/mcp/tools/fuse-report.ts-27-import { sql } from "@/lib/db";
+lib/mcp/tools/fuse-report.ts-28-import { query } from "@/lib/brain/db";
+lib/mcp/tools/fuse-report.ts-29-import { listBenchChunks, listBenchSessions, type BenchChunkRow } from "@/lib/bench";
+lib/mcp/tools/fuse-report.ts-30-import { endTimeDisagrees, tapeEndMs } from "./bench";
+lib/mcp/tools/fuse-report.ts-31-import { STALLED_BADGE_MINUTES } from "@/lib/bench-reaper-core";
+lib/mcp/tools/fuse-report.ts:32:import { realRoomIdFor, SCRATCH_ROOM_PREFIX } from "@/lib/brain/scratch";
+lib/mcp/tools/fuse-report.ts-33-import { DEFAULT_ARM, SQL_CUES_FOR_ROOM_DAY, SQL_ROOM_DAY_BY_ID, SQL_TURN_CUE_COUNTS, SQL_VISITS_FOR_DAY, TURN_CUE_TYPES, WINDOW_CUE_TYPE, type RoomDayByIdRow } from "@/lib/brain/state";
+lib/mcp/tools/fuse-report.ts-34-import { ALL_RULES_REASONS, LAST_MARK_WINDOW_MS } from "@/lib/brain/fuse/rules";
+lib/mcp/tools/fuse-report.ts-35-import { argBool, argDetail, argStr, DETAIL_SCHEMA, failSafe, type McpTool, type ToolArgs } from "../registry";
+lib/mcp/tools/fuse-report.ts-36-
+lib/mcp/tools/fuse-report.ts-37-/**
+
+=== who creates the scratch room_day, and with what ist_date ===
+lib/brain/scratch.ts:74:export const scratchRoomDayIdFor = (scratchRoomId: string, istDate: string): string => {
+lib/brain/scratch.ts:170:    const made = await query<ScratchDayRow>(SQL_SCRATCH_ROOM_DAY_UPSERT, [scratchRoomDayIdFor(scratchRoomId, istDate), scratchRoomId, istDate]);
+
+=== scratch.ts 150-215 (day creation) ===
+    const after = (await sql`SELECT id, slug, name, disabled_at FROM room WHERE id = ${id} LIMIT 1`) as RoomRow[];
+    if (after[0]) return { ok: true, room: { id: after[0].id, slug: after[0].slug, name: after[0].name, created: true } };
+    return { ok: false, error: "scratch_room_unavailable" };
+  } catch (e) {
+    return { ok: false, error: "scratch_room_unavailable", detail: String((e as Error)?.message ?? e).slice(0, 160) };
+  }
+}
+
+type ScratchDayRow = { id: string; room_id: string; ist_date: string; scratch: boolean };
+
+/**
+ * Find-or-create the scratch room_day for (scratch room, IST date). The date is the session's
+ * own IST date, never the server clock. Safe to run twice.
+ */
+export async function resolveScratchRoomDay(scratchRoomId: string, istDate: string): Promise<{ ok: true; day: ScratchRoomDay } | { ok: false; error: string; detail?: string }> {
+  try {
+    const found = await query<ScratchDayRow>(SQL_SCRATCH_ROOM_DAY_SELECT, [scratchRoomId, istDate]);
+    const existing = found.rows[0];
+    if (existing) return { ok: true, day: { ...existing, scratch: existing.scratch === true, created: false } };
+
+    const made = await query<ScratchDayRow>(SQL_SCRATCH_ROOM_DAY_UPSERT, [scratchRoomDayIdFor(scratchRoomId, istDate), scratchRoomId, istDate]);
+    const row = made.rows[0];
+    if (!row) return { ok: false, error: "scratch_day_unavailable" };
+    return { ok: true, day: { ...row, scratch: row.scratch === true, created: true } };
+  } catch (e) {
+    return { ok: false, error: "scratch_day_unavailable", detail: String((e as Error)?.message ?? e).slice(0, 160) };
+  }
+}
+
+/** Both halves, in order: the scratch room, then its day for that IST date. */
+export async function resolveScratchGraph(room: { id: string; slug: string; name: string }, istDate: string): Promise<ScratchResolution> {
+  const r = await resolveScratchRoom(room);
+  if (!r.ok) return r;
+  const d = await resolveScratchRoomDay(r.room.id, istDate);
+  if (!d.ok) return d;
+  return { ok: true, room: r.room, day: d.day };
+}
+
+=== JOB_KIND_NAMES ===
+lib/mcp/tools/jobs.ts:11:import { JobArgsError, submitJob, UnknownKindError, JOB_KIND_NAMES } from "@/lib/jobs/submit";
+lib/mcp/tools/jobs.ts:66:  // below was already JOB_KIND_NAMES; only the prose had drifted, which is the whole argument for
+lib/mcp/tools/jobs.ts:69:    `Queue long work and get an id back in under two seconds (Tier 2 §3). kind is one of ${JOB_KIND_NAMES.join(", ")}; args are validated by the kind at submit, so a job that cannot run is refused here rather than queued. ${STUB_KIND_NAMES.length} of the ${JOB_KIND_NAMES.length} kinds are registered but not yet implemented and will fail with not_implemented — that is 'not yet', not 'unknown kind'${STUB_KIND_NAMES.length ? ` (${STUB_KIND_NAMES.join(", ")})` : ""}. Returns {job_id, kind, status}. Ask scribe_job_status about it; nothing is waited on here.`,
+lib/mcp/tools/jobs.ts:74:      kind: { type: "string", enum: JOB_KIND_NAMES, description: "which step machine to run" },
+lib/mcp/tools/jobs.ts:97:        if (e instanceof UnknownKindError) return { ok: false, error: "unknown_kind", kind, allowed: JOB_KIND_NAMES };
+lib/mcp/tools/jobs.ts:166:      kind: { type: "string", enum: JOB_KIND_NAMES },
+lib/jobs/kinds/index.ts:25:export const JOB_KIND_NAMES = JOB_KINDS.map((k) => k.name);
+lib/jobs/submit.ts:14:import { KIND_BY_NAME, JOB_KIND_NAMES } from "./kinds";
+lib/jobs/submit.ts:77:export { JobArgsError, JOB_KIND_NAMES };
+--- kinds/index.ts:
+/**
+ * lib/jobs/kinds/index.ts — the registry. A kind is reachable only if it is listed here.
+ *
+ * Slice B implements `transcribe_range` and `stitch`. The other five are REGISTERED AS STUBS that
+ * fail `not_implemented` rather than being absent: the tool surface, the arg schemas and the
+ * submit-time scope check are then the same in every slice, and Slices C and D replace a body
+ * instead of adding a kind. A caller that submits one today gets a named refusal on the job row,
+ * not "unknown kind" — the difference between "not yet" and "never".
+ */
+
+import type { JobKind } from "../types";
+import { transcribeRangeKind } from "./transcribe-range";
+import { stitchKind } from "./stitch";
+import { routeTranscribeKind } from "./route-transcribe";
+import { roomWindowKind } from "./room-window";
+import { diarizeWindowKind } from "./diarize-window";
+import { emotionWindowKind } from "./emotion-window";
+import { jevEnglishKind } from "./jev-english";
+import { jevWindowKind } from "./jev-window";
+import { jevRoleKind } from "./jev-role";
+import { STUB_KINDS } from "./stubs";
+
+export const JOB_KINDS: JobKind[] = [transcribeRangeKind, stitchKind, routeTranscribeKind, roomWindowKind, diarizeWindowKind, emotionWindowKind, jevEnglishKind, jevWindowKind, jevRoleKind, ...STUB_KINDS];
+export const KIND_BY_NAME = new Map(JOB_KINDS.map((k) => [k.name, k]));
+export const JOB_KIND_NAMES = JOB_KINDS.map((k) => k.name);
+/** The kinds that are registered but still fail not_implemented. Derived, so prose cannot drift. */
+export const STUB_KIND_NAMES = STUB_KINDS.map((k) => k.name);

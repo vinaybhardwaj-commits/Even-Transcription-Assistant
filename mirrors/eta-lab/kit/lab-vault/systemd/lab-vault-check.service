@@ -1,0 +1,6 @@
+[Unit]
+Description=Daily three-copy check (box vs R2 vault vs Mini): counts and sha256, alerts the conductor on a gap
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/share/lab-vault/check-copies.py

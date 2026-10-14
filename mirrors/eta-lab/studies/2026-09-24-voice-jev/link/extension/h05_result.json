@@ -1,0 +1,20 @@
+{
+ "verdict": "PASS",
+ "dominant_cluster": 35,
+ "dominant_seconds": 181.1,
+ "seconds_by_cluster": {
+  "35": 181.1,
+  "37": 77.0,
+  "34": 7.2,
+  "28": 4.4,
+  "40": 2.6
+ },
+ "turns_in_encounter": 102,
+ "cos_to_references": {
+  "OPD4_19Sep_c40": 0.918,
+  "OPD5_23Sep_c62": 0.559,
+  "OPD7_23Sep_c200": 0.684
+ },
+ "rule": "cos>=0.60 to OPD4_19Sep_c40 AND >=0.60 to at least one of OPD5_23Sep_c62 / OPD7_23Sep_c200",
+ "frozen_rule_sha256": "ea40f81c52e1d869b70d27508bd957509f22d3dba90d6df2a8465700e783cfd4"
+}

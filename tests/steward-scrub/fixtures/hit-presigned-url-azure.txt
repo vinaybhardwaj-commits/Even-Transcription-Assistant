@@ -1,0 +1,1 @@
+https://fakeacct.blob.example.invalid/c/b?sv=2020-08-04&se=2030-01-01&sig=FAKEFAKEFAKEFAKEFAKE1234

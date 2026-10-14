@@ -1,0 +1,226 @@
+=== 525-620 ===
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# What `silent_skipped` may and may not mean (refuted 19 Sep).
+#
+# THREE OUTCOMES WERE BEING COLLAPSED INTO ONE. They are not the same thing, and a row must be able
+# to tell them apart afterwards. This is the third time this month a status has been discarded and an
+# absence made to share a value with a failure, so the distinction is NAMED here, not just fixed:
+#
+#   (a) NO_ENGINE       no engine ran at all — VAD/gate handed nothing to an engine. Nothing was
+#                       listened to. This is the ONLY real silent_skip.
+#   (b) ENGINE_NO_TEXT  an engine ran and returned nothing. The audio WAS heard; there were no words.
+#   (c) ENGINE_TEXT     an engine ran and returned something. Normal, and not a skip at all.
+#
+# The discriminator is `n_engine_segments` — how many spans an engine was actually run on — NOT the
+# count of OUTPUT segments. A window that ran an engine on noise and got nothing (b) is `ok`, never
+# `silent_skipped`; calling that a skip manufactures a starvation finding, which is the exact bug the
+# old `not segments` test produced.
+NO_ENGINE = "no_engine"
+ENGINE_NO_TEXT = "engine_no_text"
+ENGINE_TEXT = "engine_text"
+
+
+def engine_ran(n_engine_segments) -> bool:
+    """True iff at least one span was handed to an engine. Its negation is the real silent_skip."""
+    try:
+        return int(n_engine_segments) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def window_outcome(n_engine_segments, n_output_segments) -> str:
+    """Name which of (a)/(b)/(c) a window — or a whole job — is, from its engine-run + output counts."""
+    if not engine_ran(n_engine_segments):
+        return NO_ENGINE
+    try:
+        produced = int(n_output_segments) > 0
+    except (TypeError, ValueError):
+        produced = False
+    return ENGINE_TEXT if produced else ENGINE_NO_TEXT
+
+
+def transcribe_norm_wav(norm_wav: str, cand_list: list[str], do_translate: bool) -> dict:
+    """Run the per-segment pipeline over an already-normalized 16k mono WAV.
+    Timings are relative to this WAV's t=0. Shared by /route and the chunked job."""
+    total_s = wav_duration_s(norm_wav)
+    spans, seg_method = vad_segments(norm_wav, total_s)
+    sdir = tempfile.mkdtemp(prefix="eta-seg-")
+    try:
+        if not spans:
+            return {
+                "dominant_language": None,
+                "language_timeline": [],
+                "transcript_native": "",
+                "transcript_english": ("" if do_translate else None),
+                "segments": [],
+                "segmentation": {
+                    "method": seg_method,
+                    "max_window_s": SEG_SEC,
+                    "overlap_s": OVERLAP_SEC,
+                    "n_segments": 0,
+                    "n_engine_segments": 0,   # (a) VAD found no speech: no engine ran.
+                    "outcome": NO_ENGINE,
+                    "n_skipped_silent": 0,
+                    "silence_gate": {
+                        "rms_threshold": SEG_SILENCE_RMS,
+                        "max_abs_threshold": SEG_SILENCE_MAX_ABS,
+                        "min_seg_s": SEG_MIN_S,
+                    },
+                },
+                "candidates": cand_list,
+                "status": "silent_skipped",
+            }
+        seg_jobs = []
+        n_skipped_silent = 0
+        for idx, (s, e) in enumerate(spans):
+            if (e - s) < SEG_MIN_S:
+                n_skipped_silent += 1
+                sys.stderr.write(f"[eta-router] skip short span {s:.2f}-{e:.2f}\n")
+                continue
+            seg_wav = os.path.join(sdir, f"seg_{idx:04d}.wav")
+            slice_wav(norm_wav, s, e, seg_wav)
+            silent, rms, peak = is_near_silent_wav(seg_wav)
+            if silent:
+                n_skipped_silent += 1
+                sys.stderr.write(
+                    f"[eta-router] silent_skipped span {s:.2f}-{e:.2f} "
+                    f"rms={rms:.6f} max_abs={peak:.6f}\n"
+                )
+                continue
+            seg_jobs.append((idx, s, e, seg_wav))
+        results: list[dict | None] = [None] * len(spans)
+        with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as pool:
+            futs = {pool.submit(process_segment, sw, s, e, cand_list): idx
+                    for (idx, s, e, sw) in seg_jobs}
+=== 640,690 ===
+                eng_texts = list(pool.map(english_of, segments))
+        else:
+            eng_texts = ["" for _ in segments]
+        transcript_native = "\n".join(s["text"] for s in segments).strip()
+        transcript_english = ("\n".join(t for t in eng_texts if t).strip() if do_translate else None)
+        timeline = [{"start_s": s["start_s"], "end_s": s["end_s"], "lang": s["lang"],
+                     "engine": s["engine"], "chars": len(s["text"])} for s in segments]
+        by_lang: dict[str, int] = {}
+        for s in segments:
+            by_lang[s["lang"]] = by_lang.get(s["lang"], 0) + len(s["text"])
+        dominant = max(by_lang, key=by_lang.get) if by_lang else None
+        # silent_skipped iff NO ENGINE RAN (a). An engine that ran and returned nothing (b) or little
+        # (c) is `ok` — the audio was heard. Keyed on seg_jobs (spans dispatched to an engine), never
+        # on `segments` (engine OUTPUT), which is what over-claimed the half-silence/half-noise clip.
+        status = "silent_skipped" if not engine_ran(len(seg_jobs)) else "ok"
+        return {"dominant_language": dominant, "language_timeline": timeline,
+                "transcript_native": transcript_native, "transcript_english": transcript_english,
+                "segments": segments,
+                "segmentation": {"method": seg_method, "max_window_s": SEG_SEC,
+                                 "overlap_s": OVERLAP_SEC, "n_segments": len(spans),
+                                 "n_engine_segments": len(seg_jobs),
+                                 "outcome": window_outcome(len(seg_jobs), len(segments)),
+                                 "n_skipped_silent": n_skipped_silent,
+                                 "silence_gate": {
+                                     "rms_threshold": SEG_SILENCE_RMS,
+                                     "max_abs_threshold": SEG_SILENCE_MAX_ABS,
+                                     "min_seg_s": SEG_MIN_S,
+                                 }},
+                "candidates": cand_list,
+                "status": status}
+    finally:
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# Async chunked-job machinery
+# --------------------------------------------------------------------------- #
+def _job_path(jid: str) -> str:
+    return os.path.join(JOBS_DIR, jid + ".json")
+
+
+def _write_job(jid: str, obj: dict) -> None:
+    tmp = _job_path(jid) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, _job_path(jid))
+
+
+def _read_job(jid: str) -> dict | None:
+    p = _job_path(jid)
+    if not os.path.exists(p):
+=== job dict init ===
+807:        job["progress"] = {"done": 0, "total": total}
+828:            job["status"], job["segmentation"] = job_verdict(win_results)
+829:            job["progress"] = {"done": i + 1, "total": total}
+830:            job["segments"] = acc_seg
+831:            job["language_timeline"] = acc_tl
+832:            job["transcript_native"] = "\n".join(acc_native).strip()
+833:            job["transcript_english"] = ("\n".join(acc_eng).strip() if do_translate else None)
+834:            job["dominant_language"] = (max(by_lang, key=by_lang.get) if by_lang else None)
+835:            job["sec"] = round(time.time() - t0, 2)
+837:        job["state"] = "done"
+838:        job["sec"] = round(time.time() - t0, 2)
+842:        job["state"] = "failed"; job["ok"] = False; job["error"] = repr(e)[:300]
+843:        job["sec"] = round(time.time() - t0, 2)
+=== job/{id} GET ===
+13:  POST /route/job        json: {audio_url, [candidates], [translate], [window_s], [overlap_s]}
+14-                         -> {ok, job_id}  (ASYNC, for long recordings)
+15:  GET  /route/job/{id}   -> job status/progress + (when done) same shape as /route
+16-  GET  /healthz          -> {"ok": true}
+17-
+18-Spec: ETA-MACMINI-PERSEGMENT-LANGUAGE-ROUTER-HANDOFF.md (14 Jun) +
+19-      ETA-MACMINI-CHUNKED-TRANSCRIPTION-JOB-HANDOFF.md (16 Jun).
+20-v2 (16 Jun): silero-VAD segmentation; concurrency=1; expanded candidates.
+21-v3 (16 Jun): async chunked job for long recordings — downloads a presigned URL,
+22-ffmpeg time-splits into ~window_s windows, runs the SAME per-window pipeline
+23-serially, stitches with time-offset, persists a job JSON, exposes poll endpoint.
+24-"""
+25-
+26-from __future__ import annotations
+27-
+28-import os
+29-import re
+30-import sys
+31-import glob
+32-import json
+33-import time
+34-import uuid
+35-import asyncio
+36-import wave
+37-import shutil
+38-import tempfile
+39-import threading
+40-import subprocess
+--
+899:@app.post("/route/job")
+900-async def route_job(req: Request):
+901-    try:
+902-        body = await req.json()
+903-    except Exception:
+904-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid JSON body"})
+905-    audio_url = (body.get("audio_url") or "").strip()
+906-    if not audio_url:
+907-        return JSONResponse(status_code=400, content={"ok": False, "error": "audio_url required"})
+908-    cand = body.get("candidates") or DEFAULT_CANDIDATES
+909-    cand_list = [c.strip().lower() for c in cand.split(",") if c.strip()] or DEFAULT_CANDIDATES.split(",")
+910-    do_translate = bool(body.get("translate", True))
+911-    window_s = float(body.get("window_s", WINDOW_S_DEFAULT))
+912-    jid = uuid.uuid4().hex
+913-    _write_job(jid, {"ok": True, "job_id": jid, "state": "queued",
+914-                     "progress": {"done": 0, "total": 0}, "error": None})
+915-    threading.Thread(target=run_job, args=(jid, audio_url, cand_list, do_translate, window_s),
+916-                     daemon=True).start()
+917-    _cleanup_old_jobs()
+918-    return {"ok": True, "job_id": jid}
+919-
+920-
+921:@app.get("/route/job/{job_id}")
+922-async def route_job_status(job_id: str):
+923-    obj = _read_job(job_id)
+924-    if obj is None:
+925-        return JSONResponse(status_code=404, content={"ok": False, "error": "unknown job_id"})
+926-    return obj
+927-
+928-
+929-if __name__ == "__main__":
+930-    import uvicorn
+931-    uvicorn.run(app, host="127.0.0.1", port=PORT)

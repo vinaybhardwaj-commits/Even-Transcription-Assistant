@@ -1,0 +1,336 @@
+<title>Speaker Count</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#f3f5f3;--card:#ffffff;--ink:#1b2320;--mut:#5f6b66;--line:#d6dcd8;--soft:#e9eeeb;
+  --acc:#1f5e7a;--acc-ink:#ffffff;--ok:#2f7a4d;--warn:#a2641a;--bad:#a33a3a;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--ok:#6cc08c;--warn:#e0a458;--bad:#e07c7c;}}
+:root[data-theme="dark"]{
+  color-scheme:dark;--bg:#111614;--card:#18201d;--ink:#e4ebe8;--mut:#94a19b;--line:#2c3733;--soft:#1f2925;
+  --acc:#80c3df;--acc-ink:#0e1a20;--ok:#6cc08c;--warn:#e0a458;--bad:#e07c7c;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans);padding-inline:16px;padding-block:0 48px}
+.wrap{max-width:720px;margin:0 auto}
+header.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:14px 10px;border-bottom:1px solid var(--line)}
+.bar-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px}
+h1{font-size:1.15rem;font-weight:600;margin:0;text-wrap:balance}
+h2,h3{text-wrap:balance}
+.meta{color:var(--mut);font-size:.88rem}
+.prog{font-family:var(--mono);font-size:.85rem;font-variant-numeric:tabular-nums}
+.tabs{display:flex;gap:6px;margin-top:10px}
+.tab{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;padding:4px 12px;font:500 .85rem var(--sans);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+nav.chips{display:flex;gap:6px;overflow-x:auto;padding-block:10px 4px;scrollbar-width:thin}
+.chip{flex:0 0 auto;min-width:36px;font:500 .8rem var(--mono);border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:4px 8px;cursor:pointer;font-variant-numeric:tabular-nums}
+.chip.done{border-color:var(--ok);color:var(--ok)}
+.chip.part{border-style:dashed;border-color:var(--warn);color:var(--warn)}
+.chip[aria-current="true"]{outline:2px solid var(--acc);outline-offset:1px}
+button:focus-visible,input:focus-visible,textarea:focus-visible,.chip:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.intro{color:var(--mut);font-size:.9rem;max-width:62ch;margin:14px 0 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-top:14px;display:grid;gap:14px}
+.wh{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.wh h2{font-size:1.1rem;margin:0}
+.tok{font:400 .8rem var(--mono);color:var(--mut)}
+.btn{border:1px solid var(--acc);background:var(--acc);color:var(--acc-ink);border-radius:8px;padding:8px 16px;font:500 .9rem var(--sans);cursor:pointer}
+.btn.ghost{background:transparent;color:var(--acc)}
+.btn[disabled]{opacity:.4;cursor:default}
+/* player */
+.pl{display:grid;gap:4px}
+.pl-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.pl-b{min-width:44px;min-height:44px;border:1px solid var(--line);background:var(--soft);color:var(--ink);border-radius:8px;font:500 .9rem var(--sans);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 10px;font-variant-numeric:tabular-nums}
+.pl-play{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);min-width:52px}
+.pl-b svg{width:20px;height:20px;fill:currentColor}
+.pl-time{margin-left:auto;font:400 .82rem var(--mono);font-variant-numeric:tabular-nums;color:var(--mut);white-space:nowrap}
+#pl-seek{width:100%;height:32px;margin:0;accent-color:var(--acc)}
+.pl-msg{font-size:.8rem;color:var(--warn);min-height:1.1em}
+/* answers */
+fieldset{border:0;padding:0;margin:0}
+legend{font-weight:600;font-size:.95rem;margin-bottom:8px;padding:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(56px,1fr));gap:8px}
+.opts{display:flex;flex-wrap:wrap;gap:8px}
+.opt{position:relative;display:block}
+.opt input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer;width:100%;height:100%}
+.opt span{display:flex;align-items:center;justify-content:center;min-height:48px;min-width:48px;padding-inline:14px;border:1px solid var(--line);border-radius:8px;font-size:1rem;font-weight:500;background:var(--card);font-variant-numeric:tabular-nums}
+.grid .opt span{padding-inline:0}
+.opt input:checked+span{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+.opt input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
+.foot label{display:block;font-size:.85rem;font-weight:600;margin-bottom:4px}
+textarea{width:100%;min-height:60px;resize:vertical;border:1px solid var(--line);border-radius:6px;padding:7px 9px;background:var(--bg);color:var(--ink);font:inherit}
+.nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px;flex-wrap:wrap}
+.status{font-size:.82rem;color:var(--mut);min-height:1.2em;margin-top:8px}
+.link{background:none;border:0;padding:0;color:var(--acc);font:inherit;font-size:.85rem;cursor:pointer;text-decoration:underline}
+.table-wrap{overflow-x:auto;margin-top:12px}
+table{border-collapse:collapse;width:100%;font-size:.86rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
+.pill{display:inline-block;border-radius:999px;padding:1px 8px;font-size:.78rem;font-weight:500}
+.pill.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.pill.warn{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.pill.bad{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.pill.none{background:var(--soft);color:var(--mut)}
+.empty{color:var(--mut);padding:24px 0}
+@media (max-width:560px){
+  header.bar{position:static}
+  .btn,.btn.sm{min-height:44px}
+  .chip{min-height:40px;padding-inline:12px}
+  .tab{min-height:40px}
+  .nav .btn{flex:1 1 0}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="bar" id="hdr">
+    <div class="bar-row">
+      <h1>Speaker Count</h1>
+      <span class="prog" id="prog">0 / 0 answered</span>
+      <span class="meta" id="who"></span>
+    </div>
+    <div class="tabs" role="tablist" id="tabs" hidden>
+      <button class="tab" role="tab" id="tab-count" aria-selected="true">My counts</button>
+      <button class="tab" role="tab" id="tab-res" aria-selected="false">Results</button>
+    </div>
+    <nav class="chips" id="chips" aria-label="Windows"></nav>
+  </header>
+
+  <section id="view-count">
+    <p class="intro">Listen to each short clip, then say how many different people speak in it. Play it as often as you like. Your answers save as you go and only you see them here. Please don't copy anything out of this page.</p>
+    <div id="panel"><p class="empty">Loading the clips…</p></div>
+    <div class="nav">
+      <button class="btn ghost" id="prev">Previous</button>
+      <button class="btn" id="next">Next</button>
+    </div>
+    <div class="status" id="status" aria-live="polite"></div>
+    <div class="status" id="done" aria-live="polite"></div>
+  </section>
+
+  <section id="view-res" hidden>
+    <p class="intro">Every reviewer's counts, side by side. Only you (the page owner) see this tab.</p>
+    <div class="card" id="res"><p class="empty">No answers yet.</p></div>
+  </section>
+</div>
+
+<script>
+/* Speaker count. The window docs (collection "windows") are read through a whitelist: only id, duration_s and
+   audio are kept, so no other field (any engine's or the true count) can reach the screen, whatever the doc holds.
+   Answers are saved to counts/<rater id> = {rater, schema, w:{<windowId>:{n, plus?, conf, note?, t}}}. */
+let db=null,user=null,meId=null,owner=false,claudeOk=false,loaded=false;
+let wins=[],sig="",cur=0,mine={w:{}},all=[];
+let saveTimer=null,saving=Promise.resolve(),dirty=false;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const mmss=s=>{s=Math.max(0,Math.round(+s||0));return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")};
+const fnv=s=>{let h=2166136261;for(const ch of String(s)){h^=ch.charCodeAt(0);h=Math.imul(h,16777619)}return h>>>0};
+const NUMS=[0,1,2,3,4,5,6,7,8];
+const label=n=>n===8?"8+":String(n);
+const A=id=>mine.w[id]||(mine.w[id]={});
+const answered=a=>!!a&&Number.isInteger(a.n)&&(a.conf==="sure"||a.conf==="unsure");
+const state=w=>{const a=mine.w[w.id];return answered(a)?"done":a&&(Number.isInteger(a.n)||a.conf)?"part":"todo"};
+function progress(){$("prog").textContent=wins.filter(w=>state(w)==="done").length+" / "+wins.length+" answered"}
+function chips(){
+  $("chips").innerHTML=wins.map((w,i)=>{const s=state(w);
+    return `<button class="chip${s==="done"?" done":s==="part"?" part":""}" data-go="${i}" aria-current="${i===cur}" aria-label="Window ${i+1}, ${s==="done"?"answered":s==="part"?"started":"not answered"}">${i+1}</button>`}).join("");
+}
+
+/* ---- audio: the clips are small, so each is fetched into a Blob URL ahead of time. That needs no byte-range
+   support from the host (iOS Safari does) and lets Play start inside the tap. If the fetch fails the file is played directly. ---- */
+const ICON={
+  play:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>',
+  pause:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4.5v16H6zM13.5 4H18v16h-4.5z"/></svg>'};
+const RATES=[1,0.75,1.25,1.5,2];
+const blobs=new Map(),pending=new Map();
+const P={audio:null,id:null,rate:1,playing:false,pos:0};
+// Label a fetched audio file by its header when the host sent no usable content-type (Safari can refuse a mislabelled blob).
+async function audioBlob(b){
+  if(/^(audio|video)\//.test(b.type))return b;
+  const h=new Uint8Array(await b.slice(0,12).arrayBuffer()),s=String.fromCharCode(...h);
+  const type=s.slice(4,8)==="ftyp"?"audio/mp4":s.slice(0,4)==="OggS"?"audio/ogg":s.slice(0,4)==="RIFF"?"audio/wav":(h[0]===0x1A&&h[1]===0x45)?"audio/webm":"audio/mpeg";
+  return new Blob([b],{type});
+}
+function prefetch(w){
+  if(!w||!w.audio||blobs.has(w.id)||pending.has(w.id)||typeof fetch!=="function")return;
+  const p=fetch(w.audio).then(r=>{if(!r.ok)throw new Error(r.status);return r.blob()})
+    .then(audioBlob).then(bb=>{blobs.set(w.id,URL.createObjectURL(bb));pending.delete(w.id)})
+    .catch(()=>{pending.delete(w.id)});
+  pending.set(w.id,p);
+}
+function trim(){ // keep the blobs of the open window and its neighbours only
+  const keep=new Set([wins[cur-1],wins[cur],wins[cur+1]].filter(Boolean).map(w=>w.id));
+  for(const [id,u] of blobs)if(!keep.has(id)){URL.revokeObjectURL(u);blobs.delete(id)}
+}
+function resetPlayer(){
+  const a=P.audio;if(a){a.onplay=a.onpause=a.onended=a.ontimeupdate=a.onloadedmetadata=a.onerror=null;try{a.pause()}catch(e){}}
+  P.audio=null;P.id=null;P.playing=false;P.pos=0;
+}
+const curW=()=>wins[cur];
+const durOf=()=>{const w=curW();return P.audio&&Number.isFinite(P.audio.duration)?P.audio.duration:(w&&w.duration_s)||0};
+const getPos=()=>P.audio&&P.audio.readyState>=1?P.audio.currentTime:P.pos;
+function plUi(){
+  const w=curW();if(!w||!$("pl-play"))return;
+  const d=durOf(),p=Math.min(getPos(),d||getPos());
+  $("pl-play").innerHTML=P.playing?ICON.pause:ICON.play;
+  $("pl-play").setAttribute("aria-label",P.playing?"Pause":"Play");
+  $("pl-time").textContent=mmss(p)+" / "+mmss(d);
+  const sk=$("pl-seek");sk.max=Math.max(1,Math.round(d));sk.value=Math.round(p);
+  $("pl-rate").textContent=P.rate+"×";$("pl-rate").setAttribute("aria-label","Playback speed "+P.rate+"×. Tap to change.");
+}
+function ensureAudio(){
+  const w=curW();if(!w||!w.audio)return null;
+  if(P.audio&&P.id===w.id)return P.audio;
+  const start=P.pos;resetPlayer();P.pos=start;
+  const a=new Audio();P.audio=a;P.id=w.id;
+  a.onplay=()=>{P.playing=true;plUi()};a.onpause=()=>{P.playing=false;plUi()};a.onended=()=>{P.playing=false;plUi()};
+  a.ontimeupdate=()=>{P.pos=a.currentTime;plUi()};
+  a.onloadedmetadata=()=>{try{if(P.pos>0&&a.currentTime<1)a.currentTime=P.pos}catch(e){}plUi()};
+  a.onerror=()=>{P.playing=false;$("pl-msg").textContent="The clip could not be loaded.";plUi()};
+  a.playbackRate=P.rate;a.src=blobs.get(w.id)||w.audio;
+  return a;
+}
+function play(){
+  const a=ensureAudio();if(!a)return;$("pl-msg").textContent="";
+  const p=a.play();if(p&&p.catch)p.catch(()=>{$("pl-msg").textContent="Tap play to start.";P.playing=false;plUi()});
+}
+function setPos(x){
+  x=Math.max(0,Math.min(x,durOf()||x));P.pos=x;
+  if(P.audio&&P.audio.readyState>=1)P.audio.currentTime=x;
+  plUi();
+}
+
+/* ---- the window on screen ---- */
+function playerHtml(){
+  return `<div class="pl" role="group" aria-label="Clip audio">
+    <div class="pl-row">
+      <button class="pl-b pl-play" id="pl-play" aria-label="Play">${ICON.play}</button>
+      <button class="pl-b" id="pl-back" aria-label="Back 5 seconds">−5</button>
+      <button class="pl-b" id="pl-fwd" aria-label="Forward 5 seconds">+5</button>
+      <button class="pl-b" id="pl-rate" aria-label="Playback speed 1×. Tap to change.">1×</button>
+      <span class="pl-time" id="pl-time">0:00 / 0:00</span>
+    </div>
+    <input type="range" id="pl-seek" min="0" max="${Math.max(1,Math.round(curW().duration_s||0))}" step="1" value="0" aria-label="Position in the clip">
+    <div class="pl-msg" id="pl-msg" aria-live="polite"></div>
+  </div>`;
+}
+function winHtml(w){
+  const a=mine.w[w.id]||{};
+  const nums=NUMS.map(n=>`<label class="opt"><input type="radio" name="n" id="n-${n}" value="${n}"${a.n===n?" checked":""}><span>${label(n)}</span></label>`).join("");
+  const conf=["sure","unsure"].map(v=>`<label class="opt"><input type="radio" name="conf" id="conf-${v}" value="${v}"${a.conf===v?" checked":""}><span>${v==="sure"?"Sure":"Unsure"}</span></label>`).join("");
+  return `<div class="card">
+    <div class="wh"><h2>Window ${cur+1} of ${wins.length}</h2><span class="tok">${mmss(w.duration_s)} long</span></div>
+    ${playerHtml()}
+    <fieldset><legend>How many different people speak?</legend><div class="grid">${nums}</div></fieldset>
+    <fieldset><legend>How sure are you?</legend><div class="opts">${conf}</div></fieldset>
+    <div class="foot"><label for="note">Note (optional)</label><textarea id="note">${esc(a.note||"")}</textarea></div>
+  </div>`;
+}
+function render(){
+  resetPlayer();chips();progress();
+  const w=curW();
+  if(!w){
+    $("panel").innerHTML=`<p class="empty">${!claudeOk?"Open this page while signed in to claude.ai to count speakers.":loaded?"No clips have been added yet.":"Loading the clips…"}</p>`;
+    $("prev").disabled=true;$("next").disabled=true;return;
+  }
+  $("panel").innerHTML=winHtml(w);plUi();
+  prefetch(w);prefetch(wins[cur+1]);trim();
+  $("prev").disabled=cur<=0;$("next").disabled=false;$("next").textContent=cur>=wins.length-1?"Done":"Next";
+}
+function go(i){$("status").textContent="";$("done").textContent="";cur=Math.max(0,Math.min(i,wins.length-1));render();window.scrollTo({top:0,behavior:"instant"})}
+
+/* ---- saving ---- */
+function queueSave(){dirty=true;$("status").textContent="Saving…";clearTimeout(saveTimer);saveTimer=setTimeout(flush,700)}
+function flush(){
+  if(!db||!meId||!dirty||!loaded)return;dirty=false;
+  const body=JSON.parse(JSON.stringify({rater:meId,schema:1,w:mine.w,updated:new Date().toISOString()}));
+  saving=saving.then(()=>db.doc("counts/"+meId).set(body)).then(()=>{$("status").textContent="Saved"}).catch(e=>{
+    $("status").textContent=e&&e.code==="invalid_argument"?"You have view-only access, so your answers can't be saved. Ask the page owner for access.":"Couldn't save just now. Your answers are still on screen; change any answer to retry.";dirty=true;
+  });
+}
+function touch(){chips();progress();queueSave()}
+
+document.addEventListener("click",e=>{
+  const t=e.target,g=t.closest("[data-go]");if(g){go(+g.dataset.go);return}
+  if(t.closest("#pl-play")){P.playing?P.audio.pause():play();return}
+  if(t.closest("#pl-back")){setPos(getPos()-5);return}
+  if(t.closest("#pl-fwd")){setPos(getPos()+5);return}
+  if(t.closest("#pl-rate")){P.rate=RATES[(RATES.indexOf(P.rate)+1)%RATES.length];if(P.audio)P.audio.playbackRate=P.rate;plUi();return}
+  const nx=t.closest("[data-next]");if(nx){go(+nx.dataset.next)}
+});
+$("prev").onclick=()=>{if(cur>0)go(cur-1)};
+$("next").onclick=()=>{
+  if(cur<wins.length-1){go(cur+1);return}
+  flush();
+  const open=wins.map((w,i)=>({w,i})).filter(x=>state(x.w)!=="done");
+  $("done").innerHTML=open.length
+    ?"Not finished yet. Your answers save as you go, so there is nothing to submit. Still open: "+open.map(x=>`<button class="link" data-go="${x.i}">window ${x.i+1}</button>`).join(", ")+"."
+    :"All windows are answered. Your answers are saved automatically; there is nothing to submit. Thank you.";
+};
+document.addEventListener("change",e=>{
+  const t=e.target,w=curW();if(!w||t.type!=="radio")return;
+  if(t.name==="n"){const a=A(w.id);a.n=+t.value;a.plus=a.n===8;a.t=new Date().toISOString();touch()}
+  else if(t.name==="conf"){const a=A(w.id);a.conf=t.value;a.t=new Date().toISOString();touch()}
+});
+document.addEventListener("input",e=>{
+  const t=e.target,w=curW();if(!w)return;
+  if(t.id==="pl-seek"){setPos(+t.value);return}
+  if(t.id==="note"){const a=A(w.id);a.note=t.value;queueSave()}
+});
+
+/* ---- owner: results ---- */
+async function renderRes(){
+  const ids=all.map(r=>r.rater);let names={};
+  try{names=user&&user.profiles?await user.profiles(ids):{}}catch(e){}
+  const nm=id=>(names[id]&&names[id].name)||"Rater";
+  if(!all.length){$("res").innerHTML=`<p class="empty">No answers yet.</p>`;return}
+  const cell=(r,id)=>{const a=(r.w||{})[id];return answered(a)?`${label(a.n)} <span class="meta">${a.conf}</span>`:"—"};
+  let both=0,exact=0,within1=0,absSum=0;
+  const rows=wins.map((w,i)=>{
+    const done=all.map(r=>(r.w||{})[w.id]).filter(answered);
+    let agree="—";
+    if(done.length>=2){
+      let n=0,same=0;
+      for(let a=0;a<done.length;a++)for(let b=a+1;b<done.length;b++){const d=Math.abs(done[a].n-done[b].n);n++;absSum+=d;if(d===0){same++;exact++}if(d<=1)within1++}
+      both+=n;agree=`<span class="pill ${same===n?"ok":"warn"}">${same===n?"agree":"differ"}</span>`;
+    }
+    return `<tr><td class="tok">${i+1} · ${esc(w.id)}</td>${all.map(r=>`<td>${cell(r,w.id)}</td>`).join("")}<td>${agree}</td></tr>`;
+  }).join("");
+  const pct=(n,d)=>d?Math.round(100*n/d)+"% ("+n+" of "+d+")":"none yet";
+  $("res").innerHTML=`<h3 style="margin:0">Raters: ${all.length}</h3><p class="meta">${all.map(r=>esc(nm(r.rater))).join(", ")}</p>
+    <p class="meta">Pairs of answers compared: ${both}. Same count: ${pct(exact,both)}. Within one person: ${pct(within1,both)}. Mean absolute difference: ${both?(absSum/both).toFixed(2):"—"}. "8+" is treated as 8.</p>
+    <div class="table-wrap"><table><thead><tr><th>Window</th>${all.map(r=>`<th>${esc(nm(r.rater))}</th>`).join("")}<th>Compare</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function tab(which){
+  $("tab-count").setAttribute("aria-selected",which==="count");$("tab-res").setAttribute("aria-selected",which==="res");
+  $("view-count").hidden=which!=="count";$("view-res").hidden=which!=="res";$("chips").hidden=which!=="count";
+  if(which==="res")renderRes();
+}
+$("tab-count").onclick=()=>tab("count");$("tab-res").onclick=()=>tab("res");
+render();
+(async()=>{
+  if(!window.claude||!window.claude.use)return;
+  claudeOk=true;render();
+  [db,user]=await Promise.all([claude.use("db"),claude.use("user")]);
+  if(user){try{const me=await user.me();meId=me.id;owner=me.isOwner;$("who").textContent=me.name?("Counting as "+me.name):"";}catch(e){}}
+  if(!db){render();return}
+  if(!meId)$("status").textContent="Sign in to claude.ai to save your answers.";
+  db.collection("windows").onSnapshot(s=>{
+    // whitelist: nothing but these three fields is ever kept
+    const next=s.docs.filter(d=>d.exists!==false).map(d=>{const x=d.data()||{};return{id:String(x.id??d.id??""),duration_s:+x.duration_s||0,audio:typeof x.audio==="string"?x.audio:""}})
+      .filter(x=>x.id).sort((a,b)=>fnv(a.id)-fnv(b.id)||a.id.localeCompare(b.id)); // scrambled order, so an id that encodes the stratum leaks nothing
+    const ns=JSON.stringify(next);if(ns===sig)return;
+    const keep=wins[cur]&&wins[cur].id;sig=ns;wins=next;
+    const i=keep?wins.findIndex(w=>w.id===keep):-1;cur=i>=0?i:0;render();
+  },()=>{});
+  if(meId){try{const d=await db.doc("counts/"+meId).get();if(d.exists){const b=d.data()||{},w=b.w||{};
+    Object.keys(w).forEach(k=>{mine.w[k]=Object.assign({},w[k],mine.w[k]||{})});render()}}catch(e){}}
+  loaded=true;render();if(dirty)flush();
+  if(owner){$("tabs").hidden=false;
+    db.collection("counts").onSnapshot(s=>{all=s.docs.filter(d=>d.exists!==false).map(d=>d.data());if(!$("view-res").hidden)renderRes()},()=>{});
+  }
+})();
+window.addEventListener("pagehide",flush);
+</script>

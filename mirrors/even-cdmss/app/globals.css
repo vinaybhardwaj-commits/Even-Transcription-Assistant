@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: #f2f4f8;
+  --color-card: #fcfcfc;
+  --color-text: #1a1a2e;
+  --color-text-secondary: #4a5568;
+  --color-text-muted: #7a8599;
+  --color-border: #e2e6ec;
+  --color-brand: #0055ff;
+  --color-brand-dark: #0044cc;
+  --color-brand-faint: #e6eeff;
+  --color-navy: #002054;
+  --color-pink: #f96eb1;
+}
+
+html, body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Pulse animation for NEW dot (preserved verbatim from static portal per locked decision #26) */
+@keyframes new-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+.new-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f96eb1;
+  animation: new-pulse 2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+/* Card scroll fade-bottom mask per locked decision #24 (scrollable home cards) */
+.card-scroll {
+  overflow-y: auto;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+}
+.card-scroll::-webkit-scrollbar { width: 4px; }
+.card-scroll::-webkit-scrollbar-thumb { background: rgba(0,85,255,0.18); border-radius: 2px; }
+
+/* Respect prefers-reduced-motion globally (§18.4) */
+@media (prefers-reduced-motion: reduce) {
+  .new-dot { animation: none; opacity: 1; }
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* NEW-row tint background (locked decision #26) — applied via .is-new / .is-new-row */
+.is-new, .is-new-row {
+  background: linear-gradient(90deg, rgba(253, 232, 242, 0.55) 0%, transparent 60%);
+  border-radius: 6px;
+  margin: 0 -6px;
+  padding-left: 6px !important;
+  padding-right: 6px !important;
+}
+
+/* NEW pulse killswitch — Settings · Layout (PRD §11.8) */
+.kill-new-pulse .new-dot { animation: none !important; opacity: 1 !important; }
+
+/* Safe-area inset for mobile bottom bar (iOS notch + Android nav) */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0); }

@@ -1,0 +1,8 @@
+# Build-time only. The runtime plugin uses stdlib only.
+
+# Pinned, not a floor. dist/HerdrAgentIconsMax-Regular.ttf is committed and CI
+# rebuilds it to prove it is not stale, which only means anything if a rebuild
+# is byte-for-byte - and that holds within one fontTools version, not across
+# them: 4.65.0 compiles the same glyphs four bytes smaller than 4.63.0 did.
+# Bumping this pin therefore rebuilds both faces in dist/ in the same commit.
+fonttools==4.63.0

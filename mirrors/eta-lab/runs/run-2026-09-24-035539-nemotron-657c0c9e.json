@@ -1,0 +1,107 @@
+{
+ "run_id": "run-2026-09-24-035539-nemotron-657c0c9e",
+ "trainer": "train_nemotron.py",
+ "base_model": "nvidia/Nemotron-3-Diarization",
+ "base_model_snapshot": "a435e9867d79e789e90053f9b6d6834053af564a",
+ "base_model_nemo_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+ "dataset_id": "diar-train-merged-2026-09-24-657c0c9e",
+ "train_n": 161,
+ "val_n": 5,
+ "val_holdout_room_day": "rd_yhh6kexm",
+ "skipped_windows": [
+  [
+   "bw_xd6gt5sp_1790131500000_primary",
+   "9 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790157600000_primary",
+   "17 speakers"
+  ],
+  [
+   "bw_xd6gt5sp_1790156700000_primary",
+   "11 speakers"
+  ],
+  [
+   "bw_7tedad86_1790136900000_primary",
+   "9 speakers"
+  ]
+ ],
+ "max_steps": 500,
+ "lr": 1e-05,
+ "warmup_steps": 20,
+ "batch_size": 8,
+ "session_len_sec": 105,
+ "seed": 42,
+ "precision": "bf16-mixed",
+ "nemo_speech_commit": "cf724ac337d1ebc7d0dda1e23fb80916f52927a5",
+ "git_sha": "c47aeb9aa5eb8eefe5fe742646fe25c98e7e398a",
+ "env_versions": {
+  "torch": "2.14.0",
+  "lightning": "2.4.0",
+  "nemo-toolkit": "3.1.0+cf724ac33",
+  "numpy": "2.5.3"
+ },
+ "started_at": "2026-09-24T03:55:40Z",
+ "status": "OK",
+ "reason": "real run on the verified nightly dataset; quality judged only by held-out evaluation (V5 + bench20 vs pyannote.ai)",
+ "metrics": {
+  "loss": 0.10877640545368195,
+  "ats_loss": 0.08601055294275284,
+  "pil_loss": 0.03372260928153992,
+  "activity_loss": 0.11989159137010574,
+  "phantom_loss": 0.020360225811600685,
+  "learning_rate": 2.0493901047302643e-06,
+  "train_f1_acc": 0.8194918036460876,
+  "train_precision": 0.8693369626998901,
+  "train_recall": 0.7750534415245056,
+  "train_f1_acc_ats": 0.413940966129303,
+  "train_spk_count_mae": 0.5,
+  "train_spk_count_acc": 0.625,
+  "val_loss": 0.17644567787647247,
+  "val_ats_loss": 0.22430996596813202,
+  "val_pil_loss": 0.057636793702840805,
+  "val_activity_loss": 0.1497446745634079,
+  "val_phantom_loss": 0.02268245816230774,
+  "val_f1_acc": 0.9116387367248535,
+  "val_precision": 0.936498761177063,
+  "val_recall": 0.8882290124893188,
+  "val_f1_acc_ats": 0.6464928984642029,
+  "val_spk_count_mae": 0.800000011920929,
+  "val_spk_count_acc": 0.4000000059604645
+ },
+ "best_val_metric": "val_f1_acc",
+ "best_val_score": 0.9116387367248535,
+ "last_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-merged-2026-09-24-657c0c9e-nemotron/run-2026-09-24-035539-nemotron-657c0c9e.nemo",
+ "last_nemo_sha256": "3e00a76066c2b49fe2293093ed32f62e071a033c99530fb9dcd266ee98781948",
+ "last_weights_sha256": "92fbe1addfe7f5b0e198d2947f97e5980fd697a2250b425ae6f162c2b71afd4f",
+ "best_nemo_path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-merged-2026-09-24-657c0c9e-nemotron/run-2026-09-24-035539-nemotron-657c0c9e-best.nemo",
+ "best_nemo_sha256": "58bd612c76417c0d0f5173ddc15d1ab2d1fb2637edfa2c33ef5796e7aee3d8c6",
+ "best_weights_sha256": "bab89e1afd8751f234dd68168968adf278ead990897ec36502f5d1fef2968118",
+ "checkpoint_r2_key": null,
+ "checkpoint_copies": [
+  {
+   "which": "last_nemo",
+   "gcp-l4": {
+    "path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-merged-2026-09-24-657c0c9e-nemotron/run-2026-09-24-035539-nemotron-657c0c9e.nemo",
+    "sha256": "3e00a76066c2b49fe2293093ed32f62e071a033c99530fb9dcd266ee98781948"
+   },
+   "box(eta-lab-t4)": {
+    "path": "/home/eta/eta-train/runs/run-2026-09-24-035539-nemotron-657c0c9e/run-2026-09-24-035539-nemotron-657c0c9e.nemo",
+    "sha256": "3e00a76066c2b49fe2293093ed32f62e071a033c99530fb9dcd266ee98781948"
+   },
+   "identical": true
+  },
+  {
+   "which": "best_nemo",
+   "gcp-l4": {
+    "path": "/home/vinay_bhardwaj/eta-train/runs/diar-train-merged-2026-09-24-657c0c9e-nemotron/run-2026-09-24-035539-nemotron-657c0c9e-best.nemo",
+    "sha256": "58bd612c76417c0d0f5173ddc15d1ab2d1fb2637edfa2c33ef5796e7aee3d8c6"
+   },
+   "box(eta-lab-t4)": {
+    "path": "/home/eta/eta-train/runs/run-2026-09-24-035539-nemotron-657c0c9e/run-2026-09-24-035539-nemotron-657c0c9e-best.nemo",
+    "sha256": "58bd612c76417c0d0f5173ddc15d1ab2d1fb2637edfa2c33ef5796e7aee3d8c6"
+   },
+   "identical": true
+  }
+ ]
+}

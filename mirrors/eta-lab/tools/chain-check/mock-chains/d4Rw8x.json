@@ -1,0 +1,121 @@
+{
+ "id": "d4Rw8x",
+ "date": "2026-09-24",
+ "rx": {
+  "text": "Syp cough suppressant 5 ml three times daily for 5 days\nAdvise: chest X-ray if not better in a week.",
+  "created_at": "2026-09-24 10:15",
+  "author": "Dr Mock B"
+ },
+ "facts": [
+  {
+   "label": "OT booking",
+   "value": "None found"
+  },
+  {
+   "label": "Discharge",
+   "value": "None found"
+  }
+ ],
+ "encounter": {
+  "start_s": 0,
+  "end_s": 80
+ },
+ "audio_full": {
+  "src": "audio/d4Rw8x/full.mp3",
+  "t0_s": 0,
+  "duration_s": 82
+ },
+ "turns": [
+  {
+   "i": 0,
+   "start_s": 2,
+   "end_s": 6,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "Your angiogram shows a severe block in the main artery on the front of the heart.",
+   "en": "Your angiogram shows a severe block in the main artery on the front of the heart."
+  },
+  {
+   "i": 1,
+   "start_s": 7,
+   "end_s": 12,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "So what do we do now, doctor?",
+   "en": "So what do we do now, doctor?"
+  },
+  {
+   "i": 2,
+   "start_s": 13,
+   "end_s": 30,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "I want to put a stent in it, that is angioplasty. We go in through the wrist with a thin tube, open the block with a balloon and leave a small mesh tube. You will be awake, and you go home the next day.",
+   "en": "I want to put a stent in it, that is angioplasty. We go in through the wrist with a thin tube, open the block with a balloon and leave a small mesh tube. You will be awake, and you go home the next day."
+  },
+  {
+   "i": 3,
+   "start_s": 31,
+   "end_s": 36,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "Is it dangerous? Is there a risk?",
+   "en": "Is it dangerous? Is there a risk?"
+  },
+  {
+   "i": 4,
+   "start_s": 37,
+   "end_s": 50,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "There is a small risk, less than one in a hundred. The risk of leaving this block is higher. I would not delay this beyond this week.",
+   "en": "There is a small risk, less than one in a hundred. The risk of leaving this block is higher. I would not delay this beyond this week."
+  },
+  {
+   "i": 5,
+   "start_s": 51,
+   "end_s": 57,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "The cost, how much will it be?",
+   "en": "The cost, how much will it be?"
+  },
+  {
+   "i": 6,
+   "start_s": 58,
+   "end_s": 66,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "With the stent about one lakh and ten thousand. The counter will give you the estimate.",
+   "en": "With the stent about one lakh and ten thousand. The counter will give you the estimate."
+  },
+  {
+   "i": 7,
+   "start_s": 67,
+   "end_s": 74,
+   "speaker": "A",
+   "lang": "en",
+   "orig": "We will do it. Please book the earliest slot.",
+   "en": "We will do it. Please book the earliest slot."
+  },
+  {
+   "i": 8,
+   "start_s": 75,
+   "end_s": 80,
+   "speaker": "doctor",
+   "lang": "en",
+   "orig": "Good. Admit tomorrow morning, fasting from midnight.",
+   "en": "Good. Admit tomorrow morning, fasting from midnight."
+  }
+ ],
+ "linker_verdict": "link",
+ "link_score": 0.91,
+ "class": "done",
+ "jev": {
+  "named": {
+   "answer": "stent"
+  }
+ },
+ "tier": "HIGH",
+ "candidate_rank": 1
+}

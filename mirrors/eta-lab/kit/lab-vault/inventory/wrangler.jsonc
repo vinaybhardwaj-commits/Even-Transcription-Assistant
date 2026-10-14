@@ -1,0 +1,8 @@
+{
+  // Read-only inventory of eta-lab-results for the daily three-copy check. secret INVENTORY_TOKEN.
+  "name": "eta-lab-inventory",
+  "main": "index.js",
+  "compatibility_date": "2026-08-20",
+  "observability": { "enabled": true },
+  "r2_buckets": [{ "binding": "RESULTS", "bucket_name": "eta-lab-results" }]
+}

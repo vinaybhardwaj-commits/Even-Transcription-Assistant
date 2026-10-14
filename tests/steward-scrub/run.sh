@@ -34,5 +34,7 @@ for e in "$T"/data/*; do
 done
 "$ROOT/scripts/steward/scrub.sh" deadbeefdeadbeef..HEAD >/dev/null 2>&1; r=$?
 if [ $r -ne 2 ]; then fail=$((fail+1)); echo "FAIL invalid-range-must-exit-2 (rc=$r)"; else pass=$((pass+1)); fi
+"$ROOT/tests/steward-scrub/mirror-tracked.sh" >/dev/null 2>&1; r=$?
+if [ $r -ne 0 ]; then fail=$((fail+1)); echo "FAIL mirror provenance files not tracked"; else pass=$((pass+1)); fi
 echo "steward-scrub fixtures: $pass pass, $fail fail, $((pass+fail)) total"
 [ $fail -eq 0 ]
