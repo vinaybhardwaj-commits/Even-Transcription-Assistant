@@ -15,7 +15,6 @@ import { validRoomDate } from "./encounters.js";
 import { parseWin, applyWindow, FULL_LANE_KEYS, timelineDocOf, roomDayModel, hospitalPage, roomDayPage, dateListOf, DATE_RE as TL_DATE_RE } from "./timeline.js";
 import { rebModel } from "./reb.js";
 import { BLIND_CLIPS, isBlind, isBlindKey, withoutBlindLines, blankFirstWords, BLIND_MSG } from "./blind.js";
-import { consultsDocOf, spanBlind, drawerModel, drawerHtml, signClip, verifyClip, clipFileName, CLIP_FILES, CONSULT_ID_RE } from "./consults.js";
 
 const forbidden = () => new Response("forbidden", { status: 403, headers: { "content-type": "text/plain", "cache-control": "private, no-store" } });
 
@@ -283,47 +282,9 @@ async function timelineHospitalRooms(env, date) {
   return out;
 }
 // Level 2: reuse the reviewed consult() for windows/segments/turns, plus the optional timeline file
-// 6V: the day's consult clips (consults/<room>/<date>.json in eta-lab-ratings). A blind room-day never reads it.
-async function consultsDoc(env, room, date) {
-  if (!env.RATINGS || isBlind(room, date)) return { loaded: false, list: [] };
-  try { const o = await env.RATINGS.get(`consults/${room}/${date}.json`); if (!o) return { loaded: false, list: [] }; const d = consultsDocOf(JSON.parse(await o.text())); return { ...d, list: d.list.filter((c) => !spanBlind(room, c.s, c.e)) }; } catch { return { loaded: false, list: [] }; }
-}
-// the drawer for ?consult=<id>: server-rendered, signed links minted here (15 minutes), audio shown only when it is really in storage
-async function consultDrawer(env, m, id) {
-  const c = m.consults.list.find((x) => x.id === id);
-  if (!c || m.blind || spanBlind(m.room_id, c.s, c.e)) return null;
-  const dm = await drawerModel(env, m.room_id, m.date, c);
-  if (!dm) return null;
-  const has = async (f) => { try { return c.prefix && !!(await env.AUDIO?.head(`${c.prefix}/${CLIP_FILES[f]}`)); } catch { return false; } };
-  const audio = { whole: c.whole && (await has("c")), doctor: c.doctorOnly && (await has("d")) };
-  const mk = async (file, dl) => { const t = await signClip(env, { room: m.room_id, date: m.date, id: c.id, file, dl }); return t ? `/clip/${t}` : null; };
-  const links = (await mk("c", false)) ? { play: await mk("c", false), download: await mk("c", true), doctorDownload: audio.doctor ? await mk("d", true) : null } : null;
-  return drawerHtml(dm, links, audio, `/timeline/${m.room_id}/${m.date}`);
-}
-const notFound = () => new Response("not found", { status: 404, headers: baseHeaders({ "content-type": "text/plain" }) });
-// /clip/<token>: only a valid, unexpired HMAC token reaches storage; blind days, uncut consults and missing files are a bare 404 (no detail, no oracle)
-async function serveConsultClip(env, request, token) {
-  const p = await verifyClip(env, token);
-  if (!p || !validRoomDate(p.r, p.d) || !CONSULT_ID_RE.test(p.u) || isBlind(p.r, p.d)) return notFound();
-  const c = (await consultsDoc(env, p.r, p.d)).list.find((x) => x.id === p.u);
-  if (!c || c.status !== "cut" || !c.prefix || spanBlind(p.r, c.s, c.e) || !(p.f === "c" ? c.whole : c.doctorOnly) || !env.AUDIO) return notFound();
-  const key = `${c.prefix}/${CLIP_FILES[p.f]}`;
-  const head = await env.AUDIO.head(key);
-  if (!head) return notFound();
-  const range = parseRange(request.headers.get("range"), head.size);
-  const h = { "content-type": "audio/flac", "accept-ranges": "bytes", "content-disposition": `${p.a ? "attachment" : "inline"}; filename="${clipFileName(p.d, c, p.f)}"` };
-  if (range === "invalid") return new Response(null, { status: 416, headers: baseHeaders({ ...h, "content-range": `bytes */${head.size}` }) });
-  if (range === null) { const obj = await env.AUDIO.get(key); return obj ? new Response(obj.body, { status: 200, headers: baseHeaders({ ...h, "content-length": String(head.size) }) }) : notFound(); }
-  const obj = await env.AUDIO.get(key, { range });
-  return obj ? new Response(obj.body, { status: 206, headers: baseHeaders({ ...h, "content-range": `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`, "content-length": String(range.length) }) }) : notFound();
-}
-async function timelineRoomDay(env, room, date, win = null, consultId = null) {
+async function timelineRoomDay(env, room, date, win = null) {
   const c = await consult(env, room, date);
-  const m = roomDayModel(c, await timelineDoc(env, room, date), await consultsDoc(env, room, date));
-  if (m && consultId && CONSULT_ID_RE.test(consultId)) {
-    const html = await consultDrawer(env, m, consultId).catch(() => null);
-    if (html) { m.drawerHtml = html; m.drawerId = consultId; }
-  }
+  const m = roomDayModel(c, await timelineDoc(env, room, date));
   if (!win || !m) return m;
   const laneDocs = {};
   if (!m.blind && env.RATINGS) {   // uncapped lane objects, only for lanes the doc marks full and only on a non-blind room-day
@@ -463,10 +424,9 @@ async function route(request, env, url, who) {
     }
     if (extra !== undefined || !validRoomDate(room, date)) return json(404, { error: "not found" });
     const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-    return new Response(roomDayPage(await timelineRoomDay(env, room, date, parseWin(url.searchParams.get("from"), url.searchParams.get("to")), url.searchParams.get("consult"))).replaceAll("__NONCE__", nonce), { headers: baseHeaders({
+    return new Response(roomDayPage(await timelineRoomDay(env, room, date, parseWin(url.searchParams.get("from"), url.searchParams.get("to")))).replaceAll("__NONCE__", nonce), { headers: baseHeaders({
       "content-type": "text/html; charset=utf-8", "content-security-policy": CSP(nonce) }) });
   }
-  if (path.startsWith("/clip/")) return serveConsultClip(env, request, path.slice("/clip/".length));
   if (path.startsWith("/api/inspect/")) {
     const [room, date, runId, wid, extra] = path.slice("/api/inspect/".length).split("/");
     if (extra !== undefined || !validRoomDate(room, date) || !WID_RE.test(runId ?? "") || !WID_RE.test(wid ?? "")) return json(404, { error: "not found" });
