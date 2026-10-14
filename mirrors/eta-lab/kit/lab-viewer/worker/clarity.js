@@ -2,7 +2,6 @@
 // plus an empty FIXED ROUTER column that fills from router-fix's offline eval. Data: clarity/clips.json, clarity/fixed.json and clarity/audio/Lnnn.webm in
 // eta-lab-ratings (loaded by tools/clarity_seed.py; READ-ONLY here). Server-rendered and escape-first, ZERO client script; filters are plain links (the CSP has form-action 'none').
 // The rows hold PHI (transcripts, clip audio): shown to Access-restricted physicians only (same gate as every route).
-import { BLIND_CLIPS } from "./blind.js";
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const rstr = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const TAG = /^[a-z]{2,8}$/;
@@ -142,9 +141,7 @@ export function scorecardHtml(sc) {
 export async function clarityModel(env) {
   const get = async (key) => { try { const o = env.RATINGS && (await env.RATINGS.get(key)); return o ? JSON.parse(await o.text()) : null; } catch { return null; } };
   const clips = await get("clarity/clips.json"), fixed = await get("clarity/fixed.json"), sc = await get("clarity/scorecard.json");
-  const fx = fixedOf(fixed);   // R3/W51: a blind-day clip leaves the page entirely (text, router output and audio)
-  fx.rows = Object.fromEntries(Object.entries(fx.rows).filter(([id]) => !BLIND_CLIPS.has(id)));
-  return { rows: clipsOf(clips).filter((r) => !BLIND_CLIPS.has(r.id)), fixed: fx, loaded: !!clips, sc: scorecardOf(sc) };
+  return { rows: clipsOf(clips), fixed: fixedOf(fixed), loaded: !!clips, sc: scorecardOf(sc) };
 }
 
 export function parseFilters(search) {
