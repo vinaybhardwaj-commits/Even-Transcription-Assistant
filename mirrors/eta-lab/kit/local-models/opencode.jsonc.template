@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // LOCAL-MODELS pane config (453.C): OpenCode 'ollama' provider over the local OpenAI-compatible
+  // endpoint. Loopback, no key. The model pin lives on the `opencode run -m` flag, not here.
+  // ping-agent: a minimal formatter agent (tools off) — the local arm only formats/gathers.
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": { "baseURL": "http://127.0.0.1:11434/v1" },
+      "models": { "llama3.1:8b": {} }
+    }
+  },
+  "agent": {
+    "ping-agent": {
+      "mode": "primary",
+      "description": "minimal formatter for local-model benches",
+      "prompt": "You are a formatter. Answer with the requested text only, nothing else. Never use tools.",
+      "tools": { "*": false }
+    }
+  }
+}

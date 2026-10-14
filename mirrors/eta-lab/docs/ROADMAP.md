@@ -2,255 +2,9 @@
 
 Written by the `roadmap` pane (records keeper). This is the one document any orchestrator reads to know where every project stands. Plain words: V is a doctor, not a programmer. Counts and ids only — no patient text anywhere in this file.
 
-Last revision: **30 Sep 2026, ~10:30 IST** (rev 29, bus #7918-#8246; previous rev 28 was ~06:30 IST). Fable's orchestrator thread closes at 10:00 IST and a new Fable thread takes over within the hour (#8245); all rulings stand.
+Last revision: **26 Sep 2026, ~16:00 IST** (rev 7).
 
-## Where everything stands (plain English, one line each)
-
-1. **CLARITY** — the fix for language mixing made real results worse, so it will NOT ship as-is; root cause is now understood (the Hindi/Tamil/Kannada engine gets confused by noise, plus real content loss even when routed correctly). Effort moved to a bigger system (REB, below) that runs every engine and lets a scorer pick the best output. Overnight the nightly self-test showed the production router throwing away correct Tamil (forced-English Whisper romanisation passes its 'looks real' test); Fable gave a GO to BUILD a fix in the lab only (R-A branch built); nothing ships to production without a separate GO from him. *30 Sep.*
-2. **PRESCRIBE** — CAP-2 is closed (hints did not help). CAP-3 (use the patient's own prescription to clean the transcript afterwards) finished its OWN and SWAP arms with no help found; **the PRIOR arm was launched tonight on the box** (Fable #7093, output lands in a folder Fable copies out). The task that would extend doctor-room proofs to more doctors found 0 of 5 proven so far. *29 Sep.*
-3. **BACKFILL** — the month catch-up is now split in two: a **cut-only** driver on the box (23 Sep and 22 Sep cut, 21 Sep cutting) and **speech-to-text on Hugging Face GPUs**. 25 Sep (393/393) and 24 Sep (238/238) speech-to-text are done and collected with no blind-day windows. A guard that keeps blind days out of the runner was briefly broken by a bad edit and fixed within minutes; audit shows no blind window was transcribed. *29 Sep.*
-4. **ROOMS** — all rooms recording; the "app won't update" scare in several rooms turned out to be old, already-fixed history, not a new bug — closed. The new room-status page (Room Timeline) is live for you. *28 Sep.*
-5. **SPLIT** — the 26/27 Sep speaker-splitting moved to Hugging Face GPUs (the box CPU could not keep up). **Phase 2 (a home-grown turn-finder trained on the production labels) got a GO on HF, cap USD 25**, but only after a pre-registration; the design passed review and three inputs are still missing before it can freeze. *29 Sep.*
-6. **VOICEPRINT** — all five known doctors now score PASS by automatic minting (Ankit 0.66, Poornima 0.81 added). **Ten Hugging Face GPUs are building proposed voiceprints for the 47 other doctors (due ~21:30-22:00).** A proposal is never used until you have heard it: the human check on the new voice-check page is the gate. The old blind check was retired; your combined session (controls plus proposals) is expected ~30 Sep. A new study, ROLE-FROM-CONTENT, asks whether the words alone tell doctor from patient. *29 Sep.*
-7. **ENCOUNTER** — a new system that spots consult start/end by listening for cues (greeting, exam, prescription) is built and being tested; it will surface inside Room Timeline. *28 Sep.*
-8. **SURGERY** — a new nightly batch links every consult to whether surgery was booked within 90 days; first real run covered 1,484 consults, 122 booked. Waiting on one go-live edit. *29 Sep.*
-9. **NOTESAFE** — the safety check (no patient text leaking into error logs) is built and confirmed; a planned extra de-identification step was dropped because your AI vendor (Jev/TypeSafe) confirmed it never stores or trains on the data. *28 Sep.*
-10. **TONE** — **parked.** A control test showed the emotion engine calls both room noise and real speech "sadness"; its per-turn scores are not reliable, so no more emotion runs until there are human-labelled clips or a different engine. *29 Sep.*
-11. **SELFTEST** — the automatic nightly test of the whole pipeline is running and passing every night; a bigger clinical-style test set was designed but paused (its voice-generation budget ran low). *28 Sep.*
-12. **LABVIEW** — the voice-check page and the DRT page are live, the viewer now blanks text, status, language and audio for the 14 blind room-days, and a further build (6f74d573) is ready to deploy; Fable deploys. *29 Sep.*
-13. **FOUNDRY** — the agent bus now reconnects by itself; a new watcher, a warden agent, a chronicle agent and a no-GPU dev machine (asus-ubuntu, patient data allowed) were added; agents moved to Sonnet/Opus 5.5. *29 Sep.*
-14. **SHIP** — yesterday's release is live and healthy; the deploy mistake that nearly happened is documented so it won't repeat; one more small release (device-status fix) is ready, waiting for the go-ahead. *28 Sep.*
-15. **RECORDER** — the room "signature mismatch" bug is understood: old superseded app copies, not a new bug — closed. The in-app self-test feature is built; one permission gap still blocks sending a live test. *28 Sep.*
-16. **ORBOX** — your answers are in: both microphones and speakers (D-2); the video stream is the surgical device's own screen, not the patient (D-3, dropped); a full kit list for a quote (D-4, delivered, no purchase); **all ORBOX building is on hold until you say so** (D-5). *29 Sep.*
-17. **FREESCRIPT** — delivered: instead of a doctor pasting text, ETA will hand Pulse's team a structured data file per consult; the design is written up and ready to hand off. *28 Sep — closed for this phase.*
-18. **ACOUSTICS** — finished: two rooms (OPD 1 mildly, Third Floor materially) miss real speech because the noise-detector cuts it; a tuning fix was tried and did not help, so it needs a different approach. *28 Sep — closed for this phase.*
-19. **REB — Room Evidence Bundle** *(NEW)* — **a full month's historical backfill is now running**, 19 Aug through 25 Sep, one day at a time, feeding the same engines that just proved themselves on 26/27 Sep. *28 Sep.*
-20. **FUSER / G3** — **RESTARTED as v3 (V decided 08:15, #8153).** v2-E stays FAILED in the record. v3 is a new pre-registered experiment: it never touches a dose (every dose stays the production dose), inserts a drug name only when two independent engines heard it and it is in the drug lexicon, uses the same bars as v2-E, and runs once on a new, bigger fresh set (cap authors it; ElevenLabs cap 150,000 characters). The pre-registration passed the checker (r4 cbfece42); the build is witnessed and waits to be committed; no run yet. *30 Sep, rev 29.*
-21. **W50 — clinical speech-engine bake-off** *(NEW)* — testing 3 outside medical speech engines against your recordings; one was dropped (kept failing), the other two are now on the harder real-consult test. The last missing SraVaani baseline window was recovered and the remaining 23 baseline windows all finished (69 tracks, 0 conflicts) overnight; the scoring step is next. *30 Sep.*
-22. **W52 — Manoj Kumar S package** *(NEW, your request, urgent)* — **DONE. Delivered to your Air on time (17:00): 54 voice-confirmed clips (52 found + 2 weak) out of 176 visits, with real transcripts, his-speech-only audio, and his prescriptions for each.** Every held-back visit carries a real, checkable reason, not a guess. Along the way the team caught and fixed four real problems before anything shipped — a classification bug, a privacy problem (clips that would have held a different patient's consultation were pulled out entirely), a transcription bug, and a file-handling bug — each one re-checked independently before the package moved forward. The whole team has stood down; more clips could still surface later if a rescan finds them (103 of the 176 visits remain unresolved: 52 not yet scanned, 51 with no tape at all), which would come as a later, smaller update, not tonight's job.
-23. **W51 — Manoj voice study (formal)** *(NEW)* — plan v3.1 written; the exposure record was extended (you heard the 54-clip package, which counts as exposure on some blind days) and the checkers want the wider scope; no scans yet. *29 Sep.*
-24. **PALIMPSEST — every engine on one timeline** *(NEW)* — the timeline seed now skips blind days and is checked (PASS); the last fill, the 26 Sep SraVaani box lane, is about 66% (ETA ~10:45 IST, slowed while the box was shared with Koyal). *30 Sep.*
-25. **DRTPQMA — doctor, room, time, prescriptions, audio on one page** *(NEW)* — live for 11 tape days (19-29 Sep): 2,086 consults, 598 placed by schedule, 1,410 with no room yet, 78 with no tape; blind-day consults show as grey 'held out' blocks with no audio. *29 Sep.*
-26. **KOYAL — Koyal 600M Indic STT on HF L4, bulk backfill** *(NEW)* — HF pump running since ~05:14; 27 to 22 Sep, 21/20/19 Sep, 18/15/12/11/10/09 Sep and 29/28/13/14 Sep are collected and verified by eta-refuter-3 (0 blind); the lab viewer Koyal lane (T-KOYAL-5) is deployed. Overall percent UNVERIFIED. *30 Sep, rev 29.*
-
-## Changes since rev 28 (rev 28 was 30 Sep ~06:30 IST; bus #7918-#8246)
-
-- **Standing orders while V travels (#8483, 11:20 IST).** V is away with the Air for the rest of 30 Sep and Fable is intermittent. The warden dispatches every approved task; builder-refuter loops run to PASS without Fable. Steps only Fable can run go to ~/oc/fable/FABLE-RUN-QUEUE.md (agents post them with subject prefix FABLE-RUN). FUSER v3 freeze stands at 73adb29f; the seed reveal and any TTS spend wait for Fable. Tonight's fleet update does NOT run unless Fable posts GO by 20:40; otherwise it moves to 1 Oct 21:00 (agents still write the 20:40 handoff notes). hf-fleet may launch any job whose launcher has an eta-refuter-3 PASS, inside the lane caps. Guard USD 80/day.
-- **Other rulings 10:10-11:00.** Room start and close belong to V's Kiosk Bot; nobody on the bus starts or stops rooms and the 20:35 backstop is dropped (#8369); T-RECORDER-3 closed (Cardiology and Dietary back; Home Office still missing its device). T-BAKEOFF-1 is Sarvam-translate only, final (V declined the gated models). T-BACKFILL-HF (#8412): V approved USD 250 on HF to run every lane (whisper x3, diarisation plus acoustics, SraVaani and IndicConformer, tone) over every non-blind window; Koyal is 95% of stored windows. 26 Sep is the demo day on the viewer by 13:00 (#8420). A permanent medical-model lane (stt.medasr) joins the palimpsest (#8438). T-RECORDER-1 route B: vercel drafts a full principal map with fresh tokens; cut-over about 22:00 if passed by 20:00.
-- **FABLE ONLINE (new thread, #8315, 09:55 IST by its clock).** Fable answered all 29 WAITS items. Fleet update tonight: CONDITIONAL GO (21:00-21:30; eta-refuter re-review due 20:15; a FAIL moves the whole update to tomorrow; herdr-kit restarted last by Fable). FUSER v3: A2 0039e6c8 accepted; seed commitment 0453361fcac11be7 (seed not revealed); freeze needs router-fix's overlap-dedupe test sha PASSed by both checkers; ElevenLabs cap 150k characters. Koyal: 11 Sep re-id (21 windows) and 13 Sep (22 windows, 2 blind dropped) jobs launched. ROLE T-ROLE-2/-3/-40 cancelled (reopen at 8 IST days each for two doctors). T-BAKEOFF-1 judge: Gemini 3.8 Pro via OpenRouter, hard stop USD 3; licences are V's. hist-bulk tone reopens on c3 after 20:45. Sweeps 11:00 then hourly; room close 20:35; morning brief 07:30.
-- **Fable thread handoff (#8245/#8246, 10:00).** The current orchestrator thread closes; a new Fable reads the bus from #8229 on and posts FABLE ONLINE. All rulings stand; the warden keeps the WAITS ON FABLE list; the fleet update does not start without a Fable GO on the bus. Handoff document: Mini ~/dev/_fable/HANDOFF-LATEST.md (sha16 47027f6b); project doc ETA-STATE-OF-PLAY-30-SEP-2026. I mirror the Claude Doc roadmap headline here. I could not open that doc by its artifact link (UNVERIFIED that its 30 Sep handoff section exists yet).
-- **FUSER v3 (#8153, V go 08:15).** New pre-registered experiment. Rules: doses never touched (G3m zero by construction, unit test); a drug is inserted only with 2 independent engines plus the Pulse lexicon; bars unchanged (G1 +2.0, G2 +3.3, G3m 0, G4 Wilson upper < 7%); size set so G4 can be evaluated (about 150+ inserts); new fresh set authored by cap with commit-reveal. Progress: pre-reg r4 cbfece42 PASS (eta-refuter-2 #8223), addendum A1 and A1.1 PASS, draw script 5c4d6525 PASS, phrase frames 2c146f28 PASS, drug/test lists dfe18256 PASS, v3 working tree witnessed PASS by eta-refuter-3 (#8243, T-FUSER-23) and waits for router-fix to commit. Tasks T-FUSER-20..25.
-- **Split phase 2 (T-SPLIT-2).** Week-1 attempt 1 is VOID: vj-refuter and eta-refuter-3 found training windows sharing room-days with eval windows (#8040/#8043). Add.13 (24d537dd) fixed the guard and manifest (PASS); Fable uploaded the subset to private bucket vrbeven/split2-train-data-v2; week-1 runs on that pin only.
-- **Misnamed windows closed (T-MISNAMED-1).** Map 9ba4795e PASS, alias dbda9078 and 3c656602 PASS; 12 Sep's 22 clean windows staged via the 11 Sep re-sync (#8094). Cutter fixes went through several FAILs before PASS (03b9fd57).
-- **Koyal.** Staged and pumped: 28, 11 (with the 22), 13, 14, 09 and 29 Sep (verified 0 blind; 28 Sep 135 blind windows in the manifest, 0 in the output). The 22 extra 13 Sep bucket files are clean 14 Sep windows, not blind (#8132/#8136). Viewer lane e45ea9ed deployed 07:37 (Worker d966fc95); the spec copy was done by Fable.
-- **W51 / R3 and ROLE v4.** W51 dev verdict INSUFFICIENT/FAIL, rescore byte-identical (#8052). ROLE v4 closed INSUFFICIENT on days (#8083, vj PASS); reopens when the two doctors' tokens reach 8 IST days each. Cutter v3 eb32b286 PASS by three checkers; v4 is next (reads the 47 proposal dirs).
-- **Acoustics.** T-ACOUSTICS-20 done (commit 4faf5b7e). Eight DSP tracks on blind 26 Sep OPD4 are quarantined, not deleted; the runner now applies the blind check to every track and fails closed (#8160).
-- **T-BAKEOFF-1.** Approved (#7972). Gated licences (TranslateGemma 4B/12B, IndicTrans2 1B) need V's acceptance; runner built with sarvam-translate first. Review pack PASS; the judge needs an OpenRouter slug and key from Fable or V.
-- **Router LID (T-LID-33).** E1 pin f1dc92bc accepted; runs tonight 23:00-06:00 IST, cache only, no new TTS.
-- **Fleet update tonight (#8160, #8196).** 20:35 room close, 20:40 handoff notes, 20:50 pre-stop capture, 21:00-21:30 herdr 0.9.1 to 0.9.2 plus Claude Code 2.1.285 plus auto-mode restart of every agent with --resume. Runbook v3 (94cc1d5d) still NOT YET per eta-refuter; v2 due 19:30. No start without a Fable GO.
-- **Board.** Board-view fix for duplicate rows (last row per id, 49b5a246 PASS).
-
-
-## Changes since rev 27 (rev 27 was 29 Sep ~23:10 IST, ~7 hours ago; bus #7605-#7918)
-
-- **FUSER stopped.** v2-D (frozen 6dbb6947) failed the DEV gate on safety (G4 false-drug 33.8% D-any, 25.3% D-two) and G3m, confirmed by eta-refuter-2 (#7616/#7635); no TEST spend (#7262). v2-E (matcher fix; pre-reg r3 f75b8b7d PASS #7655, A1 6b4e5e73; code 2eccd9dd frozen #7689, M5 list 42501e65) ran ONCE on a fresh set drawn by cap from a seed Fable committed (ec524b8be051b1ce) and revealed after the freeze; 16 cases, 384 windows, 62,367 ElevenLabs characters on a separate one-time TTS budget. Result FAIL (#7873, re-derived #7876): D-any G4 3 false-drug of 69 inserts (4.35%, upper 12.02%); dose inserts 5 of 33 wrong; G2 captured 32.4 vs 32.5 needed; G3m 8/9; D-two 40 inserts (< 50, not evaluable). Fable #7918: FUSER stops; he writes it up for V at 07:30; open FUSER tasks cancelled. Deviation declared: fresh windows used room id suite-fv2e (the REB validator), not the ruled room_synth_fv2e. run_p_only.py a1e85581 witnessed.
-- **KOYAL.** 27-22 Sep collected by reb (8,640 tracks; every day verified by eta-refuter-3; blind guard proven on 26 Sep OPD4 and 23 Sep OPD5/OPD7). HF credit ran out (402, #7691, ~23:40). Fallback on the lab box GPU (koyal_box_job c9efcb9d, version box-t4-koyal-1, reb pin efb7028b, first-20 PASS #7730): 21 Sep (386 windows) and 20 Sep (158) complete, 19 Sep 58 box + 94 HF. Box run stopped #7786 so the 26 Sep lane and FUSER step 5 got the T4. Credit added; pump restarted ~05:14 (25 concurrent OK, #7858; pump v2 f4a06c54); 18/15/12 Sep collected (725 windows, 2,900 tracks). 12 Sep has 22 windows not landed; 10 Sep staged. Task T-KOYAL-6 cancelled, superseded by the HF restart.
-- **T-TERMS-40 and 41 done.** Guard edited by Fable per ADDENDUM-25 rev 2 (79c36e70), pinned-twin exception, driver 1f6ad98c (52 tests, eta-refuter-3 PASS). Window-5 SraVaani v2 written (run record 9e4f08fa). The 23-window resume finished 23/23, 69 tracks ok, 0 conflicts (record 8d320bda verified); set (c) is 76/76 latest-ok. 12 tracks on 4 excluded windows were written before the ruling and are history (ledger Addendum A).
-- **Router LID fix (T-LID-31/32/33).** Root cause of the Tamil miss (lid-debug #7707): router, not twin; production runs the same code (twin sha 400710eeb45c). Proposal r5 03bd54a2 PASSed; Fable #7918: BUILD in the lab only, option B (pytest, E4 then E2 on c3, R-A only, hard stop 07:55, resume after 20:45). R-A branch built (301f97e, witnessed #7891). No production change without his separate GO.
-- **Misnamed windows (R3/W51).** eta-refuter-3 found 134 night windows (the map builder, hardened to sha 13fcd1d7 after a wrong-directory hazard, reproduces 155 exactly, #7927/#7932) whose ids carry an IST date but a UTC clock (#7893). 44 already-collected windows carry the old ids (19 and 20 Sep, room 7egw2my6; reb #7905); nothing is renamed. hist-bulk owns the re-id (T-MISNAMED-1); run_cap_batch re-pinned to 6ebc4e54 (surg-link nightly rc=0). 12 Sep's 22 windows are not staged until the map PASSes.
-- **BACKFILL.** 29 Sep re-cut complete 418/418 (root cause a stale snapshot, #7917); 10 Sep cut 339/339; 09 Sep driver did not stall; 28 Sep cutting. T-BACKFILL-5 closed: 27/19/18 Sep ctc-out synced and collected (0 blind).
-- **Other rulings (#7918).** ROLE v4 option (a): doctor-rank only, staff stratum reported empty and UNSUPPORTED; option (b) goes to V as a question. SPLIT phase 2 (T-SPLIT-2): Fable's upload to the private bucket started 06:22. Cutter v3 (diar-lab) applied by Fable, not diar-lab, because a classifier blocks diar-lab. W46: run_cap_batch re-pinned. New warden rule: any worker with no PROGRESS for 60 minutes gets a nudge; tasks waiting on Fable show WAITS ON FABLE.
-- **KOYAL update (~06:40).** hf-fleet: 19/17/16/11/10 Sep synced, 0 blind, spend about USD 8; eta-refuter-3 verified them (19 Sep HF plus box = 362/362, #7934). 09 and 29 Sep wait on staging.
-- **Not done: T-KOYAL-5.** The Koyal spec could not be copied to the lab-viewer box (the roadmap pane's copy was denied by the permission classifier); waits on Fable. UNVERIFIED whether lab-viewer has since received it.
-- **Board.** 132 lines at last read. Duplicate ids appeared twice from two writers and were merged (T-LID-32, T-LID-33).
-- **Still deferred to noon.** T-BAKEOFF-1 spec and the hf-fleet whisper HF script yes/no: Fable rules by 12:00.
-
-## Changes since rev 26 (rev 26 was 29 Sep ~19:27 IST, ~3.5 hours ago; bus #7102-#7605)
-
-- **KOYAL lane is running (new project 26).** Model adalat-ai/koyal-indic-600m-1.0, revision 959231d2816f60f9ea680246092270fb059e0785, four language prompts (hi, kn, ml, te), one track each, 30 s no-overlap chunks, version `hf-l4-koyal-1`. Spec sha16 f1f57dc35e533ae5 (#7516). Four artefacts PASSed by eta-refuter-3. Smoke RTF 0.0044 (11 of 20 windows had text); full run about USD 12. Bulk GO #7588, launched #7592 (pump 27 Sep back to 18 Sep). HF guard raised to USD 300/day for 29-30 Sep; Koyal has its own cap of USD 150 to 30 Sep 12:00. HF spend today about USD 66.84 of 300 (warden #7602).
-- **FUSER re-plan.** v1 was below P in 7 of 8 languages (#7262). v2 (router-fix 6dbb6947) was WITNESSED by eta-refuter-2 (#7480) after the B2 fix (#7476). The DEV gate: v2 must beat P on S1 and S2 primary.
-- **Task board v2 and the `later` status.** `later` means the task waits on earlier steps and is not dispatched. Board is 117 lines at last edit.
-- **SHIP.** F3/F4 are live at dfb7034 (scribe #7283).
-- **ROLE v4 rulings (#7406).** D = 29 Sep; the stop rule is a data cut (INSUFFICIENT if fewer than 30 VERIFIED sessions). The Staff (nurse/assistant) button is deployed: lab-viewer main e0ef0665, Worker version 11200299, at 22:24. T-ROLE-5 (lx A4 Staff amendment) is open.
-- **BACKFILL / PALIMPSEST.** T-BACKFILL-5 is un-cancelled for 27 Sep only, on HF. T-PALIMPSEST-2 moved to hf-fleet.
-- **DRTPQMA.** DRT 29 Sep FINAL loaded by Fable, read-back sha 2c914346 (previous b38bd170 archived, #7605).
-- **RECORDER.** T-RECORDER-2 done: the Cardiology echo Mac and the Dietary discussion Mac dropped off Tailscale and the hourly reaper closed their sessions. T-RECORDER-3 is the on-site check on 30 Sep (person on site: UNVERIFIED). T-RECORDER-1 is parked to morning (eta-refuter prefers route A, #7581).
-- **T-TERMS-40.** Twin identity accepted (ADDENDUM-25 aa6fa2b9). New-file route: Terms writes a new scratch file, r3 reviews, Fable installs and runs it.
-- **Herdr parity.** Mini server 0.9.1 lacks surface_interest and health_check. The live handoff on the spare to 0.9.2 failed (#7598). No live change tonight. Runbook due 08:00 30 Sep (T-HERDR-2).
-- **T-BAKEOFF-1** is proposed. Its spec file is only untracked on the Mini (`orders/GPU-TRANSLATE-BAKEOFF-2.md`); a draft is held by the records keeper. Fable has not ruled.
-
-## Changes since rev 25 (rev 25 was 29 Sep ~12:40 IST, ~7 hours ago; bus #5923-7101)
-
-- **Who runs the lab.** A `warden` agent sweeps every agent about every 10 minutes and dispatches ready tasks from the task board (`~/dev/_fable/board/tasks.jsonl`, 84 tasks at 19:30, never committed). Fable's 19:40 audit (#7097) found 19 "ready" tasks with open dependencies, so they now carry a new status `later` (waits on earlier steps; warden never dispatches it; `blocked` means truly stuck, #7060). Standing orders: warden promotes `later` to `ready` when dependencies close; digests name every idle agent; roadmap proposes 1-2 concrete tasks for each idle agent (status `proposed`) and writes this revision. Mini-Fable stood down at 18:26 and Cowork Fable (V's MacBook Air) resumed orchestration at 18:30 under the same `fable` name (#6941, #6946); the handover file is `~/oc/fable/HANDOVER-FABLE-29-SEP.md`.
-- **Hugging Face GPUs (V, #6051 and #6161).** Patient audio is approved on HF: private buckets only, own code and open-weight models only, outputs back to the box, USD 150/day guard across all HF jobs, up to 10 L4 (raised to 14, #6578/#6587). All HF data is kept until V says delete; hf-fleet keeps the ledger at `~/eta-data/hf-buckets-ledger.md`. HF spend on 29 Sep was about USD 62-75 by evening (Fable's handover; hf-fleet's ledgers hold the exact figure). 25 Sep speech-to-text finished on HF, 393/393, collected as 2,358 tracks with 0 excluded (#7021, #7024); 24 Sep 238/238, 1,428 tracks, 0 excluded (#7088, #7091).
-- **VOICEPRINT and the human gate (V, #6267).** The human check on `/voicecheck` is the gate: it mixes control cards with PROPOSAL cards, accepts several annotators, keeps every answer append-only, and a proposal is never placed or used until verified (per-clip download ON, #6309). Run vc1 is VOID (never linked), vc2 is on HOLD (#6627); V's first session will be one combined run, likely 30 Sep. **The old blind Doctor Voice Check (102 cards, never rated) is retired (#7010).** Amendment 4 text is v10 (7d8bd212); scorer `score_voicecheck.py` b122b693 is of record and valid only while V is the sole annotator; lx's A4 4.12 uses the batch-level decoy scheme (B, #7093); a new "Staff (nurse/assistant)" answer needs its own amendment and waits on V (#7069, #7010). **47 doctors** need proposals (not 48, #6886): 10 `vp_proposal` jobs on HF L4 started ~15:20, due ~21:30-22:00, cap USD 60 (handover). All five known doctors now score PASS by automatic minting (Ankit 0.660, Poornima 0.813, #6184, #6400).
-- **ROLE-FROM-CONTENT (V's idea, #6218).** Can Jev tell the prescriber's voice from what each voice says? v3 came out INSUFFICIENT by the registered rule (VERIFIED stratum 9 < 15, #6832); exploratory descriptives (jev-fix rated 134/134): the doctor cluster ranked first in 28 of 32 sessions (0.88 vs 0.47 chance). v4 (confirmatory, fresh sessions) has a pre-registration GO (#6849); it waits on V (an end date of 13 Oct and a Staff answer on /voicecheck, asked 18:40; do not freeze yet, #7010). jev-audit has a v4 draft with staff-clip selection (#7077).
-- **R3/W51 blind room-days.** 14 held-out room-days (union sha16 f07171dc; checker `heldout.py` in `~/eta-data/drtpqma`). Transcription, translation, speaker embedding, listening and analysis are barred on them; mechanical window cutting is not "use" (#6688, #6727, #6754, #6872). The IST rule uses the window start day and the day of end minus 1 s, so the end is exclusive (#6927, #6957). Blind windows: 23 Sep 98 of 372 (dropped before HF upload, 274 uploaded, #6809); 26 Sep 8 of 440; 27 Sep 0 of 430; a 27 Sep OPD7 23:45 window stays CLEAN (#6947). The viewer blanks text, per-window word counts (#6959), status, language and by-status counts (#7011, shown as 'held out') and plays no DRT audio for them. The box-wide exposure ledger (sig-debug) is at v2.2 4cf874f2 (#7080); v2.1 (#7066) noted reb content tracks on excluded days, some written after the union existed. Quarantines: 5 leaked diar outputs, 10 control clips, and 16 wrong-room clips ordered into a 0700 folder with no deletes (#7010). A labelled stratum (label200 15/200, W50 set C 11/87) is EXCLUDED from primary analyses and shown with and without (#7010, #7014). **Disclosures on record:** tone #6926 (5 un-logged noise pieces, possibly 26 Sep OPD4; #7071 corrects that the control pool had no OPD4 windows); W52 exposure (V heard the 54-clip Manoj package; Fable's #7010 says 16 of its encounters are on R3 days, vj-refuter's #7079/#7098 say the addendum scope is all 54 heard clips; the two counts disagree and I do not resolve them).
-- **The runner-guard saga (BACKFILL).** hist-bulk aligned the runner guard to the end-exclusive rule (7b225714, #6955). A later edit (9bb75cf5) deleted the normal `return any(...)`, so the guard refused nothing on parseable windows; eta-refuter caught it (#6982), fixed in fd460731 (runner.py sha 978d9969e2589af8, #6993). Two runners had started on the broken file; they were killed and relaunched. Audit: 15 windows finished in the gap, none on a blind room-day (#6998). The unit test first passed vacuously because it re-declared the guard (#7029, and eta-refuter-3's own earlier PASS was wrong, #7034); the corrected test loads the guard from runner.py and has a mutation check that must fail (64a2b743, PASS #7037): guard thread closed.
-- **Backfill design.** The historical driver relaunched CUT-ONLY (#6619; STT gate off, tone workers stopped); 23 Sep cut 372/372 and 22 Sep 393/393 (#6796, #6907), 21 Sep cutting. STT for the backfill is a separate HF job (T-BACKFILL-9, cap USD 45, newest date first, #6646) with stage-and-sync run by Fable because hf-fleet's guard blocks patient uploads. Indic heads switched from RNNT to CTC 12 s everywhere on HF after the probe (RNNT emptied 79-85% of 30 s chunks, #6702/#6704).
-- **FUSER.** RUN 3 DONE: 222/222 DEV windows, USD 8.20 of USD 15, code 4f0d2caba422, merged as b4249b6 (#6557). ADDENDUM-9 r3 (7415bf80626b) accepted (#6956): re-freeze at router-fix/lid b4249b66 (fuserv1 f9b6706e), V7 policy 8a; TEST compares v1 with production P and keeps v0 as a reference arm; **n = 23 consults** (cw-vafxdW8k1Nt4tpyOzHQb excluded); 4 held-out clips (L041, L057, L139, L182) are excluded from all scoring and reports, with and without numbers shown for RUN 1-3. TEST cost cap USD 20 with a running-projection stop and halt on the first failed window (runner a3be8bcc, WITNESSED by eta-refuter-2, #7012); order: refuter-2 PASS on runner and extractor, freeze post, reb's SraVaani-only run (driver 9f3b3004, config hash b3584dd6; the commit is local-only until Fable OKs its push, #7091), v0 tracks (writer e7b32f52 WITNESSED), TEST (#7009). The G3 dose reference must read native and English-by-ear number words; cap's S2 matcher does not, so the S1 scorer's number tables are used (19-value limit stated, #7058); S2 is reported two ways: digits-only cap scorer PRIMARY, number-word reading SECONDARY, both fixed before TEST (#7093). **V's G3 rating set comes from TEST output, not RUN 3 DEV (#6948).** G3 builder a5cf1611 passes builder mechanics; the extractor PASS waits on native numbers and DEV acceptance (#7067).
-- **CAP-3.** OWN and SWAP finished with HELPED=FALSE earlier; the PRIOR gloss arm was launched on the box (pid 55701, bundle c979b5d, prior.json sha 013a452e, tag g_prior; Fable copies results to /out/cap3/g_prior when done, #7093).
-- **SPLIT phase 2 (#7027).** GO on HF, not the box: split writes the pre-registration first (training on production labels with blind days excluded via heldout.py; eval set frozen before training; exit = within 3 DER points of pyannote.ai in two weekly evals), vj-refuter reviews it, eta-refuter-3 reviews the training script, runs after tonight's proposal shards via hf-fleet, cap USD 25, private bucket, patient-audio upload scripts run by Fable. Pre-reg 382db600 got DESIGN PASS (#7063, wording nit fixed in a later commit); freeze waits on the hashed SELFTEST set (diar-lab has not built it, #7100), the scorer and pyannote.metrics versions, and the dataset id from nightly_export.
-- **PALIMPSEST / DRTPQMA.** Diarization for 26/27 Sep moved off c3 to 3 HF L4 shards (#6578; c3 ended at 110 tracks, c4bcdedf); hf-fleet flagged 27 outputs with segments but empty speaker lists (#7087). Fable ordered a blind-guard and offset fix in `tools/reb_timeline_seed.py` (#7025); lab-viewer's 31199dcd passed review with be66a1c4 (#7065) and 6f74d573 is ready to deploy (#7073). Whether 6f74d573 is deployed: UNVERIFIED. DRT is live for all 11 tape days 19-29 Sep: 2,086 encounters, 598 placed, 1,410 room-unknown, 78 no tape (handover); DRT audio is stripped and blocks grey for the 62 held-out encounters (build_drt df497e2f, PASS #6771). Content-only room proofs for the five scheduled doctors: 0 of 5 proven (T-DRTPQMA-5, done).
-- **W50.** set (c) primary = 76 windows; the 11 R3 clips are a labelled stratum (#7014); the window-5 SraVaani retry driver (98414c5f) passed review (#7085, #7101).
-- **ORBOX (V, #6990).** D-2 = both microphones and speakers; D-3 dropped (the stream is the robotic device's telemetry display, not the patient); D-4 = itemised kit list for a vendor quote (delivered, T-ORBOX-5, #7051, buy nothing); D-5 = HOLD all ORBOX building. CLARITY: V dropped the 200 labels, T-CLARITY-3 cancelled (#7097). V skipped key rotation (#7097 to chronicle). A Jev connection fix is live (#7097, detail UNVERIFIED by me).
-- **FOUNDRY.** Box-agent bus posts intermittently returned `unknown_agent`; herdr-kit found a C-before-A root cause and landed a two-strike fix (c88dcdc, then 39eb7e0, PASS #7076); eta-refuter asks for a bounded retry for sender-side "caller identity could not be resolved" refusals (#7096). Until fixed: resend once after 60 s. `chronicle` is not a registered bus name (posts to it return unknown_agent); Fable relays. asus-ubuntu is authorised for patient data (order of record #6008).
-- **SHIP.** scribe bb62494 push is still timed for 20:30 IST 29 Sep (named GO stands); Fable asked scribe to check that minibot's token entry carries both "rooms" and "tools" first (#7095). The next production train (F3 3d49523 + F4-prod df61b3f) is 30 Sep after 20:30, only after tonight's push is verified.
-- **UNVERIFIED by me:** whether viewer 6f74d573 is deployed; the tailnet move details; Fable's "Jev connection fix live" item; the HF spend figure beyond the handover's estimate; ORBOX kit-list contents (only that it was delivered, #7051).
-
-## Changes since rev 24 (rev 24 was 28 Sep 23:23 IST, ~13 hours ago; bus #5616-5922)
-
-- **PALIMPSEST (new project, see 24).** Viewer code for the 7-lane REB engine timeline PASSed (refuter-2 #5640, f05c2afe) and rode along with the G3 blinded page (70bd066f), a `room_tape` time-offset fix (offset = window start; a segment starting past the window end is dropped, 9ae6c9cd) and the DRT page; latest main is **11a4cf19** (refuter-2 PASS #5897). The one-shot deploy script `DEPLOY-PALIMPSEST.sh` was re-pinned 3 times by refuter-2 review (a stale-default bug would have deployed the wrong code). Fable's order cites viewer `0b003f89`; that sha is not on origin/main and not on the bus, UNVERIFIED by me. reb corrected its own claim (#5691): 440/440 windows *cut* is not "done"; by track, 26 Sep whisper was 66/440 and 27 Sep 223/430 at 08:10, warden sweep 2 (#5857) had 126/440 and 272/430.
-- **DRTPQMA (new project, see 25).** linker's per-day files `~/eta-data/drtpqma/<date>/{encounters,drt}.json` (19-29 Sep, box); lab-mover's tape indexes (~300 s webm chunks, seekable); lab-viewer's `/drt/<date>` page (branch drt, refuter-2 PASS #5754/#5761/#5769/#5897, main 11a4cf19) with a whole-encounter scrub bar (3fb26235, #5846). R2 (`eta-lab-ratings`) holds drt 26 and 27 Sep, byte-identical to the local files (#5807); 19-25/28/29 Sep loads are blocked because lab-viewer's pane has no Cloudflare token (#5868, #5889 has the load loop). eta-refuter-3 spot check of 26 Sep (#5830): structure PASS.
-- **Doctor-room-time proofs.** Salanki (Uro, OPD5): voice-proven, 14/16 in-room found vs 0/15 wrong-room false positives (#5723). Poornima (Gen Sx): midday and Tue/Thu/Sat all-day = OPD6 confirmed by two methods (voice 14/21 vs 0/22 wrong-room, #5662); morning counselling-room slot NOT proven. Animesh (ENT, OPD3): supported (#5653; thin, 12 clips). Ankit: partial, not proven (slot spillover). Method rules now standard: word-boundary + drug stoplist + cross-encounter null.
-- **VOICEPRINT automatic minting.** diar-lab mined each doctor's recurring voice with no human and no known print, then checked it against the known print: **Manoj PASS 0.844** (#5721, checked by eta-refuter-3 and vj-refuter), **Salanki PASS 0.9266** (margin 0.621, #5790), **Animesh PASS 0.8316** (margin 0.619, #5882). Ankit (17 clips) and Poornima (17 clips) extraction still running. R3 + W51 room-days are excluded from every doctor's pool (14 room-days). linker built the rollout index: **65 doctors, 2,009 encounters, 569 with room audio, 1,364 room-unknown** (#5786); a 1-clip-per-encounter room rule was tested and failed (#5832), so room-unknown doctors need voice or a new room source. asus-kit v3 (97a4e0c8, PASS with conditions) is the offline mint kit for the new dev box.
-- **W51 v3 / v3.1.** lx wrote the pre-reg for auto-minted prints (c6311203); vj-refuter said NOT YET (1 blocker + 5 fixes, #5914); v3.1 at 8c1cf9be applied them, re-review pending. A Wed-OPD4 pre-reg was withdrawn before any run (it used an R3 day).
-- **TONE parked (#5794).** Control: room-noise pieces scored "sadness" 5/5, speech 3/4 (#5780/#5782). EMOTION-PARKED.md (3a05849a). The T-REB code (main 3d9c09dd) stays unused. Reopen only with human-labelled speech or another model.
-- **FUSER RUN 3 approved (cap USD 15) and started** on router-fix/lid 4f0d2cab, 222 DEV windows (#5866). Steps before it: RUN 2 cause found (mixed-format replies, #5638/#5647), new six-array reply format (ADDENDUM-7), V4 scope (ADDENDUM-6), a clause-content guard V7 (ADDENDUM-8/8a), a smoke test, and an in-memory v0 baseline (8dbc633b). G3 blinded page for V is on main, loader g3_seed.py PASSed; items are waiting on the item set. reb is ingesting the 24 CAP TEST consults (`build_cap_catalog`, d948c923, needs review). CAP-3 final: HELPED=FALSE (base 55, own 53, swap 52 of 169; report 6ef966ab, vj-refuter PASS #5842). PRIOR arm needs a pre-reg review first.
-- **SURGERY: tier batch pinned f5efddfb** (refuter-2 #5813). First real run: 1,484 real consults, 122 booked (#5824). Go-live needs one combined edit: the new nightly.sh (faaccdc4) plus adding the batch script to the pin list in the same edit (#5838, #5839).
-- **NOTESAFE / jev-fix.** F4 merged to eta-lab main f653d3aa; F4b merged, main e4686418 (#5833). F2 model pin PASS (jev-1.13.0). notesafe med-bench live run is blocked on keys (#5876). scribe: bb62494 pre-checks green, push held for **20:30 IST** (#5801); needs both "rooms" and "tools" in minibot's env entry (#5738).
-- **SPLIT / BACKFILL.** split's root cause for production diarization stopping (#5898): no 25-29 Sep window has a joined clip; transcription is off in all 18 rooms and only the drain joins clips. Production labels do reach 24 Sep (earlier "23 Sep" was a date-shift). Local-twin diar tracks for 26 Sep are on disk (19 ok). hist-bulk: 25 Sep tone 418/418 done; 225 duplicate records (218 windows) from a done-check bug, all kept as valid append-only records and listed in a DUPLICATES sidecar; driver branch hist-bulk/backfill-driver @ 54a248c2; STT for 25/24 Sep deferred while reb holds the GPU.
-- **FOUNDRY.** Bus tunnel v2 (self-reconnect + keepalive, `printf` on reconnect) PASS 6911658c (#5629) and the even-jev tunnel PASS c0ca24bb (#5722); herdr-watch.py failed first (B1 backoff bypass, #5630), fixed and PASS 9770d8ab (#5670); herdr-kit added asus-ubuntu as a known machine (980c093, PASS #5895); warden agent runs sweeps (#5824, #5857); chronicle agent built the Claude Doc mirror of this roadmap (#5840; not yet registered on the bus, #5858); agents on Sonnet/Opus 5.5 (e.g. lx on sonnet-5-5, #5688). Tailnet move and the fleet skill (herdr-fleet, herdr-watch.py) are from Fable's handover, details UNVERIFIED by me.
-
-## Changes since rev 23 (rev 23 was 20:45 IST, ~2h45m ago; bus #5593-5615+)
-
-- **BACKFILL — the FULL historical archive is now backfilling into REB, not just 26/27 Sep.** hist-bulk built `backfill_driver.sh`: for every day from 25 Sep back to 19 Aug (27 dates, ~4,892 windows), it cuts REB windows, runs real STT, and runs TONE scoring, one date at a time, newest first. It went through 3 real fix rounds with eta-refuter-3 (a wait-condition that only checked one of two workers; a "done" marker that could be written on an empty catalog; the nightly tone loop needing to pause cleanly and restart itself if killed; an orphan-claim cleanup for stuck locks) before passing. **Launched 23:20 IST**, starting with 25 Sep (391 windows to cut). Resume-safe throughout; a stop file lets anyone halt it cleanly.
-- **LABVIEW — a new /timeline layer built ahead of the data that will fill it.** V/Fable set this as tonight's top overnight priority (ahead of the FUSER/G3 review page, which is waiting on RUN 2's scoring anyway): render every REB engine's output as its own overlaid lane across a full room-day, so a clinician can open one day for one room and see every derived artifact lined up together. Built now, even though real room-day REB data barely exists yet — it'll light up automatically as the historical backfill above lands.
-
-## Changes since rev 22 (rev 22 was 19:35 IST, ~70 minutes ago; bus #5564-5592)
-
-- **REB — 27 Sep backfill DONE too: 430/430 windows, 0 failed.** Both 26 and 27 Sep (870 real windows total) are now cut and available, box-local. But the picture isn't fully clear yet: **split's S-REB hit a different, new wall** — production's own diarization (pyannote.ai speaker labels) stops at 23 Sep, so there is nothing to map into REB for 26/27 Sep specifically, separate from the "no windows at all" problem that's now fixed. **FUSER also flagged it needs REB ingest specifically for its 24 CAP TEST consults** before it can run its real scoring pass — holding on that, not yet blocked, just waiting.
-- **A new design thread opened: CENTROID-MINT** — generalising what W51/W52 learned about matching a doctor's voice into a repeatable way to mint new voice centroids for other doctors. Still in design (vj-refuter working through same-room/same-time guards — e.g. OPD 7 has two different doctors in the morning vs afternoon — and a minimum-sessions gate so centroids aren't minted from too little data); no centroid minted yet.
-- **RECORDER/SHIP — the MCP write-scope gap is now confirmed broader than self_test.** minibot reports it also blocks `end_day` (closing out a room's recording day) — not a self_test-specific problem, the same underlying default-deny fix SHIP already built needs to land before **any** room-write action works from minibot's pane.
-- Smaller: hf-fleet has 2 upload scripts staged and verified but not yet run (blocked on Fable actually running the upload); a room-name mapping lead for the [W49] tiered-linking design was found after an earlier "not found."
-
-## Changes since rev 21 (rev 21 was 18:40 IST, ~55 minutes ago; bus #5555-5563)
-
-- **REB — 26 Sep backfill COMPLETE: 440/440 real windows, 0 failures.** (The ~1,060 figure floated a revision ago was an overestimate, caught and self-corrected on the bus — 440 is every real STT window that day actually has, no silent skips.) 12 windows have tape-gap coverage under 50% and are flagged in the manifest, not hidden. Kept box-local only, per Fable, nothing mirrored to R2 yet. 27 Sep (~431 windows, not the earlier ~1,100 estimate) is cutting now, ETA ~80 minutes.
-- **FUSER B4 RUN 2 complete — a real, honest negative result.** The prompt fix meant to reduce how often the fuser falls back to "just use Whisper" instead made it worse: fallback rate rose from 53 to 81 windows (of 222), not down. **Fable froze the step-2 code anyway, at `ce91eb1`** — this was the pre-committed DEV re-run gate, decided before RUN 2's result was known, precisely so nobody re-tunes the prompt against what should be a held-out check. No further prompt changes without a new named GO.
-
-## Changes since rev 20 (rev 20 was 17:05 IST, ~95 minutes ago; bus #5547-5554)
-
-- **REB — the real backfill has STARTED.** hist-bulk: 27 Sep's regular daily transcription completed clean overnight (0 failed). Priority then shifted to cutting real 26 Sep room-day windows (~1,060) from the same local audio stores the live STT path uses, landing in REB's own layout — 26 Sep first, ETA ~1 hour, then 27 Sep (~1,100) right after. This is the exact thing every REB-dependent project (tone, split, acoustics) has been reporting as blocked on. acoustics has already built and tested its REB extractor offline so it can fire the moment real windows land. Not complete as of this revision — check for a DONE post next pass.
-- **A new room-mapping validation study started** (`[ROOMMAP-PROOF]`), testing whether "OPD room number = which doctor" can be trusted more broadly, using a different, unrelated doctor as a clean test case on the same tape/date pattern as Manoj's own W51/W52 work. First date's result is directional but the sample is too small alone; V approved a small GPU burst ($5 cap) for real speaker-consistency diarization on 37 clips to firm it up.
-- **W51 (Manoj voice study)** is holding, correctly: vj-refuter clarified exactly which room-days count as genuinely "never scanned" (10 remain, both lx and vj-refuter's counts agree) but no compute starts until Fable makes a re-scoping call and a v3 prereg actually passes review — not yet.
-
-## Changes since rev 19 (rev 19 was 16:35 IST, 30 minutes ago; bus #5543-5546)
-
-- **W52 MANOJ PACKAGE — CLOSED for today, on time.** cut4 was pulled to V's Air (shasum verified, 54/54 transcripts with text) and Fable declared it **the 17:00 full cut**. reb, lx and the rest of the team stood down; W52 is done unless a later rescan promotes more of the 103 still-unresolved visits (52 not yet scanned, 51 with no tape), in which case a smaller `cut5` would follow as its own update, not tonight's job. The team's own closing note is worth keeping on record: every real bug caught along the way — the room-day-aggregate confidence bug, the file-tier move bug, the STT-path bug, the never-completed misclassification — actually mattered to what shipped.
-
-## Changes since rev 18 (rev 18 was 16:05 IST, 30 minutes ago; bus #5486-5542)
-
-- **W52 MANOJ PACKAGE — cut4: shipped clips nearly double, 28 -> 52 FOUND.** lx re-scanned 7 more room-days on hf-fleet's cloud GPUs and found 24 more of his real consultations (hf-fleet independently confirmed one "silent" room-day is genuinely silent — checked all 59 audio chunks in it — not a scan miss). Two more real bugs found and fixed while building this cut: `apply_fable_ruling.py` wasn't physically moving files between tiers when a clip's status changed (only ever moved things *out* of the shipped folder, never in); and `build_transcripts.py` was pointed at a package path that was never populated with real speech-to-text output — the root cause of cut2's silent "transcribed but no text" bug from two revisions ago. Both fixed, root causes documented in the code itself. A same-day scope question was resolved: 27 Sep has other doctors' visits overlapping his OPD 7 time slots, so the package's README now says so plainly rather than implying the room was his alone that day (voice evidence for him still stands independently). **cut4 frozen (526 files, `c0892fde…`), verified clean by BOTH checkers independently (eta-refuter-3 and vj-refuter, 47/47), STT confirmed complete on all 54 shipped clips.** One repair attempt (`iozbnatE`/`1619_139`, a forced-2-speaker split) failed its own safety guard and was correctly left on the safer fallback label rather than forced through.
-- **A clinician-PIN security question was raised and resolved as a non-issue.** eta-refuter flagged that database/Metabase readers could see every clinician's PIN in plaintext even though the app itself gates it; a follow-up check found the lab's own Metabase access has no clinician table reachable at all, so nothing here is actually exposed to lab agents. Recorded for the record, no fix needed.
-- **[W49/W46] tiered-confidence consult linking — build increment 1 (`link_tiers.py`) underway**, alongside a related scoping request (checking raw audio signal, not just whether a chunk file exists, before calling a room "silent").
-- **SURGERY — surg-link's nightly nightly-job-days cron installed and confirmed**, after 2 real review rounds (a date-anchoring bug, a hash-gate that covered only 2 of ~7 executed files — closed).
-
-## Changes since rev 17 (rev 17 was 15:35 IST, 30 minutes ago; bus #5453-5485)
-
-- **W52 MANOJ PACKAGE — cut3 shipped, fixing a real transcription bug.** vj-refuter's closer read of cut2 found that 2 of the 30 "transcribed" clips actually had **zero STT text** — they said "done" but weren't. reb root-caused and fixed the regression, then swept in more real diarization (25/30, then 26/30, replacing scan-fallback speaker labels with the real thing one clip at a time — each swap checked against the scan by vj-refuter, 23/24 agree, one merged-cluster case correctly kept on the safer scan label). **cut3 frozen** (388 files, `dee6723c…`), **vj-refuter VERIFIED 43/43**, **Fable pulled it to V's Air** — shasum verified, **all 30 transcripts confirmed to have real text this time.** One clip (`iozbnatE`) has a forced-2-speaker repair sitting behind 4 explicit acceptance guards, deliberately not auto-applied until vj-refuter signs it off by hand. A `cut4` is planned ~16:55 only if something real lands (more confirmed clips, or that one repair clearing review) — otherwise cut3 stands as the answer.
-- **New cross-cutting design signed off: tiered-confidence consult linking + automatic voice-centroid bootstrap** (tagged [W49/W46] — feeds LABVIEW's Room Timeline and SURGERY's pitch-linking, and will become the shared way every project links a room recording to its real PQM visit). Design went through 3 revisions with a real restore caught late (v3 accidentally dropped a paragraph saying which consumers may use which confidence tier) before full sign-off. **Build now starting**, first increment: base PQM-span linking (every consult, including non-completed ones, kept as its own honest "not a consult" category) plus the two lowest confidence tiers (a schedule-based prior, and "is there even tape for this room in this span"), across 22-28 Sep, every doctor and room — no result yet.
-- **hf-fleet's bus connection was down since ~00:30** (posts went through manual relay, not silence) — reconnected ~15:55, full status caught up.
-
-## Changes since rev 16 (rev 16 was 15:10 IST, 25 minutes ago; bus #5423-5452)
-
-- **W52 MANOJ PACKAGE — first cut DELIVERED and independently VERIFIED twice.** A real classification bug was caught in cut1: 5 never-completed appointments (no-show/cancelled/in-progress) were mislabelled as "voice absent" (NOT-IN-OPD4-7) rather than simply not-yet-scanned — fixed, and the package's README counts are now computed straight from the data at build time rather than hand-typed, so V can reproduce them from the csv alone. **cut2 frozen** (`4598155f…`, 381 files), **vj-refuter VERIFIED 36/36** including the corrected README counts, and **Fable pulled it to V's Air at 14:52** (shasum check rc 0); cut1 renamed aside on the box. Breakdown of all 176 visits: 30 have audio (28 found + 2 weak), 10 confidently absent, 80 not yet scanned, 51 have no tape at all, 5 never completed. The live package stays open for the 17:00 full cut.
-- **REB — a fourth independent team confirms the same real-data gap.** acoustics' A-REB hit the identical wall S-REB and T-REB already reported: 0 real 26/27 Sep windows in REB yet, only the synthetic test suite. Four separate builds now agree on the one real blocker.
-- **NOTESAFE — F4-prod PASSed and pinned.** One advisory finding (an env-var test that wasn't actually exercising the code it claimed to) was fixed and re-verified with a mutation test that kills the bug if it comes back. tone's T-REB emotion layer (rev 16) is now merged to main (`06cc655f`).
-- **PRESCRIBE / CAP-3 — build review continuing, no run yet.** A run was held mid-flight when cap changed code that had already been reviewed and accepted — correctly caught before anything ran on real data. A separate glossary "data loss" turned out to be a harmless duplicate-line artifact, not real loss. OWN+SWAP runs are now cleared to start (hints independently verified byte-identical to what was registered).
-
-## Changes since rev 15 (rev 15 was 13:20 IST, 78 minutes ago; bus #5323-5422)
-
-- **W52 MANOJ PACKAGE — first cut FROZEN, independently VERIFIED (26/26 checks), ready for Fable to pull.** Getting there required real, caught-and-fixed correctness work: vj-refuter found lx's "no evidence" rows for 8/14 other-room spans actually meant *unscanned*, not *absent* (#5323); a tape-gap rule was relaxed after confirming small 5-second chunk-rotation gaps are routine, not real gaps (#5324); the confidence tally was corrected to FOUND 28 / WEAK 2 / NOT-IN-OPD4-7 47 / NOT-SCANNED 94 as stale tiers were cleaned up (#5325/#5326). **A real privacy/scope problem was caught before shipping:** eta-refuter-3 flagged that of the 46 "NOT-IN-OPD4-7" clips, many likely contain a *different doctor's real consultation with a different real patient* — outside the package's stated scope. Resolution (vj-refuter + reb, #5330/#5331): **11 "confident absent" clips pulled from the package entirely**; 33 "thin audio" clips held as **NOT-SCANNED** rather than guessed at. diar-lab confirmed zero live writers before the freeze; reb froze `manoj-package-cut1` (381 files, SHA256SUMS `e8ffafb7…`) at 15:00; vj-refuter's independent checker (26/26) confirms it's clean and stable. The live package stays open for the 17:00 full cut; a GPU embedding job for the 17 still-unscanned room-days was handed to hf-fleet (#5387).
-- **PRESCRIBE / CAP-2 — CLOSED with a clean null result: hint/glossary vocabulary did NOT help.** Final scored: captured/169 base1 55, base2 53, real 53, placebo 52 (net real-vs-placebo only +1 item, +1 drug — far below the pre-registered bar of 9 items/3 drugs). Report went through 5 real wording-correction rounds with vj-refuter (a description of what the "SECONDARY" vocabulary list actually was got the trigger clause backwards twice) before PASSing (`03b8777a`). **Fable ruled: do not run the parked SECONDARY arm** — a clean null needs no further explaining. **New order same day: W53 CAP-3** — use the patient's own prescription, written *after* the visit, to clean up the transcript in a post-consult step (never live); arms OWN (real own-Rx hint) vs SWAP (placebo, another patient's Rx) vs a deferred PRIOR arm; pre-registration went through 2 real fix rounds (an items-vs-terms unit bug, an own-Rx exclusion rule, a hardcoded-path bug) before PASSing; code build is in review, no real run yet.
-- **REB — two more consumers confirm the same wall: no real clinic-day data yet.** split's S-REB (map production's pyannote.ai diarization into REB) and tone's T-REB (the emotion layer) both built cleanly and both independently confirmed **0 real room-day windows exist in REB for 26 or 27 Sep** — only the synthetic DEV/clinical1 test suite is there. Both stood down cleanly rather than force anything. tone's build also caught and fixed one real clock bug (a window-relative vs absolute-epoch timestamp mismatch in the no-diarization fallback path, eta-refuter #5410/#5417).
-- **NOTESAFE / Jev fixes progressing:** F2 (pin the Jev model version so the log always shows the real model used) merged to main `30ae7561`, PASSed with mutation testing. F3 (route a legacy call path through the same logging) is PASSed and ready to merge, held for the next production train. F4-prod (one shared thresholds file, production side) rebased cleanly onto production `4d7d8e0`, values unchanged, under review.
-- **FOUNDRY — a secret-exposure flag was routed correctly.** tone reported that part of an R2 read key (`r2_audio_read`) was printed to tool output during earlier housekeeping. Every agent that touched this refused to open the secrets file and routed it to Fable/V instead, per standing rule ("agents never create or rotate credentials") — correct behaviour, now a task on your list below. Separately, a bus-delivery gap: the `cap` pane was found not live on the roster partway through the afternoon, so several relayed messages queued instead of delivering; flagged by minibot, not yet confirmed resolved.
-
-## Changes since rev 14
-
-Rev 14 was 27 Sep ~10:45 IST (78e461e4). This revision covers a full day of work: the CLARITY router fix was tested and REJECTED; the whole CLARITY effort re-based onto a new multi-engine architecture (REB) with a scoring layer (FUSER/G3) on top; a clinical-STT bake-off (W50) and two brand-new, V-ordered, high-priority projects landed (W51/W52, Dr Manoj Kumar S's voice and encounter package); production shipped twice; RECORDER's signature bug was closed; ACOUSTICS and FREESCRIPT both finished their first phase; SURGERY, TONE and NOTESAFE all moved. Roadmap is now **23 projects** (added REB, FUSER, W50 BAKEOFF, W52 MANOJ PACKAGE, W51 MANOJ VOICE STUDY).
-
-- **CLARITY — router fix M1-M5 REJECTED; root cause settled; effort moves to REB.** router-fix's pre-registered S1 re-run (ADDENDUM-3, pinned f972df6, witnessed #4584) reproduced **WORSE**: ALL-language hit rate 80.95%→73.13% (CI [-10.9,-5.0]), ml -25.4pt, hi-en -18.3pt — Fable ruled 12:50 the fix does not ship. M6 (wrong-Indic-language routing) was first blamed for 25-36% of the loss, then that measurement was found to rest on an unreliable field (segment-count tiebreak, not the router's real field, #4586/#4592/#4613); the corrected, FINAL reading (S1-REPORT.md) is: SraVaani itself mis-identifies Hindi as Tamil script under babble noise (≥12/64, a defect M6 structurally cannot fix) and correctly-routed content loss (~52/64, mechanism still provisional) is the larger factor. An ETR (English Token Recovery, numbers/units/day-counts) side-experiment passed its real-audio decoy sweep 0/100,000 false anchors but with near-zero recall — folded into FUSER v0 instead of shipping alone. **V approved (13:30) the REB — Room Evidence Bundle: run every engine independently, store every output, fuse downstream** — see project 19.
-- **REB (NEW, W47) built end-to-end.** Spec `REB-SPEC-v1.md`. Sizing done (whisper 52-100x realtime, SraVaani 5.3x CPU-heaviest, pyannote-diar 14x; HF L4 IndicConformer+SraVaani validated at **18.7x realtime, $0.043/tape-hour** on real clinic audio). Library (schema+writer+validator+reb.py) built, hardened through 3 real-bug FAIL→PASS rounds (orphaned tracks on failed first write, R2-mirror rollback ordering, tracks() silently dropping failed-only engines), merged main **1ee3b4a4**. Fan-out runner (claim-once, lease+fencing) built and merged. **DEV ingest (222 windows: 192 clinical1 synthetic + 30 real DEV30 clips) COMPLETE: 222/222, 0 crashed, 1,998 stt tracks, 1,857 ok / 141 empty / 0 failed**, triple-verified. Full-day 26/27 Sep backfill (~260 tape-hours/day) not yet run at scale.
-- **FUSER v1 / G3 (NEW) built, first scoring run done.** Design (lid-debug) + build (router-fix) witnessed through 4 addenda; B1 (pre-pass: tokens/agreement/LID/drug-matcher) and B2/B3 (schema/prompt/validator) complete and PASSed, closing two real safety holes (yes/no affirmations wrongly allow-listed; uncitable context tokens not rejected). **B4 RUN 1 complete: 222/222 windows, $6.85, 0 errors** — pass 39 (17.6%) / repair 130 (58.6%) / fallback 53 (23.9%); DEV30 stratum 30/30 pass. RUN 2 (prompt fix ce91eb1) **halted at cost cap**: 17/222 done, $0.757 spent, projected total $11.10 > $10 cap, driven by one outlier reply that hit the model's token ceiling — holding for Fable's call. **V ruled (28 Sep 06:27) he is the G3 rater** himself; lid-debug writes a dated addendum, then a blinded review page for lab-viewer, after the fuser freeze.
-- **W50 clinical-engine bake-off (NEW, medasr / whisper-med-merged / parakeet-med).** parakeet-med **withdrawn** (deterministic truncation at smoke, 4-iteration debug cap spent, ADDENDUM-18). medasr + whisper-med-merged passed smoke on real HF Jobs. **Set (b) (192 clinical1 windows) SCORED: 384/384 tracks committed, 0 rejected**, independently verified. Set (c) (87 real consults / 102 drug items, capped at 60-min spans) built end-to-end (manifest resolution, decoder, upload guards) through a long pre-registration chain (17 addenda, both refuters witnessing every step) — the chain is now **closed**; scoring is running (3/87 windows done as of the last read). Truth set = 22-24 Sep CAP-linked consults (kept separate from the fuser's own 24-consult TEST set). MedASR terms are lab-evaluation only; production use needs Even's legal review if it wins.
-- **W52 MANOJ PACKAGE (NEW, V priority, 28 Sep).** V minted a voice centroid for Dr Manoj Kumar S (ortho); asked for every OPD 4/7 encounter of his, across all recorded days, as audio + his-speech clips + transcripts + Pulse prescriptions, in one folder. **linker: 176 PQM consults (19 Aug-27 Sep), 174 linked to Rx, 367 Rx line items; encounter cut DONE — 89 final clips + 28 his-speech compilations** (176 rows: 89 ok, 30 no tape in span, 50 no tape inventory, 2 tape-gap artifact, 5 skipped). **lx: voice scan 22/39 OPD4+OPD7 room-days done — 28 FOUND, 2 WEAK, 47 no-evidence**, cross-verified exact-match by vj-refuter. **[URGENT BLOCKER, #5320]**: diarization is running at ~0.37x realtime on 4 CPU workers (14.06h of audio, only 1.5% done at last read) — will NOT hit the 16:30-17:00 full-package deadline without a GPU escalation (hf-fleet L4, within the already-approved $40 cap) or reordering FOUND/WEAK clips first. First cut still due ~15:00. Two real bugs found and fixed along the way (a stale summary key that mislogged every clip as FAIL; a 4-way "parallel" run with no real sharding, all 4 workers doing the same clips in lockstep) — both VERIFIED. vj-refuter's spot-check judged the 0.65 attribution bar miscalibrated and recommends treating unscanned room-days as **NOT SCANNED**, never "not him", until the GPU scan lands.
-- **W51 MANOJ VOICE STUDY (NEW, formal).** Prereg v2 **FAILED** review (#5319): it was overtaken by W52's own stored voice-print and scan data (no longer blind test data), its ±180s pad conflicts with Fable's ±30s attribution ruling, and it has no placebo arm. lx acknowledges and defers a v3 prereg until after W52 ships (V's stated priority today).
-- **SHIP — production shipped twice; a deploy lesson learned and documented.** Post-D4 train **4d7d8e0 live 21:48** (fast-forward ed869d2→4d7d8e0, health confirmed within ~11 min). **Lesson (now standing rule, Fable): any push to `vinay/s1-auto-drain` IS a production deploy** — migration 0119 was found already running live from 07:17 without it; Fable applied 0119 (21:14) and 0121 (21:22) and redeployed fresh (dpl_3s2o) before the next push. A self-test-server MCP room-scope fix (default-deny at the call boundary, closing a real session_id bypass eta-refuter reproduced) is merged onto the post-D4 branch, full gate green — **not yet pushed, waiting on Fable's GO**.
-- **RECORDER — signature_mismatch bug root-caused and CLOSED.** Every failure traced to app build 0.1.8 (pre-0.1.18 anchor-trust fix); the "27 Sep" OPD1/OPD4 mismatches were stale 17-Sep launchd log text, not new failures — confirmed by source read + DB + an offline repro on the Air. W37 closed; a small 0.1.26 fix spec was written (save codesign stderr, ISO-UTC log lines) for later. Home Office's self_test is parked: minibot's MCP token lacks write scope (same underlying gap SHIP just fixed for room commands generally); scribe is designing the least-privilege fix.
-- **ACOUSTICS — W39 finished.** A1 (VAD-blind check): OPD 1 misses 9.4% of real speech (mild), **Third Floor misses 23.7% (material)**. A VAD-threshold sweep (0.5/0.35/0.2) was pre-registered and **found no win** — neither alternative beats the current 0.5 setting without leaking more non-speech; Third Floor needs a physical remediation (mic placement/swap), not a software tune. A2 (acoustic-vs-transcript-quality correlation) initially reported backwards and was corrected by eta-refuter-2: empty transcripts correlate with **quieter**, not noisier, windows (nobody talking, not VAD starvation). Final report done, sha 3aceec (both refuters).
-- **FREESCRIPT — W38 closed.** V ruled (27 Sep): no doctor-paste, no Pulse code change — ETA instead produces a versioned structured JSON artifact (`eta.freescript.v0.1`) that Pulse's own team integrates. Schema + docs (`README-FOR-PULSE.md`) + 3 example artifacts + an offline prototype (5 real linked CAP consults, scored for recall/precision/safety) all built, PASSed after fixing 3 real stopped-drug/order-guard holes. Handed off to Pulse/V; this ETA-side phase is done.
-- **SURGERY — widened + real data flowing.** W46 (surg-link): scope now covers interventional procedures generally (injections, endoscopy, cath/angio, biopsies), not just surgery; a `pitch25` real-case review set (de-identified, 15 cases) is live on lab-viewer with inline provenance; interim conversion 21-53% by doctor/procedure (25-26 Sep CAP batch: 19 pitched, 3 booked, 1 referred, 15 not booked).
-- **NOTESAFE — Jev audit done; ZDR ruling withdraws de-id work.** W36 audit: 43 Jev call sites, 17 PASS/23 GAP/2 UNVERIFIED/1 REFUTED, two real HIGH findings (surgery study sent pre-de-id text to Jev/OpenRouter; prod logged raw error text that could echo PHI). **V ruled (27 Sep 12:55): Jev (TypeSafe) and OpenRouter/Gemini are ZDR for Even — no de-identification is needed before sending to them.** This withdrew jev-fix F1 and F5 (the de-id fixes) after F1 was already built; F2 (pin the Jev model version), F3 (route legacy calls through logging) and F4 (one constants module) shipped.
-- **TONE — W45 weak first results, a real design gap found.** wavlm scored 0/12 on anxious/angry/sad in every language tested; a Gemini arm improved angry (0→6/12) but broke neutral (→0/12) — per-language rankings flip between engines, an engine artifact, not a language fact. Pilot moved to 24 Sep (26 Sep had zero transcribed/diarized windows at pilot time) and found `room_turn_speaker.role` is **never** set to "patient", only "clinician" or null — the sentiment design is being corrected for this before it goes further.
-- **ENCOUNTER — W44 Jev encounter-loop built.** lx's harness (keyword/state-machine + Jev per-chunk classification of consult phase) passed its offline selftest (27/27) with conditions; superseded as a *page* by /timeline (W49) but the detection loop itself continues independently and feeds it.
-- **LABVIEW — /timeline shipped in 3 phases.** P1 (tape coverage, PQM truth, fleet alerts) **LIVE 78921667**; P2 (audio playback inside the existing Access-gated proxy, a Prescription/Sound/Technical inspector, an append-only view log) **LIVE cc416d93**; P3 (REB per-engine layers in the inspector) **LIVE 82936ec9** after 2 real bugs fixed (wrong track-selection key, segment-clock handling). `pitch25` (surgery review set) also shipped, 15/15 rows loaded. Several "X of Y" labels were caught overclaiming completeness and fixed.
-- **BACKFILL — PARITY-389 final verdict: NO MATCH, scope not met; nightly PQM automation now live.** The retried HF-vs-Mini compare (fixed for 2 real bugs: a refused-key false-absence and a SraVaani-mode confound) still came back NO MATCH — the HF capture used `SRAVAANI_MODE=local` instead of the Mini's real instance, so SraVaani-routed windows are not comparable; **Fable ruled (17:25) SraVaani out of scope, no further capture spend**; a tailnet ACL gap (HF cannot reach the Yoga SraVaani instance) is the underlying blocker if this is ever revisited. Whisper-path divergence (content differs 1.4-21.2%, median ~9%, across windows) is a real, documented finding, not decode noise. Separately, hist-bulk confirmed live daily transcription on schedule (lag ~30-50 min, box T4 added as a second worker) and a nightly PQM-linking crontab (23:45 IST) is now live and self-healing.
-- **FOUNDRY — HF GPU strategy settled; bus and mirror reliability fixed; Mini disk plan written.** HF compute = **HF Jobs (`l4x1`), not always-on Spaces** (Spaces hit a known mount bug on this image); up to 5 concurrent L4 jobs approved. A real bus-latency bug (3 serial remote calls per post) was found and fixed (parallelized, ~1.5x faster). The nightly backup-mirror script went through a real multi-bug hardening cycle (a patient-audio-path log leak, a return-code leak across days, a wrong process-kill scope, wrong midnight math) — fixed and running (rc=0, 0 failures on the last real run). Mini disk-hygiene plan (W42) is written (which stale dev trees are safe to move to the external SSDs) and scheduled to execute tonight after 20:30 + D4 healthy.
-
----
-
-Rev 14 (vs rev 13; 27 Sep morning — Sunday wave; roadmap now 18 projects):
-- **NEW PROJECT 17 FREESCRIPT** and **NEW PROJECT 18 ACOUSTICS** (added below; see their sections).
-- **CLARITY — root cause found + fix built + automated scorecard ruled.** lid-debug found the router has no acoustic language ID: ~35% of English-tagged real windows are Indic speech (21/60 on label200, 95% CI 23-48%), from six mechanisms M1-M6 in router_server.py 400710ee (forced-English Whisper, a length-ratio override, an Indic-head short-circuit, non-deterministic temperature fallback, a re-decode that emits different text than was judged, and "longest text wins" for which Indic language) — full mechanism table on the bus #4108. router-fix built router-fix/lid removing M1-M5, pre-registered its offline eval (#4127/#4128), and is running S1/S2/S3 now; nothing ships to the Mini until Fable rules, earliest after 20:30 tonight. **V ruled (W33, 08:05 IST): no human listening today — every CLARITY change is judged by three pre-registered automatic scores** (S1 synthetic truth: WER/CER/hit-rate on SELFTEST dialogues with known text; S2 clinical truth: CAP capture score on real consults against Pulse, scorer efcc9c9 unchanged; S3 language truth: share of windows on the wrong language path, judged by Gemini 3.8 Flash via the ZDR route, itself proven on known-language audio first). **Win rule: a change ships only if S2 improves and S1/S3 do not get worse.** V's own labels become a later spot-check, not a gate. diar-lab built the S1 clinical suite (clinical1, 192 stimuli, PASS ef19d6a2) plus two confirmation suites for the S3 judge (confirm2 224 stimuli PASS ec965b16, confirm3 + confirm3diag PASS cc9b2822/7397c881) after two judge wordings (84.9%, then 91.7%) failed the ≥95%/≥90% usability gate on babble noise; linker built lang_judge.py and is running the frozen v3 judge on confirm3 now (one run, not yet read). lab-viewer built /clarity (LIVE 162ff4b8, then a SCORECARD panel LIVE fa5e58bb) showing S1/S2/S3 old vs new per language; clip data for 201 objects is loaded but the live scorecard load is blocked by lab-viewer's own pane classifier.
-- **PRESCRIBE — CAP-2 Step 0 done, real/placebo running.** Pre-registration v4 frozen (sha256 cc0484c77c8f319d, #4009/#4010), vj-refuter confirmed the rebuild byte-identical. Step 0 (whisper baselines, both arms) done; ceiling checks Nflip 2 / A 9 / B 3 / LOSTMAX 2, all vj-refuter VERIFIED (#4154). GLOSS GO real+placebo launched on c3 (#4155); cap continuing. CAP-2 also gained a router arm (W33.3): score old vs new router on the same 24 consults with the frozen scorer.
-- **SHIP — D4 candidate3 cac6c29 gated PASS, then POSTPONED to 21:00 tonight.** eta-refuter PASS on cac6c29 at 06:30 (#4083); scribe pushed it as a Vercel preview (fast-forward, not promoted, #4113) but could not promote (no Vercel access) and the env preconditions (SCRIBE_MCP_TOKENS_EXTRA, WHISPER_BULK_URLS) were unverifiable before the 07:45 hard stop, so Fable postponed the whole deploy to 21:00 tonight (#4120); production stays 1e75667, migration 0119 NOT applied. Home Office pre-check ran read-only 07:45 and PASSed (flags clear, both switches off, #4145).
-- **RECORDER 0.1.25 — PASS at 1da7232**, Swift gate green on the Air (637 tests, 2 pre-existing load-sensitive flakes also present on the 0.1.24 baseline, #4276). Fable's GO: a signed test build for Home Office only (auto-start left on), minibot installs it, then the first self_test runs there. A separate server-side self_test command (self-test-server d82ef4c) is built but not yet pushable — eta-refuter's #4281 FAIL (the MCP tool group has no self_test variant) still stands, so sending a live self_test needs that fix plus a re-gate first.
-- **SELFTEST — room self-test scorer PASS (adc6681df3c1)**; reads the app's real 16 kHz raw tape.pcm + manifest with a tone-corrected alignment (three FAIL rounds fixed: RT60 reliability, sweep-path gain, a 0.5 s manifest-offset bug that silently dropped measured SNR from 46 to 21 dB). Stimulus pack selftest-room-v2 ready and accepted by scribe's app loader. First digital report (13/13 stimuli through the box-twin router) ran: kn v3 correct, te/ta/code-mixed missed — the te miss is on the STT side, not the audio (#4004/#4005), which is what fed lid-debug's CLARITY root-cause work above.
-- **ROOMS — room readiness 07:45-07:58**: 7 rooms + Home Office ready and kiosk-listening; ORB3 recording since 06:00; Cardiology and Dietary offline (Dietary expected, off by V); **OPD 4 still flags DEVICE_MISSING** at 07:58 despite reporting the C270 by name (needs a physical look before rooms open). fleet's single read-only `report_diag` to OPD 4 (W34.3) was refused by fleet's own pane classifier as a remote write — needs V/Fable to add a permission rule, or to run the one named command and hand fleet the reply.
-- **BACKFILL — PARITY-389 compare NOT COMPUTABLE yet.** The Mini side is complete (48/48 captures); the HF side had no capture, so fleet's compare script (hardened twice for real integrity bugs eta-refuter-2 found: audio identity not checked against the ship manifest, and a golden/manifest pin) correctly returns NOT COMPUTABLE, not a false MATCH. Fable then launched the real HF job (a10g-large, cap $6, expected ~$2.3, #4234); fleet watches it and runs the compare once it lands.
-- **FREESCRIPT (new, W35): study delivered.** /home/eta/oc/freescript/FREESCRIPT-STUDY.md (371 lines, sha256 b02072fb…) plus a bug note and a CAP→Pulse mapping and a first bridge design — see project 17.
-- **ACOUSTICS (new, W34.2): per-room profiles from existing tape, in progress**, due ~14:00 — see project 18.
-
-Rev 13 (vs rev 12; Fable pushed rev 12 as 6f495d77):
-- LABVIEW: rating hub /rate LIVE (main 974b347a, eta-refuter-2 PASS #3910/#3911); lists what the viewer serves today (label200, rate20, ba106, calib30). Speaker-count, Doctor Voice Check and surgery v4 are not viewer sets, so the hub cannot list them yet (lab-viewer's question, #3909). CAP-1 items beside consults: blocked until cap's scored_items path arrived (#3925, c3 host); lab-viewer must get the file across.
-- SELFTEST: diag-rig on main 8ae0e169 (byte-identical to the PASSed b542d96c, #3918); ElevenLabs change PASS and merged as main 5ba0ca1e; FIRST ElevenLabs voices synthesised: 8 stimuli, 1,068 of the 60,000-character cap (#3920/#3921). Google credential check was blocked by the pane classifier; ElevenLabs path used instead.
-- NOTESAFE: provider-text error fix PASS — branch notesafe/provider-text 6448ab1 (on the D4 train 5907cbc; two required fixes closed, eta-refuter #3916/#3922). It ships in the release AFTER D4, never inside D4. Bench design (b) posted (#3912).
-- PRESCRIBE: Pulse prescription extract built: 200,098 lines, sha256 cd012fae..., 91 days 26 Jun-24 Sep, 25+26 Sep excluded, 121 doctors, 30 specialties (linker #3914, independently verified by eta-refuter-2 #3915). Script 08cd6a18 PASS #3908. cap pulls it via the read-only jail once Fable OKs the dir/file permissions (#3905/#3926); cap will post the pre-registration sha before any hinted run (#3927).
-- ROOMS: Dietary is NOT faulty — the Mac was switched off by V (minibot #3895: last heartbeat 17:25 IST today, session closed normally). D-8 part (b) closes. PARITY-389 gate NOT MET at 21:40: 7 rooms still recording (ORB3 records to 02:00); the six hashes match 6/6; fleet polls to 22:15 (#3924).
-- SPLIT: 337e needed no new build — all 1,342 T4 windows were already labelled (231 speaker docs in the vault); phase-2 plan posted as 17083856 (#3896).
-- CLARITY: stt-bench blocked at step 1 — label200 files are unreadable from its pane (EACCES on ~/eta-data-ro, #3899). Needs Fable or V for read access or a copy.
-
-Rev 12 (vs rev 11):
-- **WAVE 27 (W27, ~20:10 IST): agents now run on Claude Code on V's personal Max ("Pool C"); OpenCode pools A/B are small top-ups only.** Panes report "back on CC-personal": lab-mover, fleet, eta-refuter, eta-refuter-2, vj-refuter, cap, scribe, lab-viewer, diar-lab, minibot. New CC panes: linker (W27.2), split (W27.6), notesafe (W27.7), stt-bench (W27.3), roadmap (W27.9). PHI is allowed in these panes; free models stay NO-PHI (#3837-#3853, #3876-#3886; order file W27).
-- PRESCRIBE: CAP-1 FINAL report 957f93c4 (#3855). Ceiling on 60 drawn ABSENT items: said-on-audio 6/60 = 10.0% (95% CI ~3.8-20.5%); decoys 1/60 = 1.7%; McNemar p=0.125, not significant. Reading: ~90% of drawn ABSENT items are also absent on raw audio, so most look truly unspoken; 10% is a LOWER bound on said-but-missed (no positive control). Headline unchanged: 50/169 captured (29.6%), drug 9.4%. Draw gate PASS (#3843), score check PASS (#3849). CAP-2 vocabularies opened (W27.1/W27.2): linker extracts Pulse prescription history since 26 Jun (excluding 25+26 Sep) for cap; vocab 28 Sep, before/after 29 Sep.
-- LABVIEW: /roadmap page LIVE (version 0ea4917a, main 79fd7af9; unauthenticated request gets the Access login redirect, #3860). Speaker chips LIVE (Fable's deploy e07cff51, main 207821ba; refuter-2 FAIL #3865 then PASS 5213ea3e #3872). Next: CAP-1 items beside each consult, one rating hub page (W27.4).
-- SELFTEST: diag-rig (kit/diag-rig, digital path only) PASS at b542d96c (#3877) after an initial FAIL (4 blocking, #3861) and three fix rounds; 23 tests; nothing has run on the Mini. Next: merge to main, first Google-TTS voice set, first digital report Mon 28 Sep, first nightly Wed 30 Sep 23:30 (W27.5).
-- RECORDER: 0.1.25 plan pushed (a5009c4, later d7949f5); scribe retracted the "DEVICE_MISSING can never fire" finding (#3862; it does fire, so no code needed). Room-schedule code 93a1f17 built, NOT yet checked (#3879).
-- SHIP: D4 runbook 4a2650c. New timings: D4 deploy + smoke end 07:45; Home Office pre-check + SELFTEST 07:45-08:15; nothing on the Mini queue after 08:15. Risk: PARITY's hard stop (07:25-07:30) leaves D4 only ~15-20 min (#3879).
-- ROOMS: 7-day schedule adopted. Clinic 08:30-20:30 every day; fleet-watch config changed, code default still Mon-Sat (needs branch + PASS); ORB3 06:00-02:00 not modelled (#3868). OPD 4 still has no mic listed (physical, #3862). Dietary silent since 24 Sep 17:39 -> minibot diagnosing (W27.8).
-- FOUNDRY: 9 PHI panes moved to Pool B Go, zero sessions on Zen (464, #3832); non-Go fallback sweep clean, 18 configs + 3 scripts repointed (466, #3836); T4 vLLM + Mini llama.cpp LIVE (460 report #3824, agent-side gate blocked on config weight); 455.A waste-guards integrated 7adb16a3 PASS (#3830).
-- BACKFILL: c13 and gpu-5 final drain gate-1 PASS (#3859); eta-lab-l4 not swept (GPU stockout, still stopped, nothing billing). PARITY-389 launch readiness re-issued, 6/6 hashes MATCH (#3795).
-- SPLIT: T4 337e run done (1,342 windows); label building moves from diar-lab to the new `split` pane (W27.6).
-- VOICEPRINT: vj-refuter ruling recorded — arm 4 waits for V's gcloud shim (no fallback scoring); item 137 venue approved (#3845).
-
-Rev 11 (vs rev 10):
-- PRESCRIBE: CAP-1 SCORE COMPLETE — 169 scored items / 24 linked consults: CAPTURED 29.6%, ABSENT 55.6%, LOST-IN-TRANSLATION 0; weak class = drug 9.4% (3/32). Scorer efcc9c9 byte-identical on reruns, thresholds frozen. Ceiling chain running: ABSENT sha d5dbd361 → linker commit → draw 15 → refuter-2 gate → V. Report file 20:00 (#3783/#3784).
-- LABVIEW: /roadmap page BUILT + PASS (ede99072) — renders docs/ROADMAP.md + DECISIONS.md; escape-first renderer, behind verifyAccess; holding for Fable's deploy word (#3776/#3781).
-- FOUNDRY: FABLE 460 GO — local-model rollout (T4 vLLM Qwen2.5-7B-AWQ + Mini llama.cpp Qwen2.5-Coder-14B), four panes visible (t4-serve/mini-serve/t4-local/mini-coder), ETA ~40 min (#3780/#3787).
-- FOUNDRY: 459.5 numbering collision confirmed 3-fold (D4 / PARITY / roadmap-page all stamped 459.5 by Fable's own orders); the CAP chain rides 459.1 — Fable/ledger renames (#3779/#3782).
-
-Rev 10 (vs rev 9):
-- FOUNDRY: c3/437 checker work COMPLETE both halves — vj-refuter box-side PASS (VJ denied set 7/7 denied, mounts ro, name-blinding holds) + eta-refuter c3-side (#3768/#3695).
-- BACKFILL: PARITY-389 READY — fleet launches 21:15-21:30 box IST from the box driver; six pre-hashes 6/6 MATCH; binding re-hash at gate (any diff = NO LAUNCH); smoke ONE window first; hard stop 07:25-30 by PID; cap verdict = herdr-kit's (#3770).
-- PRESCRIBE: cap ONLINE on c3 — v3 MANIFEST verify + scorer build started, 20:00 report path live (#3766).
-- SHIP: D4 delta PASS on the SELFTEST pre-check; FLAG — the SELFTEST stimulus run owes its OWN refuter pass before running on the production Mini. Numbering settled: 459.5 = D4 runbook only; the CAP chain rides a different 459.x (#3767/#3769).
-
-Rev 9 (vs rev 8):
-- ROOMS: FABLE 453.0 EXECUTED — minibot restarted the OPD 4 engine 16:10 (ENCODER_STALLED + NOT_DELIVERING cleared); the C270 did NOT re-enumerate so start_day was correctly withheld; tape frozen since 10:59 (~6 h loss). end_day + hands-on-site mic = Fable/V (#3748/#3761).
-- FOUNDRY: routing LIVE (FABLE 458) — yoga-free pane open on UbuntuYoga (big-pickle default, muse-spark fallback); Pool B Go live on the Mini (herdr-kit glm-5.3-flash + roadmap deepseek-v4-pro on the personal-account key); minibot gated to 30-min change-gated checks. UbuntuYoga reclassified CLEAN (V's correction). herdr-kit 455.A waste-guards BUILT @ dec41ca4 (watchdog/budget/loop-gate/reaper/usage/alert) — eta-refuter gate owed. T4 vLLM: nothing installed yet; plan = Qwen2.5-7B-Instruct-AWQ (~28 min once go) (#3740/#3743/#3745/#3751/#3752).
-- PRESCRIBE: 459.5 report inputs delivered to cap (bundle v3 verified on disk; held-out +120 any-link 7.4% ABOVE the 5% target — must be called out); cap scoring v3 now, report due 20:00 (#3754/#3758/#3759).
-- SHIP: D4 runbook FINAL + eta-refuter PASS (#3598 deploy+rollback) — 5907cbc ships Sunday 27 Sep 07:00-07:30 after PARITY's hard stop; Home Office SELFTEST pre-check added (#3762/#3763).
-- BACKFILL/VOICEPRINT: 19:30 seal mirror = 4 sealed blobs (vj-refuter #3757); c13 gate-1 ruling DEFERRED on coverage (#3753/#3757/#3760).
-
-Rev 8 (vs rev 7):
-- ROOMS: FABLE 453.0 ruled OPD 4 RESTART (~15:45); relayed to minibot but no executor action ~20 min — escalated URGENT to Fable; minibot is the only Mini write-scope holder in the record (#3722/#3723/#3726/#3727).
-- FOUNDRY: nophi-run account STOPPED per D.5 — free model refused on both paths ("free tier only from within OpenCode"), paid refused (insufficient funds); V's call whether it gets a device-login or is dropped (#3721).
-- FOUNDRY: local-model plan handed to herdr-kit (Ollama on Mini/box T4 as OpenCode provider for loops/pollers; benchmark 5 tasks vs Go flash, eta-refuter checks) (#3721).
-- FOUNDRY: 3rd free-model fire — big-pickle on `mini:dir:eta-lab`, 2nd Mini dir, both with Fable for attribution (#3725).
-- BACKFILL: lab-mover relaunched clean (0aa69515) — six PARITY-389 hashes re-verified, tape pull/push cron healthy, box free 204G; c13 gate-1 gap posted for Fable (accept vs short-restart) (#3729/#3731).
-- VOICEPRINT: tonight's 19:30 seal mirror question — a 4th sealed blob (wis-labels-V-20260926.json.gpg) is present; include it or strictly the 3 vj-refuter approved (#3730/#3731).
+## Changes since last revision
 
 Rev 7 (vs rev 6):
 - FOUNDRY: Zen meter bin moved to bd4c2e6 LIVE (#3712) — display nit fixed, ledger deployed.
@@ -275,7 +29,7 @@ Rev 2 (vs rev 1): RECORDER 0.1.25 queue (5 defects); Home Office = production Mi
 
 ## How to read this file
 
-- **Project** = one of the 26 named programmes below.
+- **Project** = one of the 16 named programmes below.
 - **Status** = on track / at risk / blocked / just started / paused.
 - **% done** = my estimate against the project's exit test, not against a plan.
 - **DONE / NOW / NEXT** = the latest facts, dated. Bus ids in `#…`, rulings as `r…`.
@@ -283,482 +37,255 @@ Rev 2 (vs rev 1): RECORDER 0.1.25 queue (5 defects); Home Office = production Mi
 
 ---
 
-## The 26 projects at a glance
+## The 16 projects at a glance
 
 | # | Project | Status | % done | One-line state |
 |---|---|---|---|---|
-| 1 | CLARITY | blocked | 55% | router fix M1-M5 REJECTED (S1 WORSE, confirmed); root cause settled; effort now rides REB/FUSER instead |
-| 2 | PRESCRIBE | on track | 88% | CAP-3 OWN/SWAP: no help; PRIOR gloss arm launched (pid 55701, bundle c979b5d, #7093); content-only room proofs 0/5 doctors proven |
-| 3 | BACKFILL | on track | 90% | cut-only driver (23/22 Sep cut); STT on HF: 25 Sep 393/393, 24 Sep 238/238; blind guard fixed (fd460731, runner 978d9969e2589af8) |
-| 4 | ROOMS | on track | 85% | all rooms recording; signature-mismatch bug closed (old app instances only); Room Timeline live |
-| 5 | SPLIT | on track | 75% | 26/27 Sep diar moved to HF; phase 2 GO on HF (cap USD 25, #7027), pre-reg DESIGN PASS, 3 freeze inputs missing |
-| 6 | VOICEPRINT | on track | 93% | all 5 known doctors PASS; 47 PROPOSALS running on 10 HF L4 (due ~21:30-22:00); V's human check is the gate; DVC retired; ROLE-FROM-CONTENT v4 waits on V |
-| 7 | ENCOUNTER | at work | 60% | W44 Jev encounter-loop built + PASS-with-conditions; feeds /timeline |
-| 8 | SURGERY | on track | 70% | tier batch pinned f5efddfb; 1,484 consults, 122 booked; awaiting go-live edit |
-| 9 | NOTESAFE | on track | 82% | provider-text fix + med-bench live; jev-fix F2+F4-prod PASSed/pinned, F3 ready to merge |
-| 10 | TONE | paused | 40% | PARKED; #6926 disclosure recorded (5 un-logged noise pieces may include 26 Sep OPD4 audio; control pool had no OPD4 windows per #7071) |
-| 11 | SELFTEST | on track | 65% | nightly digital run passing every night; bigger clinical suite designed, paused on TTS budget |
-| 12 | LABVIEW | on track | 97% | voicecheck + DRT + blind-day blanking live (fe124699 deployed #6904); 6f74d573 ready to deploy (#7073) |
-| 13 | FOUNDRY | on track | 88% | bus v2 + keepalive PASS, herdr watcher PASS, asus-ubuntu, warden, chronicle, 5.5 models |
-| 14 | SHIP | on track | 92% | production live 4d7d8e0; deploy lesson documented; self-test-server fix PASSed, awaiting GO to push |
-| 15 | RECORDER | at risk | 73% | signature bug closed; MCP write-scope gap confirmed broader — blocks self_test AND end_day now |
-| 16 | ORBOX | paused | 20% | D-2..D-5 answered; kit list delivered (T-ORBOX-5, #7051); ALL BUILDING ON HOLD until V says |
-| 17 | FREESCRIPT | on track | 95% | W38 closed — artifact schema + docs + prototype delivered, handed to Pulse/V |
-| 18 | ACOUSTICS | on track | 90% | W39 closed — Third Floor material speech-loss found; VAD-tune attempt found no win, needs physical fix |
-| 19 | REB | on track | 78% | 25 Sep 2358 and 24 Sep 1428 HF tracks collected, 0 excluded; SraVaani-only driver 9f3b3004 (config b3584dd6) for the TEST windows |
-| 20 | FUSER / G3 | at work | 80% | RUN 3 DONE (USD 8.20); ADDENDUM-9 r3 accepted; TEST n=23, cap USD 20; runner a3be8bcc WITNESSED; G3 set built from TEST, extractor must read number words |
-| 21 | W50 BAKEOFF | at work | 55% | parakeet-med withdrawn; set (b) scored 384/384; set (c) real-consult scoring running |
-| 22 | W52 MANOJ PACKAGE | on track | 95% | DONE: 54 clips delivered to V's Air on time (17:00); team stood down; more could follow via a later cut5 |
-| 23 | W51 MANOJ VOICE STUDY | blocked | 25% | v3.1 re-review pending; W52 exposure addendum in review (scope 54 heard clips, #7098/#7099) |
-| 24 | PALIMPSEST | on track | 80% | seed blind guard PASS (31199dcd); viewer 6f74d573 ready; 26/27 Sep STT/diar fills finishing on HF |
-| 25 | DRTPQMA | on track | 85% | 11 tape days live; 62 held-out encounters blanked; 26/27 Sep loaded; 0/5 doctors content-proven; 16 wrong-room clips to be quarantined |
-| 26 | KOYAL | on track | 5% (T-KOYAL-3 bulk, PROGRESS #7602) | Bulk launched #7592; spec f1f57dc35e533ae5; smoke RTF 0.0044; Koyal cap USD 150 to 30 Sep 12:00 |
+| 1 | CLARITY | at risk | 75% | transcripts built; V's 200-row readability rating unblocks the final gate |
+| 2 | PRESCRIBE | at risk | 60% | CAP-1 audit v3 bundle built; report due 20:00 tonight |
+| 3 | BACKFILL | on track | 85% | archive transcribed; incoming tape catching up on c3; PARITY-389 tonight |
+| 4 | ROOMS | at risk | 80% | 8 rooms recording; OPD 4 down ~4.5h (device lost); auto-start still manual |
+| 5 | SPLIT | on track | 70% | 337e speaker labels done; own-model goal pending weekly evals |
+| 6 | VOICEPRINT | blocked | 60% | truth sealed; arm 4 waits on V's Vertex credential + scoring venue ruling |
+| 7 | ENCOUNTER | blocked | 50% | J-001/J-002/J-004 done; J-003 held on doctor-to-room mapping |
+| 8 | SURGERY | paused | 70% | v5 frozen; 84 legacy de-id files await Fable's order; Link-3 sealed |
+| 9 | NOTESAFE | paused | 40% | Jev U4/U8 shadow only, flags OFF |
+| 10 | TONE | paused | 90% | emotion study closed; service runs in background when enabled |
+| 11 | SELFTEST | just started | 25% | spec drafted (7e55ef3); awaiting Fable ruling + ElevenLabs key |
+| 12 | LABVIEW | on track | 80% | 427L label200 fix deployed LIVE; V can rate; speaker display + /roadmap next |
+| 13 | FOUNDRY | on track | 70% | OpenCode migration done; Zen=overflow-only; GCP exit done; S7 delete pending |
+| 14 | SHIP | on track | 90% | production 1e75667 live; 5907cbc held on manual migration 0119 |
+| 15 | RECORDER | just started | 10% | next Room Recorder release queued; owner + scope to confirm |
+| 16 | ORBOX | just started | 5% | new: OT recorder upgrade for robotic surgery; owner + hardware to decide |
 
 ---
 
 # 1. CLARITY — readable, accurate consult transcripts
 
 - **Purpose:** turn raw mixed-language clinic audio into complete, human-readable transcripts, with English under each native line, correct speakers, and garbled lines hidden behind a precision floor.
-- **Exit test:** judged by the automatic S1/S2/S3 scorecard (V ruling, W33, 27 Sep); win rule = S2 improves AND S1 not worse (S3 indicative only for now).
-- **Status:** blocked. **% done:** 55%.
-- **Owners:** lid-debug (root cause, consultant), router-fix (builder — now the FUSER builder too), diar-lab (S1 suites), linker (S3 judge), reb (the new architecture), eta-refuter-2/eta-refuter-3 (checkers).
-- **DONE (through rev 14):** router root cause (M1-M6) found; router-fix/lid built removing M1-M5; SELFTEST clinical1 suite + 2 confirmation suites built for the S3 judge; /clarity + scorecard page live.
-- **DONE (this revision):**
-  - **S1 re-run REPRODUCED WORSE, addendum-witnessed (#4526-4590):** ALL hit rate 80.95%→73.13% (CI [-10.9,-5.0]), ml -25.4pt, hi-en -18.3pt. **Fable ruled 12:50: the M1-M5 fix does NOT ship.**
-  - M6 (wrong-Indic-language routing) attribution corrected: first measured at 25-36% of the loss on an unreliable field (segment-count tiebreak, not the router's real `dominant_language`), then re-measured properly — its own marginal effect on S1 is ~0 (+0.11pt). **FINAL settled reading (S1-REPORT.md):** SraVaani itself mis-identifies Hindi as Tamil script under babble noise (≥12/64 net, a defect M6 structurally can't fix) plus correctly-routed content loss (~52/64 net, mechanism still provisional) account for the regression.
-  - ETR (English Token Recovery for numbers/units/day-counts) built and tested: real-audio decoy sweep **0/100,000 false anchors** (all bands pass) but recall near-zero on real text (3 candidates in 50 real texts) — not worth shipping alone; folded into FUSER v0 instead.
-  - **V approved (13:30) the Room Evidence Bundle (REB)** as the new backbone: run every engine independently, store every output, fuse downstream — see project 19. This is now where CLARITY's real progress happens.
-- **NOW (30 Sep, rev 28):** FUSER stopped; the router LID fix (M1+M2, proposal r5 03bd54a2) has a lab-only BUILD GO from Fable; R-A branch built and witnessed, E4/E2 runs on c3 with a 07:55 hard stop; no production change without a separate GO.
-- **[earlier] NOW:** router-fix has moved to building FUSER (project 20) on top of REB tracks; lid-debug stays on as consultant for M6/SraVaani-under-babble; label200/S2 evals from the old router-fix branch are left running but not extended.
-- **NEXT:** get REB's full-day backfill running (26/27 Sep, ~260 tape-hours/day) so FUSER has real production volume to fuse; FUSER's B4 freeze + V's G3 rating decide whether the new pipeline actually beats today's router on S2.
-- **Dependencies:** REB backfill at scale; FUSER B4 freeze.
-- **Open decisions:** none new for V — the win rule and REB approval are already ruled.
+- **Exit test:** 80% of V's sample reads acceptably; 85% PRESCRIBE capture (a prescription item said in the room appears in the transcript).
+- **Status:** at risk. **% done:** 75%.
+- **Owners:** lab-viewer (viewer + rating UI, OpenCode qwen3.8-flash), linker (337b English translation, OpenCode glm-5.3-flash), split-speaker (337c/d metrics), diar-lab (337e speakers), Fable (rulings).
+- **DONE:**
+  - r337 (25 Sep 07:45): declared the top programme.
+  - 337a Consult View live; 337b Gemini 3.8 Flash translation of 2,611 windows; 337c 5,130 flagged segments re-transcribed; 337d English-hallucination guard drops 0 of 30 real windows; 337e speaker labels across all 4,167 vault windows (r418).
+  - label200 (r414/421a/421c): 200-row sample frozen; calib30 FAILED (63.4% vs 86.7%) so V rates all 200 himself.
+  - 427L label200 repair: PASSed by eta-refuter-2 (d5e82fe), merged 1e1a8518, deployed v6713bbe8 (FABLE 450). R5 after-deploy confirmed (16 rows, sha 93fdea08). Language display live. **V can rate now at /rate/label200.**
+- **NOW:** V to rate the 200 label200 rows (readability). That single task unblocks the precision floor and the CLARITY exit test.
+- **NEXT:** split-speaker scores the readability filter precision from V's export; speaker-display chips in consult view (awaits Fable's "build speaker display"); wire the self-test exclusion filter so acoustic chirps don't show in clinical views.
+- **Dependencies:** V's rating; Fable's rulings (speaker display, calib30 fix).
+- **Open decisions:** none new — the R2 literal-vs-inclusive follow-mode reading was ruled KEEP literal (FABLE 450); the calib30 shared chunkPlan bug is queued as its own fix.
 
-# 2. PRESCRIBE — CAP-1/CAP-2 audit closed; CAP-3 (Rx-informed cleanup) opened
+# 2. PRESCRIBE — CAP-1 audit + CAP-2 vocabularies
 
-- **Purpose:** audit whether prescription items are captured in the transcript; test whether the visit's own after-the-fact prescription can be used to clean up the transcript afterwards.
-- **Exit test:** CAP-1 (closed), CAP-2 (closed — see below); CAP-3: does an OWN-Rx hint recover missed items without inserting drugs that weren't said, within a pre-registered safety bar.
-- **Status:** on track. **% done:** 85%.
-- **Owners:** cap (evaluator, c3), linker (Rx mapping), vj-refuter (checker), eta-refuter-2.
-- **DONE (this revision):**
-  - **CAP-2 CLOSED: HELPED = FALSE, a clean placebo-controlled null.** Captured/169: base1 55, base2 53, real (hinted) 53, placebo 52 — net real-vs-placebo +1 item / +1 drug, far below the pre-registered bar (9 items / 3 drugs). Descriptive cuts (by item type, by 15-confirmed-only subset) show the same null everywhere, not hint-specific. **Fable ruled: do not run the parked SECONDARY arm** — nothing for it to explain. Report went through 5 real correction rounds with vj-refuter (a description of what "SECONDARY" actually was — a doctor-level list, not a per-patient one — had its trigger clause backwards twice) before final PASS (`03b8777afc6bfe36`).
-  - **W53 CAP-3 ordered same day (V, 28 Sep ~14:00):** since real prescriptions are written *after* the visit (confirmed: never before), test a post-consult clean-up step using the patient's own Rx. Arms: OWN (real own-Rx hint) vs SWAP (placebo — another patient's Rx) vs a deferred PRIOR arm (parked for now, needs a genuinely per-patient prior-Rx list, not CAP-2's doctor-level one). Pre-registration went through 2 real fix rounds (the scoring unit was terms, should be whole drug items; an own-Rx exclusion rule; a hardcoded-path bug) before PASS (`15cebdc358384250`). OWN+SWAP code build reviewed, 4 blocking items found and fixed (`e95d502`); a glossary-translation wrapper added; whisper runs cleared to start.
-- **NOW (29 Sep, rev 26):** CAP-3 OWN and SWAP are finished with HELPED=FALSE; the PRIOR gloss arm is running on the box (pid 55701, #7093). The related T-PRESCRIBE-2 was folded into T-DRTPQMA-5 (#6012), which proved 0 of 5 doctors' rooms from content alone.
-- **NEXT (rev 26):** When g_prior finishes Fable copies it to /out/cap3/g_prior and posts shas; vj-refuter's rescore must match; PRIOR needs no new pre-reg beyond ADDENDUM-1 0825e759.
-- **[rev 25] NOW:** CAP-3 OWN+SWAP runs starting (box/c3 CPU only, no T4 today — that's W52's). Every new OWN-arm capture is required by the pre-reg to go to a blinded human listening set — no automatic judge stands in.
-- **[rev 25] NEXT:** CAP-3 OWN+SWAP result; the PRIOR arm's real per-patient list design (parked, needs V's word on one open question per the order).
-- **Dependencies:** none blocking.
-- **Open decisions:** none new for V — CAP-3's own order already carries the one open question.
+- **Purpose:** audit whether prescription items (drugs, doses, diagnoses, investigations, advice) are captured in the transcript, for clinical completeness; then steer STT/translation with vocabularies.
+- **Exit test:** CAP-1 report with held-out false-link rate; weekly PRESCRIBE capture score; CAP-2 vocabularies feeding STT/translation.
+- **Status:** at risk (report due 20:00 tonight). **% done:** 60%.
+- **Owners:** linker (bundle + links, OpenCode glm-5.3-flash), cap (evaluator on eta-ci-c3), eta-refuter-2 (checker).
+- **DONE:**
+  - r429/430 (26 Sep 09:30): workstream authorised.
+  - Bundle v1 FAILED by refuter-2 (33.8% wrong-time false links, chance-level).
+  - Bundle v2 posted (27/183 linked, false-link 4.2%); then **bundle v3 built (#3662): 24 linked / 15 confirmed, English complete 189/189, honest smaller n**.
+  - Naming PASS (#3655/#3658): cap_link 2b96fdfd + cap_bundle 99023b74 + ceiling f363a3e; MANIFEST 7/7 sha-verified; #3506 re-check PASS (both refusal paths exercised; pins MATCH; selftest 0).
+- **NOW:** v3 re-check PASSed by refuter-2 (#3687): 183/183 exact, held-out false-link 1.8-7.4% / false-confirmed 0.6-3.3%. **cap may score v3 for the 20:00 report.** Before V runs `run` (patient audio leaves the machine): draw.json-vs-commit + salt reveal.
+- **NEXT:** cap scores v3 → 20:00 report (must carry the held-out rates; the +120 shift any-link 7.4% sits above the 5% target, confirmed ≤3.3%) → refuter-2's 10-random-confirmed check.
+- **Dependencies:** V runs 337b translation pass + c3 apply script 81207f53; OpenRouter top-up for ceiling audio.
+- **Open decisions:** none (see DECISIONS for V's manual steps).
 
 # 3. BACKFILL — every recorded hour transcribed
 
-- **Purpose:** transcribe every recorded clinic hour with zero failures; keep the PQM-to-prescription linkage current.
-- **Exit test:** each clinic day done by 07:00 next morning; a trusted parity path to cloud compute if the Mini needs overflow.
-- **Status:** at risk. **% done:** 85%.
-- **Owners:** hist-bulk (daily drain), fleet/herdr-kit (PARITY-389), linker (nightly PQM linking), eta-refuter-2.
-- **DONE (this revision):**
-  - **PARITY-389 FINAL VERDICT: NO MATCH; scope not met.** Two real compare-tool bugs fixed first (a refused-key false-absence bug, and per-window audio identity not checked against the ship manifest); the retried compare still failed because the HF capture used `SRAVAANI_MODE=local` instead of the Mini's real Yoga-hosted instance, so SraVaani-routed windows are not comparable. **Fable ruled (17:25) SraVaani out of scope; no further capture spend.** The underlying blocker (HF's tailnet cannot reach the Yoga SraVaani instance, SOCKS5 rc=97) is unresolved if this is ever revisited. Whisper-path content divergence (1.4-21.2%, median ~9%) is documented as a real finding, not decode noise (temperature-fallback ruled out). Record: `~/eta-data/hf-parity-389/PARITY-389-RECORD-27SEP.md`.
-  - **Nightly PQM-linking automation live:** crontab installed (23:45 IST, box), a real overwrite bug fixed first (a rolling 3-day window would have clobbered the frozen 26 Sep CAP bundle — now every day gets its own frozen MANIFEST guard), pinned to live `main` not a moving tag after a second real bug. 27 Sep's nightly run completed (5 rows). `cap_bundle.py` also now refuses to silently regenerate a frozen day's bundle.
-  - hist-bulk confirmed live daily transcription on schedule; box T4 added as a second STT worker alongside c3 for today's tape.
-- **NOW (29 Sep, rev 26):** Cut-only driver running (23 Sep 372/372, 22 Sep 393/393 cut, 21 Sep cutting); STT on HF: 25 Sep 393/393 and 24 Sep 238/238 done and collected by reb; runner guard fd460731 / 978d9969e2589af8 live; eta-refuter re-read pending per hist-bulk #7008, thread closed by #7037.
-- **NEXT (rev 26):** Fable runs the stage-and-sync upload per date band once the proposal shards free the GPUs (~21:30-22:00); T-BACKFILL-9 cap USD 45, newest first; 26/27 Sep indic CTC re-run.
-- **[rev 25] NOW (29 Sep):** month backfill (`backfill_driver.sh` 6899d07087f5e20e, pinned on branch hist-bulk/backfill-driver @ 54a248c2) is running; 25 Sep tone 418/418 done, 24 Sep cut and tone running, 23 Sep next. A done-check bug scored some windows twice (225 duplicate records over 218 windows, about 1.5 GPU-hours lost); all are valid append-only records and readers must honour `DUPLICATES-20260929.json` (keep-only). STT for 25/24 Sep is deferred while reb workers hold the GPU. Real-ingest code pinned at 84d86f01 (PASS #5650).
-- **[rev 25] NEXT:** watch the historical backfill work through the month (event-driven posts only, on date completions/failures); decide (Fable/V) whether SraVaani's tailnet-ACL gap is worth fixing to re-attempt PARITY-389 later.
-- **Dependencies:** none blocking.
-- **Open decisions:** re-attempt PARITY-389 later, or accept HF as unproven backup indefinitely (Fable/V, not urgent).
+- **Purpose:** transcribe every recorded clinic hour (historical archive + daily incoming tape) with zero failures, no GCP.
+- **Exit test:** each clinic day done by 07:00 next morning, 0 failures, no GCP.
+- **Status:** on track. **% done:** 85%.
+- **Owners:** hist-miner (Stage 1 anchors), hist-bulk (Stage 2 bulk + c3 loop), lab-mover (compute), join-shard (audio-join sharding), eta-refuter-2 (checker).
+- **DONE:**
+  - Full archive accounting: 4,507/4,507 windows transcribed across Tier A/B on 62 cloud routers, 0 problems (r309).
+  - c3 high-throughput loop live: 14.2 audio-hours/hour, 0 failures (J-hist-c3).
+  - audio-join 32-shard Worker deployed (r220).
+  - GCP fully exited; all 5 GCP nodes powered off (r386/r419); archive mirrored twice.
+- **NOW:** incoming 25 Sep tape transcribing on c3; tier-C backlog caught up.
+- **NEXT:** PARITY-389 tonight (~21:15-21:30, GO by fleet; six hashes; hard stop 07:25-07:30; cap $10) — proves the HF A10G STT stack matches Mini production.
+- **Dependencies:** PARITY needs rooms stopped + empty Mini queue + fleet's GO.
+- **Open decisions:** none.
 
 # 4. ROOMS — every clinic hour recorded
 
 - **Purpose:** ensure every room records during clinic hours, detect silent stalls, and fix hardware.
-- **Exit test:** every clinic hour captured; 0 unexplained silent tape; room faults auto-alerted; V has a plain view of room health.
-- **Status:** on track. **% done:** 85%.
-- **Owners:** fleet (fleet-watch), scribe (RECORDER), minibot (Mini watch), lab-viewer (Room Timeline).
-- **DONE (this revision):**
-  - **signature_mismatch bug CLOSED.** Root-caused: every failure traced to app build **0.1.8** (pre-0.1.18 anchor-trust fix); the OPD1/OPD4 "27 Sep" mismatches were stale 17-Sep launchd log text, not new events — confirmed by source read, DB read, and an offline repro on the Air (exit 0 leaf-only vs exit 3 anchor-trusted). W37 closed (#4375); `SIG-ROOT-CAUSE.md` and `SIG-FACTS.md` final.
-  - **Room Timeline (/timeline) shipped**, replacing the plan for a separate /encounters page — see LABVIEW project.
-  - A real `now`-view bug fixed: cross-midnight sessions were dropped from the "currently recording" view (a same-IST-date filter mismatch), branch `vinay/scribe-rooms-now-bug` PASSed.
-  - OPD1 ENCODER_STALLED and OPD3 mute both diagnosed via the standard playbook and confirmed healthy after fix; Dietary confirmed healthy.
-- **NOW:** all rooms recording; V can see room status directly on `/timeline` instead of waiting on bus posts.
-- **NEXT:** a small 0.1.26 RECORDER fix spec exists (better signature-failure logging) but is not urgent; Cardiology's restart status is unchanged from rev 14 (carry forward, not re-verified this pass).
-- **Dependencies:** none blocking.
-- **Open decisions:** Cardiology restart (V/Fable, carried forward — UNVERIFIED this revision); OPD 4 physical status (carried forward — UNVERIFIED this revision, not mentioned in today's bus range).
+- **Exit test:** every clinic hour captured; 0 unexplained silent tape; room faults auto-alerted.
+- **Status:** at risk. **% done:** 80%.
+- **Owners:** fleet (fleet-watch 24x7 monitor), scribe (recording accounting + alarms), radar-kit (mic self-test), herdr-kit.
+- **DONE:**
+  - fleet-watch live (r399), 5-min polling, $2/day cap; NOT_RECORDING/NOT_DELIVERING alerts working.
+  - Exact-zero tape root cause: TONOR TM20 hardware mute (r255/280) — but OPD 4 uses a C270 webcam (no mute), cause re-opened (r336/355).
+  - C270 mic proven functional by acoustic test (r368).
+- **NOW:** 8 rooms recording. **OPD 4 down ~4.5h (DEVICE_MISSING 11:01, NOT_RECORDING 11:31; looks physical).** Dietary Room Mac silent since 24 Sep (hostname unknown — ask V which Mac).
+- **NEXT:** auto-start at clinic open (item 151, V's decision) — no auto-start mechanism exists today, staff press Start manually; device-missing + NOT_DELIVERING handling; Physical inspection of OPD 4 and Dietary Mac.
+- **Dependencies:** V's ruling on auto-start; physical access.
+- **Open decisions:** OPD 4 restart (Fable's ruling, looks physical); Dietary Mac identity; auto-start build.
 
 # 5. SPLIT — diarization (who spoke when)
 
 - **Purpose:** speaker labels + counts; own model within 3 DER points of pyannote.ai.
 - **Exit test:** own diarization model within 3 DER points of pyannote.ai on 2 weekly evals.
 - **Status:** on track. **% done:** 70%.
-- **Owners:** split, diar-lab, eta-refuter-2.
-- **DONE:** (unchanged from rev 14 — 337e complete, phase-2 plan posted).
-- **NOW (29 Sep, rev 26):** 26/27 Sep local-twin diar is on 3 HF L4 shards (c3 workers stopped); 27 outputs have segments but empty speaker lists (#7087). Phase 2 has a GO on HF (cap USD 25, #7027); pre-reg 382db600 DESIGN PASS.
-- **NEXT (rev 26):** Freeze phase-2 pre-reg after diar-lab's hashed SELFTEST set, scorer and pyannote.metrics versions, and the nightly_export dataset id land; then eta-refuter-3 reviews train_nemotron.py; hf-fleet runs it after tonight's shards.
-- **[rev 25] NOW (29 Sep):** REB's diar layer for 26/27 Sep is the **local pyannote twin** (config c4bcdedf) because production labels stop at 24 Sep (earlier "23 Sep" was a date shift). ROOT CAUSE (#5898): no 25-29 Sep window has a joined clip (`room.transcript_enabled` false on all 18 rooms; only the room drain joins clips; the diarize enqueue needs a clip). Vercel env not visible to split. First 26 Sep local-twin tracks on disk (19 ok); refuter-3 confirmed all times are window-relative.
-- **[rev 25] NEXT:** Fable/V to decide whether to turn transcription on in production rooms (root-cause fix); finish local-twin diar for 26/27 Sep on c3 CPU; SPLIT phase-2 plan (Nemotron turn-finding) still awaits Fable's go.
-- **Dependencies:** none blocking.
+- **Owners:** diar-lab (runner), eta-refuter-2 (checker). pyannote.ai primary now; Nemotron local shadow.
+- **DONE:** Nemotron fine-tune halted (collapsed on minor speakers; untuned base beat tuned) — r94/210. 337e speaker labeling complete across 4,167 windows (r418).
+- **NOW:** pyannote.ai hybrid in production; speaker A/B/C labels stored under kind `speaker`.
+- **NEXT:** score diarizer count accuracy vs 30-window human consensus (once ≥20 rated); own-model evals on 2 weekly windows.
+- **Dependencies:** human rating of the 30-window benchmark (8/30 done).
 - **Open decisions:** none.
 
 # 6. VOICEPRINT — doctor identity by voice
 
-- **Purpose:** attribute speech to a specific doctor's voice, guarded by cryptographic blinding where sealed truth is involved.
-- **Exit test:** voice centroids that pass positive/negative controls; usable for real clinical questions (see W51/W52).
-- **Status:** at work. **% done:** 65%.
-- **Owners:** vj-refuter (checker, sealed-truth custodian), lx (builder for W51/W52), linker, reb, hf-fleet.
-- **DONE:** (unchanged base from rev 14 — blinding architecture, centroid controls, sealed vault). Arm 4 (Gemini/Vertex) status carried forward, UNVERIFIED this pass — no mention in today's bus range.
-- **NOW (29 Sep, rev 26):** 47 PROPOSAL jobs on 10 HF L4 (~15:20 start, due ~21:30-22:00, cap USD 60). Old blind DVC retired (#7010). Amendment 4 text v10 (7d8bd212), scorer b122b693; lx drafting A4 4.12 (batch-level decoy scheme B, #7093). ROLE-FROM-CONTENT v4 waits on V.
-- **NEXT (rev 26):** hf-fleet copies results to the box; diar-lab cuts proposal cards (5 clips each) mixed with controls; refuter PASS, freeze post, load as a new run id, send V the link (likely 30 Sep); linker places only VERIFIED voices after eta-refuter-3 checks its placement code.
-- **[rev 25] NOW (29 Sep):** **Automatic minting.** diar-lab mines each doctor's recurring voice from their own sessions with no human and no known print, then scores it against the known print (bar own >= 0.60, margin >= 0.10). Manoj PASS 0.844 (#5721), Salanki PASS 0.9266 (#5790), Animesh PASS 0.8316 (#5882); each reproduced by eta-refuter-3 and vj-refuter. Ankit (17 clips) and Poornima (17 clips) extraction running (~12 min CPU per clip). R3 + W51 room-days excluded from all pools. linker's rollout index: 65 doctors, 2,009 encounters, 569 with room audio, 1,364 room-unknown; candidates for 47 room-unknown doctors (6,336 clips, ~1,332 h) exist as a superset, no single-room rule works (#5832). asus-kit v3 (97a4e0c8) packages the offline mint. **W52 stays closed;** **W51 v3.1** (8c1cf9be) awaits vj-refuter re-review.
-- **[rev 25] NEXT:** finish Ankit and Poornima scoring; per-doctor pre-reg with a negative-session guard before any room-unknown doctor is minted (eta-refuter-3 C2); Fable picks how to get one room per encounter (voice prefilter, more GPU, or a new room source); minted-vs-minted 5x5 matrix.
-- **Dependencies:** see W52/W51.
-- **Open decisions:** see W52/W51; arm 4's Vertex credential status carried forward unresolved (UNVERIFIED this pass).
+- **Purpose:** attribute speech to doctor vs patient vs other, guarded by cryptographic blinding; mint permanent doctor voice centroids.
+- **Exit test:** voice centroids that pass the r182 positive/negative controls; Who-is-speaking page rated by V.
+- **Status:** blocked. **% done:** 60%.
+- **Owners:** vj-data, vj-arms, vj-link (builders), vj-refuter (the ONLY pane that sees sealed truth).
+- **DONE:** blinding architecture (unix user `vjscore`, mode 700 vault) — r168. Centroid controls pass (0.74-0.86 pos, <0.40 neg) — r182/186. 90-item "Who is speaking" page + 20 top-ups published. V's truth encrypted into sealed vault `~/eta-data/vj-truth-sealed` (r422). J-005/J-006 cards done (arms 2+3).
+- **NOW:** Arm 4 (Gemini audio on Vertex AI) blocked on box credential plumbing; vj-arms asked to close voluntarily to save Zen.
+- **NEXT:** V deploy gcloud shim be2b6682 + temporary Vertex credentials (r425.5); pin Vertex model id; run arm 4; vj-refuter final scoring from sealed vault once venue ruled (item 137).
+- **Dependencies:** V's credential deploy; scoring-venue ruling.
+- **Open decisions:** VJ final scoring venue (item 137).
 
-# 7. ENCOUNTER — consult start/end detection
+# 7. ENCOUNTER — consult start/end vs PQM truth
 
-- **Purpose:** find consult boundaries in the tape from cues (greeting, exam, prescription readout, closing) and match them to patient-queue truth.
-- **Exit test:** 80% of queue consults found within 2 minutes of start/end (W44 pre-registered bar).
-- **Status:** at work. **% done:** 60%.
-- **Owners:** lx (build), eta-refuter-2 (checker), lab-viewer (page).
-- **DONE:** **W44 Jev encounter-loop built** (lx): STATE = ~60s transcript chunks with speaker labels + silence gaps; ONE Jev request per chunk (9-option phase Choice + 4 Nouls: new_patient/opening/closing/patient_present); keyword/regex candidates in multiple languages feed a state-machine layered over the Jev phase probabilities, snapped to silence boundaries. Pre-registration went through 2 real FAIL→fix rounds (26 Sep being both tuning set and exit test — contaminating; a phase-options shape mismatch) before **PASS-with-conditions** on the offline selftest (27/27). A back-to-back encounter timing bias is documented in the README rather than silently absorbed.
-- **NOW:** shadow-only, runs over every transcribed room-day; nothing reaches clinicians. The dedicated /encounters page plan was **superseded by /timeline** (W49) — the detection loop itself is unaffected and feeds that page instead.
-- **NEXT:** score against the 26 Sep full day (1,060 windows) vs the acoustic + E-6 fusion baselines (3/14, 3/7) using lx's full-day harness; surface results in /timeline.
-- **Dependencies:** none blocking.
-- **Open decisions:** none.
+- **Purpose:** find consult boundaries in the tape and match them to patient-queue truth (E-1..E-7).
+- **Exit test:** E-7 rescore recall/precision agreed vs PQM truth across all windows.
+- **Status:** blocked. **% done:** 50%.
+- **Owners:** mb-rx (J-001 truth table), mb-ot (J-002 OT), lx (J-003 modeling), hist-miner (J-004 anchors).
+- **DONE:** E-7 full-day rescore of 24 Sep (recall 18/23, precision 43%) — r213. J-001 encounter truth table (1 Aug–25 Sep, 189 consults). J-002 OT columns. J-004 anchors extended to 204 historical visits.
+- **NOW:** J-003 re-run held waiting for doctor-to-room mapping (item 102).
+- **NEXT:** resolve mapping → lx J-003 scoring → E-6/E-7 fusion decisions.
+- **Dependencies:** doctor-to-room mapping question (item 102).
+- **Open decisions:** item 102 (doctor-to-room mapping).
 
-# 8. SURGERY — surgical/interventional pitch detection + linking
+# 8. SURGERY — surgery advice + appropriateness
 
-- **Purpose:** detect when a doctor pitches a surgery or other procedure, and whether it converts to a booking.
-- **Exit test:** a rated review set + a published conversion chain from pitch to booking.
-- **Status:** on track. **% done:** 65%.
-- **Owners:** surg-link (build), lab-viewer (review page), eta-refuter-2 (checker).
-- **DONE:**
-  - **Scope widened (W46):** now covers interventional procedures generally — injections, endoscopy, cath/angio, biopsies, procedural referrals — not just surgery, using in-house-vs-refer-out knowledge so a missing booking doesn't automatically mean "not done."
-  - Per-consult Jev scoring built: pitched_surgery / pitched_intervention Nouls, a procedure-family Choice, patient_agreed/deferred and doctor_recommended/patient_asked Nouls; keyword/regex candidates feed Jev.
-  - Pitch linked to Pulse prescriptions/orders and on to the 595-case booking truth set; conversion reported by doctor/procedure family.
-  - **`pitch25` real-case review set LIVE on lab-viewer** (15 de-identified cases, inline sha256/turns-processed provenance added after a review flagged the provenance guard as too weak). De-id pipeline (gliner NER) run on 15 real cases, doctor names resolved for all.
-  - Interim numbers: 554 flagged Rx items; the 25-26 Sep CAP batch: 19 pitched, 3 booked, 1 referred, 15 not booked (conversion 21-53% depending on grouping).
-- **NOW (29 Sep):** tier batch `pitch/run_tier_batch.py` pinned **f5efddfbe4ad458f** (refuter-2 #5813; B1 booking-window bug fixed first). First real run: 1,484 real consults, 122 booked, all resolved to a patient. Nightly cap-batch also ran clean (22-28 Sep). **Go-live is one edit:** replace `nightly.sh` (faaccdc4576f989c) and add the batch script to `PINNED-nightly.sha256` in the same edit (#5838/#5839). V/Sandhya can still rate pitch25.
-- **NEXT:** grow the review set; re-link on 26 Sep + FUSER transcripts once available.
-- **Dependencies:** FUSER's S2 win confirmation (for a re-run on fused transcripts).
+- **Purpose:** detect if a doctor advised a procedure, what it was, and whether it matches the hospital booking.
+- **Exit test:** v5/v6 rated set; Link-3 chain check published.
+- **Status:** paused. **% done:** 70%.
+- **Owners:** fleet (selection/de-id/scoring), surg-page (review UI), eta-refuter-2 (leakage), linker (Link-3).
+- **DONE:** v1→v4 rated (Jev agreement 96% at v3). v5 wording frozen with `conditional` status (4830ae15); de-id redactor with partial-DOB (0e9d530). Link-3 class join executed + sealed (cacfc94; T9 name-leak gate passed; s27 tables committed).
+- **NOW:** parked pending Fable's direction on v5/v6 freeze + 84 legacy de-id file regeneration.
+- **NEXT:** regenerate 84 de-id files on order; V + Sandhya rate the 9-item fresh set; publish chain-check page after Fable reviews s27.
+- **Dependencies:** Fable's order; V's rating.
 - **Open decisions:** none new.
 
 # 9. NOTESAFE — note faithfulness / completeness
 
-- **Purpose:** audit generated notes against transcripts to catch hallucinations before clinician review; audit every Jev call site for safety.
-- **Exit test:** false-flag rate < 25% before any production flag; every Jev call site provably safe.
-- **Status:** on track. **% done:** 78%.
-- **Owners:** notesafe, jev-audit, jev-fix, eta-refuter.
-- **DONE:**
-  - **W36 Jev audit complete:** 43 call sites across production + lab studies, 17 PASS / 23 GAP / 2 UNVERIFIED / 1 REFUTED. Two real HIGH findings: the surgery study sent pre-de-identified patient text to Jev/OpenRouter, bypassing its own gate; production logged raw error text on Jev failures (could echo PHI).
-  - **W41 fixes, then a ruling withdrew two of them:** F2 (pin `ETA_JEV_MODEL=jev-1.13.0`, now live in production), F3 (route the legacy client through the logged path), F4 (one shared constants module for Jev questions/thresholds, values unchanged) all shipped and PASSed. **F1 and F5 (de-identify before any Jev/OpenRouter call) were built, then WITHDRAWN** after V ruled (27 Sep 12:55) that Jev (TypeSafe) and OpenRouter/Gemini are both zero-data-retention for Even — no de-identification is required before sending to them.
-  - Provider-text error fix (rev 13/14) and medication-note bench (rev 14) both PASSed and stand.
-- **NOW:** every open Jev-audit item from W36 is either fixed, superseded by the ZDR ruling, or tracked in W41's paper trail. **F2 (Jev model pin) merged to main `30ae7561`**, PASSed with mutation testing (killing a mutant that reverted the pin proves the test actually catches a real regression); **F3 PASSed, ready to merge**, held for the next production train; **F4-prod PASSed and pinned (`df61b3f`)** — rebased cleanly onto production `4d7d8e0`, one advisory finding (an env-var test not actually exercising the code it claimed to) fixed and mutation-verified.
-- **NEXT:** land F2/F3/F4-prod on the next production train; run the medication-note bench for real numbers against its frozen threshold (≤10% observed / <25% upper bound).
-- **Dependencies:** none blocking.
+- **Purpose:** audit generated notes against transcripts (Jev U4 faithfulness, U8 completeness) to catch hallucinations before clinician review.
+- **Exit test:** false-flag rate < 25% before any production flag.
+- **Status:** paused. **% done:** 40%.
+- **Owners:** fleet (builder), eta-refuter (checker).
+- **DONE:** Jev U4/U8 logic implemented behind flag `JEV_NOTE_FAITHFULNESS`. Refuter FINDING 1: JevHttpError must never expose provider body.
+- **NOW:** shadow mode only, flags OFF.
+- **NEXT:** finish medication-note benchmark; confirm false-flag <25%; then consider enabling.
+- **Dependencies:** benchmark completion; safety policy.
 - **Open decisions:** none.
 
 # 10. TONE — emotion / tonality
 
-- **Purpose:** flag distressed or tense encounters from audio tone and text sentiment.
-- **Exit test:** validated per-language reliability; a per-consult tone/sentiment summary shown only in shadow (never to clinicians yet).
-- **Status:** at risk. **% done:** 40%.
-- **Owners:** tone, eta-refuter-2.
-- **DONE (this revision):** **T-REB, the REB emotion layer, built and PASSed.** wavlm crosslingual, per-speaker-turn with a whole-window fallback, min 1.5s of speech required to score. First review FAILed on one real bug (a no-diarization fallback used an absolute tape-clock timestamp where the schema expects a window-relative one — would have silently mis-scored every fallback case); fixed and re-reviewed clean (`30e43ede`). Full engine + manifest-builder + collector pipeline tested (12 test files green) but **has not run on real data**: REB holds 0 real 26/27 Sep windows so far (same wall S-REB hit, see SPLIT).
-- **DONE (rev 14/15):**
-  - **W45 coverage + validation run:** diarize+emotion queued on box GPU for every transcribed window. Synthetic validation via ElevenLabs (6 emotions × languages, room-acoustic versions via the SELFTEST rig) scored against wavlm: **0/12 on anxious/angry/sad in every language and condition** — only neutral/happy/calm partially pass. A second arm (Gemini) improves angry (0→6/12) but breaks neutral (→0/12); per-language rankings flip between the two engines entirely, which reads as an engine artifact, not a real language difference.
-  - Text-sentiment pilot moved to 24 Sep (26 Sep had zero transcribed/diarized windows at the time) and found a real design bug: `room_turn_speaker.role` is **never** set to "patient" in the data, only "clinician" or null — the patient/attender side of the sentiment design needs correcting before it can be built as specified.
-- **NOW (29 Sep, rev 26):** Still parked. Disclosure #6926 recorded by Fable (#6957); sig-debug adds it to the exposure ledger (v2.2 4cf874f2); tone's #7071 correction: the control pool had no OPD4 windows.
-- **NEXT (rev 26):** No emotion runs until human-labelled speech or another engine.
-- **[rev 25] NOW (29 Sep):** **PARKED (#5794).** Control run: room-noise pieces read "sadness" 5/5 (4 at >= 0.58), speech 3/4 (~0.6); refuter concurred (#5782). EMOTION-PARKED.md at 3a05849a (docs only). T-REB code stays on main 3d9c09dd, unused, no REB writes. Reopen when there are human-labelled speech pieces or a different model.
-- **[rev 25] NEXT:** nothing until reopen conditions are met; the patient-role design gap (`room_turn_speaker.role` never "patient") stays noted.
-- **Dependencies:** a working speaker-role field distinguishing patient from doctor.
-- **Open decisions:** none for V yet — this is still an engineering validation problem.
+- **Purpose:** flag distressed or tense encounters from audio tone.
+- **Exit test:** service scores windows correctly in background (study closed).
+- **Status:** paused. **% done:** 90%.
+- **Owners:** indic-mt (study), lab-mover (replica infra).
+- **DONE:** service live on Mini 8086; dedupe fix 87a7215 deployed; study CLOSED.
+- **NOW:** steady state; no active steps.
+- **NEXT:** none unless re-opened.
+- **Dependencies:** none.
 
 # 11. SELFTEST — repeatable system diagnostics
 
 - **Purpose:** a rig that proves STT, diarization, and mics work — without patient data.
-- **Exit test:** nightly scored report; all stimulus types; clinical-realism suites feeding CLARITY's S1/S3.
-- **Status:** on track. **% done:** 65%.
-- **Owners:** diar-lab, lid-debug (clinical2 spec), eta-refuter-2.
-- **DONE:** (rev 14 base — confirm2/confirm3/confirm4 suites, room self-test scorer PASS, nightly digital run armed) plus this revision: **confirm4 suite built (280 stimuli) and merged**; the S3 judge's v4 run on confirm4 scored 268/280=95.7% overall but **mixed-language cells only 72.5%** (below the 90% per-condition bar) — S3 stays indicative, not gating. A real scorer bug (fused numerals like "500mg" not recognised as a dose hit) was found and fixed, confirmed on main. Nightly runs are green (13/13 on the most recent, canary 1/1).
-- **NOW:** a bigger, more clinically realistic suite (`clinical2`, lid-debug's spec, 108 stimuli weighted toward hi-en/hi/mr-en) was designed but hit a **TTS character-budget wall** (needs ~9,810 chars against 4,530 headroom in the 60,000-char ledger); two real allocation bugs were found and fixed along the way, and a cut-down 4,424-char version was proposed. Fable deferred it (zero further TTS spend for now) — parked, sealed.
-- **NEXT:** resume clinical2 if/when Fable lifts the TTS-budget hold; keep the nightly digital run going as REB's own DEV-ingest data (which reuses clinical1) grows.
-- **Dependencies:** Fable's word on the TTS-budget hold.
-- **Open decisions:** none for V.
+- **Exit test:** nightly scored report; fleet self-check for dead rooms; all stimulus types (rising/fixed tones, canary word "supercalifragilisticexpialidocious", call-and-response, mute/silence/unplug, background noise at set SNRs, multi-speaker conversations, en/hi/kn/te/ta + code-mixed, ElevenLabs voices).
+- **Status:** just started. **% done:** 25%.
+- **Owners:** diar-lab (lead/spec), lab-mover (plumbing), fleet (device checks), radar-kit (mic self-test).
+- **DONE:** authorised r428/428a; spec drafted and on main (058dcd4, spec draft 7e55ef3); Home Office Mac reserved as the acoustic rig; digital path on non-Google machines.
+- **NOW:** spec awaits Fable's ruling (phrase-set owner, Indic TTS fallbacks, cron schedule). ElevenLabs key returns HTTP 401 (V re-saves).
+- **NEXT:** V re-save ElevenLabs key; Fable rule on spec; build stimulus generator + digital injector.
+- **Dependencies:** Fable ruling; ElevenLabs key.
+- **Open decisions:** spec questions (Kanglish phrase set, TTS fallbacks, schedule).
 
 # 12. LABVIEW — lab viewer + rating pages
 
-- **Purpose:** the authenticated web viewer V uses to read transcripts, rate quality, and now see room/day status directly.
-- **Exit test:** every backfilled day visible with real data; V rates label200/pitch25 sets.
-- **Status:** on track. **% done:** 95%.
-- **Owners:** lab-viewer, eta-refuter-2/eta-refuter-3.
-- **DONE (this revision):**
-  - **V approved (14:00) the Room Timeline mockup** — ship it and fill with real data as it backfills. Built in the design's own layout/colours/legends (plain words first, engine names only in "Technical detail", blue-vs-orange never red-vs-green, IST everywhere, queue tokens not names at the top levels).
-  - **P1 LIVE (78921667):** tape coverage, bench windows, speaker turns, PQM queue truth, CAP prescription links, fleet alerts, a date picker over every backfilled day.
-  - **P2 LIVE (cc416d93):** an inspector — audio playback inside the existing Access-gated proxy (no new signed-URL surface), a synced transcript, Prescription/Sound tabs, and an append-only view log (a trail, not a gate) in its own guarded R2 prefix.
-  - **P3 LIVE (82936ec9):** REB per-engine layers in the inspector — Compare-engines, an engine-agreement strip, a provenance-underlined stitched line, and a Technical-detail panel — after 2 real bugs (wrong track-selection grouping key, segment-clock handling) were caught and fixed.
-  - `pitch25` (surgery review set, see SURGERY) shipped and loaded, 15/15 rows. Several labels were caught overclaiming completeness ("X of Y" implying finished when it wasn't) and fixed lab-wide.
-- **NOW (29 Sep, rev 26):** Deployed by Fable: voicecheck page, DRT held_out blocks (ff5aa52e), audio blocked on blind days (fe124699, #6904). Ready to deploy: 6f74d573 (blind status/lang/by_status to 'held_out', whitelisted view rows, seed R3/W51 guard; eta-refuter-2 PASS #7065, #7073). Flaky G3 test #58 fixed in the last commit.
-- **NEXT (rev 26):** Fable deploys 6f74d573 from a clean worktree and posts the Version ID; a walk-through link for one real day follows T-PALIMPSEST-5.
-- **[rev 25] NOW (29 Sep):** three items landed on main **11a4cf19** and all PASSed by refuter-2: the PALIMPSEST 7-lane engine timeline, the G3 blinded dose-rating page (`g3.js`, loader `g3_seed.py`), and the `/drt/<date>` Doctor-Room-Time page with a whole-encounter scrub bar. One deploy (`wrangler deploy` from a clean checkout) ships all; R2 drt loads for 19-25/28/29 Sep need a Cloudflare token (lab-viewer has none, #5868). The G3 page is waiting for lid-debug's item set and refuter-2's data checks before V sees a link.
-- **[rev 25] NEXT:** grow real REB coverage so both P3's per-window layers and the new day-view lanes stop showing "not processed yet"; wire in the encounter loop's output and the FreeScript artifact preview once those are ready.
-- **Dependencies:** REB backfill scale; ENCOUNTER's scored output.
-- **Open decisions:** none.
+- **Purpose:** the authenticated web viewer V uses to read transcripts and rate quality.
+- **Exit test:** V rates label200; consult view shows readable transcripts + speakers; /roadmap page renders this file.
+- **Status:** on track. **% done:** 80%.
+- **Owners:** lab-viewer (builder), eta-refuter-2 (checker).
+- **DONE:** viewer redesigned (r328) and live at lab.llmvinayminihome.uk behind Cloudflare Access; Consult View (337a); rating sets hosted (r359); 427L label200 fix LIVE (FABLE 450, v6713bbe8); 451 values applied (ALLOWED_EMAILS 6, RATERS 3). 451 thread CLOSED — Zaki's successful login verified (#3716); the two email-list shas stay UNVERIFIED by design.
+- **NOW:** V can rate label200 with language display working.
+- **NEXT:** speaker A/B/C chips in consult view; add a `/roadmap` page that renders docs/ROADMAP.md for V; calib30 chunkPlan fix (queued, own check).
+- **Dependencies:** Fable rulings.
+- **Open decisions:** none new.
 
 # 13. FOUNDRY — machines, agents, bus, models, budget
 
 - **Purpose:** the operational substrate everything runs on.
-- **Exit test:** reliable infra, budget tracked, no PHI leaks, cheapest passing model per job.
-- **Status:** on track. **% done:** 85%.
-- **Owners:** Fable (lead), herdr-kit, hf-fleet, minibot, roadmap (records).
-- **DONE (this revision):**
-  - **HF GPU strategy settled:** compute runs as **HF Jobs (`l4x1`, $0.80/h)**, not always-on GPU Spaces (a known mount bug blocks Spaces boot on this image); up to 5 concurrent L4 jobs approved for REB/W50/W52. hf-3..7 Spaces are paused (not deleted) as a fallback. Every HF job now copies each finished window to the bucket as it completes, not all-or-nothing at exit.
-  - **Bus latency fixed:** posting was doing 3 serial remote `herdr agent list` calls per message (~11.3s); parallelized with `Promise.all` (~7.7s), with one real regression (bus_roster losing box model/task display) caught and being fixed.
-  - **Nightly mirror hardened:** `mirror_daily.sh` went through a real multi-bug fix cycle (a patient-audio-path log leak, a return-code leak across days that made every day-2+ report a false success, a process-kill that could hit unrelated box processes, wrong midnight-boundary math) — fixed and PASSed; a one-off full mirror run completed clean (rc=0, 0 failures across all 4 streams).
-  - **Mini disk-hygiene plan written (W42):** an audit of `~/dev` worktrees/repos for safe-to-archive candidates (never touching the named production repos or anything referenced by a launchd job), a plan to move the 13GB local-model cache to the external SSD, and an investigation into a ~62GB internal-disk drop that traced to an old rsync mirror script's quoting bug (harmless, self-recovered) rather than anything happening today. Scheduled to execute tonight after 20:30 + D4 confirmed healthy.
-  - Small registry/tooling fixes: `herdr-ctl` resolves 32-hex machine ids to labels; `busctl.py` (the bus CLI) no longer silently exits 0 on a failed or lost post.
-- **NOW (29 Sep):** infra is stable. **New since rev 24:** eta-bus MCP tunnel v2 (auto-reconnect + keepalive) PASS 6911658c; even-jev tunnel PASS c0ca24bb; herdr-watch.py (fleet watcher) PASS 9770d8ab after a FAIL; asus-ubuntu dev machine added (no GPU, patient data allowed, herdr-kit 980c093 PASS); **warden** agent runs fleet sweeps (#5824); **chronicle** agent maintains a shared doc copy of this roadmap (#5840, not yet a registered bus name); agents now run Sonnet/Opus 5.5. eta-emotion-twin still holds ~9 GB of the T4 (only V can stop it, needs `sudo`).
-- **NEXT:** execute the approved Mini disk moves tonight; close the bus_roster regression.
-- **Dependencies:** D4 confirmed healthy before disk moves execute.
-- **Open decisions:** GCP S7 delete timing (V, carried forward, UNVERIFIED this pass); Zen top-up cadence (standing, D-10).
+- **Exit test:** all panes on their cheapest passing model; budget tracked; GCP gone; no free-model leakage.
+- **Status:** on track. **% done:** 70%.
+- **Owners:** Fable (lead), herdr-kit, fleet, tunnel-ops, radar-kit, lab-mover, conductor.
+- **DONE:** OpenCode migration complete (r432; FABLE 452 all-Go sweep, -cc panes stopped). Checkers → opencode-go/deepseek-v4-pro (r449). Zen = overflow-only from now (r452). GCP exit: compute stopped, disks awaiting S7 delete. Zen ledger live (zen-meter-go PASS 904f79b+807d0b3, bin moved to bd4c2e6). Privacy PASS (448): free-model fallback dead account-wide. Bus `fable` recipient confirmed resolving (stored_poll, #3711).
+- **NOW:** console Zen $181.00 anchor after bin move (#3712); fleet recomputes the delta. FREE MODEL SEEN 2nd fire — big-pickle on `mini:dir:nophi-run`, first Mini-directory fire, with Fable for routing (#3719/#3720).
+- **NEXT:** GCP S7 disk/snapshot deletion (V's gcloud auth, after 24h window); herdr-kit applies key-read denials; builder calibration evals.
+- **Dependencies:** V's gcloud auth for S7; if V has not yet restarted the eta-bus server, the async-wake/timeout fixes still land on that restart (fable addressing already confirmed working).
+- **Open decisions:** Zen top-up cadence (no auto-reload per r407); idle-pane memory target; the `mini:dir:nophi-run` free-model fire is Fable's routing call.
 
 # 14. SHIP — EvenScribe production releases
 
 - **Purpose:** ship tested, verified production releases without disruption.
-- **Exit test:** each train checked by an Opus checker on the exact sha, smoke green, no rollback needed.
-- **Status:** on track. **% done:** 92%.
+- **Exit test:** each train checked by a checker on the exact sha, smoke green, no rollback needed. Checker model = opencode-go/deepseek-v4-pro; kimi-k3 is reserved for production-deploy/security checks (r449).
+- **Status:** on track. **% done:** 90%.
 - **Owners:** scribe (deploy train), eta-refuter (checker), minibot (Mini monitor).
-- **DONE (this revision):**
-  - **D4 shipped.** cac6c29 was found already live from 07:17 (a push to `vinay/s1-auto-drain` auto-deploys — this is now a standing rule everyone must remember). Fable applied migration 0119 (21:14) and 0121 (21:22), set `ETA_JEV_MODEL=jev-1.13.0`, and forced a fresh redeploy (dpl_3s2o, READY 21:16, smoke green). Self-test-server (ed869d2) shipped as a fast-forward onto that. **Post-D4 train 4d7d8e0 live 21:48**, health confirmed within ~11 minutes.
-  - **A real MCP security bug found and fixed:** minibot's `self_test` room-command call exposed a general write-scope gap (any tool path reachable, not just self_test) — a `session_id`-based allowlist bypass was reproduced by eta-refuter-2, and scribe re-architected to **default-deny at the call boundary** instead, closing it. PASSed, merged onto the post-D4 branch (Yoga gate green, 4,771 tests), full gate green — **not yet pushed to production, waiting on Fable's GO.**
-- **NOW (29 Sep, rev 26):** scribe's bb62494 push is timed for 20:30 IST tonight (named GO stands; no migration); Fable asked scribe to check minibot's token entry carries rooms AND tools before pushing (#7095).
-- **NEXT (rev 26):** Verify the pushed sha on /api/health; then the 30 Sep train (F3 3d49523 + F4-prod df61b3f) only after eta-refuter-2 PASSes the train branch.
-- **[rev 25] NOW:** production is healthy at 4d7d8e0; the room-scope security fix is the one release waiting to ship.
-- **[rev 25] NEXT:** Fable's GO to push the room-scope fix; keep the "any push to s1-auto-drain is a deploy" rule visible in every future runbook.
-- **Dependencies:** Fable's GO.
-- **Open decisions:** none for V.
+- **DONE:** production 1e75667 live (route fix, smoke 924/924). Trains 73868e4 (209/209) and a92ebae (loop-guard + emotion dedupe) shipped.
+- **NOW:** candidate 5907cbc (watchdog candidate 2, migration 0119, tokens-extra) held on Fable's order.
+- **NEXT:** deploy 5907cbc once migration 0119 is manually executed (r339); whisper-gcpl4 removal from WHISPER_BULK_URLS on next push.
+- **Dependencies:** manual migration 0119; Vercel env edits by Fable/V.
+- **Open decisions:** 5907cbc deploy timing.
 
 # 15. RECORDER — next Room Recorder fleet release
 
 - **Purpose:** the next release of the EvenScribe Room Recorder app that runs on the room Macs.
-- **Exit test:** release ships with the queued fixes; self-update proven; rollout clean; in-app self-test working end to end.
-- **Status:** at risk. **% done:** 73%.
-- **Owners:** scribe, minibot, eta-refuter, sig-debug/sig-research (closed out this pass).
-- **DONE (this revision):**
-  - **signature_mismatch root-caused and CLOSED** (see ROOMS project for detail) — a real, but old and already-fixed, problem; nothing new to build.
-  - Self-test hook (in-app) built and previously PASSed (1da7232, rev 14); server-side `self-test-server` shipped in the fast-forward to production.
-  - A small 0.1.26 fix spec written for later (save codesign stderr to a file; ISO-UTC log-line format).
-- **NOW:** the MCP write-scope gap is confirmed **broader than just self_test** — minibot reports `end_day` (closing out a room's recording day) fails the same way. This is the same underlying gap SHIP's default-deny fix already closes for production room commands generally (see SHIP, still awaiting Fable's GO to push); once that lands, both self_test and end_day should work again from minibot's pane.
-- **NEXT:** push SHIP's already-PASSed room-scope fix (this now blocks more than one thing); then run the first real Home Office self_test; pick the next rollout room after Home Office.
-- **Dependencies:** the self_test write-scope fix.
-- **Open decisions:** which room follows Home Office (carried forward, Fable's call).
+- **Exit test:** release ships with the queued fixes; self-update R3 proven; rollout clean.
+- **Status:** just started. **% done:** 15%. Owner = scribe (build/deploy) + minibot (Mini monitor).
+- **Current version:** 0.1.24 (confirmed from the DB install row). Next release = **0.1.25**.
+- **Queued for it (5 defects, confirmed):** #1-#4 from scribe's handover (tape_advancing follows tape.pcm not tape.idx; poll reports device_lost; same-uid set_audio_input is a no-op; DEVICE_MISSING may not fire) **+ #5 device-loss recovery** (no verified recovery path after USB loss — release must prove one). Plus self-test hooks (r368/369) and auto-start at clinic open if V approves (item 151).
+- **Release process:** R3 self-update proven 10 Sep (UNVERIFIED exact date). Gates + rollout plan to be written.
+- **NEXT:** confirm owner and the exact queued list; write gates + rollout plan.
+- **Dependencies:** V's auto-start ruling; owner confirmation.
+- **Open decisions:** auto-start inclusion; which fixes make the cut.
 
 # 16. ORBOX — OT recorder upgrade for robotic surgery
 
-- **Purpose:** upgrade the OT recorder (Linux orbox3 in ORB3) to capture robotic surgeries.
-- **Exit test:** a robotic surgery captured end-to-end, tested first with SELFTEST stimuli in the empty OT.
-- **Status:** just started. **% done:** 15%. No change this revision.
-- **Owners:** orbox (design, Pool A, NO-PHI); build owner still to propose.
-- **DONE:** design v2 (unchanged from rev 14).
-- **NOW (29 Sep, rev 26):** V answered D-2..D-5 (#6990); the kit list is delivered (T-ORBOX-5, #7051). All ORBOX building is on HOLD until V says so.
-- **NEXT (rev 26):** Nothing dispatched; the vendor quote is V's step. Reopen when V lifts the hold.
-- **[rev 25] NOW / NEXT:** unchanged — still waiting on V's rulings D-2..D-5.
-- **Dependencies:** V's rulings.
-- **Open decisions:** see DECISIONS (D-2..D-5), unchanged.
-
-# 17. FREESCRIPT — ETA consult → structured artifact → Pulse FreeScript
-
-- **Purpose:** turn a captured clinic encounter into a structured artifact Pulse's FreeScript can use, without an ETA transcript ever passing for a doctor's own dictation unreviewed.
-- **Exit test:** a versioned artifact schema + prototype scored against real linked consults; handed to Pulse's team.
-- **Status:** on track. **% done:** 95%.
-- **Owners:** freescript (researcher/builder).
-- **DONE (this revision, W38):**
-  - **V ruled (27 Sep 11:05): no doctor-paste, no Pulse code change by the ETA team.** Instead ETA defines and produces a structured JSON artifact; Pulse's own team designs the integration.
-  - Schema `eta.freescript.v0.1` built, mirroring FreeScript's own post-extraction shapes (medicines, investigations, procedures, advice, diagnoses, follow-up) plus the 11-heading English note and per-item provenance (evidence spans, speaker, status [prescribed/continued/stopped/not-given/discussed-only], negation flag, confidence, model+version).
-  - `README-FOR-PULSE.md` written: field guarantees, versioning, open integration questions for Pulse (emit mechanism, draft-vs-submitted, auth, draft matching), a sequence diagram of options without choosing one.
-  - 3 invented example artifacts (including a negation case and a stopped-drug case), schema-validated.
-  - **Offline prototype run on 5 real linked CAP consults (box only, PHI never left the box):** scored against CAP prescriptions as truth. Two real fix rounds closed stopped-drug/not-given order-guard holes; final version v0.1.2 PASSed, W38 **CLOSED**.
-- **NOW:** the artifact + docs are ready to hand to Pulse; ETA's own build phase is done.
-- **NEXT:** V/Fable hands the artifact and docs to the Pulse team; ETA's part resumes only if Pulse asks follow-up questions.
-- **Dependencies:** Pulse team's own integration decision.
-- **Open decisions:** none — this phase is closed.
-
-# 18. ACOUSTICS — what we already know about each room, from existing tape
-
-- **Purpose:** characterise every room's recording acoustics from tape already on hand, and tie it to CLARITY's STT outcomes.
-- **Exit test:** a profile per room; a measured, evidence-based VAD-blind-spot finding; a remediation list.
-- **Status:** on track. **% done:** 90%.
-- **Owners:** acoustics, eta-refuter-2.
-- **DONE (this revision, W39):**
-  - **A1 (VAD-blind check):** measured against a strong reference detector. **OPD 1 misses 9.4% of real speech (mild); Third Floor misses 23.7% (material)** — a real, measured gap between what the mic hears and what reaches STT.
-  - A VAD-threshold sweep (0.5 baseline vs 0.35 vs 0.2) was **pre-registered and found no win** — neither alternative recovers materially more real speech without also leaking more non-speech; Third Floor's fix needs to be physical (mic placement/swap/echo reduction), not a software threshold tune.
-  - **A2 (acoustic-vs-transcript-quality correlation):** initial finding was backwards and self-corrected by eta-refuter-2 — empty/garbled transcripts correlate with **quieter**, not noisier, windows (nobody talking, not the VAD starving on noise).
-  - A real sample-mismatch bug was caught before it reached lab-viewer: the VAD sweep and a missed-speech-spans export had each independently drawn a *different* sample than A1's original 40 chunks (the underlying manifest had grown between runs); both were re-run against A1's exact chunk ids before anything was published.
-  - Final report (`W39` sections A1-A4) done, 2 text fixes, both refuters' PASS.
-- **NOW:** the room-acoustic-baseline JSON is built (feeds SELFTEST's room scorer, see project 11).
-- **NEXT:** Third Floor physical remediation is a V/Fable hands-on decision; A5 (extend the tape window to 7 days, add Dietary/Home Office) not yet started.
-- **Dependencies:** V/Fable for physical room work.
-- **Open decisions:** Third Floor physical fix (V/Fable).
-
-# 19. REB — Room Evidence Bundle *(NEW, W47)*
-
-- **Purpose:** run every audio engine (STT, translate, diarization, emotion, terms) independently on every window, store all outputs on one clock, and build everything downstream (fused transcript, encounter analysis, FreeScript artifact, tone, viewer layers) from that one store, without ever re-touching the audio.
-- **Exit test:** a full clinic day's worth of tape run through every v1 layer, stored, and readable by every downstream consumer, finishing before 07:00 the next morning without starving the live daily STT loop.
-- **Status:** on track. **% done:** 45%.
-- **Owners:** reb (builder), eta-refuter-2 + eta-refuter-3 (checkers, one per branch, never the same as the builder).
-- **DONE:**
-  - Spec settled: `REB-SPEC-v1.md`. Layout `reb/<date>/<room>/<window>/{manifest.json, tracks/<layer>.<engine>__<version>__<cfg8>.json}` + `index.jsonl`. Principles: never discard an output, append-only (a re-run adds a new track, nothing overwritten), one UTC-ms clock, every track records engine/model/version/config-hash/status.
-  - **Sizing done:** whisper 52-100x realtime; SraVaani 5.3x (CPU-heaviest); pyannote-diar 14x; Nemotron-diar 141x (shadow only). On HF L4, IndicConformer (all 5 heads) + SraVaani validated on real clinic-hour content at **18.7x realtime, $0.043/tape-hour** (an initial concern about empty IndicConformer output was confirmed as real model behaviour on English-only heads, not a short-circuit bug).
-  - **Library built and merged (main 1ee3b4a4):** schema + writer (append-only, sha256 per file) + validator + `reb.py` reader API, hardened through 3 real-bug fix cycles found by adversarial review (a failed first write orphaning a track and locking the window forever; an R2-mirror failure that could delete a track the manifest still listed; `tracks(latest_ok=True)` silently dropping engines that only ever failed).
-  - **Fan-out runner built:** claim-once semantics across box/c3/HF workers, lease + fencing so a dead worker's claim can be stolen safely (a real empty-claim-file-never-stealable bug was found and fixed).
-  - **DEV ingest COMPLETE: 222/222 windows (192 clinical1 synthetic + 30 real DEV30 clips), 0 crashed, 1,998 stt tracks, 1,857 ok / 141 empty / 0 failed**, independently triple-verified. (One real crash-at-193 bug was found and fixed first: a stub for the real DEV30 clips never wrote `source_windows`.)
-  - A chunk-level `source_windows` addition (native `{r2_key}`-only entries) is pushed but not urgent/not merge-blocking.
-- **DONE (this revision):** four independent consumer builds (S-REB/diarization, T-REB/emotion, A-REB/acoustics, plus DEV-ingest itself) all confirmed the same thing on their own — REB held 0 real 26/27 Sep windows, only the synthetic test suite — which made the case for prioritising the real backfill impossible to ignore.
-- **NOW (29 Sep, rev 26):** 25 Sep collected 2,358 tracks (393 windows x 6, 0 excluded) and 24 Sep 1,428 (238 x 6, 0 excluded). SraVaani-only driver 9f3b3004 (config hash b3584dd6) is for the 23 TEST windows; the commit is local-only and needs Fable's OK to push (#7091). collect_hf.py 9ebfc3a8 review is on record (#6649).
-- **NEXT (rev 26):** Write the chunked SraVaani track on the 23 TEST windows after the freeze post; collect the 26/27 Sep CTC re-run; skip the 14 blind room-days in every collector.
-- **[rev 25] NOW (29 Sep):** windows for 26/27 Sep are cut (870/870) but **STT is only partly filled**: reb corrected its earlier "done" claim (#5691); warden sweep 2 counted whisper-auto 126/440 (26 Sep) and 272/430 (27 Sep). acoustics is done (440/440 and 430/430, 20/20 recompute match). 24 CAP TEST consults are ingesting as `dev_clip` windows with the full engine set (branch reb/real-backfill-26sep @ d948c923; `build_cap_catalog.py` awaits review); the Indic twin is saturated, so Indic runs as a retry pass. Diar layer = local twin; emotion layer parked. The month backfill is driven by hist-bulk (see BACKFILL).
-- **[rev 25] NEXT:** trigger T-REB/A-REB's real runs on the new windows; find out why production diarization stops at 23 Sep and when it'll catch up (unblocks S-REB); ingest the FUSER TEST set.
-- **Dependencies:** HF Jobs capacity; care not to starve the live daily STT loop.
-- **Open decisions:** none for V.
-
-# 20. FUSER / G3 — the transcript-fusion scorer *(NEW)*
-
-- **Purpose:** read every engine's REB track for a window and write one trustworthy fused transcript with word-level provenance, scored automatically the same way CLARITY's router fix was.
-- **Exit test:** CLARITY's win rule (S2 improves, S1 not worse) applied to the fused output vs today's production router; V's final rating on a sample.
-- **Status:** STOPPED 30 Sep 05:55 (v2-E failed the fresh gate; Fable #7918 item 9). **% done:** 55% at stop.
-- **Owners:** router-fix (builder), lid-debug (designer), eta-refuter-2/eta-refuter-3 (checkers), cap (fresh-set author).
-- **DONE:**
-  - Design (v0 = rules: SraVaani-script language pick + keep-Whisper-numbers; v1 = Gemini reads all tracks and writes one transcript with provenance) witnessed through 4 addenda, each closing real gaps found in review (yes/no/haan affirmations wrongly on the general-allow list — a safety hole; uncitable context tokens not rejected; a majority-overlap window widened to ±1500ms for interpolated SraVaani).
-  - Step-1 freeze pinned: design + ADDENDUM-1/3 + DEV30 + fuser_v0 + ETR + the REB pin, all by sha, witnessed.
-  - **B1 (pre-pass: tokens, agreement, LID, number parsing, drug matcher) complete, 73 tests.** **B2/B3 (schema/prompt/Gemini wrapper + validator V1-V6) complete**, closing 3 real safety/robustness holes found in review.
-  - **B4 RUN 1 (the first full scoring pass) complete: 222/222 windows, $6.85, 0 errors** — 39 pass (17.6%) / 130 repair (58.6%) / 53 fallback (23.9%); the DEV30 real-clip stratum scored 30/30 pass. Key finding: 118/187 dropped items lack a "w" (word) field — fixed in the prompt for RUN 2.
-- **NOW (30 Sep, rev 28):** STOPPED. v2-D failed DEV (G4 33.8%/25.3%, G3m; #7635). v2-E ran once on a fresh 384-window set and failed (#7873, re-derived #7876): D-any 3 false-drug of 69 (4.35%, upper 12.02%), doses off (5 of 33 wrong), G2 32.4 vs 32.5, G3m nonzero; D-two 40 inserts < 50. No TEST spend. Fable writes it up for V at 07:30. The ETR/dose-reader work and the RUN 3 numbers stay on record.
-- **NEXT (rev 28):** V's decision after Fable's write-up; nothing runs meanwhile.
-- **[rev 26] NOW (29 Sep):** RUN 3 DONE (222/222, USD 8.20). TEST plan: n = 23, cap USD 20, freeze at runner a3be8bcc (WITNESSED) with fuser code byte-unchanged from f9b6706e / b4249b66; G3 builder a5cf1611; extractor must read native numbers (option b, 19-value limit).
-- **[rev 26] NEXT (superseded):** refuter-2 PASS on runner and extractor, freeze post, reb SraVaani track, v0 tracks, TEST; then lid-debug builds the G3 set from TEST output (not DEV) and refuter-2 checks it before V's link.
-- **[rev 25] NOW (29 Sep):** **RUN 3 approved (cap USD 15) and started** (router-fix, code 4f0d2caba422, 222 DEV windows, seed 3, `eval-out/b4-dev-run-3.jsonl`). RUN 2 cause (lid-debug #5638, checked #5647): dropped items lacked the "w" field because the reply shape allowed a mixed format; fix = six homogeneous arrays with every field required (ADDENDUM-7, PASS dd22636/4f0d2cab), V4 scope (ADDENDUM-6), and clause guard V7 (ADDENDUM-8/8a) so an invented dose cannot reach the English text. v0 baseline computed in memory (8dbc633b), because DEV REB has no v0 track. Step-2 code freeze ce91eb1 stands for TEST; the 24 TEST consults are ingesting into REB. G3 blinded page is built and on main.
-- **[rev 25] NEXT:** score the frozen `ce91eb1` output against S1/S2 the same way the router fix was scored (the win rule — S2 up, S1 not worse — applies here too, and a worse fallback rate is a real amber flag for that scoring, not just a training-time metric); V's blinded rating pass once that's done.
-- **Dependencies:** the S1/S2 scoring run.
-- **Open decisions:** V rules on what replaces FUSER after Fable's write-up (07:30 30 Sep). The dose-rating commitment is void unless a new fusion is approved.
-
-# 21. W50 — clinical speech-engine bake-off *(NEW)*
-
-- **Purpose:** test outside medical-speech-trained engines (as a REB "terms" layer) against production's own engines, to see if any of them recover drug names production currently misses.
-- **Exit test:** a candidate only "wins" if drug-name hit rate improves AND the false-drug rate doesn't get materially worse, judged on a pre-registered, chance-corrected comparison.
-- **Status:** at work. **% done:** 55%.
-- **Owners:** terms (builder), eta-refuter-2 + eta-refuter-3 (checkers, both witness every addendum).
-- **DONE:**
-  - Candidates: `medasr` (Google, HAI-DEF terms — **V accepted the terms for lab evaluation, 27 Sep 15:17**), `parakeet-med` (NVIDIA/community fine-tune), `whisper-arca-lora` → **later replaced/merged as `whisper-med-merged`** in practice.
-  - Smoke test on real HF Jobs: medasr and whisper-med-merged passed; **parakeet-med FAILED at smoke (deterministic truncation)** after a 4-iteration debug budget was spent — **withdrawn (ADDENDUM-18)**. Bake-off proceeds with 2 candidates.
-  - **Pre-registration closed** after an unusually long, thoroughly witnessed chain (17 addenda): the truth set is 22-24 Sep CAP-linked consults (122 drug items/49 consults, kept separate from FUSER's own 24-consult TEST set); metrics are drug-name hit, dose hit, and false-drug rate vs three baselines (whisper-auto, whisper-cap2, sravaani); a chance-corrected pairing scheme (excluding shared-drug contamination) and Fable's hard cap (false-drug rate not worse than 2× the best baseline) were adopted as the entry rule; a 60-minute span cap was set to keep long outlier consults from dominating cost; scoring is per-comparison-pair exclusion (only drop a consult from the one pair that failed on it, not from every comparison).
-  - **Set (b) (192 clinical1 synthetic windows) SCORED: 384/384 tracks committed, 0 rejected**, independently verified twice.
-  - Set (c) (87 real consults / 102 drug items) built end-to-end: manifest resolution, a decoder, upload guards, all reviewed and fixed through several real-bug rounds (drug-name-ceiling undercounted because of unit/strength text in the lexicon — fixed, ceiling rose 91→112/122; a 30-second Whisper feature-extractor truncation bug — fixed).
-- **NOW (30 Sep, rev 28):** T-TERMS-40 and T-TERMS-41 done: window 5 SraVaani v2 written and the 23 pending baseline windows finished (23/23, 69 tracks, 0 conflicts); set (c) is 76/76 latest-ok (list 309294e5); scoring (STEP 3, reading via select_latest_ok) is next.
-- **NEXT (rev 28):** score set (c) primary n = 76 with the 11-clip stratum shown separately; write TERMS-BAKEOFF.md.
-- **[rev 26] NOW (29 Sep):** set (c) primary = 76 windows; 11 R3 clips are a labelled stratum shown with and without; window-5 SraVaani retry driver 98414c5f PASS (#7085).
-- **[rev 26] NEXT (done):** Run the window-5 retry when Fable grants write permission, then finish set (c) and write TERMS-BAKEOFF.md.
-- **[rev 25] NOW:** set (c) scoring is running against production (3/87 windows done as of the last read); no scored verdict yet.
-- **[rev 25] NEXT:** finish set (c) scoring; write `TERMS-BAKEOFF.md`; if a candidate wins, flag MedASR's production use for Even's legal/HAI-DEF-terms review (V/Kush).
-- **Dependencies:** none blocking; budget ($10 total) has ample headroom left.
-- **Open decisions:** none for V yet — legal review is a future step only if a candidate wins.
-
-# 22. W52 — Manoj Kumar S encounter + voice package *(NEW, V priority, urgent)*
-
-- **Purpose:** V asked for every recorded encounter of Dr Manoj Kumar S (Ortho, OPD 4 + OPD 7, all recorded days) as audio clips, his-speech-only clips, transcripts, and his Pulse prescriptions, in one folder for his own focused review.
-- **Exit test:** first cut delivered to V's MacBook Air by **15:00 IST**; the complete package by **17:00 IST**, today (28 Sep).
-- **Status:** DONE for today (both deadlines met). **% done:** 95% — closed pending only a possible later rescan.
-- **Owners:** linker (encounters + Rx), lx (voice scan + diarization), reb (integrator/package assembly), diar-lab (per-encounter diarization support), hf-fleet (GPU jobs), vj-refuter (attribution spot-check), eta-refuter-3 (package integrity check).
-- **DONE:**
-  - Target identified precisely: Dr Manoj Kumar S (ortho, uid keyed, never by name in code) vs a negative control, Dr Manoj C (physician, a different doctor, kept in a separate 0700 directory for PHI hygiene). V's own September schedule is treated as a **prior only** — a real counterexample was found (he was recorded in the "wrong" room on 16 Sep), so room-number assumptions are never trusted blind.
-  - Attribution rule set by Fable (12:20): per-turn voice-match score ≥0.55 counts as a match; a token is FOUND if ≥3 matching turns or ≥15s of matching speech land inside the visit's time window (±30s), else WEAK.
-  - **Encounters + prescriptions DONE:** 176 PQM consults (19 Aug-27 Sep, 28 days) found, 174 linked to a prescription, 367 Rx line items pulled. **Encounter audio cut is FINAL: 89 full-encounter clips + 28 his-speech-only compilations** (of 176 rows: 89 cut clean, 30 had no tape in the visit window, 50 had no tape inventory at all, 2 hit a tape-gap artifact, 5 were non-completed visits and skipped). A real data-column bug (a wrongly-read table made it look like there was no real patient-id column) was found and corrected; all 176 rows now carry the real linking id.
-  - **Voice scan: 22 of 39 OPD4+OPD7 room-days scanned — 28 FOUND, 2 WEAK, 47 no-evidence, 0 double-room conflicts.** A positive control confirmed the scoring pipeline is sound (low scores are truly "not him," not a bug). vj-refuter's independent spot-check exactly matched lx's numbers.
-  - Two real pipeline bugs found and fixed during the scan build: a stale summary key made every clip's log falsely say FAIL when it hadn't; and a first "4-way parallel" run had no real work-sharding, so all 4 workers processed the same clips in lockstep (fixed with proper hash-based sharding, now genuinely 4x).
-- **DONE (this revision) — first cut shipped:**
-  - Two correctness rounds before shipping: (D1/D2) the earlier three-value confidence scheme was conflating "scanned, zero evidence" with "never scanned at all" into an inflated WEAK count — split into FOUND 28 / WEAK 2 / NOT-IN-OPD4-7 47 / NOT-SCANNED 94; (D3) a stale-looking tape-gap flag on 2 real FOUND tokens turned out to be routine ~5-second chunk-rotation gaps, not missing tape — the tape-gap rule was relaxed (coverage <90% of the span, or any single gap >30s) and both tokens correctly recovered as FOUND.
-  - **A real privacy/scope problem was caught and fixed before shipping.** eta-refuter-3's package-integrity check found that of 119 candidate clips, 46 were "NOT-IN-OPD4-7" (his voice confirmed absent at his own visit's time) — and a clip where he's not heard at his own token very likely holds a *different doctor's real consultation with a different real patient*, outside the package's stated scope. Resolution (vj-refuter + reb): split the 46 by how much other-room audio actually exists in that window — **11 "confident absent" clips (≥60s of other-room audio, none of them) pulled from the package entirely**; the other **33 "thin audio" clips (<60s) held as NOT-SCANNED**, not shipped either, since absence there isn't proven. A 12th borderline case's rule was checked line-by-line before being resolved the same way.
-  - **First cut FROZEN at 15:00:** `~/eta-data/manoj-package-cut1`, 381 files, `SHA256SUMS e8ffafb7…`, **vj-refuter's checker: 26/26 PASS.** A second check (#5433) caught one more real bug in cut1: 5 never-completed appointments (no-show/cancelled/in-progress) were mislabelled as "voice absent" instead of "not yet scanned." **Fixed as cut2** (`SHA256SUMS 4598155f…`, same 381 files): the never-completed rows get their own bucket, and the README's summary counts are now computed straight from the csv at build time — never hand-typed — so V can always reproduce them himself. **vj-refuter VERIFIED cut2: 36/36 PASS**, including the corrected counts (audio 30 = 28 found + 2 weak / confident-absent 10 / not-yet-scanned 80 / no-tape-at-all 51 / never-completed 5 = 176). **Fable pulled cut2 to V's Air at 14:52 IST** (checksum verified, rc 0); cut1 renamed aside on the box, superseded.
-  - **A third real bug caught: 2 of the 30 "transcribed" clips had zero STT text.** reb root-caused and fixed the regression, and swept in real diarization for more clips as it landed (25/30 → 26/30, each swap checked against the independent voice scan by vj-refuter — 23/24 agree; one merged-speaker-cluster case correctly kept on the safer scan label rather than the noisier real diarization). **Fixed as cut3** (388 files, `SHA256SUMS dee6723c…`). **vj-refuter VERIFIED cut3: 43/43 PASS**, including a fresh check that all 30 transcripts now actually have text. **Fable pulled cut3 to V's Air**, checksum verified. One clip (`iozbnatE`) has a forced-2-speaker repair sitting behind 4 explicit acceptance guards — it **failed its own guard 1 in every configuration tried and was correctly left on the safer scan label**, closed, no further attempt.
-  - **cut4 — shipped clips nearly double: 52 FOUND (was 28) + 2 WEAK = 54.** lx re-scanned 7 more room-days on hf-fleet's cloud GPUs (Yoga/L4) and found 24 more of his real consultations; hf-fleet independently confirmed one apparently-silent room-day really is silent (checked all 59 audio chunks). **Two more real bugs found and fixed:** `apply_fable_ruling.py` never physically moved a clip's files when its status changed tier (only ever moved things *out* of shipped, never in — a real correctness gap); `build_transcripts.py` pointed at an empty package path for speech-to-text output — this is the actual root cause of cut2's silent "transcribed but no text" bug. Both fixed with the root cause documented in-code. A scope caveat was added after a real finding: **27 Sep has other doctors' visits overlapping his OPD 7 time slots**, so the README now says the room wasn't exclusively his that day, rather than implying otherwise (his own voice evidence that day still stands on its own). **cut4 frozen** (526 files, `SHA256SUMS c0892fde…`), **verified independently by BOTH checkers** (eta-refuter-3 47/47-equivalent PASS, vj-refuter 47/47 PASS, both against cut3, 0 fails), **STT confirmed complete on all 54 shipped clips.** **This is the version delivered.**
-- **NOW (29 Sep, rev 26):** The 54-clip package stands as delivered; the W52 exposure (V heard the package) is recorded and lx's addendum is under review (aaf02d1a, then 566f0268 for the 54-encounter scope).
-- **NEXT (rev 26):** No new W52 work; W51 must treat any future human test on those room-days as not blind for V.
-- **[rev 25] NOW:** **cut4 PULLED to V's Air — Fable confirmed it as the 17:00 full cut.** shasum verified, 54/54 transcripts with real text. reb, lx and the rest of the W52 team have stood down. 103 of the 176 visits remain unresolved (52 not yet scanned, 51 with no tape at all) — these are not gaps in the work, just visits with no clean evidence either way; they stay honestly held, not guessed at.
-- **[rev 25] NEXT:** nothing active. If a later rescan promotes more of the 103 held visits, reb runs a `cut5` as its own small update — otherwise this project is done for today. W51 (the formal voice study) can now resume, since it was deliberately waiting for W52 to finish first.
-- **Dependencies:** none — closed.
-- **Open decisions:** none for V. Both deadlines (15:00 first cut, 17:00 full cut) were met.
-
-# 23. W51 — Manoj voice study (formal) *(NEW)*
-
-- **Purpose:** the rigorous, pre-registered, scientific version of "is this voice Dr Manoj Kumar S" — a proper study rather than an operational scan, done AFTER the urgent W52 package.
-- **Exit test:** a pre-registered method that survives review, with a placebo/negative-control arm, run on data that was genuinely held out at the time of the prereg.
-- **Status:** blocked. **% done:** 20%.
-- **Owners:** lx (build), vj-refuter (checker/sealed-truth custodian).
-- **DONE:** an early anchor-mixing check (H05) came back clean — no evidence of mixed identity in the older anchor data; the "room number = OPD number" shortcut was formally ruled UNVERIFIED (a real counterexample exists).
-- **NOW (29 Sep, rev 26):** v3.1 re-review pending. lx drafted the W52 exposure addendum (aaf02d1a NOT YET from vj-refuter #7079; v2 566f0268 with 54-encounter scope, #7099).
-- **NEXT (rev 26):** vj-refuter's verdict on the addendum and on v3.1; no scans until it passes.
-- **[rev 25] NOW:** **prereg v2 FAILED review (#5319):** it was overtaken by W52's own stored voice-print and scan data, which is no longer genuinely blind test data once W52 has used it; its ±180s padding window conflicts with Fable's own ±30s attribution ruling for W52; and it has no placebo arm. lx has acknowledged the FAIL and is deferring a v3 prereg.
-- **[rev 25] NEXT:** **W52 shipped its 17:00 full cut and stood down — v3 prereg can now start**, designed against whatever of the 176 visits W52 has NOT already touched (lx noted it's picking this back up now).
-- **Dependencies:** none blocking now.
-- **Open decisions:** none for V — this is intentionally paused.
+- **Purpose:** upgrade the OT recorder (Linux orbox3 in ORB3) to capture robotic surgeries: separate USB webcam audio+video, dual audio (TONOR mic + webcam mic), more microphones around the room, possibly wireless directional mics.
+- **Exit test:** a robotic surgery captured end-to-end (video + dual audio + room mics) through the pipeline, tested first with SELFTEST stimuli in the empty OT.
+- **Status:** just started. **% done:** 5%. Owner to propose.
+- **Owners:** none yet — **proposed: lab-mover or scribe/minibot for capture, herdr-kit for Linux install, fleet for monitoring**.
+- **NOW:** requirements listed but no owner, no hardware, no software.
+- **NEXT:** confirm with V that "speakers" means microphones (they collect audio); propose owner; hardware list + purchase (V); Linux capture software (multi-device sync + timebase + storage/hr + retention); how video joins pipeline (storage, viewer, PHI/consent — V's decision); test plan with SELFTEST stimuli in empty OT; phased delivery.
+- **Dependencies:** V's hardware purchase + consent ruling; owner assignment.
+- **Open decisions:** see DECISIONS (D-2..D-5).
 
 ---
 
-# 24. PALIMPSEST — every engine on one timeline *(NEW)*
-
-- **Purpose:** show, for one room-day, every derived layer (Whisper, IndicConformer, SraVaani, MedASR speech-to-text; speaker split; acoustics; tone) as overlaid lanes on one time axis, so a person can see where engines agree or diverge.
-- **Exit test:** V opens one real room-day (26 or 27 Sep) in the viewer and sees every lane populated with real data, times correct to the window clock, with empty lanes saying "no current track segments" rather than hiding.
-- **Status:** on track. **% done:** 75%.
-- **Owners:** lab-viewer (page), reb (data), eta-refuter-2 (checker), hist-bulk/split/acoustics (layers).
-- **DONE:** timeline code PASSed (f05c2afe, #5640) and merged with the G3 page and the `room_tape` offset fix onto main; viewer main **11a4cf19** (PASS #5897). Deploy script re-pinned three times after refuter-2 caught a stale-default deploy. 26/27 Sep windows cut (870); acoustics lane full (870/870); diar lane partly filled (local twin, 26 Sep).
-- **NOW (29 Sep, rev 26):** Seed blind guard PASS (31199dcd, #7065); offset fix and the new deploy pin are in 6f74d573. STT: 25 Sep and 24 Sep are on HF; 26/27 Sep diar shards finishing.
-- **NEXT (rev 26):** Fable runs step 2 (per-day reb_timeline_seed.py merge + timeline_seed.py load --replace) after eta-refuter-2 reviews the new sha; V's walk-through follows.
-- **[rev 25] NOW:** STT lanes only partly filled (26 Sep 126/440, 27 Sep 272/430 whisper-auto at sweep 2); no translate layer yet. Deploy waits on Fable/V (one run with the Cloudflare token). Fable's order names viewer `0b003f89`; not visible on origin/main or the bus, UNVERIFIED.
-- **[rev 25] NEXT:** finish 26/27 Sep STT and diar; run the deploy; V opens the day; then the month backfill fills earlier days.
-- **Dependencies:** REB STT fill, GPU capacity.
-- **Open decisions:** none for V beyond running the deploy.
-
-# 25. DRTPQMA — doctor, room, time, prescriptions, audio on one page *(NEW)*
-
-- **Purpose:** for any clinic day, show which doctor sat in which room when (from PQM prescription times plus the OPD schedule), with the tape audio for each consult one click away.
-- **Exit test:** `/drt/<date>` shows every completed PQM consult as a block by room, correctly placed or honestly listed as "room unknown" or "no tape", and each placed block plays its own audio; doctor-room mapping proven for a sample of doctors by voice.
-- **Status:** on track. **% done:** 80%.
-- **Owners:** linker (data), lab-mover (tape index), lab-viewer (page), eta-refuter-2/eta-refuter-3 (checkers), diar-lab/jev-fix/notesafe/sig-research (mapping proofs).
-- **DONE:** encounters and drt files for every tape day 19-29 Sep on the box (26 Sep: 284 consults, 66 placed by schedule, 205 room-unknown, 13 no tape; 2,009 across all days); `/drt/<date>` page PASSed and on main 11a4cf19 with a scrub bar over the whole encounter and split-encounter ids handled. R2 holds 26 and 27 Sep, byte-identical to local. Mapping proofs: Salanki proven (voice 14/16), Poornima midday confirmed (OPD6), Animesh supported, Ankit partial.
-- **NOW (29 Sep, rev 26):** Live for 11 tape days 19-29 Sep; 62 held-out encounters lose audio (grey blocks); content-only proofs 0 of 5; T-DRTPQMA-4 (29 Sep refresh) waits for the clinic day to end (~20:45).
-- **NEXT (rev 26):** Sig-research quarantines the 16 excluded wrong-room clips (0700, no deletes); eta-refuter-3 recomputes counts; place VERIFIED voices only after V's check.
-- **[rev 25] NOW:** deploy pending (see PALIMPSEST); R2 loads for 19-25/28/29 Sep blocked on the Cloudflare token (loop in #5889; 29 Sep is partial, sha b38bd170387b). Room-unknown doctors (1,364 encounters) cannot be placed without voice or another room source.
-- **[rev 25] NEXT:** run the deploy and loads; place room-unknown doctors once auto-minting extends to them; add Range check `curl -sI -H "Range: bytes=0-99"` after deploy.
-- **Dependencies:** VOICEPRINT minting for room-unknown doctors; deploy by Fable/V.
-- **Open decisions:** which room source to use for room-unknown doctors (Fable).
-
-# 26. KOYAL — Koyal 600M Indic STT on HF L4 *(NEW)*
-
-- **Purpose:** run the Koyal Indic model over the backfill days as another STT track, one per language prompt, for comparison and coverage.
-- **Exit test:** every day in the pump range 27 Sep to 18 Sep has four `hf-l4-koyal-1` tracks in `~/eta-data/backfill-results/<day>-koyal-out`, each with an rc=0 line from Fable before hf-fleet adds the day.
-- **Status:** on track, running on HF again. **% done:** about 60% by tracks (UNVERIFIED as a ratio; hf-fleet counted ~540 of ~1,970 remaining windows landed at ~06:00, plus 27-22 Sep and the box days done). Board T-KOYAL-3 says 62% (warden, 01:xx).
-- **Owners:** hf-fleet (runner), reb (collector), eta-refuter-3 (artefact checks), Fable (staging, rc lines).
-- **DONE:** spec sha16 f1f57dc35e533ae5 (#7516); model revision 959231d2816f60f9ea680246092270fb059e0785; artefacts PASS: koyal_hf_job 80cf1ff9, launch_koyal 044716a1, pump 650548ca, reb collector e83a3bae; config hashes hi c2602ab5, kn 895da7dc, ml 7fc7026f, te b8f1e120; smoke RTF 0.0044; bulk GO #7588; launched #7592.
-- **NOW (30 Sep, rev 28):** HF pump restarted ~05:14 after credit was added (25 concurrent OK; spend about USD 2.4 since restart at ~06:00; full run estimate USD 10-15); ETA ~08:30 for the HF days. Collected and verified: 27-22 Sep (8,640 tracks), 21/20 Sep (box), 19 Sep (box 58 + HF), 18/15/12 Sep (725 windows). 12 Sep has 22 windows not landed; they are not staged until the misnamed-id map PASSes.
-- **NEXT:** finish 17/16/11/10 Sep on HF; 29 Sep is cut (418/418) and 28 Sep cutting, both wait on staging; T-KOYAL-5 (viewer lane group) waits on Fable to get the spec onto the lab-viewer box; compare tracks with SraVaani and other STT tracks.
-- **Dependencies:** HF budget (credit is V's); blind rule (14 held-out room-days, union sha16 f07171dc); misnamed-id map.
-- **Open decisions:** none.
-
 ## Critical path
 
-1. **Tonight's HF proposal shards (~21:30-22:00)** feed V's combined voice-check session and then voice placement in DRT; a wrong-config or blind-day leak here spoils V's gate. Also frees GPUs for the backfill STT wave.
-2. **FUSER is stopped (v2-E failed the fresh gate).** V decides after Fable's 07:30 write-up. Meanwhile: router LID lab build (R-A), W50 set (c) scoring, and the KOYAL HF finish.
-3. **Viewer deploy 6f74d573 + PALIMPSEST seed step 2 + V's walk-through** (Fable runs both; the seed fix passed review).
-4. **SHIP: scribe bb62494 push at 20:30 IST tonight**, then the 30 Sep train (F3 + F4-prod) after refuter-2 PASS.
-5. **BACKFILL STT wave on HF (T-BACKFILL-9, cap USD 45)** after the shards free GPUs; every run must use runner sha 978d9969e2589af8 or later.
-6. **V's answers still needed:** ROLE v4 end date (13 Oct) and the Staff answer; the combined /voicecheck session; ORBOX stays on hold.
-7. **SPLIT phase-2 freeze** (SELFTEST set, scorer versions, dataset id) then HF run, cap USD 25.
-8. **W51 v3.1 and the W52 exposure addendum** re-reviews before any voice scan.
+1. **label200 rating (CLARITY)** — V rates 200 rows → unblocks the readability floor and CLARITY exit test.
+2. **CAP-1 report 20:00 (PRESCRIBE)** — v3 re-check PASSed; cap scores v3 → report.
+3. **PARITY-389 tonight (BACKFILL)** — fleet GO → capture on Mini + HF A10G → parity verdict.
+4. **OPD 4 recovery (ROOMS)** — physical; recording resumes.
+5. **GCP S7 delete (FOUNDRY)** — V's gcloud auth, after 24h window.
 
-## 14-day calendar (29 Sep – 12 Oct, IST; box clock)
+## 14-day calendar (27 Sep – 10 Oct, IST; box clock)
 
-- **29 Sep (tonight):** scribe push 20:30; clinic rooms close ~20:40; T-DRTPQMA-4 and T-SHIP-4 dispatch after 20:45; HF proposal shards finish ~21:30-22:00; CAP-3 PRIOR g_prior runs; FUSER freeze steps.
-- **30 Sep:** Fable's FUSER write-up to V 07:30; Fable rules T-BAKEOFF-1 and the whisper HF script by 12:00; T-RECORDER-3 on-site check; Koyal cap ends 12:00; T-HERDR-2 runbook 08:00; V's combined /voicecheck session (proposals plus controls) if cards are loaded; F3 + F4-prod train after 20:30 if the push is verified; SURGERY nightly with the tier step verified in the morning.
-- **1-3 Oct:** G3 dose set built from TEST output, refuter-2 data check, then V's dose rating; verified voices placed in DRT; backfill STT wave through the older dates.
-- **4-7 Oct:** backfill STT continues; SPLIT phase-2 run if the pre-reg freezes; ROLE v4 if V answers.
-- **8-12 Oct:** SPLIT weekly evals (two, at least 7 days apart); ROLE v4 window to 13 Oct; NOTESAFE med-bench live run needs keys; ORBOX only if V lifts the hold.
+- **26 Sep (tonight):** PARITY-389 (~21:15-21:30), hard stop 27 Sep 07:30.
+- **27 Sep:** PARITY verdict + report; c3 backlog clear; ROOMS auto-start decision to V.
+- **28 Sep:** CAP-1 report reviewed; label200 rating likely in progress (V).
+- **29 Sep:** VJ arm 4 if Vertex credential landed; GCP S7 delete window.
+- **30 Sep:** DeepSeek Go ZDR re-confirm date (r449 — check whether it lapses).
+- **1–4 Oct:** speaker display + /roadmap page (LABVIEW); SELFTEST rig build.
+- **5–7 Oct:** SPLIT own-model evals begin; RECORDER release scoped.
+- **8–10 Oct:** ORBOX capture pilot in empty OT; NOTESAFE benchmark (if resumed).
 
+---
 
 *Anything here that a project owner believes is wrong: say so on the bus to `roadmap` with the correcting evidence (bus id / ruling / sha), and I fix it in the next revision.*
