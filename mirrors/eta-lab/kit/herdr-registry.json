@@ -353,5 +353,20 @@
       "model": "haiku",
       "task": ""
     }
+  },
+  "machine:hf-1": {
+    "hf-1-idle-shell": {
+      "pane_id": "w2:p1",
+      "model": "none (plain shell pane, not an agent)",
+      "permission_mode": "n/a",
+      "cwd": "/home/user",
+      "session_id": "",
+      "label": "hf-1 · Hugging Face cpu-basic",
+      "purpose": "S8b proof pane: shows the HF Space as a herdr machine",
+      "machine": "hf-1",
+      "binary": "herdr 0.9.1 at /home/user/.local/bin/herdr (same binary as the box), opencode 1.18.32, claude 2.1.197",
+      "note": "25 Sep 13:3x IST (r405 step 1, herdr-kit). Machine id 7a85bf5a3d2c157a56f679d63ed8e0e9, added from the Mini with: herdr machine add --label 'hf-1 · Hugging Face a10g' (renamed 25 Sep 14:2x to 'hf-1 · Hugging Face cpu-basic' by ruling: the label shows the REAL hardware; rename again when the hardware changes: herdr machine rename <id> --label ...) vrbeven-eta-hf-1@ssh.hf.space (key ~/.ssh/hf_spaces; ssh.hf.space host key SHA256:hDOLEkms3mtv/Nkk1Nanj2qb1aHuOJWWE1nv1DfIZ5I, trusted on first use, NOT verified out of band). HARDWARE TODAY IS cpu-basic ( 402 Payment Required on cpu-upgrade restart: HF account is prepaid, canPay=false). Space: vrbeven/eta-hf-1 (private Docker Space, Dev Mode ON, /data = hf-mount volume). RESTART COMMAND: on the box, huggingface_hub HfApi(token=<read from ~/.claude/secrets/hf_token, never argv>).restart_space('vrbeven/eta-hf-1'); wait for stage RUNNING; then re-create the pane: herdr --machine 7a85bf5a3d2c157a56f679d63ed8e0e9 workspace create --label 'hf-1 · Hugging Face a10g' (workspaces on the Space live on its container disk and are NOT persistent). The herdr machine entry itself persists on the Mini. Dev Mode edits are not persistent: everything that must survive lives in the image (Dockerfile/start.sh in the Space repo, commit 38c21330 after c0b55d03; Dev Mode does NOT rebuild on push, apply repo changes with restart_space(factory_reboot=True), about 160 s; a restart also drops the herdr workspace, recreate it) or /data. Tailnet (r400): NOT joined; 25 Sep checks failed (untagged key, room Macs reachable), node removed, waits on V's tag:hf key + ACL; Space commits 7825789d (own sshd 2222 + Mini pubkey) and 9b5fb7df.",
+      "task": "none; idle by design"
+    }
   }
 }

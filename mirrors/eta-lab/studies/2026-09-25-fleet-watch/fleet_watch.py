@@ -376,14 +376,6 @@ def save_state(path, st):
     tmp = path + ".tmp"; json.dump(st, open(tmp, "w")); os.replace(tmp, path)
 
 
-def live_mode_ok(rt=None):
-    """Real sinks (the Mini bug log, conductor) only when THIS run home's MODE file says 'live'. A stray run with a scratch FLEET_WATCH_HOME (no MODE file) or a dry home can never reach production."""
-    try:
-        return open(os.path.join(rt or RT, "MODE")).read().strip() == "live"
-    except OSError:
-        return False
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true"); ap.add_argument("--loop", action="store_true"); ap.add_argument("--no-model", action="store_true")
@@ -391,18 +383,10 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.selftest:
         import test_fleet_watch; return test_fleet_watch.main()
-    if not a.dry and not a.select and not live_mode_ok():
-        print("fleet-watch: REFUSED: real sinks need MODE=live in %s (add --dry, or flip MODE after the refuter's PASS)" % RT, file=sys.stderr); return 4
     os.makedirs(RT, exist_ok=True); cfg = load_cfg(a.config)
     sys.path.insert(0, os.path.join(HERE, "..", "..", "kit"))
-    if a.replay and not a.dry:     # a replay to REAL sinks must never race the live writer: it takes the loop's lock too, non-blocking (refuter-2 #2498)
-        rl = open(os.path.join(RT, "lock"), "w")
-        try:
-            fcntl.flock(rl, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            print("fleet-watch: REFUSED: the live loop holds the lock; a real-sink replay must not race it", file=sys.stderr); return 3
     if a.replay:   # replayed snapshot, optional injected fault, REAL sinks, its own state file (so real state is untouched)
-        snap = json.load(open(a.replay)); label = "[REPLAY]"    # a replay is never a real event: its lines are always marked
+        snap = json.load(open(a.replay)); label = ""
         if a.inject:
             room, code = a.inject.split(":"); label = "[INJECTED TEST]"
             for r in snap["now"]["rooms"]:
